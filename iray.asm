@@ -103,6 +103,10 @@ bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer 
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
+cx0     = $82                   ; collision box corners, in map cells
+cx1     = $83
+cy0     = $84
+cy1     = $85
 stackLT = $c000
 stackRT = $c080
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
@@ -659,19 +663,77 @@ mvyp:   clc
         lda py+1
         adc #$00
         sta nyH
-mvchk:  lda nxH
+; The player is a small square, not a point. Testing only the centre let you stand with
+; your face flat against a wall at distance 0, which looks wrong and drives the wall height
+; to absurd values (88/d). Radius is a hardcoded 26/256 = 0.10 cells -- computing it per
+; frame would be pointless, it never changes.
+;
+; Note this does NOT stop colH from saturating: that needs 0.35 cells of clearance, which
+; would feel like walking in a padded corridor. Saturation is handled properly in the
+; span-merge instead (see subLp).
+mvchk:  sec                     ; cx0 = (nx - r) >> 8
+        lda nxL
+        sbc #26
+        lda nxH
+        sbc #$00
+        sta cx0
+        clc                     ; cx1 = (nx + r) >> 8
+        lda nxL
+        adc #26
+        lda nxH
+        adc #$00
+        sta cx1
+        sec                     ; cy0 = (ny - r) >> 8
+        lda nyL
+        sbc #26
+        lda nyH
+        sbc #$00
+        sta cy0
+        clc                     ; cy1 = (ny + r) >> 8
+        lda nyL
+        adc #26
+        lda nyH
+        adc #$00
+        sta cy1
+        lda cx0                 ; any corner off the map (or wrapped) rejects the move
         cmp #16
         bcs mvno
-        lda nyH
+        lda cx1
         cmp #16
         bcs mvno
-        lda nyH
+        lda cy0
+        cmp #16
+        bcs mvno
+        lda cy1
+        cmp #16
+        bcs mvno
+        lda cy0                 ; all four corners must be open
         asl
         asl
         asl
         asl
-        clc
-        adc nxH
+        sta tmp
+        ora cx0
+        tax
+        lda mapT,x
+        bne mvno
+        lda tmp
+        ora cx1
+        tax
+        lda mapT,x
+        bne mvno
+        lda cy1
+        asl
+        asl
+        asl
+        asl
+        sta tmp
+        ora cx0
+        tax
+        lda mapT,x
+        bne mvno
+        lda tmp
+        ora cx1
         tax
         lda mapT,x
         bne mvno
