@@ -1829,6 +1829,7 @@ castRay:
         lda ddxH
         sta mhi
         jsr sideMul
+${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
         ldx rang
         lda posXT,x
         bne cxpos
@@ -1855,6 +1856,7 @@ cydo:   lda py
         lda ddyH
         sta mhi
         jsr sideMul
+${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
         ldx rang
         lda posYT,x
         bne cypos
