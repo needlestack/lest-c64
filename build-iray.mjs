@@ -2043,12 +2043,12 @@ sideMul:
         tax
         bcc smh0
         lda f1LoT,x
-        sta s1
-        lda f1HiT,x
+        tay                     ; the low byte rides in Y instead of zero page: this routine
+        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
         sta s2
         jmp smh1
 smh0:   lda f0LoT,x
-        sta s1
+        tay
         lda f0HiT,x
         sta s2
 smh1:   lda fr
@@ -2059,24 +2059,24 @@ smh1:   lda fr
         adc #$01
 smh2:   tax
         sec
-        lda s1
+        tya
         sbc f0LoT,x
         sta s1
         lda s2
         sbc f0HiT,x
         sta s2
-        lda fr                  ; --- low half: (fr * mlo) >> 8, added into s1 ---
+        lda fr                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
         adc mlo
         tax
         bcc sml0
         lda f1LoT,x
-        sta qlo
+        tay
         lda f1HiT,x
         sta qhi
         jmp sml1
 sml0:   lda f0LoT,x
-        sta qlo
+        tay
         lda f0HiT,x
         sta qhi
 sml1:   lda fr
@@ -2087,15 +2087,12 @@ sml1:   lda fr
         adc #$01
 sml2:   tax
         sec
-        lda qlo
-        sbc f0LoT,x
-        sta qlo
-        lda qhi
-        sbc f0HiT,x
-        sta qhi
+        tya
+        sbc f0LoT,x             ; result discarded -- only the borrow into the high byte
+        lda qhi                 ; matters, so the old "sta qlo" here was writing a dead value
+        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into s1
         clc
-        lda s1
-        adc qhi                 ; only the high byte of the low-half product survives the >>8
+        adc s1
         sta s1
         lda s2
         adc #$00
