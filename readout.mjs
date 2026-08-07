@@ -64,6 +64,28 @@ const readChar = (C, R) => {
 };
 
 const field = (R, n) => [...Array(n)].map((_, i) => readChar(36 + i, R)).join('');
+
+// PROF=1: the PROFILE build prints 7 phase totals as 4 hex digits each, rows 4-10, cols 0-3.
+// The value is mean raster LINES per frame (accumulated over exactly 256 frames); one line
+// is 65 cycles.
+if (process.env.PROF) {
+  const NAMES = ['input', 'table clears', 'geometry (cast+interp+seams)', 'prepCells',
+                 'renderSym', 'fps counter + readout', 'raster wait'];
+  const vals = [...Array(7)].map((_, r) =>
+    parseInt([...Array(4)].map((_, i) => readChar(i, 4 + r)).join(''), 16));
+  const tot = vals.reduce((a, b) => a + b, 0);
+  console.log(`${f}\n`);
+  console.log('  phase                          lines    cycles    share');
+  vals.forEach((v, i) => console.log(
+    `  ${NAMES[i].padEnd(30)}${String(v).padStart(5)}  ${String(v * 65).padStart(8)}   ` +
+    `${(v / tot * 100).toFixed(1).padStart(5)}%`));
+  console.log(`  ${'TOTAL'.padEnd(30)}${String(tot).padStart(5)}  ${String(tot * 65).padStart(8)}` +
+              `   -> ${(1022727 / (tot * 65)).toFixed(2)} fps`);
+  const work = tot - vals[6];
+  console.log(`\n  work excluding the wait: ${work * 65} cycles = ${(work / tot * 100).toFixed(1)}%` +
+              `  (${(work * 65 / 17045).toFixed(2)} raster frames)`);
+  process.exit(0);
+}
 const X = field(0, 4), Y = field(1, 4), A = field(2, 4);
 // fps is two digits at char cols 0-1 of row 0, written by drawFps with the same glyphs.
 const FPS = readChar(0, 0) + readChar(1, 0);

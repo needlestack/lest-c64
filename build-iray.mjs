@@ -276,6 +276,22 @@ const TURN_STEP = 6;                    // was 3; 2x
 // Panel seams are a look, not a diagnostic: SEAMS=0 compiles every trace of them out --
 // the charset entries, the projection pass and the per-cell table -- so the disabled build
 // costs exactly what it did before the feature existed.
+// PROFILE=1 brackets each phase of the main loop with a raster timestamp and accumulates
+// the deltas over 256 frames, then prints them as hex. One run gives the whole split --
+// including the raster wait, which the old "call it twice and difference the fps" method
+// cannot see at all, because doubling the work just eats into the wait.
+const PROFILE0 = flag('PROFILE');
+// PROFILE1=1: emit ONLY the whole-frame tick, as an independent check on the phase split.
+const PROFILE1 = flag('PROFILE1');
+const PROFILE = PROFILE0 || PROFILE1;
+// DOUBLE=interpSpan|marchCol calls that routine twice. Differencing two PROFILE runs then
+// gives its exact cost -- the old fps-based version of this trick was distorted by the
+// raster wait absorbing the extra work.
+const DOUBLE = process.env.DOUBLE || '';
+if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
+// NOHUD=1 drops the fps counter and the X/Y readout, keeping only the two hex digits of
+// the angle so SPIN can still be measured. That is what the shipping build would look like.
+const NOHUD = flag('NOHUD');
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
 const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
@@ -471,6 +487,17 @@ capH    = $c500                 ; colH capped at 100, filled by prepCells
 cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
 cmxT    = $c640                 ; per cell-column (40): max
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
+pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
+pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $c922
+pfN     = $c923                 ; frames accumulated so far (2 bytes)
+pfCurF  = $c925                 ; scratch for one timestamp read and the delta
+pfCurL  = $c926
+pfCurX  = $c927
+pfDLo   = $c928
+pfDHi   = $c929
+pfRow   = $c92a
+pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -554,9 +581,16 @@ ccf:    sta $d800,x
         sta renderCnt
         sta fpsTens
         sta fpsOnes
+${PROFILE ? `        ldx #$2f                ; the profile accumulators live in uninitialised scratch
+        lda #$00
+pfInit: sta pfAcc,x
+        dex
+        bpl pfInit` : ''}
         cli
 
-mloop:  ${SPIN ? 'inc pa' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
+mloop:
+${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}        ${SPIN ? 'inc pa' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
+${PROFILE && !PROFILE1 ? '        ldx #0\n        jsr pfTick              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
         ; cstepT is filled by the subdivision itself now (see subFace), so it has to start
@@ -571,12 +605,14 @@ csClr:  sta cstepT,x
 smClr:  sta seamT,x
         dex
         bpl smClr` : ''}
-        lda #$00                ; explicit: the clears above leave A holding their own fill
+${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-frame table clears\n' : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta col
         jsr marchCol            ; column 0
+${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #${NLOG - 1}
         sta col
         jsr marchCol            ; column 79
+${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #$00
         sta stackLT
         lda #${NLOG - 1}
@@ -618,6 +654,7 @@ subLp:  ldx sp
         cmp tmp2
         bne subSp
         jsr interpSpan          ; same face -> merge (interpolate interior)
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}
 ${SEAMS ? '        jsr seamSpan            ; and drop a panel line on each cell boundary it crossed\n' : ''}        jmp subLp
         ; The face changes somewhere in this span. Once the span is a single column wide the
         ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
@@ -672,6 +709,7 @@ subMid: lda spanL
                                 ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
         jsr marchCol
+${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         ldx sp
         lda spanL
         sta stackLT,x
@@ -686,10 +724,18 @@ subMid: lda spanL
         stx sp
         jmp subLp
 subDn:
-${NOFILL ? '' : '        jsr prepCells\n        jsr renderSym'}
-        jsr drawFps
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams\n' : ''}${NOFILL ? '' : '        jsr prepCells'}
+${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; prepCells\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
+${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
         jsr drawDbg
-${DUMPH ? '        jsr dumpH      ; AFTER the readout: drawDbg writes rows 0-2 at cols 36-39' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
+        bne pfRdy
+        inc pfN
+        bne pfNd
+        inc pfDone              ; latch: freezes pfTick, starts drawing the table
+pfRdy:  jsr pfShow              ; every frame from now on -- the two screen buffers alternate,
+pfNd:                           ; so a one-shot draw is only in one of them
+` : ''}${DUMPH ? '        jsr dumpH      ; AFTER the readout: drawDbg writes rows 0-2 at cols 36-39' : ''}
         inc renderCnt
         lda renderCnt
         cmp #16
@@ -2070,7 +2116,116 @@ setRow:                         ; A = char row -> ppPtr
         sta ppPtr+1
         rts
 
-drawFps:
+${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
+; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
+; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
+pfShow: lda #$00
+        sta pfRow
+psLp:   lda pfRow
+        clc
+        adc #$04
+        jsr setRow
+        ldy #$00
+        lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /256)
+        asl
+        clc
+        adc pfRow
+        tax
+        lda pfAcc+2,x           ; high nibble pair first
+        pha
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        pla
+        and #$0f
+        jsr ddPut
+        lda pfAcc+1,x
+        pha
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        pla
+        and #$0f
+        jsr ddPut
+        inc pfRow
+        lda pfRow
+        cmp #$07
+        bcc psLp
+        rts
+
+; ---- pfTick: close the phase in X and open the next ----
+; Time is (frameCnt, raster line). frameCnt only advances in the IRQ, so read it, read the
+; line, then read it again -- if it moved, the two halves came from different frames and
+; the pair is meaningless. Costs ~60 cycles, 8 times a frame: 0.8%, and it lands in the
+; phase being measured, so subtract ~60 lines/256 frames per phase if you care.
+pfTick: lda pfDone
+        bne pfOff
+        lda frameCnt
+        sta pfCurF
+        lda $d012
+        sta pfCurL
+        lda frameCnt
+        cmp pfCurF
+        bne pfTick
+        sec                     ; delta = (f - pf)*263 + (l - pl)
+        lda pfCurL
+        sbc pfPrvL
+        sta pfDLo
+        lda #$00
+        sbc #$00                ; sign-extend the line difference
+        sta pfDHi
+        lda pfCurF
+        sec
+        sbc pfPrvF
+        tay
+        beq pfNoF
+pfFLp:  clc                     ; one whole video frame is 263 lines
+        lda pfDLo
+        adc #<263
+        sta pfDLo
+        lda pfDHi
+        adc #>263
+        sta pfDHi
+        dey
+        bne pfFLp
+pfNoF:  lda pfDHi               ; A negative delta means the raster wrapped 262->0 but the
+        bpl pfPos               ; IRQ had not yet bumped frameCnt -- the read caught the gap.
+        clc                     ; Add the frame the counter had not counted, so the delta is
+        lda pfDLo               ; always non-negative and the accumulate below stays simple.
+        adc #$07
+        sta pfDLo
+        lda pfDHi
+        adc #$01
+        sta pfDHi
+pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
+        sta pfPrvF
+        lda pfCurL
+        sta pfPrvL
+        stx pfCurX              ; X = phase -> byte offset X*3
+        txa
+        asl
+        clc
+        adc pfCurX
+        tay
+        clc                     ; 24-bit accumulate
+        lda pfAcc,y
+        adc pfDLo
+        sta pfAcc,y
+        iny
+        lda pfAcc,y
+        adc pfDHi
+        sta pfAcc,y
+        iny
+        lda pfAcc,y
+        adc #$00
+        sta pfAcc,y
+pfOff:  rts
+
+` : ''}drawFps:
         lda #$00
         jsr setRow
         ldy #$00
@@ -2088,6 +2243,7 @@ drawFps:
 ; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
 ; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
 drawDbg:
+${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still needs it' : ''}
         lda #$00
         jsr setRow
         ldy #36
@@ -2122,7 +2278,7 @@ drawDbg:
         lda py
         and #$0f
         jsr ddPut
-        lda #$02
+ddAng:  lda #$02
         jsr setRow
         ldy #37
         lda #10                 ; 'A'

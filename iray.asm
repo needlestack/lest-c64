@@ -147,6 +147,17 @@ capH    = $c500                 ; colH capped at 100, filled by prepCells
 cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
 cmxT    = $c640                 ; per cell-column (40): max
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
+pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
+pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $c922
+pfN     = $c923                 ; frames accumulated so far (2 bytes)
+pfCurF  = $c925                 ; scratch for one timestamp read and the delta
+pfCurL  = $c926
+pfCurX  = $c927
+pfDLo   = $c928
+pfDHi   = $c929
+pfRow   = $c92a
+pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -230,9 +241,12 @@ ccf:    sta $d800,x
         sta renderCnt
         sta fpsTens
         sta fpsOnes
+
         cli
 
-mloop:  jsr readKeys
+mloop:
+        jsr readKeys
+
 
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
         ; cstepT is filled by the subdivision itself now (see subFace), so it has to start
@@ -250,9 +264,11 @@ smClr:  sta seamT,x
         lda #$00                ; explicit: the clears above leave A holding their own fill
         sta col
         jsr marchCol            ; column 0
+
         lda #159
         sta col
         jsr marchCol            ; column 79
+
         lda #$00
         sta stackLT
         lda #159
@@ -294,6 +310,7 @@ subLp:  ldx sp
         cmp tmp2
         bne subSp
         jsr interpSpan          ; same face -> merge (interpolate interior)
+
         jsr seamSpan            ; and drop a panel line on each cell boundary it crossed
         jmp subLp
         ; The face changes somewhere in this span. Once the span is a single column wide the
@@ -349,6 +366,7 @@ subMid: lda spanL
                                 ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
         jsr marchCol
+
         ldx sp
         lda spanL
         sta stackLT,x
@@ -1722,6 +1740,7 @@ drawFps:
 ; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
 ; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
 drawDbg:
+
         lda #$00
         jsr setRow
         ldy #36
@@ -1756,7 +1775,7 @@ drawDbg:
         lda py
         and #$0f
         jsr ddPut
-        lda #$02
+ddAng:  lda #$02
         jsr setRow
         ldy #37
         lda #10                 ; 'A'
