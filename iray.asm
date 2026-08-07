@@ -103,6 +103,7 @@ bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer 
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
+errH    = $86                   ; high byte of the interpolator's error term
 cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
@@ -279,6 +280,7 @@ subDn:
         jsr renderSym
         jsr drawFps
         jsr drawDbg
+
         inc renderCnt
         lda renderCnt
         cmp #16
@@ -531,6 +533,7 @@ rfNext: ldx colc
         dex
         bpl rfCol
         rts
+
 
 ; ================= ESDF keyboard =================
 readKeys:
@@ -809,8 +812,14 @@ isPos:  sta dyv
 isErr:  lda dxv
         lsr
         sta errv                ; err = width/2
+        lda #$00
+        sta errH
         lda spanL
         sta col
+        ; The error term MUST be 16-bit. err stays below dxv (span width, up to 159) and
+        ; dyv is the height delta (up to 254), so err+dyv reaches 413. An 8-bit accumulate
+        ; drops the carry and the whole span interpolates garbage -- which is what made a
+        ; receding near wall render far too tall right up to the next marched column.
 isLp:   inc col
         lda col
         cmp spanR
@@ -819,12 +828,21 @@ isLp:   inc col
         lda errv
         adc dyv
         sta errv
-isW:    lda errv
+        lda errH
+        adc #$00
+        sta errH
+isW:    lda errH
+        bne isStep              ; >= 256, so certainly >= dxv
+        lda errv
         cmp dxv
         bcc isWr
-        sec
+isStep: sec
+        lda errv
         sbc dxv
         sta errv
+        lda errH
+        sbc #$00
+        sta errH
         lda syNeg
         beq isInc
         dec hcur

@@ -6,3 +6,5 @@
 034c 0d80 f8   # 15 faces, 56% wall
 0180 034c 48   # 14 faces, 58% wall
 0880 0280 18   # 13 faces, 25% wall
+0124 065e be   # regression: wall-hugging, colH saturation (screenshot2)
+0bc6 09b3 7a   # regression: wide span + large height delta, interpolator carry (screenshot4)

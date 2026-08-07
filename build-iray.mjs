@@ -214,6 +214,10 @@ const MEASURE = process.env.MEASURE === '1';
 const SPIN = process.env.SPIN === '1';   // diagnostic: auto-rotate, ignore input
 const NORAY = process.env.NORAY === '1'; // diagnostic: skip marching/subdivision
 const NOFILL = process.env.NOFILL === '1'; // diagnostic: skip renderSym (fill)
+// DUMPH: print colH as hex over the top 8 rows, so the interpolated heights can be read
+// straight off a screenshot. The VICE monitor's checkpoint/bsave route does not survive
+// -autostart here, and inferring colH from drawn pixels cannot see values above 100.
+const DUMPH = process.env.DUMPH === '1';
 // diagnostic: static start angle, e.g. PA=4f. Angle-dependent glitches are far easier to
 // pin here than under SPIN -- a fixed angle makes the frame reproducible, so a plain
 // -exitscreenshot run is comparable across builds without breakpointing the frame counter.
@@ -365,6 +369,7 @@ bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer 
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
+errH    = $86                   ; high byte of the interpolator's error term
 cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
@@ -540,6 +545,7 @@ subDn:
 ${NOFILL ? '' : '        jsr prepCells\n        jsr renderSym'}
         jsr drawFps
         jsr drawDbg
+${DUMPH ? '        jsr dumpH      ; AFTER the readout: drawDbg writes rows 0-2 at cols 36-39' : ''}
         inc renderCnt
         lda renderCnt
         cmp #16
@@ -793,6 +799,51 @@ rfNext: ldx colc
         bpl rfCol
         rts
 
+${DUMPH ? `
+; diagnostic: colH[0..159] as hex pairs, 40 columns per row-pair, over screen rows 0-7
+dumpH:  ldx #$00
+        lda #$00
+        sta tmp
+dhK:    lda tmp
+        asl
+        tay
+        lda rowLoT,y
+        sta ppPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta ppPtr+1
+        iny
+        lda rowLoT,y
+        sta ep2
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta ep2+1
+        ldy #$00
+dhJ:    lda colH,x
+        lsr
+        lsr
+        lsr
+        lsr
+        clc
+        adc #${hx(GLYPH0)}
+        sta (ppPtr),y
+        lda colH,x
+        and #$0f
+        clc
+        adc #${hx(GLYPH0)}
+        sta (ep2),y
+        inx
+        iny
+        cpy #40
+        bne dhJ
+        inc tmp
+        lda tmp
+        cmp #$04
+        bne dhK
+        rts
+` : ''}
 ; ================= ESDF keyboard =================
 readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
@@ -1070,8 +1121,14 @@ isPos:  sta dyv
 isErr:  lda dxv
         lsr
         sta errv                ; err = width/2
+        lda #$00
+        sta errH
         lda spanL
         sta col
+        ; The error term MUST be 16-bit. err stays below dxv (span width, up to 159) and
+        ; dyv is the height delta (up to 254), so err+dyv reaches 413. An 8-bit accumulate
+        ; drops the carry and the whole span interpolates garbage -- which is what made a
+        ; receding near wall render far too tall right up to the next marched column.
 isLp:   inc col
         lda col
         cmp spanR
@@ -1080,12 +1137,21 @@ isLp:   inc col
         lda errv
         adc dyv
         sta errv
-isW:    lda errv
+        lda errH
+        adc #$00
+        sta errH
+isW:    lda errH
+        bne isStep              ; >= 256, so certainly >= dxv
+        lda errv
         cmp dxv
         bcc isWr
-        sec
+isStep: sec
+        lda errv
         sbc dxv
         sta errv
+        lda errH
+        sbc #$00
+        sta errH
         lda syNeg
         beq isInc
         dec hcur
