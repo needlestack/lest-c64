@@ -1404,7 +1404,62 @@ isErr:  lda dxv
         ldx syNeg
         bne isD8
         ldx spanL
-isA8:   inx                     ; --- ascending ---
+isA8:   txa                     ; --- ascending, four columns per bounds test ---
+        clc
+        adc #$04
+        cmp spanR
+        bcs isA1                ; fewer than four left: rolled tail below
+        lda errv                ; the test above needed A; err is where the last body left it
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswa1
+issa1:  sbc dxv
+        iny
+        cmp dxv
+        bcs issa1
+iswa1:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswa2
+issa2:  sbc dxv
+        iny
+        cmp dxv
+        bcs issa2
+iswa2:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswa3
+issa3:  sbc dxv
+        iny
+        cmp dxv
+        bcs issa3
+iswa3:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswa4
+issa4:  sbc dxv
+        iny
+        cmp dxv
+        bcs issa4
+iswa4:  sta errv
+        tya
+        sta colH,x
+        jmp isA8
+isA1:   lda errv
+        inx
         cpx spanR
         bcs isDn
         adc dyv                 ; carry clear: cpx fell through
@@ -1418,9 +1473,64 @@ isAWr:  sta errv                ; park err: A is needed for the stores
         tya
         sta colH,x
         lda errv
-        jmp isA8
+        jmp isA1
 isD8:   ldx spanL               ; --- descending ---
-isDl8:  inx
+isDl8:  txa
+        clc
+        adc #$04
+        cmp spanR
+        bcs isD1
+        lda errv
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswd1
+issd1:  sbc dxv
+        dey
+        cmp dxv
+        bcs issd1
+iswd1:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswd2
+issd2:  sbc dxv
+        dey
+        cmp dxv
+        bcs issd2
+iswd2:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswd3
+issd3:  sbc dxv
+        dey
+        cmp dxv
+        bcs issd3
+iswd3:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        inx
+        adc dyv
+        cmp dxv
+        bcc iswd4
+issd4:  sbc dxv
+        dey
+        cmp dxv
+        bcs issd4
+iswd4:  sta errv
+        tya
+        sta colH,x
+        jmp isDl8
+isD1:   lda errv
+        inx
         cpx spanR
         bcs isDn
         adc dyv
@@ -1434,7 +1544,7 @@ isDWr:  sta errv
         tya
         sta colH,x
         lda errv
-        jmp isDl8
+        jmp isD1
 isLp:   inc col                 ; --- 16-bit path (rare: only when dxv+dyv > 255) ---
         lda col
         cmp spanR

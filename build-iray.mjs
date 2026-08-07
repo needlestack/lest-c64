@@ -212,6 +212,22 @@ const qIdxT = [...Array(CN)].map((_, v) => STEPQ.indexOf(qstep(C8(v + CLO))));
 // the solid run below it. Each slot also stores the MIRRORED row, so one pass covers both
 // halves of the screen (row 12 is its own mirror, hence the single store there).
 // One pair of chains per screen buffer, since the addresses are baked in.
+// One interpolated column of the 8-bit fast path, for the 4x unrolled group. Carry is
+// clear on entry to every copy: the group's "cmp spanR" falls through clear, "bcc" into the
+// write is only taken when clear, and the subtract loop exits on a failed "bcs". So no copy
+// needs its own clc, and the four share one bounds test instead of paying inx/cpx/bcs/jmp.
+const ispanCol = (id, step, last) => `        inx
+        adc dyv
+        cmp dxv
+        bcc isw${id}
+iss${id}:  sbc dxv
+        ${step}
+        cmp dxv
+        bcs iss${id}
+isw${id}:  sta errv
+        tya
+        sta colH,x` + (last ? '' : `
+        lda errv`);
 const chainSrc = (nm, base, rows, tail) => rows.map(r => {
   const a = base + r * 40, b = base + (24 - r) * 40;
   return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`);
@@ -1736,7 +1752,19 @@ isErr:  lda dxv
         ldx syNeg
         bne isD8
         ldx spanL
-isA8:   inx                     ; --- ascending ---
+isA8:   txa                     ; --- ascending, four columns per bounds test ---
+        clc
+        adc #$04
+        cmp spanR
+        bcs isA1                ; fewer than four left: rolled tail below
+        lda errv                ; the test above needed A; err is where the last body left it
+${ispanCol('a1', 'iny')}
+${ispanCol('a2', 'iny')}
+${ispanCol('a3', 'iny')}
+${ispanCol('a4', 'iny', true)}
+        jmp isA8
+isA1:   lda errv
+        inx
         cpx spanR
         bcs isDn
         adc dyv                 ; carry clear: cpx fell through
@@ -1750,9 +1778,21 @@ isAWr:  sta errv                ; park err: A is needed for the stores
         tya
         sta colH,x
         lda errv
-        jmp isA8
+        jmp isA1
 isD8:   ldx spanL               ; --- descending ---
-isDl8:  inx
+isDl8:  txa
+        clc
+        adc #$04
+        cmp spanR
+        bcs isD1
+        lda errv
+${ispanCol('d1', 'dey')}
+${ispanCol('d2', 'dey')}
+${ispanCol('d3', 'dey')}
+${ispanCol('d4', 'dey', true)}
+        jmp isDl8
+isD1:   lda errv
+        inx
         cpx spanR
         bcs isDn
         adc dyv
@@ -1766,7 +1806,7 @@ isDWr:  sta errv
         tya
         sta colH,x
         lda errv
-        jmp isDl8
+        jmp isD1
 isLp:   inc col                 ; --- 16-bit path (rare: only when dxv+dyv > 255) ---
         lda col
         cmp spanR
