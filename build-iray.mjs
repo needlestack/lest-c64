@@ -150,6 +150,29 @@ const stepT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(0);
   return t; });
 // clampT output (level+2, 0..12) -> index into STEPQ.
 const qIdxT = [...Array(CN)].map((_, v) => STEPQ.indexOf(qstep(C8(v + CLO))));
+
+// ---- unrolled fill chains ----
+// A straight line of store instructions, one slot per cell row, each with its screen
+// address baked into the instruction. Jumping INTO the middle of that line writes exactly
+// the rows from that slot to the end -- so a run of identical cells costs one jump plus
+// ~5 cycles per cell, with no loop counter, no per-cell test and no address arithmetic.
+// The descending chain paints the ceiling run above the wall top; the ascending one paints
+// the solid run below it. Each slot also stores the MIRRORED row, so one pass covers both
+// halves of the screen (row 12 is its own mirror, hence the single store there).
+// One pair of chains per screen buffer, since the addresses are baked in.
+const chainSrc = (nm, base, rows, tail) => rows.map(r => {
+  const a = base + r * 40, b = base + (24 - r) * 40;
+  return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`);
+}).join('\n') + `\n\tjmp ${tail}`;
+const ROWSD = [...Array(13)].map((_, i) => 12 - i), ROWSA = [...Array(13)].map((_, i) => i);
+// rbT[maxHeight] = first cell row that is not fully ceiling; rsT[minHeight] = first row
+// that is fully wall. Derived from fill = h + 8R - 92, so they replace a per-cell test
+// with one table lookup per column.
+const rbT = [...Array(256)].map((_, cmx) => cmx > 92 ? 0 : Math.floor((92 - cmx) / 8) + 1);
+const rsT = [...Array(256)].map((_, cmn) => cmn >= 100 ? 0 : Math.ceil((100 - cmn) / 8));
+// entry tables: blk indexed by rb (target row rb-1), sld indexed by rs (target row rs)
+const blkEnt = sel => ['0', ...ROWSA.map(r => `${sel}bkA${r}`)].concat(['0', ...ROWSA.map(r => `${sel}bkB${r}`)]).join(',');
+const sldEnt = sel => [...ROWSA.map(r => `${sel}slA${r}`), '0'].concat([...ROWSA.map(r => `${sel}slB${r}`), '0']).join(',');
 // clampT[(h + K) as signed byte] -> level 0..12. K = 8R-92 is negative for every row above
 // the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
 const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
@@ -311,6 +334,13 @@ joyEor  = $68
 ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
+colc    = $75                   ; cell column, parked while the chains own X
+rbv     = $76                   ; first cell row that is not fully ceiling
+rsv     = $77                   ; first cell row that is fully wall
+erow    = $78                   ; current row inside the edge run
+jv      = $79                   ; 2 bytes: chain entry vector, then the edge store pointer
+ep2     = $7b                   ; 2 bytes: mirrored-row store pointer
+bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer being drawn
 stackLT = $c000
 stackRT = $c080
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
@@ -568,56 +598,65 @@ pcSdn:  lda tmp
         rts
 
 ; ================= render: 4x8 multicolor cells + vertical symmetry =================
-; One char code per cell, written to a row AND its mirror. No flip table: charset B (used
-; below the horizon by the raster split) is charset A upside down, so the same byte draws
-; the mirrored cell. Only 13 of 25 rows are computed.
+; Walks CELL COLUMNS, not rows. Everything a column needs follows from one number -- the
+; row its wall top lands in -- so the old row-major loop was re-deriving per cell what is
+; known once per column. Here each column is three runs:
 ;
-; Cell fill in a column = clamp(h + 8R - 92, 0, 8). So per row a single constant kR = 8R-92
-; converts a height into a fill, and the solid/blank thresholds are pure compares.
+;     rows 0 .. rb-1     ceiling      painted by an unrolled chain
+;     rows rb .. rs-1    the wall top computed per cell (usually one row)
+;     rows rs .. 12      solid wall   painted by an unrolled chain
+;
+; rb/rs come from two table lookups on the column's min/max height, so no cell is ever
+; tested. The runs are painted by jumping into a straight line of store instructions with
+; the addresses baked in (see chainSrc), which is what makes walking DOWN a column cheap
+; despite the 40-byte stride -- normally the reason to render row-major.
+;
+; Each chain slot also writes the mirrored row, so both halves are painted in one pass;
+; charset B (raster-split at the horizon) makes the same char code render upside down.
 renderSym:
-        lda #$00
-        sta crc                 ; cell-row 0..12
-rsRow:  ldx crc
-        lda rowLoT,x            ; topPtr = base + rowLo[cr]
-        sta tpLo
-        lda rowHiT,x
+        lda baseHi
+        cmp #${hx(SCR_A >> 8)}
+        beq rfBufA
+        lda #14                 ; upper half of the entry tables = buffer B chains
+        bne rfBufS              ; always
+rfBufA: lda #$00
+rfBufS: sta bufOff
+        ldx #39                 ; X = cell column throughout; the chains use it as their index
+rfCol:  stx colc
+        ldy cmxT,x
+        lda rbT,y
+        sta rbv
+        ldy cmnT,x
+        lda rsT,y
+        cmp rbv
+        bcs rfRs
+        lda rbv                 ; a tall column can put rs below rb; keep the runs disjoint
+rfRs:   sta rsv
+        ; ---- ceiling run: rows 0 .. rb-1 ----
+        lda rbv
+        beq rfEdge
         clc
-        adc baseHi
-        sta tpHi
-        lda #24                 ; botPtr = base + rowLo[24-cr]
-        sec
-        sbc crc
-        tax
-        lda rowLoT,x
-        sta btLo
-        lda rowHiT,x
-        clc
-        adc baseHi
-        sta btHi
-        ldx crc
-        lda t1TabT,x
-        sta t1c                 ; h >= t1c  -> cell fully solid
-        lda tbTabT,x
-        sta tbc                 ; h <  tbc  -> cell fully blank
-        lda kTabT,x
-        sta kr                  ; kr = 8*cr - 92 (signed)
-        ; Y IS the cell column for the whole row: it indexes cmnT/cmxT and doubles as the
-        ; store index, so the loop carries no counter of its own. ~495 of the 520 cells take
-        ; a fast path, so this bookkeeping was most of the fill cost.
-        ldy #39
-rsCol:  lda cmnT,y
-        cmp t1c
-        bcc rsChkB
-        lda #${hx(SOLID)}       ; min height >= t1 -> every column full
-        bne rsPut               ; SOLID is nonzero, so this is unconditional
-rsChkB: lda cmxT,y
-        cmp tbc
-        bcs rsEdge
-        lda #${hx(BLANK)}       ; max height < tb -> every column empty
-        beq rsPut               ; BLANK is zero, so this is unconditional
-        ; ---- edge cell: both end columns -> level, then ramp or exact vertical step ----
-rsEdge: sty cellc               ; the edge path needs both index registers; park the column
-        ldx col4T,y             ; X = 4*column
+        adc bufOff
+        tay
+        lda blkLoT,y
+        sta jv
+        lda blkHiT,y
+        sta jv+1
+        ldx colc
+        lda #${hx(BLANK)}       ; A must be loaded last: the chain stores it as-is
+        jmp (jv)                ; -> descending chain -> jmp rfEdge
+        ; ---- wall-top run: rows rb .. rs-1, one real cell each ----
+rfEdge: lda rbv
+        sta erow
+rfEdgeL:lda erow
+        cmp rsv
+        bcs rfSolid
+        ldy erow
+        lda kTabT,y
+        sta kr
+        ldx colc
+        lda col4T,x
+        tax                     ; X = 4*column -> logical column of this cell
         lda capH,x
         clc
         adc kr
@@ -630,9 +669,9 @@ rsEdge: sty cellc               ; the edge path needs both index registers; park
         tay
         lda clampT,y
         sta hh1                 ; right level (0..12)
-        ldx cellc
+        ldx colc
         lda cstepT,x
-        bne rsStep
+        bne rfStep
         lda hh0                 ; single face: ramp, index = wL*16 + wR
         asl
         asl
@@ -641,10 +680,8 @@ rsEdge: sty cellc               ; the edge path needs both index registers; park
         ora hh1
         tay
         lda rampT,y
-        ldy cellc
-        jmp rsPut
-        ; face boundary inside the cell -> a genuinely vertical step at that column
-rsStep: pha
+        jmp rfStore
+rfStep: pha                     ; face boundary -> a genuinely vertical step at that column
         ldx hh0
         lda qIdxT,x
         asl
@@ -657,25 +694,56 @@ rsStep: pha
         tay
         pla
         cmp #$02
-        beq rsSt2
-        bcs rsSt3
+        beq rfSt2
+        bcs rfSt3
         lda stepT1,y
-        ldy cellc
-        jmp rsPut
-rsSt2:  lda stepT2,y
-        ldy cellc
-        jmp rsPut
-rsSt3:  lda stepT3,y
-        ldy cellc
-        jmp rsPut
-rsPut:  sta (tpLo),y
-        sta (btLo),y            ; charset B mirrors it below the horizon
-        dey
-        bpl rsCol
-        inc crc
-        lda crc
+        jmp rfStore
+rfSt2:  lda stepT2,y
+        jmp rfStore
+rfSt3:  lda stepT3,y
+rfStore:pha
+        ldy erow                ; this row, and its mirror 24-erow
+        lda rowLoT,y
+        clc
+        adc colc
+        sta jv
+        lda rowHiT,y
+        adc baseHi
+        sta jv+1
+        lda #24
+        sec
+        sbc erow
+        tay
+        lda rowLoT,y
+        clc
+        adc colc
+        sta ep2
+        lda rowHiT,y
+        adc baseHi
+        sta ep2+1
+        pla
+        ldy #$00
+        sta (jv),y
+        sta (ep2),y
+        inc erow
+        jmp rfEdgeL
+        ; ---- solid run: rows rs .. 12 ----
+rfSolid:lda rsv
         cmp #13
-        bcc rsRow
+        bcs rfNext
+        clc
+        adc bufOff
+        tay
+        lda sldLoT,y
+        sta jv
+        lda sldHiT,y
+        sta jv+1
+        ldx colc
+        lda #${hx(SOLID)}
+        jmp (jv)                ; -> ascending chain -> jmp rfNext
+rfNext: ldx colc
+        dex
+        bpl rfCol
         rts
 
 ; ================= ESDF keyboard =================
@@ -1391,6 +1459,12 @@ rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
 kTabT:  !byte ${kTab.join(',')}
 col4T:  !byte ${[...Array(40)].map((_, i) => i * 4).join(',')}
+rbT:    ${chunk(rbT).trim()}
+rsT:    ${chunk(rsT).trim()}
+blkLoT: !byte ${blkEnt('<')}
+blkHiT: !byte ${blkEnt('>')}
+sldLoT: !byte ${sldEnt('<')}
+sldHiT: !byte ${sldEnt('>')}
 t1TabT: !byte ${t1Tab.join(',')}
 tbTabT: !byte ${tbTab.join(',')}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
@@ -1420,6 +1494,10 @@ rampT:  ${chunk(rampT).trim()}
 stepT1: ${chunk(stepT[0]).trim()}
 stepT2: ${chunk(stepT[1]).trim()}
 stepT3: ${chunk(stepT[2]).trim()}
+${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
+${chainSrc('bkB', SCR_B, ROWSD, 'rfEdge')}
+${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
+${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
 `;
 
 writeFileSync('./iray.asm', asm);

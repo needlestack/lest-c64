@@ -97,6 +97,13 @@ joyEor  = $68
 ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
+colc    = $75                   ; cell column, parked while the chains own X
+rbv     = $76                   ; first cell row that is not fully ceiling
+rsv     = $77                   ; first cell row that is fully wall
+erow    = $78                   ; current row inside the edge run
+jv      = $79                   ; 2 bytes: chain entry vector, then the edge store pointer
+ep2     = $7b                   ; 2 bytes: mirrored-row store pointer
+bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer being drawn
 stackLT = $c000
 stackRT = $c080
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
@@ -355,56 +362,65 @@ pcSdn:  lda tmp
         rts
 
 ; ================= render: 4x8 multicolor cells + vertical symmetry =================
-; One char code per cell, written to a row AND its mirror. No flip table: charset B (used
-; below the horizon by the raster split) is charset A upside down, so the same byte draws
-; the mirrored cell. Only 13 of 25 rows are computed.
+; Walks CELL COLUMNS, not rows. Everything a column needs follows from one number -- the
+; row its wall top lands in -- so the old row-major loop was re-deriving per cell what is
+; known once per column. Here each column is three runs:
 ;
-; Cell fill in a column = clamp(h + 8R - 92, 0, 8). So per row a single constant kR = 8R-92
-; converts a height into a fill, and the solid/blank thresholds are pure compares.
+;     rows 0 .. rb-1     ceiling      painted by an unrolled chain
+;     rows rb .. rs-1    the wall top computed per cell (usually one row)
+;     rows rs .. 12      solid wall   painted by an unrolled chain
+;
+; rb/rs come from two table lookups on the column's min/max height, so no cell is ever
+; tested. The runs are painted by jumping into a straight line of store instructions with
+; the addresses baked in (see chainSrc), which is what makes walking DOWN a column cheap
+; despite the 40-byte stride -- normally the reason to render row-major.
+;
+; Each chain slot also writes the mirrored row, so both halves are painted in one pass;
+; charset B (raster-split at the horizon) makes the same char code render upside down.
 renderSym:
-        lda #$00
-        sta crc                 ; cell-row 0..12
-rsRow:  ldx crc
-        lda rowLoT,x            ; topPtr = base + rowLo[cr]
-        sta tpLo
-        lda rowHiT,x
+        lda baseHi
+        cmp #$04
+        beq rfBufA
+        lda #14                 ; upper half of the entry tables = buffer B chains
+        bne rfBufS              ; always
+rfBufA: lda #$00
+rfBufS: sta bufOff
+        ldx #39                 ; X = cell column throughout; the chains use it as their index
+rfCol:  stx colc
+        ldy cmxT,x
+        lda rbT,y
+        sta rbv
+        ldy cmnT,x
+        lda rsT,y
+        cmp rbv
+        bcs rfRs
+        lda rbv                 ; a tall column can put rs below rb; keep the runs disjoint
+rfRs:   sta rsv
+        ; ---- ceiling run: rows 0 .. rb-1 ----
+        lda rbv
+        beq rfEdge
         clc
-        adc baseHi
-        sta tpHi
-        lda #24                 ; botPtr = base + rowLo[24-cr]
-        sec
-        sbc crc
-        tax
-        lda rowLoT,x
-        sta btLo
-        lda rowHiT,x
-        clc
-        adc baseHi
-        sta btHi
-        ldx crc
-        lda t1TabT,x
-        sta t1c                 ; h >= t1c  -> cell fully solid
-        lda tbTabT,x
-        sta tbc                 ; h <  tbc  -> cell fully blank
-        lda kTabT,x
-        sta kr                  ; kr = 8*cr - 92 (signed)
-        ; Y IS the cell column for the whole row: it indexes cmnT/cmxT and doubles as the
-        ; store index, so the loop carries no counter of its own. ~495 of the 520 cells take
-        ; a fast path, so this bookkeeping was most of the fill cost.
-        ldy #39
-rsCol:  lda cmnT,y
-        cmp t1c
-        bcc rsChkB
-        lda #$01       ; min height >= t1 -> every column full
-        bne rsPut               ; SOLID is nonzero, so this is unconditional
-rsChkB: lda cmxT,y
-        cmp tbc
-        bcs rsEdge
-        lda #$00       ; max height < tb -> every column empty
-        beq rsPut               ; BLANK is zero, so this is unconditional
-        ; ---- edge cell: both end columns -> level, then ramp or exact vertical step ----
-rsEdge: sty cellc               ; the edge path needs both index registers; park the column
-        ldx col4T,y             ; X = 4*column
+        adc bufOff
+        tay
+        lda blkLoT,y
+        sta jv
+        lda blkHiT,y
+        sta jv+1
+        ldx colc
+        lda #$00       ; A must be loaded last: the chain stores it as-is
+        jmp (jv)                ; -> descending chain -> jmp rfEdge
+        ; ---- wall-top run: rows rb .. rs-1, one real cell each ----
+rfEdge: lda rbv
+        sta erow
+rfEdgeL:lda erow
+        cmp rsv
+        bcs rfSolid
+        ldy erow
+        lda kTabT,y
+        sta kr
+        ldx colc
+        lda col4T,x
+        tax                     ; X = 4*column -> logical column of this cell
         lda capH,x
         clc
         adc kr
@@ -417,9 +433,9 @@ rsEdge: sty cellc               ; the edge path needs both index registers; park
         tay
         lda clampT,y
         sta hh1                 ; right level (0..12)
-        ldx cellc
+        ldx colc
         lda cstepT,x
-        bne rsStep
+        bne rfStep
         lda hh0                 ; single face: ramp, index = wL*16 + wR
         asl
         asl
@@ -428,10 +444,8 @@ rsEdge: sty cellc               ; the edge path needs both index registers; park
         ora hh1
         tay
         lda rampT,y
-        ldy cellc
-        jmp rsPut
-        ; face boundary inside the cell -> a genuinely vertical step at that column
-rsStep: pha
+        jmp rfStore
+rfStep: pha                     ; face boundary -> a genuinely vertical step at that column
         ldx hh0
         lda qIdxT,x
         asl
@@ -444,25 +458,56 @@ rsStep: pha
         tay
         pla
         cmp #$02
-        beq rsSt2
-        bcs rsSt3
+        beq rfSt2
+        bcs rfSt3
         lda stepT1,y
-        ldy cellc
-        jmp rsPut
-rsSt2:  lda stepT2,y
-        ldy cellc
-        jmp rsPut
-rsSt3:  lda stepT3,y
-        ldy cellc
-        jmp rsPut
-rsPut:  sta (tpLo),y
-        sta (btLo),y            ; charset B mirrors it below the horizon
-        dey
-        bpl rsCol
-        inc crc
-        lda crc
+        jmp rfStore
+rfSt2:  lda stepT2,y
+        jmp rfStore
+rfSt3:  lda stepT3,y
+rfStore:pha
+        ldy erow                ; this row, and its mirror 24-erow
+        lda rowLoT,y
+        clc
+        adc colc
+        sta jv
+        lda rowHiT,y
+        adc baseHi
+        sta jv+1
+        lda #24
+        sec
+        sbc erow
+        tay
+        lda rowLoT,y
+        clc
+        adc colc
+        sta ep2
+        lda rowHiT,y
+        adc baseHi
+        sta ep2+1
+        pla
+        ldy #$00
+        sta (jv),y
+        sta (ep2),y
+        inc erow
+        jmp rfEdgeL
+        ; ---- solid run: rows rs .. 12 ----
+rfSolid:lda rsv
         cmp #13
-        bcc rsRow
+        bcs rfNext
+        clc
+        adc bufOff
+        tay
+        lda sldLoT,y
+        sta jv
+        lda sldHiT,y
+        sta jv+1
+        ldx colc
+        lda #$01
+        jmp (jv)                ; -> ascending chain -> jmp rfNext
+rfNext: ldx colc
+        dex
+        bpl rfCol
         rts
 
 ; ================= ESDF keyboard =================
@@ -1293,6 +1338,32 @@ rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
 kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
 col4T:  !byte 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156
+rbT:    !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
+        !byte 9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6
+        !byte 6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3
+        !byte 3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+rsT:    !byte 13,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10
+        !byte 10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7
+        !byte 7,7,7,7,6,6,6,6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4
+        !byte 4,4,4,4,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1
+        !byte 1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+blkLoT: !byte 0,<bkA0,<bkA1,<bkA2,<bkA3,<bkA4,<bkA5,<bkA6,<bkA7,<bkA8,<bkA9,<bkA10,<bkA11,<bkA12,0,<bkB0,<bkB1,<bkB2,<bkB3,<bkB4,<bkB5,<bkB6,<bkB7,<bkB8,<bkB9,<bkB10,<bkB11,<bkB12
+blkHiT: !byte 0,>bkA0,>bkA1,>bkA2,>bkA3,>bkA4,>bkA5,>bkA6,>bkA7,>bkA8,>bkA9,>bkA10,>bkA11,>bkA12,0,>bkB0,>bkB1,>bkB2,>bkB3,>bkB4,>bkB5,>bkB6,>bkB7,>bkB8,>bkB9,>bkB10,>bkB11,>bkB12
+sldLoT: !byte <slA0,<slA1,<slA2,<slA3,<slA4,<slA5,<slA6,<slA7,<slA8,<slA9,<slA10,<slA11,<slA12,0,<slB0,<slB1,<slB2,<slB3,<slB4,<slB5,<slB6,<slB7,<slB8,<slB9,<slB10,<slB11,<slB12,0
+sldHiT: !byte >slA0,>slA1,>slA2,>slA3,>slA4,>slA5,>slA6,>slA7,>slA8,>slA9,>slA10,>slA11,>slA12,0,>slB0,>slB1,>slB2,>slB3,>slB4,>slB5,>slB6,>slB7,>slB8,>slB9,>slB10,>slB11,>slB12,0
 t1TabT: !byte 100,92,84,76,68,60,52,44,36,28,20,12,4
 tbTabT: !byte 93,85,77,69,61,53,45,37,29,21,13,5,0
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
@@ -1509,3 +1580,107 @@ stepT2: !byte 0,18,167,168,169,170,0,0,28,29,171,172,173,174,0,0,175,176,56,177,
         !byte 180,181,182,84,183,184,0,0,185,186,187,188,111,112,0,0,189,190,191,192,123,1,0,0
 stepT3: !byte 0,2,193,194,195,196,0,0,197,29,198,199,200,201,0,0,202,203,56,204,205,206,0,0
         !byte 207,208,209,84,210,211,0,0,212,213,214,215,111,216,0,0,217,218,219,220,132,1,0,0
+bkA12:	sta $05e0,x
+bkA11:	sta $05b8,x
+	sta $0608,x
+bkA10:	sta $0590,x
+	sta $0630,x
+bkA9:	sta $0568,x
+	sta $0658,x
+bkA8:	sta $0540,x
+	sta $0680,x
+bkA7:	sta $0518,x
+	sta $06a8,x
+bkA6:	sta $04f0,x
+	sta $06d0,x
+bkA5:	sta $04c8,x
+	sta $06f8,x
+bkA4:	sta $04a0,x
+	sta $0720,x
+bkA3:	sta $0478,x
+	sta $0748,x
+bkA2:	sta $0450,x
+	sta $0770,x
+bkA1:	sta $0428,x
+	sta $0798,x
+bkA0:	sta $0400,x
+	sta $07c0,x
+	jmp rfEdge
+bkB12:	sta $25e0,x
+bkB11:	sta $25b8,x
+	sta $2608,x
+bkB10:	sta $2590,x
+	sta $2630,x
+bkB9:	sta $2568,x
+	sta $2658,x
+bkB8:	sta $2540,x
+	sta $2680,x
+bkB7:	sta $2518,x
+	sta $26a8,x
+bkB6:	sta $24f0,x
+	sta $26d0,x
+bkB5:	sta $24c8,x
+	sta $26f8,x
+bkB4:	sta $24a0,x
+	sta $2720,x
+bkB3:	sta $2478,x
+	sta $2748,x
+bkB2:	sta $2450,x
+	sta $2770,x
+bkB1:	sta $2428,x
+	sta $2798,x
+bkB0:	sta $2400,x
+	sta $27c0,x
+	jmp rfEdge
+slA0:	sta $0400,x
+	sta $07c0,x
+slA1:	sta $0428,x
+	sta $0798,x
+slA2:	sta $0450,x
+	sta $0770,x
+slA3:	sta $0478,x
+	sta $0748,x
+slA4:	sta $04a0,x
+	sta $0720,x
+slA5:	sta $04c8,x
+	sta $06f8,x
+slA6:	sta $04f0,x
+	sta $06d0,x
+slA7:	sta $0518,x
+	sta $06a8,x
+slA8:	sta $0540,x
+	sta $0680,x
+slA9:	sta $0568,x
+	sta $0658,x
+slA10:	sta $0590,x
+	sta $0630,x
+slA11:	sta $05b8,x
+	sta $0608,x
+slA12:	sta $05e0,x
+	jmp rfNext
+slB0:	sta $2400,x
+	sta $27c0,x
+slB1:	sta $2428,x
+	sta $2798,x
+slB2:	sta $2450,x
+	sta $2770,x
+slB3:	sta $2478,x
+	sta $2748,x
+slB4:	sta $24a0,x
+	sta $2720,x
+slB5:	sta $24c8,x
+	sta $26f8,x
+slB6:	sta $24f0,x
+	sta $26d0,x
+slB7:	sta $2518,x
+	sta $26a8,x
+slB8:	sta $2540,x
+	sta $2680,x
+slB9:	sta $2568,x
+	sta $2658,x
+slB10:	sta $2590,x
+	sta $2630,x
+slB11:	sta $25b8,x
+	sta $2608,x
+slB12:	sta $25e0,x
+	jmp rfNext
