@@ -519,7 +519,6 @@ sideT   = $c100
 idT     = $c200
 colH    = $c300
 faceIdT = $c400
-capH    = $c500                 ; colH capped at 100, filled by prepCells
 cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
 cmxT    = $c640                 ; per cell-column (40): max
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
@@ -823,16 +822,18 @@ prepCells:
         ; Four columns, unrolled. The rolled version spent dey/bne and an inx on each of
         ; 160 iterations to walk four adjacent bytes -- 26 cycles a cell column, ~1000 a
         ; frame, to index something the addressing mode can reach with a constant offset.
+        ;
+        ; No capping here any more. This used to write a capped copy of all 160 heights into
+        ; capH so the edge path could read two of them; the edge path reads ~39 a frame, so
+        ; 160 caps and 160 stores were being done to serve 39 reads. rbT and rsT are 256-entry
+        ; tables that already fold every value >= 93 / >= 100 to the same answer, so the
+        ; min/max below never needed capped input either. The two reads cap themselves now.
 pcLp:   ldx zpc
         lda #$ff
         sta tmp                 ; running min
         lda #$00
         sta tmp2                ; running max
         lda colH+0,x
-        cmp #101
-        bcc pcNc0
-        lda #100                ; cap: heights above the screen never affect the pattern
-pcNc0: sta capH+0,x
         cmp tmp
         bcs pcNmn0
         sta tmp
@@ -841,10 +842,6 @@ pcNmn0: cmp tmp2
         sta tmp2
 pcNmx0:
         lda colH+1,x
-        cmp #101
-        bcc pcNc1
-        lda #100                ; cap: heights above the screen never affect the pattern
-pcNc1: sta capH+1,x
         cmp tmp
         bcs pcNmn1
         sta tmp
@@ -853,10 +850,6 @@ pcNmn1: cmp tmp2
         sta tmp2
 pcNmx1:
         lda colH+2,x
-        cmp #101
-        bcc pcNc2
-        lda #100                ; cap: heights above the screen never affect the pattern
-pcNc2: sta capH+2,x
         cmp tmp
         bcs pcNmn2
         sta tmp
@@ -865,10 +858,6 @@ pcNmn2: cmp tmp2
         sta tmp2
 pcNmx2:
         lda colH+3,x
-        cmp #101
-        bcc pcNc3
-        lda #100                ; cap: heights above the screen never affect the pattern
-pcNc3: sta capH+3,x
         cmp tmp
         bcs pcNmn3
         sta tmp
@@ -957,14 +946,20 @@ rfEdgeL:
         ldx colc
         lda col4T,x
         tax                     ; X = 4*column -> logical column of this cell
-        lda capH,x
-        clc
+        lda colH,x              ; cap here, not over all 160 columns: (h + K) has to fit a
+        cmp #101                ; signed byte, and colH is deliberately left uncapped so the
+        bcc rfCp0               ; interpolator's merged spans stay linear
+        lda #100
+rfCp0:  clc
         adc kr
         tay
         lda clmp16,y
         sta hh0                 ; left level, already shifted into the high nibble
-        lda capH+3,x
-        clc
+        lda colH+3,x
+        cmp #101
+        bcc rfCp3
+        lda #100
+rfCp3:  clc
         adc kr
         tay
         lda clampT,y
