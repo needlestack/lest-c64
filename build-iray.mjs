@@ -98,13 +98,16 @@ for (let i = 256; i < 512; i++) { const v = Math.floor(i * i / 4); f1Lo.push(v &
 // a ramp by its endpoints). Straight-line interior sum is exactly wL+wR, which makes the
 // bulge test a subtraction: (w1+w2)-(w0+w3).
 const CLO = -2, CHI = 10, CN = CHI - CLO + 1;   // endpoint clamp range -> 13 levels
-const MINJUMP = 3;      // below this end-to-end jump, a step is indistinguishable from a ramp
+// Step levels are quantised. Walls are vertical prisms, so a face boundary is EXACTLY a
+// vertical line on screen and the renderer reads its position straight out of faceIdT --
+// no inference. But three step positions x a full 9x9 level cross product is 243 codes on
+// its own, so levels are quantised: fine at the extremes (a saturated side must land
+// exactly on 0 or 8) and coarse in the middle where 1px is invisible.
+const STEPQ = [0, 1, 3, 5, 7, 8];
 const C8 = x => Math.max(0, Math.min(8, x));
-function cellPat(a, b, bi) {                    // a,b in CLO..CHI; bi 0=step-late 1=ramp 2=step-early
-  if (bi === 1 || Math.abs(a - b) < MINJUMP) return [0, 1, 2, 3].map(k => C8(Math.round(a + (b - a) * k / 3)));
-  const v = bi === 0 ? Math.min(a, b) : Math.max(a, b);
-  return [C8(a), C8(v), C8(v), C8(b)];
-}
+const qstep = v => STEPQ.reduce((b, q) => Math.abs(q - v) < Math.abs(b - v) ? q : b, STEPQ[0]);
+const rampPat = (a, b) => [0, 1, 2, 3].map(k => C8(Math.round(a + (b - a) * k / 3)));
+const stepPat = (A, B, k) => [0, 1, 2, 3].map(i => i < k ? A : B);
 // 3x5 digit glyphs (each row = 3 bits, bit2 = left column). In the new scheme these are
 // whole CHARACTERS, not plotted pixels -- the readout pokes a char code instead of ORing
 // bits into a framebuffer, which is what let the old overlay corrupt renderer tables.
@@ -121,7 +124,8 @@ const patBytes = p => [...Array(8)].map((_, i) =>
   (p[0] > 7 - i ? 0x40 : 0) | (p[1] > 7 - i ? 0x10 : 0) | (p[2] > 7 - i ? 0x04 : 0) | (p[3] > 7 - i ? 0x01 : 0));
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
-for (let bi = 0; bi < 3; bi++) for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) intern(cellPat(a, b, bi));
+for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) intern(rampPat(a, b));
+for (let k = 1; k <= 3; k++) for (const A of STEPQ) for (const B of STEPQ) intern(stepPat(A, B, k));
 const CELLCODES = glyphs.length;
 const GLYPH0 = glyphs.length;                   // first readout glyph code
 for (let g = 0; g < NGLYPH; g++) {
@@ -137,10 +141,15 @@ console.error(`charset: ${CELLCODES} cell patterns + ${NGLYPH} readout glyphs = 
 const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
 for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
-// charT<bi>[wL*16 + wR] -> char code.  wL/wR are clampT outputs (0..12).
-const charT = [0, 1, 2].map(bi => { const t = new Array(CN * 16).fill(0);
-  for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) t[a * 16 + b] = codeOf.get(cellPat(a + CLO, b + CLO, bi).join(','));
+// rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
+const rampT = new Array(CN * 16).fill(0);
+for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) rampT[a * 16 + b] = codeOf.get(rampPat(a + CLO, b + CLO).join(','));
+// stepT<k>[qA*8 + qB] -> char code, for a cell whose face boundary falls at column k.
+const stepT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(0);
+  for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = codeOf.get(stepPat(STEPQ[i], STEPQ[j], k).join(','));
   return t; });
+// clampT output (level+2, 0..12) -> index into STEPQ.
+const qIdxT = [...Array(CN)].map((_, v) => STEPQ.indexOf(qstep(C8(v + CLO))));
 // clampT[(h + K) as signed byte] -> level 0..12. K = 8R-92 is negative for every row above
 // the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
 const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
@@ -162,6 +171,10 @@ const NOFILL = process.env.NOFILL === '1'; // diagnostic: skip renderSym (fill)
 // pin here than under SPIN -- a fixed angle makes the frame reproducible, so a plain
 // -exitscreenshot run is comparable across builds without breakpointing the frame counter.
 const PA = process.env.PA ? parseInt(process.env.PA, 16) & 0xff : 0;
+// PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
+// (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
+const PX = process.env.PX ? parseInt(process.env.PX, 16) & 0xffff : 0x0180;
+const PY = process.env.PY ? parseInt(process.env.PY, 16) & 0xffff : 0x0180;
 // Angle units per frame while the joystick is held. The angle byte is a full turn in 256
 // steps, so this is also the angular resolution of the view -- rayOff/cosCorr are indexed
 // by the same byte, so turning cannot be made smooth by shrinking this, only coarser by
@@ -187,7 +200,7 @@ const SCR_B = 0x2400;
 const CHARSET = 0x2800;                 // charset A: upright glyphs, used above the horizon
 const FTABLES = 0x3000;                 // f0Lo/f0Hi/f1Lo/f1Hi + run-id tables
 const CHARSET_B = 0x3800;               // charset B: every glyph flipped vertically
-const NEWTABLES = 0x4000;               // clampT / charT0-2, outside VIC bank 0
+const NEWTABLES = 0x4000;               // clampT / rampT / stepT, outside VIC bank 0
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
 const vm = scr => (scr >> 10) << 4;
 const cb = cs => (cs >> 11) << 1;
@@ -309,6 +322,7 @@ faceIdT = $c400
 capH    = $c500                 ; colH capped at 100, filled by prepCells
 cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
 cmxT    = $c640                 ; per cell-column (40): max
+cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -346,13 +360,13 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-        lda #$80
+        lda #${hx(PX & 255)}
         sta px
-        lda #$01
+        lda #${hx(PX >> 8)}
         sta px+1
-        lda #$80
+        lda #${hx(PY & 255)}
         sta py
-        lda #$01
+        lda #${hx(PY >> 8)}
         sta py+1
         lda #${hx(PA)}
         sta pa
@@ -445,7 +459,7 @@ subSp:  lda spanR
         inx
         stx sp
         jmp subLp
-subDn:  jsr makeDiv
+subDn:
 ${NOFILL ? '' : '        jsr prepCells\n        jsr renderSym'}
         jsr drawFps
         jsr drawDbg
@@ -477,18 +491,10 @@ mnext:  inc iterLo
         inc iterHi
         jmp mloop
 
-; ============ dividers: zero the half-height at each wall-cell boundary (white seam) ============
-makeDiv:
-        ldx #$01
-mdl:    lda faceIdT,x
-        cmp faceIdT-1,x         ; MERGE: seam only where the wall FACE changes (corners)
-        beq mdnx
-        lda #$00
-        sta colH,x              ; boundary -> white slit at this real column
-mdnx:   inx
-        cpx #${NLOG}
-        bne mdl
-        rts
+; The old makeDiv drew a white seam slit by ZEROING colH at each face boundary. That is
+; incompatible with 4-wide cells -- a zeroed column silently became a ramp endpoint, so a
+; boundary landing on a cell edge turned the whole cell into a diagonal. It is also now
+; redundant: the face boundary is rendered as a true vertical step (see prepCells/cstepT).
 
 ; ============ prepCells: per cell-column summary, once per frame ============
 ; renderSym visits 520 cells but only ~25 are edge cells; the other 495 must be rejected
@@ -525,6 +531,32 @@ pcNmx:  inx
         sta cmnT,x
         lda tmp2
         sta cmxT,x
+        ; Face boundary position inside this cell: 0 = one face (ramp), else the column
+        ; 1..3 where faceIdT changes. Walls are vertical prisms so this IS the screen-space
+        ; step, exactly -- and it does not depend on the row, so it is computed once here
+        ; rather than 13 times in renderSym.
+        ldy zpc
+        lda #$00
+        sta tmp
+        lda faceIdT,y
+        cmp faceIdT+1,y
+        beq pcS2
+        lda #$01
+        sta tmp
+        jmp pcSdn
+pcS2:   lda faceIdT+1,y
+        cmp faceIdT+2,y
+        beq pcS3
+        lda #$02
+        sta tmp
+        jmp pcSdn
+pcS3:   lda faceIdT+2,y
+        cmp faceIdT+3,y
+        beq pcSdn
+        lda #$03
+        sta tmp
+pcSdn:  lda tmp
+        sta cstepT,x
         lda zpc
         clc
         adc #$04
@@ -579,57 +611,53 @@ rsCol:  ldx cellc
         lda cmxT,x
         cmp tbc
         bcc rsBlank             ; max height < tb  -> every column empty
-        ; ---- edge cell: (wL, wR, bulge) -> char ----
+        ; ---- edge cell: both end columns -> level, then ramp or exact vertical step ----
         ldx zpc
-        lda capH,x              ; w0
+        lda capH,x
         clc
         adc kr
         tay
         lda clampT,y
-        sta hh0
-        lda capH+3,x            ; w3
+        sta hh0                 ; left level  (0..12)
+        lda capH+3,x
         clc
         adc kr
         tay
         lda clampT,y
-        sta hh1
-        lda capH+1,x            ; w1
-        clc
-        adc kr
-        tay
-        lda clampT,y
-        sta hh4
-        lda capH+2,x            ; w2
-        clc
-        adc kr
-        tay
-        lda clampT,y
-        clc
-        adc hh4                 ; w1 + w2
-        sec
-        sbc hh0
-        sec
-        sbc hh1                 ; bulge = (w1+w2) - (w0+w3); a straight line gives exactly 0
-        sta dd
-        ; index = w0*16 + w3, then pick the table by bulge sign
-        lda hh0
+        sta hh1                 ; right level (0..12)
+        ldx cellc
+        lda cstepT,x
+        bne rsStep
+        lda hh0                 ; single face: ramp, index = wL*16 + wR
         asl
         asl
         asl
         asl
         ora hh1
         tay
-        lda dd
-        bmi rsNeg
+        lda rampT,y
+        jmp rsPut
+        ; face boundary inside the cell -> a genuinely vertical step at that column
+rsStep: pha
+        ldx hh0
+        lda qIdxT,x
+        asl
+        asl
+        asl
+        sta tmp                 ; qA*8
+        ldx hh1
+        lda qIdxT,x
+        ora tmp
+        tay
+        pla
         cmp #$02
-        bcs rsUp                ; interior above the line -> step-early
-rsMid:  lda charT1,y
+        beq rsSt2
+        bcs rsSt3
+        lda stepT1,y
         jmp rsPut
-rsNeg:  cmp #$fe                ; -2 or lower -> interior below the line -> step-late
-        bcs rsMid
-        lda charT0,y
+rsSt2:  lda stepT2,y
         jmp rsPut
-rsUp:   lda charT2,y
+rsSt3:  lda stepT3,y
         jmp rsPut
 rsSolid:lda #${hx(SOLID)}
         jmp rsPut
@@ -667,8 +695,11 @@ readKeys:
         lda $dc01
         ora joyEor
         and #$40
-        bne rkNotE
-        jsr moveFwd
+        beq rkFwd               ; E held
+        lda joyv
+        and #$01
+        bne rkNotE              ; joystick-1 up also moves forward
+rkFwd:  jsr moveFwd
 rkNotE: lda $dc01
         ora joyEor
         and #$20
@@ -679,8 +710,11 @@ rkNotS: lda #$fb
         lda $dc01
         ora joyEor
         and #$04
-        bne rkNotD
-        jsr moveBack
+        beq rkBack              ; D held
+        lda joyv
+        and #$02
+        bne rkNotD              ; joystick-1 down also moves back
+rkBack: jsr moveBack
 rkNotD: lda $dc01
         ora joyEor
         and #$20
@@ -1381,9 +1415,11 @@ ${chunk(fontB, 32)}
 
         * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
 clampT: ${chunk(clampT).trim()}
-charT0: ${chunk(charT[0]).trim()}
-charT1: ${chunk(charT[1]).trim()}
-charT2: ${chunk(charT[2]).trim()}
+qIdxT:  !byte ${qIdxT.join(',')}
+rampT:  ${chunk(rampT).trim()}
+stepT1: ${chunk(stepT[0]).trim()}
+stepT2: ${chunk(stepT[1]).trim()}
+stepT3: ${chunk(stepT[2]).trim()}
 `;
 
 writeFileSync('./iray.asm', asm);
