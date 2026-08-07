@@ -2208,116 +2208,7 @@ setRow:                         ; A = char row -> ppPtr
         sta ppPtr+1
         rts
 
-${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
-; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
-; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
-pfShow: lda #$00
-        sta pfRow
-psLp:   lda pfRow
-        clc
-        adc #$04
-        jsr setRow
-        ldy #$00
-        lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /256)
-        asl
-        clc
-        adc pfRow
-        tax
-        lda pfAcc+2,x           ; high nibble pair first
-        pha
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        pla
-        and #$0f
-        jsr ddPut
-        lda pfAcc+1,x
-        pha
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        pla
-        and #$0f
-        jsr ddPut
-        inc pfRow
-        lda pfRow
-        cmp #$07
-        bcc psLp
-        rts
-
-; ---- pfTick: close the phase in X and open the next ----
-; Time is (frameCnt, raster line). frameCnt only advances in the IRQ, so read it, read the
-; line, then read it again -- if it moved, the two halves came from different frames and
-; the pair is meaningless. Costs ~60 cycles, 8 times a frame: 0.8%, and it lands in the
-; phase being measured, so subtract ~60 lines/256 frames per phase if you care.
-pfTick: lda pfDone
-        bne pfOff
-        lda frameCnt
-        sta pfCurF
-        lda $d012
-        sta pfCurL
-        lda frameCnt
-        cmp pfCurF
-        bne pfTick
-        sec                     ; delta = (f - pf)*263 + (l - pl)
-        lda pfCurL
-        sbc pfPrvL
-        sta pfDLo
-        lda #$00
-        sbc #$00                ; sign-extend the line difference
-        sta pfDHi
-        lda pfCurF
-        sec
-        sbc pfPrvF
-        tay
-        beq pfNoF
-pfFLp:  clc                     ; one whole video frame is 263 lines
-        lda pfDLo
-        adc #<263
-        sta pfDLo
-        lda pfDHi
-        adc #>263
-        sta pfDHi
-        dey
-        bne pfFLp
-pfNoF:  lda pfDHi               ; A negative delta means the raster wrapped 262->0 but the
-        bpl pfPos               ; IRQ had not yet bumped frameCnt -- the read caught the gap.
-        clc                     ; Add the frame the counter had not counted, so the delta is
-        lda pfDLo               ; always non-negative and the accumulate below stays simple.
-        adc #$07
-        sta pfDLo
-        lda pfDHi
-        adc #$01
-        sta pfDHi
-pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
-        sta pfPrvF
-        lda pfCurL
-        sta pfPrvL
-        stx pfCurX              ; X = phase -> byte offset X*3
-        txa
-        asl
-        clc
-        adc pfCurX
-        tay
-        clc                     ; 24-bit accumulate
-        lda pfAcc,y
-        adc pfDLo
-        sta pfAcc,y
-        iny
-        lda pfAcc,y
-        adc pfDHi
-        sta pfAcc,y
-        iny
-        lda pfAcc,y
-        adc #$00
-        sta pfAcc,y
-pfOff:  rts
-
-` : ''}drawFps:
+drawFps:
         lda #$00
         jsr setRow
         ldy #$00
@@ -2461,6 +2352,119 @@ ${edgeSrc('edB', SCR_B)}
 chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
+${PROFILE ? `        * = ${hx16(HTABLE + 16 * 3 * 256)}  ; the profiler lives above the height
+                            ; tables: it must not crowd the shipping build out of the 189
+                            ; bytes it has left below screen buffer B
+` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
+; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
+; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
+pfShow: lda #$00
+        sta pfRow
+psLp:   lda pfRow
+        clc
+        adc #$04
+        jsr setRow
+        ldy #$00
+        lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /256)
+        asl
+        clc
+        adc pfRow
+        tax
+        lda pfAcc+2,x           ; high nibble pair first
+        pha
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        pla
+        and #$0f
+        jsr ddPut
+        lda pfAcc+1,x
+        pha
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        pla
+        and #$0f
+        jsr ddPut
+        inc pfRow
+        lda pfRow
+        cmp #$07
+        bcc psLp
+        rts
+
+; ---- pfTick: close the phase in X and open the next ----
+; Time is (frameCnt, raster line). frameCnt only advances in the IRQ, so read it, read the
+; line, then read it again -- if it moved, the two halves came from different frames and
+; the pair is meaningless. Costs ~60 cycles, 8 times a frame: 0.8%, and it lands in the
+; phase being measured, so subtract ~60 lines/256 frames per phase if you care.
+pfTick: lda pfDone
+        bne pfOff
+        lda frameCnt
+        sta pfCurF
+        lda $d012
+        sta pfCurL
+        lda frameCnt
+        cmp pfCurF
+        bne pfTick
+        sec                     ; delta = (f - pf)*263 + (l - pl)
+        lda pfCurL
+        sbc pfPrvL
+        sta pfDLo
+        lda #$00
+        sbc #$00                ; sign-extend the line difference
+        sta pfDHi
+        lda pfCurF
+        sec
+        sbc pfPrvF
+        tay
+        beq pfNoF
+pfFLp:  clc                     ; one whole video frame is 263 lines
+        lda pfDLo
+        adc #<263
+        sta pfDLo
+        lda pfDHi
+        adc #>263
+        sta pfDHi
+        dey
+        bne pfFLp
+pfNoF:  lda pfDHi               ; A negative delta means the raster wrapped 262->0 but the
+        bpl pfPos               ; IRQ had not yet bumped frameCnt -- the read caught the gap.
+        clc                     ; Add the frame the counter had not counted, so the delta is
+        lda pfDLo               ; always non-negative and the accumulate below stays simple.
+        adc #$07
+        sta pfDLo
+        lda pfDHi
+        adc #$01
+        sta pfDHi
+pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
+        sta pfPrvF
+        lda pfCurL
+        sta pfPrvL
+        stx pfCurX              ; X = phase -> byte offset X*3
+        txa
+        asl
+        clc
+        adc pfCurX
+        tay
+        clc                     ; 24-bit accumulate
+        lda pfAcc,y
+        adc pfDLo
+        sta pfAcc,y
+        iny
+        lda pfAcc,y
+        adc pfDHi
+        sta pfAcc,y
+        iny
+        lda pfAcc,y
+        adc #$00
+        sta pfAcc,y
+pfOff:  rts
+
+` : ''}
 `;
 
 // iray.asm is deliberately tracked (see .gitignore): diffing the generated assembly is how
@@ -2502,6 +2506,10 @@ try {
   // is always the current build -- no -ntsc/-merge/foundation variants to get stale and
   // mislead. iray.asm/iray.prg are the matching support files for diffing and label lookup.
   writeFileSync('./latest.d64', Buffer.from(d.getData()));
+  // Say how much room is left below the screen buffer. The data segment has nowhere to
+  // grow -- charset A is at $2800 and buffer B sits in the way at $2400 -- so this going
+  // quiet is the difference between a build error and a frame-by-frame corruption.
+  console.log(`headroom below screen buffer B: ${SCR_B - r.labels.dataEnd} bytes`);
   console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`
     + (DIAG.length ? `\nDIAGNOSTIC BUILD [${DIAG.join(' ')}] -- asm to ${asmPath}, not for fps numbers` : ''));
 } catch (e) { console.error('ASM ERROR:', e.message); process.exit(1); }
