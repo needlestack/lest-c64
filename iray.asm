@@ -809,6 +809,12 @@ interpSpan:
 isPos:  sta dyv
         lda #$00
         sta syNeg
+        ; The error term overflows 8 bits exactly when dxv + dyv > 255: err stays below dxv
+        ; (span width, up to 159) and dyv is the height delta (up to 254), so err+dyv can
+        ; reach 413. Dropping that carry made the whole span interpolate garbage -- a
+        ; receding near wall stayed far too tall right up to the next marched column.
+        ; Test once per span and use the cheap 8-bit loop when it cannot happen, which is
+        ; the overwhelming majority of spans.
 isErr:  lda dxv
         lsr
         sta errv                ; err = width/2
@@ -816,11 +822,37 @@ isErr:  lda dxv
         sta errH
         lda spanL
         sta col
-        ; The error term MUST be 16-bit. err stays below dxv (span width, up to 159) and
-        ; dyv is the height delta (up to 254), so err+dyv reaches 413. An 8-bit accumulate
-        ; drops the carry and the whole span interpolates garbage -- which is what made a
-        ; receding near wall render far too tall right up to the next marched column.
-isLp:   inc col
+        lda dxv
+        clc
+        adc dyv
+        bcs isLp                ; can overflow -> 16-bit path
+isLp8:  inc col                 ; --- 8-bit fast path ---
+        lda col
+        cmp spanR
+        bcs isDn
+        clc
+        lda errv
+        adc dyv
+        sta errv
+isW8:   lda errv
+        cmp dxv
+        bcc isWr8
+        sec
+        sbc dxv
+        sta errv
+        lda syNeg
+        beq isInc8
+        dec hcur
+        jmp isW8
+isInc8: inc hcur
+        jmp isW8
+isWr8:  ldx col
+        lda hcur
+        sta colH,x
+        lda tmp2
+        sta faceIdT,x
+        jmp isLp8
+isLp:   inc col                 ; --- 16-bit path ---
         lda col
         cmp spanR
         bcs isDn
