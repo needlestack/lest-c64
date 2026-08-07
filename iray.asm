@@ -641,7 +641,71 @@ strafeR:
         lda moveYT,x
         sta dyv
 moveApply:
+        jsr mvCalcX
+        jsr mvCalcY
+        jsr mvFree
+        bcc mvGo                ; whole step is clear -- the common case, one test
+        ; Blocked. Rather than stop dead, retry one axis at a time and take the first that
+        ; fits. The component running INTO the wall is the one that fails, so what survives
+        ; is the component ALONG it, at full speed: a glancing hit becomes a slide, and a
+        ; corner you cut too close is rounded instead of sticking to you.
+        ;
+        ; No angle threshold is wanted here. A head-on hit has no component along the wall,
+        ; so it still stops; as the approach shallows the surviving component grows on its
+        ; own. Any explicit cutoff would only add a discontinuity where the smooth version
+        ; already does the right thing.
+        ;
+        ; Dominant axis first. It only matters when BOTH axes fit -- squeezing past a corner
+        ; where just the diagonal cell is solid -- and there, continuing the way you were
+        ; already heading reads as cutting the corner, while taking the other one reads as
+        ; an unexplained sideways jink.
         lda dxv
+        bpl mvAbx
+        eor #$ff
+        clc
+        adc #$01
+mvAbx:  sta tmp                 ; |dx|
+        lda dyv
+        bpl mvAby
+        eor #$ff
+        clc
+        adc #$01
+mvAby:  cmp tmp                 ; |dy| - |dx|
+        bcs mvYfst
+        jsr mvTryX
+        bcc mvGo
+        jsr mvTryY
+        bcc mvGo
+        rts                     ; both axes blocked: a real dead end, stand still
+mvYfst: jsr mvTryY
+        bcc mvGo
+        jsr mvTryX
+        bcc mvGo
+        rts
+mvGo:   lda nxL
+        sta px
+        lda nxH
+        sta px+1
+        lda nyL
+        sta py
+        lda nyH
+        sta py+1
+        rts
+
+mvTryX: jsr mvCalcX             ; X component alone: hold Y where it already is
+        lda py
+        sta nyL
+        lda py+1
+        sta nyH
+        jmp mvFree              ; tail call: its carry is our answer
+mvTryY: jsr mvCalcY             ; Y component alone: hold X where it already is
+        lda px
+        sta nxL
+        lda px+1
+        sta nxH
+        jmp mvFree
+
+mvCalcX:lda dxv                 ; nx = px + dxv, sign-extended into the high byte
         bpl mvxp
         clc
         lda px
@@ -650,7 +714,7 @@ moveApply:
         lda px+1
         adc #$ff
         sta nxH
-        jmp mvy
+        rts
 mvxp:   clc
         lda px
         adc dxv
@@ -658,7 +722,8 @@ mvxp:   clc
         lda px+1
         adc #$00
         sta nxH
-mvy:    lda dyv
+        rts
+mvCalcY:lda dyv
         bpl mvyp
         clc
         lda py
@@ -667,7 +732,7 @@ mvy:    lda dyv
         lda py+1
         adc #$ff
         sta nyH
-        jmp mvchk
+        rts
 mvyp:   clc
         lda py
         adc dyv
@@ -675,6 +740,11 @@ mvyp:   clc
         lda py+1
         adc #$00
         sta nyH
+        rts
+; mvFree: is the player box at (nx, ny) clear? Returns carry SET if blocked, clear if free,
+; so callers can chain attempts with bcc. It reads nx/ny and touches nothing else, which is
+; what lets moveApply probe three candidate positions with one copy of the test.
+;
 ; The player is a small square, not a point. Testing only the centre let you stand with
 ; your face flat against a wall at distance 0, which looks wrong and drives the wall height
 ; to absurd values (88/d). Radius is a hardcoded 26/256 = 0.10 cells -- computing it per
@@ -683,7 +753,7 @@ mvyp:   clc
 ; Note this does NOT stop colH from saturating: that needs 0.35 cells of clearance, which
 ; would feel like walking in a padded corridor. Saturation is handled properly in the
 ; span-merge instead (see subLp).
-mvchk:  sec                     ; cx0 = (nx - r) >> 8
+mvFree: sec                     ; cx0 = (nx - r) >> 8
         lda nxL
         sbc #26
         lda nxH
@@ -709,16 +779,16 @@ mvchk:  sec                     ; cx0 = (nx - r) >> 8
         sta cy1
         lda cx0                 ; any corner off the map (or wrapped) rejects the move
         cmp #16
-        bcs mvno
+        bcs mvBlk
         lda cx1
         cmp #16
-        bcs mvno
+        bcs mvBlk
         lda cy0
         cmp #16
-        bcs mvno
+        bcs mvBlk
         lda cy1
         cmp #16
-        bcs mvno
+        bcs mvBlk
         lda cy0                 ; all four corners must be open
         asl
         asl
@@ -728,12 +798,12 @@ mvchk:  sec                     ; cx0 = (nx - r) >> 8
         ora cx0
         tax
         lda mapT,x
-        bne mvno
+        bne mvBlk
         lda tmp
         ora cx1
         tax
         lda mapT,x
-        bne mvno
+        bne mvBlk
         lda cy1
         asl
         asl
@@ -743,21 +813,16 @@ mvchk:  sec                     ; cx0 = (nx - r) >> 8
         ora cx0
         tax
         lda mapT,x
-        bne mvno
+        bne mvBlk
         lda tmp
         ora cx1
         tax
         lda mapT,x
-        bne mvno
-        lda nxL
-        sta px
-        lda nxH
-        sta px+1
-        lda nyL
-        sta py
-        lda nyH
-        sta py+1
-mvno:   rts
+        bne mvBlk
+        clc                     ; all four corners open
+        rts
+mvBlk:  sec
+        rts
 
 ; ================= march one column: cast + store colH/idT =================
 marchCol:
