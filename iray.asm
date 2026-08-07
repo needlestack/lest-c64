@@ -555,11 +555,13 @@ rfRs:   sta rsv
         lda #$00       ; A must be loaded last: the chain stores it as-is
         jmp (jv)                ; -> descending chain -> jmp rfEdge
         ; ---- wall-top run: rows rb .. rs-1, one real cell each ----
+        ; Test at the bottom, not the top: 23 of 40 columns have no edge row at all, and
+        ; the old shape made every one of them load erow back out of memory to discover it.
 rfEdge: lda rbv
-        sta erow
-rfEdgeL:lda erow
         cmp rsv
-        bcs rfSolid
+        bcs rfSolid             ; nothing between the ceiling and the solid run
+        sta erow
+rfEdgeL:
         ldy erow
         lda kTabT,y
         sta kr
@@ -628,6 +630,9 @@ rfStore:sta ecode
         lda ecode
         jmp (jv)                ; -> edA<row>/edB<row> -> inc erow -> jmp rfEdgeL
         ; ---- solid run: rows rs .. 12 ----
+rfEdgeT:lda erow                ; bottom of the edge run
+        cmp rsv
+        bcc rfEdgeL
 rfSolid:lda rsv
         cmp #13
         bcs rfNext
@@ -2343,105 +2348,105 @@ slB12:	sta $25e0,x
 edA0:	sta $0400,x
 	sta $07c0,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA1:	sta $0428,x
 	sta $0798,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA2:	sta $0450,x
 	sta $0770,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA3:	sta $0478,x
 	sta $0748,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA4:	sta $04a0,x
 	sta $0720,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA5:	sta $04c8,x
 	sta $06f8,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA6:	sta $04f0,x
 	sta $06d0,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA7:	sta $0518,x
 	sta $06a8,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA8:	sta $0540,x
 	sta $0680,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA9:	sta $0568,x
 	sta $0658,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA10:	sta $0590,x
 	sta $0630,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA11:	sta $05b8,x
 	sta $0608,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edA12:	sta $05e0,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB0:	sta $2400,x
 	sta $27c0,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB1:	sta $2428,x
 	sta $2798,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB2:	sta $2450,x
 	sta $2770,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB3:	sta $2478,x
 	sta $2748,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB4:	sta $24a0,x
 	sta $2720,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB5:	sta $24c8,x
 	sta $26f8,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB6:	sta $24f0,x
 	sta $26d0,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB7:	sta $2518,x
 	sta $26a8,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB8:	sta $2540,x
 	sta $2680,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB9:	sta $2568,x
 	sta $2658,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB10:	sta $2590,x
 	sta $2630,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB11:	sta $25b8,x
 	sta $2608,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 edB12:	sta $25e0,x
 	inc erow
-	jmp rfEdgeL
+	jmp rfEdgeT
 chainEnd:
         * = $4a00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108

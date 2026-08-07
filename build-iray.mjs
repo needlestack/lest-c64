@@ -225,7 +225,7 @@ const ROWSD = [...Array(13)].map((_, i) => 12 - i), ROWSA = [...Array(13)].map((
 const edgeSrc = (nm, base) => ROWSA.map(r => {
   const a = base + r * 40, b = base + (24 - r) * 40;
   return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`) +
-         `\n\tinc erow\n\tjmp rfEdgeL`;
+         `\n\tinc erow\n\tjmp rfEdgeT`;
 }).join('\n');
 // rbT[maxHeight] = first cell row that is not fully ceiling; rsT[minHeight] = first row
 // that is fully wall. Derived from fill = h + 8R - 92, so they replace a per-cell test
@@ -921,11 +921,13 @@ rfRs:   sta rsv
         lda #${hx(BLANK)}       ; A must be loaded last: the chain stores it as-is
         jmp (jv)                ; -> descending chain -> jmp rfEdge
         ; ---- wall-top run: rows rb .. rs-1, one real cell each ----
+        ; Test at the bottom, not the top: 23 of 40 columns have no edge row at all, and
+        ; the old shape made every one of them load erow back out of memory to discover it.
 rfEdge: lda rbv
-        sta erow
-rfEdgeL:lda erow
         cmp rsv
-        bcs rfSolid
+        bcs rfSolid             ; nothing between the ceiling and the solid run
+        sta erow
+rfEdgeL:
         ldy erow
         lda kTabT,y
         sta kr
@@ -994,6 +996,9 @@ rfStore:sta ecode
         lda ecode
         jmp (jv)                ; -> edA<row>/edB<row> -> inc erow -> jmp rfEdgeL
         ; ---- solid run: rows rs .. 12 ----
+rfEdgeT:lda erow                ; bottom of the edge run
+        cmp rsv
+        bcc rfEdgeL
 rfSolid:lda rsv
         cmp #13
         bcs rfNext
