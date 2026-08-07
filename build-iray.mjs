@@ -39,12 +39,29 @@ for (let c = 0; c < NLOG; c++) {
   rayOff.push(Math.round(Math.atan(camX) / (2 * Math.PI) * 256) & 255);
   cosCorr.push(Math.min(255, Math.round(256 / Math.sqrt(1 + camX * camX))));
 }
-// half-height LUT indexed by perpDist>>3 (units of 1/32 cell). Half-height 0..100 in the
-// 200-row logical space. 88 half-px at 1 cell (index 32).
-// split into two 256-entry pages: hLUTa = index 0..255, hLUTb = 256..511.
-const hLUTa = [], hLUTb = [];
-for (let i = 0; i < 256; i++) { let h = Math.round(2816 / Math.max(1, i)); hLUTa.push(Math.max(0, Math.min(254, h))); }  // UNCAPPED (254) so merged spans interpolate the true (linear) height; prepCells caps at 100 on draw
-for (let i = 256; i < 512; i++) { hLUTb.push(Math.max(0, Math.min(100, Math.round(2816 / i)))); }
+// Half-height from distance. Indexed by perpDist>>3 (1/32-cell units); 88 half-px at one
+// cell. Left UNCAPPED at 254 so merged spans interpolate the true (linear) height --
+// prepCells caps at 100 on draw.
+//
+// The rectilinear cos correction depends ONLY on the column, never on the player, so it is
+// folded in here rather than multiplied onto every ray's distance. That deletes one whole
+// sideMul (two 8x16 multiplies) per ray, which was ~16% of castRay. Cost is one table per
+// quantised cosine group: 16 groups keeps the drawn-height error to at most 1px (measured
+// over every column x distance pair), for 12KB.
+//
+// Each group covers 768 entries = exactly 3 pages, so the asm picks a group by ADDING a
+// page offset -- no multiply, no shifts. 768 entries spans 24 cells, more than the 22.6
+// cell diagonal of a 16x16 map, so nothing in range is ever clamped away (the old code
+// clamped past 16 cells and drew those walls at height 1).
+const HGROUPS = 16, HSPAN = 768;
+const ccLo = Math.min(...cosCorr), ccHi = Math.max(...cosCorr);
+const hGrpOf = cosCorr.map(v => Math.min(HGROUPS - 1, Math.floor((v - ccLo) / (ccHi - ccLo + 1e-9) * HGROUPS)));
+const hRep = [...Array(HGROUPS)].map((_, g) => { const m = cosCorr.filter((_, i) => hGrpOf[i] === g);
+  return m.length ? Math.round((Math.min(...m) + Math.max(...m)) / 2) : ccLo; });
+const colGrpT = hGrpOf.map(g => g * 3);         // page offset of this column's group
+const hTab = [];
+for (let g = 0; g < HGROUPS; g++) for (let j = 0; j < HSPAN; j++)
+  hTab.push(Math.max(0, Math.min(254, Math.round(2816 / (Math.max(1, j) * hRep[g] / 256)))));
 
 // ===== connected-wall-run ids =====
 // "Same wall" = same CONTIGUOUS run of wall faces, not merely the same plane. Two wall
@@ -52,6 +69,13 @@ for (let i = 256; i < 512; i++) { hLUTb.push(Math.max(0, Math.min(100, Math.roun
 // maximal contiguous wall cells along a plane whose facing side is open (so the face is one
 // visible flat surface). Four face directions; each cell gets the run id for the face a ray
 // would hit from that side. This makes the face-merge exact (no gap-fill) with no precompute.
+// castRay drops its bounds check and steps a single cell index by +-1 / +-16, both of
+// which are only safe because a ray can never leave the grid. That holds iff the border is
+// solid all the way round -- assert it rather than trust it.
+for (let i = 0; i < 16; i++) {
+  if (!map[i] || !map[15 * 16 + i] || !map[i * 16] || !map[i * 16 + 15])
+    throw new Error(`map border must be solid: castRay has no bounds check (row/col ${i} is open)`);
+}
 const mapW = (x, y) => (x < 0 || y < 0 || x > 15 || y > 15) ? 1 : map[y * 16 + x];
 const runW = new Array(256).fill(0), runE = new Array(256).fill(0), runN = new Array(256).fill(0), runS = new Array(256).fill(0);
 let nextRun = 1;
@@ -224,6 +248,7 @@ const CHARSET = 0x2800;                 // charset A: upright glyphs, used above
 const FTABLES = 0x3000;                 // f0Lo/f0Hi/f1Lo/f1Hi + run-id tables
 const CHARSET_B = 0x3800;               // charset B: every glyph flipped vertically
 const NEWTABLES = 0x4000;               // clampT / rampT / stepT, outside VIC bank 0
+const HTABLE = 0x4800;                  // page-aligned: 16 height tables x 3 pages
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
 const vm = scr => (scr >> 10) << 4;
 const cb = cs => (cs >> 11) << 1;
@@ -242,8 +267,6 @@ px      = $02
 py      = $04
 pa      = $06
 rang    = $07
-mapX    = $08
-mapY    = $09
 sdx     = $0a
 sdy     = $0b
 ddx     = $0c
@@ -253,8 +276,6 @@ stpY    = $0f
 side    = $10
 pp      = $11
 fr      = $12
-qa      = $13
-qb      = $14
 qlo     = $15
 qhi     = $16
 col     = $17
@@ -341,6 +362,9 @@ erow    = $78                   ; current row inside the edge run
 jv      = $79                   ; 2 bytes: chain entry vector, then the edge store pointer
 ep2     = $7b                   ; 2 bytes: mirrored-row store pointer
 bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer being drawn
+cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
+stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
+hp      = $80                   ; 2 bytes: pointer into this column's height table
 stackLT = $c000
 stackRT = $c080
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
@@ -911,13 +935,7 @@ marchCol:
         sta colH,x
         lda side
         sta sideT,x             ; side kept separate (avoids id/side bit collision)
-        lda mapY
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc mapX                ; A = cell id (mapY*16 + mapX)
+        lda cell                ; castRay already maintains the cell id
         ldx col
         sta idT,x
         ; --- faceIdT = connected-wall-run id: "same wall" means same contiguous run,
@@ -1017,10 +1035,14 @@ castRay:
         sta ddy
         lda ddyHiT,x
         sta ddyH
-        lda px+1
-        sta mapX
-        lda py+1
-        sta mapY
+        lda py+1                ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc px+1
+        sta cell
         ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
         ; (standard form: full cell at frac=0, avoids the fr=256->0 wrap spike)
         lda px
@@ -1061,6 +1083,8 @@ cydo:   lda py
         bne cypos
         lda #$ff
         sta stpY
+        lda #$f0                ; -16: one cell row back
+        sta stpY16
         lda s1
         sta sdy
         lda s2
@@ -1068,6 +1092,8 @@ cydo:   lda py
         jmp cydone
 cypos:  lda #$01
         sta stpY
+        lda #$10                ; +16: one cell row on
+        sta stpY16
         sec
         lda ddy
         sbc s1
@@ -1091,10 +1117,10 @@ cstepY: clc
         lda sdyH
         adc ddyH
         sta sdyH
-        lda mapY
+        lda cell
         clc
-        adc stpY
-        sta mapY
+        adc stpY16
+        sta cell
         lda #$01
         sta side
         jmp chit
@@ -1105,31 +1131,21 @@ cstepX: clc
         lda sdxH
         adc ddxH
         sta sdxH
-        lda mapX
+        lda cell
         clc
         adc stpX
-        sta mapX
+        sta cell
         lda #$00
         sta side
-chit:   lda mapX
-        cmp #16
-        bcs cfar
-        lda mapY
-        cmp #16
-        bcs cfar
-        lda mapY
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc mapX
-        tax
+        ; No bounds check: the map border is solid on all four sides (asserted at build
+        ; time), so a ray always hits a wall before it can step outside the grid. That also
+        ; makes the +-1 cell stepping safe -- mapX never runs off the end of a row.
+chit:   ldx cell
         lda mapT,x
         bne cwall
         dey
         bne cdda
-cfar:   lda #$01
+cfar:   lda #$01                ; step guard expired; unreachable with a solid border
         sta pp
         rts
 cwall:  lda side
@@ -1149,26 +1165,15 @@ cperpY: sec
         lda sdyH
         sbc ddyH
         sta remH
-cidx:   lda col                 ; cos-correct: perpDist *= cosCorr[col] >>8 (rectilinear)
-        tax
-        lda cosCorrT,x
-        sta fr
-        lda remL
-        sta mlo
-        lda remH
-        sta mhi
-        jsr sideMul
-        lda s1
-        sta remL
-        lda s2
-        sta remH
-        lda remH
-        cmp #$10
+        ; No cos correction here: it depends only on the column, so it is baked into the
+        ; per-column height tables (see hTabT). This used to be a whole sideMul per ray.
+cidx:   lda remH
+        cmp #24
         bcc cidxok
-        lda #$01                ; >=16 cells -> tiny far wall
+        lda #$01                ; past the map diagonal -> tiny far wall
         sta pp
         rts
-        ; pp16 = perpDist>>3 = remH*32 + (remL>>3)  (0..511), 1/32-cell steps
+        ; index = perpDist>>3 = remH*32 + (remL>>3)  (0..767), 1/32-cell steps
 cidxok: lda remL
         lsr
         lsr
@@ -1194,65 +1199,74 @@ cidxok: lda remL
         sta ppLo
         lda ppHi
         adc #$00
-        sta ppHi
-        ldx ppLo
-        lda ppHi
-        bne cidxb
-        lda hLUTaT,x
-        sta pp
-        rts
-cidxb:  lda hLUTbT,x
+        sta ppHi                ; 0..2: which page inside this column's group
+        ldx col
+        lda colGrpT,x           ; group base, already scaled to pages
+        clc
+        adc ppHi
+        adc #>hTabT
+        sta hp+1
+        lda #$00
+        sta hp
+        ldy ppLo
+        lda (hp),y
         sta pp
         rts
 
 ; sideMul: fr(8) * (mhi:mlo)(16) >>8 -> s2:s1
+; Quarter-square multiply (a*b = f[a+b] - f[|a-b|], f[n] = n^2/4) inlined twice. It used to
+; be two jsr's to a shared mul8 with the operands shuffled through qa/qb; at two calls per
+; ray and ~60 cycles each, that plumbing was most of the routine's overhead.
 sideMul:
-        lda fr
-        sta qa
-        lda mhi
-        sta qb
-        jsr mul8
-        lda qlo
-        sta s1
-        lda qhi
-        sta s2
-        lda fr
-        sta qa
-        lda mlo
-        sta qb
-        jsr mul8
+        lda fr                  ; --- high half: fr * mhi -> s2:s1 ---
         clc
+        adc mhi
+        tax
+        bcc smh0
+        lda f1LoT,x
+        sta s1
+        lda f1HiT,x
+        sta s2
+        jmp smh1
+smh0:   lda f0LoT,x
+        sta s1
+        lda f0HiT,x
+        sta s2
+smh1:   lda fr
+        sec
+        sbc mhi
+        bcs smh2
+        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
+        adc #$01
+smh2:   tax
+        sec
         lda s1
-        adc qhi
+        sbc f0LoT,x
         sta s1
         lda s2
-        adc #$00
+        sbc f0HiT,x
         sta s2
-        rts
-
-; mul8: qa*qb (unsigned) -> qlo:qhi
-mul8:   lda qa
+        lda fr                  ; --- low half: (fr * mlo) >> 8, added into s1 ---
         clc
-        adc qb
+        adc mlo
         tax
-        bcc mslo
+        bcc sml0
         lda f1LoT,x
         sta qlo
         lda f1HiT,x
         sta qhi
-        jmp mdiff
-mslo:   lda f0LoT,x
+        jmp sml1
+sml0:   lda f0LoT,x
         sta qlo
         lda f0HiT,x
         sta qhi
-mdiff:  lda qa
+sml1:   lda fr
         sec
-        sbc qb
-        bcs mdpos
+        sbc mlo
+        bcs sml2
         eor #$ff
-        clc
         adc #$01
-mdpos:  tax
+sml2:   tax
         sec
         lda qlo
         sbc f0LoT,x
@@ -1260,6 +1274,13 @@ mdpos:  tax
         lda qhi
         sbc f0HiT,x
         sta qhi
+        clc
+        lda s1
+        adc qhi                 ; only the high byte of the low-half product survives the >>8
+        sta s1
+        lda s2
+        adc #$00
+        sta s2
         rts
 
 ; ---- raster IRQ: count video frames ----
@@ -1451,8 +1472,7 @@ ddyLoT: ${chunk(ddyLo).trim()}
 ddyHiT: ${chunk(ddyHi).trim()}
 posXT:  ${chunk(posX).trim()}
 posYT:  ${chunk(posY).trim()}
-hLUTaT: ${chunk(hLUTa).trim()}
-hLUTbT: ${chunk(hLUTb).trim()}
+colGrpT: !byte ${colGrpT.join(',')}
 moveXT: ${chunk(moveX).trim()}
 moveYT: ${chunk(moveY).trim()}
 rowLoT: !byte ${rowLo.join(',')}
@@ -1498,6 +1518,9 @@ ${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
 ${chainSrc('bkB', SCR_B, ROWSD, 'rfEdge')}
 ${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
 ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
+chainEnd:
+        * = ${hx16(HTABLE)}
+hTabT:  ${chunk(hTab, 32).trim()}
 `;
 
 writeFileSync('./iray.asm', asm);
@@ -1515,6 +1538,8 @@ try {
     ['f-tables', FTABLES, FTABLES + 0x800],
     ['charset B', CHARSET_B, CHARSET_B + 0x800],
   ];
+  if (r.labels.chainEnd > HTABLE)
+    throw new Error(`fill chains end at $${r.labels.chainEnd.toString(16)}, past the height tables at $${HTABLE.toString(16)}`);
   const dataLo = r.org, dataHi = r.labels.dataEnd;
   for (const [name, lo, hi] of reserved) {
     if (dataLo < hi && dataHi > lo) {
