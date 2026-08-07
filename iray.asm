@@ -1,5 +1,6 @@
 
 charset = $2800
+charsetB = $3800
 px      = $02
 py      = $04
 pa      = $06
@@ -70,7 +71,7 @@ fpsOnes = $50
 deltaL  = $51
 deltaH  = $52
 fpsv    = $53
-dpx     = $54
+dpx     = $54                   ; fps scratch (was the pixel plotter's x/y)
 dpy     = $55
 ppHi    = $56
 ppLo    = $57
@@ -91,24 +92,22 @@ t1c     = $65
 tbc     = $66
 joyv    = $67
 joyEor  = $68
-dbgRow  = $69
-pixInv  = $6a
-; overlay-private scratch. plotDigit/plotPix must NOT alias renderer vars: hcur is
-; the span-interpolation accumulator and tmp is live inside renderSym, so the shared
-; names let drawFps/drawDbg reach back into the scene between frames.
-pdBase  = $6b
-pdTmp   = $6c
-pdGi    = $6d
-pdRowN  = $6e
-pdBits  = $6f
-pdColN  = $70
-ppPtr   = $71                   ; 2 bytes ($71/$72)
+; The overlay's private scratch block (pdBase/pdTmp/... at $6b-$70) is gone with the
+; pixel plotter: the readout now pokes whole char codes, so it holds no renderer state.
+ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
+kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
+d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
 stackLT = $c000
-stackRT = $c060
+stackRT = $c080
+; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
+; index never needs a 16-bit add.
 sideT   = $c100
-idT     = $c150
-colH    = $c1a0
-faceIdT = $c1f0
+idT     = $c200
+colH    = $c300
+faceIdT = $c400
+capH    = $c500                 ; colH capped at 100, filled by prepCells
+cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
+cmxT    = $c640                 ; per cell-column (40): max
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -121,12 +120,16 @@ entry:
         sta $dd00
         lda #$1b
         sta $d011
-        lda #$08
-        sta $d016
+        lda #$18
+        sta $d016               ; MCM: multicolor text -> 4 logical px per cell, 2 physical px each
+        lda #$10
+        sta d018vm              ; display buffer A; IRQ ORs the charset bits per half-screen
         lda #$1a
-        sta $d018               ; display buffer A, chars $2800
+        sta $d018
         lda #$01
-        sta $d021               ; background white
+        sta $d021               ; 00 = white  (ceiling / floor)
+        lda #$00
+        sta $d022               ; 01 = black  (wall)
         lda #$00
         sta $d020
         lda #$ff
@@ -134,8 +137,9 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
-        lda #$00
-ccf:    sta $d800,x             ; color RAM black (fg)
+        lda #$08                ; bit3 = per-cell multicolor enable (colour bits unused: we
+                                ; only ever emit bit pairs 00 and 01, i.e. $d021/$d022)
+ccf:    sta $d800,x
         sta $d900,x
         sta $da00,x
         sta $db00,x
@@ -189,12 +193,12 @@ mloop:  jsr readKeys
         lda #$00
         sta col
         jsr marchCol            ; column 0
-        lda #79
+        lda #159
         sta col
         jsr marchCol            ; column 79
         lda #$00
         sta stackLT
-        lda #79
+        lda #159
         sta stackRT             ; push (0,79)
         lda #$01
         sta sp
@@ -223,7 +227,8 @@ subSp:  lda spanR
         lda spanL
         clc
         adc spanR
-        lsr
+        ror                     ; ROR not LSR: at 160 columns spanL+spanR reaches 318, so the
+                                ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
         jsr marchCol
         ldx sp
@@ -240,6 +245,7 @@ subSp:  lda spanR
         stx sp
         jmp subLp
 subDn:  jsr makeDiv
+        jsr prepCells
         jsr renderSym
         jsr drawFps
         jsr drawDbg
@@ -257,13 +263,13 @@ mvs:    lda $d012
         lda baseHi
         cmp #$04
         bne mshB
-        lda #$1a
-        sta $d018               ; show A, draw into B
+        lda #$10
+        sta d018vm              ; show A, draw into B (IRQ ORs in the charset bits)
         lda #$24
         sta baseHi
         jmp mnext
-mshB:   lda #$9a
-        sta $d018               ; show B, draw into A
+mshB:   lda #$90
+        sta d018vm              ; show B, draw into A
         lda #$04
         sta baseHi
 mnext:  inc iterLo
@@ -280,41 +286,67 @@ mdl:    lda faceIdT,x
         lda #$00
         sta colH,x              ; boundary -> white slit at this real column
 mdnx:   inx
-        cpx #80
+        cpx #160
         bne mdl
         rts
 
-; ================= render, cell-based + vertical symmetry (no clear, no RMW) =================
-; For each cell (2 logical columns) compute the 8-bit char directly and WRITE it; mirror
-; the top half to the bottom via flip[]. Only 13 cell-rows computed instead of 25.
+; ============ prepCells: per cell-column summary, once per frame ============
+; renderSym visits 520 cells but only ~25 are edge cells; the other 495 must be rejected
+; as fully-solid or fully-blank as cheaply as possible. Computing min/max over 4 columns
+; inside that loop would cost 4 loads per cell, so it is hoisted here: 40 iterations
+; instead of 520. Also caps the height at 100 -- colH is deliberately left UNCAPPED by the
+; interpolator so merged spans stay linear, but (h + K) must fit a signed byte downstream.
+prepCells:
+        lda #$00
+        sta cellc
+        sta zpc                 ; zpc = 4*cellc, the logical column
+pcLp:   ldx zpc
+        ldy #$04
+        lda #$ff
+        sta tmp                 ; running min
+        lda #$00
+        sta tmp2                ; running max
+pcIn:   lda colH,x
+        cmp #101
+        bcc pcNc
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc:   sta capH,x
+        cmp tmp
+        bcs pcNmn
+        sta tmp
+pcNmn:  cmp tmp2
+        bcc pcNmx
+        sta tmp2
+pcNmx:  inx
+        dey
+        bne pcIn
+        ldx cellc
+        lda tmp
+        sta cmnT,x
+        lda tmp2
+        sta cmxT,x
+        lda zpc
+        clc
+        adc #$04
+        sta zpc
+        inc cellc
+        lda cellc
+        cmp #40
+        bcc pcLp
+        rts
+
+; ================= render: 4x8 multicolor cells + vertical symmetry =================
+; One char code per cell, written to a row AND its mirror. No flip table: charset B (used
+; below the horizon by the raster split) is charset A upside down, so the same byte draws
+; the mirrored cell. Only 13 of 25 rows are computed.
+;
+; Cell fill in a column = clamp(h + 8R - 92, 0, 8). So per row a single constant kR = 8R-92
+; converts a height into a fill, and the solid/blank thresholds are pure compares.
 renderSym:
         lda #$00
         sta crc                 ; cell-row 0..12
-rsRow:  lda crc                 ; patLo/patHi = patTab + cr*64
-        sta tmp
-        lda #$00
-        sta tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        clc
-        lda tmp
-        adc #<patTabT
-        sta patLo
-        lda tmp2
-        adc #>patTabT
-        sta patHi
-        ldx crc                 ; topPtr = base + rowLo[cr]
-        lda rowLoT,x
+rsRow:  ldx crc
+        lda rowLoT,x            ; topPtr = base + rowLo[cr]
         sta tpLo
         lda rowHiT,x
         clc
@@ -330,76 +362,86 @@ rsRow:  lda crc                 ; patLo/patHi = patTab + cr*64
         clc
         adc baseHi
         sta btHi
-        ldx crc                 ; per-row solid/blank thresholds
+        ldx crc
         lda t1TabT,x
-        sta t1c
+        sta t1c                 ; h >= t1c  -> cell fully solid
         lda tbTabT,x
-        sta tbc
+        sta tbc                 ; h <  tbc  -> cell fully blank
+        lda kTabT,x
+        sta kr                  ; kr = 8*cr - 92 (signed)
         lda #$00
         sta cellc
-rsCol:  lda cellc               ; xL = 2*cellc  (X held for the whole cell)
+        sta zpc                 ; zpc = 4*cellc
+rsCol:  ldx cellc
+        lda cmnT,x
+        cmp t1c
+        bcs rsSolid             ; min height >= t1 -> every column full
+        lda cmxT,x
+        cmp tbc
+        bcc rsBlank             ; max height < tb  -> every column empty
+        ; ---- edge cell: (wL, wR, bulge) -> char ----
+        ldx zpc
+        lda capH,x              ; w0
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        sta hh0
+        lda capH+3,x            ; w3
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        sta hh1
+        lda capH+1,x            ; w1
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        sta hh4
+        lda capH+2,x            ; w2
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        clc
+        adc hh4                 ; w1 + w2
+        sec
+        sbc hh0
+        sec
+        sbc hh1                 ; bulge = (w1+w2) - (w0+w3); a straight line gives exactly 0
+        sta dd
+        ; index = w0*16 + w3, then pick the table by bulge sign
+        lda hh0
         asl
-        tax
-        ; --- fast path: both logical columns fully solid -> $FF ---
-        lda colH,x
-        cmp t1c
-        bcc rsChkB
-        lda colH+1,x
-        cmp t1c
-        bcc rsChkB
-        lda #$ff
-        ldy cellc
-        sta (tpLo),y
-        sta (btLo),y            ; flip[$ff]=$ff
-        jmp rsNext
-        ; --- fast path: both fully blank -> $00 ---
-rsChkB: lda colH,x
-        cmp tbc
-        bcs rsSlow
-        lda colH+1,x
-        cmp tbc
-        bcs rsSlow
-        lda #$00
-        ldy cellc
-        sta (tpLo),y
-        sta (btLo),y            ; flip[$00]=$00
-        jmp rsNext
-        ; --- edge cell: real pattern computation ---
-rsSlow: lda colH,x
-        cmp #51                 ; cap uncapped height at 50 before pattern lookup
-        bcc rsSa
-        lda #50
-rsSa:   tay
-        lda (patLo),y
+        asl
+        asl
+        asl
+        ora hh1
         tay
-        lda spreadLT,y
-        sta tmp
-        lda colH+1,x
-        cmp #51
-        bcc rsSb
-        lda #50
-rsSb:   tay
-        lda (patLo),y
-        tay
-        lda spreadRT,y
-        ora tmp                 ; A = combined cell pattern
-        ldx crc
-        cpx #12
-        beq rsCenter            ; center row straddles the mirror axis -> single symmetric write
-        ldy cellc
-        sta (tpLo),y            ; top half
-        tax
-        lda flipT,x
-        sta (btLo),y            ; bottom half (mirrored)
-        jmp rsNext
-rsCenter:
-        sta tmp2
-        tax
-        lda flipT,x
-        ora tmp2                ; combined | flip(combined) = symmetric, order-independent
-        ldy cellc
+        lda dd
+        bmi rsNeg
+        cmp #$02
+        bcs rsUp                ; interior above the line -> step-early
+rsMid:  lda charT1,y
+        jmp rsPut
+rsNeg:  cmp #$fe                ; -2 or lower -> interior below the line -> step-late
+        bcs rsMid
+        lda charT0,y
+        jmp rsPut
+rsUp:   lda charT2,y
+        jmp rsPut
+rsSolid:lda #$01
+        jmp rsPut
+rsBlank:lda #$00
+rsPut:  ldy cellc
         sta (tpLo),y
-rsNext: inc cellc
+        sta (btLo),y            ; charset B mirrors it below the horizon
+        lda zpc
+        clc
+        adc #$04
+        sta zpc
+        inc cellc
         lda cellc
         cmp #40
         bcc rsCol
@@ -920,9 +962,41 @@ mdpos:  tax
         rts
 
 ; ---- raster IRQ: count video frames ----
-irq:    inc frameCnt
+; Two raster IRQs per frame implement the mirror trick. Charset B is charset A with every
+; glyph's 8 bytes reversed, so below the split the SAME char code renders upside down --
+; which is exactly the vertical symmetry of the scene. renderSym therefore writes one
+; identical byte to a row and its mirror and needs no flip table at all.
+;
+; The split is at logical row 100 (the horizon), which is the MIDDLE of char row 12. That
+; is legal and in fact required: the VIC re-fetches character-generator data every raster
+; line from the current CB bits, so row 12 draws its top 4 lines from A and its bottom 4
+; from B -- self-mirroring, exactly what the horizon row needs.
+;
+; $d018 also carries the video-matrix nibble, which the main loop flips per frame for
+; double buffering, so the handler ORs the charset bits onto the live value in d018vm
+; rather than writing a constant.
+irq:    lda $d019
+        and #$01
+        beq irqd                ; not a raster IRQ
+        lda $d012
+        cmp #$96
+        bcs irqSplit
+        ; --- top of frame: select charset A, arm the split ---
+        lda d018vm
+        ora #$0a
+        sta $d018
+        lda #$96
+        sta $d012
+        inc frameCnt
         bne irqd
         inc frameCnt+1
+        jmp irqd
+irqSplit:
+        lda d018vm              ; --- horizon: select mirrored charset B ---
+        ora #$0e
+        sta $d018
+        lda #$00
+        sta $d012
 irqd:   lda #$ff
         sta $d019
         pla
@@ -978,195 +1052,92 @@ cfo:    sta fpsOnes
         stx fpsTens
         rts
 
-; ---- draw 2-digit fps at top-left (clears row0 + row1 cols0-3) ----
+; ---- readout: fps top-left, X/Y/A top-right ----
+; The overlay no longer plots pixels. In the 4x8 scheme a char code is an INDEX into the
+; cell-pattern set, not a bitmap, so there is nothing to OR bits into -- instead the last
+; 18 codes are literal digit glyphs and the readout just pokes them into screen RAM. That
+; also removes the whole class of bug where the overlay reached into renderer tables.
+setRow:                         ; A = char row -> ppPtr
+        tax
+        lda rowLoT,x
+        sta ppPtr
+        lda rowHiT,x
+        clc
+        adc baseHi
+        sta ppPtr+1
+        rts
+
 drawFps:
         lda #$00
-        sta dbgRow              ; fps digits at logical rows 0-4
-        sta pixInv              ; fps = white digits on black
-        lda baseHi
-        sta ppPtr+1
-        lda #$00
-        sta ppPtr
-        lda #$00
-        ldy #$07
-dfc0:   sta (ppPtr),y           ; row 0 cells 0-7
-        dey
-        bpl dfc0
-        ldy #47
-dfc1:   sta (ppPtr),y           ; row 1 cells 40-47
-        dey
-        cpy #39
-        bne dfc1
+        jsr setRow
+        ldy #$00
         lda fpsTens
-        ldx #$00
-        jsr plotDigit
+        clc
+        adc #$eb
+        sta (ppPtr),y
+        iny
         lda fpsOnes
-        ldx #$04
-        jsr plotDigit
+        clc
+        adc #$eb
+        sta (ppPtr),y
         rts
 
-; ===== debug readout (top-right): X/Y in cell.frac hex, A in hex. exact 8.8 position =====
+; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
+; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
 drawDbg:
         lda #$00
-        sta pixInv              ; white digits (same as fps)
-        sta dbgRow
-ddClrR: ldx dbgRow              ; black plate: rows 0-4, cols 29-39
-        lda rowLoT,x
-        clc
-        adc #29
-        sta ppPtr
-        lda rowHiT,x
-        adc baseHi
-        sta ppPtr+1
-        ldy #$0a
-        lda #$00
-ddClrC: sta (ppPtr),y
-        dey
-        bpl ddClrC
-        inc dbgRow
-        lda dbgRow
-        cmp #$05
-        bne ddClrR
-        ; --- X line (rows 0-4): label, cell nibble, frac hi, frac lo ---
-        lda #$00
-        sta dbgRow
-        lda #16
-        ldx #60
-        jsr plotDigit
+        jsr setRow
+        ldy #36
+        lda #16                 ; 'X'
+        jsr ddPut
         lda px+1
         and #$0f
-        ldx #64
-        jsr plotDigit
+        jsr ddPut
         lda px
         lsr
         lsr
         lsr
         lsr
-        ldx #68
-        jsr plotDigit
+        jsr ddPut
         lda px
         and #$0f
-        ldx #72
-        jsr plotDigit
-        ; --- Y line (rows 6-10) ---
-        lda #$06
-        sta dbgRow
-        lda #17
-        ldx #60
-        jsr plotDigit
+        jsr ddPut
+        lda #$01
+        jsr setRow
+        ldy #36
+        lda #17                 ; 'Y'
+        jsr ddPut
         lda py+1
         and #$0f
-        ldx #64
-        jsr plotDigit
+        jsr ddPut
         lda py
         lsr
         lsr
         lsr
         lsr
-        ldx #68
-        jsr plotDigit
+        jsr ddPut
         lda py
         and #$0f
-        ldx #72
-        jsr plotDigit
-        ; --- A line (rows 12-16): label + angle byte ---
-        lda #12
-        sta dbgRow
-        lda #10
-        ldx #60
-        jsr plotDigit
+        jsr ddPut
+        lda #$02
+        jsr setRow
+        ldy #37
+        lda #10                 ; 'A'
+        jsr ddPut
         lda pa
         lsr
         lsr
         lsr
         lsr
-        ldx #64
-        jsr plotDigit
+        jsr ddPut
         lda pa
         and #$0f
-        ldx #68
-        jsr plotDigit
+        jsr ddPut
         rts
-
-; plotDigit: A=digit(0..9), X=base logical col; 3x5 glyph at logical rows 0..4
-plotDigit:
-        stx pdBase
-        sta pdTmp
-        asl
-        asl
-        clc
-        adc pdTmp
-        sta pdGi                ; digit*5
-        lda #$00
-        sta pdRowN
-pdRow:  ldx pdGi
-        lda digGlyphT,x
-        sta pdBits
-        lda #$00
-        sta pdColN
-pdCol:  ldx pdColN
-        lda pdBits
-        and colBitT,x
-        beq pdSkip
-        lda pdBase
-        clc
-        adc pdColN
-        sta dpx
-        lda pdRowN
-        clc
-        adc dbgRow              ; base row (0 for fps; 0/6/12 for X/Y/A readout)
-        sta dpy
-        jsr plotPix
-pdSkip: inc pdColN
-        lda pdColN
-        cmp #$03
-        bne pdCol
-        inc pdGi
-        inc pdRowN
-        lda pdRowN
-        cmp #$05
-        bne pdRow
-        rts
-
-; plotPix: OR black logical pixel (dpx,dpy) into hidden framebuffer
-plotPix:
-        lda dpy
-        lsr
-        lsr
-        tax
-        clc
-        lda rowLoT,x
-        sta ppPtr
-        lda rowHiT,x
-        adc baseHi
-        sta ppPtr+1
-        lda dpx
-        lsr
-        clc
-        adc ppPtr
-        sta ppPtr
-        bcc ppnc
-        inc ppPtr+1
-ppnc:   lda dpy
-        and #$03
-        tax
-        lda bit1T,x
-        tax
-        lda dpx
-        and #$01
-        beq ppL
-        lda spreadRT,x
-        jmp ppor
-ppL:    lda spreadLT,x
-ppor:   ldy #$00
-        ldx pixInv
-        bne ppBlk
-        ora (ppPtr),y           ; white pixel (set bits)
+ddPut:  clc
+        adc #$eb
         sta (ppPtr),y
-        rts
-ppBlk:  eor #$ff                ; black pixel (clear the masked bits)
-        and (ppPtr),y
-        sta (ppPtr),y
+        iny
         rts
 
 ; ================= data =================
@@ -1186,8 +1157,8 @@ mapT:   !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1
         !byte 1,0,0,0,1,1,0,0,0,0,0,0,0,0,0,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-rayOffT: !byte 233,233,233,234,234,235,235,236,237,237,238,238,239,239,240,240,241,242,242,243,243,244,245,245,246,246,247,248,248,249,250,250,251,252,252,253,254,254,255,0,0,1,2,2,3,4,4,5,6,6,7,8,8,9,10,10,11,11,12,13,13,14,14,15,16,16,17,17,18,18,19,19,20,21,21,22,22,23,23,24
-cosCorrT: !byte 215,216,218,219,221,223,224,226,227,229,230,232,233,235,236,237,239,240,241,243,244,245,246,247,248,249,250,251,252,252,253,254,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,253,252,252,251,250,249,248,247,246,245,244,243,241,240,239,237,236,235,233,232,230,229,227,226,224,223,221,219,218,216,215
+rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,236,237,237,237,238,238,238,238,239,239,239,239,240,240,240,241,241,241,241,242,242,242,243,243,243,244,244,244,244,245,245,245,246,246,246,247,247,247,248,248,248,249,249,249,250,250,250,251,251,251,252,252,252,253,253,253,254,254,254,255,255,255,255,0,0,1,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,10,10,10,11,11,11,12,12,12,12,13,13,13,14,14,14,15,15,15,15,16,16,16,17,17,17,17,18,18,18,18,19,19,19,20,20,20,20,21,21,21,21,22,22,22,22,23,23,23,23,24
+cosCorrT: !byte 215,215,216,217,218,219,219,220,221,222,223,223,224,225,226,226,227,228,229,229,230,231,232,232,233,234,235,235,236,237,237,238,239,239,240,241,241,242,242,243,244,244,245,245,246,246,247,247,248,248,249,249,250,250,251,251,251,252,252,252,253,253,253,254,254,254,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,253,253,253,252,252,252,251,251,251,250,250,249,249,248,248,247,247,246,246,245,245,244,244,243,242,242,241,241,240,239,239,238,237,237,236,235,235,234,233,232,232,231,230,229,229,228,227,226,226,225,224,223,223,222,221,220,219,219,218,217,216,215,215
 ddxLoT: !byte 0,0,0,1,1,2,3,4,5,6,8,10,12,14,16,18,21,24,27,31,34,38,42,47
         !byte 52,57,63,69,75,82,90,97,106,115,125,136,148,160,174,189,205,223,242,7,31,57,87,120
         !byte 157,199,248,48,114,192,30,144,32,217,209,43,52,152,97,191,255,191,97,152,52,43,209,217
@@ -1254,28 +1225,28 @@ posYT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-hLUTaT: !byte 127,127,127,127,127,127,127,127,127,127,127,127,117,108,101,94,88,83,78,74,70,67,64,61
-        !byte 59,56,54,52,50,49,47,45,44,43,41,40,39,38,37,36,35,34,34,33,32,31,31,30
-        !byte 29,29,28,28,27,27,26,26,25,25,24,24,23,23,23,22,22,22,21,21,21,20,20,20
-        !byte 20,19,19,19,19,18,18,18,18,17,17,17,17,17,16,16,16,16,16,15,15,15,15,15
-        !byte 15,15,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12
-        !byte 12,12,12,11,11,11,11,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,10
-        !byte 10,10,10,10,10,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,8,8
-        !byte 8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,7,7,7,7
+hLUTaT: !byte 254,254,254,254,254,254,254,254,254,254,254,254,235,217,201,188,176,166,156,148,141,134,128,122
+        !byte 117,113,108,104,101,97,94,91,88,85,83,80,78,76,74,72,70,69,67,65,64,63,61,60
+        !byte 59,57,56,55,54,53,52,51,50,49,49,48,47,46,45,45,44,43,43,42,41,41,40,40
+        !byte 39,39,38,38,37,37,36,36,35,35,34,34,34,33,33,32,32,32,31,31,31,30,30,30
+        !byte 29,29,29,28,28,28,28,27,27,27,27,26,26,26,26,25,25,25,25,24,24,24,24,24
+        !byte 23,23,23,23,23,23,22,22,22,22,22,21,21,21,21,21,21,21,20,20,20,20,20,20
+        !byte 20,19,19,19,19,19,19,19,19,18,18,18,18,18,18,18,18,17,17,17,17,17,17,17
+        !byte 17,17,17,16,16,16,16,16,16,16,16,16,16,16,15,15,15,15,15,15,15,15,15,15
+        !byte 15,15,15,14,14,14,14,14,14,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13
+        !byte 13,13,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12,12,12,12,12,12,12
+        !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,11,11,11
+hLUTbT: !byte 11,11,11,11,11,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,10,10,10
+        !byte 10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,9,9,9,9,9,9,9
+        !byte 9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9
+        !byte 9,9,9,9,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
+        !byte 8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
-        !byte 7,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6
+        !byte 7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7
+        !byte 7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,6,6,6,6,6,6
+        !byte 6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6
+        !byte 6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6
         !byte 6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6
-hLUTbT: !byte 6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-        !byte 5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5
-        !byte 5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-        !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-        !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-        !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-        !byte 4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
-        !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
-        !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
-        !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
-        !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
 moveXT: !byte 36,36,36,36,36,36,36,35,35,35,35,35,34,34,34,34,33,33,33,32,32,31,31,30
         !byte 30,29,29,28,28,27,27,26,25,25,24,24,23,22,21,21,20,19,19,18,17,16,15,15
         !byte 14,13,12,11,10,10,9,8,7,6,5,4,4,3,2,1,0,255,254,253,252,252,251,250
@@ -1298,131 +1269,79 @@ moveYT: !byte 0,1,2,3,4,4,5,6,7,8,9,10,10,11,12,13,14,15,15,16,17,18,19,19
         !byte 220,220,220,220,220,220,220,221,221,221,221,221,222,222,222,222,223,223,223,224,224,225,225,226
         !byte 226,227,227,228,228,229,229,230,231,231,232,232,233,234,235,235,236,237,237,238,239,240,241,241
         !byte 242,243,244,245,246,246,247,248,249,250,251,252,252,253,254,255
-spreadLT: !byte 0,128,32,160,8,136,40,168,2,130,34,162,10,138,42,170
-spreadRT: !byte 0,64,16,80,4,68,20,84,1,65,17,81,5,69,21,85
-fromTopT: !byte 15,14,12,8
-fromBotT: !byte 1,3,7,15
 rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
-bit1T:  !byte 1,2,4,8
-colBitT: !byte 4,2,1
-digGlyphT: !byte 7,5,5,5,7,2,6,2,2,7,7,1,7,4,7,7,1,7,1,7,5,5,7,1,1,7,4,7,1,7,7,4,7,5,7,7,1,2,2,2,7,5,7,5,7,7,5,7,1,7,2,5,7,5,5,6,5,6,5,6,7,4,4,4,7,6,5,5,5,6,7,4,6,4,7,7,4,6,4,4,5,5,2,5,5,5,5,2,2,2
-flipT:  !byte 0,64,128,192,16,80,144,208,32,96,160,224,48,112,176,240,4,68,132,196,20,84,148,212
-        !byte 36,100,164,228,52,116,180,244,8,72,136,200,24,88,152,216,40,104,168,232,56,120,184,248
-        !byte 12,76,140,204,28,92,156,220,44,108,172,236,60,124,188,252,1,65,129,193,17,81,145,209
-        !byte 33,97,161,225,49,113,177,241,5,69,133,197,21,85,149,213,37,101,165,229,53,117,181,245
-        !byte 9,73,137,201,25,89,153,217,41,105,169,233,57,121,185,249,13,77,141,205,29,93,157,221
-        !byte 45,109,173,237,61,125,189,253,2,66,130,194,18,82,146,210,34,98,162,226,50,114,178,242
-        !byte 6,70,134,198,22,86,150,214,38,102,166,230,54,118,182,246,10,74,138,202,26,90,154,218
-        !byte 42,106,170,234,58,122,186,250,14,78,142,206,30,94,158,222,46,110,174,238,62,126,190,254
-        !byte 3,67,131,195,19,83,147,211,35,99,163,227,51,115,179,243,7,71,135,199,23,87,151,215
-        !byte 39,103,167,231,55,119,183,247,11,75,139,203,27,91,155,219,43,107,171,235,59,123,187,251
-        !byte 15,79,143,207,31,95,159,223,47,111,175,239,63,127,191,255
-t1TabT: !byte 50,46,42,38,34,30,26,22,18,14,10,6,2
-tbTabT: !byte 47,43,39,35,31,27,23,19,15,11,7,3,0
-patTabT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8
-        !byte 12,14,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,8,12,14,15,15,15,15,15,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8
-        !byte 12,14,15,15,15,15,15,15,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,8,12,14,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8
-        !byte 12,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,8,12,14,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8
-        !byte 12,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,8,12,14,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8
-        !byte 12,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,8,12,14,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8
-        !byte 12,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,8,12,14,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,6,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15
-        !byte 15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0
+kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
+t1TabT: !byte 100,92,84,76,68,60,52,44,36,28,20,12,4
+tbTabT: !byte 93,85,77,69,61,53,45,37,29,21,13,5,0
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
         * = charset
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,15,15,0,0,0,0,0,0,240,240,0,0,0,0,0,0,255,255
-        !byte 0,0,0,0,15,15,0,0,0,0,0,0,15,15,15,15,0,0,0,0,15,15,240,240,0,0,0,0,15,15,255,255
-        !byte 0,0,0,0,240,240,0,0,0,0,0,0,240,240,15,15,0,0,0,0,240,240,240,240,0,0,0,0,240,240,255,255
-        !byte 0,0,0,0,255,255,0,0,0,0,0,0,255,255,15,15,0,0,0,0,255,255,240,240,0,0,0,0,255,255,255,255
-        !byte 0,0,15,15,0,0,0,0,0,0,15,15,0,0,15,15,0,0,15,15,0,0,240,240,0,0,15,15,0,0,255,255
-        !byte 0,0,15,15,15,15,0,0,0,0,15,15,15,15,15,15,0,0,15,15,15,15,240,240,0,0,15,15,15,15,255,255
-        !byte 0,0,15,15,240,240,0,0,0,0,15,15,240,240,15,15,0,0,15,15,240,240,240,240,0,0,15,15,240,240,255,255
-        !byte 0,0,15,15,255,255,0,0,0,0,15,15,255,255,15,15,0,0,15,15,255,255,240,240,0,0,15,15,255,255,255,255
-        !byte 0,0,240,240,0,0,0,0,0,0,240,240,0,0,15,15,0,0,240,240,0,0,240,240,0,0,240,240,0,0,255,255
-        !byte 0,0,240,240,15,15,0,0,0,0,240,240,15,15,15,15,0,0,240,240,15,15,240,240,0,0,240,240,15,15,255,255
-        !byte 0,0,240,240,240,240,0,0,0,0,240,240,240,240,15,15,0,0,240,240,240,240,240,240,0,0,240,240,240,240,255,255
-        !byte 0,0,240,240,255,255,0,0,0,0,240,240,255,255,15,15,0,0,240,240,255,255,240,240,0,0,240,240,255,255,255,255
-        !byte 0,0,255,255,0,0,0,0,0,0,255,255,0,0,15,15,0,0,255,255,0,0,240,240,0,0,255,255,0,0,255,255
-        !byte 0,0,255,255,15,15,0,0,0,0,255,255,15,15,15,15,0,0,255,255,15,15,240,240,0,0,255,255,15,15,255,255
-        !byte 0,0,255,255,240,240,0,0,0,0,255,255,240,240,15,15,0,0,255,255,240,240,240,240,0,0,255,255,240,240,255,255
-        !byte 0,0,255,255,255,255,0,0,0,0,255,255,255,255,15,15,0,0,255,255,255,255,240,240,0,0,255,255,255,255,255,255
-        !byte 15,15,0,0,0,0,0,0,15,15,0,0,0,0,15,15,15,15,0,0,0,0,240,240,15,15,0,0,0,0,255,255
-        !byte 15,15,0,0,15,15,0,0,15,15,0,0,15,15,15,15,15,15,0,0,15,15,240,240,15,15,0,0,15,15,255,255
-        !byte 15,15,0,0,240,240,0,0,15,15,0,0,240,240,15,15,15,15,0,0,240,240,240,240,15,15,0,0,240,240,255,255
-        !byte 15,15,0,0,255,255,0,0,15,15,0,0,255,255,15,15,15,15,0,0,255,255,240,240,15,15,0,0,255,255,255,255
-        !byte 15,15,15,15,0,0,0,0,15,15,15,15,0,0,15,15,15,15,15,15,0,0,240,240,15,15,15,15,0,0,255,255
-        !byte 15,15,15,15,15,15,0,0,15,15,15,15,15,15,15,15,15,15,15,15,15,15,240,240,15,15,15,15,15,15,255,255
-        !byte 15,15,15,15,240,240,0,0,15,15,15,15,240,240,15,15,15,15,15,15,240,240,240,240,15,15,15,15,240,240,255,255
-        !byte 15,15,15,15,255,255,0,0,15,15,15,15,255,255,15,15,15,15,15,15,255,255,240,240,15,15,15,15,255,255,255,255
-        !byte 15,15,240,240,0,0,0,0,15,15,240,240,0,0,15,15,15,15,240,240,0,0,240,240,15,15,240,240,0,0,255,255
-        !byte 15,15,240,240,15,15,0,0,15,15,240,240,15,15,15,15,15,15,240,240,15,15,240,240,15,15,240,240,15,15,255,255
-        !byte 15,15,240,240,240,240,0,0,15,15,240,240,240,240,15,15,15,15,240,240,240,240,240,240,15,15,240,240,240,240,255,255
-        !byte 15,15,240,240,255,255,0,0,15,15,240,240,255,255,15,15,15,15,240,240,255,255,240,240,15,15,240,240,255,255,255,255
-        !byte 15,15,255,255,0,0,0,0,15,15,255,255,0,0,15,15,15,15,255,255,0,0,240,240,15,15,255,255,0,0,255,255
-        !byte 15,15,255,255,15,15,0,0,15,15,255,255,15,15,15,15,15,15,255,255,15,15,240,240,15,15,255,255,15,15,255,255
-        !byte 15,15,255,255,240,240,0,0,15,15,255,255,240,240,15,15,15,15,255,255,240,240,240,240,15,15,255,255,240,240,255,255
-        !byte 15,15,255,255,255,255,0,0,15,15,255,255,255,255,15,15,15,15,255,255,255,255,240,240,15,15,255,255,255,255,255,255
-        !byte 240,240,0,0,0,0,0,0,240,240,0,0,0,0,15,15,240,240,0,0,0,0,240,240,240,240,0,0,0,0,255,255
-        !byte 240,240,0,0,15,15,0,0,240,240,0,0,15,15,15,15,240,240,0,0,15,15,240,240,240,240,0,0,15,15,255,255
-        !byte 240,240,0,0,240,240,0,0,240,240,0,0,240,240,15,15,240,240,0,0,240,240,240,240,240,240,0,0,240,240,255,255
-        !byte 240,240,0,0,255,255,0,0,240,240,0,0,255,255,15,15,240,240,0,0,255,255,240,240,240,240,0,0,255,255,255,255
-        !byte 240,240,15,15,0,0,0,0,240,240,15,15,0,0,15,15,240,240,15,15,0,0,240,240,240,240,15,15,0,0,255,255
-        !byte 240,240,15,15,15,15,0,0,240,240,15,15,15,15,15,15,240,240,15,15,15,15,240,240,240,240,15,15,15,15,255,255
-        !byte 240,240,15,15,240,240,0,0,240,240,15,15,240,240,15,15,240,240,15,15,240,240,240,240,240,240,15,15,240,240,255,255
-        !byte 240,240,15,15,255,255,0,0,240,240,15,15,255,255,15,15,240,240,15,15,255,255,240,240,240,240,15,15,255,255,255,255
-        !byte 240,240,240,240,0,0,0,0,240,240,240,240,0,0,15,15,240,240,240,240,0,0,240,240,240,240,240,240,0,0,255,255
-        !byte 240,240,240,240,15,15,0,0,240,240,240,240,15,15,15,15,240,240,240,240,15,15,240,240,240,240,240,240,15,15,255,255
-        !byte 240,240,240,240,240,240,0,0,240,240,240,240,240,240,15,15,240,240,240,240,240,240,240,240,240,240,240,240,240,240,255,255
-        !byte 240,240,240,240,255,255,0,0,240,240,240,240,255,255,15,15,240,240,240,240,255,255,240,240,240,240,240,240,255,255,255,255
-        !byte 240,240,255,255,0,0,0,0,240,240,255,255,0,0,15,15,240,240,255,255,0,0,240,240,240,240,255,255,0,0,255,255
-        !byte 240,240,255,255,15,15,0,0,240,240,255,255,15,15,15,15,240,240,255,255,15,15,240,240,240,240,255,255,15,15,255,255
-        !byte 240,240,255,255,240,240,0,0,240,240,255,255,240,240,15,15,240,240,255,255,240,240,240,240,240,240,255,255,240,240,255,255
-        !byte 240,240,255,255,255,255,0,0,240,240,255,255,255,255,15,15,240,240,255,255,255,255,240,240,240,240,255,255,255,255,255,255
-        !byte 255,255,0,0,0,0,0,0,255,255,0,0,0,0,15,15,255,255,0,0,0,0,240,240,255,255,0,0,0,0,255,255
-        !byte 255,255,0,0,15,15,0,0,255,255,0,0,15,15,15,15,255,255,0,0,15,15,240,240,255,255,0,0,15,15,255,255
-        !byte 255,255,0,0,240,240,0,0,255,255,0,0,240,240,15,15,255,255,0,0,240,240,240,240,255,255,0,0,240,240,255,255
-        !byte 255,255,0,0,255,255,0,0,255,255,0,0,255,255,15,15,255,255,0,0,255,255,240,240,255,255,0,0,255,255,255,255
-        !byte 255,255,15,15,0,0,0,0,255,255,15,15,0,0,15,15,255,255,15,15,0,0,240,240,255,255,15,15,0,0,255,255
-        !byte 255,255,15,15,15,15,0,0,255,255,15,15,15,15,15,15,255,255,15,15,15,15,240,240,255,255,15,15,15,15,255,255
-        !byte 255,255,15,15,240,240,0,0,255,255,15,15,240,240,15,15,255,255,15,15,240,240,240,240,255,255,15,15,240,240,255,255
-        !byte 255,255,15,15,255,255,0,0,255,255,15,15,255,255,15,15,255,255,15,15,255,255,240,240,255,255,15,15,255,255,255,255
-        !byte 255,255,240,240,0,0,0,0,255,255,240,240,0,0,15,15,255,255,240,240,0,0,240,240,255,255,240,240,0,0,255,255
-        !byte 255,255,240,240,15,15,0,0,255,255,240,240,15,15,15,15,255,255,240,240,15,15,240,240,255,255,240,240,15,15,255,255
-        !byte 255,255,240,240,240,240,0,0,255,255,240,240,240,240,15,15,255,255,240,240,240,240,240,240,255,255,240,240,240,240,255,255
-        !byte 255,255,240,240,255,255,0,0,255,255,240,240,255,255,15,15,255,255,240,240,255,255,240,240,255,255,240,240,255,255,255,255
-        !byte 255,255,255,255,0,0,0,0,255,255,255,255,0,0,15,15,255,255,255,255,0,0,240,240,255,255,255,255,0,0,255,255
-        !byte 255,255,255,255,15,15,0,0,255,255,255,255,15,15,15,15,255,255,255,255,15,15,240,240,255,255,255,255,15,15,255,255
-        !byte 255,255,255,255,240,240,0,0,255,255,255,255,240,240,15,15,255,255,255,255,240,240,240,240,255,255,255,255,240,240,255,255
-        !byte 255,255,255,255,255,255,0,0,255,255,255,255,255,255,15,15,255,255,255,255,255,255,240,240,255,255,255,255,255,255,255,255
+        !byte 0,0,0,0,0,0,0,0,85,85,85,85,85,85,85,85,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1
+        !byte 0,0,0,0,0,1,1,1,0,0,0,0,1,1,1,1,0,0,0,1,1,1,1,1,0,0,1,1,1,1,1,1
+        !byte 0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,5,0,0,0,0,0,0,1,21
+        !byte 0,0,0,0,0,0,0,64,0,0,0,0,0,0,0,80,0,0,0,0,0,0,0,85,0,0,0,0,0,0,5,85
+        !byte 0,0,0,0,0,1,21,85,0,0,0,0,1,1,1,85,0,0,0,1,1,1,1,85,0,0,1,1,1,1,1,85
+        !byte 0,1,1,1,1,1,1,85,1,1,1,1,1,1,1,85,0,0,0,0,0,0,64,64,0,0,0,0,0,0,64,84
+        !byte 0,0,0,0,0,0,80,85,0,0,0,0,0,0,85,85,0,0,0,0,0,5,85,85,0,0,0,0,1,21,85,85
+        !byte 0,0,0,1,1,1,85,85,0,0,1,1,1,1,85,85,0,1,1,1,1,1,85,85,1,1,1,1,1,1,85,85
+        !byte 0,0,0,0,0,64,64,64,0,0,0,0,0,64,84,85,0,0,0,0,0,80,85,85,0,0,0,0,0,85,85,85
+        !byte 0,0,0,0,5,85,85,85,0,0,0,1,21,85,85,85,0,0,1,1,1,85,85,85,0,1,1,1,1,85,85,85
+        !byte 1,1,1,1,1,85,85,85,0,0,0,0,64,64,64,64,0,0,0,0,64,64,64,85,0,0,0,0,64,84,85,85
+        !byte 0,0,0,0,80,85,85,85,0,0,0,0,85,85,85,85,0,0,0,5,85,85,85,85,0,0,1,21,85,85,85,85
+        !byte 0,1,1,1,85,85,85,85,1,1,1,1,85,85,85,85,0,0,0,64,64,64,64,64,0,0,0,64,64,64,64,85
+        !byte 0,0,0,64,64,64,85,85,0,0,0,64,84,85,85,85,0,0,0,80,85,85,85,85,0,0,0,85,85,85,85,85
+        !byte 0,0,5,85,85,85,85,85,0,1,21,85,85,85,85,85,1,1,1,85,85,85,85,85,0,0,64,64,64,64,64,64
+        !byte 0,0,64,64,64,64,64,85,0,0,64,64,64,64,85,85,0,0,64,64,64,85,85,85,0,0,64,84,85,85,85,85
+        !byte 0,0,80,85,85,85,85,85,0,0,85,85,85,85,85,85,0,5,85,85,85,85,85,85,1,21,85,85,85,85,85,85
+        !byte 1,1,85,85,85,85,85,85,0,64,64,64,64,64,64,64,0,64,64,64,64,64,64,85,0,64,64,64,64,64,85,85
+        !byte 0,64,64,64,64,85,85,85,0,64,64,64,85,85,85,85,0,64,84,85,85,85,85,85,0,80,85,85,85,85,85,85
+        !byte 0,85,85,85,85,85,85,85,5,85,85,85,85,85,85,85,21,85,85,85,85,85,85,85,1,85,85,85,85,85,85,85
+        !byte 64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,85,64,64,64,64,64,64,85,85,64,64,64,64,64,85,85,85
+        !byte 64,64,64,64,85,85,85,85,64,64,64,85,85,85,85,85,64,84,85,85,85,85,85,85,80,85,85,85,85,85,85,85
+        !byte 64,64,85,85,85,85,85,85,84,85,85,85,85,85,85,85,64,85,85,85,85,85,85,85,0,0,0,0,0,0,1,5
+        !byte 0,0,0,0,0,1,1,5,0,0,0,0,1,1,5,5,0,0,0,1,1,5,5,5,0,0,1,1,1,5,5,21
+        !byte 0,1,1,1,5,5,5,21,1,1,1,5,5,5,5,21,1,1,1,5,5,5,21,21,1,1,5,5,5,5,21,21
+        !byte 0,0,0,0,0,1,5,5,0,0,0,0,1,1,5,21,0,0,0,1,1,5,5,21,0,0,1,1,5,5,5,21
+        !byte 0,1,1,1,5,5,21,21,1,1,5,5,5,21,21,21,0,0,0,0,0,1,5,21,0,0,0,0,1,5,5,21
+        !byte 0,0,0,1,1,5,21,21,0,0,1,1,5,5,21,21,0,1,1,5,5,5,21,21,1,1,1,5,5,21,21,21
+        !byte 1,5,5,5,5,21,21,21,0,0,0,0,1,5,21,85,0,0,0,1,5,5,21,85,0,0,1,1,5,21,21,85
+        !byte 0,1,1,5,5,21,21,85,1,1,5,5,5,21,21,85,1,1,5,5,21,21,21,85,1,5,5,5,21,21,21,85
+        !byte 0,0,0,0,0,0,64,80,0,0,0,1,5,21,85,85,0,0,1,5,5,21,85,85,0,1,1,5,21,21,85,85
+        !byte 1,1,5,5,21,21,85,85,1,5,5,5,21,21,85,85,1,5,5,21,21,21,85,85,0,0,0,0,0,64,64,80
+        !byte 0,0,0,0,0,64,80,80,0,0,0,0,0,64,80,84,0,0,1,5,21,85,85,85,0,1,5,5,21,85,85,85
+        !byte 1,1,5,21,21,85,85,85,1,5,5,21,21,85,85,85,5,5,5,21,21,85,85,85,0,0,0,0,64,64,80,80
+        !byte 0,0,0,0,64,64,80,84,0,0,0,0,64,80,80,84,0,0,0,0,64,80,84,85,0,1,5,21,85,85,85,85
+        !byte 1,5,5,21,85,85,85,85,1,5,21,21,85,85,85,85,5,5,21,21,85,85,85,85,0,0,0,64,64,80,80,80
+        !byte 0,0,0,64,64,80,80,84,0,0,0,64,64,80,84,84,0,0,0,64,80,80,84,85,0,0,0,64,80,84,85,85
+        !byte 1,5,21,85,85,85,85,85,5,5,21,85,85,85,85,85,5,21,21,85,85,85,85,85,0,0,64,64,64,80,80,84
+        !byte 0,0,64,64,80,80,80,84,0,0,64,64,80,80,84,84,0,0,64,64,80,84,84,85,0,0,64,80,80,84,85,85
+        !byte 0,0,64,80,84,85,85,85,5,21,85,85,85,85,85,85,0,64,64,64,80,80,80,84,0,64,64,64,80,80,84,84
+        !byte 0,64,64,80,80,80,84,84,0,64,64,80,80,84,84,85,0,64,64,80,84,84,85,85,0,64,80,80,84,85,85,85
+        !byte 0,64,80,84,85,85,85,85,64,64,64,80,80,80,80,84,64,64,64,80,80,80,84,84,64,64,64,80,80,84,84,84
+        !byte 64,64,80,80,80,84,84,85,64,64,80,80,84,84,85,85,64,64,80,84,84,85,85,85,64,80,80,84,85,85,85,85
+        !byte 64,80,84,85,85,85,85,85,64,64,80,80,80,80,84,84,64,64,80,80,80,84,84,84,64,64,80,80,84,84,84,85
+        !byte 64,80,80,80,84,84,85,85,64,80,80,84,84,85,85,85,64,80,84,84,85,85,85,85,80,80,84,85,85,85,85,85
+        !byte 80,84,85,85,85,85,85,85,64,80,80,80,80,84,84,84,64,80,80,80,84,84,84,85,64,80,80,84,84,84,85,85
+        !byte 80,80,80,84,84,85,85,85,80,80,84,84,85,85,85,85,80,84,84,85,85,85,85,85,0,0,0,0,0,0,0,21
+        !byte 0,0,0,0,0,0,21,21,0,0,0,0,0,21,21,21,0,0,0,0,21,21,21,21,0,0,0,21,21,21,21,21
+        !byte 0,0,21,21,21,21,21,21,0,21,21,21,21,21,21,21,21,21,21,21,21,21,21,21,0,0,0,0,0,0,0,84
+        !byte 0,0,0,0,21,21,21,85,0,0,0,21,21,21,21,85,0,0,21,21,21,21,21,85,0,21,21,21,21,21,21,85
+        !byte 21,21,21,21,21,21,21,85,0,0,0,0,0,0,84,84,0,0,0,21,21,21,85,85,0,0,21,21,21,21,85,85
+        !byte 0,21,21,21,21,21,85,85,21,21,21,21,21,21,85,85,0,0,0,0,0,84,84,84,0,0,21,21,21,85,85,85
+        !byte 0,21,21,21,21,85,85,85,21,21,21,21,21,85,85,85,0,0,0,0,84,84,84,84,0,0,0,0,84,84,84,85
+        !byte 0,21,21,21,85,85,85,85,21,21,21,21,85,85,85,85,0,0,0,84,84,84,84,84,0,0,0,84,84,84,84,85
+        !byte 0,0,0,84,84,84,85,85,21,21,21,85,85,85,85,85,0,0,84,84,84,84,84,84,0,0,84,84,84,84,84,85
+        !byte 0,0,84,84,84,84,85,85,0,0,84,84,84,85,85,85,21,21,85,85,85,85,85,85,0,84,84,84,84,84,84,84
+        !byte 0,84,84,84,84,84,84,85,0,84,84,84,84,84,85,85,0,84,84,84,84,85,85,85,0,84,84,84,85,85,85,85
+        !byte 84,84,84,84,84,84,84,84,84,84,84,84,84,84,84,85,84,84,84,84,84,84,85,85,84,84,84,84,84,85,85,85
+        !byte 84,84,84,84,85,85,85,85,84,84,84,85,85,85,85,85,84,84,85,85,85,85,85,85,0,84,68,68,68,84,0,0
+        !byte 0,16,80,16,16,84,0,0,0,84,4,84,64,84,0,0,0,84,4,84,4,84,0,0,0,68,68,84,4,4,0,0
+        !byte 0,84,64,84,4,84,0,0,0,84,64,84,68,84,0,0,0,84,4,16,16,16,0,0,0,84,68,84,68,84,0,0
+        !byte 0,84,68,84,4,84,0,0,0,16,68,84,68,68,0,0,0,80,68,80,68,80,0,0,0,84,64,64,64,84,0,0
+        !byte 0,80,68,68,68,80,0,0,0,84,64,80,64,84,0,0,0,84,64,80,64,64,0,0,0,68,68,16,68,68,0,0
+        !byte 0,68,68,16,16,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
         * = $3000
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
@@ -1474,3 +1393,109 @@ runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0,0,31,0
 runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,27,0,0,1,0,0,0,7,0,0,0,0,0,0,25,0,0,0,0,1,0,4,0,0,0,0,0,18,0,0,25,0,0,0,0,1,0,4,0,0,0,0,17,0,0,0,25,0,0,0,0,1,0,4,0,9,0,0,0,0,0,0,0,0,30,0,0,1,0,4,0,9,0,0,0,0,0,21,0,0,30,0,0,1,0,0,0,9,0,13,0,0,0,0,0,0,30,0,0,0,0,5,0,9,0,13,0,0,0,0,26,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,23,0,0,0,0,0,2,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,37,37,37,0,0,0,0,39,39,39,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,41,41,0,0,0,0,43,43,0,0,0,0,0,45,45,45,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,48,0,0,0,0,0,0,0,0,50,50,50,50,50,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,53,53,0,0,0,0,0,56,56,56,56,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,58,58,58,58,0,0,0,0,61,61,61,61,61,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,64,64,0,0,0,0,0,0,0,0,0,0,0,65,65,65,0,0,66,66,66,66,66,66,66,66,66,0
 runST: !byte 0,34,34,34,34,34,34,0,35,35,35,35,35,35,35,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,36,0,0,0,0,38,38,0,0,0,0,0,40,40,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,42,0,0,0,0,44,44,0,0,0,0,0,0,46,46,46,0,0,0,47,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,49,0,0,0,0,51,51,51,51,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,52,0,0,0,54,54,0,55,0,0,0,0,57,57,57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,59,59,59,59,59,0,60,0,0,62,62,62,62,0,0,0,0,0,0,0,0,0,0,0,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+        * = charsetB            ; charset A with every glyph's 8 bytes reversed
+        !byte 0,0,0,0,0,0,0,0,85,85,85,85,85,85,85,85,1,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0
+        !byte 1,1,1,0,0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,1,1,0,0
+        !byte 1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,5,0,0,0,0,0,0,0,21,1,0,0,0,0,0,0
+        !byte 64,0,0,0,0,0,0,0,80,0,0,0,0,0,0,0,85,0,0,0,0,0,0,0,85,5,0,0,0,0,0,0
+        !byte 85,21,1,0,0,0,0,0,85,1,1,1,0,0,0,0,85,1,1,1,1,0,0,0,85,1,1,1,1,1,0,0
+        !byte 85,1,1,1,1,1,1,0,85,1,1,1,1,1,1,1,64,64,0,0,0,0,0,0,84,64,0,0,0,0,0,0
+        !byte 85,80,0,0,0,0,0,0,85,85,0,0,0,0,0,0,85,85,5,0,0,0,0,0,85,85,21,1,0,0,0,0
+        !byte 85,85,1,1,1,0,0,0,85,85,1,1,1,1,0,0,85,85,1,1,1,1,1,0,85,85,1,1,1,1,1,1
+        !byte 64,64,64,0,0,0,0,0,85,84,64,0,0,0,0,0,85,85,80,0,0,0,0,0,85,85,85,0,0,0,0,0
+        !byte 85,85,85,5,0,0,0,0,85,85,85,21,1,0,0,0,85,85,85,1,1,1,0,0,85,85,85,1,1,1,1,0
+        !byte 85,85,85,1,1,1,1,1,64,64,64,64,0,0,0,0,85,64,64,64,0,0,0,0,85,85,84,64,0,0,0,0
+        !byte 85,85,85,80,0,0,0,0,85,85,85,85,0,0,0,0,85,85,85,85,5,0,0,0,85,85,85,85,21,1,0,0
+        !byte 85,85,85,85,1,1,1,0,85,85,85,85,1,1,1,1,64,64,64,64,64,0,0,0,85,64,64,64,64,0,0,0
+        !byte 85,85,64,64,64,0,0,0,85,85,85,84,64,0,0,0,85,85,85,85,80,0,0,0,85,85,85,85,85,0,0,0
+        !byte 85,85,85,85,85,5,0,0,85,85,85,85,85,21,1,0,85,85,85,85,85,1,1,1,64,64,64,64,64,64,0,0
+        !byte 85,64,64,64,64,64,0,0,85,85,64,64,64,64,0,0,85,85,85,64,64,64,0,0,85,85,85,85,84,64,0,0
+        !byte 85,85,85,85,85,80,0,0,85,85,85,85,85,85,0,0,85,85,85,85,85,85,5,0,85,85,85,85,85,85,21,1
+        !byte 85,85,85,85,85,85,1,1,64,64,64,64,64,64,64,0,85,64,64,64,64,64,64,0,85,85,64,64,64,64,64,0
+        !byte 85,85,85,64,64,64,64,0,85,85,85,85,64,64,64,0,85,85,85,85,85,84,64,0,85,85,85,85,85,85,80,0
+        !byte 85,85,85,85,85,85,85,0,85,85,85,85,85,85,85,5,85,85,85,85,85,85,85,21,85,85,85,85,85,85,85,1
+        !byte 64,64,64,64,64,64,64,64,85,64,64,64,64,64,64,64,85,85,64,64,64,64,64,64,85,85,85,64,64,64,64,64
+        !byte 85,85,85,85,64,64,64,64,85,85,85,85,85,64,64,64,85,85,85,85,85,85,84,64,85,85,85,85,85,85,85,80
+        !byte 85,85,85,85,85,85,64,64,85,85,85,85,85,85,85,84,85,85,85,85,85,85,85,64,5,1,0,0,0,0,0,0
+        !byte 5,1,1,0,0,0,0,0,5,5,1,1,0,0,0,0,5,5,5,1,1,0,0,0,21,5,5,1,1,1,0,0
+        !byte 21,5,5,5,1,1,1,0,21,5,5,5,5,1,1,1,21,21,5,5,5,1,1,1,21,21,5,5,5,5,1,1
+        !byte 5,5,1,0,0,0,0,0,21,5,1,1,0,0,0,0,21,5,5,1,1,0,0,0,21,5,5,5,1,1,0,0
+        !byte 21,21,5,5,1,1,1,0,21,21,21,5,5,5,1,1,21,5,1,0,0,0,0,0,21,5,5,1,0,0,0,0
+        !byte 21,21,5,1,1,0,0,0,21,21,5,5,1,1,0,0,21,21,5,5,5,1,1,0,21,21,21,5,5,1,1,1
+        !byte 21,21,21,5,5,5,5,1,85,21,5,1,0,0,0,0,85,21,5,5,1,0,0,0,85,21,21,5,1,1,0,0
+        !byte 85,21,21,5,5,1,1,0,85,21,21,5,5,5,1,1,85,21,21,21,5,5,1,1,85,21,21,21,5,5,5,1
+        !byte 80,64,0,0,0,0,0,0,85,85,21,5,1,0,0,0,85,85,21,5,5,1,0,0,85,85,21,21,5,1,1,0
+        !byte 85,85,21,21,5,5,1,1,85,85,21,21,5,5,5,1,85,85,21,21,21,5,5,1,80,64,64,0,0,0,0,0
+        !byte 80,80,64,0,0,0,0,0,84,80,64,0,0,0,0,0,85,85,85,21,5,1,0,0,85,85,85,21,5,5,1,0
+        !byte 85,85,85,21,21,5,1,1,85,85,85,21,21,5,5,1,85,85,85,21,21,5,5,5,80,80,64,64,0,0,0,0
+        !byte 84,80,64,64,0,0,0,0,84,80,80,64,0,0,0,0,85,84,80,64,0,0,0,0,85,85,85,85,21,5,1,0
+        !byte 85,85,85,85,21,5,5,1,85,85,85,85,21,21,5,1,85,85,85,85,21,21,5,5,80,80,80,64,64,0,0,0
+        !byte 84,80,80,64,64,0,0,0,84,84,80,64,64,0,0,0,85,84,80,80,64,0,0,0,85,85,84,80,64,0,0,0
+        !byte 85,85,85,85,85,21,5,1,85,85,85,85,85,21,5,5,85,85,85,85,85,21,21,5,84,80,80,64,64,64,0,0
+        !byte 84,80,80,80,64,64,0,0,84,84,80,80,64,64,0,0,85,84,84,80,64,64,0,0,85,85,84,80,80,64,0,0
+        !byte 85,85,85,84,80,64,0,0,85,85,85,85,85,85,21,5,84,80,80,80,64,64,64,0,84,84,80,80,64,64,64,0
+        !byte 84,84,80,80,80,64,64,0,85,84,84,80,80,64,64,0,85,85,84,84,80,64,64,0,85,85,85,84,80,80,64,0
+        !byte 85,85,85,85,84,80,64,0,84,80,80,80,80,64,64,64,84,84,80,80,80,64,64,64,84,84,84,80,80,64,64,64
+        !byte 85,84,84,80,80,80,64,64,85,85,84,84,80,80,64,64,85,85,85,84,84,80,64,64,85,85,85,85,84,80,80,64
+        !byte 85,85,85,85,85,84,80,64,84,84,80,80,80,80,64,64,84,84,84,80,80,80,64,64,85,84,84,84,80,80,64,64
+        !byte 85,85,84,84,80,80,80,64,85,85,85,84,84,80,80,64,85,85,85,85,84,84,80,64,85,85,85,85,85,84,80,80
+        !byte 85,85,85,85,85,85,84,80,84,84,84,80,80,80,80,64,85,84,84,84,80,80,80,64,85,85,84,84,84,80,80,64
+        !byte 85,85,85,84,84,80,80,80,85,85,85,85,84,84,80,80,85,85,85,85,85,84,84,80,21,0,0,0,0,0,0,0
+        !byte 21,21,0,0,0,0,0,0,21,21,21,0,0,0,0,0,21,21,21,21,0,0,0,0,21,21,21,21,21,0,0,0
+        !byte 21,21,21,21,21,21,0,0,21,21,21,21,21,21,21,0,21,21,21,21,21,21,21,21,84,0,0,0,0,0,0,0
+        !byte 85,21,21,21,0,0,0,0,85,21,21,21,21,0,0,0,85,21,21,21,21,21,0,0,85,21,21,21,21,21,21,0
+        !byte 85,21,21,21,21,21,21,21,84,84,0,0,0,0,0,0,85,85,21,21,21,0,0,0,85,85,21,21,21,21,0,0
+        !byte 85,85,21,21,21,21,21,0,85,85,21,21,21,21,21,21,84,84,84,0,0,0,0,0,85,85,85,21,21,21,0,0
+        !byte 85,85,85,21,21,21,21,0,85,85,85,21,21,21,21,21,84,84,84,84,0,0,0,0,85,84,84,84,0,0,0,0
+        !byte 85,85,85,85,21,21,21,0,85,85,85,85,21,21,21,21,84,84,84,84,84,0,0,0,85,84,84,84,84,0,0,0
+        !byte 85,85,84,84,84,0,0,0,85,85,85,85,85,21,21,21,84,84,84,84,84,84,0,0,85,84,84,84,84,84,0,0
+        !byte 85,85,84,84,84,84,0,0,85,85,85,84,84,84,0,0,85,85,85,85,85,85,21,21,84,84,84,84,84,84,84,0
+        !byte 85,84,84,84,84,84,84,0,85,85,84,84,84,84,84,0,85,85,85,84,84,84,84,0,85,85,85,85,84,84,84,0
+        !byte 84,84,84,84,84,84,84,84,85,84,84,84,84,84,84,84,85,85,84,84,84,84,84,84,85,85,85,84,84,84,84,84
+        !byte 85,85,85,85,84,84,84,84,85,85,85,85,85,84,84,84,85,85,85,85,85,85,84,84,0,0,84,68,68,68,84,0
+        !byte 0,0,84,16,16,80,16,0,0,0,84,64,84,4,84,0,0,0,84,4,84,4,84,0,0,0,4,4,84,68,68,0
+        !byte 0,0,84,4,84,64,84,0,0,0,84,68,84,64,84,0,0,0,16,16,16,4,84,0,0,0,84,68,84,68,84,0
+        !byte 0,0,84,4,84,68,84,0,0,0,68,68,84,68,16,0,0,0,80,68,80,68,80,0,0,0,84,64,64,64,84,0
+        !byte 0,0,80,68,68,68,80,0,0,0,84,64,80,64,84,0,0,0,64,64,80,64,84,0,0,0,68,68,16,68,68,0
+        !byte 0,0,16,16,16,68,68,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+        * = $4000  ; VIC bank 0 is full -- these live above it
+clampT: !byte 2,3,4,5,6,7,8,9,10,11,12,12,12,12,12,12,12,12,12,12,12,12,12,12
+        !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
+        !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
+        !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
+        !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
+        !byte 12,12,12,12,12,12,12,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+charT0: !byte 0,0,0,2,3,4,5,6,7,8,9,9,9,0,0,0,0,0,0,2,3,4,5,6
+        !byte 7,8,9,9,9,0,0,0,0,0,0,10,11,4,5,6,7,8,9,9,9,0,0,0
+        !byte 12,12,13,14,15,16,17,18,19,20,21,21,21,0,0,0,22,22,23,24,25,26,27,28
+        !byte 29,30,31,31,31,0,0,0,32,32,32,33,34,35,36,37,38,39,40,40,40,0,0,0
+        !byte 41,41,41,42,43,44,45,46,47,48,49,49,49,0,0,0,50,50,50,51,52,53,54,55
+        !byte 56,57,58,58,58,0,0,0,59,59,59,60,61,62,63,64,65,66,67,68,68,0,0,0
+        !byte 69,69,69,70,71,72,73,74,75,76,77,78,79,0,0,0,80,80,80,81,82,83,84,85
+        !byte 86,87,1,1,1,0,0,0,80,80,80,81,82,83,84,85,88,89,1,1,1,0,0,0
+        !byte 80,80,80,81,82,83,84,85,88,90,1,1,1,0,0,0
+charT1: !byte 0,0,0,2,91,92,93,94,95,96,97,98,99,0,0,0,0,0,0,2,91,100,101,102
+        !byte 103,104,98,99,105,0,0,0,0,0,0,10,11,106,107,108,109,110,111,105,112,0,0,0
+        !byte 12,12,13,14,15,16,113,114,115,116,117,118,119,0,0,0,120,120,23,24,25,26,27,121
+        !byte 122,123,124,125,126,0,0,0,127,128,129,33,34,35,36,37,130,131,132,133,134,0,0,0
+        !byte 135,136,137,138,43,44,45,46,47,139,140,141,142,0,0,0,143,144,145,146,147,53,54,55
+        !byte 56,57,148,149,150,0,0,0,151,152,153,154,155,156,63,64,65,66,67,157,157,0,0,0
+        !byte 158,159,160,161,162,163,164,74,75,76,77,78,78,0,0,0,165,166,167,168,169,170,171,172
+        !byte 86,87,1,1,1,0,0,0,166,173,174,175,176,177,178,179,180,89,1,1,1,0,0,0
+        !byte 173,174,181,182,183,184,185,186,180,89,1,1,1,0,0,0
+charT2: !byte 0,0,0,187,188,189,190,191,192,193,194,194,194,0,0,0,0,0,0,2,188,189,190,191
+        !byte 192,193,194,194,194,0,0,0,0,0,0,10,11,189,190,191,192,193,194,194,194,0,0,0
+        !byte 195,12,13,14,15,16,196,197,198,199,200,200,200,0,0,0,201,201,23,24,25,26,27,202
+        !byte 203,204,205,205,205,0,0,0,206,206,206,33,34,35,36,37,207,208,209,209,209,0,0,0
+        !byte 210,210,210,211,43,44,45,46,47,212,213,213,213,0,0,0,214,214,214,215,216,53,54,55
+        !byte 56,57,217,217,217,0,0,0,218,218,218,219,220,221,63,64,65,66,67,222,222,0,0,0
+        !byte 223,223,223,224,225,226,227,74,75,76,77,78,78,0,0,0,228,228,228,229,230,231,232,233
+        !byte 86,87,1,1,1,0,0,0,228,228,228,229,230,231,232,233,234,89,1,1,1,0,0,0
+        !byte 228,228,228,229,230,231,232,233,234,89,1,1,1,0,0,0

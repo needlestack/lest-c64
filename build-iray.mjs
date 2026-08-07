@@ -10,10 +10,6 @@ await import('./d64lib.js');
 const D64 = globalThis.D64;
 const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 0; i < arr.length; i += per) o.push(ind + '!byte ' + Array.from(arr.slice(i, i + per)).join(',')); return o.join('\n'); };
 
-// 256-char font: code bit = logical pixel. Per cell = 2 logical cols (L,R) x 4 rows.
-// group g (rows 2g..2g+1): bit(7-2g)=Left nibble(0xF0), bit(6-2g)=Right nibble(0x0F)
-const font = new Uint8Array(256 * 8);
-for (let c = 0; c < 256; c++) for (let r = 0; r < 8; r++) { const g = r >> 1, lb = 7 - g * 2, rb = 6 - g * 2; font[c * 8 + r] = (((c >> lb) & 1) ? 0xF0 : 0) | (((c >> rb) & 1) ? 0x0F : 0); }
 
 const M = [
  "1111111111111111","1000000100000001","1000000100000001","1000000100011101",
@@ -33,7 +29,7 @@ for (let a = 0; a < 256; a++) {
   ddxLo.push(dx & 255); ddxHi.push(dx >> 8); ddyLo.push(dy & 255); ddyHi.push(dy >> 8);
   posX.push(cx >= 0 ? 1 : 0); posY.push(sy >= 0 ? 1 : 0);
 }
-const NLOG = 80, FOV = 47;              // one ray per output column (option B)
+const NLOG = 160, FOV = 47;             // one ray per output column (160 logical cols)
 // RECTILINEAR projection: columns spaced by atan (flat image plane) + per-column
 // cos-correction of the distance. Fixes the fisheye arch AND makes wall height linear.
 const CTR = (NLOG - 1) / 2, HALF_UNITS = FOV / 2, TANHALF = Math.tan(HALF_UNITS / 256 * 2 * Math.PI);
@@ -43,12 +39,12 @@ for (let c = 0; c < NLOG; c++) {
   rayOff.push(Math.round(Math.atan(camX) / (2 * Math.PI) * 256) & 255);
   cosCorr.push(Math.min(255, Math.round(256 / Math.sqrt(1 + camX * camX))));
 }
-// half-height LUT indexed by perpDist>>3 (units of 1/32 cell) for finer vertical steps.
-// half-height 0..49 directly (no >>1 rounding loss). 44 half-px at 1 cell (index 32).
+// half-height LUT indexed by perpDist>>3 (units of 1/32 cell). Half-height 0..100 in the
+// 200-row logical space. 88 half-px at 1 cell (index 32).
 // split into two 256-entry pages: hLUTa = index 0..255, hLUTb = 256..511.
 const hLUTa = [], hLUTb = [];
-for (let i = 0; i < 256; i++) { let h = Math.round(1408 / Math.max(1, i)); hLUTa.push(Math.max(0, Math.min(127, h))); }  // UNCAPPED (127) so merged spans interpolate the true (linear) height; renderSym caps at 50 on draw
-for (let i = 256; i < 512; i++) { hLUTb.push(Math.max(0, Math.min(50, Math.round(1408 / i)))); }
+for (let i = 0; i < 256; i++) { let h = Math.round(2816 / Math.max(1, i)); hLUTa.push(Math.max(0, Math.min(254, h))); }  // UNCAPPED (254) so merged spans interpolate the true (linear) height; prepCells caps at 100 on draw
+for (let i = 256; i < 512; i++) { hLUTb.push(Math.max(0, Math.min(100, Math.round(2816 / i)))); }
 
 // ===== connected-wall-run ids =====
 // "Same wall" = same CONTIGUOUS run of wall faces, not merely the same plane. Two wall
@@ -86,33 +82,76 @@ for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Mat
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
 for (let i = 0; i < 256; i++) { const v = Math.floor(i * i / 4); f0Lo.push(v & 255); f0Hi.push((v >> 8) & 255); }
 for (let i = 256; i < 512; i++) { const v = Math.floor(i * i / 4); f1Lo.push(v & 255); f1Hi.push((v >> 8) & 255); }
-// bit-spread: 4-bit vertical pattern (bit k = row k) -> byte with bits at cell positions.
-// Left col occupies bit (7-2k); Right col occupies bit (6-2k).
-const spreadL = [], spreadR = [];
-for (let p = 0; p < 16; p++) { let l = 0, r = 0; for (let k = 0; k < 4; k++) if (p & (1 << k)) { l |= 1 << (7 - 2 * k); r |= 1 << (6 - 2 * k); } spreadL.push(l); spreadR.push(r); }
-const fromTop = [0xF, 0xE, 0xC, 0x8];   // rows >= m within a cell
-const fromBot = [0x1, 0x3, 0x7, 0xF];   // rows <= m within a cell
-// patTab[cr*64 + h] = 4-bit vertical wall pattern for cell-row cr (0..12), half-height h.
-// Wall spans logical rows [50-h, 49+h] (symmetric about the 49.5 mirror axis).
-const patTab = new Array(13 * 64).fill(0);
-for (let cr = 0; cr < 13; cr++) for (let h = 0; h <= 50; h++) {
-  let p = 0; for (let k = 0; k < 4; k++) { const R = 4 * cr + k; if (R >= 50 - h && R <= 49 + h) p |= (1 << k); }
-  patTab[cr * 64 + h] = p;
+// ===================== MULTICOLOR 4x8 CELL CHARSET =====================
+// Multicolor text mode: a cell is 4 logical pixels wide x 8 tall (each pixel 2 physical
+// px wide, 1 tall) => 160x200 logical in the same 1000 screen bytes. Bit pair per pixel:
+// 00 = $d021 (ceiling/floor), 01 = $d022 (wall). Pixel k occupies bits (7-2k, 6-2k), so
+// a wall pixel contributes 1<<(6-2k).
+//
+// A cell is described by [f0..f3] = wall pixels counted UP FROM THE CELL BOTTOM in each
+// of the 4 columns. Only 253 of the 2^32 possible cells are ever needed, because under
+// rectilinear projection the wall top is a straight line across a face -- see
+// analyze-4x8*.mjs / analyze-final.mjs for the derivation and the measured error.
+//
+// Index: (wL, wR, bulge). wL/wR are the clamped end columns; bulge distinguishes the
+// three interior shapes the endpoints alone cannot separate (a step cannot be told from
+// a ramp by its endpoints). Straight-line interior sum is exactly wL+wR, which makes the
+// bulge test a subtraction: (w1+w2)-(w0+w3).
+const CLO = -2, CHI = 10, CN = CHI - CLO + 1;   // endpoint clamp range -> 13 levels
+const MINJUMP = 3;      // below this end-to-end jump, a step is indistinguishable from a ramp
+const C8 = x => Math.max(0, Math.min(8, x));
+function cellPat(a, b, bi) {                    // a,b in CLO..CHI; bi 0=step-late 1=ramp 2=step-early
+  if (bi === 1 || Math.abs(a - b) < MINJUMP) return [0, 1, 2, 3].map(k => C8(Math.round(a + (b - a) * k / 3)));
+  const v = bi === 0 ? Math.min(a, b) : Math.max(a, b);
+  return [C8(a), C8(v), C8(v), C8(b)];
 }
-// flip[code] = vertically-mirrored cell (swap logical-row groups g0<->g3, g1<->g2)
-const flip = [];
-for (let c = 0; c < 256; c++) { const b = i => (c >> i) & 1; flip.push((b(1) << 7) | (b(0) << 6) | (b(3) << 5) | (b(2) << 4) | (b(5) << 3) | (b(4) << 2) | (b(7) << 1) | b(6)); }
-// 3x5 digit glyphs (each row = 3 bits, bit2 = left column)
+// 3x5 digit glyphs (each row = 3 bits, bit2 = left column). In the new scheme these are
+// whole CHARACTERS, not plotted pixels -- the readout pokes a char code instead of ORing
+// bits into a framebuffer, which is what let the old overlay corrupt renderer tables.
 const digGlyph = [
  7,5,5,5,7, 2,6,2,2,7, 7,1,7,4,7, 7,1,7,1,7, 5,5,7,1,1,          // 0-4
  7,4,7,1,7, 7,4,7,5,7, 7,1,2,2,2, 7,5,7,5,7, 7,5,7,1,7,          // 5-9
- 2,5,7,5,5, 6,5,6,5,6, 7,4,4,4,7, 6,5,5,5,6, 7,4,6,4,7, 7,4,6,4,4, // A-F (hex, glyph idx = nibble)
+ 2,5,7,5,5, 6,5,6,5,6, 7,4,4,4,7, 6,5,5,5,6, 7,4,6,4,7, 7,4,6,4,4, // A-F (glyph idx = nibble)
  5,5,2,5,5, 5,5,2,2,2];                                          // X (16), Y (17) labels
-const bit1 = [1, 2, 4, 8];              // 1<<(row&3)
-const colBit = [4, 2, 1];               // column mask left->right
-// per cell-row: half-height >= t1 => cell fully solid; < tb => cell fully blank
+const NGLYPH = digGlyph.length / 5;
+
+// --- assign char codes: cell patterns first, then the 18 readout glyphs ---
+const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of multicolor bitmap
+const patBytes = p => [...Array(8)].map((_, i) =>
+  (p[0] > 7 - i ? 0x40 : 0) | (p[1] > 7 - i ? 0x10 : 0) | (p[2] > 7 - i ? 0x04 : 0) | (p[3] > 7 - i ? 0x01 : 0));
+function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
+intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
+for (let bi = 0; bi < 3; bi++) for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) intern(cellPat(a, b, bi));
+const CELLCODES = glyphs.length;
+const GLYPH0 = glyphs.length;                   // first readout glyph code
+for (let g = 0; g < NGLYPH; g++) {
+  const rows = digGlyph.slice(g * 5, g * 5 + 5);
+  glyphs.push([...Array(8)].map((_, i) => { const r = (i >= 1 && i <= 5) ? rows[i - 1] : 0;
+    return ((r >> 2 & 1) ? 0x40 : 0) | ((r >> 1 & 1) ? 0x10 : 0) | ((r & 1) ? 0x04 : 0); }));
+}
+if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs = ${glyphs.length} > 256`);
+console.error(`charset: ${CELLCODES} cell patterns + ${NGLYPH} readout glyphs = ${glyphs.length}/256`);
+// charset A, and charset B = every glyph flipped vertically. The raster split at the
+// horizon selects B for the bottom half, so ONE char code renders as its own mirror
+// there -- renderSym writes the identical byte to both halves and needs no flip table.
+const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
+for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
+// charT<bi>[wL*16 + wR] -> char code.  wL/wR are clampT outputs (0..12).
+const charT = [0, 1, 2].map(bi => { const t = new Array(CN * 16).fill(0);
+  for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) t[a * 16 + b] = codeOf.get(cellPat(a + CLO, b + CLO, bi).join(','));
+  return t; });
+// clampT[(h + K) as signed byte] -> level 0..12. K = 8R-92 is negative for every row above
+// the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
+const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
+  return Math.max(CLO, Math.min(CHI, v)) - CLO; });
+const BLANK = codeOf.get('0,0,0,0'), SOLID = codeOf.get('8,8,8,8');
+// kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
+const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255);
+// per cell-row: cell is fully solid when min height >= t1, fully blank when max < tb.
+// fill = h + 8R - 92, so solid at fill>=8 and blank at fill<=0.
 const t1Tab = [], tbTab = [];
-for (let cr = 0; cr < 13; cr++) { t1Tab.push(Math.max(0, 50 - 4 * cr)); tbTab.push(Math.max(0, 47 - 4 * cr)); }
+for (let R = 0; R < 13; R++) { t1Tab.push(100 - 8 * R); tbTab.push(Math.max(0, 93 - 8 * R)); }
 const rowLo = [], rowHi = []; for (let R = 0; R < 25; R++) { rowLo.push((R * 40) & 255); rowHi.push((R * 40) >> 8); }
 
 const MEASURE = process.env.MEASURE === '1';
@@ -141,16 +180,28 @@ const BACK = process.env.BACK === '1'; // diagnostic: auto-walk backward
 // patTab[cr=11][h=3..5], the live partial-fill entries for the cell row just above the
 // horizon. Kept at $2400 so the whole data segment clears it; enforced by the guard
 // after assemble(), which checks every reserved region, not just the charset.
+// VIC bank 0 is now EXACTLY full -- two screen buffers, two charsets and the f-tables
+// leave no free 1K/2K-aligned slot. Any new table must live above $4000 (see NEWTABLES).
 const SCR_A = 0x0400;
 const SCR_B = 0x2400;
-const CHARSET = 0x2800;
+const CHARSET = 0x2800;                 // charset A: upright glyphs, used above the horizon
 const FTABLES = 0x3000;                 // f0Lo/f0Hi/f1Lo/f1Hi + run-id tables
+const CHARSET_B = 0x3800;               // charset B: every glyph flipped vertically
+const NEWTABLES = 0x4000;               // clampT / charT0-2, outside VIC bank 0
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
-const d018 = scr => ((scr >> 10) << 4) | ((CHARSET >> 11) << 1);
+const vm = scr => (scr >> 10) << 4;
+const cb = cs => (cs >> 11) << 1;
+const CB_A = cb(CHARSET), CB_B = cb(CHARSET_B);
+// Raster line of the horizon. The 25-row display window starts at raster 51, so logical
+// row 100 is raster 151; arm the split one line early so the swap lands before that line's
+// character fetch.
+const SPLITLINE = 150;
 const hx = n => '$' + n.toString(16).padStart(2, '0');
+const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 
 const asm = `
 charset = ${hx(CHARSET)}
+charsetB = ${hx(CHARSET_B)}
 px      = $02
 py      = $04
 pa      = $06
@@ -221,7 +272,7 @@ fpsOnes = $50
 deltaL  = $51
 deltaH  = $52
 fpsv    = $53
-dpx     = $54
+dpx     = $54                   ; fps scratch (was the pixel plotter's x/y)
 dpy     = $55
 ppHi    = $56
 ppLo    = $57
@@ -242,24 +293,22 @@ t1c     = $65
 tbc     = $66
 joyv    = $67
 joyEor  = $68
-dbgRow  = $69
-pixInv  = $6a
-; overlay-private scratch. plotDigit/plotPix must NOT alias renderer vars: hcur is
-; the span-interpolation accumulator and tmp is live inside renderSym, so the shared
-; names let drawFps/drawDbg reach back into the scene between frames.
-pdBase  = $6b
-pdTmp   = $6c
-pdGi    = $6d
-pdRowN  = $6e
-pdBits  = $6f
-pdColN  = $70
-ppPtr   = $71                   ; 2 bytes ($71/$72)
+; The overlay's private scratch block (pdBase/pdTmp/... at $6b-$70) is gone with the
+; pixel plotter: the readout now pokes whole char codes, so it holds no renderer state.
+ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
+kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
+d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
 stackLT = $c000
-stackRT = $c060
+stackRT = $c080
+; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
+; index never needs a 16-bit add.
 sideT   = $c100
-idT     = $c150
-colH    = $c1a0
-faceIdT = $c1f0
+idT     = $c200
+colH    = $c300
+faceIdT = $c400
+capH    = $c500                 ; colH capped at 100, filled by prepCells
+cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
+cmxT    = $c640                 ; per cell-column (40): max
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -272,12 +321,16 @@ entry:
         sta $dd00
         lda #$1b
         sta $d011
-        lda #$08
-        sta $d016
-        lda #${hx(d018(SCR_A))}
-        sta $d018               ; display buffer A, chars ${hx(CHARSET)}
+        lda #$18
+        sta $d016               ; MCM: multicolor text -> 4 logical px per cell, 2 physical px each
+        lda #${hx(vm(SCR_A))}
+        sta d018vm              ; display buffer A; IRQ ORs the charset bits per half-screen
+        lda #${hx(vm(SCR_A) | CB_A)}
+        sta $d018
         lda #$01
-        sta $d021               ; background white
+        sta $d021               ; 00 = white  (ceiling / floor)
+        lda #$00
+        sta $d022               ; 01 = black  (wall)
         lda #$00
         sta $d020
         lda #$ff
@@ -285,8 +338,9 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
-        lda #$00
-ccf:    sta $d800,x             ; color RAM black (fg)
+        lda #$08                ; bit3 = per-cell multicolor enable (colour bits unused: we
+                                ; only ever emit bit pairs 00 and 01, i.e. $d021/$d022)
+ccf:    sta $d800,x
         sta $d900,x
         sta $da00,x
         sta $db00,x
@@ -374,7 +428,8 @@ subSp:  lda spanR
         lda spanL
         clc
         adc spanR
-        lsr
+        ror                     ; ROR not LSR: at 160 columns spanL+spanR reaches 318, so the
+                                ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
         jsr marchCol
         ldx sp
@@ -391,7 +446,7 @@ subSp:  lda spanR
         stx sp
         jmp subLp
 subDn:  jsr makeDiv
-${NOFILL ? '' : '        jsr renderSym'}
+${NOFILL ? '' : '        jsr prepCells\n        jsr renderSym'}
         jsr drawFps
         jsr drawDbg
         inc renderCnt
@@ -408,13 +463,13 @@ mvs:    lda $d012
         lda baseHi
         cmp #${hx(SCR_A >> 8)}
         bne mshB
-        lda #${hx(d018(SCR_A))}
-        sta $d018               ; show A, draw into B
+        lda #${hx(vm(SCR_A))}
+        sta d018vm              ; show A, draw into B (IRQ ORs in the charset bits)
         lda #${hx(SCR_B >> 8)}
         sta baseHi
         jmp mnext
-mshB:   lda #${hx(d018(SCR_B))}
-        sta $d018               ; show B, draw into A
+mshB:   lda #${hx(vm(SCR_B))}
+        sta d018vm              ; show B, draw into A
         lda #${hx(SCR_A >> 8)}
         sta baseHi
 mnext:  inc iterLo
@@ -435,37 +490,63 @@ mdnx:   inx
         bne mdl
         rts
 
-; ================= render, cell-based + vertical symmetry (no clear, no RMW) =================
-; For each cell (2 logical columns) compute the 8-bit char directly and WRITE it; mirror
-; the top half to the bottom via flip[]. Only 13 cell-rows computed instead of 25.
+; ============ prepCells: per cell-column summary, once per frame ============
+; renderSym visits 520 cells but only ~25 are edge cells; the other 495 must be rejected
+; as fully-solid or fully-blank as cheaply as possible. Computing min/max over 4 columns
+; inside that loop would cost 4 loads per cell, so it is hoisted here: 40 iterations
+; instead of 520. Also caps the height at 100 -- colH is deliberately left UNCAPPED by the
+; interpolator so merged spans stay linear, but (h + K) must fit a signed byte downstream.
+prepCells:
+        lda #$00
+        sta cellc
+        sta zpc                 ; zpc = 4*cellc, the logical column
+pcLp:   ldx zpc
+        ldy #$04
+        lda #$ff
+        sta tmp                 ; running min
+        lda #$00
+        sta tmp2                ; running max
+pcIn:   lda colH,x
+        cmp #101
+        bcc pcNc
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc:   sta capH,x
+        cmp tmp
+        bcs pcNmn
+        sta tmp
+pcNmn:  cmp tmp2
+        bcc pcNmx
+        sta tmp2
+pcNmx:  inx
+        dey
+        bne pcIn
+        ldx cellc
+        lda tmp
+        sta cmnT,x
+        lda tmp2
+        sta cmxT,x
+        lda zpc
+        clc
+        adc #$04
+        sta zpc
+        inc cellc
+        lda cellc
+        cmp #40
+        bcc pcLp
+        rts
+
+; ================= render: 4x8 multicolor cells + vertical symmetry =================
+; One char code per cell, written to a row AND its mirror. No flip table: charset B (used
+; below the horizon by the raster split) is charset A upside down, so the same byte draws
+; the mirrored cell. Only 13 of 25 rows are computed.
+;
+; Cell fill in a column = clamp(h + 8R - 92, 0, 8). So per row a single constant kR = 8R-92
+; converts a height into a fill, and the solid/blank thresholds are pure compares.
 renderSym:
         lda #$00
         sta crc                 ; cell-row 0..12
-rsRow:  lda crc                 ; patLo/patHi = patTab + cr*64
-        sta tmp
-        lda #$00
-        sta tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        asl tmp
-        rol tmp2
-        clc
-        lda tmp
-        adc #<patTabT
-        sta patLo
-        lda tmp2
-        adc #>patTabT
-        sta patHi
-        ldx crc                 ; topPtr = base + rowLo[cr]
-        lda rowLoT,x
+rsRow:  ldx crc
+        lda rowLoT,x            ; topPtr = base + rowLo[cr]
         sta tpLo
         lda rowHiT,x
         clc
@@ -481,76 +562,86 @@ rsRow:  lda crc                 ; patLo/patHi = patTab + cr*64
         clc
         adc baseHi
         sta btHi
-        ldx crc                 ; per-row solid/blank thresholds
+        ldx crc
         lda t1TabT,x
-        sta t1c
+        sta t1c                 ; h >= t1c  -> cell fully solid
         lda tbTabT,x
-        sta tbc
+        sta tbc                 ; h <  tbc  -> cell fully blank
+        lda kTabT,x
+        sta kr                  ; kr = 8*cr - 92 (signed)
         lda #$00
         sta cellc
-rsCol:  lda cellc               ; xL = 2*cellc  (X held for the whole cell)
+        sta zpc                 ; zpc = 4*cellc
+rsCol:  ldx cellc
+        lda cmnT,x
+        cmp t1c
+        bcs rsSolid             ; min height >= t1 -> every column full
+        lda cmxT,x
+        cmp tbc
+        bcc rsBlank             ; max height < tb  -> every column empty
+        ; ---- edge cell: (wL, wR, bulge) -> char ----
+        ldx zpc
+        lda capH,x              ; w0
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        sta hh0
+        lda capH+3,x            ; w3
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        sta hh1
+        lda capH+1,x            ; w1
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        sta hh4
+        lda capH+2,x            ; w2
+        clc
+        adc kr
+        tay
+        lda clampT,y
+        clc
+        adc hh4                 ; w1 + w2
+        sec
+        sbc hh0
+        sec
+        sbc hh1                 ; bulge = (w1+w2) - (w0+w3); a straight line gives exactly 0
+        sta dd
+        ; index = w0*16 + w3, then pick the table by bulge sign
+        lda hh0
         asl
-        tax
-        ; --- fast path: both logical columns fully solid -> $FF ---
-        lda colH,x
-        cmp t1c
-        bcc rsChkB
-        lda colH+1,x
-        cmp t1c
-        bcc rsChkB
-        lda #$ff
-        ldy cellc
-        sta (tpLo),y
-        sta (btLo),y            ; flip[$ff]=$ff
-        jmp rsNext
-        ; --- fast path: both fully blank -> $00 ---
-rsChkB: lda colH,x
-        cmp tbc
-        bcs rsSlow
-        lda colH+1,x
-        cmp tbc
-        bcs rsSlow
-        lda #$00
-        ldy cellc
-        sta (tpLo),y
-        sta (btLo),y            ; flip[$00]=$00
-        jmp rsNext
-        ; --- edge cell: real pattern computation ---
-rsSlow: lda colH,x
-        cmp #51                 ; cap uncapped height at 50 before pattern lookup
-        bcc rsSa
-        lda #50
-rsSa:   tay
-        lda (patLo),y
+        asl
+        asl
+        asl
+        ora hh1
         tay
-        lda spreadLT,y
-        sta tmp
-        lda colH+1,x
-        cmp #51
-        bcc rsSb
-        lda #50
-rsSb:   tay
-        lda (patLo),y
-        tay
-        lda spreadRT,y
-        ora tmp                 ; A = combined cell pattern
-        ldx crc
-        cpx #12
-        beq rsCenter            ; center row straddles the mirror axis -> single symmetric write
-        ldy cellc
-        sta (tpLo),y            ; top half
-        tax
-        lda flipT,x
-        sta (btLo),y            ; bottom half (mirrored)
-        jmp rsNext
-rsCenter:
-        sta tmp2
-        tax
-        lda flipT,x
-        ora tmp2                ; combined | flip(combined) = symmetric, order-independent
-        ldy cellc
+        lda dd
+        bmi rsNeg
+        cmp #$02
+        bcs rsUp                ; interior above the line -> step-early
+rsMid:  lda charT1,y
+        jmp rsPut
+rsNeg:  cmp #$fe                ; -2 or lower -> interior below the line -> step-late
+        bcs rsMid
+        lda charT0,y
+        jmp rsPut
+rsUp:   lda charT2,y
+        jmp rsPut
+rsSolid:lda #${hx(SOLID)}
+        jmp rsPut
+rsBlank:lda #${hx(BLANK)}
+rsPut:  ldy cellc
         sta (tpLo),y
-rsNext: inc cellc
+        sta (btLo),y            ; charset B mirrors it below the horizon
+        lda zpc
+        clc
+        adc #$04
+        sta zpc
+        inc cellc
         lda cellc
         cmp #40
         bcc rsCol
@@ -1071,9 +1162,41 @@ mdpos:  tax
         rts
 
 ; ---- raster IRQ: count video frames ----
-irq:    inc frameCnt
+; Two raster IRQs per frame implement the mirror trick. Charset B is charset A with every
+; glyph's 8 bytes reversed, so below the split the SAME char code renders upside down --
+; which is exactly the vertical symmetry of the scene. renderSym therefore writes one
+; identical byte to a row and its mirror and needs no flip table at all.
+;
+; The split is at logical row 100 (the horizon), which is the MIDDLE of char row 12. That
+; is legal and in fact required: the VIC re-fetches character-generator data every raster
+; line from the current CB bits, so row 12 draws its top 4 lines from A and its bottom 4
+; from B -- self-mirroring, exactly what the horizon row needs.
+;
+; $d018 also carries the video-matrix nibble, which the main loop flips per frame for
+; double buffering, so the handler ORs the charset bits onto the live value in d018vm
+; rather than writing a constant.
+irq:    lda $d019
+        and #$01
+        beq irqd                ; not a raster IRQ
+        lda $d012
+        cmp #${hx(SPLITLINE)}
+        bcs irqSplit
+        ; --- top of frame: select charset A, arm the split ---
+        lda d018vm
+        ora #${hx(CB_A)}
+        sta $d018
+        lda #${hx(SPLITLINE)}
+        sta $d012
+        inc frameCnt
         bne irqd
         inc frameCnt+1
+        jmp irqd
+irqSplit:
+        lda d018vm              ; --- horizon: select mirrored charset B ---
+        ora #${hx(CB_B)}
+        sta $d018
+        lda #$00
+        sta $d012
 irqd:   lda #$ff
         sta $d019
         pla
@@ -1129,195 +1252,92 @@ cfo:    sta fpsOnes
         stx fpsTens
         rts
 
-; ---- draw 2-digit fps at top-left (clears row0 + row1 cols0-3) ----
+; ---- readout: fps top-left, X/Y/A top-right ----
+; The overlay no longer plots pixels. In the 4x8 scheme a char code is an INDEX into the
+; cell-pattern set, not a bitmap, so there is nothing to OR bits into -- instead the last
+; 18 codes are literal digit glyphs and the readout just pokes them into screen RAM. That
+; also removes the whole class of bug where the overlay reached into renderer tables.
+setRow:                         ; A = char row -> ppPtr
+        tax
+        lda rowLoT,x
+        sta ppPtr
+        lda rowHiT,x
+        clc
+        adc baseHi
+        sta ppPtr+1
+        rts
+
 drawFps:
         lda #$00
-        sta dbgRow              ; fps digits at logical rows 0-4
-        sta pixInv              ; fps = white digits on black
-        lda baseHi
-        sta ppPtr+1
-        lda #$00
-        sta ppPtr
-        lda #$00
-        ldy #$07
-dfc0:   sta (ppPtr),y           ; row 0 cells 0-7
-        dey
-        bpl dfc0
-        ldy #47
-dfc1:   sta (ppPtr),y           ; row 1 cells 40-47
-        dey
-        cpy #39
-        bne dfc1
+        jsr setRow
+        ldy #$00
         lda fpsTens
-        ldx #$00
-        jsr plotDigit
+        clc
+        adc #${hx(GLYPH0)}
+        sta (ppPtr),y
+        iny
         lda fpsOnes
-        ldx #$04
-        jsr plotDigit
+        clc
+        adc #${hx(GLYPH0)}
+        sta (ppPtr),y
         rts
 
-; ===== debug readout (top-right): X/Y in cell.frac hex, A in hex. exact 8.8 position =====
+; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
+; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
 drawDbg:
         lda #$00
-        sta pixInv              ; white digits (same as fps)
-        sta dbgRow
-ddClrR: ldx dbgRow              ; black plate: rows 0-4, cols 29-39
-        lda rowLoT,x
-        clc
-        adc #29
-        sta ppPtr
-        lda rowHiT,x
-        adc baseHi
-        sta ppPtr+1
-        ldy #$0a
-        lda #$00
-ddClrC: sta (ppPtr),y
-        dey
-        bpl ddClrC
-        inc dbgRow
-        lda dbgRow
-        cmp #$05
-        bne ddClrR
-        ; --- X line (rows 0-4): label, cell nibble, frac hi, frac lo ---
-        lda #$00
-        sta dbgRow
-        lda #16
-        ldx #60
-        jsr plotDigit
+        jsr setRow
+        ldy #36
+        lda #16                 ; 'X'
+        jsr ddPut
         lda px+1
         and #$0f
-        ldx #64
-        jsr plotDigit
+        jsr ddPut
         lda px
         lsr
         lsr
         lsr
         lsr
-        ldx #68
-        jsr plotDigit
+        jsr ddPut
         lda px
         and #$0f
-        ldx #72
-        jsr plotDigit
-        ; --- Y line (rows 6-10) ---
-        lda #$06
-        sta dbgRow
-        lda #17
-        ldx #60
-        jsr plotDigit
+        jsr ddPut
+        lda #$01
+        jsr setRow
+        ldy #36
+        lda #17                 ; 'Y'
+        jsr ddPut
         lda py+1
         and #$0f
-        ldx #64
-        jsr plotDigit
+        jsr ddPut
         lda py
         lsr
         lsr
         lsr
         lsr
-        ldx #68
-        jsr plotDigit
+        jsr ddPut
         lda py
         and #$0f
-        ldx #72
-        jsr plotDigit
-        ; --- A line (rows 12-16): label + angle byte ---
-        lda #12
-        sta dbgRow
-        lda #10
-        ldx #60
-        jsr plotDigit
+        jsr ddPut
+        lda #$02
+        jsr setRow
+        ldy #37
+        lda #10                 ; 'A'
+        jsr ddPut
         lda pa
         lsr
         lsr
         lsr
         lsr
-        ldx #64
-        jsr plotDigit
+        jsr ddPut
         lda pa
         and #$0f
-        ldx #68
-        jsr plotDigit
+        jsr ddPut
         rts
-
-; plotDigit: A=digit(0..9), X=base logical col; 3x5 glyph at logical rows 0..4
-plotDigit:
-        stx pdBase
-        sta pdTmp
-        asl
-        asl
-        clc
-        adc pdTmp
-        sta pdGi                ; digit*5
-        lda #$00
-        sta pdRowN
-pdRow:  ldx pdGi
-        lda digGlyphT,x
-        sta pdBits
-        lda #$00
-        sta pdColN
-pdCol:  ldx pdColN
-        lda pdBits
-        and colBitT,x
-        beq pdSkip
-        lda pdBase
-        clc
-        adc pdColN
-        sta dpx
-        lda pdRowN
-        clc
-        adc dbgRow              ; base row (0 for fps; 0/6/12 for X/Y/A readout)
-        sta dpy
-        jsr plotPix
-pdSkip: inc pdColN
-        lda pdColN
-        cmp #$03
-        bne pdCol
-        inc pdGi
-        inc pdRowN
-        lda pdRowN
-        cmp #$05
-        bne pdRow
-        rts
-
-; plotPix: OR black logical pixel (dpx,dpy) into hidden framebuffer
-plotPix:
-        lda dpy
-        lsr
-        lsr
-        tax
-        clc
-        lda rowLoT,x
-        sta ppPtr
-        lda rowHiT,x
-        adc baseHi
-        sta ppPtr+1
-        lda dpx
-        lsr
-        clc
-        adc ppPtr
-        sta ppPtr
-        bcc ppnc
-        inc ppPtr+1
-ppnc:   lda dpy
-        and #$03
-        tax
-        lda bit1T,x
-        tax
-        lda dpx
-        and #$01
-        beq ppL
-        lda spreadRT,x
-        jmp ppor
-ppL:    lda spreadLT,x
-ppor:   ldy #$00
-        ldx pixInv
-        bne ppBlk
-        ora (ppPtr),y           ; white pixel (set bits)
+ddPut:  clc
+        adc #${hx(GLYPH0)}
         sta (ppPtr),y
-        rts
-ppBlk:  eor #$ff                ; black pixel (clear the masked bits)
-        and (ppPtr),y
-        sta (ppPtr),y
+        iny
         rts
 
 ; ================= data =================
@@ -1334,24 +1354,16 @@ hLUTaT: ${chunk(hLUTa).trim()}
 hLUTbT: ${chunk(hLUTb).trim()}
 moveXT: ${chunk(moveX).trim()}
 moveYT: ${chunk(moveY).trim()}
-spreadLT: !byte ${spreadL.join(',')}
-spreadRT: !byte ${spreadR.join(',')}
-fromTopT: !byte ${fromTop.join(',')}
-fromBotT: !byte ${fromBot.join(',')}
 rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
-bit1T:  !byte ${bit1.join(',')}
-colBitT: !byte ${colBit.join(',')}
-digGlyphT: !byte ${digGlyph.join(',')}
-flipT:  ${chunk(flip).trim()}
+kTabT:  !byte ${kTab.join(',')}
 t1TabT: !byte ${t1Tab.join(',')}
 tbTabT: !byte ${tbTab.join(',')}
-patTabT: ${chunk(patTab).trim()}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
         * = charset
-${chunk(font, 32)}
+${chunk(fontA, 32)}
 
         * = $3000
 f0LoT:  ${chunk(f0Lo).trim()}
@@ -1363,6 +1375,15 @@ runWT: !byte ${runW.join(',')}
 runET: !byte ${runE.join(',')}
 runNT: !byte ${runN.join(',')}
 runST: !byte ${runS.join(',')}
+
+        * = charsetB            ; charset A with every glyph's 8 bytes reversed
+${chunk(fontB, 32)}
+
+        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
+clampT: ${chunk(clampT).trim()}
+charT0: ${chunk(charT[0]).trim()}
+charT1: ${chunk(charT[1]).trim()}
+charT2: ${chunk(charT[2]).trim()}
 `;
 
 writeFileSync('./iray.asm', asm);
@@ -1376,8 +1397,9 @@ try {
   const reserved = [
     ['screen buffer A', SCR_A, SCR_A + 0x400],
     ['screen buffer B', SCR_B, SCR_B + 0x400],
-    ['charset', CHARSET, CHARSET + 0x800],
+    ['charset A', CHARSET, CHARSET + 0x800],
     ['f-tables', FTABLES, FTABLES + 0x800],
+    ['charset B', CHARSET_B, CHARSET_B + 0x800],
   ];
   const dataLo = r.org, dataHi = r.labels.dataEnd;
   for (const [name, lo, hi] of reserved) {
