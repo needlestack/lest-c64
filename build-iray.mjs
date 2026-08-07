@@ -444,6 +444,10 @@ sShi    = $94
 ssK     = $95                   ; current boundary coordinate, and how many are left
 ssN     = $96
 ssW     = $97                   ; span width in columns
+ssCol   = $9c                   ; calcU: column, ray angle and side for the column in hand
+ssAng   = $9d
+ssSd    = $9e
+ssCL    = $9f                   ; cell coordinate along the face, at spanL
 mp      = $98                   ; mul8 operands / product
 mq      = $99
 plo     = $9a
@@ -466,8 +470,8 @@ cmxT    = $c640                 ; per cell-column (40): max
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
-uLoT    = $c700                 ; per marched column: the hit's coordinate ALONG the wall,
-uHiT    = $c800                 ;   8.8 cells. Only marched columns hold anything valid.
+remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
+remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -1257,15 +1261,30 @@ seamSpan:
         cmp #$02
         bcc ssDn                ; adjacent columns: nothing between them to mark
         sta ssW                 ; span width in columns
+        ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
+        ; coordinate along the face is the whole question: same cell, no boundary. 65% of
+        ; spans stop on this test, which is exactly why u is derived here instead of in
+        ; marchCol -- computing it for all 19 marched columns spent ~2850 cycles a frame
+        ; to use about a third of the answer.
         ldx spanL
-        lda uLoT,x
+        lda idT,x
+        ldx spanR
+        cmp idT,x
+        beq ssDn                ; identical cell -> no boundary. A run is a contiguous line
+                                ; of cells along ONE plane, so its cells can only differ in
+                                ; the coordinate that runs along the face -- comparing the
+                                ; raw cell ids is exactly the boundary test, no masking.
+        ldx spanL               ; now it is worth deriving u
+        jsr calcU
+        lda uwL
         sta uaL
-        lda uHiT,x
+        lda uwH
         sta uaH
         ldx spanR
-        lda uLoT,x
+        jsr calcU
+        lda uwL
         sta ubL
-        lda uHiT,x
+        lda uwH
         sta ubH
         ; Walk the integer coordinates between the two ends. Direction first: the face can
         ; run either way across the screen.
@@ -1423,6 +1442,69 @@ ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
         sta seamT,x
 ssOne:  rts
 
+; u for one marched column (X): where along the wall the ray landed, 8.8 cells.
+; A y-face is a wall of constant y, so the coordinate that varies along it is x, and vice
+; versa. u = p + d*dir, one sideMul: sideMul(fr, m) returns fr/256 * m, so feeding it |cos|
+; (or |sin|) as 0..255 against the parked hit distance gives exactly d*|dir|. The sign comes
+; from the same posXT/posYT the DDA used to choose its step. sideMul eats X, hence ssAng.
+calcU:  stx ssCol
+        lda remLoT,x
+        sta mlo
+        lda remHiT,x
+        sta mhi
+        lda pa
+        clc
+        adc rayOffT,x
+        sta ssAng
+        lda sideT,x
+        bne cuX
+        ldx ssAng
+        lda absSinT,x
+        sta fr
+        jsr sideMul
+        ldx ssAng
+        lda posYT,x
+        bne cuYp
+        sec
+        lda py
+        sbc s1
+        sta uwL
+        lda py+1
+        sbc s2
+        sta uwH
+        rts
+cuYp:   clc
+        lda py
+        adc s1
+        sta uwL
+        lda py+1
+        adc s2
+        sta uwH
+        rts
+cuX:    ldx ssAng
+        lda absCosT,x
+        sta fr
+        jsr sideMul
+        ldx ssAng
+        lda posXT,x
+        bne cuXp
+        sec
+        lda px
+        sbc s1
+        sta uwL
+        lda px+1
+        sbc s2
+        sta uwH
+        rts
+cuXp:   clc
+        lda px
+        adc s1
+        sta uwL
+        lda px+1
+        adc s2
+        sta uwH
+        rts
+
 ; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
 mul8:   sta mp
         clc
@@ -1483,61 +1565,10 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
 friSo:  lda runST,y
 friSto: ldx col
         sta faceIdT,x
-${SEAMS ? `        ; --- u: where along the wall this ray landed, 8.8 cells ---
-        ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and
-        ; vice versa. u = p + d*dir, one sideMul: sideMul(fr, m) gives fr/256 * m, so feeding
-        ; it |cos| (or |sin|) as 0..255 against the 16-bit hit distance gives exactly d*|dir|.
-        ; Sign comes from the same posXT/posYT the DDA already used to pick its step.
-        lda remL
-        sta mlo
+${SEAMS ? `        lda remL                ; park the raw hit distance; u is derived from it later, and
+        sta remLoT,x            ; only for the ~35% of spans that actually cross a boundary
         lda remH
-        sta mhi
-        ldx rang
-        lda side
-        bne muY
-        lda absSinT,x           ; x-face: u is the y coordinate
-        sta fr
-        jsr sideMul
-        ldx rang
-        lda posYT,x
-        bne muYp
-        sec                     ; ray heading -y: u = py - d*|sin|
-        lda py
-        sbc s1
-        sta uwL
-        lda py+1
-        sbc s2
-        jmp muSto
-muYp:   clc
-        lda py
-        adc s1
-        sta uwL
-        lda py+1
-        adc s2
-        jmp muSto
-muY:    lda absCosT,x           ; y-face: u is the x coordinate
-        sta fr
-        jsr sideMul
-        ldx rang
-        lda posXT,x
-        bne muXp
-        sec
-        lda px
-        sbc s1
-        sta uwL
-        lda px+1
-        sbc s2
-        jmp muSto
-muXp:   clc
-        lda px
-        adc s1
-        sta uwL
-        lda px+1
-        adc s2
-muSto:  ldx col
-        sta uHiT,x
-        lda uwL
-        sta uLoT,x` : ''}
+        sta remHiT,x` : ''}
         rts
 
 ; ===== interpolate colH linearly across a same-face span [spanL,spanR] (Bresenham) =====
