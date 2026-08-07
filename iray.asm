@@ -93,6 +93,8 @@ joyEor  = $68
 ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
+ecode   = $1b                   ; the edge cell's char code, parked while the store
+                                ;   stub's address is looked up
 colc    = $75                   ; cell column, parked while the chains own X
 rbv     = $76                   ; first cell row that is not fully ceiling
 rsv     = $77                   ; first cell row that is fully wall
@@ -429,26 +431,62 @@ prepCells:
         lda #$00
         sta cellc
         sta zpc                 ; zpc = 4*cellc, the logical column
+        ; Four columns, unrolled. The rolled version spent dey/bne and an inx on each of
+        ; 160 iterations to walk four adjacent bytes -- 26 cycles a cell column, ~1000 a
+        ; frame, to index something the addressing mode can reach with a constant offset.
 pcLp:   ldx zpc
-        ldy #$04
         lda #$ff
         sta tmp                 ; running min
         lda #$00
         sta tmp2                ; running max
-pcIn:   lda colH,x
+        lda colH+0,x
         cmp #101
-        bcc pcNc
+        bcc pcNc0
         lda #100                ; cap: heights above the screen never affect the pattern
-pcNc:   sta capH,x
+pcNc0: sta capH+0,x
         cmp tmp
-        bcs pcNmn
+        bcs pcNmn0
         sta tmp
-pcNmn:  cmp tmp2
-        bcc pcNmx
+pcNmn0: cmp tmp2
+        bcc pcNmx0
         sta tmp2
-pcNmx:  inx
-        dey
-        bne pcIn
+pcNmx0:
+        lda colH+1,x
+        cmp #101
+        bcc pcNc1
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc1: sta capH+1,x
+        cmp tmp
+        bcs pcNmn1
+        sta tmp
+pcNmn1: cmp tmp2
+        bcc pcNmx1
+        sta tmp2
+pcNmx1:
+        lda colH+2,x
+        cmp #101
+        bcc pcNc2
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc2: sta capH+2,x
+        cmp tmp
+        bcs pcNmn2
+        sta tmp
+pcNmn2: cmp tmp2
+        bcc pcNmx2
+        sta tmp2
+pcNmx2:
+        lda colH+3,x
+        cmp #101
+        bcc pcNc3
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc3: sta capH+3,x
+        cmp tmp
+        bcs pcNmn3
+        sta tmp
+pcNmn3: cmp tmp2
+        bcc pcNmx3
+        sta tmp2
+pcNmx3:
         ldx cellc
         lda tmp
         sta cmnT,x
@@ -532,8 +570,8 @@ rfEdgeL:lda erow
         clc
         adc kr
         tay
-        lda clampT,y
-        sta hh0                 ; left level  (0..12)
+        lda clmp16,y
+        sta hh0                 ; left level, already shifted into the high nibble
         lda capH+3,x
         clc
         adc kr
@@ -544,16 +582,17 @@ rfEdgeL:lda erow
         lda cstepT,x
         bne rfStep
         lda hh0                 ; single face: ramp, index = wL*16 + wR
-        asl
-        asl
-        asl
-        asl
-        ora hh1
+        ora hh1                 ; hh0 is already <<4, straight from clmp16
         tay
         lda rampT,y
-        jmp rfStore
+        jmp rfStore             ; (the ramp is the common case; see rfStore below)
 rfStep: pha                     ; face boundary -> a genuinely vertical step at that column
-        ldx hh0
+        lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
+        lsr
+        lsr
+        lsr
+        lsr
+        tax
         lda qIdxT,x
         asl
         asl
@@ -572,32 +611,22 @@ rfStep: pha                     ; face boundary -> a genuinely vertical step at 
 rfSt2:  lda stepT2,y
         jmp rfStore
 rfSt3:  lda stepT3,y
-rfStore:pha
-        ldy erow                ; this row, and its mirror 24-erow
-        lda rowLoT,y
+        ; Store it at this row and its mirror. This used to hand-build two 16-bit pointers
+        ; -- rowLoT/rowHiT + colc with the carry, twice -- and store through them: 85 cycles
+        ; to write two bytes. The stub has both addresses baked in and takes the column from
+        ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
+rfStore:sta ecode
+        lda erow
         clc
-        adc colc
-        sta jv
-        lda rowHiT,y
-        adc baseHi
-        sta jv+1
-        lda #24
-        sec
-        sbc erow
+        adc bufOff
         tay
-        lda rowLoT,y
-        clc
-        adc colc
-        sta ep2
-        lda rowHiT,y
-        adc baseHi
-        sta ep2+1
-        pla
-        ldy #$00
-        sta (jv),y
-        sta (ep2),y
-        inc erow
-        jmp rfEdgeL
+        lda edgLoT,y
+        sta jv
+        lda edgHiT,y
+        sta jv+1
+        ldx colc
+        lda ecode
+        jmp (jv)                ; -> edA<row>/edB<row> -> inc erow -> jmp rfEdgeL
         ; ---- solid run: rows rs .. 12 ----
 rfSolid:lda rsv
         cmp #13
@@ -1934,6 +1963,8 @@ blkLoT: !byte 0,<bkA0,<bkA1,<bkA2,<bkA3,<bkA4,<bkA5,<bkA6,<bkA7,<bkA8,<bkA9,<bkA
 blkHiT: !byte 0,>bkA0,>bkA1,>bkA2,>bkA3,>bkA4,>bkA5,>bkA6,>bkA7,>bkA8,>bkA9,>bkA10,>bkA11,>bkA12,0,>bkB0,>bkB1,>bkB2,>bkB3,>bkB4,>bkB5,>bkB6,>bkB7,>bkB8,>bkB9,>bkB10,>bkB11,>bkB12
 sldLoT: !byte <slA0,<slA1,<slA2,<slA3,<slA4,<slA5,<slA6,<slA7,<slA8,<slA9,<slA10,<slA11,<slA12,0,<slB0,<slB1,<slB2,<slB3,<slB4,<slB5,<slB6,<slB7,<slB8,<slB9,<slB10,<slB11,<slB12,0
 sldHiT: !byte >slA0,>slA1,>slA2,>slA3,>slA4,>slA5,>slA6,>slA7,>slA8,>slA9,>slA10,>slA11,>slA12,0,>slB0,>slB1,>slB2,>slB3,>slB4,>slB5,>slB6,>slB7,>slB8,>slB9,>slB10,>slB11,>slB12,0
+edgLoT: !byte <edA0,<edA1,<edA2,<edA3,<edA4,<edA5,<edA6,<edA7,<edA8,<edA9,<edA10,<edA11,<edA12,0,<edB0,<edB1,<edB2,<edB3,<edB4,<edB5,<edB6,<edB7,<edB8,<edB9,<edB10,<edB11,<edB12,0
+edgHiT: !byte >edA0,>edA1,>edA2,>edA3,>edA4,>edA5,>edA6,>edA7,>edA8,>edA9,>edA10,>edA11,>edA12,0,>edB0,>edB1,>edB2,>edB3,>edB4,>edB5,>edB6,>edB7,>edB8,>edB9,>edB10,>edB11,>edB12,0
 t1TabT: !byte 100,92,84,76,68,60,52,44,36,28,20,12,4
 tbTabT: !byte 93,85,77,69,61,53,45,37,29,21,13,5,0
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
@@ -2178,6 +2209,17 @@ clampT: !byte 2,3,4,5,6,7,8,9,10,11,12,12,12,12,12,12,12,12,12,12,12,12,12,12
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+clmp16: !byte 32,48,64,80,96,112,128,144,160,176,192,192,192,192,192,192,192,192,192,192,192,192,192,192
+        !byte 192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192
+        !byte 192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192
+        !byte 192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192
+        !byte 192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192
+        !byte 192,192,192,192,192,192,192,192,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16
 qIdxT:  !byte 0,0,0,1,1,2,2,3,3,4,5,5,5
 rampT:  !byte 0,0,0,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,2,3,12,13,14
         !byte 15,16,10,11,17,0,0,0,0,0,0,18,19,20,21,22,23,24,25,17,26,0,0,0
@@ -2298,8 +2340,110 @@ slB11:	sta $25b8,x
 	sta $2608,x
 slB12:	sta $25e0,x
 	jmp rfNext
+edA0:	sta $0400,x
+	sta $07c0,x
+	inc erow
+	jmp rfEdgeL
+edA1:	sta $0428,x
+	sta $0798,x
+	inc erow
+	jmp rfEdgeL
+edA2:	sta $0450,x
+	sta $0770,x
+	inc erow
+	jmp rfEdgeL
+edA3:	sta $0478,x
+	sta $0748,x
+	inc erow
+	jmp rfEdgeL
+edA4:	sta $04a0,x
+	sta $0720,x
+	inc erow
+	jmp rfEdgeL
+edA5:	sta $04c8,x
+	sta $06f8,x
+	inc erow
+	jmp rfEdgeL
+edA6:	sta $04f0,x
+	sta $06d0,x
+	inc erow
+	jmp rfEdgeL
+edA7:	sta $0518,x
+	sta $06a8,x
+	inc erow
+	jmp rfEdgeL
+edA8:	sta $0540,x
+	sta $0680,x
+	inc erow
+	jmp rfEdgeL
+edA9:	sta $0568,x
+	sta $0658,x
+	inc erow
+	jmp rfEdgeL
+edA10:	sta $0590,x
+	sta $0630,x
+	inc erow
+	jmp rfEdgeL
+edA11:	sta $05b8,x
+	sta $0608,x
+	inc erow
+	jmp rfEdgeL
+edA12:	sta $05e0,x
+	inc erow
+	jmp rfEdgeL
+edB0:	sta $2400,x
+	sta $27c0,x
+	inc erow
+	jmp rfEdgeL
+edB1:	sta $2428,x
+	sta $2798,x
+	inc erow
+	jmp rfEdgeL
+edB2:	sta $2450,x
+	sta $2770,x
+	inc erow
+	jmp rfEdgeL
+edB3:	sta $2478,x
+	sta $2748,x
+	inc erow
+	jmp rfEdgeL
+edB4:	sta $24a0,x
+	sta $2720,x
+	inc erow
+	jmp rfEdgeL
+edB5:	sta $24c8,x
+	sta $26f8,x
+	inc erow
+	jmp rfEdgeL
+edB6:	sta $24f0,x
+	sta $26d0,x
+	inc erow
+	jmp rfEdgeL
+edB7:	sta $2518,x
+	sta $26a8,x
+	inc erow
+	jmp rfEdgeL
+edB8:	sta $2540,x
+	sta $2680,x
+	inc erow
+	jmp rfEdgeL
+edB9:	sta $2568,x
+	sta $2658,x
+	inc erow
+	jmp rfEdgeL
+edB10:	sta $2590,x
+	sta $2630,x
+	inc erow
+	jmp rfEdgeL
+edB11:	sta $25b8,x
+	sta $2608,x
+	inc erow
+	jmp rfEdgeL
+edB12:	sta $25e0,x
+	inc erow
+	jmp rfEdgeL
 chainEnd:
-        * = $4800
+        * = $4a00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108
         !byte 104,101,98,95,93,90,88,86,83,81,79,78,76,74,73,71,70,68,67,65,64,63,62,61,60,59,58,57,56,55,54,53
         !byte 52,51,51,50,49,48,48,47,46,46,45,44,44,43,43,42,42,41,41,40,40,39,39,38,38,37,37,37,36,36,36,35

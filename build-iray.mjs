@@ -217,6 +217,16 @@ const chainSrc = (nm, base, rows, tail) => rows.map(r => {
   return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`);
 }).join('\n') + `\n\tjmp ${tail}`;
 const ROWSD = [...Array(13)].map((_, i) => 12 - i), ROWSA = [...Array(13)].map((_, i) => i);
+// One stub per cell row: store the edge char at that row AND its mirror, step the row, and
+// go back round. The run chains get their address for free from "sta abs,x" -- row baked
+// into the operand, X supplying the column -- while the edge path used to hand-build two
+// 16-bit pointers to write the same two bytes, 42 cycles a character against 5. These give
+// the edge cell the same deal.
+const edgeSrc = (nm, base) => ROWSA.map(r => {
+  const a = base + r * 40, b = base + (24 - r) * 40;
+  return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`) +
+         `\n\tinc erow\n\tjmp rfEdgeL`;
+}).join('\n');
 // rbT[maxHeight] = first cell row that is not fully ceiling; rsT[minHeight] = first row
 // that is fully wall. Derived from fill = h + 8R - 92, so they replace a per-cell test
 // with one table lookup per column.
@@ -225,10 +235,15 @@ const rsT = [...Array(256)].map((_, cmn) => cmn >= 100 ? 0 : Math.ceil((100 - cm
 // entry tables: blk indexed by rb (target row rb-1), sld indexed by rs (target row rs)
 const blkEnt = sel => ['0', ...ROWSA.map(r => `${sel}bkA${r}`)].concat(['0', ...ROWSA.map(r => `${sel}bkB${r}`)]).join(',');
 const sldEnt = sel => [...ROWSA.map(r => `${sel}slA${r}`), '0'].concat([...ROWSA.map(r => `${sel}slB${r}`), '0']).join(',');
+const edgEnt = sel => [...ROWSA.map(r => `${sel}edA${r}`), '0'].concat([...ROWSA.map(r => `${sel}edB${r}`), '0']).join(',');
 // clampT[(h + K) as signed byte] -> level 0..12. K = 8R-92 is negative for every row above
 // the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
 const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
   return Math.max(CLO, Math.min(CHI, v)) - CLO; });
+// Same table with the value pre-shifted into the high nibble. rampT is indexed by
+// wL*16 + wR, and the left level was being shifted left four times right after clampT
+// handed it over -- 8 cycles per edge cell to undo a table lookup's own output.
+const clampT16 = clampT.map(v => v << 4);
 const BLANK = codeOf.get('0,0,0,0'), SOLID = codeOf.get('8,8,8,8');
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
 const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255);
@@ -326,7 +341,8 @@ for (let a = 0; a < 256; a++) {
 const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
 for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
   recipLo.push(v & 255); recipHi.push(v >> 8); }
-const HTABLE = 0x4800;                  // page-aligned: 16 height tables x 3 pages
+const HTABLE = 0x4a00;                  // page-aligned: 16 height tables x 3 pages
+                                        // (was $4800; the edge stubs and clmp16 grew the data)
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
 const vm = scr => (scr >> 10) << 4;
 const cb = cs => (cs >> 11) << 1;
@@ -433,6 +449,8 @@ joyEor  = $68
 ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
+ecode   = $1b                   ; the edge cell's char code, parked while the store
+                                ;   stub's address is looked up
 colc    = $75                   ; cell column, parked while the chains own X
 rbv     = $76                   ; first cell row that is not fully ceiling
 rsv     = $77                   ; first cell row that is fully wall
@@ -779,26 +797,62 @@ prepCells:
         lda #$00
         sta cellc
         sta zpc                 ; zpc = 4*cellc, the logical column
+        ; Four columns, unrolled. The rolled version spent dey/bne and an inx on each of
+        ; 160 iterations to walk four adjacent bytes -- 26 cycles a cell column, ~1000 a
+        ; frame, to index something the addressing mode can reach with a constant offset.
 pcLp:   ldx zpc
-        ldy #$04
         lda #$ff
         sta tmp                 ; running min
         lda #$00
         sta tmp2                ; running max
-pcIn:   lda colH,x
+        lda colH+0,x
         cmp #101
-        bcc pcNc
+        bcc pcNc0
         lda #100                ; cap: heights above the screen never affect the pattern
-pcNc:   sta capH,x
+pcNc0: sta capH+0,x
         cmp tmp
-        bcs pcNmn
+        bcs pcNmn0
         sta tmp
-pcNmn:  cmp tmp2
-        bcc pcNmx
+pcNmn0: cmp tmp2
+        bcc pcNmx0
         sta tmp2
-pcNmx:  inx
-        dey
-        bne pcIn
+pcNmx0:
+        lda colH+1,x
+        cmp #101
+        bcc pcNc1
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc1: sta capH+1,x
+        cmp tmp
+        bcs pcNmn1
+        sta tmp
+pcNmn1: cmp tmp2
+        bcc pcNmx1
+        sta tmp2
+pcNmx1:
+        lda colH+2,x
+        cmp #101
+        bcc pcNc2
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc2: sta capH+2,x
+        cmp tmp
+        bcs pcNmn2
+        sta tmp
+pcNmn2: cmp tmp2
+        bcc pcNmx2
+        sta tmp2
+pcNmx2:
+        lda colH+3,x
+        cmp #101
+        bcc pcNc3
+        lda #100                ; cap: heights above the screen never affect the pattern
+pcNc3: sta capH+3,x
+        cmp tmp
+        bcs pcNmn3
+        sta tmp
+pcNmn3: cmp tmp2
+        bcc pcNmx3
+        sta tmp2
+pcNmx3:
         ldx cellc
         lda tmp
         sta cmnT,x
@@ -882,8 +936,8 @@ rfEdgeL:lda erow
         clc
         adc kr
         tay
-        lda clampT,y
-        sta hh0                 ; left level  (0..12)
+        lda clmp16,y
+        sta hh0                 ; left level, already shifted into the high nibble
         lda capH+3,x
         clc
         adc kr
@@ -894,16 +948,17 @@ rfEdgeL:lda erow
         lda cstepT,x
         bne rfStep
         lda hh0                 ; single face: ramp, index = wL*16 + wR
-        asl
-        asl
-        asl
-        asl
-        ora hh1
+        ora hh1                 ; hh0 is already <<4, straight from clmp16
         tay
         lda rampT,y
-        jmp rfStore
+        jmp rfStore             ; (the ramp is the common case; see rfStore below)
 rfStep: pha                     ; face boundary -> a genuinely vertical step at that column
-        ldx hh0
+        lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
+        lsr
+        lsr
+        lsr
+        lsr
+        tax
         lda qIdxT,x
         asl
         asl
@@ -922,32 +977,22 @@ rfStep: pha                     ; face boundary -> a genuinely vertical step at 
 rfSt2:  lda stepT2,y
         jmp rfStore
 rfSt3:  lda stepT3,y
-rfStore:pha
-        ldy erow                ; this row, and its mirror 24-erow
-        lda rowLoT,y
+        ; Store it at this row and its mirror. This used to hand-build two 16-bit pointers
+        ; -- rowLoT/rowHiT + colc with the carry, twice -- and store through them: 85 cycles
+        ; to write two bytes. The stub has both addresses baked in and takes the column from
+        ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
+rfStore:sta ecode
+        lda erow
         clc
-        adc colc
-        sta jv
-        lda rowHiT,y
-        adc baseHi
-        sta jv+1
-        lda #24
-        sec
-        sbc erow
+        adc bufOff
         tay
-        lda rowLoT,y
-        clc
-        adc colc
-        sta ep2
-        lda rowHiT,y
-        adc baseHi
-        sta ep2+1
-        pla
-        ldy #$00
-        sta (jv),y
-        sta (ep2),y
-        inc erow
-        jmp rfEdgeL
+        lda edgLoT,y
+        sta jv
+        lda edgHiT,y
+        sta jv+1
+        ldx colc
+        lda ecode
+        jmp (jv)                ; -> edA<row>/edB<row> -> inc erow -> jmp rfEdgeL
         ; ---- solid run: rows rs .. 12 ----
 rfSolid:lda rsv
         cmp #13
@@ -2322,6 +2367,8 @@ blkLoT: !byte ${blkEnt('<')}
 blkHiT: !byte ${blkEnt('>')}
 sldLoT: !byte ${sldEnt('<')}
 sldHiT: !byte ${sldEnt('>')}
+edgLoT: !byte ${edgEnt('<')}
+edgHiT: !byte ${edgEnt('>')}
 t1TabT: !byte ${t1Tab.join(',')}
 tbTabT: !byte ${tbTab.join(',')}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
@@ -2350,6 +2397,7 @@ absSinT: ${chunk(absSin).trim()}
 recipLoT: ${chunk(recipLo).trim()}
 recipHiT: ${chunk(recipHi).trim()}
 ` : ''}clampT: ${chunk(clampT).trim()}
+clmp16: ${chunk(clampT16).trim()}
 qIdxT:  !byte ${qIdxT.join(',')}
 rampT:  ${chunk(rampT).trim()}
 stepT1: ${chunk(stepT[0]).trim()}
@@ -2359,6 +2407,8 @@ ${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
 ${chainSrc('bkB', SCR_B, ROWSD, 'rfEdge')}
 ${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
 ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
+${edgeSrc('edA', SCR_A)}
+${edgeSrc('edB', SCR_B)}
 chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
