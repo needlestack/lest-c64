@@ -1,0 +1,12 @@
+# Build output. `node build-iray.mjs` regenerates all of this in under a second.
+#
+# iray.asm is deliberately NOT ignored: the build script emits assembly, so diffing the
+# generated .asm between commits is how we see what a JS change actually did to the
+# machine code and to the memory map. Both bugs found so far were address-layout bugs
+# invisible in the JS diff, so that churn earns its keep. The disk image and the raw
+# binary are opaque and change every build, so they stay out.
+*.d64
+iray.prg
+
+# Local-only agent/editor settings (settings.json is shared and IS tracked)
+.claude/settings.local.json

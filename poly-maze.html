@@ -1,0 +1,332 @@
+<title>Polygon Maze — C64 vector renderer</title>
+<style>
+  :root {
+    --bg: #0d0d12;
+    --panel: #14141d;
+    --edge: #26263a;
+    --ink: #d8d8e8;
+    --dim: #7a7a95;
+    --accent: #8b7cf0;
+    --accent-dim: #6c5ce7;
+    --screen-w: 480px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #1a1a2b 0%, var(--bg) 60%);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px 56px;
+    gap: 22px;
+  }
+  header { text-align: center; max-width: 560px; }
+  h1 {
+    margin: 0;
+    font-size: 13px;
+    letter-spacing: 0.42em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .sub {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--dim);
+  }
+  .sub b { color: var(--ink); font-weight: 600; }
+
+  .stage {
+    position: relative;
+    width: var(--screen-w);
+    max-width: 92vw;
+  }
+  .bezel {
+    padding: 14px;
+    background: linear-gradient(180deg, #1b1b28, #101019);
+    border: 1px solid var(--edge);
+    border-radius: 14px;
+    box-shadow: 0 24px 60px -24px #000, inset 0 1px 0 #ffffff10;
+  }
+  #screen {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    image-rendering: pixelated;
+    background: #e8e8ee;
+    border-radius: 4px;
+  }
+  #map {
+    position: absolute;
+    top: 26px;
+    right: 26px;
+    width: 96px;
+    height: 96px;
+    image-rendering: pixelated;
+    border: 1px solid #ffffff30;
+    border-radius: 3px;
+    opacity: 0.9;
+    box-shadow: 0 6px 18px -6px #000;
+  }
+
+  .hud {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    width: var(--screen-w);
+    max-width: 92vw;
+    background: var(--edge);
+    border: 1px solid var(--edge);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .cell { background: var(--panel); padding: 10px 12px; }
+  .cell .k { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+  .cell .v { font-size: 20px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .cell .v small { font-size: 11px; color: var(--dim); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    justify-content: center;
+    width: var(--screen-w);
+    max-width: 92vw;
+  }
+  .key {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--dim);
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 7px;
+    padding: 6px 9px;
+  }
+  .key kbd {
+    font-family: inherit;
+    font-size: 11px;
+    color: var(--ink);
+    background: #23233a;
+    border: 1px solid #3a3a58;
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 1px 6px;
+    min-width: 18px;
+    text-align: center;
+  }
+  .note {
+    max-width: 560px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--dim);
+    text-align: center;
+  }
+  .note b { color: var(--accent); font-weight: 600; }
+  .tap { display: none; }
+  @media (hover: none) and (pointer: coarse) {
+    .tap {
+      display: grid;
+      grid-template-columns: repeat(3, 56px);
+      grid-auto-rows: 56px;
+      gap: 8px;
+      justify-content: center;
+    }
+    .tap button {
+      font: inherit; color: var(--ink);
+      background: var(--panel); border: 1px solid var(--edge);
+      border-radius: 10px; font-size: 20px;
+      -webkit-user-select: none; user-select: none; touch-action: none;
+    }
+    .tap button:active { background: var(--accent-dim); }
+    .tap .sp { visibility: hidden; }
+  }
+</style>
+
+<header>
+  <h1>Polygon Maze</h1>
+  <p class="sub"><b>Wayout-style vector renderer.</b> The walls are projected as filled trapezoids — no ray marching. This is the JS reference for the C64 6502 build.</p>
+</header>
+
+<div class="stage">
+  <div class="bezel">
+    <canvas id="screen" width="80" height="80"></canvas>
+  </div>
+  <canvas id="map" width="48" height="48"></canvas>
+</div>
+
+<div class="hud">
+  <div class="cell"><div class="k">Frame rate</div><div class="v"><span id="fps">—</span> <small>fps</small></div></div>
+  <div class="cell"><div class="k">Faces drawn</div><div class="v"><span id="faces">—</span> <small>/ <span id="tot">—</span></small></div></div>
+  <div class="cell"><div class="k">Heading</div><div class="v"><span id="head">—</span><small>°</small></div></div>
+</div>
+
+<div class="legend">
+  <span class="key"><kbd>E</kbd> forward</span>
+  <span class="key"><kbd>D</kbd> back</span>
+  <span class="key"><kbd>S</kbd> strafe ◄</span>
+  <span class="key"><kbd>F</kbd> strafe ►</span>
+  <span class="key"><kbd>◄</kbd><kbd>►</kbd> turn</span>
+</div>
+
+<div class="tap" id="tap">
+  <button class="sp"></button><button data-k="e">▲</button><button class="sp"></button>
+  <button data-k="ArrowLeft">↺</button><button data-k="d">▼</button><button data-k="ArrowRight">↻</button>
+  <button data-k="s">◄</button><button class="sp"></button><button data-k="f">►</button>
+</div>
+
+<p class="note">Cost scales with the <b>number of visible walls</b>, not screen width × march distance — which is why open rooms stay cheap here where the raycaster crawled. This is the exact pipeline we port to 6502: transform → back-face cull → near-clip → perspective divide → painter's sort → trapezoid fill.</p>
+
+<script>
+(() => {
+  const MAP = [
+    "1111111111111111","1000000100000001","1000000100000001","1000000100011101",
+    "1011100000010001","1010000110010111","1010111100010001","1010100000000101",
+    "1010101111100101","1000101000000101","1110101011110001","1000001010000001",
+    "1011111010111111","1000000000100001","1000110000000001","1111111111111111",
+  ].map(r => r.split('').map(Number));
+  const wall = (x, y) => (x < 0 || y < 0 || x > 15 || y > 15) ? 1 : MAP[y][x];
+
+  // Wall faces bordering empty cells: [x0,y0,x1,y1, nx,ny] (n = outward normal)
+  const faces = [];
+  for (let cy = 0; cy < 16; cy++) for (let cx = 0; cx < 16; cx++) {
+    if (!wall(cx, cy)) continue;
+    if (!wall(cx, cy - 1)) faces.push([cx, cy, cx + 1, cy, 0, -1]);
+    if (!wall(cx, cy + 1)) faces.push([cx, cy + 1, cx + 1, cy + 1, 0, 1]);
+    if (!wall(cx - 1, cy)) faces.push([cx, cy, cx, cy + 1, -1, 0]);
+    if (!wall(cx + 1, cy)) faces.push([cx + 1, cy, cx + 1, cy + 1, 1, 0]);
+  }
+
+  const WIN = 80, CENTER = 40, PROJX = 61.5, PROJH = 70, MIND = 0.05;
+  const scr = document.getElementById('screen');
+  const sctx = scr.getContext('2d');
+  const img = sctx.createImageData(WIN, WIN);
+  const mini = document.getElementById('map');
+  const mctx = mini.getContext('2d');
+
+  // camera
+  let px = 2.5, py = 2.5, pa = 0;
+
+  const WALL = [16, 16, 22], FLOOR = [232, 232, 238], BORDER = [244, 244, 250];
+  function render() {
+    const cosA = Math.cos(pa), sinA = Math.sin(pa);
+    const buf = new Uint8Array(WIN * WIN); // 0 floor/ceil, 1 wall
+    const draws = [];
+    for (const [x0, y0, x1, y1, nx, ny] of faces) {
+      const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      if ((px - mx) * nx + (py - my) * ny <= 0) continue;   // back-face cull
+      let ax = x0 - px, ay = y0 - py, bx = x1 - px, by = y1 - py;
+      let ad = ax * cosA + ay * sinA, al = ay * cosA - ax * sinA;
+      let bd = bx * cosA + by * sinA, bl = by * cosA - bx * sinA;
+      if (ad <= MIND && bd <= MIND) continue;               // fully behind
+      if (ad <= MIND) { const t = (MIND - ad) / (bd - ad); al += (bl - al) * t; ad = MIND; }
+      if (bd <= MIND) { const t = (MIND - bd) / (ad - bd); bl += (al - bl) * t; bd = MIND; }
+      let Lx = CENTER + al * PROJX / ad, Lh = 0.5 * PROJH / ad;
+      let Rx = CENTER + bl * PROJX / bd, Rh = 0.5 * PROJH / bd;
+      if (Lx > Rx) { [Lx, Rx] = [Rx, Lx]; [Lh, Rh] = [Rh, Lh]; }
+      if (Rx < 0 || Lx > WIN - 1) continue;                 // off-screen
+      draws.push({ Lx, Rx, Lh, Rh, depth: Math.min(ad, bd) });
+    }
+    draws.sort((p, q) => q.depth - p.depth);                // painter's, far first
+
+    for (const d of draws) {
+      const x0 = Math.max(0, Math.ceil(d.Lx)), x1 = Math.min(WIN - 1, Math.floor(d.Rx));
+      const span = d.Rx - d.Lx || 1;
+      const eL = Math.round(d.Lx), eR = Math.round(d.Rx);   // white divider columns
+      for (let x = x0; x <= x1; x++) {
+        const t = (x - d.Lx) / span;
+        const half = d.Lh + (d.Rh - d.Lh) * t;
+        let top = Math.round(CENTER - half), bot = Math.round(CENTER + half);
+        if (top < 0) top = 0; if (bot > WIN - 1) bot = WIN - 1;
+        const v = (x === eL || x === eR) ? 2 : 1;           // 2 = edge seam
+        for (let y = top; y <= bot; y++) buf[y * WIN + x] = v;
+      }
+    }
+
+    const px32 = img.data;
+    for (let i = 0; i < WIN * WIN; i++) {
+      const c = buf[i] === 2 ? BORDER : buf[i] ? WALL : FLOOR, o = i * 4;
+      px32[o] = c[0]; px32[o + 1] = c[1]; px32[o + 2] = c[2]; px32[o + 3] = 255;
+    }
+    sctx.putImageData(img, 0, 0);
+    drawMini();
+    document.getElementById('faces').textContent = draws.length;
+    return draws.length;
+  }
+
+  function drawMini() {
+    const s = 3;
+    mctx.fillStyle = '#0d0d12'; mctx.fillRect(0, 0, 48, 48);
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      if (wall(x, y)) { mctx.fillStyle = '#3a3a58'; mctx.fillRect(x * s, y * s, s, s); }
+    }
+    mctx.fillStyle = '#8b7cf0';
+    mctx.fillRect(px * s - 1, py * s - 1, 3, 3);
+    mctx.strokeStyle = '#8b7cf0'; mctx.lineWidth = 1; mctx.beginPath();
+    mctx.moveTo(px * s, py * s);
+    mctx.lineTo(px * s + Math.cos(pa) * 6, py * s + Math.sin(pa) * 6);
+    mctx.stroke();
+  }
+
+  document.getElementById('tot').textContent = faces.length;
+
+  // --- input ---
+  const keys = {};
+  const track = ['e', 'd', 's', 'f', 'arrowleft', 'arrowright'];
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (track.includes(k)) { keys[k] = true; e.preventDefault(); }
+  });
+  addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+  // touch buttons
+  document.querySelectorAll('#tap button[data-k]').forEach(b => {
+    const k = b.dataset.k.toLowerCase();
+    const on = e => { e.preventDefault(); keys[k] = true; };
+    const off = e => { e.preventDefault(); keys[k] = false; };
+    b.addEventListener('pointerdown', on); b.addEventListener('pointerup', off);
+    b.addEventListener('pointerleave', off); b.addEventListener('pointercancel', off);
+  });
+
+  function tryMove(nx, ny) {
+    const r = 0.22;
+    if (!wall(Math.floor(nx + Math.sign(nx - px) * r), Math.floor(py))) px = nx;
+    if (!wall(Math.floor(px), Math.floor(ny + Math.sign(ny - py) * r))) py = ny;
+  }
+
+  // --- loop ---
+  let last = performance.now(), fpsAcc = 0, fpsN = 0, fpsT = 0;
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.1) dt = 0.1;
+    const MOVE = 2.6 * dt, TURN = 2.4 * dt;
+    if (keys['arrowleft']) pa -= TURN;
+    if (keys['arrowright']) pa += TURN;
+    const c = Math.cos(pa), s = Math.sin(pa);
+    let nx = px, ny = py;
+    if (keys['e']) { nx += c * MOVE; ny += s * MOVE; }
+    if (keys['d']) { nx -= c * MOVE; ny -= s * MOVE; }
+    if (keys['s']) { nx += s * MOVE; ny -= c * MOVE; }
+    if (keys['f']) { nx -= s * MOVE; ny += c * MOVE; }
+    if (nx !== px || ny !== py) tryMove(nx, ny);
+
+    render();
+
+    fpsAcc += dt; fpsN++; fpsT += now;
+    if (fpsAcc >= 0.25) {
+      document.getElementById('fps').textContent = Math.round(fpsN / fpsAcc);
+      fpsAcc = 0; fpsN = 0;
+    }
+    let deg = Math.round(pa * 180 / Math.PI) % 360; if (deg < 0) deg += 360;
+    document.getElementById('head').textContent = deg;
+    requestAnimationFrame(frame);
+  }
+  render();
+  requestAnimationFrame(frame);
+})();
+</script>
