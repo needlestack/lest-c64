@@ -102,6 +102,7 @@ erow    = $78                   ; current row inside the edge run
 jv      = $79                   ; 2 bytes: chain entry vector, then the edge store pointer
 ep2     = $7b                   ; 2 bytes: mirrored-row store pointer
 bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer being drawn
+cell0   = $13                   ; the player's own cell index, constant for the frame
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
@@ -263,6 +264,14 @@ csClr:  sta cstepT,x
 smClr:  sta seamT,x
         dex
         bpl smClr
+        lda py+1                ; the DDA's starting cell, once for the whole frame
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc px+1
+        sta cell0
         lda #$00                ; explicit: the clears above leave A holding their own fill
         sta col
         jsr marchCol            ; column 0
@@ -1402,14 +1411,9 @@ castRay:
         sta ddy
         lda ddyHiT,x
         sta ddyH
-        lda py+1                ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc px+1
-        sta cell
+        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
+        sta cell                ; The value is the player's cell, so it is the same for every
+                                ; ray in the frame -- computed once in mloop, not 11 times.
         ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
         ; (standard form: full cell at frac=0, avoids the fr=256->0 wrap spike)
         lda px
@@ -1470,7 +1474,18 @@ cypos:  lda #$01
         lda ddyH
         sbc s2
         sta sdyH
+        ; Two things the old loop did on EVERY step that are only needed once, on the step
+        ; that hits: it wrote "side" (5 cycles a step, read once after the loop), and it
+        ; round-tripped the cell index through memory -- "lda cell / adc / sta cell",
+        ; then "ldx cell" to index mapT. The index lives in X for the whole march now,
+        ; and each direction has its own tail, so "side" is a constant on the hit path
+        ; and the "which side did we come from" test after the loop goes away too.
+        ;
+        ; No bounds check: the map border is solid on all four sides (asserted at build
+        ; time), so a ray always hits a wall before it can step outside the grid. That also
+        ; makes the +-1 cell stepping safe -- mapX never runs off the end of a row.
 cydone: ldy #24
+        ldx cell
 cdda:   lda sdxH
         cmp sdyH
         bcc cstepX
@@ -1486,13 +1501,15 @@ cstepY: clc
         lda sdyH
         adc ddyH
         sta sdyH
-        lda cell
+        txa
         clc
         adc stpY16
-        sta cell
-        lda #$01
-        sta side
-        jmp chit
+        tax
+        lda mapT,x
+        bne cwallY
+        dey
+        bne cdda
+        jmp cfar
 cstepX: clc
         lda sdx
         adc ddx
@@ -1500,25 +1517,21 @@ cstepX: clc
         lda sdxH
         adc ddxH
         sta sdxH
-        lda cell
+        txa
         clc
         adc stpX
-        sta cell
-        lda #$00
-        sta side
-        ; No bounds check: the map border is solid on all four sides (asserted at build
-        ; time), so a ray always hits a wall before it can step outside the grid. That also
-        ; makes the +-1 cell stepping safe -- mapX never runs off the end of a row.
-chit:   ldx cell
+        tax
         lda mapT,x
-        bne cwall
+        bne cwallX
         dey
         bne cdda
-cfar:   lda #$01                ; step guard expired; unreachable with a solid border
+cfar:   stx cell                ; step guard expired; unreachable with a solid border
+        lda #$01
         sta pp
         rts
-cwall:  lda side
-        bne cperpY
+cwallX: stx cell                ; marchCol reads the cell back for the run-id lookup
+        lda #$00
+        sta side
         sec
         lda sdx
         sbc ddx
@@ -1527,7 +1540,10 @@ cwall:  lda side
         sbc ddxH
         sta remH
         jmp cidx
-cperpY: sec
+cwallY: stx cell
+        lda #$01
+        sta side
+        sec
         lda sdy
         sbc ddy
         sta remL
@@ -1548,25 +1564,12 @@ cidxok: lda remL
         lsr
         lsr
         sta tmp                 ; remL>>3 (0..31)
-        lda remH
-        sta tmp2
-        lda #$00
-        sta ppHi
-        asl tmp2
-        rol ppHi
-        asl tmp2
-        rol ppHi
-        asl tmp2
-        rol ppHi
-        asl tmp2
-        rol ppHi
-        asl tmp2
-        rol ppHi                ; tmp2 = (remH*32) low, ppHi = high bit
-        lda tmp2
-        clc
+        ldx remH                ; remH*32 was five rounds of "asl zp / rol zp" -- 50 cycles
+        clc                     ; to multiply a value the cmp above just bounded under 24.
+        lda m32LoT,x
         adc tmp
         sta ppLo
-        lda ppHi
+        lda m32HiT,x
         adc #$00
         sta ppHi                ; 0..2: which page inside this column's group
         ldx col
@@ -1944,6 +1947,8 @@ rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
 kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
 col4T:  !byte 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156
+m32LoT: !byte 0,32,64,96,128,160,192,224,0,32,64,96,128,160,192,224,0,32,64,96,128,160,192,224
+m32HiT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2
 rbT:    !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
         !byte 9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6
         !byte 6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3
