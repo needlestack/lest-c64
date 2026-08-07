@@ -601,18 +601,23 @@ rsRow:  ldx crc
         sta tbc                 ; h <  tbc  -> cell fully blank
         lda kTabT,x
         sta kr                  ; kr = 8*cr - 92 (signed)
-        lda #$00
-        sta cellc
-        sta zpc                 ; zpc = 4*cellc
-rsCol:  ldx cellc
-        lda cmnT,x
+        ; Y IS the cell column for the whole row: it indexes cmnT/cmxT and doubles as the
+        ; store index, so the loop carries no counter of its own. ~495 of the 520 cells take
+        ; a fast path, so this bookkeeping was most of the fill cost.
+        ldy #39
+rsCol:  lda cmnT,y
         cmp t1c
-        bcs rsSolid             ; min height >= t1 -> every column full
-        lda cmxT,x
+        bcc rsChkB
+        lda #${hx(SOLID)}       ; min height >= t1 -> every column full
+        bne rsPut               ; SOLID is nonzero, so this is unconditional
+rsChkB: lda cmxT,y
         cmp tbc
-        bcc rsBlank             ; max height < tb  -> every column empty
+        bcs rsEdge
+        lda #${hx(BLANK)}       ; max height < tb -> every column empty
+        beq rsPut               ; BLANK is zero, so this is unconditional
         ; ---- edge cell: both end columns -> level, then ramp or exact vertical step ----
-        ldx zpc
+rsEdge: sty cellc               ; the edge path needs both index registers; park the column
+        ldx col4T,y             ; X = 4*column
         lda capH,x
         clc
         adc kr
@@ -636,6 +641,7 @@ rsCol:  ldx cellc
         ora hh1
         tay
         lda rampT,y
+        ldy cellc
         jmp rsPut
         ; face boundary inside the cell -> a genuinely vertical step at that column
 rsStep: pha
@@ -654,25 +660,18 @@ rsStep: pha
         beq rsSt2
         bcs rsSt3
         lda stepT1,y
+        ldy cellc
         jmp rsPut
 rsSt2:  lda stepT2,y
+        ldy cellc
         jmp rsPut
 rsSt3:  lda stepT3,y
+        ldy cellc
         jmp rsPut
-rsSolid:lda #${hx(SOLID)}
-        jmp rsPut
-rsBlank:lda #${hx(BLANK)}
-rsPut:  ldy cellc
-        sta (tpLo),y
+rsPut:  sta (tpLo),y
         sta (btLo),y            ; charset B mirrors it below the horizon
-        lda zpc
-        clc
-        adc #$04
-        sta zpc
-        inc cellc
-        lda cellc
-        cmp #40
-        bcc rsCol
+        dey
+        bpl rsCol
         inc crc
         lda crc
         cmp #13
@@ -1391,6 +1390,7 @@ moveYT: ${chunk(moveY).trim()}
 rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
 kTabT:  !byte ${kTab.join(',')}
+col4T:  !byte ${[...Array(40)].map((_, i) => i * 4).join(',')}
 t1TabT: !byte ${t1Tab.join(',')}
 tbTabT: !byte ${tbTab.join(',')}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
