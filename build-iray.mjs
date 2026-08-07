@@ -486,6 +486,25 @@ subLp:  ldx sp
         lda faceIdT,x
         cmp tmp
         bne subSp               ; different wall FACE -> split
+        ; Heights are linear across a face, which is what makes the merge exact -- but only
+        ; while they FIT. colH is a byte, so anything closer than 88/254 = 0.35 cells
+        ; saturates, and interpolating from a saturated endpoint skews the whole span,
+        ; including the part that is on screen. If exactly one end is saturated, split
+        ; instead; if BOTH are, the span is entirely off-screen-tall and merging is still
+        ; exact (a linear function between two saturated ends never dips below them).
+        ldx spanL
+        lda colH,x
+        cmp #254
+        lda #$00
+        rol                     ; A = 1 if the left end saturated
+        sta tmp2
+        ldx spanR
+        lda colH,x
+        cmp #254
+        lda #$00
+        rol
+        cmp tmp2
+        bne subSp
         jsr interpSpan          ; same face -> merge (interpolate interior)
         jmp subLp
 subSp:  lda spanR
