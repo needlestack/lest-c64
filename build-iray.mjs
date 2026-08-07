@@ -357,6 +357,7 @@ for (let a = 0; a < 256; a++) {
 const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
 for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
   recipLo.push(v & 255); recipHi.push(v >> 8); }
+const RELOC = 0x7a00;                   // CPU-only tables, out of the VIC's 16K window
 const HTABLE = 0x4a00;                  // page-aligned: 16 height tables x 3 pages
                                         // (was $4800; the edge stubs and clmp16 grew the data)
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
@@ -2280,16 +2281,7 @@ ddPut:  clc
         rts
 
 ; ================= data =================
-mapT:   ${chunk(map, 16).trim()}
-rayOffT: !byte ${rayOff.join(',')}
 cosCorrT: !byte ${cosCorr.join(',')}
-ddxLoT: ${chunk(ddxLo).trim()}
-ddxHiT: ${chunk(ddxHi).trim()}
-ddyLoT: ${chunk(ddyLo).trim()}
-ddyHiT: ${chunk(ddyHi).trim()}
-posXT:  ${chunk(posX).trim()}
-posYT:  ${chunk(posY).trim()}
-colGrpT: !byte ${colGrpT.join(',')}
 moveXT: ${chunk(moveX).trim()}
 moveYT: ${chunk(moveY).trim()}
 rowLoT: !byte ${rowLo.join(',')}
@@ -2298,8 +2290,6 @@ kTabT:  !byte ${kTab.join(',')}
 col4T:  !byte ${[...Array(40)].map((_, i) => i * 4).join(',')}
 m32LoT: !byte ${[...Array(24)].map((_, i) => (i * 32) & 255).join(',')}
 m32HiT: !byte ${[...Array(24)].map((_, i) => (i * 32) >> 8).join(',')}
-rbT:    ${chunk(rbT).trim()}
-rsT:    ${chunk(rsT).trim()}
 blkLoT: !byte ${blkEnt('<')}
 blkHiT: !byte ${blkEnt('>')}
 sldLoT: !byte ${sldEnt('<')}
@@ -2314,16 +2304,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         * = charset
 ${chunk(fontA, 32)}
 
-        * = $3000
-f0LoT:  ${chunk(f0Lo).trim()}
-f0HiT:  ${chunk(f0Hi).trim()}
-f1LoT:  ${chunk(f1Lo).trim()}
-f1HiT:  ${chunk(f1Hi).trim()}
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
-runWT: !byte ${runW.join(',')}
-runET: !byte ${runE.join(',')}
-runNT: !byte ${runN.join(',')}
-runST: !byte ${runS.join(',')}
 
         * = charsetB            ; charset A with every glyph's 8 bytes reversed
 ${chunk(fontB, 32)}
@@ -2349,9 +2330,53 @@ ${edgeSrc('edB', SCR_B)}
 chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
-${PROFILE ? `        * = ${hx16(HTABLE + 16 * 3 * 256)}  ; the profiler lives above the height
-                            ; tables: it must not crowd the shipping build out of the 189
-                            ; bytes it has left below screen buffer B
+${PROFILE ? '' : ''}        ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
+        ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
+        ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
+        ; table its own page for free -- an "lda table,x" that crosses a page costs an
+        ; extra cycle, and these are indexed by a full byte.
+        * = ${hx16(RELOC)}
+f0LoT:  ${chunk(f0Lo).trim()}
+        * = ${hx16(RELOC + 0x100)}
+f0HiT:  ${chunk(f0Hi).trim()}
+        * = ${hx16(RELOC + 0x200)}
+f1LoT:  ${chunk(f1Lo).trim()}
+        * = ${hx16(RELOC + 0x300)}
+f1HiT:  ${chunk(f1Hi).trim()}
+        * = ${hx16(RELOC + 0x400)}
+runWT: !byte ${runW.join(',')}
+        * = ${hx16(RELOC + 0x500)}
+runET: !byte ${runE.join(',')}
+        * = ${hx16(RELOC + 0x600)}
+runNT: !byte ${runN.join(',')}
+        * = ${hx16(RELOC + 0x700)}
+runST: !byte ${runS.join(',')}
+        * = ${hx16(RELOC + 0x800)}
+mapT:   ${chunk(map, 16).trim()}
+        * = ${hx16(RELOC + 0x900)}
+rbT:    ${chunk(rbT).trim()}
+        * = ${hx16(RELOC + 0xa00)}
+rsT:    ${chunk(rsT).trim()}
+        * = ${hx16(RELOC + 0xb00)}
+ddxLoT: ${chunk(ddxLo).trim()}
+        * = ${hx16(RELOC + 0xc00)}
+ddxHiT: ${chunk(ddxHi).trim()}
+        * = ${hx16(RELOC + 0xd00)}
+ddyLoT: ${chunk(ddyLo).trim()}
+        * = ${hx16(RELOC + 0xe00)}
+ddyHiT: ${chunk(ddyHi).trim()}
+        * = ${hx16(RELOC + 0xf00)}
+posXT:  ${chunk(posX).trim()}
+        * = ${hx16(RELOC + 0x1000)}
+posYT:  ${chunk(posY).trim()}
+        * = ${hx16(RELOC + 0x1100)}
+rayOffT: !byte ${rayOff.join(',')}
+        * = ${hx16(RELOC + 0x1200)}
+colGrpT: !byte ${colGrpT.join(',')}
+
+${PROFILE ? `        * = ${hx16(RELOC + 0x1300)}  ; the profiler lives above the relocated
+                            ; tables: it must not crowd the shipping build out of the
+                            ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
 ; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
 ; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
@@ -2506,7 +2531,29 @@ try {
   // Say how much room is left below the screen buffer. The data segment has nowhere to
   // grow -- charset A is at $2800 and buffer B sits in the way at $2400 -- so this going
   // quiet is the difference between a build error and a frame-by-frame corruption.
+  // An "lda table,x" indexed by a full byte costs an extra cycle every time the index
+  // crosses a page. These are the ones indexed that way; keeping them page-aligned is free
+  // as long as nobody quietly moves them, so make moving them a build error.
+  const aligned = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
+    runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
+    ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
+    rayOffT: NLOG, colGrpT: NLOG, clampT: 256, clmp16: 256 };
+  for (const [t, n] of Object.entries(aligned)) {
+    const a = r.labels[t];
+    if (a === undefined) continue;
+    if (((a & 255) + n - 1) > 255)
+      throw new Error(`${t} at $${a.toString(16)} spans a page boundary; every indexed read ` +
+        `past $${((a | 255) + 1).toString(16)} costs an extra cycle (page-align it)`);
+  }
+  // What is left in VIC bank 0. Sprite data has to live here, 64 bytes per sprite on a
+  // 64-byte boundary, so this is the number that decides how many sprites are possible.
+  const gaps = [[r.labels.dataEnd, SCR_B], [CHARSET + 0x800, CHARSET_B]]
+    .map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
+  const free = gaps.reduce((a, [lo, hi]) => a + (hi - lo), 0);
   console.log(`headroom below screen buffer B: ${SCR_B - r.labels.dataEnd} bytes`);
+  console.log(`VIC bank 0 free: ${gaps.map(([lo, hi]) =>
+    `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
+    `  = ${free} bytes, ${free >> 6} sprite slots`);
   console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`
     + (DIAG.length ? `\nDIAGNOSTIC BUILD [${DIAG.join(' ')}] -- asm to ${asmPath}, not for fps numbers` : ''));
 } catch (e) { console.error('ASM ERROR:', e.message); process.exit(1); }
