@@ -160,6 +160,7 @@ const patBytes = p => [...Array(8)].map((_, i) =>
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
 for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) intern(rampPat(a, b));
+const STEP0 = glyphs.length;            // where the ramps end and the steps begin
 for (let k = 1; k <= 3; k++) for (const A of STEPQ) for (const B of STEPQ) intern(stepPat(A, B, k));
 const CELLCODES = glyphs.length;
 const GLYPH0 = glyphs.length;                   // first readout glyph code
@@ -184,6 +185,8 @@ for (let k = 0; k < 4; k++) {
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell patterns + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256`);
+console.error(`  codes: 0 BLANK, 1 SOLID, 2-${STEP0-1} ramps, ${STEP0}-${CELLCODES-1} steps, ` +
+              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam`);
 // charset A, and charset B = every glyph flipped vertically. The raster split at the
 // horizon selects B for the bottom half, so ONE char code renders as its own mirror
 // there -- renderSym writes the identical byte to both halves and needs no flip table.
