@@ -254,16 +254,91 @@ mloop:
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
         ; cstepT is filled by the subdivision itself now (see subFace), so it has to start
         ; the frame empty. 40 bytes; the scan it replaces in prepCells cost 1920 cycles.
-        ldx #39
+        ; Straight-line, not a loop: "sta abs" is 4 cycles against the 9 a loop iteration
+        ; costs with its dex and bpl, and 80 bytes of table twice a frame is enough for
+        ; that to matter. 240 bytes of code for ~700 cycles.
         lda #$00
-csClr:  sta cstepT,x
-        dex
-        bpl csClr
-        ldx #39       ; and every cell back to a plain solid fill
-        lda #$01
-smClr:  sta seamT,x
-        dex
-        bpl smClr
+        sta cstepT+0
+        sta cstepT+1
+        sta cstepT+2
+        sta cstepT+3
+        sta cstepT+4
+        sta cstepT+5
+        sta cstepT+6
+        sta cstepT+7
+        sta cstepT+8
+        sta cstepT+9
+        sta cstepT+10
+        sta cstepT+11
+        sta cstepT+12
+        sta cstepT+13
+        sta cstepT+14
+        sta cstepT+15
+        sta cstepT+16
+        sta cstepT+17
+        sta cstepT+18
+        sta cstepT+19
+        sta cstepT+20
+        sta cstepT+21
+        sta cstepT+22
+        sta cstepT+23
+        sta cstepT+24
+        sta cstepT+25
+        sta cstepT+26
+        sta cstepT+27
+        sta cstepT+28
+        sta cstepT+29
+        sta cstepT+30
+        sta cstepT+31
+        sta cstepT+32
+        sta cstepT+33
+        sta cstepT+34
+        sta cstepT+35
+        sta cstepT+36
+        sta cstepT+37
+        sta cstepT+38
+        sta cstepT+39
+        lda #$01       ; and every cell back to a plain solid fill
+        sta seamT+0
+        sta seamT+1
+        sta seamT+2
+        sta seamT+3
+        sta seamT+4
+        sta seamT+5
+        sta seamT+6
+        sta seamT+7
+        sta seamT+8
+        sta seamT+9
+        sta seamT+10
+        sta seamT+11
+        sta seamT+12
+        sta seamT+13
+        sta seamT+14
+        sta seamT+15
+        sta seamT+16
+        sta seamT+17
+        sta seamT+18
+        sta seamT+19
+        sta seamT+20
+        sta seamT+21
+        sta seamT+22
+        sta seamT+23
+        sta seamT+24
+        sta seamT+25
+        sta seamT+26
+        sta seamT+27
+        sta seamT+28
+        sta seamT+29
+        sta seamT+30
+        sta seamT+31
+        sta seamT+32
+        sta seamT+33
+        sta seamT+34
+        sta seamT+35
+        sta seamT+36
+        sta seamT+37
+        sta seamT+38
+        sta seamT+39
         lda py+1                ; the DDA's starting cell, once for the whole frame
         asl
         asl

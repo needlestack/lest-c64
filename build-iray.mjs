@@ -614,16 +614,13 @@ ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
         ; cstepT is filled by the subdivision itself now (see subFace), so it has to start
         ; the frame empty. 40 bytes; the scan it replaces in prepCells cost 1920 cycles.
-        ldx #${NCELL - 1}
+        ; Straight-line, not a loop: "sta abs" is 4 cycles against the 9 a loop iteration
+        ; costs with its dex and bpl, and 80 bytes of table twice a frame is enough for
+        ; that to matter. 240 bytes of code for ~700 cycles.
         lda #$00
-csClr:  sta cstepT,x
-        dex
-        bpl csClr${SEAMS ? `
-        ldx #${NCELL - 1}       ; and every cell back to a plain solid fill
-        lda #${hx(SOLID)}
-smClr:  sta seamT,x
-        dex
-        bpl smClr` : ''}
+${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS ? `
+        lda #${hx(SOLID)}       ; and every cell back to a plain solid fill
+${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}` : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
         asl
         asl
