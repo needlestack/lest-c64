@@ -90,3 +90,74 @@ for(const TH of [6,8,10,12,99]){
   const pc=v=>(v/n*100).toFixed(2), w=k=>pc(err.slice(0,k+1).reduce((a,b)=>a+b,0));
   console.log(`steep->step when span>${String(TH).padStart(2)} (${(steps/n*100).toFixed(2)}% of cells): 0px ${pc(err[0])}%  <=1px ${w(1)}%  <=2px ${w(2)}%  >=3px ${pc(err.slice(3).reduce((a,b)=>a+b,0))}%`);
 }
+
+// Practical selection rule for the asm: a cell is "steep" when its two end LEVELS differ
+// by >= 9 (of the 13 clamped levels). Then pick the step position as the column with the
+// biggest jump -- 3 compares, no division, and only on the rare steep cell.
+const CLO=-2,CHI=10;
+const lev=v=>Math.max(CLO,Math.min(CHI,v))-CLO;      // clampT: raw -> 0..12
+for(const TH of [7,8,9,10]){
+  const err=new Array(10).fill(0); let steep=0;
+  for(const raw of cells){
+    const t=raw.map(C8), w=raw.map(lev);
+    let best;
+    if(Math.abs(w[0]-w[3])>=TH){ steep++;
+      let k=1,bj=-1;
+      for(let i=1;i<4;i++){const j=Math.abs(w[i]-w[i-1]); if(j>bj){bj=j;k=i;}}
+      const A=qs(C8(raw[0])), B=qs(C8(raw[3]));
+      best=[0,1,2,3].map(i=>i<k?A:B);
+    } else {
+      const a=snap(raw[0],uniL), b=snap(raw[3],uniL);
+      best=[0,1,2,3].map(k=>C8(Math.round(a+(b-a)*k/3)));
+    }
+    err[Math.min(9,Math.max(...t.map((x,i)=>Math.abs(x-best[i]))))]++;
+  }
+  const pc=v=>(v/n*100).toFixed(2), w2=k=>pc(err.slice(0,k+1).reduce((a,b)=>a+b,0));
+  console.log(`level-gap >= ${TH} -> step (${(steep/n*100).toFixed(2)}% of cells): 0px ${pc(err[0])}%  <=1px ${w2(1)}%  <=2px ${w2(2)}%  >=3px ${pc(err.slice(3).reduce((a,b)=>a+b,0))}%`);
+}
+
+// Same rule, but take each side's LEVEL from the column adjacent to the transition
+// (still no averaging, still just loads we already have).
+for(const TH of [8,9]){
+  const err=new Array(10).fill(0);
+  for(const raw of cells){
+    const t=raw.map(C8), w=raw.map(lev);
+    let best;
+    if(Math.abs(w[0]-w[3])>=TH){
+      let k=1,bj=-1;
+      for(let i=1;i<4;i++){const j=Math.abs(w[i]-w[i-1]); if(j>bj){bj=j;k=i;}}
+      const A=qs(t[k-1]), B=qs(t[k]);          // the two columns either side of the jump
+      best=[0,1,2,3].map(i=>i<k?A:B);
+    } else {
+      const a=snap(raw[0],uniL), b=snap(raw[3],uniL);
+      best=[0,1,2,3].map(k=>C8(Math.round(a+(b-a)*k/3)));
+    }
+    err[Math.min(9,Math.max(...t.map((x,i)=>Math.abs(x-best[i]))))]++;
+  }
+  const pc=v=>(v/n*100).toFixed(2), w2=k=>pc(err.slice(0,k+1).reduce((a,b)=>a+b,0));
+  console.log(`gap>=${TH}, levels from the columns adjacent to the jump: 0px ${pc(err[0])}%  <=1px ${w2(1)}%  <=2px ${w2(2)}%  >=3px ${pc(err.slice(3).reduce((a,b)=>a+b,0))}%`);
+}
+
+// Cheapest accurate rule: A and B are the two END levels (already loaded); try all three
+// step positions and keep the one with the smallest worst-column error. Three candidate
+// patterns compared against four known values -- pure compares, no arithmetic.
+for(const TH of [6,8,9]){
+  const err=new Array(10).fill(0); let steep=0;
+  for(const raw of cells){
+    const t=raw.map(C8), w=raw.map(lev);
+    let best;
+    if(Math.abs(w[0]-w[3])>=TH){ steep++;
+      const A=qs(t[0]), B=qs(t[3]);
+      let bc=99;
+      for(let k=1;k<4;k++){ const p=[0,1,2,3].map(i=>i<k?A:B);
+        const e=Math.max(...t.map((x,i)=>Math.abs(x-p[i])));
+        if(e<bc){bc=e;best=p;} }
+    } else {
+      const a=snap(raw[0],uniL), b=snap(raw[3],uniL);
+      best=[0,1,2,3].map(k=>C8(Math.round(a+(b-a)*k/3)));
+    }
+    err[Math.min(9,Math.max(...t.map((x,i)=>Math.abs(x-best[i]))))]++;
+  }
+  const pc=v=>(v/n*100).toFixed(2), w2=k=>pc(err.slice(0,k+1).reduce((a,b)=>a+b,0));
+  console.log(`gap>=${TH}, best-of-3 positions (${(steep/n*100).toFixed(2)}% of cells): 0px ${pc(err[0])}%  <=1px ${w2(1)}%  <=2px ${w2(2)}%  >=3px ${pc(err.slice(3).reduce((a,b)=>a+b,0))}%`);
+}

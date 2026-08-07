@@ -1,10 +1,12 @@
-014c 014c 30   # 18 faces, 26% wall
-0cb3 0a80 b0   # 17 faces, 29% wall
-0180 0d4c 00   # 17 faces, 51% wall
-0c80 0eb3 80   # 17 faces, 55% wall
-0180 09b3 c8   # 16 faces, 57% wall
-034c 0d80 f8   # 15 faces, 56% wall
-0180 034c 48   # 14 faces, 58% wall
-0880 0280 18   # 13 faces, 25% wall
-0124 065e be   # regression: wall-hugging, colH saturation (screenshot2)
-0bc6 09b3 7a   # regression: wide span + large height delta, interpolator carry (screenshot4)
+# Standard verification set. Five viewpoints, five distinct positions, chosen (2026-08-07)
+# to cover every path through the subdivision + interpolator between them rather than to
+# look pretty -- a full run is build + VICE + verify-render per line, so length costs real
+# iteration time. Selection came from analyze-interp.mjs over 40 candidates (the old 10
+# positions x 4 angles); the numbers in each comment are from that model.
+#
+#   PX   PY   PA
+0bc6 09b3 7a   # regression (interpolator carry) + the only 16-bit err path: maxDy=187, wide spans
+0124 065e be   # regression (wall-hug, colH saturation): the only source of saturated endpoints
+0c80 0eb3 80   # maximum subdivision stress: 24 spans, 5 face boundaries, all narrow
+0880 0280 98   # the degenerate opposite: ONE span, 158 interior columns, full-width 16-bit
+034c 0d80 f8   # 21 spans, 6 boundaries, wide AND steep (maxW=79, maxDy=112)

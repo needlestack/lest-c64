@@ -1,9 +1,19 @@
-// build-iray.mjs — char-framebuffer raycaster, 21 rays interpolated to 80 columns.
-// Cast 21 rays across the FOV, record half-height + side per ray. Interpolate the
-// wall height across each 4-pixel gap: CONTINUOUS gaps (same side, small height
-// delta) lerp smoothly; DISCONTINUOUS gaps (corner / depth jump) snap a hard step.
-// Emit 80 independent logical columns into the 256-char framebuffer via bit-spread.
-// B&W, 8-bit DDA. ESDF turn/move. MEASURE=1 -> flat-out + fps counter.
+// build-iray.mjs — char-framebuffer raycaster for a stock C64. Emits iray.asm, assembles
+// it, and writes latest.d64. The engine, top to bottom:
+//
+//   castRay     8-bit integer DDA, one ray per connected-wall-run boundary rather than
+//               per column -- adaptive subdivision, so ~25 rays cover 160 columns.
+//               Cosine correction is folded into the height tables, not applied per ray.
+//   interpSpan  Bresenham-interpolates colH across each span between two cast rays.
+//               8-bit error term, promoted to 16-bit only when dxv+dyv can exceed 255.
+//   prepCells   per 4-column cell: min/max of colH, and the cap at 100. Hoisted out of
+//               renderSym so the 495-of-520 fully-solid/blank cells reject cheaply.
+//   renderSym   picks a char per cell (blank / solid / ramp / step) and fills the runs
+//               above and below via unrolled store chains, column-major.
+//
+// 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
+// code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
+// Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
 import { writeFileSync } from 'fs';
 import { assemble } from './asm6502.mjs';
 await import('./d64lib.js');
@@ -30,6 +40,7 @@ for (let a = 0; a < 256; a++) {
   posX.push(cx >= 0 ? 1 : 0); posY.push(sy >= 0 ? 1 : 0);
 }
 const NLOG = 160, FOV = 47;             // one ray per output column (160 logical cols)
+const NCELL = NLOG / 4;                 // 4x8 cells across the screen (40)
 // RECTILINEAR projection: columns spaced by atan (flat image plane) + per-column
 // cos-correction of the distance. Fixes the fisheye arch AND makes wall height linear.
 const CTR = (NLOG - 1) / 2, HALF_UNITS = FOV / 2, TANHALF = Math.tan(HALF_UNITS / 256 * 2 * Math.PI);
@@ -210,30 +221,44 @@ const t1Tab = [], tbTab = [];
 for (let R = 0; R < 13; R++) { t1Tab.push(100 - 8 * R); tbTab.push(Math.max(0, 93 - 8 * R)); }
 const rowLo = [], rowHi = []; for (let R = 0; R < 25; R++) { rowLo.push((R * 40) & 255); rowHi.push((R * 40) >> 8); }
 
-const MEASURE = process.env.MEASURE === '1';
-const SPIN = process.env.SPIN === '1';   // diagnostic: auto-rotate, ignore input
-const NORAY = process.env.NORAY === '1'; // diagnostic: skip marching/subdivision
-const NOFILL = process.env.NOFILL === '1'; // diagnostic: skip renderSym (fill)
+// ---- diagnostic knobs ----
+// Read every knob through flag()/hexArg() so DIAG lists exactly the ones in force. Two
+// things depend on knowing that: the build must not overwrite the tracked iray.asm with a
+// throwaway configuration (see the write site at the bottom), and the "ok:" line has to
+// say out loud which knobs are on -- NORAY and NOFILL in particular produce a build that
+// renders faster-looking nonsense and have already been mistaken for a real measurement.
+const DIAG = [];
+const flag = n => { const on = process.env[n] === '1'; if (on) DIAG.push(n); return on; };
+const hexArg = (n, dflt, mask) => {
+  if (process.env[n] === undefined) return dflt;
+  DIAG.push(`${n}=${process.env[n]}`);
+  return parseInt(process.env[n], 16) & mask;
+};
+
+const MEASURE = flag('MEASURE');
+const SPIN = flag('SPIN');     // auto-rotate, ignore input
+const NORAY = flag('NORAY');   // skip marching/subdivision
+const NOFILL = flag('NOFILL'); // skip renderSym (fill)
 // DUMPH: print colH as hex over the top 8 rows, so the interpolated heights can be read
 // straight off a screenshot. The VICE monitor's checkpoint/bsave route does not survive
 // -autostart here, and inferring colH from drawn pixels cannot see values above 100.
-const DUMPH = process.env.DUMPH === '1';
-// diagnostic: static start angle, e.g. PA=4f. Angle-dependent glitches are far easier to
-// pin here than under SPIN -- a fixed angle makes the frame reproducible, so a plain
-// -exitscreenshot run is comparable across builds without breakpointing the frame counter.
-const PA = process.env.PA ? parseInt(process.env.PA, 16) & 0xff : 0;
+const DUMPH = flag('DUMPH');
+// static start angle, e.g. PA=4f. Angle-dependent glitches are far easier to pin here than
+// under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
+// is comparable across builds without breakpointing the frame counter.
+const PA = hexArg('PA', 0, 0xff);
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
-const PX = process.env.PX ? parseInt(process.env.PX, 16) & 0xffff : 0x0180;
-const PY = process.env.PY ? parseInt(process.env.PY, 16) & 0xffff : 0x0180;
+const PX = hexArg('PX', 0x0180, 0xffff);
+const PY = hexArg('PY', 0x0180, 0xffff);
 // Angle units per frame while the joystick is held. The angle byte is a full turn in 256
 // steps, so this is also the angular resolution of the view -- rayOff/cosCorr are indexed
 // by the same byte, so turning cannot be made smooth by shrinking this, only coarser by
 // growing it. 6/256 = 8.4 degrees per frame.
 const TURN_STEP = 6;                    // was 3; 2x
-const WALK = process.env.WALK === '1'; // diagnostic: auto-walk forward (sweeps frac through 0)
-const STRAFE = process.env.STRAFE === '1'; // diagnostic: auto-strafe (parallel to walls)
-const BACK = process.env.BACK === '1'; // diagnostic: auto-walk backward
+const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
+const STRAFE = flag('STRAFE'); // auto-strafe (parallel to walls)
+const BACK = flag('BACK');     // auto-walk backward
 
 // ---- VIC bank 0 memory layout ----
 // The double buffer flips between two 1KB screen matrices. Both are RAM the renderer
@@ -468,7 +493,13 @@ ccf:    sta $d800,x
 mloop:  ${SPIN ? 'inc pa' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
+        ; cstepT is filled by the subdivision itself now (see subFace), so it has to start
+        ; the frame empty. 40 bytes; the scan it replaces in prepCells cost 1920 cycles.
+        ldx #${NCELL - 1}
         lda #$00
+csClr:  sta cstepT,x
+        dex
+        bpl csClr
         sta col
         jsr marchCol            ; column 0
         lda #${NLOG - 1}
@@ -494,7 +525,7 @@ subLp:  ldx sp
         ldx spanR
         lda faceIdT,x
         cmp tmp
-        bne subSp               ; different wall FACE -> split
+        bne subFace             ; different wall FACE -> split, and maybe record a boundary
         ; Heights are linear across a face, which is what makes the merge exact -- but only
         ; while they FIT. colH is a byte, so anything closer than 88/254 = 0.35 cells
         ; saturates, and interpolating from a saturated endpoint skews the whole span,
@@ -516,12 +547,37 @@ subLp:  ldx sp
         bne subSp
         jsr interpSpan          ; same face -> merge (interpolate interior)
         jmp subLp
-subSp:  lda spanR
+        ; The face changes somewhere in this span. Once the span is a single column wide the
+        ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
+        ; so record it straight into cstepT. The old route was to write a face id into all
+        ; 160 columns of faceIdT and have prepCells rediscover the ~2 transitions by
+        ; comparing adjacent entries in every one of the 40 cells. Same answer, minus a
+        ; per-column store in the interpolator's hot loop and minus the whole scan.
+subFace:lda spanR
         sec
         sbc spanL
         cmp #$02
-        bcc subLp               ; adjacent -> boundary, nothing between
-        lda spanL
+        bcs subMid              ; still wide -> split further
+        lda spanR
+        and #$03
+        beq subLp               ; boundary on a cell edge: the two cells simply differ, and
+                                ; cstepT can only name an interior column (1..3)
+        sta tmp
+        lda spanR
+        lsr
+        lsr
+        tax                     ; cell = spanR/4
+        lda cstepT,x
+        bne subLp               ; first boundary in a cell wins, as the old adjacent-pair scan did
+        lda tmp
+        sta cstepT,x
+        jmp subLp
+subSp:  lda spanR               ; saturation split: a real split, but NOT a face boundary
+        sec
+        sbc spanL
+        cmp #$02
+        bcc subLp               ; adjacent -> nothing between
+subMid: lda spanL
         clc
         adc spanR
         ror                     ; ROR not LSR: at 160 columns spanL+spanR reaches 318, so the
@@ -614,32 +670,10 @@ pcNmx:  inx
         sta cmnT,x
         lda tmp2
         sta cmxT,x
-        ; Face boundary position inside this cell: 0 = one face (ramp), else the column
-        ; 1..3 where faceIdT changes. Walls are vertical prisms so this IS the screen-space
-        ; step, exactly -- and it does not depend on the row, so it is computed once here
-        ; rather than 13 times in renderSym.
-        ldy zpc
-        lda #$00
-        sta tmp
-        lda faceIdT,y
-        cmp faceIdT+1,y
-        beq pcS2
-        lda #$01
-        sta tmp
-        jmp pcSdn
-pcS2:   lda faceIdT+1,y
-        cmp faceIdT+2,y
-        beq pcS3
-        lda #$02
-        sta tmp
-        jmp pcSdn
-pcS3:   lda faceIdT+2,y
-        cmp faceIdT+3,y
-        beq pcSdn
-        lda #$03
-        sta tmp
-pcSdn:  lda tmp
-        sta cstepT,x
+        ; cstepT (face-boundary column inside this cell, 0 = one face) used to be derived
+        ; here by comparing the four faceIdT entries of every cell -- 1920 cycles a frame to
+        ; rediscover ~2 transitions. The subdivision already knows exactly where they are
+        ; and writes them itself now (see subFace), so there is nothing to do per cell.
         lda zpc
         clc
         adc #$04
@@ -1101,8 +1135,6 @@ interpSpan:
         ldx spanL
         lda colH,x
         sta hcur                ; h = colH[spanL]
-        lda faceIdT,x
-        sta tmp2                ; span faceId (same across the merged interior)
         ldx spanR
         lda colH,x
         sec
@@ -1135,33 +1167,55 @@ isErr:  lda dxv
         clc
         adc dyv
         bcs isLp                ; can overflow -> 16-bit path
-isLp8:  inc col                 ; --- 8-bit fast path ---
-        lda col
-        cmp spanR
-        bcs isDn
-        clc
+        ; --- 8-bit fast path ---
+        ; This loop sets 92% of all 160 colH values (only ~13 columns are actually marched),
+        ; so it is worth spending every register on it: X = col, Y = hcur, A = err, and no
+        ; zero-page traffic per column beyond the one colH store. Three details pay for
+        ; themselves:
+        ;   - ascending and descending are separate loops, so the syNeg test happens once
+        ;     per span instead of once per Bresenham step;
+        ;   - no clc before "adc dyv": falling through "cpx spanR" already leaves carry
+        ;     clear, and so does the branch that ends the subtract loop;
+        ;   - no sec before "sbc dxv": the "cmp dxv" that got us there already set carry.
+        ; 63% of columns take zero Bresenham steps and 23% take one, so the fixed per-column
+        ; cost dominates and that is what these target -- 53 cycles/column down to 38.
+        ldy hcur
         lda errv
-        adc dyv
-        sta errv
-isW8:   lda errv
+        ldx syNeg
+        bne isD8
+        ldx spanL
+isA8:   inx                     ; --- ascending ---
+        cpx spanR
+        bcs isDn
+        adc dyv                 ; carry clear: cpx fell through
         cmp dxv
-        bcc isWr8
-        sec
-        sbc dxv
-        sta errv
-        lda syNeg
-        beq isInc8
-        dec hcur
-        jmp isW8
-isInc8: inc hcur
-        jmp isW8
-isWr8:  ldx col
-        lda hcur
+        bcc isAWr
+isAsb:  sbc dxv                 ; carry set by the cmp above / by this sbc
+        iny
+        cmp dxv
+        bcs isAsb
+isAWr:  sta errv                ; park err: A is needed for the stores
+        tya
         sta colH,x
-        lda tmp2
-        sta faceIdT,x
-        jmp isLp8
-isLp:   inc col                 ; --- 16-bit path ---
+        lda errv
+        jmp isA8
+isD8:   ldx spanL               ; --- descending ---
+isDl8:  inx
+        cpx spanR
+        bcs isDn
+        adc dyv
+        cmp dxv
+        bcc isDWr
+isDsb:  sbc dxv
+        dey
+        cmp dxv
+        bcs isDsb
+isDWr:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        jmp isDl8
+isLp:   inc col                 ; --- 16-bit path (rare: only when dxv+dyv > 255) ---
         lda col
         cmp spanR
         bcs isDn
@@ -1193,8 +1247,6 @@ isInc:  inc hcur
 isWr:   ldx col
         lda hcur
         sta colH,x
-        lda tmp2
-        sta faceIdT,x
         jmp isLp
 isDn:   rts
 
@@ -1702,7 +1754,14 @@ chainEnd:
 hTabT:  ${chunk(hTab, 32).trim()}
 `;
 
-writeFileSync('./iray.asm', asm);
+// iray.asm is deliberately tracked (see .gitignore): diffing the generated assembly is how
+// a JS change gets reviewed. But a diagnostic build bakes throwaway state into it -- a
+// `PX=0bc6` start position, or `mloop: inc pa` for SPIN -- and writing that to the tracked
+// path leaves junk in `git status` that gets swept into the next stash or commit. It has
+// happened. Diagnostic builds therefore emit to an ignored side path; labels are still
+// there to look up, the tracked reference just stays honest.
+const asmPath = DIAG.length ? './iray.diag.asm' : './iray.asm';
+writeFileSync(asmPath, asm);
 try {
   const r = assemble(asm);
   // Layout guard. The old version only checked the charset, which is why buffer B at
@@ -1734,5 +1793,6 @@ try {
   // is always the current build -- no -ntsc/-merge/foundation variants to get stale and
   // mislead. iray.asm/iray.prg are the matching support files for diffing and label lookup.
   writeFileSync('./latest.d64', Buffer.from(d.getData()));
-  console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`);
+  console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`
+    + (DIAG.length ? `\nDIAGNOSTIC BUILD [${DIAG.join(' ')}] -- asm to ${asmPath}, not for fps numbers` : ''));
 } catch (e) { console.error('ASM ERROR:', e.message); process.exit(1); }

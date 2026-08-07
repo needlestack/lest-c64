@@ -8,5 +8,9 @@
 *.d64
 iray.prg
 
+# Diagnostic builds (PX/PY/PA/SPIN/NORAY/...) emit here instead of iray.asm, so a
+# throwaway start position or `inc pa` never lands in the tracked reference copy.
+iray.diag.asm
+
 # Local-only agent/editor settings (settings.json is shared and IS tracked)
 .claude/settings.local.json

@@ -202,7 +202,13 @@ ccf:    sta $d800,x
 mloop:  jsr readKeys
 
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
+        ; cstepT is filled by the subdivision itself now (see subFace), so it has to start
+        ; the frame empty. 40 bytes; the scan it replaces in prepCells cost 1920 cycles.
+        ldx #39
         lda #$00
+csClr:  sta cstepT,x
+        dex
+        bpl csClr
         sta col
         jsr marchCol            ; column 0
         lda #159
@@ -228,7 +234,7 @@ subLp:  ldx sp
         ldx spanR
         lda faceIdT,x
         cmp tmp
-        bne subSp               ; different wall FACE -> split
+        bne subFace             ; different wall FACE -> split, and maybe record a boundary
         ; Heights are linear across a face, which is what makes the merge exact -- but only
         ; while they FIT. colH is a byte, so anything closer than 88/254 = 0.35 cells
         ; saturates, and interpolating from a saturated endpoint skews the whole span,
@@ -250,12 +256,37 @@ subLp:  ldx sp
         bne subSp
         jsr interpSpan          ; same face -> merge (interpolate interior)
         jmp subLp
-subSp:  lda spanR
+        ; The face changes somewhere in this span. Once the span is a single column wide the
+        ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
+        ; so record it straight into cstepT. The old route was to write a face id into all
+        ; 160 columns of faceIdT and have prepCells rediscover the ~2 transitions by
+        ; comparing adjacent entries in every one of the 40 cells. Same answer, minus a
+        ; per-column store in the interpolator's hot loop and minus the whole scan.
+subFace:lda spanR
         sec
         sbc spanL
         cmp #$02
-        bcc subLp               ; adjacent -> boundary, nothing between
-        lda spanL
+        bcs subMid              ; still wide -> split further
+        lda spanR
+        and #$03
+        beq subLp               ; boundary on a cell edge: the two cells simply differ, and
+                                ; cstepT can only name an interior column (1..3)
+        sta tmp
+        lda spanR
+        lsr
+        lsr
+        tax                     ; cell = spanR/4
+        lda cstepT,x
+        bne subLp               ; first boundary in a cell wins, as the old adjacent-pair scan did
+        lda tmp
+        sta cstepT,x
+        jmp subLp
+subSp:  lda spanR               ; saturation split: a real split, but NOT a face boundary
+        sec
+        sbc spanL
+        cmp #$02
+        bcc subLp               ; adjacent -> nothing between
+subMid: lda spanL
         clc
         adc spanR
         ror                     ; ROR not LSR: at 160 columns spanL+spanR reaches 318, so the
@@ -349,32 +380,10 @@ pcNmx:  inx
         sta cmnT,x
         lda tmp2
         sta cmxT,x
-        ; Face boundary position inside this cell: 0 = one face (ramp), else the column
-        ; 1..3 where faceIdT changes. Walls are vertical prisms so this IS the screen-space
-        ; step, exactly -- and it does not depend on the row, so it is computed once here
-        ; rather than 13 times in renderSym.
-        ldy zpc
-        lda #$00
-        sta tmp
-        lda faceIdT,y
-        cmp faceIdT+1,y
-        beq pcS2
-        lda #$01
-        sta tmp
-        jmp pcSdn
-pcS2:   lda faceIdT+1,y
-        cmp faceIdT+2,y
-        beq pcS3
-        lda #$02
-        sta tmp
-        jmp pcSdn
-pcS3:   lda faceIdT+2,y
-        cmp faceIdT+3,y
-        beq pcSdn
-        lda #$03
-        sta tmp
-pcSdn:  lda tmp
-        sta cstepT,x
+        ; cstepT (face-boundary column inside this cell, 0 = one face) used to be derived
+        ; here by comparing the four faceIdT entries of every cell -- 1920 cycles a frame to
+        ; rediscover ~2 transitions. The subdivision already knows exactly where they are
+        ; and writes them itself now (see subFace), so there is nothing to do per cell.
         lda zpc
         clc
         adc #$04
@@ -792,8 +801,6 @@ interpSpan:
         ldx spanL
         lda colH,x
         sta hcur                ; h = colH[spanL]
-        lda faceIdT,x
-        sta tmp2                ; span faceId (same across the merged interior)
         ldx spanR
         lda colH,x
         sec
@@ -826,33 +833,55 @@ isErr:  lda dxv
         clc
         adc dyv
         bcs isLp                ; can overflow -> 16-bit path
-isLp8:  inc col                 ; --- 8-bit fast path ---
-        lda col
-        cmp spanR
-        bcs isDn
-        clc
+        ; --- 8-bit fast path ---
+        ; This loop sets 92% of all 160 colH values (only ~13 columns are actually marched),
+        ; so it is worth spending every register on it: X = col, Y = hcur, A = err, and no
+        ; zero-page traffic per column beyond the one colH store. Three details pay for
+        ; themselves:
+        ;   - ascending and descending are separate loops, so the syNeg test happens once
+        ;     per span instead of once per Bresenham step;
+        ;   - no clc before "adc dyv": falling through "cpx spanR" already leaves carry
+        ;     clear, and so does the branch that ends the subtract loop;
+        ;   - no sec before "sbc dxv": the "cmp dxv" that got us there already set carry.
+        ; 63% of columns take zero Bresenham steps and 23% take one, so the fixed per-column
+        ; cost dominates and that is what these target -- 53 cycles/column down to 38.
+        ldy hcur
         lda errv
-        adc dyv
-        sta errv
-isW8:   lda errv
+        ldx syNeg
+        bne isD8
+        ldx spanL
+isA8:   inx                     ; --- ascending ---
+        cpx spanR
+        bcs isDn
+        adc dyv                 ; carry clear: cpx fell through
         cmp dxv
-        bcc isWr8
-        sec
-        sbc dxv
-        sta errv
-        lda syNeg
-        beq isInc8
-        dec hcur
-        jmp isW8
-isInc8: inc hcur
-        jmp isW8
-isWr8:  ldx col
-        lda hcur
+        bcc isAWr
+isAsb:  sbc dxv                 ; carry set by the cmp above / by this sbc
+        iny
+        cmp dxv
+        bcs isAsb
+isAWr:  sta errv                ; park err: A is needed for the stores
+        tya
         sta colH,x
-        lda tmp2
-        sta faceIdT,x
-        jmp isLp8
-isLp:   inc col                 ; --- 16-bit path ---
+        lda errv
+        jmp isA8
+isD8:   ldx spanL               ; --- descending ---
+isDl8:  inx
+        cpx spanR
+        bcs isDn
+        adc dyv
+        cmp dxv
+        bcc isDWr
+isDsb:  sbc dxv
+        dey
+        cmp dxv
+        bcs isDsb
+isDWr:  sta errv
+        tya
+        sta colH,x
+        lda errv
+        jmp isDl8
+isLp:   inc col                 ; --- 16-bit path (rare: only when dxv+dyv > 255) ---
         lda col
         cmp spanR
         bcs isDn
@@ -884,8 +913,6 @@ isInc:  inc hcur
 isWr:   ldx col
         lda hcur
         sta colH,x
-        lda tmp2
-        sta faceIdT,x
         jmp isLp
 isDn:   rts
 
