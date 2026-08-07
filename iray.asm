@@ -104,6 +104,29 @@ cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incre
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
 errH    = $86                   ; high byte of the interpolator's error term
+uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
+uwH     = $21
+skL     = $87                   ; --- seam pass scratch, all dead outside seamSpan ---
+skH     = $88                   ; the seam's world coordinate k, as 8.8
+uaL     = $89                   ; u at spanL / spanR
+uaH     = $8a
+ubL     = $8b
+ubH     = $8c
+saL     = $8d                   ; |u_L - k| and |u_R - k|, squeezed to 8 bits
+saH     = $8e
+sbL     = $8f
+sbH     = $90
+sPlo    = $91                   ; P = a*h_L, and the running sum P+Q
+sPhi    = $92
+sSlo    = $93
+sShi    = $94
+ssK     = $95                   ; current boundary coordinate, and how many are left
+ssN     = $96
+ssW     = $97                   ; span width in columns
+mp      = $98                   ; mul8 operands / product
+mq      = $99
+plo     = $9a
+phi     = $9b
 cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
@@ -120,6 +143,10 @@ capH    = $c500                 ; colH capped at 100, filled by prepCells
 cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
 cmxT    = $c640                 ; per cell-column (40): max
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
+seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
+                                ;   SOLID, or a seam variant when a panel line lands here
+uLoT    = $c700                 ; per marched column: the hit's coordinate ALONG the wall,
+uHiT    = $c800                 ;   8.8 cells. Only marched columns hold anything valid.
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -142,6 +169,8 @@ entry:
         sta $d021               ; 00 = white  (ceiling / floor)
         lda #$00
         sta $d022               ; 01 = black  (wall)
+        lda #$01
+        sta $d023               ; 10 = white  (panel seam; unused when SEAMS=0)
         lda #$00
         sta $d020
         lda #$ff
@@ -209,6 +238,12 @@ mloop:  jsr readKeys
 csClr:  sta cstepT,x
         dex
         bpl csClr
+        ldx #39       ; and every cell back to a plain solid fill
+        lda #$01
+smClr:  sta seamT,x
+        dex
+        bpl smClr
+        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta col
         jsr marchCol            ; column 0
         lda #159
@@ -255,6 +290,7 @@ subLp:  ldx sp
         cmp tmp2
         bne subSp
         jsr interpSpan          ; same face -> merge (interpolate interior)
+        jsr seamSpan            ; and drop a panel line on each cell boundary it crossed
         jmp subLp
         ; The face changes somewhere in this span. Once the span is a single column wide the
         ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
@@ -267,6 +303,22 @@ subFace:lda spanR
         sbc spanL
         cmp #$02
         bcs subMid              ; still wide -> split further
+        ; A corner is pinned to one column, so its seam line needs no projection at
+        ; all -- it is simply the column we just found. Do it before the k=0 bail below:
+        ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
+        lda spanR
+        lsr
+        lsr
+        tax
+        lda seamT,x
+        cmp #$01
+        bne subCn               ; a line is already claimed in this cell; one per char code
+        lda spanR
+        and #$03
+        clc
+        adc #$ef
+        sta seamT,x
+subCn:
         lda spanR
         and #$03
         beq subLp               ; boundary on a cell edge: the two cells simply differ, and
@@ -536,7 +588,7 @@ rfSolid:lda rsv
         lda sldHiT,y
         sta jv+1
         ldx colc
-        lda #$01
+        lda seamT,x             ; SOLID, or this column's seam variant
         jmp (jv)                ; -> ascending chain -> jmp rfNext
 rfNext: ldx colc
         dex
@@ -824,6 +876,221 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
 mvBlk:  sec
         rts
 
+; ================= seamSpan: project this face's cell boundaries to columns =========
+; The span runs along ONE flat face, so u (the coordinate along it) is monotonic and every
+; integer strictly between u[spanL] and u[spanR] is a cell boundary the wall crosses.
+;
+; Screen position of one: 1/z is linear in screen column -- that is exactly why the height
+; merge is exact -- and u = (u/z)/(1/z) with u/z also linear. Writing h for colH (which IS
+; 1/z up to a constant), a = |u_L - k| and b = |u_R - k|, the split falls at
+;
+;     c = spanL + (spanR - spanL) * h_L*a / (h_L*a + h_R*b)
+;
+; one divide per seam, no extra rays and no per-column work. Everything below is that.
+seamSpan:
+        lda spanR
+        sec
+        sbc spanL
+        cmp #$02
+        bcc ssDn                ; adjacent columns: nothing between them to mark
+        sta ssW                 ; span width in columns
+        ldx spanL
+        lda uLoT,x
+        sta uaL
+        lda uHiT,x
+        sta uaH
+        ldx spanR
+        lda uLoT,x
+        sta ubL
+        lda uHiT,x
+        sta ubH
+        ; Walk the integer coordinates between the two ends. Direction first: the face can
+        ; run either way across the screen.
+        lda uaH
+        cmp ubH
+        beq ssDn                ; same cell, no boundary crossed -- the common case
+        bcc ssUp
+        ; descending: boundaries at uaH, uaH-1, ... ubH+1
+        lda uaH
+        sta ssK
+        lda uaH
+        sec
+        sbc ubH
+        jmp ssCnt
+ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
+        clc
+        adc #$01
+        sta ssK
+        lda ubH
+        sec
+        sbc uaH
+ssCnt:  cmp #17
+        bcs ssDn                ; more than 16 cells of wall in one span means u is junk
+        sta ssN                 ; (castRay's far/guard exits leave remL/remH meaningless)
+ssLp:   jsr seamOne
+        dec ssN
+        beq ssDn
+        lda uaH                 ; step k toward the far end
+        cmp ubH
+        bcc ssKup
+        dec ssK
+        jmp ssLp
+ssKup:  inc ssK
+        jmp ssLp
+ssDn:   rts
+
+; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
+seamOne:
+        lda #$00                ; k as 8.8
+        sta skL
+        lda ssK
+        sta skH
+        sec                     ; a = |u_L - k|
+        lda uaL
+        sbc skL
+        sta saL
+        lda uaH
+        sbc skH
+        sta saH
+        bcs ssaP
+        sec                     ; negate
+        lda #$00
+        sbc saL
+        sta saL
+        lda #$00
+        sbc saH
+        sta saH
+ssaP:   sec                     ; b = |u_R - k|
+        lda ubL
+        sbc skL
+        sta sbL
+        lda ubH
+        sbc skH
+        sta sbH
+        bcs ssbP
+        sec
+        lda #$00
+        sbc sbL
+        sta sbL
+        lda #$00
+        sbc sbH
+        sta sbH
+        ; Squeeze a and b down to 8 bits together, so their ratio survives. The larger keeps
+        ; its top bit; the smaller may collapse to 0, which is the right limit anyway -- a
+        ; seam sitting on an endpoint belongs at that endpoint.
+ssbP:   lda saH
+        ora sbH
+        beq ssFit
+        lsr saH
+        ror saL
+        lsr sbH
+        ror sbL
+        jmp ssbP
+ssFit:  ldx spanL               ; P = a * h_L, Q = b * h_R, both 8x8 -> 16
+        lda colH,x
+        sta mq
+        lda saL
+        jsr mul8
+        lda plo
+        sta sPlo
+        lda phi
+        sta sPhi
+        ldx spanR
+        lda colH,x
+        sta mq
+        lda sbL
+        jsr mul8
+        clc                     ; sum = P + Q
+        lda plo
+        adc sPlo
+        sta sSlo
+        lda phi
+        adc sPhi
+        sta sShi
+        bcc ssNrm
+        ror sShi                ; a 17-bit sum: fold the carry back in, P follows below
+        ror sSlo
+        lsr sPhi
+        ror sPlo
+ssNrm:  lda sShi                ; scale P and sum until the sum is a byte: recip is indexed by it
+        beq ssDiv
+        lsr sShi
+        ror sSlo
+        lsr sPhi
+        ror sPlo
+        jmp ssNrm
+ssDiv:  lda sSlo
+        beq ssOne               ; degenerate (zero-length wall): leave it alone
+        tax
+        lda sPlo                ; t = P*256/sum, via one reciprocal multiply
+        sta fr
+        lda recipLoT,x
+        sta mlo
+        lda recipHiT,x
+        sta mhi
+        jsr sideMul
+        lda s2
+        beq ssT8
+        lda #$ff                ; t saturated at 1.0
+        jmp ssOff
+ssT8:   lda s1
+ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
+        lda ssW
+        jsr mul8
+        lda plo                 ; round to nearest column: truncating biased every seam a
+        cmp #$80                ; column low, which reads as the whole wall being off by one
+        lda phi
+        adc #$00
+        clc
+        adc spanL
+        cmp #160
+        bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
+        tay                     ; Y = the seam's logical column
+        tya
+        lsr
+        lsr
+        tax                     ; cell column
+        lda seamT,x
+        cmp #$01
+        bne ssOne               ; already spoken for: one line per char code
+        tya
+        and #$03
+        clc
+        adc #$ef
+        sta seamT,x
+ssOne:  rts
+
+; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
+mul8:   sta mp
+        clc
+        adc mq
+        tax
+        bcc m8l0
+        lda f1LoT,x
+        sta plo
+        lda f1HiT,x
+        sta phi
+        jmp m8l1
+m8l0:   lda f0LoT,x
+        sta plo
+        lda f0HiT,x
+        sta phi
+m8l1:   lda mp
+        sec
+        sbc mq
+        bcs m8l2
+        eor #$ff
+        adc #$01
+m8l2:   tax
+        sec
+        lda plo
+        sbc f0LoT,x
+        sta plo
+        lda phi
+        sbc f0HiT,x
+        sta phi
+        rts
+
 ; ================= march one column: cast + store colH/idT =================
 marchCol:
         jsr castRay
@@ -853,6 +1120,61 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
 friSo:  lda runST,y
 friSto: ldx col
         sta faceIdT,x
+        ; --- u: where along the wall this ray landed, 8.8 cells ---
+        ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and
+        ; vice versa. u = p + d*dir, one sideMul: sideMul(fr, m) gives fr/256 * m, so feeding
+        ; it |cos| (or |sin|) as 0..255 against the 16-bit hit distance gives exactly d*|dir|.
+        ; Sign comes from the same posXT/posYT the DDA already used to pick its step.
+        lda remL
+        sta mlo
+        lda remH
+        sta mhi
+        ldx rang
+        lda side
+        bne muY
+        lda absSinT,x           ; x-face: u is the y coordinate
+        sta fr
+        jsr sideMul
+        ldx rang
+        lda posYT,x
+        bne muYp
+        sec                     ; ray heading -y: u = py - d*|sin|
+        lda py
+        sbc s1
+        sta uwL
+        lda py+1
+        sbc s2
+        jmp muSto
+muYp:   clc
+        lda py
+        adc s1
+        sta uwL
+        lda py+1
+        adc s2
+        jmp muSto
+muY:    lda absCosT,x           ; y-face: u is the x coordinate
+        sta fr
+        jsr sideMul
+        ldx rang
+        lda posXT,x
+        bne muXp
+        sec
+        lda px
+        sbc s1
+        sta uwL
+        lda px+1
+        sbc s2
+        jmp muSto
+muXp:   clc
+        lda px
+        adc s1
+        sta uwL
+        lda px+1
+        adc s2
+muSto:  ldx col
+        sta uHiT,x
+        lda uwL
+        sta uLoT,x
         rts
 
 ; ===== interpolate colH linearly across a same-face span [spanL,spanR] (Bresenham) =====
@@ -1627,8 +1949,8 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         !byte 0,84,4,84,4,84,0,0,0,68,68,84,4,4,0,0,0,84,64,84,4,84,0,0,0,84,64,84,68,84,0,0
         !byte 0,84,4,16,16,16,0,0,0,84,68,84,68,84,0,0,0,84,68,84,4,84,0,0,0,16,68,84,68,68,0,0
         !byte 0,80,68,80,68,80,0,0,0,84,64,64,64,84,0,0,0,80,68,68,68,80,0,0,0,84,64,80,64,84,0,0
-        !byte 0,84,64,80,64,64,0,0,0,68,68,16,68,68,0,0,0,68,68,16,16,16,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,84,64,80,64,64,0,0,0,68,68,16,68,68,0,0,0,68,68,16,16,16,0,0,149,149,149,149,149,149,149,149
+        !byte 101,101,101,101,101,101,101,101,89,89,89,89,89,89,89,89,86,86,86,86,86,86,86,86,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -1744,13 +2066,57 @@ runST: !byte 0,34,34,34,34,34,34,0,35,35,35,35,35,35,35,0,0,0,0,0,0,0,0,0,0,0,0,
         !byte 0,0,84,4,84,4,84,0,0,0,4,4,84,68,68,0,0,0,84,4,84,64,84,0,0,0,84,68,84,64,84,0
         !byte 0,0,16,16,16,4,84,0,0,0,84,68,84,68,84,0,0,0,84,4,84,68,84,0,0,0,68,68,84,68,16,0
         !byte 0,0,80,68,80,68,80,0,0,0,84,64,64,64,84,0,0,0,80,68,68,68,80,0,0,0,84,64,80,64,84,0
-        !byte 0,0,64,64,80,64,84,0,0,0,68,68,16,68,68,0,0,0,16,16,16,68,68,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,64,64,80,64,84,0,0,0,68,68,16,68,68,0,0,0,16,16,16,68,68,0,149,149,149,149,149,149,149,149
+        !byte 101,101,101,101,101,101,101,101,89,89,89,89,89,89,89,89,86,86,86,86,86,86,86,86,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
         * = $4000  ; VIC bank 0 is full -- these live above it
+absCosT: !byte 255,255,255,255,255,254,253,252,251,250,248,247,245,243,241,239,237,234,231,229,226,223,220,216
+        !byte 213,209,206,202,198,194,190,185,181,177,172,167,162,157,152,147,142,137,132,126,121,115,109,104
+        !byte 98,92,86,80,74,68,62,56,50,44,38,31,25,19,13,6,0,6,13,19,25,31,38,44
+        !byte 50,56,62,68,74,80,86,92,98,104,109,115,121,126,132,137,142,147,152,157,162,167,172,177
+        !byte 181,185,190,194,198,202,206,209,213,216,220,223,226,229,231,234,237,239,241,243,245,247,248,250
+        !byte 251,252,253,254,255,255,255,255,255,255,255,255,255,254,253,252,251,250,248,247,245,243,241,239
+        !byte 237,234,231,229,226,223,220,216,213,209,206,202,198,194,190,185,181,177,172,167,162,157,152,147
+        !byte 142,137,132,126,121,115,109,104,98,92,86,80,74,68,62,56,50,44,38,31,25,19,13,6
+        !byte 0,6,13,19,25,31,38,44,50,56,62,68,74,80,86,92,98,104,109,115,121,126,132,137
+        !byte 142,147,152,157,162,167,172,177,181,185,190,194,198,202,206,209,213,216,220,223,226,229,231,234
+        !byte 237,239,241,243,245,247,248,250,251,252,253,254,255,255,255,255
+absSinT: !byte 0,6,13,19,25,31,38,44,50,56,62,68,74,80,86,92,98,104,109,115,121,126,132,137
+        !byte 142,147,152,157,162,167,172,177,181,185,190,194,198,202,206,209,213,216,220,223,226,229,231,234
+        !byte 237,239,241,243,245,247,248,250,251,252,253,254,255,255,255,255,255,255,255,255,255,254,253,252
+        !byte 251,250,248,247,245,243,241,239,237,234,231,229,226,223,220,216,213,209,206,202,198,194,190,185
+        !byte 181,177,172,167,162,157,152,147,142,137,132,126,121,115,109,104,98,92,86,80,74,68,62,56
+        !byte 50,44,38,31,25,19,13,6,0,6,13,19,25,31,38,44,50,56,62,68,74,80,86,92
+        !byte 98,104,109,115,121,126,132,137,142,147,152,157,162,167,172,177,181,185,190,194,198,202,206,209
+        !byte 213,216,220,223,226,229,231,234,237,239,241,243,245,247,248,250,251,252,253,254,255,255,255,255
+        !byte 255,255,255,255,255,254,253,252,251,250,248,247,245,243,241,239,237,234,231,229,226,223,220,216
+        !byte 213,209,206,202,198,194,190,185,181,177,172,167,162,157,152,147,142,137,132,126,121,115,109,104
+        !byte 98,92,86,80,74,68,62,56,50,44,38,31,25,19,13,6
+recipLoT: !byte 255,255,0,85,0,51,171,146,0,114,154,70,85,177,73,17,0,15,57,121,205,49,163,33
+        !byte 171,61,217,123,37,212,137,66,0,194,136,80,28,235,189,144,102,62,24,244,209,176,145,114
+        !byte 85,57,31,5,236,213,190,168,146,126,106,87,68,50,33,16,0,240,225,210,196,182,168,155
+        !byte 142,130,118,106,94,83,72,62,51,41,31,22,12,3,250,241,233,224,216,208,200,193,185,178
+        !byte 171,164,157,150,143,137,131,124,118,112,106,100,95,89,84,78,73,68,63,58,53,48,43,39
+        !byte 34,30,25,21,17,12,8,4,0,252,248,244,240,237,233,229,226,222,219,215,212,209,206,202
+        !byte 199,196,193,190,187,184,181,178,175,172,170,167,164,161,159,156,154,151,149,146,144,141,139,136
+        !byte 134,132,130,127,125,123,121,118,116,114,112,110,108,106,104,102,100,98,96,94,93,91,89,87
+        !byte 85,84,82,80,78,77,75,73,72,70,68,67,65,64,62,61,59,58,56,55,53,52,50,49
+        !byte 47,46,45,43,42,41,39,38,37,35,34,33,31,30,29,28,26,25,24,23,22,21,19,18
+        !byte 17,16,15,14,13,11,10,9,8,7,6,5,4,3,2,1
+recipHiT: !byte 255,255,128,85,64,51,42,36,32,28,25,23,21,19,18,17,16,15,14,13,12,12,11,11
+        !byte 10,10,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5
+        !byte 5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3
+        !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2
+        !byte 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
+        !byte 2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 clampT: !byte 2,3,4,5,6,7,8,9,10,11,12,12,12,12,12,12,12,12,12,12,12,12,12,12
         !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
         !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12

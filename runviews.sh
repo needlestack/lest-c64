@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run every view in views.txt through build -> VICE -> verify-render.
+# Run every view in views.txt through build -> VICE -> verify-render (+ verify-seams).
 # $1 = tag for the output files (e.g. "steep" or "base")
 set -u
 S=${SHOTDIR:-/tmp/c64fps-shots}
@@ -17,4 +17,9 @@ while read -r PX PY PA rest; do
   if [ ! -f "$S/$TAG-$n.png" ]; then echo "$n VICE FAILED"; continue; fi
   R=$(node verify-render.mjs "$S/$TAG-$n.png" "$PX" "$PY" "$PA" 2>&1 | tail -1)
   echo "$n  $PX $PY $PA  |  $R"
+  # verify-render counts a white seam pixel as "not wall", so with seams on its number is
+  # inflated by design; verify-seams is the one that actually judges them.
+  if [ "${SEAMS:-1}" != "0" ]; then
+    node verify-seams.mjs "$S/$TAG-$n.png" "$PX" "$PY" "$PA" 2>&1 | tail -n +2 | sed 's/^/     /'
+  fi
 done < views.txt

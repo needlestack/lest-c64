@@ -168,8 +168,22 @@ for (let g = 0; g < NGLYPH; g++) {
   glyphs.push([...Array(8)].map((_, i) => { const r = (i >= 1 && i <= 5) ? rows[i - 1] : 0;
     return ((r >> 2 & 1) ? 0x40 : 0) | ((r >> 1 & 1) ? 0x10 : 0) | ((r & 1) ? 0x04 : 0); }));
 }
-if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs = ${glyphs.length} > 256`);
-console.error(`charset: ${CELLCODES} cell patterns + ${NGLYPH} readout glyphs = ${glyphs.length}/256`);
+// Panel seams: a fully-solid cell with one logical pixel knocked out to bit pair 10.
+// Only two of the four multicolor pair values were in use (00 = $d021 ceiling/floor,
+// 01 = $d022 wall), so the seam gets a colour register of its own and can be retuned
+// later without touching a single charset entry.
+//
+// Four codes, one per pixel position -- and ONLY on the solid cell. A seam variant of the
+// ramp/step cells would be 4 x 221 patterns, so the seam starts one cell row below the
+// wall top. Every row is identical, which makes the pattern its own vertical mirror and
+// keeps the flipped fontB free.
+const SEAM0 = glyphs.length;
+for (let k = 0; k < 4; k++) {
+  const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : 1) << (6 - 2 * i)), 0);
+  glyphs.push(new Array(8).fill(row));
+}
+if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
+console.error(`charset: ${CELLCODES} cell patterns + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256`);
 // charset A, and charset B = every glyph flipped vertically. The raster split at the
 // horizon selects B for the bottom half, so ONE char code renders as its own mirror
 // there -- renderSym writes the identical byte to both halves and needs no flip table.
@@ -256,6 +270,11 @@ const PY = hexArg('PY', 0x0180, 0xffff);
 // by the same byte, so turning cannot be made smooth by shrinking this, only coarser by
 // growing it. 6/256 = 8.4 degrees per frame.
 const TURN_STEP = 6;                    // was 3; 2x
+// Panel seams are a look, not a diagnostic: SEAMS=0 compiles every trace of them out --
+// the charset entries, the projection pass and the per-cell table -- so the disabled build
+// costs exactly what it did before the feature existed.
+const SEAMS = process.env.SEAMS !== '0';
+if (!SEAMS) DIAG.push('SEAMS=0');
 const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
 const STRAFE = flag('STRAFE'); // auto-strafe (parallel to walls)
 const BACK = flag('BACK');     // auto-walk backward
@@ -277,6 +296,17 @@ const CHARSET = 0x2800;                 // charset A: upright glyphs, used above
 const FTABLES = 0x3000;                 // f0Lo/f0Hi/f1Lo/f1Hi + run-id tables
 const CHARSET_B = 0x3800;               // charset B: every glyph flipped vertically
 const NEWTABLES = 0x4000;               // clampT / rampT / stepT, outside VIC bank 0
+// Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
+// coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
+// solve needs into another one. 1024 bytes, all above VIC bank 0.
+const absCos = [], absSin = [];
+for (let a = 0; a < 256; a++) {
+  absCos.push(Math.min(255, Math.round(Math.abs(Math.cos(a / 256 * 2 * Math.PI)) * 256)));
+  absSin.push(Math.min(255, Math.round(Math.abs(Math.sin(a / 256 * 2 * Math.PI)) * 256)));
+}
+const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
+for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
+  recipLo.push(v & 255); recipHi.push(v >> 8); }
 const HTABLE = 0x4800;                  // page-aligned: 16 height tables x 3 pages
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
 const vm = scr => (scr >> 10) << 4;
@@ -395,6 +425,29 @@ cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incre
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
 errH    = $86                   ; high byte of the interpolator's error term
+uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
+uwH     = $21
+skL     = $87                   ; --- seam pass scratch, all dead outside seamSpan ---
+skH     = $88                   ; the seam's world coordinate k, as 8.8
+uaL     = $89                   ; u at spanL / spanR
+uaH     = $8a
+ubL     = $8b
+ubH     = $8c
+saL     = $8d                   ; |u_L - k| and |u_R - k|, squeezed to 8 bits
+saH     = $8e
+sbL     = $8f
+sbH     = $90
+sPlo    = $91                   ; P = a*h_L, and the running sum P+Q
+sPhi    = $92
+sSlo    = $93
+sShi    = $94
+ssK     = $95                   ; current boundary coordinate, and how many are left
+ssN     = $96
+ssW     = $97                   ; span width in columns
+mp      = $98                   ; mul8 operands / product
+mq      = $99
+plo     = $9a
+phi     = $9b
 cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
@@ -411,6 +464,10 @@ capH    = $c500                 ; colH capped at 100, filled by prepCells
 cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
 cmxT    = $c640                 ; per cell-column (40): max
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
+seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
+                                ;   SOLID, or a seam variant when a panel line lands here
+uLoT    = $c700                 ; per marched column: the hit's coordinate ALONG the wall,
+uHiT    = $c800                 ;   8.8 cells. Only marched columns hold anything valid.
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -433,6 +490,8 @@ entry:
         sta $d021               ; 00 = white  (ceiling / floor)
         lda #$00
         sta $d022               ; 01 = black  (wall)
+        lda #$01
+        sta $d023               ; 10 = white  (panel seam; unused when SEAMS=0)
         lda #$00
         sta $d020
         lda #$ff
@@ -499,7 +558,13 @@ ${NORAY ? '        jmp subDn' : ''}
         lda #$00
 csClr:  sta cstepT,x
         dex
-        bpl csClr
+        bpl csClr${SEAMS ? `
+        ldx #${NCELL - 1}       ; and every cell back to a plain solid fill
+        lda #${hx(SOLID)}
+smClr:  sta seamT,x
+        dex
+        bpl smClr` : ''}
+        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta col
         jsr marchCol            ; column 0
         lda #${NLOG - 1}
@@ -546,7 +611,7 @@ subLp:  ldx sp
         cmp tmp2
         bne subSp
         jsr interpSpan          ; same face -> merge (interpolate interior)
-        jmp subLp
+${SEAMS ? '        jsr seamSpan            ; and drop a panel line on each cell boundary it crossed\n' : ''}        jmp subLp
         ; The face changes somewhere in this span. Once the span is a single column wide the
         ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
         ; so record it straight into cstepT. The old route was to write a face id into all
@@ -558,6 +623,22 @@ subFace:lda spanR
         sbc spanL
         cmp #$02
         bcs subMid              ; still wide -> split further
+${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no projection at
+        ; all -- it is simply the column we just found. Do it before the k=0 bail below:
+        ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
+        lda spanR
+        lsr
+        lsr
+        tax
+        lda seamT,x
+        cmp #${hx(SOLID)}
+        bne subCn               ; a line is already claimed in this cell; one per char code
+        lda spanR
+        and #$03
+        clc
+        adc #${hx(SEAM0)}
+        sta seamT,x
+subCn:` : ''}
         lda spanR
         and #$03
         beq subLp               ; boundary on a cell edge: the two cells simply differ, and
@@ -826,7 +907,7 @@ rfSolid:lda rsv
         lda sldHiT,y
         sta jv+1
         ldx colc
-        lda #${hx(SOLID)}
+        ${SEAMS ? 'lda seamT,x             ; SOLID, or this column\'s seam variant' : `lda #${hx(SOLID)}`}
         jmp (jv)                ; -> ascending chain -> jmp rfNext
 rfNext: ldx colc
         dex
@@ -1158,7 +1239,222 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
 mvBlk:  sec
         rts
 
-; ================= march one column: cast + store colH/idT =================
+${SEAMS ? `; ================= seamSpan: project this face's cell boundaries to columns =========
+; The span runs along ONE flat face, so u (the coordinate along it) is monotonic and every
+; integer strictly between u[spanL] and u[spanR] is a cell boundary the wall crosses.
+;
+; Screen position of one: 1/z is linear in screen column -- that is exactly why the height
+; merge is exact -- and u = (u/z)/(1/z) with u/z also linear. Writing h for colH (which IS
+; 1/z up to a constant), a = |u_L - k| and b = |u_R - k|, the split falls at
+;
+;     c = spanL + (spanR - spanL) * h_L*a / (h_L*a + h_R*b)
+;
+; one divide per seam, no extra rays and no per-column work. Everything below is that.
+seamSpan:
+        lda spanR
+        sec
+        sbc spanL
+        cmp #$02
+        bcc ssDn                ; adjacent columns: nothing between them to mark
+        sta ssW                 ; span width in columns
+        ldx spanL
+        lda uLoT,x
+        sta uaL
+        lda uHiT,x
+        sta uaH
+        ldx spanR
+        lda uLoT,x
+        sta ubL
+        lda uHiT,x
+        sta ubH
+        ; Walk the integer coordinates between the two ends. Direction first: the face can
+        ; run either way across the screen.
+        lda uaH
+        cmp ubH
+        beq ssDn                ; same cell, no boundary crossed -- the common case
+        bcc ssUp
+        ; descending: boundaries at uaH, uaH-1, ... ubH+1
+        lda uaH
+        sta ssK
+        lda uaH
+        sec
+        sbc ubH
+        jmp ssCnt
+ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
+        clc
+        adc #$01
+        sta ssK
+        lda ubH
+        sec
+        sbc uaH
+ssCnt:  cmp #17
+        bcs ssDn                ; more than 16 cells of wall in one span means u is junk
+        sta ssN                 ; (castRay's far/guard exits leave remL/remH meaningless)
+ssLp:   jsr seamOne
+        dec ssN
+        beq ssDn
+        lda uaH                 ; step k toward the far end
+        cmp ubH
+        bcc ssKup
+        dec ssK
+        jmp ssLp
+ssKup:  inc ssK
+        jmp ssLp
+ssDn:   rts
+
+; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
+seamOne:
+        lda #$00                ; k as 8.8
+        sta skL
+        lda ssK
+        sta skH
+        sec                     ; a = |u_L - k|
+        lda uaL
+        sbc skL
+        sta saL
+        lda uaH
+        sbc skH
+        sta saH
+        bcs ssaP
+        sec                     ; negate
+        lda #$00
+        sbc saL
+        sta saL
+        lda #$00
+        sbc saH
+        sta saH
+ssaP:   sec                     ; b = |u_R - k|
+        lda ubL
+        sbc skL
+        sta sbL
+        lda ubH
+        sbc skH
+        sta sbH
+        bcs ssbP
+        sec
+        lda #$00
+        sbc sbL
+        sta sbL
+        lda #$00
+        sbc sbH
+        sta sbH
+        ; Squeeze a and b down to 8 bits together, so their ratio survives. The larger keeps
+        ; its top bit; the smaller may collapse to 0, which is the right limit anyway -- a
+        ; seam sitting on an endpoint belongs at that endpoint.
+ssbP:   lda saH
+        ora sbH
+        beq ssFit
+        lsr saH
+        ror saL
+        lsr sbH
+        ror sbL
+        jmp ssbP
+ssFit:  ldx spanL               ; P = a * h_L, Q = b * h_R, both 8x8 -> 16
+        lda colH,x
+        sta mq
+        lda saL
+        jsr mul8
+        lda plo
+        sta sPlo
+        lda phi
+        sta sPhi
+        ldx spanR
+        lda colH,x
+        sta mq
+        lda sbL
+        jsr mul8
+        clc                     ; sum = P + Q
+        lda plo
+        adc sPlo
+        sta sSlo
+        lda phi
+        adc sPhi
+        sta sShi
+        bcc ssNrm
+        ror sShi                ; a 17-bit sum: fold the carry back in, P follows below
+        ror sSlo
+        lsr sPhi
+        ror sPlo
+ssNrm:  lda sShi                ; scale P and sum until the sum is a byte: recip is indexed by it
+        beq ssDiv
+        lsr sShi
+        ror sSlo
+        lsr sPhi
+        ror sPlo
+        jmp ssNrm
+ssDiv:  lda sSlo
+        beq ssOne               ; degenerate (zero-length wall): leave it alone
+        tax
+        lda sPlo                ; t = P*256/sum, via one reciprocal multiply
+        sta fr
+        lda recipLoT,x
+        sta mlo
+        lda recipHiT,x
+        sta mhi
+        jsr sideMul
+        lda s2
+        beq ssT8
+        lda #$ff                ; t saturated at 1.0
+        jmp ssOff
+ssT8:   lda s1
+ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
+        lda ssW
+        jsr mul8
+        lda plo                 ; round to nearest column: truncating biased every seam a
+        cmp #$80                ; column low, which reads as the whole wall being off by one
+        lda phi
+        adc #$00
+        clc
+        adc spanL
+        cmp #${NLOG}
+        bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
+        tay                     ; Y = the seam's logical column
+        tya
+        lsr
+        lsr
+        tax                     ; cell column
+        lda seamT,x
+        cmp #${hx(SOLID)}
+        bne ssOne               ; already spoken for: one line per char code
+        tya
+        and #$03
+        clc
+        adc #${hx(SEAM0)}
+        sta seamT,x
+ssOne:  rts
+
+; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
+mul8:   sta mp
+        clc
+        adc mq
+        tax
+        bcc m8l0
+        lda f1LoT,x
+        sta plo
+        lda f1HiT,x
+        sta phi
+        jmp m8l1
+m8l0:   lda f0LoT,x
+        sta plo
+        lda f0HiT,x
+        sta phi
+m8l1:   lda mp
+        sec
+        sbc mq
+        bcs m8l2
+        eor #$ff
+        adc #$01
+m8l2:   tax
+        sec
+        lda plo
+        sbc f0LoT,x
+        sta plo
+        lda phi
+        sbc f0HiT,x
+        sta phi
+        rts
+
+` : ''}; ================= march one column: cast + store colH/idT =================
 marchCol:
         jsr castRay
         ldx col
@@ -1187,6 +1483,61 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
 friSo:  lda runST,y
 friSto: ldx col
         sta faceIdT,x
+${SEAMS ? `        ; --- u: where along the wall this ray landed, 8.8 cells ---
+        ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and
+        ; vice versa. u = p + d*dir, one sideMul: sideMul(fr, m) gives fr/256 * m, so feeding
+        ; it |cos| (or |sin|) as 0..255 against the 16-bit hit distance gives exactly d*|dir|.
+        ; Sign comes from the same posXT/posYT the DDA already used to pick its step.
+        lda remL
+        sta mlo
+        lda remH
+        sta mhi
+        ldx rang
+        lda side
+        bne muY
+        lda absSinT,x           ; x-face: u is the y coordinate
+        sta fr
+        jsr sideMul
+        ldx rang
+        lda posYT,x
+        bne muYp
+        sec                     ; ray heading -y: u = py - d*|sin|
+        lda py
+        sbc s1
+        sta uwL
+        lda py+1
+        sbc s2
+        jmp muSto
+muYp:   clc
+        lda py
+        adc s1
+        sta uwL
+        lda py+1
+        adc s2
+        jmp muSto
+muY:    lda absCosT,x           ; y-face: u is the x coordinate
+        sta fr
+        jsr sideMul
+        ldx rang
+        lda posXT,x
+        bne muXp
+        sec
+        lda px
+        sbc s1
+        sta uwL
+        lda px+1
+        sbc s2
+        jmp muSto
+muXp:   clc
+        lda px
+        adc s1
+        sta uwL
+        lda px+1
+        adc s2
+muSto:  ldx col
+        sta uHiT,x
+        lda uwL
+        sta uLoT,x` : ''}
         rts
 
 ; ===== interpolate colH linearly across a same-face span [spanL,spanR] (Bresenham) =====
@@ -1804,7 +2155,11 @@ runST: !byte ${runS.join(',')}
 ${chunk(fontB, 32)}
 
         * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
-clampT: ${chunk(clampT).trim()}
+${SEAMS ? `absCosT: ${chunk(absCos).trim()}
+absSinT: ${chunk(absSin).trim()}
+recipLoT: ${chunk(recipLo).trim()}
+recipHiT: ${chunk(recipHi).trim()}
+` : ''}clampT: ${chunk(clampT).trim()}
 qIdxT:  !byte ${qIdxT.join(',')}
 rampT:  ${chunk(rampT).trim()}
 stepT1: ${chunk(stepT[0]).trim()}
