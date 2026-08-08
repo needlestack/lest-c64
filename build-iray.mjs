@@ -705,7 +705,10 @@ for (let w = 7; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(1); ORBWIDE.
 // sprite's last row and the anchor is simply the sprite's height. No per-variant table of
 // hand-measured shadow positions any more.
 const ORBANCH = ORBEXP.map(e => e ? 42 : 21);
-const ORBBODY = [14, 10, 13];                    // light blue / light red / light green
+// The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
+// and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
+// ORBPAL=colour brings back light blue / light red / light green bodies.
+const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
 const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
 
 // Placement. Greedy over the open cells with a minimum spacing, which spreads them through
@@ -774,8 +777,10 @@ for (let cell = 0; cell < 256; cell++) {
 }
 if (candList.length > 0x2300 - 0x1900) throw new Error(
   `visibility lists are ${candList.length} bytes and would run into the step tables`);
-console.error(`orbs: ${ORBS.length} placed (${ORBBODY.map((_, c) =>
-  ORBS.filter(o => o.c === c).length).join('/')} by colour), visibility lists ` +
+const _pal = [...new Set(ORBBODY)].length === 1
+  ? `all body colour ${ORBBODY[0]}`
+  : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
+console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
   `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}`);
 const orbXL = ORBS.map(o => Math.round(o.x * 256) & 255), orbXH = ORBS.map(o => Math.round(o.x * 256) >> 8);
 const orbYL = ORBS.map(o => Math.round(o.y * 256) & 255), orbYH = ORBS.map(o => Math.round(o.y * 256) >> 8);
