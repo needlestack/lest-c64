@@ -177,22 +177,10 @@ const patBytes = p => [...Array(8)].map((_, i) =>
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
 
-// ---- two patterns per char code, picked apart by colour RAM ----
-// Only bit pairs 00 and 01 were carrying shape. 11 reads colour RAM, which is PER CELL, so
-// one code can hold two patterns: 01 where both are black, 00 where both are white, and 11
-// where they differ. Set that cell's colour RAM to black and you get the fuller pattern,
-// white and you get the sparser one.
-//
-// They have to NEST for this to work -- one pattern's black pixels must contain the
-// other's. Cell patterns are four fill heights measured from the bottom, and ramps are
-// monotone staircases, so adjacent offsets of the same slope nest almost by construction:
-// 139 ramp patterns collapse to 70 codes, 96 step patterns to 49. That halving is what pays
-// for widening the clamp from 13 levels to 16.
-const nests = (p, q) => p.every((v, i) => v >= q[i]);
-// Which patterns actually occur? Pairing costs a colour-RAM write at every cell that uses a
-// paired code, so spend the pairing on the ones the map never produces. Widening the clamp
-// added patterns that only arise from very steep slopes -- most are unreachable in practice,
-// so pairing just enough of THOSE to fit 256 leaves the common cells writing nothing at all.
+// Which patterns actually occur? The charset cannot hold every ramp and step the clamp can
+// express, so the sampler decides what is worth a code and what gets dropped (see placeAll).
+// Widening the clamp to 16 levels added patterns that only arise from very steep slopes, and
+// most of those are unreachable in practice.
 function patternFreq() {
   const f = new Map(), TH = Math.tan(FOV / 2 / 256 * 2 * Math.PI), CT = (NLOG - 1) / 2;
   const cx = c => (c - CT) / CT * TH;
@@ -279,13 +267,22 @@ const stepStats = [new Map(), new Map(), new Map()];     // per boundary positio
 let oldErr = 0;   // what the flat-plateau scheme would have cost, for an honest comparison
 const { f: PFREQ, frames: PFRAMES } = patternFreq();
 const SFRAMES = PFRAMES.length;
-const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
-  [0, 1, 2, 3].reduce((b, j) => b | ((lo[j] > 7 - i ? 1 : hi[j] > 7 - i ? 3 : 0) << (6 - 2 * j)), 0));
-// colOf: pattern -> 0 (needs colour RAM black) or 1 (white). codeOf gives the char code.
-const colOf = new Map();
-// Everything is placed unpaired first; then just enough of the least-used patterns are
-// folded together to fit 256. A pattern that stays unpaired has colour 0, which the
-// renderer reads as "no colour-RAM write needed" and skips entirely.
+// Over budget: drop patterns rather than fold two into one code.
+//
+// This used to pair patterns via colour RAM -- bit pair 11 reads colour RAM per cell, so one
+// code could hold two nesting patterns and a per-cell write picked which. It bought the
+// clamp widening from 13 levels to 16. Then frequency-aware placement spent the pairing
+// entirely on patterns the map never produces, so no cell ever needed the write... and the
+// mechanism was still costing ~300 cycles a frame and ~1500 bytes to test a condition that
+// was always false, in order to save ONE code. Ripped out 2026-08-08. If a future charset
+// genuinely needs two patterns per code, it is in the history at 66bc8cf.
+//
+// What is lost: pairing was safe under sampling error. An unsampled pattern still rendered
+// correctly, it just cost a write. A DROPPED pattern renders as its nearest neighbour, so a
+// frame the sampler never visited can show one wrong cell. Hence dropPenalty below (drop the
+// patterns whose nearest survivor is closest, so even a miss is off by as little as possible)
+// and the hard guard that a dropped pattern must never have been sampled at all.
+const dropped = [];
 function placeAll(groups) {
   const all = [];
   for (const g of groups) for (const p of g)
@@ -294,52 +291,37 @@ function placeAll(groups) {
   const unused = all.filter(p => !PFREQ.get(p.join(',')));
   console.error(`  patterns: ${all.length} distinct, ${BUDGET} codes available ` +
                 `(over by ${all.length - BUDGET}); ${unused.length} never sampled`);
-  let need = all.length - BUDGET + 5;                // +5 so a map change does not overflow
-  const order = all.map((p, i) => i)
-    .sort((a, b) => (PFREQ.get(all[a].join(',')) || 0) - (PFREQ.get(all[b].join(',')) || 0));
-  const mate = new Array(all.length).fill(-1);
-  let made = 0;
-  for (const i of order) {
-    if (made >= need) break;
-    if (mate[i] !== -1) continue;
-    let best = -1, bf = Infinity;
-    for (const j of order) {
-      if (j === i || mate[j] !== -1) continue;
-      if (!(nests(all[i], all[j]) || nests(all[j], all[i]))) continue;
-      const f = PFREQ.get(all[j].join(',')) || 0;
-      if (f < bf) { bf = f; best = j; }
-    }
-    if (best >= 0) { mate[i] = best; mate[best] = i; made++; }
+  // Keep 4 codes spare so a small map edit does not immediately overflow the charset.
+  let need = Math.max(0, all.length - BUDGET + 4);
+  if (need) {
+    // Only ever drop never-sampled patterns, cheapest first: cheap = some OTHER pattern in
+    // the set is nearly identical, so if this one does turn up the cell is barely wrong.
+    const keep = new Set(all.map(p => p.join(',')));
+    const rank = unused.map(p => {
+      let d = 9; for (const q of all) { if (q === p) continue;
+        const h = hamm(p, q); if (h < d) d = h; }
+      return { p, d };
+    }).sort((a, b) => a.d - b.d);
+    if (rank.length < need) throw new Error(
+      `charset overflow: need to drop ${need} patterns but only ${rank.length} are unsampled`);
+    for (let i = 0; i < need; i++) { dropped.push(rank[i].p); keep.delete(rank[i].p.join(',')); }
+    for (let i = all.length - 1; i >= 0; i--) if (!keep.has(all[i].join(','))) all.splice(i, 1);
   }
-  let hot = 0;
-  const done = new Set();
-  for (let i = 0; i < all.length; i++) {
-    if (done.has(i)) continue;
-    const j = mate[i];
-    if (j === -1) { const c = glyphs.length; glyphs.push(patBytes(all[i]));
-      codeOf.set(all[i].join(','), c); colOf.set(all[i].join(','), 0); done.add(i); continue; }
-    done.add(i); done.add(j);
-    const [hi, lo] = nests(all[i], all[j]) ? [all[i], all[j]] : [all[j], all[i]];
-    const c = glyphs.length; glyphs.push(pairBytes(hi, lo));
-    codeOf.set(hi.join(','), c); colOf.set(hi.join(','), 8);   // black -> the fuller pattern
-    codeOf.set(lo.join(','), c); colOf.set(lo.join(','), 9);   // white -> the sparser one
-    hot += (PFREQ.get(hi.join(',')) || 0) + (PFREQ.get(lo.join(',')) || 0);
-  }
-  const tot = [...PFREQ.values()].reduce((a, b) => a + b, 0);
-  // The average is reassuring but the queue is a per-FRAME resource: renderSym drops colour
-  // writes past 80 in a frame, silently, which would show as a wrongly-shaded cell. So report
-  // the worst sampled frame and fail the build if it is anywhere near the cap.
-  let worst = 0;
-  for (const fr of PFRAMES) {
-    let n = 0; for (const k of fr) if (colOf.get(k)) n++;
-    if (n > worst) worst = n;
-  }
-  console.error(`  pairing: ${made} pairs, ${(100 * hot / tot).toFixed(2)}% of sampled cells ` +
-                `need a colour-RAM write (worst frame ${worst} of the 80-entry queue)`);
-  if (worst > 60) throw new Error(
-    `colour queue: worst sampled frame needs ${worst} writes, cap is 80 -- raise the cap or ` +
-    `pair fewer patterns`);
+  for (const p of all) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p)); }
+  console.error(`  dropped ${dropped.length} never-sampled patterns` +
+    (dropped.length ? ` (worst substitution is ${Math.max(...dropped.map(p => {
+      let d = 9; for (const q of all) { const h = hamm(p, q); if (h < d) d = h; } return d; }))}` +
+      ` logical columns off, and only in a frame the sampler never visited)` : ''));
 }
+// codeFor: a dropped pattern falls back to the closest survivor. Table build time only --
+// the 6502 never sees this, it just reads a code out of rampT/stepT.
+const codeFor = p => {
+  const c = codeOf.get(p.join(',')); if (c !== undefined) return c;
+  let bd = 9, bp = null;
+  for (const [k] of codeOf) { const q = k.split(',').map(Number);
+    const h = hamm(p, q); if (h < bd) { bd = h; bp = k; } }
+  return codeOf.get(bp);
+};
 const rampsAll = [];
 for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) rampsAll.push(rampPat(a, b));
 
@@ -425,7 +407,6 @@ console.error(`  step patterns: ${LA}/${LM}/${LB} levels, ${STEPS.nslots} ` +
   `${(STEPS.after / SFRAMES).toFixed(3)} wrong cols/frame (flat plateau -> sloped)`);
 placeAll([rampsAll, STEPS.chosen]);
 const CELLCODES = glyphs.length;
-const colFor = p => colOf.get(p.join(',')) ?? 0;
 const GLYPH0 = glyphs.length;                   // first readout glyph code
 for (let g = 0; g < NGLYPH; g++) {
   const rows = digGlyph.slice(g * 5, g * 5 + 5);
@@ -447,7 +428,7 @@ for (let k = 0; k < 4; k++) {
   glyphs.push(new Array(8).fill(row));
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
-console.error(`charset: ${CELLCODES} cell codes (paired via colour RAM) + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256`);
+console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
@@ -459,20 +440,16 @@ const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
 for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
-const rampT = new Array(CN * 16).fill(0), rampCT = new Array(CN * 16).fill(0);
+const rampT = new Array(CN * 16).fill(0);
 for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
   const p = rampPat(a + CLO, b + CLO);
-  rampT[a * 16 + b] = codeOf.get(p.join(','));
-  rampCT[a * 16 + b] = colFor(p);               // 0 = unpaired, no write needed
+  rampT[a * 16 + b] = codeFor(p);
 }
 // stepT<k>[qA*36 + qM*6 + qB] -> char code, for a cell whose face boundary falls at column
 // k. qM is the level at the LAST column before the boundary: that third sample is what lets
 // the plateau slope down to meet the corner instead of capping it flat.
 const stepT = [0, 1, 2].map(k => { const t = new Array(LA * LM * LB).fill(0);
-  for (const [slot, p] of STEPS.assign[k]) t[slot] = codeOf.get(p.join(','));
-  return t; });
-const stepCT = [0, 1, 2].map(k => { const t = new Array(LA * LM * LB).fill(0);
-  for (const [slot, p] of STEPS.assign[k]) t[slot] = colFor(p);
+  for (const [slot, p] of STEPS.assign[k]) t[slot] = codeFor(p);
   return t; });
 // qmT[qA*8 + qM] = qA*36 + qM*6. The 6502 has no multiply, and folding both scales into one
 // lookup keeps the whole index inside a byte (max 5*36 + 5*6 + 5 = 215), so the table stays
@@ -532,16 +509,6 @@ const ROWSD = [...Array(13)].map((_, i) => 12 - i), ROWSA = [...Array(13)].map((
 // into the operand, X supplying the column -- while the edge path used to hand-build two
 // 16-bit pointers to write the same two bytes, 42 cycles a character against 5. These give
 // the edge cell the same deal.
-// Colour RAM is SHARED between the two screen buffers, so writing it during renderSym
-// corrupts the frame still on screen -- edges flickered and stray black blocks appeared for
-// single frames. The writes are collected instead and flushed after the buffer flip, in the
-// window between raster 250 and the next frame's first visible line, where the display is
-// not reading colour RAM at all.
-const cflushSrc = () => ROWSA.map(r => {
-  const a = 0xd800 + r * 40, b = 0xd800 + (24 - r) * 40;
-  return `cfA${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`) + `\n\tjmp cfLp`;
-}).join('\n');
-const cflushEnt = sel => [...ROWSA.map(r => `${sel}cfA${r}`), '0'].join(',');
 const edgeSrc = (nm, base) => ROWSA.map(r => {
   const a = base + r * 40, b = base + (24 - r) * 40;
   return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`) +
@@ -776,10 +743,6 @@ ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
 ecode   = $1b
-ecol    = $09
-ncf     = $3b                   ; queued colour-RAM writes
-cfCc    = $3e
-cfVv    = $3f                   ; colour RAM for this edge cell: $08 black, $09 white                   ; the edge cell's char code, parked while the store
                                 ;   stub's address is looked up
 colc    = $75                   ; cell column, parked while the chains own X
 rbv     = $76                   ; first cell row that is not fully ceiling
@@ -857,9 +820,6 @@ pfRow   = $c92a
 pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
-cfRow   = $cb00                 ; queued colour writes: row, cell column, value
-cfCol   = $cb60
-cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -894,8 +854,10 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
-        lda #$08                ; bit3 = per-cell multicolor enable (colour bits unused: we
-                                ; only ever emit bit pairs 00 and 01, i.e. $d021/$d022)
+        lda #$08                ; bit3 = per-cell multicolor enable. The low three bits are
+                                ; the bit-pair-11 colour, and nothing emits 11 any more --
+                                ; shape comes from 00/01 and seams from 10 -- so this is
+                                ; written once at startup and never touched again.
 ccf:    sta $d800,x
         sta $d900,x
         sta $da00,x
@@ -1194,26 +1156,7 @@ mshB:   lda #${hx(vm(SCR_B))}
         sta d018vm              ; show B, draw into A
         lda #${hx(SCR_A >> 8)}
         sta baseHi
-        ; ---- flush the queued colour RAM: the flip is done and the raster is past the
-        ; ---- visible area, so nothing is reading colour RAM right now
-mnext:
-cfLp:   ldx ncf
-        beq cfDn
-        dex
-        stx ncf
-        lda cfCol,x
-        sta cfCc
-        lda cfVal,x
-        sta cfVv
-        ldy cfRow,x
-        lda cfELoT,y
-        sta jv
-        lda cfEHiT,y
-        sta jv+1
-        ldx cfCc
-        lda cfVv
-        jmp (jv)                ; -> cfA<row> -> two stores -> jmp cfLp
-cfDn:   inc iterLo
+mnext:  inc iterLo
         bne mloop
         inc iterHi
         jmp mloop
@@ -1384,8 +1327,6 @@ rfCp3:  clc
         lda hh0                 ; single face: ramp, index = wL*16 + wR
         ora hh1                 ; hh0 is already <<4, straight from clmp16
         tay
-        lda rampCT,y            ; one code holds two patterns; colour RAM picks which
-        sta ecol
         lda rampT,y
         jmp rfStore             ; (the ramp is the common case; see rfStore below)
         ; A face boundary inside the cell -- a genuinely vertical step, whose position the
@@ -1434,35 +1375,17 @@ rfMc:   clc
         cmp #$02
         beq rfSt2
         bcs rfSt3
-        lda stepC1,y
-        sta ecol
         lda stepT1,y
         jmp rfStore
-rfSt2:  lda stepC2,y
-        sta ecol
-        lda stepT2,y
+rfSt2:  lda stepT2,y
         jmp rfStore
-rfSt3:  lda stepC3,y
-        sta ecol
-        lda stepT3,y
+rfSt3:  lda stepT3,y
         ; Store it at this row and its mirror. This used to hand-build two 16-bit pointers
         ; -- rowLoT/rowHiT + colc with the carry, twice -- and store through them: 85 cycles
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
-        lda ecol                ; 0 = this code is unpaired, colour RAM is irrelevant to it.
-        beq rfNoQ               ; the pairing is spent on patterns the map never produces,
-        ldx ncf                 ; so in practice this branch is always taken
-        cpx #${NLOG / 2}
-        bcs rfNoQ
         lda erow
-        sta cfRow,x
-        lda colc
-        sta cfCol,x
-        lda ecol
-        sta cfVal,x
-        inc ncf
-rfNoQ:  lda erow
         clc
         adc bufOff
         tay
@@ -2748,8 +2671,6 @@ blkLoT: !byte ${blkEnt('<')}
 blkHiT: !byte ${blkEnt('>')}
 sldLoT: !byte ${sldEnt('<')}
 sldHiT: !byte ${sldEnt('>')}
-cfELoT: !byte ${cflushEnt('<')}
-cfEHiT: !byte ${cflushEnt('>')}
 edgLoT: !byte ${edgEnt('<')}
 edgHiT: !byte ${edgEnt('>')}
 t1TabT: !byte ${t1Tab.join(',')}
@@ -2777,14 +2698,12 @@ qIdxMT: !byte ${qIdxMT.join(',')}
 qIdxBT: !byte ${qIdxBT.join(',')}
 qmT:    !byte ${qmT.join(',')}
 rampT:  ${chunk(rampT).trim()}
-rampCT: ${chunk(rampCT).trim()}
 ${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
 ${chainSrc('bkB', SCR_B, ROWSD, 'rfEdge')}
 ${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
 ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
 ${edgeSrc('edA', SCR_A)}
 ${edgeSrc('edB', SCR_B)}
-${cflushSrc()}
 chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
@@ -2840,12 +2759,6 @@ stepT1: ${chunk(stepT[0]).trim()}
 stepT2: ${chunk(stepT[1]).trim()}
         * = ${hx16(RELOC + 0x1500)}
 stepT3: ${chunk(stepT[2]).trim()}
-        * = ${hx16(RELOC + 0x1600)}
-stepC1: ${chunk(stepCT[0]).trim()}
-        * = ${hx16(RELOC + 0x1700)}
-stepC2: ${chunk(stepCT[1]).trim()}
-        * = ${hx16(RELOC + 0x1800)}
-stepC3: ${chunk(stepCT[2]).trim()}
 
 ${PROFILE ? `        * = ${hx16(RELOC + 0x1900)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
