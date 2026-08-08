@@ -2542,7 +2542,13 @@ try {
   }
   // What is left in VIC bank 0. Sprite data has to live here, 64 bytes per sprite on a
   // 64-byte boundary, so this is the number that decides how many sprites are possible.
+  // $1000-$1fff is NOT usable for VIC data in banks 0 and 2: the VIC sees the character
+  // ROM there regardless of what RAM holds, so sprites or a charset placed in it would
+  // display the ROM font. Cut that window out of the free list.
+  const CHARROM = [0x1000, 0x2000];
   const gaps = [[r.labels.dataEnd, SCR_B], [CHARSET + 0x800, CHARSET_B]]
+    .flatMap(([lo, hi]) => (lo < CHARROM[1] && hi > CHARROM[0])
+      ? [[lo, Math.min(hi, CHARROM[0])], [Math.max(lo, CHARROM[1]), hi]] : [[lo, hi]])
     .map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
   const free = gaps.reduce((a, [lo, hi]) => a + (hi - lo), 0);
   console.log(`headroom below screen buffer B: ${SCR_B - r.labels.dataEnd} bytes`);
