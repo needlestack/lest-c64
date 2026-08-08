@@ -675,8 +675,14 @@ for (let cell = 0; cell < 256; cell++) {
   const x = cell & 15, y = cell >> 4;
   if (map[cell]) continue;
   const cx = x + 0.5, cy = y + 0.5;
+  // Line of sight from ANYWHERE in the cell, not just its centre. The player occupies the
+  // whole cell, and standing at one edge you can see round a corner the centre cannot -- which
+  // showed up as an orb popping in and out as you walked a corridor, present in cells 9 and 11
+  // and missing in 10. Sampling a 3x3 grid makes the list a superset of what is reachable.
+  const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
   const vis = ORBS.map((o, i) => ({ i, d: Math.hypot(o.x - cx, o.y - cy) }))
-    .filter(o => o.d < ORBSEE && losFree(cx, cy, ORBS[o.i].x, ORBS[o.i].y))
+    .filter(o => o.d < ORBSEE &&
+      eye.some(([ex, ey]) => losFree(ex, ey, ORBS[o.i].x, ORBS[o.i].y)))
     .sort((a, b) => a.d - b.d);
   // FULL ADDRESS, not an offset: the 6502 loads these straight into a pointer.
   const a = CANDBASE + candList.length;
@@ -696,6 +702,8 @@ for (let cell = 0; cell < 256; cell++) {
     candList.push(v.i, brg, win);
   }
 }
+if (candList.length > 0x2300 - 0x1800) throw new Error(
+  `visibility lists are ${candList.length} bytes and would run into the step tables`);
 console.error(`orbs: ${ORBS.length} placed (${ORBBODY.map((_, c) =>
   ORBS.filter(o => o.c === c).length).join('/')} by colour), visibility lists ` +
   `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}`);
@@ -3637,14 +3645,14 @@ candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it 
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = ${hx16(RELOC + 0x1f00)}
+        * = ${hx16(RELOC + 0x2300)}
 stepT1: ${chunk(stepT[0]).trim()}
-        * = ${hx16(RELOC + 0x2000)}
+        * = ${hx16(RELOC + 0x2400)}
 stepT2: ${chunk(stepT[1]).trim()}
-        * = ${hx16(RELOC + 0x2100)}
+        * = ${hx16(RELOC + 0x2500)}
 stepT3: ${chunk(stepT[2]).trim()}
 
-${PROFILE ? `        * = ${hx16(RELOC + 0x2200)}  ; the profiler lives above the relocated
+${PROFILE ? `        * = ${hx16(RELOC + 0x2600)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
