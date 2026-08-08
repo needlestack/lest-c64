@@ -132,7 +132,10 @@ for (let i = 256; i < 512; i++) { const v = Math.floor(i * i / 4); f1Lo.push(v &
 // three interior shapes the endpoints alone cannot separate (a step cannot be told from
 // a ramp by its endpoints). Straight-line interior sum is exactly wL+wR, which makes the
 // bulge test a subtraction: (w1+w2)-(w0+w3).
-const CLO = -2, CHI = 10, CN = CHI - CLO + 1;   // endpoint clamp range -> 13 levels
+const CLO = -3, CHI = 12, CN = CHI - CLO + 1;   // endpoint clamp range -> 16 levels.
+// 13 levels left 4.3% of edge-cell endpoints clamped -- that is what flattened steep slopes.
+// 16 covers 99.5%, and it is the widest range that keeps rampT's wL*16+wR index inside one
+// 256-byte page; 25 levels would reach 100% but needs a paged lookup for the last 0.5%.
 // Step levels are quantised. Walls are vertical prisms, so a face boundary is EXACTLY a
 // vertical line on screen and the renderer reads its position straight out of faceIdT --
 // no inference. But three step positions x a full 9x9 level cross product is 243 codes on
@@ -159,10 +162,54 @@ const patBytes = p => [...Array(8)].map((_, i) =>
   (p[0] > 7 - i ? 0x40 : 0) | (p[1] > 7 - i ? 0x10 : 0) | (p[2] > 7 - i ? 0x04 : 0) | (p[3] > 7 - i ? 0x01 : 0));
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
-for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) intern(rampPat(a, b));
+
+// ---- two patterns per char code, picked apart by colour RAM ----
+// Only bit pairs 00 and 01 were carrying shape. 11 reads colour RAM, which is PER CELL, so
+// one code can hold two patterns: 01 where both are black, 00 where both are white, and 11
+// where they differ. Set that cell's colour RAM to black and you get the fuller pattern,
+// white and you get the sparser one.
+//
+// They have to NEST for this to work -- one pattern's black pixels must contain the
+// other's. Cell patterns are four fill heights measured from the bottom, and ramps are
+// monotone staircases, so adjacent offsets of the same slope nest almost by construction:
+// 139 ramp patterns collapse to 70 codes, 96 step patterns to 49. That halving is what pays
+// for widening the clamp from 13 levels to 16.
+const nests = (p, q) => p.every((v, i) => v >= q[i]);
+const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
+  [0, 1, 2, 3].reduce((b, j) => b | ((lo[j] > 7 - i ? 1 : hi[j] > 7 - i ? 3 : 0) << (6 - 2 * j)), 0));
+// colOf: pattern -> 0 (needs colour RAM black) or 1 (white). codeOf gives the char code.
+const colOf = new Map();
+function pairAll(pats) {
+  const list = [...new Map(pats.map(p => [p.join(','), p])).values()]
+    .filter(p => !codeOf.has(p.join(',')));           // BLANK/SOLID already placed
+  const n = list.length, adj = [...Array(n)].map(() => []);
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++)
+    if (i !== j && (nests(list[i], list[j]) || nests(list[j], list[i]))) adj[i].push(j);
+  const mate = new Array(n).fill(-1);
+  for (let go = true; go;) { go = false;
+    for (let i = 0; i < n; i++) { if (mate[i] !== -1) continue;
+      for (const j of adj[i]) if (mate[j] === -1) { mate[i] = j; mate[j] = i; go = true; break; } } }
+  const done = new Set();
+  for (let i = 0; i < n; i++) {
+    if (done.has(i)) continue;
+    const j = mate[i];
+    if (j === -1) { const c = glyphs.length; glyphs.push(patBytes(list[i]));
+      codeOf.set(list[i].join(','), c); colOf.set(list[i].join(','), 0); done.add(i); continue; }
+    done.add(i); done.add(j);
+    const [hi, lo] = nests(list[i], list[j]) ? [list[i], list[j]] : [list[j], list[i]];
+    const c = glyphs.length; glyphs.push(pairBytes(hi, lo));
+    codeOf.set(hi.join(','), c); colOf.set(hi.join(','), 0);   // black -> the fuller one
+    codeOf.set(lo.join(','), c); colOf.set(lo.join(','), 1);   // white -> the sparser one
+  }
+}
+const rampsAll = [], stepsAll = [];
+for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) rampsAll.push(rampPat(a, b));
+pairAll(rampsAll);
 const STEP0 = glyphs.length;            // where the ramps end and the steps begin
-for (let k = 1; k <= 3; k++) for (const A of STEPQ) for (const B of STEPQ) intern(stepPat(A, B, k));
+for (let k = 1; k <= 3; k++) for (const A of STEPQ) for (const B of STEPQ) stepsAll.push(stepPat(A, B, k));
+pairAll(stepsAll);
 const CELLCODES = glyphs.length;
+const colFor = p => colOf.get(p.join(',')) ?? 0;
 const GLYPH0 = glyphs.length;                   // first readout glyph code
 for (let g = 0; g < NGLYPH; g++) {
   const rows = digGlyph.slice(g * 5, g * 5 + 5);
@@ -184,7 +231,7 @@ for (let k = 0; k < 4; k++) {
   glyphs.push(new Array(8).fill(row));
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
-console.error(`charset: ${CELLCODES} cell patterns + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256`);
+console.error(`charset: ${CELLCODES} cell codes (paired via colour RAM) + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256`);
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${STEP0-1} ramps, ${STEP0}-${CELLCODES-1} steps, ` +
               `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam`);
 // charset A, and charset B = every glyph flipped vertically. The raster split at the
@@ -194,11 +241,18 @@ const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
 for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
-const rampT = new Array(CN * 16).fill(0);
-for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) rampT[a * 16 + b] = codeOf.get(rampPat(a + CLO, b + CLO).join(','));
+const rampT = new Array(CN * 16).fill(0), rampCT = new Array(CN * 16).fill(0);
+for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
+  const p = rampPat(a + CLO, b + CLO);
+  rampT[a * 16 + b] = codeOf.get(p.join(','));
+  rampCT[a * 16 + b] = 8 | colFor(p);           // bit3 = per-cell multicolor enable
+}
 // stepT<k>[qA*8 + qB] -> char code, for a cell whose face boundary falls at column k.
 const stepT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(0);
   for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = codeOf.get(stepPat(STEPQ[i], STEPQ[j], k).join(','));
+  return t; });
+const stepCT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(8);
+  for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = 8 | colFor(stepPat(STEPQ[i], STEPQ[j], k));
   return t; });
 // clampT output (level+2, 0..12) -> index into STEPQ.
 const qIdxT = [...Array(CN)].map((_, v) => STEPQ.indexOf(qstep(C8(v + CLO))));
@@ -253,7 +307,10 @@ const ROWSD = [...Array(13)].map((_, i) => 12 - i), ROWSA = [...Array(13)].map((
 // the edge cell the same deal.
 const edgeSrc = (nm, base) => ROWSA.map(r => {
   const a = base + r * 40, b = base + (24 - r) * 40;
+  const ca = 0xd800 + r * 40, cb = 0xd800 + (24 - r) * 40;
   return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`) +
+         `\n\tlda ecol` +                      // which of the code's two patterns to show
+         `\n\tsta ${hx16(ca)},x` + (r === 12 ? '' : `\n\tsta ${hx16(cb)},x`) +
          `\n\tinc erow\n\tjmp rfEdgeT`;
 }).join('\n');
 // rbT[maxHeight] = first cell row that is not fully ceiling; rsT[minHeight] = first row
@@ -370,8 +427,8 @@ for (let a = 0; a < 256; a++) {
 const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
 for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
   recipLo.push(v & 255); recipHi.push(v >> 8); }
-const RELOC = 0x7a00;                   // CPU-only tables, out of the VIC's 16K window
-const HTABLE = 0x4a00;                  // page-aligned: 16 height tables x 3 pages
+const RELOC = 0x7d00;                   // CPU-only tables, out of the VIC's 16K window
+const HTABLE = 0x4d00;                  // page-aligned: 16 height tables x 3 pages
                                         // (was $4800; the edge stubs and clmp16 grew the data)
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
 const vm = scr => (scr >> 10) << 4;
@@ -479,7 +536,8 @@ joyEor  = $68
 ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
-ecode   = $1b                   ; the edge cell's char code, parked while the store
+ecode   = $1b
+ecol    = $09                   ; colour RAM for this edge cell: $08 black, $09 white                   ; the edge cell's char code, parked while the store
                                 ;   stub's address is looked up
 colc    = $75                   ; cell column, parked while the chains own X
 rbv     = $76                   ; first cell row that is not fully ceiling
@@ -1064,6 +1122,8 @@ rfCp3:  clc
         lda hh0                 ; single face: ramp, index = wL*16 + wR
         ora hh1                 ; hh0 is already <<4, straight from clmp16
         tay
+        lda rampCT,y            ; one code holds two patterns; colour RAM picks which
+        sta ecol
         lda rampT,y
         jmp rfStore             ; (the ramp is the common case; see rfStore below)
 rfStep: pha                     ; face boundary -> a genuinely vertical step at that column
@@ -1086,11 +1146,17 @@ rfStep: pha                     ; face boundary -> a genuinely vertical step at 
         cmp #$02
         beq rfSt2
         bcs rfSt3
+        lda stepC1,y
+        sta ecol
         lda stepT1,y
         jmp rfStore
-rfSt2:  lda stepT2,y
+rfSt2:  lda stepC2,y
+        sta ecol
+        lda stepT2,y
         jmp rfStore
-rfSt3:  lda stepT3,y
+rfSt3:  lda stepC3,y
+        sta ecol
+        lda stepT3,y
         ; Store it at this row and its mirror. This used to hand-build two 16-bit pointers
         ; -- rowLoT/rowHiT + colc with the carry, twice -- and store through them: 85 cycles
         ; to write two bytes. The stub has both addresses baked in and takes the column from
@@ -2392,9 +2458,13 @@ recipHiT: ${chunk(recipHi).trim()}
 clmp16: ${chunk(clampT16).trim()}
 qIdxT:  !byte ${qIdxT.join(',')}
 rampT:  ${chunk(rampT).trim()}
+rampCT: ${chunk(rampCT).trim()}
 stepT1: ${chunk(stepT[0]).trim()}
 stepT2: ${chunk(stepT[1]).trim()}
 stepT3: ${chunk(stepT[2]).trim()}
+stepC1: ${chunk(stepCT[0]).trim()}
+stepC2: ${chunk(stepCT[1]).trim()}
+stepC3: ${chunk(stepCT[2]).trim()}
 ${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
 ${chainSrc('bkB', SCR_B, ROWSD, 'rfEdge')}
 ${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
