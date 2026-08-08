@@ -196,10 +196,26 @@ function patternFreq() {
       if (map[my * 16 + mx]) return side === 0 ? sdx - ddx : sdy - ddy; }
     return 1e9; };
   const cl = v => Math.max(CLO, Math.min(CHI, v));
+  // Sample where the PLAYER CAN ACTUALLY STAND, not just cell centres. A centre is never
+  // closer than 0.5 cells to a wall, but the collision box lets you press to within ~0.1 --
+  // and that is exactly where walls tower and the steep ramps get used. Sampling centres
+  // only made the rarest patterns look unused, so the pairing spent its cheap slots wrong.
+  const spots = [];
   for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
     if (map[y * 16 + x]) continue;
+    const solid = (cx2, cy2) => cx2 < 0 || cy2 < 0 || cx2 > 15 || cy2 > 15 || map[cy2 * 16 + cx2];
+    spots.push([x + 0.5, y + 0.5]);
+    const W = solid(x - 1, y), E = solid(x + 1, y), N = solid(x, y - 1), S = solid(x, y + 1);
+    if (W) spots.push([x + 0.12, y + 0.5]);
+    if (E) spots.push([x + 0.88, y + 0.5]);
+    if (N) spots.push([x + 0.5, y + 0.12]);
+    if (S) spots.push([x + 0.5, y + 0.88]);
+    if (W && N) spots.push([x + 0.12, y + 0.12]);      // inside corners: two walls at once
+    if (E && S) spots.push([x + 0.88, y + 0.88]);
+  }
+  for (const [px, py] of spots) {
     for (let a = 0; a < 256; a += 16) {
-      const base = a / 256 * 2 * Math.PI, px = x + 0.5, py = y + 0.5;
+      const base = a / 256 * 2 * Math.PI;
       const h = [...Array(NLOG)].map((_, c) =>
         Math.min(100, Math.round(88 / Math.max(shoot(px, py, base + ang[c]) * cc[c], 0.02))));
       for (let g = 0; g < NLOG / 4; g++) {
