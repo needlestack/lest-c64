@@ -323,7 +323,9 @@ for (let k = 0; k < 4; k++) {
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell codes (paired via colour RAM) + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256`);
-console.error(`  codes: 0 BLANK, 1 SOLID, 2-${STEP0-1} ramps, ${STEP0}-${CELLCODES-1} steps, ` +
+// Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
+// means there is no contiguous "steps" range to report -- they interleave by frequency.
+console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
               `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam`);
 // charset A, and charset B = every glyph flipped vertically. The raster split at the
 // horizon selects B for the bottom half, so ONE char code renders as its own mirror
@@ -716,14 +718,6 @@ pfRow   = $c92a
 pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
-cfRow   = $cb00                 ; queued colour writes: row, cell column, value
-cfCol   = $cb60
-cfVal   = $cbc0
-bndT    = $ca00                 ; columns where a face or saturation state begins
-cfRow   = $cb00                 ; queued colour writes: row, cell column, value
-cfCol   = $cb60
-cfVal   = $cbc0
-bndT    = $ca00                 ; columns where a face or saturation state begins
 cfRow   = $cb00                 ; queued colour writes: row, cell column, value
 cfCol   = $cb60
 cfVal   = $cbc0

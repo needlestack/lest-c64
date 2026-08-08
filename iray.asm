@@ -179,14 +179,6 @@ cfRow   = $cb00                 ; queued colour writes: row, cell column, value
 cfCol   = $cb60
 cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
-cfRow   = $cb00                 ; queued colour writes: row, cell column, value
-cfCol   = $cb60
-cfVal   = $cbc0
-bndT    = $ca00                 ; columns where a face or saturation state begins
-cfRow   = $cb00                 ; queued colour writes: row, cell column, value
-cfCol   = $cb60
-cfVal   = $cbc0
-bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
 
