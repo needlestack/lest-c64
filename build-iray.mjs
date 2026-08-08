@@ -213,9 +213,13 @@ function patternFreq() {
     if (W && N) spots.push([x + 0.12, y + 0.12]);      // inside corners: two walls at once
     if (E && S) spots.push([x + 0.88, y + 0.88]);
   }
+  // frames[] keeps each sampled frame's pattern list, not just the total, because the thing
+  // that can actually break is the 80-entry colour queue overflowing in ONE frame. An average
+  // of 0.00% says nothing about the worst frame.
+  const frames = [];
   for (const [px, py] of spots) {
     for (let a = 0; a < 256; a += 16) {
-      const base = a / 256 * 2 * Math.PI;
+      const base = a / 256 * 2 * Math.PI, frame = [];
       const h = [...Array(NLOG)].map((_, c) =>
         Math.min(100, Math.round(88 / Math.max(shoot(px, py, base + ang[c]) * cc[c], 0.02))));
       for (let g = 0; g < NLOG / 4; g++) {
@@ -224,10 +228,11 @@ function patternFreq() {
         let rs = mn >= 100 ? 0 : Math.ceil((100 - mn) / 8); if (rs < rb) rs = rb;
         for (let R = rb; R < rs; R++) { const K = 8 * R - 92;
           const k = rampPat(cl(q[0] + K), cl(q[3] + K)).join(',');
-          f.set(k, (f.get(k) || 0) + 1); } } } }
-  return f;
+          f.set(k, (f.get(k) || 0) + 1); frame.push(k); } }
+      frames.push(frame); } }
+  return { f, frames };
 }
-const PFREQ = patternFreq();
+const { f: PFREQ, frames: PFRAMES } = patternFreq();
 const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
   [0, 1, 2, 3].reduce((b, j) => b | ((lo[j] > 7 - i ? 1 : hi[j] > 7 - i ? 3 : 0) << (6 - 2 * j)), 0));
 // colOf: pattern -> 0 (needs colour RAM black) or 1 (white). codeOf gives the char code.
@@ -272,8 +277,19 @@ function placeAll(groups) {
     hot += (PFREQ.get(hi.join(',')) || 0) + (PFREQ.get(lo.join(',')) || 0);
   }
   const tot = [...PFREQ.values()].reduce((a, b) => a + b, 0);
+  // The average is reassuring but the queue is a per-FRAME resource: renderSym drops colour
+  // writes past 80 in a frame, silently, which would show as a wrongly-shaded cell. So report
+  // the worst sampled frame and fail the build if it is anywhere near the cap.
+  let worst = 0;
+  for (const fr of PFRAMES) {
+    let n = 0; for (const k of fr) if (colOf.get(k)) n++;
+    if (n > worst) worst = n;
+  }
   console.error(`  pairing: ${made} pairs, ${(100 * hot / tot).toFixed(2)}% of sampled cells ` +
-                `need a colour-RAM write`);
+                `need a colour-RAM write (worst frame ${worst} of the 80-entry queue)`);
+  if (worst > 60) throw new Error(
+    `colour queue: worst sampled frame needs ${worst} writes, cap is 80 -- raise the cap or ` +
+    `pair fewer patterns`);
 }
 const rampsAll = [], stepsAll = [];
 for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) rampsAll.push(rampPat(a, b));
