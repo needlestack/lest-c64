@@ -94,7 +94,10 @@ ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
 ecode   = $1b
-ecol    = $09                   ; colour RAM for this edge cell: $08 black, $09 white                   ; the edge cell's char code, parked while the store
+ecol    = $09
+ncf     = $3b                   ; queued colour-RAM writes
+cfCc    = $3e
+cfVv    = $3f                   ; colour RAM for this edge cell: $08 black, $09 white                   ; the edge cell's char code, parked while the store
                                 ;   stub's address is looked up
 colc    = $75                   ; cell column, parked while the chains own X
 rbv     = $76                   ; first cell row that is not fully ceiling
@@ -172,8 +175,17 @@ pfRow   = $c92a
 pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
+cfRow   = $cb00                 ; queued colour writes: row, cell column, value
+cfCol   = $cb60
+cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
+cfRow   = $cb00                 ; queued colour writes: row, cell column, value
+cfCol   = $cb60
+cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
+cfRow   = $cb00                 ; queued colour writes: row, cell column, value
+cfCol   = $cb60
+cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -576,7 +588,26 @@ mshB:   lda #$90
         sta d018vm              ; show B, draw into A
         lda #$04
         sta baseHi
-mnext:  inc iterLo
+        ; ---- flush the queued colour RAM: the flip is done and the raster is past the
+        ; ---- visible area, so nothing is reading colour RAM right now
+mnext:
+cfLp:   ldx ncf
+        beq cfDn
+        dex
+        stx ncf
+        lda cfCol,x
+        sta cfCc
+        lda cfVal,x
+        sta cfVv
+        ldy cfRow,x
+        lda cfELoT,y
+        sta jv
+        lda cfEHiT,y
+        sta jv+1
+        ldx cfCc
+        lda cfVv
+        jmp (jv)                ; -> cfA<row> -> two stores -> jmp cfLp
+cfDn:   inc iterLo
         bne mloop
         inc iterHi
         jmp mloop
@@ -787,7 +818,17 @@ rfSt3:  lda stepC3,y
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
+        ldx ncf                 ; queue this cell's colour for the post-flip flush
+        cpx #80
+        bcs rfNoQ
         lda erow
+        sta cfRow,x
+        lda colc
+        sta cfCol,x
+        lda ecol
+        sta cfVal,x
+        inc ncf
+rfNoQ:  lda erow
         clc
         adc bufOff
         tay
@@ -2177,6 +2218,8 @@ blkLoT: !byte 0,<bkA0,<bkA1,<bkA2,<bkA3,<bkA4,<bkA5,<bkA6,<bkA7,<bkA8,<bkA9,<bkA
 blkHiT: !byte 0,>bkA0,>bkA1,>bkA2,>bkA3,>bkA4,>bkA5,>bkA6,>bkA7,>bkA8,>bkA9,>bkA10,>bkA11,>bkA12,0,>bkB0,>bkB1,>bkB2,>bkB3,>bkB4,>bkB5,>bkB6,>bkB7,>bkB8,>bkB9,>bkB10,>bkB11,>bkB12
 sldLoT: !byte <slA0,<slA1,<slA2,<slA3,<slA4,<slA5,<slA6,<slA7,<slA8,<slA9,<slA10,<slA11,<slA12,0,<slB0,<slB1,<slB2,<slB3,<slB4,<slB5,<slB6,<slB7,<slB8,<slB9,<slB10,<slB11,<slB12,0
 sldHiT: !byte >slA0,>slA1,>slA2,>slA3,>slA4,>slA5,>slA6,>slA7,>slA8,>slA9,>slA10,>slA11,>slA12,0,>slB0,>slB1,>slB2,>slB3,>slB4,>slB5,>slB6,>slB7,>slB8,>slB9,>slB10,>slB11,>slB12,0
+cfELoT: !byte <cfA0,<cfA1,<cfA2,<cfA3,<cfA4,<cfA5,<cfA6,<cfA7,<cfA8,<cfA9,<cfA10,<cfA11,<cfA12,0
+cfEHiT: !byte >cfA0,>cfA1,>cfA2,>cfA3,>cfA4,>cfA5,>cfA6,>cfA7,>cfA8,>cfA9,>cfA10,>cfA11,>cfA12,0
 edgLoT: !byte <edA0,<edA1,<edA2,<edA3,<edA4,<edA5,<edA6,<edA7,<edA8,<edA9,<edA10,<edA11,<edA12,0,<edB0,<edB1,<edB2,<edB3,<edB4,<edB5,<edB6,<edB7,<edB8,<edB9,<edB10,<edB11,<edB12,0
 edgHiT: !byte >edA0,>edA1,>edA2,>edA3,>edA4,>edA5,>edA6,>edA7,>edA8,>edA9,>edA10,>edA11,>edA12,0,>edB0,>edB1,>edB2,>edB3,>edB4,>edB5,>edB6,>edB7,>edB8,>edB9,>edB10,>edB11,>edB12,0
 t1TabT: !byte 100,92,84,76,68,60,52,44,36,28,20,12,4
@@ -2526,182 +2569,144 @@ slB12:	sta $25e0,x
 	jmp rfNext
 edA0:	sta $0400,x
 	sta $07c0,x
-	lda ecol
-	sta $d800,x
-	sta $dbc0,x
 	inc erow
 	jmp rfEdgeT
 edA1:	sta $0428,x
 	sta $0798,x
-	lda ecol
-	sta $d828,x
-	sta $db98,x
 	inc erow
 	jmp rfEdgeT
 edA2:	sta $0450,x
 	sta $0770,x
-	lda ecol
-	sta $d850,x
-	sta $db70,x
 	inc erow
 	jmp rfEdgeT
 edA3:	sta $0478,x
 	sta $0748,x
-	lda ecol
-	sta $d878,x
-	sta $db48,x
 	inc erow
 	jmp rfEdgeT
 edA4:	sta $04a0,x
 	sta $0720,x
-	lda ecol
-	sta $d8a0,x
-	sta $db20,x
 	inc erow
 	jmp rfEdgeT
 edA5:	sta $04c8,x
 	sta $06f8,x
-	lda ecol
-	sta $d8c8,x
-	sta $daf8,x
 	inc erow
 	jmp rfEdgeT
 edA6:	sta $04f0,x
 	sta $06d0,x
-	lda ecol
-	sta $d8f0,x
-	sta $dad0,x
 	inc erow
 	jmp rfEdgeT
 edA7:	sta $0518,x
 	sta $06a8,x
-	lda ecol
-	sta $d918,x
-	sta $daa8,x
 	inc erow
 	jmp rfEdgeT
 edA8:	sta $0540,x
 	sta $0680,x
-	lda ecol
-	sta $d940,x
-	sta $da80,x
 	inc erow
 	jmp rfEdgeT
 edA9:	sta $0568,x
 	sta $0658,x
-	lda ecol
-	sta $d968,x
-	sta $da58,x
 	inc erow
 	jmp rfEdgeT
 edA10:	sta $0590,x
 	sta $0630,x
-	lda ecol
-	sta $d990,x
-	sta $da30,x
 	inc erow
 	jmp rfEdgeT
 edA11:	sta $05b8,x
 	sta $0608,x
-	lda ecol
-	sta $d9b8,x
-	sta $da08,x
 	inc erow
 	jmp rfEdgeT
 edA12:	sta $05e0,x
-	lda ecol
-	sta $d9e0,x
 	inc erow
 	jmp rfEdgeT
 edB0:	sta $2400,x
 	sta $27c0,x
-	lda ecol
-	sta $d800,x
-	sta $dbc0,x
 	inc erow
 	jmp rfEdgeT
 edB1:	sta $2428,x
 	sta $2798,x
-	lda ecol
-	sta $d828,x
-	sta $db98,x
 	inc erow
 	jmp rfEdgeT
 edB2:	sta $2450,x
 	sta $2770,x
-	lda ecol
-	sta $d850,x
-	sta $db70,x
 	inc erow
 	jmp rfEdgeT
 edB3:	sta $2478,x
 	sta $2748,x
-	lda ecol
-	sta $d878,x
-	sta $db48,x
 	inc erow
 	jmp rfEdgeT
 edB4:	sta $24a0,x
 	sta $2720,x
-	lda ecol
-	sta $d8a0,x
-	sta $db20,x
 	inc erow
 	jmp rfEdgeT
 edB5:	sta $24c8,x
 	sta $26f8,x
-	lda ecol
-	sta $d8c8,x
-	sta $daf8,x
 	inc erow
 	jmp rfEdgeT
 edB6:	sta $24f0,x
 	sta $26d0,x
-	lda ecol
-	sta $d8f0,x
-	sta $dad0,x
 	inc erow
 	jmp rfEdgeT
 edB7:	sta $2518,x
 	sta $26a8,x
-	lda ecol
-	sta $d918,x
-	sta $daa8,x
 	inc erow
 	jmp rfEdgeT
 edB8:	sta $2540,x
 	sta $2680,x
-	lda ecol
-	sta $d940,x
-	sta $da80,x
 	inc erow
 	jmp rfEdgeT
 edB9:	sta $2568,x
 	sta $2658,x
-	lda ecol
-	sta $d968,x
-	sta $da58,x
 	inc erow
 	jmp rfEdgeT
 edB10:	sta $2590,x
 	sta $2630,x
-	lda ecol
-	sta $d990,x
-	sta $da30,x
 	inc erow
 	jmp rfEdgeT
 edB11:	sta $25b8,x
 	sta $2608,x
-	lda ecol
-	sta $d9b8,x
-	sta $da08,x
 	inc erow
 	jmp rfEdgeT
 edB12:	sta $25e0,x
-	lda ecol
-	sta $d9e0,x
 	inc erow
 	jmp rfEdgeT
+cfA0:	sta $d800,x
+	sta $dbc0,x
+	jmp cfLp
+cfA1:	sta $d828,x
+	sta $db98,x
+	jmp cfLp
+cfA2:	sta $d850,x
+	sta $db70,x
+	jmp cfLp
+cfA3:	sta $d878,x
+	sta $db48,x
+	jmp cfLp
+cfA4:	sta $d8a0,x
+	sta $db20,x
+	jmp cfLp
+cfA5:	sta $d8c8,x
+	sta $daf8,x
+	jmp cfLp
+cfA6:	sta $d8f0,x
+	sta $dad0,x
+	jmp cfLp
+cfA7:	sta $d918,x
+	sta $daa8,x
+	jmp cfLp
+cfA8:	sta $d940,x
+	sta $da80,x
+	jmp cfLp
+cfA9:	sta $d968,x
+	sta $da58,x
+	jmp cfLp
+cfA10:	sta $d990,x
+	sta $da30,x
+	jmp cfLp
+cfA11:	sta $d9b8,x
+	sta $da08,x
+	jmp cfLp
+cfA12:	sta $d9e0,x
+	jmp cfLp
 chainEnd:
         * = $4d00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108

@@ -305,12 +305,19 @@ const ROWSD = [...Array(13)].map((_, i) => 12 - i), ROWSA = [...Array(13)].map((
 // into the operand, X supplying the column -- while the edge path used to hand-build two
 // 16-bit pointers to write the same two bytes, 42 cycles a character against 5. These give
 // the edge cell the same deal.
+// Colour RAM is SHARED between the two screen buffers, so writing it during renderSym
+// corrupts the frame still on screen -- edges flickered and stray black blocks appeared for
+// single frames. The writes are collected instead and flushed after the buffer flip, in the
+// window between raster 250 and the next frame's first visible line, where the display is
+// not reading colour RAM at all.
+const cflushSrc = () => ROWSA.map(r => {
+  const a = 0xd800 + r * 40, b = 0xd800 + (24 - r) * 40;
+  return `cfA${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`) + `\n\tjmp cfLp`;
+}).join('\n');
+const cflushEnt = sel => [...ROWSA.map(r => `${sel}cfA${r}`), '0'].join(',');
 const edgeSrc = (nm, base) => ROWSA.map(r => {
   const a = base + r * 40, b = base + (24 - r) * 40;
-  const ca = 0xd800 + r * 40, cb = 0xd800 + (24 - r) * 40;
   return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`) +
-         `\n\tlda ecol` +                      // which of the code's two patterns to show
-         `\n\tsta ${hx16(ca)},x` + (r === 12 ? '' : `\n\tsta ${hx16(cb)},x`) +
          `\n\tinc erow\n\tjmp rfEdgeT`;
 }).join('\n');
 // rbT[maxHeight] = first cell row that is not fully ceiling; rsT[minHeight] = first row
@@ -537,7 +544,10 @@ ppPtr   = $71                   ; 2 bytes ($71/$72): readout row pointer
 kr      = $73                   ; per-row 8*cr-92: turns a height into a cell fill
 d018vm  = $74                   ; live video-matrix nibble; the raster IRQ ORs charset bits
 ecode   = $1b
-ecol    = $09                   ; colour RAM for this edge cell: $08 black, $09 white                   ; the edge cell's char code, parked while the store
+ecol    = $09
+ncf     = $3b                   ; queued colour-RAM writes
+cfCc    = $3e
+cfVv    = $3f                   ; colour RAM for this edge cell: $08 black, $09 white                   ; the edge cell's char code, parked while the store
                                 ;   stub's address is looked up
 colc    = $75                   ; cell column, parked while the chains own X
 rbv     = $76                   ; first cell row that is not fully ceiling
@@ -615,8 +625,17 @@ pfRow   = $c92a
 pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
+cfRow   = $cb00                 ; queued colour writes: row, cell column, value
+cfCol   = $cb60
+cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
+cfRow   = $cb00                 ; queued colour writes: row, cell column, value
+cfCol   = $cb60
+cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
+cfRow   = $cb00                 ; queued colour writes: row, cell column, value
+cfCol   = $cb60
+cfVal   = $cbc0
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -951,7 +970,26 @@ mshB:   lda #${hx(vm(SCR_B))}
         sta d018vm              ; show B, draw into A
         lda #${hx(SCR_A >> 8)}
         sta baseHi
-mnext:  inc iterLo
+        ; ---- flush the queued colour RAM: the flip is done and the raster is past the
+        ; ---- visible area, so nothing is reading colour RAM right now
+mnext:
+cfLp:   ldx ncf
+        beq cfDn
+        dex
+        stx ncf
+        lda cfCol,x
+        sta cfCc
+        lda cfVal,x
+        sta cfVv
+        ldy cfRow,x
+        lda cfELoT,y
+        sta jv
+        lda cfEHiT,y
+        sta jv+1
+        ldx cfCc
+        lda cfVv
+        jmp (jv)                ; -> cfA<row> -> two stores -> jmp cfLp
+cfDn:   inc iterLo
         bne mloop
         inc iterHi
         jmp mloop
@@ -1162,7 +1200,17 @@ rfSt3:  lda stepC3,y
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
+        ldx ncf                 ; queue this cell's colour for the post-flip flush
+        cpx #${NLOG / 2}
+        bcs rfNoQ
         lda erow
+        sta cfRow,x
+        lda colc
+        sta cfCol,x
+        lda ecol
+        sta cfVal,x
+        inc ncf
+rfNoQ:  lda erow
         clc
         adc bufOff
         tay
@@ -2434,6 +2482,8 @@ blkLoT: !byte ${blkEnt('<')}
 blkHiT: !byte ${blkEnt('>')}
 sldLoT: !byte ${sldEnt('<')}
 sldHiT: !byte ${sldEnt('>')}
+cfELoT: !byte ${cflushEnt('<')}
+cfEHiT: !byte ${cflushEnt('>')}
 edgLoT: !byte ${edgEnt('<')}
 edgHiT: !byte ${edgEnt('>')}
 t1TabT: !byte ${t1Tab.join(',')}
@@ -2471,6 +2521,7 @@ ${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
 ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
 ${edgeSrc('edA', SCR_A)}
 ${edgeSrc('edB', SCR_B)}
+${cflushSrc()}
 chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
