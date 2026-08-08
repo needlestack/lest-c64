@@ -642,6 +642,8 @@ const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
 const orbExpT = ORBEXP.map(e => e);          // sprite 0 only, so the bit IS the byte
 const orbHalfT = ORBWIDE.map(w => w >> 1);
 const orbAncT = ORBANCH.map(a => a);
+// Half-width in LOGICAL columns (2 screen px each), for the depth scan under the sprite.
+const orbColT = ORBWIDE.map(w => w >> 2);
 const DBGORB = flag('DBGORB');
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
@@ -906,6 +908,9 @@ o3      = $cb0b
 ocoff   = $cb0c
 odb     = $cb20                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ovar    = $cb0d
+ocol    = $cb10                  ; sprite centre, logical column
+ocmax   = $cb0e                  ; depth scan under the sprite: right edge, and the verdict
+ocnear  = $cb0f
 ; orb projection scratch above; once a frame, so absolute costs ~50 cycles total
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -3126,7 +3131,59 @@ oxLo:   sta $d010
         sbc orbAncT,x
         bcc orbHide
         sta $d001
-        jmp orbShow             ; nothing left to reject: the VIC does the occluding
+        ; --- which side of the orb is the scene on? ---
+        ; $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be told "behind
+        ; everything" or "in front of everything". Walls FARTHER than the orb are foreground too
+        ; and would clip it just as eagerly, which is wrong and very visible down a corridor.
+        ; So scan the columns the sprite covers: only if something there is NEARER than the orb
+        ; is it worth letting the VIC clip. Taller means nearer.
+        lda oaS
+        bmi ocN
+        clc
+        lda #80
+        adc ocoff
+        jmp ocS
+ocN:    sec
+        lda #80
+        sbc ocoff
+ocS:    sta ocol
+        ldx ovar
+        lda orbColT,x
+        sta o2                  ; half the sprite's width, in logical columns
+        lda ocol
+        clc
+        adc o2
+        bcc opR1
+        lda #${NLOG - 1}        ; ran off the right edge
+opR1:   cmp #${NLOG}
+        bcc opR2
+        lda #${NLOG - 1}
+opR2:   sta ocmax
+        lda ocol
+        sec
+        sbc o2
+        bcs opL1
+        lda #$00                ; ran off the left edge
+opL1:   cmp ocmax
+        bcc opL2
+        lda ocmax               ; degenerate: keep the scan inside colH
+opL2:   tax
+        lda #$00
+        sta ocnear
+opScan: lda colH,x
+        cmp ohgt
+        bcc opNx
+        beq opNx
+        lda #$01                ; a nearer wall: let the VIC clip against it
+        sta ocnear
+        jmp opDn
+opNx:   inx
+        cpx ocmax
+        bcc opScan
+        beq opScan
+opDn:   lda ocnear
+        sta $d01b
+        jmp orbShow
 orbHide:lda #$00
         sta $d015
 ${DBGORB ? '        jmp odbg' : '        rts'}
@@ -3265,6 +3322,7 @@ orbPtrT: !byte ${orbPtrT.join(',')}
 orbExpT: !byte ${orbExpT.join(',')}
 orbHalfT: !byte ${orbHalfT.join(',')}
 orbAncT: !byte ${orbAncT.join(',')}
+orbColT: !byte ${orbColT.join(',')}
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
