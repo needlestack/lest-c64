@@ -175,39 +175,95 @@ intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fil
 // 139 ramp patterns collapse to 70 codes, 96 step patterns to 49. That halving is what pays
 // for widening the clamp from 13 levels to 16.
 const nests = (p, q) => p.every((v, i) => v >= q[i]);
+// Which patterns actually occur? Pairing costs a colour-RAM write at every cell that uses a
+// paired code, so spend the pairing on the ones the map never produces. Widening the clamp
+// added patterns that only arise from very steep slopes -- most are unreachable in practice,
+// so pairing just enough of THOSE to fit 256 leaves the common cells writing nothing at all.
+function patternFreq() {
+  const f = new Map(), TH = Math.tan(FOV / 2 / 256 * 2 * Math.PI), CT = (NLOG - 1) / 2;
+  const cx = c => (c - CT) / CT * TH;
+  const ang = [...Array(NLOG)].map((_, c) => Math.atan(cx(c)));
+  const cc = [...Array(NLOG)].map((_, c) => 1 / Math.sqrt(1 + cx(c) ** 2));
+  const shoot = (px, py, a) => { const dx = Math.cos(a), dy = Math.sin(a);
+    let mx = Math.floor(px), my = Math.floor(py);
+    const ddx = Math.abs(1 / (dx || 1e-9)), ddy = Math.abs(1 / (dy || 1e-9));
+    let sx, sy, sdx, sdy, side = 0;
+    if (dx < 0) { sx = -1; sdx = (px - mx) * ddx; } else { sx = 1; sdx = (mx + 1 - px) * ddx; }
+    if (dy < 0) { sy = -1; sdy = (py - my) * ddy; } else { sy = 1; sdy = (my + 1 - py) * ddy; }
+    for (let i = 0; i < 48; i++) { if (sdx < sdy) { sdx += ddx; mx += sx; side = 0; }
+      else { sdy += ddy; my += sy; side = 1; }
+      if (mx < 0 || my < 0 || mx > 15 || my > 15) return 1e9;
+      if (map[my * 16 + mx]) return side === 0 ? sdx - ddx : sdy - ddy; }
+    return 1e9; };
+  const cl = v => Math.max(CLO, Math.min(CHI, v));
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    if (map[y * 16 + x]) continue;
+    for (let a = 0; a < 256; a += 16) {
+      const base = a / 256 * 2 * Math.PI, px = x + 0.5, py = y + 0.5;
+      const h = [...Array(NLOG)].map((_, c) =>
+        Math.min(100, Math.round(88 / Math.max(shoot(px, py, base + ang[c]) * cc[c], 0.02))));
+      for (let g = 0; g < NLOG / 4; g++) {
+        const q = h.slice(g * 4, g * 4 + 4), mx2 = Math.max(...q), mn = Math.min(...q);
+        const rb = mx2 > 92 ? 0 : Math.floor((92 - mx2) / 8) + 1;
+        let rs = mn >= 100 ? 0 : Math.ceil((100 - mn) / 8); if (rs < rb) rs = rb;
+        for (let R = rb; R < rs; R++) { const K = 8 * R - 92;
+          const k = rampPat(cl(q[0] + K), cl(q[3] + K)).join(',');
+          f.set(k, (f.get(k) || 0) + 1); } } } }
+  return f;
+}
+const PFREQ = patternFreq();
 const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
   [0, 1, 2, 3].reduce((b, j) => b | ((lo[j] > 7 - i ? 1 : hi[j] > 7 - i ? 3 : 0) << (6 - 2 * j)), 0));
 // colOf: pattern -> 0 (needs colour RAM black) or 1 (white). codeOf gives the char code.
 const colOf = new Map();
-function pairAll(pats) {
-  const list = [...new Map(pats.map(p => [p.join(','), p])).values()]
-    .filter(p => !codeOf.has(p.join(',')));           // BLANK/SOLID already placed
-  const n = list.length, adj = [...Array(n)].map(() => []);
-  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++)
-    if (i !== j && (nests(list[i], list[j]) || nests(list[j], list[i]))) adj[i].push(j);
-  const mate = new Array(n).fill(-1);
-  for (let go = true; go;) { go = false;
-    for (let i = 0; i < n; i++) { if (mate[i] !== -1) continue;
-      for (const j of adj[i]) if (mate[j] === -1) { mate[i] = j; mate[j] = i; go = true; break; } } }
+// Everything is placed unpaired first; then just enough of the least-used patterns are
+// folded together to fit 256. A pattern that stays unpaired has colour 0, which the
+// renderer reads as "no colour-RAM write needed" and skips entirely.
+function placeAll(groups) {
+  const all = [];
+  for (const g of groups) for (const p of g)
+    if (!codeOf.has(p.join(',')) && !all.some(q => q.join(',') === p.join(','))) all.push(p);
+  const BUDGET = 256 - NGLYPH - 4 - glyphs.length;   // room left for cell patterns
+  let need = all.length - BUDGET + 5;                // +5 so a map change does not overflow
+  const order = all.map((p, i) => i)
+    .sort((a, b) => (PFREQ.get(all[a].join(',')) || 0) - (PFREQ.get(all[b].join(',')) || 0));
+  const mate = new Array(all.length).fill(-1);
+  let made = 0;
+  for (const i of order) {
+    if (made >= need) break;
+    if (mate[i] !== -1) continue;
+    let best = -1, bf = Infinity;
+    for (const j of order) {
+      if (j === i || mate[j] !== -1) continue;
+      if (!(nests(all[i], all[j]) || nests(all[j], all[i]))) continue;
+      const f = PFREQ.get(all[j].join(',')) || 0;
+      if (f < bf) { bf = f; best = j; }
+    }
+    if (best >= 0) { mate[i] = best; mate[best] = i; made++; }
+  }
+  let hot = 0;
   const done = new Set();
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < all.length; i++) {
     if (done.has(i)) continue;
     const j = mate[i];
-    if (j === -1) { const c = glyphs.length; glyphs.push(patBytes(list[i]));
-      codeOf.set(list[i].join(','), c); colOf.set(list[i].join(','), 0); done.add(i); continue; }
+    if (j === -1) { const c = glyphs.length; glyphs.push(patBytes(all[i]));
+      codeOf.set(all[i].join(','), c); colOf.set(all[i].join(','), 0); done.add(i); continue; }
     done.add(i); done.add(j);
-    const [hi, lo] = nests(list[i], list[j]) ? [list[i], list[j]] : [list[j], list[i]];
+    const [hi, lo] = nests(all[i], all[j]) ? [all[i], all[j]] : [all[j], all[i]];
     const c = glyphs.length; glyphs.push(pairBytes(hi, lo));
-    codeOf.set(hi.join(','), c); colOf.set(hi.join(','), 0);   // black -> the fuller one
-    codeOf.set(lo.join(','), c); colOf.set(lo.join(','), 1);   // white -> the sparser one
+    codeOf.set(hi.join(','), c); colOf.set(hi.join(','), 8);   // black -> the fuller pattern
+    codeOf.set(lo.join(','), c); colOf.set(lo.join(','), 9);   // white -> the sparser one
+    hot += (PFREQ.get(hi.join(',')) || 0) + (PFREQ.get(lo.join(',')) || 0);
   }
+  const tot = [...PFREQ.values()].reduce((a, b) => a + b, 0);
+  console.error(`  pairing: ${made} pairs, ${(100 * hot / tot).toFixed(2)}% of sampled cells ` +
+                `need a colour-RAM write`);
 }
 const rampsAll = [], stepsAll = [];
 for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) rampsAll.push(rampPat(a, b));
-pairAll(rampsAll);
-const STEP0 = glyphs.length;            // where the ramps end and the steps begin
 for (let k = 1; k <= 3; k++) for (const A of STEPQ) for (const B of STEPQ) stepsAll.push(stepPat(A, B, k));
-pairAll(stepsAll);
+placeAll([rampsAll, stepsAll]);
+const STEP0 = glyphs.length;            // ramps and steps now share one placement pass
 const CELLCODES = glyphs.length;
 const colFor = p => colOf.get(p.join(',')) ?? 0;
 const GLYPH0 = glyphs.length;                   // first readout glyph code
@@ -245,14 +301,14 @@ const rampT = new Array(CN * 16).fill(0), rampCT = new Array(CN * 16).fill(0);
 for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
   const p = rampPat(a + CLO, b + CLO);
   rampT[a * 16 + b] = codeOf.get(p.join(','));
-  rampCT[a * 16 + b] = 8 | colFor(p);           // bit3 = per-cell multicolor enable
+  rampCT[a * 16 + b] = colFor(p);               // 0 = unpaired, no write needed
 }
 // stepT<k>[qA*8 + qB] -> char code, for a cell whose face boundary falls at column k.
 const stepT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(0);
   for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = codeOf.get(stepPat(STEPQ[i], STEPQ[j], k).join(','));
   return t; });
-const stepCT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(8);
-  for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = 8 | colFor(stepPat(STEPQ[i], STEPQ[j], k));
+const stepCT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(0);
+  for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = colFor(stepPat(STEPQ[i], STEPQ[j], k));
   return t; });
 // clampT output (level+2, 0..12) -> index into STEPQ.
 const qIdxT = [...Array(CN)].map((_, v) => STEPQ.indexOf(qstep(C8(v + CLO))));
@@ -1200,7 +1256,9 @@ rfSt3:  lda stepC3,y
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
-        ldx ncf                 ; queue this cell's colour for the post-flip flush
+        lda ecol                ; 0 = this code is unpaired, colour RAM is irrelevant to it.
+        beq rfNoQ               ; the pairing is spent on patterns the map never produces,
+        ldx ncf                 ; so in practice this branch is always taken
         cpx #${NLOG / 2}
         bcs rfNoQ
         lda erow
