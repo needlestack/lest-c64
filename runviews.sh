@@ -25,3 +25,8 @@ while read -r PX PY PA rest; do
     node verify-seams.mjs "$S/$TAG-$n.png" "$PX" "$PY" "$PA" 2>&1 | tail -n +2 | sed 's/^/     /'
   fi
 done < views.txt
+
+# Leave latest.d64 as the SHIPPING build. Every iteration above overwrites it with a
+# viewpoint-pinned, SPRITES=0 variant, so without this the disk in the project root is
+# whatever the last view happened to be -- which cost a round trip when the orb "vanished".
+node build-iray.mjs >/dev/null 2>&1 && echo "latest.d64 rebuilt at defaults"

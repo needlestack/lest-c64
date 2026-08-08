@@ -172,8 +172,14 @@ const NGLYPH = digGlyph.length / 5;
 
 // --- assign char codes: cell patterns first, then the 18 readout glyphs ---
 const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of multicolor bitmap
+// Wall pixels are bit pair 11, not 01, and that is load-bearing: in MULTICOLOR char mode the
+// VIC treats pairs 00 and 01 as background and 10 and 11 as foreground for sprite priority.
+// With walls as foreground and $d01b set, sprite occlusion is exact, per-pixel and free --
+// no masking, no mutable sprite copies, no cycles at all. 11 takes its colour from the low 3
+// bits of colour RAM, which is written once at startup to $08: multicolor on, colour black,
+// which is what the walls wanted anyway.
 const patBytes = p => [...Array(8)].map((_, i) =>
-  (p[0] > 7 - i ? 0x40 : 0) | (p[1] > 7 - i ? 0x10 : 0) | (p[2] > 7 - i ? 0x04 : 0) | (p[3] > 7 - i ? 0x01 : 0));
+  (p[0] > 7 - i ? 0xc0 : 0) | (p[1] > 7 - i ? 0x30 : 0) | (p[2] > 7 - i ? 0x0c : 0) | (p[3] > 7 - i ? 0x03 : 0));
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
 
@@ -424,7 +430,7 @@ for (let g = 0; g < NGLYPH; g++) {
 // keeps the flipped fontB free.
 const SEAM0 = glyphs.length;
 for (let k = 0; k < 4; k++) {
-  const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : 1) << (6 - 2 * i)), 0);
+  const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : 3) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
@@ -603,6 +609,8 @@ const NOHUD = flag('NOHUD');
 // body (light blue), 01 the shaded underside (blue), 11 the highlight and the ground shadow
 // (grey 3). The shadow is the useful part for us: it marks where the orb meets the floor.
 const SPRITES = process.env.SPRITES !== '0';
+// SPRPRI=0 puts the orb back in front of everything -- the A/B test for hardware occlusion.
+const SPRPRI = +(process.env.SPRPRI ?? 1);
 const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
 const ORBBM = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 36, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 186, 0, 0, 170, 0, 0, 170, 0, 0, 169, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 2, 234, 64, 2, 170, 64, 2, 170, 64, 2, 169, 64, 2, 165, 64, 0, 149, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 3, 255, 192, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 11, 234, 144, 11, 170, 144, 10, 170, 144, 10, 170, 144, 10, 170, 80, 10, 169, 80, 2, 169, 64, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 15, 255, 240, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0], [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192, 0]];
 // variant -> which of the five bitmaps, and whether the VIC doubles it
@@ -617,7 +625,7 @@ const ORBWIDE = [4, 8, 12, 16, 24, 32, 48];
 
 // Orb world position, 8.8 cells. The player starts at (1.5, 1.5) in the top-left room, so
 // this sits a few cells away down the corridor where it is visible from the start.
-const ORBX = Math.round(3.5 * 256), ORBY = Math.round(1.5 * 256);
+const ORBX = hexArg('ORBX', 0x0380, 0xffff), ORBY = hexArg('ORBY', 0x0180, 0xffff);
 // 80 / tan(FOV/2): a unit of t (= right*256/forward) is worth this many 1/256ths of a column.
 const ORBK = Math.round(80 / Math.tan(FOV / 2 / 256 * 2 * Math.PI));
 // h -> variant. The walls are 88/d tall, so scaling the orb off the same h keeps it locked to
@@ -923,7 +931,7 @@ entry:
         lda #$01
         sta $d021               ; 00 = white  (ceiling / floor)
         lda #$00
-        sta $d022               ; 01 = black  (wall)
+        sta $d022               ; 01 = black  (readout glyphs only; walls moved to 11)
         lda #${hx(SEAMCOL)}
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry: bit pairs 00
@@ -949,8 +957,10 @@ ${SPRITES ? `        ; ---- orb sprite: static setup. Position and shape change 
         lda #$01
         sta $d015               ; enable sprite 0 only
         sta $d01c               ; ... in multicolor
-        lda #$00
-        sta $d01b               ; sprites in FRONT of the walls; occlusion is decided in code
+        lda #${SPRPRI}
+        sta $d01b               ; sprite 0 BEHIND foreground. Walls are bit pair 11 and seams
+                                ; 10, both foreground, so the VIC clips the orb against the
+                                ; scene per pixel and orbMove does not test occlusion at all.
         sta $d017
         sta $d01d
         lda #$06
@@ -3116,27 +3126,7 @@ oxLo:   sta $d010
         sbc orbAncT,x
         bcc orbHide
         sta $d001
-        ; --- occlusion: taller means nearer, so a taller wall in this column is in front ---
-        lda ocoff
-        lsr                     ; ocoff is in half-columns; colH is per logical column
-        sta o2
-        lda oaS
-        bmi ocNeg
-        clc
-        lda #80
-        adc o2
-        jmp ocDn
-ocNeg:  sec
-        lda #80
-        sbc o2
-ocDn:   bmi orbShow             ; centre off screen but part of the sprite may not be
-        cmp #${NLOG}
-        bcs orbShow
-        tax
-        lda colH,x
-        cmp ohgt
-        bcc orbShow
-        beq orbShow
+        jmp orbShow             ; nothing left to reject: the VIC does the occluding
 orbHide:lda #$00
         sta $d015
 ${DBGORB ? '        jmp odbg' : '        rts'}
