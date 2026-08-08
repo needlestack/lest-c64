@@ -594,6 +594,47 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // NOHUD=1 drops the fps counter and the X/Y readout, keeping only the two hex digits of
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
+
+// ---- the orb sprite ----
+// Seven variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps: orb5
+// and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra data.
+// Multicolor, and the colour mapping is the author's, NOT what the gmSprite header comment
+// implies -- that comment's [13]/[14]/[15] do not match this file version. Bit pair 10 is the
+// body (light blue), 01 the shaded underside (blue), 11 the highlight and the ground shadow
+// (grey 3). The shadow is the useful part for us: it marks where the orb meets the floor.
+const SPRITES = process.env.SPRITES !== '0';
+const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
+const ORBBM = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 36, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 186, 0, 0, 170, 0, 0, 170, 0, 0, 169, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 2, 234, 64, 2, 170, 64, 2, 170, 64, 2, 169, 64, 2, 165, 64, 0, 149, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 3, 255, 192, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 11, 234, 144, 11, 170, 144, 10, 170, 144, 10, 170, 144, 10, 170, 80, 10, 169, 80, 2, 169, 64, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 15, 255, 240, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0], [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192, 0]];
+// variant -> which of the five bitmaps, and whether the VIC doubles it
+const ORBSRC = [0, 1, 2, 3, 4, 3, 4];
+const ORBEXP = [0, 0, 0, 0, 0, 1, 1];
+// Raster rows from the sprite's top down to the BOTTOM of the ground shadow. That row is what
+// has to land on the floor line, or the orb looks like it is hovering.
+const ORBFOOT = [13, 15, 18, 19, 21].map(v => v);
+const ORBANCH = ORBSRC.map((b, v) => ORBFOOT[b] * (ORBEXP[v] ? 2 : 1));
+// Ball width in pixels, for centring on the column.
+const ORBWIDE = [4, 8, 12, 16, 24, 32, 48];
+
+// Orb world position, 8.8 cells. The player starts at (1.5, 1.5) in the top-left room, so
+// this sits a few cells away down the corridor where it is visible from the start.
+const ORBX = Math.round(3.5 * 256), ORBY = Math.round(1.5 * 256);
+// 80 / tan(FOV/2): a unit of t (= right*256/forward) is worth this many 1/256ths of a column.
+const ORBK = Math.round(80 / Math.tan(FOV / 2 / 256 * 2 * Math.PI));
+// h -> variant. The walls are 88/d tall, so scaling the orb off the same h keeps it locked to
+// the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at h = 88,
+// i.e. how big it looks standing one cell away; tune it by eye.
+const ORBSCALE = +(process.env.ORBSCALE ?? 34);
+const orbVarT = [...Array(256)].map((_, h) => {
+  const want = ORBSCALE * h / 88;
+  let b = 0; for (let v = 1; v < 7; v++)
+    if (Math.abs(ORBWIDE[v] - want) < Math.abs(ORBWIDE[b] - want)) b = v;
+  return b;
+});
+const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
+const orbExpT = ORBEXP.map(e => e);          // sprite 0 only, so the bit IS the byte
+const orbHalfT = ORBWIDE.map(w => w >> 1);
+const orbAncT = ORBANCH.map(a => a);
+const DBGORB = flag('DBGORB');
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
@@ -629,7 +670,7 @@ for (let a = 0; a < 256; a++) {
 const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
 for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
   recipLo.push(v & 255); recipHi.push(v >> 8); }
-const RELOC = 0x7d00;                   // CPU-only tables, out of the VIC's 16K window
+const RELOC = 0x8100;                   // CPU-only tables, out of the VIC's 16K window
 const HTABLE = 0x4d00;                  // page-aligned: 16 height tables x 3 pages
                                         // (was $4800, then $4d00; the edge stubs, clmp16 and
                                         // then the three-level step tables grew the data
@@ -821,6 +862,43 @@ pfRow   = $c92a
 pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
+; orbMove's hot working set, on seamSpan's scratch -- dead by the time orbMove runs
+oaL     = $87
+oaH     = $88
+oaS     = $89
+obm     = $8a
+obs     = $8b
+orL     = $8c
+orH     = $8d
+odxL    = $8e
+odxH    = $8f
+odxS    = $90
+odyL    = $91
+odyH    = $92
+odyS    = $93
+o0      = $94
+o1      = $95
+o2      = $96
+ivL     = $97
+ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
+ohgt    = $9d
+; ... and the cold tail, touched once or twice each, left in absolute RAM
+ocos    = $cb00
+ocosS   = $cb01
+osin    = $cb02
+osinS   = $cb03
+fwdL    = $cb04
+fwdH    = $cb05
+rgtL    = $cb06
+rgtH    = $cb07
+ogL     = $cb08
+ogH     = $cb09
+oe      = $cb0a
+o3      = $cb0b
+ocoff   = $cb0c
+odb     = $cb20                  ; DBGORB scratch: six bytes shown as hex on screen row 3
+ovar    = $cb0d
+; orb projection scratch above; once a frame, so absolute costs ~50 cycles total
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -867,7 +945,24 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-        lda #${hx(PX & 255)}
+${SPRITES ? `        ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
+        lda #$01
+        sta $d015               ; enable sprite 0 only
+        sta $d01c               ; ... in multicolor
+        lda #$00
+        sta $d01b               ; sprites in FRONT of the walls; occlusion is decided in code
+        sta $d017
+        sta $d01d
+        lda #$06
+        sta $d025               ; bit pair 01 = blue, the shaded underside
+        lda #$0f
+        sta $d026               ; bit pair 11 = grey 3, highlight and ground shadow
+        lda #$0e
+        sta $d027               ; bit pair 10 = light blue, the body
+        lda #${SPRBASE >> 6}
+        sta $07f8               ; the pointer lives in the SCREEN, so both buffers need it
+        sta $27f8
+` : ''}        lda #${hx(PX & 255)}
         sta px
         lda #${hx(PX >> 8)}
         sta px+1
@@ -1128,7 +1223,7 @@ ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast
 ${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; prepCells\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
         jsr drawDbg
-${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
+${SPRITES ? '        jsr orbMove             ; needs colH, so after the render\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
         bne pfRdy
         inc pfN
         bne pfNd
@@ -2681,7 +2776,7 @@ tbTabT: !byte ${tbTab.join(',')}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-        * = charset
+${SPRITES ? `        * = ${hx16(SPRBASE)}\norbBM:  ${ORBBM.map(b => '!byte ' + b.join(',')).join('\n        ')}\n` : ''}        * = charset
 ${chunk(fontA, 32)}
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
@@ -2710,7 +2805,427 @@ ${edgeSrc('edB', SCR_B)}
 chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
-${PROFILE ? '' : ''}        ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
+${PROFILE ? '' : ''}${SPRITES ? `
+; ---- orbMove: put the orb where the player is looking ----
+; Runs once a frame, so it is written for clarity over cycles and keeps its working set in
+; absolute RAM rather than fighting for zero page -- 50-odd absolute accesses cost 50 cycles
+; and buy the whole seam scratch range back.
+;
+; Camera space: forward = dx*cos(pa) + dy*sin(pa), right = dy*cos(pa) - dx*sin(pa). "right" is
+; the direction of INCREASING column, which is d/dpa of the ray direction = (-sin, cos).
+; Map y runs downward, matching the DDA, so no handedness fixup is needed anywhere here.
+orbMove:
+        sec                     ; dx = orb - player, signed 8.8 cells
+        lda #${hx(ORBX & 255)}
+        sbc px
+        sta oaL
+        lda #${hx(ORBX >> 8)}
+        sbc px+1
+        sta oaH
+        jsr oabs
+        lda oaL
+        sta odxL
+        lda oaH
+        sta odxH
+        lda oaS
+        sta odxS
+        sec
+        lda #${hx(ORBY & 255)}
+        sbc py
+        sta oaL
+        lda #${hx(ORBY >> 8)}
+        sbc py+1
+        sta oaH
+        jsr oabs
+        lda oaL
+        sta odyL
+        lda oaH
+        sta odyH
+        lda oaS
+        sta odyS
+        ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
+        lda absCosT,x
+        sta ocos
+        lda absSinT,x
+        sta osin
+        lda #$00                ; sin(a) < 0 exactly when bit 7 of a is set, and cos(a) < 0
+        sta osinS               ; when bit 7 of a+64 is -- no sign tables needed
+        lda pa
+        bpl oss
+        lda #$ff
+        sta osinS
+oss:    lda #$00
+        sta ocosS
+        lda pa
+        clc
+        adc #$40
+        bpl ocs
+        lda #$ff
+        sta ocosS
+ocs:
+        lda odxL                ; forward = dx*cos + dy*sin
+        sta oaL
+        lda odxH
+        sta oaH
+        lda odxS
+        sta oaS
+        lda ocos
+        sta obm
+        lda ocosS
+        sta obs
+        jsr orot
+        lda orL
+        sta fwdL
+        lda orH
+        sta fwdH
+        lda odyL
+        sta oaL
+        lda odyH
+        sta oaH
+        lda odyS
+        sta oaS
+        lda osin
+        sta obm
+        lda osinS
+        sta obs
+        jsr orot
+        clc
+        lda fwdL
+        adc orL
+        sta fwdL
+        lda fwdH
+        adc orH
+        sta fwdH
+        lda fwdH                ; behind the camera, or close enough to be inside us. Tested
+        bmi orbHide             ; HERE, before "right" costs another two products: at any given
+        bne ofwOk               ; moment most of the world is behind you
+        lda fwdL
+        cmp #$40
+        bcc orbHide
+ofwOk:
+        lda odyL                ; right = dy*cos - dx*sin
+        sta oaL
+        lda odyH
+        sta oaH
+        lda odyS
+        sta oaS
+        lda ocos
+        sta obm
+        lda ocosS
+        sta obs
+        jsr orot
+        lda orL
+        sta rgtL
+        lda orH
+        sta rgtH
+        lda odxL
+        sta oaL
+        lda odxH
+        sta oaH
+        lda odxS
+        sta oaS
+        lda osin
+        sta obm
+        lda osinS
+        sta obs
+        jsr orot
+        sec
+        lda rgtL
+        sbc orL
+        sta rgtL
+        lda rgtH
+        sbc orH
+        sta rgtH
+        ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
+        ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
+        ; of forward costs under 0.4% -- less than half a column at the screen edge.
+        lda fwdL
+        asl
+        sta ogL
+        lda fwdH
+        rol
+        sta ogH
+        lda #$00
+        sta oe
+onLp:   lda ogH
+        beq onDn
+        lsr ogH
+        ror ogL
+        inc oe
+        jmp onLp
+onDn:   ldx ogL
+        lda recipLoT,x
+        sta ivL
+        lda recipHiT,x
+        sta ivH
+        lda #$05
+        sec
+        sbc oe
+        beq ivDn
+        bmi ivRt
+        tax
+ivLp:   asl ivL
+        rol ivH
+        dex
+        bne ivLp
+        jmp ivDn
+ivRt:   tax                     ; e > 5: shift the other way instead
+ivRl:   lsr ivH
+        ror ivL
+        inx
+        bne ivRl
+ivDn:
+        ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
+        lda #$0b
+        sta mq
+        lda ivL
+        jsr mul8
+        lda plo
+        sta o0
+        lda phi
+        sta o1
+        lda #$00
+        sta o2
+        lda #$0b
+        sta mq
+        lda ivH
+        jsr mul8
+        clc
+        lda o1
+        adc plo
+        sta o1
+        lda o2
+        adc phi
+        sta o2
+        lsr o2
+        ror o1
+        lda o2
+        beq ohOk
+        lda #$ff
+        sta o1
+ohOk:   lda o1
+        sta ohgt
+        ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so
+        ; the ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit
+        ; shift that used to compute right/forward separately is gone entirely.
+        lda rgtL
+        sta oaL
+        lda rgtH
+        sta oaH
+        jsr oabs
+        lda ohgt
+        sta mq
+        lda oaL
+        jsr mul8
+        lda plo
+        sta o0
+        lda phi
+        sta o1
+        lda ohgt
+        sta mq
+        lda oaH
+        jsr mul8
+        clc
+        lda o1
+        adc plo
+        sta o1
+        lda phi
+        adc #$00
+        sta o2
+        bne orbHide             ; |right|*h past 65535 is far outside the FOV
+        lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
+        sta mq                  ; shift of it is just (b2 << 1) | (b1 >> 7) -- no shift loop.
+        lda o0
+        jsr mul8
+        lda phi
+        sta o2
+        lda #179
+        sta mq
+        lda o1
+        jsr mul8
+        clc
+        lda o2
+        adc plo
+        sta o2                  ; b1
+        lda phi
+        adc #$00                ; b2
+        asl o2                  ; b1 bit 7 -> carry
+        rol
+        bcs orbHide             ; past 255 columns off centre: nowhere near the screen
+        sta ocoff
+        ; --- pick the size variant from the projected height, exactly as the walls scale ---
+        ldx ohgt
+        lda orbVarT,x
+        sta ovar
+        tax
+        lda orbPtrT,x
+        sta $07f8               ; both buffers: the pointer lives in screen RAM
+        sta $27f8
+        lda orbExpT,x
+        sta $d017
+        sta $d01d
+        ; --- screen X: 24 + 2*column - halfWidth, as a signed 16-bit value ---
+        lda ocoff               ; 2*column = 160 +/- 2*ocoff
+        asl
+        sta o0
+        lda #$00
+        rol
+        sta o1
+        lda oaS
+        bmi oxNeg
+        clc
+        lda o0
+        adc #${24 + 160}
+        sta o0
+        lda o1
+        adc #$00
+        sta o1
+        jmp oxDn
+oxNeg:  sec
+        lda #${24 + 160}
+        sbc o0
+        sta o0
+        lda #$00
+        sbc o1
+        sta o1
+oxDn:   ldx ovar
+        sec
+        lda o0
+        sbc orbHalfT,x
+        sta o0
+        lda o1
+        sbc #$00
+        sta o1
+        bmi orbHide             ; fully off the left edge
+        cmp #$02
+        bcs orbHide             ; past x = 512, fully off the right
+        lda o0
+        sta $d000
+        lda o1
+        beq oxLo
+        lda #$01
+oxLo:   sta $d010
+        ; --- screen Y: sit the bottom of the ground shadow on the floor line, 100 + h ---
+        lda ohgt
+        cmp #96
+        bcs orbHide             ; the floor line is off the bottom of the screen
+        clc
+        adc #150                ; raster 50 + display row 100
+        ldx ovar
+        sec
+        sbc orbAncT,x
+        bcc orbHide
+        sta $d001
+        ; --- occlusion: taller means nearer, so a taller wall in this column is in front ---
+        lda ocoff
+        lsr                     ; ocoff is in half-columns; colH is per logical column
+        sta o2
+        lda oaS
+        bmi ocNeg
+        clc
+        lda #80
+        adc o2
+        jmp ocDn
+ocNeg:  sec
+        lda #80
+        sbc o2
+ocDn:   bmi orbShow             ; centre off screen but part of the sprite may not be
+        cmp #${NLOG}
+        bcs orbShow
+        tax
+        lda colH,x
+        cmp ohgt
+        bcc orbShow
+        beq orbShow
+orbHide:lda #$00
+        sta $d015
+${DBGORB ? '        jmp odbg' : '        rts'}
+orbShow:lda #$01
+        sta $d015
+${DBGORB ? `odbg:   lda fwdL
+        sta odb
+        lda fwdH
+        sta odb+1
+        lda ohgt
+        sta odb+2
+        lda ocoff
+        sta odb+3
+        lda rgtL
+        sta odb+4
+        lda rgtH
+        sta odb+5
+        ldx #$00
+        ldy #$00
+odbLp:  lda odb,x
+        lsr
+        lsr
+        lsr
+        lsr
+        clc
+        adc #${hx(GLYPH0)}
+        sta $0478,y
+        sta $2478,y
+        iny
+        lda odb,x
+        and #$0f
+        clc
+        adc #${hx(GLYPH0)}
+        sta $0478,y
+        sta $2478,y
+        iny
+        inx
+        cpx #$06
+        bne odbLp` : ''}
+        rts
+; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
+oabs:   lda #$00
+        sta oaS
+        lda oaH
+        bpl oabsD
+        lda #$ff
+        sta oaS
+        sec
+        lda #$00
+        sbc oaL
+        sta oaL
+        lda #$00
+        sbc oaH
+        sta oaH
+oabsD:  rts
+; (|a| * |b|) >> 8, then negated if the two signs disagree -- result is two's complement, so
+; the callers above can just add and subtract normally.
+orot:   lda obm
+        sta mq
+        lda oaL
+        jsr mul8
+        lda phi
+        sta orL
+        lda #$00
+        sta orH
+        lda obm
+        sta mq
+        lda oaH
+        jsr mul8
+        clc
+        lda orL
+        adc plo
+        sta orL
+        lda orH
+        adc phi
+        sta orH
+        lda oaS
+        eor obs
+        bpl orotD
+        sec
+        lda #$00
+        sbc orL
+        sta orL
+        lda #$00
+        sbc orH
+        sta orH
+orotD:  rts
+` : ''}
+        ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
@@ -2753,17 +3268,24 @@ posYT:  ${chunk(posY).trim()}
 rayOffT: !byte ${rayOff.join(',')}
         * = ${hx16(RELOC + 0x1200)}
 colGrpT: !byte ${colGrpT.join(',')}
-        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
+${SPRITES ? `        * = ${hx16(RELOC + 0x1300)}
+orbVarT: !byte ${orbVarT.join(',')}
+        * = ${hx16(RELOC + 0x1400)}
+orbPtrT: !byte ${orbPtrT.join(',')}
+orbExpT: !byte ${orbExpT.join(',')}
+orbHalfT: !byte ${orbHalfT.join(',')}
+orbAncT: !byte ${orbAncT.join(',')}
+` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = ${hx16(RELOC + 0x1300)}
-stepT1: ${chunk(stepT[0]).trim()}
-        * = ${hx16(RELOC + 0x1400)}
-stepT2: ${chunk(stepT[1]).trim()}
         * = ${hx16(RELOC + 0x1500)}
+stepT1: ${chunk(stepT[0]).trim()}
+        * = ${hx16(RELOC + 0x1600)}
+stepT2: ${chunk(stepT[1]).trim()}
+        * = ${hx16(RELOC + 0x1700)}
 stepT3: ${chunk(stepT[2]).trim()}
 
-${PROFILE ? `        * = ${hx16(RELOC + 0x1900)}  ; the profiler lives above the relocated
+${PROFILE ? `        * = ${hx16(RELOC + 0x1800)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
@@ -2932,10 +3454,19 @@ try {
     // strip comments first: "boundaries at uaH+1 .. ubH" in prose is not a reference
     const code = asm.split('\n').map(l => l.replace(/;.*$/, '')).join('\n');
     for (const n of Object.keys(zp)) if (new RegExp(`\\b${n}\\+1\\b`).test(code)) two.add(n);
+    // Deliberately shared: orbMove runs after renderSym, by which point seamSpan's scratch is
+    // dead for the frame, and orbMove keeps nothing across frames. Zero page is full, and this
+    // routine's working set is hot enough that absolute addressing cost it ~240 cycles a frame.
+    // NOT the whole seam range: mul8's own mp/mq/plo/phi sit at $98-$9b in the middle of it,
+    // and they are live inside every jsr mul8 orbMove makes. Sharing those put ivH on mp and
+    // ohgt on mq, and each multiply quietly ate its own inputs.
+    const ZPSHARED = new Set();
+    for (let a = 0x87; a <= 0x97; a++) ZPSHARED.add(a);
+    for (let a = 0x9c; a <= 0x9f; a++) ZPSHARED.add(a);
     const owner = {};
     for (const [n, a] of Object.entries(zp)) {
       for (const b of two.has(n) ? [a, a + 1] : [a]) {
-        if (owner[b] && owner[b] !== n)
+        if (owner[b] && owner[b] !== n && !ZPSHARED.has(b))
           throw new Error(`zero page $${b.toString(16)} claimed by both ${owner[b]} and ${n}` +
             (two.has(owner[b]) || two.has(n) ? ' (one of them is two bytes wide)' : ''));
         owner[b] = n;

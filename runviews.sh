@@ -10,7 +10,9 @@ n=0
 while read -r PX PY PA rest; do
   case "$PX" in ''|'#') continue;; esac
   n=$((n+1))
-  PX=$PX PY=$PY PA=$PA node build-iray.mjs >/dev/null 2>&1 || { echo "$n BUILD FAILED"; continue; }
+  # SPRITES=0: this checks the WALL renderer against the reference model, which knows
+  # nothing about sprites -- an orb in shot would just read as a pile of wrong pixels.
+  SPRITES=0 PX=$PX PY=$PY PA=$PA node build-iray.mjs >/dev/null 2>&1 || { echo "$n BUILD FAILED"; continue; }
   /Applications/vice-arm64-gtk3-3.8/bin/x64sc -silent -warp -ntsc +drive8truedrive \
      -limitcycles 30000000 -jamaction 1 -exitscreenshot "$S/$TAG-$n.png" \
      -autostart latest.d64 >/dev/null 2>&1
