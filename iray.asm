@@ -1848,6 +1848,12 @@ cdda:   lda sdxH
         cmp sdy
         bcc cstepX
         beq cstepX
+        ; Saturate, do not wrap. deltaDist is clamped at $ffff for a ray running parallel to
+        ; an axis, so a side distance that is already large overflows 16 bits on the next
+        ; add and comes back round as a SMALL number -- the DDA then thinks the crossing is
+        ; a cell away and keeps stepping that way forever. It needs the player within 1/256
+        ; of a cell boundary and a ray parallel to it, which is why it stayed hidden: a
+        ; whole wall vanished and an unrelated one filled the column.
 cstepY: clc
         lda sdy
         adc ddy
@@ -1855,7 +1861,11 @@ cstepY: clc
         lda sdyH
         adc ddyH
         sta sdyH
-        txa
+        bcc cyNs
+        lda #$ff                ; this axis is effectively never crossed again
+        sta sdy
+        sta sdyH
+cyNs:   txa
         clc
         adc stpY16
         tax
@@ -1871,7 +1881,11 @@ cstepX: clc
         lda sdxH
         adc ddxH
         sta sdxH
-        txa
+        bcc cxNs
+        lda #$ff
+        sta sdx
+        sta sdxH
+cxNs:   txa
         clc
         adc stpX
         tax

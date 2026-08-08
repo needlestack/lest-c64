@@ -1,4 +1,4 @@
-# Standard verification set. Five viewpoints, five distinct positions, chosen (2026-08-07)
+# Standard verification set. Six viewpoints, six distinct positions, chosen (2026-08-07)
 # to cover every path through the subdivision + interpolator between them rather than to
 # look pretty -- a full run is build + VICE + verify-render per line, so length costs real
 # iteration time. Selection came from analyze-interp.mjs over 40 candidates (the old 10
@@ -10,3 +10,4 @@
 0c80 0eb3 80   # maximum subdivision stress: 24 spans, 5 face boundaries, all narrow
 0880 0280 98   # the degenerate opposite: ONE span, 158 interior columns, full-width 16-bit
 034c 0d80 f8   # 21 spans, 6 boundaries, wide AND steep (maxW=79, maxDy=112)
+0855 0dff 76   # regression (DDA side-distance overflow): player 1/256 from a cell boundary
