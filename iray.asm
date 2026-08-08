@@ -193,6 +193,7 @@ o2      = $96
 ivL     = $97
 ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
 ohgt    = $9d
+ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
 ; ... and the cold tail, touched once or twice each, left in absolute RAM
 ocos    = $cb00
 ocosS   = $cb01
@@ -207,17 +208,30 @@ ogH     = $cb09
 oe      = $cb0a
 o3      = $cb0b
 ocoff   = $cb0c
-odb     = $cb20                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ovar    = $cb0d
+ocmax   = $cb0e
+ocnear  = $cb0f
 ocol    = $cb10
 ocspan  = $cb11
 ocl     = $cb12
 ocr     = $cb13
 ocrow   = $cb14
-ocrw2   = $cb15                  ; sprite centre, logical column
-ocmax   = $cb0e                  ; depth scan under the sprite: right edge, and the verdict
-ocnear  = $cb0f
-; orb projection scratch above; once a frame, so absolute costs ~50 cycles total
+ocrw2   = $cb15
+ocl2    = $cb16
+oidx    = $cb17
+ocn3    = $cb2a
+ocn     = $cb18
+ocy     = $cb19
+onv     = $cb1a
+omEn    = $cb1b
+omXX    = $cb1c
+omYY    = $cb1d
+omPri   = $cb1e
+omX8    = $cb1f
+omBit   = $cb20
+omMix   = $cb21
+orej    = $cb21
+odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -226,6 +240,11 @@ remHiT  = $c800                 ;   Parked so u can be derived later, only where
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
 entry:
         sei
+        lda #$36                ; LORAM off: BASIC ROM out, so $a000-$bfff reads the RAM the
+        sta $01                 ; program was loaded into. The relocated tables have grown past
+                                ; $a000 and were silently reading ROM -- step patterns came back
+                                ; as BASIC bytes, so corners picked nonsense and flickered.
+                                ; KERNAL and I/O stay mapped.
         lda #$00
         sta $d01a
         lda $dd00
@@ -265,16 +284,17 @@ ccf:    sta $d800,x
         inx
         bne ccf
         ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
-        lda #$01
-        sta $d015               ; enable sprite 0 only
-        sta $d01c               ; ... in multicolor
+        lda #$ff
+        sta $d01c               ; ALL eight in multicolor -- orbMove hands out slots as it
+                                ; finds visible orbs, so any of them can be in use. $d015 is
+                                ; built per frame and not set here.
         lda #1
         sta $d01b               ; sprite 0 BEHIND foreground. Walls are bit pair 11 and seams
                                 ; 10, both foreground, so the VIC clips the orb against the
                                 ; scene per pixel and orbMove does not test occlusion at all.
         sta $d017
         sta $d01d
-        lda #$06
+        lda #$0b
         sta $d025               ; bit pair 01 = blue, the shaded underside
         lda #$0f
         sta $d026               ; bit pair 11 = grey 3, highlight and ground shadow
@@ -3099,43 +3119,19 @@ hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,20
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
 
-; ---- orbMove: put the orb where the player is looking ----
-; Runs once a frame, so it is written for clarity over cycles and keeps its working set in
-; absolute RAM rather than fighting for zero page -- 50-odd absolute accesses cost 50 cycles
-; and buy the whole seam scratch range back.
+; ---- orbMove: place every visible orb ----
+; Once a frame. Written for clarity over cycles and keeping its working set in absolute RAM
+; where it can, since 50-odd absolute accesses cost 50 cycles and buy back the whole seam
+; scratch. The hot half lives in that scratch, which is dead by the time this runs.
 ;
 ; Camera space: forward = dx*cos(pa) + dy*sin(pa), right = dy*cos(pa) - dx*sin(pa). "right" is
-; the direction of INCREASING column, which is d/dpa of the ray direction = (-sin, cos).
-; Map y runs downward, matching the DDA, so no handedness fixup is needed anywhere here.
+; the direction of INCREASING column, which is d/dpa of the ray direction = (-sin, cos). Map y
+; runs downward, matching the DDA, so no handedness fixup is needed anywhere here.
+;
+; The candidate list for the player's cell is pre-sorted by distance, so the first eight orbs
+; that project are the NEAREST eight and assigning them to sprites in order also gets the
+; overlap priority right -- sprite 0 draws over sprite 1.
 orbMove:
-        sec                     ; dx = orb - player, signed 8.8 cells
-        lda #$80
-        sbc px
-        sta oaL
-        lda #$03
-        sbc px+1
-        sta oaH
-        jsr oabs
-        lda oaL
-        sta odxL
-        lda oaH
-        sta odxH
-        lda oaS
-        sta odxS
-        sec
-        lda #$80
-        sbc py
-        sta oaL
-        lda #$01
-        sbc py+1
-        sta oaH
-        jsr oabs
-        lda oaL
-        sta odyL
-        lda oaH
-        sta odyH
-        lda oaS
-        sta odyS
         ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
         lda absCosT,x
         sta ocos
@@ -3155,7 +3151,106 @@ oss:    lda #$00
         bpl ocs
         lda #$ff
         sta ocosS
-ocs:
+ocs:    lda #$00                ; the per-sprite bit registers are built up a bit at a time and
+        sta omEn                ; written once, so an unused slot is simply never set
+        sta omXX
+        sta omYY
+        sta omPri
+        sta omX8
+        sta onv
+        sta omMix
+        lda py+1                ; which cell is the player standing in?
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc px+1
+        tax
+        lda candCntT,x
+        beq obEnd
+        sta ocn
+        asl                     ; three bytes per record
+        clc
+        adc ocn
+        sta ocn3
+        lda candLoT,x
+        sta ocptr
+        lda candHiT,x
+        sta ocptr+1
+        lda #$00
+        sta ocy
+obLoop: ldy ocy
+        lda (ocptr),y
+        sta oidx
+        iny
+        lda pa                  ; is the orb anywhere near the way we are facing? The list is
+        sec                     ; all-round, the view is 66 degrees, and a full projection
+        sbc (ocptr),y           ; costs a hundred times what this compare does
+        bpl obPos
+        eor #$ff
+        clc
+        adc #$01
+obPos:  iny
+        cmp (ocptr),y
+        beq obNear
+        bcs obNext
+obNear: jsr orbOne
+obNext: lda ocy
+        clc
+        adc #$03
+        sta ocy
+        lda onv
+        cmp #$08                ; eight hardware sprites, and the list is nearest-first
+        bcs obEnd
+        lda ocy
+        cmp ocn3
+        bcc obLoop
+obEnd:  lda omEn
+        sta $d015
+        lda omXX
+        sta $d01d
+        lda omYY
+        sta $d017
+        lda omPri
+        sta $d01b
+        lda omX8
+        sta $d010
+        rts
+
+; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
+orbOne: lda #$00
+        sta orej
+        ldx oidx
+        sec                     ; dx = orb - player, signed 8.8 cells
+        lda orbXLT,x
+        sbc px
+        sta oaL
+        lda orbXHT,x
+        sbc px+1
+        sta oaH
+        jsr oabs
+        lda oaL
+        sta odxL
+        lda oaH
+        sta odxH
+        lda oaS
+        sta odxS
+        ldx oidx
+        sec
+        lda orbYLT,x
+        sbc py
+        sta oaL
+        lda orbYHT,x
+        sbc py+1
+        sta oaH
+        jsr oabs
+        lda oaL
+        sta odyL
+        lda oaH
+        sta odyH
+        lda oaS
+        sta odyS
         lda odxL                ; forward = dx*cos + dy*sin
         sta oaL
         lda odxH
@@ -3190,12 +3285,12 @@ ocs:
         adc orH
         sta fwdH
         lda fwdH                ; behind the camera, or close enough to be inside us. Tested
-        bmi orbHide             ; HERE, before "right" costs another two products: at any given
+        bmi orbNo               ; HERE, before "right" costs another two products: at any given
         bne ofwOk               ; moment most of the world is behind you
         lda fwdL
         cmp #$40
-        bcc orbHide
-ofwOk:
+        bcc orbNo
+ofwOk:  inc orej
         lda odyL                ; right = dy*cos - dx*sin
         sta oaL
         lda odyH
@@ -3229,6 +3324,7 @@ ofwOk:
         lda rgtH
         sbc orH
         sta rgtH
+        inc orej
         ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
         ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
         ; of forward costs under 0.4% -- less than half a column at the screen edge.
@@ -3267,9 +3363,7 @@ ivRl:   lsr ivH
         ror ivL
         inx
         bne ivRl
-ivDn:
-        ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
-        lda #$0b
+ivDn:   lda #$0b                ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
         sta mq
         lda ivL
         jsr mul8
@@ -3298,9 +3392,10 @@ ivDn:
         sta o1
 ohOk:   lda o1
         sta ohgt
-        ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so
-        ; the ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit
-        ; shift that used to compute right/forward separately is gone entirely.
+        inc orej
+        ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so the
+        ; ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit shift
+        ; that computing right/forward separately would need is gone entirely.
         lda rgtL
         sta oaL
         lda rgtH
@@ -3324,8 +3419,7 @@ ohOk:   lda o1
         sta o1
         lda phi
         adc #$00
-        sta o2
-        bne orbHide             ; |right|*h past 65535 is far outside the FOV
+        bne orbNo               ; |right|*h past 65535 is far outside the FOV
         lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
         sta mq                  ; shift of it is just (b2 << 1) | (b1 >> 7) -- no shift loop.
         lda o0
@@ -3339,26 +3433,28 @@ ohOk:   lda o1
         clc
         lda o2
         adc plo
-        sta o2                  ; b1
+        sta o2
         lda phi
-        adc #$00                ; b2
-        asl o2                  ; b1 bit 7 -> carry
+        adc #$00
+        asl o2
         rol
-        bcs orbHide             ; past 255 columns off centre: nowhere near the screen
+        bcs orbNo               ; past 255 columns off centre: nowhere near the screen
         sta ocoff
-        ; --- pick the size variant from the projected height, exactly as the walls scale ---
-        ldx ohgt
+        inc orej
+        ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
         lda orbVarT,x
         sta ovar
-        tax
-        lda orbPtrT,x
-        sta $07f8               ; both buffers: the pointer lives in screen RAM
-        sta $27f8
-        lda orbExpT,x
-        sta $d017
-        sta $d01d
-        ; --- screen X: 24 + 2*column - halfWidth, as a signed 16-bit value ---
-        lda ocoff               ; 2*column = 160 +/- 2*ocoff
+        lda oaS                 ; --- centre column ---
+        bmi ocN
+        clc
+        lda #80
+        adc ocoff
+        jmp ocS
+ocN:    sec
+        lda #80
+        sbc ocoff
+ocS:    sta ocol
+        lda ocoff               ; --- screen X: 24 + 2*column - halfWidth, signed 16-bit ---
         asl
         sta o0
         lda #$00
@@ -3381,7 +3477,8 @@ oxNeg:  sec
         lda #$00
         sbc o1
         sta o1
-oxDn:   ldx ovar
+oxDn:   inc orej
+        ldx ovar
         sec
         lda o0
         sbc orbHalfT,x
@@ -3389,50 +3486,33 @@ oxDn:   ldx ovar
         lda o1
         sbc #$00
         sta o1
-        bmi orbHide             ; fully off the left edge
+        bmi orbNo               ; fully off the left edge
         cmp #$02
-        bcs orbHide             ; past x = 512, fully off the right
-        lda o0
-        sta $d000
-        lda o1
-        beq oxLo
-        lda #$01
-oxLo:   sta $d010
-        ; --- screen Y: sit the bottom of the ground shadow on the floor line, 100 + h ---
-        lda ohgt
+        bcs orbNo               ; past x = 512, fully off the right
+        inc orej
+        inc orej
+        lda ohgt                ; --- screen Y: ground shadow on the floor line, 100 + h ---
         cmp #96
-        bcs orbHide             ; the floor line is off the bottom of the screen
+        bcs orbNo               ; the floor line is off the bottom of the screen
         clc
         adc #150                ; raster 50 + display row 100
         ldx ovar
         sec
         sbc orbAncT,x
-        bcc orbHide
-        sta $d001
-        ; --- which side of the orb is the scene on? ---
-        ; $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be told "behind
-        ; everything" or "in front of everything". Walls FARTHER than the orb are foreground too
-        ; and would clip it just as eagerly, which is wrong and very visible down a corridor.
-        ; So scan the columns the sprite covers: only if something there is NEARER than the orb
-        ; is it worth letting the VIC clip. Taller means nearer.
-        lda oaS
-        bmi ocN
-        clc
-        lda #80
-        adc ocoff
-        jmp ocS
-ocN:    sec
-        lda #80
-        sbc ocoff
-ocS:    sta ocol
-        ldx ovar
+        bcc orbNo
+        sta o3
+        inc orej
+        ; --- depth: $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be
+        ; told "behind everything" or "in front of everything". Walls FARTHER than the orb are
+        ; foreground too and would clip it just as eagerly, which is very visible down a
+        ; corridor. Scan what the sprite covers and decide. Taller means nearer.
         lda orbColT,x
-        sta o2                  ; half the sprite's width, in logical columns
+        sta o2
         lda ocol
         clc
         adc o2
         bcc opR1
-        lda #159        ; ran off the right edge
+        lda #159
 opR1:   cmp #160
         bcc opR2
         lda #159
@@ -3441,54 +3521,92 @@ opR2:   sta ocmax
         sec
         sbc o2
         bcs opL1
-        lda #$00                ; ran off the left edge
+        lda #$00
 opL1:   cmp ocmax
         bcc opL2
         lda ocmax               ; degenerate: keep the scan inside colH
 opL2:   tax
-        stx o3
+        stx ocl2
         lda ocmax
         sec
-        sbc o3
+        sbc ocl2
         clc
         adc #$01
-        sta ocspan              ; columns scanned, so "every one is nearer" is detectable
+        sta ocspan
         lda #$00
         sta ocnear
 opScan: lda colH,x
         cmp ohgt
         bcc opNx
         beq opNx
-        inc ocnear              ; count how many columns are nearer than the orb
+        inc ocnear
 opNx:   inx
         cpx ocmax
         bcc opScan
         beq opScan
+        ; --- take a sprite slot ---
+        ldx onv
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ldy ovar
+        lda orbPtrT,y
+        sta $07f8,x             ; the pointer lives in the SCREEN, so both buffers need it
+        sta $27f8,x
+        ldy oidx
+        lda orbColT2,y
+        sta $d027,x             ; the ONE thing that can differ per orb: bit pair 10
+        ldy ovar
+        lda orbExpT,y
+        beq oNoX
+        lda omBit
+        ora omXX
+        sta omXX
+        lda omBit
+        ora omYY
+        sta omYY
+oNoX:   txa
+        asl
+        tay
+        lda o0
+        sta $d000,y
+        lda o3
+        sta $d001,y
+        lda o1
+        beq oNoM
+        lda omBit
+        ora omX8
+        sta omX8
+oNoM:   inc onv
         lda ocnear
-        beq opFront             ; nothing nearer: draw over everything, cheapest case
-        lda #$01
-        sta $d01b               ; something is nearer, so let the VIC clip -- but that clips
+        beq orbYes              ; nothing nearer: draw over everything, cheapest case
+        lda omBit
+        ora omPri
+        sta omPri               ; something is nearer, so let the VIC clip -- but that clips
         ; against FAR walls too, and only repointing their cells can say otherwise. Skip it
         ; when every column is nearer: then the orb is wholly behind the wall and correctly
         ; invisible, and there is nothing to repoint.
         lda ocnear
         cmp ocspan
-        bcs orbShow
+        bcs orbYes
 
-        ; --- mixed depth: repoint the FAR solid cells under the sprite to SOLID's twin ---
-        lda ocol
-        sec
-        sbc o2
-        bcs omL1
-        lda #$00
-omL1:   lsr
+        ; --- mixed depth: repoint the FAR solid cells under this sprite to SOLID's twin.
+        ; The marking is relative to ONE depth, so only the nearest such orb gets it; a farther
+        ; one that a wall separates from this one would need the opposite marking, and falls
+        ; back to the priority bit alone.
+        lda omMix
+        bne orbYes
+        inc omMix
+        lda ocl2
+        lsr
         lsr
         sta ocl
         lda ocmax
         lsr
         lsr
         sta ocr
-        lda $d001               ; sprite top, as a char row
+        lda o3                  ; sprite top, as a char row
         sec
         sbc #50
         bcs omT1
@@ -3500,7 +3618,7 @@ omT1:   lsr
         ldx ovar
         lda orbSpHT,x
         clc
-        adc $d001
+        adc o3
         sec
         sbc #50
         lsr
@@ -3536,17 +3654,8 @@ omNx:   iny
         cmp ocrw2
         bcc omRow
         beq omRow
-        jmp orbShow
-opFront:lda #$00
-        sta $d01b
-        jmp orbShow
-orbHide:lda #$00
-        sta $d015
-        rts
-orbShow:lda #$01
-        sta $d015
-
-        rts
+orbYes: rts
+orbNo:  rts
 ; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
 oabs:   lda #$00
         sta oaS
@@ -3600,7 +3709,7 @@ orotD:  rts
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
-        * = $8200
+        * = $8300
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40
         !byte 64,88,113,138,164,190,217,244,16,44,73,102,132,162,193,224,0,32,65,98,132,166,201,236
@@ -3612,7 +3721,7 @@ f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,1
         !byte 0,96,193,34,132,230,73,172,16,116,217,62,164,10,113,216,64,168,17,122,228,78,185,36
         !byte 144,252,105,214,68,178,33,144,0,112,225,82,196,54,169,28,144,4,121,238,100,218,81,200
         !byte 64,184,49,170,36,158,25,148,16,140,9,134,4,130,1,128
-        * = $8300
+        * = $8400
 f0HiT:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2
         !byte 2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4
@@ -3624,7 +3733,7 @@ f0HiT:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 36,36,36,37,37,37,38,38,39,39,39,40,40,41,41,41,42,42,43,43,43,44,44,45
         !byte 45,45,46,46,47,47,48,48,49,49,49,50,50,51,51,52,52,53,53,53,54,54,55,55
         !byte 56,56,57,57,58,58,59,59,60,60,61,61,62,62,63,63
-        * = $8400
+        * = $8500
 f1LoT:  !byte 0,128,1,130,4,134,9,140,16,148,25,158,36,170,49,184,64,200,81,218,100,238,121,4
         !byte 144,28,169,54,196,82,225,112,0,144,33,178,68,214,105,252,144,36,185,78,228,122,17,168
         !byte 64,216,113,10,164,62,217,116,16,172,73,230,132,34,193,96,0,160,65,226,132,38,201,108
@@ -3636,7 +3745,7 @@ f1LoT:  !byte 0,128,1,130,4,134,9,140,16,148,25,158,36,170,49,184,64,200,81,218,
         !byte 0,224,193,162,132,102,73,44,16,244,217,190,164,138,113,88,64,40,17,250,228,206,185,164
         !byte 144,124,105,86,68,50,33,16,0,240,225,210,196,182,169,156,144,132,121,110,100,90,81,72
         !byte 64,56,49,42,36,30,25,20,16,12,9,6,4,2,1,0
-        * = $8500
+        * = $8600
 f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,75,76
         !byte 76,77,77,78,78,79,79,80,81,81,82,82,83,83,84,84,85,86,86,87,87,88,89,89
         !byte 90,90,91,92,92,93,93,94,95,95,96,96,97,98,98,99,100,100,101,101,102,103,103,104
@@ -3648,15 +3757,15 @@ f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,
         !byte 196,196,197,198,199,200,201,202,203,203,204,205,206,207,208,209,210,211,212,212,213,214,215,216
         !byte 217,218,219,220,221,222,223,224,225,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239
         !byte 240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
-        * = $8600
-runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0,0,31,0,0,0,0,0,0,0,14,0,0,0,0,0,0,0,31,0,0,0,0,0,0,0,14,0,0,0,24,0,0,0,31,0,0,3,0,0,0,0,0,0,0,0,24,0,0,0,31,0,0,3,0,0,0,0,16,0,0,0,24,0,28,0,0,0,0,3,0,8,0,0,0,0,0,0,24,0,0,0,32,0,0,3,0,8,0,0,0,0,0,0,0,0,29,0,32,0,0,3,0,8,0,12,0,0,0,0,0,0,29,0,32,0,0,0,0,8,0,12,0,0,0,0,0,0,29,0,32,0,0,0,0,8,0,12,0,19,0,0,0,0,0,0,32,0,0,0,0,0,0,12,0,19,0,0,0,0,0,0,32,0,0,6,0,0,0,0,0,19,0,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,0,0,33,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,33,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8700
-runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,27,0,0,1,0,0,0,7,0,0,0,0,0,0,25,0,0,0,0,1,0,4,0,0,0,0,0,18,0,0,25,0,0,0,0,1,0,4,0,0,0,0,17,0,0,0,25,0,0,0,0,1,0,4,0,9,0,0,0,0,0,0,0,0,30,0,0,1,0,4,0,9,0,0,0,0,0,21,0,0,30,0,0,1,0,0,0,9,0,13,0,0,0,0,0,0,30,0,0,0,0,5,0,9,0,13,0,0,0,0,26,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,23,0,0,0,0,0,2,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0,0,31,0,0,0,0,0,0,0,14,0,0,0,0,0,0,0,31,0,0,0,0,0,0,0,14,0,0,0,24,0,0,0,31,0,0,3,0,0,0,0,0,0,0,0,24,0,0,0,31,0,0,3,0,0,0,0,16,0,0,0,24,0,28,0,0,0,0,3,0,8,0,0,0,0,0,0,24,0,0,0,32,0,0,3,0,8,0,0,0,0,0,0,0,0,29,0,32,0,0,3,0,8,0,12,0,0,0,0,0,0,29,0,32,0,0,0,0,8,0,12,0,0,0,0,0,0,29,0,32,0,0,0,0,8,0,12,0,19,0,0,0,0,0,0,32,0,0,0,0,0,0,12,0,19,0,0,0,0,0,0,32,0,0,6,0,0,0,0,0,19,0,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,0,0,33,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,33,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8800
-runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,37,37,37,0,0,0,0,39,39,39,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,41,41,0,0,0,0,43,43,0,0,0,0,0,45,45,45,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,48,0,0,0,0,0,0,0,0,50,50,50,50,50,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,53,53,0,0,0,0,0,56,56,56,56,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,58,58,58,58,0,0,0,0,61,61,61,61,61,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,64,64,0,0,0,0,0,0,0,0,0,0,0,65,65,65,0,0,66,66,66,66,66,66,66,66,66,0
+runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,27,0,0,1,0,0,0,7,0,0,0,0,0,0,25,0,0,0,0,1,0,4,0,0,0,0,0,18,0,0,25,0,0,0,0,1,0,4,0,0,0,0,17,0,0,0,25,0,0,0,0,1,0,4,0,9,0,0,0,0,0,0,0,0,30,0,0,1,0,4,0,9,0,0,0,0,0,21,0,0,30,0,0,1,0,0,0,9,0,13,0,0,0,0,0,0,30,0,0,0,0,5,0,9,0,13,0,0,0,0,26,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,23,0,0,0,0,0,2,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8900
-runST: !byte 0,34,34,34,34,34,34,0,35,35,35,35,35,35,35,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,36,0,0,0,0,38,38,0,0,0,0,0,40,40,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,42,0,0,0,0,44,44,0,0,0,0,0,0,46,46,46,0,0,0,47,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,49,0,0,0,0,51,51,51,51,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,52,0,0,0,54,54,0,55,0,0,0,0,57,57,57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,59,59,59,59,59,0,60,0,0,62,62,62,62,0,0,0,0,0,0,0,0,0,0,0,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,37,37,37,0,0,0,0,39,39,39,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,41,41,0,0,0,0,43,43,0,0,0,0,0,45,45,45,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,48,0,0,0,0,0,0,0,0,50,50,50,50,50,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,53,53,0,0,0,0,0,56,56,56,56,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,58,58,58,58,0,0,0,0,61,61,61,61,61,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,64,64,0,0,0,0,0,0,0,0,0,0,0,65,65,65,0,0,66,66,66,66,66,66,66,66,66,0
         * = $8a00
+runST: !byte 0,34,34,34,34,34,34,0,35,35,35,35,35,35,35,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,36,0,0,0,0,38,38,0,0,0,0,0,40,40,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,42,0,0,0,0,44,44,0,0,0,0,0,0,46,46,46,0,0,0,47,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,49,0,0,0,0,51,51,51,51,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,52,0,0,0,54,54,0,55,0,0,0,0,57,57,57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,59,59,59,59,59,0,60,0,0,62,62,62,62,0,0,0,0,0,0,0,0,0,0,0,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $8b00
 mapT:   !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1
         !byte 1,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1
@@ -3673,7 +3782,7 @@ mapT:   !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1
         !byte 1,0,0,0,1,1,0,0,0,0,0,0,0,0,0,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        * = $8b00
+        * = $8c00
 rbT:    !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
         !byte 9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6
         !byte 6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3
@@ -3685,7 +3794,7 @@ rbT:    !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $8c00
+        * = $8d00
 rsT:    !byte 13,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10
         !byte 10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7
         !byte 7,7,7,7,6,6,6,6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4
@@ -3697,7 +3806,7 @@ rsT:    !byte 13,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $8d00
+        * = $8e00
 ddxLoT: !byte 0,0,0,1,1,2,3,4,5,6,8,10,12,14,16,18,21,24,27,31,34,38,42,47
         !byte 52,57,63,69,75,82,90,97,106,115,125,136,148,160,174,189,205,223,242,7,31,57,87,120
         !byte 157,199,248,48,114,192,30,144,32,217,209,43,52,152,97,191,255,191,97,152,52,43,209,217
@@ -3709,7 +3818,7 @@ ddxLoT: !byte 0,0,0,1,1,2,3,4,5,6,8,10,12,14,16,18,21,24,27,31,34,38,42,47
         !byte 255,191,97,152,52,43,209,217,32,144,30,192,114,48,248,199,157,120,87,57,31,7,242,223
         !byte 205,189,174,160,148,136,125,115,106,97,90,82,75,69,63,57,52,47,42,38,34,31,27,24
         !byte 21,18,16,14,12,10,8,6,5,4,3,2,1,1,0,0
-        * = $8e00
+        * = $8f00
 ddxHiT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2
         !byte 2,2,2,3,3,3,4,4,5,5,6,8,10,13,20,40,255,40,20,13,10,8,6,5
@@ -3721,7 +3830,7 @@ ddxHiT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 255,40,20,13,10,8,6,5,5,4,4,3,3,3,2,2,2,2,2,2,2,2,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        * = $8f00
+        * = $9000
 ddyLoT: !byte 255,191,97,152,52,43,209,217,32,144,30,192,114,48,248,199,157,120,87,57,31,7,242,223
         !byte 205,189,174,160,148,136,125,115,106,97,90,82,75,69,63,57,52,47,42,38,34,31,27,24
         !byte 21,18,16,14,12,10,8,6,5,4,3,2,1,1,0,0,0,0,0,1,1,2,3,4
@@ -3733,7 +3842,7 @@ ddyLoT: !byte 255,191,97,152,52,43,209,217,32,144,30,192,114,48,248,199,157,120,
         !byte 0,0,0,1,1,2,3,4,5,6,8,10,12,14,16,18,21,24,27,31,34,38,42,47
         !byte 52,57,63,69,75,82,90,97,106,115,125,136,148,160,174,189,205,223,242,7,31,57,87,120
         !byte 157,199,248,48,114,192,30,144,32,217,209,43,52,152,97,191
-        * = $9000
+        * = $9100
 ddyHiT: !byte 255,40,20,13,10,8,6,5,5,4,4,3,3,3,2,2,2,2,2,2,2,2,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -3745,7 +3854,7 @@ ddyHiT: !byte 255,40,20,13,10,8,6,5,5,4,4,3,3,3,2,2,2,2,2,2,2,2,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2
         !byte 2,2,2,3,3,3,4,4,5,5,6,8,10,13,20,40
-        * = $9100
+        * = $9200
 posXT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0
@@ -3757,7 +3866,7 @@ posXT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        * = $9200
+        * = $9300
 posYT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -3769,23 +3878,37 @@ posYT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $9300
-rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,236,237,237,237,238,238,238,238,239,239,239,239,240,240,240,241,241,241,241,242,242,242,243,243,243,244,244,244,244,245,245,245,246,246,246,247,247,247,248,248,248,249,249,249,250,250,250,251,251,251,252,252,252,253,253,253,254,254,254,255,255,255,255,0,0,1,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,10,10,10,11,11,11,12,12,12,12,13,13,13,14,14,14,15,15,15,15,16,16,16,17,17,17,17,18,18,18,18,19,19,19,20,20,20,20,21,21,21,21,22,22,22,22,23,23,23,23,24
         * = $9400
-colGrpT: !byte 0,0,0,0,3,3,3,3,6,6,9,9,9,9,12,12,12,15,15,15,15,18,18,18,21,21,21,21,24,24,24,27,27,27,27,30,30,30,30,33,33,33,33,33,36,36,36,36,39,39,39,39,39,39,42,42,42,42,42,42,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,42,42,42,42,42,42,39,39,39,39,39,39,36,36,36,36,33,33,33,33,33,30,30,30,30,27,27,27,27,24,24,24,21,21,21,21,18,18,18,15,15,15,15,12,12,12,9,9,9,9,6,6,3,3,3,3,0,0,0,0
+rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,236,237,237,237,238,238,238,238,239,239,239,239,240,240,240,241,241,241,241,242,242,242,243,243,243,244,244,244,244,245,245,245,246,246,246,247,247,247,248,248,248,249,249,249,250,250,250,251,251,251,252,252,252,253,253,253,254,254,254,255,255,255,255,0,0,1,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,10,10,10,11,11,11,12,12,12,12,13,13,13,14,14,14,15,15,15,15,16,16,16,17,17,17,17,18,18,18,18,19,19,19,20,20,20,20,21,21,21,21,22,22,22,22,23,23,23,23,24
         * = $9500
-orbVarT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6
+colGrpT: !byte 0,0,0,0,3,3,3,3,6,6,9,9,9,9,12,12,12,15,15,15,15,18,18,18,21,21,21,21,24,24,24,27,27,27,27,30,30,30,30,33,33,33,33,33,36,36,36,36,39,39,39,39,39,39,42,42,42,42,42,42,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,42,42,42,42,42,42,39,39,39,39,39,39,36,36,36,36,33,33,33,33,33,30,30,30,30,27,27,27,27,24,24,24,21,21,21,21,18,18,18,15,15,15,15,12,12,12,9,9,9,9,6,6,3,3,3,3,0,0,0,0
         * = $9600
+orbVarT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6
+        * = $9700
 orbPtrT: !byte 128,129,130,131,132,131,132
 orbExpT: !byte 0,0,0,0,0,1,1
 orbHalfT: !byte 2,4,6,8,12,16,24
 orbAncT: !byte 13,15,18,19,21,38,42
 orbColT: !byte 1,2,3,4,6,8,12
+orbBitT: !byte 1,2,4,8,16,32,64,128
+orbXLT: !byte 128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128
+orbXHT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13
+orbYLT: !byte 128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128
+orbYHT: !byte 1,1,1,1,1,3,3,3,4,4,5,5,6,6,6,7,7,8,8,9,9,9,10,10,11,11,11,12,13,13,13,14,14,14
+orbColT2: !byte 14,10,13,14,10,13,14,10,13,14,10,13,14,10,13,14,10,13,14,10,13,14,10,13,14,10,13,14,10,13,14,10,13,14
 orbSpHT: !byte 21,21,21,21,21,42,42
+        * = $9800
+candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,6,5,5,5,5,0,5,5,5,4,4,4,4,0,0,7,6,6,5,5,5,0,6,5,5,4,4,3,3,0,0,6,4,5,6,6,5,0,6,8,6,0,0,0,1,0,0,4,0,0,0,4,6,8,9,9,6,0,2,1,2,0,0,4,0,4,3,4,5,0,0,7,5,0,3,0,0,0,0,4,0,2,0,0,0,0,3,7,7,0,4,3,3,0,0,3,0,2,0,3,2,4,5,7,8,5,6,0,3,0,0,3,0,2,0,2,0,0,0,0,0,8,5,0,2,0,0,3,2,3,0,2,0,3,2,2,3,8,6,0,2,0,0,0,0,3,0,2,0,2,0,0,0,0,5,3,5,0,0,2,1,3,2,3,0,3,0,3,2,3,6,5,4,0,0,1,0,0,0,0,0,4,0,2,0,0,0,0,0,0,0,2,3,3,3,5,6,6,5,5,0,2,3,3,3,0,0,2,2,1,0,0,4,6,6,6,5,5,5,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $9900
+candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,39,54,69,84,0,99,114,129,144,156,168,180,0,0,192,213,231,249,8,23,0,38,56,71,86,98,110,119,0,0,128,146,158,173,191,209,0,224,242,10,0,0,0,28,0,0,31,0,0,0,43,55,73,97,124,151,0,169,175,178,0,0,184,0,196,208,217,229,0,0,244,9,0,24,0,0,0,0,33,0,45,0,0,0,0,51,60,81,0,102,114,123,0,0,132,0,141,0,147,156,162,174,189,210,234,249,0,11,0,0,20,0,29,0,35,0,0,0,0,0,41,65,0,80,0,0,86,95,101,0,110,0,116,125,131,137,146,170,0,188,0,0,0,0,194,0,203,0,209,0,0,0,0,215,230,239,0,0,254,4,7,16,22,0,31,0,40,49,55,64,82,97,0,0,109,0,0,0,0,0,112,0,124,0,0,0,0,0,0,0,130,136,145,154,163,178,196,214,229,0,244,250,3,12,0,0,21,27,33,0,0,36,48,66,84,102,117,132,147,159,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $9a00
+candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,155,155,155,155,155,155,0,155,155,155,155,155,155,155,0,0,155,155,155,155,156,156,0,156,156,156,156,156,156,156,0,0,156,156,156,156,156,156,0,156,156,157,0,0,0,157,0,0,157,0,0,0,157,157,157,157,157,157,0,157,157,157,0,0,157,0,157,157,157,157,0,0,157,158,0,158,0,0,0,0,158,0,158,0,0,0,0,158,158,158,0,158,158,158,0,0,158,0,158,0,158,158,158,158,158,158,158,158,0,159,0,0,159,0,159,0,159,0,0,0,0,0,159,159,0,159,0,0,159,159,159,0,159,0,159,159,159,159,159,159,0,159,0,0,0,0,159,0,159,0,159,0,0,0,0,159,159,159,0,0,159,160,160,160,160,0,160,0,160,160,160,160,160,160,0,0,160,0,0,0,0,0,160,0,160,0,0,0,0,0,0,0,160,160,160,160,160,160,160,160,160,0,160,160,161,161,0,0,161,161,161,0,0,161,161,161,161,161,161,161,161,161,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $9b00
+candListT: !byte 0,0,51,5,64,40,6,24,34,1,0,33,12,64,32,8,22,31,19,64,30,0,0,58,5,83,39,6,32,36,1,0,35,8,26,32,12,72,32,0,128,51,1,0,40,6,45,39,5,96,36,8,32,33,1,0,51,0,128,40,6,64,40,5,104,34,8,40,34,1,0,58,6,83,39,0,128,35,8,51,35,5,109,32,1,128,51,6,96,36,8,64,35,0,128,33,5,112,31,2,0,58,7,45,39,3,0,35,11,45,32,4,0,31,2,128,51,3,0,40,7,64,40,11,54,33,4,0,32,3,0,51,2,128,40,7,83,39,4,0,33,11,64,33,3,0,58,7,96,36,2,128,35,4,0,35,3,128,51,4,0,40,7,104,34,2,128,33,4,0,51,3,128,40,7,109,32,2,128,32,4,0,58,3,128,35,7,112,31,2,128,31,5,64,51,0,224,45,6,13,35,12,64,33,1,246,33,8,16,31,19,64,30,0,192,51,5,96,45,6,19,39,1,243,35,8,19,32,11,15,29,0,160,45,6,32,45,1,237,39,5,109,39,8,24,34,11,16,30,6,64,51,1,224,45,0,147,39,8,32,36,5,115,35,1,192,51,6,96,45,8,45,39,0,141,35,5,118,33,1,160,45,8,64,40,6,109,39,0,138,33,5,120,32,2,192,51,7,32,45,3,243,35,11,40,34,4,249,31,23,45,29,7,64,51,2,160,45,3,237,39,11,51,35,4,248,32,3,224,45,7,96,45,2,147,39,11,64,35,4,246,33,3,192,51,7,109,39,2,141,35,4,243,35,3,160,45,4,237,39,2,138,33,8,115,31,4,224,45,3,147,39,2,136,32,4,192,51,3,141,35,2,135,31,5,0,58,0,211,39,6,0,35,12,64,35,1,237,32,19,64,31,5,128,51,0,192,40,6,0,40,1,232,34,6,0,51,5,128,40,0,173,39,1,224,36,8,13,35,6,0,58,1,211,39,8,19,39,0,160,36,5,128,35,11,13,31,6,128,51,8,32,45,1,192,40,0,152,34,5,128,33,11,16,31,8,64,51,6,128,40,1,173,39,0,147,32,5,128,32,7,0,51,2,192,40,11,32,36,3,232,34,4,243,31,23,43,30,7,0,58,2,173,39,11,45,39,3,224,36,8,115,35,4,240,31,10,115,31,23,48,30,7,128,51,11,64,40,3,211,39,2,160,36,8,118,33,10,117,30,4,192,40,5,192,51,12,64,40,0,205,35,19,64,32,8,0,51,6,160,45,1,192,35,0,160,33,8,0,58,6,147,39,1,179,35,7,243,35,10,115,35,0,154,32,8,128,51,7,237,39,6,141,35,11,13,35,10,118,33,3,230,32,0,150,31,4,240,30,7,224,45,8,128,40,11,19,39,2,192,35,6,138,33,3,224,33,16,32,33,10,120,32,5,134,30,7,192,51,11,32,45,8,128,35,2,179,35,3,216,34,6,136,32,10,121,31,23,45,30,5,133,30,11,64,51,7,160,45,13,96,36,2,168,34,8,128,33,10,122,30,9,0,58,23,64,31,9,128,51,9,128,40,4,192,35,12,64,51,5,192,40,19,64,33,0,202,33,10,0,58,17,64,35,8,243,35,7,243,31,10,128,51,8,237,39,7,240,31,8,224,45,10,128,40,1,192,33,7,237,32,8,192,51,6,160,36,10,128,35,1,182,33,0,160,31,11,0,51,13,96,45,7,192,40,16,32,36,2,182,33,3,211,32,23,42,31,11,0,58,7,173,39,13,109,39,2,173,32,6,141,31,9,192,51,14,32,45,23,64,32,12,0,58,5,192,35,19,64,35,0,200,32,10,192,51,17,64,40,13,0,58,11,237,39,16,13,35,13,128,51,11,224,45,16,19,39,7,192,35,2,184,32,3,208,31,26,32,30,11,192,51,16,32,45,13,128,40,7,179,35,23,45,32,15,120,32,2,176,31,14,0,51,16,96,45,9,192,40,23,64,33,14,0,58,16,109,39,21,96,33,14,128,51,18,64,40,26,64,32,12,192,51,19,64,40,5,192,33,17,64,51,10,192,40,15,0,58,22,64,35,16,0,31,15,128,51,16,0,32,13,224,45,15,128,40,11,232,34,16,0,33,13,192,51,11,224,36,15,128,35,16,0,35,3,211,30,13,160,45,16,0,40,11,211,39,7,192,33,15,128,33,2,185,31,3,205,31,16,0,51,11,192,40,13,147,39,14,243,35,7,182,33,15,128,32,26,32,31,2,179,31,16,0,58,14,237,39,13,141,35,23,51,35,15,128,31,16,128,51,21,96,36,9,192,35,23,64,35,13,138,33,15,128,30,18,64,51,14,160,45,26,64,33,19,64,51,12,192,40,5,192,32,17,0,58,10,192,35,15,192,51,22,64,40,16,192,51,21,96,45,23,45,39,14,224,36,11,179,35,26,32,33,7,176,31,2,176,30,16,160,45,23,64,40,21,109,39,9,192,33,13,147,32,18,0,58,26,64,35,19,0,58,12,192,35,5,192,31,19,128,51,17,224,45,17,192,51,19,128,40,10,192,33,22,64,51,15,192,40,20,0,58,21,0,35,27,64,35,20,128,51,21,0,40,21,0,51,20,128,40,21,0,58,20,128,35,14,224,33,21,128,51,23,32,45,16,192,40,26,24,34,20,128,33,11,182,33,9,200,32,7,179,31,23,64,51,21,128,40,16,173,39,26,32,36,9,192,32,20,128,32,18,192,51,26,64,40,24,96,45,17,192,40,10,192,32,22,0,58,15,192,35,20,192,51,27,64,40,23,0,58,26,19,39,16,179,35,9,192,31,7,176,30,23,128,51,26,32,45,21,141,35,26,64,51,18,192,40,23,128,40,21,138,33,25,120,32,24,0,51,28,64,40,24,0,58,24,128,51,17,192,35,10,192,31,22,224,45,24,128,40,22,192,51,24,128,35,15,192,33,27,64,51,20,192,40,31,77,35,25,0,58,32,64,35,26,0,32,25,128,51,26,0,33,23,224,45,25,128,40,26,0,35,23,192,51,26,0,40,25,128,35,16,182,33,11,179,31,9,192,30,26,0,51,23,160,45,18,205,35,25,128,33,16,173,32,26,0,58,23,147,39,18,192,35,25,128,32,28,64,51,27,0,58,31,83,39,32,32,36,20,192,35,25,192,51,32,64,40,28,0,58,29,0,35,28,128,51,29,0,40,32,6,30,29,0,51,28,128,40,32,7,31,29,0,58,28,128,35,32,8,32,29,128,51,31,32,45,28,128,33,32,10,33,33,5,30,31,64,51,27,224,45,29,128,40,32,13,35,28,128,32,33,6,30,27,192,51,31,96,45,32,19,39,29,128,35,20,192,33,28,128,31,27,160,45,32,32,45,31,109,39,29,128,33,28,128,30,32,64,51,25,192,40,31,115,35,29,128,32,28,128,30,30,0,58,33,19,39,30,128,51,33,32,45,32,115,35,33,64,51,30,128,40,32,118,33,33,96,45,30,128,35,32,120,32,28,192,51,29,243,35,28,160,45,29,237,39,28,147,39,31,0,58,27,211,39,32,0,35,33,0,30,31,128,51,27,192,40,32,0,40,29,141,35,20,192,32,33,0,31,32,0,51,31,128,40,27,173,39,25,205,35,29,138,33,33,0,32,32,0,58,27,160,36,25,192,35,31,128,35,33,0,33,29,136,32,32,128,51,30,224,45,33,0,35,31,128,33,29,135,31,30,192,51,32,128,40,33,0,40,31,128,32,29,134,30,33,0,51,30,160,45,32,128,35,31,128,31,29,133,30,33,0,58,30,147,39,32,128,33,31,128,30,33,128,51,30,141,35,32,128,32,31,128,30   ; read through a 16-bit pointer, so it may cross pages
         ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = $9700
+        * = $a200
 stepT1: !byte 223,3,23,5,211,228,181,195,167,0,22,50,65,211,228,111,126,167,0,22,50,65,211,228
         !byte 111,126,167,0,22,50,65,211,228,111,126,167,32,34,35,65,80,38,42,40,184,46,49,50
         !byte 51,52,26,125,126,213,32,34,35,65,80,96,111,126,184,32,34,35,65,80,96,111,126,184
@@ -3797,7 +3920,7 @@ stepT1: !byte 223,3,23,5,211,228,181,195,167,0,22,50,65,211,228,111,126,167,0,22
         !byte 65,80,96,111,126,128,214,34,50,65,80,124,125,126,128,214,34,50,65,80,96,111,126,128
         !byte 169,190,50,215,199,209,174,188,1,169,190,50,215,199,209,174,188,1,169,190,50,215,199,209
         !byte 174,188,1,169,190,222,215,199,209,174,188,1
-        * = $9800
+        * = $a300
 stepT2: !byte 223,3,14,172,193,191,181,195,171,0,22,50,26,27,10,12,16,12,0,22,227,5,211,110
         !byte 111,195,21,0,22,227,210,211,228,207,139,167,32,34,35,15,6,19,15,35,178,46,34,50
         !byte 51,37,38,12,28,200,32,34,35,36,37,110,111,112,44,32,34,35,210,205,186,207,139,184
@@ -3809,7 +3932,7 @@ stepT2: !byte 223,3,14,172,193,191,181,195,171,0,22,50,26,27,10,12,16,12,0,22,22
         !byte 51,27,10,125,126,127,197,120,119,122,122,96,125,126,127,116,22,194,210,205,186,125,126,128
         !byte 169,22,222,215,199,209,174,139,1,176,190,64,215,199,209,174,139,1,217,133,134,133,134,229
         !byte 174,188,87,170,158,194,210,205,186,207,139,1
-        * = $9900
+        * = $a400
 stepT3: !byte 223,3,4,172,193,191,181,201,168,18,18,227,15,25,7,15,9,9,20,20,20,20,20,20
         !byte 20,20,20,31,31,31,31,31,31,31,31,31,32,34,23,34,33,33,34,34,178,50,36,50
         !byte 51,36,50,36,50,218,42,42,42,42,42,42,42,42,42,45,45,45,45,45,45,45,45,45

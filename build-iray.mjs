@@ -608,39 +608,103 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
 
-// ---- the orb sprite ----
-// Seven variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps: orb5
-// and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra data.
-// Multicolor, and the colour mapping is the author's, NOT what the gmSprite header comment
-// implies -- that comment's [13]/[14]/[15] do not match this file version. Bit pair 10 is the
-// body (light blue), 01 the shaded underside (blue), 11 the highlight and the ground shadow
-// (grey 3). The shadow is the useful part for us: it marks where the orb meets the floor.
+const RELOC = 0x8300;                   // CPU-only tables, out of the VIC's 16K window
+// ---- the orbs ----
+// Seven size variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps:
+// orb5 and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra
+// data. Multicolor, and the colour mapping is the author's, NOT what the gmSprite header
+// comment implies -- that comment's [13]/[14]/[15] do not match this file version. Bit pair 10
+// is the body, 01 the shaded underside, 11 the highlight and the ground shadow. The shadow is
+// the useful part for us: it marks where the orb meets the floor.
+//
+// Only the BODY can vary per orb. Bit pair 10 reads $d027+n, which is per sprite, but 01 and
+// 11 read $d025/$d026, which are single registers shared by all eight. So the underside and
+// the highlight are common to every orb on screen and only the body colour is free.
 const SPRITES = process.env.SPRITES !== '0';
-// SPRPRI=0 puts the orb back in front of everything -- the A/B test for hardware occlusion.
+// SPRPRI=0 sets the initial priority byte; orbMove overwrites it every frame, so it is not an
+// A/B for occlusion. ORBMIX=0 is -- it skips repointing far cells to SOLID's twin.
 const SPRPRI = +(process.env.SPRPRI ?? 1);
-// ORBMIX=0 keeps the per-frame priority flag but skips repointing far cells to SOLID's twin,
-// which is the A/B for whether the mixed-depth path is doing anything.
+const DBGORB = flag('DBGORB');
 const ORBMIX = process.env.ORBMIX !== '0';
 const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
 const ORBBM = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 36, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 186, 0, 0, 170, 0, 0, 170, 0, 0, 169, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 2, 234, 64, 2, 170, 64, 2, 170, 64, 2, 169, 64, 2, 165, 64, 0, 149, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 3, 255, 192, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 11, 234, 144, 11, 170, 144, 10, 170, 144, 10, 170, 144, 10, 170, 80, 10, 169, 80, 2, 169, 64, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 15, 255, 240, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0], [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192, 0]];
-// variant -> which of the five bitmaps, and whether the VIC doubles it
-const ORBSRC = [0, 1, 2, 3, 4, 3, 4];
-const ORBEXP = [0, 0, 0, 0, 0, 1, 1];
+const ORBSRC = [0, 1, 2, 3, 4, 3, 4];   // variant -> bitmap
+const ORBEXP = [0, 0, 0, 0, 0, 1, 1];   // ... and whether the VIC doubles it
 // Raster rows from the sprite's top down to the BOTTOM of the ground shadow. That row is what
 // has to land on the floor line, or the orb looks like it is hovering.
-const ORBFOOT = [13, 15, 18, 19, 21].map(v => v);
+const ORBFOOT = [13, 15, 18, 19, 21];
 const ORBANCH = ORBSRC.map((b, v) => ORBFOOT[b] * (ORBEXP[v] ? 2 : 1));
-// Ball width in pixels, for centring on the column.
-const ORBWIDE = [4, 8, 12, 16, 24, 32, 48];
+const ORBWIDE = [4, 8, 12, 16, 24, 32, 48];      // ball width in pixels, for centring
+const ORBBODY = [14, 10, 13];                    // light blue / light red / light green
+const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
 
-// Orb world position, 8.8 cells. The player starts at (1.5, 1.5) in the top-left room, so
-// this sits a few cells away down the corridor where it is visible from the start.
-const ORBX = hexArg('ORBX', 0x0380, 0xffff), ORBY = hexArg('ORBY', 0x0180, 0xffff);
-// 80 / tan(FOV/2): a unit of t (= right*256/forward) is worth this many 1/256ths of a column.
-const ORBK = Math.round(80 / Math.tan(FOV / 2 / 256 * 2 * Math.PI));
-// h -> variant. The walls are 88/d tall, so scaling the orb off the same h keeps it locked to
-// the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at h = 88,
-// i.e. how big it looks standing one cell away; tune it by eye.
+// Placement. Greedy over the open cells with a minimum spacing, which spreads them through
+// every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
+// candidate list to 9 -- see the visibility lists below, which are what make this affordable.
+const ORBSPACE = +(process.env.ORBSPACE ?? 2.2);
+// How far an orb can be and still make the cell's list. A full projection is ~2400 cycles
+// whether the orb ends up 48 pixels across or 4, so the tail of tiny distant dots is the
+// expensive part of being generous. 9 cells is where an orb is still a couple of pixels.
+const ORBSEE = +(process.env.ORBSEE ?? 9);
+const ORBS = [];
+for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
+  if (map[y * 16 + x]) continue;
+  const cx = x + 0.5, cy = y + 0.5;
+  if (cx < 2 && cy < 2) continue;                // not sitting on the player's start
+  if (ORBS.some(o => Math.hypot(o.x - cx, o.y - cy) < ORBSPACE)) continue;
+  ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
+}
+if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables are byte-sized`);
+
+// Per-cell candidate lists. Projecting an orb costs about a thousand cycles, so the thing that
+// decides whether many orbs are affordable at all is how few we even look at. From any cell,
+// only orbs with line of sight can possibly be on screen, and in a corridor maze that is very
+// few: mean 4.3, worst 9. Sorted by distance, so taking the first eight that project takes the
+// NEAREST eight, and assigning them to sprites in order gets the overlap priority right for
+// free -- sprite 0 draws over sprite 1.
+const losFree = (ax, ay, bx, by) => {
+  const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
+  for (let i = 1; i < n; i++) { const t = i / n, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+    if (map[(y | 0) * 16 + (x | 0)]) return false; }
+  return true;
+};
+const CANDBASE = RELOC + 0x1800;                 // must match the org below
+const candList = [], candLo = new Array(256).fill(0), candHi = new Array(256).fill(0),
+      candCnt = new Array(256).fill(0);
+for (let cell = 0; cell < 256; cell++) {
+  const x = cell & 15, y = cell >> 4;
+  if (map[cell]) continue;
+  const cx = x + 0.5, cy = y + 0.5;
+  const vis = ORBS.map((o, i) => ({ i, d: Math.hypot(o.x - cx, o.y - cy) }))
+    .filter(o => o.d < ORBSEE && losFree(cx, cy, ORBS[o.i].x, ORBS[o.i].y))
+    .sort((a, b) => a.d - b.d);
+  // FULL ADDRESS, not an offset: the 6502 loads these straight into a pointer.
+  const a = CANDBASE + candList.length;
+  candLo[cell] = a & 255; candHi[cell] = a >> 8;
+  candCnt[cell] = vis.length;
+  // Three bytes per candidate: orb index, bearing from this cell, and how far off that
+  // bearing the player may still see it. The list covers all 360 degrees but the FOV is 66,
+  // so without this test four candidates in five are fully projected only to be discarded --
+  // and a full projection is about 2000 cycles against 20 for the test.
+  for (const v of vis) {
+    const o = ORBS[v.i];
+    const brg = Math.round(Math.atan2(o.y - cy, o.x - cx) / (2 * Math.PI) * 256) & 255;
+    // Half the FOV, plus however far the bearing can swing as the player moves off the cell
+    // centre -- up to 0.71 cells away, which matters enormously for a near orb.
+    const win = Math.min(127, Math.ceil(FOV / 2 + Math.atan2(0.71, Math.max(v.d, 0.71))
+                                                  / (2 * Math.PI) * 256) + 2);
+    candList.push(v.i, brg, win);
+  }
+}
+console.error(`orbs: ${ORBS.length} placed (${ORBBODY.map((_, c) =>
+  ORBS.filter(o => o.c === c).length).join('/')} by colour), visibility lists ` +
+  `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}`);
+const orbXL = ORBS.map(o => Math.round(o.x * 256) & 255), orbXH = ORBS.map(o => Math.round(o.x * 256) >> 8);
+const orbYL = ORBS.map(o => Math.round(o.y * 256) & 255), orbYH = ORBS.map(o => Math.round(o.y * 256) >> 8);
+const orbCol = ORBS.map(o => ORBBODY[o.c]);
+// h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
+// locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
+// h = 88, i.e. how big it looks one cell away.
 const ORBSCALE = +(process.env.ORBSCALE ?? 34);
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = ORBSCALE * h / 88;
@@ -649,13 +713,12 @@ const orbVarT = [...Array(256)].map((_, h) => {
   return b;
 });
 const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
-const orbExpT = ORBEXP.map(e => e);          // sprite 0 only, so the bit IS the byte
+const orbExpT = ORBEXP.map(e => e);
 const orbHalfT = ORBWIDE.map(w => w >> 1);
 const orbAncT = ORBANCH.map(a => a);
-// Half-width in LOGICAL columns (2 screen px each), for the depth scan under the sprite.
-const orbColT = ORBWIDE.map(w => w >> 2);
-const orbSpHT = ORBEXP.map(e => e ? 42 : 21);   // sprite height in raster lines
-const DBGORB = flag('DBGORB');
+const orbColT = ORBWIDE.map(w => w >> 2);        // half-width in LOGICAL columns
+const orbSpHT = ORBEXP.map(e => e ? 42 : 21);    // sprite height in raster lines
+const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
@@ -691,7 +754,6 @@ for (let a = 0; a < 256; a++) {
 const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
 for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
   recipLo.push(v & 255); recipHi.push(v >> 8); }
-const RELOC = 0x8200;                   // CPU-only tables, out of the VIC's 16K window
 const HTABLE = 0x4d00;                  // page-aligned: 16 height tables x 3 pages
                                         // (was $4800, then $4d00; the edge stubs, clmp16 and
                                         // then the three-level step tables grew the data
@@ -903,6 +965,7 @@ o2      = $96
 ivL     = $97
 ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
 ohgt    = $9d
+ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
 ; ... and the cold tail, touched once or twice each, left in absolute RAM
 ocos    = $cb00
 ocosS   = $cb01
@@ -917,17 +980,30 @@ ogH     = $cb09
 oe      = $cb0a
 o3      = $cb0b
 ocoff   = $cb0c
-odb     = $cb20                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ovar    = $cb0d
+ocmax   = $cb0e
+ocnear  = $cb0f
 ocol    = $cb10
 ocspan  = $cb11
 ocl     = $cb12
 ocr     = $cb13
 ocrow   = $cb14
-ocrw2   = $cb15                  ; sprite centre, logical column
-ocmax   = $cb0e                  ; depth scan under the sprite: right edge, and the verdict
-ocnear  = $cb0f
-; orb projection scratch above; once a frame, so absolute costs ~50 cycles total
+ocrw2   = $cb15
+ocl2    = $cb16
+oidx    = $cb17
+ocn3    = $cb2a
+ocn     = $cb18
+ocy     = $cb19
+onv     = $cb1a
+omEn    = $cb1b
+omXX    = $cb1c
+omYY    = $cb1d
+omPri   = $cb1e
+omX8    = $cb1f
+omBit   = $cb20
+omMix   = $cb21
+orej    = $cb21
+odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -936,6 +1012,11 @@ remHiT  = $c800                 ;   Parked so u can be derived later, only where
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
 entry:
         sei
+        lda #$36                ; LORAM off: BASIC ROM out, so $a000-$bfff reads the RAM the
+        sta $01                 ; program was loaded into. The relocated tables have grown past
+                                ; $a000 and were silently reading ROM -- step patterns came back
+                                ; as BASIC bytes, so corners picked nonsense and flickered.
+                                ; KERNAL and I/O stay mapped.
         lda #$00
         sta $d01a
         lda $dd00
@@ -975,18 +1056,19 @@ ccf:    sta $d800,x
         inx
         bne ccf
 ${SPRITES ? `        ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
-        lda #$01
-        sta $d015               ; enable sprite 0 only
-        sta $d01c               ; ... in multicolor
+        lda #$ff
+        sta $d01c               ; ALL eight in multicolor -- orbMove hands out slots as it
+                                ; finds visible orbs, so any of them can be in use. $d015 is
+                                ; built per frame and not set here.
         lda #${SPRPRI}
         sta $d01b               ; sprite 0 BEHIND foreground. Walls are bit pair 11 and seams
                                 ; 10, both foreground, so the VIC clips the orb against the
                                 ; scene per pixel and orbMove does not test occlusion at all.
         sta $d017
         sta $d01d
-        lda #$06
+        lda #${hx(ORBUNDER)}
         sta $d025               ; bit pair 01 = blue, the shaded underside
-        lda #$0f
+        lda #${hx(ORBHILITE)}
         sta $d026               ; bit pair 11 = grey 3, highlight and ground shadow
         lda #$0e
         sta $d027               ; bit pair 10 = light blue, the body
@@ -2837,43 +2919,19 @@ chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
 ${PROFILE ? '' : ''}${SPRITES ? `
-; ---- orbMove: put the orb where the player is looking ----
-; Runs once a frame, so it is written for clarity over cycles and keeps its working set in
-; absolute RAM rather than fighting for zero page -- 50-odd absolute accesses cost 50 cycles
-; and buy the whole seam scratch range back.
+; ---- orbMove: place every visible orb ----
+; Once a frame. Written for clarity over cycles and keeping its working set in absolute RAM
+; where it can, since 50-odd absolute accesses cost 50 cycles and buy back the whole seam
+; scratch. The hot half lives in that scratch, which is dead by the time this runs.
 ;
 ; Camera space: forward = dx*cos(pa) + dy*sin(pa), right = dy*cos(pa) - dx*sin(pa). "right" is
-; the direction of INCREASING column, which is d/dpa of the ray direction = (-sin, cos).
-; Map y runs downward, matching the DDA, so no handedness fixup is needed anywhere here.
+; the direction of INCREASING column, which is d/dpa of the ray direction = (-sin, cos). Map y
+; runs downward, matching the DDA, so no handedness fixup is needed anywhere here.
+;
+; The candidate list for the player's cell is pre-sorted by distance, so the first eight orbs
+; that project are the NEAREST eight and assigning them to sprites in order also gets the
+; overlap priority right -- sprite 0 draws over sprite 1.
 orbMove:
-        sec                     ; dx = orb - player, signed 8.8 cells
-        lda #${hx(ORBX & 255)}
-        sbc px
-        sta oaL
-        lda #${hx(ORBX >> 8)}
-        sbc px+1
-        sta oaH
-        jsr oabs
-        lda oaL
-        sta odxL
-        lda oaH
-        sta odxH
-        lda oaS
-        sta odxS
-        sec
-        lda #${hx(ORBY & 255)}
-        sbc py
-        sta oaL
-        lda #${hx(ORBY >> 8)}
-        sbc py+1
-        sta oaH
-        jsr oabs
-        lda oaL
-        sta odyL
-        lda oaH
-        sta odyH
-        lda oaS
-        sta odyS
         ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
         lda absCosT,x
         sta ocos
@@ -2893,7 +2951,146 @@ oss:    lda #$00
         bpl ocs
         lda #$ff
         sta ocosS
-ocs:
+ocs:    lda #$00                ; the per-sprite bit registers are built up a bit at a time and
+        sta omEn                ; written once, so an unused slot is simply never set
+        sta omXX
+        sta omYY
+        sta omPri
+        sta omX8
+        sta onv
+        sta omMix
+        lda py+1                ; which cell is the player standing in?
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc px+1
+        tax
+        lda candCntT,x
+        beq obEnd
+        sta ocn
+        asl                     ; three bytes per record
+        clc
+        adc ocn
+        sta ocn3
+${DBGORB ? '        lda #$01\n        sta ocn\n        lda #$03\n        sta ocn3        ; DBGORB: first candidate only, so the dump is unambiguous\n' : ''}        lda candLoT,x
+        sta ocptr
+        lda candHiT,x
+        sta ocptr+1
+        lda #$00
+        sta ocy
+obLoop: ldy ocy
+        lda (ocptr),y
+        sta oidx
+        iny
+        lda pa                  ; is the orb anywhere near the way we are facing? The list is
+        sec                     ; all-round, the view is 66 degrees, and a full projection
+        sbc (ocptr),y           ; costs a hundred times what this compare does
+        bpl obPos
+        eor #$ff
+        clc
+        adc #$01
+obPos:  iny
+        cmp (ocptr),y
+        beq obNear
+        bcs obNext
+obNear: jsr orbOne
+obNext: lda ocy
+        clc
+        adc #$03
+        sta ocy
+        lda onv
+        cmp #$08                ; eight hardware sprites, and the list is nearest-first
+        bcs obEnd
+        lda ocy
+        cmp ocn3
+        bcc obLoop
+obEnd:  ${DBGORB ? `lda py+1
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc px+1
+        sta odb
+        lda fwdL
+        sta odb+1
+        lda fwdH
+        sta odb+2
+        lda rgtL
+        sta odb+3
+        lda rgtH
+        sta odb+4
+        lda ohgt
+        sta odb+5
+        ldx #$00
+        ldy #$00
+odbLp:  lda odb,x
+        lsr
+        lsr
+        lsr
+        lsr
+        clc
+        adc #${hx(GLYPH0)}
+        sta $0478,y
+        sta $2478,y
+        iny
+        lda odb,x
+        and #$0f
+        clc
+        adc #${hx(GLYPH0)}
+        sta $0478,y
+        sta $2478,y
+        iny
+        inx
+        cpx #$06
+        bne odbLp
+        ` : ''}lda omEn
+        sta $d015
+        lda omXX
+        sta $d01d
+        lda omYY
+        sta $d017
+        lda omPri
+        sta $d01b
+        lda omX8
+        sta $d010
+        rts
+
+; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
+orbOne: lda #$00
+        sta orej
+        ldx oidx
+        sec                     ; dx = orb - player, signed 8.8 cells
+        lda orbXLT,x
+        sbc px
+        sta oaL
+        lda orbXHT,x
+        sbc px+1
+        sta oaH
+        jsr oabs
+        lda oaL
+        sta odxL
+        lda oaH
+        sta odxH
+        lda oaS
+        sta odxS
+        ldx oidx
+        sec
+        lda orbYLT,x
+        sbc py
+        sta oaL
+        lda orbYHT,x
+        sbc py+1
+        sta oaH
+        jsr oabs
+        lda oaL
+        sta odyL
+        lda oaH
+        sta odyH
+        lda oaS
+        sta odyS
         lda odxL                ; forward = dx*cos + dy*sin
         sta oaL
         lda odxH
@@ -2928,12 +3125,12 @@ ocs:
         adc orH
         sta fwdH
         lda fwdH                ; behind the camera, or close enough to be inside us. Tested
-        bmi orbHide             ; HERE, before "right" costs another two products: at any given
+        bmi orbNo               ; HERE, before "right" costs another two products: at any given
         bne ofwOk               ; moment most of the world is behind you
         lda fwdL
         cmp #$40
-        bcc orbHide
-ofwOk:
+        bcc orbNo
+ofwOk:  inc orej
         lda odyL                ; right = dy*cos - dx*sin
         sta oaL
         lda odyH
@@ -2967,6 +3164,7 @@ ofwOk:
         lda rgtH
         sbc orH
         sta rgtH
+        inc orej
         ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
         ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
         ; of forward costs under 0.4% -- less than half a column at the screen edge.
@@ -3005,9 +3203,7 @@ ivRl:   lsr ivH
         ror ivL
         inx
         bne ivRl
-ivDn:
-        ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
-        lda #$0b
+ivDn:   lda #$0b                ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
         sta mq
         lda ivL
         jsr mul8
@@ -3036,9 +3232,10 @@ ivDn:
         sta o1
 ohOk:   lda o1
         sta ohgt
-        ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so
-        ; the ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit
-        ; shift that used to compute right/forward separately is gone entirely.
+        inc orej
+        ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so the
+        ; ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit shift
+        ; that computing right/forward separately would need is gone entirely.
         lda rgtL
         sta oaL
         lda rgtH
@@ -3062,8 +3259,7 @@ ohOk:   lda o1
         sta o1
         lda phi
         adc #$00
-        sta o2
-        bne orbHide             ; |right|*h past 65535 is far outside the FOV
+        bne orbNo               ; |right|*h past 65535 is far outside the FOV
         lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
         sta mq                  ; shift of it is just (b2 << 1) | (b1 >> 7) -- no shift loop.
         lda o0
@@ -3077,26 +3273,28 @@ ohOk:   lda o1
         clc
         lda o2
         adc plo
-        sta o2                  ; b1
+        sta o2
         lda phi
-        adc #$00                ; b2
-        asl o2                  ; b1 bit 7 -> carry
+        adc #$00
+        asl o2
         rol
-        bcs orbHide             ; past 255 columns off centre: nowhere near the screen
+        bcs orbNo               ; past 255 columns off centre: nowhere near the screen
         sta ocoff
-        ; --- pick the size variant from the projected height, exactly as the walls scale ---
-        ldx ohgt
+        inc orej
+        ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
         lda orbVarT,x
         sta ovar
-        tax
-        lda orbPtrT,x
-        sta $07f8               ; both buffers: the pointer lives in screen RAM
-        sta $27f8
-        lda orbExpT,x
-        sta $d017
-        sta $d01d
-        ; --- screen X: 24 + 2*column - halfWidth, as a signed 16-bit value ---
-        lda ocoff               ; 2*column = 160 +/- 2*ocoff
+        lda oaS                 ; --- centre column ---
+        bmi ocN
+        clc
+        lda #80
+        adc ocoff
+        jmp ocS
+ocN:    sec
+        lda #80
+        sbc ocoff
+ocS:    sta ocol
+        lda ocoff               ; --- screen X: 24 + 2*column - halfWidth, signed 16-bit ---
         asl
         sta o0
         lda #$00
@@ -3119,7 +3317,8 @@ oxNeg:  sec
         lda #$00
         sbc o1
         sta o1
-oxDn:   ldx ovar
+oxDn:   inc orej
+        ldx ovar
         sec
         lda o0
         sbc orbHalfT,x
@@ -3127,50 +3326,33 @@ oxDn:   ldx ovar
         lda o1
         sbc #$00
         sta o1
-        bmi orbHide             ; fully off the left edge
+        bmi orbNo               ; fully off the left edge
         cmp #$02
-        bcs orbHide             ; past x = 512, fully off the right
-        lda o0
-        sta $d000
-        lda o1
-        beq oxLo
-        lda #$01
-oxLo:   sta $d010
-        ; --- screen Y: sit the bottom of the ground shadow on the floor line, 100 + h ---
-        lda ohgt
+        bcs orbNo               ; past x = 512, fully off the right
+        inc orej
+        inc orej
+        lda ohgt                ; --- screen Y: ground shadow on the floor line, 100 + h ---
         cmp #96
-        bcs orbHide             ; the floor line is off the bottom of the screen
+        bcs orbNo               ; the floor line is off the bottom of the screen
         clc
         adc #150                ; raster 50 + display row 100
         ldx ovar
         sec
         sbc orbAncT,x
-        bcc orbHide
-        sta $d001
-        ; --- which side of the orb is the scene on? ---
-        ; $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be told "behind
-        ; everything" or "in front of everything". Walls FARTHER than the orb are foreground too
-        ; and would clip it just as eagerly, which is wrong and very visible down a corridor.
-        ; So scan the columns the sprite covers: only if something there is NEARER than the orb
-        ; is it worth letting the VIC clip. Taller means nearer.
-        lda oaS
-        bmi ocN
-        clc
-        lda #80
-        adc ocoff
-        jmp ocS
-ocN:    sec
-        lda #80
-        sbc ocoff
-ocS:    sta ocol
-        ldx ovar
+        bcc orbNo
+        sta o3
+        inc orej
+        ; --- depth: $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be
+        ; told "behind everything" or "in front of everything". Walls FARTHER than the orb are
+        ; foreground too and would clip it just as eagerly, which is very visible down a
+        ; corridor. Scan what the sprite covers and decide. Taller means nearer.
         lda orbColT,x
-        sta o2                  ; half the sprite's width, in logical columns
+        sta o2
         lda ocol
         clc
         adc o2
         bcc opR1
-        lda #${NLOG - 1}        ; ran off the right edge
+        lda #${NLOG - 1}
 opR1:   cmp #${NLOG}
         bcc opR2
         lda #${NLOG - 1}
@@ -3179,54 +3361,92 @@ opR2:   sta ocmax
         sec
         sbc o2
         bcs opL1
-        lda #$00                ; ran off the left edge
+        lda #$00
 opL1:   cmp ocmax
         bcc opL2
         lda ocmax               ; degenerate: keep the scan inside colH
 opL2:   tax
-        stx o3
+        stx ocl2
         lda ocmax
         sec
-        sbc o3
+        sbc ocl2
         clc
         adc #$01
-        sta ocspan              ; columns scanned, so "every one is nearer" is detectable
+        sta ocspan
         lda #$00
         sta ocnear
 opScan: lda colH,x
         cmp ohgt
         bcc opNx
         beq opNx
-        inc ocnear              ; count how many columns are nearer than the orb
+        inc ocnear
 opNx:   inx
         cpx ocmax
         bcc opScan
         beq opScan
+        ; --- take a sprite slot ---
+        ldx onv
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ldy ovar
+        lda orbPtrT,y
+        sta $07f8,x             ; the pointer lives in the SCREEN, so both buffers need it
+        sta $27f8,x
+        ldy oidx
+        lda orbColT2,y
+        sta $d027,x             ; the ONE thing that can differ per orb: bit pair 10
+        ldy ovar
+        lda orbExpT,y
+        beq oNoX
+        lda omBit
+        ora omXX
+        sta omXX
+        lda omBit
+        ora omYY
+        sta omYY
+oNoX:   txa
+        asl
+        tay
+        lda o0
+        sta $d000,y
+        lda o3
+        sta $d001,y
+        lda o1
+        beq oNoM
+        lda omBit
+        ora omX8
+        sta omX8
+oNoM:   inc onv
         lda ocnear
-        beq opFront             ; nothing nearer: draw over everything, cheapest case
-        lda #$01
-        sta $d01b               ; something is nearer, so let the VIC clip -- but that clips
+        beq orbYes              ; nothing nearer: draw over everything, cheapest case
+        lda omBit
+        ora omPri
+        sta omPri               ; something is nearer, so let the VIC clip -- but that clips
         ; against FAR walls too, and only repointing their cells can say otherwise. Skip it
         ; when every column is nearer: then the orb is wholly behind the wall and correctly
         ; invisible, and there is nothing to repoint.
         lda ocnear
         cmp ocspan
-        bcs orbShow
-${ORBMIX ? '' : '        jmp orbShow'}
-        ; --- mixed depth: repoint the FAR solid cells under the sprite to SOLID's twin ---
-        lda ocol
-        sec
-        sbc o2
-        bcs omL1
-        lda #$00
-omL1:   lsr
+        bcs orbYes
+${ORBMIX ? '' : '        jmp orbYes'}
+        ; --- mixed depth: repoint the FAR solid cells under this sprite to SOLID's twin.
+        ; The marking is relative to ONE depth, so only the nearest such orb gets it; a farther
+        ; one that a wall separates from this one would need the opposite marking, and falls
+        ; back to the priority bit alone.
+        lda omMix
+        bne orbYes
+        inc omMix
+        lda ocl2
+        lsr
         lsr
         sta ocl
         lda ocmax
         lsr
         lsr
         sta ocr
-        lda $d001               ; sprite top, as a char row
+        lda o3                  ; sprite top, as a char row
         sec
         sbc #50
         bcs omT1
@@ -3238,7 +3458,7 @@ omT1:   lsr
         ldx ovar
         lda orbSpHT,x
         clc
-        adc $d001
+        adc o3
         sec
         sbc #50
         lsr
@@ -3274,54 +3494,8 @@ omNx:   iny
         cmp ocrw2
         bcc omRow
         beq omRow
-        jmp orbShow
-opFront:lda #$00
-        sta $d01b
-        jmp orbShow
-orbHide:lda #$00
-        sta $d015
-${DBGORB ? '        jmp odbg' : '        rts'}
-orbShow:lda #$01
-        sta $d015
-${DBGORB ? `odbg:   lda ohgt
-        sta odb
-        lda ocol
-        sta odb+1
-        lda ocnear
-        sta odb+2
-        lda ocspan
-        sta odb+3
-        lda ocl
-        sta odb+4
-        lda ocr
-        sta odb+5
-        lda ocrow
-        sta odb+6
-        lda ocrw2
-        sta odb+7
-        ldx #$00
-        ldy #$00
-odbLp:  lda odb,x
-        lsr
-        lsr
-        lsr
-        lsr
-        clc
-        adc #${hx(GLYPH0)}
-        sta $0478,y
-        sta $2478,y
-        iny
-        lda odb,x
-        and #$0f
-        clc
-        adc #${hx(GLYPH0)}
-        sta $0478,y
-        sta $2478,y
-        iny
-        inx
-        cpx #$08
-        bne odbLp` : ''}
-        rts
+orbYes: rts
+orbNo:  rts
 ; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
 oabs:   lda #$00
         sta oaS
@@ -3421,18 +3595,32 @@ orbExpT: !byte ${orbExpT.join(',')}
 orbHalfT: !byte ${orbHalfT.join(',')}
 orbAncT: !byte ${orbAncT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
+orbBitT: !byte ${orbBitT.join(',')}
+orbXLT: !byte ${orbXL.join(',')}
+orbXHT: !byte ${orbXH.join(',')}
+orbYLT: !byte ${orbYL.join(',')}
+orbYHT: !byte ${orbYH.join(',')}
+orbColT2: !byte ${orbCol.join(',')}
 orbSpHT: !byte ${orbSpHT.join(',')}
+        * = ${hx16(RELOC + 0x1500)}
+candCntT: !byte ${candCnt.join(',')}
+        * = ${hx16(RELOC + 0x1600)}
+candLoT: !byte ${candLo.join(',')}
+        * = ${hx16(RELOC + 0x1700)}
+candHiT: !byte ${candHi.join(',')}
+` : ''}${SPRITES ? `        * = ${hx16(RELOC + 0x1800)}
+candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it may cross pages
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = ${hx16(RELOC + 0x1500)}
+        * = ${hx16(RELOC + 0x1f00)}
 stepT1: ${chunk(stepT[0]).trim()}
-        * = ${hx16(RELOC + 0x1600)}
+        * = ${hx16(RELOC + 0x2000)}
 stepT2: ${chunk(stepT[1]).trim()}
-        * = ${hx16(RELOC + 0x1700)}
+        * = ${hx16(RELOC + 0x2100)}
 stepT3: ${chunk(stepT[2]).trim()}
 
-${PROFILE ? `        * = ${hx16(RELOC + 0x1800)}  ; the profiler lives above the relocated
+${PROFILE ? `        * = ${hx16(RELOC + 0x2200)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
@@ -3649,6 +3837,10 @@ try {
   console.log(`VIC bank 0 free: ${gaps.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
     `  = ${free} bytes, ${free >> 6} sprite slots`);
+  // $a000-$bfff is BASIC ROM unless LORAM is cleared, and $d000-$dfff is I/O no matter what.
+  // Reading a table through either returns something other than what was written there.
+  if (r.end >= 0xd000) throw new Error(
+    `program ends at $${r.end.toString(16)}, past $d000 -- that is I/O, not RAM`);
   console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`
     + (DIAG.length ? `\nDIAGNOSTIC BUILD [${DIAG.join(' ')}] -- asm to ${asmPath}, not for fps numbers` : ''));
 } catch (e) { console.error('ASM ERROR:', e.message); process.exit(1); }

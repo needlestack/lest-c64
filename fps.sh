@@ -34,3 +34,8 @@ const secs=(Ts.at(-1)-Ts[0])*1e6/1022727;
 if(segs.some(d=>d>240)) console.log(`WARNING: a segment is ${Math.max(...segs)} frames, close to the 256 wrap -- shorten the step`);
 console.log(`${tag}: segments ${segs.join(' ')}  = ${tot} frames over ${secs.toFixed(2)}s  -> ${(tot/secs).toFixed(2)} fps`);
 EOF
+
+# fps.sh must be run against a SPIN=1 build, which bakes auto-rotate into iray.asm and
+# latest.d64. Leave the shipping disk behind instead of a spinning one -- twice now the disk
+# handed over has been a measurement build.
+node build-iray.mjs >/dev/null 2>&1 && echo "latest.d64 rebuilt at defaults (SPIN off)"
