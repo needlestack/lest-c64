@@ -3491,15 +3491,19 @@ oxDn:   inc orej
         bcs orbNo               ; past x = 512, fully off the right
         inc orej
         inc orej
-        lda ohgt                ; --- screen Y: ground shadow on the floor line, 100 + h ---
-        cmp #106
-        bcs orbNo               ; the floor line is off the bottom of the screen
-        clc
-        adc #150                ; raster 50 + display row 100
+        ; --- screen Y: ground shadow on the floor line, 100 + h ---
+        ; $d001 = 150 + h - anchor, but computed as (150 - anchor) + h. Adding 150 first
+        ; carries out of a byte once h passes 105, which used to cap how close an orb could
+        ; get -- it blinked out at 0.84 cells instead of sliding off the bottom. Folding the
+        ; anchor into the constant keeps the sum in range all the way down to 0.62 cells,
+        ; which is past the point where the whole sprite is below the last visible line.
         ldx ovar
-        sec
-        sbc orbAncT,x
-        bcc orbNo
+        lda orbYBaseT,x
+        clc
+        adc ohgt
+        bcs orbNo               ; far below the screen
+        cmp #251
+        bcs orbNo               ; top of the sprite is past the last visible raster line
         sta o3
         inc orej
         ; --- depth: $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be
@@ -3889,6 +3893,7 @@ orbPtrT: !byte 128,129,130,131,132,131,132
 orbExpT: !byte 0,0,0,0,0,1,1
 orbHalfT: !byte 2,4,6,8,12,16,24
 orbAncT: !byte 13,15,18,19,21,38,42
+orbYBaseT: !byte 137,135,132,131,129,112,108
 orbColT: !byte 1,2,3,4,6,8,12
 orbBitT: !byte 1,2,4,8,16,32,64,128
 orbXLT: !byte 128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128

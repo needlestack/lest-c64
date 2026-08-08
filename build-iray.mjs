@@ -710,8 +710,8 @@ const orbCol = ORBS.map(o => ORBBODY[o.c]);
 // chosen at all -- the ladder topped out one rung short. Scaled so the top rung lands where
 // the second-from-top used to, which shifts every band down with it.
 const ORBSCALE = +(process.env.ORBSCALE ?? 49);
-const ORBHMAX = 106;                    // h >= this and the floor line is off the screen; also
-                                        // the point where 150 + h would carry out of a byte
+// The largest h any variant can still show at: $d001 = (150 - anchor) + h must stay under 251.
+const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = ORBSCALE * h / 88;
   let b = 0; for (let v = 1; v < 7; v++)
@@ -721,7 +721,8 @@ const orbVarT = [...Array(256)].map((_, h) => {
 { // which rungs can actually be reached, and at what distance each one takes over?
   const band = [];
   for (let v = 0; v < 7; v++) {
-    const hs = [...Array(ORBHMAX).keys()].filter(h => orbVarT[h] === v);
+    const lim = 251 - (150 - ORBANCH[v]);
+    const hs = [...Array(lim).keys()].filter(h => orbVarT[h] === v);
     band.push(hs.length ? `${ORBWIDE[v]}px@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
       `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBWIDE[v]}px UNREACHABLE`);
   }
@@ -731,6 +732,9 @@ const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
 const orbExpT = ORBEXP.map(e => e);
 const orbHalfT = ORBWIDE.map(w => w >> 1);
 const orbAncT = ORBANCH.map(a => a);
+// 150 - anchor: raster 50 + display row 100, less the rows from the sprite's top down to the
+// bottom of its ground shadow. Adding h to THIS cannot overflow until the orb is long gone.
+const orbYBaseT = ORBANCH.map(a => 150 - a);
 const orbColT = ORBWIDE.map(w => w >> 2);        // half-width in LOGICAL columns
 const orbSpHT = ORBEXP.map(e => e ? 42 : 21);    // sprite height in raster lines
 const orbBitT = [...Array(8)].map((_, i) => 1 << i);
@@ -3346,15 +3350,19 @@ oxDn:   inc orej
         bcs orbNo               ; past x = 512, fully off the right
         inc orej
         inc orej
-        lda ohgt                ; --- screen Y: ground shadow on the floor line, 100 + h ---
-        cmp #${ORBHMAX}
-        bcs orbNo               ; the floor line is off the bottom of the screen
-        clc
-        adc #150                ; raster 50 + display row 100
+        ; --- screen Y: ground shadow on the floor line, 100 + h ---
+        ; $d001 = 150 + h - anchor, but computed as (150 - anchor) + h. Adding 150 first
+        ; carries out of a byte once h passes 105, which used to cap how close an orb could
+        ; get -- it blinked out at 0.84 cells instead of sliding off the bottom. Folding the
+        ; anchor into the constant keeps the sum in range all the way down to 0.62 cells,
+        ; which is past the point where the whole sprite is below the last visible line.
         ldx ovar
-        sec
-        sbc orbAncT,x
-        bcc orbNo
+        lda orbYBaseT,x
+        clc
+        adc ohgt
+        bcs orbNo               ; far below the screen
+        cmp #251
+        bcs orbNo               ; top of the sprite is past the last visible raster line
         sta o3
         inc orej
         ; --- depth: $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be
@@ -3609,6 +3617,7 @@ orbPtrT: !byte ${orbPtrT.join(',')}
 orbExpT: !byte ${orbExpT.join(',')}
 orbHalfT: !byte ${orbHalfT.join(',')}
 orbAncT: !byte ${orbAncT.join(',')}
+orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
 orbXLT: !byte ${orbXL.join(',')}
