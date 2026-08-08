@@ -645,27 +645,48 @@ const _rows = [...Array(21).keys()].filter(y => ORBSRC12[y].some(v => v));
 const SX0 = Math.min(..._cols), SX1 = Math.max(..._cols);
 const SY0 = Math.min(..._rows), SY1 = Math.max(..._rows);
 const SW = SX1 - SX0 + 1, SH = SY1 - SY0 + 1;
-// Downsample by footprint majority: take the most common NON-ZERO source value under each
-// destination pixel. Nearest-neighbour drops the highlight and eats whole rows of the ground
-// shadow once the orb is only a few pixels across; this keeps the silhouette.
-function orbScale(w) {
-  const hgt = Math.max(1, Math.round(SH * w / SW));
-  const out = [...Array(21)].map(() => new Array(12).fill(0));
-  const ox = (12 - w) >> 1, oy = 21 - hgt;      // centred, and standing on the sprite's floor
+// The art is a ball, a gap, then a ground shadow, and the two solid parts want different
+// downsampling. Find the gap so they can be scaled separately.
+const _ballEnd = (() => { for (let y = _rows[0]; y <= SY1; y++) if (!ORBSRC12[y].some(v => v)) return y - 1; return SY1; })();
+const _shadTop = (() => { for (let y = SY1; y >= SY0; y--) if (!ORBSRC12[y].some(v => v)) return y + 1; return SY0; })();
+// Area coverage with a threshold, sampled 4x4 within each destination pixel. The BALL needs a
+// true half-coverage test or its edges square off -- filling a destination pixel whenever any
+// source pixel under it is set dilates the silhouette out to its bounding box, which is what
+// made the small orbs look cuboid. The SHADOW is three rows of soft ellipse and a half-coverage
+// test erases most of it, so it gets a low threshold and keeps its width.
+const ORBTHR = +(process.env.ORBTHR ?? 0.5);
+function orbRegion(out, oy, hgt, y0, y1, w, thr) {
+  const sh = y1 - y0 + 1, N = 4, ox = (12 - w) >> 1;
   for (let dy = 0; dy < hgt; dy++) for (let dx = 0; dx < w; dx++) {
-    const sx0 = SX0 + dx * SW / w, sx1 = SX0 + (dx + 1) * SW / w;
-    const sy0 = SY0 + dy * SH / hgt, sy1 = SY0 + (dy + 1) * SH / hgt;
-    const t = [0, 0, 0, 0];
-    for (let sy = Math.floor(sy0); sy < Math.max(Math.ceil(sy1), Math.floor(sy0) + 1); sy++)
-      for (let sx = Math.floor(sx0); sx < Math.max(Math.ceil(sx1), Math.floor(sx0) + 1); sx++)
-        if (sy >= 0 && sy < 21 && sx >= 0 && sx < 12) t[ORBSRC12[sy][sx]]++;
-    let best = 0, bn = 0;
-    for (let v = 1; v < 4; v++) if (t[v] > bn) { bn = t[v]; best = v; }
-    out[oy + dy][ox + dx] = best;
+    const t = [0, 0, 0, 0]; let n = 0;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      const sx = Math.floor(SX0 + SW * (dx + (i + 0.5) / N) / w);
+      const sy = Math.floor(y0 + sh * (dy + (j + 0.5) / N) / hgt);
+      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) { t[ORBSRC12[sy][sx]]++; n++; }
+    }
+    if (t[1] + t[2] + t[3] < n * thr) continue;
+    let bn = 0, v = 0; for (let k = 1; k < 4; k++) if (t[k] > bn) { bn = t[k]; v = k; }
+    out[oy + dy][ox + dx] = v;
   }
+}
+function orbScale(w) {
+  const sc = w / SW;
+  const bh = Math.max(1, Math.round((_ballEnd - SY0 + 1) * sc));
+  const gh = Math.max(0, Math.round((_shadTop - _ballEnd - 1) * sc));
+  const sh = Math.max(1, Math.round((SY1 - _shadTop + 1) * sc));
+  const out = [...Array(21)].map(() => new Array(12).fill(0));
+  const oy = 21 - (bh + gh + sh);       // standing on the sprite's floor
+  orbRegion(out, oy, bh, SY0, _ballEnd, w, ORBTHR);
+  orbRegion(out, oy + bh + gh, sh, _shadTop, SY1, w, 0.2);
   return out;
 }
 const NORBBM = 12;                              // one bitmap per multicolor-pixel width, 1..12
+// The widest rung must come back byte-identical to the art it was scaled from. If a change to
+// the resampler breaks that, every other rung is suspect too.
+{ const g = orbScale(SW), b = [];
+  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
+    b.push([0,1,2,3].reduce((v, i) => v | (g[y][k*4+i] << (6-2*i)), 0));
+  if (b.join() !== ORB4RAW.join()) throw new Error('orbScale does not reproduce ORB4 at full width'); }
 const ORBBM = [...Array(NORBBM)].map((_, i) => {
   const g = orbScale(i + 1), bytes = [];
   for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
