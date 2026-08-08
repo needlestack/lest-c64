@@ -705,13 +705,28 @@ const orbCol = ORBS.map(o => ORBBODY[o.c]);
 // h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
 // locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
 // h = 88, i.e. how big it looks one cell away.
-const ORBSCALE = +(process.env.ORBSCALE ?? 34);
+// The ladder has to reach its top before the orb walks off the bottom of the screen. At 34
+// the largest variant needed h > 103 while orbOne rejects h >= HMAX, so orb6 could never be
+// chosen at all -- the ladder topped out one rung short. Scaled so the top rung lands where
+// the second-from-top used to, which shifts every band down with it.
+const ORBSCALE = +(process.env.ORBSCALE ?? 49);
+const ORBHMAX = 106;                    // h >= this and the floor line is off the screen; also
+                                        // the point where 150 + h would carry out of a byte
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = ORBSCALE * h / 88;
   let b = 0; for (let v = 1; v < 7; v++)
     if (Math.abs(ORBWIDE[v] - want) < Math.abs(ORBWIDE[b] - want)) b = v;
   return b;
 });
+{ // which rungs can actually be reached, and at what distance each one takes over?
+  const band = [];
+  for (let v = 0; v < 7; v++) {
+    const hs = [...Array(ORBHMAX).keys()].filter(h => orbVarT[h] === v);
+    band.push(hs.length ? `${ORBWIDE[v]}px@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
+      `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBWIDE[v]}px UNREACHABLE`);
+  }
+  console.error(`  orb size ladder (cells): ${band.join('  ')}`);
+}
 const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
 const orbExpT = ORBEXP.map(e => e);
 const orbHalfT = ORBWIDE.map(w => w >> 1);
@@ -3332,7 +3347,7 @@ oxDn:   inc orej
         inc orej
         inc orej
         lda ohgt                ; --- screen Y: ground shadow on the floor line, 100 + h ---
-        cmp #96
+        cmp #${ORBHMAX}
         bcs orbNo               ; the floor line is off the bottom of the screen
         clc
         adc #150                ; raster 50 + display row 100
