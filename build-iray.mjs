@@ -138,14 +138,28 @@ const CLO = -3, CHI = 12, CN = CHI - CLO + 1;   // endpoint clamp range -> 16 le
 // 256-byte page; 25 levels would reach 100% but needs a paged lookup for the last 0.5%.
 // Step levels are quantised. Walls are vertical prisms, so a face boundary is EXACTLY a
 // vertical line on screen and the renderer reads its position straight out of faceIdT --
-// no inference. But three step positions x a full 9x9 level cross product is 243 codes on
-// its own, so levels are quantised: fine at the extremes (a saturated side must land
-// exactly on 0 or 8) and coarse in the middle where 1px is invisible.
-const STEPQ = [0, 1, 3, 5, 7, 8];
+// no inference. The step table is addressed by three quantised levels (see chooseSteps), so
+// the level count enters cubed: 6 is what keeps that table to 216 bytes per boundary
+// position. Fine at the extremes (a saturated side must land exactly on 0 or 8) and coarse
+// in the middle where 1px is invisible.
+// The step table is addressed by THREE quantised levels -- the near end, the last column
+// before the boundary, and the far end -- so the level counts multiply, and their product
+// must stay under 256 to keep the index in one byte and the table reachable with abs,Y.
+// That is the binding constraint on corner accuracy, not the charset: at 6/6/6 = 216, going
+// from 64 to 128 step codes only moved the error 1.056 -> 1.004, because distinct cells were
+// already colliding in the same slot. Levels always include 0 and 8 exactly -- a saturated
+// side has to land dead on the cell edge or the corner shows a seam.
+const QLEV = {
+  3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 1, 3, 5, 7, 8],
+  7: [0, 1, 3, 4, 5, 7, 8], 8: [0, 1, 2, 3, 5, 6, 7, 8], 9: [0, 1, 2, 3, 4, 5, 6, 7, 8] };
+const [LA, LM, LB] = (process.env.QLEVELS ?? '7,4,9').split(',').map(Number);
+if (LA * LM * LB > 256) throw new Error(`step index ${LA}*${LM}*${LB} = ${LA*LM*LB} > 256`);
+if (LA > 8 || LM > 8) throw new Error('qmT is addressed as qA*8 + qM, so LA and LM must be <= 8');
+const QA = QLEV[LA], QM = QLEV[LM], QB = QLEV[LB];
 const C8 = x => Math.max(0, Math.min(8, x));
-const qstep = v => STEPQ.reduce((b, q) => Math.abs(q - v) < Math.abs(b - v) ? q : b, STEPQ[0]);
+const hamm = (p, t) => (p[0] !== t[0]) + (p[1] !== t[1]) + (p[2] !== t[2]) + (p[3] !== t[3]);
+const qsnap = (Q, v) => Q.reduce((b, q) => Math.abs(q - v) < Math.abs(b - v) ? q : b, Q[0]);
 const rampPat = (a, b) => [0, 1, 2, 3].map(k => C8(Math.round(a + (b - a) * k / 3)));
-const stepPat = (A, B, k) => [0, 1, 2, 3].map(i => i < k ? A : B);
 // 3x5 digit glyphs (each row = 3 bits, bit2 = left column). In the new scheme these are
 // whole CHARACTERS, not plotted pixels -- the readout pokes a char code instead of ORing
 // bits into a framebuffer, which is what let the old overlay corrupt renderer tables.
@@ -192,9 +206,15 @@ function patternFreq() {
     if (dy < 0) { sy = -1; sdy = (py - my) * ddy; } else { sy = 1; sdy = (my + 1 - py) * ddy; }
     for (let i = 0; i < 48; i++) { if (sdx < sdy) { sdx += ddx; mx += sx; side = 0; }
       else { sdy += ddy; my += sy; side = 1; }
-      if (mx < 0 || my < 0 || mx > 15 || my > 15) return 1e9;
-      if (map[my * 16 + mx]) return side === 0 ? sdx - ddx : sdy - ddy; }
-    return 1e9; };
+      if (mx < 0 || my < 0 || mx > 15 || my > 15) return [1e9, 0];
+      if (map[my * 16 + mx]) {
+        // The run id, not just the distance: a cell whose four columns do not all share one
+        // wall face is a STEP cell, and the sampler used to be blind to those -- it emitted a
+        // ramp pattern for every cell it saw, so step patterns have never been frequency
+        // ranked at all. That is why STEPQ was a hand-picked list rather than a measured one.
+        const face = side === 0 ? (sx > 0 ? runW : runE) : (sy > 0 ? runN : runS);
+        return [side === 0 ? sdx - ddx : sdy - ddy, face[my * 16 + mx]]; } }
+    return [1e9, 0]; };
   const cl = v => Math.max(CLO, Math.min(CHI, v));
   // Sample where the PLAYER CAN ACTUALLY STAND, not just cell centres. A centre is never
   // closer than 0.5 cells to a wall, but the collision box lets you press to within ~0.1 --
@@ -220,19 +240,45 @@ function patternFreq() {
   for (const [px, py] of spots) {
     for (let a = 0; a < 256; a += 16) {
       const base = a / 256 * 2 * Math.PI, frame = [];
-      const h = [...Array(NLOG)].map((_, c) =>
-        Math.min(100, Math.round(88 / Math.max(shoot(px, py, base + ang[c]) * cc[c], 0.02))));
+      const hit = [...Array(NLOG)].map((_, c) => shoot(px, py, base + ang[c]));
+      const h = hit.map(([d], c) => Math.min(100, Math.round(88 / Math.max(d * cc[c], 0.02))));
+      const fid = hit.map(([, id]) => id);
       for (let g = 0; g < NLOG / 4; g++) {
         const q = h.slice(g * 4, g * 4 + 4), mx2 = Math.max(...q), mn = Math.min(...q);
+        const ff = fid.slice(g * 4, g * 4 + 4);
+        let kb = 0; for (let i = 1; i < 4; i++) if (ff[i] !== ff[0]) { kb = i; break; }
         const rb = mx2 > 92 ? 0 : Math.floor((92 - mx2) / 8) + 1;
         let rs = mn >= 100 ? 0 : Math.ceil((100 - mn) / 8); if (rs < rb) rs = rb;
         for (let R = rb; R < rs; R++) { const K = 8 * R - 92;
-          const k = rampPat(cl(q[0] + K), cl(q[3] + K)).join(',');
-          f.set(k, (f.get(k) || 0) + 1); frame.push(k); } }
+          const w = q.map(v => cl(v + K));
+          if (!kb) {                                     // one face across the cell: a ramp
+            const k = rampPat(w[0], w[3]).join(',');
+            f.set(k, (f.get(k) || 0) + 1); frame.push(k); continue; }
+          // A face boundary inside the cell. Record the table slot it lands in and what the
+          // cell TRULY looks like, so the step patterns can be chosen to fit the map instead
+          // of being a fixed cross product of quantised levels.
+          // What the old scheme would have drawn here: flat plateau, 6 quantised levels.
+          const oq = v => QLEV[6].reduce((b, q) => Math.abs(q - v) < Math.abs(b - v) ? q : b, 0);
+          const oldP = [0, 1, 2, 3].map(i => i < kb ? oq(C8(w[0])) : oq(C8(w[3])));
+          oldErr += hamm(oldP, w.map(C8));
+          const slot = qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3]);
+          const key = w.map(C8).join(',');
+          let m = stepStats[kb - 1].get(slot);
+          if (!m) stepStats[kb - 1].set(slot, m = new Map());
+          m.set(key, (m.get(key) || 0) + 1);
+          frame.push([kb - 1, slot]); } }                // resolved once patterns are chosen
       frames.push(frame); } }
   return { f, frames };
 }
+// qIdx<X>: a clamped level (CLO..CHI) -> its index in that axis's quantisation. Same mapping
+// the 6502 does via qIdxAT / qIdxMT / qIdxBT.
+const qIdxA = w => QA.indexOf(qsnap(QA, C8(w)));
+const qIdxM = w => QM.indexOf(qsnap(QM, C8(w)));
+const qIdxB = w => QB.indexOf(qsnap(QB, C8(w)));
+const stepStats = [new Map(), new Map(), new Map()];     // per boundary position k=1,2,3
+let oldErr = 0;   // what the flat-plateau scheme would have cost, for an honest comparison
 const { f: PFREQ, frames: PFRAMES } = patternFreq();
+const SFRAMES = PFRAMES.length;
 const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
   [0, 1, 2, 3].reduce((b, j) => b | ((lo[j] > 7 - i ? 1 : hi[j] > 7 - i ? 3 : 0) << (6 - 2 * j)), 0));
 // colOf: pattern -> 0 (needs colour RAM black) or 1 (white). codeOf gives the char code.
@@ -294,11 +340,90 @@ function placeAll(groups) {
     `colour queue: worst sampled frame needs ${worst} writes, cap is 80 -- raise the cap or ` +
     `pair fewer patterns`);
 }
-const rampsAll = [], stepsAll = [];
+const rampsAll = [];
 for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) rampsAll.push(rampPat(a, b));
-for (let k = 1; k <= 3; k++) for (const A of STEPQ) for (const B of STEPQ) stepsAll.push(stepPat(A, B, k));
-placeAll([rampsAll, stepsAll]);
-const STEP0 = glyphs.length;            // ramps and steps now share one placement pass
+
+// ---- choosing the step patterns ----
+// A cell with a face boundary in it used to render as [A,A,A,B]: a flat plateau, then a
+// vertical drop. But the near wall is still receding across that plateau, so capping it flat
+// is the "corner cap" artifact -- measured at 1.56 wrong logical columns a frame, against
+// 0.46 if the plateau is allowed to slope. Rendering the slope needs 285 distinct patterns
+// and the charset cannot hold them, so choose the ones that buy the most accuracy per code
+// and let every other table slot fall back to the closest pattern already in the charset.
+// A slot that lands on a ramp pattern costs nothing at all: ramps are placed regardless.
+//
+// The plateau's slope needs a third sample -- the height at the LAST column before the
+// boundary -- so the step table is addressed by three levels rather than two.
+const STEPN = +(process.env.STEPN ?? 64);
+const idealStep = (k, qA, qM, qB) => {          // k = 0,1,2 for boundary position 1,2,3
+  const a = QA[qA], m = QM[qM], c = QB[qB];
+  return k === 0 ? [a, c, c, c]                 // one column before the boundary: no slope
+       : k === 1 ? [a, m, c, c]
+       : [a, C8(Math.round((a + m) / 2)), m, c];
+};
+function chooseSteps() {
+  const slots = [];
+  for (let k = 0; k < 3; k++) for (const [slot, m] of stepStats[k])
+    slots.push({ k, slot, truths: [...m].map(([s, n]) => [s.split(',').map(Number), n]) });
+  const cset = new Map();
+  for (const p of rampsAll) cset.set(p.join(','), p);           // already in the charset
+  const nFree = cset.size;
+  for (const s of slots) for (const [t] of s.truths) cset.set(t.join(','), t);
+  const cands = [...cset.values()], avail = cands.map((_, i) => i < nFree);
+  const E = cands.map(p => slots.map(s =>
+    s.truths.reduce((a, [t, n]) => a + n * hamm(p, t), 0)));
+  const best = slots.map((_, j) => {
+    let b = Infinity; for (let i = 0; i < nFree; i++) if (E[i][j] < b) b = E[i][j]; return b; });
+  const base = best.reduce((a, b) => a + b, 0);
+  const chosen = [];
+  for (let n = 0; n < STEPN; n++) {
+    let bi = -1, bg = 0;
+    for (let i = nFree; i < cands.length; i++) {
+      if (avail[i]) continue;
+      let g = 0;
+      for (let j = 0; j < slots.length; j++) { const d = best[j] - E[i][j]; if (d > 0) g += d; }
+      if (g > bg) { bg = g; bi = i; }
+    }
+    if (bi < 0) break;                          // nothing left that helps
+    avail[bi] = true; chosen.push(cands[bi]);
+    for (let j = 0; j < slots.length; j++) if (E[bi][j] < best[j]) best[j] = E[bi][j];
+  }
+  const after = best.reduce((a, b) => a + b, 0);
+  // Final assignment for every table slot, sampled or not.
+  const pool = cands.filter((_, i) => avail[i]);
+  const assign = [new Map(), new Map(), new Map()];
+  for (const s of slots) {
+    let bp = pool[0], be = Infinity;
+    for (const p of pool) { const e = s.truths.reduce((a, [t, n]) => a + n * hamm(p, t), 0);
+      if (e < be) { be = e; bp = p; } }
+    assign[s.k].set(s.slot, bp);
+  }
+  for (let k = 0; k < 3; k++) for (let a = 0; a < LA; a++) for (let m = 0; m < LM; m++)
+    for (let b = 0; b < LB; b++) {
+      const slot = a * (LM * LB) + m * LB + b;
+      if (assign[k].has(slot)) continue;         // never sampled: nearest to the ideal shape
+      const want = idealStep(k, a, m, b);
+      let bp = pool[0], be = Infinity;
+      for (const p of pool) { const e = hamm(p, want); if (e < be) { be = e; bp = p; } }
+      assign[k].set(slot, bp);
+    }
+  const tot = slots.reduce((a, s) => a + s.truths.reduce((x, [, n]) => x + n, 0), 0);
+  return { chosen, assign, base, after, nslots: slots.length, tot };
+}
+const STEPS = chooseSteps();
+// The chosen patterns' frequencies have to reach PFREQ before pairing runs, or the pairing
+// ranks every step pattern at zero and happily pairs away the common ones.
+for (let k = 0; k < 3; k++) for (const [slot, p] of STEPS.assign[k]) {
+  const m = stepStats[k].get(slot); if (!m) continue;
+  const n = [...m.values()].reduce((a, b) => a + b, 0);
+  const key = p.join(','); PFREQ.set(key, (PFREQ.get(key) || 0) + n);
+}
+for (const fr of PFRAMES) for (let i = 0; i < fr.length; i++)
+  if (Array.isArray(fr[i])) fr[i] = STEPS.assign[fr[i][0]].get(fr[i][1]).join(',');
+console.error(`  step patterns: ${LA}/${LM}/${LB} levels, ${STEPS.nslots} ` +
+  `sampled of ${3*LA*LM*LB} (k,slot) pairs, ${STEPS.chosen.length} codes; corner error ${(oldErr / SFRAMES).toFixed(3)} -> ` +
+  `${(STEPS.after / SFRAMES).toFixed(3)} wrong cols/frame (flat plateau -> sloped)`);
+placeAll([rampsAll, STEPS.chosen]);
 const CELLCODES = glyphs.length;
 const colFor = p => colOf.get(p.join(',')) ?? 0;
 const GLYPH0 = glyphs.length;                   // first readout glyph code
@@ -340,15 +465,24 @@ for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
   rampT[a * 16 + b] = codeOf.get(p.join(','));
   rampCT[a * 16 + b] = colFor(p);               // 0 = unpaired, no write needed
 }
-// stepT<k>[qA*8 + qB] -> char code, for a cell whose face boundary falls at column k.
-const stepT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(0);
-  for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = codeOf.get(stepPat(STEPQ[i], STEPQ[j], k).join(','));
+// stepT<k>[qA*36 + qM*6 + qB] -> char code, for a cell whose face boundary falls at column
+// k. qM is the level at the LAST column before the boundary: that third sample is what lets
+// the plateau slope down to meet the corner instead of capping it flat.
+const stepT = [0, 1, 2].map(k => { const t = new Array(LA * LM * LB).fill(0);
+  for (const [slot, p] of STEPS.assign[k]) t[slot] = codeOf.get(p.join(','));
   return t; });
-const stepCT = [1, 2, 3].map(k => { const t = new Array(6 * 8).fill(0);
-  for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) t[i * 8 + j] = colFor(stepPat(STEPQ[i], STEPQ[j], k));
+const stepCT = [0, 1, 2].map(k => { const t = new Array(LA * LM * LB).fill(0);
+  for (const [slot, p] of STEPS.assign[k]) t[slot] = colFor(p);
   return t; });
-// clampT output (level+2, 0..12) -> index into STEPQ.
-const qIdxT = [...Array(CN)].map((_, v) => STEPQ.indexOf(qstep(C8(v + CLO))));
+// qmT[qA*8 + qM] = qA*36 + qM*6. The 6502 has no multiply, and folding both scales into one
+// lookup keeps the whole index inside a byte (max 5*36 + 5*6 + 5 = 215), so the table stays
+// reachable with plain abs,Y addressing.
+const qmT = new Array(64).fill(0);
+for (let a = 0; a < LA; a++) for (let m = 0; m < LM; m++) qmT[a * 8 + m] = a * (LM * LB) + m * LB;
+// clampT output -> index into each axis's quantisation.
+const qIdxAT = [...Array(CN)].map((_, v) => qIdxA(v + CLO));
+const qIdxMT = [...Array(CN)].map((_, v) => qIdxM(v + CLO));
+const qIdxBT = [...Array(CN)].map((_, v) => qIdxB(v + CLO));
 
 // ---- unrolled fill chains ----
 // A straight line of store instructions, one slot per cell row, each with its screen
@@ -529,7 +663,10 @@ for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math
   recipLo.push(v & 255); recipHi.push(v >> 8); }
 const RELOC = 0x7d00;                   // CPU-only tables, out of the VIC's 16K window
 const HTABLE = 0x4d00;                  // page-aligned: 16 height tables x 3 pages
-                                        // (was $4800; the edge stubs and clmp16 grew the data)
+                                        // (was $4800, then $4d00; the edge stubs, clmp16 and
+                                        // then the three-level step tables grew the data
+                                        // block below it. The assembler catches an overlap,
+                                        // so raise this whenever it complains.)
 // $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
 const vm = scr => (scr >> 10) << 4;
 const cb = cs => (cs >> 11) << 1;
@@ -615,6 +752,8 @@ dpy     = $55
 ppHi    = $56
 ppLo    = $57
 tmp2    = $58
+kpos    = $6c                   ; step path: boundary position, and qB held across the
+qbv     = $6b                   ;   middle-column read that needs A and X
 patLo   = $59
 patHi   = $5a
 tpLo    = $5b
@@ -1249,23 +1388,49 @@ rfCp3:  clc
         sta ecol
         lda rampT,y
         jmp rfStore             ; (the ramp is the common case; see rfStore below)
-rfStep: pha                     ; face boundary -> a genuinely vertical step at that column
+        ; A face boundary inside the cell -- a genuinely vertical step, whose position the
+        ; renderer reads straight out of cstepT rather than inferring. The old scheme drew a
+        ; flat plateau up to that column, but the near wall is still receding across it, so
+        ; corners grew a horizontal cap. Sampling the height at the LAST column before the
+        ; boundary as well lets the plateau slope: 1.57 -> 0.65 wrong logical columns a frame.
+rfStep: sta kpos                ; boundary position, 1..3
         lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
         lsr
         lsr
         lsr
         lsr
         tax
-        lda qIdxT,x
+        lda qIdxAT,x
         asl
         asl
         asl
-        sta tmp                 ; qA*8
+        sta tmp                 ; qA*8, the row of qmT
         ldx hh1
-        lda qIdxT,x
-        ora tmp
+        lda qIdxBT,x
+        sta qbv
+        ldx colc                ; recompute 4*column: cheaper than storing it on every edge
+        lda col4T,x             ;   cell when only the 2.7 step cells a frame need it
+        clc
+        adc kpos
+        tax
+        dex                     ; X = 4*column + k - 1
+        lda colH,x
+        cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
+        bcc rfMc
+        lda #100
+rfMc:   clc
+        adc kr
         tay
-        pla
+        lda clampT,y
+        tax
+        lda qIdxMT,x
+        ora tmp                 ; qA*8 + qM
+        tay
+        lda qmT,y               ; -> qA*(LM*LB) + qM*LB, folded so there is no multiply here
+        clc
+        adc qbv
+        tay
+        lda kpos
         cmp #$02
         beq rfSt2
         bcs rfSt3
@@ -2607,15 +2772,12 @@ recipLoT: ${chunk(recipLo).trim()}
 recipHiT: ${chunk(recipHi).trim()}
 ` : ''}clampT: ${chunk(clampT).trim()}
 clmp16: ${chunk(clampT16).trim()}
-qIdxT:  !byte ${qIdxT.join(',')}
+qIdxAT: !byte ${qIdxAT.join(',')}
+qIdxMT: !byte ${qIdxMT.join(',')}
+qIdxBT: !byte ${qIdxBT.join(',')}
+qmT:    !byte ${qmT.join(',')}
 rampT:  ${chunk(rampT).trim()}
 rampCT: ${chunk(rampCT).trim()}
-stepT1: ${chunk(stepT[0]).trim()}
-stepT2: ${chunk(stepT[1]).trim()}
-stepT3: ${chunk(stepT[2]).trim()}
-stepC1: ${chunk(stepCT[0]).trim()}
-stepC2: ${chunk(stepCT[1]).trim()}
-stepC3: ${chunk(stepCT[2]).trim()}
 ${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
 ${chainSrc('bkB', SCR_B, ROWSD, 'rfEdge')}
 ${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
@@ -2669,8 +2831,23 @@ posYT:  ${chunk(posY).trim()}
 rayOffT: !byte ${rayOff.join(',')}
         * = ${hx16(RELOC + 0x1200)}
 colGrpT: !byte ${colGrpT.join(',')}
+        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
+        ; index -- exactly the case a page crossing taxes, and exactly why they are up here
+        ; rather than packed in below the height tables where they used to live.
+        * = ${hx16(RELOC + 0x1300)}
+stepT1: ${chunk(stepT[0]).trim()}
+        * = ${hx16(RELOC + 0x1400)}
+stepT2: ${chunk(stepT[1]).trim()}
+        * = ${hx16(RELOC + 0x1500)}
+stepT3: ${chunk(stepT[2]).trim()}
+        * = ${hx16(RELOC + 0x1600)}
+stepC1: ${chunk(stepCT[0]).trim()}
+        * = ${hx16(RELOC + 0x1700)}
+stepC2: ${chunk(stepCT[1]).trim()}
+        * = ${hx16(RELOC + 0x1800)}
+stepC3: ${chunk(stepCT[2]).trim()}
 
-${PROFILE ? `        * = ${hx16(RELOC + 0x1300)}  ; the profiler lives above the relocated
+${PROFILE ? `        * = ${hx16(RELOC + 0x1900)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
