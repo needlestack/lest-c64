@@ -182,6 +182,13 @@ const patBytes = p => [...Array(8)].map((_, i) =>
   (p[0] > 7 - i ? 0xc0 : 0) | (p[1] > 7 - i ? 0x30 : 0) | (p[2] > 7 - i ? 0x0c : 0) | (p[3] > 7 - i ? 0x03 : 0));
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
+// SOLID's twin: the same solid black, but bit pair 01, which the VIC classes as BACKGROUND and
+// so does NOT clip sprites against. Cells under a sprite whose wall is FARTHER than it get
+// repointed to this, which is the only way to express per-column depth -- $d01b is one bit for
+// the whole sprite. Only SOLID needs a twin: a ground object meets a wall's flat body, never
+// the one-cell band at its top, so the ramp and step patterns can stay single-coded.
+const SOLIDBG = glyphs.length;
+glyphs.push([...Array(8)].fill(0x55));          // 01 01 01 01
 
 // Which patterns actually occur? The charset cannot hold every ramp and step the clamp can
 // express, so the sampler decides what is worth a code and what gets dropped (see placeAll).
@@ -611,6 +618,9 @@ const NOHUD = flag('NOHUD');
 const SPRITES = process.env.SPRITES !== '0';
 // SPRPRI=0 puts the orb back in front of everything -- the A/B test for hardware occlusion.
 const SPRPRI = +(process.env.SPRPRI ?? 1);
+// ORBMIX=0 keeps the per-frame priority flag but skips repointing far cells to SOLID's twin,
+// which is the A/B for whether the mixed-depth path is doing anything.
+const ORBMIX = process.env.ORBMIX !== '0';
 const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
 const ORBBM = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 36, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 186, 0, 0, 170, 0, 0, 170, 0, 0, 169, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 2, 234, 64, 2, 170, 64, 2, 170, 64, 2, 169, 64, 2, 165, 64, 0, 149, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 3, 255, 192, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 11, 234, 144, 11, 170, 144, 10, 170, 144, 10, 170, 144, 10, 170, 80, 10, 169, 80, 2, 169, 64, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 15, 255, 240, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0], [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192, 0]];
 // variant -> which of the five bitmaps, and whether the VIC doubles it
@@ -644,6 +654,7 @@ const orbHalfT = ORBWIDE.map(w => w >> 1);
 const orbAncT = ORBANCH.map(a => a);
 // Half-width in LOGICAL columns (2 screen px each), for the depth scan under the sprite.
 const orbColT = ORBWIDE.map(w => w >> 2);
+const orbSpHT = ORBEXP.map(e => e ? 42 : 21);   // sprite height in raster lines
 const DBGORB = flag('DBGORB');
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
@@ -680,7 +691,7 @@ for (let a = 0; a < 256; a++) {
 const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
 for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
   recipLo.push(v & 255); recipHi.push(v >> 8); }
-const RELOC = 0x8100;                   // CPU-only tables, out of the VIC's 16K window
+const RELOC = 0x8200;                   // CPU-only tables, out of the VIC's 16K window
 const HTABLE = 0x4d00;                  // page-aligned: 16 height tables x 3 pages
                                         // (was $4800, then $4d00; the edge stubs, clmp16 and
                                         // then the three-level step tables grew the data
@@ -908,7 +919,12 @@ o3      = $cb0b
 ocoff   = $cb0c
 odb     = $cb20                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ovar    = $cb0d
-ocol    = $cb10                  ; sprite centre, logical column
+ocol    = $cb10
+ocspan  = $cb11
+ocl     = $cb12
+ocr     = $cb13
+ocrow   = $cb14
+ocrw2   = $cb15                  ; sprite centre, logical column
 ocmax   = $cb0e                  ; depth scan under the sprite: right edge, and the verdict
 ocnear  = $cb0f
 ; orb projection scratch above; once a frame, so absolute costs ~50 cycles total
@@ -3168,20 +3184,98 @@ opL1:   cmp ocmax
         bcc opL2
         lda ocmax               ; degenerate: keep the scan inside colH
 opL2:   tax
+        stx o3
+        lda ocmax
+        sec
+        sbc o3
+        clc
+        adc #$01
+        sta ocspan              ; columns scanned, so "every one is nearer" is detectable
         lda #$00
         sta ocnear
 opScan: lda colH,x
         cmp ohgt
         bcc opNx
         beq opNx
-        lda #$01                ; a nearer wall: let the VIC clip against it
-        sta ocnear
-        jmp opDn
+        inc ocnear              ; count how many columns are nearer than the orb
 opNx:   inx
         cpx ocmax
         bcc opScan
         beq opScan
-opDn:   lda ocnear
+        lda ocnear
+        beq opFront             ; nothing nearer: draw over everything, cheapest case
+        lda #$01
+        sta $d01b               ; something is nearer, so let the VIC clip -- but that clips
+        ; against FAR walls too, and only repointing their cells can say otherwise. Skip it
+        ; when every column is nearer: then the orb is wholly behind the wall and correctly
+        ; invisible, and there is nothing to repoint.
+        lda ocnear
+        cmp ocspan
+        bcs orbShow
+${ORBMIX ? '' : '        jmp orbShow'}
+        ; --- mixed depth: repoint the FAR solid cells under the sprite to SOLID's twin ---
+        lda ocol
+        sec
+        sbc o2
+        bcs omL1
+        lda #$00
+omL1:   lsr
+        lsr
+        sta ocl
+        lda ocmax
+        lsr
+        lsr
+        sta ocr
+        lda $d001               ; sprite top, as a char row
+        sec
+        sbc #50
+        bcs omT1
+        lda #$00
+omT1:   lsr
+        lsr
+        lsr
+        sta ocrow
+        ldx ovar
+        lda orbSpHT,x
+        clc
+        adc $d001
+        sec
+        sbc #50
+        lsr
+        lsr
+        lsr
+        cmp #25
+        bcc omB1
+        lda #24
+omB1:   sta ocrw2
+omRow:  ldy ocrow
+        lda rowLoT,y
+        sta ppPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta ppPtr+1
+        ldy ocl
+omCol:  ldx col4T,y             ; this cell column's depth, from its first logical column
+        lda colH,x
+        cmp ohgt
+        bcs omNx                ; nearer than the orb: leave it clipping
+        lda (ppPtr),y
+        cmp #${hx(SOLID)}
+        bne omNx                ; only the flat body has a twin; edges stay as they are
+        lda #${hx(SOLIDBG)}
+        sta (ppPtr),y
+omNx:   iny
+        cpy ocr
+        bcc omCol
+        beq omCol
+        inc ocrow
+        lda ocrow
+        cmp ocrw2
+        bcc omRow
+        beq omRow
+        jmp orbShow
+opFront:lda #$00
         sta $d01b
         jmp orbShow
 orbHide:lda #$00
@@ -3189,18 +3283,22 @@ orbHide:lda #$00
 ${DBGORB ? '        jmp odbg' : '        rts'}
 orbShow:lda #$01
         sta $d015
-${DBGORB ? `odbg:   lda fwdL
+${DBGORB ? `odbg:   lda ohgt
         sta odb
-        lda fwdH
+        lda ocol
         sta odb+1
-        lda ohgt
+        lda ocnear
         sta odb+2
-        lda ocoff
+        lda ocspan
         sta odb+3
-        lda rgtL
+        lda ocl
         sta odb+4
-        lda rgtH
+        lda ocr
         sta odb+5
+        lda ocrow
+        sta odb+6
+        lda ocrw2
+        sta odb+7
         ldx #$00
         ldy #$00
 odbLp:  lda odb,x
@@ -3221,7 +3319,7 @@ odbLp:  lda odb,x
         sta $2478,y
         iny
         inx
-        cpx #$06
+        cpx #$08
         bne odbLp` : ''}
         rts
 ; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
@@ -3323,6 +3421,7 @@ orbExpT: !byte ${orbExpT.join(',')}
 orbHalfT: !byte ${orbHalfT.join(',')}
 orbAncT: !byte ${orbAncT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
+orbSpHT: !byte ${orbSpHT.join(',')}
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
