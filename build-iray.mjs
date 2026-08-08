@@ -627,14 +627,63 @@ const SPRPRI = +(process.env.SPRPRI ?? 1);
 const DBGORB = flag('DBGORB');
 const ORBMIX = process.env.ORBMIX !== '0';
 const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
-const ORBBM = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 36, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40, 0, 0, 186, 0, 0, 170, 0, 0, 170, 0, 0, 169, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 2, 234, 64, 2, 170, 64, 2, 170, 64, 2, 169, 64, 2, 165, 64, 0, 149, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 3, 255, 192, 0, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 170, 0, 2, 250, 128, 11, 234, 144, 11, 170, 144, 10, 170, 144, 10, 170, 144, 10, 170, 80, 10, 169, 80, 2, 169, 64, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 0, 15, 255, 240, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0], [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192, 0]];
-const ORBSRC = [0, 1, 2, 3, 4, 3, 4];   // variant -> bitmap
-const ORBEXP = [0, 0, 0, 0, 0, 1, 1];   // ... and whether the VIC doubles it
-// Raster rows from the sprite's top down to the BOTTOM of the ground shadow. That row is what
-// has to land on the floor line, or the orb looks like it is hovering.
-const ORBFOOT = [13, 15, 18, 19, 21];
-const ORBANCH = ORBSRC.map((b, v) => ORBFOOT[b] * (ORBEXP[v] ? 2 : 1));
-const ORBWIDE = [4, 8, 12, 16, 24, 32, 48];      // ball width in pixels, for centring
+// ORB4 -- the full-size, unexpanded one -- is the canonical orb, and every other size is
+// resampled from it at build time. The author's other six were a hand-picked ladder with a
+// 2:1 gap at the top; scaling gives an even progression instead, and the sizes then follow
+// from the geometry rather than from a fudge factor.
+const ORB4RAW = [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192];
+const ORBSRC12 = (() => {
+  const d = ORB4RAW, g = [];
+  for (let y = 0; y < 21; y++) { const r = [];
+    for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++) r.push((d[y * 3 + b] >> (6 - 2 * i)) & 3);
+    g.push(r); }
+  return g;
+})();
+// Scale about the DRAWN content, not the 12x21 frame it happens to sit in.
+const _cols = [...Array(12).keys()].filter(x => ORBSRC12.some(r => r[x]));
+const _rows = [...Array(21).keys()].filter(y => ORBSRC12[y].some(v => v));
+const SX0 = Math.min(..._cols), SX1 = Math.max(..._cols);
+const SY0 = Math.min(..._rows), SY1 = Math.max(..._rows);
+const SW = SX1 - SX0 + 1, SH = SY1 - SY0 + 1;
+// Downsample by footprint majority: take the most common NON-ZERO source value under each
+// destination pixel. Nearest-neighbour drops the highlight and eats whole rows of the ground
+// shadow once the orb is only a few pixels across; this keeps the silhouette.
+function orbScale(w) {
+  const hgt = Math.max(1, Math.round(SH * w / SW));
+  const out = [...Array(21)].map(() => new Array(12).fill(0));
+  const ox = (12 - w) >> 1, oy = 21 - hgt;      // centred, and standing on the sprite's floor
+  for (let dy = 0; dy < hgt; dy++) for (let dx = 0; dx < w; dx++) {
+    const sx0 = SX0 + dx * SW / w, sx1 = SX0 + (dx + 1) * SW / w;
+    const sy0 = SY0 + dy * SH / hgt, sy1 = SY0 + (dy + 1) * SH / hgt;
+    const t = [0, 0, 0, 0];
+    for (let sy = Math.floor(sy0); sy < Math.max(Math.ceil(sy1), Math.floor(sy0) + 1); sy++)
+      for (let sx = Math.floor(sx0); sx < Math.max(Math.ceil(sx1), Math.floor(sx0) + 1); sx++)
+        if (sy >= 0 && sy < 21 && sx >= 0 && sx < 12) t[ORBSRC12[sy][sx]]++;
+    let best = 0, bn = 0;
+    for (let v = 1; v < 4; v++) if (t[v] > bn) { bn = t[v]; best = v; }
+    out[oy + dy][ox + dx] = best;
+  }
+  return out;
+}
+const NORBBM = 12;                              // one bitmap per multicolor-pixel width, 1..12
+const ORBBM = [...Array(NORBBM)].map((_, i) => {
+  const g = orbScale(i + 1), bytes = [];
+  for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
+    bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
+  bytes.push(0);
+  return bytes;
+});
+// A variant is a bitmap plus whether the VIC doubles it. Expansion is free -- same bitmap, one
+// register bit -- so the top of the ladder costs no extra data. Doubling a bitmap narrower
+// than 7 would just duplicate an unexpanded width at half the vertical resolution, so it is
+// only used above that.
+const ORBSRC = [], ORBEXP = [], ORBWIDE = [];
+for (let w = 1; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(0); ORBWIDE.push(w * 2); }
+for (let w = 7; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(1); ORBWIDE.push(w * 4); }
+// The content is bottom-aligned in every bitmap, so the ground shadow always ends on the
+// sprite's last row and the anchor is simply the sprite's height. No per-variant table of
+// hand-measured shadow positions any more.
+const ORBANCH = ORBEXP.map(e => e ? 42 : 21);
 const ORBBODY = [14, 10, 13];                    // light blue / light red / light green
 const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
 
@@ -668,7 +717,7 @@ const losFree = (ax, ay, bx, by) => {
     if (map[(y | 0) * 16 + (x | 0)]) return false; }
   return true;
 };
-const CANDBASE = RELOC + 0x1800;                 // must match the org below
+const CANDBASE = RELOC + 0x1900;                 // must match the org below
 const candList = [], candLo = new Array(256).fill(0), candHi = new Array(256).fill(0),
       candCnt = new Array(256).fill(0);
 for (let cell = 0; cell < 256; cell++) {
@@ -702,7 +751,7 @@ for (let cell = 0; cell < 256; cell++) {
     candList.push(v.i, brg, win);
   }
 }
-if (candList.length > 0x2300 - 0x1800) throw new Error(
+if (candList.length > 0x2300 - 0x1900) throw new Error(
   `visibility lists are ${candList.length} bytes and would run into the step tables`);
 console.error(`orbs: ${ORBS.length} placed (${ORBBODY.map((_, c) =>
   ORBS.filter(o => o.c === c).length).join('/')} by colour), visibility lists ` +
@@ -722,13 +771,14 @@ const ORBSCALE = +(process.env.ORBSCALE ?? 49);
 const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = ORBSCALE * h / 88;
-  let b = 0; for (let v = 1; v < 7; v++)
-    if (Math.abs(ORBWIDE[v] - want) < Math.abs(ORBWIDE[b] - want)) b = v;
+  let b = 0; for (let v = 1; v < ORBWIDE.length; v++)
+    if (Math.abs(ORBWIDE[v] - want) < Math.abs(ORBWIDE[b] - want)) b = v;   // ties keep the
+                                        // earlier (unexpanded) entry: twice the vertical detail
   return b;
 });
 { // which rungs can actually be reached, and at what distance each one takes over?
   const band = [];
-  for (let v = 0; v < 7; v++) {
+  for (let v = 0; v < ORBWIDE.length; v++) {
     const lim = 251 - (150 - ORBANCH[v]);
     const hs = [...Array(lim).keys()].filter(h => orbVarT[h] === v);
     band.push(hs.length ? `${ORBWIDE[v]}px@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
@@ -739,7 +789,6 @@ const orbVarT = [...Array(256)].map((_, h) => {
 const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
 const orbExpT = ORBEXP.map(e => e);
 const orbHalfT = ORBWIDE.map(w => w >> 1);
-const orbAncT = ORBANCH.map(a => a);
 // 150 - anchor: raster 50 + display row 100, less the rows from the sprite's top down to the
 // bottom of its ground shadow. Adding h to THIS cannot overflow until the orb is long gone.
 const orbYBaseT = ORBANCH.map(a => 150 - a);
@@ -1030,6 +1079,10 @@ omX8    = $cb1f
 omBit   = $cb20
 omMix   = $cb21
 orej    = $cb21
+obX     = $cb30
+obY     = $cb38
+obP     = $cb40
+obC     = $cb48                  ; per-sprite state, flushed to the VIC in the border
 odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -1394,7 +1447,8 @@ mshB:   lda #${hx(vm(SCR_B))}
         sta d018vm              ; show B, draw into A
         lda #${hx(SCR_A >> 8)}
         sta baseHi
-mnext:  inc iterLo
+mnext:
+${SPRITES ? '        jsr osFlush             ; sprite registers, now that the beam is out of the way\n' : ''}        inc iterLo
         bne mloop
         inc iterHi
         jmp mloop
@@ -3073,7 +3127,33 @@ odbLp:  lda odb,x
         inx
         cpx #$06
         bne odbLp
-        ` : ''}lda omEn
+        ` : ''}rts
+
+; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
+; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
+; the raster is inside the visible area lets the VIC fetch half of one frame's sprite and half
+; of the next -- a sheared orb, or one that pops to somewhere else for a single frame. Called
+; after the raster wait and the buffer flip, when the beam is past line 250 and no sprite is
+; being fetched. Costs about 30 cycles per visible orb, which is nothing next to the ~2400 it
+; took to work out where the orb goes.
+osFlush:ldx onv
+        beq osBits
+osLp:   dex
+        txa
+        asl
+        tay
+        lda obX,x
+        sta $d000,y
+        lda obY,x
+        sta $d001,y
+        lda obP,x
+        sta $07f8,x             ; the pointer lives in the SCREEN, so both buffers need it
+        sta $27f8,x
+        lda obC,x
+        sta $d027,x
+        cpx #$00
+        bne osLp
+osBits: lda omEn
         sta $d015
         lda omXX
         sta $d01d
@@ -3423,11 +3503,10 @@ opNx:   inx
         sta omEn
         ldy ovar
         lda orbPtrT,y
-        sta $07f8,x             ; the pointer lives in the SCREEN, so both buffers need it
-        sta $27f8,x
+        sta obP,x               ; buffered, not written: see osFlush
         ldy oidx
         lda orbColT2,y
-        sta $d027,x             ; the ONE thing that can differ per orb: bit pair 10
+        sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
         ldy ovar
         lda orbExpT,y
         beq oNoX
@@ -3437,13 +3516,10 @@ opNx:   inx
         lda omBit
         ora omYY
         sta omYY
-oNoX:   txa
-        asl
-        tay
-        lda o0
-        sta $d000,y
+oNoX:   lda o0
+        sta obX,x
         lda o3
-        sta $d001,y
+        sta obY,x
         lda o1
         beq oNoM
         lda omBit
@@ -3624,23 +3700,23 @@ orbVarT: !byte ${orbVarT.join(',')}
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbExpT: !byte ${orbExpT.join(',')}
 orbHalfT: !byte ${orbHalfT.join(',')}
-orbAncT: !byte ${orbAncT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
+orbSpHT: !byte ${orbSpHT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
+        * = ${hx16(RELOC + 0x1500)}
 orbXLT: !byte ${orbXL.join(',')}
 orbXHT: !byte ${orbXH.join(',')}
 orbYLT: !byte ${orbYL.join(',')}
 orbYHT: !byte ${orbYH.join(',')}
 orbColT2: !byte ${orbCol.join(',')}
-orbSpHT: !byte ${orbSpHT.join(',')}
-        * = ${hx16(RELOC + 0x1500)}
-candCntT: !byte ${candCnt.join(',')}
         * = ${hx16(RELOC + 0x1600)}
-candLoT: !byte ${candLo.join(',')}
+candCntT: !byte ${candCnt.join(',')}
         * = ${hx16(RELOC + 0x1700)}
+candLoT: !byte ${candLo.join(',')}
+        * = ${hx16(RELOC + 0x1800)}
 candHiT: !byte ${candHi.join(',')}
-` : ''}${SPRITES ? `        * = ${hx16(RELOC + 0x1800)}
+` : ''}${SPRITES ? `        * = ${hx16(RELOC + 0x1900)}
 candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it may cross pages
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
