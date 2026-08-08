@@ -245,6 +245,9 @@ function placeAll(groups) {
   for (const g of groups) for (const p of g)
     if (!codeOf.has(p.join(',')) && !all.some(q => q.join(',') === p.join(','))) all.push(p);
   const BUDGET = 256 - NGLYPH - 4 - glyphs.length;   // room left for cell patterns
+  const unused = all.filter(p => !PFREQ.get(p.join(',')));
+  console.error(`  patterns: ${all.length} distinct, ${BUDGET} codes available ` +
+                `(over by ${all.length - BUDGET}); ${unused.length} never sampled`);
   let need = all.length - BUDGET + 5;                // +5 so a map change does not overflow
   const order = all.map((p, i) => i)
     .sort((a, b) => (PFREQ.get(all[a].join(',')) || 0) - (PFREQ.get(all[b].join(',')) || 0));
