@@ -594,6 +594,7 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // NOHUD=1 drops the fps counter and the X/Y readout, keeping only the two hex digits of
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
+const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
 const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
@@ -845,8 +846,10 @@ entry:
         sta $d021               ; 00 = white  (ceiling / floor)
         lda #$00
         sta $d022               ; 01 = black  (wall)
-        lda #$01
-        sta $d023               ; 10 = white  (panel seam; unused when SEAMS=0)
+        lda #${hx(SEAMCOL)}
+        sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
+                                ; be retuned without touching a charset entry: bit pairs 00
+                                ; and 01 carry the shape, 10 carries only the seam.
         lda #$00
         sta $d020
         lda #$ff

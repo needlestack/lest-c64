@@ -4,6 +4,9 @@
 # iteration time. Selection came from analyze-interp.mjs over 40 candidates (the old 10
 # positions x 4 angles); the numbers in each comment are from that model.
 #
+# Baseline (2026-08-08, dark-grey seams): 400 286 156 53 299 262. Recolouring the seams
+# changed the METRIC, not the render -- see the note in verify-render.mjs.
+#
 #   PX   PY   PA
 0bc6 09b3 7a   # regression (interpolator carry) + the only 16-bit err path: maxDy=187, wide spans
 0124 065e be   # regression (wall-hug, colH saturation): the only source of saturated endpoints

@@ -46,7 +46,13 @@ for(let c=0;c<W;c++){
     if(r<24 && c>=144) continue;              // skip the X/Y/A readout (char rows 0-2, cols 36-39)
     if(r<8 && c<8) continue;                  // skip the fps counter
     const wall = r>=top && r<200-top;
-    const got  = shot[r]?.[c*2]==='.';        // '.' = dark = wall
+    // '.' = dark = wall. shot.mjs thresholds luminance at 128, so this counts a panel seam
+    // as wall -- which is right, a seam is drawn ON the wall and the reference model has no
+    // seams at all. It only works while the seam tone stays darker than the white ceiling:
+    // when seams were WHITE every seam pixel scored as an error, and the six-view baseline
+    // was about 60% intentional seams (988 794 732 253 819 590 -> 400 286 156 53 299 262 on
+    // recolouring alone). Pick a light seam colour and this metric silently inflates again.
+    const got  = shot[r]?.[c*2]==='.';
     tot++; if(wall!==got){diff++; d++;}
   }
   if(d>worstD){worstD=d;worstCol=c;}

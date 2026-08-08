@@ -198,8 +198,10 @@ entry:
         sta $d021               ; 00 = white  (ceiling / floor)
         lda #$00
         sta $d022               ; 01 = black  (wall)
-        lda #$01
-        sta $d023               ; 10 = white  (panel seam; unused when SEAMS=0)
+        lda #$0b
+        sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
+                                ; be retuned without touching a charset entry: bit pairs 00
+                                ; and 01 carry the shape, 10 carries only the seam.
         lda #$00
         sta $d020
         lda #$ff
