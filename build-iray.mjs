@@ -218,6 +218,7 @@ const qIdxT = [...Array(CN)].map((_, v) => STEPQ.indexOf(qstep(C8(v + CLO))));
 // needs its own clc, and the four share one bounds test instead of paying inx/cpx/bcs/jmp.
 const ispanCol = (id, step, last) => `        inx
         adc dyv
+        bcs ish${id}            ; err+dyv crossed 256: handled below, out of line
         cmp dxv
         bcc isw${id}
 iss${id}:  sbc dxv
@@ -228,6 +229,18 @@ isw${id}:  sta errv
         tya
         sta colH,x` + (last ? '' : `
         lda errv`);
+// The 9th bit of the error term, inline instead of a whole second interpolator.
+// err is always < dxv <= 159 at the top of a column, so errH is only ever set transiently
+// by the add -- there is no 16-bit state to carry between columns. Subtracting dxv while
+// the carry survives clears the 9th bit; the borrow that finally clears it IS the carry
+// into the true 8-bit value. Coalesced faces put a quarter of all columns through here.
+const ispanHi = (id, step) => `ish${id}:  sec
+        sbc dxv
+        ${step}
+        bcs ish${id}            ; no borrow -> the 9th bit is still set
+        cmp dxv
+        bcc isw${id}
+        bcs iss${id}            ; always`;
 const chainSrc = (nm, base, rows, tail) => rows.map(r => {
   const a = base + r * 40, b = base + (24 - r) * 40;
   return `${nm}${r}:` + `\tsta ${hx16(a)},x` + (r === 12 ? '' : `\n\tsta ${hx16(b)},x`);
@@ -475,6 +488,15 @@ erow    = $78                   ; current row inside the edge run
 jv      = $79                   ; 2 bytes: chain entry vector, then the edge store pointer
 ep2     = $7b                   ; 2 bytes: mirrored-row store pointer
 bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer being drawn
+nbnd    = $14                   ; how many span delimiters the search pinned
+nbnd    = $14                   ; delimiters the search pinned this frame
+bcur    = $18
+bswp    = $19
+bcnt    = $08
+nbnd    = $14                   ; delimiters the search pinned this frame
+bcur    = $18
+bswp    = $19
+bcnt    = $08
 cell0   = $13                   ; the player's own cell index, constant for the frame
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
@@ -535,6 +557,9 @@ pfRow   = $c92a
 pfDone  = $c92b
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
+bndT    = $ca00                 ; columns where a face or saturation state begins
+bndT    = $ca00                 ; columns where a face or saturation state begins
+bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
 
@@ -646,6 +671,7 @@ ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-
         adc px+1
         sta cell0
         lda #$00                ; explicit: the clears above leave A holding their own fill
+        sta nbnd
         sta col
         jsr marchCol            ; column 0
 ${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
@@ -693,9 +719,7 @@ subLp:  ldx sp
         rol
         cmp tmp2
         bne subSp
-        jsr interpSpan          ; same face -> merge (interpolate interior)
-${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}
-${SEAMS ? '        jsr seamSpan            ; and drop a panel line on each cell boundary it crossed\n' : ''}        jmp subLp
+        jmp subLp               ; merged: the interpolation happens once per FACE, at subDn
         ; The face changes somewhere in this span. Once the span is a single column wide the
         ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
         ; so record it straight into cstepT. The old route was to write a face id into all
@@ -723,6 +747,7 @@ ${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no
         adc #${hx(SEAM0)}
         sta seamT,x
 subCn:` : ''}
+        jsr subBnd              ; a face starts here: remember it as a span delimiter
         lda spanR
         and #$03
         beq subLp               ; boundary on a cell edge: the two cells simply differ, and
@@ -741,7 +766,9 @@ subSp:  lda spanR               ; saturation split: a real split, but NOT a face
         sec
         sbc spanL
         cmp #$02
-        bcc subLp               ; adjacent -> nothing between
+        bcs subMid
+        jsr subBnd              ; a delimiter too: never interpolate across a saturated end
+        jmp subLp
 subMid: lda spanL
         clc
         adc spanR
@@ -763,7 +790,74 @@ ${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         inx
         stx sp
         jmp subLp
-subDn:
+        ; ---- one interpolation per FACE, not per binary-search interval ----
+        ; The search merges wherever its two probes happen to agree, so a single flat wall
+        ; comes out as five or six abutting spans, each interpolating between its OWN marched
+        ; endpoints. That is seven noisy sample points across a wall that needs two, and it
+        ; is why a wall dead ahead had a top that rose, dipped and rose again instead of
+        ; running straight. Height is EXACTLY linear across a face, so interpolating end to
+        ; end is not an approximation -- it is the right answer, and it is cheaper, because
+        ; span setup happens once per face instead of once per interval.
+subDn:  lda #$00                ; the first face always starts at column 0
+        sta spanL
+        sta bcur
+        lda nbnd
+        beq subOne              ; no delimiters: the whole screen is one face
+        cmp #$02
+        bcc subEmt              ; one delimiter needs no sorting
+        ldx nbnd                ; bubble the handful of delimiters into column order
+        dex
+        stx bcnt
+subIns: ldx #$00
+        lda #$00
+        sta bswp
+subInL: lda bndT+1,x
+        cmp bndT,x
+        bcs subInN
+        ldy bndT,x              ; swap (STY has no abs,x, so it goes out through A)
+        sta bndT,x
+        tya
+        sta bndT+1,x
+        inc bswp
+subInN: inx
+        cpx bcnt
+        bcc subInL
+        lda bswp
+        bne subIns
+subEmt: ldx bcur
+        lda bndT,x
+        sec
+        sbc #$01
+        sta spanR               ; this face runs up to the column before the delimiter
+        jsr subFlush
+        ldx bcur
+        lda bndT,x
+        sta spanL
+        inc bcur
+        lda bcur
+        cmp nbnd
+        bcc subEmt
+subOne: lda #${NLOG - 1}
+        sta spanR
+        jsr subFlush
+        jmp subFin
+
+subFlush:                       ; interpolate + seam one maximal face
+        lda spanR
+        cmp spanL
+        bcc subFDn              ; empty
+        jsr interpSpan
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}subFDn: rts
+
+subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
+        cpx #${NLOG / 8}
+        bcs subBDn              ; list full: leave the rest as the search left them
+        lda spanR
+        sta bndT,x
+        inc nbnd
+subBDn: rts
+
+subFin:
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams\n' : ''}${NOFILL ? '' : '        jsr prepCells'}
 ${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; prepCells\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
@@ -1723,14 +1817,8 @@ isPos:  sta dyv
 isErr:  lda dxv
         lsr
         sta errv                ; err = width/2
-        lda #$00
-        sta errH
         lda spanL
         sta col
-        lda dxv
-        clc
-        adc dyv
-        bcs isLp                ; can overflow -> 16-bit path
         ; --- 8-bit fast path ---
         ; This loop sets 92% of all 160 colH values (only ~13 columns are actually marched),
         ; so it is worth spending every register on it: X = col, Y = hcur, A = err, and no
@@ -1759,11 +1847,16 @@ ${ispanCol('a2', 'iny')}
 ${ispanCol('a3', 'iny')}
 ${ispanCol('a4', 'iny', true)}
         jmp isA8
+${ispanHi('a1','iny')}
+${ispanHi('a2','iny')}
+${ispanHi('a3','iny')}
+${ispanHi('a4','iny')}
 isA1:   lda errv
         inx
         cpx spanR
         bcs isDn
         adc dyv                 ; carry clear: cpx fell through
+        bcs isAhi           ; 9th bit: same handling as the unrolled bodies
         cmp dxv
         bcc isAWr
 isAsb:  sbc dxv                 ; carry set by the cmp above / by this sbc
@@ -1775,6 +1868,13 @@ isAWr:  sta errv                ; park err: A is needed for the stores
         sta colH,x
         lda errv
         jmp isA1
+isAhi: sec
+        sbc dxv
+        iny
+        bcs isAhi
+        cmp dxv
+        bcc isAWr
+        bcs isAsb           ; always
 isD8:   ldx spanL               ; --- descending ---
 isDl8:  txa
         clc
@@ -1787,11 +1887,16 @@ ${ispanCol('d2', 'dey')}
 ${ispanCol('d3', 'dey')}
 ${ispanCol('d4', 'dey', true)}
         jmp isDl8
+${ispanHi('d1','dey')}
+${ispanHi('d2','dey')}
+${ispanHi('d3','dey')}
+${ispanHi('d4','dey')}
 isD1:   lda errv
         inx
         cpx spanR
         bcs isDn
         adc dyv
+        bcs isDhi           ; 9th bit: same handling as the unrolled bodies
         cmp dxv
         bcc isDWr
 isDsb:  sbc dxv
@@ -1803,39 +1908,13 @@ isDWr:  sta errv
         sta colH,x
         lda errv
         jmp isD1
-isLp:   inc col                 ; --- 16-bit path (rare: only when dxv+dyv > 255) ---
-        lda col
-        cmp spanR
-        bcs isDn
-        clc
-        lda errv
-        adc dyv
-        sta errv
-        lda errH
-        adc #$00
-        sta errH
-isW:    lda errH
-        bne isStep              ; >= 256, so certainly >= dxv
-        lda errv
-        cmp dxv
-        bcc isWr
-isStep: sec
-        lda errv
+isDhi: sec
         sbc dxv
-        sta errv
-        lda errH
-        sbc #$00
-        sta errH
-        lda syNeg
-        beq isInc
-        dec hcur
-        jmp isW
-isInc:  inc hcur
-        jmp isW
-isWr:   ldx col
-        lda hcur
-        sta colH,x
-        jmp isLp
+        dey
+        bcs isDhi
+        cmp dxv
+        bcc isDWr
+        bcs isDsb           ; always
 isDn:   rts
 
 ; ================= cast one ray (16-bit DDA) =================
@@ -2526,6 +2605,28 @@ try {
   // Say how much room is left below the screen buffer. The data segment has nowhere to
   // grow -- charset A is at $2800 and buffer B sits in the way at $2400 -- so this going
   // quiet is the difference between a build error and a frame-by-frame corruption.
+  // Zero page is packed tight and several variables are two bytes wide, so a new equate
+  // can silently land on someone's high byte. bcnt did exactly that -- it sat on py+1, the
+  // player's Y cell -- and the symptom was the whole screen filling with wall. Comparing
+  // equate addresses is not enough; the extents have to be checked.
+  {
+    const zp = {}, two = new Set();
+    for (const m of asm.matchAll(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{1,2})\s*(?:;.*)?$/gm)) {
+      const a = parseInt(m[2], 16); if (a < 0x100) zp[m[1]] = a;
+    }
+    // strip comments first: "boundaries at uaH+1 .. ubH" in prose is not a reference
+    const code = asm.split('\n').map(l => l.replace(/;.*$/, '')).join('\n');
+    for (const n of Object.keys(zp)) if (new RegExp(`\\b${n}\\+1\\b`).test(code)) two.add(n);
+    const owner = {};
+    for (const [n, a] of Object.entries(zp)) {
+      for (const b of two.has(n) ? [a, a + 1] : [a]) {
+        if (owner[b] && owner[b] !== n)
+          throw new Error(`zero page $${b.toString(16)} claimed by both ${owner[b]} and ${n}` +
+            (two.has(owner[b]) || two.has(n) ? ' (one of them is two bytes wide)' : ''));
+        owner[b] = n;
+      }
+    }
+  }
   // An "lda table,x" indexed by a full byte costs an extra cycle every time the index
   // crosses a page. These are the ones indexed that way; keeping them page-aligned is free
   // as long as nobody quietly moves them, so make moving them a build error.
