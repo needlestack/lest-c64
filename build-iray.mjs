@@ -215,7 +215,7 @@ intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fil
 // the whole sprite. Only SOLID needs a twin: a ground object meets a wall's flat body, never
 // the one-cell band at its top, so the ramp and step patterns can stay single-coded.
 const SOLIDBG = glyphs.length;
-glyphs.push([...Array(8)].fill(0x55));          // 01 01 01 01
+glyphs.push([...Array(8)].fill(+(process.env.VSTEPDBG ?? 0) ? 0xaa : 0x55));  // 01 01 01 01
 
 // Which patterns actually occur? The charset cannot hold every ramp and step the clamp can
 // express, so the sampler decides what is worth a code and what gets dropped (see placeAll).
@@ -347,11 +347,14 @@ function placeAll(groups) {
     for (let i = 0; i < need; i++) { dropped.push(rank[i].p); keep.delete(rank[i].p.join(',')); }
     for (let i = all.length - 1; i >= 0; i--) if (!keep.has(all[i].join(','))) all.splice(i, 1);
   }
-  const stepKeys = new Set(STEPS.chosen.map(q => q.join(',')));
+  // Nothing placed here clips a sprite: the six vertical steps that may are interned ahead of
+  // this call, so everything left is a ramp or a transitional step, and both are background.
   for (const p of all) { const k = p.join(',');
-    codeOf.set(k, glyphs.length); glyphs.push(patBytes(p, stepKeys.has(k))); }
-  console.error(`  cell codes: ${all.filter(p => stepKeys.has(p.join(','))).length} step (clip ` +
-    `sprites) / ${all.filter(p => !stepKeys.has(p.join(','))).length} ramp (do not)`);
+    codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); }
+  const stepKeys = new Set(STEPS.chosen.map(q => q.join(',')));
+  console.error(`  cell codes: ${all.filter(p => stepKeys.has(p.join(','))).length} non-vertical ` +
+    `step + ${all.filter(p => !stepKeys.has(p.join(','))).length} ramp, none clipping; ` +
+    `6 vertical steps clip, at ${VSTEP0}-${VSTEP0 + 5} with twins at ${VSTEP0 + 6}-${VSTEP0 + 11}`);
   console.error(`  dropped ${dropped.length} never-sampled patterns` +
     (dropped.length ? ` (worst substitution is ${Math.max(...dropped.map(p => {
       let d = 9; for (const q of all) { const h = hamm(p, q); if (h < d) d = h; } return d; }))}` +
@@ -449,6 +452,27 @@ for (const fr of PFRAMES) for (let i = 0; i < fr.length; i++)
 console.error(`  step patterns: ${LA}/${LM}/${LB} levels, ${STEPS.nslots} ` +
   `sampled of ${3*LA*LM*LB} (k,slot) pairs, ${STEPS.chosen.length} codes; corner error ${(oldErr / SFRAMES).toFixed(3)} -> ` +
   `${(STEPS.after / SFRAMES).toFixed(3)} wrong cols/frame (flat plateau -> sloped)`);
+// ---- the six vertical steps, and their background twins ----
+// A step whose every column is either empty or full is a CORNER: its boundary is a straight
+// vertical edge running the height of the wall, and an orb meets those constantly. Those six
+// are the only steps that may clip a sprite -- see patBytes. Every other step is a transitional
+// cell on a steep silhouette, at most a sliver wide, and clipping against one is what put a
+// black bite out of an orb standing in front of a wall's lower corner.
+//
+// They are placed HERE, ahead of placeAll, so the six land on consecutive codes with their six
+// twins immediately after: the repoint pass then converts one to the other with a single ADC #6
+// rather than a lookup. placeAll skips them, since codeOf already holds them.
+const VSTEPDBG = +(process.env.VSTEPDBG ?? 0);
+const VSTEPS = STEPS.chosen.filter(p => p.every(v => v === 0 || v >= 8));
+if (VSTEPS.length !== 6) throw new Error(`expected 6 vertical steps, found ${VSTEPS.length}`);
+const VSTEP0 = glyphs.length;
+for (const p of VSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p, true)); }
+for (const p of VSTEPS) glyphs.push(VSTEPDBG
+  ? patBytes(p, true).map(b => { let o = 0;   // VSTEPDBG: paint the twins seam-grey so a
+      for (let i = 0; i < 4; i++) if ((b >> (6 - 2*i)) & 3) o |= 2 << (6 - 2*i);   // repointed
+      return o; })                            // corner is visible on screen at a glance
+  : patBytes(p, false));                      // same pixels, bit pair 01
+const VSTEPN = VSTEPS.length;
 placeAll([rampsAll, STEPS.chosen]);
 const CELLCODES = glyphs.length;
 const GLYPH0 = glyphs.length;                   // first readout glyph code
@@ -651,7 +675,9 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
 
-const RELOC = 0x8400;                   // CPU-only tables, out of the VIC's 16K window
+// DBGORB adds code ahead of this, and the diagnostic build has run into it twice -- VICE then
+// silently boots the PREVIOUS disk and you read stale numbers. Let a debug build push it up.
+const RELOC = +(process.env.RELOC ?? 0x8400);   // CPU-only tables, out of the VIC's 16K window
 // ---- the orbs ----
 // Seven size variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps:
 // orb5 and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra
@@ -3987,7 +4013,11 @@ opNx:   inc ocspan
 opFront:lda #$00
         sta ocnear
         sta ocmask
-opDone:
+opDone: ${VSTEPDBG ? `lda ocnear              ; VSTEPDBG: the LAST projected orb's counts, as
+        sta $d020               ; border and ceiling colour -- the on-screen hex readout needs
+        lda ocspan              ; a clean background and the interesting viewpoints are exactly
+        sta $d021               ; the ones that lack it
+` : ''}
         ; --- take a sprite slot ---
         ldx onv
         lda orbBitT,x
@@ -4097,6 +4127,19 @@ omCol:  tya                     ; this cell's face: does it occlude, per the sca
         lda (ppPtr),y
         cmp #${hx(SOLID)}
         beq omPut
+        ; A vertical step is a wall CORNER, the one step that clips. When the wall it belongs to
+        ; faces the orb it must not, and unlike SOLID it cannot become a flat black cell -- half
+        ; of it is floor. Hence six twins, placed consecutively right after the six originals so
+        ; the swap is one add.
+        cmp #${hx(VSTEP0)}
+        bcc omNS
+        cmp #${hx(VSTEP0 + VSTEPN)}
+        bcs omNS
+        clc
+        adc #${hx(VSTEPN)}
+        sta (ppPtr),y
+        jmp omNx
+omNS:
         ; A seam cell is foreground too, and it was slicing a grey line through orbs standing
         ; in front of the wall. There is no background seam to swap to -- 00 is the ceiling
         ; and 01 is plain black -- so the seam simply goes for the cells an orb covers, which
