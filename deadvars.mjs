@@ -91,3 +91,41 @@ const orphan = [...labels].filter(([n, l]) => !refs.has(n) && l.afterRts);
 console.log(`\nUNREACHABLE CODE: ${orphan.length}` +
   '   -- no branch names them and control cannot fall in');
 for (const [n, l] of orphan) console.log(`  ${n.padEnd(9)} line ${l.line}`);
+
+// ---- instructions stranded after an unconditional transfer ----
+// The scan above enumerates LABELS, so it is structurally blind to code that has no label at
+// all. That is exactly what orbPaint's step 3 died of: `bcc opA1s` named the label AFTER the
+// opmn/opmx stores, leaving those stores sitting between a `jmp` and the next label. Nothing
+// could reach them, opmn/opmx kept their initial 39/0, and step 3 returned on its first
+// compare -- no wall was painted foreground in any frame, for months. A label check cannot
+// see it; walking the instruction stream can. This family has bitten twice (see also the
+// `opFront` fall-through), which is why it is worth a standing check rather than a comment.
+//
+// Once control cannot arrive, everything stays unreachable until a LABEL reopens it -- so the
+// dead flag persists across following instructions rather than being recomputed from each.
+// A build flag that switches a block off by emitting an unconditional `jmp` over it is
+// deliberate, not a bug -- ORBSTILL does exactly that. Mark those `jmp`s DEADCODE-OK and the
+// block they skip stays quiet, because a check that always prints the same known lines is one
+// people stop reading, which is how the real bug survived in the first place.
+const DIRECTIVE = /^\s*(?:!|\*\s*=)/;       // data / origin: not part of the instruction stream
+const UNCOND = new Set(['jmp', 'rts', 'rti']);
+const stranded = [];
+let expected = 0;
+{
+  let dead = false, ok = false;
+  src.forEach((line, i) => {
+    if (EQ.test(line)) return;
+    const code = line.split(';')[0];
+    if (!code.trim()) return;                       // blank or comment-only line
+    if (DIRECTIVE.test(code)) { dead = false; return; }
+    if (/^([a-z]\w*):/i.test(code)) { dead = false; ok = false; }   // a label can be branched to
+    const m = code.match(/^\s*(?:\w+:)?\s*([a-z]{3})\b/i);
+    if (!m) return;
+    if (dead) { if (ok) expected++; else stranded.push([i + 1, code.trim()]); }
+    else if (UNCOND.has(m[1].toLowerCase())) { dead = true; ok = /DEADCODE-OK/.test(line); }
+  });
+}
+console.log(`\nSTRANDED INSTRUCTIONS: ${stranded.length}` +
+  '   -- after a jmp/rts/rti with no label between, so nothing can reach them' +
+  (expected ? `   (${expected} more skipped by a DEADCODE-OK jmp)` : ''));
+for (const [ln, text] of stranded) console.log(`  line ${String(ln).padStart(5)}  ${text}`);
