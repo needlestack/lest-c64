@@ -51,9 +51,48 @@ const hit=[...Array(W)].map((_,c)=>cast(px,py,base+rayAng[c]));
 
 // A boundary between columns c-1 and c is drawn at whichever of them the engine's
 // projection rounds to, so accept either.
-const want=[];
+// A boundary carries a line only when the two runs either side are the two faces of ONE corner
+// -- which is the same thing as "both faces of that corner are visible from here". That covers
+// inside corners, and outside corners the player is past the plane of both walls of. What draws
+// nothing is a corner facing AWAY: only one face is visible and the run across the boundary is
+// an unrelated wall behind it, so the boundary is a pure silhouette, already shown by a 20+ row
+// step in the wall top. Expecting a line there would bake permanent phantom misses into this
+// check, which is how a broken metric hides a real regression.
+// Same derivation as build-iray.mjs: concave partners from open-cell corners, convex partners
+// from each run's own end cell.
+const partner=new Set();
+const pair=(a,b)=>{if(a&&b&&a!==b){partner.add(`${a},${b}`);partner.add(`${b},${a}`);}};
+for(let y=0;y<16;y++)for(let x=0;x<16;x++){
+  if(mapW(x,y)) continue;
+  const W_=mapW(x-1,y),E_=mapW(x+1,y),N_=mapW(x,y-1),S_=mapW(x,y+1);
+  if(W_&&N_) pair(runE[y*16+(x-1)], runS[(y-1)*16+x]);
+  if(E_&&N_) pair(runW[y*16+(x+1)], runS[(y-1)*16+x]);
+  if(W_&&S_) pair(runE[y*16+(x-1)], runN[(y+1)*16+x]);
+  if(E_&&S_) pair(runW[y*16+(x+1)], runN[(y+1)*16+x]);
+}
+// This file builds the run arrays but no runFace, so recover each run's face from the array it
+// appears in rather than duplicating build-iray's newRun bookkeeping.
+{ const runInfo=new Map();
+  for(const [f,arr] of [['W',runW],['E',runE],['N',runN],['S',runS]])
+    for(let c=0;c<256;c++){const r=arr[c]; if(!r) continue;
+      if(!runInfo.has(r)) runInfo.set(r,{f,cells:[]});
+      runInfo.get(r).cells.push({x:c%16,y:c>>4});}
+  for(const [r,{f,cells}] of runInfo){
+    const vert=(f==='W'||f==='E'), key=c=>vert?c.y:c.x;
+    const lo=cells.reduce((a,b)=>key(a)<key(b)?a:b), hi=cells.reduce((a,b)=>key(a)>key(b)?a:b);
+    if(vert){
+      if(!mapW(lo.x,lo.y-1)) pair(r, runN[lo.y*16+lo.x]);
+      if(!mapW(hi.x,hi.y+1)) pair(r, runS[hi.y*16+hi.x]);
+    } else {
+      if(!mapW(lo.x-1,lo.y)) pair(r, runW[lo.y*16+lo.x]);
+      if(!mapW(hi.x+1,hi.y)) pair(r, runE[hi.y*16+hi.x]);
+    }
+  }
+}
+const want=[]; let convexSkipped=0;
 for(let c=1;c<W;c++){const a=hit[c-1],b=hit[c]; if(!a||!b) continue;
-  if(a.run!==b.run) want.push({c,kind:'corner'});
+  if(a.run!==b.run){ if(partner.has(`${a.run},${b.run}`)) want.push({c,kind:'corner'});
+                     else convexSkipped++; }
   else if(a.cell!==b.cell) want.push({c,kind:'seam'});}
 // Do NOT pre-dedupe the expectation. Only one line per 4-px cell can be drawn, but which
 // of two colliding boundaries wins depends on the order the subdivision happens to visit
@@ -61,11 +100,24 @@ for(let c=1;c<W;c++){const a=hit[c-1],b=hit[c]; if(!a||!b) continue;
 // perfectly real. Match drawn lines to boundaries instead, and treat any boundary left
 // over as a collision (expected, by design) rather than a failure.
 
-// horizon row = display row 100 -> y=123; logical col c -> x=32+2c. Every column is wall
-// at the horizon, so a white pixel there is a seam and nothing else.
-const row=execSync(`node /Users/jfield/c64fps/shot.mjs ${shotFile} 32 123 320 1`).toString().trim();
+// horizon row = display row 100 -> y=123; logical col c -> x=32+2c. Every column is wall at
+// the horizon, so a pixel that is not the wall colour there is a seam and nothing else.
+//
+// Test the COLOUR against the wall, not the brightness. This used to look for a '#' from
+// shot.mjs, which thresholds luminance at 128: correct while the seams were white, but the
+// recolour to dark grey (lum 98, on a black wall) put every seam below the threshold and the
+// check reported "boundaries 9  drawn 0" for all six views -- a clean bill of health for a
+// render with no seams at all. Comparing against whatever colour the wall happens to be
+// survives the next recolour of either.
+const row=execSync(`node /Users/jfield/c64fps/shot.mjs ${shotFile} 32 123 320 1 --raw`).toString().trim().split(/\s+/);
+const tally=new Map();
+for(let c=0;c<W;c++){const v=row[c*2];tally.set(v,(tally.get(v)||0)+1);}
+const wall=[...tally].sort((a,b)=>b[1]-a[1])[0][0];
 const got=[];
-for(let c=0;c<W;c++) if(row[c*2]==='#') got.push(c);
+for(let c=0;c<W;c++) if(row[c*2]!==wall) got.push(c);
+// If seams ever cover most of the horizon the majority vote picks the seam colour instead and
+// the result inverts, so say so rather than reporting a confident wrong answer.
+if(got.length>W/2) console.log(`  WARNING: ${got.length}/${W} columns differ from the assumed wall colour ${wall} -- majority vote is unreliable here`);
 
 // Tolerance is 4 columns. The engine has at most 47 distinct ray directions across 160
 // columns, so a marched column already carries ~1.7 columns of angular slop before the
@@ -84,7 +136,8 @@ for(const g of got){
 const collided=want.filter((w,i)=>!used.has(i));
 console.log(`${shotFile.split('/').pop()}  ${PXs} ${PYs} ${PAs}`);
 console.log(`  boundaries ${want.length}  drawn ${got.length}  matched ${matched}` +
-            `  avg |offset| ${matched?(off/matched).toFixed(2):'-'} col  worst ${worst}`);
+            `  avg |offset| ${matched?(off/matched).toFixed(2):'-'} col  worst ${worst}` +
+            `  (+${convexSkipped} corners facing away, no line by design)`);
 if(spurious.length) console.log(`  SPURIOUS (drawn with no boundary near): ${spurious.join(' ')}`);
 if(collided.length) console.log(`  not drawn, cell already used: ${collided.map(w=>w.c+(w.kind==='corner'?'C':'s')).join(' ')}`);
 if(!spurious.length) console.log(`  every drawn line corresponds to a real boundary`);

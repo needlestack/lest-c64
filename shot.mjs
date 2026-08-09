@@ -35,11 +35,28 @@ const lum = (x, y) => {
   if (bd === 4) { const b = img[y * stride + (x >> 1)], v = (x & 1) ? (b & 15) : (b >> 4); return pal ? (pal[v * 3] + pal[v * 3 + 1] + pal[v * 3 + 2]) / 3 : v * 17; }
   const i = y * stride + x * bpp; return (img[i] + img[i + 1] + img[i + 2]) / 3;
 };
-const a = process.argv.slice(3).map(Number);
+// RRGGBB per pixel, space separated. The '#'/'.' modes threshold luminance at 128, which is
+// blind to anything dark-on-dark: the dark-grey panel seams (lum 98) on the black wall read
+// as plain wall, so verify-seams.mjs silently reported "drawn 0" for every view once the
+// seams were recoloured. A caller that compares colours instead of brightness survives the
+// next recolour too.
+const col = (x, y) => {
+  if (bd === 8 && ch === 1) { const v = img[y * stride + x];
+    return pal ? [pal[v*3], pal[v*3+1], pal[v*3+2]].map(n => n.toString(16).padStart(2,'0')).join('')
+               : v.toString(16).padStart(2,'0').repeat(3); }
+  if (bd === 4) { const b = img[y * stride + (x >> 1)], v = (x & 1) ? (b & 15) : (b >> 4);
+    return pal ? [pal[v*3], pal[v*3+1], pal[v*3+2]].map(n => n.toString(16).padStart(2,'0')).join('')
+               : (v * 17).toString(16).padStart(2,'0').repeat(3); }
+  const i = y * stride + x * bpp;
+  return [img[i], img[i+1], img[i+2]].map(n => n.toString(16).padStart(2,'0')).join('');
+};
+const rawMode = process.argv.includes('--raw');
+const a = process.argv.slice(3).filter(s => s !== '--raw').map(Number);
 if (a.length === 4) {
   const [x0, y0, ww, hh] = a; let out = '';
-  for (let y = y0; y < y0 + hh; y++) { let s = '';
-    for (let x = x0; x < x0 + ww; x++) s += lum(x, y) > 128 ? '#' : '.'; out += s + '\n'; }
+  for (let y = y0; y < y0 + hh; y++) { let s = [];
+    for (let x = x0; x < x0 + ww; x++) s.push(rawMode ? col(x, y) : (lum(x, y) > 128 ? '#' : '.'));
+    out += (rawMode ? s.join(' ') : s.join('')) + '\n'; }
   process.stdout.write(out);
 } else {
   console.log(`${f}: ${w}x${h} bd=${bd} ct=${ct} pal=${!!pal}`);
