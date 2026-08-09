@@ -642,10 +642,15 @@ const SPRITES = process.env.SPRITES !== '0';
 // A/B for occlusion. ORBMIX=0 is -- it skips repointing far cells to SOLID's twin.
 const SPRPRI = +(process.env.SPRPRI ?? 1);
 const DBGORB = flag('DBGORB');
+// NOEDGE=1: skip choosing a ramp/step piece and store SOLID at every wall-top cell. Renders
+// wrong on purpose -- it exists only to price the selection, which cannot be isolated any
+// other way (the cell COUNTS are unchanged, only the per-cell work).
+const NOEDGE = flag('NOEDGE');
 const ORBMIX = process.env.ORBMIX !== '0';
-// ORBSTILL=0 forces a reprojection every frame, so orbMove can be measured on a stationary
-// viewpoint -- which is the only way to benchmark it on a scene with many orbs in view.
-const ORBSTILL = process.env.ORBSTILL !== '0';
+// Skip reprojecting when the viewpoint has not moved. OFF for now -- full calculations
+// whether moving or not -- because it flatters stationary frames and hides what the projection
+// actually costs. ORBSTILL=1 turns it back on.
+const ORBSTILL = process.env.ORBSTILL === '1';
 const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
 // ORB4 -- the full-size, unexpanded one -- is the canonical orb, and every other size is
 // resampled from it at build time. The author's other six were a hand-picked ladder with a
@@ -1681,7 +1686,10 @@ rfEdge: lda rbv
         bcs rfSolid             ; nothing between the ceiling and the solid run
         sta erow
 rfEdgeL:
-        ldy erow
+${NOEDGE ? `        lda #${hx(SOLID)}
+        sta ecode
+        jmp rfStore
+` : ''}        ldy erow
         lda kTabT,y
         sta kr
         ldx colc

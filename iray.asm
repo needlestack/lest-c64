@@ -3280,7 +3280,7 @@ orbMove:
         ; spent arriving at last frame's answer. The sprite registers already hold it. All that
         ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
         ; rewrites the screen every frame and puts plain SOLID back.
-
+        jmp obMoved
         lda px
         cmp opx
         bne obMoved
