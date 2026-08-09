@@ -1002,8 +1002,14 @@ if (process.env.CELLSCAN === '1') {
                     : rampT[(w[0] - CLO) * 16 + (w[3] - CLO)];
     return patOfCode2(code) ?? [0, 0, 0, 0];
   };
-  const seen = new Map();          // true 4-column content -> {n, kb, w, firstAt}
+  const seen = new Map();          // true 4-column content -> {n, kb, w, at, cols, px, ex}
   let cells = 0, mixed = 0;
+  // L1 = wrong PIXELS, hamm = wrong COLUMNS. mergecells prices a direct shape table in pixels,
+  // so the shipped engine has to be priced in the same unit or the two cannot be compared.
+  const L1 = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) +
+                       Math.abs(a[2] - b[2]) + Math.abs(a[3] - b[3]);
+  let exactN = 0, offN = 0, offCols = 0, offPx = 0;
+  let mdlCols = 0, chrCols = 0, mdlN = 0, chrN = 0;
   const curve = [];                // saturation: distinct shapes after each 5% of positions
   const t0 = Date.now();
   spots.forEach(([px, py], si) => {
@@ -1026,37 +1032,41 @@ if (process.env.CELLSCAN === '1') {
           // full, is BLANK or SOLID and needs no pattern code at all.
           if (t.every(v => v === 0) || t.every(v => v === 8)) continue;
           mixed++;
+          // Error is accumulated PER OCCURRENCE, not once per distinct shape. rampT is indexed
+          // by the endpoint-clamped w (CLO..CHI), not by the 0..8 shape, so the same visible
+          // shape reached with different w draws differently -- scoring one representative for
+          // the whole class silently mixed those together. The browser transcription of this
+          // model disagreeing on the totals is what surfaced it; the shape COUNTS matched all
+          // along, which is why it looked fine.
+          const drawn = drawnFor(w, kb), model = modelFor(w, kb) ?? drawn;
+          const dm = hamm(t, model), dch = hamm(model, drawn), d = hamm(t, drawn);
+          const dpx = L1(t, drawn);
+          offPx += dpx; offCols += d; mdlCols += dm; chrCols += dch;
+          if (dm) mdlN++;
+          if (dch) chrN++;
+          if (d === 0) exactN++; else offN++;
           const key = t.join(',');
           let e = seen.get(key);
-          if (!e) seen.set(key, e = { n: 0, kb, w: w.slice(), at: [px, py, a] });
-          e.n++;
+          if (!e) seen.set(key, e = { n: 0, kb, w: w.slice(), at: [px, py, a], cols: 0, px: 0, ex: 0 });
+          e.n++; e.cols += d; e.px += dpx;
+          if (d === 0) e.ex++;
         }
       }
     }
     if (si % Math.max(1, Math.floor(spots.length / 20)) === 0) curve.push([si, seen.size]);
   });
   curve.push([spots.length, seen.size]);
-  // Which of these does the shipped charset get EXACTLY right, and what does a miss cost?
-  // L1 = wrong PIXELS, hamm = wrong COLUMNS. mergecells prices a direct shape table in pixels,
-  // so the shipped engine has to be priced in the same unit or the two cannot be compared.
-  const L1 = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) +
-                       Math.abs(a[2] - b[2]) + Math.abs(a[3] - b[3]);
-  let exact = 0, exactN = 0, offN = 0, offCols = 0, offPx = 0;
-  let mdlCols = 0, chrCols = 0, mdlN = 0, chrN = 0;
+  // Per-shape REPORTING only -- the totals were accumulated per occurrence in the loop above.
+  // A shape counts as "drawn exactly" only if EVERY occurrence of it was: the same shape reached
+  // with different endpoint-clamped w can draw differently, so a shape can be part-right.
+  let exact = 0;
   const misses = [];
   for (const [key, e] of seen) {
-    const t = key.split(',').map(Number);
-    const drawn = drawnFor(e.w, e.kb), model = modelFor(e.w, e.kb) ?? drawn;
-    const dm = hamm(t, model), dc = hamm(model, drawn), d = hamm(t, drawn);
-    offPx += e.n * L1(t, drawn);
-    mdlCols += e.n * dm; chrCols += e.n * dc;
-    if (dm) mdlN += e.n;
-    if (dc) chrN += e.n;
-    if (d === 0) { exact++; exactN += e.n; continue; }
-    offN += e.n; offCols += e.n * d;
-    misses.push({ key, n: e.n, d, dm, dc, kb: e.kb, at: e.at });
+    if (e.ex === e.n) { exact++; continue; }
+    misses.push({ key, n: e.n, cols: e.cols, px: e.px, kb: e.kb, at: e.at,
+                  d: (e.cols / e.n), partial: e.ex > 0 });
   }
-  misses.sort((a, b) => b.n * b.d - a.n * a.d);
+  misses.sort((a, b) => b.cols - a.cols);
   const worst = misses[0];
   const sampled = new Set(PFREQ.keys());
   const unseenByBuild = [...seen].filter(([k]) => !sampled.has(k));
@@ -1081,14 +1091,16 @@ if (process.env.CELLSCAN === '1') {
   console.error(`                                                 This is what the 43 free codes buy back.`);
   console.error(`    TOTAL   ${(100 * offN / mixed).toFixed(2)}% of cells, ${(offCols / FR).toFixed(3)} wrong cols/frame` +
     `, ${(offPx / FR).toFixed(3)} wrong PIXELS/frame`);
-  if (worst) console.error(`  worst single shape: [${worst.key}] seen ${worst.n}x, off by ${worst.d} ` +
-    `(model ${worst.dm} + charset ${worst.dc}), e.g. PX=${worst.at[0].toFixed(2)} PY=${worst.at[1].toFixed(2)} A=${worst.at[2]}`);
+  if (worst) console.error(`  worst single shape: [${worst.key}] seen ${worst.n}x, ` +
+    `${worst.cols} wrong cols total (${worst.d.toFixed(2)} avg), e.g. PX=${worst.at[0].toFixed(2)} ` +
+    `PY=${worst.at[1].toFixed(2)} A=${worst.at[2]}`);
   console.error(`  shapes the BUILD's 332x16 sampler never saw: ${unseenByBuild.length} of ${seen.size} ` +
     `(${(100 * unseenByBuild.reduce((a, [, e]) => a + e.n, 0) / mixed).toFixed(2)}% of cells)`);
-  console.error(`         shape        count  off  = model + charset   kind`);
+  console.error(`         shape        count   wrong cols  avg   kind`);
   for (const m of misses.slice(0, 15))
-    console.error(`    [${m.key}] ${String(m.n).padStart(8)}   ${m.d}   =   ${m.dm}   +   ${m.dc}    ` +
-      `${m.kb ? `step k=${m.kb}` : 'ramp'}${sampled.has(m.key) ? '' : '   NEVER SAMPLED'}`);
+    console.error(`    [${m.key}] ${String(m.n).padStart(8)}   ${String(m.cols).padStart(8)}  ` +
+      `${m.d.toFixed(2)}  ${m.kb ? `step k=${m.kb}` : 'ramp'}` +
+      `${m.partial ? ' (part-exact)' : ''}${sampled.has(m.key) ? '' : '   NEVER SAMPLED'}`);
   writeFileSync('./cellscan.json', JSON.stringify({
     step: STEP, angleStride: ASTEP, positions: spots.length, cells, mixed,
     distinct: seen.size, exact, curve,
@@ -1122,6 +1134,25 @@ for (let a = 0; a < LA; a++) for (let m = 0; m < LM; m++) qmT[a * 8 + m] = a * (
 const qIdxAT = [...Array(CN)].map((_, v) => qIdxA(v + CLO));
 const qIdxMT = [...Array(CN)].map((_, v) => qIdxM(v + CLO));
 const qIdxBT = [...Array(CN)].map((_, v) => qIdxB(v + CLO));
+
+// MODELJSON=1 dumps everything a standalone copy of the model needs -- the map, the run ids the
+// face test reads, the clamp, the two code tables and the pattern behind every code. Written so
+// the model can be run somewhere without Node (see iray-model.html): the alternative is a
+// hand-copied second implementation, which is exactly what refShoot was hoisted to avoid.
+if (process.env.MODELJSON === '1') {
+  const patOfCode3 = (() => { const m = new Map();
+    for (const [k, c] of codeOf) if (!m.has(c)) m.set(c, k.split(',').map(Number));
+    return m; })();
+  writeFileSync('./model.json', JSON.stringify({
+    NLOG, FOV, NCELL, CLO, CHI, CN, LA, LM, LB,
+    map: [...map], runW: [...runW], runE: [...runE], runN: [...runN], runS: [...runS],
+    rampT, stepT, qIdxAT, qIdxMT, qIdxBT,
+    codePat: [...Array(256)].map((_, c) => patOfCode3.get(c) ?? null),
+    cellCodes: CELLCODES, seam0: SEAM0, blank: BLANK, solid: SOLID,
+  }));
+  console.error(`MODELJSON: wrote model.json (${CELLCODES} cell codes)`);
+}
+
 
 // ---- unrolled fill chains ----
 // A straight line of store instructions, one slot per cell row, each with its screen

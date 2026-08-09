@@ -1,0 +1,503 @@
+<title>iray cell model — live</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:      #e9eef0;
+    --panel:   #ffffff;
+    --sunk:    #dde5e8;
+    --ink:     #0e171b;
+    --dim:     #55686f;
+    --faint:   #84969c;
+    --line:    #c6d4d9;
+    --accent:  #1f6072;
+    --warn:    #a03f33;
+    --ok:      #3f6f33;
+    --shadow:  0 1px 2px rgba(14,23,27,.07), 0 6px 18px rgba(14,23,27,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:     #0b1215;
+      --panel:  #121d21;
+      --sunk:   #0d171a;
+      --ink:    #dde9ec;
+      --dim:    #8aa2ab;
+      --faint:  #5b737c;
+      --line:   #21343a;
+      --accent: #78b0bf;
+      --warn:   #cf8272;
+      --ok:     #97cf82;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.28);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:     #0b1215;
+    --panel:  #121d21;
+    --sunk:   #0d171a;
+    --ink:    #dde9ec;
+    --dim:    #8aa2ab;
+    --faint:  #5b737c;
+    --line:   #21343a;
+    --accent: #78b0bf;
+    --warn:   #cf8272;
+    --ok:     #97cf82;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.28);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .mono, code, .val, canvas + * .val {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 22px 20px 56px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 4px; }
+  h1 { font-size: 20px; font-weight: 620; letter-spacing: -.01em; margin: 0; text-wrap: balance; }
+  .sub { color: var(--dim); font-size: 13.5px; margin: 2px 0 18px; max-width: 68ch; }
+  .eyebrow {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--accent);
+  }
+
+  .grid { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: minmax(0,1fr); } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: var(--shadow);
+  }
+  .card > h2 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
+    margin: 0; padding: 10px 13px; border-bottom: 1px solid var(--line); font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  }
+  .card > .body { padding: 13px; }
+
+  .screens { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .screens { grid-template-columns: 1fr; } }
+  .screen { display: flex; flex-direction: column; gap: 7px; }
+  .screen figcaption {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+  }
+  .screen figcaption b { color: var(--ink); font-weight: 600; letter-spacing: .1em; }
+  canvas.view {
+    display: block; width: 100%; height: auto; image-rendering: pixelated;
+    border: 1px solid var(--line); border-radius: 4px; background: #fff;
+    aspect-ratio: 160 / 200;
+  }
+  canvas.view:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .readout {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin: 0 0 14px; padding: 9px 11px;
+    background: var(--sunk); border: 1px solid var(--line); border-radius: 7px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+    overflow-x: auto;
+  }
+  .readout .cmd { color: var(--ink); white-space: nowrap; }
+  .readout .cmd em { color: var(--accent); font-style: normal; }
+  button {
+    font: inherit; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 5px; padding: 3px 9px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+
+  dl.stats { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: baseline; }
+  dl.stats dt { color: var(--dim); font-size: 12.5px; }
+  dl.stats dd {
+    margin: 0; text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums; font-size: 13px;
+  }
+  dl.stats dd.bad { color: var(--warn); }
+  dl.stats dd.good { color: var(--ok); }
+  .rule { height: 1px; background: var(--line); margin: 11px 0; }
+
+  .cellgrid { display: grid; grid-template-columns: auto 1fr; gap: 5px 11px; align-items: center; }
+  .cellgrid span:nth-child(odd) { color: var(--dim); font-size: 12px; }
+  .cellgrid span:nth-child(even) {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+  }
+  .swatch { display: inline-flex; gap: 2px; vertical-align: -3px; margin-right: 7px; }
+  .swatch i { display: block; width: 5px; height: 16px; background: var(--sunk); position: relative; border: 1px solid var(--line); }
+  .swatch i b { position: absolute; left: 0; right: 0; bottom: 0; background: var(--ink); display: block; }
+
+  .keys { display: flex; flex-wrap: wrap; gap: 5px; }
+  .keys kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+    padding: 1px 6px; color: var(--dim); background: var(--sunk);
+  }
+  .note { color: var(--dim); font-size: 12.5px; margin: 9px 0 0; }
+  .note code { background: var(--sunk); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  canvas.map { display: block; width: 100%; height: auto; image-rendering: pixelated; border-radius: 4px; aspect-ratio: 1; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>iray cell model</h1>
+    <span class="eyebrow">160 &times; 200 &middot; 4&times;8 cells</span>
+  </header>
+  <p class="sub">
+    The same float reference model the charset is built from, running live. Left is the true
+    geometry; right is what the engine can actually express — a ramp cell rebuilt from its two
+    clamped endpoints, or a step cell quantised into its (qA, qM, qB) slot, then looked up
+    through the shipped <span class="mono">rampT</span> / <span class="mono">stepT</span> tables.
+  </p>
+
+  <div class="readout">
+    <span class="cmd" id="cmd">PX=180 PY=180 PA=00 node build-iray.mjs</span>
+    <button id="copy" type="button">copy</button>
+    <button id="diffbtn" type="button" aria-pressed="true">diff tint</button>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>view <span id="fpsnote" class="mono" style="letter-spacing:0;text-transform:none"></span></h2>
+      <div class="body">
+        <div class="screens">
+          <figure class="screen" style="margin:0">
+            <figcaption><b>truth</b><span>float rays</span></figcaption>
+            <canvas class="view" id="truth" width="160" height="200" tabindex="0"
+                    aria-label="True geometry rendered from the float reference model"></canvas>
+          </figure>
+          <figure class="screen" style="margin:0">
+            <figcaption><b>engine</b><span>cell model</span></figcaption>
+            <canvas class="view" id="engine" width="160" height="200"
+                    aria-label="The same view as the engine's cell model draws it"></canvas>
+          </figure>
+        </div>
+        <p class="note">
+          Move with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>, turn with
+          <kbd>&larr;</kbd><kbd>&rarr;</kbd> or drag on either canvas. Hover a cell to inspect it.
+          Hold <kbd>shift</kbd> to move slowly — the interesting shapes live within 0.1 of a wall.
+        </p>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:18px">
+      <div class="card">
+        <h2>this frame</h2>
+        <div class="body">
+          <dl class="stats">
+            <dt>mixed cells</dt>            <dd id="s-mixed">0</dd>
+            <dt>drawn exactly</dt>          <dd id="s-exact" class="good">0</dd>
+            <dt>wrong columns</dt>          <dd id="s-cols" class="bad">0</dd>
+            <dt>wrong pixels</dt>           <dd id="s-px" class="bad">0</dd>
+          </dl>
+          <div class="rule"></div>
+          <dl class="stats">
+            <dt>distinct shapes seen</dt>   <dd id="s-seen">0</dd>
+            <dt>&hellip; new since reset</dt><dd id="s-new">0</dd>
+          </dl>
+          <p class="note" style="margin-top:11px">
+            A <em>mixed</em> cell contains both a white and a black pixel, so it needs a pattern
+            code. Blank and solid cells are free.
+          </p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>cell under cursor</h2>
+        <div class="body">
+          <div class="cellgrid">
+            <span>at</span>      <span id="c-at">&mdash;</span>
+            <span>true</span>    <span id="c-true">&mdash;</span>
+            <span>drawn</span>   <span id="c-drawn">&mdash;</span>
+            <span>kind</span>    <span id="c-kind">&mdash;</span>
+            <span>code</span>    <span id="c-code">&mdash;</span>
+            <span>error</span>   <span id="c-err">&mdash;</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>map</h2>
+        <div class="body">
+          <canvas class="map" id="minimap" width="128" height="128"
+                  aria-label="Top-down map with the current position and view cone"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="model" type="application/json">{"NLOG":160,"FOV":47,"NCELL":40,"CLO":-3,"CHI":12,"CN":16,"LA":7,"LM":4,"LB":9,"map":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1,0,0,0,1,1,1,0,1,1,0,1,1,1,0,0,0,0,0,0,1,0,0,0,1,1,0,1,0,0,0,0,1,1,0,0,1,0,1,1,1,1,0,1,0,1,1,1,1,0,0,0,1,0,0,0,1,1,0,1,0,1,0,0,0,0,0,0,0,0,1,0,1,1,0,1,0,1,0,1,1,1,1,1,0,0,1,0,1,1,0,0,0,1,0,1,0,0,0,0,0,0,1,0,1,1,1,1,0,1,0,1,0,1,1,1,1,0,0,0,1,1,0,0,0,0,0,1,0,1,0,0,0,0,0,0,1,1,0,1,1,1,1,1,0,1,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1,1,0,0,0,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"runW":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0,0,31,0,0,0,0,0,0,0,14,0,0,0,0,0,0,0,31,0,0,0,0,0,0,0,14,0,0,0,24,0,0,0,31,0,0,3,0,0,0,0,0,0,0,0,24,0,0,0,31,0,0,3,0,0,0,0,16,0,0,0,24,0,28,0,0,0,0,3,0,8,0,0,0,0,0,0,24,0,0,0,32,0,0,3,0,8,0,0,0,0,0,0,0,0,29,0,32,0,0,3,0,8,0,12,0,0,0,0,0,0,29,0,32,0,0,0,0,8,0,12,0,0,0,0,0,0,29,0,32,0,0,0,0,8,0,12,0,19,0,0,0,0,0,0,32,0,0,0,0,0,0,12,0,19,0,0,0,0,0,0,32,0,0,6,0,0,0,0,0,19,0,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,0,0,33,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,33,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"runE":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,15,0,0,0,0,0,27,0,0,1,0,0,0,7,0,0,0,0,0,0,25,0,0,0,0,1,0,4,0,0,0,0,0,18,0,0,25,0,0,0,0,1,0,4,0,0,0,0,17,0,0,0,25,0,0,0,0,1,0,4,0,9,0,0,0,0,0,0,0,0,30,0,0,1,0,4,0,9,0,0,0,0,0,21,0,0,30,0,0,1,0,0,0,9,0,13,0,0,0,0,0,0,30,0,0,0,0,5,0,9,0,13,0,0,0,0,26,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,13,0,20,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,23,0,0,0,0,0,2,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"runN":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,37,37,37,0,0,0,0,39,39,39,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,41,41,0,0,0,0,43,43,0,0,0,0,0,45,45,45,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,48,0,0,0,0,0,0,0,0,50,50,50,50,50,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,53,53,0,0,0,0,0,56,56,56,56,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,58,58,58,58,0,0,0,0,61,61,61,61,61,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,64,64,0,0,0,0,0,0,0,0,0,0,0,65,65,65,0,0,66,66,66,66,66,66,66,66,66,0],"runS":[0,34,34,34,34,34,34,0,35,35,35,35,35,35,35,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,36,0,0,0,0,38,38,0,0,0,0,0,40,40,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,42,0,0,0,0,44,44,0,0,0,0,0,0,46,46,46,0,0,0,47,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,49,0,0,0,0,51,51,51,51,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,52,0,0,0,54,54,0,55,0,0,0,0,57,57,57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,59,59,59,59,59,0,60,0,0,62,62,62,62,0,0,0,0,0,0,0,0,0,0,0,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"rampT":[0,0,0,0,43,44,45,46,47,48,159,49,50,51,52,53,0,0,0,0,43,54,45,46,47,48,49,50,50,52,53,53,0,0,0,0,43,54,55,56,61,49,49,50,52,51,53,57,0,0,0,0,58,59,60,61,62,48,50,50,51,53,53,63,64,64,64,65,66,67,68,61,69,69,79,13,13,13,13,70,71,72,72,73,74,75,76,77,78,79,80,24,18,81,81,81,82,82,83,84,85,86,87,88,89,90,91,9,102,9,92,92,93,93,94,95,85,96,97,98,99,100,101,102,102,20,20,20,103,12,95,182,104,105,106,107,108,109,110,111,112,113,113,113,114,95,115,115,97,116,117,118,119,120,121,122,123,123,124,124,160,132,115,115,116,107,125,126,127,128,129,130,131,131,131,131,132,133,133,133,10,10,143,134,135,136,137,1,1,1,1,1,133,133,138,36,10,11,134,134,139,140,141,1,1,1,1,1,142,138,36,145,11,134,143,26,144,140,141,1,1,1,1,1,138,145,145,145,17,146,147,26,144,148,141,1,1,1,1,1,145,145,149,150,151,146,147,19,144,148,141,1,1,1,1,1],"stepT":[[169,43,59,45,164,174,155,177,3,0,58,75,87,164,174,120,129,3,0,58,75,87,164,174,120,129,3,0,58,75,87,164,174,120,129,3,64,66,67,87,98,69,13,79,13,71,74,75,76,77,188,128,129,38,64,66,67,87,98,108,120,129,13,64,66,67,87,98,108,120,129,13,153,66,75,87,88,108,120,129,16,153,85,86,87,181,89,69,91,16,153,66,75,87,88,108,120,129,16,153,66,75,87,88,108,120,129,16,167,66,75,179,98,99,120,129,20,167,66,75,179,98,99,100,80,20,167,66,75,179,98,99,120,129,20,167,66,75,179,98,99,120,129,20,0,66,184,87,189,108,109,129,112,0,66,184,87,189,108,109,129,112,156,66,184,117,189,108,120,172,124,0,66,184,87,189,108,109,129,112,165,66,75,87,98,108,120,129,131,165,66,75,87,98,108,120,129,131,165,66,75,87,98,127,128,129,131,165,66,75,87,98,108,120,129,131,5,21,75,39,27,25,10,11,1,5,21,75,39,27,25,10,11,1,5,21,75,39,27,25,10,11,1,5,21,31,39,27,25,10,11,42],[169,43,54,152,158,157,155,159,7,0,58,75,62,49,50,52,53,52,0,58,173,45,164,119,120,159,57,0,58,173,28,164,174,30,137,3,64,66,67,48,46,61,48,67,178,71,66,75,76,61,69,52,50,29,64,66,67,68,61,119,120,121,13,64,66,67,28,33,22,30,137,13,153,58,86,87,88,47,48,159,9,163,85,86,87,181,89,51,91,34,82,58,86,87,88,119,120,121,92,82,190,86,87,88,22,30,137,16,167,58,44,97,98,99,170,159,20,93,95,75,179,98,99,170,53,35,93,58,67,97,100,99,170,102,70,93,190,37,97,98,99,30,137,20,156,58,184,45,107,108,109,159,112,12,104,184,97,189,108,109,53,112,162,104,116,117,171,108,109,185,9,103,190,184,28,107,108,109,137,124,165,58,44,45,46,47,128,129,130,168,74,75,76,49,50,128,129,130,160,116,115,125,125,108,128,129,130,160,190,37,28,33,22,128,129,131,5,58,31,39,27,25,10,137,1,12,21,86,39,27,25,10,137,1,36,10,10,10,10,183,10,11,20,6,190,37,28,33,22,30,137,1],[169,43,44,152,158,157,155,161,4,56,56,173,48,61,47,48,49,49,51,51,51,51,51,51,51,51,51,63,63,63,63,63,63,63,63,63,64,66,59,66,65,65,66,66,14,176,68,75,76,68,188,68,75,41,13,13,13,13,13,13,13,13,13,70,70,70,70,70,70,70,70,70,82,83,83,83,83,83,83,83,83,182,85,86,87,181,86,86,87,32,9,9,9,9,9,89,9,80,9,92,92,92,92,92,92,92,92,92,95,93,93,93,93,93,93,93,93,154,85,86,179,98,186,98,98,24,101,101,101,101,101,99,170,101,99,20,20,20,20,20,20,20,20,20,156,12,12,12,12,12,12,12,12,115,85,184,97,107,104,104,104,106,187,104,116,120,107,108,109,121,8,113,113,113,113,113,113,113,113,124,168,160,160,160,160,160,160,160,160,166,116,115,125,107,115,115,115,115,166,126,128,129,128,127,180,129,18,131,131,131,131,131,131,131,131,131,12,43,44,97,27,89,90,80,53,149,17,10,143,133,133,133,133,133,19,135,135,143,134,175,140,137,42,2,17,40,23,26,15,148,141,1]],"qIdxAT":[0,0,0,0,1,1,2,3,4,4,5,6,6,6,6,6],"qIdxMT":[0,0,0,0,0,1,1,1,2,2,2,3,3,3,3,3],"qIdxBT":[0,0,0,0,1,2,3,4,5,6,7,8,8,8,8,8],"codePat":[[0,0,0,0],[8,8,8,8],[8,8,8,0],[0,8,8,8],[0,0,0,8],[8,0,0,0],[8,8,0,0],[0,0,8,8],[6,6,5,8],[5,5,8,8],[8,6,6,6],[8,7,7,7],[8,3,0,0],[1,8,8,8],[1,1,1,8],[8,8,8,5],[3,8,8,8],[8,8,8,1],[7,7,7,8],[8,8,7,0],[4,8,8,8],[8,1,1,1],[8,8,5,5],[8,8,8,3],[4,4,4,8],[8,5,5,5],[8,8,8,4],[8,4,4,4],[8,8,3,3],[2,2,8,8],[8,8,6,6],[8,1,2,2],[3,3,3,8],[8,8,4,4],[3,3,8,8],[4,4,8,8],[8,6,0,0],[8,8,2,2],[2,8,8,8],[8,3,3,3],[8,8,8,2],[2,2,2,8],[8,7,7,8],[0,0,0,1],[0,0,0,2],[0,0,1,3],[0,0,2,4],[0,0,2,5],[0,0,3,6],[0,1,4,8],[0,1,5,8],[0,1,6,8],[0,2,6,8],[0,2,7,8],[0,0,1,2],[0,0,2,3],[0,1,2,4],[0,3,8,8],[0,0,1,1],[0,1,1,2],[0,1,2,3],[0,1,3,4],[0,2,3,5],[0,4,8,8],[1,0,0,0],[1,1,0,0],[1,1,1,1],[1,1,2,2],[1,2,2,3],[1,2,4,5],[1,5,8,8],[2,0,0,0],[2,1,0,0],[2,1,1,0],[2,2,1,1],[2,2,2,2],[2,2,3,3],[2,3,3,4],[2,3,4,5],[2,3,5,6],[2,4,5,7],[2,5,8,8],[3,1,0,0],[3,2,0,0],[3,2,1,0],[3,2,2,1],[3,3,2,2],[3,3,3,3],[3,3,4,4],[3,4,4,5],[3,4,5,6],[3,4,6,7],[3,6,8,8],[4,2,0,0],[4,2,1,0],[4,3,1,0],[4,3,3,2],[4,4,3,3],[4,4,4,4],[4,4,5,5],[4,5,5,6],[4,5,6,7],[4,5,7,8],[5,2,0,0],[5,4,2,1],[5,4,3,2],[5,4,4,3],[5,5,4,4],[5,5,5,5],[5,5,6,6],[5,6,6,7],[5,6,7,8],[5,6,8,8],[5,7,8,8],[6,3,0,0],[6,4,2,0],[6,5,3,2],[6,5,4,3],[6,5,5,4],[6,6,5,5],[6,6,6,6],[6,6,7,7],[6,7,7,8],[6,7,8,8],[6,8,8,8],[7,6,4,3],[7,6,5,4],[7,6,6,5],[7,7,6,6],[7,7,7,7],[7,7,8,8],[7,8,8,8],[8,4,1,0],[8,5,1,0],[8,7,5,4],[8,7,6,5],[8,7,7,6],[8,8,7,7],[8,6,2,0],[8,8,6,5],[8,8,7,6],[8,8,8,7],[8,6,1,0],[8,8,5,3],[8,8,7,5],[8,7,2,0],[8,8,5,2],[8,8,6,3],[8,8,8,6],[8,8,3,0],[8,8,4,0],[8,8,5,1],[0,0,0,3],[3,0,0,0],[4,4,4,0],[0,0,0,6],[6,0,0,0],[0,0,0,5],[0,0,0,4],[0,0,7,7],[7,7,0,0],[0,0,0,7],[6,5,0,0],[3,3,0,0],[0,4,4,4],[7,0,0,0],[7,6,4,0],[4,0,0,0],[7,2,0,0],[0,1,1,0],[4,5,6,6],[6,6,5,4],[6,7,7,7],[0,1,2,2],[0,5,5,5],[8,7,5,5],[2,2,2,0],[0,4,6,7],[1,1,8,8],[4,3,3,3],[7,7,7,6],[3,3,3,4],[3,3,2,0],[8,6,5,5],[5,2,2,2],[5,5,5,7],[4,4,4,5],[6,6,6,0],[2,2,2,5],[5,4,4,4],[8,8,1,1],null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null],"cellCodes":191,"seam0":209,"blank":0,"solid":1}</script>
+<script>
+(() => {
+  "use strict";
+  const M = JSON.parse(document.getElementById('model').textContent);
+  const { NLOG, FOV, NCELL, CLO, CHI, LM, LB, map, runW, runE, runN, runS,
+          rampT, stepT, qIdxAT, qIdxMT, qIdxBT, codePat } = M;
+
+  // ---- the reference camera and ray, transcribed from refShoot/refAng/refCc in build-iray.mjs.
+  // Same FOV, same rectilinear correction, same 48-step DDA bound, same [1e9,0] miss.
+  const TH = Math.tan(FOV / 2 / 256 * 2 * Math.PI), CT = (NLOG - 1) / 2;
+  const cxOf = c => (c - CT) / CT * TH;
+  const ANG = Array.from({length: NLOG}, (_, c) => Math.atan(cxOf(c)));
+  const CC  = Array.from({length: NLOG}, (_, c) => 1 / Math.sqrt(1 + cxOf(c) ** 2));
+  const clampE = v => Math.max(CLO, Math.min(CHI, v));
+  const C8 = v => Math.max(0, Math.min(8, v));
+
+  function shoot(px, py, a) {
+    const dx = Math.cos(a), dy = Math.sin(a);
+    let mx = Math.floor(px), my = Math.floor(py);
+    const ddx = Math.abs(1 / (dx || 1e-9)), ddy = Math.abs(1 / (dy || 1e-9));
+    let sx, sy, sdx, sdy, side = 0;
+    if (dx < 0) { sx = -1; sdx = (px - mx) * ddx; } else { sx = 1; sdx = (mx + 1 - px) * ddx; }
+    if (dy < 0) { sy = -1; sdy = (py - my) * ddy; } else { sy = 1; sdy = (my + 1 - py) * ddy; }
+    for (let i = 0; i < 48; i++) {
+      if (sdx < sdy) { sdx += ddx; mx += sx; side = 0; } else { sdy += ddy; my += sy; side = 1; }
+      if (mx < 0 || my < 0 || mx > 15 || my > 15) return [1e9, 0];
+      if (map[my * 16 + mx]) {
+        const face = side === 0 ? (sx > 0 ? runW : runE) : (sy > 0 ? runN : runS);
+        return [side === 0 ? sdx - ddx : sdy - ddy, face[my * 16 + mx]];
+      }
+    }
+    return [1e9, 0];
+  }
+
+  // ---- state
+  const S = { px: 1.5, py: 1.5, pa: 0, diff: true, hover: null };
+  const seen = new Set();
+
+  const solidAt = (x, y) => x < 0 || y < 0 || x > 15 || y > 15 || !!map[y * 16 + x];
+  function tryMove(nx, ny) {                 // 0.1 pad, the same reach the scan assumes
+    const P = 0.1;
+    if (!solidAt(Math.floor(nx + P), Math.floor(S.py)) &&
+        !solidAt(Math.floor(nx - P), Math.floor(S.py))) S.px = nx;
+    if (!solidAt(Math.floor(S.px), Math.floor(ny + P)) &&
+        !solidAt(Math.floor(S.px), Math.floor(ny - P))) S.py = ny;
+  }
+
+  const cvT = document.getElementById('truth'), ctxT = cvT.getContext('2d');
+  const cvE = document.getElementById('engine'), ctxE = cvE.getContext('2d');
+  const imgT = ctxT.createImageData(160, 200), imgE = ctxE.createImageData(160, 200);
+  const WHITE = [255, 255, 255], BLACK = [0, 0, 0];
+  // Wrong pixels are tinted, never redrawn: the shape has to stay readable underneath or the
+  // diff tells you there is an error without letting you see what it is.
+  const TINT = [207, 130, 114];
+
+  function put(img, x, y, rgb) {
+    const i = (y * 160 + x) * 4;
+    img.data[i] = rgb[0]; img.data[i + 1] = rgb[1]; img.data[i + 2] = rgb[2]; img.data[i + 3] = 255;
+  }
+
+  let lastCells = null;
+
+  function render() {
+    const base = S.pa / 256 * 2 * Math.PI;
+    const H = new Array(NLOG), F = new Array(NLOG);
+    for (let c = 0; c < NLOG; c++) {
+      const [d, id] = shoot(S.px, S.py, base + ANG[c]);
+      H[c] = Math.min(100, Math.round(88 / Math.max(d * CC[c], 0.02)));
+      F[c] = id;
+    }
+
+    for (let i = 0; i < imgT.data.length; i += 4) {
+      imgT.data[i] = imgT.data[i+1] = imgT.data[i+2] = 255; imgT.data[i+3] = 255;
+      imgE.data[i] = imgE.data[i+1] = imgE.data[i+2] = 255; imgE.data[i+3] = 255;
+    }
+
+    let mixed = 0, exact = 0, wrongCols = 0, wrongPx = 0, fresh = 0;
+    const cells = [];
+
+    for (let g = 0; g < NCELL; g++) {
+      const q = H.slice(g * 4, g * 4 + 4), ff = F.slice(g * 4, g * 4 + 4);
+      let kb = 0; for (let i = 1; i < 4; i++) if (ff[i] !== ff[0]) { kb = i; break; }
+
+      for (let R = 0; R <= 12; R++) {
+        // fill = h + 8R - 92, clamped: the cell's four columns, bottom-filled. Identical to the
+        // build's rb..rs sweep, just walked over every row instead of only the partial ones.
+        const w = q.map(v => clampE(v + 8 * R - 92));
+        const t = w.map(C8);
+        const allBlank = t.every(v => v === 0), allSolid = t.every(v => v === 8);
+
+        let drawn = t, code = null;
+        if (!allBlank && !allSolid) {
+          if (!kb) { code = rampT[(w[0] - CLO) * 16 + (w[3] - CLO)]; }
+          else {
+            const slot = qIdxAT[w[0] - CLO] * (LM * LB) + qIdxMT[w[kb - 1] - CLO] * LB + qIdxBT[w[3] - CLO];
+            code = stepT[kb - 1][slot];
+          }
+          drawn = codePat[code] || [0, 0, 0, 0];
+          mixed++;
+          const key = t.join(',');
+          if (!seen.has(key)) { seen.add(key); fresh++; }
+          let dc = 0, dp = 0;
+          for (let i = 0; i < 4; i++) { if (t[i] !== drawn[i]) dc++; dp += Math.abs(t[i] - drawn[i]); }
+          if (dc === 0) exact++; else { wrongCols += dc; wrongPx += dp; }
+          cells.push({ g, R, t, drawn, kb, code, dc, dp });
+        }
+
+        // paint both halves: the bottom is the vertical mirror, exactly as fontB gives it
+        for (let i = 0; i < 4; i++) {
+          const x = g * 4 + i;
+          for (let r = 0; r < 8; r++) {
+            const yTop = R * 8 + r, yBot = 199 - yTop;
+            if (yTop > 99) break;
+            const litT = r >= 8 - t[i], litE = r >= 8 - drawn[i];
+            put(imgT, x, yTop, litT ? BLACK : WHITE);
+            put(imgT, x, yBot, litT ? BLACK : WHITE);
+            let rgb = litE ? BLACK : WHITE;
+            if (S.diff && litE !== litT) rgb = TINT;
+            put(imgE, x, yTop, rgb);
+            put(imgE, x, yBot, rgb);
+          }
+        }
+      }
+    }
+
+    ctxT.putImageData(imgT, 0, 0);
+    ctxE.putImageData(imgE, 0, 0);
+    lastCells = cells;
+
+    const set = (id, v, cls) => { const e = document.getElementById(id); e.textContent = v;
+      if (cls !== undefined) e.className = cls; };
+    set('s-mixed', mixed);
+    set('s-exact', exact + (mixed ? '  (' + (100 * exact / mixed).toFixed(0) + '%)' : ''),
+        exact === mixed ? 'good' : '');
+    set('s-cols', wrongCols, wrongCols ? 'bad' : 'good');
+    set('s-px', wrongPx, wrongPx ? 'bad' : 'good');
+    set('s-seen', seen.size);
+    set('s-new', fresh ? '+' + fresh : '0', fresh ? 'good' : '');
+
+    const hx = (v, n) => (v >>> 0).toString(16).padStart(n, '0');
+    const cmd = 'PX=' + hx(Math.round(S.px * 256), 3) + ' PY=' + hx(Math.round(S.py * 256), 3) +
+                ' PA=' + hx(S.pa & 255, 2) + ' node build-iray.mjs';
+    document.getElementById('cmd').textContent = cmd;
+    document.getElementById('cmd').dataset.cmd = cmd;
+
+    drawMap();
+  }
+
+  // ---- minimap
+  const mm = document.getElementById('minimap'), mctx = mm.getContext('2d');
+  function drawMap() {
+    const cs = getComputedStyle(document.documentElement);
+    const line = cs.getPropertyValue('--line').trim() || '#ccc';
+    const ink = cs.getPropertyValue('--ink').trim() || '#000';
+    const acc = cs.getPropertyValue('--accent').trim() || '#69f';
+    const sunk = cs.getPropertyValue('--sunk').trim() || '#eee';
+    mctx.fillStyle = sunk; mctx.fillRect(0, 0, 128, 128);
+    mctx.fillStyle = ink;
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++)
+      if (map[y * 16 + x]) mctx.fillRect(x * 8, y * 8, 8, 8);
+    mctx.strokeStyle = line; mctx.lineWidth = 1;
+    for (let i = 0; i <= 16; i++) {
+      mctx.beginPath(); mctx.moveTo(i * 8, 0); mctx.lineTo(i * 8, 128); mctx.stroke();
+      mctx.beginPath(); mctx.moveTo(0, i * 8); mctx.lineTo(128, i * 8); mctx.stroke();
+    }
+    const a = S.pa / 256 * 2 * Math.PI, half = FOV / 2 / 256 * 2 * Math.PI;
+    mctx.fillStyle = acc; mctx.globalAlpha = .3;
+    mctx.beginPath(); mctx.moveTo(S.px * 8, S.py * 8);
+    mctx.arc(S.px * 8, S.py * 8, 34, a - half, a + half); mctx.closePath(); mctx.fill();
+    mctx.globalAlpha = 1;
+    mctx.beginPath(); mctx.arc(S.px * 8, S.py * 8, 2.6, 0, 7); mctx.fill();
+  }
+
+  // ---- input
+  const keys = new Set();
+  addEventListener('keydown', e => {
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+    keys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+  });
+  addEventListener('keyup', e => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+  addEventListener('blur', () => keys.clear());
+
+  for (const cv of [cvT, cvE]) {
+    let drag = false, lastX = 0;
+    cv.addEventListener('pointerdown', e => { drag = true; lastX = e.clientX; cv.setPointerCapture(e.pointerId); });
+    cv.addEventListener('pointerup', e => { drag = false; cv.releasePointerCapture(e.pointerId); });
+    cv.addEventListener('pointermove', e => {
+      if (drag) { S.pa = (S.pa + (e.clientX - lastX) * 0.6 + 256) % 256; lastX = e.clientX; }
+      const r = cv.getBoundingClientRect();
+      const x = Math.floor((e.clientX - r.left) / r.width * 160);
+      const y = Math.floor((e.clientY - r.top) / r.height * 200);
+      S.hover = (x >= 0 && x < 160 && y >= 0 && y < 200) ? [x, y] : null;
+      showHover();
+    });
+    cv.addEventListener('pointerleave', () => { S.hover = null; showHover(); });
+  }
+
+  const sw = p => '<span class="swatch">' + p.map(v =>
+    '<i><b style="height:' + (v * 2) + 'px"></b></i>').join('') + '</span>';
+  function showHover() {
+    const put2 = (id, html) => { document.getElementById(id).innerHTML = html; };
+    if (!S.hover || !lastCells) {
+      for (const id of ['c-at','c-true','c-drawn','c-kind','c-code','c-err']) put2(id, '&mdash;');
+      return;
+    }
+    const [x, y] = S.hover;
+    const g = Math.floor(x / 4);
+    const yTop = y > 99 ? 199 - y : y;         // the bottom half is the mirror of the top
+    const R = Math.floor(yTop / 8);
+    const c = lastCells.find(k => k.g === g && k.R === R);
+    if (!c) {
+      put2('c-at', 'cell ' + g + ', row ' + R);
+      for (const id of ['c-true','c-drawn','c-kind','c-code','c-err']) put2(id, 'blank / solid');
+      return;
+    }
+    put2('c-at', 'cell ' + c.g + ', row ' + c.R + (y > 99 ? ' (mirrored)' : ''));
+    put2('c-true', sw(c.t) + '[' + c.t.join(',') + ']');
+    put2('c-drawn', sw(c.drawn) + '[' + c.drawn.join(',') + ']');
+    put2('c-kind', c.kb ? 'step, boundary at column ' + c.kb : 'ramp (one face)');
+    put2('c-code', c.code);
+    put2('c-err', c.dc ? '<span style="color:var(--warn)">' + c.dc + ' col, ' + c.dp + ' px</span>'
+                       : '<span style="color:var(--ok)">exact</span>');
+  }
+
+  document.getElementById('copy').addEventListener('click', async e => {
+    const t = document.getElementById('cmd').dataset.cmd || '';
+    try { await navigator.clipboard.writeText(t); e.target.textContent = 'copied';
+          setTimeout(() => e.target.textContent = 'copy', 1200); }
+    catch { e.target.textContent = 'select it'; setTimeout(() => e.target.textContent = 'copy', 1200); }
+  });
+  const db = document.getElementById('diffbtn');
+  db.addEventListener('click', () => {
+    S.diff = !S.diff; db.setAttribute('aria-pressed', String(S.diff)); render();
+  });
+
+  let prev = performance.now(), acc = 0, frames = 0;
+  function loop(now) {
+    const dt = Math.min(0.05, (now - prev) / 1000); prev = now;
+    const slow = keys.has('Shift') ? 0.18 : 1;
+    const spd = 2.6 * dt * slow, rot = 90 * dt * slow;   // rot in angle-bytes per second
+    const a = S.pa / 256 * 2 * Math.PI;
+    let moved = false;
+    if (keys.has('w') || keys.has('ArrowUp'))
+      { tryMove(S.px + Math.cos(a) * spd, S.py + Math.sin(a) * spd); moved = true; }
+    if (keys.has('s') || keys.has('ArrowDown'))
+      { tryMove(S.px - Math.cos(a) * spd, S.py - Math.sin(a) * spd); moved = true; }
+    if (keys.has('q')) { tryMove(S.px + Math.sin(a) * spd, S.py - Math.cos(a) * spd); moved = true; }
+    if (keys.has('e')) { tryMove(S.px - Math.sin(a) * spd, S.py + Math.cos(a) * spd); moved = true; }
+    if (keys.has('a') || keys.has('ArrowLeft'))  { S.pa = (S.pa - rot + 256) % 256; moved = true; }
+    if (keys.has('d') || keys.has('ArrowRight')) { S.pa = (S.pa + rot) % 256; moved = true; }
+    if (moved) { render(); showHover(); }
+    acc += dt; frames++;
+    if (acc > 0.5) {
+      document.getElementById('fpsnote').textContent = (frames / acc).toFixed(0) + ' fps in-browser';
+      acc = 0; frames = 0;
+    }
+    requestAnimationFrame(loop);
+  }
+
+  render();
+  requestAnimationFrame(loop);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawMap);
+})();
+</script>
