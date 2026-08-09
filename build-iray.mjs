@@ -1183,7 +1183,9 @@ cwB     = $c528
 cbA     = $c550                 ; ... and the solid run start, or $ff for "always redraw"
 cbB     = $c578
 faceIdT = $c400
-cellFaceT = $c4a0            ; per cell-column (40): the wall run its face belongs to
+cellFaceT = $c4a0            ; per cell-column (40): the LAST wall run the cell shows
+cellFace2T = $c4c8           ; ... and the FIRST. A cell at a corner shows two walls with
+                                ; opposite answers, so one run per cell cannot decide it
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
@@ -1604,27 +1606,48 @@ subFlush:                       ; interpolate + seam one maximal face
         lda spanR
         cmp spanL
         bcc subFDn              ; empty
-        ; ---- which wall face does each CELL show? ----
+        ; ---- which wall faces does each CELL show? ----
         ; A span has one face at both ends by construction, so filling per cell here costs at
         ; most 40 stores a frame -- against 160 if faceIdT were filled per column, which it is
-        ; not (castRay writes it only where it actually marched). Cell granularity is all the
-        ; sprite occlusion needs: it repoints whole cells anyway. A cell straddling two spans
-        ; takes the later one, which is the same approximation the repointing already makes.
+        ; not (castRay writes it only where it actually marched).
+        ;
+        ; TWO runs per cell, not one. A cell is 4 logical columns, and at a corner those 4
+        ; columns can belong to two different walls whose answers are OPPOSITE: the near wall
+        ; must clip a sprite and the far wall must not. Recording only the later run made the
+        ; whole cell answer for the near wall, so a far wall's body and seam inside the same
+        ; cell went on cutting into an orb standing in front of them.
+        ;
+        ; No per-frame clear and no assumption about span order is needed. Only the FIRST cell
+        ; of a span can be shared with the span before it, and that span already wrote this
+        ; cell as one of its interior cells -- so the first run is already there, and this span
+        ; must only update the last. Every other cell of the span belongs to it entirely.
         lda spanL
         lsr
         lsr
-        tax
+        tax                     ; cl = first cell
         lda spanR
         lsr
         lsr
-        sta tmp2
+        sta tmp2                ; cr = last cell
         ldy spanL
         lda faceIdT,y           ; the span's face: both ends agree, that is why it merged
-cfLp:   sta cellFaceT,x
-        inx
+        tay                     ; Y holds the run for the rest of this
+        lda spanL
+        and #$03
+        bne cfL1                ; starts mid-cell: the previous span owns this cell's first run
+        tya
+        sta cellFace2T,x
+cfL1:   tya
+        sta cellFaceT,x
+        cpx tmp2
+        bcs cfDn                ; the span lies within one cell
+cfLp:   inx
+        tya
+        sta cellFaceT,x
+        sta cellFace2T,x        ; wholly inside this span: first and last are the same run
         cpx tmp2
         bcc cfLp
-        beq cfLp
+cfDn:
         jsr interpSpan
 ${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}subFDn: rts
 
@@ -3940,21 +3963,19 @@ opL2:   sta ocl
         sta ocspan
         sta ocmask
         ldx ocl
+        ; A cell may clip this orb only if EVERY wall it shows is in front of the orb. At a
+        ; corner the two differ, and letting the cell clip on the strength of the near wall
+        ; alone is what let the far wall's seam cut into an orb standing in front of it. Where
+        ; they disagree the cell does not clip, so the error left is up to 4 logical columns of
+        ; orb drawn over a near wall's leading edge -- far less visible than a bite out of the
+        ; orb, and the only choice available while the char cell is the unit of control.
 opScan: lda cellFaceT,x
-        sta tmp
-        lsr
-        lsr
-        lsr
-        tay
-        lda (omptr),y
-        sta tmp2
-        lda tmp
-        and #$07
-        tay
-        lda orbBitT,y
-        and tmp2
+        jsr opBit
+        beq opFree
+        lda cellFace2T,x
+        jsr opBit
         bne opOcc
-        ldy ocspan              ; this cell's face cannot occlude: mark it to be repointed
+opFree: ldy ocspan              ; this cell cannot occlude: mark it to be repointed
         lda orbBitT,y
         ora ocmask
         sta ocmask
@@ -4129,6 +4150,22 @@ omInv:  sta cbA,x
         rts
 orbYes: rts
 orbNo:  rts
+; opBit: A = a wall run id -> Z=0 if this orb lies beyond that run's face plane, from the
+; precomputed bitmap at omptr. X is the caller's cell index and is preserved.
+opBit:  sta tmp
+        lsr
+        lsr
+        lsr
+        tay
+        lda (omptr),y
+        sta tmp2
+        lda tmp
+        and #$07
+        tay
+        lda orbBitT,y
+        and tmp2
+        rts
+
 ; kSgn: the high byte a signed byte sign-extends to.
 kSgn:   bmi kSgN
         lda #$00
