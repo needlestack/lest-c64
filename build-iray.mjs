@@ -381,12 +381,15 @@ if (SPRITES) for (let k = 1; k <= 3; k++) for (const leftFg of [true, false])
 // express, so the sampler decides what is worth a code and what gets dropped (see placeAll).
 // Widening the clamp to 16 levels added patterns that only arise from very steep slopes, and
 // most of those are unreachable in practice.
-function patternFreq() {
-  const f = new Map(), TH = Math.tan(FOV / 2 / 256 * 2 * Math.PI), CT = (NLOG - 1) / 2;
-  const cx = c => (c - CT) / CT * TH;
-  const ang = [...Array(NLOG)].map((_, c) => Math.atan(cx(c)));
-  const cc = [...Array(NLOG)].map((_, c) => 1 / Math.sqrt(1 + cx(c) ** 2));
-  const shoot = (px, py, a) => { const dx = Math.cos(a), dy = Math.sin(a);
+// The reference camera and ray, hoisted out of patternFreq so that anything else measuring the
+// scene (CELLSCAN below) casts through the SAME model. A second implementation of the DDA would
+// be a second thing to keep in step, and the whole value of this model is that it is the one the
+// charset is built from.
+const TH = Math.tan(FOV / 2 / 256 * 2 * Math.PI), CT = (NLOG - 1) / 2;
+const refCx = c => (c - CT) / CT * TH;
+const refAng = [...Array(NLOG)].map((_, c) => Math.atan(refCx(c)));
+const refCc = [...Array(NLOG)].map((_, c) => 1 / Math.sqrt(1 + refCx(c) ** 2));
+const refShoot = (px, py, a) => { const dx = Math.cos(a), dy = Math.sin(a);
     let mx = Math.floor(px), my = Math.floor(py);
     const ddx = Math.abs(1 / (dx || 1e-9)), ddy = Math.abs(1 / (dy || 1e-9));
     let sx, sy, sdx, sdy, side = 0;
@@ -403,7 +406,11 @@ function patternFreq() {
         const face = side === 0 ? (sx > 0 ? runW : runE) : (sy > 0 ? runN : runS);
         return [side === 0 ? sdx - ddx : sdy - ddy, face[my * 16 + mx]]; } }
     return [1e9, 0]; };
-  const cl = v => Math.max(CLO, Math.min(CHI, v));
+const refClamp = v => Math.max(CLO, Math.min(CHI, v));
+
+function patternFreq() {
+  const f = new Map();
+  const ang = refAng, cc = refCc, shoot = refShoot, cl = refClamp;
   // Sample where the PLAYER CAN ACTUALLY STAND, not just cell centres. A centre is never
   // closer than 0.5 cells to a wall, but the collision box lets you press to within ~0.1 --
   // and that is exactly where walls tower and the steep ramps get used. Sampling centres
@@ -937,6 +944,154 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
   }
   if (SPRITES) console.error(`  step ink: ${reinked} step-only codes re-inked; ${shared} shared with rampT ` +
     `and left background (a duplicate each would cost ${shared} codes)`);
+}
+
+// ---- CELLSCAN: a dense walkthrough, to price what the sparse sampler cannot see ----
+// patternFreq samples 332 hand-chosen positions x 16 of the 256 angle bytes, and everything
+// downstream trusts it: the drop tier only ever discards patterns it reports as NEVER SAMPLED,
+// and a dropped pattern renders as its nearest neighbour. So a shape that occurs at some angle
+// the sampler skipped is a wrong cell in a frame nobody measured.
+//
+// This walks a fine grid of positions the player can actually stand at, through EVERY angle
+// byte, and records the true content of every cell that contains both white and black -- which
+// is exactly the set of cells that needs a charset code. It reports what the engine would draw
+// for each, so the error is measured against the real code tables rather than estimated.
+//
+// CELLSTEP = position grid in cells (default 0.25), CELLANG = angle byte stride (default 1,
+// i.e. all 256). It is analysis only: nothing here feeds the charset, and the run exits before
+// emitting so it can never write a disk built from a diagnostic path.
+if (process.env.CELLSCAN === '1') {
+  const STEP = +(process.env.CELLSTEP ?? 0.25);
+  const ASTEP = +(process.env.CELLANG ?? 1);
+  // The collision box lets the player press to ~0.1 of a wall but no closer, so a position
+  // nearer than PAD to a solid cell is not reachable and its patterns are not real.
+  const PAD = 0.1;
+  const solid = (x, y) => x < 0 || y < 0 || x > 15 || y > 15 || !!map[y * 16 + x];
+  const spots = [];
+  for (let cy = 0; cy < 16; cy++) for (let cx0 = 0; cx0 < 16; cx0++) {
+    if (map[cy * 16 + cx0]) continue;
+    for (let gy = STEP / 2; gy < 1; gy += STEP) for (let gx = STEP / 2; gx < 1; gx += STEP) {
+      const px = cx0 + gx, py = cy + gy;
+      if (gx < PAD && solid(cx0 - 1, cy)) continue;
+      if (gx > 1 - PAD && solid(cx0 + 1, cy)) continue;
+      if (gy < PAD && solid(cx0, cy - 1)) continue;
+      if (gy > 1 - PAD && solid(cx0, cy + 1)) continue;
+      spots.push([px, py]);
+    }
+  }
+  // What the engine would actually put on screen for a cell, through the very tables it ships.
+  const patOfCode2 = (() => { const m = new Map();
+    for (const [k, c] of codeOf) if (!m.has(c)) m.set(c, k.split(',').map(Number));
+    return c => m.get(c); })();
+  // TWO losses sit between the real cell and the pixels, and they have completely different
+  // cures, so measuring them together is useless:
+  //
+  //   MODEL   what the engine can even express. A ramp cell is rebuilt by interpolating its two
+  //           ENDPOINTS, so [7,8,8,8] is not a pattern it can ask for -- endpoints (7,8) give
+  //           [7,7,8,8]. A step cell is its quantised (qA,qM,qB) slot. No number of charset
+  //           codes fixes this; it needs a different representation.
+  //   CHARSET what the shipped codes do to the pattern the model DID ask for -- merged ramps,
+  //           dropped patterns, nearest-neighbour substitution. THIS is what free codes buy.
+  const modelFor = (w, kb) => {
+    if (!kb) return rampPat(w[0], w[3]);
+    const slot = qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3]);
+    return STEPS.assign[kb - 1].get(slot) ?? null;
+  };
+  const drawnFor = (w, kb) => {
+    const code = kb ? stepT[kb - 1][qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3])]
+                    : rampT[(w[0] - CLO) * 16 + (w[3] - CLO)];
+    return patOfCode2(code) ?? [0, 0, 0, 0];
+  };
+  const seen = new Map();          // true 4-column content -> {n, kb, w, firstAt}
+  let cells = 0, mixed = 0;
+  const curve = [];                // saturation: distinct shapes after each 5% of positions
+  const t0 = Date.now();
+  spots.forEach(([px, py], si) => {
+    for (let a = 0; a < 256; a += ASTEP) {
+      const base = a / 256 * 2 * Math.PI;
+      const hit = [...Array(NLOG)].map((_, c) => refShoot(px, py, base + refAng[c]));
+      const h = hit.map(([d], c) => Math.min(100, Math.round(88 / Math.max(d * refCc[c], 0.02))));
+      const fid = hit.map(([, id]) => id);
+      for (let g = 0; g < NLOG / 4; g++) {
+        const q = h.slice(g * 4, g * 4 + 4), mx2 = Math.max(...q), mn = Math.min(...q);
+        const ff = fid.slice(g * 4, g * 4 + 4);
+        let kb = 0; for (let i = 1; i < 4; i++) if (ff[i] !== ff[0]) { kb = i; break; }
+        const rb = mx2 > 92 ? 0 : Math.floor((92 - mx2) / 8) + 1;
+        let rs = mn >= 100 ? 0 : Math.ceil((100 - mn) / 8); if (rs < rb) rs = rb;
+        cells += 25;                 // every cell row of this column-group, mixed or not
+        for (let R = rb; R < rs; R++) {
+          const w = q.map(v => refClamp(v + 8 * R - 92));
+          const t = w.map(C8);
+          // "contains both a white and a black pixel": every column empty, or every column
+          // full, is BLANK or SOLID and needs no pattern code at all.
+          if (t.every(v => v === 0) || t.every(v => v === 8)) continue;
+          mixed++;
+          const key = t.join(',');
+          let e = seen.get(key);
+          if (!e) seen.set(key, e = { n: 0, kb, w: w.slice(), at: [px, py, a] });
+          e.n++;
+        }
+      }
+    }
+    if (si % Math.max(1, Math.floor(spots.length / 20)) === 0) curve.push([si, seen.size]);
+  });
+  curve.push([spots.length, seen.size]);
+  // Which of these does the shipped charset get EXACTLY right, and what does a miss cost?
+  let exact = 0, exactN = 0, offN = 0, offCols = 0;
+  let mdlCols = 0, chrCols = 0, mdlN = 0, chrN = 0;
+  const misses = [];
+  for (const [key, e] of seen) {
+    const t = key.split(',').map(Number);
+    const drawn = drawnFor(e.w, e.kb), model = modelFor(e.w, e.kb) ?? drawn;
+    const dm = hamm(t, model), dc = hamm(model, drawn), d = hamm(t, drawn);
+    mdlCols += e.n * dm; chrCols += e.n * dc;
+    if (dm) mdlN += e.n;
+    if (dc) chrN += e.n;
+    if (d === 0) { exact++; exactN += e.n; continue; }
+    offN += e.n; offCols += e.n * d;
+    misses.push({ key, n: e.n, d, dm, dc, kb: e.kb, at: e.at });
+  }
+  misses.sort((a, b) => b.n * b.d - a.n * a.d);
+  const worst = misses[0];
+  const sampled = new Set(PFREQ.keys());
+  const unseenByBuild = [...seen].filter(([k]) => !sampled.has(k));
+  const secs = ((Date.now() - t0) / 1000).toFixed(1);
+  console.error(`\nCELLSCAN  step ${STEP} cells, angle stride ${ASTEP}: ${spots.length} positions ` +
+    `x ${Math.ceil(256 / ASTEP)} angles = ${(spots.length * Math.ceil(256 / ASTEP)).toLocaleString()} frames, ${secs}s`);
+  const FR = spots.length * Math.ceil(256 / ASTEP);
+  console.error(`  cells on screen ${cells.toLocaleString()}, of which mixed (need a pattern code) ` +
+    `${mixed.toLocaleString()} (${(100 * mixed / cells).toFixed(1)}%, ${(mixed / FR).toFixed(1)}/frame)`);
+  console.error(`  DISTINCT mixed shapes actually reachable: ${seen.size}`);
+  console.error(`  saturation (positions scanned -> distinct shapes): ` +
+    curve.filter((_, i) => i % 4 === 0 || i === curve.length - 1)
+         .map(([s, d]) => `${s}:${d}`).join('  '));
+  console.error(`  drawn EXACTLY: ${exact}/${seen.size} shapes, ` +
+    `${(100 * exactN / mixed).toFixed(2)}% of all mixed cells by frequency`);
+  console.error(`  loss splits into:`);
+  console.error(`    MODEL   ${(100 * mdlN / mixed).toFixed(2)}% of cells, ` +
+    `${(mdlCols / FR).toFixed(3)} wrong cols/frame  -- ramp rebuilt from 2 endpoints, step quantised.`);
+  console.error(`                                                 More charset codes CANNOT fix this.`);
+  console.error(`    CHARSET ${(100 * chrN / mixed).toFixed(2)}% of cells, ` +
+    `${(chrCols / FR).toFixed(3)} wrong cols/frame  -- merges, drops, nearest-neighbour.`);
+  console.error(`                                                 This is what the 43 free codes buy back.`);
+  console.error(`    TOTAL   ${(100 * offN / mixed).toFixed(2)}% of cells, ${(offCols / FR).toFixed(3)} wrong cols/frame`);
+  if (worst) console.error(`  worst single shape: [${worst.key}] seen ${worst.n}x, off by ${worst.d} ` +
+    `(model ${worst.dm} + charset ${worst.dc}), e.g. PX=${worst.at[0].toFixed(2)} PY=${worst.at[1].toFixed(2)} A=${worst.at[2]}`);
+  console.error(`  shapes the BUILD's 332x16 sampler never saw: ${unseenByBuild.length} of ${seen.size} ` +
+    `(${(100 * unseenByBuild.reduce((a, [, e]) => a + e.n, 0) / mixed).toFixed(2)}% of cells)`);
+  console.error(`         shape        count  off  = model + charset   kind`);
+  for (const m of misses.slice(0, 15))
+    console.error(`    [${m.key}] ${String(m.n).padStart(8)}   ${m.d}   =   ${m.dm}   +   ${m.dc}    ` +
+      `${m.kb ? `step k=${m.kb}` : 'ramp'}${sampled.has(m.key) ? '' : '   NEVER SAMPLED'}`);
+  writeFileSync('./cellscan.json', JSON.stringify({
+    step: STEP, angleStride: ASTEP, positions: spots.length, cells, mixed,
+    distinct: seen.size, exact, curve,
+    shapes: [...seen].map(([k, e]) => ({ p: k, n: e.n, kb: e.kb,
+      drawn: drawnFor(e.w, e.kb).join(','), sampledByBuild: sampled.has(k), at: e.at }))
+      .sort((a, b) => b.n - a.n),
+  }, null, 1));
+  console.error('  wrote cellscan.json');
+  process.exit(0);
 }
 
 // charset A, and charset B = every glyph flipped vertically. The raster split at the
