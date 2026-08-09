@@ -186,8 +186,22 @@ const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of mul
 // no masking, no mutable sprite copies, no cycles at all. 11 takes its colour from the low 3
 // bits of colour RAM, which is written once at startup to $08: multicolor on, colour black,
 // which is what the walls wanted anyway.
-const patBytes = p => [...Array(8)].map((_, i) =>
-  (p[0] > 7 - i ? 0xc0 : 0) | (p[1] > 7 - i ? 0x30 : 0) | (p[2] > 7 - i ? 0x0c : 0) | (p[3] > 7 - i ? 0x03 : 0));
+// Wall pixels are bit pair 11 in a FULL cell and 01 in a partial one. Both are black -- 11
+// through colour RAM, 01 through $d022 -- so nothing about the image changes. What changes is
+// sprite priority: 11 is foreground and clips sprites, 01 is background and does not.
+//
+// Only the full cell needs to clip. A partial cell is the one-row band at a wall's top or
+// bottom boundary, and geometry keeps an orb away from those on a NEAR wall: the top edge sits
+// at 100-h and the bottom at 100+h, while the orb stands on the floor at 100+h_orb with
+// h_orb < h_wall, so it is above the bottom edge and far below the top one. On a FAR wall the
+// orb is in front and must not be clipped at all -- which is what was going wrong, the bottom
+// edge cutting two rows out of an orb standing in front of it.
+const patBytes = p => {
+  const full = p.every(v => v >= 8);
+  const [a, b, c, d] = full ? [0xc0, 0x30, 0x0c, 0x03] : [0x40, 0x10, 0x04, 0x01];
+  return [...Array(8)].map((_, i) =>
+    (p[0] > 7 - i ? a : 0) | (p[1] > 7 - i ? b : 0) | (p[2] > 7 - i ? c : 0) | (p[3] > 7 - i ? d : 0));
+};
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
 // SOLID's twin: the same solid black, but bit pair 01, which the VIC classes as BACKGROUND and
@@ -659,6 +673,10 @@ const FLATSPAN = flag('FLATSPAN');
 // overhead in place so the two can be told apart.
 const NOMINMAX = flag('NOMINMAX');
 const ORBMIX = process.env.ORBMIX !== '0';
+// ORBPRI=0/1 forces every sprite in front of / behind the walls, ignoring the depth scan.
+// Renders the two answers the scan is choosing between, so a frame can be compared against
+// both instead of guessed at.
+const ORBPRI = process.env.ORBPRI;
 // Skip reprojecting when the viewpoint has not moved. OFF for now -- full calculations
 // whether moving or not -- because it flatters stationary frames and hides what the projection
 // actually costs. ORBSTILL=1 turns it back on.
@@ -3515,7 +3533,7 @@ osBits: lda omEn
         sta $d01d
         lda omYY
         sta $d017
-        lda omPri
+        lda ${ORBPRI === undefined ? 'omPri' : '#$0' + (ORBPRI === '1' ? 'ff' : '0')}
         sta $d01b
         lda omX8
         sta $d010
@@ -3954,8 +3972,16 @@ omCol:  ldx col4T,y             ; this cell column's depth, from its first logic
         bcs omNx                ; nearer than the orb: leave it clipping
         lda (ppPtr),y
         cmp #${hx(SOLID)}
-        bne omNx                ; only the flat body has a twin; edges stay as they are
-        lda #${hx(SOLIDBG)}
+        beq omPut
+        ; A seam cell is foreground too, and it was slicing a grey line through orbs standing
+        ; in front of the wall. There is no background seam to swap to -- 00 is the ceiling
+        ; and 01 is plain black -- so the seam simply goes for the cells an orb covers, which
+        ; reads far better than a seam drawn across the front of it.
+        cmp #${hx(SEAM0)}
+        bcc omNx
+        cmp #${hx(SEAM0 + 4)}
+        bcs omNx
+omPut:  lda #${hx(SOLIDBG)}
         sta (ppPtr),y
 omNx:   iny
         cpy ocr
