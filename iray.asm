@@ -3340,14 +3340,25 @@ ocs:    ; ---- the half of every product that all orbs share ----
         ; dx = (orbCell - playerCell) + (0.5 - playerFraction). The right-hand term is the same
         ; for every orb, so (that * cos) and (that * sin) are frame constants. Folding them into
         ; one addend per axis pair leaves the per-orb work as four 8x8 multiplies.
+        ; 0.5 - playerFraction, as a signed byte. The range is -127..+128 and +128 does not
+        ; fit -- it reads as -128, flipping the sign of every term derived from it. That
+        ; happens for exactly one value, a fraction of zero, which is the player sitting
+        ; precisely on a cell boundary: the orbs lurch for a single frame while crossing and
+        ; snap back once past. Clamp to +127; the 1/256 of a cell it costs is invisible.
         sec
-        lda #$80                ; 0.5 - playerFraction, signed
+        lda #$80
         sbc px
-        sta ofx
+        cmp #$80
+        bne ofxOk
+        lda #$7f
+ofxOk:  sta ofx
         sec
         lda #$80
         sbc py
-        sta ofy
+        cmp #$80
+        bne ofyOk
+        lda #$7f
+ofyOk:  sta ofy
         lda ofx
         ldx ocos
         ldy ocosS
