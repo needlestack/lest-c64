@@ -247,6 +247,12 @@ obX     = $cb30
 obY     = $cb38
 obP     = $cb40
 obC     = $cb48                  ; per-sprite state, flushed to the VIC in the border
+opx     = $cb5c                  ; the viewpoint orbMove last projected from
+opy     = $cb5e
+opa     = $cb60
+rpOn    = $cb61                  ; ... and the cell rectangle it repointed, to replay
+rpH     = $cb62
+rpRow   = $cb63                  ; DBGORB: candidates that passed the bearing test
 odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -300,6 +306,12 @@ ccf:    sta $d800,x
         inx
         bne ccf
         ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
+        lda #$00
+        sta $d015               ; nothing visible until orbMove has decided what is
+        sta rpOn
+        lda pa
+        eor #$80
+        sta opa                 ; cannot match pa, so the first frame never takes the still path
         lda #$ff
         sta $d01c               ; ALL eight in multicolor -- orbMove hands out slots as it
                                 ; finds visible orbs, so any of them can be in use. $d015 is
@@ -3247,6 +3259,42 @@ hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,20
 ; that project are the NEAREST eight and assigning them to sprites in order also gets the
 ; overlap priority right -- sprite 0 draws over sprite 1.
 orbMove:
+        ; ---- nothing moved? then nothing projects differently ----
+        ; Six orbs on screen is about 18,700 cycles, and standing still it is 18,700 cycles
+        ; spent arriving at last frame's answer. The sprite registers already hold it. All that
+        ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
+        ; rewrites the screen every frame and puts plain SOLID back.
+        lda px
+        cmp opx
+        bne obMoved
+        lda px+1
+        cmp opx+1
+        bne obMoved
+        lda py
+        cmp opy
+        bne obMoved
+        lda py+1
+        cmp opy+1
+        bne obMoved
+        lda pa
+        cmp opa
+        bne obMoved
+        lda rpOn
+        beq obStill
+        jsr rpReplay
+obStill:rts
+obMoved:lda px
+        sta opx
+        lda px+1
+        sta opx+1
+        lda py
+        sta opy
+        lda py+1
+        sta opy+1
+        lda pa
+        sta opa
+        lda #$00
+        sta rpOn
         ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
         lda absCosT,x
         sta ocos
@@ -3295,6 +3343,7 @@ ocs:    lda #$00                ; the per-sprite bit registers are built up a bi
         sta ocptr+1
         lda #$00
         sta ocy
+        
 obLoop: ldy ocy
         lda (ocptr),y
         sta oidx
@@ -3769,6 +3818,17 @@ omT1:   lsr
         bcc omB1
         lda #24
 omB1:   sta ocrw2
+        lda ohgt                ; remember it: a still frame replays this without reprojecting
+        sta rpH
+        lda ocrow               ; the loop walks ocrow, so keep where it started
+        sta rpRow
+        inc rpOn
+        jmp omRow
+rpReplay:
+        lda rpH
+        sta ohgt
+        lda rpRow
+        sta ocrow
 omRow:  ldy ocrow
         lda rowLoT,y
         sta ppPtr
@@ -3795,6 +3855,7 @@ omNx:   iny
         cmp ocrw2
         bcc omRow
         beq omRow
+        rts
 orbYes: rts
 orbNo:  rts
 ; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
