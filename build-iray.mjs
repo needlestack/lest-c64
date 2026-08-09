@@ -1842,10 +1842,18 @@ entry:
 rfCz:   sta cwA,x               ; cache byte that happens to match rb or rs leaves a column
         inx                     ; never drawn at all
         bne rfCz
-        lda #$08                ; bit3 = per-cell multicolor enable. The low three bits are
-                                ; the bit-pair-11 colour, and nothing emits 11 any more --
-                                ; shape comes from 00/01 and seams from 10 -- so this is
-                                ; written once at startup and never touched again.
+        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
+                                ; bit-pair-11 colour. Written once at startup and never
+                                ; touched again: the pattern pairing that used to rewrite it
+                                ; per cell was removed at 66bc8cf.
+                                ;
+                                ; It is still the live hook for two-patterns-per-code, and
+                                ; more so than before -- every wall pixel is pair 11 now, so
+                                ; $08/$09 per cell would flip that cell's whole wall between
+                                ; black and white. The old encoding's other two values are
+                                ; also still where they were: 01 = $d022 black, 00 = $d021
+                                ; white. What killed it was the per-frame write, not the
+                                ; charset trick.
 ccf:    sta $d800,x
         sta $d900,x
         sta $da00,x
