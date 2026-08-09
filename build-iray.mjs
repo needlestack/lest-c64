@@ -1266,7 +1266,6 @@ oe      = $cb0a
 o3      = $cb0b
 ocoff   = $cb0c
 ovar    = $cb0d
-ocmax   = $cb0e
 ocnear  = $cb0f
 ocol    = $cb10
 ocspan  = $cb11
@@ -1274,7 +1273,6 @@ ocl     = $cb12
 ocr     = $cb13
 ocrow   = $cb14
 ocrw2   = $cb15
-ocl2    = $cb16
 oidx    = $cb17
 ocn3    = $cb2a
 ocn     = $cb18
@@ -4068,14 +4066,11 @@ ${ORBMIX ? '' : '        jmp orbYes'}
         lda omMix
         bne orbYes
         inc omMix
-        lda ocl2
-        lsr
-        lsr
-        sta ocl
-        lda ocmax
-        lsr
-        lsr
-        sta ocr
+        ; ocl/ocr already hold the cell range the scan walked, and ocmask's bit N means "cell
+        ; ocl+N does not occlude". This used to recompute them from ocl2/ocmax, which the old
+        ; depth scan set and nothing has set since the face-plane rewrite -- so the loop below
+        ; walked a range out of uninitialised RAM and read ocmask from the wrong base. Every
+        ; SOLID cell genuinely under the orb kept its foreground code and went on clipping.
         lda o3                  ; sprite top, as a char row
         sec
         sbc #50
