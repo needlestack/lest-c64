@@ -625,7 +625,7 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
 
-const RELOC = 0x8300;                   // CPU-only tables, out of the VIC's 16K window
+const RELOC = 0x8400;                   // CPU-only tables, out of the VIC's 16K window
 // ---- the orbs ----
 // Seven size variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps:
 // orb5 and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra
@@ -643,6 +643,9 @@ const SPRITES = process.env.SPRITES !== '0';
 const SPRPRI = +(process.env.SPRPRI ?? 1);
 const DBGORB = flag('DBGORB');
 const ORBMIX = process.env.ORBMIX !== '0';
+// ORBSTILL=0 forces a reprojection every frame, so orbMove can be measured on a stationary
+// viewpoint -- which is the only way to benchmark it on a scene with many orbs in view.
+const ORBSTILL = process.env.ORBSTILL !== '0';
 const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
 // ORB4 -- the full-size, unexpanded one -- is the canonical orb, and every other size is
 // resampled from it at build time. The author's other six were a hand-picked ladder with a
@@ -799,8 +802,13 @@ const _pal = [...new Set(ORBBODY)].length === 1
   : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
 console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
   `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}`);
-const orbXL = ORBS.map(o => Math.round(o.x * 256) & 255), orbXH = ORBS.map(o => Math.round(o.x * 256) >> 8);
-const orbYL = ORBS.map(o => Math.round(o.y * 256) & 255), orbYH = ORBS.map(o => Math.round(o.y * 256) >> 8);
+// Every orb is at a cell CENTRE, and orbOne leans on it hard: the offset to an orb is an
+// integer cell difference plus a fraction that is the same for every orb in the frame, so the
+// fractional half of each product becomes a per-frame constant and the per-orb half drops from
+// a 16x8 multiply to an 8x8. If placement ever stops being cell-centred, that has to be undone.
+for (const o of ORBS) if ((o.x % 1) !== 0.5 || (o.y % 1) !== 0.5)
+  throw new Error(`orb at (${o.x},${o.y}) is not cell-centred; orbOne assumes it is`);
+const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
 const orbCol = ORBS.map(o => ORBBODY[o.c]);
 // h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
 // locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
@@ -1143,7 +1151,23 @@ opy     = $cb5e
 opa     = $cb60
 rpOn    = $cb61                  ; ... and the cell rectangle it repointed, to replay
 rpH     = $cb62
-rpRow   = $cb63                  ; DBGORB: candidates that passed the bearing test
+rpRow   = $cb63
+ofx     = $cb64
+ofy     = $cb65
+kxc     = $cb66
+kxs     = $cb67
+kyc     = $cb68
+kys     = $cb69
+kfL     = $cb6a
+kfH     = $cb6b
+krL     = $cb6c
+krH     = $cb6d
+oix     = $cb6e
+oiy     = $cb6f
+oax     = $cb70
+oay     = $cb71
+oixS    = $cb72
+oiyS    = $cb73                  ; DBGORB: candidates that passed the bearing test
 odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -3175,6 +3199,7 @@ orbMove:
         ; spent arriving at last frame's answer. The sprite registers already hold it. All that
         ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
         ; rewrites the screen every frame and puts plain SOLID back.
+${ORBSTILL ? '' : '        jmp obMoved'}
         lda px
         cmp opx
         bne obMoved
@@ -3225,7 +3250,64 @@ oss:    lda #$00
         bpl ocs
         lda #$ff
         sta ocosS
-ocs:    lda #$00                ; the per-sprite bit registers are built up a bit at a time and
+ocs:    ; ---- the half of every product that all orbs share ----
+        ; dx = (orbCell - playerCell) + (0.5 - playerFraction). The right-hand term is the same
+        ; for every orb, so (that * cos) and (that * sin) are frame constants. Folding them into
+        ; one addend per axis pair leaves the per-orb work as four 8x8 multiplies.
+        sec
+        lda #$80                ; 0.5 - playerFraction, signed
+        sbc px
+        sta ofx
+        sec
+        lda #$80
+        sbc py
+        sta ofy
+        lda ofx
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        sta kxc
+        lda ofx
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        sta kxs
+        lda ofy
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        sta kyc
+        lda ofy
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        sta kys
+        clc                     ; forward picks up kxc + kys, right picks up kyc - kxs
+        lda kxc
+        adc kys
+        sta kfL
+        lda kxc
+        and #$80                ; sign-extend the byte sum into 16 bits
+        beq okf1
+        lda #$ff
+okf1:   sta kfH
+        lda kys
+        bpl okf2
+        dec kfH
+okf2:   sec
+        lda kyc
+        sbc kxs
+        sta krL
+        lda kyc
+        and #$80
+        beq okr1
+        lda #$ff
+okr1:   sta krH
+        lda kxs
+        bpl okr2
+        inc krH
+okr2:
+        lda #$00                ; the per-sprite bit registers are built up a bit at a time and
         sta omEn                ; written once, so an unused slot is simply never set
         sta omXX
         sta omYY
@@ -3360,64 +3442,49 @@ osBits: lda omEn
         rts
 
 ; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
-orbOne: lda #$00
-        sta orej
-        ldx oidx
-        sec                     ; dx = orb - player, signed 8.8 cells
-        lda orbXLT,x
-        sbc px
-        sta oaL
-        lda orbXHT,x
+orbOne: ldx oidx
+        sec                     ; Ix, Iy = orb cell - player cell, -15..15
+        lda orbXCT,x
         sbc px+1
-        sta oaH
-        jsr oabs
-        lda oaL
-        sta odxL
-        lda oaH
-        sta odxH
-        lda oaS
-        sta odxS
-        ldx oidx
+        sta oix
         sec
-        lda orbYLT,x
-        sbc py
-        sta oaL
-        lda orbYHT,x
+        lda orbYCT,x
         sbc py+1
-        sta oaH
-        jsr oabs
-        lda oaL
-        sta odyL
-        lda oaH
-        sta odyH
-        lda oaS
-        sta odyS
-        lda odxL                ; forward = dx*cos + dy*sin
-        sta oaL
-        lda odxH
-        sta oaH
-        lda odxS
-        sta oaS
-        lda ocos
-        sta obm
-        lda ocosS
-        sta obs
-        jsr orot
+        sta oiy
+        ldy #$00                ; magnitudes and signs, so the products can be unsigned
+        lda oix
+        bpl oipx
+        eor #$ff
+        clc
+        adc #$01
+        ldy #$ff
+oipx:   sta oax
+        sty oixS
+        ldy #$00
+        lda oiy
+        bpl oipy
+        eor #$ff
+        clc
+        adc #$01
+        ldy #$ff
+oipy:   sta oay
+        sty oiyS
+        ; forward = Ix*cos + Iy*sin + kf
+        lda oax
+        ldx ocos
+        lda oixS
+        eor ocosS
+        ldy oax
+        jsr oTerm
         lda orL
         sta fwdL
         lda orH
         sta fwdH
-        lda odyL
-        sta oaL
-        lda odyH
-        sta oaH
-        lda odyS
-        sta oaS
-        lda osin
-        sta obm
-        lda osinS
-        sta obs
-        jsr orot
+        lda oiyS
+        eor osinS
+        ldx osin
+        ldy oay
+        jsr oTerm
         clc
         lda fwdL
         adc orL
@@ -3425,39 +3492,34 @@ orbOne: lda #$00
         lda fwdH
         adc orH
         sta fwdH
+        clc
+        lda fwdL
+        adc kfL
+        sta fwdL
+        lda fwdH
+        adc kfH
+        sta fwdH
         lda fwdH                ; behind the camera, or close enough to be inside us. Tested
-        bmi orbNo               ; HERE, before "right" costs another two products: at any given
+        bmi orbNo               ; HERE, before "right" costs two more products: at any given
         bne ofwOk               ; moment most of the world is behind you
         lda fwdL
         cmp #$40
         bcc orbNo
-ofwOk:  inc orej
-        lda odyL                ; right = dy*cos - dx*sin
-        sta oaL
-        lda odyH
-        sta oaH
-        lda odyS
-        sta oaS
-        lda ocos
-        sta obm
-        lda ocosS
-        sta obs
-        jsr orot
+ofwOk:  ; right = Iy*cos - Ix*sin + kr
+        lda oiyS
+        eor ocosS
+        ldx ocos
+        ldy oay
+        jsr oTerm
         lda orL
         sta rgtL
         lda orH
         sta rgtH
-        lda odxL
-        sta oaL
-        lda odxH
-        sta oaH
-        lda odxS
-        sta oaS
-        lda osin
-        sta obm
-        lda osinS
-        sta obs
-        jsr orot
+        lda oixS
+        eor osinS
+        ldx osin
+        ldy oax
+        jsr oTerm
         sec
         lda rgtL
         sbc orL
@@ -3465,7 +3527,13 @@ ofwOk:  inc orej
         lda rgtH
         sbc orH
         sta rgtH
-        inc orej
+        clc
+        lda rgtL
+        adc krL
+        sta rgtL
+        lda rgtH
+        adc krH
+        sta rgtH
         ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
         ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
         ; of forward costs under 0.4% -- less than half a column at the screen edge.
@@ -3680,15 +3748,33 @@ opL2:   tax
         sta ocspan
         lda #$00
         sta ocnear
+        ; Step four columns at a time. This only has to answer "is anything under the sprite
+        ; nearer than the orb", and a wall narrow enough to hide between two samples is one
+        ; logical cell wide -- narrower than the smallest orb. The widest orb spans 25 columns,
+        ; so this is 7 iterations rather than 25.
 opScan: lda colH,x
         cmp ohgt
         bcc opNx
         beq opNx
         inc ocnear
 opNx:   inx
+        inx
+        inx
+        inx
         cpx ocmax
         bcc opScan
-        beq opScan
+        lda colH,x              ; and the right edge itself, which the stride can overshoot
+        cmp ohgt
+        bcc opSDn
+        beq opSDn
+        inc ocnear
+opSDn:  lda ocspan
+        lsr
+        lsr
+        sta ocspan              ; ocnear is now counted in samples, so ocspan must be too
+        bne opSD2
+        inc ocspan
+opSD2:
         ; --- take a sprite slot ---
         ldx onv
         lda orbBitT,x
@@ -3809,6 +3895,57 @@ omNx:   iny
         rts
 orbYes: rts
 orbNo:  rts
+; oTerm: (Y * X) as a 16-bit product in orL/orH, negated if A is negative. Y is a cell
+; difference magnitude (0..15) and X a trig magnitude, so this is a plain 8x8 -- the 16x8 the
+; old orot did was only ever needed because the orb offset carried a fraction, and that
+; fraction is now a per-frame constant instead.
+oTerm:  stx mq
+        sta tmp2
+        tya
+        jsr mul8
+        lda tmp2
+        bpl otD
+        sec
+        lda #$00
+        sbc plo
+        sta orL
+        lda #$00
+        sbc phi
+        sta orH
+        rts
+otD:    lda plo
+        sta orL
+        lda phi
+        sta orH
+        rts
+
+; oFrac: (signed A * unsigned X) >> 8, negated if Y is $ff. A is 0.5 minus the player's
+; fractional position, so the result is the shared fractional term of one product -- and it
+; always fits a signed byte, since |A| <= 128 and X <= 255.
+oFrac:  stx mq
+        sta tmp
+        bpl ofP
+        eor #$ff
+        clc
+        adc #$01
+        tya
+        eor #$ff
+        tay                     ; A was negative: flip the sign we were handed
+        lda tmp
+        eor #$ff
+        clc
+        adc #$01
+ofP:    sty tmp2
+        jsr mul8
+        lda tmp2
+        bpl ofD
+        sec
+        lda #$00
+        sbc phi
+        rts
+ofD:    lda phi
+        rts
+
 ; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
 oabs:   lda #$00
         sta oaS
@@ -3911,10 +4048,8 @@ orbColT: !byte ${orbColT.join(',')}
 orbSpHT: !byte ${orbSpHT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
         * = ${hx16(RELOC + 0x1500)}
-orbXLT: !byte ${orbXL.join(',')}
-orbXHT: !byte ${orbXH.join(',')}
-orbYLT: !byte ${orbYL.join(',')}
-orbYHT: !byte ${orbYH.join(',')}
+orbXCT: !byte ${orbXC.join(',')}
+orbYCT: !byte ${orbYC.join(',')}
 orbColT2: !byte ${orbCol.join(',')}
         * = ${hx16(RELOC + 0x1600)}
 candCntT: !byte ${candCnt.join(',')}
