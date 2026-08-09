@@ -576,7 +576,10 @@ const hexArg = (n, dflt, mask) => {
 };
 
 const MEASURE = flag('MEASURE');
-const SPIN = flag('SPIN');     // auto-rotate, ignore input
+const SPIN = flag('SPIN');
+// Viewpoints a SPIN benchmark cycles through, one per full rotation: the start corridor, the
+// busiest cell on the map (12 orb candidates), and two rooms away from both.
+const SPINPOS = [[1.5, 1.5], [8.5, 4.5], [12.5, 9.5], [9.5, 12.5]];     // auto-rotate, ignore input
 const NORAY = flag('NORAY');   // skip marching/subdivision
 const NOFILL = flag('NOFILL'); // skip renderSym (fill)
 // DUMPH: print colH as hex over the top 8 rows, so the interpolated heights can be read
@@ -1307,7 +1310,7 @@ pfInit: sta pfAcc,x
 
 mloop:
 ${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}        jsr tickDelta
-        ${SPIN ? 'inc pa' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
+        ${SPIN ? 'jsr spinStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${PROFILE && !PROFILE1 ? '        ldx #0\n        jsr pfTick              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
@@ -1855,7 +1858,31 @@ dhJ:    lda colH,x
         rts
 ` : ''}
 ; ================= ESDF keyboard =================
-; ---- tickDelta: how much time has passed, in 60ths ----
+${SPIN ? `; ---- spinStep: rotate one unit a frame, and hop between viewpoints ----
+; pa doubles as the frame counter for fps.sh, so the rotation has to stay exactly one unit a
+; frame. Every full rotation the player is teleported to the next preset, so a benchmark run
+; averages over several parts of the map instead of measuring one spot forever. The hop is
+; frame-locked, not time-locked, so two builds at different frame rates still visit the same
+; places in the same order and stay comparable.
+spinStep:
+        inc pa
+        bne ssDn
+        ldx spinIx
+        inx
+        cpx #${SPINPOS.length}
+        bcc ssIx
+        ldx #$00
+ssIx:   stx spinIx
+        lda spinXL,x
+        sta px
+        lda spinXH,x
+        sta px+1
+        lda spinYL,x
+        sta py
+        lda spinYH,x
+        sta py+1
+ssDn:   rts
+` : ''}; ---- tickDelta: how much time has passed, in 60ths ----
 ; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
 ; down an empty corridor, slowest where the geometry is dense, which is exactly backwards.
 ; frameCnt is bumped by the top-of-frame raster IRQ, so it counts 60ths of a second no matter
@@ -4022,6 +4049,11 @@ posYT:  ${chunk(posY).trim()}
 rayOffT: !byte ${rayOff.join(',')}
         * = ${hx16(RELOC + 0x1200)}
 colGrpT: !byte ${colGrpT.join(',')}
+${SPIN ? `spinIx: !byte 0
+spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
+spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
+spinYL: !byte ${SPINPOS.map(p => Math.round(p[1]*256) & 255).join(',')}
+spinYH: !byte ${SPINPOS.map(p => Math.round(p[1]*256) >> 8).join(',')}` : ''}
 ${SPRITES ? `        * = ${hx16(RELOC + 0x1300)}
 orbVarT: !byte ${orbVarT.join(',')}
         * = ${hx16(RELOC + 0x1400)}
