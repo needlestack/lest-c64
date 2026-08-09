@@ -113,11 +113,12 @@ console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by 
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
 // Movement is per 60Hz TICK, not per frame -- see readKeys. MOVE_STEP is the table's
 // precision, not the speed: the step is scaled by elapsed ticks and then shifted down by
-// MOVE_SHIFT, so the effective rate is MOVE_STEP >> MOVE_SHIFT = 4 units of 1/256 cell per
-// tick -- half what it was, to widen the gap between walking and running. Keeping the table at
-// 64 rather than 4 is what stops the direction quantising: cos(a)*4 rounds to five levels and
-// you walk visibly off-axis; the precision is only thrown away at the end.
-const MOVE_STEP = 64, MOVE_SHIFT = 4;
+// MOVE_SHIFT, so the effective rate is 68 >> 4 = 4.25 units of 1/256 cell per tick, which is
+// 0.996 cells a second. Keeping the table at 68 rather than 4 is what stops the direction
+// quantising: cos(a)*4 rounds to five levels and you walk visibly off-axis. The precision is
+// thrown away at the end, by the shift, and 68 is also the most the table can hold -- the
+// entries are signed bytes, so anything past 127 wraps.
+const MOVE_STEP = 68, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
@@ -593,7 +594,11 @@ const PY = hexArg('PY', 0x0180, 0xffff);
 // steps, so this is also the angular resolution of the view -- rayOff/cosCorr are indexed
 // by the same byte, so turning cannot be made smooth by shrinking this, only coarser by
 // growing it. 6/256 = 8.4 degrees per frame.
-const TURN_STEP = 1;                    // angle units per tick; ~3 a frame at 20 fps
+// Turning is accumulated in 1/256ths of an angle unit, because 60 deg/s is 0.711 units per
+// tick -- less than one. pa is the high byte of a 16-bit angle and paF the low, so the
+// fraction carries between frames instead of being lost. 182/256 * 60 ticks = 42.7 units a
+// second = exactly 60 degrees.
+const TURN_RATE = 182;
 // Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 4 units of 1/256
 // cell per tick, 32 ticks is half a cell against walls a whole cell thick, and the collision
 // box catches anything that lands inside one. It has to clear the 4x run multiplier too, or
@@ -908,6 +913,7 @@ r1      = $1d
 crc     = $1e
 tmp     = $1f
 baseHi  = $22
+paF     = $cb5b                  ; low byte of the 16-bit player angle; pa is the high
 dtv     = $cb50
 dtm     = $cb59                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $cb5a
@@ -1848,24 +1854,24 @@ readKeys:
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        ; LEFT SHIFT: run. Movement and turning get their own multipliers -- 4x and 3x -- so
-        ; running does not spin the world as fast as it moves it. Scaling elapsed TIME rather
-        ; than the step keeps each one frame-rate independent for free.
-        lda dtv
-        asl
-        asl
-        cmp #${DT_MAX}
-        bcc rkShM
-        lda #${DT_MAX}
-rkShM:  sta dtm                 ; 4x movement
+        ; LEFT SHIFT: run. 3 cells/s and 120 deg/s, against 1 and 60 walking -- movement and
+        ; turning get their own multipliers so running does not spin the world faster than it
+        ; moves through it. Scaling elapsed TIME rather than the step keeps both frame-rate
+        ; independent for free.
         lda dtv
         asl
         clc
-        adc dtv                 ; 3x turning
-        bcs rkShTc
+        adc dtv                 ; 3x movement
+        bcs rkShMc
+        cmp #${DT_MAX}
+        bcc rkShM
+rkShMc: lda #${DT_MAX}
+rkShM:  sta dtm
+        lda dtv
+        asl                     ; 2x turning
         cmp #${DT_MAX}
         bcc rkShT
-rkShTc: lda #${DT_MAX}
+        lda #${DT_MAX}
 rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40
@@ -1897,22 +1903,30 @@ rkNotF: lda joyv
         and #$04
         bne rkJR                ; joystick-1 left = turn left
         ldx dtt
-        lda pa
+        ldy pa
+        lda paF
 rkTlL:  sec
-        sbc #${hx(TURN_STEP)}
-        dex
+        sbc #${hx(TURN_RATE)}
+        bcs rkTlL2
+        dey                     ; the fraction borrowed: step the angle byte
+rkTlL2: dex
         bne rkTlL
-        sta pa
+        sta paF
+        sty pa
 rkJR:   lda joyv
         and #$08
         bne rkJD                ; joystick-1 right = turn right
         ldx dtt
-        lda pa
+        ldy pa
+        lda paF
 rkTlR:  clc
-        adc #${hx(TURN_STEP)}
-        dex
+        adc #${hx(TURN_RATE)}
+        bcc rkTlR2
+        iny                     ; the fraction carried: step the angle byte
+rkTlR2: dex
         bne rkTlR
-        sta pa
+        sta paF
+        sty pa
 rkJD:   rts
 
 moveFwd:
