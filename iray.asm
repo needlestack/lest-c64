@@ -1114,7 +1114,7 @@ maLp:   clc
         sta dysH
         dex
         bne maLp
-        ldx #3      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
+        ldx #4      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
 maSh:   lda dxsH
         cmp #$80
         ror dxsH

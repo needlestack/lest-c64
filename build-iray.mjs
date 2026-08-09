@@ -113,11 +113,11 @@ console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by 
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
 // Movement is per 60Hz TICK, not per frame -- see readKeys. MOVE_STEP is the table's
 // precision, not the speed: the step is scaled by elapsed ticks and then shifted down by
-// MOVE_SHIFT, so the effective rate is MOVE_STEP >> MOVE_SHIFT = 8 units of 1/256 cell per
-// tick, which is what 24-per-frame used to come to at 20 fps. Keeping the table at 64 rather
-// than 8 is what stops the direction quantising: cos(a)*8 rounds to nine levels and you walk
-// visibly off-axis.
-const MOVE_STEP = 64, MOVE_SHIFT = 3;
+// MOVE_SHIFT, so the effective rate is MOVE_STEP >> MOVE_SHIFT = 4 units of 1/256 cell per
+// tick -- half what it was, to widen the gap between walking and running. Keeping the table at
+// 64 rather than 4 is what stops the direction quantising: cos(a)*4 rounds to five levels and
+// you walk visibly off-axis; the precision is only thrown away at the end.
+const MOVE_STEP = 64, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
