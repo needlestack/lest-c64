@@ -1084,6 +1084,10 @@ stackRT = $c080
 sideT   = $c100
 idT     = $c200
 colH    = $c300
+cwA     = $c500                 ; per cell-column: the ceiling run length this buffer holds
+cwB     = $c528
+cbA     = $c550                 ; ... and the solid run start, or $ff for "always redraw"
+cbB     = $c578
 faceIdT = $c400
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
@@ -1225,6 +1229,11 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
+        ldx #$00                ; no run cached for either buffer yet. NOT in the sprite
+        lda #$ff                ; setup: SPRITES=0 builds render too, and an uninitialised
+rfCz:   sta cwA,x               ; cache byte that happens to match rb or rs leaves a column
+        inx                     ; never drawn at all
+        bne rfCz
         lda #$08                ; bit3 = per-cell multicolor enable. The low three bits are
                                 ; the bit-pair-11 colour, and nothing emits 11 any more --
                                 ; shape comes from 00/01 and seams from 10 -- so this is
@@ -1625,6 +1634,26 @@ renderSym:
         bne rfBufS              ; always
 rfBufA: lda #$00
 rfBufS: sta bufOff
+        ; ---- which buffer's run cache? ----
+        ; The chains repaint rows this buffer already holds whenever the run lengths have not
+        ; changed since it was last drawn, two frames ago. Each buffer needs its OWN cache --
+        ; sharing one makes each skip writes based on what the other holds, which shows up as
+        ; the view flickering on every bank switch. All four tables sit in one page, so
+        ; choosing between them is four operand bytes patched here rather than an index
+        ; computed per column.
+        lda baseHi
+        cmp #${hx(SCR_A >> 8)}
+        bne rfCbB
+        lda #<cwA
+        ldy #<cbA
+        jmp rfCbS               ; not bne: cwA is page-aligned, so A is zero here
+rfCbB:  lda #<cwB
+        ldy #<cbB
+rfCbS:  sta rfCw1+1
+        sta rfCw2+1
+        sty rfCb1+1
+        sty rfCb2+1
+${SEAMS ? '        sty rfCb3+1\n' : ''}
         ldx #39                 ; X = cell column throughout; the chains use it as their index
         ; The cell's min and max heights, computed HERE rather than in a pass of their own.
         ; prepCells walked these same 40 cell columns to write cmnT/cmxT for renderSym to read
@@ -1669,6 +1698,10 @@ pmB3:   ldy tmp2
 rfRs:   sta rsv
         ; ---- ceiling run: rows 0 .. rb-1 ----
         lda rbv
+rfCw1:  cmp cwA,x               ; operand patched above
+        beq rfEdge              ; same length as this buffer already holds: leave it alone
+rfCw2:  sta cwA,x
+        cmp #$00
         beq rfEdge
         clc
         adc bufOff
@@ -1794,7 +1827,17 @@ rfStore:sta ecode
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
-rfSolid:lda rsv
+rfSolid:${SEAMS ? `lda seamT,x
+        cmp #${hx(SOLID)}
+        bne rfSlSm              ; a seam here: its variant can change without rs moving, so
+        ` : ''}lda rsv           ; this column is never cached
+rfCb1:  cmp cbA,x
+        beq rfNext
+rfCb2:  sta cbA,x
+        jmp rfSlDr
+${SEAMS ? `rfSlSm: lda #$ff
+rfCb3:  sta cbA,x               ; a value rs can never take, so next frame redraws too
+` : ''}rfSlDr: lda rsv
         cmp #13
         bcs rfNext
         clc
@@ -3904,6 +3947,17 @@ omNx:   iny
         cmp ocrw2
         bcc omRow
         beq omRow
+        ; These cells now hold SOLID's twin, not what the chain would write, so the run cache
+        ; must not let the chain be skipped over them next frame. Both buffers, since which
+        ; one is in hand here is not worth working out for two stores.
+        ldx ocl
+        lda #$ff
+omInv:  sta cbA,x
+        sta cbB,x
+        inx
+        cpx ocr
+        bcc omInv
+        beq omInv
         rts
 orbYes: rts
 orbNo:  rts
