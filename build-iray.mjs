@@ -1082,8 +1082,6 @@ sideT   = $c100
 idT     = $c200
 colH    = $c300
 faceIdT = $c400
-cmnT    = $c600                 ; per cell-column (40): min of its 4 capped heights
-cmxT    = $c640                 ; per cell-column (40): max
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
@@ -1518,8 +1516,7 @@ subBnd: ldx nbnd                ; remember a column where a new face/saturation 
 subBDn: rts
 
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams\n' : ''}${NOFILL ? '' : '        jsr prepCells'}
-${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; prepCells\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; prepCells\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
         jsr drawDbg
 ${SPRITES ? '        jsr orbMove             ; needs colH, so after the render\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -1570,77 +1567,35 @@ ${SPRITES ? '        jsr osFlush             ; sprite registers, now that the be
 ; inside that loop would cost 4 loads per cell, so it is hoisted here: 40 iterations
 ; instead of 520. Also caps the height at 100 -- colH is deliberately left UNCAPPED by the
 ; interpolator so merged spans stay linear, but (h + K) must fit a signed byte downstream.
-prepCells:
-        lda #$00
-        sta cellc
-        sta zpc                 ; zpc = 4*cellc, the logical column
-        ; Four columns, unrolled. The rolled version spent dey/bne and an inx on each of
-        ; 160 iterations to walk four adjacent bytes -- 26 cycles a cell column, ~1000 a
-        ; frame, to index something the addressing mode can reach with a constant offset.
-        ;
-        ; No capping here any more. This used to write a capped copy of all 160 heights into
-        ; capH so the edge path could read two of them; the edge path reads ~39 a frame, so
-        ; 160 caps and 160 stores were being done to serve 39 reads. rbT and rsT are 256-entry
-        ; tables that already fold every value >= 93 / >= 100 to the same answer, so the
-        ; min/max below never needed capped input either. The two reads cap themselves now.
-pcLp:   ldx zpc
-${NOMINMAX ? `        lda colH+0,x
-        sta tmp
-        sta tmp2
-        jmp pcNmx3
-` : ''}        lda #$ff
-        sta tmp                 ; running min
-        lda #$00
-        sta tmp2                ; running max
-        lda colH+0,x
-        cmp tmp
-        bcs pcNmn0
-        sta tmp
-pcNmn0: cmp tmp2
-        bcc pcNmx0
-        sta tmp2
-pcNmx0:
-        lda colH+1,x
-        cmp tmp
-        bcs pcNmn1
-        sta tmp
-pcNmn1: cmp tmp2
-        bcc pcNmx1
-        sta tmp2
-pcNmx1:
-        lda colH+2,x
-        cmp tmp
-        bcs pcNmn2
-        sta tmp
-pcNmn2: cmp tmp2
-        bcc pcNmx2
-        sta tmp2
-pcNmx2:
-        lda colH+3,x
-        cmp tmp
-        bcs pcNmn3
-        sta tmp
-pcNmn3: cmp tmp2
-        bcc pcNmx3
-        sta tmp2
-pcNmx3:
-        ldx cellc
-        lda tmp
-        sta cmnT,x
-        lda tmp2
-        sta cmxT,x
-        ; cstepT (face-boundary column inside this cell, 0 = one face) used to be derived
-        ; here by comparing the four faceIdT entries of every cell -- 1920 cycles a frame to
-        ; rediscover ~2 transitions. The subdivision already knows exactly where they are
-        ; and writes them itself now (see subFace), so there is nothing to do per cell.
-        lda zpc
+; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
+mul8:   sta mp
         clc
-        adc #$04
-        sta zpc
-        inc cellc
-        lda cellc
-        cmp #40
-        bcc pcLp
+        adc mq
+        tax
+        bcc m8l0
+        lda f1LoT,x
+        sta plo
+        lda f1HiT,x
+        sta phi
+        jmp m8l1
+m8l0:   lda f0LoT,x
+        sta plo
+        lda f0HiT,x
+        sta phi
+m8l1:   lda mp
+        sec
+        sbc mq
+        bcs m8l2
+        eor #$ff
+        adc #$01
+m8l2:   tax
+        sec
+        lda plo
+        sbc f0LoT,x
+        sta plo
+        lda phi
+        sbc f0HiT,x
+        sta phi
         rts
 
 ; ================= render: 4x8 multicolor cells + vertical symmetry =================
@@ -1668,11 +1623,42 @@ renderSym:
 rfBufA: lda #$00
 rfBufS: sta bufOff
         ldx #39                 ; X = cell column throughout; the chains use it as their index
+        ; The cell's min and max heights, computed HERE rather than in a pass of their own.
+        ; prepCells walked these same 40 cell columns to write cmnT/cmxT for renderSym to read
+        ; back one loop later -- 40 iterations of loop overhead and a store-then-load round
+        ; trip to move two bytes between two routines that visit the cells in the same order.
+        ; X is the cell column and the chains index by it, so it has to survive; Y and A are
+        ; free here, which is all this needs.
 rfCol:  stx colc
-        ldy cmxT,x
+        ldy col4T,x             ; first logical column of this cell; colH is page-aligned, so
+        lda colH,y              ; the +1/+2/+3 forms cannot cross a page
+        sta tmp                 ; running min
+        sta tmp2                ; running max
+        lda colH+1,y
+        cmp tmp
+        bcs pmA1
+        sta tmp
+pmA1:   cmp tmp2
+        bcc pmB1
+        sta tmp2
+pmB1:   lda colH+2,y
+        cmp tmp
+        bcs pmA2
+        sta tmp
+pmA2:   cmp tmp2
+        bcc pmB2
+        sta tmp2
+pmB2:   lda colH+3,y
+        cmp tmp
+        bcs pmA3
+        sta tmp
+pmA3:   cmp tmp2
+        bcc pmB3
+        sta tmp2
+pmB3:   ldy tmp2
         lda rbT,y
         sta rbv
-        ldy cmnT,x
+        ldy tmp
         lda rsT,y
         cmp rbv
         bcs rfRs
@@ -3179,36 +3165,6 @@ chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
 ${PROFILE ? '' : ''}${SPRITES ? `
-; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
-mul8:   sta mp
-        clc
-        adc mq
-        tax
-        bcc m8l0
-        lda f1LoT,x
-        sta plo
-        lda f1HiT,x
-        sta phi
-        jmp m8l1
-m8l0:   lda f0LoT,x
-        sta plo
-        lda f0HiT,x
-        sta phi
-m8l1:   lda mp
-        sec
-        sbc mq
-        bcs m8l2
-        eor #$ff
-        adc #$01
-m8l2:   tax
-        sec
-        lda plo
-        sbc f0LoT,x
-        sta plo
-        lda phi
-        sbc f0HiT,x
-        sta phi
-        rts
 
 ; ---- orbMove: place every visible orb ----
 ; Once a frame. Written for clarity over cycles and keeping its working set in absolute RAM
