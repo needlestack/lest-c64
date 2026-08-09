@@ -594,7 +594,11 @@ const PY = hexArg('PY', 0x0180, 0xffff);
 // by the same byte, so turning cannot be made smooth by shrinking this, only coarser by
 // growing it. 6/256 = 8.4 degrees per frame.
 const TURN_STEP = 1;                    // angle units per tick; ~3 a frame at 20 fps
-const DT_MAX = 16;                      // ticks: a hitch must not step far enough to tunnel
+// Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 4 units of 1/256
+// cell per tick, 32 ticks is half a cell against walls a whole cell thick, and the collision
+// box catches anything that lands inside one. It has to clear the 4x run multiplier too, or
+// running would silently stop scaling with frame rate below about 15 fps.
+const DT_MAX = 32;
 // Panel seams are a look, not a diagnostic: SEAMS=0 compiles every trace of them out --
 // the charset entries, the projection pass and the per-cell table -- so the disabled build
 // costs exactly what it did before the feature existed.
@@ -1844,22 +1848,24 @@ readKeys:
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        ; LEFT SHIFT: run. Movement and turning get their own multipliers -- 2x and 1.5x --
-        ; because doubling both made the world spin faster than it moved. Scaling elapsed TIME
-        ; rather than the step keeps each one frame-rate independent for free.
+        ; LEFT SHIFT: run. Movement and turning get their own multipliers -- 4x and 3x -- so
+        ; running does not spin the world as fast as it moves it. Scaling elapsed TIME rather
+        ; than the step keeps each one frame-rate independent for free.
         lda dtv
+        asl
         asl
         cmp #${DT_MAX}
         bcc rkShM
         lda #${DT_MAX}
-rkShM:  sta dtm                 ; 2x movement
+rkShM:  sta dtm                 ; 4x movement
         lda dtv
-        lsr
+        asl
         clc
-        adc dtv                 ; 1.5x turning
+        adc dtv                 ; 3x turning
+        bcs rkShTc
         cmp #${DT_MAX}
         bcc rkShT
-        lda #${DT_MAX}
+rkShTc: lda #${DT_MAX}
 rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40

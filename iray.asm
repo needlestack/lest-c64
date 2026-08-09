@@ -963,9 +963,9 @@ tickDelta:
         bne tdCl
         inc dtv                 ; two renders inside one tick: still move a little
 tdCl:   lda dtv
-        cmp #16
+        cmp #32
         bcc tdDn
-        lda #16          ; a hitch must not step far enough to tunnel a wall
+        lda #32          ; a hitch must not step far enough to tunnel a wall
         sta dtv
 tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
         sta dtm
@@ -989,22 +989,24 @@ readKeys:
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        ; LEFT SHIFT: run. Movement and turning get their own multipliers -- 2x and 1.5x --
-        ; because doubling both made the world spin faster than it moved. Scaling elapsed TIME
-        ; rather than the step keeps each one frame-rate independent for free.
+        ; LEFT SHIFT: run. Movement and turning get their own multipliers -- 4x and 3x -- so
+        ; running does not spin the world as fast as it moves it. Scaling elapsed TIME rather
+        ; than the step keeps each one frame-rate independent for free.
         lda dtv
         asl
-        cmp #16
+        asl
+        cmp #32
         bcc rkShM
-        lda #16
-rkShM:  sta dtm                 ; 2x movement
+        lda #32
+rkShM:  sta dtm                 ; 4x movement
         lda dtv
-        lsr
+        asl
         clc
-        adc dtv                 ; 1.5x turning
-        cmp #16
+        adc dtv                 ; 3x turning
+        bcs rkShTc
+        cmp #32
         bcc rkShT
-        lda #16
+rkShTc: lda #32
 rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40
