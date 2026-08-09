@@ -111,7 +111,13 @@ console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by 
 // Per-frame step, in 1/256ths of a map cell (px/py are 8.8 fixed point). Must stay well
 // under 256: moveApply only collision-tests the DESTINATION cell, so a step approaching a
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
-const MOVE_STEP = 36;                   // was 24; 1.5x
+// Movement is per 60Hz TICK, not per frame -- see readKeys. MOVE_STEP is the table's
+// precision, not the speed: the step is scaled by elapsed ticks and then shifted down by
+// MOVE_SHIFT, so the effective rate is MOVE_STEP >> MOVE_SHIFT = 8 units of 1/256 cell per
+// tick, which is what 24-per-frame used to come to at 20 fps. Keeping the table at 64 rather
+// than 8 is what stops the direction quantising: cos(a)*8 rounds to nine levels and you walk
+// visibly off-axis.
+const MOVE_STEP = 64, MOVE_SHIFT = 3;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
@@ -587,7 +593,8 @@ const PY = hexArg('PY', 0x0180, 0xffff);
 // steps, so this is also the angular resolution of the view -- rayOff/cosCorr are indexed
 // by the same byte, so turning cannot be made smooth by shrinking this, only coarser by
 // growing it. 6/256 = 8.4 degrees per frame.
-const TURN_STEP = 6;                    // was 3; 2x
+const TURN_STEP = 1;                    // angle units per tick; ~3 a frame at 20 fps
+const DT_MAX = 16;                      // ticks: a hitch must not step far enough to tunnel
 // Panel seams are a look, not a diagnostic: SEAMS=0 compiles every trace of them out --
 // the charset entries, the projection pass and the per-cell table -- so the disabled build
 // costs exactly what it did before the feature existed.
@@ -897,6 +904,15 @@ r1      = $1d
 crc     = $1e
 tmp     = $1f
 baseHi  = $22
+dtv     = $cb50
+lastMv  = $cb51
+dxs     = $cb52
+dxsH    = $cb53
+dys     = $cb54
+dysH    = $cb55
+dxSgn   = $cb56
+dySgn   = $cb57
+rowv    = $cb58                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
 nxL     = $25
@@ -1229,7 +1245,8 @@ pfInit: sta pfAcc,x
         cli
 
 mloop:
-${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}        ${SPIN ? 'inc pa' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
+${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}        jsr tickDelta
+        ${SPIN ? 'inc pa' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${PROFILE && !PROFILE1 ? '        ldx #0\n        jsr pfTick              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
@@ -1782,6 +1799,29 @@ dhJ:    lda colH,x
         rts
 ` : ''}
 ; ================= ESDF keyboard =================
+; ---- tickDelta: how much time has passed, in 60ths ----
+; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
+; down an empty corridor, slowest where the geometry is dense, which is exactly backwards.
+; frameCnt is bumped by the top-of-frame raster IRQ, so it counts 60ths of a second no matter
+; how long the render took. Called from the main loop rather than from readKeys, so the WALK
+; and STRAFE diagnostic builds move at the same speed a player does.
+tickDelta:
+        lda frameCnt
+        sec
+        sbc lastMv
+        sta dtv
+        lda frameCnt
+        sta lastMv
+        lda dtv
+        bne tdCl
+        inc dtv                 ; two renders inside one tick: still move a little
+tdCl:   lda dtv
+        cmp #${DT_MAX}
+        bcc tdDn
+        lda #${DT_MAX}          ; a hitch must not step far enough to tunnel a wall
+        sta dtv
+tdDn:   rts
+
 readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
@@ -1796,14 +1836,23 @@ readKeys:
         sta $dc00
         lda $dc01
         ora joyEor
+        sta rowv                ; SHIFT, E and S all live in this row -- read it once
+        and #$80
+        bne rkNoSh
+        asl dtv                 ; LEFT SHIFT: run. Doubling elapsed time doubles the step AND
+        lda dtv                 ; the turn rate together, with nothing else to keep in step
+        cmp #${DT_MAX}
+        bcc rkNoSh
+        lda #${DT_MAX}
+        sta dtv
+rkNoSh: lda rowv
         and #$40
         beq rkFwd               ; E held
         lda joyv
         and #$01
         bne rkNotE              ; joystick-1 up also moves forward
 rkFwd:  jsr moveFwd
-rkNotE: lda $dc01
-        ora joyEor
+rkNotE: lda rowv
         and #$20
         bne rkNotS
         jsr strafeL
@@ -1825,16 +1874,22 @@ rkNotD: lda $dc01
 rkNotF: lda joyv
         and #$04
         bne rkJR                ; joystick-1 left = turn left
+        ldx dtv
         lda pa
-        sec
+rkTlL:  sec
         sbc #${hx(TURN_STEP)}
+        dex
+        bne rkTlL
         sta pa
 rkJR:   lda joyv
         and #$08
         bne rkJD                ; joystick-1 right = turn right
+        ldx dtv
         lda pa
-        clc
+rkTlR:  clc
         adc #${hx(TURN_STEP)}
+        dex
+        bne rkTlR
         sta pa
 rkJD:   rts
 
@@ -1878,6 +1933,53 @@ strafeR:
         lda moveYT,x
         sta dyv
 moveApply:
+        ; Scale the step by elapsed ticks: dxs = dxv * dtv >> MOVE_SHIFT, sign extended to 16
+        ; bits. dtv is single digits, so repeated addition beats setting up a multiply, and
+        ; doing the shift AFTER is what keeps the direction accurate -- the table is deliberately
+        ; 8x coarser than the speed so cos(a) has somewhere to live.
+        ldy #$00
+        lda dxv
+        bpl maSx
+        ldy #$ff
+maSx:   sty dxSgn
+        ldy #$00
+        lda dyv
+        bpl maSy
+        ldy #$ff
+maSy:   sty dySgn
+        lda #$00
+        sta dxs
+        sta dxsH
+        sta dys
+        sta dysH
+        ldx dtv
+maLp:   clc
+        lda dxs
+        adc dxv
+        sta dxs
+        lda dxsH
+        adc dxSgn
+        sta dxsH
+        clc
+        lda dys
+        adc dyv
+        sta dys
+        lda dysH
+        adc dySgn
+        sta dysH
+        dex
+        bne maLp
+        ldx #${MOVE_SHIFT}      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
+maSh:   lda dxsH
+        cmp #$80
+        ror dxsH
+        ror dxs
+        lda dysH
+        cmp #$80
+        ror dysH
+        ror dys
+        dex
+        bne maSh
         jsr mvCalcX
         jsr mvCalcY
         jsr mvFree
@@ -1942,40 +2044,20 @@ mvTryY: jsr mvCalcY             ; Y component alone: hold X where it already is
         sta nxH
         jmp mvFree
 
-mvCalcX:lda dxv                 ; nx = px + dxv, sign-extended into the high byte
-        bpl mvxp
-        clc
+mvCalcX:clc                     ; nx = px + dxs, already a proper signed 16-bit step
         lda px
-        adc dxv
+        adc dxs
         sta nxL
         lda px+1
-        adc #$ff
+        adc dxsH
         sta nxH
         rts
-mvxp:   clc
-        lda px
-        adc dxv
-        sta nxL
-        lda px+1
-        adc #$00
-        sta nxH
-        rts
-mvCalcY:lda dyv
-        bpl mvyp
-        clc
+mvCalcY:clc
         lda py
-        adc dyv
+        adc dys
         sta nyL
         lda py+1
-        adc #$ff
-        sta nyH
-        rts
-mvyp:   clc
-        lda py
-        adc dyv
-        sta nyL
-        lda py+1
-        adc #$00
+        adc dysH
         sta nyH
         rts
 ; mvFree: is the player box at (nx, ny) clear? Returns carry SET if blocked, clear if free,

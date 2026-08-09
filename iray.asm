@@ -23,6 +23,15 @@ r1      = $1d
 crc     = $1e
 tmp     = $1f
 baseHi  = $22
+dtv     = $cb50
+lastMv  = $cb51
+dxs     = $cb52
+dxsH    = $cb53
+dys     = $cb54
+dysH    = $cb55
+dxSgn   = $cb56
+dySgn   = $cb57
+rowv    = $cb58                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
 nxL     = $25
@@ -351,6 +360,7 @@ ccf:    sta $d800,x
         cli
 
 mloop:
+        jsr tickDelta
         jsr readKeys
 
 
@@ -934,6 +944,29 @@ rfNext: ldx colc
 
 
 ; ================= ESDF keyboard =================
+; ---- tickDelta: how much time has passed, in 60ths ----
+; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
+; down an empty corridor, slowest where the geometry is dense, which is exactly backwards.
+; frameCnt is bumped by the top-of-frame raster IRQ, so it counts 60ths of a second no matter
+; how long the render took. Called from the main loop rather than from readKeys, so the WALK
+; and STRAFE diagnostic builds move at the same speed a player does.
+tickDelta:
+        lda frameCnt
+        sec
+        sbc lastMv
+        sta dtv
+        lda frameCnt
+        sta lastMv
+        lda dtv
+        bne tdCl
+        inc dtv                 ; two renders inside one tick: still move a little
+tdCl:   lda dtv
+        cmp #16
+        bcc tdDn
+        lda #16          ; a hitch must not step far enough to tunnel a wall
+        sta dtv
+tdDn:   rts
+
 readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
@@ -948,14 +981,23 @@ readKeys:
         sta $dc00
         lda $dc01
         ora joyEor
+        sta rowv                ; SHIFT, E and S all live in this row -- read it once
+        and #$80
+        bne rkNoSh
+        asl dtv                 ; LEFT SHIFT: run. Doubling elapsed time doubles the step AND
+        lda dtv                 ; the turn rate together, with nothing else to keep in step
+        cmp #16
+        bcc rkNoSh
+        lda #16
+        sta dtv
+rkNoSh: lda rowv
         and #$40
         beq rkFwd               ; E held
         lda joyv
         and #$01
         bne rkNotE              ; joystick-1 up also moves forward
 rkFwd:  jsr moveFwd
-rkNotE: lda $dc01
-        ora joyEor
+rkNotE: lda rowv
         and #$20
         bne rkNotS
         jsr strafeL
@@ -977,16 +1019,22 @@ rkNotD: lda $dc01
 rkNotF: lda joyv
         and #$04
         bne rkJR                ; joystick-1 left = turn left
+        ldx dtv
         lda pa
-        sec
-        sbc #$06
+rkTlL:  sec
+        sbc #$01
+        dex
+        bne rkTlL
         sta pa
 rkJR:   lda joyv
         and #$08
         bne rkJD                ; joystick-1 right = turn right
+        ldx dtv
         lda pa
-        clc
-        adc #$06
+rkTlR:  clc
+        adc #$01
+        dex
+        bne rkTlR
         sta pa
 rkJD:   rts
 
@@ -1030,6 +1078,53 @@ strafeR:
         lda moveYT,x
         sta dyv
 moveApply:
+        ; Scale the step by elapsed ticks: dxs = dxv * dtv >> MOVE_SHIFT, sign extended to 16
+        ; bits. dtv is single digits, so repeated addition beats setting up a multiply, and
+        ; doing the shift AFTER is what keeps the direction accurate -- the table is deliberately
+        ; 8x coarser than the speed so cos(a) has somewhere to live.
+        ldy #$00
+        lda dxv
+        bpl maSx
+        ldy #$ff
+maSx:   sty dxSgn
+        ldy #$00
+        lda dyv
+        bpl maSy
+        ldy #$ff
+maSy:   sty dySgn
+        lda #$00
+        sta dxs
+        sta dxsH
+        sta dys
+        sta dysH
+        ldx dtv
+maLp:   clc
+        lda dxs
+        adc dxv
+        sta dxs
+        lda dxsH
+        adc dxSgn
+        sta dxsH
+        clc
+        lda dys
+        adc dyv
+        sta dys
+        lda dysH
+        adc dySgn
+        sta dysH
+        dex
+        bne maLp
+        ldx #3      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
+maSh:   lda dxsH
+        cmp #$80
+        ror dxsH
+        ror dxs
+        lda dysH
+        cmp #$80
+        ror dysH
+        ror dys
+        dex
+        bne maSh
         jsr mvCalcX
         jsr mvCalcY
         jsr mvFree
@@ -1094,40 +1189,20 @@ mvTryY: jsr mvCalcY             ; Y component alone: hold X where it already is
         sta nxH
         jmp mvFree
 
-mvCalcX:lda dxv                 ; nx = px + dxv, sign-extended into the high byte
-        bpl mvxp
-        clc
+mvCalcX:clc                     ; nx = px + dxs, already a proper signed 16-bit step
         lda px
-        adc dxv
+        adc dxs
         sta nxL
         lda px+1
-        adc #$ff
+        adc dxsH
         sta nxH
         rts
-mvxp:   clc
-        lda px
-        adc dxv
-        sta nxL
-        lda px+1
-        adc #$00
-        sta nxH
-        rts
-mvCalcY:lda dyv
-        bpl mvyp
-        clc
+mvCalcY:clc
         lda py
-        adc dyv
+        adc dys
         sta nyL
         lda py+1
-        adc #$ff
-        sta nyH
-        rts
-mvyp:   clc
-        lda py
-        adc dyv
-        sta nyL
-        lda py+1
-        adc #$00
+        adc dysH
         sta nyH
         rts
 ; mvFree: is the player box at (nx, ny) clear? Returns carry SET if blocked, clear if free,
@@ -2271,28 +2346,28 @@ ddPut:  clc
 
 ; ================= data =================
 cosCorrT: !byte 215,215,216,217,218,219,219,220,221,222,223,223,224,225,226,226,227,228,229,229,230,231,232,232,233,234,235,235,236,237,237,238,239,239,240,241,241,242,242,243,244,244,245,245,246,246,247,247,248,248,249,249,250,250,251,251,251,252,252,252,253,253,253,254,254,254,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,253,253,253,252,252,252,251,251,251,250,250,249,249,248,248,247,247,246,246,245,245,244,244,243,242,242,241,241,240,239,239,238,237,237,236,235,235,234,233,232,232,231,230,229,229,228,227,226,226,225,224,223,223,222,221,220,219,219,218,217,216,215,215
-moveXT: !byte 36,36,36,36,36,36,36,35,35,35,35,35,34,34,34,34,33,33,33,32,32,31,31,30
-        !byte 30,29,29,28,28,27,27,26,25,25,24,24,23,22,21,21,20,19,19,18,17,16,15,15
-        !byte 14,13,12,11,10,10,9,8,7,6,5,4,4,3,2,1,0,255,254,253,252,252,251,250
-        !byte 249,248,247,246,246,245,244,243,242,241,241,240,239,238,237,237,236,235,235,234,233,232,232,231
-        !byte 231,230,229,229,228,228,227,227,226,226,225,225,224,224,223,223,223,222,222,222,222,221,221,221
-        !byte 221,221,220,220,220,220,220,220,220,220,220,220,220,220,220,221,221,221,221,221,222,222,222,222
-        !byte 223,223,223,224,224,225,225,226,226,227,227,228,228,229,229,230,231,231,232,232,233,234,235,235
-        !byte 236,237,237,238,239,240,241,241,242,243,244,245,246,246,247,248,249,250,251,252,252,253,254,255
-        !byte 0,1,2,3,4,4,5,6,7,8,9,10,10,11,12,13,14,15,15,16,17,18,19,19
-        !byte 20,21,21,22,23,24,24,25,25,26,27,27,28,28,29,29,30,30,31,31,32,32,33,33
-        !byte 33,34,34,34,34,35,35,35,35,35,36,36,36,36,36,36
-moveYT: !byte 0,1,2,3,4,4,5,6,7,8,9,10,10,11,12,13,14,15,15,16,17,18,19,19
-        !byte 20,21,21,22,23,24,24,25,25,26,27,27,28,28,29,29,30,30,31,31,32,32,33,33
-        !byte 33,34,34,34,34,35,35,35,35,35,36,36,36,36,36,36,36,36,36,36,36,36,36,35
-        !byte 35,35,35,35,34,34,34,34,33,33,33,32,32,31,31,30,30,29,29,28,28,27,27,26
-        !byte 25,25,24,24,23,22,21,21,20,19,19,18,17,16,15,15,14,13,12,11,10,10,9,8
-        !byte 7,6,5,4,4,3,2,1,0,255,254,253,252,252,251,250,249,248,247,246,246,245,244,243
-        !byte 242,241,241,240,239,238,237,237,236,235,235,234,233,232,232,231,231,230,229,229,228,228,227,227
-        !byte 226,226,225,225,224,224,223,223,223,222,222,222,222,221,221,221,221,221,220,220,220,220,220,220
-        !byte 220,220,220,220,220,220,220,221,221,221,221,221,222,222,222,222,223,223,223,224,224,225,225,226
-        !byte 226,227,227,228,228,229,229,230,231,231,232,232,233,234,235,235,236,237,237,238,239,240,241,241
-        !byte 242,243,244,245,246,246,247,248,249,250,251,252,252,253,254,255
+moveXT: !byte 64,64,64,64,64,64,63,63,63,62,62,62,61,61,60,60,59,59,58,57,56,56,55,54
+        !byte 53,52,51,50,49,48,47,46,45,44,43,42,41,39,38,37,36,34,33,32,30,29,27,26
+        !byte 24,23,22,20,19,17,16,14,12,11,9,8,6,5,3,2,0,254,253,251,250,248,247,245
+        !byte 244,242,240,239,237,236,234,233,232,230,229,227,226,224,223,222,220,219,218,217,215,214,213,212
+        !byte 211,210,209,208,207,206,205,204,203,202,201,200,200,199,198,197,197,196,196,195,195,194,194,194
+        !byte 193,193,193,192,192,192,192,192,192,192,192,192,192,192,193,193,193,194,194,194,195,195,196,196
+        !byte 197,197,198,199,200,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,217,218,219
+        !byte 220,222,223,224,226,227,229,230,232,233,234,236,237,239,240,242,244,245,247,248,250,251,253,254
+        !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
+        !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
+        !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64
+moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
+        !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
+        !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64,64,64,64,64,64,64,63,63
+        !byte 63,62,62,62,61,61,60,60,59,59,58,57,56,56,55,54,53,52,51,50,49,48,47,46
+        !byte 45,44,43,42,41,39,38,37,36,34,33,32,30,29,27,26,24,23,22,20,19,17,16,14
+        !byte 12,11,9,8,6,5,3,2,0,254,253,251,250,248,247,245,244,242,240,239,237,236,234,233
+        !byte 232,230,229,227,226,224,223,222,220,219,218,217,215,214,213,212,211,210,209,208,207,206,205,204
+        !byte 203,202,201,200,200,199,198,197,197,196,196,195,195,194,194,194,193,193,193,192,192,192,192,192
+        !byte 192,192,192,192,192,192,193,193,193,194,194,194,195,195,196,196,197,197,198,199,200,200,201,202
+        !byte 203,204,205,206,207,208,209,210,211,212,213,214,215,217,218,219,220,222,223,224,226,227,229,230
+        !byte 232,233,234,236,237,239,240,242,244,245,247,248,250,251,253,254
 rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
 kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
