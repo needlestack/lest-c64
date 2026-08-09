@@ -646,6 +646,11 @@ const DBGORB = flag('DBGORB');
 // wrong on purpose -- it exists only to price the selection, which cannot be isolated any
 // other way (the cell COUNTS are unchanged, only the per-cell work).
 const NOEDGE = flag('NOEDGE');
+// FLATSPAN=1: fill each span with its left endpoint instead of interpolating. Renders wrong
+// on purpose. It prices the WHOLE interpolator, which is the ceiling on what any reduction of
+// horizontal resolution could win -- halving the column count can save at most about half of
+// what the loop costs, and this says what that loop costs.
+const FLATSPAN = flag('FLATSPAN');
 const ORBMIX = process.env.ORBMIX !== '0';
 // Skip reprojecting when the viewpoint has not moved. OFF for now -- full calculations
 // whether moving or not -- because it flatters stationary frames and hides what the projection
@@ -2533,6 +2538,13 @@ interpSpan:
         ldx spanL
         lda colH,x
         sta hcur                ; h = colH[spanL]
+${FLATSPAN ? `        inx
+isFl:   sta colH,x
+        inx
+        cpx spanR
+        bcc isFl
+        rts
+` : ''}
         ldx spanR
         lda colH,x
         sec

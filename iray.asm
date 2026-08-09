@@ -1652,6 +1652,7 @@ interpSpan:
         ldx spanL
         lda colH,x
         sta hcur                ; h = colH[spanL]
+
         ldx spanR
         lda colH,x
         sec
