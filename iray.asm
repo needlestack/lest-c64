@@ -146,6 +146,28 @@ faceIdT = $c400
 cellFaceT = $c4a0            ; per cell-column (40): the LAST wall run the cell shows
 cellFace2T = $c4c8           ; ... and the FIRST. A cell at a corner shows two walls with
                                 ; opposite answers, so one run per cell cannot decide it
+ocl2    = $cb93                 ; the bounding box in COLUMNS, not cells
+ocmax   = $cb94
+fgCell  = $c5a0                 ; per cell-column (40): bits 3..0 = which of the cell's four
+                                ; logical columns must be FOREGROUND (clip a sprite), bit 7 =
+                                ; some orb's bounding box covers this cell
+opsl    = $cb95
+opbn    = $cbc4                 ; index into opbuf while pass 1 walks a box
+opbuf   = $cbd0                 ; the per-cell masks of the orb in hand, up to 12 cells
+opreq   = $cbc2                 ; columns of this orb's box that must clip it, and
+opcon   = $cbc3                 ; columns made foreground that must not
+opcl    = $cb96
+opcr    = $cb97
+opbl    = $cbc0
+opbr    = $cbc1                 ; the sprite slot orbPaint has in hand
+pbb     = $cb90                 ; the columns of the cell in hand that lie inside that box
+pkm     = $cb91                 ; ... that belong to the cell's FIRST run
+pmk     = $cb92                 ; ... that this orb needs foreground
+obCL    = $cb98                 ; per sprite slot, for the second pass: cell range and
+obCR    = $cba0                 ; bounding-box edge masks, so pass 2 need not reproject
+obBL    = $cba8
+obBR    = $cbb0
+obIX    = $cbb8
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
@@ -216,9 +238,6 @@ obC     = $cb48                  ; per-sprite state, flushed to the VIC in the b
 opx     = $cb5c                  ; the viewpoint orbMove last projected from
 opy     = $cb5e
 opa     = $cb60
-rpOn    = $cb61                  ; ... and the cell rectangle it repointed, to replay
-rpH     = $cb62
-rpRow   = $cb63
 ofx     = $cb64
 ofy     = $cb65
 kxc     = $cb66
@@ -299,7 +318,6 @@ ccf:    sta $d800,x
         ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
         lda #$00
         sta $d015               ; nothing visible until orbMove has decided what is
-        sta rpOn
         lda pa
         eor #$80
         sta opa                 ; cannot match pa, so the first frame never takes the still path
@@ -417,7 +435,49 @@ mloop:
         sta cstepT+37
         sta cstepT+38
         sta cstepT+39
-        lda #$01       ; and every cell back to a plain solid fill
+        lda #$00
+        sta fgCell+0
+        sta fgCell+1
+        sta fgCell+2
+        sta fgCell+3
+        sta fgCell+4
+        sta fgCell+5
+        sta fgCell+6
+        sta fgCell+7
+        sta fgCell+8
+        sta fgCell+9
+        sta fgCell+10
+        sta fgCell+11
+        sta fgCell+12
+        sta fgCell+13
+        sta fgCell+14
+        sta fgCell+15
+        sta fgCell+16
+        sta fgCell+17
+        sta fgCell+18
+        sta fgCell+19
+        sta fgCell+20
+        sta fgCell+21
+        sta fgCell+22
+        sta fgCell+23
+        sta fgCell+24
+        sta fgCell+25
+        sta fgCell+26
+        sta fgCell+27
+        sta fgCell+28
+        sta fgCell+29
+        sta fgCell+30
+        sta fgCell+31
+        sta fgCell+32
+        sta fgCell+33
+        sta fgCell+34
+        sta fgCell+35
+        sta fgCell+36
+        sta fgCell+37
+        sta fgCell+38
+        sta fgCell+39
+        lda #$02     ; and every wall back to BACKGROUND black -- a sprite passes in
+                                ; front of it unless an orb asks for the column to clip
         sta seamT+0
         sta seamT+1
         sta seamT+2
@@ -535,12 +595,12 @@ subFace:lda spanR
         lsr
         tax
         lda seamT,x
-        cmp #$01
+        cmp #$02     ; still a plain fill? the default is BACKGROUND black now
         bne subCn               ; a line is already claimed in this cell; one per char code
         lda spanR
         and #$03
         clc
-        adc #$f8
+        adc #$fc
         sta seamT,x
 subCn:
         jsr subBnd              ; a face starts here: remember it as a span delimiter
@@ -697,10 +757,11 @@ subBnd: ldx nbnd                ; remember a column where a new face/saturation 
 subBDn: rts
 
 subFin:
+        jsr orbMove             ; BEFORE renderSym: it decides which columns are
+        jsr orbPaint            ; foreground, and renderSym draws them that way first time
         jsr renderSym
         jsr drawFps
         jsr drawDbg
-        jsr orbMove             ; needs colH, so after the render
 
         inc renderCnt
         lda renderCnt
@@ -990,9 +1051,9 @@ rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
 rfSolid:lda seamT,x
-        cmp #$01
-        bne rfSlSm              ; a seam here: its variant can change without rs moving, so
-        lda rsv           ; this column is never cached
+        cmp #$02     ; the default now that walls start as background black. Anything
+        bne rfSlSm              ; else -- a seam, or a column an orb asked to clip -- can change
+        lda rsv           ; without rs moving, so it is never cached
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
@@ -1577,12 +1638,12 @@ ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
         lsr
         tax                     ; cell column
         lda seamT,x
-        cmp #$01
+        cmp #$02     ; still a plain fill? the default is BACKGROUND black now
         bne ssOne               ; already spoken for: one line per char code
         tya
         and #$03
         clc
-        adc #$f8
+        adc #$fc
         sta seamT,x
 ssOne:  rts
 
@@ -2531,7 +2592,7 @@ orbBM:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
         !byte 0,16,68,84,68,68,0,0,0,80,68,80,68,80,0,0,0,84,64,64,64,84,0,0,0,80,68,68,68,80,0,0
         !byte 0,84,64,80,64,84,0,0,0,84,64,80,64,64,0,0,0,68,68,16,68,68,0,0,0,68,68,16,16,16,0,0
         !byte 191,191,191,191,191,191,191,191,239,239,239,239,239,239,239,239,251,251,251,251,251,251,251,251,254,254,254,254,254,254,254,254
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 149,149,149,149,149,149,149,149,101,101,101,101,101,101,101,101,89,89,89,89,89,89,89,89,86,86,86,86,86,86,86,86
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 
@@ -2599,7 +2660,7 @@ orbBM:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
         !byte 0,0,68,68,84,68,16,0,0,0,80,68,80,68,80,0,0,0,84,64,64,64,84,0,0,0,80,68,68,68,80,0
         !byte 0,0,84,64,80,64,84,0,0,0,64,64,80,64,84,0,0,0,68,68,16,68,68,0,0,0,16,16,16,68,68,0
         !byte 191,191,191,191,191,191,191,191,239,239,239,239,239,239,239,239,251,251,251,251,251,251,251,251,254,254,254,254,254,254,254,254
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 149,149,149,149,149,149,149,149,101,101,101,101,101,101,101,101,89,89,89,89,89,89,89,89,86,86,86,86,86,86,86,86
 
         * = $4000  ; VIC bank 0 is full -- these live above it
 absCosT: !byte 255,255,255,255,255,254,253,252,251,250,248,247,245,243,241,239,237,234,231,229,226,223,220,216
@@ -3311,10 +3372,9 @@ orbMove:
         lda pa
         cmp opa
         bne obMoved
-        lda rpOn
-        beq obStill
-        jsr rpReplay
-obStill:rts
+        rts                     ; a still frame. The slot data from the last one still stands
+                                ; and orbPaint runs unconditionally, so the walls come out
+                                ; painted the same way without reprojecting anything.
 obMoved:lda px
         sta opx
         lda px+1
@@ -3325,8 +3385,6 @@ obMoved:lda px
         sta opy+1
         lda pa
         sta opa
-        lda #$00
-        sta rpOn
         ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
         lda absCosT,x
         sta ocos
@@ -3796,88 +3854,38 @@ oxDn:   ldx ovar
         ; against the wall's was per column and quantised, so two cells of one flat wall could
         ; disagree -- and every occlusion artifact in this thing has been exactly that
         ; disagreement showing up as a sliver of orb through a wall or a slice cut out of one.
-        lda oflag
-        bpl opFront             ; nothing visible from this cell can occlude this orb at all
-        ldx ovar
+        ; ---- record what this orb needs, for the paint pass below ----
+        ; Nothing is decided here and nothing is written to the screen. The orb states which
+        ; columns under it must clip it; orbPaint merges every orb's statement and renderSym
+        ; then draws each column that way the first time. There is no second pass over the
+        ; walls at all, which is what removes every artifact that came from editing them.
+        ldx ovar                ; half the orb's width, in logical columns
         lda orbColT,x
         sta o2
+        lda ocol                ; the bounding box, in logical columns
+        sec
+        sbc o2
+        bcs opBL1
+        lda #$00
+opBL1:  sta ocl2
+        lsr
+        lsr
+        sta ocl
         lda ocol
         clc
         adc o2
-        bcc opR1
+        bcc opBR1
         lda #159
-opR1:   cmp #160
-        bcc opR2
+opBR1:  cmp #160
+        bcc opBR2
         lda #159
-opR2:   lsr
+opBR2:  sta ocmax
         lsr
-        sta ocr                 ; rightmost CELL the sprite covers
-        lda ocol
-        sec
-        sbc o2
-        bcs opL1
-        lda #$00
-opL1:   lsr
         lsr
-        cmp ocr
-        bcc opL2
-        lda ocr
-opL2:   sta ocl
-        ldx oidx
-        lda orbOccLoT,x         ; this orb's occluder bitmap
-        sta omptr
-        lda orbOccHiT,x
-        sta omptr+1
-        lda #$00
-        sta ocnear
-        sta ocspan
-        sta ocmask
-        sta ocsplit
-        sta ocside
-        ldx ocl
-        ; A cell may clip this orb only if EVERY wall it shows is in front of the orb. At a
-        ; corner the two differ, and letting the cell clip on the strength of the near wall
-        ; alone is what let the far wall's seam cut into an orb standing in front of it. Where
-        ; they disagree the cell does not clip, so the error left is up to 4 logical columns of
-        ; orb drawn over a near wall's leading edge -- far less visible than a bite out of the
-        ; orb, and the only choice available while the char cell is the unit of control.
-opScan: lda cellFace2T,x         ; the FIRST run the cell shows
-        jsr opBit
-        beq opFno
-        lda cellFaceT,x         ; ... and the LAST
-        jsr opBit
-        bne opOcc               ; both are in front of the orb: this cell clips as it stands
-        ldy ocspan              ; first in front, last behind -> split, near side on the left
-        lda orbBitT,y
-        ora ocside
-        sta ocside
-        bne opSpl               ; always: orbBitT is a bit, never zero
-opFno:  lda cellFaceT,x
-        jsr opBit
-        beq opFree              ; neither is in front: the whole cell steps aside
-opSpl:  ldy ocspan              ; the two disagree, so no single code can answer for the cell
-        lda orbBitT,y
-        ora ocsplit
-        sta ocsplit
-opFree: ldy ocspan              ; this cell cannot occlude outright: mark it to be repointed
-        lda orbBitT,y
-        ora ocmask
-        sta ocmask
-        jmp opNx
-opOcc:  inc ocnear
-opNx:   inc ocspan
-        inx
-        cpx ocr
-        bcc opScan
-        beq opScan
-        jmp opDone
-        ; The flag says no run visible from this cell can occlude this orb, so skip the scan
-        ; entirely and declare it unoccluded. ocspan is left stale on purpose: the consumers
-        ; below only read it once ocnear is nonzero.
-opFront:lda #$00
-        sta ocnear
-        sta ocmask
-        sta ocsplit
+        cmp ocl
+        bcs opBR3
+        lda ocl
+opBR3:  sta ocr
 opDone: 
         ; --- take a sprite slot ---
         ldx onv
@@ -3909,172 +3917,220 @@ oNoX:   lda o0
         lda omBit
         ora omX8
         sta omX8
-oNoM:   inc onv
-        lda ocnear
-        beq orbYes              ; nothing nearer: draw over everything, cheapest case
-        lda omBit
-        ora omPri
-        sta omPri               ; something is nearer, so let the VIC clip -- but that clips
-        ; against FAR walls too, and only repointing their cells can say otherwise. Skip it
-        ; when every column is nearer: then the orb is wholly behind the wall and correctly
-        ; invisible, and there is nothing to repoint.
-        lda ocnear
-        cmp ocspan
-        bcs orbYes
-
-        ; --- mixed depth: repoint the FAR solid cells under this sprite to SOLID's twin.
-        ; The marking is relative to ONE depth, so only the nearest such orb gets it; a farther
-        ; one that a wall separates from this one would need the opposite marking, and falls
-        ; back to the priority bit alone.
-        lda omMix
-        bne orbYes
-        inc omMix
-        ; ocl/ocr already hold the cell range the scan walked, and ocmask's bit N means "cell
-        ; ocl+N does not occlude". This used to recompute them from ocl2/ocmax, which the old
-        ; depth scan set and nothing has set since the face-plane rewrite -- so the loop below
-        ; walked a range out of uninitialised RAM and read ocmask from the wrong base. Every
-        ; SOLID cell genuinely under the orb kept its foreground code and went on clipping.
-        ldx ovar
-        lda o3
-        clc
-        adc orbBlankT,x         ; the first row the sprite actually inks, not the rectangle's
-        sec
-        sbc #50
-        bcs omT1
-        lda #$00
-omT1:   lsr
-        lsr
-        lsr
-        sta ocrow
-        ldx ovar
-        lda orbSpHT,x
-        clc
-        adc o3
-        sec
-        sbc #50
-        lsr
-        lsr
-        lsr
-        cmp #25
-        bcc omB1
-        lda #24
-omB1:   sta ocrw2
-        lda ohgt                ; remember it: a still frame replays this without reprojecting
-        sta rpH
-        lda ocrow               ; the loop walks ocrow, so keep where it started
-        sta rpRow
-        inc rpOn
-        jmp omRow
-rpReplay:
-        lda rpH
-        sta ohgt
-        lda rpRow
-        sta ocrow
-omRow:  ldy ocrow
-        lda rowLoT,y
-        sta ppPtr
-        lda rowHiT,y
-        clc
-        adc baseHi
-        sta ppPtr+1
-        ldy ocl
-omCol:  tya                     ; this cell's face: does it occlude, per the scan above?
-        sec
-        sbc ocl
-        tax
-        lda orbBitT,x
-        and ocmask
-        beq omNx                ; it occludes: leave it clipping
-        lda orbBitT,x
-        and ocsplit
-        beq omWhole             ; one answer serves the whole cell
-        ; --- the cell shows two walls with opposite answers: put the priority edge INSIDE it.
-        ; Only a cell that is black across its full width can take one. A seam cell qualifies:
-        ; its 2px stripe is lost, which is what already happens to a seam an orb stands in
-        ; front of. A step or ramp does not -- part of it is floor or ceiling, and painting it
-        ; solid would black that out -- so those keep the old whole-cell answer.
-        lda orbBitT,x
-        sta tmp2                ; this cell's mask bit: X is about to be reused for the code
-        lda (ppPtr),y
-        tax
-        lda splitT,x            ; a step that can draw its own priority edge?
-        beq omSpNS
-        sta (ppPtr),y
-        jmp omNx
-omSpNS: txa
-        cmp #$01
-        beq omSpOk
-        cmp #$f8
-        bcc omWhole
-        cmp #$fc
-        bcs omWhole
-omSpOk: lda cstepT,y            ; where the boundary falls inside the cell, 1..3
-        beq omWhole             ; on the cell edge after all: nothing to split
-        asl
-        sec
-        sbc #$02                ; (k-1)*2
-        sta tmp
-        lda tmp2
-        and ocside
-        beq omSpR
-        lda tmp                 ; the FIRST run is the near one: left half clips
-        clc
-        adc #$03
-        bne omSpPut             ; always: SPLIT0 is well above zero
-omSpR:  lda tmp                 ; the LAST run is the near one: right half clips
-        clc
-        adc #$04
-omSpPut:sta (ppPtr),y
-        jmp omNx
-omWhole:lda (ppPtr),y
-        cmp #$01
-        beq omPut
-        ; A vertical step is a wall CORNER, the one step that clips. When the wall it belongs to
-        ; faces the orb it must not, and unlike SOLID it cannot become a flat black cell -- half
-        ; of it is floor. Hence six twins, placed consecutively right after the six originals so
-        ; the swap is one add.
-        cmp #$09
-        bcc omNS
-        cmp #$0f
-        bcs omNS
-        clc
-        adc #$06
-        sta (ppPtr),y
-        jmp omNx
-omNS:
-        ; A seam cell is foreground too, and it was slicing a grey line through orbs standing
-        ; in front of the wall. There is no background seam to swap to -- 00 is the ceiling
-        ; and 01 is plain black -- so the seam simply goes for the cells an orb covers, which
-        ; reads far better than a seam drawn across the front of it.
-        cmp #$f8
-        bcc omNx
-        cmp #$fc
-        bcs omNx
-omPut:  lda #$02
-        sta (ppPtr),y
-omNx:   iny
-        cpy ocr
-        bcc omCol
-        beq omCol
-        inc ocrow
-        lda ocrow
-        cmp ocrw2
-        bcc omRow
-        beq omRow
-        ; These cells now hold SOLID's twin, not what the chain would write, so the run cache
-        ; must not let the chain be skipped over them next frame. Both buffers, since which
-        ; one is in hand here is not worth working out for two stores.
-        ldx ocl
-        lda #$ff
-omInv:  sta cbA,x
-        sta cbB,x
-        inx
-        cpx ocr
-        bcc omInv
-        beq omInv
-        rts
+oNoM:   ; remember what this orb asked for; the second pass compares it against what the
+        ; scene actually ended up painting, which is the only place a conflict can show up
+        ldx onv
+        lda oidx
+        sta obIX,x
+        lda ocl
+        sta obCL,x
+        lda ocr
+        sta obCR,x
+        lda ocl2
+        and #$03
+        tay
+        lda bbLT,y              ; the columns of the leftmost cell inside the box
+        sta obBL,x
+        lda ocmax
+        and #$03
+        tay
+        lda bbRT,y              ; ... and of the rightmost
+        sta obBR,x
+        inc onv
 orbYes: rts
 orbNo:  rts
+; ---- orbPaint: turn what the orbs asked for into what the walls will be drawn as ----
+;
+; Three steps, in order, and no screen memory is touched by any of them.
+;   1. every orb marks the cells its bounding box covers, and within those cells the COLUMNS
+;      whose wall must clip it. Columns, not cells: a cell at a corner shows two walls, and the
+;      four bit pairs of a char can say something different about each of its four columns.
+;   2. each orb's priority bit. It is "behind foreground" unless some column inside its box came
+;      out foreground that this orb did NOT ask for -- meaning another, nearer orb needed it. The
+;      hardware offers one shared foreground set and one bit per sprite, so that case cannot be
+;      expressed; letting the orb through reads far better than a bite out of it.
+;   3. one char code per covered cell, straight from the four-bit mask, which already names the
+;      split boundary. Cells no orb covers keep whatever the renderer chose, seam and all.
+orbPaint:
+        lda onv
+        beq opAllD              ; nothing on screen: the walls stay background and nothing clips
+        ldx #$00
+opAll:  jsr opSlot              ; load slot X's box and occluder bitmap
+        ; First just count. An orb every column of whose box is occluded cannot be seen at all,
+        ; and an orb nobody can see must not get a vote: its demands would make walls foreground
+        ; for no visible gain and force VISIBLE orbs into the conflict rule below. It does not
+        ; even need a sprite -- dropping it is both cheaper and exactly what it looks like.
+        lda #$00
+        sta opreq
+        sta opcon               ; reused here as the box's own column count
+        tay
+        sty opbn
+        ldx opcl
+opA0:   jsr opCell
+        ldy opbn
+        sta opbuf,y             ; keep it: recomputing costs two bitmap lookups a cell
+        tay
+        lda popcT,y
+        clc
+        adc opreq
+        sta opreq
+        ldy pbb
+        lda popcT,y
+        clc
+        adc opcon
+        sta opcon
+        inx
+        ldy opbn
+        iny
+        sty opbn
+        cpx opcr
+        bcc opA0
+        beq opA0
+        lda opreq
+        cmp opcon
+        bcc opA1s               ; something of it shows: let it speak
+        ldx opsl                ; wholly hidden: take its sprite away and move on
+        lda orbBitT,x
+        eor #$ff
+        and omEn
+        sta omEn
+        jmp opANx
+opA1s:  ldx opcl
+        ldy #$00
+opA1:   lda opbuf,y
+        ora fgCell,x
+        sta fgCell,x
+        iny
+        inx
+        cpx opcr
+        bcc opA1
+        beq opA1
+opANx:  ldx opsl
+        inx
+        cpx onv
+        bcc opAll
+        ; ---- 2. each orb's priority bit, now that the foreground set is final ----
+        ldx #$00
+opPri:  jsr opSlot
+        lda orbBitT,x
+        and omEn
+        beq opP2                ; pass 1 took this one's sprite away: nothing to decide
+        lda #$00
+        sta opreq
+        sta opcon
+        ldx opcl
+opP1:   jsr opCell
+        sta pmk                 ; columns this orb needs to clip it ...
+        tay
+        lda popcT,y
+        clc
+        adc opreq
+        sta opreq
+        lda pmk
+        eor #$0f                ; ... against columns it did NOT ask for but which something
+        and pbb                 ; else made foreground. Both are counted rather than the second
+        and fgCell,x            ; merely noted: one shared foreground set and one bit per sprite
+        tay                     ; cannot express both, so the bit goes with the majority.
+        lda popcT,y
+        clc
+        adc opcon
+        sta opcon
+        inx
+        cpx opcr
+        bcc opP1
+        beq opP1
+        lda opcon               ; more of the box wants clipping than not: let the VIC clip.
+        cmp opreq               ; Ties go to clipping -- a wall that should hide an orb is more
+        beq opP1a               ; conspicuous than an orb slightly over one that should not.
+        bcs opP2
+opP1a:  ldx opsl
+        lda orbBitT,x
+        ora omPri
+        sta omPri
+opP2:   ldx opsl
+        inx
+        cpx onv
+        bcc opPri
+        ; ---- 3. the char code for every covered cell ----
+        ldx #$27
+opMat:  lda fgCell,x
+        beq opMt1               ; no orb needs this column to clip: it stays background black
+        tay
+        lda seamT,x
+        cmp #$f8
+        bcc opMt2
+        ; A seam has only two forms, all-clipping or all-not, because its grey stripe can live
+        ; in no other bit pair and there are no codes left for a per-column seam. So it goes
+        ; with the majority of the cell, and a tie goes to NOT clipping: an orb slightly over a
+        ; wall reads better than a bite out of one, and the stripe still crosses it either way.
+        lda fgCell,x
+        tay
+        lda popcT,y
+        cmp #$03
+        bcc opMt1
+        lda seamT,x
+        sec                     ; same line, but its black columns now clip
+        sbc #$04
+        sta seamT,x
+        bcs opMt1               ; always
+opMt2:  lda fgCodeT,y
+        sta seamT,x
+opMt1:  dex
+        bpl opMat
+opAllD: rts
+
+; opSlot: copy sprite slot X's cell range and box-edge masks into scratch, and point omptr at
+; its occluder bitmap. CPX and LDX have no indexed-absolute mode, so the loop bounds have to
+; live somewhere the comparisons can reach.
+opSlot: stx opsl
+        lda obCL,x
+        sta opcl
+        lda obCR,x
+        sta opcr
+        lda obBL,x
+        sta opbl
+        lda obBR,x
+        sta opbr
+        lda obIX,x
+        tay
+        lda orbOccLoT,y
+        sta omptr
+        lda orbOccHiT,y
+        sta omptr+1
+        rts
+
+; opCell: for the orb whose bitmap omptr points at, which of cell X's four columns must clip
+; it? Returns that four-bit mask in A, and leaves the box mask for the cell in pbb. Bit 3 is
+; the cell's leftmost column, so the mask reads left to right and indexes fgCodeT directly.
+opCell: lda #$0f
+        cpx opcl
+        bne opC1
+        and opbl
+opC1:   cpx opcr
+        bne opC2
+        and opbr
+opC2:   sta pbb
+        lda #$00
+        sta pmk
+        ldy cstepT,x
+        lda kMaskT,y            ; the columns belonging to the cell's FIRST run
+        sta pkm
+        lda cellFace2T,x
+        jsr opBit
+        beq opC3
+        lda pkm
+        sta pmk
+opC3:   lda cellFaceT,x
+        jsr opBit
+        beq opC4
+        lda pkm
+        eor #$0f                ; ... and the rest belong to its LAST run
+        ora pmk
+        sta pmk
+opC4:   lda pmk
+        and pbb
+        rts
+
 ; opBit: A = a wall run id -> Z=0 if this orb lies beyond that run's face plane, from the
 ; precomputed bitmap at omptr. X is the caller's cell index and is preserved.
 opBit:  sta tmp
@@ -4356,6 +4412,20 @@ orbYBaseT: !byte 129,129,129,129,129,129,129,129,129,129,129,129,108,108,108,108
 orbColT: !byte 0,1,1,2,2,3,3,4,4,5,5,6,7,8,9,10,11,12
 orbSpHT: !byte 21,21,21,21,21,21,21,21,21,21,21,21,42,42,42,42,42,42
 orbBlankT: !byte 19,16,15,14,13,9,8,7,6,2,1,0,16,14,12,4,2,0   ; transparent rows above the ball, per variant
+; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the
+; columns of that first and last cell which lie inside it. Bit 3 is the leftmost column.
+popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
+bbLT:   !byte $0f,$07,$03,$01
+bbRT:   !byte $08,$0c,$0e,$0f
+; kMaskT: cstepT names where a cell's run boundary falls, so this is the set of columns
+; belonging to the FIRST of its two runs. 0 = no boundary, so the cell shows one run and it
+; is the last one.
+kMaskT: !byte $00,$08,$0c,$0e
+; fgCodeT: the four-bit foreground mask straight to a char code. The mask already names the
+; split boundary, so no separate lookup of where it falls is needed. The four non-contiguous
+; masks need three runs inside one cell to arise and have no code; they fall back to whichever
+; answer covers more of the cell.
+fgCodeT: !byte $02,$08,$02,$06,$02,$01,$01,$04,$03,$01,$01,$01,$05,$01,$07,$01
 orbBitT: !byte 1,2,4,8,16,32,64,128
 orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
 orbOccHiT: !byte 166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,167,167,167,167,167
