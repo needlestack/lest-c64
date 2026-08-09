@@ -17,10 +17,6 @@ fr      = $12
 qlo     = $15
 qhi     = $16
 col     = $17
-cptr    = $1a
-r0      = $1c
-r1      = $1d
-crc     = $1e
 tmp     = $1f
 baseHi  = $22
 paF     = $cb5b                  ; low byte of the 16-bit player angle; pa is the high
@@ -43,24 +39,10 @@ nyL     = $27
 nyH     = $28
 iterLo  = $29
 iterHi  = $2a
-remLo2  = $2b
-cnt     = $2c
-zpc     = $2d
-frcnt   = $2e
-lastf   = $2f
-gi      = $30
 cb      = $31
 hh0     = $32
 hh1     = $33
-hh4     = $34
-dd      = $35
-xcol    = $36
 hcur    = $37
-tval    = $38
-bval    = $39
-ccell   = $3a
-patt    = $3c
-sprd    = $3d
 ddxH    = $40
 ddyH    = $41
 sdxH    = $42
@@ -86,20 +68,11 @@ ppLo    = $57
 tmp2    = $58
 kpos    = $6c                   ; step path: boundary position, and qB held across the
 qbv     = $6b                   ;   middle-column read that needs A and X
-patLo   = $59
-patHi   = $5a
-tpLo    = $5b
-tpHi    = $5c
-btLo    = $5d
-btHi    = $5e
-cellc   = $5f
 spanL   = $60
 spanR   = $61
 sp      = $62
 errv    = $63
 syNeg   = $64
-t1c     = $65
-tbc     = $66
 joyv    = $67
 joyEor  = $68
 ; The overlay's private scratch block (pdBase/pdTmp/... at $6b-$70) is gone with the
@@ -149,10 +122,7 @@ sShi    = $94
 ssK     = $95                   ; current boundary coordinate, and how many are left
 ssN     = $96
 ssW     = $97                   ; span width in columns
-ssCol   = $9c                   ; calcU: column, ray angle and side for the column in hand
 ssAng   = $9d
-ssSd    = $9e
-ssCL    = $9f                   ; cell coordinate along the face, at spanL
 mp      = $98                   ; mul8 operands / product
 mq      = $99
 plo     = $9a
@@ -192,16 +162,8 @@ seamT   = $c6c0                 ; per cell-column (40): char code for the solid 
 oaL     = $87
 oaH     = $88
 oaS     = $89
-obm     = $8a
-obs     = $8b
 orL     = $8c
 orH     = $8d
-odxL    = $8e
-odxH    = $8f
-odxS    = $90
-odyL    = $91
-odyH    = $92
-odyS    = $93
 o0      = $94
 o1      = $95
 o2      = $96
@@ -1604,8 +1566,7 @@ ssOne:  rts
 ; versa. u = p + d*dir, one sideMul: sideMul(fr, m) returns fr/256 * m, so feeding it |cos|
 ; (or |sin|) as 0..255 against the parked hit distance gives exactly d*|dir|. The sign comes
 ; from the same posXT/posYT the DDA used to choose its step. sideMul eats X, hence ssAng.
-calcU:  stx ssCol
-        lda remLoT,x
+calcU:  lda remLoT,x
         sta mlo
         lda remHiT,x
         sta mhi
@@ -4107,38 +4068,6 @@ oabs:   lda #$00
         sbc oaH
         sta oaH
 oabsD:  rts
-; (|a| * |b|) >> 8, then negated if the two signs disagree -- result is two's complement, so
-; the callers above can just add and subtract normally.
-orot:   lda obm
-        sta mq
-        lda oaL
-        jsr mul8
-        lda phi
-        sta orL
-        lda #$00
-        sta orH
-        lda obm
-        sta mq
-        lda oaH
-        jsr mul8
-        clc
-        lda orL
-        adc plo
-        sta orL
-        lda orH
-        adc phi
-        sta orH
-        lda oaS
-        eor obs
-        bpl orotD
-        sec
-        lda #$00
-        sbc orL
-        sta orL
-        lda #$00
-        sbc orH
-        sta orH
-orotD:  rts
 
         ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
