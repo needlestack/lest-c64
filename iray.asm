@@ -24,6 +24,8 @@ crc     = $1e
 tmp     = $1f
 baseHi  = $22
 dtv     = $cb50
+dtm     = $cb59                  ; elapsed ticks scaled for movement, and for turning
+dtt     = $cb5a
 lastMv  = $cb51
 dxs     = $cb52
 dxsH    = $cb53
@@ -965,7 +967,10 @@ tdCl:   lda dtv
         bcc tdDn
         lda #16          ; a hitch must not step far enough to tunnel a wall
         sta dtv
-tdDn:   rts
+tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
+        sta dtm
+        sta dtt
+        rts
 
 readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
@@ -984,12 +989,23 @@ readKeys:
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        asl dtv                 ; LEFT SHIFT: run. Doubling elapsed time doubles the step AND
-        lda dtv                 ; the turn rate together, with nothing else to keep in step
+        ; LEFT SHIFT: run. Movement and turning get their own multipliers -- 2x and 1.5x --
+        ; because doubling both made the world spin faster than it moved. Scaling elapsed TIME
+        ; rather than the step keeps each one frame-rate independent for free.
+        lda dtv
+        asl
         cmp #16
-        bcc rkNoSh
+        bcc rkShM
         lda #16
-        sta dtv
+rkShM:  sta dtm                 ; 2x movement
+        lda dtv
+        lsr
+        clc
+        adc dtv                 ; 1.5x turning
+        cmp #16
+        bcc rkShT
+        lda #16
+rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40
         beq rkFwd               ; E held
@@ -1019,7 +1035,7 @@ rkNotD: lda $dc01
 rkNotF: lda joyv
         and #$04
         bne rkJR                ; joystick-1 left = turn left
-        ldx dtv
+        ldx dtt
         lda pa
 rkTlL:  sec
         sbc #$01
@@ -1029,7 +1045,7 @@ rkTlL:  sec
 rkJR:   lda joyv
         and #$08
         bne rkJD                ; joystick-1 right = turn right
-        ldx dtv
+        ldx dtt
         lda pa
 rkTlR:  clc
         adc #$01
@@ -1097,7 +1113,7 @@ maSy:   sty dySgn
         sta dxsH
         sta dys
         sta dysH
-        ldx dtv
+        ldx dtm
 maLp:   clc
         lda dxs
         adc dxv
