@@ -1037,13 +1037,18 @@ if (process.env.CELLSCAN === '1') {
   });
   curve.push([spots.length, seen.size]);
   // Which of these does the shipped charset get EXACTLY right, and what does a miss cost?
-  let exact = 0, exactN = 0, offN = 0, offCols = 0;
+  // L1 = wrong PIXELS, hamm = wrong COLUMNS. mergecells prices a direct shape table in pixels,
+  // so the shipped engine has to be priced in the same unit or the two cannot be compared.
+  const L1 = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) +
+                       Math.abs(a[2] - b[2]) + Math.abs(a[3] - b[3]);
+  let exact = 0, exactN = 0, offN = 0, offCols = 0, offPx = 0;
   let mdlCols = 0, chrCols = 0, mdlN = 0, chrN = 0;
   const misses = [];
   for (const [key, e] of seen) {
     const t = key.split(',').map(Number);
     const drawn = drawnFor(e.w, e.kb), model = modelFor(e.w, e.kb) ?? drawn;
     const dm = hamm(t, model), dc = hamm(model, drawn), d = hamm(t, drawn);
+    offPx += e.n * L1(t, drawn);
     mdlCols += e.n * dm; chrCols += e.n * dc;
     if (dm) mdlN += e.n;
     if (dc) chrN += e.n;
@@ -1074,7 +1079,8 @@ if (process.env.CELLSCAN === '1') {
   console.error(`    CHARSET ${(100 * chrN / mixed).toFixed(2)}% of cells, ` +
     `${(chrCols / FR).toFixed(3)} wrong cols/frame  -- merges, drops, nearest-neighbour.`);
   console.error(`                                                 This is what the 43 free codes buy back.`);
-  console.error(`    TOTAL   ${(100 * offN / mixed).toFixed(2)}% of cells, ${(offCols / FR).toFixed(3)} wrong cols/frame`);
+  console.error(`    TOTAL   ${(100 * offN / mixed).toFixed(2)}% of cells, ${(offCols / FR).toFixed(3)} wrong cols/frame` +
+    `, ${(offPx / FR).toFixed(3)} wrong PIXELS/frame`);
   if (worst) console.error(`  worst single shape: [${worst.key}] seen ${worst.n}x, off by ${worst.d} ` +
     `(model ${worst.dm} + charset ${worst.dc}), e.g. PX=${worst.at[0].toFixed(2)} PY=${worst.at[1].toFixed(2)} A=${worst.at[2]}`);
   console.error(`  shapes the BUILD's 332x16 sampler never saw: ${unseenByBuild.length} of ${seen.size} ` +
@@ -1086,6 +1092,7 @@ if (process.env.CELLSCAN === '1') {
   writeFileSync('./cellscan.json', JSON.stringify({
     step: STEP, angleStride: ASTEP, positions: spots.length, cells, mixed,
     distinct: seen.size, exact, curve,
+    shippedCols: offCols / FR, shippedPx: offPx / FR, cellCodes: CELLCODES,
     shapes: [...seen].map(([k, e]) => ({ p: k, n: e.n, kb: e.kb,
       drawn: drawnFor(e.w, e.kb).join(','), sampledByBuild: sampled.has(k), at: e.at }))
       .sort((a, b) => b.n - a.n),
