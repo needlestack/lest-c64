@@ -217,6 +217,21 @@ intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fil
 const SOLIDBG = glyphs.length;
 glyphs.push([...Array(8)].fill(+(process.env.VSTEPDBG ?? 0) ? 0xaa : 0x55));  // 01 01 01 01
 
+// ---- SOLID split six ways: black on black, with a priority edge inside the cell ----
+// Sprite priority is a property of the BIT PAIR, so it is per logical column, not per cell.
+// A cell at a corner shows two walls -- one that must clip a sprite and one that must not --
+// and both are black, so the cell can carry a vertical priority edge that is invisible as
+// colour and exact as occlusion. Same trick as SOLIDBG, just applied per column instead of
+// per cell, which is what SOLIDBG should have been all along.
+//
+// Six codes: the boundary falls at column 1, 2 or 3 (a boundary on the cell edge leaves the
+// cell showing one wall, so there is nothing to split), and either side may be the near one.
+// Code = SPLIT0 + (k-1)*2 + (the FIRST run is the near one ? 0 : 1).
+const SPLIT0 = glyphs.length;
+for (let k = 1; k <= 3; k++) for (const leftFg of [true, false])
+  glyphs.push([...Array(8)].fill([0, 1, 2, 3].reduce(
+    (b, c) => b | (((c < k) === leftFg ? 3 : 1) << (6 - 2 * c)), 0)));
+
 // Which patterns actually occur? The charset cannot hold every ramp and step the clamp can
 // express, so the sampler decides what is worth a code and what gets dropped (see placeAll).
 // Widening the clamp to 16 levels added patterns that only arise from very steep slopes, and
@@ -463,6 +478,27 @@ console.error(`  step patterns: ${LA}/${LM}/${LB} levels, ${STEPS.nslots} ` +
 // twins immediately after: the repoint pass then converts one to the other with a single ADC #6
 // rather than a lookup. placeAll skips them, since codeOf already holds them.
 const VSTEPDBG = +(process.env.VSTEPDBG ?? 0);
+
+// ---- split twins for the busiest wall-meets-wall steps ----
+// Every step cell IS a corner: the subdivision only picks one where a face boundary falls
+// inside the cell. So when a step has a SATURATED column and a partial one, the saturated
+// side is the wall that fills the cell -- the taller one on screen, hence the nearer one.
+// That makes the split self-describing: no second orientation is needed, unlike SOLID, where
+// both sides are equally black and only the run ids can say which is near.
+//
+// The class has 35 members and a flat distribution, so it cannot be covered outright. These
+// are the busiest, interned consecutively so the swap is one add, like the vertical steps.
+// 8, not 10: past 8 the extra exact twins cost more never-sampled patterns than they buy in
+// coverage, because the nearest-twin substitution below already reaches the whole class.
+const SSTEPN = +(process.env.SSTEPN ?? 8);
+const SSTEPS = STEPS.chosen
+  .filter(p => p.some(v => v >= 8) && p.some(v => v > 0 && v < 8))
+  .sort((a, b) => (PFREQ.get(b.join(',')) || 0) - (PFREQ.get(a.join(',')) || 0))
+  .slice(0, SSTEPN);
+// ink unchanged, but each column's bit pair says whether it clips: saturated = the near wall
+const splitBytes = p => [...Array(8)].map((_, i) =>
+  [0, 1, 2, 3].reduce((b, c) => b | (p[c] > 7 - i ? (p[c] >= 8 ? 3 : 1) << (6 - 2 * c) : 0), 0));
+
 const VSTEPS = STEPS.chosen.filter(p => p.every(v => v === 0 || v >= 8));
 if (VSTEPS.length !== 6) throw new Error(`expected 6 vertical steps, found ${VSTEPS.length}`);
 const VSTEP0 = glyphs.length;
@@ -473,8 +509,36 @@ for (const p of VSTEPS) glyphs.push(VSTEPDBG
       return o; })                            // corner is visible on screen at a glance
   : patBytes(p, false));                      // same pixels, bit pair 01
 const VSTEPN = VSTEPS.length;
+const SSTEP0 = glyphs.length;
+for (const p of SSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p)); }
+for (const p of SSTEPS) glyphs.push(splitBytes(p));
+console.error(`  split steps: ${SSTEPN} of ${STEPS.chosen.filter(p => p.some(v => v >= 8) &&
+  p.some(v => v > 0 && v < 8)).length} wall-meets-wall patterns, at ${SSTEP0}-${SSTEP0 + SSTEPN - 1}` +
+  ` with splits at ${SSTEP0 + SSTEPN}-${SSTEP0 + 2 * SSTEPN - 1}`);
 placeAll([rampsAll, STEPS.chosen]);
 const CELLCODES = glyphs.length;
+// A step's split twin has to have the step's own ink, and the class is far too big to give
+// every member one. But the charset already accepts a nearest-pattern substitution for the
+// patterns it had to drop, and the same rule works here: a step whose own twin does not exist
+// borrows the twin of the closest one that does. The ink is then off by a logical column or
+// two of height for as long as an orb overlaps that one cell -- against the orb bleeding over
+// a whole near wall, which is what happens with no twin at all.
+const SPLITSUB = 2;               // refuse a substitution worse than this many columns
+const splitT = new Array(256).fill(0);
+{ let exact = 0, near = 0;
+  for (const [key, code] of codeOf) {
+    const q = key.split(',').map(Number);
+    if (!(q.some(v => v >= 8) && q.some(v => v > 0 && v < 8))) continue;   // not wall-meets-wall
+    let bd = 99, bi = -1;
+    SSTEPS.forEach((p, i) => { const d = hamm(p, q); if (d < bd) { bd = d; bi = i; } });
+    if (bi < 0 || bd > SPLITSUB) continue;
+    splitT[code] = SSTEP0 + SSTEPN + bi;
+    if (bd === 0) exact++; else near++;
+  }
+  console.error(`  split twins: ${exact} steps use their own, ${near} borrow the nearest ` +
+    `(within ${SPLITSUB} columns), out of ${[...codeOf].filter(([k]) => { const q = k.split(',').map(Number);
+      return q.some(v => v >= 8) && q.some(v => v > 0 && v < 8); }).length} wall-meets-wall codes`);
+}
 const GLYPH0 = glyphs.length;                   // first readout glyph code
 for (let g = 0; g < NGLYPH; g++) {
   const rows = digGlyph.slice(g * 5, g * 5 + 5);
@@ -1276,6 +1340,8 @@ oay     = $cb71
 oixS    = $cb72
 oiyS    = $cb73
 ocmask  = $cb74                  ; per cell under the sprite: 1 = its face cannot occlude
+ocsplit = $cb76                  ; ... 1 = its two runs DISAGREE, so it needs a column split
+ocside  = $cb77                  ; ... 1 = of those two, the FIRST run is the near one
 oflag   = $cb75                  ; DBGORB: candidates that passed the bearing test
 odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
@@ -3962,6 +4028,8 @@ opL2:   sta ocl
         sta ocnear
         sta ocspan
         sta ocmask
+        sta ocsplit
+        sta ocside
         ldx ocl
         ; A cell may clip this orb only if EVERY wall it shows is in front of the orb. At a
         ; corner the two differ, and letting the cell clip on the strength of the near wall
@@ -3969,13 +4037,25 @@ opL2:   sta ocl
         ; they disagree the cell does not clip, so the error left is up to 4 logical columns of
         ; orb drawn over a near wall's leading edge -- far less visible than a bite out of the
         ; orb, and the only choice available while the char cell is the unit of control.
-opScan: lda cellFaceT,x
+opScan: lda cellFace2T,x         ; the FIRST run the cell shows
         jsr opBit
-        beq opFree
-        lda cellFace2T,x
+        beq opFno
+        lda cellFaceT,x         ; ... and the LAST
         jsr opBit
-        bne opOcc
-opFree: ldy ocspan              ; this cell cannot occlude: mark it to be repointed
+        bne opOcc               ; both are in front of the orb: this cell clips as it stands
+        ldy ocspan              ; first in front, last behind -> split, near side on the left
+        lda orbBitT,y
+        ora ocside
+        sta ocside
+        bne opSpl               ; always: orbBitT is a bit, never zero
+opFno:  lda cellFaceT,x
+        jsr opBit
+        beq opFree              ; neither is in front: the whole cell steps aside
+opSpl:  ldy ocspan              ; the two disagree, so no single code can answer for the cell
+        lda orbBitT,y
+        ora ocsplit
+        sta ocsplit
+opFree: ldy ocspan              ; this cell cannot occlude outright: mark it to be repointed
         lda orbBitT,y
         ora ocmask
         sta ocmask
@@ -3993,6 +4073,7 @@ opNx:   inc ocspan
 opFront:lda #$00
         sta ocnear
         sta ocmask
+        sta ocsplit
 opDone: ${VSTEPDBG ? `lda ocnear              ; VSTEPDBG: the LAST projected orb's counts, as
         sta $d020               ; border and ceiling colour -- the on-screen hex readout needs
         lda ocspan              ; a clean background and the interesting viewpoints are exactly
@@ -4101,7 +4182,48 @@ omCol:  tya                     ; this cell's face: does it occlude, per the sca
         lda orbBitT,x
         and ocmask
         beq omNx                ; it occludes: leave it clipping
+        lda orbBitT,x
+        and ocsplit
+        beq omWhole             ; one answer serves the whole cell
+        ; --- the cell shows two walls with opposite answers: put the priority edge INSIDE it.
+        ; Only a cell that is black across its full width can take one. A seam cell qualifies:
+        ; its 2px stripe is lost, which is what already happens to a seam an orb stands in
+        ; front of. A step or ramp does not -- part of it is floor or ceiling, and painting it
+        ; solid would black that out -- so those keep the old whole-cell answer.
+        lda orbBitT,x
+        sta tmp2                ; this cell's mask bit: X is about to be reused for the code
         lda (ppPtr),y
+        tax
+        lda splitT,x            ; a step that can draw its own priority edge?
+        beq omSpNS
+        sta (ppPtr),y
+        jmp omNx
+omSpNS: txa
+        cmp #${hx(SOLID)}
+        beq omSpOk
+        cmp #${hx(SEAM0)}
+        bcc omWhole
+        cmp #${hx(SEAM0 + 4)}
+        bcs omWhole
+omSpOk: lda cstepT,y            ; where the boundary falls inside the cell, 1..3
+        beq omWhole             ; on the cell edge after all: nothing to split
+        asl
+        sec
+        sbc #$02                ; (k-1)*2
+        sta tmp
+        lda tmp2
+        and ocside
+        beq omSpR
+        lda tmp                 ; the FIRST run is the near one: left half clips
+        clc
+        adc #${hx(SPLIT0)}
+        bne omSpPut             ; always: SPLIT0 is well above zero
+omSpR:  lda tmp                 ; the LAST run is the near one: right half clips
+        clc
+        adc #${hx(SPLIT0 + 1)}
+omSpPut:sta (ppPtr),y
+        jmp omNx
+omWhole:lda (ppPtr),y
         cmp #${hx(SOLID)}
         beq omPut
         ; A vertical step is a wall CORNER, the one step that clips. When the wall it belongs to
@@ -4325,8 +4447,13 @@ stepT1: ${chunk(stepT[0]).trim()}
 stepT2: ${chunk(stepT[1]).trim()}
         * = ${hx16(RELOC + 0x2600)}
 stepT3: ${chunk(stepT[2]).trim()}
-
-${PROFILE ? `        * = ${hx16(RELOC + 0x2700)}  ; the profiler lives above the relocated
+${SPRITES ? `        * = ${hx16(RELOC + 0x2700)}
+; splitT: cell code -> the same cell drawn with a priority edge down the run boundary inside
+; it, or 0 for "no such twin, fall back to a whole-cell answer". Sits above the step tables
+; because the assembler takes origins in ascending order only.
+splitT: !byte ${splitT.join(',')}
+` : ''}
+${PROFILE ? `        * = ${hx16(RELOC + 0x2800)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
