@@ -3065,6 +3065,25 @@ cypos:  lda #$01
         ; No bounds check: the map border is solid on all four sides (asserted at build
         ; time), so a ray always hits a wall before it can step outside the grid. That also
         ; makes the +-1 cell stepping safe -- mapX never runs off the end of a row.
+        ; An axis-aligned ray never crosses a grid line on that axis, and the delta table
+        ; says so by saturating to $ffff. The FIRST side distance did not: it is the
+        ; fraction of a cell to the next line multiplied by that delta, and a small enough
+        ; fraction pulls the product right back down into range -- at y=4.992 the fraction
+        ; is 1/128 and $ffff becomes 512, two cells. The DDA then took a step it should
+        ; never take, hit the wrong wall, and drew a column of the wrong height straight
+        ; through the scene. Saturate the product too, on both axes.
+        lda ddxH
+        and ddx
+        cmp #$ff
+        bne cySx
+        sta sdx
+        sta sdxH
+cySx:   lda ddyH
+        and ddy
+        cmp #$ff
+        bne cydone
+        sta sdy
+        sta sdyH
 cydone: ldy #24
         ldx cell
 cdda:   lda sdxH
