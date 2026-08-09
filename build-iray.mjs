@@ -190,14 +190,14 @@ const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of mul
 // through colour RAM, 01 through $d022 -- so nothing about the image changes. What changes is
 // sprite priority: 11 is foreground and clips sprites, 01 is background and does not.
 //
-// Only the full cell needs to clip. A partial cell is the one-row band at a wall's top or
-// bottom boundary, and geometry keeps an orb away from those on a NEAR wall: the top edge sits
-// at 100-h and the bottom at 100+h, while the orb stands on the floor at 100+h_orb with
-// h_orb < h_wall, so it is above the bottom edge and far below the top one. On a FAR wall the
-// orb is in front and must not be clipped at all -- which is what was going wrong, the bottom
-// edge cutting two rows out of an orb standing in front of it.
-const patBytes = p => {
-  const full = p.every(v => v >= 8);
+// Full cells and STEP cells clip; RAMP cells do not. A ramp is the one-row band along a
+// wall's top or bottom boundary, and geometry keeps an orb off those on a near wall: the top
+// edge is at 100-h, the bottom at 100+h, and the orb stands at 100+h_orb with h_orb < h_wall,
+// so it is above the bottom edge and far below the top. A STEP is a corner, whose boundary
+// runs the whole height of the wall -- an orb meets those all the time, and making them
+// background let an orb draw straight over a near wall's edge.
+const patBytes = (p, isStep) => {
+  const full = isStep || p.every(v => v >= 8);
   const [a, b, c, d] = full ? [0xc0, 0x30, 0x0c, 0x03] : [0x40, 0x10, 0x04, 0x01];
   return [...Array(8)].map((_, i) =>
     (p[0] > 7 - i ? a : 0) | (p[1] > 7 - i ? b : 0) | (p[2] > 7 - i ? c : 0) | (p[3] > 7 - i ? d : 0));
@@ -342,7 +342,11 @@ function placeAll(groups) {
     for (let i = 0; i < need; i++) { dropped.push(rank[i].p); keep.delete(rank[i].p.join(',')); }
     for (let i = all.length - 1; i >= 0; i--) if (!keep.has(all[i].join(','))) all.splice(i, 1);
   }
-  for (const p of all) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p)); }
+  const stepKeys = new Set(STEPS.chosen.map(q => q.join(',')));
+  for (const p of all) { const k = p.join(',');
+    codeOf.set(k, glyphs.length); glyphs.push(patBytes(p, stepKeys.has(k))); }
+  console.error(`  cell codes: ${all.filter(p => stepKeys.has(p.join(','))).length} step (clip ` +
+    `sprites) / ${all.filter(p => !stepKeys.has(p.join(','))).length} ramp (do not)`);
   console.error(`  dropped ${dropped.length} never-sampled patterns` +
     (dropped.length ? ` (worst substitution is ${Math.max(...dropped.map(p => {
       let d = 9; for (const q of all) { const h = hamm(p, q); if (h < d) d = h; } return d; }))}` +
