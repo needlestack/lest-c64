@@ -271,6 +271,17 @@ const digGlyph = [
  5,5,2,5,5, 5,5,2,2,2];                                          // X (16), Y (17) labels
 const NGLYPH = digGlyph.length / 5;
 
+// SPRITES gates the orbs AND everything the charset carries on their behalf, so it has to be
+// known before the first glyph is interned -- hence up here rather than down with the other
+// knobs. On this branch it defaults OFF: walls and seams only.
+//
+// Why the charset cares at all: the foreground/background split below is INVISIBLE. Bit pairs
+// 01 and 11 are both black (01 through $d022, 11 through colour RAM), and the only thing that
+// tells them apart is sprite priority. With no sprites, every code can be foreground, and the
+// 43 codes spent on saying otherwise -- SOLID's twin, the six splits, the four seam-bg, the 12
+// ramp/step background twins and the 20 shared-shape foreground duplicates -- come back.
+const SPRITES = process.env.SPRITES === '1';
+
 // --- assign char codes: cell patterns first, then the 18 readout glyphs ---
 const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of multicolor bitmap
 // Wall pixels are bit pair 11, not 01, and that is load-bearing: in MULTICOLOR char mode the
@@ -320,8 +331,13 @@ const patBytes = (p, isStep) => {
     const leftTaller = p[bi - 1] > p[bi];
     return [0, 1, 2, 3].map(k => ((leftTaller ? k < bi : k >= bi) ? FGPX : BGPX)[k]);
   };
-  const m = (STEPSTATIC && isStep) ? stepInk()
-                                   : (isStep || p.every(v => v >= 8) ? FGPX : BGPX);
+  // No sprites means nothing reads the priority bit, so the whole fg/bg question is moot and
+  // every column goes foreground. That is not a cosmetic simplification: it is what makes a
+  // shape's code depend on its SHAPE alone, so a ramp and a step that look alike can share one
+  // code again -- which is where the background twins and foreground duplicates come back from.
+  const m = !SPRITES                 ? FGPX
+          : (STEPSTATIC && isStep)   ? stepInk()
+                                     : (isStep || p.every(v => v >= 8) ? FGPX : BGPX);
   return [...Array(8)].map((_, i) =>
     (p[0] > 7 - i ? m[0] : 0) | (p[1] > 7 - i ? m[1] : 0) | (p[2] > 7 - i ? m[2] : 0) | (p[3] > 7 - i ? m[3] : 0));
 };
@@ -331,13 +347,17 @@ const bgOnly = b => { let o = 0;
   return o; };
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
+const BLANK = codeOf.get('0,0,0,0'), SOLID = codeOf.get('8,8,8,8');
 // SOLID's twin: the same solid black, but bit pair 01, which the VIC classes as BACKGROUND and
 // so does NOT clip sprites against. Cells under a sprite whose wall is FARTHER than it get
 // repointed to this, which is the only way to express per-column depth -- $d01b is one bit for
 // the whole sprite. Only SOLID needs a twin: a ground object meets a wall's flat body, never
 // the one-cell band at its top, so the ramp and step patterns can stay single-coded.
-const SOLIDBG = glyphs.length;
-glyphs.push([...Array(8)].fill(+(process.env.VSTEPDBG ?? 0) ? 0xaa : 0x55));  // 01 01 01 01
+// Without sprites there is nothing to be background FOR, so SOLIDBG aliases SOLID and costs no
+// code. Every "is this cell still a plain fill?" test in the seam path compares against it and
+// keeps working unchanged, because a plain fill is now simply SOLID.
+const SOLIDBG = SPRITES ? glyphs.length : SOLID;
+if (SPRITES) glyphs.push([...Array(8)].fill(+(process.env.VSTEPDBG ?? 0) ? 0xaa : 0x55));  // 01 01 01 01
 
 // ---- SOLID split six ways: black on black, with a priority edge inside the cell ----
 // Sprite priority is a property of the BIT PAIR, so it is per logical column, not per cell.
@@ -349,8 +369,11 @@ glyphs.push([...Array(8)].fill(+(process.env.VSTEPDBG ?? 0) ? 0xaa : 0x55));  //
 // Six codes: the boundary falls at column 1, 2 or 3 (a boundary on the cell edge leaves the
 // cell showing one wall, so there is nothing to split), and either side may be the near one.
 // Code = SPLIT0 + (k-1)*2 + (the FIRST run is the near one ? 0 : 1).
+// Six codes that say nothing about the IMAGE -- both sides are black -- so with no sprite to
+// clip they are six codes of pure nothing. Only fgCodeT reads them, and that table is gated on
+// SPRITES too.
 const SPLIT0 = glyphs.length;
-for (let k = 1; k <= 3; k++) for (const leftFg of [true, false])
+if (SPRITES) for (let k = 1; k <= 3; k++) for (const leftFg of [true, false])
   glyphs.push([...Array(8)].fill([0, 1, 2, 3].reduce(
     (b, c) => b | (((c < k) === leftFg ? 3 : 1) << (6 - 2 * c)), 0)));
 
@@ -778,8 +801,10 @@ for (let k = 0; k < 4; k++) {
 // pairs are spent on white and black. So a seam on a wall that must not clip a sprite costs
 // two pixels of line across it instead of the whole cell, and the wall keeps its seam. This
 // is what lets a seam cell take part in the ordinary foreground rule like any other wall.
-const SEAMBG0 = glyphs.length;
-for (let k = 0; k < 4; k++) {
+// With no sprite to pass behind them there is one seam form, not two, so SEAMBG0 aliases SEAM0
+// and the seam path picks the same four codes it always did.
+const SEAMBG0 = SPRITES ? glyphs.length : SEAM0;
+if (SPRITES) for (let k = 0; k < 4; k++) {
   const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : 1) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
@@ -796,14 +821,17 @@ const patOfCode = (() => { const m = new Map();
 const stepInked = new Set();
 for (let c = VSTEP0; c < VSTEP0 + VSTEPN; c++) stepInked.add(c);
 for (let c = SSTEP0; c < SSTEP0 + SSTEPS.length; c++) stepInked.add(c);
+// A collision is only a problem when the two codes must DIFFER in priority. Everything is
+// foreground now, so a ramp and a step of the same shape are the same glyph and can share the
+// one code, exactly as they did before occlusion existed.
 const bgTwinOf = new Map();
-for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
+if (SPRITES) for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
   const c = codeFor(rampPat(a + CLO, b + CLO));
   if (stepInked.has(c) && !bgTwinOf.has(c)) {
     bgTwinOf.set(c, glyphs.length); glyphs.push(glyphs[c].map(bgOnly));
   }
 }
-console.error(`  ramp/step shape collisions: ${bgTwinOf.size} step codes needed a background twin`);
+if (SPRITES) console.error(`  ramp/step shape collisions: ${bgTwinOf.size} step codes needed a background twin`);
 // ---- foreground duplicates for the busiest SHARED shapes ----
 // A shape reachable from BOTH tables is background-inked, because a ramp can never occlude --
 // and that leaves a hole in a wall's vertical edge wherever the edge cell's shape happens to
@@ -821,8 +849,10 @@ for (let k = 0; k < 3; k++) for (const [slot, pat] of STEPS.assign[k]) {
 const rampReach = new Set();
 for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) rampReach.add(codeFor(rampPat(a + CLO, b + CLO)));
 const SHAREDUP = +(process.env.SHAREDUP ?? 20);
+// Same story as the background twins, from the other side: a shared shape only needed a second
+// code because one user wanted it foreground and the other background. Nobody wants background.
 const fgDupOf = new Map();
-{
+if (SPRITES) {
   const ranked = [...stepUse].filter(([c]) => rampReach.has(c) && !stepInked.has(c))
                              .sort((x, y) => y[1] - x[1]);
   let covered = 0, tot = ranked.reduce((a, [, n]) => a + n, 0);
@@ -835,11 +865,13 @@ const fgDupOf = new Map();
     `${tot ? (100 * covered / tot).toFixed(0) : 0}% of shared-code step draws`);
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 8 seams = ${glyphs.length} > 256`);
-console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + 8 seam = ${glyphs.length}/256`);
+console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + ${SPRITES ? 8 : 4} seam = ${glyphs.length}/256` +
+  (SPRITES ? '' : `  -- ${256 - glyphs.length} free (SPRITES=0 hands back the occlusion codes)`));
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
-              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam, ${SEAMBG0}-${SEAMBG0+3} seam-bg`);
+              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam` +
+              (SPRITES ? `, ${SEAMBG0}-${SEAMBG0+3} seam-bg` : ''));
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
 // An EDGE cell must never emit SOLID. SOLID is inked all-foreground because fgCodeT needs it as
 // rule 3's "every column clips" answer, but a ramp is one face and can never occlude -- and 25
@@ -871,7 +903,9 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
   const rampCodes = new Set(rampT);
   const stepCodes = new Set([...stepT[0], ...stepT[1], ...stepT[2]]);
   let reinked = 0, shared = 0;
-  for (const c of stepCodes) {
+  // Without sprites patBytes returns the same foreground ink for every pattern, so this pass
+  // would rewrite each glyph with its own bytes. Skip it rather than report a no-op as work.
+  for (const c of (SPRITES ? stepCodes : [])) {
     if (c === SOLIDBG || c === 0) continue;
     if (rampCodes.has(c)) { shared++; continue; }
     if (stepInked.has(c)) continue;
@@ -901,7 +935,7 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
           `cumulative ${(100 * run / total).toFixed(1)}%`);
     });
   }
-  console.error(`  step ink: ${reinked} step-only codes re-inked; ${shared} shared with rampT ` +
+  if (SPRITES) console.error(`  step ink: ${reinked} step-only codes re-inked; ${shared} shared with rampT ` +
     `and left background (a duplicate each would cost ${shared} codes)`);
 }
 
@@ -997,7 +1031,7 @@ const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
 // wL*16 + wR, and the left level was being shifted left four times right after clampT
 // handed it over -- 8 cycles per edge cell to undo a table lookup's own output.
 const clampT16 = clampT.map(v => v << 4);
-const BLANK = codeOf.get('0,0,0,0'), SOLID = codeOf.get('8,8,8,8');
+// BLANK / SOLID are declared up where they are interned -- SOLIDBG's alias needs SOLID.
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
 const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255);
 // per cell-row: cell is fully solid when min height >= t1, fully blank when max < tb.
@@ -1095,7 +1129,7 @@ const RELOC = +(process.env.RELOC ??
 // Only the BODY can vary per orb. Bit pair 10 reads $d027+n, which is per sprite, but 01 and
 // 11 read $d025/$d026, which are single registers shared by all eight. So the underside and
 // the highlight are common to every orb on screen and only the body colour is free.
-const SPRITES = process.env.SPRITES !== '0';
+// SPRITES itself is declared up with the charset -- it decides how many codes exist.
 // SPRPRI=0 sets the initial priority byte; orbMove overwrites it every frame, so it is not an
 // A/B for occlusion. ORBMIX=0 is -- it skips repointing far cells to SOLID's twin.
 const SPRPRI = +(process.env.SPRPRI ?? 1);
@@ -1257,7 +1291,7 @@ const orbOcc = ORBS.map(o => {
   }
   return m;
 });
-console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs = ${OCCBYTES * ORBS.length}` +
+if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs = ${OCCBYTES * ORBS.length}` +
   ` bytes; a run can occlude ${(orbOcc.reduce((a, m) =>
     a + m.reduce((b, v) => b + v.toString(2).split('1').length - 1, 0), 0) / ORBS.length).toFixed(1)}` +
   ` orbs on average`);
@@ -1357,7 +1391,7 @@ if (process.env.ORBDIAG === '1') {
 const _pal = [...new Set(ORBBODY)].length === 1
   ? `all body colour ${ORBBODY[0]}`
   : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
-console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
+if (SPRITES) console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
   `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}; ` +
   `${(100 * candList.filter((_, i) => i % 3 === 2 && (candList[i] & 0x80)).length /
      (candList.length / 3)).toFixed(0)}% of candidates could be occluded from their cell`);
@@ -1395,7 +1429,7 @@ const orbVarT = [...Array(256)].map((_, h) => {
     band.push(hs.length ? `${ORBWIDE[v]}px@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
       `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBWIDE[v]}px UNREACHABLE`);
   }
-  console.error(`  orb size ladder (cells): ${band.join('  ')}`);
+  if (SPRITES) console.error(`  orb size ladder (cells): ${band.join('  ')}`);
 }
 const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
 const orbExpT = ORBEXP.map(e => e);
@@ -1902,11 +1936,13 @@ ${NORAY ? '        jmp subDn' : ''}
         ; costs with its dex and bpl, and 80 bytes of table twice a frame is enough for
         ; that to matter. 240 bytes of code for ~700 cycles.
         lda #$00
-${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS ? `
+${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS ? `${SPRITES ? `
         lda #$00
 ${[...Array(NCELL)].map((_, i) => `        sta fgCell+${i}`).join('\n')}
         lda #${hx(SOLIDBG)}     ; and every wall back to BACKGROUND black -- a sprite passes in
-                                ; front of it unless an orb asks for the column to clip
+                                ; front of it unless an orb asks for the column to clip` : `
+        lda #${hx(SOLIDBG)}     ; and every wall back to a plain fill. fgCell is not cleared:
+                                ; only orbPaint writes it, and there are no orbs`}
 ${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}` : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
         asl
@@ -2111,7 +2147,7 @@ subFlush:                       ; interpolate + seam one maximal face
         lda spanR
         cmp spanL
         bcc subFDn              ; empty
-        ; ---- which wall faces does each CELL show? ----
+${SPRITES ? `        ; ---- which wall faces does each CELL show? ----
         ; A span has one face at both ends by construction, so filling per cell here costs at
         ; most 40 stores a frame -- against 160 if faceIdT were filled per column, which it is
         ; not (castRay writes it only where it actually marched).
@@ -2153,7 +2189,9 @@ cfLp:   inx
         cpx tmp2
         bcc cfLp
 cfDn:
-        jsr interpSpan
+` : `        ; cellFaceT/cellFace2T are not built: orbPaint was their only reader, so with no
+        ; sprites this whole per-cell fill is dead work in the subdivision's hot path.
+`}        jsr interpSpan
 ${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
