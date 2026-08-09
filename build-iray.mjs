@@ -651,6 +651,10 @@ const NOEDGE = flag('NOEDGE');
 // horizontal resolution could win -- halving the column count can save at most about half of
 // what the loop costs, and this says what that loop costs.
 const FLATSPAN = flag('FLATSPAN');
+// NOMINMAX=1: take the cell's min and max from its first column instead of comparing all
+// four. Renders slightly wrong; it prices the comparison half of prepCells, leaving the loop
+// overhead in place so the two can be told apart.
+const NOMINMAX = flag('NOMINMAX');
 const ORBMIX = process.env.ORBMIX !== '0';
 // Skip reprojecting when the viewpoint has not moved. OFF for now -- full calculations
 // whether moving or not -- because it flatters stationary frames and hides what the projection
@@ -1580,7 +1584,11 @@ prepCells:
         ; tables that already fold every value >= 93 / >= 100 to the same answer, so the
         ; min/max below never needed capped input either. The two reads cap themselves now.
 pcLp:   ldx zpc
-        lda #$ff
+${NOMINMAX ? `        lda colH+0,x
+        sta tmp
+        sta tmp2
+        jmp pcNmx3
+` : ''}        lda #$ff
         sta tmp                 ; running min
         lda #$00
         sta tmp2                ; running max
