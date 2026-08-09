@@ -212,13 +212,9 @@ oe      = $cb0a
 o3      = $cb0b
 ocoff   = $cb0c
 ovar    = $cb0d
-ocnear  = $cb0f
 ocol    = $cb10
-ocspan  = $cb11
 ocl     = $cb12
 ocr     = $cb13
-ocrow   = $cb14
-ocrw2   = $cb15
 oidx    = $cb17
 ocn3    = $cb2a
 ocn     = $cb18
@@ -230,7 +226,6 @@ omYY    = $cb1d
 omPri   = $cb1e
 omX8    = $cb1f
 omBit   = $cb20
-omMix   = $cb21
 obX     = $cb30
 obY     = $cb38
 obP     = $cb40
@@ -254,10 +249,6 @@ oax     = $cb70
 oay     = $cb71
 oixS    = $cb72
 oiyS    = $cb73
-ocmask  = $cb74                  ; per cell under the sprite: 1 = its face cannot occlude
-ocsplit = $cb76                  ; ... 1 = its two runs DISAGREE, so it needs a column split
-ocside  = $cb77                  ; ... 1 = of those two, the FIRST run is the near one
-oflag   = $cb75                  ; DBGORB: candidates that passed the bearing test
 odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -1035,7 +1026,34 @@ rfSt3:  lda stepT3,y
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
-        lda erow
+        ; A vertical edge is the piece an orb meets at a corner, and it obeys the same rule
+        ; as the wall body: background unless a column of this cell must clip something. Its
+        ; ink is on the wall's side of the cell and nowhere else, so "any column" is exact
+        ; here -- the empty side has no pixels to classify. Ramps are never foreground.
+        cmp #$09
+        bcc rfSt0
+        cmp #$0f
+        bcs rfSt0
+        ldy colc
+        lda fgCell,y
+        and #$0f
+        bne rfSt0               ; something here must clip: keep the foreground form
+        lda ecode
+        clc
+        adc #$06      ; ... otherwise its background twin
+        sta ecode
+        ; A wall-meets-wall step: the cell is part near wall, part far, and its twin puts the
+        ; priority edge between them. Only where the twin has this pattern's own ink -- see
+        ; SPLITSUB -- so the wall never changes shape, and only where something must clip.
+        ldy colc
+        lda fgCell,y
+        and #$0f
+        beq rfSt0
+        ldy ecode
+        lda splitT,y
+        beq rfSt0
+        sta ecode
+rfSt0:  lda erow
         clc
         adc bufOff
         tay
@@ -3505,7 +3523,6 @@ ofyOk:  sta ofy
         sta omPri
         sta omX8
         sta onv
-        sta omMix
         lda py+1                ; which cell is the player standing in?
         asl
         asl
@@ -3542,7 +3559,6 @@ obLoop: ldy ocy
 obPos:  iny
         sta tmp                 ; how far off the bearing we are
         lda (ocptr),y
-        sta oflag               ; bit 7: some run visible from this cell could occlude this orb
         and #$7f
         cmp tmp
         bcc obNext              ; outside the window: not on screen
@@ -3905,7 +3921,7 @@ opBR2:  sta ocmax
         bcs opBR3
         lda ocl
 opBR3:  sta ocr
-opDone: 
+opDone:
         ; --- take a sprite slot ---
         ldx onv
         lda orbBitT,x
@@ -4429,8 +4445,6 @@ orbExpT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1
 orbHalfT: !byte 11,12,11,12,11,12,11,12,11,12,11,12,22,24,22,24,22,24
 orbYBaseT: !byte 129,129,129,129,129,129,129,129,129,129,129,129,108,108,108,108,108,108
 orbColT: !byte 0,1,1,2,2,3,3,4,4,5,5,6,7,8,9,10,11,12
-orbSpHT: !byte 21,21,21,21,21,21,21,21,21,21,21,21,42,42,42,42,42,42
-orbBlankT: !byte 19,16,15,14,13,9,8,7,6,2,1,0,16,14,12,4,2,0   ; transparent rows above the ball, per variant
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the
 ; columns of that first and last cell which lie inside it. Bit 3 is the leftmost column.
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
@@ -4505,6 +4519,6 @@ stepT3: !byte 223,37,38,180,194,192,184,202,11,52,52,227,49,59,41,49,43,43,54,54
 ; splitT: cell code -> the same cell drawn with a priority edge down the run boundary inside
 ; it, or 0 for "no such twin, fall back to a whole-cell answer". Sits above the step tables
 ; because the assembler takes origins in ascending order only.
-splitT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,29,30,31,32,33,34,35,36,0,0,0,0,0,0,0,0,0,0,0,0,0,0,31,29,31,0,0,0,0,0,0,0,0,0,30,0,0,0,0,0,0,30,0,0,0,0,0,0,0,0,0,31,30,0,0,0,0,0,0,0,0,0,0,30,0,0,0,0,0,0,0,0,0,0,29,0,0,0,0,0,0,0,0,0,0,30,30,0,0,0,0,0,0,0,0,0,0,29,30,30,0,0,0,0,0,0,0,0,0,29,29,35,0,0,0,0,0,0,0,0,30,35,34,34,34,34,32,32,29,33,32,33,33,32,32,32,33,33,32,36,32,36,32,33,33,33,36,32,36,33,33,36,36,32,36,34,34,36,33,0,0,0,36,0,35,33,0,36,36,35,31,0,0,0,36,0,33,0,36,0,30,0,0,0,36,0,32,30,36,36,0,30,35,0,34,36,34,0,0,0,0,0,0,0,0,0,0,0,33,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+splitT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,29,30,31,32,33,34,35,36,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
 

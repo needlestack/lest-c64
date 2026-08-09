@@ -55,8 +55,10 @@ src.forEach((line, i) => {
   // `lda #<foo` / `#>foo` takes foo's ADDRESS -- self-modifying code and pointer setup, not a
   // read of its contents. Counting those as reads is what made cwB/cbB look like dead reads.
   const addrOnly = /#[<>]/.test(operand);
-  // `jmp (jv)` reads jv. Without this, every indirect dispatch vector reads as write-only.
-  const indirect = op === 'jmp' && /^\(/.test(operand.trim());
+  // `jmp (jv)` reads jv, and so does `sta (ppPtr),y` -- storing THROUGH a pointer reads the
+  // pointer. Without this, every indirect dispatch vector and every scratch pointer reads as
+  // write-only, and the next person deletes one.
+  const indirect = /^\(/.test(operand.trim());
   for (const name of operand.matchAll(/\b([a-z]\w*)\b/gi)) {
     if (labels.has(name[1])) refs.add(name[1]);
     const v = vars.get(name[1]); if (!v || addrOnly) continue;
