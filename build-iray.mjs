@@ -113,12 +113,13 @@ console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by 
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
 // Movement is per 60Hz TICK, not per frame -- see readKeys. MOVE_STEP is the table's
 // precision, not the speed: the step is scaled by elapsed ticks and then shifted down by
-// MOVE_SHIFT, so the effective rate is 68 >> 4 = 4.25 units of 1/256 cell per tick, which is
-// 0.996 cells a second. Keeping the table at 68 rather than 4 is what stops the direction
-// quantising: cos(a)*4 rounds to five levels and you walk visibly off-axis. The precision is
-// thrown away at the end, by the shift, and 68 is also the most the table can hold -- the
-// entries are signed bytes, so anything past 127 wraps.
-const MOVE_STEP = 68, MOVE_SHIFT = 4;
+// MOVE_SHIFT, so the effective rate is 64 >> 4 = 4 units of 1/256 cell per tick = 0.94 cells
+// a second. Round numbers rather than exact ones: neither constant costs anything at runtime
+// (the table is built here, the rate is an immediate), so there is no reason to carry 68 and
+// 4.25 around for the last 6%. Keeping the table at 64 rather than 4 is what stops the
+// DIRECTION quantising -- cos(a)*4 rounds to five levels and you walk visibly off-axis -- and
+// 64 leaves headroom under the signed-byte limit the entries have to fit.
+const MOVE_STEP = 64, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
@@ -596,9 +597,9 @@ const PY = hexArg('PY', 0x0180, 0xffff);
 // growing it. 6/256 = 8.4 degrees per frame.
 // Turning is accumulated in 1/256ths of an angle unit, because 60 deg/s is 0.711 units per
 // tick -- less than one. pa is the high byte of a 16-bit angle and paF the low, so the
-// fraction carries between frames instead of being lost. 182/256 * 60 ticks = 42.7 units a
-// second = exactly 60 degrees.
-const TURN_RATE = 182;
+// fraction carries between frames instead of being lost. 3/4 of a unit per tick * 60 ticks =
+// 45 units a second = 63 degrees.
+const TURN_RATE = 192;          // 3/4 of an angle unit per tick
 // Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 4 units of 1/256
 // cell per tick, 32 ticks is half a cell against walls a whole cell thick, and the collision
 // box catches anything that lands inside one. It has to clear the 4x run multiplier too, or
