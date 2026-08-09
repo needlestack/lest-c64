@@ -90,20 +90,25 @@ for (let i = 0; i < 16; i++) {
 const mapW = (x, y) => (x < 0 || y < 0 || x > 15 || y > 15) ? 1 : map[y * 16 + x];
 const runW = new Array(256).fill(0), runE = new Array(256).fill(0), runN = new Array(256).fill(0), runS = new Array(256).fill(0);
 let nextRun = 1;
+// Every run lies in ONE plane and faces one way -- W runs are a vertical strip at constant x,
+// N runs a horizontal strip at constant y -- which is what makes sprite occlusion a single
+// comparison later. runPlane is the coordinate, runFace which side is the visible one.
+const runPlane = [0], runFace = [0];    // index by run id; 0 is "no run"
+const newRun = (plane, face) => { runPlane[nextRun] = plane; runFace[nextRun] = face; return nextRun++; };
 for (let x = 0; x < 16; x++) {          // vertical planes: west/east faces, contiguous in y
   let wp = false, ep = false, wId = 0, eId = 0;
   for (let y = 0; y < 16; y++) {
     const wf = mapW(x, y) && !mapW(x - 1, y), ef = mapW(x, y) && !mapW(x + 1, y);
-    if (wf) { if (!wp) wId = nextRun++; runW[y * 16 + x] = wId; } wp = wf;
-    if (ef) { if (!ep) eId = nextRun++; runE[y * 16 + x] = eId; } ep = ef;
+    if (wf) { if (!wp) wId = newRun(x, 'W'); runW[y * 16 + x] = wId; } wp = wf;
+    if (ef) { if (!ep) eId = newRun(x + 1, 'E'); runE[y * 16 + x] = eId; } ep = ef;
   }
 }
 for (let y = 0; y < 16; y++) {          // horizontal planes: north/south faces, contiguous in x
   let np = false, sp = false, nId = 0, sId = 0;
   for (let x = 0; x < 16; x++) {
     const nf = mapW(x, y) && !mapW(x, y - 1), sf = mapW(x, y) && !mapW(x, y + 1);
-    if (nf) { if (!np) nId = nextRun++; runN[y * 16 + x] = nId; } np = nf;
-    if (sf) { if (!sp) sId = nextRun++; runS[y * 16 + x] = sId; } sp = sf;
+    if (nf) { if (!np) nId = newRun(y, 'N'); runN[y * 16 + x] = nId; } np = nf;
+    if (sf) { if (!sp) sId = newRun(y + 1, 'S'); runS[y * 16 + x] = sId; } sp = sf;
   }
 }
 if (nextRun - 1 > 255) throw new Error(`too many wall runs (${nextRun - 1}) for a byte id`);
@@ -794,6 +799,32 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // few: mean 4.3, worst 9. Sorted by distance, so taking the first eight that project takes the
 // NEAREST eight, and assigning them to sprites in order gets the overlap priority right for
 // free -- sprite 0 draws over sprite 1.
+// ---- which walls can occlude which orb ----
+// A wall face occludes an orb only if the orb is on the FAR side of that face's plane. We
+// render camera-facing faces only, so a face that appears on screen already faces the camera;
+// if the orb is beyond it, the face is between them. That answer does not involve the camera
+// at all, so it is a constant: 66 runs x 34 orbs, computed here, one bit each.
+//
+// This replaces comparing the orb's height against the wall's. Depth comparison is per column
+// and quantised, so two neighbouring cells of one flat wall could disagree -- which is where
+// every occlusion artifact in this thing has come from. A plane test is per FACE, so every
+// cell showing that face gets the same answer by construction.
+const OCCBYTES = (nextRun + 7) >> 3;
+const orbOcc = ORBS.map(o => {
+  const m = new Array(OCCBYTES).fill(0);
+  for (let r = 1; r < nextRun; r++) {
+    const k = runPlane[r];
+    const beyond = runFace[r] === 'W' ? o.x > k : runFace[r] === 'E' ? o.x < k
+                 : runFace[r] === 'N' ? o.y > k : o.y < k;
+    if (beyond) m[r >> 3] |= 1 << (r & 7);
+  }
+  return m;
+});
+console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs = ${OCCBYTES * ORBS.length}` +
+  ` bytes; a run can occlude ${(orbOcc.reduce((a, m) =>
+    a + m.reduce((b, v) => b + v.toString(2).split('1').length - 1, 0), 0) / ORBS.length).toFixed(1)}` +
+  ` orbs on average`);
+
 const losFree = (ax, ay, bx, by) => {
   const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
   for (let i = 1; i < n; i++) { const t = i / n, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
@@ -824,6 +855,31 @@ for (let cell = 0; cell < 256; cell++) {
   // bearing the player may still see it. The list covers all 360 degrees but the FOV is 66,
   // so without this test four candidates in five are fully projected only to be discarded --
   // and a full projection is about 2000 cycles against 20 for the test.
+  // What can get BETWEEN an eye position in this cell and the orb? Asking "what runs are
+  // visible from here" was far too broad -- from most cells you can see most of the map, so
+  // it skipped almost nothing. March each eye position at the orb instead, across the orb's
+  // width, and see what is hit on the way.
+  const blockers = (o) => {
+    const out = new Set();
+    for (const [ex, ey] of eye) {
+      const vx = o.x - ex, vy = o.y - ey, L = Math.hypot(vx, vy) || 1;
+      for (const off of [-0.25, 0, 0.25]) {          // the orb has width, so sample across it
+        const tx = o.x - vy / L * off, ty = o.y + vx / L * off;
+        const dx = tx - ex, dy = ty - ey, n = Math.ceil(Math.hypot(dx, dy) * 8);
+        for (let i = 1; i < n; i++) {
+          const t = i / n, x = ex + dx * t, y = ey + dy * t;
+          const mx = x | 0, my = y | 0;
+          if (mx < 0 || my < 0 || mx > 15 || my > 15) break;
+          if (map[my * 16 + mx]) {                    // which face did we come through?
+            const px2 = ex + dx * ((i - 1) / n), py2 = ey + dy * ((i - 1) / n);
+            const t2 = (px2 | 0) !== mx ? (dx > 0 ? runW : runE) : (dy > 0 ? runN : runS);
+            out.add(t2[my * 16 + mx]); break;
+          }
+        }
+      }
+    }
+    return out;
+  };
   for (const v of vis) {
     const o = ORBS[v.i];
     const brg = Math.round(Math.atan2(o.y - cy, o.x - cx) / (2 * Math.PI) * 256) & 255;
@@ -831,7 +887,10 @@ for (let cell = 0; cell < 256; cell++) {
     // centre -- up to 0.71 cells away, which matters enormously for a near orb.
     const win = Math.min(127, Math.ceil(FOV / 2 + Math.atan2(0.71, Math.max(v.d, 0.71))
                                                   / (2 * Math.PI) * 256) + 2);
-    candList.push(v.i, brg, win);
+    // Bit 7 of the window byte is spare (windows never exceed 127): set it when some run
+    // visible from this cell could occlude this orb.
+    const canOcc = [...blockers(o)].some(r => (orbOcc[v.i][r >> 3] >> (r & 7)) & 1);
+    candList.push(v.i, brg, win | (canOcc ? 0x80 : 0));
   }
 }
 if (candList.length > 0x2300 - 0x1900) throw new Error(
@@ -840,7 +899,9 @@ const _pal = [...new Set(ORBBODY)].length === 1
   ? `all body colour ${ORBBODY[0]}`
   : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
 console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
-  `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}`);
+  `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}; ` +
+  `${(100 * candList.filter((_, i) => i % 3 === 2 && (candList[i] & 0x80)).length /
+     (candList.length / 3)).toFixed(0)}% of candidates could be occluded from their cell`);
 // Every orb is at a cell CENTRE, and orbOne leans on it hard: the offset to an orb is an
 // integer cell difference plus a fraction that is the same for every orb in the frame, so the
 // fractional half of each product becomes a per-frame constant and the per-orb half drops from
@@ -848,6 +909,7 @@ console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
 for (const o of ORBS) if ((o.x % 1) !== 0.5 || (o.y % 1) !== 0.5)
   throw new Error(`orb at (${o.x},${o.y}) is not cell-centred; orbOne assumes it is`);
 const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
+
 const orbCol = ORBS.map(o => ORBBODY[o.c]);
 // h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
 // locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
@@ -893,6 +955,12 @@ const orbYBaseT = ORBANCH.map(a => 150 - a);
 const orbColT = ORBWIDE.map(w => w >> 2);        // half-width in LOGICAL columns
 const orbSpHT = ORBEXP.map(e => e ? 42 : 21);    // sprite height in raster lines
 const orbBitT = [...Array(8)].map((_, i) => 1 << i);
+// The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
+// is (ptr),y with no multiply.
+const OCCBASE = RELOC + 0x2200;   // above the visibility lists; see the org below
+const orbOccFlat = orbOcc.flat();
+const orbOccLo = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
+const orbOccHi = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
@@ -1119,6 +1187,7 @@ cwB     = $c528
 cbA     = $c550                 ; ... and the solid run start, or $ff for "always redraw"
 cbB     = $c578
 faceIdT = $c400
+cellFaceT = $c4a0            ; per cell-column (40): the wall run its face belongs to
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
@@ -1153,6 +1222,8 @@ o2      = $96
 ivL     = $97
 ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
 ohgt    = $9d
+omptr   = $87                    ; 2 bytes: this orb's occluder bitmap. Shares oaL/oaH,
+                                ;   which are dead once the column offset has been worked out
 ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
 ; ... and the cold tail, touched once or twice each, left in absolute RAM
 ocos    = $cb00
@@ -1215,7 +1286,9 @@ oiy     = $cb6f
 oax     = $cb70
 oay     = $cb71
 oixS    = $cb72
-oiyS    = $cb73                  ; DBGORB: candidates that passed the bearing test
+oiyS    = $cb73
+ocmask  = $cb74                  ; per cell under the sprite: 1 = its face cannot occlude
+oflag   = $cb75                  ; DBGORB: candidates that passed the bearing test
 odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -1545,6 +1618,27 @@ subFlush:                       ; interpolate + seam one maximal face
         lda spanR
         cmp spanL
         bcc subFDn              ; empty
+        ; ---- which wall face does each CELL show? ----
+        ; A span has one face at both ends by construction, so filling per cell here costs at
+        ; most 40 stores a frame -- against 160 if faceIdT were filled per column, which it is
+        ; not (castRay writes it only where it actually marched). Cell granularity is all the
+        ; sprite occlusion needs: it repoints whole cells anyway. A cell straddling two spans
+        ; takes the later one, which is the same approximation the repointing already makes.
+        lda spanL
+        lsr
+        lsr
+        tax
+        lda spanR
+        lsr
+        lsr
+        sta tmp2
+        ldy spanL
+        lda faceIdT,y           ; the span's face: both ends agree, that is why it merged
+cfLp:   sta cellFaceT,x
+        inx
+        cpx tmp2
+        bcc cfLp
+        beq cfLp
         jsr interpSpan
 ${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}subFDn: rts
 
@@ -3451,10 +3545,13 @@ obLoop: ldy ocy
         clc
         adc #$01
 obPos:  iny
-        cmp (ocptr),y
-        beq obNear
-        bcs obNext
-obNear: jsr orbOne
+        sta tmp                 ; how far off the bearing we are
+        lda (ocptr),y
+        sta oflag               ; bit 7: some run visible from this cell could occlude this orb
+        and #$7f
+        cmp tmp
+        bcc obNext              ; outside the window: not on screen
+        jsr orbOne
 obNext: lda ocy
         clc
         adc #$03
@@ -3811,10 +3908,19 @@ oxDn:   ldx ovar
         cmp #251
         bcs orbNo               ; top of the sprite is past the last visible raster line
         sta o3
-        ; --- depth: $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be
-        ; told "behind everything" or "in front of everything". Walls FARTHER than the orb are
-        ; foreground too and would clip it just as eagerly, which is very visible down a
-        ; corridor. Scan what the sprite covers and decide. Taller means nearer.
+        ; ---- occlusion: is the orb beyond the faces it overlaps? ----
+        ; A face occludes the orb only if the orb lies on the FAR side of its plane. We render
+        ; camera-facing faces only, so anything on screen already faces the camera; if the orb
+        ; is beyond it, the face is between them. That answer never involves the camera, so it
+        ; is precomputed at build time: one bit per (orb, run).
+        ;
+        ; Per FACE, not per column, and that is the whole point. Comparing the orb's height
+        ; against the wall's was per column and quantised, so two cells of one flat wall could
+        ; disagree -- and every occlusion artifact in this thing has been exactly that
+        ; disagreement showing up as a sliver of orb through a wall or a slice cut out of one.
+        lda oflag
+        bpl opFront             ; nothing visible from this cell can occlude this orb at all
+        ldx ovar
         lda orbColT,x
         sta o2
         lda ocol
@@ -3825,52 +3931,63 @@ oxDn:   ldx ovar
 opR1:   cmp #${NLOG}
         bcc opR2
         lda #${NLOG - 1}
-opR2:   sta ocmax
+opR2:   lsr
+        lsr
+        sta ocr                 ; rightmost CELL the sprite covers
         lda ocol
         sec
         sbc o2
         bcs opL1
         lda #$00
-opL1:   cmp ocmax
+opL1:   lsr
+        lsr
+        cmp ocr
         bcc opL2
-        lda ocmax               ; degenerate: keep the scan inside colH
-opL2:   tax
-        stx ocl2
-        lda ocmax
-        sec
-        sbc ocl2
-        clc
-        adc #$01
-        sta ocspan
+        lda ocr
+opL2:   sta ocl
+        ldx oidx
+        lda orbOccLoT,x         ; this orb's occluder bitmap
+        sta omptr
+        lda orbOccHiT,x
+        sta omptr+1
         lda #$00
         sta ocnear
-        ; Step four columns at a time. This only has to answer "is anything under the sprite
-        ; nearer than the orb", and a wall narrow enough to hide between two samples is one
-        ; logical cell wide -- narrower than the smallest orb. The widest orb spans 25 columns,
-        ; so this is 7 iterations rather than 25.
-opScan: lda colH,x
-        cmp ohgt
-        bcc opNx
-        beq opNx
-        inc ocnear
-opNx:   inx
+        sta ocspan
+        sta ocmask
+        ldx ocl
+opScan: lda cellFaceT,x
+        sta tmp
+        lsr
+        lsr
+        lsr
+        tay
+        lda (omptr),y
+        sta tmp2
+        lda tmp
+        and #$07
+        tay
+        lda orbBitT,y
+        and tmp2
+        bne opOcc
+        ldy ocspan              ; this cell's face cannot occlude: mark it to be repointed
+        lda orbBitT,y
+        ora ocmask
+        sta ocmask
+        jmp opNx
+opOcc:  inc ocnear
+opNx:   inc ocspan
         inx
-        inx
-        inx
-        cpx ocmax
+        cpx ocr
         bcc opScan
-        lda colH,x              ; and the right edge itself, which the stride can overshoot
-        cmp ohgt
-        bcc opSDn
-        beq opSDn
-        inc ocnear
-opSDn:  lda ocspan
-        lsr
-        lsr
-        sta ocspan              ; ocnear is now counted in samples, so ocspan must be too
-        bne opSD2
-        inc ocspan
-opSD2:
+        beq opScan
+        jmp opDone
+        ; The flag says no run visible from this cell can occlude this orb, so skip the scan
+        ; entirely and declare it unoccluded. ocspan is left stale on purpose: the consumers
+        ; below only read it once ocnear is nonzero.
+opFront:lda #$00
+        sta ocnear
+        sta ocmask
+opDone:
         ; --- take a sprite slot ---
         ldx onv
         lda orbBitT,x
@@ -3970,10 +4087,13 @@ omRow:  ldy ocrow
         adc baseHi
         sta ppPtr+1
         ldy ocl
-omCol:  ldx col4T,y             ; this cell column's depth, from its first logical column
-        lda colH,x
-        cmp ohgt
-        bcs omNx                ; nearer than the orb: leave it clipping
+omCol:  tya                     ; this cell's face: does it occlude, per the scan above?
+        sec
+        sbc ocl
+        tax
+        lda orbBitT,x
+        and ocmask
+        beq omNx                ; it occludes: leave it clipping
         lda (ppPtr),y
         cmp #${hx(SOLID)}
         beq omPut
@@ -4176,6 +4296,8 @@ orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
 orbSpHT: !byte ${orbSpHT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
+orbOccLoT: !byte ${orbOccLo.join(',')}
+orbOccHiT: !byte ${orbOccHi.join(',')}
         * = ${hx16(RELOC + 0x1500)}
 orbXCT: !byte ${orbXC.join(',')}
 orbYCT: !byte ${orbYC.join(',')}
@@ -4188,17 +4310,19 @@ candLoT: !byte ${candLo.join(',')}
 candHiT: !byte ${candHi.join(',')}
 ` : ''}${SPRITES ? `        * = ${hx16(RELOC + 0x1900)}
 candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it may cross pages
+` : ''}${SPRITES ? `        * = ${hx16(OCCBASE)}
+orbOccT: !byte ${orbOccFlat.join(',')}
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = ${hx16(RELOC + 0x2300)}
-stepT1: ${chunk(stepT[0]).trim()}
         * = ${hx16(RELOC + 0x2400)}
-stepT2: ${chunk(stepT[1]).trim()}
+stepT1: ${chunk(stepT[0]).trim()}
         * = ${hx16(RELOC + 0x2500)}
+stepT2: ${chunk(stepT[1]).trim()}
+        * = ${hx16(RELOC + 0x2600)}
 stepT3: ${chunk(stepT[2]).trim()}
 
-${PROFILE ? `        * = ${hx16(RELOC + 0x2600)}  ; the profiler lives above the relocated
+${PROFILE ? `        * = ${hx16(RELOC + 0x2700)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
