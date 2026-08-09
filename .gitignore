@@ -15,3 +15,6 @@ iray.diag.asm
 # Local-only agent/editor settings (settings.json is shared and IS tracked)
 .claude/settings.local.json
 orbdiag.json
+
+# macOS finder droppings
+.DS_Store

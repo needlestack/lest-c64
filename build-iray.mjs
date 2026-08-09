@@ -1078,8 +1078,12 @@ const NOHUD = flag('NOHUD');
 // A diagnostic build adds code ahead of this and has run into it twice; the failure is silent
 // (the assembler errors, VICE boots the PREVIOUS disk, you read stale numbers off a stale
 // frame), so give those builds the extra page automatically rather than by remembering to.
+// $8600 for every build, not just the instrumented ones. orbSeam pushed the code past $8500
+// and the SPIN build -- which adds the auto-rotate hunk -- hit "* = $8500 moves backward".
+// Keeping ONE base for all configs matters beyond fitting: a measurement build has to have the
+// same table layout as the build it is measuring, or the number describes a different program.
 const RELOC = +(process.env.RELOC ??
-  (process.env.DBGORB === '1' || +(process.env.VSTEPDBG ?? 0) ? 0x8600 : 0x8500));
+  (process.env.DBGORB === '1' || +(process.env.VSTEPDBG ?? 0) ? 0x8700 : 0x8600));
 // ---- the orbs ----
 // Seven size variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps:
 // orb5 and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra
@@ -1407,6 +1411,18 @@ const orbHalfT = ORBSRC.map((b, v) => {
 // 150 - anchor: raster 50 + display row 100, less the rows from the sprite's top down to the
 // bottom of its ground shadow. Adding h to THIS cannot overflow until the orb is long gone.
 const orbYBaseT = ORBANCH.map(a => 150 - a);
+// Leading blank rows per variant, doubled when the VIC expands, and the sprite's total height.
+// The ball is bottom-aligned in every bitmap, so a small variant carries most of its 21 rows
+// blank ABOVE the ball -- up to two and a half char rows of nothing. orbSeam uses these to
+// patch only the rows an orb actually inks; using the raw sprite rectangle instead is what
+// once made seams vanish in cells with no orb near them.
+const orbBlankT = ORBSRC.map((b, v) => {
+  const bm = ORBBM[b];
+  let r = 0;
+  while (r < 21 && !bm[r * 3] && !bm[r * 3 + 1] && !bm[r * 3 + 2]) r++;
+  return r * (ORBEXP[v] ? 2 : 1);
+});
+const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
 // Half-width in LOGICAL columns, rounded UP. w>>2 truncates, so any sprite whose width is not
 // a multiple of 4 logical columns lost half a column at each edge -- and the bounding box built
 // from it then stopped one column short of the sprite's own pixels. The wall column under that
@@ -1651,6 +1667,19 @@ obCR    = $cba0                 ; bounding-box edge masks, so pass 2 need not re
 obBL    = $cba8
 obBR    = $cbb0
 obIX    = $cbb8
+obV     = $cbd0                 ; size variant per slot, so orbSeam can find the sprite's
+                                ; leading blank rows -- obIX is the ORB index, not the variant
+osR0    = $cbd8                 ; orbSeam scratch: first and last char row an orb inks,
+osR1    = $cbd9                 ; the column being patched, and the char to patch it with
+osCol   = $cbda
+osChr   = $cbdb
+osTmp   = $cbdc
+osEnd   = $cbdd
+osRB    = $cbde
+obOcc   = $cbe0                 ; per slot: bit 7 = this orb has a possible occluder here
+ocanO   = $cbe8                 ; the same bit while the candidate list is being walked
+ocanF   = $cbe9                 ; and while orbPaint has one slot in hand
+osPtr   = $fb                   ; 2 bytes: screen row pointer
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
@@ -2138,7 +2167,7 @@ subBDn: rts
 subFin:
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; prepCells\n' : ''}${SPRITES ? `        jsr orbMove             ; BEFORE renderSym: it decides which columns are
         jsr orbPaint            ; foreground, and renderSym draws them that way first time
-` : ''}${NOFILL ? '' : '        jsr renderSym'}
+` : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && SEAMS ? '\n        jsr orbSeam             ; take the panel line out of the cells an orb covers' : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
         jsr drawDbg
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -4085,6 +4114,10 @@ obLoop: ldy ocy
 obPos:  iny
         sta tmp                 ; how far off the bearing we are
         lda (ocptr),y
+        sta ocanO               ; bit 7: can ANY run reachable from this cell occlude this orb?
+                                ; blockers() answered that at build time and it was being
+                                ; thrown away here, so every projected orb paid for the full
+                                ; per-cell mask even when the answer was always no
         and #$7f
         cmp tmp
         bcc obNext              ; outside the window: not on screen
@@ -4468,7 +4501,10 @@ oxDn:   ldx ovar
         sbc o2
         bcs opBL1
         lda #$00
-opBL1:  sta ocl2
+opBL1:  cmp #${hx(NLOG)}        ; and clamp the TOP end too. Only the underflow was caught, so
+        bcc opBL2               ; an orb whose centre projects past the right edge gave a box
+        lda #${hx(NLOG - 1)}    ; starting past column 159 -- cell 40 or beyond, which walks
+opBL2:  sta ocl2                ; off the end of fgCell and seamT and writes past the screen
         lsr
         lsr
         sta ocl
@@ -4533,6 +4569,10 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         ldx onv
         lda oidx
         sta obIX,x
+        lda ovar
+        sta obV,x
+        lda ocanO
+        sta obOcc,x
         lda ocl
         sta obCL,x
         lda ocr
@@ -4629,6 +4669,10 @@ opA1s:  ldx opcl
         lda opbBaseT,y
         tay
 opA1:   lda opbuf,y
+        ora #$80                ; bit 7 = this cell lies inside SOME orb's box, whether or not
+                                ; that orb needs any of its columns to clip. The seam pass
+                                ; below needs plain OVERLAP, which the four column bits cannot
+                                ; express: a cell an orb merely covers has a mask of zero.
         ora fgCell,x
         sta fgCell,x
         iny
@@ -4707,24 +4751,26 @@ opP2:   ldx opsl
         cpx opmn
         bcc opAllD
 opMat:  lda fgCell,x
-        beq opMt1               ; no orb needs this column to clip: it stays background black
-        tay
+        bpl opMt1               ; no orb's box covers this cell at all -- the sweep runs over
+                                ; the union min..max, so it walks the gaps between orbs too
+        and #$0f
+        tay                     ; Y = the columns that must clip, 0 if none
         lda seamT,x
         cmp #${hx(SEAM0)}
         bcc opMt2
-        ; A seam still has only two forms, all-clipping or all-not -- its grey stripe can live
-        ; in no other bit pair. But it no longer needs a majority vote to choose between them.
-        ; Seams are now suppressed at convex run ends, so a seam only ever falls INSIDE a run,
-        ; where all four columns show the same wall and therefore share one occlusion answer.
-        ; Any column asking to clip means the whole cell clips, exactly. The old popcount and
-        ; its "ties go to not clipping" were a compromise for the corner case that no longer
-        ; reaches here -- and that compromise is what left an orb overhanging a wall edge.
+        ; A seam's black columns follow the ordinary foreground rule; its grey line is bit
+        ; pair 10 and clips regardless. Where an orb actually overlaps, orbSeam patches the
+        ; line out afterwards -- per CELL, which this per-column table cannot express.
+        tya
+        beq opMt1               ; covered but nothing clips: leave the background seam
         lda seamT,x
-        sec                     ; same line, but its black columns now clip
+        sec
         sbc #$04
         sta seamT,x
         bcs opMt1               ; always
-opMt2:  lda fgCodeT,y
+opMt2:  tya
+        beq opMt1               ; covered, but nothing here has to clip: background black
+        lda fgCodeT,y
         sta seamT,x
 opMt1:  cpx opmn
         beq opAllD
@@ -4732,10 +4778,123 @@ opMt1:  cpx opmn
         bpl opMat
 opAllD: rts
 
+; ---- orbSeam: take the panel line out of the cells an orb actually covers ----
+; A seam's grey stripe is bit pair 10, and pair 10 is the only place grey can live -- 00 and 01
+; are spent on white and black -- so it counts as FOREGROUND in BOTH seam variants and draws
+; over any orb whose priority bit is set. That is a two-pixel line straight through an orb
+; standing in front of the wall, and there is no background seam to switch to.
+;
+; seamT is one byte per COLUMN, used for that column's whole solid run, so dropping the line
+; there would drop it top to bottom. This runs after renderSym and patches the cells an orb
+; actually inks, which is the only granularity that keeps the line above and below the ball.
+;
+; Cheap because almost nothing qualifies: a cell must be under an orb AND in one of the ~8
+; columns a seam lands in, so most frames patch nothing at all.
+orbSeam:
+        ldx #$00
+osOrb:  cpx onv
+        bcs osDone
+        lda orbBitT,x           ; a slot pass 1 took the sprite away from draws nothing
+        and omEn
+        beq osNext
+        ldy obV,x               ; first inked row: sprite top + this variant's blank rows
+        lda obY,x
+        clc
+        adc orbBlankT,y
+        sec
+        sbc #$32                ; raster 50 = display row 0
+        bcs osT1
+        lda #$00
+osT1:   lsr
+        lsr
+        lsr
+        sta osR0
+        lda obY,x               ; last inked row: the ball is bottom-aligned, so sprite bottom
+        clc
+        adc orbHgtT,y
+        sec
+        sbc #$32
+        lsr
+        lsr
+        lsr
+        cmp #$19
+        bcc osT2
+        lda #$18
+osT2:   sta osR1
+        cmp osR0
+        bcc osNext              ; entirely off the top of the display
+        lda obCR,x              ; walk this orb's cell columns, clamped to the 40 real ones --
+        cmp #${hx(NCELL)}       ; a stray column here writes past the screen into the program
+        bcc osE1
+        lda #${hx(NCELL - 1)}
+osE1:   sta osEnd
+        lda obCL,x
+        cmp #${hx(NCELL)}
+        bcs osNext
+        sta osCol
+osCol1: ldy osCol
+        lda seamT,y
+        cmp #${hx(SEAM0)}
+        bcc osCol2              ; no panel line in this column: nothing to patch
+        lda fgCell,y            ; the char the column would use without its line
+        and #$0f
+        beq osBg
+        tay
+        lda fgCodeT,y
+        bne osHave              ; always
+osBg:   lda #${hx(SOLIDBG)}
+osHave: sta osChr
+        ; seamT describes this column's SOLID RUN only. Below the wall's base the cell is floor,
+        ; and patching a wall char in there paints a black block over it -- which is exactly what
+        ; the first version did next to a near orb. The run's last row is 24 - rs, mirrored from
+        ; the top half, and rsT turns the column's height into rs.
+        lda osCol
+        asl
+        asl
+        tay                     ; first logical column of this cell
+        lda colH,y
+        tay
+        lda #$18
+        sec
+        sbc rsT,y
+        cmp osR1
+        bcc osRB1
+        lda osR1
+osRB1:  sta osRB
+        cmp osR0
+        bcc osCol2              ; the orb sits entirely below the wall in this column
+        ldy osR0
+osRow:  lda rowLoT,y
+        clc
+        adc osCol
+        sta osPtr
+        lda rowHiT,y
+        adc baseHi
+        sta osPtr+1
+        lda osChr
+        sty osTmp
+        ldy #$00
+        sta (osPtr),y
+        ldy osTmp
+        iny
+        cpy osRB
+        bcc osRow
+        beq osRow
+osCol2: inc osCol
+        lda osCol
+        cmp osEnd
+        bcc osCol1
+        beq osCol1
+osNext: inx
+        jmp osOrb
+osDone: rts
+
 ; opSlot: copy sprite slot X's cell range and box-edge masks into scratch, and point omptr at
 ; its occluder bitmap. CPX and LDX have no indexed-absolute mode, so the loop bounds have to
 ; live somewhere the comparisons can reach.
 opSlot: stx opsl
+        lda obOcc,x
+        sta ocanF
         lda obCL,x
         sta opcl
         lda obCR,x
@@ -4765,6 +4924,8 @@ opC1:   cpx opcr
 opC2:   sta pbb
         lda #$00
         sta pmk
+        lda ocanF               ; nothing reachable from the player's cell can occlude this
+        bpl opC4                ; orb, so every column answers no -- skip both bitmap lookups
         ldy cstepT,x
         lda kMaskT,y            ; the columns belonging to the cell's FIRST run
         sta pkm
@@ -4931,6 +5092,8 @@ orbPtrT: !byte ${orbPtrT.join(',')}
 orbExpT: !byte ${orbExpT.join(',')}
 orbHalfT: !byte ${orbHalfT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
+orbBlankT: !byte ${orbBlankT.join(',')}
+orbHgtT: !byte ${orbHgtT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the
 ; columns of that first and last cell which lie inside it. Bit 3 is the leftmost column.
