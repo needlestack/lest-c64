@@ -3337,31 +3337,38 @@ ocs:    ; ---- the half of every product that all orbs share ----
         ldy osinS
         jsr oFrac
         sta kys
-        clc                     ; forward picks up kxc + kys, right picks up kyc - kxs
+        ; forward picks up kxc + kys, right picks up kyc - kxs. Both are sums of SIGNED
+        ; bytes and both need a real 16-bit add: sign-extend each operand into its own high
+        ; byte and let adc/sbc carry between them. Sign-extending and then discarding the
+        ; carry -- which is what this did -- is wrong by 256 whenever the low bytes carry,
+        ; and since these terms come from the player's sub-cell position the error moves as
+        ; you walk. It reads as the orbs drifting off the map.
+        lda kxc
+        jsr kSgn
+        sta tmp
+        lda kys
+        jsr kSgn
+        sta tmp2
+        clc
         lda kxc
         adc kys
         sta kfL
-        lda kxc
-        and #$80                ; sign-extend the byte sum into 16 bits
-        beq okf1
-        lda #$ff
-okf1:   sta kfH
-        lda kys
-        bpl okf2
-        dec kfH
-okf2:   sec
+        lda tmp
+        adc tmp2
+        sta kfH
+        lda kyc
+        jsr kSgn
+        sta tmp
+        lda kxs
+        jsr kSgn
+        sta tmp2
+        sec
         lda kyc
         sbc kxs
         sta krL
-        lda kyc
-        and #$80
-        beq okr1
-        lda #$ff
-okr1:   sta krH
-        lda kxs
-        bpl okr2
-        inc krH
-okr2:
+        lda tmp
+        sbc tmp2
+        sta krH
         lda #$00                ; the per-sprite bit registers are built up a bit at a time and
         sta omEn                ; written once, so an unused slot is simply never set
         sta omXX
@@ -3961,6 +3968,13 @@ omInv:  sta cbA,x
         rts
 orbYes: rts
 orbNo:  rts
+; kSgn: the high byte a signed byte sign-extends to.
+kSgn:   bmi kSgN
+        lda #$00
+        rts
+kSgN:   lda #$ff
+        rts
+
 ; oTerm: (Y * X) as a 16-bit product in orL/orH, negated if A is negative. Y is a cell
 ; difference magnitude (0..15) and X a trig magnitude, so this is a plain 8x8 -- the 16x8 the
 ; old orot did was only ever needed because the orb offset carried a fraction, and that
