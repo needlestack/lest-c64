@@ -856,7 +856,15 @@ const orbVarT = [...Array(256)].map((_, h) => {
 }
 const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
 const orbExpT = ORBEXP.map(e => e);
-const orbHalfT = ORBWIDE.map(w => w >> 1);
+// Distance from the sprite's LEFT EDGE to the ball's centre, which is what positioning needs
+// -- not half the ball's width. orbScale centres the content in the 12-column sprite, so the
+// centre sits ~12px in whatever the ball's size; using ballWidth/2 drew small orbs up to 10px
+// right of where they belong AND shifted them on every variant change, which is the scaling
+// jump. It also put the sprite somewhere the depth scan had not tested, hence stray occlusion.
+const orbHalfT = ORBSRC.map((b, v) => {
+  const w = b + 1, ox = (12 - w) >> 1;
+  return (2 * ox + w) * (ORBEXP[v] ? 2 : 1);
+});
 // 150 - anchor: raster 50 + display row 100, less the rows from the sprite's top down to the
 // bottom of its ground shadow. Adding h to THIS cannot overflow until the orb is long gone.
 const orbYBaseT = ORBANCH.map(a => 150 - a);
