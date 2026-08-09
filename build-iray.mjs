@@ -1160,7 +1160,6 @@ omPri   = $cb1e
 omX8    = $cb1f
 omBit   = $cb20
 omMix   = $cb21
-orej    = $cb21
 obX     = $cb30
 obY     = $cb38
 obP     = $cb40
@@ -3433,15 +3432,15 @@ obEnd:  ${DBGORB ? `lda py+1
         clc
         adc px+1
         sta odb
-        lda ocn
+        lda kxc
         sta odb+1
-        lda onv
+        lda kxs
         sta odb+2
-        lda nproj
+        lda kyc
         sta odb+3
-        lda dtv
+        lda kys
         sta odb+4
-        lda dtm
+        lda onv
         sta odb+5
         ldx #$00
         ldy #$00
@@ -3663,7 +3662,6 @@ ivDn:   lda #$0b                ; h = 22528/forward = iv * 11/512, the same 88/d
         sta o1
 ohOk:   lda o1
         sta ohgt
-        inc orej
         ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so the
         ; ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit shift
         ; that computing right/forward separately would need is gone entirely.
@@ -3711,7 +3709,6 @@ ohOk:   lda o1
         rol
         bcs orbNo               ; past 255 columns off centre: nowhere near the screen
         sta ocoff
-        inc orej
         ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
         lda orbVarT,x
         sta ovar
@@ -3748,8 +3745,7 @@ oxNeg:  sec
         lda #$00
         sbc o1
         sta o1
-oxDn:   inc orej
-        ldx ovar
+oxDn:   ldx ovar
         sec
         lda o0
         sbc orbHalfT,x
@@ -3760,8 +3756,6 @@ oxDn:   inc orej
         bmi orbNo               ; fully off the left edge
         cmp #$02
         bcs orbNo               ; past x = 512, fully off the right
-        inc orej
-        inc orej
         ; --- screen Y: ground shadow on the floor line, 100 + h ---
         ; $d001 = 150 + h - anchor, but computed as (150 - anchor) + h. Adding 150 first
         ; carries out of a byte once h passes 105, which used to cap how close an orb could
@@ -3776,7 +3770,6 @@ oxDn:   inc orej
         cmp #251
         bcs orbNo               ; top of the sprite is past the last visible raster line
         sta o3
-        inc orej
         ; --- depth: $d01b is per SPRITE but depth is per COLUMN, so the hardware can only be
         ; told "behind everything" or "in front of everything". Walls FARTHER than the orb are
         ; foreground too and would clip it just as eagerly, which is very visible down a
@@ -4004,7 +3997,9 @@ otD:    lda plo
 ; always fits a signed byte, since |A| <= 128 and X <= 255.
 oFrac:  stx mq
         sta tmp
-        bpl ofP
+        cmp #$00                ; STA does not set flags -- without this the branch tested
+        bpl ofP                 ; whatever the caller's ldy left, so a negative offset was
+                                ; multiplied as its unsigned byte and never negated
         eor #$ff
         clc
         adc #$01
@@ -4329,6 +4324,17 @@ try {
     // NOT the whole seam range: mul8's own mp/mq/plo/phi sit at $98-$9b in the middle of it,
     // and they are live inside every jsr mul8 orbMove makes. Sharing those put ivH on mp and
     // ohgt on mq, and each multiply quietly ate its own inputs.
+    // The same collision check for the $cb00 scratch block. Zero page has been guarded for a
+    // while; this block has not, and two variables quietly shared $cb21 for several commits.
+    {
+      const own = {};
+      for (const m of asm.matchAll(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\$(cb[0-9a-fA-F]{2})\s*(?:;.*)?$/gm)) {
+        const a = parseInt(m[2], 16);
+        if (own[a] && own[a] !== m[1])
+          throw new Error(`$${m[2]} claimed by both ${own[a]} and ${m[1]}`);
+        own[a] = m[1];
+      }
+    }
     const ZPSHARED = new Set();
     for (let a = 0x87; a <= 0x97; a++) ZPSHARED.add(a);
     for (let a = 0x9c; a <= 0x9f; a++) ZPSHARED.add(a);
