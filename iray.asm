@@ -1605,36 +1605,6 @@ cuXp:   clc
         sta uwH
         rts
 
-; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
-mul8:   sta mp
-        clc
-        adc mq
-        tax
-        bcc m8l0
-        lda f1LoT,x
-        sta plo
-        lda f1HiT,x
-        sta phi
-        jmp m8l1
-m8l0:   lda f0LoT,x
-        sta plo
-        lda f0HiT,x
-        sta phi
-m8l1:   lda mp
-        sec
-        sbc mq
-        bcs m8l2
-        eor #$ff
-        adc #$01
-m8l2:   tax
-        sec
-        lda plo
-        sbc f0LoT,x
-        sta plo
-        lda phi
-        sbc f0HiT,x
-        sta phi
-        rts
 
 ; ================= march one column: cast + store colH/idT =================
 marchCol:
@@ -3261,6 +3231,37 @@ hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,20
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
+
+; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
+mul8:   sta mp
+        clc
+        adc mq
+        tax
+        bcc m8l0
+        lda f1LoT,x
+        sta plo
+        lda f1HiT,x
+        sta phi
+        jmp m8l1
+m8l0:   lda f0LoT,x
+        sta plo
+        lda f0HiT,x
+        sta phi
+m8l1:   lda mp
+        sec
+        sbc mq
+        bcs m8l2
+        eor #$ff
+        adc #$01
+m8l2:   tax
+        sec
+        lda plo
+        sbc f0LoT,x
+        sta plo
+        lda phi
+        sbc f0HiT,x
+        sta phi
+        rts
 
 ; ---- orbMove: place every visible orb ----
 ; Once a frame. Written for clarity over cycles and keeping its working set in absolute RAM
