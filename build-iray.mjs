@@ -346,6 +346,45 @@ function placeAll(groups) {
   const unused = all.filter(p => !PFREQ.get(p.join(',')));
   console.error(`  patterns: ${all.length} distinct, ${BUDGET} codes available ` +
                 `(over by ${all.length - BUDGET}); ${unused.length} never sampled`);
+  // ---- merge RAMPS that are nearly duplicates of one another ----
+  // Runs BEFORE the never-sampled drop below, so the codes it frees count against what that
+  // tier still has to find. The other way round, the drop tier throws before the merge can help.
+  // (was: second tier) merge RAMPS that are nearly duplicates of one another ----
+  // Never-sampled patterns are free to drop; past those, freeing a code costs accuracy. Spend
+  // it on ramps rather than steps. A ramp error is one row of height in one column of a smooth
+  // gradient, which reads as a slightly different slope; a step error changes the shape of a
+  // CORNER, which the eye goes straight to. Same Hamming distance, very different visibility.
+  //
+  // Cost of merging a pattern into its nearest survivor = how often it is sampled times how far
+  // that survivor is, so this is priced in the same units the step table reports: wrong logical
+  // columns per frame. Cheapest first.
+  // 56 frees enough for every wall-meets-wall step to get its own exact twin, and costs 0.009
+// wrong logical columns a frame -- one percent of what the sloped-step scheme itself is worth.
+// Ramps had that much slack because the clamp expresses far more slopes than the map produces.
+const RAMPFREE = +(process.env.RAMPFREE ?? 56);
+  const merged = [];
+  if (RAMPFREE) {
+    const stepK = new Set(STEPS.chosen.map(q => q.join(',')));
+    const keep = new Set(all.map(p => p.join(',')));
+    const cand = all.filter(p => !stepK.has(p.join(',')))
+      .map(p => { let d = 9, bq = null;
+        for (const q of all) { if (q === p) continue; const h = hamm(p, q); if (h < d) { d = h; bq = q; } }
+        return { p, d, n: PFREQ.get(p.join(',')) || 0 }; })
+      .sort((a, b) => a.n * a.d - b.n * b.d);
+    if (cand.length < RAMPFREE) throw new Error(`only ${cand.length} ramps to merge`);
+    for (let i = 0; i < RAMPFREE; i++) {
+      // do not merge a pattern into one that is itself being merged away
+      if (!keep.has(cand[i].p.join(','))) continue;
+      merged.push(cand[i]); dropped.push(cand[i].p); keep.delete(cand[i].p.join(','));
+    }
+    for (let i = all.length - 1; i >= 0; i--) if (!keep.has(all[i].join(','))) all.splice(i, 1);
+    const cost = merged.reduce((a, m) => a + m.n * m.d, 0) / SFRAMES;
+    console.error(`  merged ${merged.length} near-duplicate ramps to free codes: ` +
+      `+${cost.toFixed(3)} wrong logical columns a frame ` +
+      `(the sloped-step scheme is worth 0.920 by the same measure); ` +
+      `worst single merge moves ${Math.max(...merged.map(m => m.d))} column(s), ` +
+      `busiest merged ramp was sampled ${Math.max(...merged.map(m => m.n))} times`);
+  }
   // Keep 4 codes spare so a small map edit does not immediately overflow the charset.
   let need = Math.max(0, all.length - BUDGET + 4);
   if (need) {
@@ -488,9 +527,9 @@ const VSTEPDBG = +(process.env.VSTEPDBG ?? 0);
 //
 // The class has 35 members and a flat distribution, so it cannot be covered outright. These
 // are the busiest, interned consecutively so the swap is one add, like the vertical steps.
-// 8, not 10: past 8 the extra exact twins cost more never-sampled patterns than they buy in
-// coverage, because the nearest-twin substitution below already reaches the whole class.
-const SSTEPN = +(process.env.SSTEPN ?? 8);
+// The whole class, now that merged ramps pay for it: every wall-meets-wall step gets a twin
+// carrying its OWN ink, so none has to borrow one and no wall changes shape.
+const SSTEPN = +(process.env.SSTEPN ?? 35);
 const SSTEPS = STEPS.chosen
   .filter(p => p.some(v => v >= 8) && p.some(v => v > 0 && v < 8))
   .sort((a, b) => (PFREQ.get(b.join(',')) || 0) - (PFREQ.get(a.join(',')) || 0))
@@ -512,9 +551,9 @@ const VSTEPN = VSTEPS.length;
 const SSTEP0 = glyphs.length;
 for (const p of SSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p)); }
 for (const p of SSTEPS) glyphs.push(splitBytes(p));
-console.error(`  split steps: ${SSTEPN} of ${STEPS.chosen.filter(p => p.some(v => v >= 8) &&
-  p.some(v => v > 0 && v < 8)).length} wall-meets-wall patterns, at ${SSTEP0}-${SSTEP0 + SSTEPN - 1}` +
-  ` with splits at ${SSTEP0 + SSTEPN}-${SSTEP0 + 2 * SSTEPN - 1}`);
+console.error(`  split steps: ${SSTEPS.length} of ${STEPS.chosen.filter(p => p.some(v => v >= 8) &&
+  p.some(v => v > 0 && v < 8)).length} wall-meets-wall patterns, at ${SSTEP0}-${SSTEP0 + SSTEPS.length - 1}` +
+  ` with splits at ${SSTEP0 + SSTEPS.length}-${SSTEP0 + 2 * SSTEPS.length - 1}`);
 placeAll([rampsAll, STEPS.chosen]);
 const CELLCODES = glyphs.length;
 // A step's split twin has to have the step's own ink, and the class is far too big to give
@@ -535,7 +574,7 @@ const splitT = new Array(256).fill(0);
     let bd = 99, bi = -1;
     SSTEPS.forEach((p, i) => { const d = hamm(p, q); if (d < bd) { bd = d; bi = i; } });
     if (bi < 0 || bd > SPLITSUB) continue;
-    splitT[code] = SSTEP0 + SSTEPN + bi;
+    splitT[code] = SSTEP0 + SSTEPS.length + bi;
     if (bd === 0) exact++; else near++;
   }
   console.error(`  split twins: ${exact} steps use their own, ${near} borrow the nearest ` +
@@ -758,7 +797,7 @@ const NOHUD = flag('NOHUD');
 // (the assembler errors, VICE boots the PREVIOUS disk, you read stale numbers off a stale
 // frame), so give those builds the extra page automatically rather than by remembering to.
 const RELOC = +(process.env.RELOC ??
-  (process.env.DBGORB === '1' || +(process.env.VSTEPDBG ?? 0) ? 0x8500 : 0x8400));
+  (process.env.DBGORB === '1' || +(process.env.VSTEPDBG ?? 0) ? 0x8600 : 0x8500));
 // ---- the orbs ----
 // Seven size variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps:
 // orb5 and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra
@@ -1273,7 +1312,11 @@ fgCell  = $c5a0                 ; per cell-column (40): bits 3..0 = which of the
                                 ; some orb's bounding box covers this cell
 opsl    = $cb95
 opbn    = $cbc4                 ; index into opbuf while pass 1 walks a box
-opbuf   = $cbd0                 ; the per-cell masks of the orb in hand, up to 12 cells
+opbuf   = $cc00                 ; per sprite slot, 12 cells each: the columns that slot needs
+                                ; foreground in each cell of its box. Pass 2 reads them back
+                                ; rather than deriving them again -- two bitmap lookups a cell
+opmn    = $cbc5                 ; lowest and highest cell any orb touched, so the code-writing
+opmx    = $cbc6                 ; sweep covers those and not all forty
 opreq   = $cbc2                 ; columns of this orb's box that must clip it, and
 opcon   = $cbc3                 ; columns made foreground that must not
 opcl    = $cb96
@@ -4161,6 +4204,10 @@ orbNo:  rts
 ;   3. one char code per covered cell, straight from the four-bit mask, which already names the
 ;      split boundary. Cells no orb covers keep whatever the renderer chose, seam and all.
 orbPaint:
+        lda #${hx(NCELL - 1)}
+        sta opmn
+        lda #$00
+        sta opmx
         lda onv
         beq opAllD              ; nothing on screen: the walls stay background and nothing clips
         ldx #$00
@@ -4172,8 +4219,9 @@ opAll:  jsr opSlot              ; load slot X's box and occluder bitmap
         lda #$00
         sta opreq
         sta opcon               ; reused here as the box's own column count
-        tay
-        sty opbn
+        ldy opsl
+        lda opbBaseT,y
+        sta opbn                ; this slot's twelve bytes of opbuf
         ldx opcl
 opA0:   jsr opCell
         ldy opbn
@@ -4204,8 +4252,18 @@ opA0:   jsr opCell
         and omEn
         sta omEn
         jmp opANx
+        lda opcl                ; remember how far the code sweep has to reach
+        cmp opmn
+        bcs opA1m
+        sta opmn
+opA1m:  lda opcr
+        cmp opmx
+        bcc opA1s
+        sta opmx
 opA1s:  ldx opcl
-        ldy #$00
+        ldy opsl
+        lda opbBaseT,y
+        tay
 opA1:   lda opbuf,y
         ora fgCell,x
         sta fgCell,x
@@ -4227,8 +4285,21 @@ opPri:  jsr opSlot
         lda #$00
         sta opreq
         sta opcon
+        ldy opsl
+        lda opbBaseT,y
+        sta opbn
         ldx opcl
-opP1:   jsr opCell
+opP1:   lda #$0f                ; which columns of this cell lie inside the box
+        cpx opcl
+        bne opP1x
+        and opbl
+opP1x:  cpx opcr
+        bne opP1y
+        and opbr
+opP1y:  sta pbb
+        ldy opbn
+        lda opbuf,y             ; what this orb asked for, from pass 1
+        inc opbn
         sta pmk                 ; columns this orb needs to clip it ...
         tay
         lda popcT,y
@@ -4261,7 +4332,9 @@ opP2:   ldx opsl
         cpx onv
         bcc opPri
         ; ---- 3. the char code for every covered cell ----
-        ldx #${hx(NCELL - 1)}
+        ldx opmx
+        cpx opmn
+        bcc opAllD
 opMat:  lda fgCell,x
         beq opMt1               ; no orb needs this column to clip: it stays background black
         tay
@@ -4284,7 +4357,9 @@ opMat:  lda fgCell,x
         bcs opMt1               ; always
 opMt2:  lda fgCodeT,y
         sta seamT,x
-opMt1:  dex
+opMt1:  cpx opmn
+        beq opAllD
+        dex
         bpl opMat
 opAllD: rts
 
@@ -4490,6 +4565,7 @@ orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the
 ; columns of that first and last cell which lie inside it. Bit 3 is the leftmost column.
+opbBaseT: !byte 0,12,24,36,48,60,72,84
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
