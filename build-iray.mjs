@@ -113,6 +113,82 @@ for (let y = 0; y < 16; y++) {          // horizontal planes: north/south faces,
 }
 if (nextRun - 1 > 255) throw new Error(`too many wall runs (${nextRun - 1}) for a byte id`);
 console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by run, gap-safe, no precompute`);
+
+// ---- CONVEX run ends carry no seam ----
+// A seam at the end of a receding wall marks a corner you cannot see around, and the
+// silhouette there already steps 20+ rows (measured: 21/22/25/27 across the six views), so the
+// line is redundant. It is also actively harmful: that boundary lands in the very cell where
+// an orb needs PER-COLUMN occlusion, and a seam cell cannot express that -- it is all-clipping
+// or all-not. Dropping these makes every convex corner a plain two-black SOLID split, which is
+// per-column and exact, and lets orbPaint drop its majority-vote compromise.
+//
+// A run ends because the next cell along its strip is open (the wall simply stops -> CONVEX,
+// you see past the edge) or solid (the wall turns and another face meets it -> CONCAVE). The
+// concave ones MUST keep their seam: there the two faces sit at nearly the same depth (median
+// step 2 rows) so it is black meeting black, and the grey line is the only thing dividing them.
+//
+// A CONVEX end keeps its line too, but only when BOTH of its faces are visible -- when the
+// player is past the plane of both walls and the outside corner protrudes toward them, the two
+// faces genuinely meet on screen and that edge needs dividing. What must lose its line is the
+// convex corner facing AWAY, where only one face is visible and the boundary is a pure
+// silhouette against an unrelated wall behind it.
+//
+// Both cases collapse to the same cheap test, because the run on the far side of the boundary
+// says which it is. The test has to run where corners are marked, in subFace, and there the two
+// runs either side are all that is in hand -- not a coordinate. So enumerate the PARTNER of each
+// run end:
+//   concave end (next cell solid, the wall turns): the perpendicular face that meets it, found
+//     at a corner of an OPEN cell whose two adjoining cells are both solid;
+//   convex end (next cell open, the wall stops): the perpendicular face of the run's OWN end
+//     cell, which is the other half of the protruding corner.
+// If the run across the boundary is that partner, both faces are visible and the line stays.
+// If it is anything else, the wall behind is unrelated and the boundary is a silhouette.
+//
+// Every run end has exactly ONE partner, so a run has at most two -- two bytes, two compares.
+const cpLo = new Array(nextRun).fill(0), cpHi = new Array(nextRun).fill(0);
+{
+  const addPair = (a, b) => {
+    if (!a || !b || a === b) return;
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (cpLo[x] === y || cpHi[x] === y) continue;
+      if (!cpLo[x]) cpLo[x] = y; else if (!cpHi[x]) cpHi[x] = y;
+      else throw new Error(`run ${x} has more than two corner partners`);
+    }
+  };
+  // concave ends: an inside corner, seen from an open cell with two solid neighbours
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    if (mapW(x, y)) continue;
+    const W_ = mapW(x - 1, y), E_ = mapW(x + 1, y), N_ = mapW(x, y - 1), S_ = mapW(x, y + 1);
+    if (W_ && N_) addPair(runE[y * 16 + (x - 1)], runS[(y - 1) * 16 + x]);
+    if (E_ && N_) addPair(runW[y * 16 + (x + 1)], runS[(y - 1) * 16 + x]);
+    if (W_ && S_) addPair(runE[y * 16 + (x - 1)], runN[(y + 1) * 16 + x]);
+    if (E_ && S_) addPair(runW[y * 16 + (x + 1)], runN[(y + 1) * 16 + x]);
+  }
+  // convex ends: the wall stops, and its own end cell's perpendicular face turns the corner.
+  // Pairing them keeps the line when the player sees BOTH faces of that protruding edge, and
+  // drops it when the far side is an unrelated wall -- the corner facing away from the view.
+  const ARR = { W: runW, E: runE, N: runN, S: runS };
+  for (let r = 1; r < nextRun; r++) {
+    const f = runFace[r], arr = ARR[f], vert = (f === 'W' || f === 'E');
+    const cells = [];
+    for (let c = 0; c < 256; c++) if (arr[c] === r) cells.push({ x: c % 16, y: c >> 4 });
+    if (!cells.length) continue;
+    const key = c => vert ? c.y : c.x;
+    const lo = cells.reduce((a, b) => key(a) < key(b) ? a : b);
+    const hi = cells.reduce((a, b) => key(a) > key(b) ? a : b);
+    if (vert) {
+      if (!mapW(lo.x, lo.y - 1)) addPair(r, runN[lo.y * 16 + lo.x]);
+      if (!mapW(hi.x, hi.y + 1)) addPair(r, runS[hi.y * 16 + hi.x]);
+    } else {
+      if (!mapW(lo.x - 1, lo.y)) addPair(r, runW[lo.y * 16 + lo.x]);
+      if (!mapW(hi.x + 1, hi.y)) addPair(r, runE[hi.y * 16 + hi.x]);
+    }
+  }
+}
+console.error(`  corner partners (line kept): ` +
+  `${cpLo.filter(Boolean).length + cpHi.filter(Boolean).length} run ends of ${(nextRun - 1) * 2}` +
+  ` -- inside corners, plus outside corners with both faces visible; a corner facing away from` +
+  ` the view has an unrelated wall across the boundary and draws no line`);
 // Per-frame step, in 1/256ths of a map cell (px/py are 8.8 fixed point). Must stay well
 // under 256: moveApply only collision-tests the DESTINATION cell, so a step approaching a
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
@@ -165,12 +241,24 @@ const CLO = -3, CHI = 12, CN = CHI - CLO + 1;   // endpoint clamp range -> 16 le
 const QLEV = {
   3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 1, 3, 5, 7, 8],
   7: [0, 1, 3, 4, 5, 7, 8], 8: [0, 1, 2, 3, 5, 6, 7, 8], 9: [0, 1, 2, 3, 4, 5, 6, 7, 8] };
+// Keying all four columns instead (4*4*4*4 = 256, the same one-byte index) was measured
+// 2026-08-09 and is WORSE: corner error 0.576 -> 1.486, six views 1484 -> 1506, and visibly so
+// -- 4 levels cannot place a wall top closer than ~2 rows, which becomes a 5-row jump inside a
+// single cell and reads as spikes along the wall top. No level spacing rescues it (0,3,5,8 ->
+// 1.535; 0,2,5,8 -> 1.537; 0,3,6,8 -> 1.486). The three-axis key's blind spot -- it cannot see
+// the interior column on the far side of the boundary -- is a design limit, accepted.
 const [LA, LM, LB] = (process.env.QLEVELS ?? '7,4,9').split(',').map(Number);
 if (LA * LM * LB > 256) throw new Error(`step index ${LA}*${LM}*${LB} = ${LA*LM*LB} > 256`);
 if (LA > 8 || LM > 8) throw new Error('qmT is addressed as qA*8 + qM, so LA and LM must be <= 8');
 const QA = QLEV[LA], QM = QLEV[LM], QB = QLEV[LB];
+const SLOTN = LA * LM * LB;
 const C8 = x => Math.max(0, Math.min(8, x));
 const hamm = (p, t) => (p[0] !== t[0]) + (p[1] !== t[1]) + (p[2] !== t[2]) + (p[3] !== t[3]);
+// Counting differing COLUMNS, not rows of difference, is deliberate. Weighting by magnitude
+// instead (sum of |row difference|) was measured 2026-08-09 and is WORSE: corner error 0.653 ->
+// 1.016, and it did not fix the artifact that motivated trying it. Substitution was never the
+// binding constraint -- a step slot is keyed on (a, m, b) and cannot see the third column, so
+// 0006/0056/0066 share one slot and one code whichever metric picks between them.
 const qsnap = (Q, v) => Q.reduce((b, q) => Math.abs(q - v) < Math.abs(b - v) ? q : b, Q[0]);
 const rampPat = (a, b) => [0, 1, 2, 3].map(k => C8(Math.round(a + (b - a) * k / 3)));
 // 3x5 digit glyphs (each row = 3 bits, bit2 = left column). In the new scheme these are
@@ -201,12 +289,46 @@ const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of mul
 // so it is above the bottom edge and far below the top. A STEP is a corner, whose boundary
 // runs the whole height of the wall -- an orb meets those all the time, and making them
 // background let an orb draw straight over a near wall's edge.
+// STEPSTATIC=1 inks each column by its OWN fill rather than the whole pattern: a column filled
+// top to bottom is a wall that continues past this cell, so it is FOREGROUND and clips; a
+// partially filled column is a wall EDGE, so it is BACKGROUND and does not.
+//
+// Why that is enough on its own, and needs no per-frame choice: the camera height is fixed and
+// everything stands on the floor, so "farther" always means "nearer the horizon". An orb a wall
+// should occlude therefore projects INSIDE that wall's solid region, never onto the one-cell
+// band where its edge lives -- so the columns this leaves background are exactly the ones no
+// occluded orb can reach. The sprite's single priority bit then says WHETHER to clip and the
+// two blacks in the char say WHERE, which is the whole point of having two blacks.
+// Default ON since 2026-08-09: no counterexample survived testing, it fixed an overhang nothing
+// else could, and it costs nothing (18.96 fps either way). STEPSTATIC=0 restores the old
+// per-frame selection with its twin codes.
+const STEPSTATIC = process.env.STEPSTATIC !== '0';
+const FGPX = [0xc0, 0x30, 0x0c, 0x03], BGPX = [0x40, 0x10, 0x04, 0x01];
 const patBytes = (p, isStep) => {
-  const full = isStep || p.every(v => v >= 8);
-  const [a, b, c, d] = full ? [0xc0, 0x30, 0x0c, 0x03] : [0x40, 0x10, 0x04, 0x01];
+  // isStep gates the per-column inking. Without that gate it also fired on RAMPS, and a ramp
+  // whose slope happens to touch the top of its cell has a saturated column -- so every edge
+  // cell along a receding wall grew a foreground stripe and clipped orbs standing in front of
+  // it. A ramp is ONE face and can never occlude; only a cell showing two walls may.
+  // Which columns of a step are foreground: the TALLER side of it, whether or not that side
+  // reaches top to bottom. "Column is full height" was too narrow -- a step sitting at ground
+  // level whose near side is a ramp-to-void never reaches the cell bottom, so the whole cell
+  // came out background and stopped occluding. The step's boundary is the adjacent pair with
+  // the largest jump; the side with the greater values is the nearer wall, hence the occluder.
+  const stepInk = () => {
+    let bi = 1, bd = -1;
+    for (let i = 1; i < 4; i++) { const d = Math.abs(p[i] - p[i - 1]); if (d > bd) { bd = d; bi = i; } }
+    const leftTaller = p[bi - 1] > p[bi];
+    return [0, 1, 2, 3].map(k => ((leftTaller ? k < bi : k >= bi) ? FGPX : BGPX)[k]);
+  };
+  const m = (STEPSTATIC && isStep) ? stepInk()
+                                   : (isStep || p.every(v => v >= 8) ? FGPX : BGPX);
   return [...Array(8)].map((_, i) =>
-    (p[0] > 7 - i ? a : 0) | (p[1] > 7 - i ? b : 0) | (p[2] > 7 - i ? c : 0) | (p[3] > 7 - i ? d : 0));
+    (p[0] > 7 - i ? m[0] : 0) | (p[1] > 7 - i ? m[1] : 0) | (p[2] > 7 - i ? m[2] : 0) | (p[3] > 7 - i ? m[3] : 0));
 };
+const bgOnly = b => { let o = 0;
+  for (let i = 0; i < 4; i++) { const pr = (b >> (6 - 2 * i)) & 3;
+    o |= (pr === 3 ? 1 : pr) << (6 - 2 * i); }
+  return o; };
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
 // SOLID's twin: the same solid black, but bit pair 01, which the VIC classes as BACKGROUND and
@@ -361,7 +483,10 @@ function placeAll(groups) {
   // 56 frees enough for every wall-meets-wall step to get its own exact twin, and costs 0.009
 // wrong logical columns a frame -- one percent of what the sloped-step scheme itself is worth.
 // Ramps had that much slack because the clamp expresses far more slopes than the map produces.
-const RAMPFREE = +(process.env.RAMPFREE ?? 56);
+// 60, not 56: the extra four pay for the background twins that ramp/step shape
+// collisions need (see below). Costs +0.010 wrong logical columns a frame against
+// +0.009, which is nothing beside a ramp cell clipping an orb.
+const RAMPFREE = +(process.env.RAMPFREE ?? 60);
   const merged = [];
   if (RAMPFREE) {
     const stepK = new Set(STEPS.chosen.map(q => q.join(',')));
@@ -408,7 +533,8 @@ const RAMPFREE = +(process.env.RAMPFREE ?? 56);
   const stepKeys = new Set(STEPS.chosen.map(q => q.join(',')));
   console.error(`  cell codes: ${all.filter(p => stepKeys.has(p.join(','))).length} non-vertical ` +
     `step + ${all.filter(p => !stepKeys.has(p.join(','))).length} ramp, none clipping; ` +
-    `6 vertical steps clip, at ${VSTEP0}-${VSTEP0 + 5} with twins at ${VSTEP0 + 6}-${VSTEP0 + 11}`);
+    `6 vertical steps clip, at ${VSTEP0}-${VSTEP0 + 5}` +
+    (STEPSTATIC ? ` (no twins: each column inks itself)` : ` with twins at ${VSTEP0 + 6}-${VSTEP0 + 11}`));
   console.error(`  dropped ${dropped.length} never-sampled patterns` +
     (dropped.length ? ` (worst substitution is ${Math.max(...dropped.map(p => {
       let d = 9; for (const q of all) { const h = hamm(p, q); if (h < d) d = h; } return d; }))}` +
@@ -437,7 +563,21 @@ for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) rampsAll.push(
 //
 // The plateau's slope needs a third sample -- the height at the LAST column before the
 // boundary -- so the step table is addressed by three levels rather than two.
-const STEPN = +(process.env.STEPN ?? 64);
+// 100, not 64, since STEPSTATIC returned 41 codes (the twins were pure duplicates of their
+// bases once each column inks itself). Steps are where the error is: the ramp merging costs
+// +0.009 wrong logical columns a frame against the step corner error's 0.653, so un-merging
+// ramps would spend all 44 codes on the smaller of the two by two orders of magnitude.
+// Measured: corner error 0.653 -> 0.576, six views 1490 -> 1484 pixels, and 0401/027c/31 88 ->
+// 74 wrong pixels. NOT a fix for the reported bulge itself: column 54 still draws its top at
+// row 56 against the model's 50, byte for byte, at 64 and at 100 alike. What improved there is
+// OTHER step error in the same column. 140 buys nothing at all -- past here the limit is the
+// slot key, which cannot see a step's third column, and no code budget reaches that.
+// 80, not 100: twenty codes went to foreground duplicates of the busiest SHARED ramp/step
+// shapes (SHAREDUP), which is what stops a wall's vertical edge losing foreground for the one
+// cell whose shape happens to coincide with a ramp. Paying for them out of the step table costs
+// corner error 0.576 -> 0.606; paying out of the ramp table instead (RAMPFREE 60 -> 84) costs
+// +0.31 wrong columns a frame, ten times more, because the cheap near-duplicate ramps run out.
+const STEPN = +(process.env.STEPN ?? 80);
 const idealStep = (k, qA, qM, qB) => {          // k = 0,1,2 for boundary position 1,2,3
   const a = QA[qA], m = QM[qM], c = QB[qB];
   return k === 0 ? [a, c, c, c]                 // one column before the boundary: no slope
@@ -474,6 +614,32 @@ function chooseSteps() {
   const after = best.reduce((a, b) => a + b, 0);
   // Final assignment for every table slot, sampled or not.
   const pool = cands.filter((_, i) => avail[i]);
+  // STEPDIAG=1 lists the pool as digit strings ("0066" = [0,0,6,6]). The selection is greedy on
+  // SAMPLED frequency, so a shape the walkthrough never produced can lose even when codes are
+  // free -- which is invisible from the code counts alone and needs checking directly when a
+  // single column renders at the wrong height.
+  if (process.env.STEPDIAG === '1') {
+    let occ = 0; for (let k = 0; k < 3; k++) for (const [, m] of stepStats[k])
+      for (const [, n] of m) occ += n;
+    console.error(`  step cells sampled: ${occ} over ${PFRAMES.length} sampled frames = ` +
+      `${(occ / PFRAMES.length).toFixed(2)} per frame -- this is what any per-cell selection cost is multiplied by`);
+  }
+  if (process.env.STEPDIAG === '1')
+    console.error(`  step pool (${pool.length}): ${pool.map(p => p.join('')).sort().join(' ')}`);
+  // STEPDIAG=<pattern> (e.g. 0066) traces ONE truth: which (k,slot) it lands in, what else
+  // shares that slot, and what the slot ends up assigned. A slot key is (a, m, b) -- it does
+  // NOT include every column -- so two different-looking cells can be forced to share one code,
+  // and that is invisible from the pool listing alone.
+  const trace = process.env.STEPDIAG && /^\d{4}$/.test(process.env.STEPDIAG)
+    ? process.env.STEPDIAG : null;
+  if (trace) {
+    for (const s of slots) {
+      if (!s.truths.some(([t]) => t.join('') === trace)) continue;
+      const share = s.truths.map(([t, n]) => `${t.join('')}x${n}`).join(' ');
+      console.error(`  STEPDIAG ${trace}: k=${s.k} slot=${s.slot}`);
+      console.error(`    truths sharing this slot: ${share}`);
+    }
+  }
   const assign = [new Map(), new Map(), new Map()];
   for (const s of slots) {
     let bp = pool[0], be = Infinity;
@@ -504,7 +670,7 @@ for (let k = 0; k < 3; k++) for (const [slot, p] of STEPS.assign[k]) {
 for (const fr of PFRAMES) for (let i = 0; i < fr.length; i++)
   if (Array.isArray(fr[i])) fr[i] = STEPS.assign[fr[i][0]].get(fr[i][1]).join(',');
 console.error(`  step patterns: ${LA}/${LM}/${LB} levels, ${STEPS.nslots} ` +
-  `sampled of ${3*LA*LM*LB} (k,slot) pairs, ${STEPS.chosen.length} codes; corner error ${(oldErr / SFRAMES).toFixed(3)} -> ` +
+  `sampled of ${3*SLOTN} (k,slot) pairs, ${STEPS.chosen.length} codes; corner error ${(oldErr / SFRAMES).toFixed(3)} -> ` +
   `${(STEPS.after / SFRAMES).toFixed(3)} wrong cols/frame (flat plateau -> sloped)`);
 // ---- the six vertical steps, and their background twins ----
 // A step whose every column is either empty or full is a CORNER: its boundary is a straight
@@ -542,18 +708,24 @@ const VSTEPS = STEPS.chosen.filter(p => p.every(v => v === 0 || v >= 8));
 if (VSTEPS.length !== 6) throw new Error(`expected 6 vertical steps, found ${VSTEPS.length}`);
 const VSTEP0 = glyphs.length;
 for (const p of VSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p, true)); }
-for (const p of VSTEPS) glyphs.push(VSTEPDBG
+// The background twin exists ONLY for renderSym's per-frame swap. Under STEPSTATIC each column
+// is already inked by its own fill and nothing is swapped, so it is dead weight.
+if (!STEPSTATIC) for (const p of VSTEPS) glyphs.push(VSTEPDBG
   ? patBytes(p, true).map(b => { let o = 0;   // VSTEPDBG: paint the twins seam-grey so a
       for (let i = 0; i < 4; i++) if ((b >> (6 - 2*i)) & 3) o |= 2 << (6 - 2*i);   // repointed
       return o; })                            // corner is visible on screen at a glance
   : patBytes(p, false));                      // same pixels, bit pair 01
 const VSTEPN = VSTEPS.length;
 const SSTEP0 = glyphs.length;
-for (const p of SSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p)); }
-for (const p of SSTEPS) glyphs.push(splitBytes(p));
-console.error(`  split steps: ${SSTEPS.length} of ${STEPS.chosen.filter(p => p.some(v => v >= 8) &&
-  p.some(v => v > 0 && v < 8)).length} wall-meets-wall patterns, at ${SSTEP0}-${SSTEP0 + SSTEPS.length - 1}` +
-  ` with splits at ${SSTEP0 + SSTEPS.length}-${SSTEP0 + 2 * SSTEPS.length - 1}`);
+for (const p of SSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p, true)); }
+// splitBytes IS the per-column inking, so under STEPSTATIC the "twin" comes out byte-identical
+// to the base glyph -- a pure duplicate of every one of these. That is where the codes come back.
+if (!STEPSTATIC) for (const p of SSTEPS) glyphs.push(splitBytes(p));
+console.error(`  wall-meets-wall steps: ${SSTEPS.length} of ${STEPS.chosen.filter(p => p.some(v => v >= 8) &&
+  p.some(v => v > 0 && v < 8)).length} patterns, at ${SSTEP0}-${SSTEP0 + SSTEPS.length - 1}` +
+  (STEPSTATIC ? ` (no split twins: splitBytes IS the per-column inking, so a twin would be a
+byte-identical duplicate -- that is the 41 codes STEPSTATIC hands back)`
+              : ` with splits at ${SSTEP0 + SSTEPS.length}-${SSTEP0 + 2 * SSTEPS.length - 1}`));
 placeAll([rampsAll, STEPS.chosen]);
 const CELLCODES = glyphs.length;
 // A step's split twin has to have the step's own ink, and the class is far too big to give
@@ -568,7 +740,7 @@ const CELLCODES = glyphs.length;
 const SPLITSUB = +(process.env.SPLITSUB ?? 0);
 const splitT = new Array(256).fill(0);
 { let exact = 0, near = 0;
-  for (const [key, code] of codeOf) {
+  for (const [key, code] of (STEPSTATIC ? [] : codeOf)) {
     const q = key.split(',').map(Number);
     if (!(q.some(v => v >= 8) && q.some(v => v > 0 && v < 8))) continue;   // not wall-meets-wall
     let bd = 99, bi = -1;
@@ -577,7 +749,7 @@ const splitT = new Array(256).fill(0);
     splitT[code] = SSTEP0 + SSTEPS.length + bi;
     if (bd === 0) exact++; else near++;
   }
-  console.error(`  split twins: ${exact} steps use their own, ${near} borrow the nearest ` +
+  if (!STEPSTATIC) console.error(`  split twins: ${exact} steps use their own, ${near} borrow the nearest ` +
     `(within ${SPLITSUB} columns), out of ${[...codeOf].filter(([k]) => { const q = k.split(',').map(Number);
       return q.some(v => v >= 8) && q.some(v => v > 0 && v < 8); }).length} wall-meets-wall codes`);
 }
@@ -611,30 +783,140 @@ for (let k = 0; k < 4; k++) {
   const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : 1) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
+// A ramp and a step can share the SAME four-column shape, but must not share a CODE: a step's
+// code is inked per-column -- foreground on its saturated columns -- and a ramp can never
+// occlude. 20 of rampT's 256 entries landed on a step's code that way, which is why a plain
+// sloping wall base rendered as a clipping black block. Give each such shape a background-inked
+// duplicate of the step's own glyph: identical pixels, only the priority differs.
+// Built HERE, before the overflow check, because these are real codes and must be counted.
+// code -> the pattern it was interned under, for building duplicates of an existing glyph
+const patOfCode = (() => { const m = new Map();
+  for (const [k, c] of codeOf) if (!m.has(c)) m.set(c, k.split(',').map(Number));
+  return c => m.get(c); })();
+const stepInked = new Set();
+for (let c = VSTEP0; c < VSTEP0 + VSTEPN; c++) stepInked.add(c);
+for (let c = SSTEP0; c < SSTEP0 + SSTEPS.length; c++) stepInked.add(c);
+const bgTwinOf = new Map();
+for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
+  const c = codeFor(rampPat(a + CLO, b + CLO));
+  if (stepInked.has(c) && !bgTwinOf.has(c)) {
+    bgTwinOf.set(c, glyphs.length); glyphs.push(glyphs[c].map(bgOnly));
+  }
+}
+console.error(`  ramp/step shape collisions: ${bgTwinOf.size} step codes needed a background twin`);
+// ---- foreground duplicates for the busiest SHARED shapes ----
+// A shape reachable from BOTH tables is background-inked, because a ramp can never occlude --
+// and that leaves a hole in a wall's vertical edge wherever the edge cell's shape happens to
+// coincide with a ramp. Fixing every one costs a duplicate each and there are ~58, but the
+// distribution has a head: the top 10 carry 62% of all shared-code step draws and the top 20
+// carry 85%. So duplicate the busiest SHAREDUP of them, ranked by how often each is actually
+// drawn AS A STEP, and let the tail keep sharing. SHAREDIAG=1 prints the ranking.
+const stepUse = new Map();
+for (let k = 0; k < 3; k++) for (const [slot, pat] of STEPS.assign[k]) {
+  const m = stepStats[k].get(slot); if (!m) continue;
+  let n = 0; for (const [, c] of m) n += c;
+  const code = codeFor(pat);
+  stepUse.set(code, (stepUse.get(code) || 0) + n);
+}
+const rampReach = new Set();
+for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) rampReach.add(codeFor(rampPat(a + CLO, b + CLO)));
+const SHAREDUP = +(process.env.SHAREDUP ?? 20);
+const fgDupOf = new Map();
+{
+  const ranked = [...stepUse].filter(([c]) => rampReach.has(c) && !stepInked.has(c))
+                             .sort((x, y) => y[1] - x[1]);
+  let covered = 0, tot = ranked.reduce((a, [, n]) => a + n, 0);
+  for (const [c, n] of ranked.slice(0, SHAREDUP)) {
+    fgDupOf.set(c, glyphs.length);
+    glyphs.push(patBytes(patOfCode(c), true));      // same shape, step ink
+    covered += n;
+  }
+  console.error(`  shared-shape fg duplicates: ${fgDupOf.size} of ${ranked.length}, covering ` +
+    `${tot ? (100 * covered / tot).toFixed(0) : 0}% of shared-code step draws`);
+}
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 8 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + 8 seam = ${glyphs.length}/256`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
               `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam, ${SEAMBG0}-${SEAMBG0+3} seam-bg`);
-// charset A, and charset B = every glyph flipped vertically. The raster split at the
-// horizon selects B for the bottom half, so ONE char code renders as its own mirror
-// there -- renderSym writes the identical byte to both halves and needs no flip table.
-const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
-for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
-  for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
+// An EDGE cell must never emit SOLID. SOLID is inked all-foreground because fgCodeT needs it as
+// rule 3's "every column clips" answer, but a ramp is one face and can never occlude -- and 25
+// of rampT's 256 entries are fully saturated, so they landed on SOLID and clipped orbs standing
+// in front of them. Visually identical (both blacks are black); it is the priority that differs.
+const edgeCode = p => { const c = codeFor(p);
+  return c === codeOf.get('8,8,8,8') ? SOLIDBG : c; };
 const rampT = new Array(CN * 16).fill(0);
 for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
   const p = rampPat(a + CLO, b + CLO);
-  rampT[a * 16 + b] = codeFor(p);
+  rampT[a * 16 + b] = (c => bgTwinOf.get(c) ?? (c === codeOf.get('8,8,8,8') ? SOLIDBG : c))(codeFor(p));
 }
 // stepT<k>[qA*36 + qM*6 + qB] -> char code, for a cell whose face boundary falls at column
 // k. qM is the level at the LAST column before the boundary: that third sample is what lets
 // the plateau slope down to meet the corner instead of capping it flat.
-const stepT = [0, 1, 2].map(k => { const t = new Array(LA * LM * LB).fill(0);
-  for (const [slot, p] of STEPS.assign[k]) t[slot] = codeFor(p);
+const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
+  // a step cell prefers the foreground duplicate of a shared shape where one was made
+  for (const [slot, p] of STEPS.assign[k]) { const c = edgeCode(p); t[slot] = fgDupOf.get(c) ?? c; }
   return t; });
+// A code reachable ONLY from stepT is used solely as a step cell, so give it step ink even if
+// its pattern never made the SSTEPS list -- that list is capped by frequency and needs a
+// full-height column, so shapes like [6,8,8,8] and [0,5,5,5] fell through and rendered as
+// plain background, leaving a vertical edge that occludes in one cell and not the two above
+// and below it. Free: it re-inks existing glyphs and adds no codes. Codes reachable from BOTH
+// tables cannot be fixed this way -- they would each need a duplicate, and there is no room.
+{
+  const patOf = new Map();
+  for (const [k, c] of codeOf) if (!patOf.has(c)) patOf.set(c, k.split(',').map(Number));
+  const rampCodes = new Set(rampT);
+  const stepCodes = new Set([...stepT[0], ...stepT[1], ...stepT[2]]);
+  let reinked = 0, shared = 0;
+  for (const c of stepCodes) {
+    if (c === SOLIDBG || c === 0) continue;
+    if (rampCodes.has(c)) { shared++; continue; }
+    if (stepInked.has(c)) continue;
+    const pat = patOf.get(c); if (!pat) continue;
+    glyphs[c] = patBytes(pat, true); reinked++;
+  }
+  // SHAREDIAG=1 ranks the shared ramp/step codes by how often each is actually DRAWN as a
+  // step, so the cost of duplicating them can be spent head-first instead of all-or-nothing.
+  if (process.env.SHAREDIAG === '1') {
+    const useAsStep = new Map();
+    for (let k = 0; k < 3; k++) for (const [slot, pat] of STEPS.assign[k]) {
+      const m = stepStats[k].get(slot); if (!m) continue;
+      let n = 0; for (const [, c] of m) n += c;
+      const code = codeFor(pat);
+      useAsStep.set(code, (useAsStep.get(code) || 0) + n);
+    }
+    const shared = [...useAsStep].filter(([c]) => rampCodes.has(c) && stepCodes.has(c))
+                                 .sort((a, b) => b[1] - a[1]);
+    const total = shared.reduce((a, [, n]) => a + n, 0);
+    console.error(`  SHAREDIAG: ${shared.length} shared codes drawn as a step ${total} times ` +
+      `across ${PFRAMES.length} sampled frames (${(total / PFRAMES.length).toFixed(2)} cells/frame)`);
+    let run = 0;
+    shared.forEach(([c, n], i) => { run += n;
+      if (i < 20 || i === shared.length - 1)
+        console.error(`    #${String(i + 1).padStart(2)} code ${String(c).padStart(3)}  ` +
+          `${String(n).padStart(5)} uses  ${(100 * n / total).toFixed(1)}%  ` +
+          `cumulative ${(100 * run / total).toFixed(1)}%`);
+    });
+  }
+  console.error(`  step ink: ${reinked} step-only codes re-inked; ${shared} shared with rampT ` +
+    `and left background (a duplicate each would cost ${shared} codes)`);
+}
+
+// charset A, and charset B = every glyph flipped vertically. The raster split at the
+// horizon selects B for the bottom half, so ONE char code renders as its own mirror
+// there -- renderSym writes the identical byte to both halves and needs no flip table.
+// Charset A keeps its foreground ink, exactly like B. A version of this stripped it -- every 11
+// pair to 01 -- reasoning that an ORB can never reach above the horizon: it stands on the floor
+// and its pixel height is always under 88/dist, the wall half-height at its own range. True of
+// orbs, and wrong in general. A tall object rises above the horizon under perspective even
+// though the ceiling never does, and it would need clipping at a top step. Do not strip A again
+// for the sake of a tidier FGDBG map -- the extra black up there is the honest picture.
+const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
+for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
 // qmT[qA*8 + qM] = qA*36 + qM*6. The 6502 has no multiply, and folding both scales into one
 // lookup keeps the whole index inside a byte (max 5*36 + 5*6 + 5 = 215), so the table stays
 // reachable with plain abs,Y addressing.
@@ -832,6 +1114,11 @@ const ORBMIX = process.env.ORBMIX !== '0';
 // Renders the two answers the scan is choosing between, so a frame can be compared against
 // both instead of guessed at.
 const ORBPRI = process.env.ORBPRI;
+// OPCONF=0 disables the conflict release in orbPaint step 2 -- the rule that lets an orb
+// through when columns inside its box were made foreground by a DIFFERENT orb. That rule is
+// the only place one orb's presence can change another's occlusion, so this flag is the A/B
+// that says whether a "second orb on screen breaks it" report is that rule or something else.
+const OPCONF = process.env.OPCONF !== '0';
 // Skip reprojecting when the viewpoint has not moved. OFF for now -- full calculations
 // whether moving or not -- because it flatters stationary frames and hides what the projection
 // actually costs. ORBSTILL=1 turns it back on.
@@ -1041,6 +1328,28 @@ for (let cell = 0; cell < 256; cell++) {
 }
 if (candList.length > 0x2300 - 0x1900) throw new Error(
   `visibility lists are ${candList.length} bytes and would run into the step tables`);
+// ORBDIAG=1 writes every input to the occlusion decision as JSON. Occlusion questions are
+// "which run, which plane, which orb, was it culled" -- all build-time constants -- and
+// re-deriving them in a separate script is how the last analysis went wrong (it approximated
+// the projection and pointed at a viewpoint where nothing clipped at all). Dump the real ones.
+if (process.env.ORBDIAG === '1') {
+  const perCell = {};
+  for (let c = 0; c < 256; c++) {
+    if (map[c] || !candCnt[c]) continue;
+    const base = (candLo[c] | (candHi[c] << 8)) - CANDBASE;
+    perCell[`${c % 16},${c >> 4}`] = [...Array(candCnt[c])].map((_, j) => ({
+      orb: candList[base + j * 3], brg: candList[base + j * 3 + 1],
+      win: candList[base + j * 3 + 2] & 0x7f,
+      canOcc: !!(candList[base + j * 3 + 2] & 0x80),
+    }));
+  }
+  writeFileSync('orbdiag.json', JSON.stringify({
+    orbs: ORBS, runFace, runPlane, nextRun, map,
+    runW, runE, runN, runS,
+    orbOcc: orbOcc.map(m => m.map(b => b)), perCell,
+  }));
+  console.error('ORBDIAG: wrote orbdiag.json');
+}
 const _pal = [...new Set(ORBBODY)].length === 1
   ? `all body colour ${ORBBODY[0]}`
   : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
@@ -1098,7 +1407,13 @@ const orbHalfT = ORBSRC.map((b, v) => {
 // 150 - anchor: raster 50 + display row 100, less the rows from the sprite's top down to the
 // bottom of its ground shadow. Adding h to THIS cannot overflow until the orb is long gone.
 const orbYBaseT = ORBANCH.map(a => 150 - a);
-const orbColT = ORBWIDE.map(w => w >> 2);        // half-width in LOGICAL columns
+// Half-width in LOGICAL columns, rounded UP. w>>2 truncates, so any sprite whose width is not
+// a multiple of 4 logical columns lost half a column at each edge -- and the bounding box built
+// from it then stopped one column short of the sprite's own pixels. The wall column under that
+// edge never got marked, and a one-column sliver of orb showed through a wall that was otherwise
+// clipping it correctly. Rounding up costs nothing: an over-wide box marks nothing extra, since
+// every column is still filtered through the face-plane mask.
+const orbColT = ORBWIDE.map(w => (w + 3) >> 2);
 const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
 // is (ptr),y with no multiply.
@@ -1106,6 +1421,11 @@ const OCCBASE = RELOC + 0x2200;   // above the visibility lists; see the org bel
 const orbOccFlat = orbOcc.flat();
 const orbOccLo = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
 const orbOccHi = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
+// FGDBG=<colour> tints BACKGROUND black ($d022). Foreground black is bit pair 11 and takes its
+// colour from colour RAM, so it stays black -- which makes every cell that can clip a sprite
+// show up as the only black left on screen. The one direct way to answer "which wall pieces are
+// rendered foreground", instead of inferring it from where an orb happens to get bitten.
+const FGDBG = +(process.env.FGDBG ?? 0);
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
@@ -1441,7 +1761,7 @@ entry:
         sta $d018
         lda #$01
         sta $d021               ; 00 = white  (ceiling / floor)
-        lda #$00
+        lda #${hx(FGDBG)}
         sta $d022               ; 01 = black  (readout glyphs only; walls moved to 11)
         lda #${hx(SEAMCOL)}
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
@@ -1631,7 +1951,26 @@ subFace:lda spanR
 ${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no projection at
         ; all -- it is simply the column we just found. Do it before the k=0 bail below:
         ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
-        lda spanR
+        ;
+        ; ...but only if the corner is CONCAVE, an inside corner where two perpendicular faces
+        ; meet. There the two walls sit at the same depth, so it is black meeting black and the
+        ; line is the only thing dividing them. A CONVEX corner -- the end of a receding wall,
+        ; the kind you cannot see around -- is already drawn by the silhouette, which steps 20+
+        ; rows at that column, and its line lands in exactly the cell where an orb needs
+        ; per-column occlusion. A seam cell cannot express that: it is all-clipping or all-not.
+        ; Leaving convex corners seam-free makes them plain two-black SOLID splits, which are
+        ; per-column and exact.
+        lda spanL
+        tax
+        lda faceIdT,x
+        tax                     ; X = the run on this side
+        ldy spanR
+        lda faceIdT,y           ; A = the run on the other side
+        cmp cpLoT,x
+        beq subCv
+        cmp cpHiT,x
+        bne subCn               ; not a concave partner: convex silhouette, draw nothing
+subCv:  lda spanR
         lsr
         lsr
         tax
@@ -2083,7 +2422,7 @@ rfSt3:  lda stepT3,y
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
-${SPRITES ? `        ; A vertical edge is the piece an orb meets at a corner, and it obeys the same rule
+${SPRITES && !STEPSTATIC ? `        ; A vertical edge is the piece an orb meets at a corner, and it obeys the same rule
         ; as the wall body: background unless a column of this cell must clip something. Its
         ; ink is on the wall's side of the cell and nowhere else, so "any column" is exact
         ; here -- the empty side has no pixels to classify. Ramps are never foreground.
@@ -2091,26 +2430,32 @@ ${SPRITES ? `        ; A vertical edge is the piece an orb meets at a corner, an
         bcc rfSt0
         cmp #${hx(VSTEP0 + VSTEPN)}
         bcs rfSt0
+${STEPSTATIC ? `        ; STEPSTATIC: the glyph already inks each column by its own fill, so there is
+        ; nothing to choose per frame and no twin to swap in.
+` : `        ; Three forms, and the mask picks between them. This used to test fgCell, branch away
+        ; on nonzero, then test the SAME unchanged fgCell again -- so the split lookup below
+        ; could never be reached and all 35 twins were dead. Both branches must come off ONE
+        ; read, with the mixed case falling through to the split.
         ldy colc
         lda fgCell,y
         and #$0f
-        bne rfSt0               ; something here must clip: keep the foreground form
-        lda ecode
-        clc
-        adc #${hx(VSTEPN)}      ; ... otherwise its background twin
-        sta ecode
-        ; A wall-meets-wall step: the cell is part near wall, part far, and its twin puts the
-        ; priority edge between them. Only where the twin has this pattern's own ink -- see
-        ; SPLITSUB -- so the wall never changes shape, and only where something must clip.
-        ldy colc
-        lda fgCell,y
-        and #$0f
-        beq rfSt0
+        beq rfStBg              ; nothing under this cell must clip: its background twin
+        cmp #$0f
+        beq rfSt0               ; every column must clip: the base code IS the foreground form
+        ; Mixed -- the cell is part near wall, part far, and they disagree. That is exactly what
+        ; the split twin says: a priority edge down the run boundary inside the cell, both sides
+        ; the same black. Only where the twin carries this pattern's own ink (see SPLITSUB), so
+        ; the wall never changes shape as an orb passes.
         ldy ecode
         lda splitT,y
-        beq rfSt0
+        beq rfSt0               ; no twin for this pattern: keep the foreground form, since a
+        sta ecode               ; wall that should hide an orb shows worse than the reverse
+        bne rfSt0               ; always -- a splitT entry of 0 was rejected above
+rfStBg: lda ecode
+        clc
+        adc #${hx(VSTEPN)}
         sta ecode
-rfSt0:  ` : ''}lda erow
+`}rfSt0:  ` : ''}lda erow
         clc
         adc bufOff
         tay
@@ -2657,6 +3002,10 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
 ssCnt:  cmp #17
         bcs ssDn                ; more than 16 cells of wall in one span means u is junk
         sta ssN                 ; (castRay's far/guard exits leave remL/remH meaningless)
+        ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
+        ; end rays land in, so the outer edges of the wall are never crossed between them. The
+        ; corner at the end of a receding wall is marked by subFace instead, which is where it
+        ; gets suppressed.
 ssLp:   jsr seamOne
         dec ssN
         beq ssDn
@@ -3570,7 +3919,7 @@ orbMove:
         ; spent arriving at last frame's answer. The sprite registers already hold it. All that
         ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
         ; rewrites the screen every frame and puts plain SOLID back.
-${ORBSTILL ? '' : '        jmp obMoved'}
+${ORBSTILL ? '' : '        jmp obMoved             ; DEADCODE-OK: ORBSTILL=0 skips the still-frame test on purpose'}
         lda px
         cmp opx
         bne obMoved
@@ -4161,6 +4510,16 @@ opDone:
         ora omYY
         sta omYY
 oNoX:   lda o0
+        and #$fe                ; snap X to the MULTICOLOR grid. A multicolor char pixel is two
+                                ; hires pixels aligned to the character (always even, since
+                                ; sprite X 24 is screen x 0); a multicolor SPRITE pixel is also
+                                ; two, but aligned to the sprite's own X. At an odd X the two
+                                ; grids are half a pixel out of phase, and since the VIC decides
+                                ; priority per HIRES pixel, one half of a sprite pixel lands on
+                                ; foreground and clips while its partner lands on background and
+                                ; draws -- a one-hires-pixel sliver of orb peeking past a wall
+                                ; edge that is otherwise clipping it correctly. Costs 2 cycles
+                                ; and quantises horizontal motion to 2px.
         sta obX,x
         lda o3
         sta obY,x
@@ -4245,14 +4604,19 @@ opA0:   jsr opCell
         beq opA0
         lda opreq
         cmp opcon
-        bcc opA1s               ; something of it shows: let it speak
+        bcc opA1r               ; something of it shows: let it speak
         ldx opsl                ; wholly hidden: take its sprite away and move on
         lda orbBitT,x
         eor #$ff
         and omEn
         sta omEn
         jmp opANx
-        lda opcl                ; remember how far the code sweep has to reach
+        ; The branch above MUST name this line, not opA1s. Landing on opA1s skips both stores
+        ; and leaves opmn/opmx at their initial 39/0, so step 3's "ldx opmx / cpx opmn" fails
+        ; on the first compare and no cell is ever given a foreground code -- rule 3 dead for
+        ; every orb in every frame, while wholly-hidden orbs still vanish via the cull above,
+        ; which is what made it read as "occlusion works sometimes".
+opA1r:  lda opcl                ; remember how far the code sweep has to reach
         cmp opmn
         bcs opA1m
         sta opmn
@@ -4319,10 +4683,17 @@ opP1y:  sta pbb
         cpx opcr
         bcc opP1
         beq opP1
+        lda opreq               ; Asked for NOTHING? Then no wall in the scene faces away from
+        beq opP2                ; this orb, nothing can hide it, and it goes OVER foreground --
+                                ; rule 4. Without this the comparison below sees 0 against 0,
+                                ; scores it a tie, and ties clip. That is how an orb standing in
+                                ; front of a statically-foreground vertical edge got bitten: the
+                                ; edge is foreground from the charset, not because anything
+                                ; requested it, so fgCell is empty and opcon counts zero too.
         lda opcon               ; more of the box wants clipping than not: let the VIC clip.
         cmp opreq               ; Ties go to clipping -- a wall that should hide an orb is more
         beq opP1a               ; conspicuous than an orb slightly over one that should not.
-        bcs opP2
+${OPCONF ? '        bcs opP2' : '        ; OPCONF=0: conflict release disabled, every orb clips'}
 opP1a:  ldx opsl
         lda orbBitT,x
         ora omPri
@@ -4341,15 +4712,13 @@ opMat:  lda fgCell,x
         lda seamT,x
         cmp #${hx(SEAM0)}
         bcc opMt2
-        ; A seam has only two forms, all-clipping or all-not, because its grey stripe can live
-        ; in no other bit pair and there are no codes left for a per-column seam. So it goes
-        ; with the majority of the cell, and a tie goes to NOT clipping: an orb slightly over a
-        ; wall reads better than a bite out of one, and the stripe still crosses it either way.
-        lda fgCell,x
-        tay
-        lda popcT,y
-        cmp #$03
-        bcc opMt1
+        ; A seam still has only two forms, all-clipping or all-not -- its grey stripe can live
+        ; in no other bit pair. But it no longer needs a majority vote to choose between them.
+        ; Seams are now suppressed at convex run ends, so a seam only ever falls INSIDE a run,
+        ; where all four columns show the same wall and therefore share one occlusion answer.
+        ; Any column asking to clip means the whole cell clips, exactly. The old popcount and
+        ; its "ties go to not clipping" were a compromise for the corner case that no longer
+        ; reaches here -- and that compromise is what left an orb overhanging a wall edge.
         lda seamT,x
         sec                     ; same line, but its black columns now clip
         sbc #$04
@@ -4615,13 +4984,22 @@ stepT1: ${chunk(stepT[0]).trim()}
 stepT2: ${chunk(stepT[1]).trim()}
         * = ${hx16(RELOC + 0x2600)}
 stepT3: ${chunk(stepT[2]).trim()}
-${SPRITES ? `        * = ${hx16(RELOC + 0x2700)}
+${SPRITES && !STEPSTATIC ? `        * = ${hx16(RELOC + 0x2700)}
 ; splitT: cell code -> the same cell drawn with a priority edge down the run boundary inside
 ; it, or 0 for "no such twin, fall back to a whole-cell answer". Sits above the step tables
 ; because the assembler takes origins in ascending order only.
 splitT: !byte ${splitT.join(',')}
 ` : ''}
-${PROFILE ? `        * = ${hx16(RELOC + 0x2800)}  ; the profiler lives above the relocated
+${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
+; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its
+; corner line only when the run across the boundary is one of these; every other run-to-run
+; boundary is a convex silhouette, where the wall's edge occludes something unrelated behind
+; it and the line is both redundant and in the way of per-column occlusion.
+; Indexed by run id, so whole tables rather than a packed set.
+cpLoT:  !byte ${cpLo.join(',')}
+cpHiT:  !byte ${cpHi.join(',')}
+` : ''}
+${PROFILE ? `        * = ${hx16(RELOC + 0x2900)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
