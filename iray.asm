@@ -3934,7 +3934,10 @@ oNoM:   inc onv
         ; depth scan set and nothing has set since the face-plane rewrite -- so the loop below
         ; walked a range out of uninitialised RAM and read ocmask from the wrong base. Every
         ; SOLID cell genuinely under the orb kept its foreground code and went on clipping.
-        lda o3                  ; sprite top, as a char row
+        ldx ovar
+        lda o3
+        clc
+        adc orbBlankT,x         ; the first row the sprite actually inks, not the rectangle's
         sec
         sbc #50
         bcs omT1
@@ -4352,6 +4355,7 @@ orbHalfT: !byte 11,12,11,12,11,12,11,12,11,12,11,12,22,24,22,24,22,24
 orbYBaseT: !byte 129,129,129,129,129,129,129,129,129,129,129,129,108,108,108,108,108,108
 orbColT: !byte 0,1,1,2,2,3,3,4,4,5,5,6,7,8,9,10,11,12
 orbSpHT: !byte 21,21,21,21,21,21,21,21,21,21,21,21,42,42,42,42,42,42
+orbBlankT: !byte 19,16,15,14,13,9,8,7,6,2,1,0,16,14,12,4,2,0   ; transparent rows above the ball, per variant
 orbBitT: !byte 1,2,4,8,16,32,64,128
 orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
 orbOccHiT: !byte 166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,166,167,167,167,167,167

@@ -741,7 +741,11 @@ const NOHUD = flag('NOHUD');
 
 // DBGORB adds code ahead of this, and the diagnostic build has run into it twice -- VICE then
 // silently boots the PREVIOUS disk and you read stale numbers. Let a debug build push it up.
-const RELOC = +(process.env.RELOC ?? 0x8400);   // CPU-only tables, out of the VIC's 16K window
+// A diagnostic build adds code ahead of this and has run into it twice; the failure is silent
+// (the assembler errors, VICE boots the PREVIOUS disk, you read stale numbers off a stale
+// frame), so give those builds the extra page automatically rather than by remembering to.
+const RELOC = +(process.env.RELOC ??
+  (process.env.DBGORB === '1' || +(process.env.VSTEPDBG ?? 0) ? 0x8500 : 0x8400));
 // ---- the orbs ----
 // Seven size variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps:
 // orb5 and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra
@@ -859,6 +863,15 @@ for (let w = 7; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(1); ORBWIDE.
 // sprite's last row and the anchor is simply the sprite's height. No per-variant table of
 // hand-measured shadow positions any more.
 const ORBANCH = ORBEXP.map(e => e ? 42 : 21);
+// ... but the sprite RECTANGLE is 21 rows whatever the ball's size, so a small distant orb
+// carries up to 18 blank rows above its content. The repoint pass walked those, so it deleted
+// seams and repointed walls in cells the sprite never puts a pixel in -- visible as a corner
+// seam simply missing, with no orb anywhere near it to explain the loss.
+const orbBlankT = ORBSRC.map((src, v) => {
+  const g = orbScale(src + 1);
+  let n = 0; while (n < 21 && g[n].every(p => p === 0)) n++;
+  return n * (ORBEXP[v] ? 2 : 1);
+});
 // The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
 // and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
 // ORBPAL=colour brings back light blue / light red / light green bodies.
@@ -4134,7 +4147,10 @@ ${ORBMIX ? '' : '        jmp orbYes'}
         ; depth scan set and nothing has set since the face-plane rewrite -- so the loop below
         ; walked a range out of uninitialised RAM and read ocmask from the wrong base. Every
         ; SOLID cell genuinely under the orb kept its foreground code and went on clipping.
-        lda o3                  ; sprite top, as a char row
+        ldx ovar
+        lda o3
+        clc
+        adc orbBlankT,x         ; the first row the sprite actually inks, not the rectangle's
         sec
         sbc #50
         bcs omT1
@@ -4421,6 +4437,7 @@ orbHalfT: !byte ${orbHalfT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
 orbSpHT: !byte ${orbSpHT.join(',')}
+orbBlankT: !byte ${orbBlankT.join(',')}   ; transparent rows above the ball, per variant
 orbBitT: !byte ${orbBitT.join(',')}
 orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
