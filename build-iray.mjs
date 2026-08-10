@@ -49,8 +49,8 @@ for (let a = 0; a < 256; a++) {
 // angle, which also keeps `rang` exactly as it was for every other consumer.
 const FINEANG = process.env.FINEANG === '1';
 
-if (FINEANG && +(process.env.PLAN ?? 0) === 3)
-  throw new Error('FINEANG and PLAN=3 both claim RELOC+0x2900; test them separately for now');
+if (FINEANG && process.env.SPRITES !== '0' && process.env.SPRITES !== undefined)
+  throw new Error('FINEANG puts its tables in the orb-table space, which SPRITES=1 needs');
 const ddxLoQ = [], ddxHiQ = [], ddyLoQ = [], ddyHiQ = [];
 for (let q = 0; q < 1024; q++) {
   const cx = Math.cos(q / 1024 * 2 * Math.PI), sy = Math.sin(q / 1024 * 2 * Math.PI);
@@ -5778,6 +5778,24 @@ candHiT: !byte ${candHi.join(',')}
 candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it may cross pages
 ` : ''}${SPRITES ? `        * = ${hx16(OCCBASE)}
 orbOccT: !byte ${orbOccFlat.join(',')}
+` : ''}${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
+; The DDA deltas at quarter-angle resolution. 1024 entries each, addressed as four pages via
+; the dispatch in castRay, so no index arithmetic wider than a byte ever happens. The 256-entry
+; originals are left in place and unused -- posXT/posYT/absSinT/absCosT still index by the
+; integer angle, and their page-alignment check would have to be reworked for no gain.
+ddxLoTQ: ${chunk(ddxLoQ).trim()}
+        * = ${hx16(RELOC + 0x1700)}
+ddxHiTQ: ${chunk(ddxHiQ).trim()}
+        * = ${hx16(RELOC + 0x1b00)}
+ddyLoTQ: ${chunk(ddyLoQ).trim()}
+        * = ${hx16(RELOC + 0x1f00)}
+ddyHiTQ: ${chunk(ddyHiQ).trim()}
+        * = ${hx16(RELOC + 0x2300)}
+; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
+; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
+; table landed on $c000 -- which is stackLT, the subdivision's own stack. It rendered fine until
+; the recursion got deep enough to reach it, then corrupted every span from mid-screen right.
+rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
@@ -5801,24 +5819,6 @@ ${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
 ; Indexed by run id, so whole tables rather than a packed set.
 cpLoT:  !byte ${cpLo.join(',')}
 cpHiT:  !byte ${cpHi.join(',')}
-` : ''}${FINEANG ? `        * = ${hx16(RELOC + 0x2900)}
-; The DDA deltas at quarter-angle resolution. 1024 entries each, addressed as four pages via
-; the dispatch in castRay, so no index arithmetic wider than a byte ever happens. The 256-entry
-; originals are left in place and unused -- posXT/posYT/absSinT/absCosT still index by the
-; integer angle, and their page-alignment check would have to be reworked for no gain.
-ddxLoTQ: ${chunk(ddxLoQ).trim()}
-        * = ${hx16(RELOC + 0x2d00)}
-ddxHiTQ: ${chunk(ddxHiQ).trim()}
-        * = ${hx16(RELOC + 0x3100)}
-ddyLoTQ: ${chunk(ddyLoQ).trim()}
-        * = ${hx16(RELOC + 0x3500)}
-ddyHiTQ: ${chunk(ddyHiQ).trim()}
-        * = ${hx16(RELOC + 0x3900)}
-; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
-; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
-; table landed on $c000 -- which is stackLT, the subdivision's own stack. It rendered fine until
-; the recursion got deep enough to reach it, then corrupted every span from mid-screen right.
-rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
 ` : ''}
 ${PLAN === 3 ? `        * = ${hx16(RELOC + 0x2900)}
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
