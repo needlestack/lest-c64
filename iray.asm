@@ -189,6 +189,8 @@ cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 
 bidx    = $cbf0                 ; PLAN=2: the bucket index the code came from, and which
 thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
 cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
+cmtmp   = $cbf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $cbf5                 ; the ninth index bit -- the two columns the bucket throws away
 cqN     = $cbf3                 ; entries in the colour queue
 cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only ($fb is orbSeam's)
 cqLo    = $cc00                 ; colour queue: address low, high, and the value to write.
@@ -3510,5 +3512,6 @@ stepT3: !byte 169,43,44,152,158,157,155,161,4,56,56,173,48,61,47,48,49,49,51,51,
 ; Indexed by run id, so whole tables rather than a packed set.
 cpLoT:  !byte 0,34,54,39,40,53,58,39,45,46,65,66,58,51,34,35,45,42,41,56,57,50,61,62,37,38,56,37,43,48,48,35,44,62,1,15,14,24,25,3,4,16,17,31,32,16,9,24,29,3,12,13,29,1,2,8,19,20,12,6,19,32,23,22,10,2,11
 cpHiT:  !byte 0,53,65,49,49,54,59,40,55,55,64,64,50,59,36,36,41,46,42,60,60,51,63,63,47,47,57,38,44,52,52,43,61,66,14,31,15,27,27,7,7,18,18,28,28,8,17,25,30,4,21,21,30,5,5,9,26,26,6,13,20,22,33,23,11,10,33
+
 
 

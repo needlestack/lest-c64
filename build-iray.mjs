@@ -772,6 +772,7 @@ byte-identical duplicate -- that is the 41 codes STEPSTATIC hands back)`
 const PLAN = +(process.env.PLAN ?? 0);
 const planData = PLAN ? JSON.parse(readFileSync('./charset-plan.json', 'utf8')) : null;
 if (PLAN === 2 && !planData.paired) throw new Error('charset-plan.json has no paired plan: rerun with PAIRED=1');
+if (PLAN === 3 && !planData.fine) throw new Error('charset-plan.json has no fine plan: rerun charsetgen');
 // Bottom-anchored fills, so row i (0 = top) is lit when i >= 8 - level. Both halves of a pair
 // use the same rule, which is why nesting is just componentwise <=.
 const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
@@ -785,10 +786,10 @@ if (!PLAN) placeAll([rampsAll, STEPS.chosen]);
 else {
   glyphs.length = 2;                      // keep BLANK=0 and SOLID=1; drop everything interned
   for (const k of [...codeOf.keys()]) if (codeOf.get(k) >= 2) codeOf.delete(k);
-  const src = PLAN === 2 ? planData.paired : planData;
+  const src = PLAN === 2 ? planData.paired : PLAN === 3 ? planData.fine : planData;
   src.codes.forEach(c => glyphs.push(PLAN === 2 ? pairBytes(c[0], c[1]) : patBytes(c)));
   planCode = new Map(src.assign.map(([k, i]) => [k, 2 + i]));
-  if (PLAN === 2) planThr = new Map(src.thr);
+  if (PLAN === 2 || PLAN === 3) planThr = new Map(src.thr);
   console.error(`PLAN=${PLAN}: ${src.codes.length} codes from charsetgen` +
     (PLAN === 2 ? ` (${2 * src.codes.length} glyphs, nesting pairs)` : '') +
     `, predicted ${(src.cost ?? src.costPx).toFixed(0)} px over ${planData.frames} frames ` +
@@ -965,7 +966,31 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
   // a step cell prefers the foreground duplicate of a shared shape where one was made
   for (const [slot, p] of STEPS.assign[k]) { const c = edgeCode(p); t[slot] = fgDupOf.get(c) ?? c; }
   return t; });
-if (PLAN) console.error(`  PLAN: ${planFallback} of ${CN * 16 + 3 * SLOTN} table entries fell back ` +
+// PLAN=3: the index gains a ninth bit, so every table gains a second copy -- one for each half
+// of the split. A bucket that never split has thr 0, which compares true for every m, so its LO
+// copy is unreachable and just mirrors HI rather than needing a special case.
+let rampTlo = null, rampThi = null, stepTlo = null, stepThi = null;
+let fineHit = 0, fineMiss = 0;
+if (PLAN === 3) {
+  rampThi = new Array(CN * 16).fill(0); rampTlo = new Array(CN * 16).fill(0);
+  for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
+    const i = a * 16 + b, fb = nearestCode(rampPat(a + CLO, b + CLO));
+    planCode.has(`r${i}.h`) ? fineHit++ : fineMiss++;
+    rampThi[i] = planCode.get(`r${i}.h`) ?? fb;
+    rampTlo[i] = planCode.get(`r${i}.l`) ?? rampThi[i];
+  }
+  stepThi = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
+  stepTlo = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
+  for (let k = 0; k < 3; k++) for (let slot = 0; slot < SLOTN; slot++) {
+    const fb = nearestCode(STEPS.assign[k].get(slot) ?? [0, 0, 0, 0]);
+    planCode.has(`s${k}.${slot}.h`) ? fineHit++ : fineMiss++;
+    stepThi[k][slot] = planCode.get(`s${k}.${slot}.h`) ?? fb;
+    stepTlo[k][slot] = planCode.get(`s${k}.${slot}.l`) ?? stepThi[k][slot];
+  }
+  console.error(`  PLAN=3: ${fineHit} of ${fineHit + fineMiss} index slots come from the plan, ` +
+    `${fineMiss} fall back to the nearest codeword (never reached by the walkthrough)`);
+}
+if (PLAN && PLAN !== 3) console.error(`  PLAN: ${planFallback} of ${CN * 16 + 3 * SLOTN} table entries fell back ` +
   `to the nearest codeword (bucket never reached by the walkthrough)`);
 // A code reachable ONLY from stepT is used solely as a step cell, so give it step ink even if
 // its pattern never made the SSTEPS list -- that list is capped by frequency and needs a
@@ -1300,6 +1325,15 @@ const edgEnt = sel => [...ROWSA.map(r => `${sel}edA${r}`), '0'].concat([...ROWSA
 // the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
 const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
   return Math.max(CLO, Math.min(CHI, v)) - CLO; });
+// clamp8T: the same index straight to the LEVEL C8 uses, 0..8. clampT returns 0..15 -- an index
+// into the 16-level clamp, where the level is value+CLO and anything at or above 11 is a full
+// column. calcM needs the level, because the thresholds it compares against were computed
+// offline on 0..8 shapes; summing clampT instead compares a 0..30 quantity against a 0..17
+// threshold, which is the bug this fixes. Doing the arithmetic inline would be `sbc #3` plus a
+// clamp at each end, ~20 cycles twice on the hottest path. A second 256-byte table is free:
+// the lookup happens either way.
+const clamp8T = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
+  return Math.max(0, Math.min(8, v)); });
 // Same table with the value pre-shifted into the high nibble. rampT is indexed by
 // wL*16 + wR, and the left level was being shifted left four times right after clampT
 // handed it over -- 8 cycles per edge cell to undo a table lookup's own output.
@@ -1991,6 +2025,8 @@ cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 
 bidx    = $cbf0                 ; PLAN=2: the bucket index the code came from, and which
 thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
 cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
+cmtmp   = $cbf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $cbf5                 ; the ninth index bit -- the two columns the bucket throws away
 cqN     = $cbf3                 ; entries in the colour queue
 cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only ($fb is orbSeam's)
 cqLo    = $cc00                 ; colour queue: address low, high, and the value to write.
@@ -2746,8 +2782,21 @@ rfCp3:  clc
 ${PLAN === 2 ? `        sty bidx                ; the pair's threshold is indexed the same way as its code
         lda #$00
         sta thsel
-` : ''}        lda rampT,y
-        jmp rfStore             ; (the ramp is the common case; see rfStore below)
+        lda rampT,y
+        jmp rfStore             ; (the ramp is the common case; see rfStore below)` : PLAN === 3 ? `        ; The ninth bit of the index. The byte in Y is two of the cell's four columns; m is the
+        ; other two, and the per-bucket threshold turns it into one bit. Carry from the compare
+        ; picks the table, so no wide arithmetic is needed -- the tables are page-aligned and the
+        ; index stays a byte in Y.
+        sty bidx
+        jsr calcM
+        ldy bidx
+        cmp rampThrT,y
+        bcs rmpHi
+        lda rampTlo,y
+        jmp rfStore
+rmpHi:  lda rampThi,y
+        jmp rfStore` : `        lda rampT,y
+        jmp rfStore             ; (the ramp is the common case; see rfStore below)`}
         ; A face boundary inside the cell -- a genuinely vertical step, whose position the
         ; renderer reads straight out of cstepT rather than inferring. The old scheme drew a
         ; flat plateau up to that column, but the near wall is still receding across it, so
@@ -2793,15 +2842,38 @@ rfMc:   clc
 ${PLAN === 2 ? `        sty bidx
         lda kpos                ; 1..3, and thsel 0 is the ramp -- so kpos IS the selector
         sta thsel
+` : ''}${PLAN === 3 ? `        sty bidx
+        jsr calcM
+        sta cmv                 ; m survives the kpos dispatch below
+        ldy bidx
 ` : ''}        lda kpos
         cmp #$02
         beq rfSt2
         bcs rfSt3
-        lda stepT1,y
+${PLAN === 3 ? `        lda cmv
+        cmp stepThrT1,y
+        bcs st1h
+        lda stepT1lo,y
+        jmp rfStore
+st1h:   lda stepT1hi,y
+        jmp rfStore
+rfSt2:  lda cmv
+        cmp stepThrT2,y
+        bcs st2h
+        lda stepT2lo,y
+        jmp rfStore
+st2h:   lda stepT2hi,y
+        jmp rfStore
+rfSt3:  lda cmv
+        cmp stepThrT3,y
+        bcs st3h
+        lda stepT3lo,y
+        jmp rfStore
+st3h:   lda stepT3hi,y` : `        lda stepT1,y
         jmp rfStore
 rfSt2:  lda stepT2,y
         jmp rfStore
-rfSt3:  lda stepT3,y
+rfSt3:  lda stepT3,y`}
         ; Store it at this row and its mirror. This used to hand-build two 16-bit pointers
         ; -- rowLoT/rowHiT + colc with the carry, twice -- and store through them: 85 cycles
         ; to write two bytes. The stub has both addresses baked in and takes the column from
@@ -2822,7 +2894,7 @@ ${PLAN === 2 ? `        ; ---- which half of the pair does this cell show? ----
 rcM1:   clc
         adc kr
         tay
-        lda clampT,y
+        lda clamp8T,y           ; LEVEL 0..8, matching the offline thresholds -- not clampT
         sta cqtmp               ; free scratch: the colour is not chosen until below
         lda colH+2,x
         cmp #101
@@ -2831,7 +2903,7 @@ rcM1:   clc
 rcM2:   clc
         adc kr
         tay
-        lda clampT,y
+        lda clamp8T,y
         clc
         adc cqtmp               ; A = m, and the compares below only need the carry
         ldy bidx
@@ -2934,7 +3006,35 @@ rfNext: ldx colc
         dex
         bpl rfCol
         rts
-${PLAN === 2 ? `
+${PLAN === 3 ? `
+; calcM: A = w1 + w2, the two columns the bucket index does not carry. Same cap and clamp the
+; endpoints get -- (h + K) must fit a signed byte, and clampT is the only thing that turns a
+; height into a level. A subroutine rather than inlined twice: 12 cycles of jsr/rts against
+; ~40 bytes duplicated, on a path that already costs ~50.
+calcM:  ldx colc
+        lda col4T,x
+        tax
+        lda colH+1,x
+        cmp #101
+        bcc cm1
+        lda #100
+cm1:    clc
+        adc kr
+        tay
+        lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
+        sta cmtmp
+        lda colH+2,x
+        cmp #101
+        bcc cm2
+        lda #100
+cm2:    clc
+        adc kr
+        tay
+        lda clamp8T,y
+        clc
+        adc cmtmp
+        rts
+` : ''}${PLAN === 2 ? `
 ; cqPush: queue colour RAM cell (Y = char row, colc = column) = cqtmp. The cap is a real bound,
 ; not a guess -- the build asserts the worst sampled frame against it, exactly as the old colour
 ; queue did, because an overflow here is a wrong-coloured cell rather than a crash and would go
@@ -4358,7 +4458,7 @@ qIdxAT: !byte ${qIdxAT.join(',')}
 qIdxMT: !byte ${qIdxMT.join(',')}
 qIdxBT: !byte ${qIdxBT.join(',')}
 qmT:    !byte ${qmT.join(',')}
-rampT:  ${chunk(rampT).trim()}
+${PLAN === 3 ? '' : `rampT:  ${chunk(rampT).trim()}`}
 ${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
 ${chainSrc('bkB', SCR_B, ROWSD, 'rfEdge')}
 ${chainSrc('slA', SCR_A, ROWSA, 'rfNext')}
@@ -5582,11 +5682,11 @@ orbOccT: !byte ${orbOccFlat.join(',')}
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
         * = ${hx16(RELOC + 0x2400)}
-stepT1: ${chunk(stepT[0]).trim()}
+${PLAN === 3 ? '' : `stepT1: ${chunk(stepT[0]).trim()}`}
         * = ${hx16(RELOC + 0x2500)}
-stepT2: ${chunk(stepT[1]).trim()}
+${PLAN === 3 ? '' : `stepT2: ${chunk(stepT[1]).trim()}`}
         * = ${hx16(RELOC + 0x2600)}
-stepT3: ${chunk(stepT[2]).trim()}
+${PLAN === 3 ? '' : `stepT3: ${chunk(stepT[2]).trim()}`}
 ${SPRITES && !STEPSTATIC ? `        * = ${hx16(RELOC + 0x2700)}
 ; splitT: cell code -> the same cell drawn with a priority edge down the run boundary inside
 ; it, or 0 for "no such twin, fall back to a whole-cell answer". Sits above the step tables
@@ -5601,6 +5701,37 @@ ${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
 ; Indexed by run id, so whole tables rather than a packed set.
 cpLoT:  !byte ${cpLo.join(',')}
 cpHiT:  !byte ${cpHi.join(',')}
+` : ''}
+${PLAN === 3 ? `        * = ${hx16(RELOC + 0x2900)}
+; The ninth index bit costs a second copy of every code table plus the thresholds that derive
+; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the
+; hottest lookup in the renderer. The single-copy rampT/stepT are not emitted at all under
+; PLAN=3, which pays back four of these twelve pages.
+rampTlo: ${chunk(rampTlo).trim()}
+        * = ${hx16(RELOC + 0x2a00)}
+rampThi: ${chunk(rampThi).trim()}
+        * = ${hx16(RELOC + 0x2b00)}
+stepT1lo: ${chunk(stepTlo[0]).trim()}
+        * = ${hx16(RELOC + 0x2c00)}
+stepT1hi: ${chunk(stepThi[0]).trim()}
+        * = ${hx16(RELOC + 0x2d00)}
+stepT2lo: ${chunk(stepTlo[1]).trim()}
+        * = ${hx16(RELOC + 0x2e00)}
+stepT2hi: ${chunk(stepThi[1]).trim()}
+        * = ${hx16(RELOC + 0x2f00)}
+stepT3lo: ${chunk(stepTlo[2]).trim()}
+        * = ${hx16(RELOC + 0x3000)}
+stepT3hi: ${chunk(stepThi[2]).trim()}
+        * = ${hx16(RELOC + 0x3100)}
+rampThrT: !byte ${[...Array(256)].map((_, i) => planThr.get('r' + i) ?? 0).join(',')}
+        * = ${hx16(RELOC + 0x3200)}
+stepThrT1: !byte ${[...Array(SLOTN)].map((_, i) => planThr.get('s0.' + i) ?? 0).join(',')}
+        * = ${hx16(RELOC + 0x3300)}
+stepThrT2: !byte ${[...Array(SLOTN)].map((_, i) => planThr.get('s1.' + i) ?? 0).join(',')}
+        * = ${hx16(RELOC + 0x3400)}
+stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => planThr.get('s2.' + i) ?? 0).join(',')}
+        * = ${hx16(RELOC + 0x3500)}
+clamp8T: ${chunk(clamp8T).trim()}
 ` : ''}
 ${PROFILE ? `        * = ${hx16(RELOC + 0x2900)}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the

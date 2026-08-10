@@ -267,8 +267,9 @@ console.log(`    cells needing the non-default colour:  ${(minority / FRAMES).to
 // by the same w1+w2 threshold to get a FINER INDEX, then quantise those sub-buckets down to the
 // SAME 232 codes. No pairing, no nesting constraint, no colour RAM writes -- just a bigger
 // table feeding the same charset.
+let fine = null;
 {
-  const B2 = [];
+  const B2 = [], fthr = new Map();
   for (const b of B) {
     let bt = null, bc = Infinity;
     for (let thr = 0; thr <= 17; thr++) {
@@ -277,7 +278,10 @@ console.log(`    cells needing the non-default colour:  ${(minority / FRAMES).to
       const c = costOf(hi, median(hi)) + costOf(lo, median(lo));
       if (c < bc) { bc = c; bt = thr; }
     }
-    if (bt === null) { B2.push(b); continue; }
+    // thr 0 compares true for every m, so a bucket that would not split answers from its HI
+    // half and its LO half is never reached -- same result as not splitting, no special case.
+    fthr.set(b.key, bt === null ? 0 : bt);
+    if (bt === null) { B2.push({ ...b, key: b.key + '.h' }); continue; }
     const hi = b.shapes.filter(x => x.v[1] + x.v[2] >= bt), lo = b.shapes.filter(x => x.v[1] + x.v[2] < bt);
     B2.push({ key: b.key + '.h', kind: b.kind, shapes: hi, n: hi.reduce((a, x) => a + x.n, 0) });
     B2.push({ key: b.key + '.l', kind: b.kind, shapes: lo, n: lo.reduce((a, x) => a + x.n, 0) });
@@ -292,6 +296,8 @@ console.log(`    cells needing the non-default colour:  ${(minority / FRAMES).to
     const r = best(B2, K, 8);
     console.log(`    finer index, quantised to ${String(K).padStart(3)} codes        ` +
       `${A(r.cost, r.cols).padStart(8)}    ${per(r.cost).padStart(8)}  ${per(r.cols).padStart(10)}`);
+    if (K === 232) fine = { codes: r.codes, assign: [...r.assign], thr: [...fthr],
+                            cost: r.cost, cols: r.cols, acc: acc(r.cost, r.cols) };
   }
 }
 
@@ -348,8 +354,8 @@ const out = {
   source: 'charsetgen', frames: FRAMES, totalCells: TOTAL,
   floorPx: FLOOR, floorCols: FLOORC, buckets: B.length, kcell: KCELL,
   shippedPx: scan.shippedPx, shippedCols: scan.shippedCols,
-  codes: finalPlan.codes, assign: [...finalPlan.assign],
-  costPx: finalPlan.cost, costCols: finalPlan.cols,
+  codes: finalPlan.codes, assign: [...finalPlan.assign], fine,
+  costPx: finalPlan.cost, costCols: finalPlan.cols, acc: acc(finalPlan.cost, finalPlan.cols),
   paired,
 };
 writeFileSync('./charset-plan.json', JSON.stringify(out));
