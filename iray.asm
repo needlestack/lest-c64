@@ -186,6 +186,15 @@ ocanO   = $cbe8                 ; the same bit while the candidate list is being
 ocanF   = $cbe9                 ; and while orbPaint has one slot in hand
 osPtr   = $fb                   ; 2 bytes: screen row pointer
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
+bidx    = $cbf0                 ; PLAN=2: the bucket index the code came from, and which
+thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
+cqN     = $cbf3                 ; entries in the colour queue
+cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only ($fb is orbSeam's)
+cqLo    = $cc00                 ; colour queue: address low, high, and the value to write.
+cqHi    = $cc40                 ; Written after the buffer flip, never inline -- colour RAM is
+cqCol   = $cc80                 ; NOT double buffered, so an inline write repaints the frame
+                                ; still on screen. That is the shimmer the old pairing hit.
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $c922
@@ -2451,6 +2460,7 @@ rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
 kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
 col4T:  !byte 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156
+
 m32LoT: !byte 0,32,64,96,128,160,192,224,0,32,64,96,128,160,192,224,0,32,64,96,128,160,192,224
 m32HiT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2
 blkLoT: !byte 0,<bkA0,<bkA1,<bkA2,<bkA3,<bkA4,<bkA5,<bkA6,<bkA7,<bkA8,<bkA9,<bkA10,<bkA11,<bkA12,0,<bkB0,<bkB1,<bkB2,<bkB3,<bkB4,<bkB5,<bkB6,<bkB7,<bkB8,<bkB9,<bkB10,<bkB11,<bkB12

@@ -14,7 +14,7 @@
 // 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
 // code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
-import { writeFileSync } from 'fs';
+import { writeFileSync, readFileSync } from 'fs';
 import { assemble } from './asm6502.mjs';
 await import('./d64lib.js');
 const D64 = globalThis.D64;
@@ -347,6 +347,11 @@ const bgOnly = b => { let o = 0;
   return o; };
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
+// Under PLAN=2 colour RAM means something, so every glyph that is NOT a nesting pair has to be
+// colour-INDEPENDENT or it changes with its neighbours. SOLID becomes black-in-both (01) rather
+// than the bit pair 11 the walls-only build uses. That is also what removes the need to restore
+// colour RAM: a cell that stops being an edge cell gets SOLID or BLANK, and neither reads $d800.
+if (+(process.env.PLAN ?? 0) === 2) glyphs[1] = [...Array(8)].fill(0x55);
 const BLANK = codeOf.get('0,0,0,0'), SOLID = codeOf.get('8,8,8,8');
 // SOLID's twin: the same solid black, but bit pair 01, which the VIC classes as BACKGROUND and
 // so does NOT clip sprites against. Cells under a sprite whose wall is FARTHER than it get
@@ -756,7 +761,39 @@ console.error(`  wall-meets-wall steps: ${SSTEPS.length} of ${STEPS.chosen.filte
   (STEPSTATIC ? ` (no split twins: splitBytes IS the per-column inking, so a twin would be a
 byte-identical duplicate -- that is the 41 codes STEPSTATIC hands back)`
               : ` with splits at ${SSTEP0 + SSTEPS.length}-${SSTEP0 + 2 * SSTEPS.length - 1}`));
-placeAll([rampsAll, STEPS.chosen]);
+// PLAN=1 / PLAN=2 replace the whole generated codebook with charsetgen's k-medians plan.
+// The pipeline above still runs -- STEPS and the sampler are what produced the buckets the plan
+// is expressed in -- but its code ASSIGNMENT is thrown away and rebuilt from the plan, so the
+// merges, drops and nearest-neighbour substitutions no longer apply.
+//
+// PLAN=2 additionally makes every code carry a NESTING PAIR: 01 = black in both, 00 = white in
+// both, 11 = the rows where they differ. Colour RAM picks whether 11 reads black (the fuller
+// half) or white (the sparser half), so one code holds two patterns and the cell chooses.
+const PLAN = +(process.env.PLAN ?? 0);
+const planData = PLAN ? JSON.parse(readFileSync('./charset-plan.json', 'utf8')) : null;
+if (PLAN === 2 && !planData.paired) throw new Error('charset-plan.json has no paired plan: rerun with PAIRED=1');
+// Bottom-anchored fills, so row i (0 = top) is lit when i >= 8 - level. Both halves of a pair
+// use the same rule, which is why nesting is just componentwise <=.
+const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
+  [0, 1, 2, 3].reduce((b, c) => b | ((i >= 8 - lo[c] ? 1 : i >= 8 - hi[c] ? 3 : 0) << (6 - 2 * c)), 0));
+// 64 entries: ~23 edge cells a frame, two rows each, so 46 is the working number and 64 is
+// headroom. The build asserts the worst SAMPLED frame below rather than trusting the estimate.
+const CQMAX = 64;
+let planCode = null;                      // bucket key -> code, for rampT/stepT below
+let planThr = null;                       // bucket key -> the w1+w2 threshold for its pair
+if (!PLAN) placeAll([rampsAll, STEPS.chosen]);
+else {
+  glyphs.length = 2;                      // keep BLANK=0 and SOLID=1; drop everything interned
+  for (const k of [...codeOf.keys()]) if (codeOf.get(k) >= 2) codeOf.delete(k);
+  const src = PLAN === 2 ? planData.paired : planData;
+  src.codes.forEach(c => glyphs.push(PLAN === 2 ? pairBytes(c[0], c[1]) : patBytes(c)));
+  planCode = new Map(src.assign.map(([k, i]) => [k, 2 + i]));
+  if (PLAN === 2) planThr = new Map(src.thr);
+  console.error(`PLAN=${PLAN}: ${src.codes.length} codes from charsetgen` +
+    (PLAN === 2 ? ` (${2 * src.codes.length} glyphs, nesting pairs)` : '') +
+    `, predicted ${(src.cost ?? src.costPx).toFixed(0)} px over ${planData.frames} frames ` +
+    `(${((src.cost ?? src.costPx) / planData.frames).toFixed(3)}/frame vs ${planData.shippedPx.toFixed(3)} shipped)`);
+}
 const CELLCODES = glyphs.length;
 // A step's split twin has to have the step's own ink, and the class is far too big to give
 // every member one. But the charset already accepts a nearest-pattern substitution for the
@@ -800,7 +837,9 @@ for (let g = 0; g < NGLYPH; g++) {
 // keeps the flipped fontB free.
 const SEAM0 = glyphs.length;
 for (let k = 0; k < 4; k++) {
-  const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : 3) << (6 - 2 * i)), 0);
+  // wall columns are 11 normally, but 01 under PLAN=2 -- see the SOLID note above
+  const wall = +(process.env.PLAN ?? 0) === 2 ? 1 : 3;
+  const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : wall) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
 // ... and the same four with their BLACK columns in the background pair. Only the grey stripe
@@ -886,18 +925,48 @@ console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleav
 // in front of them. Visually identical (both blacks are black); it is the priority that differs.
 const edgeCode = p => { const c = codeFor(p);
   return c === codeOf.get('8,8,8,8') ? SOLIDBG : c; };
+// Under PLAN the entry is whatever charsetgen assigned to that BUCKET. Buckets the walkthrough
+// never reached still need an answer -- they are reachable geometry the scan happened to miss,
+// not impossible ones -- so they fall back to the codeword nearest the pattern the old linear
+// model would have drawn. nearestCode is also what keeps a plan valid after a map edit.
+const planL1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);
+const planPats = PLAN ? (PLAN === 2 ? planData.paired.codes.map(c => c[0]) : planData.codes) : [];
+const nearestCode = p => { let bi = 0, bd = 99;
+  planPats.forEach((q, i) => { const d = planL1(p, q); if (d < bd) { bd = d; bi = i; } });
+  return 2 + bi; };
+let planFallback = 0;
 const rampT = new Array(CN * 16).fill(0);
 for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
   const p = rampPat(a + CLO, b + CLO);
+  if (PLAN) {
+    const hit = planCode.get(`r${a * 16 + b}`);
+    if (hit === undefined) planFallback++;
+    rampT[a * 16 + b] = hit ?? nearestCode(p);
+  } else
   rampT[a * 16 + b] = (c => bgTwinOf.get(c) ?? (c === codeOf.get('8,8,8,8') ? SOLIDBG : c))(codeFor(p));
 }
 // stepT<k>[qA*36 + qM*6 + qB] -> char code, for a cell whose face boundary falls at column
 // k. qM is the level at the LAST column before the boundary: that third sample is what lets
 // the plateau slope down to meet the corner instead of capping it flat.
 const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
+  if (PLAN) {
+    // Every slot, not just the sampled ones: an unsampled slot still gets reached at some
+    // viewpoint, and leaving it 0 draws a BLANK hole in a wall.
+    for (let slot = 0; slot < SLOTN; slot++) {
+      const hit = planCode.get(`s${k}.${slot}`);
+      if (hit !== undefined) { t[slot] = hit; continue; }
+      planFallback++;
+      const p = STEPS.assign[k].get(slot);
+      t[slot] = nearestCode(p ?? [QA[Math.floor(slot / (LM * LB))] ?? 0, 0, 0,
+                                  QB[slot % LB] ?? 0]);
+    }
+    return t;
+  }
   // a step cell prefers the foreground duplicate of a shared shape where one was made
   for (const [slot, p] of STEPS.assign[k]) { const c = edgeCode(p); t[slot] = fgDupOf.get(c) ?? c; }
   return t; });
+if (PLAN) console.error(`  PLAN: ${planFallback} of ${CN * 16 + 3 * SLOTN} table entries fell back ` +
+  `to the nearest codeword (bucket never reached by the walkthrough)`);
 // A code reachable ONLY from stepT is used solely as a step cell, so give it step ink even if
 // its pattern never made the SSTEPS list -- that list is capped by frequency and needs a
 // full-height column, so shapes like [6,8,8,8] and [0,5,5,5] fell through and rendered as
@@ -1003,6 +1072,7 @@ if (process.env.CELLSCAN === '1') {
     return patOfCode2(code) ?? [0, 0, 0, 0];
   };
   const seen = new Map();          // true 4-column content -> {n, kb, w, at, cols, px, ex}
+  const buckets = new Map();       // "r<idx>" / "s<k>.<slot>" -> Map(trueShape -> count)
   let cells = 0, mixed = 0;
   // L1 = wrong PIXELS, hamm = wrong COLUMNS. mergecells prices a direct shape table in pixels,
   // so the shipped engine has to be priced in the same unit or the two cannot be compared.
@@ -1050,6 +1120,15 @@ if (process.env.CELLSCAN === '1') {
           if (!e) seen.set(key, e = { n: 0, kb, w: w.slice(), at: [px, py, a], cols: 0, px: 0, ex: 0 });
           e.n++; e.cols += d; e.px += dpx;
           if (d === 0) e.ex++;
+          // Per-BUCKET histograms: which true shapes land in each rampT entry and each step
+          // slot, and how often. The charset picks one pattern per bucket, so this is the only
+          // distribution that can tell it which pattern to pick -- a global shape histogram
+          // cannot, because it does not know which shapes have to share an answer.
+          const bk = kb ? `s${kb - 1}.${qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3])}`
+                        : `r${(w[0] - CLO) * 16 + (w[3] - CLO)}`;
+          let bh = buckets.get(bk);
+          if (!bh) buckets.set(bk, bh = new Map());
+          bh.set(key, (bh.get(key) || 0) + 1);
         }
       }
     }
@@ -1108,6 +1187,7 @@ if (process.env.CELLSCAN === '1') {
     shapes: [...seen].map(([k, e]) => ({ p: k, n: e.n, kb: e.kb,
       drawn: drawnFor(e.w, e.kb).join(','), sampledByBuild: sampled.has(k), at: e.at }))
       .sort((a, b) => b.n - a.n),
+    buckets: [...buckets].map(([b, h]) => [b, [...h]]),
   }, null, 1));
   console.error('  wrote cellscan.json');
   process.exit(0);
@@ -1908,6 +1988,15 @@ ocanO   = $cbe8                 ; the same bit while the candidate list is being
 ocanF   = $cbe9                 ; and while orbPaint has one slot in hand
 osPtr   = $fb                   ; 2 bytes: screen row pointer
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
+bidx    = $cbf0                 ; PLAN=2: the bucket index the code came from, and which
+thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
+cqN     = $cbf3                 ; entries in the colour queue
+cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only ($fb is orbSeam's)
+cqLo    = $cc00                 ; colour queue: address low, high, and the value to write.
+cqHi    = $cc40                 ; Written after the buffer flip, never inline -- colour RAM is
+cqCol   = $cc80                 ; NOT double buffered, so an inline write repaints the frame
+                                ; still on screen. That is the shimmer the old pairing hit.
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $c922
@@ -2053,7 +2142,11 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-${SPRITES ? `        ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
+${PLAN === 2 ? `        lda #$00                ; the colour queue must start EMPTY. Uninitialised, a boot value
+        sta cqN                 ; of 64 or more makes every push hit the full check silently,
+                                ; and the first flush walks 64 garbage pointers writing colour
+                                ; bytes wherever they happen to point.
+` : ''}${SPRITES ? `        ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
         lda #$00
         sta $d015               ; nothing visible until orbMove has decided what is
         lda pa
@@ -2441,7 +2534,25 @@ mshB:   lda #${hx(vm(SCR_B))}
         lda #${hx(SCR_A >> 8)}
         sta baseHi
 mnext:
-${SPRITES ? '        jsr osFlush             ; sprite registers, now that the beam is out of the way\n' : ''}        inc iterLo
+${PLAN === 2 ? `        ; ---- colour RAM flush: past raster 250, after the flip, never inline ----
+        ; Only edge cells carry a nesting pair, and every edge cell is queued every frame, so
+        ; nothing has to be restored: a cell that stops being an edge gets SOLID or BLANK, and
+        ; neither of those glyphs contains a bit pair 11 to colour.
+        ldx cqN
+        beq cqDone
+cqF1:   dex
+        lda cqLo,x
+        sta cqp
+        lda cqHi,x
+        sta cqp+1
+        lda cqCol,x
+        ldy #$00
+        sta (cqp),y
+        cpx #$00
+        bne cqF1
+cqDone: lda #$00
+        sta cqN
+` : ''}${SPRITES ? '        jsr osFlush             ; sprite registers, now that the beam is out of the way\n' : ''}        inc iterLo
         bne mloop
         inc iterHi
         jmp mloop
@@ -2632,7 +2743,10 @@ rfCp3:  clc
         lda hh0                 ; single face: ramp, index = wL*16 + wR
         ora hh1                 ; hh0 is already <<4, straight from clmp16
         tay
-        lda rampT,y
+${PLAN === 2 ? `        sty bidx                ; the pair's threshold is indexed the same way as its code
+        lda #$00
+        sta thsel
+` : ''}        lda rampT,y
         jmp rfStore             ; (the ramp is the common case; see rfStore below)
         ; A face boundary inside the cell -- a genuinely vertical step, whose position the
         ; renderer reads straight out of cstepT rather than inferring. The old scheme drew a
@@ -2676,7 +2790,10 @@ rfMc:   clc
         clc
         adc qbv
         tay
-        lda kpos
+${PLAN === 2 ? `        sty bidx
+        lda kpos                ; 1..3, and thsel 0 is the ramp -- so kpos IS the selector
+        sta thsel
+` : ''}        lda kpos
         cmp #$02
         beq rfSt2
         bcs rfSt3
@@ -2690,7 +2807,59 @@ rfSt3:  lda stepT3,y
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
-${SPRITES && !STEPSTATIC ? `        ; A vertical edge is the piece an orb meets at a corner, and it obeys the same rule
+${PLAN === 2 ? `        ; ---- which half of the pair does this cell show? ----
+        ; The bucket is two of the four columns, because a 4D index is what costs -- not the
+        ; data, which colH has all along. So one add and one table compare recover most of what
+        ; the bucket threw away: m = w1 + w2 against a threshold chosen per bucket offline.
+        ; Measured at 99% of what a perfect oracle bit would be worth.
+        ldx colc
+        lda col4T,x
+        tax
+        lda colH+1,x
+        cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
+        bcc rcM1
+        lda #100
+rcM1:   clc
+        adc kr
+        tay
+        lda clampT,y
+        sta cqtmp               ; free scratch: the colour is not chosen until below
+        lda colH+2,x
+        cmp #101
+        bcc rcM2
+        lda #100
+rcM2:   clc
+        adc kr
+        tay
+        lda clampT,y
+        clc
+        adc cqtmp               ; A = m, and the compares below only need the carry
+        ldy bidx
+        ldx thsel
+        beq rcRamp
+        dex
+        beq rcS1
+        dex
+        beq rcS2
+        cmp stepThrT3,y
+        jmp rcSet
+rcS1:   cmp stepThrT1,y
+        jmp rcSet
+rcS2:   cmp stepThrT2,y
+        jmp rcSet
+rcRamp: cmp rampThrT,y
+rcSet:  lda #$08                ; carry set: m >= thr -> the FULLER half -> 11 reads black
+        bcs rcHave
+        lda #$09                ; sparser half -> 11 reads white, so those rows drop out
+rcHave: sta cqtmp
+        ldy erow                ; queue this row and its mirror; renderSym writes both
+        jsr cqPush
+        lda #24
+        sec
+        sbc erow
+        tay
+        jsr cqPush
+` : ''}${SPRITES && !STEPSTATIC ? `        ; A vertical edge is the piece an orb meets at a corner, and it obeys the same rule
         ; as the wall body: background unless a column of this cell must clip something. Its
         ; ink is on the wall's side of the cell and nowhere else, so "any column" is exact
         ; here -- the empty side has no pixels to classify. Ramps are never foreground.
@@ -2765,7 +2934,27 @@ rfNext: ldx colc
         dex
         bpl rfCol
         rts
-
+${PLAN === 2 ? `
+; cqPush: queue colour RAM cell (Y = char row, colc = column) = cqtmp. The cap is a real bound,
+; not a guess -- the build asserts the worst sampled frame against it, exactly as the old colour
+; queue did, because an overflow here is a wrong-coloured cell rather than a crash and would go
+; unnoticed for a long time.
+cqPush: lda ccLoT,y
+        clc
+        adc colc
+        ldx cqN
+        sta cqLo,x
+        lda ccHiT,y
+        adc #$00
+        sta cqHi,x
+        lda cqtmp
+        sta cqCol,x
+        inx
+        cpx #${hx(CQMAX)}
+        bcs cqFull              ; full: drop it. One cell shows the other half of its pair for
+        stx cqN                 ; one frame, which beats scribbling past the queue.
+cqFull: rts
+` : ''}
 ${DUMPH ? `
 ; diagnostic: colH[0..159] as hex pairs, 40 columns per row-pair, over screen rows 0-7
 dumpH:  ldx #$00
@@ -4125,6 +4314,18 @@ rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
 kTabT:  !byte ${kTab.join(',')}
 col4T:  !byte ${[...Array(40)].map((_, i) => i * 4).join(',')}
+${PLAN === 2 ? `; Colour RAM row bases. $d800 is fixed -- colour RAM is NOT double buffered -- so unlike
+; rowLoT/rowHiT these need no per-buffer offset.
+ccLoT:  !byte ${[...Array(25)].map((_, r) => (0xd800 + r * 40) & 255).join(',')}
+ccHiT:  !byte ${[...Array(25)].map((_, r) => (0xd800 + r * 40) >> 8).join(',')}
+; Per-bucket threshold on m = w1 + w2. A bucket whose pair collapsed to a single glyph gets 0,
+; which compares true for every m and so always picks the fuller half -- the same answer the
+; single-glyph plan would have given.
+rampThrT: !byte ${[...Array(256)].map((_, i) => planThr.get('r' + i) ?? 0).join(',')}
+stepThrT1: !byte ${[...Array(SLOTN)].map((_, i) => planThr.get('s0.' + i) ?? 0).join(',')}
+stepThrT2: !byte ${[...Array(SLOTN)].map((_, i) => planThr.get('s1.' + i) ?? 0).join(',')}
+stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => planThr.get('s2.' + i) ?? 0).join(',')}
+` : ''}
 m32LoT: !byte ${[...Array(24)].map((_, i) => (i * 32) & 255).join(',')}
 m32HiT: !byte ${[...Array(24)].map((_, i) => (i * 32) >> 8).join(',')}
 blkLoT: !byte ${blkEnt('<')}
