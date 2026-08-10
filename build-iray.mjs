@@ -39,15 +39,41 @@ for (let a = 0; a < 256; a++) {
   ddxLo.push(dx & 255); ddxHi.push(dx >> 8); ddyLo.push(dy & 255); ddyHi.push(dy >> 8);
   posX.push(cx >= 0 ? 1 : 0); posY.push(sy >= 0 ? 1 : 0);
 }
+// FINEANG=1: the DDA deltas at QUARTER-angle resolution, 1024 entries instead of 256.
+// The angle byte gives only 48 distinct ray directions across 160 columns, so 3-5 adjacent
+// columns march the identical ray and a wall's far end can only sit on a run edge -- it jumps a
+// whole character instead of scrolling. Two fractional bits make every column distinct.
+//
+// ONLY these four tables grow. posXT/posYT are sign bits that flip at 0/64/128/192, and
+// absSinT/absCosT feed u for seams which is already +-1-2 columns; both stay on the integer
+// angle, which also keeps `rang` exactly as it was for every other consumer.
+const FINEANG = process.env.FINEANG === '1';
+// Span delimiters the subdivision may pin. Was NLOG/8 = 20, which the COARSE angle table never
+// reached: 3-5 adjacent columns shared a ray, so boundaries that fell inside a run were invisible
+// and merged. FINEANG resolves them, the list fills, and everything past the overflow is left as
+// the search happened to leave it -- 100+ rows of wrong wall, always at the right of the screen
+// because that is what gets searched last. bndT owns a whole page, so the cap was never about
+// space. The build reports the worst SAMPLED frame so this cannot silently re-fill.
+const NBND = +(process.env.NBND ?? (FINEANG ? 64 : NLOG / 8));
+if (FINEANG && +(process.env.PLAN ?? 0) === 3)
+  throw new Error('FINEANG and PLAN=3 both claim RELOC+0x2900; test them separately for now');
+const ddxLoQ = [], ddxHiQ = [], ddyLoQ = [], ddyHiQ = [];
+for (let q = 0; q < 1024; q++) {
+  const cx = Math.cos(q / 1024 * 2 * Math.PI), sy = Math.sin(q / 1024 * 2 * Math.PI);
+  const dx = Math.min(65535, Math.round(SCALE / Math.max(1e-3, Math.abs(cx))));
+  const dy = Math.min(65535, Math.round(SCALE / Math.max(1e-3, Math.abs(sy))));
+  ddxLoQ.push(dx & 255); ddxHiQ.push(dx >> 8); ddyLoQ.push(dy & 255); ddyHiQ.push(dy >> 8);
+}
 const NLOG = 160, FOV = 47;             // one ray per output column (160 logical cols)
 const NCELL = NLOG / 4;                 // 4x8 cells across the screen (40)
 // RECTILINEAR projection: columns spaced by atan (flat image plane) + per-column
 // cos-correction of the distance. Fixes the fisheye arch AND makes wall height linear.
 const CTR = (NLOG - 1) / 2, HALF_UNITS = FOV / 2, TANHALF = Math.tan(HALF_UNITS / 256 * 2 * Math.PI);
-const rayOff = [], cosCorr = [];
+const rayOff = [], cosCorr = [], rayOffQ = [];
 for (let c = 0; c < NLOG; c++) {
   const camX = (c - CTR) / CTR * TANHALF;
   rayOff.push(Math.round(Math.atan(camX) / (2 * Math.PI) * 256) & 255);
+  rayOffQ.push(Math.round(Math.atan(camX) / (2 * Math.PI) * 1024));   // signed, |v| < 128
   cosCorr.push(Math.min(255, Math.round(256 / Math.sqrt(1 + camX * camX))));
 }
 // Half-height from distance. Indexed by perpDist>>3 (1/32-cell units); 88 half-px at one
@@ -2024,6 +2050,10 @@ osPtr   = $fb                   ; 2 bytes: screen row pointer
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
 bidx    = $cbf0                 ; PLAN=2: the bucket index the code came from, and which
 thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+paqL    = $cbf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
+paqH    = $cbf7
+rqL     = $cbf8                 ; and this ray's 10-bit angle: rqL is the table index,
+rqH     = $cbf9                 ; rqH (0..3) picks which quarter of the 1024-entry table
 cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
 cmtmp   = $cbf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
 cmv     = $cbf5                 ; the ninth index bit -- the two columns the bucket throws away
@@ -2114,7 +2144,7 @@ oay     = $cb71
 oixS    = $cb72
 oiyS    = $cb73
 odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
-bndT    = $ca00                 ; columns where a face or saturation state begins
+bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
 
@@ -2282,7 +2312,15 @@ ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-
         clc
         adc px+1
         sta cell0
-        lda #$00                ; explicit: the clears above leave A holding their own fill
+${FINEANG ? `        lda pa                  ; pa*4 once a frame, not once a ray -- it is constant across
+        asl                     ; the whole frame and the rays only add their own offset
+        sta paqL
+        lda #$00
+        rol
+        asl paqL
+        rol
+        sta paqH
+` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
         sta col
         jsr marchCol            ; column 0
@@ -2525,7 +2563,7 @@ cfDn:
 ${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
-        cpx #${NLOG / 8}
+        cpx #${hx(NBND)}
         bcs subBDn              ; list full: leave the rest as the search left them
         lda spanR
         sta bndT,x
@@ -3942,8 +3980,69 @@ castRay:
         lda pa
         clc
         adc rayOffT,x
-        sta rang
+        sta rang                ; integer angle: still what posXT/posYT/absSinT/absCosT want
+${FINEANG ? `        ; ---- 10-bit ray angle for the DDA deltas ----
+        ; Dispatch on the quarter rather than patching four operands: rqH is 0..3, so four load
+        ; blocks with the page folded into the absolute address cost ~8 cycles, against ~40 to
+        ; self-modify. Only 13.2 rays are cast a frame, so this is ~400 cycles total.
+        lda rayOffQS,x          ; signed: sign-extend into the high byte by hand
+        bmi faNeg
+        clc
+        adc paqL
+        sta rqL
+        lda paqH
+        adc #$00
+        jmp faHi
+faNeg:  clc
+        adc paqL
+        sta rqL
+        lda paqH
+        adc #$ff                ; -1 in the high byte
+faHi:   and #$03
         tax
+        ldy rqL
+        cpx #$00                ; NOT a bare BEQ: the LDY above sets Z from rqL, not from the
+        beq faP0                ; page, and without this the dispatch branches on the index
+        dex
+        beq faP1
+        dex
+        beq faP2
+        lda ddxLoTQ+768,y
+        sta ddx
+        lda ddxHiTQ+768,y
+        sta ddxH
+        lda ddyLoTQ+768,y
+        sta ddy
+        lda ddyHiTQ+768,y
+        sta ddyH
+        jmp faDn
+faP0:   lda ddxLoTQ,y
+        sta ddx
+        lda ddxHiTQ,y
+        sta ddxH
+        lda ddyLoTQ,y
+        sta ddy
+        lda ddyHiTQ,y
+        sta ddyH
+        jmp faDn
+faP1:   lda ddxLoTQ+256,y
+        sta ddx
+        lda ddxHiTQ+256,y
+        sta ddxH
+        lda ddyLoTQ+256,y
+        sta ddy
+        lda ddyHiTQ+256,y
+        sta ddyH
+        jmp faDn
+faP2:   lda ddxLoTQ+512,y
+        sta ddx
+        lda ddxHiTQ+512,y
+        sta ddxH
+        lda ddyLoTQ+512,y
+        sta ddy
+        lda ddyHiTQ+512,y
+        sta ddyH
+faDn:` : `        tax
         lda ddxLoT,x
         sta ddx
         lda ddxHiT,x
@@ -3951,7 +4050,7 @@ castRay:
         lda ddyLoT,x
         sta ddy
         lda ddyHiT,x
-        sta ddyH
+        sta ddyH`}
         lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
         sta cell                ; The value is the player's cell, so it is the same for every
                                 ; ray in the frame -- computed once in mloop, not 11 times.
@@ -5701,6 +5800,24 @@ ${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
 ; Indexed by run id, so whole tables rather than a packed set.
 cpLoT:  !byte ${cpLo.join(',')}
 cpHiT:  !byte ${cpHi.join(',')}
+` : ''}${FINEANG ? `        * = ${hx16(RELOC + 0x2900)}
+; The DDA deltas at quarter-angle resolution. 1024 entries each, addressed as four pages via
+; the dispatch in castRay, so no index arithmetic wider than a byte ever happens. The 256-entry
+; originals are left in place and unused -- posXT/posYT/absSinT/absCosT still index by the
+; integer angle, and their page-alignment check would have to be reworked for no gain.
+ddxLoTQ: ${chunk(ddxLoQ).trim()}
+        * = ${hx16(RELOC + 0x2d00)}
+ddxHiTQ: ${chunk(ddxHiQ).trim()}
+        * = ${hx16(RELOC + 0x3100)}
+ddyLoTQ: ${chunk(ddyLoQ).trim()}
+        * = ${hx16(RELOC + 0x3500)}
+ddyHiTQ: ${chunk(ddyHiQ).trim()}
+        * = ${hx16(RELOC + 0x3900)}
+; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
+; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
+; table landed on $c000 -- which is stackLT, the subdivision's own stack. It rendered fine until
+; the recursion got deep enough to reach it, then corrupted every span from mid-screen right.
+rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
 ` : ''}
 ${PLAN === 3 ? `        * = ${hx16(RELOC + 0x2900)}
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
