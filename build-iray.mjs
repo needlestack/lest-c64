@@ -301,12 +301,22 @@ const C8 = x => Math.max(0, Math.min(8, x));
 // Build-time only: stepT keeps its size, its index and its three lookups. Nothing in the
 // renderer changes.
 const STEPA = process.env.STEPA === '1';
+// Which column the MIDDLE sample reads. It was always w[kb-1] -- "the last column before the
+// boundary" -- which for kb=1 is w[0], i.e. qA itself. That wasted a third of the key exactly
+// where two walls meet: the s0 bucket class measures 0.812 px/cell against 0.31-0.41 for s1/s2,
+// with worst spread 17 against 6-10. kb=1 has only ONE near column, so nothing is lost by
+// reading the FAR side instead.
+const qmCol = kb => (kb === 1 ? 1 : kb - 1);
+const lerp = (v0, v1, n) => [...Array(n)].map((_, i) => n < 2 ? v0 : Math.round(v0 + (v1 - v0) * i / (n - 1)));
 const stepAPat = (k, slot) => {
   const kb = k + 1;
   const qAi = Math.floor(slot / (LM * LB)), r = slot % (LM * LB);
   const a = QA[qAi], m = QM[Math.floor(r / LB)], b = QB[r % LB];
-  const near = [...Array(kb)].map((_, i) => kb < 2 ? a : Math.round(a + (m - a) * i / (kb - 1)));
-  return [...near, ...Array(4 - kb).fill(b)].map(C8);
+  // m sits on the near side for kb=2/3 (the near wall gets a real ramp between two samples) and
+  // on the FAR side for kb=1, where the near wall is one column and needs no ramp -- so the
+  // sample gives the far side a slope instead of being thrown away.
+  return (kb === 1 ? [a, ...lerp(m, b, 3)]
+                   : [...lerp(a, m, kb), ...Array(4 - kb).fill(b)]).map(C8);
 };
 // every shape the formula can ask for, so placeAll gives them codes
 // ...but ONLY for slots the sampler actually reaches. Generating all 756 asks for 630 distinct
@@ -521,7 +531,7 @@ function patternFreq() {
           const oq = v => QLEV[6].reduce((b, q) => Math.abs(q - v) < Math.abs(b - v) ? q : b, 0);
           const oldP = [0, 1, 2, 3].map(i => i < kb ? oq(C8(w[0])) : oq(C8(w[3])));
           oldErr += hamm(oldP, w.map(C8));
-          const slot = qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3]);
+          const slot = qIdxA(w[0]) * (LM * LB) + qIdxM(w[qmCol(kb)]) * LB + qIdxB(w[3]);
           const key = w.map(C8).join(',');
           let m = stepStats[kb - 1].get(slot);
           if (!m) stepStats[kb - 1].set(slot, m = new Map());
@@ -1181,11 +1191,11 @@ if (process.env.CELLSCAN === '1') {
   //           dropped patterns, nearest-neighbour substitution. THIS is what free codes buy.
   const modelFor = (w, kb) => {
     if (!kb) return rampPat(w[0], w[3]);
-    const slot = qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3]);
+    const slot = qIdxA(w[0]) * (LM * LB) + qIdxM(w[qmCol(kb)]) * LB + qIdxB(w[3]);
     return STEPS.assign[kb - 1].get(slot) ?? null;
   };
   const drawnFor = (w, kb) => {
-    const code = kb ? stepT[kb - 1][qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3])]
+    const code = kb ? stepT[kb - 1][qIdxA(w[0]) * (LM * LB) + qIdxM(w[qmCol(kb)]) * LB + qIdxB(w[3])]
                     : rampT[(w[0] - CLO) * 16 + (w[3] - CLO)];
     return patOfCode2(code) ?? [0, 0, 0, 0];
   };
@@ -1242,7 +1252,7 @@ if (process.env.CELLSCAN === '1') {
           // slot, and how often. The charset picks one pattern per bucket, so this is the only
           // distribution that can tell it which pattern to pick -- a global shape histogram
           // cannot, because it does not know which shapes have to share an answer.
-          const bk = kb ? `s${kb - 1}.${qIdxA(w[0]) * (LM * LB) + qIdxM(w[kb - 1]) * LB + qIdxB(w[3])}`
+          const bk = kb ? `s${kb - 1}.${qIdxA(w[0]) * (LM * LB) + qIdxM(w[qmCol(kb)]) * LB + qIdxB(w[3])}`
                         : `r${(w[0] - CLO) * 16 + (w[3] - CLO)}`;
           let bh = buckets.get(bk);
           if (!bh) buckets.set(bk, bh = new Map());
@@ -1302,6 +1312,7 @@ if (process.env.CELLSCAN === '1') {
     step: STEP, angleStride: ASTEP, positions: spots.length, cells, mixed,
     distinct: seen.size, exact, curve,
     shippedCols: offCols / FR, shippedPx: offPx / FR, cellCodes: CELLCODES,
+    QA, QM, QB, LM, LB,
     shapes: [...seen].map(([k, e]) => ({ p: k, n: e.n, kb: e.kb,
       drawn: drawnFor(e.w, e.kb).join(','), sampledByBuild: sampled.has(k), at: e.at }))
       .sort((a, b) => b.n - a.n),
@@ -2925,9 +2936,9 @@ rfStep: sta kpos                ; boundary position, 1..3
         ldx colc                ; recompute 4*column: cheaper than storing it on every edge
         lda col4T,x             ;   cell when only the 2.7 step cells a frame need it
         clc
-        adc kpos
+        ldy kpos                ; qmColT = 0,1,1,2 -- never w[0], which qA already covers
+        adc qmColT,y
         tax
-        dex                     ; X = 4*column + k - 1
         lda colH,x
         cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rfMc
@@ -4580,6 +4591,7 @@ rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
 kTabT:  !byte ${kTab.join(',')}
 col4T:  !byte ${[...Array(40)].map((_, i) => i * 4).join(',')}
+qmColT: !byte 0,${[1,2,3].map(qmCol).join(',')}   ; middle-sample column, indexed by kpos
 ${PLAN === 2 ? `; Colour RAM row bases. $d800 is fixed -- colour RAM is NOT double buffered -- so unlike
 ; rowLoT/rowHiT these need no per-buffer offset.
 ccLoT:  !byte ${[...Array(25)].map((_, r) => (0xd800 + r * 40) & 255).join(',')}

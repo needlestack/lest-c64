@@ -28,11 +28,30 @@ const L1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b
 const hamm = (a, b) => (a[0]!==b[0]) + (a[1]!==b[1]) + (a[2]!==b[2]) + (a[3]!==b[3]);
 
 // ---- buckets: what the engine is forced to answer in one code
+// STEPA=1: a step bucket's ANSWER is the formula's shape, not a median of what landed in it.
+// So that is what the codebook must CONTAIN -- otherwise the engine looks up a shape nobody
+// allocated a code for and nearestCode lands somewhere arbitrary, which is what "wrong corners"
+// looked like. The demand is the formula shape, weighted by how many cells the bucket serves.
+const STEPA = process.env.STEPA === '1';
+const { QA, QM, QB, LM, LB } = scan;
+const C8 = x => Math.max(0, Math.min(8, x));
+const lerp = (v0, v1, n) => [...Array(n)].map((_, i) => n < 2 ? v0 : Math.round(v0 + (v1 - v0) * i / (n - 1)));
+const stepAPat = (k, slot) => { const kb = k + 1;
+  const a = QA[Math.floor(slot / (LM * LB))], r = slot % (LM * LB);
+  const m = QM[Math.floor(r / LB)], b = QB[r % LB];
+  return (kb === 1 ? [a, ...lerp(m, b, 3)] : [...lerp(a, m, kb), ...Array(4 - kb).fill(b)]).map(C8); };
 const B = scan.buckets.map(([key, hist]) => {
-  const shapes = hist.map(([s, n]) => ({ v: parse(s), n }));
-  return { key, kind: key[0] === 'r' ? 'ramp' : 'step', shapes,
-           n: shapes.reduce((a, s) => a + s.n, 0) };
+  let shapes = hist.map(([s, n]) => ({ v: parse(s), n }));
+  const n = shapes.reduce((a, s) => a + s.n, 0);
+  if (STEPA && key[0] === 's') {
+    const [k, slot] = [+key[1], +key.slice(3)];
+    shapes = [{ v: stepAPat(k, slot), n }];
+  }
+  return { key, kind: key[0] === 'r' ? 'ramp' : 'step', shapes, n };
 });
+if (STEPA) console.log(`  STEPA: ${B.filter(b => b.kind === 'step').length} step buckets ` +
+  `demand their formula shape, ${new Set(B.filter(b => b.kind === 'step')
+    .map(b => b.shapes[0].v.join(','))).size} distinct`);
 
 // weighted per-column median of a shape list -- the L1-optimal glyph for that set
 function median(shapes) {
