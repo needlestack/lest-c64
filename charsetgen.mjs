@@ -261,6 +261,40 @@ for (const b of B) {
 console.log(`    cells needing the non-default colour:  ${(minority / FRAMES).toFixed(2)} per frame ` +
   `(${(100 * minority / TOTAL).toFixed(1)}% of mixed cells)`);
 
+// ---- Is the win ADDRESSING or GLYPHS? The colour trick changes both at once -- it doubles the
+// index (one extra bit per cell) and doubles the glyphs (two per code) -- so on its own it
+// cannot say which one is doing the work. This isolates the addressing half: split every bucket
+// by the same w1+w2 threshold to get a FINER INDEX, then quantise those sub-buckets down to the
+// SAME 232 codes. No pairing, no nesting constraint, no colour RAM writes -- just a bigger
+// table feeding the same charset.
+{
+  const B2 = [];
+  for (const b of B) {
+    let bt = null, bc = Infinity;
+    for (let thr = 0; thr <= 17; thr++) {
+      const hi = b.shapes.filter(x => x.v[1] + x.v[2] >= thr), lo = b.shapes.filter(x => x.v[1] + x.v[2] < thr);
+      if (!hi.length || !lo.length) continue;
+      const c = costOf(hi, median(hi)) + costOf(lo, median(lo));
+      if (c < bc) { bc = c; bt = thr; }
+    }
+    if (bt === null) { B2.push(b); continue; }
+    const hi = b.shapes.filter(x => x.v[1] + x.v[2] >= bt), lo = b.shapes.filter(x => x.v[1] + x.v[2] < bt);
+    B2.push({ key: b.key + '.h', kind: b.kind, shapes: hi, n: hi.reduce((a, x) => a + x.n, 0) });
+    B2.push({ key: b.key + '.l', kind: b.kind, shapes: lo, n: lo.reduce((a, x) => a + x.n, 0) });
+  }
+  for (const b of B2) if (!b.ideal) { b.ideal = median(b.shapes); b.floor = costOf(b.shapes, b.ideal); }
+  const f2 = B2.reduce((a, b) => a + b.floor, 0);
+  const f2c = B2.reduce((a, b) => a + costCols(b.shapes, b.ideal), 0);
+  console.log(`\n  ISOLATING the two halves of what PLAN=2 changes:`);
+  console.log(`    finer index, ${B2.length} sub-buckets, unlimited codes   ` +
+    `${A(f2, f2c).padStart(8)}    ${per(f2).padStart(8)}  ${per(f2c).padStart(10)}`);
+  for (const K of [232, 464]) {
+    const r = best(B2, K, 8);
+    console.log(`    finer index, quantised to ${String(K).padStart(3)} codes        ` +
+      `${A(r.cost, r.cols).padStart(8)}    ${per(r.cost).padStart(8)}  ${per(r.cols).padStart(10)}`);
+  }
+}
+
 // ---- write the plan the build consumes.
 // KCELL is what is left for cell patterns after BLANK, SOLID, the 18 readout glyphs and the 4
 // seam codes: 256 - 2 - 18 - 4 = 232. BLANK and SOLID are not in the codebook -- they answer
