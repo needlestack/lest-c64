@@ -1023,6 +1023,14 @@ for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
 // k. qM is the level at the LAST column before the boundary: that third sample is what lets
 // the plateau slope down to meet the corner instead of capping it flat.
 const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
+  if (PLAN && STEPA) {
+    // Scheme A + a k-medians codebook: do NOT reserve codes for the formula's shapes. The
+    // sampler already chose the best set of shapes it could afford; the formula just indexes
+    // into it by nearest match. That is the whole point -- steps, ramps and the six hard
+    // verticals all come out of one pool, and nothing is set aside.
+    for (let slot = 0; slot < SLOTN; slot++) t[slot] = nearestCode(stepAPat(k, slot));
+    return t;
+  }
   if (PLAN) {
     // Every slot, not just the sampled ones: an unsampled slot still gets reached at some
     // viewpoint, and leaving it 0 draws a BLANK hole in a wall.
@@ -1060,6 +1068,13 @@ if (PLAN === 3) {
   stepThi = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
   stepTlo = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
   for (let k = 0; k < 3; k++) for (let slot = 0; slot < SLOTN; slot++) {
+    if (STEPA) {
+      // Scheme A: the shape comes from the formula, so both halves of the fine index answer the
+      // same way -- the extra bit says nothing the three samples do not already carry. It is
+      // still spent usefully on RAMPS, which is where 83% of the error lives.
+      stepThi[k][slot] = stepTlo[k][slot] = nearestCode(stepAPat(k, slot));
+      fineHit++; continue;
+    }
     const fb = nearestCode(STEPS.assign[k].get(slot) ?? [0, 0, 0, 0]);
     planCode.has(`s${k}.${slot}.h`) ? fineHit++ : fineMiss++;
     stepThi[k][slot] = planCode.get(`s${k}.${slot}.h`) ?? fb;
