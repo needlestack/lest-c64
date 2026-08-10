@@ -278,8 +278,41 @@ const [LA, LM, LB] = (process.env.QLEVELS ?? '7,4,9').split(',').map(Number);
 if (LA * LM * LB > 256) throw new Error(`step index ${LA}*${LM}*${LB} = ${LA*LM*LB} > 256`);
 if (LA > 8 || LM > 8) throw new Error('qmT is addressed as qA*8 + qM, so LA and LM must be <= 8');
 const QA = QLEV[LA], QM = QLEV[LM], QB = QLEV[LB];
+
 const SLOTN = LA * LM * LB;
+
 const C8 = x => Math.max(0, Math.min(8, x));
+// STEPA=1 -- reconstruct a step cell by FORMULA instead of by sampled median.
+//
+// The three samples are qA (column 0), qM (the last column before the boundary) and qB
+// (column 3). Two of them sit on the NEAR wall, so that side gets a real ramp; the far wall has
+// only one sample, so it is drawn FLAT at qB. That guarantees a hard edge at the boundary, which
+// is the whole point: a sampled median over a mixed bucket can emit a compromise shape that
+// smears a corner, and L1 scores that identically to a harmless 1px slope error even though only
+// one of them is visible.
+//
+// Measured against the best-possible table for this index (per-bucket weighted median):
+//   free 4-level glyph  0.514 px/step-cell     formula  0.574     +0.172 wrong px/FRAME
+// against a shipped total of 12.182, i.e. ~1.4% of frame error, for a class of artefact it
+// cannot produce at all. Two schemes that lost: flat near + ramped far (0.718), and ramping
+// BOTH sides toward the centre sample (2.787 -- the far wall's height at the boundary has
+// nothing to do with the near wall's, so that fights the geometry).
+//
+// Build-time only: stepT keeps its size, its index and its three lookups. Nothing in the
+// renderer changes.
+const STEPA = process.env.STEPA === '1';
+const stepAPat = (k, slot) => {
+  const kb = k + 1;
+  const qAi = Math.floor(slot / (LM * LB)), r = slot % (LM * LB);
+  const a = QA[qAi], m = QM[Math.floor(r / LB)], b = QB[r % LB];
+  const near = [...Array(kb)].map((_, i) => kb < 2 ? a : Math.round(a + (m - a) * i / (kb - 1)));
+  return [...near, ...Array(4 - kb).fill(b)].map(C8);
+};
+// every shape the formula can ask for, so placeAll gives them codes
+// ...but ONLY for slots the sampler actually reaches. Generating all 756 asks for 630 distinct
+// shapes against 191 codes; the ~255 reachable slots are what the map can really produce, and
+// unreachable ones fall back to the nearest code exactly as dropped patterns always have.
+let stepAAll = [];
 const hamm = (p, t) => (p[0] !== t[0]) + (p[1] !== t[1]) + (p[2] !== t[2]) + (p[3] !== t[3]);
 // Counting differing COLUMNS, not rows of difference, is deliberate. Weighting by magnitude
 // instead (sum of |row difference|) was measured 2026-08-09 and is WORSE: corner error 0.653 ->
@@ -722,12 +755,25 @@ function chooseSteps() {
   return { chosen, assign, base, after, nslots: slots.length, tot };
 }
 const STEPS = chooseSteps();
+if (STEPA) { const seen = new Map();
+  // stepStats holds the slots the sampler actually VISITED; STEPS.assign back-fills all 756
+  // with nearest-shape guesses, so using it would ask for shapes the map never produces.
+  for (let k = 0; k < 3; k++) for (const slot of stepStats[k].keys()) {
+    const p = stepAPat(k, slot); seen.set(p.join(','), p); }
+  stepAAll = [...seen.values()];
+  console.error(`  STEPA: ${stepAAll.length} distinct formula shapes over ` +
+    `${stepStats.reduce((a, m) => a + m.size, 0)} sampled slots`); }
 // The chosen patterns' frequencies have to reach PFREQ before pairing runs, or the pairing
 // ranks every step pattern at zero and happily pairs away the common ones.
 for (let k = 0; k < 3; k++) for (const [slot, p] of STEPS.assign[k]) {
   const m = stepStats[k].get(slot); if (!m) continue;
   const n = [...m.values()].reduce((a, b) => a + b, 0);
-  const key = p.join(','); PFREQ.set(key, (PFREQ.get(key) || 0) + n);
+  // Under STEPA the code the slot will USE is the formula's shape, not the sampled pattern, so
+  // that is what must carry the frequency. Registering p instead left every formula shape with
+  // no frequency at all, which made the drop tier treat all 227 of them as never-sampled and
+  // discard exactly the shapes the step table was about to ask for.
+  const key = (STEPA ? stepAPat(k, slot) : p).join(',');
+  PFREQ.set(key, (PFREQ.get(key) || 0) + n);
 }
 for (const fr of PFRAMES) for (let i = 0; i < fr.length; i++)
   if (Array.isArray(fr[i])) fr[i] = STEPS.assign[fr[i][0]].get(fr[i][1]).join(',');
@@ -809,7 +855,7 @@ const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
 const CQMAX = 64;
 let planCode = null;                      // bucket key -> code, for rampT/stepT below
 let planThr = null;                       // bucket key -> the w1+w2 threshold for its pair
-if (!PLAN) placeAll([rampsAll, STEPS.chosen]);
+if (!PLAN) placeAll([rampsAll, STEPA ? stepAAll : STEPS.chosen]);
 else {
   glyphs.length = 2;                      // keep BLANK=0 and SOLID=1; drop everything interned
   for (const k of [...codeOf.keys()]) if (codeOf.get(k) >= 2) codeOf.delete(k);
@@ -988,6 +1034,11 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
       t[slot] = nearestCode(p ?? [QA[Math.floor(slot / (LM * LB))] ?? 0, 0, 0,
                                   QB[slot % LB] ?? 0]);
     }
+    return t;
+  }
+  if (STEPA) {                       // every slot, by formula -- no sampling involved
+    for (let slot = 0; slot < SLOTN; slot++) {
+      const c = edgeCode(stepAPat(k, slot)); t[slot] = fgDupOf.get(c) ?? c; }
     return t;
   }
   // a step cell prefers the foreground duplicate of a shared shape where one was made
