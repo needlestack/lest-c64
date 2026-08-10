@@ -48,13 +48,7 @@ for (let a = 0; a < 256; a++) {
 // absSinT/absCosT feed u for seams which is already +-1-2 columns; both stay on the integer
 // angle, which also keeps `rang` exactly as it was for every other consumer.
 const FINEANG = process.env.FINEANG === '1';
-// Span delimiters the subdivision may pin. Was NLOG/8 = 20, which the COARSE angle table never
-// reached: 3-5 adjacent columns shared a ray, so boundaries that fell inside a run were invisible
-// and merged. FINEANG resolves them, the list fills, and everything past the overflow is left as
-// the search happened to leave it -- 100+ rows of wrong wall, always at the right of the screen
-// because that is what gets searched last. bndT owns a whole page, so the cap was never about
-// space. The build reports the worst SAMPLED frame so this cannot silently re-fill.
-const NBND = +(process.env.NBND ?? (FINEANG ? 64 : NLOG / 8));
+
 if (FINEANG && +(process.env.PLAN ?? 0) === 3)
   throw new Error('FINEANG and PLAN=3 both claim RELOC+0x2900; test them separately for now');
 const ddxLoQ = [], ddxHiQ = [], ddyLoQ = [], ddyHiQ = [];
@@ -66,6 +60,13 @@ for (let q = 0; q < 1024; q++) {
 }
 const NLOG = 160, FOV = 47;             // one ray per output column (160 logical cols)
 const NCELL = NLOG / 4;                 // 4x8 cells across the screen (40)
+// Span delimiters the subdivision may pin. Was NLOG/8 = 20, which the COARSE angle table never
+// reached: 3-5 adjacent columns shared a ray, so boundaries that fell inside a run were invisible
+// and merged. FINEANG resolves them, the list fills, and everything past the overflow is left as
+// the search happened to leave it -- 100+ rows of wrong wall, always at the right of the screen
+// because that is what gets searched last. bndT owns a whole page, so the cap was never about
+// space. The build reports the worst SAMPLED frame so this cannot silently re-fill.
+const NBND = +(process.env.NBND ?? (FINEANG ? 64 : NLOG / 8));
 // RECTILINEAR projection: columns spaced by atan (flat image plane) + per-column
 // cos-correction of the distance. Fixes the fisheye arch AND makes wall height linear.
 const CTR = (NLOG - 1) / 2, HALF_UNITS = FOV / 2, TANHALF = Math.tan(HALF_UNITS / 256 * 2 * Math.PI);
