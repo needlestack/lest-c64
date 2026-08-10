@@ -120,14 +120,32 @@ function best(bs, K, tries = 6) {
   return b;
 }
 
+// ---- ONE accuracy number, used for every comparison from here on.
+//
+// Two error measures matter and neither alone is honest. Wrong PIXELS says how far the drawn
+// silhouette is displaced; wrong COLUMNS says how widely. A column off by 8 pixels and one off
+// by 1 are equally "a wrong column", and 8 pixels spread over 8 columns is far more visible
+// than 8 pixels stacked in one. So normalise each against its own worst case and average:
+//
+//   P = wrong pixels  / (32 * mixed cells)     a cell has 4 columns x 8 rows to get wrong
+//   C = wrong columns / (4  * mixed cells)     a cell has 4 columns to get wrong AT ALL
+//   accuracy = 100 - 100*(P + C)/2
+//
+// It is an INDEX, not a physical quantity -- the point is that one number ranks every scheme on
+// one scale. px/frame and cols/frame stay in the output as the inputs to it, so the index can
+// never quietly drift from what it is made of.
+const acc = (px, cols) => 100 - 100 * (px / (32 * TOTAL) + cols / (4 * TOTAL)) / 2;
+const A = (px, cols) => acc(px, cols).toFixed(3) + '%';
 const per = (v) => (v / FRAMES).toFixed(3);
 console.log(`charsetgen  ${B.length} reachable buckets ` +
   `(${B.filter(b => b.kind === 'ramp').length} ramp, ${B.filter(b => b.kind === 'step').length} step), ` +
   `${TOTAL.toLocaleString()} mixed cells over ${FRAMES.toLocaleString()} frames`);
-console.log(`  SHIPPED today:            ${per(scan.shippedPx)} px/frame, ${per(scan.shippedCols)} cols/frame`
-  .replace(per(scan.shippedPx), scan.shippedPx.toFixed(3))
-  .replace(per(scan.shippedCols), scan.shippedCols.toFixed(3)));
-console.log(`  FLOOR (1 code per bucket, ${B.length} codes): ${per(FLOOR)} px/frame, ${per(FLOORC)} cols/frame`);
+const shipPx = scan.shippedPx * FRAMES, shipCols = scan.shippedCols * FRAMES;
+console.log(`\n  scheme                                accuracy    px/frame  cols/frame  codes`);
+console.log(`  SHIPPED today                         ${A(shipPx, shipCols).padStart(8)}    ` +
+  `${scan.shippedPx.toFixed(3).padStart(8)}  ${scan.shippedCols.toFixed(3).padStart(10)}    191`);
+console.log(`  FLOOR (one code per bucket)           ${A(FLOOR, FLOORC).padStart(8)}    ` +
+  `${per(FLOOR).padStart(8)}  ${per(FLOORC).padStart(10)}    ${B.length}`);
 console.log(`     -- that is what the ADDRESSING costs. No charset can beat it without changing`);
 console.log(`        how a cell is indexed, and it is already better than today with no merging.`);
 
@@ -137,7 +155,7 @@ const PLANS = (process.env.PLANS || '128:96,110:114,96:128,140:84,160:64').split
   .map(p => p.split(':').map(Number));
 
 console.log(`\n  SPLIT budgets (ramp codes : step codes) -- separate codebooks:`);
-console.log(`    ramp  step  total   px/frame  cols/frame`);
+console.log(`    ramp  step  total   accuracy   px/frame  cols/frame`);
 const results = [];
 for (const [kr, ks] of PLANS) {
   const r = best(ramps, kr), s = best(steps, ks);
@@ -145,16 +163,16 @@ for (const [kr, ks] of PLANS) {
   const tot = r.codes.length + s.codes.length;
   results.push({ kr, ks, tot, px, cols, r, s });
   console.log(`    ${String(r.codes.length).padStart(4)}  ${String(s.codes.length).padStart(4)}  ` +
-    `${String(tot).padStart(5)}   ${per(px).padStart(8)}   ${per(cols).padStart(8)}`);
+    `${String(tot).padStart(5)}   ${A(px, cols).padStart(8)}   ${per(px).padStart(8)}   ${per(cols).padStart(8)}`);
 }
 
 console.log(`\n  SHARED codebook -- one pool both tables index into:`);
-console.log(`    codes   px/frame  cols/frame`);
+console.log(`    codes   accuracy   px/frame  cols/frame`);
 const shared = [];
 for (const K of (process.env.SHARED || '160,190,214,224,234').split(',').map(Number)) {
   const a = best(B, K);
   shared.push({ K, a });
-  console.log(`    ${String(a.codes.length).padStart(5)}   ${per(a.cost).padStart(8)}   ${per(a.cols).padStart(8)}`);
+  console.log(`    ${String(a.codes.length).padStart(5)}   ${A(a.cost, a.cols).padStart(8)}   ${per(a.cost).padStart(8)}   ${per(a.cols).padStart(8)}`);
 }
 
 // ---- what a SECOND pattern per code could be worth, which is the whole case for the colour
@@ -251,8 +269,8 @@ const KCELL = +(process.env.KCELL ?? 232);
 const PAIRED = process.env.PAIRED === '1';
 
 const finalPlan = best(B, KCELL, 10);
-console.log(`\n  PLAN (KCELL=${KCELL}, single glyph): ${finalPlan.codes.length} codes, ` +
-  `${per(finalPlan.cost)} px/frame, ${per(finalPlan.cols)} cols/frame`);
+console.log(`  PLAN=1 (KCELL=${KCELL}, single glyph)  ${A(finalPlan.cost, finalPlan.cols).padStart(8)}    ` +
+  `${per(finalPlan.cost).padStart(8)}  ${per(finalPlan.cols).padStart(10)}    ${finalPlan.codes.length}`);
 
 let paired = null;
 if (PAIRED) {
@@ -287,8 +305,8 @@ if (PAIRED) {
   for (const b of B) { const i = grp.assign.get(b.key), t = thrs.get(b.key), [p, q] = pairs[i];
     for (const s of b.shapes) pcols += s.n * hamm(s.v, (s.v[1] + s.v[2] >= t) ? p : q); }
   paired = { codes: pairs, assign: [...grp.assign], thr: [...thrs], cost: pcost, cols: pcols };
-  console.log(`  PLAN (KCELL=${KCELL}, PAIRED):        ${pairs.length} codes / ${2 * pairs.length} glyphs, ` +
-    `${per(pcost)} px/frame, ${per(pcols)} cols/frame`);
+  console.log(`  PLAN=2 (KCELL=${KCELL}, nesting pairs) ${A(pcost, pcols).padStart(8)}    ` +
+    `${per(pcost).padStart(8)}  ${per(pcols).padStart(10)}    ${pairs.length} codes = ${2 * pairs.length} glyphs`);
   console.log(`      colour writes: ${(pminority / FRAMES).toFixed(2)} cells/frame need the non-default half`);
 }
 
