@@ -1066,7 +1066,7 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
 // of the split. A bucket that never split has thr 0, which compares true for every m, so its LO
 // copy is unreachable and just mirrors HI rather than needing a special case.
 let rampTlo = null, rampThi = null, stepTlo = null, stepThi = null;
-let fineHit = 0, fineMiss = 0;
+let fineHit = 0, fineMiss = 0; const stepAErr = [];
 if (PLAN === 3) {
   rampThi = new Array(CN * 16).fill(0); rampTlo = new Array(CN * 16).fill(0);
   for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
@@ -1082,7 +1082,13 @@ if (PLAN === 3) {
       // Scheme A: the shape comes from the formula, so both halves of the fine index answer the
       // same way -- the extra bit says nothing the three samples do not already carry. It is
       // still spent usefully on RAMPS, which is where 83% of the error lives.
-      stepThi[k][slot] = stepTlo[k][slot] = nearestCode(stepAPat(k, slot));
+      const want = stepAPat(k, slot);
+      const code = nearestCode(want);
+      stepThi[k][slot] = stepTlo[k][slot] = code;
+      // MIDPOINT PROBE: does the table actually encode what the formula asked for?
+      const got = planPats[code - 2] ?? [0,0,0,0];
+      const d = Math.abs(want[0]-got[0])+Math.abs(want[1]-got[1])+Math.abs(want[2]-got[2])+Math.abs(want[3]-got[3]);
+      stepAErr.push({ k, slot, want: want.join(','), got: got.join(','), d });
       fineHit++; continue;
     }
     const fb = nearestCode(STEPS.assign[k].get(slot) ?? [0, 0, 0, 0]);
@@ -1090,6 +1096,12 @@ if (PLAN === 3) {
     stepThi[k][slot] = planCode.get(`s${k}.${slot}.h`) ?? fb;
     stepTlo[k][slot] = planCode.get(`s${k}.${slot}.l`) ?? stepThi[k][slot];
   }
+  if (stepAErr.length) { const ex = stepAErr.filter(e => e.d === 0).length;
+    const bad = stepAErr.filter(e => e.d > 0).sort((a, b) => b.d - a.d);
+    console.error(`  STEPA TABLE PROBE: ${ex}/${stepAErr.length} slots encode the formula EXACTLY; ` +
+      `mean L1 ${(stepAErr.reduce((a,e)=>a+e.d,0)/stepAErr.length).toFixed(3)}, worst ${bad[0]?.d ?? 0}`);
+    for (const e of bad.slice(0, 6))
+      console.error(`     k=${e.k} slot=${e.slot}  want [${e.want}]  got [${e.got}]  off ${e.d}`); }
   console.error(`  PLAN=3: ${fineHit} of ${fineHit + fineMiss} index slots come from the plan, ` +
     `${fineMiss} fall back to the nearest codeword (never reached by the walkthrough)`);
 }
