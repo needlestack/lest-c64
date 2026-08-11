@@ -1730,6 +1730,7 @@ colS    = $cb25                 ;   the default build does not emit that.
 pkNew   = $cb26                 ; palette keys this frame, last frame, and the fresh presses
 pkOld   = $cb27
 pkEdge  = $cb28
+pkJoy   = $cb29                 ; joystick-1 lines, masked out of the palette-key reads
 ` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -3226,15 +3227,27 @@ ${PALKEYS ? `; ---- palKeys: 1 / 2 / 3 cycle the ceiling, wall and seam inks ---
 ; folded into one byte as bit0='1', bit2='3', bit3='2' so a single edge test covers them --
 ; without the edge test a held key would sprint through all sixteen colours in a quarter second.
 palKeys:
+        ; JOYSTICK 1 SHARES $dc01 WITH THE KEYBOARD COLUMNS, so a row read sees both. Joy-1 up
+        ; pulls bit 0 and right pulls bit 3 -- the very bits '1'/'3' and '2' live on -- so
+        ; without this mask, pushing the stick up cycled the ceiling AND the seam, and pushing
+        ; right cycled the walls. readKeys has always done this; palKeys was written without it.
+        ; Read the port with NO row selected: whatever is low then is the stick, not a key.
+        lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta pkJoy               ; 1 where a joystick line is active
         lda #$7f
         sta $dc00
         lda $dc01
-        eor #$ff                ; matrix reads active LOW; invert so 1 means pressed
+        ora pkJoy               ; force the stick's bits high = "not pressed" in this active-low
+        eor #$ff                ; read, THEN invert so 1 means pressed
         and #$09
         sta pkNew
         lda #$fd
         sta $dc00
         lda $dc01
+        ora pkJoy
         eor #$ff
         and #$01
         asl
