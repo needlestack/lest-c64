@@ -274,7 +274,18 @@ const QLEV = {
 // single cell and reads as spikes along the wall top. No level spacing rescues it (0,3,5,8 ->
 // 1.535; 0,2,5,8 -> 1.537; 0,3,6,8 -> 1.486). The three-axis key's blind spot -- it cannot see
 // the interior column on the far side of the boundary -- is a design limit, accepted.
-const [LA, LM, LB] = (process.env.QLEVELS ?? '7,4,9').split(',').map(Number);
+// 9,3,9 not 7,4,9. Both edges EXACT, the middle coarse. Re-bucketing the walkthrough over every
+// balance whose product fits a byte says this is the best one available -- and it is smaller
+// (243 states against 252):
+//   7x4x9  252  0.356 px/step-cell  96.5% hard edges kept   <- was
+//   9x3x9  243  0.334              98.0%                    <- is
+//   8x4x8  256  0.393              98.3%
+//   9x2x9  162  0.429              97.0%
+// The middle sample only has to say roughly WHERE the step falls; the edges set the heights the
+// eye aligns against, so trading middle resolution for exact edges is the right direction. It is
+// specifically BOTH edges together that pays: 9x3x8 and 8x3x9 both fall back to ~0.384.
+// (9x9x9 reaches 0.154 but needs 729 states = 3 pages -- see DECISIONS.md.)
+const [LA, LM, LB] = (process.env.QLEVELS ?? '9,3,9').split(',').map(Number);
 // The one-byte slot is not a law, it is a budget. Past 256 states the slot becomes 9 or 10 bits
 // and the step tables gain pages, dispatched on the high byte -- the same trick the quarter-angle
 // table uses. Only ~2.9 step cells a frame reach this path, so the ~30 extra cycles are noise.
