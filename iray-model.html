@@ -114,6 +114,14 @@
   button:hover { border-color: var(--accent); color: var(--accent); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+  #goto {
+    font: inherit; font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 5px; padding: 3px 9px; min-width: 24ch; flex: 1 1 24ch;
+  }
+  #goto:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #goto::placeholder { color: var(--faint); }
 
   dl.stats { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: baseline; }
   dl.stats dt { color: var(--dim); font-size: 12.5px; }
@@ -163,6 +171,9 @@
     <span class="cmd" id="cmd">PX=180 PY=180 PA=00 node build-iray.mjs</span>
     <button id="copy" type="button">copy</button>
     <button id="diffbtn" type="button" aria-pressed="true">diff tint</button>
+    <input id="goto" type="text" spellcheck="false"
+           placeholder="paste PX=… PY=… PA=… to jump" aria-label="Jump to a viewpoint" />
+    <span id="gotomsg" class="cmd" style="color:var(--dim)"></span>
   </div>
 
   <div class="grid">
@@ -477,6 +488,30 @@
           setTimeout(() => e.target.textContent = 'copy', 1200); }
     catch { e.target.textContent = 'select it'; setTimeout(() => e.target.textContent = 'copy', 1200); }
   });
+  // Jump straight to a viewpoint by pasting what "copy" produced -- the whole command line, or
+  // just the three tokens. Same hex the C64 readout prints, so a screenshot and this page address
+  // the same frame. Accepts them in any order and ignores everything else on the line.
+  const gotoEl = document.getElementById('goto'), gotoMsg = document.getElementById('gotomsg');
+  function jump(text) {
+    const g = k => { const m = new RegExp(k + '\\s*=\\s*\\$?([0-9a-fA-F]+)').exec(text); return m ? parseInt(m[1], 16) : null; };
+    const X = g('PX'), Y = g('PY'), A = g('PA');
+    if (X === null || Y === null || A === null) {
+      gotoMsg.textContent = 'need PX=, PY= and PA=';
+      return false;
+    }
+    S.px = X / 256; S.py = Y / 256; S.pa = A & 255;
+    render(); showHover();
+    gotoMsg.textContent = 'jumped';
+    setTimeout(() => { gotoMsg.textContent = ''; }, 1400);
+    return true;
+  }
+  gotoEl.addEventListener('keydown', e => { if (e.key === 'Enter') { jump(gotoEl.value); e.preventDefault(); } });
+  gotoEl.addEventListener('paste', e => {
+    const t = (e.clipboardData || window.clipboardData).getData('text');
+    if (t) { setTimeout(() => jump(gotoEl.value || t), 0); }
+  });
+  // typing/arrow keys must not drive the camera while the box has focus
+  gotoEl.addEventListener('focus', () => keys.clear());
   const db = document.getElementById('diffbtn');
   db.addEventListener('click', () => {
     S.diff = !S.diff; db.setAttribute('aria-pressed', String(S.diff)); render();
