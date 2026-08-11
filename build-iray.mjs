@@ -2245,21 +2245,21 @@ cqLo    = $cc00                 ; colour queue: address low, high, and the value
 cqHi    = $cc40                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $cc80                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $c900                 ; PROFILE: 10 phases x 3 bytes, raster lines summed
-pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
-pfPrvL  = $c922
-pfCurH  = $c92c                 ; ninth raster bit, current and previous
-pfPrvH  = $c92d
-pfTmp   = $c92e
-pfTmp2  = $c92f
-pfN     = $c923                 ; frames accumulated so far (2 bytes)
-pfCurF  = $c925                 ; scratch for one timestamp read and the delta
-pfCurL  = $c926
-pfCurX  = $c927
-pfDLo   = $c928
-pfDHi   = $c929
-pfRow   = $c92a
-pfDone  = $c92b
+pfAcc   = $c900                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
+pfPrvF  = $c930                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $c932
+pfCurH  = $c936                 ; ninth raster bit, current and previous
+pfPrvH  = $c937
+pfTmp   = $c938
+pfTmp2  = $c939
+pfN     = $c93c                 ; frames accumulated so far (2 bytes)
+pfCurF  = $c93a                 ; scratch for one timestamp read and the delta
+pfCurL  = $c93b
+pfCurX  = $c93f
+pfDLo   = $c93d
+pfDHi   = $c93e
+pfRow   = $c934
+pfDone  = $c935
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ; orbMove's hot working set, on seamSpan's scratch -- dead by the time orbMove runs
@@ -2510,11 +2510,11 @@ ${FINEANG ? `        lda pa                  ; pa*4 once a frame, not once a ray
         sta nbnd
         sta col
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 0
-${PROFILE && !PROFILE1 ? '        ldx #7\n        jsr pfTick              ; marchCol\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #${NLOG - 1}
         sta col
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 79
-${PROFILE && !PROFILE1 ? '        ldx #7\n        jsr pfTick              ; marchCol\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #$00
         sta stackLT
         lda #${NLOG - 1}
@@ -2631,7 +2631,7 @@ subMid: lda spanL
                                 ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFILE && !PROFILE1 ? '        ldx #7\n        jsr pfTick              ; marchCol\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         ldx sp
         lda spanL
         sta stackLT,x
@@ -3986,8 +3986,7 @@ marchCol:
         lda side
         sta sideT,x             ; side kept separate (avoids id/side bit collision)
         lda cell                ; castRay already maintains the cell id
-        ldx col
-        sta idT,x
+        sta idT,x               ; X is still col -- nothing since the store above touches it
         ; --- faceIdT = connected-wall-run id: "same wall" means same contiguous run,
         ;     not merely same plane -> the merge cannot span a hallway gap ---
         tay                     ; Y = cell id (index into run tables)
@@ -4004,8 +4003,7 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
         lda runNT,y
         jmp friSto
 friSo:  lda runST,y
-friSto: ldx col
-        sta faceIdT,x
+friSto: sta faceIdT,x           ; X still col: the run-table branch above only uses A and Y
 ${SEAMS ? `        lda remL                ; park the raw hit distance; u is derived from it later, and
         sta remLoT,x            ; only for the ~35% of spans that actually cross a boundary
         lda remH
@@ -4231,7 +4229,7 @@ faDn:` : `        tax
         sta ddy
         lda ddyHiT,x
         sta ddyH`}
-        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
+${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
         sta cell                ; The value is the player's cell, so it is the same for every
                                 ; ray in the frame -- computed once in mloop, not 11 times.
         ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
@@ -4323,7 +4321,8 @@ cySx:   lda ddyH
         bne cydone
         sta sdy
         sta sdyH
-cydone: ldy #24
+cydone:${PROFILE && !PROFILE1 ? '\n        ldx #10\n        jsr pfTick              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
+        ldy #24
         ldx cell
 cdda:   lda sdxH
         cmp sdyH
@@ -4405,7 +4404,8 @@ cwallY: stx cell
         sta remH
         ; No cos correction here: it depends only on the column, so it is baked into the
         ; per-column height tables (see hTabT). This used to be a whole sideMul per ray.
-cidx:   lda remH
+cidx:${PROFILE && !PROFILE1 ? '\n        ldx #11\n        jsr pfTick              ; ray: the DDA loop (after the label: jmp cidx skips it)' : ''}
+        lda remH
         cmp #24
         bcc cidxok
         lda #$01                ; past the map diagonal -> tiny far wall
@@ -6045,8 +6045,12 @@ pfShow: lda #$00
         ; TWO COLUMNS of five. Ten rows starting at 4 would reach rows 12-13, which are BELOW
         ; the horizon -- the raster split swaps to the vertically flipped charset B there, so the
         ; digits render mirrored and cannot be read back. Everything must stay above row 12.
-psLp:   lda pfRow
-        cmp #$05
+psLp:   lda pfRow               ; row = 4 + phase mod 5
+        cmp #$0a
+        bcc psR1
+        sec
+        sbc #$05
+psR1:   cmp #$05
         bcc psRw
         sec
         sbc #$05
@@ -6054,10 +6058,14 @@ psRw:   clc
         adc #$04
         jsr setRow
         ldy #$00
-        lda pfRow
-        cmp #$05
+        lda pfRow               ; column = (phase / 5) * 5 chars across
+        cmp #$0a
+        bcc psC1
+        ldy #$0a
+        bne psCol
+psC1:   cmp #$05
         bcc psCol
-        ldy #$05                ; second column, five chars across
+        ldy #$05
 psCol:  lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /256)
         asl
         clc
@@ -6085,7 +6093,7 @@ psCol:  lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /2
         jsr ddPut
         inc pfRow
         lda pfRow
-        cmp #$0a
+        cmp #$0d
         bcc psLp
         rts
 
