@@ -423,63 +423,10 @@ const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of mul
 // A pattern is four column heights 0..8, and the glyph is just those four columns filled from
 // the bottom -- one ink for the whole cell, so a shape's code depends on its SHAPE alone.
 const FGPX = [0xc0, 0x30, 0x0c, 0x03];
-// ---- AA=1: antialias the wall top with the two spare bit pairs ----
-// The four pairs give exactly four inks, and one of them was going spare: 01 and 11 are BOTH
-// black today, a leftover from sprite priority needing them distinguishable to the VIC and
-// identical to the eye. Repointing $d022 to light grey turns that into a ramp --
-//   00 white   01 light grey   10 dark grey (shared with the seam)   11 black
-// -- at no cost in char codes, cycles or memory. Only these bytes change.
-//
-// The precision has to be MANUFACTURED. A pattern is four integer levels and one level is one
-// pixel, so nothing sub-pixel survives to render time. But a wall top is linear across a face
-// (the same fact the subdivision merges spans on and renderSym now takes its min/max from), so
-// fitting a line through the four samples recovers where the true edge sits inside its pixel.
-//
-// A large residual means the four samples are NOT a line -- a step, a corner, a vertical edge --
-// and those keep hard edges, which is what they are for. That test is also what keeps BLANK and
-// SOLID byte-identical: a constant fits exactly, and constant coverage is 0 or 1 everywhere.
-const AA = process.env.AA === '1';
-const AAPX = [[0, 0, 0, 0], [0x40, 0x10, 0x04, 0x01],
-              [0x80, 0x20, 0x08, 0x02], [0xc0, 0x30, 0x0c, 0x03]];
-const AARES = +(process.env.AARES ?? 0.9);      // residual above which a pattern is a step
-const patBytes = p => {
-  if (!AA)
-    return [...Array(8)].map((_, i) =>
-      (p[0] > 7 - i ? FGPX[0] : 0) | (p[1] > 7 - i ? FGPX[1] : 0) |
-      (p[2] > 7 - i ? FGPX[2] : 0) | (p[3] > 7 - i ? FGPX[3] : 0));
-  // Fit through the column CENTRES, x = c + 0.5, then integrate coverage across each column's
-  // full width. Point-sampling the line at one x per column looks right and is not: a slope of
-  // exactly one level per column lands every sample on a pixel edge, so every coverage comes out
-  // 0 or 1 and the steepest smooth ramp -- the one whose staircase shows most -- gets no
-  // antialiasing at all. Area coverage is what actually softens it.
-  const sy = p[0] + p[1] + p[2] + p[3];
-  const sxy = 0.5 * p[0] + 1.5 * p[1] + 2.5 * p[2] + 3.5 * p[3];
-  const b = (4 * sxy - 8 * sy) / 20, a = (sy - 8 * b) / 4;
-  const resid = Math.max(...[0, 1, 2, 3].map(c => Math.abs(a + b * (c + 0.5) - p[c])));
-  if (resid > AARES)                                  // not a line: a step, and steps stay hard
-    return [...Array(8)].map((_, i) =>
-      (p[0] > 7 - i ? FGPX[0] : 0) | (p[1] > 7 - i ? FGPX[1] : 0) |
-      (p[2] > 7 - i ? FGPX[2] : 0) | (p[3] > 7 - i ? FGPX[3] : 0));
-  const N = 8;                                        // sub-samples across a column, build time
-  return [...Array(8)].map((_, i) => {
-    const bot = 7 - i;                                // this row spans [bot, bot+1)
-    let byte = 0;
-    for (let c = 0; c < 4; c++) {
-      let cov = 0;
-      for (let k = 0; k < N; k++) {
-        const x = c + (k + 0.5) / N;
-        cov += Math.max(0, Math.min(1, Math.max(0, Math.min(8, a + b * x)) - bot));
-      }
-      cov /= N;
-      // Thresholds are the MIDPOINTS between the four inks' actual coverages, not even
-      // quarters: the C64 greys are not evenly spaced. Luminance white 255, light grey 187,
-      // dark grey 95, black 0 -> the inks represent coverage 0, 0.27, 0.63, 1.0, so the
-      // nearest-ink boundaries fall at 0.135, 0.45 and 0.815.
-      byte |= AAPX[cov < 0.135 ? 0 : cov < 0.45 ? 1 : cov < 0.815 ? 2 : 3][c];
-    }
-    return byte;
-  });
-};
+const patBytes = p =>
+  [...Array(8)].map((_, i) =>
+    (p[0] > 7 - i ? FGPX[0] : 0) | (p[1] > 7 - i ? FGPX[1] : 0) |
+    (p[2] > 7 - i ? FGPX[2] : 0) | (p[3] > 7 - i ? FGPX[3] : 0));
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
 // Under PLAN=2 colour RAM means something, so every glyph that is NOT a nesting pair has to be
@@ -880,10 +827,7 @@ const GLYPH0 = glyphs.length;                   // first readout glyph code
 for (let g = 0; g < NGLYPH; g++) {
   const rows = digGlyph.slice(g * 5, g * 5 + 5);
   glyphs.push([...Array(8)].map((_, i) => { const r = (i >= 1 && i <= 5) ? rows[i - 1] : 0;
-    // Bit pair 11 (colour RAM, black), NOT 01. Identical today -- both pairs are black -- but
-    // AA repoints $d022 to light grey, and light-grey-on-white would make the fps/X/Y/A readout
-    // unreadable and take readout.mjs and every measurement harness with it.
-    return ((r >> 2 & 1) ? 0xc0 : 0) | ((r >> 1 & 1) ? 0x30 : 0) | ((r & 1) ? 0x0c : 0); }));
+    return ((r >> 2 & 1) ? 0x40 : 0) | ((r >> 1 & 1) ? 0x10 : 0) | ((r & 1) ? 0x04 : 0); }));
 }
 // Panel seams: a fully-solid cell with one logical pixel knocked out to bit pair 10.
 // Only two of the four multicolor pair values were in use (00 = $d021 ceiling/floor,
@@ -1803,9 +1747,8 @@ entry:
         sta $d018
         lda #$01
         sta $d021               ; 00 = white  (ceiling / floor)
-        lda #${hx(AA ? 15 : 0)}
-        sta $d022               ; 01 = ${AA ? 'light grey, the lighter of the two AA inks'
-                                            : 'black (unused: walls are 11, via colour RAM)'}
+        lda #$00
+        sta $d022               ; 01 = black  (readout glyphs only; walls are 11, via colour RAM)
         lda #${hx(SEAMCOL)}
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry: bit pairs 00

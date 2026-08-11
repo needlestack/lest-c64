@@ -104,6 +104,34 @@ exactly on every major hard-edge bucket (s0.243, s1.8, s2.8, s0.8).
 The plateau variant (BOTH sides flat) was tested and rejected: 0.730 vs 0.514, and it re-creates
 the horizontal-cap artefact the sloped scheme fixed years ago (1.573 -> 0.606 in the build log).
 
+## 5b. Antialiasing the wall top — BUILT, LOOKED AT, REVERTED (2026-08-11)
+
+Tried at the user's suggestion and reverted on their verdict: **"makes sharp aliased edges (a
+'look') a bit fringe-y, which isn't really a look."** Reverted whole at 4930c94; `latest.d64`
+came back byte-identical to the pre-AA build, so nothing needed re-verifying.
+
+It was not rejected for cost. The mechanism was free and it worked as designed:
+- The four bit pairs give four inks and one was spare — 01 and 11 are both black, left over from
+  sprite priority needing them distinguishable to the VIC and identical to the eye. Repointing
+  `$d022` to light grey gave white / light grey / dark grey / black for no codes, no memory and
+  no cycles (20 fps with and without, same viewpoint).
+- Sub-pixel precision does not exist at render time (one level = one pixel), so it was
+  RECONSTRUCTED at build time by least-squares fitting a line through the four samples — legal
+  because a wall top is linear across a face. Residual > 0.9 meant "not a line" and kept hard
+  edges, which also left BLANK and SOLID byte-identical.
+- 139 of 232 codebook patterns antialiased (60%), mean 3.3 grey pixels of 32.
+
+**Do not re-propose it as a rendering improvement.** Two implementation notes worth keeping if it
+is ever revisited for another reason:
+- Use AREA coverage across the column's width, not a point sample per column. A slope of exactly
+  one level per column puts every sample on a pixel edge, so every coverage lands on 0 or 1 and
+  the steepest smooth ramp gets no antialiasing at all.
+- The C64 greys are not evenly spaced. Luminance 255/187/95/0 means the inks represent coverage
+  0, 0.27, 0.63, 1.0, so nearest-ink thresholds are 0.135 / 0.45 / 0.815, not even quarters.
+
+The aesthetic point is the durable one: this renderer's hard black-on-white edges are a
+deliberate look, and four inks are too few to soften them without reading as fringing.
+
 ## 6. Rejected, with reasons
 
 - **Colour-RAM pattern pairing** — buys the smaller 19%, needs a write queue + post-flip flush,
