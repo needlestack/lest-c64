@@ -1435,6 +1435,16 @@ const NOMINMAX = flag('NOMINMAX');
 const RAYCNT = flag('RAYCNT');
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
+// CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
+// They were dropped from convex ends because the silhouette there already steps 20+ rows so
+// the line looked redundant, and because the boundary landed in the one cell an orb needed
+// per-column occlusion in. The orb reason is gone, and the line is NOT redundant where it
+// matters: below the far wall's top both sides are black, and the grey stripe is the only
+// thing dividing them. seamT applies to the SOLID run only -- rows rs..12, where rs comes
+// from the cell's MINIMUM height, i.e. the far wall's top -- so the line automatically starts
+// where the step pieces end and never runs up the near wall's full height.
+// CVXSEAM=0 restores the concave-only rule (and with it the need for cpLoT/cpHiT).
+const CVXSEAM = process.env.CVXSEAM !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
 const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
 const STRAFE = flag('STRAFE'); // auto-strafe (parallel to walls)
@@ -1924,7 +1934,7 @@ ${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no
         ; the kind you cannot see around -- is already drawn by the silhouette, which steps 20+
         ; rows at that column. The grey line adds nothing to a boundary that emphatic, so
         ; convex corners are left seam-free and render as plain two-black steps.
-        lda spanL
+${CVXSEAM ? '' : `        lda spanL
         tax
         lda faceIdT,x
         tax                     ; X = the run on this side
@@ -1934,7 +1944,7 @@ ${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no
         beq subCv
         cmp cpHiT,x
         bne subCn               ; not a concave partner: convex silhouette, draw nothing
-subCv:  lda spanR
+`}subCv:  lda spanR
         lsr
         lsr
         tax
@@ -2586,7 +2596,7 @@ rfCbS:  sta rfCw1+1
         sta rfCw2+1
         sty rfCb1+1
         sty rfCb2+1
-${SEAMS ? '        sty rfCb3+1\n' : ''}
+
         ldx #39                 ; X = cell column throughout; the chains use it as their index
         ; The cell's min and max heights, computed HERE rather than in a pass of their own.
         ; prepCells walked these same 40 cell columns to write cmnT/cmxT for renderSym to read
@@ -2876,17 +2886,29 @@ rcHave: sta cqtmp
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
-rfSolid:${SEAMS ? `lda seamT,x
-        cmp #${hx(SOLID)}       ; the frame's default. A seam variant can change without rs
-        bne rfSlSm              ; moving, so a seam column is never cached
-        ` : ''}lda rsv
+rfSolid:${SEAMS ? `; The cache byte carries rs AND which seam variant this column holds. rs is 0..13 and
+        ; the byte is eight bits, so the top nibble was simply going spare: 0 = no seam,
+        ; 1..4 = stripe position + 1. Before this, a seam column stored $ff and redrew every
+        ; frame -- correct, but only because a seam variant can change while rs does not, which
+        ; is a reason to widen the key, not to give up on caching.
+        lda seamT,x
+        cmp #${hx(SOLID)}
+        beq rfSlNo
+        and #$03
+        clc
+        adc #$01
+        asl
+        asl
+        asl
+        asl
+        ora rsv
+        bne rfSlCk              ; always -- the high nibble is nonzero by construction
+rfSlNo: ` : ''}lda rsv
+rfSlCk:
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
-        jmp rfSlDr
-${SEAMS ? `rfSlSm: lda #$ff
-rfCb3:  sta cbA,x               ; a value rs can never take, so next frame redraws too
-` : ''}rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
+rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         cmp #13
         bcs rfNext
         clc
@@ -4819,8 +4841,11 @@ ${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
 ; boundary is a convex silhouette, where the wall's edge stands against something unrelated
 ; behind it and the 20-row step has already drawn the division.
 ; Indexed by run id, so whole tables rather than a packed set.
-cpLoT:  !byte ${cpLo.join(',')}
-cpHiT:  !byte ${cpHi.join(',')}
+${CVXSEAM ? `; Emitted only when CVXSEAM=0. With every run-to-run boundary drawing a line, nothing reads
+; these -- ${cpLo.filter(Boolean).length + cpHi.filter(Boolean).length} bytes of corner-partner
+; tables and the whole build-time derivation exist purely to tell a corner from a silhouette,
+; and the renderer no longer cares which it is.` : `cpLoT:  !byte ${cpLo.join(',')}
+cpHiT:  !byte ${cpHi.join(',')}`}
 ` : ''}
 ${PLAN === 3 ? `        * = ${hx16(RELOC + 0x2900)}
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive

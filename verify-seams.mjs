@@ -51,13 +51,16 @@ const hit=[...Array(W)].map((_,c)=>cast(px,py,base+rayAng[c]));
 
 // A boundary between columns c-1 and c is drawn at whichever of them the engine's
 // projection rounds to, so accept either.
-// A boundary carries a line only when the two runs either side are the two faces of ONE corner
-// -- which is the same thing as "both faces of that corner are visible from here". That covers
-// inside corners, and outside corners the player is past the plane of both walls of. What draws
-// nothing is a corner facing AWAY: only one face is visible and the run across the boundary is
-// an unrelated wall behind it, so the boundary is a pure silhouette, already shown by a 20+ row
-// step in the wall top. Expecting a line there would bake permanent phantom misses into this
-// check, which is how a broken metric hides a real regression.
+// EVERY run-to-run boundary carries a line as of CVXSEAM (2026-08-11), including a corner
+// facing AWAY -- one face visible, an unrelated wall across the boundary. That used to draw
+// nothing, on the grounds that the 20+ row step in the wall top already shows it. But the step
+// only shows it ABOVE the far wall's top; below that both sides are black, and the grey stripe
+// is the only thing dividing them. seamT applies to the solid run alone, so the line lands
+// exactly in that black-on-black region and nowhere else.
+//
+// This check encoded the OLD rule and therefore reported the new lines as spurious -- a
+// checker enforcing a spec the engine had deliberately moved past. Kept as a separate count
+// so the two classes stay legible; set CVXSEAM=0 to score the old behaviour.
 // Same derivation as build-iray.mjs: concave partners from open-cell corners, convex partners
 // from each run's own end cell.
 const partner=new Set();
@@ -89,9 +92,12 @@ for(let y=0;y<16;y++)for(let x=0;x<16;x++){
     }
   }
 }
+const CVXSEAM = process.env.CVXSEAM !== '0';
 const want=[]; let convexSkipped=0;
 for(let c=1;c<W;c++){const a=hit[c-1],b=hit[c]; if(!a||!b) continue;
-  if(a.run!==b.run){ if(partner.has(`${a.run},${b.run}`)) want.push({c,kind:'corner'});
+  if(a.run!==b.run){ const corner=partner.has(`${a.run},${b.run}`);
+                     if(corner) want.push({c,kind:'corner'});
+                     else if(CVXSEAM) { want.push({c,kind:'silhouette'}); convexSkipped++; }
                      else convexSkipped++; }
   else if(a.cell!==b.cell) want.push({c,kind:'seam'});}
 // Do NOT pre-dedupe the expectation. Only one line per 4-px cell can be drawn, but which
@@ -137,9 +143,9 @@ const collided=want.filter((w,i)=>!used.has(i));
 console.log(`${shotFile.split('/').pop()}  ${PXs} ${PYs} ${PAs}`);
 console.log(`  boundaries ${want.length}  drawn ${got.length}  matched ${matched}` +
             `  avg |offset| ${matched?(off/matched).toFixed(2):'-'} col  worst ${worst}` +
-            `  (+${convexSkipped} corners facing away, no line by design)`);
+            `  (${convexSkipped} of them silhouette corners, now drawn too)`);
 if(spurious.length) console.log(`  SPURIOUS (drawn with no boundary near): ${spurious.join(' ')}`);
-if(collided.length) console.log(`  not drawn, cell already used: ${collided.map(w=>w.c+(w.kind==='corner'?'C':'s')).join(' ')}`);
+if(collided.length) console.log(`  not drawn, cell already used: ${collided.map(w=>w.c+(w.kind==='corner'?'C':w.kind==='silhouette'?'X':'s')).join(' ')}`);
 if(!spurious.length) console.log(`  every drawn line corresponds to a real boundary`);
 
 if (process.env.DUMP) {

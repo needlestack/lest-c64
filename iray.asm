@@ -479,16 +479,6 @@ subFace:lda spanR
         ; the kind you cannot see around -- is already drawn by the silhouette, which steps 20+
         ; rows at that column. The grey line adds nothing to a boundary that emphatic, so
         ; convex corners are left seam-free and render as plain two-black steps.
-        lda spanL
-        tax
-        lda faceIdT,x
-        tax                     ; X = the run on this side
-        ldy spanR
-        lda faceIdT,y           ; A = the run on the other side
-        cmp cpLoT,x
-        beq subCv
-        cmp cpHiT,x
-        bne subCn               ; not a concave partner: convex silhouette, draw nothing
 subCv:  lda spanR
         lsr
         lsr
@@ -1117,7 +1107,6 @@ rfCbS:  sta rfCw1+1
         sta rfCw2+1
         sty rfCb1+1
         sty rfCb2+1
-        sty rfCb3+1
 
         ldx #39                 ; X = cell column throughout; the chains use it as their index
         ; The cell's min and max heights, computed HERE rather than in a pass of their own.
@@ -1341,16 +1330,28 @@ lda erow
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
-rfSolid:lda seamT,x
-        cmp #$01       ; the frame's default. A seam variant can change without rs
-        bne rfSlSm              ; moving, so a seam column is never cached
-        lda rsv
+rfSolid:; The cache byte carries rs AND which seam variant this column holds. rs is 0..13 and
+        ; the byte is eight bits, so the top nibble was simply going spare: 0 = no seam,
+        ; 1..4 = stripe position + 1. Before this, a seam column stored $ff and redrew every
+        ; frame -- correct, but only because a seam variant can change while rs does not, which
+        ; is a reason to widen the key, not to give up on caching.
+        lda seamT,x
+        cmp #$01
+        beq rfSlNo
+        and #$03
+        clc
+        adc #$01
+        asl
+        asl
+        asl
+        asl
+        ora rsv
+        bne rfSlCk              ; always -- the high nibble is nonzero by construction
+rfSlNo: lda rsv
+rfSlCk:
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
-        jmp rfSlDr
-rfSlSm: lda #$ff
-rfCb3:  sta cbA,x               ; a value rs can never take, so next frame redraws too
 rfSlDr: lda rsv
         cmp #13
         bcs rfNext
@@ -4232,8 +4233,10 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; boundary is a convex silhouette, where the wall's edge stands against something unrelated
 ; behind it and the 20-row step has already drawn the division.
 ; Indexed by run id, so whole tables rather than a packed set.
-cpLoT:  !byte 0,34,54,39,40,53,58,39,45,46,65,66,58,51,34,35,45,42,41,56,57,50,61,62,37,38,56,37,43,48,48,35,44,62,1,15,14,24,25,3,4,16,17,31,32,16,9,24,29,3,12,13,29,1,2,8,19,20,12,6,19,32,23,22,10,2,11
-cpHiT:  !byte 0,53,65,49,49,54,59,40,55,55,64,64,50,59,36,36,41,46,42,60,60,51,63,63,47,47,57,38,44,52,52,43,61,66,14,31,15,27,27,7,7,18,18,28,28,8,17,25,30,4,21,21,30,5,5,9,26,26,6,13,20,22,33,23,11,10,33
+; Emitted only when CVXSEAM=0. With every run-to-run boundary drawing a line, nothing reads
+; these -- 132 bytes of corner-partner
+; tables and the whole build-time derivation exist purely to tell a corner from a silhouette,
+; and the renderer no longer cares which it is.
 
         * = $af00
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
