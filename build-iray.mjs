@@ -1656,9 +1656,13 @@ pvPH    = $cb0e
 pvPB    = $cb0f
 pvSgn   = $cb10                 ; sign of the term, carried around the unsigned multiply
 pvI2    = $cb11                 ; the hint index, saved across mul8 (which needs X)
-rayN    = $cb14                 ; RAYCNT: marchCol calls this frame
-pvNdbg  = $cb13                 ; RAYCNT: pvN as pivPrep saw it, before it is cleared
 pvYs    = $cb12                 ; the bearing, saved across the first multiply
+` : ''}${RAYCNT ? `; RAYCNT diagnostics. Declared OUTSIDE the PIVOT block: a RAYCNT build with PIVOT=0 is the
+; baseline half of the comparison, and gating these on PIVOT made that build fail to assemble --
+; which left latest.d64 holding the PREVIOUS disk and reported the default viewpoint as if it
+; were the one asked for. Silent, and exactly the trap the RELOC comment warns about.
+rayN    = $cb14                 ; marchCol calls this frame
+pvNdbg  = $cb13                 ; pvN as pivPrep saw it, before pivPrep clears it
 ` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -4390,7 +4394,7 @@ ${RAYCNT ? `        lda #$03
         lda rayN
         and #$0f
         jsr ddPut
-        lda #$04                ; row 4: how many hints pivPrep had to work with. If this is
+${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had to work with. If this is
         jsr setRow              ; 0 every frame the prediction is not running at all, which
         ldy #38                 ; no amount of staring at the ray count would reveal.
         lda pvNdbg
@@ -4402,7 +4406,7 @@ ${RAYCNT ? `        lda #$03
         lda pvNdbg
         and #$0f
         jsr ddPut
-` : ''}ddAng:  lda #$02
+` : ''}` : ''}ddAng:  lda #$02
         jsr setRow
         ldy #37
         lda #10                 ; 'A'
