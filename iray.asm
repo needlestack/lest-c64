@@ -243,9 +243,23 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
-        ldx #$00                ; no run cached for either buffer yet -- an uninitialised
-        lda #$ff                ; cache byte that happens to match rb or rs would leave a
-rfCz:   sta cwA,x               ; column never drawn at all
+        ; No run cached for either buffer yet. The two halves need OPPOSITE sentinels now that
+        ; the tests are ordered compares rather than equality:
+        ;   cwA/cwB start at 0 -- the ceiling test skips when rb has SHRUNK, and $ff would make
+        ;     every column look like a shrink and skip its own first paint, leaving the BASIC
+        ;     screen showing through.
+        ;   cbA/cbB start at $ff -- the solid test skips when rs has GROWN, and $ff exceeds any
+        ;     rs, so the first frame always draws.
+        ; The four tables are contiguous at $c500/$c528/$c550/$c578, so one walk covers them:
+        ; offsets 0-79 are the ceiling pair, 80-159 the solid pair.
+        ldx #$00
+        lda #$00
+rfCz0:  sta cwA,x
+        inx
+        cpx #80
+        bcc rfCz0
+        lda #$ff
+rfCz:   sta cwA,x
         inx
         bne rfCz
         lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
@@ -1178,8 +1192,15 @@ rfRs:   sta rsv
 rfCw1:  cmp cwA,x               ; operand patched above
         beq rfEdge              ; same length as this buffer already holds: leave it alone
 rfCw2:  sta cwA,x
+        ; SHRANK -- and a shorter ceiling needs no writes at all. Rows 0..rb-1 are already
+        ; blank, being a prefix of what this buffer holds, and the rows the ceiling gave up
+        ; (rb..rb_old-1) are overwritten THIS frame by the edge loop, which runs rb..rs-1, or
+        ; by the solid chain under it. rfRs clamps rs >= rb, so between them those two always
+        ; cover the gap -- which is what makes this safe rather than merely usually right.
+        bcc rfEdge
         cmp #$00
         beq rfEdge
+
         clc
         adc bufOff
         tay
@@ -1349,6 +1370,9 @@ rfSolid:; A seam column always redraws. The cache byte HAS room to carry the sea
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
+        bcs rfNext              ; rs GREW: the solid run starts later, so it only gave rows up,
+                                ; and the edge loop (rb..rs-1) has just redrawn every one of
+                                ; them. Rows rs..12 are a suffix of what the buffer holds.
         jmp rfSlDr
 rfSlSm: lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
 rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITHOUT COMPARING:

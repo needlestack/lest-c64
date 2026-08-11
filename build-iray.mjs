@@ -1445,6 +1445,10 @@ const SEAMS = process.env.SEAMS !== '0';
 // where the step pieces end and never runs up the near wall's full height.
 // CVXSEAM=0 restores the concave-only rule (and with it the need for cpLoT/cpHiT).
 const CVXSEAM = process.env.CVXSEAM !== '0';
+// PARTIAL=0 restores the pure equality test on both run caches -- redraw the whole chain on any
+// change. The A/B for the shrink/grow skip, and the only way to tell a stale-pixel bug in it
+// from ordinary model disagreement, since the pinned six views never exercise either path.
+const PARTIAL = process.env.PARTIAL !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
 const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
 const STRAFE = flag('STRAFE'); // auto-strafe (parallel to walls)
@@ -1714,6 +1718,7 @@ rayFrm  = $cb17                 ; for free -- the same trick the profiler uses
 rayMean = $cb18
 pvNdbg  = $cb13                 ; pvN as pivPrep saw it, before pivPrep clears it
 ` : ''}${TOUR ? `tourC   = $cb19                 ; TOUR phase counter
+tourF   = $cb22                 ; 2 bytes: frames elapsed, for the freeze
 ` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -1755,9 +1760,23 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
-        ldx #$00                ; no run cached for either buffer yet -- an uninitialised
-        lda #$ff                ; cache byte that happens to match rb or rs would leave a
-rfCz:   sta cwA,x               ; column never drawn at all
+        ; No run cached for either buffer yet. The two halves need OPPOSITE sentinels now that
+        ; the tests are ordered compares rather than equality:
+        ;   cwA/cwB start at 0 -- the ceiling test skips when rb has SHRUNK, and $ff would make
+        ;     every column look like a shrink and skip its own first paint, leaving the BASIC
+        ;     screen showing through.
+        ;   cbA/cbB start at $ff -- the solid test skips when rs has GROWN, and $ff exceeds any
+        ;     rs, so the first frame always draws.
+        ; The four tables are contiguous at $c500/$c528/$c550/$c578, so one walk covers them:
+        ; offsets 0-79 are the ceiling pair, 80-159 the solid pair.
+        ldx #$00
+        lda #$00
+rfCz0:  sta cwA,x
+        inx
+        cpx #80
+        bcc rfCz0
+        lda #$ff
+rfCz:   sta cwA,x
         inx
         bne rfCz
         lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
@@ -2665,9 +2684,15 @@ rfRs:   sta rsv
         lda rbv
 rfCw1:  cmp cwA,x               ; operand patched above
         beq rfEdge              ; same length as this buffer already holds: leave it alone
-${RAYCNT ? '        inc chnN\n' : ''}rfCw2:  sta cwA,x
-        cmp #$00
+rfCw2:  sta cwA,x
+        ; SHRANK -- and a shorter ceiling needs no writes at all. Rows 0..rb-1 are already
+        ; blank, being a prefix of what this buffer holds, and the rows the ceiling gave up
+        ; (rb..rb_old-1) are overwritten THIS frame by the edge loop, which runs rb..rs-1, or
+        ; by the solid chain under it. rfRs clamps rs >= rb, so between them those two always
+        ; cover the gap -- which is what makes this safe rather than merely usually right.
+${PARTIAL ? '        bcc rfEdge\n' : ''}        cmp #$00
         beq rfEdge
+${RAYCNT ? '        inc chnN\n' : ''}
         clc
         adc bufOff
         tay
@@ -2904,7 +2929,10 @@ rfSolid:${SEAMS ? `; A seam column always redraws. The cache byte HAS room to ca
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
-        jmp rfSlDr
+${PARTIAL ? `        bcs rfNext              ; rs GREW: the solid run starts later, so it only gave rows up,
+                                ; and the edge loop (rb..rs-1) has just redrawn every one of
+                                ; them. Rows rs..12 are a suffix of what the buffer holds.
+` : ''}        jmp rfSlDr
 ${SEAMS ? `rfSlSm: lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
 rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITHOUT COMPARING:
                                 ; comparing $ff against a cache that already holds $ff matches,
@@ -3096,7 +3124,21 @@ ${TOUR ? `
 ; benchmark that silently stops moving still prints a confident number. +-0.25 cells around a
 ; cell centre clears the 0.102 collision box, so it cannot stop.
 tourStep:
-        inc pa
+        ; TOURSTOP: move for 512 frames, then FREEZE. That is what makes the run cache
+        ; testable. A pinned viewpoint never changes rb or rs, so the equality test always
+        ; hits and the shrink/grow skips never execute -- the six views would pass with those
+        ; paths completely broken. Moving first exercises them; freezing afterwards makes the
+        ; result scoreable, because a stale row left behind by a wrong skip is never redrawn
+        ; once nothing is changing, so it sits there until the screenshot catches it.
+        ; 512 is a whole number of rotations (1 angle unit a frame) and of the 16-frame
+        ; oscillation, so the frozen viewpoint is exactly PX/PY/PA again.
+        lda tourF+1
+        cmp #$02
+        bcs tourDn
+        inc tourF
+        bne tsNc
+        inc tourF+1
+tsNc:   inc pa
         inc tourC
         lda tourC
         and #$08                ; 8 frames out, 8 back: period 16, net displacement zero
@@ -3116,6 +3158,7 @@ tourStep:
         adc #$00
         sta py+1
         rts
+tourDn: rts
 tourBk: lda px
         sec
         sbc #$08
