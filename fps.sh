@@ -4,7 +4,7 @@
 # The SPIN build now hops to the next of four preset viewpoints on every full rotation, so a
 # run averages over several parts of the map rather than measuring one spot forever. It used
 # to sit at the start corridor for all five samples, which flattered anything whose cost
-# scales with what is on screen -- the orb work barely showed up there at all. The hop is
+# scales with what is on screen -- the cheapest view is not a benchmark. The hop is
 # frame-locked so two builds still visit the same places in the same order.
 #
 # Five is a hard budget: each run occupies the machine, so benchmarking and regression

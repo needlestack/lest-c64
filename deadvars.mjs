@@ -83,7 +83,7 @@ const show = (title, list, note) => {
       `  writes ${v.writes.length ? 'line ' + v.writes.join(',') : 'none'}`);
 };
 console.log(`${vars.size} RAM variables in ${process.argv[2] ?? 'iray.asm'}`);
-show('READ, NEVER WRITTEN', readNeverWritten, 'each of these is an ocl2');
+show('READ, NEVER WRITTEN', readNeverWritten, 'reads uninitialised RAM -- the bug this tool exists for');
 show('WRITTEN, NEVER READ', writtenNeverRead, 'dead stores, or a consumer that was deleted');
 show('NEITHER', untouched, 'stale equates');
 
@@ -94,7 +94,7 @@ for (const [n, l] of orphan) console.log(`  ${n.padEnd(9)} line ${l.line}`);
 
 // ---- instructions stranded after an unconditional transfer ----
 // The scan above enumerates LABELS, so it is structurally blind to code that has no label at
-// all. That is exactly what orbPaint's step 3 died of: `bcc opA1s` named the label AFTER the
+// all. That is exactly what the old orb painter's step 3 died of: a `bcc` naming the label AFTER the
 // opmn/opmx stores, leaving those stores sitting between a `jmp` and the next label. Nothing
 // could reach them, opmn/opmx kept their initial 39/0, and step 3 returned on its first
 // compare -- no wall was painted foreground in any frame, for months. A label check cannot
@@ -104,7 +104,7 @@ for (const [n, l] of orphan) console.log(`  ${n.padEnd(9)} line ${l.line}`);
 // Once control cannot arrive, everything stays unreachable until a LABEL reopens it -- so the
 // dead flag persists across following instructions rather than being recomputed from each.
 // A build flag that switches a block off by emitting an unconditional `jmp` over it is
-// deliberate, not a bug -- ORBSTILL does exactly that. Mark those `jmp`s DEADCODE-OK and the
+// deliberate, not a bug -- a flag that disables a fast path does exactly that. Mark those `jmp`s DEADCODE-OK and the
 // block they skip stays quiet, because a check that always prints the same known lines is one
 // people stop reading, which is how the real bug survived in the first place.
 const DIRECTIVE = /^\s*(?:!|\*\s*=)/;       // data / origin: not part of the instruction stream

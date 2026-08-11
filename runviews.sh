@@ -10,9 +10,7 @@ n=0
 while read -r PX PY PA rest; do
   case "$PX" in ''|'#') continue;; esac
   n=$((n+1))
-  # SPRITES=0: this checks the WALL renderer against the reference model, which knows
-  # nothing about sprites -- an orb in shot would just read as a pile of wrong pixels.
-  SPRITES=0 PX=$PX PY=$PY PA=$PA node build-iray.mjs >/dev/null 2>&1 || { echo "$n BUILD FAILED"; continue; }
+  PX=$PX PY=$PY PA=$PA node build-iray.mjs >/dev/null 2>&1 || { echo "$n BUILD FAILED"; continue; }
   /Applications/vice-arm64-gtk3-3.8/bin/x64sc -silent -warp -ntsc +drive8truedrive \
      -limitcycles 30000000 -jamaction 1 -exitscreenshot "$S/$TAG-$n.png" \
      -autostart latest.d64 >/dev/null 2>&1
@@ -27,6 +25,6 @@ while read -r PX PY PA rest; do
 done < views.txt
 
 # Leave latest.d64 as the SHIPPING build. Every iteration above overwrites it with a
-# viewpoint-pinned, SPRITES=0 variant, so without this the disk in the project root is
-# whatever the last view happened to be -- which cost a round trip when the orb "vanished".
+# viewpoint-pinned variant, so without this the disk in the project root is whatever the
+# last view happened to be -- which has cost a round trip before.
 node build-iray.mjs >/dev/null 2>&1 && echo "latest.d64 rebuilt at defaults"

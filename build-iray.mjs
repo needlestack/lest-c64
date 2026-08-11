@@ -44,15 +44,13 @@ for (let a = 0; a < 256; a++) {
 // columns march the identical ray and a wall's far end can only sit on a run edge -- it jumps a
 // whole character instead of scrolling. Two fractional bits make every column distinct.
 //
-// ONLY these four tables grow. posXT/posYT are sign bits that flip at 0/64/128/192, and
-// absSinT/absCosT feed u for seams which is already +-1-2 columns; both stay on the integer
-// angle, which also keeps `rang` exactly as it was for every other consumer.
+// ONLY these four tables grow. absSinT/absCosT feed u for seams, which is already +-1-2
+// columns, so they stay on the integer angle; posXT/posYT likewise, for calcU's own ssAng.
+// castRay itself no longer forms a coarse angle at all -- its step signs come from rqH.
 // ON by default: the byte angle gave only 48 distinct ray directions across 160 columns, which
 // made every wall's far end jump a whole character instead of scrolling. FINEANG=0 restores it.
 const FINEANG = process.env.FINEANG !== '0';
 
-if (FINEANG && process.env.SPRITES !== '0' && process.env.SPRITES !== undefined)
-  throw new Error('FINEANG puts its tables in the orb-table space, which SPRITES=1 needs');
 const ddxLoQ = [], ddxHiQ = [], ddyLoQ = [], ddyHiQ = [];
 for (let q = 0; q < 1024; q++) {
   const cx = Math.cos(q / 1024 * 2 * Math.PI), sy = Math.sin(q / 1024 * 2 * Math.PI);
@@ -120,8 +118,8 @@ const mapW = (x, y) => (x < 0 || y < 0 || x > 15 || y > 15) ? 1 : map[y * 16 + x
 const runW = new Array(256).fill(0), runE = new Array(256).fill(0), runN = new Array(256).fill(0), runS = new Array(256).fill(0);
 let nextRun = 1;
 // Every run lies in ONE plane and faces one way -- W runs are a vertical strip at constant x,
-// N runs a horizontal strip at constant y -- which is what makes sprite occlusion a single
-// comparison later. runPlane is the coordinate, runFace which side is the visible one.
+// N runs a horizontal strip at constant y. runPlane is the coordinate, runFace which side is
+// the visible one; the seam pass uses both to place a panel line at the right column.
 const runPlane = [0], runFace = [0];    // index by run id; 0 is "no run"
 const newRun = (plane, face) => { runPlane[nextRun] = plane; runFace[nextRun] = face; return nextRun++; };
 for (let x = 0; x < 16; x++) {          // vertical planes: west/east faces, contiguous in y
@@ -146,10 +144,8 @@ console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by 
 // ---- CONVEX run ends carry no seam ----
 // A seam at the end of a receding wall marks a corner you cannot see around, and the
 // silhouette there already steps 20+ rows (measured: 21/22/25/27 across the six views), so the
-// line is redundant. It is also actively harmful: that boundary lands in the very cell where
-// an orb needs PER-COLUMN occlusion, and a seam cell cannot express that -- it is all-clipping
-// or all-not. Dropping these makes every convex corner a plain two-black SOLID split, which is
-// per-column and exact, and lets orbPaint drop its majority-vote compromise.
+// line is redundant -- it draws a grey divider across a boundary the 20-row jump has already
+// made unmistakable. Dropping these makes every convex corner a plain two-black step.
 //
 // A run ends because the next cell along its strip is open (the wall simply stops -> CONVEX,
 // you see past the edge) or solid (the wall turns and another face meets it -> CONCAVE). The
@@ -363,80 +359,29 @@ const digGlyph = [
  5,5,2,5,5, 5,5,2,2,2];                                          // X (16), Y (17) labels
 const NGLYPH = digGlyph.length / 5;
 
-// SPRITES gates the orbs AND everything the charset carries on their behalf, so it has to be
-// known before the first glyph is interned -- hence up here rather than down with the other
-// knobs. On this branch it defaults OFF: walls and seams only.
-//
-// Why the charset cares at all: the foreground/background split below is INVISIBLE. Bit pairs
-// 01 and 11 are both black (01 through $d022, 11 through colour RAM), and the only thing that
-// tells them apart is sprite priority. With no sprites, every code can be foreground, and the
-// 43 codes spent on saying otherwise -- SOLID's twin, the six splits, the four seam-bg, the 12
-// ramp/step background twins and the 20 shared-shape foreground duplicates -- come back.
-const SPRITES = process.env.SPRITES === '1';
+// NOTE for whoever adds objects back (2026-08-11, at the user's request): every trace of the
+// orb/sprite pass has been removed from this file, deliberately and not because it was broken.
+// The plan is to do objects as a SECOND PASS over the finished wall image rather than weaving
+// priority into the charset, so none of what follows should be reinstated as it was. What that
+// old scheme cost is worth knowing before rebuilding it: the fg/bg split below is INVISIBLE --
+// bit pairs 01 and 11 are both black (01 through $d022, 11 through colour RAM) and only sprite
+// priority tells them apart -- and expressing it cost 43 of 256 char codes (SOLID's twin, six
+// vertical splits, four seam-bg, twelve ramp/step background twins, twenty shared-shape
+// foreground duplicates). Those 43 codes are now spent on rendering accuracy instead.
 
 // --- assign char codes: cell patterns first, then the 18 readout glyphs ---
 const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of multicolor bitmap
-// Wall pixels are bit pair 11, not 01, and that is load-bearing: in MULTICOLOR char mode the
-// VIC treats pairs 00 and 01 as background and 10 and 11 as foreground for sprite priority.
-// With walls as foreground and $d01b set, sprite occlusion is exact, per-pixel and free --
-// no masking, no mutable sprite copies, no cycles at all. 11 takes its colour from the low 3
-// bits of colour RAM, which is written once at startup to $08: multicolor on, colour black,
-// which is what the walls wanted anyway.
-// Wall pixels are bit pair 11 in a FULL cell and 01 in a partial one. Both are black -- 11
-// through colour RAM, 01 through $d022 -- so nothing about the image changes. What changes is
-// sprite priority: 11 is foreground and clips sprites, 01 is background and does not.
-//
-// Full cells and STEP cells clip; RAMP cells do not. A ramp is the one-row band along a
-// wall's top or bottom boundary, and geometry keeps an orb off those on a near wall: the top
-// edge is at 100-h, the bottom at 100+h, and the orb stands at 100+h_orb with h_orb < h_wall,
-// so it is above the bottom edge and far below the top. A STEP is a corner, whose boundary
-// runs the whole height of the wall -- an orb meets those all the time, and making them
-// background let an orb draw straight over a near wall's edge.
-// STEPSTATIC=1 inks each column by its OWN fill rather than the whole pattern: a column filled
-// top to bottom is a wall that continues past this cell, so it is FOREGROUND and clips; a
-// partially filled column is a wall EDGE, so it is BACKGROUND and does not.
-//
-// Why that is enough on its own, and needs no per-frame choice: the camera height is fixed and
-// everything stands on the floor, so "farther" always means "nearer the horizon". An orb a wall
-// should occlude therefore projects INSIDE that wall's solid region, never onto the one-cell
-// band where its edge lives -- so the columns this leaves background are exactly the ones no
-// occluded orb can reach. The sprite's single priority bit then says WHETHER to clip and the
-// two blacks in the char say WHERE, which is the whole point of having two blacks.
-// Default ON since 2026-08-09: no counterexample survived testing, it fixed an overhang nothing
-// else could, and it costs nothing (18.96 fps either way). STEPSTATIC=0 restores the old
-// per-frame selection with its twin codes.
-const STEPSTATIC = process.env.STEPSTATIC !== '0';
-const FGPX = [0xc0, 0x30, 0x0c, 0x03], BGPX = [0x40, 0x10, 0x04, 0x01];
-const patBytes = (p, isStep) => {
-  // isStep gates the per-column inking. Without that gate it also fired on RAMPS, and a ramp
-  // whose slope happens to touch the top of its cell has a saturated column -- so every edge
-  // cell along a receding wall grew a foreground stripe and clipped orbs standing in front of
-  // it. A ramp is ONE face and can never occlude; only a cell showing two walls may.
-  // Which columns of a step are foreground: the TALLER side of it, whether or not that side
-  // reaches top to bottom. "Column is full height" was too narrow -- a step sitting at ground
-  // level whose near side is a ramp-to-void never reaches the cell bottom, so the whole cell
-  // came out background and stopped occluding. The step's boundary is the adjacent pair with
-  // the largest jump; the side with the greater values is the nearer wall, hence the occluder.
-  const stepInk = () => {
-    let bi = 1, bd = -1;
-    for (let i = 1; i < 4; i++) { const d = Math.abs(p[i] - p[i - 1]); if (d > bd) { bd = d; bi = i; } }
-    const leftTaller = p[bi - 1] > p[bi];
-    return [0, 1, 2, 3].map(k => ((leftTaller ? k < bi : k >= bi) ? FGPX : BGPX)[k]);
-  };
-  // No sprites means nothing reads the priority bit, so the whole fg/bg question is moot and
-  // every column goes foreground. That is not a cosmetic simplification: it is what makes a
-  // shape's code depend on its SHAPE alone, so a ramp and a step that look alike can share one
-  // code again -- which is where the background twins and foreground duplicates come back from.
-  const m = !SPRITES                 ? FGPX
-          : (STEPSTATIC && isStep)   ? stepInk()
-                                     : (isStep || p.every(v => v >= 8) ? FGPX : BGPX);
-  return [...Array(8)].map((_, i) =>
-    (p[0] > 7 - i ? m[0] : 0) | (p[1] > 7 - i ? m[1] : 0) | (p[2] > 7 - i ? m[2] : 0) | (p[3] > 7 - i ? m[3] : 0));
-};
-const bgOnly = b => { let o = 0;
-  for (let i = 0; i < 4; i++) { const pr = (b >> (6 - 2 * i)) & 3;
-    o |= (pr === 3 ? 1 : pr) << (6 - 2 * i); }
-  return o; };
+// Wall pixels are bit pair 11, which takes its colour from the low 3 bits of colour RAM. That
+// is written once at startup to $08 -- multicolor on, colour black -- and never touched again,
+// so the walls cost no colour-RAM traffic at all. Pair 01 ($d022) is also black and is now
+// unused by the cell codes; it stays black so the two are interchangeable if anything wants it.
+// A pattern is four column heights 0..8, and the glyph is just those four columns filled from
+// the bottom -- one ink for the whole cell, so a shape's code depends on its SHAPE alone.
+const FGPX = [0xc0, 0x30, 0x0c, 0x03];
+const patBytes = p =>
+  [...Array(8)].map((_, i) =>
+    (p[0] > 7 - i ? FGPX[0] : 0) | (p[1] > 7 - i ? FGPX[1] : 0) |
+    (p[2] > 7 - i ? FGPX[2] : 0) | (p[3] > 7 - i ? FGPX[3] : 0));
 function intern(p) { const k = p.join(','); if (!codeOf.has(k)) { codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); } return codeOf.get(k); }
 intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fill constants
 // Under PLAN=2 colour RAM means something, so every glyph that is NOT a nesting pair has to be
@@ -445,34 +390,6 @@ intern([0, 0, 0, 0]); intern([8, 8, 8, 8]);     // BLANK=0 SOLID=1: the fast-fil
 // colour RAM: a cell that stops being an edge cell gets SOLID or BLANK, and neither reads $d800.
 if (+(process.env.PLAN ?? 0) === 2) glyphs[1] = [...Array(8)].fill(0x55);
 const BLANK = codeOf.get('0,0,0,0'), SOLID = codeOf.get('8,8,8,8');
-// SOLID's twin: the same solid black, but bit pair 01, which the VIC classes as BACKGROUND and
-// so does NOT clip sprites against. Cells under a sprite whose wall is FARTHER than it get
-// repointed to this, which is the only way to express per-column depth -- $d01b is one bit for
-// the whole sprite. Only SOLID needs a twin: a ground object meets a wall's flat body, never
-// the one-cell band at its top, so the ramp and step patterns can stay single-coded.
-// Without sprites there is nothing to be background FOR, so SOLIDBG aliases SOLID and costs no
-// code. Every "is this cell still a plain fill?" test in the seam path compares against it and
-// keeps working unchanged, because a plain fill is now simply SOLID.
-const SOLIDBG = SPRITES ? glyphs.length : SOLID;
-if (SPRITES) glyphs.push([...Array(8)].fill(+(process.env.VSTEPDBG ?? 0) ? 0xaa : 0x55));  // 01 01 01 01
-
-// ---- SOLID split six ways: black on black, with a priority edge inside the cell ----
-// Sprite priority is a property of the BIT PAIR, so it is per logical column, not per cell.
-// A cell at a corner shows two walls -- one that must clip a sprite and one that must not --
-// and both are black, so the cell can carry a vertical priority edge that is invisible as
-// colour and exact as occlusion. Same trick as SOLIDBG, just applied per column instead of
-// per cell, which is what SOLIDBG should have been all along.
-//
-// Six codes: the boundary falls at column 1, 2 or 3 (a boundary on the cell edge leaves the
-// cell showing one wall, so there is nothing to split), and either side may be the near one.
-// Code = SPLIT0 + (k-1)*2 + (the FIRST run is the near one ? 0 : 1).
-// Six codes that say nothing about the IMAGE -- both sides are black -- so with no sprite to
-// clip they are six codes of pure nothing. Only fgCodeT reads them, and that table is gated on
-// SPRITES too.
-const SPLIT0 = glyphs.length;
-if (SPRITES) for (let k = 1; k <= 3; k++) for (const leftFg of [true, false])
-  glyphs.push([...Array(8)].fill([0, 1, 2, 3].reduce(
-    (b, c) => b | (((c < k) === leftFg ? 3 : 1) << (6 - 2 * c)), 0)));
 
 // Which patterns actually occur? The charset cannot hold every ramp and step the clamp can
 // express, so the sampler decides what is worth a code and what gets dropped (see placeAll).
@@ -653,15 +570,11 @@ const RAMPFREE = +(process.env.RAMPFREE ?? 60);
     for (let i = 0; i < need; i++) { dropped.push(rank[i].p); keep.delete(rank[i].p.join(',')); }
     for (let i = all.length - 1; i >= 0; i--) if (!keep.has(all[i].join(','))) all.splice(i, 1);
   }
-  // Nothing placed here clips a sprite: the six vertical steps that may are interned ahead of
-  // this call, so everything left is a ramp or a transitional step, and both are background.
   for (const p of all) { const k = p.join(',');
     codeOf.set(k, glyphs.length); glyphs.push(patBytes(p)); }
   const stepKeys = new Set(STEPS.chosen.map(q => q.join(',')));
-  console.error(`  cell codes: ${all.filter(p => stepKeys.has(p.join(','))).length} non-vertical ` +
-    `step + ${all.filter(p => !stepKeys.has(p.join(','))).length} ramp, none clipping; ` +
-    `6 vertical steps clip, at ${VSTEP0}-${VSTEP0 + 5}` +
-    (STEPSTATIC ? ` (no twins: each column inks itself)` : ` with twins at ${VSTEP0 + 6}-${VSTEP0 + 11}`));
+  console.error(`  cell codes: ${all.filter(p => stepKeys.has(p.join(','))).length} step + ` +
+    `${all.filter(p => !stepKeys.has(p.join(','))).length} ramp`);
   console.error(`  dropped ${dropped.length} never-sampled patterns` +
     (dropped.length ? ` (worst substitution is ${Math.max(...dropped.map(p => {
       let d = 9; for (const q of all) { const h = hamm(p, q); if (h < d) d = h; } return d; }))}` +
@@ -690,8 +603,8 @@ for (let a = CLO; a <= CHI; a++) for (let b = CLO; b <= CHI; b++) rampsAll.push(
 //
 // The plateau's slope needs a third sample -- the height at the LAST column before the
 // boundary -- so the step table is addressed by three levels rather than two.
-// 100, not 64, since STEPSTATIC returned 41 codes (the twins were pure duplicates of their
-// bases once each column inks itself). Steps are where the error is: the ramp merging costs
+// 100, not 64: dropping the sprite-priority twins returned 41 codes, which went here.
+// Steps are where the error is: the ramp merging costs
 // +0.009 wrong logical columns a frame against the step corner error's 0.653, so un-merging
 // ramps would spend all 44 codes on the smaller of the two by two orders of magnitude.
 // Measured: corner error 0.653 -> 0.576, six views 1490 -> 1484 pixels, and 0401/027c/31 88 ->
@@ -812,60 +725,13 @@ for (const fr of PFRAMES) for (let i = 0; i < fr.length; i++)
 console.error(`  step patterns: ${LA}/${LM}/${LB} levels, ${STEPS.nslots} ` +
   `sampled of ${3*SLOTN} (k,slot) pairs, ${STEPS.chosen.length} codes; corner error ${(oldErr / SFRAMES).toFixed(3)} -> ` +
   `${(STEPS.after / SFRAMES).toFixed(3)} wrong cols/frame (flat plateau -> sloped)`);
-// ---- the six vertical steps, and their background twins ----
-// A step whose every column is either empty or full is a CORNER: its boundary is a straight
-// vertical edge running the height of the wall, and an orb meets those constantly. Those six
-// are the only steps that may clip a sprite -- see patBytes. Every other step is a transitional
-// cell on a steep silhouette, at most a sliver wide, and clipping against one is what put a
-// black bite out of an orb standing in front of a wall's lower corner.
-//
-// They are placed HERE, ahead of placeAll, so the six land on consecutive codes with their six
-// twins immediately after: the repoint pass then converts one to the other with a single ADC #6
-// rather than a lookup. placeAll skips them, since codeOf already holds them.
-const VSTEPDBG = +(process.env.VSTEPDBG ?? 0);
-
-// ---- split twins for the busiest wall-meets-wall steps ----
-// Every step cell IS a corner: the subdivision only picks one where a face boundary falls
-// inside the cell. So when a step has a SATURATED column and a partial one, the saturated
-// side is the wall that fills the cell -- the taller one on screen, hence the nearer one.
-// That makes the split self-describing: no second orientation is needed, unlike SOLID, where
-// both sides are equally black and only the run ids can say which is near.
-//
-// The class has 35 members and a flat distribution, so it cannot be covered outright. These
-// are the busiest, interned consecutively so the swap is one add, like the vertical steps.
-// The whole class, now that merged ramps pay for it: every wall-meets-wall step gets a twin
-// carrying its OWN ink, so none has to borrow one and no wall changes shape.
-const SSTEPN = +(process.env.SSTEPN ?? 35);
-const SSTEPS = STEPS.chosen
-  .filter(p => p.some(v => v >= 8) && p.some(v => v > 0 && v < 8))
-  .sort((a, b) => (PFREQ.get(b.join(',')) || 0) - (PFREQ.get(a.join(',')) || 0))
-  .slice(0, SSTEPN);
-// ink unchanged, but each column's bit pair says whether it clips: saturated = the near wall
-const splitBytes = p => [...Array(8)].map((_, i) =>
-  [0, 1, 2, 3].reduce((b, c) => b | (p[c] > 7 - i ? (p[c] >= 8 ? 3 : 1) << (6 - 2 * c) : 0), 0));
-
+// The six VERTICAL steps -- every column either empty or full, i.e. a wall corner seen edge-on.
+// Nothing special about them any more (they used to be interned here, ahead of placeAll, so
+// their sprite-priority twins could land on consecutive codes), but the assert is worth keeping:
+// if the step chooser ever stops producing all six, a corner would render as its nearest
+// neighbour and the wall would grow a notch.
 const VSTEPS = STEPS.chosen.filter(p => p.every(v => v === 0 || v >= 8));
 if (VSTEPS.length !== 6) throw new Error(`expected 6 vertical steps, found ${VSTEPS.length}`);
-const VSTEP0 = glyphs.length;
-for (const p of VSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p, true)); }
-// The background twin exists ONLY for renderSym's per-frame swap. Under STEPSTATIC each column
-// is already inked by its own fill and nothing is swapped, so it is dead weight.
-if (!STEPSTATIC) for (const p of VSTEPS) glyphs.push(VSTEPDBG
-  ? patBytes(p, true).map(b => { let o = 0;   // VSTEPDBG: paint the twins seam-grey so a
-      for (let i = 0; i < 4; i++) if ((b >> (6 - 2*i)) & 3) o |= 2 << (6 - 2*i);   // repointed
-      return o; })                            // corner is visible on screen at a glance
-  : patBytes(p, false));                      // same pixels, bit pair 01
-const VSTEPN = VSTEPS.length;
-const SSTEP0 = glyphs.length;
-for (const p of SSTEPS) { codeOf.set(p.join(','), glyphs.length); glyphs.push(patBytes(p, true)); }
-// splitBytes IS the per-column inking, so under STEPSTATIC the "twin" comes out byte-identical
-// to the base glyph -- a pure duplicate of every one of these. That is where the codes come back.
-if (!STEPSTATIC) for (const p of SSTEPS) glyphs.push(splitBytes(p));
-console.error(`  wall-meets-wall steps: ${SSTEPS.length} of ${STEPS.chosen.filter(p => p.some(v => v >= 8) &&
-  p.some(v => v > 0 && v < 8)).length} patterns, at ${SSTEP0}-${SSTEP0 + SSTEPS.length - 1}` +
-  (STEPSTATIC ? ` (no split twins: splitBytes IS the per-column inking, so a twin would be a
-byte-identical duplicate -- that is the 41 codes STEPSTATIC hands back)`
-              : ` with splits at ${SSTEP0 + SSTEPS.length}-${SSTEP0 + 2 * SSTEPS.length - 1}`));
 // PLAN=1 / PLAN=2 replace the whole generated codebook with charsetgen's k-medians plan.
 // The pipeline above still runs -- STEPS and the sampler are what produced the buckets the plan
 // is expressed in -- but its code ASSIGNMENT is thrown away and rebuilt from the plan, so the
@@ -912,31 +778,6 @@ else {
     `(${((src.cost ?? src.costPx) / planData.frames).toFixed(3)}/frame vs ${planData.shippedPx.toFixed(3)} shipped)`);
 }
 const CELLCODES = glyphs.length;
-// A step's split twin has to have the step's own ink, and the class is far too big to give
-// every member one. But the charset already accepts a nearest-pattern substitution for the
-// patterns it had to drop, and the same rule works here: a step whose own twin does not exist
-// borrows the twin of the closest one that does. The ink is then off by a logical column or
-// two of height for as long as an orb overlaps that one cell -- against the orb bleeding over
-// a whole near wall, which is what happens with no twin at all.
-// 0: a twin must carry its OWN pattern's ink. A borrowed one is off by a column or two of
-// height, and that shows as the wall silhouette shifting while an orb passes -- the whole
-// point of drawing the walls once is that they then do not move.
-const SPLITSUB = +(process.env.SPLITSUB ?? 0);
-const splitT = new Array(256).fill(0);
-{ let exact = 0, near = 0;
-  for (const [key, code] of (STEPSTATIC ? [] : codeOf)) {
-    const q = key.split(',').map(Number);
-    if (!(q.some(v => v >= 8) && q.some(v => v > 0 && v < 8))) continue;   // not wall-meets-wall
-    let bd = 99, bi = -1;
-    SSTEPS.forEach((p, i) => { const d = hamm(p, q); if (d < bd) { bd = d; bi = i; } });
-    if (bi < 0 || bd > SPLITSUB) continue;
-    splitT[code] = SSTEP0 + SSTEPS.length + bi;
-    if (bd === 0) exact++; else near++;
-  }
-  if (!STEPSTATIC) console.error(`  split twins: ${exact} steps use their own, ${near} borrow the nearest ` +
-    `(within ${SPLITSUB} columns), out of ${[...codeOf].filter(([k]) => { const q = k.split(',').map(Number);
-      return q.some(v => v >= 8) && q.some(v => v > 0 && v < 8); }).length} wall-meets-wall codes`);
-}
 const GLYPH0 = glyphs.length;                   // first readout glyph code
 for (let g = 0; g < NGLYPH; g++) {
   const rows = digGlyph.slice(g * 5, g * 5 + 5);
@@ -959,89 +800,15 @@ for (let k = 0; k < 4; k++) {
   const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : wall) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
-// ... and the same four with their BLACK columns in the background pair. Only the grey stripe
-// itself has to stay foreground -- pair 10 is the one place grey lives, and both background
-// pairs are spent on white and black. So a seam on a wall that must not clip a sprite costs
-// two pixels of line across it instead of the whole cell, and the wall keeps its seam. This
-// is what lets a seam cell take part in the ordinary foreground rule like any other wall.
-// With no sprite to pass behind them there is one seam form, not two, so SEAMBG0 aliases SEAM0
-// and the seam path picks the same four codes it always did.
-const SEAMBG0 = SPRITES ? glyphs.length : SEAM0;
-if (SPRITES) for (let k = 0; k < 4; k++) {
-  const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : 1) << (6 - 2 * i)), 0);
-  glyphs.push(new Array(8).fill(row));
-}
-// A ramp and a step can share the SAME four-column shape, but must not share a CODE: a step's
-// code is inked per-column -- foreground on its saturated columns -- and a ramp can never
-// occlude. 20 of rampT's 256 entries landed on a step's code that way, which is why a plain
-// sloping wall base rendered as a clipping black block. Give each such shape a background-inked
-// duplicate of the step's own glyph: identical pixels, only the priority differs.
-// Built HERE, before the overflow check, because these are real codes and must be counted.
-// code -> the pattern it was interned under, for building duplicates of an existing glyph
-const patOfCode = (() => { const m = new Map();
-  for (const [k, c] of codeOf) if (!m.has(c)) m.set(c, k.split(',').map(Number));
-  return c => m.get(c); })();
-const stepInked = new Set();
-for (let c = VSTEP0; c < VSTEP0 + VSTEPN; c++) stepInked.add(c);
-for (let c = SSTEP0; c < SSTEP0 + SSTEPS.length; c++) stepInked.add(c);
-// A collision is only a problem when the two codes must DIFFER in priority. Everything is
-// foreground now, so a ramp and a step of the same shape are the same glyph and can share the
-// one code, exactly as they did before occlusion existed.
-const bgTwinOf = new Map();
-if (SPRITES) for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
-  const c = codeFor(rampPat(a + CLO, b + CLO));
-  if (stepInked.has(c) && !bgTwinOf.has(c)) {
-    bgTwinOf.set(c, glyphs.length); glyphs.push(glyphs[c].map(bgOnly));
-  }
-}
-if (SPRITES) console.error(`  ramp/step shape collisions: ${bgTwinOf.size} step codes needed a background twin`);
-// ---- foreground duplicates for the busiest SHARED shapes ----
-// A shape reachable from BOTH tables is background-inked, because a ramp can never occlude --
-// and that leaves a hole in a wall's vertical edge wherever the edge cell's shape happens to
-// coincide with a ramp. Fixing every one costs a duplicate each and there are ~58, but the
-// distribution has a head: the top 10 carry 62% of all shared-code step draws and the top 20
-// carry 85%. So duplicate the busiest SHAREDUP of them, ranked by how often each is actually
-// drawn AS A STEP, and let the tail keep sharing. SHAREDIAG=1 prints the ranking.
-const stepUse = new Map();
-for (let k = 0; k < 3; k++) for (const [slot, pat] of STEPS.assign[k]) {
-  const m = stepStats[k].get(slot); if (!m) continue;
-  let n = 0; for (const [, c] of m) n += c;
-  const code = codeFor(pat);
-  stepUse.set(code, (stepUse.get(code) || 0) + n);
-}
-const rampReach = new Set();
-for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) rampReach.add(codeFor(rampPat(a + CLO, b + CLO)));
-const SHAREDUP = +(process.env.SHAREDUP ?? 20);
-// Same story as the background twins, from the other side: a shared shape only needed a second
-// code because one user wanted it foreground and the other background. Nobody wants background.
-const fgDupOf = new Map();
-if (SPRITES) {
-  const ranked = [...stepUse].filter(([c]) => rampReach.has(c) && !stepInked.has(c))
-                             .sort((x, y) => y[1] - x[1]);
-  let covered = 0, tot = ranked.reduce((a, [, n]) => a + n, 0);
-  for (const [c, n] of ranked.slice(0, SHAREDUP)) {
-    fgDupOf.set(c, glyphs.length);
-    glyphs.push(patBytes(patOfCode(c), true));      // same shape, step ink
-    covered += n;
-  }
-  console.error(`  shared-shape fg duplicates: ${fgDupOf.size} of ${ranked.length}, covering ` +
-    `${tot ? (100 * covered / tot).toFixed(0) : 0}% of shared-code step draws`);
-}
-if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 8 seams = ${glyphs.length} > 256`);
-console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + ${SPRITES ? 8 : 4} seam = ${glyphs.length}/256` +
-  (SPRITES ? '' : `  -- ${256 - glyphs.length} free (SPRITES=0 hands back the occlusion codes)`));
+if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
+console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256` +
+  `  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
-              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam` +
-              (SPRITES ? `, ${SEAMBG0}-${SEAMBG0+3} seam-bg` : ''));
+              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam`);
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
-// An EDGE cell must never emit SOLID. SOLID is inked all-foreground because fgCodeT needs it as
-// rule 3's "every column clips" answer, but a ramp is one face and can never occlude -- and 25
-// of rampT's 256 entries are fully saturated, so they landed on SOLID and clipped orbs standing
-// in front of them. Visually identical (both blacks are black); it is the priority that differs.
-const edgeCode = p => { const c = codeFor(p);
-  return c === codeOf.get('8,8,8,8') ? SOLIDBG : c; };
+const edgeCode = p => codeFor(p);
 // Under PLAN the entry is whatever charsetgen assigned to that BUCKET. Buckets the walkthrough
 // never reached still need an answer -- they are reachable geometry the scan happened to miss,
 // not impossible ones -- so they fall back to the codeword nearest the pattern the old linear
@@ -1068,7 +835,7 @@ for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
     if (hit === undefined) planFallback++;
     rampT[a * 16 + b] = hit ?? nearestCode(p);
   } else
-  rampT[a * 16 + b] = (c => bgTwinOf.get(c) ?? (c === codeOf.get('8,8,8,8') ? SOLIDBG : c))(codeFor(p));
+  rampT[a * 16 + b] = codeFor(p);
 }
 // stepT<k>[qA*36 + qM*6 + qB] -> char code, for a cell whose face boundary falls at column
 // k. qM is the level at the LAST column before the boundary: that third sample is what lets
@@ -1097,11 +864,10 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
   }
   if (STEPA) {                       // every slot, by formula -- no sampling involved
     for (let slot = 0; slot < SLOTN; slot++) {
-      const c = edgeCode(stepAPat(k, slot)); t[slot] = fgDupOf.get(c) ?? c; }
+      const c = edgeCode(stepAPat(k, slot)); t[slot] = c; }
     return t;
   }
-  // a step cell prefers the foreground duplicate of a shared shape where one was made
-  for (const [slot, p] of STEPS.assign[k]) { const c = edgeCode(p); t[slot] = fgDupOf.get(c) ?? c; }
+  for (const [slot, p] of STEPS.assign[k]) t[slot] = edgeCode(p);
   return t; });
 // PLAN=3: the index gains a ninth bit, so every table gains a second copy -- one for each half
 // of the split. A bucket that never split has thr 0, which compares true for every m, so its LO
@@ -1148,53 +914,6 @@ if (PLAN === 3) {
 }
 if (PLAN && PLAN !== 3) console.error(`  PLAN: ${planFallback} of ${CN * 16 + 3 * SLOTN} table entries fell back ` +
   `to the nearest codeword (bucket never reached by the walkthrough)`);
-// A code reachable ONLY from stepT is used solely as a step cell, so give it step ink even if
-// its pattern never made the SSTEPS list -- that list is capped by frequency and needs a
-// full-height column, so shapes like [6,8,8,8] and [0,5,5,5] fell through and rendered as
-// plain background, leaving a vertical edge that occludes in one cell and not the two above
-// and below it. Free: it re-inks existing glyphs and adds no codes. Codes reachable from BOTH
-// tables cannot be fixed this way -- they would each need a duplicate, and there is no room.
-{
-  const patOf = new Map();
-  for (const [k, c] of codeOf) if (!patOf.has(c)) patOf.set(c, k.split(',').map(Number));
-  const rampCodes = new Set(rampT);
-  const stepCodes = new Set([...stepT[0], ...stepT[1], ...stepT[2]]);
-  let reinked = 0, shared = 0;
-  // Without sprites patBytes returns the same foreground ink for every pattern, so this pass
-  // would rewrite each glyph with its own bytes. Skip it rather than report a no-op as work.
-  for (const c of (SPRITES ? stepCodes : [])) {
-    if (c === SOLIDBG || c === 0) continue;
-    if (rampCodes.has(c)) { shared++; continue; }
-    if (stepInked.has(c)) continue;
-    const pat = patOf.get(c); if (!pat) continue;
-    glyphs[c] = patBytes(pat, true); reinked++;
-  }
-  // SHAREDIAG=1 ranks the shared ramp/step codes by how often each is actually DRAWN as a
-  // step, so the cost of duplicating them can be spent head-first instead of all-or-nothing.
-  if (process.env.SHAREDIAG === '1') {
-    const useAsStep = new Map();
-    for (let k = 0; k < 3; k++) for (const [slot, pat] of STEPS.assign[k]) {
-      const m = stepStats[k].get(slot); if (!m) continue;
-      let n = 0; for (const [, c] of m) n += c;
-      const code = codeFor(pat);
-      useAsStep.set(code, (useAsStep.get(code) || 0) + n);
-    }
-    const shared = [...useAsStep].filter(([c]) => rampCodes.has(c) && stepCodes.has(c))
-                                 .sort((a, b) => b[1] - a[1]);
-    const total = shared.reduce((a, [, n]) => a + n, 0);
-    console.error(`  SHAREDIAG: ${shared.length} shared codes drawn as a step ${total} times ` +
-      `across ${PFRAMES.length} sampled frames (${(total / PFRAMES.length).toFixed(2)} cells/frame)`);
-    let run = 0;
-    shared.forEach(([c, n], i) => { run += n;
-      if (i < 20 || i === shared.length - 1)
-        console.error(`    #${String(i + 1).padStart(2)} code ${String(c).padStart(3)}  ` +
-          `${String(n).padStart(5)} uses  ${(100 * n / total).toFixed(1)}%  ` +
-          `cumulative ${(100 * run / total).toFixed(1)}%`);
-    });
-  }
-  if (SPRITES) console.error(`  step ink: ${reinked} step-only codes re-inked; ${shared} shared with rampT ` +
-    `and left background (a duplicate each would cost ${shared} codes)`);
-}
 
 // ---- CELLSCAN: a dense walkthrough, to price what the sparse sampler cannot see ----
 // patternFreq samples 332 hand-chosen positions x 16 of the 256 angle bytes, and everything
@@ -1417,12 +1136,10 @@ if (process.env.CELLSCAN === '1') {
 // charset A, and charset B = every glyph flipped vertically. The raster split at the
 // horizon selects B for the bottom half, so ONE char code renders as its own mirror
 // there -- renderSym writes the identical byte to both halves and needs no flip table.
-// Charset A keeps its foreground ink, exactly like B. A version of this stripped it -- every 11
-// pair to 01 -- reasoning that an ORB can never reach above the horizon: it stands on the floor
-// and its pixel height is always under 88/dist, the wall half-height at its own range. True of
-// orbs, and wrong in general. A tall object rises above the horizon under perspective even
-// though the ceiling never does, and it would need clipping at a top step. Do not strip A again
-// for the sake of a tidier FGDBG map -- the extra black up there is the honest picture.
+// Both charsets keep bit pair 11 for wall pixels. A version of this rewrote charset A's 11
+// pairs to 01, on the theory that nothing above the horizon ever needs the foreground pair.
+// That reasoning does not generalise -- a tall object rises above the horizon under
+// perspective even though the ceiling never does -- so leave A and B identical in ink.
 const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
 for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
@@ -1546,7 +1263,6 @@ const clamp8T = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
 // wL*16 + wR, and the left level was being shifted left four times right after clampT
 // handed it over -- 8 cycles per edge cell to undo a table lookup's own output.
 const clampT16 = clampT.map(v => v << 4);
-// BLANK / SOLID are declared up where they are interned -- SOLIDBG's alias needs SOLID.
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
 const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255);
 // per cell-row: cell is fully solid when min height >= t1, fully blank when max < tb.
@@ -1572,7 +1288,7 @@ const hexArg = (n, dflt, mask) => {
 const MEASURE = flag('MEASURE');
 const SPIN = flag('SPIN');
 // Viewpoints a SPIN benchmark cycles through, one per full rotation: the start corridor, the
-// busiest cell on the map (12 orb candidates), and two rooms away from both.
+// busiest cell on the map, and two rooms away from both.
 const SPINPOS = [[1.5, 1.5], [8.5, 4.5], [12.5, 9.5], [9.5, 12.5]];     // auto-rotate, ignore input
 const NORAY = flag('NORAY');   // skip marching/subdivision
 const NOFILL = flag('NOFILL'); // skip renderSym (fill)
@@ -1622,33 +1338,13 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
 
-// DBGORB adds code ahead of this, and the diagnostic build has run into it twice -- VICE then
-// silently boots the PREVIOUS disk and you read stale numbers. Let a debug build push it up.
-// A diagnostic build adds code ahead of this and has run into it twice; the failure is silent
-// (the assembler errors, VICE boots the PREVIOUS disk, you read stale numbers off a stale
-// frame), so give those builds the extra page automatically rather than by remembering to.
-// $8600 for every build, not just the instrumented ones. orbSeam pushed the code past $8500
-// and the SPIN build -- which adds the auto-rotate hunk -- hit "* = $8500 moves backward".
-// Keeping ONE base for all configs matters beyond fitting: a measurement build has to have the
-// same table layout as the build it is measuring, or the number describes a different program.
-const RELOC = +(process.env.RELOC ??
-  (process.env.DBGORB === '1' || +(process.env.VSTEPDBG ?? 0) ? 0x8700 : 0x8600));
-// ---- the orbs ----
-// Seven size variants were authored (orb0 smallest .. orb6 largest) but only FIVE bitmaps:
-// orb5 and orb6 are orb3 and orb4 with the VIC's 2x expand bits set, so they cost no extra
-// data. Multicolor, and the colour mapping is the author's, NOT what the gmSprite header
-// comment implies -- that comment's [13]/[14]/[15] do not match this file version. Bit pair 10
-// is the body, 01 the shaded underside, 11 the highlight and the ground shadow. The shadow is
-// the useful part for us: it marks where the orb meets the floor.
-//
-// Only the BODY can vary per orb. Bit pair 10 reads $d027+n, which is per sprite, but 01 and
-// 11 read $d025/$d026, which are single registers shared by all eight. So the underside and
-// the highlight are common to every orb on screen and only the body colour is free.
-// SPRITES itself is declared up with the charset -- it decides how many codes exist.
-// SPRPRI=0 sets the initial priority byte; orbMove overwrites it every frame, so it is not an
-// A/B for occlusion. ORBMIX=0 is -- it skips repointing far cells to SOLID's twin.
-const SPRPRI = +(process.env.SPRPRI ?? 1);
-const DBGORB = flag('DBGORB');
+// Where the CPU-only tables start, and so the ceiling on how much code there may be. A build
+// that adds code ahead of this has run into it twice, and the failure is SILENT: the assembler
+// errors, VICE boots the PREVIOUS disk, and you read stale numbers off a stale frame.
+// $8600 for every build, not just the instrumented ones. Keeping ONE base for all configs
+// matters beyond fitting: a measurement build has to have the same table layout as the build
+// it is measuring, or the number describes a different program.
+const RELOC = +(process.env.RELOC ?? 0x8600);
 // NOEDGE=1: skip choosing a ramp/step piece and store SOLID at every wall-top cell. Renders
 // wrong on purpose -- it exists only to price the selection, which cannot be isolated any
 // other way (the cell COUNTS are unchanged, only the per-cell work).
@@ -1662,335 +1358,6 @@ const FLATSPAN = flag('FLATSPAN');
 // four. Renders slightly wrong; it prices the comparison half of prepCells, leaving the loop
 // overhead in place so the two can be told apart.
 const NOMINMAX = flag('NOMINMAX');
-const ORBMIX = process.env.ORBMIX !== '0';
-// ORBPRI=0/1 forces every sprite in front of / behind the walls, ignoring the depth scan.
-// Renders the two answers the scan is choosing between, so a frame can be compared against
-// both instead of guessed at.
-const ORBPRI = process.env.ORBPRI;
-// OPCONF=0 disables the conflict release in orbPaint step 2 -- the rule that lets an orb
-// through when columns inside its box were made foreground by a DIFFERENT orb. That rule is
-// the only place one orb's presence can change another's occlusion, so this flag is the A/B
-// that says whether a "second orb on screen breaks it" report is that rule or something else.
-const OPCONF = process.env.OPCONF !== '0';
-// Skip reprojecting when the viewpoint has not moved. OFF for now -- full calculations
-// whether moving or not -- because it flatters stationary frames and hides what the projection
-// actually costs. ORBSTILL=1 turns it back on.
-const ORBSTILL = process.env.ORBSTILL === '1';
-const SPRBASE = 0x2000;                 // VIC bank 0, 64-byte aligned, below screen buffer B
-// ORB4 -- the full-size, unexpanded one -- is the canonical orb, and every other size is
-// resampled from it at build time. The author's other six were a hand-picked ladder with a
-// 2:1 gap at the top; scaling gives an even progression instead, and the sizes then follow
-// from the geometry rather than from a fudge factor.
-const ORB4RAW = [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192];
-const ORBSRC12 = (() => {
-  const d = ORB4RAW, g = [];
-  for (let y = 0; y < 21; y++) { const r = [];
-    for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++) r.push((d[y * 3 + b] >> (6 - 2 * i)) & 3);
-    g.push(r); }
-  return g;
-})();
-// Scale about the DRAWN content, not the 12x21 frame it happens to sit in.
-const _cols = [...Array(12).keys()].filter(x => ORBSRC12.some(r => r[x]));
-const _rows = [...Array(21).keys()].filter(y => ORBSRC12[y].some(v => v));
-const SX0 = Math.min(..._cols), SX1 = Math.max(..._cols);
-const SY0 = Math.min(..._rows), SY1 = Math.max(..._rows);
-const SW = SX1 - SX0 + 1, SH = SY1 - SY0 + 1;
-// The art is a ball, a gap, then a ground shadow, and the two solid parts want different
-// downsampling. Find the gap so they can be scaled separately.
-const _ballEnd = (() => { for (let y = _rows[0]; y <= SY1; y++) if (!ORBSRC12[y].some(v => v)) return y - 1; return SY1; })();
-const _shadTop = (() => { for (let y = SY1; y >= SY0; y--) if (!ORBSRC12[y].some(v => v)) return y + 1; return SY0; })();
-// Area coverage with a threshold, sampled 4x4 within each destination pixel. The BALL needs a
-// true half-coverage test or its edges square off -- filling a destination pixel whenever any
-// source pixel under it is set dilates the silhouette out to its bounding box, which is what
-// made the small orbs look cuboid. The SHADOW is three rows of soft ellipse and a half-coverage
-// test erases most of it, so it gets a low threshold and keeps its width.
-const ORBTHR = +(process.env.ORBTHR ?? 0.5);
-function orbRegion(out, oy, hgt, y0, y1, w, thr) {
-  const sh = y1 - y0 + 1, N = 4, ox = (12 - w) >> 1;
-  for (let dy = 0; dy < hgt; dy++) for (let dx = 0; dx < w; dx++) {
-    const t = [0, 0, 0, 0]; let n = 0;
-    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
-      const sx = Math.floor(SX0 + SW * (dx + (i + 0.5) / N) / w);
-      const sy = Math.floor(y0 + sh * (dy + (j + 0.5) / N) / hgt);
-      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) { t[ORBSRC12[sy][sx]]++; n++; }
-    }
-    if (t[1] + t[2] + t[3] < n * thr) continue;
-    let bn = 0, v = 0; for (let k = 1; k < 4; k++) if (t[k] > bn) { bn = t[k]; v = k; }
-    out[oy + dy][ox + dx] = v;
-  }
-}
-function orbScale(w) {
-  const sc = w / SW;
-  const bh = Math.max(1, Math.round((_ballEnd - SY0 + 1) * sc));
-  const gh = Math.max(0, Math.round((_shadTop - _ballEnd - 1) * sc));
-  const sh = Math.max(1, Math.round((SY1 - _shadTop + 1) * sc));
-  const out = [...Array(21)].map(() => new Array(12).fill(0));
-  const oy = 21 - (bh + gh + sh);       // standing on the sprite's floor
-  orbRegion(out, oy, bh, SY0, _ballEnd, w, ORBTHR);
-  orbRegion(out, oy + bh + gh, sh, _shadTop, SY1, w, 0.2);
-  return out;
-}
-const NORBBM = 12;                              // one bitmap per multicolor-pixel width, 1..12
-// The widest rung must come back byte-identical to the art it was scaled from. If a change to
-// the resampler breaks that, every other rung is suspect too.
-{ const g = orbScale(SW), b = [];
-  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
-    b.push([0,1,2,3].reduce((v, i) => v | (g[y][k*4+i] << (6-2*i)), 0));
-  if (b.join() !== ORB4RAW.join()) throw new Error('orbScale does not reproduce ORB4 at full width'); }
-const ORBBM = [...Array(NORBBM)].map((_, i) => {
-  const g = orbScale(i + 1), bytes = [];
-  for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
-    bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
-  bytes.push(0);
-  return bytes;
-});
-// A variant is a bitmap plus whether the VIC doubles it. Expansion is free -- same bitmap, one
-// register bit -- so the top of the ladder costs no extra data. Doubling a bitmap narrower
-// than 7 would just duplicate an unexpanded width at half the vertical resolution, so it is
-// only used above that.
-const ORBSRC = [], ORBEXP = [], ORBWIDE = [];
-for (let w = 1; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(0); ORBWIDE.push(w * 2); }
-for (let w = 7; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(1); ORBWIDE.push(w * 4); }
-// The content is bottom-aligned in every bitmap, so the ground shadow always ends on the
-// sprite's last row and the anchor is simply the sprite's height. No per-variant table of
-// hand-measured shadow positions any more.
-const ORBANCH = ORBEXP.map(e => e ? 42 : 21);
-// The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
-// and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
-// ORBPAL=colour brings back light blue / light red / light green bodies.
-const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
-const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
-
-// Placement. Greedy over the open cells with a minimum spacing, which spreads them through
-// every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
-// candidate list to 9 -- see the visibility lists below, which are what make this affordable.
-const ORBSPACE = +(process.env.ORBSPACE ?? 2.2);
-// How far an orb can be and still make the cell's list. A full projection is ~2400 cycles
-// whether the orb ends up 48 pixels across or 4, so the tail of tiny distant dots is the
-// expensive part of being generous. 9 cells is where an orb is still a couple of pixels.
-const ORBSEE = +(process.env.ORBSEE ?? 9);
-const ORBS = [];
-for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
-  if (map[y * 16 + x]) continue;
-  const cx = x + 0.5, cy = y + 0.5;
-  if (cx < 2 && cy < 2) continue;                // not sitting on the player's start
-  if (ORBS.some(o => Math.hypot(o.x - cx, o.y - cy) < ORBSPACE)) continue;
-  ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
-}
-if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables are byte-sized`);
-
-// Per-cell candidate lists. Projecting an orb costs about a thousand cycles, so the thing that
-// decides whether many orbs are affordable at all is how few we even look at. From any cell,
-// only orbs with line of sight can possibly be on screen, and in a corridor maze that is very
-// few: mean 4.3, worst 9. Sorted by distance, so taking the first eight that project takes the
-// NEAREST eight, and assigning them to sprites in order gets the overlap priority right for
-// free -- sprite 0 draws over sprite 1.
-// ---- which walls can occlude which orb ----
-// A wall face occludes an orb only if the orb is on the FAR side of that face's plane. We
-// render camera-facing faces only, so a face that appears on screen already faces the camera;
-// if the orb is beyond it, the face is between them. That answer does not involve the camera
-// at all, so it is a constant: 66 runs x 34 orbs, computed here, one bit each.
-//
-// This replaces comparing the orb's height against the wall's. Depth comparison is per column
-// and quantised, so two neighbouring cells of one flat wall could disagree -- which is where
-// every occlusion artifact in this thing has come from. A plane test is per FACE, so every
-// cell showing that face gets the same answer by construction.
-const OCCBYTES = (nextRun + 7) >> 3;
-const orbOcc = ORBS.map(o => {
-  const m = new Array(OCCBYTES).fill(0);
-  for (let r = 1; r < nextRun; r++) {
-    const k = runPlane[r];
-    const beyond = runFace[r] === 'W' ? o.x > k : runFace[r] === 'E' ? o.x < k
-                 : runFace[r] === 'N' ? o.y > k : o.y < k;
-    if (beyond) m[r >> 3] |= 1 << (r & 7);
-  }
-  return m;
-});
-if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs = ${OCCBYTES * ORBS.length}` +
-  ` bytes; a run can occlude ${(orbOcc.reduce((a, m) =>
-    a + m.reduce((b, v) => b + v.toString(2).split('1').length - 1, 0), 0) / ORBS.length).toFixed(1)}` +
-  ` orbs on average`);
-
-const losFree = (ax, ay, bx, by) => {
-  const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
-  for (let i = 1; i < n; i++) { const t = i / n, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
-    if (map[(y | 0) * 16 + (x | 0)]) return false; }
-  return true;
-};
-const CANDBASE = RELOC + 0x1900;                 // must match the org below
-const candList = [], candLo = new Array(256).fill(0), candHi = new Array(256).fill(0),
-      candCnt = new Array(256).fill(0);
-for (let cell = 0; cell < 256; cell++) {
-  const x = cell & 15, y = cell >> 4;
-  if (map[cell]) continue;
-  const cx = x + 0.5, cy = y + 0.5;
-  // Line of sight from ANYWHERE in the cell, not just its centre. The player occupies the
-  // whole cell, and standing at one edge you can see round a corner the centre cannot -- which
-  // showed up as an orb popping in and out as you walked a corridor, present in cells 9 and 11
-  // and missing in 10. Sampling a 3x3 grid makes the list a superset of what is reachable.
-  const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
-  const vis = ORBS.map((o, i) => ({ i, d: Math.hypot(o.x - cx, o.y - cy) }))
-    .filter(o => o.d < ORBSEE &&
-      eye.some(([ex, ey]) => losFree(ex, ey, ORBS[o.i].x, ORBS[o.i].y)))
-    .sort((a, b) => a.d - b.d);
-  // FULL ADDRESS, not an offset: the 6502 loads these straight into a pointer.
-  const a = CANDBASE + candList.length;
-  candLo[cell] = a & 255; candHi[cell] = a >> 8;
-  candCnt[cell] = vis.length;
-  // Three bytes per candidate: orb index, bearing from this cell, and how far off that
-  // bearing the player may still see it. The list covers all 360 degrees but the FOV is 66,
-  // so without this test four candidates in five are fully projected only to be discarded --
-  // and a full projection is about 2000 cycles against 20 for the test.
-  // What can get BETWEEN an eye position in this cell and the orb? Asking "what runs are
-  // visible from here" was far too broad -- from most cells you can see most of the map, so
-  // it skipped almost nothing. March each eye position at the orb instead, across the orb's
-  // width, and see what is hit on the way.
-  const blockers = (o) => {
-    const out = new Set();
-    for (const [ex, ey] of eye) {
-      const vx = o.x - ex, vy = o.y - ey, L = Math.hypot(vx, vy) || 1;
-      for (const off of [-0.25, 0, 0.25]) {          // the orb has width, so sample across it
-        const tx = o.x - vy / L * off, ty = o.y + vx / L * off;
-        const dx = tx - ex, dy = ty - ey, n = Math.ceil(Math.hypot(dx, dy) * 8);
-        for (let i = 1; i < n; i++) {
-          const t = i / n, x = ex + dx * t, y = ey + dy * t;
-          const mx = x | 0, my = y | 0;
-          if (mx < 0 || my < 0 || mx > 15 || my > 15) break;
-          if (map[my * 16 + mx]) {                    // which face did we come through?
-            const px2 = ex + dx * ((i - 1) / n), py2 = ey + dy * ((i - 1) / n);
-            const t2 = (px2 | 0) !== mx ? (dx > 0 ? runW : runE) : (dy > 0 ? runN : runS);
-            out.add(t2[my * 16 + mx]); break;
-          }
-        }
-      }
-    }
-    return out;
-  };
-  for (const v of vis) {
-    const o = ORBS[v.i];
-    const brg = Math.round(Math.atan2(o.y - cy, o.x - cx) / (2 * Math.PI) * 256) & 255;
-    // Half the FOV, plus however far the bearing can swing as the player moves off the cell
-    // centre -- up to 0.71 cells away, which matters enormously for a near orb.
-    const win = Math.min(127, Math.ceil(FOV / 2 + Math.atan2(0.71, Math.max(v.d, 0.71))
-                                                  / (2 * Math.PI) * 256) + 2);
-    // Bit 7 of the window byte is spare (windows never exceed 127): set it when some run
-    // visible from this cell could occlude this orb.
-    const canOcc = [...blockers(o)].some(r => (orbOcc[v.i][r >> 3] >> (r & 7)) & 1);
-    candList.push(v.i, brg, win | (canOcc ? 0x80 : 0));
-  }
-}
-if (candList.length > 0x2300 - 0x1900) throw new Error(
-  `visibility lists are ${candList.length} bytes and would run into the step tables`);
-// ORBDIAG=1 writes every input to the occlusion decision as JSON. Occlusion questions are
-// "which run, which plane, which orb, was it culled" -- all build-time constants -- and
-// re-deriving them in a separate script is how the last analysis went wrong (it approximated
-// the projection and pointed at a viewpoint where nothing clipped at all). Dump the real ones.
-if (process.env.ORBDIAG === '1') {
-  const perCell = {};
-  for (let c = 0; c < 256; c++) {
-    if (map[c] || !candCnt[c]) continue;
-    const base = (candLo[c] | (candHi[c] << 8)) - CANDBASE;
-    perCell[`${c % 16},${c >> 4}`] = [...Array(candCnt[c])].map((_, j) => ({
-      orb: candList[base + j * 3], brg: candList[base + j * 3 + 1],
-      win: candList[base + j * 3 + 2] & 0x7f,
-      canOcc: !!(candList[base + j * 3 + 2] & 0x80),
-    }));
-  }
-  writeFileSync('orbdiag.json', JSON.stringify({
-    orbs: ORBS, runFace, runPlane, nextRun, map,
-    runW, runE, runN, runS,
-    orbOcc: orbOcc.map(m => m.map(b => b)), perCell,
-  }));
-  console.error('ORBDIAG: wrote orbdiag.json');
-}
-const _pal = [...new Set(ORBBODY)].length === 1
-  ? `all body colour ${ORBBODY[0]}`
-  : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
-if (SPRITES) console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
-  `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}; ` +
-  `${(100 * candList.filter((_, i) => i % 3 === 2 && (candList[i] & 0x80)).length /
-     (candList.length / 3)).toFixed(0)}% of candidates could be occluded from their cell`);
-// Every orb is at a cell CENTRE, and orbOne leans on it hard: the offset to an orb is an
-// integer cell difference plus a fraction that is the same for every orb in the frame, so the
-// fractional half of each product becomes a per-frame constant and the per-orb half drops from
-// a 16x8 multiply to an 8x8. If placement ever stops being cell-centred, that has to be undone.
-for (const o of ORBS) if ((o.x % 1) !== 0.5 || (o.y % 1) !== 0.5)
-  throw new Error(`orb at (${o.x},${o.y}) is not cell-centred; orbOne assumes it is`);
-const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
-
-const orbCol = ORBS.map(o => ORBBODY[o.c]);
-// h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
-// locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
-// h = 88, i.e. how big it looks one cell away.
-// The ladder has to reach its top before the orb walks off the bottom of the screen. At 34
-// the largest variant needed h > 103 while orbOne rejects h >= HMAX, so orb6 could never be
-// chosen at all -- the ladder topped out one rung short. Scaled so the top rung lands where
-// the second-from-top used to, which shifts every band down with it.
-const ORBSCALE = +(process.env.ORBSCALE ?? 49);
-// The largest h any variant can still show at: $d001 = (150 - anchor) + h must stay under 251.
-const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
-const orbVarT = [...Array(256)].map((_, h) => {
-  const want = ORBSCALE * h / 88;
-  let b = 0; for (let v = 1; v < ORBWIDE.length; v++)
-    if (Math.abs(ORBWIDE[v] - want) < Math.abs(ORBWIDE[b] - want)) b = v;   // ties keep the
-                                        // earlier (unexpanded) entry: twice the vertical detail
-  return b;
-});
-{ // which rungs can actually be reached, and at what distance each one takes over?
-  const band = [];
-  for (let v = 0; v < ORBWIDE.length; v++) {
-    const lim = 251 - (150 - ORBANCH[v]);
-    const hs = [...Array(lim).keys()].filter(h => orbVarT[h] === v);
-    band.push(hs.length ? `${ORBWIDE[v]}px@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
-      `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBWIDE[v]}px UNREACHABLE`);
-  }
-  if (SPRITES) console.error(`  orb size ladder (cells): ${band.join('  ')}`);
-}
-const orbPtrT = ORBSRC.map(b => (SPRBASE >> 6) + b);
-const orbExpT = ORBEXP.map(e => e);
-// Distance from the sprite's LEFT EDGE to the ball's centre, which is what positioning needs
-// -- not half the ball's width. orbScale centres the content in the 12-column sprite, so the
-// centre sits ~12px in whatever the ball's size; using ballWidth/2 drew small orbs up to 10px
-// right of where they belong AND shifted them on every variant change, which is the scaling
-// jump. It also put the sprite somewhere the depth scan had not tested, hence stray occlusion.
-const orbHalfT = ORBSRC.map((b, v) => {
-  const w = b + 1, ox = (12 - w) >> 1;
-  return (2 * ox + w) * (ORBEXP[v] ? 2 : 1);
-});
-// 150 - anchor: raster 50 + display row 100, less the rows from the sprite's top down to the
-// bottom of its ground shadow. Adding h to THIS cannot overflow until the orb is long gone.
-const orbYBaseT = ORBANCH.map(a => 150 - a);
-// Leading blank rows per variant, doubled when the VIC expands, and the sprite's total height.
-// The ball is bottom-aligned in every bitmap, so a small variant carries most of its 21 rows
-// blank ABOVE the ball -- up to two and a half char rows of nothing. orbSeam uses these to
-// patch only the rows an orb actually inks; using the raw sprite rectangle instead is what
-// once made seams vanish in cells with no orb near them.
-const orbBlankT = ORBSRC.map((b, v) => {
-  const bm = ORBBM[b];
-  let r = 0;
-  while (r < 21 && !bm[r * 3] && !bm[r * 3 + 1] && !bm[r * 3 + 2]) r++;
-  return r * (ORBEXP[v] ? 2 : 1);
-});
-const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
-// Half-width in LOGICAL columns, rounded UP. w>>2 truncates, so any sprite whose width is not
-// a multiple of 4 logical columns lost half a column at each edge -- and the bounding box built
-// from it then stopped one column short of the sprite's own pixels. The wall column under that
-// edge never got marked, and a one-column sliver of orb showed through a wall that was otherwise
-// clipping it correctly. Rounding up costs nothing: an over-wide box marks nothing extra, since
-// every column is still filtered through the face-plane mask.
-const orbColT = ORBWIDE.map(w => (w + 3) >> 2);
-const orbBitT = [...Array(8)].map((_, i) => 1 << i);
-// The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
-// is (ptr),y with no multiply.
-const OCCBASE = RELOC + 0x2200;   // above the visibility lists; see the org below
-const orbOccFlat = orbOcc.flat();
-const orbOccLo = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
-const orbOccHi = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
-// FGDBG=<colour> tints BACKGROUND black ($d022). Foreground black is bit pair 11 and takes its
-// colour from colour RAM, so it stays black -- which makes every cell that can clip a sprite
-// show up as the only black left on screen. The one direct way to answer "which wall pieces are
-// rendered foreground", instead of inferring it from where an orb happens to get bitten.
-const FGDBG = +(process.env.FGDBG ?? 0);
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
@@ -2048,7 +1415,8 @@ charsetB = ${hx(CHARSET_B)}
 px      = $02
 py      = $04
 pa      = $06
-rang    = $07
+; $07 is free: it was rang, the coarse byte ray angle, dead since castRay's step
+; signs moved to the fine angle.
 sdx     = $0a
 sdy     = $0b
 ddx     = $0c
@@ -2187,61 +1555,21 @@ cwB     = $c528
 cbA     = $c550                 ; ... and the solid run start, or $ff for "always redraw"
 cbB     = $c578
 faceIdT = $c400
-cellFaceT = $c4a0            ; per cell-column (40): the LAST wall run the cell shows
-cellFace2T = $c4c8           ; ... and the FIRST. A cell at a corner shows two walls with
-                                ; opposite answers, so one run per cell cannot decide it
-ocl2    = $cb93                 ; the bounding box in COLUMNS, not cells
-ocmax   = $cb94
-fgCell  = $c5a0                 ; per cell-column (40): bits 3..0 = which of the cell's four
-                                ; logical columns must be FOREGROUND (clip a sprite), bit 7 =
-                                ; some orb's bounding box covers this cell
-opsl    = $cb95
-opbn    = $cbc4                 ; index into opbuf while pass 1 walks a box
-opbuf   = $cc00                 ; per sprite slot, 12 cells each: the columns that slot needs
-                                ; foreground in each cell of its box. Pass 2 reads them back
-                                ; rather than deriving them again -- two bitmap lookups a cell
-opmn    = $cbc5                 ; lowest and highest cell any orb touched, so the code-writing
-opmx    = $cbc6                 ; sweep covers those and not all forty
-opreq   = $cbc2                 ; columns of this orb's box that must clip it, and
-opcon   = $cbc3                 ; columns made foreground that must not
-opcl    = $cb96
-opcr    = $cb97
-opbl    = $cbc0
-opbr    = $cbc1                 ; the sprite slot orbPaint has in hand
-pbb     = $cb90                 ; the columns of the cell in hand that lie inside that box
-pkm     = $cb91                 ; ... that belong to the cell's FIRST run
-pmk     = $cb92                 ; ... that this orb needs foreground
-obCL    = $cb98                 ; per sprite slot, for the second pass: cell range and
-obCR    = $cba0                 ; bounding-box edge masks, so pass 2 need not reproject
-obBL    = $cba8
-obBR    = $cbb0
-obIX    = $cbb8
-obV     = $cbd0                 ; size variant per slot, so orbSeam can find the sprite's
-                                ; leading blank rows -- obIX is the ORB index, not the variant
-osR0    = $cbd8                 ; orbSeam scratch: first and last char row an orb inks,
-osR1    = $cbd9                 ; the column being patched, and the char to patch it with
-osCol   = $cbda
-osChr   = $cbdb
-osTmp   = $cbdc
-osEnd   = $cbdd
-osRB    = $cbde
-obOcc   = $cbe0                 ; per slot: bit 7 = this orb has a possible occluder here
-ocanO   = $cbe8                 ; the same bit while the candidate list is being walked
-ocanF   = $cbe9                 ; and while orbPaint has one slot in hand
-osPtr   = $fb                   ; 2 bytes: screen row pointer
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $cbf0                 ; PLAN=2: the bucket index the code came from, and which
+bidx    = $cbf0                ; PLAN=2: the bucket index the code came from, and which
 thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
 paqL    = $cbf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
 paqH    = $cbf7
 rqL     = $cbf8                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $cbf9                 ; rqH (0..3) picks which quarter of the 1024-entry table
-rqH     = $cbfc                 ; fine-angle quarter, 0..3
+rqH     = $cbfc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+                                ; It was declared TWICE, at $cbf9 and here; the assembler takes
+                                ; the last, so $cbf9 was never the live one. Removed rather
+                                ; than left as a trap for the next reader.
 cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
 cmtmp   = $cbf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
 cmv     = $cbf5                 ; the ninth index bit -- the two columns the bucket throws away
 cqN     = $cbf3                 ; entries in the colour queue
-cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only ($fb is orbSeam's)
+cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only
 cqLo    = $cc00                 ; colour queue: address low, high, and the value to write.
 cqHi    = $cc40                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $cc80                 ; NOT double buffered, so an inline write repaints the frame
@@ -2263,74 +1591,6 @@ pfRow   = $c934
 pfDone  = $c935
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
-; orbMove's hot working set, on seamSpan's scratch -- dead by the time orbMove runs
-oaL     = $87
-oaH     = $88
-oaS     = $89
-orL     = $8c
-orH     = $8d
-o0      = $94
-o1      = $95
-o2      = $96
-ivL     = $97
-ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
-ohgt    = $9d
-omptr   = $87                    ; 2 bytes: this orb's occluder bitmap. Shares oaL/oaH,
-                                ;   which are dead once the column offset has been worked out
-ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
-; ... and the cold tail, touched once or twice each, left in absolute RAM
-ocos    = $cb00
-ocosS   = $cb01
-osin    = $cb02
-osinS   = $cb03
-fwdL    = $cb04
-fwdH    = $cb05
-rgtL    = $cb06
-rgtH    = $cb07
-ogL     = $cb08
-ogH     = $cb09
-oe      = $cb0a
-o3      = $cb0b
-ocoff   = $cb0c
-ovar    = $cb0d
-ocol    = $cb10
-ocl     = $cb12
-ocr     = $cb13
-oidx    = $cb17
-ocn3    = $cb2a
-ocn     = $cb18
-ocy     = $cb19
-onv     = $cb1a
-omEn    = $cb1b
-omXX    = $cb1c
-omYY    = $cb1d
-omPri   = $cb1e
-omX8    = $cb1f
-omBit   = $cb20
-obX     = $cb30
-obY     = $cb38
-obP     = $cb40
-obC     = $cb48                  ; per-sprite state, flushed to the VIC in the border
-opx     = $cb5c                  ; the viewpoint orbMove last projected from
-opy     = $cb5e
-opa     = $cb60
-ofx     = $cb64
-ofy     = $cb65
-kxc     = $cb66
-kxs     = $cb67
-kyc     = $cb68
-kys     = $cb69
-kfL     = $cb6a
-kfH     = $cb6b
-krL     = $cb6c
-krH     = $cb6d
-oix     = $cb6e
-oiy     = $cb6f
-oax     = $cb70
-oay     = $cb71
-oixS    = $cb72
-oiyS    = $cb73
-odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -2359,8 +1619,8 @@ entry:
         sta $d018
         lda #$01
         sta $d021               ; 00 = white  (ceiling / floor)
-        lda #${hx(FGDBG)}
-        sta $d022               ; 01 = black  (readout glyphs only; walls moved to 11)
+        lda #$00
+        sta $d022               ; 01 = black  (readout glyphs only; walls are 11, via colour RAM)
         lda #${hx(SEAMCOL)}
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry: bit pairs 00
@@ -2372,10 +1632,10 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
-        ldx #$00                ; no run cached for either buffer yet. NOT in the sprite
-        lda #$ff                ; setup: SPRITES=0 builds render too, and an uninitialised
-rfCz:   sta cwA,x               ; cache byte that happens to match rb or rs leaves a column
-        inx                     ; never drawn at all
+        ldx #$00                ; no run cached for either buffer yet -- an uninitialised
+        lda #$ff                ; cache byte that happens to match rb or rs would leave a
+rfCz:   sta cwA,x               ; column never drawn at all
+        inx
         bne rfCz
         lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
@@ -2399,31 +1659,6 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta cqN                 ; of 64 or more makes every push hit the full check silently,
                                 ; and the first flush walks 64 garbage pointers writing colour
                                 ; bytes wherever they happen to point.
-` : ''}${SPRITES ? `        ; ---- orb sprite: static setup. Position and shape change per frame in orbMove.
-        lda #$00
-        sta $d015               ; nothing visible until orbMove has decided what is
-        lda pa
-        eor #$80
-        sta opa                 ; cannot match pa, so the first frame never takes the still path
-        lda #$ff
-        sta $d01c               ; ALL eight in multicolor -- orbMove hands out slots as it
-                                ; finds visible orbs, so any of them can be in use. $d015 is
-                                ; built per frame and not set here.
-        lda #${SPRPRI}
-        sta $d01b               ; sprite 0 BEHIND foreground. Walls are bit pair 11 and seams
-                                ; 10, both foreground, so the VIC clips the orb against the
-                                ; scene per pixel and orbMove does not test occlusion at all.
-        sta $d017
-        sta $d01d
-        lda #${hx(ORBUNDER)}
-        sta $d025               ; bit pair 01 = blue, the shaded underside
-        lda #${hx(ORBHILITE)}
-        sta $d026               ; bit pair 11 = grey 3, highlight and ground shadow
-        lda #$0e
-        sta $d027               ; bit pair 10 = light blue, the body
-        lda #${SPRBASE >> 6}
-        sta $07f8               ; the pointer lives in the SCREEN, so both buffers need it
-        sta $27f8
 ` : ''}        lda #${hx(PX & 255)}
         sta px
         lda #${hx(PX >> 8)}
@@ -2483,13 +1718,8 @@ ${NORAY ? '        jmp subDn' : ''}
         ; costs with its dex and bpl, and 80 bytes of table twice a frame is enough for
         ; that to matter. 240 bytes of code for ~700 cycles.
         lda #$00
-${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS ? `${SPRITES ? `
-        lda #$00
-${[...Array(NCELL)].map((_, i) => `        sta fgCell+${i}`).join('\n')}
-        lda #${hx(SOLIDBG)}     ; and every wall back to BACKGROUND black -- a sprite passes in
-                                ; front of it unless an orb asks for the column to clip` : `
-        lda #${hx(SOLIDBG)}     ; and every wall back to a plain fill. fgCell is not cleared:
-                                ; only orbPaint writes it, and there are no orbs`}
+${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS ? `
+        lda #${hx(SOLID)}       ; and every wall column back to a plain fill
 ${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}` : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
         asl
@@ -2576,10 +1806,8 @@ ${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no
         ; meet. There the two walls sit at the same depth, so it is black meeting black and the
         ; line is the only thing dividing them. A CONVEX corner -- the end of a receding wall,
         ; the kind you cannot see around -- is already drawn by the silhouette, which steps 20+
-        ; rows at that column, and its line lands in exactly the cell where an orb needs
-        ; per-column occlusion. A seam cell cannot express that: it is all-clipping or all-not.
-        ; Leaving convex corners seam-free makes them plain two-black SOLID splits, which are
-        ; per-column and exact.
+        ; rows at that column. The grey line adds nothing to a boundary that emphatic, so
+        ; convex corners are left seam-free and render as plain two-black steps.
         lda spanL
         tax
         lda faceIdT,x
@@ -2595,12 +1823,12 @@ subCv:  lda spanR
         lsr
         tax
         lda seamT,x
-        cmp #${hx(SOLIDBG)}     ; still a plain fill? the default is BACKGROUND black now
+        cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
         bne subCn               ; a line is already claimed in this cell; one per char code
         lda spanR
         and #$03
         clc
-        adc #${hx(SEAMBG0)}
+        adc #${hx(SEAM0)}
         sta seamT,x
 subCn:` : ''}
         jsr subBnd              ; a face starts here: remember it as a span delimiter
@@ -2702,51 +1930,7 @@ subFlush:                       ; interpolate + seam one maximal face
         lda spanR
         cmp spanL
         bcc subFDn              ; empty
-${SPRITES ? `        ; ---- which wall faces does each CELL show? ----
-        ; A span has one face at both ends by construction, so filling per cell here costs at
-        ; most 40 stores a frame -- against 160 if faceIdT were filled per column, which it is
-        ; not (castRay writes it only where it actually marched).
-        ;
-        ; TWO runs per cell, not one. A cell is 4 logical columns, and at a corner those 4
-        ; columns can belong to two different walls whose answers are OPPOSITE: the near wall
-        ; must clip a sprite and the far wall must not. Recording only the later run made the
-        ; whole cell answer for the near wall, so a far wall's body and seam inside the same
-        ; cell went on cutting into an orb standing in front of them.
-        ;
-        ; No per-frame clear and no assumption about span order is needed. Only the FIRST cell
-        ; of a span can be shared with the span before it, and that span already wrote this
-        ; cell as one of its interior cells -- so the first run is already there, and this span
-        ; must only update the last. Every other cell of the span belongs to it entirely.
-        lda spanL
-        lsr
-        lsr
-        tax                     ; cl = first cell
-        lda spanR
-        lsr
-        lsr
-        sta tmp2                ; cr = last cell
-        ldy spanL
-        lda faceIdT,y           ; the span's face: both ends agree, that is why it merged
-        tay                     ; Y holds the run for the rest of this
-        lda spanL
-        and #$03
-        bne cfL1                ; starts mid-cell: the previous span owns this cell's first run
-        tya
-        sta cellFace2T,x
-cfL1:   tya
-        sta cellFaceT,x
-        cpx tmp2
-        bcs cfDn                ; the span lies within one cell
-cfLp:   inx
-        tya
-        sta cellFaceT,x
-        sta cellFace2T,x        ; wholly inside this span: first and last are the same run
-        cpx tmp2
-        bcc cfLp
-cfDn:
-` : `        ; cellFaceT/cellFace2T are not built: orbPaint was their only reader, so with no
-        ; sprites this whole per-cell fill is dead work in the subdivision's hot path.
-`}${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr interpSpan
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr interpSpan
 ${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #8\n        jsr pfTick              ; interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}${PROFILE && !PROFILE1 && SEAMS ? '        ldx #9\n        jsr pfTick              ; seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
@@ -2758,9 +1942,7 @@ subBnd: ldx nbnd                ; remember a column where a new face/saturation 
 subBDn: rts
 
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? `        jsr orbMove             ; BEFORE renderSym: it decides which columns are
-        jsr orbPaint            ; foreground, and renderSym draws them that way first time
-` : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && SEAMS ? '\n        jsr orbSeam             ; take the panel line out of the cells an orb covers' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
         jsr drawDbg
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -2813,7 +1995,7 @@ cqF1:   dex
         bne cqF1
 cqDone: lda #$00
         sta cqN
-` : ''}${SPRITES ? '        jsr osFlush             ; sprite registers, now that the beam is out of the way\n' : ''}        inc iterLo
+` : ''}        inc iterLo
         bne mloop
         inc iterHi
         jmp mloop
@@ -3150,40 +2332,7 @@ rcHave: sta cqtmp
         sbc erow
         tay
         jsr cqPush
-` : ''}${SPRITES && !STEPSTATIC ? `        ; A vertical edge is the piece an orb meets at a corner, and it obeys the same rule
-        ; as the wall body: background unless a column of this cell must clip something. Its
-        ; ink is on the wall's side of the cell and nowhere else, so "any column" is exact
-        ; here -- the empty side has no pixels to classify. Ramps are never foreground.
-        cmp #${hx(VSTEP0)}
-        bcc rfSt0
-        cmp #${hx(VSTEP0 + VSTEPN)}
-        bcs rfSt0
-${STEPSTATIC ? `        ; STEPSTATIC: the glyph already inks each column by its own fill, so there is
-        ; nothing to choose per frame and no twin to swap in.
-` : `        ; Three forms, and the mask picks between them. This used to test fgCell, branch away
-        ; on nonzero, then test the SAME unchanged fgCell again -- so the split lookup below
-        ; could never be reached and all 35 twins were dead. Both branches must come off ONE
-        ; read, with the mixed case falling through to the split.
-        ldy colc
-        lda fgCell,y
-        and #$0f
-        beq rfStBg              ; nothing under this cell must clip: its background twin
-        cmp #$0f
-        beq rfSt0               ; every column must clip: the base code IS the foreground form
-        ; Mixed -- the cell is part near wall, part far, and they disagree. That is exactly what
-        ; the split twin says: a priority edge down the run boundary inside the cell, both sides
-        ; the same black. Only where the twin carries this pattern's own ink (see SPLITSUB), so
-        ; the wall never changes shape as an orb passes.
-        ldy ecode
-        lda splitT,y
-        beq rfSt0               ; no twin for this pattern: keep the foreground form, since a
-        sta ecode               ; wall that should hide an orb shows worse than the reverse
-        bne rfSt0               ; always -- a splitT entry of 0 was rejected above
-rfStBg: lda ecode
-        clc
-        adc #${hx(VSTEPN)}
-        sta ecode
-`}rfSt0:  ` : ''}lda erow
+` : ''}lda erow
         clc
         adc bufOff
         tay
@@ -3199,9 +2348,9 @@ rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
 rfSolid:${SEAMS ? `lda seamT,x
-        cmp #${hx(SOLIDBG)}     ; the default now that walls start as background black. Anything
-        bne rfSlSm              ; else -- a seam, or a column an orb asked to clip -- can change
-        ` : ''}lda rsv           ; without rs moving, so it is never cached
+        cmp #${hx(SOLID)}       ; the frame's default. A seam variant can change without rs
+        bne rfSlSm              ; moving, so a seam column is never cached
+        ` : ''}lda rsv
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
@@ -3906,12 +3055,12 @@ ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
         lsr
         tax                     ; cell column
         lda seamT,x
-        cmp #${hx(SOLIDBG)}     ; still a plain fill? the default is BACKGROUND black now
+        cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
         bne ssOne               ; already spoken for: one line per char code
         tya
         and #$03
         clc
-        adc #${hx(SEAMBG0)}
+        adc #${hx(SEAM0)}
         sta seamT,x
 ssOne:  rts
 
@@ -4847,7 +3996,7 @@ tbTabT: !byte ${tbTab.join(',')}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-${SPRITES ? `        * = ${hx16(SPRBASE)}\norbBM:  ${ORBBM.map(b => '!byte ' + b.join(',')).join('\n        ')}\n` : ''}        * = charset
+        * = charset
 ${chunk(fontA, 32)}
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
@@ -4876,1115 +4025,6 @@ ${edgeSrc('edB', SCR_B)}
 chainEnd:
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
-${PROFILE ? '' : ''}${SPRITES ? `
-
-; ---- orbMove: place every visible orb ----
-; Once a frame. Written for clarity over cycles and keeping its working set in absolute RAM
-; where it can, since 50-odd absolute accesses cost 50 cycles and buy back the whole seam
-; scratch. The hot half lives in that scratch, which is dead by the time this runs.
-;
-; Camera space: forward = dx*cos(pa) + dy*sin(pa), right = dy*cos(pa) - dx*sin(pa). "right" is
-; the direction of INCREASING column, which is d/dpa of the ray direction = (-sin, cos). Map y
-; runs downward, matching the DDA, so no handedness fixup is needed anywhere here.
-;
-; The candidate list for the player's cell is pre-sorted by distance, so the first eight orbs
-; that project are the NEAREST eight and assigning them to sprites in order also gets the
-; overlap priority right -- sprite 0 draws over sprite 1.
-orbMove:
-        ; ---- nothing moved? then nothing projects differently ----
-        ; Six orbs on screen is about 18,700 cycles, and standing still it is 18,700 cycles
-        ; spent arriving at last frame's answer. The sprite registers already hold it. All that
-        ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
-        ; rewrites the screen every frame and puts plain SOLID back.
-${ORBSTILL ? '' : '        jmp obMoved             ; DEADCODE-OK: ORBSTILL=0 skips the still-frame test on purpose'}
-        lda px
-        cmp opx
-        bne obMoved
-        lda px+1
-        cmp opx+1
-        bne obMoved
-        lda py
-        cmp opy
-        bne obMoved
-        lda py+1
-        cmp opy+1
-        bne obMoved
-        lda pa
-        cmp opa
-        bne obMoved
-        rts                     ; a still frame. The slot data from the last one still stands
-                                ; and orbPaint runs unconditionally, so the walls come out
-                                ; painted the same way without reprojecting anything.
-obMoved:lda px
-        sta opx
-        lda px+1
-        sta opx+1
-        lda py
-        sta opy
-        lda py+1
-        sta opy+1
-        lda pa
-        sta opa
-        ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
-        lda absCosT,x
-        sta ocos
-        lda absSinT,x
-        sta osin
-        lda #$00                ; sin(a) < 0 exactly when bit 7 of a is set, and cos(a) < 0
-        sta osinS               ; when bit 7 of a+64 is -- no sign tables needed
-        lda pa
-        bpl oss
-        lda #$ff
-        sta osinS
-oss:    lda #$00
-        sta ocosS
-        lda pa
-        clc
-        adc #$40
-        bpl ocs
-        lda #$ff
-        sta ocosS
-ocs:    ; ---- the half of every product that all orbs share ----
-        ; dx = (orbCell - playerCell) + (0.5 - playerFraction). The right-hand term is the same
-        ; for every orb, so (that * cos) and (that * sin) are frame constants. Folding them into
-        ; one addend per axis pair leaves the per-orb work as four 8x8 multiplies.
-        ; 0.5 - playerFraction, as a signed byte. The range is -127..+128 and +128 does not
-        ; fit -- it reads as -128, flipping the sign of every term derived from it. That
-        ; happens for exactly one value, a fraction of zero, which is the player sitting
-        ; precisely on a cell boundary: the orbs lurch for a single frame while crossing and
-        ; snap back once past. Clamp to +127; the 1/256 of a cell it costs is invisible.
-        sec
-        lda #$80
-        sbc px
-        cmp #$80
-        bne ofxOk
-        lda #$7f
-ofxOk:  sta ofx
-        sec
-        lda #$80
-        sbc py
-        cmp #$80
-        bne ofyOk
-        lda #$7f
-ofyOk:  sta ofy
-        lda ofx
-        ldx ocos
-        ldy ocosS
-        jsr oFrac
-        sta kxc
-        lda ofx
-        ldx osin
-        ldy osinS
-        jsr oFrac
-        sta kxs
-        lda ofy
-        ldx ocos
-        ldy ocosS
-        jsr oFrac
-        sta kyc
-        lda ofy
-        ldx osin
-        ldy osinS
-        jsr oFrac
-        sta kys
-        ; forward picks up kxc + kys, right picks up kyc - kxs. Both are sums of SIGNED
-        ; bytes and both need a real 16-bit add: sign-extend each operand into its own high
-        ; byte and let adc/sbc carry between them. Sign-extending and then discarding the
-        ; carry -- which is what this did -- is wrong by 256 whenever the low bytes carry,
-        ; and since these terms come from the player's sub-cell position the error moves as
-        ; you walk. It reads as the orbs drifting off the map.
-        lda kxc
-        jsr kSgn
-        sta tmp
-        lda kys
-        jsr kSgn
-        sta tmp2
-        clc
-        lda kxc
-        adc kys
-        sta kfL
-        lda tmp
-        adc tmp2
-        sta kfH
-        lda kyc
-        jsr kSgn
-        sta tmp
-        lda kxs
-        jsr kSgn
-        sta tmp2
-        sec
-        lda kyc
-        sbc kxs
-        sta krL
-        lda tmp
-        sbc tmp2
-        sta krH
-        lda #$00                ; the per-sprite bit registers are built up a bit at a time and
-        sta omEn                ; written once, so an unused slot is simply never set
-        sta omXX
-        sta omYY
-        sta omPri
-        sta omX8
-        sta onv
-        lda py+1                ; which cell is the player standing in?
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc px+1
-        tax
-        lda candCntT,x
-        beq obEnd
-        sta ocn
-        asl                     ; three bytes per record
-        clc
-        adc ocn
-        sta ocn3
-${DBGORB ? '        lda #$01\n' : ''}        lda candLoT,x
-        sta ocptr
-        lda candHiT,x
-        sta ocptr+1
-        lda #$00
-        sta ocy
-        
-obLoop: ldy ocy
-        lda (ocptr),y
-        sta oidx
-        iny
-        lda pa                  ; is the orb anywhere near the way we are facing? The list is
-        sec                     ; all-round, the view is 66 degrees, and a full projection
-        sbc (ocptr),y           ; costs a hundred times what this compare does
-        bpl obPos
-        eor #$ff
-        clc
-        adc #$01
-obPos:  iny
-        sta tmp                 ; how far off the bearing we are
-        lda (ocptr),y
-        sta ocanO               ; bit 7: can ANY run reachable from this cell occlude this orb?
-                                ; blockers() answered that at build time and it was being
-                                ; thrown away here, so every projected orb paid for the full
-                                ; per-cell mask even when the answer was always no
-        and #$7f
-        cmp tmp
-        bcc obNext              ; outside the window: not on screen
-        jsr orbOne
-obNext: lda ocy
-        clc
-        adc #$03
-        sta ocy
-        lda onv
-        cmp #$08                ; eight hardware sprites, and the list is nearest-first
-        bcs obEnd
-        lda ocy
-        cmp ocn3
-        bcc obLoop
-obEnd:  ${DBGORB ? `lda py+1
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc px+1
-        sta odb
-        lda kxc
-        sta odb+1
-        lda kxs
-        sta odb+2
-        lda kyc
-        sta odb+3
-        lda kys
-        sta odb+4
-        lda onv
-        sta odb+5
-        ldx #$00
-        ldy #$00
-odbLp:  lda odb,x
-        lsr
-        lsr
-        lsr
-        lsr
-        clc
-        adc #${hx(GLYPH0)}
-        sta $0478,y
-        sta $2478,y
-        iny
-        lda odb,x
-        and #$0f
-        clc
-        adc #${hx(GLYPH0)}
-        sta $0478,y
-        sta $2478,y
-        iny
-        inx
-        cpx #$06
-        bne odbLp
-        ` : ''}rts
-
-; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
-; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
-; the raster is inside the visible area lets the VIC fetch half of one frame's sprite and half
-; of the next -- a sheared orb, or one that pops to somewhere else for a single frame. Called
-; after the raster wait and the buffer flip, when the beam is past line 250 and no sprite is
-; being fetched. Costs about 30 cycles per visible orb, which is nothing next to the ~2400 it
-; took to work out where the orb goes.
-osFlush:ldx onv
-        beq osBits
-osLp:   dex
-        txa
-        asl
-        tay
-        lda obX,x
-        sta $d000,y
-        lda obY,x
-        sta $d001,y
-        lda obP,x
-        sta $07f8,x             ; the pointer lives in the SCREEN, so both buffers need it
-        sta $27f8,x
-        lda obC,x
-        sta $d027,x
-        cpx #$00
-        bne osLp
-osBits: lda omEn
-        sta $d015
-        lda omXX
-        sta $d01d
-        lda omYY
-        sta $d017
-        lda ${ORBPRI === undefined ? 'omPri' : '#$0' + (ORBPRI === '1' ? 'ff' : '0')}
-        sta $d01b
-        lda omX8
-        sta $d010
-        rts
-
-; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
-orbOne: ldx oidx
-        sec                     ; Ix, Iy = orb cell - player cell, -15..15
-        lda orbXCT,x
-        sbc px+1
-        sta oix
-        sec
-        lda orbYCT,x
-        sbc py+1
-        sta oiy
-        ldy #$00                ; magnitudes and signs, so the products can be unsigned
-        lda oix
-        bpl oipx
-        eor #$ff
-        clc
-        adc #$01
-        ldy #$ff
-oipx:   sta oax
-        sty oixS
-        ldy #$00
-        lda oiy
-        bpl oipy
-        eor #$ff
-        clc
-        adc #$01
-        ldy #$ff
-oipy:   sta oay
-        sty oiyS
-        ; forward = Ix*cos + Iy*sin + kf
-        lda oax
-        ldx ocos
-        lda oixS
-        eor ocosS
-        ldy oax
-        jsr oTerm
-        lda orL
-        sta fwdL
-        lda orH
-        sta fwdH
-        lda oiyS
-        eor osinS
-        ldx osin
-        ldy oay
-        jsr oTerm
-        clc
-        lda fwdL
-        adc orL
-        sta fwdL
-        lda fwdH
-        adc orH
-        sta fwdH
-        clc
-        lda fwdL
-        adc kfL
-        sta fwdL
-        lda fwdH
-        adc kfH
-        sta fwdH
-        lda fwdH                ; behind the camera, or close enough to be inside us. Tested
-        bmi orbNo               ; HERE, before "right" costs two more products: at any given
-        bne ofwOk               ; moment most of the world is behind you
-        lda fwdL
-        cmp #$40
-        bcc orbNo
-ofwOk:  ; right = Iy*cos - Ix*sin + kr
-        lda oiyS
-        eor ocosS
-        ldx ocos
-        ldy oay
-        jsr oTerm
-        lda orL
-        sta rgtL
-        lda orH
-        sta rgtH
-        lda oixS
-        eor osinS
-        ldx osin
-        ldy oax
-        jsr oTerm
-        sec
-        lda rgtL
-        sbc orL
-        sta rgtL
-        lda rgtH
-        sbc orH
-        sta rgtH
-        clc
-        lda rgtL
-        adc krL
-        sta rgtL
-        lda rgtH
-        adc krH
-        sta rgtH
-        ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
-        ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
-        ; of forward costs under 0.4% -- less than half a column at the screen edge.
-        lda fwdL
-        asl
-        sta ogL
-        lda fwdH
-        rol
-        sta ogH
-        lda #$00
-        sta oe
-onLp:   lda ogH
-        beq onDn
-        lsr ogH
-        ror ogL
-        inc oe
-        jmp onLp
-onDn:   ldx ogL
-        lda recipLoT,x
-        sta ivL
-        lda recipHiT,x
-        sta ivH
-        lda #$05
-        sec
-        sbc oe
-        beq ivDn
-        bmi ivRt
-        tax
-ivLp:   asl ivL
-        rol ivH
-        dex
-        bne ivLp
-        jmp ivDn
-ivRt:   tax                     ; e > 5: shift the other way instead
-ivRl:   lsr ivH
-        ror ivL
-        inx
-        bne ivRl
-ivDn:   lda #$0b                ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
-        sta mq
-        lda ivL
-        jsr mul8
-        lda plo
-        sta o0
-        lda phi
-        sta o1
-        lda #$00
-        sta o2
-        lda #$0b
-        sta mq
-        lda ivH
-        jsr mul8
-        clc
-        lda o1
-        adc plo
-        sta o1
-        lda o2
-        adc phi
-        sta o2
-        lsr o2
-        ror o1
-        lda o2
-        beq ohOk
-        lda #$ff
-        sta o1
-ohOk:   lda o1
-        sta ohgt
-        ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so the
-        ; ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit shift
-        ; that computing right/forward separately would need is gone entirely.
-        lda rgtL
-        sta oaL
-        lda rgtH
-        sta oaH
-        jsr oabs
-        lda ohgt
-        sta mq
-        lda oaL
-        jsr mul8
-        lda plo
-        sta o0
-        lda phi
-        sta o1
-        lda ohgt
-        sta mq
-        lda oaH
-        jsr mul8
-        clc
-        lda o1
-        adc plo
-        sta o1
-        lda phi
-        adc #$00
-        bne orbNo               ; |right|*h past 65535 is far outside the FOV
-        lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
-        sta mq                  ; shift of it is just (b2 << 1) | (b1 >> 7) -- no shift loop.
-        lda o0
-        jsr mul8
-        lda phi
-        sta o2
-        lda #179
-        sta mq
-        lda o1
-        jsr mul8
-        clc
-        lda o2
-        adc plo
-        sta o2
-        lda phi
-        adc #$00
-        asl o2
-        rol
-        bcs orbNo               ; past 255 columns off centre: nowhere near the screen
-        sta ocoff
-        ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
-        lda orbVarT,x
-        sta ovar
-        lda oaS                 ; --- centre column ---
-        bmi ocN
-        clc
-        lda #80
-        adc ocoff
-        jmp ocS
-ocN:    sec
-        lda #80
-        sbc ocoff
-ocS:    sta ocol
-        lda ocoff               ; --- screen X: 24 + 2*column - halfWidth, signed 16-bit ---
-        asl
-        sta o0
-        lda #$00
-        rol
-        sta o1
-        lda oaS
-        bmi oxNeg
-        clc
-        lda o0
-        adc #${24 + 160}
-        sta o0
-        lda o1
-        adc #$00
-        sta o1
-        jmp oxDn
-oxNeg:  sec
-        lda #${24 + 160}
-        sbc o0
-        sta o0
-        lda #$00
-        sbc o1
-        sta o1
-oxDn:   ldx ovar
-        sec
-        lda o0
-        sbc orbHalfT,x
-        sta o0
-        lda o1
-        sbc #$00
-        sta o1
-        bmi orbNo               ; fully off the left edge
-        cmp #$02
-        bcs orbNo               ; past x = 512, fully off the right
-        ; --- screen Y: ground shadow on the floor line, 100 + h ---
-        ; $d001 = 150 + h - anchor, but computed as (150 - anchor) + h. Adding 150 first
-        ; carries out of a byte once h passes 105, which used to cap how close an orb could
-        ; get -- it blinked out at 0.84 cells instead of sliding off the bottom. Folding the
-        ; anchor into the constant keeps the sum in range all the way down to 0.62 cells,
-        ; which is past the point where the whole sprite is below the last visible line.
-        ldx ovar
-        lda orbYBaseT,x
-        clc
-        adc ohgt
-        bcs orbNo               ; far below the screen
-        cmp #251
-        bcs orbNo               ; top of the sprite is past the last visible raster line
-        sta o3
-        ; ---- occlusion: is the orb beyond the faces it overlaps? ----
-        ; A face occludes the orb only if the orb lies on the FAR side of its plane. We render
-        ; camera-facing faces only, so anything on screen already faces the camera; if the orb
-        ; is beyond it, the face is between them. That answer never involves the camera, so it
-        ; is precomputed at build time: one bit per (orb, run).
-        ;
-        ; Per FACE, not per column, and that is the whole point. Comparing the orb's height
-        ; against the wall's was per column and quantised, so two cells of one flat wall could
-        ; disagree -- and every occlusion artifact in this thing has been exactly that
-        ; disagreement showing up as a sliver of orb through a wall or a slice cut out of one.
-        ; ---- record what this orb needs, for the paint pass below ----
-        ; Nothing is decided here and nothing is written to the screen. The orb states which
-        ; columns under it must clip it; orbPaint merges every orb's statement and renderSym
-        ; then draws each column that way the first time. There is no second pass over the
-        ; walls at all, which is what removes every artifact that came from editing them.
-        ldx ovar                ; half the orb's width, in logical columns
-        lda orbColT,x
-        sta o2
-        lda ocol                ; the bounding box, in logical columns
-        sec
-        sbc o2
-        bcs opBL1
-        lda #$00
-opBL1:  cmp #${hx(NLOG)}        ; and clamp the TOP end too. Only the underflow was caught, so
-        bcc opBL2               ; an orb whose centre projects past the right edge gave a box
-        lda #${hx(NLOG - 1)}    ; starting past column 159 -- cell 40 or beyond, which walks
-opBL2:  sta ocl2                ; off the end of fgCell and seamT and writes past the screen
-        lsr
-        lsr
-        sta ocl
-        lda ocol
-        clc
-        adc o2
-        bcc opBR1
-        lda #159
-opBR1:  cmp #160
-        bcc opBR2
-        lda #159
-opBR2:  sta ocmax
-        lsr
-        lsr
-        cmp ocl
-        bcs opBR3
-        lda ocl
-opBR3:  sta ocr
-opDone:
-        ; --- take a sprite slot ---
-        ldx onv
-        lda orbBitT,x
-        sta omBit
-        ora omEn
-        sta omEn
-        ldy ovar
-        lda orbPtrT,y
-        sta obP,x               ; buffered, not written: see osFlush
-        ldy oidx
-        lda orbColT2,y
-        sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
-        ldy ovar
-        lda orbExpT,y
-        beq oNoX
-        lda omBit
-        ora omXX
-        sta omXX
-        lda omBit
-        ora omYY
-        sta omYY
-oNoX:   lda o0
-        and #$fe                ; snap X to the MULTICOLOR grid. A multicolor char pixel is two
-                                ; hires pixels aligned to the character (always even, since
-                                ; sprite X 24 is screen x 0); a multicolor SPRITE pixel is also
-                                ; two, but aligned to the sprite's own X. At an odd X the two
-                                ; grids are half a pixel out of phase, and since the VIC decides
-                                ; priority per HIRES pixel, one half of a sprite pixel lands on
-                                ; foreground and clips while its partner lands on background and
-                                ; draws -- a one-hires-pixel sliver of orb peeking past a wall
-                                ; edge that is otherwise clipping it correctly. Costs 2 cycles
-                                ; and quantises horizontal motion to 2px.
-        sta obX,x
-        lda o3
-        sta obY,x
-        lda o1
-        beq oNoM
-        lda omBit
-        ora omX8
-        sta omX8
-oNoM:   ; remember what this orb asked for; the second pass compares it against what the
-        ; scene actually ended up painting, which is the only place a conflict can show up
-        ldx onv
-        lda oidx
-        sta obIX,x
-        lda ovar
-        sta obV,x
-        lda ocanO
-        sta obOcc,x
-        lda ocl
-        sta obCL,x
-        lda ocr
-        sta obCR,x
-        lda ocl2
-        and #$03
-        tay
-        lda bbLT,y              ; the columns of the leftmost cell inside the box
-        sta obBL,x
-        lda ocmax
-        and #$03
-        tay
-        lda bbRT,y              ; ... and of the rightmost
-        sta obBR,x
-        inc onv
-orbYes: rts
-orbNo:  rts
-; ---- orbPaint: turn what the orbs asked for into what the walls will be drawn as ----
-;
-; Three steps, in order, and no screen memory is touched by any of them.
-;   1. every orb marks the cells its bounding box covers, and within those cells the COLUMNS
-;      whose wall must clip it. Columns, not cells: a cell at a corner shows two walls, and the
-;      four bit pairs of a char can say something different about each of its four columns.
-;   2. each orb's priority bit. It is "behind foreground" unless some column inside its box came
-;      out foreground that this orb did NOT ask for -- meaning another, nearer orb needed it. The
-;      hardware offers one shared foreground set and one bit per sprite, so that case cannot be
-;      expressed; letting the orb through reads far better than a bite out of it.
-;   3. one char code per covered cell, straight from the four-bit mask, which already names the
-;      split boundary. Cells no orb covers keep whatever the renderer chose, seam and all.
-orbPaint:
-        lda #${hx(NCELL - 1)}
-        sta opmn
-        lda #$00
-        sta opmx
-        lda onv
-        beq opAllD              ; nothing on screen: the walls stay background and nothing clips
-        ldx #$00
-opAll:  jsr opSlot              ; load slot X's box and occluder bitmap
-        ; First just count. An orb every column of whose box is occluded cannot be seen at all,
-        ; and an orb nobody can see must not get a vote: its demands would make walls foreground
-        ; for no visible gain and force VISIBLE orbs into the conflict rule below. It does not
-        ; even need a sprite -- dropping it is both cheaper and exactly what it looks like.
-        lda #$00
-        sta opreq
-        sta opcon               ; reused here as the box's own column count
-        ldy opsl
-        lda opbBaseT,y
-        sta opbn                ; this slot's twelve bytes of opbuf
-        ldx opcl
-opA0:   jsr opCell
-        ldy opbn
-        sta opbuf,y             ; keep it: recomputing costs two bitmap lookups a cell
-        tay
-        lda popcT,y
-        clc
-        adc opreq
-        sta opreq
-        ldy pbb
-        lda popcT,y
-        clc
-        adc opcon
-        sta opcon
-        inx
-        ldy opbn
-        iny
-        sty opbn
-        cpx opcr
-        bcc opA0
-        beq opA0
-        lda opreq
-        cmp opcon
-        bcc opA1r               ; something of it shows: let it speak
-        ldx opsl                ; wholly hidden: take its sprite away and move on
-        lda orbBitT,x
-        eor #$ff
-        and omEn
-        sta omEn
-        jmp opANx
-        ; The branch above MUST name this line, not opA1s. Landing on opA1s skips both stores
-        ; and leaves opmn/opmx at their initial 39/0, so step 3's "ldx opmx / cpx opmn" fails
-        ; on the first compare and no cell is ever given a foreground code -- rule 3 dead for
-        ; every orb in every frame, while wholly-hidden orbs still vanish via the cull above,
-        ; which is what made it read as "occlusion works sometimes".
-opA1r:  lda opcl                ; remember how far the code sweep has to reach
-        cmp opmn
-        bcs opA1m
-        sta opmn
-opA1m:  lda opcr
-        cmp opmx
-        bcc opA1s
-        sta opmx
-opA1s:  ldx opcl
-        ldy opsl
-        lda opbBaseT,y
-        tay
-opA1:   lda opbuf,y
-        ora #$80                ; bit 7 = this cell lies inside SOME orb's box, whether or not
-                                ; that orb needs any of its columns to clip. The seam pass
-                                ; below needs plain OVERLAP, which the four column bits cannot
-                                ; express: a cell an orb merely covers has a mask of zero.
-        ora fgCell,x
-        sta fgCell,x
-        iny
-        inx
-        cpx opcr
-        bcc opA1
-        beq opA1
-opANx:  ldx opsl
-        inx
-        cpx onv
-        bcc opAll
-        ; ---- 2. each orb's priority bit, now that the foreground set is final ----
-        ldx #$00
-opPri:  jsr opSlot
-        lda orbBitT,x
-        and omEn
-        beq opP2                ; pass 1 took this one's sprite away: nothing to decide
-        lda #$00
-        sta opreq
-        sta opcon
-        ldy opsl
-        lda opbBaseT,y
-        sta opbn
-        ldx opcl
-opP1:   lda #$0f                ; which columns of this cell lie inside the box
-        cpx opcl
-        bne opP1x
-        and opbl
-opP1x:  cpx opcr
-        bne opP1y
-        and opbr
-opP1y:  sta pbb
-        ldy opbn
-        lda opbuf,y             ; what this orb asked for, from pass 1
-        inc opbn
-        sta pmk                 ; columns this orb needs to clip it ...
-        tay
-        lda popcT,y
-        clc
-        adc opreq
-        sta opreq
-        lda pmk
-        eor #$0f                ; ... against columns it did NOT ask for but which something
-        and pbb                 ; else made foreground. Both are counted rather than the second
-        and fgCell,x            ; merely noted: one shared foreground set and one bit per sprite
-        tay                     ; cannot express both, so the bit goes with the majority.
-        lda popcT,y
-        clc
-        adc opcon
-        sta opcon
-        inx
-        cpx opcr
-        bcc opP1
-        beq opP1
-        lda opreq               ; Asked for NOTHING? Then no wall in the scene faces away from
-        beq opP2                ; this orb, nothing can hide it, and it goes OVER foreground --
-                                ; rule 4. Without this the comparison below sees 0 against 0,
-                                ; scores it a tie, and ties clip. That is how an orb standing in
-                                ; front of a statically-foreground vertical edge got bitten: the
-                                ; edge is foreground from the charset, not because anything
-                                ; requested it, so fgCell is empty and opcon counts zero too.
-        lda opcon               ; more of the box wants clipping than not: let the VIC clip.
-        cmp opreq               ; Ties go to clipping -- a wall that should hide an orb is more
-        beq opP1a               ; conspicuous than an orb slightly over one that should not.
-${OPCONF ? '        bcs opP2' : '        ; OPCONF=0: conflict release disabled, every orb clips'}
-opP1a:  ldx opsl
-        lda orbBitT,x
-        ora omPri
-        sta omPri
-opP2:   ldx opsl
-        inx
-        cpx onv
-        bcc opPri
-        ; ---- 3. the char code for every covered cell ----
-        ldx opmx
-        cpx opmn
-        bcc opAllD
-opMat:  lda fgCell,x
-        bpl opMt1               ; no orb's box covers this cell at all -- the sweep runs over
-                                ; the union min..max, so it walks the gaps between orbs too
-        and #$0f
-        tay                     ; Y = the columns that must clip, 0 if none
-        lda seamT,x
-        cmp #${hx(SEAM0)}
-        bcc opMt2
-        ; A seam's black columns follow the ordinary foreground rule; its grey line is bit
-        ; pair 10 and clips regardless. Where an orb actually overlaps, orbSeam patches the
-        ; line out afterwards -- per CELL, which this per-column table cannot express.
-        tya
-        beq opMt1               ; covered but nothing clips: leave the background seam
-        lda seamT,x
-        sec
-        sbc #$04
-        sta seamT,x
-        bcs opMt1               ; always
-opMt2:  tya
-        beq opMt1               ; covered, but nothing here has to clip: background black
-        lda fgCodeT,y
-        sta seamT,x
-opMt1:  cpx opmn
-        beq opAllD
-        dex
-        bpl opMat
-opAllD: rts
-
-; ---- orbSeam: take the panel line out of the cells an orb actually covers ----
-; A seam's grey stripe is bit pair 10, and pair 10 is the only place grey can live -- 00 and 01
-; are spent on white and black -- so it counts as FOREGROUND in BOTH seam variants and draws
-; over any orb whose priority bit is set. That is a two-pixel line straight through an orb
-; standing in front of the wall, and there is no background seam to switch to.
-;
-; seamT is one byte per COLUMN, used for that column's whole solid run, so dropping the line
-; there would drop it top to bottom. This runs after renderSym and patches the cells an orb
-; actually inks, which is the only granularity that keeps the line above and below the ball.
-;
-; Cheap because almost nothing qualifies: a cell must be under an orb AND in one of the ~8
-; columns a seam lands in, so most frames patch nothing at all.
-orbSeam:
-        ldx #$00
-osOrb:  cpx onv
-        bcs osDone
-        lda orbBitT,x           ; a slot pass 1 took the sprite away from draws nothing
-        and omEn
-        beq osNext
-        ldy obV,x               ; first inked row: sprite top + this variant's blank rows
-        lda obY,x
-        clc
-        adc orbBlankT,y
-        sec
-        sbc #$32                ; raster 50 = display row 0
-        bcs osT1
-        lda #$00
-osT1:   lsr
-        lsr
-        lsr
-        sta osR0
-        lda obY,x               ; last inked row: the ball is bottom-aligned, so sprite bottom
-        clc
-        adc orbHgtT,y
-        sec
-        sbc #$32
-        lsr
-        lsr
-        lsr
-        cmp #$19
-        bcc osT2
-        lda #$18
-osT2:   sta osR1
-        cmp osR0
-        bcc osNext              ; entirely off the top of the display
-        lda obCR,x              ; walk this orb's cell columns, clamped to the 40 real ones --
-        cmp #${hx(NCELL)}       ; a stray column here writes past the screen into the program
-        bcc osE1
-        lda #${hx(NCELL - 1)}
-osE1:   sta osEnd
-        lda obCL,x
-        cmp #${hx(NCELL)}
-        bcs osNext
-        sta osCol
-osCol1: ldy osCol
-        lda seamT,y
-        cmp #${hx(SEAM0)}
-        bcc osCol2              ; no panel line in this column: nothing to patch
-        lda fgCell,y            ; the char the column would use without its line
-        and #$0f
-        beq osBg
-        tay
-        lda fgCodeT,y
-        bne osHave              ; always
-osBg:   lda #${hx(SOLIDBG)}
-osHave: sta osChr
-        ; seamT describes this column's SOLID RUN only. Below the wall's base the cell is floor,
-        ; and patching a wall char in there paints a black block over it -- which is exactly what
-        ; the first version did next to a near orb. The run's last row is 24 - rs, mirrored from
-        ; the top half, and rsT turns the column's height into rs.
-        lda osCol
-        asl
-        asl
-        tay                     ; first logical column of this cell
-        lda colH,y
-        tay
-        lda #$18
-        sec
-        sbc rsT,y
-        cmp osR1
-        bcc osRB1
-        lda osR1
-osRB1:  sta osRB
-        cmp osR0
-        bcc osCol2              ; the orb sits entirely below the wall in this column
-        ldy osR0
-osRow:  lda rowLoT,y
-        clc
-        adc osCol
-        sta osPtr
-        lda rowHiT,y
-        adc baseHi
-        sta osPtr+1
-        lda osChr
-        sty osTmp
-        ldy #$00
-        sta (osPtr),y
-        ldy osTmp
-        iny
-        cpy osRB
-        bcc osRow
-        beq osRow
-osCol2: inc osCol
-        lda osCol
-        cmp osEnd
-        bcc osCol1
-        beq osCol1
-osNext: inx
-        jmp osOrb
-osDone: rts
-
-; opSlot: copy sprite slot X's cell range and box-edge masks into scratch, and point omptr at
-; its occluder bitmap. CPX and LDX have no indexed-absolute mode, so the loop bounds have to
-; live somewhere the comparisons can reach.
-opSlot: stx opsl
-        lda obOcc,x
-        sta ocanF
-        lda obCL,x
-        sta opcl
-        lda obCR,x
-        sta opcr
-        lda obBL,x
-        sta opbl
-        lda obBR,x
-        sta opbr
-        lda obIX,x
-        tay
-        lda orbOccLoT,y
-        sta omptr
-        lda orbOccHiT,y
-        sta omptr+1
-        rts
-
-; opCell: for the orb whose bitmap omptr points at, which of cell X's four columns must clip
-; it? Returns that four-bit mask in A, and leaves the box mask for the cell in pbb. Bit 3 is
-; the cell's leftmost column, so the mask reads left to right and indexes fgCodeT directly.
-opCell: lda #$0f
-        cpx opcl
-        bne opC1
-        and opbl
-opC1:   cpx opcr
-        bne opC2
-        and opbr
-opC2:   sta pbb
-        lda #$00
-        sta pmk
-        lda ocanF               ; nothing reachable from the player's cell can occlude this
-        bpl opC4                ; orb, so every column answers no -- skip both bitmap lookups
-        ldy cstepT,x
-        lda kMaskT,y            ; the columns belonging to the cell's FIRST run
-        sta pkm
-        lda cellFace2T,x
-        jsr opBit
-        beq opC3
-        lda pkm
-        sta pmk
-opC3:   lda cellFaceT,x
-        jsr opBit
-        beq opC4
-        lda pkm
-        eor #$0f                ; ... and the rest belong to its LAST run
-        ora pmk
-        sta pmk
-opC4:   lda pmk
-        and pbb
-        rts
-
-; opBit: A = a wall run id -> Z=0 if this orb lies beyond that run's face plane, from the
-; precomputed bitmap at omptr. X is the caller's cell index and is preserved.
-opBit:  sta tmp
-        lsr
-        lsr
-        lsr
-        tay
-        lda (omptr),y
-        sta tmp2
-        lda tmp
-        and #$07
-        tay
-        lda orbBitT,y
-        and tmp2
-        rts
-
-; kSgn: the high byte a signed byte sign-extends to.
-kSgn:   bmi kSgN
-        lda #$00
-        rts
-kSgN:   lda #$ff
-        rts
-
-; oTerm: (Y * X) as a 16-bit product in orL/orH, negated if A is negative. Y is a cell
-; difference magnitude (0..15) and X a trig magnitude, so this is a plain 8x8 -- the 16x8 the
-; old orot did was only ever needed because the orb offset carried a fraction, and that
-; fraction is now a per-frame constant instead.
-oTerm:  stx mq
-        sta tmp2
-        tya
-        jsr mul8
-        lda tmp2
-        bpl otD
-        sec
-        lda #$00
-        sbc plo
-        sta orL
-        lda #$00
-        sbc phi
-        sta orH
-        rts
-otD:    lda plo
-        sta orL
-        lda phi
-        sta orH
-        rts
-
-; oFrac: (signed A * unsigned X) >> 8, negated if Y is $ff. A is 0.5 minus the player's
-; fractional position, so the result is the shared fractional term of one product -- and it
-; always fits a signed byte, since |A| <= 128 and X <= 255.
-oFrac:  stx mq
-        sta tmp
-        cmp #$00                ; STA does not set flags -- without this the branch tested
-        bpl ofP                 ; whatever the caller's ldy left, so a negative offset was
-                                ; multiplied as its unsigned byte and never negated
-        eor #$ff
-        clc
-        adc #$01
-        tya
-        eor #$ff
-        tay                     ; A was negative: flip the sign we were handed
-        lda tmp
-        eor #$ff
-        clc
-        adc #$01
-ofP:    sty tmp2
-        jsr mul8
-        lda tmp2
-        bpl ofD
-        sec
-        lda #$00
-        sbc phi
-        rts
-ofD:    lda phi
-        rts
-
-; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
-oabs:   lda #$00
-        sta oaS
-        lda oaH
-        bpl oabsD
-        lda #$ff
-        sta oaS
-        sec
-        lda #$00
-        sbc oaL
-        sta oaL
-        lda #$00
-        sbc oaH
-        sta oaH
-oabsD:  rts
-` : ''}
         ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
@@ -6033,60 +4073,7 @@ spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
 spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
 spinYL: !byte ${SPINPOS.map(p => Math.round(p[1]*256) & 255).join(',')}
 spinYH: !byte ${SPINPOS.map(p => Math.round(p[1]*256) >> 8).join(',')}` : ''}
-${SPRITES ? `        * = ${hx16(RELOC + 0x1300)}
-orbVarT: !byte ${orbVarT.join(',')}
-        * = ${hx16(RELOC + 0x1400)}
-orbPtrT: !byte ${orbPtrT.join(',')}
-orbExpT: !byte ${orbExpT.join(',')}
-orbHalfT: !byte ${orbHalfT.join(',')}
-orbYBaseT: !byte ${orbYBaseT.join(',')}
-orbBlankT: !byte ${orbBlankT.join(',')}
-orbHgtT: !byte ${orbHgtT.join(',')}
-orbColT: !byte ${orbColT.join(',')}
-; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the
-; columns of that first and last cell which lie inside it. Bit 3 is the leftmost column.
-opbBaseT: !byte 0,12,24,36,48,60,72,84
-popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
-bbLT:   !byte $0f,$07,$03,$01
-bbRT:   !byte $08,$0c,$0e,$0f
-; kMaskT: cstepT names where a cell's run boundary falls, so this is the set of columns
-; belonging to the FIRST of its two runs. 0 = no boundary, so the cell shows one run and it
-; is the last one.
-kMaskT: !byte $00,$08,$0c,$0e
-; fgCodeT: the four-bit foreground mask straight to a char code. The mask already names the
-; split boundary, so no separate lookup of where it falls is needed. The four non-contiguous
-; masks need three runs inside one cell to arise and have no code; they fall back to whichever
-; answer covers more of the cell.
-fgCodeT: !byte ${[...Array(16)].map((_, m) => {
-  const bit = c => (m >> (3 - c)) & 1;
-  if (m === 0) return hx(SOLIDBG);
-  if (m === 15) return hx(SOLID);
-  for (let k = 1; k <= 3; k++) {
-    const left = [...Array(4)].map((_, c) => (c < k ? 1 : 0));
-    if (left.every((v, c) => v === bit(c))) return hx(SPLIT0 + (k - 1) * 2);
-    if (left.every((v, c) => (1 - v) === bit(c))) return hx(SPLIT0 + (k - 1) * 2 + 1);
-  }
-  const n = [0,1,2,3].filter(bit).length;
-  return hx(n >= 2 ? SOLID : SOLIDBG);
-}).join(',')}
-orbBitT: !byte ${orbBitT.join(',')}
-orbOccLoT: !byte ${orbOccLo.join(',')}
-orbOccHiT: !byte ${orbOccHi.join(',')}
-        * = ${hx16(RELOC + 0x1500)}
-orbXCT: !byte ${orbXC.join(',')}
-orbYCT: !byte ${orbYC.join(',')}
-orbColT2: !byte ${orbCol.join(',')}
-        * = ${hx16(RELOC + 0x1600)}
-candCntT: !byte ${candCnt.join(',')}
-        * = ${hx16(RELOC + 0x1700)}
-candLoT: !byte ${candLo.join(',')}
-        * = ${hx16(RELOC + 0x1800)}
-candHiT: !byte ${candHi.join(',')}
-` : ''}${SPRITES ? `        * = ${hx16(RELOC + 0x1900)}
-candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it may cross pages
-` : ''}${SPRITES ? `        * = ${hx16(OCCBASE)}
-orbOccT: !byte ${orbOccFlat.join(',')}
-` : ''}${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
+${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
 ; The DDA deltas at quarter-angle resolution. 1024 entries each, addressed as four pages via
 ; the dispatch in castRay, so no index arithmetic wider than a byte ever happens. The 256-entry
 ; originals are left in place and unused -- posXT/posYT/absSinT/absCosT still index by the
@@ -6113,17 +4100,11 @@ ${PLAN === 3 ? '' : `stepT1: ${chunk(stepT[0]).trim()}`}
 ${PLAN === 3 ? '' : `stepT2: ${chunk(stepT[1]).trim()}`}
         * = ${hx16(RELOC + 0x2600)}
 ${PLAN === 3 ? '' : `stepT3: ${chunk(stepT[2]).trim()}`}
-${SPRITES && !STEPSTATIC ? `        * = ${hx16(RELOC + 0x2700)}
-; splitT: cell code -> the same cell drawn with a priority edge down the run boundary inside
-; it, or 0 for "no such twin, fall back to a whole-cell answer". Sits above the step tables
-; because the assembler takes origins in ascending order only.
-splitT: !byte ${splitT.join(',')}
-` : ''}
 ${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
 ; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its
 ; corner line only when the run across the boundary is one of these; every other run-to-run
-; boundary is a convex silhouette, where the wall's edge occludes something unrelated behind
-; it and the line is both redundant and in the way of per-column occlusion.
+; boundary is a convex silhouette, where the wall's edge stands against something unrelated
+; behind it and the 20-row step has already drawn the division.
 ; Indexed by run id, so whole tables rather than a packed set.
 cpLoT:  !byte ${cpLo.join(',')}
 cpHiT:  !byte ${cpHi.join(',')}
@@ -6357,12 +4338,9 @@ try {
     // strip comments first: "boundaries at uaH+1 .. ubH" in prose is not a reference
     const code = asm.split('\n').map(l => l.replace(/;.*$/, '')).join('\n');
     for (const n of Object.keys(zp)) if (new RegExp(`\\b${n}\\+1\\b`).test(code)) two.add(n);
-    // Deliberately shared: orbMove runs after renderSym, by which point seamSpan's scratch is
-    // dead for the frame, and orbMove keeps nothing across frames. Zero page is full, and this
-    // routine's working set is hot enough that absolute addressing cost it ~240 cycles a frame.
-    // NOT the whole seam range: mul8's own mp/mq/plo/phi sit at $98-$9b in the middle of it,
-    // and they are live inside every jsr mul8 orbMove makes. Sharing those put ivH on mp and
-    // ohgt on mq, and each multiply quietly ate its own inputs.
+    // If a future pass wants to share zero page with seamSpan's scratch, note where the trap
+    // is: mul8's own mp/mq/plo/phi sit at $98-$9b in the middle of that range and are live
+    // inside every jsr mul8. The orb pass shared them once and each multiply ate its own inputs.
     // The same collision check for the $cb00 scratch block. Zero page has been guarded for a
     // while; this block has not, and two variables quietly shared $cb21 for several commits.
     {
@@ -6402,7 +4380,8 @@ try {
         `past $${((a | 255) + 1).toString(16)} costs an extra cycle (page-align it)`);
   }
   // What is left in VIC bank 0. Sprite data has to live here, 64 bytes per sprite on a
-  // 64-byte boundary, so this is the number that decides how many sprites are possible.
+  // 64-byte boundary, so this is the number that decides how many sprites a future object
+  // pass can have. Nothing in this build uses sprites -- the figure is reported for that.
   // $1000-$1fff is NOT usable for VIC data in banks 0 and 2: the VIC sees the character
   // ROM there regardless of what RAM holds, so sprites or a charset placed in it would
   // display the ROM font. Cut that window out of the free list.

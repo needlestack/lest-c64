@@ -70,10 +70,22 @@ Cluster BUCKETS, not shapes: the engine answers one pattern per table entry rega
 SHARED codebook beats split budgets (234 shared = 8.948 vs 224 split 140:84 = 9.550) because a
 ramp and a step of the same shape are the same glyph once occlusion is gone.
 
-## 4. Occlusion/sprites removed (walls-only) — ADOPTED for this line of work
+## 4. Occlusion/sprites removed (walls-only) — ADOPTED, then DELETED OUTRIGHT (2026-08-11)
 
 The fg/bg split is INVISIBLE: bit pairs 01 and 11 are both black; only sprite priority tells them
 apart. With no sprites every pixel goes foreground and 43 codes come back (256/256 -> 213/256).
+
+First this was a `SPRITES=0` default with the code still present. On 2026-08-11 the user decided
+to redo objects as a SECOND PASS over the finished wall image, so every trace was removed rather
+than left gated — ~2,200 lines of build script and ~35KB of 6502 source, plus the per-cell
+`cellFaceT` fill in the subdivision's hot path, 84 scratch equates, and `splitT`.
+
+**The removal is provably behaviour-neutral: `latest.d64` is byte-identical before and after**
+(md5 582eda6d…, 46,079 bytes). Everything deleted was already unreachable under `SPRITES=0`.
+
+Do NOT reinstate the old scheme when objects come back. What it cost, for reference: 43 of 256
+char codes, a per-frame `fgCell` clear, an `orbPaint` pass whose rules never fully settled, and
+a permanent constraint that a ramp and a step of the same shape could not share a code.
 
 ## 5. Scheme A: step cells by FORMULA — VALIDATED, NOT YET SHIPPED
 
@@ -109,7 +121,10 @@ the horizontal-cap artefact the sloped scheme fixed years ago (1.573 -> 0.606 in
   fix would be `qM = w[min(kb,2)]`, free.
 - Ramp buckets r176/r11 are BIMODAL (sharp edges and slopes sharing one bucket, medianed to
   [8,5,0,0]). A median is meaningless for a bimodal cluster — charsetgen should refuse and split.
-- FINEANG's tables squat in the orb-table space; sprites will need it back ($e000 under KERNAL).
+- FINEANG's tables now own what was the orb-table space outright ($8600+0x1300..0x2300). An
+  object pass needs its own home; $e000-$ffff under KERNAL is the 8K to take (own vectors at
+  $fffa/$fffc/$fffe — the engine currently uses the KERNAL $0314 indirect). VIC bank 0 has
+  3,072 bytes free = 48 sprite slots, which the build reports every run.
 - PLAN=3 + STEPA: the shipped tables are stepT{1,2,3}{lo,hi}, NOT stepT. Patching stepT under
   PLAN=3 changes nothing (byte-identical disk).
 

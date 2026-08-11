@@ -4,7 +4,8 @@ charsetB = $3800
 px      = $02
 py      = $04
 pa      = $06
-rang    = $07
+; $07 is free: it was rang, the coarse byte ray angle, dead since castRay's step
+; signs moved to the fine angle.
 sdx     = $0a
 sdy     = $0b
 ddx     = $0c
@@ -143,61 +144,21 @@ cwB     = $c528
 cbA     = $c550                 ; ... and the solid run start, or $ff for "always redraw"
 cbB     = $c578
 faceIdT = $c400
-cellFaceT = $c4a0            ; per cell-column (40): the LAST wall run the cell shows
-cellFace2T = $c4c8           ; ... and the FIRST. A cell at a corner shows two walls with
-                                ; opposite answers, so one run per cell cannot decide it
-ocl2    = $cb93                 ; the bounding box in COLUMNS, not cells
-ocmax   = $cb94
-fgCell  = $c5a0                 ; per cell-column (40): bits 3..0 = which of the cell's four
-                                ; logical columns must be FOREGROUND (clip a sprite), bit 7 =
-                                ; some orb's bounding box covers this cell
-opsl    = $cb95
-opbn    = $cbc4                 ; index into opbuf while pass 1 walks a box
-opbuf   = $cc00                 ; per sprite slot, 12 cells each: the columns that slot needs
-                                ; foreground in each cell of its box. Pass 2 reads them back
-                                ; rather than deriving them again -- two bitmap lookups a cell
-opmn    = $cbc5                 ; lowest and highest cell any orb touched, so the code-writing
-opmx    = $cbc6                 ; sweep covers those and not all forty
-opreq   = $cbc2                 ; columns of this orb's box that must clip it, and
-opcon   = $cbc3                 ; columns made foreground that must not
-opcl    = $cb96
-opcr    = $cb97
-opbl    = $cbc0
-opbr    = $cbc1                 ; the sprite slot orbPaint has in hand
-pbb     = $cb90                 ; the columns of the cell in hand that lie inside that box
-pkm     = $cb91                 ; ... that belong to the cell's FIRST run
-pmk     = $cb92                 ; ... that this orb needs foreground
-obCL    = $cb98                 ; per sprite slot, for the second pass: cell range and
-obCR    = $cba0                 ; bounding-box edge masks, so pass 2 need not reproject
-obBL    = $cba8
-obBR    = $cbb0
-obIX    = $cbb8
-obV     = $cbd0                 ; size variant per slot, so orbSeam can find the sprite's
-                                ; leading blank rows -- obIX is the ORB index, not the variant
-osR0    = $cbd8                 ; orbSeam scratch: first and last char row an orb inks,
-osR1    = $cbd9                 ; the column being patched, and the char to patch it with
-osCol   = $cbda
-osChr   = $cbdb
-osTmp   = $cbdc
-osEnd   = $cbdd
-osRB    = $cbde
-obOcc   = $cbe0                 ; per slot: bit 7 = this orb has a possible occluder here
-ocanO   = $cbe8                 ; the same bit while the candidate list is being walked
-ocanF   = $cbe9                 ; and while orbPaint has one slot in hand
-osPtr   = $fb                   ; 2 bytes: screen row pointer
 cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $cbf0                 ; PLAN=2: the bucket index the code came from, and which
+bidx    = $cbf0                ; PLAN=2: the bucket index the code came from, and which
 thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
 paqL    = $cbf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
 paqH    = $cbf7
 rqL     = $cbf8                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $cbf9                 ; rqH (0..3) picks which quarter of the 1024-entry table
-rqH     = $cbfc                 ; fine-angle quarter, 0..3
+rqH     = $cbfc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+                                ; It was declared TWICE, at $cbf9 and here; the assembler takes
+                                ; the last, so $cbf9 was never the live one. Removed rather
+                                ; than left as a trap for the next reader.
 cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
 cmtmp   = $cbf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
 cmv     = $cbf5                 ; the ninth index bit -- the two columns the bucket throws away
 cqN     = $cbf3                 ; entries in the colour queue
-cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only ($fb is orbSeam's)
+cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only
 cqLo    = $cc00                 ; colour queue: address low, high, and the value to write.
 cqHi    = $cc40                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $cc80                 ; NOT double buffered, so an inline write repaints the frame
@@ -219,74 +180,6 @@ pfRow   = $c934
 pfDone  = $c935
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
-; orbMove's hot working set, on seamSpan's scratch -- dead by the time orbMove runs
-oaL     = $87
-oaH     = $88
-oaS     = $89
-orL     = $8c
-orH     = $8d
-o0      = $94
-o1      = $95
-o2      = $96
-ivL     = $97
-ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
-ohgt    = $9d
-omptr   = $87                    ; 2 bytes: this orb's occluder bitmap. Shares oaL/oaH,
-                                ;   which are dead once the column offset has been worked out
-ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
-; ... and the cold tail, touched once or twice each, left in absolute RAM
-ocos    = $cb00
-ocosS   = $cb01
-osin    = $cb02
-osinS   = $cb03
-fwdL    = $cb04
-fwdH    = $cb05
-rgtL    = $cb06
-rgtH    = $cb07
-ogL     = $cb08
-ogH     = $cb09
-oe      = $cb0a
-o3      = $cb0b
-ocoff   = $cb0c
-ovar    = $cb0d
-ocol    = $cb10
-ocl     = $cb12
-ocr     = $cb13
-oidx    = $cb17
-ocn3    = $cb2a
-ocn     = $cb18
-ocy     = $cb19
-onv     = $cb1a
-omEn    = $cb1b
-omXX    = $cb1c
-omYY    = $cb1d
-omPri   = $cb1e
-omX8    = $cb1f
-omBit   = $cb20
-obX     = $cb30
-obY     = $cb38
-obP     = $cb40
-obC     = $cb48                  ; per-sprite state, flushed to the VIC in the border
-opx     = $cb5c                  ; the viewpoint orbMove last projected from
-opy     = $cb5e
-opa     = $cb60
-ofx     = $cb64
-ofy     = $cb65
-kxc     = $cb66
-kxs     = $cb67
-kyc     = $cb68
-kys     = $cb69
-kfL     = $cb6a
-kfH     = $cb6b
-krL     = $cb6c
-krH     = $cb6d
-oix     = $cb6e
-oiy     = $cb6f
-oax     = $cb70
-oay     = $cb71
-oixS    = $cb72
-oiyS    = $cb73
-odb     = $cb22                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 bndT    = $ca00                 ; columns where a face or saturation state begins ($40 max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -316,7 +209,7 @@ entry:
         lda #$01
         sta $d021               ; 00 = white  (ceiling / floor)
         lda #$00
-        sta $d022               ; 01 = black  (readout glyphs only; walls moved to 11)
+        sta $d022               ; 01 = black  (readout glyphs only; walls are 11, via colour RAM)
         lda #$0b
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry: bit pairs 00
@@ -328,10 +221,10 @@ entry:
         lda #$00
         sta $dc03
         ldx #$00
-        ldx #$00                ; no run cached for either buffer yet. NOT in the sprite
-        lda #$ff                ; setup: SPRITES=0 builds render too, and an uninitialised
-rfCz:   sta cwA,x               ; cache byte that happens to match rb or rs leaves a column
-        inx                     ; never drawn at all
+        ldx #$00                ; no run cached for either buffer yet -- an uninitialised
+        lda #$ff                ; cache byte that happens to match rb or rs would leave a
+rfCz:   sta cwA,x               ; column never drawn at all
+        inx
         bne rfCz
         lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
@@ -446,8 +339,7 @@ mloop:
         sta cstepT+37
         sta cstepT+38
         sta cstepT+39
-        lda #$01     ; and every wall back to a plain fill. fgCell is not cleared:
-                                ; only orbPaint writes it, and there are no orbs
+        lda #$01       ; and every wall column back to a plain fill
         sta seamT+0
         sta seamT+1
         sta seamT+2
@@ -573,10 +465,8 @@ subFace:lda spanR
         ; meet. There the two walls sit at the same depth, so it is black meeting black and the
         ; line is the only thing dividing them. A CONVEX corner -- the end of a receding wall,
         ; the kind you cannot see around -- is already drawn by the silhouette, which steps 20+
-        ; rows at that column, and its line lands in exactly the cell where an orb needs
-        ; per-column occlusion. A seam cell cannot express that: it is all-clipping or all-not.
-        ; Leaving convex corners seam-free makes them plain two-black SOLID splits, which are
-        ; per-column and exact.
+        ; rows at that column. The grey line adds nothing to a boundary that emphatic, so
+        ; convex corners are left seam-free and render as plain two-black steps.
         lda spanL
         tax
         lda faceIdT,x
@@ -592,7 +482,7 @@ subCv:  lda spanR
         lsr
         tax
         lda seamT,x
-        cmp #$01     ; still a plain fill? the default is BACKGROUND black now
+        cmp #$01       ; still a plain fill? one seam line per cell
         bne subCn               ; a line is already claimed in this cell; one per char code
         lda spanR
         and #$03
@@ -699,8 +589,6 @@ subFlush:                       ; interpolate + seam one maximal face
         lda spanR
         cmp spanL
         bcc subFDn              ; empty
-        ; cellFaceT/cellFace2T are not built: orbPaint was their only reader, so with no
-        ; sprites this whole per-cell fill is dead work in the subdivision's hot path.
         jsr interpSpan
         jsr seamSpan
 subFDn: rts
@@ -1029,9 +917,9 @@ rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
 rfSolid:lda seamT,x
-        cmp #$01     ; the default now that walls start as background black. Anything
-        bne rfSlSm              ; else -- a seam, or a column an orb asked to clip -- can change
-        lda rsv           ; without rs moving, so it is never cached
+        cmp #$01       ; the frame's default. A seam variant can change without rs
+        bne rfSlSm              ; moving, so a seam column is never cached
+        lda rsv
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
@@ -1648,7 +1536,7 @@ ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
         lsr
         tax                     ; cell column
         lda seamT,x
-        cmp #$01     ; still a plain fill? the default is BACKGROUND black now
+        cmp #$01       ; still a plain fill? one seam line per cell
         bne ssOne               ; already spoken for: one line per char code
         tya
         and #$03
@@ -3524,7 +3412,6 @@ hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,20
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
         !byte 4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4
-
         ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
@@ -3899,12 +3786,11 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
 
         * = $ac00
 
-
         * = $ae00
 ; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its
 ; corner line only when the run across the boundary is one of these; every other run-to-run
-; boundary is a convex silhouette, where the wall's edge occludes something unrelated behind
-; it and the line is both redundant and in the way of per-column occlusion.
+; boundary is a convex silhouette, where the wall's edge stands against something unrelated
+; behind it and the 20-row step has already drawn the division.
 ; Indexed by run id, so whole tables rather than a packed set.
 cpLoT:  !byte 0,34,54,39,40,53,58,39,45,46,65,66,58,51,34,35,45,42,41,56,57,50,61,62,37,38,56,37,43,48,48,35,44,62,1,15,14,24,25,3,4,16,17,31,32,16,9,24,29,3,12,13,29,1,2,8,19,20,12,6,19,32,23,22,10,2,11
 cpHiT:  !byte 0,53,65,49,49,54,59,40,55,55,64,64,50,59,36,36,41,46,42,60,60,51,63,63,47,47,57,38,44,52,52,43,61,66,14,31,15,27,27,7,7,18,18,28,28,8,17,25,30,4,21,21,30,5,5,9,26,26,6,13,20,22,33,23,11,10,33
