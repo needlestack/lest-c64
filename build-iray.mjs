@@ -2236,6 +2236,7 @@ paqL    = $cbf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a
 paqH    = $cbf7
 rqL     = $cbf8                 ; and this ray's 10-bit angle: rqL is the table index,
 rqH     = $cbf9                 ; rqH (0..3) picks which quarter of the 1024-entry table
+rqH     = $cbfc                 ; fine-angle quarter, 0..3
 cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
 cmtmp   = $cbf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
 cmv     = $cbf5                 ; the ninth index bit -- the two columns the bucket throws away
@@ -4155,10 +4156,8 @@ isDn:   rts
 ; ================= cast one ray (16-bit DDA) =================
 castRay:
         ldx col
-        lda pa
-        clc
-        adc rayOffT,x
-        sta rang                ; integer angle: still what posXT/posYT/absSinT/absCosT want
+        ; The coarse angle is gone: the step signs now come from the fine angle's quarter, and
+        ; posXT/posYT/absSinT/absCosT are only read by calcU, which builds its own ssAng.
 ${FINEANG ? `        ; ---- 10-bit ray angle for the DDA deltas ----
         ; Dispatch on the quarter rather than patching four operands: rqH is 0..3, so four load
         ; blocks with the page folded into the absolute address cost ~8 cycles, against ~40 to
@@ -4177,6 +4176,7 @@ faNeg:  clc
         lda paqH
         adc #$ff                ; -1 in the high byte
 faHi:   and #$03
+        sta rqH                 ; which quarter of the circle the FINE angle is in
         tax
         ldy rqL
         cpx #$00                ; NOT a bare BEQ: the LDY above sets Z from rqL, not from the
@@ -4240,11 +4240,78 @@ ${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; ray:
         sta mlo
         lda ddxH
         sta mhi
-        jsr sideMul
+        ; --- sideMul inlined: a jsr/rts pair here is 12 cy a call, 24 a ray, ~770 a
+        ; --- frame. Every other caller still uses the subroutine.
+        lda fr                  ; --- high half: fr * mhi -> s2:s1 ---
+        clc
+        adc mhi
+        tax
+        bcc cxmh0
+        lda f1LoT,x
+        tay                     ; the low byte rides in Y instead of zero page: this routine
+        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
+        sta s2
+        jmp cxmh1
+cxmh0:   lda f0LoT,x
+        tay
+        lda f0HiT,x
+        sta s2
+cxmh1:   lda fr
+        sec
+        sbc mhi
+        bcs cxmh2
+        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
+        adc #$01
+cxmh2:   tax
+        sec
+        tya
+        sbc f0LoT,x
+        sta s1
+        lda s2
+        sbc f0HiT,x
+        sta s2
+        lda fr                  ; --- low half: only the HIGH byte survives the >>8 ---
+        clc
+        adc mlo
+        tax
+        bcc cxml0
+        lda f1LoT,x
+        tay
+        lda f1HiT,x
+        sta qhi
+        jmp cxml1
+cxml0:   lda f0LoT,x
+        tay
+        lda f0HiT,x
+        sta qhi
+cxml1:   lda fr
+        sec
+        sbc mlo
+        bcs cxml2
+        eor #$ff
+        adc #$01
+cxml2:   tax
+        sec
+        tya
+        sbc f0LoT,x             ; result discarded -- only the borrow into the high byte
+        lda qhi                 ; matters, so the old "sta qlo" here was writing a dead value
+        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into s1
+        clc
+        adc s1
+        sta s1
+        lda s2
+        adc #$00
+        sta s2
 ${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
-        ldx rang
-        lda posXT,x
-        bne cxpos
+        ; STEP SIGNS COME FROM THE FINE ANGLE. FINEANG moved the deltas to rq but left these
+        ; on the coarse rang, and the two disagree at the axis boundaries -- the ray then steps
+        ; the wrong way while using a delta for a slightly different direction. cos >= 0 in
+        ; quarters 0 and 3, sin >= 0 in quarters 0 and 1, so rqH decides both, and posXT/posYT
+        ; (512 bytes holding two bits) are not needed at all.
+        lda rqH
+        beq cxpos
+        cmp #$03
+        beq cxpos
         lda #$ff
         sta stpX
         lda s1
@@ -4267,11 +4334,72 @@ cydo:   lda py
         sta mlo
         lda ddyH
         sta mhi
-        jsr sideMul
+        ; --- sideMul inlined: a jsr/rts pair here is 12 cy a call, 24 a ray, ~770 a
+        ; --- frame. Every other caller still uses the subroutine.
+        lda fr                  ; --- high half: fr * mhi -> s2:s1 ---
+        clc
+        adc mhi
+        tax
+        bcc cymh0
+        lda f1LoT,x
+        tay                     ; the low byte rides in Y instead of zero page: this routine
+        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
+        sta s2
+        jmp cymh1
+cymh0:   lda f0LoT,x
+        tay
+        lda f0HiT,x
+        sta s2
+cymh1:   lda fr
+        sec
+        sbc mhi
+        bcs cymh2
+        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
+        adc #$01
+cymh2:   tax
+        sec
+        tya
+        sbc f0LoT,x
+        sta s1
+        lda s2
+        sbc f0HiT,x
+        sta s2
+        lda fr                  ; --- low half: only the HIGH byte survives the >>8 ---
+        clc
+        adc mlo
+        tax
+        bcc cyml0
+        lda f1LoT,x
+        tay
+        lda f1HiT,x
+        sta qhi
+        jmp cyml1
+cyml0:   lda f0LoT,x
+        tay
+        lda f0HiT,x
+        sta qhi
+cyml1:   lda fr
+        sec
+        sbc mlo
+        bcs cyml2
+        eor #$ff
+        adc #$01
+cyml2:   tax
+        sec
+        tya
+        sbc f0LoT,x             ; result discarded -- only the borrow into the high byte
+        lda qhi                 ; matters, so the old "sta qlo" here was writing a dead value
+        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into s1
+        clc
+        adc s1
+        sta s1
+        lda s2
+        adc #$00
+        sta s2
 ${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
-        ldx rang
-        lda posYT,x
-        bne cypos
+        lda rqH                 ; sin >= 0 in quarters 0 and 1
+        cmp #$02
+        bcc cypos
         lda #$ff
         sta stpY
         lda #$f0                ; -16: one cell row back
