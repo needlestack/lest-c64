@@ -736,12 +736,17 @@ pivPrep:
         lda py+1
         sta opyH
         ; ---- the two screen edges, as always ----
+        ; Ticked like every other march. Without these the profiler credited pivPrep's rays to
+        ; whatever phase happened to be open and reported "ray: hit + height + marchCol stores"
+        ; at 0.0% -- which is impossible, and was the tell that the numbers were describing a
+        ; tick layout the code no longer had.
         lda #$00
         sta col
         jsr marchCol
         lda #159
         sta col
         jsr marchCol
+
         lda #$00
         sta sp
         sta pvLast

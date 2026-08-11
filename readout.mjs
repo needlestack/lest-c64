@@ -79,9 +79,17 @@ if (process.env.RAYS) {
 // The value is mean raster LINES per frame (accumulated over exactly 256 frames); one line
 // is 65 cycles.
 if (process.env.PROF) {
-  const NAMES = ['input', 'table clears', 'subdivision control', '  ray: angle+dispatch',
+  // Phase 7 has NO tick anywhere in the engine -- grep 'ldx #7'. It was labelled "ray:
+  // marchCol stores" and read 0.0% forever, which is indistinguishable from a phase whose
+  // ticks have been deleted. That ambiguity cost a round of investigation when the temporal
+  // pivot genuinely did remove some tick sites, so the label now says what it is.
+  //
+  // 'input' is NOT tickDelta + readKeys costing 6,000 cycles. Phase 0 opens the instant the
+  // raster wait ends, which is exactly when the top-of-frame IRQ fires, so the IRQ lands in it
+  // systematically. Treat it as IRQ overhead, not input, until someone brackets it properly.
+  const NAMES = ['input (+ the top-of-frame IRQ, see below)', 'table clears', 'subdivision control', '  ray: angle+dispatch',
                  'renderSym', 'fps counter + readout', 'raster wait',
-                 '  ray: marchCol stores', '  interpSpan', '  seamSpan',
+                 '(phase 7: unused)', '  interpSpan', '  seamSpan',
                  '  ray: initial distances', '  ray: DDA loop', '  ray: hit + height'];
   // two columns of five: phase r is at row 4 + r%5, starting at char col 0 or 5. Rows 12-13
   // would sit below the horizon where charset B mirrors the glyphs and they cannot be decoded.

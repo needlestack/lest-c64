@@ -2174,12 +2174,17 @@ ${PIVTRANS ? '        sta pvDY' : '        lda #$00\n        sta pvDY'}
         lda py+1
         sta opyH
         ; ---- the two screen edges, as always ----
+        ; Ticked like every other march. Without these the profiler credited pivPrep's rays to
+        ; whatever phase happened to be open and reported "ray: hit + height + marchCol stores"
+        ; at 0.0% -- which is impossible, and was the tell that the numbers were describing a
+        ; tick layout the code no longer had.
         lda #$00
         sta col
-        jsr marchCol
-        lda #${NLOG - 1}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
+${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        lda #${NLOG - 1}
         sta col
-        jsr marchCol
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
+${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}
         lda #$00
         sta sp
         sta pvLast
@@ -2213,8 +2218,8 @@ pivEnd: lda #${hx(NLOG - 1)}    ; the last span always runs to the right edge
 ; march column A, then push the span (pvLast, A) and make A the new pvLast
 pivCut: pha
         sta col
-        jsr marchCol
-        pla
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
+${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        pla
 pivPush:ldx sp
         pha
         lda pvLast
