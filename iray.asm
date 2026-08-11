@@ -576,8 +576,10 @@ pvRcD:
         lsr
         tax                     ; cell = spanR/4
         lda cstepT,x
-        bne subLp               ; first boundary in a cell wins, as the old adjacent-pair scan did
-        lda tmp
+        and #$03                ; bit 7 is subBnd's "delimiter inside this cell" mark, not a
+        bne subLp               ; position -- first POSITION in a cell still wins
+        lda cstepT,x
+        ora tmp
         sta cstepT,x
         jmp subLp
 subSp:  lda spanR               ; saturation split: a real split, but NOT a face boundary
@@ -674,6 +676,26 @@ subBnd: ldx nbnd                ; remember a column where a new face/saturation 
         lda spanR
         sta bndT,x
         inc nbnd
+        ; ---- and mark the CELL, in bit 7 of cstepT ----
+        ; interpSpan interpolates linearly between delimiters, so between them colH is monotonic
+        ; and a cell's min and max are simply its END columns. That is only true of a cell with no
+        ; delimiter strictly inside it -- two linear pieces can meet in a V. So record which cells
+        ; those are, and renderSym scans all four columns only for them. Measured over 11,960
+        ; cells: 97.0% have no interior delimiter, and the end columns gave the right min/max for
+        ; every one of them.
+        ;
+        ; A delimiter on a cell EDGE does not count: the cell is still one linear piece.
+        ; Bit 7 rather than a second table, because cstepT is already cleared every frame and
+        ; already indexed by cell. Everything reading it for the step position masks #$03.
+        and #$03
+        beq subBDn
+        lda spanR
+        lsr
+        lsr
+        tax
+        lda cstepT,x
+        ora #$80
+        sta cstepT,x
 subBDn: rts
 
 ; ===== pivPrep: seed the subdivision from where last frame's boundaries have moved to =====
@@ -1105,7 +1127,28 @@ rfCbS:  sta rfCw1+1
         ; X is the cell column and the chains index by it, so it has to survive; Y and A are
         ; free here, which is all this needs.
 rfCol:  stx colc
-        ldy col4T,x             ; first logical column of this cell; colH is page-aligned, so
+        ; colH is ONE linear ramp across any cell with no delimiter inside it, so its extremes
+        ; are its END columns and the middle two need not be looked at. 97% of cells, measured.
+        ; The four-way scan below is kept for the other 3%, where two linear pieces meet and the
+        ; extreme can be in the middle.
+        lda cstepT,x
+        bne pmSlow
+        ; X MUST survive this: it is the cell column, and the run-cache test right after pmB3
+        ; is a cmp against cwA,x. The first cut held h3 in X and addressed the cache with a
+        ; wall height instead -- six views went 914 -> 6913 wrong pixels.
+        ldy col4T,x
+        lda colH,y              ; h0
+        cmp colH+3,y            ; vs h3
+        bcs pmFhi
+        sta tmp                 ; h0 < h3: min = h0, max = h3
+        lda colH+3,y
+        sta tmp2
+        jmp pmB3
+pmFhi:  sta tmp2                ; h0 >= h3: max = h0, min = h3
+        lda colH+3,y
+        sta tmp
+        jmp pmB3
+pmSlow: ldy col4T,x             ; first logical column of this cell; colH is page-aligned, so
         lda colH,y              ; the +1/+2/+3 forms cannot cross a page
         sta tmp                 ; running min
         sta tmp2                ; running max
@@ -1190,6 +1233,7 @@ rfCp3:  clc
         sta hh1                 ; right level (0..12)
         ldx colc
         lda cstepT,x
+        and #$03                ; mask subBnd's cell mark; only the POSITION selects a step
         bne rfStep
         lda hh0                 ; single face: ramp, index = wL*16 + wR
         ora hh1                 ; hh0 is already <<4, straight from clmp16
