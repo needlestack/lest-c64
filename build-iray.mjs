@@ -14,7 +14,7 @@
 // 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
 // code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
-import { writeFileSync, readFileSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { assemble } from './asm6502.mjs';
 await import('./d64lib.js');
 const D64 = globalThis.D64;
@@ -47,7 +47,9 @@ for (let a = 0; a < 256; a++) {
 // ONLY these four tables grow. posXT/posYT are sign bits that flip at 0/64/128/192, and
 // absSinT/absCosT feed u for seams which is already +-1-2 columns; both stay on the integer
 // angle, which also keeps `rang` exactly as it was for every other consumer.
-const FINEANG = process.env.FINEANG === '1';
+// ON by default: the byte angle gave only 48 distinct ray directions across 160 columns, which
+// made every wall's far end jump a whole character instead of scrolling. FINEANG=0 restores it.
+const FINEANG = process.env.FINEANG !== '0';
 
 if (FINEANG && process.env.SPRITES !== '0' && process.env.SPRITES !== undefined)
   throw new Error('FINEANG puts its tables in the orb-table space, which SPRITES=1 needs');
@@ -872,7 +874,18 @@ byte-identical duplicate -- that is the 41 codes STEPSTATIC hands back)`
 // PLAN=2 additionally makes every code carry a NESTING PAIR: 01 = black in both, 00 = white in
 // both, 11 = the rows where they differ. Colour RAM picks whether 11 reads black (the fuller
 // half) or white (the sparser half), so one code holds two patterns and the cell chooses.
-const PLAN = +(process.env.PLAN ?? 0);
+// PLAN=3 by default -- the finer ramp index plus the k-medians charset. It needs
+// charset-plan.json, which charsetgen writes and which is NOT tracked (it is derived), so fall
+// back rather than fail if someone builds from a clean checkout:
+//   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs
+const PLAN = (() => {
+  const want = +(process.env.PLAN ?? 3);
+  if (!want) return 0;
+  if (existsSync('./charset-plan.json')) return want;
+  console.error('  no charset-plan.json -- building WITHOUT the k-medians charset (PLAN=0).');
+  console.error('  regenerate: CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs');
+  return 0;
+})();
 const planData = PLAN ? JSON.parse(readFileSync('./charset-plan.json', 'utf8')) : null;
 if (PLAN === 2 && !planData.paired) throw new Error('charset-plan.json has no paired plan: rerun with PAIRED=1');
 if (PLAN === 3 && !planData.fine) throw new Error('charset-plan.json has no fine plan: rerun charsetgen');
