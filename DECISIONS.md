@@ -126,3 +126,39 @@ the horizontal-cap artefact the sloped scheme fixed years ago (1.573 -> 0.606 in
 - **Aggregate per-shape stats hide per-occurrence truth.** cellscan scored one representative's
   (w,kb) for a whole shape class; the browser transcription disagreeing on totals while matching
   counts is what exposed it.
+
+## Unfinished: widening the step slot past one byte
+
+MEASURED and worth doing, NOT implemented. The step index is `slot = qA*(LM*LB) + qM*LB + qB`
+with levels 7/4/9 = 252 states, deliberately just under 256 so it is one byte and one `lda
+stepT1,y`.
+
+Floor per step cell, re-bucketing the walkthrough offline:
+
+  7 x 4 x 9   252  1 page   0.352   <- ships today, and it is the BEST one-byte balance
+  9 x 4 x 7   252  1 page   0.365      the mirror: left/right are nearly symmetric after all
+  6 x 7 x 6   252  1 page   0.388      symmetric-looking, worse -- the edges are worth more
+  9 x 4 x 9   324  2 pages  0.274      both edges exact, qM untouched
+  9 x 6 x 9   486  2 pages  0.228
+  9 x 9 x 9   729  3 pages  0.154      all three exact
+
+Every rebalance inside the byte LOSES. There is no free win; the only lever is spending more
+than a byte. (This also retracts an earlier claim of mine that qM at 4 levels was "underweighted"
+-- it is the optimum for a 256-state budget. qA is the starved axis: 7 -> 9 alone buys more than
+anything done to qM.)
+
+Cost is small: ~2.9 step cells a frame, so ~30 extra cycles per frame. 2-page and 3-page are
+nearly the same work -- one branch vs a 3-way branch.
+
+WHAT IS DONE: the byte guard is lifted, and the fold tables qmLoT / qaLoT / qaHiT exist, sized
+so that `qM*LB + qB` can never carry (max LM*LB - 1 < 256), which is what keeps the whole sum to
+a single 16-bit add.
+
+WHAT IS NOT: the 6502 side. `rfStep` still folds `qA*8 + qM` through `qmT` into one byte, and
+stepT1/2/3 are emitted one page each. Both must change together:
+  1. `lda qIdxAT,x` stops pre-shifting; qA stays a raw index
+  2. slot = `qmLoT[qM] + qB + qaLoT[qA]`, carry into `qaHiT[qA]` -> slotL / slotH
+  3. dispatch on slotH inside the existing kpos dispatch (3 x SLOTPAGES load blocks)
+  4. emit stepT1/2/3 page-aligned at SLOTN bytes each, and find them a home -- 9 pages for
+     9x9x9, which collides with FINEANG at RELOC+0x1300 and PLAN=3 at RELOC+0x2900
+Until then QLEVELS with a product over 256 throws a build error naming exactly this.

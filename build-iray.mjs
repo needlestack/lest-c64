@@ -275,8 +275,17 @@ const QLEV = {
 // 1.535; 0,2,5,8 -> 1.537; 0,3,6,8 -> 1.486). The three-axis key's blind spot -- it cannot see
 // the interior column on the far side of the boundary -- is a design limit, accepted.
 const [LA, LM, LB] = (process.env.QLEVELS ?? '7,4,9').split(',').map(Number);
-if (LA * LM * LB > 256) throw new Error(`step index ${LA}*${LM}*${LB} = ${LA*LM*LB} > 256`);
-if (LA > 8 || LM > 8) throw new Error('qmT is addressed as qA*8 + qM, so LA and LM must be <= 8');
+// The one-byte slot is not a law, it is a budget. Past 256 states the slot becomes 9 or 10 bits
+// and the step tables gain pages, dispatched on the high byte -- the same trick the quarter-angle
+// table uses. Only ~2.9 step cells a frame reach this path, so the ~30 extra cycles are noise.
+// The measured payoff: 7x4x9 = 0.352 px/step-cell, 9x6x9 = 0.228, 9x9x9 = 0.154.
+const SLOTPAGES = Math.ceil(LA * LM * LB / 256);
+if (SLOTPAGES > 1) throw new Error(
+  `step index ${LA}*${LM}*${LB} = ${LA*LM*LB} needs ${SLOTPAGES} pages. The JS side is ready ` +
+  `(qmLoT/qaLoT/qaHiT below) but the 6502 side is NOT: rfStep still folds qA*8+qM into one byte ` +
+  `via qmT, and stepT1/2/3 are emitted one page each. Both must change together -- see the ` +
+  `unfinished work note in DECISIONS.md.`);
+if (LA > 9 || LM > 9 || LB > 9) throw new Error('quantisation levels max out at 9 (exact 0..8)');
 const QA = QLEV[LA], QM = QLEV[LM], QB = QLEV[LB];
 
 const SLOTN = LA * LM * LB;
@@ -1346,11 +1355,14 @@ if (process.env.CELLSCAN === '1') {
 const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
 for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
-// qmT[qA*8 + qM] = qA*36 + qM*6. The 6502 has no multiply, and folding both scales into one
-// lookup keeps the whole index inside a byte (max 5*36 + 5*6 + 5 = 215), so the table stays
-// reachable with plain abs,Y addressing.
+// qA*(LM*LB) exceeds a byte once the slot does, so the single fold table becomes three small
+// ones. qM*LB + qB can never carry (max (LM-1)*LB + LB-1 = LM*LB - 1 < 256 for every legal
+// shape), which is what keeps the whole sum to ONE 16-bit add instead of two.
 const qmT = new Array(64).fill(0);
 for (let a = 0; a < LA; a++) for (let m = 0; m < LM; m++) qmT[a * 8 + m] = a * (LM * LB) + m * LB;
+const qmLoT = [...Array(16)].map((_, m) => (m < LM ? m * LB : 0));
+const qaLoT = [...Array(16)].map((_, a) => (a < LA ? (a * LM * LB) & 255 : 0));
+const qaHiT = [...Array(16)].map((_, a) => (a < LA ? (a * LM * LB) >> 8 : 0));
 // clampT output -> index into each axis's quantisation.
 const qIdxAT = [...Array(CN)].map((_, v) => qIdxA(v + CLO));
 const qIdxMT = [...Array(CN)].map((_, v) => qIdxM(v + CLO));
