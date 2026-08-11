@@ -1444,13 +1444,22 @@ const qIdxBT = [...Array(CN)].map((_, v) => qIdxB(v + CLO));
 // the model can be run somewhere without Node (see iray-model.html): the alternative is a
 // hand-copied second implementation, which is exactly what refShoot was hoisted to avoid.
 if (process.env.MODELJSON === '1') {
+  // Under PLAN the codebook is the plan's, not codeOf -- codeOf keeps only BLANK and SOLID once
+  // placeAll is skipped, so building the glyph table from it yields 2 patterns and a blank page.
   const patOfCode3 = (() => { const m = new Map();
     for (const [k, c] of codeOf) if (!m.has(c)) m.set(c, k.split(',').map(Number));
+    planPats.forEach((p, i) => m.set(2 + i, p));
     return m; })();
   writeFileSync('./model.json', JSON.stringify({
     NLOG, FOV, NCELL, CLO, CHI, CN, LA, LM, LB,
     map: [...map], runW: [...runW], runE: [...runE], runN: [...runN], runS: [...runS],
     rampT, stepT, qIdxAT, qIdxMT, qIdxBT,
+    // PLAN=3's actual tables, so the browser page models the SHIPPED renderer rather than a
+    // single-index approximation of it. Without these the page silently shows a different engine.
+    plan: PLAN,
+    rampTlo, rampThi, stepTlo, stepThi,
+    rampThr: PLAN === 3 ? [...Array(256)].map((_, i) => planThr.get('r' + i) ?? 0) : null,
+    stepThr: PLAN === 3 ? [0, 1, 2].map(k => [...Array(SLOTN)].map((_, i) => planThr.get(`s${k}.${i}`) ?? 0)) : null,
     codePat: [...Array(256)].map((_, c) => patOfCode3.get(c) ?? null),
     cellCodes: CELLCODES, seam0: SEAM0, blank: BLANK, solid: SOLID,
   }));
