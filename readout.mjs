@@ -65,6 +65,16 @@ const readChar = (C, R) => {
 
 const field = (R, n) => [...Array(n)].map((_, i) => readChar(36 + i, R)).join('');
 
+// RAYCNT=1 builds print the frame's marchCol count as 'E' + two hex digits on row 3. It is the
+// only direct read on whether a subdivision change did what it claimed: fps is raster-quantised
+// and averages over every other phase, so a real change in ray count can vanish inside it.
+if (process.env.RAYS) {
+  const h = readChar(38, 3) + readChar(39, 3);
+  const n = readChar(38, 4) + readChar(39, 4);
+  console.log(`${f}: rays/frame = ${h} (${parseInt(h, 16)})   hints available = ${n} (${parseInt(n, 16)})`);
+  process.exit(0);
+}
+
 // PROF=1: the PROFILE build prints 7 phase totals as 4 hex digits each, rows 4-10, cols 0-3.
 // The value is mean raster LINES per frame (accumulated over exactly 256 frames); one line
 // is 65 cycles.

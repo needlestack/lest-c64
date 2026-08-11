@@ -77,6 +77,46 @@ for (let c = 0; c < NLOG; c++) {
   rayOffQ.push(Math.round(Math.atan(camX) / (2 * Math.PI) * 1024));   // signed, |v| < 128
   cosCorr.push(Math.min(255, Math.round(256 / Math.sqrt(1 + camX * camX))));
 }
+// ---- PIVOT: seed the subdivision from where last frame's boundaries have moved to ----
+// The subdivision bisects, so it spends ~7.3 marches locating each boundary from scratch every
+// frame -- and boundaries barely move between frames. Predict each one forward and start the
+// search from a ONE-COLUMN bracket around the prediction instead of from the whole screen.
+// Modelled in analyze-pivot.mjs at 22.6 -> 15.0 marches a frame (-33%), 0 boundaries lost.
+//
+// It cannot lose a boundary, structurally: the extra cut points only ever SPLIT a span, and
+// every sub-span still gets the same face-id test, so this finds a superset of what bisection
+// finds. A bad prediction costs probes, never pixels -- which is what makes w=0 safe.
+//
+// prediction (all fixed point, see analyze-pivot.mjs where the scales were verified):
+//   q' = rayOffQS[c] - dqa + ((dxv*sin(a) - dyv*cos(a)) * rcp + 2^14 >> 15)
+//        \___ where it was ___/  \_ rotation _/  \______ translation, first order ______/
+// then qToColT turns q' back into a column. The 2^14 is a ROUND: a bare >>15 truncates toward
+// -inf, which is -0.4 of a column every frame and at w=0 there is no slack for it.
+// Requires FINEANG (for rayOffQS) and PLAN=3 (for the three table pages it frees; see the
+// emission site). Both are the defaults, so this is on unless something else is being tested.
+const PIVOT = FINEANG && +(process.env.PLAN ?? 3) === 3 && process.env.PIVOT !== '0';
+// signed sin * 128, by BYTE angle. absSinT/absCosT hold the magnitudes but put the sign in a
+// separate table, which is a second lookup and a branch on a path that multiplies twice per
+// boundary per frame. Only SIN is stored: cos(a) = sin(a + 64) at 256 units to the turn, and
+// the quarter-turn add is four cycles against a whole page of table -- which matters, because
+// the three pages below are exactly the three the step tables vacate under PLAN=3.
+const sinS = [];
+for (let a = 0; a < 256; a++)
+  sinS.push(Math.max(-128, Math.min(127, Math.round(Math.sin(a / 256 * 2 * Math.PI) * 128))) & 255);
+// quarter-unit offset (+128 bias) -> column. The inverse of rayOffQS, and the reason the
+// prediction needs no divide: the rectilinear spacing is baked in here rather than solved for.
+// Offsets outside the FOV clamp to the screen edge, which is what should happen to a boundary
+// that has rotated off screen -- it lands on column 0 or 159 and merges away.
+const qToCol = [...Array(256)].map((_, i) => {
+  const q = i - 128, camX = Math.tan(q / 1024 * 2 * Math.PI);
+  return Math.max(0, Math.min(NLOG - 1, Math.round(CTR + camX / TANHALF * CTR)));
+});
+// 163/d as a byte, indexed by d in 1/16-cell steps. 163 is what makes the final shift 2^15.
+// Saturates at d = 0.639 cells; nearer than that the correction is under-applied and that
+// boundary falls back to bisection, which the structural argument above makes harmless.
+const RCPK = 163;
+const rcpD = [...Array(256)].map((_, i) =>
+  i === 0 ? 255 : Math.max(1, Math.min(255, Math.round(RCPK * 16 / i))));
 // Half-height from distance. Indexed by perpDist>>3 (1/32-cell units); 88 half-px at one
 // cell. Left UNCAPPED at 254 so merged spans interpolate the true (linear) height --
 // prepCells caps at 100 on draw.
@@ -1358,6 +1398,10 @@ const FLATSPAN = flag('FLATSPAN');
 // four. Renders slightly wrong; it prices the comparison half of prepCells, leaving the loop
 // overhead in place so the two can be told apart.
 const NOMINMAX = flag('NOMINMAX');
+// RAYCNT=1 shows the number of marchCol calls this frame as two hex digits on row 3. The one
+// number that says whether a change to the SUBDIVISION did what it claimed -- fps cannot, since
+// it is raster-quantised and mixes in every other phase.
+const RAYCNT = flag('RAYCNT');
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
@@ -1501,16 +1545,11 @@ erow    = $78                   ; current row inside the edge run
 jv      = $79                   ; 2 bytes: chain entry vector, then the edge store pointer
 ep2     = $7b                   ; 2 bytes: mirrored-row store pointer
 bufOff  = $7d                   ; 0 or 14: selects the chain set for the buffer being drawn
-nbnd    = $14                   ; how many span delimiters the search pinned
 nbnd    = $14                   ; delimiters the search pinned this frame
-bcur    = $18
+bcur    = $18                   ; subIns/subEmt: the delimiter being sorted, and its swap
 bswp    = $19
 bcnt    = $08
-nbnd    = $14                   ; delimiters the search pinned this frame
-bcur    = $18
-bswp    = $19
-bcnt    = $08
-cell0   = $13                   ; the player's own cell index, constant for the frame
+cell0   = $13                  ; the player's own cell index, constant for the frame
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
@@ -1591,7 +1630,36 @@ pfRow   = $c934
 pfDone  = $c935
 seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
-bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
+${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
+; Three ${hx(NBND)}-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
+; top of the frame and only written afterwards, as the search pins this frame's boundaries --
+; so one buffer is enough and no copy is needed.
+pvBnd   = ${hx16(RELOC + 0x2700)}             ; the column the boundary was pinned at
+pvAng   = ${hx16(RELOC + 0x2700 + NBND)}             ; its WORLD bearing as a byte angle, pa + rayOffT[col]
+pvRcp   = ${hx16(RELOC + 0x2700 + 2 * NBND)}             ; 163/distance, for the translation term
+pvN     = $cb00                 ; how many of them there are; 0 disables the hint for a frame
+opaL    = $cb01                 ; the 16-bit angle those bearings were taken at
+opaH    = $cb02
+opxL    = $cb03                 ; ... and the position, so the translation term has a delta
+opxH    = $cb04
+opyL    = $cb05
+opyH    = $cb06
+dqa     = $cb07                 ; this frame's rotation, quarter-units, signed
+pvDX    = $cb08                 ; this frame's translation, 1/256 cells, signed bytes.
+pvDY    = $cb09                 ;   NOT dxv/dyv -- interpSpan already owns those as its
+                                ;   Bresenham span width and error step.
+pvI     = $cb0a                 ; index while walking the hints, and the last cut emitted
+pvLast  = $cb0b
+pvTL    = $cb0c                 ; the signed 16-bit term, and the top two bytes of the
+pvTH    = $cb0d                 ;   24-bit product it feeds
+pvPH    = $cb0e
+pvPB    = $cb0f
+pvSgn   = $cb10                 ; sign of the term, carried around the unsigned multiply
+pvI2    = $cb11                 ; the hint index, saved across mul8 (which needs X)
+rayN    = $cb14                 ; RAYCNT: marchCol calls this frame
+pvNdbg  = $cb13                 ; RAYCNT: pvN as pivPrep saw it, before it is cleared
+pvYs    = $cb12                 ; the bearing, saved across the first multiply
+` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
 
@@ -1739,20 +1807,23 @@ ${FINEANG ? `        lda pa                  ; pa*4 once a frame, not once a ray
         sta paqH
 ` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
-        sta col
+${RAYCNT ? '        sta rayN\n' : ''}
+${PIVOT ? `        jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
+                                ; and leaves the stack holding the spans between them
+` : `        sta col
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 0
 ${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #${NLOG - 1}
         sta col
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 79
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 159
 ${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #$00
         sta stackLT
         lda #${NLOG - 1}
-        sta stackRT             ; push (0,79)
+        sta stackRT             ; push (0,159)
         lda #$01
         sta sp
-subLp:  ldx sp
+`}subLp:  ldx sp
         beq subDn
         dex
         stx sp
@@ -1832,7 +1903,70 @@ subCv:  lda spanR
         sta seamT,x
 subCn:` : ''}
         jsr subBnd              ; a face starts here: remember it as a span delimiter
-        lda spanR
+${PIVOT ? `        ; ---- and remember it as NEXT frame's hint ----
+        ; Recorded HERE rather than from bndT afterwards, because bndT also holds saturation
+        ; splits and only real face boundaries are worth predicting. Three bytes: the column,
+        ; the WORLD bearing it was seen at (so the rotation term is a plain subtract next
+        ; frame), and 163/distance for the translation term. The distance costs nothing to
+        ; obtain -- castRay already parked it in remLoT/remHiT for calcU.
+        ; Kept SORTED by column, by insertion. The subdivision discovers boundaries in stack
+        ; order, not left to right, and pivPrep needs them ascending: it walks them once,
+        ; emitting cuts, and drops any that would not increase. Unsorted, almost every hint
+        ; failed that test and the frame silently fell back to plain bisection -- which is
+        ; exactly what the first measurement showed, 26 rays with the pivot and 26 without.
+        ; (The JS model hid this: it called .sort() on the cut list, so it was measuring an
+        ; ordering the 6502 never had.) ~6 entries, so insertion is a few hundred cycles.
+        ldx pvN
+        cpx #${hx(NBND)}
+        bcs pvRcD               ; hint list full: the rest of this frame's boundaries go
+        lda spanL               ; unpredicted, which costs probes and nothing else
+                                ; spanL, NOT spanR. The boundary lies BETWEEN the two, and
+                                ; pivPrep brackets a hint p with cuts at p and p+1 -- so the
+                                ; hint has to be the LEFT column or every bracket sits one
+                                ; column past its boundary and catches nothing. bndT keeps
+                                ; storing spanR; that is a span delimiter, a different thing.
+        sta tmp2
+pvInsL: txa
+        beq pvInsD
+        lda pvBnd-1,x
+        cmp tmp2
+        bcc pvInsD              ; found the slot: everything left of it is smaller
+        sta pvBnd,x             ; A still holds pvBnd[x-1] -- cmp does not disturb it
+        lda pvAng-1,x
+        sta pvAng,x
+        lda pvRcp-1,x
+        sta pvRcp,x
+        dex
+        jmp pvInsL
+pvInsD: lda tmp2
+        sta pvBnd,x
+        tay
+        lda rayOffT,y
+        clc
+        adc pa
+        sta pvAng,x
+        lda remHiT,y
+        cmp #16
+        bcs pvRcFar             ; 16+ cells: the translation term is under a quarter-unit at
+        asl                     ; any plausible speed, so a constant is as good as a lookup
+        asl
+        asl
+        asl
+        sta tmp
+        lda remLoT,y
+        lsr
+        lsr
+        lsr
+        lsr
+        ora tmp                 ; distance in 1/16 cells
+        tay
+        lda rcpDT,y
+        jmp pvRcS
+pvRcFar:lda #10
+pvRcS:  sta pvRcp,x
+        inc pvN
+pvRcD:
+` : ''}        lda spanR
         and #$03
         beq subLp               ; boundary on a cell edge: the two cells simply differ, and
                                 ; cstepT can only name an interior column (1..3)
@@ -1940,7 +2074,308 @@ subBnd: ldx nbnd                ; remember a column where a new face/saturation 
         sta bndT,x
         inc nbnd
 subBDn: rts
+${PIVOT ? `
+; ===== pivPrep: seed the subdivision from where last frame's boundaries have moved to =====
+; Bisection locates each boundary from scratch every frame, ~7.3 marches each, and boundaries
+; barely move between frames. This predicts each one forward and hands the search a ONE-COLUMN
+; bracket around it instead of the whole screen. The spans BETWEEN brackets merge on their first
+; pop and cost nothing, so the win is the whole search tree above each boundary.
+;
+; It cannot lose a boundary: extra cut points only ever SPLIT a span, and every sub-span still
+; gets the same face-id test in subLp -- so this finds a superset of what bisection finds. That
+; is why the bracket can be one column wide with no safety margin: a wrong prediction costs
+; probes, never pixels. Modelled in analyze-pivot.mjs at 22.6 -> 15.0 marches/frame.
+;
+; With pvN = 0 -- first frame, or PIVOT off -- it degenerates to exactly the old seeding.
+pivPrep:
+        ; ---- rotation, quarter-units: (pa:paF - opa) >> 6 ----
+        lda paF
+        sec
+        sbc opaL
+        sta pvTL
+        lda pa
+        sbc opaH
+        sta pvTH
+        asl pvTL                ; <<2 and take the high byte IS >>6, sign intact: DT_MAX caps
+        rol pvTH                ; the turn at 32 ticks x 192 = 6144, and 6144<<2 still fits 16
+        asl pvTL                ; bits. Without that cap this would silently wrap.
+        rol pvTH
+        lda pvTH
+        sta dqa
+        ; ---- translation, 1/256 cells ----
+        lda px
+        sec
+        sbc opxL
+        sta pvTL
+        lda px+1
+        sbc opxH
+        sta pvTH
+        jsr pvClmp
+        sta pvDX
+        lda py
+        sec
+        sbc opyL
+        sta pvTL
+        lda py+1
+        sbc opyH
+        sta pvTH
+        jsr pvClmp
+        sta pvDY
+        ; ---- this viewpoint becomes next frame's reference ----
+        lda paF
+        sta opaL
+        lda pa
+        sta opaH
+        lda px
+        sta opxL
+        lda px+1
+        sta opxH
+        lda py
+        sta opyL
+        lda py+1
+        sta opyH
+        ; ---- the two screen edges, as always ----
+        lda #$00
+        sta col
+        jsr marchCol
+        lda #${NLOG - 1}
+        sta col
+        jsr marchCol
+        lda #$00
+        sta sp
+        sta pvLast
+        sta pvI
+${RAYCNT ? '        lda pvN\n        sta pvNdbg\n' : ''}pivLp:  lda pvI
+        cmp pvN
+        bcs pivEnd
+        ldx pvI
+        jsr pivOne              ; A = where hint X is predicted to be now
+        cmp pvLast
+        beq pivNx               ; predictions must come out strictly increasing, or the spans
+        bcc pivNx               ; would overlap and the stack would describe nonsense. Rotation
+        cmp #${hx(NLOG - 1)}    ; is monotonic but the per-boundary translation term is not, so
+        bcs pivNx               ; anything out of order is simply dropped -- it costs one
+        pha                     ; unpredicted boundary, not a wrong image.
+        jsr pivCut
+        pla
+        clc
+        adc #$01
+        cmp #${hx(NLOG - 1)}
+        bcs pivNx
+        jsr pivCut
+pivNx:  inc pvI
+        bne pivLp               ; always: pvI < NBND
+pivEnd: lda #${hx(NLOG - 1)}    ; the last span always runs to the right edge
+        jsr pivPush
+        lda #$00
+        sta pvN                 ; this frame records its own boundaries from scratch
+        rts
 
+; march column A, then push the span (pvLast, A) and make A the new pvLast
+pivCut: pha
+        sta col
+        jsr marchCol
+        pla
+pivPush:ldx sp
+        pha
+        lda pvLast
+        sta stackLT,x
+        pla
+        sta stackRT,x
+        sta pvLast
+        inx
+        stx sp
+        rts
+
+; pvClmp: signed 16-bit pvTL/pvTH -> A, saturating to -128..127 rather than wrapping. A wrap
+; here would turn a large forward step into a large BACKWARD prediction, which is worse than
+; no prediction at all.
+pvClmp: lda pvTH
+        beq pvcP
+        cmp #$ff
+        beq pvcN
+        lda pvTH
+        bmi pvcLo
+        lda #$7f
+        rts
+pvcLo:  lda #$80
+        rts
+pvcP:   lda pvTL                ; high byte 0: fits iff the low byte is not already negative
+        bpl pvcD
+        lda #$7f
+        rts
+pvcN:   lda pvTL                ; high byte $ff: fits iff the low byte IS negative
+        bmi pvcD
+        lda #$80
+pvcD:   rts
+
+; pivOne: X = hint index -> A = predicted column.
+;   q' = rayOffQS[col] - dqa + ((pvDX*sin(a) - pvDY*cos(a)) * rcp + 2^14 >> 15)
+; and qToColT turns q' back into a column, which is why there is no divide anywhere here --
+; the rectilinear column spacing is baked into that table.
+pivOne: stx pvI2
+        ldy pvAng,x
+        jsr pivTerm             ; pvTL/pvTH = the signed 16-bit term
+        lda #$00
+        sta pvSgn
+        lda pvTH
+        bpl pv1p
+        lda #$00                ; |term|, sign remembered
+        sec
+        sbc pvTL
+        sta pvTL
+        lda #$00
+        sbc pvTH
+        sta pvTH
+        lda #$ff
+        sta pvSgn
+pv1p:   ldx pvI2                ; |term| * rcp, 16x8 -> 24 bits
+        lda pvRcp,x
+        sta mq
+        lda pvTL
+        jsr mul8                ; the product's LOW byte is never read: the >>15 below takes
+        lda phi                 ; only bits 15..22, so byte 0 cannot reach the result
+        sta pvPH
+        lda #$00
+        sta pvPB
+        lda pvTH
+        beq pv1n                ; high byte zero -- the common case, one multiply not two
+        jsr mul8                ; mq still holds rcp
+        clc
+        lda pvPH
+        adc plo
+        sta pvPH
+        lda phi
+        adc #$00
+        sta pvPB
+pv1n:   lda pvPH                ; + 2^14: a bare >>15 truncates toward -inf, and -0.4 of a
+        clc                     ; column every frame is enough to miss at a one-column bracket
+        adc #$40
+        sta pvPH
+        lda pvPB
+        adc #$00
+        sta pvPB
+        lda pvPH                ; >>15 = (pvPB<<1) | bit 7 of pvPH
+        asl
+        lda pvPB
+        rol
+        ldy pvSgn
+        bpl pv1s
+        eor #$ff                ; put the sign back
+        clc
+        adc #$01
+pv1s:   sta pvTL                ; daq, signed byte -> sign-extend for the 16-bit sum
+        ldy #$00
+        bit pvTL
+        bpl pv1e
+        ldy #$ff
+pv1e:   sty pvTH
+        ldx pvI2                ; + rayOffQS[col], sign-extended
+        ldy pvBnd,x
+        lda rayOffQS,y
+        clc
+        adc pvTL
+        sta pvTL
+        lda rayOffQS,y
+        and #$80
+        beq pv1f
+        lda #$ff
+pv1f:   adc pvTH                ; carry from the low add is still live
+        sta pvTH
+        lda pvTL                ; - dqa, sign-extended
+        sec
+        sbc dqa
+        sta pvTL
+        lda dqa
+        and #$80
+        beq pv1g
+        lda #$ff
+pv1g:   sta tmp
+        lda pvTH
+        sbc tmp
+        sta pvTH
+        jsr pvClmp              ; off-screen offsets saturate, so a boundary that rotated out
+        clc                     ; of view lands on column 0 or 159 and merges away
+        adc #$80
+        tay
+        lda qToColT,y
+        rts
+
+; pivTerm: Y = the boundary's world bearing -> pvTL/pvTH = pvDX*sin(a) - pvDY*cos(a), signed.
+; Two unsigned multiplies with the signs carried in pvSgn, because mul8 is a quarter-square
+; table and only takes magnitudes.
+pivTerm:lda #$00
+        sta pvTL
+        sta pvTH
+        sta pvSgn
+        sty pvYs
+        lda sinST,y
+        jsr pvNeg
+        sta mq
+        lda pvDX
+        jsr pvNeg
+        jsr mul8
+        lda pvSgn
+        bmi pvT1s
+        clc                     ; term += |dx*sin|
+        lda pvTL
+        adc plo
+        sta pvTL
+        lda pvTH
+        adc phi
+        sta pvTH
+        jmp pvT2
+pvT1s:  sec                     ; term -= |dx*sin|
+        lda pvTL
+        sbc plo
+        sta pvTL
+        lda pvTH
+        sbc phi
+        sta pvTH
+pvT2:   lda #$00
+        sta pvSgn
+        lda pvYs                ; cos(a) = sin(a + a quarter turn); no second table
+        clc
+        adc #$40
+        tay
+        lda sinST,y
+        jsr pvNeg
+        sta mq
+        lda pvDY
+        jsr pvNeg
+        jsr mul8
+        lda pvSgn               ; this product is SUBTRACTED, so the senses invert
+        bmi pvT2a
+        sec
+        lda pvTL
+        sbc plo
+        sta pvTL
+        lda pvTH
+        sbc phi
+        sta pvTH
+        rts
+pvT2a:  clc
+        lda pvTL
+        adc plo
+        sta pvTL
+        lda pvTH
+        adc phi
+        sta pvTH
+        rts
+
+; pvNeg: A signed -> A = |A|, flipping pvSgn's bit 7 when it was negative
+pvNeg:  cmp #$80
+        bcc pvNgD
+        eor #$ff
+        clc
+        adc #$01
+        pha
+        lda pvSgn
+        eor #$80
+        sta pvSgn
+        pla
+pvNgD:  rts
+` : ''}
 subFin:
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
@@ -3129,7 +3564,7 @@ cuXp:   clc
 
 ` : ''}; ================= march one column: cast + store colH/idT =================
 marchCol:
-        jsr castRay
+${RAYCNT ? '        inc rayN\n' : ''}        jsr castRay
         ldx col
         lda pp
         sta colH,x
@@ -3941,7 +4376,33 @@ ${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still 
         lda py
         and #$0f
         jsr ddPut
-ddAng:  lda #$02
+${RAYCNT ? `        lda #$03
+        jsr setRow
+        ldy #37
+        lda #14                 ; 'E' -- rays this frame, in hex
+        jsr ddPut
+        lda rayN
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda rayN
+        and #$0f
+        jsr ddPut
+        lda #$04                ; row 4: how many hints pivPrep had to work with. If this is
+        jsr setRow              ; 0 every frame the prediction is not running at all, which
+        ldy #38                 ; no amount of staring at the ray count would reveal.
+        lda pvNdbg
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda pvNdbg
+        and #$0f
+        jsr ddPut
+` : ''}ddAng:  lda #$02
         jsr setRow
         ldy #37
         lda #10                 ; 'A'
@@ -4095,11 +4556,25 @@ rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
         * = ${hx16(RELOC + 0x2400)}
-${PLAN === 3 ? '' : `stepT1: ${chunk(stepT[0]).trim()}`}
+${PLAN === 3 ? '' : `stepT1: ${chunk(stepT[0]).trim()}`}${PIVOT ? `
+; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
+; lo/hi pair up at 0x2900 and emit nothing here. There is no room above the tables (the
+; profiler already claims 0x3600 and $c000 is stackLT), so this is the space there is, and it
+; is why PIVOT requires PLAN=3.
+;
+; qToColT: a quarter-unit offset (biased by 128) straight back to a column -- the inverse of
+; rayOffQS. This table is what keeps the prediction divide-free; the rectilinear column
+; spacing lives here instead of in an atan.
+qToColT: !byte ${qToCol.join(',')}` : ''}
         * = ${hx16(RELOC + 0x2500)}
-${PLAN === 3 ? '' : `stepT2: ${chunk(stepT[1]).trim()}`}
+${PLAN === 3 ? '' : `stepT2: ${chunk(stepT[1]).trim()}`}${PIVOT ? `
+sinST:  !byte ${sinS.join(',')}` : ''}
         * = ${hx16(RELOC + 0x2600)}
-${PLAN === 3 ? '' : `stepT3: ${chunk(stepT[2]).trim()}`}
+${PLAN === 3 ? '' : `stepT3: ${chunk(stepT[2]).trim()}`}${PIVOT ? `
+; 163/d as a byte, d in 1/16 cells. 163 is the constant that makes the final shift exactly
+; 2^15. Saturates at d = 0.639 cells, where the correction is under-applied and that boundary
+; falls back to bisection -- harmless, because a missed prediction can only cost probes.
+rcpDT:  !byte ${rcpD.join(',')}` : ''}
 ${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
 ; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its
 ; corner line only when the run across the boundary is one of these; every other run-to-run
