@@ -1047,7 +1047,15 @@ const edgeCode = p => { const c = codeFor(p);
 // not impossible ones -- so they fall back to the codeword nearest the pattern the old linear
 // model would have drawn. nearestCode is also what keeps a plan valid after a map edit.
 const planL1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);
-const planPats = PLAN ? (PLAN === 2 ? planData.paired.codes.map(c => c[0]) : planData.codes) : [];
+// MUST be the codebook the glyphs were actually built from. This read planData.codes even under
+// PLAN=3, whose glyphs come from planData.fine.codes -- a DIFFERENT array -- so nearestCode
+// returned an index into the wrong list and every fallback slot pointed at an unrelated glyph.
+// It only shows on buckets the walkthrough never reached (71 of 1012), which is why it survived
+// the six-view check and turned up as a ramp facing the wrong way at one viewpoint.
+const planPats = !PLAN ? []
+  : PLAN === 2 ? planData.paired.codes.map(c => c[0])
+  : PLAN === 3 ? planData.fine.codes
+  : planData.codes;
 const nearestCode = p => { let bi = 0, bd = 99;
   planPats.forEach((q, i) => { const d = planL1(p, q); if (d < bd) { bd = d; bi = i; } });
   return 2 + bi; };
