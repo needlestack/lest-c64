@@ -69,10 +69,14 @@ const field = (R, n) => [...Array(n)].map((_, i) => readChar(36 + i, R)).join(''
 // The value is mean raster LINES per frame (accumulated over exactly 256 frames); one line
 // is 65 cycles.
 if (process.env.PROF) {
-  const NAMES = ['input', 'table clears', 'geometry (cast+interp+seams)', 'prepCells',
-                 'renderSym', 'fps counter + readout', 'raster wait'];
-  const vals = [...Array(7)].map((_, r) =>
-    parseInt([...Array(4)].map((_, i) => readChar(i, 4 + r)).join(''), 16));
+  const NAMES = ['input', 'table clears', 'subdivision control', '(spare)',
+                 'renderSym', 'fps counter + readout', 'raster wait',
+                 '  marchCol (castRay)', '  interpSpan', '  seamSpan'];
+  // two columns of five: phase r is at row 4 + r%5, starting at char col 0 or 5. Rows 12-13
+  // would sit below the horizon where charset B mirrors the glyphs and they cannot be decoded.
+  const vals = [...Array(10)].map((_, r) =>
+    parseInt([...Array(4)].map((_, i) =>
+      readChar((r < 5 ? 0 : 5) + i, 4 + (r % 5))).join(''), 16));
   const tot = vals.reduce((a, b) => a + b, 0);
   console.log(`${f}\n`);
   console.log('  phase                          lines    cycles    share');

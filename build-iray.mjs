@@ -2245,7 +2245,7 @@ cqLo    = $cc00                 ; colour queue: address low, high, and the value
 cqHi    = $cc40                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $cc80                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
+pfAcc   = $c900                 ; PROFILE: 10 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $c922
 pfCurH  = $c92c                 ; ninth raster bit, current and previous
@@ -2509,12 +2509,12 @@ ${FINEANG ? `        lda pa                  ; pa*4 once a frame, not once a ray
 ` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
         sta col
-        jsr marchCol            ; column 0
-${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 0
+${PROFILE && !PROFILE1 ? '        ldx #7\n        jsr pfTick              ; marchCol\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #${NLOG - 1}
         sta col
-        jsr marchCol            ; column 79
-${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 79
+${PROFILE && !PROFILE1 ? '        ldx #7\n        jsr pfTick              ; marchCol\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #$00
         sta stackLT
         lda #${NLOG - 1}
@@ -2630,8 +2630,8 @@ subMid: lda spanL
         ror                     ; ROR not LSR: at 160 columns spanL+spanR reaches 318, so the
                                 ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
-        jsr marchCol
-${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
+${PROFILE && !PROFILE1 ? '        ldx #7\n        jsr pfTick              ; marchCol\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         ldx sp
         lda spanL
         sta stackLT,x
@@ -2745,8 +2745,8 @@ cfLp:   inx
 cfDn:
 ` : `        ; cellFaceT/cellFace2T are not built: orbPaint was their only reader, so with no
         ; sprites this whole per-cell fill is dead work in the subdivision's hot path.
-`}        jsr interpSpan
-${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}subFDn: rts
+`}${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr interpSpan
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #8\n        jsr pfTick              ; interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}${PROFILE && !PROFILE1 && SEAMS ? '        ldx #9\n        jsr pfTick              ; seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
         cpx #${hx(NBND)}
@@ -6042,12 +6042,23 @@ ${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the 
 ; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
 pfShow: lda #$00
         sta pfRow
+        ; TWO COLUMNS of five. Ten rows starting at 4 would reach rows 12-13, which are BELOW
+        ; the horizon -- the raster split swaps to the vertically flipped charset B there, so the
+        ; digits render mirrored and cannot be read back. Everything must stay above row 12.
 psLp:   lda pfRow
-        clc
+        cmp #$05
+        bcc psRw
+        sec
+        sbc #$05
+psRw:   clc
         adc #$04
         jsr setRow
         ldy #$00
-        lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /256)
+        lda pfRow
+        cmp #$05
+        bcc psCol
+        ldy #$05                ; second column, five chars across
+psCol:  lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /256)
         asl
         clc
         adc pfRow
@@ -6074,7 +6085,7 @@ psLp:   lda pfRow
         jsr ddPut
         inc pfRow
         lda pfRow
-        cmp #$07
+        cmp #$0a
         bcc psLp
         rts
 
