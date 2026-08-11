@@ -1340,11 +1340,27 @@ const MEASURE = flag('MEASURE');
 // Oscillating rather than walking: moveFwd stops dead at a wall, so a plain walk test decays
 // into a standing test after a few seconds and reports a flattering number for the wrong reason.
 // Out 32 frames, back 32, while turning, cannot wedge.
+// It does NOT hop viewpoints, and that is the whole point. The first version reused spinStep,
+// which hops on the angle wrap every 256 frames -- exactly the period of the ray-count mean.
+// So each sample reported ONE viewpoint, and WHICH one depended on how many frames had elapsed
+// in the cycle budget, which depends on the frame rate, which is the thing being measured. Three
+// configs landed on three different scenes and produced 9 / 16 / 8 rays; I nearly reported that
+// as proof the translation term works. It compares nothing.
+//
+// Fixed viewpoint + 1 angle unit a frame + a 16-frame oscillation means a 256-frame window is
+// exactly one full rotation and a whole number of oscillations -- identical in composition for
+// every build, whatever its frame rate. PX/PY choose the scene.
 const TOUR = flag('TOUR');
-const SPIN = flag('SPIN') || TOUR;      // TOUR reuses spinStep and its viewpoint table
+const SPIN = flag('SPIN');
 // Viewpoints a SPIN benchmark cycles through, one per full rotation: the start corridor, the
 // busiest cell on the map, and two rooms away from both.
-const SPINPOS = [[1.5, 1.5], [8.5, 4.5], [12.5, 9.5], [9.5, 12.5]];     // auto-rotate, ignore input
+// auto-rotate, ignore input. TOUR gets a FIFTH stop that SPIN does not: the four spin
+// viewpoints are all simple scenes -- 8-9 rays a frame against 28 at the corridor around
+// (3.5,13.5) -- so a tour of them exercises the pivot's code without exercising its workload,
+// and reported +1.0% where the hard viewpoint alone gives +25%. SPIN's four are deliberately
+// left untouched: fps.sh's ruler changed once before (5f07f0a) and every number from before it
+// became incomparable. Do not repeat that to make a graph look better.
+const SPINPOS = [[1.5, 1.5], [8.5, 4.5], [12.5, 9.5], [9.5, 12.5]];    // auto-rotate, ignore input
 const NORAY = flag('NORAY');   // skip marching/subdivision
 const NOFILL = flag('NOFILL'); // skip renderSym (fill)
 // DUMPH: print colH as hex over the top 8 rows, so the interpolated heights can be read
@@ -2951,7 +2967,7 @@ ssIx:   stx spinIx
         lda spinYH,x
         sta py+1
 ssDn:   rts
-${TOUR ? `
+${false ? `
 ; tourStep: turn AND translate. Drives px/py DIRECTLY rather than calling moveFwd, because
 ; moveFwd stops dead at a wall and a benchmark that quietly stops moving still prints a
 ; confident number. The first cut of this used moveFwd and read 7 rays/frame for every config
@@ -2983,7 +2999,29 @@ tourStep:
         sbc #$00
         sta py+1
         rts
-tourF:  lda px
+tourF:  rts
+` : ''}` : ''}
+${TOUR ? `
+; ---- tourStep: rotate AND translate, at a FIXED viewpoint ----
+; The benchmark motion that actually exercises the temporal pivot. Rotation alone (SPIN) leaves
+; the prediction's translation term -- two multiplies, the signs, the reciprocal, the 24-bit
+; product -- running on zero every frame, which is how it went untested into a commit.
+;
+; One angle unit a frame and a 16-frame position cycle, so 256 frames is exactly one rotation
+; and 16 whole oscillations. Every 256-frame window is therefore IDENTICAL in composition no
+; matter how fast the build runs, which is what makes two configs comparable. No viewpoint hop,
+; for the same reason -- see the TOUR comment above for how that went the first time.
+;
+; px/py are driven directly rather than through moveFwd: moveFwd stops at a wall, and a
+; benchmark that silently stops moving still prints a confident number. +-0.25 cells around a
+; cell centre clears the 0.102 collision box, so it cannot stop.
+tourStep:
+        inc pa
+        inc tourC
+        lda tourC
+        and #$08                ; 8 frames out, 8 back: period 16, net displacement zero
+        bne tourBk
+        lda px
         clc
         adc #$08
         sta px
@@ -2998,7 +3036,22 @@ tourF:  lda px
         adc #$00
         sta py+1
         rts
-` : ''}` : ''}; ---- tickDelta: how much time has passed, in 60ths ----
+tourBk: lda px
+        sec
+        sbc #$08
+        sta px
+        lda px+1
+        sbc #$00
+        sta px+1
+        lda py
+        sec
+        sbc #$08
+        sta py
+        lda py+1
+        sbc #$00
+        sta py+1
+        rts
+` : ''}; ---- tickDelta: how much time has passed, in 60ths ----
 ; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
 ; down an empty corridor, slowest where the geometry is dense, which is exactly backwards.
 ; frameCnt is bumped by the top-of-frame raster IRQ, so it counts 60ths of a second no matter
