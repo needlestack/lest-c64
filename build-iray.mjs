@@ -2248,6 +2248,10 @@ cqCol   = $cc80                 ; NOT double buffered, so an inline write repain
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $c922
+pfCurH  = $c92c                 ; ninth raster bit, current and previous
+pfPrvH  = $c92d
+pfTmp   = $c92e
+pfTmp2  = $c92f
 pfN     = $c923                 ; frames accumulated so far (2 bytes)
 pfCurF  = $c925                 ; scratch for one timestamp read and the delta
 pfCurL  = $c926
@@ -2753,7 +2757,7 @@ subBnd: ldx nbnd                ; remember a column where a new face/saturation 
 subBDn: rts
 
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; prepCells\n' : ''}${SPRITES ? `        jsr orbMove             ; BEFORE renderSym: it decides which columns are
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? `        jsr orbMove             ; BEFORE renderSym: it decides which columns are
         jsr orbPaint            ; foreground, and renderSym draws them that way first time
 ` : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && SEAMS ? '\n        jsr orbSeam             ; take the panel line out of the cells an orb covers' : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
@@ -2818,12 +2822,6 @@ cqDone: lda #$00
 ; boundary landing on a cell edge turned the whole cell into a diagonal. It is also now
 ; redundant: the face boundary is rendered as a true vertical step (see prepCells/cstepT).
 
-; ============ prepCells: per cell-column summary, once per frame ============
-; renderSym visits 520 cells but only ~25 are edge cells; the other 495 must be rejected
-; as fully-solid or fully-blank as cheaply as possible. Computing min/max over 4 columns
-; inside that loop would cost 4 loads per cell, so it is hoisted here: 40 iterations
-; instead of 520. Also caps the height at 100 -- colH is deliberately left UNCAPPED by the
-; interpolator so merged spans stay linear, but (h + K) must fit a signed byte downstream.
 ; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
 mul8:   sta mp
         clc
@@ -6033,9 +6031,12 @@ stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => planThr.get('s2.' + i) ?? 0).
         * = ${hx16(RELOC + 0x3500)}
 clamp8T: ${chunk(clamp8T).trim()}
 ` : ''}
-${PROFILE ? `        * = ${hx16(RELOC + 0x2900)}  ; the profiler lives above the relocated
+${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
-                            ; space it has left below screen buffer B
+                            ; space it has left below screen buffer B. PLAN=3 claims
+                            ; RELOC+0x2900 for its lo/hi code tables, so the profiler
+                            ; moves above THOSE -- otherwise the origin runs backward
+                            ; and the build dies with an overlap error.
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
 ; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
 ; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
@@ -6086,17 +6087,22 @@ pfTick: lda pfDone
         bne pfOff
         lda frameCnt
         sta pfCurF
-        lda $d012
-        sta pfCurL
+        lda $d012               ; LOW 8 bits only -- $d012 cannot tell line 5 from line 261, so
+        sta pfCurL              ; the ninth bit comes from $d011 bit 7. Normalise it to 0/1 HERE,
+        lda $d011               ; at capture: doing it during the subtract clobbers the borrow
+        asl                     ; the 16-bit chain below depends on.
+        lda #$00
+        rol
+        sta pfCurH
         lda frameCnt
         cmp pfCurF
         bne pfTick
-        sec                     ; delta = (f - pf)*263 + (l - pl)
-        lda pfCurL
-        sbc pfPrvL
+        sec                     ; delta = (f - pf)*263 + (l - pl), l a full 9 bits.
+        lda pfCurL              ; One unbroken borrow chain: nothing may touch the carry
+        sbc pfPrvL              ; between these two subtracts.
         sta pfDLo
-        lda #$00
-        sbc #$00                ; sign-extend the line difference
+        lda pfCurH
+        sbc pfPrvH
         sta pfDHi
         lda pfCurF
         sec
@@ -6125,6 +6131,8 @@ pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
         sta pfPrvF
         lda pfCurL
         sta pfPrvL
+        lda pfCurH
+        sta pfPrvH
         stx pfCurX              ; X = phase -> byte offset X*3
         txa
         asl

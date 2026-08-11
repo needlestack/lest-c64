@@ -204,6 +204,10 @@ cqCol   = $cc80                 ; NOT double buffered, so an inline write repain
 pfAcc   = $c900                 ; PROFILE: 7 phases x 3 bytes, raster lines summed
 pfPrvF  = $c920                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $c922
+pfCurH  = $c92c                 ; ninth raster bit, current and previous
+pfPrvH  = $c92d
+pfTmp   = $c92e
+pfTmp2  = $c92f
 pfN     = $c923                 ; frames accumulated so far (2 bytes)
 pfCurF  = $c925                 ; scratch for one timestamp read and the delta
 pfCurL  = $c926
@@ -747,12 +751,6 @@ mnext:
 ; boundary landing on a cell edge turned the whole cell into a diagonal. It is also now
 ; redundant: the face boundary is rendered as a true vertical step (see prepCells/cstepT).
 
-; ============ prepCells: per cell-column summary, once per frame ============
-; renderSym visits 520 cells but only ~25 are edge cells; the other 495 must be rejected
-; as fully-solid or fully-blank as cheaply as possible. Computing min/max over 4 columns
-; inside that loop would cost 4 loads per cell, so it is hoisted here: 40 iterations
-; instead of 520. Also caps the height at 100 -- colH is deliberately left UNCAPPED by the
-; interpolator so merged spans stay linear, but (h + K) must fit a signed byte downstream.
 ; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
 mul8:   sta mp
         clc
