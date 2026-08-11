@@ -1263,8 +1263,46 @@ if (process.env.CELLSCAN === '1') {
   let mdlCols = 0, chrCols = 0, mdlN = 0, chrN = 0;
   const curve = [];                // saturation: distinct shapes after each 5% of positions
   const t0 = Date.now();
-  spots.forEach(([px, py], si) => {
-    for (let a = 0; a < 256; a += ASTEP) {
+  // CELLRAND=N: N unique random samples instead of the grid x every angle. The reachable state
+  // space is FINITE and not continuous -- px/py are 8.8 fixed point (256 sub-positions per cell)
+  // and pa is a byte -- so uniform-over-that-lattice is the honest reading of "any valid value";
+  // sampling off it would measure states the engine cannot be in. Seeded, so a run is repeatable.
+  const NRAND = +(process.env.CELLRAND ?? 0);
+  const samples = [];
+  if (NRAND) {
+    const open = [];
+    for (let cy = 0; cy < 16; cy++) for (let cx0 = 0; cx0 < 16; cx0++)
+      if (!map[cy * 16 + cx0]) open.push([cx0, cy]);
+    // mulberry32, not an LCG: rnd*1103515245 exceeds 2^53 in JS and loses the low bits, so the
+    // obvious LCG degenerates into a short cycle -- it produced 3,670 unique values out of 2M.
+    let rnd = 12345;
+    const rand = () => { rnd = rnd + 0x6D2B79F5 | 0;
+      let t = Math.imul(rnd ^ rnd >>> 15, 1 | rnd);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+    const seen = new Set();
+    let guard = 0;
+    while (samples.length < NRAND && guard++ < NRAND * 20) {
+      const [cx0, cy] = open[(rand() * open.length) | 0];
+      const fx = (rand() * 256) | 0, fy = (rand() * 256) | 0;
+      const gx = fx / 256, gy = fy / 256;
+      if (gx < PAD && solid(cx0 - 1, cy)) continue;
+      if (gx > 1 - PAD && solid(cx0 + 1, cy)) continue;
+      if (gy < PAD && solid(cx0, cy - 1)) continue;
+      if (gy > 1 - PAD && solid(cx0, cy + 1)) continue;
+      const a = (rand() * 256) | 0;
+      const key = ((cx0 * 256 + fx) * 4096 + (cy * 256 + fy)) * 256 + a;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      samples.push([cx0 + gx, cy + gy, a]);
+    }
+    console.error(`  CELLRAND: ${samples.length.toLocaleString()} unique random (px,py,pa) samples`);
+  }
+  const driver = NRAND
+    ? cb => samples.forEach(([px, py, a], si) => cb(px, py, a, si))
+    : cb => spots.forEach(([px, py], si) => { for (let a = 0; a < 256; a += ASTEP) cb(px, py, a, si); });
+  driver((px, py, a, si) => {
+    {
       const base = a / 256 * 2 * Math.PI;
       const hit = [...Array(NLOG)].map((_, c) => refShoot(px, py, base + refAng[c]));
       const h = hit.map(([d], c) => Math.min(100, Math.round(88 / Math.max(d * refCc[c], 0.02))));
@@ -1313,9 +1351,9 @@ if (process.env.CELLSCAN === '1') {
         }
       }
     }
-    if (si % Math.max(1, Math.floor(spots.length / 20)) === 0) curve.push([si, seen.size]);
+    if (si % Math.max(1, Math.floor((NRAND || spots.length) / 20)) === 0) curve.push([si, seen.size]);
   });
-  curve.push([spots.length, seen.size]);
+  curve.push([NRAND || spots.length, seen.size]);
   // Per-shape REPORTING only -- the totals were accumulated per occurrence in the loop above.
   // A shape counts as "drawn exactly" only if EVERY occurrence of it was: the same shape reached
   // with different endpoint-clamped w can draw differently, so a shape can be part-right.
@@ -1333,7 +1371,7 @@ if (process.env.CELLSCAN === '1') {
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   console.error(`\nCELLSCAN  step ${STEP} cells, angle stride ${ASTEP}: ${spots.length} positions ` +
     `x ${Math.ceil(256 / ASTEP)} angles = ${(spots.length * Math.ceil(256 / ASTEP)).toLocaleString()} frames, ${secs}s`);
-  const FR = spots.length * Math.ceil(256 / ASTEP);
+  const FR = NRAND || (spots.length * Math.ceil(256 / ASTEP));
   console.error(`  cells on screen ${cells.toLocaleString()}, of which mixed (need a pattern code) ` +
     `${mixed.toLocaleString()} (${(100 * mixed / cells).toFixed(1)}%, ${(mixed / FR).toFixed(1)}/frame)`);
   console.error(`  DISTINCT mixed shapes actually reachable: ${seen.size}`);
@@ -1362,7 +1400,8 @@ if (process.env.CELLSCAN === '1') {
       `${m.d.toFixed(2)}  ${m.kb ? `step k=${m.kb}` : 'ramp'}` +
       `${m.partial ? ' (part-exact)' : ''}${sampled.has(m.key) ? '' : '   NEVER SAMPLED'}`);
   writeFileSync('./cellscan.json', JSON.stringify({
-    step: STEP, angleStride: ASTEP, positions: spots.length, cells, mixed,
+    step: STEP, angleStride: ASTEP, positions: NRAND || spots.length, cells, mixed,
+    randomSamples: NRAND || 0, frames: NRAND || (spots.length * Math.ceil(256 / ASTEP)),
     distinct: seen.size, exact, curve,
     shippedCols: offCols / FR, shippedPx: offPx / FR, cellCodes: CELLCODES,
     QA, QM, QB, LM, LB,
