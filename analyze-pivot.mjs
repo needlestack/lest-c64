@@ -136,6 +136,31 @@ const rayOffQ=rayAng.map(a=>Math.round(a/(2*Math.PI)*Q));
 const qToCol=[...Array(256)].map((_,i)=>{ const q=i-128;
   const c=colOf(Math.max(-1.2,Math.min(1.2,q/Q*2*Math.PI)));
   return Math.max(0,Math.min(W-1,Math.round(c))); });
+// The EXACT arithmetic the 6502 will run. Scales chosen so the final shift is a power of two:
+//   dx,dy  signed byte, 1/256 cell      sa,ca  signed byte, sin*128
+//   rcp    unsigned byte, 163/d         daq = (dx*sa - dy*ca) * rcp >> 15
+// because (dx/256)*(sa/128)*(rcp/163) rad * 1024/2pi = dx*sa*rcp / 32773, and 32773 -> 2^15
+// is a 0.015% error, far below one quarter-unit. rcp clamps at 255, i.e. d = 0.639 cells;
+// closer than that the correction is under-applied and the boundary simply falls back to
+// bisection, which is why the clamp is safe rather than merely tolerable.
+const RCPK=163;
+function predict6502(prev,p0,b0,p1,b1){
+  const dq=Math.round(((b1-b0)/(2*Math.PI)*65536))>>6;      // pa:paF difference, quarter-units
+  let dx=Math.round((p1[0]-p0[0])*256), dy=Math.round((p1[1]-p0[1])*256);
+  dx=Math.max(-128,Math.min(127,dx)); dy=Math.max(-128,Math.min(127,dy));
+  return prev.map(e=>{
+    const a=b0+rayAng[e.c];
+    const sa=Math.max(-128,Math.min(127,Math.round(Math.sin(a)*128)));
+    const ca=Math.max(-128,Math.min(127,Math.round(Math.cos(a)*128)));
+    const rcp=Math.max(1,Math.min(255,Math.round(RCPK/Math.max(e.d,0.01))));
+    const term=dx*sa-dy*ca;                                  // signed 16-bit
+    // +2^14 before the shift. A bare >>15 truncates toward -inf, which is a systematic -0.5
+    // quarter-unit -- about -0.4 of a column, and at w=0 there is no slack to absorb it.
+    const daq=(term*rcp+16384)>>15;                          // signed, quarter-units
+    const q=rayOffQ[e.c]-dq+daq;
+    return qToCol[Math.max(0,Math.min(255,q+128))];
+  });
+}
 function predictQ(prev,p0,b0,p1,b1){
   const dq=Math.round((b1-b0)/(2*Math.PI)*Q);        // rotation, quarter-units
   const mx=Math.round((p1[0]-p0[0])*256), my=Math.round((p1[1]-p0[1])*256);   // 8.8 cells
@@ -174,7 +199,7 @@ const STARTS=[[1.5,1.5,0x30],[12.7,10.5,0xb0],[1.5,13.3,0x00],[12.5,14.7,0x80],
               [1.5,9.7,0xc8],[3.3,13.5,0xf8],[1.5,3.3,0x48],[8.5,2.5,0x18]];
 const FRAMES=24;
 
-const MODELS=['none','rot','lin','linq','full'];
+const MODELS=['none','rot','lin','linq','asm','full'];
 const WIDTHS=[0,1];
 const results=new Map();                       // key -> {marched, missed, found, frames}
 const bump=(k,m,missed,found)=>{const r=results.get(k)||{marched:0,missed:0,found:0,frames:0};
@@ -196,7 +221,8 @@ for(const [mname,[dv,da,strafe]] of Object.entries(MOTIONS)){
       const key=`${model}/w${w}`;
       const st=mem.get(key);
       const cuts=[0,W-1];
-      if(st){ const pr = model==='linq' ? predictQ(st.prev,st.p0,st.b0,p0,base0)
+      if(st){ const pr = model==='asm'  ? predict6502(st.prev,st.p0,st.b0,p0,base0)
+                       : model==='linq' ? predictQ(st.prev,st.p0,st.b0,p0,base0)
                                         : predict(model,st.prev,st.p0,st.b0,p0,base0);
         for(const p of pr){
           cuts.push(Math.floor(p)-w, Math.ceil(p)+w+1); } }
@@ -281,6 +307,44 @@ console.log('\nA scheme is only interesting if it marches less AND misses no mor
   }
   console.log(`\nSANITY 2 (recursion stopped at 8 columns -- boundaries CANNOT be resolved):`);
   console.log(`  ${(100*missed/found).toFixed(1)}% missed  -- non-zero, so the detector works.`);
+}
+// ---- what is the residual, and can a STATIC pivot reach it? ----
+// A temporal hint can only predict a boundary that EXISTED last frame. One that just came into
+// view -- round a corner, past a doorway, in from the screen edge -- has no hint and falls all
+// the way back to bisection. This splits the marches into the part the hint already owns and the
+// part only a static (geometry-derived) pivot could reach.
+{
+  let frames=0, marched=0, kept=0, fresh=0, ideal=0;
+  for(const [dv,da,st] of [[DV,DA,false],[DV,0,false],[0,DA,false],[DV,0,true]])
+  for(const [sx,sy,sa] of STARTS){
+    let px=sx,py=sy,base=sa/256*2*Math.PI; let mem=null;
+    for(let f=0;f<FRAMES;f++){
+      const T=truth(px,py,base), p0=[px,py], b0=base;
+      const cuts=[0,W-1];
+      let pred=[];
+      if(mem){ pred=predictQ(mem.prev,mem.p0,mem.b0,p0,b0);
+        for(const q of pred) cuts.push(Math.floor(q),Math.ceil(q)+1); }
+      const r=frame(px,py,base,cuts);
+      // a TRUE boundary counts as "kept" if some prediction landed within 1 column of it
+      for(const b of T.bnds){
+        if(pred.some(q=>Math.abs(q-b)<=1.5)) kept++; else fresh++;
+      }
+      ideal += 2 + 2*T.bnds.length;      // every boundary predicted exactly: 2 cuts, no refine
+      marched += r.marched; frames++;
+      mem={prev:r.bnds.map(c=>({c,d:r.dist[c]})),p0,b0};
+      const dir=base+(st?Math.PI/2:0);
+      const nx=px+Math.cos(dir)*dv, ny=py+Math.sin(dir)*dv;
+      if(!map[Math.floor(ny)*16+Math.floor(nx)]){px=nx;py=ny;}
+      base+=da;
+    }
+  }
+  const tot=kept+fresh;
+  console.log(`\nWHERE THE REMAINING MARCHES GO (linq/w0, all four moving motions)`);
+  console.log(`  marches/frame          ${(marched/frames).toFixed(1)}`);
+  console.log(`  perfect-prediction floor ${(ideal/frames).toFixed(1)}   (2 endpoints + 2 cuts per boundary)`);
+  console.log(`  residual above floor   ${((marched-ideal)/frames).toFixed(1)}  <-- what a static pivot could still attack`);
+  console.log(`  boundaries predicted within 1 column: ${(100*kept/tot).toFixed(0)}%`);
+  console.log(`  boundaries with NO usable hint:       ${(100*fresh/tot).toFixed(0)}%  (new to the view, or mispredicted)`);
 }
 // Raw boundary volume, so the percentages above have a denominator you can see.
 {
