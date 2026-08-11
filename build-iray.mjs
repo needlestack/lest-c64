@@ -95,6 +95,11 @@ for (let c = 0; c < NLOG; c++) {
 // Requires FINEANG (for rayOffQS) and PLAN=3 (for the three table pages it frees; see the
 // emission site). Both are the defaults, so this is on unless something else is being tested.
 const PIVOT = FINEANG && +(process.env.PLAN ?? 3) === 3 && process.env.PIVOT !== '0';
+// PIVTRANS=0 zeroes the translation delta, leaving the rotation-only prediction. Not a tuning
+// knob -- it is the A/B that says whether the translation term earns the two multiplies, and
+// the only way to tell a WORKING translation term from a broken one, since a broken one cannot
+// corrupt the image (extra cuts only split spans) and shows up purely as lost rays.
+const PIVTRANS = process.env.PIVTRANS !== '0';
 // signed sin * 128, by BYTE angle. absSinT/absCosT hold the magnitudes but put the sign in a
 // separate table, which is a second lookup and a branch on a path that multiplies twice per
 // boundary per frame. Only SIN is stored: cos(a) = sin(a + 64) at 256 units to the turn, and
@@ -1326,7 +1331,17 @@ const hexArg = (n, dflt, mask) => {
 };
 
 const MEASURE = flag('MEASURE');
-const SPIN = flag('SPIN');
+// TOUR=1: spinStep's rotation PLUS a forward/back oscillation. Exists because every test we had
+// left half the temporal pivot unexercised -- runviews pins the viewpoint (rotation AND
+// translation both zero, so the prediction is a bare table round trip) and SPIN only rotates
+// (translation still zero). The pivot's translation term -- two multiplies, the sign handling,
+// the reciprocal, the 24-bit product -- had never run on a non-zero input.
+//
+// Oscillating rather than walking: moveFwd stops dead at a wall, so a plain walk test decays
+// into a standing test after a few seconds and reports a flattering number for the wrong reason.
+// Out 32 frames, back 32, while turning, cannot wedge.
+const TOUR = flag('TOUR');
+const SPIN = flag('SPIN') || TOUR;      // TOUR reuses spinStep and its viewpoint table
 // Viewpoints a SPIN benchmark cycles through, one per full rotation: the start corridor, the
 // busiest cell on the map, and two rooms away from both.
 const SPINPOS = [[1.5, 1.5], [8.5, 4.5], [12.5, 9.5], [9.5, 12.5]];     // auto-rotate, ignore input
@@ -1662,7 +1677,11 @@ pvYs    = $cb12                 ; the bearing, saved across the first multiply
 ; which left latest.d64 holding the PREVIOUS disk and reported the default viewpoint as if it
 ; were the one asked for. Silent, and exactly the trap the RELOC comment warns about.
 rayN    = $cb14                 ; marchCol calls this frame
+rayAcc  = $cb15                 ; 2 bytes: 256 frames of rayN. The HIGH byte is then the mean,
+rayFrm  = $cb17                 ; for free -- the same trick the profiler uses
+rayMean = $cb18
 pvNdbg  = $cb13                 ; pvN as pivPrep saw it, before pivPrep clears it
+` : ''}${TOUR ? `tourC   = $cb19                 ; TOUR phase counter
 ` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -1780,7 +1799,7 @@ pfInit: sta pfAcc,x
 
 mloop:
 ${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}        jsr tickDelta
-        ${SPIN ? 'jsr spinStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
+        ${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${PROFILE && !PROFILE1 ? '        ldx #0\n        jsr pfTick              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
@@ -2115,7 +2134,7 @@ pivPrep:
         sbc opxH
         sta pvTH
         jsr pvClmp
-        sta pvDX
+${PIVTRANS ? '        sta pvDX' : '        lda #$00\n        sta pvDX                ; PIVTRANS=0: rotation-only prediction'}
         lda py
         sec
         sbc opyL
@@ -2124,7 +2143,7 @@ pivPrep:
         sbc opyH
         sta pvTH
         jsr pvClmp
-        sta pvDY
+${PIVTRANS ? '        sta pvDY' : '        lda #$00\n        sta pvDY'}
         ; ---- this viewpoint becomes next frame's reference ----
         lda paF
         sta opaL
@@ -2932,7 +2951,54 @@ ssIx:   stx spinIx
         lda spinYH,x
         sta py+1
 ssDn:   rts
-` : ''}; ---- tickDelta: how much time has passed, in 60ths ----
+${TOUR ? `
+; tourStep: turn AND translate. Drives px/py DIRECTLY rather than calling moveFwd, because
+; moveFwd stops dead at a wall and a benchmark that quietly stops moving still prints a
+; confident number. The first cut of this used moveFwd and read 7 rays/frame for every config
+; including plain bisection -- the player had wedged in a corner and most frames were a blank
+; wall at arm's length. A test that cannot fail loudly is worse than no test.
+;
+; +-0.25 cells on both axes around the spin viewpoint, reversing every 8 frames. The viewpoints
+; are cell centres, so 0.25 stays 0.25 clear of the wall against a collision box of 0.102 -- no
+; collision test is needed and the motion therefore cannot stop. 8/256 a frame at ~20 fps is
+; 0.63 cells/s against a player's 0.94, so the deltas are the right order of magnitude.
+tourStep:
+        jsr spinStep            ; rotation, and the viewpoint hop on a full turn
+        inc tourC
+        lda tourC
+        and #$08                ; 8 frames one way, 8 the other
+        beq tourF
+        lda px
+        sec
+        sbc #$08
+        sta px
+        lda px+1
+        sbc #$00
+        sta px+1
+        lda py
+        sec
+        sbc #$08
+        sta py
+        lda py+1
+        sbc #$00
+        sta py+1
+        rts
+tourF:  lda px
+        clc
+        adc #$08
+        sta px
+        lda px+1
+        adc #$00
+        sta px+1
+        lda py
+        clc
+        adc #$08
+        sta py
+        lda py+1
+        adc #$00
+        sta py+1
+        rts
+` : ''}` : ''}; ---- tickDelta: how much time has passed, in 60ths ----
 ; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
 ; down an empty corridor, slowest where the geometry is dense, which is exactly backwards.
 ; frameCnt is bumped by the top-of-frame raster IRQ, so it counts 60ths of a second no matter
@@ -4380,18 +4446,34 @@ ${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still 
         lda py
         and #$0f
         jsr ddPut
-${RAYCNT ? `        lda #$03
+${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
+        ; A single frame's count is meaningless under motion, and motion is the only condition
+        ; that exercises the prediction at all.
+        lda rayAcc
+        clc
+        adc rayN
+        sta rayAcc
+        bcc rcNc
+        inc rayAcc+1
+rcNc:   inc rayFrm
+        bne rcNd
+        lda rayAcc+1
+        sta rayMean
+        lda #$00
+        sta rayAcc
+        sta rayAcc+1
+rcNd:   lda #$03
         jsr setRow
         ldy #37
-        lda #14                 ; 'E' -- rays this frame, in hex
+        lda #14                 ; 'E' -- MEAN rays/frame over the last 256 frames, hex
         jsr ddPut
-        lda rayN
+        lda rayMean
         lsr
         lsr
         lsr
         lsr
         jsr ddPut
-        lda rayN
+        lda rayMean
         and #$0f
         jsr ddPut
 ${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had to work with. If this is
