@@ -416,13 +416,17 @@ const NGLYPH = digGlyph.length / 5;
 
 // --- assign char codes: cell patterns first, then the 18 readout glyphs ---
 const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of multicolor bitmap
-// Wall pixels are bit pair 11, which takes its colour from the low 3 bits of colour RAM. That
-// is written once at startup to $08 -- multicolor on, colour black -- and never touched again,
-// so the walls cost no colour-RAM traffic at all. Pair 01 ($d022) is also black and is now
-// unused by the cell codes; it stays black so the two are interchangeable if anything wants it.
+// Wall pixels are bit pair 01, which reads $d022. THREE INKS, one per register:
+//   00  $d021  the ceiling and floor      01  $d022  the walls      10  $d023  the seams
+// and bit pair 11 is deliberately UNUSED. 11 is the one pair whose colour comes from colour RAM,
+// and colour RAM only has three usable bits -- eight colours, not sixteen. Retiring 11 rather
+// than 01 is what lets all three inks reach the whole palette from their own register, which is
+// what the 1/2/3 keys cycle. Colour RAM is still written once at startup because bit 3 is the
+// per-cell multicolor ENABLE; its colour bits no longer reach the screen.
+//
 // A pattern is four column heights 0..8, and the glyph is just those four columns filled from
 // the bottom -- one ink for the whole cell, so a shape's code depends on its SHAPE alone.
-const FGPX = [0xc0, 0x30, 0x0c, 0x03];
+const FGPX = [0x40, 0x10, 0x04, 0x01];
 const patBytes = p =>
   [...Array(8)].map((_, i) =>
     (p[0] > 7 - i ? FGPX[0] : 0) | (p[1] > 7 - i ? FGPX[1] : 0) |
@@ -840,8 +844,7 @@ for (let g = 0; g < NGLYPH; g++) {
 // keeps the flipped fontB free.
 const SEAM0 = glyphs.length;
 for (let k = 0; k < 4; k++) {
-  // wall columns are 11 normally, but 01 under PLAN=2 -- see the SOLID note above
-  const wall = +(process.env.PLAN ?? 0) === 2 ? 1 : 3;
+  const wall = 1;               // bit pair 01, like every other wall pixel
   const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : wall) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
@@ -1433,6 +1436,8 @@ const NOMINMAX = flag('NOMINMAX');
 // number that says whether a change to the SUBDIVISION did what it claimed -- fps cannot, since
 // it is raster-quantised and mixes in every other phase.
 const RAYCNT = flag('RAYCNT');
+// PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
+const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 const SEAMS = process.env.SEAMS !== '0';
 // CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
@@ -1719,6 +1724,12 @@ rayMean = $cb18
 pvNdbg  = $cb13                 ; pvN as pivPrep saw it, before pivPrep clears it
 ` : ''}${TOUR ? `tourC   = $cb19                 ; TOUR phase counter
 tourF   = $cb22                 ; 2 bytes: frames elapsed, for the freeze
+` : ''}${PALKEYS ? `colW    = $cb23                 ; the three ink colours, cycled by keys 1/2/3. Declared here
+colB    = $cb24                 ;   and not beside tourC, which is inside a TOUR-only block --
+colS    = $cb25                 ;   the default build does not emit that.
+pkNew   = $cb26                 ; palette keys this frame, last frame, and the fresh presses
+pkOld   = $cb27
+pkEdge  = $cb28
 ` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -1745,14 +1756,20 @@ entry:
         sta d018vm              ; display buffer A; IRQ ORs the charset bits per half-screen
         lda #${hx(vm(SCR_A) | CB_A)}
         sta $d018
+        ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
+        ; round the palette. Bit pair 11 is unused -- see the charset note.
         lda #$01
-        sta $d021               ; 00 = white  (ceiling / floor)
+        sta colW
+        sta $d021               ; 00 = ceiling and floor
         lda #$00
-        sta $d022               ; 01 = black  (readout glyphs only; walls are 11, via colour RAM)
+        sta colB
+        sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured)
         lda #${hx(SEAMCOL)}
+        sta colS
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
-                                ; be retuned without touching a charset entry: bit pairs 00
-                                ; and 01 carry the shape, 10 carries only the seam.
+                                ; be retuned without touching a charset entry.
+        lda #$00
+        sta pkOld
         lda #$00
         sta $d020
         lda #$ff
@@ -1849,7 +1866,8 @@ pfInit: sta pfAcc,x
         cli
 
 mloop:
-${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}        jsr tickDelta
+${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
+` : ''}        jsr tickDelta
         ${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${PROFILE && !PROFILE1 ? '        ldx #0\n        jsr pfTick              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
@@ -3200,7 +3218,63 @@ tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
         sta dtt
         rts
 
-readKeys:
+${PALKEYS ? `; ---- palKeys: 1 / 2 / 3 cycle the ceiling, wall and seam inks ----
+; Purely for looking at. In mloop rather than readKeys so it works in the SPIN and TOUR builds
+; too, which never call readKeys. ~30 cycles a frame; PALKEYS=0 removes it for benchmarking.
+;
+; Matrix rows: '1' and '2' are both row $7f (bits 0 and 3), '3' is row $fd bit 0. The three are
+; folded into one byte as bit0='1', bit2='3', bit3='2' so a single edge test covers them --
+; without the edge test a held key would sprint through all sixteen colours in a quarter second.
+palKeys:
+        lda #$7f
+        sta $dc00
+        lda $dc01
+        eor #$ff                ; matrix reads active LOW; invert so 1 means pressed
+        and #$09
+        sta pkNew
+        lda #$fd
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        and #$01
+        asl
+        asl
+        ora pkNew
+        sta pkNew
+        eor pkOld               ; changed since last frame ...
+        and pkNew               ; ... and pressed now: a fresh press
+        sta pkEdge
+        lda pkNew
+        sta pkOld
+        lda #$ff
+        sta $dc00               ; leave the port neutral for the joystick read in readKeys
+        lda pkEdge
+        and #$01
+        beq pk2
+        inc colW
+        lda colW
+        and #$0f
+        sta colW
+        sta $d021
+pk2:    lda pkEdge
+        and #$08
+        beq pk3
+        inc colB
+        lda colB
+        and #$0f
+        sta colB
+        sta $d022
+pk3:    lda pkEdge
+        and #$04
+        beq pkDn
+        inc colS
+        lda colS
+        and #$0f
+        sta colS
+        sta $d023
+pkDn:   rts
+
+` : ''}readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
         ; keyboard scan (joystick-1 shares $dc01 with the keyboard matrix rows).
