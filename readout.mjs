@@ -71,7 +71,11 @@ const field = (R, n) => [...Array(n)].map((_, i) => readChar(36 + i, R)).join(''
 if (process.env.RAYS) {
   const h = readChar(38, 3) + readChar(39, 3);
   const n = readChar(38, 4) + readChar(39, 4);
-  console.log(`${f}: rays/frame = ${h} (${parseInt(h, 16)})   hints available = ${n} (${parseInt(n, 16)})`);
+  const e = readChar(38, 5) + readChar(39, 5);
+  console.log(`${f}: rays/frame = ${h} (${parseInt(h, 16)})   hints = ${n} (${parseInt(n, 16)})` +
+              `   edge cells/frame = ${e} (${parseInt(e, 16)})`);
+  const c = readChar(38, 6) + readChar(39, 6);
+  console.log(`${' '.repeat(f.length)}  run-cache MISSES = ${parseInt(c, 16)} of 80 chains/frame`);
   process.exit(0);
 }
 

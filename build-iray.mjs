@@ -1693,6 +1693,12 @@ pvYs    = $cb12                 ; the bearing, saved across the first multiply
 ; which left latest.d64 holding the PREVIOUS disk and reported the default viewpoint as if it
 ; were the one asked for. Silent, and exactly the trap the RELOC comment warns about.
 rayN    = $cb14                 ; marchCol calls this frame
+edgN    = $cb1a                 ; edge cells drawn this frame -- the part of renderSym the run
+edgAcc  = $cb1b                 ;   cache cannot skip, and so the part worth optimising
+edgMean = $cb1d
+chnN    = $cb1e                 ; chain DRAWS this frame, of 80 possible (40 ceiling + 40 solid)
+chnAcc  = $cb1f                 ;   -- i.e. how often the run cache MISSES
+chnMean = $cb21
 rayAcc  = $cb15                 ; 2 bytes: 256 frames of rayN. The HIGH byte is then the mean,
 rayFrm  = $cb17                 ; for free -- the same trick the profiler uses
 rayMean = $cb18
@@ -1846,7 +1852,7 @@ ${FINEANG ? `        lda pa                  ; pa*4 once a frame, not once a ray
         sta paqH
 ` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
-${RAYCNT ? '        sta rayN\n' : ''}
+${RAYCNT ? '        sta rayN\n        sta edgN\n        sta chnN\n' : ''}
 ${PIVOT ? `        jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
                                 ; and leaves the stack holding the spans between them
 ` : `        sta col
@@ -2605,7 +2611,7 @@ rfRs:   sta rsv
         lda rbv
 rfCw1:  cmp cwA,x               ; operand patched above
         beq rfEdge              ; same length as this buffer already holds: leave it alone
-rfCw2:  sta cwA,x
+${RAYCNT ? '        inc chnN\n' : ''}rfCw2:  sta cwA,x
         cmp #$00
         beq rfEdge
         clc
@@ -2626,7 +2632,7 @@ rfEdge: lda rbv
         bcs rfSolid             ; nothing between the ceiling and the solid run
         sta erow
 rfEdgeL:
-${NOEDGE ? `        lda #${hx(SOLID)}
+${RAYCNT ? '        inc edgN\n' : ''}${NOEDGE ? `        lda #${hx(SOLID)}
         sta ecode
         jmp rfStore
 ` : ''}        ldy erow
@@ -2836,7 +2842,7 @@ rfCb2:  sta cbA,x
         jmp rfSlDr
 ${SEAMS ? `rfSlSm: lda #$ff
 rfCb3:  sta cbA,x               ; a value rs can never take, so next frame redraws too
-` : ''}rfSlDr: lda rsv
+` : ''}rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         cmp #13
         bcs rfNext
         clc
@@ -4513,13 +4519,33 @@ ${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of 
         sta rayAcc
         bcc rcNc
         inc rayAcc+1
-rcNc:   inc rayFrm
+rcNc:   lda chnAcc
+        clc
+        adc chnN
+        sta chnAcc
+        bcc rcNf
+        inc chnAcc+1
+rcNf:   lda edgAcc
+        clc
+        adc edgN
+        sta edgAcc
+        bcc rcNe
+        inc edgAcc+1
+rcNe:   inc rayFrm
         bne rcNd
         lda rayAcc+1
         sta rayMean
+        lda edgAcc+1
+        sta edgMean
+        lda chnAcc+1
+        sta chnMean
         lda #$00
         sta rayAcc
         sta rayAcc+1
+        sta edgAcc
+        sta edgAcc+1
+        sta chnAcc
+        sta chnAcc+1
 rcNd:   lda #$03
         jsr setRow
         ldy #37
@@ -4546,7 +4572,31 @@ ${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had t
         lda pvNdbg
         and #$0f
         jsr ddPut
-` : ''}` : ''}ddAng:  lda #$02
+` : ''}        lda #$05                ; row 5: MEAN edge cells a frame -- rows the run cache
+        jsr setRow              ; cannot skip, each one a full ramp/step selection
+        ldy #38
+        lda edgMean
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda edgMean
+        and #$0f
+        jsr ddPut
+        lda #$06                ; row 6: MEAN chain draws a frame, of 80. The run cache's miss
+        jsr setRow              ; rate -- the direct read on whether the RLE is doing its job
+        ldy #38
+        lda chnMean
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda chnMean
+        and #$0f
+        jsr ddPut
+` : ''}ddAng:  lda #$02
         jsr setRow
         ldy #37
         lda #10                 ; 'A'
