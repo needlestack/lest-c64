@@ -1275,7 +1275,7 @@ if (process.env.CELLSCAN === '1') {
       if (!map[cy * 16 + cx0]) open.push([cx0, cy]);
     // mulberry32, not an LCG: rnd*1103515245 exceeds 2^53 in JS and loses the low bits, so the
     // obvious LCG degenerates into a short cycle -- it produced 3,670 unique values out of 2M.
-    let rnd = 12345;
+    let rnd = +(process.env.CELLSEED ?? 12345);   // CELLSEED: an independent draw, to measure how often a fallback is really hit
     const rand = () => { rnd = rnd + 0x6D2B79F5 | 0;
       let t = Math.imul(rnd ^ rnd >>> 15, 1 | rnd);
       t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
