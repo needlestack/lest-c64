@@ -2596,6 +2596,7 @@ rfCbS:  sta rfCw1+1
         sta rfCw2+1
         sty rfCb1+1
         sty rfCb2+1
+${SEAMS ? '        sty rfCb3+1\n' : ''}
 
         ldx #39                 ; X = cell column throughout; the chains use it as their index
         ; The cell's min and max heights, computed HERE rather than in a pass of their own.
@@ -2886,29 +2887,31 @@ rcHave: sta cqtmp
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
-rfSolid:${SEAMS ? `; The cache byte carries rs AND which seam variant this column holds. rs is 0..13 and
-        ; the byte is eight bits, so the top nibble was simply going spare: 0 = no seam,
-        ; 1..4 = stripe position + 1. Before this, a seam column stored $ff and redrew every
-        ; frame -- correct, but only because a seam variant can change while rs does not, which
-        ; is a reason to widen the key, not to give up on caching.
+rfSolid:${SEAMS ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
+        ; rs is 0..13, so the top nibble is spare -- and that was tried and MEASURED: 25 chain
+        ; draws of 80 with it, 25 without. Not one extra hit.
+        ;
+        ; The reason is worth keeping. rb and rs are quantised to 13 char ROWS, so a column's
+        ; wall top must move ~8 pixels to change one -- coarser than a frame of motion, which is
+        ; why they hit 69% of the time. A seam's position is one of 4 slots inside a 4-pixel
+        ; cell, two physical pixels apiece: finer than a frame of motion, so it changes every
+        ; frame and the key never matches. A cache key pays only when it is COARSER than the
+        ; movement between frames, and no amount of spare bits changes that.
         lda seamT,x
         cmp #${hx(SOLID)}
-        beq rfSlNo
-        and #$03
-        clc
-        adc #$01
-        asl
-        asl
-        asl
-        asl
-        ora rsv
-        bne rfSlCk              ; always -- the high nibble is nonzero by construction
-rfSlNo: ` : ''}lda rsv
-rfSlCk:
+        bne rfSlSm              ; a seam column bypasses the COMPARE entirely -- see below
+        ` : ''}lda rsv
 rfCb1:  cmp cbA,x
         beq rfNext
 rfCb2:  sta cbA,x
-rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
+        jmp rfSlDr
+${SEAMS ? `rfSlSm: lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
+rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITHOUT COMPARING:
+                                ; comparing $ff against a cache that already holds $ff matches,
+                                ; and the column is skipped even though its seam may have MOVED.
+                                ; Collapsing this into the common path cost 914 -> 7117 wrong
+                                ; pixels across the six views.
+` : ''}rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         cmp #13
         bcs rfNext
         clc
