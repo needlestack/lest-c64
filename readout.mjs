@@ -90,14 +90,14 @@ if (process.env.PROF) {
   // Phases 7 and 13 split what used to be one 'subdivision control' bucket. It read 23.6% at
   // the worst viewpoint and nobody could say what was in it, which is the same failure mode
   // the old unused phase 7 had: a number with no owner is a number nobody acts on.
-  const NAMES = ['input (+ the top-of-frame IRQ, see below)', 'table clears', 'subdiv: span stack + bookkeeping', '  ray: angle+dispatch',
+  const NAMES = ['input (+ the top-of-frame IRQ, see below)', 'table clears', 'subdiv: subLp + flush bookkeeping', '  ray: angle+dispatch',
                  'renderSym', 'fps counter + readout', 'raster wait',
                  'subdiv: delimiter bubble sort', '  interpSpan', '  seamSpan',
                  '  ray: initial distances', '  ray: DDA loop', '  ray: hit + height',
-                 'subdiv: pivOne prediction'];
+                 'subdiv: pivOne prediction', 'subdiv: pivPrep bookkeeping'];
   // two columns of five: phase r is at row 4 + r%5, starting at char col 0, 5 or 10. Rows 12-13
   // would sit below the horizon where charset B mirrors the glyphs and they cannot be decoded.
-  const vals = [...Array(14)].map((_, r) =>
+  const vals = [...Array(15)].map((_, r) =>
     parseInt([...Array(4)].map((_, i) =>
       readChar(Math.floor(r / 5) * 5 + i, 4 + (r % 5))).join(''), 16));
   const tot = vals.reduce((a, b) => a + b, 0);

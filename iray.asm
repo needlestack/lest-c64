@@ -2646,7 +2646,7 @@ faDn:
         ; All six are zero page, so the copies bought nothing and cost 18 cycles an axis --
         ; 36 a ray, ~720 a frame. The names only ever existed as sideMul's argument protocol,
         ; and an inlined body has no protocol to honour.
-        lda px                  ; --- high half: fr * mhi -> s2:s1 ---
+        lda px                  ; --- high half: fr * mhi -> sdxH:s1 ---
         clc
         adc ddxH
         tax
@@ -2654,12 +2654,12 @@ faDn:
         lda f1LoT,x
         tay                     ; the low byte rides in Y instead of zero page: this routine
         lda f1HiT,x             ; never used Y at all, and it is the hottest one here
-        sta s2
+        sta sdxH
         jmp cxmh1
 cxmh0:   lda f0LoT,x
         tay
         lda f0HiT,x
-        sta s2
+        sta sdxH
 cxmh1:   lda px
         sec
         sbc ddxH
@@ -2670,10 +2670,10 @@ cxmh2:   tax
         sec
         tya
         sbc f0LoT,x
-        sta s1
-        lda s2
+        sta sdx
+        lda sdxH
         sbc f0HiT,x
-        sta s2
+        sta sdxH
         lda px                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
         adc ddx
@@ -2699,13 +2699,13 @@ cxml2:   tax
         tya
         sbc f0LoT,x             ; result discarded -- only the borrow into the high byte
         lda qhi                 ; matters, so the old "sta qlo" here was writing a dead value
-        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into s1
+        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into sdx
         clc
-        adc s1
-        sta s1
-        lda s2
+        adc sdx
+        sta sdx
+        lda sdxH
         adc #$00
-        sta s2
+        sta sdxH
 
         ; STEP SIGNS COME FROM THE FINE ANGLE. FINEANG moved the deltas to rq but left these
         ; on the coarse rang, and the two disagree at the axis boundaries -- the ray then steps
@@ -2718,23 +2718,20 @@ cxml2:   tax
         beq cxpos
         lda #$ff
         sta stpX
-        lda s1
-        sta sdx
-        lda s2
-        sta sdxH
-        jmp cydo
+        jmp cydo                ; negative: m IS the side distance, and the inlined
+                                ; multiply above now writes it straight into sdx
 cxpos:  lda #$01
         sta stpX
-        sec
+        sec                     ; positive: sdx = ddx - m, in place
         lda ddx
-        sbc s1
+        sbc sdx
         sta sdx
         lda ddxH
-        sbc s2
+        sbc sdxH
         sta sdxH
 cydo:
         ; --- sideMul inlined; reads py / ddyH / ddy directly, see the X axis above ---
-        lda py                  ; --- high half: fr * mhi -> s2:s1 ---
+        lda py                  ; --- high half: fr * mhi -> sdyH:s1 ---
         clc
         adc ddyH
         tax
@@ -2742,12 +2739,12 @@ cydo:
         lda f1LoT,x
         tay                     ; the low byte rides in Y instead of zero page: this routine
         lda f1HiT,x             ; never used Y at all, and it is the hottest one here
-        sta s2
+        sta sdyH
         jmp cymh1
 cymh0:   lda f0LoT,x
         tay
         lda f0HiT,x
-        sta s2
+        sta sdyH
 cymh1:   lda py
         sec
         sbc ddyH
@@ -2758,10 +2755,10 @@ cymh2:   tax
         sec
         tya
         sbc f0LoT,x
-        sta s1
-        lda s2
+        sta sdy
+        lda sdyH
         sbc f0HiT,x
-        sta s2
+        sta sdyH
         lda py                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
         adc ddy
@@ -2787,13 +2784,13 @@ cyml2:   tax
         tya
         sbc f0LoT,x             ; result discarded -- only the borrow into the high byte
         lda qhi                 ; matters, so the old "sta qlo" here was writing a dead value
-        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into s1
+        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into sdy
         clc
-        adc s1
-        sta s1
-        lda s2
+        adc sdy
+        sta sdy
+        lda sdyH
         adc #$00
-        sta s2
+        sta sdyH
 
         lda rqH                 ; sin >= 0 in quarters 0 and 1
         cmp #$02
@@ -2802,21 +2799,18 @@ cyml2:   tax
         sta stpY
         lda #$f0                ; -16: one cell row back
         sta stpY16
-        lda s1
-        sta sdy
-        lda s2
-        sta sdyH
-        jmp cydone
+        jmp cydone                ; negative: m IS the side distance, and the inlined
+                                ; multiply above now writes it straight into sdy
 cypos:  lda #$01
         sta stpY
         lda #$10                ; +16: one cell row on
         sta stpY16
-        sec
+        sec                     ; positive: sdy = ddy - m, in place
         lda ddy
-        sbc s1
+        sbc sdy
         sta sdy
         lda ddyH
-        sbc s2
+        sbc sdyH
         sta sdyH
         ; Two things the old loop did on EVERY step that are only needed once, on the step
         ; that hits: it wrote "side" (5 cycles a step, read once after the loop), and it
