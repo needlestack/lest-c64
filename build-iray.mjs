@@ -4331,14 +4331,10 @@ cxmh2:   tax
         adc ddx
         tax
         bcc cxml0
-        lda f1LoT,x
-        tay
         lda f1HiT,x
         sta qhi
         jmp cxml1
-cxml0:   lda f0LoT,x
-        tay
-        lda f0HiT,x
+cxml0:   lda f0HiT,x
         sta qhi
 cxml1:   lda px
         sec
@@ -4347,11 +4343,17 @@ cxml1:   lda px
         eor #$ff
         adc #$01
 cxml2:   tax
+        ; THE BORROW FROM THE LOW BYTES IS DELIBERATELY NOT COMPUTED. This half only ever
+        ; contributed the high byte of fr*ddxL, so the two low-byte loads and the subtract
+        ; that produced their borrow existed only to be +/-1 correct in the LAST bit.
+        ; Dropping them leaves the product high by 0 or 1 -- the side distance wrong by at
+        ; most 1/256 of a cell, one-sided, and NOT accumulated: the DDA adds exact deltas
+        ; from here on. On screen: colH = 88/d so dColH ~ 88*(1/256)/d^2, and a wall top is
+        ; only VISIBLE below colH 100, i.e. d >= 0.88 cells -- so the worst visible error is
+        ; 0.45 of a logical pixel, falling off as the square of distance.
         sec
-        tya
-        sbc f0LoT,x             ; result discarded -- only the borrow into the high byte
-        lda qhi                 ; matters, so the old "sta qlo" here was writing a dead value
-        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into sdx
+        lda qhi
+        sbc f0HiT,x             ; high byte of fr*ddxL, straight into sdx
         clc
         adc sdx
         sta sdx
@@ -4422,14 +4424,10 @@ cymh2:   tax
         adc ddy
         tax
         bcc cyml0
-        lda f1LoT,x
-        tay
         lda f1HiT,x
         sta qhi
         jmp cyml1
-cyml0:   lda f0LoT,x
-        tay
-        lda f0HiT,x
+cyml0:   lda f0HiT,x
         sta qhi
 cyml1:   lda py
         sec
@@ -4438,11 +4436,17 @@ cyml1:   lda py
         eor #$ff
         adc #$01
 cyml2:   tax
+        ; THE BORROW FROM THE LOW BYTES IS DELIBERATELY NOT COMPUTED. This half only ever
+        ; contributed the high byte of fr*ddyL, so the two low-byte loads and the subtract
+        ; that produced their borrow existed only to be +/-1 correct in the LAST bit.
+        ; Dropping them leaves the product high by 0 or 1 -- the side distance wrong by at
+        ; most 1/256 of a cell, one-sided, and NOT accumulated: the DDA adds exact deltas
+        ; from here on. On screen: colH = 88/d so dColH ~ 88*(1/256)/d^2, and a wall top is
+        ; only VISIBLE below colH 100, i.e. d >= 0.88 cells -- so the worst visible error is
+        ; 0.45 of a logical pixel, falling off as the square of distance.
         sec
-        tya
-        sbc f0LoT,x             ; result discarded -- only the borrow into the high byte
-        lda qhi                 ; matters, so the old "sta qlo" here was writing a dead value
-        sbc f0HiT,x             ; A = high byte of fr*mlo, so it can go straight into sdy
+        lda qhi
+        sbc f0HiT,x             ; high byte of fr*ddyL, straight into sdy
         clc
         adc sdy
         sta sdy
