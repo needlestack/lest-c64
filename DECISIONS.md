@@ -205,3 +205,48 @@ stepT1/2/3 are emitted one page each. Both must change together:
   4. emit stepT1/2/3 page-aligned at SLOTN bytes each, and find them a home -- 9 pages for
      9x9x9, which collides with FINEANG at RELOC+0x1300 and PLAN=3 at RELOC+0x2900
 Until then QLEVELS with a product over 256 throws a build error naming exactly this.
+
+## 12. interpSpan run-fill — BUILT, MEASURED, REJECTED (2026-08-12)
+
+Fill a span's interior as RUNS of constant `colH` instead of stepping a Bresenham per column.
+Written, verified byte-identical on hardware, measured, and then **reverted**.
+
+**It works and it is exact.** The shipped loop starts `err` at `dxv>>1` and per interior column
+adds `dyv`, subtracting `dxv` and stepping `h` on overflow, i.e. `h_i = floor((e0 + i*dyv)/dxv)`.
+The run lengths between the crossings are themselves a Bresenham line of slope `frac/dyv` where
+`dxv = base*dyv + frac`, seeded from `N = dxv - e0 - 1`:
+
+    len0 = N div dyv    e = N mod dyv    base = dxv div dyv    frac = dxv mod dyv
+    per run: L = base;  e += frac;  if (e >= dyv) { e -= dyv; L++ }
+
+Verified identical over 120,870 span shapes in JS and byte-identical over the six views on real
+hardware (196 78 158 6 292 154 unchanged). **The seeding had to be derived, not guessed** — a
+first attempt seeded `e` from `e0 mod dyv` and disagreed on 8,928 of 12,719 shapes, by one column
+here and there, which is invisible on screen. If this is ever revisited, keep the build-time
+equivalence check; the algorithm is not the risky part, the seeding is.
+
+**Why it was rejected: it is a wash at the viewpoint that sets the floor.** Measured at
+`PX=c80 PY=a80 PA=b0`, interpSpan went 8,645 -> 8,970, i.e. **325 cycles SLOWER**. Modelled over
+3,616 frames with hardware-derived costs, the best selector reaches -968 a mean frame and -1,664
+on column-heavy frames but **+54 at the worst-fps viewpoint** — and no rule fixes that, because
+that view is boundary-dense (10 spans, each paying two divides) and half its spans are steeper
+than they are wide. A saving that is zero where the frame budget binds does not buy gameplay
+headroom, which was the entire justification.
+
+**Three estimation errors, all mine, all in the same direction:**
+- *Baseline.* I took `interpSpan_net / interior_columns = 6,575/140 = 47` cycles a column. That
+  quotient includes per-span setup. The loop's own comment says **38** and it was right.
+  **Trust the code's own measured comment over a quotient you formed yourself.**
+- *Run overhead.* Modelled at 22 cycles a run before the loop existed; as written it is ~70 —
+  30 to clip the run to the span end, 5 for the end test, ~35 for the height and error step.
+  **Pricing code you have not written is guessing.**
+- *Setup.* 300 -> 380 -> 434 as I looked closer. Two `rfDiv` calls at ~200 each; `asl`/`inc` on
+  zero page are 5 cycles, not 3.
+
+Every parameter moved against the change, and only the emulator stopped it. That is the third
+estimate this session wrong by ~2x (calcM inline 945 -> 455, seam incremental 3,000 -> 1,700).
+**Model to decide WHERE to look; never to decide whether to ship.**
+
+Cost of the experiment for the record: 179 bytes and ~90 lines, plus a second interpolation path
+selected by a performance heuristic — which is also the change most likely to read as a mystery
+later. Deleting it was the readable outcome as well as the fast one.
