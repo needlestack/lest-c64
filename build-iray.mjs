@@ -1325,6 +1325,35 @@ const clamp8T = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
 // wL*16 + wR, and the left level was being shifted left four times right after clampT
 // handed it over -- 8 cycles per edge cell to undo a table lookup's own output.
 const clampT16 = clampT.map(v => v << 4);
+if (PLAN === 3) {
+  // ---- the two invariants renderSym's skip-calcM shortcut RELIES on, asserted ----
+  // Both were comments until now, and a comment does not fail the build. The shortcut reads the
+  // threshold, and on zero jumps straight to the hi half without computing m at all. That is
+  // only sound while:
+  //
+  //   (a) m cannot be negative, so "m >= thr" at thr = 0 is a tautology. m is the sum of two
+  //       clamp8T entries, so this is a claim about clamp8T's RANGE -- which is enforced by a
+  //       Math.max(0, ...) today and would be silently broken by anyone widening it.
+  //   (b) thr == 0 implies lo == hi. The normaliser above guarantees the forward direction, but
+  //       NOT the converse: if a future charset plan ever emitted a real threshold of 0 for a
+  //       slot whose halves differ, every cell landing there would render the hi half forever.
+  //       Nothing else in the pipeline would notice -- it is a wrong CODE, not a wrong shape,
+  //       so verify-render would report a handful of stray pixels with no hint of the cause.
+  const c8 = clamp8T.findIndex(v => v < 0 || v > 8);
+  if (c8 >= 0) throw new Error(
+    `clamp8T[${c8}] = ${clamp8T[c8]} is outside 0..8, so m could go negative and renderSym's ` +
+    `thr == 0 shortcut (skip calcM, take the hi half) is no longer a tautology`);
+  const offenders = [];
+  for (let i = 0; i < 256; i++)
+    if (rampThrN(i) === 0 && rampTlo[i] !== rampThi[i]) offenders.push(`ramp slot ${i}`);
+  for (let k = 0; k < 3; k++) for (let i = 0; i < SLOTN; i++)
+    if (stepThrN(k, i) === 0 && stepTlo[k][i] !== stepThi[k][i]) offenders.push(`step k=${k} slot ${i}`);
+  if (offenders.length) throw new Error(
+    `${offenders.length} slot(s) have threshold 0 but lo != hi (${offenders.slice(0, 4).join(', ')}` +
+    `${offenders.length > 4 ? ', ...' : ''}). renderSym treats thr == 0 as "no second codeword" ` +
+    `and would always pick the hi half there`);
+}
+
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
 const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255);
 // per cell-row: cell is fully solid when min height >= t1, fully blank when max < tb.
