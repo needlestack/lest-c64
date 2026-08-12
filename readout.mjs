@@ -83,21 +83,21 @@ if (process.env.RAYS) {
 // The value is mean raster LINES per frame (accumulated over exactly 256 frames); one line
 // is 65 cycles.
 if (process.env.PROF) {
-  // Phase 7 has NO tick anywhere in the engine -- grep 'ldx #7'. It was labelled "ray:
-  // marchCol stores" and read 0.0% forever, which is indistinguishable from a phase whose
-  // ticks have been deleted. That ambiguity cost a round of investigation when the temporal
-  // pivot genuinely did remove some tick sites, so the label now says what it is.
-  //
   // 'input' is NOT tickDelta + readKeys costing 6,000 cycles. Phase 0 opens the instant the
   // raster wait ends, which is exactly when the top-of-frame IRQ fires, so the IRQ lands in it
   // systematically. Treat it as IRQ overhead, not input, until someone brackets it properly.
-  const NAMES = ['input (+ the top-of-frame IRQ, see below)', 'table clears', 'subdivision control', '  ray: angle+dispatch',
+  //
+  // Phases 7 and 13 split what used to be one 'subdivision control' bucket. It read 23.6% at
+  // the worst viewpoint and nobody could say what was in it, which is the same failure mode
+  // the old unused phase 7 had: a number with no owner is a number nobody acts on.
+  const NAMES = ['input (+ the top-of-frame IRQ, see below)', 'table clears', 'subdiv: span stack + bookkeeping', '  ray: angle+dispatch',
                  'renderSym', 'fps counter + readout', 'raster wait',
-                 '(phase 7: unused)', '  interpSpan', '  seamSpan',
-                 '  ray: initial distances', '  ray: DDA loop', '  ray: hit + height'];
-  // two columns of five: phase r is at row 4 + r%5, starting at char col 0 or 5. Rows 12-13
+                 'subdiv: delimiter bubble sort', '  interpSpan', '  seamSpan',
+                 '  ray: initial distances', '  ray: DDA loop', '  ray: hit + height',
+                 'subdiv: pivOne prediction'];
+  // two columns of five: phase r is at row 4 + r%5, starting at char col 0, 5 or 10. Rows 12-13
   // would sit below the horizon where charset B mirrors the glyphs and they cannot be decoded.
-  const vals = [...Array(13)].map((_, r) =>
+  const vals = [...Array(14)].map((_, r) =>
     parseInt([...Array(4)].map((_, i) =>
       readChar(Math.floor(r / 5) * 5 + i, 4 + (r % 5))).join(''), 16));
   const tot = vals.reduce((a, b) => a + b, 0);

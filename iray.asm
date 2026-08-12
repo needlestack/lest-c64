@@ -202,6 +202,12 @@ pvPB    = $cb0f
 pvSgn   = $cb10                 ; sign of the term, carried around the unsigned multiply
 pvI2    = $cb11                 ; the hint index, saved across mul8 (which needs X)
 pvYs    = $cb12                 ; the bearing, saved across the first multiply
+pvMode  = $cb2a                 ; 0 = predict in full, 1 = turned in place (the translation
+                                ;   term is identically zero), 2 = nothing moved at all.
+                                ; NOT beside pvYs: $cb13-$cb29 are claimed by the RAYCNT,
+                                ; TOUR and PALKEYS blocks below, which are separate build
+                                ; flags -- a PIVOT variable landing in that range collides
+                                ; only in the diagnostic builds, i.e. silently.
 colW    = $cb23                 ; the three ink colours, cycled by keys 1/2/3. Declared here
 colB    = $cb24                 ;   and not beside tourC, which is inside a TOUR-only block --
 colS    = $cb25                 ;   the default build does not emit that.
@@ -527,13 +533,18 @@ subCn:
         ; the WORLD bearing it was seen at (so the rotation term is a plain subtract next
         ; frame), and 163/distance for the translation term. The distance costs nothing to
         ; obtain -- castRay already parked it in remLoT/remHiT for calcU.
-        ; Kept SORTED by column, by insertion. The subdivision discovers boundaries in stack
-        ; order, not left to right, and pivPrep needs them ascending: it walks them once,
-        ; emitting cuts, and drops any that would not increase. Unsorted, almost every hint
-        ; failed that test and the frame silently fell back to plain bisection -- which is
-        ; exactly what the first measurement showed, 26 rays with the pivot and 26 without.
-        ; (The JS model hid this: it called .sort() on the cut list, so it was measuring an
-        ; ordering the 6502 never had.) ~6 entries, so insertion is a few hundred cycles.
+        ; Kept SORTED by column, by insertion. pivPrep has to see them in ascending column
+        ; order: it walks them once, emitting cuts, and drops any that would not increase.
+        ; Unsorted, almost every hint failed that test and the frame silently fell back to
+        ; plain bisection -- which is exactly what the first measurement showed, 26 rays with
+        ; the pivot and 26 without. (The JS model hid this: it called .sort() on the cut list,
+        ; so it was measuring an ordering the 6502 never had.)
+        ;
+        ; The list is kept DESCENDING and pivPrep walks it backwards. The span stack pops the
+        ; rightmost span first, so boundaries are discovered right to left, and inserting a
+        ; descending stream into an ascending list puts every arrival at the FRONT -- three
+        ; parallel arrays shifted up by one, nine times, 1,500 cycles at the worst viewpoint.
+        ; Matching the list's order to the discovery order turns all of that into an append.
         ldx pvN
         cpx #$40
         bcs pvRcD               ; hint list full: the rest of this frame's boundaries go
@@ -548,7 +559,7 @@ pvInsL: txa
         beq pvInsD
         lda pvBnd-1,x
         cmp tmp2
-        bcc pvInsD              ; found the slot: everything left of it is smaller
+        bcs pvInsD              ; found the slot: everything left of it is LARGER (descending)
         sta pvBnd,x             ; A still holds pvBnd[x-1] -- cmp does not disturb it
         lda pvAng-1,x
         sta pvAng,x
@@ -636,14 +647,38 @@ subMid: lda spanL
         ; running straight. Height is EXACTLY linear across a face, so interpolating end to
         ; end is not an approximation -- it is the right answer, and it is cheaper, because
         ; span setup happens once per face instead of once per interval.
-subDn:  lda #$00                ; the first face always starts at column 0
+subDn:
+        lda #$00                ; the first face always starts at column 0
         sta spanL
         sta bcur
         lda nbnd
         beq subOne              ; no delimiters: the whole screen is one face
         cmp #$02
         bcc subEmt              ; one delimiter needs no sorting
-        ldx nbnd                ; bubble the handful of delimiters into column order
+        ; ---- reverse first, because the delimiters arrive fully DESCENDING ----
+        ; subLp pops the rightmost span first, so it discovers boundaries right to left and
+        ; bndT fills in reverse. That is the bubble sort's worst case exactly: n passes of n
+        ; compares, every one of them swapping. Measured 2,445 cycles at the worst viewpoint,
+        ; 3.4% of the frame, to sort nine bytes. Reversing is O(n) and leaves the sort in
+        ; place, so a run that is NOT perfectly descending -- a saturation split landing out
+        ; of turn -- still comes out ordered, just without the free ride.
+        ldx #$00
+        ldy nbnd
+        dey
+brvLp:  stx tmp
+        cpy tmp
+        bcc brvDn               ; the ends have crossed
+        beq brvDn               ; ... or met, at an odd middle element
+        lda bndT,x
+        sta tmp2
+        lda bndT,y
+        sta bndT,x
+        lda tmp2
+        sta bndT,y
+        inx
+        dey
+        jmp brvLp
+brvDn:  ldx nbnd                ; bubble the handful of delimiters into column order
         dex
         stx bcnt
 subIns: ldx #$00
@@ -762,6 +797,23 @@ pivPrep:
         sta pvTH
         jsr pvClmp
         sta pvDY
+        ; ---- how much of the prediction does this frame actually need? ----
+        ; pivOne is 890 cycles a hint -- measured, 11% of the worst frame at nine hints -- and
+        ; almost all of it is the translation term: two signed multiplies for the displacement
+        ; and a third for the reciprocal. When the camera has not translated that term is
+        ; identically zero, so the whole chain computes a very expensive nothing. Turning on
+        ; the spot is the common case that hits this, and standing still hits the stronger one:
+        ; with no rotation either, the boundary is exactly where it was pinned last frame.
+        lda #$00
+        sta pvMode
+        lda pvDX
+        ora pvDY
+        bne pvMDn               ; the camera moved: the full prediction earns its cycles
+        inc pvMode
+        lda dqa
+        bne pvMDn
+        inc pvMode
+pvMDn:
         ; ---- this viewpoint becomes next frame's reference ----
         lda paF
         sta opaL
@@ -790,11 +842,12 @@ pivPrep:
         lda #$00
         sta sp
         sta pvLast
-        sta pvI
-pivLp:  lda pvI
-        cmp pvN
-        bcs pivEnd
-        ldx pvI
+        lda pvN                 ; the hint list is DESCENDING (see pvInsL), so walking it from
+        sta pvI                 ; the end is what yields ascending columns here
+pivLp:  ldx pvI
+        beq pivEnd
+        dex
+        stx pvI
         jsr pivOne              ; A = where hint X is predicted to be now
         cmp pvLast
         beq pivNx               ; predictions must come out strictly increasing, or the spans
@@ -809,8 +862,7 @@ pivLp:  lda pvI
         cmp #$9f
         bcs pivNx
         jsr pivCut
-pivNx:  inc pvI
-        bne pivLp               ; always: pvI < NBND
+pivNx:  jmp pivLp               ; pvI was decremented at the top; 0 ends the walk
 pivEnd: lda #$9f    ; the last span always runs to the right edge
         jsr pivPush
         lda #$00
@@ -860,7 +912,18 @@ pvcD:   rts
 ; and qToColT turns q' back into a column, which is why there is no divide anywhere here --
 ; the rectilinear column spacing is baked into that table.
 pivOne: stx pvI2
-        ldy pvAng,x
+        lda pvMode              ; see pvMDn: skip what this frame's motion makes zero
+        beq pv1All
+        cmp #$02
+        bcs pv1Sti
+        lda #$00                ; turned in place: daq = 0, so the term, both multiplies and
+        sta pvTL                ; the reciprocal are all skipped -- only the rotation is left
+        sta pvTH
+        jmp pv1r
+pv1Sti: lda pvBnd,x             ; nothing moved: the boundary is still exactly where it was
+        rts                     ; pinned, which is a better answer than the rounding the
+                                ; qToColT round trip would give it
+pv1All: ldy pvAng,x
         jsr pivTerm             ; pvTL/pvTH = the signed 16-bit term
         lda #$00
         sta pvSgn
@@ -916,7 +979,7 @@ pv1s:   sta pvTL                ; daq, signed byte -> sign-extend for the 16-bit
         bpl pv1e
         ldy #$ff
 pv1e:   sty pvTH
-        ldx pvI2                ; + rayOffQS[col], sign-extended
+pv1r:   ldx pvI2                ; + rayOffQS[col], sign-extended
         ldy pvBnd,x
         lda rayOffQS,y
         clc
@@ -1257,10 +1320,10 @@ rfCp3:  clc
         tay
         lda clampT,y
         sta hh1                 ; right level (0..12)
-        ldx colc
-        lda cstepT,x
+        ldy colc                ; through Y, NOT X: X still holds 4*col from the h0/h3 loads
+        lda cstepT,y            ; above, and the ramp path's inlined calcM below needs it. The
         and #$03                ; mask subBnd's cell mark; only the POSITION selects a step
-        bne rfStep
+        bne rfStep              ; step path clobbers X anyway and rebuilds 4*col for itself.
         lda hh0                 ; single face: ramp, index = wL*16 + wR
         ora hh1                 ; hh0 is already <<4, straight from clmp16
         tay
@@ -1268,10 +1331,46 @@ rfCp3:  clc
         ; other two, and the per-bucket threshold turns it into one bit. Carry from the compare
         ; picks the table, so no wide arithmetic is needed -- the tables are page-aligned and the
         ; index stays a byte in Y.
+        ; ---- and 44% of slots do not have a ninth bit at all ----
+        ; m is clamp8T + clamp8T, two levels of 0..8, so it can never be negative and "m >= 0"
+        ; is a tautology. A threshold of ZERO therefore means "always the hi half, whatever m
+        ; is" -- which makes it the exact encoding for "the plan never allocated this slot a
+        ; second codeword". Reading the threshold FIRST and bailing on zero skips calcM
+        ; entirely: 83 cycles an edge cell, on 435 of 985 slots, for a 7-cycle test and no
+        ; change to a single pixel. The build normalises every lo == hi slot to zero (see
+        ; rampThrN) so the test catches all of them, not just the 314 that were already zero.
         sty bidx
-        jsr calcM
+        lda rampThrT,y
+        beq rmpHi
+        sta cmv                 ; cmv held m across the kpos dispatch; the threshold needs it
+                                ; more, and m no longer has to survive anything
+        ; ---- calcM, inlined on the ramp path only ----
+        ; X still holds 4*col, which is why the cstepT test above went through Y. As a
+        ; subroutine this rebuilt it from colc on EVERY edge cell -- ldx colc / lda col4T,x /
+        ; tax, plus the jsr/rts: 21 cycles, on the ~45 of 48 edge cells a frame that are ramps.
+        ; The three step sites still call calcM; they clobber X and only 2.7 cells a frame
+        ; reach them, so a second inlined copy there would be 40 bytes for nothing.
+        lda colH+1,x
+        cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
+        bcc rmpM1
+        lda #100
+rmpM1:  clc
+        adc kr
+        tay
+        lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
+        sta cmtmp
+        lda colH+2,x
+        cmp #101
+        bcc rmpM2
+        lda #100
+rmpM2:  clc
+        adc kr
+        tay
+        lda clamp8T,y
+        clc
+        adc cmtmp               ; A = m
         ldy bidx
-        cmp rampThrT,y
+        cmp cmv
         bcs rmpHi
         lda rampTlo,y
         jmp rfStore
@@ -1319,30 +1418,42 @@ rfMc:   clc
         clc
         adc qbv
         tay
-        sty bidx
-        jsr calcM
-        sta cmv                 ; m survives the kpos dispatch below
-        ldy bidx
+        sty bidx                ; calcM is NOT called yet -- see the ramp path: the threshold
+                                ; decides whether it is needed at all, and the threshold to read
+                                ; depends on kpos, so the dispatch has to come first now. Y holds
+                                ; the slot index throughout; nothing below disturbs it.
         lda kpos
         cmp #$02
         beq rfSt2
         bcs rfSt3
-        lda cmv
-        cmp stepThrT1,y
+        lda stepThrT1,y
+        beq st1h                ; threshold 0: no second codeword for this slot, skip calcM
+        sta cmv
+        jsr calcM
+        ldy bidx
+        cmp cmv
         bcs st1h
         lda stepT1lo,y
         jmp rfStore
 st1h:   lda stepT1hi,y
         jmp rfStore
-rfSt2:  lda cmv
-        cmp stepThrT2,y
+rfSt2:  lda stepThrT2,y
+        beq st2h
+        sta cmv
+        jsr calcM
+        ldy bidx
+        cmp cmv
         bcs st2h
         lda stepT2lo,y
         jmp rfStore
 st2h:   lda stepT2hi,y
         jmp rfStore
-rfSt3:  lda cmv
-        cmp stepThrT3,y
+rfSt3:  lda stepThrT3,y
+        beq st3h
+        sta cmv
+        jsr calcM
+        ldy bidx
+        cmp cmv
         bcs st3h
         lda stepT3lo,y
         jmp rfStore
@@ -2529,17 +2640,15 @@ faDn:
                                 ; ray in the frame -- computed once in mloop, not 11 times.
         ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
         ; (standard form: full cell at frac=0, avoids the fr=256->0 wrap spike)
-        lda px
-        sta fr
-        lda ddx
-        sta mlo
-        lda ddxH
-        sta mhi
         ; --- sideMul inlined: a jsr/rts pair here is 12 cy a call, 24 a ray, ~770 a
         ; --- frame. Every other caller still uses the subroutine.
-        lda fr                  ; --- high half: fr * mhi -> s2:s1 ---
+        ; It reads px / ddxH / ddx DIRECTLY rather than copying them into fr / mhi / mlo first.
+        ; All six are zero page, so the copies bought nothing and cost 18 cycles an axis --
+        ; 36 a ray, ~720 a frame. The names only ever existed as sideMul's argument protocol,
+        ; and an inlined body has no protocol to honour.
+        lda px                  ; --- high half: fr * mhi -> s2:s1 ---
         clc
-        adc mhi
+        adc ddxH
         tax
         bcc cxmh0
         lda f1LoT,x
@@ -2551,9 +2660,9 @@ cxmh0:   lda f0LoT,x
         tay
         lda f0HiT,x
         sta s2
-cxmh1:   lda fr
+cxmh1:   lda px
         sec
-        sbc mhi
+        sbc ddxH
         bcs cxmh2
         eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
         adc #$01
@@ -2565,9 +2674,9 @@ cxmh2:   tax
         lda s2
         sbc f0HiT,x
         sta s2
-        lda fr                  ; --- low half: only the HIGH byte survives the >>8 ---
+        lda px                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
-        adc mlo
+        adc ddx
         tax
         bcc cxml0
         lda f1LoT,x
@@ -2579,9 +2688,9 @@ cxml0:   lda f0LoT,x
         tay
         lda f0HiT,x
         sta qhi
-cxml1:   lda fr
+cxml1:   lda px
         sec
-        sbc mlo
+        sbc ddx
         bcs cxml2
         eor #$ff
         adc #$01
@@ -2623,17 +2732,11 @@ cxpos:  lda #$01
         lda ddxH
         sbc s2
         sta sdxH
-cydo:   lda py
-        sta fr
-        lda ddy
-        sta mlo
-        lda ddyH
-        sta mhi
-        ; --- sideMul inlined: a jsr/rts pair here is 12 cy a call, 24 a ray, ~770 a
-        ; --- frame. Every other caller still uses the subroutine.
-        lda fr                  ; --- high half: fr * mhi -> s2:s1 ---
+cydo:
+        ; --- sideMul inlined; reads py / ddyH / ddy directly, see the X axis above ---
+        lda py                  ; --- high half: fr * mhi -> s2:s1 ---
         clc
-        adc mhi
+        adc ddyH
         tax
         bcc cymh0
         lda f1LoT,x
@@ -2645,9 +2748,9 @@ cymh0:   lda f0LoT,x
         tay
         lda f0HiT,x
         sta s2
-cymh1:   lda fr
+cymh1:   lda py
         sec
-        sbc mhi
+        sbc ddyH
         bcs cymh2
         eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
         adc #$01
@@ -2659,9 +2762,9 @@ cymh2:   tax
         lda s2
         sbc f0HiT,x
         sta s2
-        lda fr                  ; --- low half: only the HIGH byte survives the >>8 ---
+        lda py                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
-        adc mlo
+        adc ddy
         tax
         bcc cyml0
         lda f1LoT,x
@@ -2673,9 +2776,9 @@ cyml0:   lda f0LoT,x
         tay
         lda f0HiT,x
         sta qhi
-cyml1:   lda fr
+cyml1:   lda py
         sec
-        sbc mlo
+        sbc ddy
         bcs cyml2
         eor #$ff
         adc #$01
@@ -4449,13 +4552,13 @@ stepT3hi: !byte 9,51,147,116,157,226,50,159,125,20,20,147,13,117,35,233,20,169,1
         !byte 23,190,36,167,135,98,91,105,172,231,183,80,201,122,222,10,30,21,4,4,203,200,195,41
         !byte 102,61,30
         * = $b700
-rampThrT: !byte 0,0,0,0,0,1,1,1,2,3,3,7,5,6,6,9,0,0,0,0,0,1,2,0,3,5,0,9,8,0,10,12,0,0,0,0,1,0,3,4,0,5,7,10,9,9,0,13,0,0,0,0,2,3,0,5,5,0,8,11,0,10,12,13,0,0,1,2,0,4,5,0,6,7,0,11,10,0,12,14,1,1,0,3,4,0,6,7,0,9,10,12,12,12,0,15,1,2,3,0,5,6,0,8,8,0,11,12,0,13,14,15,1,0,4,5,0,7,8,0,10,11,0,13,13,0,15,16,2,3,0,5,6,0,8,10,0,12,13,14,15,15,0,16,3,5,5,0,7,9,0,11,12,0,14,15,0,16,16,0,3,0,7,8,0,10,11,0,13,14,0,16,16,0,0,0,7,9,10,11,11,12,12,13,14,15,16,0,0,0,0,0,5,8,9,0,10,12,0,13,15,0,16,0,0,0,0,0,6,0,9,10,0,12,13,0,15,16,0,0,0,0,0,0,6,10,0,12,12,0,14,15,0,16,0,0,0,0,0,0,9,12,13,13,14,15,15,16,16,0,0,0,0,0,0,0
+rampThrT: !byte 0,0,0,0,0,1,1,1,2,3,3,7,5,6,6,9,0,0,0,0,0,1,2,0,3,5,0,9,8,0,10,12,0,0,0,0,1,0,3,4,0,5,0,10,9,9,0,13,0,0,0,0,2,3,0,5,5,0,8,11,0,10,0,13,0,0,1,2,0,4,5,0,6,7,0,11,10,0,12,14,1,1,0,3,4,0,6,7,0,9,10,12,12,12,0,15,1,2,3,0,5,6,0,8,8,0,11,0,0,13,14,15,1,0,4,5,0,7,8,0,10,11,0,13,13,0,15,16,2,3,0,5,0,0,8,10,0,12,13,14,15,15,0,16,3,5,5,0,7,9,0,11,12,0,14,15,0,16,16,0,3,0,7,8,0,10,11,0,13,14,0,16,16,0,0,0,7,9,10,11,11,12,12,13,14,15,16,0,0,0,0,0,5,0,9,0,10,12,0,13,15,0,16,0,0,0,0,0,6,0,9,0,0,12,13,0,15,16,0,0,0,0,0,0,6,10,0,0,12,0,14,15,0,16,0,0,0,0,0,0,9,12,13,13,14,15,15,16,16,0,0,0,0,0,0,0
         * = $b800
-stepThrT1: !byte 2,1,3,3,3,3,4,4,5,0,0,6,7,7,9,11,12,13,0,0,0,0,0,0,14,15,16,1,2,3,4,5,6,6,7,5,0,0,6,7,8,9,11,11,11,0,0,0,0,0,0,14,15,16,2,3,4,5,5,6,6,7,6,5,0,6,7,7,9,9,10,11,0,0,0,0,0,0,14,15,16,2,3,4,5,0,6,1,1,6,5,6,6,7,7,8,9,11,12,0,0,0,0,0,0,14,15,16,1,1,3,5,0,0,0,0,5,5,6,7,7,8,9,11,11,12,0,0,0,0,0,0,14,15,16,1,1,1,5,0,0,0,0,5,5,7,8,8,9,10,11,12,13,0,0,0,0,0,0,14,15,16,1,3,3,3,0,0,0,0,6,6,7,8,8,10,11,12,13,14,9,0,0,0,0,0,14,15,16,1,2,3,1,1,0,0,0,5,6,9,8,9,10,11,11,13,9,9,9,12,13,13,14,14,15,16,1,1,3,5,3,3,5,5,6,7,8,6,7,8,9,11,13,11,12,14,15,15,15,15,15,15,15
+stepThrT1: !byte 2,1,3,3,3,3,4,4,5,0,0,6,7,7,9,11,0,13,0,0,0,0,0,0,0,0,16,1,0,3,4,0,6,0,7,5,0,0,6,0,8,9,11,11,11,0,0,0,0,0,0,0,15,0,2,3,4,5,0,0,0,7,6,5,0,6,0,7,9,9,10,11,0,0,0,0,0,0,14,15,16,2,3,4,5,0,6,1,1,6,5,0,6,7,0,8,0,11,12,0,0,0,0,0,0,14,15,0,1,1,3,0,0,0,0,0,5,5,6,7,7,0,9,11,11,0,0,0,0,0,0,0,14,15,16,1,0,1,0,0,0,0,0,5,5,0,0,8,9,10,11,12,13,0,0,0,0,0,0,14,15,16,0,3,3,3,0,0,0,0,6,6,7,0,8,10,11,0,13,14,9,0,0,0,0,0,14,0,16,1,2,3,1,1,0,0,0,5,6,0,8,9,10,11,11,13,9,9,9,12,13,13,0,14,0,16,0,1,3,0,3,3,5,5,6,7,8,0,7,0,9,11,13,11,12,14,15,15,15,15,15,15,15
         * = $b900
-stepThrT2: !byte 2,1,2,2,3,4,3,4,5,0,0,0,7,8,9,10,12,13,0,0,0,0,0,0,0,15,16,1,1,3,4,4,5,6,6,7,0,0,6,7,8,9,11,12,14,0,0,0,0,0,0,0,15,16,2,3,3,5,5,6,7,8,9,4,6,6,7,8,8,11,10,12,0,0,0,0,0,0,0,15,16,1,3,4,5,5,6,7,7,7,5,6,6,7,7,8,9,11,10,0,0,0,0,0,0,0,15,16,1,3,4,5,0,0,0,0,0,4,6,6,7,7,9,10,11,11,0,0,0,0,0,0,14,15,16,1,3,4,5,0,0,0,0,0,5,8,7,8,9,9,11,12,12,0,0,0,0,0,0,14,15,16,1,3,4,0,0,0,0,0,0,6,6,8,8,10,11,11,13,13,8,12,10,13,13,14,14,15,16,1,3,4,0,0,0,0,0,0,6,6,8,8,9,11,12,13,14,10,10,11,12,12,14,14,15,16,1,3,4,0,0,0,0,0,0,6,6,8,9,10,11,12,13,0,12,13,13,14,14,15,15,16,13
+stepThrT2: !byte 2,1,2,2,3,4,3,4,5,0,0,0,0,0,0,10,12,13,0,0,0,0,0,0,0,0,16,1,1,3,4,4,5,6,6,7,0,0,6,0,8,9,11,12,0,0,0,0,0,0,0,0,0,0,2,3,3,5,0,0,0,8,9,4,6,6,0,0,8,11,10,0,0,0,0,0,0,0,0,15,16,1,3,0,5,5,6,7,7,7,5,0,6,0,7,8,9,11,10,0,0,0,0,0,0,0,15,0,1,3,0,0,0,0,0,0,0,0,6,6,7,7,9,10,11,11,0,0,0,0,0,0,14,15,16,1,3,4,0,0,0,0,0,0,5,0,0,8,9,9,11,12,12,0,0,0,0,0,0,14,15,16,1,3,0,0,0,0,0,0,0,0,6,0,8,10,11,11,13,13,8,0,10,0,0,14,14,0,16,1,0,0,0,0,0,0,0,0,6,6,8,8,9,11,0,13,14,10,10,11,12,12,0,14,0,16,1,0,0,0,0,0,0,0,0,0,6,8,9,10,0,0,13,0,12,13,13,14,14,15,15,16,0
         * = $ba00
-stepThrT3: !byte 2,1,2,2,1,1,1,1,1,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,2,3,3,3,1,1,1,2,0,0,0,6,6,7,9,9,10,0,0,0,0,0,0,0,0,15,3,3,4,4,4,4,3,3,3,6,6,6,6,7,8,9,10,6,0,0,0,0,0,0,0,12,15,3,4,5,5,5,5,5,5,5,7,7,7,7,7,8,8,9,7,0,0,0,0,0,0,0,0,15,4,5,5,0,0,0,0,0,0,7,8,7,7,8,9,10,10,8,0,0,0,0,0,0,13,13,15,3,6,6,6,0,0,0,0,0,9,9,9,8,9,10,11,11,10,0,0,0,0,0,0,0,14,14,4,6,6,0,0,0,0,0,0,11,11,10,11,10,11,12,12,12,14,14,14,14,14,14,14,14,15,4,7,7,0,0,0,0,0,0,11,10,10,11,11,12,13,13,13,15,15,15,15,15,15,15,15,15,7,8,8,0,0,0,0,0,0,13,11,11,12,13,14,14,14,0,16,16,16,16,16,16,16,16,15
+stepThrT3: !byte 2,1,2,2,1,1,0,1,0,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,0,3,3,3,1,1,1,0,0,0,0,0,6,7,9,0,10,0,0,0,0,0,0,0,0,15,3,3,0,0,0,4,3,3,3,0,6,6,6,7,0,9,10,6,0,0,0,0,0,0,0,12,15,3,0,0,0,0,0,0,5,5,0,0,0,7,7,8,8,9,7,0,0,0,0,0,0,0,0,15,4,0,0,0,0,0,0,0,0,0,8,7,7,0,9,10,10,8,0,0,0,0,0,0,13,13,15,3,0,6,6,0,0,0,0,0,9,9,9,8,9,10,11,11,0,0,0,0,0,0,0,0,0,14,4,6,6,0,0,0,0,0,0,0,11,10,11,10,11,12,12,12,0,0,14,0,0,14,14,14,15,4,7,7,0,0,0,0,0,0,11,10,10,11,0,12,13,13,13,15,15,0,15,15,15,0,0,15,7,8,8,0,0,0,0,0,0,13,11,11,12,13,14,14,14,0,16,16,0,16,16,16,16,16,15
         * = $bb00
 clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
