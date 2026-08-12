@@ -223,11 +223,32 @@ remHiT  = $c800                 ;   Parked so u can be derived later, only where
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
 entry:
         sei
-        lda #$36                ; LORAM off: BASIC ROM out, so $a000-$bfff reads the RAM the
-        sta $01                 ; program was loaded into. The relocated tables have grown past
-                                ; $a000 and were silently reading ROM -- step patterns came back
-                                ; as BASIC bytes, so corners picked nonsense and flickered.
-                                ; KERNAL and I/O stay mapped.
+        lda #$35                ; processor-port mode 5: RAM at $a000-$bfff, I/O at $d000-$dfff,
+        sta $01                 ; RAM at $e000-$ffff. BASIC and KERNAL both out, I/O still there.
+                                ;
+                                ; $34 IS THE TRAP AND IT LOOKS RIGHT. Mode 4 (LORAM=0, HIRAM=0,
+                                ; CHAREN=1) is RAM EVERYWHERE -- $d000-$dfff included -- because
+                                ; the PLA only maps I/O when LORAM or HIRAM is set; CHAREN alone
+                                ; does not do it. Every $d0xx store then lands in RAM, the VIC
+                                ; never sees a register write, and the six views came back
+                                ; 38-60% wrong. Mode 5 keeps LORAM=1, which costs nothing here:
+                                ; BASIC needs HIRAM too, so $a000 is RAM either way.
+                                ;
+                                ; BASIC had to go because the relocated tables grew past $a000
+                                ; and were silently reading ROM -- step patterns came back as
+                                ; BASIC bytes, so corners picked nonsense and flickered.
+                                ;
+                                ; The KERNAL goes for 8KB of table space at $e000-$ffff, which
+                                ; is the only sizeable block left and is invisible to the VIC
+                                ; (it lies in VIC bank 3; we render from bank 0), so it cannot
+                                ; eat the sprite headroom in bank 0. Nothing calls a KERNAL
+                                ; entry point after startup -- the autostart loader is done by
+                                ; the time this runs, and mloop never returns to BASIC.
+                                ;
+                                ; THE PRICE IS THE VECTORS. With the ROM gone the CPU fetches
+                                ; $fffa/$fffe out of RAM, so this must install them itself --
+                                ; see below. Writes always land in RAM on a 6510, so the order
+                                ; of the banking and the vector stores does not matter.
         lda #$00
         sta $d01a
         lda $dd00
@@ -315,10 +336,23 @@ ccf:    sta $d800,x
         sta iterLo
         sta iterHi
         ; raster IRQ frame counter (for fps)
+        ; ---- hardware IRQ/NMI vectors, not the KERNAL's $0314 indirection ----
+        ; Going direct is not just necessary now the ROM is gone, it is FASTER: the KERNAL
+        ; handler pushes the registers, polls the interrupt source and then jmp ($0314), which
+        ; is ~40-50 cycles of dispatch on every interrupt. There are two a frame (top of frame
+        ; and the horizon split), so this hands back ~100 cycles a frame.
         lda #<irq
-        sta $0314
+        sta $fffe
         lda #>irq
-        sta $0315
+        sta $ffff
+        ; NMI must be pointed somewhere real or RESTORE jams the machine: with the ROM out,
+        ; $fffa would otherwise be whatever the loader left in RAM.
+        lda #<nmi
+        sta $fffa
+        lda #>nmi
+        sta $fffb
+        ; $fffc (RESET) is deliberately left alone. A reset resets the processor port to $37,
+        ; mapping the ROM back in, so the CPU reads the KERNAL's reset vector, not this RAM.
         lda #$01
         sta $d01a
         lda #$00
@@ -3043,7 +3077,15 @@ sml2:   tax
 ; $d018 also carries the video-matrix nibble, which the main loop flips per frame for
 ; double buffering, so the handler ORs the charset bits onto the live value in d018vm
 ; rather than writing a constant.
-irq:    lda $d019
+; The CPU stacks only PC and P, so the registers are this routine's job now. The KERNAL used
+; to push A/X/Y before jmp ($0314), which is why the tail below pulls three bytes -- that tail
+; was always here, and without these four pushes it would return with the stack out of step.
+irq:    pha
+        txa
+        pha
+        tya
+        pha
+        lda $d019
         and #$01
         beq irqd                ; not a raster IRQ
         lda $d012
@@ -3071,6 +3113,15 @@ irqd:   lda #$ff
         tay
         pla
         tax
+        pla
+        rti
+
+; ---- nmi: swallow RESTORE ----
+; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
+; behind it, so this exists purely to make that keypress harmless. $dd0d is read to clear the
+; CIA2 latch in case an NMI ever arrives from there instead.
+nmi:    pha
+        lda $dd0d
         pla
         rti
 
