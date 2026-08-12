@@ -1,6 +1,8 @@
 
-charset = $2800
-charsetB = $3800
+charset = $d000        ; where the VIC reads them: under the I/O hole
+charsetB = $d800
+chrSrc  = $2800        ; where they are loaded to, and copied from at startup
+chrSrcB = $3800
 px      = $02
 py      = $04
 pa      = $06
@@ -251,16 +253,16 @@ entry:
                                 ; of the banking and the vector stores does not matter.
         lda #$00
         sta $d01a
-        lda $dd00
-        ora #$03
+        lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
+        and #$fc                ; %00 -- "and", where bank 0 was "ora #$03".
         sta $dd00
         lda #$1b
         sta $d011
         lda #$18
         sta $d016               ; MCM: multicolor text -> 4 logical px per cell, 2 physical px each
-        lda #$10
+        lda #$80
         sta d018vm              ; display buffer A; IRQ ORs the charset bits per half-screen
-        lda #$1a
+        lda #$84
         sta $d018
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
@@ -320,6 +322,59 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
+        ; ---- copy both charsets into the RAM under the I/O hole ----
+        ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
+        ; CIA registers rather than memory (the build refuses an image past $c000 for the same
+        ; reason). So the fonts are loaded low, at chrSrc/chrSrcB, and moved up here.
+        ;
+        ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
+        ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
+        ; is safe to have the VIC's registers unmapped for 4KB of copying.
+        ;
+        ; ORDER MATTERS AND IT IS SUBTLE. The colour-RAM fill above had to run with I/O MAPPED,
+        ; because colour RAM is a separate 1K chip at $d800-$dbff. Charset B also lives at $d800 --
+        ; in the DRAM underneath, which is what the VIC reads. Two different memories at one
+        ; address, each reached in a different port mode, and the writes above and below must not
+        ; be swapped.
+        lda #$34
+        sta $01
+        ldx #$00
+cpChr:  lda chrSrc,x
+        sta charset,x
+        lda chrSrc+256,x
+        sta charset+256,x
+        lda chrSrc+512,x
+        sta charset+512,x
+        lda chrSrc+768,x
+        sta charset+768,x
+        lda chrSrc+1024,x
+        sta charset+1024,x
+        lda chrSrc+1280,x
+        sta charset+1280,x
+        lda chrSrc+1536,x
+        sta charset+1536,x
+        lda chrSrc+1792,x
+        sta charset+1792,x
+        lda chrSrcB,x
+        sta charsetB,x
+        lda chrSrcB+256,x
+        sta charsetB+256,x
+        lda chrSrcB+512,x
+        sta charsetB+512,x
+        lda chrSrcB+768,x
+        sta charsetB+768,x
+        lda chrSrcB+1024,x
+        sta charsetB+1024,x
+        lda chrSrcB+1280,x
+        sta charsetB+1280,x
+        lda chrSrcB+1536,x
+        sta charsetB+1536,x
+        lda chrSrcB+1792,x
+        sta charsetB+1792,x
+        inx
+        bne cpChr
+        lda #$35                ; back to mode 5: I/O mapped, both ROMs still out
+        sta $01
         lda #$80
         sta px
         lda #$01
@@ -330,7 +385,7 @@ ccf:    sta $d800,x
         sta py+1
         lda #$00
         sta pa
-        lda #$04
+        lda #$e0
         sta baseHi
         lda #$00
         sta iterLo
@@ -1136,16 +1191,16 @@ mvs:    lda $d012
         cmp #250
         bne mvs
         lda baseHi
-        cmp #$04
+        cmp #$e0
         bne mshB
-        lda #$10
+        lda #$80
         sta d018vm              ; show A, draw into B (IRQ ORs in the charset bits)
-        lda #$24
+        lda #$e4
         sta baseHi
         jmp mnext
 mshB:   lda #$90
         sta d018vm              ; show B, draw into A
-        lda #$04
+        lda #$e0
         sta baseHi
 mnext:
         inc iterLo
@@ -1207,7 +1262,7 @@ m8l2:   tax
 ; charset B (raster-split at the horizon) makes the same char code render upside down.
 renderSym:
         lda baseHi
-        cmp #$04
+        cmp #$e0
         beq rfBufA
         lda #14                 ; upper half of the entry tables = buffer B chains
         bne rfBufS              ; always
@@ -1221,7 +1276,7 @@ rfBufS: sta bufOff
         ; choosing between them is four operand bytes patched here rather than an index
         ; computed per column.
         lda baseHi
-        cmp #$04
+        cmp #$e0
         bne rfCbB
         lda #<cwA
         ldy #<cbA
@@ -3099,7 +3154,7 @@ irq:    pha
         bcs irqSplit
         ; --- top of frame: select charset A, arm the split ---
         lda d018vm
-        ora #$0a
+        ora #$04
         sta $d018
         lda #$96
         sta $d012
@@ -3109,7 +3164,7 @@ irq:    pha
         jmp irqd
 irqSplit:
         lda d018vm              ; --- horizon: select mirrored charset B ---
-        ora #$0e
+        ora #$06
         sta $d018
         lda #$00
         sta $d012
@@ -3309,7 +3364,7 @@ tbTabT: !byte 93,85,77,69,61,53,45,37,29,21,13,5,0
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-        * = charset
+        * = $2800    ; charset A's SOURCE; cpChr copies it to $d000
         !byte 0,0,0,0,0,0,0,0,85,85,85,85,85,85,85,85,0,0,0,0,85,85,85,85,0,0,0,85,85,85,85,85
         !byte 84,84,84,84,84,84,84,84,21,85,85,85,85,85,85,85,0,0,0,0,0,64,64,80,64,64,64,64,64,64,64,64
         !byte 0,0,0,0,0,80,85,85,0,0,0,0,0,0,0,21,80,84,85,85,85,85,85,85,0,0,0,0,0,0,85,85
@@ -3377,7 +3432,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 
-        * = charsetB            ; charset A with every glyph's 8 bytes reversed
+        * = $3800  ; charset B's source: A with every glyph's 8 bytes reversed
         !byte 0,0,0,0,0,0,0,0,85,85,85,85,85,85,85,85,85,85,85,85,0,0,0,0,85,85,85,85,85,0,0,0
         !byte 84,84,84,84,84,84,84,84,85,85,85,85,85,85,85,21,80,64,64,0,0,0,0,0,64,64,64,64,64,64,64,64
         !byte 85,85,80,0,0,0,0,0,21,0,0,0,0,0,0,0,85,85,85,85,85,85,84,80,85,85,0,0,0,0,0,0
@@ -3515,210 +3570,210 @@ qIdxMT: !byte 0,0,0,0,0,0,1,1,1,1,2,2,2,2,2,2
 qIdxBT: !byte 0,0,0,0,1,2,3,4,5,6,7,8,8,8,8,8
 qmT:    !byte 0,9,18,0,0,0,0,0,27,36,45,0,0,0,0,0,54,63,72,0,0,0,0,0,81,90,99,0,0,0,0,0,108,117,126,0,0,0,0,0,135,144,153,0,0,0,0,0,162,171,180,0,0,0,0,0,189,198,207,0,0,0,0,0,216,225,234
 
-bkA12:	sta $05e0,x
-bkA11:	sta $05b8,x
-	sta $0608,x
-bkA10:	sta $0590,x
-	sta $0630,x
-bkA9:	sta $0568,x
-	sta $0658,x
-bkA8:	sta $0540,x
-	sta $0680,x
-bkA7:	sta $0518,x
-	sta $06a8,x
-bkA6:	sta $04f0,x
-	sta $06d0,x
-bkA5:	sta $04c8,x
-	sta $06f8,x
-bkA4:	sta $04a0,x
-	sta $0720,x
-bkA3:	sta $0478,x
-	sta $0748,x
-bkA2:	sta $0450,x
-	sta $0770,x
-bkA1:	sta $0428,x
-	sta $0798,x
-bkA0:	sta $0400,x
-	sta $07c0,x
+bkA12:	sta $e1e0,x
+bkA11:	sta $e1b8,x
+	sta $e208,x
+bkA10:	sta $e190,x
+	sta $e230,x
+bkA9:	sta $e168,x
+	sta $e258,x
+bkA8:	sta $e140,x
+	sta $e280,x
+bkA7:	sta $e118,x
+	sta $e2a8,x
+bkA6:	sta $e0f0,x
+	sta $e2d0,x
+bkA5:	sta $e0c8,x
+	sta $e2f8,x
+bkA4:	sta $e0a0,x
+	sta $e320,x
+bkA3:	sta $e078,x
+	sta $e348,x
+bkA2:	sta $e050,x
+	sta $e370,x
+bkA1:	sta $e028,x
+	sta $e398,x
+bkA0:	sta $e000,x
+	sta $e3c0,x
 	jmp rfEdge
-bkB12:	sta $25e0,x
-bkB11:	sta $25b8,x
-	sta $2608,x
-bkB10:	sta $2590,x
-	sta $2630,x
-bkB9:	sta $2568,x
-	sta $2658,x
-bkB8:	sta $2540,x
-	sta $2680,x
-bkB7:	sta $2518,x
-	sta $26a8,x
-bkB6:	sta $24f0,x
-	sta $26d0,x
-bkB5:	sta $24c8,x
-	sta $26f8,x
-bkB4:	sta $24a0,x
-	sta $2720,x
-bkB3:	sta $2478,x
-	sta $2748,x
-bkB2:	sta $2450,x
-	sta $2770,x
-bkB1:	sta $2428,x
-	sta $2798,x
-bkB0:	sta $2400,x
-	sta $27c0,x
+bkB12:	sta $e5e0,x
+bkB11:	sta $e5b8,x
+	sta $e608,x
+bkB10:	sta $e590,x
+	sta $e630,x
+bkB9:	sta $e568,x
+	sta $e658,x
+bkB8:	sta $e540,x
+	sta $e680,x
+bkB7:	sta $e518,x
+	sta $e6a8,x
+bkB6:	sta $e4f0,x
+	sta $e6d0,x
+bkB5:	sta $e4c8,x
+	sta $e6f8,x
+bkB4:	sta $e4a0,x
+	sta $e720,x
+bkB3:	sta $e478,x
+	sta $e748,x
+bkB2:	sta $e450,x
+	sta $e770,x
+bkB1:	sta $e428,x
+	sta $e798,x
+bkB0:	sta $e400,x
+	sta $e7c0,x
 	jmp rfEdge
-slA0:	sta $0400,x
-	sta $07c0,x
-slA1:	sta $0428,x
-	sta $0798,x
-slA2:	sta $0450,x
-	sta $0770,x
-slA3:	sta $0478,x
-	sta $0748,x
-slA4:	sta $04a0,x
-	sta $0720,x
-slA5:	sta $04c8,x
-	sta $06f8,x
-slA6:	sta $04f0,x
-	sta $06d0,x
-slA7:	sta $0518,x
-	sta $06a8,x
-slA8:	sta $0540,x
-	sta $0680,x
-slA9:	sta $0568,x
-	sta $0658,x
-slA10:	sta $0590,x
-	sta $0630,x
-slA11:	sta $05b8,x
-	sta $0608,x
-slA12:	sta $05e0,x
+slA0:	sta $e000,x
+	sta $e3c0,x
+slA1:	sta $e028,x
+	sta $e398,x
+slA2:	sta $e050,x
+	sta $e370,x
+slA3:	sta $e078,x
+	sta $e348,x
+slA4:	sta $e0a0,x
+	sta $e320,x
+slA5:	sta $e0c8,x
+	sta $e2f8,x
+slA6:	sta $e0f0,x
+	sta $e2d0,x
+slA7:	sta $e118,x
+	sta $e2a8,x
+slA8:	sta $e140,x
+	sta $e280,x
+slA9:	sta $e168,x
+	sta $e258,x
+slA10:	sta $e190,x
+	sta $e230,x
+slA11:	sta $e1b8,x
+	sta $e208,x
+slA12:	sta $e1e0,x
 	jmp rfNext
-slB0:	sta $2400,x
-	sta $27c0,x
-slB1:	sta $2428,x
-	sta $2798,x
-slB2:	sta $2450,x
-	sta $2770,x
-slB3:	sta $2478,x
-	sta $2748,x
-slB4:	sta $24a0,x
-	sta $2720,x
-slB5:	sta $24c8,x
-	sta $26f8,x
-slB6:	sta $24f0,x
-	sta $26d0,x
-slB7:	sta $2518,x
-	sta $26a8,x
-slB8:	sta $2540,x
-	sta $2680,x
-slB9:	sta $2568,x
-	sta $2658,x
-slB10:	sta $2590,x
-	sta $2630,x
-slB11:	sta $25b8,x
-	sta $2608,x
-slB12:	sta $25e0,x
+slB0:	sta $e400,x
+	sta $e7c0,x
+slB1:	sta $e428,x
+	sta $e798,x
+slB2:	sta $e450,x
+	sta $e770,x
+slB3:	sta $e478,x
+	sta $e748,x
+slB4:	sta $e4a0,x
+	sta $e720,x
+slB5:	sta $e4c8,x
+	sta $e6f8,x
+slB6:	sta $e4f0,x
+	sta $e6d0,x
+slB7:	sta $e518,x
+	sta $e6a8,x
+slB8:	sta $e540,x
+	sta $e680,x
+slB9:	sta $e568,x
+	sta $e658,x
+slB10:	sta $e590,x
+	sta $e630,x
+slB11:	sta $e5b8,x
+	sta $e608,x
+slB12:	sta $e5e0,x
 	jmp rfNext
-edA0:	sta $0400,x
-	sta $07c0,x
+edA0:	sta $e000,x
+	sta $e3c0,x
 	inc erow
 	jmp rfEdgeT
-edA1:	sta $0428,x
-	sta $0798,x
+edA1:	sta $e028,x
+	sta $e398,x
 	inc erow
 	jmp rfEdgeT
-edA2:	sta $0450,x
-	sta $0770,x
+edA2:	sta $e050,x
+	sta $e370,x
 	inc erow
 	jmp rfEdgeT
-edA3:	sta $0478,x
-	sta $0748,x
+edA3:	sta $e078,x
+	sta $e348,x
 	inc erow
 	jmp rfEdgeT
-edA4:	sta $04a0,x
-	sta $0720,x
+edA4:	sta $e0a0,x
+	sta $e320,x
 	inc erow
 	jmp rfEdgeT
-edA5:	sta $04c8,x
-	sta $06f8,x
+edA5:	sta $e0c8,x
+	sta $e2f8,x
 	inc erow
 	jmp rfEdgeT
-edA6:	sta $04f0,x
-	sta $06d0,x
+edA6:	sta $e0f0,x
+	sta $e2d0,x
 	inc erow
 	jmp rfEdgeT
-edA7:	sta $0518,x
-	sta $06a8,x
+edA7:	sta $e118,x
+	sta $e2a8,x
 	inc erow
 	jmp rfEdgeT
-edA8:	sta $0540,x
-	sta $0680,x
+edA8:	sta $e140,x
+	sta $e280,x
 	inc erow
 	jmp rfEdgeT
-edA9:	sta $0568,x
-	sta $0658,x
+edA9:	sta $e168,x
+	sta $e258,x
 	inc erow
 	jmp rfEdgeT
-edA10:	sta $0590,x
-	sta $0630,x
+edA10:	sta $e190,x
+	sta $e230,x
 	inc erow
 	jmp rfEdgeT
-edA11:	sta $05b8,x
-	sta $0608,x
+edA11:	sta $e1b8,x
+	sta $e208,x
 	inc erow
 	jmp rfEdgeT
-edA12:	sta $05e0,x
+edA12:	sta $e1e0,x
 	inc erow
 	jmp rfEdgeT
-edB0:	sta $2400,x
-	sta $27c0,x
+edB0:	sta $e400,x
+	sta $e7c0,x
 	inc erow
 	jmp rfEdgeT
-edB1:	sta $2428,x
-	sta $2798,x
+edB1:	sta $e428,x
+	sta $e798,x
 	inc erow
 	jmp rfEdgeT
-edB2:	sta $2450,x
-	sta $2770,x
+edB2:	sta $e450,x
+	sta $e770,x
 	inc erow
 	jmp rfEdgeT
-edB3:	sta $2478,x
-	sta $2748,x
+edB3:	sta $e478,x
+	sta $e748,x
 	inc erow
 	jmp rfEdgeT
-edB4:	sta $24a0,x
-	sta $2720,x
+edB4:	sta $e4a0,x
+	sta $e720,x
 	inc erow
 	jmp rfEdgeT
-edB5:	sta $24c8,x
-	sta $26f8,x
+edB5:	sta $e4c8,x
+	sta $e6f8,x
 	inc erow
 	jmp rfEdgeT
-edB6:	sta $24f0,x
-	sta $26d0,x
+edB6:	sta $e4f0,x
+	sta $e6d0,x
 	inc erow
 	jmp rfEdgeT
-edB7:	sta $2518,x
-	sta $26a8,x
+edB7:	sta $e518,x
+	sta $e6a8,x
 	inc erow
 	jmp rfEdgeT
-edB8:	sta $2540,x
-	sta $2680,x
+edB8:	sta $e540,x
+	sta $e680,x
 	inc erow
 	jmp rfEdgeT
-edB9:	sta $2568,x
-	sta $2658,x
+edB9:	sta $e568,x
+	sta $e658,x
 	inc erow
 	jmp rfEdgeT
-edB10:	sta $2590,x
-	sta $2630,x
+edB10:	sta $e590,x
+	sta $e630,x
 	inc erow
 	jmp rfEdgeT
-edB11:	sta $25b8,x
-	sta $2608,x
+edB11:	sta $e5b8,x
+	sta $e608,x
 	inc erow
 	jmp rfEdgeT
-edB12:	sta $25e0,x
+edB12:	sta $e5e0,x
 	inc erow
 	jmp rfEdgeT
 chainEnd:

@@ -1511,14 +1511,35 @@ const BACK = flag('BACK');     // auto-walk backward
 // patTab[cr=11][h=3..5], the live partial-fill entries for the cell row just above the
 // horizon. Kept at $2400 so the whole data segment clears it; enforced by the guard
 // after assemble(), which checks every reserved region, not just the charset.
-// VIC bank 0 is now EXACTLY full -- two screen buffers, two charsets and the f-tables
-// leave no free 1K/2K-aligned slot. Any new table must live above $4000 (see NEWTABLES).
-const SCR_A = 0x0400;
-const SCR_B = 0x2400;
-const CHARSET = 0x2800;                 // charset A: upright glyphs, used above the horizon
-const FTABLES = 0x3000;                 // f0Lo/f0Hi/f1Lo/f1Hi + run-id tables
-const CHARSET_B = 0x3800;               // charset B: every glyph flipped vertically
-const NEWTABLES = 0x4000;               // clampT / rampT / stepT, outside VIC bank 0
+// ===================== VIC BANK 3: GRAPHICS, AND ONLY GRAPHICS =====================
+// The VIC lives in bank 3 ($c000-$ffff) and everything it reads lives there; nothing else does.
+// A bank you can reason about as a unit is worth more than the churn of moving things out of it,
+// and it makes the sprite budget one number instead of "whatever is left between the tables".
+//
+// THE POINT OF BANK 3 IS THE I/O HOLE. The VIC's fetches do not go through the processor port --
+// the only exception is the character ROM, which it sees at $1000-$1fff in banks 0 and 2. So in
+// bank 3 the VIC reads plain RAM at $d000-$dfff, which is exactly 4KB, exactly two charsets, and
+// exactly the RAM the CPU can never use because it needs I/O mapped there. Free space.
+//
+// Two consequences worth stating out loud:
+//   - The charsets CANNOT be loaded into place: LOAD runs with I/O mapped, so the loader would
+//     write VIC and CIA registers instead of memory. They are emitted low, at CHARSRC, and copied
+//     up at startup with the port switched to $34. See cpChr.
+//   - CHARSET_B at $d800 sits under COLOUR RAM. Those are different physical memories: colour RAM
+//     is a separate 1K chip the CPU reaches when I/O is mapped, and the DRAM underneath is what
+//     the VIC reads. They coexist, and the colour-RAM init must run with I/O mapped while the
+//     charset copy runs with it banked out.
+//
+// Bank 0 is now CPU-only, so the char-ROM shadow at $1000-$1fff stops mattering entirely.
+const VBANK = 0xc000;                   // VIC bank 3
+const SCR_A = 0xe000;                   // both screens must stay CPU-writable: renderSym
+const SCR_B = 0xe400;                   //   writes one of them every frame
+const CHARSET = 0xd000;                 // charset A: upright glyphs, above the horizon
+const CHARSET_B = 0xd800;               // charset B: every glyph flipped, below the horizon
+const CHARSRC = 0x2800;                 // where the two charsets are EMITTED, 2KB apart, and
+const CHARSRC_B = 0x3800;               //   copied from at startup. Reclaimable afterwards.
+const FTABLES = 0x3000;                 // f0Lo/f0Hi/f1Lo/f1Hi + run-id tables (CPU only)
+const NEWTABLES = 0x4000;               // clampT / rampT / stepT
 // Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
 // coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
 // solve needs into another one. 1024 bytes, all above VIC bank 0.
@@ -1535,9 +1556,10 @@ const HTABLE = 0x4d00;                  // page-aligned: 16 height tables x 3 pa
                                         // then the three-level step tables grew the data
                                         // block below it. The assembler catches an overlap,
                                         // so raise this whenever it complains.)
-// $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048
-const vm = scr => (scr >> 10) << 4;
-const cb = cs => (cs >> 11) << 1;
+// $d018: bits 7-4 = video matrix / 1024, bits 3-1 = charset / 2048 -- both RELATIVE TO THE BANK,
+// which is why these subtract VBANK. They read as absolute addresses and are not.
+const vm = scr => (((scr - VBANK) >> 10) & 15) << 4;
+const cb = cs => (((cs - VBANK) >> 11) & 7) << 1;
 const CB_A = cb(CHARSET), CB_B = cb(CHARSET_B);
 // Raster line of the horizon. The 25-row display window starts at raster 51, so logical
 // row 100 is raster 151; arm the split one line early so the swap lands before that line's
@@ -1547,8 +1569,10 @@ const hx = n => '$' + n.toString(16).padStart(2, '0');
 const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 
 const asm = `
-charset = ${hx(CHARSET)}
+charset = ${hx(CHARSET)}        ; where the VIC reads them: under the I/O hole
 charsetB = ${hx(CHARSET_B)}
+chrSrc  = ${hx(CHARSRC)}        ; where they are loaded to, and copied from at startup
+chrSrcB = ${hx(CHARSRC_B)}
 px      = $02
 py      = $04
 pa      = $06
@@ -1816,8 +1840,8 @@ entry:
                                 ; of the banking and the vector stores does not matter.
         lda #$00
         sta $d01a
-        lda $dd00
-        ora #$03
+        lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
+        and #$fc                ; %00 -- "and", where bank 0 was "ora #$03".
         sta $dd00
         lda #$1b
         sta $d011
@@ -1885,6 +1909,59 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
+        ; ---- copy both charsets into the RAM under the I/O hole ----
+        ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
+        ; CIA registers rather than memory (the build refuses an image past $c000 for the same
+        ; reason). So the fonts are loaded low, at chrSrc/chrSrcB, and moved up here.
+        ;
+        ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
+        ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
+        ; is safe to have the VIC's registers unmapped for 4KB of copying.
+        ;
+        ; ORDER MATTERS AND IT IS SUBTLE. The colour-RAM fill above had to run with I/O MAPPED,
+        ; because colour RAM is a separate 1K chip at $d800-$dbff. Charset B also lives at $d800 --
+        ; in the DRAM underneath, which is what the VIC reads. Two different memories at one
+        ; address, each reached in a different port mode, and the writes above and below must not
+        ; be swapped.
+        lda #$34
+        sta $01
+        ldx #$00
+cpChr:  lda chrSrc,x
+        sta charset,x
+        lda chrSrc+256,x
+        sta charset+256,x
+        lda chrSrc+512,x
+        sta charset+512,x
+        lda chrSrc+768,x
+        sta charset+768,x
+        lda chrSrc+1024,x
+        sta charset+1024,x
+        lda chrSrc+1280,x
+        sta charset+1280,x
+        lda chrSrc+1536,x
+        sta charset+1536,x
+        lda chrSrc+1792,x
+        sta charset+1792,x
+        lda chrSrcB,x
+        sta charsetB,x
+        lda chrSrcB+256,x
+        sta charsetB+256,x
+        lda chrSrcB+512,x
+        sta charsetB+512,x
+        lda chrSrcB+768,x
+        sta charsetB+768,x
+        lda chrSrcB+1024,x
+        sta charsetB+1024,x
+        lda chrSrcB+1280,x
+        sta charsetB+1280,x
+        lda chrSrcB+1536,x
+        sta charsetB+1536,x
+        lda chrSrcB+1792,x
+        sta charsetB+1792,x
+        inx
+        bne cpChr
+        lda #$35                ; back to mode 5: I/O mapped, both ROMs still out
+        sta $01
 ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EMPTY. Uninitialised, a boot value
         sta cqN                 ; of 64 or more makes every push hit the full check silently,
                                 ; and the first flush walks 64 garbage pointers writing colour
@@ -5073,12 +5150,12 @@ tbTabT: !byte ${tbTab.join(',')}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-        * = charset
+        * = ${hx16(CHARSRC)}    ; charset A's SOURCE; cpChr copies it to $d000
 ${chunk(fontA, 32)}
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 
-        * = charsetB            ; charset A with every glyph's 8 bytes reversed
+        * = ${hx16(CHARSRC_B)}  ; charset B's source: A with every glyph's 8 bytes reversed
 ${chunk(fontB, 32)}
 
         * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
@@ -5393,12 +5470,13 @@ try {
   // to the assembler but is rewritten every frame. Check every region the data segment
   // must not touch, and name the overlap so the next collision is a build error rather
   // than a glitch three cell-rows wide near the horizon.
+  // Bank 0 holds no VIC data any more -- the screens and charsets are in bank 3 -- so what the
+  // growing data segment can still collide with is the charset SOURCE it is loaded alongside,
+  // and the f-tables between the two halves of it.
   const reserved = [
-    ['screen buffer A', SCR_A, SCR_A + 0x400],
-    ['screen buffer B', SCR_B, SCR_B + 0x400],
-    ['charset A', CHARSET, CHARSET + 0x800],
+    ['charset A source', CHARSRC, CHARSRC + 0x800],
     ['f-tables', FTABLES, FTABLES + 0x800],
-    ['charset B', CHARSET_B, CHARSET_B + 0x800],
+    ['charset B source', CHARSRC_B, CHARSRC_B + 0x800],
   ];
   if (r.labels.chainEnd > HTABLE)
     throw new Error(`fill chains end at $${r.labels.chainEnd.toString(16)}, past the height tables at $${HTABLE.toString(16)}`);
@@ -5473,20 +5551,35 @@ try {
       throw new Error(`${t} at $${a.toString(16)} spans a page boundary; every indexed read ` +
         `past $${((a | 255) + 1).toString(16)} costs an extra cycle (page-align it)`);
   }
-  // What is left in VIC bank 0. Sprite data has to live here, 64 bytes per sprite on a
-  // 64-byte boundary, so this is the number that decides how many sprites a future object
-  // pass can have. Nothing in this build uses sprites -- the figure is reported for that.
-  // $1000-$1fff is NOT usable for VIC data in banks 0 and 2: the VIC sees the character
-  // ROM there regardless of what RAM holds, so sprites or a charset placed in it would
-  // display the ROM font. Cut that window out of the free list.
-  const CHARROM = [0x1000, 0x2000];
-  const gaps = [[r.labels.dataEnd, SCR_B], [CHARSET + 0x800, CHARSET_B]]
-    .flatMap(([lo, hi]) => (lo < CHARROM[1] && hi > CHARROM[0])
-      ? [[lo, Math.min(hi, CHARROM[0])], [Math.max(lo, CHARROM[1]), hi]] : [[lo, hi]])
-    .map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
-  const free = gaps.reduce((a, [lo, hi]) => a + (hi - lo), 0);
-  console.log(`headroom below screen buffer B: ${SCR_B - r.labels.dataEnd} bytes`);
-  console.log(`VIC bank 0 free: ${gaps.map(([lo, hi]) =>
+  // What is left in VIC BANK 3 for sprites. Sprite data is 64 bytes on a 64-byte boundary, so
+  // this is the number that decides how many sprites an object pass can have. No char-ROM window
+  // to cut out any more -- that shadow is banks 0 and 2 only, which is half the reason for moving.
+  //
+  // Occupied: the two screens, the two charsets under the I/O hole, and $fffa-$ffff, which the VIC
+  // would happily read but which we write the NMI and IRQ vectors into -- so graphics placed there
+  // would have six bytes punched out of it.
+  // ...and any CPU equate still squatting in the bank. Bank 3 is meant to be graphics-only; until
+  // every one of these is evicted the free figure would be a lie, and a lie in the direction that
+  // gets sprite data written over the span stack.
+  const squatters = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)/gm)]
+    .map(m => [m[1], parseInt(m[2], 16)])
+    .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB');
+  const used = [[SCR_A, SCR_A + 0x400], [SCR_B, SCR_B + 0x400],
+                [CHARSET, CHARSET + 0x800], [CHARSET_B, CHARSET_B + 0x800],
+                [0xfffa, 0x10000],
+                // a squatter's extent is unknown, so reserve to the next page boundary
+                ...squatters.map(([, a]) => [a & ~255, (a & ~255) + 256]),
+               ].sort((a, b) => a[0] - b[0]);
+  if (squatters.length) console.log(`  bank 3 still has ${squatters.length} CPU equate(s) in it ` +
+    `($${Math.min(...squatters.map(x => x[1])).toString(16)}-` +
+    `$${Math.max(...squatters.map(x => x[1])).toString(16)}) -- not yet graphics-only`);
+  const gaps = []; let at = VBANK;
+  for (const [lo, hi] of used) { if (lo > at) gaps.push([at, lo]); at = Math.max(at, hi); }
+  if (at < 0x10000) gaps.push([at, 0x10000]);
+  const bank3 = gaps.map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
+  const free = bank3.reduce((a, [lo, hi]) => a + (hi - lo), 0);
+  console.log(`headroom below the charset source: ${CHARSRC - r.labels.dataEnd} bytes`);
+  console.log(`VIC bank 3 free: ${bank3.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
     `  = ${free} bytes, ${free >> 6} sprite slots`);
   // $a000-$bfff is BASIC ROM unless LORAM is cleared, and $d000-$dfff is I/O no matter what.
@@ -5504,8 +5597,8 @@ try {
     // Anything NOT listed that lands in the image is a real bug: the program writes over RAM the
     // loader filled with data, so it works for one frame and not the next.
     const OK = {
-      charset:  'a NAME for emitted charset data, not RAM scratch',
-      charsetB: 'ditto, the mirrored charset',
+      chrSrc:   'a NAME for emitted charset data, not RAM scratch -- cpChr copies it to $d000',
+      chrSrcB:  'ditto, the mirrored charset',
       pvBnd:    'lives in the pages PLAN=3 vacates -- stepT1/2/3 are not emitted there',
       pvAng:    'ditto',
       pvRcp:    'ditto',
@@ -5520,8 +5613,12 @@ try {
       clash.slice(0, 6).map(([n, a]) => `${n}=$${a.toString(16)}`).join(', ') +
       `${clash.length > 6 ? ', ...' : ''}`);
   }
-  if (r.end >= 0xd000) throw new Error(
-    `program ends at $${r.end.toString(16)}, past $d000 -- that is I/O, not RAM`);
+  // The image must stop at $c000. It used to be $d000 (past which LOAD would write I/O registers
+  // rather than memory) but bank 3 is graphics-only now, so $c000 is the real wall -- and it is the
+  // number that will tell us the day a compressed loader becomes necessary rather than optional.
+  if (r.end > VBANK) throw new Error(
+    `program ends at $${r.end.toString(16)}, past $${VBANK.toString(16)} -- bank 3 is graphics-only. ` +
+    `${r.end - VBANK} bytes over; the single-load ceiling is $0801-$bfff (47.5KB).`);
   console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`
     + (DIAG.length ? `\nDIAGNOSTIC BUILD [${DIAG.join(' ')}] -- asm to ${asmPath}, not for fps numbers` : ''));
 } catch (e) { console.error('ASM ERROR:', e.message); process.exit(1); }
