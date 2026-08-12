@@ -250,3 +250,90 @@ estimate this session wrong by ~2x (calcM inline 945 -> 455, seam incremental 3,
 Cost of the experiment for the record: 179 bytes and ~90 lines, plus a second interpolation path
 selected by a performance heuristic — which is also the change most likely to read as a mystery
 later. Deleting it was the readable outcome as well as the fast one.
+
+## 13. Skipping empty cells in the march (distance field) — REJECTED, no empty space exists
+
+The march is an OCCLUSION SEARCH, not a distance measurement: the distance falls out as one
+subtract (`rem = sdx - ddx`). So the natural shortcut is to not step through cells that cannot
+contain a wall — sphere tracing. Precompute `distT[cell]` = Chebyshev distance to the nearest
+wall and advance that far in one go.
+
+**Measured over the map's 136 open cells: `distT` is 1 for 130 of them (96%), 2 for six, and
+never more.** A jump has to clear about **8** cells to pay for itself — jumping in distance means
+recomputing the cell and both side distances from scratch, the same ~307-cycle pair of multiplies
+as ray setup, against ~65 to step one cell. The map never offers more than 2.
+
+**The technique is standard and correct; a 16x16 maze with 1-2 cell corridors is the geometry that
+starves it.** Every cell the DDA walks is wall-adjacent and could have been the answer. Revisit
+only if the map ever gains open rooms several cells across.
+
+Grounding numbers, worst viewpoint: 134 cell crossings to resolve 20 columns, 6.7 a ray (min 1,
+max 14), ~65 cycles a crossing. Per ray: 89 angle + 307 side distances + 435 DDA + 141 answer.
+**Only 14% of a ray produces the answer; 81% is the search and its setup.**
+
+## 14. Projecting wall runs instead of casting rays — REJECTED, candidates outnumber the answer
+
+The map is static, axis-aligned and unit-celled, so every wall run is a segment between two known
+world points and `runWT`/`runET`/`runNT`/`runST` enumerate all 66 of them at build time. Project a
+run's two endpoints to two screen columns and two `colH` values and you have exactly the span
+endpoints the subdivision spends two rays each to find — and `colH` is linear across a run, so the
+existing interpolator handles the rest unchanged.
+
+**Measured over 7,232 frames (66 runs, 186 faces, mean run 2.8 cells):**
+
+| | mean | max |
+|---|---|---|
+| runs facing the viewer (per-cell PVS) | **35.3** of 66 | — |
+| runs to project (facing + inside the 66 deg FOV) | **11.27** | 33 |
+| runs that actually reach the screen | **2.30** | 10 |
+
+**80% of the projection work would be spent on fully-occluded geometry**, and a per-cell PVS
+barely culls, because in a maze most of the map faces you. Priced at 550 cycles a projected run
+(two bearings ~175, two view-axis distances ~100) against the measured 973 a ray:
+
+    worst-fps viewpoint   CAST 20 x 973 = 19,460   PROJECT 22 x 550 = 12,100   -> 7,400 better
+    start corridor        CAST 10 x 973 =  9,730   PROJECT 24 x 550 = 13,200   -> 3,500 WORSE
+    mean over all frames                                                       -> ~1,700 worse
+
+...and that is BEFORE occlusion, which the DDA gives away free (the first hit IS the visible one)
+and which projection must reintroduce as a front-to-back order plus a column clip list.
+
+**THE PRINCIPLE, worth more than the numbers: raycasting's cost scales with the ANSWER, projection's
+with the CANDIDATES. Here candidates outnumber visible geometry 5:1 (11.27 vs 2.30), so projection
+starts 5x behind.** That is why Wolfenstein-class geometry got raycast and Doom-class got BSP —
+Doom's open sightlines make the candidate set small relative to what is visible; a maze inverts it.
+`build-pmaze`'s ~3 fps is NOT evidence here: that was a full polygon rasteriser, not just a
+geometry query. The DDA is the right model for this map.
+
+## 15. Seam placement — corners are already free, interiors are already at the exact floor
+
+Two different mechanisms, and only one of them costs anything.
+
+**Corner seams are free and always were.** `subFace` writes `seamT[cell] = SEAM0 + (spanR & 3)`
+the moment the subdivision pins a boundary to one column, gated on a concave-partner check
+(`cpLoT`/`cpHiT`). No projection, no divide: ~40 cycles, ~360 a frame at the worst viewpoint, and
+it rides entirely on boundary-finding work already being done. Convex corners are deliberately
+left seam-free — the silhouette already steps 20+ rows there.
+
+**All 5,210 cycles are the INTERIOR seams**, `seamSpan` marking where a long wall crosses cell
+boundaries along its own face — the sliding cue. Cost is `calcU` twice per surviving span (~840)
+plus `seamOne` at ~330 per seam.
+
+**A "falloff pattern" is not a cheat here — it is the exact geometry.** Deriving `dc/du` for an
+axis-aligned face, the `(s'z - sz')` term collapses to the perpendicular distance from the eye to
+the face's plane, which is CONSTANT along that face. With `colH = 88/z` that gives
+
+    gap between consecutive cell boundaries = K * colH(u) * colH(u+1),   K constant per span
+
+**But the cheap single-height version, `K * colH^2`, is off by 3.65 columns on average and 10.37
+at worst** (302 sample points, 4 viewpoints) — because the gaps are 18-24 columns wide and `colH`
+changes substantially across one, so the derivative badly overestimates the difference.
+
+**And the exact form reduces to what `seamOne` already does.** `z` is linear in `u` along the
+face, so the column is projective in `u`: `c(k) = (P + Qk)/(R + Sk)`, i.e. two adds and one
+divide per seam. `seamOne`'s reciprocal multiply IS that divide. There is no cheaper exact answer.
+
+**Conclusion: optimal for corners, optimal for exact interiors.** The only remaining saving is a
+deliberate accuracy trade — `K * colH(u) * colH(u+1)` with `colH(u+1)` estimated from the previous
+gap, two multiplies instead of the divide chain, ~2,300 cycles at the worst viewpoint for a
+placement error of a few columns. Not taken: unmeasured, and seams are the feature.
