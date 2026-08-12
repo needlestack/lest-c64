@@ -1592,18 +1592,18 @@ qhi     = $16
 col     = $17
 tmp     = $1f
 baseHi  = $22
-paF     = $cb5b                  ; low byte of the 16-bit player angle; pa is the high
-dtv     = $cb50
-dtm     = $cb59                  ; elapsed ticks scaled for movement, and for turning
-dtt     = $cb5a
-lastMv  = $cb51
-dxs     = $cb52
-dxsH    = $cb53
-dys     = $cb54
-dysH    = $cb55
-dxSgn   = $cb56
-dySgn   = $cb57
-rowv    = $cb58                  ; keyboard row 1, held so SHIFT/E/S read it once
+paF     = $2b5b                  ; low byte of the 16-bit player angle; pa is the high
+dtv     = $2b50
+dtm     = $2b59                  ; elapsed ticks scaled for movement, and for turning
+dtt     = $2b5a
+lastMv  = $2b51
+dxs     = $2b52
+dxsH    = $2b53
+dys     = $2b54
+dysH    = $2b55
+dxSgn   = $2b56
+dySgn   = $2b57
+rowv    = $2b58                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
 nxL     = $25
@@ -1699,53 +1699,53 @@ cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
 cy1     = $85
-stackLT = $c000
-stackRT = $c080
+stackLT = $0400
+stackRT = $0480
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
 ; index never needs a 16-bit add.
-sideT   = $c100
-idT     = $c200
-colH    = $c300
-cwA     = $c500                 ; per cell-column: the ceiling run length this buffer holds
-cwB     = $c528
-cbA     = $c550                 ; ... and the solid run start, or $ff for "always redraw"
-cbB     = $c578
-faceIdT = $c400
-cstepT  = $c680                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $cbf0                ; PLAN=2: the bucket index the code came from, and which
-thsel   = $cbf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
-paqL    = $cbf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
-paqH    = $cbf7
-rqL     = $cbf8                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $cbfc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+sideT   = $0500
+idT     = $0600
+colH    = $0700
+cwA     = $2500                 ; per cell-column: the ceiling run length this buffer holds
+cwB     = $2528
+cbA     = $2550                 ; ... and the solid run start, or $ff for "always redraw"
+cbB     = $2578
+faceIdT = $2400
+cstepT  = $2680                 ; per cell-column (40): face-boundary column, 0 = none
+bidx    = $2bf0                ; PLAN=2: the bucket index the code came from, and which
+thsel   = $2bf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+paqL    = $2bf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
+paqH    = $2bf7
+rqL     = $2bf8                 ; and this ray's 10-bit angle: rqL is the table index,
+rqH     = $2bfc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
                                 ; It was declared TWICE, at $cbf9 and here; the assembler takes
                                 ; the last, so $cbf9 was never the live one. Removed rather
                                 ; than left as a trap for the next reader.
-cqtmp   = $cbf2                 ; the colour this cell needs, while both its rows are queued
-cmtmp   = $cbf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
-cmv     = $cbf5                 ; the ninth index bit -- the two columns the bucket throws away
-cqN     = $cbf3                 ; entries in the colour queue
+cqtmp   = $2bf2                 ; the colour this cell needs, while both its rows are queued
+cmtmp   = $2bf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $2bf5                 ; the ninth index bit -- the two columns the bucket throws away
+cqN     = $2bf3                 ; entries in the colour queue
 cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only
-cqLo    = $cc00                 ; colour queue: address low, high, and the value to write.
-cqHi    = $cc40                 ; Written after the buffer flip, never inline -- colour RAM is
-cqCol   = $cc80                 ; NOT double buffered, so an inline write repaints the frame
+cqLo    = $2c00                 ; colour queue: address low, high, and the value to write.
+cqHi    = $2c40                 ; Written after the buffer flip, never inline -- colour RAM is
+cqCol   = $2c80                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $c900                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
-pfPrvF  = $c930                 ; previous timestamp: frame counter, then raster line
-pfPrvL  = $c932
-pfCurH  = $c936                 ; ninth raster bit, current and previous
-pfPrvH  = $c937
-pfTmp   = $c938
-pfTmp2  = $c939
-pfN     = $c93c                 ; frames accumulated so far (2 bytes)
-pfCurF  = $c93a                 ; scratch for one timestamp read and the delta
-pfCurL  = $c93b
-pfCurX  = $c93f
-pfDLo   = $c93d
-pfDHi   = $c93e
-pfRow   = $c934
-pfDone  = $c935
-seamT   = $c6c0                 ; per cell-column (40): char code for the solid run --
+pfAcc   = $2900                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
+pfPrvF  = $2930                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $2932
+pfCurH  = $2936                 ; ninth raster bit, current and previous
+pfPrvH  = $2937
+pfTmp   = $2938
+pfTmp2  = $2939
+pfN     = $293c                 ; frames accumulated so far (2 bytes)
+pfCurF  = $293a                 ; scratch for one timestamp read and the delta
+pfCurL  = $293b
+pfCurX  = $293f
+pfDLo   = $293d
+pfDHi   = $293e
+pfRow   = $2934
+pfDone  = $2935
+seamT   = $26c0                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
 ; Three ${hx(NBND)}-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
@@ -1754,27 +1754,27 @@ ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they w
 pvBnd   = ${hx16(RELOC + 0x2700)}             ; the column the boundary was pinned at
 pvAng   = ${hx16(RELOC + 0x2700 + NBND)}             ; its WORLD bearing as a byte angle, pa + rayOffT[col]
 pvRcp   = ${hx16(RELOC + 0x2700 + 2 * NBND)}             ; 163/distance, for the translation term
-pvN     = $cb00                 ; how many of them there are; 0 disables the hint for a frame
-opaL    = $cb01                 ; the 16-bit angle those bearings were taken at
-opaH    = $cb02
-opxL    = $cb03                 ; ... and the position, so the translation term has a delta
-opxH    = $cb04
-opyL    = $cb05
-opyH    = $cb06
-dqa     = $cb07                 ; this frame's rotation, quarter-units, signed
-pvDX    = $cb08                 ; this frame's translation, 1/256 cells, signed bytes.
-pvDY    = $cb09                 ;   NOT dxv/dyv -- interpSpan already owns those as its
+pvN     = $2b00                 ; how many of them there are; 0 disables the hint for a frame
+opaL    = $2b01                 ; the 16-bit angle those bearings were taken at
+opaH    = $2b02
+opxL    = $2b03                 ; ... and the position, so the translation term has a delta
+opxH    = $2b04
+opyL    = $2b05
+opyH    = $2b06
+dqa     = $2b07                 ; this frame's rotation, quarter-units, signed
+pvDX    = $2b08                 ; this frame's translation, 1/256 cells, signed bytes.
+pvDY    = $2b09                 ;   NOT dxv/dyv -- interpSpan already owns those as its
                                 ;   Bresenham span width and error step.
-pvI     = $cb0a                 ; index while walking the hints, and the last cut emitted
-pvLast  = $cb0b
-pvTL    = $cb0c                 ; the signed 16-bit term, and the top two bytes of the
-pvTH    = $cb0d                 ;   24-bit product it feeds
-pvPH    = $cb0e
-pvPB    = $cb0f
-pvSgn   = $cb10                 ; sign of the term, carried around the unsigned multiply
-pvI2    = $cb11                 ; the hint index, saved across mul8 (which needs X)
-pvYs    = $cb12                 ; the bearing, saved across the first multiply
-pvMode  = $cb2a                 ; 0 = predict in full, 1 = turned in place (the translation
+pvI     = $2b0a                 ; index while walking the hints, and the last cut emitted
+pvLast  = $2b0b
+pvTL    = $2b0c                 ; the signed 16-bit term, and the top two bytes of the
+pvTH    = $2b0d                 ;   24-bit product it feeds
+pvPH    = $2b0e
+pvPB    = $2b0f
+pvSgn   = $2b10                 ; sign of the term, carried around the unsigned multiply
+pvI2    = $2b11                 ; the hint index, saved across mul8 (which needs X)
+pvYs    = $2b12                 ; the bearing, saved across the first multiply
+pvMode  = $2b2a                 ; 0 = predict in full, 1 = turned in place (the translation
                                 ;   term is identically zero), 2 = nothing moved at all.
                                 ; NOT beside pvYs: $cb13-$cb29 are claimed by the RAYCNT,
                                 ; TOUR and PALKEYS blocks below, which are separate build
@@ -1784,29 +1784,29 @@ pvMode  = $cb2a                 ; 0 = predict in full, 1 = turned in place (the 
 ; baseline half of the comparison, and gating these on PIVOT made that build fail to assemble --
 ; which left latest.d64 holding the PREVIOUS disk and reported the default viewpoint as if it
 ; were the one asked for. Silent, and exactly the trap the RELOC comment warns about.
-rayN    = $cb14                 ; marchCol calls this frame
-edgN    = $cb1a                 ; edge cells drawn this frame -- the part of renderSym the run
-edgAcc  = $cb1b                 ;   cache cannot skip, and so the part worth optimising
-edgMean = $cb1d
-chnN    = $cb1e                 ; chain DRAWS this frame, of 80 possible (40 ceiling + 40 solid)
-chnAcc  = $cb1f                 ;   -- i.e. how often the run cache MISSES
-chnMean = $cb21
-rayAcc  = $cb15                 ; 2 bytes: 256 frames of rayN. The HIGH byte is then the mean,
-rayFrm  = $cb17                 ; for free -- the same trick the profiler uses
-rayMean = $cb18
-pvNdbg  = $cb13                 ; pvN as pivPrep saw it, before pivPrep clears it
+rayN    = $2b14                 ; marchCol calls this frame
+edgN    = $2b1a                 ; edge cells drawn this frame -- the part of renderSym the run
+edgAcc  = $2b1b                 ;   cache cannot skip, and so the part worth optimising
+edgMean = $2b1d
+chnN    = $2b1e                 ; chain DRAWS this frame, of 80 possible (40 ceiling + 40 solid)
+chnAcc  = $2b1f                 ;   -- i.e. how often the run cache MISSES
+chnMean = $2b21
+rayAcc  = $2b15                 ; 2 bytes: 256 frames of rayN. The HIGH byte is then the mean,
+rayFrm  = $2b17                 ; for free -- the same trick the profiler uses
+rayMean = $2b18
+pvNdbg  = $2b13                 ; pvN as pivPrep saw it, before pivPrep clears it
 ` : ''}${TOUR ? `tourC   = $cb19                 ; TOUR phase counter
-tourF   = $cb22                 ; 2 bytes: frames elapsed, for the freeze
-` : ''}${PALKEYS ? `colW    = $cb23                 ; the three ink colours, cycled by keys 1/2/3. Declared here
-colB    = $cb24                 ;   and not beside tourC, which is inside a TOUR-only block --
-colS    = $cb25                 ;   the default build does not emit that.
-pkNew   = $cb26                 ; palette keys this frame, last frame, and the fresh presses
-pkOld   = $cb27
-pkEdge  = $cb28
-pkJoy   = $cb29                 ; joystick-1 lines, masked out of the palette-key reads
-` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
-remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
-remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
+tourF   = $2b22                 ; 2 bytes: frames elapsed, for the freeze
+` : ''}${PALKEYS ? `colW    = $2b23                 ; the three ink colours, cycled by keys 1/2/3. Declared here
+colB    = $2b24                 ;   and not beside tourC, which is inside a TOUR-only block --
+colS    = $2b25                 ;   the default build does not emit that.
+pkNew   = $2b26                 ; palette keys this frame, last frame, and the fresh presses
+pkOld   = $2b27
+pkEdge  = $2b28
+pkJoy   = $2b29                 ; joystick-1 lines, masked out of the palette-key reads
+` : ''}bndT    = $2a00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
+remLoT  = $2700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
+remHiT  = $2800                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -1838,6 +1838,59 @@ entry:
                                 ; $fffa/$fffe out of RAM, so this must install them itself --
                                 ; see below. Writes always land in RAM on a 6510, so the order
                                 ; of the banking and the vector stores does not matter.
+        ; ---- copy both charsets into the RAM under the I/O hole ----
+        ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
+        ; CIA registers rather than memory (the build refuses an image past $c000 for the same
+        ; reason). So the fonts are loaded low, at chrSrc/chrSrcB, and moved up here.
+        ;
+        ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
+        ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
+        ; is safe to have the VIC's registers unmapped for 4KB of copying.
+        ;
+        ; ORDER MATTERS AND IT IS SUBTLE. The colour-RAM fill above had to run with I/O MAPPED,
+        ; because colour RAM is a separate 1K chip at $d800-$dbff. Charset B also lives at $d800 --
+        ; in the DRAM underneath, which is what the VIC reads. Two different memories at one
+        ; address, each reached in a different port mode, and the writes above and below must not
+        ; be swapped.
+        lda #$34
+        sta $01
+        ldx #$00
+cpChr:  lda chrSrc,x
+        sta charset,x
+        lda chrSrc+256,x
+        sta charset+256,x
+        lda chrSrc+512,x
+        sta charset+512,x
+        lda chrSrc+768,x
+        sta charset+768,x
+        lda chrSrc+1024,x
+        sta charset+1024,x
+        lda chrSrc+1280,x
+        sta charset+1280,x
+        lda chrSrc+1536,x
+        sta charset+1536,x
+        lda chrSrc+1792,x
+        sta charset+1792,x
+        lda chrSrcB,x
+        sta charsetB,x
+        lda chrSrcB+256,x
+        sta charsetB+256,x
+        lda chrSrcB+512,x
+        sta charsetB+512,x
+        lda chrSrcB+768,x
+        sta charsetB+768,x
+        lda chrSrcB+1024,x
+        sta charsetB+1024,x
+        lda chrSrcB+1280,x
+        sta charsetB+1280,x
+        lda chrSrcB+1536,x
+        sta charsetB+1536,x
+        lda chrSrcB+1792,x
+        sta charsetB+1792,x
+        inx
+        bne cpChr
+        lda #$35                ; back to mode 5: I/O mapped, both ROMs still out
+        sta $01
         lda #$00
         sta $d01a
         lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
@@ -1909,59 +1962,6 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-        ; ---- copy both charsets into the RAM under the I/O hole ----
-        ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
-        ; CIA registers rather than memory (the build refuses an image past $c000 for the same
-        ; reason). So the fonts are loaded low, at chrSrc/chrSrcB, and moved up here.
-        ;
-        ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
-        ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
-        ; is safe to have the VIC's registers unmapped for 4KB of copying.
-        ;
-        ; ORDER MATTERS AND IT IS SUBTLE. The colour-RAM fill above had to run with I/O MAPPED,
-        ; because colour RAM is a separate 1K chip at $d800-$dbff. Charset B also lives at $d800 --
-        ; in the DRAM underneath, which is what the VIC reads. Two different memories at one
-        ; address, each reached in a different port mode, and the writes above and below must not
-        ; be swapped.
-        lda #$34
-        sta $01
-        ldx #$00
-cpChr:  lda chrSrc,x
-        sta charset,x
-        lda chrSrc+256,x
-        sta charset+256,x
-        lda chrSrc+512,x
-        sta charset+512,x
-        lda chrSrc+768,x
-        sta charset+768,x
-        lda chrSrc+1024,x
-        sta charset+1024,x
-        lda chrSrc+1280,x
-        sta charset+1280,x
-        lda chrSrc+1536,x
-        sta charset+1536,x
-        lda chrSrc+1792,x
-        sta charset+1792,x
-        lda chrSrcB,x
-        sta charsetB,x
-        lda chrSrcB+256,x
-        sta charsetB+256,x
-        lda chrSrcB+512,x
-        sta charsetB+512,x
-        lda chrSrcB+768,x
-        sta charsetB+768,x
-        lda chrSrcB+1024,x
-        sta charsetB+1024,x
-        lda chrSrcB+1280,x
-        sta charsetB+1280,x
-        lda chrSrcB+1536,x
-        sta charsetB+1536,x
-        lda chrSrcB+1792,x
-        sta charsetB+1792,x
-        inx
-        bne cpChr
-        lda #$35                ; back to mode 5: I/O mapped, both ROMs still out
-        sta $01
 ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EMPTY. Uninitialised, a boot value
         sta cqN                 ; of 64 or more makes every push hit the full check silently,
                                 ; and the first flush walks 64 garbage pointers writing colour
@@ -5603,9 +5603,18 @@ try {
       pvAng:    'ditto',
       pvRcp:    'ditto',
     };
+    // ONE documented region rather than seventy-five individual exceptions. $2400-$2fff is bank 0's
+    // post-startup RAM: the image's filler between the end of the data segment and the charset
+    // source, plus the charset source itself, which cpChr consumes at startup.
+    //
+    // THE INVARIANT THIS RESTS ON: nothing in $2400-$2fff may be touched before cpChr has run.
+    // That is exactly why cpChr is now the FIRST thing init does -- ahead of the colour-RAM fill
+    // and the run-cache clear, both of which write RAM in this range. Reordering init would
+    // reintroduce a bug that looks like corrupt graphics, so the copy stays first.
+    const XFER = [0x2400, 0x3000];
     const eq = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
       .map(m => [m[1], parseInt(m[2], 16)])
-      .filter(([n, a]) => a >= 0x0400 && !(n in OK));
+      .filter(([n, a]) => a >= 0x0400 && !(n in OK) && !(a >= XFER[0] && a < XFER[1]));
     const clash = eq.filter(([, a]) => a >= r.org && a < r.end);
     if (clash.length) throw new Error(
       `${clash.length} RAM equate(s) sit inside the emitted image $${r.org.toString(16)}-` +
