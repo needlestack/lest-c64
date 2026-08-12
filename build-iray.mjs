@@ -848,6 +848,50 @@ for (let k = 0; k < 4; k++) {
   const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : wall) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
+// The four log tables occupy $e000..$efff. $fffa-$ffff hold the NMI and IRQ vectors this program
+// installs at startup, so a table extending into them would be written over the vectors and the
+// next interrupt would jump into table data -- a hang with no relation to the code that caused it.
+// The assembler cannot catch this: the tables are built at RUNTIME, so nothing is emitted there.
+// mkLog's ARITHMETIC, checked here rather than trusted. The runviews pass after adding mkLog
+// proves only that it does not crash and does not clobber the vectors -- nothing reads the tables
+// yet, so it would pass just as well if every entry were garbage. This replicates lg16 exactly
+// (normalise right until the high byte clears, then (k+7)*256 + logT[mantissa]) over every entry
+// the engine will actually index, and compares against the real logarithm.
+{
+  const logT = [...Array(256)].map((_, i) =>
+    Math.min(255, Math.round((Math.log2(256 + i) - 8) * 256)));
+  let worst = 0, worstAt = null;
+  for (const [name, lo, hi] of [['ddx', ddxLoQ, ddxHiQ], ['ddy', ddyLoQ, ddyHiQ]])
+    for (let q = 0; q < 1024; q++) {
+      const raw = lo[q] | (hi[q] << 8);
+      if (raw < 256) throw new Error(
+        `${name}[${q}] = ${raw} is below 256, so lg16's normalisation cannot reach a mantissa ` +
+        `of 128..255. It assumes 1/|cos| >= 1, i.e. raw >= SCALE.`);
+      let v = raw, k = 8, out = 0;                          // lg16: lda #$08 / sta lgK
+      while (v > 511) { out = v & 1; v >>= 1; k++; }        //        lsr/ror, inc lgK
+      v += out;                                             //        adc #$00 -- round to nearest
+      if (v > 511) { v = 256; k++; }                        //        511+1 -> 256 one power up
+      const got = k * 256 + logT[v - 256];                  //        indexed by the LOW byte
+      const want = Math.log2(raw) * 256;
+      const e = Math.abs(got - want);
+      if (e > worst) { worst = e; worstAt = `${name}[${q}] raw=${raw}`; }
+    }
+  // One LSB here is 1/256 of a power of two, i.e. 0.27% of the value -- the band the DDA model
+  // measured as MORE faithful than the shipped fixed point. Two LSBs would still be inside it;
+  // anything larger means the tables are wrong, not merely quantised.
+  if (worst > 1.2) throw new Error(
+    `mkLog's log is off by ${worst.toFixed(2)} LSB at ${worstAt} -- expected under 2. ` +
+    `logT or lg16's normalisation is wrong, not just coarse.`);
+  console.error(`  mkLog: log tables reproduce log2 to ${worst.toFixed(2)} LSB worst case ` +
+                `(1 LSB = 0.27% of value), over 2048 entries`);
+}
+{
+  const LOGBASE = 0xe000, LOGEND = LOGBASE + 4 * 1024, VECTORS = 0xfffa;
+  if (LOGEND > VECTORS) throw new Error(
+    `the log tables run to $${LOGEND.toString(16)}, into the $fffa vectors: mkLog would ` +
+    `overwrite the NMI/IRQ vectors and the next interrupt would jump into table data`);
+  if (LOGBASE < 0xe000) throw new Error(`log tables below $e000 would land in I/O or the image`);
+}
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256` +
   `  -- ${256 - glyphs.length} free`);
@@ -1582,6 +1626,10 @@ dySgn   = $cb57
 rowv    = $cb58                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
+; ---- mkLog scratch: startup only, so it may share the render-time zero page freely ----
+; $2b-$30 is a genuinely free block ($2a is iterHi, one byte; $31 is cb).
+lgV     = $2b                   ; the 16-bit delta being converted, shifted down in place
+lgK     = $2d                   ; the shift count it took to normalise it to 8 bits
 nxL     = $25
 nxH     = $26
 nyL     = $27
@@ -1783,6 +1831,17 @@ pkJoy   = $cb29                 ; joystick-1 lines, masked out of the palette-ke
 ` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
+; ---- log-form deltas, in the RAM under the banked-out KERNAL ----
+; Built at startup by mkLog, not emitted: 4KB of table would push the image past $d000, which is
+; I/O and cannot be loaded over -- the build refuses it outright ("program ends past $d000").
+; $e000-$fff9 is usable; $fffa-$ffff are the NMI and IRQ vectors this program installs itself, so
+; a table reaching them would be overwritten onto the vectors and the next interrupt would jump
+; into table data. LOGHI_END below is asserted at build time, because the assembler only catches
+; origins that move BACKWARD -- a table running forward into $fffa assembles silently.
+dxLogLo = $e000
+dxLogHi = $e400
+dyLogLo = $e800
+dyLogHi = $ec00
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -1947,6 +2006,8 @@ ${PROFILE ? `        ldx #$2f                ; the profile accumulators live in 
 pfInit: sta pfAcc,x
         dex
         bpl pfInit` : ''}
+        jsr mkLog               ; fill the log-form delta tables under the banked-out KERNAL
+
         cli
 
 mloop:
@@ -4803,6 +4864,68 @@ irqd:   lda #$ff
         pla
         rti
 
+; ---- mkLog: build the log-form delta tables at $e000 from the linear ones ----
+; ddxLoTQ/ddxHiTQ hold 1/|cos| as raw 16-bit (8.8 fixed point, saturated at $ffff). This writes
+; log2(raw) * 256 for each of the 1024 quarter-angles, x and y, so that castRay's initial side
+; distance -- frac * ddx -- becomes ONE ADD of a frame constant instead of a 16x8 multiply.
+;
+; Derived at startup rather than stored because 4KB more table would push the image past $d000,
+; which is I/O and cannot be loaded over. 2048 entries at ~60 cycles is about 0.12s, once.
+;
+; The normalisation is what keeps logT down to one byte: shift the value right until the high byte
+; is clear, which leaves a mantissa in 128..255 (the input is always >= 256, since 1/|cos| >= 1),
+; and then log2(v)*256 = (k+7)*256 + logT[m]. High byte from the count, low byte from the table.
+mkLog:
+${[0, 1, 2, 3].map(pg => `        ldy #$00
+mkX${pg}:   lda ddxLoTQ+${pg * 256},y
+        sta lgV
+        lda ddxHiTQ+${pg * 256},y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dxLogLo+${pg * 256},y
+        lda lgK
+        sta dxLogHi+${pg * 256},y
+        iny
+        bne mkX${pg}
+`).join('')}${[0, 1, 2, 3].map(pg => `        ldy #$00
+mkY${pg}:   lda ddyLoTQ+${pg * 256},y
+        sta lgV
+        lda ddyHiTQ+${pg * 256},y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dyLogLo+${pg * 256},y
+        lda lgK
+        sta dyLogHi+${pg * 256},y
+        iny
+        bne mkY${pg}
+`).join('')}        rts
+
+; lg16: lgV (16-bit, >= 256) -> lgV = low byte of log2*256, lgK = high byte
+lg16:   lda #$08                ; the +8 folded in: logT is indexed by a 9-bit mantissa, 256..511
+        sta lgK
+lg16n:  lda lgV+1
+        cmp #$02
+        bcc lg16d               ; high byte down to 1: the mantissa is 256 + lgV
+        lsr lgV+1
+        ror lgV
+        inc lgK
+        jmp lg16n
+        ; ROUND the mantissa, do not truncate it. The shifts above discard up to 8 low bits,
+        ; which alone is 1/256 of the value = 1.44 LSB of log -- 0.67% relative error, outside the
+        ; 0.27% band the DDA needs. The carry still holds the last bit shifted out (lda/beq/inc/jmp
+        ; do not touch it), so one adc turns truncation into round-to-nearest.
+lg16d:  lda lgV
+        adc #$00
+        bcc lg16r               ; 511 rounded up to 512: mantissa 256, one power higher
+        lda #$00
+        inc lgK
+lg16r:  tax                     ; the mantissa's LOW byte; its high byte is the implicit 1
+        lda logT,x
+        sta lgV
+        rts
+
 ; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
 ; behind it, so this exists purely to make that keypress harmless. $dd0d is read to clear the
@@ -5227,6 +5350,21 @@ stepThrT2: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(1, i)).join(',')}
 stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(2, i)).join(',')}
         * = ${hx16(RELOC + 0x3500)}
 clamp8T: ${chunk(clamp8T).trim()}
+        * = ${hx16(RELOC + 0x3700)}
+; logT[i] = (log2(256 + i) - 8) * 256, i.e. indexed by the LOW BYTE of a 9-bit mantissa.
+; mkLog normalises every value into 256..511, where the high byte is fixed at 1 and carries no
+; information -- so a 9-bit mantissa costs the same 256 bytes an 8-bit one would, and buys a bit
+; of precision that matters: with 128..255 the worst case was 1.86 LSB (0.50% of value), outside
+; the band castRay needs. Then
+;     log2(v) * 256  =  (8 + shifts) * 256 + logT[low byte]
+; so the high byte comes from the shift count and the low byte from one lookup, with no 16-bit
+; arithmetic anywhere.
+logT:   ${chunk([...Array(256)].map((_, i) =>
+          Math.min(255, Math.round((Math.log2(256 + i) - 8) * 256)))).trim()}
+        * = ${hx16(RELOC + 0x3800)}
+; expT[f] = 2^(f/256) * 256 - 256, so the mantissa is (256 + expT[f]) with an implicit leading 1.
+expT:   ${chunk([...Array(256)].map((_, f) =>
+          Math.min(255, Math.round(Math.pow(2, f / 256) * 256) - 256))).trim()}
 ` : ''}
 ${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the

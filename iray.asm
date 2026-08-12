@@ -34,6 +34,10 @@ dySgn   = $cb57
 rowv    = $cb58                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
+; ---- mkLog scratch: startup only, so it may share the render-time zero page freely ----
+; $2b-$30 is a genuinely free block ($2a is iterHi, one byte; $31 is cb).
+lgV     = $2b                   ; the 16-bit delta being converted, shifted down in place
+lgK     = $2d                   ; the shift count it took to normalise it to 8 bits
 nxL     = $25
 nxH     = $26
 nyL     = $27
@@ -218,6 +222,17 @@ pkJoy   = $cb29                 ; joystick-1 lines, masked out of the palette-ke
 bndT    = $ca00                 ; columns where a face or saturation state begins ($40 max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
+; ---- log-form deltas, in the RAM under the banked-out KERNAL ----
+; Built at startup by mkLog, not emitted: 4KB of table would push the image past $d000, which is
+; I/O and cannot be loaded over -- the build refuses it outright ("program ends past $d000").
+; $e000-$fff9 is usable; $fffa-$ffff are the NMI and IRQ vectors this program installs itself, so
+; a table reaching them would be overwritten onto the vectors and the next interrupt would jump
+; into table data. LOGHI_END below is asserted at build time, because the assembler only catches
+; origins that move BACKWARD -- a table running forward into $fffa assembles silently.
+dxLogLo = $e000
+dxLogHi = $e400
+dyLogLo = $e800
+dyLogHi = $ec00
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -373,6 +388,8 @@ ccf:    sta $d800,x
         sta renderCnt
         sta fpsTens
         sta fpsOnes
+
+        jsr mkLog               ; fill the log-form delta tables under the banked-out KERNAL
 
         cli
 
@@ -3116,6 +3133,140 @@ irqd:   lda #$ff
         pla
         rti
 
+; ---- mkLog: build the log-form delta tables at $e000 from the linear ones ----
+; ddxLoTQ/ddxHiTQ hold 1/|cos| as raw 16-bit (8.8 fixed point, saturated at $ffff). This writes
+; log2(raw) * 256 for each of the 1024 quarter-angles, x and y, so that castRay's initial side
+; distance -- frac * ddx -- becomes ONE ADD of a frame constant instead of a 16x8 multiply.
+;
+; Derived at startup rather than stored because 4KB more table would push the image past $d000,
+; which is I/O and cannot be loaded over. 2048 entries at ~60 cycles is about 0.12s, once.
+;
+; The normalisation is what keeps logT down to one byte: shift the value right until the high byte
+; is clear, which leaves a mantissa in 128..255 (the input is always >= 256, since 1/|cos| >= 1),
+; and then log2(v)*256 = (k+7)*256 + logT[m]. High byte from the count, low byte from the table.
+mkLog:
+        ldy #$00
+mkX0:   lda ddxLoTQ+0,y
+        sta lgV
+        lda ddxHiTQ+0,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dxLogLo+0,y
+        lda lgK
+        sta dxLogHi+0,y
+        iny
+        bne mkX0
+        ldy #$00
+mkX1:   lda ddxLoTQ+256,y
+        sta lgV
+        lda ddxHiTQ+256,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dxLogLo+256,y
+        lda lgK
+        sta dxLogHi+256,y
+        iny
+        bne mkX1
+        ldy #$00
+mkX2:   lda ddxLoTQ+512,y
+        sta lgV
+        lda ddxHiTQ+512,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dxLogLo+512,y
+        lda lgK
+        sta dxLogHi+512,y
+        iny
+        bne mkX2
+        ldy #$00
+mkX3:   lda ddxLoTQ+768,y
+        sta lgV
+        lda ddxHiTQ+768,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dxLogLo+768,y
+        lda lgK
+        sta dxLogHi+768,y
+        iny
+        bne mkX3
+        ldy #$00
+mkY0:   lda ddyLoTQ+0,y
+        sta lgV
+        lda ddyHiTQ+0,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dyLogLo+0,y
+        lda lgK
+        sta dyLogHi+0,y
+        iny
+        bne mkY0
+        ldy #$00
+mkY1:   lda ddyLoTQ+256,y
+        sta lgV
+        lda ddyHiTQ+256,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dyLogLo+256,y
+        lda lgK
+        sta dyLogHi+256,y
+        iny
+        bne mkY1
+        ldy #$00
+mkY2:   lda ddyLoTQ+512,y
+        sta lgV
+        lda ddyHiTQ+512,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dyLogLo+512,y
+        lda lgK
+        sta dyLogHi+512,y
+        iny
+        bne mkY2
+        ldy #$00
+mkY3:   lda ddyLoTQ+768,y
+        sta lgV
+        lda ddyHiTQ+768,y
+        sta lgV+1
+        jsr lg16
+        lda lgV
+        sta dyLogLo+768,y
+        lda lgK
+        sta dyLogHi+768,y
+        iny
+        bne mkY3
+        rts
+
+; lg16: lgV (16-bit, >= 256) -> lgV = low byte of log2*256, lgK = high byte
+lg16:   lda #$08                ; the +8 folded in: logT is indexed by a 9-bit mantissa, 256..511
+        sta lgK
+lg16n:  lda lgV+1
+        cmp #$02
+        bcc lg16d               ; high byte down to 1: the mantissa is 256 + lgV
+        lsr lgV+1
+        ror lgV
+        inc lgK
+        jmp lg16n
+        ; ROUND the mantissa, do not truncate it. The shifts above discard up to 8 low bits,
+        ; which alone is 1/256 of the value = 1.44 LSB of log -- 0.67% relative error, outside the
+        ; 0.27% band the DDA needs. The carry still holds the last bit shifted out (lda/beq/inc/jmp
+        ; do not touch it), so one adc turns truncation into round-to-nearest.
+lg16d:  lda lgV
+        adc #$00
+        bcc lg16r               ; 511 rounded up to 512: mantissa 256, one power higher
+        lda #$00
+        inc lgK
+lg16r:  tax                     ; the mantissa's LOW byte; its high byte is the implicit 1
+        lda logT,x
+        sta lgV
+        rts
+
 ; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
 ; behind it, so this exists purely to make that keypress harmless. $dd0d is read to clear the
@@ -4620,5 +4771,38 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $bd00
+; logT[i] = (log2(256 + i) - 8) * 256, i.e. indexed by the LOW BYTE of a 9-bit mantissa.
+; mkLog normalises every value into 256..511, where the high byte is fixed at 1 and carries no
+; information -- so a 9-bit mantissa costs the same 256 bytes an 8-bit one would, and buys a bit
+; of precision that matters: with 128..255 the worst case was 1.86 LSB (0.50% of value), outside
+; the band castRay needs. Then
+;     log2(v) * 256  =  (8 + shifts) * 256 + logT[low byte]
+; so the high byte comes from the shift count and the low byte from one lookup, with no 16-bit
+; arithmetic anywhere.
+logT:   !byte 0,1,3,4,6,7,9,10,11,13,14,16,17,18,20,21,22,24,25,26,28,29,30,32
+        !byte 33,34,36,37,38,40,41,42,44,45,46,47,49,50,51,52,54,55,56,57,59,60,61,62
+        !byte 63,65,66,67,68,69,71,72,73,74,75,77,78,79,80,81,82,84,85,86,87,88,89,90
+        !byte 92,93,94,95,96,97,98,99,100,102,103,104,105,106,107,108,109,110,111,112,113,114,116,117
+        !byte 118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141
+        !byte 142,143,144,145,146,147,148,149,150,151,152,153,154,155,155,156,157,158,159,160,161,162,163,164
+        !byte 165,166,167,168,169,169,170,171,172,173,174,175,176,177,178,178,179,180,181,182,183,184,185,185
+        !byte 186,187,188,189,190,191,192,192,193,194,195,196,197,198,198,199,200,201,202,203,203,204,205,206
+        !byte 207,208,208,209,210,211,212,212,213,214,215,216,216,217,218,219,220,220,221,222,223,224,224,225
+        !byte 226,227,228,228,229,230,231,231,232,233,234,234,235,236,237,238,238,239,240,241,241,242,243,244
+        !byte 244,245,246,247,247,248,249,249,250,251,252,252,253,254,255,255
+        * = $be00
+; expT[f] = 2^(f/256) * 256 - 256, so the mantissa is (256 + expT[f]) with an implicit leading 1.
+expT:   !byte 0,1,1,2,3,3,4,5,6,6,7,8,8,9,10,11,11,12,13,14,14,15,16,16
+        !byte 17,18,19,19,20,21,22,22,23,24,25,25,26,27,28,29,29,30,31,32,32,33,34,35
+        !byte 36,36,37,38,39,40,40,41,42,43,44,44,45,46,47,48,48,49,50,51,52,53,53,54
+        !byte 55,56,57,58,58,59,60,61,62,63,64,65,65,66,67,68,69,70,71,72,72,73,74,75
+        !byte 76,77,78,79,80,81,81,82,83,84,85,86,87,88,89,90,91,92,93,94,94,95,96,97
+        !byte 98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121
+        !byte 122,123,124,125,126,127,128,129,130,131,132,133,135,136,137,138,139,140,141,142,143,144,145,146
+        !byte 147,149,150,151,152,153,154,155,156,157,159,160,161,162,163,164,165,166,168,169,170,171,172,173
+        !byte 175,176,177,178,179,180,182,183,184,185,186,188,189,190,191,192,194,195,196,197,198,200,201,202
+        !byte 203,205,206,207,208,210,211,212,214,215,216,217,219,220,221,222,224,225,226,228,229,230,232,233
+        !byte 234,236,237,238,240,241,242,244,245,246,248,249,250,252,253,255
 
 
