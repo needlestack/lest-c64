@@ -333,7 +333,33 @@ changes substantially across one, so the derivative badly overestimates the diff
 face, so the column is projective in `u`: `c(k) = (P + Qk)/(R + Sk)`, i.e. two adds and one
 divide per seam. `seamOne`'s reciprocal multiply IS that divide. There is no cheaper exact answer.
 
-**Conclusion: optimal for corners, optimal for exact interiors.** The only remaining saving is a
-deliberate accuracy trade — `K * colH(u) * colH(u+1)` with `colH(u+1)` estimated from the previous
-gap, two multiplies instead of the divide chain, ~2,300 cycles at the worst viewpoint for a
-placement error of a few columns. Not taken: unmeasured, and seams are the feature.
+**The stepped-falloff version was then MODELLED and REJECTED** (2,986 spans, 7,829 seams). Errors
+accumulate, because stepping replaces `seamOne`'s independent per-seam solve:
+
+| scheme | mean err | p90 | worst |
+|---|---|---|---|
+| `K*h^2` (one height) | 14.13 cols | 47.04 | 120.81 |
+| `K*h*h(c+gap)`, 1 iteration | 6.08 | 18.57 | 71.42 |
+| `K*h*h(c+gap)`, 2 iterations | 4.41 | 14.42 | **161.02** |
+
+Two iterations has a WORSE tail than one -- the fixed-point iteration diverges when the gap is
+large relative to the span. And the prize is tiny: mean seams a span is **2.62**, so only 1.62 a
+span get the cheap path, **~840 cycles at the worst viewpoint**. 840 cycles for a 6-column mean
+placement error on a 160-column screen, on the feature the whole thing exists for. No.
+
+**WHY THERE IS NO CHEAPER EXACT FORMULA -- the structural answer.** There IS a simple exact one,
+`c(k) = (P + Qk)/(R + Sk)`, two adds and one divide, and the divide cannot go because
+**perspective IS a division**: screen position = lateral / depth. What makes the rest of this
+engine fast is that it never asks that question -- `1/z` is linear in screen column, so height is
+a table lookup; height is therefore linear across a face, so `interpSpan` is adds only; and the
+DDA runs screen -> world, getting depth as a by-product. **The seams are the ONLY forward
+projection (world -> screen) in the renderer**, which is the one direction that needs a divide.
+They are not badly implemented; they are the only genuinely projective question being asked, and
+they already pay the minimum for it. The falloff law is exact and circular: it needs the height at
+the next seam, which is what you are solving for.
+
+**Also corrected here: convex corner seams ARE drawn** (`CVXSEAM=1`, the default since the orb
+pass was deleted). They cover only the part below the far wall's top, because `seamT` applies to
+the SOLID run (rows `rs..12`, `rs` from the cell's MINIMUM height) -- so the line starts where the
+step pieces end and never runs up the near wall's full height. That is a consequence of the data
+layout, not extra code, so concave-only vs both is purely a matter of taste at zero cost.
