@@ -243,6 +243,13 @@ dxLogLo = $e000
 dxLogHi = $e400
 dyLogLo = $e800
 dyLogHi = $ec00
+; logFr[f] = log2(f/256)*256, signed. UP HERE, NOT IN THE IMAGE, and that is the whole point:
+; it was emitted at $c000 and $c000 is stackLT -- the subdivision's span stack -- so subLp
+; overwrote the high byte every frame and castRay's x side distance came out ~19x too small.
+; The assembler cannot catch that: an equate has no origin to move backward from. See the
+; image-vs-equate guard in build-iray.mjs, added because of this.
+logFrLo = $f000
+logFrHi = $f100
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -3222,6 +3229,35 @@ mkY3:   lda ddyLoTQ+768,y
         sta dyLogHi+768,y
         iny
         bne mkY3
+        ; ---- logFr, the per-frame factors' logs ----
+        ; f < 256, so normalise LEFT until the value reaches 256..511, and then
+        ;     log2(f/256)*256 = logT[low byte] - k*256
+        ; giving the low byte from one lookup and the high byte as -k. f = 0 is the slot meaning
+        ; "the factor is exactly 1.0", whose log is 0 -- which is what the +x case needs when the
+        ; position sits exactly on a cell boundary.
+        lda #$00
+        sta logFrLo
+        sta logFrHi
+        ldy #$01
+mkFrLp: sty lgV
+        lda #$00
+        sta lgV+1
+        sta lgK
+mkFrN:  lda lgV+1
+        bne mkFrD
+        asl lgV
+        rol lgV+1
+        inc lgK
+        jmp mkFrN
+mkFrD:  ldx lgV
+        lda logT,x
+        sta logFrLo,y
+        lda #$00
+        sec
+        sbc lgK
+        sta logFrHi,y
+        iny
+        bne mkFrLp
         rts
 
 ; lg16: lgV (16-bit, >= 256) -> lgV = low byte of log2*256, lgK = high byte
@@ -4879,7 +4915,8 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $bd00
+
+        * = $be00
 ; logT[i] = (log2(256 + i) - 8) * 256, i.e. indexed by the LOW BYTE of a 9-bit mantissa.
 ; mkLog normalises every value into 256..511, where the high byte is fixed at 1 and carries no
 ; information -- so a 9-bit mantissa costs the same 256 bytes an 8-bit one would, and buys a bit
@@ -4899,7 +4936,7 @@ logT:   !byte 0,1,3,4,6,7,9,10,11,13,14,16,17,18,20,21,22,24,25,26,28,29,30,32
         !byte 207,208,208,209,210,211,212,212,213,214,215,216,216,217,218,219,220,220,221,222,223,224,224,225
         !byte 226,227,228,228,229,230,231,231,232,233,234,234,235,236,237,238,238,239,240,241,241,242,243,244
         !byte 244,245,246,247,247,248,249,249,250,251,252,252,253,254,255,255
-        * = $be00
+        * = $bf00
 ; expT[f] = 2^(f/256) * 256 - 256, so the mantissa is (256 + expT[f]) with an implicit leading 1.
 expT:   !byte 0,1,1,2,3,3,4,5,6,6,7,8,8,9,10,11,11,12,13,14,14,15,16,16
         !byte 17,18,19,19,20,21,22,22,23,24,25,25,26,27,28,29,29,30,31,32,32,33,34,35
@@ -4912,37 +4949,4 @@ expT:   !byte 0,1,1,2,3,3,4,5,6,6,7,8,8,9,10,11,11,12,13,14,14,15,16,16
         !byte 175,176,177,178,179,180,182,183,184,185,186,188,189,190,191,192,194,195,196,197,198,200,201,202
         !byte 203,205,206,207,208,210,211,212,214,215,216,217,219,220,221,222,224,225,226,228,229,230,232,233
         !byte 234,236,237,238,240,241,242,244,245,246,248,249,250,252,253,255
-        * = $bf00
-; logFracT[f] = log2(f/256) * 256, signed, so it is NEGATIVE throughout (f/256 < 1). Offline
-; rather than derived, because it is the one operand whose log must be exact to +-0.5 LSB: the
-; other side of the add is mkLog's output, already carrying 1.04 LSB, and two coarse logs would
-; put the product outside the band castRay needs.
-;
-; castRay wants TWO constants an axis and both come from this table:
-;    -x  sdx = ddx * frac/256        -> logFracT[frac]
-;    +x  sdx = ddx * (256-frac)/256  -> logFracT[256-frac], and frac = 0 means x1.0, i.e. 0
-logFrLo: !byte 0,0,0,150,0,82,150,207,0,44,82,118,150,179,207,232,0,22,44,63,82,100,118,134
-        !byte 150,165,179,193,207,220,232,244,0,11,22,33,44,54,63,73,82,92,100,109,118,126,134,142
-        !byte 150,157,165,172,179,186,193,200,207,213,220,226,232,238,244,250,0,6,11,17,22,28,33,38
-        !byte 44,49,54,59,63,68,73,78,82,87,92,96,100,105,109,113,118,122,126,130,134,138,142,146
-        !byte 150,154,157,161,165,169,172,176,179,183,186,190,193,197,200,203,207,210,213,216,220,223,226,229
-        !byte 232,235,238,241,244,247,250,253,0,3,6,9,11,14,17,20,22,25,28,30,33,36,38,41
-        !byte 44,46,49,51,54,56,59,61,63,66,68,71,73,75,78,80,82,85,87,89,92,94,96,98
-        !byte 100,103,105,107,109,111,113,116,118,120,122,124,126,128,130,132,134,136,138,140,142,144,146,148
-        !byte 150,152,154,155,157,159,161,163,165,167,169,170,172,174,176,178,179,181,183,185,186,188,190,192
-        !byte 193,195,197,198,200,202,203,205,207,208,210,212,213,215,216,218,220,221,223,224,226,228,229,231
-        !byte 232,234,235,237,238,240,241,243,244,246,247,249,250,252,253,255
-        * = $c000
-logFrHi: !byte 0,248,249,249,250,250,250,250,251,251,251,251,251,251,251,251,252,252,252,252,252,252,252,252
-        !byte 252,252,252,252,252,252,252,252,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253
-        !byte 253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,254,254,254,254,254,254,254,254
-        !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254
-        !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254
-        !byte 254,254,254,254,254,254,254,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-
 

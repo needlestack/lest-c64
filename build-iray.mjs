@@ -1523,6 +1523,15 @@ const NOMINMAX = flag('NOMINMAX');
 // number that says whether a change to the SUBDIVISION did what it claimed -- fps cannot, since
 // it is raster-quantised and mixes in every other phase.
 const RAYCNT = flag('RAYCNT');
+// PROBE=<column>: freeze that column's FINAL side distances at cydone and print them as hex on
+// row 8. cydone is deliberately the capture point: it is where sdx/sdy are complete whichever way
+// they were computed, so a log build and a multiply build can be compared at the same place
+// instead of at two different points in two different pipelines.
+const PROBE = process.env.PROBE === undefined ? null : +process.env.PROBE;
+// PROBELOG=1 moves the capture to faDn, reading the raw LOG SUMS instead of the linear values.
+const PROBELOG = flag('PROBELOG');
+const PROBETBL = flag('PROBETBL');
+if (PROBE !== null) DIAG.push(`PROBE=${PROBE}`);
 // PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
 const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
@@ -1838,6 +1847,8 @@ pkNew   = $cb26                 ; palette keys this frame, last frame, and the f
 pkOld   = $cb27
 pkEdge  = $cb28
 pkJoy   = $cb29                 ; joystick-1 lines, masked out of the palette-key reads
+` : ''}${PROBE !== null ? `prbX    = $cb2c                 ; PROBE: sdx/sdxH/sdy/sdyH for one column
+prbY    = $cb2e
 ` : ''}bndT    = $ca00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
@@ -1852,6 +1863,13 @@ dxLogLo = $e000
 dxLogHi = $e400
 dyLogLo = $e800
 dyLogHi = $ec00
+; logFr[f] = log2(f/256)*256, signed. UP HERE, NOT IN THE IMAGE, and that is the whole point:
+; it was emitted at $c000 and $c000 is stackLT -- the subdivision's span stack -- so subLp
+; overwrote the high byte every frame and castRay's x side distance came out ~19x too small.
+; The assembler cannot catch that: an equate has no origin to move backward from. See the
+; image-vs-equate guard in build-iray.mjs, added because of this.
+logFrLo = $f000
+logFrHi = $f100
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -4447,7 +4465,19 @@ ${q === 2 ? '' : '        jmp faDn\n'}`;
         sta ddy
         lda ddyHiT,x
         sta ddyH`}
-${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
+${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; ray: angle + quarter-angle dispatch\n' : ''}${PROBE !== null && PROBELOG ? `        lda col                 ; PROBELOGMARK: the raw log sums, before lgExp
+        cmp #${PROBE}
+        bne prbDn
+        lda sdx
+        sta prbX
+        lda sdxH
+        sta prbX+1
+        lda sdy
+        sta prbY
+        lda sdyH
+        sta prbY+1
+prbDn:
+` : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
         sta cell                ; The value is the player's cell, so it is the same for every
                                 ; ray in the frame -- computed once in mloop, not 11 times.
         ; ---- side distances, out of the log sums the dispatch already built ----
@@ -4526,7 +4556,19 @@ cySx:   lda ddyH
         sta sdy
         sta sdyH
 cydone:${PROFILE && !PROFILE1 ? '\n        ldx #10\n        jsr pfTick              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
-        ldy #24
+${PROBE !== null && !PROBELOG ? `        lda col                 ; PROBEMARK: latch this column's FINAL side distances.
+        cmp #${PROBE}           ; cydone is the capture point on purpose -- sdx/sdy are complete
+        bne prbDn               ; here whichever way they were computed, so a log build and a
+        lda sdx                 ; multiply build are compared at the same place in the pipeline.
+        sta prbX
+        lda sdxH
+        sta prbX+1
+        lda sdy
+        sta prbY
+        lda sdyH
+        sta prbY+1
+prbDn:
+` : ''}        ldy #24
         ldx cell
 cdda:   lda sdxH
         cmp sdyH
@@ -4798,7 +4840,36 @@ mkY${pg}:   lda ddyLoTQ+${pg * 256},y
         sta dyLogHi+${pg * 256},y
         iny
         bne mkY${pg}
-`).join('')}        rts
+`).join('')}        ; ---- logFr, the per-frame factors' logs ----
+        ; f < 256, so normalise LEFT until the value reaches 256..511, and then
+        ;     log2(f/256)*256 = logT[low byte] - k*256
+        ; giving the low byte from one lookup and the high byte as -k. f = 0 is the slot meaning
+        ; "the factor is exactly 1.0", whose log is 0 -- which is what the +x case needs when the
+        ; position sits exactly on a cell boundary.
+        lda #$00
+        sta logFrLo
+        sta logFrHi
+        ldy #$01
+mkFrLp: sty lgV
+        lda #$00
+        sta lgV+1
+        sta lgK
+mkFrN:  lda lgV+1
+        bne mkFrD
+        asl lgV
+        rol lgV+1
+        inc lgK
+        jmp mkFrN
+mkFrD:  ldx lgV
+        lda logT,x
+        sta logFrLo,y
+        lda #$00
+        sec
+        sbc lgK
+        sta logFrHi,y
+        iny
+        bne mkFrLp
+        rts
 
 ; lg16: lgV (16-bit, >= 256) -> lgV = low byte of log2*256, lgK = high byte
 lg16:   lda #$08                ; the +8 folded in: logT is indexed by a 9-bit mantissa, 256..511
@@ -4874,7 +4945,18 @@ ${[8, 7, 6, 5, 4, 3, 2, 1].map(n => `shL${ax}${n}: asl ${lo}
         rol ${hi}`).join('\n')}
         rts
 `; }).join('\n')}
-; ---- nmi: swallow RESTORE ----
+${PROBE !== null ? `; ddHex: A as two hex digits at the current row, Y advancing
+ddHex:  pha
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        pla
+        and #$0f
+        jmp ddPut
+
+` : ''}; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
 ; behind it, so this exists purely to make that keypress harmless. $dd0d is read to clear the
 ; CIA2 latch in case an NMI ever arrives from there instead.
@@ -5059,6 +5141,26 @@ ${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had t
         lda pvNdbg
         and #$0f
         jsr ddPut
+` : ''}${PROBE !== null && PROBETBL ? `        ldy #128                ; PROBETBL: the logFr entry this frame's px fraction indexes,
+        lda logFrLo,y           ; read straight out of RAM, against the lkXN it produced
+        sta prbX
+        lda logFrHi,y
+        sta prbX+1
+        lda lkXN
+        sta prbY
+        lda lkXN+1
+        sta prbY+1
+` : ''}${PROBE !== null ? `        lda #$08                ; row 8: PROBE -- sdxH sdx sdyH sdy, high byte first
+        jsr setRow
+        ldy #$00
+        lda prbX+1
+        jsr ddHex
+        lda prbX
+        jsr ddHex
+        lda prbY+1
+        jsr ddHex
+        lda prbY
+        jsr ddHex
 ` : ''}        lda #$05                ; row 5: MEAN edge cells a frame -- rows the run cache
         jsr setRow              ; cannot skip, each one a full ramp/step selection
         ldy #38
@@ -5298,42 +5400,18 @@ stepThrT2: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(1, i)).join(',')}
 stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(2, i)).join(',')}
         * = ${hx16(RELOC + 0x3500)}
 clamp8T: ${chunk(clamp8T).trim()}
-        * = ${hx16(RELOC + 0x3700)}
-; logT[i] = (log2(256 + i) - 8) * 256, i.e. indexed by the LOW BYTE of a 9-bit mantissa.
-; mkLog normalises every value into 256..511, where the high byte is fixed at 1 and carries no
-; information -- so a 9-bit mantissa costs the same 256 bytes an 8-bit one would, and buys a bit
-; of precision that matters: with 128..255 the worst case was 1.86 LSB (0.50% of value), outside
-; the band castRay needs. Then
-;     log2(v) * 256  =  (8 + shifts) * 256 + logT[low byte]
-; so the high byte comes from the shift count and the low byte from one lookup, with no 16-bit
-; arithmetic anywhere.
-logT:   ${chunk([...Array(256)].map((_, i) =>
-          Math.min(255, Math.round((Math.log2(256 + i) - 8) * 256)))).trim()}
-        * = ${hx16(RELOC + 0x3800)}
-; expT[f] = 2^(f/256) * 256 - 256, so the mantissa is (256 + expT[f]) with an implicit leading 1.
-expT:   ${chunk([...Array(256)].map((_, f) =>
-          Math.min(255, Math.round(Math.pow(2, f / 256) * 256) - 256))).trim()}
-        * = ${hx16(RELOC + 0x3900)}
-; logFracT[f] = log2(f/256) * 256, signed, so it is NEGATIVE throughout (f/256 < 1). Offline
-; rather than derived, because it is the one operand whose log must be exact to +-0.5 LSB: the
-; other side of the add is mkLog's output, already carrying 1.04 LSB, and two coarse logs would
-; put the product outside the band castRay needs.
-;
-; castRay wants TWO constants an axis and both come from this table:
-;    -x  sdx = ddx * frac/256        -> logFracT[frac]
-;    +x  sdx = ddx * (256-frac)/256  -> logFracT[256-frac], and frac = 0 means x1.0, i.e. 0
-logFrLo: ${chunk([...Array(256)].map((_, f) =>
-           (f === 0 ? 0 : Math.round(Math.log2(f / 256) * 256)) & 255)).trim()}
-        * = ${hx16(RELOC + 0x3a00)}
-logFrHi: ${chunk([...Array(256)].map((_, f) =>
-           ((f === 0 ? 0 : Math.round(Math.log2(f / 256) * 256)) >> 8) & 255)).trim()}
-` : ''}
 ${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B. PLAN=3 claims
                             ; RELOC+0x2900 for its lo/hi code tables, so the profiler
                             ; moves above THOSE -- otherwise the origin runs backward
                             ; and the build dies with an overlap error.
+                            ;
+                            ; It gets 0x3600-0x37ff, TWO pages, because pfShow plus pfTick is
+                            ; ~266 bytes and one page left it spilling 10 bytes into stackLT at
+                            ; $c000 -- caught by the image-vs-equate guard below, which is the
+                            ; second real collision that guard has found. logT and expT sit above
+                            ; it at 0x3800/0x3900 so the image ends exactly AT $c000.
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
 ; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
 ; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
@@ -5470,6 +5548,22 @@ pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
 pfOff:  rts
 
 ` : ''}
+        * = ${hx16(RELOC + 0x3800)}
+; logT[i] = (log2(256 + i) - 8) * 256, i.e. indexed by the LOW BYTE of a 9-bit mantissa.
+; mkLog normalises every value into 256..511, where the high byte is fixed at 1 and carries no
+; information -- so a 9-bit mantissa costs the same 256 bytes an 8-bit one would, and buys a bit
+; of precision that matters: with 128..255 the worst case was 1.86 LSB (0.50% of value), outside
+; the band castRay needs. Then
+;     log2(v) * 256  =  (8 + shifts) * 256 + logT[low byte]
+; so the high byte comes from the shift count and the low byte from one lookup, with no 16-bit
+; arithmetic anywhere.
+logT:   ${chunk([...Array(256)].map((_, i) =>
+          Math.min(255, Math.round((Math.log2(256 + i) - 8) * 256)))).trim()}
+        * = ${hx16(RELOC + 0x3900)}
+; expT[f] = 2^(f/256) * 256 - 256, so the mantissa is (256 + expT[f]) with an implicit leading 1.
+expT:   ${chunk([...Array(256)].map((_, f) =>
+          Math.min(255, Math.round(Math.pow(2, f / 256) * 256) - 256))).trim()}
+` : ''}
 `;
 
 // iray.asm is deliberately tracked (see .gitignore): diffing the generated assembly is how
@@ -5585,6 +5679,33 @@ try {
     `  = ${free} bytes, ${free >> 6} sprite slots`);
   // $a000-$bfff is BASIC ROM unless LORAM is cleared, and $d000-$dfff is I/O no matter what.
   // Reading a table through either returns something other than what was written there.
+  // ---- no RAM equate may sit inside the emitted image ----
+  // THE GUARD THAT WAS MISSING. logFrHi was emitted at $c000, which is stackLT -- the
+  // subdivision's span stack -- so the table was perfect on disk and shredded within one frame,
+  // and castRay's x side distance came out 19x too small. The assembler cannot see this: an
+  // equate has no origin, so there is nothing to "move backward" from. Every symbol given an
+  // address at or above $0400 is now checked against the image's actual extent.
+  {
+    // Deliberate overlaps, each for a stated reason -- the ; DEADCODE-OK pattern, applied here.
+    // Anything NOT on this list that lands in the image is a real bug: the program writes RAM the
+    // loader filled with data, so it works on the first frame and not the second.
+    const OK = {
+      charset:  'a NAME for emitted charset data, not RAM scratch',
+      charsetB: 'ditto, the mirrored charset',
+      pvBnd:    'lives in the pages PLAN=3 vacates -- stepT1/2/3 are not emitted there',
+      pvAng:    'ditto',
+      pvRcp:    'ditto',
+    };
+    const eq = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
+      .map(m => [m[1], parseInt(m[2], 16)])
+      .filter(([n, a]) => a >= 0x0400 && !(n in OK));
+    const clash = eq.filter(([, a]) => a >= r.org && a < r.end);
+    if (clash.length) throw new Error(
+      `${clash.length} RAM equate(s) sit inside the emitted image $${r.org.toString(16)}-` +
+      `$${r.end.toString(16)}, so the program's own writes will overwrite emitted data: ` +
+      clash.slice(0, 6).map(([n, a]) => `${n}=$${a.toString(16)}`).join(', ') +
+      `${clash.length > 6 ? ', ...' : ''}`);
+  }
   if (r.end >= 0xd000) throw new Error(
     `program ends at $${r.end.toString(16)}, past $d000 -- that is I/O, not RAM`);
   console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`
