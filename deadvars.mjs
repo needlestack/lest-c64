@@ -83,6 +83,22 @@ const show = (title, list, note) => {
       `  writes ${v.writes.length ? 'line ' + v.writes.join(',') : 'none'}`);
 };
 console.log(`${vars.size} RAM variables in ${process.argv[2] ?? 'iray.asm'}`);
+// ---- two more facts about this codebase, in the same spirit as the notes above ----
+// cpChr copies the charsets from where the LOADER put them to where the VIC reads them, and both
+// ends of that copy look like bugs from here:
+//   chrSrc / chrSrcB  are read and never written, because the loader writes them -- they name
+//                     emitted data, not scratch.
+//   charset / charsetB are written and never read, because the VIC reads them, not the CPU. They
+//                     sit under the I/O hole, where the CPU cannot read them at all in normal
+//                     port mode.
+// Exempting them keeps both columns at zero, which is the only state in which anyone keeps
+// reading this tool's output.
+const LOADER_WRITES = new Set(['chrSrc', 'chrSrcB']);   // emitted data: the loader is the writer
+const VIC_READS = new Set(['charset', 'charsetB']);     // the VIC is the reader, not the CPU
+for (const n of LOADER_WRITES) { const i = readNeverWritten.findIndex(e => e[0] === n);
+  if (i >= 0) readNeverWritten.splice(i, 1); }
+for (const n of VIC_READS) { const i = writtenNeverRead.findIndex(e => e[0] === n);
+  if (i >= 0) writtenNeverRead.splice(i, 1); }
 show('READ, NEVER WRITTEN', readNeverWritten, 'reads uninitialised RAM -- the bug this tool exists for');
 show('WRITTEN, NEVER READ', writtenNeverRead, 'dead stores, or a consumer that was deleted');
 show('NEITHER', untouched, 'stale equates');
