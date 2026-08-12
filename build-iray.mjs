@@ -1630,6 +1630,16 @@ dyv     = $24
 ; $2b-$30 is a genuinely free block ($2a is iterHi, one byte; $31 is cb).
 lgV     = $2b                   ; the 16-bit delta being converted, shifted down in place
 lgK     = $2d                   ; the shift count it took to normalise it to 8 bits
+; ---- per-frame log constants, and exp2's working state ----
+; lkXP/lkXN are log2 of the two factors the x side distance can need, computed once a frame from
+; px's fraction; lkYP/lkYN likewise from py's. Signed 16-bit, always negative or zero.
+; Placed around the singles the collision check flags: $30 and $36 are free but $31 is cb and
+; $37 is hcur, so neither can start a two-byte pair.
+lkXP    = $2e                   ; 2 bytes
+lkXN    = $34                   ; 2 bytes
+lkYP    = $38                   ; 2 bytes
+lkYN    = $3a                   ; 2 bytes
+lgS     = $3c                   ; 2 bytes: the log sum, then exp2's mantissa
 nxL     = $25
 nxH     = $26
 nyL     = $27
@@ -2042,7 +2052,38 @@ ${FINEANG ? `        lda pa                  ; pa*4 once a frame, not once a ray
         asl paqL
         rol
         sta paqH
-` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
+` : ''}        ; ---- log2 of this frame's two side-distance factors, per axis ----
+        ; sdx is ddx times frac/256 (stepping -x) or (256-frac)/256 (stepping +x), and BOTH
+        ; factors depend only on px's fraction -- so their logs are frame constants and the
+        ; per-ray multiply collapses to one 16-bit add. frac = 0 is the only special case: the
+        ; +x factor is then exactly 1.0, whose log is 0, and logFracT[0] holds 0 for that reason.
+        ldy px
+        lda logFrLo,y
+        sta lkXN
+        lda logFrHi,y
+        sta lkXN+1
+        lda #$00                ; 256 - frac, as a byte: 0 when frac is 0, which indexes the
+        sec                     ; slot holding log 1.0 = 0 -- exactly right
+        sbc px
+        tay
+        lda logFrLo,y
+        sta lkXP
+        lda logFrHi,y
+        sta lkXP+1
+        ldy py
+        lda logFrLo,y
+        sta lkYN
+        lda logFrHi,y
+        sta lkYN+1
+        lda #$00
+        sec
+        sbc py
+        tay
+        lda logFrLo,y
+        sta lkYP
+        lda logFrHi,y
+        sta lkYP+1
+        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
 ${RAYCNT ? '        sta rayN\n        sta edgN\n        sta chnN\n' : ''}
 ${PIVOT ? `        jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
@@ -4926,6 +4967,49 @@ lg16r:  tax                     ; the mantissa's LOW byte; its high byte is the 
         sta lgV
         rts
 
+; ---- lgExp: lgS holds log2(v)*256 (0..4096) -> lgS holds v as a 16-bit value ----
+; The mantissa is 256 + expT[fractional byte] -- nine bits with the leading 1 implicit -- and the
+; integer byte says which power of two to place it at, so the answer is mantissa << (I - 8), the
+; shift running -8..+8. That shift is the ONLY reason logs are not simply cheaper than the
+; quarter-square multiply they replace; everything else here is two lookups and an add.
+;
+; Two fall-through chains with a computed entry, the trick renderSym's run chains use: enter N
+; pairs from the end and exactly N shifts happen, with no loop counter. Typical rays need 0-2 --
+; sdx runs from a fraction of a cell to a couple of cells, so I lands at 7-9 -- and only a ray
+; nearly parallel to an axis reaches either end.
+;
+; The entry is arithmetic rather than an address table: the chain is uniform, 6 bytes a pair, so
+; shOffT holds a byte offset from shChain. That also sidesteps whether this assembler takes
+; "<label" inside a !byte list, which it is not documented to do.
+lgExp:  ldx lgS+1               ; the integer byte indexes shOffT directly: entry i shifts by i-8
+        ldy lgS                 ; ...read BOTH before the mantissa overwrites them
+        lda expT,y
+        sta lgS
+        lda #$01                ; the implicit leading 1: mantissa = 256 + expT[frac]
+        sta lgS+1
+        lda shOffT,x
+        clc
+        adc #<shChain
+        sta jv
+        lda #>shChain
+        adc #$00
+        sta jv+1
+        jmp (jv)
+
+; Offsets as LABEL ARITHMETIC, not counted bytes. Counting them by hand got it wrong first go --
+; lgS is zero page, so each pair is 4 bytes and not the 6 an absolute operand would take, and the
+; rts landed at 32 rather than 48. The assembler supports '-', so let it do the counting: this
+; cannot drift if a pair ever changes size or the chain is reordered.
+shOffT: !byte ${[8, 7, 6, 5, 4, 3, 2, 1].map(n => `shR${n}-shChain`).join(',')},shDone-shChain,${
+              [1, 2, 3, 4, 5, 6, 7, 8].map(n => `shL${n}-shChain`).join(',')}
+shChain:
+${[...Array(8)].map((_, i) => `shR${8 - i}:  lsr lgS+1
+        ror lgS`).join('\n')}
+shDone: rts                     ; I = 8: the mantissa is already in place
+${[...Array(8)].map((_, i) => `shL${8 - i}:  asl lgS
+        rol lgS+1`).join('\n')}
+        rts
+
 ; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
 ; behind it, so this exists purely to make that keypress harmless. $dd0d is read to clear the
@@ -5365,6 +5449,20 @@ logT:   ${chunk([...Array(256)].map((_, i) =>
 ; expT[f] = 2^(f/256) * 256 - 256, so the mantissa is (256 + expT[f]) with an implicit leading 1.
 expT:   ${chunk([...Array(256)].map((_, f) =>
           Math.min(255, Math.round(Math.pow(2, f / 256) * 256) - 256))).trim()}
+        * = ${hx16(RELOC + 0x3900)}
+; logFracT[f] = log2(f/256) * 256, signed, so it is NEGATIVE throughout (f/256 < 1). Offline
+; rather than derived, because it is the one operand whose log must be exact to +-0.5 LSB: the
+; other side of the add is mkLog's output, already carrying 1.04 LSB, and two coarse logs would
+; put the product outside the band castRay needs.
+;
+; castRay wants TWO constants an axis and both come from this table:
+;    -x  sdx = ddx * frac/256        -> logFracT[frac]
+;    +x  sdx = ddx * (256-frac)/256  -> logFracT[256-frac], and frac = 0 means x1.0, i.e. 0
+logFrLo: ${chunk([...Array(256)].map((_, f) =>
+           (f === 0 ? 0 : Math.round(Math.log2(f / 256) * 256)) & 255)).trim()}
+        * = ${hx16(RELOC + 0x3a00)}
+logFrHi: ${chunk([...Array(256)].map((_, f) =>
+           ((f === 0 ? 0 : Math.round(Math.log2(f / 256) * 256)) >> 8) & 255)).trim()}
 ` : ''}
 ${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the

@@ -38,6 +38,16 @@ dyv     = $24
 ; $2b-$30 is a genuinely free block ($2a is iterHi, one byte; $31 is cb).
 lgV     = $2b                   ; the 16-bit delta being converted, shifted down in place
 lgK     = $2d                   ; the shift count it took to normalise it to 8 bits
+; ---- per-frame log constants, and exp2's working state ----
+; lkXP/lkXN are log2 of the two factors the x side distance can need, computed once a frame from
+; px's fraction; lkYP/lkYN likewise from py's. Signed 16-bit, always negative or zero.
+; Placed around the singles the collision check flags: $30 and $36 are free but $31 is cb and
+; $37 is hcur, so neither can start a two-byte pair.
+lkXP    = $2e                   ; 2 bytes
+lkXN    = $34                   ; 2 bytes
+lkYP    = $38                   ; 2 bytes
+lkYN    = $3a                   ; 2 bytes
+lgS     = $3c                   ; 2 bytes: the log sum, then exp2's mantissa
 nxL     = $25
 nxH     = $26
 nyL     = $27
@@ -503,6 +513,37 @@ mloop:
         asl paqL
         rol
         sta paqH
+        ; ---- log2 of this frame's two side-distance factors, per axis ----
+        ; sdx is ddx times frac/256 (stepping -x) or (256-frac)/256 (stepping +x), and BOTH
+        ; factors depend only on px's fraction -- so their logs are frame constants and the
+        ; per-ray multiply collapses to one 16-bit add. frac = 0 is the only special case: the
+        ; +x factor is then exactly 1.0, whose log is 0, and logFracT[0] holds 0 for that reason.
+        ldy px
+        lda logFrLo,y
+        sta lkXN
+        lda logFrHi,y
+        sta lkXN+1
+        lda #$00                ; 256 - frac, as a byte: 0 when frac is 0, which indexes the
+        sec                     ; slot holding log 1.0 = 0 -- exactly right
+        sbc px
+        tay
+        lda logFrLo,y
+        sta lkXP
+        lda logFrHi,y
+        sta lkXP+1
+        ldy py
+        lda logFrLo,y
+        sta lkYN
+        lda logFrHi,y
+        sta lkYN+1
+        lda #$00
+        sec
+        sbc py
+        tay
+        lda logFrLo,y
+        sta lkYP
+        lda logFrHi,y
+        sta lkYP+1
         lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
 
@@ -3267,6 +3308,76 @@ lg16r:  tax                     ; the mantissa's LOW byte; its high byte is the 
         sta lgV
         rts
 
+; ---- lgExp: lgS holds log2(v)*256 (0..4096) -> lgS holds v as a 16-bit value ----
+; The mantissa is 256 + expT[fractional byte] -- nine bits with the leading 1 implicit -- and the
+; integer byte says which power of two to place it at, so the answer is mantissa << (I - 8), the
+; shift running -8..+8. That shift is the ONLY reason logs are not simply cheaper than the
+; quarter-square multiply they replace; everything else here is two lookups and an add.
+;
+; Two fall-through chains with a computed entry, the trick renderSym's run chains use: enter N
+; pairs from the end and exactly N shifts happen, with no loop counter. Typical rays need 0-2 --
+; sdx runs from a fraction of a cell to a couple of cells, so I lands at 7-9 -- and only a ray
+; nearly parallel to an axis reaches either end.
+;
+; The entry is arithmetic rather than an address table: the chain is uniform, 6 bytes a pair, so
+; shOffT holds a byte offset from shChain. That also sidesteps whether this assembler takes
+; "<label" inside a !byte list, which it is not documented to do.
+lgExp:  ldx lgS+1               ; the integer byte indexes shOffT directly: entry i shifts by i-8
+        ldy lgS                 ; ...read BOTH before the mantissa overwrites them
+        lda expT,y
+        sta lgS
+        lda #$01                ; the implicit leading 1: mantissa = 256 + expT[frac]
+        sta lgS+1
+        lda shOffT,x
+        clc
+        adc #<shChain
+        sta jv
+        lda #>shChain
+        adc #$00
+        sta jv+1
+        jmp (jv)
+
+; Offsets as LABEL ARITHMETIC, not counted bytes. Counting them by hand got it wrong first go --
+; lgS is zero page, so each pair is 4 bytes and not the 6 an absolute operand would take, and the
+; rts landed at 32 rather than 48. The assembler supports '-', so let it do the counting: this
+; cannot drift if a pair ever changes size or the chain is reordered.
+shOffT: !byte shR8-shChain,shR7-shChain,shR6-shChain,shR5-shChain,shR4-shChain,shR3-shChain,shR2-shChain,shR1-shChain,shDone-shChain,shL1-shChain,shL2-shChain,shL3-shChain,shL4-shChain,shL5-shChain,shL6-shChain,shL7-shChain,shL8-shChain
+shChain:
+shR8:  lsr lgS+1
+        ror lgS
+shR7:  lsr lgS+1
+        ror lgS
+shR6:  lsr lgS+1
+        ror lgS
+shR5:  lsr lgS+1
+        ror lgS
+shR4:  lsr lgS+1
+        ror lgS
+shR3:  lsr lgS+1
+        ror lgS
+shR2:  lsr lgS+1
+        ror lgS
+shR1:  lsr lgS+1
+        ror lgS
+shDone: rts                     ; I = 8: the mantissa is already in place
+shL8:  asl lgS
+        rol lgS+1
+shL7:  asl lgS
+        rol lgS+1
+shL6:  asl lgS
+        rol lgS+1
+shL5:  asl lgS
+        rol lgS+1
+shL4:  asl lgS
+        rol lgS+1
+shL3:  asl lgS
+        rol lgS+1
+shL2:  asl lgS
+        rol lgS+1
+shL1:  asl lgS
+        rol lgS+1
+        rts
+
 ; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
 ; behind it, so this exists purely to make that keypress harmless. $dd0d is read to clear the
@@ -4804,5 +4915,37 @@ expT:   !byte 0,1,1,2,3,3,4,5,6,6,7,8,8,9,10,11,11,12,13,14,14,15,16,16
         !byte 175,176,177,178,179,180,182,183,184,185,186,188,189,190,191,192,194,195,196,197,198,200,201,202
         !byte 203,205,206,207,208,210,211,212,214,215,216,217,219,220,221,222,224,225,226,228,229,230,232,233
         !byte 234,236,237,238,240,241,242,244,245,246,248,249,250,252,253,255
+        * = $bf00
+; logFracT[f] = log2(f/256) * 256, signed, so it is NEGATIVE throughout (f/256 < 1). Offline
+; rather than derived, because it is the one operand whose log must be exact to +-0.5 LSB: the
+; other side of the add is mkLog's output, already carrying 1.04 LSB, and two coarse logs would
+; put the product outside the band castRay needs.
+;
+; castRay wants TWO constants an axis and both come from this table:
+;    -x  sdx = ddx * frac/256        -> logFracT[frac]
+;    +x  sdx = ddx * (256-frac)/256  -> logFracT[256-frac], and frac = 0 means x1.0, i.e. 0
+logFrLo: !byte 0,0,0,150,0,82,150,207,0,44,82,118,150,179,207,232,0,22,44,63,82,100,118,134
+        !byte 150,165,179,193,207,220,232,244,0,11,22,33,44,54,63,73,82,92,100,109,118,126,134,142
+        !byte 150,157,165,172,179,186,193,200,207,213,220,226,232,238,244,250,0,6,11,17,22,28,33,38
+        !byte 44,49,54,59,63,68,73,78,82,87,92,96,100,105,109,113,118,122,126,130,134,138,142,146
+        !byte 150,154,157,161,165,169,172,176,179,183,186,190,193,197,200,203,207,210,213,216,220,223,226,229
+        !byte 232,235,238,241,244,247,250,253,0,3,6,9,11,14,17,20,22,25,28,30,33,36,38,41
+        !byte 44,46,49,51,54,56,59,61,63,66,68,71,73,75,78,80,82,85,87,89,92,94,96,98
+        !byte 100,103,105,107,109,111,113,116,118,120,122,124,126,128,130,132,134,136,138,140,142,144,146,148
+        !byte 150,152,154,155,157,159,161,163,165,167,169,170,172,174,176,178,179,181,183,185,186,188,190,192
+        !byte 193,195,197,198,200,202,203,205,207,208,210,212,213,215,216,218,220,221,223,224,226,228,229,231
+        !byte 232,234,235,237,238,240,241,243,244,246,247,249,250,252,253,255
+        * = $c000
+logFrHi: !byte 0,248,249,249,250,250,250,250,251,251,251,251,251,251,251,251,252,252,252,252,252,252,252,252
+        !byte 252,252,252,252,252,252,252,252,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253
+        !byte 253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,254,254,254,254,254,254,254,254
+        !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254
+        !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254
+        !byte 254,254,254,254,254,254,254,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
 
 
