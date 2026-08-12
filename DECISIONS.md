@@ -375,7 +375,7 @@ predicts why:
 
 | site | verdict |
 |---|---|
-| `castRay` initial side distances | **CONVERTED.** `frac` is an 8-bit runtime byte, `ddx`'s log is precomputed by `mkLog`, so the 16x8 multiply became one 16-bit add. **910 cycles**, and slightly MORE faithful (runviews 884 -> 866). |
+| `castRay` initial side distances | **CONVERTED.** `frac` is an 8-bit runtime byte, `ddx`'s log is precomputed by `mkLog`, so the 16x8 multiply became one 16-bit add. **910 cycles.** See the accuracy correction below -- it is NOT more faithful. |
 | `seamOne` divide + `*W` | **TRIED, MEASURED, REVERTED** -- see below |
 | `calcU` x3 (`sideMul`) | one table operand, one runtime 16-BIT operand needing normalisation (~30 cy) -> ~80 against `sideMul`'s ~70. A loss. |
 | `pivOne` x4 (`mul8`) | runtime x runtime |
@@ -411,3 +411,26 @@ overstatement.**
 **What the branch is worth if the log tables are dropped:** the 8KB at `$e000` (invisible to the
 VIC, so it cannot eat bank 0's sprite headroom), 260 cycles from taking the IRQ vectors direct, the
 image-vs-equate build guard, and the `$fffa` guard. All independent of the logs.
+
+### Correction: the log path is NOT more accurate. The 884 -> 866 is luck.
+
+Recorded here because the commit for the conversion claims otherwise, and the claim is wrong.
+
+`runviews` went 914 (original) -> 884 (borrow drop) -> 866 (logs), and the logs' -18 decomposes as
+**-48 on view 1 and +30 on view 2**, the +30 being the borrow drop's own gain handed back. That
+looks like an improvement. It is not, and the measurement that settles it was already in hand:
+replaying 217,600 rays against exact float, **logs land on a different wall run 0.059% of the time
+against the shipped quarter-square's 0.056%** -- so the log path is marginally LESS faithful to the
+geometry, not more.
+
+Both carry about one LSB of error: logs from 1.04 LSB of quantisation (0.27% relative), the
+quarter-square from a deliberate truncation of the same order. **Same magnitude, different
+distribution.** Six viewpoints cannot tell "more accurate" from "differently wrong by the same
+amount", and 18 pixels across 189,312 is not a signal. The borrow drop's 30 was correctly called
+luck at the time; the same scepticism should have been applied here immediately.
+
+**Which removes the last argument for keeping the log tables.** They are 910 cycles for ~200 lines,
+four tables, the engine's most subtle invariants, and marginally worse geometry -- and one of those
+invariants (the carry through `lg16`'s loop test) already broke silently while the build check
+validated the intended algorithm rather than the emitted one. If the branch is trimmed, the RAM,
+the IRQ vectors, the two build guards and both bug fixes all stand without them.
