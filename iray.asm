@@ -34,20 +34,6 @@ dySgn   = $cb57
 rowv    = $cb58                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
-; ---- mkLog scratch: startup only, so it may share the render-time zero page freely ----
-; $2b-$30 is a genuinely free block ($2a is iterHi, one byte; $31 is cb).
-lgV     = $2b                   ; the 16-bit delta being converted, shifted down in place
-lgK     = $2d                   ; the shift count it took to normalise it to 8 bits
-; ---- per-frame log constants, and exp2's working state ----
-; lkXP/lkXN are log2 of the two factors the x side distance can need, computed once a frame from
-; px's fraction; lkYP/lkYN likewise from py's. Signed 16-bit, always negative or zero.
-; Placed around the singles the collision check flags: $30 and $36 are free but $31 is cb and
-; $37 is hcur, so neither can start a two-byte pair.
-lkXP    = $2e                   ; 2 bytes
-lkXN    = $34                   ; 2 bytes
-lkYP    = $38                   ; 2 bytes
-lkYN    = $3a                   ; 2 bytes
-lgS     = $3c                   ; 2 bytes: the log sum, then exp2's mantissa
 nxL     = $25
 nxH     = $26
 nyL     = $27
@@ -232,24 +218,6 @@ pkJoy   = $cb29                 ; joystick-1 lines, masked out of the palette-ke
 bndT    = $ca00                 ; columns where a face or saturation state begins ($40 max)
 remLoT  = $c700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $c800                 ;   Parked so u can be derived later, only where it is needed.
-; ---- log-form deltas, in the RAM under the banked-out KERNAL ----
-; Built at startup by mkLog, not emitted: 4KB of table would push the image past $d000, which is
-; I/O and cannot be loaded over -- the build refuses it outright ("program ends past $d000").
-; $e000-$fff9 is usable; $fffa-$ffff are the NMI and IRQ vectors this program installs itself, so
-; a table reaching them would be overwritten onto the vectors and the next interrupt would jump
-; into table data. LOGHI_END below is asserted at build time, because the assembler only catches
-; origins that move BACKWARD -- a table running forward into $fffa assembles silently.
-dxLogLo = $e000
-dxLogHi = $e400
-dyLogLo = $e800
-dyLogHi = $ec00
-; logFr[f] = log2(f/256)*256, signed. UP HERE, NOT IN THE IMAGE, and that is the whole point:
-; it was emitted at $c000 and $c000 is stackLT -- the subdivision's span stack -- so subLp
-; overwrote the high byte every frame and castRay's x side distance came out ~19x too small.
-; The assembler cannot catch that: an equate has no origin to move backward from. See the
-; image-vs-equate guard in build-iray.mjs, added because of this.
-logFrLo = $f000
-logFrHi = $f100
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -406,8 +374,6 @@ ccf:    sta $d800,x
         sta fpsTens
         sta fpsOnes
 
-        jsr mkLog               ; fill the log-form delta tables under the banked-out KERNAL
-
         cli
 
 mloop:
@@ -520,37 +486,6 @@ mloop:
         asl paqL
         rol
         sta paqH
-        ; ---- log2 of this frame's two side-distance factors, per axis ----
-        ; sdx is ddx times frac/256 (stepping -x) or (256-frac)/256 (stepping +x), and BOTH
-        ; factors depend only on px's fraction -- so their logs are frame constants and the
-        ; per-ray multiply collapses to one 16-bit add. frac = 0 is the only special case: the
-        ; +x factor is then exactly 1.0, whose log is 0, and logFracT[0] holds 0 for that reason.
-        ldy px
-        lda logFrLo,y
-        sta lkXN
-        lda logFrHi,y
-        sta lkXN+1
-        lda #$00                ; 256 - frac, as a byte: 0 when frac is 0, which indexes the
-        sec                     ; slot holding log 1.0 = 0 -- exactly right
-        sbc px
-        tay
-        lda logFrLo,y
-        sta lkXP
-        lda logFrHi,y
-        sta lkXP+1
-        ldy py
-        lda logFrLo,y
-        sta lkYN
-        lda logFrHi,y
-        sta lkYN+1
-        lda #$00
-        sec
-        sbc py
-        tay
-        lda logFrLo,y
-        sta lkYP
-        lda logFrHi,y
-        sta lkYP+1
         lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
 
@@ -2706,26 +2641,8 @@ faHi:   and #$03
         sta ddy
         lda ddyHiTQ+768,y
         sta ddyH
-        ; log2(side distance) = log2(delta) + log2(this frame's factor): ONE 16-bit add where a
-        ; 16x8 quarter-square multiply used to be. It lands straight in sdx/sdy, which lgExpX and
-        ; lgExpY turn into the linear value in place -- no copying. And the "+" direction is now
-        ; just a different frame constant instead of a ddx-minus-m subtract, so that goes too.
-        lda dxLogLo+768,y
-        clc
-        adc lkXP
-        sta sdx
-        lda dxLogHi+768,y
-        adc lkXP+1
-        sta sdxH
-        lda dyLogLo+768,y
-        clc
-        adc lkYN
-        sta sdy
-        lda dyLogHi+768,y
-        adc lkYN+1
-        sta sdyH
         jmp faDn
-faP0:  lda ddxLoTQ,y
+faP0:   lda ddxLoTQ,y
         sta ddx
         lda ddxHiTQ,y
         sta ddxH
@@ -2733,26 +2650,8 @@ faP0:  lda ddxLoTQ,y
         sta ddy
         lda ddyHiTQ,y
         sta ddyH
-        ; log2(side distance) = log2(delta) + log2(this frame's factor): ONE 16-bit add where a
-        ; 16x8 quarter-square multiply used to be. It lands straight in sdx/sdy, which lgExpX and
-        ; lgExpY turn into the linear value in place -- no copying. And the "+" direction is now
-        ; just a different frame constant instead of a ddx-minus-m subtract, so that goes too.
-        lda dxLogLo,y
-        clc
-        adc lkXP
-        sta sdx
-        lda dxLogHi,y
-        adc lkXP+1
-        sta sdxH
-        lda dyLogLo,y
-        clc
-        adc lkYP
-        sta sdy
-        lda dyLogHi,y
-        adc lkYP+1
-        sta sdyH
         jmp faDn
-faP1:  lda ddxLoTQ+256,y
+faP1:   lda ddxLoTQ+256,y
         sta ddx
         lda ddxHiTQ+256,y
         sta ddxH
@@ -2760,26 +2659,8 @@ faP1:  lda ddxLoTQ+256,y
         sta ddy
         lda ddyHiTQ+256,y
         sta ddyH
-        ; log2(side distance) = log2(delta) + log2(this frame's factor): ONE 16-bit add where a
-        ; 16x8 quarter-square multiply used to be. It lands straight in sdx/sdy, which lgExpX and
-        ; lgExpY turn into the linear value in place -- no copying. And the "+" direction is now
-        ; just a different frame constant instead of a ddx-minus-m subtract, so that goes too.
-        lda dxLogLo+256,y
-        clc
-        adc lkXN
-        sta sdx
-        lda dxLogHi+256,y
-        adc lkXN+1
-        sta sdxH
-        lda dyLogLo+256,y
-        clc
-        adc lkYP
-        sta sdy
-        lda dyLogHi+256,y
-        adc lkYP+1
-        sta sdyH
         jmp faDn
-faP2:  lda ddxLoTQ+512,y
+faP2:   lda ddxLoTQ+512,y
         sta ddx
         lda ddxHiTQ+512,y
         sta ddxH
@@ -2787,66 +2668,188 @@ faP2:  lda ddxLoTQ+512,y
         sta ddy
         lda ddyHiTQ+512,y
         sta ddyH
-        ; log2(side distance) = log2(delta) + log2(this frame's factor): ONE 16-bit add where a
-        ; 16x8 quarter-square multiply used to be. It lands straight in sdx/sdy, which lgExpX and
-        ; lgExpY turn into the linear value in place -- no copying. And the "+" direction is now
-        ; just a different frame constant instead of a ddx-minus-m subtract, so that goes too.
-        lda dxLogLo+512,y
-        clc
-        adc lkXN
-        sta sdx
-        lda dxLogHi+512,y
-        adc lkXN+1
-        sta sdxH
-        lda dyLogLo+512,y
-        clc
-        adc lkYN
-        sta sdy
-        lda dyLogHi+512,y
-        adc lkYN+1
-        sta sdyH
 faDn:
         lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
         sta cell                ; The value is the player's cell, so it is the same for every
                                 ; ray in the frame -- computed once in mloop, not 11 times.
-        ; ---- side distances, out of the log sums the dispatch already built ----
-        ; sdx and sdy arrive holding log2(side distance) * 256: the 16x8 quarter-square multiply
-        ; that used to produce them collapsed into one 16-bit add up in the quarter dispatch (see
-        ; faP0), because BOTH of its factors -- the delta and the position's fraction -- have logs
-        ; that are known before the ray starts. All that is left is turning each back into a
-        ; linear value, in place.
-        jsr lgExpX
-        jsr lgExpY
+        ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
+        ; (standard form: full cell at frac=0, avoids the fr=256->0 wrap spike)
+        ; --- sideMul inlined: a jsr/rts pair here is 12 cy a call, 24 a ray, ~770 a
+        ; --- frame. Every other caller still uses the subroutine.
+        ; It reads px / ddxH / ddx DIRECTLY rather than copying them into fr / mhi / mlo first.
+        ; All six are zero page, so the copies bought nothing and cost 18 cycles an axis --
+        ; 36 a ray, ~720 a frame. The names only ever existed as sideMul's argument protocol,
+        ; and an inlined body has no protocol to honour.
+        lda px                  ; --- high half: fr * mhi -> sdxH:s1 ---
+        clc
+        adc ddxH
+        tax
+        bcc cxmh0
+        lda f1LoT,x
+        tay                     ; the low byte rides in Y instead of zero page: this routine
+        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
+        sta sdxH
+        jmp cxmh1
+cxmh0:   lda f0LoT,x
+        tay
+        lda f0HiT,x
+        sta sdxH
+cxmh1:   lda px
+        sec
+        sbc ddxH
+        bcs cxmh2
+        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
+        adc #$01
+cxmh2:   tax
+        sec
+        tya
+        sbc f0LoT,x
+        sta sdx
+        lda sdxH
+        sbc f0HiT,x
+        sta sdxH
+        lda px                  ; --- low half: only the HIGH byte survives the >>8 ---
+        clc
+        adc ddx
+        tax
+        bcc cxml0
+        lda f1HiT,x
+        sta qhi
+        jmp cxml1
+cxml0:   lda f0HiT,x
+        sta qhi
+cxml1:   lda px
+        sec
+        sbc ddx
+        bcs cxml2
+        eor #$ff
+        adc #$01
+cxml2:   tax
+        ; THE BORROW FROM THE LOW BYTES IS DELIBERATELY NOT COMPUTED. This half only ever
+        ; contributed the high byte of fr*ddxL, so the two low-byte loads and the subtract
+        ; that produced their borrow existed only to be +/-1 correct in the LAST bit.
+        ; Dropping them leaves the product high by 0 or 1 -- the side distance wrong by at
+        ; most 1/256 of a cell, one-sided, and NOT accumulated: the DDA adds exact deltas
+        ; from here on. On screen: colH = 88/d so dColH ~ 88*(1/256)/d^2, and a wall top is
+        ; only VISIBLE below colH 100, i.e. d >= 0.88 cells -- so the worst visible error is
+        ; 0.45 of a logical pixel, falling off as the square of distance.
+        sec
+        lda qhi
+        sbc f0HiT,x             ; high byte of fr*ddxL, straight into sdx
+        clc
+        adc sdx
+        sta sdx
+        lda sdxH
+        adc #$00
+        sta sdxH
+
         ; STEP SIGNS COME FROM THE FINE ANGLE. FINEANG moved the deltas to rq but left these
         ; on the coarse rang, and the two disagree at the axis boundaries -- the ray then steps
         ; the wrong way while using a delta for a slightly different direction. cos >= 0 in
         ; quarters 0 and 3, sin >= 0 in quarters 0 and 1, so rqH decides both, and posXT/posYT
         ; (512 bytes holding two bits) are not needed at all.
-        ;
-        ; The direction no longer selects an ARITHMETIC path, only a sign. It used to: stepping +x
-        ; meant "sdx = ddx - m" and stepping -x meant "sdx = m", so each axis carried a subtract on
-        ; one branch. Now both are the same expression with a different frame constant.
         lda rqH
         beq cxpos
         cmp #$03
         beq cxpos
         lda #$ff
         sta stpX
-        jmp cydo
+        jmp cydo                ; negative: m IS the side distance, and the inlined
+                                ; multiply above now writes it straight into sdx
 cxpos:  lda #$01
         sta stpX
-cydo:   lda rqH                 ; sin >= 0 in quarters 0 and 1
+        sec                     ; positive: sdx = ddx - m, in place
+        lda ddx
+        sbc sdx
+        sta sdx
+        lda ddxH
+        sbc sdxH
+        sta sdxH
+cydo:
+        ; --- sideMul inlined; reads py / ddyH / ddy directly, see the X axis above ---
+        lda py                  ; --- high half: fr * mhi -> sdyH:s1 ---
+        clc
+        adc ddyH
+        tax
+        bcc cymh0
+        lda f1LoT,x
+        tay                     ; the low byte rides in Y instead of zero page: this routine
+        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
+        sta sdyH
+        jmp cymh1
+cymh0:   lda f0LoT,x
+        tay
+        lda f0HiT,x
+        sta sdyH
+cymh1:   lda py
+        sec
+        sbc ddyH
+        bcs cymh2
+        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
+        adc #$01
+cymh2:   tax
+        sec
+        tya
+        sbc f0LoT,x
+        sta sdy
+        lda sdyH
+        sbc f0HiT,x
+        sta sdyH
+        lda py                  ; --- low half: only the HIGH byte survives the >>8 ---
+        clc
+        adc ddy
+        tax
+        bcc cyml0
+        lda f1HiT,x
+        sta qhi
+        jmp cyml1
+cyml0:   lda f0HiT,x
+        sta qhi
+cyml1:   lda py
+        sec
+        sbc ddy
+        bcs cyml2
+        eor #$ff
+        adc #$01
+cyml2:   tax
+        ; THE BORROW FROM THE LOW BYTES IS DELIBERATELY NOT COMPUTED. This half only ever
+        ; contributed the high byte of fr*ddyL, so the two low-byte loads and the subtract
+        ; that produced their borrow existed only to be +/-1 correct in the LAST bit.
+        ; Dropping them leaves the product high by 0 or 1 -- the side distance wrong by at
+        ; most 1/256 of a cell, one-sided, and NOT accumulated: the DDA adds exact deltas
+        ; from here on. On screen: colH = 88/d so dColH ~ 88*(1/256)/d^2, and a wall top is
+        ; only VISIBLE below colH 100, i.e. d >= 0.88 cells -- so the worst visible error is
+        ; 0.45 of a logical pixel, falling off as the square of distance.
+        sec
+        lda qhi
+        sbc f0HiT,x             ; high byte of fr*ddyL, straight into sdy
+        clc
+        adc sdy
+        sta sdy
+        lda sdyH
+        adc #$00
+        sta sdyH
+
+        lda rqH                 ; sin >= 0 in quarters 0 and 1
         cmp #$02
         bcc cypos
         lda #$ff
         sta stpY
         lda #$f0                ; -16: one cell row back
         sta stpY16
-        jmp cySat
+        jmp cySat               ; negative: m IS the side distance, so there is nothing to
+                                ; subtract -- but the saturation below still has to run
 cypos:  lda #$01
         sta stpY
         lda #$10                ; +16: one cell row on
         sta stpY16
+        sec                     ; positive: sdy = ddy - m, in place
+        lda ddy
+        sbc sdy
+        sta sdy
+        lda ddyH
+        sbc sdyH
+        sta sdyH
 cySat:
         ; Two things the old loop did on EVERY step that are only needed once, on the step
         ; that hits: it wrote "side" (5 cycles a step, read once after the loop), and it
@@ -2866,12 +2869,10 @@ cySat:
         ; never take, hit the wrong wall, and drew a column of the wrong height straight
         ; through the scene. Saturate the product too, on both axes.
         ;
-        ; BOTH DIRECTIONS REACH THIS NOW, AND THAT IS A FIX. The -y branch used to "jmp cydone"
-        ; straight past this check, so the guard only ever ran when stepping +y. That was survivable
-        ; while the two directions computed different expressions -- stepping -y gave
-        ; sdy = ddy * frac, which only collapses when frac is tiny -- but it was always an
-        ; asymmetry rather than a reason. Now that both directions are ddy times a factor, either
-        ; can produce the small product, so both fall through to here.
+        ; AND BOTH DIRECTIONS MUST REACH IT. The -y branch used to "jmp cydone" straight past this
+        ; check, so the guard only ever ran when stepping +y. Stepping -y gives sdy = ddy * frac,
+        ; which collapses the same way when frac is small -- rarer than the +y case the comment
+        ; above describes, but the same bug, and it was an asymmetry rather than a reason.
         lda ddxH
         and ddx
         cmp #$ff
@@ -3120,296 +3121,6 @@ irqd:   lda #$ff
         tax
         pla
         rti
-
-; ---- mkLog: build the log-form delta tables at $e000 from the linear ones ----
-; ddxLoTQ/ddxHiTQ hold 1/|cos| as raw 16-bit (8.8 fixed point, saturated at $ffff). This writes
-; log2(raw) * 256 for each of the 1024 quarter-angles, x and y, so that castRay's initial side
-; distance -- frac * ddx -- becomes ONE ADD of a frame constant instead of a 16x8 multiply.
-;
-; Derived at startup rather than stored because 4KB more table would push the image past $d000,
-; which is I/O and cannot be loaded over. 2048 entries at ~60 cycles is about 0.12s, once.
-;
-; The normalisation is what keeps logT down to one byte: shift the value right until the high byte
-; is clear, which leaves a mantissa in 128..255 (the input is always >= 256, since 1/|cos| >= 1),
-; and then log2(v)*256 = (k+7)*256 + logT[m]. High byte from the count, low byte from the table.
-mkLog:
-        ldy #$00
-mkX0:   lda ddxLoTQ+0,y
-        sta lgV
-        lda ddxHiTQ+0,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dxLogLo+0,y
-        lda lgK
-        sta dxLogHi+0,y
-        iny
-        bne mkX0
-        ldy #$00
-mkX1:   lda ddxLoTQ+256,y
-        sta lgV
-        lda ddxHiTQ+256,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dxLogLo+256,y
-        lda lgK
-        sta dxLogHi+256,y
-        iny
-        bne mkX1
-        ldy #$00
-mkX2:   lda ddxLoTQ+512,y
-        sta lgV
-        lda ddxHiTQ+512,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dxLogLo+512,y
-        lda lgK
-        sta dxLogHi+512,y
-        iny
-        bne mkX2
-        ldy #$00
-mkX3:   lda ddxLoTQ+768,y
-        sta lgV
-        lda ddxHiTQ+768,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dxLogLo+768,y
-        lda lgK
-        sta dxLogHi+768,y
-        iny
-        bne mkX3
-        ldy #$00
-mkY0:   lda ddyLoTQ+0,y
-        sta lgV
-        lda ddyHiTQ+0,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dyLogLo+0,y
-        lda lgK
-        sta dyLogHi+0,y
-        iny
-        bne mkY0
-        ldy #$00
-mkY1:   lda ddyLoTQ+256,y
-        sta lgV
-        lda ddyHiTQ+256,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dyLogLo+256,y
-        lda lgK
-        sta dyLogHi+256,y
-        iny
-        bne mkY1
-        ldy #$00
-mkY2:   lda ddyLoTQ+512,y
-        sta lgV
-        lda ddyHiTQ+512,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dyLogLo+512,y
-        lda lgK
-        sta dyLogHi+512,y
-        iny
-        bne mkY2
-        ldy #$00
-mkY3:   lda ddyLoTQ+768,y
-        sta lgV
-        lda ddyHiTQ+768,y
-        sta lgV+1
-        jsr lg16
-        lda lgV
-        sta dyLogLo+768,y
-        lda lgK
-        sta dyLogHi+768,y
-        iny
-        bne mkY3
-        ; ---- logFr, the per-frame factors' logs ----
-        ; f < 256, so normalise LEFT until the value reaches 256..511, and then
-        ;     log2(f/256)*256 = logT[low byte] - k*256
-        ; giving the low byte from one lookup and the high byte as -k. f = 0 is the slot meaning
-        ; "the factor is exactly 1.0", whose log is 0 -- which is what the +x case needs when the
-        ; position sits exactly on a cell boundary.
-        lda #$00
-        sta logFrLo
-        sta logFrHi
-        ldy #$01
-mkFrLp: sty lgV
-        lda #$00
-        sta lgV+1
-        sta lgK
-mkFrN:  lda lgV+1
-        bne mkFrD
-        asl lgV
-        rol lgV+1
-        inc lgK
-        jmp mkFrN
-mkFrD:  ldx lgV
-        lda logT,x
-        sta logFrLo,y
-        lda #$00
-        sec
-        sbc lgK
-        sta logFrHi,y
-        iny
-        bne mkFrLp
-        rts
-
-; lg16: lgV (16-bit, >= 256) -> lgV = low byte of log2*256, lgK = high byte
-lg16:   lda #$08                ; the +8 folded in: logT is indexed by a 9-bit mantissa, 256..511
-        sta lgK
-        ; AND, NOT CMP. The rounding below needs the carry from the final "ror lgV" -- the bit
-        ; that fell out -- and cmp SETS the carry, which silently killed the round-to-nearest and
-        ; left this truncating at 1.86 LSB while the build check validated the 1.04 LSB version it
-        ; was supposed to implement. lda/and/beq/inc/jmp all leave the carry alone; "high byte >= 2"
-        ; is the same test as "any bit above bit 0", and the input is always >= 256 so the high
-        ; byte never reaches 0.
-lg16n:  lda lgV+1
-        and #$fe
-        beq lg16d               ; high byte down to 1: the mantissa is 256 + lgV
-        lsr lgV+1
-        ror lgV
-        inc lgK
-        jmp lg16n
-        ; ROUND the mantissa, do not truncate it. The shifts above discard up to 8 low bits,
-        ; which alone is 1/256 of the value = 1.44 LSB of log -- 0.67% relative error, outside the
-        ; 0.27% band the DDA needs. The carry still holds the last bit shifted out (lda/beq/inc/jmp
-        ; do not touch it), so one adc turns truncation into round-to-nearest.
-lg16d:  lda lgV
-        adc #$00
-        bcc lg16r               ; 511 rounded up to 512: mantissa 256, one power higher
-        lda #$00
-        inc lgK
-lg16r:  tax                     ; the mantissa's LOW byte; its high byte is the implicit 1
-        lda logT,x
-        sta lgV
-        rts
-
-; ---- lgExpX / lgExpY: turn log2(v)*256 into a linear 16-bit v, in place ----
-; The mantissa is 256 + expT[fractional byte] -- nine bits with the leading 1 implicit -- and the
-; integer byte says which power of two to place it at, so the answer is mantissa << (I - 8), the
-; shift running -8..+8. That shift is the ONLY reason logs are not simply cheaper than the
-; quarter-square multiply they replace; everything else here is two lookups and an add.
-;
-; Two fall-through chains with a computed entry, the trick renderSym's run chains use: enter N
-; pairs from the end and exactly N shifts happen, with no loop counter. Typical rays need 0-2 --
-; sdx runs from a fraction of a cell to a couple of cells, so I lands at 7-9 -- and only a ray
-; nearly parallel to an axis reaches either end.
-;
-; Emitted TWICE, once per axis, so each works directly on sdx/sdxH or sdy/sdyH. One shared copy
-; would need the caller to shuffle the value into scratch and back, which is ~24 cycles a call
-; against ~70 bytes of duplicated chain -- and this is on the per-ray path.
-;
-; The entry offsets are LABEL ARITHMETIC, not counted bytes: sdx and sdxH are zero page, so a pair
-; is 4 bytes and not the 6 an absolute operand would take. Counting by hand got that wrong, and
-; the assembler cannot get it wrong.
-shOffT: !byte shRX8-shcX,shRX7-shcX,shRX6-shcX,shRX5-shcX,shRX4-shcX,shRX3-shcX,shRX2-shcX,shRX1-shcX,shDX-shcX,shLX1-shcX,shLX2-shcX,shLX3-shcX,shLX4-shcX,shLX5-shcX,shLX6-shcX,shLX7-shcX,shLX8-shcX
-lgExpX:
-        ldx sdxH               ; the integer byte indexes shOffT directly: entry i shifts by i-8
-        ldy sdx               ; ...read BOTH before the mantissa overwrites them
-        lda expT,y
-        sta sdx
-        lda #$01                ; the implicit leading 1: mantissa = 256 + expT[frac]
-        sta sdxH
-        lda shOffT,x
-        clc
-        adc #<shcX
-        sta jv
-        lda #>shcX
-        adc #$00
-        sta jv+1
-        jmp (jv)
-shcX:
-shRX8: lsr sdxH
-        ror sdx
-shRX7: lsr sdxH
-        ror sdx
-shRX6: lsr sdxH
-        ror sdx
-shRX5: lsr sdxH
-        ror sdx
-shRX4: lsr sdxH
-        ror sdx
-shRX3: lsr sdxH
-        ror sdx
-shRX2: lsr sdxH
-        ror sdx
-shRX1: lsr sdxH
-        ror sdx
-shDX: rts                     ; I = 8: the mantissa is already in place
-shLX8: asl sdx
-        rol sdxH
-shLX7: asl sdx
-        rol sdxH
-shLX6: asl sdx
-        rol sdxH
-shLX5: asl sdx
-        rol sdxH
-shLX4: asl sdx
-        rol sdxH
-shLX3: asl sdx
-        rol sdxH
-shLX2: asl sdx
-        rol sdxH
-shLX1: asl sdx
-        rol sdxH
-        rts
-
-lgExpY:
-        ldx sdyH               ; the integer byte indexes shOffT directly: entry i shifts by i-8
-        ldy sdy               ; ...read BOTH before the mantissa overwrites them
-        lda expT,y
-        sta sdy
-        lda #$01                ; the implicit leading 1: mantissa = 256 + expT[frac]
-        sta sdyH
-        lda shOffT,x
-        clc
-        adc #<shcY
-        sta jv
-        lda #>shcY
-        adc #$00
-        sta jv+1
-        jmp (jv)
-shcY:
-shRY8: lsr sdyH
-        ror sdy
-shRY7: lsr sdyH
-        ror sdy
-shRY6: lsr sdyH
-        ror sdy
-shRY5: lsr sdyH
-        ror sdy
-shRY4: lsr sdyH
-        ror sdy
-shRY3: lsr sdyH
-        ror sdy
-shRY2: lsr sdyH
-        ror sdy
-shRY1: lsr sdyH
-        ror sdy
-shDY: rts                     ; I = 8: the mantissa is already in place
-shLY8: asl sdy
-        rol sdyH
-shLY7: asl sdy
-        rol sdyH
-shLY6: asl sdy
-        rol sdyH
-shLY5: asl sdy
-        rol sdyH
-shLY4: asl sdy
-        rol sdyH
-shLY3: asl sdy
-        rol sdyH
-shLY2: asl sdy
-        rol sdyH
-shLY1: asl sdy
-        rol sdyH
-        rts
 
 ; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
@@ -4916,37 +4627,4 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
-        * = $be00
-; logT[i] = (log2(256 + i) - 8) * 256, i.e. indexed by the LOW BYTE of a 9-bit mantissa.
-; mkLog normalises every value into 256..511, where the high byte is fixed at 1 and carries no
-; information -- so a 9-bit mantissa costs the same 256 bytes an 8-bit one would, and buys a bit
-; of precision that matters: with 128..255 the worst case was 1.86 LSB (0.50% of value), outside
-; the band castRay needs. Then
-;     log2(v) * 256  =  (8 + shifts) * 256 + logT[low byte]
-; so the high byte comes from the shift count and the low byte from one lookup, with no 16-bit
-; arithmetic anywhere.
-logT:   !byte 0,1,3,4,6,7,9,10,11,13,14,16,17,18,20,21,22,24,25,26,28,29,30,32
-        !byte 33,34,36,37,38,40,41,42,44,45,46,47,49,50,51,52,54,55,56,57,59,60,61,62
-        !byte 63,65,66,67,68,69,71,72,73,74,75,77,78,79,80,81,82,84,85,86,87,88,89,90
-        !byte 92,93,94,95,96,97,98,99,100,102,103,104,105,106,107,108,109,110,111,112,113,114,116,117
-        !byte 118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141
-        !byte 142,143,144,145,146,147,148,149,150,151,152,153,154,155,155,156,157,158,159,160,161,162,163,164
-        !byte 165,166,167,168,169,169,170,171,172,173,174,175,176,177,178,178,179,180,181,182,183,184,185,185
-        !byte 186,187,188,189,190,191,192,192,193,194,195,196,197,198,198,199,200,201,202,203,203,204,205,206
-        !byte 207,208,208,209,210,211,212,212,213,214,215,216,216,217,218,219,220,220,221,222,223,224,224,225
-        !byte 226,227,228,228,229,230,231,231,232,233,234,234,235,236,237,238,238,239,240,241,241,242,243,244
-        !byte 244,245,246,247,247,248,249,249,250,251,252,252,253,254,255,255
-        * = $bf00
-; expT[f] = 2^(f/256) * 256 - 256, so the mantissa is (256 + expT[f]) with an implicit leading 1.
-expT:   !byte 0,1,1,2,3,3,4,5,6,6,7,8,8,9,10,11,11,12,13,14,14,15,16,16
-        !byte 17,18,19,19,20,21,22,22,23,24,25,25,26,27,28,29,29,30,31,32,32,33,34,35
-        !byte 36,36,37,38,39,40,40,41,42,43,44,44,45,46,47,48,48,49,50,51,52,53,53,54
-        !byte 55,56,57,58,58,59,60,61,62,63,64,65,65,66,67,68,69,70,71,72,72,73,74,75
-        !byte 76,77,78,79,80,81,81,82,83,84,85,86,87,88,89,90,91,92,93,94,94,95,96,97
-        !byte 98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121
-        !byte 122,123,124,125,126,127,128,129,130,131,132,133,135,136,137,138,139,140,141,142,143,144,145,146
-        !byte 147,149,150,151,152,153,154,155,156,157,159,160,161,162,163,164,165,166,168,169,170,171,172,173
-        !byte 175,176,177,178,179,180,182,183,184,185,186,188,189,190,191,192,194,195,196,197,198,200,201,202
-        !byte 203,205,206,207,208,210,211,212,214,215,216,217,219,220,221,222,224,225,226,228,229,230,232,233
-        !byte 234,236,237,238,240,241,242,244,245,246,248,249,250,252,253,255
 
