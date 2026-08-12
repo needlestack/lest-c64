@@ -363,3 +363,51 @@ pass was deleted). They cover only the part below the far wall's top, because `s
 the SOLID run (rows `rs..12`, `rs` from the cell's MINIMUM height) -- so the line starts where the
 step pieces end and never runs up the near wall's full height. That is a consequence of the data
 layout, not extra code, so concave-only vs both is purely a matter of taste at zero cost.
+
+## 16. Log tables — one profitable customer out of ten, and `seamOne` was not it (2026-08-12)
+
+Branch `logtables`. `a*b = exp2(log2 a + log2 b)`, with `logT`/`expT` (256 bytes each) and a 9-bit
+mantissa. **Converted exactly ONE of the engine's ~10 multiply/divide sites**, and the rule that
+predicts why:
+
+> Logs win only where EVERY operand's log is a single lookup -- an 8-bit runtime value, or a table
+> whose log can be precomputed offline -- AND the result tolerates 0.27% relative error.
+
+| site | verdict |
+|---|---|
+| `castRay` initial side distances | **CONVERTED.** `frac` is an 8-bit runtime byte, `ddx`'s log is precomputed by `mkLog`, so the 16x8 multiply became one 16-bit add. **910 cycles**, and slightly MORE faithful (runviews 884 -> 866). |
+| `seamOne` divide + `*W` | **TRIED, MEASURED, REVERTED** -- see below |
+| `calcU` x3 (`sideMul`) | one table operand, one runtime 16-BIT operand needing normalisation (~30 cy) -> ~80 against `sideMul`'s ~70. A loss. |
+| `pivOne` x4 (`mul8`) | runtime x runtime |
+| `pvRcS` (`rcpDT`) | already a single lookup |
+
+**Quarter-squares are the better multiply and stay.** Exact, 1024 bytes, ~70 cycles, and they win
+whenever a 16-bit LINEAR product is wanted, because the `exp2` denormalise shift costs about what
+the whole multiply does. Logs' real edges are that they divide at all, and that a CHAIN costs one
+`exp2` however many operations it contains.
+
+**`seamOne`: 195 cycles for visible seam damage. Rejected.** It is the one site where the chain
+argument applies -- `offset = exp2(log2 P - log2 sum + log2 W)` replaces a reciprocal multiply AND
+a `mul8` -- and `logFr` doubles as the byte-log table (`log2(f)*256 = logFr[f] + 2048`, and across
+`+P -sum +W` the three 2048s collapse to one). Wall pixels were untouched (866 either way), but:
+
+| view | before | after |
+|---|---|---|
+| 1 | 8 drawn, 8 matched, avg 0.38, worst 1 | **9 drawn, 8 matched** (a SPURIOUS seam), avg 0.88, worst 2 |
+| 2 | 6 drawn, 6 matched, avg 0.50 | 6 drawn, **5 matched** |
+| 5 | 11 drawn, 11 matched, avg 0.45 | **10 drawn**, 10 matched (one seam LOST), avg 0.60 |
+| 6 | avg 0.29 | avg 0.57 |
+| 3 | avg 0.33 | avg 0.25 (better) |
+
+A spurious seam, a lost seam, and doubled average offset in two views, for **195 cycles in
+`seamSpan`** (measured 7,410 -> 7,215). Seams are the motion cue; that is not a trade worth making.
+
+**SIXTH consecutive optimistic estimate.** Predicted ~1,000-1,170 for `seamOne`, got 195. The
+running tally this session: `calcM` inline 945->455, seam falloff 3,000->1,700->rejected, run-fill
++2,000->negative, log side distances ~3,000->910, `seamOne` ~1,100->195. Only the KERNAL IRQ
+vectors came in above estimate (100 -> 260). **Treat any unmeasured cycle estimate as a 2-3x
+overstatement.**
+
+**What the branch is worth if the log tables are dropped:** the 8KB at `$e000` (invisible to the
+VIC, so it cannot eat bank 0's sprite headroom), 260 cycles from taking the IRQ vectors direct, the
+image-vs-equate build guard, and the `$fffa` guard. All independent of the logs.
