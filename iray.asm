@@ -127,6 +127,11 @@ cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
 cy1     = $85
+; $0400-$04e0 is ALSO where the self-extracting loader copies its decoder and runs it, so these two
+; hold decoder bytes rather than KERNAL screen data at the moment the game starts. That is safe, and
+; deadvars is what makes it safe rather than an argument: it reports 0 variables read before being
+; written, so nothing here is ever consumed before the subdivision pushes to it. If that check ever
+; comes back non-zero for a $04xx array, this is the first thing to suspect.
 stackLT = $0400
 stackRT = $0480
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
@@ -178,7 +183,11 @@ pfCurH  = $7e36                 ; ninth raster bit, current and previous
 pfPrvH  = $7e37
 pfTmp   = $7e38
 pfTmp2  = $7e39
-pfN     = $7e3c                 ; frames accumulated so far (2 bytes)
+pfN     = $7e3c                 ; frames accumulated so far -- ONE byte. It is incremented and
+                                ;   the WRAP to zero is what counts 256 (inc pfN / bne / inc pfDone),
+                                ;   so pfDone is the high byte in effect. The comment here said
+                                ;   "2 bytes" and pfDLo sits at $7e3d, which made the new overlap
+                                ;   guard fire -- correctly, on the comment rather than the code.
 pfCurF  = $7e3a                 ; scratch for one timestamp read and the delta
 pfCurL  = $7e3b
 pfCurX  = $7e3f
@@ -226,9 +235,12 @@ pvMode  = $802a                 ; 0 = predict in full, 1 = turned in place (the 
                                 ; TOUR and PALKEYS blocks below, which are separate build
                                 ; flags -- a PIVOT variable landing in that range collides
                                 ; only in the diagnostic builds, i.e. silently.
-colW    = $8023                 ; the three ink colours, cycled by keys 1/2/3. Declared here
-colB    = $8024                 ;   and not beside tourC, which is inside a TOUR-only block --
-colS    = $8025                 ;   the default build does not emit that.
+colW    = $8023                 ; the three ink colours, one register each. NOT inside the PALKEYS
+colB    = $8024                 ;   block: init loads $d021/$d022/$d023 from these in EVERY build,
+colS    = $8025                 ;   so PALKEYS=0 failed to assemble on an undefined colW. It is the
+                                ;   key CYCLING that is optional, not the colours -- and a config
+                                ;   that does not assemble is the silent trap this file warns about
+                                ;   elsewhere: VICE boots the PREVIOUS disk and the numbers look real.
 pkNew   = $8026                 ; palette keys this frame, last frame, and the fresh presses
 pkOld   = $8027
 pkEdge  = $8028
@@ -347,7 +359,7 @@ cpChr:  txa
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry.
         lda #$00
-        sta pkOld
+        sta pkOld               ; no keys held on the first frame, so nothing reads as a fresh press
         lda #$00
         sta $d020
         lda #$ff

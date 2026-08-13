@@ -7,6 +7,8 @@
 # binary are opaque and change every build, so they stay out.
 *.d64
 iray.prg
+iray-c.prg
+iray-charset.bin
 
 # Diagnostic builds (PX/PY/PA/SPIN/NORAY/...) emit here instead of iray.asm, so a
 # throwaway start position or `inc pa` never lands in the tracked reference copy.

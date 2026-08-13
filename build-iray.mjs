@@ -1719,6 +1719,11 @@ cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
 cy1     = $85
+; $0400-$04e0 is ALSO where the self-extracting loader copies its decoder and runs it, so these two
+; hold decoder bytes rather than KERNAL screen data at the moment the game starts. That is safe, and
+; deadvars is what makes it safe rather than an argument: it reports 0 variables read before being
+; written, so nothing here is ever consumed before the subdivision pushes to it. If that check ever
+; comes back non-zero for a $04xx array, this is the first thing to suspect.
 stackLT = $0400
 stackRT = $0480
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
@@ -1770,7 +1775,11 @@ pfCurH  = $7e36                 ; ninth raster bit, current and previous
 pfPrvH  = $7e37
 pfTmp   = $7e38
 pfTmp2  = $7e39
-pfN     = $7e3c                 ; frames accumulated so far (2 bytes)
+pfN     = $7e3c                 ; frames accumulated so far -- ONE byte. It is incremented and
+                                ;   the WRAP to zero is what counts 256 (inc pfN / bne / inc pfDone),
+                                ;   so pfDone is the high byte in effect. The comment here said
+                                ;   "2 bytes" and pfDLo sits at $7e3d, which made the new overlap
+                                ;   guard fire -- correctly, on the comment rather than the code.
 pfCurF  = $7e3a                 ; scratch for one timestamp read and the delta
 pfCurL  = $7e3b
 pfCurX  = $7e3f
@@ -1833,12 +1842,31 @@ rayAcc  = $8015                 ; 2 bytes: 256 frames of rayN. The HIGH byte is 
 rayFrm  = $8017                 ; for free -- the same trick the profiler uses
 rayMean = $8018
 pvNdbg  = $8013                 ; pvN as pivPrep saw it, before pivPrep clears it
-` : ''}${TOUR ? `tourC   = $cb19                 ; TOUR phase counter
-tourF   = $8022                 ; 2 bytes: frames elapsed, for the freeze
-` : ''}${PALKEYS ? `colW    = $8023                 ; the three ink colours, cycled by keys 1/2/3. Declared here
-colB    = $8024                 ;   and not beside tourC, which is inside a TOUR-only block --
-colS    = $8025                 ;   the default build does not emit that.
-pkNew   = $8026                 ; palette keys this frame, last frame, and the fresh presses
+` : ''}${TOUR ? `tourC   = $802d                 ; TOUR phase counter. Was $cb19 -- an address from BEFORE the
+                                ;   move to VIC bank 3, so it pointed into what is now sprite space.
+                                ;   Nothing caught it: $cb19 is outside the image, so the
+                                ;   image-vs-equate guard had nothing to say, and TOUR is a
+                                ;   diagnostic build nobody diffs.
+tourF   = $802b                 ; 2 bytes: frames elapsed, for the 512-frame freeze. It was at
+                                ;   $8022, whose HIGH byte $8023 is colW -- so in any TOUR build
+                                ;   "inc tourF+1" recoloured the walls, and colW's value decided
+                                ;   when the freeze happened. That defeats the one thing TOUR is
+                                ;   for: freezing at exactly PX/PY/PA so a stale row left by a bad
+                                ;   run-cache skip stays on screen to be scored.
+                                ;
+                                ;   Found by the RAM-overlap guard, which is also why the guard
+                                ;   needs SIZES: as a 1-byte variable tourF looked harmless.
+                                ;   NOTE there is a dead "tourF: rts" label in the FIRST tourStep
+                                ;   above, which is disabled by a false template guard and never
+                                ;   emitted. The LIVE tourStep is the second one, and it uses this
+                                ;   as a 2-byte variable.
+` : ''}colW    = $8023                 ; the three ink colours, one register each. NOT inside the PALKEYS
+colB    = $8024                 ;   block: init loads $d021/$d022/$d023 from these in EVERY build,
+colS    = $8025                 ;   so PALKEYS=0 failed to assemble on an undefined colW. It is the
+                                ;   key CYCLING that is optional, not the colours -- and a config
+                                ;   that does not assemble is the silent trap this file warns about
+                                ;   elsewhere: VICE boots the PREVIOUS disk and the numbers look real.
+${PALKEYS ? `pkNew   = $8026                 ; palette keys this frame, last frame, and the fresh presses
 pkOld   = $8027
 pkEdge  = $8028
 pkJoy   = $8029                 ; joystick-1 lines, masked out of the palette-key reads
@@ -1955,9 +1983,9 @@ cpChr:  txa
         sta colS
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry.
-        lda #$00
-        sta pkOld
-        lda #$00
+${PALKEYS ? `        lda #$00
+        sta pkOld               ; no keys held on the first frame, so nothing reads as a fresh press
+` : ''}        lda #$00
         sta $d020
         lda #$ff
         sta $dc02
@@ -5745,6 +5773,8 @@ try {
       bndT: NBND, pvBnd: NBND, pvAng: NBND, pvRcp: NBND,
       cqLo: 64, cqHi: 64, cqCol: 64,
       pfAcc: 39,                       // 13 phases x 3 bytes
+      rayAcc: 2, edgAcc: 2, chnAcc: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
+      tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
     };
     {
       const all = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
