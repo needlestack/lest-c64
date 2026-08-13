@@ -517,7 +517,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -3894,17 +3894,31 @@ oSChk:  ldx ohL
         ldy ohSv
         and runBitT,y
         beq oSAdv               ; this run does not occlude this orb
-        ; it does: stamp [max(spanL, obL) .. min(spanR, obR)]
+        ; it does: stamp [max(spanL, obL) .. min(spanR, obR)] -- but the two ends are NOT alike.
+        ;
+        ; One end comes from the WALL's edge and the other from the ORB's box. Only the wall edge
+        ; needs precision: that is where the wall stops and the orb should start showing. At the
+        ; orb's own edge there is no orb beyond to clip and the wall carries on regardless, so a
+        ; split there buys nothing -- it just spends a partial glyph saying something invisible.
+        ; Round that end OUT to the cell boundary instead.
+        ;
+        ; And it makes every band exactly expressible. The splits are "n columns from one side",
+        ; so a band needs at most ONE non-aligned end; with the orb's edge snapped to a boundary
+        ; the only ragged end left is the wall's, which is precisely what they are for. The
+        ; middle-band case -- both ends interior to one cell, which no glyph can say -- cannot
+        ; arise any more.
         ldx osI
         lda ohL
         cmp obL,x
-        bcs oSL1
+        bcs oSL1                ; the WALL's edge wins: keep it exact
         lda obL,x
+        and #$fc                ; the ORB's edge wins: round out to the start of its cell
 oSL1:   sta osL
         lda ohRun
         cmp obR,x
-        bcc oSR1
+        bcc oSR1                ; the WALL's edge wins
         lda obR,x
+        ora #$03                ; the ORB's edge: round out to the end of its cell
 oSR1:   sta osR
         lda osL
         cmp osR
