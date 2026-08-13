@@ -882,9 +882,17 @@ const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // Every row of these glyphs is identical, so charset B (built by reversing each glyph's rows)
 // keeps the dot centred without any special handling.
 if (process.env.CELLMARK === '1') {
-  const mark = row => (row & 0xc3) | (2 << 4) | (2 << 2);   // keep columns 0 and 3, grey 1 and 2
-  for (const code of [SOLID, ...[...Array(7)].map((_, i) => OCC0 + i)])
-    for (const r of [3, 4]) glyphs[code][r] = mark(glyphs[code][r]);
+  // SOLID gets a GREY dot (pair 10) and every occluder a WHITE one (pair 00), so wall and stamp
+  // are told apart at a glance. Always the same two columns and rows whatever the split, so the
+  // dot marks the CELL's centre and the char grid can be counted directly.
+  //
+  // White is a bonus: 00 is a BACKGROUND pair, so unlike the grey dot it does not clip sprites.
+  // The grey one on SOLID does, which is why this stays a diagnostic build.
+  const dot = (row, pair) => (row & 0xc3) | (pair << 4) | (pair << 2);
+  for (const r of [3, 4]) {
+    glyphs[SOLID][r] = dot(glyphs[SOLID][r], 2);
+    for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], 0);
+  }
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + 4 seam + 7 occluder ` +
