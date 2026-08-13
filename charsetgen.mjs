@@ -22,6 +22,22 @@
 import { readFileSync, writeFileSync } from 'fs';
 
 const scan = JSON.parse(readFileSync('./cellscan.json', 'utf8'));
+// KCELL is what is left for cell patterns after BLANK, SOLID, the 18 readout glyphs and the 4
+// seam codes: 256 - 2 - 18 - 4 = 232. BLANK and SOLID are not in the codebook -- they answer the
+// all-white and all-black cells, which are not "mixed" and never reach a bucket.
+//
+// Declared HERE, above every consumer. It used to sit at the bottom, below the finer-index loop
+// that quantises the codebook PLAN=3 actually ships -- and that loop had 232 hardcoded twice. So
+// setting KCELL resized the PLAN=1 codebook, which the shipping build does not use, and silently
+// left PLAN=3 at 232. It looked like it worked: the plan file changed and the build did not.
+// 225, not 232: SEVEN codes are reserved for the sprite occluders -- one all-foreground-black
+// cell plus the six vertical splits (boundary at column 1, 2 or 3 x which side is foreground).
+// They are visually identical black to the walls around them and differ only in BIT PAIR, i.e.
+// only in sprite priority. Measured cost of giving them up: the shipped codebook goes 97.570% ->
+// 97.525% accurate, 0.019 -> 0.020 predicted px/frame, against 445.194 for the pre-plan charset.
+// charset-plan.json is derived and untracked, so this default IS the reservation: regenerating
+// with 232 would build a plan the occluders have no room in.
+const KCELL = +(process.env.KCELL ?? 225);
 const FRAMES = scan.positions * Math.ceil(256 / scan.angleStride);
 const parse = k => k.split(',').map(Number);
 const L1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);
@@ -311,11 +327,11 @@ let fine = null;
   console.log(`\n  ISOLATING the two halves of what PLAN=2 changes:`);
   console.log(`    finer index, ${B2.length} sub-buckets, unlimited codes   ` +
     `${A(f2, f2c).padStart(8)}    ${per(f2).padStart(8)}  ${per(f2c).padStart(10)}`);
-  for (const K of [232, 464]) {
+  for (const K of [KCELL, 2 * KCELL]) {
     const r = best(B2, K, 8);
     console.log(`    finer index, quantised to ${String(K).padStart(3)} codes        ` +
       `${A(r.cost, r.cols).padStart(8)}    ${per(r.cost).padStart(8)}  ${per(r.cols).padStart(10)}`);
-    if (K === 232) fine = { codes: r.codes, assign: [...r.assign], thr: [...fthr],
+    if (K === KCELL) fine = { codes: r.codes, assign: [...r.assign], thr: [...fthr],
                             cost: r.cost, cols: r.cols, acc: acc(r.cost, r.cols) };
   }
 }
@@ -324,7 +340,6 @@ let fine = null;
 // KCELL is what is left for cell patterns after BLANK, SOLID, the 18 readout glyphs and the 4
 // seam codes: 256 - 2 - 18 - 4 = 232. BLANK and SOLID are not in the codebook -- they answer
 // the all-white and all-black cells, which are not "mixed" and never reach a bucket.
-const KCELL = +(process.env.KCELL ?? 232);
 const PAIRED = process.env.PAIRED === '1';
 
 const finalPlan = best(B, KCELL, 10);
