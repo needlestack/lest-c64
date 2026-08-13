@@ -337,6 +337,13 @@ ohFst   = $8595                 ; the stamp's two edge glyphs, chosen once per s
 ohLst   = $8596
 ohFstW  = $8523                 ; the same two edge glyphs backed by white
 ohLstW  = $8524
+ohFstM  = $8525                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
+ohLstM  = $8526                 ;   what the cell shows outside the stamp, which picks the backing
+ohMsk   = $8527                 ; oSBack scratch: the mask under test, and the saved X
+ohMsX   = $8528
+o2r     = $8529                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
+                                ;   Not zero page: it is touched a handful of times per orb, in
+                                ;   the projection, never in a per-column loop.
 osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
 oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
@@ -520,7 +527,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -3961,6 +3968,8 @@ oSCells:        lda osL
         sta ohFst               ; the glyph for the cell the stamp starts in, on black ...
         lda occRTW,y
         sta ohFstW              ; ... and the same shape on white
+        lda kMskT,y
+        sta ohFstM              ; ... and which of the cell's columns this split leaves showing
         lda osR
         and #$03
         tay
@@ -3968,6 +3977,8 @@ oSCells:        lda osL
         sta ohLst               ; ditto for the cell it ends in
         lda occLTW,y
         sta ohLstW
+        lda mMskT,y
+        sta ohLstM
         ldx osI
         lda orbBitT,x
         ora omPri
@@ -4012,7 +4023,8 @@ oSCR2:  sta ohRun               ; last cell
         ; "from the right" one, which clips k..3, over-covering to the right by up to 3 columns.
         ; Over-covering takes a small bite out of the orb; under-covering leaves orb drawn ON the
         ; wall, which is the error that reads as broken -- so this errs the safe way.
-        jsr oSWall              ; single-cell stamp: pick the backing, do not skip
+        lda ohFstM
+        jsr oSBack              ; single-cell stamp: pick the backing, do not skip
         lda ohFst
         bcs oSC1s
         lda ohFstW
@@ -4033,7 +4045,8 @@ oSC1s:  sta (osPtr),y
         ; paints its floor half black. That is the black block below the wall's lower bound.
         ; Skipping them leaves up to 8px of orb showing over the wall's bottom edge instead, which
         ; is the smaller error and the one that reads as a soft edge rather than a stray block.
-oSCMid: jsr oSWall        ; the FIRST cell straddles the wall's edge, so it is stamped
+oSCMid: lda ohFstM
+        jsr oSBack        ; the FIRST cell straddles the wall's edge, so it is stamped
         lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
         bcs oSCMs               ;   not fully wall has floor or ceiling beyond the silhouette, and
         lda ohFstW              ;   the white-backed split leaves that showing.
@@ -4047,7 +4060,8 @@ oSCCol: iny
         lda #$f6
         sta (osPtr),y
         jmp oSCCol
-oSCLst: jsr oSWall
+oSCLst: lda ohLstM
+        jsr oSBack
         lda ohLst
         bcs oSCLs
         lda ohLstW
@@ -4068,6 +4082,29 @@ oSWall: lda (osPtr),y
 oSWyes: sec
         rts
 oSWno:  clc
+        rts
+
+; oSBack: choose an EDGE cell's backing. A = the cellFillT mask naming the columns the split does
+; NOT cover. Carry set -> the black-backed glyph, because those columns hold wall; clear -> white.
+;
+; This is the question oSWall could not answer. "Is the cell SOLID" conflates two different cells:
+; a step at a CORNER is not SOLID but has wall on both sides and wants BLACK, while a cell on a
+; vertical silhouette has floor or ceiling beyond it and wants WHITE. Both took white, so the
+; corner case showed a white notch where the wall continues.
+;
+; X is not live in the cell loop, but oSCDn's cache invalidation follows it, so save it rather
+; than depend on that -- twice per span row is not worth the coupling.
+oSBack: sta ohMsk
+        stx ohMsX
+        lda (osPtr),y
+        tax
+        lda cellFillT,x
+        ldx ohMsX
+        and ohMsk
+        beq oSBw
+        sec
+        rts
+oSBw:   clc
         rts
 
 oSCDn:  lda osL                 ; invalidate the cache for every cell column just stamped
@@ -4478,9 +4515,11 @@ oxDn:   ldx ovar
         ; columns under it must clip it; orbPaint merges every orb's statement and renderSym
         ; then draws each column that way the first time. There is no second pass over the
         ; walls at all, which is what removes every artifact that came from editing them.
-        ldx ovar                ; half the orb's width, in logical columns
-        lda orbColT,x
-        sta o2
+        ldx ovar                ; the ball's extent each side of ocol, in logical columns. Two
+        lda orbColLT,x          ;   tables, not one half-width: the ball is not centred on ocol
+        sta o2                  ;   (see orbColLT) and an even-wide ball never can be
+        lda orbColRT,x
+        sta o2r
         lda ocolN               ; the bounding box, in logical columns
         bne opBLn
         lda ocol
@@ -4489,7 +4528,7 @@ oxDn:   ldx ovar
         bcs opBL1
         lda #$00
         jmp opBL2               ; straddles column 0 from the right: left edge is 0
-opBLn:  lda o2                  ; centre is LEFT of 0 by ocol columns, so the box ends at
+opBLn:  lda o2r                 ; centre is LEFT of 0 by ocol columns, so the box ends at
         sec                     ;   o2 - ocol. If that borrows, the whole orb is off screen.
         sbc ocol
         bcc opBLx
@@ -4514,11 +4553,11 @@ opBL2:  sta ocl2
         bne opBRn
         lda ocol
         clc
-        adc o2
+        adc o2r
         bcc opBR1
         lda #159
         jmp opBR1
-opBRn:  lda o2                  ; the centre is ocol columns LEFT of 0, so the box ends at
+opBRn:  lda o2r                 ; the centre is ocol columns LEFT of 0, so the box ends at
         sec                     ;   o2 - ocol. The check above already proved o2 > ocol, so this
         sbc ocol                ;   cannot borrow and the result is well under 160.
 opBR1:  cmp #160
@@ -4768,19 +4807,19 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $2e00
+        * = $2d00
 orbVarT: !byte 21,21,21,21,21,20,20,20,20,19,19,19,19,18,18,18,18,17,17,17,17,16,16,16,16,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12,12,12,11,11,11,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $2f00
+        * = $2e00
 candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,8,5,5,5,5,0,5,5,5,5,4,5,5,0,0,7,8,6,6,5,5,0,6,6,6,6,5,5,3,0,0,6,7,6,6,6,6,0,9,8,8,0,0,0,4,0,0,6,0,0,0,7,10,12,12,11,9,0,3,3,2,0,0,4,0,4,5,7,8,0,0,10,9,0,4,0,0,0,0,4,0,4,0,0,0,0,6,9,7,0,6,8,5,0,0,4,0,2,0,3,5,5,6,8,9,10,7,0,3,0,0,4,0,3,0,3,0,0,0,0,0,12,9,0,3,0,0,4,5,4,0,2,0,3,3,3,6,10,10,0,3,0,0,0,0,4,0,3,0,4,0,0,0,0,9,8,5,0,0,2,4,4,5,3,0,4,0,3,4,4,7,7,6,0,0,4,0,0,0,0,0,6,0,6,0,0,0,0,0,0,0,4,3,3,4,6,7,7,8,7,0,4,4,4,4,0,0,2,2,2,0,0,7,7,8,8,7,5,5,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $3000
+        * = $2f00
 candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,45,60,75,90,0,105,120,135,150,165,177,192,0,0,207,228,252,14,32,47,0,62,80,98,116,134,149,164,0,0,173,191,212,230,248,10,0,28,55,79,0,0,0,103,0,0,115,0,0,0,133,154,184,220,0,33,0,60,69,78,0,0,84,0,96,108,123,144,0,0,168,198,0,225,0,0,0,0,237,0,249,0,0,0,0,5,23,50,0,71,89,113,0,0,128,0,140,0,146,155,170,185,203,227,254,28,0,49,0,0,58,0,70,0,79,0,0,0,0,0,88,124,0,151,0,0,160,172,187,0,199,0,205,214,223,232,250,24,0,54,0,0,0,0,63,0,75,0,84,0,0,0,0,96,123,147,0,0,162,168,180,192,207,0,216,0,228,237,249,5,26,47,0,0,65,0,0,0,0,0,77,0,95,0,0,0,0,0,0,0,113,125,134,143,155,173,194,215,239,0,4,16,28,40,0,0,52,58,64,0,0,70,91,112,136,160,181,196,211,223,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $3100
+        * = $3000
 candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,0,55,55,55,55,55,55,55,0,0,55,55,55,56,56,56,0,56,56,56,56,56,56,56,0,0,56,56,56,56,56,57,0,57,57,57,0,0,0,57,0,0,57,0,0,0,57,57,57,57,58,58,0,58,58,58,0,0,58,0,58,58,58,58,0,0,58,58,0,58,0,0,0,0,58,0,58,0,0,0,0,59,59,59,0,59,59,59,0,0,59,0,59,0,59,59,59,59,59,59,59,60,0,60,0,0,60,0,60,0,60,0,0,0,0,0,60,60,0,60,0,0,60,60,60,0,60,0,60,60,60,60,60,61,0,61,0,0,0,0,61,0,61,0,61,0,0,0,0,61,61,61,0,0,61,61,61,61,61,0,61,0,61,61,61,62,62,62,0,0,62,0,0,0,0,0,62,0,62,0,0,0,0,0,0,0,62,62,62,62,62,62,62,62,62,0,63,63,63,63,0,0,63,63,63,0,0,63,63,63,63,63,63,63,63,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $3200
+        * = $3100
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
 orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72,85,189,78,80,213,218,218,0,72,85,73,79,80,213,218,218,0,72,85,73,49,80,213,218,218,0,176,170,182,78,112,213,218,218,0,200,175,182,78,112,213,218,218,0,72,85,169,78,112,213,218,218,0,72,181,182,78,160,213,218,218,0,72,85,73,73,160,213,218,218,0,200,170,182,78,160,222,218,218,0,72,85,233,78,160,222,218,218,0,176,170,182,78,160,234,218,218,0,72,85,189,78,160,234,218,218,0,72,85,73,121,160,234,218,218,0,72,173,182,78,160,42,219,218,0,72,85,73,79,160,42,219,218,0,200,170,182,78,160,42,223,218,0,72,85,73,49,160,42,223,218,0,176,170,182,78,160,42,213,218,0,72,213,183,78,160,42,213,218,0,72,85,233,78,160,42,213,218,0,72,173,182,78,160,42,229,219,0,72,85,73,73,160,42,229,219,0,248,170,182,78,160,42,37,217,0,72,85,169,78,160,42,37,217,0,72,85,73,49,160,42,37,217,0,72,213,183,78,160,42,37,253,0,176,170,182,78,160,42,37,165,0,200,175,182,78,160,42,37,165,0,72,85,73,79,160,42,37,165,0,72,181,182,78,160,42,37,37,1,72,85,169,78,160,42,37,37,1,72,85,73,121,160,42,37,37,1
-        * = $3400
+        * = $3300
 orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
 orbHalfT: !byte 22,24,22,24,22,24,22,24,22,24,22,11,11,11,11,11,11,12,11,12,11,12
@@ -4788,7 +4827,8 @@ orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129
 orbBlankT: !byte 0,2,4,6,8,10,12,14,16,18,20,0,2,4,6,8,10,12,14,16,18,20
 orbAnchT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
 orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
-orbColT: !byte 12,11,11,10,10,9,9,8,7,7,6,6,6,5,5,4,3,3,2,2,1,1
+orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1
+orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,6,5,5,4,3,3,1,2,0,1,0
 orbBitT: !byte 1,2,4,8,16,32,64,128
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.
@@ -4800,13 +4840,22 @@ occLT: !byte 243,244,245,246
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
 occRTW: !byte 246,255,254,253
 occLTW: !byte 250,251,252,246
+; Which of a glyph's four columns contain WALL, one bit each, bit 3 = column 0. A column counts
+; as wall if any of its eight rows is bit pair 01. This is what decides an edge cell's backing:
+; ask what the columns the stamp does NOT cover actually hold, rather than guessing from whether
+; the cell is SOLID. A step at a corner has wall on both sides and wants BLACK; a cell on a
+; vertical silhouette has floor beyond it and wants WHITE. "Is it SOLID" cannot tell them apart.
+cellFillT: !byte 0,15,15,15,14,15,12,8,15,7,15,15,14,15,15,15,3,15,15,15,7,15,8,12,14,15,15,12,3,15,15,7,15,15,15,7,15,15,15,15,15,15,15,15,15,15,15,14,15,7,1,3,14,7,15,15,15,15,15,15,15,15,15,15,12,15,15,15,15,12,15,15,15,15,15,12,14,15,7,12,15,14,15,15,14,15,15,15,8,12,15,15,15,3,15,15,15,15,15,7,15,1,15,15,15,15,15,15,15,15,15,3,1,14,15,15,7,7,15,7,15,15,15,15,15,1,15,15,15,15,15,14,15,15,7,15,14,2,7,15,15,15,7,15,15,15,15,7,15,15,15,8,15,15,7,15,8,3,1,3,1,15,3,15,15,15,15,15,8,7,3,3,7,15,15,14,15,15,7,15,15,7,15,15,15,14,15,15,12,7,15,15,8,15,14,15,15,14,7,15,15,15,12,15,15,15,15,15,7,15,7,15,15,14,15,15,3,15,15,14,12,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,7,11,13,14,7,3,1,0,14,12,8,0,0,0,0,0,0
+; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
+kMskT: !byte 0,8,12,14
+mMskT: !byte 7,3,1,0
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
 ; that might be occluded, which is the only part of the test that is not O(1).
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8,8,8
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4
 orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
-orbOccHiT: !byte 50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,51,51,51,51,51
+orbOccHiT: !byte 49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,50,50,50,50,50
 orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13
 orbYCT: !byte 1,1,1,1,1,3,3,3,4,4,5,5,6,6,6,7,7,8,8,9,9,9,10,10,11,11,11,12,13,13,13,14,14,14
 orbColT2: !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12

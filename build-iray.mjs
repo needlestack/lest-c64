@@ -1677,12 +1677,12 @@ const SPRBASE = 0xc000;
 // magnitude bigger than everything else here, and an offset scheme invites the mistake of
 // budgeting them like a small table. The four 256-entry tables are page-aligned because the
 // 6502 indexes them by a whole byte (cell number, or h).
-const ORB_VART     = 0x2e00;    // h -> size variant, 256
-const ORB_CANDCNT  = 0x2f00;    // per cell: how many candidates, 256
-const ORB_CANDLO   = 0x3000;    // per cell: pointer to its list, lo/hi, 256 each
-const ORB_CANDHI   = 0x3100;
-const ORB_OCC      = 0x3200;    // occluder masks, OCCBYTES x norbs
-const ORB_SMALL    = 0x3400;    // the per-variant and per-orb tables: THREE pages. The ladder
+const ORB_VART     = 0x2d00;    // h -> size variant, 256
+const ORB_CANDCNT  = 0x2e00;    // per cell: how many candidates, 256
+const ORB_CANDLO   = 0x2f00;    // per cell: pointer to its list, lo/hi, 256 each
+const ORB_CANDHI   = 0x3000;
+const ORB_OCC      = 0x3100;    // occluder masks, OCCBYTES x norbs
+const ORB_SMALL    = 0x3300;    // the per-variant and per-orb tables: FOUR pages. The ladder
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
 const ORB_CANDLIST = 0x3700;    // the visibility lists themselves: 3 bytes per candidate
@@ -2048,11 +2048,18 @@ const orbVarT = [...Array(256)].map((_, h) => {
 // would give 768, which does not even fit in a pointer byte.
 const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
 const orbExpT = ORBEXP.map(e => e);
-// Distance from the sprite's LEFT EDGE to the ball's centre, which is what positioning needs
-// -- not half the ball's width. orbScale centres the content in the 12-column sprite, so the
-// centre sits ~12px in whatever the ball's size; using ballWidth/2 drew small orbs up to 10px
-// right of where they belong AND shifted them on every variant change, which is the scaling
-// jump. It also put the sprite somewhere the depth scan had not tested, hence stray occlusion.
+// Distance from the sprite's LEFT EDGE to the anchor the projection aims at. orbScale centres
+// the content in the 12-column sprite, so this is ~half the sprite whatever the ball's size;
+// using ballWidth/2 drew small orbs up to 10px right of where they belong AND shifted them on
+// every variant change, which is the scaling jump. It also put the sprite somewhere the depth
+// scan had not tested, hence stray occlusion.
+//
+// NOTE the `b` here is ORBSRC -- an INDEX into the bitmap list, not a width -- so `w` is not the
+// ball's width and this is not the ball's centre. It lands on the SPRITE's centre instead, which
+// is why it comes out a near-constant 11/12 (22/24 expanded) and why the scaling jump stayed
+// fixed. It is left exactly as it is: it defines where every orb is drawn. What must not happen
+// again is a SECOND, independently-derived idea of where the ball is -- so the bounding box
+// below is computed FROM this value rather than alongside it.
 const orbHalfT = ORBSRC.map((b, v) => {
   const w = b + 1, ox = (12 - w) >> 1;
   return (2 * ox + w) * (ORBEXP[v] ? 2 : 1);
@@ -2067,13 +2074,41 @@ const orbYBaseT = ORBANCH.map(a => 150 - a);
 // once made seams vanish in cells with no orb near them.
 const orbBlankT = LADDER.map((r, v) => ORBANCH[v] - ORBTALL[v]);
 const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
-// Half-width in LOGICAL columns, rounded UP. w>>2 truncates, so any sprite whose width is not
-// a multiple of 4 logical columns lost half a column at each edge -- and the bounding box built
-// from it then stopped one column short of the sprite's own pixels. The wall column under that
-// edge never got marked, and a one-column sliver of orb showed through a wall that was otherwise
-// clipping it correctly. Rounding up costs nothing: an over-wide box marks nothing extra, since
-// every column is still filtered through the face-plane mask.
-const orbColT = ORBWIDE.map(w => (w + 3) >> 2);
+// The bounding box, as the ball's TRUE extent in logical columns each side of ocol. Asymmetric,
+// and it has to be: the ball is centred in the sprite by ox = (12 - w) >> 1, which TRUNCATES, so
+// whenever 12 - w is odd the ball sits half a sprite-pixel left of the sprite's centre -- and
+// ocol is the sprite's centre (see orbHalfT). A symmetric +/-halfWidth box cannot express that,
+// nor can it express an even-column-wide ball at all, since it is always an odd number of columns
+// wide. Rung 10 measured: a 7-wide expanded ball spans 14 columns at -8/+5 about ocol, where the
+// symmetric box claimed +/-7 -- so it missed the ball's leftmost column, and a one-column sliver
+// of orb showed through a wall that was otherwise clipping it correctly.
+//
+// Derived from orbHalfT so the two can never drift apart: the sprite's left edge is at
+// 2*ocol - orbHalfT, and the ball starts 2*ox sprite-pixels into it.
+const orbBoxT = LADDER.map((r, v) => {
+  const w = orbW(r.h), ox = (12 - w) >> 1, xx = r.exp ? 2 : 1;
+  const left = 2 * ox * xx, wide = w * 2 * xx;           // hires px, from the sprite's left edge
+  // FLOOR both: o0 is snapped DOWN to an even X (see the multicolor-grid note at obX), which can
+  // slide the whole sprite one hires pixel left. Flooring rounds the left edge outward, and the
+  // right edge can only move left, so both stay covering.
+  return { l: -Math.floor((left - orbHalfT[v]) / 2),
+           r:  Math.floor((left + wide - 1 - orbHalfT[v]) / 2) };
+});
+const orbColLT = orbBoxT.map(b => b.l);          // columns from ocol to the ball's left edge
+// The last rung is a ONE-column ball sitting entirely left of ocol, so its true right offset is
+// -1. The runtime adds this to ocol with a carry test for "past column 255", which a negative
+// addend would trip. Clamp it: over-covering by a column is invisible, because the stamp only
+// writes cells that are already fully wall, and the occluder is black on black there. It is
+// UNDER-covering that shows, which is the bug this whole table exists to fix.
+const orbColRT = orbBoxT.map(b => Math.max(0, b.r));
+if (orbBoxT.filter(b => b.r < 0).length > 1)
+  throw new Error('more than the smallest rung has a negative right offset -- the ladder changed');
+if (process.env.ORBBOX === '1')
+  orbBoxT.forEach((b, v) => console.error(`  raw rung ${v+1}: l=${b.l} r=${b.r}`));
+if (process.env.ORBBOX === '1')
+  LADDER.forEach((r, v) => console.error(
+    `  rung ${v+1}: bitmapW=${orbW(r.h)} exp=${r.exp?1:0} orbHalfT=${orbHalfT[v]}` +
+    ` box=-${orbColLT[v]}/+${orbColRT[v]} (${orbColLT[v]+orbColRT[v]+1} cols)`));
 const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
 // is (ptr),y with no multiply.
@@ -2481,6 +2516,13 @@ ohFst   = $8595                 ; the stamp's two edge glyphs, chosen once per s
 ohLst   = $8596
 ohFstW  = $8523                 ; the same two edge glyphs backed by white
 ohLstW  = $8524
+ohFstM  = $8525                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
+ohLstM  = $8526                 ;   what the cell shows outside the stamp, which picks the backing
+ohMsk   = $8527                 ; oSBack scratch: the mask under test, and the saved X
+ohMsX   = $8528
+o2r     = $8529                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
+                                ;   Not zero page: it is touched a handful of times per orb, in
+                                ;   the projection, never in a per-column loop.
 osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
 oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
@@ -6351,6 +6393,8 @@ oSCells:${ORBNOCELL ? `rts
         sta ohFst               ; the glyph for the cell the stamp starts in, on black ...
         lda occRTW,y
         sta ohFstW              ; ... and the same shape on white
+        lda kMskT,y
+        sta ohFstM              ; ... and which of the cell's columns this split leaves showing
         lda osR
         and #$03
         tay
@@ -6358,6 +6402,8 @@ oSCells:${ORBNOCELL ? `rts
         sta ohLst               ; ditto for the cell it ends in
         lda occLTW,y
         sta ohLstW
+        lda mMskT,y
+        sta ohLstM
 ${process.env.ORBFGDBG ? `        lda osRow
         and #$0f
         sta $d020               ; PROBE: the row oSCells is about to stamp from
@@ -6405,7 +6451,8 @@ oSCR2:  sta ohRun               ; last cell
         ; "from the right" one, which clips k..3, over-covering to the right by up to 3 columns.
         ; Over-covering takes a small bite out of the orb; under-covering leaves orb drawn ON the
         ; wall, which is the error that reads as broken -- so this errs the safe way.
-        jsr oSWall              ; single-cell stamp: pick the backing, do not skip
+        lda ohFstM
+        jsr oSBack              ; single-cell stamp: pick the backing, do not skip
         lda ohFst
         bcs oSC1s
         lda ohFstW
@@ -6427,7 +6474,8 @@ oSC1s:  sta (osPtr),y
         ; Skipping them leaves up to 8px of orb showing over the wall's bottom edge instead, which
         ; is the smaller error and the one that reads as a soft edge rather than a stray block.
 oSCMid: ${DBGORB ? `inc oSCnt
-        ` : ''}jsr oSWall        ; the FIRST cell straddles the wall's edge, so it is stamped
+        ` : ''}lda ohFstM
+        jsr oSBack        ; the FIRST cell straddles the wall's edge, so it is stamped
         lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
         bcs oSCMs               ;   not fully wall has floor or ceiling beyond the silhouette, and
         lda ohFstW              ;   the white-backed split leaves that showing.
@@ -6441,7 +6489,8 @@ oSCCol: iny
         lda #${hx(OCC_FULL)}
         sta (osPtr),y
         jmp oSCCol
-oSCLst: jsr oSWall
+oSCLst: lda ohLstM
+        jsr oSBack
         lda ohLst
         bcs oSCLs
         lda ohLstW
@@ -6462,6 +6511,29 @@ oSWall: lda (osPtr),y
 oSWyes: sec
         rts
 oSWno:  clc
+        rts
+
+; oSBack: choose an EDGE cell's backing. A = the cellFillT mask naming the columns the split does
+; NOT cover. Carry set -> the black-backed glyph, because those columns hold wall; clear -> white.
+;
+; This is the question oSWall could not answer. "Is the cell SOLID" conflates two different cells:
+; a step at a CORNER is not SOLID but has wall on both sides and wants BLACK, while a cell on a
+; vertical silhouette has floor or ceiling beyond it and wants WHITE. Both took white, so the
+; corner case showed a white notch where the wall continues.
+;
+; X is not live in the cell loop, but oSCDn's cache invalidation follows it, so save it rather
+; than depend on that -- twice per span row is not worth the coupling.
+oSBack: sta ohMsk
+        stx ohMsX
+        lda (osPtr),y
+        tax
+        lda cellFillT,x
+        ldx ohMsX
+        and ohMsk
+        beq oSBw
+        sec
+        rts
+oSBw:   clc
         rts
 
 oSCDn:  lda osL                 ; invalidate the cache for every cell column just stamped
@@ -6874,9 +6946,11 @@ oxDn:   ldx ovar
         ; columns under it must clip it; orbPaint merges every orb's statement and renderSym
         ; then draws each column that way the first time. There is no second pass over the
         ; walls at all, which is what removes every artifact that came from editing them.
-        ldx ovar                ; half the orb's width, in logical columns
-        lda orbColT,x
-        sta o2
+        ldx ovar                ; the ball's extent each side of ocol, in logical columns. Two
+        lda orbColLT,x          ;   tables, not one half-width: the ball is not centred on ocol
+        sta o2                  ;   (see orbColLT) and an even-wide ball never can be
+        lda orbColRT,x
+        sta o2r
         lda ocolN               ; the bounding box, in logical columns
         bne opBLn
         lda ocol
@@ -6885,7 +6959,7 @@ oxDn:   ldx ovar
         bcs opBL1
         lda #$00
         jmp opBL2               ; straddles column 0 from the right: left edge is 0
-opBLn:  lda o2                  ; centre is LEFT of 0 by ocol columns, so the box ends at
+opBLn:  lda o2r                 ; centre is LEFT of 0 by ocol columns, so the box ends at
         sec                     ;   o2 - ocol. If that borrows, the whole orb is off screen.
         sbc ocol
         bcc opBLx
@@ -6910,11 +6984,11 @@ opBL2:  sta ocl2
         bne opBRn
         lda ocol
         clc
-        adc o2
+        adc o2r
         bcc opBR1
         lda #159
         jmp opBR1
-opBRn:  lda o2                  ; the centre is ocol columns LEFT of 0, so the box ends at
+opBRn:  lda o2r                 ; the centre is ocol columns LEFT of 0, so the box ends at
         sec                     ;   o2 - ocol. The check above already proved o2 > ocol, so this
         sbc ocol                ;   cannot borrow and the result is well under 160.
 opBR1:  cmp #160
@@ -7203,7 +7277,8 @@ orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbBlankT: !byte ${orbBlankT.join(',')}
 orbAnchT: !byte ${ORBANCH.join(',')}
 orbHgtT: !byte ${orbHgtT.join(',')}
-orbColT: !byte ${orbColT.join(',')}
+orbColLT: !byte ${orbColLT.join(',')}
+orbColRT: !byte ${orbColRT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.
@@ -7215,6 +7290,21 @@ occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
 occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
 occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
+; Which of a glyph's four columns contain WALL, one bit each, bit 3 = column 0. A column counts
+; as wall if any of its eight rows is bit pair 01. This is what decides an edge cell's backing:
+; ask what the columns the stamp does NOT cover actually hold, rather than guessing from whether
+; the cell is SOLID. A step at a corner has wall on both sides and wants BLACK; a cell on a
+; vertical silhouette has floor beyond it and wants WHITE. "Is it SOLID" cannot tell them apart.
+cellFillT: !byte ${[...Array(256)].map((_, c) => {
+  const g = glyphs[c] || new Array(8).fill(0);
+  let m = 0;
+  for (let col = 0; col < 4; col++)
+    if (g.some(row => ((row >> (6 - 2 * col)) & 3) === 1)) m |= 8 >> col;
+  return m;
+}).join(',')}
+; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
+kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
+mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
 ; that might be occluded, which is the only part of the test that is not O(1).
@@ -7561,6 +7651,12 @@ try {
   const reserved = [];
   if (r.labels.chainEnd > HTABLE)
     throw new Error(`fill chains end at $${r.labels.chainEnd.toString(16)}, past the height tables at $${HTABLE.toString(16)}`);
+  // LABELS=<substr> prints matching label addresses, so a debugger can be pointed at a routine
+  // without hand-assembling. The listing has the labels; only the assembler knows their addresses.
+  if (process.env.LABELS)
+    for (const [k, v] of Object.entries(r.labels).sort((a, b) => a[1] - b[1]))
+      if (k.toLowerCase().includes(process.env.LABELS.toLowerCase()))
+        console.log(`  label ${k} = $${v.toString(16)}`);
   const dataLo = r.org, dataHi = r.labels.dataEnd;
   for (const [name, lo, hi] of reserved) {
     if (dataLo < hi && dataHi > lo) {
