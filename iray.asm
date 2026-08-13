@@ -325,6 +325,14 @@ obBR    = $85b0
 obIX    = $85b8
 obV     = $85d0                 ; size variant per slot, so orbSeam can find the sprite's
 obOcc   = $85e0                 ; per slot: bit 7 = this orb has a possible occluder here
+omptr   = $87                   ; 2 bytes: this orb's occluder mask. Deliberately SHARES oaL/oaH,
+                                ;   the multiply accumulator, which is dead once the projection
+                                ;   has produced a column range -- the same aliasing the original
+                                ;   used. Anything calling oabs after this point would break it.
+ohRun   = $85f0                 ; the run id, held across the mask-byte lookup
+ohL     = $85f1                 ; the span being tested: its left column, and the index into bndT
+ohBX    = $85f2
+ohDbg   = $85f3                 ; ORBOCCDBG: furthest stage any orb reached this frame
 ocanO   = $85e8                 ; the same bit while the candidate list is being walked
 
 bndT    = $7f00                 ; columns where a face or saturation state begins ($40 max)
@@ -3746,7 +3754,8 @@ obEnd:  rts
 ; after the raster wait and the buffer flip, when the beam is past line 250 and no sprite is
 ; being fetched. Costs about 30 cycles per visible orb, which is nothing next to the ~2400 it
 ; took to work out where the orb goes.
-osFlush:ldx onv
+osFlush:
+        ldx onv
         beq osBits
 osLp:   dex
         txa
@@ -4088,6 +4097,79 @@ opBR2:  sta ocmax
         bcs opBR3
         lda ocl
 opBR3:  sta ocr
+        ; ---- is this orb WHOLLY occluded? ----
+        ; The rule is the user's: a wall facing AWAY from an orb always occludes it, and a wall
+        ; facing the orb never can. Which side of each face's plane every orb lies on is a
+        ; build-time constant (orbOccT, one bit per orb x run), so the only runtime question is
+        ; whether some column under the orb shows a run that does NOT occlude it -- and the first
+        ; such column means the orb is visible. There is no depth test and no height test:
+        ;
+        ;   - no depth, because the plane test decides it per FACE, so every column showing that
+        ;     face gets the same answer by construction. Depth comparisons are per column and
+        ;     quantised, which is where every occlusion artifact in this engine has come from.
+        ;   - no height, because camera height is fixed and everything stands on the floor. A wall
+        ;     that occludes an orb is NEARER, hence taller on screen with a lower base, so the orb
+        ;     projects entirely inside its solid region and can never poke out above it.
+        ;
+        ; faceIdT is the run id per logical COLUMN, filled during casting for the run-merge, so it
+        ; costs nothing to produce here -- and it is FINER than the per-cell fill the old scheme
+        ; needed. A corner cell showing two different runs was the source of most of that scheme's
+        ; artifacts and of its "every run in the cell must agree" rule; per column, that case does
+        ; not arise.
+        lda ocanO
+        bpl opDone              ; build time: nothing reachable from this cell can occlude it, and
+                                ; that is true of 56% of candidates -- they never enter the walk
+
+        ldy oidx
+        lda orbOccLoT,y
+        sta omptr
+        lda orbOccHiT,y
+        sta omptr+1
+        ; Walk the SPANS the subdivision left behind, not the columns. bndT holds the columns
+        ; where a new face begins, sorted, so the spans are [0,bndT[0]-1], [bndT[0],bndT[1]-1],
+        ; ... [bndT[n-1],159] -- about fourteen of them. Each span is a contiguous piece of ONE
+        ; wall run, and its LEFT column is a cast column, which is the only place faceIdT is
+        ; valid: it is written once per ray, and adaptive subdivision casts ~14-26 of 160. Reading
+        ; it per column looks right and silently returns last frame's values for the rest.
+        ;
+        ; So this needs nothing added to the interpolator or to the wall drawing. It reads what
+        ; the subdivision already produced, and it stops at the first span that does not occlude.
+        lda #$00
+        sta ohL                 ; the first span starts at column 0
+        sta ohBX
+ohSpan: ldx ohBX                ; this span's right edge
+        cpx nbnd
+        bcc ohSB
+        lda #$9f    ; the last span runs to the right edge of the screen
+        jmp ohSR
+ohSB:   lda bndT,x
+        sec
+        sbc #$01
+ohSR:   cmp ocl2
+        bcc ohAdv               ; span ends before the orb begins: irrelevant, skip it
+        lda ohL
+        cmp ocmax
+        beq ohChk
+        bcs ohHide              ; span begins past the orb: every overlapping span occluded it
+ohChk:
+        ldx ohL
+        ldy faceIdT,x           ; the run this span shows
+        beq opDone              ; no run here at all, so the orb shows through
+        sty ohRun
+        lda runByteT,y
+        tay
+        lda (omptr),y           ; the mask byte holding this run's bit
+        ldy ohRun
+        and runBitT,y
+        beq opDone              ; this run does not occlude this orb -> the orb is visible
+ohAdv:  ldx ohBX
+        cpx nbnd
+        bcs ohHide              ; that was the last span, and it occluded
+        lda bndT,x
+        sta ohL                 ; the next span starts at this boundary
+        inc ohBX
+        jmp ohSpan
+ohHide: jmp orbNo           ; wholly occluded: take no sprite slot at all
 opDone:
         ; --- take a sprite slot ---
         ldx onv
@@ -4269,6 +4351,11 @@ orbBlankT: !byte 0,2,4,6,8,10,12,14,16,18,20,0,2,4,6,8,10,12,14,16,18,20
 orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
 orbColT: !byte 12,11,11,10,10,9,9,8,7,7,6,6,6,5,5,4,3,3,2,2,1,1
 orbBitT: !byte 1,2,4,8,16,32,64,128
+; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
+; instead of three lsrs and an and per column: this runs once per logical column under every orb
+; that might be occluded, which is the only part of the test that is not O(1).
+runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8,8,8
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4
 orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
 orbOccHiT: !byte 51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,51,52,52,52,52,52
 orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13
