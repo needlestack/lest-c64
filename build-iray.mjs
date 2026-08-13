@@ -1759,9 +1759,14 @@ ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they w
 ; Three ${hx(NBND)}-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
 ; top of the frame and only written afterwards, as the search pins this frame's boundaries --
 ; so one buffer is enough and no copy is needed.
-pvBnd   = ${hx16(RELOC + 0x2700)}             ; the column the boundary was pinned at
-pvAng   = ${hx16(RELOC + 0x2700 + NBND)}             ; its WORLD bearing as a byte angle, pa + rayOffT[col]
-pvRcp   = ${hx16(RELOC + 0x2700 + 2 * NBND)}             ; 163/distance, for the translation term
+; These sat in a HOLE in the emitted image (RELOC+0x2700, a page the fixed table map happened to
+; skip), which is why all three needed image-vs-equate allowlist entries. A hole is a terrible
+; place for RAM: it is only free because of where its neighbours' page counts happen to land, so
+; any table gaining a page silently overwrites the pivot state. They now live in the reclaimed
+; charset-B source, which is free by construction after cpChr rather than by coincidence.
+pvBnd   = $3800                 ; the column the boundary was pinned at
+pvAng   = ${hx16(0x3800 + NBND)}                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
+pvRcp   = ${hx16(0x3800 + 2 * NBND)}                 ; 163/distance, for the translation term
 pvN     = $2b00                 ; how many of them there are; 0 disables the hint for a frame
 opaL    = $2b01                 ; the 16-bit angle those bearings were taken at
 opaH    = $2b02
@@ -5619,9 +5624,6 @@ try {
     const OK = {
       chrSrc:   'a NAME for emitted charset data, not RAM scratch -- cpChr copies it to $d000',
       chrSrcB:  'ditto, the mirrored charset',
-      pvBnd:    'lives in the pages PLAN=3 vacates -- stepT1/2/3 are not emitted there',
-      pvAng:    'ditto',
-      pvRcp:    'ditto',
     };
     // ONE documented region rather than seventy-five individual exceptions. $2800-$2fff is bank 0's
     // post-startup RAM: the charset source itself, which cpChr consumes at startup.
@@ -5635,10 +5637,14 @@ try {
     // That is exactly why cpChr is now the FIRST thing init does -- ahead of the colour-RAM fill
     // and the run-cache clear, both of which write RAM in this range. Reordering init would
     // reintroduce a bug that looks like corrupt graphics, so the copy stays first.
-    const XFER = [0x2800, 0x3000];
+    // TWO regions, not one contiguous range, and the gap between them matters: $3000-$37ff is the
+    // f-tables, which are read every frame. Only the charset SOURCES are reclaimable, because only
+    // they are consumed once and never read again.
+    const XFER = [[0x2800, 0x3000], [0x3800, 0x4000]];
+    const reclaimed = a => XFER.some(([lo, hi]) => a >= lo && a < hi);
     const eq = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
       .map(m => [m[1], parseInt(m[2], 16)])
-      .filter(([n, a]) => a >= 0x0400 && !(n in OK) && !(a >= XFER[0] && a < XFER[1]));
+      .filter(([n, a]) => a >= 0x0400 && !(n in OK) && !reclaimed(a));
     const clash = eq.filter(([, a]) => a >= r.org && a < r.end);
     if (clash.length) throw new Error(
       `${clash.length} RAM equate(s) sit inside the emitted image $${r.org.toString(16)}-` +

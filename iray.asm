@@ -189,9 +189,14 @@ seamT   = $2fc8                 ; per cell-column (40): char code for the solid 
 ; Three $40-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
 ; top of the frame and only written afterwards, as the search pins this frame's boundaries --
 ; so one buffer is enough and no copy is needed.
-pvBnd   = $ad00             ; the column the boundary was pinned at
-pvAng   = $ad40             ; its WORLD bearing as a byte angle, pa + rayOffT[col]
-pvRcp   = $ad80             ; 163/distance, for the translation term
+; These sat in a HOLE in the emitted image (RELOC+0x2700, a page the fixed table map happened to
+; skip), which is why all three needed image-vs-equate allowlist entries. A hole is a terrible
+; place for RAM: it is only free because of where its neighbours' page counts happen to land, so
+; any table gaining a page silently overwrites the pivot state. They now live in the reclaimed
+; charset-B source, which is free by construction after cpChr rather than by coincidence.
+pvBnd   = $3800                 ; the column the boundary was pinned at
+pvAng   = $3840                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
+pvRcp   = $3880                 ; 163/distance, for the translation term
 pvN     = $2b00                 ; how many of them there are; 0 disables the hint for a frame
 opaL    = $2b01                 ; the 16-bit angle those bearings were taken at
 opaH    = $2b02
