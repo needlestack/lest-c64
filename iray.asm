@@ -350,6 +350,7 @@ ohRun   = $85f0                 ; the run id, held across the mask-byte lookup
 ohL     = $85f1                 ; the span being tested: its left column, and the index into bndT
 ohBX    = $85f2
 ohDbg   = $85f3                 ; ORBOCCDBG: furthest stage any orb reached this frame
+ocolN   = $8597                 ; centre column went left of 0: ocol holds the magnitude
 ocanO   = $85e8                 ; the same bit while the candidate list is being walked
 
 bndT    = $7f00                 ; columns where a face or saturation state begins ($40 max)
@@ -4386,7 +4387,23 @@ ohOk:   lda o1
 ocN:    sec
         lda #80
         sbc ocoff
+        bcs ocS
+        ; The centre is LEFT of column 0. ocol is a plain byte, so it has just wrapped to
+        ; something large -- and a large ocol is indistinguishable from an orb far to the RIGHT.
+        ; Keep the magnitude and a flag instead, so the box code below can tell the two apart. An
+        ; orb whose CENTRE is off the left edge can still be half on screen, and treating its
+        ; wrapped column as "off the right" would delete it.
+        eor #$ff
+        clc
+        adc #$01                ; A = how far left of column 0 the centre sits
+        sta ocol
+        lda #$ff
+        sta ocolN
+        jmp ocDn
 ocS:    sta ocol
+        lda #$00
+        sta ocolN
+ocDn:
         lda ocoff               ; --- screen X: 24 + 2*column - halfWidth, signed 16-bit ---
         asl
         sta o0
@@ -4453,11 +4470,22 @@ oxDn:   ldx ovar
         ldx ovar                ; half the orb's width, in logical columns
         lda orbColT,x
         sta o2
-        lda ocol                ; the bounding box, in logical columns
+        lda ocolN               ; the bounding box, in logical columns
+        bne opBLn
+        lda ocol
         sec
         sbc o2
         bcs opBL1
         lda #$00
+        jmp opBL2               ; straddles column 0 from the right: left edge is 0
+opBLn:  lda o2                  ; centre is LEFT of 0 by ocol columns, so the box ends at
+        sec                     ;   o2 - ocol. If that borrows, the whole orb is off screen.
+        sbc ocol
+        bcc opBLx
+        beq opBLx
+        lda #$00                ; part of it shows: the box starts at column 0
+        jmp opBL2
+opBLx:  jmp orbNo
 opBL1:  cmp #$a0        ; A box that STARTS past the last column is an orb entirely off
         bcc opBL2               ; the right edge. This used to clamp to 159, which turned "not on
         jmp orbNo               ; screen" into "one column at the screen edge" -- so the orb took a
@@ -4471,11 +4499,17 @@ opBL2:  sta ocl2
         lsr
         lsr
         sta ocl
+        lda ocolN
+        bne opBRn
         lda ocol
         clc
         adc o2
         bcc opBR1
         lda #159
+        jmp opBR1
+opBRn:  lda o2                  ; the centre is ocol columns LEFT of 0, so the box ends at
+        sec                     ;   o2 - ocol. The check above already proved o2 > ocol, so this
+        sbc ocol                ;   cannot borrow and the result is well under 160.
 opBR1:  cmp #160
         bcc opBR2
         lda #159
