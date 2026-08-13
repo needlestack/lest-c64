@@ -1335,6 +1335,7 @@ pvNgD:  rts
 subFin:
         jsr orbMove             ; once a frame: project every candidate the cell lists
         jsr renderSym
+        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
         jsr drawFps
         jsr drawDbg
 
@@ -3789,6 +3790,12 @@ obEnd:  rts
 orbStamp:
         lda onv
         beq oSDn
+        sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
+        lda #$00                ;   selection below leaves the cache base in A, and with this store
+        sta osI                 ;   after it, osN got #<cbA / #<cbB -- 80 or 120 -- so the loop
+                                ;   walked a hundred slots of an eight-slot array and stamped
+                                ;   garbage. It alternated with the buffer, which is exactly why
+                                ;   only ever one buffer looked wrong.
         ; Which buffer's run cache to invalidate. renderSym patches operands rather than indexing
         ; per column; do the same, once per frame. cbA/cbB hold the solid-run START this buffer
         ; already shows, and $ff is the sentinel it treats as "always redraw" -- a value rs cannot
@@ -3803,9 +3810,6 @@ orbStamp:
 oSCbB:  lda #<cbB
 oSCbS:  sta oSInv+1
         sta oSDIn+1
-        sta osN
-        lda #$00
-        sta osI
 oSLoop: ldx osI
         lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb

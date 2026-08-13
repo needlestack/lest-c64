@@ -1615,11 +1615,9 @@ const ORBDESEAM = process.env.ORBDESEAM !== '0';
 // and ceiling (00, $d021) stay as they are. ORBFG=6 makes every cell the stamp touches blue,
 // which is the only way to see WHERE it is drawing rather than infer it from what looks wrong.
 const ORBFG = process.env.ORBFG;
-// ORBSTAMP=1 enables PARTIAL occlusion. OFF by default until the onv corruption below is found:
-// onv reads 3 at the end of orbMove and 120 by the time orbStamp copies it, so the pass walks a
-// hundred slots of garbage per frame. That is not a stamping-logic fault and must be fixed before
-// this can be trusted. The whole-orb hide is unaffected and stays on -- verified, and free.
-const ORBSTAMP = process.env.ORBSTAMP === '1';
+// ORBSTAMP=0 disables PARTIAL occlusion. On by default: the slot-count clobber that made this
+// walk a hundred garbage slots per frame is fixed -- see orbStamp's entry.
+const ORBSTAMP = process.env.ORBSTAMP !== '0';
 // ORBNOCELL=1: walk and decide, but stamp nothing. Separates the SEARCH cost from the WRITING.
 const ORBNOCELL = process.env.ORBNOCELL === '1';
 // The sprite bitmaps are PLACED into VIC bank 3 by the self-extracting loader ($c000, 64-byte
@@ -6096,6 +6094,12 @@ ${DBGORB ? `        lda #$00
         sta oSSpn
 ` : ''}        lda onv
         beq oSDn
+        sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
+        lda #$00                ;   selection below leaves the cache base in A, and with this store
+        sta osI                 ;   after it, osN got #<cbA / #<cbB -- 80 or 120 -- so the loop
+                                ;   walked a hundred slots of an eight-slot array and stamped
+                                ;   garbage. It alternated with the buffer, which is exactly why
+                                ;   only ever one buffer looked wrong.
         ; Which buffer's run cache to invalidate. renderSym patches operands rather than indexing
         ; per column; do the same, once per frame. cbA/cbB hold the solid-run START this buffer
         ; already shows, and $ff is the sentinel it treats as "always redraw" -- a value rs cannot
@@ -6110,9 +6114,6 @@ ${DBGORB ? `        lda #$00
 oSCbB:  lda #<cbB
 oSCbS:  sta oSInv+1
         sta oSDIn+1
-        sta osN
-        lda #$00
-        sta osI
 oSLoop: ldx osI
         lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
