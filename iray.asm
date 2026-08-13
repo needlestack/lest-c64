@@ -1,7 +1,7 @@
 
 charset = $d000        ; where the VIC reads them: under the I/O hole
 charsetB = $d800
-chrSrc  = $2800        ; where they are loaded to, and copied from at startup
+chrSrc  = $3000        ; where they are loaded to, and copied from at startup
 chrSrcB = $3800
 px      = $02
 py      = $04
@@ -22,18 +22,18 @@ qhi     = $16
 col     = $17
 tmp     = $1f
 baseHi  = $22
-paF     = $2b5b                  ; low byte of the 16-bit player angle; pa is the high
-dtv     = $2b50
-dtm     = $2b59                  ; elapsed ticks scaled for movement, and for turning
-dtt     = $2b5a
-lastMv  = $2b51
-dxs     = $2b52
-dxsH    = $2b53
-dys     = $2b54
-dysH    = $2b55
-dxSgn   = $2b56
-dySgn   = $2b57
-rowv    = $2b58                  ; keyboard row 1, held so SHIFT/E/S read it once
+paF     = $335b                  ; low byte of the 16-bit player angle; pa is the high
+dtv     = $3350
+dtm     = $3359                  ; elapsed ticks scaled for movement, and for turning
+dtt     = $335a
+lastMv  = $3351
+dxs     = $3352
+dxsH    = $3353
+dys     = $3354
+dysH    = $3355
+dxSgn   = $3356
+dySgn   = $3357
+rowv    = $3358                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
 nxL     = $25
@@ -136,54 +136,59 @@ stackRT = $0480
 sideT   = $0500
 idT     = $0600
 colH    = $0700
-; ---- the arrays evicted from the image's FILLER ($2400-$27ff), 2026-08-12 ----
-; These six used to sit at $2400-$27ff, which is the gap between the end of the data segment and
-; the charset source -- i.e. the only space the CODE has left to grow into. That made the build's
-; "headroom below the charset source" report a LIE: it measured $2800 - dataEnd = 1,762 bytes, but
-; the code would have hit faceIdT at $2400 after 738. They now live in the reclaimed charset
-; source at $2800-$2fff beside remHiT, which nothing else contends for, so the whole filler is
-; code space again. Packing them tighter than this would buy nothing -- $2800-$2fff is not the
-; scarce resource, the $2800 ceiling is.
-cwA     = $2f00                 ; per cell-column: the ceiling run length this buffer holds
-cwB     = $2f28
-cbA     = $2f50                 ; ... and the solid run start, or $ff for "always redraw"
-cbB     = $2f78
-faceIdT = $2d00                 ; page-aligned: a column index must never need a 16-bit add
-cstepT  = $2fa0                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $2bf0                ; PLAN=2: the bucket index the code came from, and which
-thsel   = $2bf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
-paqL    = $2bf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
-paqH    = $2bf7
-rqL     = $2bf8                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $2bfc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+; ---- the per-frame arrays: ALL of them live in the reclaimed charset source, $3000-$37ff ----
+; Two evictions got them here, both for the same reason -- an array in the code's growth room is
+; an array that caps the engine:
+;
+;   1. Six of these sat at $2400-$27ff, the image's filler between the data segment and the
+;      charset source, i.e. the only space the CODE has to grow into. That made the build's
+;      headroom report a LIE: it printed $2800 - dataEnd = 1,762 bytes, but the code would have
+;      hit faceIdT at $2400 after 738.
+;   2. Then the charset source itself moved from $2800 up to $3000, closing a dead 2KB hole and
+;      taking the code's ceiling with it -- so the arrays followed it up here, out of the way.
+;
+; Everything is page-aligned where a full byte indexes it. Packing tighter than this would buy
+; nothing: $3000-$37ff is not the scarce resource, the ceiling below it is.
+cwA     = $3700                 ; per cell-column: the ceiling run length this buffer holds
+cwB     = $3728
+cbA     = $3750                 ; ... and the solid run start, or $ff for "always redraw"
+cbB     = $3778
+faceIdT = $3500                 ; page-aligned: a column index must never need a 16-bit add
+cstepT  = $37a0                 ; per cell-column (40): face-boundary column, 0 = none
+bidx    = $33f0                ; PLAN=2: the bucket index the code came from, and which
+thsel   = $33f1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+paqL    = $33f6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
+paqH    = $33f7
+rqL     = $33f8                 ; and this ray's 10-bit angle: rqL is the table index,
+rqH     = $33fc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
                                 ; It was declared TWICE, at $cbf9 and here; the assembler takes
                                 ; the last, so $cbf9 was never the live one. Removed rather
                                 ; than left as a trap for the next reader.
-cqtmp   = $2bf2                 ; the colour this cell needs, while both its rows are queued
-cmtmp   = $2bf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
-cmv     = $2bf5                 ; the ninth index bit -- the two columns the bucket throws away
-cqN     = $2bf3                 ; entries in the colour queue
+cqtmp   = $33f2                 ; the colour this cell needs, while both its rows are queued
+cmtmp   = $33f4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $33f5                 ; the ninth index bit -- the two columns the bucket throws away
+cqN     = $33f3                 ; entries in the colour queue
 cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only
-cqLo    = $2c00                 ; colour queue: address low, high, and the value to write.
-cqHi    = $2c40                 ; Written after the buffer flip, never inline -- colour RAM is
-cqCol   = $2c80                 ; NOT double buffered, so an inline write repaints the frame
+cqLo    = $3400                 ; colour queue: address low, high, and the value to write.
+cqHi    = $3440                 ; Written after the buffer flip, never inline -- colour RAM is
+cqCol   = $3480                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $2900                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
-pfPrvF  = $2930                 ; previous timestamp: frame counter, then raster line
-pfPrvL  = $2932
-pfCurH  = $2936                 ; ninth raster bit, current and previous
-pfPrvH  = $2937
-pfTmp   = $2938
-pfTmp2  = $2939
-pfN     = $293c                 ; frames accumulated so far (2 bytes)
-pfCurF  = $293a                 ; scratch for one timestamp read and the delta
-pfCurL  = $293b
-pfCurX  = $293f
-pfDLo   = $293d
-pfDHi   = $293e
-pfRow   = $2934
-pfDone  = $2935
-seamT   = $2fc8                 ; per cell-column (40): char code for the solid run --
+pfAcc   = $3100                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
+pfPrvF  = $3130                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $3132
+pfCurH  = $3136                 ; ninth raster bit, current and previous
+pfPrvH  = $3137
+pfTmp   = $3138
+pfTmp2  = $3139
+pfN     = $313c                 ; frames accumulated so far (2 bytes)
+pfCurF  = $313a                 ; scratch for one timestamp read and the delta
+pfCurL  = $313b
+pfCurX  = $313f
+pfDLo   = $313d
+pfDHi   = $313e
+pfRow   = $3134
+pfDone  = $3135
+seamT   = $37c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
 ; Three $40-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
@@ -197,42 +202,42 @@ seamT   = $2fc8                 ; per cell-column (40): char code for the solid 
 pvBnd   = $3800                 ; the column the boundary was pinned at
 pvAng   = $3840                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
 pvRcp   = $3880                 ; 163/distance, for the translation term
-pvN     = $2b00                 ; how many of them there are; 0 disables the hint for a frame
-opaL    = $2b01                 ; the 16-bit angle those bearings were taken at
-opaH    = $2b02
-opxL    = $2b03                 ; ... and the position, so the translation term has a delta
-opxH    = $2b04
-opyL    = $2b05
-opyH    = $2b06
-dqa     = $2b07                 ; this frame's rotation, quarter-units, signed
-pvDX    = $2b08                 ; this frame's translation, 1/256 cells, signed bytes.
-pvDY    = $2b09                 ;   NOT dxv/dyv -- interpSpan already owns those as its
+pvN     = $3300                 ; how many of them there are; 0 disables the hint for a frame
+opaL    = $3301                 ; the 16-bit angle those bearings were taken at
+opaH    = $3302
+opxL    = $3303                 ; ... and the position, so the translation term has a delta
+opxH    = $3304
+opyL    = $3305
+opyH    = $3306
+dqa     = $3307                 ; this frame's rotation, quarter-units, signed
+pvDX    = $3308                 ; this frame's translation, 1/256 cells, signed bytes.
+pvDY    = $3309                 ;   NOT dxv/dyv -- interpSpan already owns those as its
                                 ;   Bresenham span width and error step.
-pvI     = $2b0a                 ; index while walking the hints, and the last cut emitted
-pvLast  = $2b0b
-pvTL    = $2b0c                 ; the signed 16-bit term, and the top two bytes of the
-pvTH    = $2b0d                 ;   24-bit product it feeds
-pvPH    = $2b0e
-pvPB    = $2b0f
-pvSgn   = $2b10                 ; sign of the term, carried around the unsigned multiply
-pvI2    = $2b11                 ; the hint index, saved across mul8 (which needs X)
-pvYs    = $2b12                 ; the bearing, saved across the first multiply
-pvMode  = $2b2a                 ; 0 = predict in full, 1 = turned in place (the translation
+pvI     = $330a                 ; index while walking the hints, and the last cut emitted
+pvLast  = $330b
+pvTL    = $330c                 ; the signed 16-bit term, and the top two bytes of the
+pvTH    = $330d                 ;   24-bit product it feeds
+pvPH    = $330e
+pvPB    = $330f
+pvSgn   = $3310                 ; sign of the term, carried around the unsigned multiply
+pvI2    = $3311                 ; the hint index, saved across mul8 (which needs X)
+pvYs    = $3312                 ; the bearing, saved across the first multiply
+pvMode  = $332a                 ; 0 = predict in full, 1 = turned in place (the translation
                                 ;   term is identically zero), 2 = nothing moved at all.
                                 ; NOT beside pvYs: $cb13-$cb29 are claimed by the RAYCNT,
                                 ; TOUR and PALKEYS blocks below, which are separate build
                                 ; flags -- a PIVOT variable landing in that range collides
                                 ; only in the diagnostic builds, i.e. silently.
-colW    = $2b23                 ; the three ink colours, cycled by keys 1/2/3. Declared here
-colB    = $2b24                 ;   and not beside tourC, which is inside a TOUR-only block --
-colS    = $2b25                 ;   the default build does not emit that.
-pkNew   = $2b26                 ; palette keys this frame, last frame, and the fresh presses
-pkOld   = $2b27
-pkEdge  = $2b28
-pkJoy   = $2b29                 ; joystick-1 lines, masked out of the palette-key reads
-bndT    = $2a00                 ; columns where a face or saturation state begins ($40 max)
-remLoT  = $2e00                 ; per marched column: castRay's raw hit distance, 8.8 cells.
-remHiT  = $2800                 ;   Parked so u can be derived later, only where it is needed.
+colW    = $3323                 ; the three ink colours, cycled by keys 1/2/3. Declared here
+colB    = $3324                 ;   and not beside tourC, which is inside a TOUR-only block --
+colS    = $3325                 ;   the default build does not emit that.
+pkNew   = $3326                 ; palette keys this frame, last frame, and the fresh presses
+pkOld   = $3327
+pkEdge  = $3328
+pkJoy   = $3329                 ; joystick-1 lines, masked out of the palette-key reads
+bndT    = $3200                 ; columns where a face or saturation state begins ($40 max)
+remLoT  = $3600                 ; per marched column: castRay's raw hit distance, 8.8 cells.
+remHiT  = $3000                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -3377,7 +3382,7 @@ tbTabT: !byte 93,85,77,69,61,53,45,37,29,21,13,5,0
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-        * = $2800    ; charset A's SOURCE; cpChr copies it to $d000
+        * = $3000    ; charset A's SOURCE; cpChr copies it to $d000
         !byte 0,0,0,0,0,0,0,0,85,85,85,85,85,85,85,85,0,0,0,0,85,85,85,85,0,0,0,85,85,85,85,85
         !byte 84,84,84,84,84,84,84,84,21,85,85,85,85,85,85,85,0,0,0,0,0,64,64,80,64,64,64,64,64,64,64,64
         !byte 0,0,0,0,0,80,85,85,0,0,0,0,0,0,0,21,80,84,85,85,85,85,85,85,0,0,0,0,0,0,85,85

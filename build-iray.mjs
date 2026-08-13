@@ -1536,9 +1536,21 @@ const SCR_A = 0xe000;                   // both screens must stay CPU-writable: 
 const SCR_B = 0xe400;                   //   writes one of them every frame
 const CHARSET = 0xd000;                 // charset A: upright glyphs, above the horizon
 const CHARSET_B = 0xd800;               // charset B: every glyph flipped, below the horizon
-const CHARSRC = 0x2800;                 // where the two charsets are EMITTED, 2KB apart, and
-const CHARSRC_B = 0x3800;               //   copied from at startup. Reclaimable afterwards.
-const FTABLES = 0x3000;                 // f0Lo/f0Hi/f1Lo/f1Hi + run-id tables (CPU only)
+// The two charsets are EMITTED here and copied up to $d000 at startup, then this space is
+// reclaimable. They are now ADJACENT ($3000-$3fff) rather than 2KB apart, and that is the whole
+// point: charset A used to sit at $2800 with a 2KB HOLE at $3000-$37ff above it, because the
+// f-tables that once lived there moved up to RELOC and nobody moved the charset down after them.
+// A build guard was still reserving $3000-$37ff for those departed f-tables, so the hole was
+// defended as well as empty -- and the code block's ceiling was $2800 for no reason at all.
+// Adjacent sources mean ONE contiguous reclaimed region and 2KB more code space, for free.
+const CHARSRC = 0x3000;
+const CHARSRC_B = 0x3800;
+// FTABLES is GONE, and deliberately not replaced by a constant nobody uses. f0Lo/f0Hi/f1Lo/f1Hi
+// and the run-id tables were moved up to RELOC with the rest of the CPU-only tables; only this
+// constant and a build guard citing it stayed behind at $3000, reserving 2KB against a tenant that
+// had left and pinning the code's ceiling at $2800 for years. The charsets occupy $3000-$3fff now.
+// If a table needs a base address, take it from RELOC's allocation, not from a fresh constant --
+// a constant is a claim about the map that nothing checks.
 const NEWTABLES = 0x4000;               // clampT / rampT / stepT
 // Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
 // coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
@@ -1592,18 +1604,18 @@ qhi     = $16
 col     = $17
 tmp     = $1f
 baseHi  = $22
-paF     = $2b5b                  ; low byte of the 16-bit player angle; pa is the high
-dtv     = $2b50
-dtm     = $2b59                  ; elapsed ticks scaled for movement, and for turning
-dtt     = $2b5a
-lastMv  = $2b51
-dxs     = $2b52
-dxsH    = $2b53
-dys     = $2b54
-dysH    = $2b55
-dxSgn   = $2b56
-dySgn   = $2b57
-rowv    = $2b58                  ; keyboard row 1, held so SHIFT/E/S read it once
+paF     = $335b                  ; low byte of the 16-bit player angle; pa is the high
+dtv     = $3350
+dtm     = $3359                  ; elapsed ticks scaled for movement, and for turning
+dtt     = $335a
+lastMv  = $3351
+dxs     = $3352
+dxsH    = $3353
+dys     = $3354
+dysH    = $3355
+dxSgn   = $3356
+dySgn   = $3357
+rowv    = $3358                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
 nxL     = $25
@@ -1706,54 +1718,59 @@ stackRT = $0480
 sideT   = $0500
 idT     = $0600
 colH    = $0700
-; ---- the arrays evicted from the image's FILLER ($2400-$27ff), 2026-08-12 ----
-; These six used to sit at $2400-$27ff, which is the gap between the end of the data segment and
-; the charset source -- i.e. the only space the CODE has left to grow into. That made the build's
-; "headroom below the charset source" report a LIE: it measured $2800 - dataEnd = 1,762 bytes, but
-; the code would have hit faceIdT at $2400 after 738. They now live in the reclaimed charset
-; source at $2800-$2fff beside remHiT, which nothing else contends for, so the whole filler is
-; code space again. Packing them tighter than this would buy nothing -- $2800-$2fff is not the
-; scarce resource, the $2800 ceiling is.
-cwA     = $2f00                 ; per cell-column: the ceiling run length this buffer holds
-cwB     = $2f28
-cbA     = $2f50                 ; ... and the solid run start, or $ff for "always redraw"
-cbB     = $2f78
-faceIdT = $2d00                 ; page-aligned: a column index must never need a 16-bit add
-cstepT  = $2fa0                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $2bf0                ; PLAN=2: the bucket index the code came from, and which
-thsel   = $2bf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
-paqL    = $2bf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
-paqH    = $2bf7
-rqL     = $2bf8                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $2bfc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+; ---- the per-frame arrays: ALL of them live in the reclaimed charset source, $3000-$37ff ----
+; Two evictions got them here, both for the same reason -- an array in the code's growth room is
+; an array that caps the engine:
+;
+;   1. Six of these sat at $2400-$27ff, the image's filler between the data segment and the
+;      charset source, i.e. the only space the CODE has to grow into. That made the build's
+;      headroom report a LIE: it printed $2800 - dataEnd = 1,762 bytes, but the code would have
+;      hit faceIdT at $2400 after 738.
+;   2. Then the charset source itself moved from $2800 up to $3000, closing a dead 2KB hole and
+;      taking the code's ceiling with it -- so the arrays followed it up here, out of the way.
+;
+; Everything is page-aligned where a full byte indexes it. Packing tighter than this would buy
+; nothing: $3000-$37ff is not the scarce resource, the ceiling below it is.
+cwA     = $3700                 ; per cell-column: the ceiling run length this buffer holds
+cwB     = $3728
+cbA     = $3750                 ; ... and the solid run start, or $ff for "always redraw"
+cbB     = $3778
+faceIdT = $3500                 ; page-aligned: a column index must never need a 16-bit add
+cstepT  = $37a0                 ; per cell-column (40): face-boundary column, 0 = none
+bidx    = $33f0                ; PLAN=2: the bucket index the code came from, and which
+thsel   = $33f1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+paqL    = $33f6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
+paqH    = $33f7
+rqL     = $33f8                 ; and this ray's 10-bit angle: rqL is the table index,
+rqH     = $33fc                 ; rqH (0..3) picks which quarter of the 1024-entry table.
                                 ; It was declared TWICE, at $cbf9 and here; the assembler takes
                                 ; the last, so $cbf9 was never the live one. Removed rather
                                 ; than left as a trap for the next reader.
-cqtmp   = $2bf2                 ; the colour this cell needs, while both its rows are queued
-cmtmp   = $2bf4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
-cmv     = $2bf5                 ; the ninth index bit -- the two columns the bucket throws away
-cqN     = $2bf3                 ; entries in the colour queue
+cqtmp   = $33f2                 ; the colour this cell needs, while both its rows are queued
+cmtmp   = $33f4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $33f5                 ; the ninth index bit -- the two columns the bucket throws away
+cqN     = $33f3                 ; entries in the colour queue
 cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only
-cqLo    = $2c00                 ; colour queue: address low, high, and the value to write.
-cqHi    = $2c40                 ; Written after the buffer flip, never inline -- colour RAM is
-cqCol   = $2c80                 ; NOT double buffered, so an inline write repaints the frame
+cqLo    = $3400                 ; colour queue: address low, high, and the value to write.
+cqHi    = $3440                 ; Written after the buffer flip, never inline -- colour RAM is
+cqCol   = $3480                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $2900                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
-pfPrvF  = $2930                 ; previous timestamp: frame counter, then raster line
-pfPrvL  = $2932
-pfCurH  = $2936                 ; ninth raster bit, current and previous
-pfPrvH  = $2937
-pfTmp   = $2938
-pfTmp2  = $2939
-pfN     = $293c                 ; frames accumulated so far (2 bytes)
-pfCurF  = $293a                 ; scratch for one timestamp read and the delta
-pfCurL  = $293b
-pfCurX  = $293f
-pfDLo   = $293d
-pfDHi   = $293e
-pfRow   = $2934
-pfDone  = $2935
-seamT   = $2fc8                 ; per cell-column (40): char code for the solid run --
+pfAcc   = $3100                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
+pfPrvF  = $3130                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $3132
+pfCurH  = $3136                 ; ninth raster bit, current and previous
+pfPrvH  = $3137
+pfTmp   = $3138
+pfTmp2  = $3139
+pfN     = $313c                 ; frames accumulated so far (2 bytes)
+pfCurF  = $313a                 ; scratch for one timestamp read and the delta
+pfCurL  = $313b
+pfCurX  = $313f
+pfDLo   = $313d
+pfDHi   = $313e
+pfRow   = $3134
+pfDone  = $3135
+seamT   = $37c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
 ; Three ${hx(NBND)}-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
@@ -1767,27 +1784,27 @@ ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they w
 pvBnd   = $3800                 ; the column the boundary was pinned at
 pvAng   = ${hx16(0x3800 + NBND)}                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
 pvRcp   = ${hx16(0x3800 + 2 * NBND)}                 ; 163/distance, for the translation term
-pvN     = $2b00                 ; how many of them there are; 0 disables the hint for a frame
-opaL    = $2b01                 ; the 16-bit angle those bearings were taken at
-opaH    = $2b02
-opxL    = $2b03                 ; ... and the position, so the translation term has a delta
-opxH    = $2b04
-opyL    = $2b05
-opyH    = $2b06
-dqa     = $2b07                 ; this frame's rotation, quarter-units, signed
-pvDX    = $2b08                 ; this frame's translation, 1/256 cells, signed bytes.
-pvDY    = $2b09                 ;   NOT dxv/dyv -- interpSpan already owns those as its
+pvN     = $3300                 ; how many of them there are; 0 disables the hint for a frame
+opaL    = $3301                 ; the 16-bit angle those bearings were taken at
+opaH    = $3302
+opxL    = $3303                 ; ... and the position, so the translation term has a delta
+opxH    = $3304
+opyL    = $3305
+opyH    = $3306
+dqa     = $3307                 ; this frame's rotation, quarter-units, signed
+pvDX    = $3308                 ; this frame's translation, 1/256 cells, signed bytes.
+pvDY    = $3309                 ;   NOT dxv/dyv -- interpSpan already owns those as its
                                 ;   Bresenham span width and error step.
-pvI     = $2b0a                 ; index while walking the hints, and the last cut emitted
-pvLast  = $2b0b
-pvTL    = $2b0c                 ; the signed 16-bit term, and the top two bytes of the
-pvTH    = $2b0d                 ;   24-bit product it feeds
-pvPH    = $2b0e
-pvPB    = $2b0f
-pvSgn   = $2b10                 ; sign of the term, carried around the unsigned multiply
-pvI2    = $2b11                 ; the hint index, saved across mul8 (which needs X)
-pvYs    = $2b12                 ; the bearing, saved across the first multiply
-pvMode  = $2b2a                 ; 0 = predict in full, 1 = turned in place (the translation
+pvI     = $330a                 ; index while walking the hints, and the last cut emitted
+pvLast  = $330b
+pvTL    = $330c                 ; the signed 16-bit term, and the top two bytes of the
+pvTH    = $330d                 ;   24-bit product it feeds
+pvPH    = $330e
+pvPB    = $330f
+pvSgn   = $3310                 ; sign of the term, carried around the unsigned multiply
+pvI2    = $3311                 ; the hint index, saved across mul8 (which needs X)
+pvYs    = $3312                 ; the bearing, saved across the first multiply
+pvMode  = $332a                 ; 0 = predict in full, 1 = turned in place (the translation
                                 ;   term is identically zero), 2 = nothing moved at all.
                                 ; NOT beside pvYs: $cb13-$cb29 are claimed by the RAYCNT,
                                 ; TOUR and PALKEYS blocks below, which are separate build
@@ -1797,29 +1814,29 @@ pvMode  = $2b2a                 ; 0 = predict in full, 1 = turned in place (the 
 ; baseline half of the comparison, and gating these on PIVOT made that build fail to assemble --
 ; which left latest.d64 holding the PREVIOUS disk and reported the default viewpoint as if it
 ; were the one asked for. Silent, and exactly the trap the RELOC comment warns about.
-rayN    = $2b14                 ; marchCol calls this frame
-edgN    = $2b1a                 ; edge cells drawn this frame -- the part of renderSym the run
-edgAcc  = $2b1b                 ;   cache cannot skip, and so the part worth optimising
-edgMean = $2b1d
-chnN    = $2b1e                 ; chain DRAWS this frame, of 80 possible (40 ceiling + 40 solid)
-chnAcc  = $2b1f                 ;   -- i.e. how often the run cache MISSES
-chnMean = $2b21
-rayAcc  = $2b15                 ; 2 bytes: 256 frames of rayN. The HIGH byte is then the mean,
-rayFrm  = $2b17                 ; for free -- the same trick the profiler uses
-rayMean = $2b18
-pvNdbg  = $2b13                 ; pvN as pivPrep saw it, before pivPrep clears it
+rayN    = $3314                 ; marchCol calls this frame
+edgN    = $331a                 ; edge cells drawn this frame -- the part of renderSym the run
+edgAcc  = $331b                 ;   cache cannot skip, and so the part worth optimising
+edgMean = $331d
+chnN    = $331e                 ; chain DRAWS this frame, of 80 possible (40 ceiling + 40 solid)
+chnAcc  = $331f                 ;   -- i.e. how often the run cache MISSES
+chnMean = $3321
+rayAcc  = $3315                 ; 2 bytes: 256 frames of rayN. The HIGH byte is then the mean,
+rayFrm  = $3317                 ; for free -- the same trick the profiler uses
+rayMean = $3318
+pvNdbg  = $3313                 ; pvN as pivPrep saw it, before pivPrep clears it
 ` : ''}${TOUR ? `tourC   = $cb19                 ; TOUR phase counter
-tourF   = $2b22                 ; 2 bytes: frames elapsed, for the freeze
-` : ''}${PALKEYS ? `colW    = $2b23                 ; the three ink colours, cycled by keys 1/2/3. Declared here
-colB    = $2b24                 ;   and not beside tourC, which is inside a TOUR-only block --
-colS    = $2b25                 ;   the default build does not emit that.
-pkNew   = $2b26                 ; palette keys this frame, last frame, and the fresh presses
-pkOld   = $2b27
-pkEdge  = $2b28
-pkJoy   = $2b29                 ; joystick-1 lines, masked out of the palette-key reads
-` : ''}bndT    = $2a00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
-remLoT  = $2e00                 ; per marched column: castRay's raw hit distance, 8.8 cells.
-remHiT  = $2800                 ;   Parked so u can be derived later, only where it is needed.
+tourF   = $3322                 ; 2 bytes: frames elapsed, for the freeze
+` : ''}${PALKEYS ? `colW    = $3323                 ; the three ink colours, cycled by keys 1/2/3. Declared here
+colB    = $3324                 ;   and not beside tourC, which is inside a TOUR-only block --
+colS    = $3325                 ;   the default build does not emit that.
+pkNew   = $3326                 ; palette keys this frame, last frame, and the fresh presses
+pkOld   = $3327
+pkEdge  = $3328
+pkJoy   = $3329                 ; joystick-1 lines, masked out of the palette-key reads
+` : ''}bndT    = $3200                 ; columns where a face or saturation state begins (${hx(NBND)} max)
+remLoT  = $3600                 ; per marched column: castRay's raw hit distance, 8.8 cells.
+remHiT  = $3000                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -5486,9 +5503,12 @@ try {
   // Bank 0 holds no VIC data any more -- the screens and charsets are in bank 3 -- so what the
   // growing data segment can still collide with is the charset SOURCE it is loaded alongside,
   // and the f-tables between the two halves of it.
+  // The f-tables used to be reserved here as well, at $3000-$37ff. They moved up to
+  // RELOC and the reservation stayed, so the build defended 2KB that held nothing and capped the
+  // code at $3000. Reserving a region for a tenant that has left is worse than not checking:
+  // the guard's existence is what stops anyone asking whether the region is still needed.
   const reserved = [
     ['charset A source', CHARSRC, CHARSRC + 0x800],
-    ['f-tables', FTABLES, FTABLES + 0x800],
     ['charset B source', CHARSRC_B, CHARSRC_B + 0x800],
   ];
   if (r.labels.chainEnd > HTABLE)
@@ -5509,7 +5529,7 @@ try {
   // mislead. iray.asm/iray.prg are the matching support files for diffing and label lookup.
   writeFileSync('./latest.d64', Buffer.from(d.getData()));
   // Say how much room is left below the screen buffer. The data segment has nowhere to
-  // grow -- charset A is at $2800 and buffer B sits in the way at $2400 -- so this going
+  // grow -- charset A is at $3000 and buffer B sits in the way at $2400 -- so this going
   // quiet is the difference between a build error and a frame-by-frame corruption.
   // Zero page is packed tight and several variables are two bytes wide, so a new equate
   // can silently land on someone's high byte. bcnt did exactly that -- it sat on py+1, the
@@ -5591,18 +5611,40 @@ try {
   if (at < 0x10000) gaps.push([at, 0x10000]);
   const bank3 = gaps.map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
   const free = bank3.reduce((a, [lo, hi]) => a + (hi - lo), 0);
+  // ---- the free-space picture, in one place ----
   // Report the FIRST thing the code block would hit as it grows, not an assumed one. This used to
   // print CHARSRC - dataEnd unconditionally and so overstated the room by 1,024 bytes for as long
   // as arrays sat in the filler at $2400. A headroom figure nobody can trust is worse than none:
   // it is the number you consult before deciding a feature fits.
+  //
+  // Then every HOLE in the image. These are what makes the total free space larger than the code's
+  // headroom and yet mostly unspendable: a hole is only usable by whoever it is adjacent to. That
+  // gap between "free" and "usable" is the whole argument for allocating the data heap downward
+  // from $c000, so it is worth printing rather than reasoning about.
   {
     const de = r.labels.dataEnd;
-    const obst = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{4})/gm)]
-      .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a > de && a < CHARSRC)
-      .sort((x, y) => x[1] - y[1])[0];
+    const eqs = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{4})/gm)]
+      .map(m => [m[1], parseInt(m[2], 16)]);
+    const obst = eqs.filter(([, a]) => a > de && a < CHARSRC).sort((x, y) => x[1] - y[1])[0];
     const [what, at] = obst ?? ['the charset source', CHARSRC];
     console.log(`code headroom: ${at - de} bytes  ($${de.toString(16)} -> ` +
                 `$${at.toString(16)}, ${what})`);
+    // A hole is only real free space if no RAM equate already lives in it -- the arrays in the
+    // reclaimed charset source are exactly that case, and counting them as free is the mistake
+    // the old headroom line made.
+    const holes = (r.holes ?? []).map(([lo, hi]) => {
+      const squatters = eqs.filter(([, a]) => a >= lo && a < hi).map(([n]) => n);
+      return [lo, hi, squatters];
+    });
+    const spendable = holes.filter(h => !h[2].length).reduce((a, [lo, hi]) => a + (hi - lo), 0);
+    console.log(`image holes: ${holes.length}, ${spendable} bytes with nothing living in them` +
+                ` (+ ${VBANK - r.end} bytes above the image, below $c000)`);
+    for (const [lo, hi, sq] of holes)
+      console.log(`  $${lo.toString(16)}-$${(hi - 1).toString(16)}  ${String(hi - lo).padStart(5)}` +
+                  `  ${sq.length ? 'holds ' + sq.slice(0, 6).join(' ') + (sq.length > 6 ? ' ...' : '')
+                                 : '(free)'}`);
+    console.log(`TOTAL SPENDABLE: ${spendable + (VBANK - r.end)} bytes, in ` +
+                `${holes.filter(h => !h[2].length).length + 1} fragments`);
   }
   console.log(`VIC bank 3 free: ${bank3.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
@@ -5625,7 +5667,7 @@ try {
       chrSrc:   'a NAME for emitted charset data, not RAM scratch -- cpChr copies it to $d000',
       chrSrcB:  'ditto, the mirrored charset',
     };
-    // ONE documented region rather than seventy-five individual exceptions. $2800-$2fff is bank 0's
+    // ONE documented region rather than seventy-five individual exceptions. $3000-$37ff is bank 0's
     // post-startup RAM: the charset source itself, which cpChr consumes at startup.
     //
     // It used to start at $2400, taking in the image's filler as well -- but arrays living in the
@@ -5633,14 +5675,14 @@ try {
     // ceiling. The region is now exactly the reclaimed source, so the guard's lower bound and the
     // code's upper bound are the same number and neither can drift without the other noticing.
     //
-    // THE INVARIANT THIS RESTS ON: nothing in $2800-$2fff may be touched before cpChr has run.
+    // THE INVARIANT THIS RESTS ON: nothing in $3000-$37ff may be touched before cpChr has run.
     // That is exactly why cpChr is now the FIRST thing init does -- ahead of the colour-RAM fill
     // and the run-cache clear, both of which write RAM in this range. Reordering init would
     // reintroduce a bug that looks like corrupt graphics, so the copy stays first.
-    // TWO regions, not one contiguous range, and the gap between them matters: $3000-$37ff is the
-    // f-tables, which are read every frame. Only the charset SOURCES are reclaimable, because only
-    // they are consumed once and never read again.
-    const XFER = [[0x2800, 0x3000], [0x3800, 0x4000]];
+    // ONE contiguous region now: the two charset sources are adjacent at $3000-$3fff, so all the
+    // reclaimed RAM is one range. It was two ranges with a live gap between them (the f-tables at
+    // $3000-$37ff) until the sources were moved together -- which is exactly why they were moved.
+    const XFER = [[CHARSRC, CHARSRC_B + 0x800]];
     const reclaimed = a => XFER.some(([lo, hi]) => a >= lo && a < hi);
     const eq = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
       .map(m => [m[1], parseInt(m[2], 16)])

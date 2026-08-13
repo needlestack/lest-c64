@@ -238,6 +238,7 @@ export function assemble(source, opts = {}) {
   const out = [];
   const listing = [];
   const emitAt = new Map(); // pc -> index in out (contiguous assumed)
+  const holes = [];         // [lo, hi) ranges the image pads rather than fills -- see the org case
   let cur = org;
   const emit = (b) => { out.push(b & 0xFF); cur++; };
 
@@ -247,6 +248,11 @@ export function assemble(source, opts = {}) {
       // load image stays gap-free (e.g. code at $0801, bitmap at $2000)
       if (s.pc < cur)
         throw new Error(`* = $${s.pc.toString(16)} moves backward from $${cur.toString(16)} (overlapping output not supported)`);
+      // Record the hole before filling it. Callers cannot recover these from the image afterwards:
+      // the padding is zeros and so is plenty of real table data, so a zero-run scan guesses. The
+      // holes are the whole of the image's unused space, which is the number a layout decision
+      // turns on -- worth three lines here rather than an estimate at every call site.
+      if (cur < s.pc) holes.push([cur, s.pc]);
       while (cur < s.pc) { out.push(0); cur++; }
       continue;
     }
@@ -304,7 +310,7 @@ export function assemble(source, opts = {}) {
   const prg = new Uint8Array(bytes.length + 2);
   prg[0] = org & 0xFF; prg[1] = (org >> 8) & 0xFF;
   prg.set(bytes, 2);
-  return { prg, bytes, org, end: org + bytes.length, labels: symbols, listing };
+  return { prg, bytes, org, end: org + bytes.length, labels: symbols, listing, holes };
 }
 
 // Small CLI: node asm6502.mjs in.asm out.prg
