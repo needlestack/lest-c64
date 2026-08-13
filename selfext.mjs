@@ -242,13 +242,31 @@ d_next:
         cmp #0
         beq d_end
         bmi d_match
-        tax                     ; literal run of A (1..127) bytes
-d_lit:
-        jsr d_get
-        jsr d_put
-        dex
+        ; ---- literal run of A bytes, 1..127 ----
+        ; Y-INDEXED, with the pointers moved once per RUN rather than once per byte. This was
+        ; jsr d_get plus jsr d_put per byte: two jsr/rts pairs and two 16-bit increments, ~75
+        ; cycles to copy one byte. Indirect-indexed handles the page crossing itself, and a run is
+        ; at most 127, so Y cannot wrap inside the loop.
+        sta tmp
+        ldy #$00
+d_lit:  lda (rsrc),y
+        sta (rdst),y
+        iny
+        cpy tmp
         bne d_lit
-        jmp d_next
+        tya                     ; advance both pointers by the run length
+        clc
+        adc rsrc
+        sta rsrc
+        bcc d_l1
+        inc rsrc+1
+d_l1:   tya
+        clc
+        adc rdst
+        sta rdst
+        bcc d_l2
+        inc rdst+1
+d_l2:   jmp d_next
 d_end:
         rts
 d_match:
@@ -301,29 +319,40 @@ d_domatch:
         lda rdst+1
         sbc off+1
         sta mptr+1
-d_mloop:
-        ldy #0
-        lda (mptr),y
+        ; Copy len bytes forward, Y-indexed, in chunks of 256. Forward and byte-by-byte is
+        ; REQUIRED, not incidental: when off < len the source overlaps what is being written, and
+        ; reading (mptr),y then returns a byte this very loop wrote earlier. That is how the
+        ; format expresses runs, so the overlap is the point.
+        ;
+        ; The old loop advanced two 16-bit pointers and did a 16-bit decrement per byte -- about
+        ; 45 cycles each. Here the pointers move once per chunk.
+d_mchk: lda len+1
+        beq d_mlast
+        ldy #$00
+d_m256: lda (mptr),y
         sta (rdst),y
-        inc mptr
-        bne d_m1
-        inc mptr+1
-d_m1:
-        inc rdst
-        bne d_m2
+        iny
+        bne d_m256
+        inc mptr+1              ; a whole page done: step both pointers a page on
         inc rdst+1
-d_m2:
-        lda len                 ; len -= 1 (16-bit), loop until 0
-        sec
-        sbc #1
-        sta len
-        lda len+1
-        sbc #0
-        sta len+1
-        lda len
-        ora len+1
-        bne d_mloop
-        jmp d_next
+        dec len+1
+        jmp d_mchk
+d_mlast:lda len
+        beq d_mdn
+        sta tmp
+        ldy #$00
+d_mlp:  lda (mptr),y
+        sta (rdst),y
+        iny
+        cpy tmp
+        bne d_mlp
+        tya                     ; only rdst matters now: mptr is rebuilt from it next match
+        clc
+        adc rdst
+        sta rdst
+        bcc d_mdn
+        inc rdst+1
+d_mdn:  jmp d_next
 d_get:
         ldy #0
         lda (rsrc),y
