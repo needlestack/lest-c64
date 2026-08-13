@@ -517,7 +517,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.

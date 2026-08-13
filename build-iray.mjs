@@ -872,6 +872,20 @@ const occRow = (n, fromRight) => [0, 1, 2, 3].reduce((b, i) => {
 for (let n = 1; n <= 4; n++) glyphs.push(new Array(8).fill(occRow(n, false)));
 for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true)));
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
+
+// CELLMARK=1: put a 2x2 grey dot in the middle of SOLID and of all seven occluders -- columns 1
+// and 2, rows 3 and 4, at bit pair 10 ($d023, grey). Purely a debugging aid: it makes the CHAR
+// GRID visible, so a stamp that is one column out can be read off the screen directly instead of
+// inferred from where blue meets black. It does clip sprites where the dot is, since 10 is a
+// foreground pair -- acceptable for a diagnostic build, not for anything else.
+//
+// Every row of these glyphs is identical, so charset B (built by reversing each glyph's rows)
+// keeps the dot centred without any special handling.
+if (process.env.CELLMARK === '1') {
+  const mark = row => (row & 0xc3) | (2 << 4) | (2 << 2);   // keep columns 0 and 3, grey 1 and 2
+  for (const code of [SOLID, ...[...Array(7)].map((_, i) => OCC0 + i)])
+    for (const r of [3, 4]) glyphs[code][r] = mark(glyphs[code][r]);
+}
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + 4 seam + 7 occluder ` +
   `= ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
