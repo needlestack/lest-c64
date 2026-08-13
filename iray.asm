@@ -1335,7 +1335,6 @@ pvNgD:  rts
 subFin:
         jsr orbMove             ; once a frame: project every candidate the cell lists
         jsr renderSym
-        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
         jsr drawFps
         jsr drawDbg
 
@@ -3943,7 +3942,13 @@ oSCRow: lda ohSv
         cmp osRowB
         beq oSCR1
         bcs oSCDn
-oSCR1:  tay
+oSCR1:  cmp #$19
+        bcs oSCDn               ; rowLoT/rowHiT hold 25 entries. Indexing past them gives a
+                                ; garbage high byte, osPtr then points ANYWHERE, and the store
+                                ; below writes wherever that lands -- including over osI and osN,
+                                ; the loop's own counters. That is how one bad row became a
+                                ; runaway loop writing across the machine.
+        tay
         lda rowLoT,y
         sta osPtr
         lda rowHiT,y
@@ -3954,10 +3959,15 @@ oSCR1:  tay
         lsr
         lsr
         tay                     ; first cell
+        cpy #$28
+        bcs oSCDn               ; and a cell index has to be a real column, 0..39
         lda osR
         lsr
         lsr
-        sta ohRun               ; last cell
+        cmp #$28
+        bcc oSCR2
+        lda #$27
+oSCR2:  sta ohRun               ; last cell
         cpy ohRun               ; TEST BEFORE WRITING. This was a do-while, so an inverted range
         bcs oSCNx               ;   (left > right) still painted one cell -- which is exactly the
 oSCCol: lda #$fc
@@ -3994,8 +4004,13 @@ oSCId:  rts
 oSDeseam:
         ldx osI
         lda obCR,x              ; the orb's full cell range; hoisted, CPY has no abs,x
-        sta osR
+        cmp #$28
+        bcc oSDc1
+        lda #$27                ; a cell index must be 0..39 whatever the slot data says
+oSDc1:  sta osR
         lda obCL,x
+        cmp #$28
+        bcs oSDDn
         sta osDC
         ; COLUMNS OUTER, rows inner. seamT says per cell column what the solid run carries --
         ; SOLID, or a seam variant when a panel line lands there -- so a column with no seam skips
@@ -4014,7 +4029,9 @@ oSDRow: lda ohSv
         cmp osRowB
         beq oSDR1
         bcs oSDNx
-oSDR1:  tay
+oSDR1:  cmp #$19
+        bcs oSDNx               ; same bound as oSCells -- never index the row tables past 24
+        tay
         lda rowLoT,y
         sta osPtr
         lda rowHiT,y
