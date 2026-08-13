@@ -245,6 +245,107 @@ pkNew   = $8026                 ; palette keys this frame, last frame, and the f
 pkOld   = $8027
 pkEdge  = $8028
 pkJoy   = $8029                 ; joystick-1 lines, masked out of the palette-key reads
+; ---- orb scratch ----
+; The absolute half was at $cbxx, which the bank-3 move turned into graphics-only space. It is
+; now the LAST FREE PAGE of the array hole ($8500-$85ef) -- one page, every relative offset
+; preserved. The zero-page half is seamSpan's scratch, dead by the time orbMove runs. NOTE
+; mul8's own mp/mq/plo/phi sit at $98-$9b: ivH/ohgt/ocptr are deliberately ABOVE them and
+; o0-o2/ivL below, because relaxing that once put ivH on mp and every jsr mul8 ate its own
+; inputs -- the orb simply vanished.
+oaL     = $87
+oaH     = $88
+oaS     = $89
+orL     = $8c
+orH     = $8d
+o0      = $94
+o1      = $95
+o2      = $96
+ivL     = $97
+ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
+ohgt    = $9d
+ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
+ocos    = $8500
+ocosS   = $8501
+osin    = $8502
+osinS   = $8503
+fwdL    = $8504
+fwdH    = $8505
+rgtL    = $8506
+rgtH    = $8507
+ogL     = $8508
+ogH     = $8509
+oe      = $850a
+o3      = $850b
+ocoff   = $850c
+ovar    = $850d
+ocol    = $8510
+ocl     = $8512
+ocr     = $8513
+oidx    = $8517
+ocn     = $8518
+ocy     = $8519
+onv     = $851a
+omEn    = $851b
+omXX    = $851c
+omYY    = $851d
+omPri   = $851e
+omX8    = $851f
+omBit   = $8520
+odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
+ocn3    = $852a
+obX     = $8530
+obY     = $8538
+obP     = $8540
+obC     = $8548                  ; per-sprite state, flushed to the VIC in the border
+opx     = $855c                  ; the viewpoint orbMove last projected from
+opy     = $855e
+opa     = $8560
+ofx     = $8564
+ofy     = $8565
+kxc     = $8566
+kxs     = $8567
+kyc     = $8568
+kys     = $8569
+kfL     = $856a
+kfH     = $856b
+krL     = $856c
+krH     = $856d
+oix     = $856e
+oiy     = $856f
+oax     = $8570
+oay     = $8571
+oixS    = $8572
+oiyS    = $8573
+ocl2    = $8593                 ; the bounding box in COLUMNS, not cells
+ocmax   = $8594
+obCL    = $8598                 ; per sprite slot, for the second pass: cell range and
+obCR    = $85a0                 ; bounding-box edge masks, so pass 2 need not reproject
+obBL    = $85a8
+obBR    = $85b0
+obIX    = $85b8
+obV     = $85d0                 ; size variant per slot, so orbSeam can find the sprite's
+obOcc   = $85e0                 ; per slot: bit 7 = this orb has a possible occluder here
+obL     = $8574                 ; per slot: the orb's TIGHT column range, which the cell range
+obR     = $857c                 ;   cannot give -- a cell is 4 columns and a box starts inside one
+osI     = $85f4                 ; orbStamp: slot being stamped, and how many there are
+osN     = $85f5
+osL     = $85f6                 ; the span/box intersection being stamped
+osR     = $85f7
+osRow   = $85f8                 ; char row range
+osRowB  = $85f9
+osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
+ohSv    = $85fa                 ; span right edge / row counter, reused
+osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
+                                ;   orbStamp runs, so its pointer is free
+omptr   = $87                   ; 2 bytes: this orb's occluder mask. Deliberately SHARES oaL/oaH,
+                                ;   the multiply accumulator, which is dead once the projection
+                                ;   has produced a column range -- the same aliasing the original
+                                ;   used. Anything calling oabs after this point would break it.
+ohRun   = $85f0                 ; the run id, held across the mask-byte lookup
+ohL     = $85f1                 ; the span being tested: its left column, and the index into bndT
+ohBX    = $85f2
+ohDbg   = $85f3                 ; ORBOCCDBG: furthest stage any orb reached this frame
+ocanO   = $85e8                 ; the same bit while the candidate list is being walked
 
 bndT    = $7f00                 ; columns where a face or saturation state begins ($40 max)
 remLoT  = $8300                 ; per marched column: castRay's raw hit distance, 8.8 cells.
@@ -359,6 +460,30 @@ cpChr:  txa
         sta colS
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry.
+        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
+        lda #$00
+        sta $d015               ; nothing visible until orbMove has decided what is
+        lda pa
+        eor #$80
+        sta opa                 ; cannot match pa, so the first frame never takes the still path
+        lda #$ff
+        sta $d01c               ; ALL eight in multicolor: orbMove hands out slots as it finds
+                                ; visible orbs, so any of them can be in use
+        lda #$0b
+        sta $d025               ; sprite bit pair 01 = the shaded underside
+        lda #$0f
+        sta $d026               ; sprite bit pair 11 = highlight and ground shadow
+        lda #$0c
+        sta $d027               ; sprite bit pair 10 = the body. Per-sprite, so osFlush rewrites
+                                ; it; this is only the first frame's value.
+                                ;
+                                ; $d01b comes from omPri every frame, and nothing SETS omPri yet,
+                                ; so every sprite is IN FRONT of all foreground. Deliberate: the
+                                ; walls are already bit pair 01 (background), so orbs draw over
+                                ; them -- but the seams are bit pair 10, which IS foreground, and
+                                ; would otherwise take a bite out of an orb standing in front of
+                                ; one. Occlusion returns as stamped foreground-black chars plus a
+                                ; per-orb priority bit, and that is when this changes.
         lda #$00
         sta pkOld               ; no keys held on the first frame, so nothing reads as a fresh press
         lda #$00
@@ -1205,6 +1330,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 
 subFin:
+        jsr orbMove             ; once a frame: project every candidate the cell lists
         jsr renderSym
         jsr drawFps
         jsr drawDbg
@@ -1233,6 +1359,7 @@ mshB:   lda #$90
         lda #$e0
         sta baseHi
 mnext:
+        jsr osFlush             ; sprite registers, now the beam is out of the way
         inc iterLo
         bne mloop
         inc iterHi
@@ -3421,6 +3548,1053 @@ edgHiT: !byte >edA0,>edA1,>edA2,>edA3,>edA4,>edA5,>edA6,>edA7,>edA8,>edA9,>edA10
 t1TabT: !byte 100,92,84,76,68,60,52,44,36,28,20,12,4
 tbTabT: !byte 93,85,77,69,61,53,45,37,29,21,13,5,0
 
+; ==================== orbs: projection and placement ====================
+; Ported from ddfa4bc^ (the pass deleted at ddfa4bc) with three changes for the current map:
+;   - the sprite pointers live in the last eight bytes of SCREEN memory, which is bank 3 now;
+;   - the scratch moved off $cbxx -- bank 3 is graphics-only -- to the array hole's last page;
+;   - orbPaint and orbSeam are NOT ported, so nothing here decides occlusion.
+
+; ---- orbMove: place every visible orb ----
+; Once a frame. Written for clarity over cycles and keeping its working set in absolute RAM
+; where it can, since 50-odd absolute accesses cost 50 cycles and buy back the whole seam
+; scratch. The hot half lives in that scratch, which is dead by the time this runs.
+;
+; Camera space: forward = dx*cos(pa) + dy*sin(pa), right = dy*cos(pa) - dx*sin(pa). "right" is
+; the direction of INCREASING column, which is d/dpa of the ray direction = (-sin, cos). Map y
+; runs downward, matching the DDA, so no handedness fixup is needed anywhere here.
+;
+; The candidate list for the player's cell is pre-sorted by distance, so the first eight orbs
+; that project are the NEAREST eight and assigning them to sprites in order also gets the
+; overlap priority right -- sprite 0 draws over sprite 1.
+orbMove:
+        ; ---- nothing moved? then nothing projects differently ----
+        ; Six orbs on screen is about 18,700 cycles, and standing still it is 18,700 cycles
+        ; spent arriving at last frame's answer. The sprite registers already hold it. All that
+        ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
+        ; rewrites the screen every frame and puts plain SOLID back.
+        jmp obMoved             ; DEADCODE-OK: the still-frame short-circuit is off until the
+                                ; occlusion stamping lands -- see the comment above it.
+        lda px
+        cmp opx
+        bne obMoved
+        lda px+1
+        cmp opx+1
+        bne obMoved
+        lda py
+        cmp opy
+        bne obMoved
+        lda py+1
+        cmp opy+1
+        bne obMoved
+        lda pa
+        cmp opa
+        bne obMoved
+        rts                     ; a still frame. The slot data from the last one still stands
+                                ; and orbPaint runs unconditionally, so the walls come out
+                                ; painted the same way without reprojecting anything.
+obMoved:lda px
+        sta opx
+        lda px+1
+        sta opx+1
+        lda py
+        sta opy
+        lda py+1
+        sta opy+1
+        lda pa
+        sta opa
+        ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
+        lda absCosT,x
+        sta ocos
+        lda absSinT,x
+        sta osin
+        lda #$00                ; sin(a) < 0 exactly when bit 7 of a is set, and cos(a) < 0
+        sta osinS               ; when bit 7 of a+64 is -- no sign tables needed
+        lda pa
+        bpl oss
+        lda #$ff
+        sta osinS
+oss:    lda #$00
+        sta ocosS
+        lda pa
+        clc
+        adc #$40
+        bpl ocs
+        lda #$ff
+        sta ocosS
+ocs:    ; ---- the half of every product that all orbs share ----
+        ; dx = (orbCell - playerCell) + (0.5 - playerFraction). The right-hand term is the same
+        ; for every orb, so (that * cos) and (that * sin) are frame constants. Folding them into
+        ; one addend per axis pair leaves the per-orb work as four 8x8 multiplies.
+        ; 0.5 - playerFraction, as a signed byte. The range is -127..+128 and +128 does not
+        ; fit -- it reads as -128, flipping the sign of every term derived from it. That
+        ; happens for exactly one value, a fraction of zero, which is the player sitting
+        ; precisely on a cell boundary: the orbs lurch for a single frame while crossing and
+        ; snap back once past. Clamp to +127; the 1/256 of a cell it costs is invisible.
+        sec
+        lda #$80
+        sbc px
+        cmp #$80
+        bne ofxOk
+        lda #$7f
+ofxOk:  sta ofx
+        sec
+        lda #$80
+        sbc py
+        cmp #$80
+        bne ofyOk
+        lda #$7f
+ofyOk:  sta ofy
+        lda ofx
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        sta kxc
+        lda ofx
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        sta kxs
+        lda ofy
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        sta kyc
+        lda ofy
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        sta kys
+        ; forward picks up kxc + kys, right picks up kyc - kxs. Both are sums of SIGNED
+        ; bytes and both need a real 16-bit add: sign-extend each operand into its own high
+        ; byte and let adc/sbc carry between them. Sign-extending and then discarding the
+        ; carry -- which is what this did -- is wrong by 256 whenever the low bytes carry,
+        ; and since these terms come from the player's sub-cell position the error moves as
+        ; you walk. It reads as the orbs drifting off the map.
+        lda kxc
+        jsr kSgn
+        sta tmp
+        lda kys
+        jsr kSgn
+        sta tmp2
+        clc
+        lda kxc
+        adc kys
+        sta kfL
+        lda tmp
+        adc tmp2
+        sta kfH
+        lda kyc
+        jsr kSgn
+        sta tmp
+        lda kxs
+        jsr kSgn
+        sta tmp2
+        sec
+        lda kyc
+        sbc kxs
+        sta krL
+        lda tmp
+        sbc tmp2
+        sta krH
+        lda #$00                ; the per-sprite bit registers are built up a bit at a time and
+        sta omEn                ; written once, so an unused slot is simply never set
+        sta omXX
+        sta omYY
+        sta omPri
+        sta omX8
+        sta onv
+        lda py+1                ; which cell is the player standing in?
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc px+1
+        tax
+        lda candCntT,x
+        beq obEnd
+        sta ocn
+        asl                     ; three bytes per record
+        clc
+        adc ocn
+        sta ocn3
+        lda candLoT,x
+        sta ocptr
+        lda candHiT,x
+        sta ocptr+1
+        lda #$00
+        sta ocy
+        
+obLoop: ldy ocy
+        lda (ocptr),y
+        sta oidx
+        iny
+        lda pa                  ; is the orb anywhere near the way we are facing? The list is
+        sec                     ; all-round, the view is 66 degrees, and a full projection
+        sbc (ocptr),y           ; costs a hundred times what this compare does
+        bpl obPos
+        eor #$ff
+        clc
+        adc #$01
+obPos:  iny
+        sta tmp                 ; how far off the bearing we are
+        lda (ocptr),y
+        sta ocanO               ; bit 7: can ANY run reachable from this cell occlude this orb?
+                                ; blockers() answered that at build time and it was being
+                                ; thrown away here, so every projected orb paid for the full
+                                ; per-cell mask even when the answer was always no
+        and #$7f
+        cmp tmp
+        bcc obNext              ; outside the window: not on screen
+        jsr orbOne
+obNext: lda ocy
+        clc
+        adc #$03
+        sta ocy
+        lda onv
+        cmp #$08                ; eight hardware sprites, and the list is nearest-first
+        bcs obEnd
+        lda ocy
+        cmp ocn3
+        bcc obLoop
+obEnd:  rts
+
+; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
+; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
+; the raster is inside the visible area lets the VIC fetch half of one frame's sprite and half
+; of the next -- a sheared orb, or one that pops to somewhere else for a single frame. Called
+; after the raster wait and the buffer flip, when the beam is past line 250 and no sprite is
+; being fetched. Costs about 30 cycles per visible orb, which is nothing next to the ~2400 it
+; took to work out where the orb goes.
+; ---- orbStamp: paint foreground black where a wall should clip an orb ----
+; Runs AFTER renderSym, because it overwrites cells renderSym has just drawn. The seven occluder
+; glyphs are the same black as the wall and differ only in bit pair, so a stamped cell is
+; invisible as colour and clips exactly.
+;
+; Per orb, only where the build already said occlusion is possible (obOcc bit 7, false for 56% of
+; candidates). Walk the spans overlapping the orb's box exactly as orbOne does; every span whose
+; run occludes this orb gets its intersection with the box stamped.
+;
+; Two things follow from stamping at all, and both are handled here rather than anywhere else:
+;   - the orb's PRIORITY bit has to be set, or foreground means nothing to it. Set per orb, not
+;     globally: an orb with nothing occluding it keeps priority 0, which is why seams cannot bite
+;     it and why it needs no de-seam sweep.
+;   - once its bit is set, SEAMS clip it too -- they are bit pair 10, the only other foreground
+;     in the charset. So every seam inside the orb's box becomes plain black. Its whole box, not
+;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
+;     wall is occluding at the edge.
+orbStamp:
+        lda onv
+        beq oSDn
+        ; Which buffer's run cache to invalidate. renderSym patches operands rather than indexing
+        ; per column; do the same, once per frame. cbA/cbB hold the solid-run START this buffer
+        ; already shows, and $ff is the sentinel it treats as "always redraw" -- a value rs cannot
+        ; take, already used for seam columns. A stamped cell is invisible to that cache, so
+        ; without this the column is skipped next time this buffer comes round and the black block
+        ; STAYS: a trail behind every moving orb.
+        lda baseHi
+        cmp #$e0
+        bne oSCbB
+        lda #<cbA
+        jmp oSCbS
+oSCbB:  lda #<cbB
+oSCbS:  sta oSInv+1
+        sta oSDIn+1
+        sta osN
+        lda #$00
+        sta osI
+oSLoop: ldx osI
+        lda obOcc,x
+        bpl oSNext              ; nothing reachable from this cell can occlude this orb
+        lda obIX,x
+        tay
+        lda orbOccLoT,y
+        sta omptr
+        lda orbOccHiT,y
+        sta omptr+1
+        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
+        ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
+        ; Display y is raster - 50, and a char row is eight of those.
+        ldy obV,x
+        ; Display y is raster - 50, and a char row is eight of those. SUBTRACT THE 50 FIRST: obY
+        ; is 150 - anchor + h, so obY + anchor is 150 + h, which passes 255 once h > 105 and wraps.
+        ; The bottom row then came out tiny, the stamp ran from a bogus row, and black cells landed
+        ; on the white CEILING -- long vertical bars, with the de-seam stripping seams nowhere near
+        ; the orb. One overflow, both symptoms.
+        lda obY,x
+        sec
+        sbc #$32
+        sta ohSv                ; display y of the sprite frame's top row
+        clc
+        adc orbBlankT,y         ; ... plus the blank rows above the content
+        lsr
+        lsr
+        lsr
+        sta osRow
+        lda ohSv
+        clc
+        adc orbAnchT,y
+        sec
+        sbc #$01                ; the last inked row
+        lsr
+        lsr
+        lsr
+        cmp #$19
+        bcc oSRok
+        lda #$18                ; clamp to the last screen row: a near orb's box runs off the
+                                ; bottom, and the rows below 24 are not screen memory at all
+oSRok:  sta osRowB
+        lda osRow               ; clamp the TOP row too. Only the bottom was clamped, so a near
+        cmp #$19                ;   orb whose feet run off the screen came out with osRow 26
+        bcc oSRtk               ;   against osRowB 24 -- an inverted row range.
+        lda #$18
+oSRtk:  cmp osRowB
+        bcc oSRok2
+        beq oSRok2
+        jmp oSDone              ; nothing of this orb is on screen
+oSRok2: sta osRow
+        ; walk the spans, exactly as the whole-orb test does
+        lda #$00
+        sta ohL
+        sta ohBX
+oSSpan: ldx ohBX
+        cpx nbnd
+        bcc oSSB
+        lda #$9f
+        jmp oSSR
+oSSB:   lda bndT,x
+        sec
+        sbc #$01
+oSSR:   sta ohRun               ; borrow: this span's right edge
+        ldx osI
+        cmp obL,x
+        bcc oSAdv               ; span ends before the orb begins
+        lda ohL
+        cmp obR,x
+        beq oSChk
+        bcs oSDone              ; span begins past the orb: nothing left to stamp
+oSChk:  ldx ohL
+        ldy faceIdT,x
+        beq oSAdv               ; no run in this span, so it cannot occlude
+        sty ohSv
+        lda runByteT,y
+        tay
+        lda (omptr),y
+        ldy ohSv
+        and runBitT,y
+        beq oSAdv               ; this run does not occlude this orb
+        ; it does: stamp [max(spanL, obL) .. min(spanR, obR)]
+        ldx osI
+        lda ohL
+        cmp obL,x
+        bcs oSL1
+        lda obL,x
+oSL1:   sta osL
+        lda ohRun
+        cmp obR,x
+        bcc oSR1
+        lda obR,x
+oSR1:   sta osR
+        lda osL
+        cmp osR
+        beq oSCall
+        bcs oSAdv               ; inverted intersection: nothing to stamp for this span
+oSCall: jsr oSCells
+oSAdv:  ldx ohBX
+        cpx nbnd
+        bcs oSDone
+        lda bndT,x
+        sta ohL
+        inc ohBX
+        jmp oSSpan
+oSDone: lda omPri            ; was anything stamped for this orb? then its seams must go
+        ldx osI
+        and orbBitT,x
+        beq oSDsk
+        jsr oSDeseam
+oSDsk:  inc osI
+        lda osI
+        cmp osN
+        bcs oSDn
+        jmp oSLoop
+oSNext: inc osI
+        lda osI
+        cmp osN
+        bcc oSLoop
+oSDn:   rts
+
+; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
+; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
+; so occlusion currently quantises to a 4-column cell (8 screen pixels).
+oSCells:        ldx osI
+        lda orbBitT,x
+        ora omPri
+        sta omPri               ; this orb is now BEHIND foreground
+        lda osRow
+        sta ohSv
+oSCRow: lda ohSv
+        cmp osRowB
+        beq oSCR1
+        bcs oSCDn
+oSCR1:  tay
+        lda rowLoT,y
+        sta osPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta osPtr+1
+        lda osL
+        lsr
+        lsr
+        tay                     ; first cell
+        lda osR
+        lsr
+        lsr
+        sta ohRun               ; last cell
+        cpy ohRun               ; TEST BEFORE WRITING. This was a do-while, so an inverted range
+        bcs oSCNx               ;   (left > right) still painted one cell -- which is exactly the
+oSCCol: lda #$fc    ;   stray black block that showed up in the ceiling.
+        sta (osPtr),y
+        cpy ohRun
+        bcs oSCNx
+        iny
+        bne oSCCol
+oSCNx:  inc ohSv
+        jmp oSCRow
+oSCDn:  lda osL                 ; invalidate the cache for every cell column just stamped
+        lsr
+        lsr
+        tay
+        lda osR
+        lsr
+        lsr
+        sta ohSv
+oSCIv:  lda #$ff
+oSInv:  sta cbA,y               ; operand patched above to this buffer's cache
+        cpy ohSv
+        bcs oSCId
+        iny
+        bne oSCIv
+oSCId:  rts
+
+; oSDeseam: a seam inside a stamped orb's box would clip it -- seams are bit pair 10, the only
+; other foreground in the charset. Replace each with plain SOLID, which is the same black at bit
+; pair 01 and cannot clip. The orb's WHOLE box, not just the occluded part: a near wall's seam
+; would otherwise bite an orb that a DIFFERENT wall is occluding at the edge.
+;
+; Only reached by orbs that were actually stamped, so an unoccluded orb pays nothing and keeps
+; its seams -- which is the whole reason the priority bit is per orb rather than global.
+oSDeseam:
+        ldx osI
+        lda obCR,x              ; the orb's full cell range; hoisted, CPY has no abs,x
+        sta osR
+        lda obCL,x
+        sta osDC
+        ; COLUMNS OUTER, rows inner. seamT says per cell column what the solid run carries --
+        ; SOLID, or a seam variant when a panel line lands there -- so a column with no seam skips
+        ; all of its rows without a single screen read. Seams are rare, so nearly every column
+        ; exits here. With the test inside the row loop instead it saved the read but kept the
+        ; loop, and cost the same 3 fps.
+oSDCol: ldy osDC
+        lda seamT,y
+        cmp #$f5
+        bcc oSDNx
+        cmp #$f9
+        bcs oSDNx
+        lda osRow
+        sta ohSv
+oSDRow: lda ohSv
+        cmp osRowB
+        beq oSDR1
+        bcs oSDNx
+oSDR1:  tay
+        lda rowLoT,y
+        sta osPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta osPtr+1
+        ldy osDC
+        lda (osPtr),y           ; the seam does not reach every row of the box: the rows above the
+        cmp #$f5       ;   solid run are ceiling or edge cells and must not become SOLID
+        bcc oSDRN
+        cmp #$f9
+        bcs oSDRN
+        lda #$01
+        sta (osPtr),y
+        lda #$ff
+oSDIn:  sta cbA,y               ; operand shares oSInv's patch target
+oSDRN:  inc ohSv
+        jmp oSDRow
+oSDNx:  ldy osDC
+        cpy osR
+        bcs oSDDn
+        inc osDC
+        jmp oSDCol
+oSDDn:  rts
+
+osFlush:
+        ldx onv
+        beq osBits
+osLp:   dex
+        txa
+        asl
+        tay
+        lda obX,x
+        sta $d000,y
+        lda obY,x
+        sta $d001,y
+        lda obP,x
+        sta $e3f8,x             ; the pointer lives in the SCREEN, so both buffers need it
+        sta $e7f8,x
+        lda obC,x
+        sta $d027,x
+        cpx #$00
+        bne osLp
+osBits: lda omEn
+        sta $d015
+        lda omXX
+        sta $d01d
+        lda omYY
+        sta $d017
+        lda omPri
+        sta $d01b
+        lda omX8
+        sta $d010
+        rts
+
+; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
+orbOne: ldx oidx
+        sec                     ; Ix, Iy = orb cell - player cell, -15..15
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+        ldy #$00                ; magnitudes and signs, so the products can be unsigned
+        lda oix
+        bpl oipx
+        eor #$ff
+        clc
+        adc #$01
+        ldy #$ff
+oipx:   sta oax
+        sty oixS
+        ldy #$00
+        lda oiy
+        bpl oipy
+        eor #$ff
+        clc
+        adc #$01
+        ldy #$ff
+oipy:   sta oay
+        sty oiyS
+        ; forward = Ix*cos + Iy*sin + kf
+        lda oax
+        ldx ocos
+        lda oixS
+        eor ocosS
+        ldy oax
+        jsr oTerm
+        lda orL
+        sta fwdL
+        lda orH
+        sta fwdH
+        lda oiyS
+        eor osinS
+        ldx osin
+        ldy oay
+        jsr oTerm
+        clc
+        lda fwdL
+        adc orL
+        sta fwdL
+        lda fwdH
+        adc orH
+        sta fwdH
+        clc
+        lda fwdL
+        adc kfL
+        sta fwdL
+        lda fwdH
+        adc kfH
+        sta fwdH
+        lda fwdH                ; behind the camera, or close enough to be inside us. Tested
+        bmi orbNo               ; HERE, before "right" costs two more products: at any given
+        bne ofwOk               ; moment most of the world is behind you
+        lda fwdL
+        cmp #$40
+        bcc orbNo
+ofwOk:  ; right = Iy*cos - Ix*sin + kr
+        lda oiyS
+        eor ocosS
+        ldx ocos
+        ldy oay
+        jsr oTerm
+        lda orL
+        sta rgtL
+        lda orH
+        sta rgtH
+        lda oixS
+        eor osinS
+        ldx osin
+        ldy oax
+        jsr oTerm
+        sec
+        lda rgtL
+        sbc orL
+        sta rgtL
+        lda rgtH
+        sbc orH
+        sta rgtH
+        clc
+        lda rgtL
+        adc krL
+        sta rgtL
+        lda rgtH
+        adc krH
+        sta rgtH
+        ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
+        ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
+        ; of forward costs under 0.4% -- less than half a column at the screen edge.
+        lda fwdL
+        asl
+        sta ogL
+        lda fwdH
+        rol
+        sta ogH
+        lda #$00
+        sta oe
+onLp:   lda ogH
+        beq onDn
+        lsr ogH
+        ror ogL
+        inc oe
+        jmp onLp
+onDn:   ldx ogL
+        lda recipLoT,x
+        sta ivL
+        lda recipHiT,x
+        sta ivH
+        lda #$05
+        sec
+        sbc oe
+        beq ivDn
+        bmi ivRt
+        tax
+ivLp:   asl ivL
+        rol ivH
+        dex
+        bne ivLp
+        jmp ivDn
+ivRt:   tax                     ; e > 5: shift the other way instead
+ivRl:   lsr ivH
+        ror ivL
+        inx
+        bne ivRl
+ivDn:   lda #$0b                ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
+        sta mq
+        lda ivL
+        jsr mul8
+        lda plo
+        sta o0
+        lda phi
+        sta o1
+        lda #$00
+        sta o2
+        lda #$0b
+        sta mq
+        lda ivH
+        jsr mul8
+        clc
+        lda o1
+        adc plo
+        sta o1
+        lda o2
+        adc phi
+        sta o2
+        lsr o2
+        ror o1
+        lda o2
+        beq ohOk
+        lda #$ff
+        sta o1
+ohOk:   lda o1
+        sta ohgt
+        ; column offset = right * (80/tan(FOV/2)) / forward. h is ALREADY 22528/forward, so the
+        ; ratio comes free off it -- right*h/183 -- and the 16x16 multiply plus 32-bit shift
+        ; that computing right/forward separately would need is gone entirely.
+        lda rgtL
+        sta oaL
+        lda rgtH
+        sta oaH
+        jsr oabs
+        lda ohgt
+        sta mq
+        lda oaL
+        jsr mul8
+        lda plo
+        sta o0
+        lda phi
+        sta o1
+        lda ohgt
+        sta mq
+        lda oaH
+        jsr mul8
+        clc
+        lda o1
+        adc plo
+        sta o1
+        lda phi
+        adc #$00
+        bne orbNo               ; |right|*h past 65535 is far outside the FOV
+        lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
+        sta mq                  ; shift of it is just (b2 << 1) | (b1 >> 7) -- no shift loop.
+        lda o0
+        jsr mul8
+        lda phi
+        sta o2
+        lda #179
+        sta mq
+        lda o1
+        jsr mul8
+        clc
+        lda o2
+        adc plo
+        sta o2
+        lda phi
+        adc #$00
+        asl o2
+        rol
+        bcs orbNo               ; past 255 columns off centre: nowhere near the screen
+        sta ocoff
+        ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
+        lda orbVarT,x
+        sta ovar
+        lda oaS                 ; --- centre column ---
+        bmi ocN
+        clc
+        lda #80
+        adc ocoff
+        jmp ocS
+ocN:    sec
+        lda #80
+        sbc ocoff
+ocS:    sta ocol
+        lda ocoff               ; --- screen X: 24 + 2*column - halfWidth, signed 16-bit ---
+        asl
+        sta o0
+        lda #$00
+        rol
+        sta o1
+        lda oaS
+        bmi oxNeg
+        clc
+        lda o0
+        adc #184
+        sta o0
+        lda o1
+        adc #$00
+        sta o1
+        jmp oxDn
+oxNeg:  sec
+        lda #184
+        sbc o0
+        sta o0
+        lda #$00
+        sbc o1
+        sta o1
+oxDn:   ldx ovar
+        sec
+        lda o0
+        sbc orbHalfT,x
+        sta o0
+        lda o1
+        sbc #$00
+        sta o1
+        bmi orbNo               ; fully off the left edge
+        cmp #$02
+        bcs orbNo               ; past x = 512, fully off the right
+        ; --- screen Y: ground shadow on the floor line, 100 + h ---
+        ; $d001 = 150 + h - anchor, but computed as (150 - anchor) + h. Adding 150 first
+        ; carries out of a byte once h passes 105, which used to cap how close an orb could
+        ; get -- it blinked out at 0.84 cells instead of sliding off the bottom. Folding the
+        ; anchor into the constant keeps the sum in range all the way down to 0.62 cells,
+        ; which is past the point where the whole sprite is below the last visible line.
+        ldx ovar
+        lda orbYBaseT,x
+        clc
+        adc ohgt
+        bcs orbNo               ; far below the screen
+        cmp #251
+        bcs orbNo               ; top of the sprite is past the last visible raster line
+        sta o3
+        ; ---- occlusion: is the orb beyond the faces it overlaps? ----
+        ; A face occludes the orb only if the orb lies on the FAR side of its plane. We render
+        ; camera-facing faces only, so anything on screen already faces the camera; if the orb
+        ; is beyond it, the face is between them. That answer never involves the camera, so it
+        ; is precomputed at build time: one bit per (orb, run).
+        ;
+        ; Per FACE, not per column, and that is the whole point. Comparing the orb's height
+        ; against the wall's was per column and quantised, so two cells of one flat wall could
+        ; disagree -- and every occlusion artifact in this thing has been exactly that
+        ; disagreement showing up as a sliver of orb through a wall or a slice cut out of one.
+        ; ---- record what this orb needs, for the paint pass below ----
+        ; Nothing is decided here and nothing is written to the screen. The orb states which
+        ; columns under it must clip it; orbPaint merges every orb's statement and renderSym
+        ; then draws each column that way the first time. There is no second pass over the
+        ; walls at all, which is what removes every artifact that came from editing them.
+        ldx ovar                ; half the orb's width, in logical columns
+        lda orbColT,x
+        sta o2
+        lda ocol                ; the bounding box, in logical columns
+        sec
+        sbc o2
+        bcs opBL1
+        lda #$00
+opBL1:  cmp #$a0        ; and clamp the TOP end too. Only the underflow was caught, so
+        bcc opBL2               ; an orb whose centre projects past the right edge gave a box
+        lda #$9f    ; starting past column 159 -- cell 40 or beyond, which walks
+opBL2:  sta ocl2                ; off the end of fgCell and seamT and writes past the screen
+        lsr
+        lsr
+        sta ocl
+        lda ocol
+        clc
+        adc o2
+        bcc opBR1
+        lda #159
+opBR1:  cmp #160
+        bcc opBR2
+        lda #159
+opBR2:  sta ocmax
+        lsr
+        lsr
+        cmp ocl
+        bcs opBR3
+        lda ocl
+opBR3:  sta ocr
+        ; ---- is this orb WHOLLY occluded? ----
+        ; The rule is the user's: a wall facing AWAY from an orb always occludes it, and a wall
+        ; facing the orb never can. Which side of each face's plane every orb lies on is a
+        ; build-time constant (orbOccT, one bit per orb x run), so the only runtime question is
+        ; whether some column under the orb shows a run that does NOT occlude it -- and the first
+        ; such column means the orb is visible. There is no depth test and no height test:
+        ;
+        ;   - no depth, because the plane test decides it per FACE, so every column showing that
+        ;     face gets the same answer by construction. Depth comparisons are per column and
+        ;     quantised, which is where every occlusion artifact in this engine has come from.
+        ;   - no height, because camera height is fixed and everything stands on the floor. A wall
+        ;     that occludes an orb is NEARER, hence taller on screen with a lower base, so the orb
+        ;     projects entirely inside its solid region and can never poke out above it.
+        ;
+        ; faceIdT is the run id per logical COLUMN, filled during casting for the run-merge, so it
+        ; costs nothing to produce here -- and it is FINER than the per-cell fill the old scheme
+        ; needed. A corner cell showing two different runs was the source of most of that scheme's
+        ; artifacts and of its "every run in the cell must agree" rule; per column, that case does
+        ; not arise.
+        lda ocanO
+        bpl opDone              ; build time: nothing reachable from this cell can occlude it, and
+                                ; that is true of 56% of candidates -- they never enter the walk
+
+        ldy oidx
+        lda orbOccLoT,y
+        sta omptr
+        lda orbOccHiT,y
+        sta omptr+1
+        ; Walk the SPANS the subdivision left behind, not the columns. bndT holds the columns
+        ; where a new face begins, sorted, so the spans are [0,bndT[0]-1], [bndT[0],bndT[1]-1],
+        ; ... [bndT[n-1],159] -- about fourteen of them. Each span is a contiguous piece of ONE
+        ; wall run, and its LEFT column is a cast column, which is the only place faceIdT is
+        ; valid: it is written once per ray, and adaptive subdivision casts ~14-26 of 160. Reading
+        ; it per column looks right and silently returns last frame's values for the rest.
+        ;
+        ; So this needs nothing added to the interpolator or to the wall drawing. It reads what
+        ; the subdivision already produced, and it stops at the first span that does not occlude.
+        lda #$00
+        sta ohL                 ; the first span starts at column 0
+        sta ohBX
+ohSpan: ldx ohBX                ; this span's right edge
+        cpx nbnd
+        bcc ohSB
+        lda #$9f    ; the last span runs to the right edge of the screen
+        jmp ohSR
+ohSB:   lda bndT,x
+        sec
+        sbc #$01
+ohSR:   cmp ocl2
+        bcc ohAdv               ; span ends before the orb begins: irrelevant, skip it
+        lda ohL
+        cmp ocmax
+        beq ohChk
+        bcs ohHide              ; span begins past the orb: every overlapping span occluded it
+ohChk:
+        ldx ohL
+        ldy faceIdT,x           ; the run this span shows
+        beq opDone              ; no run here at all, so the orb shows through
+        sty ohRun
+        lda runByteT,y
+        tay
+        lda (omptr),y           ; the mask byte holding this run's bit
+        ldy ohRun
+        and runBitT,y
+        beq opDone              ; this run does not occlude this orb -> the orb is visible
+ohAdv:  ldx ohBX
+        cpx nbnd
+        bcs ohHide              ; that was the last span, and it occluded
+        lda bndT,x
+        sta ohL                 ; the next span starts at this boundary
+        inc ohBX
+        jmp ohSpan
+ohHide: jmp orbNo           ; wholly occluded: take no sprite slot at all
+opDone:
+        ; --- take a sprite slot ---
+        ldx onv
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ldy ovar
+        lda orbPtrT,y
+        sta obP,x               ; buffered, not written: see osFlush
+        ldy oidx
+        lda orbColT2,y
+        sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
+        ldy ovar
+        lda orbExpT,y
+        beq oNoX
+        lda omBit
+        ora omXX
+        sta omXX
+        lda omBit
+        ora omYY
+        sta omYY
+oNoX:   lda o0
+        and #$fe                ; snap X to the MULTICOLOR grid. A multicolor char pixel is two
+                                ; hires pixels aligned to the character (always even, since
+                                ; sprite X 24 is screen x 0); a multicolor SPRITE pixel is also
+                                ; two, but aligned to the sprite's own X. At an odd X the two
+                                ; grids are half a pixel out of phase, and since the VIC decides
+                                ; priority per HIRES pixel, one half of a sprite pixel lands on
+                                ; foreground and clips while its partner lands on background and
+                                ; draws -- a one-hires-pixel sliver of orb peeking past a wall
+                                ; edge that is otherwise clipping it correctly. Costs 2 cycles
+                                ; and quantises horizontal motion to 2px.
+        sta obX,x
+        lda o3
+        sta obY,x
+        lda o1
+        beq oNoM
+        lda omBit
+        ora omX8
+        sta omX8
+oNoM:   ; remember what this orb asked for; the second pass compares it against what the
+        ; scene actually ended up painting, which is the only place a conflict can show up
+        ldx onv
+        lda oidx
+        sta obIX,x
+        lda ovar
+        sta obV,x
+        lda ocanO
+        sta obOcc,x
+        lda ocl
+        sta obCL,x
+        lda ocr
+        sta obCR,x
+        lda ocl2
+        sta obL,x               ; the tight column range, for the stamp pass
+        lda ocmax
+        sta obR,x
+        lda ocl2
+        and #$03
+        tay
+        lda bbLT,y              ; the columns of the leftmost cell inside the box
+        sta obBL,x
+        lda ocmax
+        and #$03
+        tay
+        lda bbRT,y              ; ... and of the rightmost
+        sta obBR,x
+        inc onv
+orbYes: rts
+orbNo:  rts
+kSgn:   bmi kSgN
+        lda #$00
+        rts
+kSgN:   lda #$ff
+        rts
+
+; oTerm: (Y * X) as a 16-bit product in orL/orH, negated if A is negative. Y is a cell
+; difference magnitude (0..15) and X a trig magnitude, so this is a plain 8x8 -- the 16x8 the
+; old orot did was only ever needed because the orb offset carried a fraction, and that
+; fraction is now a per-frame constant instead.
+oTerm:  stx mq
+        sta tmp2
+        tya
+        jsr mul8
+        lda tmp2
+        bpl otD
+        sec
+        lda #$00
+        sbc plo
+        sta orL
+        lda #$00
+        sbc phi
+        sta orH
+        rts
+otD:    lda plo
+        sta orL
+        lda phi
+        sta orH
+        rts
+
+; oFrac: (signed A * unsigned X) >> 8, negated if Y is $ff. A is 0.5 minus the player's
+; fractional position, so the result is the shared fractional term of one product -- and it
+; always fits a signed byte, since |A| <= 128 and X <= 255.
+oFrac:  stx mq
+        sta tmp
+        cmp #$00                ; STA does not set flags -- without this the branch tested
+        bpl ofP                 ; whatever the caller's ldy left, so a negative offset was
+                                ; multiplied as its unsigned byte and never negated
+        eor #$ff
+        clc
+        adc #$01
+        tya
+        eor #$ff
+        tay                     ; A was negative: flip the sign we were handed
+        lda tmp
+        eor #$ff
+        clc
+        adc #$01
+ofP:    sty tmp2
+        jsr mul8
+        lda tmp2
+        bpl ofD
+        sec
+        lda #$00
+        sbc phi
+        rts
+ofD:    lda phi
+        rts
+
+; |a| with the sign kept aside, so every product below can be done unsigned and negated once.
+oabs:   lda #$00
+        sta oaS
+        lda oaH
+        bpl oabsD
+        lda #$ff
+        sta oaS
+        sec
+        lda #$00
+        sbc oaL
+        sta oaL
+        lda #$00
+        sbc oaH
+        sta oaH
+oabsD:  rts
+
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
@@ -3435,6 +4609,52 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; still built in JS -- charsetgen and the readout glyph checks compare against it -- but nothing
 ; is emitted, which is the point: it was a permutation of bytes already in the image.
 
+; ================= orb tables =================
+; These sit in the hole between the code and the first emitted table. Only what the projection
+; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
+; popcT) are NOT here, because they addressed charset twins that no longer exist.
+        * = $2e00
+orbVarT: !byte 21,21,21,21,21,20,20,20,20,19,19,19,19,18,18,18,18,17,17,17,17,16,16,16,16,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12,12,12,11,11,11,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $2f00
+candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,8,5,5,5,5,0,5,5,5,5,4,5,5,0,0,7,8,6,6,5,5,0,6,6,6,6,5,5,3,0,0,6,7,6,6,6,6,0,9,8,8,0,0,0,4,0,0,6,0,0,0,7,10,12,12,11,9,0,3,3,2,0,0,4,0,4,5,7,8,0,0,10,9,0,4,0,0,0,0,4,0,4,0,0,0,0,6,9,7,0,6,8,5,0,0,4,0,2,0,3,5,5,6,8,9,10,7,0,3,0,0,4,0,3,0,3,0,0,0,0,0,12,9,0,3,0,0,4,5,4,0,2,0,3,3,3,6,10,10,0,3,0,0,0,0,4,0,3,0,4,0,0,0,0,9,8,5,0,0,2,4,4,5,3,0,4,0,3,4,4,7,7,6,0,0,4,0,0,0,0,0,6,0,6,0,0,0,0,0,0,0,4,3,3,4,6,7,7,8,7,0,4,4,4,4,0,0,2,2,2,0,0,7,7,8,8,7,5,5,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $3000
+candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,45,60,75,90,0,105,120,135,150,165,177,192,0,0,207,228,252,14,32,47,0,62,80,98,116,134,149,164,0,0,173,191,212,230,248,10,0,28,55,79,0,0,0,103,0,0,115,0,0,0,133,154,184,220,0,33,0,60,69,78,0,0,84,0,96,108,123,144,0,0,168,198,0,225,0,0,0,0,237,0,249,0,0,0,0,5,23,50,0,71,89,113,0,0,128,0,140,0,146,155,170,185,203,227,254,28,0,49,0,0,58,0,70,0,79,0,0,0,0,0,88,124,0,151,0,0,160,172,187,0,199,0,205,214,223,232,250,24,0,54,0,0,0,0,63,0,75,0,84,0,0,0,0,96,123,147,0,0,162,168,180,192,207,0,216,0,228,237,249,5,26,47,0,0,65,0,0,0,0,0,77,0,95,0,0,0,0,0,0,0,113,125,134,143,155,173,194,215,239,0,4,16,28,40,0,0,52,58,64,0,0,70,91,112,136,160,181,196,211,223,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $3100
+candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,0,55,55,55,55,55,55,55,0,0,55,55,55,56,56,56,0,56,56,56,56,56,56,56,0,0,56,56,56,56,56,57,0,57,57,57,0,0,0,57,0,0,57,0,0,0,57,57,57,57,58,58,0,58,58,58,0,0,58,0,58,58,58,58,0,0,58,58,0,58,0,0,0,0,58,0,58,0,0,0,0,59,59,59,0,59,59,59,0,0,59,0,59,0,59,59,59,59,59,59,59,60,0,60,0,0,60,0,60,0,60,0,0,0,0,0,60,60,0,60,0,0,60,60,60,0,60,0,60,60,60,60,60,61,0,61,0,0,0,0,61,0,61,0,61,0,0,0,0,61,61,61,0,0,61,61,61,61,61,0,61,0,61,61,61,62,62,62,0,0,62,0,0,0,0,0,62,0,62,0,0,0,0,0,0,0,62,62,62,62,62,62,62,62,62,0,63,63,63,63,0,0,63,63,63,0,0,63,63,63,63,63,63,63,63,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $3200
+; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
+; because the test does not involve the camera at all -- see the data layer above.
+orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72,85,189,78,80,213,218,218,0,72,85,73,79,80,213,218,218,0,72,85,73,49,80,213,218,218,0,176,170,182,78,112,213,218,218,0,200,175,182,78,112,213,218,218,0,72,85,169,78,112,213,218,218,0,72,181,182,78,160,213,218,218,0,72,85,73,73,160,213,218,218,0,200,170,182,78,160,222,218,218,0,72,85,233,78,160,222,218,218,0,176,170,182,78,160,234,218,218,0,72,85,189,78,160,234,218,218,0,72,85,73,121,160,234,218,218,0,72,173,182,78,160,42,219,218,0,72,85,73,79,160,42,219,218,0,200,170,182,78,160,42,223,218,0,72,85,73,49,160,42,223,218,0,176,170,182,78,160,42,213,218,0,72,213,183,78,160,42,213,218,0,72,85,233,78,160,42,213,218,0,72,173,182,78,160,42,229,219,0,72,85,73,73,160,42,229,219,0,248,170,182,78,160,42,37,217,0,72,85,169,78,160,42,37,217,0,72,85,73,49,160,42,37,217,0,72,213,183,78,160,42,37,253,0,176,170,182,78,160,42,37,165,0,200,175,182,78,160,42,37,165,0,72,85,73,79,160,42,37,165,0,72,181,182,78,160,42,37,37,1,72,85,169,78,160,42,37,37,1,72,85,73,121,160,42,37,37,1
+        * = $3400
+orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15
+orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
+orbHalfT: !byte 22,24,22,24,22,24,22,24,22,24,22,11,11,11,11,11,11,12,11,12,11,12
+orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129
+orbBlankT: !byte 0,2,4,6,8,10,12,14,16,18,20,0,2,4,6,8,10,12,14,16,18,20
+orbAnchT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
+orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
+orbColT: !byte 12,11,11,10,10,9,9,8,7,7,6,6,6,5,5,4,3,3,2,2,1,1
+orbBitT: !byte 1,2,4,8,16,32,64,128
+; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
+; instead of three lsrs and an and per column: this runs once per logical column under every orb
+; that might be occluded, which is the only part of the test that is not O(1).
+runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8,8,8
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4
+orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
+orbOccHiT: !byte 50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,51,51,51,51,51
+orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13
+orbYCT: !byte 1,1,1,1,1,3,3,3,4,4,5,5,6,6,6,7,7,8,8,9,9,9,10,10,11,11,11,12,13,13,13,14,14,14
+orbColT2: !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
+; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
+; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
+; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
+; which named charset twins, do not.
+bbLT:   !byte $0f,$07,$03,$01
+bbRT:   !byte $08,$0c,$0e,$0f
+popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
+opbBaseT: !byte 0,12,24,36,48,60,72,84
+        * = $3700
+candListT: !byte 0,0,51,5,64,40,6,24,34,1,0,33,12,64,32,8,22,31,19,64,30,0,0,58,5,83,39,6,32,36,1,0,35,8,26,32,12,72,160,19,69,158,11,19,157,0,128,51,1,0,40,6,45,39,5,96,36,8,32,33,1,0,51,0,128,40,6,64,40,5,104,34,8,40,34,1,0,58,6,83,39,0,128,35,8,51,35,5,109,32,1,128,51,6,96,36,8,64,35,0,128,33,5,112,31,2,0,58,7,45,39,3,0,35,11,45,32,4,0,31,2,128,51,3,0,40,7,64,40,11,54,33,4,0,32,3,0,51,2,128,40,7,83,39,4,0,33,11,64,33,3,0,58,7,96,36,2,128,35,4,0,35,11,74,161,3,128,51,4,0,40,7,104,34,2,128,33,4,0,51,3,128,40,7,109,160,2,128,32,8,112,158,4,0,58,3,128,35,7,112,159,2,128,31,8,113,157,5,64,51,0,224,45,6,13,35,12,64,33,1,246,33,8,16,159,19,64,30,0,192,51,5,96,45,6,19,39,1,243,35,12,74,161,8,19,160,19,70,158,11,15,157,0,160,45,6,32,45,1,237,39,5,109,39,8,24,34,11,16,158,6,64,51,1,224,45,0,147,39,8,32,36,5,115,35,11,19,158,1,192,51,6,96,45,8,45,39,0,141,35,5,118,33,1,160,45,8,64,40,6,109,39,0,138,33,5,120,32,2,192,51,7,32,45,3,243,35,11,40,34,4,249,31,23,45,157,7,64,51,2,160,45,3,237,39,11,51,35,4,248,32,23,49,157,3,224,45,7,96,45,2,147,39,11,64,35,4,246,33,8,109,160,3,192,51,7,109,167,2,141,35,4,243,35,11,77,163,8,112,159,3,160,45,4,237,39,7,115,163,2,138,33,8,115,159,4,224,45,3,147,39,7,118,161,2,136,32,8,117,158,4,192,51,3,141,35,2,135,31,5,0,58,0,211,39,6,0,35,12,64,35,1,237,32,19,64,31,5,128,51,0,192,40,6,0,40,12,77,163,1,232,34,8,10,161,19,71,159,6,0,51,5,128,40,0,173,39,1,224,36,8,13,163,11,11,158,6,0,58,1,211,39,8,19,167,0,160,36,5,128,35,11,13,159,6,128,51,8,32,45,1,192,40,0,152,34,5,128,33,11,16,159,8,64,51,6,128,40,1,173,39,0,147,32,11,19,160,5,128,32,7,0,51,2,192,40,8,109,167,11,32,36,3,232,34,16,38,160,10,112,159,4,243,159,23,43,158,7,0,58,2,173,39,11,45,39,3,224,36,8,115,163,4,240,159,10,115,159,23,48,158,7,128,51,11,64,40,3,211,167,2,160,36,13,88,162,8,118,161,4,237,160,10,117,158,4,192,40,9,109,167,3,152,162,2,141,159,5,192,51,12,64,40,0,205,163,6,243,163,1,230,160,19,64,32,8,0,51,6,160,173,10,109,167,1,192,35,5,138,161,7,246,161,0,160,161,8,0,58,6,147,167,1,179,35,7,243,163,10,115,163,11,10,161,0,154,32,5,136,160,3,234,159,4,241,157,8,128,51,7,237,167,2,205,163,6,141,163,11,13,163,1,168,162,10,118,161,3,230,160,16,26,160,0,150,159,5,135,159,4,240,158,7,224,45,8,128,40,11,19,167,2,192,35,6,138,161,3,224,33,16,32,161,10,120,160,0,147,158,4,237,158,5,134,158,23,40,158,7,192,51,11,32,45,13,83,167,8,128,35,2,179,35,3,216,34,16,40,162,6,136,160,10,121,159,23,45,158,5,133,158,11,64,51,7,160,45,13,96,164,3,205,163,2,168,34,8,128,33,6,135,159,23,51,159,10,122,158,9,0,58,14,45,167,23,64,31,9,128,51,4,205,163,23,71,159,9,128,40,4,192,35,12,64,51,5,192,40,19,64,33,0,202,161,10,0,58,17,64,35,8,243,163,7,243,159,10,128,51,8,237,167,17,77,163,1,202,161,7,240,159,8,224,45,10,128,40,6,173,167,1,192,33,7,237,160,0,166,160,3,232,158,8,192,51,6,160,164,10,128,35,7,232,162,1,182,33,0,160,159,3,229,158,4,237,157,11,0,51,13,96,173,7,192,40,16,32,164,8,141,163,2,182,161,3,211,160,6,144,159,23,42,159,26,36,158,11,0,58,7,173,39,13,109,167,16,45,167,3,202,161,8,138,161,2,173,32,23,48,159,6,141,159,9,192,51,14,32,173,16,83,167,23,64,32,12,0,58,5,192,35,19,64,35,0,200,160,10,192,51,17,64,40,8,232,162,7,237,158,13,0,58,11,237,167,7,205,163,15,115,163,16,13,35,3,214,159,13,128,51,11,224,45,16,19,167,7,192,35,15,118,161,23,38,160,2,184,160,3,208,159,26,32,158,11,192,51,16,32,173,13,128,40,7,179,35,23,45,160,15,120,160,2,176,31,14,0,51,16,96,173,9,192,40,21,88,162,23,64,33,15,122,158,14,0,58,9,173,167,16,109,167,18,45,167,23,74,161,21,96,161,26,56,160,15,123,158,14,128,51,18,64,40,16,115,163,21,102,160,26,64,32,12,192,51,19,64,40,5,192,33,0,199,159,17,64,51,10,192,40,15,0,58,22,64,35,16,0,31,15,128,51,13,237,167,22,77,163,11,237,160,16,0,32,13,224,173,15,128,40,11,232,162,16,0,33,3,216,158,13,192,51,11,224,36,15,128,35,16,0,35,7,202,161,3,211,158,13,160,45,16,0,40,11,211,39,7,192,33,15,128,33,14,246,161,2,185,159,3,205,159,16,0,51,11,192,40,13,147,39,14,243,163,23,40,162,7,182,33,15,128,32,26,32,159,2,179,31,16,0,58,11,173,167,14,237,167,21,83,167,9,205,163,13,141,163,23,51,35,7,173,160,15,128,31,2,173,158,16,128,51,14,224,173,21,96,164,9,192,35,23,64,35,13,138,161,15,128,30,18,64,51,14,160,173,26,64,33,19,64,51,12,192,40,5,192,32,0,198,158,17,0,58,19,109,167,10,192,35,15,192,51,22,64,40,16,249,159,16,192,51,21,96,173,23,45,167,14,224,164,11,179,163,13,152,162,9,202,161,20,118,161,26,32,161,7,176,159,15,135,159,2,176,158,16,160,45,23,64,40,14,211,167,21,109,167,26,40,162,9,192,33,13,147,160,20,120,160,15,134,158,18,0,58,14,173,167,26,64,35,19,0,58,17,237,167,12,192,35,5,192,31,19,128,51,17,224,173,12,179,163,10,202,161,5,185,159,17,192,51,19,128,40,24,83,167,10,192,33,22,64,51,15,192,40,20,0,58,21,0,35,27,64,35,20,128,51,21,0,40,27,77,163,21,0,51,20,128,40,14,230,160,21,0,58,16,211,167,23,19,167,20,128,35,14,224,161,26,19,160,21,128,51,23,32,173,16,192,40,14,216,162,26,24,162,20,128,33,11,182,161,9,200,160,7,179,159,2,177,157,23,64,51,21,128,40,16,173,39,26,32,164,11,173,160,9,192,32,13,154,160,20,128,32,7,173,158,2,173,157,18,192,51,26,64,40,23,109,167,24,96,173,17,192,40,19,147,167,10,192,32,22,0,58,15,192,35,24,115,163,20,192,51,27,64,40,21,243,163,31,74,161,23,0,58,21,147,167,26,19,39,16,179,163,25,115,163,20,136,160,11,176,159,9,192,31,7,176,158,23,128,51,26,32,45,18,211,167,21,141,163,16,168,162,25,118,161,9,185,159,20,135,159,26,64,51,18,192,40,23,128,40,21,138,161,25,120,160,24,0,51,28,64,40,24,0,58,28,83,167,17,205,163,10,199,159,24,128,51,22,237,167,17,192,35,10,192,31,22,224,173,24,128,40,17,179,163,15,202,161,10,185,159,22,192,51,24,128,35,15,192,33,27,64,51,20,192,40,31,77,163,32,40,162,25,0,58,32,64,35,26,0,32,25,128,51,23,237,167,32,77,163,26,0,33,23,224,173,25,128,40,26,0,35,9,198,158,23,192,51,26,0,40,25,128,35,16,182,161,11,179,159,9,192,30,7,177,157,26,0,51,23,160,45,18,205,163,25,128,33,16,173,160,9,186,158,7,173,157,26,0,58,23,147,39,18,192,35,21,147,160,16,166,160,25,128,32,28,64,51,24,224,173,29,13,163,32,10,157,27,0,58,31,83,167,32,32,164,20,192,35,29,115,163,28,121,159,25,192,51,32,64,40,31,104,162,26,248,160,29,120,160,28,123,158,28,0,58,24,211,167,29,0,35,32,5,158,28,128,51,29,0,40,32,6,158,29,0,51,28,128,40,32,7,159,29,0,58,31,19,167,28,128,35,32,8,160,29,128,51,31,32,173,27,237,167,28,128,33,32,10,161,33,5,158,31,64,51,27,224,173,29,128,40,32,13,35,20,202,161,28,128,32,33,6,158,27,192,51,31,96,45,32,19,39,29,128,35,20,192,33,28,128,31,33,7,159,27,160,173,32,32,45,25,211,167,31,109,39,29,128,33,20,182,161,33,8,160,28,128,30,32,64,51,25,192,40,27,147,167,31,115,35,33,10,161,29,128,32,28,128,30,30,0,58,32,109,167,33,19,39,31,120,160,30,128,51,33,32,45,32,115,163,31,121,159,33,64,51,30,128,40,32,118,161,31,122,158,33,96,45,30,128,35,32,120,160,31,123,158,28,192,51,29,243,35,28,160,45,29,237,167,29,224,173,28,147,39,31,0,58,27,211,167,29,147,167,32,0,35,20,200,160,28,136,160,33,0,30,31,128,51,27,192,40,32,0,40,29,141,163,20,192,32,33,0,31,28,135,159,32,0,51,31,128,40,27,173,167,25,205,163,29,138,161,33,0,32,20,184,160,28,134,158,32,0,58,30,237,167,27,160,164,25,192,35,31,128,35,33,0,33,29,136,160,28,133,158,32,128,51,30,224,173,33,0,35,25,179,163,27,152,162,31,128,33,29,135,159,30,192,51,32,128,40,33,0,40,31,128,32,29,134,158,33,0,51,30,160,45,32,128,35,31,128,31,29,133,158,33,0,58,30,147,39,32,128,33,31,128,30,33,128,51,30,141,35,32,128,32,31,128,30   ; read through a 16-bit pointer, so it may cross pages
         * = $4000  ; VIC bank 0 is full -- these live above it
 absCosT: !byte 255,255,255,255,255,254,253,252,251,250,248,247,245,243,241,239,237,234,231,229,226,223,220,216
         !byte 213,209,206,202,198,194,190,185,181,177,172,167,162,157,152,147,142,137,132,126,121,115,109,104

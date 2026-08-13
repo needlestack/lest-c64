@@ -1605,6 +1605,20 @@ const DBGORB = process.env.DBGORB === '1';
 // ORBOCC=0 switches the whole-orb occlusion test off, so it can be A/B'd in one run the way
 // SPRITES=0 does. With it off every projected orb draws, including ones entirely behind a wall.
 const ORBOCC = process.env.ORBOCC !== '0';
+// ORBINV=0: stamp but do NOT invalidate the run cache. Renders with trails; exists to price the
+// invalidation separately from the stamping, which is the only way to know which one costs.
+const ORBINV = process.env.ORBINV !== '0';
+// ORBDESEAM=0: skip the seam sweep, to price it against the stamping.
+const ORBDESEAM = process.env.ORBDESEAM !== '0';
+// ORBFG=<n>: tint the OCCLUDERS. Bit pair 11 takes its colour from the low three bits of colour
+// RAM, so filling it with $08|n paints every stamped cell colour n while walls (pair 01, $d022)
+// and ceiling (00, $d021) stay as they are. ORBFG=6 makes every cell the stamp touches blue,
+// which is the only way to see WHERE it is drawing rather than infer it from what looks wrong.
+const ORBFG = process.env.ORBFG;
+// ORBSTAMP=1 enables PARTIAL occlusion (the orbStamp pass). Default OFF: it clips correctly at a
+// static viewpoint but writes some cells to the wrong place, and costs 6 fps. The whole-orb hide
+// above it is unaffected and stays on -- that one is verified and free.
+const ORBSTAMP = process.env.ORBSTAMP === '1';
 // The sprite bitmaps are PLACED into VIC bank 3 by the self-extracting loader ($c000, 64-byte
 // aligned, first of the 159 free slots) rather than emitted into the image. They were at $2000
 // in bank 0 before the bank-3 move, which is now the code's growth room.
@@ -2381,6 +2395,7 @@ osL     = $85f6                 ; the span/box intersection being stamped
 osR     = $85f7
 osRow   = $85f8                 ; char row range
 osRowB  = $85f9
+osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
 ohSv    = $85fa                 ; span right edge / row counter, reused
 osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
                                 ;   orbStamp runs, so its pointer is free
@@ -2559,7 +2574,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #${hx(0x08 | (ORBFG ? (+ORBFG & 7) : 0))}                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -3331,7 +3346,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
         jsr drawDbg
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -6008,23 +6023,17 @@ obNext: lda ocy
         lda ocy
         cmp ocn3
         bcc obLoop
-obEnd:  ${DBGORB ? `lda py+1
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc px+1
-        sta odb
-        lda kxc
+obEnd:  ${DBGORB ? `lda ohL
+        sta odb                 ; the span walk's state as orbStamp left it
+        lda ohRun
         sta odb+1
-        lda kxs
+        lda ohBX
         sta odb+2
-        lda kyc
+        lda nbnd
         sta odb+3
-        lda kys
-        sta odb+4
-        lda onv
+        lda bndT
+        sta odb+4               ; the first two delimiters, to see if bndT is ascending
+        lda bndT+1
         sta odb+5
         ldx #$00
         ldy #$00
@@ -6035,15 +6044,15 @@ odbLp:  lda odb,x
         lsr
         clc
         adc #${hx(GLYPH0)}
-        sta $0478,y
-        sta $2478,y
+        sta ${hx16(SCR_A + 0x78)},y
+        sta ${hx16(SCR_B + 0x78)},y
         iny
         lda odb,x
         and #$0f
         clc
         adc #${hx(GLYPH0)}
-        sta $0478,y
-        sta $2478,y
+        sta ${hx16(SCR_A + 0x78)},y
+        sta ${hx16(SCR_B + 0x78)},y
         iny
         inx
         cpx #$06
@@ -6077,6 +6086,20 @@ odbLp:  lda odb,x
 orbStamp:
         lda onv
         beq oSDn
+        ; Which buffer's run cache to invalidate. renderSym patches operands rather than indexing
+        ; per column; do the same, once per frame. cbA/cbB hold the solid-run START this buffer
+        ; already shows, and $ff is the sentinel it treats as "always redraw" -- a value rs cannot
+        ; take, already used for seam columns. A stamped cell is invisible to that cache, so
+        ; without this the column is skipped next time this buffer comes round and the black block
+        ; STAYS: a trail behind every moving orb.
+        lda baseHi
+        cmp #$e0
+        bne oSCbB
+        lda #<cbA
+        jmp oSCbS
+oSCbB:  lda #<cbB
+oSCbS:  sta oSInv+1
+        sta oSDIn+1
         sta osN
         lda #$00
         sta osI
@@ -6093,20 +6116,26 @@ oSLoop: ldx osI
         ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
         ; Display y is raster - 50, and a char row is eight of those.
         ldy obV,x
+        ; Display y is raster - 50, and a char row is eight of those. SUBTRACT THE 50 FIRST: obY
+        ; is 150 - anchor + h, so obY + anchor is 150 + h, which passes 255 once h > 105 and wraps.
+        ; The bottom row then came out tiny, the stamp ran from a bogus row, and black cells landed
+        ; on the white CEILING -- long vertical bars, with the de-seam stripping seams nowhere near
+        ; the orb. One overflow, both symptoms.
         lda obY,x
-        clc
-        adc orbBlankT,y
         sec
         sbc #$32
+        sta ohSv                ; display y of the sprite frame's top row
+        clc
+        adc orbBlankT,y         ; ... plus the blank rows above the content
         lsr
         lsr
         lsr
         sta osRow
-        lda obY,x
+        lda ohSv
         clc
         adc orbAnchT,y
         sec
-        sbc #$33                ; -50, then -1 for the last inked row
+        sbc #$01                ; the last inked row
         lsr
         lsr
         lsr
@@ -6115,6 +6144,15 @@ oSLoop: ldx osI
         lda #$18                ; clamp to the last screen row: a near orb's box runs off the
                                 ; bottom, and the rows below 24 are not screen memory at all
 oSRok:  sta osRowB
+        lda osRow               ; clamp the TOP row too. Only the bottom was clamped, so a near
+        cmp #$19                ;   orb whose feet run off the screen came out with osRow 26
+        bcc oSRtk               ;   against osRowB 24 -- an inverted row range.
+        lda #$18
+oSRtk:  cmp osRowB
+        bcc oSRok2
+        beq oSRok2
+        jmp oSDone              ; nothing of this orb is on screen
+oSRok2: sta osRow
         ; walk the spans, exactly as the whole-orb test does
         lda #$00
         sta ohL
@@ -6157,7 +6195,11 @@ oSL1:   sta osL
         bcc oSR1
         lda obR,x
 oSR1:   sta osR
-        jsr oSCells
+        lda osL
+        cmp osR
+        beq oSCall
+        bcs oSAdv               ; inverted intersection: nothing to stamp for this span
+oSCall: jsr oSCells
 oSAdv:  ldx ohBX
         cpx nbnd
         bcs oSDone
@@ -6165,7 +6207,12 @@ oSAdv:  ldx ohBX
         sta ohL
         inc ohBX
         jmp oSSpan
-oSDone: inc osI
+oSDone: lda omPri            ; was anything stamped for this orb? then its seams must go
+        ldx osI
+        and orbBitT,x
+        beq oSDsk
+${ORBDESEAM ? `        jsr oSDeseam` : `        nop                      ; ORBDESEAM=0`}
+oSDsk:  inc osI
         lda osI
         cmp osN
         bcs oSDn
@@ -6179,7 +6226,10 @@ oSDn:   rts
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
-oSCells:ldx osI
+oSCells:${process.env.ORBFGDBG ? `        lda osRow
+        and #$0f
+        sta $d020               ; PROBE: the row oSCells is about to stamp from
+` : ''}        ldx osI
         lda orbBitT,x
         ora omPri
         sta omPri               ; this orb is now BEHIND foreground
@@ -6204,7 +6254,9 @@ oSCR1:  tay
         lsr
         lsr
         sta ohRun               ; last cell
-oSCCol: lda #${hx(OCC_FULL)}
+        cpy ohRun               ; TEST BEFORE WRITING. This was a do-while, so an inverted range
+        bcs oSCNx               ;   (left > right) still painted one cell -- which is exactly the
+oSCCol: lda #${hx(OCC_FULL)}    ;   stray black block that showed up in the ceiling.
         sta (osPtr),y
         cpy ohRun
         bcs oSCNx
@@ -6212,7 +6264,77 @@ oSCCol: lda #${hx(OCC_FULL)}
         bne oSCCol
 oSCNx:  inc ohSv
         jmp oSCRow
-oSCDn:  rts
+oSCDn:  lda osL                 ; invalidate the cache for every cell column just stamped
+        lsr
+        lsr
+        tay
+        lda osR
+        lsr
+        lsr
+        sta ohSv
+oSCIv:  lda #$ff
+${ORBINV ? `oSInv:  sta cbA,y               ; operand patched above to this buffer's cache` : `oSInv:  bit $ffff                ; ORBINV=0: invalidation off, so the stamp leaves trails`}
+        cpy ohSv
+        bcs oSCId
+        iny
+        bne oSCIv
+oSCId:  rts
+
+; oSDeseam: a seam inside a stamped orb's box would clip it -- seams are bit pair 10, the only
+; other foreground in the charset. Replace each with plain SOLID, which is the same black at bit
+; pair 01 and cannot clip. The orb's WHOLE box, not just the occluded part: a near wall's seam
+; would otherwise bite an orb that a DIFFERENT wall is occluding at the edge.
+;
+; Only reached by orbs that were actually stamped, so an unoccluded orb pays nothing and keeps
+; its seams -- which is the whole reason the priority bit is per orb rather than global.
+oSDeseam:
+        ldx osI
+        lda obCR,x              ; the orb's full cell range; hoisted, CPY has no abs,x
+        sta osR
+        lda obCL,x
+        sta osDC
+        ; COLUMNS OUTER, rows inner. seamT says per cell column what the solid run carries --
+        ; SOLID, or a seam variant when a panel line lands there -- so a column with no seam skips
+        ; all of its rows without a single screen read. Seams are rare, so nearly every column
+        ; exits here. With the test inside the row loop instead it saved the read but kept the
+        ; loop, and cost the same 3 fps.
+oSDCol: ldy osDC
+        lda seamT,y
+        cmp #${hx(SEAM0)}
+        bcc oSDNx
+        cmp #${hx(SEAM0 + 4)}
+        bcs oSDNx
+        lda osRow
+        sta ohSv
+oSDRow: lda ohSv
+        cmp osRowB
+        beq oSDR1
+        bcs oSDNx
+oSDR1:  tay
+        lda rowLoT,y
+        sta osPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta osPtr+1
+        ldy osDC
+        lda (osPtr),y           ; the seam does not reach every row of the box: the rows above the
+        cmp #${hx(SEAM0)}       ;   solid run are ceiling or edge cells and must not become SOLID
+        bcc oSDRN
+        cmp #${hx(SEAM0 + 4)}
+        bcs oSDRN
+        lda #${hx(SOLID)}
+        sta (osPtr),y
+        lda #$ff
+${ORBINV ? `oSDIn:  sta cbA,y               ; operand shares oSInv's patch target` : `oSDIn:  bit $ffff                ; ORBINV=0`}
+oSDRN:  inc ohSv
+        jmp oSDRow
+oSDNx:  ldy osDC
+        cpy osR
+        bcs oSDDn
+        inc osDC
+        jmp oSDCol
+oSDDn:  rts
 
 osFlush:${process.env.ORBOCCDBG ? `
         lda ohDbg
