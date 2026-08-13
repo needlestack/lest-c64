@@ -333,6 +333,8 @@ osL     = $85f6                 ; the span/box intersection being stamped
 osR     = $85f7
 osRow   = $85f8                 ; char row range
 osRowB  = $85f9
+ohFst   = $8595                 ; the stamp's two edge glyphs, chosen once per span
+ohLst   = $8596
 osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
 oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
@@ -3811,8 +3813,6 @@ oSCbB:  lda #<cbB
 oSCbS:  sta oSInv+1
         sta oSDIn+1
 oSLoop: ldx osI
-        lda obOcc,x
-        bpl oSNext              ; nothing reachable from this cell can occlude this orb
 
         lda obIX,x
         tay
@@ -3937,7 +3937,17 @@ oSDn:   rts
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
-oSCells:        ldx osI
+oSCells:        lda osL
+        and #$03
+        tay
+        lda occRT,y
+        sta ohFst               ; the glyph for the cell the stamp starts in
+        lda osR
+        and #$03
+        tay
+        lda occLT,y
+        sta ohLst               ; ... and for the one it ends in
+        ldx osI
         lda orbBitT,x
         ora omPri
         sta omPri               ; this orb is now BEHIND foreground
@@ -3973,14 +3983,27 @@ oSCR1:  cmp #$19
         bcc oSCR2
         lda #$27
 oSCR2:  sta ohRun               ; last cell
-        cpy ohRun               ; TEST BEFORE WRITING. This was a do-while, so an inverted range
-        bcs oSCNx               ;   (left > right) still painted one cell -- which is exactly the
-oSCCol: lda #$fc
-        sta (osPtr),y
         cpy ohRun
-        bcs oSCNx
-        iny
-        bne oSCCol
+        bcc oSCMid
+        bne oSCNx               ; first cell past last: an inverted range, nothing to stamp
+        ; ---- the whole stamp lies inside ONE cell ----
+        ; Columns k..m of it clip, and no single glyph says that unless k is 0 or m is 3. Take the
+        ; "from the right" one, which clips k..3, over-covering to the right by up to 3 columns.
+        ; Over-covering takes a small bite out of the orb; under-covering leaves orb drawn ON the
+        ; wall, which is the error that reads as broken -- so this errs the safe way.
+        lda ohFst
+        sta (osPtr),y
+        jmp oSCNx
+oSCMid: lda ohFst        ; first cell: the stamp starts part way in, so clip from the right
+        sta (osPtr),y
+oSCCol: iny
+        cpy ohRun
+        beq oSCLst
+        lda #$fc    ; interior cells are covered whole
+        sta (osPtr),y
+        jmp oSCCol
+oSCLst: lda ohLst               ; last cell: the stamp ends part way in, so clip from the left
+        sta (osPtr),y
 oSCNx:  inc ohSv
         jmp oSCRow
 oSCDn:  lda osL                 ; invalidate the cache for every cell column just stamped
@@ -4664,6 +4687,13 @@ orbAnchT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,2
 orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
 orbColT: !byte 12,11,11,10,10,9,9,8,7,7,6,6,6,5,5,4,3,3,2,2,1,1
 orbBitT: !byte 1,2,4,8,16,32,64,128
+; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
+; needs a glyph with only part of it foreground.
+;   occRT[k] -- the stamp STARTS at column k of this cell, so columns k..3 clip: "from the right"
+;   occLT[m] -- the stamp ENDS at column m, so columns 0..m clip: "from the left"
+; Both give the whole-cell glyph where the boundary lands on a cell edge, so no special case.
+occRT: !byte 252,255,254,253
+occLT: !byte 249,250,251,252
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
 ; that might be occluded, which is the only part of the test that is not O(1).
