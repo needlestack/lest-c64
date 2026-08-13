@@ -11,6 +11,9 @@ while read -r PX PY PA rest; do
   case "$PX" in ''|'#') continue;; esac
   n=$((n+1))
   PX=$PX PY=$PY PA=$PA node build-iray.mjs >/dev/null 2>&1 || { echo "$n BUILD FAILED"; continue; }
+# VICE inverts boolean flags: +opt DISABLES, -opt enables. So +drive8truedrive means true drive
+# emulation is OFF, which is what we want -- nothing measured here depends on 1541 timing, and
+# with it ON a 13.5KB disk takes over 50M cycles to load.
   /Applications/vice-arm64-gtk3-3.8/bin/x64sc -silent -warp -ntsc +drive8truedrive \
      -limitcycles 30000000 -jamaction 1 -exitscreenshot "$S/$TAG-$n.png" \
      -autostart latest.d64 >/dev/null 2>&1

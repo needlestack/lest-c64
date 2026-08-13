@@ -25,6 +25,9 @@ mkdir -p "$S"
 TAG=$1
 cd /Users/jfield/c64fps
 for T in 15 22 29 36 43; do
+# VICE inverts boolean flags: +opt DISABLES, -opt enables. So +drive8truedrive means true drive
+# emulation is OFF, which is what we want -- nothing measured here depends on 1541 timing, and
+# with it ON a 13.5KB disk takes over 50M cycles to load.
   /Applications/vice-arm64-gtk3-3.8/bin/x64sc -silent -warp -ntsc +drive8truedrive \
      -limitcycles ${T}000000 -jamaction 1 -exitscreenshot "$S/fps-$TAG-$T.png" \
      -autostart latest.d64 >/dev/null 2>&1
