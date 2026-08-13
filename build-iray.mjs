@@ -5548,6 +5548,25 @@ try {
   // is always the current build -- no -ntsc/-merge/foundation variants to get stale and
   // mislead. iray.asm/iray.prg are the matching support files for diffing and label lookup.
   writeFileSync('./latest.d64', Buffer.from(d.getData()));
+  // SELFEXT=1: package as a COMPRESSED self-extracting PRG instead of a load-in-place image.
+  //
+  // Why this is the direction and not a size trick: a load-in-place image must be ONE contiguous
+  // run that the KERNAL can write with I/O mapped, which is what forces the charset to be shipped
+  // as a low "source" and copied up by cpChr, and what makes every hole in the image dead weight
+  // in the file. A decompressing loader places each element wherever we want -- including straight
+  // into $d000-$dfff, which LOAD can never reach.
+  //
+  // selfext.mjs is vendored from ~/GMC64/code UNCHANGED except its d64lib path. It is VICE-verified
+  // byte-exact upstream on a 57KB image spanning the I/O hole, so it is invoked as a subprocess
+  // rather than forked into this file: a verified packer that drifts is worth less than one that is
+  // slightly awkward to call.
+  if (process.env.SELFEXT) {
+    const { execSync } = await import('child_process');
+    const out = execSync('node ./selfext.mjs ./iray.prg ./iray-c.prg', { encoding: 'utf8' });
+    console.log(out.trim());
+    writeFileSync('./latest.d64', readFileSync('./iray-c.d64'));
+    console.log('latest.d64 is the COMPRESSED self-extracting build');
+  }
   // Say how much room is left below the screen buffer. The data segment has nowhere to
   // grow -- charset A is at $3000 and buffer B sits in the way at $2400 -- so this going
   // quiet is the difference between a build error and a frame-by-frame corruption.
