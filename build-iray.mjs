@@ -1463,6 +1463,11 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // NOHUD=1 drops the fps counter and the X/Y readout, keeping only the two hex digits of
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
+// WIGGLE=1: step forward and back on alternate frames, driving moveFwd/moveBack directly. A
+// forward step and a back step must be exact inverses, so X/Y in the readout must not move at
+// all. Any change is drift, and it is measurable in one run rather than felt over a minute of
+// walking. This is how the arithmetic-shift asymmetry was confirmed and then confirmed fixed.
+const WIGGLE = flag('WIGGLE');
 
 // Where the CPU-only tables start, and so the ceiling on how much code there may be. A build
 // that adds code ahead of this has run into it twice, and the failure is SILENT: the assembler
@@ -1609,62 +1614,80 @@ const _rows = [...Array(21).keys()].filter(y => ORBSRC12[y].some(v => v));
 const SX0 = Math.min(..._cols), SX1 = Math.max(..._cols);
 const SY0 = Math.min(..._rows), SY1 = Math.max(..._rows);
 const SW = SX1 - SX0 + 1, SH = SY1 - SY0 + 1;
-// The art is a ball, a gap, then a ground shadow, and the two solid parts want different
-// downsampling. Find the gap so they can be scaled separately.
-const _ballEnd = (() => { for (let y = _rows[0]; y <= SY1; y++) if (!ORBSRC12[y].some(v => v)) return y - 1; return SY1; })();
-const _shadTop = (() => { for (let y = SY1; y >= SY0; y--) if (!ORBSRC12[y].some(v => v)) return y + 1; return SY0; })();
-// Area coverage with a threshold, sampled 4x4 within each destination pixel. The BALL needs a
-// true half-coverage test or its edges square off -- filling a destination pixel whenever any
-// source pixel under it is set dilates the silhouette out to its bounding box, which is what
-// made the small orbs look cuboid. The SHADOW is three rows of soft ellipse and a half-coverage
-// test erases most of it, so it gets a low threshold and keeps its width.
-const ORBTHR = +(process.env.ORBTHR ?? 0.5);
-function orbRegion(out, oy, hgt, y0, y1, w, thr) {
-  const sh = y1 - y0 + 1, N = 4, ox = (12 - w) >> 1;
-  for (let dy = 0; dy < hgt; dy++) for (let dx = 0; dx < w; dx++) {
-    const t = [0, 0, 0, 0]; let n = 0;
-    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
-      const sx = Math.floor(SX0 + SW * (dx + (i + 0.5) / N) / w);
-      const sy = Math.floor(y0 + sh * (dy + (j + 0.5) / N) / hgt);
-      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) { t[ORBSRC12[sy][sx]]++; n++; }
+// ---- one scheme for the whole sprite ----
+// The ball, the gap and the ground shadow used to be three regions, each resampled with its own
+// threshold and its own independent rounding of its row count. That is what produced the visible
+// jump: at bitmap width 9 all three roundings tipped at once and the drawn height fell from 19
+// rows to 15 for a 10% change in width -- a lurch, not a step. The regions are gone.
+//
+// The rule is now: resample the whole content box to w x h, and give each destination pixel the
+// MOST COMMON of the four values among its samples, with transparency competing on equal terms.
+// No thresholds, no per-region special cases, nothing tuned. Ties go to the higher index, so a
+// half-covered edge pixel fills rather than erodes and a highlight survives against body colour
+// at small sizes -- the case that made nearest-neighbour unusable below about 6px across.
+const ORBSAMP = 4;                              // NxN point samples per destination pixel
+function orbScale(w, h) {
+  const out = [...Array(21)].map(() => new Array(12).fill(0));
+  const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, and standing on the floor
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
+    const t = [0, 0, 0, 0];
+    for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
+      const sx = Math.floor(SX0 + SW * (dx + (i + 0.5) / ORBSAMP) / w);
+      const sy = Math.floor(SY0 + SH * (dy + (j + 0.5) / ORBSAMP) / h);
+      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[ORBSRC12[sy][sx]]++;
     }
-    if (t[1] + t[2] + t[3] < n * thr) continue;
-    let bn = 0, v = 0; for (let k = 1; k < 4; k++) if (t[k] > bn) { bn = t[k]; v = k; }
+    let bn = -1, v = 0;
+    for (let k = 0; k < 4; k++) if (t[k] >= bn) { bn = t[k]; v = k; }
     out[oy + dy][ox + dx] = v;
   }
-}
-function orbScale(w) {
-  const sc = w / SW;
-  const bh = Math.max(1, Math.round((_ballEnd - SY0 + 1) * sc));
-  const gh = Math.max(0, Math.round((_shadTop - _ballEnd - 1) * sc));
-  const sh = Math.max(1, Math.round((SY1 - _shadTop + 1) * sc));
-  const out = [...Array(21)].map(() => new Array(12).fill(0));
-  const oy = 21 - (bh + gh + sh);       // standing on the sprite's floor
-  orbRegion(out, oy, bh, SY0, _ballEnd, w, ORBTHR);
-  orbRegion(out, oy + bh + gh, sh, _shadTop, SY1, w, 0.2);
   return out;
 }
-const NORBBM = 12;                              // one bitmap per multicolor-pixel width, 1..12
-// The widest rung must come back byte-identical to the art it was scaled from. If a change to
-// the resampler breaks that, every other rung is suspect too.
-{ const g = orbScale(SW), b = [];
-  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
-    b.push([0,1,2,3].reduce((v, i) => v | (g[y][k*4+i] << (6-2*i)), 0));
-  if (b.join() !== ORB4RAW.join()) throw new Error('orbScale does not reproduce ORB4 at full width'); }
-const ORBBM = [...Array(NORBBM)].map((_, i) => {
-  const g = orbScale(i + 1), bytes = [];
+// ---- the ladder: one rung per 2 APPARENT screen pixels of height ----
+// A bitmap row is 2 screen rows when the VIC expands the sprite and 1 when it does not, so the
+// same 2px rule means stepping the bitmap by ONE row while expanded and TWO while not. The
+// expanded half runs down to where its apparent height meets the largest unexpanded one (22 vs
+// 21), and the two halves SHARE bitmaps -- an expanded rung and a normal rung of the same bitmap
+// height are the same 63 bytes with a different register bit. 22 rungs from 16 bitmaps.
+//
+// Driven by height rather than width because height has 21 levels against width's 12, so it is
+// the finer axis: stepping it gives 4.8-6.3% near-range steps where stepping width gave 9-17%.
+// The cost is that five expanded rungs repeat the previous width, since width cannot follow at
+// that resolution -- the orb shrinks vertically for one rung before its width catches up, about
+// +-5% of aspect wobble. That is the trade: a small squash instead of a large jump.
+const orbW = h => Math.max(1, Math.round(SW * h / SH));
+const LADDER = [];
+for (let h = SH; 2 * h >= SH; h--) LADDER.push({ h, exp: 1 });
+for (let h = SH; h >= 1; h -= 2)   LADDER.push({ h, exp: 0 });
+const ORBBMH = [...new Set(LADDER.map(r => r.h))].sort((a, b) => b - a);   // distinct bitmaps
+const ORBBM = ORBBMH.map(h => {
+  const g = orbScale(orbW(h), h), bytes = [];
   for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
     bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
   bytes.push(0);
   return bytes;
 });
-// A variant is a bitmap plus whether the VIC doubles it. Expansion is free -- same bitmap, one
-// register bit -- so the top of the ladder costs no extra data. Doubling a bitmap narrower
-// than 7 would just duplicate an unexpanded width at half the vertical resolution, so it is
-// only used above that.
-const ORBSRC = [], ORBEXP = [], ORBWIDE = [];
-for (let w = 1; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(0); ORBWIDE.push(w * 2); }
-for (let w = 7; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(1); ORBWIDE.push(w * 4); }
+const NORBBM = ORBBM.length;
+// The widest rung must come back byte-identical to the art it was scaled from. If a change to
+// the resampler breaks that, every other rung is suspect too.
+if (ORBBM[0].slice(0, 63).join() !== ORB4RAW.slice(0, 63).join())
+  throw new Error('orbScale does not reproduce ORB4 at full size -- the resampler changed');
+const ORBSRC = LADDER.map(r => ORBBMH.indexOf(r.h));
+const ORBEXP = LADDER.map(r => r.exp);
+const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent width, screen px
+const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent height, screen px
+if (process.env.ORBDUMP === '1') {
+  const CH = [' ', '.', '#', 'o'];
+  console.error(`  ${LADDER.length} rungs from ${NORBBM} bitmaps (${NORBBM * 64} bytes, ` +
+                `${NORBBM} of 159 sprite slots)`);
+  LADDER.forEach((r, v) => {
+    const g = orbScale(orbW(r.h), r.h);
+    const step = v ? (100 * (1 - ORBTALL[v] / ORBTALL[v - 1])).toFixed(1) + '%' : '-';
+    console.error(`  --- rung ${v + 1}: bitmap ${orbW(r.h)}x${r.h}${r.exp ? ' EXPANDED' : ''}` +
+                  `, apparent ${ORBTALL[v]}h x ${ORBWIDE[v]}w, step ${step}`);
+    for (let y = 21 - r.h; y < 21; y++)
+      console.error('      |' + g[y].map(c => CH[c]).join('').replace(/\s+$/, '').padEnd(12) + '|');
+  });
+}
 // The content is bottom-aligned in every bitmap, so the ground shadow always ends on the
 // sprite's last row and the anchor is simply the sprite's height. No per-variant table of
 // hand-measured shadow positions any more.
@@ -1845,11 +1868,17 @@ const orbCol = ORBS.map(o => ORBBODY[o.c]);
 const ORBSCALE = +(process.env.ORBSCALE ?? 49);
 // The largest h any variant can still show at: $d001 = (150 - anchor) + h must stay under 251.
 const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
+// Selection is by apparent HEIGHT, not width. The ladder steps height evenly, and width -- with
+// only 12 levels against height's 21 -- cannot follow: five rungs repeat the width of the rung
+// above them. Choosing on width therefore made those five UNREACHABLE, because a nearest-width
+// search can only ever return the first of a pair. ORBSCALE keeps its meaning (the ball's
+// diameter in pixels at h = 88, a width) and is converted through the top rung's own aspect, so
+// the tuning knob is unchanged.
 const orbVarT = [...Array(256)].map((_, h) => {
-  const want = ORBSCALE * h / 88;
-  let b = 0; for (let v = 1; v < ORBWIDE.length; v++)
-    if (Math.abs(ORBWIDE[v] - want) < Math.abs(ORBWIDE[b] - want)) b = v;   // ties keep the
-                                        // earlier (unexpanded) entry: twice the vertical detail
+  const want = (ORBSCALE * h / 88) * ORBTALL[0] / ORBWIDE[0];
+  let b = 0; for (let v = 1; v < ORBTALL.length; v++)
+    if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;   // ties keep the
+                                        // earlier (expanded) entry: twice the horizontal detail
   return b;
 });
 { // which rungs can actually be reached, and at what distance each one takes over?
@@ -1857,8 +1886,8 @@ const orbVarT = [...Array(256)].map((_, h) => {
   for (let v = 0; v < ORBWIDE.length; v++) {
     const lim = 251 - (150 - ORBANCH[v]);
     const hs = [...Array(lim).keys()].filter(h => orbVarT[h] === v);
-    band.push(hs.length ? `${ORBWIDE[v]}px@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
-      `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBWIDE[v]}px UNREACHABLE`);
+    band.push(hs.length ? `${ORBTALL[v]}h@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
+      `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBTALL[v]}h/${ORBWIDE[v]}w UNREACHABLE`);
   }
   if (SPRITES) console.error(`  orb size ladder (cells): ${band.join('  ')}`);
 }
@@ -2546,7 +2575,7 @@ pfInit: sta pfAcc,x
 mloop:
 ${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
 ` : ''}        jsr tickDelta
-        ${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
+        ${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WIGGLE ? 'jsr wiggleStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${PROFILE && !PROFILE1 ? '        ldx #0\n        jsr pfTick              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
@@ -4171,7 +4200,13 @@ rkTlR2: dex
         sty pa
 rkJD:   rts
 
-moveFwd:
+${WIGGLE ? `wiggleStep:
+        lda iterLo              ; alternate frames: forward, back, forward, back...
+        and #$01
+        bne wgBack
+        jmp moveFwd
+wgBack: jmp moveBack
+` : ''}moveFwd:
         ldx pa
         lda moveXT,x
         sta dxv
@@ -4247,7 +4282,36 @@ maLp:   clc
         sta dysH
         dex
         bne maLp
-        ldx #${MOVE_SHIFT}      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
+        ; ROUND TOWARD ZERO, not toward negative infinity. The shift below is arithmetic, so it
+        ; floors -- and floor(v/16) + floor(-v/16) = -1 for any v that is not a multiple of 16.
+        ; That makes a step forward and a step back NOT inverses: each pair loses one unit of
+        ; 1/256 cell on every axis whose product is not a multiple of 16, always toward -x/-y.
+        ; Wiggling back and forth therefore walked the player slowly north-west, which reads as
+        ; a sideways drift whose SCREEN direction depends on facing -- the same world-space bleed
+        ; projecting left at one heading and right at another.
+        ;
+        ; Biasing a negative value by 2^SHIFT-1 before an arithmetic shift truncates toward zero,
+        ; which makes the two directions exact mirrors. The sign is already known in dxSgn/dySgn,
+        ; so this is two conditional 16-bit adds once a frame. Verified with WIGGLE=1.
+        lda dxSgn
+        beq maBy
+        clc
+        lda dxs
+        adc #${hx((1 << MOVE_SHIFT) - 1)}
+        sta dxs
+        lda dxsH
+        adc #$00
+        sta dxsH
+maBy:   lda dySgn
+        beq maBd
+        clc
+        lda dys
+        adc #${hx((1 << MOVE_SHIFT) - 1)}
+        sta dys
+        lda dysH
+        adc #$00
+        sta dysH
+maBd:   ldx #${MOVE_SHIFT}      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
 maSh:   lda dxsH
         cmp #$80
         ror dxsH
