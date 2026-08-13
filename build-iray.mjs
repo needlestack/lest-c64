@@ -259,6 +259,7 @@ console.error(`  corner partners (line kept): ` +
   `${cpLo.filter(Boolean).length + cpHi.filter(Boolean).length} run ends of ${(nextRun - 1) * 2}` +
   ` -- inside corners, plus outside corners with both faces visible; a corner facing away from` +
   ` the view has an unrelated wall across the boundary and draws no line`);
+
 // Per-frame step, in 1/256ths of a map cell (px/py are 8.8 fixed point). Must stay well
 // under 256: moveApply only collision-tests the DESTINATION cell, so a step approaching a
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
@@ -1544,13 +1545,10 @@ const SCR_A = 0xe000;                   // both screens must stay CPU-writable: 
 const SCR_B = 0xe400;                   //   writes one of them every frame
 const CHARSET = 0xd000;                 // charset A: upright glyphs, above the horizon
 const CHARSET_B = 0xd800;               // charset B: every glyph flipped, below the horizon
-// The two charsets are EMITTED here and copied up to $d000 at startup, then this space is
-// reclaimable. They are now ADJACENT ($3000-$3fff) rather than 2KB apart, and that is the whole
-// point: charset A used to sit at $2800 with a 2KB HOLE at $3000-$37ff above it, because the
-// f-tables that once lived there moved up to RELOC and nobody moved the charset down after them.
-// A build guard was still reserving $3000-$37ff for those departed f-tables, so the hole was
-// defended as well as empty -- and the code block's ceiling was $2800 for no reason at all.
-// Adjacent sources mean ONE contiguous reclaimed region and 2KB more code space, for free.
+// Charset B is DERIVED from A at startup (see cpChr), so only ONE charset exists anywhere --
+// and it is never in the image: the loader decodes it straight into $d000, which is the one
+// thing a KERNAL LOAD cannot do. The paragraph that used to be here described a low "source"
+// copy at $3000-$3fff and two build guards defending it; all of that is gone.
 // CHARSRC is GONE. The charset is not in the image at any address: it is a separate compressed
 // segment the loader decodes straight into $d000. Nothing here may name a load address for it,
 // because there isn't one -- the destination lives in the --seg argument, and $d000/$d800 are named
@@ -1560,8 +1558,350 @@ const CHARSET_B = 0xd800;               // charset B: every glyph flipped, below
 // constant and a build guard citing it stayed behind at $3000, reserving 2KB against a tenant that
 // had left and pinning the code's ceiling at $2800 for years. The charsets occupy $3000-$3fff now.
 // If a table needs a base address, take it from RELOC's allocation, not from a fresh constant --
-// a constant is a claim about the map that nothing checks.
+// a constant is a claim about the map that nothing checks. The charsets are NOT at $3000 any
+// more either -- that space is the orb tables and the code's growth room.
 const NEWTABLES = 0x4000;               // clampT / rampT / stepT
+
+// ============================ ORBS: the data layer ============================
+// Restored 2026-08-12 from ddfa4bc^ (the pass deleted at ddfa4bc), porting ONLY what does not
+// depend on the abandoned two-blacks occlusion scheme: the art and its resampling ladder, the
+// placement, the per-cell visibility lists, and the per-variant/per-orb tables. The charset
+// twins, the four painting rules, repointing and STEPSTATIC are deliberately NOT brought back --
+// occlusion will be done by stamping foreground-black chars per orb per cell instead.
+const SPRITES = process.env.SPRITES !== '0';
+// The sprite bitmaps are PLACED into VIC bank 3 by the self-extracting loader ($c000, 64-byte
+// aligned, first of the 159 free slots) rather than emitted into the image. They were at $2000
+// in bank 0 before the bank-3 move, which is now the code's growth room.
+const SPRBASE = 0xc000;
+// The orb tables go at the TOP of the hole above the code, ending at $4000 where the first
+// emitted table begins. Placing them at the top rather than the bottom keeps the code's growth
+// room ONE contiguous piece below them instead of splitting the hole in two. RELOC+0x1300,
+// where these lived before, belongs to FINEANG's quarter-angle tables now.
+//
+// Named bases rather than offsets from one origin: the visibility lists are 2.3KB, an order of
+// magnitude bigger than everything else here, and an offset scheme invites the mistake of
+// budgeting them like a small table. The four 256-entry tables are page-aligned because the
+// 6502 indexes them by a whole byte (cell number, or h).
+const ORB_VART     = 0x2f00;    // h -> size variant, 256
+const ORB_CANDCNT  = 0x3000;    // per cell: how many candidates, 256
+const ORB_CANDLO   = 0x3100;    // per cell: pointer to its list, lo/hi, 256 each
+const ORB_CANDHI   = 0x3200;
+const ORB_OCC      = 0x3300;    // occluder masks, OCCBYTES x norbs
+const ORB_SMALL    = 0x3500;    // the per-variant and per-orb tables: 304 bytes, so TWO pages
+const ORB_CANDLIST = 0x3700;    // the visibility lists themselves: 3 bytes per candidate
+const ORB_TOP      = 0x4000;    // and the first emitted table, which they must not reach
+
+const ORB4RAW = [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192];
+const ORBSRC12 = (() => {
+  const d = ORB4RAW, g = [];
+  for (let y = 0; y < 21; y++) { const r = [];
+    for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++) r.push((d[y * 3 + b] >> (6 - 2 * i)) & 3);
+    g.push(r); }
+  return g;
+})();
+// Scale about the DRAWN content, not the 12x21 frame it happens to sit in.
+const _cols = [...Array(12).keys()].filter(x => ORBSRC12.some(r => r[x]));
+const _rows = [...Array(21).keys()].filter(y => ORBSRC12[y].some(v => v));
+const SX0 = Math.min(..._cols), SX1 = Math.max(..._cols);
+const SY0 = Math.min(..._rows), SY1 = Math.max(..._rows);
+const SW = SX1 - SX0 + 1, SH = SY1 - SY0 + 1;
+// The art is a ball, a gap, then a ground shadow, and the two solid parts want different
+// downsampling. Find the gap so they can be scaled separately.
+const _ballEnd = (() => { for (let y = _rows[0]; y <= SY1; y++) if (!ORBSRC12[y].some(v => v)) return y - 1; return SY1; })();
+const _shadTop = (() => { for (let y = SY1; y >= SY0; y--) if (!ORBSRC12[y].some(v => v)) return y + 1; return SY0; })();
+// Area coverage with a threshold, sampled 4x4 within each destination pixel. The BALL needs a
+// true half-coverage test or its edges square off -- filling a destination pixel whenever any
+// source pixel under it is set dilates the silhouette out to its bounding box, which is what
+// made the small orbs look cuboid. The SHADOW is three rows of soft ellipse and a half-coverage
+// test erases most of it, so it gets a low threshold and keeps its width.
+const ORBTHR = +(process.env.ORBTHR ?? 0.5);
+function orbRegion(out, oy, hgt, y0, y1, w, thr) {
+  const sh = y1 - y0 + 1, N = 4, ox = (12 - w) >> 1;
+  for (let dy = 0; dy < hgt; dy++) for (let dx = 0; dx < w; dx++) {
+    const t = [0, 0, 0, 0]; let n = 0;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      const sx = Math.floor(SX0 + SW * (dx + (i + 0.5) / N) / w);
+      const sy = Math.floor(y0 + sh * (dy + (j + 0.5) / N) / hgt);
+      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) { t[ORBSRC12[sy][sx]]++; n++; }
+    }
+    if (t[1] + t[2] + t[3] < n * thr) continue;
+    let bn = 0, v = 0; for (let k = 1; k < 4; k++) if (t[k] > bn) { bn = t[k]; v = k; }
+    out[oy + dy][ox + dx] = v;
+  }
+}
+function orbScale(w) {
+  const sc = w / SW;
+  const bh = Math.max(1, Math.round((_ballEnd - SY0 + 1) * sc));
+  const gh = Math.max(0, Math.round((_shadTop - _ballEnd - 1) * sc));
+  const sh = Math.max(1, Math.round((SY1 - _shadTop + 1) * sc));
+  const out = [...Array(21)].map(() => new Array(12).fill(0));
+  const oy = 21 - (bh + gh + sh);       // standing on the sprite's floor
+  orbRegion(out, oy, bh, SY0, _ballEnd, w, ORBTHR);
+  orbRegion(out, oy + bh + gh, sh, _shadTop, SY1, w, 0.2);
+  return out;
+}
+const NORBBM = 12;                              // one bitmap per multicolor-pixel width, 1..12
+// The widest rung must come back byte-identical to the art it was scaled from. If a change to
+// the resampler breaks that, every other rung is suspect too.
+{ const g = orbScale(SW), b = [];
+  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
+    b.push([0,1,2,3].reduce((v, i) => v | (g[y][k*4+i] << (6-2*i)), 0));
+  if (b.join() !== ORB4RAW.join()) throw new Error('orbScale does not reproduce ORB4 at full width'); }
+const ORBBM = [...Array(NORBBM)].map((_, i) => {
+  const g = orbScale(i + 1), bytes = [];
+  for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
+    bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
+  bytes.push(0);
+  return bytes;
+});
+// A variant is a bitmap plus whether the VIC doubles it. Expansion is free -- same bitmap, one
+// register bit -- so the top of the ladder costs no extra data. Doubling a bitmap narrower
+// than 7 would just duplicate an unexpanded width at half the vertical resolution, so it is
+// only used above that.
+const ORBSRC = [], ORBEXP = [], ORBWIDE = [];
+for (let w = 1; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(0); ORBWIDE.push(w * 2); }
+for (let w = 7; w <= NORBBM; w++) { ORBSRC.push(w - 1); ORBEXP.push(1); ORBWIDE.push(w * 4); }
+// The content is bottom-aligned in every bitmap, so the ground shadow always ends on the
+// sprite's last row and the anchor is simply the sprite's height. No per-variant table of
+// hand-measured shadow positions any more.
+const ORBANCH = ORBEXP.map(e => e ? 42 : 21);
+// The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
+// and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
+// ORBPAL=colour brings back light blue / light red / light green bodies.
+const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
+const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
+
+// Placement. Greedy over the open cells with a minimum spacing, which spreads them through
+// every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
+// candidate list to 9 -- see the visibility lists below, which are what make this affordable.
+const ORBSPACE = +(process.env.ORBSPACE ?? 2.2);
+// How far an orb can be and still make the cell's list. A full projection is ~2400 cycles
+// whether the orb ends up 48 pixels across or 4, so the tail of tiny distant dots is the
+// expensive part of being generous. 9 cells is where an orb is still a couple of pixels.
+const ORBSEE = +(process.env.ORBSEE ?? 9);
+const ORBS = [];
+for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
+  if (map[y * 16 + x]) continue;
+  const cx = x + 0.5, cy = y + 0.5;
+  if (cx < 2 && cy < 2) continue;                // not sitting on the player's start
+  if (ORBS.some(o => Math.hypot(o.x - cx, o.y - cy) < ORBSPACE)) continue;
+  ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
+}
+if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables are byte-sized`);
+
+// Per-cell candidate lists. Projecting an orb costs about a thousand cycles, so the thing that
+// decides whether many orbs are affordable at all is how few we even look at. From any cell,
+// only orbs with line of sight can possibly be on screen, and in a corridor maze that is very
+// few: mean 4.3, worst 9. Sorted by distance, so taking the first eight that project takes the
+// NEAREST eight, and assigning them to sprites in order gets the overlap priority right for
+// free -- sprite 0 draws over sprite 1.
+// ---- which walls can occlude which orb ----
+// A wall face occludes an orb only if the orb is on the FAR side of that face's plane. We
+// render camera-facing faces only, so a face that appears on screen already faces the camera;
+// if the orb is beyond it, the face is between them. That answer does not involve the camera
+// at all, so it is a constant: 66 runs x 34 orbs, computed here, one bit each.
+//
+// This replaces comparing the orb's height against the wall's. Depth comparison is per column
+// and quantised, so two neighbouring cells of one flat wall could disagree -- which is where
+// every occlusion artifact in this thing has come from. A plane test is per FACE, so every
+// cell showing that face gets the same answer by construction.
+const OCCBYTES = (nextRun + 7) >> 3;
+const orbOcc = ORBS.map(o => {
+  const m = new Array(OCCBYTES).fill(0);
+  for (let r = 1; r < nextRun; r++) {
+    const k = runPlane[r];
+    const beyond = runFace[r] === 'W' ? o.x > k : runFace[r] === 'E' ? o.x < k
+                 : runFace[r] === 'N' ? o.y > k : o.y < k;
+    if (beyond) m[r >> 3] |= 1 << (r & 7);
+  }
+  return m;
+});
+if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs = ${OCCBYTES * ORBS.length}` +
+  ` bytes; a run can occlude ${(orbOcc.reduce((a, m) =>
+    a + m.reduce((b, v) => b + v.toString(2).split('1').length - 1, 0), 0) / ORBS.length).toFixed(1)}` +
+  ` orbs on average`);
+
+const losFree = (ax, ay, bx, by) => {
+  const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
+  for (let i = 1; i < n; i++) { const t = i / n, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+    if (map[(y | 0) * 16 + (x | 0)]) return false; }
+  return true;
+};
+const CANDBASE = ORB_CANDLIST;                    // a FULL address: the 6502 loads it into a pointer
+const candList = [], candLo = new Array(256).fill(0), candHi = new Array(256).fill(0),
+      candCnt = new Array(256).fill(0);
+for (let cell = 0; cell < 256; cell++) {
+  const x = cell & 15, y = cell >> 4;
+  if (map[cell]) continue;
+  const cx = x + 0.5, cy = y + 0.5;
+  // Line of sight from ANYWHERE in the cell, not just its centre. The player occupies the
+  // whole cell, and standing at one edge you can see round a corner the centre cannot -- which
+  // showed up as an orb popping in and out as you walked a corridor, present in cells 9 and 11
+  // and missing in 10. Sampling a 3x3 grid makes the list a superset of what is reachable.
+  const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
+  const vis = ORBS.map((o, i) => ({ i, d: Math.hypot(o.x - cx, o.y - cy) }))
+    .filter(o => o.d < ORBSEE &&
+      eye.some(([ex, ey]) => losFree(ex, ey, ORBS[o.i].x, ORBS[o.i].y)))
+    .sort((a, b) => a.d - b.d);
+  // FULL ADDRESS, not an offset: the 6502 loads these straight into a pointer.
+  const a = CANDBASE + candList.length;
+  candLo[cell] = a & 255; candHi[cell] = a >> 8;
+  candCnt[cell] = vis.length;
+  // Three bytes per candidate: orb index, bearing from this cell, and how far off that
+  // bearing the player may still see it. The list covers all 360 degrees but the FOV is 66,
+  // so without this test four candidates in five are fully projected only to be discarded --
+  // and a full projection is about 2000 cycles against 20 for the test.
+  // What can get BETWEEN an eye position in this cell and the orb? Asking "what runs are
+  // visible from here" was far too broad -- from most cells you can see most of the map, so
+  // it skipped almost nothing. March each eye position at the orb instead, across the orb's
+  // width, and see what is hit on the way.
+  const blockers = (o) => {
+    const out = new Set();
+    for (const [ex, ey] of eye) {
+      const vx = o.x - ex, vy = o.y - ey, L = Math.hypot(vx, vy) || 1;
+      for (const off of [-0.25, 0, 0.25]) {          // the orb has width, so sample across it
+        const tx = o.x - vy / L * off, ty = o.y + vx / L * off;
+        const dx = tx - ex, dy = ty - ey, n = Math.ceil(Math.hypot(dx, dy) * 8);
+        for (let i = 1; i < n; i++) {
+          const t = i / n, x = ex + dx * t, y = ey + dy * t;
+          const mx = x | 0, my = y | 0;
+          if (mx < 0 || my < 0 || mx > 15 || my > 15) break;
+          if (map[my * 16 + mx]) {                    // which face did we come through?
+            const px2 = ex + dx * ((i - 1) / n), py2 = ey + dy * ((i - 1) / n);
+            const t2 = (px2 | 0) !== mx ? (dx > 0 ? runW : runE) : (dy > 0 ? runN : runS);
+            out.add(t2[my * 16 + mx]); break;
+          }
+        }
+      }
+    }
+    return out;
+  };
+  for (const v of vis) {
+    const o = ORBS[v.i];
+    const brg = Math.round(Math.atan2(o.y - cy, o.x - cx) / (2 * Math.PI) * 256) & 255;
+    // Half the FOV, plus however far the bearing can swing as the player moves off the cell
+    // centre -- up to 0.71 cells away, which matters enormously for a near orb.
+    const win = Math.min(127, Math.ceil(FOV / 2 + Math.atan2(0.71, Math.max(v.d, 0.71))
+                                                  / (2 * Math.PI) * 256) + 2);
+    // Bit 7 of the window byte is spare (windows never exceed 127): set it when some run
+    // visible from this cell could occlude this orb.
+    const canOcc = [...blockers(o)].some(r => (orbOcc[v.i][r >> 3] >> (r & 7)) & 1);
+    candList.push(v.i, brg, win | (canOcc ? 0x80 : 0));
+  }
+}
+if (ORB_CANDLIST + candList.length > ORB_TOP) throw new Error(
+  `visibility lists are ${candList.length} bytes, ending at $${(ORB_CANDLIST + candList.length)
+  .toString(16)} past the first emitted table at $${ORB_TOP.toString(16)}. ORBSEE (currently ` +
+  `${ORBSEE} cells) is the knob: it decides how many orbs each cell may list.`);
+// ORBDIAG=1 writes every input to the occlusion decision as JSON. Occlusion questions are
+// "which run, which plane, which orb, was it culled" -- all build-time constants -- and
+// re-deriving them in a separate script is how the last analysis went wrong (it approximated
+// the projection and pointed at a viewpoint where nothing clipped at all). Dump the real ones.
+if (process.env.ORBDIAG === '1') {
+  const perCell = {};
+  for (let c = 0; c < 256; c++) {
+    if (map[c] || !candCnt[c]) continue;
+    const base = (candLo[c] | (candHi[c] << 8)) - CANDBASE;
+    perCell[`${c % 16},${c >> 4}`] = [...Array(candCnt[c])].map((_, j) => ({
+      orb: candList[base + j * 3], brg: candList[base + j * 3 + 1],
+      win: candList[base + j * 3 + 2] & 0x7f,
+      canOcc: !!(candList[base + j * 3 + 2] & 0x80),
+    }));
+  }
+  writeFileSync('orbdiag.json', JSON.stringify({
+    orbs: ORBS, runFace, runPlane, nextRun, map,
+    runW, runE, runN, runS,
+    orbOcc: orbOcc.map(m => m.map(b => b)), perCell,
+  }));
+  console.error('ORBDIAG: wrote orbdiag.json');
+}
+const _pal = [...new Set(ORBBODY)].length === 1
+  ? `all body colour ${ORBBODY[0]}`
+  : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
+if (SPRITES) console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
+  `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}; ` +
+  `${(100 * candList.filter((_, i) => i % 3 === 2 && (candList[i] & 0x80)).length /
+     (candList.length / 3)).toFixed(0)}% of candidates could be occluded from their cell`);
+// Every orb is at a cell CENTRE, and orbOne leans on it hard: the offset to an orb is an
+// integer cell difference plus a fraction that is the same for every orb in the frame, so the
+// fractional half of each product becomes a per-frame constant and the per-orb half drops from
+// a 16x8 multiply to an 8x8. If placement ever stops being cell-centred, that has to be undone.
+for (const o of ORBS) if ((o.x % 1) !== 0.5 || (o.y % 1) !== 0.5)
+  throw new Error(`orb at (${o.x},${o.y}) is not cell-centred; orbOne assumes it is`);
+const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
+
+const orbCol = ORBS.map(o => ORBBODY[o.c]);
+// h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
+// locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
+// h = 88, i.e. how big it looks one cell away.
+// The ladder has to reach its top before the orb walks off the bottom of the screen. At 34
+// the largest variant needed h > 103 while orbOne rejects h >= HMAX, so orb6 could never be
+// chosen at all -- the ladder topped out one rung short. Scaled so the top rung lands where
+// the second-from-top used to, which shifts every band down with it.
+const ORBSCALE = +(process.env.ORBSCALE ?? 49);
+// The largest h any variant can still show at: $d001 = (150 - anchor) + h must stay under 251.
+const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
+const orbVarT = [...Array(256)].map((_, h) => {
+  const want = ORBSCALE * h / 88;
+  let b = 0; for (let v = 1; v < ORBWIDE.length; v++)
+    if (Math.abs(ORBWIDE[v] - want) < Math.abs(ORBWIDE[b] - want)) b = v;   // ties keep the
+                                        // earlier (unexpanded) entry: twice the vertical detail
+  return b;
+});
+{ // which rungs can actually be reached, and at what distance each one takes over?
+  const band = [];
+  for (let v = 0; v < ORBWIDE.length; v++) {
+    const lim = 251 - (150 - ORBANCH[v]);
+    const hs = [...Array(lim).keys()].filter(h => orbVarT[h] === v);
+    band.push(hs.length ? `${ORBWIDE[v]}px@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
+      `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBWIDE[v]}px UNREACHABLE`);
+  }
+  if (SPRITES) console.error(`  orb size ladder (cells): ${band.join('  ')}`);
+}
+// A sprite pointer is BANK-RELATIVE, not absolute: the VIC forms the address as bank base +
+// pointer*64. This read (SPRBASE >> 6) when bank 0 made the two the same thing -- the identical
+// latent assumption that vm()/cb() carried into the bank-3 move. In bank 3 the absolute form
+// would give 768, which does not even fit in a pointer byte.
+const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
+const orbExpT = ORBEXP.map(e => e);
+// Distance from the sprite's LEFT EDGE to the ball's centre, which is what positioning needs
+// -- not half the ball's width. orbScale centres the content in the 12-column sprite, so the
+// centre sits ~12px in whatever the ball's size; using ballWidth/2 drew small orbs up to 10px
+// right of where they belong AND shifted them on every variant change, which is the scaling
+// jump. It also put the sprite somewhere the depth scan had not tested, hence stray occlusion.
+const orbHalfT = ORBSRC.map((b, v) => {
+  const w = b + 1, ox = (12 - w) >> 1;
+  return (2 * ox + w) * (ORBEXP[v] ? 2 : 1);
+});
+// 150 - anchor: raster 50 + display row 100, less the rows from the sprite's top down to the
+// bottom of its ground shadow. Adding h to THIS cannot overflow until the orb is long gone.
+const orbYBaseT = ORBANCH.map(a => 150 - a);
+// Leading blank rows per variant, doubled when the VIC expands, and the sprite's total height.
+// The ball is bottom-aligned in every bitmap, so a small variant carries most of its 21 rows
+// blank ABOVE the ball -- up to two and a half char rows of nothing. orbSeam uses these to
+// patch only the rows an orb actually inks; using the raw sprite rectangle instead is what
+// once made seams vanish in cells with no orb near them.
+const orbBlankT = ORBSRC.map((b, v) => {
+  const bm = ORBBM[b];
+  let r = 0;
+  while (r < 21 && !bm[r * 3] && !bm[r * 3 + 1] && !bm[r * 3 + 2]) r++;
+  return r * (ORBEXP[v] ? 2 : 1);
+});
+const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
+// Half-width in LOGICAL columns, rounded UP. w>>2 truncates, so any sprite whose width is not
+// a multiple of 4 logical columns lost half a column at each edge -- and the bounding box built
+// from it then stopped one column short of the sprite's own pixels. The wall column under that
+// edge never got marked, and a one-column sliver of orb showed through a wall that was otherwise
+// clipping it correctly. Rounding up costs nothing: an over-wide box marks nothing extra, since
+// every column is still filtered through the face-plane mask.
+const orbColT = ORBWIDE.map(w => (w + 3) >> 2);
+const orbBitT = [...Array(8)].map((_, i) => 1 << i);
+// The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
+// is (ptr),y with no multiply.
+const OCCBASE = ORB_OCC;
+const orbOccFlat = orbOcc.flat();
+const orbOccLo = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
+const orbOccHi = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
 // Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
 // coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
 // solve needs into another one. 1024 bytes, all above VIC bank 0.
@@ -5228,7 +5568,39 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; still built in JS -- charsetgen and the readout glyph checks compare against it -- but nothing
 ; is emitted, which is the point: it was a permutation of bytes already in the image.
 
-        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
+${SPRITES ? `; ================= orb tables =================
+; These sit in the hole between the code and the first emitted table. Only what the projection
+; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
+; popcT) are NOT here, because they addressed charset twins that no longer exist.
+        * = ${hx16(ORB_VART)}
+orbVarT: !byte ${orbVarT.join(',')}
+        * = ${hx16(ORB_CANDCNT)}
+candCntT: !byte ${candCnt.join(',')}
+        * = ${hx16(ORB_CANDLO)}
+candLoT: !byte ${candLo.join(',')}
+        * = ${hx16(ORB_CANDHI)}
+candHiT: !byte ${candHi.join(',')}
+        * = ${hx16(ORB_OCC)}
+; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
+; because the test does not involve the camera at all -- see the data layer above.
+orbOccT: !byte ${orbOccFlat.join(',')}
+        * = ${hx16(ORB_SMALL)}
+orbPtrT: !byte ${orbPtrT.join(',')}
+orbExpT: !byte ${orbExpT.join(',')}
+orbHalfT: !byte ${orbHalfT.join(',')}
+orbYBaseT: !byte ${orbYBaseT.join(',')}
+orbBlankT: !byte ${orbBlankT.join(',')}
+orbHgtT: !byte ${orbHgtT.join(',')}
+orbColT: !byte ${orbColT.join(',')}
+orbBitT: !byte ${orbBitT.join(',')}
+orbOccLoT: !byte ${orbOccLo.join(',')}
+orbOccHiT: !byte ${orbOccHi.join(',')}
+orbXCT: !byte ${orbXC.join(',')}
+orbYCT: !byte ${orbYC.join(',')}
+orbColT2: !byte ${orbCol.join(',')}
+        * = ${hx16(ORB_CANDLIST)}
+candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it may cross pages
+` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
 absCosT: ${chunk(absCos).trim()}
 absSinT: ${chunk(absSin).trim()}
 recipLoT: ${chunk(recipLo).trim()}
@@ -5564,6 +5936,10 @@ try {
   }
   // The charset ships as a raw binary for the loader to place, not as part of the image.
   writeFileSync('./iray-charset.bin', Buffer.from(fontA));
+  // Same for the sprite bitmaps, which go to $c000 -- the first of VIC bank 3's free slots.
+  // They were at $2000 in bank 0 before the bank-3 move, competing with code for address space;
+  // now they are graphics living in the graphics bank, which is what bank 3 is for.
+  if (SPRITES) writeFileSync('./iray-sprites.bin', Buffer.from(ORBBM.flat()));
   writeFileSync('./iray.prg', Buffer.from(r.prg));
   const d = D64.createEmpty('IRAY', '01');
   d.writeFile('IMAZE'.padEnd(6) + '/PRG', r.prg, D64.FILE_TYPE_PRG);
@@ -5589,7 +5965,8 @@ try {
   if (!process.env.NOSELFEXT) {
     const { execSync } = await import('child_process');
     const out = execSync('node ./selfext.mjs ./iray.prg ./iray-c.prg ' +
-                         '--seg d000:./iray-charset.bin', { encoding: 'utf8' });
+                         '--seg d000:./iray-charset.bin' +
+                         (SPRITES ? ' --seg c000:./iray-sprites.bin' : ''), { encoding: 'utf8' });
     console.log(out.trim());
     writeFileSync('./latest.d64', readFileSync('./iray-c.d64'));
     console.log('latest.d64 is the COMPRESSED self-extracting build');
