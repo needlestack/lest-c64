@@ -527,7 +527,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -4452,40 +4452,30 @@ ocS:    sta ocol
         lda #$00
         sta ocolN
 ocDn:
-        lda ocoff               ; --- screen X: 24 + 2*column - halfWidth, signed 16-bit ---
-        asl
+        ; --- screen X, on the 160-COLUMN grid: X = 2 * (ocol + orbXOffT) ---
+        ; The engine is 160x200 throughout and a multicolor sprite pixel is two hires pixels, so
+        ; there is no odd sprite X worth having. This used to build a signed 16-bit HIRES x --
+        ; two 16-bit adds and a 16-bit subtract -- and then threw the low bit away again with
+        ; an AND #$fe. In columns it is one byte add and a shift, X is even by construction,
+        ; and the half column the snap could take is gone, which is what lets the bounding box
+        ; above be exact instead of rounded outward.
+        ldx ovar
+        lda ocolN
+        bne oxNeg
+        lda ocol                ; centre on screen: b = ocol + (12 - halfCols)
+        clc
+        adc orbXOffT,x
+        bcc oxDn
+        jmp orbNo               ; b past 255: far off the right, and b<<1 would wrap
+oxNeg:  lda orbXOffT,x          ; centre is ocol columns LEFT of column 0, so b = offset - ocol
+        sec
+        sbc ocol
+        bcc orbNo               ; sprite's left edge is left of X = 0, which no sprite can be
+oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         sta o0
         lda #$00
         rol
         sta o1
-        lda oaS
-        bmi oxNeg
-        clc
-        lda o0
-        adc #184
-        sta o0
-        lda o1
-        adc #$00
-        sta o1
-        jmp oxDn
-oxNeg:  sec
-        lda #184
-        sbc o0
-        sta o0
-        lda #$00
-        sbc o1
-        sta o1
-oxDn:   ldx ovar
-        sec
-        lda o0
-        sbc orbHalfT,x
-        sta o0
-        lda o1
-        sbc #$00
-        sta o1
-        bmi orbNo               ; fully off the left edge
-        cmp #$02
-        bcs orbNo               ; past x = 512, fully off the right
         ; --- screen Y: ground shadow on the floor line, 100 + h ---
         ; $d001 = 150 + h - anchor, but computed as (150 - anchor) + h. Adding 150 first
         ; carries out of a byte once h passes 105, which used to cap how close an orb could
@@ -4665,17 +4655,15 @@ opDone:
         lda omBit
         ora omYY
         sta omYY
-oNoX:   lda o0
-        and #$fe                ; snap X to the MULTICOLOR grid. A multicolor char pixel is two
-                                ; hires pixels aligned to the character (always even, since
-                                ; sprite X 24 is screen x 0); a multicolor SPRITE pixel is also
-                                ; two, but aligned to the sprite's own X. At an odd X the two
-                                ; grids are half a pixel out of phase, and since the VIC decides
-                                ; priority per HIRES pixel, one half of a sprite pixel lands on
+oNoX:   lda o0                  ; already on the multicolor grid -- X is 2*b, so always even.
+                                ; It has to be: a multicolor CHAR pixel is two hires pixels
+                                ; aligned to the character, a multicolor SPRITE pixel is two
+                                ; aligned to the sprite's own X, and at an odd X the two grids
+                                ; are half a pixel out of phase. The VIC then decides priority
+                                ; per HIRES pixel, so one half of a sprite pixel lands on
                                 ; foreground and clips while its partner lands on background and
-                                ; draws -- a one-hires-pixel sliver of orb peeking past a wall
-                                ; edge that is otherwise clipping it correctly. Costs 2 cycles
-                                ; and quantises horizontal motion to 2px.
+                                ; draws -- a one-pixel sliver of orb peeking past a wall edge
+                                ; that is otherwise clipping it correctly.
         sta obX,x
         lda o3
         sta obY,x
@@ -4822,13 +4810,13 @@ orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72
         * = $3300
 orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
-orbHalfT: !byte 22,24,22,24,22,24,22,24,22,24,22,11,11,11,11,11,11,12,11,12,11,12
+orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6
 orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129
 orbBlankT: !byte 0,2,4,6,8,10,12,14,16,18,20,0,2,4,6,8,10,12,14,16,18,20
 orbAnchT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
 orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
 orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1
-orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,6,5,5,4,3,3,1,2,0,1,0
+orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0
 orbBitT: !byte 1,2,4,8,16,32,64,128
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.

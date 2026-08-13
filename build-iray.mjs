@@ -2074,6 +2074,19 @@ const orbYBaseT = ORBANCH.map(a => 150 - a);
 // once made seams vanish in cells with no orb near them.
 const orbBlankT = LADDER.map((r, v) => ORBANCH[v] - ORBTALL[v]);
 const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
+// Half the sprite, in LOGICAL COLUMNS. Everything in this engine lives on the 160x200 grid, and
+// a multicolor sprite pixel is two hires pixels, so a sprite has no odd X worth taking: the old
+// code built a 16-bit hires X and then snapped its low bit off again (`and #$fe`). Rounding UP
+// here is exactly what that snap did -- effective halfWidth h + (h & 1) -- so no orb moves.
+const orbHalfCT = orbHalfT.map(h => Math.ceil(h / 2));
+// X = 24 + 2*col, and 24 hires px is 12 columns, so X = 2 * (col + 12) and the sprite's left
+// column is ocol - orbHalfCT. Fold both into one table: b = ocol + orbXOffT, X = b << 1. The
+// offset is never negative (orbHalfCT is 6..12), so it is a plain ADC with no sign handling, and
+// X comes out EVEN by construction rather than by masking.
+const orbXOffT = orbHalfCT.map(h => 12 - h);
+if (orbXOffT.some(v => v < 0 || v > 12))
+  throw new Error('orbXOffT out of range -- a sprite is more than 12 columns off its own centre');
+
 // The bounding box, as the ball's TRUE extent in logical columns each side of ocol. Asymmetric,
 // and it has to be: the ball is centred in the sprite by ox = (12 - w) >> 1, which TRUNCATES, so
 // whenever 12 - w is odd the ball sits half a sprite-pixel left of the sprite's centre -- and
@@ -2083,16 +2096,16 @@ const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
 // symmetric box claimed +/-7 -- so it missed the ball's leftmost column, and a one-column sliver
 // of orb showed through a wall that was otherwise clipping it correctly.
 //
-// Derived from orbHalfT so the two can never drift apart: the sprite's left edge is at
-// 2*ocol - orbHalfT, and the ball starts 2*ox sprite-pixels into it.
+// Derived from orbHalfCT so the two can never drift apart: the sprite's left column is
+// ocol - orbHalfCT, and the ball starts ox sprite-pixels into it.
+//
+// EXACT, with no rounding anywhere, because sprite X is now built on the 160-column grid (see
+// orbXOffT). While X was a hires quantity that got its low bit snapped off at the end, the box
+// had to round outward to cover the half column the snap could take.
 const orbBoxT = LADDER.map((r, v) => {
   const w = orbW(r.h), ox = (12 - w) >> 1, xx = r.exp ? 2 : 1;
-  const left = 2 * ox * xx, wide = w * 2 * xx;           // hires px, from the sprite's left edge
-  // FLOOR both: o0 is snapped DOWN to an even X (see the multicolor-grid note at obX), which can
-  // slide the whole sprite one hires pixel left. Flooring rounds the left edge outward, and the
-  // right edge can only move left, so both stay covering.
-  return { l: -Math.floor((left - orbHalfT[v]) / 2),
-           r:  Math.floor((left + wide - 1 - orbHalfT[v]) / 2) };
+  const left = ox * xx, wide = w * xx;                   // logical columns, from the sprite's left
+  return { l: orbHalfCT[v] - left, r: left + wide - 1 - orbHalfCT[v] };
 });
 const orbColLT = orbBoxT.map(b => b.l);          // columns from ocol to the ball's left edge
 // The last rung is a ONE-column ball sitting entirely left of ocol, so its true right offset is
@@ -2107,7 +2120,7 @@ if (process.env.ORBBOX === '1')
   orbBoxT.forEach((b, v) => console.error(`  raw rung ${v+1}: l=${b.l} r=${b.r}`));
 if (process.env.ORBBOX === '1')
   LADDER.forEach((r, v) => console.error(
-    `  rung ${v+1}: bitmapW=${orbW(r.h)} exp=${r.exp?1:0} orbHalfT=${orbHalfT[v]}` +
+    `  rung ${v+1}: bitmapW=${orbW(r.h)} exp=${r.exp?1:0} halfCols=${orbHalfCT[v]}` +
     ` box=-${orbColLT[v]}/+${orbColRT[v]} (${orbColLT[v]+orbColRT[v]+1} cols)`));
 const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
@@ -6883,40 +6896,30 @@ ocS:    sta ocol
         lda #$00
         sta ocolN
 ocDn:
-        lda ocoff               ; --- screen X: 24 + 2*column - halfWidth, signed 16-bit ---
-        asl
+        ; --- screen X, on the 160-COLUMN grid: X = 2 * (ocol + orbXOffT) ---
+        ; The engine is 160x200 throughout and a multicolor sprite pixel is two hires pixels, so
+        ; there is no odd sprite X worth having. This used to build a signed 16-bit HIRES x --
+        ; two 16-bit adds and a 16-bit subtract -- and then threw the low bit away again with
+        ; an AND #$fe. In columns it is one byte add and a shift, X is even by construction,
+        ; and the half column the snap could take is gone, which is what lets the bounding box
+        ; above be exact instead of rounded outward.
+        ldx ovar
+        lda ocolN
+        bne oxNeg
+        lda ocol                ; centre on screen: b = ocol + (12 - halfCols)
+        clc
+        adc orbXOffT,x
+        bcc oxDn
+        jmp orbNo               ; b past 255: far off the right, and b<<1 would wrap
+oxNeg:  lda orbXOffT,x          ; centre is ocol columns LEFT of column 0, so b = offset - ocol
+        sec
+        sbc ocol
+        bcc orbNo               ; sprite's left edge is left of X = 0, which no sprite can be
+oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         sta o0
         lda #$00
         rol
         sta o1
-        lda oaS
-        bmi oxNeg
-        clc
-        lda o0
-        adc #${24 + 160}
-        sta o0
-        lda o1
-        adc #$00
-        sta o1
-        jmp oxDn
-oxNeg:  sec
-        lda #${24 + 160}
-        sbc o0
-        sta o0
-        lda #$00
-        sbc o1
-        sta o1
-oxDn:   ldx ovar
-        sec
-        lda o0
-        sbc orbHalfT,x
-        sta o0
-        lda o1
-        sbc #$00
-        sta o1
-        bmi orbNo               ; fully off the left edge
-        cmp #$02
-        bcs orbNo               ; past x = 512, fully off the right
         ; --- screen Y: ground shadow on the floor line, 100 + h ---
         ; $d001 = 150 + h - anchor, but computed as (150 - anchor) + h. Adding 150 first
         ; carries out of a byte once h passes 105, which used to cap how close an orb could
@@ -7115,17 +7118,15 @@ ${process.env.ORBOCCDBG ? `ohHide:${process.env.ORBOCCDBG ? `
         lda omBit
         ora omYY
         sta omYY
-oNoX:   lda o0
-        and #$fe                ; snap X to the MULTICOLOR grid. A multicolor char pixel is two
-                                ; hires pixels aligned to the character (always even, since
-                                ; sprite X 24 is screen x 0); a multicolor SPRITE pixel is also
-                                ; two, but aligned to the sprite's own X. At an odd X the two
-                                ; grids are half a pixel out of phase, and since the VIC decides
-                                ; priority per HIRES pixel, one half of a sprite pixel lands on
+oNoX:   lda o0                  ; already on the multicolor grid -- X is 2*b, so always even.
+                                ; It has to be: a multicolor CHAR pixel is two hires pixels
+                                ; aligned to the character, a multicolor SPRITE pixel is two
+                                ; aligned to the sprite's own X, and at an odd X the two grids
+                                ; are half a pixel out of phase. The VIC then decides priority
+                                ; per HIRES pixel, so one half of a sprite pixel lands on
                                 ; foreground and clips while its partner lands on background and
-                                ; draws -- a one-hires-pixel sliver of orb peeking past a wall
-                                ; edge that is otherwise clipping it correctly. Costs 2 cycles
-                                ; and quantises horizontal motion to 2px.
+                                ; draws -- a one-pixel sliver of orb peeking past a wall edge
+                                ; that is otherwise clipping it correctly.
         sta obX,x
         lda o3
         sta obY,x
@@ -7272,7 +7273,7 @@ orbOccT: !byte ${orbOccFlat.join(',')}
         * = ${hx16(ORB_SMALL)}
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbExpT: !byte ${orbExpT.join(',')}
-orbHalfT: !byte ${orbHalfT.join(',')}
+orbXOffT: !byte ${orbXOffT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbBlankT: !byte ${orbBlankT.join(',')}
 orbAnchT: !byte ${ORBANCH.join(',')}
