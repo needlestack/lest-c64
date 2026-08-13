@@ -865,13 +865,23 @@ for (let k = 0; k < 4; k++) {
 // Every row is identical, which makes each glyph its own vertical mirror -- so charset B, which
 // cpChr builds by reversing each glyph's rows, comes out correct for free.
 const OCC0 = glyphs.length;
-const occRow = (n, fromRight) => [0, 1, 2, 3].reduce((b, i) => {
+const occRow = (n, fromRight, bg) => [0, 1, 2, 3].reduce((b, i) => {
   const fg = fromRight ? i >= 4 - n : i < n;
-  return b | ((fg ? 3 : 1) << (6 - 2 * i));      // 11 = foreground black, 01 = the wall's black
+  return b | ((fg ? 3 : bg) << (6 - 2 * i));      // 11 = foreground; bg is the rest of the cell
 }, 0);
-for (let n = 1; n <= 4; n++) glyphs.push(new Array(8).fill(occRow(n, false)));
-for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true)));
+for (let n = 1; n <= 4; n++) glyphs.push(new Array(8).fill(occRow(n, false, 1)));
+for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 1)));
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
+
+// ---- and the same splits backed by WHITE ----
+// A cell straddling a wall's VERTICAL silhouette has floor or ceiling beyond the edge, not more
+// wall. Backing the split with black there blots out the corridor, so the same six shapes exist
+// again over bit pair 00. Which one a cell gets is decided at stamp time from what renderSym
+// actually drew there -- see oSCells. No white "whole cell": a cell with no wall in it at all is
+// not something to hide an orb behind, and OCC_FULL already covers the all-wall case.
+const OCCW0 = glyphs.length;
+for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, false, 0)));
+for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 0)));
 
 // CELLMARK=1: put a 2x2 grey dot in the middle of SOLID and of all seven occluders -- columns 1
 // and 2, rows 3 and 4, at bit pair 10 ($d023, grey). Purely a debugging aid: it makes the CHAR
@@ -896,12 +906,13 @@ if (process.env.CELLMARK === '1') {
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + 4 seam + 7 occluder ` +
-  `= ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
+  `+ 6 white-backed = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
               `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam, ` +
-              `${OCC0}-${OCC0+6} occluder (${OCC_FULL} = whole cell)`);
+              `${OCC0}-${OCC0+6} occluder on black, ${OCCW0}-${OCCW0+5} on white ` +
+              `(${OCC_FULL} = whole cell)`);
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
 const edgeCode = p => codeFor(p);
 // Under PLAN the entry is whatever charsetgen assigned to that BUCKET. Buckets the walkthrough
@@ -2468,6 +2479,8 @@ osRow   = $85f8                 ; char row range
 osRowB  = $85f9
 ohFst   = $8595                 ; the stamp's two edge glyphs, chosen once per span
 ohLst   = $8596
+ohFstW  = $8523                 ; the same two edge glyphs backed by white
+ohLstW  = $8524
 osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
 oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
@@ -6335,12 +6348,16 @@ oSCells:${ORBNOCELL ? `rts
         and #$03
         tay
         lda occRT,y
-        sta ohFst               ; the glyph for the cell the stamp starts in
+        sta ohFst               ; the glyph for the cell the stamp starts in, on black ...
+        lda occRTW,y
+        sta ohFstW              ; ... and the same shape on white
         lda osR
         and #$03
         tay
         lda occLT,y
-        sta ohLst               ; ... and for the one it ends in
+        sta ohLst               ; ditto for the cell it ends in
+        lda occLTW,y
+        sta ohLstW
 ${process.env.ORBFGDBG ? `        lda osRow
         and #$0f
         sta $d020               ; PROBE: the row oSCells is about to stamp from
@@ -6388,10 +6405,11 @@ oSCR2:  sta ohRun               ; last cell
         ; "from the right" one, which clips k..3, over-covering to the right by up to 3 columns.
         ; Over-covering takes a small bite out of the orb; under-covering leaves orb drawn ON the
         ; wall, which is the error that reads as broken -- so this errs the safe way.
-        jsr oSWall
-        bcc oSCNx
+        jsr oSWall              ; single-cell stamp: pick the backing, do not skip
         lda ohFst
-        sta (osPtr),y
+        bcs oSC1s
+        lda ohFstW
+oSC1s:  sta (osPtr),y
         jmp oSCNx
         ; ---- only stamp cells that actually HOLD WALL ----
         ; The stamp covers the ORB's rows, on the assumption that a wall which occludes an orb
@@ -6409,9 +6427,11 @@ oSCR2:  sta ohRun               ; last cell
         ; Skipping them leaves up to 8px of orb showing over the wall's bottom edge instead, which
         ; is the smaller error and the one that reads as a soft edge rather than a stray block.
 oSCMid: ${DBGORB ? `inc oSCnt
-        ` : ''}jsr oSWall
-        bcc oSCCol              ; not fully wall: nothing to occlude with here
-        lda ohFst               ; first cell: the stamp starts part way in, so clip from the right
+        ` : ''}jsr oSWall        ; the FIRST cell straddles the wall's edge, so it is stamped
+        lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
+        bcs oSCMs               ;   not fully wall has floor or ceiling beyond the silhouette, and
+        lda ohFstW              ;   the white-backed split leaves that showing.
+oSCMs:               ; first cell: the stamp starts part way in, so clip from the right
         sta (osPtr),y
 oSCCol: iny
         cpy ohRun
@@ -6422,8 +6442,10 @@ oSCCol: iny
         sta (osPtr),y
         jmp oSCCol
 oSCLst: jsr oSWall
-        bcc oSCNx
-        lda ohLst               ; last cell: the stamp ends part way in, so clip from the left
+        lda ohLst
+        bcs oSCLs
+        lda ohLstW
+oSCLs:               ; last cell: the stamp ends part way in, so clip from the left
         sta (osPtr),y
 oSCNx:  inc ohSv
         jmp oSCRow
@@ -7190,6 +7212,9 @@ orbBitT: !byte ${orbBitT.join(',')}
 ; Both give the whole-cell glyph where the boundary lands on a cell edge, so no special case.
 occRT: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCC0 + 3 + (4 - k)).join(',')}
 occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
+; the same two, backed by white, for a cell on a wall's vertical silhouette
+occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
+occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
 ; that might be occluded, which is the only part of the test that is not O(1).

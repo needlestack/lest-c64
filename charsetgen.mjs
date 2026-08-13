@@ -30,14 +30,15 @@ const scan = JSON.parse(readFileSync('./cellscan.json', 'utf8'));
 // that quantises the codebook PLAN=3 actually ships -- and that loop had 232 hardcoded twice. So
 // setting KCELL resized the PLAN=1 codebook, which the shipping build does not use, and silently
 // left PLAN=3 at 232. It looked like it worked: the plan file changed and the build did not.
-// 225, not 232: SEVEN codes are reserved for the sprite occluders -- one all-foreground-black
+// 219, not 232: THIRTEEN codes are reserved for the sprite occluders -- one all-foreground-black
 // cell plus the six vertical splits (boundary at column 1, 2 or 3 x which side is foreground).
-// They are visually identical black to the walls around them and differ only in BIT PAIR, i.e.
-// only in sprite priority. Measured cost of giving them up: the shipped codebook goes 97.570% ->
-// 97.525% accurate, 0.019 -> 0.020 predicted px/frame, against 445.194 for the pre-plan charset.
+// ... plus six more of those splits backed by WHITE rather than black, for a cell straddling a
+// wall's vertical silhouette, where beyond the edge is floor or ceiling and painting it black
+// would blot out the corridor. Measured cost of the thirteen: the shipped codebook goes 97.570%
+// -> 97.459% accurate, and 0.019 -> 0.020 predicted px/frame, against 445.194 pre-plan.
 // charset-plan.json is derived and untracked, so this default IS the reservation: regenerating
 // with 232 would build a plan the occluders have no room in.
-const KCELL = +(process.env.KCELL ?? 225);
+const KCELL = +(process.env.KCELL ?? 219);
 const FRAMES = scan.positions * Math.ceil(256 / scan.angleStride);
 const parse = k => k.split(',').map(Number);
 const L1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);
