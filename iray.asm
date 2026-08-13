@@ -1,7 +1,6 @@
 
 charset = $d000        ; where the VIC reads them: under the I/O hole
 charsetB = $d800
-chrSrc  = $3800        ; where they are loaded to, and copied from at startup
 px      = $02
 py      = $04
 pa      = $06
@@ -271,8 +270,9 @@ entry:
         ; ---- copy both charsets into the RAM under the I/O hole ----
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
         ; CIA registers rather than memory (the build refuses an image past $c000 for the same
-        ; reason). So the font is loaded low, at chrSrc, and moved up here -- and only ONE font is
-        ; loaded: charset B is derived from A below rather than shipped as a second copy.
+        ; reason). Charset A is therefore not loaded at all in the usual sense: the self-extracting
+        ; loader decodes it STRAIGHT into $d000 with the port at $34. All that is left to do here is
+        ; build the mirror, charset B, from the copy already in place.
         ;
         ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
         ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
@@ -291,44 +291,31 @@ entry:
         ; page is a whole number of glyphs (256 = 32 x 8), so the mirrored index never leaves the
         ; page either, and the same ",y" offset works for all eight.
         ;
-        ; That deletes chrSrcB: 2KB of emitted data that was a byte-for-byte permutation of data
-        ; already in the image. It costs three instructions per iteration -- about 27,000 cycles
-        ; once, at startup, against 2,048 bytes of the load and 2,048 bytes off the code ceiling.
+        ; So the file carries ONE non-mirrored charset and nothing else: 2KB, compressed, placed
+        ; directly in bank 3. The mirror costs about 20,000 cycles once at startup, against 2KB of
+        ; the load -- and against the ordering invariant and the copy loop that used to be needed.
         ldx #$00
 cpChr:  txa
         eor #$07
         tay                     ; y now indexes the MIRRORED row of the same glyph as x
-        lda chrSrc,x
-        sta charset,x
-        lda chrSrc,y
+                                ; -- and the SOURCE is charset A itself, already in place at $d000.
+                                ; Readable only because the port is $34: in $35 these loads would
+                                ; return VIC and CIA register values, not glyphs.
+        lda charset,y
         sta charsetB,x
-        lda chrSrc+256,x
-        sta charset+256,x
-        lda chrSrc+256,y
+        lda charset+256,y
         sta charsetB+256,x
-        lda chrSrc+512,x
-        sta charset+512,x
-        lda chrSrc+512,y
+        lda charset+512,y
         sta charsetB+512,x
-        lda chrSrc+768,x
-        sta charset+768,x
-        lda chrSrc+768,y
+        lda charset+768,y
         sta charsetB+768,x
-        lda chrSrc+1024,x
-        sta charset+1024,x
-        lda chrSrc+1024,y
+        lda charset+1024,y
         sta charsetB+1024,x
-        lda chrSrc+1280,x
-        sta charset+1280,x
-        lda chrSrc+1280,y
+        lda charset+1280,y
         sta charsetB+1280,x
-        lda chrSrc+1536,x
-        sta charset+1536,x
-        lda chrSrc+1536,y
+        lda charset+1536,y
         sta charsetB+1536,x
-        lda chrSrc+1792,x
-        sta charset+1792,x
-        lda chrSrc+1792,y
+        lda charset+1792,y
         sta charsetB+1792,x
         inx
         bne cpChr
@@ -3394,71 +3381,10 @@ tbTabT: !byte 93,85,77,69,61,53,45,37,29,21,13,5,0
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-        * = $3800    ; charset A's SOURCE; cpChr copies it to $d000
-        !byte 0,0,0,0,0,0,0,0,85,85,85,85,85,85,85,85,0,0,0,0,85,85,85,85,0,0,0,85,85,85,85,85
-        !byte 84,84,84,84,84,84,84,84,21,85,85,85,85,85,85,85,0,0,0,0,0,64,64,80,64,64,64,64,64,64,64,64
-        !byte 0,0,0,0,0,80,85,85,0,0,0,0,0,0,0,21,80,84,85,85,85,85,85,85,0,0,0,0,0,0,85,85
-        !byte 0,0,0,0,0,0,64,84,0,0,0,0,0,5,21,85,0,0,0,0,0,0,0,85,5,21,85,85,85,85,85,85
-        !byte 5,5,5,5,5,5,5,5,0,0,0,0,0,84,85,85,0,0,0,80,85,85,85,85,0,0,0,1,5,21,85,85
-        !byte 0,1,1,1,5,5,21,21,0,85,85,85,85,85,85,85,0,0,0,0,0,0,0,64,80,80,80,80,80,80,80,80
-        !byte 64,64,64,80,80,80,84,84,1,1,5,5,21,21,85,85,0,0,80,85,85,85,85,85,64,64,64,64,80,80,80,80
-        !byte 1,1,1,1,5,5,5,5,0,0,0,64,80,80,84,85,80,85,85,85,85,85,85,85,21,21,21,21,21,21,21,21
-        !byte 0,0,80,84,85,85,85,85,0,0,1,21,85,85,85,85,0,0,85,85,85,85,85,85,0,0,0,1,1,5,21,21
-        !byte 64,64,80,80,84,84,85,85,0,0,0,0,80,85,85,85,80,80,80,85,85,85,85,85,0,5,21,85,85,85,85,85
-        !byte 5,5,5,5,5,69,85,85,84,84,84,85,85,85,85,85,5,85,85,85,85,85,85,85,0,0,0,5,85,85,85,85
-        !byte 1,5,21,85,85,85,85,85,0,0,0,0,0,64,84,85,0,0,0,0,0,21,85,85,0,0,0,0,0,0,80,84
-        !byte 0,0,5,85,85,85,85,85,0,0,0,21,21,21,21,21,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,5
-        !byte 0,0,0,64,64,80,80,84,0,0,0,0,1,1,5,21,0,1,1,5,5,21,21,85,0,0,0,0,0,0,80,85
-        !byte 0,0,0,64,84,85,85,85,0,0,0,64,80,84,85,85,0,84,85,85,85,85,85,85,0,0,0,0,5,85,85,85
-        !byte 0,0,0,0,0,0,84,85,84,85,85,85,85,85,85,85,0,0,64,80,84,85,85,85,0,0,0,0,0,5,85,85
-        !byte 0,0,64,80,80,80,80,80,0,80,85,85,85,85,85,85,0,21,85,85,85,85,85,85,0,0,0,0,0,1,5,85
-        !byte 0,0,0,0,0,0,5,85,0,0,0,0,0,0,64,80,0,0,0,0,0,85,85,85,0,0,0,1,5,5,21,85
-        !byte 0,0,0,0,64,84,85,85,0,0,0,0,5,21,85,85,0,64,84,85,85,85,85,85,0,0,0,64,64,64,80,80
-        !byte 0,0,64,64,80,80,84,84,0,0,84,85,85,85,85,85,5,5,5,5,5,21,21,21,0,64,64,64,64,80,80,80
-        !byte 80,80,80,84,84,84,85,85,0,0,0,0,64,80,84,84,0,1,5,21,85,85,85,85,0,0,0,0,84,85,85,85
-        !byte 0,0,0,0,0,0,0,84,0,5,85,85,85,85,85,85,0,0,0,0,0,0,21,85,0,0,21,85,85,85,85,85
-        !byte 0,0,0,64,64,64,64,64,0,0,0,0,0,0,0,80,0,0,0,84,85,85,85,85,0,0,1,5,21,85,85,85
-        !byte 5,5,5,21,21,21,21,85,0,0,0,0,0,1,5,5,0,0,0,0,64,80,84,85,80,80,80,80,85,85,85,85
-        !byte 80,84,84,85,85,85,85,85,5,5,5,21,21,21,85,85,0,0,0,1,21,85,85,85,0,0,0,0,0,0,1,21
-        !byte 0,0,0,0,0,1,21,85,0,0,0,0,0,0,0,1,84,84,85,85,85,85,85,85,0,0,0,0,64,85,85,85
-        !byte 1,1,85,85,85,85,85,85,0,1,1,5,21,21,85,85,0,0,0,0,0,0,1,85,0,0,5,21,85,85,85,85
-        !byte 0,64,80,84,85,85,85,85,0,0,0,0,1,5,21,85,0,0,1,5,5,21,85,85,0,0,0,0,0,0,1,5
-        !byte 0,0,0,0,0,1,1,1,0,0,0,0,0,64,80,84,0,1,21,85,85,85,85,85,1,21,85,85,85,85,85,85
-        !byte 0,0,0,0,0,1,5,21,0,0,0,0,1,5,21,21,1,1,1,1,1,85,85,85,0,0,0,0,1,5,5,21
-        !byte 64,80,84,85,85,85,85,85,0,0,0,0,21,85,85,85,80,80,84,84,85,85,85,85,0,64,80,84,84,85,85,85
-        !byte 64,80,80,84,85,85,85,85,1,1,1,1,1,1,1,1,0,0,0,0,1,21,85,85,5,21,21,85,85,85,85,85
-        !byte 5,5,21,85,85,85,85,85,0,0,0,21,85,85,85,85,0,80,84,85,85,85,85,85,0,0,0,0,64,80,80,84
-        !byte 21,21,21,21,21,85,85,85,0,0,0,0,80,84,85,85,0,0,0,0,0,21,21,21,64,64,64,64,85,85,85,85
-        !byte 0,0,0,0,0,64,84,84,0,0,0,0,0,0,0,4,0,21,21,21,21,21,21,21,5,5,21,21,21,85,85,85
-        !byte 0,0,0,64,80,85,85,85,64,84,85,85,85,85,85,85,0,0,1,1,1,5,5,5,0,0,64,84,85,85,85,85
-        !byte 1,5,5,21,85,85,85,85,0,0,0,0,0,80,84,85,1,5,5,21,21,85,85,85,0,0,0,0,0,0,5,21
-        !byte 0,0,0,5,21,85,85,85,1,1,5,5,5,21,21,85,0,0,1,1,1,85,85,85,0,0,0,0,0,64,64,64
-        !byte 64,64,64,64,64,64,85,85,64,64,64,85,85,85,85,85,0,0,0,1,1,5,5,21,64,64,64,65,85,85,85,85
-        !byte 0,0,0,0,64,64,64,64,0,0,0,0,1,1,5,5,0,0,0,0,1,1,1,1,0,1,1,1,1,1,5,5
-        !byte 0,0,0,0,0,0,1,1,1,1,81,85,85,85,85,85,0,0,0,0,0,1,1,5,0,1,5,5,21,85,85,85
-        !byte 0,1,85,85,85,85,85,85,64,64,80,84,84,85,85,85,0,0,64,64,80,84,84,85,64,80,80,84,84,85,85,85
-        !byte 0,64,64,64,64,64,64,64,1,1,5,5,5,5,21,21,1,1,1,5,5,5,5,5,0,1,5,5,5,5,5,5
-        !byte 5,5,5,5,21,21,21,21,21,21,21,21,85,85,85,85,0,64,64,80,84,84,85,85,64,64,80,80,80,84,84,84
-        !byte 21,21,21,21,21,21,21,85,21,21,85,85,85,85,85,85,5,5,5,5,5,5,21,21,21,21,21,85,85,85,85,85
-        !byte 1,1,1,1,1,1,85,85,0,0,0,0,21,21,21,21,1,1,1,1,1,1,1,85,80,80,80,84,84,84,84,85
-        !byte 0,0,64,80,80,84,85,85,0,0,80,84,84,84,84,84,0,0,0,81,85,85,85,85,0,0,0,1,5,85,85,85
-        !byte 0,80,80,80,80,80,80,80,5,21,21,21,21,21,21,21,64,64,80,80,80,84,84,85,64,64,64,64,64,64,64,85
-        !byte 0,0,64,64,64,64,64,64,1,1,5,5,5,85,85,85,80,84,84,84,84,84,84,84,84,84,84,84,85,85,85,85
-        !byte 80,84,84,84,85,85,85,85,80,80,80,80,80,80,84,84,0,1,21,21,21,21,21,21,0,64,64,80,80,84,84,85
-        !byte 84,84,84,84,84,85,85,85,80,80,84,84,84,85,85,85,0,64,64,64,64,64,80,80,84,84,84,84,84,84,85,85
-        !byte 0,0,0,0,0,0,69,85,0,5,21,21,85,85,85,85,0,1,1,5,85,85,85,85,0,0,1,1,5,21,21,85
-        !byte 5,5,21,21,21,21,21,21,64,64,85,85,85,85,85,85,1,1,1,5,5,5,21,21,0,0,0,69,85,85,85,85
-        !byte 0,0,0,65,85,85,85,85,0,64,64,64,80,80,84,84,1,1,1,1,85,85,85,85,1,1,1,1,65,85,85,85
-        !byte 0,0,1,5,5,5,5,5,5,5,5,85,85,85,85,85,1,1,1,85,85,85,85,85,0,0,0,64,64,80,84,84
-        !byte 0,0,0,0,0,64,80,80,0,0,0,0,0,0,64,64,80,80,84,85,85,85,85,85,0,0,0,0,0,5,5,5
-        !byte 5,5,85,85,85,85,85,85,0,64,80,80,84,85,85,85,0,0,0,1,1,1,1,5,0,0,0,0,0,0,80,80
-        !byte 0,0,64,64,80,80,80,84,0,0,0,0,64,64,64,80,0,0,0,0,0,0,84,84,80,80,84,84,84,84,84,84
-        !byte 80,80,80,80,84,84,84,84,0,0,1,1,5,5,21,21,0,84,68,68,68,84,0,0,0,16,80,16,16,84,0,0
-        !byte 0,84,4,84,64,84,0,0,0,84,4,84,4,84,0,0,0,68,68,84,4,4,0,0,0,84,64,84,4,84,0,0
-        !byte 0,84,64,84,68,84,0,0,0,84,4,16,16,16,0,0,0,84,68,84,68,84,0,0,0,84,68,84,4,84,0,0
-        !byte 0,16,68,84,68,68,0,0,0,80,68,80,68,80,0,0,0,84,64,64,64,84,0,0,0,80,68,68,68,80,0,0
-        !byte 0,84,64,80,64,84,0,0,0,84,64,80,64,64,0,0,0,68,68,16,68,68,0,0,0,68,68,16,16,16,0,0
-        !byte 149,149,149,149,149,149,149,149,101,101,101,101,101,101,101,101,89,89,89,89,89,89,89,89,86,86,86,86,86,86,86,86
+; The charset is NOT in the image. It is shipped as its own compressed segment and decoded
+; straight into $d000-$d7ff by the loader, with the port at $34 -- which is the one thing a KERNAL
+; LOAD can never do, and the reason a low "source" copy existed here for as long as it did. See
+; iray-charset.bin and the --seg argument in the SELFEXT block below.
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 

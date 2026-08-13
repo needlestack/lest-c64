@@ -1531,7 +1531,7 @@ const BACK = flag('BACK');     // auto-walk backward
 //
 // Two consequences worth stating out loud:
 //   - The charsets CANNOT be loaded into place: LOAD runs with I/O mapped, so the loader would
-//     write VIC and CIA registers instead of memory. They are emitted low, at CHARSRC, and copied
+//     write VIC and CIA registers instead of memory. So the charset is not LOADED at all: the
 //     up at startup with the port switched to $34. See cpChr.
 //   - CHARSET_B at $d800 sits under COLOUR RAM. Those are different physical memories: colour RAM
 //     is a separate 1K chip the CPU reaches when I/O is mapped, and the DRAM underneath is what
@@ -1551,8 +1551,10 @@ const CHARSET_B = 0xd800;               // charset B: every glyph flipped, below
 // A build guard was still reserving $3000-$37ff for those departed f-tables, so the hole was
 // defended as well as empty -- and the code block's ceiling was $2800 for no reason at all.
 // Adjacent sources mean ONE contiguous reclaimed region and 2KB more code space, for free.
-const CHARSRC = 0x3800;                 // the ONLY charset in the image, and the last 2KB of it
-const CHARSRC_B = null;                 // charset B is derived at startup, never emitted -- see cpChr
+// CHARSRC is GONE. The charset is not in the image at any address: it is a separate compressed
+// segment the loader decodes straight into $d000. Nothing here may name a load address for it,
+// because there isn't one -- the destination lives in the --seg argument, and $d000/$d800 are named
+// by the `charset`/`charsetB` equates, which is where the CPU and the VIC actually find it.
 // FTABLES is GONE, and deliberately not replaced by a constant nobody uses. f0Lo/f0Hi/f1Lo/f1Hi
 // and the run-id tables were moved up to RELOC with the rest of the CPU-only tables; only this
 // constant and a build guard citing it stayed behind at $3000, reserving 2KB against a tenant that
@@ -1591,7 +1593,6 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 const asm = `
 charset = ${hx(CHARSET)}        ; where the VIC reads them: under the I/O hole
 charsetB = ${hx(CHARSET_B)}
-chrSrc  = ${hx(CHARSRC)}        ; where they are loaded to, and copied from at startup
 px      = $02
 py      = $04
 pa      = $06
@@ -1878,8 +1879,9 @@ entry:
         ; ---- copy both charsets into the RAM under the I/O hole ----
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
         ; CIA registers rather than memory (the build refuses an image past $c000 for the same
-        ; reason). So the font is loaded low, at chrSrc, and moved up here -- and only ONE font is
-        ; loaded: charset B is derived from A below rather than shipped as a second copy.
+        ; reason). Charset A is therefore not loaded at all in the usual sense: the self-extracting
+        ; loader decodes it STRAIGHT into $d000 with the port at $34. All that is left to do here is
+        ; build the mirror, charset B, from the copy already in place.
         ;
         ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
         ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
@@ -1898,44 +1900,31 @@ entry:
         ; page is a whole number of glyphs (256 = 32 x 8), so the mirrored index never leaves the
         ; page either, and the same ",y" offset works for all eight.
         ;
-        ; That deletes chrSrcB: 2KB of emitted data that was a byte-for-byte permutation of data
-        ; already in the image. It costs three instructions per iteration -- about 27,000 cycles
-        ; once, at startup, against 2,048 bytes of the load and 2,048 bytes off the code ceiling.
+        ; So the file carries ONE non-mirrored charset and nothing else: 2KB, compressed, placed
+        ; directly in bank 3. The mirror costs about 20,000 cycles once at startup, against 2KB of
+        ; the load -- and against the ordering invariant and the copy loop that used to be needed.
         ldx #$00
 cpChr:  txa
         eor #$07
         tay                     ; y now indexes the MIRRORED row of the same glyph as x
-        lda chrSrc,x
-        sta charset,x
-        lda chrSrc,y
+                                ; -- and the SOURCE is charset A itself, already in place at $d000.
+                                ; Readable only because the port is $34: in $35 these loads would
+                                ; return VIC and CIA register values, not glyphs.
+        lda charset,y
         sta charsetB,x
-        lda chrSrc+256,x
-        sta charset+256,x
-        lda chrSrc+256,y
+        lda charset+256,y
         sta charsetB+256,x
-        lda chrSrc+512,x
-        sta charset+512,x
-        lda chrSrc+512,y
+        lda charset+512,y
         sta charsetB+512,x
-        lda chrSrc+768,x
-        sta charset+768,x
-        lda chrSrc+768,y
+        lda charset+768,y
         sta charsetB+768,x
-        lda chrSrc+1024,x
-        sta charset+1024,x
-        lda chrSrc+1024,y
+        lda charset+1024,y
         sta charsetB+1024,x
-        lda chrSrc+1280,x
-        sta charset+1280,x
-        lda chrSrc+1280,y
+        lda charset+1280,y
         sta charsetB+1280,x
-        lda chrSrc+1536,x
-        sta charset+1536,x
-        lda chrSrc+1536,y
+        lda charset+1536,y
         sta charsetB+1536,x
-        lda chrSrc+1792,x
-        sta charset+1792,x
-        lda chrSrc+1792,y
+        lda charset+1792,y
         sta charsetB+1792,x
         inx
         bne cpChr
@@ -5200,8 +5189,10 @@ tbTabT: !byte ${tbTab.join(',')}
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-        * = ${hx16(CHARSRC)}    ; charset A's SOURCE; cpChr copies it to $d000
-${chunk(fontA, 32)}
+; The charset is NOT in the image. It is shipped as its own compressed segment and decoded
+; straight into $d000-$d7ff by the loader, with the port at $34 -- which is the one thing a KERNAL
+; LOAD can never do, and the reason a low "source" copy existed here for as long as it did. See
+; iray-charset.bin and the --seg argument in the SELFEXT block below.
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 
@@ -5528,9 +5519,11 @@ try {
   // RELOC and the reservation stayed, so the build defended 2KB that held nothing and capped the
   // code at $3000. Reserving a region for a tenant that has left is worse than not checking:
   // the guard's existence is what stops anyone asking whether the region is still needed.
-  const reserved = [
-    ['the charset', CHARSRC, CHARSRC + 0x800],
-  ];
+  // Nothing is reserved in the image for graphics now: the charset is a separate segment placed at
+  // $d000 by the loader, and bank 3 holds no CPU data. The list is kept (empty) rather than deleted
+  // because the NEXT thing shipped as a segment -- sprites -- will want the same check if it ever
+  // needs a staging area inside the image.
+  const reserved = [];
   if (r.labels.chainEnd > HTABLE)
     throw new Error(`fill chains end at $${r.labels.chainEnd.toString(16)}, past the height tables at $${HTABLE.toString(16)}`);
   const dataLo = r.org, dataHi = r.labels.dataEnd;
@@ -5541,6 +5534,8 @@ try {
         `(move tables above the f-tables)`);
     }
   }
+  // The charset ships as a raw binary for the loader to place, not as part of the image.
+  writeFileSync('./iray-charset.bin', Buffer.from(fontA));
   writeFileSync('./iray.prg', Buffer.from(r.prg));
   const d = D64.createEmpty('IRAY', '01');
   d.writeFile('IMAZE'.padEnd(6) + '/PRG', r.prg, D64.FILE_TYPE_PRG);
@@ -5560,9 +5555,13 @@ try {
   // byte-exact upstream on a 57KB image spanning the I/O hole, so it is invoked as a subprocess
   // rather than forked into this file: a verified packer that drifts is worth less than one that is
   // slightly awkward to call.
-  if (process.env.SELFEXT) {
+  // NOT optional any more, and NOSELFEXT is a debugging escape hatch that produces a disk which
+  // CANNOT RENDER: the charset is no longer in the image, so a plain load leaves $d000 full of
+  // whatever was there. It exists only to inspect the uncompressed image quickly.
+  if (!process.env.NOSELFEXT) {
     const { execSync } = await import('child_process');
-    const out = execSync('node ./selfext.mjs ./iray.prg ./iray-c.prg', { encoding: 'utf8' });
+    const out = execSync('node ./selfext.mjs ./iray.prg ./iray-c.prg ' +
+                         '--seg d000:./iray-charset.bin', { encoding: 'utf8' });
     console.log(out.trim());
     writeFileSync('./latest.d64', readFileSync('./iray-c.d64'));
     console.log('latest.d64 is the COMPRESSED self-extracting build');
@@ -5664,8 +5663,13 @@ try {
     const de = r.labels.dataEnd;
     const eqs = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{4})/gm)]
       .map(m => [m[1], parseInt(m[2], 16)]);
-    const obst = eqs.filter(([, a]) => a > de && a < CHARSRC).sort((x, y) => x[1] - y[1])[0];
-    const [what, at] = obst ?? ['the charset source', CHARSRC];
+    // The ceiling is wherever the hole above the code ENDS -- i.e. the next emitted byte -- or the
+    // first array parked inside that hole, whichever comes first. Deriving it from a constant is
+    // what made this report wrong twice: once when arrays sat in the filler, once when the constant
+    // outlived the data it named.
+    const gap = (r.holes ?? []).find(([lo, hi]) => de >= lo && de < hi) ?? [de, de];
+    const obst = eqs.filter(([, a]) => a > de && a < gap[1]).sort((x, y) => x[1] - y[1])[0];
+    const [what, at] = obst ?? ['the next emitted table', gap[1]];
     console.log(`code headroom: ${at - de} bytes  ($${de.toString(16)} -> ` +
                 `$${at.toString(16)}, ${what})`);
     // A hole is only real free space if no RAM equate already lives in it -- the arrays in the
@@ -5703,8 +5707,6 @@ try {
     // Anything NOT listed that lands in the image is a real bug: the program writes over RAM the
     // loader filled with data, so it works for one frame and not the next.
     const OK = {
-      chrSrc:   'a NAME for emitted charset data, not RAM scratch -- cpChr copies it to $d000',
-      chrSrcB:  'ditto, the mirrored charset',
     };
     // ONE documented region rather than seventy-five individual exceptions. $3000-$37ff is bank 0's
     // post-startup RAM: the charset source itself, which cpChr consumes at startup.

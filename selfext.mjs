@@ -104,9 +104,58 @@ function packSeg(data, C, dstStart, floor, barrier) {
   throw new Error('no safe staging gap');
 }
 
+// ---- a segment whose destination is DISJOINT from the main image ----
+// packSeg above stages a stream just above its OWN output, because an in-place decode has to keep
+// the read pointer ahead of the write pointer. A segment landing somewhere the image never touches
+// (the charset at $d000-$d7ff, sprites in bank 3) has no such constraint: stream and output cannot
+// collide, so the stream is staged at an EXPLICIT address instead of one derived from the output.
+//
+// That is not a detail. Deriving it would put the charset's stream just above $d7ff -- and the
+// relocator copies streams up with I/O MAPPED, so those bytes would land in COLOUR RAM, not the
+// DRAM underneath. The staging address is chosen by the caller, below the main stream, and the
+// segment is decoded FIRST so the main segment is free to overwrite that area afterwards.
+function packDisjoint(data, C, dstStart, stageAt) {
+  const outLo = dstStart, outHi = dstStart + data.length - 1;
+  const cLo = stageAt, cHi = stageAt + C.length - 1;
+  if (outLo <= cHi && cLo <= outHi)
+    throw new Error(`disjoint segment overlaps its own stream: out $${outLo.toString(16)}-$${outHi.toString(16)}, stream $${cLo.toString(16)}-$${cHi.toString(16)}`);
+  // Decode it for real and compare. The packer is only trustworthy if every stream it emits is
+  // verified against its input here, not just the ones the in-place simulator happens to cover.
+  const mem = new Uint8Array(65536);
+  for (let k = 0; k < C.length; k++) mem[cLo + k] = C[k];
+  let src = cLo, dst = dstStart, produced = 0;
+  const rd = () => mem[src++], wr = v => { mem[dst++] = v; produced++; };
+  while (produced < data.length) {
+    const tok = rd(); if (tok === 0) break;
+    if (tok < 0x80) { for (let k = 0; k < tok; k++) wr(rd()); }
+    else { let len, lf = tok & 0x3f;
+      if (lf === 63) { len = 66; let e; do { e = rd(); len += e; } while (e === 255); } else len = lf + 3;
+      let off; if (tok & 0x40) { const lo = rd(), hi = rd(); off = lo | (hi << 8); } else off = rd();
+      for (let k = 0; k < len; k++) wr(mem[dst - off]); } }
+  if (produced !== data.length) throw new Error('disjoint segment decoded short');
+  for (let j = 0; j < data.length; j++) if (mem[dstStart + j] !== data[j])
+    throw new Error(`disjoint segment mismatch at +${j}`);
+  return { C, gap: 0, dstStart, len: data.length, Csrc0: cLo, Ctop: cHi, disjoint: true };
+}
+
 // ==================== build ====================
 const inPath = process.argv[2], outPath = process.argv[3];
-if (!inPath || !outPath) { console.error('usage: node selfext.mjs <game.prg> <out.prg>'); process.exit(1); }
+if (!inPath || !outPath) {
+  console.error('usage: node selfext.mjs <game.prg> <out.prg> [--seg <hexaddr>:<file> ...]');
+  console.error('  --seg places a raw binary at an address the KERNAL cannot LOAD to, e.g.');
+  console.error('  --seg d000:charset.bin  (under the I/O hole; decoded with the port at $34)');
+  process.exit(1);
+}
+// Extra segments: raw binaries with an explicit destination. Given in the order they should be
+// DECODED, which is before the main image -- see packDisjoint.
+const extras = [];
+for (let i = 4; i < process.argv.length; i++) {
+  if (process.argv[i] !== '--seg') continue;
+  const spec = process.argv[++i] ?? '';
+  const m = /^([0-9a-fA-F]{1,4}):(.+)$/.exec(spec);
+  if (!m) throw new Error(`bad --seg "${spec}", want <hexaddr>:<file>`);
+  extras.push({ dst: parseInt(m[1], 16), path: m[2], data: new Uint8Array(readFileSync(m[2])) });
+}
 
 const file = readFileSync(inPath);
 const org = file[0] | (file[1] << 8);
@@ -141,14 +190,41 @@ if (OUTTOP < IO_LO) {
 const twoSeg = segs.length > 1;
 const bankByte = twoSeg ? 0x35 : 0x36;             // $35 = BASIC+KERNAL out (RAM at $e000); $36 = BASIC out only
 
+// ---- stage the extra segments BELOW the main stream and decode them FIRST ----
+// Their staging areas sit inside the main image's future output, which is safe precisely because
+// they are decoded first: by the time the main segment writes there, they have been consumed. The
+// alternative -- staging above their own output -- puts the charset's stream in colour RAM.
+const mainLo = Math.min(...segs.map(x => x.Csrc0));
+let stageTop = mainLo;                             // fill downward from just below the main stream
+const extraSegs = [];
+for (const e of extras) {
+  const C = lzEncode(e.data);
+  stageTop -= C.length;
+  extraSegs.push({ ...packDisjoint(e.data, C, e.dst, stageTop), path: e.path });
+}
+// Every stream lives in the loaded file first and is copied up, so the lowest staging address must
+// clear the file's top or a copy would overwrite its own source.
+const allSegs = [...extraSegs, ...segs];           // decode order: extras, then the image
+const fileTopEst = ORG + LOADER_MAX + allSegs.reduce((n, x) => n + x.C.length, 0);
+if (stageTop <= fileTopEst) throw new Error(
+  `extra segments stage at $${stageTop.toString(16)}, at or below the loaded file top ` +
+  `$${fileTopEst.toString(16)} -- the copy would overwrite its own source`);
+
 // ---- decoder, assembled for $0400 ----
 // zp: rsrc/rdst = src/dst ptrs; len 16-bit; off 16-bit; mptr match-src; tok/tmp scratch.
 // Top-level: init each segment's src/dst, jsr decode_seg (stops on its $00 token), then jmp game.
 let decInit = '';
-segs.forEach((s, i) => {
+allSegs.forEach((s) => {
+  // A destination inside $d000-$dfff is RAM only in port mode $34 (mode 4, RAM EVERYWHERE). Mode
+  // $35 keeps I/O mapped there, so the same stores would land on VIC and CIA registers -- the exact
+  // reason the KERNAL cannot LOAD a charset into place. Interrupts are already off (sei in the
+  // relocator) and the decoder touches no I/O, so unmapping it for the length of one segment is safe.
+  const hole = s.dstStart >= IO_LO && s.dstStart < IO_HI;
+  if (hole) decInit += `        lda #$34                ; RAM everywhere: $d000-$dfff is the DESTINATION\n        sta $01\n`;
   decInit += `        lda #<$${s.Csrc0.toString(16)}\n        sta rsrc\n        lda #>$${s.Csrc0.toString(16)}\n        sta rsrc+1\n`;
   decInit += `        lda #<$${s.dstStart.toString(16)}\n        sta rdst\n        lda #>$${s.dstStart.toString(16)}\n        sta rdst+1\n`;
   decInit += `        jsr decode_seg\n`;
+  if (hole) decInit += `        lda #$${bankByte.toString(16)}                ; I/O back, for the remaining copies and the game\n        sta $01\n`;
 });
 const decSrc = `
 rsrc = $f0
@@ -282,7 +358,7 @@ function buildLoader(P_dec, P_cs) {
   // overlap an earlier stream's file position; copying the later one first saves it before the
   // earlier copy overwrites those file bytes. (Each stream's staging clears its own file chunk,
   // guaranteed by its floor.)
-  for (let i = segs.length - 1; i >= 0; i--) copies += copyBlock(P_cs[i], segs[i].Csrc0, segs[i].C.length);
+  for (let i = allSegs.length - 1; i >= 0; i--) copies += copyBlock(P_cs[i], allSegs[i].Csrc0, allSegs[i].C.length);
   return `
 rsrc = $f0
 rdst = $f2
@@ -327,15 +403,15 @@ mcpy_done:
         rts
 `;
 }
-let loaderBytes = assemble(buildLoader(0x1000, segs.map(() => 0x2000))).bytes;   // size probe
+let loaderBytes = assemble(buildLoader(0x1000, allSegs.map(() => 0x2000))).bytes;   // size probe
 const P_dec = ORG + loaderBytes.length;
 const P_cs = []; let p = P_dec + DECLEN;
-for (const s of segs) { P_cs.push(p); p += s.C.length; }
+for (const s of allSegs) { P_cs.push(p); p += s.C.length; }
 loaderBytes = assemble(buildLoader(P_dec, P_cs)).bytes;                          // real
 if (ORG + loaderBytes.length !== P_dec) throw new Error('loader size shifted between passes');
 
 // ---- assemble the file image: [loader][decoder][C1][C2...] at $0801 ----
-const chunks = [loaderBytes, DECB, ...segs.map(s => s.C)];
+const chunks = [loaderBytes, DECB, ...allSegs.map(s => s.C)];
 const payload = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
 { let o = 0; for (const c of chunks) { payload.set(c, o); o += c.length; } }
 const prg = new Uint8Array(2 + payload.length);
@@ -343,7 +419,7 @@ prg[0] = ORG & 0xff; prg[1] = ORG >> 8; prg.set(payload, 2);
 
 // sanity: each stream's high staging must clear its OWN file chunk (so the copy is disjoint);
 // cross-stream overlap is handled by the reverse-order copy in buildLoader.
-segs.forEach((s, i) => {
+allSegs.forEach((s, i) => {
   const fileEnd = P_cs[i] + s.C.length - 1;
   if (s.Csrc0 <= fileEnd) throw new Error(`seg${i + 1} staging $${s.Csrc0.toString(16)} overlaps its own file chunk (ends $${fileEnd.toString(16)}) — segment too large to self-extract`);
 });
@@ -356,8 +432,10 @@ writeFileSync(outPath.replace(/\.prg$/i, '.d64'), Buffer.from(d64.getData()));
 
 console.log(`selfext ${inPath}:`);
 console.log(`  image   $${org.toString(16)}..$${OUTTOP.toString(16)}  (${D.length} bytes)${twoSeg ? '  [spans I/O hole -> 2 segments]' : ''}`);
-segs.forEach((s, i) => {
-  console.log(`  seg${i + 1}   $${s.dstStart.toString(16)}..$${(s.dstStart + s.len - 1).toString(16)} (${s.len}B) -> packed ${s.C.length}B (${(s.len / s.C.length).toFixed(2)}x), staged $${s.Csrc0.toString(16)}..$${s.Ctop.toString(16)} gap ${s.gap}`);
+let inPlaceN = 0;
+allSegs.forEach((s) => {
+  const tag = s.disjoint ? `placed` : `seg${++inPlaceN} `;
+  console.log(`  ${tag} $${s.dstStart.toString(16)}..$${(s.dstStart + s.len - 1).toString(16)} (${s.len}B) -> packed ${s.C.length}B (${(s.len / s.C.length).toFixed(2)}x), staged $${s.Csrc0.toString(16)}..$${s.Ctop.toString(16)}${s.disjoint ? ` <- ${s.path}` : ` gap ${s.gap}`}`);
 });
 console.log(`  decoder $${DEC.toString(16)}..$${(DEC + DECLEN - 1).toString(16)} (${DECLEN}B), bank $${bankByte.toString(16)}`);
 console.log(`  -> ${outPath}  (${prg.length} bytes, ${(prg.length / file.length * 100).toFixed(1)}% of the ${file.length}-byte original)`);

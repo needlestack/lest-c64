@@ -93,7 +93,11 @@ console.log(`${vars.size} RAM variables in ${process.argv[2] ?? 'iray.asm'}`);
 //                     port mode.
 // Exempting them keeps both columns at zero, which is the only state in which anyone keeps
 // reading this tool's output.
-const LOADER_WRITES = new Set(['chrSrc', 'chrSrcB']);   // emitted data: the loader is the writer
+// Read but never written BY THE CPU, because the LOADER is the writer. This used to be
+// chrSrc/chrSrcB -- emitted charset data copied up by cpChr. Both are gone; the charset is a
+// compressed segment the self-extracting loader decodes straight into $d000, so `charset` itself
+// is now the entry. cpChr reads it to build the mirror. Sprites will join this list.
+const LOADER_WRITES = new Set(['charset']);
 const VIC_READS = new Set(['charset', 'charsetB']);     // the VIC is the reader, not the CPU
 for (const n of LOADER_WRITES) { const i = readNeverWritten.findIndex(e => e[0] === n);
   if (i >= 0) readNeverWritten.splice(i, 1); }
