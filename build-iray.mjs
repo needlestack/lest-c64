@@ -6027,18 +6027,18 @@ obNext: lda ocy
         lda ocy
         cmp ocn3
         bcc obLoop
-obEnd:  ${DBGORB ? `lda nbnd
-        sta odb                 ; delimiters this frame -- how long one span walk is
-        lda onv
-        sta odb+1               ; sprites in use
-        lda oSOrb
-        sta odb+2               ; ... of which entered the span walk at all
-        lda oSSpn
-        sta odb+3               ; spans visited in total
+obEnd:  ${DBGORB ? `lda osRow
+        sta odb                 ; the last stamp's row range, column range, and which slot
+        lda osRowB
+        sta odb+1
+        lda osL
+        sta odb+2
+        lda osR
+        sta odb+3
+        lda osI
+        sta odb+4
         lda oSCnt
-        sta odb+4               ; cells stamped
-        lda #$00
-        sta odb+5
+        sta odb+5               ; cells stamped this frame
         ldx #$00
         ldy #$00
 odbLp:  lda odb,x
@@ -6153,15 +6153,18 @@ ${DBGORB ? `        inc oSOrb
         lda #$18                ; clamp to the last screen row: a near orb's box runs off the
                                 ; bottom, and the rows below 24 are not screen memory at all
 oSRok:  sta osRowB
-        lda osRow               ; clamp the TOP row too. Only the bottom was clamped, so a near
-        cmp #$19                ;   orb whose feet run off the screen came out with osRow 26
-        bcc oSRtk               ;   against osRowB 24 -- an inverted row range.
-        lda #$18
-oSRtk:  cmp osRowB
-        bcc oSRok2
+        ; The TOP row is CHECKED, not clamped. Clamping it to 24 turned "this orb's box starts
+        ; below the screen" into "stamp row 24" -- a bar of foreground black along the bottom of
+        ; the floor, appearing as soon as you walk close to anything, since a near orb's box runs
+        ; off the bottom. An orb that starts past the last row has nothing on screen at all.
+        lda osRow
+        cmp #$19
+        bcs oSNone
+        cmp osRowB
         beq oSRok2
-        jmp oSDone              ; nothing of this orb is on screen
-oSRok2: sta osRow
+        bcc oSRok2
+oSNone: jmp oSDone              ; nothing of this orb is on screen
+oSRok2:
         ; walk the spans, exactly as the whole-orb test does
         lda #$00
         sta ohL

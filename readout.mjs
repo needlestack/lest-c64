@@ -65,6 +65,17 @@ const readChar = (C, R) => {
 
 const field = (R, n) => [...Array(n)].map((_, i) => readChar(36 + i, R)).join('');
 
+// DBGROW=1: decode the DBGORB hex dump, which drawDbg writes as 12 digits at row 3, column 0.
+// Reading those glyphs off a scaled screenshot by eye is guesswork -- they are 3x5 pixels. This
+// uses the same glyph table the display was drawn from, so the numbers are exact.
+if (process.env.DBGROW) {
+  const hex = [...Array(12)].map((_, i) => readChar(i, 3)).join('');
+  const bytes = [...Array(6)].map((_, i) => parseInt(hex.slice(i * 2, i * 2 + 2), 16));
+  console.log('DBGORB row: ' + hex + '   bytes: ' +
+    bytes.map(b => Number.isNaN(b) ? '??' : b + ' ($' + b.toString(16) + ')').join('  '));
+  process.exit(0);
+}
+
 // RAYCNT=1 builds print the frame's marchCol count as 'E' + two hex digits on row 3. It is the
 // only direct read on whether a subdivision change did what it claimed: fps is raster-quantised
 // and averages over every other phase, so a real change in ray count can vanish inside it.
