@@ -3813,6 +3813,7 @@ oSCbS:  sta oSInv+1
 oSLoop: ldx osI
         lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
+
         lda obIX,x
         tay
         lda orbOccLoT,y

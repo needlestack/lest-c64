@@ -1618,6 +1618,17 @@ const ORBFG = process.env.ORBFG;
 // ORBSTAMP=0 disables PARTIAL occlusion. On by default: the slot-count clobber that made this
 // walk a hundred garbage slots per frame is fixed -- see orbStamp's entry.
 const ORBSTAMP = process.env.ORBSTAMP !== '0';
+// ORBGATE=1 restores the build-time canOcc gate on the STAMP pass. OFF by default.
+//
+// canOcc comes from blockers(), which marches from 9 eye positions in the cell across +-0.25
+// cells of the orb. That answers "can this orb be occluded from this cell" well enough for the
+// WHOLE-ORB hide, but partial occlusion asks a wider question -- can any PART of it be hidden
+// from anywhere in the cell -- and ORBGATECHK=1 measures the gate answering "no" wrongly for
+// 4 of 426 gated candidates (0.9%). Each of those is an orb that visibly overlaps a wall for as
+// long as you stand in that cell, and pops correct again one step later.
+//
+// Skipping the gate costs 21.59 -> 21.48 fps, which is worth not having that class of bug.
+const ORBGATE = process.env.ORBGATE === '1';
 // ORBNOCELL=1: walk and decide, but stamp nothing. Separates the SEARCH cost from the WRITING.
 const ORBNOCELL = process.env.ORBNOCELL === '1';
 // The sprite bitmaps are PLACED into VIC bank 3 by the self-extracting loader ($c000, 64-byte
@@ -1911,6 +1922,43 @@ if (process.env.ORBOCCFIND === '1') {
     console.error(`  PX=${(h.cx * 256).toString(16).padStart(4, '0')} ` +
       `PY=${(h.cy * 256).toString(16).padStart(4, '0')} PA=${h.brg.toString(16).padStart(2, '0')}` +
       `   orb ${h.oi} at ${h.d.toFixed(1)} cells, blocked from the cell centre`);
+}
+// ORBGATECHK=1: is the build-time canOcc bit ever WRONG? blockers() marches from 9 eye positions
+// across +-0.25 cells of the orb. Partial occlusion needs "can any part of this orb be hidden from
+// anywhere in this cell", which is a wider question -- and if the gate says no where the answer is
+// yes, the stamp is skipped and the orb visibly overlaps the wall. Sample the cell far more finely
+// here, and across the orb's real half-width, to find out.
+if (process.env.ORBGATECHK === '1') {
+  let checked = 0, wrong = 0;
+  const N = 7, OFF = [-0.45, 0.45];
+  for (let cell = 0; cell < 256; cell++) {
+    if (map[cell] || !candCnt[cell]) continue;
+    const cx = (cell & 15) + 0.5, cy = (cell >> 4) + 0.5;
+    const base = (candLo[cell] | (candHi[cell] << 8)) - CANDBASE;
+    for (let j = 0; j < candCnt[cell]; j++) {
+      const oi = candList[base + j * 3], win = candList[base + j * 3 + 2];
+      if (win & 0x80) continue;              // gate already says occlusion is possible
+      checked++;
+      const o = ORBS[oi];
+      // the orb's true half-width in cells at this distance: apparent width / (2 * 163 / d)
+      const d = Math.hypot(o.x - cx, o.y - cy);
+      // The orb's world half-width. The screen spans 2*d*tan(FOV/2) ~= 0.87*d cells, and the
+      // ball is about 49 of 320 pixels across at any distance, so its diameter is ~0.13*d cells.
+      // ORBSCALE is declared further down the file, so the constant is inlined here.
+      const half = Math.max(0.2, 0.067 * d);
+      let bad = false;
+      for (let a = 0; a < N && !bad; a++) for (let b = 0; b < N && !bad; b++) {
+        const ex = cx + OFF[0] + (OFF[1] - OFF[0]) * a / (N - 1);
+        const ey = cy + OFF[0] + (OFF[1] - OFF[0]) * b / (N - 1);
+        const vx = o.x - ex, vy = o.y - ey, L = Math.hypot(vx, vy) || 1;
+        for (const t of [-half, half])
+          if (!losFree(ex, ey, o.x - vy / L * t, o.y + vx / L * t)) bad = true;
+      }
+      if (bad) wrong++;
+    }
+  }
+  console.error(`ORBGATECHK: ${wrong} of ${checked} candidates whose gate says "nothing can ` +
+    `occlude" ARE partly occluded from somewhere in their cell (${(100*wrong/checked).toFixed(1)}%)`);
 }
 const _pal = [...new Set(ORBBODY)].length === 1
   ? `all body colour ${ORBBODY[0]}`
@@ -6115,8 +6163,9 @@ oSCbB:  lda #<cbB
 oSCbS:  sta oSInv+1
         sta oSDIn+1
 oSLoop: ldx osI
-        lda obOcc,x
+${ORBGATE ? `        lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
+` : ''}
 ${DBGORB ? `        inc oSOrb
 ` : ''}        lda obIX,x
         tay
