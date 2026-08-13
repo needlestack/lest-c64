@@ -6351,8 +6351,8 @@ oSCR2:  sta ohRun               ; last cell
         ; "from the right" one, which clips k..3, over-covering to the right by up to 3 columns.
         ; Over-covering takes a small bite out of the orb; under-covering leaves orb drawn ON the
         ; wall, which is the error that reads as broken -- so this errs the safe way.
-        lda (osPtr),y
-        beq oSCNx               ; see oSCSk below
+        jsr oSWall
+        bcc oSCNx
         lda ohFst
         sta (osPtr),y
         jmp oSCNx
@@ -6362,28 +6362,49 @@ oSCR2:  sta ohRun               ; last cell
         ; above the orb's bottom -- it painted foreground black onto the FLOOR, below the orb,
         ; where there is nothing to occlude with.
         ;
-        ; renderSym has just drawn the scene, so the cell itself is the answer, and it is exact
-        ; without any depth or height arithmetic: BLANK is code 0, and ceiling and floor are BLANK.
-        ; A cell that is not wall is not something to hide an orb behind, whatever the geometry.
+        ; renderSym has just drawn the scene, so the cell itself is the answer, with no depth or
+        ; height arithmetic anywhere. And the test is the user's own rule: occlusion is vertical
+        ; edges and FULLY BLACK WALL CHARS. Only SOLID and the seam variants are fully wall.
+        ;
+        ; Testing merely "not BLANK" was not enough. A cell at the wall's BASE is a partial edge
+        ; cell -- part wall, part floor -- and the splits are horizontal only, so stamping one
+        ; paints its floor half black. That is the black block below the wall's lower bound.
+        ; Skipping them leaves up to 8px of orb showing over the wall's bottom edge instead, which
+        ; is the smaller error and the one that reads as a soft edge rather than a stray block.
 oSCMid: ${DBGORB ? `inc oSCnt
-        ` : ''}lda (osPtr),y
-        beq oSCCol              ; floor or ceiling here: nothing to occlude with, leave it
+        ` : ''}jsr oSWall
+        bcc oSCCol              ; not fully wall: nothing to occlude with here
         lda ohFst               ; first cell: the stamp starts part way in, so clip from the right
         sta (osPtr),y
 oSCCol: iny
         cpy ohRun
         beq oSCLst
-        lda (osPtr),y
-        beq oSCCol              ; ditto for every interior cell
+        jsr oSWall
+        bcc oSCCol              ; ditto for every interior cell
         lda #${hx(OCC_FULL)}
         sta (osPtr),y
         jmp oSCCol
-oSCLst: lda (osPtr),y
-        beq oSCNx
+oSCLst: jsr oSWall
+        bcc oSCNx
         lda ohLst               ; last cell: the stamp ends part way in, so clip from the left
         sta (osPtr),y
 oSCNx:  inc ohSv
         jmp oSCRow
+; oSWall: carry set if the cell at (osPtr),y is FULLY wall -- SOLID, or a seam variant, which is
+; SOLID with a panel line on it. Ramp and step cells are part ceiling or part floor and cannot be
+; stamped, because the occluder splits are horizontal only.
+oSWall: lda (osPtr),y
+        cmp #${hx(SOLID)}
+        beq oSWyes
+        cmp #${hx(SEAM0)}
+        bcc oSWno
+        cmp #${hx(SEAM0 + 4)}
+        bcs oSWno
+oSWyes: sec
+        rts
+oSWno:  clc
+        rts
+
 oSCDn:  lda osL                 ; invalidate the cache for every cell column just stamped
         lsr
         lsr
