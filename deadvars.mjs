@@ -98,7 +98,16 @@ console.log(`${vars.size} RAM variables in ${process.argv[2] ?? 'iray.asm'}`);
 // compressed segment the self-extracting loader decodes straight into $d000, so `charset` itself
 // is now the entry. cpChr reads it to build the mirror. Sprites will join this list.
 const LOADER_WRITES = new Set(['charset']);
-const VIC_READS = new Set(['charset', 'charsetB']);     // the VIC is the reader, not the CPU
+const VIC_READS = new Set(['charset', 'charsetB']);
+// Written by orbOne, read by nobody YET: the per-orb bounding box, index, variant and
+// occluder-plane mask. These are the inputs the occlusion pass consumes, and that pass is
+// deliberately not ported alongside the projection -- occlusion is being rebuilt as stamped
+// foreground-black chars rather than the charset-twin scheme that used to read these. Kept
+// declared rather than deleted so the next step has its inputs, and listed here rather than
+// left as noise, because a dirty deadvars baseline hides the next real bug.
+const OCCLUSION_PENDING = new Set(['obCL', 'obCR', 'obBL', 'obBR', 'obIX', 'obV', 'obOcc']);     // the VIC is the reader, not the CPU
+for (const n of OCCLUSION_PENDING) { const i = writtenNeverRead.findIndex(e => e[0] === n);
+  if (i >= 0) writtenNeverRead.splice(i, 1); }
 for (const n of LOADER_WRITES) { const i = readNeverWritten.findIndex(e => e[0] === n);
   if (i >= 0) readNeverWritten.splice(i, 1); }
 for (const n of VIC_READS) { const i = writtenNeverRead.findIndex(e => e[0] === n);
