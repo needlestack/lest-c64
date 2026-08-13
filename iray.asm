@@ -4458,10 +4458,16 @@ oxDn:   ldx ovar
         sbc o2
         bcs opBL1
         lda #$00
-opBL1:  cmp #$a0        ; and clamp the TOP end too. Only the underflow was caught, so
-        bcc opBL2               ; an orb whose centre projects past the right edge gave a box
-        lda #$9f    ; starting past column 159 -- cell 40 or beyond, which walks
-opBL2:  sta ocl2                ; off the end of fgCell and seamT and writes past the screen
+opBL1:  cmp #$a0        ; A box that STARTS past the last column is an orb entirely off
+        bcc opBL2               ; the right edge. This used to clamp to 159, which turned "not on
+        jmp orbNo               ; screen" into "one column at the screen edge" -- so the orb took a
+                                ; sprite slot it could never be seen in, and orbStamp then painted
+                                ; occluders into cell 39 for it. Invisible in the shipping build,
+                                ; since black on black wall looks the same, but real work for an
+                                ; orb that is not there. Clamping was added to stop the box
+                                ; running off the end of fgCell and seamT; rejecting does that
+                                ; too, and is what the geometry actually says.
+opBL2:  sta ocl2
         lsr
         lsr
         sta ocl
