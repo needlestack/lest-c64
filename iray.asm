@@ -3991,18 +3991,35 @@ oSCR2:  sta ohRun               ; last cell
         ; "from the right" one, which clips k..3, over-covering to the right by up to 3 columns.
         ; Over-covering takes a small bite out of the orb; under-covering leaves orb drawn ON the
         ; wall, which is the error that reads as broken -- so this errs the safe way.
+        lda (osPtr),y
+        beq oSCNx               ; see oSCSk below
         lda ohFst
         sta (osPtr),y
         jmp oSCNx
-oSCMid: lda ohFst        ; first cell: the stamp starts part way in, so clip from the right
+        ; ---- only stamp cells that actually HOLD WALL ----
+        ; The stamp covers the ORB's rows, on the assumption that a wall which occludes an orb
+        ; extends below its feet. Where that does not hold -- a receding wall whose base has risen
+        ; above the orb's bottom -- it painted foreground black onto the FLOOR, below the orb,
+        ; where there is nothing to occlude with.
+        ;
+        ; renderSym has just drawn the scene, so the cell itself is the answer, and it is exact
+        ; without any depth or height arithmetic: BLANK is code 0, and ceiling and floor are BLANK.
+        ; A cell that is not wall is not something to hide an orb behind, whatever the geometry.
+oSCMid: lda (osPtr),y
+        beq oSCCol              ; floor or ceiling here: nothing to occlude with, leave it
+        lda ohFst               ; first cell: the stamp starts part way in, so clip from the right
         sta (osPtr),y
 oSCCol: iny
         cpy ohRun
         beq oSCLst
-        lda #$fc    ; interior cells are covered whole
+        lda (osPtr),y
+        beq oSCCol              ; ditto for every interior cell
+        lda #$fc
         sta (osPtr),y
         jmp oSCCol
-oSCLst: lda ohLst               ; last cell: the stamp ends part way in, so clip from the left
+oSCLst: lda (osPtr),y
+        beq oSCNx
+        lda ohLst               ; last cell: the stamp ends part way in, so clip from the left
         sta (osPtr),y
 oSCNx:  inc ohSv
         jmp oSCRow
