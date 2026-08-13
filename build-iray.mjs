@@ -1618,12 +1618,14 @@ const SPRBASE = 0xc000;
 // magnitude bigger than everything else here, and an offset scheme invites the mistake of
 // budgeting them like a small table. The four 256-entry tables are page-aligned because the
 // 6502 indexes them by a whole byte (cell number, or h).
-const ORB_VART     = 0x2f00;    // h -> size variant, 256
-const ORB_CANDCNT  = 0x3000;    // per cell: how many candidates, 256
-const ORB_CANDLO   = 0x3100;    // per cell: pointer to its list, lo/hi, 256 each
-const ORB_CANDHI   = 0x3200;
-const ORB_OCC      = 0x3300;    // occluder masks, OCCBYTES x norbs
-const ORB_SMALL    = 0x3500;    // the per-variant and per-orb tables: 304 bytes, so TWO pages
+const ORB_VART     = 0x2e00;    // h -> size variant, 256
+const ORB_CANDCNT  = 0x2f00;    // per cell: how many candidates, 256
+const ORB_CANDLO   = 0x3000;    // per cell: pointer to its list, lo/hi, 256 each
+const ORB_CANDHI   = 0x3100;
+const ORB_OCC      = 0x3200;    // occluder masks, OCCBYTES x norbs
+const ORB_SMALL    = 0x3400;    // the per-variant and per-orb tables: THREE pages. The ladder
+                                //   made every per-variant table 22 entries instead of 18, and
+                                //   the stamp pass added orbAnchT, so two pages stopped fitting.
 const ORB_CANDLIST = 0x3700;    // the visibility lists themselves: 3 bytes per candidate
 const ORB_TOP      = 0x4000;    // and the first emitted table, which they must not reach
 
@@ -1967,12 +1969,7 @@ const orbYBaseT = ORBANCH.map(a => 150 - a);
 // blank ABOVE the ball -- up to two and a half char rows of nothing. orbSeam uses these to
 // patch only the rows an orb actually inks; using the raw sprite rectangle instead is what
 // once made seams vanish in cells with no orb near them.
-const orbBlankT = ORBSRC.map((b, v) => {
-  const bm = ORBBM[b];
-  let r = 0;
-  while (r < 21 && !bm[r * 3] && !bm[r * 3 + 1] && !bm[r * 3 + 2]) r++;
-  return r * (ORBEXP[v] ? 2 : 1);
-});
+const orbBlankT = LADDER.map((r, v) => ORBANCH[v] - ORBTALL[v]);
 const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
 // Half-width in LOGICAL columns, rounded UP. w>>2 truncates, so any sprite whose width is not
 // a multiple of 4 logical columns lost half a column at each edge -- and the bounding box built
@@ -2376,6 +2373,17 @@ obBR    = $85b0
 obIX    = $85b8
 obV     = $85d0                 ; size variant per slot, so orbSeam can find the sprite's
 obOcc   = $85e0                 ; per slot: bit 7 = this orb has a possible occluder here
+obL     = $8574                 ; per slot: the orb's TIGHT column range, which the cell range
+obR     = $857c                 ;   cannot give -- a cell is 4 columns and a box starts inside one
+osI     = $85f4                 ; orbStamp: slot being stamped, and how many there are
+osN     = $85f5
+osL     = $85f6                 ; the span/box intersection being stamped
+osR     = $85f7
+osRow   = $85f8                 ; char row range
+osRowB  = $85f9
+ohSv    = $85fa                 ; span right edge / row counter, reused
+osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
+                                ;   orbStamp runs, so its pointer is free
 omptr   = $87                   ; 2 bytes: this orb's occluder mask. Deliberately SHARES oaL/oaH,
                                 ;   the multiply accumulator, which is dead once the projection
                                 ;   has produced a column range -- the same aliasing the original
@@ -3323,7 +3331,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' : ''}${NOFILL ? '' : '        jsr renderSym'}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : '        jsr drawFps'}
         jsr drawDbg
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -6049,6 +6057,163 @@ odbLp:  lda odb,x
 ; after the raster wait and the buffer flip, when the beam is past line 250 and no sprite is
 ; being fetched. Costs about 30 cycles per visible orb, which is nothing next to the ~2400 it
 ; took to work out where the orb goes.
+; ---- orbStamp: paint foreground black where a wall should clip an orb ----
+; Runs AFTER renderSym, because it overwrites cells renderSym has just drawn. The seven occluder
+; glyphs are the same black as the wall and differ only in bit pair, so a stamped cell is
+; invisible as colour and clips exactly.
+;
+; Per orb, only where the build already said occlusion is possible (obOcc bit 7, false for 56% of
+; candidates). Walk the spans overlapping the orb's box exactly as orbOne does; every span whose
+; run occludes this orb gets its intersection with the box stamped.
+;
+; Two things follow from stamping at all, and both are handled here rather than anywhere else:
+;   - the orb's PRIORITY bit has to be set, or foreground means nothing to it. Set per orb, not
+;     globally: an orb with nothing occluding it keeps priority 0, which is why seams cannot bite
+;     it and why it needs no de-seam sweep.
+;   - once its bit is set, SEAMS clip it too -- they are bit pair 10, the only other foreground
+;     in the charset. So every seam inside the orb's box becomes plain black. Its whole box, not
+;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
+;     wall is occluding at the edge.
+orbStamp:
+        lda onv
+        beq oSDn
+        sta osN
+        lda #$00
+        sta osI
+oSLoop: ldx osI
+        lda obOcc,x
+        bpl oSNext              ; nothing reachable from this cell can occlude this orb
+        lda obIX,x
+        tay
+        lda orbOccLoT,y
+        sta omptr
+        lda orbOccHiT,y
+        sta omptr+1
+        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
+        ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
+        ; Display y is raster - 50, and a char row is eight of those.
+        ldy obV,x
+        lda obY,x
+        clc
+        adc orbBlankT,y
+        sec
+        sbc #$32
+        lsr
+        lsr
+        lsr
+        sta osRow
+        lda obY,x
+        clc
+        adc orbAnchT,y
+        sec
+        sbc #$33                ; -50, then -1 for the last inked row
+        lsr
+        lsr
+        lsr
+        cmp #$19
+        bcc oSRok
+        lda #$18                ; clamp to the last screen row: a near orb's box runs off the
+                                ; bottom, and the rows below 24 are not screen memory at all
+oSRok:  sta osRowB
+        ; walk the spans, exactly as the whole-orb test does
+        lda #$00
+        sta ohL
+        sta ohBX
+oSSpan: ldx ohBX
+        cpx nbnd
+        bcc oSSB
+        lda #${hx(NLOG - 1)}
+        jmp oSSR
+oSSB:   lda bndT,x
+        sec
+        sbc #$01
+oSSR:   sta ohRun               ; borrow: this span's right edge
+        ldx osI
+        cmp obL,x
+        bcc oSAdv               ; span ends before the orb begins
+        lda ohL
+        cmp obR,x
+        beq oSChk
+        bcs oSDone              ; span begins past the orb: nothing left to stamp
+oSChk:  ldx ohL
+        ldy faceIdT,x
+        beq oSAdv               ; no run in this span, so it cannot occlude
+        sty ohSv
+        lda runByteT,y
+        tay
+        lda (omptr),y
+        ldy ohSv
+        and runBitT,y
+        beq oSAdv               ; this run does not occlude this orb
+        ; it does: stamp [max(spanL, obL) .. min(spanR, obR)]
+        ldx osI
+        lda ohL
+        cmp obL,x
+        bcs oSL1
+        lda obL,x
+oSL1:   sta osL
+        lda ohRun
+        cmp obR,x
+        bcc oSR1
+        lda obR,x
+oSR1:   sta osR
+        jsr oSCells
+oSAdv:  ldx ohBX
+        cpx nbnd
+        bcs oSDone
+        lda bndT,x
+        sta ohL
+        inc ohBX
+        jmp oSSpan
+oSDone: inc osI
+        lda osI
+        cmp osN
+        bcs oSDn
+        jmp oSLoop
+oSNext: inc osI
+        lda osI
+        cmp osN
+        bcc oSLoop
+oSDn:   rts
+
+; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
+; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
+; so occlusion currently quantises to a 4-column cell (8 screen pixels).
+oSCells:ldx osI
+        lda orbBitT,x
+        ora omPri
+        sta omPri               ; this orb is now BEHIND foreground
+        lda osRow
+        sta ohSv
+oSCRow: lda ohSv
+        cmp osRowB
+        beq oSCR1
+        bcs oSCDn
+oSCR1:  tay
+        lda rowLoT,y
+        sta osPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta osPtr+1
+        lda osL
+        lsr
+        lsr
+        tay                     ; first cell
+        lda osR
+        lsr
+        lsr
+        sta ohRun               ; last cell
+oSCCol: lda #${hx(OCC_FULL)}
+        sta (osPtr),y
+        cpy ohRun
+        bcs oSCNx
+        iny
+        bne oSCCol
+oSCNx:  inc ohSv
+        jmp oSCRow
+oSCDn:  rts
+
 osFlush:${process.env.ORBOCCDBG ? `
         lda ohDbg
         sta $d020               ; 0 none 1 reached 2 gate-passed 3 span-overlap 4 HIDDEN` : ''}
@@ -6541,6 +6706,10 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         lda ocr
         sta obCR,x
         lda ocl2
+        sta obL,x               ; the tight column range, for the stamp pass
+        lda ocmax
+        sta obR,x
+        lda ocl2
         and #$03
         tay
         lda bbLT,y              ; the columns of the leftmost cell inside the box
@@ -6664,6 +6833,7 @@ orbExpT: !byte ${orbExpT.join(',')}
 orbHalfT: !byte ${orbHalfT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbBlankT: !byte ${orbBlankT.join(',')}
+orbAnchT: !byte ${ORBANCH.join(',')}
 orbHgtT: !byte ${orbHgtT.join(',')}
 orbColT: !byte ${orbColT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
