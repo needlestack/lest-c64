@@ -1706,12 +1706,20 @@ stackRT = $0480
 sideT   = $0500
 idT     = $0600
 colH    = $0700
-cwA     = $2500                 ; per cell-column: the ceiling run length this buffer holds
-cwB     = $2528
-cbA     = $2550                 ; ... and the solid run start, or $ff for "always redraw"
-cbB     = $2578
-faceIdT = $2400
-cstepT  = $2680                 ; per cell-column (40): face-boundary column, 0 = none
+; ---- the arrays evicted from the image's FILLER ($2400-$27ff), 2026-08-12 ----
+; These six used to sit at $2400-$27ff, which is the gap between the end of the data segment and
+; the charset source -- i.e. the only space the CODE has left to grow into. That made the build's
+; "headroom below the charset source" report a LIE: it measured $2800 - dataEnd = 1,762 bytes, but
+; the code would have hit faceIdT at $2400 after 738. They now live in the reclaimed charset
+; source at $2800-$2fff beside remHiT, which nothing else contends for, so the whole filler is
+; code space again. Packing them tighter than this would buy nothing -- $2800-$2fff is not the
+; scarce resource, the $2800 ceiling is.
+cwA     = $2f00                 ; per cell-column: the ceiling run length this buffer holds
+cwB     = $2f28
+cbA     = $2f50                 ; ... and the solid run start, or $ff for "always redraw"
+cbB     = $2f78
+faceIdT = $2d00                 ; page-aligned: a column index must never need a 16-bit add
+cstepT  = $2fa0                 ; per cell-column (40): face-boundary column, 0 = none
 bidx    = $2bf0                ; PLAN=2: the bucket index the code came from, and which
 thsel   = $2bf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
 paqL    = $2bf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
@@ -1745,7 +1753,7 @@ pfDLo   = $293d
 pfDHi   = $293e
 pfRow   = $2934
 pfDone  = $2935
-seamT   = $26c0                 ; per cell-column (40): char code for the solid run --
+seamT   = $2fc8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
 ; Three ${hx(NBND)}-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
@@ -1805,7 +1813,7 @@ pkOld   = $2b27
 pkEdge  = $2b28
 pkJoy   = $2b29                 ; joystick-1 lines, masked out of the palette-key reads
 ` : ''}bndT    = $2a00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
-remLoT  = $2700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
+remLoT  = $2e00                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $2800                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
@@ -5578,7 +5586,19 @@ try {
   if (at < 0x10000) gaps.push([at, 0x10000]);
   const bank3 = gaps.map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
   const free = bank3.reduce((a, [lo, hi]) => a + (hi - lo), 0);
-  console.log(`headroom below the charset source: ${CHARSRC - r.labels.dataEnd} bytes`);
+  // Report the FIRST thing the code block would hit as it grows, not an assumed one. This used to
+  // print CHARSRC - dataEnd unconditionally and so overstated the room by 1,024 bytes for as long
+  // as arrays sat in the filler at $2400. A headroom figure nobody can trust is worse than none:
+  // it is the number you consult before deciding a feature fits.
+  {
+    const de = r.labels.dataEnd;
+    const obst = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{4})/gm)]
+      .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a > de && a < CHARSRC)
+      .sort((x, y) => x[1] - y[1])[0];
+    const [what, at] = obst ?? ['the charset source', CHARSRC];
+    console.log(`code headroom: ${at - de} bytes  ($${de.toString(16)} -> ` +
+                `$${at.toString(16)}, ${what})`);
+  }
   console.log(`VIC bank 3 free: ${bank3.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
     `  = ${free} bytes, ${free >> 6} sprite slots`);
@@ -5603,15 +5623,19 @@ try {
       pvAng:    'ditto',
       pvRcp:    'ditto',
     };
-    // ONE documented region rather than seventy-five individual exceptions. $2400-$2fff is bank 0's
-    // post-startup RAM: the image's filler between the end of the data segment and the charset
-    // source, plus the charset source itself, which cpChr consumes at startup.
+    // ONE documented region rather than seventy-five individual exceptions. $2800-$2fff is bank 0's
+    // post-startup RAM: the charset source itself, which cpChr consumes at startup.
     //
-    // THE INVARIANT THIS RESTS ON: nothing in $2400-$2fff may be touched before cpChr has run.
+    // It used to start at $2400, taking in the image's filler as well -- but arrays living in the
+    // filler are arrays living in the code's growth room, which is what hid the real 738-byte
+    // ceiling. The region is now exactly the reclaimed source, so the guard's lower bound and the
+    // code's upper bound are the same number and neither can drift without the other noticing.
+    //
+    // THE INVARIANT THIS RESTS ON: nothing in $2800-$2fff may be touched before cpChr has run.
     // That is exactly why cpChr is now the FIRST thing init does -- ahead of the colour-RAM fill
     // and the run-cache clear, both of which write RAM in this range. Reordering init would
     // reintroduce a bug that looks like corrupt graphics, so the copy stays first.
-    const XFER = [0x2400, 0x3000];
+    const XFER = [0x2800, 0x3000];
     const eq = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
       .map(m => [m[1], parseInt(m[2], 16)])
       .filter(([n, a]) => a >= 0x0400 && !(n in OK) && !(a >= XFER[0] && a < XFER[1]));

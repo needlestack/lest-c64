@@ -136,12 +136,20 @@ stackRT = $0480
 sideT   = $0500
 idT     = $0600
 colH    = $0700
-cwA     = $2500                 ; per cell-column: the ceiling run length this buffer holds
-cwB     = $2528
-cbA     = $2550                 ; ... and the solid run start, or $ff for "always redraw"
-cbB     = $2578
-faceIdT = $2400
-cstepT  = $2680                 ; per cell-column (40): face-boundary column, 0 = none
+; ---- the arrays evicted from the image's FILLER ($2400-$27ff), 2026-08-12 ----
+; These six used to sit at $2400-$27ff, which is the gap between the end of the data segment and
+; the charset source -- i.e. the only space the CODE has left to grow into. That made the build's
+; "headroom below the charset source" report a LIE: it measured $2800 - dataEnd = 1,762 bytes, but
+; the code would have hit faceIdT at $2400 after 738. They now live in the reclaimed charset
+; source at $2800-$2fff beside remHiT, which nothing else contends for, so the whole filler is
+; code space again. Packing them tighter than this would buy nothing -- $2800-$2fff is not the
+; scarce resource, the $2800 ceiling is.
+cwA     = $2f00                 ; per cell-column: the ceiling run length this buffer holds
+cwB     = $2f28
+cbA     = $2f50                 ; ... and the solid run start, or $ff for "always redraw"
+cbB     = $2f78
+faceIdT = $2d00                 ; page-aligned: a column index must never need a 16-bit add
+cstepT  = $2fa0                 ; per cell-column (40): face-boundary column, 0 = none
 bidx    = $2bf0                ; PLAN=2: the bucket index the code came from, and which
 thsel   = $2bf1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
 paqL    = $2bf6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
@@ -175,7 +183,7 @@ pfDLo   = $293d
 pfDHi   = $293e
 pfRow   = $2934
 pfDone  = $2935
-seamT   = $26c0                 ; per cell-column (40): char code for the solid run --
+seamT   = $2fc8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
 ; Three $40-byte arrays in the page splitT used to hold. Read ENTIRELY by pivPrep at the
@@ -218,7 +226,7 @@ pkOld   = $2b27
 pkEdge  = $2b28
 pkJoy   = $2b29                 ; joystick-1 lines, masked out of the palette-key reads
 bndT    = $2a00                 ; columns where a face or saturation state begins ($40 max)
-remLoT  = $2700                 ; per marched column: castRay's raw hit distance, 8.8 cells.
+remLoT  = $2e00                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $2800                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
