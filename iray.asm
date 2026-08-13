@@ -334,6 +334,9 @@ osR     = $85f7
 osRow   = $85f8                 ; char row range
 osRowB  = $85f9
 osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
+oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
+oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
+oSSpn   = $85fe
 ohSv    = $85fa                 ; span right edge / row counter, reused
 osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
                                 ;   orbStamp runs, so its pointer is free
@@ -1332,6 +1335,7 @@ pvNgD:  rts
 subFin:
         jsr orbMove             ; once a frame: project every candidate the cell lists
         jsr renderSym
+        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
         jsr drawFps
         jsr drawDbg
 
@@ -3953,7 +3957,7 @@ oSCR1:  tay
         sta ohRun               ; last cell
         cpy ohRun               ; TEST BEFORE WRITING. This was a do-while, so an inverted range
         bcs oSCNx               ;   (left > right) still painted one cell -- which is exactly the
-oSCCol: lda #$fc    ;   stray black block that showed up in the ceiling.
+oSCCol: lda #$fc
         sta (osPtr),y
         cpy ohRun
         bcs oSCNx

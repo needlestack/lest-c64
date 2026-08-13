@@ -1615,10 +1615,11 @@ const ORBDESEAM = process.env.ORBDESEAM !== '0';
 // and ceiling (00, $d021) stay as they are. ORBFG=6 makes every cell the stamp touches blue,
 // which is the only way to see WHERE it is drawing rather than infer it from what looks wrong.
 const ORBFG = process.env.ORBFG;
-// ORBSTAMP=1 enables PARTIAL occlusion (the orbStamp pass). Default OFF: it clips correctly at a
-// static viewpoint but writes some cells to the wrong place, and costs 6 fps. The whole-orb hide
-// above it is unaffected and stays on -- that one is verified and free.
-const ORBSTAMP = process.env.ORBSTAMP === '1';
+// ORBSTAMP=0 disables PARTIAL occlusion (the orbStamp pass). ON by default: placement is correct
+// and the remaining problem is cost, which is easier to judge against something you can see.
+const ORBSTAMP = process.env.ORBSTAMP !== '0';
+// ORBNOCELL=1: walk and decide, but stamp nothing. Separates the SEARCH cost from the WRITING.
+const ORBNOCELL = process.env.ORBNOCELL === '1';
 // The sprite bitmaps are PLACED into VIC bank 3 by the self-extracting loader ($c000, 64-byte
 // aligned, first of the 159 free slots) rather than emitted into the image. They were at $2000
 // in bank 0 before the bank-3 move, which is now the code's growth room.
@@ -2396,6 +2397,9 @@ osR     = $85f7
 osRow   = $85f8                 ; char row range
 osRowB  = $85f9
 osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
+oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
+oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
+oSSpn   = $85fe
 ohSv    = $85fa                 ; span right edge / row counter, reused
 osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
                                 ;   orbStamp runs, so its pointer is free
@@ -6023,17 +6027,17 @@ obNext: lda ocy
         lda ocy
         cmp ocn3
         bcc obLoop
-obEnd:  ${DBGORB ? `lda ohL
-        sta odb                 ; the span walk's state as orbStamp left it
-        lda ohRun
-        sta odb+1
-        lda ohBX
-        sta odb+2
-        lda nbnd
-        sta odb+3
-        lda bndT
-        sta odb+4               ; the first two delimiters, to see if bndT is ascending
-        lda bndT+1
+obEnd:  ${DBGORB ? `lda nbnd
+        sta odb                 ; delimiters this frame -- how long one span walk is
+        lda onv
+        sta odb+1               ; sprites in use
+        lda oSOrb
+        sta odb+2               ; ... of which entered the span walk at all
+        lda oSSpn
+        sta odb+3               ; spans visited in total
+        lda oSCnt
+        sta odb+4               ; cells stamped
+        lda #$00
         sta odb+5
         ldx #$00
         ldy #$00
@@ -6084,7 +6088,11 @@ odbLp:  lda odb,x
 ;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
 ;     wall is occluding at the edge.
 orbStamp:
-        lda onv
+${DBGORB ? `        lda #$00
+        sta oSCnt
+        sta oSOrb
+        sta oSSpn
+` : ''}        lda onv
         beq oSDn
         ; Which buffer's run cache to invalidate. renderSym patches operands rather than indexing
         ; per column; do the same, once per frame. cbA/cbB hold the solid-run START this buffer
@@ -6106,7 +6114,8 @@ oSCbS:  sta oSInv+1
 oSLoop: ldx osI
         lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
-        lda obIX,x
+${DBGORB ? `        inc oSOrb
+` : ''}        lda obIX,x
         tay
         lda orbOccLoT,y
         sta omptr
@@ -6157,7 +6166,8 @@ oSRok2: sta osRow
         lda #$00
         sta ohL
         sta ohBX
-oSSpan: ldx ohBX
+oSSpan: ${DBGORB ? `inc oSSpn
+        ` : ''}ldx ohBX
         cpx nbnd
         bcc oSSB
         lda #${hx(NLOG - 1)}
@@ -6226,7 +6236,8 @@ oSDn:   rts
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
-oSCells:${process.env.ORBFGDBG ? `        lda osRow
+oSCells:${ORBNOCELL ? `rts
+` : ''}${process.env.ORBFGDBG ? `        lda osRow
         and #$0f
         sta $d020               ; PROBE: the row oSCells is about to stamp from
 ` : ''}        ldx osI
@@ -6256,7 +6267,8 @@ oSCR1:  tay
         sta ohRun               ; last cell
         cpy ohRun               ; TEST BEFORE WRITING. This was a do-while, so an inverted range
         bcs oSCNx               ;   (left > right) still painted one cell -- which is exactly the
-oSCCol: lda #${hx(OCC_FULL)}    ;   stray black block that showed up in the ceiling.
+oSCCol: ${DBGORB ? `inc oSCnt
+        ` : ''}lda #${hx(OCC_FULL)}
         sta (osPtr),y
         cpy ohRun
         bcs oSCNx
