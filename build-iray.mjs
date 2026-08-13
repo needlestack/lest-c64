@@ -849,13 +849,37 @@ for (let k = 0; k < 4; k++) {
   const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : wall) << (6 - 2 * i)), 0);
   glyphs.push(new Array(8).fill(row));
 }
+// ---- the sprite occluders: seven cells of black that CLIP ----
+// Bit pair 11, where every wall pixel is 01. In multicolor char mode 00 and 01 count as
+// BACKGROUND for sprite priority and 10 and 11 as FOREGROUND, so these clip a sprite whose
+// $d01b bit is set while the walls around them do not. Pair 11 takes its colour from the low
+// three bits of colour RAM, which is $08 everywhere -- so it draws BLACK, identical to the wall
+// it is stamped over. The difference is invisible as colour and exact as occlusion.
+//
+// Indexed by how many columns from one side are foreground:
+//   OCC0+0..3  foreground on the LEFT,  1..4 columns (4 = the whole cell)
+//   OCC0+4..6  foreground on the RIGHT, 1..3 columns
+// Four boundary positions x two sides would be eight, but "all four from the left" and "all four
+// from the right" are the same cell, so it is seven.
+//
+// Every row is identical, which makes each glyph its own vertical mirror -- so charset B, which
+// cpChr builds by reversing each glyph's rows, comes out correct for free.
+const OCC0 = glyphs.length;
+const occRow = (n, fromRight) => [0, 1, 2, 3].reduce((b, i) => {
+  const fg = fromRight ? i >= 4 - n : i < n;
+  return b | ((fg ? 3 : 1) << (6 - 2 * i));      // 11 = foreground black, 01 = the wall's black
+}, 0);
+for (let n = 1; n <= 4; n++) glyphs.push(new Array(8).fill(occRow(n, false)));
+for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true)));
+const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
-console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout glyphs + 4 seam = ${glyphs.length}/256` +
-  `  -- ${256 - glyphs.length} free`);
+console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + 4 seam + 7 occluder ` +
+  `= ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
-              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam`);
+              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam, ` +
+              `${OCC0}-${OCC0+6} occluder (${OCC_FULL} = whole cell)`);
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
 const edgeCode = p => codeFor(p);
 // Under PLAN the entry is whatever charsetgen assigned to that BUCKET. Buckets the walkthrough
