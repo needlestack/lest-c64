@@ -24,6 +24,8 @@ paF     = $805b                  ; low byte of the 16-bit player angle; pa is th
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
+dtr     = $805c                  ; elapsed ticks x4, the run's compensation for the quartered
+                                 ;   walking rates; the 3x/2x below then apply on top of it
 lastMv  = $8051
 dxs     = $8052
 dxsH    = $8053
@@ -527,7 +529,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -1833,9 +1835,9 @@ tickDelta:
         bne tdCl
         inc dtv                 ; two renders inside one tick: still move a little
 tdCl:   lda dtv
-        cmp #32
+        cmp #128
         bcc tdDn
-        lda #32          ; a hitch must not step far enough to tunnel a wall
+        lda #128          ; a hitch must not step far enough to tunnel a wall
         sta dtv
 tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
         sta dtm
@@ -1931,20 +1933,30 @@ readKeys:
         ; turning get their own multipliers so running does not spin the world faster than it
         ; moves through it. Scaling elapsed TIME rather than the step keeps both frame-rate
         ; independent for free.
+        ; Walking is a QUARTER of what it was (MOVE_SHIFT, TURN_RATE), so running scales elapsed
+        ; time by 4 first and then applies the 3x/2x it always did. Running therefore moves and
+        ; turns at exactly the speed it always has, while walking got four times finer.
         lda dtv
         asl
+        bcs rkR4s
+        asl
+        bcc rkR4
+rkR4s:  lda #128
+rkR4:   sta dtr
+        asl
         clc
-        adc dtv                 ; 3x movement
+        adc dtr                 ; 3x movement
         bcs rkShMc
-        cmp #32
+        cmp #128
         bcc rkShM
-rkShMc: lda #32
+rkShMc: lda #128
 rkShM:  sta dtm
-        lda dtv
-        asl                     ; 2x turning
-        cmp #32
+        lda dtr
+        asl                     ; 2x turning. dtr reaches DT_MAX now, so this can carry out
+        bcs rkShTs              ;   where the old 2x of a 32-capped dtv never could
+        cmp #128
         bcc rkShT
-        lda #32
+rkShTs: lda #128
 rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40
@@ -1979,7 +1991,7 @@ rkNotF: lda joyv
         ldy pa
         lda paF
 rkTlL:  sec
-        sbc #$c0
+        sbc #$30
         bcs rkTlL2
         dey                     ; the fraction borrowed: step the angle byte
 rkTlL2: dex
@@ -1993,7 +2005,7 @@ rkJR:   lda joyv
         ldy pa
         lda paF
 rkTlR:  clc
-        adc #$c0
+        adc #$30
         bcc rkTlR2
         iny                     ; the fraction carried: step the angle byte
 rkTlR2: dex
@@ -2093,7 +2105,7 @@ maLp:   clc
         beq maBy
         clc
         lda dxs
-        adc #$0f
+        adc #$3f
         sta dxs
         lda dxsH
         adc #$00
@@ -2102,12 +2114,12 @@ maBy:   lda dySgn
         beq maBd
         clc
         lda dys
-        adc #$0f
+        adc #$3f
         sta dys
         lda dysH
         adc #$00
         sta dysH
-maBd:   ldx #4      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
+maBd:   ldx #6      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
 maSh:   lda dxsH
         cmp #$80
         ror dxsH

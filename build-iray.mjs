@@ -265,13 +265,14 @@ console.error(`  corner partners (line kept): ` +
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
 // Movement is per 60Hz TICK, not per frame -- see readKeys. MOVE_STEP is the table's
 // precision, not the speed: the step is scaled by elapsed ticks and then shifted down by
-// MOVE_SHIFT, so the effective rate is 64 >> 4 = 4 units of 1/256 cell per tick = 0.94 cells
-// a second. Round numbers rather than exact ones: neither constant costs anything at runtime
+// MOVE_SHIFT, so the effective rate is 64 >> 6 = 1 unit of 1/256 cell per tick = 0.23 cells
+// a second. That is a QUARTER of what it was (>> 4), for fine positioning while judging
+// rendering; running is unchanged, see the 4x in readKeys' SHIFT block. Round numbers rather than exact ones: neither constant costs anything at runtime
 // (the table is built here, the rate is an immediate), so there is no reason to carry 68 and
 // 4.25 around for the last 6%. Keeping the table at 64 rather than 4 is what stops the
 // DIRECTION quantising -- cos(a)*4 rounds to five levels and you walk visibly off-axis -- and
 // 64 leaves headroom under the signed-byte limit the entries have to fit.
-const MOVE_STEP = 64, MOVE_SHIFT = 4;
+const MOVE_STEP = 64, MOVE_SHIFT = 6;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
@@ -1493,14 +1494,16 @@ const PY = hexArg('PY', 0x0180, 0xffff);
 // growing it. 6/256 = 8.4 degrees per frame.
 // Turning is accumulated in 1/256ths of an angle unit, because 60 deg/s is 0.711 units per
 // tick -- less than one. pa is the high byte of a 16-bit angle and paF the low, so the
-// fraction carries between frames instead of being lost. 3/4 of a unit per tick * 60 ticks =
-// 45 units a second = 63 degrees.
-const TURN_RATE = 192;          // 3/4 of an angle unit per tick
-// Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 4 units of 1/256
-// cell per tick, 32 ticks is half a cell against walls a whole cell thick, and the collision
-// box catches anything that lands inside one. It has to clear the 4x run multiplier too, or
-// running would silently stop scaling with frame rate below about 15 fps.
-const DT_MAX = 32;
+// fraction carries between frames instead of being lost. 3/16 of a unit per tick * 60 ticks =
+// 11.25 units a second = 16 degrees -- a QUARTER of the 63 deg/s it was, to match the walking
+// step. The fractional accumulator is what makes a rate this small work at all.
+const TURN_RATE = 48;           // 3/16 of an angle unit per tick
+// Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 1 unit of 1/256
+// cell per tick, 128 ticks is half a cell against walls a whole cell thick, and the collision
+// box catches anything that lands inside one. It rose from 32 with the step's fall from 4 to
+// 1 unit, holding that half-cell guarantee exactly. It has to clear the run multipliers too,
+// or running would silently stop scaling with frame rate below about 15 fps.
+const DT_MAX = 128;
 // Panel seams are a look, not a diagnostic: SEAMS=0 compiles every trace of them out --
 // the charset entries, the projection pass and the per-cell table -- so the disabled build
 // costs exactly what it did before the feature existed.
@@ -2186,6 +2189,8 @@ paF     = $805b                  ; low byte of the 16-bit player angle; pa is th
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
+dtr     = $805c                  ; elapsed ticks x4, the run's compensation for the quartered
+                                 ;   walking rates; the 3x/2x below then apply on top of it
 lastMv  = $8051
 dxs     = $8052
 dxsH    = $8053
@@ -4357,24 +4362,34 @@ pkDn:   rts
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        ; LEFT SHIFT: run. 3 cells/s and 120 deg/s, against 1 and 60 walking -- movement and
+        ; LEFT SHIFT: run. 3 cells/s and 120 deg/s, against 0.23 and 16 walking -- movement and
         ; turning get their own multipliers so running does not spin the world faster than it
         ; moves through it. Scaling elapsed TIME rather than the step keeps both frame-rate
         ; independent for free.
+        ; Walking is a QUARTER of what it was (MOVE_SHIFT, TURN_RATE), so running scales elapsed
+        ; time by 4 first and then applies the 3x/2x it always did. Running therefore moves and
+        ; turns at exactly the speed it always has, while walking got four times finer.
         lda dtv
         asl
+        bcs rkR4s
+        asl
+        bcc rkR4
+rkR4s:  lda #${DT_MAX}
+rkR4:   sta dtr
+        asl
         clc
-        adc dtv                 ; 3x movement
+        adc dtr                 ; 3x movement
         bcs rkShMc
         cmp #${DT_MAX}
         bcc rkShM
 rkShMc: lda #${DT_MAX}
 rkShM:  sta dtm
-        lda dtv
-        asl                     ; 2x turning
+        lda dtr
+        asl                     ; 2x turning. dtr reaches DT_MAX now, so this can carry out
+        bcs rkShTs              ;   where the old 2x of a 32-capped dtv never could
         cmp #${DT_MAX}
         bcc rkShT
-        lda #${DT_MAX}
+rkShTs: lda #${DT_MAX}
 rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40
