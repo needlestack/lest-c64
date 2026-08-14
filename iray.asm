@@ -529,7 +529,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -4866,12 +4866,16 @@ occLT: !byte 243,244,245,246
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
 occRTW: !byte 246,255,254,253
 occLTW: !byte 250,251,252,246
-; Which of a glyph's four columns contain WALL, one bit each, bit 3 = column 0. A column counts
-; as wall if any of its eight rows is bit pair 01. This is what decides an edge cell's backing:
+; Which of a glyph's four columns are WALL, one bit each, bit 3 = column 0. A column counts as
+; wall if MOST of its eight rows are bit pair 01 -- not merely one of them. A cell at the wall's
+; BASE is floor with a sliver of wall along its top edge, and "any row" handed that whole column
+; to the wall, backing the split in black over what is plainly floor. The split covers all eight
+; rows of the cell, so the honest summary of a column is what it mostly shows. This is what
+; decides an edge cell's backing:
 ; ask what the columns the stamp does NOT cover actually hold, rather than guessing from whether
 ; the cell is SOLID. A step at a corner has wall on both sides and wants BLACK; a cell on a
 ; vertical silhouette has floor beyond it and wants WHITE. "Is it SOLID" cannot tell them apart.
-cellFillT: !byte 0,15,15,15,14,15,12,8,15,7,15,15,14,15,15,15,3,15,15,15,7,15,8,12,14,15,15,12,3,15,15,7,15,15,15,7,15,15,15,15,15,15,15,15,15,15,15,14,15,7,1,3,14,7,15,15,15,15,15,15,15,15,15,15,12,15,15,15,15,12,15,15,15,15,15,12,14,15,7,12,15,14,15,15,14,15,15,15,8,12,15,15,15,3,15,15,15,15,15,7,15,1,15,15,15,15,15,15,15,15,15,3,1,14,15,15,7,7,15,7,15,15,15,15,15,1,15,15,15,15,15,14,15,15,7,15,14,2,7,15,15,15,7,15,15,15,15,7,15,15,15,8,15,15,7,15,8,3,1,3,1,15,3,15,15,15,15,15,8,7,3,3,7,15,15,14,15,15,7,15,15,7,15,15,15,14,15,15,12,7,15,15,8,15,14,15,15,14,7,15,15,15,12,15,15,15,15,15,7,15,7,15,15,14,15,15,3,15,15,14,12,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,7,11,13,14,7,3,1,0,14,12,8,0,0,0,0,0,0
+cellFillT: !byte 0,15,15,15,14,15,0,8,0,0,15,0,0,0,0,15,3,0,15,3,3,15,0,12,12,7,15,12,3,12,15,7,15,15,15,1,14,12,15,15,3,15,15,15,15,0,0,0,15,7,1,0,8,1,3,0,14,12,15,3,0,15,14,0,12,15,15,0,0,0,0,3,8,3,15,8,12,15,3,8,14,8,15,14,0,15,0,15,8,0,15,7,7,0,8,15,15,7,7,0,0,0,15,8,15,7,0,15,15,1,3,0,0,0,15,15,0,1,1,1,15,7,15,14,15,1,1,15,15,15,15,8,7,12,0,15,0,0,7,7,12,15,1,15,15,0,7,0,7,3,1,0,8,15,1,15,8,1,1,1,0,15,0,7,15,14,12,14,8,3,3,3,7,15,14,12,7,15,3,15,1,7,1,14,12,14,15,3,12,7,12,8,8,3,14,15,15,12,7,12,14,14,8,14,0,15,15,3,7,15,3,15,15,12,15,9,3,15,15,8,0,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,7,11,13,14,7,3,1,0,14,12,8,0,0,0,0,0,0
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
 kMskT: !byte 0,8,12,14
 mMskT: !byte 7,3,1,0
