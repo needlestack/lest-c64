@@ -7335,8 +7335,12 @@ occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
 occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
 occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
-; Which of a glyph's four columns contain WALL, one bit each, bit 3 = column 0. A column counts
-; as wall if any of its eight rows is bit pair 01. This is what decides an edge cell's backing:
+; Which of a glyph's four columns are WALL, one bit each, bit 3 = column 0. A column counts as
+; wall if MOST of its eight rows are bit pair 01 -- not merely one of them. A cell at the wall's
+; BASE is floor with a sliver of wall along its top edge, and "any row" handed that whole column
+; to the wall, backing the split in black over what is plainly floor. The split covers all eight
+; rows of the cell, so the honest summary of a column is what it mostly shows. This is what
+; decides an edge cell's backing:
 ; ask what the columns the stamp does NOT cover actually hold, rather than guessing from whether
 ; the cell is SOLID. A step at a corner has wall on both sides and wants BLACK; a cell on a
 ; vertical silhouette has floor beyond it and wants WHITE. "Is it SOLID" cannot tell them apart.
@@ -7344,7 +7348,7 @@ cellFillT: !byte ${[...Array(256)].map((_, c) => {
   const g = glyphs[c] || new Array(8).fill(0);
   let m = 0;
   for (let col = 0; col < 4; col++)
-    if (g.some(row => ((row >> (6 - 2 * col)) & 3) === 1)) m |= 8 >> col;
+    if (g.filter(row => ((row >> (6 - 2 * col)) & 3) === 1).length >= 4) m |= 8 >> col;
   return m;
 }).join(',')}
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
