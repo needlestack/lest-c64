@@ -4431,7 +4431,17 @@ ohOk:   lda o1
         clc
         lda #80
         adc ocoff
-        jmp ocS
+        bcc ocS                 ; 80 + ocoff past 255 means the centre is off the RIGHT of the
+        jmp orbNo               ;   screen by more than a screen's width. ocol is a plain byte,
+                                ;   so it WRAPS -- and a wrapped ocol is a small number, which
+                                ;   reads as a column near the LEFT edge. An orb 59 degrees off
+                                ;   axis was drawn at column 16, and as the player turned away
+                                ;   from it ocoff grew, so the ghost slid RIGHT across a scene
+                                ;   moving the other way, until ocoff finally passed 255 and the
+                                ;   guard above deleted it. The mirror case going LEFT was
+                                ;   handled (ocolN, below); this side was not. Rejecting is
+                                ;   safe: a centre at column 256+ puts the nearest edge of the
+                                ;   widest orb at column 244, off the 160-column screen.
 ocN:    sec
         lda #80
         sbc ocoff
