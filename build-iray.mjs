@@ -6478,11 +6478,27 @@ oSCR2:  sta ohRun               ; last cell
         bcc oSCMid
         bne oSCNx               ; first cell past last: an inverted range, nothing to stamp
         ; ---- the whole stamp lies inside ONE cell ----
-        ; Columns k..m of it clip, and no single glyph says that unless k is 0 or m is 3. Take the
-        ; "from the right" one, which clips k..3, over-covering to the right by up to 3 columns.
-        ; Over-covering takes a small bite out of the orb; under-covering leaves orb drawn ON the
-        ; wall, which is the error that reads as broken -- so this errs the safe way.
-        lda ohFstM
+        ; Columns k..m of it clip, and no single glyph says that unless k is 0 or m is 3.
+        ;
+        ; When k IS 0 the "from the left" glyph says it exactly, so use that. Taking the
+        ; from-the-right one unconditionally covered k..3 whatever m was, which put a column of
+        ; foreground black outside the wall's own edge -- visible against the ceiling beyond it.
+        ; The wall's edge is the one end that has to be exact; that is the whole reason the split
+        ; glyphs exist.
+        ;
+        ; With both ends interior there is still no glyph for it, and it stays the from-the-right
+        ; one: over-covering takes a small bite out of the orb, while under-covering leaves orb
+        ; drawn ON the wall, which is the error that reads as broken.
+        lda osL
+        and #$03
+        bne oSC1r
+        lda ohLstM              ; k = 0: clip from the LEFT, exactly m+1 columns
+        jsr oSBack
+        lda ohLst
+        bcs oSC1s
+        lda ohLstW
+        jmp oSC1s
+oSC1r:  lda ohFstM
         jsr oSBack              ; single-cell stamp: pick the backing, do not skip
         lda ohFst
         bcs oSC1s

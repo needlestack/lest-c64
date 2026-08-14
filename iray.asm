@@ -1929,7 +1929,7 @@ readKeys:
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        ; LEFT SHIFT: run. 3 cells/s and 120 deg/s, against 1 and 60 walking -- movement and
+        ; LEFT SHIFT: run. 3 cells/s and 120 deg/s, against 0.23 and 16 walking -- movement and
         ; turning get their own multipliers so running does not spin the world faster than it
         ; moves through it. Scaling elapsed TIME rather than the step keeps both frame-rate
         ; independent for free.
