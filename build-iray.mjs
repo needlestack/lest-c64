@@ -1861,6 +1861,25 @@ const losFree = (ax, ay, bx, by) => {
 const CANDBASE = ORB_CANDLIST;                    // a FULL address: the 6502 loads it into a pointer
 const candList = [], candLo = new Array(256).fill(0), candHi = new Array(256).fill(0),
       candCnt = new Array(256).fill(0);
+const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
+const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
+const HOLEX = +(process.env.HOLEX ?? 4), HOLEY = +(process.env.HOLEY ?? 1);   // its cell
+// ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
+// An orb is only projected if it survives the per-cell candidate list and a bearing window;
+// a culled orb is ~20 cycles against ~2,400 projected, and that ratio is the entire reason 34
+// orbs are affordable. The hole was paying full price every frame -- behind you, through a
+// wall, across the map -- so it gets the same treatment.
+//
+// A bit rather than a 3-byte candidate record because the lists are already 2,283 bytes of a
+// 2,304-byte region: one more record per cell would not fit. 32 bytes buys the LOS half of the
+// cull, which is the larger half in a maze (most cells cannot see a given spot at all), and
+// orbOne's existing "behind the camera" test still catches the rest cheaply.
+// HOLECULL=0 fills the map solid, so the gate always passes: it prices the cull the same way
+// ORBGATE and ORBSTAMP price theirs. Rendering is identical either way -- only the cost moves.
+const HOLECULL = process.env.HOLECULL !== "0";
+const holeSee = new Array(32).fill(0);
+const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
+if (!HOLECULL) holeSee.fill(255);
 for (let cell = 0; cell < 256; cell++) {
   const x = cell & 15, y = cell >> 4;
   if (map[cell]) continue;
@@ -1874,6 +1893,9 @@ for (let cell = 0; cell < 256; cell++) {
     .filter(o => o.d < ORBSEE &&
       eye.some(([ex, ey]) => losFree(ex, ey, ORBS[o.i].x, ORBS[o.i].y)))
     .sort((a, b) => a.d - b.d);
+  if (Math.hypot(HOLEX + 0.5 - cx, HOLEY + 0.5 - cy) < HOLE_MAX_D &&
+      eye.some(([ex, ey]) => losFree(ex, ey, HOLEX + 0.5, HOLEY + 0.5)))
+    holeSee[cell >> 3] |= 1 << (cell & 7);       // same 3x3 eye grid as the orbs, same reason
   // FULL ADDRESS, not an offset: the 6502 loads these straight into a pointer.
   const a = CANDBASE + candList.length;
   candLo[cell] = a & 255; candHi[cell] = a >> 8;
@@ -2158,19 +2180,29 @@ const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // A logical column is exactly one multicolor sprite pixel (160 = 320/2), which makes the
 // budget clean: 2 sprites hmag = 48 columns, 2 unmag = 24, 1 unmag = 12.
 //
-// NEAR FIELD IS NOT DRAWN HERE. Below d=2.05 the ellipse outgrows two sprites (6 sprites at
-// 1.5 cells, 10 at 1.0, and at the lip it is 197 columns -- wider than the screen). At that
-// range it is no longer a sprite-shaped problem; it is the floor going black across the
-// bottom of the view, which is a job for the whole-cell occluder glyphs and orbStamp. The
-// ladder clamps to its largest rung until that exists.
-const HOLER = +(process.env.HOLER ?? 0.4);       // hole radius in cells
-const HOLEX = +(process.env.HOLEX ?? 4), HOLEY = +(process.env.HOLEY ?? 1);   // its cell
+// THE RADIUS IS DERIVED FROM A RULE, not chosen. The hole should reach its widest -- two hmag
+// sprites, 48 columns -- exactly as its near edge touches the bottom of the screen, so that the
+// two sprites are spent at the moment the shape stops growing on screen. Near edge at row 200
+// means 88/(d-r) = 100, so d-r = 0.88; width 48 means d = 2*F_COL*r/48 = 5.1238r; together
+// r = 0.88/4.1238 = 0.213 cells, a hole 0.43 cells across.
+//
+// The largest rungs then need VERTICAL magnification as well: at that distance the ellipse is
+// 32.7 rows tall against a sprite's 21. That is free -- same two sprites, one more register bit
+// -- and costs only vertical bitmap resolution on the rungs where the shape is biggest and
+// smoothest. Below d=1.09 the ellipse still outgrows the pair, but by then its near half is
+// off the bottom of the screen and only a shallow arc shows, so clamping barely reads. The
+// full near field still belongs to the whole-cell occluder glyphs and orbStamp.
 const HOLEBASE = SPRBASE + 0x400;                // straight after the orb ladder's 16 slots
-const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
+// A rung is a target apparent WIDTH; both magnification bits then follow from the SHAPE rather
+// than from a fixed schedule of regimes. Two sprites hold 24 multicolor pixels, so hmag is on
+// exactly when the ellipse is wider than that, and vmag exactly when it is taller than a
+// sprite's 21 rows. Deciding each independently is what lets the near rungs be both wide and
+// tall without a third pair of sprites.
 const HOLE_LADDER = [];
-for (let w = 48; w >= 26; w -= 2) HOLE_LADDER.push({ w, mag: 1, spr: 2 });
-for (let w = 24; w >= 14; w -= 2) HOLE_LADDER.push({ w, mag: 0, spr: 2 });
-for (let w = 12; w >= 4;  w -= 2) HOLE_LADDER.push({ w, mag: 0, spr: 1 });
+for (let w = 48; w >= 4; w -= 2) {
+  const spr = w > 12 ? 2 : 1;
+  HOLE_LADDER.push({ w, spr, px: spr * 12, mag: w > spr * 12 ? 1 : 0 });
+}
 // Rasterised by INVERTING the projection per screen row rather than by fitting an ellipse:
 // row y looks at ground distance Z = 88/(y-100), where the circle spans |X| <= sqrt(r^2-(Z-d)^2).
 // That is exact, and it is what puts the widest part of the shape BELOW its centre -- the near
@@ -2183,11 +2215,14 @@ for (const g of HOLE_LADDER) {
   g.d = 2 * F_COL * HOLER / g.w;                 // the distance at which it is exactly this wide
   g.far = Math.round(100 + 88 / (g.d + HOLER));  // screen row of the sprite's TOP
   g.near = 100 + 88 / (g.d - HOLER);
-  g.px = g.spr * 12;                             // logical bitmap width in multicolor pixels
+  g.vmag = (g.near - g.far) > 21 ? 1 : 0;        // taller than a sprite: expand it vertically
+  const cw = g.mag ? 2 : 1, ch = g.vmag ? 2 : 1; // screen columns and rows per bitmap pixel
+  if ((g.near - g.far) > 21 * ch)
+    throw new Error(`hole rung ${g.w}c is ${(g.near - g.far).toFixed(1)} rows: past 2 sprites`);
   g.grid = [...Array(21)].map((_, by) => {
-    const y = g.far + by + 0.5, s = holeSpan(g.d, y);
+    const y = g.far + by * ch + ch / 2, s = holeSpan(g.d, y);
     return [...Array(g.px)].map((_, bx) => {
-      const off = (bx - g.px / 2 + 0.5) * (g.mag ? 2 : 1);   // apparent columns from centre
+      const off = (bx - g.px / 2 + 0.5) * cw;    // apparent columns from centre
       return Math.abs(off) <= s ? 2 : 0;         // bit pair 10 = the per-sprite colour = black
     });
   });
@@ -2195,13 +2230,13 @@ for (const g of HOLE_LADDER) {
   // rung comes out BLANK -- the hole would vanish at range rather than shrink to a dash. Force
   // the row nearest its vertical centre to the nominal width whenever nothing was hit.
   if (!g.grid.some(row => row.some(v => v))) {
-    const by = Math.max(0, Math.min(20, Math.round((g.near + g.far) / 2) - g.far));
+    const by = Math.max(0, Math.min(20, Math.round(((g.near + g.far) / 2 - g.far) / ch)));
     for (let bx = 0; bx < g.px; bx++) {
-      const off = (bx - g.px / 2 + 0.5) * (g.mag ? 2 : 1);
+      const off = (bx - g.px / 2 + 0.5) * cw;
       if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = 2;
     }
   }
-  if (g.far + 21 > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
+  if (50 + g.far > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
 }
 // One sprite's 63 bytes, taking multicolor pixels [x0, x0+12) of a rung's logical bitmap.
 const holeSprite = (g, x0) => {
@@ -2231,14 +2266,14 @@ const holeXOffT = HOLE_LADDER.map(g => (g.px / 2) * (g.mag ? 2 : 1));
 // Sprite Y = 50 + far, computed as (50 + far - h) + h so the runtime adds the live h.
 const holeYBaseT = HOLE_LADDER.map(g => 50 + g.far - holeHOf(g));
 if (holeYBaseT.some(v => v < 0 || v > 255)) throw new Error('holeYBaseT out of byte range');
-const holeFlagT = HOLE_LADDER.map(g => (g.mag ? 1 : 0) | (g.spr === 2 ? 2 : 0));
+const holeFlagT = HOLE_LADDER.map(g => (g.mag ? 1 : 0) | (g.spr === 2 ? 2 : 0) | (g.vmag ? 4 : 0));
 if (process.env.HOLEDUMP === '1') {
   console.error(`  hole ladder: r=${HOLER} (${(2 * HOLER).toFixed(2)} cells across), ` +
     `${HOLE_LADDER.length} rungs, ${HOLEBM.length} sprite slots`);
   HOLE_LADDER.forEach((g, i) => console.error(
     `  rung ${String(i + 1).padStart(2)}: ${String(g.w).padStart(2)}c x ` +
     `${(g.near - g.far).toFixed(1).padStart(4)}r at d=${g.d.toFixed(2)} h=${holeHOf(g)}` +
-    `${g.mag ? ' hmag' : ''} ${g.spr}spr rows ${g.far}..${g.near.toFixed(0)}`));
+    `${g.mag ? " hmag" : ""}${g.vmag ? " vmag" : ""} ${g.spr}spr rows ${g.far}..${g.near.toFixed(0)}`));
 }
 // The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
 // is (ptr),y with no multiply.
@@ -2608,6 +2643,9 @@ onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two
 ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohW     = $850e                  ;   step to the right half (24 or 48), and whether there IS one
 ohT     = $850f
+ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
+pcell   = $8515                  ; the cell the player stands in, for the hole's LOS gate
+ohN     = $8516                  ; and how many sprite slots the hole took this frame
 odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ocn3    = $852a
 obX     = $8530
@@ -6297,6 +6335,8 @@ ${process.env.ORBOCCDBG ? `        sta ohDbg
         clc
         adc px+1
         tax
+        stx pcell               ; kept for the hole's own LOS gate at obEnd, which is reached
+                                ;   through the beq below as well as through the loop
         lda candCntT,x
         beq obEnd
         sta ocn
@@ -6347,17 +6387,30 @@ obEnd:  ; ---- the hole, projected last ----
         ; Entry ${ORBS.length} in orbXCT/orbYCT, so it goes through orbOne unchanged and only the tail
         ; differs. Last because the orb list is sorted nearest-first and sprite number decides
         ; overlap priority, so the orbs should keep the low slots.
+        lda #$00
+        sta ohN                 ; slots the hole takes this frame, 0, 1 or 2
+        lda pcell               ; ---- the same LOS cull an orb gets, as one bit per cell ----
+        and #$07                ; A projection is ~2,400 cycles and this test is ~25, which is
+        tay                     ; the ratio the whole candidate-list scheme exists for. Without
+        lda pcell               ; it the hole paid full price every frame, including from cells
+        lsr                     ; it cannot be seen from at all -- most of them, in a maze.
+        lsr
+        lsr
+        tax
+        lda holeSeeT,x
+        and orbBitT,y
+        beq ohSkip
         lda onv
-        sta onvO                ; the ORB count, frozen before the hole appends to it: orbStamp
-                                ;   walks slots expecting obL/obR/obOcc and a hole fills none of
-                                ;   them, so it would stamp occluder glyphs over a garbage cell
-                                ;   range. That cost a whole fps notch before it was caught.
         cmp #$07
         bcs ohSkip              ; needs TWO free slots, and a half-drawn hole is worse than none
         lda #${hx(ORBS.length)}
         sta oidx
         jsr orbOne
-ohSkip: ${DBGORB ? `lda osI
+ohSkip: lda onv                 ; the ORB count: orbStamp walks slots expecting obL/obR/obOcc and
+        sec                     ;   a hole fills none of them, so it would stamp occluder glyphs
+        sbc ohN                 ;   over a garbage cell range. The hole is always projected LAST,
+        sta onvO                ;   so subtracting its slots is enough to fence it off.
+        ${DBGORB ? `lda osI
         sta odb                 ; the loop counter and its bound, against what set the bound
         lda osN
         sta odb+1
@@ -7428,10 +7481,10 @@ ohGot:                          ; X = rung, and it indexes every table below
         lda holePtrT,x
         sta ohP
         lda holeFlagT,x
-        pha
+        sta ohF                 ; bit 0 hmag, bit 1 two sprites, bit 2 vmag
         and #$02
         sta ohT                 ; two sprites, or one?
-        pla
+        lda ohF
         and #$01
         beq ohNoM
         lda #48                 ; hmag: one sprite covers 24 columns, so the right half starts
@@ -7465,13 +7518,19 @@ holeSlot:
         sta obP,x
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
-        lda ohW
-        cmp #48
-        bne ohNoX
+        lda ohF                 ; the two magnifications are decided SEPARATELY, from the
+        lsr                     ;   ellipse's own width and height -- which is what lets the
+        bcc ohNoX               ;   near rungs be both 48 columns wide and 33 rows tall on the
+        lda omBit               ;   same two sprites, and is why no bitmap can be shared
+        ora omXX                ;   between rungs the way the orb ladder shares them
+        sta omXX
+ohNoX:  lda ohF
+        and #$04
+        beq ohNoY
         lda omBit
-        ora omXX                ; hmag ONLY. Vertical stays 1:1, which is exactly why a hole
-        sta omXX                ;   cannot share a bitmap between two rungs the way an orb can
-ohNoX:  lda o0
+        ora omYY
+        sta omYY
+ohNoY:  lda o0
         sta obX,x
         lda o3
         sta obY,x
@@ -7481,6 +7540,7 @@ ohNoX:  lda o0
         ora omX8
         sta omX8
 ohNo8:  inc onv
+        inc ohN                 ; so obEnd can fence the orb slots off from the hole's
         rts
 kSgn:   bmi kSgN
         lda #$00
@@ -7593,6 +7653,7 @@ orbOccT: !byte ${orbOccFlat.join(',')}
 ; two-sprite rung needs one pointer and an increment.
 holePtrT: !byte ${holeSlotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
 holeHT: !byte ${holeHT.join(',')}
+holeSeeT: !byte ${holeSee.join(",")}
 holeXOffT: !byte ${holeXOffT.join(',')}
 holeYBaseT: !byte ${holeYBaseT.join(',')}
 holeFlagT: !byte ${holeFlagT.join(',')}

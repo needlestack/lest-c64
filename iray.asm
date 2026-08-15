@@ -299,6 +299,9 @@ onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two
 ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohW     = $850e                  ;   step to the right half (24 or 48), and whether there IS one
 ohT     = $850f
+ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
+pcell   = $8515                  ; the cell the player stands in, for the hole's LOS gate
+ohN     = $8516                  ; and how many sprite slots the hole took this frame
 odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ocn3    = $852a
 obX     = $8530
@@ -3785,6 +3788,8 @@ ofyOk:  sta ofy
         clc
         adc px+1
         tax
+        stx pcell               ; kept for the hole's own LOS gate at obEnd, which is reached
+                                ;   through the beq below as well as through the loop
         lda candCntT,x
         beq obEnd
         sta ocn
@@ -3835,17 +3840,30 @@ obEnd:  ; ---- the hole, projected last ----
         ; Entry 34 in orbXCT/orbYCT, so it goes through orbOne unchanged and only the tail
         ; differs. Last because the orb list is sorted nearest-first and sprite number decides
         ; overlap priority, so the orbs should keep the low slots.
+        lda #$00
+        sta ohN                 ; slots the hole takes this frame, 0, 1 or 2
+        lda pcell               ; ---- the same LOS cull an orb gets, as one bit per cell ----
+        and #$07                ; A projection is ~2,400 cycles and this test is ~25, which is
+        tay                     ; the ratio the whole candidate-list scheme exists for. Without
+        lda pcell               ; it the hole paid full price every frame, including from cells
+        lsr                     ; it cannot be seen from at all -- most of them, in a maze.
+        lsr
+        lsr
+        tax
+        lda holeSeeT,x
+        and orbBitT,y
+        beq ohSkip
         lda onv
-        sta onvO                ; the ORB count, frozen before the hole appends to it: orbStamp
-                                ;   walks slots expecting obL/obR/obOcc and a hole fills none of
-                                ;   them, so it would stamp occluder glyphs over a garbage cell
-                                ;   range. That cost a whole fps notch before it was caught.
         cmp #$07
         bcs ohSkip              ; needs TWO free slots, and a half-drawn hole is worse than none
         lda #$22
         sta oidx
         jsr orbOne
-ohSkip: rts
+ohSkip: lda onv                 ; the ORB count: orbStamp walks slots expecting obL/obR/obOcc and
+        sec                     ;   a hole fills none of them, so it would stamp occluder glyphs
+        sbc ohN                 ;   over a garbage cell range. The hole is always projected LAST,
+        sta onvO                ;   so subtracting its slots is enough to fence it off.
+        rts
 
 ; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
 ; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
@@ -4848,10 +4866,10 @@ ohGot:                          ; X = rung, and it indexes every table below
         lda holePtrT,x
         sta ohP
         lda holeFlagT,x
-        pha
+        sta ohF                 ; bit 0 hmag, bit 1 two sprites, bit 2 vmag
         and #$02
         sta ohT                 ; two sprites, or one?
-        pla
+        lda ohF
         and #$01
         beq ohNoM
         lda #48                 ; hmag: one sprite covers 24 columns, so the right half starts
@@ -4885,13 +4903,19 @@ holeSlot:
         sta obP,x
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
-        lda ohW
-        cmp #48
-        bne ohNoX
+        lda ohF                 ; the two magnifications are decided SEPARATELY, from the
+        lsr                     ;   ellipse's own width and height -- which is what lets the
+        bcc ohNoX               ;   near rungs be both 48 columns wide and 33 rows tall on the
+        lda omBit               ;   same two sprites, and is why no bitmap can be shared
+        ora omXX                ;   between rungs the way the orb ladder shares them
+        sta omXX
+ohNoX:  lda ohF
+        and #$04
+        beq ohNoY
         lda omBit
-        ora omXX                ; hmag ONLY. Vertical stays 1:1, which is exactly why a hole
-        sta omXX                ;   cannot share a bitmap between two rungs the way an orb can
-ohNoX:  lda o0
+        ora omYY
+        sta omYY
+ohNoY:  lda o0
         sta obX,x
         lda o3
         sta obY,x
@@ -4901,6 +4925,7 @@ ohNoX:  lda o0
         ora omX8
         sta omX8
 ohNo8:  inc onv
+        inc ohN                 ; so obEnd can fence the orb slots off from the hole's
         rts
 kSgn:   bmi kSgN
         lda #$00
@@ -5012,10 +5037,11 @@ orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
 holePtrT: !byte 16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,53,54,55,56
-holeHT: !byte 43,41,39,38,36,34,32,30,29,27,25,23,21,20,18,16,14,13,11,9,7,5,4
+holeHT: !byte 80,77,74,70,67,64,60,57,54,50,47,44,40,37,34,30,27,23,20,17,13,10,7
+holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 holeXOffT: !byte 24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,12,6,6,6,6,6
-holeYBaseT: !byte 143,144,144,144,145,145,146,147,146,147,147,148,149,148,149,149,149,149,149,150,150,150,150
-holeFlagT: !byte 3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,0,0,0,0,0
+holeYBaseT: !byte 137,138,139,140,141,141,143,143,143,145,145,145,147,147,147,148,148,149,149,149,150,150,150
+holeFlagT: !byte 7,7,7,7,7,3,3,3,3,3,3,3,2,2,2,2,2,2,0,0,0,0,0
 orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6
