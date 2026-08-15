@@ -1768,8 +1768,11 @@ const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent wid
 const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent height, screen px
 if (process.env.ORBDUMP === '1') {
   const CH = [' ', '.', '#', 'o'];
-  console.error(`  ${LADDER.length} rungs from ${NORBBM} bitmaps (${NORBBM * 64} bytes, ` +
-                `${NORBBM} of 159 sprite slots)`);
+  // No slot total here on purpose: bank 3's free space is not known until the image is laid out,
+  // and a literal copied from one build's report is exactly how this said "of 159" long after the
+  // 159 stopped being true. The net/gross figure is printed with the rest of the memory picture.
+  console.error(`  ${LADDER.length} rungs from ${NORBBM} bitmaps ` +
+                `(${NORBBM * 64} bytes at $${SPRBASE.toString(16)}, ${NORBBM} sprite slots)`);
   LADDER.forEach((r, v) => {
     const g = orbScale(orbW(r.h), r.h);
     const step = v ? (100 * (1 - ORBTALL[v] / ORBTALL[v - 1])).toFixed(1) + '%' : '-';
@@ -7825,15 +7828,28 @@ try {
                 [0xfffa, 0x10000],
                 // a squatter's extent is unknown, so reserve to the next page boundary
                 ...squatters.map(([, a]) => [a & ~255, (a & ~255) + 256]),
-               ].sort((a, b) => a[0] - b[0]);
+               ];
   if (squatters.length) console.log(`  bank 3 still has ${squatters.length} CPU equate(s) in it ` +
     `($${Math.min(...squatters.map(x => x[1])).toString(16)}-` +
     `$${Math.max(...squatters.map(x => x[1])).toString(16)}) -- not yet graphics-only`);
-  const gaps = []; let at = VBANK;
-  for (const [lo, hi] of used) { if (lo > at) gaps.push([at, lo]); at = Math.max(at, hi); }
-  if (at < 0x10000) gaps.push([at, 0x10000]);
-  const bank3 = gaps.map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
-  const free = bank3.reduce((a, [lo, hi]) => a + (hi - lo), 0);
+  // The orb ladder is NOT in the assembled image -- the disk builder drops it at $c000 as its own
+  // `--seg`, so nothing else in this accounting knows it is there, and the figure counted the
+  // sprites we already ship as room for more. NET is the number that decides what a new object
+  // can have; gross is kept alongside it so the difference reads as "spent", not as a correction.
+  const sprSeg = SPRITES ? [[SPRBASE, SPRBASE + NORBBM * 64]] : [];
+  const slotsIn = occupied => {
+    const gaps = []; let at = VBANK;
+    for (const [lo, hi] of [...occupied].sort((a, b) => a[0] - b[0])) {
+      if (lo > at) gaps.push([at, lo]);
+      at = Math.max(at, hi);
+    }
+    if (at < 0x10000) gaps.push([at, 0x10000]);
+    // sprite data is 64 bytes on a 64-byte boundary, so round each gap's start up before counting
+    const regions = gaps.map(([lo, hi]) => [(lo + 63) & ~63, hi]).filter(([lo, hi]) => hi > lo);
+    return [regions, regions.reduce((a, [lo, hi]) => a + (hi - lo), 0)];
+  };
+  const [bank3, free] = slotsIn([...used, ...sprSeg]);
+  const [, gross] = slotsIn(used);
   // ---- the free-space picture, in one place ----
   // Report the FIRST thing the code block would hit as it grows, not an assumed one. This used to
   // print CHARSRC - dataEnd unconditionally and so overstated the room by 1,024 bytes for as long
@@ -7876,7 +7892,8 @@ try {
   }
   console.log(`VIC bank 3 free: ${bank3.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
-    `  = ${free} bytes, ${free >> 6} sprite slots`);
+    `  = ${free} bytes, ${free >> 6} sprite slots` +
+    (SPRITES ? ` (${gross >> 6} gross, ${NORBBM} spent on the orb ladder)` : ''));
   // $a000-$bfff is BASIC ROM unless LORAM is cleared, and $d000-$dfff is I/O no matter what.
   // Reading a table through either returns something other than what was written there.
   // ---- no RAM equate may sit inside the emitted image ----
