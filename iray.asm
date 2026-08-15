@@ -860,15 +860,50 @@ pvRcD:
         and #$03
         beq subLp               ; boundary on a cell edge: the two cells simply differ, and
                                 ; cstepT can only name an interior column (1..3)
-        sta tmp
+        sta tmp                 ; the position, 1..3
+        ; ---- a cell can hold TWO face boundaries, and cstepT names one ----
+        ; The rule used to be "first POSITION in a cell wins", and since the span stack pops the
+        ; rightmost span first that meant the RIGHTMOST boundary won -- regardless of size. A
+        ; 2-row step against a distant wall could therefore displace the 6-row silhouette beside
+        ; it, and the step model ("plateau to the boundary column, then drop") then paints wall
+        ; across a column that has none. Keep the boundary with the LARGER height jump instead:
+        ; a step's whole job is to place the edge the eye reads, and that is the big one.
+        ; |dh| lives in bits 2-6, which nothing else uses -- bits 0-1 are the position and bit 7
+        ; is subBnd's mark. Both columns are span ends, so both heights are already marched.
+        ;
+        ; SATURATE at 31, do not scale. colH is a height in ROWS, and a distant corridor is only
+        ; 9-15 rows tall all the way across -- the first cut shifted |dh| down by 3 and every
+        ; boundary in this frame quantised to zero, so the tie-break kept the rightmost and the
+        ; rule changed nothing. The comparison only needs an ORDER, and the pair it has to
+        ; separate is small-against-small far more often than huge-against-huge.
+        ldx spanR
+        lda colH,x
+        ldx spanL
+        sec
+        sbc colH,x
+        bcs csAbs
+        eor #$ff
+        adc #$01                ; carry is clear on this path, so this is a true negate
+csAbs:  cmp #32
+        bcc csSat               ; two boundaries both jumping 31+ rows in one cell is two
+        lda #31                 ; silhouettes in four columns: either is a defensible edge
+csSat:  asl
+        asl                     ; 0..31 -> bits 2-6
+        ora tmp
+        sta tmp                 ; strength | position: both what gets stored and what we compare
         lda spanR
         lsr
         lsr
         tax                     ; cell = spanR/4
         lda cstepT,x
-        and #$03                ; bit 7 is subBnd's "delimiter inside this cell" mark, not a
-        bne subLp               ; position -- first POSITION in a cell still wins
-        lda cstepT,x
+        and #$7f                ; drop subBnd's "delimiter inside this cell" mark. What is left
+        beq csSet               ; is strength|position, so ONE compare orders by strength and
+        cmp tmp                 ; breaks ties on position -- no need to mask the two apart
+        bcs subLp               ; the recorded boundary jumps at least as far: keep it. On a tie
+                                ; the higher position wins, and within one cell that is the
+                                ; rightmost -- exactly what the old first-wins rule kept
+csSet:  lda cstepT,x
+        and #$80                ; keep subBnd's mark; clear any position we are replacing
         ora tmp
         sta cstepT,x
         jmp subLp
