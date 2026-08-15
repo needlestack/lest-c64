@@ -293,6 +293,12 @@ omYY    = $851d
 omPri   = $851e
 omX8    = $851f
 omBit   = $8520
+onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two as well, because
+                                 ;   osFlush must write them, but orbStamp must NOT walk them:
+                                 ;   a hole fills no slot fields and the stamp would read garbage
+ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
+ohW     = $850e                  ;   step to the right half (24 or 48), and whether there IS one
+ohT     = $850f
 odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ocn3    = $852a
 obX     = $8530
@@ -3825,7 +3831,21 @@ obNext: lda ocy
         lda ocy
         cmp ocn3
         bcc obLoop
-obEnd:  rts
+obEnd:  ; ---- the hole, projected last ----
+        ; Entry 34 in orbXCT/orbYCT, so it goes through orbOne unchanged and only the tail
+        ; differs. Last because the orb list is sorted nearest-first and sprite number decides
+        ; overlap priority, so the orbs should keep the low slots.
+        lda onv
+        sta onvO                ; the ORB count, frozen before the hole appends to it: orbStamp
+                                ;   walks slots expecting obL/obR/obOcc and a hole fills none of
+                                ;   them, so it would stamp occluder glyphs over a garbage cell
+                                ;   range. That cost a whole fps notch before it was caught.
+        cmp #$07
+        bcs ohSkip              ; needs TWO free slots, and a half-drawn hole is worse than none
+        lda #$22
+        sta oidx
+        jsr orbOne
+ohSkip: rts
 
 ; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
 ; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
@@ -3852,7 +3872,7 @@ obEnd:  rts
 ;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
 ;     wall is occluding at the edge.
 orbStamp:
-        lda onv
+        lda onvO                ; ORBS only -- the hole's slots carry no stamp state
         beq oSDn
         sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
         lda #$00                ;   selection below leaves the cache base in A, and with this store
@@ -4530,6 +4550,13 @@ ocS:    sta ocol
         lda #$00
         sta ocolN
 ocDn:
+        lda oidx
+        cmp #$22
+        bcs holeTail            ; entries above the orbs in orbXCT/orbYCT are HOLES. Everything
+                                ;   up to here -- forward, right, h, ocol -- is the same
+                                ;   question for a disc on the floor as for a sphere; only the
+                                ;   ladder differs, because a disc projects to an ellipse whose
+                                ;   aspect changes with distance and a sphere does not.
         ; --- screen X, on the 160-COLUMN grid: X = 2 * (ocol + orbXOffT) ---
         ; The engine is 160x200 throughout and a multicolor sprite pixel is two hires pixels, so
         ; there is no odd sprite X worth having. This used to build a signed 16-bit HIRES x --
@@ -4780,6 +4807,101 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         inc onv
 orbYes: rts
 orbNo:  rts
+
+; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
+; Two sprites side by side, the left half and the right half of one ellipse, so the pair reads
+; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
+; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
+holeTail:
+        ldx #$00                ; find the rung: holeHT descends, so the first entry at or below
+ohFind: lda ohgt                ;   our h is it. A scan, not a 256-byte table -- this runs once
+        cmp holeHT,x            ;   a frame, so ~100 cycles is free and a page is not
+        bcs ohGot
+        inx
+        cpx #23
+        bcc ohFind
+        rts                     ; smaller than the smallest rung: too far to be worth a sprite
+ohGot:                          ; X = rung, and it indexes every table below
+        lda ocolN
+        bne orbNo               ; centre left of column 0. A hole that wide is half on screen
+                                ;   and should be clipped, not dropped -- but a sprite cannot
+                                ;   start left of X=0, so that needs the char stamp, not this.
+        lda ocol                ; X = 2*column + 24: the VIC's origin is 24 hires pixels left of
+        clc                     ;   the display, which the orb path hides inside orbXOffT's
+        adc #$0c                ;   "12 - halfCols". Here the two halves are separate, so the
+        bcs orbNo               ;   +12 columns is explicit -- leaving it out drew the hole
+        sec                     ;   exactly 12 columns left of where it belonged.
+        sbc holeXOffT,x         ; the left sprite's left edge: half the BITMAP's apparent width,
+        bcc orbNo               ;   not half the ellipse -- the shape is centred in the bitmap
+        asl                     ; X = 2*b, on the 160-column grid like every other sprite here
+        sta o0
+        lda #$00
+        rol
+        sta o1
+        lda holeYBaseT,x        ; the sprite's TOP row is the ellipse's FAR edge, 100+88/(d+r),
+        clc                     ;   so the base folds in the offset from h that the rung implies
+        adc ohgt
+        bcs orbNo
+        cmp #251
+        bcs orbNo               ; top past the last visible raster line
+        sta o3
+        lda holePtrT,x
+        sta ohP
+        lda holeFlagT,x
+        pha
+        and #$02
+        sta ohT                 ; two sprites, or one?
+        pla
+        and #$01
+        beq ohNoM
+        lda #48                 ; hmag: one sprite covers 24 columns, so the right half starts
+        bne ohSetW              ;   48 hires pixels along
+ohNoM:  lda #24
+ohSetW: sta ohW
+        jsr holeSlot
+        lda ohT
+        beq ohDone
+        inc ohP                 ; the right half is always the next slot, by construction
+        clc
+        lda o0
+        adc ohW
+        sta o0
+        lda o1
+        adc #$00
+        sta o1
+        jsr holeSlot
+ohDone: rts
+
+; holeSlot: give o0/o1 (X), o3 (Y) and ohP to the next free sprite slot.
+holeSlot:
+        ldx onv
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ora omPri               ; behind foreground: a wall in front of the hole has to win, and
+        sta omPri               ;   the floor it lies in is background, so it still draws there
+        lda ohP
+        sta obP,x
+        lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
+        sta obC,x
+        lda ohW
+        cmp #48
+        bne ohNoX
+        lda omBit
+        ora omXX                ; hmag ONLY. Vertical stays 1:1, which is exactly why a hole
+        sta omXX                ;   cannot share a bitmap between two rungs the way an orb can
+ohNoX:  lda o0
+        sta obX,x
+        lda o3
+        sta obY,x
+        lda o1
+        beq ohNo8
+        lda omBit
+        ora omX8
+        sta omX8
+ohNo8:  inc onv
+        rts
 kSgn:   bmi kSgN
         lda #$00
         rts
@@ -4886,6 +5008,14 @@ candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,0,55,55,55,55
 ; because the test does not involve the camera at all -- see the data layer above.
 orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72,85,189,78,80,213,218,218,0,72,85,73,79,80,213,218,218,0,72,85,73,49,80,213,218,218,0,176,170,182,78,112,213,218,218,0,200,175,182,78,112,213,218,218,0,72,85,169,78,112,213,218,218,0,72,181,182,78,160,213,218,218,0,72,85,73,73,160,213,218,218,0,200,170,182,78,160,222,218,218,0,72,85,233,78,160,222,218,218,0,176,170,182,78,160,234,218,218,0,72,85,189,78,160,234,218,218,0,72,85,73,121,160,234,218,218,0,72,173,182,78,160,42,219,218,0,72,85,73,79,160,42,219,218,0,200,170,182,78,160,42,223,218,0,72,85,73,49,160,42,223,218,0,176,170,182,78,160,42,213,218,0,72,213,183,78,160,42,213,218,0,72,85,233,78,160,42,213,218,0,72,173,182,78,160,42,229,219,0,72,85,73,73,160,42,229,219,0,248,170,182,78,160,42,37,217,0,72,85,169,78,160,42,37,217,0,72,85,73,49,160,42,37,217,0,72,213,183,78,160,42,37,253,0,176,170,182,78,160,42,37,165,0,200,175,182,78,160,42,37,165,0,72,85,73,79,160,42,37,165,0,72,181,182,78,160,42,37,37,1,72,85,169,78,160,42,37,37,1,72,85,73,121,160,42,37,37,1
         * = $3300
+; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
+; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
+; two-sprite rung needs one pointer and an increment.
+holePtrT: !byte 16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,53,54,55,56
+holeHT: !byte 43,41,39,38,36,34,32,30,29,27,25,23,21,20,18,16,14,13,11,9,7,5,4
+holeXOffT: !byte 24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,12,6,6,6,6,6
+holeYBaseT: !byte 143,144,144,144,145,145,146,147,146,147,147,148,149,148,149,149,149,149,149,150,150,150,150
+holeFlagT: !byte 3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,0,0,0,0,0
 orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6
@@ -4926,8 +5056,10 @@ runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4
 orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
 orbOccHiT: !byte 49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,50,50,50,50,50
-orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13
-orbYCT: !byte 1,1,1,1,1,3,3,3,4,4,5,5,6,6,6,7,7,8,8,9,9,9,10,10,11,11,11,12,13,13,13,14,14,14
+; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
+; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
+orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13,4
+orbYCT: !byte 1,1,1,1,1,3,3,3,4,4,5,5,6,6,6,7,7,8,8,9,9,9,10,10,11,11,11,12,13,13,13,14,14,14,1
 orbColT2: !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about

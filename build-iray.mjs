@@ -2139,6 +2139,107 @@ if (process.env.ORBBOX === '1')
     `  rung ${v+1}: bitmapW=${orbW(r.h)} exp=${r.exp?1:0} halfCols=${orbHalfCT[v]}` +
     ` box=-${orbColLT[v]}/+${orbColRT[v]} (${orbColLT[v]+orbColRT[v]+1} cols)`));
 const orbBitT = [...Array(8)].map((_, i) => 1 << i);
+
+// ---- HOLES: a circle lying on the FLOOR, which is a different projection from a sphere ----
+// An orb is a sphere, so it projects to a circle at every distance and one bitmap ladder can
+// scale uniformly. A hole is a disc in the ground plane, so it projects to an ELLIPSE whose
+// aspect changes with distance:
+//
+//     width  (columns) = 2*F_COL*r/d          falls as 1/d
+//     height (rows)    = 88/(d-r) - 88/(d+r)  falls as 1/d^2
+//
+// The height collapses quadratically, so a hole 48 columns wide is 17 rows tall at d=2.05 and
+// a hole 24 wide is 4 rows tall at d=4.10. Every rung is therefore a DIFFERENT shape, and --
+// unlike the orb, where the VIC's expand bit doubles both axes and lets two rungs share one
+// bitmap -- hmag doubles the width only, so no bitmap can be shared between a magnified rung
+// and an unmagnified one. One bitmap per rung.
+//
+// A rung is a target apparent WIDTH, because width is the larger and more legible dimension.
+// A logical column is exactly one multicolor sprite pixel (160 = 320/2), which makes the
+// budget clean: 2 sprites hmag = 48 columns, 2 unmag = 24, 1 unmag = 12.
+//
+// NEAR FIELD IS NOT DRAWN HERE. Below d=2.05 the ellipse outgrows two sprites (6 sprites at
+// 1.5 cells, 10 at 1.0, and at the lip it is 197 columns -- wider than the screen). At that
+// range it is no longer a sprite-shaped problem; it is the floor going black across the
+// bottom of the view, which is a job for the whole-cell occluder glyphs and orbStamp. The
+// ladder clamps to its largest rung until that exists.
+const HOLER = +(process.env.HOLER ?? 0.4);       // hole radius in cells
+const HOLEX = +(process.env.HOLEX ?? 4), HOLEY = +(process.env.HOLEY ?? 1);   // its cell
+const HOLEBASE = SPRBASE + 0x400;                // straight after the orb ladder's 16 slots
+const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
+const HOLE_LADDER = [];
+for (let w = 48; w >= 26; w -= 2) HOLE_LADDER.push({ w, mag: 1, spr: 2 });
+for (let w = 24; w >= 14; w -= 2) HOLE_LADDER.push({ w, mag: 0, spr: 2 });
+for (let w = 12; w >= 4;  w -= 2) HOLE_LADDER.push({ w, mag: 0, spr: 1 });
+// Rasterised by INVERTING the projection per screen row rather than by fitting an ellipse:
+// row y looks at ground distance Z = 88/(y-100), where the circle spans |X| <= sqrt(r^2-(Z-d)^2).
+// That is exact, and it is what puts the widest part of the shape BELOW its centre -- the near
+// half of the disc covers more rows than the far half, which is what reads as "lying down".
+const holeSpan = (d, y) => {
+  const Z = 88 / (y - 100), t = HOLER * HOLER - (Z - d) * (Z - d);
+  return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
+};
+for (const g of HOLE_LADDER) {
+  g.d = 2 * F_COL * HOLER / g.w;                 // the distance at which it is exactly this wide
+  g.far = Math.round(100 + 88 / (g.d + HOLER));  // screen row of the sprite's TOP
+  g.near = 100 + 88 / (g.d - HOLER);
+  g.px = g.spr * 12;                             // logical bitmap width in multicolor pixels
+  g.grid = [...Array(21)].map((_, by) => {
+    const y = g.far + by + 0.5, s = holeSpan(g.d, y);
+    return [...Array(g.px)].map((_, bx) => {
+      const off = (bx - g.px / 2 + 0.5) * (g.mag ? 2 : 1);   // apparent columns from centre
+      return Math.abs(off) <= s ? 2 : 0;         // bit pair 10 = the per-sprite colour = black
+    });
+  });
+  // A distant hole is under a row tall, so sampling row centres can miss it entirely and the
+  // rung comes out BLANK -- the hole would vanish at range rather than shrink to a dash. Force
+  // the row nearest its vertical centre to the nominal width whenever nothing was hit.
+  if (!g.grid.some(row => row.some(v => v))) {
+    const by = Math.max(0, Math.min(20, Math.round((g.near + g.far) / 2) - g.far));
+    for (let bx = 0; bx < g.px; bx++) {
+      const off = (bx - g.px / 2 + 0.5) * (g.mag ? 2 : 1);
+      if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = 2;
+    }
+  }
+  if (g.far + 21 > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
+}
+// One sprite's 63 bytes, taking multicolor pixels [x0, x0+12) of a rung's logical bitmap.
+const holeSprite = (g, x0) => {
+  const b = [];
+  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
+    b.push([0, 1, 2, 3].reduce((v, i) => v | (g.grid[y][x0 + k * 4 + i] << (6 - 2 * i)), 0));
+  b.push(0);
+  return b;
+};
+const HOLEBM = HOLE_LADDER.flatMap(g => g.spr === 2
+  ? [holeSprite(g, 0), holeSprite(g, 12)] : [holeSprite(g, 0)]);
+// Left half's slot; the right half is always the next one, so the runtime needs one pointer.
+let _hslot = 0;
+const holeSlotT = HOLE_LADDER.map(g => { const s = _hslot; _hslot += g.spr; return s; });
+// h = 88/d, the same value the walls and the orb ladder are indexed by. A 23-entry DESCENDING
+// list scanned at runtime, not the 256-byte table the orb ladder uses: this runs once a frame,
+// so ~100 cycles of scanning is free, and a page-aligned table would have to be squeezed into
+// the orb table region for no gain. Closer than the widest rung clamps to it (see NEAR FIELD
+// above), further than the smallest is not drawn.
+const holeHOf = g => Math.round(88 / g.d);
+const holeHT = HOLE_LADDER.map(holeHOf);
+if (holeHT.some((h, i) => i && h >= holeHT[i - 1]))
+  throw new Error('hole h thresholds are not strictly descending -- the scan needs them sorted');
+// Columns from the hole's centre to the LEFT edge of the left sprite: half the bitmap's
+// apparent width, not half the ellipse -- the ellipse is drawn centred inside the bitmap.
+const holeXOffT = HOLE_LADDER.map(g => (g.px / 2) * (g.mag ? 2 : 1));
+// Sprite Y = 50 + far, computed as (50 + far - h) + h so the runtime adds the live h.
+const holeYBaseT = HOLE_LADDER.map(g => 50 + g.far - holeHOf(g));
+if (holeYBaseT.some(v => v < 0 || v > 255)) throw new Error('holeYBaseT out of byte range');
+const holeFlagT = HOLE_LADDER.map(g => (g.mag ? 1 : 0) | (g.spr === 2 ? 2 : 0));
+if (process.env.HOLEDUMP === '1') {
+  console.error(`  hole ladder: r=${HOLER} (${(2 * HOLER).toFixed(2)} cells across), ` +
+    `${HOLE_LADDER.length} rungs, ${HOLEBM.length} sprite slots`);
+  HOLE_LADDER.forEach((g, i) => console.error(
+    `  rung ${String(i + 1).padStart(2)}: ${String(g.w).padStart(2)}c x ` +
+    `${(g.near - g.far).toFixed(1).padStart(4)}r at d=${g.d.toFixed(2)} h=${holeHOf(g)}` +
+    `${g.mag ? ' hmag' : ''} ${g.spr}spr rows ${g.far}..${g.near.toFixed(0)}`));
+}
 // The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
 // is (ptr),y with no multiply.
 const OCCBASE = ORB_OCC;
@@ -2501,6 +2602,12 @@ omYY    = $851d
 omPri   = $851e
 omX8    = $851f
 omBit   = $8520
+onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two as well, because
+                                 ;   osFlush must write them, but orbStamp must NOT walk them:
+                                 ;   a hole fills no slot fields and the stamp would read garbage
+ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
+ohW     = $850e                  ;   step to the right half (24 or 48), and whether there IS one
+ohT     = $850f
 odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ocn3    = $852a
 obX     = $8530
@@ -6236,7 +6343,21 @@ obNext: lda ocy
         lda ocy
         cmp ocn3
         bcc obLoop
-obEnd:  ${DBGORB ? `lda osI
+obEnd:  ; ---- the hole, projected last ----
+        ; Entry ${ORBS.length} in orbXCT/orbYCT, so it goes through orbOne unchanged and only the tail
+        ; differs. Last because the orb list is sorted nearest-first and sprite number decides
+        ; overlap priority, so the orbs should keep the low slots.
+        lda onv
+        sta onvO                ; the ORB count, frozen before the hole appends to it: orbStamp
+                                ;   walks slots expecting obL/obR/obOcc and a hole fills none of
+                                ;   them, so it would stamp occluder glyphs over a garbage cell
+                                ;   range. That cost a whole fps notch before it was caught.
+        cmp #$07
+        bcs ohSkip              ; needs TWO free slots, and a half-drawn hole is worse than none
+        lda #${hx(ORBS.length)}
+        sta oidx
+        jsr orbOne
+ohSkip: ${DBGORB ? `lda osI
         sta odb                 ; the loop counter and its bound, against what set the bound
         lda osN
         sta odb+1
@@ -6301,7 +6422,7 @@ ${DBGORB ? `        lda #$00
         sta oSCnt
         sta oSOrb
         sta oSSpn
-` : ''}        lda onv
+` : ''}        lda onvO                ; ORBS only -- the hole's slots carry no stamp state
         beq oSDn
         sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
         lda #$00                ;   selection below leaves the cache base in A, and with this store
@@ -6990,6 +7111,13 @@ ocS:    sta ocol
         lda #$00
         sta ocolN
 ocDn:
+        lda oidx
+        cmp #${hx(ORBS.length)}
+        bcs holeTail            ; entries above the orbs in orbXCT/orbYCT are HOLES. Everything
+                                ;   up to here -- forward, right, h, ocol -- is the same
+                                ;   question for a disc on the floor as for a sphere; only the
+                                ;   ladder differs, because a disc projects to an ellipse whose
+                                ;   aspect changes with distance and a sphere does not.
         ; --- screen X, on the 160-COLUMN grid: X = 2 * (ocol + orbXOffT) ---
         ; The engine is 160x200 throughout and a multicolor sprite pixel is two hires pixels, so
         ; there is no odd sprite X worth having. This used to build a signed 16-bit HIRES x --
@@ -7259,6 +7387,101 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         inc onv
 orbYes: rts
 orbNo:  rts
+
+; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
+; Two sprites side by side, the left half and the right half of one ellipse, so the pair reads
+; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
+; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
+holeTail:
+        ldx #$00                ; find the rung: holeHT descends, so the first entry at or below
+ohFind: lda ohgt                ;   our h is it. A scan, not a 256-byte table -- this runs once
+        cmp holeHT,x            ;   a frame, so ~100 cycles is free and a page is not
+        bcs ohGot
+        inx
+        cpx #${HOLE_LADDER.length}
+        bcc ohFind
+        rts                     ; smaller than the smallest rung: too far to be worth a sprite
+ohGot:                          ; X = rung, and it indexes every table below
+        lda ocolN
+        bne orbNo               ; centre left of column 0. A hole that wide is half on screen
+                                ;   and should be clipped, not dropped -- but a sprite cannot
+                                ;   start left of X=0, so that needs the char stamp, not this.
+        lda ocol                ; X = 2*column + 24: the VIC's origin is 24 hires pixels left of
+        clc                     ;   the display, which the orb path hides inside orbXOffT's
+        adc #$0c                ;   "12 - halfCols". Here the two halves are separate, so the
+        bcs orbNo               ;   +12 columns is explicit -- leaving it out drew the hole
+        sec                     ;   exactly 12 columns left of where it belonged.
+        sbc holeXOffT,x         ; the left sprite's left edge: half the BITMAP's apparent width,
+        bcc orbNo               ;   not half the ellipse -- the shape is centred in the bitmap
+        asl                     ; X = 2*b, on the 160-column grid like every other sprite here
+        sta o0
+        lda #$00
+        rol
+        sta o1
+        lda holeYBaseT,x        ; the sprite's TOP row is the ellipse's FAR edge, 100+88/(d+r),
+        clc                     ;   so the base folds in the offset from h that the rung implies
+        adc ohgt
+        bcs orbNo
+        cmp #251
+        bcs orbNo               ; top past the last visible raster line
+        sta o3
+        lda holePtrT,x
+        sta ohP
+        lda holeFlagT,x
+        pha
+        and #$02
+        sta ohT                 ; two sprites, or one?
+        pla
+        and #$01
+        beq ohNoM
+        lda #48                 ; hmag: one sprite covers 24 columns, so the right half starts
+        bne ohSetW              ;   48 hires pixels along
+ohNoM:  lda #24
+ohSetW: sta ohW
+        jsr holeSlot
+        lda ohT
+        beq ohDone
+        inc ohP                 ; the right half is always the next slot, by construction
+        clc
+        lda o0
+        adc ohW
+        sta o0
+        lda o1
+        adc #$00
+        sta o1
+        jsr holeSlot
+ohDone: rts
+
+; holeSlot: give o0/o1 (X), o3 (Y) and ohP to the next free sprite slot.
+holeSlot:
+        ldx onv
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ora omPri               ; behind foreground: a wall in front of the hole has to win, and
+        sta omPri               ;   the floor it lies in is background, so it still draws there
+        lda ohP
+        sta obP,x
+        lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
+        sta obC,x
+        lda ohW
+        cmp #48
+        bne ohNoX
+        lda omBit
+        ora omXX                ; hmag ONLY. Vertical stays 1:1, which is exactly why a hole
+        sta omXX                ;   cannot share a bitmap between two rungs the way an orb can
+ohNoX:  lda o0
+        sta obX,x
+        lda o3
+        sta obY,x
+        lda o1
+        beq ohNo8
+        lda omBit
+        ora omX8
+        sta omX8
+ohNo8:  inc onv
+        rts
 kSgn:   bmi kSgN
         lda #$00
         rts
@@ -7365,6 +7588,14 @@ candHiT: !byte ${candHi.join(',')}
 ; because the test does not involve the camera at all -- see the data layer above.
 orbOccT: !byte ${orbOccFlat.join(',')}
         * = ${hx16(ORB_SMALL)}
+; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
+; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
+; two-sprite rung needs one pointer and an increment.
+holePtrT: !byte ${holeSlotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
+holeHT: !byte ${holeHT.join(',')}
+holeXOffT: !byte ${holeXOffT.join(',')}
+holeYBaseT: !byte ${holeYBaseT.join(',')}
+holeFlagT: !byte ${holeFlagT.join(',')}
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
@@ -7411,8 +7642,10 @@ runByteT: !byte ${[...Array(nextRun)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(nextRun)].map((_, r) => 1 << (r & 7)).join(',')}
 orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
-orbXCT: !byte ${orbXC.join(',')}
-orbYCT: !byte ${orbYC.join(',')}
+; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
+; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
+orbXCT: !byte ${[...orbXC, HOLEX].join(',')}
+orbYCT: !byte ${[...orbYC, HOLEY].join(',')}
 orbColT2: !byte ${orbCol.join(',')}
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -7770,6 +8003,7 @@ try {
   // They were at $2000 in bank 0 before the bank-3 move, competing with code for address space;
   // now they are graphics living in the graphics bank, which is what bank 3 is for.
   if (SPRITES) writeFileSync('./iray-sprites.bin', Buffer.from(ORBBM.flat()));
+  if (SPRITES) writeFileSync('./iray-holes.bin', Buffer.from(HOLEBM.flat()));
   writeFileSync('./iray.prg', Buffer.from(r.prg));
   const d = D64.createEmpty('IRAY', '01');
   d.writeFile('IMAZE'.padEnd(6) + '/PRG', r.prg, D64.FILE_TYPE_PRG);
@@ -7796,7 +8030,9 @@ try {
     const { execSync } = await import('child_process');
     const out = execSync('node ./selfext.mjs ./iray.prg ./iray-c.prg ' +
                          '--seg d000:./iray-charset.bin' +
-                         (SPRITES ? ' --seg c000:./iray-sprites.bin' : ''), { encoding: 'utf8' });
+                         (SPRITES ? ' --seg c000:./iray-sprites.bin' +
+                                    ` --seg ${HOLEBASE.toString(16)}:./iray-holes.bin` : ''),
+                         { encoding: 'utf8' });
     console.log(out.trim());
     writeFileSync('./latest.d64', readFileSync('./iray-c.d64'));
     console.log('latest.d64 is the COMPRESSED self-extracting build');
@@ -7883,7 +8119,8 @@ try {
   // `--seg`, so nothing else in this accounting knows it is there, and the figure counted the
   // sprites we already ship as room for more. NET is the number that decides what a new object
   // can have; gross is kept alongside it so the difference reads as "spent", not as a correction.
-  const sprSeg = SPRITES ? [[SPRBASE, SPRBASE + NORBBM * 64]] : [];
+  const sprSeg = SPRITES ? [[SPRBASE, SPRBASE + NORBBM * 64],
+                            [HOLEBASE, HOLEBASE + HOLEBM.length * 64]] : [];
   const slotsIn = occupied => {
     const gaps = []; let at = VBANK;
     for (const [lo, hi] of [...occupied].sort((a, b) => a[0] - b[0])) {
@@ -7940,7 +8177,8 @@ try {
   console.log(`VIC bank 3 free: ${bank3.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
     `  = ${free} bytes, ${free >> 6} sprite slots` +
-    (SPRITES ? ` (${gross >> 6} gross, ${NORBBM} spent on the orb ladder)` : ''));
+    (SPRITES ? ` (${gross >> 6} gross, ${NORBBM} spent on the orb ladder` +
+               ` and ${HOLEBM.length} on the hole ladder)` : ''));
   // $a000-$bfff is BASIC ROM unless LORAM is cleared, and $d000-$dfff is I/O no matter what.
   // Reading a table through either returns something other than what was written there.
   // ---- no RAM equate may sit inside the emitted image ----
