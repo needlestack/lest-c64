@@ -220,11 +220,20 @@ allSegs.forEach((s) => {
   // reason the KERNAL cannot LOAD a charset into place. Interrupts are already off (sei in the
   // relocator) and the decoder touches no I/O, so unmapping it for the length of one segment is safe.
   const hole = s.dstStart >= IO_LO && s.dstStart < IO_HI;
-  if (hole) decInit += `        lda #$34                ; RAM everywhere: $d000-$dfff is the DESTINATION\n        sta $01\n`;
+  // ...and a destination at $e000+ needs the KERNAL out for a DIFFERENT reason. Writes to
+  // $a000-$ffff always reach RAM whatever $01 says, so storing there looks safe -- but this is
+  // an LZ format, and a match token COPIES BACK FROM THE OUTPUT. With the KERNAL mapped, every
+  // back-reference reads ROM instead of the bytes just written: the literals land correctly and
+  // everything after the first match is garbage. That is exactly how it failed -- $e800 held the
+  // right 16 bytes and $ed40 held KERNAL.
+  const hiRam = s.dstStart >= IO_HI;
+  if (hole || hiRam) decInit += `        lda #$${hole ? '34' : '35'}                ; ${hole
+    ? 'RAM everywhere: $d000-$dfff is the DESTINATION'
+    : 'KERNAL out: match copies must read back RAM'}\n        sta $01\n`;
   decInit += `        lda #<$${s.Csrc0.toString(16)}\n        sta rsrc\n        lda #>$${s.Csrc0.toString(16)}\n        sta rsrc+1\n`;
   decInit += `        lda #<$${s.dstStart.toString(16)}\n        sta rdst\n        lda #>$${s.dstStart.toString(16)}\n        sta rdst+1\n`;
   decInit += `        jsr decode_seg\n`;
-  if (hole) decInit += `        lda #$${bankByte.toString(16)}                ; I/O back, for the remaining copies and the game\n        sta $01\n`;
+  if (hole || hiRam) decInit += `        lda #$${bankByte.toString(16)}                ; back to the game's banking, for the remaining copies\n        sta $01\n`;
 });
 const decSrc = `
 rsrc = $f0

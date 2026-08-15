@@ -4836,7 +4836,7 @@ ohFind: lda ohgt                ;   our h is it. A scan, not a 256-byte table --
         cmp holeHT,x            ;   a frame, so ~100 cycles is free and a page is not
         bcs ohGot
         inx
-        cpx #23
+        cpx #35
         bcc ohFind
         rts                     ; smaller than the smallest rung: too far to be worth a sprite
 ohGot:                          ; X = rung, and it indexes every table below
@@ -4866,28 +4866,35 @@ ohGot:                          ; X = rung, and it indexes every table below
         lda holePtrT,x
         sta ohP
         lda holeFlagT,x
-        sta ohF                 ; bit 0 hmag, bit 1 two sprites, bit 2 vmag
-        and #$02
-        sta ohT                 ; two sprites, or one?
+        sta ohF                 ; bits 0-1 sprite count, bit 2 hmag, bit 3 vmag
+        and #$03
+        sta ohT                 ; 1, 2 or 3 sprites side by side, holding ONE ellipse
+        clc
+        adc onv
+        cmp #$09
+        bcs orbNo               ; would need a ninth hardware sprite: draw none of it, because
+                                ;   a hole missing its right-hand third reads as a wall, not a
+                                ;   hole. Checked HERE and not at the call site, which cannot
+                                ;   know the rung until the projection has run.
         lda ohF
-        and #$01
+        and #$04
         beq ohNoM
-        lda #48                 ; hmag: one sprite covers 24 columns, so the right half starts
-        bne ohSetW              ;   48 hires pixels along
+        lda #48                 ; hmag: one sprite covers 24 columns, so the next starts 48
+        bne ohSetW              ;   hires pixels along
 ohNoM:  lda #24
 ohSetW: sta ohW
-        jsr holeSlot
-        lda ohT
+ohLp:   jsr holeSlot
+        dec ohT
         beq ohDone
-        inc ohP                 ; the right half is always the next slot, by construction
-        clc
+        inc ohP                 ; the halves are consecutive slots by construction, so the
+        clc                     ;   pointer walks and only the X advances
         lda o0
         adc ohW
         sta o0
         lda o1
         adc #$00
         sta o1
-        jsr holeSlot
+        jmp ohLp
 ohDone: rts
 
 ; holeSlot: give o0/o1 (X), o3 (Y) and ohP to the next free sprite slot.
@@ -4904,13 +4911,13 @@ holeSlot:
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
         lda ohF                 ; the two magnifications are decided SEPARATELY, from the
-        lsr                     ;   ellipse's own width and height -- which is what lets the
-        bcc ohNoX               ;   near rungs be both 48 columns wide and 33 rows tall on the
-        lda omBit               ;   same two sprites, and is why no bitmap can be shared
-        ora omXX                ;   between rungs the way the orb ladder shares them
+        and #$04                ;   ellipse's own visible width and height -- which is what lets
+        beq ohNoX               ;   a near rung be 48 columns wide and 33 rows tall on two
+        lda omBit               ;   sprites, and is why no bitmap can be shared between rungs
+        ora omXX                ;   the way the orb ladder shares them across the expand bit
         sta omXX
 ohNoX:  lda ohF
-        and #$04
+        and #$08
         beq ohNoY
         lda omBit
         ora omYY
@@ -5032,16 +5039,19 @@ candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,0,55,55,55,55
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
 orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72,85,189,78,80,213,218,218,0,72,85,73,79,80,213,218,218,0,72,85,73,49,80,213,218,218,0,176,170,182,78,112,213,218,218,0,200,175,182,78,112,213,218,218,0,72,85,169,78,112,213,218,218,0,72,181,182,78,160,213,218,218,0,72,85,73,73,160,213,218,218,0,200,170,182,78,160,222,218,218,0,72,85,233,78,160,222,218,218,0,176,170,182,78,160,234,218,218,0,72,85,189,78,160,234,218,218,0,72,85,73,121,160,234,218,218,0,72,173,182,78,160,42,219,218,0,72,85,73,79,160,42,219,218,0,200,170,182,78,160,42,223,218,0,72,85,73,49,160,42,223,218,0,176,170,182,78,160,42,213,218,0,72,213,183,78,160,42,213,218,0,72,85,233,78,160,42,213,218,0,72,173,182,78,160,42,229,219,0,72,85,73,73,160,42,229,219,0,248,170,182,78,160,42,37,217,0,72,85,169,78,160,42,37,217,0,72,85,73,49,160,42,37,217,0,72,213,183,78,160,42,37,253,0,176,170,182,78,160,42,37,165,0,200,175,182,78,160,42,37,165,0,72,85,73,79,160,42,37,165,0,72,181,182,78,160,42,37,37,1,72,85,169,78,160,42,37,37,1,72,85,73,121,160,42,37,37,1
+        * = $3240
+; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
+; record per cell would have been 768 and the lists have 21 bytes spare.
+holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
-holePtrT: !byte 16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,53,54,55,56
-holeHT: !byte 80,77,74,70,67,64,60,57,54,50,47,44,40,37,34,30,27,23,20,17,13,10,7
-holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-holeXOffT: !byte 24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,12,6,6,6,6,6
-holeYBaseT: !byte 137,138,139,140,141,141,143,143,143,145,145,145,147,147,147,148,148,149,149,149,150,150,150
-holeFlagT: !byte 7,7,7,7,7,3,3,3,3,3,3,3,2,2,2,2,2,2,0,0,0,0,0
+holePtrT: !byte 160,162,164,166,169,172,175,178,181,184,187,190,193,196,198,200,202,204,206,208,210,212,214,216,218,220,222,224,226,228,230,231,232,233,234
+holeHT: !byte 129,125,121,117,113,109,105,101,97,93,89,85,80,77,74,70,67,64,60,57,54,50,47,44,40,37,34,30,27,23,20,17,13,10,7
+holeXOffT: !byte 24,24,24,36,36,36,36,36,36,36,36,36,36,24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,6,6,6,6,6
+holeYBaseT: !byte 119,121,123,124,126,127,129,130,132,133,134,135,137,138,139,140,141,141,143,143,143,145,145,145,147,147,147,148,148,149,149,149,150,150,150
+holeFlagT: !byte 6,6,6,7,7,7,7,7,7,15,15,15,15,14,14,14,14,6,6,6,6,6,6,6,6,2,2,2,2,2,1,1,1,1,1
 orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6

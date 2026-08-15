@@ -2192,17 +2192,28 @@ const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // smoothest. Below d=1.09 the ellipse still outgrows the pair, but by then its near half is
 // off the bottom of the screen and only a shallow arc shows, so clamping barely reads. The
 // full near field still belongs to the whole-cell occluder glyphs and orbStamp.
-const HOLEBASE = SPRBASE + 0x400;                // straight after the orb ladder's 16 slots
+const HOLEBASE = 0xe800;                         // above the charsets: 75 slots do not fit in
+                                                 //   the 48 between $c400 and the I/O hole, and
+                                                 //   $e800-$ffb9 is the bank.s other free run
 // A rung is a target apparent WIDTH; both magnification bits then follow from the SHAPE rather
 // than from a fixed schedule of regimes. Two sprites hold 24 multicolor pixels, so hmag is on
 // exactly when the ellipse is wider than that, and vmag exactly when it is taller than a
 // sprite's 21 rows. Deciding each independently is what lets the near rungs be both wide and
 // tall without a third pair of sprites.
+// TWO families, because apparent width is not monotonic in distance. Far out, the ellipse grows
+// steadily as you approach and WIDTH is the natural step. Once the near edge passes row 200 the
+// widest part of the shape is below the screen, so the VISIBLE width peaks at 59.9 columns
+// (d=0.88) and then shrinks again -- it cannot key a table, and those rungs step by h instead.
+//
+// The near family closes the near field completely; it does not need the char stamp after all.
+// Three hmag sprites is 72 columns against that 59.9 peak, so there is never a four-sprite case,
+// and the screen edge eats the shape faster than perspective grows it -- so vmag is needed only
+// down to d=0.90 and a plain sprite holds it from there. The hole leaves the screen entirely at
+// d = 0.88 - r = 0.667, where the ladder simply ends.
 const HOLE_LADDER = [];
-for (let w = 48; w >= 4; w -= 2) {
-  const spr = w > 12 ? 2 : 1;
-  HOLE_LADDER.push({ w, spr, px: spr * 12, mag: w > spr * 12 ? 1 : 0 });
-}
+for (let w = 48; w >= 4; w -= 2) HOLE_LADDER.push({ w, d: 2 * F_COL * HOLER / w });
+for (let h = 85; h <= 129; h += 4) HOLE_LADDER.push({ d: 88 / h });
+HOLE_LADDER.sort((a, b) => a.d - b.d);           // nearest first, so holeHT descends in h
 // Rasterised by INVERTING the projection per screen row rather than by fitting an ellipse:
 // row y looks at ground distance Z = 88/(y-100), where the circle spans |X| <= sqrt(r^2-(Z-d)^2).
 // That is exact, and it is what puts the widest part of the shape BELOW its centre -- the near
@@ -2212,13 +2223,26 @@ const holeSpan = (d, y) => {
   return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
 };
 for (const g of HOLE_LADDER) {
-  g.d = 2 * F_COL * HOLER / g.w;                 // the distance at which it is exactly this wide
   g.far = Math.round(100 + 88 / (g.d + HOLER));  // screen row of the sprite's TOP
   g.near = 100 + 88 / (g.d - HOLER);
-  g.vmag = (g.near - g.far) > 21 ? 1 : 0;        // taller than a sprite: expand it vertically
+  // Everything below is sized by what is ON SCREEN, not by the whole ellipse. Past d=1.09 the
+  // near half is under row 200 and sizing by the full shape would demand sprites to draw rows
+  // nobody can see -- it is exactly that clipping which keeps three sprites sufficient.
+  g.vis = Math.min(200, g.near) - g.far;
+  let vw = 0;
+  for (let y = g.far; y <= Math.min(200, Math.ceil(g.near)); y++)
+    vw = Math.max(vw, 2 * holeSpan(g.d, y + 0.5));
+  g.w = Math.max(g.w ?? 0, vw);                  // the far family already knows its nominal width
+  g.spr = Math.max(1, Math.min(3, Math.ceil(g.w / 24)));
+  if (g.w <= 12) g.spr = 1; else if (g.w <= 48) g.spr = Math.max(2, g.spr);
+  g.px = g.spr * 12;                             // logical bitmap width in multicolor pixels
+  g.mag = g.w > g.px ? 1 : 0;
+  g.vmag = g.vis > 21 ? 1 : 0;                   // taller than a sprite: expand it vertically
   const cw = g.mag ? 2 : 1, ch = g.vmag ? 2 : 1; // screen columns and rows per bitmap pixel
-  if ((g.near - g.far) > 21 * ch)
-    throw new Error(`hole rung ${g.w}c is ${(g.near - g.far).toFixed(1)} rows: past 2 sprites`);
+  if (g.vis > 21 * ch)
+    throw new Error(`hole rung at d=${g.d.toFixed(2)} shows ${g.vis.toFixed(1)} rows: too tall`);
+  if (g.w > g.px * cw)
+    throw new Error(`hole rung at d=${g.d.toFixed(2)} is ${g.w.toFixed(1)}c: past 3 sprites`);
   g.grid = [...Array(21)].map((_, by) => {
     const y = g.far + by * ch + ch / 2, s = holeSpan(g.d, y);
     return [...Array(g.px)].map((_, bx) => {
@@ -2246,8 +2270,8 @@ const holeSprite = (g, x0) => {
   b.push(0);
   return b;
 };
-const HOLEBM = HOLE_LADDER.flatMap(g => g.spr === 2
-  ? [holeSprite(g, 0), holeSprite(g, 12)] : [holeSprite(g, 0)]);
+const HOLEBM = HOLE_LADDER.flatMap(g =>
+  [...Array(g.spr)].map((_, i) => holeSprite(g, i * 12)));
 // Left half's slot; the right half is always the next one, so the runtime needs one pointer.
 let _hslot = 0;
 const holeSlotT = HOLE_LADDER.map(g => { const s = _hslot; _hslot += g.spr; return s; });
@@ -2266,13 +2290,14 @@ const holeXOffT = HOLE_LADDER.map(g => (g.px / 2) * (g.mag ? 2 : 1));
 // Sprite Y = 50 + far, computed as (50 + far - h) + h so the runtime adds the live h.
 const holeYBaseT = HOLE_LADDER.map(g => 50 + g.far - holeHOf(g));
 if (holeYBaseT.some(v => v < 0 || v > 255)) throw new Error('holeYBaseT out of byte range');
-const holeFlagT = HOLE_LADDER.map(g => (g.mag ? 1 : 0) | (g.spr === 2 ? 2 : 0) | (g.vmag ? 4 : 0));
+// bits 0-1 = how many sprites this rung needs (1..3), bit 2 = hmag, bit 3 = vmag
+const holeFlagT = HOLE_LADDER.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
 if (process.env.HOLEDUMP === '1') {
   console.error(`  hole ladder: r=${HOLER} (${(2 * HOLER).toFixed(2)} cells across), ` +
     `${HOLE_LADDER.length} rungs, ${HOLEBM.length} sprite slots`);
   HOLE_LADDER.forEach((g, i) => console.error(
-    `  rung ${String(i + 1).padStart(2)}: ${String(g.w).padStart(2)}c x ` +
-    `${(g.near - g.far).toFixed(1).padStart(4)}r at d=${g.d.toFixed(2)} h=${holeHOf(g)}` +
+    `  rung ${String(i + 1).padStart(2)}: ${g.w.toFixed(0).padStart(2)}c x ` +
+    `${g.vis.toFixed(1).padStart(4)}r vis at d=${g.d.toFixed(2)} h=${holeHOf(g)}` +
     `${g.mag ? " hmag" : ""}${g.vmag ? " vmag" : ""} ${g.spr}spr rows ${g.far}..${g.near.toFixed(0)}`));
 }
 // The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
@@ -7481,28 +7506,35 @@ ohGot:                          ; X = rung, and it indexes every table below
         lda holePtrT,x
         sta ohP
         lda holeFlagT,x
-        sta ohF                 ; bit 0 hmag, bit 1 two sprites, bit 2 vmag
-        and #$02
-        sta ohT                 ; two sprites, or one?
+        sta ohF                 ; bits 0-1 sprite count, bit 2 hmag, bit 3 vmag
+        and #$03
+        sta ohT                 ; 1, 2 or 3 sprites side by side, holding ONE ellipse
+        clc
+        adc onv
+        cmp #$09
+        bcs orbNo               ; would need a ninth hardware sprite: draw none of it, because
+                                ;   a hole missing its right-hand third reads as a wall, not a
+                                ;   hole. Checked HERE and not at the call site, which cannot
+                                ;   know the rung until the projection has run.
         lda ohF
-        and #$01
+        and #$04
         beq ohNoM
-        lda #48                 ; hmag: one sprite covers 24 columns, so the right half starts
-        bne ohSetW              ;   48 hires pixels along
+        lda #48                 ; hmag: one sprite covers 24 columns, so the next starts 48
+        bne ohSetW              ;   hires pixels along
 ohNoM:  lda #24
 ohSetW: sta ohW
-        jsr holeSlot
-        lda ohT
+ohLp:   jsr holeSlot
+        dec ohT
         beq ohDone
-        inc ohP                 ; the right half is always the next slot, by construction
-        clc
+        inc ohP                 ; the halves are consecutive slots by construction, so the
+        clc                     ;   pointer walks and only the X advances
         lda o0
         adc ohW
         sta o0
         lda o1
         adc #$00
         sta o1
-        jsr holeSlot
+        jmp ohLp
 ohDone: rts
 
 ; holeSlot: give o0/o1 (X), o3 (Y) and ohP to the next free sprite slot.
@@ -7519,13 +7551,13 @@ holeSlot:
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
         lda ohF                 ; the two magnifications are decided SEPARATELY, from the
-        lsr                     ;   ellipse's own width and height -- which is what lets the
-        bcc ohNoX               ;   near rungs be both 48 columns wide and 33 rows tall on the
-        lda omBit               ;   same two sprites, and is why no bitmap can be shared
-        ora omXX                ;   between rungs the way the orb ladder shares them
+        and #$04                ;   ellipse's own visible width and height -- which is what lets
+        beq ohNoX               ;   a near rung be 48 columns wide and 33 rows tall on two
+        lda omBit               ;   sprites, and is why no bitmap can be shared between rungs
+        ora omXX                ;   the way the orb ladder shares them across the expand bit
         sta omXX
 ohNoX:  lda ohF
-        and #$04
+        and #$08
         beq ohNoY
         lda omBit
         ora omYY
@@ -7647,13 +7679,16 @@ candHiT: !byte ${candHi.join(',')}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
 orbOccT: !byte ${orbOccFlat.join(',')}
+        * = $3240
+; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
+; record per cell would have been 768 and the lists have 21 bytes spare.
+holeSeeT: !byte ${holeSee.join(",")}
         * = ${hx16(ORB_SMALL)}
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
 holePtrT: !byte ${holeSlotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
 holeHT: !byte ${holeHT.join(',')}
-holeSeeT: !byte ${holeSee.join(",")}
 holeXOffT: !byte ${holeXOffT.join(',')}
 holeYBaseT: !byte ${holeYBaseT.join(',')}
 holeFlagT: !byte ${holeFlagT.join(',')}
