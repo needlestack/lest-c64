@@ -265,14 +265,13 @@ console.error(`  corner partners (line kept): ` +
 // full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
 // Movement is per 60Hz TICK, not per frame -- see readKeys. MOVE_STEP is the table's
 // precision, not the speed: the step is scaled by elapsed ticks and then shifted down by
-// MOVE_SHIFT, so the effective rate is 64 >> 6 = 1 unit of 1/256 cell per tick = 0.23 cells
-// a second. That is a QUARTER of what it was (>> 4), for fine positioning while judging
-// rendering; running is unchanged, see the 4x in readKeys' SHIFT block. Round numbers rather than exact ones: neither constant costs anything at runtime
+// MOVE_SHIFT, so the effective rate is 64 >> 4 = 4 units of 1/256 cell per tick = 0.94 cells
+// a second. Round numbers rather than exact ones: neither constant costs anything at runtime
 // (the table is built here, the rate is an immediate), so there is no reason to carry 68 and
 // 4.25 around for the last 6%. Keeping the table at 64 rather than 4 is what stops the
 // DIRECTION quantising -- cos(a)*4 rounds to five levels and you walk visibly off-axis -- and
 // 64 leaves headroom under the signed-byte limit the entries have to fit.
-const MOVE_STEP = 64, MOVE_SHIFT = 6;
+const MOVE_STEP = 64, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
@@ -1488,22 +1487,30 @@ const PA = hexArg('PA', 0, 0xff);
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
 const PX = hexArg('PX', 0x0180, 0xffff);
 const PY = hexArg('PY', 0x0180, 0xffff);
-// Angle units per frame while the joystick is held. The angle byte is a full turn in 256
-// steps, so this is also the angular resolution of the view -- rayOff/cosCorr are indexed
-// by the same byte, so turning cannot be made smooth by shrinking this, only coarser by
-// growing it. 6/256 = 8.4 degrees per frame.
-// Turning is accumulated in 1/256ths of an angle unit, because 60 deg/s is 0.711 units per
-// tick -- less than one. pa is the high byte of a 16-bit angle and paF the low, so the
-// fraction carries between frames instead of being lost. 3/16 of a unit per tick * 60 ticks =
-// 11.25 units a second = 16 degrees -- a QUARTER of the 63 deg/s it was, to match the walking
-// step. The fractional accumulator is what makes a rate this small work at all.
-const TURN_RATE = 48;           // 3/16 of an angle unit per tick
-// Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 1 unit of 1/256
-// cell per tick, 128 ticks is half a cell against walls a whole cell thick, and the collision
-// box catches anything that lands inside one. It rose from 32 with the step's fall from 4 to
-// 1 unit, holding that half-cell guarantee exactly. It has to clear the run multipliers too,
-// or running would silently stop scaling with frame rate below about 15 fps.
-const DT_MAX = 128;
+// Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
+// accumulated at that precision because the rate is well under one unit a tick: pa is the
+// high byte of a 16-bit angle and paF the low, so the fraction carries between frames
+// instead of being lost. 3/4 of a unit per tick * 60 ticks = 45 units a second = 63 degrees.
+//
+// ---- what makes a turn rate smooth, and why this one is not special ----
+// The renderer draws the angle at QUARTER-unit resolution (FINEANG's 1024-entry tables, fed
+// by paq -- see the paq block in the frame setup, which used to discard the fraction and is
+// the reason turning ever stuttered). One quarter unit is 0.75 screen columns at the centre
+// of the view and 1.06 at the edge, so the WORST a frame can be out is about one column --
+// under what the renderer can draw, whatever rate is chosen. A whole unit is 3.0 and 4.3
+// columns, which is why the old byte-resolution path was plainly uneven at any rate below
+// 256 (one unit a tick, 84 deg/s) that did not divide the frame time exactly.
+//
+// A rate that is a whole number of quarter units per tick -- a multiple of 64 -- is exactly
+// even at every frame rate, because elapsed time is always a whole number of ticks. 192 is
+// one of those, so this rate happens to be exact as well as inside the band. That is a
+// bonus, not a constraint: pick the speed by feel.
+const TURN_RATE = 192;          // 3/4 of an angle unit per tick = 3 quarter units
+// Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 4 units of 1/256
+// cell per tick, 32 ticks is half a cell against walls a whole cell thick, and the collision
+// box catches anything that lands inside one. It has to clear the 3x run multiplier too, or
+// running would silently stop scaling with frame rate below about 15 fps.
+const DT_MAX = 32;
 // Panel seams are a look, not a diagnostic: SEAMS=0 compiles every trace of them out --
 // the charset entries, the projection pass and the per-cell table -- so the disabled build
 // costs exactly what it did before the feature existed.
@@ -2192,8 +2199,8 @@ paF     = $805b                  ; low byte of the 16-bit player angle; pa is th
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
-dtr     = $805c                  ; elapsed ticks x4, the run's compensation for the quartered
-                                 ;   walking rates; the 3x/2x below then apply on top of it
+rxF     = $805c                  ; the sub-quantum remainder of each axis' step, carried to the
+ryF     = $805d                  ;   next frame instead of being truncated away (see moveApply)
 lastMv  = $8051
 dxs     = $8052
 dxsH    = $8053
@@ -2836,14 +2843,30 @@ ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-
         clc
         adc px+1
         sta cell0
-${FINEANG ? `        lda pa                  ; pa*4 once a frame, not once a ray -- it is constant across
-        asl                     ; the whole frame and the rays only add their own offset
+${FINEANG ? `        ; ---- the view angle at QUARTER-unit resolution: paq = (pa:paF) >> 6 ----
+        ; Once a frame, not once a ray: it is constant across the whole frame and the rays only
+        ; add their own offset.
+        ;
+        ; This used to be pa*4, which set the two fractional bits to zero every frame -- so the
+        ; angle fraction readKeys accumulates never reached the picture and the view could only
+        ; turn in WHOLE units. Turning is well under one unit a frame, so some frames turned and
+        ; some did not: a whole unit is 3.0 screen columns at the centre of the view and 4.3 at
+        ; the edge, which is a plainly visible hitch several times a second. A quarter unit is
+        ; 0.75 and 1.06, at or under what the renderer can draw at all.
+        ; pivPrep, forty lines further on, has always worked from the full 16-bit angle -- it
+        ; was predicting a rotation the rays then declined to perform.
+        lda paF
+        asl
+        sta tmp                 ; paF << 1, its top bit now in C
+        lda pa
+        rol
         sta paqL
         lda #$00
         rol
-        asl paqL
-        rol
-        sta paqH
+        sta paqH                ; (pa:paF) >> 7 so far, 9 bits
+        asl tmp
+        rol paqL
+        rol paqH                ; and once more: >> 6, the 10 bits the tables are indexed by
 ` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
 ${RAYCNT ? '        sta rayN\n        sta edgN\n        sta chnN\n' : ''}
@@ -4400,34 +4423,27 @@ pkDn:   rts
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        ; LEFT SHIFT: run. 3 cells/s and 120 deg/s, against 0.23 and 16 walking -- movement and
+        ; LEFT SHIFT: run. 3 cells/s and 127 deg/s, against 0.94 and 63 walking -- movement and
         ; turning get their own multipliers so running does not spin the world faster than it
         ; moves through it. Scaling elapsed TIME rather than the step keeps both frame-rate
         ; independent for free.
-        ; Walking is a QUARTER of what it was (MOVE_SHIFT, TURN_RATE), so running scales elapsed
-        ; time by 4 first and then applies the 3x/2x it always did. Running therefore moves and
-        ; turns at exactly the speed it always has, while walking got four times finer.
+        ; The extra x4 that b3e72b0 put in front of these is gone with the quarter-speed walk
+        ; it was compensating for: 3x/2x of a plain dtv gives running exactly the rates it has
+        ; had throughout, 12 units of 1/256 cell and 6 quarter-units of angle per tick.
         lda dtv
         asl
-        bcs rkR4s
-        asl
-        bcc rkR4
-rkR4s:  lda #${DT_MAX}
-rkR4:   sta dtr
-        asl
         clc
-        adc dtr                 ; 3x movement
+        adc dtv                 ; 3x movement
         bcs rkShMc
         cmp #${DT_MAX}
         bcc rkShM
 rkShMc: lda #${DT_MAX}
 rkShM:  sta dtm
-        lda dtr
-        asl                     ; 2x turning. dtr reaches DT_MAX now, so this can carry out
-        bcs rkShTs              ;   where the old 2x of a 32-capped dtv never could
+        lda dtv
+        asl                     ; 2x turning
         cmp #${DT_MAX}
         bcc rkShT
-rkShTs: lda #${DT_MAX}
+        lda #${DT_MAX}
 rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40
@@ -4545,10 +4561,12 @@ maSx:   sty dxSgn
         bpl maSy
         ldy #$ff
 maSy:   sty dySgn
-        lda #$00
-        sta dxs
-        sta dxsH
+        lda rxF                 ; seed each axis with what it had left over last frame, so the
+        sta dxs                 ;   sub-quantum part of the step is never lost (see below)
+        lda ryF
         sta dys
+        lda #$00
+        sta dxsH                ; the remainders are 0..2^MOVE_SHIFT-1, so never negative
         sta dysH
         ldx dtm
 maLp:   clc
@@ -4567,36 +4585,30 @@ maLp:   clc
         sta dysH
         dex
         bne maLp
-        ; ROUND TOWARD ZERO, not toward negative infinity. The shift below is arithmetic, so it
-        ; floors -- and floor(v/16) + floor(-v/16) = -1 for any v that is not a multiple of 16.
-        ; That makes a step forward and a step back NOT inverses: each pair loses one unit of
-        ; 1/256 cell on every axis whose product is not a multiple of 16, always toward -x/-y.
-        ; Wiggling back and forth therefore walked the player slowly north-west, which reads as
-        ; a sideways drift whose SCREEN direction depends on facing -- the same world-space bleed
-        ; projecting left at one heading and right at another.
+        ; ---- CARRY the remainder, do not round it away ----
+        ; The shift below is arithmetic, so it FLOORS, and floor(v/16) + floor(-v/16) = -1 for
+        ; any v that is not a multiple of 16. That made a step forward and a step back not
+        ; inverses: each pair lost one unit of 1/256 cell on every axis whose product is not a
+        ; multiple of 16, always toward -x/-y. Wiggling back and forth therefore walked the
+        ; player slowly north-west, a sideways drift whose SCREEN direction depends on facing.
+        ; It also meant the rate depended on heading -- cos(a)*dtm/16 truncated, so a diagonal
+        ; ran measurably slow -- and that a frame taking 33% longer could cover exactly the
+        ; same ground, because both products floored to the same step.
         ;
-        ; Biasing a negative value by 2^SHIFT-1 before an arithmetic shift truncates toward zero,
-        ; which makes the two directions exact mirrors. The sign is already known in dxSgn/dySgn,
-        ; so this is two conditional 16-bit adds once a frame. Verified with WIGGLE=1.
-        lda dxSgn
-        beq maBy
-        clc
+        ; This used to be fixed by biasing a negative value by 2^SHIFT-1 to truncate toward
+        ; zero, which cures the drift and neither of the other two. Keeping the remainder cures
+        ; all three at once and is CHEAPER than the bias it replaces: the low bits are the exact
+        ; floor remainder in two's complement, so one AND per axis and next frame's accumulation
+        ; starts from it. Sum of steps then equals the floor of the sum however the frame times
+        ; and the heading wander, forward and back are exact inverses again (r returns to what
+        ; it was -- verify with WIGGLE=1), and no facing is slow.
         lda dxs
-        adc #${hx((1 << MOVE_SHIFT) - 1)}
-        sta dxs
-        lda dxsH
-        adc #$00
-        sta dxsH
-maBy:   lda dySgn
-        beq maBd
-        clc
+        and #${hx((1 << MOVE_SHIFT) - 1)}
+        sta rxF
         lda dys
-        adc #${hx((1 << MOVE_SHIFT) - 1)}
-        sta dys
-        lda dysH
-        adc #$00
-        sta dysH
-maBd:   ldx #${MOVE_SHIFT}      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
+        and #${hx((1 << MOVE_SHIFT) - 1)}
+        sta ryF
+        ldx #${MOVE_SHIFT}      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
 maSh:   lda dxsH
         cmp #$80
         ror dxsH

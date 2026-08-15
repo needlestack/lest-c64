@@ -24,8 +24,8 @@ paF     = $805b                  ; low byte of the 16-bit player angle; pa is th
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
-dtr     = $805c                  ; elapsed ticks x4, the run's compensation for the quartered
-                                 ;   walking rates; the 3x/2x below then apply on top of it
+rxF     = $805c                  ; the sub-quantum remainder of each axis' step, carried to the
+ryF     = $805d                  ;   next frame instead of being truncated away (see moveApply)
 lastMv  = $8051
 dxs     = $8052
 dxsH    = $8053
@@ -705,14 +705,30 @@ mloop:
         clc
         adc px+1
         sta cell0
-        lda pa                  ; pa*4 once a frame, not once a ray -- it is constant across
-        asl                     ; the whole frame and the rays only add their own offset
+        ; ---- the view angle at QUARTER-unit resolution: paq = (pa:paF) >> 6 ----
+        ; Once a frame, not once a ray: it is constant across the whole frame and the rays only
+        ; add their own offset.
+        ;
+        ; This used to be pa*4, which set the two fractional bits to zero every frame -- so the
+        ; angle fraction readKeys accumulates never reached the picture and the view could only
+        ; turn in WHOLE units. Turning is well under one unit a frame, so some frames turned and
+        ; some did not: a whole unit is 3.0 screen columns at the centre of the view and 4.3 at
+        ; the edge, which is a plainly visible hitch several times a second. A quarter unit is
+        ; 0.75 and 1.06, at or under what the renderer can draw at all.
+        ; pivPrep, forty lines further on, has always worked from the full 16-bit angle -- it
+        ; was predicting a rotation the rays then declined to perform.
+        lda paF
+        asl
+        sta tmp                 ; paF << 1, its top bit now in C
+        lda pa
+        rol
         sta paqL
         lda #$00
         rol
-        asl paqL
-        rol
-        sta paqH
+        sta paqH                ; (pa:paF) >> 7 so far, 9 bits
+        asl tmp
+        rol paqL
+        rol paqH                ; and once more: >> 6, the 10 bits the tables are indexed by
         lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
 
@@ -1870,9 +1886,9 @@ tickDelta:
         bne tdCl
         inc dtv                 ; two renders inside one tick: still move a little
 tdCl:   lda dtv
-        cmp #128
+        cmp #32
         bcc tdDn
-        lda #128          ; a hitch must not step far enough to tunnel a wall
+        lda #32          ; a hitch must not step far enough to tunnel a wall
         sta dtv
 tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
         sta dtm
@@ -1964,34 +1980,27 @@ readKeys:
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
         and #$80
         bne rkNoSh
-        ; LEFT SHIFT: run. 3 cells/s and 120 deg/s, against 0.23 and 16 walking -- movement and
+        ; LEFT SHIFT: run. 3 cells/s and 127 deg/s, against 0.94 and 63 walking -- movement and
         ; turning get their own multipliers so running does not spin the world faster than it
         ; moves through it. Scaling elapsed TIME rather than the step keeps both frame-rate
         ; independent for free.
-        ; Walking is a QUARTER of what it was (MOVE_SHIFT, TURN_RATE), so running scales elapsed
-        ; time by 4 first and then applies the 3x/2x it always did. Running therefore moves and
-        ; turns at exactly the speed it always has, while walking got four times finer.
+        ; The extra x4 that b3e72b0 put in front of these is gone with the quarter-speed walk
+        ; it was compensating for: 3x/2x of a plain dtv gives running exactly the rates it has
+        ; had throughout, 12 units of 1/256 cell and 6 quarter-units of angle per tick.
         lda dtv
         asl
-        bcs rkR4s
-        asl
-        bcc rkR4
-rkR4s:  lda #128
-rkR4:   sta dtr
-        asl
         clc
-        adc dtr                 ; 3x movement
+        adc dtv                 ; 3x movement
         bcs rkShMc
-        cmp #128
+        cmp #32
         bcc rkShM
-rkShMc: lda #128
+rkShMc: lda #32
 rkShM:  sta dtm
-        lda dtr
-        asl                     ; 2x turning. dtr reaches DT_MAX now, so this can carry out
-        bcs rkShTs              ;   where the old 2x of a 32-capped dtv never could
-        cmp #128
+        lda dtv
+        asl                     ; 2x turning
+        cmp #32
         bcc rkShT
-rkShTs: lda #128
+        lda #32
 rkShT:  sta dtt
 rkNoSh: lda rowv
         and #$40
@@ -2026,7 +2035,7 @@ rkNotF: lda joyv
         ldy pa
         lda paF
 rkTlL:  sec
-        sbc #$30
+        sbc #$c0
         bcs rkTlL2
         dey                     ; the fraction borrowed: step the angle byte
 rkTlL2: dex
@@ -2040,7 +2049,7 @@ rkJR:   lda joyv
         ldy pa
         lda paF
 rkTlR:  clc
-        adc #$30
+        adc #$c0
         bcc rkTlR2
         iny                     ; the fraction carried: step the angle byte
 rkTlR2: dex
@@ -2103,10 +2112,12 @@ maSx:   sty dxSgn
         bpl maSy
         ldy #$ff
 maSy:   sty dySgn
-        lda #$00
-        sta dxs
-        sta dxsH
+        lda rxF                 ; seed each axis with what it had left over last frame, so the
+        sta dxs                 ;   sub-quantum part of the step is never lost (see below)
+        lda ryF
         sta dys
+        lda #$00
+        sta dxsH                ; the remainders are 0..2^MOVE_SHIFT-1, so never negative
         sta dysH
         ldx dtm
 maLp:   clc
@@ -2125,36 +2136,30 @@ maLp:   clc
         sta dysH
         dex
         bne maLp
-        ; ROUND TOWARD ZERO, not toward negative infinity. The shift below is arithmetic, so it
-        ; floors -- and floor(v/16) + floor(-v/16) = -1 for any v that is not a multiple of 16.
-        ; That makes a step forward and a step back NOT inverses: each pair loses one unit of
-        ; 1/256 cell on every axis whose product is not a multiple of 16, always toward -x/-y.
-        ; Wiggling back and forth therefore walked the player slowly north-west, which reads as
-        ; a sideways drift whose SCREEN direction depends on facing -- the same world-space bleed
-        ; projecting left at one heading and right at another.
+        ; ---- CARRY the remainder, do not round it away ----
+        ; The shift below is arithmetic, so it FLOORS, and floor(v/16) + floor(-v/16) = -1 for
+        ; any v that is not a multiple of 16. That made a step forward and a step back not
+        ; inverses: each pair lost one unit of 1/256 cell on every axis whose product is not a
+        ; multiple of 16, always toward -x/-y. Wiggling back and forth therefore walked the
+        ; player slowly north-west, a sideways drift whose SCREEN direction depends on facing.
+        ; It also meant the rate depended on heading -- cos(a)*dtm/16 truncated, so a diagonal
+        ; ran measurably slow -- and that a frame taking 33% longer could cover exactly the
+        ; same ground, because both products floored to the same step.
         ;
-        ; Biasing a negative value by 2^SHIFT-1 before an arithmetic shift truncates toward zero,
-        ; which makes the two directions exact mirrors. The sign is already known in dxSgn/dySgn,
-        ; so this is two conditional 16-bit adds once a frame. Verified with WIGGLE=1.
-        lda dxSgn
-        beq maBy
-        clc
+        ; This used to be fixed by biasing a negative value by 2^SHIFT-1 to truncate toward
+        ; zero, which cures the drift and neither of the other two. Keeping the remainder cures
+        ; all three at once and is CHEAPER than the bias it replaces: the low bits are the exact
+        ; floor remainder in two's complement, so one AND per axis and next frame's accumulation
+        ; starts from it. Sum of steps then equals the floor of the sum however the frame times
+        ; and the heading wander, forward and back are exact inverses again (r returns to what
+        ; it was -- verify with WIGGLE=1), and no facing is slow.
         lda dxs
-        adc #$3f
-        sta dxs
-        lda dxsH
-        adc #$00
-        sta dxsH
-maBy:   lda dySgn
-        beq maBd
-        clc
+        and #$0f
+        sta rxF
         lda dys
-        adc #$3f
-        sta dys
-        lda dysH
-        adc #$00
-        sta dysH
-maBd:   ldx #6      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
+        and #$0f
+        sta ryF
+        ldx #4      ; arithmetic shift: cmp #$80 puts bit 7 back into carry
 maSh:   lda dxsH
         cmp #$80
         ror dxsH
