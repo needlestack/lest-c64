@@ -308,11 +308,11 @@ ohT     = $850f
 ohWc    = $852b                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
 ohBL    = $852c                  ; this slice's column + 12, signed and 16-bit: it runs to
 ohBH    = $852d                  ;   249, so bit 7 of the low byte cannot carry the sign
-arcC    = $8532                  ; fdArc: the column it is darkening, how many rows, and the
-arcN    = $8533                  ;   flat boundary row the rim is measured from
-arcB    = $8534
-fdCol   = $8535                  ; what fdFill lays down: floor or hole
-arcMx   = $8536                  ; deepest the rim may cut: never more than the black behind it
+arcC    = $81c8                  ; fdArc: the column it is darkening, how many rows, and the
+arcN    = $81c9                  ;   flat boundary row the rim is measured from
+arcB    = $81ca
+fdCol   = $81cb                  ; what fdFill lays down: floor or hole
+arcMx   = $81cc                  ; deepest the rim may cut: never more than the black behind it
 hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32 for the
 hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
@@ -1458,7 +1458,11 @@ mfNL:
         jsr computeFps
         lda #$00
         sta renderCnt
-noFps:
+noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falling through to fmvs
+                                ; instead gave every rendered frame the fall's extra raster period
+                                ; -- a whole period of 17,045 cycles added to a frame that already
+                                ; costs three or four of them, so ~a fifth of the frame rate, on
+                                ; the one path that was never meant to be locked to 30.
 fmvs:   lda $d012               ; the fall's own wait: burn one whole raster period so it runs
         cmp #250                ;   at a LOCKED 30fps. The widest frame only just fits 60Hz, so
         bne fmvs                ;   some spilled and the rate flipped -- and a varying rate is
@@ -5208,7 +5212,8 @@ fdNeg:  lda #$01       ; landing: still inside the shaft, so the band above the 
         jmp fdArc
 
 fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
-        beq fdcDn
+        cmp #$00                ; explicit, not inherited: a zero count here would run the
+        beq fdcDn              ;   dec/bne loop 256 times and blit 10KB over the program
 fdcRow: ldy #39                 ; unrolled four ways: the widest frame copies a whole screen,
 fdcB:   lda (fdS),y             ;   and at the 16 cycles a byte the plain loop cost that is
         sta (fdD),y             ;   16,000 against a 17,045-cycle raster period -- so those
@@ -5251,8 +5256,15 @@ fdaLp:  ldx arcC
         cmp arcMx               ; the rim can never be deeper than the black behind it, so it
         bcc fdaD                ;   GROWS IN as the hole arrives instead of appearing at full
         lda arcMx               ;   depth the moment the first black row does -- and at zero
-fdaD:   beq fdaNx               ;   depth there is no rim at all, which is the point before
-        sta arcN                ;   your head has passed floor level
+fdaD:   cmp #$00                ;   depth there is no rim at all, which is the point before
+                                ;   your head has passed floor level.
+                                ; THE RE-TEST IS NOT REDUNDANT: the clamp's own "cmp arcMx" left Z
+                                ; meaning "equal to arcMx", not "zero", so a column with arcT 0 and
+                                ; arcMx 3 walked straight past the guard with arcN = 0 -- and
+                                ; "dec arcN / bne" then ran 256 rows at stride 40, 10KB of $01
+                                ; through the program itself. It jammed the CPU a frame later.
+        beq fdaNx
+        sta arcN
         lda fSro
         bpl fdaUp
         lda arcB                ; landing: black is ABOVE, so grow downward from the edge
@@ -5294,7 +5306,8 @@ fdaNx:  dec arcC
         rts
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
-        beq fdfDn
+        cmp #$00                ; explicit, not inherited: a zero count here would run the
+        beq fdfDn              ;   dec/bne loop 256 times and blit 10KB over the program
 fdfRow: lda fdCol
         ldy #39
 fdfB:   sta (fdD),y             ; the same four-way unroll: 11 cycles a byte down to 8.75
