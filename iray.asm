@@ -293,6 +293,16 @@ omYY    = $851d
 omPri   = $851e
 omX8    = $851f
 omBit   = $8520
+fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
+fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
+fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing
+fPosL   = $81c1                  ; travel so far, 8.8 pixels
+fPosH   = $81c2
+fVelL   = $81c3                  ; and the speed, 8.8 pixels per frame
+fVelH   = $81c4
+fSro    = $81c5                  ; signed row offset: screen row r shows source row r + fSro
+fdK     = $81c6                  ; its magnitude, and the row counter the two loops share
+fdN     = $81c7
 onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two as well, because
                                  ;   osFlush must write them, but orbStamp must NOT walk them:
                                  ;   a hole fills no slot fields and the stamp would read garbage
@@ -615,7 +625,20 @@ ccf:    sta $d800,x
 mloop:
         jsr palKeys             ; 1/2/3 walk the three inks round the palette
         jsr tickDelta
-        jsr readKeys
+        lda fallSt              ; falling? then no input, no rays, no renderSym -- one block
+        beq mfIn                ;   copy and out, which is what lets it run at 60fps
+        cmp #$02
+        beq mfRnd               ; except state 2, the single ordinary frame that draws the
+        jsr fallStep            ;   level being landed in
+        jmp mvs
+mfIn:   jsr readKeys
+        jsr fallChk             ; stepped into the hole? the drop starts on this frame
+        lda fallSt
+        beq mfRnd
+        jsr fallStep
+        jmp mvs
+mfRnd:
+
 
 
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
@@ -1410,6 +1433,11 @@ subFin:
         jsr orbMove             ; once a frame: project every candidate the cell lists
         jsr renderSym
         jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
+        lda fallSt              ; the one ordinary frame of the level being landed in:
+        cmp #$02                ;   stash it as the scroll source and start the slide, before
+        bne mfNL                ;   the flip can show it whole for a frame
+        jsr fallLand
+mfNL:
         jsr drawFps
         jsr drawDbg
 
@@ -4852,6 +4880,252 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
 orbYes: rts
 orbNo:  rts
 
+; ================= the drop =================
+; Both phases scroll the SAME way: a static source blitted at a signed row offset, black
+; wherever the source does not reach. The drop scrolls the frozen last frame up and off
+; (offset 0 -> +25); the landing scrolls the new view up INTO place from below (-25 -> 0).
+; One routine draws both, which is why the acceleration and the deceleration cost the same.
+;
+; Sub-row motion is $d011's fine scroll, and it is not optional: a quadratic fall's first
+; frame moves 0.44 pixels, so whole-row steps would stall for four frames and then jump.
+; $d011 is written once at init and by nothing per-frame, so the low three bits are ours.
+;
+; Colour RAM is uniform $08 and written once at startup, so unlike a normal char-mode scroll
+; this moves the screen matrix ONLY -- half the work a scrolling game would do here.
+
+; fallChk: standing in the hole's cell? Then go.
+fallChk:lda px+1
+        cmp #$04
+        bne fcNo
+        lda py+1
+        cmp #$01
+        bne fcNo
+        lda #$00
+        sta $d015               ; sprites away: they belong to the level being left
+        sta fPosL
+        sta fPosH
+        sta fVelL
+        sta fVelH
+        lda #$01
+        sta fallSt
+        lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
+        cmp #$e0  ;   drawn into, so the displayed one is the other
+        bne fcGB
+        lda #$e4
+        bne fcGrab              ; always taken: a page number, never zero
+fcGB:   lda #$e0
+fcGrab: jsr fallSnap
+fcNo:   rts
+
+; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
+; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
+fallSnap:
+        sta fdS+1
+        lda #$00
+        sta fdS
+        sta fdD
+        lda #$61
+        sta fdD+1
+        ldx #$04
+        ldy #$00
+fsnLp:  lda (fdS),y
+        sta (fdD),y
+        iny
+        bne fsnLp
+        inc fdS+1
+        inc fdD+1
+        dex
+        bne fsnLp
+        rts
+
+; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
+fallStep:
+        lda fallSt
+        cmp #$03
+        beq fstAdv              ; landing runs at the speed the drop ended at: no acceleration
+        clc
+        lda fVelL
+        adc #$72
+        sta fVelL
+        lda fVelH
+        adc #$00
+        sta fVelH
+fstAdv: clc
+        lda fPosL
+        adc fVelL
+        sta fPosL
+        lda fPosH
+        adc fVelH
+        sta fPosH
+        cmp #200
+        bcc fstDrw
+        ; ---- this phase has run its course ----
+        lda #200
+        sta fPosH               ; clamp, so the last frame lands exactly on the boundary
+        lda fallSt
+        cmp #$03
+        beq fstEnd
+        lda #$80                ; drop over: put the player down in the new level and let the
+        sta px                  ;   main loop render one ordinary frame there
+        lda #$01
+        sta px+1
+        lda #$80
+        sta py
+        lda #$0d
+        sta py+1
+        lda #$02
+        sta fallSt
+        jsr fallInv             ; the render coming next frame draws into a buffer the fall
+                                ;   scribbled, so it must not trust the run cache
+fstDrw: lda fPosH               ; whole rows = (px + 4) >> 3, the rounding that pairs with the
+        clc                     ;   fine scroll below: together they place the content exactly
+        adc #$04
+        lsr
+        lsr
+        lsr
+        sta fSro
+        lda fallSt
+        cmp #$03
+        bne fstD1
+        sec
+        lda fSro
+        sbc #25                 ; landing: the source begins a full screen below
+        sta fSro
+fstD1:  lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred value
+        sec
+        sbc fPosH
+        and #$07
+        ora #$18                ; DEN + RSEL, raster MSB clear
+        sta $d011
+        jmp fallDraw
+fstEnd: lda #$00                ; landing over: hand the screen back to the renderer
+        sta fallSt
+        lda #$1b
+        sta $d011
+        ; fall through into fallInv
+
+; fallInv: forget both buffers' run caches. renderSym skips a column whose cached ceiling run
+; and solid-run start still match, and the fall wrote the screen straight past it -- so without
+; this the scrolled image STAYS in every column the renderer thinks it already got right. Same
+; hazard orbStamp has to clear after itself, and it reads as an inverted, sheared frame.
+; THE TWO HALVES NEED OPPOSITE SENTINELS -- the same pair the power-on clear uses, and for the
+; same reason. The tests are ordered compares, not equality: the ceiling test skips when rb has
+; SHRUNK, so cwA/cwB must go to 0 or every column looks like a shrink and skips its own repaint,
+; leaving the old screen showing through; the solid test skips when rs has GROWN, so cbA/cbB
+; must go to $ff, which exceeds any rs. Filling all 160 with $ff instead produced a sheared,
+; inverted frame at 7 fps -- and the frame rate is the tell, because a stale cache costs
+; nothing while a bogus run LENGTH makes renderSym walk far past the column.
+fallInv:ldx #$00
+        lda #$00
+fivC:   sta cwA,x               ; offsets 0-79: the ceiling pair
+        inx
+        cpx #80
+        bcc fivC
+        lda #$ff
+fivS:   sta cwA,x               ; offsets 80-159: the solid pair
+        inx
+        cpx #160
+        bcc fivS
+        rts
+
+; fallLand: called once, after the new view has been rendered into the back buffer. Stash it
+; as the scroll source, then immediately overdraw that buffer with the first landing frame --
+; otherwise the flip would show the new level whole for one frame before the slide begins.
+fallLand:
+        lda baseHi
+        jsr fallSnap
+        lda #$03
+        sta fallSt
+        lda #$00
+        sta fPosL
+        sta fPosH
+        jmp fallStep
+
+; fallDraw: screen row r shows fallBuf row r + fSro; rows the source does not reach are black.
+; The copy and the fill always total 25 rows, and the copy half shrinks as the screen fills
+; with black -- so the most expensive frame is the mid-point, not the end.
+fallDraw:
+        lda fSro
+        bpl fdAbs
+        eor #$ff
+        clc
+        adc #$01
+fdAbs:  cmp #26
+        bcc fdK1
+        lda #25                 ; wholly off screen
+fdK1:   sta fdK
+        lda #$00
+        sta fdD
+        lda baseHi
+        sta fdD+1
+        lda #<$6100
+        sta fdS
+        lda #>$6100
+        sta fdS+1
+        ldx fdK
+        lda fSro
+        bmi fdNeg
+        clc                     ; source starts K rows in; the black goes after the copy
+        lda fdS
+        adc mul40LoT,x
+        sta fdS
+        lda fdS+1
+        adc mul40HiT,x
+        sta fdS+1
+        lda #25
+        sec
+        sbc fdK
+        jsr fdCopy
+        lda fdK
+        jmp fdFill
+fdNeg:  lda fdK                 ; destination starts K rows in; the black goes first
+        jsr fdFill
+        lda #25
+        sec
+        sbc fdK
+        jmp fdCopy
+
+fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
+        beq fdcDn
+fdcRow: ldy #39
+fdcB:   lda (fdS),y
+        sta (fdD),y
+        dey
+        bpl fdcB
+        clc
+        lda fdS
+        adc #40
+        sta fdS
+        bcc fdcS1
+        inc fdS+1
+fdcS1:  clc
+        lda fdD
+        adc #40
+        sta fdD
+        bcc fdcS2
+        inc fdD+1
+fdcS2:  dec fdN
+        bne fdcRow
+fdcDn:  rts
+
+fdFill: sta fdN                 ; A rows of black, advancing the destination only
+        beq fdfDn
+fdfRow: lda #$01
+        ldy #39
+fdfB:   sta (fdD),y
+        dey
+        bpl fdfB
+        clc
+        lda fdD
+        adc #40
+        sta fdD
+        bcc fdfS
+        inc fdD+1
+fdfS:   dec fdN
+        bne fdfRow
+fdfDn:  rts
+
+
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
 ; Two sprites side by side, the left half and the right half of one ellipse, so the pair reads
 ; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
@@ -5053,14 +5327,6 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $2d00
-orbVarT: !byte 21,21,21,21,21,20,20,20,20,19,19,19,19,18,18,18,18,17,17,17,17,16,16,16,16,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12,12,12,11,11,11,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $2e00
-candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,8,5,5,5,5,0,5,5,5,5,4,5,5,0,0,7,8,6,6,5,5,0,6,6,6,6,5,5,3,0,0,6,7,6,6,6,6,0,9,8,8,0,0,0,4,0,0,6,0,0,0,7,10,12,12,11,9,0,3,3,2,0,0,4,0,4,5,7,8,0,0,10,9,0,4,0,0,0,0,4,0,4,0,0,0,0,6,9,7,0,6,8,5,0,0,4,0,2,0,3,5,5,6,8,9,10,7,0,3,0,0,4,0,3,0,3,0,0,0,0,0,12,9,0,3,0,0,4,5,4,0,2,0,3,3,3,6,10,10,0,3,0,0,0,0,4,0,3,0,4,0,0,0,0,9,8,5,0,0,2,4,4,5,3,0,4,0,3,4,4,7,7,6,0,0,4,0,0,0,0,0,6,0,6,0,0,0,0,0,0,0,4,3,3,4,6,7,7,8,7,0,4,4,4,4,0,0,2,2,2,0,0,7,7,8,8,7,5,5,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $2f00
-candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,45,60,75,90,0,105,120,135,150,165,177,192,0,0,207,228,252,14,32,47,0,62,80,98,116,134,149,164,0,0,173,191,212,230,248,10,0,28,55,79,0,0,0,103,0,0,115,0,0,0,133,154,184,220,0,33,0,60,69,78,0,0,84,0,96,108,123,144,0,0,168,198,0,225,0,0,0,0,237,0,249,0,0,0,0,5,23,50,0,71,89,113,0,0,128,0,140,0,146,155,170,185,203,227,254,28,0,49,0,0,58,0,70,0,79,0,0,0,0,0,88,124,0,151,0,0,160,172,187,0,199,0,205,214,223,232,250,24,0,54,0,0,0,0,63,0,75,0,84,0,0,0,0,96,123,147,0,0,162,168,180,192,207,0,216,0,228,237,249,5,26,47,0,0,65,0,0,0,0,0,77,0,95,0,0,0,0,0,0,0,113,125,134,143,155,173,194,215,239,0,4,16,28,40,0,0,52,58,64,0,0,70,91,112,136,160,181,196,211,223,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $3000
-candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,0,55,55,55,55,55,55,55,0,0,55,55,55,56,56,56,0,56,56,56,56,56,56,56,0,0,56,56,56,56,56,57,0,57,57,57,0,0,0,57,0,0,57,0,0,0,57,57,57,57,58,58,0,58,58,58,0,0,58,0,58,58,58,58,0,0,58,58,0,58,0,0,0,0,58,0,58,0,0,0,0,59,59,59,0,59,59,59,0,0,59,0,59,0,59,59,59,59,59,59,59,60,0,60,0,0,60,0,60,0,60,0,0,0,0,0,60,60,0,60,0,0,60,60,60,0,60,0,60,60,60,60,60,61,0,61,0,0,0,0,61,0,61,0,61,0,0,0,0,61,61,61,0,0,61,61,61,61,61,0,61,0,61,61,61,62,62,62,0,0,62,0,0,0,0,0,62,0,62,0,0,0,0,0,0,0,62,62,62,62,62,62,62,62,62,0,63,63,63,63,0,0,63,63,63,0,0,63,63,63,63,63,63,63,63,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $3100
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
@@ -5069,6 +5335,9 @@ orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
 holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
+mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
+mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -5541,6 +5810,14 @@ hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,20
         !byte 15,15,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12,12,12,11,11,11,11
         !byte 11,11,10,10,10,10,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,6
         !byte 6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3
+        * = $5d00
+orbVarT: !byte 21,21,21,21,21,20,20,20,20,19,19,19,19,18,18,18,18,17,17,17,17,16,16,16,16,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12,12,12,11,11,11,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $5e00
+candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,8,5,5,5,5,0,5,5,5,5,4,5,5,0,0,7,8,6,6,5,5,0,6,6,6,6,5,5,3,0,0,6,7,6,6,6,6,0,9,8,8,0,0,0,4,0,0,6,0,0,0,7,10,12,12,11,9,0,3,3,2,0,0,4,0,4,5,7,8,0,0,10,9,0,4,0,0,0,0,4,0,4,0,0,0,0,6,9,7,0,6,8,5,0,0,4,0,2,0,3,5,5,6,8,9,10,7,0,3,0,0,4,0,3,0,3,0,0,0,0,0,12,9,0,3,0,0,4,5,4,0,2,0,3,3,3,6,10,10,0,3,0,0,0,0,4,0,3,0,4,0,0,0,0,9,8,5,0,0,2,4,4,5,3,0,4,0,3,4,4,7,7,6,0,0,4,0,0,0,0,0,6,0,6,0,0,0,0,0,0,0,4,3,3,4,6,7,7,8,7,0,4,4,4,4,0,0,2,2,2,0,0,7,7,8,8,7,5,5,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $5f00
+candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,45,60,75,90,0,105,120,135,150,165,177,192,0,0,207,228,252,14,32,47,0,62,80,98,116,134,149,164,0,0,173,191,212,230,248,10,0,28,55,79,0,0,0,103,0,0,115,0,0,0,133,154,184,220,0,33,0,60,69,78,0,0,84,0,96,108,123,144,0,0,168,198,0,225,0,0,0,0,237,0,249,0,0,0,0,5,23,50,0,71,89,113,0,0,128,0,140,0,146,155,170,185,203,227,254,28,0,49,0,0,58,0,70,0,79,0,0,0,0,0,88,124,0,151,0,0,160,172,187,0,199,0,205,214,223,232,250,24,0,54,0,0,0,0,63,0,75,0,84,0,0,0,0,96,123,147,0,0,162,168,180,192,207,0,216,0,228,237,249,5,26,47,0,0,65,0,0,0,0,0,77,0,95,0,0,0,0,0,0,0,113,125,134,143,155,173,194,215,239,0,4,16,28,40,0,0,52,58,64,0,0,70,91,112,136,160,181,196,211,223,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $6000
+candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,0,55,55,55,55,55,55,55,0,0,55,55,55,56,56,56,0,56,56,56,56,56,56,56,0,0,56,56,56,56,56,57,0,57,57,57,0,0,0,57,0,0,57,0,0,0,57,57,57,57,58,58,0,58,58,58,0,0,58,0,58,58,58,58,0,0,58,58,0,58,0,0,0,0,58,0,58,0,0,0,0,59,59,59,0,59,59,59,0,0,59,0,59,0,59,59,59,59,59,59,59,60,0,60,0,0,60,0,60,0,60,0,0,0,0,0,60,60,0,60,0,0,60,60,60,0,60,0,60,60,60,60,60,61,0,61,0,0,0,0,61,0,61,0,61,0,0,0,0,61,61,61,0,0,61,61,61,61,61,0,61,0,61,61,61,62,62,62,0,0,62,0,0,0,0,0,62,0,62,0,0,0,0,0,0,0,62,62,62,62,62,62,62,62,62,0,63,63,63,63,0,0,63,63,63,0,0,63,63,63,63,63,63,63,63,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
