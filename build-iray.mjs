@@ -2249,15 +2249,17 @@ const FALLX = +(process.env.FALLX ?? 1), FALLY = +(process.env.FALLY ?? 13);   /
 const mul40 = [...Array(26)].map((_, i) => i * 40);
 // ---- the hole's RIM: the edge the world slides past is an arc, not a straight line ----
 // A flat boundary reads as a shutter closing. A curved one reads as falling THROUGH something,
-// which is the whole point of the animation. arcT is extra black rows per character column --
-// zero in the middle, deepest at the sides -- so the content bulges downward in the middle on
-// the way out and upward in the middle on the way in. Parabolic rather than circular: a circle
-// is nearly flat across the middle 20 columns and only droops at the very edges, which looks
-// like a sagging line instead of a rim.
+// which is the whole point of the animation. arcT is extra black rows per character column,
+// DEEPEST IN THE MIDDLE and zero at the sides: what rises past you is the FAR rim of the hole,
+// so the black bulges upward at its centre on the way down, and on the way up the new floor
+// appears at the sides first. (Built it the other way round first, reasoning about a camera at
+// the centre of a cylindrical shaft, which gives the opposite curve and looks like a sagging
+// line.) Parabolic rather than circular: a circle is nearly flat across the middle twenty
+// columns and only turns at the very edges, so the curve does not read.
 const HOLE_ARC = +(process.env.HOLE_ARC ?? 5);   // rows of droop at the extreme columns
 const arcT = [...Array(40)].map((_, c) => {
   const u = (c - 19.5) / 19.5;
-  return Math.round(HOLE_ARC * u * u);
+  return Math.round(HOLE_ARC * (1 - u * u));
 });
 const HOLEBASE = 0xe800;                         // above the charsets: 75 slots do not fit in
                                                  //   the 48 between $c400 and the I/O hole, and
