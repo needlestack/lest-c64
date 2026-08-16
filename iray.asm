@@ -309,6 +309,7 @@ onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two
 ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohW     = $850e                  ;   step to the right half (24 or 48), and whether there IS one
 ohT     = $850f
+ohWc    = $852b                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
 pcell   = $8515                  ; the cell the player stands in, for the hole's LOS gate
 ohN     = $8516                  ; and how many sprite slots the hole took this frame
@@ -630,7 +631,7 @@ mloop:
         cmp #$02
         beq mfRnd               ; except state 2, the single ordinary frame that draws the
         jsr fallStep            ;   level being landed in
-        jmp mvs
+        jmp fmvs
 mfIn:   jsr readKeys
         jsr fallChk             ; stepped into the hole? the drop starts on this frame
         lda fallSt
@@ -1449,6 +1450,12 @@ mfNL:
         lda #$00
         sta renderCnt
 noFps:
+fmvs:   lda $d012               ; the fall's own wait: burn one whole raster period so it runs
+        cmp #250                ;   at a LOCKED 30fps. The widest frame only just fits 60Hz, so
+        bne fmvs                ;   some spilled and the rate flipped -- and a varying rate is
+fmv2:   lda $d012               ;   what stutters. Twice the headroom, never a missed period.
+        cmp #250
+        beq fmv2
 mvs:    lda $d012
         cmp #250
         bne mvs
@@ -4900,8 +4907,12 @@ fallChk:lda px+1
         lda py+1
         cmp #$01
         bne fcNo
-        lda #$00
-        sta $d015               ; sprites away: they belong to the level being left
+        lda #$00                ; sprites away: they belong to the level being left. Clear the
+        sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
+        sta omXX                ;   which is past where the fall path rejoins the loop, so it
+        sta omYY                ;   would put the register straight back and leave an orb
+        sta omPri               ;   hanging in space while the world scrolled away behind it
+        sta omX8
         sta fPosL
         sta fPosH
         sta fVelL
@@ -4945,10 +4956,10 @@ fallStep:
         beq fstAdv              ; landing runs at the speed the drop ended at: no acceleration
         clc
         lda fVelL
-        adc #$72
+        adc #$c7
         sta fVelL
         lda fVelH
-        adc #$00
+        adc #$01
         sta fVelH
 fstAdv: clc
         lda fPosL
@@ -4995,7 +5006,10 @@ fstD1:  lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred
         sec
         sbc fPosH
         and #$07
-        ora #$18                ; DEN + RSEL, raster MSB clear
+        ora #$10                ; DEN, and RSEL CLEAR: 24-row mode for the whole fall. Moving
+                                ; YSCROLL off centre in 25-row mode leaves a partial character
+                                ; row exposed top and bottom, which reads as a jagged edge --
+                                ; 24-row mode crops four pixels each end and hides exactly that.
         sta $d011
         jmp fallDraw
 fstEnd: lda #$00                ; landing over: hand the screen back to the renderer
@@ -5087,8 +5101,17 @@ fdNeg:  lda fdK                 ; destination starts K rows in; the black goes f
 
 fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
         beq fdcDn
-fdcRow: ldy #39
-fdcB:   lda (fdS),y
+fdcRow: ldy #39                 ; unrolled four ways: the widest frame copies a whole screen,
+fdcB:   lda (fdS),y             ;   and at the 16 cycles a byte the plain loop cost that is
+        sta (fdD),y             ;   16,000 against a 17,045-cycle raster period -- so those
+        dey                     ;   frames spilled into a second period and the fall alternated
+        lda (fdS),y             ;   60fps and 30. 40 divides by 4, and this brings it to 13.75.
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
         sta (fdD),y
         dey
         bpl fdcB
@@ -5112,7 +5135,13 @@ fdFill: sta fdN                 ; A rows of black, advancing the destination onl
         beq fdfDn
 fdfRow: lda #$01
         ldy #39
-fdfB:   sta (fdD),y
+fdfB:   sta (fdD),y             ; the same four-way unroll: 11 cycles a byte down to 8.75
+        dey
+        sta (fdD),y
+        dey
+        sta (fdD),y
+        dey
+        sta (fdD),y
         dey
         bpl fdfB
         clc
@@ -5140,22 +5169,6 @@ ohFind: lda ohgt                ;   our h is it. A scan, not a 256-byte table --
         bcc ohFind
         rts                     ; smaller than the smallest rung: too far to be worth a sprite
 ohGot:                          ; X = rung, and it indexes every table below
-        lda ocolN
-        bne orbNo               ; centre left of column 0. A hole that wide is half on screen
-                                ;   and should be clipped, not dropped -- but a sprite cannot
-                                ;   start left of X=0, so that needs the char stamp, not this.
-        lda ocol                ; X = 2*column + 24: the VIC's origin is 24 hires pixels left of
-        clc                     ;   the display, which the orb path hides inside orbXOffT's
-        adc #$0c                ;   "12 - halfCols". Here the two halves are separate, so the
-        bcs orbNo               ;   +12 columns is explicit -- leaving it out drew the hole
-        sec                     ;   exactly 12 columns left of where it belonged.
-        sbc holeXOffT,x         ; the left sprite's left edge: half the BITMAP's apparent width,
-        bcc orbNo               ;   not half the ellipse -- the shape is centred in the bitmap
-        asl                     ; X = 2*b, on the 160-column grid like every other sprite here
-        sta o0
-        lda #$00
-        rol
-        sta o1
         lda holeYBaseT,x        ; the sprite's TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
@@ -5178,12 +5191,58 @@ ohGot:                          ; X = rung, and it indexes every table below
                                 ;   know the rung until the projection has run.
         lda ohF
         and #$04
+        beq ohNoMc
+        lda #24                 ; hmag: each sprite covers 24 columns rather than 12
+        bne ohSetC              ; always taken
+ohNoMc: lda #12
+ohSetC: sta ohWc
+        ; ---- where the leftmost sprite goes, and which sprites are worth placing ----
+        ; b = the pair's start column + 12, because sprite X is 2*column + 24. This used to
+        ; reject the whole hole the moment b went negative, which threw away a hole that was
+        ; still most of the way on screen -- a 48-column one vanished while 35 of its columns
+        ; were still visible. A sprite cannot start left of X=0, but the ones to its RIGHT can
+        ; still be placed: drop leading sprites until the leftmost fits, and draw the rest.
+        lda ocolN
+        beq ohXP
+        lda ocol                ; the centre sits ocol columns LEFT of column 0
+        clc
+        adc holeXOffT,x
+        sta tmp                 ; ocol + half, both small, so no carry to worry about
+        lda #$0c
+        sec
+        sbc tmp                 ; b = 12 - (ocol + half); carry clear iff b is negative
+        jmp ohXSk
+ohXP:   lda ocol
+        clc
+        adc #$0c                ; X = 2*column + 24: the VIC's origin is 24 hires pixels left
+        bcs orbNo               ;   of the display, which the orb path hides inside orbXOffT's
+        sec                     ;   "12 - halfCols". Here the two halves are separate, so the
+        sbc holeXOffT,x         ;   +12 is explicit -- leaving it out drew the hole exactly
+                                ;   12 columns left of where it belonged.
+ohXSk:  bcs ohXok               ; b >= 0: the leftmost sprite is placeable as it stands
+ohXLp:  dec ohT
+        beq orbNo               ; every sprite is off the left edge: nothing to draw
+        inc ohP                 ; the next one along becomes the leftmost
+        clc
+        adc ohWc
+        bmi ohXLp               ; b is a small negative here, so bmi is the right test
+ohXok:  asl                     ; X = 2*b, on the 160-column grid like every other sprite here
+        sta o0
+        lda #$00
+        rol
+        sta o1
+        lda ohF
+        and #$04
         beq ohNoM
         lda #48                 ; hmag: one sprite covers 24 columns, so the next starts 48
         bne ohSetW              ;   hires pixels along
 ohNoM:  lda #24
 ohSetW: sta ohW
-ohLp:   jsr holeSlot
+ohLp:   lda o1
+        cmp #$02
+        bcs ohDone              ; X past 511 does not fit the register: this sprite and every
+                                ;   one right of it is off the screen anyway
+        jsr holeSlot
         dec ohT
         beq ohDone
         inc ohP                 ; the halves are consecutive slots by construction, so the
