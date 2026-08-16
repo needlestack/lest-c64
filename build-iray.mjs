@@ -2394,6 +2394,9 @@ const CB_A = cb(CHARSET), CB_B = cb(CHARSET_B);
 // row 100 is raster 151; arm the split one line early so the swap lands before that line's
 // character fetch.
 const SPLITLINE = 150;
+// The HUD sits one row down: in 24-row mode the top four pixel lines are under the border,
+// and the readout glyphs put their ink on lines 1-5 of the cell.
+const HUDROW = 1;
 const hx = n => '$' + n.toString(16).padStart(2, '0');
 const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 
@@ -2908,8 +2911,11 @@ cpChr:  txa
         lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
         and #$fc                ; %00 -- "and", where bank 0 was "ora #$03".
         sta $dd00
-        lda #$1b
-        sta $d011
+        lda #$13                ; 24-ROW MODE, ALWAYS. RSEL clear costs 4 pixels of border top
+        sta $d011               ; and bottom and buys two things: the partial character row that
+                                ; YSCROLL exposes while scrolling is hidden, and -- because the
+                                ; fall needs 24-row mode anyway -- the screen no longer changes
+                                ; size when you drop into a hole. There is no transition to pop.
         lda #$18
         sta $d016               ; MCM: multicolor text -> 4 logical px per cell, 2 physical px each
         lda #${hx(vm(SCR_A))}
@@ -6134,8 +6140,8 @@ setRow:                         ; A = char row -> ppPtr
         rts
 
 drawFps:
-        lda #$00
-        jsr setRow
+        lda #${hx(HUDROW)}      ; not row 0: 24-row mode crops the top four pixels, and the
+        jsr setRow              ;   glyph ink starts on the second line of the cell
         ldy #$00
         lda fpsTens
         clc
@@ -6152,7 +6158,7 @@ drawFps:
 ; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
 drawDbg:
 ${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still needs it' : ''}
-        lda #$00
+        lda #${hx(HUDROW)}      ; see drawFps: the top character row is half under the border
         jsr setRow
         ldy #36
         lda #16                 ; 'X'
@@ -6169,7 +6175,7 @@ ${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still 
         lda px
         and #$0f
         jsr ddPut
-        lda #$01
+        lda #${hx(HUDROW + 1)}
         jsr setRow
         ldy #36
         lda #17                 ; 'Y'
@@ -6272,7 +6278,7 @@ ${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had t
         lda chnMean
         and #$0f
         jsr ddPut
-` : ''}ddAng:  lda #$02
+` : ''}ddAng:  lda #${hx(HUDROW + 2)}
         jsr setRow
         ldy #37
         lda #10                 ; 'A'
@@ -7781,7 +7787,7 @@ fstEnd: lda #${hx(SPLITLINE)}
         sta lastFrame           ;   -- so every drop poisoned the next reading. That is what the
         lda frameCnt+1          ;   apparent frame-rate hit was: the counter, not the renderer.
         sta lastFrame+1
-        lda #$1b
+        lda #$13                ; back to the resting mode, which is also 24 rows
         sta $d011
         ; fall through into fallInv
 

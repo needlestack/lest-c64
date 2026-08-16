@@ -124,7 +124,8 @@ if (process.env.PROF) {
               `  (${(work * 65 / 17045).toFixed(2)} raster frames)`);
   process.exit(0);
 }
-const X = field(0, 4), Y = field(1, 4), A = field(2, 4);
+const HUDROW = 1;                              // matches build-iray.mjs: 24-row mode
+const X = field(HUDROW, 4), Y = field(HUDROW + 1, 4), A = field(HUDROW + 2, 4);
 // fps is two digits at char cols 0-1 of row 0, written by drawFps with the same glyphs.
-const FPS = readChar(0, 0) + readChar(1, 0);
+const FPS = readChar(0, HUDROW) + readChar(1, HUDROW);
 console.log(`${f}: ${X} ${Y} ${A}  fps=${FPS}`);

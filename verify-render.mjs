@@ -43,8 +43,12 @@ for(let c=0;c<W;c++){
   const top=CY-h[c];
   let d=0;
   for(let r=0;r<200;r++){
-    if(r<24 && c>=144) continue;              // skip the X/Y/A readout (char rows 0-2, cols 36-39)
-    if(r<8 && c<8) continue;                  // skip the fps counter
+    if(r<4 || r>=196) continue;               // 24-ROW MODE: RSEL is clear, so the top and
+                                              // bottom four pixel lines are under the border.
+                                              // Counting them scored the border as a wrong
+                                              // ceiling and put ~800 px on every view.
+    if(r<32 && c>=144) continue;              // skip the X/Y/A readout (char rows 1-3, cols 36-39)
+    if(r>=8 && r<16 && c<8) continue;         // skip the fps counter (char row 1)
     const wall = r>=top && r<200-top;
     // '.' = dark = wall. shot.mjs thresholds luminance at 128, so this counts a panel seam
     // as wall -- which is right, a seam is drawn ON the wall and the reference model has no
