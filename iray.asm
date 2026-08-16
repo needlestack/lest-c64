@@ -308,11 +308,13 @@ ohT     = $850f
 ohWc    = $852b                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
 ohBL    = $852c                  ; this slice's column + 12, signed and 16-bit: it runs to
 ohBH    = $852d                  ;   249, so bit 7 of the low byte cannot carry the sign
-arcC    = $81c8                  ; fdArc: the column it is darkening, how many rows, and the
-arcN    = $81c9                  ;   flat boundary row the rim is measured from
-arcB    = $81ca
+arcC    = $81c8                  ; arcCalc/arcBand: the column being worked
+arcA    = $81c9                  ; the rim's amplitude this frame, 88s/r -- the whole animation
+arcHi   = $81ca                  ; the LOWEST rim row over all 40 columns: whole rows below it are
+                                 ;   solid hole and fill fast, so only the thin band above it
+                                 ;   needs per-column work
 fdCol   = $81cb                  ; what fdFill lays down: floor or hole
-arcMx   = $81cc                  ; deepest the rim may cut: never more than the black behind it
+arcR    = $81d0                  ; 40 bytes: the rim's character row per column
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
                                  ;   content is in the BACK buffer -- writing the register inside
@@ -5204,44 +5206,33 @@ fdK1:   sta fdK
         sec
         sbc fdK
         jsr fdCopy              ; the scene, scrolled up by K rows
-        lda fPosH               ; how much of the gap below it is HOLE yet? None at all until
-        lsr                     ;   the eye has passed floor level -- see fBlkT. Before that it
-        lsr                     ;   is all floor, which is what makes this read as falling into
-        lsr                     ;   something rather than the hole appearing in front of you.
-        tax
-        lda fBlkT,x
-        cmp fdK
-        bcc fbOk
-        lda fdK                 ; never more black than there is room below the scene
-fbOk:   sta tmp
+        jsr arcCalc             ; where the rim sits in every column, and its lowest row
+        lda #$00       ; FLOOR from the bottom of the departing scene down to the band:
+        sta fdCol               ;   ground you have not fallen past yet. Whole rows, so it is the
+        lda arcHi               ;   cheap unrolled fill even though the boundary below it is not
+        clc                     ;   flat -- arcBand then eats into it per column.
+        adc fdK
+        sec
+        sbc #25
+        bcs fbOk                ; the band can start above the scene's bottom edge early on,
+        lda #$00                ;   when the rim is still off the foot of the screen
+fbOk:   jsr fdFill
+        jsr arcBand             ; the curve itself: hole from arcR[c] down to arcHi, per column
+        lda #$01       ; then the rest of the hole, whole rows again
+        sta fdCol
         lda #25
         sec
-        sbc tmp
-        sta arcB                ; the rim rides the top of the black
-        lda tmp
-        sta arcMx
-        lda #$00
-        sta fdCol
-        lda fdK                 ; floor first...
-        sec
-        sbc tmp
+        sbc arcHi
         jsr fdFill
-        lda #$01
-        sta fdCol
-        lda tmp                 ; ...then the hole
-        jsr fdFill
-        jmp fdArc
+        rts
 fdNeg:  lda #$01       ; landing: still inside the shaft, so the band above the rising
-        sta fdCol               ;   scene is all hole. Its own floor arrives with it.
-        lda fdK
-        sta arcB
-        sta arcMx
-        jsr fdFill
+        sta fdCol               ;   scene is all hole. Its own floor arrives with it. The inverted
+        lda fdK                 ;   arc belongs here and is not built yet -- the landing keeps the
+        jsr fdFill              ;   flat boundary until the fall-in is signed off.
         lda #25
         sec
         sbc fdK
-        jsr fdCopy
-        jmp fdArc
+        jmp fdCopy
 
 fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
         cmp #$00                ; explicit, not inherited: a zero count here would run the
@@ -5276,65 +5267,84 @@ fdcS2:  dec fdN
         bne fdcRow
 fdcDn:  rts
 
-; fdArc: punch the rim. The straight copy above leaves a flat boundary; this adds arcT[c] rows
-; of black on the CONTENT side of it, column by column, so the edge the world slides past is an
-; arc. Only the outer columns have any depth, so it is ~60 cells whatever the frame -- far
-; cheaper than making the main copy per-column, which would have meant a stride-40 walk of the
-; whole screen instead of two contiguous blocks.
-fdArc:  lda #39
-        sta arcC
-fdaLp:  ldx arcC
-        lda arcT,x
-        cmp arcMx               ; the rim can never be deeper than the black behind it, so it
-        bcc fdaD                ;   GROWS IN as the hole arrives instead of appearing at full
-        lda arcMx               ;   depth the moment the first black row does -- and at zero
-fdaD:   cmp #$00                ;   depth there is no rim at all, which is the point before
-                                ;   your head has passed floor level.
-                                ; THE RE-TEST IS NOT REDUNDANT: the clamp's own "cmp arcMx" left Z
-                                ; meaning "equal to arcMx", not "zero", so a column with arcT 0 and
-                                ; arcMx 3 walked straight past the guard with arcN = 0 -- and
-                                ; "dec arcN / bne" then ran 256 rows at stride 40, 10KB of $01
-                                ; through the program itself. It jammed the CPU a frame later.
-        beq fdaNx
-        sta arcN
-        lda fSro
-        bpl fdaUp
-        lda arcB                ; landing: black is ABOVE, so grow downward from the edge
-        jmp fdaGo
-fdaUp:  lda arcB                ; dropping: black is BELOW, so grow upward into the content
-        sec
-        sbc arcN
-        bcc fdaNx               ; the whole rim is off the top
-fdaGo:  cmp #25
-        bcs fdaNx               ; starts past the last row
-        tay
-        sty tmp                 ; clip the run to the bottom of the screen
-        lda #25
+; ---- arcCalc: where the rim sits in every column this frame ----
+; row(c) = 100 + A + ((A * arcD[c]) >> 8), A = 100 - fPosH/2.  One multiply a column, 40 a frame,
+; against roughly 34,000 spare cycles in a 3-period fall frame -- which is why the shape is
+; computed rather than stored: the table form would be 30 frames x 40 columns and buy nothing.
+; mul8 clobbers X, so the column lives in Y throughout.
+arcCalc:lda fPosH
+        lsr
+        sta tmp
+        lda #100
         sec
         sbc tmp
-        cmp arcN
-        bcs fdaAd
-        sta arcN
-fdaAd:  clc
-        lda mul40LoT,y
-        adc arcC
-        sta fdD
-        lda mul40HiT,y
-        adc baseHi
-        sta fdD+1
-        ldy #$00
-fdaW:   lda #$01
-        sta (fdD),y
+        sta arcA                ; 0..100 through the drop; the inverted half is the landing's
+        lda #$00
+        sta arcHi
+        ldy #39
+acLp:   lda arcD,y
+        sta mq
+        lda arcA
+        jsr mul8                ; phi = (A * arcD[c]) >> 8, 0..18
+        lda phi
         clc
-        lda fdD
+        adc arcA                ; + A, and + 100 for the horizon. 218 worst case, no carry out
+        adc #100
+        lsr
+        lsr
+        lsr                     ; pixels -> character rows
+        cmp #26
+        bcc acOk
+        lda #25                 ; below the last row: the rim is still off the foot of the screen
+acOk:   sta arcR,y
+        cmp arcHi
+        bcc acNx
+        sta arcHi               ; running maximum: the lowest row the rim reaches
+acNx:   dey
+        bpl acLp
+        lda #25                 ; THE BAND MAY NOT START ABOVE THE SCENE. The three pieces of the
+        sec                     ; frame -- copy, floor fill, hole fill -- must total exactly 25
+        sbc fdK                 ; rows or the last fill walks off the screen, and that identity
+        cmp arcHi               ; only holds while arcHi is at or below the scene's bottom edge.
+        bcc acDn                ; It is, because the scene leaves at twice the rim's rate, but
+        sta arcHi               ; the geometry is not the place to enforce a memory-safety
+acDn:   rts                     ; invariant -- see the 10KB blit in [[iray-fall]].
+
+; ---- arcBand: the curve itself, the only per-column work in the frame ----
+; Whole rows below arcHi are solid hole and were filled by the unrolled loop; this adds the rows
+; between each column's own rim and arcHi. The band is at most three rows tall (19px of droop at
+; the extremes, nothing at the horizon), so this is ~120 stores, not 1,000.
+; fdS is free here: the drop finished with it after fdCopy and does not touch it again.
+arcBand:ldy #39
+abLp:   lda arcHi
+        sec
+        sbc arcR,y
+        beq abNx                ; this column already IS the lowest row
+        sta arcC
+        ldx arcR,y
+        tya                     ; pointer = baseHi:mul40[row] + column
+        clc
+        adc mul40LoT,x
+        sta fdS
+        lda mul40HiT,x
+        adc baseHi
+        sta fdS+1
+        sty tmp
+        ldx arcC
+        ldy #$00
+abW:    lda #$01
+        sta (fdS),y
+        clc
+        lda fdS
         adc #40
-        sta fdD
-        bcc fdaW2
-        inc fdD+1
-fdaW2:  dec arcN
-        bne fdaW
-fdaNx:  dec arcC
-        bpl fdaLp
+        sta fdS
+        bcc abW2
+        inc fdS+1
+abW2:   dex
+        bne abW
+        ldy tmp
+abNx:   dey
+        bpl abLp
         rts
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
@@ -5631,8 +5641,7 @@ holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
-fBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,2,3,5,7,8,10,12,13,15,17,18,20,22,23,25
-arcT: !byte 0,0,1,1,2,2,3,3,3,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,3,3,3,2,2,1,1,0,0
+arcD: !byte 48,43,39,35,31,27,24,21,18,15,12,10,8,6,4,3,2,1,0,0,0,0,1,2,3,4,5,7,9,12,14,17,20,23,27,30,34,38,42,47
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
