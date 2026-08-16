@@ -2276,9 +2276,23 @@ const mul40 = [...Array(26)].map((_, i) => i * 40);
 const F_COL_ARC = 122.97;                        // logical (multicolor) columns per unit tangent
 const arcD = [...Array(40)].map((_, c) =>
   Math.round(256 * (Math.sqrt(1 + ((4 * c + 1.5 - 80) / F_COL_ARC) ** 2) - 1)));
-// A = 100 - fPosH/2: the rim centre runs from the screen bottom to the horizon over the drop and
-// is FLAT the moment it arrives there, while the frozen scene above it leaves at twice the rate.
-// The widening gap between them is floor -- the ground you have not fallen past yet.
+// A comes from the geometry, and so does WHEN the rim appears -- neither is tuned. The scene's
+// bottom edge is the floor at d = 88/100 cells; under the uniform scroll it sits at row
+// 200 - fPosH, and physically at 100 + 100s. Equating them is the only self-consistent link:
+//
+//     s = 1 - fPosH/100,   A = 88s/r = 412 * s        (r = HOLER = 0.2134 cells)
+//
+// so A runs +412 -> -412 across the drop and the rim's crown only clears the bottom of the screen
+// at fPosH = 76 -- 38% in, after eleven of the thirty frames of wall movement. Flat at fPosH 100,
+// clear of the top at 124. That is the "it should not enter until your head is near the floor"
+// behaviour falling out of the vertical field of view rather than being dialled in.
+// ARC_R IS THE DWELL KNOB, and the only one. A sweeps at 88/(100*ARC_R) per unit of fPosH, so a
+// SMALL hole whips the arc past in a few frames and a large one lets it linger. At the true
+// HOLER the arc is on screen for the last 39% of the DISTANCE, which in an accelerating fall is
+// only ~6 of 30 frames; 0.35 puts it at ~11, 0.61 at ~15. Physically it should match the sprite
+// hole, but nothing is on screen to compare it against once the fall starts.
+const ARC_R = +(process.env.ARC_R ?? HOLER);
+const ARC_K = Math.round(16 * 88 / (ARC_R * 100));   // A = (|q| * ARC_K) >> 4
 const HOLEBASE = 0xe800;                         // above the charsets: 75 slots do not fit in
                                                  //   the 48 between $c400 and the I/O hole, and
                                                  //   $e800-$ffb9 is the bank.s other free run
@@ -2781,6 +2795,7 @@ arcHi   = $81ca                  ; the LOWEST rim row over all 40 columns: whole
                                  ;   solid hole and fill fast, so only the thin band above it
                                  ;   needs per-column work
 fdCol   = $81cb                  ; what fdFill lays down: floor or hole
+arcNg   = $81cc                  ; $ff once the eye is BELOW floor level and the arc inverts
 arcR    = $81d0                  ; 40 bytes: the rim's character row per column
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
@@ -7952,17 +7967,23 @@ fdK1:   sta fdK
         adc fdK
         sec
         sbc #25
-        bcs fbOk                ; the band can start above the scene's bottom edge early on,
-        lda #$00                ;   when the rim is still off the foot of the screen
-fbOk:   jsr fdFill
+        bcc fbSkip              ; NEGATIVE means the rim has climbed ABOVE the scene's bottom
+        jsr fdFill              ;   edge, which happens as soon as the eye passes floor level.
+fbSkip:                         ;   There is no floor left to draw then -- the hole covers scene.
+        ldx arcHi               ; so point fdD at the band explicitly rather than relying on the
+        lda mul40LoT,x          ;   fills to have walked there. Once the rim can be above the
+        sta fdD                 ;   scene the three pieces no longer tile the screen in order,
+        clc                     ;   and sequential advance would run the last fill off the end.
+        lda mul40HiT,x
+        adc baseHi
+        sta fdD+1
         jsr arcBand             ; the curve itself: hole from arcR[c] down to arcHi, per column
-        lda #${hx(SOLID)}       ; then the rest of the hole, whole rows again
-        sta fdCol
+        lda #${hx(SOLID)}       ; then the rest of the hole, whole rows again -- and below the
+        sta fdCol               ;   horizon this is what pushes the last of the floor off the top
         lda #25
         sec
         sbc arcHi
-        jsr fdFill
-        rts
+        jmp fdFill
 fdNeg:  lda #${hx(SOLID)}       ; landing: still inside the shaft, so the band above the rising
         sta fdCol               ;   scene is all hole. Its own floor arrives with it. The inverted
         lda fdK                 ;   arc belongs here and is not built yet -- the landing keeps the
@@ -8010,43 +8031,69 @@ fdcDn:  rts
 ; against roughly 34,000 spare cycles in a 3-period fall frame -- which is why the shape is
 ; computed rather than stored: the table form would be 30 frames x 40 columns and buy nothing.
 ; mul8 clobbers X, so the column lives in Y throughout.
-arcCalc:lda fPosH
-        lsr
-        sta tmp
+arcCalc:lda #$00                ; q = 100 - fPosH, signed: how far the eye still is from the
+        sta arcNg               ;   floor, positive above it and negative below
         lda #100
         sec
-        sbc tmp
-        sta arcA                ; 0..100 through the drop; the inverted half is the landing's
+        sbc fPosH
+        bcs acQP
+        dec arcNg               ; $ff: past floor level, so the arc is about to invert
+        eor #$ff
+        clc
+        adc #$01
+acQP:   ldx #${hx(ARC_K)}       ; |A| = |q| * 88/(100*ARC_R), the sweep rate -- see ARC_R
+        stx mq
+        jsr mul8
+        ldx #$04
+acSh:   lsr phi                 ; >> 4, in 16 bits: the product reaches 6600 at the top of the
+        ror plo                 ;   fall and only the clamped tail of it is ever on screen
+        dex
+        bne acSh
+        lda phi
+        bne acSat
+        lda plo
+        cmp #121
+        bcc acAok
+acSat:  lda #120                ; past this the rim is off the screen in EVERY column, and the
+acAok:  sta arcA                ;   clamp makes that fall out of the row clamps below
         lda #$00
         sta arcHi
         ldy #39
 acLp:   lda arcD,y
         sta mq
         lda arcA
-        jsr mul8                ; phi = (A * arcD[c]) >> 8, 0..18
-        lda phi
-        clc
-        adc arcA                ; + A, and + 100 for the horizon. 218 worst case, no carry out
+        jsr mul8                ; phi = (|A| * arcD[c]) >> 8, the droop away from the centre
+        lda arcNg
+        bne acNeg
+        clc                     ; above floor level: an ARCH, centre highest
+        lda arcA
+        adc phi
         adc #100
-        lsr
+        jmp acRow
+acNeg:  clc                     ; below it: the same curve inverted, centre lowest, and the
+        lda arcA                ;   whole thing climbing off the top of the screen
+        adc phi
+        cmp #101
+        bcs acZero
+        sta tmp
+        lda #100
+        sec
+        sbc tmp
+        jmp acRow
+acZero: lda #$00                ; above the first row
+acRow:  lsr
         lsr
         lsr                     ; pixels -> character rows
         cmp #26
         bcc acOk
-        lda #25                 ; below the last row: the rim is still off the foot of the screen
+        lda #25                 ; below the last row: still off the foot of the screen
 acOk:   sta arcR,y
         cmp arcHi
         bcc acNx
         sta arcHi               ; running maximum: the lowest row the rim reaches
 acNx:   dey
         bpl acLp
-        lda #25                 ; THE BAND MAY NOT START ABOVE THE SCENE. The three pieces of the
-        sec                     ; frame -- copy, floor fill, hole fill -- must total exactly 25
-        sbc fdK                 ; rows or the last fill walks off the screen, and that identity
-        cmp arcHi               ; only holds while arcHi is at or below the scene's bottom edge.
-        bcc acDn                ; It is, because the scene leaves at twice the rim's rate, but
-        sta arcHi               ; the geometry is not the place to enforce a memory-safety
-acDn:   rts                     ; invariant -- see the 10KB blit in [[iray-fall]].
+        rts                     ; invariant -- see the 10KB blit in [[iray-fall]].
 
 ; ---- arcBand: the curve itself, the only per-column work in the frame ----
 ; Whole rows below arcHi are solid hole and were filled by the unrolled loop; this adds the rows
