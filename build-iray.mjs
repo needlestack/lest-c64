@@ -2242,7 +2242,7 @@ const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // velocity it ends at (26.7 px/frame) becomes the landing speed -- so "terminal velocity" falls
 // out of the physics instead of being a second number to tune.
 const FALL = process.env.FALL !== '0';
-const FALLBUF = 0x6100;                          // 1K in the run hTabT freed: the frozen frame
+const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: the frozen frame
 const FALL_ACC = 455;                            // 8.8 px/frame^2
 const FALL_END = 200;                            // pixels of travel per phase = screen height
 const FALLX = +(process.env.FALLX ?? 1), FALLY = +(process.env.FALLY ?? 13);   // where you land
@@ -2337,6 +2337,14 @@ const holeSlotT = HOLE_LADDER.map(g => { const s = _hslot; _hslot += g.spr; retu
 // above), further than the smallest is not drawn.
 const holeHOf = g => Math.round(88 / g.d);
 const holeHT = HOLE_LADDER.map(holeHOf);
+// ...and a 256-byte h -> rung table, now that hTabT has freed a page to put one in. The scan
+// was fine at 23 rungs and is not at 35: ~600 cycles of linear walk every frame the hole is
+// visible, against 8 for a lookup. $ff = past the smallest rung; closer than the widest clamps.
+const holeVarT = [...Array(256)].map((_, h) => {
+  if (h >= holeHT[0]) return 0;
+  const v = holeHT.findIndex(t => t <= h);
+  return v < 0 ? 0xff : v;
+});
 if (holeHT.some((h, i) => i && h >= holeHT[i - 1]))
   throw new Error('hole h thresholds are not strictly descending -- the scan needs them sorted');
 // Columns from the hole's centre to the LEFT edge of the left sprite: half the bitmap's
@@ -6618,6 +6626,9 @@ oSCbB:  lda #<cbB
 oSCbS:  sta oSInv+1
         sta oSDIn+1
 oSLoop: ldx osI
+        lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
+        cmp #${hx(ORBS.length)} ;   below this test is always here, because ORBGATE is off by
+        bcs oSNext              ;   default and cannot be relied on to fence anything
 ${ORBGATE ? `        lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
 ` : ''}
@@ -7874,15 +7885,11 @@ fdfDn:  rts
 ; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
 ; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
 holeTail:
-        ldx #$00                ; find the rung: holeHT descends, so the first entry at or below
-ohFind: lda ohgt                ;   our h is it. A scan, not a 256-byte table -- this runs once
-        cmp holeHT,x            ;   a frame, so ~100 cycles is free and a page is not
-        bcs ohGot
-        inx
-        cpx #${HOLE_LADDER.length}
-        bcc ohFind
-        rts                     ; smaller than the smallest rung: too far to be worth a sprite
-ohGot:                          ; X = rung, and it indexes every table below
+        ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
+        lda holeVarT,x          ;   linear scan while the ladder was 23 rungs; at 35 it was
+        cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
+        beq orbNo               ;   hole costs to draw.
+        tax                     ; X = rung, and it indexes every table below
         lda holeYBaseT,x        ; the sprite's TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
@@ -7939,11 +7946,18 @@ ohSetC: sta ohWc
 ohXP:   lda ocol
         sec
         sbc holeXOffT,x         ; s = ocol - half, the pair's start column
-        bcc ohXN                ; s is negative, so it cannot be off the RIGHT
-        cmp #160
+        bcs ohXPP               ; s >= 0
+        clc                     ; s < 0: b = s + 12, and the carry OUT of this add is a real
+        adc #$0c                ;   sign flag, because it says the sum crossed back through 0
+        jmp ohXS
+ohXPP:  cmp #160
         bcs orbNo               ; the pair starts right of the last column
-ohXN:   clc
-        adc #$0c                ; b = s + 12
+        clc
+        adc #$0c                ; b = s + 12, which cannot be negative on this path -- so force
+        sec                     ;   the flag. Taking the carry from the ADD instead marked every
+                                ;   on-screen hole as negative (adc only carries past 255), the
+                                ;   loop took the off-the-left branch, and nothing was ever
+                                ;   placed: the hole vanished from the start position entirely.
 ohXS:   sta ohBL                ; carry now says whether b came out non-negative
         lda #$00
         bcs ohXH
@@ -8000,9 +8014,14 @@ holeSlot:
         sta obP,x
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
-        sta obOcc,x             ; and bit 7 clear tells orbStamp to skip this slot: a hole fills
-                                ;   none of the stamp state, and it no longer sits reliably at
-                                ;   the END of the slot list where a count could fence it off
+        sta obOcc,x
+        lda oidx                ; and MARK THE SLOT as a hole, so orbStamp can tell. It fills no
+        sta obIX,x              ;   stamp state at all, and it no longer sits reliably at the end
+                                ;   of the list where a count could fence it off. obOcc is not
+                                ;   enough: the gate that reads it is behind ORBGATE, which is
+                                ;   OFF by default -- so the stamp was walking these slots with
+                                ;   a stale obL/obR and scribbling occluders over a garbage cell
+                                ;   range. 29,510 cycles for a hole that costs 2,400 to project.
         lda ohF                 ; the two magnifications are decided SEPARATELY, from the
         and #$04                ;   ellipse's own visible width and height -- which is what lets
         beq ohNoX               ;   a near rung be 48 columns wide and 33 rows tall on two
@@ -8135,7 +8154,6 @@ mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
 holePtrT: !byte ${holeSlotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
-holeHT: !byte ${holeHT.join(',')}
 holeXOffT: !byte ${holeXOffT.join(',')}
 holeYBaseT: !byte ${holeYBaseT.join(',')}
 holeFlagT: !byte ${holeFlagT.join(',')}
@@ -8231,6 +8249,9 @@ candCntT: !byte ${candCnt.join(',')}
 candLoT: !byte ${candLo.join(',')}
         * = ${hx16(ORB_CANDHI)}
 candHiT: !byte ${candHi.join(',')}
+        * = $6100
+; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
+holeVarT: !byte ${holeVarT.join(',')}
         ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry

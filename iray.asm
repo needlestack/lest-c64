@@ -3953,6 +3953,9 @@ oSCbB:  lda #<cbB
 oSCbS:  sta oSInv+1
         sta oSDIn+1
 oSLoop: ldx osI
+        lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
+        cmp #$22 ;   below this test is always here, because ORBGATE is off by
+        bcs oSNext              ;   default and cannot be relied on to fence anything
 
         lda obIX,x
         tay
@@ -4940,7 +4943,7 @@ fallSnap:
         lda #$00
         sta fdS
         sta fdD
-        lda #$61
+        lda #$62
         sta fdD+1
         ldx #$04
         ldy #$00
@@ -5091,9 +5094,9 @@ fdK1:   sta fdK
         sta fdD
         lda baseHi
         sta fdD+1
-        lda #<$6100
+        lda #<$6200
         sta fdS
-        lda #>$6100
+        lda #>$6200
         sta fdS+1
         ldx fdK
         lda fSro
@@ -5179,15 +5182,11 @@ fdfDn:  rts
 ; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
 ; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
 holeTail:
-        ldx #$00                ; find the rung: holeHT descends, so the first entry at or below
-ohFind: lda ohgt                ;   our h is it. A scan, not a 256-byte table -- this runs once
-        cmp holeHT,x            ;   a frame, so ~100 cycles is free and a page is not
-        bcs ohGot
-        inx
-        cpx #35
-        bcc ohFind
-        rts                     ; smaller than the smallest rung: too far to be worth a sprite
-ohGot:                          ; X = rung, and it indexes every table below
+        ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
+        lda holeVarT,x          ;   linear scan while the ladder was 23 rungs; at 35 it was
+        cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
+        beq orbNo               ;   hole costs to draw.
+        tax                     ; X = rung, and it indexes every table below
         lda holeYBaseT,x        ; the sprite's TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
@@ -5244,11 +5243,18 @@ ohSetC: sta ohWc
 ohXP:   lda ocol
         sec
         sbc holeXOffT,x         ; s = ocol - half, the pair's start column
-        bcc ohXN                ; s is negative, so it cannot be off the RIGHT
-        cmp #160
+        bcs ohXPP               ; s >= 0
+        clc                     ; s < 0: b = s + 12, and the carry OUT of this add is a real
+        adc #$0c                ;   sign flag, because it says the sum crossed back through 0
+        jmp ohXS
+ohXPP:  cmp #160
         bcs orbNo               ; the pair starts right of the last column
-ohXN:   clc
-        adc #$0c                ; b = s + 12
+        clc
+        adc #$0c                ; b = s + 12, which cannot be negative on this path -- so force
+        sec                     ;   the flag. Taking the carry from the ADD instead marked every
+                                ;   on-screen hole as negative (adc only carries past 255), the
+                                ;   loop took the off-the-left branch, and nothing was ever
+                                ;   placed: the hole vanished from the start position entirely.
 ohXS:   sta ohBL                ; carry now says whether b came out non-negative
         lda #$00
         bcs ohXH
@@ -5305,9 +5311,14 @@ holeSlot:
         sta obP,x
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
-        sta obOcc,x             ; and bit 7 clear tells orbStamp to skip this slot: a hole fills
-                                ;   none of the stamp state, and it no longer sits reliably at
-                                ;   the END of the slot list where a count could fence it off
+        sta obOcc,x
+        lda oidx                ; and MARK THE SLOT as a hole, so orbStamp can tell. It fills no
+        sta obIX,x              ;   stamp state at all, and it no longer sits reliably at the end
+                                ;   of the list where a count could fence it off. obOcc is not
+                                ;   enough: the gate that reads it is behind ORBGATE, which is
+                                ;   OFF by default -- so the stamp was walking these slots with
+                                ;   a stale obL/obR and scribbling occluders over a garbage cell
+                                ;   range. 29,510 cycles for a hole that costs 2,400 to project.
         lda ohF                 ; the two magnifications are decided SEPARATELY, from the
         and #$04                ;   ellipse's own visible width and height -- which is what lets
         beq ohNoX               ;   a near rung be 48 columns wide and 33 rows tall on two
@@ -5440,7 +5451,6 @@ mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
 holePtrT: !byte 160,162,164,166,169,172,175,178,181,184,187,190,193,196,198,200,202,204,206,208,210,212,214,216,218,220,222,224,226,228,230,231,232,233,234
-holeHT: !byte 129,125,121,117,113,109,105,101,97,93,89,85,80,77,74,70,67,64,60,57,54,50,47,44,40,37,34,30,27,23,20,17,13,10,7
 holeXOffT: !byte 24,24,24,36,36,36,36,36,36,36,36,36,36,24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,6,6,6,6,6
 holeYBaseT: !byte 119,121,123,124,126,127,129,130,132,133,134,135,137,138,139,140,141,141,143,143,143,145,145,145,147,147,147,148,148,149,149,149,150,150,150
 holeFlagT: !byte 6,6,6,7,7,7,7,7,7,15,15,15,15,14,14,14,14,6,6,6,6,6,6,6,6,2,2,2,2,2,1,1,1,1,1
@@ -5917,6 +5927,9 @@ candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,8,5,5,5,5,0,5,5,5,5,4,5,5,0,
 candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,45,60,75,90,0,105,120,135,150,165,177,192,0,0,207,228,252,14,32,47,0,62,80,98,116,134,149,164,0,0,173,191,212,230,248,10,0,28,55,79,0,0,0,103,0,0,115,0,0,0,133,154,184,220,0,33,0,60,69,78,0,0,84,0,96,108,123,144,0,0,168,198,0,225,0,0,0,0,237,0,249,0,0,0,0,5,23,50,0,71,89,113,0,0,128,0,140,0,146,155,170,185,203,227,254,28,0,49,0,0,58,0,70,0,79,0,0,0,0,0,88,124,0,151,0,0,160,172,187,0,199,0,205,214,223,232,250,24,0,54,0,0,0,0,63,0,75,0,84,0,0,0,0,96,123,147,0,0,162,168,180,192,207,0,216,0,228,237,249,5,26,47,0,0,65,0,0,0,0,0,77,0,95,0,0,0,0,0,0,0,113,125,134,143,155,173,194,215,239,0,4,16,28,40,0,0,52,58,64,0,0,70,91,112,136,160,181,196,211,223,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $6000
 candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,0,55,55,55,55,55,55,55,0,0,55,55,55,56,56,56,0,56,56,56,56,56,56,56,0,0,56,56,56,56,56,57,0,57,57,57,0,0,0,57,0,0,57,0,0,0,57,57,57,57,58,58,0,58,58,58,0,0,58,0,58,58,58,58,0,0,58,58,0,58,0,0,0,0,58,0,58,0,0,0,0,59,59,59,0,59,59,59,0,0,59,0,59,0,59,59,59,59,59,59,59,60,0,60,0,0,60,0,60,0,60,0,0,0,0,0,60,60,0,60,0,0,60,60,60,0,60,0,60,60,60,60,60,61,0,61,0,0,0,0,61,0,61,0,61,0,0,0,0,61,61,61,0,0,61,61,61,61,61,0,61,0,61,61,61,62,62,62,0,0,62,0,0,0,0,0,62,0,62,0,0,0,0,0,0,0,62,62,62,62,62,62,62,62,62,0,63,63,63,63,0,0,63,63,63,0,0,63,63,63,63,63,63,63,63,63,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        * = $6100
+; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
+holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,31,30,30,30,29,29,29,29,28,28,28,27,27,27,27,26,26,26,25,25,25,24,24,24,24,23,23,23,22,22,22,21,21,21,21,20,20,20,19,19,19,18,18,18,18,17,17,17,16,16,16,15,15,15,15,14,14,14,13,13,13,12,12,12,12,12,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
