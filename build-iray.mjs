@@ -2247,6 +2247,18 @@ const FALL_ACC = 455;                            // 8.8 px/frame^2
 const FALL_END = 200;                            // pixels of travel per phase = screen height
 const FALLX = +(process.env.FALLX ?? 1), FALLY = +(process.env.FALLY ?? 13);   // where you land
 const mul40 = [...Array(26)].map((_, i) => i * 40);
+// ---- the hole's RIM: the edge the world slides past is an arc, not a straight line ----
+// A flat boundary reads as a shutter closing. A curved one reads as falling THROUGH something,
+// which is the whole point of the animation. arcT is extra black rows per character column --
+// zero in the middle, deepest at the sides -- so the content bulges downward in the middle on
+// the way out and upward in the middle on the way in. Parabolic rather than circular: a circle
+// is nearly flat across the middle 20 columns and only droops at the very edges, which looks
+// like a sagging line instead of a rim.
+const HOLE_ARC = +(process.env.HOLE_ARC ?? 5);   // rows of droop at the extreme columns
+const arcT = [...Array(40)].map((_, c) => {
+  const u = (c - 19.5) / 19.5;
+  return Math.round(HOLE_ARC * u * u);
+});
 const HOLEBASE = 0xe800;                         // above the charsets: 75 slots do not fit in
                                                  //   the 48 between $c400 and the I/O hole, and
                                                  //   $e800-$ffb9 is the bank.s other free run
@@ -2743,6 +2755,9 @@ ohT     = $850f
 ohWc    = $852b                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
 ohBL    = $852c                  ; this slice's column + 12, signed and 16-bit: it runs to
 ohBH    = $852d                  ;   249, so bit 7 of the low byte cannot carry the sign
+arcC    = $8532                  ; fdArc: the column it is darkening, how many rows, and the
+arcN    = $8533                  ;   flat boundary row the rim is measured from
+arcB    = $8534
 hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32 for the
 hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
@@ -7868,15 +7883,19 @@ fdK1:   sta fdK
         lda #25
         sec
         sbc fdK
+        sta arcB                ; dropping: the flat boundary is where the black begins
         jsr fdCopy
         lda fdK
-        jmp fdFill
+        jsr fdFill
+        jmp fdArc
 fdNeg:  lda fdK                 ; destination starts K rows in; the black goes first
+        sta arcB                ; landing: the flat boundary is where the content begins
         jsr fdFill
         lda #25
         sec
         sbc fdK
-        jmp fdCopy
+        jsr fdCopy
+        jmp fdArc
 
 fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
         beq fdcDn
@@ -7909,6 +7928,57 @@ fdcS1:  clc
 fdcS2:  dec fdN
         bne fdcRow
 fdcDn:  rts
+
+; fdArc: punch the rim. The straight copy above leaves a flat boundary; this adds arcT[c] rows
+; of black on the CONTENT side of it, column by column, so the edge the world slides past is an
+; arc. Only the outer columns have any depth, so it is ~60 cells whatever the frame -- far
+; cheaper than making the main copy per-column, which would have meant a stride-40 walk of the
+; whole screen instead of two contiguous blocks.
+fdArc:  lda #39
+        sta arcC
+fdaLp:  ldx arcC
+        lda arcT,x
+        beq fdaNx               ; middle columns: the boundary is already where it belongs
+        sta arcN
+        lda fSro
+        bpl fdaUp
+        lda arcB                ; landing: black is ABOVE, so grow downward from the edge
+        jmp fdaGo
+fdaUp:  lda arcB                ; dropping: black is BELOW, so grow upward into the content
+        sec
+        sbc arcN
+        bcc fdaNx               ; the whole rim is off the top
+fdaGo:  cmp #25
+        bcs fdaNx               ; starts past the last row
+        tay
+        sty tmp                 ; clip the run to the bottom of the screen
+        lda #25
+        sec
+        sbc tmp
+        cmp arcN
+        bcs fdaAd
+        sta arcN
+fdaAd:  clc
+        lda mul40LoT,y
+        adc arcC
+        sta fdD
+        lda mul40HiT,y
+        adc baseHi
+        sta fdD+1
+        ldy #$00
+fdaW:   lda #${hx(SOLID)}
+        sta (fdD),y
+        clc
+        lda fdD
+        adc #40
+        sta fdD
+        bcc fdaW2
+        inc fdD+1
+fdaW2:  dec arcN
+        bne fdaW
+fdaNx:  dec arcC
+        bpl fdaLp
+        rts
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
         beq fdfDn
@@ -8202,7 +8272,8 @@ orbOccT: !byte ${orbOccFlat.join(',')}
 holeSeeT: !byte ${holeSee.join(",")}
 ${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
-mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
+mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}
+arcT: !byte ${arcT.join(',')}` : ''}
         * = ${hx16(ORB_SMALL)}
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
