@@ -1889,7 +1889,12 @@ const candList = [], candLo = new Array(256).fill(0), candHi = new Array(256).fi
       candCnt = new Array(256).fill(0);
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
 const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
-const HOLEX = +(process.env.HOLEX ?? 4), HOLEY = +(process.env.HOLEY ?? 1);   // its cell
+// TWO holes, alternating, so the drop can be exercised over and over without reloading: the
+// one you land next to takes you back where you came from. Same maze both ways for now -- only
+// the hole cell and the landing spot differ, which is all the level transition actually needs.
+const HOLES_AT = [[+(process.env.HOLEX ?? 4), +(process.env.HOLEY ?? 1)],
+                  [+(process.env.HOLE2X ?? 4), +(process.env.HOLE2Y ?? 13)]];
+const LANDS_AT = [[1, 13], [1, 1]];              // where each one drops you
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
 // An orb is only projected if it survives the per-cell candidate list and a bearing window;
 // a culled orb is ~20 cycles against ~2,400 projected, and that ratio is the entire reason 34
@@ -1903,7 +1908,7 @@ const HOLEX = +(process.env.HOLEX ?? 4), HOLEY = +(process.env.HOLEY ?? 1);   //
 // HOLECULL=0 fills the map solid, so the gate always passes: it prices the cull the same way
 // ORBGATE and ORBSTAMP price theirs. Rendering is identical either way -- only the cost moves.
 const HOLECULL = process.env.HOLECULL !== "0";
-const holeSee = new Array(32).fill(0);
+const holeSee = new Array(64).fill(0);           // 32 bytes per hole, indexed by the level
 const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
 if (!HOLECULL) holeSee.fill(255);
 for (let cell = 0; cell < 256; cell++) {
@@ -1919,9 +1924,11 @@ for (let cell = 0; cell < 256; cell++) {
     .filter(o => o.d < ORBSEE &&
       eye.some(([ex, ey]) => losFree(ex, ey, ORBS[o.i].x, ORBS[o.i].y)))
     .sort((a, b) => a.d - b.d);
-  if (Math.hypot(HOLEX + 0.5 - cx, HOLEY + 0.5 - cy) < HOLE_MAX_D &&
-      eye.some(([ex, ey]) => losFree(ex, ey, HOLEX + 0.5, HOLEY + 0.5)))
-    holeSee[cell >> 3] |= 1 << (cell & 7);       // same 3x3 eye grid as the orbs, same reason
+  HOLES_AT.forEach(([hx0, hy0], L) => {         // same 3x3 eye grid as the orbs, same reason
+    if (Math.hypot(hx0 + 0.5 - cx, hy0 + 0.5 - cy) < HOLE_MAX_D &&
+        eye.some(([ex, ey]) => losFree(ex, ey, hx0 + 0.5, hy0 + 0.5)))
+      holeSee[L * 32 + (cell >> 3)] |= 1 << (cell & 7);
+  });
   // FULL ADDRESS, not an offset: the 6502 loads these straight into a pointer.
   const a = CANDBASE + candList.length;
   candLo[cell] = a & 255; candHi[cell] = a >> 8;
@@ -2722,9 +2729,12 @@ onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two
                                  ;   osFlush must write them, but orbStamp must NOT walk them:
                                  ;   a hole fills no slot fields and the stamp would read garbage
 ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
-ohW     = $850e                  ;   step to the right half (24 or 48), and whether there IS one
 ohT     = $850f
 ohWc    = $852b                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
+ohBL    = $852c                  ; this slice's column + 12, signed and 16-bit: it runs to
+ohBH    = $852d                  ;   249, so bit 7 of the low byte cannot carry the sign
+hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32 for the
+hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
 pcell   = $8515                  ; the cell the player stands in, for the hole's LOS gate
 ohN     = $8516                  ; and how many sprite slots the hole took this frame
@@ -2914,6 +2924,8 @@ cpChr:  txa
                                 ; be retuned without touching a charset entry.
 ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
+        sta hlv                 ; hole 0 is the live one until the first drop swaps them
+        sta hlvOf
         sta $d015               ; nothing visible until orbMove has decided what is
         lda pa
         eor #$80
@@ -6528,6 +6540,8 @@ obEnd:  ; ---- the hole, projected last ----
         lsr                     ; it cannot be seen from at all -- most of them, in a maze.
         lsr
         lsr
+        clc
+        adc hlvOf               ; 32 bytes of map per hole; hlvOf picks the live one
         tax
         lda holeSeeT,x
         and orbBitT,y
@@ -6535,7 +6549,9 @@ obEnd:  ; ---- the hole, projected last ----
         lda onv
         cmp #$07
         bcs ohSkip              ; needs TWO free slots, and a half-drawn hole is worse than none
-        lda #${hx(ORBS.length)}
+        lda hlv
+        clc
+        adc #${hx(ORBS.length)} ; the live hole is entry ORBS.length + level in orbXCT/orbYCT
         sta oidx
         jsr orbOne
 ohSkip: lda onv                 ; the ORB count: orbStamp walks slots expecting obL/obR/obOcc and
@@ -7587,11 +7603,12 @@ ${FALL ? `
 ; this moves the screen matrix ONLY -- half the work a scrolling game would do here.
 
 ; fallChk: standing in the hole's cell? Then go.
-fallChk:lda px+1
-        cmp #${hx(HOLEX)}
+fallChk:ldx hlv
+        lda px+1
+        cmp orbXCT+${ORBS.length},x
         bne fcNo
         lda py+1
-        cmp #${hx(HOLEY)}
+        cmp orbYCT+${ORBS.length},x
         bne fcNo
         lda #$00                ; sprites away: they belong to the level being left. Clear the
         sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
@@ -7662,14 +7679,23 @@ fstAdv: clc
         lda fallSt
         cmp #$03
         beq fstEnd
-        lda #$80                ; drop over: put the player down in the new level and let the
-        sta px                  ;   main loop render one ordinary frame there
-        lda #${hx(FALLX)}
-        sta px+1
-        lda #$80
+        ldx hlv                 ; drop over: put the player down in the new level and let the
+        lda #$80                ;   main loop render one ordinary frame there
+        sta px
         sta py
-        lda #${hx(FALLY)}
+        lda landXT,x
+        sta px+1
+        lda landYT,x
         sta py+1
+        txa                     ; and swap which hole is live, so the one you land beside
+        eor #$01                ;   takes you back and the drop can be exercised on a loop
+        sta hlv
+        asl
+        asl
+        asl
+        asl
+        asl
+        sta hlvOf               ; level * 32, the offset into holeSeeT
         lda #$02
         sta fallSt
         jsr fallInv             ; the render coming next frame draws into a buffer the fall
@@ -7888,57 +7914,74 @@ ohSetC: sta ohWc
         ; still most of the way on screen -- a 48-column one vanished while 35 of its columns
         ; were still visible. A sprite cannot start left of X=0, but the ones to its RIGHT can
         ; still be placed: drop leading sprites until the leftmost fits, and draw the rest.
+        ; ---- b = this sprite's column + 12, kept SIGNED and 16-bit ----
+        ; SPRITE X WRAPS. It is a 9-bit compare against a counter that also wraps, so a sprite
+        ; placed near 512 starts late in the line, the counter rolls over, and the rest of it
+        ; draws at the left of the SAME line. That makes a negative column exact rather than
+        ; impossible: for a slice starting at column s, its pixel c lands at 2(s+c)+24 mod 512,
+        ; which is display column s+c. So asl on the two's-complement byte IS the right X,
+        ; and nothing needs dropping for being off the left -- it either shows its visible part
+        ; or falls in the right border where nobody sees it.
         lda ocolN
         beq ohXP
         lda ocol                ; the centre sits ocol columns LEFT of column 0
         clc
         adc holeXOffT,x
-        sta tmp                 ; ocol + half, both small, so no carry to worry about
+        cmp #72
+        bcs orbNo               ; even the pair's right edge is off the screen
+        sta tmp
         lda #$0c
         sec
-        sbc tmp                 ; b = 12 - (ocol + half); carry clear iff b is negative
-        jmp ohXSk
+        sbc tmp                 ; b = 12 - (ocol + half)
+        jmp ohXS
 ohXP:   lda ocol
-        clc
-        adc #$0c                ; X = 2*column + 24: the VIC's origin is 24 hires pixels left
-        bcs orbNo               ;   of the display, which the orb path hides inside orbXOffT's
-        sec                     ;   "12 - halfCols". Here the two halves are separate, so the
-        sbc holeXOffT,x         ;   +12 is explicit -- leaving it out drew the hole exactly
-                                ;   12 columns left of where it belonged.
-ohXSk:  bcs ohXok               ; b >= 0: the leftmost sprite is placeable as it stands
-ohXLp:  dec ohT
-        beq orbNo               ; every sprite is off the left edge: nothing to draw
-        inc ohP                 ; the next one along becomes the leftmost
-        clc
+        sec
+        sbc holeXOffT,x         ; s = ocol - half, the pair's start column
+        bcc ohXN                ; s is negative, so it cannot be off the RIGHT
+        cmp #160
+        bcs orbNo               ; the pair starts right of the last column
+ohXN:   clc
+        adc #$0c                ; b = s + 12
+ohXS:   sta ohBL                ; carry now says whether b came out non-negative
+        lda #$00
+        bcs ohXH
+        lda #$ff                ; sign-extend: the loop below tests bH, not bit 7 of bL,
+ohXH:   sta ohBH                ;   because b runs to 249 and bit 7 would be ambiguous there
+ohXok:  ; ---- place each slice that has any of its box on screen, and only those ----
+        ; Each is judged on ITS OWN column span, not on whether the leftmost one fits. Off the
+        ; left it is still placed, because the X wrap draws its visible part correctly; only a
+        ; slice with no visible column at all is skipped, and one entirely off the RIGHT ends
+        ; the loop since every slice after it is further right still.
+ohLp:   lda ohBH
+        bmi ohLL                ; b < 0: off the left, or partly so
+        bne ohDone              ; b >= 256: off the right, and so is everything after it
+        lda ohBL
+        cmp #172
+        bcs ohDone              ; column 160 or beyond: same
+        jmp ohPl
+ohLL:   clc                     ; b < 0: visible only if b + cols reaches column 0, i.e. 12
+        lda ohBL
         adc ohWc
-        bmi ohXLp               ; b is a small negative here, so bmi is the right test
-ohXok:  asl                     ; X = 2*b, on the 160-column grid like every other sprite here
+        bcc ohNx                ; still negative even a whole slice later: nothing shows
+        cmp #13
+        bcc ohNx
+ohPl:   lda ohBL                ; X = 2b as a 9-bit value. For negative b the two's-complement
+        asl                     ;   byte shifts straight into the wrapped X the VIC wants.
         sta o0
         lda #$00
         rol
         sta o1
-        lda ohF
-        and #$04
-        beq ohNoM
-        lda #48                 ; hmag: one sprite covers 24 columns, so the next starts 48
-        bne ohSetW              ;   hires pixels along
-ohNoM:  lda #24
-ohSetW: sta ohW
-ohLp:   lda o1
-        cmp #$02
-        bcs ohDone              ; X past 511 does not fit the register: this sprite and every
-                                ;   one right of it is off the screen anyway
         jsr holeSlot
-        dec ohT
+ohNx:   dec ohT
         beq ohDone
-        inc ohP                 ; the halves are consecutive slots by construction, so the
-        clc                     ;   pointer walks and only the X advances
-        lda o0
-        adc ohW
-        sta o0
-        lda o1
+        inc ohP                 ; the slices are consecutive slots by construction, so the
+        clc                     ;   pointer walks and only the column advances
+        lda ohBL
+        adc ohWc
+        sta ohBL
+        lda ohBH
         adc #$00
-        sta o1
+        sta ohBH
         jmp ohLp
 ohDone: rts
 
@@ -8140,8 +8183,10 @@ orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte ${[...orbXC, HOLEX].join(',')}
-orbYCT: !byte ${[...orbYC, HOLEY].join(',')}
+orbXCT: !byte ${[...orbXC, ...HOLES_AT.map(h => h[0])].join(',')}
+orbYCT: !byte ${[...orbYC, ...HOLES_AT.map(h => h[1])].join(',')}
+landXT: !byte ${LANDS_AT.map(l => l[0]).join(',')}
+landYT: !byte ${LANDS_AT.map(l => l[1]).join(',')}
 orbColT2: !byte ${orbCol.join(',')}
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
