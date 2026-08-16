@@ -2257,6 +2257,17 @@ const mul40 = [...Array(26)].map((_, i) => i * 40);
 // line.) Parabolic rather than circular: a circle is nearly flat across the middle twenty
 // columns and only turns at the very edges, so the curve does not read.
 const HOLE_ARC = +(process.env.HOLE_ARC ?? 5);   // rows of droop at the extreme columns
+// ---- and the hole does not arrive until your head does ----
+// While the eye is still above the floor there is FLOOR below the departing view, not a hole.
+// So the drop fills white first and the black rim only rises once you have dropped far enough
+// to pass floor level. Filling black from the first frame made the hole look like it appeared
+// in front of you rather than something you fell into. fBlkT is black rows by travel/8.
+const WHITE_UNTIL = +(process.env.WHITE_UNTIL ?? 80);   // px of travel before the rim shows
+const fBlkT = [...Array(26)].map((_, t) => {
+  const p = t * 8;
+  return p <= WHITE_UNTIL ? 0
+    : Math.min(25, Math.round(25 * (p - WHITE_UNTIL) / (FALL_END - WHITE_UNTIL)));
+});
 const arcT = [...Array(40)].map((_, c) => {
   const u = (c - 19.5) / 19.5;
   return Math.round(HOLE_ARC * (1 - u * u));
@@ -2760,6 +2771,8 @@ ohBH    = $852d                  ;   249, so bit 7 of the low byte cannot carry 
 arcC    = $8532                  ; fdArc: the column it is darkening, how many rows, and the
 arcN    = $8533                  ;   flat boundary row the rim is measured from
 arcB    = $8534
+fdCol   = $8535                  ; what fdFill lays down: floor or hole
+arcMx   = $8536                  ; deepest the rim may cut: never more than the black behind it
 hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32 for the
 hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
@@ -7885,13 +7898,39 @@ fdK1:   sta fdK
         lda #25
         sec
         sbc fdK
-        sta arcB                ; dropping: the flat boundary is where the black begins
-        jsr fdCopy
-        lda fdK
+        jsr fdCopy              ; the scene, scrolled up by K rows
+        lda fPosH               ; how much of the gap below it is HOLE yet? None at all until
+        lsr                     ;   the eye has passed floor level -- see fBlkT. Before that it
+        lsr                     ;   is all floor, which is what makes this read as falling into
+        lsr                     ;   something rather than the hole appearing in front of you.
+        tax
+        lda fBlkT,x
+        cmp fdK
+        bcc fbOk
+        lda fdK                 ; never more black than there is room below the scene
+fbOk:   sta tmp
+        lda #25
+        sec
+        sbc tmp
+        sta arcB                ; the rim rides the top of the black
+        lda tmp
+        sta arcMx
+        lda #${hx(BLANK)}
+        sta fdCol
+        lda fdK                 ; floor first...
+        sec
+        sbc tmp
+        jsr fdFill
+        lda #${hx(SOLID)}
+        sta fdCol
+        lda tmp                 ; ...then the hole
         jsr fdFill
         jmp fdArc
-fdNeg:  lda fdK                 ; destination starts K rows in; the black goes first
-        sta arcB                ; landing: the flat boundary is where the content begins
+fdNeg:  lda #${hx(SOLID)}       ; landing: still inside the shaft, so the band above the rising
+        sta fdCol               ;   scene is all hole. Its own floor arrives with it.
+        lda fdK
+        sta arcB
+        sta arcMx
         jsr fdFill
         lda #25
         sec
@@ -7940,8 +7979,11 @@ fdArc:  lda #39
         sta arcC
 fdaLp:  ldx arcC
         lda arcT,x
-        beq fdaNx               ; middle columns: the boundary is already where it belongs
-        sta arcN
+        cmp arcMx               ; the rim can never be deeper than the black behind it, so it
+        bcc fdaD                ;   GROWS IN as the hole arrives instead of appearing at full
+        lda arcMx               ;   depth the moment the first black row does -- and at zero
+fdaD:   beq fdaNx               ;   depth there is no rim at all, which is the point before
+        sta arcN                ;   your head has passed floor level
         lda fSro
         bpl fdaUp
         lda arcB                ; landing: black is ABOVE, so grow downward from the edge
@@ -7984,7 +8026,7 @@ fdaNx:  dec arcC
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
         beq fdfDn
-fdfRow: lda #${hx(SOLID)}
+fdfRow: lda fdCol
         ldy #39
 fdfB:   sta (fdD),y             ; the same four-way unroll: 11 cycles a byte down to 8.75
         dey
@@ -8275,6 +8317,7 @@ holeSeeT: !byte ${holeSee.join(",")}
 ${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
 mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}
+fBlkT: !byte ${fBlkT.join(',')}
 arcT: !byte ${arcT.join(',')}` : ''}
         * = ${hx16(ORB_SMALL)}
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----

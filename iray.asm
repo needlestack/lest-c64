@@ -311,6 +311,8 @@ ohBH    = $852d                  ;   249, so bit 7 of the low byte cannot carry 
 arcC    = $8532                  ; fdArc: the column it is darkening, how many rows, and the
 arcN    = $8533                  ;   flat boundary row the rim is measured from
 arcB    = $8534
+fdCol   = $8535                  ; what fdFill lays down: floor or hole
+arcMx   = $8536                  ; deepest the rim may cut: never more than the black behind it
 hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32 for the
 hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
@@ -5165,13 +5167,39 @@ fdK1:   sta fdK
         lda #25
         sec
         sbc fdK
-        sta arcB                ; dropping: the flat boundary is where the black begins
-        jsr fdCopy
-        lda fdK
+        jsr fdCopy              ; the scene, scrolled up by K rows
+        lda fPosH               ; how much of the gap below it is HOLE yet? None at all until
+        lsr                     ;   the eye has passed floor level -- see fBlkT. Before that it
+        lsr                     ;   is all floor, which is what makes this read as falling into
+        lsr                     ;   something rather than the hole appearing in front of you.
+        tax
+        lda fBlkT,x
+        cmp fdK
+        bcc fbOk
+        lda fdK                 ; never more black than there is room below the scene
+fbOk:   sta tmp
+        lda #25
+        sec
+        sbc tmp
+        sta arcB                ; the rim rides the top of the black
+        lda tmp
+        sta arcMx
+        lda #$00
+        sta fdCol
+        lda fdK                 ; floor first...
+        sec
+        sbc tmp
+        jsr fdFill
+        lda #$01
+        sta fdCol
+        lda tmp                 ; ...then the hole
         jsr fdFill
         jmp fdArc
-fdNeg:  lda fdK                 ; destination starts K rows in; the black goes first
-        sta arcB                ; landing: the flat boundary is where the content begins
+fdNeg:  lda #$01       ; landing: still inside the shaft, so the band above the rising
+        sta fdCol               ;   scene is all hole. Its own floor arrives with it.
+        lda fdK
+        sta arcB
+        sta arcMx
         jsr fdFill
         lda #25
         sec
@@ -5220,8 +5248,11 @@ fdArc:  lda #39
         sta arcC
 fdaLp:  ldx arcC
         lda arcT,x
-        beq fdaNx               ; middle columns: the boundary is already where it belongs
-        sta arcN
+        cmp arcMx               ; the rim can never be deeper than the black behind it, so it
+        bcc fdaD                ;   GROWS IN as the hole arrives instead of appearing at full
+        lda arcMx               ;   depth the moment the first black row does -- and at zero
+fdaD:   beq fdaNx               ;   depth there is no rim at all, which is the point before
+        sta arcN                ;   your head has passed floor level
         lda fSro
         bpl fdaUp
         lda arcB                ; landing: black is ABOVE, so grow downward from the edge
@@ -5264,7 +5295,7 @@ fdaNx:  dec arcC
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
         beq fdfDn
-fdfRow: lda #$01
+fdfRow: lda fdCol
         ldy #39
 fdfB:   sta (fdD),y             ; the same four-way unroll: 11 cycles a byte down to 8.75
         dey
@@ -5555,6 +5586,7 @@ holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
+fBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,2,3,5,7,8,10,12,13,15,17,18,20,22,23,25
 arcT: !byte 0,0,1,1,2,2,3,3,3,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,3,3,3,2,2,1,1,0,0
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
