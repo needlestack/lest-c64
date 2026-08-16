@@ -141,10 +141,31 @@ const ccLo = Math.min(...cosCorr), ccHi = Math.max(...cosCorr);
 const hGrpOf = cosCorr.map(v => Math.min(HGROUPS - 1, Math.floor((v - ccLo) / (ccHi - ccLo + 1e-9) * HGROUPS)));
 const hRep = [...Array(HGROUPS)].map((_, g) => { const m = cosCorr.filter((_, i) => hGrpOf[i] === g);
   return m.length ? Math.round((Math.min(...m) + Math.max(...m)) / 2) : ccLo; });
-const colGrpT = hGrpOf.map(g => g * 3);         // page offset of this column's group
+const colGrpT = hGrpOf.map(g => g);            // this column's group IS its page in hTabT now
+// ---- ONE PAGE per group, not three: 1/d is nearly flat once it is small ----
+// Measured over a mid group: j 0-64 holds 52 distinct heights, but j 384-768 holds THREE. Half
+// the table was encoding eleven numbers. So the distance index is subsampled where the curve is
+// flat, on a scale whose zone boundaries are (page of j, top bit of j) -- so the runtime test is
+// a branch on bytes it already has, never arithmetic on a 16-bit j.
+//
+//   j   0.. 127  ->  y = j                      one entry per j, the near field
+//   j 128.. 255  ->  y = 128 + ((j&127) >> 1)   two
+//   j 256.. 511  ->  y = 192 + ((j>>8==1) ...)  eight
+//   j 512.. 767  ->  y = 224 + ...              sixteen
+//
+// 240 entries, so a group is one page and hTabT is 4,096 bytes against 12,288. Worst error is
+// 2 rows -- EXACTLY what the 16-group cosCorr quantisation already costs today, so the new scale
+// adds nothing to the worst case; mean error is 0.081 rows.
+//
+// It also makes an out-of-range j safe. m32LoT reaches j = 991 against HSPAN's 768, which used
+// to read into the NEXT group's pages; every zone here lands inside the group's own page.
+const hJofY = y => y < 128 ? y
+                 : y < 192 ? 128 + ((y - 128) << 1)
+                 : y < 224 ? 256 + ((y - 192) << 3)
+                 :           512 + ((y - 224) << 4);
 const hTab = [];
-for (let g = 0; g < HGROUPS; g++) for (let j = 0; j < HSPAN; j++)
-  hTab.push(Math.max(0, Math.min(254, Math.round(2816 / (Math.max(1, j) * hRep[g] / 256)))));
+for (let g = 0; g < HGROUPS; g++) for (let y = 0; y < 256; y++)
+  hTab.push(Math.max(0, Math.min(254, Math.round(2816 / (Math.max(1, hJofY(y)) * hRep[g] / 256)))));
 
 // ===== connected-wall-run ids =====
 // "Same wall" = same CONTIGUOUS run of wall faces, not merely the same plane. Two wall
@@ -5800,16 +5821,42 @@ cidxok: lda remL
         sta ppLo
         lda m32HiT,x
         adc #$00
-        sta ppHi                ; 0..2: which page inside this column's group
-        ldx col
-        lda colGrpT,x           ; group base, already scaled to pages
+        sta ppHi                ; 0..2: which 256 of the distance index j
+        ; ---- fold j onto the group's SINGLE page (see hJofY in the build) ----
+        ; Zone boundaries are the page of j and the top bit of its low byte, so this is two
+        ; branches on bytes already in hand -- no arithmetic on a 16-bit j. The near field
+        ; (j < 128, walls inside ~4 cells) is the common case and takes the short path.
+        lda ppHi
+        bne hzFar
+        lda ppLo
+        bpl hzDn                ; j 0..127: one table entry per j
+        and #$7f
+        lsr
+        ora #$80                ; j 128..255: two per entry. Bit 7 is set, so never zero
+        bne hzDn                ;   and this branch is unconditional
+hzFar:  lsr                     ; ppHi 1 -> C=1, ppHi 2 -> C=0
+        lda ppLo
+        bcc hzF2
+        lsr
+        lsr
+        lsr
         clc
-        adc ppHi
+        adc #192                ; j 256..511: eight per entry
+        bne hzDn                ; >= 192, so never zero
+hzF2:   lsr
+        lsr
+        lsr
+        lsr
+        clc
+        adc #224                ; j 512..767: sixteen per entry
+hzDn:   tay
+        ldx col
+        lda colGrpT,x           ; the group IS the page: one per group now, not three
+        clc
         adc #>hTabT
         sta hp+1
         lda #$00
         sta hp
-        ldy ppLo
         lda (hp),y
         sta pp
         rts
@@ -8256,9 +8303,23 @@ try {
     // A hole is only real free space if no RAM equate already lives in it -- the arrays in the
     // reclaimed charset source are exactly that case, and counting them as free is the mistake
     // the old headroom line made.
-    const holes = (r.holes ?? []).map(([lo, hi]) => {
-      const squatters = eqs.filter(([, a]) => a >= lo && a < hi).map(([n]) => n);
-      return [lo, hi, squatters];
+    // ...but SPLIT the gap at them rather than writing the whole thing off. A single equate in a
+    // 10K gap used to make all 10K read as occupied, which is a lie in the safe direction and
+    // exactly as unhelpful as the sprite-slot figure that counted the orbs as free room. A
+    // squatter's extent is unknown, so reserve its whole page and report what is left either side.
+    const holes = (r.holes ?? []).flatMap(([lo, hi]) => {
+      const pages = [...new Set(eqs.filter(([, a]) => a >= lo && a < hi)
+        .map(([, a]) => a & ~255))].sort((a, b) => a - b);
+      if (!pages.length) return [[lo, hi, []]];
+      const out = []; let at = lo;
+      for (const p of pages) {
+        if (p > at) out.push([at, p, []]);                       // free run before this squatter
+        at = Math.max(at, p + 256);
+      }
+      const names = eqs.filter(([, a]) => a >= lo && a < hi).map(([n]) => n);
+      out.push([pages[0], Math.min(hi, at), names]);             // the squatted pages themselves
+      if (at < hi) out.push([at, hi, []]);
+      return out.sort((a, b) => a[0] - b[0]);
     });
     const spendable = holes.filter(h => !h[2].length).reduce((a, [lo, hi]) => a + (hi - lo), 0);
     console.log(`image holes: ${holes.length}, ${spendable} bytes with nothing living in them` +
