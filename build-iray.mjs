@@ -2242,6 +2242,10 @@ const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // velocity it ends at (26.7 px/frame) becomes the landing speed -- so "terminal velocity" falls
 // out of the physics instead of being a second number to tune.
 const FALL = process.env.FALL !== '0';
+const FROWT   = 0x6600;                          // 30 x 32: the camera-height row map. Not in
+                                                 //   RELOC, which is full to the image end, and
+                                                 //   not inline: 960 bytes pushed the data
+                                                 //   segment through ORB_SMALL at $3300.
 const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: the frozen frame
 const FALL_END = 200;                            // pixels of travel per phase = screen height
 // ---- how long the drop takes, and how smooth it can possibly be ----
@@ -2293,6 +2297,41 @@ const arcD = [...Array(40)].map((_, c) =>
 // hole, but nothing is on screen to compare it against once the fall starts.
 const ARC_R = +(process.env.ARC_R ?? HOLER);
 const ARC_K = Math.round(16 * 88 / (ARC_R * 100));   // A = (|q| * ARC_K) >> 4
+// ---- fRowT: the camera HEIGHT, as a destination-row -> source-row remap ----
+// Every floor-plane feature's distance from the horizon scales by s, and everything above it by
+// (2-s). Written per row that is one statement: A ROW MOVES UP BY ITS DISTANCE FROM THE HORIZON
+// TIMES (1-s) -- above and below alike, with row 100 the fixed point. So the "shear" is not a
+// shear and needs no 3D: it is a vertical remap of the frozen frame, and the copy loop already
+// walks a source pointer row by row. The renderer cannot do this itself at any price, because it
+// draws the lower half as the MIRROR of the upper (charset B), which is only valid with the eye
+// exactly mid-wall -- the two halves need opposite scale factors here.
+//
+// Inverted for a destination-driven copy:
+//     row >= 100:  src = 100 + (row-100)/s        (no source once s <= 0: that is the hole)
+//     row <  100:  src = 100 - (100-row)/(2-s)
+// Below-horizon rows lose their source from the bottom up and never in the middle, so one byte
+// per frame (fwN, at offset 25) says where the content stops. 32-byte blocks so the index is a
+// shift; frame-indexed rather than fPosH-indexed because fPosH is quadratic and sharing a block
+// between two frames would read as a stall.
+const fRowT = (() => {
+  const out = []; let pos = 0, vel = 0;
+  for (let n = 0; n < FALL_FRAMES; n++) {
+    vel += FALL_ACC; pos += vel;
+    const ph = Math.min(FALL_END, pos >> 8), s = 1 - ph / 100;
+    const blk = new Array(32).fill(0); let nsrc = 25;
+    for (let R = 0; R < 25; R++) {
+      const pd = R * 8 + 4;
+      let sr = -1;
+      if (pd < 100) sr = Math.floor((100 - (100 - pd) / (2 - s)) / 8);
+      else if (s > 0) sr = Math.floor((100 + (pd - 100) / s) / 8);
+      if (sr < 0 || sr > 24) { if (pd >= 100 && nsrc === 25) nsrc = R; sr = 0; }
+      blk[R] = sr;
+    }
+    blk[25] = nsrc;
+    out.push(...blk);
+  }
+  return out;
+})();
 const HOLEBASE = 0xe800;                         // above the charsets: 75 slots do not fit in
                                                  //   the 48 between $c400 and the I/O hole, and
                                                  //   $e800-$ffb9 is the bank.s other free run
@@ -2796,6 +2835,9 @@ arcHi   = $81ca                  ; the LOWEST rim row over all 40 columns: whole
                                  ;   needs per-column work
 fdCol   = $81cb                  ; what fdFill lays down: floor or hole
 arcNg   = $81cc                  ; $ff once the eye is BELOW floor level and the arc inverts
+fFrm    = $81f8                  ; which frame of the drop: the index into fRowT. ABOVE arcR's
+fwRow   = $81f9                  ;   40 bytes -- $81cd is pd11, which the overlap check caught
+fwN     = $81fa
 arcR    = $81d0                  ; 40 bytes: the rim's character row per column
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
@@ -7727,6 +7769,8 @@ fallChk:ldx hlv
         sta fPosH
         sta fVelL
         sta fVelH
+        ldx #$ff                ; -1: the first fallStep advances it to fRowT block 0, which is
+        stx fFrm                ;   the state after one frame of travel
         lda #$01
         sta fallSt
         lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
@@ -7764,6 +7808,12 @@ fallStep:
         lda fallSt
         cmp #$03
         beq fstAdv              ; landing runs at the speed the drop ended at: no acceleration
+        ldx fFrm                ; advance the warp's frame index -- DROP ONLY, and up here
+        inx                     ; because everything below fstAdv is a branch target. Putting
+        cpx #${FALL_FRAMES}     ; this immediately before fstDrw hid it behind "bcc fstDrw":
+        bcc fstFOk              ; the counter never moved, fRowT block 0 is the identity, and
+        ldx #${FALL_FRAMES - 1} ; the fall rendered a frozen frame thirty times. Second time
+fstFOk: stx fFrm                ; this exact trap has bitten -- see bug 4 in [[iray-fall]].
         clc
         lda fVelL
         adc #${hx(FALL_ACC & 255)}
@@ -7821,22 +7871,20 @@ fstDrw: lda fPosH               ; whole rows = (px + 4) >> 3, the rounding that 
         lda fSro
         sbc #25                 ; landing: the source begins a full screen below
         sta fSro
-fstD1:  ; ---- carry the charset split with the content ----
-        ; Charset B is the mirrored half, used BELOW the horizon. The frozen frame's floor
-        ; scrolls up past a split that does not move, so those cells get drawn with charset A
-        ; un-mirrored -- which shows as the wall's BOTTOM edge going jagged a few frames in,
-        ; because that edge is exactly where the mirrored ramp and step glyphs live.
+fstD1:  ; ---- the split does not travel any more ----
+        ; fdWarp's fixed point is row 100: the horizon is the one row that does not move, because
+        ; content above it scales away and content below scales into it. So the split stays where
+        ; the renderer put it, and the fine scroll goes neutral -- with every row moving at its
+        ; own rate there is no uniform translation for a sub-row remainder to belong to. This
+        ; deletes the moving split and, with it, the whole jagged-wall-bottom failure mode.
         lda fallSt
         cmp #$03
         beq fsSpL
-        lda #${hx(SPLITLINE)}   ; dropping: the horizon rises by the travel so far
-        sec
-        sbc fPosH
-        bcc fsSpTop
-        cmp #50
-        bcs fsSpSt
-fsSpTop:lda #50                 ; horizon above the display: the whole screen is below it now
-        bne fsSpSt              ; always taken
+        lda #${hx(SPLITLINE)}
+        sta pSplit
+        lda #$13
+        sta pd11
+        jmp fallDraw
 fsSpL:  lda fPosH               ; landing: the new frame's horizon starts a screen BELOW and
         cmp #100                ;   comes up to meet the split
         bcc fsSpBot
@@ -7929,44 +7977,21 @@ fallLand:
 ; with black -- so the most expensive frame is the mid-point, not the end.
 fallDraw:
         lda fSro
-        bpl fdAbs
-        eor #$ff
-        clc
-        adc #$01
-fdAbs:  cmp #26
-        bcc fdK1
-        lda #25                 ; wholly off screen
-fdK1:   sta fdK
-        lda #$00
-        sta fdD
-        lda baseHi
-        sta fdD+1
-        lda #<${hx16(FALLBUF)}
-        sta fdS
-        lda #>${hx16(FALLBUF)}
-        sta fdS+1
-        ldx fdK
-        lda fSro
-        bmi fdNeg
-        clc                     ; source starts K rows in; the black goes after the copy
-        lda fdS
-        adc mul40LoT,x
-        sta fdS
-        lda fdS+1
-        adc mul40HiT,x
-        sta fdS+1
-        lda #25
-        sec
-        sbc fdK
-        jsr fdCopy              ; the scene, scrolled up by K rows
+        bmi fdNeg               ; landing: still the flat translating copy
+        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
         jsr arcCalc             ; where the rim sits in every column, and its lowest row
         lda #${hx(BLANK)}       ; FLOOR from the bottom of the departing scene down to the band:
         sta fdCol               ;   ground you have not fallen past yet. Whole rows, so it is the
-        lda arcHi               ;   cheap unrolled fill even though the boundary below it is not
-        clc                     ;   flat -- arcBand then eats into it per column.
-        adc fdK
+        ldx fwN                 ;   cheap unrolled fill even though the boundary below it is not
+        lda mul40LoT,x          ;   flat -- arcBand then eats into it per column.
+        sta fdD
+        lda mul40HiT,x
+        clc
+        adc baseHi
+        sta fdD+1
+        lda arcHi
         sec
-        sbc #25
+        sbc fwN
         bcc fbSkip              ; NEGATIVE means the rim has climbed ABOVE the scene's bottom
         jsr fdFill              ;   edge, which happens as soon as the eye passes floor level.
 fbSkip:                         ;   There is no floor left to draw then -- the hole covers scene.
@@ -7984,7 +8009,23 @@ fbSkip:                         ;   There is no floor left to draw then -- the h
         sec
         sbc arcHi
         jmp fdFill
-fdNeg:  lda #${hx(SOLID)}       ; landing: still inside the shaft, so the band above the rising
+fdNeg:  lda fSro                ; |fSro| rows of shaft above the rising scene
+        eor #$ff
+        clc
+        adc #$01
+        cmp #26
+        bcc fdK1
+        lda #25
+fdK1:   sta fdK
+        lda #$00
+        sta fdD
+        lda baseHi
+        sta fdD+1
+        lda #<${hx16(FALLBUF)}
+        sta fdS
+        lda #>${hx16(FALLBUF)}
+        sta fdS+1
+        lda #${hx(SOLID)}       ; landing: still inside the shaft, so the band above the rising
         sta fdCol               ;   scene is all hole. Its own floor arrives with it. The inverted
         lda fdK                 ;   arc belongs here and is not built yet -- the landing keeps the
         jsr fdFill              ;   flat boundary until the fall-in is signed off.
@@ -8031,6 +8072,81 @@ fdcDn:  rts
 ; against roughly 34,000 spare cycles in a 3-period fall frame -- which is why the shape is
 ; computed rather than stored: the table form would be 30 frames x 40 columns and buy nothing.
 ; mul8 clobbers X, so the column lives in Y throughout.
+; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
+; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
+; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
+; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
+; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
+; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
+; every row moving at its own rate there is no uniform translation left for one to carry.
+fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
+        and #$07                 ;   than held in zero page: the table is not page aligned, and
+        asl                      ;   a crossing costs one cycle on 25 reads.
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #<fRowT
+        sta fwLd+1
+        lda #$00
+        adc #$00
+        sta tmp                  ; carry out of the low byte
+        lda fFrm
+        lsr
+        lsr
+        lsr
+        clc
+        adc tmp
+        adc #>fRowT
+        sta fwLd+2
+        ldy #25
+fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
+        sta fwN
+        lda #$00
+        sta fwRow
+fwLp:   lda fwRow
+        cmp fwN
+        bcs fwDn
+        tay
+        lda fwLd+1               ; re-read the row map through the same patched operand
+        sta fwT+1
+        lda fwLd+2
+        sta fwT+2
+fwT:    lda $ffff,y
+        tax
+        lda mul40LoT,x
+        clc
+        adc #<${hx16(FALLBUF)}
+        sta fdS
+        lda mul40HiT,x
+        adc #>${hx16(FALLBUF)}
+        sta fdS+1
+        ldx fwRow
+        lda mul40LoT,x
+        sta fdD
+        lda mul40HiT,x
+        clc
+        adc baseHi
+        sta fdD+1
+        ldy #39
+fwB:    lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        bpl fwB
+        inc fwRow
+        jmp fwLp
+fwDn:   rts
+
 arcCalc:lda #$00                ; q = 100 - fPosH, signed: how far the eye still is from the
         sta arcNg               ;   floor, positive above it and negative below
         lda #100
@@ -8535,6 +8651,8 @@ holeVarT: !byte ${holeVarT.join(',')}
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
+        * = ${hx16(FROWT)}
+fRowT: ${chunk(fRowT, 32).trim()}
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}

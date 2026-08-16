@@ -315,6 +315,9 @@ arcHi   = $81ca                  ; the LOWEST rim row over all 40 columns: whole
                                  ;   needs per-column work
 fdCol   = $81cb                  ; what fdFill lays down: floor or hole
 arcNg   = $81cc                  ; $ff once the eye is BELOW floor level and the arc inverts
+fFrm    = $81f8                  ; which frame of the drop: the index into fRowT. ABOVE arcR's
+fwRow   = $81f9                  ;   40 bytes -- $81cd is pd11, which the overlap check caught
+fwN     = $81fa
 arcR    = $81d0                  ; 40 bytes: the rim's character row per column
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
@@ -4975,6 +4978,8 @@ fallChk:ldx hlv
         sta fPosH
         sta fVelL
         sta fVelH
+        ldx #$ff                ; -1: the first fallStep advances it to fRowT block 0, which is
+        stx fFrm                ;   the state after one frame of travel
         lda #$01
         sta fallSt
         lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
@@ -5012,6 +5017,12 @@ fallStep:
         lda fallSt
         cmp #$03
         beq fstAdv              ; landing runs at the speed the drop ended at: no acceleration
+        ldx fFrm                ; advance the warp's frame index -- DROP ONLY, and up here
+        inx                     ; because everything below fstAdv is a branch target. Putting
+        cpx #30     ; this immediately before fstDrw hid it behind "bcc fstDrw":
+        bcc fstFOk              ; the counter never moved, fRowT block 0 is the identity, and
+        ldx #29 ; the fall rendered a frozen frame thirty times. Second time
+fstFOk: stx fFrm                ; this exact trap has bitten -- see bug 4 in [[iray-fall]].
         clc
         lda fVelL
         adc #$6e
@@ -5069,22 +5080,20 @@ fstDrw: lda fPosH               ; whole rows = (px + 4) >> 3, the rounding that 
         lda fSro
         sbc #25                 ; landing: the source begins a full screen below
         sta fSro
-fstD1:  ; ---- carry the charset split with the content ----
-        ; Charset B is the mirrored half, used BELOW the horizon. The frozen frame's floor
-        ; scrolls up past a split that does not move, so those cells get drawn with charset A
-        ; un-mirrored -- which shows as the wall's BOTTOM edge going jagged a few frames in,
-        ; because that edge is exactly where the mirrored ramp and step glyphs live.
+fstD1:  ; ---- the split does not travel any more ----
+        ; fdWarp's fixed point is row 100: the horizon is the one row that does not move, because
+        ; content above it scales away and content below scales into it. So the split stays where
+        ; the renderer put it, and the fine scroll goes neutral -- with every row moving at its
+        ; own rate there is no uniform translation for a sub-row remainder to belong to. This
+        ; deletes the moving split and, with it, the whole jagged-wall-bottom failure mode.
         lda fallSt
         cmp #$03
         beq fsSpL
-        lda #$96   ; dropping: the horizon rises by the travel so far
-        sec
-        sbc fPosH
-        bcc fsSpTop
-        cmp #50
-        bcs fsSpSt
-fsSpTop:lda #50                 ; horizon above the display: the whole screen is below it now
-        bne fsSpSt              ; always taken
+        lda #$96
+        sta pSplit
+        lda #$13
+        sta pd11
+        jmp fallDraw
 fsSpL:  lda fPosH               ; landing: the new frame's horizon starts a screen BELOW and
         cmp #100                ;   comes up to meet the split
         bcc fsSpBot
@@ -5177,44 +5186,21 @@ fallLand:
 ; with black -- so the most expensive frame is the mid-point, not the end.
 fallDraw:
         lda fSro
-        bpl fdAbs
-        eor #$ff
-        clc
-        adc #$01
-fdAbs:  cmp #26
-        bcc fdK1
-        lda #25                 ; wholly off screen
-fdK1:   sta fdK
-        lda #$00
-        sta fdD
-        lda baseHi
-        sta fdD+1
-        lda #<$6200
-        sta fdS
-        lda #>$6200
-        sta fdS+1
-        ldx fdK
-        lda fSro
-        bmi fdNeg
-        clc                     ; source starts K rows in; the black goes after the copy
-        lda fdS
-        adc mul40LoT,x
-        sta fdS
-        lda fdS+1
-        adc mul40HiT,x
-        sta fdS+1
-        lda #25
-        sec
-        sbc fdK
-        jsr fdCopy              ; the scene, scrolled up by K rows
+        bmi fdNeg               ; landing: still the flat translating copy
+        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
         jsr arcCalc             ; where the rim sits in every column, and its lowest row
         lda #$00       ; FLOOR from the bottom of the departing scene down to the band:
         sta fdCol               ;   ground you have not fallen past yet. Whole rows, so it is the
-        lda arcHi               ;   cheap unrolled fill even though the boundary below it is not
-        clc                     ;   flat -- arcBand then eats into it per column.
-        adc fdK
+        ldx fwN                 ;   cheap unrolled fill even though the boundary below it is not
+        lda mul40LoT,x          ;   flat -- arcBand then eats into it per column.
+        sta fdD
+        lda mul40HiT,x
+        clc
+        adc baseHi
+        sta fdD+1
+        lda arcHi
         sec
-        sbc #25
+        sbc fwN
         bcc fbSkip              ; NEGATIVE means the rim has climbed ABOVE the scene's bottom
         jsr fdFill              ;   edge, which happens as soon as the eye passes floor level.
 fbSkip:                         ;   There is no floor left to draw then -- the hole covers scene.
@@ -5232,7 +5218,23 @@ fbSkip:                         ;   There is no floor left to draw then -- the h
         sec
         sbc arcHi
         jmp fdFill
-fdNeg:  lda #$01       ; landing: still inside the shaft, so the band above the rising
+fdNeg:  lda fSro                ; |fSro| rows of shaft above the rising scene
+        eor #$ff
+        clc
+        adc #$01
+        cmp #26
+        bcc fdK1
+        lda #25
+fdK1:   sta fdK
+        lda #$00
+        sta fdD
+        lda baseHi
+        sta fdD+1
+        lda #<$6200
+        sta fdS
+        lda #>$6200
+        sta fdS+1
+        lda #$01       ; landing: still inside the shaft, so the band above the rising
         sta fdCol               ;   scene is all hole. Its own floor arrives with it. The inverted
         lda fdK                 ;   arc belongs here and is not built yet -- the landing keeps the
         jsr fdFill              ;   flat boundary until the fall-in is signed off.
@@ -5279,6 +5281,81 @@ fdcDn:  rts
 ; against roughly 34,000 spare cycles in a 3-period fall frame -- which is why the shape is
 ; computed rather than stored: the table form would be 30 frames x 40 columns and buy nothing.
 ; mul8 clobbers X, so the column lives in Y throughout.
+; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
+; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
+; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
+; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
+; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
+; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
+; every row moving at its own rate there is no uniform translation left for one to carry.
+fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
+        and #$07                 ;   than held in zero page: the table is not page aligned, and
+        asl                      ;   a crossing costs one cycle on 25 reads.
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #<fRowT
+        sta fwLd+1
+        lda #$00
+        adc #$00
+        sta tmp                  ; carry out of the low byte
+        lda fFrm
+        lsr
+        lsr
+        lsr
+        clc
+        adc tmp
+        adc #>fRowT
+        sta fwLd+2
+        ldy #25
+fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
+        sta fwN
+        lda #$00
+        sta fwRow
+fwLp:   lda fwRow
+        cmp fwN
+        bcs fwDn
+        tay
+        lda fwLd+1               ; re-read the row map through the same patched operand
+        sta fwT+1
+        lda fwLd+2
+        sta fwT+2
+fwT:    lda $ffff,y
+        tax
+        lda mul40LoT,x
+        clc
+        adc #<$6200
+        sta fdS
+        lda mul40HiT,x
+        adc #>$6200
+        sta fdS+1
+        ldx fwRow
+        lda mul40LoT,x
+        sta fdD
+        lda mul40HiT,x
+        clc
+        adc baseHi
+        sta fdD+1
+        ldy #39
+fwB:    lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        bpl fwB
+        inc fwRow
+        jmp fwLp
+fwDn:   rts
+
 arcCalc:lda #$00                ; q = 100 - fPosH, signed: how far the eye still is from the
         sta arcNg               ;   floor, positive above it and negative below
         lda #100
@@ -6164,6 +6241,37 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
+        * = $6600
+fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,0,24,0,0,0,0,0,0
+        !byte 1,2,3,4,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22,23,24,0,24,0,0,0,0,0,0
+        !byte 1,2,3,4,5,6,6,7,8,9,10,11,12,13,14,15,16,17,19,20,21,22,23,24,0,24,0,0,0,0,0,0
+        !byte 1,2,3,4,5,6,7,8,8,9,10,11,12,13,14,15,17,18,19,20,21,22,23,0,0,23,0,0,0,0,0,0
+        !byte 2,2,3,4,5,6,7,8,9,9,10,11,12,13,14,16,17,18,19,20,21,23,24,0,0,23,0,0,0,0,0,0
+        !byte 2,3,4,4,5,6,7,8,9,9,10,11,12,13,14,16,17,18,19,21,22,23,24,0,0,23,0,0,0,0,0,0
+        !byte 2,3,4,5,5,6,7,8,9,10,10,11,12,13,15,16,17,18,20,21,22,24,0,0,0,22,0,0,0,0,0,0
+        !byte 3,3,4,5,6,7,7,8,9,10,10,11,12,13,15,16,18,19,20,22,23,0,0,0,0,21,0,0,0,0,0,0
+        !byte 3,4,4,5,6,7,7,8,9,10,10,11,12,13,15,16,18,19,21,22,24,0,0,0,0,21,0,0,0,0,0,0
+        !byte 3,4,5,6,6,7,8,8,9,10,11,11,12,14,15,17,19,20,22,23,0,0,0,0,0,20,0,0,0,0,0,0
+        !byte 4,4,5,6,6,7,8,9,9,10,11,11,12,14,16,17,19,21,23,0,0,0,0,0,0,19,0,0,0,0,0,0
+        !byte 4,5,5,6,7,7,8,9,9,10,11,11,12,14,16,18,20,22,24,0,0,0,0,0,0,19,0,0,0,0,0,0
+        !byte 4,5,6,6,7,8,8,9,9,10,11,11,12,14,17,19,22,24,0,0,0,0,0,0,0,18,0,0,0,0,0,0
+        !byte 5,5,6,7,7,8,8,9,10,10,11,11,12,15,18,21,23,0,0,0,0,0,0,0,0,17,0,0,0,0,0,0
+        !byte 5,6,6,7,7,8,9,9,10,10,11,11,12,16,19,23,0,0,0,0,0,0,0,0,0,16,0,0,0,0,0,0
+        !byte 5,6,6,7,8,8,9,9,10,10,11,11,12,17,23,0,0,0,0,0,0,0,0,0,0,15,0,0,0,0,0,0
+        !byte 6,6,7,7,8,8,9,9,10,10,11,11,12,22,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0
+        !byte 6,6,7,7,8,8,9,9,10,10,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,0,0,0
+        !byte 6,7,7,8,8,9,9,10,10,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 6,7,7,8,8,9,9,10,10,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 7,7,8,8,8,9,9,10,10,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 7,7,8,8,9,9,9,10,10,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 7,8,8,8,9,9,10,10,10,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 7,8,8,9,9,9,10,10,10,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 8,8,8,9,9,9,10,10,11,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 8,8,9,9,9,10,10,10,11,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 8,8,9,9,9,10,10,10,11,11,11,12,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40
