@@ -303,9 +303,6 @@ fVelH   = $81c4
 fSro    = $81c5                  ; signed row offset: screen row r shows source row r + fSro
 fdK     = $81c6                  ; its magnitude, and the row counter the two loops share
 fdN     = $81c7
-onvO    = $8511                  ; slots holding ORBS. onv counts the hole's two as well, because
-                                 ;   osFlush must write them, but orbStamp must NOT walk them:
-                                 ;   a hole fills no slot fields and the stamp would read garbage
 ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohT     = $850f
 ohWc    = $852b                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
@@ -315,7 +312,6 @@ hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32
 hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
 pcell   = $8515                  ; the cell the player stands in, for the hole's LOS gate
-ohN     = $8516                  ; and how many sprite slots the hole took this frame
 odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 ocn3    = $852a
 obX     = $8530
@@ -3854,8 +3850,13 @@ ofyOk:  sta ofy
         clc
         adc px+1
         tax
-        stx pcell               ; kept for the hole's own LOS gate at obEnd, which is reached
-                                ;   through the beq below as well as through the loop
+        stx pcell
+        jsr holeOne             ; ---- the hole FIRST, before the orbs claim the slots ----
+                                ; It used to go last, so any frame with seven orbs on screen
+                                ; simply lost it -- a level exit blinking in and out as you
+                                ; walk is far worse than one orb fewer. The orb list is still
+                                ; nearest-first, so what it costs is the farthest orbs.
+        ldx pcell
         lda candCntT,x
         beq obEnd
         sta ocn
@@ -3902,38 +3903,7 @@ obNext: lda ocy
         lda ocy
         cmp ocn3
         bcc obLoop
-obEnd:  ; ---- the hole, projected last ----
-        ; Entry 34 in orbXCT/orbYCT, so it goes through orbOne unchanged and only the tail
-        ; differs. Last because the orb list is sorted nearest-first and sprite number decides
-        ; overlap priority, so the orbs should keep the low slots.
-        lda #$00
-        sta ohN                 ; slots the hole takes this frame, 0, 1 or 2
-        lda pcell               ; ---- the same LOS cull an orb gets, as one bit per cell ----
-        and #$07                ; A projection is ~2,400 cycles and this test is ~25, which is
-        tay                     ; the ratio the whole candidate-list scheme exists for. Without
-        lda pcell               ; it the hole paid full price every frame, including from cells
-        lsr                     ; it cannot be seen from at all -- most of them, in a maze.
-        lsr
-        lsr
-        clc
-        adc hlvOf               ; 32 bytes of map per hole; hlvOf picks the live one
-        tax
-        lda holeSeeT,x
-        and orbBitT,y
-        beq ohSkip
-        lda onv
-        cmp #$07
-        bcs ohSkip              ; needs TWO free slots, and a half-drawn hole is worse than none
-        lda hlv
-        clc
-        adc #$22 ; the live hole is entry ORBS.length + level in orbXCT/orbYCT
-        sta oidx
-        jsr orbOne
-ohSkip: lda onv                 ; the ORB count: orbStamp walks slots expecting obL/obR/obOcc and
-        sec                     ;   a hole fills none of them, so it would stamp occluder glyphs
-        sbc ohN                 ;   over a garbage cell range. The hole is always projected LAST,
-        sta onvO                ;   so subtracting its slots is enough to fence it off.
-        rts
+obEnd:  rts
 
 ; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
 ; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
@@ -3960,7 +3930,7 @@ ohSkip: lda onv                 ; the ORB count: orbStamp walks slots expecting 
 ;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
 ;     wall is occluding at the edge.
 orbStamp:
-        lda onvO                ; ORBS only -- the hole's slots carry no stamp state
+        lda onv
         beq oSDn
         sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
         lda #$00                ;   selection below leaves the cache base in A, and with this store
@@ -4896,6 +4866,31 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
 orbYes: rts
 orbNo:  rts
 
+; holeOne: the live hole's LOS gate and projection, run BEFORE the orb candidates so it can
+; never lose its sprite slots to them. A projection is ~2,400 cycles and this test is ~25,
+; which is the ratio the whole candidate-list scheme exists for -- without it the hole paid
+; full price every frame, including from cells it cannot be seen from at all, most of them.
+holeOne:lda pcell
+        and #$07
+        tay
+        lda pcell
+        lsr
+        lsr
+        lsr
+        clc
+        adc hlvOf               ; 32 bytes of map per hole; hlvOf picks the live one
+        tax
+        lda holeSeeT,x
+        and orbBitT,y
+        beq hoNo
+        lda hlv
+        clc
+        adc #$22 ; the live hole is entry ORBS.length + level in orbXCT/orbYCT
+        sta oidx
+        jmp orbOne              ; tail call: orbOne branches to holeTail on the index
+hoNo:   rts
+
+
 ; ================= the drop =================
 ; Both phases scroll the SAME way: a static source blitted at a signed row offset, black
 ; wherever the source does not reach. The drop scrolls the frozen last frame up and off
@@ -5033,6 +5028,11 @@ fstD1:  lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred
         jmp fallDraw
 fstEnd: lda #$00                ; landing over: hand the screen back to the renderer
         sta fallSt
+        sta renderCnt           ; and start the fps window fresh. It counts ticks per 16 RENDERED
+        lda frameCnt            ;   frames, and the fall advances the clock without rendering any
+        sta lastFrame           ;   -- so every drop poisoned the next reading. That is what the
+        lda frameCnt+1          ;   apparent frame-rate hit was: the counter, not the renderer.
+        sta lastFrame+1
         lda #$1b
         sta $d011
         ; fall through into fallInv
@@ -5305,6 +5305,9 @@ holeSlot:
         sta obP,x
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
+        sta obOcc,x             ; and bit 7 clear tells orbStamp to skip this slot: a hole fills
+                                ;   none of the stamp state, and it no longer sits reliably at
+                                ;   the END of the slot list where a count could fence it off
         lda ohF                 ; the two magnifications are decided SEPARATELY, from the
         and #$04                ;   ellipse's own visible width and height -- which is what lets
         beq ohNoX               ;   a near rung be 48 columns wide and 33 rows tall on two
@@ -5327,7 +5330,6 @@ ohNoY:  lda o0
         ora omX8
         sta omX8
 ohNo8:  inc onv
-        inc ohN                 ; so obEnd can fence the orb slots off from the hole's
         rts
 kSgn:   bmi kSgN
         lda #$00
@@ -5429,7 +5431,7 @@ orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72
         * = $3240
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
-holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,130,2,254,3,206,127,0,0
+holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,192,127,0,0
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
@@ -5484,9 +5486,9 @@ orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,1
 orbOccHiT: !byte 49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,50,50,50,50,50
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13,4,4
+orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13,4,13
 orbYCT: !byte 1,1,1,1,1,3,3,3,4,4,5,5,6,6,6,7,7,8,8,9,9,9,10,10,11,11,11,12,13,13,13,14,14,14,1,13
-landXT: !byte 1,1
+landXT: !byte 11,1
 landYT: !byte 13,1
 orbColT2: !byte 12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
