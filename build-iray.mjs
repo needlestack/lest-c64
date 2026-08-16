@@ -7726,7 +7726,7 @@ fstDrw: lda fPosH               ; whole rows = (px + 4) >> 3, the rounding that 
         lda fSro
         sbc #25                 ; landing: the source begins a full screen below
         sta fSro
-        ; ---- carry the charset split with the content ----
+fstD1:  ; ---- carry the charset split with the content ----
         ; Charset B is the mirrored half, used BELOW the horizon. The frozen frame's floor
         ; scrolls up past a split that does not move, so those cells get drawn with charset A
         ; un-mirrored -- which shows as the wall's BOTTOM edge going jagged a few frames in,
@@ -7752,7 +7752,7 @@ fsSpL:  lda fPosH               ; landing: the new frame's horizon starts a scre
 fsSpBot:lda #250                ; horizon still below the display: all of it is above the split
 fsSpSt: sta irqCmp+1
         sta irqArm+1
-fstD1:  lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred value
+        lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred value
         sec
         sbc fPosH
         and #$07
