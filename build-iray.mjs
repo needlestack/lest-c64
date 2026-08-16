@@ -7765,6 +7765,15 @@ fsSpSt: sta irqCmp+1
 fstEnd: lda #${hx(SPLITLINE)}
         sta irqCmp+1            ; horizon back where the renderer expects it
         sta irqArm+1
+        lda #$00                ; ...and DRAW the new level exactly in place before letting go.
+        sta fSro                ;   Returning without drawing left the buffer holding the last
+        jsr fallDraw            ;   landing frame, still ~26 px out of position, while the split
+                                ;   had already moved back to the horizon -- one frame of
+                                ;   mirrored glyphs where the two disagreed. $d011 goes to $1b
+                                ;   below, before the flip, which is right for a settled frame.
+        lda pa                  ; force orbMove to reproject: it early-outs on a still frame,
+        eor #$80                ;   and the player has not moved since the landing began, so
+        sta opa                 ;   the sprites we just cleared would never come back
         lda #$00                ; landing over: hand the screen back to the renderer
         sta fallSt
         sta renderCnt           ; and start the fps window fresh. It counts ticks per 16 RENDERED
@@ -7806,6 +7815,12 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
 fallLand:
         lda baseHi
         jsr fallSnap
+        lda #$00                ; the render that just ran turned the sprites back on, and
+        sta omEn                ;   osFlush still runs every landing frame -- so they would
+        sta omXX                ;   hang motionless while the world rose underneath them.
+        sta omYY                ;   Clear the buffer as the drop does; they come back when
+        sta omPri               ;   the renderer does.
+        sta omX8
         lda #$03
         sta fallSt
         lda #$00
