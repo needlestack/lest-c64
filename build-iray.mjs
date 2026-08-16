@@ -2243,8 +2243,17 @@ const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // out of the physics instead of being a second number to tune.
 const FALL = process.env.FALL !== '0';
 const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: the frozen frame
-const FALL_ACC = 455;                            // 8.8 px/frame^2
 const FALL_END = 200;                            // pixels of travel per phase = screen height
+// ---- how long the drop takes, and how smooth it can possibly be ----
+// FALL_PERIODS raster periods per animation frame, FALL_FRAMES frames to cover FALL_END pixels.
+// Those two are the whole tuning: duration = FRAMES * PERIODS / 60 seconds, and the LAST step --
+// terminal velocity, the biggest jump on screen -- is 2*END/(FRAMES+1) pixels. Acceleration is
+// then forced, not chosen: a = 2*END/(N(N+1)). Going slower buys smoothness quadratically, which
+// is why 15 frames at 30fps ended on a 25px lurch and 30 at 20fps ends on 13px for the same
+// 200px of travel. The landing inherits the drop's final speed by design, so it lengthens too.
+const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 3);   // 3 = a locked 20fps
+const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 30);   // 30 * 3 / 60 = 1.5s, 13px worst step
+const FALL_ACC = Math.round(2 * FALL_END * 256 / (FALL_FRAMES * (FALL_FRAMES + 1)));  // 8.8
 const FALLX = +(process.env.FALLX ?? 1), FALLY = +(process.env.FALLY ?? 13);   // where you land
 const mul40 = [...Array(26)].map((_, i) => i * 40);
 // ---- the hole's RIM: the edge the world slides past is an arc, not a straight line ----
@@ -2773,6 +2782,16 @@ arcN    = $81c9                  ;   flat boundary row the rim is measured from
 arcB    = $81ca
 fdCol   = $81cb                  ; what fdFill lays down: floor or hole
 arcMx   = $81cc                  ; deepest the rim may cut: never more than the black behind it
+pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
+pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
+                                 ;   content is in the BACK buffer -- writing the register inside
+                                 ;   fallStep showed the new scroll against the OLD frame for one
+                                 ;   60Hz frame, and since the scroll is (3-pos)&7 it steps
+                                 ;   BACKWARDS every time pos crosses a character. Measured on a
+                                 ;   frame-by-frame recording as +1, -4, +8/+5, -1, +2, +24 ...
+                                 ;   Same lesson as omEn: when the value is double buffered, the
+                                 ;   register is the wrong lever. See [[iray-fall]].
+fT0     = $81cf                  ; frameCnt at the last flip: the fall's constant-rate reference
 hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32 for the
 hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
@@ -2942,12 +2961,18 @@ cpChr:  txa
         and #$fc                ; %00 -- "and", where bank 0 was "ora #$03".
         sta $dd00
         lda #$13                ; 24-ROW MODE, ALWAYS. RSEL clear costs 4 pixels of border top
-        sta $d011               ; and bottom and buys two things: the partial character row that
+        sta pd11                ; and bottom and buys two things: the partial character row that
+        sta $d011               ; (pd11 is the value mnext republishes every frame, so it has to
+                                ;  start out agreeing with the register)
                                 ; YSCROLL exposes while scrolling is hidden, and -- because the
                                 ; fall needs 24-row mode anyway -- the screen no longer changes
                                 ; size when you drop into a hole. There is no transition to pop.
         lda #$18
         sta $d016               ; MCM: multicolor text -> 4 logical px per cell, 2 physical px each
+        lda #${hx(SPLITLINE)}
+        sta pSplit              ; the pending split starts where the renderer wants it
+        lda #$00
+        sta fT0
         lda #${hx(vm(SCR_A))}
         sta d018vm              ; display buffer A; IRQ ORs the charset bits per half-screen
         lda #${hx(vm(SCR_A) | CB_A)}
@@ -3108,7 +3133,7 @@ ${FALL ? `        lda fallSt              ; falling? then no input, no rays, no 
         cmp #$02
         beq mfRnd               ; except state 2, the single ordinary frame that draws the
         jsr fallStep            ;   level being landed in
-        jmp fmvs
+        jmp fwait
 mfIn:   ` : '        '}${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WIGGLE ? 'jsr wiggleStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${FALL ? `        jsr fallChk             ; stepped into the hole? the drop starts on this frame
         lda fallSt
@@ -3877,20 +3902,35 @@ pfNd:                           ; so a one-shot draw is only in one of them
         jsr computeFps
         lda #$00
         sta renderCnt
-noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falling through to fmvs
-                                ; instead gave every rendered frame the fall's extra raster period
-                                ; -- a whole period of 17,045 cycles added to a frame that already
-                                ; costs three or four of them, so ~a fifth of the frame rate, on
-                                ; the one path that was never meant to be locked to 30.
-fmvs:   lda $d012               ; the fall's own wait: burn one whole raster period so it runs
-        cmp #250                ;   at a LOCKED 30fps. The widest frame only just fits 60Hz, so
-        bne fmvs                ;   some spilled and the rate flipped -- and a varying rate is
-fmv2:   lda $d012               ;   what stutters. Twice the headroom, never a missed period.
-        cmp #250
-        beq fmv2
+noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falling through to the
+                                ; fall's wait gave every rendered frame an extra raster period --
+                                ; 17,045 cycles on a frame that already costs three or four of
+                                ; them, ~a fifth of the frame rate, on the one path that was
+                                ; never meant to be locked to a fixed rate.
+
+; ---- fwait: the fall's CONSTANT-RATE wait, ${FALL_PERIODS} raster periods per animation frame ----
+; Counting periods off frameCnt is what makes it constant. The old form -- spin to 250, then burn
+; one more period -- is only two periods while the frame's work fits inside the first; when it ran
+; past 250 the spin silently picked up a third, so the fall alternated 30 and 20fps. A rate that
+; VARIES reads as stutter far more than a low rate does. frameCnt is incremented by the top-of-frame
+; IRQ, so it keeps counting THROUGH the block copy: the deadline is absolute, not measured from
+; whenever the work happened to finish.
+fwait:  lda frameCnt
+        sec
+        sbc fT0
+        cmp #${FALL_PERIODS}
+        bcc fwait
 mvs:    lda $d012
         cmp #250
         bne mvs
+        lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
+        sta fT0                 ;   frame, so the next deadline is exactly fT0 + ${FALL_PERIODS}
+        lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
+        sta $d011               ;   flip below, so the fine scroll and the content it shifts reach
+        lda pSplit              ;   the screen on the same 60Hz frame. Written inside fallStep they
+        sta irqCmp+1            ;   landed a frame early, against the back buffer -- which is the
+        sta irqArm+1            ;   whole of the fall's backwards jitter. Raster 250 is in the
+                                ;   lower border, so both are safe to touch here.
         lda baseHi
         cmp #${hx(SCR_A >> 8)}
         bne mshB
@@ -7790,8 +7830,9 @@ fsSpL:  lda fPosH               ; landing: the new frame's horizon starts a scre
         sbc fPosH               ; 350 - pos, which fits a byte once pos has passed 100
         bne fsSpSt              ; 150..250 here, never zero
 fsSpBot:lda #250                ; horizon still below the display: all of it is above the split
-fsSpSt: sta irqCmp+1
-        sta irqArm+1
+fsSpSt: sta pSplit               ; PENDING, not the live operand: both of these describe the
+                                ; frame being drawn into the BACK buffer, so they may not take
+                                ; effect until it is on screen. mnext publishes them.
         lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred value
         sec
         sbc fPosH
@@ -7800,11 +7841,11 @@ fsSpSt: sta irqCmp+1
                                 ; YSCROLL off centre in 25-row mode leaves a partial character
                                 ; row exposed top and bottom, which reads as a jagged edge --
                                 ; 24-row mode crops four pixels each end and hides exactly that.
-        sta $d011
+        sta pd11
         jmp fallDraw
 fstEnd: lda #${hx(SPLITLINE)}
-        sta irqCmp+1            ; horizon back where the renderer expects it
-        sta irqArm+1
+        sta pSplit              ; horizon back where the renderer expects it -- pending, so it
+                                ;   lands with the settled frame drawn just below
         lda #$00                ; ...and DRAW the new level exactly in place before letting go.
         sta fSro                ;   Returning without drawing left the buffer holding the last
         jsr fallDraw            ;   landing frame, still ~26 px out of position, while the split
@@ -7822,7 +7863,7 @@ fstEnd: lda #${hx(SPLITLINE)}
         lda frameCnt+1          ;   apparent frame-rate hit was: the counter, not the renderer.
         sta lastFrame+1
         lda #$13                ; back to the resting mode, which is also 24 rows
-        sta $d011
+        sta pd11
         ; fall through into fallInv
 
 ; fallInv: forget both buffers' run caches. renderSym skips a column whose cached ceiling run
