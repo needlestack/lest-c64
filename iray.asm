@@ -3475,13 +3475,17 @@ irq:    pha
         and #$01
         beq irqd                ; not a raster IRQ
         lda $d012
-        cmp #$96
-        bcs irqSplit
+irqCmp: cmp #$96   ; operand PATCHED, not a variable read: the fall scrolls the
+        bcs irqSplit            ;   frozen frame past the horizon so the split has to travel
+                                ;   with it, but "cmp abs" costs two cycles more than "cmp #"
+                                ;   and that was enough to push the sta $d018 below past the
+                                ;   VIC's fetch point for the line -- the six-view error went
+                                ;   304 -> 547 on those two cycles alone.
         ; --- top of frame: select charset A, arm the split ---
         lda d018vm
         ora #$04
         sta $d018
-        lda #$96
+irqArm: lda #$96   ; operand patched alongside irqCmp
         sta $d012
         inc frameCnt
         bne irqd
@@ -5019,6 +5023,32 @@ fstDrw: lda fPosH               ; whole rows = (px + 4) >> 3, the rounding that 
         lda fSro
         sbc #25                 ; landing: the source begins a full screen below
         sta fSro
+        ; ---- carry the charset split with the content ----
+        ; Charset B is the mirrored half, used BELOW the horizon. The frozen frame's floor
+        ; scrolls up past a split that does not move, so those cells get drawn with charset A
+        ; un-mirrored -- which shows as the wall's BOTTOM edge going jagged a few frames in,
+        ; because that edge is exactly where the mirrored ramp and step glyphs live.
+        lda fallSt
+        cmp #$03
+        beq fsSpL
+        lda #$96   ; dropping: the horizon rises by the travel so far
+        sec
+        sbc fPosH
+        bcc fsSpTop
+        cmp #50
+        bcs fsSpSt
+fsSpTop:lda #50                 ; horizon above the display: the whole screen is below it now
+        bne fsSpSt              ; always taken
+fsSpL:  lda fPosH               ; landing: the new frame's horizon starts a screen BELOW and
+        cmp #100                ;   comes up to meet the split
+        bcc fsSpBot
+        lda #$5e
+        sec
+        sbc fPosH               ; 350 - pos, which fits a byte once pos has passed 100
+        bne fsSpSt              ; 150..250 here, never zero
+fsSpBot:lda #250                ; horizon still below the display: all of it is above the split
+fsSpSt: sta irqCmp+1
+        sta irqArm+1
 fstD1:  lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred value
         sec
         sbc fPosH
@@ -5029,7 +5059,10 @@ fstD1:  lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred
                                 ; 24-row mode crops four pixels each end and hides exactly that.
         sta $d011
         jmp fallDraw
-fstEnd: lda #$00                ; landing over: hand the screen back to the renderer
+fstEnd: lda #$96
+        sta irqCmp+1            ; horizon back where the renderer expects it
+        sta irqArm+1
+        lda #$00                ; landing over: hand the screen back to the renderer
         sta fallSt
         sta renderCnt           ; and start the fps window fresh. It counts ticks per 16 RENDERED
         lda frameCnt            ;   frames, and the fall advances the clock without rendering any
