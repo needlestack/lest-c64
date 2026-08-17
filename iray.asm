@@ -5168,9 +5168,16 @@ fdPol:  stx fdCol
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx fFrm
+        lda arcInv              ; the landing runs the crown's two speeds in the other order
+        bne apL
         lda arcYT,x
+        sta arcY
+        lda arcET,x
+        jmp apE
+apL:    lda arcYT2,x
         sta arcY                ; the crown's pixel row
-        lda arcET,x             ; and the signed depth: + is an arch, - is inverted
+        lda arcET2,x            ; and the signed depth: + is an arch, - is inverted
+apE:
         bpl apEP
         eor #$ff
         clc
@@ -6122,6 +6129,8 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         * = $6600          ; the fall's animation data, out of the image's own segment
 arcYT: !byte 200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte 20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
+arcYT2: !byte 200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0    ; the landing's mirrored schedule
+arcET2: !byte 20,15,11,6,2,253,249,244,239,236,236,236,236,236,236,236
 arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
 
         * = $8600

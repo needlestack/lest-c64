@@ -2364,16 +2364,24 @@ if (Math.round(ARC_AMP_RAW) > 120)
 // curved on the way out, which is what read as "archy at the top". Symmetry wants
 // ARC_SLOW = 1 + 2*ARC_AMP/100.
 const ARC_SLOW  = +(process.env.ARC_SLOW ?? 1.4);
-const [arcYT, arcET] = (() => {
+// The LANDING is the same motion with the crown's two speeds in the opposite order: slow to the
+// middle, then matching the edges. Both schedules run the crown 200 -> 0 and the depth +AMP ->
+// -AMP over the same edge travel, so they share v and FALL_FRAMES -- the drop HOLDS the arch and
+// then flips, the landing flips and then HOLDS. Mirror images in time.
+const arcSched = slowFirst => {
   const v = (100 + ARC_SLOW * 100) / (FALL_FRAMES - 1), Y = [], E = [];
   for (let n = 0; n < FALL_FRAMES; n++) {
     const d = n * v;                               // how far the EDGES have come
-    const y = d <= 100 ? 200 - d : 100 - (d - 100) / ARC_SLOW;
+    const y = slowFirst
+      ? (d <= 100 * ARC_SLOW ? 200 - d / ARC_SLOW : 100 - (d - 100 * ARC_SLOW))
+      : (d <= 100 ? 200 - d : 100 - (d - 100) / ARC_SLOW);
     Y.push(Math.max(0, Math.min(255, Math.round(y))));
     E.push(Math.round((200 + ARC_AMP - d) - y) & 255);
   }
   return [Y, E];
-})();
+};
+const [arcYT, arcET] = arcSched(false);
+const [arcYT2, arcET2] = arcSched(true);
 // FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
 // while the arc is being judged on its own: the scene sliding is a second effect competing for
 // attention with the one that has to work first.
@@ -8116,9 +8124,16 @@ fwDn:   rts
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx fFrm
+        lda arcInv              ; the landing runs the crown's two speeds in the other order
+        bne apL
         lda arcYT,x
+        sta arcY
+        lda arcET,x
+        jmp apE
+apL:    lda arcYT2,x
         sta arcY                ; the crown's pixel row
-        lda arcET,x             ; and the signed depth: + is an arch, - is inverted
+        lda arcET2,x            ; and the signed depth: + is an arch, - is inverted
+apE:
         bpl apEP
         eor #$ff
         clc
@@ -8764,6 +8779,8 @@ holeVarT: !byte ${holeVarT.join(',')}
         * = ${hx16(FROWT)}          ; the fall's animation data, out of the image's own segment
 arcYT: !byte ${arcYT.join(',')}     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte ${arcET.join(',')}
+arcYT2: !byte ${arcYT2.join(',')}    ; the landing's mirrored schedule
+arcET2: !byte ${arcET2.join(',')}
 arcD: !byte ${arcD.join(',')}
 ${FALLSCENE ? `        * = ${hx16(FROWT + 0x100)}
 fRowT: ${chunk(fRowT, 32).trim()}` : ''}
