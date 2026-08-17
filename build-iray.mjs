@@ -2276,27 +2276,40 @@ const mul40 = [...Array(26)].map((_, i) => i * 40);
 // The old arcT was a fixed parabola of HOLE_ARC rows, and fBlkT was a 26-entry step table that
 // advanced the black on a SEPARATE clock from the scroll -- which is what made the hole arrive in
 // 2-3 character-row jumps. Both are gone: A is derived from fPosH, so there is one clock.
-// arcD is the shape less its centre value, in 1/256ths, so row = 100 + A + (A*arcD[c] >> 8).
 const F_COL_ARC = 122.97;                        // logical (multicolor) columns per unit tangent
-const arcD = [...Array(40)].map((_, c) =>
-  Math.round(256 * (Math.sqrt(1 + ((4 * c + 1.5 - 80) / F_COL_ARC) ** 2) - 1)));
-// A comes from the geometry, and so does WHEN the rim appears -- neither is tuned. The scene's
-// bottom edge is the floor at d = 88/100 cells; under the uniform scroll it sits at row
-// 200 - fPosH, and physically at 100 + 100s. Equating them is the only self-consistent link:
-//
-//     s = 1 - fPosH/100,   A = 88s/r = 412 * s        (r = HOLER = 0.2134 cells)
-//
-// so A runs +412 -> -412 across the drop and the rim's crown only clears the bottom of the screen
-// at fPosH = 76 -- 38% in, after eleven of the thirty frames of wall movement. Flat at fPosH 100,
-// clear of the top at 124. That is the "it should not enter until your head is near the floor"
-// behaviour falling out of the vertical field of view rather than being dialled in.
-// ARC_R IS THE DWELL KNOB, and the only one. A sweeps at 88/(100*ARC_R) per unit of fPosH, so a
-// SMALL hole whips the arc past in a few frames and a large one lets it linger. At the true
-// HOLER the arc is on screen for the last 39% of the DISTANCE, which in an accelerating fall is
-// only ~6 of 30 frames; 0.35 puts it at ~11, 0.61 at ~15. Physically it should match the sprite
-// hole, but nothing is on screen to compare it against once the fall starts.
-const ARC_R = +(process.env.ARC_R ?? HOLER);
-const ARC_K = Math.round(16 * 88 / (ARC_R * 100));   // A = (|q| * ARC_K) >> 4
+// arcD is the SHAPE, normalised 0 at the centre to 255 at the extreme column, so the runtime
+// amplitude is directly the arc's depth in pixels: row(c) = Y + (E * arcD[c] >> 8).
+const arcDraw = [...Array(40)].map((_, c) =>
+  Math.sqrt(1 + ((4 * c + 1.5 - 80) / F_COL_ARC) ** 2) - 1);
+const arcD = arcDraw.map(v => Math.round(255 * v / Math.max(...arcDraw)));
+// ---- THE DEMO ANIMATION: the arc does NOT flatten into a line ----
+// The realistic version (A = 88s/r, the arc interpolating through flat at the horizon) is correct
+// and reads as almost nothing: the curve is only 19px deep and it is on screen for six frames.
+// This is the deliberately unrealistic one, and it communicates the situation better. THE EDGES
+// MOVE AT A CONSTANT SPEED THE WHOLE WAY; the CROWN pauses at the centre while the arc turns
+// inside out. Three phases, continuous at both joins:
+//   rise  crown 200 -> 100, E = +DEPTH        an arch, shape held
+//   flip  crown = 100,      E = +DEPTH -> -DEPTH   sides overtake the crown
+//   exit  crown 100 -> 0,   E = -DEPTH        the inverted arc leaves the top
+const ARC_DEPTH = +(process.env.ARC_DEPTH ?? 48);  // px between crown and edge. 19 was the real
+                                                   //   one and it read as a straight line.
+const [arcYT, arcET] = (() => {
+  const total = 200 + 2 * ARC_DEPTH, v = total / (FALL_FRAMES - 1), Y = [], E = [];
+  for (let n = 0; n < FALL_FRAMES; n++) {
+    const edge = 200 + ARC_DEPTH - n * v;
+    let y, e;
+    if (edge >= 100 + ARC_DEPTH) { y = edge - ARC_DEPTH; e = ARC_DEPTH; }
+    else if (edge >= 100 - ARC_DEPTH) { y = 100; e = edge - 100; }
+    else { y = edge + ARC_DEPTH; e = -ARC_DEPTH; }
+    Y.push(Math.max(0, Math.min(255, Math.round(y))));
+    E.push(Math.round(e) & 255);
+  }
+  return [Y, E];
+})();
+// FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
+// while the arc is being judged on its own: the scene sliding is a second effect competing for
+// attention with the one that has to work first.
+const FALLSCENE = process.env.FALLSCENE === '1';
 // ---- fRowT: the camera HEIGHT, as a destination-row -> source-row remap ----
 // Every floor-plane feature's distance from the horizon scales by s, and everything above it by
 // (2-s). Written per row that is one statement: A ROW MOVES UP BY ITS DISTANCE FROM THE HORIZON
@@ -2838,6 +2851,7 @@ arcNg   = $81cc                  ; $ff once the eye is BELOW floor level and the
 fFrm    = $81f8                  ; which frame of the drop: the index into fRowT. ABOVE arcR's
 fwRow   = $81f9                  ;   40 bytes -- $81cd is pd11, which the overlap check caught
 fwN     = $81fa
+arcY    = $81fb                  ; the crown's pixel row this frame
 arcR    = $81d0                  ; 40 bytes: the rim's character row per column
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
@@ -7978,23 +7992,16 @@ fallLand:
 fallDraw:
         lda fSro
         bmi fdNeg               ; landing: still the flat translating copy
-        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
-        jsr arcCalc             ; where the rim sits in every column, and its lowest row
-        lda #${hx(BLANK)}       ; FLOOR from the bottom of the departing scene down to the band:
-        sta fdCol               ;   ground you have not fallen past yet. Whole rows, so it is the
-        ldx fwN                 ;   cheap unrolled fill even though the boundary below it is not
-        lda mul40LoT,x          ;   flat -- arcBand then eats into it per column.
-        sta fdD
-        lda mul40HiT,x
-        clc
-        adc baseHi
+${FALLSCENE ? `        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
+` : ''}        jsr arcCalc             ; where the rim sits in every column, and its lowest row
+        lda #${hx(BLANK)}       ; everything above the arc is FLOOR. With FALLSCENE off that is
+        sta fdCol               ;   the whole screen down to the band: the drop blanks to white on
+        lda #$00                ;   its first frame and the arc is the only thing moving, so there
+        sta fdD                 ;   is ONE effect on screen to judge instead of two.
+        lda baseHi
         sta fdD+1
         lda arcHi
-        sec
-        sbc fwN
-        bcc fbSkip              ; NEGATIVE means the rim has climbed ABOVE the scene's bottom
-        jsr fdFill              ;   edge, which happens as soon as the eye passes floor level.
-fbSkip:                         ;   There is no floor left to draw then -- the hole covers scene.
+        jsr fdFill
         ldx arcHi               ; so point fdD at the band explicitly rather than relying on the
         lda mul40LoT,x          ;   fills to have walked there. Once the rim can be above the
         sta fdD                 ;   scene the three pieces no longer tile the screen in order,
@@ -8067,12 +8074,7 @@ fdcS2:  dec fdN
         bne fdcRow
 fdcDn:  rts
 
-; ---- arcCalc: where the rim sits in every column this frame ----
-; row(c) = 100 + A + ((A * arcD[c]) >> 8), A = 100 - fPosH/2.  One multiply a column, 40 a frame,
-; against roughly 34,000 spare cycles in a 3-period fall frame -- which is why the shape is
-; computed rather than stored: the table form would be 30 frames x 40 columns and buy nothing.
-; mul8 clobbers X, so the column lives in Y throughout.
-; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
+${FALLSCENE ? `; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
 ; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
 ; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
 ; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
@@ -8147,62 +8149,51 @@ fwB:    lda (fdS),y
         jmp fwLp
 fwDn:   rts
 
-arcCalc:lda #$00                ; q = 100 - fPosH, signed: how far the eye still is from the
-        sta arcNg               ;   floor, positive above it and negative below
-        lda #100
-        sec
-        sbc fPosH
-        bcs acQP
-        dec arcNg               ; $ff: past floor level, so the arc is about to invert
-        eor #$ff
-        clc
+` : ''}; ---- arcCalc: where the arc sits in every column this frame ----
+; row(c) = Y + (E * arcD[c] >> 8), Y and E straight out of the two animation tables. One
+; multiply a column, 40 a frame, against ~34,000 spare cycles in a 3-period fall frame.
+; mul8 clobbers X, so the column lives in Y throughout.
+arcCalc:ldx fFrm                ; the whole animation is two bytes a frame: where the crown is
+        lda arcYT,x             ;   and how deep the arc is, signed. See ARC_DEPTH.
+        sta arcY
+        lda arcET,x
+        bpl acEP
+        eor #$ff                ; negative: the arc has turned inside out and the edges are
+        clc                     ;   ABOVE the crown
         adc #$01
-acQP:   ldx #${hx(ARC_K)}       ; |A| = |q| * 88/(100*ARC_R), the sweep rate -- see ARC_R
-        stx mq
-        jsr mul8
-        ldx #$04
-acSh:   lsr phi                 ; >> 4, in 16 bits: the product reaches 6600 at the top of the
-        ror plo                 ;   fall and only the clamped tail of it is ever on screen
-        dex
-        bne acSh
-        lda phi
-        bne acSat
-        lda plo
-        cmp #121
-        bcc acAok
-acSat:  lda #120                ; past this the rim is off the screen in EVERY column, and the
-acAok:  sta arcA                ;   clamp makes that fall out of the row clamps below
+        ldx #$ff
+        stx arcNg
+        jmp acES
+acEP:   ldx #$00
+        stx arcNg
+acES:   sta arcA
         lda #$00
         sta arcHi
         ldy #39
 acLp:   lda arcD,y
         sta mq
         lda arcA
-        jsr mul8                ; phi = (|A| * arcD[c]) >> 8, the droop away from the centre
+        jsr mul8                ; phi = (|E| * arcD[c]) >> 8: this column's depth, in pixels
         lda arcNg
         bne acNeg
-        clc                     ; above floor level: an ARCH, centre highest
-        lda arcA
+        clc                     ; arch: edges below the crown
+        lda arcY
         adc phi
-        adc #100
+        bcs acMax               ; past the foot of the screen
         jmp acRow
-acNeg:  clc                     ; below it: the same curve inverted, centre lowest, and the
-        lda arcA                ;   whole thing climbing off the top of the screen
-        adc phi
-        cmp #101
-        bcs acZero
-        sta tmp
-        lda #100
+acMax:  lda #200
+        jmp acRow
+acNeg:  lda arcY                ; inverted: edges above it
         sec
-        sbc tmp
-        jmp acRow
-acZero: lda #$00                ; above the first row
+        sbc phi
+        bcs acRow
+        lda #$00                ; past the top
 acRow:  lsr
         lsr
         lsr                     ; pixels -> character rows
         cmp #26
         bcc acOk
-        lda #25                 ; below the last row: still off the foot of the screen
+        lda #25
 acOk:   sta arcR,y
         cmp arcHi
         bcc acNx
@@ -8651,8 +8642,11 @@ holeVarT: !byte ${holeVarT.join(',')}
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
-        * = ${hx16(FROWT)}
-fRowT: ${chunk(fRowT, 32).trim()}
+        * = ${hx16(FROWT)}          ; the fall's animation data, out of the image's own segment
+arcYT: !byte ${arcYT.join(',')}     ;   which has no slack left above ORB_SMALL at $3300
+arcET: !byte ${arcET.join(',')}
+${FALLSCENE ? `        * = ${hx16(FROWT + 0x100)}
+fRowT: ${chunk(fRowT, 32).trim()}` : ''}
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
