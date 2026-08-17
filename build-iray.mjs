@@ -2466,10 +2466,10 @@ const fRowT = (() => {
       else if (sc > 0) ps = 100 + (pd - (100 - t)) / sc;   // below it: slide AND compress
       else ps = 1e9;
       const sr = Math.floor(ps / 8);
-      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 0; }
+      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 255; }
       else blk[R] = sr;
     }
-    blk[25] = nsrc;
+    blk[25] = nsrc;                                  // the drop's content runs 0..nsrc-1
     out.push(...blk);
   }
   // SECOND ARC_N blocks: the landing. The new room slides IN from below and lands exactly in
@@ -2481,11 +2481,10 @@ const fRowT = (() => {
     const blk = new Array(32).fill(0); let nsrc = 25;
     for (let R = 0; R < 25; R++) {
       const sr = R - off;
-      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 0; }
-      else blk[R] = sr;
+      blk[R] = (sr < 0 || sr > 24) ? 255 : sr;       // 255 = this row has no source yet
     }
-    blk[25] = nsrc;
-    out.push(...blk);
+    blk[25] = 0;                                     // the landing's content runs off..24, at the
+    out.push(...blk);                                //   BOTTOM, so the hole fill starts at row 0
   }
   return out;
 })();
@@ -8041,14 +8040,12 @@ fsDone: lda #$13
 fstEnd: lda #${hx(SPLITLINE)}
         sta pSplit              ; horizon back where the renderer expects it -- pending, so it
                                 ;   lands with the settled frame drawn just below
-        lda #${hx(BLANK)}       ; the landing ends on a FULL WHITE screen and the renderer pops
-        sta fdCol               ;   the maze in next frame. Returning without drawing would leave
-        lda #$00                ;   the buffer holding a landing frame two flips stale.
-        sta fdD
-        lda baseHi
-        sta fdD+1
-        lda #25
-        jsr fdFill
+        lda #246                ; a settled frame wants A above the horizon and B below it
+        sta pSplit2
+        jsr fdWarp              ; and it wants the ROOM, in place. The last landing block is the
+                                ;   identity, so this is a straight copy -- filling white here
+                                ;   instead was a one-frame flash between the arc finishing and
+                                ;   the renderer taking over.
         lda pa                  ; force orbMove to reproject: it early-outs on a still frame,
         eor #$80                ;   and the player has not moved since the landing began, so
         sta opa                 ;   the sprites we just cleared would never come back
@@ -8213,7 +8210,7 @@ fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where con
         lda #$00
         sta fwRow
 fwLp:   lda fwRow
-        cmp fwN
+        cmp #25
         bcs fwDn
         tay
         lda fwLd+1               ; re-read the row map through the same patched operand
@@ -8221,6 +8218,8 @@ fwLp:   lda fwRow
         lda fwLd+2
         sta fwT+2
 fwT:    lda $ffff,y
+        cmp #255
+        beq fwSkip              ; no source for this row -- the landing's room has not reached it
         tax
         lda mul40LoT,x
         clc
@@ -8250,7 +8249,7 @@ fwB:    lda (fdS),y
         sta (fdD),y
         dey
         bpl fwB
-        inc fwRow
+fwSkip: inc fwRow
         jmp fwLp
 fwDn:   rts
 
@@ -8430,7 +8429,10 @@ apT1:   lda arcY
 apT2:   lsr
         lsr
         lsr                     ; -> character row
-        asl                     ; -> raster: 8 rows per cell, display starts 50 lines down
+        cmp #25                 ; CLAMP FIRST. arcY is 255 while the arc is off the foot, which
+        bcc apT2b               ;   gives row 31 -> 248 -> +50 = 298, and that wrapped to 42:
+        lda #24                 ;   below pSplit, so the clamp collapsed region B to nothing and
+apT2b:  asl                     ;   drew the whole lower screen in charset A.
         asl
         asl
         clc
