@@ -325,6 +325,10 @@ apSgn   = $81da                  ; fdRamp: which way the ramp leans, and its new
 apLo    = $81db
 apHi    = $81dc
 arcSh   = $81dd                  ; this frame's shear, 255 = none, 0 = flat against the horizon
+phA     = $81df                  ; the arc's row LAST time each buffer was drawn. The region below
+phB     = $81e0                  ;   it is already solid, so only the newly covered rows need
+                                 ;   painting -- and PER BUFFER, because each one is two animation
+                                 ;   frames stale.
 arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
@@ -4999,6 +5003,9 @@ fallChk:ldx hlv
         sta omX8
         ldx #$ff                ; -1: the first fallStep advances it to fRowT block 0, which is
         stx fFrm                ;   the state after one frame of travel
+        ldx #25                 ; and neither buffer has any of the new colour in it yet
+        stx phA
+        stx phB
         lda #$01
         sta fallSt
         lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
@@ -5067,10 +5074,11 @@ fstFOk: stx fFrm
         lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
         beq fsLand
-        lda #$96   ; DROP: the horizon split stays where the renderer put it -- the
-        sta pSplit              ;   frozen scene below it is MIRRORED and needs charset B. arcPrep
-        lda #$00                ;   sets the second split, at the top of the arc, where A has to
-        sta arcInv              ;   come back for the rim glyph.
+        ldx fFrm                ; DROP: the horizon TRAVELS now, because the room slides up with
+        lda arcSpT,x            ;   the arc. Below it the frozen scene is MIRRORED and needs
+        sta pSplit              ;   charset B; arcPrep sets the second split, at the top of the
+        lda #$00                ;   arc, where A has to come back for the rim glyph.
+        sta arcInv
         beq fsDone
 fsLand: lda #30                 ; LANDING: the same movement with the colours swapped -- white
         sta pSplit              ;   rising to replace the black. The rim is now SOLID above and
@@ -5142,6 +5150,9 @@ fallLand:
         sta omX8
         lda #$03
         sta fallSt
+        ldx #25                 ; the landing paints the OTHER colour, so neither buffer has any
+        stx phA                 ;   of it yet either
+        stx phB
         ldx #$ff                ; -1: fallStep advances it to arc frame 0, so the landing replays
         stx fFrm                ;   the same sixteen frames with the colours swapped. It must
         jmp fallStep            ;   overdraw the back buffer NOW -- the render that just ran is
@@ -5187,12 +5198,25 @@ fdNoF:
         adc baseHi
         sta fdD+1
         jsr arcBand             ; the curve itself, at pixel resolution via the ramps
-        lda arcBlw
-        sta fdCol
-        lda #25
+        lda arcBlw              ; ---- and only the rows that just CHANGED ----
+        sta fdCol               ; The arc only ever rises, so everything below where it was last
+        ldx #<phA               ; time this buffer was drawn is already painted. Fill from the
+        lda baseHi              ; new edge to the old one and no further: four rows on a typical
+        cmp #$e0  ; frame instead of up to twenty-five. Per buffer, because each is
+        beq fdPhA               ; two animation frames behind the other.
+        ldx #<phB
+fdPhA:  stx fdPh+1              ; both operands patched: one reads it, one writes it back
+        stx fdPhW+1
+fdPh:   lda phA
         sec
         sbc arcHi
-        jmp fdFill              ; and everything below it
+        bcs fdPh2
+        lda #$00                ; the arc went backwards: nothing new to cover
+fdPh2:  pha
+        lda arcHi
+fdPhW:  sta phA                 ; remember where it is now, for this buffer
+        pla
+        jmp fdFill
 
 ; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
 ; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
@@ -5450,9 +5474,9 @@ apT2:   lsr
         asl
         clc
         adc #50
-        cmp #$96   ; never ABOVE the horizon split: with the arc up there the scene
-        bcs apT3                ;   below is entirely covered by hole, which is mirror-invariant,
-        lda #$96   ;   so collapsing region B to nothing is right
+        cmp pSplit              ; never ABOVE the horizon split -- which now MOVES. With the arc
+        bcs apT3                ;   up there the scene below is entirely covered by hole, which is
+        lda pSplit              ;   mirror-invariant, so collapsing region B to nothing is right
 apT3:   cmp #246
         bcc apT4
         lda #246                ; off the foot: region B runs to the bottom. NOT 250 -- the
@@ -6455,6 +6479,8 @@ arcYT2: !byte 246,234,223,211,200,189,177,166,154,143,131,120,109,96,80,64,48,32
 arcET2: !byte 38,34,29,25,20,15,11,6,2,253,249,244,239,236,236,236,236,236,236,236
 arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
 arcShT: !byte 255,243,217,191,165,138,112,86,59,33,7,0,0,0,0,0,0,0,0,0
+arcTrT: !byte 0,7,23,39,55,71,87,103,119,135,151,164,175,186,198,209,221,232,244,255
+arcSpT: !byte 150,143,127,111,95,79,63,51,51,51,51,51,51,51,51,51,51,51,51,51
         * = $6700
 rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,101,255,88,26,170,0,255
         !byte 162,76,255,255,255,132,255,255,151,255,153,56,165,255,255,138,255,248,255,255,123,255,86,83
@@ -6469,25 +6495,25 @@ rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,10
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
         * = $6800
 fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,24,0,24,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,16,17,18,19,20,21,23,24,0,0,23,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,15,16,17,19,20,21,23,24,0,0,0,22,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,17,18,20,21,23,24,0,0,0,0,21,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,14,16,18,19,21,23,0,0,0,0,0,0,19,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,14,17,19,21,23,0,0,0,0,0,0,0,18,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,15,18,21,24,0,0,0,0,0,0,0,0,17,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,16,21,0,0,0,0,0,0,0,0,0,0,15,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,20,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,0,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,0,24,0,0,0,0,0,0
+        !byte 3,4,5,6,7,8,9,10,11,12,13,14,15,17,18,19,20,21,22,24,0,0,0,0,0,20,0,0,0,0,0,0
+        !byte 5,6,7,8,9,10,11,12,13,15,16,17,19,20,21,23,24,0,0,0,0,0,0,0,0,17,0,0,0,0,0,0
+        !byte 7,8,9,10,11,12,13,15,16,18,20,21,23,24,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0
+        !byte 9,10,11,12,14,15,17,19,21,23,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,0
+        !byte 11,12,14,16,19,21,23,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,0,0,0,0,0,0
+        !byte 15,18,21,23,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,0,0
+        !byte 24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $6b00
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.

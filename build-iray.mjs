@@ -2416,6 +2416,15 @@ const arcShT = arcYT.map(y => {
   const s = (y - 100) / (arcYT[0] - 100);
   return Math.max(0, Math.min(255, Math.round(255 * s)));
 });
+// ---- and the whole room SLIDES, at the crown's speed ----
+// The shear alone is not the effect: without the room going up with it there is nothing to fall
+// past. t is the crown's travel, so everything translates up at exactly the rate the rim rises,
+// and the below-horizon half compresses INTO that as it goes. The horizon therefore moves too --
+// it is at 100 - t on screen -- so the charset split has to travel with it again, which is what
+// arcSpT is. Above the horizon nothing shears, it just slides: those edges change too little to
+// see before they leave the top.
+const arcTrT = arcYT.map(y => Math.max(0, Math.min(255, arcYT[0] - y)));
+const arcSpT = arcTrT.map(t => Math.max(51, Math.min(246, 150 - t)));
 // FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
 // while the arc is being judged on its own: the scene sliding is a second effect competing for
 // attention with the one that has to work first.
@@ -2439,16 +2448,17 @@ const FALLSCENE = process.env.FALLSCENE !== '0';   // the sheared scene is the d
 const fRowT = (() => {
   const out = [];
   for (let n = 0; n < ARC_N; n++) {
-    const sc = arcShT[n] / 255;
+    const sc = arcShT[n] / 255, t = arcTrT[n];
     const blk = new Array(32).fill(0); let nsrc = 25;
     for (let R = 0; R < 25; R++) {
       const pd = R * 8 + 4;
-      let sr;
-      if (pd < 100) sr = R;                        // ABOVE THE HORIZON: left alone. The change
-      else if (sc > 0) sr = Math.floor((100 + (pd - 100) / sc) / 8);   // there is too small to
-      else sr = -1;                                //   notice before it leaves the top.
-      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; sr = 0; }
-      blk[R] = sr;
+      let ps;
+      if (pd < 100 - t) ps = pd + t;                       // above the horizon: pure slide
+      else if (sc > 0) ps = 100 + (pd - (100 - t)) / sc;   // below it: slide AND compress
+      else ps = 1e9;
+      const sr = Math.floor(ps / 8);
+      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 0; }
+      else blk[R] = sr;
     }
     blk[25] = nsrc;
     out.push(...blk);
@@ -2968,6 +2978,10 @@ apSgn   = $81da                  ; fdRamp: which way the ramp leans, and its new
 apLo    = $81db
 apHi    = $81dc
 arcSh   = $81dd                  ; this frame's shear, 255 = none, 0 = flat against the horizon
+phA     = $81df                  ; the arc's row LAST time each buffer was drawn. The region below
+phB     = $81e0                  ;   it is already solid, so only the newly covered rows need
+                                 ;   painting -- and PER BUFFER, because each one is two animation
+                                 ;   frames stale.
 arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
@@ -7913,6 +7927,9 @@ fallChk:ldx hlv
         sta omX8
         ldx #$ff                ; -1: the first fallStep advances it to fRowT block 0, which is
         stx fFrm                ;   the state after one frame of travel
+        ldx #25                 ; and neither buffer has any of the new colour in it yet
+        stx phA
+        stx phB
         lda #$01
         sta fallSt
         lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
@@ -7981,10 +7998,11 @@ fstFOk: stx fFrm
         lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
         beq fsLand
-        lda #${hx(SPLITLINE)}   ; DROP: the horizon split stays where the renderer put it -- the
-        sta pSplit              ;   frozen scene below it is MIRRORED and needs charset B. arcPrep
-        lda #$00                ;   sets the second split, at the top of the arc, where A has to
-        sta arcInv              ;   come back for the rim glyph.
+        ldx fFrm                ; DROP: the horizon TRAVELS now, because the room slides up with
+        lda arcSpT,x            ;   the arc. Below it the frozen scene is MIRRORED and needs
+        sta pSplit              ;   charset B; arcPrep sets the second split, at the top of the
+        lda #$00                ;   arc, where A has to come back for the rim glyph.
+        sta arcInv
         beq fsDone
 fsLand: lda #30                 ; LANDING: the same movement with the colours swapped -- white
         sta pSplit              ;   rising to replace the black. The rim is now SOLID above and
@@ -8056,6 +8074,9 @@ fallLand:
         sta omX8
         lda #$03
         sta fallSt
+        ldx #25                 ; the landing paints the OTHER colour, so neither buffer has any
+        stx phA                 ;   of it yet either
+        stx phB
         ldx #$ff                ; -1: fallStep advances it to arc frame 0, so the landing replays
         stx fFrm                ;   the same sixteen frames with the colours swapped. It must
         jmp fallStep            ;   overdraw the back buffer NOW -- the render that just ran is
@@ -8102,12 +8123,25 @@ fdNoF:
         adc baseHi
         sta fdD+1
         jsr arcBand             ; the curve itself, at pixel resolution via the ramps
-        lda arcBlw
-        sta fdCol
-        lda #25
+        lda arcBlw              ; ---- and only the rows that just CHANGED ----
+        sta fdCol               ; The arc only ever rises, so everything below where it was last
+        ldx #<phA               ; time this buffer was drawn is already painted. Fill from the
+        lda baseHi              ; new edge to the old one and no further: four rows on a typical
+        cmp #${hx(SCR_A >> 8)}  ; frame instead of up to twenty-five. Per buffer, because each is
+        beq fdPhA               ; two animation frames behind the other.
+        ldx #<phB
+fdPhA:  stx fdPh+1              ; both operands patched: one reads it, one writes it back
+        stx fdPhW+1
+fdPh:   lda phA
         sec
         sbc arcHi
-        jmp fdFill              ; and everything below it
+        bcs fdPh2
+        lda #$00                ; the arc went backwards: nothing new to cover
+fdPh2:  pha
+        lda arcHi
+fdPhW:  sta phA                 ; remember where it is now, for this buffer
+        pla
+        jmp fdFill
 
 ${FALLSCENE ? `; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
 ; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
@@ -8365,9 +8399,9 @@ apT2:   lsr
         asl
         clc
         adc #50
-        cmp #${hx(SPLITLINE)}   ; never ABOVE the horizon split: with the arc up there the scene
-        bcs apT3                ;   below is entirely covered by hole, which is mirror-invariant,
-        lda #${hx(SPLITLINE)}   ;   so collapsing region B to nothing is right
+        cmp pSplit              ; never ABOVE the horizon split -- which now MOVES. With the arc
+        bcs apT3                ;   up there the scene below is entirely covered by hole, which is
+        lda pSplit              ;   mirror-invariant, so collapsing region B to nothing is right
 apT3:   cmp #246
         bcc apT4
         lda #246                ; off the foot: region B runs to the bottom. NOT 250 -- the
@@ -8989,6 +9023,8 @@ arcYT2: !byte ${arcYT2.join(',')}    ; the landing's mirrored schedule
 arcET2: !byte ${arcET2.join(',')}
 arcD: !byte ${arcD.join(',')}
 arcShT: !byte ${arcShT.join(',')}
+arcTrT: !byte ${arcTrT.join(',')}
+arcSpT: !byte ${arcSpT.join(',')}
         * = ${hx16(FROWT + 0x100)}
 rampInv: ${chunk(rampInv).trim()}
 ${FALLSCENE ? `        * = ${hx16(FROWT + 0x200)}
