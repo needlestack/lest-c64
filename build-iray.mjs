@@ -2307,7 +2307,11 @@ const F_COL_ARC = 122.97;                        // logical (multicolor) columns
 //   0.80            0.05  0.21  0.50                    6.0 px
 //   0.92            0.04  0.18  0.45                    7.4 px
 //   1.00            0.03  0.13  0.34                   15.0 px  <- clamps to the steepest ramp
-const ARC_WIDE = +(process.env.ARC_WIDE ?? 1.0);
+// 0.92 is the least-squares fit to the exact MIDPOINT of the projection and the full circle,
+// taken over the whole profile rather than at one sample: 1.0 read as too round, the projection
+// as too much of an arch. It also keeps the steepest cell at 7.4px, well inside what one ramp
+// glyph can express, where 1.0 sat exactly on the CLO..CHI limit.
+const ARC_WIDE = +(process.env.ARC_WIDE ?? 0.92);
 const arcDraw = ARC_WIDE === 0
   ? [...Array(41)].map((_, e) => Math.sqrt(1 + ((4 * e - 80) / F_COL_ARC) ** 2) - 1)
   : [...Array(41)].map((_, e) => {
