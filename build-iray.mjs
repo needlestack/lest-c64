@@ -2207,7 +2207,11 @@ const orbVarT = [...Array(256)].map((_, h) => {
   const band = [];
   for (let v = 0; v < ORBWIDE.length; v++) {
     const lim = 251 - (150 - ORBANCH[v]);
-    const hs = [...Array(lim).keys()].filter(h => orbVarT[h] === v);
+    // Each rung is reached through its OWN distance map -- orbVarT for the round entities,
+    // angVarT for the tall ones. Testing every rung against orbVarT reported the entire angel
+    // ladder as dead, which it is not: it is simply never what a round thing asks for.
+    const vt = v >= ANG_V0 ? angVarT : orbVarT;
+    const hs = [...Array(lim).keys()].filter(h => vt[h] === v);
     band.push(hs.length ? `${ORBTALL[v]}h@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
       `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBTALL[v]}h/${ORBWIDE[v]}w UNREACHABLE`);
   }
