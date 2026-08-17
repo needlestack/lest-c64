@@ -5080,8 +5080,9 @@ fstFOk: stx fFrm
         lda #$00                ;   arc, where A has to come back for the rim glyph.
         sta arcInv
         beq fsDone
-fsLand: lda #30                 ; LANDING: the same movement with the colours swapped -- white
-        sta pSplit              ;   rising to replace the black. The rim is now SOLID above and
+fsLand: ldx fFrm                ; LANDING: the same movement with the colours swapped -- white
+        lda arcSp2T,x           ;   rising to replace the black, over the NEW room sliding up
+        sta pSplit              ;   into place. The rim is now SOLID above and
         lda #$ff                ;   BLANK below, which is the mirror of what the dictionary
         sta arcInv              ;   holds, so park the split ABOVE the display instead and let
                                 ;   charset B supply the other polarity. Every column flips on
@@ -5142,6 +5143,10 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
 ; as the scroll source, then immediately overdraw that buffer with the first landing frame --
 ; otherwise the flip would show the new level whole for one frame before the slide begins.
 fallLand:
+        lda baseHi              ; SNAPSHOT THE NEW ROOM. Without this the landing warps whatever
+        jsr fallSnap            ;   fallBuf still holds -- the room you just LEFT -- and replays
+                                ;   its slide under the inverted arc. That is the second room
+                                ;   going up in the middle of the fall.
         lda #$00                ; the render that just ran turned the sprites back on, and
         sta omEn                ;   osFlush still runs every landing frame -- so they would
         sta omXX                ;   hang motionless while the world rose underneath them.
@@ -5225,10 +5230,17 @@ fdPhW:  sta phA                 ; remember where it is now, for this buffer
 ; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
 ; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
 ; every row moving at its own rate there is no uniform translation left for one to carry.
-fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
-        and #$07                 ;   than held in zero page: the table is not page aligned, and
+fdWarp: lda arcInv               ; the landing's blocks follow the drop's in the same table
+        beq fdwD
+        lda fFrm
+        clc
+        adc #20
+        jmp fdwI
+fdwD:   lda fFrm
+fdwI:   sta apT
+        and #$07                 ; point the load at this frame's 32-byte block. Patched rather
+        asl                      ;   than held in zero page: the table is not page aligned, and
         asl                      ;   a crossing costs one cycle on 25 reads.
-        asl
         asl
         asl
         asl
@@ -5238,7 +5250,7 @@ fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block.
         lda #$00
         adc #$00
         sta tmp                  ; carry out of the low byte
-        lda fFrm
+        lda apT
         lsr
         lsr
         lsr
@@ -5618,81 +5630,6 @@ arcClp: clc
 aclZ:   lda #$00
 aclD:   rts
 
-; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
-; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
-; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
-; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
-; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
-; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
-; every row moving at its own rate there is no uniform translation left for one to carry.
-fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
-        and #$07                 ;   than held in zero page: the table is not page aligned, and
-        asl                      ;   a crossing costs one cycle on 25 reads.
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #<fRowT
-        sta fwLd+1
-        lda #$00
-        adc #$00
-        sta tmp                  ; carry out of the low byte
-        lda fFrm
-        lsr
-        lsr
-        lsr
-        clc
-        adc tmp
-        adc #>fRowT
-        sta fwLd+2
-        ldy #25
-fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
-        sta fwN
-        lda #$00
-        sta fwRow
-fwLp:   lda fwRow
-        cmp fwN
-        bcs fwDn
-        tay
-        lda fwLd+1               ; re-read the row map through the same patched operand
-        sta fwT+1
-        lda fwLd+2
-        sta fwT+2
-fwT:    lda $ffff,y
-        tax
-        lda mul40LoT,x
-        clc
-        adc #<$6200
-        sta fdS
-        lda mul40HiT,x
-        adc #>$6200
-        sta fdS+1
-        ldx fwRow
-        lda mul40LoT,x
-        sta fdD
-        lda mul40HiT,x
-        clc
-        adc baseHi
-        sta fdD+1
-        ldy #39
-fwB:    lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        bpl fwB
-        inc fwRow
-        jmp fwLp
-fwDn:   rts
-
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
         cmp #$00                ; explicit, not inherited: a zero count here would run the
         beq fdfDn              ;   dec/bne loop 256 times and blit 10KB over the program
@@ -6030,7 +5967,7 @@ mMskT: !byte 7,3,1,0
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8,8,8
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4
 orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
-orbOccHiT: !byte 107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,108,108,108,108,108
+orbOccHiT: !byte 109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,109,110,110,110,110,110
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13,4,13
@@ -6481,6 +6418,7 @@ arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,
 arcShT: !byte 255,243,217,191,165,138,112,86,59,33,7,0,0,0,0,0,0,0,0,0
 arcTrT: !byte 0,7,23,39,55,71,87,103,119,135,151,164,175,186,198,209,221,232,244,255
 arcSpT: !byte 150,143,127,111,95,79,63,51,51,51,51,51,51,51,51,51,51,51,51,51
+arcSp2T: !byte 246,246,246,246,246,246,246,246,246,246,246,246,246,246,230,214,198,182,166,150
         * = $6700
 rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,101,255,88,26,170,0,255
         !byte 162,76,255,255,255,132,255,255,151,255,153,56,165,255,255,138,255,248,255,255,123,255,86,83
@@ -6514,7 +6452,27 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $6b00
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,0,0,0,0,0,0,0
+        !byte 0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,0,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0
+        * = $6d00
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
 orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72,85,189,78,80,213,218,218,0,72,85,73,79,80,213,218,218,0,72,85,73,49,80,213,218,218,0,176,170,182,78,112,213,218,218,0,200,175,182,78,112,213,218,218,0,72,85,169,78,112,213,218,218,0,72,181,182,78,160,213,218,218,0,72,85,73,73,160,213,218,218,0,200,170,182,78,160,222,218,218,0,72,85,233,78,160,222,218,218,0,176,170,182,78,160,234,218,218,0,72,85,189,78,160,234,218,218,0,72,85,73,121,160,234,218,218,0,72,173,182,78,160,42,219,218,0,72,85,73,79,160,42,219,218,0,200,170,182,78,160,42,223,218,0,72,85,73,49,160,42,223,218,0,176,170,182,78,160,42,213,218,0,72,213,183,78,160,42,213,218,0,72,85,233,78,160,42,213,218,0,72,173,182,78,160,42,229,219,0,72,85,73,73,160,42,229,219,0,248,170,182,78,160,42,37,217,0,72,85,169,78,160,42,37,217,0,72,85,73,49,160,42,37,217,0,72,213,183,78,160,42,37,253,0,176,170,182,78,160,42,37,165,0,200,175,182,78,160,42,37,165,0,72,85,73,79,160,42,37,165,0,72,181,182,78,160,42,37,37,1,72,85,169,78,160,42,37,37,1,72,85,73,121,160,42,37,37,1

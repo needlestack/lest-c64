@@ -1717,7 +1717,7 @@ const ORB_VART     = 0x5d00;    // h -> size variant, 256
 const ORB_CANDCNT  = 0x5e00;    // per cell: how many candidates, 256
 const ORB_CANDLO   = 0x5f00;    // per cell: pointer to its list, lo/hi, 256 each
 const ORB_CANDHI   = 0x6000;
-const ORB_OCC      = 0x6b00;    // occluder masks, OCCBYTES x norbs. Out of the image segment
+const ORB_OCC      = 0x6d00;    // occluder masks, OCCBYTES x norbs. Out of the image segment
                                 //   entirely: at $3100 it capped the code, and fdRamp ran 3
                                 //   bytes past it. Addressed through the orbOccLo/Hi pointer
                                 //   pair, so it has no alignment or locality requirement, and
@@ -2425,6 +2425,14 @@ const arcShT = arcYT.map(y => {
 // see before they leave the top.
 const arcTrT = arcYT.map(y => Math.max(0, Math.min(255, arcYT[0] - y)));
 const arcSpT = arcTrT.map(t => Math.max(51, Math.min(246, 150 - t)));
+const arcTr2T = arcYT2.map(y => Math.max(0, Math.min(255, arcYT2[0] - y)));
+// The landing's split travels too: the new room's horizon starts below the screen and rises into
+// place, so charset A covers its ceiling half and B its floor half exactly as in an ordinary
+// frame. It reaches SPLITLINE on the last frame, which is where the renderer wants it.
+const arcSp2T = arcTr2T.map(t => {
+  const off = Math.round((arcTr2T[ARC_N - 1] - t) / 8);
+  return Math.max(51, Math.min(246, 150 + off * 8));
+});
 // FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
 // while the arc is being judged on its own: the scene sliding is a second effect competing for
 // attention with the one that has to work first.
@@ -2447,6 +2455,7 @@ const FALLSCENE = process.env.FALLSCENE !== '0';   // the sheared scene is the d
 // between two frames would read as a stall.
 const fRowT = (() => {
   const out = [];
+  // FIRST ARC_N blocks: the drop. Slide up, and compress the below-horizon half into it.
   for (let n = 0; n < ARC_N; n++) {
     const sc = arcShT[n] / 255, t = arcTrT[n];
     const blk = new Array(32).fill(0); let nsrc = 25;
@@ -2457,6 +2466,21 @@ const fRowT = (() => {
       else if (sc > 0) ps = 100 + (pd - (100 - t)) / sc;   // below it: slide AND compress
       else ps = 1e9;
       const sr = Math.floor(ps / 8);
+      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 0; }
+      else blk[R] = sr;
+    }
+    blk[25] = nsrc;
+    out.push(...blk);
+  }
+  // SECOND ARC_N blocks: the landing. The new room slides IN from below and lands exactly in
+  // place -- no shear yet. It still owes (200 - t) pixels of travel, so a destination row shows
+  // the source row that far above it, and rows whose source has not arrived yet show nothing.
+  for (let n = 0; n < ARC_N; n++) {
+    const t = arcTr2T[n];
+    const off = Math.round((arcTr2T[ARC_N - 1] - t) / 8);
+    const blk = new Array(32).fill(0); let nsrc = 25;
+    for (let R = 0; R < 25; R++) {
+      const sr = R - off;
       if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 0; }
       else blk[R] = sr;
     }
@@ -8004,8 +8028,9 @@ fstFOk: stx fFrm
         lda #$00                ;   arc, where A has to come back for the rim glyph.
         sta arcInv
         beq fsDone
-fsLand: lda #30                 ; LANDING: the same movement with the colours swapped -- white
-        sta pSplit              ;   rising to replace the black. The rim is now SOLID above and
+fsLand: ldx fFrm                ; LANDING: the same movement with the colours swapped -- white
+        lda arcSp2T,x           ;   rising to replace the black, over the NEW room sliding up
+        sta pSplit              ;   into place. The rim is now SOLID above and
         lda #$ff                ;   BLANK below, which is the mirror of what the dictionary
         sta arcInv              ;   holds, so park the split ABOVE the display instead and let
                                 ;   charset B supply the other polarity. Every column flips on
@@ -8066,6 +8091,10 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
 ; as the scroll source, then immediately overdraw that buffer with the first landing frame --
 ; otherwise the flip would show the new level whole for one frame before the slide begins.
 fallLand:
+        lda baseHi              ; SNAPSHOT THE NEW ROOM. Without this the landing warps whatever
+        jsr fallSnap            ;   fallBuf still holds -- the room you just LEFT -- and replays
+                                ;   its slide under the inverted arc. That is the second room
+                                ;   going up in the middle of the fall.
         lda #$00                ; the render that just ran turned the sprites back on, and
         sta omEn                ;   osFlush still runs every landing frame -- so they would
         sta omXX                ;   hang motionless while the world rose underneath them.
@@ -8150,10 +8179,17 @@ ${FALLSCENE ? `; ---- fdWarp: the drop's copy, one source row per DESTINATION ro
 ; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
 ; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
 ; every row moving at its own rate there is no uniform translation left for one to carry.
-fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
-        and #$07                 ;   than held in zero page: the table is not page aligned, and
+fdWarp: lda arcInv               ; the landing's blocks follow the drop's in the same table
+        beq fdwD
+        lda fFrm
+        clc
+        adc #${ARC_N}
+        jmp fdwI
+fdwD:   lda fFrm
+fdwI:   sta apT
+        and #$07                 ; point the load at this frame's 32-byte block. Patched rather
+        asl                      ;   than held in zero page: the table is not page aligned, and
         asl                      ;   a crossing costs one cycle on 25 reads.
-        asl
         asl
         asl
         asl
@@ -8163,7 +8199,7 @@ fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block.
         lda #$00
         adc #$00
         sta tmp                  ; carry out of the low byte
-        lda fFrm
+        lda apT
         lsr
         lsr
         lsr
@@ -8543,82 +8579,7 @@ arcClp: clc
 aclZ:   lda #$00
 aclD:   rts
 
-${FALLSCENE ? `; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
-; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
-; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
-; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
-; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
-; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
-; every row moving at its own rate there is no uniform translation left for one to carry.
-fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
-        and #$07                 ;   than held in zero page: the table is not page aligned, and
-        asl                      ;   a crossing costs one cycle on 25 reads.
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #<fRowT
-        sta fwLd+1
-        lda #$00
-        adc #$00
-        sta tmp                  ; carry out of the low byte
-        lda fFrm
-        lsr
-        lsr
-        lsr
-        clc
-        adc tmp
-        adc #>fRowT
-        sta fwLd+2
-        ldy #25
-fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
-        sta fwN
-        lda #$00
-        sta fwRow
-fwLp:   lda fwRow
-        cmp fwN
-        bcs fwDn
-        tay
-        lda fwLd+1               ; re-read the row map through the same patched operand
-        sta fwT+1
-        lda fwLd+2
-        sta fwT+2
-fwT:    lda $ffff,y
-        tax
-        lda mul40LoT,x
-        clc
-        adc #<${hx16(FALLBUF)}
-        sta fdS
-        lda mul40HiT,x
-        adc #>${hx16(FALLBUF)}
-        sta fdS+1
-        ldx fwRow
-        lda mul40LoT,x
-        sta fdD
-        lda mul40HiT,x
-        clc
-        adc baseHi
-        sta fdD+1
-        ldy #39
-fwB:    lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        bpl fwB
-        inc fwRow
-        jmp fwLp
-fwDn:   rts
-
-` : ''}fdFill: sta fdN                 ; A rows of black, advancing the destination only
+${FALLSCENE ? `` : ''}fdFill: sta fdN                 ; A rows of black, advancing the destination only
         cmp #$00                ; explicit, not inherited: a zero count here would run the
         beq fdfDn              ;   dec/bne loop 256 times and blit 10KB over the program
 fdfRow: lda fdCol
@@ -9025,6 +8986,7 @@ arcD: !byte ${arcD.join(',')}
 arcShT: !byte ${arcShT.join(',')}
 arcTrT: !byte ${arcTrT.join(',')}
 arcSpT: !byte ${arcSpT.join(',')}
+arcSp2T: !byte ${arcSp2T.join(',')}
         * = ${hx16(FROWT + 0x100)}
 rampInv: ${chunk(rampInv).trim()}
 ${FALLSCENE ? `        * = ${hx16(FROWT + 0x200)}
