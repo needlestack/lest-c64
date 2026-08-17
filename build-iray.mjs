@@ -2282,27 +2282,34 @@ const F_COL_ARC = 122.97;                        // logical (multicolor) columns
 const arcDraw = [...Array(40)].map((_, c) =>
   Math.sqrt(1 + ((4 * c + 1.5 - 80) / F_COL_ARC) ** 2) - 1);
 const arcD = arcDraw.map(v => Math.round(255 * v / Math.max(...arcDraw)));
-// ---- THE DEMO ANIMATION: the arc does NOT flatten into a line ----
-// The realistic version (A = 88s/r, the arc interpolating through flat at the horizon) is correct
-// and reads as almost nothing: the curve is only 19px deep and it is on screen for six frames.
-// This is the deliberately unrealistic one, and it communicates the situation better. THE EDGES
-// MOVE AT A CONSTANT SPEED THE WHOLE WAY; the CROWN pauses at the centre while the arc turns
-// inside out. Three phases, continuous at both joins:
-//   rise  crown 200 -> 100, E = +DEPTH        an arch, shape held
-//   flip  crown = 100,      E = +DEPTH -> -DEPTH   sides overtake the crown
-//   exit  crown 100 -> 0,   E = -DEPTH        the inverted arc leaves the top
+// ---- THE DEMO ANIMATION: the arc turns inside out on the way up ----
+// The realistic version (A = 88s/r, interpolating through flat at the horizon) is correct and
+// reads as almost nothing: 19px of curvature, on screen for six frames. This is the deliberately
+// unrealistic one, and it communicates the situation better.
+//
+// ONE RULE: the EDGES move at a constant speed the whole way, and the CROWN drops to HALF speed
+// once it reaches the middle. Everything else follows. While the crown is at full speed the arc
+// rises with its shape held; from the middle on, the edges gain on it at v/2 a frame, so the
+// curvature sweeps continuously from +DEPTH through flat to -DEPTH and the arc is fully inverted
+// just as it leaves the top. An earlier cut STOPPED the crown dead at the middle, which gave the
+// same inversion but with a visible hitch where it parked.
 const ARC_DEPTH = +(process.env.ARC_DEPTH ?? 48);  // px between crown and edge. 19 was the real
                                                    //   one and it read as a straight line.
+// ARC_SLOW is how much the crown slows, and it decides whether the inverted arc is ever SEEN.
+// The edges gain on the crown at v(1 - 1/k) while the crown moves at v/k, so the gap changes by
+// 1/(k-1) per pixel of crown travel -- and the crown has only 100px between the middle and the
+// top. At k=2 that is 1:1, so inverting from +48 to -48 costs 96px and the arc finishes turning
+// over exactly as it leaves: fully inverted, never on screen. k=3 halves the rate and the arc is
+// fully inverted with the crown still at row 52, so it travels the last quarter as a proper
+// upside-down arc.
+const ARC_SLOW  = +(process.env.ARC_SLOW ?? 2);
 const [arcYT, arcET] = (() => {
-  const total = 200 + 2 * ARC_DEPTH, v = total / (FALL_FRAMES - 1), Y = [], E = [];
+  const v = (100 + ARC_SLOW * 100) / (FALL_FRAMES - 1), Y = [], E = [];
   for (let n = 0; n < FALL_FRAMES; n++) {
-    const edge = 200 + ARC_DEPTH - n * v;
-    let y, e;
-    if (edge >= 100 + ARC_DEPTH) { y = edge - ARC_DEPTH; e = ARC_DEPTH; }
-    else if (edge >= 100 - ARC_DEPTH) { y = 100; e = edge - 100; }
-    else { y = edge + ARC_DEPTH; e = -ARC_DEPTH; }
+    const d = n * v;                               // how far the EDGES have come
+    const y = d <= 100 ? 200 - d : 100 - (d - 100) / ARC_SLOW;
     Y.push(Math.max(0, Math.min(255, Math.round(y))));
-    E.push(Math.round(e) & 255);
+    E.push(Math.round((200 + ARC_DEPTH - d) - y) & 255);
   }
   return [Y, E];
 })();

@@ -6144,8 +6144,8 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
         * = $6600          ; the fall's animation data, out of the image's own segment
-arcYT: !byte 200,190,180,169,159,149,139,129,118,108,100,100,100,100,100,100,100,100,100,100,92,82,71,61,51,41,31,20,10,0     ;   which has no slack left above ORB_SMALL at $3300
-arcET: !byte 48,48,48,48,48,48,48,48,48,48,46,36,26,15,5,251,241,230,220,210,208,208,208,208,208,208,208,208,208,208
+arcYT: !byte 200,190,179,169,159,148,138,128,117,107,98,93,88,83,78,72,67,62,57,52,47,41,36,31,26,21,16,10,5,0     ;   which has no slack left above ORB_SMALL at $3300
+arcET: !byte 48,48,48,48,48,48,48,48,48,48,46,41,36,31,26,20,15,10,5,0,251,245,240,235,230,225,220,214,209,204
 
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
