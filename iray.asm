@@ -337,6 +337,7 @@ pSplit2 = $81de                  ; the arc's split: charset A again from the rim
 pCh0    = $81e1                  ; which charset each of the three regions uses. The DROP wants
 pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
 arcSkip = $81e4                  ; the landing places its own splits
+arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, see the overlap
 pCh2    = $81e3                  ;   then A for the rim. The LANDING wants B,A,B: its rim is at
                                  ;   the TOP in the mirrored polarity, then the new room's ceiling
                                  ;   half, then its floor half. Same three-stage chain either way.
@@ -5056,9 +5057,14 @@ fsnLp:  lda (fdS),y
 fallStep:
         ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
         inx                     ;   counter. Up here because everything below is a branch target
-        cpx #20           ;   -- putting it lower hid it behind a branch once already.
-        bcc fstFOk
-        ldx #19       ; ---- this phase has run its course ----
+        ldy fallSt              ;   -- putting it lower hid it behind a branch once already.
+        cpy #$03                ; the DROP hands over ARC_OVERLAP frames early; its last frames
+        beq fstLim3             ;   are drawn on top of the landing's first ones
+        cpx #16
+        jmp fstLimD
+fstLim3:cpx #20
+fstLimD:bcc fstFOk
+        dex                     ; ---- this phase has run its course ----
         stx fFrm
         lda fallSt
         cmp #$03
@@ -5113,8 +5119,21 @@ fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, i
         sta arcInv              ;   holds, so park the split ABOVE the display instead and let
                                 ;   charset B supply the other polarity. Every column flips on
                                 ;   the same frame, so one raster line does the whole job.
-        lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+        cpx #4     ; still inside the overlap window? then the screen is the two
+        bcs fsL2                ;   RIMS and nothing else: A for the departing one at the top,
+        lda #$04        ;   B for the arriving one below it. The new room is held off
+        sta pCh0                ;   screen this early, so two regions is all it takes.
+        lda #$06
+        sta pCh1
+        sta pCh2
+        lda arcOvSpT,x
+        sta pSplit
+        lda #246
         sta pSplit2
+        jmp fsL3
+fsL2:   lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+        sta pSplit2
+fsL3:
         lda #$ff
         sta arcSkip             ; arcPrep must not overwrite pSplit2 on the landing
 fsDone: lda #$13
@@ -5249,7 +5268,45 @@ fdPh2:  pha
         lda arcHi
 fdPhW:  sta phA                 ; remember where it is now, for this buffer
         pla
-        jmp fdFill
+        jsr fdFill
+        ; ---- the DEPARTING arc, drawn over the top of an arriving one ----
+        ; Only for the first ARC_OVERLAP frames of the landing, and only ever above it: the two
+        ; rims never share a row (see arcOvSpT). Its polarity is the drop's -- floor above, hole
+        ; below -- so charset A, which is why pCh0 goes back to A through the window. No second
+        ; routine: fill BLANK down to where the rim bottoms out, then let arcBand lay the glyph
+        ; and run SOLID beneath it, which is exactly what it already does.
+        lda arcInv
+        beq fdTDn               ; drop frames have no tail to draw
+        lda fFrm
+        cmp #4
+        bcs fdTDn
+        clc
+        adc #16
+        sta arcIx
+        lda #$00
+        sta arcInv              ; drop tables, drop polarity
+        jsr arcPrep
+        lda #$00
+        sta fdCol
+        lda #$01
+        sta arcBlw
+        lda #$00
+        sta fdD
+        lda baseHi
+        sta fdD+1
+        lda arcHi
+        jsr fdFill              ; white from the top down to the rim's lowest row
+        ldx arcHi
+        lda mul40LoT,x
+        sta fdD
+        clc
+        lda mul40HiT,x
+        adc baseHi
+        sta fdD+1
+        jsr arcBand
+        lda #$ff
+        sta arcInv              ; put it back: the landing owns the rest of the phase
+fdTDn:  rts
 
 ; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
 ; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
@@ -5451,7 +5508,7 @@ fdrDn:  rts
 ; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
-arcPrep:ldx fFrm
+arcPrep:ldx arcIx
         lda arcShT,x
         sta arcSh               ; this frame's shear, for fdWarp's block and fdRamp
         lda arcInv              ; the landing runs the crown's two speeds in the other order
@@ -6443,15 +6500,18 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         * = $6600          ; the fall's animation data, out of the image's own segment
 arcYT: !byte 255,248,232,216,200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte 20,20,20,20,20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
-arcYT2: !byte 246,234,223,211,200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0    ; the landing's mirrored schedule
-arcET2: !byte 38,34,29,25,20,15,11,6,2,253,249,244,239,236,236,236,236,236,236,236
+arcYT2: !byte 200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0,0,0,0,0    ; the landing's mirrored schedule
+arcET2: !byte 20,15,11,6,2,253,249,244,239,236,236,236,236,236,236,236,236,236,236,236
 arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
 arcShT: !byte 255,243,217,191,165,138,112,86,59,33,7,0,0,0,0,0,0,0,0,0
 arcTrT: !byte 0,7,23,39,55,71,87,103,119,135,151,164,175,186,198,209,221,232,244,255
 arcSpT: !byte 150,143,127,111,95,79,63,51,51,51,51,51,51,51,51,51,51,51,51,51
-arcSp2T: !byte 246,246,246,246,246,246,242,226,210,194,186,178,162,154,138,122,106,90,74,58
-arcSp2bT: !byte 246,246,246,246,246,246,246,246,246,246,246,246,246,246,246,238,222,198,174,150
+arcSp2T: !byte 246,246,242,226,210,194,186,178,162,154,138,122,106,90,74,58,58,58,58,58
+arcSp2bT: !byte 246,246,246,246,246,246,246,246,246,246,246,238,222,206,190,174,174,174,174,150
 arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
+; the split for an overlap frame: between the departing arc's lowest row and the arriving one's
+; highest, so each rim sits in the charset its polarity needs
+arcOvSpT: !byte 90,74,66,58
         * = $6700
 rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,101,255,88,26,170,0,255
         !byte 162,76,255,255,255,132,255,255,151,255,153,56,165,255,255,138,255,248,255,255,123,255,86,83
@@ -6488,10 +6548,6 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,0,0,0,0,0,0,0
@@ -6502,7 +6558,11 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,0,0,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
         !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
         !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,0,0,0,0,0,0,0
         * = $6d00

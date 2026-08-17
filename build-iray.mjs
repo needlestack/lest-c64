@@ -2382,10 +2382,13 @@ const ARC_SLOW  = +(process.env.ARC_SLOW ?? 1.4);
 const ARC_LEAD = +(process.env.ARC_LEAD ?? 4);
 const ARC_N = FALL_FRAMES + ARC_LEAD;
 const ARC_V = (100 + ARC_SLOW * 100) / (FALL_FRAMES - 1);
-const arcSched = slowFirst => {
+// The LANDING takes no lead. ARC_LEAD exists so the walls can start moving before the rim shows,
+// and the landing has no walls to lead -- carrying it there just held the arriving arc off screen
+// through the whole overlap window, which is the one place it needs to be visible.
+const arcSched = (slowFirst, lead) => {
   const Y = [], E = [];
   for (let n = 0; n < ARC_N; n++) {
-    const d = (n - ARC_LEAD) * ARC_V;              // how far the EDGES have come; negative in lead
+    const d = (n - lead) * ARC_V;                  // how far the EDGES have come; negative in lead
     const y = slowFirst
       ? (d <= 100 * ARC_SLOW ? 200 - d / ARC_SLOW : 100 - (d - 100 * ARC_SLOW))
       : (d <= 100 ? 200 - d : 100 - (d - 100) / ARC_SLOW);
@@ -2404,8 +2407,8 @@ const rampInv = (() => {
   inv[BLANK] = 0xff; inv[SOLID] = 0xff;
   return inv;
 })();
-const [arcYT, arcET] = arcSched(false);
-const [arcYT2, arcET2] = arcSched(true);
+const [arcYT, arcET] = arcSched(false, ARC_LEAD);
+const [arcYT2, arcET2] = arcSched(true, 0);
 // ---- the SHEAR, tied to the crown ----
 // A wall bottom sits at 100 + colH and moves to 100 + s*colH, so the DEEPEST edge -- the one at
 // the very foot of the screen, colH 100 -- travels at exactly the crown's speed, and shallower
@@ -2431,6 +2434,15 @@ const arcTr2T = arcYT2.map(y => Math.max(0, Math.min(255, arcYT2[0] - y)));
 // polarities on one scanline, so instead of drawing the rim per-column we simply never let the
 // room and the arc share a raster. ARC_GAP rows of slack, so the split has somewhere to land.
 const ARC_GAP = +(process.env.ARC_GAP ?? 2);
+// ---- the two arcs OVERLAP ----
+// The drop hands over ARC_OVERLAP frames early and its last few frames are drawn on top of the
+// landing's first few, so the white arriving from the bottom is already climbing while the black
+// one is still leaving the top. One continuous action instead of two, which is the whole point of
+// a cut-scene. It stays TWO charset regions through the window because the new room is held
+// off-screen that early: A for the departing rim (floor above, hole below), B for the arriving
+// one (hole above, floor below).
+const ARC_OVERLAP = +(process.env.ARC_OVERLAP ?? 4);
+const ARC_DROP_N = ARC_N - ARC_OVERLAP;
 const arcSpan = (Y, E) => {                        // [topmost row, first row entirely past it]
   const dep = Math.round(Math.abs(E) * 255 / 256);
   const lo = E >= 0 ? Y : Y - dep, hi = E >= 0 ? Y + dep : Y;
@@ -3031,6 +3043,7 @@ pSplit2 = $81de                  ; the arc's split: charset A again from the rim
 pCh0    = $81e1                  ; which charset each of the three regions uses. The DROP wants
 pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
 arcSkip = $81e4                  ; the landing places its own splits
+arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, see the overlap
 pCh2    = $81e3                  ;   then A for the rim. The LANDING wants B,A,B: its rim is at
                                  ;   the TOP in the mirrored polarity, then the new room's ceiling
                                  ;   half, then its floor half. Same three-stage chain either way.
@@ -8021,9 +8034,14 @@ fsnLp:  lda (fdS),y
 fallStep:
         ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
         inx                     ;   counter. Up here because everything below is a branch target
-        cpx #${ARC_N}           ;   -- putting it lower hid it behind a branch once already.
-        bcc fstFOk
-        ldx #${ARC_N - 1}       ; ---- this phase has run its course ----
+        ldy fallSt              ;   -- putting it lower hid it behind a branch once already.
+        cpy #$03                ; the DROP hands over ARC_OVERLAP frames early; its last frames
+        beq fstLim3             ;   are drawn on top of the landing's first ones
+        cpx #${ARC_DROP_N}
+        jmp fstLimD
+fstLim3:cpx #${ARC_N}
+fstLimD:bcc fstFOk
+        dex                     ; ---- this phase has run its course ----
         stx fFrm
         lda fallSt
         cmp #$03
@@ -8078,8 +8096,21 @@ fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, i
         sta arcInv              ;   holds, so park the split ABOVE the display instead and let
                                 ;   charset B supply the other polarity. Every column flips on
                                 ;   the same frame, so one raster line does the whole job.
-        lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+        cpx #${ARC_OVERLAP}     ; still inside the overlap window? then the screen is the two
+        bcs fsL2                ;   RIMS and nothing else: A for the departing one at the top,
+        lda #${hx(CB_A)}        ;   B for the arriving one below it. The new room is held off
+        sta pCh0                ;   screen this early, so two regions is all it takes.
+        lda #${hx(CB_B)}
+        sta pCh1
+        sta pCh2
+        lda arcOvSpT,x
+        sta pSplit
+        lda #246
         sta pSplit2
+        jmp fsL3
+fsL2:   lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+        sta pSplit2
+fsL3:
         lda #$ff
         sta arcSkip             ; arcPrep must not overwrite pSplit2 on the landing
 fsDone: lda #$13
@@ -8215,7 +8246,45 @@ fdPh2:  pha
         lda arcHi
 fdPhW:  sta phA                 ; remember where it is now, for this buffer
         pla
-        jmp fdFill
+        jsr fdFill
+        ; ---- the DEPARTING arc, drawn over the top of an arriving one ----
+        ; Only for the first ARC_OVERLAP frames of the landing, and only ever above it: the two
+        ; rims never share a row (see arcOvSpT). Its polarity is the drop's -- floor above, hole
+        ; below -- so charset A, which is why pCh0 goes back to A through the window. No second
+        ; routine: fill BLANK down to where the rim bottoms out, then let arcBand lay the glyph
+        ; and run SOLID beneath it, which is exactly what it already does.
+        lda arcInv
+        beq fdTDn               ; drop frames have no tail to draw
+        lda fFrm
+        cmp #${ARC_OVERLAP}
+        bcs fdTDn
+        clc
+        adc #${ARC_DROP_N}
+        sta arcIx
+        lda #$00
+        sta arcInv              ; drop tables, drop polarity
+        jsr arcPrep
+        lda #${hx(BLANK)}
+        sta fdCol
+        lda #${hx(SOLID)}
+        sta arcBlw
+        lda #$00
+        sta fdD
+        lda baseHi
+        sta fdD+1
+        lda arcHi
+        jsr fdFill              ; white from the top down to the rim's lowest row
+        ldx arcHi
+        lda mul40LoT,x
+        sta fdD
+        clc
+        lda mul40HiT,x
+        adc baseHi
+        sta fdD+1
+        jsr arcBand
+        lda #$ff
+        sta arcInv              ; put it back: the landing owns the rest of the phase
+fdTDn:  rts
 
 ${FALLSCENE ? `; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
 ; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
@@ -8417,7 +8486,7 @@ fdrDn:  rts
 ; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
-arcPrep:ldx fFrm
+arcPrep:ldx arcIx
         lda arcShT,x
         sta arcSh               ; this frame's shear, for fdWarp's block and fdRamp
         lda arcInv              ; the landing runs the crown's two speeds in the other order
@@ -9037,6 +9106,13 @@ arcSpT: !byte ${arcSpT.join(',')}
 arcSp2T: !byte ${arcSp2T.join(',')}
 arcSp2bT: !byte ${arcSp2bT.join(',')}
 arcTopT: !byte ${arcTopT.join(',')}
+; the split for an overlap frame: between the departing arc's lowest row and the arriving one's
+; highest, so each rim sits in the charset its polarity needs
+arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
+  const d = arcSpan(arcYT[ARC_DROP_N + n], (arcET[ARC_DROP_N + n] << 24) >> 24)[1];
+  const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
+  return Math.max(51, Math.min(246, 50 + Math.min(d, l) * 8));
+}).join(',')}
         * = ${hx16(FROWT + 0x100)}
 rampInv: ${chunk(rampInv).trim()}
 ${FALLSCENE ? `        * = ${hx16(FROWT + 0x200)}
