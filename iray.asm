@@ -5041,9 +5041,14 @@ fallChk:ldx hlv
         asl
         asl
         sta hlvOf
-        lda #$02
+        ldx #$ff                ; the drop starts on THIS frame -- mfIn falls into fallStep and
+        stx fFrm                ;   draws frame 0, so stepping in and falling are the same frame
+        ldx #25
+        stx phA
+        stx phB
+        lda #$01
         sta fallSt
-        jsr fallInv             ; THE RENDER COMING NEXT FRAME DRAWS INTO A BUFFER THE PREVIOUS
+        jsr fallInv             ; THE RENDER COMING IN A FEW FRAMES DRAWS INTO A BUFFER A PREVIOUS
                                 ; FALL SCRIBBLED. Without this renderSym skips every column whose
                                 ; cached runs still look unchanged and leaves the LAST fall's
                                 ; destination sitting there -- the second drop showed the first
@@ -5109,7 +5114,14 @@ fstLimD:bcc fstFOk
         jsr fallInv             ; the fall scribbled both buffers behind renderSym's run cache
         ldx #$00                ; and THIS frame is landing frame 0, drawn without a gap
 fstFOk: stx fFrm
-        lda fallSt              ; ---- which way round is the arc drawn? ----
+        cpx #2   ; time to fetch the destination room? Ask for it NEXT frame; this
+        bne fstNR               ;   one still draws. fallLand snapshots it and hands back.
+        ldy fallSt
+        cpy #$01
+        bne fstNR
+        lda #$02
+        sta fallSt
+fstNR:  lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
         beq fsLand
         ldx fFrm                ; DROP: the horizon TRAVELS now, because the room slides up with
@@ -5213,23 +5225,20 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
 ; as the scroll source, then immediately overdraw that buffer with the first landing frame --
 ; otherwise the flip would show the new level whole for one frame before the slide begins.
 fallLand:
-        lda baseHi              ; the render that just ran is the DESTINATION room. Stash it and
-        jsr fallSnap2           ;   start the drop: from here the whole cut-scene runs without
-                                ;   another render, so nothing stalls it in the middle.
-        lda #$00                ; the render that just ran turned the sprites back on, and
-        sta omEn                ;   osFlush still runs every landing frame -- so they would
-        sta omXX                ;   hang motionless while the world rose underneath them.
-        sta omYY                ;   Clear the buffer as the drop does; they come back when
-        sta omPri               ;   the renderer does.
+        lda baseHi              ; the render that just ran is the DESTINATION room. Stash it, and
+        jsr fallSnap2           ;   the cut-scene never needs the renderer again.
+        lda #$00                ; the render turned the sprites back on, and osFlush runs every
+        sta omEn                ;   fall frame -- they would hang motionless while the world
+        sta omXX                ;   slid away behind them. Clear the BUFFER, not $d015.
+        sta omYY
+        sta omPri
         sta omX8
         lda #$01
-        sta fallSt              ; ...and it is the DROP that starts now
-        ldx #25
-        stx phA
-        stx phB
-        ldx #$ff
-        stx fFrm
-        jmp fallStep            ; overdraw the back buffer NOW -- the render that just ran is
+        sta fallSt              ; back to the drop, at the frame it was already on -- fFrm is NOT
+        ldx #25                 ;   reset, or the render would restart the fall. But the render
+        stx phA                 ;   overwrote the back buffer, so neither buffer can be assumed
+        stx phB                 ;   to hold the hole colour any more: the incremental fill has to
+        jmp fallStep            ;   start over. Then draw this frame over the render.            ; overdraw the back buffer NOW -- the render that just ran is
                                 ;   sitting in it and the flip would show the destination room
                                 ;   whole for one frame before the fall starts.
 
