@@ -2289,8 +2289,31 @@ const F_COL_ARC = 122.97;                        // logical (multicolor) columns
 // amplitude is directly the arc's depth in pixels: row(c) = Y + (E * arcD[c] >> 8).
 // Sampled at cell EDGES, 41 of them, because a ramp glyph is chosen by the boundary's height at
 // the left and right edge of the cell -- the centre value alone cannot pick a slope.
-const arcDraw = [...Array(41)].map((_, e) =>
-  Math.sqrt(1 + ((4 * e - 80) / F_COL_ARC) ** 2) - 1);
+//
+// ---- ARC_WIDE: how much of the hole's circle is on screen, and it is the SHAPE knob ----
+// sqrt(1+t^2)-1 is the true projection and it is very nearly a PARABOLA -- an arch. A circle seen
+// in perspective is an ELLIPSE, which is flatter across the middle and turns down much harder at
+// the sides, and its normalised top arc is 1 - sqrt(1 - x^2) whatever the ellipse's aspect. The
+// difference is not subtle: at half width the parabola has already dropped 27% of its depth and
+// the circle only 13%.
+//
+// ARC_WIDE is the fraction of the ellipse's half-width that the screen covers. At 1.0 the hole's
+// left and right extremes sit exactly at the screen edges, so you see the WHOLE dome and the
+// tangent goes vertical at the last column -- the most circular it can look. Below 1.0 the hole
+// is wider than the screen and you see only its flatter middle; as it tends to 0 it becomes the
+// parabola again. ARC_WIDE=0 selects the true projection instead.
+//   ARC_WIDE   depth at 1/4, 1/2, 3/4 width      steepest cell at DEPTH=48
+//   projection      0.07  0.27  0.58                    4.3 px
+//   0.80            0.05  0.21  0.50                    6.0 px
+//   0.92            0.04  0.18  0.45                    7.4 px
+//   1.00            0.03  0.13  0.34                   15.0 px  <- clamps to the steepest ramp
+const ARC_WIDE = +(process.env.ARC_WIDE ?? 1.0);
+const arcDraw = ARC_WIDE === 0
+  ? [...Array(41)].map((_, e) => Math.sqrt(1 + ((4 * e - 80) / F_COL_ARC) ** 2) - 1)
+  : [...Array(41)].map((_, e) => {
+      const x = ARC_WIDE * (e - 20) / 20;
+      return 1 - Math.sqrt(Math.max(0, 1 - x * x));
+    });
 const arcD = arcDraw.map(v => Math.round(255 * v / Math.max(...arcDraw)));
 // ---- THE DEMO ANIMATION: the arc turns inside out on the way up ----
 // The realistic version (A = 88s/r, interpolating through flat at the horizon) is correct and
