@@ -531,6 +531,14 @@ cpChr:  txa
         sta pSplit              ; the pending splits start where the renderer wants them
         lda #246
         sta pSplit2
+        lda #$04        ; AND THE PENDING CHARSETS. mnext publishes these into the IRQ's
+        sta pCh0                ;   three "ora #" operands every frame, not just during a fall,
+        sta pCh2                ;   so leaving them as power-on garbage ORed random bits into
+        lda #$06        ;   $d018 from the first frame: the whole screen came up as
+        sta pCh1                ;   noise. deadvars cannot see it -- they ARE written, just not
+        lda #$00                ;   before they are first read.
+        sta arcSkip
+        sta arcIx
         lda #$00
         sta arcSkip
         lda #$00
