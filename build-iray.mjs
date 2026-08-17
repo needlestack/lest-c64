@@ -2339,7 +2339,7 @@ const arcD = arcDraw.map(v => Math.round(255 * v / Math.max(...arcDraw)));
 // edge, which pinned the visible depth to ARC_DEPTH whatever w was -- cropping bent the curve but
 // never flattened it. arcD is still normalised to 255 at the edge, for the precision; the crop
 // is applied to the AMPLITUDE instead, which is the same thing without losing bits.
-const ARC_DEPTH = +(process.env.ARC_DEPTH ?? 240);
+const ARC_DEPTH = +(process.env.ARC_DEPTH ?? 100);
 const ARC_AMP_RAW = ARC_DEPTH * (1 - Math.sqrt(1 - ARC_WIDE * ARC_WIDE));
 const ARC_AMP = Math.max(0, Math.min(120, Math.round(ARC_AMP_RAW)));   // signed byte, and the
                                                                        // screen is only 200 tall
