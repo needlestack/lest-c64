@@ -2437,7 +2437,14 @@ const ARC_OVERLAP = +(process.env.ARC_OVERLAP ?? 4);
 // Which drop frame asks for the destination render. NOT frame 0: a render is ~4 raster periods
 // and at frame 0 nothing has moved yet, so it reads as hitting something rather than falling.
 // Two frames in, the room is already sliding and the hitch lands inside motion.
-const ARC_RENDER_AT = +(process.env.ARC_RENDER_AT ?? 2);
+// ---- the destination room is rendered IN SLICES, in the gaps the fall's own frames leave ----
+// A fall frame uses ~30,000 of its 51,135 cycle budget, so ~21,000 is going spare every frame and
+// there are ten frames before the room appears. The cast is interruptible (see subLp) and
+// renderSym takes a column range, so the whole render fits in that slack with nothing to stall
+// for. renderSym cannot write to fallBuf2 -- its fill chains bake the screen address in -- so a
+// slice renders into the BACK buffer and is copied out before the fall frame paints over it.
+const BG_ITERS = +(process.env.BG_ITERS ?? 40);   // subdivision pops per frame
+const BG_COLS  = +(process.env.BG_COLS ?? 10);    // columns drawn per frame
 const ARC_DROP_N = ARC_N - ARC_OVERLAP;
 const arcSpan = (Y, E) => {                        // [topmost row, first row entirely past it]
   const dep = Math.round(Math.abs(E) * 255 / 256);
@@ -3032,6 +3039,8 @@ pCh0    = $81e1                  ; which charset each of the three regions uses.
 pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
 arcSkip = $81e4                  ; the landing places its own splits
 arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, see the overlap
+rsHi    = $81eb                  ; renderSym's column range, 39..0 for an ordinary frame
+rsLo    = $81ec
 bgOn    = $81e6                  ; background render in progress: cap the subdivision loop
 bgN     = $81e7                  ; iterations left this frame
 bgMore  = $81e8                  ; $ff = the stack still has work on it
@@ -3404,22 +3413,19 @@ ${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster
 ` : ''}        jsr tickDelta
 ${FALL ? `        lda fallSt              ; falling? then no input, no rays, no renderSym -- one block
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
-        cmp #$02
-        beq mfRnd               ; except state 2, the single ordinary frame that draws the
-        jsr fallStep            ;   level being landed in
+        jsr fallStep
         jmp fwait
 mfIn:   ` : '        '}${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WIGGLE ? 'jsr wiggleStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
 ${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
-        cmp #$02                ; state 2 wants the RENDERER, not a fall frame: it is the one
-        beq mfRnd               ;   ordinary render of the destination room, which fallLand
-        jsr fallStep            ;   snapshots before the drop begins. fallChk used to set state 1
-        jmp mvs                 ;   here, where dropping straight into fallStep was right -- with
-                                ;   it setting 2 the render never ran and fallBuf2 kept the FIRST
-                                ;   destination for every later fall.
+        jsr fallStep            ; the destination render is a background job now -- no state
+        jmp mvs                 ;   between walking and falling
 mfRnd:  lda #$00
-        sta bgOn                ; the player's own frame is never capped
+        sta bgOn                ; the player's own frame is never capped, and draws every column
+        sta rsLo
+        lda #39
+        sta rsHi
         jsr rayAll              ; the cast is a SUBROUTINE now, so the fall can run it too --
         jmp subFin              ;   in slices, into a buffer, while the animation keeps moving
 rayCont:jmp subLp               ; resume a capped cast: everything it needs is still in RAM
@@ -4170,11 +4176,6 @@ pvNgD:  rts
 ` : ''}
 subFin:
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
-${FALL ? `        lda fallSt              ; the one ordinary frame of the level being landed in:
-        cmp #$02                ;   stash it as the scroll source and start the slide, before
-        bne mfNL                ;   the flip can show it whole for a frame
-        jsr fallLand
-mfNL:` : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg`}
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -4347,7 +4348,10 @@ rfCbS:  sta rfCw1+1
         sty rfCb2+1
 ${SEAMS ? '        sty rfCb3+1\n' : ''}
 
-        ldx #39                 ; X = cell column throughout; the chains use it as their index
+        ldx rsHi                ; X = cell column throughout; the chains use it as their index.
+                                ; A RANGE, not always 39..0: the fall renders the destination
+                                ; room a slice of columns at a time, in the gaps its own frames
+                                ; leave, so nothing has to stall for a whole render.
         ; The cell's min and max heights, computed HERE rather than in a pass of their own.
         ; prepCells walked these same 40 cell columns to write cmnT/cmxT for renderSym to read
         ; back one loop later -- 40 iterations of loop overhead and a store-then-load round
@@ -4740,8 +4744,10 @@ rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITH
         jmp (jv)                ; -> ascending chain -> jmp rfNext
 rfNext: ldx colc
         dex
-        bpl rfCol
-        rts
+        bmi rfDone              ; past column 0
+        cpx rsLo
+        bcs rfCol               ; still inside the slice
+rfDone: rts
 ${PLAN === 3 ? `
 ; calcM: A = w1 + w2, the two columns the bucket index does not carry. Same cap and clamp the
 ; endpoints get -- (h + K) must fit a signed byte, and clampT is the only thing that turns a
@@ -8039,6 +8045,8 @@ fallChk:ldx hlv
         stx phB
         lda #$01
         sta fallSt
+        sta bgPh                ; and start rendering the destination room IN THE BACKGROUND,
+                                ;   a slice per frame in the slack the fall leaves
         jsr fallInv             ; THE RENDER COMING IN A FEW FRAMES DRAWS INTO A BUFFER A PREVIOUS
                                 ; FALL SCRIBBLED. Without this renderSym skips every column whose
                                 ; cached runs still look unchanged and leaves the LAST fall's
@@ -8058,14 +8066,10 @@ fcNo:   rts
 
 ; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
 ; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
-fallSnap2:
-        sta fdS+1               ; ...and the same into the DESTINATION buffer
-        lda #${hx(FALLBUF2 >> 8)}
-        bne fsnGo               ; always taken: a page number
 fallSnap:
         sta fdS+1
         lda #${hx(FALLBUF >> 8)}
-fsnGo:  sta fdD+1
+        sta fdD+1
         lda #$00
         sta fdS
         sta fdD
@@ -8105,14 +8109,7 @@ fstLimD:bcc fstFOk
         jsr fallInv             ; the fall scribbled both buffers behind renderSym's run cache
         ldx #$00                ; and THIS frame is landing frame 0, drawn without a gap
 fstFOk: stx fFrm
-        cpx #${ARC_RENDER_AT}   ; time to fetch the destination room? Ask for it NEXT frame; this
-        bne fstNR               ;   one still draws. fallLand snapshots it and hands back.
-        ldy fallSt
-        cpy #$01
-        bne fstNR
-        lda #$02
-        sta fallSt
-fstNR:  lda fallSt              ; ---- which way round is the arc drawn? ----
+        lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
         beq fsLand
         ldx fFrm                ; DROP: the horizon TRAVELS now, because the room slides up with
@@ -8212,31 +8209,13 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
         bcc fivS
         rts
 
-; fallLand: called once, after the new view has been rendered into the back buffer. Stash it
-; as the scroll source, then immediately overdraw that buffer with the first landing frame --
-; otherwise the flip would show the new level whole for one frame before the slide begins.
-fallLand:
-        lda baseHi              ; the render that just ran is the DESTINATION room. Stash it, and
-        jsr fallSnap2           ;   the cut-scene never needs the renderer again.
-        lda #$00                ; the render turned the sprites back on, and osFlush runs every
-        sta omEn                ;   fall frame -- they would hang motionless while the world
-        sta omXX                ;   slid away behind them. Clear the BUFFER, not $d015.
-        sta omYY
-        sta omPri
-        sta omX8
-        lda #$01
-        sta fallSt              ; back to the drop, at the frame it was already on -- fFrm is NOT
-        ldx #25                 ;   reset, or the render would restart the fall. But the render
-        stx phA                 ;   overwrote the back buffer, so neither buffer can be assumed
-        stx phB                 ;   to hold the hole colour any more: the incremental fill has to
-        jmp fallStep            ;   start over. Then draw this frame over the render.            ; overdraw the back buffer NOW -- the render that just ran is
-                                ;   sitting in it and the flip would show the destination room
-                                ;   whole for one frame before the fall starts.
-
 ; fallDraw: one path for both phases. arcInv swaps which side of the rim is floor and which is
 ; hole; the arc itself -- crown, depth, profile -- is identical, so the world closing over you and
 ; the room opening under you are the same sixteen frames run twice.
 fallDraw:
+        jsr bgStep              ; a slice of the destination render first -- it draws into the
+                                ;   back buffer and copies itself out, and the fall frame below
+                                ;   then paints over the whole thing
         lda fFrm                ; which arc frame to draw. The overlap re-points this at a DROP
         sta arcIx               ;   frame further on, so it has to be reset every frame -- losing
                                 ;   this line left arcPrep reading whatever the tail draw set
@@ -8429,7 +8408,91 @@ fwSkip: inc fwRow
         jmp fwLp
 fwDn:   rts
 
-` : ''}; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
+` : ''}; ---- bgStep: one slice of the destination render, once per fall frame ----
+bgStep: lda bgPh
+        beq bgDn
+        cmp #$03
+        beq bgDn                ; finished: the room is waiting in fallBuf2
+        cmp #$02
+        beq bgDraw
+        ; ---- casting ----
+        lda #$ff
+        sta bgOn                ; cap the subdivision: it returns when the budget runs out
+        lda #${BG_ITERS}
+        sta bgN
+        lda #$00
+        sta bgMore
+        lda bgPh
+        cmp #$04
+        beq bgCont
+        jsr rayAll              ; first slice: prepCells, pivot, the two edge rays, then subLp
+        jmp bgCastD
+bgCont: jsr rayCont             ; later slices: straight back into subLp, sp untouched
+bgCastD:lda #$00
+        sta bgOn
+        lda bgMore
+        beq bgCast2
+        lda #$04                ; more on the stack
+        sta bgPh
+        rts
+bgCast2:lda #$02                ; cast done -- draw the columns next
+        sta bgPh
+        lda #39
+        sta bgCol
+        jmp fallInv             ; renderSym must not trust a cache the fall has been scribbling
+        ; ---- drawing ----
+bgDraw: lda bgCol
+        sta rsHi
+        sec
+        sbc #${BG_COLS - 1}
+        bcs bgD1
+        lda #$00
+bgD1:   sta rsLo
+        jsr renderSym
+        jsr bgCopy              ; out to fallBuf2 before the fall frame paints over it
+        lda rsLo
+        beq bgFin
+        sec
+        sbc #$01
+        sta bgCol
+        rts
+bgFin:  lda #$03
+        sta bgPh
+bgDn:   rts
+
+; bgCopy: columns rsLo..rsHi of the back buffer, into the same columns of fallBuf2.
+bgCopy: lda #$00
+        sta fdS
+        sta fdD
+        lda baseHi
+        sta fdS+1
+        lda #${hx(FALLBUF2 >> 8)}
+        sta fdD+1
+        ldx #25
+bgcRow: ldy rsLo
+bgcB:   lda (fdS),y
+        sta (fdD),y
+        cpy rsHi
+        beq bgcAdv
+        iny
+        jmp bgcB
+bgcAdv: clc
+        lda fdS
+        adc #40
+        sta fdS
+        bcc bgcS1
+        inc fdS+1
+bgcS1:  clc
+        lda fdD
+        adc #40
+        sta fdD
+        bcc bgcS2
+        inc fdD+1
+bgcS2:  dex
+        bne bgcRow
+        rts
+
+; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx arcIx
