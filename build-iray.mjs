@@ -2188,9 +2188,17 @@ const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
 // search can only ever return the first of a pair. ORBSCALE keeps its meaning (the ball's
 // diameter in pixels at h = 88, a width) and is converted through the top rung's own aspect, so
 // the tuning knob is unchanged.
-// and the angel's own distance->variant map, offset into the shared list
+// and the angel's own distance->variant map, offset into the shared list.
+// A floor-to-ceiling object is 2*ohgt pixels tall -- a wall spans 100-ohgt to 100+ohgt -- so a
+// figure ANGH of that height wants 2*ohgt*ANGH. The FOOT stands on the floor at row 100+ohgt,
+// which reaches the bottom of the screen at ohgt = 100, and 2*100*0.42 = 84 is exactly the top
+// rung: so the angel hits full size just as it starts to leave the frame, and not before.
+// It saturated at 2.1 cells before because the target was the orb's, doubled by guess.
+// 0.42 of wall height is what a 2-sprite ladder can reach; more sprites would allow a taller
+// figure, the way the hole grew a 3-sprite near field.
+const ANGH = +(process.env.ANGH ?? 0.42);
 const angVarT = [...Array(256)].map((_, h) => {
-  const want = (ORBSCALE * h / 88) * (ORBTALL[ANG_V0] / ORBWIDE[ANG_V0]) * 2;
+  const want = 2 * h * ANGH;
   let b = ANG_V0;
   for (let v = ANG_V0 + 1; v < ORBTALL.length; v++)
     if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
