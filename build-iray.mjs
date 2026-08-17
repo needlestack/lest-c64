@@ -2971,7 +2971,9 @@ arcSh   = $81dd                  ; this frame's shear, 255 = none, 0 = flat agai
 arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
-pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
+pSplit  = $81ce
+pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
+                                 ;   The fine scroll belongs to the content it shifts, and that
                                  ;   content is in the BACK buffer -- writing the register inside
                                  ;   fallStep showed the new scroll against the OLD frame for one
                                  ;   60Hz frame, and since the scroll is (3-pos)&7 it steps
@@ -3158,7 +3160,9 @@ cpChr:  txa
         lda #$18
         sta $d016               ; MCM: multicolor text -> 4 logical px per cell, 2 physical px each
         lda #${hx(SPLITLINE)}
-        sta pSplit              ; the pending split starts where the renderer wants it
+        sta pSplit              ; the pending splits start where the renderer wants them
+        lda #246
+        sta pSplit2
         lda #$00
         sta fT0
         lda #${hx(vm(SCR_A))}
@@ -4118,6 +4122,9 @@ mvs:    lda $d012
         lda pSplit              ;   the screen on the same 60Hz frame. Written inside fallStep they
         sta irqCmp+1            ;   landed a frame early, against the back buffer -- which is the
         sta irqArm+1            ;   whole of the fall's backwards jitter. Raster 250 is in the
+        lda pSplit2
+        sta irqCm2+1
+        sta irqAr2+1
                                 ;   lower border, so both are safe to touch here.
         lda baseHi
         cmp #${hx(SCR_A >> 8)}
@@ -6299,29 +6306,37 @@ irq:    pha
         lda $d019
         and #$01
         beq irqd                ; not a raster IRQ
+        ; ---- THREE regions, because the two things below the horizon want opposite polarities.
+        ; The frozen scene below the horizon is drawn as MIRRORED glyphs and needs charset B; the
+        ; arc's rim is floor-above/hole-below and needs A, which is the only polarity the ramp
+        ; dictionary holds. Parking the whole screen in A drew every wall bottom upside down --
+        ; the jaggedness, and the same failure the moving split was invented for.
+        ; Ordered so the HORIZON split, the one over live content, takes the shortest path.
         lda $d012
-irqCmp: cmp #${hx(SPLITLINE)}   ; operand PATCHED, not a variable read: the fall scrolls the
-        bcs irqSplit            ;   frozen frame past the horizon so the split has to travel
-                                ;   with it, but "cmp abs" costs two cycles more than "cmp #"
-                                ;   and that was enough to push the sta $d018 below past the
-                                ;   VIC's fetch point for the line -- the six-view error went
-                                ;   304 -> 547 on those two cycles alone.
-        ; --- top of frame: select charset A, arm the split ---
-        lda d018vm
+irqCmp: cmp #${hx(SPLITLINE)}   ; operands PATCHED, not variable reads: "cmp abs" is two cycles
+        bcc irqTop              ;   more than "cmp #" and that was once enough to push the
+irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the line.
+        bcs irqA2
+        lda d018vm              ; --- horizon..arc: the mirrored half ---
+        ora #${hx(CB_B)}
+        sta $d018
+irqAr2: lda #246                ; next stop: the top of the arc
+        sta $d012
+        jmp irqd
+irqA2:  lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
         ora #${hx(CB_A)}
         sta $d018
-irqArm: lda #${hx(SPLITLINE)}   ; operand patched alongside irqCmp
+        lda #$00
+        sta $d012
+        jmp irqd
+irqTop: lda d018vm              ; --- top of frame: charset A, arm the horizon ---
+        ora #${hx(CB_A)}
+        sta $d018
+irqArm: lda #${hx(SPLITLINE)}
         sta $d012
         inc frameCnt
         bne irqd
         inc frameCnt+1
-        jmp irqd
-irqSplit:
-        lda d018vm              ; --- horizon: select mirrored charset B ---
-        ora #${hx(CB_B)}
-        sta $d018
-        lda #$00
-        sta $d012
 irqd:   lda #$ff
         sta $d019
         pla
@@ -7966,12 +7981,11 @@ fstFOk: stx fFrm
         lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
         beq fsLand
-        lda #252                ; DROP: park the split BELOW the last display line (pixel 199 is
-        sta pSplit              ;   raster 249) so the whole screen is charset A, which is the
-        lda #$00                ;   polarity of a floor-above/hole-below rim.
-        sta arcInv              ; NOT 250: the buffer flip spins on raster 250, and a split IRQ
-        beq fsDone              ;   on that line eats 40 of its 65 cycles, so the spin misses the
-                                ;   window and waits a whole extra frame. Keep 250 clear.
+        lda #${hx(SPLITLINE)}   ; DROP: the horizon split stays where the renderer put it -- the
+        sta pSplit              ;   frozen scene below it is MIRRORED and needs charset B. arcPrep
+        lda #$00                ;   sets the second split, at the top of the arc, where A has to
+        sta arcInv              ;   come back for the rim glyph.
+        beq fsDone
 fsLand: lda #30                 ; LANDING: the same movement with the colours swapped -- white
         sta pSplit              ;   rising to replace the black. The rim is now SOLID above and
         lda #$ff                ;   BLANK below, which is the mirror of what the dictionary
@@ -8328,6 +8342,38 @@ apH4:   lsr
         bcc apHok
         lda #25
 apHok:  sta arcHi
+        ; ---- and the top of the arc, which is where charset A has to come back ----
+        lda arcInv              ; the LANDING wants B everywhere: its rim is drawn in the mirrored
+        beq apTop               ;   polarity and there is no un-mirrored scene left on screen
+        lda #246
+        sta pSplit2
+        rts
+apTop:  lda arcNg               ; inverted: the EDGES are highest; arch: the crown is
+        beq apT1
+        lda arcY
+        sec
+        sbc arcA
+        bcs apT2
+        lda #$00
+        beq apT2
+apT1:   lda arcY
+apT2:   lsr
+        lsr
+        lsr                     ; -> character row
+        asl                     ; -> raster: 8 rows per cell, display starts 50 lines down
+        asl
+        asl
+        clc
+        adc #50
+        cmp #${hx(SPLITLINE)}   ; never ABOVE the horizon split: with the arc up there the scene
+        bcs apT3                ;   below is entirely covered by hole, which is mirror-invariant,
+        lda #${hx(SPLITLINE)}   ;   so collapsing region B to nothing is right
+apT3:   cmp #246
+        bcc apT4
+        lda #246                ; off the foot: region B runs to the bottom. NOT 250 -- the
+                                ;   buffer flip spins on that line and a split IRQ there costs
+                                ;   it a whole frame. Third time; see [[iray-fall]].
+apT4:   sta pSplit2
         rts
 
 ; ---- arcPx: the boundary's pixel row at cell edge Y ----
