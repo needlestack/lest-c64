@@ -693,11 +693,15 @@ mloop:
         jsr fallStep            ;   level being landed in
         jmp fwait
 mfIn:   jsr readKeys
-        jsr fallChk             ; stepped into the hole? the drop starts on this frame
+        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
-        jsr fallStep
-        jmp mvs
+        cmp #$02                ; state 2 wants the RENDERER, not a fall frame: it is the one
+        beq mfRnd               ;   ordinary render of the destination room, which fallLand
+        jsr fallStep            ;   snapshots before the drop begins. fallChk used to set state 1
+        jmp mvs                 ;   here, where dropping straight into fallStep was right -- with
+                                ;   it setting 2 the render never ran and fallBuf2 kept the FIRST
+                                ;   destination for every later fall.
 mfRnd:
 
 
@@ -5039,6 +5043,14 @@ fallChk:ldx hlv
         sta hlvOf
         lda #$02
         sta fallSt
+        jsr fallInv             ; THE RENDER COMING NEXT FRAME DRAWS INTO A BUFFER THE PREVIOUS
+                                ; FALL SCRIBBLED. Without this renderSym skips every column whose
+                                ; cached runs still look unchanged and leaves the LAST fall's
+                                ; destination sitting there -- the second drop showed the first
+                                ; one's room sliding up, and only corrected at fstEnd, which is
+                                ; the next place the cache is cleared. Bug 1 in [[iray-fall]],
+                                ; for the third time: anything that writes the screen behind
+                                ; renderSym has to invalidate before renderSym runs again.
         lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
         cmp #$e0  ;   drawn into, so the displayed one is the other
         bne fcGB
