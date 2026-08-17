@@ -321,10 +321,6 @@ apIdx   = $81d4                  ;   edge counter while Y addresses the screen.
 apCode  = $81d5
 apY     = $81d6
 apT     = $81d7                  ; arcLvl's argument
-apSgn   = $81da                  ; fdRamp: which way the ramp leans, and its new endpoints
-apLo    = $81db
-apHi    = $81dc
-arcSh   = $81dd                  ; this frame's shear, 255 = none, 0 = flat against the horizon
 phA     = $81df                  ; the arc's row LAST time each buffer was drawn. The region below
 phB     = $81e0                  ;   it is already solid, so only the newly covered rows need
                                  ;   painting -- and PER BUFFER, because each one is two animation
@@ -5152,6 +5148,11 @@ fstEnd: lda #$96
                                 ;   lands with the settled frame drawn just below
         lda #246                ; a settled frame wants A above the horizon and B below it
         sta pSplit2
+        lda #$04        ; AND THE CHARSET PLAN BACK. Restoring the split lines but not
+        sta pCh0                ;   these left the renderer running the landing's B,A,B -- both
+        sta pCh2                ;   halves of every frame mirrored until the next fall.
+        lda #$06
+        sta pCh1
         jsr fdWarp              ; and it wants the ROOM, in place. The last landing block is the
                                 ;   identity, so this is a straight copy -- filling white here
                                 ;   instead was a one-frame flash between the arc finishing and
@@ -5223,9 +5224,12 @@ fallLand:
 ; hole; the arc itself -- crown, depth, profile -- is identical, so the world closing over you and
 ; the room opening under you are the same sixteen frames run twice.
 fallDraw:
+        lda fFrm                ; which arc frame to draw. The overlap re-points this at a DROP
+        sta arcIx               ;   frame further on, so it has to be reset every frame -- losing
+                                ;   this line left arcPrep reading whatever the tail draw set
+                                ;   last, and the arc appeared late and in the wrong place.
         jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
-        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
-        jsr fdRamp              ; and the wall-bottom ramps re-angled to match
+        jsr fdWarp              ; the room, slid up. No shear -- see fRowT.
 
         ldx #$00       ; drop: floor above, hole below
         ldy #$01
@@ -5400,125 +5404,10 @@ fwSkip: inc fwRow
         jmp fwLp
 fwDn:   rts
 
-; ---- fdRamp: the only thing the warp cannot do for itself ----
-; fdWarp moves whole character rows, so a wall-bottom ramp arrives at its new row still drawn at
-; its OLD angle -- which is the jaggedness. Nothing else needs fixing: horizontal boundaries stay
-; horizontal under a vertical scale, and the angled edges ABOVE the horizon change too little to
-; see before they leave the top. So the entire correction is one cell per column, below the
-; horizon, made shallower.
-; The wall bottom is at 100 + colH and shears to 100 + s*colH, which says exactly which cell to
-; touch -- no scan. rampInv turns the code back into its endpoint pair, the pair's DIFFERENCE is
-; the slope, scaling it by s is the shear, and rampThi turns it back into a code.
-fdRamp: lda arcSh
-        beq fdrDn               ; already flat against the horizon: nothing left to lean
-        cmp #$ff
-        beq fdrDn               ; not started
-        ldy #39
-fdrLp:  sty apY
-        tya
-        asl
-        asl
-        tax                     ; colH is per LOGICAL column; a cell's left edge is 4c
-        lda colH,x
-        beq fdrNx
-        cmp #101
-        bcs fdrNx               ; taller than the screen: its bottom is off the foot anyway
-        sta mq
-        lda arcSh
-        jsr mul8
-        lda phi
-        clc
-        adc #100                ; the sheared wall bottom, in pixels
-        lsr
-        lsr
-        lsr
-        cmp #25
-        bcs fdrNx
-        tax
-        lda mul40LoT,x
-        clc
-        adc apY
-        sta fdS
-        lda mul40HiT,x
-        adc baseHi
-        sta fdS+1
-        ldy #$00
-        lda (fdS),y
-        tax
-        lda rampInv,x
-        cmp #$ff
-        beq fdrNx               ; BLANK, SOLID, or anything that is not a ramp
-        pha
-        lsr
-        lsr
-        lsr
-        lsr
-        sta apPrev              ; wL
-        pla
-        and #$0f
-        sta apCur               ; wR
-        sec
-        sbc apPrev              ; d = wR - wL, the slope
-        ldx #$00
-        bcs fdrPos
-        eor #$ff                ; leaning the other way
-        clc
-        adc #$01
-        ldx #$ff
-fdrPos: stx apSgn
-        sta mq
-        lda arcSh
-        jsr mul8
-        lda phi
-        sta apIdx               ; |d| scaled by s
-        clc
-        lda apPrev
-        adc apCur
-        sta apBase              ; wL + wR: the midpoint, doubled, and it does not move
-        sec
-        sbc apIdx
-        bcs fdrL
-        lda #$00
-fdrL:   lsr
-        sta apLo
-        clc
-        lda apBase
-        adc apIdx
-        lsr
-        cmp #$10
-        bcc fdrH
-        lda #$0f
-fdrH:   sta apHi
-        lda apSgn
-        bne fdrNeg
-        lda apLo
-        asl
-        asl
-        asl
-        asl
-        ora apHi
-        jmp fdrPut
-fdrNeg: lda apHi
-        asl
-        asl
-        asl
-        asl
-        ora apLo
-fdrPut: tax
-        lda rampThi,x
-        ldy #$00
-        sta (fdS),y
-fdrNx:  ldy apY
-        dey
-        bpl fdrLp
-fdrDn:  rts
-
 ; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx arcIx
-        lda arcShT,x
-        sta arcSh               ; this frame's shear, for fdWarp's block and fdRamp
         lda arcInv              ; the landing runs the crown's two speeds in the other order
         bne apL
         lda arcYT,x
@@ -6511,7 +6400,6 @@ arcET: !byte 20,20,20,20,20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
 arcYT2: !byte 200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0,0,0,0,0    ; the landing's mirrored schedule
 arcET2: !byte 20,15,11,6,2,253,249,244,239,236,236,236,236,236,236,236,236,236,236,236
 arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
-arcShT: !byte 255,243,217,191,165,138,112,86,59,33,7,0,0,0,0,0,0,0,0,0
 arcTrT: !byte 0,7,23,39,55,71,87,103,119,135,151,164,175,186,198,209,221,232,244,255
 arcSpT: !byte 150,143,127,111,95,79,63,51,51,51,51,51,51,51,51,51,51,51,51,51
 arcSp2T: !byte 246,246,242,226,210,194,186,178,162,154,138,122,106,90,74,58,58,58,58,58
@@ -6520,33 +6408,21 @@ arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
 ; the split for an overlap frame: between the departing arc's lowest row and the arriving one's
 ; highest, so each rim sits in the charset its polarity needs
 arcOvSpT: !byte 90,74,66,58
-        * = $6700
-rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,101,255,88,26,170,0,255
-        !byte 162,76,255,255,255,132,255,255,151,255,153,56,165,255,255,138,255,248,255,255,123,255,86,83
-        !byte 255,255,255,36,129,255,58,255,134,133,169,255,84,186,149,255,255,255,154,255,255,80,102,72
-        !byte 255,87,255,113,145,152,15,144,181,115,106,118,67,255,69,137,255,66,135,89,75,22,116,255
-        !byte 184,91,104,255,255,4,217,255,255,255,255,121,166,71,255,5,255,98,255,255,38,55,255,39
-        !byte 255,103,183,255,255,255,255,126,125,120,168,114,95,117,255,255,255,255,255,109,255,255,9,255
-        !byte 255,100,107,53,255,44,255,255,255,255,24,255,255,7,255,10,255,255,6,255,255,255,148,182
-        !byte 255,13,12,255,31,127,255,177,79,157,11,143,255,255,255,179,255,255,255,255,255,255,255,255
-        !byte 255,255,242,247,231,176,255,163,246,214,255,245,255,255,255,73,47,255,255,255,255,161,255,255
-        !byte 255,255,255,131,97,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
         * = $6800
 fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,23,0,0,0,0,0,0
         !byte 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,255,255,23,0,0,0,0,0,0
-        !byte 3,4,5,6,7,8,9,10,11,12,13,14,15,17,18,19,20,21,22,24,255,255,255,255,255,20,0,0,0,0,0,0
-        !byte 5,6,7,8,9,10,11,12,13,15,16,17,19,20,21,23,24,255,255,255,255,255,255,255,255,17,0,0,0,0,0,0
-        !byte 7,8,9,10,11,12,13,15,16,18,20,21,23,24,255,255,255,255,255,255,255,255,255,255,255,14,0,0,0,0,0,0
-        !byte 9,10,11,12,14,15,17,19,21,23,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,10,0,0,0,0,0,0
-        !byte 11,12,14,16,19,21,23,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,7,0,0,0,0,0,0
-        !byte 15,18,21,23,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,4,0,0,0,0,0,0
-        !byte 24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,1,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
+        !byte 3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,22,0,0,0,0,0,0
+        !byte 5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,20,0,0,0,0,0,0
+        !byte 7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,18,0,0,0,0,0,0
+        !byte 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,16,0,0,0,0,0,0
+        !byte 11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,14,0,0,0,0,0,0
+        !byte 13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,12,0,0,0,0,0,0
+        !byte 15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,10,0,0,0,0,0,0
+        !byte 17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,8,0,0,0,0,0,0
+        !byte 19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,6,0,0,0,0,0,0
+        !byte 21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,4,0,0,0,0,0,0
+        !byte 22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,3,0,0,0,0,0,0
+        !byte 23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,2,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0

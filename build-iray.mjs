@@ -2397,16 +2397,6 @@ const arcSched = (slowFirst, lead) => {
   }
   return [Y, E];
 };
-// rampInv is the inverse of rampThi: a char code back to the (wL*16 + wR) endpoint pair it was
-// fitted to. The dictionary is many-to-one (116 distinct codes over 256 pairs) so this picks a
-// representative, which is all a "make this ramp shallower" substitution needs. $ff marks every
-// code that is not a ramp -- BLANK, SOLID, readout, seam, occluder -- so the fix-up can bail.
-const rampInv = (() => {
-  const inv = new Array(256).fill(0xff);
-  for (let i = 0; i < 256; i++) if (inv[rampThi[i]] === 0xff) inv[rampThi[i]] = i;
-  inv[BLANK] = 0xff; inv[SOLID] = 0xff;
-  return inv;
-})();
 const [arcYT, arcET] = arcSched(false, ARC_LEAD);
 const [arcYT2, arcET2] = arcSched(true, 0);
 // ---- the SHEAR, tied to the crown ----
@@ -2415,10 +2405,6 @@ const [arcYT2, arcET2] = arcSched(true, 0);
 // ones proportionally slower. That is both what "the same speed as the crown" asks for and what
 // the geometry wants, since a nearer floor really does rise faster. s hits 0 as the crown reaches
 // the horizon, so the walls finish flattening exactly as the rim arrives there.
-const arcShT = arcYT.map(y => {
-  const s = (y - 100) / (arcYT[0] - 100);
-  return Math.max(0, Math.min(255, Math.round(255 * s)));
-});
 // ---- and the whole room SLIDES, at the crown's speed ----
 // The shear alone is not the effect: without the room going up with it there is nothing to fall
 // past. t is the crown's travel, so everything translates up at exactly the rate the rim rises,
@@ -2485,15 +2471,11 @@ const fRowT = (() => {
   const out = [];
   // FIRST ARC_N blocks: the drop. Slide up, and compress the below-horizon half into it.
   for (let n = 0; n < ARC_N; n++) {
-    const sc = arcShT[n] / 255, t = arcTrT[n];
+    const t = arcTrT[n];
     const blk = new Array(32).fill(0); let nsrc = 25;
     for (let R = 0; R < 25; R++) {
-      const pd = R * 8 + 4;
-      let ps;
-      if (pd < 100 - t) ps = pd + t;                       // above the horizon: pure slide
-      else if (sc > 0) ps = 100 + (pd - (100 - t)) / sc;   // below it: slide AND compress
-      else ps = 1e9;
-      const sr = Math.floor(ps / 8);
+      const ps = R * 8 + 4 + t;                            // JUST A SLIDE. No shear, no
+      const sr = Math.floor(ps / 8);                       //   compression, no recalculation.
       if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 255; }
       else blk[R] = sr;
     }
@@ -3027,10 +3009,6 @@ apIdx   = $81d4                  ;   edge counter while Y addresses the screen.
 apCode  = $81d5
 apY     = $81d6
 apT     = $81d7                  ; arcLvl's argument
-apSgn   = $81da                  ; fdRamp: which way the ramp leans, and its new endpoints
-apLo    = $81db
-apHi    = $81dc
-arcSh   = $81dd                  ; this frame's shear, 255 = none, 0 = flat against the horizon
 phA     = $81df                  ; the arc's row LAST time each buffer was drawn. The region below
 phB     = $81e0                  ;   it is already solid, so only the newly covered rows need
                                  ;   painting -- and PER BUFFER, because each one is two animation
@@ -8129,6 +8107,11 @@ fstEnd: lda #${hx(SPLITLINE)}
                                 ;   lands with the settled frame drawn just below
         lda #246                ; a settled frame wants A above the horizon and B below it
         sta pSplit2
+        lda #${hx(CB_A)}        ; AND THE CHARSET PLAN BACK. Restoring the split lines but not
+        sta pCh0                ;   these left the renderer running the landing's B,A,B -- both
+        sta pCh2                ;   halves of every frame mirrored until the next fall.
+        lda #${hx(CB_B)}
+        sta pCh1
         jsr fdWarp              ; and it wants the ROOM, in place. The last landing block is the
                                 ;   identity, so this is a straight copy -- filling white here
                                 ;   instead was a one-frame flash between the arc finishing and
@@ -8200,9 +8183,12 @@ fallLand:
 ; hole; the arc itself -- crown, depth, profile -- is identical, so the world closing over you and
 ; the room opening under you are the same sixteen frames run twice.
 fallDraw:
+        lda fFrm                ; which arc frame to draw. The overlap re-points this at a DROP
+        sta arcIx               ;   frame further on, so it has to be reset every frame -- losing
+                                ;   this line left arcPrep reading whatever the tail draw set
+                                ;   last, and the arc appeared late and in the wrong place.
         jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
-${FALLSCENE ? `        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
-        jsr fdRamp              ; and the wall-bottom ramps re-angled to match
+${FALLSCENE ? `        jsr fdWarp              ; the room, slid up. No shear -- see fRowT.
 ` : ''}
         ldx #${hx(BLANK)}       ; drop: floor above, hole below
         ldy #${hx(SOLID)}
@@ -8378,125 +8364,10 @@ fwSkip: inc fwRow
         jmp fwLp
 fwDn:   rts
 
-` : ''}; ---- fdRamp: the only thing the warp cannot do for itself ----
-; fdWarp moves whole character rows, so a wall-bottom ramp arrives at its new row still drawn at
-; its OLD angle -- which is the jaggedness. Nothing else needs fixing: horizontal boundaries stay
-; horizontal under a vertical scale, and the angled edges ABOVE the horizon change too little to
-; see before they leave the top. So the entire correction is one cell per column, below the
-; horizon, made shallower.
-; The wall bottom is at 100 + colH and shears to 100 + s*colH, which says exactly which cell to
-; touch -- no scan. rampInv turns the code back into its endpoint pair, the pair's DIFFERENCE is
-; the slope, scaling it by s is the shear, and rampThi turns it back into a code.
-fdRamp: lda arcSh
-        beq fdrDn               ; already flat against the horizon: nothing left to lean
-        cmp #$ff
-        beq fdrDn               ; not started
-        ldy #39
-fdrLp:  sty apY
-        tya
-        asl
-        asl
-        tax                     ; colH is per LOGICAL column; a cell's left edge is 4c
-        lda colH,x
-        beq fdrNx
-        cmp #101
-        bcs fdrNx               ; taller than the screen: its bottom is off the foot anyway
-        sta mq
-        lda arcSh
-        jsr mul8
-        lda phi
-        clc
-        adc #100                ; the sheared wall bottom, in pixels
-        lsr
-        lsr
-        lsr
-        cmp #25
-        bcs fdrNx
-        tax
-        lda mul40LoT,x
-        clc
-        adc apY
-        sta fdS
-        lda mul40HiT,x
-        adc baseHi
-        sta fdS+1
-        ldy #$00
-        lda (fdS),y
-        tax
-        lda rampInv,x
-        cmp #$ff
-        beq fdrNx               ; BLANK, SOLID, or anything that is not a ramp
-        pha
-        lsr
-        lsr
-        lsr
-        lsr
-        sta apPrev              ; wL
-        pla
-        and #$0f
-        sta apCur               ; wR
-        sec
-        sbc apPrev              ; d = wR - wL, the slope
-        ldx #$00
-        bcs fdrPos
-        eor #$ff                ; leaning the other way
-        clc
-        adc #$01
-        ldx #$ff
-fdrPos: stx apSgn
-        sta mq
-        lda arcSh
-        jsr mul8
-        lda phi
-        sta apIdx               ; |d| scaled by s
-        clc
-        lda apPrev
-        adc apCur
-        sta apBase              ; wL + wR: the midpoint, doubled, and it does not move
-        sec
-        sbc apIdx
-        bcs fdrL
-        lda #$00
-fdrL:   lsr
-        sta apLo
-        clc
-        lda apBase
-        adc apIdx
-        lsr
-        cmp #$10
-        bcc fdrH
-        lda #$0f
-fdrH:   sta apHi
-        lda apSgn
-        bne fdrNeg
-        lda apLo
-        asl
-        asl
-        asl
-        asl
-        ora apHi
-        jmp fdrPut
-fdrNeg: lda apHi
-        asl
-        asl
-        asl
-        asl
-        ora apLo
-fdrPut: tax
-        lda rampThi,x
-        ldy #$00
-        sta (fdS),y
-fdrNx:  ldy apY
-        dey
-        bpl fdrLp
-fdrDn:  rts
-
-; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
+` : ''}; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx arcIx
-        lda arcShT,x
-        sta arcSh               ; this frame's shear, for fdWarp's block and fdRamp
         lda arcInv              ; the landing runs the crown's two speeds in the other order
         bne apL
         lda arcYT,x
@@ -9108,7 +8979,6 @@ arcET: !byte ${arcET.join(',')}
 arcYT2: !byte ${arcYT2.join(',')}    ; the landing's mirrored schedule
 arcET2: !byte ${arcET2.join(',')}
 arcD: !byte ${arcD.join(',')}
-arcShT: !byte ${arcShT.join(',')}
 arcTrT: !byte ${arcTrT.join(',')}
 arcSpT: !byte ${arcSpT.join(',')}
 arcSp2T: !byte ${arcSp2T.join(',')}
@@ -9121,8 +8991,6 @@ arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
   return Math.max(51, Math.min(246, 50 + Math.min(d, l) * 8));
 }).join(',')}
-        * = ${hx16(FROWT + 0x100)}
-rampInv: ${chunk(rampInv).trim()}
 ${FALLSCENE ? `        * = ${hx16(FROWT + 0x200)}
 fRowT: ${chunk(fRowT, 32).trim()}` : ''}
         * = ${hx16(ORB_OCC)}
