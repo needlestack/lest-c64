@@ -5026,13 +5026,13 @@ fallStep:
         beq fstAdv              ; landing runs at the speed the drop ended at: no acceleration
         ldx fFrm                ; advance the warp's frame index -- DROP ONLY, and up here
         inx                     ; because everything below fstAdv is a branch target. Putting
-        cpx #30     ; this immediately before fstDrw hid it behind "bcc fstDrw":
+        cpx #20     ; this immediately before fstDrw hid it behind "bcc fstDrw":
         bcc fstFOk              ; the counter never moved, fRowT block 0 is the identity, and
-        ldx #29 ; the fall rendered a frozen frame thirty times. Second time
+        ldx #19 ; the fall rendered a frozen frame thirty times. Second time
 fstFOk: stx fFrm                ; this exact trap has bitten -- see bug 4 in [[iray-fall]].
         clc
         lda fVelL
-        adc #$6e
+        adc #$f4
         sta fVelL
         lda fVelH
         adc #$00
@@ -5765,7 +5765,7 @@ holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
-arcD: !byte 255,223,195,170,148,127,109,93,78,65,53,43,34,26,19,13,8,5,2,1,0,1,2,5,8,13,19,26,34,43,53,65,78,93,109,127,148,170,195,223,255
+arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -6256,9 +6256,9 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
         * = $6600          ; the fall's animation data, out of the image's own segment
-arcYT: !byte 200,190,179,169,159,148,138,128,117,107,98,93,88,83,78,72,67,62,57,52,47,41,36,31,26,21,16,10,5,0     ;   which has no slack left above ORB_SMALL at $3300
-arcET: !byte 48,48,48,48,48,48,48,48,48,48,46,41,36,31,26,20,15,10,5,0,251,245,240,235,230,225,220,214,209,204
-arcD: !byte 255,223,195,170,148,127,109,93,78,65,53,43,34,26,19,13,8,5,2,1,0,1,2,5,8,13,19,26,34,43,53,65,78,93,109,127,148,170,195,223,255
+arcYT: !byte 200,184,168,153,137,121,105,95,87,79,71,63,55,47,39,32,24,16,8,0     ;   which has no slack left above ORB_SMALL at $3300
+arcET: !byte 48,48,48,48,48,48,48,43,35,27,19,11,3,251,243,236,228,220,212,204
+arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
 
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132

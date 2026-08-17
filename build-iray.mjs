@@ -2264,7 +2264,7 @@ const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 2);   // 2 = a locked 30fps, 
                                                  //   place of an 8.75 cy/byte fill) and would
                                                  //   just exceed it -- inlining arcBand's mul8
                                                  //   and its two arcClp calls pays for that.
-const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 30);   // 30 * 2 / 60 = 1.0s
+const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 20);   // 20 * 2 / 60 = 0.67s
 const FALL_ACC = Math.round(2 * FALL_END * 256 / (FALL_FRAMES * (FALL_FRAMES + 1)));  // 8.8
 const FALLX = +(process.env.FALLX ?? 1), FALLY = +(process.env.FALLY ?? 13);   // where you land
 const mul40 = [...Array(26)].map((_, i) => i * 40);
@@ -2313,7 +2313,7 @@ const F_COL_ARC = 122.97;                        // logical (multicolor) columns
 // viewport edge, so lowering it changes only how much of the circle you see -- the rim is still
 // ARC_DEPTH deep at the screen edge either way. The visible slope there goes 2.35 -> 1.33, which
 // is what stops it reading as a dome that ends at the screen edge.
-const ARC_WIDE = +(process.env.ARC_WIDE ?? 0.80);
+const ARC_WIDE = +(process.env.ARC_WIDE ?? 0.60);
 const arcDraw = ARC_WIDE === 0
   ? [...Array(41)].map((_, e) => Math.sqrt(1 + ((4 * e - 80) / F_COL_ARC) ** 2) - 1)
   : [...Array(41)].map((_, e) => {
