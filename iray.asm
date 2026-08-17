@@ -296,12 +296,6 @@ omBit   = $8520
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
 fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing
-fPosL   = $81c1                  ; travel so far, 8.8 pixels
-fPosH   = $81c2
-fVelL   = $81c3                  ; and the speed, 8.8 pixels per frame
-fVelH   = $81c4
-fSro    = $81c5                  ; signed row offset: screen row r shows source row r + fSro
-fdK     = $81c6                  ; its magnitude, and the row counter the two loops share
 fdN     = $81c7
 ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohT     = $850f
@@ -326,6 +320,9 @@ apBase  = $81d3                  ;   half-built rampThi index, the glyph, and th
 apIdx   = $81d4                  ;   edge counter while Y addresses the screen.
 apCode  = $81d5
 apY     = $81d6
+apT     = $81d7                  ; arcLvl's argument
+arcBlw  = $81d8                  ; what fills BELOW the rim this phase
+arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
                                  ;   content is in the BACK buffer -- writing the register inside
@@ -4981,10 +4978,6 @@ fallChk:ldx hlv
         sta omYY                ;   would put the register straight back and leave an orb
         sta omPri               ;   hanging in space while the world scrolled away behind it
         sta omX8
-        sta fPosL
-        sta fPosH
-        sta fVelL
-        sta fVelH
         ldx #$ff                ; -1: the first fallStep advances it to fRowT block 0, which is
         stx fFrm                ;   the state after one frame of travel
         lda #$01
@@ -5021,34 +5014,12 @@ fsnLp:  lda (fdS),y
 
 ; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
 fallStep:
-        lda fallSt
-        cmp #$03
-        beq fstAdv              ; landing runs at the speed the drop ended at: no acceleration
-        ldx fFrm                ; advance the warp's frame index -- DROP ONLY, and up here
-        inx                     ; because everything below fstAdv is a branch target. Putting
-        cpx #16     ; this immediately before fstDrw hid it behind "bcc fstDrw":
-        bcc fstFOk              ; the counter never moved, fRowT block 0 is the identity, and
-        ldx #15 ; the fall rendered a frozen frame thirty times. Second time
-fstFOk: stx fFrm                ; this exact trap has bitten -- see bug 4 in [[iray-fall]].
-        clc
-        lda fVelL
-        adc #$78
-        sta fVelL
-        lda fVelH
-        adc #$01
-        sta fVelH
-fstAdv: clc
-        lda fPosL
-        adc fVelL
-        sta fPosL
-        lda fPosH
-        adc fVelH
-        sta fPosH
-        cmp #200
-        bcc fstDrw
-        ; ---- this phase has run its course ----
-        lda #200
-        sta fPosH               ; clamp, so the last frame lands exactly on the boundary
+        ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
+        inx                     ;   counter. Up here because everything below is a branch target
+        cpx #16     ;   -- putting it lower hid it behind a branch once already.
+        bcc fstFOk
+        ldx #15 ; ---- this phase has run its course ----
+        stx fFrm
         lda fallSt
         cmp #$03
         beq fstEnd
@@ -5073,68 +5044,36 @@ fstAdv: clc
         sta fallSt
         jsr fallInv             ; the render coming next frame draws into a buffer the fall
                                 ;   scribbled, so it must not trust the run cache
-fstDrw: lda fPosH               ; whole rows = (px + 4) >> 3, the rounding that pairs with the
-        clc                     ;   fine scroll below: together they place the content exactly
-        adc #$04
-        lsr
-        lsr
-        lsr
-        sta fSro
-        lda fallSt
+fstFOk: stx fFrm
+        lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
-        bne fstD1
-        sec
-        lda fSro
-        sbc #25                 ; landing: the source begins a full screen below
-        sta fSro
-fstD1:  ; ---- the split does not travel any more ----
-        ; fdWarp's fixed point is row 100: the horizon is the one row that does not move, because
-        ; content above it scales away and content below scales into it. So the split stays where
-        ; the renderer put it, and the fine scroll goes neutral -- with every row moving at its
-        ; own rate there is no uniform translation for a sub-row remainder to belong to. This
-        ; deletes the moving split and, with it, the whole jagged-wall-bottom failure mode.
-        lda fallSt
-        cmp #$03
-        beq fsSpL
-        lda #252                ; park the split BELOW the last display line (pixel 199 is raster
-        sta pSplit              ;   249): the whole screen is charset A for the drop, which is the
-        lda #$13                ;   polarity the rim's ramp glyphs are drawn in, and nothing else
-        sta pd11                ;   on screen cares -- BLANK and SOLID are their own mirrors.
-                                ; NOT 250. The buffer flip spins on raster 250, and a split IRQ on
-                                ; that same line eats ~40 of its 65 cycles, so the spin misses the
-                                ; window and waits a whole extra frame -- one-period slips
-                                ; scattered over a third of the fall. Keep raster 250 clear.
-        jmp fallDraw
-fsSpL:  lda fPosH               ; landing: the new frame's horizon starts a screen BELOW and
-        cmp #100                ;   comes up to meet the split
-        bcc fsSpBot
-        lda #$5e
-        sec
-        sbc fPosH               ; 350 - pos, which fits a byte once pos has passed 100
-        bne fsSpSt              ; 150..250 here, never zero
-fsSpBot:lda #250                ; horizon still below the display: all of it is above the split
-fsSpSt: sta pSplit               ; PENDING, not the live operand: both of these describe the
-                                ; frame being drawn into the BACK buffer, so they may not take
-                                ; effect until it is on screen. mnext publishes them.
-        lda #$03                ; fine scroll = (3 - px) & 7, with 3 the centred value
-        sec
-        sbc fPosH
-        and #$07
-        ora #$10                ; DEN, and RSEL CLEAR: 24-row mode for the whole fall. Moving
-                                ; YSCROLL off centre in 25-row mode leaves a partial character
-                                ; row exposed top and bottom, which reads as a jagged edge --
-                                ; 24-row mode crops four pixels each end and hides exactly that.
+        beq fsLand
+        lda #252                ; DROP: park the split BELOW the last display line (pixel 199 is
+        sta pSplit              ;   raster 249) so the whole screen is charset A, which is the
+        lda #$00                ;   polarity of a floor-above/hole-below rim.
+        sta arcInv              ; NOT 250: the buffer flip spins on raster 250, and a split IRQ
+        beq fsDone              ;   on that line eats 40 of its 65 cycles, so the spin misses the
+                                ;   window and waits a whole extra frame. Keep 250 clear.
+fsLand: lda #30                 ; LANDING: the same movement with the colours swapped -- white
+        sta pSplit              ;   rising to replace the black. The rim is now SOLID above and
+        lda #$ff                ;   BLANK below, which is the mirror of what the dictionary
+        sta arcInv              ;   holds, so park the split ABOVE the display instead and let
+                                ;   charset B supply the other polarity. Every column flips on
+                                ;   the same frame, so one raster line does the whole job.
+fsDone: lda #$13
         sta pd11
         jmp fallDraw
 fstEnd: lda #$96
         sta pSplit              ; horizon back where the renderer expects it -- pending, so it
                                 ;   lands with the settled frame drawn just below
-        lda #$00                ; ...and DRAW the new level exactly in place before letting go.
-        sta fSro                ;   Returning without drawing left the buffer holding the last
-        jsr fallDraw            ;   landing frame, still ~26 px out of position, while the split
-                                ;   had already moved back to the horizon -- one frame of
-                                ;   mirrored glyphs where the two disagreed. $d011 goes to $1b
-                                ;   below, before the flip, which is right for a settled frame.
+        lda #$00       ; the landing ends on a FULL WHITE screen and the renderer pops
+        sta fdCol               ;   the maze in next frame. Returning without drawing would leave
+        lda #$00                ;   the buffer holding a landing frame two flips stale.
+        sta fdD
+        lda baseHi
+        sta fdD+1
+        lda #25
+        jsr fdFill
         lda pa                  ; force orbMove to reproject: it early-outs on a still frame,
         eor #$80                ;   and the player has not moved since the landing began, so
         sta opa                 ;   the sprites we just cleared would never come back
@@ -5177,8 +5116,6 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
 ; as the scroll source, then immediately overdraw that buffer with the first landing frame --
 ; otherwise the flip would show the new level whole for one frame before the slide begins.
 fallLand:
-        lda baseHi
-        jsr fallSnap
         lda #$00                ; the render that just ran turned the sprites back on, and
         sta omEn                ;   osFlush still runs every landing frame -- so they would
         sta omXX                ;   hang motionless while the world rose underneath them.
@@ -5187,97 +5124,45 @@ fallLand:
         sta omX8
         lda #$03
         sta fallSt
-        lda #$00
-        sta fPosL
-        sta fPosH
-        jmp fallStep
+        ldx #$ff                ; -1: fallStep advances it to arc frame 0, so the landing replays
+        stx fFrm                ;   the same sixteen frames with the colours swapped. It must
+        jmp fallStep            ;   overdraw the back buffer NOW -- the render that just ran is
+                                ;   sitting in it and the flip would show the maze whole for one
+                                ;   frame before the white starts rising.
 
-; fallDraw: screen row r shows fallBuf row r + fSro; rows the source does not reach are black.
-; The copy and the fill always total 25 rows, and the copy half shrinks as the screen fills
-; with black -- so the most expensive frame is the mid-point, not the end.
+; fallDraw: one path for both phases. arcInv swaps which side of the rim is floor and which is
+; hole; the arc itself -- crown, depth, profile -- is identical, so the world closing over you and
+; the room opening under you are the same sixteen frames run twice.
 fallDraw:
-        lda fSro
-        bmi fdNeg               ; landing: still the flat translating copy
         jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
-        lda #$00       ; everything above the arc is FLOOR. With FALLSCENE off that is
-        sta fdCol               ;   the whole screen down to the band: the drop blanks to white on
-        lda #$00                ;   its first frame and the arc is the only thing moving, so there
-        sta fdD                 ;   is ONE effect on screen to judge instead of two.
+        ldx #$00       ; drop: floor above, hole below
+        ldy #$01
+        lda arcInv
+        beq fdPol
+        ldx #$01       ; landing: the other way round, and charset B has already been
+        ldy #$00       ;   selected to give the rim glyph the matching polarity
+fdPol:  stx fdCol
+        sty arcBlw              ; arcBand fills below its glyph with this
+        lda #$00
+        sta fdD
         lda baseHi
         sta fdD+1
         lda arcHi
-        jsr fdFill
-        ldx arcHi               ; so point fdD at the band explicitly rather than relying on the
-        lda mul40LoT,x          ;   fills to have walked there. Once the rim can be above the
-        sta fdD                 ;   scene the three pieces no longer tile the screen in order,
-        clc                     ;   and sequential advance would run the last fill off the end.
+        jsr fdFill              ; everything above the arc, whole rows
+        ldx arcHi               ; point fdD at the band explicitly rather than relying on the
+        lda mul40LoT,x          ;   fills to have walked there
+        sta fdD
+        clc
         lda mul40HiT,x
         adc baseHi
         sta fdD+1
         jsr arcBand             ; the curve itself, at pixel resolution via the ramps
-        lda #$01       ; then the rest of the hole, whole rows again -- and below the
-        sta fdCol               ;   horizon this is what pushes the last of the floor off the top
+        lda arcBlw
+        sta fdCol
         lda #25
         sec
         sbc arcHi
-        jmp fdFill
-fdNeg:  lda fSro                ; |fSro| rows of shaft above the rising scene
-        eor #$ff
-        clc
-        adc #$01
-        cmp #26
-        bcc fdK1
-        lda #25
-fdK1:   sta fdK
-        lda #$00
-        sta fdD
-        lda baseHi
-        sta fdD+1
-        lda #<$6200
-        sta fdS
-        lda #>$6200
-        sta fdS+1
-        lda #$01       ; landing: still inside the shaft, so the band above the rising
-        sta fdCol               ;   scene is all hole. Its own floor arrives with it. The inverted
-        lda fdK                 ;   arc belongs here and is not built yet -- the landing keeps the
-        jsr fdFill              ;   flat boundary until the fall-in is signed off.
-        lda #25
-        sec
-        sbc fdK
-        jmp fdCopy
-
-fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
-        cmp #$00                ; explicit, not inherited: a zero count here would run the
-        beq fdcDn              ;   dec/bne loop 256 times and blit 10KB over the program
-fdcRow: ldy #39                 ; unrolled four ways: the widest frame copies a whole screen,
-fdcB:   lda (fdS),y             ;   and at the 16 cycles a byte the plain loop cost that is
-        sta (fdD),y             ;   16,000 against a 17,045-cycle raster period -- so those
-        dey                     ;   frames spilled into a second period and the fall alternated
-        lda (fdS),y             ;   60fps and 30. 40 divides by 4, and this brings it to 13.75.
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        bpl fdcB
-        clc
-        lda fdS
-        adc #40
-        sta fdS
-        bcc fdcS1
-        inc fdS+1
-fdcS1:  clc
-        lda fdD
-        adc #40
-        sta fdD
-        bcc fdcS2
-        inc fdD+1
-fdcS2:  dec fdN
-        bne fdcRow
-fdcDn:  rts
+        jmp fdFill              ; and everything below it
 
 ; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
@@ -5365,22 +5250,16 @@ abLp:   jsr arcPx
         asl
         asl
         asl
-        clc
-        adc #$08
-        sta apBase              ; 8 + 8*row: level = apBase - px
-        sec
-        lda apBase
-        sbc apPrev
-        jsr arcClp
+        sta apBase              ; 8*row
+        lda apPrev
+        jsr arcLvl
         asl
         asl
         asl
         asl
         sta apIdx
-        sec
-        lda apBase
-        sbc apCur
-        jsr arcClp
+        lda apCur
+        jsr arcLvl
         ora apIdx
         tax
         lda rampThi,x
@@ -5414,7 +5293,7 @@ abW:    clc
         sta fdS
         bcc abW1
         inc fdS+1
-abW1:   lda #$01
+abW1:   lda arcBlw
         sta (fdS),y
         dex
         bne abW
@@ -5425,6 +5304,24 @@ abNx:   ldy apY
         cpy #41
         bcc abLp
         rts
+
+; px -> rampThi nibble. rampThi holds BLANK-above/SOLID-below glyphs with the level counted in
+; pixels UP FROM THE CELL FLOOR. The landing needs the opposite polarity and gets it from charset
+; B, which mirrors the glyph vertically -- so there the level is measured from the cell TOP
+; instead, and the same table serves both.
+arcLvl: sta apT
+        lda arcInv
+        bne alvB
+        lda apBase              ; drop:    level = 8 + 8*row - px
+        clc
+        adc #$08
+        sec
+        sbc apT
+        jmp arcClp
+alvB:   lda apT                 ; landing: level = px - 8*row, and B flips it on the way out
+        sec
+        sbc apBase
+        jmp arcClp
 
 ; level -> rampThi nibble: clamp to CLO..CHI and bias by -CLO. A level arrives as a signed byte
 ; and both ends really do occur -- the arc leaves the cell at the steep columns.
@@ -5437,39 +5334,6 @@ arcClp: clc
         rts
 aclZ:   lda #$00
 aclD:   rts
-
-fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
-        cmp #$00                ; explicit, not inherited: a zero count here would run the
-        beq fdcDn              ;   dec/bne loop 256 times and blit 10KB over the program
-fdcRow: ldy #39                 ; unrolled four ways: the widest frame copies a whole screen,
-fdcB:   lda (fdS),y             ;   and at the 16 cycles a byte the plain loop cost that is
-        sta (fdD),y             ;   16,000 against a 17,045-cycle raster period -- so those
-        dey                     ;   frames spilled into a second period and the fall alternated
-        lda (fdS),y             ;   60fps and 30. 40 divides by 4, and this brings it to 13.75.
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        lda (fdS),y
-        sta (fdD),y
-        dey
-        bpl fdcB
-        clc
-        lda fdS
-        adc #40
-        sta fdS
-        bcc fdcS1
-        inc fdS+1
-fdcS1:  clc
-        lda fdD
-        adc #40
-        sta fdD
-        bcc fdcS2
-        inc fdD+1
-fdcS2:  dec fdN
-        bne fdcRow
-fdcDn:  rts
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
         cmp #$00                ; explicit, not inherited: a zero count here would run the
