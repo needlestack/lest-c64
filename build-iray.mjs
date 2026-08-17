@@ -2332,8 +2332,20 @@ const arcD = arcDraw.map(v => Math.round(255 * v / Math.max(...arcDraw)));
 // curvature sweeps continuously from +DEPTH through flat to -DEPTH and the arc is fully inverted
 // just as it leaves the top. An earlier cut STOPPED the crown dead at the middle, which gave the
 // same inversion but with a visible hitch where it parked.
-const ARC_DEPTH = +(process.env.ARC_DEPTH ?? 48);  // px between crown and edge. 19 was the real
-                                                   //   one and it read as a straight line.
+// ARC_DEPTH is the depth of the WHOLE ellipse -- what you would see at ARC_WIDE=1. ARC_WIDE then
+// CROPS it, and the visible depth follows: ARC_DEPTH * (1 - sqrt(1 - w^2)). So w -> 0 flattens
+// toward a straight line and w = 1 shows the full semi-ellipse, which is what the knob should
+// always have done. The first cut renormalised the profile against its value AT the viewport
+// edge, which pinned the visible depth to ARC_DEPTH whatever w was -- cropping bent the curve but
+// never flattened it. arcD is still normalised to 255 at the edge, for the precision; the crop
+// is applied to the AMPLITUDE instead, which is the same thing without losing bits.
+const ARC_DEPTH = +(process.env.ARC_DEPTH ?? 240);
+const ARC_AMP_RAW = ARC_DEPTH * (1 - Math.sqrt(1 - ARC_WIDE * ARC_WIDE));
+const ARC_AMP = Math.max(0, Math.min(120, Math.round(ARC_AMP_RAW)));   // signed byte, and the
+                                                                       // screen is only 200 tall
+if (Math.round(ARC_AMP_RAW) > 120)
+  console.log(`  NOTE: visible arc depth ${Math.round(ARC_AMP_RAW)}px clamped to ${ARC_AMP} ` +
+              `-- lower ARC_DEPTH or ARC_WIDE`);
 // ARC_SLOW is how much the crown slows, and it decides whether the inverted arc is ever SEEN.
 // The edges gain on the crown at v(1 - 1/k) while the crown moves at v/k, so the gap changes by
 // 1/(k-1) per pixel of crown travel -- and the crown has only 100px between the middle and the
@@ -2348,7 +2360,7 @@ const [arcYT, arcET] = (() => {
     const d = n * v;                               // how far the EDGES have come
     const y = d <= 100 ? 200 - d : 100 - (d - 100) / ARC_SLOW;
     Y.push(Math.max(0, Math.min(255, Math.round(y))));
-    E.push(Math.round((200 + ARC_DEPTH - d) - y) & 255);
+    E.push(Math.round((200 + ARC_AMP - d) - y) & 255);
   }
   return [Y, E];
 })();
