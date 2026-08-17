@@ -336,6 +336,8 @@ arcSkip = $81e4                  ; the landing places its own splits
 arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, see the overlap
 rsHi    = $81eb                  ; renderSym's column range, 39..0 for an ordinary frame
 rsLo    = $81ec
+otmp    = $81ed                  ; tall entities: the upper half's pointer, and which slot the
+onvL    = $81ee                  ;   lower half took, so its clip record can be inherited
 bgOn    = $81e6                  ; background render in progress: cap the subdivision loop
 bgN     = $81e7                  ; iterations left this frame
 bgMore  = $81e8                  ; $ff = the stack still has work on it
@@ -4078,7 +4080,7 @@ oSCbS:  sta oSInv+1
         sta oSDIn+1
 oSLoop: ldx osI
         lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
-        cmp #$01 ;   below this test is always here, because ORBGATE is off by
+        cmp #$02 ;   below this test is always here, because ORBGATE is off by
         bcs oSNext              ;   default and cannot be relied on to fence anything
 
         lda obIX,x
@@ -4697,8 +4699,13 @@ ohOk:   lda o1
         bcs orbNo               ; past 255 columns off centre: nowhere near the screen
         sta ocoff
         ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
-        lda orbVarT,x
-        sta ovar
+        ldy oidx                ; TALL entities have their own rungs, appended to the same
+        lda orbTallT,y          ;   variant list so every table indexed by ovar still works
+        beq omVarO
+        lda angVarT,x
+        bne omVarS              ; always taken: the angel's rungs never start at 0
+omVarO: lda orbVarT,x
+omVarS: sta ovar
         lda oaS                 ; --- centre column ---
         bmi ocN
         clc
@@ -4736,7 +4743,7 @@ ocS:    sta ocol
         sta ocolN
 ocDn:
         lda oidx
-        cmp #$01
+        cmp #$02
         bcs holeTail            ; entries above the orbs in orbXCT/orbYCT are HOLES. Everything
                                 ;   up to here -- forward, right, h, ocol -- is the same
                                 ;   question for a disc on the floor as for a sphere; only the
@@ -4989,6 +4996,67 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         tay
         lda bbRT,y              ; ... and of the rightmost
         sta obBR,x
+        stx onvL                ; X is still the lower slot: the upper half copies its record
+        inc onv
+        ; ---- a TALL entity takes a second slot for its upper half ----
+        ; Same X, same colour, same expand; the other bitmap; and one sprite height above -- 21
+        ; rows, or 42 once vmag has doubled it, which is exactly what orbAnchT already holds.
+        ldy ovar
+        lda orbPtrU,y
+        beq orbYes              ; one-sprite entity: nothing more to do
+        sta otmp
+        ldx onv
+        cpx #$08
+        bcs orbYes              ; no slot left: show the lower half rather than nothing
+        sec
+        lda o3
+        sbc orbAnchT,y
+        bcc orbYes              ; upper half is off the top of the screen
+        sta obY,x
+        lda otmp
+        sta obP,x
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ldy oidx
+        lda orbColT2,y
+        sta obC,x
+        ldy ovar
+        lda orbExpT,y
+        beq oNoX2
+        lda omBit
+        ora omXX
+        sta omXX
+        lda omBit
+        ora omYY
+        sta omYY
+oNoX2:  lda o0
+        sta obX,x
+        lda o1
+        beq oNoM2
+        lda omBit
+        ora omX8
+        sta omX8
+oNoM2:  ldy onvL                ; the stamp pass clips by column, and the two halves span the
+        lda obIX,y              ;   same columns -- so the upper slot inherits the lower's record
+        sta obIX,x
+        lda obV,y
+        sta obV,x
+        lda obOcc,y
+        sta obOcc,x
+        lda obCL,y
+        sta obCL,x
+        lda obCR,y
+        sta obCR,x
+        lda obL,y
+        sta obL,x
+        lda obR,y
+        sta obR,x
+        lda obBL,y
+        sta obBL,x
+        lda obBR,y
+        sta obBR,x
         inc onv
 orbYes: rts
 orbNo:  rts
@@ -5012,7 +5080,7 @@ holeOne:lda pcell
         beq hoNo
         lda hlv
         clc
-        adc #$01 ; the live hole is entry ORBS.length + level in orbXCT/orbYCT
+        adc #$02 ; the live hole is entry ORBS.length + level in orbXCT/orbYCT
         sta oidx
         jmp orbOne              ; tail call: orbOne branches to holeTail on the index
 hoNo:   rts
@@ -5034,10 +5102,10 @@ hoNo:   rts
 ; fallChk: standing in the hole's cell? Then go.
 fallChk:ldx hlv
         lda px+1
-        cmp orbXCT+1,x
+        cmp orbXCT+2,x
         bne fcNo
         lda py+1
-        cmp orbYCT+1,x
+        cmp orbYCT+2,x
         bne fcNo
         lda #$00                ; sprites away: they belong to the level being left. Clear the
         sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
@@ -6009,13 +6077,6 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $3240
-; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
-; record per cell would have been 768 and the lists have 21 bytes spare.
-holeSeeT: !byte 0,0,0,0,0,0,254,0,254,127,254,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,254,0,254,127,254,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
-mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
-mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -6024,15 +6085,8 @@ holePtrT: !byte 160,162,164,166,169,172,175,178,181,184,187,190,193,196,198,200,
 holeXOffT: !byte 24,24,24,36,36,36,36,36,36,36,36,36,36,24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,6,6,6,6,6
 holeYBaseT: !byte 119,121,123,124,126,127,129,130,132,133,134,135,137,138,139,140,141,141,143,143,143,145,145,145,147,147,147,148,148,149,149,149,150,150,150
 holeFlagT: !byte 6,6,6,7,7,7,7,7,7,15,15,15,15,14,14,14,14,6,6,6,6,6,6,6,6,2,2,2,2,2,1,1,1,1,1
-orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15
-orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0
-orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6
-orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129
-orbBlankT: !byte 0,2,4,6,8,10,12,14,16,18,20,0,2,4,6,8,10,12,14,16,18,20
-orbAnchT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
-orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21
-orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1
-orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0
+orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1,23,21,21,19,17,15,13,12,11,11,10,9,8,7,6,5,5,4,3,2
+orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14,14,11,10,9,8,7,6,6,5,4,3,2,1,0
 orbBitT: !byte 1,2,4,8,16,32,64,128
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.
@@ -6062,15 +6116,15 @@ mMskT: !byte 7,3,1,0
 ; that might be occluded, which is the only part of the test that is not O(1).
 runByteT: !byte 0,0,0,0,0,0,0,0,1
 runBitT: !byte 1,2,4,8,16,32,64,128,1
-orbOccLoT: !byte 0
-orbOccHiT: !byte 109
+orbOccLoT: !byte 0,2
+orbOccHiT: !byte 111,111
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 8,14,14
-orbYCT: !byte 4,4,4
+orbXCT: !byte 8,11,14,14
+orbYCT: !byte 4,4,4,4
 landXT: !byte 2,2
 landYT: !byte 2,2
-orbColT2: !byte 12
+orbColT2: !byte 12,12
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
 ; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
@@ -6080,7 +6134,7 @@ bbRT:   !byte $08,$0c,$0e,$0f
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
 opbBaseT: !byte 0,12,24,36,48,60,72,84
         * = $3700
-candListT: !byte 0,16,30,0,19,158,0,22,159,0,26,160,0,32,161,0,40,162,0,11,30,0,13,31,0,16,31,0,19,160,0,24,162,0,32,164,0,45,167,0,6,30,0,7,31,0,8,32,0,10,33,0,13,35,0,19,167,0,32,173,0,0,30,0,0,31,0,0,32,0,0,33,0,0,35,0,0,40,0,0,51,0,0,58,0,128,51,0,128,40,0,128,35,0,128,33,0,128,32,0,128,31,0,250,30,0,249,31,0,248,32,0,246,33,0,243,35,0,237,167,0,224,173,0,245,30,0,243,31,0,240,31,0,237,160,0,232,162,0,224,164,0,211,167,0,240,30,0,237,158,0,234,159,0,230,160,0,224,161,0,216,162   ; read through a 16-bit pointer, so it may cross pages
+candListT: !byte 0,16,30,0,19,158,0,22,159,0,26,160,0,32,161,0,40,162,0,11,30,0,13,31,0,16,31,0,19,160,0,24,162,0,32,164,0,45,167,0,6,30,0,7,31,0,8,32,1,5,158,0,10,33,1,6,158,0,13,35,1,7,159,0,19,167,1,8,160,0,32,173,1,10,161,0,0,30,0,0,31,0,0,32,1,0,30,0,0,33,1,0,30,0,0,35,1,0,31,0,0,40,1,0,32,0,0,51,1,0,33,0,0,58,1,0,35,0,128,51,1,0,40,1,0,51,0,128,40,1,0,58,0,128,35,1,128,51,0,128,33,1,128,40,0,128,32,1,128,35,0,128,31,0,250,30,0,249,31,0,248,32,1,251,158,0,246,33,1,250,158,0,243,35,1,249,159,0,237,167,1,248,160,0,224,173,1,246,161,0,245,30,0,243,31,0,240,31,0,237,160,0,232,162,0,224,164,0,211,167,0,240,30,0,237,158,0,234,159,0,230,160,0,224,161,0,216,162   ; read through a 16-bit pointer, so it may cross pages
         * = $4000  ; VIC bank 0 is full -- these live above it
 absCosT: !byte 255,255,255,255,255,254,253,252,251,250,248,247,245,243,241,239,237,234,231,229,226,223,220,216
         !byte 213,209,206,202,198,194,190,185,181,177,172,167,162,157,152,147,142,137,132,126,121,115,109,104
@@ -6490,11 +6544,11 @@ hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,20
         !byte 11,11,10,10,10,10,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,6
         !byte 6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3
         * = $5d00
-orbVarT: !byte 21,21,21,21,21,20,20,20,20,19,19,19,19,18,18,18,18,17,17,17,17,16,16,16,16,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12,12,12,11,11,11,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+orbVarT: !byte 21,21,21,21,21,20,20,20,20,19,19,19,41,41,18,18,18,17,17,17,17,16,16,16,39,39,15,15,15,14,14,14,14,13,13,13,37,37,12,12,12,12,11,11,11,10,10,10,9,9,9,9,8,8,8,34,34,7,7,7,6,6,6,6,5,5,5,32,32,4,4,4,3,3,3,3,2,2,2,2,30,30,1,1,1,0,0,0,0,0,0,0,0,28,28,28,28,28,28,28,28,28,28,28,28,27,27,27,27,27,27,27,27,27,27,27,27,26,26,26,26,26,26,26,26,26,26,26,26,26,25,25,25,25,25,25,25,25,25,25,25,25,24,24,24,24,24,24,24,24,24,24,24,24,23,23,23,23,23,23,23,23,23,23,23,23,23,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22
         * = $5e00
-candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+candCntT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,2,2,2,2,2,0,0,0,0,0,0,0,0,0,1,1,2,2,2,2,2,2,2,2,2,2,2,2,0,0,1,1,2,2,2,2,2,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $5f00
-candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,6,9,12,15,18,0,0,0,0,0,0,0,0,0,18,21,24,27,30,33,36,0,0,0,0,0,0,0,0,0,39,42,45,48,51,54,57,0,0,0,0,0,0,0,0,0,60,63,66,69,72,75,78,81,84,87,90,93,96,99,0,0,102,105,108,111,114,117,120,0,0,0,0,0,0,0,0,0,123,126,129,132,135,138,141,0,0,0,0,0,0,0,0,0,144,147,150,153,156,159,162,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+candLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,6,9,12,15,18,0,0,0,0,0,0,0,0,0,18,21,24,27,30,33,36,0,0,0,0,0,0,0,0,0,39,42,45,51,57,63,69,0,0,0,0,0,0,0,0,0,75,78,81,87,93,99,105,111,117,123,129,135,141,147,0,0,153,156,159,165,171,177,183,0,0,0,0,0,0,0,0,0,189,192,195,198,201,204,207,0,0,0,0,0,0,0,0,0,210,213,216,219,222,225,228,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $6000
 candHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,55,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,55,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,55,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,55,55,55,55,55,55,55,55,0,0,55,55,55,55,55,55,55,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,55,0,0,0,0,0,0,0,0,0,55,55,55,55,55,55,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $6100
@@ -6518,8 +6572,26 @@ arcSp2bT: !byte 246,246,246,246,246,246,246,246,246,246,246,238,222,206,190,174,
 arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
 ; the split for an overlap frame: between the departing arc's lowest row and the arriving one's
 ; highest, so each rim sits in the charset its polarity needs
+; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
+; record per cell would have been 768 and the lists have 21 bytes spare.
+holeSeeT: !byte 0,0,0,0,0,0,254,0,254,127,254,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,254,0,254,127,254,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
+mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
+mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
+; the per-VARIANT tables live out here: the angel's rungs doubled their length and pushed the
+; image segment through holeSeeT at $3240
+orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15,16,18,20,22,24,26,28,16,18,20,22,24,26,28,30,31,32,33,34,35
+orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,17,19,21,23,25,27,29,17,19,21,23,25,27,29,0,0,0,0,0,0
+orbTallT: !byte 0,1
+orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0
+orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6,1,1,1,1,1,1,1,6,6,6,6,6,6,6,6,6,6,6,6,6
+orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,129,129
+orbBlankT: !byte 0,2,4,6,8,10,12,14,16,18,20,0,2,4,6,8,10,12,14,16,18,20,-42,-36,-30,-24,-18,-12,-6,-21,-18,-15,-12,-9,-6,-3,0,3,6,9,12,15
+orbAnchT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21,21,21
+orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21,21,21
+angVarT: !byte 41,41,41,41,40,40,39,38,38,37,37,36,35,35,34,33,33,32,31,31,30,29,29,29,28,28,28,27,27,27,26,26,26,25,25,25,24,24,24,23,23,23,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22
 arcOvSpT: !byte 90,74,66,58
-        * = $6800
+        * = $6a00
 fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,23,0,0,0,0,0,0
         !byte 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,255,255,23,0,0,0,0,0,0
         !byte 3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,22,0,0,0,0,0,0
@@ -6560,10 +6632,10 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,
         !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
         !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
         !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,0,0,0,0,0,0,0
-        * = $6d00
+        * = $6f00
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte 12,0
+orbOccT: !byte 12,0,12,0
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40

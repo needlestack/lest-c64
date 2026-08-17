@@ -1730,7 +1730,7 @@ const ORB_VART     = 0x5d00;    // h -> size variant, 256
 const ORB_CANDCNT  = 0x5e00;    // per cell: how many candidates, 256
 const ORB_CANDLO   = 0x5f00;    // per cell: pointer to its list, lo/hi, 256 each
 const ORB_CANDHI   = 0x6000;
-const ORB_OCC      = 0x6d00;    // occluder masks, OCCBYTES x norbs. Out of the image segment
+const ORB_OCC      = 0x6f00;    // occluder masks, OCCBYTES x norbs. Out of the image segment
                                 //   entirely: at $3100 it capped the code, and fdRamp ran 3
                                 //   bytes past it. Addressed through the orbOccLo/Hi pointer
                                 //   pair, so it has no alignment or locality requirement, and
@@ -1807,7 +1807,7 @@ const ORBBM = ORBBMH.map(h => {
   bytes.push(0);
   return bytes;
 });
-const NORBBM = ORBBM.length;
+let NORBBM = ORBBM.length;
 // The widest rung must come back byte-identical to the art it was scaled from. If a change to
 // the resampler breaks that, every other rung is suspect too.
 if (ORBBM[0].slice(0, 63).join() !== ORB4RAW.slice(0, 63).join())
@@ -1816,6 +1816,66 @@ const ORBSRC = LADDER.map(r => ORBBMH.indexOf(r.h));
 const ORBEXP = LADDER.map(r => r.exp);
 const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent width, screen px
 const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent height, screen px
+// ---- TALL ENTITIES: the angel, two sprites stacked ----
+// Art comes off TMP-2.d64 (GKGM, two frames) via angel-art.json. 12x42 multicolor, body and
+// underside inks only. Same resampler as the orb -- majority of 4x4 samples, transparency
+// competing on equal terms -- just over a 42-row box, so the output is TWO sprite bitmaps.
+// Step of 3 source rows a rung: 7% a step, comparable to the orb ladder, and 13 distinct heights
+// instead of 32. Heights above 21 need two bitmaps, at or below 21 only one -- so a distant angel
+// costs a single sprite, which is where the slot budget goes.
+const ANGART = JSON.parse(readFileSync('./angel-art.json', 'utf8'));
+const ANGSRC42 = (() => { const g = [];
+  for (let y = 0; y < 42; y++) { const r = [];
+    for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++)
+      r.push((ANGART.angel[y * 3 + b] >> (6 - 2 * i)) & 3);
+    g.push(r); }
+  return g; })();
+const angW = h => Math.max(1, Math.round(12 * h / 42));
+function angScale(w, h) {
+  const out = [...Array(42)].map(() => new Array(12).fill(0));
+  const ox = (12 - w) >> 1, oy = 42 - h;         // centred, and standing on the floor
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
+    const t = [0, 0, 0, 0];
+    for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
+      const sx = Math.min(11, Math.floor((dx + (i + 0.5) / ORBSAMP) * 12 / w));
+      const sy = Math.min(41, Math.floor((dy + (j + 0.5) / ORBSAMP) * 42 / h));
+      t[ANGSRC42[sy][sx]]++;
+    }
+    let best = 0; for (let v = 1; v < 4; v++) if (t[v] >= t[best]) best = v;
+    out[oy + dy][ox + dx] = best;
+  }
+  return out;
+}
+const angBytes = (g, row0) => { const b = [];
+  for (let y = row0; y < row0 + 21; y++) for (let k = 0; k < 3; k++)
+    b.push([0, 1, 2, 3].reduce((v, i) => v | (g[y][k * 4 + i] << (6 - 2 * i)), 0));
+  b.push(0); return b; };
+const ANGLAD = [];
+for (let h = 42; h >= 24; h -= 3) ANGLAD.push({ h, exp: 1 });   // apparent 84..48
+for (let h = 42; h >= 6;  h -= 3) ANGLAD.push({ h, exp: 0 });   // apparent 42..6
+const ANGBMH = [...new Set(ANGLAD.map(r => r.h))].sort((a, b) => b - a);
+const ANG_BM0 = ORBBM.length;                    // where the angel's bitmaps start
+const ANGIDX = new Map();                        // height -> [lower slot, upper slot or -1]
+for (const h of ANGBMH) {
+  const g = angScale(angW(h), h);
+  const lo = ORBBM.length; ORBBM.push(angBytes(g, 21));         // rows 21..41: the lower sprite
+  let up = -1;
+  if (h > 21) { up = ORBBM.length; ORBBM.push(angBytes(g, 0)); }// rows 0..20: only if it reaches
+  ANGIDX.set(h, [lo, up]);
+}
+const ANG_V0 = LADDER.length;                    // the angel's rungs follow the orb's in the
+                                                 // SHARED variant tables, so every table indexed
+                                                 // by ovar extends for free
+for (const r of ANGLAD) {
+  const [lo, up] = ANGIDX.get(r.h);
+  LADDER.push({ h: r.h, exp: r.exp, up });
+  ORBSRC.push(lo); ORBEXP.push(r.exp);
+  ORBWIDE.push(angW(r.h) * (r.exp ? 4 : 2));
+  ORBTALL.push(r.h * (r.exp ? 2 : 1));
+}
+// upper-sprite bitmap per variant; 0 means "this entity is one sprite"
+const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
+NORBBM = ORBBM.length;
 if (process.env.ORBDUMP === '1') {
   const CH = [' ', '.', '#', 'o'];
   // No slot total here on purpose: bank 3's free space is not known until the image is laid out,
@@ -1866,6 +1926,7 @@ if (process.env.ORBSCATTER) {
   }
 } else {
   ORBS.push({ x: 8.5, y: 4.5, c: 0 });           // the corridor mouth
+  ORBS.push({ x: 11.5, y: 4.5, c: 0, tall: true });   // the angel, halfway down
 }
 if (process.env.ORBWHERE)
   ORBS.forEach((o, i) => { if (String(i) === process.env.ORBWHERE)
@@ -2127,6 +2188,14 @@ const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
 // search can only ever return the first of a pair. ORBSCALE keeps its meaning (the ball's
 // diameter in pixels at h = 88, a width) and is converted through the top rung's own aspect, so
 // the tuning knob is unchanged.
+// and the angel's own distance->variant map, offset into the shared list
+const angVarT = [...Array(256)].map((_, h) => {
+  const want = (ORBSCALE * h / 88) * (ORBTALL[ANG_V0] / ORBWIDE[ANG_V0]) * 2;
+  let b = ANG_V0;
+  for (let v = ANG_V0 + 1; v < ORBTALL.length; v++)
+    if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
+  return b;
+});
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = (ORBSCALE * h / 88) * ORBTALL[0] / ORBWIDE[0];
   let b = 0; for (let v = 1; v < ORBTALL.length; v++)
@@ -2149,6 +2218,8 @@ const orbVarT = [...Array(256)].map((_, h) => {
 // latent assumption that vm()/cb() carried into the bank-3 move. In bank 3 the absolute form
 // would give 768, which does not even fit in a pointer byte.
 const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
+const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
+const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
 const orbExpT = ORBEXP.map(e => e);
 // Distance from the sprite's LEFT EDGE to the anchor the projection aims at. orbScale centres
 // the content in the 12-column sprite, so this is ~half the sprite whatever the ball's size;
@@ -3066,6 +3137,8 @@ arcSkip = $81e4                  ; the landing places its own splits
 arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, see the overlap
 rsHi    = $81eb                  ; renderSym's column range, 39..0 for an ordinary frame
 rsLo    = $81ec
+otmp    = $81ed                  ; tall entities: the upper half's pointer, and which slot the
+onvL    = $81ee                  ;   lower half took, so its clip record can be inherited
 bgOn    = $81e6                  ; background render in progress: cap the subdivision loop
 bgN     = $81e7                  ; iterations left this frame
 bgMore  = $81e8                  ; $ff = the stack still has work on it
@@ -7679,8 +7752,13 @@ ohOk:   lda o1
         bcs orbNo               ; past 255 columns off centre: nowhere near the screen
         sta ocoff
         ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
-        lda orbVarT,x
-        sta ovar
+        ldy oidx                ; TALL entities have their own rungs, appended to the same
+        lda orbTallT,y          ;   variant list so every table indexed by ovar still works
+        beq omVarO
+        lda angVarT,x
+        bne omVarS              ; always taken: the angel's rungs never start at 0
+omVarO: lda orbVarT,x
+omVarS: sta ovar
         lda oaS                 ; --- centre column ---
         bmi ocN
         clc
@@ -7989,6 +8067,67 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         and #$03
         tay
         lda bbRT,y              ; ... and of the rightmost
+        sta obBR,x
+        stx onvL                ; X is still the lower slot: the upper half copies its record
+        inc onv
+        ; ---- a TALL entity takes a second slot for its upper half ----
+        ; Same X, same colour, same expand; the other bitmap; and one sprite height above -- 21
+        ; rows, or 42 once vmag has doubled it, which is exactly what orbAnchT already holds.
+        ldy ovar
+        lda orbPtrU,y
+        beq orbYes              ; one-sprite entity: nothing more to do
+        sta otmp
+        ldx onv
+        cpx #$08
+        bcs orbYes              ; no slot left: show the lower half rather than nothing
+        sec
+        lda o3
+        sbc orbAnchT,y
+        bcc orbYes              ; upper half is off the top of the screen
+        sta obY,x
+        lda otmp
+        sta obP,x
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ldy oidx
+        lda orbColT2,y
+        sta obC,x
+        ldy ovar
+        lda orbExpT,y
+        beq oNoX2
+        lda omBit
+        ora omXX
+        sta omXX
+        lda omBit
+        ora omYY
+        sta omYY
+oNoX2:  lda o0
+        sta obX,x
+        lda o1
+        beq oNoM2
+        lda omBit
+        ora omX8
+        sta omX8
+oNoM2:  ldy onvL                ; the stamp pass clips by column, and the two halves span the
+        lda obIX,y              ;   same columns -- so the upper slot inherits the lower's record
+        sta obIX,x
+        lda obV,y
+        sta obV,x
+        lda obOcc,y
+        sta obOcc,x
+        lda obCL,y
+        sta obCL,x
+        lda obCR,y
+        sta obCR,x
+        lda obL,y
+        sta obL,x
+        lda obR,y
+        sta obR,x
+        lda obBL,y
+        sta obBL,x
+        lda obBR,y
         sta obBR,x
         inc onv
 orbYes: rts
@@ -9011,13 +9150,6 @@ ${SPRITES ? `; ================= orb tables =================
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $3240
-; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
-; record per cell would have been 768 and the lists have 21 bytes spare.
-holeSeeT: !byte ${holeSee.join(",")}
-${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
-mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
-mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
         * = ${hx16(ORB_SMALL)}
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -9026,13 +9158,6 @@ holePtrT: !byte ${holeSlotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
 holeXOffT: !byte ${holeXOffT.join(',')}
 holeYBaseT: !byte ${holeYBaseT.join(',')}
 holeFlagT: !byte ${holeFlagT.join(',')}
-orbPtrT: !byte ${orbPtrT.join(',')}
-orbExpT: !byte ${orbExpT.join(',')}
-orbXOffT: !byte ${orbXOffT.join(',')}
-orbYBaseT: !byte ${orbYBaseT.join(',')}
-orbBlankT: !byte ${orbBlankT.join(',')}
-orbAnchT: !byte ${ORBANCH.join(',')}
-orbHgtT: !byte ${orbHgtT.join(',')}
 orbColLT: !byte ${orbColLT.join(',')}
 orbColRT: !byte ${orbColRT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
@@ -9139,12 +9264,30 @@ arcSp2bT: !byte ${arcSp2bT.join(',')}
 arcTopT: !byte ${arcTopT.join(',')}
 ; the split for an overlap frame: between the departing arc's lowest row and the arriving one's
 ; highest, so each rim sits in the charset its polarity needs
+; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
+; record per cell would have been 768 and the lists have 21 bytes spare.
+holeSeeT: !byte ${holeSee.join(",")}
+${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
+mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
+mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
+; the per-VARIANT tables live out here: the angel's rungs doubled their length and pushed the
+; image segment through holeSeeT at $3240
+orbPtrT: !byte ${orbPtrT.join(',')}
+orbPtrU: !byte ${orbPtrU.join(',')}
+orbTallT: !byte ${orbTallT.join(',')}
+orbExpT: !byte ${orbExpT.join(',')}
+orbXOffT: !byte ${orbXOffT.join(',')}
+orbYBaseT: !byte ${orbYBaseT.join(',')}
+orbBlankT: !byte ${orbBlankT.join(',')}
+orbAnchT: !byte ${ORBANCH.join(',')}
+orbHgtT: !byte ${orbHgtT.join(',')}
+angVarT: !byte ${angVarT.join(',')}
 arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const d = arcSpan(arcYT[ARC_DROP_N + n], (arcET[ARC_DROP_N + n] << 24) >> 24)[1];
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
   return Math.max(51, Math.min(246, 50 + Math.min(d, l) * 8));
 }).join(',')}
-${FALLSCENE ? `        * = ${hx16(FROWT + 0x200)}
+${FALLSCENE ? `        * = ${hx16(FROWT + 0x400)}
 fRowT: ${chunk(fRowT, 32).trim()}` : ''}
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
