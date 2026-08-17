@@ -334,6 +334,16 @@ pCh0    = $81e1                  ; which charset each of the three regions uses.
 pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
 arcSkip = $81e4                  ; the landing places its own splits
 arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, see the overlap
+bgOn    = $81e6                  ; background render in progress: cap the subdivision loop
+bgN     = $81e7                  ; iterations left this frame
+bgMore  = $81e8                  ; $ff = the stack still has work on it
+bgCol   = $81e9                  ; next column for the sliced renderSym
+bgPh    = $81ea                  ; 0 idle, 1 casting, 2 drawing columns, 3 done
+                                 ; NOTE: renderSym cannot target fallBuf2 -- its fill chains are
+                                 ; straight lines of stores with the screen address BAKED IN, one
+                                 ; pair per buffer. The slices therefore render into the back
+                                 ; buffer and get copied out column-wise before the fall frame
+                                 ; paints over them.
 pCh2    = $81e3                  ;   then A for the rim. The LANDING wants B,A,B: its rim is at
                                  ;   the TOP in the mirrored polarity, then the new room's ceiling
                                  ;   half, then its floor half. Same three-stage chain either way.
@@ -702,7 +712,12 @@ mfIn:   jsr readKeys
         jmp mvs                 ;   here, where dropping straight into fallStep was right -- with
                                 ;   it setting 2 the render never ran and fallBuf2 kept the FIRST
                                 ;   destination for every later fall.
-mfRnd:
+mfRnd:  lda #$00
+        sta bgOn                ; the player's own frame is never capped
+        jsr rayAll              ; the cast is a SUBROUTINE now, so the fall can run it too --
+        jmp subFin              ;   in slices, into a buffer, while the animation keeps moving
+rayCont:jmp subLp               ; resume a capped cast: everything it needs is still in RAM
+rayAll:
 
 
 
@@ -831,7 +846,14 @@ mfRnd:
 
         jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
                                 ; and leaves the stack holding the spans between them
-subLp:  ldx sp
+subLp:  lda bgOn                ; ---- the cast is INTERRUPTIBLE ----
+        beq subLp0              ;   Normal rendering pays one compare per pop for this. The
+        dec bgN                 ;   background render for the fall gets a per-frame iteration
+        bne subLp0              ;   budget instead, and when it runs out it simply RETURNS: sp
+        lda #$ff                ;   and the two stack arrays are plain RAM, so next frame picks
+        sta bgMore              ;   up exactly where it stopped. No recursion to unwind -- the
+        rts                     ;   subdivision was an explicit stack all along.
+subLp0: ldx sp
         beq subDn
         dex
         stx sp
@@ -1122,7 +1144,7 @@ subEmt: ldx bcur
 subOne: lda #159
         sta spanR
         jsr subFlush
-        jmp subFin
+        rts                     ; was "jmp subFin": rayAll returns to its caller now
 
 subFlush:                       ; interpolate + seam one maximal face
         lda spanR
