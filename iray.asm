@@ -319,7 +319,13 @@ fFrm    = $81f8                  ; which frame of the drop: the index into fRowT
 fwRow   = $81f9                  ;   40 bytes -- $81cd is pd11, which the overlap check caught
 fwN     = $81fa
 arcY    = $81fb                  ; the crown's pixel row this frame
-arcR    = $81d0                  ; 40 bytes: the rim's character row per column
+apPrev  = $81d0                  ; arcBand: the boundary pixel row at this cell's left edge,
+apCur   = $81d1                  ;   and at its right -- carried over so 41 edges cost 41
+apRow   = $81d2                  ;   multiplies, not 80. Then the cell row, 8*row+8, the
+apBase  = $81d3                  ;   half-built rampThi index, the glyph, and the saved
+apIdx   = $81d4                  ;   edge counter while Y addresses the screen.
+apCode  = $81d5
+apY     = $81d6
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce                  ;   The fine scroll belongs to the content it shifts, and that
                                  ;   content is in the BACK buffer -- writing the register inside
@@ -1487,7 +1493,7 @@ noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falli
                                 ; them, ~a fifth of the frame rate, on the one path that was
                                 ; never meant to be locked to a fixed rate.
 
-; ---- fwait: the fall's CONSTANT-RATE wait, 3 raster periods per animation frame ----
+; ---- fwait: the fall's CONSTANT-RATE wait, 2 raster periods per animation frame ----
 ; Counting periods off frameCnt is what makes it constant. The old form -- spin to 250, then burn
 ; one more period -- is only two periods while the frame's work fits inside the first; when it ran
 ; past 250 the spin silently picked up a third, so the fall alternated 30 and 20fps. A rate that
@@ -1497,13 +1503,13 @@ noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falli
 fwait:  lda frameCnt
         sec
         sbc fT0
-        cmp #3
+        cmp #2
         bcc fwait
 mvs:    lda $d012
         cmp #250
         bne mvs
         lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
-        sta fT0                 ;   frame, so the next deadline is exactly fT0 + 3
+        sta fT0                 ;   frame, so the next deadline is exactly fT0 + 2
         lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
         sta $d011               ;   flip below, so the fine scroll and the content it shifts reach
         lda pSplit              ;   the screen on the same 60Hz frame. Written inside fallStep they
@@ -5090,10 +5096,14 @@ fstD1:  ; ---- the split does not travel any more ----
         lda fallSt
         cmp #$03
         beq fsSpL
-        lda #$96
-        sta pSplit
-        lda #$13
-        sta pd11
+        lda #252                ; park the split BELOW the last display line (pixel 199 is raster
+        sta pSplit              ;   249): the whole screen is charset A for the drop, which is the
+        lda #$13                ;   polarity the rim's ramp glyphs are drawn in, and nothing else
+        sta pd11                ;   on screen cares -- BLANK and SOLID are their own mirrors.
+                                ; NOT 250. The buffer flip spins on raster 250, and a split IRQ on
+                                ; that same line eats ~40 of its 65 cycles, so the spin misses the
+                                ; window and waits a whole extra frame -- one-period slips
+                                ; scattered over a third of the fall. Keep raster 250 clear.
         jmp fallDraw
 fsSpL:  lda fPosH               ; landing: the new frame's horizon starts a screen BELOW and
         cmp #100                ;   comes up to meet the split
@@ -5188,7 +5198,7 @@ fallLand:
 fallDraw:
         lda fSro
         bmi fdNeg               ; landing: still the flat translating copy
-        jsr arcCalc             ; where the rim sits in every column, and its lowest row
+        jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
         lda #$00       ; everything above the arc is FLOOR. With FALLSCENE off that is
         sta fdCol               ;   the whole screen down to the band: the drop blanks to white on
         lda #$00                ;   its first frame and the arc is the only thing moving, so there
@@ -5204,7 +5214,7 @@ fallDraw:
         lda mul40HiT,x
         adc baseHi
         sta fdD+1
-        jsr arcBand             ; the curve itself: hole from arcR[c] down to arcHi, per column
+        jsr arcBand             ; the curve itself, at pixel resolution via the ramps
         lda #$01       ; then the rest of the hole, whole rows again -- and below the
         sta fdCol               ;   horizon this is what pushes the last of the floor off the top
         lda #25
@@ -5269,95 +5279,197 @@ fdcS2:  dec fdN
         bne fdcRow
 fdcDn:  rts
 
-; ---- arcCalc: where the arc sits in every column this frame ----
-; row(c) = Y + (E * arcD[c] >> 8), Y and E straight out of the two animation tables. One
-; multiply a column, 40 a frame, against ~34,000 spare cycles in a 3-period fall frame.
-; mul8 clobbers X, so the column lives in Y throughout.
-arcCalc:ldx fFrm                ; the whole animation is two bytes a frame: where the crown is
-        lda arcYT,x             ;   and how deep the arc is, signed. See ARC_DEPTH.
-        sta arcY
-        lda arcET,x
-        bpl acEP
-        eor #$ff                ; negative: the arc has turned inside out and the edges are
-        clc                     ;   ABOVE the crown
+; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
+; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
+; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
+arcPrep:ldx fFrm
+        lda arcYT,x
+        sta arcY                ; the crown's pixel row
+        lda arcET,x             ; and the signed depth: + is an arch, - is inverted
+        bpl apEP
+        eor #$ff
+        clc
         adc #$01
         ldx #$ff
         stx arcNg
-        jmp acES
-acEP:   ldx #$00
+        sta arcA
+        lda arcY                ; inverted: the CENTRE is the lowest point
+        jmp apH3
+apEP:   ldx #$00
         stx arcNg
-acES:   sta arcA
-        lda #$00
-        sta arcHi
-        ldy #39
-acLp:   lda arcD,y
+        sta arcA
+        clc                     ; arch: the EDGES are
+        lda arcY
+        adc arcA
+        bcc apH3
+        lda #199
+apH3:   cmp #200
+        bcc apH4
+        lda #199
+apH4:   lsr
+        lsr
+        lsr
+        clc
+        adc #$01                ; first row that is entirely hole
+        cmp #26
+        bcc apHok
+        lda #25
+apHok:  sta arcHi
+        rts
+
+; ---- arcPx: the boundary's pixel row at cell edge Y ----
+; px = crown + (|E| * arcD[edge] >> 8), signed by arcNg. mul8 keeps Y, which is what lets the
+; caller walk the 41 edges with the index in Y throughout.
+arcPx:  lda arcD,y
         sta mq
         lda arcA
-        jsr mul8                ; phi = (|E| * arcD[c]) >> 8: this column's depth, in pixels
+        jsr mul8
         lda arcNg
-        bne acNeg
-        clc                     ; arch: edges below the crown
+        bne apxN
+        clc
         lda arcY
         adc phi
-        bcs acMax               ; past the foot of the screen
-        jmp acRow
-acMax:  lda #200
-        jmp acRow
-acNeg:  lda arcY                ; inverted: edges above it
+        bcs apxLo               ; past the foot of the screen
+        cmp #200
+        bcc apxD
+apxLo:  lda #199
+        rts
+apxN:   lda arcY
         sec
         sbc phi
-        bcs acRow
+        bcs apxD
         lda #$00                ; past the top
-acRow:  lsr
-        lsr
-        lsr                     ; pixels -> character rows
-        cmp #26
-        bcc acOk
-        lda #25
-acOk:   sta arcR,y
-        cmp arcHi
-        bcc acNx
-        sta arcHi               ; running maximum: the lowest row the rim reaches
-acNx:   dey
-        bpl acLp
-        rts                     ; invariant -- see the 10KB blit in [[iray-fall]].
+apxD:   rts
 
-; ---- arcBand: the curve itself, the only per-column work in the frame ----
-; Whole rows below arcHi are solid hole and were filled by the unrolled loop; this adds the rows
-; between each column's own rim and arcHi. The band is at most three rows tall (19px of droop at
-; the extremes, nothing at the horizon), so this is ~120 stores, not 1,000.
-; fdS is free here: the drop finished with it after fdCopy and does not touch it again.
-arcBand:ldy #39
-abLp:   lda arcHi
+; ---- arcBand: the arc at PIXEL resolution, out of the existing ramp dictionary ----
+; A character cell gets the ramp whose left and right endpoints match the boundary's height at
+; that cell's two edges: rampThi[wL*16 + wR], level counted in pixels UP FROM THE CELL FLOOR, so
+; level = 8 + 8*row - px. The dictionary already carries every endpoint pair over CLO..CHI, and
+; the arc's steepest cell changes by 5px, so nothing new had to be fitted -- see [[iray-fall]].
+; NO BANK SWITCH IS NEEDED: the rim is floor-above/hole-below whichever way it curves, which is
+; charset A's polarity, and the whole screen is parked in A for the drop. Rows below the glyph are
+; solid hole; rows above it were filled BLANK already.
+arcBand:ldy #$00
+        jsr arcPx
+        sta apPrev
+        ldy #$01
+abLp:   jsr arcPx
+        sta apCur
+        clc                     ; the cell is placed by the MIDPOINT of its two edges, which keeps
+        adc apPrev              ;   both endpoints inside CLO..CHI even on the steepest cell
+        ror                     ;   (9-bit average: the carry is bit 8)
+        lsr
+        lsr
+        lsr
+        sta apRow
+        asl
+        asl
+        asl
+        clc
+        adc #$08
+        sta apBase              ; 8 + 8*row: level = apBase - px
         sec
-        sbc arcR,y
-        beq abNx                ; this column already IS the lowest row
-        sta arcC
-        ldx arcR,y
-        tya                     ; pointer = baseHi:mul40[row] + column
+        lda apBase
+        sbc apPrev
+        jsr arcClp
+        asl
+        asl
+        asl
+        asl
+        sta apIdx
+        sec
+        lda apBase
+        sbc apCur
+        jsr arcClp
+        ora apIdx
+        tax
+        lda rampThi,x
+        sta apCode
+        ldx apRow               ; screen address = base + 40*row + column, column = Y-1
+        tya
+        sec
+        sbc #$01
         clc
         adc mul40LoT,x
         sta fdS
         lda mul40HiT,x
         adc baseHi
         sta fdS+1
-        sty tmp
-        ldx arcC
+        sty apY
         ldy #$00
-abW:    lda #$01
+        lda apCode
         sta (fdS),y
+        lda arcHi               ; and solid hole from the row below it down to arcHi
+        sec
+        sbc apRow
+        bcc abNx
+        beq abNx
+        sec
+        sbc #$01
+        beq abNx
+        tax
+abW:    clc
+        lda fdS
+        adc #40
+        sta fdS
+        bcc abW1
+        inc fdS+1
+abW1:   lda #$01
+        sta (fdS),y
+        dex
+        bne abW
+abNx:   ldy apY
+        lda apCur
+        sta apPrev
+        iny
+        cpy #41
+        bcc abLp
+        rts
+
+; level -> rampThi nibble: clamp to CLO..CHI and bias by -CLO. A level arrives as a signed byte
+; and both ends really do occur -- the arc leaves the cell at the steep columns.
+arcClp: clc
+        adc #$03
+        bmi aclZ
+        cmp #$10
+        bcc aclD
+        lda #$0f
+        rts
+aclZ:   lda #$00
+aclD:   rts
+
+fdCopy: sta fdN                 ; A rows, advancing BOTH pointers
+        cmp #$00                ; explicit, not inherited: a zero count here would run the
+        beq fdcDn              ;   dec/bne loop 256 times and blit 10KB over the program
+fdcRow: ldy #39                 ; unrolled four ways: the widest frame copies a whole screen,
+fdcB:   lda (fdS),y             ;   and at the 16 cycles a byte the plain loop cost that is
+        sta (fdD),y             ;   16,000 against a 17,045-cycle raster period -- so those
+        dey                     ;   frames spilled into a second period and the fall alternated
+        lda (fdS),y             ;   60fps and 30. 40 divides by 4, and this brings it to 13.75.
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        bpl fdcB
         clc
         lda fdS
         adc #40
         sta fdS
-        bcc abW2
+        bcc fdcS1
         inc fdS+1
-abW2:   dex
-        bne abW
-        ldy tmp
-abNx:   dey
-        bpl abLp
-        rts
+fdcS1:  clc
+        lda fdD
+        adc #40
+        sta fdD
+        bcc fdcS2
+        inc fdD+1
+fdcS2:  dec fdN
+        bne fdcRow
+fdcDn:  rts
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
         cmp #$00                ; explicit, not inherited: a zero count here would run the
@@ -5653,7 +5765,7 @@ holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
-arcD: !byte 255,231,209,187,167,147,128,111,95,79,65,53,41,31,23,15,9,5,2,0,0,1,4,8,14,21,29,39,50,62,76,91,107,124,142,162,182,203,226,249
+arcD: !byte 255,232,210,189,168,149,131,113,97,82,68,55,44,34,25,17,11,6,3,1,0,1,3,6,11,17,25,34,44,55,68,82,97,113,131,149,168,189,210,232,255
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -6146,6 +6258,7 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         * = $6600          ; the fall's animation data, out of the image's own segment
 arcYT: !byte 200,190,179,169,159,148,138,128,117,107,98,93,88,83,78,72,67,62,57,52,47,41,36,31,26,21,16,10,5,0     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte 48,48,48,48,48,48,48,48,48,48,46,41,36,31,26,20,15,10,5,0,251,245,240,235,230,225,220,214,209,204
+arcD: !byte 255,232,210,189,168,149,131,113,97,82,68,55,44,34,25,17,11,6,3,1,0,1,3,6,11,17,25,34,44,55,68,82,97,113,131,149,168,189,210,232,255
 
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
