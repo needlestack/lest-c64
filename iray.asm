@@ -334,6 +334,12 @@ arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colour
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce
 pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
+pCh0    = $81e1                  ; which charset each of the three regions uses. The DROP wants
+pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
+arcSkip = $81e4                  ; the landing places its own splits
+pCh2    = $81e3                  ;   then A for the rim. The LANDING wants B,A,B: its rim is at
+                                 ;   the TOP in the mirrored polarity, then the new room's ceiling
+                                 ;   half, then its floor half. Same three-stage chain either way.
                                  ;   The fine scroll belongs to the content it shifts, and that
                                  ;   content is in the BACK buffer -- writing the register inside
                                  ;   fallStep showed the new scroll against the OLD frame for one
@@ -524,6 +530,8 @@ cpChr:  txa
         sta pSplit              ; the pending splits start where the renderer wants them
         lda #246
         sta pSplit2
+        lda #$00
+        sta arcSkip
         lda #$00
         sta fT0
         lda #$80
@@ -1527,6 +1535,12 @@ mvs:    lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
+        lda pCh0
+        sta irqC0+1
+        lda pCh1
+        sta irqC1+1
+        lda pCh2
+        sta irqC2+1
                                 ;   lower border, so both are safe to touch here.
         lda baseHi
         cmp #$e0
@@ -3554,19 +3568,19 @@ irqCmp: cmp #$96   ; operands PATCHED, not variable reads: "cmp abs" is two cycl
 irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the line.
         bcs irqA2
         lda d018vm              ; --- horizon..arc: the mirrored half ---
-        ora #$06
+irqC1:  ora #$06
         sta $d018
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
 irqA2:  lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
-        ora #$04
+irqC2:  ora #$04
         sta $d018
         lda #$00
         sta $d012
         jmp irqd
 irqTop: lda d018vm              ; --- top of frame: charset A, arm the horizon ---
-        ora #$04
+irqC0:  ora #$04
         sta $d018
 irqArm: lda #$96
         sta $d012
@@ -5079,14 +5093,30 @@ fstFOk: stx fFrm
         sta pSplit              ;   charset B; arcPrep sets the second split, at the top of the
         lda #$00                ;   arc, where A has to come back for the rim glyph.
         sta arcInv
-        beq fsDone
-fsLand: ldx fFrm                ; LANDING: the same movement with the colours swapped -- white
-        lda arcSp2T,x           ;   rising to replace the black, over the NEW room sliding up
-        sta pSplit              ;   into place. The rim is now SOLID above and
+        lda #$04        ; DROP: A above the horizon, B below it, A again for the rim
+        sta pCh0
+        sta pCh2
+        lda #$06
+        sta pCh1
+        lda #$00
+        sta arcSkip             ; the drop lets arcPrep place the arc's split
+        beq fsDone              ; always taken
+fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, in the mirrored
+        lda #$06        ;   polarity, then the new room's ceiling half, then its floor
+        sta pCh0                ;   half. The room is held clear of the arc (see ARC_GAP) so no
+        sta pCh2                ;   scanline ever has to serve both.
+        lda #$04
+        sta pCh1
+        lda arcSp2T,x           ; white rising to replace the black, over the NEW room sliding up
+        sta pSplit              ;   into place. The rim is SOLID above and
         lda #$ff                ;   BLANK below, which is the mirror of what the dictionary
         sta arcInv              ;   holds, so park the split ABOVE the display instead and let
                                 ;   charset B supply the other polarity. Every column flips on
                                 ;   the same frame, so one raster line does the whole job.
+        lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+        sta pSplit2
+        lda #$ff
+        sta arcSkip             ; arcPrep must not overwrite pSplit2 on the landing
 fsDone: lda #$13
         sta pd11
         jmp fallDraw
@@ -5464,10 +5494,8 @@ apH4:   lsr
         lda #25
 apHok:  sta arcHi
         ; ---- and the top of the arc, which is where charset A has to come back ----
-        lda arcInv              ; the LANDING wants B everywhere: its rim is drawn in the mirrored
-        beq apTop               ;   polarity and there is no un-mirrored scene left on screen
-        lda #246
-        sta pSplit2
+        lda arcSkip             ; the landing sets both splits itself, from its own tables
+        beq apTop
         rts
 apTop:  lda arcNg               ; inverted: the EDGES are highest; arch: the crown is
         beq apT1
@@ -6421,7 +6449,9 @@ arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,
 arcShT: !byte 255,243,217,191,165,138,112,86,59,33,7,0,0,0,0,0,0,0,0,0
 arcTrT: !byte 0,7,23,39,55,71,87,103,119,135,151,164,175,186,198,209,221,232,244,255
 arcSpT: !byte 150,143,127,111,95,79,63,51,51,51,51,51,51,51,51,51,51,51,51,51
-arcSp2T: !byte 246,246,246,246,246,246,246,246,246,246,246,246,246,246,230,214,198,182,166,150
+arcSp2T: !byte 246,246,246,246,246,246,242,226,210,194,186,178,162,154,138,122,106,90,74,58
+arcSp2bT: !byte 246,246,246,246,246,246,246,246,246,246,246,246,246,246,246,238,222,198,174,150
+arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
         * = $6700
 rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,101,255,88,26,170,0,255
         !byte 162,76,255,255,255,132,255,255,151,255,153,56,165,255,255,138,255,248,255,255,123,255,86,83
@@ -6435,8 +6465,8 @@ rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,10
         !byte 255,255,255,131,97,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
         * = $6800
-fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0
-        !byte 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,24,0,0,0,0,0,0
+fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,23,0,0,0,0,0,0
+        !byte 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,255,255,23,0,0,0,0,0,0
         !byte 3,4,5,6,7,8,9,10,11,12,13,14,15,17,18,19,20,21,22,24,255,255,255,255,255,20,0,0,0,0,0,0
         !byte 5,6,7,8,9,10,11,12,13,15,16,17,19,20,21,23,24,255,255,255,255,255,255,255,255,17,0,0,0,0,0,0
         !byte 7,8,9,10,11,12,13,15,16,18,20,21,23,24,255,255,255,255,255,255,255,255,255,255,255,14,0,0,0,0,0,0
@@ -6460,20 +6490,20 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,0,0,0,0,0,0,0
-        !byte 255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,0,0,0,0,0,0,0
-        !byte 255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,0,0,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
         !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,0,0,0,0,0,0,0
         * = $6d00
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,

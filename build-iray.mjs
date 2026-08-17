@@ -2426,13 +2426,29 @@ const arcShT = arcYT.map(y => {
 const arcTrT = arcYT.map(y => Math.max(0, Math.min(255, arcYT[0] - y)));
 const arcSpT = arcTrT.map(t => Math.max(51, Math.min(246, 150 - t)));
 const arcTr2T = arcYT2.map(y => Math.max(0, Math.min(255, arcYT2[0] - y)));
+// ---- where the arc reaches, per frame, in CHARACTER ROWS ----
+// Both ends, because the scene has to be kept clear of it: a horizontal split cannot serve two
+// polarities on one scanline, so instead of drawing the rim per-column we simply never let the
+// room and the arc share a raster. ARC_GAP rows of slack, so the split has somewhere to land.
+const ARC_GAP = +(process.env.ARC_GAP ?? 2);
+const arcSpan = (Y, E) => {                        // [topmost row, first row entirely past it]
+  const dep = Math.round(Math.abs(E) * 255 / 256);
+  const lo = E >= 0 ? Y : Y - dep, hi = E >= 0 ? Y + dep : Y;
+  return [Math.max(0, Math.min(25, lo >> 3)), Math.max(0, Math.min(25, (Math.min(199, hi) >> 3) + 1))];
+};
+const arcTopT = arcYT.map((y, n) => arcSpan(y, (arcET[n] << 24) >> 24)[0]);
+const arcHi2T = arcYT2.map((y, n) => arcSpan(y, (arcET2[n] << 24) >> 24)[1]);
 // The landing's split travels too: the new room's horizon starts below the screen and rises into
 // place, so charset A covers its ceiling half and B its floor half exactly as in an ordinary
 // frame. It reaches SPLITLINE on the last frame, which is where the renderer wants it.
-const arcSp2T = arcTr2T.map(t => {
-  const off = Math.round((arcTr2T[ARC_N - 1] - t) / 8);
-  return Math.max(51, Math.min(246, 150 + off * 8));
-});
+// ...but it must still SETTLE. The hold is tapered over the last few frames so the room reaches
+// its resting place instead of stopping ARC_GAP rows short of it -- by then the arc is a row or
+// two from the top and any overlap is off the edge of the screen.
+const arcLandOff = arcTr2T.map((t, n) =>
+  Math.min(Math.max(Math.round((arcTr2T[ARC_N - 1] - t) / 8), arcHi2T[n] + ARC_GAP),
+           (ARC_N - 1 - n) * 3));
+const arcSp2T  = arcHi2T.map(h => Math.max(51, Math.min(246, 50 + h * 8)));        // below the rim
+const arcSp2bT = arcLandOff.map(o => Math.max(51, Math.min(246, 150 + o * 8)));    // room horizon
 // FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
 // while the arc is being judged on its own: the scene sliding is a second effect competing for
 // attention with the one that has to work first.
@@ -2469,6 +2485,8 @@ const fRowT = (() => {
       if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 255; }
       else blk[R] = sr;
     }
+    const lim = Math.max(0, arcTopT[n] - ARC_GAP);   // never let the scene reach the arc
+    if (nsrc > lim) { for (let R = lim; R < 25; R++) blk[R] = 255; nsrc = lim; }
     blk[25] = nsrc;                                  // the drop's content runs 0..nsrc-1
     out.push(...blk);
   }
@@ -2477,7 +2495,7 @@ const fRowT = (() => {
   // the source row that far above it, and rows whose source has not arrived yet show nothing.
   for (let n = 0; n < ARC_N; n++) {
     const t = arcTr2T[n];
-    const off = Math.round((arcTr2T[ARC_N - 1] - t) / 8);
+    const off = arcLandOff[n];
     const blk = new Array(32).fill(0); let nsrc = 25;
     for (let R = 0; R < 25; R++) {
       const sr = R - off;
@@ -3010,6 +3028,12 @@ arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colour
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce
 pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
+pCh0    = $81e1                  ; which charset each of the three regions uses. The DROP wants
+pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
+arcSkip = $81e4                  ; the landing places its own splits
+pCh2    = $81e3                  ;   then A for the rim. The LANDING wants B,A,B: its rim is at
+                                 ;   the TOP in the mirrored polarity, then the new room's ceiling
+                                 ;   half, then its floor half. Same three-stage chain either way.
                                  ;   The fine scroll belongs to the content it shifts, and that
                                  ;   content is in the BACK buffer -- writing the register inside
                                  ;   fallStep showed the new scroll against the OLD frame for one
@@ -3200,6 +3224,8 @@ cpChr:  txa
         sta pSplit              ; the pending splits start where the renderer wants them
         lda #246
         sta pSplit2
+        lda #$00
+        sta arcSkip
         lda #$00
         sta fT0
         lda #${hx(vm(SCR_A))}
@@ -4162,6 +4188,12 @@ mvs:    lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
+        lda pCh0
+        sta irqC0+1
+        lda pCh1
+        sta irqC1+1
+        lda pCh2
+        sta irqC2+1
                                 ;   lower border, so both are safe to touch here.
         lda baseHi
         cmp #${hx(SCR_A >> 8)}
@@ -6355,19 +6387,19 @@ irqCmp: cmp #${hx(SPLITLINE)}   ; operands PATCHED, not variable reads: "cmp abs
 irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the line.
         bcs irqA2
         lda d018vm              ; --- horizon..arc: the mirrored half ---
-        ora #${hx(CB_B)}
+irqC1:  ora #${hx(CB_B)}
         sta $d018
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
 irqA2:  lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
-        ora #${hx(CB_A)}
+irqC2:  ora #${hx(CB_A)}
         sta $d018
         lda #$00
         sta $d012
         jmp irqd
 irqTop: lda d018vm              ; --- top of frame: charset A, arm the horizon ---
-        ora #${hx(CB_A)}
+irqC0:  ora #${hx(CB_A)}
         sta $d018
 irqArm: lda #${hx(SPLITLINE)}
         sta $d012
@@ -8026,14 +8058,30 @@ fstFOk: stx fFrm
         sta pSplit              ;   charset B; arcPrep sets the second split, at the top of the
         lda #$00                ;   arc, where A has to come back for the rim glyph.
         sta arcInv
-        beq fsDone
-fsLand: ldx fFrm                ; LANDING: the same movement with the colours swapped -- white
-        lda arcSp2T,x           ;   rising to replace the black, over the NEW room sliding up
-        sta pSplit              ;   into place. The rim is now SOLID above and
+        lda #${hx(CB_A)}        ; DROP: A above the horizon, B below it, A again for the rim
+        sta pCh0
+        sta pCh2
+        lda #${hx(CB_B)}
+        sta pCh1
+        lda #$00
+        sta arcSkip             ; the drop lets arcPrep place the arc's split
+        beq fsDone              ; always taken
+fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, in the mirrored
+        lda #${hx(CB_B)}        ;   polarity, then the new room's ceiling half, then its floor
+        sta pCh0                ;   half. The room is held clear of the arc (see ARC_GAP) so no
+        sta pCh2                ;   scanline ever has to serve both.
+        lda #${hx(CB_A)}
+        sta pCh1
+        lda arcSp2T,x           ; white rising to replace the black, over the NEW room sliding up
+        sta pSplit              ;   into place. The rim is SOLID above and
         lda #$ff                ;   BLANK below, which is the mirror of what the dictionary
         sta arcInv              ;   holds, so park the split ABOVE the display instead and let
                                 ;   charset B supply the other polarity. Every column flips on
                                 ;   the same frame, so one raster line does the whole job.
+        lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+        sta pSplit2
+        lda #$ff
+        sta arcSkip             ; arcPrep must not overwrite pSplit2 on the landing
 fsDone: lda #$13
         sta pd11
         jmp fallDraw
@@ -8412,10 +8460,8 @@ apH4:   lsr
         lda #25
 apHok:  sta arcHi
         ; ---- and the top of the arc, which is where charset A has to come back ----
-        lda arcInv              ; the LANDING wants B everywhere: its rim is drawn in the mirrored
-        beq apTop               ;   polarity and there is no un-mirrored scene left on screen
-        lda #246
-        sta pSplit2
+        lda arcSkip             ; the landing sets both splits itself, from its own tables
+        beq apTop
         rts
 apTop:  lda arcNg               ; inverted: the EDGES are highest; arch: the crown is
         beq apT1
@@ -8989,6 +9035,8 @@ arcShT: !byte ${arcShT.join(',')}
 arcTrT: !byte ${arcTrT.join(',')}
 arcSpT: !byte ${arcSpT.join(',')}
 arcSp2T: !byte ${arcSp2T.join(',')}
+arcSp2bT: !byte ${arcSp2bT.join(',')}
+arcTopT: !byte ${arcTopT.join(',')}
         * = ${hx16(FROWT + 0x100)}
 rampInv: ${chunk(rampInv).trim()}
 ${FALLSCENE ? `        * = ${hx16(FROWT + 0x200)}
