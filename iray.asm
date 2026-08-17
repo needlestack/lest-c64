@@ -321,6 +321,10 @@ apIdx   = $81d4                  ;   edge counter while Y addresses the screen.
 apCode  = $81d5
 apY     = $81d6
 apT     = $81d7                  ; arcLvl's argument
+apSgn   = $81da                  ; fdRamp: which way the ramp leans, and its new endpoints
+apLo    = $81db
+apHi    = $81dc
+arcSh   = $81dd                  ; this frame's shear, 255 = none, 0 = flat against the horizon
 arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
@@ -1490,7 +1494,7 @@ noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falli
                                 ; them, ~a fifth of the frame rate, on the one path that was
                                 ; never meant to be locked to a fixed rate.
 
-; ---- fwait: the fall's CONSTANT-RATE wait, 2 raster periods per animation frame ----
+; ---- fwait: the fall's CONSTANT-RATE wait, 3 raster periods per animation frame ----
 ; Counting periods off frameCnt is what makes it constant. The old form -- spin to 250, then burn
 ; one more period -- is only two periods while the frame's work fits inside the first; when it ran
 ; past 250 the spin silently picked up a third, so the fall alternated 30 and 20fps. A rate that
@@ -1500,13 +1504,13 @@ noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falli
 fwait:  lda frameCnt
         sec
         sbc fT0
-        cmp #2
+        cmp #3
         bcc fwait
 mvs:    lda $d012
         cmp #250
         bne mvs
         lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
-        sta fT0                 ;   frame, so the next deadline is exactly fT0 + 2
+        sta fT0                 ;   frame, so the next deadline is exactly fT0 + 3
         lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
         sta $d011               ;   flip below, so the fine scroll and the content it shifts reach
         lda pSplit              ;   the screen on the same 60Hz frame. Written inside fallStep they
@@ -5016,9 +5020,9 @@ fsnLp:  lda (fdS),y
 fallStep:
         ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
         inx                     ;   counter. Up here because everything below is a branch target
-        cpx #16     ;   -- putting it lower hid it behind a branch once already.
+        cpx #20           ;   -- putting it lower hid it behind a branch once already.
         bcc fstFOk
-        ldx #15 ; ---- this phase has run its course ----
+        ldx #19       ; ---- this phase has run its course ----
         stx fFrm
         lda fallSt
         cmp #$03
@@ -5135,6 +5139,9 @@ fallLand:
 ; the room opening under you are the same sixteen frames run twice.
 fallDraw:
         jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
+        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
+        jsr fdRamp              ; and the wall-bottom ramps re-angled to match
+
         ldx #$00       ; drop: floor above, hole below
         ldy #$01
         lda arcInv
@@ -5143,12 +5150,21 @@ fallDraw:
         ldy #$00       ;   selected to give the rim glyph the matching polarity
 fdPol:  stx fdCol
         sty arcBlw              ; arcBand fills below its glyph with this
-        lda #$00
+        ldx fwN                 ; the warped scene already fills rows 0..fwN-1, so the band
+        lda arcHi               ;   starts where its content stopped. Filling from row 0 here
+        sec                     ;   erased the copy that had just been made -- paying for the
+        sbc fwN                 ;   scene twice and then throwing it away.
+        bcc fdNoF
+        pha
+        lda mul40LoT,x
         sta fdD
-        lda baseHi
+        clc
+        lda mul40HiT,x
+        adc baseHi
         sta fdD+1
-        lda arcHi
-        jsr fdFill              ; everything above the arc, whole rows
+        pla
+        jsr fdFill              ; everything between the scene and the arc, whole rows
+fdNoF:
         ldx arcHi               ; point fdD at the band explicitly rather than relying on the
         lda mul40LoT,x          ;   fills to have walked there
         sta fdD
@@ -5164,10 +5180,200 @@ fdPol:  stx fdCol
         sbc arcHi
         jmp fdFill              ; and everything below it
 
+; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
+; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
+; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
+; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
+; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
+; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
+; every row moving at its own rate there is no uniform translation left for one to carry.
+fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
+        and #$07                 ;   than held in zero page: the table is not page aligned, and
+        asl                      ;   a crossing costs one cycle on 25 reads.
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #<fRowT
+        sta fwLd+1
+        lda #$00
+        adc #$00
+        sta tmp                  ; carry out of the low byte
+        lda fFrm
+        lsr
+        lsr
+        lsr
+        clc
+        adc tmp
+        adc #>fRowT
+        sta fwLd+2
+        ldy #25
+fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
+        sta fwN
+        lda #$00
+        sta fwRow
+fwLp:   lda fwRow
+        cmp fwN
+        bcs fwDn
+        tay
+        lda fwLd+1               ; re-read the row map through the same patched operand
+        sta fwT+1
+        lda fwLd+2
+        sta fwT+2
+fwT:    lda $ffff,y
+        tax
+        lda mul40LoT,x
+        clc
+        adc #<$6200
+        sta fdS
+        lda mul40HiT,x
+        adc #>$6200
+        sta fdS+1
+        ldx fwRow
+        lda mul40LoT,x
+        sta fdD
+        lda mul40HiT,x
+        clc
+        adc baseHi
+        sta fdD+1
+        ldy #39
+fwB:    lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        bpl fwB
+        inc fwRow
+        jmp fwLp
+fwDn:   rts
+
+; ---- fdRamp: the only thing the warp cannot do for itself ----
+; fdWarp moves whole character rows, so a wall-bottom ramp arrives at its new row still drawn at
+; its OLD angle -- which is the jaggedness. Nothing else needs fixing: horizontal boundaries stay
+; horizontal under a vertical scale, and the angled edges ABOVE the horizon change too little to
+; see before they leave the top. So the entire correction is one cell per column, below the
+; horizon, made shallower.
+; The wall bottom is at 100 + colH and shears to 100 + s*colH, which says exactly which cell to
+; touch -- no scan. rampInv turns the code back into its endpoint pair, the pair's DIFFERENCE is
+; the slope, scaling it by s is the shear, and rampThi turns it back into a code.
+fdRamp: lda arcSh
+        beq fdrDn               ; already flat against the horizon: nothing left to lean
+        cmp #$ff
+        beq fdrDn               ; not started
+        ldy #39
+fdrLp:  sty apY
+        tya
+        asl
+        asl
+        tax                     ; colH is per LOGICAL column; a cell's left edge is 4c
+        lda colH,x
+        beq fdrNx
+        cmp #101
+        bcs fdrNx               ; taller than the screen: its bottom is off the foot anyway
+        sta mq
+        lda arcSh
+        jsr mul8
+        lda phi
+        clc
+        adc #100                ; the sheared wall bottom, in pixels
+        lsr
+        lsr
+        lsr
+        cmp #25
+        bcs fdrNx
+        tax
+        lda mul40LoT,x
+        clc
+        adc apY
+        sta fdS
+        lda mul40HiT,x
+        adc baseHi
+        sta fdS+1
+        ldy #$00
+        lda (fdS),y
+        tax
+        lda rampInv,x
+        cmp #$ff
+        beq fdrNx               ; BLANK, SOLID, or anything that is not a ramp
+        pha
+        lsr
+        lsr
+        lsr
+        lsr
+        sta apPrev              ; wL
+        pla
+        and #$0f
+        sta apCur               ; wR
+        sec
+        sbc apPrev              ; d = wR - wL, the slope
+        ldx #$00
+        bcs fdrPos
+        eor #$ff                ; leaning the other way
+        clc
+        adc #$01
+        ldx #$ff
+fdrPos: stx apSgn
+        sta mq
+        lda arcSh
+        jsr mul8
+        lda phi
+        sta apIdx               ; |d| scaled by s
+        clc
+        lda apPrev
+        adc apCur
+        sta apBase              ; wL + wR: the midpoint, doubled, and it does not move
+        sec
+        sbc apIdx
+        bcs fdrL
+        lda #$00
+fdrL:   lsr
+        sta apLo
+        clc
+        lda apBase
+        adc apIdx
+        lsr
+        cmp #$10
+        bcc fdrH
+        lda #$0f
+fdrH:   sta apHi
+        lda apSgn
+        bne fdrNeg
+        lda apLo
+        asl
+        asl
+        asl
+        asl
+        ora apHi
+        jmp fdrPut
+fdrNeg: lda apHi
+        asl
+        asl
+        asl
+        asl
+        ora apLo
+fdrPut: tax
+        lda rampThi,x
+        ldy #$00
+        sta (fdS),y
+fdrNx:  ldy apY
+        dey
+        bpl fdrLp
+fdrDn:  rts
+
 ; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx fFrm
+        lda arcShT,x
+        sta arcSh               ; this frame's shear, for fdWarp's block and fdRamp
         lda arcInv              ; the landing runs the crown's two speeds in the other order
         bne apL
         lda arcYT,x
@@ -5341,6 +5547,81 @@ arcClp: clc
         rts
 aclZ:   lda #$00
 aclD:   rts
+
+; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
+; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
+; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
+; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
+; The per-row cost over a flat translation is the lookup and the two pointer builds, ~30 cycles,
+; against the 550 the 40-byte copy already costs. There is no fine scroll to pair with it: with
+; every row moving at its own rate there is no uniform translation left for one to carry.
+fdWarp: lda fFrm                 ; point the load at this frame's 32-byte block. Patched rather
+        and #$07                 ;   than held in zero page: the table is not page aligned, and
+        asl                      ;   a crossing costs one cycle on 25 reads.
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc #<fRowT
+        sta fwLd+1
+        lda #$00
+        adc #$00
+        sta tmp                  ; carry out of the low byte
+        lda fFrm
+        lsr
+        lsr
+        lsr
+        clc
+        adc tmp
+        adc #>fRowT
+        sta fwLd+2
+        ldy #25
+fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
+        sta fwN
+        lda #$00
+        sta fwRow
+fwLp:   lda fwRow
+        cmp fwN
+        bcs fwDn
+        tay
+        lda fwLd+1               ; re-read the row map through the same patched operand
+        sta fwT+1
+        lda fwLd+2
+        sta fwT+2
+fwT:    lda $ffff,y
+        tax
+        lda mul40LoT,x
+        clc
+        adc #<$6200
+        sta fdS
+        lda mul40HiT,x
+        adc #>$6200
+        sta fdS+1
+        ldx fwRow
+        lda mul40LoT,x
+        sta fdD
+        lda mul40HiT,x
+        clc
+        adc baseHi
+        sta fdD+1
+        ldy #39
+fwB:    lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        lda (fdS),y
+        sta (fdD),y
+        dey
+        bpl fwB
+        inc fwRow
+        jmp fwLp
+fwDn:   rts
 
 fdFill: sta fdN                 ; A rows of black, advancing the destination only
         cmp #$00                ; explicit, not inherited: a zero count here would run the
@@ -5625,10 +5906,6 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $3100
-; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
-; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72,85,189,78,80,213,218,218,0,72,85,73,79,80,213,218,218,0,72,85,73,49,80,213,218,218,0,176,170,182,78,112,213,218,218,0,200,175,182,78,112,213,218,218,0,72,85,169,78,112,213,218,218,0,72,181,182,78,160,213,218,218,0,72,85,73,73,160,213,218,218,0,200,170,182,78,160,222,218,218,0,72,85,233,78,160,222,218,218,0,176,170,182,78,160,234,218,218,0,72,85,189,78,160,234,218,218,0,72,85,73,121,160,234,218,218,0,72,173,182,78,160,42,219,218,0,72,85,73,79,160,42,219,218,0,200,170,182,78,160,42,223,218,0,72,85,73,49,160,42,223,218,0,176,170,182,78,160,42,213,218,0,72,213,183,78,160,42,213,218,0,72,85,233,78,160,42,213,218,0,72,173,182,78,160,42,229,219,0,72,85,73,73,160,42,229,219,0,248,170,182,78,160,42,37,217,0,72,85,169,78,160,42,37,217,0,72,85,73,49,160,42,37,217,0,72,213,183,78,160,42,37,253,0,176,170,182,78,160,42,37,165,0,200,175,182,78,160,42,37,165,0,72,85,73,79,160,42,37,165,0,72,181,182,78,160,42,37,37,1,72,85,169,78,160,42,37,37,1,72,85,73,121,160,42,37,37,1
         * = $3240
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
@@ -5636,7 +5913,6 @@ holeSeeT: !byte 0,0,126,0,126,0,126,0,226,1,98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
-arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
         * = $3300
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -5684,7 +5960,7 @@ mMskT: !byte 7,3,1,0
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8,8,8
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4
 orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99,108,117,126,135,144,153,162,171,180,189,198,207,216,225,234,243,252,5,14,23,32,41
-orbOccHiT: !byte 49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,49,50,50,50,50,50
+orbOccHiT: !byte 107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,107,108,108,108,108,108
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 orbXCT: !byte 2,5,8,11,14,1,4,9,6,12,3,10,1,8,13,5,11,3,14,1,7,10,5,12,2,9,14,7,1,4,11,6,9,13,4,13
@@ -6127,12 +6403,49 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
         * = $6600          ; the fall's animation data, out of the image's own segment
-arcYT: !byte 200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
-arcET: !byte 20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
-arcYT2: !byte 200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0    ; the landing's mirrored schedule
-arcET2: !byte 20,15,11,6,2,253,249,244,239,236,236,236,236,236,236,236
+arcYT: !byte 255,248,232,216,200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
+arcET: !byte 20,20,20,20,20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
+arcYT2: !byte 246,234,223,211,200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0    ; the landing's mirrored schedule
+arcET2: !byte 38,34,29,25,20,15,11,6,2,253,249,244,239,236,236,236,236,236,236,236
 arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
-
+arcShT: !byte 255,243,217,191,165,138,112,86,59,33,7,0,0,0,0,0,0,0,0,0
+        * = $6700
+rampInv: !byte 255,255,119,136,255,171,96,255,255,52,185,85,255,70,68,155,255,101,255,88,26,170,0,255
+        !byte 162,76,255,255,255,132,255,255,151,255,153,56,165,255,255,138,255,248,255,255,123,255,86,83
+        !byte 255,255,255,36,129,255,58,255,134,133,169,255,84,186,149,255,255,255,154,255,255,80,102,72
+        !byte 255,87,255,113,145,152,15,144,181,115,106,118,67,255,69,137,255,66,135,89,75,22,116,255
+        !byte 184,91,104,255,255,4,217,255,255,255,255,121,166,71,255,5,255,98,255,255,38,55,255,39
+        !byte 255,103,183,255,255,255,255,126,125,120,168,114,95,117,255,255,255,255,255,109,255,255,9,255
+        !byte 255,100,107,53,255,44,255,255,255,255,24,255,255,7,255,10,255,255,6,255,255,255,148,182
+        !byte 255,13,12,255,31,127,255,177,79,157,11,143,255,255,255,179,255,255,255,255,255,255,255,255
+        !byte 255,255,242,247,231,176,255,163,246,214,255,245,255,255,255,73,47,255,255,255,255,161,255,255
+        !byte 255,255,255,131,97,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        * = $6800
+fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,24,0,24,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,16,17,18,19,20,21,23,24,0,0,23,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,15,16,17,19,20,21,23,24,0,0,0,22,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,17,18,20,21,23,24,0,0,0,0,21,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,14,16,18,19,21,23,0,0,0,0,0,0,19,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,14,17,19,21,23,0,0,0,0,0,0,0,18,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,15,18,21,24,0,0,0,0,0,0,0,0,17,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,16,21,0,0,0,0,0,0,0,0,0,0,15,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,20,0,0,0,0,0,0,0,0,0,0,0,14,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,0,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        !byte 0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0
+        * = $6b00
+; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
+; because the test does not involve the camera at all -- see the data layer above.
+orbOccT: !byte 248,170,182,78,80,213,218,218,0,72,173,182,78,80,213,218,218,0,72,85,189,78,80,213,218,218,0,72,85,73,79,80,213,218,218,0,72,85,73,49,80,213,218,218,0,176,170,182,78,112,213,218,218,0,200,175,182,78,112,213,218,218,0,72,85,169,78,112,213,218,218,0,72,181,182,78,160,213,218,218,0,72,85,73,73,160,213,218,218,0,200,170,182,78,160,222,218,218,0,72,85,233,78,160,222,218,218,0,176,170,182,78,160,234,218,218,0,72,85,189,78,160,234,218,218,0,72,85,73,121,160,234,218,218,0,72,173,182,78,160,42,219,218,0,72,85,73,79,160,42,219,218,0,200,170,182,78,160,42,223,218,0,72,85,73,49,160,42,223,218,0,176,170,182,78,160,42,213,218,0,72,213,183,78,160,42,213,218,0,72,85,233,78,160,42,213,218,0,72,173,182,78,160,42,229,219,0,72,85,73,73,160,42,229,219,0,248,170,182,78,160,42,37,217,0,72,85,169,78,160,42,37,217,0,72,85,73,49,160,42,37,217,0,72,213,183,78,160,42,37,253,0,176,170,182,78,160,42,37,165,0,200,175,182,78,160,42,37,165,0,72,85,73,79,160,42,37,165,0,72,181,182,78,160,42,37,37,1,72,85,169,78,160,42,37,37,1,72,85,73,121,160,42,37,37,1
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40

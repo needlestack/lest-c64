@@ -1717,7 +1717,11 @@ const ORB_VART     = 0x5d00;    // h -> size variant, 256
 const ORB_CANDCNT  = 0x5e00;    // per cell: how many candidates, 256
 const ORB_CANDLO   = 0x5f00;    // per cell: pointer to its list, lo/hi, 256 each
 const ORB_CANDHI   = 0x6000;
-const ORB_OCC      = 0x3100;    // occluder masks, OCCBYTES x norbs
+const ORB_OCC      = 0x6b00;    // occluder masks, OCCBYTES x norbs. Out of the image segment
+                                //   entirely: at $3100 it capped the code, and fdRamp ran 3
+                                //   bytes past it. Addressed through the orbOccLo/Hi pointer
+                                //   pair, so it has no alignment or locality requirement, and
+                                //   moving it hands the code the 320 bytes up to holeSeeT.
 const ORB_SMALL    = 0x3300;    // the per-variant and per-orb tables: FOUR pages. The ladder
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
@@ -2255,7 +2259,10 @@ const FALL_END = 200;                            // pixels of travel per phase =
 // then forced, not chosen: a = 2*END/(N(N+1)). Going slower buys smoothness quadratically, which
 // is why 15 frames at 30fps ended on a 25px lurch and 30 at 20fps ends on 13px for the same
 // 200px of travel. The landing inherits the drop's final speed by design, so it lengthens too.
-const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 2);   // 2 = a locked 30fps, measured clean:
+// 3 = a locked 20fps. 2 held while the fall was the arc over a blank screen (worst frame 30,064
+// cycles), but the sheared scene adds a 25-row copy and the ramp fix-up: worst frame is now
+// 48,099 = 2.82 periods, so 30fps would slip on most frames. 3 periods is 51,135, a 6% margin.
+const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 3);   // was 2 = 30fps, measured clean:
                                                  //   124 of 124 gaps at exactly 2 periods. The
                                                  //   worst fall frame is 30,064 cycles = 1.76
                                                  //   periods against a 34,090 budget, so there is
@@ -2368,10 +2375,17 @@ const ARC_SLOW  = +(process.env.ARC_SLOW ?? 1.4);
 // middle, then matching the edges. Both schedules run the crown 200 -> 0 and the depth +AMP ->
 // -AMP over the same edge travel, so they share v and FALL_FRAMES -- the drop HOLDS the arch and
 // then flips, the landing flips and then HOLDS. Mirror images in time.
+// ARC_LEAD frames run before the crown reaches the bottom of the screen. The arc is invisible
+// through them (crown above row 200) but the SHEAR is already going, so the walls start lifting
+// a few frames before the rim shows -- which is what makes the rim read as arriving rather than
+// as the start of the whole event.
+const ARC_LEAD = +(process.env.ARC_LEAD ?? 4);
+const ARC_N = FALL_FRAMES + ARC_LEAD;
+const ARC_V = (100 + ARC_SLOW * 100) / (FALL_FRAMES - 1);
 const arcSched = slowFirst => {
-  const v = (100 + ARC_SLOW * 100) / (FALL_FRAMES - 1), Y = [], E = [];
-  for (let n = 0; n < FALL_FRAMES; n++) {
-    const d = n * v;                               // how far the EDGES have come
+  const Y = [], E = [];
+  for (let n = 0; n < ARC_N; n++) {
+    const d = (n - ARC_LEAD) * ARC_V;              // how far the EDGES have come; negative in lead
     const y = slowFirst
       ? (d <= 100 * ARC_SLOW ? 200 - d / ARC_SLOW : 100 - (d - 100 * ARC_SLOW))
       : (d <= 100 ? 200 - d : 100 - (d - 100) / ARC_SLOW);
@@ -2380,12 +2394,32 @@ const arcSched = slowFirst => {
   }
   return [Y, E];
 };
+// rampInv is the inverse of rampThi: a char code back to the (wL*16 + wR) endpoint pair it was
+// fitted to. The dictionary is many-to-one (116 distinct codes over 256 pairs) so this picks a
+// representative, which is all a "make this ramp shallower" substitution needs. $ff marks every
+// code that is not a ramp -- BLANK, SOLID, readout, seam, occluder -- so the fix-up can bail.
+const rampInv = (() => {
+  const inv = new Array(256).fill(0xff);
+  for (let i = 0; i < 256; i++) if (inv[rampThi[i]] === 0xff) inv[rampThi[i]] = i;
+  inv[BLANK] = 0xff; inv[SOLID] = 0xff;
+  return inv;
+})();
 const [arcYT, arcET] = arcSched(false);
 const [arcYT2, arcET2] = arcSched(true);
+// ---- the SHEAR, tied to the crown ----
+// A wall bottom sits at 100 + colH and moves to 100 + s*colH, so the DEEPEST edge -- the one at
+// the very foot of the screen, colH 100 -- travels at exactly the crown's speed, and shallower
+// ones proportionally slower. That is both what "the same speed as the crown" asks for and what
+// the geometry wants, since a nearer floor really does rise faster. s hits 0 as the crown reaches
+// the horizon, so the walls finish flattening exactly as the rim arrives there.
+const arcShT = arcYT.map(y => {
+  const s = (y - 100) / (arcYT[0] - 100);
+  return Math.max(0, Math.min(255, Math.round(255 * s)));
+});
 // FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
 // while the arc is being judged on its own: the scene sliding is a second effect competing for
 // attention with the one that has to work first.
-const FALLSCENE = process.env.FALLSCENE === '1';
+const FALLSCENE = process.env.FALLSCENE !== '0';   // the sheared scene is the default now
 // ---- fRowT: the camera HEIGHT, as a destination-row -> source-row remap ----
 // Every floor-plane feature's distance from the horizon scales by s, and everything above it by
 // (2-s). Written per row that is one statement: A ROW MOVES UP BY ITS DISTANCE FROM THE HORIZON
@@ -2403,17 +2437,17 @@ const FALLSCENE = process.env.FALLSCENE === '1';
 // shift; frame-indexed rather than fPosH-indexed because fPosH is quadratic and sharing a block
 // between two frames would read as a stall.
 const fRowT = (() => {
-  const out = []; let pos = 0, vel = 0;
-  for (let n = 0; n < FALL_FRAMES; n++) {
-    vel += FALL_ACC; pos += vel;
-    const ph = Math.min(FALL_END, pos >> 8), s = 1 - ph / 100;
+  const out = [];
+  for (let n = 0; n < ARC_N; n++) {
+    const sc = arcShT[n] / 255;
     const blk = new Array(32).fill(0); let nsrc = 25;
     for (let R = 0; R < 25; R++) {
       const pd = R * 8 + 4;
-      let sr = -1;
-      if (pd < 100) sr = Math.floor((100 - (100 - pd) / (2 - s)) / 8);
-      else if (s > 0) sr = Math.floor((100 + (pd - 100) / s) / 8);
-      if (sr < 0 || sr > 24) { if (pd >= 100 && nsrc === 25) nsrc = R; sr = 0; }
+      let sr;
+      if (pd < 100) sr = R;                        // ABOVE THE HORIZON: left alone. The change
+      else if (sc > 0) sr = Math.floor((100 + (pd - 100) / sc) / 8);   // there is too small to
+      else sr = -1;                                //   notice before it leaves the top.
+      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; sr = 0; }
       blk[R] = sr;
     }
     blk[25] = nsrc;
@@ -2930,6 +2964,10 @@ apIdx   = $81d4                  ;   edge counter while Y addresses the screen.
 apCode  = $81d5
 apY     = $81d6
 apT     = $81d7                  ; arcLvl's argument
+apSgn   = $81da                  ; fdRamp: which way the ramp leans, and its new endpoints
+apLo    = $81db
+apHi    = $81dc
+arcSh   = $81dd                  ; this frame's shear, 255 = none, 0 = flat against the horizon
 arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
@@ -7896,9 +7934,9 @@ fsnLp:  lda (fdS),y
 fallStep:
         ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
         inx                     ;   counter. Up here because everything below is a branch target
-        cpx #${FALL_FRAMES}     ;   -- putting it lower hid it behind a branch once already.
+        cpx #${ARC_N}           ;   -- putting it lower hid it behind a branch once already.
         bcc fstFOk
-        ldx #${FALL_FRAMES - 1} ; ---- this phase has run its course ----
+        ldx #${ARC_N - 1}       ; ---- this phase has run its course ----
         stx fFrm
         lda fallSt
         cmp #$03
@@ -8014,8 +8052,10 @@ fallLand:
 ; hole; the arc itself -- crown, depth, profile -- is identical, so the world closing over you and
 ; the room opening under you are the same sixteen frames run twice.
 fallDraw:
+        jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
 ${FALLSCENE ? `        jsr fdWarp              ; the scene, rescaled about the horizon: see fRowT
-` : ''}        jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
+        jsr fdRamp              ; and the wall-bottom ramps re-angled to match
+` : ''}
         ldx #${hx(BLANK)}       ; drop: floor above, hole below
         ldy #${hx(SOLID)}
         lda arcInv
@@ -8024,12 +8064,22 @@ ${FALLSCENE ? `        jsr fdWarp              ; the scene, rescaled about the h
         ldy #${hx(BLANK)}       ;   selected to give the rim glyph the matching polarity
 fdPol:  stx fdCol
         sty arcBlw              ; arcBand fills below its glyph with this
-        lda #$00
+${FALLSCENE ? `        ldx fwN                 ; the warped scene already fills rows 0..fwN-1, so the band
+        lda arcHi               ;   starts where its content stopped. Filling from row 0 here
+        sec                     ;   erased the copy that had just been made -- paying for the
+        sbc fwN                 ;   scene twice and then throwing it away.
+        bcc fdNoF` : `        ldx #$00
+        lda arcHi`}
+        pha
+        lda mul40LoT,x
         sta fdD
-        lda baseHi
+        clc
+        lda mul40HiT,x
+        adc baseHi
         sta fdD+1
-        lda arcHi
-        jsr fdFill              ; everything above the arc, whole rows
+        pla
+        jsr fdFill              ; everything between the scene and the arc, whole rows
+fdNoF:
         ldx arcHi               ; point fdD at the band explicitly rather than relying on the
         lda mul40LoT,x          ;   fills to have walked there
         sta fdD
@@ -8120,10 +8170,125 @@ fwB:    lda (fdS),y
         jmp fwLp
 fwDn:   rts
 
-` : ''}; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
+` : ''}; ---- fdRamp: the only thing the warp cannot do for itself ----
+; fdWarp moves whole character rows, so a wall-bottom ramp arrives at its new row still drawn at
+; its OLD angle -- which is the jaggedness. Nothing else needs fixing: horizontal boundaries stay
+; horizontal under a vertical scale, and the angled edges ABOVE the horizon change too little to
+; see before they leave the top. So the entire correction is one cell per column, below the
+; horizon, made shallower.
+; The wall bottom is at 100 + colH and shears to 100 + s*colH, which says exactly which cell to
+; touch -- no scan. rampInv turns the code back into its endpoint pair, the pair's DIFFERENCE is
+; the slope, scaling it by s is the shear, and rampThi turns it back into a code.
+fdRamp: lda arcSh
+        beq fdrDn               ; already flat against the horizon: nothing left to lean
+        cmp #$ff
+        beq fdrDn               ; not started
+        ldy #39
+fdrLp:  sty apY
+        tya
+        asl
+        asl
+        tax                     ; colH is per LOGICAL column; a cell's left edge is 4c
+        lda colH,x
+        beq fdrNx
+        cmp #101
+        bcs fdrNx               ; taller than the screen: its bottom is off the foot anyway
+        sta mq
+        lda arcSh
+        jsr mul8
+        lda phi
+        clc
+        adc #100                ; the sheared wall bottom, in pixels
+        lsr
+        lsr
+        lsr
+        cmp #25
+        bcs fdrNx
+        tax
+        lda mul40LoT,x
+        clc
+        adc apY
+        sta fdS
+        lda mul40HiT,x
+        adc baseHi
+        sta fdS+1
+        ldy #$00
+        lda (fdS),y
+        tax
+        lda rampInv,x
+        cmp #$ff
+        beq fdrNx               ; BLANK, SOLID, or anything that is not a ramp
+        pha
+        lsr
+        lsr
+        lsr
+        lsr
+        sta apPrev              ; wL
+        pla
+        and #$0f
+        sta apCur               ; wR
+        sec
+        sbc apPrev              ; d = wR - wL, the slope
+        ldx #$00
+        bcs fdrPos
+        eor #$ff                ; leaning the other way
+        clc
+        adc #$01
+        ldx #$ff
+fdrPos: stx apSgn
+        sta mq
+        lda arcSh
+        jsr mul8
+        lda phi
+        sta apIdx               ; |d| scaled by s
+        clc
+        lda apPrev
+        adc apCur
+        sta apBase              ; wL + wR: the midpoint, doubled, and it does not move
+        sec
+        sbc apIdx
+        bcs fdrL
+        lda #$00
+fdrL:   lsr
+        sta apLo
+        clc
+        lda apBase
+        adc apIdx
+        lsr
+        cmp #$10
+        bcc fdrH
+        lda #$0f
+fdrH:   sta apHi
+        lda apSgn
+        bne fdrNeg
+        lda apLo
+        asl
+        asl
+        asl
+        asl
+        ora apHi
+        jmp fdrPut
+fdrNeg: lda apHi
+        asl
+        asl
+        asl
+        asl
+        ora apLo
+fdrPut: tax
+        lda rampThi,x
+        ldy #$00
+        sta (fdS),y
+fdrNx:  ldy apY
+        dey
+        bpl fdrLp
+fdrDn:  rts
+
+; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx fFrm
+        lda arcShT,x
+        sta arcSh               ; this frame's shear, for fdWarp's block and fdRamp
         lda arcInv              ; the landing runs the crown's two speeds in the other order
         bne apL
         lda arcYT,x
@@ -8656,18 +8821,13 @@ ${SPRITES ? `; ================= orb tables =================
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = ${hx16(ORB_OCC)}
-; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
-; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte ${orbOccFlat.join(',')}
         * = $3240
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
 holeSeeT: !byte ${holeSee.join(",")}
 ${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
-mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}
-arcD: !byte ${arcD.join(',')}` : ''}
+mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
         * = ${hx16(ORB_SMALL)}
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -8782,8 +8942,15 @@ arcET: !byte ${arcET.join(',')}
 arcYT2: !byte ${arcYT2.join(',')}    ; the landing's mirrored schedule
 arcET2: !byte ${arcET2.join(',')}
 arcD: !byte ${arcD.join(',')}
-${FALLSCENE ? `        * = ${hx16(FROWT + 0x100)}
+arcShT: !byte ${arcShT.join(',')}
+        * = ${hx16(FROWT + 0x100)}
+rampInv: ${chunk(rampInv).trim()}
+${FALLSCENE ? `        * = ${hx16(FROWT + 0x200)}
 fRowT: ${chunk(fRowT, 32).trim()}` : ''}
+        * = ${hx16(ORB_OCC)}
+; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
+; because the test does not involve the camera at all -- see the data layer above.
+orbOccT: !byte ${orbOccFlat.join(',')}
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
