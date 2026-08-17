@@ -2206,7 +2206,10 @@ const angVarT = [...Array(256)].map((_, h) => {
 });
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = (ORBSCALE * h / 88) * ORBTALL[0] / ORBWIDE[0];
-  let b = 0; for (let v = 1; v < ORBTALL.length; v++)
+  // STOP AT ANG_V0. The angel's rungs live in this same list, and searching past the boundary
+  // let a round orb pick a TALL variant at certain distances -- the orb turned into an angel for
+  // one scale step, and took a second sprite slot with it.
+  let b = 0; for (let v = 1; v < ANG_V0; v++)
     if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;   // ties keep the
                                         // earlier (expanded) entry: twice the horizontal detail
   return b;
@@ -3100,6 +3103,8 @@ oidx    = $8517
 ocn     = $8518
 ocy     = $8519
 onv     = $851a
+ohtmp   = $81f0                  ; how many slots this rung of the hole wants
+onvH    = $81ef                  ; the HOLE allocates downward from 8: it is flat on the floor,
 omEn    = $851b
 omXX    = $851c
 omYY    = $851d
@@ -6983,6 +6988,9 @@ ofyOk:  sta ofy
         sta omPri
         sta omX8
         sta onv
+        ldx #$08                ;   so nothing can ever be behind it -- anything further away is
+        stx onvH                ;   higher up the screen and does not overlap. Last slot = lowest
+                                ;   VIC priority, and the two allocators meet in the middle.
 ${process.env.ORBOCCDBG ? `        sta ohDbg
 ` : ''}        lda py+1                ; which cell is the player standing in?
         asl
@@ -7040,8 +7048,8 @@ obNext: lda ocy
         adc #$03
         sta ocy
         lda onv
-        cmp #$08                ; eight hardware sprites, and the list is nearest-first
-        bcs obEnd
+        cmp onvH                ; eight hardware sprites, and the list is nearest-first -- but
+        bcs obEnd               ;   the hole has been taking them from the top end
         lda ocy
         cmp ocn3
         bcc obLoop
@@ -8090,7 +8098,7 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         beq orbYes              ; one-sprite entity: nothing more to do
         sta otmp
         ldx onv
-        cpx #$08
+        cpx onvH
         bcs orbYes              ; no slot left: show the lower half rather than nothing
         sec
         lda o3
@@ -8927,10 +8935,12 @@ holeTail:
         sta ohF                 ; bits 0-1 sprite count, bit 2 hmag, bit 3 vmag
         and #$03
         sta ohT                 ; 1, 2 or 3 sprites side by side, holding ONE ellipse
-        clc
-        adc onv
-        cmp #$09
-        bcs orbNo               ; would need a ninth hardware sprite: draw none of it, because
+        sta ohtmp               ; the hole takes its slots from the TOP, so what it needs is room
+        lda onvH                ;   between the two allocators, not room below eight
+        sec
+        sbc ohtmp
+        cmp onv
+        bcc orbNo               ; would need a slot the orbs already hold: draw none of it,
                                 ;   a hole missing its right-hand third reads as a wall, not a
                                 ;   hole. Checked HERE and not at the call site, which cannot
                                 ;   know the rung until the projection has run.
@@ -9025,9 +9035,13 @@ ohNx:   dec ohT
         jmp ohLp
 ohDone: rts
 
-; holeSlot: give o0/o1 (X), o3 (Y) and ohP to the next free sprite slot.
+; holeSlot: give o0/o1 (X), o3 (Y) and ohP to the next free sprite slot -- counting DOWN from 8.
+; The hole lies flat on the floor, so nothing can be behind it: anything further away is higher up
+; the screen and cannot overlap, and anything nearer must be in front. Lowest VIC priority is
+; therefore always right, and it stops the hole painting over an angel standing beyond it.
 holeSlot:
-        ldx onv
+        dec onvH
+        ldx onvH
         lda orbBitT,x
         sta omBit
         ora omEn
@@ -9067,8 +9081,7 @@ ohNoY:  lda o0
         lda omBit
         ora omX8
         sta omX8
-ohNo8:  inc onv
-        rts
+ohNo8:  rts
 kSgn:   bmi kSgN
         lda #$00
         rts
