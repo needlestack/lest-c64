@@ -21,11 +21,24 @@ const D64 = globalThis.D64;
 const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 0; i < arr.length; i += per) o.push(ind + '!byte ' + Array.from(arr.slice(i, i + per)).join(',')); return o.join('\n'); };
 
 
+// ---- LEVEL 1: one room, one corridor ----
+// 7x7 of open floor with a 1-wide corridor off the centre of its east wall. The interior of the
+// grid is 14x14 once the border walls are counted, so 7 + 7 is what fits -- 7 + 9 would need an
+// 18-wide grid, and 16x16 is baked into the per-cell tables. The room gets the space because the
+// room is where the dodge happens; the corridor only has to hold orb, angel and hole.
+// Everything below row 8 is solid: dead space the player cannot reach, which costs nothing.
 const M = [
- "1111111111111111","1000000100000001","1000000100000001","1000000100011101",
- "1011100000010001","1010000110010111","1010111100010001","1010100000000101",
- "1010101111100101","1000101000000101","1110101011110001","1000001010000001",
- "1011111010111111","1000000000100001","1000110000000001","1111111111111111",
+ "1111111111111111",
+ "1000000011111111",
+ "1000000011111111",
+ "1000000011111111",
+ "1000000000000001",   // room cols 1-7, doorway at 8, corridor 9-14
+ "1000000011111111",
+ "1000000011111111",
+ "1000000011111111",
+ "1111111111111111",
+ "1111111111111111","1111111111111111","1111111111111111",
+ "1111111111111111","1111111111111111","1111111111111111","1111111111111111",
 ].map(r => r.split('').map(Number));
 const map = []; for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) map.push(M[y][x]);
 
@@ -1506,7 +1519,7 @@ const DUMPH = flag('DUMPH');
 const PA = hexArg('PA', 0, 0xff);
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
-const PX = hexArg('PX', 0x0180, 0xffff);
+const PX = hexArg('PX', 0x0280, 0xffff);   // level 1: stand in the room, off the corridor axis
 const PY = hexArg('PY', 0x0180, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
@@ -1837,13 +1850,22 @@ const ORBSPACE = +(process.env.ORBSPACE ?? 2.2);
 // whether the orb ends up 48 pixels across or 4, so the tail of tiny distant dots is the
 // expensive part of being generous. 9 cells is where an orb is still a couple of pixels.
 const ORBSEE = +(process.env.ORBSEE ?? 9);
+// ---- LEVEL 1 places its objects by hand ----
+// One orb at the mouth of the corridor, one hole at the far end, and (later) one angel halfway
+// between them. The orb both blocks the way through and cages the angel, which is the whole
+// lesson of the level -- so the placement is the design, not a scatter. ORBSCATTER=1 brings back
+// the old fill-the-map-with-orbs behaviour for engine testing.
 const ORBS = [];
-for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
-  if (map[y * 16 + x]) continue;
-  const cx = x + 0.5, cy = y + 0.5;
-  if (cx < 2 && cy < 2) continue;                // not sitting on the player's start
-  if (ORBS.some(o => Math.hypot(o.x - cx, o.y - cy) < ORBSPACE)) continue;
-  ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
+if (process.env.ORBSCATTER) {
+  for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
+    if (map[y * 16 + x]) continue;
+    const cx = x + 0.5, cy = y + 0.5;
+    if (cx < 2 && cy < 2) continue;              // not sitting on the player's start
+    if (ORBS.some(o => Math.hypot(o.x - cx, o.y - cy) < ORBSPACE)) continue;
+    ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
+  }
+} else {
+  ORBS.push({ x: 8.5, y: 4.5, c: 0 });           // the corridor mouth
 }
 if (process.env.ORBWHERE)
   ORBS.forEach((o, i) => { if (String(i) === process.env.ORBWHERE)
@@ -1896,9 +1918,12 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
 // one you land next to takes you back where you came from. Same maze both ways for now -- only
 // the hole cell and the landing spot differ, which is all the level transition actually needs.
-const HOLES_AT = [[+(process.env.HOLEX ?? 4), +(process.env.HOLEY ?? 1)],
-                  [+(process.env.HOLE2X ?? 13), +(process.env.HOLE2Y ?? 13)]];
-const LANDS_AT = [[11, 13], [1, 1]];             // opposite corners: each drop lands you near
+// Level 1 has ONE hole, at the far end of the corridor. The fall machinery alternates between two
+// so a drop can be exercised on a loop, so the second entry is the same cell: fall through it,
+// land back in the room, walk out again.
+const HOLES_AT = [[+(process.env.HOLEX ?? 14), +(process.env.HOLEY ?? 4)],
+                  [+(process.env.HOLE2X ?? 14), +(process.env.HOLE2Y ?? 4)]];
+const LANDS_AT = [[2, 2], [2, 2]];               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
