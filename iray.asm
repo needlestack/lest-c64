@@ -5026,16 +5026,16 @@ fallStep:
         beq fstAdv              ; landing runs at the speed the drop ended at: no acceleration
         ldx fFrm                ; advance the warp's frame index -- DROP ONLY, and up here
         inx                     ; because everything below fstAdv is a branch target. Putting
-        cpx #20     ; this immediately before fstDrw hid it behind "bcc fstDrw":
+        cpx #16     ; this immediately before fstDrw hid it behind "bcc fstDrw":
         bcc fstFOk              ; the counter never moved, fRowT block 0 is the identity, and
-        ldx #19 ; the fall rendered a frozen frame thirty times. Second time
+        ldx #15 ; the fall rendered a frozen frame thirty times. Second time
 fstFOk: stx fFrm                ; this exact trap has bitten -- see bug 4 in [[iray-fall]].
         clc
         lda fVelL
-        adc #$f4
+        adc #$78
         sta fVelL
         lda fVelH
-        adc #$00
+        adc #$01
         sta fVelH
 fstAdv: clc
         lda fPosL
@@ -6256,8 +6256,8 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
         * = $6600          ; the fall's animation data, out of the image's own segment
-arcYT: !byte 200,184,168,153,137,121,105,95,87,79,71,63,55,47,39,32,24,16,8,0     ;   which has no slack left above ORB_SMALL at $3300
-arcET: !byte 20,20,20,20,20,20,20,15,7,255,247,239,231,223,215,208,200,192,184,176
+arcYT: !byte 200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
+arcET: !byte 20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
 arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,2,5,9,14,21,28,37,47,59,71,85,101,118,136,156,178,202,227,255
 
         * = $8600

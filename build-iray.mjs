@@ -2264,7 +2264,12 @@ const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 2);   // 2 = a locked 30fps, 
                                                  //   place of an 8.75 cy/byte fill) and would
                                                  //   just exceed it -- inlining arcBand's mul8
                                                  //   and its two arcClp calls pays for that.
-const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 20);   // 20 * 2 / 60 = 0.67s
+// 16, down from 20, to HOLD THE RISE SPEED while ARC_SLOW changed. v = (100 + 100*ARC_SLOW)/(N-1)
+// is forced by the geometry, so v, N and ARC_SLOW cannot all three be chosen: at v = 15.8 px/frame
+// and N = 20, ARC_SLOW must be 2. Dropping N to 16 keeps v at 16.0 -- the climb to flat, the part
+// that was right, is unchanged to within 1% -- and the exit is shorter because the crown is now
+// moving faster through it.
+const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 16);   // 16 * 2 / 60 = 0.53s
 const FALL_ACC = Math.round(2 * FALL_END * 256 / (FALL_FRAMES * (FALL_FRAMES + 1)));  // 8.8
 const FALLX = +(process.env.FALLX ?? 1), FALLY = +(process.env.FALLY ?? 13);   // where you land
 const mul40 = [...Array(26)].map((_, i) => i * 40);
@@ -2353,7 +2358,12 @@ if (Math.round(ARC_AMP_RAW) > 120)
 // over exactly as it leaves: fully inverted, never on screen. k=3 halves the rate and the arc is
 // fully inverted with the crown still at row 52, so it travels the last quarter as a proper
 // upside-down arc.
-const ARC_SLOW  = +(process.env.ARC_SLOW ?? 2);
+// 1.4, not 2. The gap changes by (ARC_SLOW - 1) per pixel of CROWN travel, and the crown covers
+// 100px after the middle, so THE EXIT INVERSION IS FIXED BY ARC_SLOW ALONE -- ARC_DEPTH does not
+// enter it. At 2 that made the arc leave 80px inverted against a 20px entry arch: four times as
+// curved on the way out, which is what read as "archy at the top". Symmetry wants
+// ARC_SLOW = 1 + 2*ARC_AMP/100.
+const ARC_SLOW  = +(process.env.ARC_SLOW ?? 1.4);
 const [arcYT, arcET] = (() => {
   const v = (100 + ARC_SLOW * 100) / (FALL_FRAMES - 1), Y = [], E = [];
   for (let n = 0; n < FALL_FRAMES; n++) {
