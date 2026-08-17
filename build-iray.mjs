@@ -1730,7 +1730,7 @@ const ORB_VART     = 0x5d00;    // h -> size variant, 256
 const ORB_CANDCNT  = 0x5e00;    // per cell: how many candidates, 256
 const ORB_CANDLO   = 0x5f00;    // per cell: pointer to its list, lo/hi, 256 each
 const ORB_CANDHI   = 0x6000;
-const ORB_OCC      = 0x6f00;    // occluder masks, OCCBYTES x norbs. Out of the image segment
+const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the image segment
                                 //   entirely: at $3100 it capped the code, and fdRamp ran 3
                                 //   bytes past it. Addressed through the orbOccLo/Hi pointer
                                 //   pair, so it has no alignment or locality requirement, and
@@ -2235,6 +2235,13 @@ const orbVarT = [...Array(256)].map((_, h) => {
 const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
 const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
 const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
+// ---- blkT: what MOVEMENT collides with, as opposed to what the renderer draws ----
+// mapT stays exactly the walls, because that is what the raycaster and the run/seam tables are
+// built from -- an orb must not become a wall to look at. blkT is walls OR entities, so mvFree
+// tests one table and costs nothing extra, and picking an orb up is a single store into it.
+// 2 rather than 1 marks "entity, not wall", which the angel will want when it starts moving.
+const blkT = map.slice();
+ORBS.forEach(o => { blkT[(Math.floor(o.y) << 4) | Math.floor(o.x)] = 2; });
 const orbExpT = ORBEXP.map(e => e);
 // Distance from the sprite's LEFT EDGE to the anchor the projection aims at. orbScale centres
 // the content in the 12-column sprite, so this is ~half the sprite whatever the ball's size;
@@ -5524,12 +5531,12 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         sta tmp
         ora cx0
         tax
-        lda mapT,x
+        lda blkT,x
         bne mvBlk
         lda tmp
         ora cx1
         tax
-        lda mapT,x
+        lda blkT,x
         bne mvBlk
         lda cy1
         asl
@@ -5539,12 +5546,12 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         sta tmp
         ora cx0
         tax
-        lda mapT,x
+        lda blkT,x
         bne mvBlk
         lda tmp
         ora cx1
         tax
-        lda mapT,x
+        lda blkT,x
         bne mvBlk
         clc                     ; all four corners open
         rts
@@ -9291,6 +9298,7 @@ arcTopT: !byte ${arcTopT.join(',')}
 ; highest, so each rim sits in the charset its polarity needs
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
+blkT: !byte ${blkT.join(',')}
 holeSeeT: !byte ${holeSee.join(",")}
 ${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
@@ -9312,7 +9320,7 @@ arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
   return Math.max(51, Math.min(246, 50 + Math.min(d, l) * 8));
 }).join(',')}
-${FALLSCENE ? `        * = ${hx16(FROWT + 0x400)}
+${FALLSCENE ? `        * = ${hx16(FROWT + 0x500)}
 fRowT: ${chunk(fRowT, 32).trim()}` : ''}
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
