@@ -2250,6 +2250,12 @@ const FROWT   = 0x6600;                          // 30 x 32: the camera-height r
                                                  //   RELOC, which is full to the image end, and
                                                  //   not inline: 960 bytes pushed the data
                                                  //   segment through ORB_SMALL at $3300.
+const FALLBUF2 = 0x4900;                         // the DESTINATION room, rendered at the start of
+                                                 //   the fall instead of the middle. A full render
+                                                 //   is 3-4 raster periods; in the middle it stalled
+                                                 //   the animation for ~0.4s between the two arcs.
+                                                 //   At frame zero the screen has not moved yet, so
+                                                 //   the same stall is invisible.
 const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: the frozen frame
 const FALL_END = 200;                            // pixels of travel per phase = screen height
 // ---- how long the drop takes, and how smooth it can possibly be ----
@@ -7979,12 +7985,24 @@ fallChk:ldx hlv
         sta omYY                ;   would put the register straight back and leave an orb
         sta omPri               ;   hanging in space while the world scrolled away behind it
         sta omX8
-        ldx #$ff                ; -1: the first fallStep advances it to fRowT block 0, which is
-        stx fFrm                ;   the state after one frame of travel
-        ldx #25                 ; and neither buffer has any of the new colour in it yet
-        stx phA
-        stx phB
-        lda #$01
+        ldx hlv                 ; go to the landing spot NOW and let the main loop render it
+        lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
+        sta px                  ;   player does not move again for the rest of the fall.
+        sta py
+        lda landXT,x
+        sta px+1
+        lda landYT,x
+        sta py+1
+        txa
+        eor #$01
+        sta hlv
+        asl
+        asl
+        asl
+        asl
+        asl
+        sta hlvOf
+        lda #$02
         sta fallSt
         lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
         cmp #${hx(SCR_A >> 8)}  ;   drawn into, so the displayed one is the other
@@ -7997,13 +8015,17 @@ fcNo:   rts
 
 ; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
 ; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
+fallSnap2:
+        sta fdS+1               ; ...and the same into the DESTINATION buffer
+        lda #${hx(FALLBUF2 >> 8)}
+        bne fsnGo               ; always taken: a page number
 fallSnap:
         sta fdS+1
+        lda #${hx(FALLBUF >> 8)}
+fsnGo:  sta fdD+1
         lda #$00
         sta fdS
         sta fdD
-        lda #${hx(FALLBUF >> 8)}
-        sta fdD+1
         ldx #$04
         ldy #$00
 fsnLp:  lda (fdS),y
@@ -8032,27 +8054,13 @@ fstLimD:bcc fstFOk
         lda fallSt
         cmp #$03
         beq fstEnd
-        ldx hlv                 ; drop over: put the player down in the new level and let the
-        lda #$80                ;   main loop render one ordinary frame there
-        sta px
-        sta py
-        lda landXT,x
-        sta px+1
-        lda landYT,x
-        sta py+1
-        txa                     ; and swap which hole is live, so the one you land beside
-        eor #$01                ;   takes you back and the drop can be exercised on a loop
-        sta hlv
-        asl
-        asl
-        asl
-        asl
-        asl
-        sta hlvOf               ; level * 32, the offset into holeSeeT
-        lda #$02
-        sta fallSt
-        jsr fallInv             ; the render coming next frame draws into a buffer the fall
-                                ;   scribbled, so it must not trust the run cache
+        lda #$03                ; drop over -- straight into the landing. The destination room
+        sta fallSt              ;   was rendered and snapshotted before the drop began, so there
+        ldx #25                 ;   is nothing to stall for here. Neither buffer holds any of the
+        stx phA                 ;   landing's colour yet.
+        stx phB
+        jsr fallInv             ; the fall scribbled both buffers behind renderSym's run cache
+        ldx #$00                ; and THIS frame is landing frame 0, drawn without a gap
 fstFOk: stx fFrm
         lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
@@ -8158,26 +8166,25 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
 ; as the scroll source, then immediately overdraw that buffer with the first landing frame --
 ; otherwise the flip would show the new level whole for one frame before the slide begins.
 fallLand:
-        lda baseHi              ; SNAPSHOT THE NEW ROOM. Without this the landing warps whatever
-        jsr fallSnap            ;   fallBuf still holds -- the room you just LEFT -- and replays
-                                ;   its slide under the inverted arc. That is the second room
-                                ;   going up in the middle of the fall.
+        lda baseHi              ; the render that just ran is the DESTINATION room. Stash it and
+        jsr fallSnap2           ;   start the drop: from here the whole cut-scene runs without
+                                ;   another render, so nothing stalls it in the middle.
         lda #$00                ; the render that just ran turned the sprites back on, and
         sta omEn                ;   osFlush still runs every landing frame -- so they would
         sta omXX                ;   hang motionless while the world rose underneath them.
         sta omYY                ;   Clear the buffer as the drop does; they come back when
         sta omPri               ;   the renderer does.
         sta omX8
-        lda #$03
-        sta fallSt
-        ldx #25                 ; the landing paints the OTHER colour, so neither buffer has any
-        stx phA                 ;   of it yet either
+        lda #$01
+        sta fallSt              ; ...and it is the DROP that starts now
+        ldx #25
+        stx phA
         stx phB
-        ldx #$ff                ; -1: fallStep advances it to arc frame 0, so the landing replays
-        stx fFrm                ;   the same sixteen frames with the colours swapped. It must
-        jmp fallStep            ;   overdraw the back buffer NOW -- the render that just ran is
-                                ;   sitting in it and the flip would show the maze whole for one
-                                ;   frame before the white starts rising.
+        ldx #$ff
+        stx fFrm
+        jmp fallStep            ; overdraw the back buffer NOW -- the render that just ran is
+                                ;   sitting in it and the flip would show the destination room
+                                ;   whole for one frame before the fall starts.
 
 ; fallDraw: one path for both phases. arcInv swaps which side of the rim is floor and which is
 ; hole; the arc itself -- crown, depth, profile -- is identical, so the world closing over you and
@@ -8332,13 +8339,24 @@ fwT:    lda $ffff,y
         cmp #255
         beq fwSkip              ; no source for this row -- the landing's room has not reached it
         tax
+        lda arcInv              ; the landing slides the DESTINATION room, snapshotted before
+        beq fwSrcA              ;   the drop began; the drop slides the one being left
         lda mul40LoT,x
+        clc
+        adc #<${hx16(FALLBUF2)}
+        sta fdS
+        lda mul40HiT,x
+        adc #>${hx16(FALLBUF2)}
+        sta fdS+1
+        jmp fwSrcD
+fwSrcA: lda mul40LoT,x
         clc
         adc #<${hx16(FALLBUF)}
         sta fdS
         lda mul40HiT,x
         adc #>${hx16(FALLBUF)}
         sta fdS+1
+fwSrcD:
         ldx fwRow
         lda mul40LoT,x
         sta fdD
