@@ -695,7 +695,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -4204,6 +4204,13 @@ occStamp:
 oSCbB:  lda #<cbB
 oSCbS:  sta oSInv+1
         sta oSDIn+1
+        lda baseHi              ; ...and the same buffer's CEILING/BLANK-run cache. A stamped char
+        cmp #$e0                ;   lands in one of three bands: the blank run above (cwA), the
+        bne oSCwB               ;   solid run below (cbA), or the edge band between. The edge band
+        lda #<cwA               ;   is redrawn unconditionally so it needs nothing, and cbA was
+        jmp oSCwS               ;   already poisoned -- but a stamp in the BLANK run was invisible
+oSCwB:  lda #<cwB               ;   to both, so rfCw1's compare kept matching and those rows were
+oSCwS:  sta oSInvW+1            ;   never redrawn again.
 oSLoop: ldx osI
         lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
         cmp #$02 ;   below this test is always here, because ORBGATE is off by
@@ -4518,6 +4525,9 @@ oSCDn:  lda osL                 ; invalidate the cache for every cell column jus
         sta ohSv
 oSCIv:  lda #$ff
 oSInv:  sta cbA,y               ; operand patched above to this buffer's cache
+        lda #$00                ; The two tests are ordered compares in OPPOSITE directions,
+oSInvW: sta cwA,y               ;   so they need opposite poisons: $ff would read as a SHRUNK
+                                ;   ceiling and be skipped, and 0 is a length rs can take.
         cpy ohSv
         bcs oSCId
         iny
