@@ -468,7 +468,7 @@ obV     = $85d0                 ; size variant per slot, so orbSeam can find the
 obOcc   = $85e0                 ; per slot: bit 7 = this orb has a possible occluder here
 obL     = $8574                 ; per slot: the orb's TIGHT column range, which the cell range
 obR     = $857c                 ;   cannot give -- a cell is 4 columns and a box starts inside one
-osI     = $85f4                 ; orbStamp: slot being stamped, and how many there are
+osI     = $85f4                 ; occStamp: slot being stamped, and how many there are
 osN     = $85f5
 osL     = $85f6                 ; the span/box intersection being stamped
 osR     = $85f7
@@ -485,13 +485,13 @@ ohMsX   = $8528
 o2r     = $8529                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
                                 ;   Not zero page: it is touched a handful of times per orb, in
                                 ;   the projection, never in a per-column loop.
-osDC    = $85fb                 ; orbStamp: the de-seam's current cell column
+osDC    = $85fb                 ; occStamp: the de-seam's current cell column
 oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
 oSSpn   = $85fe
 ohSv    = $85fa                 ; span right edge / row counter, reused
 osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
-                                ;   orbStamp runs, so its pointer is free
+                                ;   occStamp runs, so its pointer is free
 omptr   = $87                   ; 2 bytes: this orb's occluder mask. Deliberately SHARES oaL/oaH,
                                 ;   the multiply accumulator, which is dead once the projection
                                 ;   has produced a column range -- the same aliasing the original
@@ -691,7 +691,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
@@ -1628,7 +1628,7 @@ subFin:
                                 ;   rendered next frame via entDty, which nobody can see.
         jsr dieChk              ; the mark, and the moment they turn far enough to see it
         jsr renderSym
-        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
+        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
         jsr drawFps
         jsr drawDbg
 
@@ -4106,7 +4106,7 @@ ofyOk:  sta ofy
         lda #215
         sta obY
         lda #$ff
-        sta obIX                ; not an entity: this is the value orbStamp's hole test already
+        sta obIX                ; not an entity: this is the value occStamp's hole test already
                                 ;   rejects, so the icon stamps no occluders
         lda #$01
         sta omEn
@@ -4158,7 +4158,9 @@ obEnd:  rts
 ; after the raster wait and the buffer flip, when the beam is past line 250 and no sprite is
 ; being fetched. Costs about 30 cycles per visible orb, which is nothing next to the ~2400 it
 ; took to work out where the orb goes.
-; ---- orbStamp: paint foreground black where a wall should clip an orb ----
+; ---- occStamp: paint foreground black where a wall should clip an ENTITY ----
+; Named for what it does, not for what it was written for: orbs, angels and anything else that
+; takes a sprite slot all clip the same way, and the angel is just an entity with two of them.
 ; Runs AFTER renderSym, because it overwrites cells renderSym has just drawn. The seven occluder
 ; glyphs are the same black as the wall and differ only in bit pair, so a stamped cell is
 ; invisible as colour and clips exactly.
@@ -4175,7 +4177,7 @@ obEnd:  rts
 ;     in the charset. So every seam inside the orb's box becomes plain black. Its whole box, not
 ;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
 ;     wall is occluding at the edge.
-orbStamp:
+occStamp:
         lda onv
         beq oSDn
         sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
@@ -4965,7 +4967,7 @@ opBLx:  jmp orbNo
 opBL1:  cmp #$a0        ; A box that STARTS past the last column is an orb entirely off
         bcc opBL2               ; the right edge. This used to clamp to 159, which turned "not on
         jmp orbNo               ; screen" into "one column at the screen edge" -- so the orb took a
-                                ; sprite slot it could never be seen in, and orbStamp then painted
+                                ; sprite slot it could never be seen in, and occStamp then painted
                                 ; occluders into cell 39 for it. Invisible in the shipping build,
                                 ; since black on black wall looks the same, but real work for an
                                 ; orb that is not there. Clamping was added to stop the box
@@ -5460,7 +5462,7 @@ fstEnd: lda #$96
 ; fallInv: forget both buffers' run caches. renderSym skips a column whose cached ceiling run
 ; and solid-run start still match, and the fall wrote the screen straight past it -- so without
 ; this the scrolled image STAYS in every column the renderer thinks it already got right. Same
-; hazard orbStamp has to clear after itself, and it reads as an inverted, sheared frame.
+; hazard occStamp has to clear after itself, and it reads as an inverted, sheared frame.
 ; THE TWO HALVES NEED OPPOSITE SENTINELS -- the same pair the power-on clear uses, and for the
 ; same reason. The tests are ordered compares, not equality: the ceiling test skips when rb has
 ; SHRUNK, so cwA/cwB must go to 0 or every column looks like a shrink and skips its own repaint,
@@ -7110,7 +7112,7 @@ holeSlot:
         lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
         sta obC,x
         sta obOcc,x
-        lda oidx                ; and MARK THE SLOT as a hole, so orbStamp can tell. It fills no
+        lda oidx                ; and MARK THE SLOT as a hole, so occStamp can tell. It fills no
         sta obIX,x              ;   stamp state at all, and it no longer sits reliably at the end
                                 ;   of the list where a count could fence it off. obOcc is not
                                 ;   enough: the gate that reads it is behind ORBGATE, which is
