@@ -178,25 +178,25 @@ cqLo    = $8100                 ; colour queue: address low, high, and the value
 cqHi    = $8140                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $8180                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $7e00                 ; PROFILE: 16 phases x 3 bytes, raster lines summed
-pfPrvF  = $7e30                 ; previous timestamp: frame counter, then raster line
-pfPrvL  = $7e32
-pfCurH  = $7e36                 ; ninth raster bit, current and previous
-pfPrvH  = $7e37
-pfTmp   = $7e38
-pfTmp2  = $7e39
-pfN     = $7e3c                 ; frames accumulated so far -- ONE byte. It is incremented and
+pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
+pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $7e42
+pfCurH  = $7e46                 ; ninth raster bit, current and previous
+pfPrvH  = $7e47
+pfTmp   = $7e48
+pfTmp2  = $7e49
+pfN     = $7e4c                 ; frames accumulated so far -- ONE byte. It is incremented and
                                 ;   the WRAP to zero is what counts 256 (inc pfN / bne / inc pfDone),
                                 ;   so pfDone is the high byte in effect. The comment here said
                                 ;   "2 bytes" and pfDLo sits at $7e3d, which made the new overlap
                                 ;   guard fire -- correctly, on the comment rather than the code.
-pfCurF  = $7e3a                 ; scratch for one timestamp read and the delta
-pfCurL  = $7e3b
-pfCurX  = $7e3f
-pfDLo   = $7e3d
-pfDHi   = $7e3e
-pfRow   = $7e34
-pfDone  = $7e35
+pfCurF  = $7e4a                 ; scratch for one timestamp read and the delta
+pfCurL  = $7e4b
+pfCurX  = $7e4f
+pfDLo   = $7e4d
+pfDHi   = $7e4e
+pfRow   = $7e44
+pfDone  = $7e45
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
@@ -691,7 +691,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.

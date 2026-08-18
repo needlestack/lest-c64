@@ -935,7 +935,13 @@ if (process.env.CELLMARK === '1') {
   const dot = (row, pair) => (row & 0xc3) | (pair << 4) | (pair << 2);
   for (const r of [3, 4]) {
     glyphs[SOLID][r] = dot(glyphs[SOLID][r], 2);
-    for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], 0);
+    // GREY (pair 10) on the occluders too, not white. The dot used to be white so wall and stamp
+    // could be told apart by dot colour -- but ORBFG already tells them apart far better, by
+    // tinting the whole stamped cell, and a white marker is useless when the bug you are chasing
+    // IS white leaking into an occlusion. Grey everywhere marks the char grid; colour carries
+    // the meaning; and any white on screen is now unambiguously the bug.
+    for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], 2);
+    for (let i = 0; i < 6; i++) glyphs[OCCW0 + i][r] = dot(glyphs[OCCW0 + i][r], 2);
   }
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
@@ -2998,25 +3004,25 @@ cqLo    = $8100                 ; colour queue: address low, high, and the value
 cqHi    = $8140                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $8180                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $7e00                 ; PROFILE: 16 phases x 3 bytes, raster lines summed
-pfPrvF  = $7e30                 ; previous timestamp: frame counter, then raster line
-pfPrvL  = $7e32
-pfCurH  = $7e36                 ; ninth raster bit, current and previous
-pfPrvH  = $7e37
-pfTmp   = $7e38
-pfTmp2  = $7e39
-pfN     = $7e3c                 ; frames accumulated so far -- ONE byte. It is incremented and
+pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
+pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
+pfPrvL  = $7e42
+pfCurH  = $7e46                 ; ninth raster bit, current and previous
+pfPrvH  = $7e47
+pfTmp   = $7e48
+pfTmp2  = $7e49
+pfN     = $7e4c                 ; frames accumulated so far -- ONE byte. It is incremented and
                                 ;   the WRAP to zero is what counts 256 (inc pfN / bne / inc pfDone),
                                 ;   so pfDone is the high byte in effect. The comment here said
                                 ;   "2 bytes" and pfDLo sits at $7e3d, which made the new overlap
                                 ;   guard fire -- correctly, on the comment rather than the code.
-pfCurF  = $7e3a                 ; scratch for one timestamp read and the delta
-pfCurL  = $7e3b
-pfCurX  = $7e3f
-pfDLo   = $7e3d
-pfDHi   = $7e3e
-pfRow   = $7e34
-pfDone  = $7e35
+pfCurF  = $7e4a                 ; scratch for one timestamp read and the delta
+pfCurL  = $7e4b
+pfCurX  = $7e4f
+pfDLo   = $7e4d
+pfDHi   = $7e4e
+pfRow   = $7e44
+pfDone  = $7e45
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
@@ -4424,8 +4430,8 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
-${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : `        jsr drawFps
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; orbStamp: the partial-occlusion pass' : ''}
+${PROFILE && !PROFILE1 ? '' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -10931,7 +10937,7 @@ psCol:  lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /2
         jsr ddPut
         inc pfRow
         lda pfRow
-        cmp #$10                ; 16 phases. Row = 4 + r%5 and column = (r/5)*5, so r=14 is
+        cmp #$11                ; 17 phases. Row = 4 + r%5 and column = (r/5)*5, so r=14 is
         bcc psLp                ; row 8 / col 10 -- still above the horizon, still readable.
         rts
 
@@ -11299,7 +11305,7 @@ try {
       // arc scratch, and it took a freeze to notice.
       obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
       obL: 8, obR: 8, obBL: 8, obBR: 8,
-      pfAcc: 48,                       // SIXTEEN phases x 3. It said 13 while the code used 15,
+      pfAcc: 51,                       // SEVENTEEN phases x 3. It said 13 while the code used 15,
                                        //   so two phases' worth of room was undeclared and the
                                        //   next variable placed there would have collided.
       // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
