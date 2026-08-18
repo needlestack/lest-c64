@@ -8376,9 +8376,21 @@ oNoX2:  lda o0
         lda omBit
         ora omX8
         sta omX8
-oNoM2:  ldy onvL                ; the stamp pass clips by column, and the two halves span the
-        lda obIX,y              ;   same columns -- so the upper slot inherits the lower's record
-        sta obIX,x
+oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EXCEPT its identity
+        lda #$ff                ; ---- and it must NOT stamp ----
+        sta obIX,x              ; The old note here said the two halves span the same columns, so
+                                ; the upper slot could just copy the lower's record and let the
+                                ; stamp pass clip by column. But the stamp clips by ROW too, from
+                                ; obY + orbBlankT[obV] -- and this slot carries the LOWER's obV
+                                ; with an obY one anchor higher. orbBlankT is NEGATIVE for a
+                                ; two-sprite variant precisely because the lower slot's span
+                                ; already covers the whole entity, so the upper one laid down a
+                                ; second rectangle 21 rows above it: a bar of occluder standing
+                                ; two to three cells clear over the angel's head, occluding
+                                ; correctly but far too much.
+                                ; $ff is the same "not an entity" marker the icon and the hole
+                                ; use, and obIX is read nowhere but occStamp, so this costs
+                                ; nothing and needs no new state.
         lda obV,y
         sta obV,x
         lda obOcc,y
