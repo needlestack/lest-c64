@@ -178,7 +178,7 @@ cqLo    = $8100                 ; colour queue: address low, high, and the value
 cqHi    = $8140                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $8180                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $7e00                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
+pfAcc   = $7e00                 ; PROFILE: 16 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e30                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e32
 pfCurH  = $7e36                 ; ninth raster bit, current and previous

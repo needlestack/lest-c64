@@ -2998,7 +2998,7 @@ cqLo    = $8100                 ; colour queue: address low, high, and the value
 cqHi    = $8140                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $8180                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
-pfAcc   = $7e00                 ; PROFILE: 13 phases x 3 bytes, raster lines summed
+pfAcc   = $7e00                 ; PROFILE: 16 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e30                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e32
 pfCurH  = $7e36                 ; ninth raster bit, current and previous
@@ -4424,7 +4424,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
@@ -10931,7 +10931,7 @@ psCol:  lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /2
         jsr ddPut
         inc pfRow
         lda pfRow
-        cmp #$0f                ; 15 phases. Row = 4 + r%5 and column = (r/5)*5, so r=14 is
+        cmp #$10                ; 16 phases. Row = 4 + r%5 and column = (r/5)*5, so r=14 is
         bcc psLp                ; row 8 / col 10 -- still above the horizon, still readable.
         rts
 
@@ -11299,7 +11299,9 @@ try {
       // arc scratch, and it took a freeze to notice.
       obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
       obL: 8, obR: 8, obBL: 8, obBR: 8,
-      pfAcc: 39,                       // 13 phases x 3 bytes
+      pfAcc: 48,                       // SIXTEEN phases x 3. It said 13 while the code used 15,
+                                       //   so two phases' worth of room was undeclared and the
+                                       //   next variable placed there would have collided.
       // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
       // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
       // player's projected X overwrote the death trigger's reference angle every frame and you
