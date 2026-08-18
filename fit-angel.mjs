@@ -87,7 +87,7 @@ for (const nm of names) {
   // pack each 32-pixel centroid back into 8 glyph bytes -- the same layout it came in as
   // Order the glyphs by similarity before emitting: a pure permutation, no quality cost, and it
   // lets the LZ match neighbouring glyphs against each other. Worth ~40 packed bytes, which is
-  // ~80 of the self-extractor's staging headroom -- see iray-memory-map.
+  // ~80 of the self-extractor's staging headroom.
   const dist = (a, b) => { let d = 0; for (let i = 0; i < 32; i++) { const x = cents[a][i] - cents[b][i]; d += x*x; } return d; };
   const used = new Array(K).fill(false), chain = [0]; used[0] = true;
   for (let k = 1; k < K; k++) { const last = chain[k-1]; let bi = -1, bd = Infinity;

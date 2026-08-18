@@ -129,7 +129,7 @@ cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
 cy1     = $85
-; $0400-$04e0 is ALSO where the self-extracting loader copies its decoder and runs it, so these two
+; $0400-$04e0 was where the old self-extracting decoder ran. The loader is a separate file now, so these two
 ; hold decoder bytes rather than KERNAL screen data at the moment the game starts. That is safe, and
 ; deadvars is what makes it safe rather than an argument: it reports 0 variables read before being
 ; written, so nothing here is ever consumed before the subdivision pushes to it. If that check ever
@@ -720,8 +720,7 @@ ccf:    sta $d800,x
         lda #$00
         sta pa
         jsr sndInit             ; the drone starts before the first frame and never stops
-        lda #$01
-        sta dbgOnce
+
         lda #$00
         sta dieSt               ; power-on garbage here sent the loop straight into dieRev with
         sta marked              ;   no state set up, and the program fell out to BASIC
@@ -5083,7 +5082,8 @@ ohAdv:  ldx ohBX
         sta ohL                 ; the next span starts at this boundary
         inc ohBX
         jmp ohSpan
-ohHide: lda ovProbe
+ohHide:
+        lda ovProbe
         beq ohHid0
         rts                     ; probe done: the counters are the answer, and nothing has been
 ohHid0: jmp orbNo               ;   allocated, because allocation lives past opDone
@@ -6263,9 +6263,8 @@ anNo:   clc
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
-; The trigger is the angel's projected COLUMN, not orbSeenT: waiting for it to take a sprite slot
-; means waiting until it is already on screen, and the whole point is that you never see the
-; little sprite. orbProj returns the off-centre column even when the thing is off screen.
+; The trigger is ONE angle comparison. Contact hides the angel outright, so there is no sprite to
+; see and nothing to project -- turn DIE_TURN either way and the cut scene fires.
 dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
         beq dckLive             ;   the sprites. obC is rewritten by orbMove every frame and
         ldx #$07                ;   flushed to $d027+n after us, so this is the last word on it.
@@ -7221,7 +7220,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; The charset is NOT in the image. It is shipped as its own compressed segment and decoded
 ; straight into $d000-$d7ff by the loader, with the port at $34 -- which is the one thing a KERNAL
 ; LOAD can never do, and the reason a low "source" copy existed here for as long as it did. See
-; iray-charset.bin and the --seg argument in the SELFEXT block below.
+; the ICHR file on the disk, which the boot loader lands at $c000 and copies under the hole.
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 

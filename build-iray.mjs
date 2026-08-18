@@ -1708,7 +1708,7 @@ const ORBSTAMP = process.env.ORBSTAMP !== '0';
 const ORBGATE = process.env.ORBGATE === '1';
 // ORBNOCELL=1: walk and decide, but stamp nothing. Separates the SEARCH cost from the WRITING.
 const ORBNOCELL = process.env.ORBNOCELL === '1';
-// The sprite bitmaps are PLACED into VIC bank 3 by the self-extracting loader ($c000, 64-byte
+// The sprite bitmaps are their own disk file, loaded straight into VIC bank 3 ($c000, 64-byte
 // aligned, first of the 159 free slots) rather than emitted into the image. They were at $2000
 // in bank 0 before the bank-3 move, which is now the code's growth room.
 const SPRBASE = 0xc000;
@@ -1727,9 +1727,6 @@ const SPRBASE = 0xc000;
 // and the code got a clean run to $3100 instead. Emitted AFTER hTabT, since the assembler
 // lays out in address order.
 const ORB_VART     = 0x5d00;    // h -> size variant, 256
-const ORB_CANDCNT  = 0x5e00;    // per cell: how many candidates, 256
-const ORB_CANDLO   = 0x5f00;    // per cell: pointer to its list, lo/hi, 256 each
-const ORB_CANDHI   = 0x6000;
 const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the image segment
                                 //   entirely: at $3100 it capped the code, and fdRamp ran 3
                                 //   bytes past it. Addressed through the orbOccLo/Hi pointer
@@ -1743,8 +1740,6 @@ const ORB_SMALL    = 0x3d00;    // THREE pages of per-variant and per-orb tables
 // reporting. The direct entity loop in orbMove replaced them, and a movable orb invalidates
 // every field in them anyway -- the bearing, the window and the canOcc bit are all relative to
 // where the orb stood at BUILD time. Nothing is emitted; ORB_SMALL now starts here.
-const ORB_CANDLIST = 0x3700;    // the visibility lists themselves: 3 bytes per candidate
-const ORB_TOP      = 0x4000;    // and the first emitted table, which they must not reach
 
 const ORB4RAW = [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192];
 const ORBSRC12 = (() => {
@@ -1834,10 +1829,8 @@ const ANGART = JSON.parse(readFileSync('./angel-art.json', 'utf8'));
 // 160x200 multicolor stored as 4x8 tiles of 8 bytes, which IS a C64 char glyph, so the fitter's
 // output drops straight into a charset. 256 glyphs reproduce the face at RMS 0.082 -- close
 // enough that no raster split and no backup of charset A is needed.
-// OFF BY DEFAULT until the face has a delivery route. The self-extractor loads every packed
-// stream low and copies them up, so a stream must clear the loaded file's top -- and the build
-// is already within ~1KB of that limit. The face is 3,048 bytes (2,807 packed) and does not fit;
-// see the note in iray-memory-map. The death CODE fits, the ART does not.
+// The death cut scene, on by default. The face ships INSIDE the image at $7100 -- there is no
+// packer and no staging any more, so nothing about it is size-constrained. See fit-angel.mjs.
 const DIE      = process.env.DIE !== '0' && process.env.SNDTEST !== '1';
 const FACE     = process.env.FACE ?? 'hangl1';
 const FACEART  = JSON.parse(readFileSync('./angel-face.json', 'utf8'))[FACE];
@@ -1854,7 +1847,6 @@ const DIE_OUT  = +(process.env.DIEOUT  ?? 16);   // fade the room to black: 4 ti
 const DIE_SHOW = +(process.env.DIESHOW ?? 54);   // the face on screen, 0.9s
 const DIE_OFF0 = +(process.env.DIEOFF0 ?? 10);   // columns of it showing when the fade-up starts
 const DIE_OFF1 = +(process.env.DIEOFF1 ?? 48);
-const DIE_TRIG = +(process.env.DIETRIG ?? 110);  // columns off centre: fire before it is visible
 // ...OR any turn of this much while still cornered. An angel on your flank can need most of a
 // revolution to come into view, and the player is turning the whole time wondering why nothing
 // is happening. 256 units to the circle, so 30 degrees is 21.
@@ -1907,7 +1899,6 @@ const ANGLAD = [];
 for (let h = 42; h >= 24; h -= 3) ANGLAD.push({ h, exp: 1 });   // apparent 84..48
 for (let h = 42; h >= 6;  h -= 3) ANGLAD.push({ h, exp: 0 });   // apparent 42..6
 const ANGBMH = [...new Set(ANGLAD.map(r => r.h))].sort((a, b) => b - a);
-const ANG_BM0 = ORBBM.length;                    // where the angel's bitmaps start
 const ANGIDX = new Map();                        // height -> [lower slot, upper slot or -1]
 for (const h of ANGBMH) {
   const g = angScale(angW(h), h);
@@ -1964,7 +1955,6 @@ const ORBSPACE = +(process.env.ORBSPACE ?? 2.2);
 // How far an orb can be and still make the cell's list. A full projection is ~2400 cycles
 // whether the orb ends up 48 pixels across or 4, so the tail of tiny distant dots is the
 // expensive part of being generous. 9 cells is where an orb is still a couple of pixels.
-const ORBSEE = +(process.env.ORBSEE ?? 9);
 // ---- LEVEL 1 places its objects by hand ----
 // One orb at the mouth of the corridor, one hole at the far end, and (later) one angel halfway
 // between them. The orb both blocks the way through and cages the angel, which is the whole
@@ -2026,9 +2016,6 @@ const losFree = (ax, ay, bx, by) => {
     if (map[(y | 0) * 16 + (x | 0)]) return false; }
   return true;
 };
-const CANDBASE = ORB_CANDLIST;                    // a FULL address: the 6502 loads it into a pointer
-const candList = [], candLo = new Array(256).fill(0), candHi = new Array(256).fill(0),
-      candCnt = new Array(256).fill(0);
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
 const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
@@ -2067,157 +2054,16 @@ for (let cell = 0; cell < 256; cell++) {
   // showed up as an orb popping in and out as you walked a corridor, present in cells 9 and 11
   // and missing in 10. Sampling a 3x3 grid makes the list a superset of what is reachable.
   const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
-  const vis = ORBS.map((o, i) => ({ i, d: Math.hypot(o.x - cx, o.y - cy) }))
-    .filter(o => o.d < ORBSEE &&
-      eye.some(([ex, ey]) => losFree(ex, ey, ORBS[o.i].x, ORBS[o.i].y)))
-    .sort((a, b) => a.d - b.d);
-  HOLES_AT.forEach(([hx0, hy0], L) => {         // same 3x3 eye grid as the orbs, same reason
+  HOLES_AT.forEach(([hx0, hy0], L) => {         // same 3x3 eye grid the orbs used to share
     if (Math.hypot(hx0 + 0.5 - cx, hy0 + 0.5 - cy) < HOLE_MAX_D &&
         eye.some(([ex, ey]) => losFree(ex, ey, hx0 + 0.5, hy0 + 0.5)))
       holeSee[L * 32 + (cell >> 3)] |= 1 << (cell & 7);
   });
-  // FULL ADDRESS, not an offset: the 6502 loads these straight into a pointer.
-  const a = CANDBASE + candList.length;
-  candLo[cell] = a & 255; candHi[cell] = a >> 8;
-  candCnt[cell] = vis.length;
-  // Three bytes per candidate: orb index, bearing from this cell, and how far off that
-  // bearing the player may still see it. The list covers all 360 degrees but the FOV is 66,
-  // so without this test four candidates in five are fully projected only to be discarded --
-  // and a full projection is about 2000 cycles against 20 for the test.
-  // What can get BETWEEN an eye position in this cell and the orb? Asking "what runs are
-  // visible from here" was far too broad -- from most cells you can see most of the map, so
-  // it skipped almost nothing. March each eye position at the orb instead, across the orb's
-  // width, and see what is hit on the way.
-  const blockers = (o) => {
-    const out = new Set();
-    for (const [ex, ey] of eye) {
-      const vx = o.x - ex, vy = o.y - ey, L = Math.hypot(vx, vy) || 1;
-      for (const off of [-0.25, 0, 0.25]) {          // the orb has width, so sample across it
-        const tx = o.x - vy / L * off, ty = o.y + vx / L * off;
-        const dx = tx - ex, dy = ty - ey, n = Math.ceil(Math.hypot(dx, dy) * 8);
-        for (let i = 1; i < n; i++) {
-          const t = i / n, x = ex + dx * t, y = ey + dy * t;
-          const mx = x | 0, my = y | 0;
-          if (mx < 0 || my < 0 || mx > 15 || my > 15) break;
-          if (map[my * 16 + mx]) {                    // which face did we come through?
-            const px2 = ex + dx * ((i - 1) / n), py2 = ey + dy * ((i - 1) / n);
-            const t2 = (px2 | 0) !== mx ? (dx > 0 ? runW : runE) : (dy > 0 ? runN : runS);
-            out.add(t2[my * 16 + mx]); break;
-          }
-        }
-      }
-    }
-    return out;
-  };
-  for (const v of vis) {
-    const o = ORBS[v.i];
-    const brg = Math.round(Math.atan2(o.y - cy, o.x - cx) / (2 * Math.PI) * 256) & 255;
-    // Half the FOV, plus however far the bearing can swing as the player moves off the cell
-    // centre -- up to 0.71 cells away, which matters enormously for a near orb.
-    const win = Math.min(127, Math.ceil(FOV / 2 + Math.atan2(0.71, Math.max(v.d, 0.71))
-                                                  / (2 * Math.PI) * 256) + 2);
-    // Bit 7 of the window byte is spare (windows never exceed 127): set it when some run
-    // visible from this cell could occlude this orb.
-    const canOcc = [...blockers(o)].some(r => (orbOcc[v.i][r >> 3] >> (r & 7)) & 1);
-    candList.push(v.i, brg, win | (canOcc ? 0x80 : 0));
-  }
-}
-if (ORB_CANDLIST + candList.length > ORB_TOP) throw new Error(
-  `visibility lists are ${candList.length} bytes, ending at $${(ORB_CANDLIST + candList.length)
-  .toString(16)} past the first emitted table at $${ORB_TOP.toString(16)}. ORBSEE (currently ` +
-  `${ORBSEE} cells) is the knob: it decides how many orbs each cell may list.`);
-// ORBDIAG=1 writes every input to the occlusion decision as JSON. Occlusion questions are
-// "which run, which plane, which orb, was it culled" -- all build-time constants -- and
-// re-deriving them in a separate script is how the last analysis went wrong (it approximated
-// the projection and pointed at a viewpoint where nothing clipped at all). Dump the real ones.
-if (process.env.ORBDIAG === '1') {
-  const perCell = {};
-  for (let c = 0; c < 256; c++) {
-    if (map[c] || !candCnt[c]) continue;
-    const base = (candLo[c] | (candHi[c] << 8)) - CANDBASE;
-    perCell[`${c % 16},${c >> 4}`] = [...Array(candCnt[c])].map((_, j) => ({
-      orb: candList[base + j * 3], brg: candList[base + j * 3 + 1],
-      win: candList[base + j * 3 + 2] & 0x7f,
-      canOcc: !!(candList[base + j * 3 + 2] & 0x80),
-    }));
-  }
-  writeFileSync('orbdiag.json', JSON.stringify({
-    orbs: ORBS, runFace, runPlane, nextRun, map,
-    runW, runE, runN, runS,
-    orbOcc: orbOcc.map(m => m.map(b => b)), perCell,
-  }));
-  console.error('ORBDIAG: wrote orbdiag.json');
-}
-// ORBOCCFIND=1: name viewpoints where the whole-orb test MUST fire. The runtime test can only
-// hide an orb the visibility list still offers, so the case is: some eye position in the cell
-// sees the orb (hence it is listed) but the cell CENTRE does not (hence standing there, every
-// column under it is wall). Rare by construction, which is why walking around did not find one.
-if (process.env.ORBOCCFIND === '1') {
-  const hits = [];
-  for (let cell = 0; cell < 256; cell++) {
-    if (map[cell] || !candCnt[cell]) continue;
-    const cx = (cell & 15) + 0.5, cy = (cell >> 4) + 0.5;
-    const base = (candLo[cell] | (candHi[cell] << 8)) - CANDBASE;
-    for (let j = 0; j < candCnt[cell]; j++) {
-      const oi = candList[base + j * 3], win = candList[base + j * 3 + 2];
-      if (!(win & 0x80)) continue;                       // build says nothing can occlude it
-      const o = ORBS[oi];
-      if (losFree(cx, cy, o.x, o.y)) continue;           // visible from the centre: no good
-      const brg = Math.round(Math.atan2(o.y - cy, o.x - cx) / (2 * Math.PI) * 256) & 255;
-      hits.push({ cell, cx, cy, oi, brg, d: Math.hypot(o.x - cx, o.y - cy) });
-    }
-  }
-  hits.sort((a, b) => a.d - b.d);
-  console.error(`ORBOCCFIND: ${hits.length} (cell, orb) pairs where the test must fire`);
-  for (const h of hits.slice(0, 6))
-    console.error(`  PX=${(h.cx * 256).toString(16).padStart(4, '0')} ` +
-      `PY=${(h.cy * 256).toString(16).padStart(4, '0')} PA=${h.brg.toString(16).padStart(2, '0')}` +
-      `   orb ${h.oi} at ${h.d.toFixed(1)} cells, blocked from the cell centre`);
-}
-// ORBGATECHK=1: is the build-time canOcc bit ever WRONG? blockers() marches from 9 eye positions
-// across +-0.25 cells of the orb. Partial occlusion needs "can any part of this orb be hidden from
-// anywhere in this cell", which is a wider question -- and if the gate says no where the answer is
-// yes, the stamp is skipped and the orb visibly overlaps the wall. Sample the cell far more finely
-// here, and across the orb's real half-width, to find out.
-if (process.env.ORBGATECHK === '1') {
-  let checked = 0, wrong = 0;
-  const N = 7, OFF = [-0.45, 0.45];
-  for (let cell = 0; cell < 256; cell++) {
-    if (map[cell] || !candCnt[cell]) continue;
-    const cx = (cell & 15) + 0.5, cy = (cell >> 4) + 0.5;
-    const base = (candLo[cell] | (candHi[cell] << 8)) - CANDBASE;
-    for (let j = 0; j < candCnt[cell]; j++) {
-      const oi = candList[base + j * 3], win = candList[base + j * 3 + 2];
-      if (win & 0x80) continue;              // gate already says occlusion is possible
-      checked++;
-      const o = ORBS[oi];
-      // the orb's true half-width in cells at this distance: apparent width / (2 * 163 / d)
-      const d = Math.hypot(o.x - cx, o.y - cy);
-      // The orb's world half-width. The screen spans 2*d*tan(FOV/2) ~= 0.87*d cells, and the
-      // ball is about 49 of 320 pixels across at any distance, so its diameter is ~0.13*d cells.
-      // ORBSCALE is declared further down the file, so the constant is inlined here.
-      const half = Math.max(0.2, 0.067 * d);
-      let bad = false;
-      for (let a = 0; a < N && !bad; a++) for (let b = 0; b < N && !bad; b++) {
-        const ex = cx + OFF[0] + (OFF[1] - OFF[0]) * a / (N - 1);
-        const ey = cy + OFF[0] + (OFF[1] - OFF[0]) * b / (N - 1);
-        const vx = o.x - ex, vy = o.y - ey, L = Math.hypot(vx, vy) || 1;
-        for (const t of [-half, half])
-          if (!losFree(ex, ey, o.x - vy / L * t, o.y + vx / L * t)) bad = true;
-      }
-      if (bad) wrong++;
-    }
-  }
-  console.error(`ORBGATECHK: ${wrong} of ${checked} candidates whose gate says "nothing can ` +
-    `occlude" ARE partly occluded from somewhere in their cell (${(100*wrong/checked).toFixed(1)}%)`);
 }
 const _pal = [...new Set(ORBBODY)].length === 1
   ? `all body colour ${ORBBODY[0]}`
   : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
-if (SPRITES) console.error(`orbs: ${ORBS.length} placed (${_pal}), visibility lists ` +
-  `${candList.length} bytes (3/candidate), worst cell sees ${Math.max(...candCnt)}; ` +
-  `${(100 * candList.filter((_, i) => i % 3 === 2 && (candList[i] & 0x80)).length /
-     (candList.length / 3)).toFixed(0)}% of candidates could be occluded from their cell`);
+if (SPRITES) console.error(`orbs: ${ORBS.length} placed (${_pal})`);
 // Every orb is at a cell CENTRE, and orbOne leans on it hard: the offset to an orb is an
 // integer cell difference plus a fraction that is the same for every orb in the frame, so the
 // fractional half of each product becomes a per-frame constant and the per-orb half drops from
@@ -2236,7 +2082,6 @@ const orbCol = ORBS.map(o => ORBBODY[o.c]);
 // the second-from-top used to, which shifts every band down with it.
 const ORBSCALE = +(process.env.ORBSCALE ?? 49);
 // The largest h any variant can still show at: $d001 = (150 - anchor) + h must stay under 251.
-const ORBHMAX = 251 - (150 - Math.max(...ORBANCH));
 // Selection is by apparent HEIGHT, not width. The ladder steps height evenly, and width -- with
 // only 12 levels against height's 21 -- cannot follow: five rungs repeat the width of the rung
 // above them. Choosing on width therefore made those five UNREACHABLE, because a nearest-width
@@ -2403,15 +2248,11 @@ const SND_VFALL = +(process.env.SNDVFALL ?? 4);  // cells per e-fold of the loud
 // IS the far end of this, and near is the same voice with the filter opened back down.
 // With the melody parked, MASTER VOLUME is effectively the drone's own volume, so it can carry
 // the loudness half of the job that the SID gives no per-voice control for.
-const SND_FCN   = +(process.env.SNDFCN ?? 8);    // HP cutoff when it is on top of you: full body
-const SND_FCF   = +(process.env.SNDFCF ?? 150);  // and far off: fundamental gone, buzz only
 const SND_VOLN  = +(process.env.SNDVOLN ?? 15);
 // 2, not 4: at the START the angel is 9 cells away and the old curve still gave volume 5 of 15,
 // which is present enough to be company. The drone should be nearly nothing until something is
 // actually coming for you.
 const SND_VOLF  = +(process.env.SNDVOLF ?? 2);
-const SND_PWN   = +(process.env.SNDPWN ?? 8);    // 50% square near, a 6% sliver far away: the
-const SND_PWF   = +(process.env.SNDPWF ?? 15);   //   one thing pulse width IS good for is thinness
 const sndLoud = d => { const k = Math.exp(-15 / SND_VFALL);
   return (Math.exp(-Math.min(d, 15) / SND_VFALL) - k) / (1 - k); };
 const lerpT = (near, far) => [...Array(16)].map((_, d) => Math.round(far + (near - far) * sndLoud(d)));
@@ -2592,8 +2433,6 @@ const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 3);   // was 2 = 30fps, measu
 // that was right, is unchanged to within 1% -- and the exit is shorter because the crown is now
 // moving faster through it.
 const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 16);   // 16 * 2 / 60 = 0.53s
-const FALL_ACC = Math.round(2 * FALL_END * 256 / (FALL_FRAMES * (FALL_FRAMES + 1)));  // 8.8
-const FALLX = +(process.env.FALLX ?? 1), FALLY = +(process.env.FALLY ?? 13);   // where you land
 const mul40 = [...Array(26)].map((_, i) => i * 40);
 // ---- the hole's RIM: one equation, and the shape is FORCED, not tuned ----
 // A floor point at perpendicular distance d projects to row 100 + 88*s/d, where s is the eye
@@ -3110,7 +2949,7 @@ cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
 cy1     = $85
-; $0400-$04e0 is ALSO where the self-extracting loader copies its decoder and runs it, so these two
+; $0400-$04e0 was where the old self-extracting decoder ran. The loader is a separate file now, so these two
 ; hold decoder bytes rather than KERNAL screen data at the moment the game starts. That is safe, and
 ; deadvars is what makes it safe rather than an argument: it reports 0 variables read before being
 ; written, so nothing here is ever consumed before the subdivision pushes to it. If that check ever
@@ -3738,8 +3577,8 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         lda #${hx(PA)}
         sta pa
 ${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
-` : ''}        lda #$01
-        sta dbgOnce
+` : ''}${process.env.DROPNOW ? `        lda #$01
+        sta dbgOnce` : ''}
 ${DIE ? `        lda #$00
         sta dieSt               ; power-on garbage here sent the loop straight into dieRev with
         sta marked              ;   no state set up, and the program fell out to BASIC
@@ -4585,7 +4424,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #14\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
@@ -6859,7 +6698,7 @@ irqArm: lda #${hx(SPLITLINE)}
         bne irqNf
         inc frameCnt+1
 irqNf:${MELODY && SOUND ? `        jsr melTick             ; 60Hz, and the next raster compare is already armed above
-` : ''}${SOUND && !MELODY && DIE ? `        jsr pulseTick           ; 60Hz, and the next raster compare is already armed above
+` : ''}${SOUND && DIE ? `        jsr pulseTick           ; 60Hz, and the next raster compare is already armed above
 ` : ''}
 irqd:   lda #$ff
         sta $d019
@@ -8355,11 +8194,10 @@ ohAdv:  ldx ohBX
         sta ohL                 ; the next span starts at this boundary
         inc ohBX
         jmp ohSpan
-${process.env.ORBOCCDBG ? `ohHide:${process.env.ORBOCCDBG ? `
+ohHide:${process.env.ORBOCCDBG ? `
         lda #$04
         sta ohDbg` : ''}
-        jmp orbNo
-` : `ohHide: lda ovProbe
+${`        lda ovProbe
         beq ohHid0
         rts                     ; probe done: the counters are the answer, and nothing has been
 ohHid0: jmp orbNo               ;   allocated, because allocation lives past opDone
@@ -9482,7 +9320,7 @@ drawSnd:
         jsr ddPut
         rts
 
-` : ''}; ---- sndTick: the detune tracks the nearest angel ----
+` : ''}${SOUND ? `; ---- sndTick: the detune tracks the nearest angel ----
 ; Chebyshev distance, because the angel moves on a king's graph -- diagonal and orthogonal steps
 ; are both one move, so that is what "one cell away" has to mean here too. It runs whether or not
 ; you are looking, which is the point: the sound is the channel that works when sight does not.
@@ -9542,7 +9380,7 @@ ${SNDTEST ? '' : `        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonan
         sta $d418               ;   cannot tell which one you are hearing. Low-pass, as it began.
 `}        rts
 
-; ---- angStep: give every unobserved angel its share of the clock, and move the ones that are due
+` : ''}; ---- angStep: give every unobserved angel its share of the clock, and move the ones that are due
 ; The accumulator advances ONLY while the angel is unobserved, so looking at one stops its clock
 ; rather than just its feet -- look away and it takes a normal-length pause, not an instant step.
 ; Per angel, not global: two angels in different directions have to keep separate time, which is
@@ -9762,9 +9600,8 @@ anNo:   clc
 ${DIE ? `; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
-; The trigger is the angel's projected COLUMN, not orbSeenT: waiting for it to take a sprite slot
-; means waiting until it is already on screen, and the whole point is that you never see the
-; little sprite. orbProj returns the off-centre column even when the thing is off screen.
+; The trigger is ONE angle comparison. Contact hides the angel outright, so there is no sprite to
+; see and nothing to project -- turn DIE_TURN either way and the cut scene fires.
 dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
         beq dckLive             ;   the sprites. obC is rewritten by orbMove every frame and
         ldx #$07                ;   flushed to $d027+n after us, so this is the last word on it.
@@ -10708,7 +10545,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; The charset is NOT in the image. It is shipped as its own compressed segment and decoded
 ; straight into $d000-$d7ff by the loader, with the port at $34 -- which is the one thing a KERNAL
 ; LOAD can never do, and the reason a low "source" copy existed here for as long as it did. See
-; iray-charset.bin and the --seg argument in the SELFEXT block below.
+; the ICHR file on the disk, which the boot loader lands at $c000 and copies under the hole.
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 
@@ -10880,7 +10717,7 @@ sndV1L: !byte ${sndV1.map(v => v & 255).join(',')}
 sndV1H: !byte ${sndV1.map(v => v >> 8).join(',')}
 sndV2L: !byte ${sndV2.map(v => v & 255).join(',')}
 sndV2H: !byte ${sndV2.map(v => v >> 8).join(',')}
-sndVolT: !byte ${sndVolT.join(',')}
+sndVolT: !byte ${sndVolT.join(',')}` : ''}
 ${DIE ? `darkerT: !byte ${darkerT.join(',')}
 dieC1T: !byte ${dieRamp(2).join(',')}   ; $d021 -> grey2, $d022 -> grey1, $d023 -> grey3
 dieC2T: !byte ${dieRamp(1).join(',')}
@@ -10900,7 +10737,7 @@ pulseIncH: !byte ${pulseInc.map(v => v >> 8).join(',')}
 faceChrT: ${chunk(FACEART.chars, 32).trim()}
         * = $7900
 faceScrT: ${chunk(FACEART.screen, 32).trim()}` : ''}
-${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
+${SOUND ? `${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
 melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
@@ -11220,18 +11057,6 @@ try {
     }
   }
   // The charset ships as a raw binary for the loader to place, not as part of the image.
-  // The .bin files are no longer inputs to anything -- the disk is assembled straight from the
-  // arrays below. Kept because they are handy to hexdump when a glyph looks wrong.
-  writeFileSync('./iray-charset.bin', Buffer.from(fontA));
-  // Same for the sprite bitmaps, which go to $c000 -- the first of VIC bank 3's free slots.
-  // They were at $2000 in bank 0 before the bank-3 move, competing with code for address space;
-  // now they are graphics living in the graphics bank, which is what bank 3 is for.
-  if (SPRITES) writeFileSync('./iray-sprites.bin', Buffer.from(ORBBM.flat()));
-  if (SPRITES) writeFileSync('./iray-holes.bin', Buffer.from(HOLEBM.flat()));
-  // $7100 charset then $7900 codes, as one blob with the gap padded, so it is a single segment
-  if (DIE) writeFileSync('./iray-face.bin', Buffer.from(
-    [...FACEART.chars, ...Array(0x800 - 2048).fill(0), ...FACEART.screen]
-));
   writeFileSync('./iray.prg', Buffer.from(r.prg));
 
   // ---- THE DISK: a loader plus four raw files, each landing where it belongs ----

@@ -54,4 +54,4 @@ EOF
 # environment -- so `SPRITES=0 ./runviews.sh` left a sprites-off disk while printing
 # "rebuilt at defaults", and the next person to run latest.d64 saw no orbs and went looking
 # for a bug. Clearing the diagnostic vars explicitly is the only way the message is true.
-env -u SPIN -u SPRITES -u ORBOCC -u ORBOCCDBG -u ORBDUMP -u WIGGLE -u TOUR -u PROFILE -u RAYCNT -u PLAN -u PX -u PY -u PA -u NOSELFEXT -u DBGORB -u FINEANG -u SEAMS -u PIVOT -u PALKEYS -u KCELL node build-iray.mjs >/dev/null 2>&1 && echo "latest.d64 rebuilt at defaults (SPIN off)"
+env -u SPIN -u SPRITES -u ORBOCC -u ORBOCCDBG -u ORBDUMP -u WIGGLE -u TOUR -u PROFILE -u RAYCNT -u PLAN -u PX -u PY -u PA -u DBGORB -u FINEANG -u SEAMS -u PIVOT -u PALKEYS -u KCELL node build-iray.mjs >/dev/null 2>&1 && echo "latest.d64 rebuilt at defaults (SPIN off)"

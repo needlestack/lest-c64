@@ -2,7 +2,7 @@
 // A tiny PRG you RUN, which pulls every other file straight to where it belongs. No compression,
 // no staging area, no in-place decode -- and therefore none of the DUPLICATION that had the
 // packed image existing twice in RAM at once and the load budget 156 bytes from the wall.
-// See iray-memory-map: the old scheme cost two bytes of headroom per packed byte.
+// The old scheme cost two bytes of headroom per packed byte, which is why it ran out.
 //
 // Two hardware facts set the shape:
 //   * KERNAL LOAD runs with I/O MAPPED, so it physically CANNOT write $d000-$dfff. The charset
