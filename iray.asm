@@ -3870,6 +3870,24 @@ drawDbg:
         lda py
         and #$0f
         jsr ddPut
+        ; ---- the angel's CELL ----
+        ; x/y/a pin the CAMERA, and that used to be the whole story. It is not any more: an angel
+        ; wanders while unobserved, so the same three numbers put a different scene in front of it
+        ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
+        ; facing one freezes its clock, so waiting does not sweep the possibilities either --
+        ; the cell has to be READ OFF and fed back in through ANGAT.
+        lda #$04
+        jsr setRow
+        ldy #37
+        lda #14                 ; 'E' for entity -- no spare glyph for a better label, and
+        jsr ddPut               ;   adding one costs a cell code out of a full charset
+        ldx #$01
+        lda orbXCT,x            ; ddPut leaves X alone, so one load covers both digits
+        and #$0f
+        jsr ddPut
+        lda orbYCT,x
+        and #$0f
+        jsr ddPut
 ddAng:  lda #$03
         jsr setRow
         ldy #37
@@ -7296,7 +7314,7 @@ occLT: !byte 243,244,245,246
 occRTW: !byte 246,255,254,253
 occLTW: !byte 250,251,252,246
 ; Which of a glyph's four columns are WALL, one bit each, bit 3 = column 0. A column counts as
-; wall if MOST of its eight rows are bit pair 01 -- not merely one of them. A cell at the wall's
+; wall if MOST of its eight rows are NOT BACKGROUND -- not merely one of them. A cell at the wall's
 ; BASE is floor with a sliver of wall along its top edge, and "any row" handed that whole column
 ; to the wall, backing the split in black over what is plainly floor. The split covers all eight
 ; rows of the cell, so the honest summary of a column is what it mostly shows. This is what
@@ -7304,7 +7322,20 @@ occLTW: !byte 250,251,252,246
 ; ask what the columns the stamp does NOT cover actually hold, rather than guessing from whether
 ; the cell is SOLID. A step at a corner has wall on both sides and wants BLACK; a cell on a
 ; vertical silhouette has floor beyond it and wants WHITE. "Is it SOLID" cannot tell them apart.
-cellFillT: !byte 0,15,15,15,14,15,0,8,0,0,15,0,0,0,0,15,3,0,15,3,3,15,0,12,12,7,15,12,3,12,15,7,15,15,15,1,14,12,15,15,3,15,15,15,15,0,0,0,15,7,1,0,8,1,3,0,14,12,15,3,0,15,14,0,12,15,15,0,0,0,0,3,8,3,15,8,12,15,3,8,14,8,15,14,0,15,0,15,8,0,15,7,7,0,8,15,15,7,7,0,0,0,15,8,15,7,0,15,15,1,3,0,0,0,15,15,0,1,1,1,15,7,15,14,15,1,1,15,15,15,15,8,7,12,0,15,0,0,7,7,12,15,1,15,15,0,7,0,7,3,1,0,8,15,1,15,8,1,1,1,0,15,0,7,15,14,12,14,8,3,3,3,7,15,14,12,7,15,3,15,1,7,1,14,12,14,15,3,12,7,12,8,8,3,14,15,15,12,7,12,14,14,8,14,0,15,15,3,7,15,3,15,15,12,15,9,3,15,15,8,0,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,7,11,13,14,7,3,1,0,14,12,8,0,0,0,0,0,0
+;
+; NOT-BACKGROUND, not "is pair 01". White backing exists for exactly one reason -- the column
+; shows ceiling or floor beyond the wall's silhouette -- and that is pair 00 and nothing else.
+; Testing for 01 also excluded:
+;   pair 10, a SEAM. A seam column is SOLID with a panel line on it, and oSWall already counts
+;     seam variants as fully wall, so the two tests disagreed. When the uncovered part was
+;     EXACTLY the seam column -- last cell with osR&3 = 2 and the seam in column 3, or first
+;     cell with osL&3 = 1 and the seam in column 0 -- the mask ANDed to zero and the cell was
+;     backed in WHITE, punching a 2px-wide full-height white sliver through the occlusion. In a
+;     seamed corridor that is a white edge on nearly every stamp. (oSDeseam could not save it:
+;     it runs at oSDone, AFTER every cell of the orb has already been stamped and read.)
+;   pair 11, another entity's occluder, where two stamps overlap. Opaque, and backing it white
+;     would punch a hole through the first stamp.
+cellFillT: !byte 0,15,15,15,14,15,0,8,0,0,15,0,0,0,0,15,3,0,15,3,3,15,0,12,12,7,15,12,3,12,15,7,15,15,15,1,14,12,15,15,3,15,15,15,15,0,0,0,15,7,1,0,8,1,3,0,14,12,15,3,0,15,14,0,12,15,15,0,0,0,0,3,8,3,15,8,12,15,3,8,14,8,15,14,0,15,0,15,8,0,15,7,7,0,8,15,15,7,7,0,0,0,15,8,15,7,0,15,15,1,3,0,0,0,15,15,0,1,1,1,15,7,15,14,15,1,1,15,15,15,15,8,7,12,0,15,0,0,7,7,12,15,1,15,15,0,7,0,7,3,1,0,8,15,1,15,8,1,1,1,0,15,0,7,15,14,12,14,8,3,3,3,7,15,14,12,7,15,3,15,1,7,1,14,12,14,15,3,12,7,12,8,8,3,14,15,15,12,7,12,14,14,8,14,0,15,15,3,7,15,3,15,15,12,15,9,3,15,15,8,0,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,15,15,15,15,15,15,15,15,15,15,15,8,12,14,1,3,7
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
 kMskT: !byte 0,8,12,14
 mMskT: !byte 7,3,1,0

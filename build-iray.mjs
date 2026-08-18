@@ -1979,6 +1979,15 @@ if (process.env.ORBSCATTER) {
   ORBS.push({ x: 8.5, y: 4.5, c: 0 });           // the corridor mouth
   ORBS.push({ x: 11.5, y: 4.5, c: 0, tall: true });   // the angel, halfway down
 }
+// ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
+// where the entity stands, and a wandering angel puts a different configuration in front of the
+// camera on every headless run -- so a reported one cannot be reproduced at all without this.
+// Pair it with ANGFREEZE=1 to hold it there.
+if (process.env.ANGAT) {
+  const [ax, ay] = process.env.ANGAT.split(',').map(Number);
+  if (!isFinite(ax) || !isFinite(ay)) throw new Error(`ANGAT wants "x,y", got "${process.env.ANGAT}"`);
+  ORBS.forEach(o => { if (o.tall) { o.x = ax; o.y = ay; } });
+}
 if (process.env.ORBWHERE)
   ORBS.forEach((o, i) => { if (String(i) === process.env.ORBWHERE)
     console.error(`  orb ${i}: world x=${o.x} y=${o.y}`); });
@@ -6843,7 +6852,25 @@ ${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still 
         lda py
         and #$0f
         jsr ddPut
-${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
+${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's CELL ----
+        ; x/y/a pin the CAMERA, and that used to be the whole story. It is not any more: an angel
+        ; wanders while unobserved, so the same three numbers put a different scene in front of it
+        ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
+        ; facing one freezes its clock, so waiting does not sweep the possibilities either --
+        ; the cell has to be READ OFF and fed back in through ANGAT.
+        lda #${hx(HUDROW + 3)}
+        jsr setRow
+        ldy #37
+        lda #14                 ; 'E' for entity -- no spare glyph for a better label, and
+        jsr ddPut               ;   adding one costs a cell code out of a full charset
+        ldx #${hx(ORBS.findIndex(o => o.tall))}
+        lda orbXCT,x            ; ddPut leaves X alone, so one load covers both digits
+        and #$0f
+        jsr ddPut
+        lda orbYCT,x
+        and #$0f
+        jsr ddPut
+`}${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
         ; A single frame's count is meaningless under motion, and motion is the only condition
         ; that exercises the prediction at all.
         lda rayAcc
@@ -9431,7 +9458,11 @@ ${SNDTEST ? '' : `        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonan
 ; Per angel, not global: two angels in different directions have to keep separate time, which is
 ; the whole squeeze. dtv is 60ths elapsed, capped at 32 by tickDelta, so the sum cannot carry.
 angStep:
-        ldx #$00
+${process.env.ANGFREEZE === '1' ? `        rts                     ; ANGFREEZE=1: the angel never steps, so it stays at its build-time
+                                ;   cell. Occlusion artefacts depend on WHERE the entity is, and an
+                                ;   angel that wanders makes a headless capture show a different
+                                ;   configuration every run -- unreproducible by construction.
+` : ''}        ldx #$00
 asLp:   stx amIdx
         lda orbTallT,x
         beq asNext              ; not an angel
@@ -10624,7 +10655,7 @@ occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
 occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
 occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 ; Which of a glyph's four columns are WALL, one bit each, bit 3 = column 0. A column counts as
-; wall if MOST of its eight rows are bit pair 01 -- not merely one of them. A cell at the wall's
+; wall if MOST of its eight rows are NOT BACKGROUND -- not merely one of them. A cell at the wall's
 ; BASE is floor with a sliver of wall along its top edge, and "any row" handed that whole column
 ; to the wall, backing the split in black over what is plainly floor. The split covers all eight
 ; rows of the cell, so the honest summary of a column is what it mostly shows. This is what
@@ -10632,11 +10663,24 @@ occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 ; ask what the columns the stamp does NOT cover actually hold, rather than guessing from whether
 ; the cell is SOLID. A step at a corner has wall on both sides and wants BLACK; a cell on a
 ; vertical silhouette has floor beyond it and wants WHITE. "Is it SOLID" cannot tell them apart.
+;
+; NOT-BACKGROUND, not "is pair 01". White backing exists for exactly one reason -- the column
+; shows ceiling or floor beyond the wall's silhouette -- and that is pair 00 and nothing else.
+; Testing for 01 also excluded:
+;   pair 10, a SEAM. A seam column is SOLID with a panel line on it, and oSWall already counts
+;     seam variants as fully wall, so the two tests disagreed. When the uncovered part was
+;     EXACTLY the seam column -- last cell with osR&3 = 2 and the seam in column 3, or first
+;     cell with osL&3 = 1 and the seam in column 0 -- the mask ANDed to zero and the cell was
+;     backed in WHITE, punching a 2px-wide full-height white sliver through the occlusion. In a
+;     seamed corridor that is a white edge on nearly every stamp. (oSDeseam could not save it:
+;     it runs at oSDone, AFTER every cell of the orb has already been stamped and read.)
+;   pair 11, another entity's occluder, where two stamps overlap. Opaque, and backing it white
+;     would punch a hole through the first stamp.
 cellFillT: !byte ${[...Array(256)].map((_, c) => {
   const g = glyphs[c] || new Array(8).fill(0);
   let m = 0;
   for (let col = 0; col < 4; col++)
-    if (g.filter(row => ((row >> (6 - 2 * col)) & 3) === 1).length >= 4) m |= 8 >> col;
+    if (g.filter(row => ((row >> (6 - 2 * col)) & 3) !== 0).length >= 4) m |= 8 >> col;
   return m;
 }).join(',')}
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
