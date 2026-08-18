@@ -363,6 +363,7 @@ odX     = $84f2
 odY     = $84f3
 odD     = $84f4
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
+ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
                                  ;   $ff every frame except while carrying
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
@@ -1619,6 +1620,9 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 
 subFin:
+        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every
+                                ;   entity mask has to be rebuilt against it before anything reads
+                                ;   one. See orbOcc1.
         jsr orbMove             ; once a frame: project every candidate the cell lists
         jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one
                                 ;   down. AFTER orbMove, because that is what sets up the frame
@@ -5880,8 +5884,16 @@ oiNext: txa
 ; thing about occlusion that is precomputed. Every bit of it is a function of where the entity
 ; WAS at build time, so setting an orb down somewhere else, or an angel taking a step, makes it
 ; describe the old position: hidden behind walls it is now in front of, and stamped through ones
-; it is behind. This is NOT a per-frame cost -- it is one pass over the 8 runs when
-; something actually moves, ~30 cycles each.
+; it is behind.
+;
+; It is ALSO a function of the run table, and that is per-frame. Run ids are handed out by the
+; subdivision in the order the runs come out of it, so they renumber whenever the view changes --
+; the same id is a different wall a frame later. A mask built once at boot and refreshed only on
+; an angel's step (once every two seconds) therefore spent every frame in between naming the
+; wrong runs: an occluder that should have stamped did nothing, and one that should not have
+; stamped hid the entity. That is the "missing blue block with the statue peeking through it".
+; So orbOccAll below re-runs it for every entity every frame, from subFin where the table is
+; final and before orbMove, which is the first thing to read the mask.
 ; The mask base is self-modified rather than indirect-indexed because the loop needs Y for the
 ; run id and X for the byte within the mask.
 orbOcc1:
@@ -5923,6 +5935,20 @@ ooSt:   sta $ffff,x
 ooNx:   iny
         cpy #$09
         bcc ooLp
+        rts
+
+; ---- orbOccAll: every entity's mask, rebuilt against THIS frame's run numbering ----
+; Called from subFin, where the subdivision is done and the run table will not change again this
+; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
+orbOccAll:
+        lda #$01
+ooAlp:  sta ooAI
+        tax
+        jsr orbOcc1
+        lda ooAI
+        sec
+        sbc #$01
+        bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
         rts
 
 ; ---- sndInit: one sustained chord of two, and then only the detune ever changes ----
