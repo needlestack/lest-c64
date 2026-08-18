@@ -331,6 +331,10 @@ ovOcc   = $8552                  ;   ... and columns a span HIDES
 ovSpR   = $8554                  ; the span's right edge, kept for the overlap width
 ovTmp   = $8555
 ovSvS   = $8556                  ; orbSeenT saved across a probe -- orbNo writes it
+sdL     = $85d8                  ; STAMPDBG: the cell range the last stamped span covered, and
+sdR     = $85d9                  ;   how many spans were stamped this frame. Recorded by the
+sdN     = $85da                  ;   stamp ITSELF, so it can be read at a single breakpoint --
+sdEnt   = $85db                  ;   watchpoints shift raster timing and this engine notices.
 markPa  = $8553                  ; heading when the angel cornered you: the turn trigger's origin
 dieMir  = $8592                  ; the face comes in from the side the turn is bringing into view
 sndMode = $85ce                  ; index into sndModeT: low / band / high / notch
@@ -691,7 +695,7 @@ rfCz0:  sta cwA,x
 rfCz:   sta cwA,x
         inx
         bne rfCz
-        lda #$08                ; bit3 = per-cell multicolor enable, low three bits = the
+        lda #$0e                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
                                 ; per cell was removed at 66bc8cf.
