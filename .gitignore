@@ -23,3 +23,8 @@ orbdiag.json
 cellscan.json
 model.json
 charset-plan.json
+
+# fit-angel.mjs previews: regenerate with `node fit-angel.mjs TMP-3.d64 hangl1`. The FITTED
+# asset (angel-face.json) is committed because the build reads it; the PNGs are just for looking.
+hangl*-fit.png
+hangl*-compare*.png

@@ -1735,9 +1735,14 @@ const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the 
                                 //   bytes past it. Addressed through the orbOccLo/Hi pointer
                                 //   pair, so it has no alignment or locality requirement, and
                                 //   moving it hands the code the 320 bytes up to holeSeeT.
-const ORB_SMALL    = 0x3300;    // the per-variant and per-orb tables: FOUR pages. The ladder
+// SNDTEST adds ~300 bytes of live tweak keys, which is more than the slack below this
+const ORB_SMALL    = 0x3d00;    // THREE pages of per-variant and per-orb tables, and $4000
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
+// DEAD as of 2026-08-17, and kept only because the build still computes the lists for its own
+// reporting. The direct entity loop in orbMove replaced them, and a movable orb invalidates
+// every field in them anyway -- the bearing, the window and the canOcc bit are all relative to
+// where the orb stood at BUILD time. Nothing is emitted; ORB_SMALL now starts here.
 const ORB_CANDLIST = 0x3700;    // the visibility lists themselves: 3 bytes per candidate
 const ORB_TOP      = 0x4000;    // and the first emitted table, which they must not reach
 
@@ -1824,6 +1829,54 @@ const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent hei
 // instead of 32. Heights above 21 need two bitmaps, at or below 21 only one -- so a distant angel
 // costs a single sprite, which is where the slot budget goes.
 const ANGART = JSON.parse(readFileSync('./angel-art.json', 'utf8'));
+// ---- THE DEATH CUT SCENE: the Haserot Angel, fitted to 256 glyphs ----
+// angel-face.json is produced by fit-angel.mjs from a GEK scene on TMP-3.d64. A GEK image is
+// 160x200 multicolor stored as 4x8 tiles of 8 bytes, which IS a C64 char glyph, so the fitter's
+// output drops straight into a charset. 256 glyphs reproduce the face at RMS 0.082 -- close
+// enough that no raster split and no backup of charset A is needed.
+// OFF BY DEFAULT until the face has a delivery route. The self-extractor loads every packed
+// stream low and copies them up, so a stream must clear the loaded file's top -- and the build
+// is already within ~1KB of that limit. The face is 3,048 bytes (2,807 packed) and does not fit;
+// see the note in iray-memory-map. The death CODE fits, the ART does not.
+const DIE      = process.env.DIE !== '0' && process.env.SNDTEST !== '1';
+const FACE     = process.env.FACE ?? 'hangl1';
+const FACEART  = JSON.parse(readFileSync('./angel-face.json', 'utf8'))[FACE];
+if (!FACEART) throw new Error(`angel-face.json has no "${FACE}"`);
+// The all-background glyph, for the columns the face has not reached yet. The fitter seeds on
+// the commonest tiles and the surround is black, so this always exists -- but check, because a
+// missing one would silently scroll the face in over a wall of noise.
+const FACE_NCHR = FACEART.chars.length;   // 8 bytes per glyph; fewer than 256 is normal
+const FACE_BLANK = FACEART.blank;   // all-ones after the 0<->3 swap, not all-zeros
+// ---- EVERYTHING HERE IS IN SIXTIETHS, off frameCnt ----
+// The first version counted RENDER frames. The renderer runs at ~19fps and varies, so a 40-frame
+// fade took 2.1 seconds instead of 0.27 -- the same mistake tickDelta exists to undo.
+const DIE_OUT  = +(process.env.DIEOUT  ?? 16);   // fade the room to black: 4 ticks of 4
+const DIE_SHOW = +(process.env.DIESHOW ?? 54);   // the face on screen, 0.9s
+const DIE_OFF0 = +(process.env.DIEOFF0 ?? 10);   // columns of it showing when the fade-up starts
+const DIE_OFF1 = +(process.env.DIEOFF1 ?? 48);
+const DIE_TRIG = +(process.env.DIETRIG ?? 110);  // columns off centre: fire before it is visible
+// ...OR any turn of this much while still cornered. An angel on your flank can need most of a
+// revolution to come into view, and the player is turning the whole time wondering why nothing
+// is happening. 256 units to the circle, so 30 degrees is 21.
+const DIE_TURN = +(process.env.DIETURN ?? 21);   // and where it has got to when the screen is black
+// One step darker, for any colour. The fade-out reads the LIVE registers and walks them down
+// this, so it does not care what palKeys left the palette on.
+const CLUM = { 0:0, 6:.15, 9:.2, 11:.31, 2:.35, 4:.4, 8:.42, 12:.5, 14:.55, 5:.55, 10:.6, 3:.65,
+               15:.69, 7:.75, 13:.8, 1:1 };
+const darkerT = [...Array(16)].map((_, c) => {
+  let best = 0;
+  for (const g of [0, 11, 12, 15, 1]) if (CLUM[g] < CLUM[c] && CLUM[g] >= CLUM[best]) best = g;
+  return best;
+});
+// Phase 2's palette, in 9 ticks of 6 sixtieths: up the chain to each register's own target, hold,
+// then back down. Each slot stops where it needs to, which is what makes them arrive together.
+const UPCH = [0, 11, 12, 15];
+const dieRamp = tgt => [...Array(9)].map((_, t) =>
+  t <= 3 ? UPCH[Math.min(t, tgt)] : t <= 5 ? UPCH[tgt] : UPCH[Math.max(0, tgt - (t - 5))]);
+const dieVolT = [...Array(9)].map((_, t) => t <= 5 ? 15 : Math.max(0, 15 - (t - 5) * 5));
+// elapsed sixtieth -> tick. A table because 54/9 is 6 and a shift cannot divide by six: with
+// >>2 the ramp finished at el=36 and the picture went black well BEFORE the face reached centre.
+const dieTckT = [...Array(DIE_SHOW)].map((_, e) => Math.min(8, Math.floor(e * 9 / DIE_SHOW)));
 const ANGSRC42 = (() => { const g = [];
   for (let y = 0; y < 42; y++) { const r = [];
     for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++)
@@ -1875,6 +1928,8 @@ for (const r of ANGLAD) {
 }
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
+const ICO_BM = ORBBM.length;                     // the carried-orb icon: a fixed sprite in the
+ORBBM.push([...ANGART.icoorb, 0]);               //   lower left, never scaled
 NORBBM = ORBBM.length;
 if (process.env.ORBDUMP === '1') {
   const CH = [' ', '.', '#', 'o'];
@@ -2235,13 +2290,19 @@ const orbVarT = [...Array(256)].map((_, h) => {
 const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
 const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
 const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
+const ICO_PTR = ((SPRBASE - VBANK) >> 6) + ICO_BM;
+const orbHidT = ORBS.map(() => 0);   // 1 = in the player's hands, not in the world
+// CARRY=n boots the run already holding entity n-1. Headless testing can't press SPACE, so the
+// build has to reproduce every part of the state orbUse leaves behind, not just the icon.
+const CARRY0 = +(process.env.CARRY ?? 0);
+if (CARRY0) orbHidT[CARRY0 - 1] = 1;
 // ---- blkT: what MOVEMENT collides with, as opposed to what the renderer draws ----
 // mapT stays exactly the walls, because that is what the raycaster and the run/seam tables are
 // built from -- an orb must not become a wall to look at. blkT is walls OR entities, so mvFree
 // tests one table and costs nothing extra, and picking an orb up is a single store into it.
 // 2 rather than 1 marks "entity, not wall", which the angel will want when it starts moving.
 const blkT = map.slice();
-ORBS.forEach(o => { blkT[(Math.floor(o.y) << 4) | Math.floor(o.x)] = 2; });
+ORBS.forEach((o, i) => { if (!orbHidT[i]) blkT[(Math.floor(o.y) << 4) | Math.floor(o.x)] = 2; });
 const orbExpT = ORBEXP.map(e => e);
 // Distance from the sprite's LEFT EDGE to the anchor the projection aims at. orbScale centres
 // the content in the 12-column sprite, so this is ~half the sprite whatever the ball's size;
@@ -2268,6 +2329,136 @@ const orbYBaseT = ORBANCH.map(a => 150 - a);
 // patch only the rows an orb actually inks; using the raw sprite rectangle instead is what
 // once made seams vanish in cells with no orb near them.
 const orbBlankT = LADDER.map((r, v) => ORBANCH[v] - ORBTALL[v]);
+// How far $d001 may sink before it is pinned. Walk right up to an orb and its anchor goes past
+// the last visible raster, so the whole sprite slides off the bottom -- you could still pick up
+// something you could not see. ORB_FLOOR rows of CONTENT (not sprite frame: the content is
+// bottom-aligned with orbBlankT blank rows above it) always stay on screen instead.
+const ORB_FLOOR = +(process.env.ORB_FLOOR ?? 12);
+// 60ths of a second between angel steps. Level 1 is deliberately slow; the design note is that
+// the NUMBER of angels matters far more than the speed, because you can only watch one way.
+const ANG_PERIOD = +(process.env.ANGPER ?? 120);
+// Columns from screen centre inside which a destination counts as "you would see me there".
+// 80 is the screen edge; the margin covers the sprite's own width, since a cell whose CENTRE is
+// just off screen can still show half an angel.
+// Most a slide may advance in one frame. At ~19fps dtv is about 3, so this only bites on a
+// hitch -- where the alternative is a visible jump.
+// ---- how obscured a destination has to be before an angel will step into it ----
+// It MAY move into view, but only where something covers it. The span walk already visits every
+// wall-run span overlapping the entity and spans carry COLUMN extents, so counting columns shown
+// against columns hidden gives a real fraction -- and ">= half obscured" is then one compare,
+// with no division anywhere. ANGOBSC shifts the visible count left: 0 = half, 1 = two thirds.
+const ANG_OBSC = +(process.env.ANGOBSC ?? 0);
+// ---- SOUND: two detuned low-pass pulses, and the detune IS the proximity readout ----
+// Two voices a hair apart beat at exactly their difference in Hz, so one number controls the
+// whole effect: a slow flange far off, a throb closer, a heartbeat when it is on top of you.
+// NTSC: Fn = f * 16777216 / 1022727, i.e. 16.405 units per Hz, so the detune in units / 16.4 IS
+// the beat rate in Hz. Everything here is env-tunable because it can only really be judged by ear.
+const SOUND    = process.env.SOUND !== '0';
+// SNDTEST=1: ONE voice, no detune, no melody, and the distance tracking switched off, so the
+// drone holds still while 4/5 sweep the filter cutoff and 6/7 step the pulse width. Both values
+// are shown top-right under the X/Y/A readout. This exists because cutoff and pulse width are
+// the SID's only per-voice level controls and they can only be judged by ear.
+const SNDTEST  = process.env.SNDTEST === '1';
+const SND_HZ   = +(process.env.SNDHZ   ?? 55);   // the drone's pitch
+const SND_NEAR = +(process.env.SNDNEAR ?? 36);   // detune when an angel is in the next cell: 2.2 Hz
+const SND_FALL = +(process.env.SNDFALL ?? 3);    // cells per e-fold of the falloff
+const SND_FAR  = +(process.env.SNDFAR  ?? 2);    // floor: 0.12 Hz, a drift you feel more than hear
+const SND_PW   = +(process.env.SNDPW   ?? 0x800);
+const SND_FC   = +(process.env.SNDFC   ?? 30);   // low-pass cutoff, top 8 bits of 11
+const SND_RES  = +(process.env.SNDRES  ?? 8);
+const SND_AD   = +(process.env.SNDAD   ?? 0x80); // slow attack, no decay
+const SND_SR   = +(process.env.SNDSR   ?? 0xfa); // full sustain: gated once and never released
+const SND_FN   = Math.round(SND_HZ * 16777216 / 1022727);
+// Indexed by Chebyshev cell distance to the nearest angel. Exponential, so the last two cells of
+// an approach are where it turns from atmosphere into a pulse.
+// VOICE 1 IS A REAL NOTE, and voice 2 rides above it purely to make the beat. 55 Hz is exactly
+// A1 in A440, which is where the drone already sat, so the approach is a clean A1 -> A#1: one
+// half step, landing on a note rather than on an arbitrary number of cents. Keeping voice 1 as
+// the named pitch is what makes it possible to write music against this later.
+const SND_NOTE = +(process.env.SNDNOTE ?? 0);    // semitones above A1 at the FAR end
+const SND_STEP = +(process.env.SNDSTEP ?? 1);    // half steps of climb at closest approach
+const SND_DMAX = +(process.env.SNDDMAX ?? 8);    // cells the climb is spread over
+const hzToFn = hz => Math.round(hz * 16777216 / 1022727);
+const noteHz = semis => 55 * Math.pow(2, semis / 12);
+// Same exponential shape as the detune, but NORMALISED so it is exactly 1 at d=0 and exactly 0
+// at d=SND_DMAX. Unnormalised it left 0.3 cents on the table at the far end, so the drone never
+// quite sat on the note it is supposed to name.
+const sndShape = d => {
+  if (d >= SND_DMAX) return 0;
+  const k = Math.exp(-SND_DMAX / SND_FALL);
+  return (Math.exp(-d / SND_FALL) - k) / (1 - k);
+};
+const sndDet = d => Math.max(SND_FAR, SND_NEAR * Math.exp(-d / SND_FALL));
+// ---- how LOUD the drone is, which on a SID is not a volume at all ----
+// $d418 is master and would take the melody with it, and the per-voice sustain cannot be raised
+// mid-note (the 6581 envelope only counts down toward it, so a raise sends it to zero; re-gating
+// to force a rise spikes to full scale first and clicks). What IS per-voice and click-free:
+// FILTER CUTOFF and PULSE WIDTH. Voices 1-2 are the only ones routed through the filter, so both
+// land on the drone alone. Far off it is a narrow, almost closed-off rumble; close up a fat 50%
+// pulse with the filter open. Which is also what distance actually does to a sound.
+const SND_VFALL = +(process.env.SNDVFALL ?? 4);  // cells per e-fold of the loudness falloff
+// HIGH-PASS, not low. The fundamental is 55Hz, so sweeping an HP cutoff UP past it strips the
+// body and leaves the harmonics -- thin and quiet, which is what distance sounds like. Low-pass
+// only ever made it darker. The user's "fluorescent light buzz" (cutoff 150, PW 15, high-pass)
+// IS the far end of this, and near is the same voice with the filter opened back down.
+// With the melody parked, MASTER VOLUME is effectively the drone's own volume, so it can carry
+// the loudness half of the job that the SID gives no per-voice control for.
+const SND_FCN   = +(process.env.SNDFCN ?? 8);    // HP cutoff when it is on top of you: full body
+const SND_FCF   = +(process.env.SNDFCF ?? 150);  // and far off: fundamental gone, buzz only
+const SND_VOLN  = +(process.env.SNDVOLN ?? 15);
+// 2, not 4: at the START the angel is 9 cells away and the old curve still gave volume 5 of 15,
+// which is present enough to be company. The drone should be nearly nothing until something is
+// actually coming for you.
+const SND_VOLF  = +(process.env.SNDVOLF ?? 2);
+const SND_PWN   = +(process.env.SNDPWN ?? 8);    // 50% square near, a 6% sliver far away: the
+const SND_PWF   = +(process.env.SNDPWF ?? 15);   //   one thing pulse width IS good for is thinness
+const sndLoud = d => { const k = Math.exp(-15 / SND_VFALL);
+  return (Math.exp(-Math.min(d, 15) / SND_VFALL) - k) / (1 - k); };
+const lerpT = (near, far) => [...Array(16)].map((_, d) => Math.round(far + (near - far) * sndLoud(d)));
+// Only the volume tracks distance now. SND_FCN/FCF and SND_PWN/PWF are kept because the
+// high-pass sweep is worth coming back to, but nothing reads them.
+const sndVolT = lerpT(SND_VOLN, SND_VOLF);
+// ---- the border pulses in time with the beat ----
+// The beat rate IS the detune in Hz, so the phase increment is just the detune scaled: adding
+// detune<<6 to a 16-bit accumulator every sixtieth gives one cycle per 1024/detune sixtieths,
+// within 4% of the 984/detune the beat actually runs at. Top three bits of the high byte pick
+// the colour, so the wrap is free.
+const PULSE_MAX = +(process.env.PULSEMAX ?? 4);  // cells: nothing at all beyond this
+const pulseInc = [...Array(PULSE_MAX + 1)].map((_, d) => Math.round(sndDet(d)) << 6);
+const pulseT = (process.env.PULSET ?? '0,11,12,11,0,0,0,0').split(',').map(Number);
+// PULSE WIDTH IS A DEAD END AS A LEVEL CONTROL -- user tested the live sweep 2026-08-17 and none
+// of it reads as loudness, only as tone. It stays fixed at SND_PW; the live key survives because
+// it is a useful timbre control.
+const sndBase = d => hzToFn(noteHz(SND_NOTE + SND_STEP * sndShape(d)));
+const sndV1 = [...Array(16)].map((_, d) => sndBase(d));
+const sndV2 = [...Array(16)].map((_, d) => sndBase(d) + Math.round(sndDet(d)));
+// ---- voice 3: a small figure over the drone ----
+// A natural-minor colour against the A drone: the fifth, the flat sixth, the flat seventh. Named
+// in semitones above A1 so it stays tied to whatever SNDNOTE the drone is on.
+const MELODY   = process.env.MELODY === '1' && !SNDTEST;   // parked; MELODY=1 brings it back
+const MEL_SEQ  = (process.env.MELSEQ ?? 'A3 E4 F4 E4 A3 E4 F4 G4').trim().split(/\s+/);
+const MEL_DUR  = +(process.env.MELDUR ?? 60);    // 60ths per note: one a second, so an 8s loop
+const MEL_GATE = +(process.env.MELGATE ?? 24);   // of those, how many are gated ON
+// Attack 2 (16ms) is fast without being a click; decay 6 drops from the full-scale attack peak
+// to SUSTAIN 8 in 168ms, and 8 is the "melody volume" -- the only per-voice level the SID has.
+// Gate goes low at MEL_GATE and release 10 (750ms) fades the tail, so a note has thinned out but
+// not vanished by the time the next one fires.
+const MEL_AD   = +(process.env.MELAD ?? 0x26);
+const MEL_SR   = +(process.env.MELSR ?? 0x8a);
+const SEMI = { C: -9, D: -7, E: -5, F: -4, G: -2, A: 0, B: 2 };
+const melFn = MEL_SEQ.map(n => {
+  const m = /^([A-G])(#?)(-?\d)$/.exec(n);
+  if (!m) throw new Error(`melody note "${n}" is not like A3 or F#4`);
+  // A1 is the reference and octave numbers change at C, so A3 is 24 semitones above A1.
+  return hzToFn(noteHz(SEMI[m[1]] + (m[2] ? 1 : 0) + 12 * (+m[3] - 1)));
+});
+// orbBlankT goes NEGATIVE for a two-sprite entity -- ORBTALL is the whole entity's height while
+// ORBANCH is only the LOWER sprite's frame, so the content overflows upward into the other slot.
+// The cap is about the lower sprite's own frame, so clamp: untreated it computed to 280/274/268,
+// the assembler truncated those to 24/18/12/0, and the angel pinned near raster ZERO -- off the
+// top with its feet sticking into the display, which is exactly how it was reported.
+const orbYCapT = orbBlankT.map(b => Math.max(0, 250 - ORB_FLOOR - Math.max(0, b)));
+if (orbYCapT.some(v => v < 0 || v > 255)) throw new Error('orbYCapT does not fit a byte');
 const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
 // Half the sprite, in LOGICAL COLUMNS. Everything in this engine lives on the 160x200 grid, and
 // a multicolor sprite pixel is two hires pixels, so a sprite has no odd X worth taking: the old
@@ -3110,7 +3301,14 @@ oidx    = $8517
 ocn     = $8518
 ocy     = $8519
 onv     = $851a
-ohtmp   = $81f0                  ; how many slots this rung of the hole wants
+ohtmp   = $81f0
+carry   = $81f1                  ; 0 = empty hands, else the held entity's index + 1
+fcCell  = $81f2                  ; the cell directly in front of the player, and its parts
+fcX     = $81f3
+fcY     = $81f4
+okNew   = $81f5                  ; SPACE, debounced to one action a press
+okOld   = $81f6
+okJoy   = $81f7                  ; how many slots this rung of the hole wants
 onvH    = $81ef                  ; the HOLE allocates downward from 8: it is flat on the floor,
 omEn    = $851b
 omXX    = $851c
@@ -3118,6 +3316,65 @@ omYY    = $851d
 omPri   = $851e
 omX8    = $851f
 omBit   = $8520
+melCnt  = $85c3                  ; 60ths left on this note, where we are in the figure, and the
+melIx   = $85c4                  ;   shimmer phase plus the waveform byte it selects
+melPh   = $85c5
+melWav  = $85c6
+skJoy   = $85c7                  ; SNDTEST: the live cutoff / pulse-width tweak keys
+skTmp   = $85c8
+skOld   = $85c9
+skNew   = $85cc
+skEdge  = $85cd
+marked  = $8584                  ; 0, or the index+1 of the angel that stepped up beside you
+dieSt   = $8585                  ; 0 alive, 1 fade+disintegrate, 2 the face arriving, 3 held
+dieCnt  = $8586
+dieDir  = $8587                  ; the turn the player was making, locked in
+dieOpa  = $8588
+dieOff  = $8589                  ; 0 = face fully off right, 40 = centred, 80 = off left
+ddRow   = $858a
+ddLo    = $858b                  ; the run of screen columns the face actually covers
+ddSrc   = $858d
+dieT0   = $858e                  ; frameCnt when they died: everything is measured from here
+dieTck  = $858f                  ; the last palette tick written, so a fill happens once
+dieEl   = $8590
+dkJoy   = $8591
+dieInk  = $8561                  ; the orb's body colour, walked down to black with the room
+ovProbe = $8550                  ; the span walk is counting columns, not allocating a sprite
+ovVis   = $8551                  ; columns of the entity a span SHOWS
+ovOcc   = $8552                  ;   ... and columns a span HIDES
+ovSpR   = $8554                  ; the span's right edge, kept for the overlap width
+ovTmp   = $8555
+ovSvS   = $8556                  ; orbSeenT saved across a probe -- orbNo writes it
+markPa  = $8553                  ; heading when the angel cornered you: the turn trigger's origin
+dieMir  = $8592                  ; the face comes in from the side the turn is bringing into view
+sndMode = $85ce                  ; index into sndModeT: low / band / high / notch
+sndVol  = $85cf
+sndFc   = $85ca
+sndPw   = $85cb
+sndD    = $85c0                  ; nearest angel, in cells; and the scratch the search needs
+sndI    = $85c1
+sndT    = $85c2
+pulsePh = $8562                  ; 16-bit beat phase, advanced in the IRQ
+
+omMc    = $850e
+amIdx   = $84f6                  ; angel movement scratch: entity, chosen step, target cell
+amDX    = $84f7
+amDY    = $84f8
+amTX    = $84f9
+amTY    = $84fa
+amCell  = $84fb
+amX     = $84fc
+amY     = $84fd
+entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gate must not skip
+dbgOnce = $84f5                  ; DROPNOW only
+odBest  = $84f0                  ; the drop/take chooser: best |columns from centre| so far,
+odCell  = $84f1                  ;   what won ($ff = nothing in reach), and the loop counter
+odX     = $84f2
+odY     = $84f3
+odD     = $84f4
+ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
+ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
+                                 ;   $ff every frame except while carrying
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
 fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing
@@ -3161,7 +3418,7 @@ arcSkip = $81e4                  ; the landing places its own splits
 arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, see the overlap
 rsHi    = $81eb                  ; renderSym's column range, 39..0 for an ordinary frame
 rsLo    = $81ec
-otmp    = $81ed                  ; tall entities: the upper half's pointer, and which slot the
+otmp    = $81ed
 onvL    = $81ee                  ;   lower half took, so its clip record can be inherited
 bgOn    = $81e6                  ; background render in progress: cap the subdivision loop
 bgN     = $81e7                  ; iterations left this frame
@@ -3480,6 +3737,29 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta py+1
         lda #${hx(PA)}
         sta pa
+${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
+` : ''}        lda #$01
+        sta dbgOnce
+${DIE ? `        lda #$00
+        sta dieSt               ; power-on garbage here sent the loop straight into dieRev with
+        sta marked              ;   no state set up, and the program fell out to BASIC
+        sta pulsePh
+        sta pulsePh+1
+        lda #$0f
+        sta sndD                ; far, so the border does not pulse before the first sndTick
+` : ''}${SPRITES ? `        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
+                                ;   jumping here, and their state is all live RAM
+` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
+        sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
+${process.env.OCCSELF ? `
+        ldx #${hx(ORBS.length - 1)}   ; OCCSELF=1: rebuild every mask at boot from orbOcc1 and
+ooSlf:  txa                     ;   leave the result. Nothing has moved yet, so the table it
+        pha                     ;   produces must equal the one the build emitted -- which is
+        jsr orbOcc1             ;   the whole test
+        pla
+        tax
+        dex
+        bpl ooSlf` : ''}
         lda #${hx(SCR_A >> 8)}
         sta baseHi
         lda #$00
@@ -3532,12 +3812,20 @@ pfInit: sta pfAcc,x
 
 mloop:
 ${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
+${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}
+${SNDTEST ? '        jsr sndKeys             ; 4/5 cutoff, 6/7 pulse width\n' : ''}
 ` : ''}        jsr tickDelta
-${FALL ? `        lda fallSt              ; falling? then no input, no rays, no renderSym -- one block
+${FALL ? `${DIE ? `        lda dieSt               ; the face is arriving: no input, no rays, no renderSym, and
+        cmp #$02                ;   the same three-period pacing the fall runs at
+        bcc mfAlive
+        jsr dieRev
+        jmp fwait
+mfAlive:
+` : ''}        lda fallSt              ; falling? then no input, no rays, no renderSym -- one block
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
         jmp fwait
-mfIn:   ` : '        '}${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WIGGLE ? 'jsr wiggleStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}
+mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        ' : ''}${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WIGGLE ? 'jsr wiggleStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}${DIE ? '\nmfSkip:' : ''}
 ${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
@@ -4297,9 +4585,10 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #14\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr orbStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #4\n        jsr pfTick              ; renderSym\n' : ''}${NOHUD ? '' : `        jsr drawFps
-        jsr drawDbg`}
+        jsr drawDbg
+${SNDTEST ? '        jsr drawSnd\n' : ''}`}
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
         bne pfRdy
         inc pfN
@@ -6567,8 +6856,11 @@ irqC0:  ora #${hx(CB_A)}
 irqArm: lda #${hx(SPLITLINE)}
         sta $d012
         inc frameCnt
-        bne irqd
+        bne irqNf
         inc frameCnt+1
+irqNf:${MELODY && SOUND ? `        jsr melTick             ; 60Hz, and the next raster compare is already armed above
+` : ''}${SOUND && !MELODY && DIE ? `        jsr pulseTick           ; 60Hz, and the next raster compare is already armed above
+` : ''}
 irqd:   lda #$ff
         sta $d019
         pla
@@ -6810,6 +7102,8 @@ ddPut:  clc
 
 ; ================= data =================
 cosCorrT: !byte ${cosCorr.join(',')}
+dirXT:  !byte 1,1,0,255,255,255,0,1
+dirYT:  !byte 0,1,1,1,0,255,255,255
 moveXT: ${chunk(moveX).trim()}
 moveYT: ${chunk(moveY).trim()}
 rowLoT: !byte ${rowLo.join(',')}
@@ -6866,6 +7160,12 @@ orbMove:
         ; rewrites the screen every frame and puts plain SOLID back.
         jmp obMoved             ; DEADCODE-OK: the still-frame short-circuit is off until the
                                 ; occlusion stamping lands -- see the comment above it.
+${DIE ? `        lda dieSt               ; the cut scene owns the sprites from the swap onward. Clearing
+        cmp #$02                ;   omEn inside the swap did not hold: the swap runs from mfIn and
+        bcs omDead              ;   the REST of that same frame still calls orbMove, which put the
+` : ''}        lda entDty              ; an entity moved even though the player did not. Without this
+        bne obMoved             ;   a dropped orb stayed unrendered, and an angel that stepped
+                                ;   while you stood still never appeared where it went
         lda px
         cmp opx
         bne obMoved
@@ -6884,7 +7184,10 @@ orbMove:
         rts                     ; a still frame. The slot data from the last one still stands
                                 ; and orbPaint runs unconditionally, so the walls come out
                                 ; painted the same way without reprojecting anything.
-obMoved:lda px
+${DIE ? `omDead: rts
+` : ''}obMoved:lda #$00
+        sta entDty
+        lda px
         sta opx
         lda px+1
         sta opx+1
@@ -6998,6 +7301,27 @@ ofyOk:  sta ofy
         ldx #$08                ;   so nothing can ever be behind it -- anything further away is
         stx onvH                ;   higher up the screen and does not overlap. Last slot = lowest
                                 ;   VIC priority, and the two allocators meet in the middle.
+        lda #$ff
+        sta omMc                ; every sprite multicolor unless the icon says otherwise
+        lda carry               ; ---- the carried orb, as an icon in the lower left ----
+        beq omNoIco             ; SLOT 0, and the world then allocates from 1. Sprite-vs-sprite
+        lda #${hx(ICO_PTR)}     ;   priority is fixed by slot number and nothing else, so being
+        sta obP                 ;   the HUD means being slot 0 -- at 7 a near orb in the corner
+        lda #12                 ;   would have drawn over it.
+        sta obC
+        lda #40
+        sta obX
+        lda #215
+        sta obY
+        lda #$ff
+        sta obIX                ; not an entity: this is the value orbStamp's hole test already
+                                ;   rejects, so the icon stamps no occluders
+        lda #$01
+        sta omEn
+        sta onv                 ; world entities start at slot 1
+        lda #$fe
+        sta omMc                ; the icon art is HI-RES, so slot 0 leaves multicolor
+omNoIco:
 ${process.env.ORBOCCDBG ? `        sta ohDbg
 ` : ''}        lda py+1                ; which cell is the player standing in?
         asl
@@ -7013,52 +7337,26 @@ ${FALL ? `        jsr holeOne             ; ---- the hole FIRST, before the orbs
                                 ; simply lost it -- a level exit blinking in and out as you
                                 ; walk is far worse than one orb fewer. The orb list is still
                                 ; nearest-first, so what it costs is the farthest orbs.
-` : ''}        ldx pcell
-        lda candCntT,x
-        beq obEnd
-        sta ocn
-        asl                     ; three bytes per record
-        clc
-        adc ocn
-        sta ocn3
-${DBGORB ? '        lda #$01\n' : ''}        lda candLoT,x
-        sta ocptr
-        lda candHiT,x
-        sta ocptr+1
+` : ''}        ; ---- every entity, every frame ----
+        ; The per-cell candidate lists carried a PRECOMPUTED bearing and occlusion answer for each
+        ; (cell, orb) pair, which is exactly what a movable orb invalidates. With a handful of
+        ; entities the list was never the expensive part -- projecting is -- so the loop just walks
+        ; them all and lets orbOne reject what is off screen. ocanO goes conservative: ask the
+        ; occlusion test rather than trust a build-time answer about where things used to be.
         lda #$00
-        sta ocy
-        
-obLoop: ldy ocy
-        lda (ocptr),y
         sta oidx
-        iny
-        lda pa                  ; is the orb anywhere near the way we are facing? The list is
-        sec                     ; all-round, the view is 66 degrees, and a full projection
-        sbc (ocptr),y           ; costs a hundred times what this compare does
-        bpl obPos
-        eor #$ff
-        clc
-        adc #$01
-obPos:  iny
-        sta tmp                 ; how far off the bearing we are
-        lda (ocptr),y
-        sta ocanO               ; bit 7: can ANY run reachable from this cell occlude this orb?
-                                ; blockers() answered that at build time and it was being
-                                ; thrown away here, so every projected orb paid for the full
-                                ; per-cell mask even when the answer was always no
-        and #$7f
-        cmp tmp
-        bcc obNext              ; outside the window: not on screen
+obLoop: lda oidx
+        cmp #${ORBS.length}
+        bcs obEnd
+        tax
+        lda orbHidT,x
+        bne obNext              ; carried, so not in the world
+        lda #$80
+        sta ocanO
         jsr orbOne
-obNext: lda ocy
-        clc
-        adc #$03
-        sta ocy
+obNext: inc oidx
         lda onv
-        cmp onvH                ; eight hardware sprites, and the list is nearest-first -- but
-        bcs obEnd               ;   the hole has been taking them from the top end
-        lda ocy
-        cmp ocn3
+        cmp onvH
         bcc obLoop
 obEnd:  ${DBGORB ? `lda osI
         sta odb                 ; the loop counter and its bound, against what set the bound
@@ -7542,9 +7840,11 @@ oSDDn:  rts
 osFlush:${process.env.ORBOCCDBG ? `
         lda ohDbg
         sta $d020               ; 0 none 1 reached 2 gate-passed 3 span-overlap 4 HIDDEN` : ''}
-        ldx onv
-        beq osBits
-osLp:   dex
+        ldx #$08                ; ALL eight slots, not onv: the hole and the carried-orb icon
+osLp:   dex                     ;   allocate DOWNWARD from 7, so a loop bounded by onv set their
+                                ;   enable bit and never wrote X/Y/pointer -- both stayed parked
+                                ;   at 0,0, off the top of the screen. Flushing an unallocated
+                                ;   slot in between is free: its enable bit is clear.
         txa
         asl
         tay
@@ -7561,6 +7861,8 @@ osLp:   dex
         bne osLp
 osBits: lda omEn
         sta $d015
+        lda omMc
+        sta $d01c
         lda omXX
         sta $d01d
         lda omYY
@@ -7572,15 +7874,13 @@ osBits: lda omEn
         rts
 
 ; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
-orbOne: ldx oidx
-        sec                     ; Ix, Iy = orb cell - player cell, -15..15
-        lda orbXCT,x
-        sbc px+1
-        sta oix
-        sec
-        lda orbYCT,x
-        sbc py+1
-        sta oiy
+
+; ---- orbProj: cell delta (oix, oiy) -> ohgt and |column offset from screen centre| ----
+; Split out of orbOne so the drop-target chooser can ask "where would an entity standing in
+; THAT cell appear" without a second copy of the projection. C clear on return means nowhere
+; on screen at all: behind the camera, close enough to be inside us, or past 255 columns off
+; centre. oaS carries the side. Nothing here touches oidx, which is why it splits cleanly.
+orbProj:
         ldy #$00                ; magnitudes and signs, so the products can be unsigned
         lda oix
         bpl oipx
@@ -7630,11 +7930,11 @@ oipy:   sta oay
         adc kfH
         sta fwdH
         lda fwdH                ; behind the camera, or close enough to be inside us. Tested
-        bmi orbNo               ; HERE, before "right" costs two more products: at any given
+        bmi opjNo               ; HERE, before "right" costs two more products: at any given
         bne ofwOk               ; moment most of the world is behind you
         lda fwdL
         cmp #$40
-        bcc orbNo
+        bcc opjNo
 ofwOk:  ; right = Iy*cos - Ix*sin + kr
         lda oiyS
         eor ocosS
@@ -7757,7 +8057,7 @@ ohOk:   lda o1
         sta o1
         lda phi
         adc #$00
-        bne orbNo               ; |right|*h past 65535 is far outside the FOV
+        bne opjNo               ; |right|*h past 65535 is far outside the FOV
         lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
         sta mq                  ; shift of it is just (b2 << 1) | (b1 >> 7) -- no shift loop.
         lda o0
@@ -7776,8 +8076,23 @@ ohOk:   lda o1
         adc #$00
         asl o2
         rol
-        bcs orbNo               ; past 255 columns off centre: nowhere near the screen
+        bcs opjNo               ; past 255 columns off centre: nowhere near the screen
         sta ocoff
+        sec
+        rts
+opjNo:  clc
+        rts
+orbOne: ldx oidx
+        sec                     ; Ix, Iy = orb cell - player cell, -15..15
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+        jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+        bcc orbNo               ;   everything above needs only the cell it stands in
         ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
         ldy oidx                ; TALL entities have their own rungs, appended to the same
         lda orbTallT,y          ;   variant list so every table indexed by ovar still works
@@ -7863,10 +8178,12 @@ oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         lda orbYBaseT,x
         clc
         adc ohgt
-        bcs orbNo               ; far below the screen
-        cmp #251
-        bcs orbNo               ; top of the sprite is past the last visible raster line
-        sta o3
+        bcs orbYCp              ; the sum passed 255, so it is far below the screen
+        cmp orbYCapT,x
+        bcc orbYok
+orbYCp: lda orbYCapT,x          ; PINNED rather than dropped: an entity you are pressed against
+orbYok: sta o3                  ;   keeps ORB_FLOOR rows above the last raster line, so anything
+                                ;   close enough to pick up is close enough to see
         ; ---- occlusion: is the orb beyond the faces it overlaps? ----
         ; A face occludes the orb only if the orb lies on the FAR side of its plane. We render
         ; camera-facing faces only, so anything on screen already faces the camera; if the orb
@@ -7995,7 +8312,8 @@ ohSpan: ldx ohBX                ; this span's right edge
 ohSB:   lda bndT,x
         sec
         sbc #$01
-ohSR:   cmp ocl2
+ohSR:   sta ovSpR               ; the probe needs this span's right edge for the overlap width
+        cmp ocl2
         bcc ohAdv               ; span ends before the orb begins: irrelevant, skip it
         lda ohL
         cmp ocmax
@@ -8009,14 +8327,27 @@ ${process.env.ORBOCCDBG ? `        lda #$03
 ohDc:
 ` : ''}        ldx ohL
         ldy faceIdT,x           ; the run this span shows
-        beq opDone              ; no run here at all, so the orb shows through
+        beq opVis               ; no run here at all, so the orb shows through
         sty ohRun
         lda runByteT,y
         tay
         lda (omptr),y           ; the mask byte holding this run's bit
         ldy ohRun
         and runBitT,y
-        beq opDone              ; this run does not occlude this orb -> the orb is visible
+        beq opVis               ; this run does not occlude this orb -> the orb is visible
+        lda ovProbe             ; occluding. Only on THIS path: the "span ends before the orb"
+        beq ohAdv               ;   skip below reaches ohAdv having covered nothing.
+        jsr ovWide
+        clc
+        adc ovOcc
+        sta ovOcc
+        jmp ohAdv
+opVis:  lda ovProbe             ; PROBING: one visible span is not the answer, because the
+        beq opDone              ;   question is HOW MUCH of it shows. Keep walking and count.
+        jsr ovWide
+        clc
+        adc ovVis
+        sta ovVis
 ohAdv:  ldx ohBX
         cpx nbnd
         bcs ohHide              ; that was the last span, and it occluded
@@ -8028,7 +8359,27 @@ ${process.env.ORBOCCDBG ? `ohHide:${process.env.ORBOCCDBG ? `
         lda #$04
         sta ohDbg` : ''}
         jmp orbNo
-` : `ohHide: jmp orbNo           ; wholly occluded: take no sprite slot at all
+` : `ohHide: lda ovProbe
+        beq ohHid0
+        rts                     ; probe done: the counters are the answer, and nothing has been
+ohHid0: jmp orbNo               ;   allocated, because allocation lives past opDone
+
+; ovWide: how many of the ENTITY's columns this span covers.
+;   min(spanRight, ocmax) - max(spanLeft, ocl2) + 1
+ovWide: lda ohL
+        cmp ocl2
+        bcs ovW1
+        lda ocl2
+ovW1:   sta ovTmp
+        lda ovSpR
+        cmp ocmax
+        bcc ovW2
+        lda ocmax
+ovW2:   sec
+        sbc ovTmp
+        clc
+        adc #$01
+        rts
 `}` : ''}opDone:
         ; --- take a sprite slot ---
         ldx onv
@@ -8157,8 +8508,14 @@ oNoM2:  ldy onvL                ; the stamp pass clips by column, and the two ha
         lda obBR,y
         sta obBR,x
         inc onv
-orbYes: rts
-orbNo:  rts
+orbYes: ldx oidx                ; it got a sprite slot, so a pixel of it is on screen. The
+        lda #$01                ;   renderer already culls anything off screen or wholly
+        sta orbSeenT,x          ;   occluded, so this IS the "unobserved" test, for free
+        rts
+orbNo:  ldx oidx
+        lda #$00
+        sta orbSeenT,x
+        rts
 ${FALL ? `
 ; holeOne: the live hole's LOS gate and projection, run BEFORE the orb candidates so it can
 ; never lose its sprite slots to them. A projection is ~2,400 cycles and this test is ~25,
@@ -8599,7 +8956,1188 @@ fwSkip: inc fwRow
         jmp fwLp
 fwDn:   rts
 
-` : ''}; ---- bgStep: one slice of the destination render, once per fall frame ----
+` : ''}; ---- faceCell: the cell directly in front, to the nearest of eight ----
+; pa is a full byte of turn, so +16 then >>5 rounds to the nearest octant instead of truncating
+; toward the one you have just left. Eight rather than four because "the square most in front of
+; you" means exactly that when you are facing a corner, and because the angels move in eight.
+; ---- dpCand: the neighbouring cell one step along direction X, and its parts ----
+dpCand: clc
+        lda px+1
+        adc dirXT,x
+        and #$0f
+        sta fcX
+        clc
+        lda py+1
+        adc dirYT,x
+        and #$0f
+        sta fcY
+        asl
+        asl
+        asl
+        asl
+        ora fcX
+        sta fcCell
+        rts
+
+; ---- dropPick: which neighbouring cell the carried orb should go in ----
+; NOT the one the facing rounds to. An entity is drawn at its cell's CENTRE, and the centre of
+; the cell dead ahead can be a long way off the view axis when the player is standing near a cell
+; boundary -- which is why a dropped orb kept landing at the edge of the screen. So ask the
+; projection where each candidate would actually appear and keep the most centred one. The
+; nearest cell is deliberately still a candidate even though the orb lands pinned at the bottom
+; of the screen there. Eight projections, once per keypress, against 30,208 cycles in a frame.
+dropPick:
+        lda #$ff
+        sta odBest
+        sta odCell              ; nothing placeable in reach
+        ldx #$07
+dpLp:   stx odD
+        jsr dpCand
+        ldx fcCell
+        lda blkT,x
+        bne dpNext              ; a wall, or something already standing there
+        ldx odD
+        lda dirXT,x
+        sta oix
+        lda dirYT,x
+        sta oiy
+        jsr orbProj
+        bcc dpNext              ; would not be on screen at all
+        lda ocoff
+        cmp odBest
+        bcs dpNext
+        sta odBest
+        lda fcCell
+        sta odCell
+        lda fcX
+        sta odX
+        lda fcY
+        sta odY
+dpNext: ldx odD
+        dex
+        bpl dpLp
+        rts
+
+; ---- takePick: which adjacent orb the player is looking at ----
+; Same ranking, over entities rather than directions: the one whose cell projects nearest the
+; middle of the screen. Walking over an orb diagonally used to leave it unpickable because the
+; rounded facing named a different cell.
+takePick:
+        lda #$ff
+        sta odBest
+        sta odCell              ; holds an ENTITY index here, not a cell
+        ldx #$00
+tkLp:   stx odD
+        lda orbTallT,x
+        bne tkNext              ; an angel is not luggage
+        lda orbHidT,x
+        bne tkNext
+        sec
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        clc                     ; delta + 1 is 0, 1 or 2 exactly when the delta is -1, 0 or 1
+        adc #$01
+        cmp #$03
+        bcs tkNext
+        ldx odD
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+        clc
+        adc #$01
+        cmp #$03
+        bcs tkNext
+        lda oix
+        ora oiy
+        beq tkNext              ; our own cell: nothing to project
+        jsr orbProj
+        bcc tkNext
+        lda ocoff
+        cmp odBest
+        bcs tkNext
+        sta odBest
+        lda odD
+        sta odCell
+tkNext: ldx odD
+        inx
+        cpx #${hx(ORBS.length)}
+        bcc tkLp
+        rts
+
+; ---- orbKey: SPACE picks up and puts down, one action a press ----
+; Row 7 bit 4. The joystick shares these lines, so read the port with no row selected first and
+; force whatever the stick is holding back high -- otherwise FIRE reads as SPACE.
+orbKey: lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta okJoy
+        lda #$7f
+        sta $dc00
+        lda $dc01
+        ora okJoy
+        eor #$ff
+        and #$10
+        sta okNew
+        lda #$ff
+        sta $dc00               ; leave the port neutral for the joystick read in readKeys
+        lda okNew
+        beq okUp
+        lda okOld
+        bne okDone              ; held, not a fresh press
+        lda #$01
+        sta okOld
+        jmp orbUse
+okUp:   lda #$00
+        sta okOld
+okDone: rts
+
+; ---- objInit: every entity back to its starting cell ----
+; A restart is a jmp to entry, and entity state lives in tables the game edits IN PLACE. blkT is
+; rebuilt from mapT rather than kept as a second copy -- 256 bytes of table saved, and it can
+; never drift out of step with the walls.
+objInit:
+        ldx #$00
+oiBlk:  lda mapT,x              ; walls first
+        sta blkT,x
+        inx
+        bne oiBlk
+        ldx #${hx(ORBS.length - 1)}
+oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
+        sta orbXCT,x
+        lda orbY0T,x
+        sta orbYCT,x
+        lda orbHid0T,x          ; the BUILD's hidden flag, not zero: CARRY=n starts the run
+        sta orbHidT,x           ;   holding an entity, and resetting that put it back in the
+        bne oiNext              ;   world -- both carried AND blocking its old cell
+        sta angAccT,x
+        sta orbSeenT,x
+        lda orbY0T,x
+        asl
+        asl
+        asl
+        asl
+        ora orbX0T,x
+        tay
+        lda #$02
+        sta blkT,y              ; 2 = entity, not wall -- angStep and mvFree both rely on it
+oiNext: txa
+        pha                     ; orbOcc1 CLOBBERS X. Without this the dex/bpl below ran on
+        jsr orbOcc1             ;   garbage and the loop scribbled 2s across blkT at random
+        pla                     ;   cells -- which opened the doorway the caging orb was
+        tax                     ;   supposed to block, and the angel walked straight out.
+        dex
+        bpl oiEnt
+        lda #$00
+        sta carry
+        sta marked
+        sta entDty
+        rts
+
+; ---- orbOcc1: rebuild entity X's occluder mask from the cell it stands in NOW ----
+; orbOccT answers "is this entity beyond that wall run's plane" -- the facing rule, and the only
+; thing about occlusion that is precomputed. Every bit of it is a function of where the entity
+; WAS at build time, so setting an orb down somewhere else, or an angel taking a step, makes it
+; describe the old position: hidden behind walls it is now in front of, and stamped through ones
+; it is behind. This is NOT a per-frame cost -- it is one pass over the ${nextRun - 1} runs when
+; something actually moves, ~30 cycles each.
+; The mask base is self-modified rather than indirect-indexed because the loop needs Y for the
+; run id and X for the byte within the mask.
+orbOcc1:
+        lda orbOccLoT,x
+        sta ooCl+1
+        sta ooLd+1
+        sta ooSt+1
+        lda orbOccHiT,x
+        sta ooCl+2
+        sta ooLd+2
+        sta ooSt+2
+        lda orbXCT,x
+        sta ooCX
+        lda orbYCT,x
+        sta ooCY
+        lda #$00
+        ldx #${hx(OCCBYTES - 1)}
+ooCl:   sta $ffff,x
+        dex
+        bpl ooCl
+        ldy #$01                ; run 0 is the "no run" sentinel and owns no bit
+ooLp:   lda runFaceT,y
+        pha                     ; PLA sets N from bit 7 and leaves C alone, so the sense survives
+        and #$01                ;   the axis pick and the compare below
+        beq ooAxX
+        lda ooCY
+        jmp ooCmp
+ooAxX:  lda ooCX
+ooCmp:  cmp runPlaneT,y         ; C set = cell >= plane
+        pla
+        bpl ooGE
+        bcc ooSet               ; sense 1: the entity must be strictly nearer than the plane
+        bcs ooNx                ; always taken
+ooGE:   bcc ooNx
+ooSet:  ldx runByteT,y
+ooLd:   lda $ffff,x
+        ora runBitT,y
+ooSt:   sta $ffff,x
+ooNx:   iny
+        cpy #${hx(nextRun)}
+        bcc ooLp
+        rts
+
+; ---- sndInit: one sustained chord of two, and then only the detune ever changes ----
+; The SID has no reset line, so every register is cleared first -- whatever BASIC or the loader
+; left in there is otherwise still playing. Gated once and never released: this is a drone, so
+; the envelope only ever runs its attack.
+sndInit:
+        ldx #$18
+        lda #$00
+sniLp:  sta $d400,x
+        dex
+        bpl sniLp
+        lda #<${hx16(SND_FN)}
+        sta $d400
+        sta $d407
+        lda #>${hx16(SND_FN)}
+        sta $d401
+        sta $d408
+        lda #${hx(SND_PW & 0xff)}
+        sta $d402
+        sta $d409
+        lda #${hx(SND_PW >> 8)}
+        sta $d403
+        sta $d40a
+        lda #${hx(SND_AD)}
+        sta $d405
+        sta $d40c
+        lda #${hx(SND_SR)}
+        sta $d406
+        sta $d40d
+        lda #$00                ; cutoff is 11 bits: three low, then eight. Only the top matters
+        sta $d415
+        lda #${hx(SND_FC)}
+        sta $d416
+        lda #${hx((SND_RES << 4) | 3)}
+        sta $d417               ; resonance, and voices 1 and 2 routed through the filter
+        lda #${hx(0x10 | SND_VOLN)}
+        sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
+        lda #$41                ; pulse + gate
+        sta $d404
+${SNDTEST ? `                                ; SNDTEST: voice 2 never gets a waveform, so the drone is
+                                ;   one bare pulse and the detune is out of the picture
+        lda #${hx(SND_FC)}
+        sta sndFc
+        lda #${hx(SND_PW >> 8)}
+        sta sndPw
+        lda #$00
+        sta sndMode             ; low-pass, matching the shipping build
+        lda #$0f
+        sta sndVol
+` : `        sta $d40b
+`}
+${MELODY ? `        lda #${hx(MEL_AD)}      ; voice 3 plucks: no attack, short decay, no sustain
+        sta $d413
+        lda #${hx(MEL_SR)}
+        sta $d414
+        lda #$01                ; so the first melTick rolls straight over to note 0
+        sta melCnt
+        lda #${hx(melFn.length - 1)}
+        sta melIx
+` : ''}        rts
+
+${SOUND && DIE ? `; ---- pulseTick: the border beats with the audio, called from the 60Hz IRQ ----
+; Not the main loop: at ~19fps and varying, a pulse would stagger. The phase increment is the
+; detune scaled, so the border is locked to the beat by construction rather than by a second
+; timer that could drift against it. Silent above PULSE_MAX cells -- the pulse is the last
+; warning, not the ambience.
+pulseTick:
+        lda marked              ; ONLY while an angel has you cornered and you have not looked.
+        beq pqOff               ;   Not a proximity meter -- a "you are about to die" warning, and
+        ldx sndD                ;   walking out of reach cancels it. dieGo clears marked, so the
+        cpx #${hx(PULSE_MAX + 1)}   ; border stops the instant the cut scene starts.
+        bcs pqOff
+        clc
+        lda pulsePh
+        adc pulseIncL,x
+        sta pulsePh
+        lda pulsePh+1
+        adc pulseIncH,x
+        sta pulsePh+1
+        lsr                     ; top three bits of the high byte: eight steps a cycle
+        lsr
+        lsr
+        lsr
+        lsr
+        tax
+        lda pulseT,x
+        sta $d020
+        rts
+pqOff:  lda #$00
+        sta $d020
+        rts
+
+` : ''}${MELODY ? `; ---- melTick: voice 3, called from the TOP-OF-FRAME IRQ ----
+; In the IRQ and not the main loop, because the main loop runs at 19fps and varies: note lengths
+; would follow the frame rate (the same mistake tickDelta exists to undo) and the shimmer would
+; be a 19Hz warble instead of a sheen. irqTop arms the next raster compare BEFORE it calls this,
+; and the next split is ~9,750 cycles away, so there is room. The IRQ has already saved A/X/Y.
+;
+; The shimmer is Hubbard's trick: flip the waveform between triangle and sawtooth every single
+; frame. Same pitch, same envelope -- the timbre alternates faster than the ear separates it and
+; the note reads as one bright, unstable tone.
+melTick:
+        lda melPh
+        eor #$ff
+        sta melPh
+        bmi melTri
+        lda #$21                ; sawtooth + gate
+        bne melW                ; always taken
+melTri: lda #$11                ; triangle + gate
+melW:   sta melWav
+        dec melCnt
+        bne melHold
+        lda #${hx(MEL_DUR)}     ; ---- next note ----
+        sta melCnt
+        ldx melIx
+        inx
+        cpx #${hx(melFn.length)}
+        bcc melIx2
+        ldx #$00
+melIx2: stx melIx
+        lda melLoT,x
+        sta $d40e
+        lda melHiT,x
+        sta $d40f
+        lda melWav
+        and #$fe                ; gate LOW for this one frame: the envelope only retriggers on
+        sta $d412               ;   the edge, and the 16ms gap is what articulates the figure
+        rts
+melHold:
+        lda melCnt
+        cmp #${hx(MEL_DUR - MEL_GATE)}
+        bcc melTail
+        lda melWav              ; head of the note: gated, attacking then settling to sustain 8
+        sta $d412
+        rts
+melTail:
+        lda melWav              ; released early, so the note has thinned out but not vanished
+        and #$fe                ;   by the time the next one fires. The shimmer keeps running
+        sta $d412               ;   through the tail
+        rts
+` : ''}
+${SNDTEST ? `; ---- sndKeys: 4/5 sweep the cutoff, 6/7 step the pulse width ----
+; Same joystick masking as palKeys: joy-1 shares $dc01 with the keyboard columns, so read the
+; port with NO row selected first and force whatever the stick holds back high. The cutoff
+; repeats while held, because sweeping 0..255 one press at a time is not a listening test; the
+; pulse width is edge-triggered, because it only has 16 steps.
+sndKeys:
+        lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta skJoy               ; 1 where a joystick line is active, so key reads can mask it out
+        lda #$fd                ; '4' -- row $fd bit 3 -- cutoff DOWN, repeating while held
+        sta $dc00
+        lda $dc01
+        ora skJoy
+        and #$08
+        bne skN4
+        lda sndFc
+        cmp #$02
+        bcc skN4
+        sec
+        sbc #$02
+        sta sndFc
+skN4:   lda #$fb                ; '5' bit 0 = cutoff UP, '6' bit 3 = pulse width DOWN
+        sta $dc00
+        lda $dc01
+        ora skJoy
+        sta skTmp
+        and #$01
+        bne skN5
+        lda sndFc
+        cmp #$fe
+        bcs skN5
+        clc
+        adc #$02
+        sta sndFc
+skN5:   lda #$00                ; the rest are edge-triggered, packed into one byte
+        sta skNew
+        lda skTmp
+        and #$08
+        bne sk6n
+        lda #$01
+        sta skNew
+sk6n:   lda #$f7                ; '7' bit 0 = pulse width UP, '8' bit 3 = filter MODE
+        sta $dc00
+        lda $dc01
+        ora skJoy
+        sta skTmp
+        and #$01
+        bne sk7n
+        lda skNew
+        ora #$02
+        sta skNew
+sk7n:   lda skTmp
+        and #$08
+        bne sk8n
+        lda skNew
+        ora #$04
+        sta skNew
+sk8n:   lda #$ef                ; '9' bit 0 = volume DOWN, '0' bit 3 = volume UP
+        sta $dc00
+        lda $dc01
+        ora skJoy
+        sta skTmp
+        and #$01
+        bne sk9n
+        lda skNew
+        ora #$08
+        sta skNew
+sk9n:   lda skTmp
+        and #$08
+        bne sk0n
+        lda skNew
+        ora #$10
+        sta skNew
+sk0n:   lda #$ff
+        sta $dc00               ; leave the port neutral for readKeys
+        lda skNew
+        eor skOld
+        and skNew               ; changed AND down now = a fresh press
+        sta skEdge
+        lda skNew
+        sta skOld
+        lda skEdge
+        and #$01
+        beq skE7
+        lda sndPw
+        beq skE7
+        dec sndPw
+skE7:   lda skEdge
+        and #$02
+        beq skE8
+        lda sndPw
+        cmp #$0f
+        bcs skE8
+        inc sndPw
+skE8:   lda skEdge
+        and #$04
+        beq skE9
+        ldx sndMode
+        inx
+        cpx #$04
+        bcc skE8s
+        ldx #$00
+skE8s:  stx sndMode
+skE9:   lda skEdge
+        and #$08
+        beq skE0
+        lda sndVol
+        beq skE0
+        dec sndVol
+skE0:   lda skEdge
+        and #$10
+        beq skPut
+        lda sndVol
+        cmp #$0f
+        bcs skPut
+        inc sndVol
+skPut:  lda sndFc
+        sta $d416
+        lda sndPw
+        sta $d403
+        ldx sndMode
+        lda sndModeT,x
+        ora sndVol
+        sta $d418
+        rts
+; ONE cutoff serves all three modes and their outputs are SUMMED, so low+high is a NOTCH, not a
+; narrow band -- combining them cannot attenuate. High-pass alone is the one that can: sweep its
+; cutoff up past 55Hz and the fundamental goes first, then the harmonics.
+sndModeT: !byte $10,$20,$40,$50 ; low-pass, band-pass, high-pass, low+high = notch
+
+; ---- drawSnd: the two numbers, under the X/Y/A block ----
+drawSnd:
+        lda #$04
+        jsr setRow
+        ldy #34                 ; six glyphs now, so it has to start further left
+        lda #$0f                ; 'F'
+        jsr ddPut
+        lda sndFc
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda sndFc
+        and #$0f
+        jsr ddPut
+        lda sndPw
+        jsr ddPut
+        lda sndMode
+        jsr ddPut
+        lda sndVol
+        jsr ddPut
+        rts
+
+` : ''}; ---- sndTick: the detune tracks the nearest angel ----
+; Chebyshev distance, because the angel moves on a king's graph -- diagonal and orthogonal steps
+; are both one move, so that is what "one cell away" has to mean here too. It runs whether or not
+; you are looking, which is the point: the sound is the channel that works when sight does not.
+sndTick:
+        lda #$0f
+        sta sndD
+        ldx #$00
+stLp:   stx sndI
+        lda orbTallT,x
+        beq stNext              ; not an angel
+        lda orbHidT,x
+        bne stNext
+        sec
+        lda orbXCT,x
+        sbc px+1
+        bcs stPx
+        eor #$ff                ; borrow: A is the two's complement, so negate for |dx|
+        clc
+        adc #$01
+stPx:   sta sndT
+        ldx sndI
+        sec
+        lda orbYCT,x
+        sbc py+1
+        bcs stPy
+        eor #$ff
+        clc
+        adc #$01
+stPy:   cmp sndT
+        bcs stMax               ; Chebyshev: whichever axis is further
+        lda sndT
+stMax:  cmp sndD
+        bcs stNext
+        sta sndD                ; a new nearest
+stNext: ldx sndI
+        inx
+        cpx #${hx(ORBS.length)}
+        bcc stLp
+        lda sndD
+        cmp #$10
+        bcc stOk
+        lda #$0f                ; the table only runs to 15 cells; the map is 16 wide
+stOk:   ldy marked              ; cornered: the angel is HIDDEN so the search above skipped it,
+        beq stOk2               ;   but it is standing on top of you and the drone should say so
+        lda #$00
+stOk2:  tax                     ; everything comes straight off tables -- the climb, the detune
+        lda sndV1L,x            ;   and the loudness pair are all folded in at build time, so
+        sta $d400               ;   there is no arithmetic here at all
+        lda sndV1H,x
+        sta $d401
+        lda sndV2L,x
+        sta $d407
+        lda sndV2H,x
+        sta $d408
+${SNDTEST ? '' : `        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonance and pulse width are set once in
+        ora #$10                ;   sndInit and left there -- with three things moving at once you
+        sta $d418               ;   cannot tell which one you are hearing. Low-pass, as it began.
+`}        rts
+
+; ---- angStep: give every unobserved angel its share of the clock, and move the ones that are due
+; The accumulator advances ONLY while the angel is unobserved, so looking at one stops its clock
+; rather than just its feet -- look away and it takes a normal-length pause, not an instant step.
+; Per angel, not global: two angels in different directions have to keep separate time, which is
+; the whole squeeze. dtv is 60ths elapsed, capped at 32 by tickDelta, so the sum cannot carry.
+angStep:
+        ldx #$00
+asLp:   stx amIdx
+        lda orbTallT,x
+        beq asNext              ; not an angel
+
+        lda orbHidT,x
+        bne asNext              ; not in the world
+        lda orbSeenT,x
+        bne asNext              ; one visible pixel freezes it, and its clock with it
+        lda angAccT,x
+        clc
+        adc dtv
+        cmp #${hx(ANG_PERIOD)}
+        bcc asKeep
+        jsr angOne              ; due a step (X is the entity; angOne preserves nothing)
+        lda #$00
+asKeep: ldx amIdx
+        sta angAccT,x
+asNext: ldx amIdx
+        inx
+        cpx #${hx(ORBS.length)}
+        bcc asLp
+        rts
+
+; ---- angOne: one grid step toward the player ----
+; Greedy, not a path. A distance field would have to be rebuilt every time the player moves or an
+; orb lands, and slow-and-inexorable is both cheaper and the better feeling. Diagonal first, then
+; each axis alone, so a blocked diagonal still makes progress along a wall.
+angOne: stx amIdx
+        lda #$00
+        sta amDX
+        sta amDY
+        lda px+1                ; dx = sign(player cell - angel cell), per axis
+        cmp orbXCT,x
+        beq anNoX
+        lda #$01
+        bcs anSetX
+        lda #$ff
+anSetX: sta amDX
+anNoX:  lda py+1
+        cmp orbYCT,x
+        beq anNoY
+        lda #$01
+        bcs anSetY
+        lda #$ff
+anSetY: sta amDY
+anNoY:  lda amDX
+        sta amTX
+        lda amDY
+        sta amTY
+        jsr anTry
+        bcs anGo
+        lda amDX                ; diagonal blocked: slide along x
+        sta amTX
+        lda #$00
+        sta amTY
+        jsr anTry
+        bcs anGo
+        lda #$00
+        sta amTX
+        lda amDY
+        sta amTY
+        jsr anTry
+        bcc anDone              ; boxed in this tick
+anGo:   ldx amIdx
+        lda orbYCT,x            ; the cell it is leaving opens
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        tay
+        lda #$00
+        sta blkT,y
+        lda amX
+        sta orbXCT,x
+        lda amY
+        sta orbYCT,x
+        ldy amCell
+        lda #$02
+        sta blkT,y
+        lda #$01
+        sta entDty
+${DIE ? `        sec                     ; did that land it beside the player? then they are MARKED.
+        lda orbXCT,x            ;   Triggered by the ANGEL moving, never by adjacency itself --
+        sbc px+1                ;   which is exactly why walking into one yourself is harmless.
+        clc                     ;   and needs no "who moved last" bookkeeping at all.
+        adc #$01
+        cmp #$03
+        bcs anNoMk
+        sec
+        lda orbYCT,x
+        sbc py+1
+        clc
+        adc #$01
+        cmp #$03
+        bcs anNoMk
+        ldx amIdx
+        lda #$01                ; it stops rendering ENTIRELY from here. Nothing after this has
+        sta orbHidT,x           ;   to reason about where the sprite is or whether it shows --
+        inx                     ;   the whole trigger is one angle comparison.
+        stx marked
+        lda pa                  ; the heading it caught you at, for the turn trigger
+        sta markPa
+anNoMk: ldx amIdx
+` : ''}        jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
+anDone: rts
+
+; ---- anTry: is the step in amTX/amTY legal? C set and amCell/amX/amY filled if so ----
+anTry:  lda amTX
+        ora amTY
+        beq anNo                ; standing in the player's cell already
+        ldx amIdx
+        clc
+        lda orbXCT,x
+        adc amTX
+        and #$0f
+        sta amX
+        clc
+        lda orbYCT,x
+        adc amTY
+        and #$0f
+        sta amY
+        lda amX                 ; never step ONTO the player: touching is harmless by design,
+        cmp px+1                ;   but blkT under their feet would make mvFree refuse every
+        bne anT1                ;   move they tried and the game would just stop
+        lda amY
+        cmp py+1
+        beq anNo
+anT1:   lda amY
+        asl
+        asl
+        asl
+        asl
+        ora amX
+        sta amCell
+        tay
+        lda blkT,y
+        bne anNo                ; wall, orb or another angel
+        lda amTX                ; a diagonal may not cut between two walls touching at a point:
+        beq anSqOk              ;   an angel is a solid object, so BOTH cells it brushes past
+        lda amTY                ;   have to be open. An AXIAL step skips only the squeeze test --
+        beq anSqOk              ;   it must still face the visibility check below.
+        lda amY
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        tay
+        lda blkT,y
+        bne anNo
+        lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora amX
+        tay
+        lda blkT,y
+        bne anNo
+anSqOk:
+        ; ---- how much of it would the player SEE standing there? ----
+        ; It MAY step into view -- an angel easing round a corner and freezing mid-peek is the
+        ; best thing it does -- but only into a cell something covers. Walking out into an open
+        ; room breaks the one rule it has. The span walk counts columns shown against columns
+        ; hidden, so this is a fraction, not a boolean, and the compare needs no division.
+        ; Off screen and behind a wall are the same case, deliberately.
+        ldx amIdx
+        lda orbXCT,x            ; point it at the DESTINATION, occluder mask and all
+        pha
+        lda orbYCT,x
+        pha
+        lda orbSeenT,x          ; orbNo writes this on its early exits and the freeze test reads
+        sta ovSvS               ;   it next frame -- a probe must not disturb it
+        lda amX
+        sta orbXCT,x
+        lda amY
+        sta orbYCT,x
+        jsr orbOcc1
+        ldx amIdx
+        stx oidx
+        lda #$00
+        sta ovVis
+        sta ovOcc
+        lda #$01
+        sta ovProbe
+        lda #$80
+        sta ocanO
+        jsr orbOne
+        lda #$00
+        sta ovProbe
+        ldx amIdx               ; and put it back where it really is
+        lda ovSvS
+        sta orbSeenT,x
+        pla
+        sta orbYCT,x
+        pla
+        sta orbXCT,x
+        jsr orbOcc1
+        lda ovVis
+        beq anYes               ; nothing of it shows there at all
+${'        asl\n'.repeat(ANG_OBSC)}        cmp ovOcc
+        beq anYes
+        bcc anYes               ; at least half of it is covered: it may creep in
+        jmp anNo                ; out in the open, so it stays where it is
+anYes:  sec
+        rts
+anNo:   clc
+        rts
+
+${DIE ? `; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
+; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
+; which is what makes walking into one harmless. Here we only LIFT it, and fire.
+; The trigger is the angel's projected COLUMN, not orbSeenT: waiting for it to take a sprite slot
+; means waiting until it is already on screen, and the whole point is that you never see the
+; little sprite. orbProj returns the off-centre column even when the thing is off screen.
+dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
+        beq dckLive             ;   the sprites. obC is rewritten by orbMove every frame and
+        ldx #$07                ;   flushed to $d027+n after us, so this is the last word on it.
+dckSp:  lda dieInk
+        sta obC,x
+        dex
+        bpl dckSp
+        rts
+dckLive:
+        lda pa                  ; which way they are turning, sampled every frame so the cut
+        sec                     ;   scene can lock it in and keep turning for them
+        sbc dieOpa
+        sta dieDir
+        lda pa
+        sta dieOpa
+        lda marked
+        beq dcNo
+        tax
+        dex
+        stx amIdx
+        sec
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        clc
+        adc #$01
+        cmp #$03
+        bcs dcClr               ; more than a cell away in x: the mark lifts
+        ldx amIdx
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+        clc
+        adc #$01
+        cmp #$03
+        bcs dcClr
+        sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
+        lda pa                  ;   them? The angel is hidden, so there is no sprite to see and
+        sbc markPa              ;   nothing to project. Turn 30 degrees either way and you die.
+        bpl dcPos
+        eor #$ff
+        clc
+        adc #$01
+dcPos:  cmp #${hx(DIE_TURN)}
+        bcc dcNo
+dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
+dieGo:  ${process.env.DIEDIR ? `lda #${hx(+process.env.DIEDIR & 255)}
+        sta dieDir      ; DIEDIR forces the turn direction, to test both entry sides
+        ` : ''}lda dieDir
+        bne dgD
+        lda #$01                ; not turning: give the face a side to come from anyway
+        sta dieDir
+dgD:    lda #$00                ; AFTER the branch above, not inside it -- pulseTick gates on
+        sta marked              ;   marked, and skipping this left the border beating right
+        ldx #${hx(ORBS.length - 1)}   ; through the cut scene whenever the player WAS turning.   ; the angel simply is not there any more -- hiding it is one
+dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slot. The user wants
+        beq dgA2                ;   it gone, not faded: it is the thing that just killed you.
+        lda #$01
+        sta orbHidT,x
+dgA2:   dex
+        bpl dgA
+        lda #${hx(ORBBODY[0])}  ; the orb, by contrast, fades out with everything else
+        sta dieInk
+        lda #$01
+        sta dieSt
+        lda frameCnt
+        sta dieT0
+        lda #$ff
+        sta dieTck              ; no tick written yet
+        rts
+dcClr:  ldx amIdx               ; out of reach again: the sentence lifts and it comes back
+        lda #$00
+        sta orbHidT,x
+        sta marked
+dcNo:   rts
+
+; ---- dieFade: the room goes out, and nothing else happens ----
+; No charset corruption any more: the swap is one frame, done once the screen is already black,
+; so it is invisible. Reads the LIVE colour registers and walks each one step darker per tick,
+; so slots that start dark reach black early and the whole palette converges.
+dieFade:
+        clc                     ; their own turn, continued for them
+        lda pa
+        adc dieDir
+        sta pa
+        lda frameCnt
+        sec
+        sbc dieT0
+        cmp #${hx(DIE_OUT)}
+        bcs dfEnd
+        lsr                     ; one tick per four sixtieths
+        lsr
+        cmp dieTck
+        beq dfDn                ; this tick already written
+        sta dieTck
+        lda $d021               ; VIC colour registers read back, but with the UNUSED UPPER BITS
+        and #$0f                ;   SET -- white reads as $f1, not $01, which indexed a 16-entry
+        tax                     ;   table 241 bytes past its end
+        lda darkerT,x
+        sta $d021
+        lda $d022
+        and #$0f
+        tax
+        lda darkerT,x
+        sta $d022
+        lda $d023
+        and #$0f
+        tax
+        lda darkerT,x
+        sta $d023
+        lda $d025               ; the two SHARED sprite colours, underside and highlight
+        and #$0f
+        tax
+        lda darkerT,x
+        sta $d025
+        lda $d026
+        and #$0f
+        tax
+        lda darkerT,x
+        sta $d026
+        ldx dieInk              ; and the per-sprite body colour, applied in dieChk below
+        lda darkerT,x
+        sta dieInk
+        lda dieTck
+        bne dfDn
+        ldx #$00                ; first tick only: the occluder ink goes at once. It shows in a
+dfCol:  lda #$08                ;   handful of stamped cells, and a fill per tick is 14,000
+        sta $d800,x             ;   cycles inside a frame that is still rendering
+        sta $d900,x
+        sta $da00,x
+        sta $db00,x
+        inx
+        bne dfCol
+dfDn:   rts
+
+; ---- dieSwap: hand the screen to the face, in ONE frame, on black ----
+dfEnd:
+        sei                     ; charset B is under the I/O hole: port $34, and no IRQ while it
+        lda #$34                ;   is banked out. 1,280 bytes = five pages, ~12,800 cycles.
+        sta $01
+        ldx #$00                ; unrolled per page and GENERATED from the glyph count -- this
+dsLp:${[...Array(Math.ceil(FACE_NCHR / 256))].map((_, pg) => `
+        lda faceChrT+${hx16(pg * 256)},x
+        sta ${hx16(0xd800 + pg * 256)},x`).join('')}
+        inx
+        bne dsLp
+        lda #$35
+        sta $01
+        cli
+        ldx #$00                ; colour RAM is the OTHER memory at $d800 and needs I/O back in.
+dsCol:  lda #${hx(8 | FACEART.colram)}  ; bit 3 keeps the cell multicolor; the face wants black here
+        sta $d800,x
+        sta $d900,x
+        sta $da00,x
+        sta $db00,x
+        inx
+        bne dsCol
+        lda #$06                ; the angel charset in all three raster regions
+        sta pCh0
+        sta pCh1
+        sta pCh2
+        lda #$00                ; still black: phase 2 ramps up from here
+        sta $d021
+        sta $d022
+        sta $d023
+        lda #$00                ; which edge the face arrives at. Increasing pa sweeps world
+        ldx dieDir              ;   points LEFT, so a right turn brings new scenery in from the
+        bpl dsMir               ;   RIGHT -- and the face has to match, or it slides in from the
+        lda #$ff                ;   side you are turning AWAY from
+dsMir:  sta dieMir
+        lda #$02
+        sta dieSt
+        lda #$ff
+        sta dieTck
+        rts
+
+; ---- dieRev: the face slides past, fading up and then out, and never stops moving ----
+dieRev: lda #$00                ; no sprites from here on. Clearing this at the SWAP did not hold:
+        sta omEn                ;   the swap runs early in the frame and orbMove refills omEn
+        sta $d015               ;   later in the same one, so the carried-orb slot came back.
+        lda dieSt
+        cmp #$03
+        beq drHeld              ; HELD. Elapsed is a byte, so left running it wrapped after 256
+        lda frameCnt            ;   sixtieths and re-entered the reveal -- face, slide and sound
+                                ;   all coming back every 4.3 seconds.
+        sec
+        sbc dieT0
+        sec
+        sbc #${hx(DIE_OUT)}
+        cmp #${hx(DIE_SHOW)}
+        bcs drEnd
+        sta dieEl
+        ldx #${hx(Math.round(256 * (DIE_OFF1 - DIE_OFF0) / DIE_SHOW))}
+        stx mq
+        jsr mul8                ; A = elapsed, so phi is elapsed * span / DIE_SHOW
+        lda phi
+        clc
+        adc #${hx(DIE_OFF0)}
+        ldx dieMir
+        beq drOff
+        sta ddSrc               ; mirrored about centre: 80 - offset comes in from the other edge
+        lda #${hx(80)}
+        sec
+        sbc ddSrc
+drOff:  sta dieOff
+        ldx dieEl               ; palette and volume on a coarser 9-tick grid
+        lda dieTckT,x
+        tax
+        cpx dieTck
+        beq drDraw
+        stx dieTck
+        lda dieC1T,x
+        sta $d021
+        lda dieC2T,x
+        sta $d022
+        lda dieC3T,x
+        sta $d023
+        lda dieVolT,x
+        ora #$10                ; keep the low-pass bit; the drone fades out with the picture
+        sta $d418
+drDraw: jmp dieDraw
+drEnd:  lda #$03
+        sta dieSt
+        lda #$00
+        sta $d021
+        sta $d022
+        sta $d023
+        lda #$10
+        sta $d418               ; silence, and it lands on the same frame as the black
+drHeld: rts
+
+; ---- dieDraw: paint the face into BOTH buffers ----
+; Both, because the flip alternates them every frame and dieRev only ever writes the one being
+; drawn. Two buffers a column or two apart is exactly the "slides over to reveal another face and
+; then stutters back and forth" the user saw. We are inside the fall's three-period budget.
+dieDraw:
+        lda dieOff              ; screen column c shows face column c + dieOff - 40
+        cmp #${hx(40)}
+        bcs ddLo0
+        sta ddSrc
+        lda #${hx(40)}
+        sec
+        sbc ddSrc
+        sta ddLo
+        lda #$00
+        sta ddSrc
+        jmp ddRows
+ddLo0:  lda #$00
+        sta ddLo
+        lda dieOff
+        sec
+        sbc #${hx(40)}
+        sta ddSrc
+ddRows: lda #$00
+        sta ddRow
+ddR:    ldx ddRow
+        lda rowLoT,x
+        sta ddSA+1
+        sta ddSB+1
+        sta ddTA+1
+        sta ddTB+1
+        sta ddLd+1
+        lda rowHiT,x
+        clc
+        adc #${hx(SCR_A >> 8)}
+        sta ddSA+2
+        sta ddTA+2
+        lda rowHiT,x
+        clc
+        adc #${hx(SCR_B >> 8)}
+        sta ddSB+2
+        sta ddTB+2
+        lda rowHiT,x
+        clc
+        adc #>faceScrT
+        sta ddLd+2
+        ldx #$00
+ddB:    cpx ddLo                ; the columns the face has not reached
+        bcs ddC
+        lda #${hx(FACE_BLANK)}
+ddSA:   sta $0400,x
+ddSB:   sta $0400,x
+        inx
+        jmp ddB
+ddC:    cpx #${hx(40)}
+        bcs ddNx
+        txa
+        sec
+        sbc ddLo
+        clc
+        adc ddSrc
+        tay
+        cpy #${hx(40)}
+        bcc ddF
+        lda #${hx(FACE_BLANK)} ; past its right edge
+        jmp ddP
+ddF:
+ddLd:   lda faceScrT,y
+ddP:
+ddTA:   sta $0400,x
+ddTB:   sta $0400,x
+        inx
+        jmp ddC
+ddNx:   inc ddRow
+        lda ddRow
+        cmp #${hx(25)}
+        bcc ddR
+        rts
+
+; ---- dieKey: RETURN restarts, from anywhere ----
+dieKey: lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta dkJoy               ; the stick shares these lines, same as palKeys and orbKey
+        lda #$fe
+        sta $dc00
+        lda $dc01
+        ora dkJoy
+        and #$02                ; RETURN
+        bne dkNo
+        ldx #$ff                ; jumping out of a jsr chain, so drop the stack first
+        txs
+        jmp entry
+dkNo:   lda #$ff
+        sta $dc00
+        rts
+
+` : ''}; ---- orbUse: take the orb in front, or set the carried one down there ----
+orbUse: lda carry
+        bne orbPut
+        jsr takePick            ; ---- pick up ----
+        ldx odCell
+        cpx #$ff
+        beq okDone              ; nothing adjacent worth taking
+        lda #$01                ; out of the world, into the hands
+        sta orbHidT,x
+        lda orbYCT,x            ; and the cell it was standing in opens
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        tay
+        lda #$00
+        sta blkT,y
+        inx
+        stx carry               ; index + 1, so zero can mean empty
+        lda #$01
+        sta entDty
+        rts
+orbPut: jsr dropPick            ; ---- put down ----
+        ldx odCell
+        cpx #$ff
+        beq okDone              ; nowhere it could go: keep hold of it
+        lda #$02
+        sta blkT,x
+        ldx carry
+        dex
+        lda odX                 ; cell coordinates ARE the position, so it lands centred
+        sta orbXCT,x
+        lda odY
+        sta orbYCT,x
+        lda #$00
+        sta orbHidT,x
+        sta carry
+        lda #$01
+        sta entDty              ; leaves X alone, and X is still the entity index orbOcc1 wants
+        jmp orbOcc1             ; X is still the entity index. Its build-time occluder mask is
+                                ;   about the cell it came from and is now wrong.
+
+; ---- bgStep: one slice of the destination render, once per fall frame ----
 bgStep: lda bgPh
         beq bgDn
         cmp #$03
@@ -9225,6 +10763,13 @@ mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
 ; that might be occluded, which is the only part of the test that is not O(1).
+; The plane test itself, so a MOVED entity can rebuild its own mask. runFaceT encodes the two
+; things the comparison needs: bit 0 picks the axis (0 = x, 1 = y) and bit 7 the sense (0 = the
+; entity's cell must be >= the plane, 1 = strictly less). Entities are cell-centred, so the
+; build's "o.x > k" on a .5 coordinate is exactly "cellX >= k" on an integer one.
+runPlaneT: !byte ${[...Array(nextRun)].map((_, r) => r ? runPlane[r] : 0).join(',')}
+runFaceT: !byte ${[...Array(nextRun)].map((_, r) =>
+    r === 0 ? 0 : { W: 0x00, E: 0x80, N: 0x01, S: 0x81 }[runFace[r]]).join(',')}
 runByteT: !byte ${[...Array(nextRun)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(nextRun)].map((_, r) => 1 << (r & 7)).join(',')}
 orbOccLoT: !byte ${orbOccLo.join(',')}
@@ -9244,8 +10789,6 @@ bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
 opbBaseT: !byte 0,12,24,36,48,60,72,84
-        * = ${hx16(ORB_CANDLIST)}
-candListT: !byte ${candList.join(',')}   ; read through a 16-bit pointer, so it may cross pages
 ` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
 absCosT: ${chunk(absCos).trim()}
 absSinT: ${chunk(absSin).trim()}
@@ -9269,12 +10812,6 @@ chainEnd:
 hTabT:  ${chunk(hTab, 32).trim()}
         * = ${hx16(ORB_VART)}
 orbVarT: !byte ${orbVarT.join(',')}
-        * = ${hx16(ORB_CANDCNT)}
-candCntT: !byte ${candCnt.join(',')}
-        * = ${hx16(ORB_CANDLO)}
-candLoT: !byte ${candLo.join(',')}
-        * = ${hx16(ORB_CANDHI)}
-candHiT: !byte ${candHi.join(',')}
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte ${holeVarT.join(',')}
@@ -9308,9 +10845,19 @@ mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbPtrU: !byte ${orbPtrU.join(',')}
 orbTallT: !byte ${orbTallT.join(',')}
+orbHidT: !byte ${orbHidT.join(',')}
+orbHid0T: !byte ${orbHidT.join(',')}   ; the build's hidden flags, for objInit
+orbX0T: !byte ${orbXC.join(',')}   ; where objInit puts them back on a restart
+orbY0T: !byte ${orbYC.join(',')}
+; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
+; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
+; which shares oidx, lands somewhere harmless rather than past the end.
+orbSeenT: !byte ${[...ORBS, ...HOLES_AT].map(() => 0).join(',')}
+angAccT: !byte ${ORBS.map(() => 0).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
+orbYCapT: !byte ${orbYCapT.join(',')}
 orbBlankT: !byte ${orbBlankT.join(',')}
 orbAnchT: !byte ${ORBANCH.join(',')}
 orbHgtT: !byte ${orbHgtT.join(',')}
@@ -9325,7 +10872,36 @@ fRowT: ${chunk(fRowT, 32).trim()}` : ''}
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte ${orbOccFlat.join(',')}
+orbOccT: !byte ${(process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat).join(',')}
+${SOUND ? `; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
+; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
+; the rest of the per-orb tables live in runs right up against FROWT+0x500.
+sndV1L: !byte ${sndV1.map(v => v & 255).join(',')}
+sndV1H: !byte ${sndV1.map(v => v >> 8).join(',')}
+sndV2L: !byte ${sndV2.map(v => v & 255).join(',')}
+sndV2H: !byte ${sndV2.map(v => v >> 8).join(',')}
+sndVolT: !byte ${sndVolT.join(',')}
+${DIE ? `darkerT: !byte ${darkerT.join(',')}
+dieC1T: !byte ${dieRamp(2).join(',')}   ; $d021 -> grey2, $d022 -> grey1, $d023 -> grey3
+dieC2T: !byte ${dieRamp(1).join(',')}
+dieC3T: !byte ${dieRamp(3).join(',')}
+dieVolT: !byte ${dieVolT.join(',')}
+dieTckT: !byte ${dieTckT.join(',')}
+pulseT: !byte ${pulseT.join(',')}
+pulseIncL: !byte ${pulseInc.map(v => v & 255).join(',')}
+pulseIncH: !byte ${pulseInc.map(v => v >> 8).join(',')}
+; ---- the death cut scene's charset and its 40x25 of codes ----
+; EMITTED INTO THE IMAGE, deliberately, not placed with --seg. A placed segment decodes BEFORE
+; the main stream, and $7100 sits inside the main stream's own staged copy -- so the face was
+; overwriting the compressed bytes the main decode then read, and the program never started.
+; Every other placed segment targets $c000 or above, clear of the staging area. That is the rule.
+; faceScrT is PAGE ALIGNED: dieRev adds a row offset straight onto its page byte.
+        * = $7100
+faceChrT: ${chunk(FACEART.chars, 32).trim()}
+        * = $7900
+faceScrT: ${chunk(FACEART.screen, 32).trim()}` : ''}
+${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
+melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
@@ -9453,6 +11029,9 @@ stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(2, i)).join(',')}
         * = ${hx16(RELOC + 0x3500)}
 clamp8T: ${chunk(clamp8T).trim()}
 ` : ''}
+; The image used to be padded out to $bfff to buy load-time headroom -- the staged copy of the
+; compressed stream was pinned to the image's top, so a taller image lifted it. There is no
+; staged copy any more, so the padding bought nothing and cost a kilobyte of disk and load time.
 ${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the profiler lives above the relocated
                             ; tables: it must not crowd the shipping build out of the
                             ; space it has left below screen buffer B. PLAN=3 claims
@@ -9641,45 +11220,47 @@ try {
     }
   }
   // The charset ships as a raw binary for the loader to place, not as part of the image.
+  // The .bin files are no longer inputs to anything -- the disk is assembled straight from the
+  // arrays below. Kept because they are handy to hexdump when a glyph looks wrong.
   writeFileSync('./iray-charset.bin', Buffer.from(fontA));
   // Same for the sprite bitmaps, which go to $c000 -- the first of VIC bank 3's free slots.
   // They were at $2000 in bank 0 before the bank-3 move, competing with code for address space;
   // now they are graphics living in the graphics bank, which is what bank 3 is for.
   if (SPRITES) writeFileSync('./iray-sprites.bin', Buffer.from(ORBBM.flat()));
   if (SPRITES) writeFileSync('./iray-holes.bin', Buffer.from(HOLEBM.flat()));
+  // $7100 charset then $7900 codes, as one blob with the gap padded, so it is a single segment
+  if (DIE) writeFileSync('./iray-face.bin', Buffer.from(
+    [...FACEART.chars, ...Array(0x800 - 2048).fill(0), ...FACEART.screen]
+));
   writeFileSync('./iray.prg', Buffer.from(r.prg));
+
+  // ---- THE DISK: a loader plus four raw files, each landing where it belongs ----
+  // This replaces the compressed self-extracting PRG. That scheme decoded IN PLACE, so every
+  // packed stream had to exist TWICE at once -- as loaded low, and as a staged copy high -- and
+  // the two piles had closed to 156 bytes of each other. A packed byte cost two bytes of
+  // headroom; a byte of image LENGTH bought one back, which is why the image was padded rather
+  // than compacted. None of that arithmetic exists any more: nothing is duplicated, so the only
+  // constraint left is that the program fits in the machine, which it does with 9K to spare.
+  // Compression was only ever buying load TIME, and a fastloader buys that better.
+  const prgOf = (addr, data) => Buffer.from([addr & 255, addr >> 8, ...data]);
+  const DISK = [
+    // name, load address, bytes, and whether it must land BEFORE the charset copy
+    { tag: 'C', name: 'ICHR', first: true, at: 0xc000, data: [...fontA] },
+    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: 0xc000, data: ORBBM.flat() },
+                   { tag: 'H', name: 'IHOL', at: HOLEBASE, data: HOLEBM.flat() }] : []),
+    { tag: 'M', name: 'IMG', at: r.org, data: [...r.bytes] },
+  ];
+  const { buildLoader } = await import('./loader-src.mjs');
+  const ld = buildLoader(assemble, DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first })),
+                         r.labels.entry);
   const d = D64.createEmpty('IRAY', '01');
-  d.writeFile('IMAZE'.padEnd(6) + '/PRG', r.prg, D64.FILE_TYPE_PRG);
-  // Single canonical disk. Every build overwrites it, so "the disk in the project root"
-  // is always the current build -- no -ntsc/-merge/foundation variants to get stale and
-  // mislead. iray.asm/iray.prg are the matching support files for diffing and label lookup.
+  d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);   // first, so LOAD"*" finds it
+  for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG);
   writeFileSync('./latest.d64', Buffer.from(d.getData()));
-  // SELFEXT=1: package as a COMPRESSED self-extracting PRG instead of a load-in-place image.
-  //
-  // Why this is the direction and not a size trick: a load-in-place image must be ONE contiguous
-  // run that the KERNAL can write with I/O mapped, which is what forces the charset to be shipped
-  // as a low "source" and copied up by cpChr, and what makes every hole in the image dead weight
-  // in the file. A decompressing loader places each element wherever we want -- including straight
-  // into $d000-$dfff, which LOAD can never reach.
-  //
-  // selfext.mjs is vendored from ~/GMC64/code UNCHANGED except its d64lib path. It is VICE-verified
-  // byte-exact upstream on a 57KB image spanning the I/O hole, so it is invoked as a subprocess
-  // rather than forked into this file: a verified packer that drifts is worth less than one that is
-  // slightly awkward to call.
-  // NOT optional any more, and NOSELFEXT is a debugging escape hatch that produces a disk which
-  // CANNOT RENDER: the charset is no longer in the image, so a plain load leaves $d000 full of
-  // whatever was there. It exists only to inspect the uncompressed image quickly.
-  if (!process.env.NOSELFEXT) {
-    const { execSync } = await import('child_process');
-    const out = execSync('node ./selfext.mjs ./iray.prg ./iray-c.prg ' +
-                         '--seg d000:./iray-charset.bin' +
-                         (SPRITES ? ' --seg c000:./iray-sprites.bin' +
-                                    ` --seg ${HOLEBASE.toString(16)}:./iray-holes.bin` : ''),
-                         { encoding: 'utf8' });
-    console.log(out.trim());
-    writeFileSync('./latest.d64', readFileSync('./iray-c.d64'));
-    console.log('latest.d64 is the COMPRESSED self-extracting build');
-  }
+  console.log(`disk: loader ${ld.prg.length}B + ` +
+    DISK.map(f => `${f.name} ${(f.data.length / 1024).toFixed(1)}K@$${f.at.toString(16)}`).join(' + ') +
+    `  = ${d.getFreeBlocks()} blocks free`);
+
   // Say how much room is left below the screen buffer. The data segment has nowhere to
   // grow -- charset A is at $3000 and buffer B sits in the way at $2400 -- so this going
   // quiet is the difference between a build error and a frame-by-frame corruption.
@@ -9894,6 +11475,12 @@ try {
       obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
       obL: 8, obR: 8, obBL: 8, obBR: 8,
       pfAcc: 39,                       // 13 phases x 3 bytes
+      // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
+      // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
+      // player's projected X overwrote the death trigger's reference angle every frame and you
+      // died the instant an angel reached you, standing still. Anything referenced as name+1
+      // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
+      pulsePh: 2, opx: 2, opy: 2,
       rayAcc: 2, edgAcc: 2, chnAcc: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
       tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
     };
