@@ -45,6 +45,27 @@ const M = [
  "1111111111111111","1111111111111111","1111111111111111",
  "1111111111111111","1111111111111111","1111111111111111","1111111111111111",
 ].map(r => r.split('').map(Number));
+// LEVEL2=1: a bare 8x8 room, purely somewhere to walk around the new puzzle objects. Not a
+// designed level -- no puzzle, just an exit hole, two sockets, two orbs and the angel, spread
+// out enough to look at from a distance and from on top of.
+const LEVEL2 = process.env.LEVEL2 === '1';
+if (LEVEL2) {
+  // Not a bare box: a plain 8x8 room has four wall runs and too few distinct step patterns for
+  // the charset generator, which wants six vertical steps. A pillar gives it those AND gives
+  // you a corner to walk an object behind.
+  const L2 = ["################",
+              "#........#######",
+              "#........#######",
+              "#..##....#######",
+              "#..##....#######",
+              "#........#######",
+              "#........#######",
+              "#........#######",
+              "#........#######",
+              "################","################","################",
+              "################","################","################","################"];
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) M[y][x] = L2[y][x] === '#' ? 1 : 0;
+}
 const map = []; for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) map.push(M[y][x]);
 
 // ---- ANGEL PATHING: a breadth-first distance map, filled a few cells per frame ----
@@ -2054,12 +2075,13 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
   }
 } else {
-  ORBS.push({ x: 8.5, y: 4.5, c: 0 });           // the corridor mouth
+  if (LEVEL2) { ORBS.push({ x: 2.5, y: 6.5, c: 0 }); ORBS.push({ x: 6.5, y: 2.5, c: 0 }); }
+  else ORBS.push({ x: 8.5, y: 4.5, c: 0 });      // the corridor mouth
   // The angel starts IMMEDIATELY BEHIND the orb. Walking up to the orb -- the one thing a new
   // player is drawn to -- then puts them at nearly the closest range, so they get the heartbeat
   // end of the detune straight away instead of the far-off flange. It also stops the encounter
   // depending on them happening to look away long enough for it to close the distance.
-  ORBS.push({ x: 9.5, y: 4.5, c: 0, tall: true });
+  ORBS.push(LEVEL2 ? { x: 8.5, y: 1.5, c: 0, tall: true } : { x: 9.5, y: 4.5, c: 0, tall: true });
 }
 // ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
 // where the entity stands, and a wandering angel puts a different configuration in front of the
@@ -2121,9 +2143,19 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 1 has ONE hole, at the far end of the corridor. The fall machinery alternates between two
 // so a drop can be exercised on a loop, so the second entry is the same cell: fall through it,
 // land back in the room, walk out again.
-const HOLES_AT = [[+(process.env.HOLEX ?? 14), +(process.env.HOLEY ?? 4)],
+const HOLES_AT = [[+(process.env.HOLEX ?? (LEVEL2 ? 8 : 14)), +(process.env.HOLEY ?? (LEVEL2 ? 8 : 4))],
                   [+(process.env.HOLE2X ?? 14), +(process.env.HOLE2Y ?? 4)]];
-const LANDS_AT = [[2, 2], [2, 2]];               // level 1: the drop puts you back in the room
+// SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
+// the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
+// orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
+// picks them up for free.
+const SOCKETS_AT = (process.env.SOCKETS ?? (LEVEL2 ? '3,3;6,6' : '')).split(';')
+  .filter(Boolean).map(p => p.split(',').map(Number));
+// Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
+// bitmaps, the fill colours and the ladder choice.
+const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
+                  ...SOCKETS_AT.map(h => ({ x: h[0], y: h[1], exit: false }))];
+const LANDS_AT = LEVEL2 ? [[1, 1], [1, 1]] : [[2, 2], [2, 2]];               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -2151,9 +2183,13 @@ for (let cell = 0; cell < 256; cell++) {
   // showed up as an orb popping in and out as you walked a corridor, present in cells 9 and 11
   // and missing in 10. Sampling a 3x3 grid makes the list a superset of what is reachable.
   const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
-  HOLES_AT.forEach(([hx0, hy0], L) => {         // same 3x3 eye grid the orbs used to share
-    if (Math.hypot(hx0 + 0.5 - cx, hy0 + 0.5 - cy) < HOLE_MAX_D &&
-        eye.some(([ex, ey]) => losFree(ex, ey, hx0 + 0.5, hy0 + 0.5)))
+  HOLELIKE.forEach((h, L) => {                  // same 3x3 eye grid the orbs used to share
+    // Each is capped by ITS OWN ladder's reach: a socket is half the radius, so its smallest
+    // rung runs out at half the distance and listing it further would cost a projection to
+    // draw nothing.
+    const maxD = h.exit ? HOLE_MAX_D : HOLE_MAX_D / 2;
+    if (Math.hypot(h.x + 0.5 - cx, h.y + 0.5 - cy) < maxD &&
+        eye.some(([ex, ey]) => losFree(ex, ey, h.x + 0.5, h.y + 0.5)))
       holeSee[L * 32 + (cell >> 3)] |= 1 << (cell & 7);
   });
 }
@@ -2783,104 +2819,134 @@ const HOLEBASE = 0xe800;                         // above the charsets: 75 slots
 // and the screen edge eats the shape faster than perspective grows it -- so vmag is needed only
 // down to d=0.90 and a plain sprite holds it from there. The hole leaves the screen entirely at
 // d = 0.88 - r = 0.667, where the ladder simply ends.
-const HOLE_LADDER = [];
-for (let w = 48; w >= 4; w -= 2) HOLE_LADDER.push({ w, d: 2 * F_COL * HOLER / w });
-for (let h = 85; h <= 129; h += 4) HOLE_LADDER.push({ d: 88 / h });
-HOLE_LADDER.sort((a, b) => a.d - b.d);           // nearest first, so holeHT descends in h
-// Rasterised by INVERTING the projection per screen row rather than by fitting an ellipse:
-// row y looks at ground distance Z = 88/(y-100), where the circle spans |X| <= sqrt(r^2-(Z-d)^2).
-// That is exact, and it is what puts the widest part of the shape BELOW its centre -- the near
-// half of the disc covers more rows than the far half, which is what reads as "lying down".
-const holeSpan = (d, y) => {
-  const Z = 88 / (y - 100), t = HOLER * HOLER - (Z - d) * (Z - d);
-  return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
-};
-for (const g of HOLE_LADDER) {
-  g.far = Math.round(100 + 88 / (g.d + HOLER));  // screen row of the sprite's TOP
-  g.near = 100 + 88 / (g.d - HOLER);
-  // Everything below is sized by what is ON SCREEN, not by the whole ellipse. Past d=1.09 the
-  // near half is under row 200 and sizing by the full shape would demand sprites to draw rows
-  // nobody can see -- it is exactly that clipping which keeps three sprites sufficient.
-  g.vis = Math.min(200, g.near) - g.far;
-  let vw = 0;
-  for (let y = g.far; y <= Math.min(200, Math.ceil(g.near)); y++)
-    vw = Math.max(vw, 2 * holeSpan(g.d, y + 0.5));
-  g.w = Math.max(g.w ?? 0, vw);                  // the far family already knows its nominal width
-  g.spr = Math.max(1, Math.min(3, Math.ceil(g.w / 24)));
-  if (g.w <= 12) g.spr = 1; else if (g.w <= 48) g.spr = Math.max(2, g.spr);
-  g.px = g.spr * 12;                             // logical bitmap width in multicolor pixels
-  g.mag = g.w > g.px ? 1 : 0;
-  g.vmag = g.vis > 21 ? 1 : 0;                   // taller than a sprite: expand it vertically
-  const cw = g.mag ? 2 : 1, ch = g.vmag ? 2 : 1; // screen columns and rows per bitmap pixel
-  if (g.vis > 21 * ch)
-    throw new Error(`hole rung at d=${g.d.toFixed(2)} shows ${g.vis.toFixed(1)} rows: too tall`);
-  if (g.w > g.px * cw)
-    throw new Error(`hole rung at d=${g.d.toFixed(2)} is ${g.w.toFixed(1)}c: past 3 sprites`);
-  g.grid = [...Array(21)].map((_, by) => {
-    const y = g.far + by * ch + ch / 2, s = holeSpan(g.d, y);
-    return [...Array(g.px)].map((_, bx) => {
-      const off = (bx - g.px / 2 + 0.5) * cw;    // apparent columns from centre
-      const a = Math.abs(off);
-      if (a > s) return 0;
-      // TWO inks, so one bitmap serves the exit hole AND a socket. The RIM is bit pair 01, a
-      // shared register; the FILL is pair 10, which is obC -- the one ink that can differ per
-      // sprite. So the same rung reads as a pit (fill black), an empty socket (fill floor
-      // colour, leaving a ring) or a seated orb (fill the orb's colour), for one byte.
-      // Below about two columns across there is no room for both, and an all-rim dot is the
-      // honest answer -- a distant hole should shrink to a mark, not develop an outline.
-      return (s > 2 * HOLE_RIM * cw && a <= s - HOLE_RIM * cw) ? 2 : 1;
+// ---- one ladder builder, so a socket is the SAME SHAPE at a different radius ----
+// A socket cannot just reindex the hole's ladder at a longer distance: for a flat disc the
+// apparent WIDTH scales as r/d but the HEIGHT as r/d^2, so a rung matched on width at twice the
+// distance comes out twice too flat. Same projection, same code, different r -- and because the
+// socket is half the radius its rungs are mostly one sprite, so the second ladder is cheap.
+// slot0 is where its bitmaps start in the shared HOLEBASE block.
+function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true) {
+  const L = [];
+  for (let w = wMax; w >= 4; w -= wStep) L.push({ w, d: 2 * F_COL * r / w });
+  // The near family exists because a BIG disc's widest part goes below row 200 and
+  // width stops keying the table. A socket never gets that big -- its widest rung is
+  // already the closest it can be drawn at all -- so it has no near field.
+  if (nearFam) for (let h = 85; h <= 129; h += 4) L.push({ d: 88 / h });
+  L.sort((a, b) => a.d - b.d);           // nearest first, so hT descends in h
+  // Rasterised by INVERTING the projection per screen row rather than by fitting an ellipse:
+  // row y looks at ground distance Z = 88/(y-100), where the circle spans |X| <= sqrt(r^2-(Z-d)^2).
+  // That is exact, and it is what puts the widest part of the shape BELOW its centre -- the near
+  // half of the disc covers more rows than the far half, which is what reads as "lying down".
+  const span = (d, y) => {
+    const Z = 88 / (y - 100), t = r * r - (Z - d) * (Z - d);
+    return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
+  };
+  for (const g of L) {
+    g.far = Math.round(100 + 88 / (g.d + r));  // screen row of the sprite's TOP
+    g.near = 100 + 88 / (g.d - r);
+    // Everything below is sized by what is ON SCREEN, not by the whole ellipse. Past d=1.09 the
+    // near half is under row 200 and sizing by the full shape would demand sprites to draw rows
+    // nobody can see -- it is exactly that clipping which keeps three sprites sufficient.
+    g.vis = Math.min(200, g.near) - g.far;
+    let vw = 0;
+    for (let y = g.far; y <= Math.min(200, Math.ceil(g.near)); y++)
+      vw = Math.max(vw, 2 * span(g.d, y + 0.5));
+    g.w = Math.max(g.w ?? 0, vw);                  // the far family already knows its nominal width
+    g.spr = Math.max(1, Math.min(3, Math.ceil(g.w / 24)));
+    if (g.w <= 12) g.spr = 1; else if (g.w <= 48) g.spr = Math.max(2, g.spr);
+    g.px = g.spr * 12;                             // logical bitmap width in multicolor pixels
+    g.mag = g.w > g.px ? 1 : 0;
+    g.vmag = g.vis > 21 ? 1 : 0;                   // taller than a sprite: expand it vertically
+    const cw = g.mag ? 2 : 1, ch = g.vmag ? 2 : 1; // screen columns and rows per bitmap pixel
+    if (g.vis > 21 * ch)
+      throw new Error(`hole rung at d=${g.d.toFixed(2)} shows ${g.vis.toFixed(1)} rows: too tall`);
+    if (g.w > g.px * cw)
+      throw new Error(`hole rung at d=${g.d.toFixed(2)} is ${g.w.toFixed(1)}c: past 3 sprites`);
+    g.grid = [...Array(21)].map((_, by) => {
+      const y = g.far + by * ch + ch / 2, s = span(g.d, y);
+      return [...Array(g.px)].map((_, bx) => {
+        const off = (bx - g.px / 2 + 0.5) * cw;    // apparent columns from centre
+        const a = Math.abs(off);
+        if (a > s) return 0;
+        // TWO inks, so one bitmap serves the exit hole AND a socket. The RIM is bit pair 01, a
+        // shared register; the FILL is pair 10, which is obC -- the one ink that can differ per
+        // sprite. So the same rung reads as a pit (fill black), an empty socket (fill floor
+        // colour, leaving a ring) or a seated orb (fill the orb's colour), for one byte.
+        // Below about two columns across there is no room for both, and an all-rim dot is the
+        // honest answer -- a distant hole should shrink to a mark, not develop an outline.
+        return (s > 2 * HOLE_RIM * cw && a <= s - HOLE_RIM * cw) ? 2 : 1;
+      });
     });
-  });
-  // A distant hole is under a row tall, so sampling row centres can miss it entirely and the
-  // rung comes out BLANK -- the hole would vanish at range rather than shrink to a dash. Force
-  // the row nearest its vertical centre to the nominal width whenever nothing was hit.
-  if (!g.grid.some(row => row.some(v => v))) {
-    const by = Math.max(0, Math.min(20, Math.round(((g.near + g.far) / 2 - g.far) / ch)));
-    for (let bx = 0; bx < g.px; bx++) {
-      const off = (bx - g.px / 2 + 0.5) * cw;
-      if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = 1;   // all rim: see above
+    // A distant hole is under a row tall, so sampling row centres can miss it entirely and the
+    // rung comes out BLANK -- the hole would vanish at range rather than shrink to a dash. Force
+    // the row nearest its vertical centre to the nominal width whenever nothing was hit.
+    if (!g.grid.some(row => row.some(v => v))) {
+      const by = Math.max(0, Math.min(20, Math.round(((g.near + g.far) / 2 - g.far) / ch)));
+      for (let bx = 0; bx < g.px; bx++) {
+        const off = (bx - g.px / 2 + 0.5) * cw;
+        if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = 1;   // all rim: see above
+      }
     }
+    if (50 + g.far > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
   }
-  if (50 + g.far > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
+  // One sprite's 63 bytes, taking multicolor pixels [x0, x0+12) of a rung's logical bitmap.
+  const sprite = (g, x0) => {
+    const b = [];
+    for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
+      b.push([0, 1, 2, 3].reduce((v, i) => v | (g.grid[y][x0 + k * 4 + i] << (6 - 2 * i)), 0));
+    b.push(0);
+    return b;
+  };
+  const BM = L.flatMap(g =>
+    [...Array(g.spr)].map((_, i) => sprite(g, i * 12)));
+  // Left half's slot; the right half is always the next one, so the runtime needs one pointer.
+  let _hslot = slot0;
+  const slotT = L.map(g => { const s = _hslot; _hslot += g.spr; return s; });
+  // h = 88/d, the same value the walls and the orb ladder are indexed by. A 23-entry DESCENDING
+  // list scanned at runtime, not the 256-byte table the orb ladder uses: this runs once a frame,
+  // so ~100 cycles of scanning is free, and a page-aligned table would have to be squeezed into
+  // the orb table region for no gain. Closer than the widest rung clamps to it (see NEAR FIELD
+  // above), further than the smallest is not drawn.
+  const hOf = g => Math.round(88 / g.d);
+  const hT = L.map(hOf);
+  // ...and a 256-byte h -> rung table, now that hTabT has freed a page to put one in. The scan
+  // was fine at 23 rungs and is not at 35: ~600 cycles of linear walk every frame the hole is
+  // visible, against 8 for a lookup. $ff = past the smallest rung; closer than the widest clamps.
+  const varT = [...Array(256)].map((_, h) => {
+    if (h >= hT[0]) return 0;
+    const v = hT.findIndex(t => t <= h);
+    return v < 0 ? 0xff : v;
+  });
+  if (hT.some((h, i) => i && h >= hT[i - 1]))
+    throw new Error('hole h thresholds are not strictly descending -- the scan needs them sorted');
+  // Columns from the hole's centre to the LEFT edge of the left sprite: half the bitmap's
+  // apparent width, not half the ellipse -- the ellipse is drawn centred inside the bitmap.
+  const xOffT = L.map(g => (g.px / 2) * (g.mag ? 2 : 1));
+  // Sprite Y = 50 + far, computed as (50 + far - h) + h so the runtime adds the live h.
+  const yBaseT = L.map(g => 50 + g.far - hOf(g));
+  if (yBaseT.some(v => v < 0 || v > 255)) throw new Error('yBaseT out of byte range');
+  // bits 0-1 = how many sprites this rung needs (1..3), bit 2 = hmag, bit 3 = vmag
+  const flagT = L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
+  return { L, BM, slotT, hT, varT, xOffT, yBaseT, flagT, hOf, slotEnd: _hslot };
 }
-// One sprite's 63 bytes, taking multicolor pixels [x0, x0+12) of a rung's logical bitmap.
-const holeSprite = (g, x0) => {
-  const b = [];
-  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
-    b.push([0, 1, 2, 3].reduce((v, i) => v | (g.grid[y][x0 + k * 4 + i] << (6 - 2 * i)), 0));
-  b.push(0);
-  return b;
-};
-const HOLEBM = HOLE_LADDER.flatMap(g =>
-  [...Array(g.spr)].map((_, i) => holeSprite(g, i * 12)));
-// Left half's slot; the right half is always the next one, so the runtime needs one pointer.
-let _hslot = 0;
-const holeSlotT = HOLE_LADDER.map(g => { const s = _hslot; _hslot += g.spr; return s; });
-// h = 88/d, the same value the walls and the orb ladder are indexed by. A 23-entry DESCENDING
-// list scanned at runtime, not the 256-byte table the orb ladder uses: this runs once a frame,
-// so ~100 cycles of scanning is free, and a page-aligned table would have to be squeezed into
-// the orb table region for no gain. Closer than the widest rung clamps to it (see NEAR FIELD
-// above), further than the smallest is not drawn.
-const holeHOf = g => Math.round(88 / g.d);
-const holeHT = HOLE_LADDER.map(holeHOf);
-// ...and a 256-byte h -> rung table, now that hTabT has freed a page to put one in. The scan
-// was fine at 23 rungs and is not at 35: ~600 cycles of linear walk every frame the hole is
-// visible, against 8 for a lookup. $ff = past the smallest rung; closer than the widest clamps.
-const holeVarT = [...Array(256)].map((_, h) => {
-  if (h >= holeHT[0]) return 0;
-  const v = holeHT.findIndex(t => t <= h);
-  return v < 0 ? 0xff : v;
-});
-if (holeHT.some((h, i) => i && h >= holeHT[i - 1]))
-  throw new Error('hole h thresholds are not strictly descending -- the scan needs them sorted');
-// Columns from the hole's centre to the LEFT edge of the left sprite: half the bitmap's
-// apparent width, not half the ellipse -- the ellipse is drawn centred inside the bitmap.
-const holeXOffT = HOLE_LADDER.map(g => (g.px / 2) * (g.mag ? 2 : 1));
-// Sprite Y = 50 + far, computed as (50 + far - h) + h so the runtime adds the live h.
-const holeYBaseT = HOLE_LADDER.map(g => 50 + g.far - holeHOf(g));
-if (holeYBaseT.some(v => v < 0 || v > 255)) throw new Error('holeYBaseT out of byte range');
-// bits 0-1 = how many sprites this rung needs (1..3), bit 2 = hmag, bit 3 = vmag
-const holeFlagT = HOLE_LADDER.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
+const HOLE = makeHoleLadder(HOLER, 2, 0);
+// A socket is orb-shadow sized. HOLER is 0.43 cells across and an orb is roughly 0.2, so half.
+// Coarser width steps than the exit hole: a socket is small enough that a size step is a pixel
+// or two, and the slots matter more than the smoothness.
+const SOCKR = +(process.env.SOCKR ?? HOLER / 2);
+// wMax 32, not 48: at half the radius a 48-column socket would be 0.55 cells away and
+// its far edge below row 250. Closer than the widest rung clamps to it, as the hole does.
+const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false);
+// The hole moved from a scan to a 256-byte h -> rung table when it reached 35 rungs (~600
+// cycles a frame). A socket ladder is a third of that, so the scan is ~100 cycles and a page
+// is worth more than the cycles here.
+if (HOLELIKE.length > 4) throw new Error(
+  `${HOLELIKE.length} hole-like entities: holeSeeT has room for 4 (32 bytes each). ` +
+  `More wants the per-level loading, not another table squeezed in.`);
+const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...SOCK.BM];
+const holeSlotT = HOLE.slotT, holeHT = HOLE.hT, holeVarT = HOLE.varT;
+const holeXOffT = HOLE.xOffT, holeYBaseT = HOLE.yBaseT, holeFlagT = HOLE.flagT;
+const holeHOf = HOLE.hOf;
 if (process.env.HOLEDUMP === '1') {
   console.error(`  hole ladder: r=${HOLER} (${(2 * HOLER).toFixed(2)} cells across), ` +
     `${HOLE_LADDER.length} rungs, ${HOLEBM.length} sprite slots`);
@@ -3335,6 +3401,10 @@ bfsTail = $85ef
 bfsC    = $8559
 bfsND   = $855a
 bfsN    = $855b
+hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
+hlKind  = $85dd                  ; which ladder holeTail is currently patched for
+hoI     = $85de                  ; holeOne's loop: which hole-like entity, and its
+hoOf    = $85df                  ;   LOS bitmap offset (index x 32)
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
@@ -8578,7 +8648,20 @@ ${FALL ? `
 ; never lose its sprite slots to them. A projection is ~2,400 cycles and this test is ~25,
 ; which is the ratio the whole candidate-list scheme exists for -- without it the hole paid
 ; full price every frame, including from cells it cannot be seen from at all, most of them.
-holeOne:lda pcell
+; Loops every hole-like entity: the LIVE exit hole, then every socket. Each has its own 32-byte
+; LOS bitmap, its own fill ink and (for sockets) its own ladder -- hlSet points holeTail at the
+; right one. The exits come first in HOLELIKE and only the live one is drawn, so the loop skips
+; the other; sockets are always live.
+holeOne:lda hlv                 ; the live exit hole first, so it can never lose a slot to a
+        sta hoI                 ;   socket -- the slots are allocated downward and it is the
+hoLp:   lda hoI                 ;   biggest thing here
+        asl                     ; x32: this entity's LOS bitmap
+        asl
+        asl
+        asl
+        asl
+        sta hoOf
+        lda pcell
         and #$07
         tay
         lda pcell
@@ -8586,17 +8669,28 @@ holeOne:lda pcell
         lsr
         lsr
         clc
-        adc hlvOf               ; 32 bytes of map per hole; hlvOf picks the live one
+        adc hoOf
         tax
         lda holeSeeT,x
         and orbBitT,y
-        beq hoNo
-        lda hlv
+        beq hoNx                ; not visible from this cell: ~25 cycles against a ~2,400 projection
+        lda hoI
+        jsr hlSet               ; ink and ladder for THIS one
+        lda hoI
         clc
-        adc #${hx(ORBS.length)} ; the live hole is entry ORBS.length + level in orbXCT/orbYCT
+        adc #${hx(ORBS.length)} ; hole-like entities follow the orbs in orbXCT/orbYCT
         sta oidx
-        jmp orbOne              ; tail call: orbOne branches to holeTail on the index
-hoNo:   rts
+        jsr orbOne              ; orbOne branches to holeTail on the index
+hoNx:   lda hoI
+        cmp #${hx(HOLES_AT.length)}
+        bcs hoInc               ; already past the exits: just step on
+        lda #${hx(HOLES_AT.length - 1)}
+        sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
+hoInc:  inc hoI
+        lda hoI
+        cmp #${hx(HOLELIKE.length)}
+        bcc hoLp
+        rts
 ` : ''}
 ${FALL ? `
 ; ================= the drop =================
@@ -10535,26 +10629,94 @@ fdfS:   dec fdN
 fdfDn:  rts
 ` : ''}
 
+; ---- hlSet: point holeTail at one hole-like entity's ladder, and pick up its ink ----
+; A = index into HOLELIKE. Exits come first, so anything at or past the exit count is a socket.
+; The six operands only need re-patching when the KIND changes, and a frame is normally one exit
+; then a run of sockets -- so this is two patch runs a frame, not one per entity.
+hlSet:  tay
+        lda hlFillT,y
+        sta hlFill
+        cpy #${hx(HOLES_AT.length)}
+        lda #$01                ; 1 = socket, 0 = exit hole
+        bcs hlS1
+        lda #$00
+hlS1:   cmp hlKind
+        beq hlSdn               ; already pointed the right way -- the usual case
+        sta hlKind
+        beq hlSh
+        ; ---- a socket's ladder ----
+        ; BOTH operand bytes, not just the low one: the two table sets are emitted next to each
+        ; other and nothing stops them straddling a page.
+        lda #<hlRungS
+        ldx #>hlRungS
+        jsr hlPokeR
+        lda #<sockYBaseT
+        ldx #>sockYBaseT
+        jsr hlPokeY
+        lda #<sockPtrT
+        ldx #>sockPtrT
+        jsr hlPokeP
+        lda #<sockFlagT
+        ldx #>sockFlagT
+        jsr hlPokeF
+        lda #<sockXOffT
+        ldx #>sockXOffT
+        jmp hlPokeX
+hlSh:   ; ---- the exit hole's ----
+        lda #<hlRungH
+        ldx #>hlRungH
+        jsr hlPokeR
+        lda #<holeYBaseT
+        ldx #>holeYBaseT
+        jsr hlPokeY
+        lda #<holePtrT
+        ldx #>holePtrT
+        jsr hlPokeP
+        lda #<holeFlagT
+        ldx #>holeFlagT
+        jsr hlPokeF
+        lda #<holeXOffT
+        ldx #>holeXOffT
+        jmp hlPokeX
+hlPokeR:sta hlRung+1
+        stx hlRung+2
+        rts
+hlPokeY:sta hlYB+1
+        stx hlYB+2
+        rts
+hlPokeP:sta hlPtr+1
+        stx hlPtr+2
+        rts
+hlPokeF:sta hlFlg+1
+        stx hlFlg+2
+        rts
+hlPokeX:sta hlXO1+1
+        stx hlXO1+2
+        sta hlXO2+1
+        stx hlXO2+2
+hlSdn:  rts
+
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
 ; Two sprites side by side, the left half and the right half of one ellipse, so the pair reads
 ; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
 ; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
 holeTail:
         ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
-        lda holeVarT,x          ;   linear scan while the ladder was 23 rungs; at 35 it was
+hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -> rung table,
+                                ;   hlRungS scans the socket's ${SOCK.L.length} rungs
         cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
         beq orbNo               ;   hole costs to draw.
         tax                     ; X = rung, and it indexes every table below
-        lda holeYBaseT,x        ; the sprite's TOP row is the ellipse's FAR edge, 100+88/(d+r),
+hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
         bcs orbNo
         cmp #251
         bcs orbNo               ; top past the last visible raster line
         sta o3
-        lda holePtrT,x
+hlPtr:  lda holePtrT,x          ; PATCHED
         sta ohP
-        lda holeFlagT,x
+hlFlg:  lda holeFlagT,x         ; PATCHED
         sta ohF                 ; bits 0-1 sprite count, bit 2 hmag, bit 3 vmag
         and #$03
         sta ohT                 ; 1, 2 or 3 sprites side by side, holding ONE ellipse
@@ -10592,7 +10754,7 @@ ohSetC: sta ohWc
         beq ohXP
         lda ocol                ; the centre sits ocol columns LEFT of column 0
         clc
-        adc holeXOffT,x
+hlXO1:  adc holeXOffT,x         ; PATCHED
         cmp #72
         bcs orbNo               ; even the pair's right edge is off the screen
         sta tmp
@@ -10602,7 +10764,7 @@ ohSetC: sta ohWc
         jmp ohXS
 ohXP:   lda ocol
         sec
-        sbc holeXOffT,x         ; s = ocol - half, the pair's start column
+hlXO2:  sbc holeXOffT,x         ; PATCHED. s = ocol - half, the pair's start column
         bcs ohXPP               ; s >= 0
         clc                     ; s < 0: b = s + 12, and the carry OUT of this add is a real
         adc #$0c                ;   sign flag, because it says the sum crossed back through 0
@@ -10673,13 +10835,9 @@ holeSlot:
         sta omPri               ;   the floor it lies in is background, so it still draws there
         lda ohP
         sta obP,x
-        lda #${hx(+(process.env.HOLEFILL ?? 0) & 15)}
-                                ; bit pair 10 is the per-sprite colour: the ONE ink that can
-                                ; differ per sprite, and so the whole difference between a pit
-                                ; and a socket. 0 = black = a hole you fall down. The floor
-                                ; colour leaves just the rim, which reads as an empty socket;
-                                ; an orb's colour reads as one seated in it. HOLEFILL=n to look.
-        sta obC,x
+        lda hlFill              ; bit pair 10 is the per-sprite colour: the ONE ink that can
+        sta obC,x               ;   differ per sprite, and so the whole difference between a pit
+                                ;   and a socket. Set from hlFillT by hlSet.
         sta obOcc,x
         lda oidx                ; and MARK THE SLOT as a hole, so occStamp can tell. It fills no
         sta obIX,x              ;   stamp state at all, and it no longer sits reliably at the end
@@ -10811,6 +10969,14 @@ holePtrT: !byte ${holeSlotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
 holeXOffT: !byte ${holeXOffT.join(',')}
 holeYBaseT: !byte ${holeYBaseT.join(',')}
 holeFlagT: !byte ${holeFlagT.join(',')}
+        ; ---- the socket's ladder: same tables, half the radius ----
+        ; No 256-byte h -> rung table for this one. The hole earned its page at 35 rungs; a
+        ; socket has ${SOCK.L.length}, so hlRungS scans and the page stays spent on something else.
+sockPtrT: !byte ${SOCK.slotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
+sockXOffT: !byte ${SOCK.xOffT.join(',')}
+sockYBaseT: !byte ${SOCK.yBaseT.join(',')}
+sockFlagT: !byte ${SOCK.flagT.join(',')}
+sockHT: !byte ${SOCK.hT.join(',')}   ; DESCENDING h thresholds, scanned by hlRungS
 orbColLT: !byte ${orbColLT.join(',')}
 orbColRT: !byte ${orbColRT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
@@ -10872,8 +11038,8 @@ orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte ${[...orbXC, ...HOLES_AT.map(h => h[0])].join(',')}
-orbYCT: !byte ${[...orbYC, ...HOLES_AT.map(h => h[1])].join(',')}
+orbXCT: !byte ${[...orbXC, ...HOLELIKE.map(h => h.x)].join(',')}
+orbYCT: !byte ${[...orbYC, ...HOLELIKE.map(h => h.y)].join(',')}
 landXT: !byte ${LANDS_AT.map(l => l[0]).join(',')}
 landYT: !byte ${LANDS_AT.map(l => l[1]).join(',')}
 orbColT2: !byte ${orbCol.join(',')}
@@ -10904,6 +11070,27 @@ ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
 ${edgeSrc('edA', SCR_A)}
 ${edgeSrc('edB', SCR_B)}
 chainEnd:
+        ; ---- the two rung finders, in the sliver before fallSnapD at $4900 ----
+        ; Out here only because the main code block ends a few bytes short of ORB_SMALL once
+        ; PROFILE adds its ticks. Reached by a patched jsr from holeTail, so nothing falls in.
+        * = $48c3
+; X = h. A = the rung, or $ff for "past the smallest".
+hlRungH:lda holeVarT,x
+        rts
+; The socket scans instead. sockHT descends, so the first threshold at or below h is the rung,
+; and h above the first entry clamps to rung 0 -- the same rule holeVarT bakes in.
+hlRungS:txa
+        ldy #$00
+hrsL:   cmp sockHT,y
+        bcs hrsHit
+        iny
+        cpy #${hx(SOCK.L.length)}
+        bcc hrsL
+        lda #$ff
+        rts
+hrsHit: tya
+        rts
+
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
         * = ${hx16(ORB_VART)}
@@ -11075,6 +11262,13 @@ bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
 bfsQ:   !fill ${BFS_Q}, 0
+        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
+        ; 32 bytes each. It lived in the fall's block until the sockets made it too big for the
+        ; slack there.
+holeSeeT: !byte ${holeSee.join(",")}
+        ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
+        ; a seated one -- the whole difference, one byte. See holeTail.
+hlFillT: !byte ${HOLELIKE.map(h => h.exit ? 0 : 15).join(',')}
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte ${holeVarT.join(',')}
@@ -11099,7 +11293,6 @@ arcTopT: !byte ${arcTopT.join(',')}
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
 blkT: !byte ${blkT.join(',')}
-holeSeeT: !byte ${holeSee.join(",")}
 ${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
 mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
@@ -11115,7 +11308,7 @@ orbY0T: !byte ${orbYC.join(',')}
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
-orbSeenT: !byte ${[...ORBS, ...HOLES_AT].map(() => 0).join(',')}
+orbSeenT: !byte ${[...ORBS, ...HOLELIKE].map(() => 0).join(',')}
 angAccT: !byte ${ORBS.map(() => 0).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}

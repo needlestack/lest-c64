@@ -374,6 +374,10 @@ bfsTail = $85ef
 bfsC    = $8559
 bfsND   = $855a
 bfsN    = $855b
+hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
+hlKind  = $85dd                  ; which ladder holeTail is currently patched for
+hoI     = $85de                  ; holeOne's loop: which hole-like entity, and its
+hoOf    = $85df                  ;   LOS bitmap offset (index x 32)
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
@@ -5360,7 +5364,20 @@ orbNo:  ldx oidx
 ; never lose its sprite slots to them. A projection is ~2,400 cycles and this test is ~25,
 ; which is the ratio the whole candidate-list scheme exists for -- without it the hole paid
 ; full price every frame, including from cells it cannot be seen from at all, most of them.
-holeOne:lda pcell
+; Loops every hole-like entity: the LIVE exit hole, then every socket. Each has its own 32-byte
+; LOS bitmap, its own fill ink and (for sockets) its own ladder -- hlSet points holeTail at the
+; right one. The exits come first in HOLELIKE and only the live one is drawn, so the loop skips
+; the other; sockets are always live.
+holeOne:lda hlv                 ; the live exit hole first, so it can never lose a slot to a
+        sta hoI                 ;   socket -- the slots are allocated downward and it is the
+hoLp:   lda hoI                 ;   biggest thing here
+        asl                     ; x32: this entity's LOS bitmap
+        asl
+        asl
+        asl
+        asl
+        sta hoOf
+        lda pcell
         and #$07
         tay
         lda pcell
@@ -5368,17 +5385,28 @@ holeOne:lda pcell
         lsr
         lsr
         clc
-        adc hlvOf               ; 32 bytes of map per hole; hlvOf picks the live one
+        adc hoOf
         tax
         lda holeSeeT,x
         and orbBitT,y
-        beq hoNo
-        lda hlv
+        beq hoNx                ; not visible from this cell: ~25 cycles against a ~2,400 projection
+        lda hoI
+        jsr hlSet               ; ink and ladder for THIS one
+        lda hoI
         clc
-        adc #$02 ; the live hole is entry ORBS.length + level in orbXCT/orbYCT
+        adc #$02 ; hole-like entities follow the orbs in orbXCT/orbYCT
         sta oidx
-        jmp orbOne              ; tail call: orbOne branches to holeTail on the index
-hoNo:   rts
+        jsr orbOne              ; orbOne branches to holeTail on the index
+hoNx:   lda hoI
+        cmp #$02
+        bcs hoInc               ; already past the exits: just step on
+        lda #$01
+        sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
+hoInc:  inc hoI
+        lda hoI
+        cmp #$02
+        bcc hoLp
+        rts
 
 
 ; ================= the drop =================
@@ -7102,26 +7130,94 @@ fdfS:   dec fdN
 fdfDn:  rts
 
 
+; ---- hlSet: point holeTail at one hole-like entity's ladder, and pick up its ink ----
+; A = index into HOLELIKE. Exits come first, so anything at or past the exit count is a socket.
+; The six operands only need re-patching when the KIND changes, and a frame is normally one exit
+; then a run of sockets -- so this is two patch runs a frame, not one per entity.
+hlSet:  tay
+        lda hlFillT,y
+        sta hlFill
+        cpy #$02
+        lda #$01                ; 1 = socket, 0 = exit hole
+        bcs hlS1
+        lda #$00
+hlS1:   cmp hlKind
+        beq hlSdn               ; already pointed the right way -- the usual case
+        sta hlKind
+        beq hlSh
+        ; ---- a socket's ladder ----
+        ; BOTH operand bytes, not just the low one: the two table sets are emitted next to each
+        ; other and nothing stops them straddling a page.
+        lda #<hlRungS
+        ldx #>hlRungS
+        jsr hlPokeR
+        lda #<sockYBaseT
+        ldx #>sockYBaseT
+        jsr hlPokeY
+        lda #<sockPtrT
+        ldx #>sockPtrT
+        jsr hlPokeP
+        lda #<sockFlagT
+        ldx #>sockFlagT
+        jsr hlPokeF
+        lda #<sockXOffT
+        ldx #>sockXOffT
+        jmp hlPokeX
+hlSh:   ; ---- the exit hole's ----
+        lda #<hlRungH
+        ldx #>hlRungH
+        jsr hlPokeR
+        lda #<holeYBaseT
+        ldx #>holeYBaseT
+        jsr hlPokeY
+        lda #<holePtrT
+        ldx #>holePtrT
+        jsr hlPokeP
+        lda #<holeFlagT
+        ldx #>holeFlagT
+        jsr hlPokeF
+        lda #<holeXOffT
+        ldx #>holeXOffT
+        jmp hlPokeX
+hlPokeR:sta hlRung+1
+        stx hlRung+2
+        rts
+hlPokeY:sta hlYB+1
+        stx hlYB+2
+        rts
+hlPokeP:sta hlPtr+1
+        stx hlPtr+2
+        rts
+hlPokeF:sta hlFlg+1
+        stx hlFlg+2
+        rts
+hlPokeX:sta hlXO1+1
+        stx hlXO1+2
+        sta hlXO2+1
+        stx hlXO2+2
+hlSdn:  rts
+
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
 ; Two sprites side by side, the left half and the right half of one ellipse, so the pair reads
 ; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
 ; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
 holeTail:
         ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
-        lda holeVarT,x          ;   linear scan while the ladder was 23 rungs; at 35 it was
+hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -> rung table,
+                                ;   hlRungS scans the socket's 8 rungs
         cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
         beq orbNo               ;   hole costs to draw.
         tax                     ; X = rung, and it indexes every table below
-        lda holeYBaseT,x        ; the sprite's TOP row is the ellipse's FAR edge, 100+88/(d+r),
+hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
         bcs orbNo
         cmp #251
         bcs orbNo               ; top past the last visible raster line
         sta o3
-        lda holePtrT,x
+hlPtr:  lda holePtrT,x          ; PATCHED
         sta ohP
-        lda holeFlagT,x
+hlFlg:  lda holeFlagT,x         ; PATCHED
         sta ohF                 ; bits 0-1 sprite count, bit 2 hmag, bit 3 vmag
         and #$03
         sta ohT                 ; 1, 2 or 3 sprites side by side, holding ONE ellipse
@@ -7159,7 +7255,7 @@ ohSetC: sta ohWc
         beq ohXP
         lda ocol                ; the centre sits ocol columns LEFT of column 0
         clc
-        adc holeXOffT,x
+hlXO1:  adc holeXOffT,x         ; PATCHED
         cmp #72
         bcs orbNo               ; even the pair's right edge is off the screen
         sta tmp
@@ -7169,7 +7265,7 @@ ohSetC: sta ohWc
         jmp ohXS
 ohXP:   lda ocol
         sec
-        sbc holeXOffT,x         ; s = ocol - half, the pair's start column
+hlXO2:  sbc holeXOffT,x         ; PATCHED. s = ocol - half, the pair's start column
         bcs ohXPP               ; s >= 0
         clc                     ; s < 0: b = s + 12, and the carry OUT of this add is a real
         adc #$0c                ;   sign flag, because it says the sum crossed back through 0
@@ -7240,13 +7336,9 @@ holeSlot:
         sta omPri               ;   the floor it lies in is background, so it still draws there
         lda ohP
         sta obP,x
-        lda #$00
-                                ; bit pair 10 is the per-sprite colour: the ONE ink that can
-                                ; differ per sprite, and so the whole difference between a pit
-                                ; and a socket. 0 = black = a hole you fall down. The floor
-                                ; colour leaves just the rim, which reads as an empty socket;
-                                ; an orb's colour reads as one seated in it. HOLEFILL=n to look.
-        sta obC,x
+        lda hlFill              ; bit pair 10 is the per-sprite colour: the ONE ink that can
+        sta obC,x               ;   differ per sprite, and so the whole difference between a pit
+                                ;   and a socket. Set from hlFillT by hlSet.
         sta obOcc,x
         lda oidx                ; and MARK THE SLOT as a hole, so occStamp can tell. It fills no
         sta obIX,x              ;   stamp state at all, and it no longer sits reliably at the end
@@ -7378,6 +7470,14 @@ holePtrT: !byte 160,162,164,166,169,172,175,178,181,184,187,190,193,196,198,200,
 holeXOffT: !byte 24,24,24,36,36,36,36,36,36,36,36,36,36,24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,6,6,6,6,6
 holeYBaseT: !byte 119,121,123,124,126,127,129,130,132,133,134,135,137,138,139,140,141,141,143,143,143,145,145,145,147,147,147,148,148,149,149,149,150,150,150
 holeFlagT: !byte 6,6,6,7,7,7,7,7,7,15,15,15,15,14,14,14,14,6,6,6,6,6,6,6,6,2,2,2,2,2,1,1,1,1,1
+        ; ---- the socket's ladder: same tables, half the radius ----
+        ; No 256-byte h -> rung table for this one. The hole earned its page at 35 rungs; a
+        ; socket has 8, so hlRungS scans and the page stays spent on something else.
+sockPtrT: !byte 235,237,239,241,243,245,246,247
+sockXOffT: !byte 24,24,24,12,12,6,6,6
+sockYBaseT: !byte 138,140,143,145,146,148,149,150
+sockFlagT: !byte 6,6,6,2,2,1,1,1
+sockHT: !byte 107,94,80,67,54,40,27,13   ; DESCENDING h thresholds, scanned by hlRungS
 orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1,23,21,21,19,17,15,13,12,11,11,10,9,8,7,6,5,5,4,3,2
 orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14,14,11,10,9,8,7,6,6,5,4,3,2,1,0
 orbBitT: !byte 1,2,4,8,16,32,64,128
@@ -7724,6 +7824,27 @@ edB12:	sta $e5e0,x
 	inc erow
 	jmp rfEdgeT
 chainEnd:
+        ; ---- the two rung finders, in the sliver before fallSnapD at $4900 ----
+        ; Out here only because the main code block ends a few bytes short of ORB_SMALL once
+        ; PROFILE adds its ticks. Reached by a patched jsr from holeTail, so nothing falls in.
+        * = $48c3
+; X = h. A = the rung, or $ff for "past the smallest".
+hlRungH:lda holeVarT,x
+        rts
+; The socket scans instead. sockHT descends, so the first threshold at or below h is the rung,
+; and h above the first entry clamps to rung 0 -- the same rule holeVarT bakes in.
+hlRungS:txa
+        ldy #$00
+hrsL:   cmp sockHT,y
+        bcs hrsHit
+        iny
+        cpy #$08
+        bcc hrsL
+        lda #$ff
+        rts
+hrsHit: tya
+        rts
+
         * = $4d00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108
         !byte 104,101,98,95,93,90,88,86,83,81,79,78,76,74,73,71,70,68,67,65,64,63,62,61,60,59,58,57,56,55,54,53
@@ -8022,6 +8143,13 @@ bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
 bfsQ:   !fill 46, 0
+        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
+        ; 32 bytes each. It lived in the fall's block until the sockets made it too big for the
+        ; slack there.
+holeSeeT: !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
+        ; a seated one -- the whole difference, one byte. See holeTail.
+hlFillT: !byte 0,0
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,31,30,30,30,29,29,29,29,28,28,28,27,27,27,27,26,26,26,25,25,25,24,24,24,24,23,23,23,22,22,22,21,21,21,21,20,20,20,19,19,19,18,18,18,18,17,17,17,16,16,16,15,15,15,15,14,14,14,13,13,13,12,12,12,12,12,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -8046,7 +8174,6 @@ arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
 blkT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,2,2,0,0,0,0,0,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-holeSeeT: !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
