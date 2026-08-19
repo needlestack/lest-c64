@@ -714,15 +714,15 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-        lda #$80
+        lda #$55
         sta px
-        lda #$02
+        lda #$01
         sta px+1
-        lda #$80
+        lda #$e0
         sta py
         lda #$01
         sta py+1
-        lda #$00
+        lda #$16
         sta pa
         jsr sndInit             ; the drone starts before the first frame and never stops
 
