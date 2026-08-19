@@ -1527,16 +1527,17 @@ const DUMPH = flag('DUMPH');
 // static start angle, e.g. PA=4f. Angle-dependent glitches are far easier to pin here than
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
-const PA = hexArg('PA', 0x16, 0xff);   // ...facing across the room toward the corridor mouth
+const PA = hexArg('PA', 0x3b, 0xff);   // ...across the room, NOT down the corridor axis
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
-// Level 1 opens in the room's north-west corner looking diagonally across it and down the
-// corridor. The old start (2.5, 1.5 facing along +x) put a wall a cell in front of the camera
-// once the room's walls were stepped in, so the game began on a black screen. This is the most
-// expensive sightline on the map -- nearly every wall run at once, 12 fps against the level's
-// 25.9 average -- and that is deliberate: it is the establishing shot.
-const PX = hexArg('PX', 0x0155, 0xffff);
-const PY = hexArg('PY', 0x01e0, 0xffff);
+// Level 1 opens in the room's north-west corner looking diagonally across it. The old start
+// (2.5, 1.5 facing along +x) put a wall a cell in front of the camera once the room's walls
+// were stepped in, so the game began on a near-black screen.
+// Chosen for the opening FRAME RATE as much as the composition: this angle shows the room
+// without also looking straight down the full corridor, so it opens at 20 fps rather than the
+// 12 of the corridor-axis view. First impressions run on the first frame.
+const PX = hexArg('PX', 0x01f6, 0xffff);
+const PY = hexArg('PY', 0x0149, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
