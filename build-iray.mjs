@@ -2889,10 +2889,21 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
         // two inks. Only the socket asks for two: pair 01, a shared register, for its grey1
         // rim, and obC for the grey3 inside. Below about two columns across there is no room
         // for both and it goes all-rim, which is honest for a mark that small.
-        if (!rim) return 2;
-        return (s > 2 * rim * cw && a <= s - rim * cw) ? 2 : 1;
+        return 2;                    // rim is applied as an outline below, not per row
       });
     });
+    // ---- the rim as a true OUTLINE ----
+    // Testing |off| against the row's own half-width only rims the LEFT and RIGHT of each row,
+    // so the topmost and bottommost rows of the ellipse showed their fill straight to the edge
+    // and the ring was open at top and bottom. Erode instead: any filled pixel with a hole in
+    // the four neighbours -- or with nothing beyond the edge of the bitmap -- is rim.
+    if (rim) {
+      const inside = g.grid.map(row => row.map(v => v !== 0));
+      const at = (y, x) => y >= 0 && y < 21 && x >= 0 && x < g.px && inside[y][x];
+      for (let y = 0; y < 21; y++) for (let x = 0; x < g.px; x++)
+        if (inside[y][x] && !(at(y - 1, x) && at(y + 1, x) && at(y, x - 1) && at(y, x + 1)))
+          g.grid[y][x] = 1;
+    }
     // A distant hole is under a row tall, so sampling row centres can miss it entirely and the
     // rung comes out BLANK -- the hole would vanish at range rather than shrink to a dash. Force
     // the row nearest its vertical centre to the nominal width whenever nothing was hit.
@@ -2971,42 +2982,88 @@ const discSpan = (r, d, y) => {
   const Z = 88 / (y - 100), t = r * r - (Z - d) * (Z - d);
   return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
 };
+// ---- the seated orb, built in SOURCE ART coordinates ----
+// Take the orb as drawn, slide it DOWN until the ball's midpoint sits on the widest row of its
+// own ground shadow, and trim whatever falls below the shadow's silhouette. Doing it here rather
+// than per rung means the shape is decided once and every scale inherits it, and the ball keeps
+// its real shading and highlight instead of a procedural dome.
+//   rows 0..14 ball (midpoint 7), 15..17 gap, 18..20 shadow (widest row 19)
+const ORBSEAT12 = (() => {
+  const SHADOW_MID = 19, drop = SHADOW_MID - BALL_MID;
+  // how far down each column the shadow reaches -- this is the trim line
+  const foot = [...Array(12)].map((_, x) => {
+    let f = -1;
+    for (let y = 18; y <= 20; y++) if (ORBSRC12[y][x]) f = y;
+    return f;
+  });
+  return [...Array(21)].map((_, y) => [...Array(12)].map((_, x) => {
+    if (foot[x] < 0 || y > foot[x]) return 0;   // past the shadow: trimmed away
+    const sy = y - drop;
+    return (sy >= 0 && sy <= 14) ? ORBSRC12[sy][x] : 0;
+  }));
+})();
+{ const n = ORBSEAT12.flat().filter(Boolean).length;
+  if (!n) throw new Error('the seated orb came out empty'); }
+const _sc = [...Array(12).keys()].filter(x => ORBSEAT12.some(r => r[x]));
+const _sr = [...Array(21).keys()].filter(y => ORBSEAT12[y].some(v => v));
+const EX0 = Math.min(..._sc), EX1 = Math.max(..._sc);
+const EY0 = Math.min(..._sr), EY1 = Math.max(..._sr);
+const EW = EX1 - EX0 + 1, EH = EY1 - EY0 + 1;
+// the same majority-of-NxN-samples rule orbScale uses, so it degrades the same way
+function seatScale(w, h) {
+  const out = [...Array(h)].map(() => new Array(w).fill(0));
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
+    const t = [0, 0, 0, 0];
+    for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
+      const sx = Math.floor(EX0 + EW * (dx + (i + 0.5) / ORBSAMP) / w);
+      const sy = Math.floor(EY0 + EH * (dy + (j + 0.5) / ORBSAMP) / h);
+      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[ORBSEAT12[sy][sx]]++;
+    }
+    let best = 0;
+    for (let v = 1; v < 4; v++) if (t[v] >= t[best]) best = v;
+    out[dy][dx] = best;
+  }
+  return out;
+}
 function makeSeatLadder(sockL, slot0) {
   const L = [];
   let slot = slot0;
+  // where the shadow's widest row sits inside the seated art, as a fraction of its height
+  const MIDF = (19 - EY0 + 0.5) / EH;
   for (const sg of sockL) {
     const cw = sg.mag ? 2 : 1;
-    const domeH = 176 * SOCKR / sg.d;            // screen rows the dome stands proud
-    const botY = Math.min(200, sg.near);         // the socket's near edge, its lowest row
-    const topY = sg.far - domeH;                 // the top of the dome
-    // vmag from the WHOLE shape, dome included -- the socket's own choice is for a shorter one
-    const vmag = (botY - topY) > 21 ? 1 : 0, ch = vmag ? 2 : 1;
-    if ((botY - topY) > 21 * ch) continue;       // too close to draw: the near rungs just end
-    const g = { d: sg.d, px: sg.px, mag: sg.mag, vmag, spr: sg.spr,
-                far: Math.round(topY), domeH };
-    g.grid = [...Array(21)].map((_, by) => {
-      const y = g.far + by * ch + ch / 2;
-      const sSock = discSpan(SOCKR, sg.d, y);    // inside the socket's ellipse at this row?
-      return [...Array(sg.px)].map((_, bx) => {
-        const off = (bx - sg.px / 2 + 0.5) * cw, a = Math.abs(off);
-        if (sSock > 0 && a <= sSock)             // the socket's own arc: rim stays rim, the
-          return (sSock > 2 * HOLE_RIM * cw && a <= sSock - HOLE_RIM * cw) ? 2 : 1;
-        if (y >= sg.far) return 0;               // below the socket's top but outside it
-        // ...the dome. Resampled from the ball's TOP HALF, so it keeps its shading and its
-        // highlight, exactly as orbScale does for a standing orb.
-        const t = [0, 0, 0, 0];
-        for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
-          const fx = (bx + (i + 0.5) / ORBSAMP) / sg.px;
-          const fy = (by + (j + 0.5) / ORBSAMP) * ch / (sg.far - g.far);
-          const sx = Math.floor(SX0 + SW * fx), sy = Math.floor((BALL_MID + 1) * fy);
-          if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[ORBSRC12[sy][sx]]++;
-        }
-        let best = 0;
-        for (let v = 1; v < 4; v++) if (t[v] >= t[best]) best = v;
-        return best;
+    // The orb is as wide as the socket and keeps the source aspect in bitmap pixels, exactly as
+    // orbW does for a standing one. Its own height is what decides vmag here -- the socket's
+    // choice is for a flat ellipse and the dome is much taller than that.
+    const w = sg.px, hWant = Math.max(1, Math.round(EH * w / EW));
+    // rows the whole thing needs: the dome above the shadow line, plus the socket below it
+    const sockBelow = Math.max(0, Math.min(200, sg.near) - (sg.far + (sg.near - sg.far) / 2));
+    let vmag = sg.vmag, ch = vmag ? 2 : 1, h = hWant;
+    if (hWant * MIDF + sockBelow / ch > 21 && !vmag) { vmag = 1; ch = 2; h = Math.max(1, Math.round(hWant / 2)); }
+    const art = seatScale(w, h);
+    const artMid = Math.round(h * MIDF);
+    // rasterise the socket's own ellipse at THIS rung's ch, rather than copying the socket
+    // rung's grid, which may be at a different vertical scale
+    const widY = artMid;                     // the ellipse's widest row IS the shadow line
+    const far = Math.round(100 + 88 / sg.d) - widY * ch;
+    const grid = [...Array(21)].map((_, by) => {
+      const y = far + by * ch + ch / 2;
+      const sS = discSpan(SOCKR, sg.d, y);
+      return [...Array(w)].map((_, bx) => {
+        const off = (bx - w / 2 + 0.5) * cw;
+        return (sS > 0 && Math.abs(off) <= sS) ? 2 : 0;
       });
     });
-    g.slot = slot; slot += g.spr;
+    if (HOLE_RIM) {                          // the same closed outline the empty socket gets
+      const ins = grid.map(r => r.map(v => v !== 0));
+      const at = (y, x) => y >= 0 && y < 21 && x >= 0 && x < w && ins[y][x];
+      for (let y = 0; y < 21; y++) for (let x = 0; x < w; x++)
+        if (ins[y][x] && !(at(y-1,x) && at(y+1,x) && at(y,x-1) && at(y,x+1))) grid[y][x] = 1;
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++)   // the orb, sitting in it
+      if (art[y][x]) grid[y][x] = art[y][x];
+    const g = { d: sg.d, px: w, mag: sg.mag, vmag, spr: sg.spr, far, grid, slot };
+    slot += g.spr;
     L.push(g);
   }
   return { L, BM: L.flatMap(g => [...Array(g.spr)].map((_, i) => {
@@ -3023,6 +3080,14 @@ function makeSeatLadder(sockL, slot0) {
            slotEnd: slot };
 }
 const SEAT = makeSeatLadder(SOCK.L, 0);
+if (process.env.SEATDUMP) {
+  const i = +process.env.SEATDUMP;
+  const ch = { 0: '.', 1: 'u', 2: 'B', 3: 'H' };
+  console.error(`  socket rung ${i}: px=${SOCK.L[i].px} mag=${SOCK.L[i].mag} vmag=${SOCK.L[i].vmag} far=${SOCK.L[i].far}`);
+  SOCK.L[i].grid.forEach((r, y) => console.error('   S' + String(y).padStart(2) + ' ' + r.map(v => ch[v]).join('')));
+  console.error(`  seat rung ${i}: far=${SEAT.L[i].far}`);
+  SEAT.L[i].grid.forEach((r, y) => console.error('   E' + String(y).padStart(2) + ' ' + r.map(v => ch[v]).join('')));
+}
 fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, 0x10000);
 fitsBank('seat ladder', SEATBASE, SEAT.BM.length, 0xd000);
 if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of byte range');
