@@ -1638,6 +1638,9 @@ const WIGGLE = flag('WIGGLE');
 // $8600 for every build, not just the instrumented ones. Keeping ONE base for all configs
 // matters beyond fitting: a measurement build has to have the same table layout as the build
 // it is measuring, or the number describes a different program.
+// Buffers that exist ONLY at runtime -- nothing is ever emitted into them, so every checker
+// that works from the emitted image is blind to them and must be told. See fallSnapD/fallSnapS.
+const RUNTIME_BUFS = { fallSnapD: 1000, fallSnapS: 1000 };
 const RELOC = +(process.env.RELOC ?? 0x8600);
 // NOEDGE=1: skip choosing a ramp/step piece and store SOLID at every wall-top cell. Renders
 // wrong on purpose -- it exists only to price the selection, which cannot be isolated any
@@ -3325,6 +3328,13 @@ ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested 
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
                                  ;   $ff every frame except while carrying
+; ---- the fall's two SCREEN SNAPSHOTS, 1000 bytes each ----
+; fallDraw scrolls one room past another by copying rows out of these. They are written and read
+; ONLY at runtime -- nothing is emitted into them -- so before they were named here the hole
+; report counted both as free space and handed them out twice: the angel path table landed on
+; $4900 and the BFS distance maps on $6200, and the drop came up as a screenful of garbage.
+fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
+fallSnapS = $6200                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
 fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing
@@ -10878,11 +10888,20 @@ ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
 ${edgeSrc('edA', SCR_A)}
 ${edgeSrc('edB', SCR_B)}
 chainEnd:
-        ; ---- the angel's pathing code, in the hole between the chains and HTABLE ----
-        ; It lives out here rather than in the main code block because that block ends 77 bytes
-        ; short of ORB_SMALL at $3d00, and PROFILE's extra ticks alone were enough to overrun it.
-        ; Nothing falls through to here; both routines are reached by jsr.
-        * = $48c3
+        * = ${hx16(HTABLE)}
+hTabT:  ${chunk(hTab, 32).trim()}
+        * = ${hx16(ORB_VART)}
+orbVarT: !byte ${orbVarT.join(',')}
+        ; ---- the angel's distance maps, its pathing code, and its queue ----
+        ; NOT at $4900 or $6200: those are the fall's screen snapshots, which are runtime-only
+        ; and so invisible to the hole report until it was told about them. Putting the path
+        ; table on one and these maps on the other is what turned the drop into garbage.
+        ; The two maps are ping-ponged -- bfsTick builds the WORK one a few cells a frame while
+        ; anPath reads the LIVE one -- and both are page-aligned because a whole cell byte
+        ; indexes them. bfsD0 lives off at $ae00 because this gap is not big enough for both.
+        * = $5e00
+bfsD1:  !fill 256, 255
+        * = $5f00
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
 ; BFS guarantees one exists for every reachable cell, so the only $ff cases are a map that has
@@ -11035,10 +11054,11 @@ bfsFin: lda bfsFor
         sta bfsStN+2
         rts
 
-        * = ${hx16(HTABLE)}
-hTabT:  ${chunk(hTab, 32).trim()}
-        * = ${hx16(ORB_VART)}
-orbVarT: !byte ${orbVarT.join(',')}
+        ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
+bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
+pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
+pathDYT: !byte 0,0,1,255
+bfsQ:   !fill ${BFS_Q}, 0
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte ${holeVarT.join(',')}
@@ -11047,19 +11067,6 @@ holeVarT: !byte ${holeVarT.join(',')}
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
-        ; ---- the angel's distance maps ----
-        ; Two of them, ping-ponged: bfsTick builds the WORK map a few cells a frame while anPath
-        ; reads the LIVE one, so the angel never sees a half-filled fill. Page-aligned because
-        ; both are indexed by a whole cell byte. Contents are built at runtime; the zeros here
-        ; are only what the loader writes.
-        * = $6200
-bfsD0:  !fill 256, 255
-bfsD1:  !fill 256, 255
-bfsQ:   !fill ${BFS_Q}, 0
-        ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
-bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
-pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
-pathDYT: !byte 0,0,1,255
         * = ${hx16(FROWT)}          ; the fall's animation data, out of the image's own segment
 arcYT: !byte ${arcYT.join(',')}     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte ${arcET.join(',')}
@@ -11238,7 +11245,9 @@ ${CVXSEAM ? `; Emitted only when CVXSEAM=0. With every run-to-run boundary drawi
 ; and the renderer no longer cares which it is.` : `cpLoT:  !byte ${cpLo.join(',')}
 cpHiT:  !byte ${cpHi.join(',')}`}
 ` : ''}
-${PLAN === 3 ? `        * = ${hx16(RELOC + 0x2900)}
+${PLAN === 3 ? `        * = $ae00
+bfsD0:  !fill 256, 255          ; the angel's other distance map -- see bfsD1 at $5e00
+        * = ${hx16(RELOC + 0x2900)}
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
 ; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the
 ; hottest lookup in the renderer. The single-copy rampT/stepT are not emitted at all under
@@ -11617,13 +11626,18 @@ try {
     // exactly as unhelpful as the sprite-slot figure that counted the orbs as free room. A
     // squatter's extent is unknown, so reserve its whole page and report what is left either side.
     const holes = (r.holes ?? []).flatMap(([lo, hi]) => {
-      const pages = [...new Set(eqs.filter(([, a]) => a >= lo && a < hi)
-        .map(([, a]) => a & ~255))].sort((a, b) => a - b);
+      // A squatter reserves every page its size touches, not just the page its address is in.
+      // fallSnapD/fallSnapS are 1000 bytes each, and reserving one page of each would still
+      // have offered the other three -- which is the bug this block exists to prevent.
+      const squat = eqs.filter(([, a]) => a >= lo && a < hi)
+        .map(([n, a]) => [a & ~255, (a + (RUNTIME_BUFS[n] ?? 1) - 1) | 255]);
+      const pages = [...new Set(squat.map(([p]) => p))].sort((a, b) => a - b);
       if (!pages.length) return [[lo, hi, []]];
+      const endOf = p => Math.max(...squat.filter(([q]) => q === p).map(([, e]) => e)) + 1;
       const out = []; let at = lo;
       for (const p of pages) {
         if (p > at) out.push([at, p, []]);                       // free run before this squatter
-        at = Math.max(at, p + 256);
+        at = Math.max(at, endOf(p));
       }
       const names = eqs.filter(([, a]) => a >= lo && a < hi).map(([n]) => n);
       out.push([pages[0], Math.min(hi, at), names]);             // the squatted pages themselves
@@ -11710,6 +11724,7 @@ try {
       // player's projected X overwrote the death trigger's reference angle every frame and you
       // died the instant an angel reached you, standing still. Anything referenced as name+1
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
+      ...RUNTIME_BUFS,
       pulsePh: 2, opx: 2, opy: 2,
       rayAcc: 2, edgAcc: 2, chnAcc: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
       tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
