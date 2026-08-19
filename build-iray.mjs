@@ -7333,8 +7333,10 @@ oSCwB:  lda #<cwB               ;   to both, so rfCw1's compare kept matching an
 oSCwS:  sta oSInvW+1            ;   never redrawn again.
 oSLoop: ldx osI
         lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
-        cmp #${hx(ORBS.length)} ;   below this test is always here, because ORBGATE is off by
-        bcs oSNext              ;   default and cannot be relied on to fence anything
+        cmp #$fe                ;   below this test is always here, because ORBGATE is off by
+        beq oSUpHf              ;   default and cannot be relied on to fence anything
+        cmp #${hx(ORBS.length)}
+        bcs oSNext
 ${ORBGATE ? `        lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
 ` : ''}
@@ -7468,6 +7470,21 @@ oSDsk:  inc osI
         cmp osN
         bcs oSDn
         jmp oSLoop
+; ---- the UPPER half of a tall entity: take the priority bit, stamp nothing ----
+; Its rows are already covered -- orbBlankT is negative for a two-sprite variant so the LOWER
+; slot's span reaches over both -- but $d01b is per SPRITE, and without its bit set this half
+; draws in front of the very occluders the lower half just laid down.
+; The lower half is always the slot BEFORE it: orbOne does stx onvL / inc onv / ldx onv, and
+; entity slots run upward from 0 while holes come downward from 8, so the pair is contiguous.
+; occStamp walks slots in ascending order, so the lower half's bit is already in omPri here.
+oSUpHf: dex
+        lda orbBitT,x
+        and omPri
+        beq oSNext              ; the lower half was not occluded, so neither is this one
+        inx
+        lda orbBitT,x
+        ora omPri
+        sta omPri
 oSNext: inc osI
         lda osI
         cmp osN
@@ -8377,7 +8394,7 @@ oNoX2:  lda o0
         ora omX8
         sta omX8
 oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EXCEPT its identity
-        lda #$ff                ; ---- and it must NOT stamp ----
+        lda #$fe                ; ---- and it must NOT stamp ----
         sta obIX,x              ; The old note here said the two halves span the same columns, so
                                 ; the upper slot could just copy the lower's record and let the
                                 ; stamp pass clip by column. But the stamp clips by ROW too, from
@@ -8388,9 +8405,13 @@ oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EX
                                 ; second rectangle 21 rows above it: a bar of occluder standing
                                 ; two to three cells clear over the angel's head, occluding
                                 ; correctly but far too much.
-                                ; $ff is the same "not an entity" marker the icon and the hole
-                                ; use, and obIX is read nowhere but occStamp, so this costs
-                                ; nothing and needs no new state.
+                                ; $fe rather than the icon/hole's $ff, because this slot is not
+                                ; simply "nothing": STAMPING is per ENTITY but PRIORITY is per
+                                ; SPRITE. Marking it $ff skipped it outright and its $d01b bit
+                                ; stopped being set, so the angel's top half drew IN FRONT of the
+                                ; occluders it was supposed to be behind. occStamp gives $fe its
+                                ; own arm -- inherit the bit, stamp nothing. Both values are
+                                ; >= ORBS.length, so the ordinary reject still catches them.
         lda obV,y
         sta obV,x
         lda obOcc,y
