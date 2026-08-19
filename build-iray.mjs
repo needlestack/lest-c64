@@ -1608,6 +1608,11 @@ const RAYCNT = flag('RAYCNT');
 // PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
 const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
+// SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. seamSpan is ~9% of
+// the frame on a long sightline and every one of those seams is a one-pixel line on a wall a
+// handful of rows tall. 0 = off, which is the default because this is a LOOK decision, not a
+// free win: the far corridor is exactly where the seams get culled and exactly where the eye is.
+const SEAMFAR = +(process.env.SEAMFAR ?? 0);
 const SEAMS = process.env.SEAMS !== '0';
 // CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
 // They were dropped from convex ends because the silhouette there already steps 20+ rows so
@@ -1982,7 +1987,11 @@ if (process.env.ORBSCATTER) {
   }
 } else {
   ORBS.push({ x: 8.5, y: 4.5, c: 0 });           // the corridor mouth
-  ORBS.push({ x: 11.5, y: 4.5, c: 0, tall: true });   // the angel, halfway down
+  // The angel starts IMMEDIATELY BEHIND the orb. Walking up to the orb -- the one thing a new
+  // player is drawn to -- then puts them at nearly the closest range, so they get the heartbeat
+  // end of the detune straight away instead of the far-off flange. It also stops the encounter
+  // depending on them happening to look away long enough for it to close the distance.
+  ORBS.push({ x: 9.5, y: 4.5, c: 0, tall: true });
 }
 // ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
 // where the entity stands, and a wandering angel puts a different configuration in front of the
@@ -5729,6 +5738,20 @@ seamSpan:
         cmp #$02
         bcc ssDn                ; adjacent columns: nothing between them to mark
         sta ssW                 ; span width in columns
+${SEAMFAR ? `        ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
+        ; colH is a height in ROWS, so it is 1/z up to a constant and the whole distance test is
+        ; one compare -- no arithmetic, and it lands BEFORE calcU and the divide, which is where
+        ; the cost actually is. Keep the TALLER end: a span running away from you still has a
+        ; near end worth marking, and only when BOTH ends are small is there nothing to see.
+        ldx spanL
+        lda colH,x
+        ldx spanR
+        cmp colH,x
+        bcs ssTall
+        lda colH,x
+ssTall: cmp #${hx(SEAMFAR)}
+        bcc ssDn                ; too far for a one-pixel line to read as panelling
+` : ''}
         ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
         ; coordinate along the face is the whole question: same cell, no boundary. 65% of
         ; spans stop on this test, which is exactly why u is derived here instead of in
