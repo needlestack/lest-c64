@@ -362,10 +362,18 @@ odCell  = $84f1                  ;   what won ($ff = nothing in reach), and the 
 odX     = $84f2
 odY     = $84f3
 odD     = $84f4
-apP     = $8557                  ; anPath: player and angel open-cell indices, the nibble
-apA     = $8558                  ;   index into pathT (16-bit) and which half of the byte
-apOff   = $8559
-apNib   = $855b
+apC     = $8557                  ; anPath: the angel's cell, and the distance it is looking for
+apD     = $8558
+bfsPhase = $85e9                 ; the incremental distance fill: 0 idle, 1 clearing, 2 expanding
+bfsCl   = $85ea                  ;   clear cursor, the cell each map is FOR, the queue ends,
+bfsFor  = $85eb                  ;   the cell being expanded and its distance+1, and the
+bfsDone = $85ec                  ;   per-frame expansion counter
+bfsWant = $85ed
+bfsHead = $85ee
+bfsTail = $85ef
+bfsC    = $8559
+bfsND   = $855a
+bfsN    = $855b
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
@@ -1633,6 +1641,7 @@ subFin:
                                 ;   trig and fractional-offset terms orbProj reads. Acting a frame
                                 ;   later than the press is invisible; projecting from last
                                 ;   frame pose would not be.
+        jsr bfsTick             ; a few cells of the angel distance map; see anPath
         jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run
                                 ;   before it, the angel decided on last frame visibility and so
                                 ;   took one free step on the very frame you turned to face it --
@@ -6293,65 +6302,6 @@ anNoMk: ldx amIdx
         jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
 anDone: rts
 
-; ---- anPath: A = the precomputed first step from the angel's cell toward the player ----
-; 0 = +x, 1 = -x, 2 = +y, 3 = -y, $ff = no answer (the player's own cell, or off the open map).
-; One BFS per player cell, done at build time; this is the lookup. ~40 cycles, and it runs once
-; per ANG_PERIOD -- every ~120 frames -- so its cost rounds to nothing per frame.
-anPath: lda py+1                ; player cell -> open-cell index
-        asl
-        asl
-        asl
-        asl
-        ora px+1
-        tax
-        lda pathIdxT,x
-        cmp #$ff
-        beq anPNo
-        sta apP
-        ldx amIdx               ; angel cell -> open-cell index
-        lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
-        tax
-        lda pathIdxT,x
-        cmp #$ff
-        beq anPNo
-        sta apA
-        ldx apP                 ; entry = apP * PATH_N + apA, as a nibble index
-        clc
-        lda pathRowLo,x
-        adc apA
-        sta apOff
-        lda pathRowHi,x
-        adc #$00
-        sta apOff+1
-        lda apOff               ; low bit picks the nibble; keep it before the shift eats it
-        and #$01
-        sta apNib
-        lsr apOff+1
-        ror apOff               ; nibble index -> byte index
-        clc
-        lda apOff
-        adc #<pathT             ; self-modified rather than (zp),y: no zero page to spare, and
-        sta apLd+1              ;   the engine patches operands elsewhere for the same reason
-        lda apOff+1
-        adc #>pathT
-        sta apLd+2
-apLd:   lda $ffff
-        ldx apNib
-        beq anPLo
-        lsr                     ; odd entry lives in the high nibble
-        lsr
-        lsr
-        lsr
-anPLo:  and #$0f
-        rts
-anPNo:  lda #$ff
-        rts
-
 ; ---- anTry: is the step in amTX/amTY legal? C set and amCell/amX/amY filled if so ----
 ; Steps are ORTHOGONAL ONLY now, so exactly one of amTX/amTY is zero and the old diagonal
 ; squeeze test -- both brushed cells must be open -- has no case left to guard. It is gone with
@@ -7762,42 +7712,163 @@ edB12:	sta $e5e0,x
 	inc erow
 	jmp rfEdgeT
 chainEnd:
-        ; ---- the angel's path table, in the hole between the chains and HTABLE ----
-        ; 1013 bytes, indexed 16-bit, so anPath patches the load's operand rather than burning
-        ; two bytes of zero page on a pointer.
+        ; ---- the angel's pathing code, in the hole between the chains and HTABLE ----
+        ; It lives out here rather than in the main code block because that block ends 77 bytes
+        ; short of ORB_SMALL at $3d00, and PROFILE's extra ticks alone were enough to overrun it.
+        ; Nothing falls through to here; both routines are reached by jsr.
         * = $48c3
-pathT: !byte 31,34,51,17,17,49,51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,3,47,50,19,17,17,51,51,51,51
-        !byte 51,17,17,17,17,51,51,3,51,51,19,51,51,34,31,0,0,48,51,51,51,51,51,19,17,17,17,49,51,51,48,51
-        !byte 51,49,51,35,2,15,0,0,51,51,51,51,51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,31,17,17,49
-        !byte 51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2,31,17,17,51,51,51,51,51,17,17,17,17,51
-        !byte 51,3,51,51,19,51,51,34,34,0,31,17,49,51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2
-        !byte 0,31,17,51,51,51,51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,0,0,31,49,51,51,51,51,19,17
-        !byte 17,17,49,51,51,48,51,51,49,51,35,34,2,0,0,31,51,51,51,51,51,17,17,17,17,51,51,3,51,51,19,51
-        !byte 51,34,34,0,0,0,63,51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,31,17,49
-        !byte 51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34,1,31,17,51,51,19,17,17,17,49,51,51,48
-        !byte 51,51,49,51,35,34,2,34,34,18,0,31,49,51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34
-        !byte 1,0,31,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,0,0,63,51,51,17,17,17,17
-        !byte 51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,31,17,17,17,17,17,49,51,51,48,51,51,49,51,35,34
-        !byte 2,34,34,18,34,34,2,31,17,17,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,31,17
-        !byte 17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34,2,0,31,17,17,17,17,51,51,3,51,51,19
-        !byte 51,51,34,34,32,34,34,33,34,34,0,0,31,17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34
-        !byte 2,0,0,31,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,0,0,31,17,17,49,51,51
-        !byte 48,51,51,49,51,35,34,2,34,34,18,34,34,2,0,0,0,31,17,17,51,51,3,51,51,19,51,51,34,34,32,34
-        !byte 34,33,34,34,0,0,0,0,31,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34,2,0,0,0,0,31
-        !byte 17,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,0,0,0,0,31,49,51,51,48,51,51,49,51,35
-        !byte 34,2,34,34,18,34,34,2,0,0,0,0,0,31,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,0
-        !byte 0,0,0,0,63,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,31,17,1,51,51
-        !byte 19,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,1,31,17,48,51,51,49,51,35,34,2,34,34,18,34
-        !byte 34,34,34,34,17,17,17,17,0,31,1,51,51,19,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,1,0
-        !byte 31,48,51,51,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,0,0,15,51,51,19,51,51,34,34,32
-        !byte 34,34,33,34,34,34,34,18,17,17,17,33,34,34,31,17,17,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17
-        !byte 17,17,34,34,2,31,17,17,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,33,34,34,0,31,17,49,51
-        !byte 35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,34,34,2,0,31,17,51,51,34,34,32,34,34,33,34,34,34
-        !byte 34,18,17,17,17,33,34,34,0,0,31,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,34,34,2,0
-        !byte 0,31,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,33,34,34,0,0,0,63,51,35,34,2,34,34,18
-        !byte 34,34,34,34,34,17,17,17,17,34,34,34,18,17,17,31,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,33
-        !byte 34,34,34,17,17,1,63,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,34,34,2,0,0,34,51,31,34,34
-        !byte 32,34,34,33,34,34,34,34,18,17,17,17,33,34,34,0,0,32,50,3,255
+; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
+; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
+; BFS guarantees one exists for every reachable cell, so the only $ff cases are a map that has
+; not been filled yet and the angel standing on the player, which anTry already prevents.
+; The two LIVE reads are self-modified rather than indirect -- the map base is one of two pages
+; and only changes when a fill completes, so paying for it per read would be silly.
+anPath: ldx amIdx
+        lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        sta apC
+        tax
+apLdA:  lda bfsD0,x             ; operand PATCHED to the live map
+        cmp #$ff
+        beq anPNo               ; no fill has completed yet
+        sec
+        sbc #$01
+        bcc anPNo               ; distance 0: standing on the player
+        sta apD
+        ldy #$00
+anPLp:  lda apC
+        clc
+        adc bfsDCT,y            ; no bounds check: the border is solid, so a step off the open
+        tax                     ;   region always lands in a wall and is rejected below
+        lda mapT,x
+        bne anPNx
+apLdB:  lda bfsD0,x             ; operand PATCHED to the live map
+        cmp apD
+        beq anPHit
+anPNx:  iny
+        cpy #$04
+        bcc anPLp
+anPNo:  lda #$ff
+        rts
+anPHit: tya
+        rts
+
+; ---- bfsTick: a few cells of the distance map, once a frame ----
+; The angel reads the map once per ANG_PERIOD -- ~120 frames -- so there is no reason to pay for
+; a whole fill in one of them. Phase 1 clears the work map 64 bytes a frame, phase 2 expands
+; BFS_RATE cells a frame; the whole thing lands in about 30 frames.
+;
+; If the player keeps moving, the fill in flight is allowed to FINISH rather than being
+; restarted -- bfsWant remembers where they got to and the next fill starts there. A map at most
+; one fill old is invisible on something that steps once every two seconds, and restarting
+; forever would mean the map never completed at all.
+bfsTick:
+        lda py+1                ; where the player is NOW
+        asl
+        asl
+        asl
+        asl
+        ora px+1
+        sta bfsWant
+        lda bfsPhase
+        bne bfsWork
+        lda bfsWant             ; idle: is the live map still for the right cell?
+        cmp bfsDone
+        beq bfsRts
+        sta bfsFor              ; no -- start one
+        lda #$00
+        sta bfsCl
+        lda #$01
+        sta bfsPhase
+bfsWork:
+        lda bfsPhase
+        cmp #$02
+        beq bfsExp
+        ; ---- phase 1: clear the work map, 64 bytes a frame ----
+        ldx bfsCl
+        ldy #64
+        lda #$ff
+bfsClL: 
+bfsClS: sta bfsD1,x             ; operand PATCHED to the work map
+        inx
+        dey
+        bne bfsClL
+        stx bfsCl
+        txa                     ; STX SETS NO FLAGS -- without this the branch tested the Z the
+        bne bfsRts              ;   clear loop exited on, which is always set, so the queue was
+                                ;   seeded after every 64-byte chunk instead of once the page
+                                ;   was done. X wrapping to 0 is what "finished" means here.
+        ldx bfsFor              ; seed the queue with the player's own cell at distance 0
+        lda #$00
+bfsSd:  sta bfsD1,x             ; operand PATCHED to the work map
+        lda bfsFor
+        sta bfsQ
+        lda #$00
+        sta bfsHead
+        lda #$01
+        sta bfsTail
+        lda #$02
+        sta bfsPhase
+        rts
+        ; ---- phase 2: expand BFS_RATE cells a frame ----
+bfsExp: lda #$02
+        sta bfsN
+bfsExL: lda bfsHead
+        cmp bfsTail
+        beq bfsFin              ; queue empty -> the map is complete
+        tax
+        lda bfsQ,x
+        sta bfsC
+        inc bfsHead
+        tax
+bfsLdC: lda bfsD1,x             ; operand PATCHED to the work map
+        clc
+        adc #$01
+        sta bfsND
+        ldy #$00
+bfsNbL: lda bfsC
+        clc
+        adc bfsDCT,y
+        tax
+        lda mapT,x              ; walls only -- blkT carries entities and they must not block
+        bne bfsNbN
+bfsLdN: lda bfsD1,x             ; operand PATCHED to the work map
+        cmp #$ff
+        bne bfsNbN              ; already has a distance
+        lda bfsND
+bfsStN: sta bfsD1,x             ; operand PATCHED to the work map
+        txa
+        ldx bfsTail
+        sta bfsQ,x
+        inc bfsTail
+bfsNbN: iny
+        cpy #$04
+        bcc bfsNbL
+        dec bfsN
+        bne bfsExL
+bfsRts: rts
+        ; ---- the fill is done: swap the maps over ----
+bfsFin: lda bfsFor
+        sta bfsDone
+        lda #$00
+        sta bfsPhase
+        lda apLdA+2             ; live <-> work, by swapping the patched high bytes
+        pha
+        lda bfsClS+2
+        sta apLdA+2
+        sta apLdB+2
+        pla
+        sta bfsClS+2
+        sta bfsSd+2
+        sta bfsLdC+2
+        sta bfsLdN+2
+        sta bfsStN+2
+        rts
+
         * = $4d00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108
         !byte 104,101,98,95,93,90,88,86,83,81,79,78,76,74,73,71,70,68,67,65,64,63,62,61,60,59,58,57,56,55,54,53
@@ -7937,15 +8008,18 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
-        ; ---- angel path lookups ----
-        ; pathIdxT is page-aligned: it is indexed by a whole cell byte, so a page cross would
-        ; cost a cycle on every lookup. pathRow* turn an open-cell index into its row offset,
-        ; which is a multiply by PATH_N the 6502 has no instruction for.
+        ; ---- the angel's distance maps ----
+        ; Two of them, ping-ponged: bfsTick builds the WORK map a few cells a frame while anPath
+        ; reads the LIVE one, so the angel never sees a half-filled fill. Page-aligned because
+        ; both are indexed by a whole cell byte. Contents are built at runtime; the zeros here
+        ; are only what the loader writes.
         * = $6200
-pathIdxT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,255,255,255,2,3,255,255,255,255,255,255,255,255,255,4,5,6,7,8,9,10,255,255,255,255,255,255,255,255,255,255,11,12,13,14,15,255,255,255,255,255,255,255,255,255,255,255,16,17,18,19,20,21,22,23,24,25,26,27,28,255,255,255,29,30,31,32,33,255,255,255,255,255,255,255,255,255,255,34,35,36,37,38,39,40,255,255,255,255,255,255,255,255,255,41,42,255,255,255,43,44,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
-pathRowLo: !byte 0,45,90,135,180,225,14,59,104,149,194,239,28,73,118,163,208,253,42,87,132,177,222,11,56,101,146,191,236,25,70,115,160,205,250,39,84,129,174,219,8,53,98,143,188
-pathRowHi: !byte 0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,3,4,4,4,4,4,4,5,5,5,5,5,5,6,6,6,6,6,7,7,7,7,7
-pathDXT: !byte 1,255,0,0
+bfsD0:  !fill 256, 255
+bfsD1:  !fill 256, 255
+bfsQ:   !fill 46, 0
+        ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
+bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
+pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         * = $6600          ; the fall's animation data, out of the image's own segment
 arcYT: !byte 255,248,232,216,200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300

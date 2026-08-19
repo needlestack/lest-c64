@@ -47,59 +47,50 @@ const M = [
 ].map(r => r.split('').map(Number));
 const map = []; for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) map.push(M[y][x]);
 
-// ---- ANGEL PATHING: the next step, precomputed for every (player cell, angel cell) pair ----
-// The greedy chase it replaces tried three steps, all of them straight at the player, and simply
-// stopped when every one was blocked. That was survivable on an open maze and is not on a room
-// with walls stepping into it: whenever the player is axis-aligned with an angel, two of the
-// three candidates degenerate to a no-op and a duplicate, so it got ONE try and stuck fast.
+// ---- ANGEL PATHING: a breadth-first distance map, filled a few cells per frame ----
+// The greedy chase this replaces tried three steps, all straight at the player, and stopped when
+// every one was blocked. Two of the three degenerated when the player was axis-aligned -- (0,dy),
+// (0,0), (0,dy) -- so it got ONE try and stuck fast against the room's stepped walls.
 //
-// A BFS from the player gives each cell its true step distance, and the guarantee falls out of
-// the construction: a cell only receives distance d because it was reached from a neighbour at
-// d-1, so a strictly-decreasing move always exists. No local minima, no wall-following.
+// BFS from the player gives every cell its true step distance, and the guarantee is in the
+// construction: a cell only receives distance d because it was reached from a neighbour at d-1,
+// so a strictly-decreasing move always exists. No local minima, no wall-following, no heuristic.
 //
-// The walls never move, so none of that needs to happen at runtime -- do the BFS from every open
-// cell HERE and store only the first step. 45 open cells is 45x45 = 2025 entries, one direction
-// each, packed two to a byte: 1013 bytes and about 40 cycles to read, once every ANG_PERIOD.
+// It is filled INCREMENTALLY -- a couple of cells per frame -- because the angel only reads it
+// once per ANG_PERIOD, ~120 frames away. A whole fill lands in about 30 frames, so the answer is
+// always ready and the cost is a couple of hundred cycles a frame instead of a ~7,000 cycle
+// spike every time the player crosses a cell boundary.
 //
-// Topology comes from `map` (walls), NOT blkT: blkT also carries entities as 2, and a fill that
-// treated those as solid would never assign the angel's own cell a value. Movable obstacles are
-// exactly why the greedy list survives as a fallback -- see anPath.
+// Two distance arrays, ping-ponged: the angel reads the LIVE one while the WORK one is being
+// built, so it never sees a half-finished map. Topology comes from mapT (walls), NOT blkT, which
+// also carries entities as 2 -- a fill treating those as solid would never reach the angel's own
+// cell. Movable obstacles are what the greedy pair still handles, as a fallback.
 const pathOpen = [];
 for (let c = 0; c < 256; c++) if (map[c] === 0) pathOpen.push(c);
 const PATH_N = pathOpen.length;
-const pathIdx = new Array(256).fill(255);
-pathOpen.forEach((c, i) => { pathIdx[c] = i; });
-// 0 = +x, 1 = -x, 2 = +y, 3 = -y, 15 = no step (only ever the player's own cell)
-const PATH_DIRS = [[1, 0, 0], [-1, 0, 1], [0, 1, 2], [0, -1, 3]];
-const pathNib = new Array(PATH_N * PATH_N).fill(15);
-for (let pi = 0; pi < PATH_N; pi++) {
-  const seen = new Array(256).fill(false);
-  seen[pathOpen[pi]] = true;
-  const q = [pathOpen[pi]];
+{ // one connected region, or an angel can be permanently marooned -- and so can the player
+  const seen = new Set([pathOpen[0]]), q = [pathOpen[0]];
   for (let h = 0; h < q.length; h++) {
     const c = q[h], cx = c & 15, cy = c >> 4;
-    for (const [dx, dy] of PATH_DIRS) {
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = cx + dx, ny = cy + dy;
       if (nx < 0 || nx > 15 || ny < 0 || ny > 15) continue;
       const n = ny * 16 + nx;
-      if (map[n] !== 0 || seen[n]) continue;
-      seen[n] = true;
-      // n was reached FROM c, so the step from n back toward the player is the reverse
-      pathNib[pi * PATH_N + pathIdx[n]] = PATH_DIRS.find(s => s[0] === -dx && s[1] === -dy)[2];
-      q.push(n);
+      if (map[n] === 0 && !seen.has(n)) { seen.add(n); q.push(n); }
     }
   }
+  if (seen.size !== PATH_N) throw new Error(
+    `angel path: ${PATH_N} open cells but only ${seen.size} reachable from ` +
+    `(${pathOpen[0] & 15},${pathOpen[0] >> 4}) -- the open cells are not one connected region`);
 }
-{ // every open cell must reach every other, or an angel can be permanently marooned
-  const bad = pathNib.findIndex((v, i) => v === 15 && Math.floor(i / PATH_N) !== i % PATH_N);
-  if (bad >= 0) throw new Error(`angel path: cell ${pathOpen[bad % PATH_N]} cannot reach ` +
-    `${pathOpen[Math.floor(bad / PATH_N)]} -- the open cells are not one connected region`);
-}
-const pathPacked = [];
-for (let i = 0; i < pathNib.length; i += 2)
-  pathPacked.push(pathNib[i] | ((pathNib[i + 1] ?? 15) << 4));
-console.error(`  angel path: ${PATH_N} open cells -> ${pathNib.length} entries, ` +
-  `${pathPacked.length} bytes packed`);
+// The queue never holds more than one entry per open cell, since a cell is enqueued when it is
+// first given a distance and never again.
+const BFS_Q = PATH_N + 1;
+// Cells expanded per frame. A fill is PATH_N expansions plus the array clear, so this sets how
+// many frames it takes; anything well under ANG_PERIOD is free.
+const BFS_RATE = +(process.env.BFSRATE ?? 2);
+console.error(`  angel path: ${PATH_N} open cells, BFS queue ${BFS_Q}, ${BFS_RATE} cells/frame ` +
+  `-> ~${Math.ceil(PATH_N / BFS_RATE) + 4} frames a fill`);
 
 // 16-bit fixed point: 256 units = 1 cell (8.8). deltaDist = 256/|dir|, clamp 65535.
 const SCALE = 256;
@@ -3318,10 +3309,18 @@ odCell  = $84f1                  ;   what won ($ff = nothing in reach), and the 
 odX     = $84f2
 odY     = $84f3
 odD     = $84f4
-apP     = $8557                  ; anPath: player and angel open-cell indices, the nibble
-apA     = $8558                  ;   index into pathT (16-bit) and which half of the byte
-apOff   = $8559
-apNib   = $855b
+apC     = $8557                  ; anPath: the angel's cell, and the distance it is looking for
+apD     = $8558
+bfsPhase = $85e9                 ; the incremental distance fill: 0 idle, 1 clearing, 2 expanding
+bfsCl   = $85ea                  ;   clear cursor, the cell each map is FOR, the queue ends,
+bfsFor  = $85eb                  ;   the cell being expanded and its distance+1, and the
+bfsDone = $85ec                  ;   per-frame expansion counter
+bfsWant = $85ed
+bfsHead = $85ee
+bfsTail = $85ef
+bfsC    = $8559
+bfsND   = $855a
+bfsN    = $855b
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
@@ -4536,7 +4535,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
 ${PROFILE && !PROFILE1 ? '' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
@@ -9734,65 +9733,6 @@ anNoMk: ldx amIdx
 ` : ''}        jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
 anDone: rts
 
-; ---- anPath: A = the precomputed first step from the angel's cell toward the player ----
-; 0 = +x, 1 = -x, 2 = +y, 3 = -y, $ff = no answer (the player's own cell, or off the open map).
-; One BFS per player cell, done at build time; this is the lookup. ~40 cycles, and it runs once
-; per ANG_PERIOD -- every ~120 frames -- so its cost rounds to nothing per frame.
-anPath: lda py+1                ; player cell -> open-cell index
-        asl
-        asl
-        asl
-        asl
-        ora px+1
-        tax
-        lda pathIdxT,x
-        cmp #$ff
-        beq anPNo
-        sta apP
-        ldx amIdx               ; angel cell -> open-cell index
-        lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
-        tax
-        lda pathIdxT,x
-        cmp #$ff
-        beq anPNo
-        sta apA
-        ldx apP                 ; entry = apP * PATH_N + apA, as a nibble index
-        clc
-        lda pathRowLo,x
-        adc apA
-        sta apOff
-        lda pathRowHi,x
-        adc #$00
-        sta apOff+1
-        lda apOff               ; low bit picks the nibble; keep it before the shift eats it
-        and #$01
-        sta apNib
-        lsr apOff+1
-        ror apOff               ; nibble index -> byte index
-        clc
-        lda apOff
-        adc #<pathT             ; self-modified rather than (zp),y: no zero page to spare, and
-        sta apLd+1              ;   the engine patches operands elsewhere for the same reason
-        lda apOff+1
-        adc #>pathT
-        sta apLd+2
-apLd:   lda $ffff
-        ldx apNib
-        beq anPLo
-        lsr                     ; odd entry lives in the high nibble
-        lsr
-        lsr
-        lsr
-anPLo:  and #$0f
-        rts
-anPNo:  lda #$ff
-        rts
-
 ; ---- anTry: is the step in amTX/amTY legal? C set and amCell/amX/amY filled if so ----
 ; Steps are ORTHOGONAL ONLY now, so exactly one of amTX/amTY is zero and the old diagonal
 ; squeeze test -- both brushed cells must be open -- has no case left to guard. It is gone with
@@ -10938,11 +10878,163 @@ ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
 ${edgeSrc('edA', SCR_A)}
 ${edgeSrc('edB', SCR_B)}
 chainEnd:
-        ; ---- the angel's path table, in the hole between the chains and HTABLE ----
-        ; 1013 bytes, indexed 16-bit, so anPath patches the load's operand rather than burning
-        ; two bytes of zero page on a pointer.
+        ; ---- the angel's pathing code, in the hole between the chains and HTABLE ----
+        ; It lives out here rather than in the main code block because that block ends 77 bytes
+        ; short of ORB_SMALL at $3d00, and PROFILE's extra ticks alone were enough to overrun it.
+        ; Nothing falls through to here; both routines are reached by jsr.
         * = $48c3
-pathT: ${chunk(pathPacked, 32).trim()}
+; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
+; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
+; BFS guarantees one exists for every reachable cell, so the only $ff cases are a map that has
+; not been filled yet and the angel standing on the player, which anTry already prevents.
+; The two LIVE reads are self-modified rather than indirect -- the map base is one of two pages
+; and only changes when a fill completes, so paying for it per read would be silly.
+anPath: ldx amIdx
+        lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        sta apC
+        tax
+apLdA:  lda bfsD0,x             ; operand PATCHED to the live map
+        cmp #$ff
+        beq anPNo               ; no fill has completed yet
+        sec
+        sbc #$01
+        bcc anPNo               ; distance 0: standing on the player
+        sta apD
+        ldy #$00
+anPLp:  lda apC
+        clc
+        adc bfsDCT,y            ; no bounds check: the border is solid, so a step off the open
+        tax                     ;   region always lands in a wall and is rejected below
+        lda mapT,x
+        bne anPNx
+apLdB:  lda bfsD0,x             ; operand PATCHED to the live map
+        cmp apD
+        beq anPHit
+anPNx:  iny
+        cpy #$04
+        bcc anPLp
+anPNo:  lda #$ff
+        rts
+anPHit: tya
+        rts
+
+; ---- bfsTick: a few cells of the distance map, once a frame ----
+; The angel reads the map once per ANG_PERIOD -- ~120 frames -- so there is no reason to pay for
+; a whole fill in one of them. Phase 1 clears the work map 64 bytes a frame, phase 2 expands
+; BFS_RATE cells a frame; the whole thing lands in about 30 frames.
+;
+; If the player keeps moving, the fill in flight is allowed to FINISH rather than being
+; restarted -- bfsWant remembers where they got to and the next fill starts there. A map at most
+; one fill old is invisible on something that steps once every two seconds, and restarting
+; forever would mean the map never completed at all.
+bfsTick:
+        lda py+1                ; where the player is NOW
+        asl
+        asl
+        asl
+        asl
+        ora px+1
+        sta bfsWant
+        lda bfsPhase
+        bne bfsWork
+        lda bfsWant             ; idle: is the live map still for the right cell?
+        cmp bfsDone
+        beq bfsRts
+        sta bfsFor              ; no -- start one
+        lda #$00
+        sta bfsCl
+        lda #$01
+        sta bfsPhase
+bfsWork:
+        lda bfsPhase
+        cmp #$02
+        beq bfsExp
+        ; ---- phase 1: clear the work map, 64 bytes a frame ----
+        ldx bfsCl
+        ldy #64
+        lda #$ff
+bfsClL: 
+bfsClS: sta bfsD1,x             ; operand PATCHED to the work map
+        inx
+        dey
+        bne bfsClL
+        stx bfsCl
+        txa                     ; STX SETS NO FLAGS -- without this the branch tested the Z the
+        bne bfsRts              ;   clear loop exited on, which is always set, so the queue was
+                                ;   seeded after every 64-byte chunk instead of once the page
+                                ;   was done. X wrapping to 0 is what "finished" means here.
+        ldx bfsFor              ; seed the queue with the player's own cell at distance 0
+        lda #$00
+bfsSd:  sta bfsD1,x             ; operand PATCHED to the work map
+        lda bfsFor
+        sta bfsQ
+        lda #$00
+        sta bfsHead
+        lda #$01
+        sta bfsTail
+        lda #$02
+        sta bfsPhase
+        rts
+        ; ---- phase 2: expand BFS_RATE cells a frame ----
+bfsExp: lda #${hx(BFS_RATE)}
+        sta bfsN
+bfsExL: lda bfsHead
+        cmp bfsTail
+        beq bfsFin              ; queue empty -> the map is complete
+        tax
+        lda bfsQ,x
+        sta bfsC
+        inc bfsHead
+        tax
+bfsLdC: lda bfsD1,x             ; operand PATCHED to the work map
+        clc
+        adc #$01
+        sta bfsND
+        ldy #$00
+bfsNbL: lda bfsC
+        clc
+        adc bfsDCT,y
+        tax
+        lda mapT,x              ; walls only -- blkT carries entities and they must not block
+        bne bfsNbN
+bfsLdN: lda bfsD1,x             ; operand PATCHED to the work map
+        cmp #$ff
+        bne bfsNbN              ; already has a distance
+        lda bfsND
+bfsStN: sta bfsD1,x             ; operand PATCHED to the work map
+        txa
+        ldx bfsTail
+        sta bfsQ,x
+        inc bfsTail
+bfsNbN: iny
+        cpy #$04
+        bcc bfsNbL
+        dec bfsN
+        bne bfsExL
+bfsRts: rts
+        ; ---- the fill is done: swap the maps over ----
+bfsFin: lda bfsFor
+        sta bfsDone
+        lda #$00
+        sta bfsPhase
+        lda apLdA+2             ; live <-> work, by swapping the patched high bytes
+        pha
+        lda bfsClS+2
+        sta apLdA+2
+        sta apLdB+2
+        pla
+        sta bfsClS+2
+        sta bfsSd+2
+        sta bfsLdC+2
+        sta bfsLdN+2
+        sta bfsStN+2
+        rts
+
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
         * = ${hx16(ORB_VART)}
@@ -10955,15 +11047,18 @@ holeVarT: !byte ${holeVarT.join(',')}
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
-        ; ---- angel path lookups ----
-        ; pathIdxT is page-aligned: it is indexed by a whole cell byte, so a page cross would
-        ; cost a cycle on every lookup. pathRow* turn an open-cell index into its row offset,
-        ; which is a multiply by PATH_N the 6502 has no instruction for.
+        ; ---- the angel's distance maps ----
+        ; Two of them, ping-ponged: bfsTick builds the WORK map a few cells a frame while anPath
+        ; reads the LIVE one, so the angel never sees a half-filled fill. Page-aligned because
+        ; both are indexed by a whole cell byte. Contents are built at runtime; the zeros here
+        ; are only what the loader writes.
         * = $6200
-pathIdxT: !byte ${pathIdx.join(',')}
-pathRowLo: !byte ${[...Array(PATH_N)].map((_, i) => (i * PATH_N) & 255).join(',')}
-pathRowHi: !byte ${[...Array(PATH_N)].map((_, i) => (i * PATH_N) >> 8).join(',')}
-pathDXT: !byte 1,255,0,0
+bfsD0:  !fill 256, 255
+bfsD1:  !fill 256, 255
+bfsQ:   !fill ${BFS_Q}, 0
+        ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
+bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
+pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         * = ${hx16(FROWT)}          ; the fall's animation data, out of the image's own segment
 arcYT: !byte ${arcYT.join(',')}     ;   which has no slack left above ORB_SMALL at $3300
@@ -11615,7 +11710,7 @@ try {
       // player's projected X overwrote the death trigger's reference angle every frame and you
       // died the instant an angel reached you, standing still. Anything referenced as name+1
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
-      pulsePh: 2, opx: 2, opy: 2, apOff: 2,
+      pulsePh: 2, opx: 2, opy: 2,
       rayAcc: 2, edgAcc: 2, chnAcc: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
       tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
     };
