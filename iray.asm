@@ -7530,11 +7530,7 @@ sockYBaseT: !byte 138,140,143,145,146,148,149,150
 sockFlagT: !byte 6,6,6,2,2,1,1,1
 sockHT: !byte 107,94,80,67,54,40,27,13   ; DESCENDING h thresholds, scanned by hlRungS
         ; ---- and an orb seated in one ----
-seatPtrT: !byte 37,39,41,43,45,47,48,49
-seatXOffT: !byte 24,24,24,12,12,6,6,6
-seatYBaseT: !byte 135,135,135,135,135,142,142,142
-seatFlagT: !byte 6,6,6,2,2,1,1,1
-seatHT: !byte 107,94,80,67,54,40,27,13
+
 orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1,23,21,21,19,17,15,13,12,11,11,10,9,8,7,6,5,5,4,3,2
 orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14,14,11,10,9,8,7,6,6,5,4,3,2,1,0
 orbBitT: !byte 1,2,4,8,16,32,64,128
@@ -7901,18 +7897,8 @@ hrsL:   cmp sockHT,y
         rts
 hrsHit: tya
         rts
-; The seat ladder is the socket ladder rung for rung, but a rung can be DROPPED when the shape
-; grows past a sprite, so it gets its own thresholds rather than sharing sockHT.
-hlRungE:txa
-        ldy #$00
-hreL:   cmp seatHT,y
-        bcs hreHit
-        iny
-        cpy #$08
-        bcc hreL
-        lda #$ff
-        rts
-hreHit: tya
+; A seated orb steps exactly as a standing one, so it reads the SAME table the orb does.
+hlRungE:lda orbVarT,x
         rts
 
         * = $4d00
@@ -8621,8 +8607,18 @@ posYT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $9700
 rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,236,237,237,237,238,238,238,238,239,239,239,239,240,240,240,241,241,241,241,242,242,242,243,243,243,244,244,244,244,245,245,245,246,246,246,247,247,247,248,248,248,249,249,249,250,250,250,251,251,251,252,252,252,253,253,253,254,254,254,255,255,255,255,0,0,1,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,10,10,10,11,11,11,12,12,12,12,13,13,13,14,14,14,15,15,15,15,16,16,16,17,17,17,17,18,18,18,18,19,19,19,20,20,20,20,21,21,21,21,22,22,22,22,23,23,23,23,24
+        ; ---- the seated orb's per-variant tables ----
+        ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
+        ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
+        ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
+        * = $97a0
+seatPtrT: !byte 37,38,38,39,39,40,40,41,42,42,43,37,38,39,40,42,43,44,45,46,47,48
+seatYBaseT: !byte 134,136,136,136,136,138,138,140,142,142,142,142,143,143,144,146,146,147,147,148,148,149
         * = $9800
 colGrpT: !byte 0,0,0,0,1,1,1,1,2,2,3,3,3,3,4,4,4,5,5,5,5,6,6,6,7,7,7,7,8,8,8,9,9,9,9,10,10,10,10,11,11,11,11,11,12,12,12,12,13,13,13,13,13,13,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,11,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,7,7,7,7,6,6,6,5,5,5,5,4,4,4,3,3,3,3,2,2,1,1,1,1,0,0,0,0
+        * = $98a0
+seatFlagT: !byte 13,13,13,13,13,13,13,13,13,13,13,1,1,1,1,1,1,1,1,1,1,1
+seatXOffT: !byte 12,12,12,12,12,12,12,12,12,12,12,6,6,6,6,6,6,6,6,6,6,6
 
         * = $9900
 ; The DDA deltas at quarter-angle resolution. 1024 entries each, addressed as four pages via

@@ -3025,54 +3025,62 @@ function seatScale(w, h) {
   }
   return out;
 }
-function makeSeatLadder(sockL, slot0) {
-  const L = [];
-  let slot = slot0;
-  // where the shadow's widest row sits inside the seated art, as a fraction of its height
-  const MIDF = (19 - EY0 + 0.5) / EH;
-  for (const sg of sockL) {
-    // A seated orb REPLACES the socket -- hlSet points the entity at this ladder instead of the
-    // socket's, so there is one sprite, not two, and nothing of the socket belongs in this
-    // bitmap. Drawing the ellipse under the orb here was what made it read as two objects.
-    // Width is the socket's, since they are the same diameter; the height follows the source
-    // aspect in bitmap pixels, exactly as orbW does for a standing orb.
-    const w = sg.px, hWant = Math.max(1, Math.round(EH * w / EW));
-    let vmag = 0, ch = 1, h = hWant;
-    if (h > 21) { vmag = 1; ch = 2; h = Math.max(1, Math.round(hWant / 2)); }
+// ---- the seated orb rides the ORB's ladder, not the socket's ----
+// Keying it to the socket's rungs gave it eight coarse steps and two widths, so it barely
+// shrank with distance and its hmag flipped while its width did not. It is an ORB, so it should
+// step exactly as one: index the same 256-byte orbVarT the orb uses, and give every orb variant
+// a seated bitmap of the same width the standing orb would have.
+// Only the WIDTHS are distinct -- the seated art is 3/4 as tall as it is wide, so the twenty-odd
+// orb heights collapse onto twelve bitmaps.
+function makeSeatLadder(slot0) {
+  const MIDF = (19 - EY0 + 0.5) / EH;          // the shadow line's place inside the art
+  const widths = [...new Set(ORBSRC.slice(0, ANG_V0)
+    .map(b => Math.max(1, orbW(ORBBMH[b]))))].sort((a, b) => b - a);
+  const BM = widths.map(w => {
+    const h = Math.max(1, Math.round(EH * w / EW));
     const art = seatScale(w, h);
-    // the art's shadow line is the floor, so it lands on the floor row for this distance
-    const artMid = Math.round(h * MIDF);
-    const far = Math.round(100 + 88 / sg.d) - artMid * ch;
-    const grid = [...Array(21)].map((_, y) =>
-      [...Array(w)].map((_, x) => (y < h ? art[y][x] : 0)));
-    const g = { d: sg.d, px: w, mag: sg.mag, vmag, spr: sg.spr, far, grid, slot };
-    slot += g.spr;
-    L.push(g);
+    const ox = (12 - w) >> 1;                  // centred in the sprite, like orbScale
+    const grid = [...Array(21)].map((_, y) => [...Array(12)].map((_, x) =>
+      (y < h && x >= ox && x - ox < w) ? art[y][x - ox] : 0));
+    const b = [];
+    for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
+      b.push([0, 1, 2, 3].reduce((v, q) => v | (grid[y][k * 4 + q] << (6 - 2 * q)), 0));
+    b.push(0);
+    return b;
+  });
+  const midOf = w => Math.round(Math.max(1, Math.round(EH * w / EW)) * MIDF);
+  // per ORB VARIANT, so orbVarT selects it
+  const src = [], flag = [], xOff = [], yBase = [];
+  for (let v = 0; v < ANG_V0; v++) {
+    const w = Math.max(1, orbW(ORBBMH[ORBSRC[v]])), e = ORBEXP[v] ? 1 : 0;
+    src.push(widths.indexOf(w));
+    // ONE sprite always: a seated orb is the top of a ball, never tall enough for two the way a
+    // standing one can be. exp drives both magnifications, exactly as it does for the orb.
+    flag.push(1 | (e ? 4 : 0) | (e ? 8 : 0));
+    xOff.push(6 * (e ? 2 : 1));
+    // the art's shadow line lands on the floor row, 100 + h, and yBase is that minus h
+    yBase.push(150 - midOf(w) * (e ? 2 : 1));
   }
-  return { L, BM: L.flatMap(g => [...Array(g.spr)].map((_, i) => {
-             const b = [];
-             for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
-               b.push([0, 1, 2, 3].reduce((v, q) =>
-                 v | (g.grid[y][i * 12 + k * 4 + q] << (6 - 2 * q)), 0));
-             b.push(0); return b; })),
-           slotT: L.map(g => g.slot),
-           hT: L.map(g => Math.round(88 / g.d)),
-           xOffT: L.map(g => (g.px / 2) * (g.mag ? 2 : 1)),
-           yBaseT: L.map(g => 50 + g.far - Math.round(88 / g.d)),
-           flagT: L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0)),
-           slotEnd: slot };
+  if (yBase.some(y => y < 0 || y > 255)) throw new Error('seat yBase out of byte range');
+  return { BM, slotT: src.map(i => slot0 + i), flagT: flag, xOffT: xOff, yBaseT: yBase,
+           slotEnd: slot0 + BM.length, nBM: BM.length };
 }
-const SEAT = makeSeatLadder(SOCK.L, 0);
-if (process.env.SEATDUMP) {
-  const i = +process.env.SEATDUMP;
-  const ch = { 0: '.', 1: 'u', 2: 'B', 3: 'H' };
-  console.error(`  socket rung ${i}: px=${SOCK.L[i].px} mag=${SOCK.L[i].mag} vmag=${SOCK.L[i].vmag} far=${SOCK.L[i].far}`);
-  SOCK.L[i].grid.forEach((r, y) => console.error('   S' + String(y).padStart(2) + ' ' + r.map(v => ch[v]).join('')));
-  console.error(`  seat rung ${i}: far=${SEAT.L[i].far}`);
-  SEAT.L[i].grid.forEach((r, y) => console.error('   E' + String(y).padStart(2) + ' ' + r.map(v => ch[v]).join('')));
+const SEAT = makeSeatLadder(0);
+if (process.env.SEATDUMP === 'steps') {
+  console.error('   d     h  var  orbW  seatBM  flag xOff yBase');
+  for (const d of [0.7,0.9,1.2,1.6,2,3,4,6,8,12,20]) {
+    const h = Math.min(255, Math.round(88 / d)), v = orbVarT[h];
+    if (v >= ANG_V0) { console.error(`  ${d} -> angel variant`); continue; }
+    const w = Math.max(1, orbW(ORBBMH[ORBSRC[v]]));
+    console.error(`  ${String(d).padStart(4)} ${String(h).padStart(3)} ${String(v).padStart(4)}` +
+      ` ${String(w).padStart(5)} ${String(SEAT.slotT[v]).padStart(7)}` +
+      ` ${String(SEAT.flagT[v]).padStart(5)} ${String(SEAT.xOffT[v]).padStart(4)}` +
+      ` ${String(SEAT.yBaseT[v]).padStart(6)}`);
+  }
 }
+
 fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, 0x10000);
-fitsBank('seat ladder', SEATBASE, SEAT.BM.length, 0xd000);
+fitsBank('seat ladder', SEATBASE, SEAT.nBM, 0xd000);
 if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of byte range');
 // The hole moved from a scan to a 256-byte h -> rung table when it reached 35 rungs (~600
 // cycles a frame). A socket ladder is a third of that, so the scan is ~100 cycles and a page
@@ -11179,11 +11187,7 @@ sockYBaseT: !byte ${SOCK.yBaseT.join(',')}
 sockFlagT: !byte ${SOCK.flagT.join(',')}
 sockHT: !byte ${SOCK.hT.join(',')}   ; DESCENDING h thresholds, scanned by hlRungS
         ; ---- and an orb seated in one ----
-seatPtrT: !byte ${SEAT.slotT.map(s => ((SEATBASE - VBANK) >> 6) + s).join(',')}
-seatXOffT: !byte ${SEAT.xOffT.join(',')}
-seatYBaseT: !byte ${SEAT.yBaseT.join(',')}
-seatFlagT: !byte ${SEAT.flagT.join(',')}
-seatHT: !byte ${SEAT.hT.join(',')}
+
 orbColLT: !byte ${orbColLT.join(',')}
 orbColRT: !byte ${orbColRT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
@@ -11297,18 +11301,8 @@ hrsL:   cmp sockHT,y
         rts
 hrsHit: tya
         rts
-; The seat ladder is the socket ladder rung for rung, but a rung can be DROPPED when the shape
-; grows past a sprite, so it gets its own thresholds rather than sharing sockHT.
-hlRungE:txa
-        ldy #$00
-hreL:   cmp seatHT,y
-        bcs hreHit
-        iny
-        cpy #${hx(SEAT.L.length)}
-        bcc hreL
-        lda #$ff
-        rts
-hreHit: tya
+; A seated orb steps exactly as a standing one, so it reads the SAME table the orb does.
+hlRungE:lda orbVarT,x
         rts
 
         * = ${hx16(HTABLE)}
@@ -11627,8 +11621,18 @@ posXT:  ${chunk(posX).trim()}
 posYT:  ${chunk(posY).trim()}
         * = ${hx16(RELOC + 0x1100)}
 rayOffT: !byte ${rayOff.join(',')}
+        ; ---- the seated orb's per-variant tables ----
+        ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
+        ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
+        ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
+        * = $97a0
+seatPtrT: !byte ${SEAT.slotT.map(v => ((SEATBASE - VBANK) >> 6) + (v - SEAT.slotT[0] + SEAT.slotT[0] - 0)).join(',')}
+seatYBaseT: !byte ${SEAT.yBaseT.join(',')}
         * = ${hx16(RELOC + 0x1200)}
 colGrpT: !byte ${colGrpT.join(',')}
+        * = $98a0
+seatFlagT: !byte ${SEAT.flagT.join(',')}
+seatXOffT: !byte ${SEAT.xOffT.join(',')}
 ${SPIN ? `spinIx: !byte 0
 spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
 spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
