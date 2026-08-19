@@ -362,6 +362,10 @@ odCell  = $84f1                  ;   what won ($ff = nothing in reach), and the 
 odX     = $84f2
 odY     = $84f3
 odD     = $84f4
+apP     = $8557                  ; anPath: player and angel open-cell indices, the nibble
+apA     = $8558                  ;   index into pathT (16-bit) and which half of the byte
+apOff   = $8559
+apNib   = $855b
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
@@ -6212,13 +6216,28 @@ anNoX:  lda py+1
         bcs anSetY
         lda #$ff
 anSetY: sta amDY
-anNoY:  lda amDX
+        ; ---- the precomputed shortest step, then the greedy list as a fallback ----
+        ; pathT is exact for the WALLS, which never move. It cannot know about a dropped orb, so
+        ; when anTry refuses the step the old greedy pair still gets its turn -- one wasted tick
+        ; against an obstacle that is rare, transient and two seconds from being irrelevant.
+anNoY:  jsr anPath
+        cmp #$ff
+        beq anGreed
+        tax
+        lda pathDXT,x
         sta amTX
-        lda amDY
+        lda pathDYT,x
         sta amTY
         jsr anTry
         bcs anGo
-        lda amDX                ; diagonal blocked: slide along x
+        ; ---- greedy fallback: slide along x, then along y ----
+        ; ORTHOGONAL ONLY. The diagonal candidate is gone, and with it the way an angel could
+        ; cross a cell it never occupied: a diagonal brushes two cells and anTry only ever
+        ; checked those for WALLS, never for visibility, so it could slip across ground the
+        ; player was looking straight at. Four directions means every step lands in exactly one
+        ; cell and that cell faces the obscured test.
+anGreed:
+        lda amDX
         sta amTX
         lda #$00
         sta amTY
@@ -6274,7 +6293,69 @@ anNoMk: ldx amIdx
         jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
 anDone: rts
 
+; ---- anPath: A = the precomputed first step from the angel's cell toward the player ----
+; 0 = +x, 1 = -x, 2 = +y, 3 = -y, $ff = no answer (the player's own cell, or off the open map).
+; One BFS per player cell, done at build time; this is the lookup. ~40 cycles, and it runs once
+; per ANG_PERIOD -- every ~120 frames -- so its cost rounds to nothing per frame.
+anPath: lda py+1                ; player cell -> open-cell index
+        asl
+        asl
+        asl
+        asl
+        ora px+1
+        tax
+        lda pathIdxT,x
+        cmp #$ff
+        beq anPNo
+        sta apP
+        ldx amIdx               ; angel cell -> open-cell index
+        lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        tax
+        lda pathIdxT,x
+        cmp #$ff
+        beq anPNo
+        sta apA
+        ldx apP                 ; entry = apP * PATH_N + apA, as a nibble index
+        clc
+        lda pathRowLo,x
+        adc apA
+        sta apOff
+        lda pathRowHi,x
+        adc #$00
+        sta apOff+1
+        lda apOff               ; low bit picks the nibble; keep it before the shift eats it
+        and #$01
+        sta apNib
+        lsr apOff+1
+        ror apOff               ; nibble index -> byte index
+        clc
+        lda apOff
+        adc #<pathT             ; self-modified rather than (zp),y: no zero page to spare, and
+        sta apLd+1              ;   the engine patches operands elsewhere for the same reason
+        lda apOff+1
+        adc #>pathT
+        sta apLd+2
+apLd:   lda $ffff
+        ldx apNib
+        beq anPLo
+        lsr                     ; odd entry lives in the high nibble
+        lsr
+        lsr
+        lsr
+anPLo:  and #$0f
+        rts
+anPNo:  lda #$ff
+        rts
+
 ; ---- anTry: is the step in amTX/amTY legal? C set and amCell/amX/amY filled if so ----
+; Steps are ORTHOGONAL ONLY now, so exactly one of amTX/amTY is zero and the old diagonal
+; squeeze test -- both brushed cells must be open -- has no case left to guard. It is gone with
+; the diagonals; if they ever come back, it has to come back with them.
 anTry:  lda amTX
         ora amTY
         beq anNo                ; standing in the player's cell already
@@ -6305,28 +6386,6 @@ anT1:   lda amY
         tay
         lda blkT,y
         bne anNo                ; wall, orb or another angel
-        lda amTX                ; a diagonal may not cut between two walls touching at a point:
-        beq anSqOk              ;   an angel is a solid object, so BOTH cells it brushes past
-        lda amTY                ;   have to be open. An AXIAL step skips only the squeeze test --
-        beq anSqOk              ;   it must still face the visibility check below.
-        lda amY
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
-        tay
-        lda blkT,y
-        bne anNo
-        lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
-        ora amX
-        tay
-        lda blkT,y
-        bne anNo
 anSqOk:
         ; ---- how much of it would the player SEE standing there? ----
         ; It MAY step into view -- an angel easing round a corner and freezing mid-peek is the
@@ -7703,6 +7762,42 @@ edB12:	sta $e5e0,x
 	inc erow
 	jmp rfEdgeT
 chainEnd:
+        ; ---- the angel's path table, in the hole between the chains and HTABLE ----
+        ; 1013 bytes, indexed 16-bit, so anPath patches the load's operand rather than burning
+        ; two bytes of zero page on a pointer.
+        * = $48c3
+pathT: !byte 31,34,51,17,17,49,51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,3,47,50,19,17,17,51,51,51,51
+        !byte 51,17,17,17,17,51,51,3,51,51,19,51,51,34,31,0,0,48,51,51,51,51,51,19,17,17,17,49,51,51,48,51
+        !byte 51,49,51,35,2,15,0,0,51,51,51,51,51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,31,17,17,49
+        !byte 51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2,31,17,17,51,51,51,51,51,17,17,17,17,51
+        !byte 51,3,51,51,19,51,51,34,34,0,31,17,49,51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2
+        !byte 0,31,17,51,51,51,51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,0,0,31,49,51,51,51,51,19,17
+        !byte 17,17,49,51,51,48,51,51,49,51,35,34,2,0,0,31,51,51,51,51,51,17,17,17,17,51,51,3,51,51,19,51
+        !byte 51,34,34,0,0,0,63,51,51,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,31,17,49
+        !byte 51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34,1,31,17,51,51,19,17,17,17,49,51,51,48
+        !byte 51,51,49,51,35,34,2,34,34,18,0,31,49,51,51,17,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34
+        !byte 1,0,31,51,51,19,17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,0,0,63,51,51,17,17,17,17
+        !byte 51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,31,17,17,17,17,17,49,51,51,48,51,51,49,51,35,34
+        !byte 2,34,34,18,34,34,2,31,17,17,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,31,17
+        !byte 17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34,2,0,31,17,17,17,17,51,51,3,51,51,19
+        !byte 51,51,34,34,32,34,34,33,34,34,0,0,31,17,17,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34
+        !byte 2,0,0,31,17,17,17,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,0,0,31,17,17,49,51,51
+        !byte 48,51,51,49,51,35,34,2,34,34,18,34,34,2,0,0,0,31,17,17,51,51,3,51,51,19,51,51,34,34,32,34
+        !byte 34,33,34,34,0,0,0,0,31,17,49,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34,2,0,0,0,0,31
+        !byte 17,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,0,0,0,0,31,49,51,51,48,51,51,49,51,35
+        !byte 34,2,34,34,18,34,34,2,0,0,0,0,0,31,51,51,3,51,51,19,51,51,34,34,32,34,34,33,34,34,0,0
+        !byte 0,0,0,0,63,51,51,48,51,51,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,31,17,1,51,51
+        !byte 19,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,1,31,17,48,51,51,49,51,35,34,2,34,34,18,34
+        !byte 34,34,34,34,17,17,17,17,0,31,1,51,51,19,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,1,0
+        !byte 31,48,51,51,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,0,0,15,51,51,19,51,51,34,34,32
+        !byte 34,34,33,34,34,34,34,18,17,17,17,33,34,34,31,17,17,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17
+        !byte 17,17,34,34,2,31,17,17,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,33,34,34,0,31,17,49,51
+        !byte 35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,34,34,2,0,31,17,51,51,34,34,32,34,34,33,34,34,34
+        !byte 34,18,17,17,17,33,34,34,0,0,31,49,51,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,34,34,2,0
+        !byte 0,31,51,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,33,34,34,0,0,0,63,51,35,34,2,34,34,18
+        !byte 34,34,34,34,34,17,17,17,17,34,34,34,18,17,17,31,51,34,34,32,34,34,33,34,34,34,34,18,17,17,17,33
+        !byte 34,34,34,17,17,1,63,35,34,2,34,34,18,34,34,34,34,34,17,17,17,17,34,34,2,0,0,34,51,31,34,34
+        !byte 32,34,34,33,34,34,34,34,18,17,17,17,33,34,34,0,0,32,50,3,255
         * = $4d00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108
         !byte 104,101,98,95,93,90,88,86,83,81,79,78,76,74,73,71,70,68,67,65,64,63,62,61,60,59,58,57,56,55,54,53
@@ -7842,6 +7937,16 @@ holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
+        ; ---- angel path lookups ----
+        ; pathIdxT is page-aligned: it is indexed by a whole cell byte, so a page cross would
+        ; cost a cycle on every lookup. pathRow* turn an open-cell index into its row offset,
+        ; which is a multiply by PATH_N the 6502 has no instruction for.
+        * = $6200
+pathIdxT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,255,255,255,2,3,255,255,255,255,255,255,255,255,255,4,5,6,7,8,9,10,255,255,255,255,255,255,255,255,255,255,11,12,13,14,15,255,255,255,255,255,255,255,255,255,255,255,16,17,18,19,20,21,22,23,24,25,26,27,28,255,255,255,29,30,31,32,33,255,255,255,255,255,255,255,255,255,255,34,35,36,37,38,39,40,255,255,255,255,255,255,255,255,255,41,42,255,255,255,43,44,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+pathRowLo: !byte 0,45,90,135,180,225,14,59,104,149,194,239,28,73,118,163,208,253,42,87,132,177,222,11,56,101,146,191,236,25,70,115,160,205,250,39,84,129,174,219,8,53,98,143,188
+pathRowHi: !byte 0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,3,4,4,4,4,4,4,5,5,5,5,5,5,6,6,6,6,6,7,7,7,7,7
+pathDXT: !byte 1,255,0,0
+pathDYT: !byte 0,0,1,255
         * = $6600          ; the fall's animation data, out of the image's own segment
 arcYT: !byte 255,248,232,216,200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte 20,20,20,20,20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236

@@ -47,6 +47,60 @@ const M = [
 ].map(r => r.split('').map(Number));
 const map = []; for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) map.push(M[y][x]);
 
+// ---- ANGEL PATHING: the next step, precomputed for every (player cell, angel cell) pair ----
+// The greedy chase it replaces tried three steps, all of them straight at the player, and simply
+// stopped when every one was blocked. That was survivable on an open maze and is not on a room
+// with walls stepping into it: whenever the player is axis-aligned with an angel, two of the
+// three candidates degenerate to a no-op and a duplicate, so it got ONE try and stuck fast.
+//
+// A BFS from the player gives each cell its true step distance, and the guarantee falls out of
+// the construction: a cell only receives distance d because it was reached from a neighbour at
+// d-1, so a strictly-decreasing move always exists. No local minima, no wall-following.
+//
+// The walls never move, so none of that needs to happen at runtime -- do the BFS from every open
+// cell HERE and store only the first step. 45 open cells is 45x45 = 2025 entries, one direction
+// each, packed two to a byte: 1013 bytes and about 40 cycles to read, once every ANG_PERIOD.
+//
+// Topology comes from `map` (walls), NOT blkT: blkT also carries entities as 2, and a fill that
+// treated those as solid would never assign the angel's own cell a value. Movable obstacles are
+// exactly why the greedy list survives as a fallback -- see anPath.
+const pathOpen = [];
+for (let c = 0; c < 256; c++) if (map[c] === 0) pathOpen.push(c);
+const PATH_N = pathOpen.length;
+const pathIdx = new Array(256).fill(255);
+pathOpen.forEach((c, i) => { pathIdx[c] = i; });
+// 0 = +x, 1 = -x, 2 = +y, 3 = -y, 15 = no step (only ever the player's own cell)
+const PATH_DIRS = [[1, 0, 0], [-1, 0, 1], [0, 1, 2], [0, -1, 3]];
+const pathNib = new Array(PATH_N * PATH_N).fill(15);
+for (let pi = 0; pi < PATH_N; pi++) {
+  const seen = new Array(256).fill(false);
+  seen[pathOpen[pi]] = true;
+  const q = [pathOpen[pi]];
+  for (let h = 0; h < q.length; h++) {
+    const c = q[h], cx = c & 15, cy = c >> 4;
+    for (const [dx, dy] of PATH_DIRS) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || nx > 15 || ny < 0 || ny > 15) continue;
+      const n = ny * 16 + nx;
+      if (map[n] !== 0 || seen[n]) continue;
+      seen[n] = true;
+      // n was reached FROM c, so the step from n back toward the player is the reverse
+      pathNib[pi * PATH_N + pathIdx[n]] = PATH_DIRS.find(s => s[0] === -dx && s[1] === -dy)[2];
+      q.push(n);
+    }
+  }
+}
+{ // every open cell must reach every other, or an angel can be permanently marooned
+  const bad = pathNib.findIndex((v, i) => v === 15 && Math.floor(i / PATH_N) !== i % PATH_N);
+  if (bad >= 0) throw new Error(`angel path: cell ${pathOpen[bad % PATH_N]} cannot reach ` +
+    `${pathOpen[Math.floor(bad / PATH_N)]} -- the open cells are not one connected region`);
+}
+const pathPacked = [];
+for (let i = 0; i < pathNib.length; i += 2)
+  pathPacked.push(pathNib[i] | ((pathNib[i + 1] ?? 15) << 4));
+console.error(`  angel path: ${PATH_N} open cells -> ${pathNib.length} entries, ` +
+  `${pathPacked.length} bytes packed`);
+
 // 16-bit fixed point: 256 units = 1 cell (8.8). deltaDist = 256/|dir|, clamp 65535.
 const SCALE = 256;
 const ddxLo = [], ddxHi = [], ddyLo = [], ddyHi = [], posX = [], posY = [];
@@ -3264,6 +3318,10 @@ odCell  = $84f1                  ;   what won ($ff = nothing in reach), and the 
 odX     = $84f2
 odY     = $84f3
 odD     = $84f4
+apP     = $8557                  ; anPath: player and angel open-cell indices, the nibble
+apA     = $8558                  ;   index into pathT (16-bit) and which half of the byte
+apOff   = $8559
+apNib   = $855b
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
@@ -9599,13 +9657,28 @@ anNoX:  lda py+1
         bcs anSetY
         lda #$ff
 anSetY: sta amDY
-anNoY:  lda amDX
+        ; ---- the precomputed shortest step, then the greedy list as a fallback ----
+        ; pathT is exact for the WALLS, which never move. It cannot know about a dropped orb, so
+        ; when anTry refuses the step the old greedy pair still gets its turn -- one wasted tick
+        ; against an obstacle that is rare, transient and two seconds from being irrelevant.
+anNoY:  jsr anPath
+        cmp #$ff
+        beq anGreed
+        tax
+        lda pathDXT,x
         sta amTX
-        lda amDY
+        lda pathDYT,x
         sta amTY
         jsr anTry
         bcs anGo
-        lda amDX                ; diagonal blocked: slide along x
+        ; ---- greedy fallback: slide along x, then along y ----
+        ; ORTHOGONAL ONLY. The diagonal candidate is gone, and with it the way an angel could
+        ; cross a cell it never occupied: a diagonal brushes two cells and anTry only ever
+        ; checked those for WALLS, never for visibility, so it could slip across ground the
+        ; player was looking straight at. Four directions means every step lands in exactly one
+        ; cell and that cell faces the obscured test.
+anGreed:
+        lda amDX
         sta amTX
         lda #$00
         sta amTY
@@ -9661,7 +9734,69 @@ anNoMk: ldx amIdx
 ` : ''}        jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
 anDone: rts
 
+; ---- anPath: A = the precomputed first step from the angel's cell toward the player ----
+; 0 = +x, 1 = -x, 2 = +y, 3 = -y, $ff = no answer (the player's own cell, or off the open map).
+; One BFS per player cell, done at build time; this is the lookup. ~40 cycles, and it runs once
+; per ANG_PERIOD -- every ~120 frames -- so its cost rounds to nothing per frame.
+anPath: lda py+1                ; player cell -> open-cell index
+        asl
+        asl
+        asl
+        asl
+        ora px+1
+        tax
+        lda pathIdxT,x
+        cmp #$ff
+        beq anPNo
+        sta apP
+        ldx amIdx               ; angel cell -> open-cell index
+        lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        tax
+        lda pathIdxT,x
+        cmp #$ff
+        beq anPNo
+        sta apA
+        ldx apP                 ; entry = apP * PATH_N + apA, as a nibble index
+        clc
+        lda pathRowLo,x
+        adc apA
+        sta apOff
+        lda pathRowHi,x
+        adc #$00
+        sta apOff+1
+        lda apOff               ; low bit picks the nibble; keep it before the shift eats it
+        and #$01
+        sta apNib
+        lsr apOff+1
+        ror apOff               ; nibble index -> byte index
+        clc
+        lda apOff
+        adc #<pathT             ; self-modified rather than (zp),y: no zero page to spare, and
+        sta apLd+1              ;   the engine patches operands elsewhere for the same reason
+        lda apOff+1
+        adc #>pathT
+        sta apLd+2
+apLd:   lda $ffff
+        ldx apNib
+        beq anPLo
+        lsr                     ; odd entry lives in the high nibble
+        lsr
+        lsr
+        lsr
+anPLo:  and #$0f
+        rts
+anPNo:  lda #$ff
+        rts
+
 ; ---- anTry: is the step in amTX/amTY legal? C set and amCell/amX/amY filled if so ----
+; Steps are ORTHOGONAL ONLY now, so exactly one of amTX/amTY is zero and the old diagonal
+; squeeze test -- both brushed cells must be open -- has no case left to guard. It is gone with
+; the diagonals; if they ever come back, it has to come back with them.
 anTry:  lda amTX
         ora amTY
         beq anNo                ; standing in the player's cell already
@@ -9692,28 +9827,6 @@ anT1:   lda amY
         tay
         lda blkT,y
         bne anNo                ; wall, orb or another angel
-        lda amTX                ; a diagonal may not cut between two walls touching at a point:
-        beq anSqOk              ;   an angel is a solid object, so BOTH cells it brushes past
-        lda amTY                ;   have to be open. An AXIAL step skips only the squeeze test --
-        beq anSqOk              ;   it must still face the visibility check below.
-        lda amY
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
-        tay
-        lda blkT,y
-        bne anNo
-        lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
-        ora amX
-        tay
-        lda blkT,y
-        bne anNo
 anSqOk:
         ; ---- how much of it would the player SEE standing there? ----
         ; It MAY step into view -- an angel easing round a corner and freezing mid-peek is the
@@ -10825,6 +10938,11 @@ ${chainSrc('slB', SCR_B, ROWSA, 'rfNext')}
 ${edgeSrc('edA', SCR_A)}
 ${edgeSrc('edB', SCR_B)}
 chainEnd:
+        ; ---- the angel's path table, in the hole between the chains and HTABLE ----
+        ; 1013 bytes, indexed 16-bit, so anPath patches the load's operand rather than burning
+        ; two bytes of zero page on a pointer.
+        * = $48c3
+pathT: ${chunk(pathPacked, 32).trim()}
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
         * = ${hx16(ORB_VART)}
@@ -10837,6 +10955,16 @@ holeVarT: !byte ${holeVarT.join(',')}
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
+        ; ---- angel path lookups ----
+        ; pathIdxT is page-aligned: it is indexed by a whole cell byte, so a page cross would
+        ; cost a cycle on every lookup. pathRow* turn an open-cell index into its row offset,
+        ; which is a multiply by PATH_N the 6502 has no instruction for.
+        * = $6200
+pathIdxT: !byte ${pathIdx.join(',')}
+pathRowLo: !byte ${[...Array(PATH_N)].map((_, i) => (i * PATH_N) & 255).join(',')}
+pathRowHi: !byte ${[...Array(PATH_N)].map((_, i) => (i * PATH_N) >> 8).join(',')}
+pathDXT: !byte 1,255,0,0
+pathDYT: !byte 0,0,1,255
         * = ${hx16(FROWT)}          ; the fall's animation data, out of the image's own segment
 arcYT: !byte ${arcYT.join(',')}     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte ${arcET.join(',')}
@@ -11487,7 +11615,7 @@ try {
       // player's projected X overwrote the death trigger's reference angle every frame and you
       // died the instant an angel reached you, standing still. Anything referenced as name+1
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
-      pulsePh: 2, opx: 2, opy: 2,
+      pulsePh: 2, opx: 2, opy: 2, apOff: 2,
       rayAcc: 2, edgAcc: 2, chnAcc: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
       tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
     };
