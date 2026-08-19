@@ -6000,6 +6000,15 @@ oiNext: txa
         sta carry
         sta marked
         sta entDty
+        sta bfsPhase            ; NO FILL IN FLIGHT. Uninitialised this could read as phase 2,
+                                ;   which drops bfsTick straight into the expand loop with a
+                                ;   garbage bfsTail and scribbles past bfsQ.
+        ldx #$01
+hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
+        dex
+        bpl hlSCl
+        lda #$ff                ; a cell the player can never be in, so the first frame always
+        sta bfsDone             ;   starts a fill
         rts
 
 ; ---- orbOcc1: rebuild entity X's occluder mask from the cell it stands in NOW ----
@@ -6768,13 +6777,52 @@ dkNo:   lda #$ff
         rts
 
 ; ---- orbUse: take the orb in front, or set the carried one down there ----
+; ---- hlAt: is odX/odY a SOCKET? Y = its hole-like index, or $ff ----
+; Exits are skipped: you cannot put an orb down a hole you are about to fall through.
+hlAt:   ldy #$02
+hlAtL:  cpy #$02
+        bcs hlAtNo
+        tya
+        clc
+        adc #$02 ; hole-like entities follow the orbs in orbXCT/orbYCT
+        tax
+        lda orbXCT,x
+        cmp odX
+        bne hlAtN
+        lda orbYCT,x
+        cmp odY
+        beq hlAtD
+hlAtN:  iny
+        bne hlAtL               ; always taken
+hlAtNo: ldy #$ff
+hlAtD:  rts
+
 orbUse: lda carry
         bne orbPut
         jsr takePick            ; ---- pick up ----
         ldx odCell
         cpx #$ff
-        beq okDone              ; nothing adjacent worth taking
-        lda #$01                ; out of the world, into the hands
+        bne okTake
+        ; nothing loose adjacent -- but the cell you are facing may hold a seated orb
+        jsr dropPick
+        ldx odCell
+        cpx #$ff
+        beq okDone
+        jsr hlAt
+        cpy #$ff
+        beq okDone
+        lda hlSeat,y
+        bpl okDone              ; that socket is empty
+        and #$0f
+        tax                     ; the orb that was sitting in it comes back out
+        lda #$00
+        sta hlSeat,y
+        inx
+        stx carry
+        lda #$01
+        sta entDty
+        rts
+okTake: lda #$01                ; out of the world, into the hands
         sta orbHidT,x
         lda orbYCT,x            ; and the cell it was standing in opens
         asl
@@ -6794,7 +6842,22 @@ orbPut: jsr dropPick            ; ---- put down ----
         ldx odCell
         cpx #$ff
         beq okDone              ; nowhere it could go: keep hold of it
-        lda #$02
+        jsr hlAt                ; a socket? then it goes IN rather than on the floor
+        cpy #$ff
+        beq okPlain
+        lda hlSeat,y
+        bmi okDone              ; that one is already full: keep hold of it
+        lda carry
+        sec
+        sbc #$01                ; carry is index+1
+        ora #$80                ; bit 7 = seated, low nibble = which orb
+        sta hlSeat,y
+        lda #$00
+        sta carry               ; the orb stays orbHidT from the pickup, so it draws as the
+        lda #$01                ;   socket's seated sprite and not as itself
+        sta entDty
+        rts
+okPlain:lda #$02
         sta blkT,x
         ldx carry
         dex
@@ -7135,66 +7198,54 @@ fdfDn:  rts
 ; The six operands only need re-patching when the KIND changes, and a frame is normally one exit
 ; then a run of sockets -- so this is two patch runs a frame, not one per entity.
 hlSet:  tay
-        lda hlFillT,y
-        sta hlFill
         cpy #$02
-        lda #$01                ; 1 = socket, 0 = exit hole
-        bcs hlS1
+        bcs hlSsock
+        lda hlFillT,y           ; an exit hole: black, and it is never anything else
+        sta hlFill
         lda #$00
-hlS1:   cmp hlKind
+        beq hlSk                ; always taken
+hlSsock:lda hlSeat,y            ; bit 7 = an orb is sitting in this one, low nibble its colour
+        bmi hlSfull
+        lda hlFillT,y           ; empty: grey3 inside a grey1 rim
+        sta hlFill
+        lda #$01
+        bne hlSk
+hlSfull:and #$0f
+        tax                     ; seated: the ORB's own body colour fills it
+        lda orbColT2,x
+        sta hlFill
+        lda #$02
+hlSk:   cmp hlKind
         beq hlSdn               ; already pointed the right way -- the usual case
         sta hlKind
-        beq hlSh
-        ; ---- a socket's ladder ----
-        ; BOTH operand bytes, not just the low one: the two table sets are emitted next to each
-        ; other and nothing stops them straddling a page.
-        lda #<hlRungS
-        ldx #>hlRungS
-        jsr hlPokeR
-        lda #<sockYBaseT
-        ldx #>sockYBaseT
-        jsr hlPokeY
-        lda #<sockPtrT
-        ldx #>sockPtrT
-        jsr hlPokeP
-        lda #<sockFlagT
-        ldx #>sockFlagT
-        jsr hlPokeF
-        lda #<sockXOffT
-        ldx #>sockXOffT
-        jmp hlPokeX
-hlSh:   ; ---- the exit hole's ----
-        lda #<hlRungH
-        ldx #>hlRungH
-        jsr hlPokeR
-        lda #<holeYBaseT
-        ldx #>holeYBaseT
-        jsr hlPokeY
-        lda #<holePtrT
-        ldx #>holePtrT
-        jsr hlPokeP
-        lda #<holeFlagT
-        ldx #>holeFlagT
-        jsr hlPokeF
-        lda #<holeXOffT
-        ldx #>holeXOffT
-        jmp hlPokeX
-hlPokeR:sta hlRung+1
-        stx hlRung+2
-        rts
-hlPokeY:sta hlYB+1
-        stx hlYB+2
-        rts
-hlPokeP:sta hlPtr+1
-        stx hlPtr+2
-        rts
-hlPokeF:sta hlFlg+1
-        stx hlFlg+2
-        rts
-hlPokeX:sta hlXO1+1
-        stx hlXO1+2
+        ; ---- point the six operands at this kind's ladder ----
+        ; Three near-identical patch blocks were 175 bytes of code; this is a table of the five
+        ; base addresses per kind and one run of stores. BOTH bytes of every operand, because
+        ; the table sets are emitted next to each other and may straddle a page.
+        tax
+        ldy hlK5T,x             ; five entries a kind
+        lda hlSrcL,y
+        sta hlRung+1
+        lda hlSrcH,y
+        sta hlRung+2
+        lda hlSrcL+1,y
+        sta hlYB+1
+        lda hlSrcH+1,y
+        sta hlYB+2
+        lda hlSrcL+2,y
+        sta hlPtr+1
+        lda hlSrcH+2,y
+        sta hlPtr+2
+        lda hlSrcL+3,y
+        sta hlFlg+1
+        lda hlSrcH+3,y
+        sta hlFlg+2
+        lda hlSrcL+4,y
+        sta hlXO1+1
         sta hlXO2+1
-        stx hlXO2+2
+        lda hlSrcH+4,y
+        sta hlXO1+2
+        sta hlXO2+2
 hlSdn:  rts
 
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
@@ -7478,6 +7529,12 @@ sockXOffT: !byte 24,24,24,12,12,6,6,6
 sockYBaseT: !byte 138,140,143,145,146,148,149,150
 sockFlagT: !byte 6,6,6,2,2,1,1,1
 sockHT: !byte 107,94,80,67,54,40,27,13   ; DESCENDING h thresholds, scanned by hlRungS
+        ; ---- and an orb seated in one ----
+seatPtrT: !byte 37,39,41,43,45,47,48,49
+seatXOffT: !byte 24,24,24,12,12,6,6,6
+seatYBaseT: !byte 115,120,126,131,135,139,143,147
+seatFlagT: !byte 14,14,14,10,2,1,1,1
+seatHT: !byte 107,94,80,67,54,40,27,13
 orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1,23,21,21,19,17,15,13,12,11,11,10,9,8,7,6,5,5,4,3,2
 orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14,14,11,10,9,8,7,6,6,5,4,3,2,1,0
 orbBitT: !byte 1,2,4,8,16,32,64,128
@@ -7844,6 +7901,19 @@ hrsL:   cmp sockHT,y
         rts
 hrsHit: tya
         rts
+; The seat ladder is the socket ladder rung for rung, but a rung can be DROPPED when the shape
+; grows past a sprite, so it gets its own thresholds rather than sharing sockHT.
+hlRungE:txa
+        ldy #$00
+hreL:   cmp seatHT,y
+        bcs hreHit
+        iny
+        cpy #$08
+        bcc hreL
+        lda #$ff
+        rts
+hreHit: tya
+        rts
 
         * = $4d00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108
@@ -8150,6 +8220,9 @@ holeSeeT: !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
 hlFillT: !byte 0,0
+        ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
+        ; colour. Emitted rather than equated so a fresh load starts it clear.
+hlSeat: !fill 2, 0
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,31,30,30,30,29,29,29,29,28,28,28,27,27,27,27,26,26,26,25,25,25,24,24,24,24,23,23,23,22,22,22,21,21,21,21,20,20,20,19,19,19,18,18,18,18,17,17,17,16,16,16,15,15,15,15,14,14,14,13,13,13,12,12,12,12,12,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -8200,6 +8273,16 @@ orbAnchT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,2
 orbHgtT: !byte 42,42,42,42,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21,42,42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,21,21,21
 angVarT: !byte 41,41,41,41,41,41,41,41,41,40,40,40,40,39,39,39,39,38,38,38,37,37,37,37,36,36,36,35,35,35,35,34,34,34,33,33,33,33,32,32,32,32,31,31,31,30,30,30,30,29,29,29,29,29,28,28,28,28,28,28,28,27,27,27,27,27,27,27,26,26,26,26,26,26,26,25,25,25,25,25,25,25,25,24,24,24,24,24,24,24,23,23,23,23,23,23,23,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22
 arcOvSpT: !byte 90,74,66,58
+        ; ---- which ladder each kind uses: rung finder, yBase, ptr, flag, xOff ----
+        ; 0 = the exit hole, 1 = an empty socket, 2 = an orb seated in one. hlSet indexes this
+        ; instead of carrying three copies of the same six stores.
+hlK5T:  !byte 0,5,10
+hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT
+        !byte <hlRungS,<sockYBaseT,<sockPtrT,<sockFlagT,<sockXOffT
+        !byte <hlRungE,<seatYBaseT,<seatPtrT,<seatFlagT,<seatXOffT
+hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
+        !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
+        !byte >hlRungE,>seatYBaseT,>seatPtrT,>seatFlagT,>seatXOffT
         * = $6b00
 fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,23,0,0,0,0,0,0
         !byte 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,255,255,23,0,0,0,0,0,0

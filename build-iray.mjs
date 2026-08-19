@@ -2081,7 +2081,11 @@ if (process.env.ORBSCATTER) {
   // player is drawn to -- then puts them at nearly the closest range, so they get the heartbeat
   // end of the detune straight away instead of the far-off flange. It also stops the encounter
   // depending on them happening to look away long enough for it to close the distance.
-  ORBS.push(LEVEL2 ? { x: 8.5, y: 1.5, c: 0, tall: true } : { x: 9.5, y: 4.5, c: 0, tall: true });
+  // LEVEL2 is a test room, so no angel in it by default -- ANGEL=1 puts one back. The pathing
+  // and the death trigger both cope with there being none: angStep's loop finds no tall entity,
+  // marked stays 0, and the HUD's E readout is already gated on one existing.
+  if (!LEVEL2 || process.env.ANGEL === '1')
+    ORBS.push(LEVEL2 ? { x: 8.5, y: 1.5, c: 0, tall: true } : { x: 9.5, y: 4.5, c: 0, tall: true });
 }
 // ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
 // where the entity stands, and a wandering angel puts a different configuration in front of the
@@ -2144,12 +2148,13 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // so a drop can be exercised on a loop, so the second entry is the same cell: fall through it,
 // land back in the room, walk out again.
 const HOLES_AT = [[+(process.env.HOLEX ?? (LEVEL2 ? 8 : 14)), +(process.env.HOLEY ?? (LEVEL2 ? 8 : 4))],
-                  [+(process.env.HOLE2X ?? 14), +(process.env.HOLE2Y ?? 4)]];
+                  [+(process.env.HOLE2X ?? (LEVEL2 ? 8 : 14)),
+                   +(process.env.HOLE2Y ?? (LEVEL2 ? 8 : 4))]];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
 // orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
 // picks them up for free.
-const SOCKETS_AT = (process.env.SOCKETS ?? (LEVEL2 ? '3,3;6,6' : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (LEVEL2 ? '2,2;6,6' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -2819,13 +2824,23 @@ const HOLEBASE = 0xe800;                         // above the charsets: 75 slots
 // and the screen edge eats the shape faster than perspective grows it -- so vmag is needed only
 // down to d=0.90 and a plain sprite holds it from there. The hole leaves the screen entirely at
 // d = 0.88 - r = 0.667, where the ladder simply ends.
+// The build let 101 slots be written from $e800 and the last 8 ran off the top of memory, which
+// came out as a garbled screen with no error anywhere. Sprite data is emitted as raw files at
+// fixed addresses, so nothing else was ever going to catch it.
+const fitsBank = (name, at, slots, end) => {
+  if (at + slots * 64 > end) throw new Error(
+    `${name}: ${slots} sprite slots at $${at.toString(16)} need ` +
+    `$${(at + slots * 64).toString(16)}, past $${end.toString(16)} -- ` +
+    `${Math.ceil((at + slots * 64 - end) / 64)} slots too many`);
+};
+
 // ---- one ladder builder, so a socket is the SAME SHAPE at a different radius ----
 // A socket cannot just reindex the hole's ladder at a longer distance: for a flat disc the
 // apparent WIDTH scales as r/d but the HEIGHT as r/d^2, so a rung matched on width at twice the
 // distance comes out twice too flat. Same projection, same code, different r -- and because the
 // socket is half the radius its rungs are mostly one sprite, so the second ladder is cheap.
 // slot0 is where its bitmaps start in the shared HOLEBASE block.
-function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true) {
+function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
   const L = [];
   for (let w = wMax; w >= 4; w -= wStep) L.push({ w, d: 2 * F_COL * r / w });
   // The near family exists because a BIG disc's widest part goes below row 200 and
@@ -2868,13 +2883,14 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true) {
         const off = (bx - g.px / 2 + 0.5) * cw;    // apparent columns from centre
         const a = Math.abs(off);
         if (a > s) return 0;
-        // TWO inks, so one bitmap serves the exit hole AND a socket. The RIM is bit pair 01, a
-        // shared register; the FILL is pair 10, which is obC -- the one ink that can differ per
-        // sprite. So the same rung reads as a pit (fill black), an empty socket (fill floor
-        // colour, leaving a ring) or a seated orb (fill the orb's colour), for one byte.
-        // Below about two columns across there is no room for both, and an all-rim dot is the
-        // honest answer -- a distant hole should shrink to a mark, not develop an outline.
-        return (s > 2 * HOLE_RIM * cw && a <= s - HOLE_RIM * cw) ? 2 : 1;
+        // rim = 0 (the exit hole) is a flat silhouette in bit pair 10 = obC, exactly as it
+        // always was. Putting a rim on it ate a pixel off each side of the black and read as a
+        // SMALLER hole, which is why the two are separate ladders rather than one bitmap with
+        // two inks. Only the socket asks for two: pair 01, a shared register, for its grey1
+        // rim, and obC for the grey3 inside. Below about two columns across there is no room
+        // for both and it goes all-rim, which is honest for a mark that small.
+        if (!rim) return 2;
+        return (s > 2 * rim * cw && a <= s - rim * cw) ? 2 : 1;
       });
     });
     // A distant hole is under a row tall, so sampling row centres can miss it entirely and the
@@ -2884,7 +2900,7 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true) {
       const by = Math.max(0, Math.min(20, Math.round(((g.near + g.far) / 2 - g.far) / ch)));
       for (let bx = 0; bx < g.px; bx++) {
         const off = (bx - g.px / 2 + 0.5) * cw;
-        if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = 1;   // all rim: see above
+        if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = rim ? 1 : 2;
       }
     }
     if (50 + g.far > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
@@ -2936,14 +2952,100 @@ const HOLE = makeHoleLadder(HOLER, 2, 0);
 const SOCKR = +(process.env.SOCKR ?? HOLER / 2);
 // wMax 32, not 48: at half the radius a 48-column socket would be 0.55 cells away and
 // its far edge below row 250. Closer than the widest rung clamps to it, as the hole does.
-const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false);
+const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, HOLE_RIM);
+// ---- an orb SEATED in a socket: the ball's top half rising out of the socket's own arc ----
+// Not a flat cut. The bottom of the shape IS the socket rung's ellipse, so the orb reads as
+// sitting down in it rather than balanced on it, and the cut automatically has the right
+// perspective at every distance. Above that sits the top half of the ball, resampled from the
+// same source art as the orb -- so it keeps its shading and its highlight.
+//   ball rows 0..14 of ORBSRC12, centre row 7; 15..17 gap; 18..20 the ground shadow, which a
+//   seated orb has no use for.
+// The seat ladder does NOT follow the others at HOLEBASE: $e800 runs to $ffff, which is exactly
+// 96 slots, and the exit hole plus the socket already take 88. It lives in bank 3's other free
+// run instead. $c940 is 64-byte aligned, which a sprite pointer requires.
+const SEATBASE = 0xc940;
+const BALL_MID = 7;
+// the same inverse-projection the holes use: half-width in columns of a disc of radius r,
+// centred at ground distance d, at screen row y
+const discSpan = (r, d, y) => {
+  const Z = 88 / (y - 100), t = r * r - (Z - d) * (Z - d);
+  return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
+};
+function makeSeatLadder(sockL, slot0) {
+  const L = [];
+  let slot = slot0;
+  for (const sg of sockL) {
+    const cw = sg.mag ? 2 : 1;
+    const domeH = 176 * SOCKR / sg.d;            // screen rows the dome stands proud
+    const botY = Math.min(200, sg.near);         // the socket's near edge, its lowest row
+    const topY = sg.far - domeH;                 // the top of the dome
+    // vmag from the WHOLE shape, dome included -- the socket's own choice is for a shorter one
+    const vmag = (botY - topY) > 21 ? 1 : 0, ch = vmag ? 2 : 1;
+    if ((botY - topY) > 21 * ch) continue;       // too close to draw: the near rungs just end
+    const g = { d: sg.d, px: sg.px, mag: sg.mag, vmag, spr: sg.spr,
+                far: Math.round(topY), domeH };
+    g.grid = [...Array(21)].map((_, by) => {
+      const y = g.far + by * ch + ch / 2;
+      const sSock = discSpan(SOCKR, sg.d, y);    // inside the socket's ellipse at this row?
+      return [...Array(sg.px)].map((_, bx) => {
+        const off = (bx - sg.px / 2 + 0.5) * cw, a = Math.abs(off);
+        if (sSock > 0 && a <= sSock)             // the socket's own arc: rim stays rim, the
+          return (sSock > 2 * HOLE_RIM * cw && a <= sSock - HOLE_RIM * cw) ? 2 : 1;
+        if (y >= sg.far) return 0;               // below the socket's top but outside it
+        // ...the dome. Resampled from the ball's TOP HALF, so it keeps its shading and its
+        // highlight, exactly as orbScale does for a standing orb.
+        const t = [0, 0, 0, 0];
+        for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
+          const fx = (bx + (i + 0.5) / ORBSAMP) / sg.px;
+          const fy = (by + (j + 0.5) / ORBSAMP) * ch / (sg.far - g.far);
+          const sx = Math.floor(SX0 + SW * fx), sy = Math.floor((BALL_MID + 1) * fy);
+          if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[ORBSRC12[sy][sx]]++;
+        }
+        let best = 0;
+        for (let v = 1; v < 4; v++) if (t[v] >= t[best]) best = v;
+        return best;
+      });
+    });
+    g.slot = slot; slot += g.spr;
+    L.push(g);
+  }
+  return { L, BM: L.flatMap(g => [...Array(g.spr)].map((_, i) => {
+             const b = [];
+             for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
+               b.push([0, 1, 2, 3].reduce((v, q) =>
+                 v | (g.grid[y][i * 12 + k * 4 + q] << (6 - 2 * q)), 0));
+             b.push(0); return b; })),
+           slotT: L.map(g => g.slot),
+           hT: L.map(g => Math.round(88 / g.d)),
+           xOffT: L.map(g => (g.px / 2) * (g.mag ? 2 : 1)),
+           yBaseT: L.map(g => 50 + g.far - Math.round(88 / g.d)),
+           flagT: L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0)),
+           slotEnd: slot };
+}
+const SEAT = makeSeatLadder(SOCK.L, 0);
+fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, 0x10000);
+fitsBank('seat ladder', SEATBASE, SEAT.BM.length, 0xd000);
+if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of byte range');
 // The hole moved from a scan to a 256-byte h -> rung table when it reached 35 rungs (~600
 // cycles a frame). A socket ladder is a third of that, so the scan is ~100 cycles and a page
 // is worth more than the cycles here.
+for (const h of HOLELIKE)
+  if (map[h.y * 16 + h.x] !== 0) throw new Error(
+    `${h.exit ? 'exit hole' : 'socket'} at (${h.x},${h.y}) is inside a wall`);
 if (HOLELIKE.length > 4) throw new Error(
   `${HOLELIKE.length} hole-like entities: holeSeeT has room for 4 (32 bytes each). ` +
   `More wants the per-level loading, not another table squeezed in.`);
 const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...SOCK.BM];
+
+// The exit hole must be a flat silhouette -- one ink, bit pair 10. A rim on it reads as a
+// smaller hole, which is exactly the regression this assertion exists to catch.
+if (process.env.HOLEBMHASH === '1') console.error('  exit-hole bitmap checksum: ' +
+  HOLE.BM.flat().reduce((a, b, i) => (a * 31 + b * (i % 7 + 1)) >>> 0, 7) +
+  ` over ${HOLE.BM.length} slots`);
+if (HOLE.L.some(g => g.grid.some(row => row.some(v => v === 1))))
+  throw new Error('the exit hole has rim pixels: it must be a single ink, see makeHoleLadder');
+if (!SOCK.L.some(g => g.grid.some(row => row.some(v => v === 1))))
+  throw new Error('the socket has no rim pixels: HOLE_RIM is 0?');
 const holeSlotT = HOLE.slotT, holeHT = HOLE.hT, holeVarT = HOLE.varT;
 const holeXOffT = HOLE.xOffT, holeYBaseT = HOLE.yBaseT, holeFlagT = HOLE.flagT;
 const holeHOf = HOLE.hOf;
@@ -9285,6 +9387,15 @@ oiNext: txa
         sta carry
         sta marked
         sta entDty
+        sta bfsPhase            ; NO FILL IN FLIGHT. Uninitialised this could read as phase 2,
+                                ;   which drops bfsTick straight into the expand loop with a
+                                ;   garbage bfsTail and scribbles past bfsQ.
+        ldx #${hx(HOLELIKE.length - 1)}
+hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
+        dex
+        bpl hlSCl
+        lda #$ff                ; a cell the player can never be in, so the first frame always
+        sta bfsDone             ;   starts a fill
         rts
 
 ; ---- orbOcc1: rebuild entity X's occluder mask from the cell it stands in NOW ----
@@ -10267,13 +10378,52 @@ dkNo:   lda #$ff
         rts
 
 ` : ''}; ---- orbUse: take the orb in front, or set the carried one down there ----
+; ---- hlAt: is odX/odY a SOCKET? Y = its hole-like index, or $ff ----
+; Exits are skipped: you cannot put an orb down a hole you are about to fall through.
+hlAt:   ldy #${hx(HOLES_AT.length)}
+hlAtL:  cpy #${hx(HOLELIKE.length)}
+        bcs hlAtNo
+        tya
+        clc
+        adc #${hx(ORBS.length)} ; hole-like entities follow the orbs in orbXCT/orbYCT
+        tax
+        lda orbXCT,x
+        cmp odX
+        bne hlAtN
+        lda orbYCT,x
+        cmp odY
+        beq hlAtD
+hlAtN:  iny
+        bne hlAtL               ; always taken
+hlAtNo: ldy #$ff
+hlAtD:  rts
+
 orbUse: lda carry
         bne orbPut
         jsr takePick            ; ---- pick up ----
         ldx odCell
         cpx #$ff
-        beq okDone              ; nothing adjacent worth taking
-        lda #$01                ; out of the world, into the hands
+        bne okTake
+        ; nothing loose adjacent -- but the cell you are facing may hold a seated orb
+        jsr dropPick
+        ldx odCell
+        cpx #$ff
+        beq okDone
+        jsr hlAt
+        cpy #$ff
+        beq okDone
+        lda hlSeat,y
+        bpl okDone              ; that socket is empty
+        and #$0f
+        tax                     ; the orb that was sitting in it comes back out
+        lda #$00
+        sta hlSeat,y
+        inx
+        stx carry
+        lda #$01
+        sta entDty
+        rts
+okTake: lda #$01                ; out of the world, into the hands
         sta orbHidT,x
         lda orbYCT,x            ; and the cell it was standing in opens
         asl
@@ -10293,7 +10443,22 @@ orbPut: jsr dropPick            ; ---- put down ----
         ldx odCell
         cpx #$ff
         beq okDone              ; nowhere it could go: keep hold of it
-        lda #$02
+        jsr hlAt                ; a socket? then it goes IN rather than on the floor
+        cpy #$ff
+        beq okPlain
+        lda hlSeat,y
+        bmi okDone              ; that one is already full: keep hold of it
+        lda carry
+        sec
+        sbc #$01                ; carry is index+1
+        ora #$80                ; bit 7 = seated, low nibble = which orb
+        sta hlSeat,y
+        lda #$00
+        sta carry               ; the orb stays orbHidT from the pickup, so it draws as the
+        lda #$01                ;   socket's seated sprite and not as itself
+        sta entDty
+        rts
+okPlain:lda #$02
         sta blkT,x
         ldx carry
         dex
@@ -10634,66 +10799,54 @@ fdfDn:  rts
 ; The six operands only need re-patching when the KIND changes, and a frame is normally one exit
 ; then a run of sockets -- so this is two patch runs a frame, not one per entity.
 hlSet:  tay
-        lda hlFillT,y
-        sta hlFill
         cpy #${hx(HOLES_AT.length)}
-        lda #$01                ; 1 = socket, 0 = exit hole
-        bcs hlS1
+        bcs hlSsock
+        lda hlFillT,y           ; an exit hole: black, and it is never anything else
+        sta hlFill
         lda #$00
-hlS1:   cmp hlKind
+        beq hlSk                ; always taken
+hlSsock:lda hlSeat,y            ; bit 7 = an orb is sitting in this one, low nibble its colour
+        bmi hlSfull
+        lda hlFillT,y           ; empty: grey3 inside a grey1 rim
+        sta hlFill
+        lda #$01
+        bne hlSk
+hlSfull:and #$0f
+        tax                     ; seated: the ORB's own body colour fills it
+        lda orbColT2,x
+        sta hlFill
+        lda #$02
+hlSk:   cmp hlKind
         beq hlSdn               ; already pointed the right way -- the usual case
         sta hlKind
-        beq hlSh
-        ; ---- a socket's ladder ----
-        ; BOTH operand bytes, not just the low one: the two table sets are emitted next to each
-        ; other and nothing stops them straddling a page.
-        lda #<hlRungS
-        ldx #>hlRungS
-        jsr hlPokeR
-        lda #<sockYBaseT
-        ldx #>sockYBaseT
-        jsr hlPokeY
-        lda #<sockPtrT
-        ldx #>sockPtrT
-        jsr hlPokeP
-        lda #<sockFlagT
-        ldx #>sockFlagT
-        jsr hlPokeF
-        lda #<sockXOffT
-        ldx #>sockXOffT
-        jmp hlPokeX
-hlSh:   ; ---- the exit hole's ----
-        lda #<hlRungH
-        ldx #>hlRungH
-        jsr hlPokeR
-        lda #<holeYBaseT
-        ldx #>holeYBaseT
-        jsr hlPokeY
-        lda #<holePtrT
-        ldx #>holePtrT
-        jsr hlPokeP
-        lda #<holeFlagT
-        ldx #>holeFlagT
-        jsr hlPokeF
-        lda #<holeXOffT
-        ldx #>holeXOffT
-        jmp hlPokeX
-hlPokeR:sta hlRung+1
-        stx hlRung+2
-        rts
-hlPokeY:sta hlYB+1
-        stx hlYB+2
-        rts
-hlPokeP:sta hlPtr+1
-        stx hlPtr+2
-        rts
-hlPokeF:sta hlFlg+1
-        stx hlFlg+2
-        rts
-hlPokeX:sta hlXO1+1
-        stx hlXO1+2
+        ; ---- point the six operands at this kind's ladder ----
+        ; Three near-identical patch blocks were 175 bytes of code; this is a table of the five
+        ; base addresses per kind and one run of stores. BOTH bytes of every operand, because
+        ; the table sets are emitted next to each other and may straddle a page.
+        tax
+        ldy hlK5T,x             ; five entries a kind
+        lda hlSrcL,y
+        sta hlRung+1
+        lda hlSrcH,y
+        sta hlRung+2
+        lda hlSrcL+1,y
+        sta hlYB+1
+        lda hlSrcH+1,y
+        sta hlYB+2
+        lda hlSrcL+2,y
+        sta hlPtr+1
+        lda hlSrcH+2,y
+        sta hlPtr+2
+        lda hlSrcL+3,y
+        sta hlFlg+1
+        lda hlSrcH+3,y
+        sta hlFlg+2
+        lda hlSrcL+4,y
+        sta hlXO1+1
         sta hlXO2+1
-        stx hlXO2+2
+        lda hlSrcH+4,y
+        sta hlXO1+2
+        sta hlXO2+2
 hlSdn:  rts
 
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
@@ -10977,6 +11130,12 @@ sockXOffT: !byte ${SOCK.xOffT.join(',')}
 sockYBaseT: !byte ${SOCK.yBaseT.join(',')}
 sockFlagT: !byte ${SOCK.flagT.join(',')}
 sockHT: !byte ${SOCK.hT.join(',')}   ; DESCENDING h thresholds, scanned by hlRungS
+        ; ---- and an orb seated in one ----
+seatPtrT: !byte ${SEAT.slotT.map(s => ((SEATBASE - VBANK) >> 6) + s).join(',')}
+seatXOffT: !byte ${SEAT.xOffT.join(',')}
+seatYBaseT: !byte ${SEAT.yBaseT.join(',')}
+seatFlagT: !byte ${SEAT.flagT.join(',')}
+seatHT: !byte ${SEAT.hT.join(',')}
 orbColLT: !byte ${orbColLT.join(',')}
 orbColRT: !byte ${orbColRT.join(',')}
 orbBitT: !byte ${orbBitT.join(',')}
@@ -11089,6 +11248,19 @@ hrsL:   cmp sockHT,y
         lda #$ff
         rts
 hrsHit: tya
+        rts
+; The seat ladder is the socket ladder rung for rung, but a rung can be DROPPED when the shape
+; grows past a sprite, so it gets its own thresholds rather than sharing sockHT.
+hlRungE:txa
+        ldy #$00
+hreL:   cmp seatHT,y
+        bcs hreHit
+        iny
+        cpy #${hx(SEAT.L.length)}
+        bcc hreL
+        lda #$ff
+        rts
+hreHit: tya
         rts
 
         * = ${hx16(HTABLE)}
@@ -11269,6 +11441,9 @@ holeSeeT: !byte ${holeSee.join(",")}
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
 hlFillT: !byte ${HOLELIKE.map(h => h.exit ? 0 : 15).join(',')}
+        ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
+        ; colour. Emitted rather than equated so a fresh load starts it clear.
+hlSeat: !fill ${HOLELIKE.length}, 0
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte ${holeVarT.join(',')}
@@ -11323,6 +11498,16 @@ arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
   return Math.max(51, Math.min(246, 50 + Math.min(d, l) * 8));
 }).join(',')}
+        ; ---- which ladder each kind uses: rung finder, yBase, ptr, flag, xOff ----
+        ; 0 = the exit hole, 1 = an empty socket, 2 = an orb seated in one. hlSet indexes this
+        ; instead of carrying three copies of the same six stores.
+hlK5T:  !byte 0,5,10
+hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT
+        !byte <hlRungS,<sockYBaseT,<sockPtrT,<sockFlagT,<sockXOffT
+        !byte <hlRungE,<seatYBaseT,<seatPtrT,<seatFlagT,<seatXOffT
+hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
+        !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
+        !byte >hlRungE,>seatYBaseT,>seatPtrT,>seatFlagT,>seatXOffT
 ${FALLSCENE ? `        * = ${hx16(FROWT + 0x500)}
 fRowT: ${chunk(fRowT, 32).trim()}` : ''}
         * = ${hx16(ORB_OCC)}
@@ -11693,7 +11878,11 @@ try {
     // name, load address, bytes, and whether it must land BEFORE the charset copy
     { tag: 'C', name: 'ICHR', first: true, at: 0xc000, data: [...fontA] },
     ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: 0xc000, data: ORBBM.flat() },
-                   { tag: 'H', name: 'IHOL', at: HOLEBASE, data: HOLEBM.flat() }] : []),
+                   { tag: 'H', name: 'IHOL', at: HOLEBASE, data: HOLEBM.flat() },
+                   { tag: 'E', name: 'ISEAT', at: SEATBASE, data: SEAT.BM.flat() }] : []),
+    // HOLEBMHASH=1: checksum just the EXIT hole's bitmaps, so a change to the socket
+    // ladder cannot be mistaken for a change to the hole.
+
     { tag: 'M', name: 'IMG', at: r.org, data: [...r.bytes] },
   ];
   const { buildLoader } = await import('./loader-src.mjs');

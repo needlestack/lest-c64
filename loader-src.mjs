@@ -10,7 +10,9 @@
 //   * The image covers $0801-$bfff, which includes this stub. So the body relocates itself into
 //     bank 3's free tail and runs from there while the image lands on top of where it started.
 // Hence the order: charset to $c000, copy it away, THEN the orb ladder over the top of it.
-export const LOADER_RUN = 0xcb00;
+export const LOADER_RUN = 0xcf00;   // ABOVE the sprite data in bank 3: ISEAT loads to $c940
+                                    // and runs to $cc7f, which used to land straight on the
+                                    // loader body and drop the machine back to BASIC
 const hx4 = n => '$' + n.toString(16).padStart(4, '0');
 const petscii = s => [...s].map(c => c.charCodeAt(0)).join(',');
 
