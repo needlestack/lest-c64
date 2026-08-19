@@ -2762,6 +2762,9 @@ const fRowT = (() => {
   }
   return out;
 })();
+// Rim thickness in BITMAP pixels. The rim is what makes one bitmap serve as both the exit
+// hole and a socket -- see the grid build below.
+const HOLE_RIM = +(process.env.HOLERIM ?? 1);
 const HOLEBASE = 0xe800;                         // above the charsets: 75 slots do not fit in
                                                  //   the 48 between $c400 and the I/O hole, and
                                                  //   $e800-$ffb9 is the bank.s other free run
@@ -2817,7 +2820,15 @@ for (const g of HOLE_LADDER) {
     const y = g.far + by * ch + ch / 2, s = holeSpan(g.d, y);
     return [...Array(g.px)].map((_, bx) => {
       const off = (bx - g.px / 2 + 0.5) * cw;    // apparent columns from centre
-      return Math.abs(off) <= s ? 2 : 0;         // bit pair 10 = the per-sprite colour = black
+      const a = Math.abs(off);
+      if (a > s) return 0;
+      // TWO inks, so one bitmap serves the exit hole AND a socket. The RIM is bit pair 01, a
+      // shared register; the FILL is pair 10, which is obC -- the one ink that can differ per
+      // sprite. So the same rung reads as a pit (fill black), an empty socket (fill floor
+      // colour, leaving a ring) or a seated orb (fill the orb's colour), for one byte.
+      // Below about two columns across there is no room for both, and an all-rim dot is the
+      // honest answer -- a distant hole should shrink to a mark, not develop an outline.
+      return (s > 2 * HOLE_RIM * cw && a <= s - HOLE_RIM * cw) ? 2 : 1;
     });
   });
   // A distant hole is under a row tall, so sampling row centres can miss it entirely and the
@@ -2827,7 +2838,7 @@ for (const g of HOLE_LADDER) {
     const by = Math.max(0, Math.min(20, Math.round(((g.near + g.far) / 2 - g.far) / ch)));
     for (let bx = 0; bx < g.px; bx++) {
       const off = (bx - g.px / 2 + 0.5) * cw;
-      if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = 2;
+      if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = 1;   // all rim: see above
     }
   }
   if (50 + g.far > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
@@ -10662,7 +10673,12 @@ holeSlot:
         sta omPri               ;   the floor it lies in is background, so it still draws there
         lda ohP
         sta obP,x
-        lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
+        lda #${hx(+(process.env.HOLEFILL ?? 0) & 15)}
+                                ; bit pair 10 is the per-sprite colour: the ONE ink that can
+                                ; differ per sprite, and so the whole difference between a pit
+                                ; and a socket. 0 = black = a hole you fall down. The floor
+                                ; colour leaves just the rim, which reads as an empty socket;
+                                ; an orb's colour reads as one seated in it. HOLEFILL=n to look.
         sta obC,x
         sta obOcc,x
         lda oidx                ; and MARK THE SLOT as a hole, so occStamp can tell. It fills no

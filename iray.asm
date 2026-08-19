@@ -7240,7 +7240,12 @@ holeSlot:
         sta omPri               ;   the floor it lies in is background, so it still draws there
         lda ohP
         sta obP,x
-        lda #$00                ; bit pair 10 is the per-sprite colour and a hole is black
+        lda #$00
+                                ; bit pair 10 is the per-sprite colour: the ONE ink that can
+                                ; differ per sprite, and so the whole difference between a pit
+                                ; and a socket. 0 = black = a hole you fall down. The floor
+                                ; colour leaves just the rim, which reads as an empty socket;
+                                ; an orb's colour reads as one seated in it. HOLEFILL=n to look.
         sta obC,x
         sta obOcc,x
         lda oidx                ; and MARK THE SLOT as a hole, so occStamp can tell. It fills no
