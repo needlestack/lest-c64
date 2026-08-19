@@ -3340,10 +3340,14 @@ cxml2:   tax
         beq cxpos
         lda #$ff
         sta stpX
+        lda #$ca                ; dex: the DDA's X step, patched rather than added -- see cxInc
+        sta cxInc
         jmp cydo                ; negative: m IS the side distance, and the inlined
                                 ; multiply above now writes it straight into sdx
 cxpos:  lda #$01
         sta stpX
+        lda #$e8                ; inx
+        sta cxInc
         sec                     ; positive: sdx = ddx - m, in place
         lda ddx
         sbc sdx
@@ -3481,7 +3485,7 @@ cdda:   lda sdxH
         lda sdx
         cmp sdy
         bcc cstepX
-        beq cstepX
+        beq cstepXc             ; the ONLY entry that arrives with carry SET -- see cstepXc
         ; Saturate, do not wrap. deltaDist is clamped at $ffff for a ray running parallel to
         ; an axis, so a side distance that is already large overflows 16 bits on the next
         ; add and comes back round as a SMALL number -- the DDA then thinks the crossing is
@@ -3508,8 +3512,12 @@ cyNs:   txa
         dey
         bne cdda
         jmp cfar
-cstepX: clc
-        lda sdx
+        ; Both 'bcc cstepX' above arrive with carry CLEAR -- that is what the branch tested --
+        ; so the add below does not need a clc. Only the exact-tie 'beq' arrives with it set,
+        ; and that pays for its own here rather than taxing every step. (The Y side keeps its
+        ; clc: 'bne cstepY' is reached when sdxH > sdyH, i.e. carry SET.)
+cstepXc: clc
+cstepX: lda sdx
         adc ddx
         sta sdx
         lda sdxH
@@ -3519,10 +3527,12 @@ cstepX: clc
         lda #$ff
         sta sdx
         sta sdxH
-cxNs:   txa
-        clc
-        adc stpX
-        tax
+        ; stpX is ALWAYS +-1 and is decided once per ray, so this is inx/dex -- 2 cycles
+        ; against the 9 that txa / clc / adc stpX / tax cost. The opcode is patched at the
+        ; same place stpX is set; stpX itself stays, because marchCol reads it to pick which
+        ; face of the cell was hit.
+cxNs:
+cxInc:  inx                     ; PATCHED to $e8 inx / $ca dex, once per ray
         lda mapT,x
         bne cwallX
         dey
