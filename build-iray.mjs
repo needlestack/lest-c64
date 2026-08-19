@@ -28,14 +28,19 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 // room is where the dodge happens; the corridor only has to hold orb, angel and hole.
 // Everything below row 8 is solid: dead space the player cannot reach, which costs nothing.
 const M = [
+ // Each of the room's four long walls steps one cell in over its middle third, so no wall is a
+ // flat 7-cell run any more -- a first level of nothing but unbroken faces read as bland. The
+ // shape is symmetric about the corridor axis y=4, and about x=4 apart from the doorway, which
+ // the east wall gives up its middle cell to; that leaves (7,4) a one-cell throat framing the
+ // corridor mouth. Player starts at (2,1) and the fall lands at (2,2), so both stay open.
  "1111111111111111",
+ "1001110011111111",   // north wall steps in at x3-5
  "1000000011111111",
+ "1100000111111111",   // west and east step in at y3...
+ "1100000000000001",   // ...y4, except the doorway at 8; corridor 9-14
+ "1100000111111111",   // ...and y5
  "1000000011111111",
- "1000000011111111",
- "1000000000000001",   // room cols 1-7, doorway at 8, corridor 9-14
- "1000000011111111",
- "1000000011111111",
- "1000000011111111",
+ "1001110011111111",   // south wall steps in at x3-5
  "1111111111111111",
  "1111111111111111","1111111111111111","1111111111111111",
  "1111111111111111","1111111111111111","1111111111111111","1111111111111111",
