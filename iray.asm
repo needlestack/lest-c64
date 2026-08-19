@@ -2627,6 +2627,19 @@ seamSpan:
         cmp #$02
         bcc ssDn                ; adjacent columns: nothing between them to mark
         sta ssW                 ; span width in columns
+        ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
+        ; colH is a height in ROWS, so it is 1/z up to a constant and the whole distance test is
+        ; one compare -- no arithmetic, and it lands BEFORE calcU and the divide, which is where
+        ; the cost actually is. Keep the TALLER end: a span running away from you still has a
+        ; near end worth marking, and only when BOTH ends are small is there nothing to see.
+        ldx spanL
+        lda colH,x
+        ldx spanR
+        cmp colH,x
+        bcs ssTall
+        lda colH,x
+ssTall: cmp #$0c
+        bcc ssDn                ; too far for a one-pixel line to read as panelling
 
         ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
         ; coordinate along the face is the whole question: same cell, no boundary. 65% of

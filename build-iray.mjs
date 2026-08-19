@@ -1608,11 +1608,25 @@ const RAYCNT = flag('RAYCNT');
 // PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
 const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
-// SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. seamSpan is ~9% of
-// the frame on a long sightline and every one of those seams is a one-pixel line on a wall a
-// handful of rows tall. 0 = off, which is the default because this is a LOOK decision, not a
-// free win: the far corridor is exactly where the seams get culled and exactly where the eye is.
-const SEAMFAR = +(process.env.SEAMFAR ?? 0);
+// SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
+//
+// This is STRUCTURAL, not taste. A seam is a whole character -- SEAM0..SEAM0+3 are SOLID glyphs
+// with a line down one of the four pixel columns -- so it can only appear on a char row that is
+// FULLY wall, and it is always 8px tall and 2px wide. rsT says where those rows start
+// (rs = ceil((100-h)/8), fully-solid rows per half = 13 - rs), which makes the whole thing a
+// table of h:
+//
+//     colH   wall     fully-solid char rows per half
+//     0-3    0-6px    0   <- a seam is IMPOSSIBLE here; computing one is pure waste
+//     4-11   8-23px   1
+//     12-19  24-39px  2
+//     20-27  40-55px  3
+//
+// So n=4 is free by construction. Past that it is a judgement, and the fixed 2px width is the
+// argument for culling EARLIER rather than later: on a wall 16px tall a panel line is not
+// panelling, it is a speck with the same weight as one on a wall five times the size.
+// Default 12 -- keep seams only where there are at least two solid rows a side.
+const SEAMFAR = +(process.env.SEAMFAR ?? 12);
 const SEAMS = process.env.SEAMS !== '0';
 // CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
 // They were dropped from convex ends because the silhouette there already steps 20+ rows so
