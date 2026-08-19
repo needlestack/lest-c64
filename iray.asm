@@ -5404,7 +5404,7 @@ hoNx:   lda hoI
         sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
 hoInc:  inc hoI
         lda hoI
-        cmp #$02
+        cmp #$03
         bcc hoLp
         rts
 
@@ -6003,7 +6003,7 @@ oiNext: txa
         sta bfsPhase            ; NO FILL IN FLIGHT. Uninitialised this could read as phase 2,
                                 ;   which drops bfsTick straight into the expand loop with a
                                 ;   garbage bfsTail and scribbles past bfsQ.
-        ldx #$01
+        ldx #$02
 hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         dex
         bpl hlSCl
@@ -6780,7 +6780,7 @@ dkNo:   lda #$ff
 ; ---- hlAt: is odX/odY a SOCKET? Y = its hole-like index, or $ff ----
 ; Exits are skipped: you cannot put an orb down a hole you are about to fall through.
 hlAt:   ldy #$02
-hlAtL:  cpy #$02
+hlAtL:  cpy #$03
         bcs hlAtNo
         tya
         clc
@@ -7532,8 +7532,8 @@ sockHT: !byte 107,94,80,67,54,40,27,13   ; DESCENDING h thresholds, scanned by h
         ; ---- and an orb seated in one ----
 seatPtrT: !byte 37,39,41,43,45,47,48,49
 seatXOffT: !byte 24,24,24,12,12,6,6,6
-seatYBaseT: !byte 135,135,134,135,135,142,142,142
-seatFlagT: !byte 6,6,14,2,2,1,1,1
+seatYBaseT: !byte 135,135,135,135,135,142,142,142
+seatFlagT: !byte 6,6,6,2,2,1,1,1
 seatHT: !byte 107,94,80,67,54,40,27,13
 orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1,23,21,21,19,17,15,13,12,11,11,10,9,8,7,6,5,5,4,3,2
 orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14,14,11,10,9,8,7,6,6,5,4,3,2,1,0
@@ -7589,8 +7589,8 @@ orbOccLoT: !byte 0,4
 orbOccHiT: !byte 112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 8,9,14,14
-orbYCT: !byte 4,4,4,4
+orbXCT: !byte 8,9,14,14,11
+orbYCT: !byte 4,4,4,4,4
 landXT: !byte 2,2
 landYT: !byte 2,2
 orbColT2: !byte 12,12
@@ -8216,13 +8216,13 @@ bfsQ:   !fill 46, 0
         ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
         ; 32 bytes each. It lived in the fall's block until the sockets made it too big for the
         ; slack there.
-holeSeeT: !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+holeSeeT: !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,,,,,,,96,,224,127,96
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
-hlFillT: !byte 0,0
+hlFillT: !byte 0,0,15
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
-hlSeat: !fill 2, 0
+hlSeat: !fill 3, 0
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,31,30,30,30,29,29,29,29,28,28,28,27,27,27,27,26,26,26,25,25,25,24,24,24,24,23,23,23,22,22,22,21,21,21,21,20,20,20,19,19,19,18,18,18,18,17,17,17,16,16,16,15,15,15,15,14,14,14,13,13,13,12,12,12,12,12,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -8262,7 +8262,7 @@ orbY0T: !byte 4,4
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
-orbSeenT: !byte 0,0,0,0
+orbSeenT: !byte 0,0,0,0,0
 angAccT: !byte 0,0   ; 60ths banked toward this angel's next step
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6,1,1,1,1,1,1,1,6,6,6,6,6,6,6,6,6,6,6,6,6

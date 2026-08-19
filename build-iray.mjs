@@ -3031,37 +3031,20 @@ function makeSeatLadder(sockL, slot0) {
   // where the shadow's widest row sits inside the seated art, as a fraction of its height
   const MIDF = (19 - EY0 + 0.5) / EH;
   for (const sg of sockL) {
-    const cw = sg.mag ? 2 : 1;
-    // The orb is as wide as the socket and keeps the source aspect in bitmap pixels, exactly as
-    // orbW does for a standing one. Its own height is what decides vmag here -- the socket's
-    // choice is for a flat ellipse and the dome is much taller than that.
+    // A seated orb REPLACES the socket -- hlSet points the entity at this ladder instead of the
+    // socket's, so there is one sprite, not two, and nothing of the socket belongs in this
+    // bitmap. Drawing the ellipse under the orb here was what made it read as two objects.
+    // Width is the socket's, since they are the same diameter; the height follows the source
+    // aspect in bitmap pixels, exactly as orbW does for a standing orb.
     const w = sg.px, hWant = Math.max(1, Math.round(EH * w / EW));
-    // rows the whole thing needs: the dome above the shadow line, plus the socket below it
-    const sockBelow = Math.max(0, Math.min(200, sg.near) - (sg.far + (sg.near - sg.far) / 2));
-    let vmag = sg.vmag, ch = vmag ? 2 : 1, h = hWant;
-    if (hWant * MIDF + sockBelow / ch > 21 && !vmag) { vmag = 1; ch = 2; h = Math.max(1, Math.round(hWant / 2)); }
+    let vmag = 0, ch = 1, h = hWant;
+    if (h > 21) { vmag = 1; ch = 2; h = Math.max(1, Math.round(hWant / 2)); }
     const art = seatScale(w, h);
+    // the art's shadow line is the floor, so it lands on the floor row for this distance
     const artMid = Math.round(h * MIDF);
-    // rasterise the socket's own ellipse at THIS rung's ch, rather than copying the socket
-    // rung's grid, which may be at a different vertical scale
-    const widY = artMid;                     // the ellipse's widest row IS the shadow line
-    const far = Math.round(100 + 88 / sg.d) - widY * ch;
-    const grid = [...Array(21)].map((_, by) => {
-      const y = far + by * ch + ch / 2;
-      const sS = discSpan(SOCKR, sg.d, y);
-      return [...Array(w)].map((_, bx) => {
-        const off = (bx - w / 2 + 0.5) * cw;
-        return (sS > 0 && Math.abs(off) <= sS) ? 2 : 0;
-      });
-    });
-    if (HOLE_RIM) {                          // the same closed outline the empty socket gets
-      const ins = grid.map(r => r.map(v => v !== 0));
-      const at = (y, x) => y >= 0 && y < 21 && x >= 0 && x < w && ins[y][x];
-      for (let y = 0; y < 21; y++) for (let x = 0; x < w; x++)
-        if (ins[y][x] && !(at(y-1,x) && at(y+1,x) && at(y,x-1) && at(y,x+1))) grid[y][x] = 1;
-    }
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++)   // the orb, sitting in it
-      if (art[y][x]) grid[y][x] = art[y][x];
+    const far = Math.round(100 + 88 / sg.d) - artMid * ch;
+    const grid = [...Array(21)].map((_, y) =>
+      [...Array(w)].map((_, x) => (y < h ? art[y][x] : 0)));
     const g = { d: sg.d, px: w, mag: sg.mag, vmag, spr: sg.spr, far, grid, slot };
     slot += g.spr;
     L.push(g);
