@@ -21,6 +21,7 @@ col     = $17
 tmp     = $1f
 baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
+smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
@@ -1097,7 +1098,25 @@ pvInsD: lda tmp2
         clc
         adc pa
         sta pvAng,x
-        lda remHiT,y
+        ; ---- the reciprocal must come from the NEARER side, not from spanL ----
+        ; A silhouette boundary is a physical edge on the near surface, so it moves with THAT
+        ; surface's parallax. spanL is the near side for a right-facing silhouette and the FAR
+        ; side for a left-facing one, so taking the distance from spanL unconditionally
+        ; mispredicted every left-facing silhouette -- it was told to drift at the far wall's
+        ; rate when the edge actually moves at the near object's. That is why the glitch was
+        ; asymmetric: strafing one way the mispredicted bracket still landed inside the object,
+        ; strafing the other it fell short onto the far wall and the object went unprobed.
+        ; Whole cells only, no fraction tiebreak: the case this exists for is a near object
+        ; against a far wall, which always differs in the high byte. When the two sides ARE in
+        ; the same cell of distance their reciprocals agree to within a 1/16-cell table step,
+        ; so which one wins cannot matter -- and 13 bytes of headroom can.
+        ; spanR is always spanL+1, so fold the +1 into the ADDRESS and the iny/dey disappear.
+        ldy tmp2
+        lda remHiT+1,y          ; the far end of the pinned pair
+        cmp remHiT,y
+        bcs pvNL                ; right is no nearer -> keep spanL
+        iny                     ; right is nearer -> spanR
+pvNL:        lda remHiT,y
         cmp #16
         bcs pvRcFar             ; 16+ cells: the translation term is under a quarter-unit at
         asl                     ; any plausible speed, so a constant is as good as a lookup

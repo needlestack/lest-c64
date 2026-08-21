@@ -1739,6 +1739,25 @@ if (!SEAMS) DIAG.push('SEAMS=0');
 const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
 const STRAFE = flag('STRAFE'); // auto-strafe (parallel to walls)
 const BACK = flag('BACK');     // auto-walk backward
+// STRAFEL=1: auto-strafe the OTHER way. Not symmetry for its own sake -- the pivot's prediction
+// is left/right asymmetric (a hint takes its distance from spanL, which is the near surface for
+// a right-facing silhouette and the FAR one for a left-facing silhouette), so a glitch that
+// needs the mispredicted direction cannot be reproduced by strafeR at all.
+const STRAFEL = flag('STRAFEL');
+// SLOWMO=n: let the auto-mover take a step only every n-th frame. The auto-walk and auto-strafe
+// move at PLAYER speed, so a 3-cell traverse is over in about a second -- and a glitch that lives
+// on two or three frames of it cannot be caught by -limitcycles at all, because the whole window
+// is narrower than the jitter in when the disk finishes loading. Stretching the traverse does not
+// change what is rendered at any given position, only how long the emulator sits there.
+// PVNEAR=0 restores the old "always spanL" reciprocal, so the before/after of that fix can be
+// benchmarked as the only difference between two builds. Keep it until the number is recorded.
+const PVNEAR = process.env.PVNEAR !== '0';
+if (!PVNEAR) DIAG.push('PVNEAR=0');
+const SLOWMO = +(process.env.SLOWMO ?? 0);
+if (SLOWMO) DIAG.push(`SLOWMO=${SLOWMO}`);
+const AUTOMOVE = TOUR ? 'tourStep' : SPIN ? 'spinStep' : WIGGLE ? 'wiggleStep'
+               : WALK ? 'moveFwd' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL'
+               : BACK ? 'moveBack' : null;
 
 // ---- VIC bank 0 memory layout ----
 // The double buffer flips between two 1KB screen matrices. Both are RAM the renderer
@@ -3191,6 +3210,7 @@ col     = $17
 tmp     = $1f
 baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
+smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
@@ -3954,7 +3974,10 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta py+1
         lda #${hx(PA)}
         sta pa
-${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
+${SLOWMO ? `        lda #$01
+        sta smCnt               ; 1, not SLOWMO: step on the FIRST frame, so the traverse starts
+                                ; from the requested position rather than SLOWMO frames into it
+` : ''}${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
 ` : ''}${process.env.DROPNOW ? `        lda #$01
         sta dbgOnce` : ''}
 ${DIE ? `        lda #$00
@@ -4042,7 +4065,7 @@ mfAlive:
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
         jmp fwait
-mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        ' : ''}${TOUR ? 'jsr tourStep' : SPIN ? 'jsr spinStep' : WIGGLE ? 'jsr wiggleStep' : WALK ? 'jsr moveFwd' : STRAFE ? 'jsr strafeR' : BACK ? 'jsr moveBack' : 'jsr readKeys'}${DIE ? '\nmfSkip:' : ''}
+mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
@@ -4255,7 +4278,25 @@ pvInsD: lda tmp2
         clc
         adc pa
         sta pvAng,x
-        lda remHiT,y
+${PVNEAR ? `        ; ---- the reciprocal must come from the NEARER side, not from spanL ----
+        ; A silhouette boundary is a physical edge on the near surface, so it moves with THAT
+        ; surface's parallax. spanL is the near side for a right-facing silhouette and the FAR
+        ; side for a left-facing one, so taking the distance from spanL unconditionally
+        ; mispredicted every left-facing silhouette -- it was told to drift at the far wall's
+        ; rate when the edge actually moves at the near object's. That is why the glitch was
+        ; asymmetric: strafing one way the mispredicted bracket still landed inside the object,
+        ; strafing the other it fell short onto the far wall and the object went unprobed.
+        ; Whole cells only, no fraction tiebreak: the case this exists for is a near object
+        ; against a far wall, which always differs in the high byte. When the two sides ARE in
+        ; the same cell of distance their reciprocals agree to within a 1/16-cell table step,
+        ; so which one wins cannot matter -- and 13 bytes of headroom can.
+        ; spanR is always spanL+1, so fold the +1 into the ADDRESS and the iny/dey disappear.
+        ldy tmp2
+        lda remHiT+1,y          ; the far end of the pinned pair
+        cmp remHiT,y
+        bcs pvNL                ; right is no nearer -> keep spanL
+        iny                     ; right is nearer -> spanR
+pvNL:` : ''}        lda remHiT,y
         cmp #16
         bcs pvRcFar             ; 16+ cells: the translation term is under a quarter-unit at
         asl                     ; any plausible speed, so a constant is as good as a lookup
