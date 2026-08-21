@@ -3029,10 +3029,13 @@ const melFn = MEL_SEQ.map(n => {
 // cap on that directly, and allow a couple of rows of clip rather than none, so the TOP stays
 // closer to where perspective wants it once the ladder can no longer grow.
 const ANGCLIP = +(process.env.ANGCLIP ?? 4);
-// The test is "is this a MULTI-SPRITE-ROW entity", not "is ANG6 on": under ANGFINE the same
-// ladder holds band rungs that are three sprite rows AND plain rungs that are one, and the
-// plain ones must keep the orb rule they have today.
-const orbYCapT = orbBlankT.map((b, v) => (v >= ANG_V0 && (ANG6 || ORBROWS[v] > 1))
+// The test is simply "is this a TALL entity's rung" -- every variant from ANG_V0 up. It used to
+// be gated on ANG6, and then on the variant being multi-row, which meant the rule was written
+// for the six-sprite angel and the TWO-sprite one never got it: it fell through to the orb rule
+// and pinned 26 rows lower on every magnified rung. That is exactly where it shows, because the
+// magnified rungs are the close ones, where the ladder has stopped growing and translation down
+// the screen is all that is left.
+const orbYCapT = orbBlankT.map((b, v) => v >= ANG_V0
   ? Math.max(0, Math.min(255, 250 + ANGCLIP - ORBANCH[v]))
   : Math.max(0, 250 - ORB_FLOOR - Math.max(0, b)));
 if (orbYCapT.some(v => v < 0 || v > 255)) throw new Error('orbYCapT does not fit a byte');
