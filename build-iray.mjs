@@ -17,6 +17,7 @@
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { assemble } from './asm6502.mjs';
 import { fitOrb, fitArt } from './fit-orb.mjs';
+import { ang6Ladder } from './ang6.mjs';
 import { LOADER_RUN } from './loader-src.mjs';
 // NOSOCK=1 drops the socket AND seated-orb bitmaps. They are emitted even in levels with no
 // sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
@@ -2306,7 +2307,9 @@ for (let h = 42; h >= 24; h -= 3) ANGLAD.push({ h, exp: 1 });   // apparent 84..
 for (let h = 42; h >= 6;  h -= 3) ANGLAD.push({ h, exp: 0 });   // apparent 42..6
 const ANGBMH = [...new Set(ANGLAD.map(r => r.h))].sort((a, b) => b - a);
 const ANGIDX = new Map();                        // height -> [lower slot, upper slot or -1]
-for (const h of ANGBMH) {
+// ANG6 replaces these entirely; generating them anyway spent 20 sprite slots on bitmaps no
+// variant points at.
+for (const h of (process.env.ANG6 === '1' ? [] : ANGBMH)) {
   const g = angScale(angW(h), h);
   const lo = ORBBM.length; ORBBM.push(angBytes(g, 21));         // rows 21..41: the lower sprite
   let up = -1;
@@ -2316,13 +2319,62 @@ for (const h of ANGBMH) {
 const ANG_V0 = LADDER.length;                    // the angel's rungs follow the orb's in the
                                                  // SHARED variant tables, so every table indexed
                                                  // by ovar extends for free
-for (const r of ANGLAD) {
+// ANG6=1: the six-sprite ladder from ang6.mjs -- up to 2 columns x 3 rows, so the angel can be
+// 80x126 instead of 48x84 and the mid range is drawn at four times the sample density.
+const ANG6 = process.env.ANG6 === '1';
+if (ANG6) {
+  const { rungs, sets } = ang6Ladder();
+  const angBase = new Map();
+  for (const [key, st] of sets) {
+    // Fit the figure, then lay it into a (cols*12) x (rows*21) canvas and slice that into
+    // sprites. Centred across and standing on the floor, exactly as orbScale places a ball.
+    const px = fitArt(`angel-${ANGELART || 'full'}.png`, st.w, st.h, { mirror: false, contrast: ANGCON }).px;
+    const CW = st.cols * 12, CH = st.rows * 21;
+    const g = [...Array(CH)].map(() => new Array(CW).fill(0));
+    const ox = (CW - st.w) >> 1, oy = CH - st.h;
+    for (let y = 0; y < st.h; y++) for (let x = 0; x < st.w; x++) g[oy + y][ox + x] = px[y * st.w + x];
+    angBase.set(key, ORBBM.length);
+    // Row-major from the BOTTOM row up. The base bitmap has to be the bottom-left cell,
+    // because that is the one the existing projection places from orbPtrT -- emit top-first and
+    // the head is drawn where the feet belong.
+    // ANG6BOX=1: outline every sprite cell, so the grid the angel is built from is visible as
+    // bounding boxes on screen. Bit pair 3 ($d026) because the art uses it sparingly, so a solid
+    // rectangle of it reads clearly against both the figure and the black behind it.
+    const BOX = process.env.ANG6BOX === '1';
+    for (let i = 0; i < st.rows; i++) for (let c = 0; c < st.cols; c++) {
+      const r = st.rows - 1 - i;
+      const b = [];
+      for (let y = r * 21; y < r * 21 + 21; y++) for (let k = 0; k < 3; k++)
+        b.push([0, 1, 2, 3].reduce((v, j) => {
+          const sy = y - r * 21, lx = k * 4 + j;
+          const px = (BOX && (sy === 0 || sy === 20 || lx === 0 || lx === 11))
+                   ? 3 : g[y][c * 12 + lx];
+          return v | (px << (6 - 2 * j));
+        }, 0));
+      b.push(0);
+      ORBBM.push(b);
+    }
+  }
+  for (const r of rungs) {
+    const bs = angBase.get(`${r.w}x${r.h}`);
+    LADDER.push({ h: r.h, exp: r.xm === 2 ? 1 : 0, cols: r.cols, rows: r.rows, base: bs });
+    ORBSRC.push(bs);
+    ORBEXP.push(r.xm === 2 ? 1 : 0);
+    ORBYEX.push(r.ym === 2 ? 1 : 0);
+    ORBWIDE.push(r.w * 2 * r.xm);
+    ORBTALL.push(r.H);
+  }
+} else for (const r of ANGLAD) {
   const [lo, up] = ANGIDX.get(r.h);
   LADDER.push({ h: r.h, exp: r.exp, up });
   ORBSRC.push(lo); ORBEXP.push(r.exp); ORBYEX.push(r.exp);
   ORBWIDE.push(angW(r.h) * (r.exp ? 4 : 2));
   ORBTALL.push(r.h * (r.exp ? 2 : 1));
 }
+// Sprite grid per variant. Everything that is not a six-sprite angel rung is 1x1 for the lower
+// sprite plus the legacy "upper" slot, which the runtime still handles as a special case.
+const ORBCOLS = LADDER.map(r => r.cols ?? 1);
+const ORBROWS = LADDER.map(r => r.rows ?? 1);
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
 const ICO_BM = ORBBM.length;                     // the carried-orb icon: a fixed sprite in the
@@ -2554,6 +2606,27 @@ const angVarT = [...Array(256)].map((_, h) => {
     if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
   return b;
 });
+if (process.env.ANG6DUMP === '1') {
+  for (const bi of [42, 43]) {
+    console.error(`  --- ORBBM[${bi}] ---`);
+    const b = ORBBM[bi], CH = '.-+#';
+    for (let y = 0; y < 21; y++)
+      console.error('    ' + String(y).padStart(2) + ' ' + [0,1,2].flatMap(k =>
+        [0,1,2,3].map(i => CH[(b[y*3+k] >> (6-2*i)) & 3])).join(''));
+  }
+  console.error('  angel variants: var H tall wide grid base');
+  for (let v = ANG_V0; v < ORBTALL.length; v++)
+    console.error(`    var ${v} (0x${v.toString(16)})  tall ${String(ORBTALL[v]).padStart(3)}` +
+      `  wide ${String(ORBWIDE[v]).padStart(3)}  grid ${ORBCOLS[v]}x${ORBROWS[v]}` +
+      `  base ${ORBSRC[v]}  xexp ${ORBEXP[v]} yexp ${ORBYEX[v]}`);
+  console.error('  ohgt -> angel rung (want = 2*h*ANGH):');
+  for (const h of [40, 60, 80, 100, 117, 140, 180, 255]) {
+    const v = angVarT[h];
+    console.error(`    ohgt ${String(h).padStart(3)}  want ${(2 * h * ANGH).toFixed(0).padStart(3)}` +
+      `  -> var ${v} (rung ${v - ANG_V0})  tall ${ORBTALL[v]}  wide ${ORBWIDE[v]}` +
+      `  grid ${ORBCOLS[v]}x${ORBROWS[v]}  xexp ${ORBEXP[v]} yexp ${ORBYEX[v]}  ptr ${ORBSRC[v]}`);
+  }
+}
 // ---- ANGMID=1: centre the angel on its ideal height instead of standing it on the floor ----
 // The rung is a quantised height, and foot-anchoring puts ALL of that error at the TOP: between
 // jumps the figure slides down with the ground line, then the top leaps by the whole step. Split
@@ -2759,7 +2832,17 @@ const melFn = MEL_SEQ.map(n => {
 // The cap is about the lower sprite's own frame, so clamp: untreated it computed to 280/274/268,
 // the assembler truncated those to 24/18/12/0, and the angel pinned near raster ZERO -- off the
 // top with its feet sticking into the display, which is exactly how it was reported.
-const orbYCapT = orbBlankT.map(b => Math.max(0, 250 - ORB_FLOOR - Math.max(0, b)));
+// How far down an entity may slide before it is pinned. The orb's rule works from orbBlankT,
+// which is the blank ABOVE the ball inside ONE sprite -- meaningless for a multi-row figure,
+// where ORBTALL is the whole angel and ORBANCH is a single sprite, so it comes out NEGATIVE,
+// max(0,..) flattens it to zero and the cap lets the bottom sprite run 30 rows past the screen.
+// The angel is bottom-aligned in its canvas, so its content ends one sprite height below o3:
+// cap on that directly, and allow a couple of rows of clip rather than none, so the TOP stays
+// closer to where perspective wants it once the ladder can no longer grow.
+const ANGCLIP = +(process.env.ANGCLIP ?? 4);
+const orbYCapT = orbBlankT.map((b, v) => (ANG6 && v >= ANG_V0)
+  ? Math.max(0, Math.min(255, 250 + ANGCLIP - ORBANCH[v]))
+  : Math.max(0, 250 - ORB_FLOOR - Math.max(0, b)));
 if (orbYCapT.some(v => v < 0 || v > 255)) throw new Error('orbYCapT does not fit a byte');
 const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
 // Half the sprite, in LOGICAL COLUMNS. Everything in this engine lives on the 160x200 grid, and
@@ -3534,6 +3617,26 @@ baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
 smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
 hazCur  = $805f                  ; the cell whose run-table patches are currently applied
+ogC     = $8060                  ; the sprite GRID walk for a tall entity: columns, rows, the
+ogR     = $8061                  ;   row and column pitches, the bitmap base, and the cursor
+ogAnch  = $8062
+ogXOff  = $8063
+ogPtr   = $8064
+ogRow   = $8065
+ogCol   = $8066
+ogN     = $8067
+ogXL    = $8068
+ogXH    = $8069
+ogGL    = $806a                  ; the GRID's left edge: the anchor centres one column
+ogGH    = $806b
+dbg0    = $806c                  ; ANG6DBG2: engine state captured at the angel's grid setup
+dbg1    = $806d
+dbg2    = $806e
+dbg3    = $806f
+dbg4    = $8070
+dbg5    = $8071
+dbg6    = $8072
+dbg7    = $8073
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
 opaqL   = $8076                  ; the paq the cached frame trig was taken at
 opaqH   = $8077
@@ -7624,9 +7727,43 @@ drawFps:
 
 ; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
 ; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
-drawDbg:
+${process.env.ANG6DBG2 === '1' ? `ddHex:  pha                     ; A as two hex digits at Y, Y advanced
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        pla
+        and #$0f
+        jmp ddPut
+` : ''}drawDbg:
 ${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still needs it' : ''}
-        lda #${hx(HUDROW)}      ; see drawFps: the top character row is half under the border
+${process.env.ANG6DBG2 === '1' ? `        ; ANG6DBG2: rows 6-7 carry the angel's projection state as hex pairs --
+        ;   row 6: ovar  cols  rows  onv
+        ;   row 7: onvH  primary obY  obP  obX
+        lda #$06
+        jsr setRow
+        ldy #28
+        lda dbg0
+        jsr ddHex
+        lda dbg1
+        jsr ddHex
+        lda dbg2
+        jsr ddHex
+        lda dbg3
+        jsr ddHex
+        lda #$07
+        jsr setRow
+        ldy #28
+        lda dbg4
+        jsr ddHex
+        lda dbg5
+        jsr ddHex
+        lda dbg6
+        jsr ddHex
+        lda dbg7
+        jsr ddHex
+` : ''}        lda #${hx(HUDROW)}      ; see drawFps: the top character row is half under the border
         jsr setRow
         ldy #36
         lda #16                 ; 'X'
@@ -9168,10 +9305,17 @@ ovW2:   sec
         lda omBit
         ora omXX
         sta omXX
-        lda omBit
+${ANG6 ? `        ; X and Y expansion are separate for the six-sprite ladder, which uses vmag ALONE
+        ; to double the size without halving the horizontal resolution. Setting both from
+        ; orbExpT left a vmag-only rung drawn half height while orbAnchT spaced its rows 42
+        ; apart -- the rows floated one sprite clear of each other with a gap between.
+oNoX:   ldy ovar
+        lda orbYExT,y
+        beq oNoY
+        lda omBit` : `        lda omBit`}
         ora omYY
         sta omYY
-oNoX:   lda o0                  ; already on the multicolor grid -- X is 2*b, so always even.
+${ANG6 ? 'oNoY:' : 'oNoX:'}   lda o0                  ; already on the multicolor grid -- X is 2*b, so always even.
                                 ; It has to be: a multicolor CHAR pixel is two hires pixels
                                 ; aligned to the character, a multicolor SPRITE pixel is two
                                 ; aligned to the sprite's own X, and at an odd X the two grids
@@ -9220,7 +9364,204 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         ; ---- a TALL entity takes a second slot for its upper half ----
         ; Same X, same colour, same expand; the other bitmap; and one sprite height above -- 21
         ; rows, or 42 once vmag has doubled it, which is exactly what orbAnchT already holds.
+${ANG6 ? `        ; ---- the rest of the sprite GRID ----
+        ; A tall entity is up to 2 columns x 3 rows now, not a fixed pair. The slot placed above
+        ; is the BOTTOM-LEFT cell; every other cell is a follower -- same colour, same expands,
+        ; its own bitmap, offset by whole sprite widths and heights, and marked $fe so it
+        ; inherits priority but stamps nothing (see the note on $fe below).
         ldy ovar
+        lda orbColsT,y
+        sta ogC
+        lda orbRowsT,y
+        sta ogR
+${process.env.ANG6DBG2 === '1' ? `        cmp #$02                ; capture only a MULTI-ROW entity: this block runs for every
+        bcc ag6nd               ;   entity, and an orb was overwriting the angel's state
+        ldy ovar
+        sty dbg0
+        lda ogC
+        sta dbg1
+        lda ogR
+        sta dbg2
+        lda onvL                ; which slot the primary took
+        sta dbg3
+        lda omEn                ; ...and whether its enable bit is actually set
+        sta dbg4
+        ldx onvL
+        lda obY,x
+        sta dbg5
+        lda obP,x
+        sta dbg6
+        lda omX8                ; the 9th X bit: if slot 1 is set here, X is 224+256 = off screen
+        sta dbg7
+ag6nd:  ldy ovar
+` : ''}
+        lda orbAnchT,y
+        sta ogAnch
+        lda orbColPT,y
+        sta ogXOff
+        lda orbPtrT,y
+        sta ogPtr
+        ; ---- the grid's left edge ----
+        ; The anchor aims at the centre of ONE 12-column sprite, so a two-column grid hangs half
+        ; a sprite width too far right: its left edge is that much further left. Computed once
+        ; here rather than per cell, and 9 bits wide because a sprite's X is.
+        lda o0
+        sta ogGL
+        lda o1
+        sta ogGH
+        lda ogC
+        cmp #$02
+        bne ogPri               ; one column: the anchor is already the grid's left edge
+        lda ogXOff
+        lsr
+        sta ogN
+        lda ogGL
+        sec
+        sbc ogN
+        sta ogGL
+        bcs ogPri
+        dec ogGH
+ogPri:
+${process.env.ANG6DBG === '1' ? `        ldx onvL                ; ANG6DBG: colour the primary too (row 0, col 0 -> red), so all
+        lda #$02                ;   six cells are distinguishable from each other and from orbs
+        sta obC,x
+` : ''}        ; ---- and move the PRIMARY onto that edge too ----
+        ; It was placed from orbXOffT, which is built for a ONE-column sprite -- so the bottom
+        ; left cell sat half a sprite right of the other five and the figure came apart. Same
+        ; shift, applied to the slot already written.
+        ldx onvL
+        lda ogGL
+        sta obX,x
+        lda orbBitT,x
+        sta omBit
+        lda ogGH
+        and #$01
+        beq ogPCl
+        lda omBit               ; past 255: the 9th bit goes on
+        ora omX8
+        sta omX8
+        jmp ogRow0
+ogPCl:  lda omBit               ; ...and off again if the shift brought it back under
+        eor #$ff
+        and omX8
+        sta omX8
+ogRow0: lda #$00
+        sta ogRow
+ogRLp:  lda #$00
+        sta ogCol
+ogCLp:  lda ogRow               ; the primary is row 0, column 0: already placed
+        bne ogDo
+        lda ogCol
+        beq ogNext
+ogDo:   ldx onv
+        cpx onvH
+        bcs ogEnd               ; out of slots: draw what is already placed rather than nothing
+        lda ogRow               ; Y = o3 - row*anchor, row counting UP from the feet. The count
+        sta ogN                 ;   is 0..2, so repeated subtraction beats a multiply.
+        lda o3
+ogYLp:  ldy ogN
+        beq ogYok
+        sec
+        sbc ogAnch
+        bcc ogNext              ; this row is off the top of the screen
+        dec ogN
+        jmp ogYLp
+ogYok:  sta obY,x
+        lda ogGL                ; X = grid left + col*(one sprite width), 9 bits wide
+        sta ogXL
+        lda ogGH
+        sta ogXH
+        bmi ogNext              ; grid runs off the left of the screen: skip this column
+        ldy ogCol
+        beq ogXok
+ogXLp:  lda ogXL
+        clc
+        adc ogXOff
+        sta ogXL
+        bcc ogXnc
+        inc ogXH
+ogXnc:  dey
+        bne ogXLp
+ogXok:  lda ogXL
+        sta obX,x
+${process.env.ANG6FLAT === '1' ? `        lda ogPtr               ; ANG6FLAT=1: every follower gets the SAME bitmap
+        sta obP,x` : `        lda ogRow               ; bitmap = base + row*cols + col, laid out row-major from the top
+        ldy ogC
+        cpy #$02
+        bne ogM1
+        asl
+ogM1:   clc
+        adc ogCol
+        clc
+        adc ogPtr
+        sta obP,x`}
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        lda ogXH
+        and #$01
+        beq ogNoM
+        lda omBit
+        ora omX8
+        sta omX8
+ogNoM:  ${process.env.ANG6DBG === '1' ? `lda ogRow   ; ANG6DBG=1: a colour per grid cell, so the layout can be read off
+        asl                     ; the screen. 2+row*2+col -> red/cyan/purple/green/blue/yellow
+        clc
+        adc ogCol
+        clc
+        adc #$02
+        sta obC,x` : `ldy oidx
+        lda orbColT2,y
+        sta obC,x`}
+        ldy ovar                ; the two magnifications are separate now: the six-sprite ladder
+        lda orbExpT,y           ;   uses vmag alone to double the size without halving the
+        beq ogNoXX              ;   horizontal resolution
+        lda omBit
+        ora omXX
+        sta omXX
+ogNoXX: lda orbYExT,y
+        beq ogNoYY
+        lda omBit
+        ora omYY
+        sta omYY
+ogNoYY: ldy onvL
+        lda #$fe
+        sta obIX,x
+        lda obV,y
+        sta obV,x
+        lda obOcc,y
+        sta obOcc,x
+        lda obCL,y
+        sta obCL,x
+        lda obCR,y
+        sta obCR,x
+        lda obL,y
+        sta obL,x
+        lda obR,y
+        sta obR,x
+        lda obBL,y
+        sta obBL,x
+        lda obBR,y
+        sta obBR,x
+${process.env.ANG6DBG2 === '1' ? `        lda obY,x               ; ANG6DBG2: where this FOLLOWER actually landed
+        sta dbg5
+        lda obP,x
+        sta dbg6
+        lda omYY
+        sta dbg7
+` : ''}        inc onv
+ogNext: inc ogCol
+        lda ogCol
+        cmp ogC
+        bcc ogCLp
+        inc ogRow
+        lda ogRow
+        cmp ogR
+        bcc ogRLp
+ogEnd:  jmp orbYes
+
+` : ''}        ldy ovar
         lda orbPtrU,y
         beq orbYes              ; one-sprite entity: nothing more to do
         sta otmp
@@ -12393,6 +12734,14 @@ hazHiT: !byte ${hazPick.map(i => `>hazL${i}`).join(',')}
 hazCT:  !byte ${hazRec.map(r => r.cell).join(',')}
 hazRstT: !byte ${hazRst.join(',')},$ff
 ${hazLists.map((l, i) => `hazL${i}: !byte ${l}`).join('\n')}` : ''}
+${ANG6 ? `        ; Above the image for the same reason the hazard data is: four more 44-entry tables
+        ; appended to the per-variant block push the next segment past its own origin, and the
+        ; free fragments below are both too small and a property of the map.
+        * = $bd00
+orbColsT: !byte ${ORBCOLS.join(',')}
+orbRowsT: !byte ${ORBROWS.join(',')}
+orbColPT: !byte ${ORBXOFF.join(',')}
+orbYExT: !byte ${ORBYEX.join(',')}` : ''}
 ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
         ; block, which it overflows. NOT inside the ANG6 block above, though it was written there:
         ; centring is about a TALL entity, and the two-sprite ladder has those too, so gating the

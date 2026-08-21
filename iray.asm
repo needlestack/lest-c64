@@ -23,6 +23,26 @@ baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
 smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
 hazCur  = $805f                  ; the cell whose run-table patches are currently applied
+ogC     = $8060                  ; the sprite GRID walk for a tall entity: columns, rows, the
+ogR     = $8061                  ;   row and column pitches, the bitmap base, and the cursor
+ogAnch  = $8062
+ogXOff  = $8063
+ogPtr   = $8064
+ogRow   = $8065
+ogCol   = $8066
+ogN     = $8067
+ogXL    = $8068
+ogXH    = $8069
+ogGL    = $806a                  ; the GRID's left edge: the anchor centres one column
+ogGH    = $806b
+dbg0    = $806c                  ; ANG6DBG2: engine state captured at the angel's grid setup
+dbg1    = $806d
+dbg2    = $806e
+dbg3    = $806f
+dbg4    = $8070
+dbg5    = $8071
+dbg6    = $8072
+dbg7    = $8073
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
 opaqL   = $8076                  ; the paq the cached frame trig was taken at
 opaqH   = $8077
@@ -9072,6 +9092,7 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
 ; The image used to be padded out to $bfff to buy load-time headroom -- the staged copy of the
 ; compressed stream was pinned to the image's top, so a taller image lifted it. There is no
 ; staged copy any more, so the padding bought nothing and cost a kilobyte of disk and load time.
+
 
 
         ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
