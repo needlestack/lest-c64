@@ -988,14 +988,14 @@ const OCCW0 = glyphs.length;
 for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, false, 0)));
 for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 0)));
 
-// CELLMARK=1: put a 2x2 grey dot in the middle of SOLID and of all seven occluders -- columns 1
-// and 2, rows 3 and 4, at bit pair 10 ($d023, grey). Purely a debugging aid: it makes the CHAR
-// GRID visible, so a stamp that is one column out can be read off the screen directly instead of
-// inferred from where blue meets black. It does clip sprites where the dot is, since 10 is a
-// foreground pair -- acceptable for a diagnostic build, not for anything else.
+// CELLMARK=1: put a small grey triangle in the middle of SOLID and of all seven occluders --
+// columns 1 and 2, rows 2 to 5, at bit pair 10 ($d023, grey). Purely a debugging aid: it makes
+// the CHAR GRID visible, so a stamp that is one column out can be read off the screen directly
+// instead of inferred from where blue meets black. It does clip sprites where the marker is,
+// since 10 is a foreground pair -- acceptable for a diagnostic build, not for anything else.
 //
-// Every row of these glyphs is identical, so charset B (built by reversing each glyph's rows)
-// keeps the dot centred without any special handling.
+// The marker is vertically symmetric, so charset B (built by reversing each glyph's rows) keeps
+// it identical without any special handling -- see the shape diagram at the CELLMARK block.
 if (process.env.CELLMARK === '1') {
   // SOLID gets a GREY dot (pair 10) and every occluder a WHITE one (pair 00), so wall and stamp
   // are told apart at a glance. Always the same two columns and rows whatever the split, so the
@@ -1003,16 +1003,34 @@ if (process.env.CELLMARK === '1') {
   //
   // White is a bonus: 00 is a BACKGROUND pair, so unlike the grey dot it does not clip sprites.
   // The grey one on SOLID does, which is why this stays a diagnostic build.
-  const dot = (row, pair) => (row & 0xc3) | (pair << 4) | (pair << 2);
-  for (const r of [3, 4]) {
-    glyphs[SOLID][r] = dot(glyphs[SOLID][r], 2);
+  // The marker points SIDEWAYS, and that is not a style choice. Charset B is not an alternate
+  // frame -- it is the below-horizon half of the same screen, raster-split at the horizon and
+  // derived from A by reversing each glyph's rows. A triangle pointing up would therefore render
+  // point-DOWN below the horizon, in the same picture, and a marker that changes shape halfway
+  // down the screen is useless for counting the char grid. Pointing right, centred on the row
+  // 3/4 boundary, the shape is its own vertical mirror: rows 2 and 5 match, rows 3 and 4 match,
+  // and the untouched rows were already identical. Same free-charset-B property the square had.
+  //
+  //   row 2   . X . .
+  //   row 3   . X X .
+  //   row 4   . X X .
+  //   row 5   . X . .
+  //
+  // Six pixels rather than the square's four, so it clips slightly more sprite -- still only a
+  // diagnostic build, and still confined to the two centre columns so the cell centre is marked.
+  const TRI = { 2: [1], 3: [1, 2], 4: [1, 2], 5: [1] };
+  const dot = (row, cols, pair) => cols.reduce(
+    (b, i) => (b & ~(3 << (6 - 2 * i))) | (pair << (6 - 2 * i)), row);
+  for (const r of [2, 3, 4, 5]) {
+    const cols = TRI[r];
+    glyphs[SOLID][r] = dot(glyphs[SOLID][r], cols, 2);
     // GREY (pair 10) on the occluders too, not white. The dot used to be white so wall and stamp
     // could be told apart by dot colour -- but ORBFG already tells them apart far better, by
     // tinting the whole stamped cell, and a white marker is useless when the bug you are chasing
     // IS white leaking into an occlusion. Grey everywhere marks the char grid; colour carries
     // the meaning; and any white on screen is now unambiguously the bug.
-    for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], 2);
-    for (let i = 0; i < 6; i++) glyphs[OCCW0 + i][r] = dot(glyphs[OCCW0 + i][r], 2);
+    for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], cols, 2);
+    for (let i = 0; i < 6; i++) glyphs[OCCW0 + i][r] = dot(glyphs[OCCW0 + i][r], cols, 2);
   }
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
