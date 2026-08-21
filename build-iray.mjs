@@ -17,6 +17,11 @@
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { assemble } from './asm6502.mjs';
 import { fitOrb, fitArt } from './fit-orb.mjs';
+import { LOADER_RUN } from './loader-src.mjs';
+// NOSOCK=1 drops the socket AND seated-orb bitmaps. They are emitted even in levels with no
+// sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
+// Hoisted here because SEATBASE's fit check and the bank-3 overlap guard both consult it.
+const NOSOCK = process.env.NOSOCK === '1';
 import { png } from './png.mjs';
 await import('./d64lib.js');
 const D64 = globalThis.D64;
@@ -2190,6 +2195,9 @@ if (process.env.ORBSHEET === '1') {
 }
 const ORBSRC = LADDER.map(r => ORBBMH.indexOf(r.h));
 const ORBEXP = LADDER.map(r => r.exp);
+// Y expansion, SEPARATE from X. One flag drove both until the six-sprite angel ladder
+// needed vmag alone -- doubling the size without halving the horizontal resolution.
+const ORBYEX = LADDER.map(r => r.exp);
 const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent width, screen px
 const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent height, screen px
 // ---- TALL ENTITIES: the angel, two sprites stacked ----
@@ -2311,7 +2319,7 @@ const ANG_V0 = LADDER.length;                    // the angel's rungs follow the
 for (const r of ANGLAD) {
   const [lo, up] = ANGIDX.get(r.h);
   LADDER.push({ h: r.h, exp: r.exp, up });
-  ORBSRC.push(lo); ORBEXP.push(r.exp);
+  ORBSRC.push(lo); ORBEXP.push(r.exp); ORBYEX.push(r.exp);
   ORBWIDE.push(angW(r.h) * (r.exp ? 4 : 2));
   ORBTALL.push(r.h * (r.exp ? 2 : 1));
 }
@@ -2320,6 +2328,11 @@ const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
 const ICO_BM = ORBBM.length;                     // the carried-orb icon: a fixed sprite in the
 ORBBM.push([...ANGART.icoorb, 0]);               //   lower left, never scaled
 NORBBM = ORBBM.length;
+// Every bitmap must be EXACTLY 64 bytes: they upload as one flat block and are addressed by
+// sprite pointer, so a single short entry shifts every bitmap after it and the pointers walk
+// into whatever follows -- which reads on screen as the wrong art entirely.
+ORBBM.forEach((b, i) => { if (b.length !== 64)
+  throw new Error(`sprite bitmap ${i} is ${b.length} bytes, not 64`); });
 if (process.env.ORBDUMP === '1') {
   const CH = [' ', '.', '#', 'o'];
   // No slot total here on purpose: bank 3's free space is not known until the image is laid out,
@@ -2339,7 +2352,8 @@ if (process.env.ORBDUMP === '1') {
 // The content is bottom-aligned in every bitmap, so the ground shadow always ends on the
 // sprite's last row and the anchor is simply the sprite's height. No per-variant table of
 // hand-measured shadow positions any more.
-const ORBANCH = ORBEXP.map(e => e ? 42 : 21);
+const ORBANCH = ORBYEX.map(e => e ? 42 : 21);   // row pitch: one sprite height
+const ORBXOFF = ORBEXP.map(e => e ? 48 : 24);   // column pitch: one sprite width
 // The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
 // and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
 // ORBPAL=colour brings back light blue / light red / light green bodies.
@@ -3272,7 +3286,11 @@ const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, HOLE_RIM);
 // The seat ladder does NOT follow the others at HOLEBASE: $e800 runs to $ffff, which is exactly
 // 96 slots, and the exit hole plus the socket already take 88. It lives in bank 3's other free
 // run instead. $c940 is 64-byte aligned, which a sprite pointer requires.
-const SEATBASE = 0xc940;
+// Immediately above the orb ladder, not a fixed address. $c940 was chosen when that ladder was
+// 37 bitmaps and landed exactly at its end; the six-sprite angel grew it to 51, so the ISEAT
+// segment loaded ON TOP of bitmaps 37 onward and every angel rung based past 37 drew half-orbs.
+// Derived, so it cannot rot again -- and checked below, because nothing was checking it.
+const SEATBASE = SPRBASE + NORBBM * 64;
 const BALL_MID = 7;
 // the same inverse-projection the holes use: half-width in columns of a disc of radius r,
 // centred at ground distance d, at screen row y
@@ -3378,7 +3396,8 @@ if (process.env.SEATDUMP === 'steps') {
 }
 
 fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, 0x10000);
-fitsBank('seat ladder', SEATBASE, SEAT.nBM, 0xd000);
+if (!NOSOCK) fitsBank('seat ladder', SEATBASE, SEAT.nBM, LOADER_RUN);
+
 if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of byte range');
 // The hole moved from a scan to a 256-byte h -> rung table when it reached 35 rungs (~600
 // cycles a frame). A socket ladder is a third of that, so the scan is ~100 cycles and a page
@@ -3389,7 +3408,27 @@ for (const h of HOLELIKE)
 if (HOLELIKE.length > 4) throw new Error(
   `${HOLELIKE.length} hole-like entities: holeSeeT has room for 4 (32 bytes each). ` +
   `More wants the per-level loading, not another table squeezed in.`);
-const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...SOCK.BM];
+const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM)];
+console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} socket` +
+              `${NOSOCK ? ' (DROPPED)' : ''} = ${HOLEBM.length} slots`);
+// The three sprite blocks share VIC bank 3 and are loaded as SEPARATE FILES, so an overlap is
+// silent: the later file simply overwrites the earlier one's art and the wrong sprites appear on
+// screen with everything else -- pointers, positions, enable bits -- looking perfectly correct.
+// That is exactly how a fixed SEATBASE survived the orb ladder growing past it.
+{
+  // The LOADER itself lives in this bank and is RUNNING while the segments arrive, so a segment
+  // that reaches it overwrites itself mid-load and the machine drops back to BASIC. That has
+  // happened before -- it is why LOADER_RUN moved from $cb00 to $cf00.
+  const blocks = [['orb ladder', SPRBASE, NORBBM * 64],
+                  ...(NOSOCK ? [] : [['seat ladder', SEATBASE, SEAT.nBM * 64]]),
+                  ['hole ladder', HOLEBASE, HOLEBM.length * 64],
+                  ['the loader', LOADER_RUN, 0x100]];
+  for (const [an, aa, al] of blocks) for (const [bn, ba, bl] of blocks)
+    if (an < bn && aa < ba + bl && ba < aa + al)
+      throw new Error(`${an} ($${aa.toString(16)}-$${(aa + al - 1).toString(16)}) overlaps ` +
+        `${bn} ($${ba.toString(16)}-$${(ba + bl - 1).toString(16)}): they load as separate ` +
+        `files, so the later one silently overwrites the earlier one's sprites`);
+}
 
 // The exit hole must be a flat silhouette -- one ink, bit pair 10. A rim on it reads as a
 // smaller hole, which is exactly the regression this assertion exists to catch.
@@ -11972,6 +12011,7 @@ orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbYCapT: !byte ${orbYCapT.join(',')}
 orbBlankT: !byte ${orbBlankT.join(',')}
 orbAnchT: !byte ${ORBANCH.join(',')}
+
 orbHgtT: !byte ${orbHgtT.join(',')}
 angVarT: !byte ${angVarT.join(',')}
 arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
@@ -12395,7 +12435,7 @@ try {
     { tag: 'C', name: 'ICHR', first: true, at: 0xc000, data: [...fontA] },
     ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: 0xc000, data: ORBBM.flat() },
                    { tag: 'H', name: 'IHOL', at: HOLEBASE, data: HOLEBM.flat() },
-                   { tag: 'E', name: 'ISEAT', at: SEATBASE, data: SEAT.BM.flat() }] : []),
+                   ...(NOSOCK ? [] : [{ tag: 'E', name: 'ISEAT', at: SEATBASE, data: SEAT.BM.flat() }])] : []),
     // HOLEBMHASH=1: checksum just the EXIT hole's bitmaps, so a change to the socket
     // ladder cannot be mistaken for a change to the hole.
 
