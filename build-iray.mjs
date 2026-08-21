@@ -2277,11 +2277,27 @@ const ANGSRC42 = (() => {
 const angW = h => Math.max(1, Math.round(12 * h / 42));
 // The figure at an arbitrary resolution, as a flat w*h array. Split out of angScale because the
 // detail band needs canvases bigger than the one 12x42 sprite pair angScale is built around.
+// Content box of the SOURCE that the last angPx call sampled, or null if there was no source
+// and the figure was upscaled from the 12x42 art. The detail band reports it per rung: the
+// whole point of the band is a FINER SOURCE FOOTPRINT, and that claim should be checkable from
+// the build log rather than taken on trust.
+let angPxBox = null;
+// The size angPx was ACTUALLY asked for, recorded from its own arguments rather than from what
+// the caller meant to ask for. The two can only differ if something is fitting once and
+// stretching, which is exactly what the band's guard has to be able to catch.
+let angPxAt = null;
 function angPx(w, h) {
-  if (ANGELART && process.env.ORBRUNG !== '0')
+  angPxAt = { w, h };
+  if (ANGELART && process.env.ORBRUNG !== '0') {
     // Same reason as the orb: majority voting flattens a dithered figure as it shrinks, so
-    // every rung is fitted from the source at its own resolution instead.
-    return fitArt(`angel-${ANGELART}.png`, w, h, { mirror: false, contrast: ANGCON }).px;
+    // every rung is fitted from the source at its own resolution instead. fitArt box-filters
+    // from the full-resolution render -- a destination pixel's footprint is bw*dx/W -- so a
+    // wider W really does sample finer, rather than resampling a smaller fit.
+    const r = fitArt(`angel-${ANGELART}.png`, w, h, { mirror: false, contrast: ANGCON });
+    angPxBox = r.box;
+    return r.px;
+  }
+  angPxBox = null;
   // Resampled from the 12x42 drawn art. NOTE for the detail band: above 12x42 this is an
   // UPSCALE and invents no detail. The band still buys smoother edges than 2x2 magnified
   // pixels, but the extra samples are only real when ANGELART supplies a real source.
@@ -2358,6 +2374,7 @@ const ANGFSTEP = +(process.env.ANGFSTEP ?? 1.10);
 const ANGFB = [];
 if (ANGFINE) for (let H = 42 * ANGFSTEP; H <= ANGFTOP + 0.5; H *= ANGFSTEP) ANGFB.push(Math.round(H));
 ANGFB.reverse();
+const ANGFFIT = [];                              // per band rung: what it was actually fitted from
 const ANGLAD = [];
 // Magnified rungs stop where the band takes over: below that ceiling an apparent height is
 // reached by magnifying a small bitmap, which is the very thing ANGFINE is buying back.
@@ -2402,6 +2419,7 @@ if (ANG6) {
   if (r.grid) {                                  // ANGFINE's detail band: unmagnified, multi-cell
     const w = angW(r.H), cols = Math.ceil(w / 12), rows = Math.ceil(r.H / 21);
     const base = gridSet(angPx(w, r.H), w, r.H, cols, rows);
+    ANGFFIT.push({ H: r.H, w, box: angPxBox, at: angPxAt });
     LADDER.push({ h: r.H, exp: 0, cols, rows, base });
     ORBSRC.push(base); ORBEXP.push(0); ORBYEX.push(0);
     ORBWIDE.push(w * 2);                         // unmagnified: one mc pixel is two hires
@@ -2424,6 +2442,34 @@ if (ANGFINE) {
     ` = ${ANGFB.length * 6} sprite slots, step ${((ANGFSTEP - 1) * 100).toFixed(1)}%`);
   console.error(`    apparent 42 -> ${say(42)};  next rung up ${ANGFB.length ? ANGFB[ANGFB.length - 1] : '-'}` +
     ` -> ${ANGFB.length ? say(ANGFB[ANGFB.length - 1]) : '-'}  (was 48 -> 7x24=168 samples)`);
+  // Every rung REFITTED from the source at its own resolution, not resampled from a smaller
+  // fit. The check is the source FOOTPRINT: it has to SHRINK as the rung grows, or the extra
+  // pixels carry no extra information and the band is buying nothing.
+  const upscaled = ANGFFIT.filter(f => !f.box);
+  if (upscaled.length) {
+    console.error(`  *** ANGFINE WITHOUT A SOURCE RENDER: ${upscaled.length} band rungs are ` +
+      `UPSCALED from the 12x42 art. ***`);
+    console.error(`      The band is meant to buy real samples; an upscale invents none, and the ` +
+      `sprites are spent either way.`);
+    console.error(`      Set ANGELART (and leave ORBRUNG unset) or the six sprites are wasted.`);
+  } else {
+    // Both halves of "refitted at each level" are checked, because either can fail alone.
+    // 1. Every rung is fitted AT ITS OWN RESOLUTION -- not fitted once and scaled up.
+    for (const f of ANGFFIT) if (f.at.w !== f.w || f.at.h !== f.H)
+      throw new Error(`ANGFINE rung ${f.H}: bitmap is ${f.w}x${f.H} but the art was fitted at ` +
+        `${f.at.w}x${f.at.h} -- that is a stretch, not a refit`);
+    // 2. And that really does buy finer sampling: the source footprint must SHRINK up the
+    //    ladder. Measured from the size actually fitted, so a fit-once-and-scale cannot pass.
+    const foot = f => `${(f.box[0] / f.at.w).toFixed(1)}x${(f.box[1] / f.at.h).toFixed(1)}`;
+    const up = [{ w: 12, H: 42, box: ANGFFIT[0].box, at: { w: 12, h: 42 } }, ...ANGFFIT]
+      .sort((a, b) => a.H - b.H);
+    console.error('    source px per bitmap px (must SHRINK up the ladder, or the refit is a lie): ' +
+      up.map(f => `${f.w}x${f.H} ${foot(f)}`).join('  ->  '));
+    const fp = up.map(f => f.box[1] / f.at.h);
+    if (fp.some((v, i) => i && v >= fp[i - 1]))
+      throw new Error('ANGFINE: a band rung samples the source no finer than a smaller rung does ' +
+                      '-- the rungs are being stretched, not refitted');
+  }
 }
 // Sprite grid per variant. Everything that is not a six-sprite angel rung is 1x1 for the lower
 // sprite plus the legacy "upper" slot, which the runtime still handles as a special case.
