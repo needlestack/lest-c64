@@ -2326,23 +2326,18 @@ function angScale(w, h) {
 // across, standing on the floor. Emitted BOTTOM ROW FIRST, because the base bitmap has to be
 // the bottom-left cell -- that is the one the existing projection places from orbPtrT, so a
 // top-first emission draws the head where the feet belong. Returns the base bitmap index.
-// ANG6BOX=1 outlines every sprite cell, so the grid is visible as bounding boxes on screen;
-// bit pair 3 ($d026) because the art uses it sparingly, so a solid rectangle of it reads
-// clearly against both the figure and the black behind it.
+// Outlining for the debug view is NOT done here -- see SPRBOX below, which boxes every entity
+// sprite on one rule rather than only the ones that happen to come through a grid.
 function gridSet(px, w, h, cols, rows) {
   const CW = cols * 12, CH = rows * 21;
   const g = [...Array(CH)].map(() => new Array(CW).fill(0));
   const ox = (CW - w) >> 1, oy = CH - h;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) g[oy + y][ox + x] = px[y * w + x];
-  const base = ORBBM.length, BOX = process.env.ANG6BOX === '1';
+  const base = ORBBM.length;
   for (let i = 0; i < rows; i++) for (let c = 0; c < cols; c++) {
     const r = rows - 1 - i, b = [];
     for (let y = r * 21; y < r * 21 + 21; y++) for (let k = 0; k < 3; k++)
-      b.push([0, 1, 2, 3].reduce((v, j) => {
-        const sy = y - r * 21, lx = k * 4 + j;
-        const p = (BOX && (sy === 0 || sy === 20 || lx === 0 || lx === 11)) ? 3 : g[y][c * 12 + lx];
-        return v | (p << (6 - 2 * j));
-      }, 0));
+      b.push([0, 1, 2, 3].reduce((v, j) => v | (g[y][c * 12 + k * 4 + j] << (6 - 2 * j)), 0));
     b.push(0);
     ORBBM.push(b);
   }
@@ -2483,6 +2478,20 @@ const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
 const ICO_BM = ORBBM.length;                     // the carried-orb icon: a fixed sprite in the
 ORBBM.push([...ANGART.icoorb, 0]);               //   lower left, never scaled
 NORBBM = ORBBM.length;
+// ---- SPRBOX=1: outline EVERY entity sprite, so the hardware grid is visible on screen ----
+// Where each sprite begins and ends, whether the cells of a multi-sprite figure abut or overlap,
+// and how much of a sprite is empty headroom. Applied to the finished bitmaps rather than inside
+// each generator, so the six-sprite band, the two-sprite angel's halves, the orbs and the icon
+// are all boxed on the same rule -- boxing only the ones that come through gridSet is what makes
+// a misalignment BETWEEN the two kinds invisible, which is exactly the comparison worth seeing.
+// Bit pair 3 ($d026) because the art uses it sparingly, so a solid rectangle reads clearly
+// against both the figure and the black behind it. It OVERWRITES art on the border rows and
+// columns: this is a view for judging LAYOUT, not one to judge the art in.
+// ANG6BOX is kept as a name for it, since that is what the six-sprite work was driven with.
+if (process.env.SPRBOX === '1' || process.env.ANG6BOX === '1')
+  for (const b of ORBBM) for (let y = 0; y < 21; y++) for (let x = 0; x < 12; x++)
+    if (y === 0 || y === 20 || x === 0 || x === 11)
+      b[y * 3 + (x >> 2)] |= 3 << (6 - 2 * (x & 3));   // set both bits: pixel value 3
 // Every bitmap must be EXACTLY 64 bytes: they upload as one flat block and are addressed by
 // sprite pointer, so a single short entry shifts every bitmap after it and the pointers walk
 // into whatever follows -- which reads on screen as the wrong art entirely.
