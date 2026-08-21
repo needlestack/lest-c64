@@ -4193,7 +4193,8 @@ ${CVXSEAM ? '' : `        lda spanL
         beq subCv
         cmp cpHiT,x
         bne subCn               ; not a concave partner: convex silhouette, draw nothing
-`}subCv:  lda spanR
+`}subCv:  ${process.env.NOCSEAM === '1' ? 'jmp subCn   ; NOCSEAM=1: corner seams off, to tell the two writers apart' : ''}
+        lda spanR
         lsr
         lsr
         tax
@@ -6274,7 +6275,31 @@ ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
         lda seamT,x
         cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
         bne ssOne               ; already spoken for: one line per char code
-        tya
+        ; ---- and neither NEIGHBOUR is spoken for ----
+        ; The per-cell guard only stops two lines landing in the SAME cell. subFace marks a
+        ; corner from a pinned screen column and this marks a panel from a projected world
+        ; coordinate, so the two reach a cell by completely different routes and routinely land
+        ; one cell apart -- drawn as a doubled line 1-4 pixels wide, most visibly where a near
+        ; object's silhouette sits just left of the far wall's first panel boundary.
+        ; Corner seams are written during subdivision, before this pass runs, so checking the
+        ; neighbours here gives the corner precedence: it marks real structure, a panel line is
+        ; decoration. It also thins panel lines wherever they bunch closer than a cell, which is
+        ; what happens as a receding wall approaches the vanishing point.
+        cpx #$00
+        beq ssNL                ; column 0 has no left neighbour
+        dex
+        lda seamT,x
+        inx
+        cmp #${hx(SOLID)}
+        bne ssOne
+ssNL:   cpx #${NCELL - 1}
+        beq ssNR
+        inx
+        lda seamT,x
+        dex
+        cmp #${hx(SOLID)}
+        bne ssOne
+ssNR:   tya
         and #$03
         clc
         adc #${hx(SEAM0)}
