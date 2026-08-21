@@ -1612,6 +1612,12 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 const PA = hexArg('PA', 0x3b, 0xff);   // ...across the room, NOT down the corridor axis
+// PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
+// the ray tables at QUARTER-unit resolution, so pa:paF = C000, C040, C080 and C0C0 are four
+// DIFFERENT renders that all read "AC0" on screen. A cold start left paF at zero, so three of
+// every four reachable views could not be replayed from a screenshot at all, and a reported
+// glitch that lived on one of them looked like it simply did not reproduce.
+const PAF = hexArg('PAF', 0x00, 0xff);
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
 // Level 1 opens in the room's north-west corner looking diagonally across it. The old start
@@ -3164,6 +3170,17 @@ for (let a = 0; a < 256; a++) {
   absCos.push(Math.min(255, Math.round(Math.abs(Math.cos(a / 256 * 2 * Math.PI)) * 256)));
   absSin.push(Math.min(255, Math.round(Math.abs(Math.sin(a / 256 * 2 * Math.PI)) * 256)));
 }
+// ---- |cos| at QUARTER-unit resolution, one QUARTER CIRCLE ----
+// orbProj read absCosT[pa] -- the WHOLE-unit angle -- while the rays turn on paq, which is
+// (pa:paF)>>6. A whole unit is 3 screen columns at centre and 4.3 at the edge, so while turning
+// the walls slid smoothly and every sprite sat still, then jumped a unit at once.
+// A full-circle pair of 1024-entry tables would be 2KB and there is no 2KB hole -- the big one
+// at $7058 belongs to the death face and is only free while DIE=0. But |cos| has period 512 in
+// quarter-units and mirrors about 256, so ONE 256-byte quarter circle serves both: |cos| folds
+// the index, and |sin(x)| = |cos(x + quarter turn)| folds the same table.
+const qcos = [...Array(256)].map((_, q) =>
+  Math.min(255, Math.round(Math.abs(Math.cos(q / 1024 * 2 * Math.PI)) * 256)));
+const QCOSBASE = +(process.env.QCOSBASE ?? 0xbf00);   // above the image, below the $c000 ceiling
 const recipLo = [], recipHi = [];       // recip[n] = 65536/n, so (P * recip[n]) >> 8 = P*256/n
 for (let n = 0; n < 256; n++) { const v = n === 0 ? 65535 : Math.min(65535, Math.round(65536 / n));
   recipLo.push(v & 255); recipHi.push(v >> 8); }
@@ -3211,6 +3228,9 @@ tmp     = $1f
 baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
 smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
+oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
+opaqL   = $8076                  ; the paq the cached frame trig was taken at
+opaqH   = $8077
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
@@ -3974,7 +3994,9 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta py+1
         lda #${hx(PA)}
         sta pa
-${SLOWMO ? `        lda #$01
+${PAF ? `        lda #${hx(PAF)}
+        sta paF                 ; PAF: the sub-unit angle the readout cannot show
+` : ''}${SLOWMO ? `        lda #$01
         sta smCnt               ; 1, not SLOWMO: step on the FIRST frame, so the traverse starts
                                 ; from the requested position rather than SLOWMO frames into it
 ` : ''}${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
@@ -7406,7 +7428,7 @@ ${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had t
         jsr ddPut
 ` : ''}ddAng:  lda #${hx(HUDROW + 2)}
         jsr setRow
-        ldy #37
+        ldy #35                 ; one column left of X/Y: the angle is FOUR digits, not two
         lda #10                 ; 'A'
         jsr ddPut
         lda pa
@@ -7418,7 +7440,15 @@ ${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had t
         lda pa
         and #$0f
         jsr ddPut
-        rts
+        lda paF                 ; ---- and the SUB-UNIT half of it ----
+        lsr                     ; pa alone is ambiguous: paq indexes the ray tables at
+        lsr                     ; quarter-unit resolution, so pa:paF = C000, C040, C080 and C0C0
+        lsr                     ; are four DIFFERENT renders that all used to read "AC0" on
+        lsr                     ; screen. Three of every four reachable views could not be
+        jsr ddPut               ; replayed from a screenshot, and a glitch living on one of them
+        lda paF                 ; looked like it simply did not reproduce. Read all four digits
+        and #$0f                ; off and feed them straight back in as PA=c0 PAF=40.
+        jmp ddPut
 ddPut:  clc
         adc #${hx(GLYPH0)}
         sta (ppPtr),y
@@ -7503,8 +7533,11 @@ ${DIE ? `        lda dieSt               ; the cut scene owns the sprites from t
         lda py+1
         cmp opy+1
         bne obMoved
-        lda pa
-        cmp opa
+        lda paqL                ; the QUARTER-unit angle: comparing pa alone made a sub-unit turn
+        cmp opaqL               ;   look like a still frame, so sprites were not reprojected at
+        bne obMoved             ;   all until pa ticked over -- three columns at a time
+        lda paqH
+        cmp opaqH
         bne obMoved
         rts                     ; a still frame. The slot data from the last one still stands
                                 ; and orbPaint runs unconditionally, so the walls come out
@@ -7522,10 +7555,27 @@ ${DIE ? `omDead: rts
         sta opy+1
         lda pa
         sta opa
-        ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
-        lda absCosT,x
+        lda paqL
+        sta opaqL
+        lda paqH
+        sta opaqH
+        ; |cos| and |sin| at quarter-unit resolution, folded out of one quarter circle.
+        ; cos: a = paq mod 512.  sin: |sin(x)| = |cos(x + quarter turn)|, so a = (paq+256) mod 512.
+        lda paqL
+        sta oqa
+        lda paqH
+        and #$01
+        sta oqa+1
+        jsr qTrig
         sta ocos
-        lda absSinT,x
+        lda paqL
+        sta oqa
+        lda paqH
+        clc
+        adc #$01
+        and #$01
+        sta oqa+1
+        jsr qTrig
         sta osin
         lda #$00                ; sin(a) < 0 exactly when bit 7 of a is set, and cos(a) < 0
         sta osinS               ; when bit 7 of a+64 is -- no sign tables needed
@@ -7718,6 +7768,23 @@ odbLp:  lda odb,x
         cpx #$06
         bne odbLp
         ` : ''}rts
+
+; qTrig: 9-bit angle in oqa -> |cos| of it, from the 256-byte quarter circle.
+; |cos| mirrors about a quarter turn, so 256..511 reads back down the same table.
+qTrig:  lda oqa+1
+        beq qtLo
+        lda #$00                ; a >= 256: index 512 - a
+        sec
+        sbc oqa
+        beq qtZ                 ; a == 256 exactly -> cos is 0, and 256 is off the end
+        tax
+        lda qcosT,x
+        rts
+qtZ:    lda #$00
+        rts
+qtLo:   ldx oqa
+        lda qcosT,x
+        rts
 
 ; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
 ; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
@@ -11953,6 +12020,8 @@ pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
 pfOff:  rts
 
 ` : ''}
+        * = ${hx(QCOSBASE)}
+qcosT: !byte ${qcos.join(',')}
 `;
 
 // iray.asm is deliberately tracked (see .gitignore): diffing the generated assembly is how

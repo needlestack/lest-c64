@@ -63,7 +63,9 @@ const readChar = (C, R) => {
   return rows.every(v => v === 0) ? ' ' : '?';
 };
 
-const field = (R, n) => [...Array(n)].map((_, i) => readChar(36 + i, R)).join('');
+// C0 defaults to 36 because that is where drawDbg starts X and Y. The angle row starts one
+// column earlier: it carries the sub-unit fraction too, so it is five characters wide.
+const field = (R, n, C0 = 36) => [...Array(n)].map((_, i) => readChar(C0 + i, R)).join('');
 
 // DBGROW=1: decode the DBGORB hex dump, which drawDbg writes as 12 digits at row 3, column 0.
 // Reading those glyphs off a scaled screenshot by eye is guesswork -- they are 3x5 pixels. This
@@ -125,7 +127,7 @@ if (process.env.PROF) {
   process.exit(0);
 }
 const HUDROW = 1;                              // matches build-iray.mjs: 24-row mode
-const X = field(HUDROW, 4), Y = field(HUDROW + 1, 4), A = field(HUDROW + 2, 4);
+const X = field(HUDROW, 4), Y = field(HUDROW + 1, 4), A = field(HUDROW + 2, 5, 35);
 // fps is two digits at char cols 0-1 of row 0, written by drawFps with the same glyphs.
 const FPS = readChar(0, HUDROW) + readChar(1, HUDROW);
 console.log(`${f}: ${X} ${Y} ${A}  fps=${FPS}`);

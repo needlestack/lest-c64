@@ -22,6 +22,9 @@ tmp     = $1f
 baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
 smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
+oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
+opaqL   = $8076                  ; the paq the cached frame trig was taken at
+opaqH   = $8077
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
@@ -3982,7 +3985,7 @@ drawDbg:
         jsr ddPut
 ddAng:  lda #$03
         jsr setRow
-        ldy #37
+        ldy #35                 ; one column left of X/Y: the angle is FOUR digits, not two
         lda #10                 ; 'A'
         jsr ddPut
         lda pa
@@ -3994,7 +3997,15 @@ ddAng:  lda #$03
         lda pa
         and #$0f
         jsr ddPut
-        rts
+        lda paF                 ; ---- and the SUB-UNIT half of it ----
+        lsr                     ; pa alone is ambiguous: paq indexes the ray tables at
+        lsr                     ; quarter-unit resolution, so pa:paF = C000, C040, C080 and C0C0
+        lsr                     ; are four DIFFERENT renders that all used to read "AC0" on
+        lsr                     ; screen. Three of every four reachable views could not be
+        jsr ddPut               ; replayed from a screenshot, and a glitch living on one of them
+        lda paF                 ; looked like it simply did not reproduce. Read all four digits
+        and #$0f                ; off and feed them straight back in as PA=c0 PAF=40.
+        jmp ddPut
 ddPut:  clc
         adc #$dd
         sta (ppPtr),y
@@ -4088,8 +4099,11 @@ orbMove:
         lda py+1
         cmp opy+1
         bne obMoved
-        lda pa
-        cmp opa
+        lda paqL                ; the QUARTER-unit angle: comparing pa alone made a sub-unit turn
+        cmp opaqL               ;   look like a still frame, so sprites were not reprojected at
+        bne obMoved             ;   all until pa ticked over -- three columns at a time
+        lda paqH
+        cmp opaqH
         bne obMoved
         rts                     ; a still frame. The slot data from the last one still stands
                                 ; and orbPaint runs unconditionally, so the walls come out
@@ -4107,10 +4121,27 @@ obMoved:lda #$00
         sta opy+1
         lda pa
         sta opa
-        ldx pa                  ; |cos| and |sin| are already tabulated for the DDA
-        lda absCosT,x
+        lda paqL
+        sta opaqL
+        lda paqH
+        sta opaqH
+        ; |cos| and |sin| at quarter-unit resolution, folded out of one quarter circle.
+        ; cos: a = paq mod 512.  sin: |sin(x)| = |cos(x + quarter turn)|, so a = (paq+256) mod 512.
+        lda paqL
+        sta oqa
+        lda paqH
+        and #$01
+        sta oqa+1
+        jsr qTrig
         sta ocos
-        lda absSinT,x
+        lda paqL
+        sta oqa
+        lda paqH
+        clc
+        adc #$01
+        and #$01
+        sta oqa+1
+        jsr qTrig
         sta osin
         lda #$00                ; sin(a) < 0 exactly when bit 7 of a is set, and cos(a) < 0
         sta osinS               ; when bit 7 of a+64 is -- no sign tables needed
@@ -4268,6 +4299,23 @@ obNext: inc oidx
         cmp onvH
         bcc obLoop
 obEnd:  rts
+
+; qTrig: 9-bit angle in oqa -> |cos| of it, from the 256-byte quarter circle.
+; |cos| mirrors about a quarter turn, so 256..511 reads back down the same table.
+qTrig:  lda oqa+1
+        beq qtLo
+        lda #$00                ; a >= 256: index 512 - a
+        sec
+        sbc oqa
+        beq qtZ                 ; a == 256 exactly -> cos is 0, and 256 is off the end
+        tax
+        lda qcosT,x
+        rts
+qtZ:    lda #$00
+        rts
+qtLo:   ldx oqa
+        lda qcosT,x
+        rts
 
 ; ---- osFlush: hand the frame's sprite state to the VIC, in the border ----
 ; Everything above only fills buffers. Writing $d000/$d001, a sprite pointer or a colour while
@@ -9011,3 +9059,5 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
 ; compressed stream was pinned to the image's top, so a taller image lifted it. There is no
 ; staged copy any more, so the padding bought nothing and cost a kilobyte of disk and load time.
 
+        * = $bf00
+qcosT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,254,253,253,253,253,252,252,252,252,251,251,251,250,250,250,249,249,249,248,248,248,247,247,246,246,245,245,245,244,244,243,243,242,242,241,241,240,239,239,238,238,237,237,236,235,235,234,233,233,232,231,231,230,229,229,228,227,227,226,225,224,224,223,222,221,220,220,219,218,217,216,215,215,214,213,212,211,210,209,208,207,207,206,205,204,203,202,201,200,199,198,197,196,195,194,193,192,191,190,189,188,186,185,184,183,182,181,180,179,178,177,175,174,173,172,171,170,168,167,166,165,164,162,161,160,159,157,156,155,154,152,151,150,149,147,146,145,144,142,141,140,138,137,136,134,133,132,130,129,128,126,125,123,122,121,119,118,117,115,114,112,111,109,108,107,105,104,102,101,99,98,97,95,94,92,91,89,88,86,85,83,82,80,79,77,76,74,73,71,70,68,67,65,64,62,61,59,58,56,55,53,51,50,48,47,45,44,42,41,39,38,36,34,33,31,30,28,27,25,24,22,20,19,17,16,14,13,11,9,8,6,5,3,2
