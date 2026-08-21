@@ -291,6 +291,184 @@ for (let y = 0; y < 16; y++) {          // horizontal planes: north/south faces,
 if (nextRun - 1 > 255) throw new Error(`too many wall runs (${nextRun - 1}) for a byte id`);
 console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by run, gap-safe, no precompute`);
 
+// ================= MERGE HAZARD: runs an occluder breaks into two pieces =================
+// subLp merges a span when faceIdT is equal at BOTH ENDS, without ever looking between them, so
+// a wall wholly inside such a span renders as nothing at all. That is safe only while every run
+// is seen in ONE piece. From a fixed point a planar one-sided run subtends a CONTIGUOUS arc --
+// it can only be broken by something in front of it -- so "this run is visible in two
+// disconnected arcs from here" IS the hazard, exactly, with no need to enumerate pillars or
+// reason about shadow geometry. It catches L-bends and doorway reveals on the same test.
+//
+// The gap between the arcs is also where the run must be split: any cell boundary in there
+// separates the two visible pieces, so the ends of any span containing the occluder land on
+// different ids and subLp subdivides instead of interpolating across.
+const HAZDIRS = +(process.env.HAZDIRS ?? 1024);   // angular resolution of the sweep
+const HAZSAMP = +(process.env.HAZSAMP ?? 3);      // NxN sample points per cell
+// A ray hits a face, and the face belongs to a run. Returns [runId, coordinate along the run]:
+// N/S runs are horizontal strips so they are indexed by x, E/W runs are vertical so by y.
+function hazCast(px, py, dx, dy) {
+  let x = Math.floor(px), y = Math.floor(py);
+  const sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1;
+  const tdx = Math.abs(1 / dx), tdy = Math.abs(1 / dy);
+  let tx = (dx > 0 ? (x + 1 - px) : (px - x)) * tdx;
+  let ty = (dy > 0 ? (y + 1 - py) : (py - y)) * tdy;
+  for (let i = 0; i < 48; i++) {
+    let side;
+    if (tx < ty) { x += sx; tx += tdx; side = 0; } else { y += sy; ty += tdy; side = 1; }
+    if (x < 0 || y < 0 || x > 15 || y > 15) return null;
+    if (map[y * 16 + x]) {
+      const c = y * 16 + x;
+      // side 0 means the ray crossed a vertical edge: travelling +x it lands on a WEST face.
+      if (side === 0) return [dx > 0 ? runW[c] : runE[c], y];
+      return [dy > 0 ? runN[c] : runS[c], x];
+    }
+  }
+  return null;
+}
+// From one point: which runs come back in more than one arc, and where the gap is.
+function hazAt(px, py) {
+  const hit = new Array(HAZDIRS), crd = new Array(HAZDIRS);
+  for (let a = 0; a < HAZDIRS; a++) {
+    const t = a * 2 * Math.PI / HAZDIRS;
+    const r = hazCast(px, py, Math.cos(t), Math.sin(t));
+    hit[a] = r ? r[0] : 0; crd[a] = r ? r[1] : 0;
+  }
+  const out = [];
+  for (const run of new Set(hit.filter(Boolean))) {
+    // Walk the circle and cut it into maximal arcs of this run. Start where the run is NOT
+    // visible, so the arcs come out unwrapped; a run visible in every direction is impossible.
+    let s = 0; while (s < HAZDIRS && hit[s] === run) s++;
+    if (s === HAZDIRS) continue;
+    const arcs = [];
+    let cur = null;
+    for (let i = 0; i < HAZDIRS; i++) {
+      const a = (s + i) % HAZDIRS;
+      if (hit[a] === run) { (cur ??= arcs[arcs.push([]) - 1]).push(crd[a]); }
+      else cur = null;
+    }
+    if (arcs.length < 2) continue;                  // one piece: safe to merge end to end
+    // Order the pieces along the run's axis and cut between the two outermost.
+    const ext = arcs.map(v => [Math.min(...v), Math.max(...v)]).sort((a, b) => a[0] - b[0]);
+    const lo = ext[0][1], hi = ext[ext.length - 1][0];
+    if (hi > lo) out.push({ run, split: hi, pieces: arcs.length });
+  }
+  return out;
+}
+
+// Per OPEN cell, union the hazards over a grid of sample points. Sampled rather than solved
+// because the player stands anywhere in the cell, not at its centre, and the arcs shift as they
+// move; the inset keeps samples off the walls, where the collision radius never lets them go.
+// Union, never intersection: a cell is hazardous if ANY position in it is.
+const hazCell = new Map();                        // cell index -> [{run, split}]
+{
+  const t0 = Date.now();
+  let flagged = 0, worst = 0;
+  for (let cy = 0; cy < 16; cy++) for (let cx = 0; cx < 16; cx++) {
+    if (map[cy * 16 + cx]) continue;
+    const per = new Map();                        // run -> split coordinate (widest cut wins)
+    for (let i = 0; i < HAZSAMP; i++) for (let j = 0; j < HAZSAMP; j++) {
+      const px = cx + 0.2 + 0.6 * (HAZSAMP === 1 ? 0.5 : i / (HAZSAMP - 1));
+      const py = cy + 0.2 + 0.6 * (HAZSAMP === 1 ? 0.5 : j / (HAZSAMP - 1));
+      for (const h of hazAt(px, py)) {
+        worst = Math.max(worst, h.pieces);
+        // Different sample points can want different cuts. Take the LOWEST, which is the most
+        // conservative: it puts the split as early along the run as any viewpoint in this cell
+        // needs, and a split that is earlier than necessary only ever costs a probe.
+        const prev = per.get(h.run);
+        if (prev === undefined || h.split < prev) per.set(h.run, h.split);
+      }
+    }
+    if (per.size) {
+      hazCell.set(cy * 16 + cx, [...per].map(([run, split]) => ({ run, split })));
+      flagged++;
+    }
+  }
+  const open = map.filter(v => !v).length;
+  console.error(`merge hazard: ${flagged} of ${open} open cells need a run split ` +
+    `(${(100 * flagged / open).toFixed(0)}%), worst run breaks into ${worst} pieces, ` +
+    `${HAZDIRS} dirs x ${HAZSAMP}x${HAZSAMP} samples in ${Date.now() - t0}ms`);
+  if (flagged) {
+    const ex = [...hazCell].slice(0, process.env.HAZDUMP ? 999 : 6).map(([c, hs]) =>
+      `(${c & 15},${c >> 4})->${hs.map(h => `run${h.run}@${h.split}`).join(' ')}`);
+    console.error(`  e.g. ${ex.join(process.env.HAZDUMP ? '\n       ' : '  ')}`);
+    if (process.env.HAZDUMP) for (const r of new Set([...hazCell.values()].flat().map(h => h.run)))
+      console.error(`  run ${r}: ${runFace[r]} face, plane ${runPlane[r]}`);
+  }
+}
+
+// ---- turn the hazards into per-cell patches of the run tables ----
+// The split half gets a run id of its OWN, allocated here so that everything downstream which
+// is sized by nextRun (cpLo/cpHi below, and every table indexed by run) covers it without
+// knowing this exists. One spare per split run, not per split POINT: only one cell's patches
+// are ever applied at a time, so the same spare can serve every cell that splits that run.
+//
+// The spare deliberately gets NO concave partner. Where the split half meets a real corner the
+// seam line is skipped while the patch is live -- a missing grey divider in a handful of cells,
+// against a wall that would otherwise not be drawn at all.
+// Free fragments this data is placed into. Per-LEVEL by nature: a different map leaves free
+// space in different places. Overridable so a new level can be re-fitted without editing code.
+// One block above the end of the image rather than scattered through the free fragments below
+// it. The assembler emits strictly ascending and cannot move its origin backwards, so every
+// fragment would need injecting at its own point in the table sequence; and the fragments are a
+// property of the MAP, so a new level would move them all. Above the image there is a contiguous
+// KB to the $c000 ceiling, which is the same for every level.
+const HAZ_BASE = +(process.env.HAZ_BASE ?? 0xbc00);
+const HAZFACE = { W: 0, E: 1, N: 2, S: 3 };
+const hazRunT = { W: runW, E: runE, N: runN, S: runS };
+const hazSpare = new Map();
+const hazRec = [];
+for (const [cell, hs] of hazCell) for (const h of hs) {
+  if (!hazSpare.has(h.run)) hazSpare.set(h.run, newRun(runPlane[h.run], runFace[h.run]));
+  const face = runFace[h.run], tbl = hazRunT[face];
+  const horiz = face === 'N' || face === 'S';       // horizontal strip -> indexed by x
+  const cells = [];
+  for (let c = 0; c < 256; c++)
+    if (tbl[c] === h.run && (horiz ? (c & 15) : (c >> 4)) >= h.split) cells.push(c);
+  if (cells.length) hazRec.push({ cell, sel: HAZFACE[face], spare: hazSpare.get(h.run),
+                                  orig: h.run, cells });
+}
+const HAZ = hazRec.length > 0 && process.env.NOHAZ !== '1';   // NOHAZ=1: A/B the fix
+// cell, table selector, spare id, original id, count, then that many wall-cell indices; $ff ends.
+// hazSet advances by count+5 in one 8-bit add, so a record may not be longer than that allows.
+const HAZTBL = { 0: 'runWT', 1: 'runET', 2: 'runNT', 3: 'runST' };
+// Everything is (addrLo, addrHi, value) triples ending in $ff, so ONE walker serves both jobs.
+const hazTrip = (sel, cell, val) =>
+  `<${HAZTBL[sel]}+${cell},>${HAZTBL[sel]}+${cell},${val}`;
+// The restore list puts every splittable run back to its merged id. Resetting all of them
+// unconditionally is what removes the need to remember which cell was patched last -- there is
+// no revert step, no hazCur, and no way for a stale patch to survive a cell change.
+const hazRst = [];
+for (const [run, ] of hazSpare) {
+  const face = runFace[run], tbl = hazRunT[face], sel = HAZFACE[face];
+  for (let c = 0; c < 256; c++) if (tbl[c] === run) hazRst.push(hazTrip(sel, c, run));
+}
+const hazKey = r => `${r.orig}@${r.cells[0]}`;
+const hazUniq = [...new Set(hazRec.map(hazKey))];
+const hazLists = hazUniq.map(k => {
+  const r = hazRec.find(x => hazKey(x) === k);
+  return r.cells.map(c => hazTrip(r.sel, c, r.spare)).join(',') + ',$ff';
+});
+// hazCT is parallel to the cell list; each entry points at one of the SHARED lists above.
+const hazPick = hazRec.map(r => hazUniq.indexOf(hazKey(r)));
+if (HAZ) {
+  const bytes = hazRst.length * 3 + 1 + hazLists.reduce((n, l) => n + l.split(',').length, 0)
+              + hazRec.length * 3;
+  console.error(`  ${hazUniq.length} distinct (run,split) lists shared by ${hazRec.length} cells`);
+  const fits = (n, cap, what) => { if (n > cap)
+    throw new Error(`hazard ${what} is ${n} bytes, fragment holds ${cap}`); return n; };
+  fits(bytes + 28, 0xc000 - HAZ_BASE, 'block');   // +28 for hzRun itself
+  console.error(`  ${hazRec.length} patch records, ${hazSpare.size} spare run ids ` +
+                `(${[...hazSpare].map(([r, s]) => `${r}->${s}`).join(' ')}), ${bytes} bytes`);
+  // Every hazardous cell must come out with a patch, or the split silently does not happen and
+  // the wall goes back to vanishing. Checked rather than argued -- the whole point of computing
+  // this at build time is that the guarantee is verifiable.
+  for (const [cell, hs] of hazCell) for (const h of hs)
+    if (!hazRec.some(r => r.cell === cell && r.orig === h.run))
+      throw new Error(`merge hazard at cell (${cell & 15},${cell >> 4}) run ${h.run} has no ` +
+                      `patch: split ${h.split} selected no cells of the run`);
+}
+
+
 // ---- CONVEX run ends carry no seam ----
 // A seam at the end of a receding wall marks a corner you cannot see around, and the
 // silhouette there already steps 20+ rows (measured: 21/22/25/27 across the six views), so the
@@ -3228,6 +3406,7 @@ tmp     = $1f
 baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
 smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
+hazCur  = $805f                  ; the cell whose run-table patches are currently applied
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
 opaqL   = $8076                  ; the paq the cached frame trig was taken at
 opaqH   = $8077
@@ -4123,6 +4302,10 @@ ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-
         clc
         adc px+1
         sta cell0
+${HAZ ? `        cmp hazCur              ; the run tables are patched for the cell being RENDERED
+        beq hzOk                ;   from, so this stays consistent even when the fall renders a
+${process.env.HAZCALL === '0' ? '' : '        jsr hazSet              ;   different cell than the player stands in'}
+hzOk:` : ''}
 ${FINEANG ? `        ; ---- the view angle at QUARTER-unit resolution: paq = (pa:paF) >> 6 ----
         ; Once a frame, not once a ray: it is constant across the whole frame and the rays only
         ; add their own offset.
@@ -6431,6 +6614,34 @@ cuXp:   clc
         sta uwH
         rts
 
+
+` : ''}${HAZ ? `; ============ per-cell run splits: make subLp's merge test correct, by cell ============
+; subLp merges a span on faceIdT alone and never looks between the ends, so a wall hidden inside
+; one is not drawn at all. From most cells every run is visible in ONE piece and that merge is
+; exact; from a few, an occluder breaks a run in two and it is wrong. Those cells -- and only
+; those -- get the far run's second half renamed to a spare id, so the EXISTING test splits the
+; span. No width cap, no forced probes, no per-ray cost: cells that can merge safely still do.
+;
+; Restore-everything-then-apply, rather than reverting the last cell's patches. It costs a few
+; more stores on a cell change and removes the entire class of bug where a stale patch outlives
+; the cell that set it -- there is no "currently applied" state to get wrong.
+hazSet: lda #<hazRstT    ; hzRd is self-modified rather than indirect: (zp),y needs a ZERO
+        sta hzRd+1      ;   PAGE pointer, and there is none spare -- pointing it at $805f
+        lda #>hazRstT   ;   assembled as ($5f),y and scattered writes across memory.
+        sta hzRd+2
+        jsr hzRun               ; every splittable run back to its merged id
+        ldx #${hazRec.length - 1}
+hzF:    lda hazCT,x             ; does THIS cell split anything?
+        cmp cell0
+        beq hzG
+        dex
+        bpl hzF
+        rts
+hzG:    lda hazLoT,x            ; X must survive to here: hzRun clobbers it, and has not run yet
+        sta hzRd+1
+        lda hazHiT,x
+        sta hzRd+2
+        jmp hzRun
 
 ` : ''}; ================= march one column: cast + store colH/idT =================
 marchCol:
@@ -12020,6 +12231,29 @@ pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
 pfOff:  rts
 
 ` : ''}
+${HAZ ? `        ; The walker and all its data, above the image. The dispatcher stays down in the
+        ; main code stream's headroom; only this needs somewhere with room.
+        * = ${hx(HAZ_BASE)}
+hzRun:  ldx #$00                ; walk (addrLo, addrHi, value) triples until $ff
+hzL:    jsr hzGet
+        cmp #$ff
+        beq hzRt
+        sta hzS+1
+        jsr hzGet
+        sta hzS+2
+        jsr hzGet
+hzS:    sta $ffff               ; self-modified: the run-table byte this triple names
+        jmp hzL
+hzRt:   rts
+hzGet:                          ; next byte of the list; every list is well under 256 bytes
+hzRd:   lda $ffff,x
+        inx
+        rts
+hazLoT: !byte ${hazPick.map(i => `<hazL${i}`).join(',')}
+hazHiT: !byte ${hazPick.map(i => `>hazL${i}`).join(',')}
+hazCT:  !byte ${hazRec.map(r => r.cell).join(',')}
+hazRstT: !byte ${hazRst.join(',')},$ff
+${hazLists.map((l, i) => `hazL${i}: !byte ${l}`).join('\n')}` : ''}
         * = ${hx(QCOSBASE)}
 qcosT: !byte ${qcos.join(',')}
 `;
