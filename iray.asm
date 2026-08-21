@@ -46,6 +46,9 @@ dbg7    = $8073
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
 opaqL   = $8076                  ; the paq the cached frame trig was taken at
 opaqH   = $8077
+acRow   = $8078                  ; ANGCHAR: the silhouette stamp's cell walk -- row, running
+acIx    = $8079                  ;   index into the cell map, and which charset half the row
+acB     = $807a                  ;   falls in (0 = A above the horizon, 1 = B below it)
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a

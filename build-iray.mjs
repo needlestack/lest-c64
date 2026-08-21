@@ -696,6 +696,62 @@ const digGlyph = [
  5,5,2,5,5, 5,5,2,2,2];                                          // X (16), Y (17) labels
 const NGLYPH = digGlyph.length / 5;
 
+// ================= ANGCHAR=1: the angel's SILHOUETTE drawn in CHARACTERS =================
+// An experiment, off by default and self-contained. Three things had to be true and all three
+// were measured before a line of this was written:
+//
+// 1. THE SHAPE FITS THE DICTIONARY'S IDIOM. A cell can express one contiguous ink run per
+//    column. Constraining the fitted art that way reproduces 99.6% of the silhouette's pixels
+//    at apparent 63 -- whole CELLS are a blob, but sub-cell boundaries are near-exact.
+// 2. THE INK EXISTS. Angel ink is bit pair 10, which reads $d023 -- a GLOBAL register, so it
+//    takes all sixteen colours including the three greys that colour RAM (three usable bits,
+//    eight colours) can never reach. No palette shuffle, no colour-RAM writes. The rest of the
+//    cell is pair 01, the wall ink, so the silhouette is exact against a wall and fringes black
+//    where it overhangs floor or ceiling.
+// 3. THE CODES ARE AFFORDABLE. Regenerating the plan at KCELL=176 moves charsetgen's predicted
+//    error 0.020 -> 0.022 px/frame against a shipped baseline of 445. The charset reads as
+//    256/256 full, but its MARGINAL codes are worth almost nothing.
+//
+// The cost that is not obvious: charset B is charset A with every glyph's rows REVERSED (it is
+// the below-horizon half of the same screen, not a second frame), so a cell that can appear
+// below the horizon needs the code whose A-form is the reverse of what it wants. Closing the
+// set under row-reversal is what takes 24 glyphs to 43.
+const ANGCHAR = process.env.ANGCHAR === '1';
+const ANGCHARH = +(process.env.ANGCHARH ?? 63);         // apparent height in rows
+const ANGCHARW = Math.max(1, Math.round(12 * ANGCHARH / 42));
+const ANGCCOL = Math.ceil(ANGCHARW / 4), ANGCROW = Math.ceil(ANGCHARH / 8);
+const ANGCG = [];                                       // the glyphs, 8 bytes each
+const ANGCA = [], ANGCB = [];                           // per cell: index of the A- and B-form
+if (ANGCHAR) {
+  const px = fitArt(`angel-${process.env.ANGELART || 'full'}.png`, ANGCHARW, ANGCHARH,
+                    { mirror: false, contrast: +(process.env.ANGCON ?? 1.6) }).px;
+  const key = new Map();
+  const intern = rows => { const k = rows.join(',');
+    if (!key.has(k)) { key.set(k, ANGCG.length); ANGCG.push(rows); }
+    return key.get(k); };
+  const pad = ANGCROW * 8 - ANGCHARH;                   // bottom-aligned: it stands on the floor
+  for (let cy = 0; cy < ANGCROW; cy++) for (let cx = 0; cx < ANGCCOL; cx++) {
+    const rows = [];
+    let anyInk = false;
+    for (let y = 0; y < 8; y++) {
+      let b = 0;
+      for (let i = 0; i < 4; i++) {
+        const sy = cy * 8 + y - pad, sx = cx * 4 + i;
+        const on = sy >= 0 && sy < ANGCHARH && sx < ANGCHARW && px[sy * ANGCHARW + sx];
+        if (on) anyInk = true;
+        b |= (on ? 2 : 1) << (6 - 2 * i);               // 10 = angel ink, 01 = wall ink
+      }
+      rows.push(b);
+    }
+    // A cell the figure never reaches is left alone rather than painted wall-ink, so the
+    // silhouette does not carry a rectangle of background around with it. The sentinel is 0,
+    // NOT $ff: these become codes ANGC0..255 at emission, so $ff is a real angel cell.
+    if (!anyInk) { ANGCA.push(-1); ANGCB.push(-1); continue; }
+    ANGCA.push(intern(rows));
+    ANGCB.push(intern([...rows].reverse()));            // what charset B will show below the split
+  }
+}
+
 // NOTE for whoever adds objects back (2026-08-11, at the user's request): every trace of the
 // orb/sprite pass has been removed from this file, deliberately and not because it was broken.
 // The plan is to do objects as a SECOND PASS over the finished wall image rather than weaving
@@ -849,6 +905,12 @@ function placeAll(groups) {
   const all = [];
   for (const g of groups) for (const p of g)
     if (!codeOf.has(p.join(',')) && !all.some(q => q.join(',') === p.join(','))) all.push(p);
+  // NOTE for anyone trying to free codes: this budget does NOT size the shipped dictionary.
+  // Under PLAN=3 the codes come from charsetgen's precomputed plan, so a reservation added here
+  // is silently ignored -- shrink the plan with KCELL instead. Measured, so it need not be
+  // guessed again: KCELL 219 -> 176 frees 43 codes and moves the predicted error 0.020 ->
+  // 0.022 px/frame, against a shipped baseline of 445. The charset reads as 256/256 full, but
+  // its MARGINAL codes are worth almost nothing.
   const BUDGET = 256 - NGLYPH - 4 - glyphs.length;   // room left for cell patterns
   const unused = all.filter(p => !PFREQ.get(p.join(',')));
   console.error(`  patterns: ${all.length} distinct, ${BUDGET} codes available ` +
@@ -1218,6 +1280,21 @@ if (process.env.CELLMARK === '1') {
     for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], cols, 2);
     for (let i = 0; i < 6; i++) glyphs[OCCW0 + i][r] = dot(glyphs[OCCW0 + i][r], cols, 2);
   }
+}
+// The angel's silhouette glyphs go LAST, so every existing code keeps its number and a build
+// with ANGCHAR=0 is byte-identical.
+const ANGC0 = glyphs.length;
+if (ANGCHAR) {
+  if (ANGC0 + ANGCG.length > 256) throw new Error(
+    `ANGCHAR needs ${ANGCG.length} codes and only ${256 - ANGC0} are free. The cell dictionary ` +
+    `is sized by a PRECOMPUTED PLAN, so shrinking it is a separate step:\n` +
+    `    KCELL=${CELLCODES - 2 - (ANGCG.length - (256 - ANGC0))} node charsetgen.mjs\n` +
+    `  then rebuild. Measured cost of doing that: charsetgen's predicted error moves 0.020 -> ` +
+    `0.022 px/frame at KCELL=176, against a shipped baseline of 445.`);
+  for (const g of ANGCG) glyphs.push(g);
+  console.error(`  ANGCHAR: apparent ${ANGCHARH} (${ANGCHARW} logical px) -> ${ANGCCOL}x${ANGCROW} ` +
+    `cells, ${ANGCG.length} glyphs at codes ${ANGC0}-${glyphs.length - 1} ` +
+    `(${ANGCA.filter(c => c >= 0).length} of ${ANGCA.length} cells inked)`);
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + 4 seam + 7 occluder ` +
@@ -3755,6 +3832,9 @@ dbg7    = $8073
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
 opaqL   = $8076                  ; the paq the cached frame trig was taken at
 opaqH   = $8077
+acRow   = $8078                  ; ANGCHAR: the silhouette stamp's cell walk -- row, running
+acIx    = $8079                  ;   index into the cell map, and which charset half the row
+acB     = $807a                  ;   falls in (0 = A above the horizon, 1 = B below it)
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
@@ -5395,7 +5475,7 @@ pvNgD:  rts
 ` : ''}
 subFin:
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${NOFILL ? '' : '        jsr renderSym'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
-${PROFILE && !PROFILE1 ? '' : ''}${NOHUD ? '' : `        jsr drawFps
+${ANGCHAR ? '        jsr angChar             ; AFTER renderSym and occStamp, for the same reason they are\n                                ;   ordered that way: it overwrites cells they just drew\n' : ''}${PROFILE && !PROFILE1 ? '' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -8045,8 +8125,62 @@ ddPut:  clc
         iny
         rts
 
-; ================= data =================
-cosCorrT: !byte ${cosCorr.join(',')}
+${ANGCHAR ? `; ---- angChar: stamp the angel's silhouette into the char buffer ----
+; Runs AFTER renderSym, so it overwrites the wall image the renderer just drew, and into the
+; BACK buffer, which is what renderSym was drawing. Idempotent: re-stamped every frame, so a
+; column renderSym skipped (run cache hit) still carries last frame's stamp and agrees.
+;
+; NOT wired to the angel's projected position yet -- ANGCX/ANGCY place it. What that leaves
+; untested is the thing most likely to decide this: the figure can only sit on the 4x8 cell
+; grid, so it JUMPS 4 pixels across and 8 down as it walks, where a sprite slides one.
+;
+; No run-cache invalidation either, and that IS needed once it moves: the cells the figure
+; vacates are ones renderSym believes it already painted correctly. See the note on cwA/cbA.
+angChar:lda #$00
+        sta acRow
+        sta acIx                ; walks the cell map row-major, so no multiply per row
+acRLp:  lda acRow
+        clc
+        adc #${hx(+(process.env.ANGCY ?? 4))}
+        pha                     ; the screen row, wanted twice
+        cmp #${hx(+(process.env.ANGCSPLIT ?? 13))}
+        lda #$00                ; NOT the carry: setRow and the index arithmetic below both
+        bcc acAbv               ;   clobber it, so the split test is kept in a byte
+        lda #$01
+acAbv:  sta acB
+        pla
+        jsr setRow              ; clobbers X, so the column loop is set up after it
+        ldx #$00
+acCLp:  ldy acIx
+        lda acB
+        bne acUseB
+        lda angcAT,y
+        jmp acGot
+acUseB: lda angcBT,y
+acGot:  beq acSkip              ; 0 = a cell the figure never reaches: leave the wall alone
+        pha
+        txa
+        clc
+        adc #${hx(+(process.env.ANGCX ?? 17))}
+        tay
+        pla
+        sta (ppPtr),y
+acSkip: inc acIx
+        inx
+        cpx #${hx(ANGCCOL)}
+        bne acCLp
+        inc acRow
+        lda acRow
+        cmp #${hx(ANGCROW)}
+        bne acRLp
+        rts
+
+` : ''}; ================= data =================
+${ANGCHAR ? `; Char CODES, not indices into the glyph list -- the silhouette glyphs are appended last, so
+; the code is ANGC0 + index. 0 means "leave this cell alone".
+angcAT: !byte ${ANGCA.map(c => c < 0 ? 0 : ANGC0 + c).join(',')}
+angcBT: !byte ${ANGCB.map(c => c < 0 ? 0 : ANGC0 + c).join(',')}
+` : ''}cosCorrT: !byte ${cosCorr.join(',')}
 dirXT:  !byte 1,1,0,255,255,255,0,1
 dirYT:  !byte 0,1,1,1,0,255,255,255
 moveXT: ${chunk(moveX).trim()}
