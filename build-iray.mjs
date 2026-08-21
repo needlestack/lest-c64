@@ -2275,17 +2275,17 @@ const ANGSRC42 = (() => {
     g.push(r); }
   return g; })();
 const angW = h => Math.max(1, Math.round(12 * h / 42));
-function angScale(w, h) {
-  const out = [...Array(42)].map(() => new Array(12).fill(0));
-  const ox = (12 - w) >> 1, oy = 42 - h;         // centred, and standing on the floor
-  if (ANGELART && process.env.ORBRUNG !== '0') {
+// The figure at an arbitrary resolution, as a flat w*h array. Split out of angScale because the
+// detail band needs canvases bigger than the one 12x42 sprite pair angScale is built around.
+function angPx(w, h) {
+  if (ANGELART && process.env.ORBRUNG !== '0')
     // Same reason as the orb: majority voting flattens a dithered figure as it shrinks, so
     // every rung is fitted from the source at its own resolution instead.
-    const px = fitArt(`angel-${ANGELART}.png`, w, h, { mirror: false, contrast: ANGCON }).px;
-    for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
-      out[oy + dy][ox + dx] = px[dy * w + dx];
-    return out;
-  }
+    return fitArt(`angel-${ANGELART}.png`, w, h, { mirror: false, contrast: ANGCON }).px;
+  // Resampled from the 12x42 drawn art. NOTE for the detail band: above 12x42 this is an
+  // UPSCALE and invents no detail. The band still buys smoother edges than 2x2 magnified
+  // pixels, but the extra samples are only real when ANGELART supplies a real source.
+  const px = new Array(w * h).fill(0);
   for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
     const t = [0, 0, 0, 0];
     for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
@@ -2294,18 +2294,78 @@ function angScale(w, h) {
       t[ANGSRC42[sy][sx]]++;
     }
     let best = 0; for (let v = 1; v < 4; v++) if (t[v] >= t[best]) best = v;
-    out[oy + dy][ox + dx] = best;
+    px[dy * w + dx] = best;
   }
+  return px;
+}
+function angScale(w, h) {
+  const out = [...Array(42)].map(() => new Array(12).fill(0));
+  const ox = (12 - w) >> 1, oy = 42 - h;         // centred, and standing on the floor
+  const px = angPx(w, h);
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
+    out[oy + dy][ox + dx] = px[dy * w + dx];
   return out;
+}
+// Lay a fitted figure into a (cols*12) x (rows*21) canvas and slice it into sprites: centred
+// across, standing on the floor. Emitted BOTTOM ROW FIRST, because the base bitmap has to be
+// the bottom-left cell -- that is the one the existing projection places from orbPtrT, so a
+// top-first emission draws the head where the feet belong. Returns the base bitmap index.
+// ANG6BOX=1 outlines every sprite cell, so the grid is visible as bounding boxes on screen;
+// bit pair 3 ($d026) because the art uses it sparingly, so a solid rectangle of it reads
+// clearly against both the figure and the black behind it.
+function gridSet(px, w, h, cols, rows) {
+  const CW = cols * 12, CH = rows * 21;
+  const g = [...Array(CH)].map(() => new Array(CW).fill(0));
+  const ox = (CW - w) >> 1, oy = CH - h;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) g[oy + y][ox + x] = px[y * w + x];
+  const base = ORBBM.length, BOX = process.env.ANG6BOX === '1';
+  for (let i = 0; i < rows; i++) for (let c = 0; c < cols; c++) {
+    const r = rows - 1 - i, b = [];
+    for (let y = r * 21; y < r * 21 + 21; y++) for (let k = 0; k < 3; k++)
+      b.push([0, 1, 2, 3].reduce((v, j) => {
+        const sy = y - r * 21, lx = k * 4 + j;
+        const p = (BOX && (sy === 0 || sy === 20 || lx === 0 || lx === 11)) ? 3 : g[y][c * 12 + lx];
+        return v | (p << (6 - 2 * j));
+      }, 0));
+    b.push(0);
+    ORBBM.push(b);
+  }
+  return base;
 }
 const angBytes = (g, row0) => { const b = [];
   for (let y = row0; y < row0 + 21; y++) for (let k = 0; k < 3; k++)
     b.push([0, 1, 2, 3].reduce((v, i) => v | (g[y][k * 4 + i] << (6 - 2 * i)), 0));
   b.push(0); return b; };
+// ---- ANGFINE=1: six sprites spent on DETAIL, not on SIZE ----
+// A different use of the sprite grid from ANG6, and the opposite trade. The plain rungs top out
+// at apparent 42 -- a 12x42 bitmap, one column of two sprites, every sample a real one. Step one
+// rung closer and the ladder MAGNIFIES a SMALLER bitmap instead: apparent 48 is a 7x24 bitmap at
+// 2x2, so at the exact moment the angel gets big enough to look at, its sample count drops from
+// 504 to 168. ANGFINE fills that band with UNMAGNIFIED grids instead. Three sprite rows reach 63
+// rows unexpanded, and at the aspect the art already uses (angW = 12h/42) that is 18 columns, so
+// 2 cols x 3 rows holds the whole figure at full resolution. Magnification resumes above 63,
+// where four sprite rows would cost twelve sprites and there is no way around it.
+//
+// The six sprites are only spent in that band -- roughly 1.4 to 2.0 cells away -- not for the
+// angel's whole life, which is what makes this affordable where ANG6 was not.
+const ANGFINE = process.env.ANGFINE === '1' && process.env.ANG6 !== '1';
+const ANGFTOP = +(process.env.ANGFTOP ?? 63);    // three sprite rows, unmagnified
+const ANGFSTEP = +(process.env.ANGFSTEP ?? 1.10);
+// Descending apparent heights strictly between the plain top (42) and ANGFTOP. Walked UPWARD
+// from 42 so the first band rung is a genuine step away from the plain one: walking down from
+// ANGFTOP instead leaves a last rung a couple of percent above 42, which costs six sprites for
+// a size change nobody can see.
+const ANGFB = [];
+if (ANGFINE) for (let H = 42 * ANGFSTEP; H <= ANGFTOP + 0.5; H *= ANGFSTEP) ANGFB.push(Math.round(H));
+ANGFB.reverse();
 const ANGLAD = [];
-for (let h = 42; h >= 24; h -= 3) ANGLAD.push({ h, exp: 1 });   // apparent 84..48
-for (let h = 42; h >= 6;  h -= 3) ANGLAD.push({ h, exp: 0 });   // apparent 42..6
-const ANGBMH = [...new Set(ANGLAD.map(r => r.h))].sort((a, b) => b - a);
+// Magnified rungs stop where the band takes over: below that ceiling an apparent height is
+// reached by magnifying a small bitmap, which is the very thing ANGFINE is buying back.
+const MAGLO = ANGFB.length ? Math.ceil(ANGFB[0] / 2 / 3) * 3 : 24;      // bitmap h; apparent 2h
+for (let h = 42; h >= MAGLO; h -= 3) ANGLAD.push({ h, exp: 1 });   // apparent 84..2*MAGLO
+for (const H of ANGFB) ANGLAD.push({ H, grid: true });             // the detail band, descending
+for (let h = 42; h >= 6;  h -= 3) ANGLAD.push({ h, exp: 0 });      // apparent 42..6
+const ANGBMH = [...new Set(ANGLAD.filter(r => !r.grid).map(r => r.h))].sort((a, b) => b - a);
 const ANGIDX = new Map();                        // height -> [lower slot, upper slot or -1]
 // ANG6 replaces these entirely; generating them anyway spent 20 sprite slots on bitmaps no
 // variant points at.
@@ -2326,34 +2386,8 @@ if (ANG6) {
   const { rungs, sets } = ang6Ladder();
   const angBase = new Map();
   for (const [key, st] of sets) {
-    // Fit the figure, then lay it into a (cols*12) x (rows*21) canvas and slice that into
-    // sprites. Centred across and standing on the floor, exactly as orbScale places a ball.
     const px = fitArt(`angel-${ANGELART || 'full'}.png`, st.w, st.h, { mirror: false, contrast: ANGCON }).px;
-    const CW = st.cols * 12, CH = st.rows * 21;
-    const g = [...Array(CH)].map(() => new Array(CW).fill(0));
-    const ox = (CW - st.w) >> 1, oy = CH - st.h;
-    for (let y = 0; y < st.h; y++) for (let x = 0; x < st.w; x++) g[oy + y][ox + x] = px[y * st.w + x];
-    angBase.set(key, ORBBM.length);
-    // Row-major from the BOTTOM row up. The base bitmap has to be the bottom-left cell,
-    // because that is the one the existing projection places from orbPtrT -- emit top-first and
-    // the head is drawn where the feet belong.
-    // ANG6BOX=1: outline every sprite cell, so the grid the angel is built from is visible as
-    // bounding boxes on screen. Bit pair 3 ($d026) because the art uses it sparingly, so a solid
-    // rectangle of it reads clearly against both the figure and the black behind it.
-    const BOX = process.env.ANG6BOX === '1';
-    for (let i = 0; i < st.rows; i++) for (let c = 0; c < st.cols; c++) {
-      const r = st.rows - 1 - i;
-      const b = [];
-      for (let y = r * 21; y < r * 21 + 21; y++) for (let k = 0; k < 3; k++)
-        b.push([0, 1, 2, 3].reduce((v, j) => {
-          const sy = y - r * 21, lx = k * 4 + j;
-          const px = (BOX && (sy === 0 || sy === 20 || lx === 0 || lx === 11))
-                   ? 3 : g[y][c * 12 + lx];
-          return v | (px << (6 - 2 * j));
-        }, 0));
-      b.push(0);
-      ORBBM.push(b);
-    }
+    angBase.set(key, gridSet(px, st.w, st.h, st.cols, st.rows));
   }
   for (const r of rungs) {
     const bs = angBase.get(`${r.w}x${r.h}`);
@@ -2365,16 +2399,39 @@ if (ANG6) {
     ORBTALL.push(r.H);
   }
 } else for (const r of ANGLAD) {
+  if (r.grid) {                                  // ANGFINE's detail band: unmagnified, multi-cell
+    const w = angW(r.H), cols = Math.ceil(w / 12), rows = Math.ceil(r.H / 21);
+    const base = gridSet(angPx(w, r.H), w, r.H, cols, rows);
+    LADDER.push({ h: r.H, exp: 0, cols, rows, base });
+    ORBSRC.push(base); ORBEXP.push(0); ORBYEX.push(0);
+    ORBWIDE.push(w * 2);                         // unmagnified: one mc pixel is two hires
+    ORBTALL.push(r.H);
+    continue;
+  }
   const [lo, up] = ANGIDX.get(r.h);
   LADDER.push({ h: r.h, exp: r.exp, up });
   ORBSRC.push(lo); ORBEXP.push(r.exp); ORBYEX.push(r.exp);
   ORBWIDE.push(angW(r.h) * (r.exp ? 4 : 2));
   ORBTALL.push(r.h * (r.exp ? 2 : 1));
 }
+if (ANGFINE) {
+  // Samples per rung, so the thing this exists to fix is visible in the build log: the old
+  // ladder's step off the plain top is where the count collapses.
+  const say = H => { const v = ORBTALL.lastIndexOf(H); return v < 0 ? '?' :
+    `${ORBWIDE[v] / 2}x${LADDER[v].cols ? H : H / (ORBEXP[v] ? 2 : 1)}` +
+    `=${(ORBWIDE[v] / 2) * (LADDER[v].cols ? H : H / (ORBEXP[v] ? 2 : 1))} samples`; };
+  console.error(`  ANGFINE band: ${ANGFB.length} rungs ${ANGFB.join(',')} at ${ANGFB.length ? '2x3' : '-'}` +
+    ` = ${ANGFB.length * 6} sprite slots, step ${((ANGFSTEP - 1) * 100).toFixed(1)}%`);
+  console.error(`    apparent 42 -> ${say(42)};  next rung up ${ANGFB.length ? ANGFB[ANGFB.length - 1] : '-'}` +
+    ` -> ${ANGFB.length ? say(ANGFB[ANGFB.length - 1]) : '-'}  (was 48 -> 7x24=168 samples)`);
+}
 // Sprite grid per variant. Everything that is not a six-sprite angel rung is 1x1 for the lower
 // sprite plus the legacy "upper" slot, which the runtime still handles as a special case.
 const ORBCOLS = LADDER.map(r => r.cols ?? 1);
 const ORBROWS = LADDER.map(r => r.rows ?? 1);
+// The RUNTIME support is "an entity drawn as a grid of sprites"; ANG6 and ANGFINE are two
+// different ladders that use it. Everything below gates on this rather than on either ladder.
+const GRID = ANG6 || ANGFINE;
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
 const ICO_BM = ORBBM.length;                     // the carried-orb icon: a fixed sprite in the
@@ -2840,7 +2897,10 @@ const melFn = MEL_SEQ.map(n => {
 // cap on that directly, and allow a couple of rows of clip rather than none, so the TOP stays
 // closer to where perspective wants it once the ladder can no longer grow.
 const ANGCLIP = +(process.env.ANGCLIP ?? 4);
-const orbYCapT = orbBlankT.map((b, v) => (ANG6 && v >= ANG_V0)
+// The test is "is this a MULTI-SPRITE-ROW entity", not "is ANG6 on": under ANGFINE the same
+// ladder holds band rungs that are three sprite rows AND plain rungs that are one, and the
+// plain ones must keep the orb rule they have today.
+const orbYCapT = orbBlankT.map((b, v) => (v >= ANG_V0 && (ANG6 || ORBROWS[v] > 1))
   ? Math.max(0, Math.min(255, 250 + ANGCLIP - ORBANCH[v]))
   : Math.max(0, 250 - ORB_FLOOR - Math.max(0, b)));
 if (orbYCapT.some(v => v < 0 || v > 255)) throw new Error('orbYCapT does not fit a byte');
@@ -9364,7 +9424,7 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         ; ---- a TALL entity takes a second slot for its upper half ----
         ; Same X, same colour, same expand; the other bitmap; and one sprite height above -- 21
         ; rows, or 42 once vmag has doubled it, which is exactly what orbAnchT already holds.
-${ANG6 ? `        ; ---- the rest of the sprite GRID ----
+${GRID ? `        ; ---- the rest of the sprite GRID ----
         ; A tall entity is up to 2 columns x 3 rows now, not a fixed pair. The slot placed above
         ; is the BOTTOM-LEFT cell; every other cell is a follower -- same colour, same expands,
         ; its own bitmap, offset by whole sprite widths and heights, and marked $fe so it
@@ -9374,6 +9434,17 @@ ${ANG6 ? `        ; ---- the rest of the sprite GRID ----
         sta ogC
         lda orbRowsT,y
         sta ogR
+        ; ---- a 1x1 entity has no followers, and must FALL THROUGH ----
+        ; Every orb is 1x1, and under ANGFINE so is every angel rung outside the detail band --
+        ; those still use the legacy upper-sprite path below. Running the grid loop for them
+        ; ends at ogEnd, which jumps PAST that path, so the two-sprite angel would lose its top
+        ; half. ANG6 never noticed: it has no two-sprite rungs at all.
+        cmp #$02
+        bcs ogGrid
+        lda ogC
+        cmp #$02
+        bcc ogSkip
+ogGrid:
 ${process.env.ANG6DBG2 === '1' ? `        cmp #$02                ; capture only a MULTI-ROW entity: this block runs for every
         bcc ag6nd               ;   entity, and an orb was overwriting the angel's state
         ldy ovar
@@ -9560,7 +9631,7 @@ ogNext: inc ogCol
         cmp ogR
         bcc ogRLp
 ogEnd:  jmp orbYes
-
+ogSkip:
 ` : ''}        ldy ovar
         lda orbPtrU,y
         beq orbYes              ; one-sprite entity: nothing more to do
@@ -12734,13 +12805,16 @@ hazHiT: !byte ${hazPick.map(i => `>hazL${i}`).join(',')}
 hazCT:  !byte ${hazRec.map(r => r.cell).join(',')}
 hazRstT: !byte ${hazRst.join(',')},$ff
 ${hazLists.map((l, i) => `hazL${i}: !byte ${l}`).join('\n')}` : ''}
-${ANG6 ? `        ; Above the image for the same reason the hazard data is: four more 44-entry tables
+${GRID ? `        ; Above the image for the same reason the hazard data is: more 44-entry tables
         ; appended to the per-variant block push the next segment past its own origin, and the
         ; free fragments below are both too small and a property of the map.
         * = $bd00
 orbColsT: !byte ${ORBCOLS.join(',')}
 orbRowsT: !byte ${ORBROWS.join(',')}
 orbColPT: !byte ${ORBXOFF.join(',')}
+        ; Read by the grid loop's follower code whichever ladder is on. Only ANG6 ever makes it
+        ; DIFFER from orbExpT -- every ANGFINE rung has xm == ym -- but the loop is shared, so
+        ; the table is too rather than forking the hot path on a build flag.
 orbYExT: !byte ${ORBYEX.join(',')}` : ''}
 ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
         ; block, which it overflows. NOT inside the ANG6 block above, though it was written there:
