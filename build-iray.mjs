@@ -16,6 +16,8 @@
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { assemble } from './asm6502.mjs';
+import { fitOrb, fitArt } from './fit-orb.mjs';
+import { png } from './png.mjs';
 await import('./d64lib.js');
 const D64 = globalThis.D64;
 const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 0; i < arr.length; i += per) o.push(ind + '!byte ' + Array.from(arr.slice(i, i + per)).join(',')); return o.join('\n'); };
@@ -2067,7 +2069,12 @@ const ORB_SMALL    = 0x3d00;    // THREE pages of per-variant and per-orb tables
 // every field in them anyway -- the bearing, the window and the canOcc bit are all relative to
 // where the orb stood at BUILD time. Nothing is emitted; ORB_SMALL now starts here.
 
-const ORB4RAW = [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192];
+// ORBART=rough|glossy samples the top-of-ladder sprite from a photoreal sphere render
+// instead of using the drawn art. Everything below is unchanged: orbScale still resamples
+// this one 12x21 bitmap down every rung, so the whole ladder follows from whichever it is.
+const ORBART = process.env.ORBART;
+const ORB4HAND = [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192];
+const ORB4RAW = ORBART ? fitOrb(`sphere-${ORBART}.png`).bytes.slice(0, 63) : ORB4HAND;
 const ORBSRC12 = (() => {
   const d = ORB4RAW, g = [];
   for (let y = 0; y < 21; y++) { const r = [];
@@ -2096,6 +2103,19 @@ const ORBSAMP = 4;                              // NxN point samples per destina
 function orbScale(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, and standing on the floor
+  if (ORBART && process.env.ORBRUNG !== '0') {   // ORBRUNG=0: A/B the per-rung fit
+    // ---- fit every rung from the SOURCE, not from the biggest rung ----
+    // Majority-of-16-samples is what flattens a dithered ball as it shrinks: the vote resolves
+    // each destination pixel to whichever level dominates its footprint, so the grain averages
+    // out and the small rungs read SMOOTHER than the large ones -- the ball loses its texture
+    // exactly where it also loses its shading. Re-dithering at the rung's own resolution keeps
+    // the same amount of grain per pixel all the way down. The source is decoded once and
+    // cached, so this costs a box filter per rung, not a PNG decode.
+    const px = fitArt(`sphere-${ORBART}.png`, w, h).px;
+    for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
+      out[oy + dy][ox + dx] = px[dy * w + dx];
+    return out;
+  }
   for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
     const t = [0, 0, 0, 0];
     for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
@@ -2138,6 +2158,36 @@ let NORBBM = ORBBM.length;
 // the resampler breaks that, every other rung is suspect too.
 if (ORBBM[0].slice(0, 63).join() !== ORB4RAW.slice(0, 63).join())
   throw new Error('orbScale does not reproduce ORB4 at full size -- the resampler changed');
+// ORBSHEET=1: every distinct bitmap in the ladder, on black and on white, at 8x4 zoom (a
+// multicolor pixel is 2 hires wide, so 8x4 keeps its real proportions). The point is to see how
+// the art SURVIVES being resampled down -- a sphere that reads well at 21 rows and turns to
+// noise at 9 is a worse choice than one that degrades gracefully, and that is not visible from
+// the top rung alone.
+if (process.env.ORBSHEET === '1') {
+  const ZX = 8, ZY = 4, PAD = 4, GAP = 8;
+  const cw = 12 * ZX + PAD, chh = 21 * ZY;
+  const SW_ = ORBBM.length * cw, SH_ = chh * 2 + GAP;
+  const rgb = new Uint8Array(SW_ * SH_ * 3);
+  const INKRGB = { 1: [68, 68, 68], 2: [108, 108, 108], 3: [149, 149, 149] };
+  const put = (x, y, c) => { const o = (y * SW_ + x) * 3;
+    rgb[o] = c[0]; rgb[o + 1] = c[1]; rgb[o + 2] = c[2]; };
+  for (let band = 0; band < 2; band++) {
+    const back = band ? [255, 255, 255] : [0, 0, 0];
+    for (let y = 0; y < chh; y++) for (let x = 0; x < SW_; x++) put(x, band * (chh + GAP) + y, back);
+  }
+  for (let bi = 0; bi < ORBBM.length; bi++) for (let band = 0; band < 2; band++) {
+    const b = ORBBM[bi];
+    for (let y = 0; y < 21; y++) for (let x = 0; x < 12; x++) {
+      const v = (b[y * 3 + (x >> 2)] >> (6 - 2 * (x & 3))) & 3;
+      if (!v) continue;
+      for (let py = 0; py < ZY; py++) for (let px = 0; px < ZX; px++)
+        put(bi * cw + x * ZX + px, band * (chh + GAP) + y * ZY + py, INKRGB[v]);
+    }
+  }
+  const nm = `orb-${ORBART || 'hand'}.png`;
+  writeFileSync(`./${nm}`, png(SW_, SH_, rgb));
+  console.error(`${nm}: ${ORBBM.length} bitmaps, heights ${ORBBMH.join(',')}`);
+}
 const ORBSRC = LADDER.map(r => ORBBMH.indexOf(r.h));
 const ORBEXP = LADDER.map(r => r.exp);
 const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent width, screen px
@@ -2195,7 +2245,21 @@ const dieVolT = [...Array(9)].map((_, t) => t <= 5 ? 15 : Math.max(0, 15 - (t - 
 // elapsed sixtieth -> tick. A table because 54/9 is 6 and a shift cannot divide by six: with
 // >>2 the ramp finished at el=36 and the picture went black well BEFORE the face reached centre.
 const dieTckT = [...Array(DIE_SHOW)].map((_, e) => Math.min(8, Math.floor(e * 9 / DIE_SHOW)));
-const ANGSRC42 = (() => { const g = [];
+// ANGELART=full digitises the angel from angel-full.png instead of using the drawn art off
+// TMP-2.d64. The figure's content box is about 604x1123, a 0.54 ratio against the sprite's
+// 0.48 displayed one, so it fits at very nearly its own proportions.
+const ANGELART = process.env.ANGELART;
+// ANGCON: the S-curve strength for the ANGEL only. Shared with the orb it would be wrong --
+// the orb's whole character is the dither grain, and pushing tones off the middle grey collapses
+// it into a hard light/dark split. The angel wants the opposite: its shading reads as mush until
+// the levels spread off the centre.
+const ANGCON = +(process.env.ANGCON ?? 1.6);
+const ANGSRC42 = (() => {
+  if (ANGELART) {
+    const px = fitArt(`angel-${ANGELART}.png`, 12, 42, { mirror: false, contrast: ANGCON }).px;
+    return [...Array(42)].map((_, y) => [...px.slice(y * 12, y * 12 + 12)]);
+  }
+  const g = [];
   for (let y = 0; y < 42; y++) { const r = [];
     for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++)
       r.push((ANGART.angel[y * 3 + b] >> (6 - 2 * i)) & 3);
@@ -2205,6 +2269,14 @@ const angW = h => Math.max(1, Math.round(12 * h / 42));
 function angScale(w, h) {
   const out = [...Array(42)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 42 - h;         // centred, and standing on the floor
+  if (ANGELART && process.env.ORBRUNG !== '0') {
+    // Same reason as the orb: majority voting flattens a dithered figure as it shrinks, so
+    // every rung is fitted from the source at its own resolution instead.
+    const px = fitArt(`angel-${ANGELART}.png`, w, h, { mirror: false, contrast: ANGCON }).px;
+    for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
+      out[oy + dy][ox + dx] = px[dy * w + dx];
+    return out;
+  }
   for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
     const t = [0, 0, 0, 0];
     for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
@@ -2296,7 +2368,12 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
   }
 } else {
-  if (LEVEL2) { ORBS.push({ x: 2.5, y: 6.5, c: 0 }); ORBS.push({ x: 6.5, y: 2.5, c: 0 }); }
+  // NOORB=1: the angel only. It shares the sprite budget and the priority ordering with every
+  // orb on screen, so having one standing in front of it is the wrong thing to be looking at
+  // while judging the angel's own scaling.
+  const NOORB = process.env.NOORB === '1';
+  if (NOORB) { /* no plain orbs */ }
+  else if (LEVEL2) { ORBS.push({ x: 2.5, y: 6.5, c: 0 }); ORBS.push({ x: 6.5, y: 2.5, c: 0 }); }
   else ORBS.push({ x: 8.5, y: 4.5, c: 0 });      // the corridor mouth
   // The angel starts IMMEDIATELY BEHIND the orb. Walking up to the orb -- the one thing a new
   // player is drawn to -- then puts them at nearly the closest range, so they get the heartbeat
