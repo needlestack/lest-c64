@@ -2554,6 +2554,17 @@ const angVarT = [...Array(256)].map((_, h) => {
     if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
   return b;
 });
+// ---- ANGMID=1: centre the angel on its ideal height instead of standing it on the floor ----
+// The rung is a quantised height, and foot-anchoring puts ALL of that error at the TOP: between
+// jumps the figure slides down with the ground line, then the top leaps by the whole step. Split
+// the error and it grows both ways, so the top moves half as far. ovar is itself a function of
+// ohgt, so the offset is entirely precomputable -- one signed byte per h, one add at runtime.
+const ANGMID = process.env.ANGMID !== '0';
+const angMidT = [...Array(256)].map((_, h) => {
+  if (!ANGMID) return 0;
+  const off = Math.round((ORBTALL[angVarT[h]] - 2 * h * ANGH) / 2);
+  return Math.max(-128, Math.min(127, off)) & 255;      // two's complement in a byte
+});
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = (ORBSCALE * h / 88) * ORBTALL[0] / ORBWIDE[0];
   // STOP AT ANG_V0. The angel's rungs live in this same list, and searching past the boundary
@@ -8927,6 +8938,17 @@ oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         clc
         adc ohgt
         bcs orbYCp              ; the sum passed 255, so it is far below the screen
+${ANGMID ? `        pha                     ; ---- centre a TALL entity on its ideal height ----
+        ldy oidx                ;   the offset is half the rung's quantisation error, signed,
+        lda orbTallT,y          ;   precomputed per ohgt -- see angMidT in the build. X holds
+        beq oMidSk              ;   ovar for the cap below, so only A and Y are touched here.
+        ldy ohgt
+        pla
+        clc
+        adc angMidT,y
+        jmp oMidNo
+oMidSk: pla
+oMidNo:` : ''}
         cmp orbYCapT,x
         bcc orbYok
 orbYCp: lda orbYCapT,x          ; PINNED rather than dropped: an entity you are pressed against
@@ -12371,6 +12393,12 @@ hazHiT: !byte ${hazPick.map(i => `>hazL${i}`).join(',')}
 hazCT:  !byte ${hazRec.map(r => r.cell).join(',')}
 hazRstT: !byte ${hazRst.join(',')},$ff
 ${hazLists.map((l, i) => `hazL${i}: !byte ${l}`).join('\n')}` : ''}
+${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
+        ; block, which it overflows. NOT inside the ANG6 block above, though it was written there:
+        ; centring is about a TALL entity, and the two-sprite ladder has those too, so gating the
+        ; table on ANG6 while its use site is gated on ANGMID broke the DEFAULT build outright.
+        * = $be00
+angMidT: !byte ${angMidT.join(',')}` : ''}
         * = ${hx(QCOSBASE)}
 qcosT: !byte ${qcos.join(',')}
 `;
