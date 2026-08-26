@@ -22,7 +22,12 @@ orbdiag.json
 .DS_Store
 cellscan.json
 model.json
-charset-plan.json
+# charset-plan.json is TRACKED. It looks derived and it is not: it is the k-medians fit over a
+# 2M-position scan of a shape-rich maze, it is canonical input to every build, and no level's map
+# is an input to it. Untracked, a clean clone would silently refit the charset against whatever
+# map happened to be built and ship different glyphs.
+# Regenerate deliberately with:
+#   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs
 
 # fit-angel.mjs previews: regenerate with `node fit-angel.mjs TMP-3.d64 hangl1`. The FITTED
 # asset (angel-face.json) is committed because the build reads it; the PNGs are just for looking.
