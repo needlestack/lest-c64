@@ -23,26 +23,8 @@ baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
 smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
 hazCur  = $805f                  ; the cell whose run-table patches are currently applied
-ogC     = $8060                  ; the sprite GRID walk for a tall entity: columns, rows, the
-ogR     = $8061                  ;   row and column pitches, the bitmap base, and the cursor
-ogAnch  = $8062
-ogXOff  = $8063
-ogPtr   = $8064
-ogRow   = $8065
-ogCol   = $8066
-ogN     = $8067
-ogXL    = $8068
-ogXH    = $8069
-ogGL    = $806a                  ; the GRID's left edge: the anchor centres one column
-ogGH    = $806b
-dbg0    = $806c                  ; ANG6DBG2: engine state captured at the angel's grid setup
-dbg1    = $806d
-dbg2    = $806e
-dbg3    = $806f
-dbg4    = $8070
-dbg5    = $8071
-dbg6    = $8072
-dbg7    = $8073
+                                 ; $8060-$8073 are free: they held the sprite GRID walk and its
+                                 ; debug capture, both gone with the six-sprite angel
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
 opaqL   = $8076                  ; the paq the cached frame trig was taken at
 opaqH   = $8077
@@ -340,14 +322,24 @@ skOld   = $85c9
 skNew   = $85cc
 skEdge  = $85cd
 marked  = $8584                  ; 0, or the index+1 of the angel that stepped up beside you
-dieSt   = $8585                  ; 0 alive, 1 fade+disintegrate, 2 the face arriving, 3 held
+dieSt   = $8585                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
 dieCnt  = $8586
 dieDir  = $8587                  ; the turn the player was making, locked in
 dieOpa  = $8588
-dieOff  = $8589                  ; 0 = face fully off right, 40 = centred, 80 = off left
-ddRow   = $858a
-ddLo    = $858b                  ; the run of screen columns the face actually covers
-ddSrc   = $858d
+dieP    = $8589                  ; which picture of this death's sequence is on screen
+dieRem  = $858a                  ; whole angle units the sweep still owes
+dieCl   = $858b                  ; scratch: dx+1 and dy+1 while the bearing index is built
+dieRlT  = $8069                  ; frames before the landing note's gate drops
+dieKik  = $8068                  ; frames left in the kick's downward sweep
+dieFqL  = $8066                  ; the rising tone's 16-bit frequency
+dieFqH  = $8067
+dieSgn  = $8065                  ; oaS at the last projection: which side of centre
+dieLk   = $8064                  ; consecutive frames the angel has read as centred
+dieIdx  = $8063                  ; the entity the death sweep is steering onto
+dieDirF = $8061                  ; fine half of the captured turn rate
+dieOpaF = $8062
+dieCy   = $8060                  ; ($8060-$8073 came free with the six-sprite angel)
+dieOff  = $858d                  ; the angel's column offset from centre, from the projection
 dieT0   = $858e                  ; frameCnt when they died: everything is measured from here
 dieTck  = $858f                  ; the last palette tick written, so a fill happens once
 dieEl   = $8590
@@ -364,7 +356,6 @@ sdR     = $85d9                  ;   how many spans were stamped this frame. Rec
 sdN     = $85da                  ;   stamp ITSELF, so it can be read at a single breakpoint --
 sdEnt   = $85db                  ;   watchpoints shift raster timing and this engine notices.
 markPa  = $8553                  ; heading when the angel cornered you: the turn trigger's origin
-dieMir  = $8592                  ; the face comes in from the side the turn is bringing into view
 sndMode = $85ce                  ; index into sndModeT: low / band / high / notch
 sndVol  = $85cf
 sndFc   = $85ca
@@ -372,7 +363,6 @@ sndPw   = $85cb
 sndD    = $85c0                  ; nearest angel, in cells; and the scratch the search needs
 sndI    = $85c1
 sndT    = $85c2
-pulsePh = $8562                  ; 16-bit beat phase, advanced in the IRQ
 
 omMc    = $850e
 amIdx   = $84f6                  ; angel movement scratch: entity, chosen step, target cell
@@ -652,9 +642,12 @@ cpChr:  txa
         lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
         and #$fc                ; %00 -- "and", where bank 0 was "ora #$03".
         sta $dd00
-        lda #$13                ; 24-ROW MODE, ALWAYS. RSEL clear costs 4 pixels of border top
-        sta pd11                ; and bottom and buys two things: the partial character row that
-        sta $d011               ; (pd11 is the value mnext republishes every frame, so it has to
+        lda #$03                ; 24-ROW MODE, ALWAYS -- but DEN OFF until the first frame is
+        sta pd11                ;   drawn. entry is the RESTART too, and a death picture is still
+        sta $d011               ;   in both buffers while cpChr rebuilds the cell charset beneath
+                                ;   it: the angel, drawn in the level's wall ramps, for a frame.
+                                ;   renderSym turns the display on once it has something real.
+                                ; (pd11 is the value mnext republishes every frame, so it has to
                                 ;  start out agreeing with the register)
                                 ; YSCROLL exposes while scrolling is hidden, and -- because the
                                 ; fall needs 24-row mode anyway -- the screen no longer changes
@@ -765,29 +758,28 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-        lda #$f6
+        lda #$80
         sta px
-        lda #$01
+        lda #$06
         sta px+1
-        lda #$49
+        lda #$80
         sta py
-        lda #$01
+        lda #$07
         sta py+1
-        lda #$3b
+        lda #$80
         sta pa
         jsr sndInit             ; the drone starts before the first frame and never stops
 
         lda #$00
-        sta dieSt               ; power-on garbage here sent the loop straight into dieRev with
+        sta dieSt               ; power-on garbage here sent the loop straight into the cut scene with
         sta marked              ;   no state set up, and the program fell out to BASIC
-        sta pulsePh
-        sta pulsePh+1
         lda #$0f
-        sta sndD                ; far, so the border does not pulse before the first sndTick
+        sta sndD
         jsr objInit             ; entities back to their starting cells -- RETURN restarts by
                                 ;   jumping here, and their state is all live RAM
         lda #$00
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
+
 
         lda #$e0
         sta baseHi
@@ -844,7 +836,7 @@ mloop:
         lda dieSt               ; the face is arriving: no input, no rays, no renderSym, and
         cmp #$02                ;   the same three-period pacing the fall runs at
         bcc mfAlive
-        jsr dieRev
+        jsr dieShow
         jmp fwait
 mfAlive:
         lda fallSt              ; falling? then no input, no rays, no renderSym -- one block
@@ -971,7 +963,10 @@ rayAll:
         clc
         adc px+1
         sta cell0
-
+        cmp hazCur              ; the run tables are patched for the cell being RENDERED
+        beq hzOk                ;   from, so this stays consistent even when the fall renders a
+        jsr hazSet              ;   different cell than the player stands in
+hzOk:
         ; ---- the view angle at QUARTER-unit resolution: paq = (pa:paF) >> 6 ----
         ; Once a frame, not once a ray: it is constant across the whole frame and the rays only
         ; add their own offset.
@@ -1708,6 +1703,8 @@ subFin:
                                 ;   rendered next frame via entDty, which nobody can see.
         jsr dieChk              ; the mark, and the moment they turn far enough to see it
         jsr renderSym
+        lda #$13                ; DEN on: there is a rendered frame to show now
+        sta pd11
         jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
         jsr drawFps
         jsr drawDbg
@@ -2985,6 +2982,36 @@ cuXp:   clc
         rts
 
 
+; ============ per-cell run splits: make subLp's merge test correct, by cell ============
+; subLp merges a span on faceIdT alone and never looks between the ends, so a wall hidden inside
+; one is not drawn at all. From most cells every run is visible in ONE piece and that merge is
+; exact; from a few, an occluder breaks a run in two and it is wrong. Those cells -- and only
+; those -- get the far run's second half renamed to a spare id, so the EXISTING test splits the
+; span. No width cap, no forced probes, no per-ray cost: cells that can merge safely still do.
+;
+; Restore-everything-then-apply, rather than reverting the last cell's patches. It costs a few
+; more stores on a cell change and removes the entire class of bug where a stale patch outlives
+; the cell that set it -- there is no "currently applied" state to get wrong.
+hazSet: lda #<hazRstT    ; hzRd is self-modified rather than indirect: (zp),y needs a ZERO
+        sta hzRd+1      ;   PAGE pointer, and there is none spare -- pointing it at $805f
+        lda #>hazRstT   ;   assembled as ($5f),y and scattered writes across memory.
+        sta hzRd+2
+        jsr hzRun               ; every splittable run back to its merged id
+        ldx hazNT               ; how many cells THIS level splits, less one. $ff = none, and it
+        bmi hzNo                ;   must branch out: x=$ff would read 255 bytes past hazCT.
+                                ;   (hzRt is in the HAZ_BASE block, far out of branch range.)
+hzF:    lda hazCT,x             ; does THIS cell split anything?
+        cmp cell0
+        beq hzG
+        dex
+        bpl hzF
+hzNo:   rts
+hzG:    lda hazLoT,x            ; X must survive to here: hzRun clobbers it, and has not run yet
+        sta hzRd+1
+        lda hazHiT,x
+        sta hzRd+2
+        jmp hzRun
+
 ; ================= march one column: cast + store colH/idT =================
 marchCol:
         jsr castRay
@@ -3320,48 +3347,34 @@ faNeg:  clc
         adc #$ff                ; -1 in the high byte
 faHi:   and #$03
         sta rqH                 ; which quarter of the circle the FINE angle is in
-        tax
         ldy rqL
-        cpx #$00                ; NOT a bare BEQ: the LDY above sets Z from rqL, not from the
-        beq faP0                ; page, and without this the dispatch branches on the index
-        dex
-        beq faP1
-        dex
-        beq faP2
-        lda ddxLoTQ+768,y
-        sta ddx
-        lda ddxHiTQ+768,y
-        sta ddxH
-        lda ddyLoTQ+768,y
-        sta ddy
-        lda ddyHiTQ+768,y
-        sta ddyH
-        jmp faDn
-faP0:   lda ddxLoTQ,y
+        ; ---- TWO PAGES OF TABLE SERVE ALL FOUR QUARTERS, AND THERE IS NO ddy AT ALL ----
+        ; ddx = SCALE/|cos| and ddy = SCALE/|sin|, and both identities below are proved
+        ; byte-for-byte at build time rather than argued from the trigonometry:
+        ;   |cos| has period HALF a circle, so quarters 2 and 3 repeat quarters 0 and 1
+        ;     -> only BIT 0 of the quarter selects a page.
+        ;   sin and cos are a quarter turn apart, and a quarter of 1024 is exactly 256 --
+        ;     one whole page -- so ddy is the OTHER page at the same index.
+        ; So the whole 4KB of quarter-angle deltas is 1KB, the dispatch is one branch instead
+        ; of four compares, and not a cycle of it is spent on the folding.
+        lsr                     ; carry = bit 0 of the quarter; ldy above leaves it alone
+        bcs faOdd
+        lda ddxLoTQ,y           ; even quarter: ddx from page 0, ddy from page 1
         sta ddx
         lda ddxHiTQ,y
         sta ddxH
-        lda ddyLoTQ,y
+        lda ddxLoTQ+256,y
         sta ddy
-        lda ddyHiTQ,y
+        lda ddxHiTQ+256,y
         sta ddyH
         jmp faDn
-faP1:   lda ddxLoTQ+256,y
+faOdd:  lda ddxLoTQ+256,y       ; odd quarter: the two pages swap roles
         sta ddx
         lda ddxHiTQ+256,y
         sta ddxH
-        lda ddyLoTQ+256,y
+        lda ddxLoTQ,y
         sta ddy
-        lda ddyHiTQ+256,y
-        sta ddyH
-        jmp faDn
-faP2:   lda ddxLoTQ+512,y
-        sta ddx
-        lda ddxHiTQ+512,y
-        sta ddxH
-        lda ddyLoTQ+512,y
-        sta ddy
-        lda ddyHiTQ+512,y
+        lda ddxHiTQ,y
         sta ddyH
 faDn:
         lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
@@ -3856,8 +3869,7 @@ irqArm: lda #$96
         inc frameCnt
         bne irqNf
         inc frameCnt+1
-irqNf:        jsr pulseTick           ; 60Hz, and the next raster compare is already armed above
-
+irqNf:
 irqd:   lda #$ff
         sta $d019
         pla
@@ -3954,6 +3966,7 @@ drawFps:
 
 ; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
 ; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
+
 drawDbg:
 
         lda #$01      ; see drawFps: the top character row is half under the border
@@ -4038,7 +4051,6 @@ ddPut:  clc
         rts
 
 ; ================= data =================
-cosCorrT: !byte 215,215,216,217,218,219,219,220,221,222,223,223,224,225,226,226,227,228,229,229,230,231,232,232,233,234,235,235,236,237,237,238,239,239,240,241,241,242,242,243,244,244,245,245,246,246,247,247,248,248,249,249,250,250,251,251,251,252,252,252,253,253,253,254,254,254,254,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,253,253,253,252,252,252,251,251,251,250,250,249,249,248,248,247,247,246,246,245,245,244,244,243,242,242,241,241,240,239,239,238,237,237,236,235,235,234,233,232,232,231,230,229,229,228,227,226,226,225,224,223,223,222,221,220,219,219,218,217,216,215,215
 dirXT:  !byte 1,1,0,255,255,255,0,1
 dirYT:  !byte 0,1,1,1,0,255,255,255
 moveXT: !byte 64,64,64,64,64,64,63,63,63,62,62,62,61,61,60,60,59,59,58,57,56,56,55,54
@@ -5055,10 +5067,20 @@ orbOne: ldx oidx
         sta oiy
         jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
         bcc orbNo               ;   everything above needs only the cell it stands in
+        lda oidx                ; the death sweep steers by ONE entity's column offset, so
+        cmp dieIdx              ;   test identity, not tallness: hole-like entities reach the tall
+        bne odSk                ;   test below with an index PAST THE END of orbTallT, and a stray
+        lda ocoff               ;   non-zero there let the exit hole coming into view stop the
+        sta dieOff              ;   sweep dead, forty degrees short of the angel.
+        lda oaS                 ; ocoff is an unsigned MAGNITUDE: orbOne takes the side from oaS
+        sta dieSgn              ;   and forms 80+ocoff or 80-ocoff. Read as a signed byte instead,
+                                ;   250 columns off centre looks like -6 and the lock fires on it.
+odSk:
         ldx ohgt                ; --- size variant, scaled exactly as the walls are ---
         ldy oidx                ; TALL entities have their own rungs, appended to the same
         lda orbTallT,y          ;   variant list so every table indexed by ovar still works
         beq omVarO
+
         lda angVarT,x
         bne omVarS              ; always taken: the angel's rungs never start at 0
 omVarO: lda orbVarT,x
@@ -5564,6 +5586,14 @@ fallChk:ldx hlv
         sta omYY                ;   would put the register straight back and leave an orb
         sta omPri               ;   hanging in space while the world scrolled away behind it
         sta omX8
+        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
+        ; Order is load-bearing twice over. lvlSwap must run before landXT is read, or the player
+        ; is placed at the spot they just left; and objInit must run after it, because it rebuilds
+        ; blkT from the NEW mapT and puts each entity back at the new level's build-time cell.
+        ; Both are done here rather than on landing so the destination render -- which bgPh starts
+        ; a slice per frame from the next frame on -- sees the new geometry from its first slice.
+        jsr lvlSwap
+        jsr objInit
         ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
         sta px                  ;   player does not move again for the rest of the fall.
@@ -6193,7 +6223,7 @@ ooLd:   lda $ffff,x
         ora runBitT,y
 ooSt:   sta $ffff,x
 ooNx:   iny
-        cpy #$19
+        cpy #$19        ; NRUN, not this level's own count: the loops are shared
         bcc ooLp
         rts
 
@@ -6251,37 +6281,6 @@ sniLp:  sta $d400,x
         sta $d404
         sta $d40b
 
-        rts
-
-; ---- pulseTick: the border beats with the audio, called from the 60Hz IRQ ----
-; Not the main loop: at ~19fps and varying, a pulse would stagger. The phase increment is the
-; detune scaled, so the border is locked to the beat by construction rather than by a second
-; timer that could drift against it. Silent above PULSE_MAX cells -- the pulse is the last
-; warning, not the ambience.
-pulseTick:
-        lda marked              ; ONLY while an angel has you cornered and you have not looked.
-        beq pqOff               ;   Not a proximity meter -- a "you are about to die" warning, and
-        ldx sndD                ;   walking out of reach cancels it. dieGo clears marked, so the
-        cpx #$05   ; border stops the instant the cut scene starts.
-        bcs pqOff
-        clc
-        lda pulsePh
-        adc pulseIncL,x
-        sta pulsePh
-        lda pulsePh+1
-        adc pulseIncH,x
-        sta pulsePh+1
-        lsr                     ; top three bits of the high byte: eight steps a cycle
-        lsr
-        lsr
-        lsr
-        lsr
-        tax
-        lda pulseT,x
-        sta $d020
-        rts
-pqOff:  lda #$00
-        sta $d020
         rts
 
 
@@ -6360,10 +6359,22 @@ asLp:   stx amIdx
         bne asNext              ; not in the world
         lda orbSeenT,x
         bne asNext              ; one visible pixel freezes it, and its clock with it
+        ; ---- how long until this angel's next step? It depends how far away it is. ----
+        ; Y holds the answer rather than A because the accumulator has to be loaded after this and
+        ; there is no cmp with a Y-indexed operand -- hence the one-byte parking spot.
+        jsr angDst              ; A = BFS cells from the player; $ff if no fill has landed yet
+        ldy angPerT             ; the near period, and the safe default
+        cmp #$ff
+        beq asPer               ;   no map yet -- do NOT let an unreachable angel run at the fast
+        cmp angFarT             ;   rate just because $ff compares high
+        bcc asPer
+        ldy angPerFT            ; far off: close the gap at the shorter period
+asPer:  sty asPCur
+        ldx amIdx               ; angDst clobbered X
         lda angAccT,x
         clc
         adc dtv
-        cmp #$78
+        cmp asPCur              ; both periods are per LEVEL, swapped with the rest of the manifest
         bcc asKeep
         jsr angOne              ; due a step (X is the entity; angOne preserves nothing)
         lda #$00
@@ -6403,34 +6414,24 @@ anSetY: sta amDY
         ; against an obstacle that is rare, transient and two seconds from being irrelevant.
 anNoY:  jsr anPath
         cmp #$ff
-        beq anGreed
+        beq anDone              ; no descending neighbour: it is walled in, so it WAITS
         tax
         lda pathDXT,x
         sta amTX
         lda pathDYT,x
         sta amTY
+        ; ---- THE GREEDY FALLBACK IS GONE, and the fill is why ----
+        ; It existed only to paper over a path that was plotted through orbs it could not see:
+        ; the angel walked into one, was refused, and slid sideways. That produced the pacing --
+        ; a caged angel wandering its cage because greedy tracked whichever side the player was
+        ; on -- and it could never solve a room with one door blocked and another open, because
+        ; greedy points AT the player, through the wall, not round to the far door.
+        ; Now the fill itself routes round orbs, so a refused step means genuinely boxed in, and
+        ; the right answer to that is to stand still.
         jsr anTry
-        bcs anGo
-        ; ---- greedy fallback: slide along x, then along y ----
-        ; ORTHOGONAL ONLY. The diagonal candidate is gone, and with it the way an angel could
-        ; cross a cell it never occupied: a diagonal brushes two cells and anTry only ever
-        ; checked those for WALLS, never for visibility, so it could slip across ground the
-        ; player was looking straight at. Four directions means every step lands in exactly one
-        ; cell and that cell faces the obscured test.
-anGreed:
-        lda amDX
-        sta amTX
-        lda #$00
-        sta amTY
-        jsr anTry
-        bcs anGo
-        lda #$00
-        sta amTX
-        lda amDY
-        sta amTY
-        jsr anTry
-        bcc anDone              ; boxed in this tick
-anGo:   ldx amIdx
+        bcc anDone
+anGo:   inc blkVer              ; the obstacle map changed: the fill has to be redone
+        ldx amIdx
         lda orbYCT,x            ; the cell it is leaving opens
         asl
         asl
@@ -6508,6 +6509,24 @@ anT1:   lda amY
         tay
         lda blkT,y
         bne anNo                ; wall, orb or another angel
+        ; ---- the leash. One bit per cell; see LEASH_AT for why the fill ignores it. ----
+        lda amCell
+        and #$07
+        tax
+        lda #$01                ; 1 << (cell & 7), by shifting rather than a table -- this runs
+alMsk:  dex                     ;   once per attempted step, which is once every two seconds
+        bmi alGot
+        asl
+        bne alMsk               ; always taken: bit 7 is the last one that can be set
+alGot:  sta atMsk
+        lda amCell
+        lsr
+        lsr
+        lsr
+        tay
+        lda angBlkT,y
+        and atMsk
+        bne anNo                ; leashed: this one does not go there
 anSqOk:
         ; ---- how much of it would the player SEE standing there? ----
         ; It MAY step into view -- an angel easing round a corner and freezing mid-peek is the
@@ -6558,102 +6577,150 @@ anYes:  sec
 anNo:   clc
         rts
 
-; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
-; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
-; which is what makes walking into one harmless. Here we only LIFT it, and fire.
-; The trigger is ONE angle comparison. Contact hides the angel outright, so there is no sprite to
-; see and nothing to project -- turn DIE_TURN either way and the cut scene fires.
-dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
-        beq dckLive             ;   the sprites. obC is rewritten by orbMove every frame and
-        ldx #$07                ;   flushed to $d027+n after us, so this is the last word on it.
-dckSp:  lda dieInk
-        sta obC,x
-        dex
-        bpl dckSp
+; ---- snTone / snRise: the DRONE climbs ----
+; Not a note over the top: the drone itself is wound up, voices 1 and 2 together, keeping their
+; absolute detune so the beating between them stays where it was while the pitch rises.
+snTone: lda #<$03bc
+        sta dieFqL
+        lda #>$03bc
+        sta dieFqH
         rts
-dckLive:
-        lda pa                  ; which way they are turning, sampled every frame so the cut
-        sec                     ;   scene can lock it in and keep turning for them
-        sbc dieOpa
-        sta dieDir
-        lda pa
-        sta dieOpa
-        lda marked
-        beq dcNo
-        tax
-        dex
-        stx amIdx
-        sec
-        lda orbXCT,x
-        sbc px+1
-        sta oix
+snRise: lda dieFqH              ; at the top already? then hold there
+        cmp #>$08e1
+        bcs snRDn
         clc
-        adc #$01
-        cmp #$03
-        bcs dcClr               ; more than a cell away in x: the mark lifts
-        ldx amIdx
-        sec
-        lda orbYCT,x
-        sbc py+1
-        sta oiy
-        clc
-        adc #$01
-        cmp #$03
-        bcs dcClr
-        sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
-        lda pa                  ;   them? The angel is hidden, so there is no sprite to see and
-        sbc markPa              ;   nothing to project. Turn 30 degrees either way and you die.
-        bpl dcPos
-        eor #$ff
-        clc
-        adc #$01
-dcPos:  cmp #$15
-        bcc dcNo
-dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
-dieGo:  lda dieDir
-        bne dgD
-        lda #$01                ; not turning: give the face a side to come from anyway
-        sta dieDir
-dgD:    lda #$00                ; AFTER the branch above, not inside it -- pulseTick gates on
-        sta marked              ;   marked, and skipping this left the border beating right
-        ldx #$01   ; through the cut scene whenever the player WAS turning.   ; the angel simply is not there any more -- hiding it is one
-dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slot. The user wants
-        beq dgA2                ;   it gone, not faded: it is the thing that just killed you.
-        lda #$01
-        sta orbHidT,x
-dgA2:   dex
-        bpl dgA
-        lda #$0c  ; the orb, by contrast, fades out with everything else
-        sta dieInk
-        lda #$01
-        sta dieSt
-        lda frameCnt
-        sta dieT0
-        lda #$ff
-        sta dieTck              ; no tick written yet
+        lda dieFqL
+        adc #<$0013
+        sta dieFqL
+        lda dieFqH
+        adc #>$0013
+        sta dieFqH
+snRDn:  lda dieFqL              ; voice 1
+        sta $d400
+        lda dieFqH
+        sta $d401
+        clc                     ; voice 2 rides DIE_DET above it, the same gap throughout
+        lda dieFqL
+        adc #<$0024
+        sta $d407
+        lda dieFqH
+        adc #>$0024
+        sta $d408
         rts
-dcClr:  ldx amIdx               ; out of reach again: the sentence lifts and it comes back
+snOff:  lda #$00                ; the angel is centred and everything stops. A low note under
+        sta $d404               ;   the noise hit could not be heard anyway, and silence at the
+        sta $d40b               ;   moment it faces you is stronger than another sound.
+        rts
+
+; ---- snBoom / snCrash: the picture arrives, and the dark closes ----
+; Same voice, one after the other and never overlapping, so they can simply overwrite each other.
+snBoom: lda #$00                ; the drone stops dead as the picture lands -- the hit should
+        sta $d404               ;   arrive into silence, not on top of a chord. Clearing the
+        sta $d40b               ;   waveform cuts it at once; releasing would take ~750ms.
+        lda #<$08f9
+        sta $d40e
+        lda #>$08f9
+        sta $d40f
+        jmp snHit
+snHit:  jsr snKick              ; the tonal half of the drum, under the noise
+        lda #$0a
+        sta $d413
         lda #$00
-        sta orbHidT,x
-        sta marked
-dcNo:   rts
+        sta $d414
+        lda #$80                ; gate LOW first: the envelope will not retrigger otherwise
+        sta $d412
+        lda #$81                ; noise + gate -- pitched, because the noise generator is clocked
+        sta $d412               ;   by the frequency registers
+        rts
 
 ; ---- dieFade: the room goes out, and nothing else happens ----
 ; No charset corruption any more: the swap is one frame, done once the screen is already black,
 ; so it is invisible. Reads the LIVE colour registers and walks each one step darker per tick,
 ; so slots that start dark reach black early and the whole palette converges.
 dieFade:
-        clc                     ; their own turn, continued for them
+        ; Their own turn, continued for them and eased out. dieDir only supplies the DIRECTION
+        ; now: the rate comes from dieRotT so the sweep decelerates into stillness instead of
+        ; stopping dead when the fade happens to end.
+        ; TURN_RATE a tick, dtt ticks a frame: the identical loop readKeys runs, so the sweep is
+        ; the same speed as turning by hand. dieRem is the whole units still owed, counted down on
+        ; each carry out of the fraction, and the sweep simply stops when it reaches zero.
+        lda dieRem              ; frames of turn left: a backstop, not the stopping rule
+        beq dfTDn
+        dec dieRem
+        lda dieOff              ; columns off centre, UNSIGNED -- see the stash in orbOne
+dfOP:   cmp #$18
+        bcs dfMiss
+        ; ---- TWO consecutive frames, not one ----
+        ; The angel is a cell away, so on the frame it crosses into the frustum its forward
+        ; distance is near zero and the projection is numerically unstable -- it can alias to a
+        ; small offset. Measured: the lock fired on a reading of about 4 columns, applied a
+        ; 315-fine correction, and the very next projection put the angel at -76. A single frame
+        ; of a very close object entering view is not evidence; a value that survives two frames is.
+        inc dieLk
+        lda dieLk
+        cmp #$02
+        bcc dfSpin
+        ; ---- inside the window: land it exactly ----
+        ; One column is COL_FINE units of angle, so the residual converts straight into a
+        ; correction and the angel locks dead centre in a single step. Turning until |off| is
+        ; merely "small enough" cannot do that -- one frame of turn covers more than any sane
+        ; tolerance, so it stopped short or sailed past depending on which frame it landed on.
+        lda #$00
+        sta dieRem
+        jsr snOff               ; the drone CUTS here, before the correction branches --
+                                ;   sitting it just above dfLD meant the positive side's
+                                ;   "jmp dfLD" jumped clean over it, so only one turn direction
+                                ;   ever silenced the drone.
+        lda dieOff              ; already a magnitude, so there is no sign to strip
+dfLP:   ldx #$4b
+        stx mq
+        jsr mul8                ; phi:plo = |off| * COL_FINE
+        lda dieSgn              ; which side it sits on decides which way to correct
+        bmi dfLN
+        clc                     ; right of centre: turning up sweeps it left, onto the middle
+        lda paF
+        adc plo
+        sta paF
+        lda pa
+        adc phi
+        sta pa
+        jmp dfLD
+dfLN:   sec
+        lda paF
+        sbc plo
+        sta paF
+        lda pa
+        sbc phi
+        sta pa
+dfLD:   lda #$00                ; the room has already gone; $d023 is untouched, so the seams
+        sta $d021               ;   stay and the angel is not left alone in the black
+        sta $d022
+        lda frameCnt            ; re-date, so "elapsed >= DIE_OUT" fires DIE_PAUSE frames from now
+        sec
+        sbc #$78
+        sta dieT0
+        rts
+dfMiss: lda #$00                ; outside the window: the run of good frames restarts
+        sta dieLk
+        jsr snRise              ; a step up the octave for every frame of turn
+dfSpin: clc                     ; their OWN rate, continued: one signed 16-bit add a frame, no
+        lda paF                 ;   ramp and no easing -- it turns exactly as they were turning
+        adc dieDirF
+        sta paF
         lda pa
         adc dieDir
         sta pa
+dfTDn:
         lda frameCnt
         sec
         sbc dieT0
-        cmp #$10
+        cmp #$f0
         bcs dfEnd
-        lsr                     ; one tick per four sixtieths
-        lsr
+        cmp #$10                ; elapsed -> shade, three frames each; past the table it is black
+        bcc dffOk
+        lda #$0f
+dffOk:  tax
+        lda dieFadeT,x
         cmp dieTck
         beq dfDn                ; this tick already written
         sta dieTck
@@ -6667,24 +6734,11 @@ dieFade:
         tax
         lda darkerT,x
         sta $d022
-        lda $d023
-        and #$0f
-        tax
-        lda darkerT,x
-        sta $d023
-        lda $d025               ; the two SHARED sprite colours, underside and highlight
-        and #$0f
-        tax
-        lda darkerT,x
-        sta $d025
-        lda $d026
-        and #$0f
-        tax
-        lda darkerT,x
-        sta $d026
-        ldx dieInk              ; and the per-sprite body colour, applied in dieChk below
-        lda darkerT,x
-        sta dieInk
+        ; $d023 is deliberately NOT walked down: the seams stay lit through the whole turn, and
+        ; once the walls and floor have gone they are the only thing still drawing the room.
+        ; $d025/$d026 and dieInk are the ANGEL's inks and are deliberately left alone: it is the
+        ; one thing that does not go out. The orbs cannot be spared with it -- those two registers
+        ; are shared by all eight sprites -- which is why dieGo cuts them outright instead.
         lda dieTck
         bne dfDn
         ldx #$00                ; first tick only: the occluder ink goes at once. It shows in a
@@ -6745,164 +6799,77 @@ dsCol:  lda #$08  ; bit 3 keeps the cell multicolor; the face wants black here
         ldx dieDir              ;   points LEFT, so a right turn brings new scenery in from the
         bpl dsMir               ;   RIGHT -- and the face has to match, or it slides in from the
         lda #$ff                ;   side you are turning AWAY from
-dsMir:  sta dieMir
+dsMir:
+        ; ---- and straight into the first picture ----
+        ; The screen is black here (the fade just finished and the swap set every palette register
+        ; to 0), so the copy is invisible and the cut is picOn's three stores on the next frame.
+        lda #$00
+        sta dieP
         lda #$02
         sta dieSt
-        lda #$ff
-        sta dieTck
-        rts
+        lda #$ff                ; "not placed yet" -- see dieShow. dfEnd runs INSIDE the fade
+        sta dieTck              ;   frame, which returns into the render path, so anything drawn
+        rts                     ;   here is painted over by renderSym before it is ever displayed.
 
-; ---- dieRev: the face slides past, fading up and then out, and never stops moving ----
-dieRev: lda #$00                ; no sprites from here on. Clearing this at the SWAP did not hold:
+; ---- dieShow: the pictures, cut to hard and held ----
+; The face used to SLIDE in and back out, fading up and down, never still. This does not: the
+; screen is already black when a picture is prepared, so the cut is one write per palette register
+; and the picture is simply THERE. Stark reads as more unsettling than motion -- the user's call
+; after seeing both, and the reason the charset-cycling experiment was dropped entirely.
+;
+; dieN is how many pictures THIS death shows. It survives the restart because dieKey does
+; "jmp entry", which reloads nothing and clears only what entry explicitly clears -- so dieN is
+; EMITTED data, 0 off the disk, and counts up from there. dieP is which one is on screen.
+dieShow:
+        jsr snKTick             ; the kick keeps falling while the picture holds
+        lda #$00                ; no sprites from here on. Clearing this at the SWAP did not hold:
         sta omEn                ;   the swap runs early in the frame and orbMove refills omEn
         sta $d015               ;   later in the same one, so the carried-orb slot came back.
         lda dieSt
         cmp #$03
-        beq drHeld              ; HELD. Elapsed is a byte, so left running it wrapped after 256
-        lda frameCnt            ;   sixtieths and re-entered the reveal -- face, slide and sound
-                                ;   all coming back every 4.3 seconds.
+        beq dshHld              ; HELD: black, waiting on RETURN, nothing left to time
+        lda dieTck              ; $ff = the picture is not on screen yet. It CANNOT be placed in
+        cmp #$ff                ;   dfEnd: that runs inside the FADE frame, which returns into the
+        bne dshRun              ;   render path and repaints the room over it. By here the main
+        jsr picPut              ;   loop has branched away from the renderer, so the screen sticks.
+        jsr picOn
+        lda frameCnt
+        sta dieT0
+        lda #$00
+        sta dieTck
+        rts
+dshRun: lda frameCnt            ; elapsed since this picture went up
         sec
         sbc dieT0
-        sec
-        sbc #$10
-        cmp #$36
-        bcs drEnd
-        sta dieEl
-        ldx #$b4
-        stx mq
-        jsr mul8                ; A = elapsed, so phi is elapsed * span / DIE_SHOW
-        lda phi
-        clc
-        adc #$0a
-        ldx dieMir
-        beq drOff
-        sta ddSrc               ; mirrored about centre: 80 - offset comes in from the other edge
-        lda #$50
-        sec
-        sbc ddSrc
-drOff:  sta dieOff
-        ldx dieEl               ; palette and volume on a coarser 9-tick grid
-        lda dieTckT,x
-        tax
-        cpx dieTck
-        beq drDraw
-        stx dieTck
-        lda dieC1T,x
+        cmp #$78
+        bcc dshHld              ; still showing it
+        ; ---- this picture is done: black FIRST, always ----
+        ; Going black before deciding what comes next is what makes the next cut hard. The copy
+        ; takes about a frame and a half and both buffers are displayed in turn, so it cannot
+        ; happen while a picture is up without showing itself.
+        lda #$00
         sta $d021
-        lda dieC2T,x
         sta $d022
-        lda dieC3T,x
         sta $d023
-        lda dieVolT,x
-        ora #$10                ; keep the low-pass bit; the drone fades out with the picture
-        sta $d418
-drDraw: jmp dieDraw
-drEnd:  lda #$03
+
+        inc dieP
+        lda dieP
+        cmp dieN
+        bcs dshEnd              ; shown them all
+        jsr picPut              ; the next one into both buffers, still black
+        jsr picOn               ; ...and cut to it
+        lda frameCnt
+        sta dieT0
+        rts
+dshEnd: lda #$03                ; nothing sounds here: the dark is silent
         sta dieSt
+        lda dieN                ; the sequence ran its full length: start the next death over
+        cmp #$02
+        bcc dshHld
         lda #$00
-        sta $d021
-        sta $d022
-        sta $d023
-        lda #$10
-        sta $d418               ; silence, and it lands on the same frame as the black
-drHeld: rts
+        sta dieN
+dshHld: rts
 
-; ---- dieDraw: paint the face into BOTH buffers ----
-; Both, because the flip alternates them every frame and dieRev only ever writes the one being
-; drawn. Two buffers a column or two apart is exactly the "slides over to reveal another face and
-; then stutters back and forth" the user saw. We are inside the fall's three-period budget.
-dieDraw:
-        lda dieOff              ; screen column c shows face column c + dieOff - 40
-        cmp #$28
-        bcs ddLo0
-        sta ddSrc
-        lda #$28
-        sec
-        sbc ddSrc
-        sta ddLo
-        lda #$00
-        sta ddSrc
-        jmp ddRows
-ddLo0:  lda #$00
-        sta ddLo
-        lda dieOff
-        sec
-        sbc #$28
-        sta ddSrc
-ddRows: lda #$00
-        sta ddRow
-ddR:    ldx ddRow
-        lda rowLoT,x
-        sta ddSA+1
-        sta ddSB+1
-        sta ddTA+1
-        sta ddTB+1
-        sta ddLd+1
-        lda rowHiT,x
-        clc
-        adc #$e0
-        sta ddSA+2
-        sta ddTA+2
-        lda rowHiT,x
-        clc
-        adc #$e4
-        sta ddSB+2
-        sta ddTB+2
-        lda rowHiT,x
-        clc
-        adc #>faceScrT
-        sta ddLd+2
-        ldx #$00
-ddB:    cpx ddLo                ; the columns the face has not reached
-        bcs ddC
-        lda #$00
-ddSA:   sta $0400,x
-ddSB:   sta $0400,x
-        inx
-        jmp ddB
-ddC:    cpx #$28
-        bcs ddNx
-        txa
-        sec
-        sbc ddLo
-        clc
-        adc ddSrc
-        tay
-        cpy #$28
-        bcc ddF
-        lda #$00 ; past its right edge
-        jmp ddP
-ddF:
-ddLd:   lda faceScrT,y
-ddP:
-ddTA:   sta $0400,x
-ddTB:   sta $0400,x
-        inx
-        jmp ddC
-ddNx:   inc ddRow
-        lda ddRow
-        cmp #$19
-        bcc ddR
-        rts
-
-; ---- dieKey: RETURN restarts, from anywhere ----
-dieKey: lda #$ff
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        sta dkJoy               ; the stick shares these lines, same as palKeys and orbKey
-        lda #$fe
-        sta $dc00
-        lda $dc01
-        ora dkJoy
-        and #$02                ; RETURN
-        bne dkNo
-        ldx #$ff                ; jumping out of a jsr chain, so drop the stack first
-        txs
-        jmp entry
-dkNo:   lda #$ff
-        sta $dc00
-        rts
 
 ; ---- orbUse: take the orb in front, or set the carried one down there ----
 ; ---- hlAt: is odX/odY a SOCKET? Y = its hole-like index, or $ff ----
@@ -6950,7 +6917,8 @@ orbUse: lda carry
         lda #$01
         sta entDty
         rts
-okTake: lda #$01                ; out of the world, into the hands
+okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may exist now
+        lda #$01                ; out of the world, into the hands
         sta orbHidT,x
         lda orbYCT,x            ; and the cell it was standing in opens
         asl
@@ -6985,7 +6953,8 @@ orbPut: jsr dropPick            ; ---- put down ----
         lda #$01                ;   socket's seated sprite and not as itself
         sta entDty
         rts
-okPlain:lda #$02
+okPlain:inc blkVer              ; ...and setting one down closes a cell
+        lda #$02
         sta blkT,x
         ldx carry
         dex
@@ -7641,7 +7610,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $3d00
+        * = $3d40
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
@@ -7705,18 +7674,19 @@ mMskT: !byte 7,3,1,0
 ; things the comparison needs: bit 0 picks the axis (0 = x, 1 = y) and bit 7 the sense (0 = the
 ; entity's cell must be >= the plane, 1 = strictly less). Entities are cell-centred, so the
 ; build's "o.x > k" on a .5 coordinate is exactly "cellX >= k" on an integer one.
-runPlaneT: !byte 0,1,1,2,3,3,6,6,7,7,8,8,15,1,1,2,3,3,4,6,5,6,7,8,8
-runFaceT: !byte 0,128,128,128,0,0,128,128,0,0,0,0,0,129,129,129,1,1,129,129,1,129,1,1,1
+        ; Straight from the per-level manifest, not a second copy of the same expression: these
+        ; are NRUN long rather than this level's own run count, and the swap exchanges them
+        ; against a shadow sized the same way. Two sources for one table is how they drift.
+runPlaneT: !byte 0,1,2,3,6,5,7,8,11,10,12,1,2,3,2,3,4,5,7,6,8,0,0,0,0
+runFaceT: !byte 0,128,0,128,128,0,0,128,128,0,0,129,1,129,1,129,1,129,129,1,1,0,0,0,0
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3
-runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,0,0,0,0
 orbOccLoT: !byte 0,4
 orbOccHiT: !byte 112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 8,9,14,14
-orbYCT: !byte 4,4,4,4
-landXT: !byte 2,2
-landYT: !byte 2,2
+orbXCT: !byte 6,6,6,6
+orbYCT: !byte 2,3,5,5
 orbColT2: !byte 12,12
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -8176,6 +8146,23 @@ bfsD1:  !fill 256, 255
 ; not been filled yet and the angel standing on the player, which anTry already prevents.
 ; The two LIVE reads are self-modified rather than indirect -- the map base is one of two pages
 ; and only changes when a fill completes, so paying for it per read would be silly.
+; ---- angDst: how many steps the player is from entity X, off the live BFS map ----
+; The same field anPath walks, read one cell deep. $ff means the fill has not reached this cell --
+; either no fill has completed yet, or the angel is walled off -- and callers must treat that as
+; "unknown", not as "very far", or a marooned angel would run at the fast rate forever.
+angDst: lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        tax
+apLdC:  lda bfsD0,x             ; operand PATCHED to the live map, alongside apLdA/apLdB
+        rts
+asPCur: !byte 0                 ; the period angStep settled on for the angel it is looking at
+angPerFT: !byte $78  ; 60ths between steps when the player is far off...
+angFarT: !byte $06      ; ...where "far" starts. Per level, both swapped with angPerT.
+
 anPath: ldx amIdx
         lda orbYCT,x
         asl
@@ -8197,7 +8184,7 @@ anPLp:  lda apC
         clc
         adc bfsDCT,y            ; no bounds check: the border is solid, so a step off the open
         tax                     ;   region always lands in a wall and is rejected below
-        lda mapT,x
+        lda blkT,x              ; blkT, matching the fill: walls and entities alike are refused
         bne anPNx
 apLdB:  lda bfsD0,x             ; operand PATCHED to the live map
         cmp apD
@@ -8229,10 +8216,19 @@ bfsTick:
         sta bfsWant
         lda bfsPhase
         bne bfsWork
-        lda bfsWant             ; idle: is the live map still for the right cell?
+        ; Idle: is the live map still good? It has to be for the right PLAYER CELL and for the
+        ; current arrangement of obstacles -- now that orbs block a path, picking one up or
+        ; setting one down changes the answer just as much as walking does.
+        lda bfsWant
         cmp bfsDone
+        bne bfsGo
+        lda blkVer
+        cmp bfsBVD
         beq bfsRts
-        sta bfsFor              ; no -- start one
+bfsGo:  lda bfsWant
+        sta bfsFor
+        lda blkVer
+        sta bfsBVF              ; remember what this fill is for, not what is current when it ends
         lda #$00
         sta bfsCl
         lda #$01
@@ -8287,13 +8283,19 @@ bfsNbL: lda bfsC
         clc
         adc bfsDCT,y
         tax
-        lda mapT,x              ; walls only -- blkT carries entities and they must not block
-        bne bfsNbN
+        ; ---- blkT, NOT mapT: an orb is a real obstacle and the path has to go round it ----
+        ; A blocked cell still RECEIVES a distance -- otherwise an entity could never read its
+        ; own cell, which is the reason this fill used to ignore entities entirely -- but it is
+        ; never EXPANDED from, so no route is ever plotted through one.
+        lda blkT,x
+        sta bfsBlk
 bfsLdN: lda bfsD1,x             ; operand PATCHED to the work map
         cmp #$ff
         bne bfsNbN              ; already has a distance
         lda bfsND
 bfsStN: sta bfsD1,x             ; operand PATCHED to the work map
+        lda bfsBlk              ; leaves X alone, which still holds the cell
+        bne bfsNbN              ; blocked: distance recorded, but nothing expands from here
         txa
         ldx bfsTail
         sta bfsQ,x
@@ -8303,10 +8305,40 @@ bfsNbN: iny
         bcc bfsNbL
         dec bfsN
         bne bfsExL
+        ; ---- EARLY OUT: stop as soon as every angel can see its way to the player ----
+        ; BFS assigns in strictly increasing distance, so the instant an angel's own cell has a
+        ; value, every cell nearer than it already has one -- and that is exactly the set anPath
+        ; reads. Filling the far side of the map it is never going to walk buys nothing. The
+        ; point is not frame rate (2 cells a frame was never the cost) but FRESHNESS: a short
+        ; fill lands sooner, so dropping an orb re-routes the angel in a fraction of the time.
+        ; An angel that is walled in never gets a distance, so this never fires and the fill
+        ; runs to its natural end -- which is correct, and is also when it matters least.
+        ldx #$01
+bfsEnL: lda orbTallT,x
+        beq bfsEnN
+        lda orbHidT,x
+        bne bfsEnN              ; not in the world
+        stx bfsEnI
+        lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        tax
+bfsLdE: lda bfsD1,x             ; operand PATCHED to the work map
+        cmp #$ff
+        beq bfsRts              ; no distance yet: keep filling
+        ldx bfsEnI
+bfsEnN: dex
+        bpl bfsEnL
+        jmp bfsFin              ; every angel has its answer
 bfsRts: rts
         ; ---- the fill is done: swap the maps over ----
 bfsFin: lda bfsFor
         sta bfsDone
+        lda bfsBVF
+        sta bfsBVD
         lda #$00
         sta bfsPhase
         lda apLdA+2             ; live <-> work, by swapping the patched high bytes
@@ -8314,23 +8346,24 @@ bfsFin: lda bfsFor
         lda bfsClS+2
         sta apLdA+2
         sta apLdB+2
+        sta apLdC+2             ; angDst reads the same map as anPath, so it swaps with it
         pla
         sta bfsClS+2
         sta bfsSd+2
         sta bfsLdC+2
         sta bfsLdN+2
         sta bfsStN+2
+        sta bfsLdE+2            ; the early-out reads the WORK map, so it swaps with the rest
         rts
 
         ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
 bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
-bfsQ:   !fill 46, 0
         ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
         ; 32 bytes each. It lived in the fall's block until the sockets made it too big for the
         ; slack there.
-holeSeeT: !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+holeSeeT: !byte 0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
 hlFillT: !byte 0,0
@@ -8360,7 +8393,7 @@ arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
 ; highest, so each rim sits in the charset its polarity needs
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
-blkT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,2,2,0,0,0,0,0,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+blkT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,1,1,1,1,2,1,1,1,1,0,1,1,1,1,1,0,1,0,0,0,2,0,0,0,1,0,1,1,1,1,1,0,1,0,0,1,1,1,0,0,1,0,1,1,1,1,1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
@@ -8371,8 +8404,8 @@ orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,17,19,21,23,25,27,29,
 orbTallT: !byte 0,1
 orbHidT: !byte 0,0
 orbHid0T: !byte 0,0   ; the build's hidden flags, for objInit
-orbX0T: !byte 8,9   ; where objInit puts them back on a restart
-orbY0T: !byte 4,4
+orbX0T: !byte 6,6   ; where objInit puts them back on a restart
+orbY0T: !byte 2,3
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
@@ -8442,7 +8475,7 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,
         * = $7000
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte 48,15,43,0,48,15,43,0
+orbOccT: !byte 164,241,6,0,164,81,6,0
 ; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
@@ -8451,119 +8484,125 @@ sndV1H: !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
 sndV2L: !byte 224,197,177,164,154,148,143,139,137,136,136,136,136,136,136,136
 sndV2H: !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
 sndVolT: !byte 15,12,10,8,7,6,5,4,3,3,3,3,2,2,2,2
+; Where each picture's map lives. The first is inside the image next to the charset; the rest
+; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
+picLoT: !byte <faceScrT,$40
+picHiT: !byte >faceScrT,$c9
+; dieN is the death counter and it is DATA, not an equate, on purpose: dieKey restarts with
+; "jmp entry", which reloads nothing, so an emitted 0 is the only initialisation it ever gets --
+; and that is exactly what makes it survive the restart and count deaths rather than resetting.
+dieN:   !byte 0
+angBearT: !byte 160,192,224,128,0,0,96,64,32
+dieFadeT: !byte 0,0,0,1,1,1,2,2,2,3,3,3,4,4,4,5
 darkerT: !byte 0,15,11,12,11,12,0,15,11,0,12,0,11,15,12,12
-dieC1T: !byte 0,11,12,12,12,12,11,0,0   ; $d021 -> grey2, $d022 -> grey1, $d023 -> grey3
-dieC2T: !byte 0,11,11,11,11,11,0,0,0
-dieC3T: !byte 0,11,12,15,15,15,12,11,0
-dieVolT: !byte 15,15,15,15,15,15,10,5,0
-dieTckT: !byte 0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,3,3,4,4,4,4,4,4,5,5,5,5,5,5,6,6,6,6,6,6,7,7,7,7,7,7,8,8,8,8,8,8
-pulseT: !byte 0,11,12,11,0,0,0,0
-pulseIncL: !byte 0,128,128,64,64
-pulseIncH: !byte 9,6,4,3,2
 ; ---- the death cut scene's charset and its 40x25 of codes ----
 ; EMITTED INTO THE IMAGE, deliberately, not placed with --seg. A placed segment decodes BEFORE
 ; the main stream, and $7100 sits inside the main stream's own staged copy -- so the face was
 ; overwriting the compressed bytes the main decode then read, and the program never started.
 ; Every other placed segment targets $c000 or above, clear of the staging area. That is the rule.
-; faceScrT is PAGE ALIGNED: dieRev adds a row offset straight onto its page byte.
+; faceScrT is PAGE ALIGNED: the screen copy adds a row offset straight onto its page byte.
+; ONLY THE FIRST PICTURE LIVES HERE. The charset is 2,048 and a map is 1,000, so picture 1 fills
+; exactly the 3,048 the single face used to occupy -- no image space had to be found for it. Every
+; picture after the first has nowhere contiguous to go (the largest free hole in the image is 256
+; bytes), so it ships as its own loaded segment in bank 3; see PICSEG.
         * = $7100
-faceChrT: !byte 255,255,255,255,255,255,255,255,127,255,255,255,255,255,255,255,255,255,255,255,255,255,255,253,223,255,255,255,255,255,255,255
-        !byte 255,255,127,255,255,255,255,255,255,255,255,255,255,255,127,255,255,255,255,255,255,255,255,223,255,255,255,255,255,255,255,127
-        !byte 253,255,255,255,255,255,127,127,253,253,255,255,255,255,255,255,223,253,255,255,247,255,255,255,213,221,255,255,255,255,255,255
-        !byte 253,221,247,253,247,253,255,255,253,245,253,253,247,253,255,255,253,245,245,253,245,245,253,221,253,247,247,255,247,247,247,221
-        !byte 247,255,247,255,247,255,255,253,255,255,255,223,247,127,127,253,255,127,255,255,127,127,255,255,255,255,255,255,255,223,255,255
-        !byte 255,223,255,255,223,223,127,127,127,223,255,127,255,127,127,255,127,127,127,127,127,127,127,127,223,223,119,127,95,127,127,95
-        !byte 127,223,215,127,95,119,95,119,119,223,215,125,127,247,247,127,247,223,215,255,255,255,127,255,255,255,223,255,223,253,247,255
-        !byte 223,247,223,223,255,255,255,255,223,119,127,221,253,255,255,255,247,127,127,223,247,255,255,255,119,119,119,223,119,255,127,223
-        !byte 119,247,247,245,119,223,247,255,119,127,223,119,247,223,255,255,119,119,221,119,119,221,119,119,93,215,221,119,119,221,221,119
-        !byte 221,221,93,215,119,223,223,255,93,95,95,223,127,223,95,127,255,255,255,255,255,127,223,119,255,255,255,223,255,247,223,247
-        !byte 255,255,253,255,245,247,255,247,247,253,253,255,247,247,255,215,247,221,221,247,253,247,255,255,119,221,247,247,253,247,253,255
-        !byte 247,253,247,253,253,253,253,125,255,255,255,255,253,253,253,253,255,255,255,127,255,125,253,247,255,255,127,253,255,253,255,247
-        !byte 255,255,255,255,255,252,253,245,255,255,253,253,253,245,245,117,255,255,253,253,221,119,117,255,255,255,247,221,221,119,247,125
-        !byte 253,255,247,247,221,247,119,223,253,253,119,255,221,127,127,255,255,255,119,247,117,127,255,127,255,255,255,247,223,119,221,221
-        !byte 255,119,223,255,255,255,221,221,223,119,223,119,223,119,127,223,119,247,119,119,221,119,117,221,87,119,119,221,221,119,93,223
-        !byte 85,85,85,85,221,119,93,87,87,85,93,93,87,119,93,215,117,117,85,213,85,85,85,85,119,117,117,85,213,213,213,85
-        !byte 117,85,117,93,85,117,84,85,119,221,119,221,119,221,93,221,213,221,247,247,247,221,247,221,221,221,253,223,221,221,119,119
-        !byte 221,119,221,221,221,221,223,247,221,119,253,127,253,253,255,247,125,253,255,125,125,253,245,253,221,221,247,221,221,247,221,255
-        !byte 221,221,119,93,221,119,119,221,221,215,117,223,119,119,245,221,221,119,119,223,119,117,223,117,223,125,221,221,119,223,119,85
-        !byte 85,85,197,85,213,213,85,85,85,85,85,85,85,69,87,87,93,117,95,87,205,199,85,87,93,119,93,23,93,93,87,87
-        !byte 220,245,117,85,85,213,119,85,84,85,117,87,117,221,93,221,117,117,221,119,221,127,221,253,117,93,220,213,221,221,221,119
-        !byte 213,213,220,221,253,117,220,245,247,223,253,125,220,117,220,245,255,255,252,253,252,253,252,241,255,255,253,255,245,252,196,209
-        !byte 255,255,255,255,255,245,223,220,213,115,117,117,247,221,119,253,85,245,213,197,213,213,117,221,23,93,221,221,213,221,255,255
-        !byte 23,21,85,85,87,93,213,117,85,215,23,87,87,87,221,119,95,119,29,119,53,31,93,85,87,85,21,85,85,85,69,69
-        !byte 105,166,38,102,154,26,33,105,170,170,170,170,170,170,138,162,129,160,138,170,136,170,162,170,162,40,138,162,40,138,162,8
-        !byte 40,138,162,2,152,138,162,34,136,97,162,42,8,106,145,145,160,88,130,38,168,138,89,73,98,42,72,42,88,2,90,66
-        !byte 129,164,160,168,160,168,170,170,2,136,34,40,138,34,168,138,40,138,162,40,137,129,38,166,136,170,170,170,130,130,40,106
-        !byte 138,162,40,74,24,162,40,136,160,160,40,98,104,98,104,10,154,152,166,106,98,152,154,38,154,134,160,137,105,96,146,150
-        !byte 84,70,18,74,65,72,101,100,68,101,33,129,105,72,210,218,68,69,17,17,68,85,84,68,70,72,18,150,105,105,150,144
-        !byte 1,166,2,154,97,105,134,166,138,160,1,148,81,68,20,68,168,10,42,152,2,68,84,4,148,1,169,10,104,154,154,36
-        !byte 100,33,33,20,132,33,148,145,106,10,8,100,100,0,144,17,25,136,128,164,136,136,160,129,33,144,0,169,10,42,97,96
-        !byte 34,98,8,24,70,16,26,64,81,81,24,152,164,160,170,208,168,132,164,40,138,42,66,208,0,36,89,0,68,17,69,85
-        !byte 130,34,130,146,170,34,85,221,130,0,2,131,165,87,93,223,138,162,40,170,117,117,119,255,40,34,21,21,119,215,221,255
-        !byte 5,23,61,127,223,247,255,127,143,133,223,223,127,255,255,255,129,87,93,253,125,85,29,93,80,84,84,117,85,113,93,125
-        !byte 68,20,84,21,17,81,85,85,69,6,144,106,98,169,151,157,106,74,98,232,210,218,57,57,196,85,113,68,80,84,85,82
-        !byte 80,81,80,197,80,84,196,81,117,85,81,69,17,84,68,101,253,213,213,68,16,84,20,85,255,255,170,136,170,98,34,168
-        !byte 255,255,170,34,138,162,42,162,255,255,170,34,170,34,138,162,255,255,170,34,168,34,168,34,255,255,170,34,170,34,40,138
-        !byte 255,255,170,34,170,32,170,136,255,255,170,34,170,34,162,40,255,255,170,34,170,34,40,154,255,255,168,40,138,2,10,88
-        !byte 255,255,170,34,170,82,8,137,255,255,26,98,74,98,40,9,255,255,131,161,43,170,136,10,93,125,71,215,23,5,165,136
-        !byte 127,127,79,95,79,83,23,145,95,87,31,85,65,1,149,145,255,191,159,23,129,21,160,161,255,255,63,129,133,136,145,41
-        !byte 85,85,23,145,151,160,33,105,31,127,31,21,93,5,81,77,95,93,119,29,119,85,117,29,255,117,119,53,125,117,117,113
-        !byte 221,220,117,117,117,212,113,113,117,220,213,116,213,112,113,113,253,245,245,241,244,241,245,241,244,240,244,241,244,241,244,241
-        !byte 244,241,245,241,244,241,197,213,117,117,117,215,113,215,213,115,221,61,31,87,85,211,85,245,95,87,87,7,87,215,241,245
-        !byte 255,255,68,69,23,119,119,221,255,255,112,92,68,241,117,220,221,215,241,220,220,247,253,127,213,85,117,85,212,196,85,117
-        !byte 255,93,215,84,65,204,87,53,255,95,127,67,83,68,213,112,119,85,213,17,81,21,5,84,116,84,93,55,21,23,23,93
-        !byte 84,81,196,117,117,21,117,92,52,84,204,85,220,116,213,92,117,92,220,117,212,213,247,28,221,117,85,117,84,80,196,4
-        !byte 255,255,252,114,112,74,88,9,255,255,255,245,245,1,21,69,255,255,255,63,95,131,15,216,63,63,95,31,79,79,79,87
-        !byte 71,19,69,29,71,93,7,93,23,23,77,21,69,53,52,84,5,29,71,5,129,145,36,37,21,21,4,133,128,168,40,168
-        !byte 9,25,8,73,25,89,25,24,137,169,32,128,166,25,153,33,10,72,1,66,74,149,145,101,17,68,101,1,68,17,17,196
-        !byte 169,20,68,17,68,17,17,68,145,149,148,145,164,165,129,37,97,154,100,1,26,66,68,21,26,22,68,17,69,81,68,20
-        !byte 84,68,198,17,68,25,64,20,136,90,66,146,150,164,32,169,68,81,68,17,149,21,148,17,8,18,16,18,80,18,80,18
-        !byte 4,165,128,145,32,32,145,36,68,81,64,64,2,34,10,8,68,16,64,88,0,6,0,106,100,38,98,73,25,22,0,64
-        !byte 166,0,64,68,17,20,17,17,164,1,17,20,17,68,81,17,102,73,89,22,18,197,81,87,68,65,89,132,129,70,70,129
-        !byte 68,17,145,164,129,32,165,138,36,33,129,68,17,69,1,69,17,69,81,68,23,69,29,71,21,65,84,69,87,93,63,55
-        !byte 213,197,85,17,71,7,31,31,53,205,199,119,71,29,77,31,199,205,85,213,49,85,117,29,77,93,55,29,119,53,29,119
-        !byte 5,1,145,21,21,145,69,85,3,0,69,69,21,71,69,23,81,20,85,68,17,68,81,17,49,177,177,128,149,128,145,20
-        !byte 81,17,101,97,146,0,21,119,64,17,20,81,17,68,20,68,5,145,148,145,133,132,37,164,73,82,6,2,4,64,2,16
-        !byte 69,16,84,5,69,81,0,64,69,81,68,164,129,81,17,37,105,129,4,145,17,81,17,68,69,68,68,17,1,69,17,80
-        !byte 68,20,68,17,16,196,65,209,88,198,198,194,86,198,85,209,10,74,82,2,212,86,214,208,16,16,113,84,212,84,112,84
-        !byte 160,40,98,218,250,253,220,255,68,81,17,81,84,84,87,93,196,85,85,84,69,81,196,85,69,85,196,81,196,81,196,196
-        !byte 197,211,199,213,205,71,205,199,220,213,113,212,197,69,21,81,84,80,90,26,7,5,221,255,240,240,112,48,177,189,29,31
-        !byte 202,208,252,220,245,255,255,255,255,255,21,113,64,247,223,255,255,255,154,4,144,165,129,137,255,255,168,129,164,20,133,16
-        !byte 69,71,21,93,84,20,74,3,0,68,17,100,164,132,129,4,17,17,85,69,68,81,1,17,31,79,95,79,31,67,81,145
-        !byte 31,87,87,7,19,71,7,67,9,6,2,0,11,67,147,143,79,19,15,211,71,199,80,20,196,81,84,197,83,16,80,81
+faceChrT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,191,255,255,255,255,255,255,255,254,255,255,255,255,255,247,255,255
+        !byte 255,255,255,255,255,255,254,252,255,255,255,255,255,255,63,63,255,255,255,255,255,255,255,253,255,253,255,255,255,255,255,255
+        !byte 255,255,255,253,255,255,255,255,255,255,255,255,255,255,252,252,255,255,223,255,255,255,125,255,255,255,255,255,255,254,252,252
+        !byte 191,255,255,255,255,255,255,255,85,255,255,255,255,255,255,255,255,255,255,255,255,255,191,191,255,255,255,255,255,191,63,127
+        !byte 255,255,255,255,247,255,255,255,255,255,127,255,255,255,255,255,255,255,255,127,255,255,255,255,255,255,255,255,255,255,255,247
+        !byte 255,255,255,255,255,3,170,128,255,255,255,255,255,255,175,43,255,255,255,255,226,144,72,81,255,255,255,255,43,66,40,80
+        !byte 255,255,255,255,255,254,242,241,255,255,255,255,255,168,43,74,255,255,255,255,255,255,191,175,240,245,198,192,24,11,93,85
+        !byte 69,95,157,127,127,255,125,255,211,211,214,246,254,244,222,246,253,241,247,247,229,149,63,63,80,85,221,116,245,244,194,213
+        !byte 69,217,112,53,63,157,167,83,63,111,79,95,3,67,94,246,229,229,205,215,207,213,223,207,81,252,212,255,253,255,119,255
+        !byte 47,99,128,34,76,218,215,244,255,255,255,255,255,63,191,239,253,241,240,240,240,224,199,149,19,3,77,31,31,247,125,55
+        !byte 254,246,118,214,244,214,242,214,255,255,255,252,254,253,252,254,55,215,63,95,255,127,255,127,255,253,92,92,84,213,211,213
+        !byte 255,127,85,137,1,80,81,64,247,211,212,253,255,245,254,252,196,237,197,237,193,197,197,197,244,244,116,253,255,247,221,255
+        !byte 207,175,43,35,218,88,84,45,4,82,16,89,65,73,5,3,61,87,253,95,93,215,125,87,255,255,119,255,223,255,119,223
+        !byte 245,116,244,244,213,209,244,209,255,255,255,255,63,191,63,47,255,255,255,249,244,231,247,245,127,55,255,223,127,119,255,255
+        !byte 95,221,213,252,247,223,215,223,83,215,71,31,215,215,83,67,253,221,221,213,245,245,253,127,255,63,63,63,143,95,251,255
+        !byte 215,213,221,149,23,21,93,21,255,223,247,255,255,247,221,255,255,255,119,247,255,255,221,253,209,72,210,90,246,210,116,212
+        !byte 191,191,63,63,63,175,15,143,252,249,241,243,241,237,220,212,37,85,29,85,84,81,69,13,245,83,245,93,125,85,93,29
+        !byte 255,223,93,255,127,215,29,221,125,245,253,221,255,253,223,247,79,15,35,96,216,81,213,87,247,245,215,87,95,125,127,245
+        !byte 223,127,255,63,79,211,245,209,247,221,197,119,117,85,66,8,83,71,97,65,80,66,40,111,255,253,253,253,255,53,21,5
+        !byte 79,207,112,119,29,85,253,79,252,248,241,48,32,64,69,84,23,23,93,87,93,87,117,119,127,247,119,127,255,215,93,223
+        !byte 127,221,119,253,127,253,119,125,245,247,119,215,245,221,93,221,139,131,67,71,210,80,65,1,224,224,192,196,194,212,212,214
+        !byte 37,21,13,13,5,87,95,81,23,23,92,85,197,193,205,213,247,255,93,95,221,119,87,95,255,255,125,247,255,127,223,247
+        !byte 245,252,214,214,250,208,80,193,1,225,5,5,163,21,81,99,93,84,213,69,92,244,212,66,8,174,106,65,21,5,73,21
+        !byte 46,62,168,0,0,82,41,64,117,93,17,20,53,95,135,160,8,47,3,79,91,68,8,202,213,55,221,197,229,229,183,35
+        !byte 119,119,253,213,221,119,253,93,223,127,93,223,215,93,213,255,253,221,245,221,127,215,117,215,244,125,253,93,245,119,247,223
+        !byte 0,0,32,0,1,0,32,0,146,180,48,48,20,93,84,20,81,80,85,209,1,81,85,81,221,245,212,117,21,85,95,31
+        !byte 247,117,87,117,215,247,117,127,255,223,127,247,255,127,221,125,216,68,80,68,89,71,31,85,44,28,125,252,85,93,29,13
+        !byte 40,42,11,43,42,2,84,80,199,193,226,160,137,129,100,21,67,11,82,2,0,0,64,80,128,170,250,190,60,40,34,0
+        !byte 122,118,61,63,149,53,116,84,161,137,129,96,96,216,116,54,119,213,253,223,95,215,124,119,215,119,85,119,115,119,93,95
+        !byte 127,95,95,87,223,221,245,125,213,119,87,93,213,215,93,215,73,209,81,208,86,244,84,212,191,63,127,127,127,63,63,191
+        !byte 255,247,255,255,255,253,255,255,2,16,80,64,64,64,64,1,21,85,93,5,5,5,7,71,5,21,85,21,5,5,20,21
+        !byte 247,93,85,125,127,95,93,119,253,221,117,247,255,247,215,221,240,248,8,32,16,0,34,8,165,79,15,23,133,143,151,15
+        !byte 85,85,215,85,116,84,244,84,17,5,68,20,20,49,88,208,5,5,1,85,21,20,16,80,85,4,16,16,81,81,64,64
+        !byte 58,212,212,212,210,212,240,212,156,5,175,179,177,169,161,136,55,149,93,71,199,209,245,85,93,87,85,93,247,253,85,221
+        !byte 247,85,117,93,119,85,85,93,117,95,125,85,117,119,85,117,70,196,80,192,66,64,192,80,191,191,127,63,127,63,63,191
+        !byte 8,64,65,81,81,55,117,85,129,19,5,5,132,16,85,68,85,85,244,213,93,85,93,87,119,125,85,119,119,119,87,247
+        !byte 253,245,220,245,245,116,113,212,136,128,42,32,128,0,0,0,103,87,7,83,133,65,252,79,85,213,223,93,221,116,247,117
+        !byte 80,65,65,16,86,81,64,85,81,69,5,1,0,129,161,161,85,65,69,0,21,81,89,77,218,212,244,211,196,213,84,223
+        !byte 170,168,116,84,168,0,100,216,87,83,85,23,23,7,13,7,117,221,21,93,93,87,85,87,93,93,31,87,93,117,85,253
+        !byte 241,85,117,85,213,85,85,85,66,80,192,80,80,244,116,124,191,191,63,127,63,127,127,63,81,84,80,80,66,80,84,84
+        !byte 68,208,85,84,4,16,21,21,87,87,93,85,71,85,93,23,223,221,87,255,247,127,125,125,213,213,83,83,95,85,29,79
+        !byte 84,80,85,69,85,71,87,111,185,172,11,10,34,84,221,247,93,255,61,225,168,9,87,253,117,7,70,127,127,117,213,255
+        !byte 1,192,112,86,220,253,93,223,127,127,0,191,59,162,84,253,84,79,255,250,250,32,81,93,22,76,5,81,16,50,126,252
+        !byte 103,67,113,51,21,53,28,156,87,215,85,215,223,253,221,253,215,117,85,85,125,85,85,85,116,85,93,87,119,93,21,93
+        !byte 84,244,84,84,0,84,68,84,191,191,63,191,191,191,63,191,18,148,212,212,198,196,196,196,4,69,21,21,5,19,5,21
+        !byte 85,21,93,23,87,85,245,119,253,117,117,119,124,221,117,125,125,93,92,93,125,116,117,116,79,79,95,79,79,79,95,79
+        !byte 223,221,255,247,255,119,255,223,253,253,253,253,253,125,220,253,253,253,93,119,247,117,125,127,127,87,255,119,255,87,93,21
+        !byte 221,253,255,247,247,245,253,245,133,149,69,101,64,202,208,208,117,125,85,125,117,125,85,125,221,85,85,87,119,85,85,71
+        !byte 112,213,221,69,212,85,92,69,0,20,20,70,6,7,71,15,255,255,252,240,244,210,10,97,251,175,2,186,176,130,137,65
+        !byte 255,255,239,250,170,2,81,85,215,255,255,127,23,15,7,65,255,248,229,197,148,80,87,213,10,140,104,73,41,20,232,1
+        !byte 8,66,34,64,79,220,65,82,255,175,139,43,6,128,96,88,255,255,255,255,255,252,252,248,255,251,234,128,128,5,85,87
+        !byte 255,255,138,251,171,10,91,82,255,255,47,235,254,184,10,15,255,255,255,255,255,63,191,63,253,249,252,241,228,212,24,86
+        !byte 15,84,74,32,33,133,129,23,71,87,127,93,255,127,255,221,93,255,253,255,119,255,255,255,35,91,215,214,82,214,244,116
+        !byte 252,251,245,255,229,205,199,5,28,116,221,213,125,221,127,127,33,53,221,253,242,208,214,212,208,118,221,127,31,15,135,71
+        !byte 20,173,39,0,93,209,116,221,191,15,79,207,95,95,2,37,248,241,241,245,241,245,231,229,85,95,255,221,119,255,127,255
+        !byte 85,253,255,221,247,223,255,253,83,37,44,74,83,208,214,253,143,211,50,80,0,48,60,44,255,255,255,255,63,255,191,63
+        !byte 255,255,252,252,249,245,237,212,22,16,65,79,92,144,96,0,127,255,85,95,63,63,55,127,255,255,255,125,255,255,127,253
+        !byte 223,255,255,255,221,255,255,255,212,246,220,246,86,246,244,118,254,252,253,255,253,253,252,255,65,247,255,255,125,255,223,95
+        !byte 221,95,253,253,247,247,255,255,80,66,74,84,253,125,252,253,35,49,40,64,95,255,63,63,245,117,127,29,127,95,255,87
+        !byte 0,211,255,255,85,117,213,212,255,63,63,63,191,255,255,63,245,245,247,247,241,245,247,243,215,255,255,127,221,255,255,127
+        !byte 127,255,255,255,223,255,255,255,221,127,221,253,255,127,215,255,75,67,194,222,93,209,88,214,15,143,195,226,226,187,58,46
+        !byte 255,255,255,255,255,255,252,253,250,224,192,144,136,1,5,5,17,5,99,71,95,95,215,221,255,255,93,255,255,127,119,253
+        !byte 255,255,255,125,255,255,253,223,221,255,255,253,247,255,255,255,86,214,214,214,70,82,212,82,254,241,245,239,199,213,215,195
+        !byte 255,95,127,255,255,255,255,255,223,213,215,209,215,245,247,221,252,124,198,84,30,22,69,95,63,157,129,129,136,144,72,208
         * = $7900
-faceScrT: !byte 0,0,0,0,0,0,48,185,172,17,55,46,184,143,247,153,152,148,144,147,149,145,150,146,246,151,159,54,245,186,51,173
-        !byte 154,0,0,0,0,0,0,0,0,0,0,0,0,87,216,132,28,52,69,142,96,117,112,230,196,124,105,99,97,106,111,118
-        !byte 122,199,123,157,38,89,170,67,234,158,0,0,0,0,0,0,0,0,0,0,49,215,37,2,50,1,80,235,213,62,220,239
-        !byte 228,194,110,108,100,193,202,209,207,229,231,195,161,39,12,75,84,109,156,0,0,0,0,0,0,0,0,0,222,91,1,40
-        !byte 1,85,92,214,221,255,64,139,225,198,115,102,101,116,204,232,227,221,140,135,95,73,24,43,58,203,197,22,0,0,0,0
-        !byte 0,0,0,86,188,31,0,15,47,62,182,61,217,175,64,200,211,222,250,208,121,121,119,212,192,178,180,79,76,34,78,9
-        !byte 71,238,98,251,0,0,0,0,0,0,0,168,59,1,2,26,163,81,241,63,189,127,206,137,127,237,114,114,136,202,210,126
-        !byte 201,191,160,141,243,94,174,177,44,90,107,223,7,0,0,0,0,0,45,240,74,4,41,70,93,183,248,224,242,131,133,10
-        !byte 32,60,181,231,179,72,53,30,244,130,128,125,190,218,57,11,171,82,103,226,187,0,0,0,0,0,166,219,36,0,20,66
-        !byte 164,253,134,68,29,56,5,0,0,42,165,205,252,23,88,19,0,0,1,35,236,190,65,0,14,13,233,104,254,0,0,0
-        !byte 0,0,167,162,4,40,21,71,216,74,29,50,36,36,25,27,6,15,139,105,250,75,21,0,53,29,245,186,58,235,94,2
-        !byte 32,0,62,109,202,7,0,0,0,0,167,22,2,50,18,44,95,17,2,1,0,2,0,45,22,75,206,97,204,24,46,5
-        !byte 0,7,0,11,30,63,162,18,3,38,68,124,197,187,0,0,0,0,241,22,68,2,0,63,250,178,84,54,0,4,2,17
-        !byte 75,142,227,97,120,95,34,27,8,3,30,163,63,141,157,1,45,55,3,140,191,252,0,0,0,2,77,32,1,54,0,90
-        !byte 124,191,202,163,0,69,63,183,141,136,205,97,104,127,205,155,49,37,244,243,206,105,197,31,9,94,5,62,109,222,22,0
-        !byte 0,166,215,3,49,22,0,36,136,107,253,215,0,62,222,237,81,216,131,81,131,113,135,118,191,157,45,157,138,105,220,31
-        !byte 0,76,38,14,234,249,187,0,0,76,34,1,169,1,27,42,82,222,254,37,80,250,92,66,66,3,44,65,2,9,239,60
-        !byte 222,225,22,114,235,213,79,57,0,9,79,8,64,225,252,0,0,61,24,9,216,5,40,13,67,175,77,4,84,90,57,63
-        !byte 241,62,78,55,140,183,205,252,114,77,14,60,240,78,25,2,19,0,12,22,35,136,250,0,0,79,57,0,62,17,9,39
-        !byte 69,68,76,20,13,34,175,114,205,228,157,62,205,105,99,122,250,93,90,217,65,65,28,40,1,6,0,3,31,135,192,22
-        !byte 0,43,1,0,3,171,24,16,12,68,182,77,44,162,238,114,129,132,33,12,12,244,236,220,207,228,238,61,92,61,18,3
-        !byte 0,2,4,0,71,174,235,22,0,58,18,45,6,69,78,38,9,72,93,222,166,95,60,28,4,0,2,5,5,7,0,91
-        !byte 81,231,238,64,77,93,0,0,0,6,48,0,66,89,136,22,0,21,0,44,72,18,90,57,0,65,81,76,14,95,68,88
-        !byte 185,142,176,173,63,142,159,185,83,250,239,62,79,33,0,0,0,18,15,7,12,67,241,22,0,1,0,0,12,47,0,73
-        !byte 6,0,34,34,44,95,58,135,33,82,11,11,11,84,83,76,63,64,255,34,34,21,0,0,9,5,66,21,9,72,80,22
-        !byte 0,0,0,0,5,82,19,27,1,0,9,73,73,239,62,65,62,75,75,65,63,62,142,222,178,225,77,67,28,1,0,0
-        !byte 73,0,71,59,4,58,60,22,0,1,0,0,24,3,22,16,0,0,0,1,59,83,238,139,206,249,95,178,228,118,99,122
-        !byte 223,81,79,33,4,0,0,2,33,0,14,72,23,15,73,18,0,0,0,0,28,0,1,0,0,0,0,0,9,28,89,237
-        !byte 127,61,35,35,35,77,225,215,35,33,1,0,0,0,0,0,31,0,16,232,23,0,74,22,0,0,0,0,16,0,2,0
-        !byte 0,0,0,0,0,0,3,42,25,31,29,9,33,68,68,32,3,0,0,0,0,0,0,0,26,0,0,76,61,8,73,4
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,13,91,3,13,18
+faceScrT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,20,21,0,0,9,22,23,1,0,0
+        !byte 24,25,26,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,27,28,29
+        !byte 0,0,30,31,32,33,0,0,34,35,36,37,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,38,39,10,40,0,41,42,43,44,45,0,0,34,10,47,48,5,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,11,49,50,51,52,53,54,55,56,57,58,59,2,60,61,62,63,64,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,65,66,67,68,69,70,71,72,73,74,75,76,77
+        !byte 78,79,80,81,82,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,83,84,85,86,87
+        !byte 88,89,90,91,92,93,94,95,96,97,98,99,121,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,101,102,103,104,105,106,107,108,109,100,111,112,113,114,115,116,117,118,119,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,140,141,142,143,144,145,146,147,148,149,150,151,152
+        !byte 153,154,155,156,157,158,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,159,160,161,162,163
+        !byte 164,165,166,167,168,169,170,171,172,173,174,175,176,177,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,178,179,180,181,182,183,13,184,185,186,187,13,188,189,190,191,192,193,12,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,83,123,142,247,52,183,239,188,190,137,159,122,185,67,190,182,192,153,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,185,121,155,3,156,183,96,115,58,180,155,157,235
+        !byte 123,187,156,128,177,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,130,174,114,123
+        !byte 119,81,137,58,182,131,44,187,189,85,156,159,158,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,83,123,67,176,177,147,154,52,123,49,149,168,154,191,156,49,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,65,123,182,46,183,58,154,31,123,110,149,70,183,85,159,183,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,47,123,128,46,239,58,135,98,123,100,179,159
+        !byte 158,60,159,237,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,178,182,30
+        !byte 5,248,115,238,123,140,183,190,183,163,102,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,238,254,190,124,249,135,128,107,121,183,122,163,123,183,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,185,128,238,78,188,79,238,78,46,183,149,12,85,158,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,180,238,3,227,162,181,67,102,102,189
+        !byte 0,164,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,253,120
+        !byte 161,227,81,58,158,189,102,58,237,57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,158,80,183,181,155,233,122,46,237,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,190,52,137,185,78,175,157,57,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0
 
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
@@ -8614,22 +8653,22 @@ f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,
         !byte 217,218,219,220,221,222,223,224,225,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239
         !byte 240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
         * = $8a00
-runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0,0,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,2,0,0,0,0,6,0,0,0,0,10,0,0,0,0,0,2,0,0,0,0,0,0,0,9,0,10,0,0,0,0,0,2,0,0,5,0,0,0,0,9,0,10,0,0,0,0,0,2,0,0,0,0,0,0,0,9,0,10,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8b00
-runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,6,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,4,0,0,0,0,8,0,0,0,0,0,1,0,3,0,0,0,0,0,0,0,8,0,0,0,0,0,1,0,3,0,0,0,0,7,0,0,8,0,0,0,0,0,1,0,3,0,0,0,0,0,0,0,8,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8c00
-runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,0,0,0,0,0,17,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,20,20,20,20,20,20,20,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,22,22,0,0,0,0,0,0,0,0,0,0,0,23,23,0,0,0,24,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,12,12,12,12,0,14,14,14,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,16,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,19,19,19,19,19,19,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,20,20,20,20,20,20,20,20,20,20,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8d00
-runST: !byte 0,13,13,0,0,0,14,14,0,0,0,0,0,0,0,0,0,0,0,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,18,18,18,18,18,18,18,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,0,0,0,0,0,21,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runST: !byte 0,11,11,11,11,11,11,11,11,11,11,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,13,13,13,0,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,17,17,17,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,18,18,18,18,18,18,18,18,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8e00
 mapT:   !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1
-        !byte 1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1
-        !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1
-        !byte 1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1
-        !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1
-        !byte 1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1
-        !byte 1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1
+        !byte 1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1
+        !byte 1,0,1,1,1,1,0,1,1,1,1,0,1,1,1,1
+        !byte 1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1
+        !byte 1,0,1,0,0,1,1,1,0,0,1,0,1,1,1,1
+        !byte 1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1
+        !byte 1,0,1,1,1,1,1,1,1,1,1,0,1,1,1,1
+        !byte 1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -8662,54 +8701,48 @@ rsT:    !byte 13,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        * = $9100
-ddxLoT: !byte 0,0,0,1,1,2,3,4,5,6,8,10,12,14,16,18,21,24,27,31,34,38,42,47
-        !byte 52,57,63,69,75,82,90,97,106,115,125,136,148,160,174,189,205,223,242,7,31,57,87,120
-        !byte 157,199,248,48,114,192,30,144,32,217,209,43,52,152,97,191,255,191,97,152,52,43,209,217
-        !byte 32,144,30,192,114,48,248,199,157,120,87,57,31,7,242,223,205,189,174,160,148,136,125,115
-        !byte 106,97,90,82,75,69,63,57,52,47,42,38,34,31,27,24,21,18,16,14,12,10,8,6
-        !byte 5,4,3,2,1,1,0,0,0,0,0,1,1,2,3,4,5,6,8,10,12,14,16,18
-        !byte 21,24,27,31,34,38,42,47,52,57,63,69,75,82,90,97,106,115,125,136,148,160,174,189
-        !byte 205,223,242,7,31,57,87,120,157,199,248,48,114,192,30,144,32,217,209,43,52,152,97,191
-        !byte 255,191,97,152,52,43,209,217,32,144,30,192,114,48,248,199,157,120,87,57,31,7,242,223
-        !byte 205,189,174,160,148,136,125,115,106,97,90,82,75,69,63,57,52,47,42,38,34,31,27,24
-        !byte 21,18,16,14,12,10,8,6,5,4,3,2,1,1,0,0
-        * = $9200
-ddxHiT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2
-        !byte 2,2,2,3,3,3,4,4,5,5,6,8,10,13,20,40,255,40,20,13,10,8,6,5
-        !byte 5,4,4,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,2,2,2,2,2,2,2,2,3,3,3,4,4,5,5,6,8,10,13,20,40
-        !byte 255,40,20,13,10,8,6,5,5,4,4,3,3,3,2,2,2,2,2,2,2,2,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        * = $9300
-ddyLoT: !byte 255,191,97,152,52,43,209,217,32,144,30,192,114,48,248,199,157,120,87,57,31,7,242,223
-        !byte 205,189,174,160,148,136,125,115,106,97,90,82,75,69,63,57,52,47,42,38,34,31,27,24
-        !byte 21,18,16,14,12,10,8,6,5,4,3,2,1,1,0,0,0,0,0,1,1,2,3,4
-        !byte 5,6,8,10,12,14,16,18,21,24,27,31,34,38,42,47,52,57,63,69,75,82,90,97
-        !byte 106,115,125,136,148,160,174,189,205,223,242,7,31,57,87,120,157,199,248,48,114,192,30,144
-        !byte 32,217,209,43,52,152,97,191,255,191,97,152,52,43,209,217,32,144,30,192,114,48,248,199
-        !byte 157,120,87,57,31,7,242,223,205,189,174,160,148,136,125,115,106,97,90,82,75,69,63,57
-        !byte 52,47,42,38,34,31,27,24,21,18,16,14,12,10,8,6,5,4,3,2,1,1,0,0
-        !byte 0,0,0,1,1,2,3,4,5,6,8,10,12,14,16,18,21,24,27,31,34,38,42,47
-        !byte 52,57,63,69,75,82,90,97,106,115,125,136,148,160,174,189,205,223,242,7,31,57,87,120
-        !byte 157,199,248,48,114,192,30,144,32,217,209,43,52,152,97,191
-        * = $9400
-ddyHiT: !byte 255,40,20,13,10,8,6,5,5,4,4,3,3,3,2,2,2,2,2,2,2,2,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,4,4
-        !byte 5,5,6,8,10,13,20,40,255,40,20,13,10,8,6,5,5,4,4,3,3,3,2,2
-        !byte 2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2
-        !byte 2,2,2,3,3,3,4,4,5,5,6,8,10,13,20,40
+        * = $9100     ; a jsr target, in the page FINEANG's
+        ; coarse delta tables vacated. It used to sit at $609b, a hole that only LEVEL 1's map
+        ; leaves -- level 2's data ran straight through it and the build died. Everything from
+        ; RELOC on is engine table space at fixed origins, so it is free on EVERY map.
+; ---- snKick: voice 1 falls fast, so the ear hears an impact and not a note ----
+; Voice 1 is free at this point: the drone is cut on the same frame the picture arrives. The
+; fall is what makes it percussive -- held still it would just be a low tone under the noise.
+snKick: lda #<$05c4
+        sta dieFqL
+        sta $d400
+        lda #>$05c4
+        sta dieFqH
+        sta $d401
+                                ; pulse width is already SND_PW from sndInit; no need to set it
+        lda #$09
+        sta $d405
+        lda #$00
+        sta $d406
+        lda #$40                ; gate low first, or the envelope will not retrigger
+        sta $d404
+        lda #$41                ; pulse + gate
+        sta $d404
+        lda #$07
+        sta dieKik
+        rts
+
+; called once a frame while a picture is up: steps the fall, then stops touching the voice
+snKTick: lda dieKik
+        beq snKDn
+        dec dieKik
+        sec
+        lda dieFqL
+        sbc #<$0091
+        sta dieFqL
+        sta $d400
+        lda dieFqH
+        sbc #>$0091
+        sta dieFqH
+        sta $d401
+snKDn:  rts
+
+
         * = $9500
 posXT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -8742,7 +8775,7 @@ rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,2
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
         * = $97a0
 seatPtrT: !byte 37,38,38,39,39,40,40,41,42,42,43,37,38,39,40,42,43,44,45,46,47,48
-seatYBaseT: !byte 134,136,136,136,136,138,138,140,142,142,142,142,143,143,144,146,146,147,147,148,148,149
+seatYBaseT: !byte 132,134,134,134,134,136,136,138,140,140,142,141,142,142,143,145,146,146,147,147,148,149
         * = $9800
 colGrpT: !byte 0,0,0,0,1,1,1,1,2,2,3,3,3,3,4,4,4,5,5,5,5,6,6,6,7,7,7,7,8,8,8,9,9,9,9,10,10,10,10,11,11,11,11,11,12,12,12,12,13,13,13,13,13,13,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,11,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,7,7,7,7,6,6,6,5,5,5,5,4,4,4,3,3,3,3,2,2,1,1,1,1,0,0,0,0
         * = $98a0
@@ -8750,10 +8783,13 @@ seatFlagT: !byte 13,13,13,13,13,13,13,13,13,13,13,1,1,1,1,1,1,1,1,1,1,1
 seatXOffT: !byte 12,12,12,12,12,12,12,12,12,12,12,6,6,6,6,6,6,6,6,6,6,6
 
         * = $9900
-; The DDA deltas at quarter-angle resolution. 1024 entries each, addressed as four pages via
-; the dispatch in castRay, so no index arithmetic wider than a byte ever happens. The 256-entry
-; originals are left in place and unused -- posXT/posYT/absSinT/absCosT still index by the
-; integer angle, and their page-alignment check would have to be reworked for no gain.
+; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
+; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
+; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
+; ddx is not using. Both identities are asserted over every entry at build time.
+; The 256-entry integer-angle originals are emitted only for FINEANG=0 -- posXT/posYT/absSinT/
+; absCosT still index by the integer angle, and their page-alignment check would have to be
+; reworked for no gain.
 ddxLoTQ: !byte 0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,3
         !byte 3,3,3,4,4,4,4,5,5,5,6,6,6,7,7,8,8,8,9,9,10,10,11,11
         !byte 12,12,13,13,14,14,15,15,16,16,17,18,18,19,20,20,21,22,23,23,24,25,26,26
@@ -8775,29 +8811,8 @@ ddxLoTQ: !byte 0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,3
         !byte 34,33,32,31,31,30,29,28,27,26,26,25,24,23,23,22,21,20,20,19,18,18,17,16
         !byte 16,15,15,14,14,13,13,12,12,11,11,10,10,9,9,8,8,8,7,7,6,6,6,5
         !byte 5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,1,1,1,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1
-        !byte 1,1,2,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,6,6,6,7,7,8
-        !byte 8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15,16,16,17,18,18,19,20,20
-        !byte 21,22,23,23,24,25,26,26,27,28,29,30,31,31,32,33,34,35,36,37,38,39,40,41
-        !byte 42,44,45,46,47,48,49,51,52,53,54,56,57,58,60,61,63,64,66,67,69,70,72,74
-        !byte 75,77,79,80,82,84,86,88,90,91,93,95,97,100,102,104,106,108,111,113,115,118,120,123
-        !byte 125,128,130,133,136,139,142,145,148,151,154,157,160,163,167,170,174,177,181,185,189,193,197,201
-        !byte 205,209,213,218,223,227,232,237,242,247,252,2,7,13,19,25,31,37,44,51,57,64,72,79
-        !byte 87,95,103,111,120,129,138,147,157,167,177,188,199,211,223,235,248,5,19,33,48,64,80,96
-        !byte 114,132,151,171,192,214,236,4,30,56,84,113,144,177,212,249,32,74,119,166,217,16,76,139
-        !byte 209,28,110,200,43,153,19,155,52,225,168,141,152,212,79,30,97,74,43,154,191,84,125,250
-        !byte 255,250,125,84,191,154,43,74,97,30,79,212,152,141,168,225,52,155,19,153,43,200,110,28
-        !byte 209,139,76,16,217,166,119,74,32,249,212,177,144,113,84,56,30,4,236,214,192,171,151,132
-        !byte 114,96,80,64,48,33,19,5,248,235,223,211,199,188,177,167,157,147,138,129,120,111,103,95
-        !byte 87,79,72,64,57,51,44,37,31,25,19,13,7,2,252,247,242,237,232,227,223,218,213,209
-        !byte 205,201,197,193,189,185,181,177,174,170,167,163,160,157,154,151,148,145,142,139,136,133,130,128
-        !byte 125,123,120,118,115,113,111,108,106,104,102,100,97,95,93,91,90,88,86,84,82,80,79,77
-        !byte 75,74,72,70,69,67,66,64,63,61,60,58,57,56,54,53,52,51,49,48,47,46,45,44
-        !byte 42,41,40,39,38,37,36,35,34,33,32,31,31,30,29,28,27,26,26,25,24,23,23,22
-        !byte 21,20,20,19,18,18,17,16,16,15,15,14,14,13,13,12,12,11,11,10,10,9,9,8
-        !byte 8,8,7,7,6,6,6,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1
-        !byte 1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0
-        * = $9d00
+        !byte 0,0,0,0,0,0,0,0
+        * = $9b00
 ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -8819,116 +8834,202 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1
+        * = $9d00
+; ---- the angel-path fill's own state ----
+; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
+; do with how many levels are resident. Tucking it in there compiled fine on the default build and
+; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
+bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
+bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
+blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
+bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
+bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
+atMsk:  !byte 0                 ; the leash bit under test
+        ; The fill's queue. Moved out of the $3d40 block, which the wider level 2 map pushed three
+        ; bytes past $6100 -- this grows with the open-cell count, so it is exactly the thing that
+        ; should not live in a block with no slack. Pure scratch: nothing swaps it.
+bfsQ:   !fill 52, 0
+        ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
+        ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
+angBlkT: !byte 0,0,8,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
+        ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
+        ; and the manifest carries each chunk's destination, so where they live is free choice.
+angPerT: !byte $78   ; 60ths between angel steps on THIS level, when it is close
+landXT: !byte 6,6
+landYT: !byte 7,7
+; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
+; Level 2's copy of every per-level table, in manifest order, as one blob. lvlSwap EXCHANGES it
+; with the live tables, so this holds whichever level you are not standing in. It lives in table
+; space (fixed off RELOC) rather than in an image hole, because holes move when the map does --
+; which is exactly how the old $609b and $bc00 placements broke the moment a second map existed.
+lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
+        !byte 1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1
+        !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1
+        !byte 1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2
-        !byte 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3
-        !byte 3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,5,5,5,5,5,6,6,6
-        !byte 6,7,7,7,8,8,9,9,10,10,11,12,13,14,16,18,20,23,27,32,40,54,81,162
-        !byte 255,162,81,54,40,32,27,23,20,18,16,14,13,12,11,10,10,9,9,8,8,7,7,7
-        !byte 6,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3
-        !byte 3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
-        !byte 2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1
+        !byte 1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,1
+        !byte 1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,2,2,0,0,0,0,0,1
+        !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0
+        !byte 1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        * = $a100
-ddyLoTQ: !byte 255,250,125,84,191,154,43,74,97,30,79,212,152,141,168,225,52,155,19,153,43,200,110,28
-        !byte 209,139,76,16,217,166,119,74,32,249,212,177,144,113,84,56,30,4,236,214,192,171,151,132
-        !byte 114,96,80,64,48,33,19,5,248,235,223,211,199,188,177,167,157,147,138,129,120,111,103,95
-        !byte 87,79,72,64,57,51,44,37,31,25,19,13,7,2,252,247,242,237,232,227,223,218,213,209
-        !byte 205,201,197,193,189,185,181,177,174,170,167,163,160,157,154,151,148,145,142,139,136,133,130,128
-        !byte 125,123,120,118,115,113,111,108,106,104,102,100,97,95,93,91,90,88,86,84,82,80,79,77
-        !byte 75,74,72,70,69,67,66,64,63,61,60,58,57,56,54,53,52,51,49,48,47,46,45,44
-        !byte 42,41,40,39,38,37,36,35,34,33,32,31,31,30,29,28,27,26,26,25,24,23,23,22
-        !byte 21,20,20,19,18,18,17,16,16,15,15,14,14,13,13,12,12,11,11,10,10,9,9,8
-        !byte 8,8,7,7,6,6,6,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1
-        !byte 1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,3,3,3,3,4,4,4,4,5
-        !byte 5,5,6,6,6,7,7,8,8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15
-        !byte 16,16,17,18,18,19,20,20,21,22,23,23,24,25,26,26,27,28,29,30,31,31,32,33
-        !byte 34,35,36,37,38,39,40,41,42,44,45,46,47,48,49,51,52,53,54,56,57,58,60,61
-        !byte 63,64,66,67,69,70,72,74,75,77,79,80,82,84,86,88,90,91,93,95,97,100,102,104
-        !byte 106,108,111,113,115,118,120,123,125,128,130,133,136,139,142,145,148,151,154,157,160,163,167,170
-        !byte 174,177,181,185,189,193,197,201,205,209,213,218,223,227,232,237,242,247,252,2,7,13,19,25
-        !byte 31,37,44,51,57,64,72,79,87,95,103,111,120,129,138,147,157,167,177,188,199,211,223,235
-        !byte 248,5,19,33,48,64,80,96,114,132,151,171,192,214,236,4,30,56,84,113,144,177,212,249
-        !byte 32,74,119,166,217,16,76,139,209,28,110,200,43,153,19,155,52,225,168,141,152,212,79,30
-        !byte 97,74,43,154,191,84,125,250,255,250,125,84,191,154,43,74,97,30,79,212,152,141,168,225
-        !byte 52,155,19,153,43,200,110,28,209,139,76,16,217,166,119,74,32,249,212,177,144,113,84,56
-        !byte 30,4,236,214,192,171,151,132,114,96,80,64,48,33,19,5,248,235,223,211,199,188,177,167
-        !byte 157,147,138,129,120,111,103,95,87,79,72,64,57,51,44,37,31,25,19,13,7,2,252,247
-        !byte 242,237,232,227,223,218,213,209,205,201,197,193,189,185,181,177,174,170,167,163,160,157,154,151
-        !byte 148,145,142,139,136,133,130,128,125,123,120,118,115,113,111,108,106,104,102,100,97,95,93,91
-        !byte 90,88,86,84,82,80,79,77,75,74,72,70,69,67,66,64,63,61,60,58,57,56,54,53
-        !byte 52,51,49,48,47,46,45,44,42,41,40,39,38,37,36,35,34,33,32,31,31,30,29,28
-        !byte 27,26,26,25,24,23,23,22,21,20,20,19,18,18,17,16,16,15,15,14,14,13,13,12
-        !byte 12,11,11,10,10,9,9,8,8,8,7,7,6,6,6,5,5,5,4,4,4,4,3,3
-        !byte 3,3,2,2,2,2,2,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,3
-        !byte 3,3,3,4,4,4,4,5,5,5,6,6,6,7,7,8,8,8,9,9,10,10,11,11
-        !byte 12,12,13,13,14,14,15,15,16,16,17,18,18,19,20,20,21,22,23,23,24,25,26,26
-        !byte 27,28,29,30,31,31,32,33,34,35,36,37,38,39,40,41,42,44,45,46,47,48,49,51
-        !byte 52,53,54,56,57,58,60,61,63,64,66,67,69,70,72,74,75,77,79,80,82,84,86,88
-        !byte 90,91,93,95,97,100,102,104,106,108,111,113,115,118,120,123,125,128,130,133,136,139,142,145
-        !byte 148,151,154,157,160,163,167,170,174,177,181,185,189,193,197,201,205,209,213,218,223,227,232,237
-        !byte 242,247,252,2,7,13,19,25,31,37,44,51,57,64,72,79,87,95,103,111,120,129,138,147
-        !byte 157,167,177,188,199,211,223,235,248,5,19,33,48,64,80,96,114,132,151,171,192,214,236,4
-        !byte 30,56,84,113,144,177,212,249,32,74,119,166,217,16,76,139,209,28,110,200,43,153,19,155
-        !byte 52,225,168,141,152,212,79,30,97,74,43,154,191,84,125,250
-        * = $a500
-ddyHiTQ: !byte 255,162,81,54,40,32,27,23,20,18,16,14,13,12,11,10,10,9,9,8,8,7,7,7
-        !byte 6,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3
-        !byte 3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
-        !byte 2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2
-        !byte 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
-        !byte 2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4
-        !byte 5,5,5,5,5,6,6,6,6,7,7,7,8,8,9,9,10,10,11,12,13,14,16,18
-        !byte 20,23,27,32,40,54,81,162,255,162,81,54,40,32,27,23,20,18,16,14,13,12,11,10
-        !byte 10,9,9,8,8,7,7,7,6,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4
-        !byte 4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2
-        !byte 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
-        !byte 2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4
-        !byte 4,4,4,4,4,4,4,4,5,5,5,5,5,6,6,6,6,7,7,7,8,8,9,9
-        !byte 10,10,11,12,13,14,16,18,20,23,27,32,40,54,81,162
+        !byte 1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,4,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0,0,9
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11,0,0,0,0,0,0,0
+        !byte 0,0,0,5,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,6,0,0
+        !byte 0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,7,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,0,0,0,0,0,17
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,20,20,20,20,20,20,20,20,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,22,22,22,0,0,0,0,0,0,0,0,0,0
+        !byte 0,23,23,0,0,0,24,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,13,13,0,0,0,14,14,0,0,0,0,0,0,0,0
+        !byte 0,0,0,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,18,18,18,18,18,18,18,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,0,0,0,0,0,21
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,1,1,2,3,3,6,6,7,7,8,8,15,1,1,2,3,3,4,6,5,6,7,8
+        !byte 8,0,128,128,128,0,0,128,128,0,0,0,0,0,129,129,129,1,1,129,129,1,129,1
+        !byte 1,1,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2
+        !byte 2,2,3,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16
+        !byte 32,64,128,1,0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,124,0,252,127,124,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,9,14,14
+        !byte 4,4,4,4,8,9,4,4,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,120,6,0
+        !byte 0,0,1,0,4,48,15,43,0,48,15,43,0,255,0,0,0,0,$ff
+; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
+; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
+lvlDstLoT: !byte <mapT,<blkT,<runWT,<runET,<runNT,<runST,<runPlaneT,<runFaceT,<runByteT,<runBitT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>blkT,>runWT,>runET,>runNT,>runST,>runPlaneT,>runFaceT,>runByteT,>runBitT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$00,$00,$00,$00,$00,$19,$19,$19,$19,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$02,$08,$01,$01,$01,$01,$01,$01
+
+; ---- lvlSwap: exchange the live per-level tables with the shadow ----
+; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
+; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are 1,730
+; of them. The table index lives in lsIdx for the same reason.
+; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
+; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
+; so the fall runs in both directions and dying never has to reload anything.
+lvlSwap:
+        lda #<lvlShadow
+        sta lsS+1
+        sta lsS2+1
+        lda #>lvlShadow
+        sta lsS+2
+        sta lsS2+2
+        lda #$00
+        sta lsIdx
+lsTab:  ldy lsIdx
+        lda lvlLenT,y
+        sta lsLen
+        lda lvlDstLoT,y
+        sta lsD+1
+        sta lsD2+1
+        lda lvlDstHiT,y
+        sta lsD+2
+        sta lsD2+2
+        ldy #$00
+lsByte:
+lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
+lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
+lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
+        txa                     ;   a byte, which over 1,730 bytes is most of an extra frame.
+lsD2:   sta $ffff,y
+        iny
+        cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
+        bne lsByte
+        ; The shadow is one run of bytes, so it advances by this chunk's length -- but a length
+        ; of 0 MEANS 256, and "adc #0" advances by nothing. Six of these chunks are a full page,
+        ; so getting this wrong swapped all of them against the same shadow page and left the
+        ; live mapT holding some other table's bytes.
+        lda lsLen
+        beq lsPg                ; a whole page: the low byte is already right
+        clc
+        adc lsS+1
+        sta lsS+1
+        sta lsS2+1
+        bcc lsNC
+lsPg:   inc lsS+2
+        inc lsS2+2
+lsNC:   inc lsIdx
+        lda lsIdx
+        cmp #$1f
+        bne lsTab
+        rts
+lsIdx:  !byte 0
+lsLen:  !byte 0
+
+        ; The walker and all its data. The dispatcher stays down in the
+        ; main code stream's headroom; only this needs somewhere with room.
+        * = $a600
+hzRun:  ldx #$00                ; walk (addrLo, addrHi, value) triples until $ff
+hzL:    jsr hzGet
+        cmp #$ff
+        beq hzRt
+        sta hzS+1
+        jsr hzGet
+        sta hzS+2
+        jsr hzGet
+hzS:    sta $ffff               ; self-modified: the run-table byte this triple names
+        jmp hzL
+hzRt:   rts
+hzGet:                          ; next byte of the list; every list is well under 256 bytes
+hzRd:   lda $ffff,x
+        inx
+        rts
+        ; ---- THE LIVE LEVEL'S SPLIT DATA. Every byte of it is swappable. ----
+        ; hazNT is the whole on/off switch: $ff means this level splits nothing, and hazSet then
+        ; touches only hazRstT (whose first byte is the $ff terminator), so a level with no
+        ; hazards costs one branch. The shared lists are ONE flat run with the pointers held as
+        ; offsets into it, rather than a label each, because a label resolves to an address and
+        ; the other level's copy has to mean the same thing after it is swapped in.
+hazNT:  !byte $ff
+hazLoT: !byte 0
+hazHiT: !byte 0
+hazCT:  !byte 0
+hazRstT: !byte $ff
+hazLstT: !byte 0
         * = $a900
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
@@ -8965,7 +9066,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; behind it and the 20-row step has already drawn the division.
 ; Indexed by run id, so whole tables rather than a packed set.
 ; Emitted only when CVXSEAM=0. With every run-to-run boundary drawing a line, nothing reads
-; these -- 48 bytes of corner-partner
+; these -- 40 bytes of corner-partner
 ; tables and the whole build-time derivation exist purely to tell a corner from a silhouette,
 ; and the renderer no longer cares which it is.
 
@@ -9000,51 +9101,51 @@ rampThi: !byte 22,22,22,22,101,111,162,157,157,142,159,178,170,169,169,78,22,22,
         !byte 96,102,61,5,5,5,5,5,24,175,175,175,183,80,201,196,96,102,61,5,5,5,5,5
         !byte 197,183,194,194,194,203,200,195,41,102,61,5,5,5,5,5
         * = $b100
-stepT1lo: !byte 89,101,111,162,158,50,50,159,125,22,51,86,134,117,181,49,198,172,22,51,11,70,181,49
+stepT1lo: !byte 89,101,111,162,158,50,50,159,125,22,51,86,134,117,181,49,198,172,22,51,11,70,181,3
         !byte 138,138,189,22,14,106,67,109,35,142,20,182,22,14,86,13,73,19,207,54,149,22,14,68
         !byte 70,2,3,138,138,176,69,12,204,11,63,19,19,20,180,47,60,8,46,126,19,110,105,25
         !byte 22,14,11,63,2,3,87,138,97,151,6,204,8,59,150,50,50,125,113,145,8,70,59,187
         !byte 91,163,193,151,14,11,70,59,3,87,205,132,156,156,191,103,2,43,34,50,125,131,94,72
-        !byte 103,2,2,33,206,144,156,14,11,70,2,43,87,205,127,88,88,88,103,2,3,48,21,182
-        !byte 52,29,57,140,2,211,3,48,218,88,14,11,70,2,3,87,39,127,192,191,192,192,192,3
-        !byte 34,66,182,64,64,184,140,18,3,34,164,104,188,185,36,32,32,77,34,66,15,168,168,152
-        !byte 168,168,3,34,21,182,79,199,152,140,135,153,153,164,215,188,188,36,167,108,130,65,21,42
+        !byte 103,2,2,33,206,144,156,14,11,103,2,43,87,205,127,88,88,88,103,2,3,48,21,182
+        !byte 52,29,57,140,2,211,3,48,218,88,14,8,70,2,3,87,39,127,192,191,192,192,192,3
+        !byte 34,85,182,64,64,184,140,18,3,34,164,104,188,185,36,32,32,77,34,66,15,168,168,152
+        !byte 168,168,153,34,21,182,79,199,152,140,135,153,153,164,215,188,188,36,167,108,130,65,21,42
         !byte 7,7,152,152,7,7,152,152,215,27,24,152,152,135,155,153,209,155,23,183,80,201,122,120
         !byte 141,30,30
         * = $b200
-stepT1hi: !byte 9,9,147,116,117,154,142,20,16,22,51,134,181,181,49,198,198,208,22,51,11,70,181,49
+stepT1hi: !byte 9,9,147,116,117,154,142,20,16,22,51,134,181,181,49,198,198,208,22,51,11,70,181,3
         !byte 138,138,31,89,14,68,100,109,71,71,54,149,22,14,13,13,181,49,198,198,92,22,14,68
         !byte 70,2,3,138,176,176,47,60,11,63,63,19,19,54,40,47,60,17,46,73,148,91,25,97
         !byte 22,14,11,63,2,3,138,132,132,113,45,8,63,59,187,150,54,40,81,145,17,37,59,98
         !byte 91,205,139,151,14,11,70,59,3,205,132,132,75,191,8,103,2,43,34,50,40,81,29,133
-        !byte 83,2,43,107,82,144,156,14,11,70,2,43,205,173,173,75,191,191,103,2,3,48,21,40
-        !byte 219,29,57,56,90,3,48,114,128,88,14,11,70,2,3,39,179,179,192,191,152,103,192,3
-        !byte 34,66,40,76,166,184,62,32,77,34,85,15,175,185,36,32,32,77,58,66,177,202,191,152
-        !byte 152,135,3,34,21,40,213,199,174,123,108,74,34,21,42,175,183,80,201,130,130,58,21,5
+        !byte 83,2,43,107,82,144,156,14,11,103,2,43,205,173,173,75,191,191,103,2,3,48,21,40
+        !byte 219,29,57,56,90,3,48,114,128,88,14,8,70,2,3,39,179,179,192,191,152,103,192,3
+        !byte 34,85,40,76,166,184,62,32,77,34,85,15,175,185,36,32,32,77,58,66,177,202,191,152
+        !byte 152,135,153,34,21,40,213,199,174,123,108,74,34,21,42,175,183,80,201,130,130,58,21,5
         !byte 7,152,152,152,135,155,209,209,40,24,190,152,135,135,153,209,21,42,4,4,203,200,195,41
         !byte 102,61,42
         * = $b300
-stepT2lo: !byte 137,101,111,112,158,157,50,159,125,22,51,134,134,181,49,54,172,172,22,51,197,95,181,49
-        !byte 142,138,189,22,22,106,67,53,154,142,159,182,22,14,86,13,73,19,54,25,92,22,14,68
-        !byte 95,71,38,207,138,176,69,55,106,11,63,19,110,20,180,47,60,8,46,73,19,110,54,97
+stepT2lo: !byte 137,101,111,112,158,157,50,159,125,22,51,134,134,181,49,54,172,172,22,51,197,95,181,38
+        !byte 198,138,189,22,22,106,67,53,154,142,159,182,22,14,86,13,73,19,54,25,92,22,14,68
+        !byte 95,95,38,10,138,176,69,55,106,11,63,19,110,20,180,47,60,8,46,73,19,110,54,97
         !byte 22,55,11,63,95,38,138,138,97,151,6,8,8,8,150,150,118,180,220,145,8,70,59,187
-        !byte 150,163,193,6,51,8,70,59,38,91,205,132,156,191,191,103,103,43,142,28,128,131,94,8
-        !byte 103,103,43,33,206,214,75,29,8,37,2,43,87,205,127,88,191,191,103,18,3,48,28,128
-        !byte 52,29,57,140,2,212,48,48,218,75,29,29,95,18,77,87,39,127,192,191,191,152,157,26
+        !byte 150,163,193,6,51,8,70,59,38,10,205,132,156,191,191,103,103,43,107,28,128,131,94,8
+        !byte 103,103,43,33,206,214,75,51,197,37,2,43,87,205,127,88,191,191,103,18,3,48,28,128
+        !byte 52,29,57,140,2,212,48,48,218,75,29,8,95,18,77,87,39,127,192,191,191,152,157,26
         !byte 34,85,15,64,52,184,140,18,26,3,164,104,188,185,184,32,32,77,34,66,15,168,191,152
-        !byte 152,157,157,65,21,42,79,79,213,140,135,153,34,164,104,188,188,188,123,95,130,65,21,42
+        !byte 152,18,153,65,21,42,79,79,213,140,135,153,34,164,104,188,188,188,123,95,130,65,21,42
         !byte 7,7,152,152,135,153,209,30,5,27,27,152,135,135,153,209,209,172,23,23,197,95,95,38
         !byte 10,30,30
         * = $b400
-stepT2hi: !byte 9,51,147,93,119,216,216,171,16,22,51,134,134,181,49,198,198,208,22,51,197,95,181,49
-        !byte 142,138,31,89,14,86,13,109,71,216,171,16,22,14,13,13,181,49,198,92,92,22,14,68
-        !byte 95,71,38,207,138,176,47,60,11,63,63,19,110,40,40,47,17,17,46,73,148,107,97,97
+stepT2hi: !byte 9,51,147,93,119,216,216,171,16,22,51,134,134,181,49,198,198,208,22,51,197,95,181,38
+        !byte 198,138,31,89,14,86,13,109,71,216,171,16,22,14,13,13,181,49,198,92,92,22,14,68
+        !byte 95,95,38,10,138,176,47,60,11,63,63,19,110,40,40,47,17,17,46,73,148,107,97,97
         !byte 22,55,11,63,95,38,138,97,132,220,45,8,63,59,187,91,163,40,81,145,17,70,121,148
-        !byte 107,205,40,6,51,8,70,59,38,91,132,132,75,45,8,103,103,43,142,28,128,131,133,133
-        !byte 83,2,129,107,205,144,75,29,8,37,2,43,205,173,173,75,191,8,103,18,3,48,28,128
-        !byte 64,29,57,56,90,3,87,39,217,75,29,29,95,18,77,39,127,179,75,191,152,152,157,26
+        !byte 107,205,40,6,51,8,70,59,38,10,132,132,75,45,8,103,103,43,107,28,128,131,133,133
+        !byte 83,2,129,107,205,144,75,51,197,37,2,43,205,173,173,75,191,8,103,18,3,48,28,128
+        !byte 64,29,57,56,90,3,87,39,217,75,29,8,95,18,77,39,127,179,75,191,152,152,157,26
         !byte 34,85,15,64,64,184,62,32,77,34,85,15,185,185,32,32,32,58,58,66,177,202,202,152
-        !byte 152,157,157,65,21,42,188,199,174,123,108,74,34,21,42,175,183,80,167,130,130,58,21,5
+        !byte 152,18,153,65,21,42,188,199,174,123,108,74,34,21,42,175,183,80,167,130,130,58,21,5
         !byte 202,152,152,152,135,153,209,30,5,27,24,36,36,108,153,209,21,172,4,4,203,200,195,41
         !byte 102,61,30
         * = $b500
@@ -9096,12 +9197,235 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
 ; compressed stream was pinned to the image's top, so a taller image lifted it. There is no
 ; staged copy any more, so the padding bought nothing and cost a kilobyte of disk and load time.
 
+        ; ---- dieChk and dieGo, relocated ----
+        ; Another jsr target, out of the main block because the cut scene needs those bytes.
+        ; $bc00 is a whole free page and now uncontested: the merge-hazard lists used to claim
+        ; the same address and only fitted because level 1 has no hazard cells. They live in
+        ; table space now (see HAZ_BASE), which is the same address on every map.
+        * = $bc00
+; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
+; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
+; which is what makes walking into one harmless. Here we only LIFT it, and fire.
+; The trigger is ONE angle comparison. Contact hides the angel outright, so there is no sprite to
+; see and nothing to project -- turn DIE_TURN either way and the cut scene fires.
+dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
+        beq dckLive             ;   the sprites. obC is rewritten by orbMove every frame and
+        ldx #$07                ;   flushed to $d027+n after us, so this is the last word on it.
+dckSp:  lda dieInk
+        sta obC,x
+        dex
+        bpl dckSp
+        rts
+dckLive:
+        sec                     ; the turn they are ACTUALLY making, as a signed 16-bit rate over
+        lda paF                 ;   pa:paF. The whole-byte version dropped the fraction, and the
+        sbc dieOpaF             ;   fraction is most of it -- a hand turn is 3/4 of a unit a tick.
+        sta dieDirF             ;   The scene then continues at exactly the speed they had.
+        lda pa
+        sbc dieOpa
+        sta dieDir
+        lda paF
+        sta dieOpaF
+        lda pa
+        sta dieOpa
+        lda marked
+        beq dcNo
+        tax
+        dex
+        stx amIdx
+        sec
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        clc
+        adc #$01
+        cmp #$03
+        bcs dcClr               ; more than a cell away in x: the mark lifts
+        ldx amIdx
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+        clc
+        adc #$01
+        cmp #$03
+        bcs dcClr
+        sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
+        lda pa                  ;   them? The angel is hidden, so there is no sprite to see and
+        sbc markPa              ;   nothing to project. Turn 30 degrees either way and you die.
+        bpl dcPos
+        eor #$ff
+        clc
+        adc #$01
+dcPos:  cmp #$15
+        bcc dcNo
+dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
+dieGo:  lda dieDir
+        bne dgD
+        lda #$01                ; not turning: give the face a side to come from anyway
+        sta dieDir
+dgD:    ; ---- which way round, and unhide it ----
+        ; A marked angel is HIDDEN -- that is how contact works -- so the scene is where it comes
+        ; back. The cell delta is one of eight neighbours; angBearT turns that into a bearing, and
+        ; the signed difference from the current heading gives both the direction to turn and a
+        ; first estimate of how far. dieOff starts far from centre so the stop cannot fire early.
+        lda #$0f                ; white -> grey3 at once: the room starts leaving as you are grabbed
+        sta $d021
+        lda #$ff                ; unsigned "never projected", far outside the lock window
+        sta dieOff
+        lda #$ff
+        sta dieRem
+        lda marked
+        beq dpDn
+        ldx amIdx
+        stx dieIdx              ; the one entity dieOff is allowed to come from
+        lda #$00
+        sta dieLk
+        jsr snTone              ; the dissonance starts with the grab
 
+        lda #$00
+        sta orbHidT,x
+        sec
+        lda orbXCT,x            ; dx+1, in 0..2
+        sbc px+1
+        clc
+        adc #$01
+        sta dieCl
+        sec
+        lda orbYCT,x            ; (dy+1)*3
+        sbc py+1
+        clc
+        adc #$01
+        sta dieCy               ; dy+1, kept: *3 needs it twice
+        asl                     ; 2(dy+1)
+        clc
+        adc dieCy               ; 3(dy+1)
+        clc
+        adc dieCl               ; + (dx+1)
+        tax
+        lda angBearT,x
+        sec
+        sbc pa                  ; shortest way round: the sign of the difference is the way to go
+        sta dieCl
+        ; dieDir is the HIGH BYTE OF A RATE now, not a direction flag. Storing +-1 into it left
+        ; pa:paF advancing by $01xx or $FFxx a frame -- and $FFxx is minus a quarter of a unit, so
+        ; the turn crawled backwards and never arrived. Keep the captured rate; only its SIGN is
+        ; ours to choose.
+        lda dieDir
+        ora dieDirF
+        bne dpHav               ; they were mid-turn, so there is a real rate to continue
+        lda #$c0   ; ...and if they were not, a hand-speed default
+        sta dieDirF
+        lda #$02
+        sta dieDir
+dpHav:  lda dieCl
+        eor dieDir
+        bpl dpDn                ; already heading the short way round
+        sec                     ; otherwise negate the whole 16-bit rate, magnitude intact
+        lda #$00
+        sbc dieDirF
+        sta dieDirF
+        lda #$00
+        sbc dieDir
+        sta dieDir
+dpDn:   lda #$00                ; AFTER the branch above, not inside it: skipping it left the
+        sta marked              ;   player marked through the whole cut scene when they WERE turning
+        ldx #$01   ; the angel simply is not there any more -- hiding it is one
+dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slot.
+        bne dgA2                ; TALL: that is the angel, and it is the one thing that stays
+        lda #$01
+        sta orbHidT,x           ; everything else is cut outright -- see above, $d025/$d026 are
+                                ;   shared, so an orb cannot dim while the angel stays lit
+dgA2:   dex
+        bpl dgA
+        lda #$0c  ; the orb, by contrast, fades out with everything else
+        sta dieInk
+        inc dieN                ; how many pictures this death earns; dshEnd resets it after the
+        lda #$01                ;   last one, so the sequence starts over rather than running out
+        sta dieSt
+        lda frameCnt
+        sta dieT0
+        lda #$ff
+        sta dieTck              ; no tick written yet
+        rts
+dcClr:  ldx amIdx               ; out of reach again: the sentence lifts and it comes back
+        lda #$00
+        sta orbHidT,x
+        sta marked
+dcNo:   rts
+
+
+        ; ---- the rest of the relocated region ----
+        ; Continues straight on from dieChk/dieGo above: $bc00-$bdff is 512 free bytes and the
+        ; group needs about 480, so ONE origin serves the lot. Stating a second one at $bd00 only
+        ; worked while the first block was small enough to leave room for it.
+
+; ---- picPut: the current picture into BOTH screen buffers ----
+; Both, because the buffers still flip every frame during the scene -- writing only the one being
+; drawn is exactly the "slides over and stutters back and forth" the old version was reported as.
+; Four whole pages rather than 1,000 bytes: the 24-byte overrun lands in the unused tail of the
+; screen and the source overruns into free space, so the loop costs nothing to keep simple.
+picPut: ldx dieP
+        lda picLoT,x
+        sta ppRd+1
+        lda picHiT,x
+        sta ppRd+2
+        lda #$00
+        sta ppWA+1
+        sta ppWB+1
+        lda #$e0
+        sta ppWA+2
+        lda #$e4
+        sta ppWB+2
+        ldx #$04
+ppPg:   ldy #$00
+ppRd:   lda $ffff,y
+ppWA:   sta $ffff,y
+ppWB:   sta $ffff,y
+        iny
+        bne ppRd
+        inc ppRd+2
+        inc ppWA+2
+        inc ppWB+2
+        dex
+        bne ppPg
+        rts
+
+; ---- picOn: the cut itself ----
+; One write per palette register, on a frame that is already black. No ramp and no slide: between
+; one frame and the next the picture is simply there.
+picOn:  jsr snBoom
+        lda #$0c
+        sta $d021
+        lda #$0b
+        sta $d022
+        lda #$0f
+        sta $d023
+        rts
+
+; ---- dieKey: RETURN restarts, from anywhere ----
+dieKey: lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta dkJoy               ; the stick shares these lines, same as palKeys and orbKey
+        lda #$fe
+        sta $dc00
+        lda $dc01
+        ora dkJoy
+        and #$02                ; RETURN
+        bne dkNo
+        ldx #$ff                ; jumping out of a jsr chain, so drop the stack first
+        txs
+        jmp entry
+dkNo:   lda #$ff
+        sta $dc00
+        rts
 
         ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
-        ; block, which it overflows. NOT inside the ANG6 block above, though it was written there:
-        ; centring is about a TALL entity, and the two-sprite ladder has those too, so gating the
-        ; table on ANG6 while its use site is gated on ANGMID broke the DEFAULT build outright.
+        ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
+        ; inside the six-sprite angel's table block, and gating a table on one flag while its use
+        ; site is gated on another broke the DEFAULT build outright.
         * = $be00
 angMidT: !byte 3,3,2,2,1,1,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,255,255,1,1,0,0,0,255,255,1,1,1,0,0,255,255,1,1,1,0,0,255,255,2,1,1,0,0,255,255,255,1,1,0,0,255,255,255,1,1,0,0,0,255,255,1,1,0,0,0,255,255,254,254,253,253,253,252,252,251,251,251,250,250,249,249,248,248,248,247,247,246,246,246,245,245,244,244,243,243,243,242,242,241,241,240,240,240,239,239,238,238,238,237,237,236,236,235,235,235,234,234,233,233,232,232,232,231,231,230,230,230,229,229,228,228,227,227,227,226,226,225,225,225,224,224,223,223,222,222,222,221,221,220,220,219,219,219,218,218,217,217,217,216,216,215,215,214,214,214,213,213,212,212,211,211,211,210,210,209,209,209,208,208,207,207,206,206,206,205,205,204,204,204,203,203,202,202,201,201,201,200,200,199,199,198,198,198,197,197,196,196,196,195,195,194,194,193,193,193,192,192,191,191
         * = $bf00

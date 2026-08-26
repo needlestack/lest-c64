@@ -130,4 +130,8 @@ const HUDROW = 1;                              // matches build-iray.mjs: 24-row
 const X = field(HUDROW, 4), Y = field(HUDROW + 1, 4), A = field(HUDROW + 2, 5, 35);
 // fps is two digits at char cols 0-1 of row 0, written by drawFps with the same glyphs.
 const FPS = readChar(0, HUDROW) + readChar(1, HUDROW);
-console.log(`${f}: ${X} ${Y} ${A}  fps=${FPS}`);
+// ENT=1: the HUD's E field -- the ANGEL's cell, as 'E' + x + y, at row 4 column 37 (drawDbg's
+// `ldy #37`). Reading it by eye off a 3x5 glyph is guesswork; this uses the same glyph table the
+// display was drawn from. It is how an angel's progress is measured between two builds.
+const ENT = process.env.ENT ? '  ' + field(4, 3, 37) : '';
+console.log(`${f}: ${X} ${Y} ${A}  fps=${FPS}${ENT}`);
