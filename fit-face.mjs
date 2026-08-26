@@ -21,7 +21,7 @@ const FACE = JSON.parse(readFileSync('./angel-face.json', 'utf8')).hangl1;
 const RGB = { 0: [0,0,0], 11: [68,68,68], 12: [108,108,108], 15: [149,149,149], 1: [255,255,255] };
 const INK = [FACE.d021, FACE.d022, FACE.d023, FACE.colram];
 const lum = c => (RGB[c][0]*0.299 + RGB[c][1]*0.587 + RGB[c][2]*0.114);
-const LU = INK.map(lum);
+export const LU = INK.map(lum);
 
 // The picture is grey-on-WHITE and the charset is light-on-BLACK, so the background has to go.
 // NOT by inverting: the statue is darker than its background but its own shading runs the right
@@ -35,8 +35,8 @@ const GAM  = +(process.env.FACEGAMMA ?? 1);
 // how hard to perturb the quantiser, in luminance units. 0 = pure Floyd-Steinberg.
 const GRIT = +(process.env.FACEGRIT ?? 40);
 // the three non-black inks, darkest first, as pixel values
-const GREYS = [0,1,2,3].filter(v => INK[v] !== 0).sort((a, b) => LU[a] - LU[b]);
-const BLACK = [0,1,2,3].find(v => INK[v] === 0);
+export const GREYS = [0,1,2,3].filter(v => INK[v] !== 0).sort((a, b) => LU[a] - LU[b]);
+export const BLACK = [0,1,2,3].find(v => INK[v] === 0);
 
 // Error diffusion, because the charset it has to share is DITHERED. hangl1 was dithered by
 // hand, so its 256 glyphs are textures -- checkers, gradients, stipple. Thresholding a
@@ -45,7 +45,7 @@ const BLACK = [0,1,2,3].find(v => INK[v] === 0);
 // on detail. Dither first and both pictures speak the same language.
 // Floyd-Steinberg, serpentine: alternating the scan direction stops the error trailing off to
 // one side and worming.
-function dither(tone, inks) {
+export function dither(tone, inks) {
   const lo = Math.min(...inks.map(v => LU[v])), hi = Math.max(...inks.map(v => LU[v]));
   const target = Float64Array.from(tone, t => t < 0 ? -1 : lo + t * (hi - lo));
   const buf = Float64Array.from(target);
@@ -82,7 +82,7 @@ function dither(tone, inks) {
   return out;
 }
 
-function toPixels(file) {
+export function toPixels(file) {
   // Fit the picture into the 320x200 display without distorting it: scale to full height and
   // letterbox. A multicolor pixel is two hires pixels wide, so the grid is 160 across.
   const [w, h] = execFileSync('magick', ['identify', '-format', '%w %h', file])
@@ -198,7 +198,7 @@ function hanglPixels() {
   }
   return px;
 }
-const tilesOf = px => {
+export const tilesOf = px => {
   const out = [];
   for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) {
     const t = new Uint8Array(32);
@@ -211,7 +211,7 @@ const tilesOf = px => {
 // k-means in LUMINANCE, seeded on the commonest distinct tiles -- the same scheme fit-angel
 // uses, and for the same reason: raw 2-bit values would score a light/mid swap as a smaller
 // error than a light/dark one, which is backwards.
-function cluster(tiles, K, iters = 60) {
+export function cluster(tiles, K, iters = 60) {
   const freq = new Map();
   for (const p of tiles) { const k = p.join(','); freq.set(k, (freq.get(k) ?? 0) + 1); }
   const cents = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, K)
@@ -264,7 +264,7 @@ function cluster(tiles, K, iters = 60) {
 }
 
 // fitting against an ARBITRARY glyph set, not just the shipped one
-function fitTo(px, glyphs) {
+export function fitTo(px, glyphs) {
   const screen = new Array(1000);
   let err = 0;
   const t = new Float64Array(32);
@@ -510,5 +510,8 @@ for (const t of TAGS) {
   const f = k => `${scores[t][k].rms.toFixed(4)} (${String(scores[t][k].used).padStart(3)}/256)`;
   console.error(`  ${t.padEnd(8)} ${own.toFixed(4)}         ${f('medoid')}  ${f('flip')}`);
 }
-writeFileSync('./face-extra.json', JSON.stringify(out));
+// Guarded: build-facetest3.mjs imports this module for its fitting pipeline, and an import
+// must not rewrite the asset every other build reads.
+if (process.argv[1] && process.argv[1].endsWith('fit-face.mjs'))
+  writeFileSync('./face-extra.json', JSON.stringify(out));
 console.error(`\nface-extra.json: ${Object.keys(out).join(', ')}`);
