@@ -27,6 +27,22 @@ if (DIETEST) {                       // defaults only: each is still overridable
   process.env.ANGAT ??= '3.5,4.5';   // ...one cell west
   process.env.ANGFREEZE ??= '1';
 }
+// TESTLVL=1: a bare room for LOOKING at things -- not a level. 8x8, one column, one orb, one
+// socket, the exit hole in a corner, no angel. It sets everything else it needs, because the
+// combination is not obvious and getting any of it wrong fails in a different file:
+//   - sockets and the SECOND cut-scene picture both want SEATBASE, so a socket build ships one
+//     picture (see the PICSEG check);
+//   - a socket is a hole-like entity, so the entity count stops matching level 1 and the two
+//     levels can no longer share one binary.
+const TESTLVL = process.env.TESTLVL === '1';
+if (TESTLVL) {                       // defaults only: each is still overridable on its own
+  process.env.NPIC ??= '1';
+  process.env.TWOLEV ??= '0';
+  process.env.ANGEL ??= '0';
+  process.env.PX ??= '0180';         // (1.5, 1.5) looking into the room at 22.5 degrees, which
+  process.env.PY ??= '0180';         //   is the one heading that has BOTH the socket and the
+  process.env.PA ??= '10';           //   far-corner hole inside the FOV at once
+}
 // NOSOCK=1 drops the socket AND seated-orb bitmaps. They are emitted even in levels with no
 // sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
 // Hoisted here because SEATBASE's fit check and the bank-3 overlap guard both consult it.
@@ -86,7 +102,20 @@ if (LEVEL2) {
   // way you ran round mattered for a reason the map never earned. One cell wider to the east and
   // the door on x6 makes it five and five.
   //                x: 0123456789ABCDEF
-  const L2 = ["################",
+  const L2 = TESTLVL ? ["################",
+              "#........#######",   // A BARE ROOM, x1-8 y1-8, for looking at things.
+              "#........#######",   //   socket at (5,2), orb at (3,6), exit hole at (8,8),
+              "#........#######",   //   and a single column near the middle.
+              process.env.WALLOFF ? "#........#######"    // WALLOFF=1: the same room with the
+                                  : "#...#....#######",   // y4  column at (4,4) taken out
+              "#........#######",
+              "#........#######",
+              "#........#######",
+              "#........#######",
+              "################",
+              "################","################","################",
+              "################","################","################","################"]
+            : ["################",
               "#...........####",   // y1  ring, north arc, x1-11
               "#.####.####.####",   // y2  inner wall, with THE DOOR at (6,2)
               "#.#.......#.####",   // y3  chamber x3-9, y3-5. The ANGEL starts at (6,3),
@@ -736,7 +765,25 @@ const C8 = x => Math.max(0, Math.min(8, x));
 //
 // Build-time only: stepT keeps its size, its index and its three lookups. Nothing in the
 // renderer changes.
+// The step shape from stepAPat(k, slot) -- a formula over the slot index and the fixed QLEV
+// quantisation, with NO map input -- matched against the canonical codewords. Every room then
+// produces IDENTICAL step tables, where the sampled path makes them differ per map (972 bytes
+// between the two levels, 140 entries between wall configurations) purely to fill index slots the
+// plan does not cover.
+// Costs +0.172 wrong px/frame against a shipped 12.182 -- about 1.4% -- for a class of artefact
+// it cannot produce at all.
+// TRIED AS THE DEFAULT 2026-08-27 and turned back off the same day: the user reported seeing a
+// degradation on screen. The 1.4% is an AVERAGE over a walkthrough and averages hide where the
+// error lands -- see the note in [[iray-charset-decisions]]. STEPA=1 to compare.
 const STEPA = process.env.STEPA === '1';
+// DEFAULT ON since 2026-08-27. The plan answers every slot it covers -- 546 of 729 -- and only
+// the LEFTOVERS come from the formula rather than from this room's own sampling. That removes the
+// entire map dependence of the step tables (they are byte-identical between the two levels and
+// with or without a wall) and the user could not tell it from the sampled build at four
+// viewpoints, three of them up against the column where step cells actually live.
+// Full STEPA looked worse for a reason worth remembering: it hits `continue` before ever reading
+// planCode, so it throws away the 546 GOOD answers to make the 183 leftovers go away.
+const STEPFB = process.env.STEPFB !== '0';
 // Which column the MIDDLE sample reads. It was always w[kb-1] -- "the last column before the
 // boundary" -- which for kb=1 is w[0], i.e. qA itself. That wasted a third of the key exactly
 // where two walls meet: the s0 bucket class measures 0.812 px/cell against 0.31-0.41 for s1/s2,
@@ -1209,13 +1256,26 @@ for (const fr of PFRAMES) for (let i = 0; i < fr.length; i++)
 console.error(`  step patterns: ${LA}/${LM}/${LB} levels, ${STEPS.nslots} ` +
   `sampled of ${3*SLOTN} (k,slot) pairs, ${STEPS.chosen.length} codes; corner error ${(oldErr / SFRAMES).toFixed(3)} -> ` +
   `${(STEPS.after / SFRAMES).toFixed(3)} wrong cols/frame (flat plateau -> sloped)`);
-// The six VERTICAL steps -- every column either empty or full, i.e. a wall corner seen edge-on.
-// Nothing special about them any more (they used to be interned here, ahead of placeAll, so
-// their sprite-priority twins could land on consecutive codes), but the assert is worth keeping:
-// if the step chooser ever stops producing all six, a corner would render as its nearest
-// neighbour and the wall would grow a notch.
+// The VERTICAL steps -- every column either empty or full, i.e. a wall corner seen edge-on.
+// This USED to throw unless it found exactly six, and that was a category error. The charset is
+// canonical now: charsetgen fits it once over a maze scan and no level's map is an input, so
+// fontA comes out byte-identical whatever the room looks like. What the step chooser produces is
+// a per-map INDEX into that fixed charset, so "how many vertical step shapes does this room
+// contain" is a fact about the ROOM. A bare box legitimately has none -- there are no edge-on
+// corners in it to render, so nothing can render wrong -- and demanding six of it was demanding
+// the room have a feature.
+//
+// It had teeth, too: level 2's map carries a comment saying its pillar is there partly to satisfy
+// this. Rooms can be whatever shape the design wants.
+//
+// Kept as a REPORT rather than deleted. On a map that should have these corners, a low count
+// still means the chooser dropped shapes it was asked for, and a corner would then render as its
+// nearest neighbour -- the wall grows a notch. That is worth seeing; it is not worth refusing to
+// build over.
 const VSTEPS = STEPS.chosen.filter(p => p.every(v => v === 0 || v >= 8));
-if (VSTEPS.length !== 6) throw new Error(`expected 6 vertical steps, found ${VSTEPS.length}`);
+if (VSTEPS.length !== 6)
+  console.error(`  note: ${VSTEPS.length} of 6 vertical step shapes in this map's index` +
+    (VSTEPS.length ? ' -- corners of the missing kinds fall back to their nearest neighbour' : ''));
 // PLAN=1 / PLAN=2 replace the whole generated codebook with charsetgen's k-medians plan.
 // The pipeline above still runs -- STEPS and the sampler are what produced the buckets the plan
 // is expressed in -- but its code ASSIGNMENT is thrown away and rebuilt from the plan, so the
@@ -1477,7 +1537,12 @@ if (PLAN === 3) {
       stepAErr.push({ k, slot, want: want.join(','), got: got.join(','), d });
       fineHit++; continue;
     }
-    const fb = nearestCode(STEPS.assign[k].get(slot) ?? [0, 0, 0, 0]);
+    // STEPFB=1: the plan still answers every slot it covers -- 546 of 729 -- and only the
+    // LEFTOVERS come from the formula instead of from this room's sampling. That is the whole
+    // map dependence (183 slots) removed without giving up a single plan answer, which is what
+    // full STEPA does and why it reads as a degradation: it replaces the good 546 too.
+    const fb = nearestCode(STEPFB ? stepAPat(k, slot)
+                                  : (STEPS.assign[k].get(slot) ?? [0, 0, 0, 0]));
     planCode.has(`s${k}.${slot}.h`) ? fineHit++ : fineMiss++;
     stepThi[k][slot] = planCode.get(`s${k}.${slot}.h`) ?? fb;
     stepTlo[k][slot] = planCode.get(`s${k}.${slot}.l`) ?? stepThi[k][slot];
@@ -2401,7 +2466,9 @@ if (PICS.chars.length !== 2048) throw new Error(`death-pics.json charset is ${PI
 if (!PICS.maps.length) throw new Error('death-pics.json carries no pictures');
 for (const m of PICS.maps) if (m.map.length !== 1000)
   throw new Error(`death-pics.json ${m.name} is ${m.map.length} cells, not 1000`);
-const NPIC = PICS.maps.length;
+// NPIC caps how many of death-pics.json's pictures ship. Capping to 1 frees SEATBASE, which is
+// the socket ladder's home -- the two cannot both have it.
+const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? 99));
 const FACEART = { colram: PICS.colram & 7 };
 const FACE_NCHR = PICS.chars.length;      // 8 bytes a glyph, so 2048 is the full 256
 const FACE_BLANK = 0;
@@ -2581,8 +2648,6 @@ for (const r of ANGLAD) {
 }
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
-const ICO_BM = ORBBM.length;                     // the carried-orb icon: a fixed sprite in the
-ORBBM.push([...ANGART.icoorb, 0]);               //   lower left, never scaled
 NORBBM = ORBBM.length;
 // ---- SPRBOX=1: outline EVERY entity sprite, so the hardware grid is visible on screen ----
 // Where each sprite begins and ends, whether the angel's two halves abut or overlap, and how
@@ -2593,10 +2658,17 @@ NORBBM = ORBBM.length;
 // Bit pair 3 ($d026) because the art uses it sparingly, so a solid rectangle reads clearly
 // against both the figure and the black behind it. It OVERWRITES art on the border rows and
 // columns: this is a view for judging LAYOUT, not one to judge the art in.
-if (process.env.SPRBOX === '1')
-  for (const b of ORBBM) for (let y = 0; y < 21; y++) for (let x = 0; x < 12; x++)
-    if (y === 0 || y === 20 || x === 0 || x === 11)
+// SPRBOX=1 outlines all four sides. SPRBOX=2 leaves the TOP OPEN -- which is what you want for
+// the hole and socket ladders, because their art is bottom-heavy and starts at the bitmap's top
+// row, so a top edge draws straight through the shape you are trying to look at.
+const SPRBOX = +(process.env.SPRBOX ?? 0);
+const boxBitmaps = bms => {
+  if (!SPRBOX) return;
+  for (const b of bms) for (let y = 0; y < 21; y++) for (let x = 0; x < 12; x++)
+    if ((SPRBOX === 1 && y === 0) || y === 20 || x === 0 || x === 11)
       b[y * 3 + (x >> 2)] |= 3 << (6 - 2 * (x & 3));   // set both bits: pixel value 3
+};
+boxBitmaps(ORBBM);
 // Every bitmap must be EXACTLY 64 bytes: they upload as one flat block and are addressed by
 // sprite pointer, so a single short entry shifts every bitmap after it and the pointers walk
 // into whatever follows -- which reads on screen as the wrong art entirely.
@@ -2658,6 +2730,7 @@ if (process.env.ORBSCATTER) {
   // Level 2: ONE orb, and it is standing in the doorway at (5,2) -- the only way into the chamber
   // that holds the exit. It reads exactly like level 1's caging orb, which is the point: the
   // player already knows to pick it up. What is new is that they have to put it back.
+  else if (TESTLVL) ORBS.push({ x: 3.5, y: 6.5, c: 0 });  // out in the open, to walk up to
   else if (LEVEL2) ORBS.push({ x: 6.5, y: 2.5, c: 0 });   // in the doorway at (6,2)
   else ORBS.push({ x: 8.5, y: 4.5, c: 0 });      // the corridor mouth
   // The angel starts IMMEDIATELY BEHIND the orb. Walking up to the orb -- the one thing a new
@@ -2706,24 +2779,21 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // and quantised, so two neighbouring cells of one flat wall could disagree -- which is where
 // every occlusion artifact in this thing has come from. A plane test is per FACE, so every
 // cell showing that face gets the same answer by construction.
+// ---- WALL REMOVAL: the same room with the column taken out ----
+// A wall cannot be recomputed at runtime -- the merge-hazard analysis alone is 1024 directions by
+// 3x3 samples -- so both configurations are built and the DIFFERENCE is shipped. Run ids renumber
+// wholesale when a wall goes (13 runs here become 5), which is why this is 81 bytes and not one.
+const WALLVAR = (TESTLVL && !process.env.WALLOFF && !process.env.LVLDUMP) ? (() => {
+  const tmp = './.wall-tables.json';
+  execFileSync(process.execPath, [process.argv[1]],
+    { env: { ...process.env, WALLOFF: '1', LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
+  return JSON.parse(readFileSync(tmp, 'utf8'));
+})() : null;
+
 // Sized to the LARGER level, both of them. A run id past a level's own count has runBitT = 0, so
 // it sets no bit and costs only the loop iteration -- the padding is inert, not merely harmless.
 const NRUN = Math.max(nextRun, LVL2?.nextRun ?? 0);
 const OCCBYTES = (NRUN + 7) >> 3;
-const orbOcc = ORBS.map(o => {
-  const m = new Array(OCCBYTES).fill(0);
-  for (let r = 1; r < nextRun; r++) {
-    const k = runPlane[r];
-    const beyond = runFace[r] === 'W' ? o.x > k : runFace[r] === 'E' ? o.x < k
-                 : runFace[r] === 'N' ? o.y > k : o.y < k;
-    if (beyond) m[r >> 3] |= 1 << (r & 7);
-  }
-  return m;
-});
-if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs = ${OCCBYTES * ORBS.length}` +
-  ` bytes; a run can occlude ${(orbOcc.reduce((a, m) =>
-    a + m.reduce((b, v) => b + v.toString(2).split('1').length - 1, 0), 0) / ORBS.length).toFixed(1)}` +
-  ` orbs on average`);
 
 const losFree = (ax, ay, bx, by) => {
   const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
@@ -2742,20 +2812,39 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLES_AT = [[+(process.env.HOLEX ?? (LEVEL2 ? 6 : 14)), +(process.env.HOLEY ?? (LEVEL2 ? 5 : 4))],
-                  [+(process.env.HOLE2X ?? (LEVEL2 ? 6 : 14)),
-                   +(process.env.HOLE2Y ?? (LEVEL2 ? 5 : 4))]];   // centred under the column
+const HOLE_D = TESTLVL ? [8, 8] : LEVEL2 ? [6, 5] : [14, 4];   // level 2: centred under the column
+const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])],
+                  [+(process.env.HOLE2X ?? HOLE_D[0]), +(process.env.HOLE2Y ?? HOLE_D[1])]];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
 // orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
 // picks them up for free.
 // (3,5) and (7,3) are open chamber cells in the ring map -- the old (2,2)/(6,6) are walls now
-const SOCKETS_AT = (process.env.SOCKETS ?? (LEVEL2 ? '3,5;7,3' : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (TESTLVL ? '5,2' : LEVEL2 ? '3,5;7,3' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
 const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
                   ...SOCKETS_AT.map(h => ({ x: h[0], y: h[1], exit: false }))];
+
+// Masks for the ORBS *and* the hole-like entities, in the same order as orbXCT/orbYCT. Holes
+// were left out of this originally, which is the whole reason they had no occlusion test: the
+// walk in orbOne indexes orbOccLoT by oidx, and past ORBS.length there was nothing to index.
+// The test itself never cared what kind of thing it was -- it is a face-plane compare on an x,y.
+const orbOcc = [...ORBS, ...HOLELIKE.map(h => ({ x: h.x + 0.5, y: h.y + 0.5 }))].map(o => {
+  const m = new Array(OCCBYTES).fill(0);
+  for (let r = 1; r < nextRun; r++) {
+    const k = runPlane[r];
+    const beyond = runFace[r] === 'W' ? o.x > k : runFace[r] === 'E' ? o.x < k
+                 : runFace[r] === 'N' ? o.y > k : o.y < k;
+    if (beyond) m[r >> 3] |= 1 << (r & 7);
+  }
+  return m;
+});
+if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs = ${OCCBYTES * orbOcc.length}` +
+  ` bytes (${orbOcc.length} entities); a run can occlude ${(orbOcc.reduce((a, m) =>
+    a + m.reduce((b, v) => b + v.toString(2).split('1').length - 1, 0), 0) / ORBS.length).toFixed(1)}` +
+  ` orbs on average`);
 // LAND=x,y overrides where the drop puts you. It exists for testing the level transition: the
 // only way to check that the level you fall INTO renders like the level you would have booted
 // into is to arrive at the same cell, and merge-hazard cells (the ones that can go wrong) are
@@ -2772,7 +2861,7 @@ const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
 // far too much rope -- it could shadow you along the entire length of the room. Two squares means
 // slipping past it is a matter of a step or two, not a plan. The rest of the loop is safe ground,
 // which is what makes the door area read as guarded.
-const LEASH_AT = (process.env.LEASH ?? (LEVEL2 ? '3,1;9,1' : '')).split(';')
+const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : LEVEL2 ? '3,1;9,1' : '')).split(';')
   .filter(Boolean).map(q => q.split(',').map(Number));
 const angBlk = new Array(32).fill(0);
 for (const [lx, ly] of LEASH_AT) {
@@ -2782,7 +2871,7 @@ for (const [lx, ly] of LEASH_AT) {
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number), process.env.LAND.split(',').map(Number)]
-  : LEVEL2 ? [[6, 7], [6, 7]] : [[2, 2], [2, 2]];   // level 2: the same cell the game opens on               // level 1: the drop puts you back in the room
+  : TESTLVL ? [[1, 1], [1, 1]] : LEVEL2 ? [[6, 7], [6, 7]] : [[2, 2], [2, 2]];   // L2: where it opens               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -2798,7 +2887,12 @@ const LANDS_AT = process.env.LAND
 // HOLECULL=0 fills the map solid, so the gate always passes: it prices the cull the same way
 // ORBGATE and ORBSTAMP price theirs. Rendering is identical either way -- only the cost moves.
 const HOLECULL = process.env.HOLECULL !== "0";
-const holeSee = new Array(64).fill(0);           // 32 bytes per hole, indexed by the level
+// 32 bytes per hole-like entity. Sized by how many there ARE: it was a flat 64 -- two holes'
+// worth -- while the writes below index at L*32 for up to four. With a socket present the array
+// grew SPARSE past 64, and `join` renders a hole as an empty field, so holeSeeT emitted
+// "!byte ...,,..." -- 81 fields with 2 empty, every byte after the gap shifted, and the socket's
+// visibility bitmap silently wrong. It assembled cleanly the whole time.
+const holeSee = new Array(HOLELIKE.length * 32).fill(0);
 const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
 if (!HOLECULL) holeSee.fill(255);
 for (let cell = 0; cell < 256; cell++) {
@@ -2928,7 +3022,25 @@ const orbVarT = [...Array(256)].map((_, h) => {
 const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
 const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
 const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
-const ICO_PTR = ((SPRBASE - VBANK) >> 6) + ICO_BM;
+// Where the carried orb sits. Expanded both ways it is 48 hires pixels wide, so X centres it on
+// the 320-wide display whose left edge is sprite X 24: 24 + 160 - 24. Y is chosen so the ball
+// clears the bottom of the screen and the ground shadow underneath it does not -- the sprite is
+// 42 rasters tall expanded and the last visible line is about 250.
+const ORB_HOLD_X = +(process.env.ORBHOLDX ?? 160);
+const ORB_HOLD_Y = +(process.env.ORBHOLDY ?? 210);
+// ---- the swallow: the orb shrinking into a socket ----
+// Frames, not sixtieths, and deliberately: this is four DRAWN steps, so it has to advance once
+// per rendered frame or a step is skipped and the flourish stutters. Durations that matter get
+// measured off frameCnt; a four-step animation is not a duration, it is four pictures.
+const SOK_ORB = 4;                               // frames the orb is visible, shrinking
+const SOK_SHR = 3;                               // frames the socket then takes to close
+const SOK_ANIM = SOK_ORB + SOK_SHR - 1;          // they overlap by one: the socket starts closing
+                                                 //   on the orb's last frame
+// Rungs skipped per frame, sized so four frames walk the WHOLE orb ladder rather than nibbling at
+// it. ORBTALL is 42,40,38,...,3,1 -- 22 rungs -- so the old ANG_V0/8 was 2 a frame and took the
+// orb from 42 rows only down to 30, which read as barely shrinking at all. (ANG_V0-1)/(SOK_ORB-1)
+// lands the last frame on the smallest rung: 42, 28, 15, 1.
+const SOK_VSTEP = Math.max(1, Math.floor((ANG_V0 - 1) / (SOK_ORB - 1)));
 const orbHidT = ORBS.map(() => 0);   // 1 = in the player's hands, not in the world
 // CARRY=n boots the run already holding entity n-1. Headless testing can't press SPACE, so the
 // build has to reproduce every part of the state orbUse leaves behind, not just the icon.
@@ -3574,13 +3686,20 @@ const fitsBank = (name, at, slots, end) => {
 // distance comes out twice too flat. Same projection, same code, different r -- and because the
 // socket is half the radius its rungs are mostly one sprite, so the second ladder is cheap.
 // slot0 is where its bitmaps start in the shared HOLEBASE block.
+const LOW_ROWS = +(process.env.HOLELOW ?? 2);   // a rung this short gets the far-end fudge
 function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
   const L = [];
-  for (let w = wMax; w >= 4; w -= wStep) L.push({ w, d: 2 * F_COL * r / w });
+  // Rungs are evenly spaced in apparent WIDTH, which is evenly spaced in 1/d -- so a step that
+  // is reasonable up close covers an enormous span of world distance once the shape is small.
+  // At step 4 the last two rungs are 8 columns at 6.6 cells and 4 columns at 13.1: one rung for
+  // half the visible range, and it reads as the hole not changing size at all as you walk. Below
+  // 12 columns the step halves, which costs one slot a rung (they are all single-sprite there).
+  for (let w = wMax; w >= 4; w -= (w > 12 ? wStep : Math.max(2, wStep >> 1)))
+    L.push({ w, d: 2 * F_COL * r / w });
   // The near family exists because a BIG disc's widest part goes below row 200 and
   // width stops keying the table. A socket never gets that big -- its widest rung is
   // already the closest it can be drawn at all -- so it has no near field.
-  if (nearFam) for (let h = 85; h <= 129; h += 4) L.push({ d: 88 / h });
+  if (nearFam) for (let h = 85; h <= 129; h += wStep * 2) L.push({ d: 88 / h });
   L.sort((a, b) => a.d - b.d);           // nearest first, so hT descends in h
   // Rasterised by INVERTING the projection per screen row rather than by fitting an ellipse:
   // row y looks at ground distance Z = 88/(y-100), where the circle spans |X| <= sqrt(r^2-(Z-d)^2).
@@ -3601,8 +3720,23 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
     for (let y = g.far; y <= Math.min(200, Math.ceil(g.near)); y++)
       vw = Math.max(vw, 2 * span(g.d, y + 0.5));
     g.w = Math.max(g.w ?? 0, vw);                  // the far family already knows its nominal width
+    // Sprite count. The old rule was ceil(w/24) -- 24 columns a sprite, which is the MAGNIFIED
+    // capacity, so it minimised slots and paid in horizontal resolution: anything over 24 columns
+    // got 2x-wide pixels, and at w=24.1 against px=24 that was for a tenth of a column. Prefer the
+    // UNMAGNIFIED fit wherever one exists (12 columns a sprite, so up to 36 across three), and
+    // fall back to the slot-minimal magnified rule only when the shape is genuinely too wide.
+    // Two sprite-count rules, and which one a ladder gets is a slot budget decision.
+    //   default: ceil(w/24) -- 24 columns a sprite, the MAGNIFIED capacity. Minimal slots, and
+    //     anything past 24 columns pays in 2x-wide pixels. The exit hole uses this; at 75 slots
+    //     it is most of the $e800 region and cannot afford otherwise.
+    //   crisp: ceil(w/12) -- the UNMAGNIFIED capacity, so up to 36 columns across three sprites
+    //     with no magnification at all. The socket uses this: it is small, its widest rung is 32
+    //     columns, so it never magnifies and never needs vmag either.
+    // 24 columns is what ONE magnified sprite covers (12 pixels, 2 columns each), so ceil(w/24)
+    // is the honest count on its own. The rule used to force a second sprite for anything over 12
+    // columns, which spent two slots on rungs a single magnified sprite could draw -- three of
+    // them, at 24, 20 and 16 columns. Those slots pay for the extra far-field rungs below.
     g.spr = Math.max(1, Math.min(3, Math.ceil(g.w / 24)));
-    if (g.w <= 12) g.spr = 1; else if (g.w <= 48) g.spr = Math.max(2, g.spr);
     g.px = g.spr * 12;                             // logical bitmap width in multicolor pixels
     g.mag = g.w > g.px ? 1 : 0;
     g.vmag = g.vis > 21 ? 1 : 0;                   // taller than a sprite: expand it vertically
@@ -3648,8 +3782,36 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
         if (Math.abs(off) <= g.w / 2) g.grid[by][bx] = rim ? 1 : 2;
       }
     }
+    // ---- REALITY FUDGE AT THE FAR END ----
+    // The last few rungs are a couple of columns wide and under one screen row tall, and their top
+    // row lands within a few rasters of the horizon -- which is exactly where the wall meets the
+    // floor. Drawn honestly they read as a mark ON the wall, or as a stray glitch, and capping the
+    // ladder instead made the exit invisible from across a room, which is worse.
+    // So: shift the shape one pixel DOWN inside its sprite, off the join and onto the floor. And
+    // where the true shape was thinner than a whole row it drew nothing at all -- give it one row
+    // at its real width, since width is the dimension that still survives out there.
+    // Not accurate. At four columns across and one row tall, accuracy is not what is failing.
+    if (g.vis < LOW_ROWS) {
+      g.grid = [new Array(g.px).fill(0), ...g.grid.slice(0, 20)];
+      if (!g.grid.some(row => row.some(v => v)))
+        g.grid[1] = [...Array(g.px)].map((_, bx) =>
+          Math.abs((bx - g.px / 2 + 0.5) * cw) <= g.w / 2 ? 2 : 0);
+    }
     if (50 + g.far > 250) throw new Error(`hole rung ${g.w}c starts at row ${g.far}, off screen`);
   }
+  // ---- DROP RUNGS THAT CANNOT DRAW A SHAPE ----
+  // At the far end the disc is a couple of columns wide and less than one screen row tall -- the
+  // last rung of a step-4 ladder computes to NEGATIVE height -- and its top row sits within a few
+  // rasters of the horizon, which is exactly where the wall meets the floor. So it renders as a
+  // one-pixel mark on the wall base: sometimes indistinguishable from the wall, sometimes a stray
+  // dash. There is no drawing fix for that, because there is no shape there to draw. Cutting the
+  // ladder short caps the render distance for free -- varT returns $ff past the smallest rung, so
+  // beyond it the hole is simply not drawn.
+  const minRows = +(process.env.HOLEMINROWS ?? 0);   // 0 = keep every rung; see the fudge below
+  // Off unless asked for: the far-end fudge above keeps these rungs legible, and a rung whose
+  // true height is NEGATIVE still has real width, which is the dimension that matters out there.
+  if (minRows > 0) L.splice(0, L.length, ...L.filter(g => g.vis >= minRows));
+
   // One sprite's 63 bytes, taking multicolor pixels [x0, x0+12) of a rung's logical bitmap.
   const sprite = (g, x0) => {
     const b = [];
@@ -3690,14 +3852,58 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
   const flagT = L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
   return { L, BM, slotT, hT, varT, xOffT, yBaseT, flagT, hOf, slotEnd: _hslot };
 }
-const HOLE = makeHoleLadder(HOLER, 2, 0);
+// HOLESTEP: columns between one far-family rung and the next, and (doubled) rasters between one
+// near-family rung and the next. Coarser steps mean the hole's drawn size jumps further as you
+// walk toward it -- the ladder is what makes it grow smoothly -- so this trades slots against
+// that stepping. 2 gives 70 slots and growth so fluid it does not read as a scaled sprite at all;
+// 4 gives 39, and the stepping it introduces is invisible next to what the far-end fudge fixed.
+// User's call after playing both: 4. HOLESTEP=2 brings the smooth ladder back.
+const HOLESTEP = +(process.env.HOLESTEP ?? 4);
+const HOLE = makeHoleLadder(HOLER, HOLESTEP, 0);
 // A socket is orb-shadow sized. HOLER is 0.43 cells across and an orb is roughly 0.2, so half.
 // Coarser width steps than the exit hole: a socket is small enough that a size step is a pixel
 // or two, and the slots matter more than the smoothness.
+// A socket is orb-shadow sized: half the exit hole's radius.
 const SOCKR = +(process.env.SOCKR ?? HOLER / 2);
-// wMax 32, not 48: at half the radius a 48-column socket would be 0.55 cells away and
-// its far edge below row 250. Closer than the widest rung clamps to it, as the hole does.
-const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, HOLE_RIM);
+// FLAT -- rim 0. The exit hole is rimless because a rim ate a pixel each side and read as a
+// SMALLER hole; the socket now borrows its art anyway, so colour is what tells them apart.
+const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, 0);
+// ---- SOCKETS BORROW THE EXIT HOLE'S BITMAPS AND OWN NONE ----
+// A disc of HALF the radius at distance d is the same shape as a full-size one at 2d stretched
+// twice vertically -- exactly, not approximately. Rasterising row by row, the socket's half-width
+// at row y equals the hole's at the row half as far from the horizon, and "half as far from the
+// horizon" is precisely what the sprite's Y-expand bit does. Both ladders are keyed by apparent
+// width, so every socket width already exists in the exit's list.
+//
+// The two CLOSEST rungs are the exception: once the disc's near edge falls past row 200 the
+// projection is clipped rather than similar and the correspondence breaks. They clamp to the
+// widest rung that does work and run off the bottom of the screen, which is what you want anyway
+// when you are standing on the thing.
+//
+// This spends more sprites on screen than a dedicated ladder would -- a one-sprite version was
+// tried, at 6 slots and a 23% smaller socket with 2-column pixels up close, and this looked
+// better. Zero slots is the other half of the argument.
+{
+  const near2 = d => HOLE.L.reduce((best, g, i) =>
+    Math.abs(g.d - 2 * d) < Math.abs(HOLE.L[best].d - 2 * d) ? i : best, 0);
+  const idx = SOCK.L.map(g => near2(g.d));
+  const ok = Math.max(0, SOCK.L.findIndex((g, i) => Math.abs(HOLE.L[idx[i]].vis * 2 - g.vis) < 1.2));
+  for (let i = 0; i < ok; i++) idx[i] = idx[ok];
+  SOCK.BM = [];                                   // nothing of its own is emitted
+  SOCK.slotT = idx.map(i => HOLE.slotT[i]);
+  SOCK.xOffT = idx.map(i => HOLE.xOffT[i]);       // the BORROWED bitmap's width, not the socket's
+  SOCK.flagT = idx.map(i => (HOLE.flagT[i] & 0x07) | 8);   // its sprite count and hmag, vmag forced
+  SOCK.slotEnd = HOLE.slotEnd;                    // ...so it consumes no slots
+  console.error(`  sockets: ${SOCK.L.length} rungs, 0 slots of their own -- borrowed from the ` +
+    `exit ladder${ok ? `, closest ${ok} clamped to rung ${ok}` : ''}`);
+}
+// Rungs the socket skips per frame as it closes, sized the same way: SOK_SHR frames walk its
+// whole ladder. It has to live here rather than beside SOK_VSTEP because the ladder it measures
+// is not built until now.
+const SOK_SSTEP = Math.max(1, Math.floor((SOCK.L.length - 1) / SOK_SHR));
+
+// yBaseT stays the SOCKET's own: the borrowed bitmap is placed at the socket's top row and expands
+// downward from there, which lands every row exactly where the socket's own projection wanted it.
 // ---- an orb SEATED in a socket: the ball's top half rising out of the socket's own arc ----
 // Not a flat cut. The bottom of the shape IS the socket rung's ellipse, so the orb reads as
 // sitting down in it rather than balanced on it, and the cut automatically has the right
@@ -3818,7 +4024,7 @@ if (process.env.SEATDUMP === 'steps') {
 }
 
 fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, 0x10000);
-if (!NOSOCK) fitsBank('seat ladder', SEATBASE, SEAT.nBM, LOADER_RUN);
+
 
 // ---- PICSEG: cut-scene pictures 2..N, in the socket ladder's space ----
 // A picture map is 1,000 bytes and the image's largest free hole is 256, so only the FIRST
@@ -3828,9 +4034,6 @@ if (!NOSOCK) fitsBank('seat ladder', SEATBASE, SEAT.nBM, LOADER_RUN);
 // separate job and this build is a look at the SEQUENCE, not the final layout.
 const PICSEG = DIE && NPIC > 1 ? PICS.maps.slice(1).flatMap(m => m.map) : [];
 if (PICSEG.length) {
-  if (!NOSOCK) throw new Error(
-    `${NPIC} cut-scene pictures need $${SEATBASE.toString(16)} for IPIC, where the socket ladder ` +
-    `lives. Build with NOSOCK=1, or ship one picture.`);
   const room = LOADER_RUN - SEATBASE;
   if (PICSEG.length > room) throw new Error(
     `IPIC is ${PICSEG.length} bytes but only ${room} are free between $${SEATBASE.toString(16)} ` +
@@ -3850,6 +4053,11 @@ if (HOLELIKE.length > 4) throw new Error(
   `${HOLELIKE.length} hole-like entities: holeSeeT has room for 4 (32 bytes each). ` +
   `More wants the per-level loading, not another table squeezed in.`);
 const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM)];
+// SPRBOX boxes the ORB bitmaps up at their generator; the hole and socket ladders are built much
+// later, so they get the same treatment here. Without this the one case where the hardware grid
+// matters most -- a wide flat ellipse spread across two or three sprites -- was the one case you
+// could not see. Bit pair 3 ($d026), as above; it overwrites art on the border rows and columns.
+boxBitmaps(HOLEBM);
 console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} socket` +
               `${NOSOCK ? ' (DROPPED)' : ''} = ${HOLEBM.length} slots`);
 // The three sprite blocks share VIC bank 3 and are loaded as SEPARATE FILES, so an overlap is
@@ -3861,7 +4069,7 @@ console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} s
   // that reaches it overwrites itself mid-load and the machine drops back to BASIC. That has
   // happened before -- it is why LOADER_RUN moved from $cb00 to $cf00.
   const blocks = [['orb ladder', SPRBASE, NORBBM * 64],
-                  ...(NOSOCK ? [] : [['seat ladder', SEATBASE, SEAT.nBM * 64]]),
+
                   ['hole ladder', HOLEBASE, HOLEBM.length * 64],
                   ['the loader', LOADER_RUN, 0x100]];
   for (const [an, aa, al] of blocks) for (const [bn, ba, bl] of blocks)
@@ -3878,8 +4086,6 @@ if (process.env.HOLEBMHASH === '1') console.error('  exit-hole bitmap checksum: 
   ` over ${HOLE.BM.length} slots`);
 if (HOLE.L.some(g => g.grid.some(row => row.some(v => v === 1))))
   throw new Error('the exit hole has rim pixels: it must be a single ink, see makeHoleLadder');
-if (!SOCK.L.some(g => g.grid.some(row => row.some(v => v === 1))))
-  throw new Error('the socket has no rim pixels: HOLE_RIM is 0?');
 const holeSlotT = HOLE.slotT, holeHT = HOLE.hT, holeVarT = HOLE.varT;
 const holeXOffT = HOLE.xOffT, holeYBaseT = HOLE.yBaseT, holeFlagT = HOLE.flagT;
 const holeHOf = HOLE.hOf;
@@ -3895,8 +4101,9 @@ if (process.env.HOLEDUMP === '1') {
 // is (ptr),y with no multiply.
 const OCCBASE = ORB_OCC;
 const orbOccFlat = orbOcc.flat();
-const orbOccLo = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
-const orbOccHi = ORBS.map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
+const NOCC = ORBS.length + HOLELIKE.length;      // every entity orbOne can be asked about
+const orbOccLo = [...Array(NOCC)].map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
+const orbOccHi = [...Array(NOCC)].map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
 // Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
 // coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
 // solve needs into another one. 1024 bytes, all above VIC bank 0.
@@ -4075,6 +4282,42 @@ if (TWOLEV) {
 // level does. Level 1 splits nothing, so on its own it emits none of this -- but level 2 rides
 // along in the shadow and does, and the code is shared. hazNT is what turns it off per level.
 const HAZRT = HAZ || TWOLEV;
+
+// The delta, as two lists of hzRun triples -- one to take the wall out, one to put it back.
+// hzRun already walks (addrLo, addrHi, value) until $ff, which is exactly this job at a larger
+// scale, so the runtime cost of a wall change is a routine that already exists and is proven.
+// SKIPPED: orbOccT is rebuilt from scratch every frame by orbOccAll, and orbOccLoT only differs
+// between these two builds because the dump computes its own stride -- in one binary both use the
+// same one. Shipping either would be bytes spent to write what is already correct.
+// Frames the wall takes to fall. MUST BE A POWER OF TWO -- the per-frame height is h*wsN/WS_N
+// and the divide is a shift. 4 ships; WALLSINK=16 slows it right down, which is how you tell a
+// collapse from a pop.
+const WS_N = +(process.env.WALLSINK ?? 4);
+const WS_SH = Math.log2(WS_N);
+if (!Number.isInteger(WS_SH)) throw new Error(`WALLSINK must be a power of two, got ${WS_N}`);
+// wsN is a single byte and 0 is the idle state, so the collapse cannot be longer than 255
+// frames -- 512 assembled as `lda #$200`, truncated to 0, and the sink free-ran forever.
+if (WS_N > 255) throw new Error(`WALLSINK must be <= 255 frames (wsN is one byte), got ${WS_N}`);
+const WALL_DELTA = WALLVAR ? (() => {
+  const SKIP = new Set(['orbOccLoT', 'orbOccT']);
+  const off = [], on = [];
+  for (const [n, live] of LVL_TABLES) {
+    const v = WALLVAR.tables[n];
+    if (!v || SKIP.has(n)) continue;
+    for (let i = 0; i < live.length; i++)
+      if ((v[i] ?? 0) !== (live[i] ?? 0)) {
+        off.push(`<${n}+${i},>${n}+${i},${v[i] ?? 0}`);
+        on.push(`<${n}+${i},>${n}+${i},${live[i] ?? 0}`);
+      }
+  }
+  // which cell actually goes -- the one mapT byte that differs. The sink pass needs it to know
+  // which columns are showing the doomed wall.
+  let cell = -1;
+  for (let i = 0; i < 256; i++) if ((WALLVAR.tables.mapT[i] ?? 0) !== LVL_TABLES.find(([n]) => n === 'mapT')[1][i]) cell = i;
+  console.error(`  wall change: ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction` +
+    `, cell ${cell & 15},${cell >> 4}`);
+  return { off, on, cell };
+})() : null;
 
 // LVLDUMP: this build exists only to hand its per-level tables to another one. Stop before
 // assembling -- the .d64 it would write is not wanted and would clobber the real disk.
@@ -4913,7 +5156,14 @@ ${DIE ? `        lda #$00
         sta marked              ;   no state set up, and the program fell out to BASIC
         lda #$0f
         sta sndD
-` : ''}${SPRITES ? `        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
+` : ''}${SPRITES ? `        lda #$00
+        sta sokAn               ; RETURN restarts by JUMPING to entry, not by reloading, so
+${WALL_DELTA ? `        sta wsN                 ;   anything mid-animation is still live RAM and has to be
+        lda wallSt              ;   cleared by hand. A wall the sockets took out must come back
+        beq wrOK                ;   too, or a restart hands you a level already solved.
+        jsr wallTog             ; wallSt non-zero takes the wtBack path: no animation, just there
+wrOK:
+` : ''}        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
                                 ;   jumping here, and their state is all live RAM
 ` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
@@ -5781,7 +6031,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
 ${ANGCHAR ? '        jsr angChar             ; AFTER renderSym and occStamp, for the same reason they are\n                                ;   ordered that way: it overwrites cells they just drew\n' : ''}${PROFILE && !PROFILE1 ? '' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
@@ -8688,25 +8938,102 @@ ofyOk:  sta ofy
                                 ;   VIC priority, and the two allocators meet in the middle.
         lda #$ff
         sta omMc                ; every sprite multicolor unless the icon says otherwise
-        lda carry               ; ---- the carried orb, as an icon in the lower left ----
-        beq omNoIco             ; SLOT 0, and the world then allocates from 1. Sprite-vs-sprite
-        lda #${hx(ICO_PTR)}     ;   priority is fixed by slot number and nothing else, so being
-        sta obP                 ;   the HUD means being slot 0 -- at 7 a near orb in the corner
-        lda #12                 ;   would have drawn over it.
-        sta obC
-        lda #40
+        lda sokAn               ; ---- being swallowed by a socket? animate instead of holding ----
+        bne omSwal
+        lda carry               ; ---- the carried orb, HELD IN FRONT OF YOU ----
+        beq omNoIco             ; Was a small hi-res icon in the lower left. Now it is the orb
+                                ;   itself at its nearest ladder rung -- variant 0, a 21-row
+                                ;   bitmap vertically expanded to 42 -- parked centre-bottom with
+                                ;   its ground shadow off the end of the screen, so it reads as
+                                ;   carried rather than as a HUD element.
+                                ; SLOT 0, and the world then allocates from 1. Sprite-vs-sprite
+                                ;   priority is fixed by slot number and nothing else, so being
+                                ;   in the foreground means being slot 0 -- at 7 a near orb in
+                                ;   the corner would have drawn over it.
+        tax
+        dex                     ; carry is index+1, so zero can mean empty
+        lda orbColT2,x
+        sta obC                 ; the orb's OWN body colour, not the icon's fixed grey
+        lda #${hx(orbPtrT[0])}
+        sta obP
+        lda #${hx(ORB_HOLD_X)}
         sta obX
-        lda #215
+        lda #${hx(ORB_HOLD_Y)}
         sta obY
         lda #$ff
         sta obIX                ; not an entity: this is the value occStamp's hole test already
-                                ;   rejects, so the icon stamps no occluders
+                                ;   rejects, so it stamps no occluders
         lda #$01
         sta omEn
         sta onv                 ; world entities start at slot 1
-        lda #$fe
-        sta omMc                ; the icon art is HI-RES, so slot 0 leaves multicolor
-omNoIco:
+        sta omYY                ; BOTH ways, which is what orbExpT says for this variant and what
+        sta omXX                ;   the world does for it -- expanded vertically only, it was half
+                                ;   its proper width. Safe to store rather than OR: both buffers
+                                ;   were cleared just above and the world ORs its slots in after.
+        jmp omNoIco
+        ; ---- the swallow, one drawn step a frame ----
+omSwal: lda sokAn
+        cmp #${hx(SOK_SHR)}
+        bcc omSwTk              ; the orb has gone; only the socket is closing now
+        ldx sokVar
+        lda orbPtrT,x
+        sta obP
+        lda #12
+        sta obC
+        lda #$ff
+        sta obIX
+        lda #$01
+        sta omEn
+        sta onv
+        ldy sokVar              ; the smaller rungs are not all expanded; ask the same table the
+        lda orbExpT,y           ;   world asks rather than assuming
+        beq omSwHf
+        lda #$01
+        sta omXX
+        sta omYY
+        lda sokCX               ; expanded: 48 hires wide, 42 rasters tall
+        sec
+        sbc #$18
+        sta obX
+        lda sokCY
+        sec
+        sbc #$2a
+        jmp omSwPy
+omSwHf: lda sokCX               ; not expanded: 24 by 21
+        sec
+        sbc #$0c
+        sta obX
+        lda sokCY
+        sec
+        sbc #$15
+omSwPy: sta obY
+omSwNx: clc                     ; walk it toward the socket and down the ladder
+        lda sokCX
+        adc sokDX
+        sta sokCX
+        clc
+        lda sokCY
+        adc sokDY
+        sta sokCY
+        lda sokVar
+        clc
+        adc #${hx(SOK_VSTEP)}
+        cmp #${hx(ANG_V0)}
+        bcc omSwV
+        lda #${hx(ANG_V0 - 1)}  ; never past the orb's own rungs and into the angel's
+omSwV:  sta sokVar
+omSwTk: dec sokAn
+        bne omNoIco
+        ; ---- landed: the socket eats it, and both leave the world ----
+        ldy sokWho
+        dey
+        lda #$ff
+        sta hlSeat,y
+        iny
+        sty sockHit
+        lda #$01
+        sta entDty
+${WALL_DELTA ? '        jsr wallTog             ; for now the socket is wired straight to the wall\n' : ''}omNoIco:
 ${process.env.ORBOCCDBG ? `        sta ohDbg
 ` : ''}        lda py+1                ; which cell is the player standing in?
         asl
@@ -9730,8 +10057,10 @@ ${process.env.ORBOCCDBG ? `        lda #$01
         bcc ohDa
         sta ohDbg
 ohDa:
-` : ''}        lda ocanO
-        bpl opDone              ; build time: nothing reachable from this cell can occlude it, and
+` : ''}occWalk:lda ocanO       ; ENTRY POINT for a probe: with ovProbe set, ohHide rts's instead of
+        bpl opDone              ;   jumping to orbNo, so a caller can ask the question and act on
+                                ;   the answer itself. build time: nothing reachable from this
+                                ;   cell can occlude it, and
                                 ; that is true of 56% of candidates -- they never enter the walk
 ${process.env.ORBOCCDBG ? `        lda #$02
         cmp ohDbg
@@ -10014,6 +10343,9 @@ hoLp:   lda hoI                 ;   biggest thing here
         lda holeSeeT,x
         and orbBitT,y
         beq hoNx                ; not visible from this cell: ~25 cycles against a ~2,400 projection
+        ldy hoI                 ; ...and a CONSUMED socket is not in the world at all any more.
+        lda hlSeat,y            ; Exit holes keep 0 here for ever, so this costs them one compare.
+        bmi hoNx
         lda hoI
         jsr hlSet               ; ink and ladder for THIS one
         lda hoI
@@ -10706,7 +11038,7 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
-        lda #${hx(ORBS.length - 1)}
+        lda #${hx(ORBS.length + HOLELIKE.length - 1)}   ; orbs AND hole-like entities
 ooAlp:  sta ooAI
         tax
         jsr orbOcc1
@@ -11583,24 +11915,8 @@ orbUse: lda carry
         ldx odCell
         cpx #$ff
         bne okTake
-        ; nothing loose adjacent -- but the cell you are facing may hold a seated orb
-        jsr dropPick
-        ldx odCell
-        cpx #$ff
-        beq okDone
-        jsr hlAt
-        cpy #$ff
-        beq okDone
-        lda hlSeat,y
-        bpl okDone              ; that socket is empty
-        and #$0f
-        tax                     ; the orb that was sitting in it comes back out
-        lda #$00
-        sta hlSeat,y
-        inx
-        stx carry
-        lda #$01
-        sta entDty
+        ; nothing loose adjacent, and nothing to take back: seating is one-way now, so a
+        ; filled socket has nothing in it to retrieve.
         rts
 okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may exist now
         lda #$01                ; out of the world, into the hands
@@ -11627,15 +11943,52 @@ orbPut: jsr dropPick            ; ---- put down ----
         cpy #$ff
         beq okPlain
         lda hlSeat,y
-        bmi okDone              ; that one is already full: keep hold of it
-        lda carry
-        sec
-        sbc #$01                ; carry is index+1
-        ora #$80                ; bit 7 = seated, low nibble = which orb
-        sta hlSeat,y
+        bmi okDone              ; already used: bit 7 now means CONSUMED, and it is one-way
+        ; ---- ONE WAY. The orb and the socket both leave the world. ----
+        ; They used to seat: the orb stayed orbHidT and drew as a half-ball sitting in the dish,
+        ; and you could take it back out. Neither survives the design -- an orb spent on a socket
+        ; is spent, which is what makes it compete with its own use as a wall. So the socket is
+        ; marked consumed and stops rendering, the orb is already hidden from the pickup and
+        ; simply never returns, and sockHit says which one for whatever the level hangs on it.
+        iny
+        sty sokWho              ; index+1; the consume happens when the animation lands
+        lda #${hx(SOK_ANIM)}
+        sta sokAn               ; orb phase while sokAn >= SOK_SHR, socket closing at or below it
         lda #$00
-        sta carry               ; the orb stays orbHidT from the pickup, so it draws as the
-        lda #$01                ;   socket's seated sprite and not as itself
+        sta sokVar
+        ; sokCX is the orb's CENTRE, not its left edge. A sprite shrinks about its left edge, so
+        ; walking obX directly made the ball drift left as it lost its expand bit -- 12 hires
+        ; pixels of it, which is exactly "it goes to the left of the socket". The centre is walked
+        ; and the half-width is taken off at draw time, where the variant's real width is known.
+        lda #${hx(ORB_HOLD_X + 24)}   ; held, expanded: 48 wide, so centre = left + 24
+        sta sokCX
+        lda #${hx(ORB_HOLD_Y + 42)}   ; and sokCY is the orb's BOTTOM, for the same reason: a
+        sta sokCY                     ;   sprite shrinks about its TOP edge, so walking obY made
+                                      ;   the ball climb 21 rasters as it lost its Y expand. Only
+                                      ;   visible when the socket is nearly under you, because
+                                      ;   otherwise the fall toward it hides the drift.
+        lda sokLC               ; the socket's centre column -> hires centre, +24 for the border
+        asl
+        clc
+        adc #$18
+        sec
+        sbc #${hx(ORB_HOLD_X + 24)}
+        cmp #$80                ; /4, ARITHMETIC: cmp #$80 seeds carry from bit 7, so ror keeps
+        ror                     ;   the sign. A plain lsr would send a leftward move rightwards.
+        cmp #$80
+        ror
+        sta sokDX
+        lda sokLY               ; the socket's top row is where the ball comes to rest
+        sec
+        sbc #${hx(ORB_HOLD_Y + 42)}
+        cmp #$80
+        ror
+        cmp #$80
+        ror
+        sta sokDY
+        lda #$00
+        sta carry               ; out of your hands from this instant; the animation owns it now
+        lda #$01
         sta entDty
         rts
 okPlain:inc blkVer              ; ...and setting one down closes a cell
@@ -12035,12 +12388,64 @@ hlSdn:  rts
 ; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
 ; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
 holeTail:
-        ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
+        ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
+        ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
+        ; points across the player's whole cell, ANY of which seeing the hole means it is drawn.
+        ; Deliberately a superset -- it was added because orbs popped in and out along a corridor
+        ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
+        ; The real test is the span walk in orbOne, and it works for any entity with an occluder
+        ; mask; holes had none, which is the only reason they were excluded. They have one now.
+        ; ONE COLUMN, the hole's centre. A hole is the wall's own colour, so partial occlusion
+        ; needs no handling -- it melts into the wall. Only "wholly behind" must stop drawing.
+        lda ocolN
+        bne hlOcDn              ; centre is off the left edge; the column tests below decide
+        lda ocol
+        cmp #${hx(NLOG)}
+        bcs hlOcDn              ; ...or off the right
+        sta ocl2
+        sta ocmax               ; a one-column box: ovWide then measures just that column
+        lda #$00
+        sta ovVis
+        sta ovOcc
+        lda #$01
+        sta ovProbe             ; probe: the walk returns instead of drawing or rejecting
+        lda #$80
+        sta ocanO               ; conservative, exactly as obLoop and the angel probe do
+        jsr occWalk
+        lda #$00
+        sta ovProbe
+        lda ovVis
+        beq orbNo               ; no visible column: it is wholly behind a wall
+hlOcDn: ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
 hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -> rung table,
                                 ;   hlRungS scans the socket's ${SOCK.L.length} rungs
         cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
         beq orbNo               ;   hole costs to draw.
         tax                     ; X = rung, and it indexes every table below
+        ; ---- closing on a swallowed orb? walk this socket down its own ladder ----
+        ; Rungs run nearest-first, so ADDING to the index shrinks it. Overlaps the orb's last
+        ; frame by one, which is what makes the two read as one motion rather than two events.
+        lda sokAn
+        beq hlNoShr
+        cmp #${hx(SOK_SHR + 1)}
+        bcs hlNoShr             ; still the orb's part of the animation
+        lda oidx                ; ...and only the socket actually doing the swallowing
+        sec
+        sbc #${hx(ORBS.length - 1)}   ; hole-like index + 1, which is what sokWho holds
+        cmp sokWho
+        bne hlNoShr
+        lda #${hx(SOK_SHR)}
+        sec
+        sbc sokAn               ; 0, 1, 2 ... as it closes
+        tay
+        txa                     ; the rung it would have drawn at...
+        clc
+        adc sokShrT,y           ; ...pushed down the ladder. A TABLE, not a shift: the step is 3
+        cmp #${hx(SOCK.L.length)}   ;   here and shifting only ever multiplies by a power of two
+        bcc hlShrX
+        lda #${hx(SOCK.L.length - 1)}   ; never past the smallest rung it has
+hlShrX: tax
+hlNoShr:
 hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
@@ -12048,6 +12453,17 @@ hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge
         cmp #251
         bcs orbNo               ; top past the last visible raster line
         sta o3
+        ; Remember where the last SOCKET was drawn. The swallow animation flies the orb to it, and
+        ; by the time that starts the socket is the cell you are facing -- so it was drawn this
+        ; frame and these are current. ocol is the 160-column grid; doubling gives the sprite X.
+        lda oidx
+        cmp #${hx(ORBS.length + HOLES_AT.length)}
+        bcc hlNoSk              ; an exit hole, not a socket
+        lda ocol
+        sta sokLC
+        lda o3
+        sta sokLY
+hlNoSk:
 hlPtr:  lda holePtrT,x          ; PATCHED
         sta ohP
 hlFlg:  lda holeFlagT,x         ; PATCHED
@@ -12897,6 +13313,185 @@ blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
 bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
+sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
+sokShrT: !byte ${[...Array(SOK_SHR)].map((_, i) => i * SOK_SSTEP).join(',')}   ; rungs down, per closing frame
+${WALL_DELTA ? `
+; ---- A WALL, TAKEN OUT AND PUT BACK ----
+; Both configurations of the room are built (the second in a subprocess, same trick the shadow
+; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
+; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
+; wall goes -- 13 runs become 5 here -- which is why this is ${WALL_DELTA.off.length} bytes and
+; not the one map byte you would guess.
+; The format is hzRun's: (addrLo, addrHi, value) until $ff. That routine already exists for the
+; per-cell run splits, so the runtime cost of changing a wall is a call to proven code.
+; NOT in the delta, deliberately: stepT (map-independent since STEPFB), orbOccT (orbOccAll
+; rebuilds every mask every frame) and the charset (canonical -- fontA is byte-identical with the
+; column present and removed).
+wallOffT: !byte ${WALL_DELTA.off.join(',')},$ff
+wallOnT: !byte ${WALL_DELTA.on.join(',')},$ff
+
+wallSt: !byte 0                 ; 0 = the wall is there
+dbgOnce2: !byte 1               ; WALLNOW's one-shot
+
+; ---- wallTog: flip it, either way ----
+wallTog:lda wallSt
+        bne wtBack
+        lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
+        sta wsN                 ;   the last frame of it -- see wallSink.
+        ldx #$9f                ; and wipe idT, because only the ~14-26 CAST columns are written
+        lda #$ff                ;   each frame and the rest still hold the cell some earlier pose
+wtClr:  sta idT,x               ;   struck there. Scanning those stale entries stretched the span
+        dex                     ;   to 0..158 while turning -- every wall on screen sank, not the
+        cpx #$ff                ;   doomed one. ($ff is safe as "no cell": ids are y*16+x and no
+        bne wtClr               ;   map here is 16 rows deep.)
+        rts
+wtBack: lda #<wallOnT           ; coming back: no animation, just put it there
+        sta hzRd+1
+        lda #>wallOnT
+        sta hzRd+2
+        lda #$00
+        beq wtGo                ; always taken
+wtOff:  lda #<wallOffT
+        sta hzRd+1
+        lda #>wallOffT
+        sta hzRd+2
+        lda #$01
+wtGo:   sta wallSt
+        jsr hzRun               ; hzRun sets its own X and walks to the $ff
+        inc blkVer              ; the obstacle map moved: the angel's fill must be redone
+        lda #$01
+        sta entDty              ; ...and the frame redrawn even if nothing else moved
+        jmp fallInv             ; renderSym's run cache still believes the old geometry -- a
+                                ;   column it thinks is unchanged is a column it will not repaint
+
+; ---- wallSink: the doomed wall dropping into the floor, one frame at a time ----
+; Called just before renderSym, which is the only place this can go: renderSym derives each
+; cell's min and max straight from colH (prepCells, which used to cache them, is gone), so
+; colH IS the height the wall will be drawn at.
+; idT holds the cell each column's ray struck -- written once per cast column and interpolated
+; across the spans -- so a column showing this wall's face is exactly one whose idT matches.
+; Halving colH a frame drops it into the floor in four. What is revealed above it is ceiling and
+; floor colour, not the room behind: the ray STOPPED at this wall, so nothing behind it was ever
+; cast. For four frames of a wall dissolving into white that is the effect, not a compromise --
+; the real geometry arrives on the last frame with the delta.
+wallSink:
+        lda wsN                 ; idle? Then there is no collapse to advance. Without this the
+        bne wsBusy              ;   fallthrough hits the dec wsN below on every ordinary frame,
+        rts                     ;   wrapping 0 -> $ff and re-running the collapse every 256 frames.
+wsBusy: lda #$ff                ; find the doomed wall's SPAN this frame. Scanning downward means
+        sta wsLo                ;   the first match is the rightmost column, so wsHi is written
+        sta wsHi                ;   once (guarded below) and wsLo keeps falling to the leftmost.
+        ldx #$9f
+wsFind: lda idT,x
+        cmp #${hx(WALL_DELTA.cell)}  ; the doomed cell's map id (y*16+x)
+        bne wsFN
+        stx wsLo
+        lda wsHi
+        cmp #$ff
+        bne wsFN
+        stx wsHi
+wsFN:   lda #$ff                ; consume it: an entry this frame's cast did not write must not
+        sta idT,x               ;   be matched again next frame. See wtClr.
+        dex
+        cpx #$ff                ; NOT bpl: the scan starts at column 159, which already has bit 7
+        bne wsFind              ;   set, so dex/bpl would fall through after testing ONE column.
+                                ;   Run until X wraps past zero instead.
+        lda wsHi
+        cmp #$ff
+        beq wsTick              ; not on screen this frame: nothing to shrink, but the clock
+                                ;   still has to run or the collapse would stall out of view
+        ; How low may a column go? To the wall BESIDE it, and no lower. The room behind the
+        ; doomed wall was never cast -- the ray stopped here -- so sinking past its
+        ; surroundings paints flat ceiling and floor colour, which reads as a hole in the
+        ; world. The columns just outside the span are the live answer to "what is the wall
+        ; around this", and being live they survive the player moving mid-collapse, which a
+        ; height captured once at arm time would not.
+        ldx wsHi
+        cpx #$9f
+        beq wfNoR               ; span runs to the right edge: no neighbour that side
+        inx
+        lda colH,x
+        bne wfGotR              ; treat 0 as no neighbour too
+wfNoR:  lda #$00
+wfGotR: sta wsFlr
+        ldx wsLo
+        beq wfDone              ; span runs to the left edge
+        dex
+        lda colH,x
+        cmp wsFlr
+        bcc wfDone              ; keep the TALLER side, so neither edge opens a gap
+        sta wsFlr
+
+        ; Applied PER COLUMN, so the wall does not go all at once: each column clamps as it
+        ; reaches the surrounding height, and the ones with least to fall clamp first. The
+        ; silhouette eats itself away instead of sinking as a block.
+wfDone: lda #$00
+        sta wsAny               ; ...and whether ANY column is still falling
+        ldx wsHi
+wsLp:   lda colH,x
+        jsr wsScl
+        cmp wsFlr
+        bcc wsClamp
+        beq wsClamp
+        inc wsAny               ; still standing proud of the wall beside it
+        jmp wsPut
+wsClamp:lda wsFlr               ; level with its surroundings: this column has become the room
+wsPut:  sta colH,x
+        cpx wsLo
+        beq wsScan
+        dex
+        jmp wsLp
+wsScl:  sta wsT                 ; A = h -> A = h * wsN / WS_N, X untouched. The accumulator
+        lda #$00                ;   STARTS at h and adds h another wsN times, so wsN = WS_N-1
+        sta wsT2                ;   returns exactly h -- which is the first frame that scales
+        lda wsT                 ;   anything, since arming wipes idT and the span is only found
+        ldy wsN                 ;   on the frame after.
+wsMul:  clc
+        adc wsT
+        bcc wsM1
+        inc wsT2
+wsM1:   dey
+        bne wsMul
+        ldy #${hx(WS_SH)}       ; >> log2(WS_N), 16-bit
+wsDiv:  lsr wsT2
+        ror
+        dey
+        bne wsDiv
+        rts
+
+        ; Every column has clamped, so there is nothing left to animate: end it here rather
+        ; than sitting on a finished picture until the clock runs out. Reached ONLY from the
+        ; bottom of the scan loop -- a frame that found no span exits at wsTick instead, and
+        ; must, because arming wipes idT and that first frame is indistinguishable from this
+        ; one on wsAny alone. Conflating them ended the collapse before it drew a frame.
+wsScan: lda wsAny
+        beq wsDone
+wsTick: dec wsN
+        bne wsMore
+wsDone: lda #$00                ; the wsAny path skips the dec, so stop the clock by hand or the
+        sta wsN                 ;   idle guard lets the whole collapse run again next frame
+        jsr wtOff               ; the collapse has finished: NOW the map really changes
+        rts
+wsMore: lda #$01
+        sta entDty              ; keep the frame alive while it falls...
+        jmp fallInv             ; ...and repaint in full, since colH is moving under the cache
+wsN:    !byte 0                 ; frames of collapse left
+wsT:    !byte 0
+wsT2:   !byte 0
+wsAny:  !byte 0                 ; any column still above the wall beside it this frame?
+wsFlr:  !byte 0                 ; that surrounding height, recomputed live every frame
+wsLo:   !byte 0
+wsHi:   !byte 0
+` : ''}
+sokAn:  !byte 0                 ; frames left in the swallow; 0 = idle
+sokWho: !byte 0                 ; hole-like index+1 of the socket doing the swallowing
+sokLC:  !byte 0                 ; the last socket DRAWN: its centre column...
+sokLY:  !byte 0                 ; ...and its sprite Y, which the orb flies to
+sokVar: !byte 0                 ; the orb's ladder variant this frame
+sokCX:  !byte 0                 ; and where it is, walked by sokDX/sokDY
+sokCY:  !byte 0
+sokDX:  !byte 0
+sokDY:  !byte 0
         ; The fill's queue. Moved out of the $3d40 block, which the wider level 2 map pushed three
         ; bytes past $6100 -- this grows with the open-cell count, so it is exactly the thing that
         ; should not live in a block with no slack. Pure scratch: nothing swaps it.
@@ -13493,6 +14088,14 @@ try {
     throw new Error(`fill chains end at $${r.labels.chainEnd.toString(16)}, past the height tables at $${HTABLE.toString(16)}`);
   // LABELS=<substr> prints matching label addresses, so a debugger can be pointed at a routine
   // without hand-assembling. The listing has the labels; only the assembler knows their addresses.
+  // LABELAT=<hex> lists every label whose address falls in that page, which is how a
+  // runtime clobber gets pinned to the table that owns the address.
+  if (process.env.LABELAT) {
+    const pg = parseInt(process.env.LABELAT, 16) >> 8;
+    const hits = Object.entries(r.labels).filter(([, v]) => (v >> 8) === pg)
+      .sort((a, b) => a[1] - b[1]);
+    for (const [k, v] of hits) console.log(`  @${v.toString(16)} ${k}`);
+  }
   if (process.env.LABELS)
     for (const [k, v] of Object.entries(r.labels).sort((a, b) => a[1] - b[1]))
       if (k.toLowerCase().includes(process.env.LABELS.toLowerCase()))
@@ -13522,7 +14125,7 @@ try {
     { tag: 'C', name: 'ICHR', first: true, at: 0xc000, data: [...fontA] },
     ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: 0xc000, data: ORBBM.flat() },
                    { tag: 'H', name: 'IHOL', at: HOLEBASE, data: HOLEBM.flat() },
-                   ...(NOSOCK ? [] : [{ tag: 'E', name: 'ISEAT', at: SEATBASE, data: SEAT.BM.flat() }])] : []),
+                   ] : []),   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
     // socket ladder vacates under NOSOCK. This is DATA the VIC never reads -- it is copied to a
@@ -13627,8 +14230,15 @@ try {
   // `--seg`, so nothing else in this accounting knows it is there, and the figure counted the
   // sprites we already ship as room for more. NET is the number that decides what a new object
   // can have; gross is kept alongside it so the difference reads as "spent", not as a correction.
+  // ...and neither is anything else that reaches bank 3 by a route the assembler cannot see. The
+  // figure was reporting 47 free slots where 27 were real, every time, because it counted only the
+  // two sprite ladders: the LOADER relocates its body to LOADER_RUN and runs there, and SEATBASE
+  // holds either the seat ladder or IPIC depending on the build. All three are as occupied as any
+  // table; leaving them out is how "3K free" turned into a socket ladder that did not fit.
   const sprSeg = SPRITES ? [[SPRBASE, SPRBASE + NORBBM * 64],
-                            [HOLEBASE, HOLEBASE + HOLEBM.length * 64]] : [];
+                            [HOLEBASE, HOLEBASE + HOLEBM.length * 64],
+                            [LOADER_RUN, 0xd000],
+                            ...(PICSEG.length ? [[SEATBASE, SEATBASE + PICSEG.length]] : [])] : [];
   const slotsIn = occupied => {
     const gaps = []; let at = VBANK;
     for (const [lo, hi] of [...occupied].sort((a, b) => a[0] - b[0])) {

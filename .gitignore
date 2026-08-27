@@ -49,3 +49,5 @@ orb-*.png
 ang6-*.png
 vice-screen-*.png
 .lvl2-tables.json
+# the WALLOFF=1 subprocess dump, same as above
+.wall-tables.json

@@ -775,6 +775,8 @@ ccf:    sta $d800,x
         sta marked              ;   no state set up, and the program fell out to BASIC
         lda #$0f
         sta sndD
+        lda #$00
+        sta sokAn               ; RETURN restarts by JUMPING to entry, not by reloading, so
         jsr objInit             ; entities back to their starting cells -- RETURN restarts by
                                 ;   jumping here, and their state is all live RAM
         lda #$00
@@ -4281,24 +4283,101 @@ ofyOk:  sta ofy
                                 ;   VIC priority, and the two allocators meet in the middle.
         lda #$ff
         sta omMc                ; every sprite multicolor unless the icon says otherwise
-        lda carry               ; ---- the carried orb, as an icon in the lower left ----
-        beq omNoIco             ; SLOT 0, and the world then allocates from 1. Sprite-vs-sprite
-        lda #$24     ;   priority is fixed by slot number and nothing else, so being
-        sta obP                 ;   the HUD means being slot 0 -- at 7 a near orb in the corner
-        lda #12                 ;   would have drawn over it.
-        sta obC
-        lda #40
+        lda sokAn               ; ---- being swallowed by a socket? animate instead of holding ----
+        bne omSwal
+        lda carry               ; ---- the carried orb, HELD IN FRONT OF YOU ----
+        beq omNoIco             ; Was a small hi-res icon in the lower left. Now it is the orb
+                                ;   itself at its nearest ladder rung -- variant 0, a 21-row
+                                ;   bitmap vertically expanded to 42 -- parked centre-bottom with
+                                ;   its ground shadow off the end of the screen, so it reads as
+                                ;   carried rather than as a HUD element.
+                                ; SLOT 0, and the world then allocates from 1. Sprite-vs-sprite
+                                ;   priority is fixed by slot number and nothing else, so being
+                                ;   in the foreground means being slot 0 -- at 7 a near orb in
+                                ;   the corner would have drawn over it.
+        tax
+        dex                     ; carry is index+1, so zero can mean empty
+        lda orbColT2,x
+        sta obC                 ; the orb's OWN body colour, not the icon's fixed grey
+        lda #$00
+        sta obP
+        lda #$a0
         sta obX
-        lda #215
+        lda #$d2
         sta obY
         lda #$ff
         sta obIX                ; not an entity: this is the value occStamp's hole test already
-                                ;   rejects, so the icon stamps no occluders
+                                ;   rejects, so it stamps no occluders
         lda #$01
         sta omEn
         sta onv                 ; world entities start at slot 1
-        lda #$fe
-        sta omMc                ; the icon art is HI-RES, so slot 0 leaves multicolor
+        sta omYY                ; BOTH ways, which is what orbExpT says for this variant and what
+        sta omXX                ;   the world does for it -- expanded vertically only, it was half
+                                ;   its proper width. Safe to store rather than OR: both buffers
+                                ;   were cleared just above and the world ORs its slots in after.
+        jmp omNoIco
+        ; ---- the swallow, one drawn step a frame ----
+omSwal: lda sokAn
+        cmp #$03
+        bcc omSwTk              ; the orb has gone; only the socket is closing now
+        ldx sokVar
+        lda orbPtrT,x
+        sta obP
+        lda #12
+        sta obC
+        lda #$ff
+        sta obIX
+        lda #$01
+        sta omEn
+        sta onv
+        ldy sokVar              ; the smaller rungs are not all expanded; ask the same table the
+        lda orbExpT,y           ;   world asks rather than assuming
+        beq omSwHf
+        lda #$01
+        sta omXX
+        sta omYY
+        lda sokCX               ; expanded: 48 hires wide, 42 rasters tall
+        sec
+        sbc #$18
+        sta obX
+        lda sokCY
+        sec
+        sbc #$2a
+        jmp omSwPy
+omSwHf: lda sokCX               ; not expanded: 24 by 21
+        sec
+        sbc #$0c
+        sta obX
+        lda sokCY
+        sec
+        sbc #$15
+omSwPy: sta obY
+omSwNx: clc                     ; walk it toward the socket and down the ladder
+        lda sokCX
+        adc sokDX
+        sta sokCX
+        clc
+        lda sokCY
+        adc sokDY
+        sta sokCY
+        lda sokVar
+        clc
+        adc #$07
+        cmp #$16
+        bcc omSwV
+        lda #$15  ; never past the orb's own rungs and into the angel's
+omSwV:  sta sokVar
+omSwTk: dec sokAn
+        bne omNoIco
+        ; ---- landed: the socket eats it, and both leave the world ----
+        ldy sokWho
+        dey
+        lda #$ff
+        sta hlSeat,y
+        iny
+        sty sockHit
+        lda #$01
+        sta entDty
 omNoIco:
         lda py+1                ; which cell is the player standing in?
         asl
@@ -5268,8 +5347,10 @@ opBR3:  sta ocr
         ; needed. A corner cell showing two different runs was the source of most of that scheme's
         ; artifacts and of its "every run in the cell must agree" rule; per column, that case does
         ; not arise.
-        lda ocanO
-        bpl opDone              ; build time: nothing reachable from this cell can occlude it, and
+occWalk:lda ocanO       ; ENTRY POINT for a probe: with ovProbe set, ohHide rts's instead of
+        bpl opDone              ;   jumping to orbNo, so a caller can ask the question and act on
+                                ;   the answer itself. build time: nothing reachable from this
+                                ;   cell can occlude it, and
                                 ; that is true of 56% of candidates -- they never enter the walk
 
         ldy oidx
@@ -5540,6 +5621,9 @@ hoLp:   lda hoI                 ;   biggest thing here
         lda holeSeeT,x
         and orbBitT,y
         beq hoNx                ; not visible from this cell: ~25 cycles against a ~2,400 projection
+        ldy hoI                 ; ...and a CONSUMED socket is not in the world at all any more.
+        lda hlSeat,y            ; Exit holes keep 0 here for ever, so this costs them one compare.
+        bmi hoNx
         lda hoI
         jsr hlSet               ; ink and ladder for THIS one
         lda hoI
@@ -6231,7 +6315,7 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
-        lda #$01
+        lda #$03   ; orbs AND hole-like entities
 ooAlp:  sta ooAI
         tax
         jsr orbOcc1
@@ -6898,24 +6982,8 @@ orbUse: lda carry
         ldx odCell
         cpx #$ff
         bne okTake
-        ; nothing loose adjacent -- but the cell you are facing may hold a seated orb
-        jsr dropPick
-        ldx odCell
-        cpx #$ff
-        beq okDone
-        jsr hlAt
-        cpy #$ff
-        beq okDone
-        lda hlSeat,y
-        bpl okDone              ; that socket is empty
-        and #$0f
-        tax                     ; the orb that was sitting in it comes back out
-        lda #$00
-        sta hlSeat,y
-        inx
-        stx carry
-        lda #$01
-        sta entDty
+        ; nothing loose adjacent, and nothing to take back: seating is one-way now, so a
+        ; filled socket has nothing in it to retrieve.
         rts
 okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may exist now
         lda #$01                ; out of the world, into the hands
@@ -6942,15 +7010,52 @@ orbPut: jsr dropPick            ; ---- put down ----
         cpy #$ff
         beq okPlain
         lda hlSeat,y
-        bmi okDone              ; that one is already full: keep hold of it
-        lda carry
-        sec
-        sbc #$01                ; carry is index+1
-        ora #$80                ; bit 7 = seated, low nibble = which orb
-        sta hlSeat,y
+        bmi okDone              ; already used: bit 7 now means CONSUMED, and it is one-way
+        ; ---- ONE WAY. The orb and the socket both leave the world. ----
+        ; They used to seat: the orb stayed orbHidT and drew as a half-ball sitting in the dish,
+        ; and you could take it back out. Neither survives the design -- an orb spent on a socket
+        ; is spent, which is what makes it compete with its own use as a wall. So the socket is
+        ; marked consumed and stops rendering, the orb is already hidden from the pickup and
+        ; simply never returns, and sockHit says which one for whatever the level hangs on it.
+        iny
+        sty sokWho              ; index+1; the consume happens when the animation lands
+        lda #$06
+        sta sokAn               ; orb phase while sokAn >= SOK_SHR, socket closing at or below it
         lda #$00
-        sta carry               ; the orb stays orbHidT from the pickup, so it draws as the
-        lda #$01                ;   socket's seated sprite and not as itself
+        sta sokVar
+        ; sokCX is the orb's CENTRE, not its left edge. A sprite shrinks about its left edge, so
+        ; walking obX directly made the ball drift left as it lost its expand bit -- 12 hires
+        ; pixels of it, which is exactly "it goes to the left of the socket". The centre is walked
+        ; and the half-width is taken off at draw time, where the variant's real width is known.
+        lda #$b8   ; held, expanded: 48 wide, so centre = left + 24
+        sta sokCX
+        lda #$fc   ; and sokCY is the orb's BOTTOM, for the same reason: a
+        sta sokCY                     ;   sprite shrinks about its TOP edge, so walking obY made
+                                      ;   the ball climb 21 rasters as it lost its Y expand. Only
+                                      ;   visible when the socket is nearly under you, because
+                                      ;   otherwise the fall toward it hides the drift.
+        lda sokLC               ; the socket's centre column -> hires centre, +24 for the border
+        asl
+        clc
+        adc #$18
+        sec
+        sbc #$b8
+        cmp #$80                ; /4, ARITHMETIC: cmp #$80 seeds carry from bit 7, so ror keeps
+        ror                     ;   the sign. A plain lsr would send a leftward move rightwards.
+        cmp #$80
+        ror
+        sta sokDX
+        lda sokLY               ; the socket's top row is where the ball comes to rest
+        sec
+        sbc #$fc
+        cmp #$80
+        ror
+        cmp #$80
+        ror
+        sta sokDY
+        lda #$00
+        sta carry               ; out of your hands from this instant; the animation owns it now
+        lda #$01
         sta entDty
         rts
 okPlain:inc blkVer              ; ...and setting one down closes a cell
@@ -7350,12 +7455,64 @@ hlSdn:  rts
 ; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
 ; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
 holeTail:
-        ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
+        ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
+        ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
+        ; points across the player's whole cell, ANY of which seeing the hole means it is drawn.
+        ; Deliberately a superset -- it was added because orbs popped in and out along a corridor
+        ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
+        ; The real test is the span walk in orbOne, and it works for any entity with an occluder
+        ; mask; holes had none, which is the only reason they were excluded. They have one now.
+        ; ONE COLUMN, the hole's centre. A hole is the wall's own colour, so partial occlusion
+        ; needs no handling -- it melts into the wall. Only "wholly behind" must stop drawing.
+        lda ocolN
+        bne hlOcDn              ; centre is off the left edge; the column tests below decide
+        lda ocol
+        cmp #$a0
+        bcs hlOcDn              ; ...or off the right
+        sta ocl2
+        sta ocmax               ; a one-column box: ovWide then measures just that column
+        lda #$00
+        sta ovVis
+        sta ovOcc
+        lda #$01
+        sta ovProbe             ; probe: the walk returns instead of drawing or rejecting
+        lda #$80
+        sta ocanO               ; conservative, exactly as obLoop and the angel probe do
+        jsr occWalk
+        lda #$00
+        sta ovProbe
+        lda ovVis
+        beq orbNo               ; no visible column: it is wholly behind a wall
+hlOcDn: ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
 hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -> rung table,
-                                ;   hlRungS scans the socket's 8 rungs
+                                ;   hlRungS scans the socket's 10 rungs
         cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
         beq orbNo               ;   hole costs to draw.
         tax                     ; X = rung, and it indexes every table below
+        ; ---- closing on a swallowed orb? walk this socket down its own ladder ----
+        ; Rungs run nearest-first, so ADDING to the index shrinks it. Overlaps the orb's last
+        ; frame by one, which is what makes the two read as one motion rather than two events.
+        lda sokAn
+        beq hlNoShr
+        cmp #$04
+        bcs hlNoShr             ; still the orb's part of the animation
+        lda oidx                ; ...and only the socket actually doing the swallowing
+        sec
+        sbc #$01   ; hole-like index + 1, which is what sokWho holds
+        cmp sokWho
+        bne hlNoShr
+        lda #$03
+        sec
+        sbc sokAn               ; 0, 1, 2 ... as it closes
+        tay
+        txa                     ; the rung it would have drawn at...
+        clc
+        adc sokShrT,y           ; ...pushed down the ladder. A TABLE, not a shift: the step is 3
+        cmp #$0a   ;   here and shifting only ever multiplies by a power of two
+        bcc hlShrX
+        lda #$09   ; never past the smallest rung it has
+hlShrX: tax
+hlNoShr:
 hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
@@ -7363,6 +7520,17 @@ hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge
         cmp #251
         bcs orbNo               ; top past the last visible raster line
         sta o3
+        ; Remember where the last SOCKET was drawn. The swallow animation flies the orb to it, and
+        ; by the time that starts the socket is the cell you are facing -- so it was drawn this
+        ; frame and these are current. ocol is the 160-column grid; doubling gives the sprite X.
+        lda oidx
+        cmp #$04
+        bcc hlNoSk              ; an exit hole, not a socket
+        lda ocol
+        sta sokLC
+        lda o3
+        sta sokLY
+hlNoSk:
 hlPtr:  lda holePtrT,x          ; PATCHED
         sta ohP
 hlFlg:  lda holeFlagT,x         ; PATCHED
@@ -7614,18 +7782,18 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
-holePtrT: !byte 160,162,164,166,169,172,175,178,181,184,187,190,193,196,198,200,202,204,206,208,210,212,214,216,218,220,222,224,226,228,230,231,232,233,234
-holeXOffT: !byte 24,24,24,36,36,36,36,36,36,36,36,36,36,24,24,24,24,24,24,24,24,24,24,24,24,12,12,12,12,12,6,6,6,6,6
-holeYBaseT: !byte 119,121,123,124,126,127,129,130,132,133,134,135,137,138,139,140,141,141,143,143,143,145,145,145,147,147,147,148,148,149,149,149,150,150,150
-holeFlagT: !byte 6,6,6,7,7,7,7,7,7,15,15,15,15,14,14,14,14,6,6,6,6,6,6,6,6,2,2,2,2,2,1,1,1,1,1
+holePtrT: !byte 160,162,165,168,171,174,177,180,182,184,186,188,190,192,193,194,195,196,197,198
+holeXOffT: !byte 24,36,36,36,36,36,36,24,24,24,24,24,24,12,12,6,6,6,6,6
+holeYBaseT: !byte 121,124,127,130,133,135,137,139,141,143,143,145,147,147,148,149,149,150,150,150
+holeFlagT: !byte 6,7,7,7,15,15,15,14,14,6,6,6,6,5,5,1,1,1,1,1
         ; ---- the socket's ladder: same tables, half the radius ----
         ; No 256-byte h -> rung table for this one. The hole earned its page at 35 rungs; a
-        ; socket has 8, so hlRungS scans and the page stays spent on something else.
-sockPtrT: !byte 235,237,239,241,243,245,246,247
-sockXOffT: !byte 24,24,24,12,12,6,6,6
-sockYBaseT: !byte 138,140,143,145,146,148,149,150
-sockFlagT: !byte 6,6,6,2,2,1,1,1
-sockHT: !byte 107,94,80,67,54,40,27,13   ; DESCENDING h thresholds, scanned by hlRungS
+        ; socket has 10, so hlRungS scans and the page stays spent on something else.
+sockPtrT: !byte 190,190,190,192,193,194,195,196,197,198
+sockXOffT: !byte 24,24,24,12,12,6,6,6,6,6
+sockYBaseT: !byte 138,140,143,145,146,148,148,149,150,150
+sockFlagT: !byte 14,14,14,13,13,9,9,9,9,9
+sockHT: !byte 107,94,80,67,54,40,34,27,20,13   ; DESCENDING h thresholds, scanned by hlRungS
         ; ---- and an orb seated in one ----
 
 orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1,23,21,21,19,17,15,13,12,11,11,10,9,8,7,6,5,5,4,3,2
@@ -7681,8 +7849,8 @@ runPlaneT: !byte 0,1,2,3,6,5,7,8,11,10,12,1,2,3,2,3,4,5,7,6,8,0,0,0,0
 runFaceT: !byte 0,128,0,128,128,0,0,128,128,0,0,129,1,129,1,129,1,129,129,1,1,0,0,0,0
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,0,0,0,0
-orbOccLoT: !byte 0,4
-orbOccHiT: !byte 112,112
+orbOccLoT: !byte 0,4,8,12
+orbOccHiT: !byte 112,112,112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 orbXCT: !byte 6,6,6,6
@@ -7989,7 +8157,7 @@ hlRungS:txa
 hrsL:   cmp sockHT,y
         bcs hrsHit
         iny
-        cpy #$08
+        cpy #$0a
         bcc hrsL
         lda #$ff
         rts
@@ -8372,7 +8540,7 @@ hlFillT: !byte 0,0
 hlSeat: !fill 2, 0
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
-holeVarT: !byte 255,255,255,255,255,255,255,34,34,34,33,33,33,32,32,32,32,31,31,31,30,30,30,29,29,29,29,28,28,28,27,27,27,27,26,26,26,25,25,25,24,24,24,24,23,23,23,22,22,22,21,21,21,21,20,20,20,19,19,19,18,18,18,18,17,17,17,16,16,16,15,15,15,15,14,14,14,13,13,13,12,12,12,12,12,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,8,7,7,7,7,6,6,6,6,5,5,5,5,4,4,4,4,3,3,3,3,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+holeVarT: !byte 255,255,255,255,255,255,255,19,19,19,18,18,18,17,17,17,17,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; ---- CPU-only tables, lifted clear of VIC bank 0 ----
         ; None of this is ever fetched by the VIC, so none of it belongs in the 16K the
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
@@ -8475,7 +8643,7 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,
         * = $7000
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte 164,241,6,0,164,81,6,0
+orbOccT: !byte 164,241,6,0,164,81,6,0,164,81,5,0,164,81,5,0
 ; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
@@ -8486,7 +8654,7 @@ sndV2H: !byte 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3
 sndVolT: !byte 15,12,10,8,7,6,5,4,3,3,3,3,2,2,2,2
 ; Where each picture's map lives. The first is inside the image next to the charset; the rest
 ; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
-picLoT: !byte <faceScrT,$40
+picLoT: !byte <faceScrT,$00
 picHiT: !byte >faceScrT,$c9
 ; dieN is the death counter and it is DATA, not an equate, on purpose: dieKey restarts with
 ; "jmp entry", which reloads nothing, so an emitted 0 is the only initialisation it ever gets --
@@ -8774,7 +8942,7 @@ rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,2
         ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
         * = $97a0
-seatPtrT: !byte 37,38,38,39,39,40,40,41,42,42,43,37,38,39,40,42,43,44,45,46,47,48
+seatPtrT: !byte 36,37,37,38,38,39,39,40,41,41,42,36,37,38,39,41,42,43,44,45,46,47
 seatYBaseT: !byte 132,134,134,134,134,136,136,138,140,140,142,141,142,142,143,145,146,146,147,147,148,149
         * = $9800
 colGrpT: !byte 0,0,0,0,1,1,1,1,2,2,3,3,3,3,4,4,4,5,5,5,5,6,6,6,7,7,7,7,8,8,8,9,9,9,9,10,10,10,10,11,11,11,11,11,12,12,12,12,13,13,13,13,13,13,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,11,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,7,7,7,7,6,6,6,5,5,5,5,4,4,4,3,3,3,3,2,2,1,1,1,1,0,0,0,0
@@ -8846,6 +9014,18 @@ blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
 bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
+sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
+sokShrT: !byte 0,3,6   ; rungs down, per closing frame
+
+sokAn:  !byte 0                 ; frames left in the swallow; 0 = idle
+sokWho: !byte 0                 ; hole-like index+1 of the socket doing the swallowing
+sokLC:  !byte 0                 ; the last socket DRAWN: its centre column...
+sokLY:  !byte 0                 ; ...and its sprite Y, which the orb flies to
+sokVar: !byte 0                 ; the orb's ladder variant this frame
+sokCX:  !byte 0                 ; and where it is, walked by sokDX/sokDY
+sokCY:  !byte 0
+sokDX:  !byte 0
+sokDY:  !byte 0
         ; The fill's queue. Moved out of the $3d40 block, which the wider level 2 map pushed three
         ; bytes past $6100 -- this grows with the open-cell count, so it is exactly the thing that
         ; should not live in a block with no slack. Pure scratch: nothing swaps it.
@@ -8937,12 +9117,13 @@ lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,9,14,14
         !byte 4,4,4,4,8,9,4,4,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,120,6,0
-        !byte 0,0,1,0,4,48,15,43,0,48,15,43,0,255,0,0,0,0,$ff
+        !byte 0,0,1,0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255
+        !byte 0,0,0,0,$ff
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlDstLoT: !byte <mapT,<blkT,<runWT,<runET,<runNT,<runST,<runPlaneT,<runFaceT,<runByteT,<runBitT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>blkT,>runWT,>runET,>runNT,>runST,>runPlaneT,>runFaceT,>runByteT,>runBitT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$00,$00,$00,$00,$00,$19,$19,$19,$19,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$02,$08,$01,$01,$01,$01,$01,$01
+lvlLenT: !byte $00,$00,$00,$00,$00,$00,$19,$19,$19,$19,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$04,$10,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9101,76 +9282,76 @@ rampThi: !byte 22,22,22,22,101,111,162,157,157,142,159,178,170,169,169,78,22,22,
         !byte 96,102,61,5,5,5,5,5,24,175,175,175,183,80,201,196,96,102,61,5,5,5,5,5
         !byte 197,183,194,194,194,203,200,195,41,102,61,5,5,5,5,5
         * = $b100
-stepT1lo: !byte 89,101,111,162,158,50,50,159,125,22,51,86,134,117,181,49,198,172,22,51,11,70,181,3
-        !byte 138,138,189,22,14,106,67,109,35,142,20,182,22,14,86,13,73,19,207,54,149,22,14,68
-        !byte 70,2,3,138,138,176,69,12,204,11,63,19,19,20,180,47,60,8,46,126,19,110,105,25
-        !byte 22,14,11,63,2,3,87,138,97,151,6,204,8,59,150,50,50,125,113,145,8,70,59,187
-        !byte 91,163,193,151,14,11,70,59,3,87,205,132,156,156,191,103,2,43,34,50,125,131,94,72
-        !byte 103,2,2,33,206,144,156,14,11,103,2,43,87,205,127,88,88,88,103,2,3,48,21,182
-        !byte 52,29,57,140,2,211,3,48,218,88,14,8,70,2,3,87,39,127,192,191,192,192,192,3
-        !byte 34,85,182,64,64,184,140,18,3,34,164,104,188,185,36,32,32,77,34,66,15,168,168,152
-        !byte 168,168,153,34,21,182,79,199,152,140,135,153,153,164,215,188,188,36,167,108,130,65,21,42
+stepT1lo: !byte 89,101,111,162,158,50,50,159,125,9,134,86,134,117,181,49,198,172,181,49,49,49,49,138
+        !byte 138,138,189,22,14,106,67,109,35,142,20,182,47,13,86,13,73,19,207,54,149,185,183,49
+        !byte 49,49,138,138,138,176,69,12,204,11,63,19,19,20,180,47,60,8,46,126,19,110,105,25
+        !byte 185,183,80,201,122,132,87,138,97,151,6,204,8,59,150,50,50,125,113,145,8,70,59,187
+        !byte 91,163,193,185,183,80,201,122,132,87,205,132,156,156,191,103,157,103,150,50,125,131,94,72
+        !byte 103,2,2,33,206,144,185,183,80,201,122,96,87,205,127,88,88,88,103,157,212,150,28,182
+        !byte 52,29,57,140,2,211,3,48,218,185,183,80,201,122,96,87,39,127,192,191,192,192,192,212
+        !byte 150,28,182,64,64,184,140,18,3,34,164,104,188,185,36,32,32,77,34,66,15,168,168,152
+        !byte 168,168,155,150,155,182,79,199,152,140,135,153,153,164,215,188,188,36,167,108,130,65,21,42
         !byte 7,7,152,152,7,7,152,152,215,27,24,152,152,135,155,153,209,155,23,183,80,201,122,120
         !byte 141,30,30
         * = $b200
-stepT1hi: !byte 9,9,147,116,117,154,142,20,16,22,51,134,181,181,49,198,198,208,22,51,11,70,181,3
-        !byte 138,138,31,89,14,68,100,109,71,71,54,149,22,14,13,13,181,49,198,198,92,22,14,68
-        !byte 70,2,3,138,176,176,47,60,11,63,63,19,19,54,40,47,60,17,46,73,148,91,25,97
-        !byte 22,14,11,63,2,3,138,132,132,113,45,8,63,59,187,150,54,40,81,145,17,37,59,98
-        !byte 91,205,139,151,14,11,70,59,3,205,132,132,75,191,8,103,2,43,34,50,40,81,29,133
-        !byte 83,2,43,107,82,144,156,14,11,103,2,43,205,173,173,75,191,191,103,2,3,48,21,40
-        !byte 219,29,57,56,90,3,48,114,128,88,14,8,70,2,3,39,179,179,192,191,152,103,192,3
-        !byte 34,85,40,76,166,184,62,32,77,34,85,15,175,185,36,32,32,77,58,66,177,202,191,152
-        !byte 152,135,153,34,21,40,213,199,174,123,108,74,34,21,42,175,183,80,201,130,130,58,21,5
+stepT1hi: !byte 9,9,147,116,117,154,142,20,16,9,134,134,181,181,49,198,198,208,181,49,49,49,49,138
+        !byte 138,138,31,89,14,68,100,109,71,71,54,149,47,13,13,13,181,49,198,198,92,185,183,49
+        !byte 49,49,138,138,176,176,47,60,11,63,63,19,19,54,40,47,60,17,46,73,148,91,25,97
+        !byte 185,183,80,201,122,132,138,132,132,113,45,8,63,59,187,150,54,40,81,145,17,37,59,98
+        !byte 91,205,139,185,183,80,201,122,132,205,132,132,75,191,8,103,157,103,150,50,40,81,29,133
+        !byte 83,2,43,107,82,144,185,183,80,201,122,96,205,173,173,75,191,191,103,157,212,150,28,40
+        !byte 219,29,57,56,90,3,48,114,128,185,183,80,201,122,96,39,179,179,192,191,152,103,192,212
+        !byte 150,28,40,76,166,184,62,32,77,34,85,15,175,185,36,32,32,77,58,66,177,202,191,152
+        !byte 152,135,155,150,155,40,213,199,174,123,108,74,34,21,42,175,183,80,201,130,130,58,21,5
         !byte 7,152,152,152,135,155,209,209,40,24,190,152,135,135,153,209,21,42,4,4,203,200,195,41
         !byte 102,61,42
         * = $b300
-stepT2lo: !byte 137,101,111,112,158,157,50,159,125,22,51,134,134,181,49,54,172,172,22,51,197,95,181,38
-        !byte 198,138,189,22,22,106,67,53,154,142,159,182,22,14,86,13,73,19,54,25,92,22,14,68
-        !byte 95,95,38,10,138,176,69,55,106,11,63,19,110,20,180,47,60,8,46,73,19,110,54,97
-        !byte 22,55,11,63,95,38,138,138,97,151,6,8,8,8,150,150,118,180,220,145,8,70,59,187
-        !byte 150,163,193,6,51,8,70,59,38,10,205,132,156,191,191,103,103,43,107,28,128,131,94,8
-        !byte 103,103,43,33,206,214,75,51,197,37,2,43,87,205,127,88,191,191,103,18,3,48,28,128
-        !byte 52,29,57,140,2,212,48,48,218,75,29,8,95,18,77,87,39,127,192,191,191,152,157,26
-        !byte 34,85,15,64,52,184,140,18,26,3,164,104,188,185,184,32,32,77,34,66,15,168,191,152
-        !byte 152,18,153,65,21,42,79,79,213,140,135,153,34,164,104,188,188,188,123,95,130,65,21,42
-        !byte 7,7,152,152,135,153,209,30,5,27,27,152,135,135,153,209,209,172,23,23,197,95,95,38
+stepT2lo: !byte 137,101,111,112,158,157,50,159,125,89,9,134,134,181,49,54,172,172,23,9,86,134,181,49
+        !byte 138,138,189,22,22,106,67,53,154,142,159,182,89,14,86,13,73,19,54,25,92,23,14,86
+        !byte 13,181,49,138,138,176,69,55,106,11,63,19,110,20,180,47,60,8,46,73,19,110,54,97
+        !byte 23,55,8,46,73,49,138,138,97,151,6,8,8,8,150,150,118,180,220,145,8,70,59,187
+        !byte 150,163,193,23,145,8,37,121,129,87,205,132,156,191,191,103,103,43,107,40,40,131,94,8
+        !byte 103,103,43,33,206,214,23,23,133,37,2,129,87,205,127,88,191,191,103,2,211,48,39,40
+        !byte 52,29,57,140,2,212,48,48,218,23,23,29,140,18,77,87,39,127,192,191,191,152,2,211
+        !byte 34,85,40,64,52,184,140,18,26,3,164,104,188,185,184,32,32,77,34,66,15,168,191,152
+        !byte 152,135,153,34,21,40,79,79,213,140,135,153,34,164,104,188,188,188,123,95,130,65,21,42
+        !byte 7,7,152,152,135,153,209,21,40,27,27,152,135,135,153,209,209,42,23,23,197,95,95,38
         !byte 10,30,30
         * = $b400
-stepT2hi: !byte 9,51,147,93,119,216,216,171,16,22,51,134,134,181,49,198,198,208,22,51,197,95,181,38
-        !byte 198,138,31,89,14,86,13,109,71,216,171,16,22,14,13,13,181,49,198,92,92,22,14,68
-        !byte 95,95,38,10,138,176,47,60,11,63,63,19,110,40,40,47,17,17,46,73,148,107,97,97
-        !byte 22,55,11,63,95,38,138,97,132,220,45,8,63,59,187,91,163,40,81,145,17,70,121,148
-        !byte 107,205,40,6,51,8,70,59,38,10,132,132,75,45,8,103,103,43,107,28,128,131,133,133
-        !byte 83,2,129,107,205,144,75,51,197,37,2,43,205,173,173,75,191,8,103,18,3,48,28,128
-        !byte 64,29,57,56,90,3,87,39,217,75,29,8,95,18,77,39,127,179,75,191,152,152,157,26
-        !byte 34,85,15,64,64,184,62,32,77,34,85,15,185,185,32,32,32,58,58,66,177,202,202,152
-        !byte 152,18,153,65,21,42,188,199,174,123,108,74,34,21,42,175,183,80,167,130,130,58,21,5
-        !byte 202,152,152,152,135,153,209,30,5,27,24,36,36,108,153,209,21,172,4,4,203,200,195,41
+stepT2hi: !byte 9,51,147,93,119,216,216,171,16,89,9,134,134,181,49,198,198,208,23,9,86,134,181,49
+        !byte 138,138,31,89,14,86,13,109,71,216,171,16,89,14,13,13,181,49,198,92,92,23,14,86
+        !byte 13,181,49,138,138,176,47,60,11,63,63,19,110,40,40,47,17,17,46,73,148,107,97,97
+        !byte 23,55,8,46,73,49,138,97,132,220,45,8,63,59,187,91,163,40,81,145,17,70,121,148
+        !byte 107,205,40,23,145,8,37,121,129,87,132,132,75,45,8,103,103,43,107,40,40,131,133,133
+        !byte 83,2,129,107,205,144,23,23,133,37,2,129,205,173,173,75,191,8,103,2,211,48,39,40
+        !byte 64,29,57,56,90,3,87,39,217,23,23,29,140,18,77,39,127,179,75,191,152,152,2,211
+        !byte 34,85,40,64,64,184,62,32,77,34,85,15,185,185,32,32,32,58,58,66,177,202,202,152
+        !byte 152,135,153,34,21,40,188,199,174,123,108,74,34,21,42,175,183,80,167,130,130,58,21,5
+        !byte 202,152,152,152,135,153,209,21,40,27,24,36,36,108,153,209,21,42,4,4,203,200,195,41
         !byte 102,61,30
         * = $b500
-stepT3lo: !byte 137,101,160,112,158,50,50,50,125,20,20,93,116,119,154,142,159,170,172,172,172,172,172,172
-        !byte 172,171,78,22,14,106,67,53,50,50,50,182,207,207,13,13,109,71,207,54,149,92,92,92
+stepT3lo: !byte 137,101,160,112,158,50,50,50,125,9,9,93,116,119,154,142,159,170,172,172,172,172,172,172
+        !byte 172,171,78,22,14,106,67,53,50,50,50,182,13,13,13,13,109,71,207,54,149,92,92,92
         !byte 92,92,92,25,25,92,69,12,11,11,11,11,182,182,182,47,60,11,63,126,19,110,105,180
         !byte 97,97,97,97,97,97,25,25,97,6,45,8,8,8,150,150,180,180,17,17,17,70,59,187
-        !byte 150,118,118,139,139,139,139,139,139,107,146,139,156,94,8,103,75,75,75,75,215,81,133,72
-        !byte 103,2,2,33,206,215,128,128,128,128,128,128,107,82,144,75,29,8,103,52,52,52,52,52
-        !byte 29,29,57,140,2,186,3,218,218,127,127,127,127,127,39,39,39,44,192,29,29,140,79,79
-        !byte 79,79,79,185,166,184,62,18,3,26,161,161,185,185,32,32,32,77,34,85,115,202,213,213
-        !byte 62,27,27,27,27,27,199,199,174,123,108,26,34,164,104,194,194,203,58,58,58,58,21,21
-        !byte 27,24,24,167,135,98,91,105,172,175,190,36,165,124,120,209,21,21,194,194,203,196,196,96
+        !byte 150,118,118,185,139,139,139,139,139,107,146,139,156,94,8,103,75,75,150,180,215,81,133,72
+        !byte 103,2,2,33,206,215,185,185,203,205,205,205,107,82,144,75,29,8,103,52,212,150,215,215
+        !byte 29,29,57,140,2,186,3,218,218,4,4,203,200,127,39,39,39,44,192,29,29,140,79,79
+        !byte 150,215,215,185,166,184,62,18,3,26,161,161,185,185,32,32,32,77,34,85,115,202,213,213
+        !byte 62,27,155,155,155,214,199,199,174,123,108,26,34,164,104,194,194,203,58,58,58,58,21,21
+        !byte 27,24,24,167,27,155,155,155,155,175,190,36,165,124,120,209,21,21,194,194,203,196,196,96
         !byte 10,30,21
         * = $b600
-stepT3hi: !byte 9,51,147,116,157,157,50,159,125,20,20,147,13,117,35,20,20,169,172,172,172,172,172,172
-        !byte 172,78,31,84,14,68,100,100,53,182,182,182,207,207,13,13,71,19,54,54,25,92,92,92
+stepT3hi: !byte 9,51,147,116,157,157,50,159,125,9,9,147,13,117,35,20,20,169,172,172,172,172,172,172
+        !byte 172,78,31,84,14,68,100,100,53,182,182,182,13,13,13,13,71,19,54,54,25,92,92,92
         !byte 92,92,92,25,25,176,47,55,11,11,11,11,180,180,180,17,17,17,46,73,19,91,25,118
         !byte 97,97,97,97,97,97,25,97,132,136,45,8,8,8,150,150,118,118,17,17,17,59,121,148
-        !byte 91,163,214,139,139,139,139,139,139,107,146,132,81,94,8,103,75,75,75,75,215,81,83,133
-        !byte 37,2,43,107,82,214,128,128,128,128,128,128,205,205,173,52,29,29,140,52,52,52,52,52
-        !byte 185,185,90,56,18,3,48,114,218,127,127,127,127,127,39,39,39,127,76,29,29,140,79,79
-        !byte 79,79,79,185,185,32,32,143,26,34,164,104,185,185,203,32,32,58,58,66,15,213,199,174
-        !byte 62,27,27,27,27,27,185,185,36,167,108,74,65,21,21,4,4,203,200,195,41,58,21,5
-        !byte 23,190,36,167,135,98,91,105,172,194,183,80,201,122,38,10,30,21,4,4,203,200,195,41
+        !byte 91,163,214,185,139,139,139,139,139,107,146,132,81,94,8,103,75,75,150,180,215,81,83,133
+        !byte 37,2,43,107,82,214,185,185,203,205,205,205,205,205,173,52,29,29,140,52,212,150,215,215
+        !byte 185,185,90,56,18,3,48,114,218,4,4,203,200,127,39,39,39,127,76,29,29,140,79,79
+        !byte 150,215,215,185,185,32,32,143,26,34,164,104,185,185,203,32,32,58,58,66,15,213,199,174
+        !byte 62,27,155,155,155,214,185,185,36,167,108,74,65,21,21,4,4,203,200,195,41,58,21,5
+        !byte 23,190,36,167,27,155,155,155,155,194,183,80,201,122,38,10,30,21,4,4,203,200,195,41
         !byte 102,61,30
         * = $b700
 rampThrT: !byte 0,0,0,0,0,1,1,1,2,3,0,7,5,6,6,9,0,0,0,0,0,1,2,0,3,0,0,9,8,0,10,12,0,0,0,0,1,0,3,4,0,0,0,10,9,9,0,13,0,0,0,0,2,3,0,5,5,0,8,11,0,10,0,13,0,0,1,2,0,4,5,0,6,7,0,11,10,0,12,14,1,1,0,3,4,0,6,7,0,9,10,12,12,12,0,15,1,2,3,0,5,6,0,8,8,0,11,0,0,13,14,15,1,0,4,5,0,7,8,0,10,11,0,13,13,0,15,16,2,3,0,5,0,0,8,10,0,12,13,14,15,15,0,16,3,5,5,0,7,9,0,11,12,0,14,15,0,16,16,0,3,0,7,8,0,10,11,0,13,14,0,16,16,0,0,0,7,9,10,11,11,12,12,13,14,15,16,0,0,0,0,0,5,0,9,0,10,12,0,13,15,0,16,0,0,0,0,0,6,0,9,0,0,12,13,0,15,16,0,0,0,0,0,0,6,0,0,0,12,0,14,15,0,16,0,0,0,0,0,0,9,12,13,13,14,15,15,16,16,0,0,0,0,0,0,0
