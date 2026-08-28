@@ -140,15 +140,15 @@ const map = []; for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) map.pu
 // orb 1's two-byte mask. One orb occluded correctly and the other was visible through walls.
 const TWOLEV = !process.env.LVLDUMP && process.env.TWOLEV !== '0';
 const LVL2 = TWOLEV ? (() => {
-  // SOCKETS='' on BOTH sides: level 2's sockets give it 4 hole-like entities to level 1's 2, and
-  // that count is an immediate in three places (hlAtL, the orbOne dispatch, the seat loop), so
-  // the levels must agree on it. The guard further down says so by name if this is ever relaxed.
-  if (process.env.SOCKETS === undefined && LEVEL2)
-    console.error('  note: sockets are off while two levels share a binary (entity counts must match)');
-  process.env.SOCKETS ??= '';
+  // The other level is built with the SOCKETS environment left alone, so it declares whatever
+  // its own map declares. It used to be forced empty on both sides, because the entity counts
+  // were immediates and the two levels had to agree; they are swapped bytes now (nOrbT/nHoleT/
+  // nExitT) and the tables are sized to the largest resident level, so the levels are free to
+  // hold different numbers of things.
   const tmp = './.lvl2-tables.json';
+  const { SOCKETS, ...envNoSock } = process.env;
   execFileSync(process.execPath, [process.argv[1]],
-    { env: { ...process.env, LEVEL2: LEVEL2 ? '' : '1', SOCKETS: '', LVLDUMP: tmp },
+    { env: { ...envNoSock, LEVEL2: LEVEL2 ? '' : '1', LVLDUMP: tmp },
       stdio: ['ignore', 'ignore', 'ignore'] });
   return JSON.parse(readFileSync(tmp, 'utf8'));
 })() : null;
@@ -2795,6 +2795,7 @@ const WALLVAR = (TESTLVL && !process.env.WALLOFF && !process.env.LVLDUMP) ? (() 
 const NRUN = Math.max(nextRun, LVL2?.nextRun ?? 0);
 const OCCBYTES = (NRUN + 7) >> 3;
 
+
 const losFree = (ax, ay, bx, by) => {
   const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
   for (let i = 1; i < n; i++) { const t = i / n, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
@@ -2820,12 +2821,31 @@ const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOL
 // orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
 // picks them up for free.
 // (3,5) and (7,3) are open chamber cells in the ring map -- the old (2,2)/(6,6) are walls now
-const SOCKETS_AT = (process.env.SOCKETS ?? (TESTLVL ? '5,2' : LEVEL2 ? '3,5;7,3' : '')).split(';')
+// Level 2's '3,5;7,3' was a placeholder from when it was being designed, and it never shipped --
+// sockets were forced off because the entity counts had to match. Now that they need not, leaving
+// the placeholder in would have quietly put two sockets into the ring level. A level declares
+// sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
+// level keeps its own.
+const SOCKETS_AT = (process.env.SOCKETS ?? (TESTLVL ? '5,2' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
 const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
                   ...SOCKETS_AT.map(h => ({ x: h[0], y: h[1], exit: false }))];
+
+// Entity counts differ between levels -- a level with a socket has a hole-like entity a level
+// without one does not. Every TABLE is sized to the largest resident level so the swap has room,
+// and the live counts travel as three swapped bytes (nOrbT/nHoleT/nExitT) that the shared loops
+// read instead of an immediate. Exactly the rule NRUN already follows.
+//
+// The per-level layout stays PACKED -- orbs, then hole-like entities -- rather than being pinned
+// at the maximum. That looks like the weaker choice and is not: packed makes the orb/hole
+// BOUNDARY and the orb LOOP BOUND the same number, so one byte serves both, and a combined walk
+// over every entity stays a single contiguous range. Pinned would need two ranges everywhere.
+// It is only safe because every per-entity table is swapped; see LVL_TABLES.
+const NORB  = Math.max(ORBS.length,     LVL2?.nOrbs     ?? 0);
+const NHOLE = Math.max(HOLELIKE.length, LVL2?.nHoleLike ?? 0);
+const NEXIT = Math.max(HOLES_AT.length, LVL2?.nExit     ?? 0);
 
 // Masks for the ORBS *and* the hole-like entities, in the same order as orbXCT/orbYCT. Holes
 // were left out of this originally, which is the whole reason they had no occlusion test: the
@@ -2892,7 +2912,7 @@ const HOLECULL = process.env.HOLECULL !== "0";
 // grew SPARSE past 64, and `join` renders a hole as an empty field, so holeSeeT emitted
 // "!byte ...,,..." -- 81 fields with 2 empty, every byte after the gap shifted, and the socket's
 // visibility bitmap silently wrong. It assembled cleanly the whole time.
-const holeSee = new Array(HOLELIKE.length * 32).fill(0);
+const holeSee = new Array(NHOLE * 32).fill(0);   // NHOLE, not this level's own count: swapped
 const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
 if (!HOLECULL) holeSee.fill(255);
 for (let cell = 0; cell < 256; cell++) {
@@ -4049,8 +4069,8 @@ if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of 
 for (const h of HOLELIKE)
   if (map[h.y * 16 + h.x] !== 0) throw new Error(
     `${h.exit ? 'exit hole' : 'socket'} at (${h.x},${h.y}) is inside a wall`);
-if (HOLELIKE.length > 4) throw new Error(
-  `${HOLELIKE.length} hole-like entities: holeSeeT has room for 4 (32 bytes each). ` +
+if (NHOLE > 4) throw new Error(
+  `${NHOLE} hole-like entities across the resident levels: holeSeeT has room for 4 (32 bytes each). ` +
   `More wants the per-level loading, not another table squeezed in.`);
 const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM)];
 // SPRBOX boxes the ORB bitmaps up at their generator; the hole and socket ladders are built much
@@ -4101,7 +4121,8 @@ if (process.env.HOLEDUMP === '1') {
 // is (ptr),y with no multiply.
 const OCCBASE = ORB_OCC;
 const orbOccFlat = orbOcc.flat();
-const NOCC = ORBS.length + HOLELIKE.length;      // every entity orbOne can be asked about
+
+const NOCC = NORB + NHOLE;                       // every entity orbOne can be asked about
 const orbOccLo = [...Array(NOCC)].map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
 const orbOccHi = [...Array(NOCC)].map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
 // Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
@@ -4160,6 +4181,7 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 // The order here is the order of the shadow blob, so it is also the swap order. Anything added
 // here must be swapped, or the new level renders with the old level's geometry.
 const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from the manifest
+const pad = (a, n) => [...a, ...Array(Math.max(0, n - a.length)).fill(0)];
 const LVL_TABLES = [
   ['mapT', map],
   ['blkT', blkT],
@@ -4170,14 +4192,26 @@ const LVL_TABLES = [
   ['runByteT', [...Array(NRUN)].map((_, r) => r >> 3)],
   ['runBitT', [...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0)],
   ['holeSeeT', holeSee],
-  ['orbXCT', [...orbXC, ...HOLELIKE.map(h => h.x)]],
-  ['orbYCT', [...orbYC, ...HOLELIKE.map(h => h.y)]],
-  ['orbX0T', orbXC], ['orbY0T', orbYC],
+  // PADDED to the largest resident level. The swap exchanges in place, so a chunk that is
+  // shorter here than in the other level would run off the end of this one. The padding sits
+  // AFTER the real entries, so the packed orbs-then-holes layout is untouched and nothing
+  // indexes into it -- every loop stops at the live count.
+  ['orbXCT', pad([...orbXC, ...HOLELIKE.map(h => h.x)], NOCC)],
+  ['orbYCT', pad([...orbYC, ...HOLELIKE.map(h => h.y)], NOCC)],
+  ['orbX0T', pad(orbXC, NORB)], ['orbY0T', pad(orbYC, NORB)],
   ['landXT', LANDS_AT.map(l => l[0])], ['landYT', LANDS_AT.map(l => l[1])],
   ['angBlkT', angBlk],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
-  ['hlFillT', HOLELIKE.map(h => h.exit ? 0 : 15)],
-  ['orbTallT', orbTallT],
+  ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : 15), NHOLE)],
+  ['orbTallT', pad(orbTallT, NORB)],
+  ['orbHid0T', pad(orbHidT, NORB)], // per-entity and per-level: which entities start out of the world
+  // The live counts. Shared loops read these instead of an immediate, which is the whole point:
+  // a level with a socket has one more hole-like entity than a level without one, and the code
+  // between them is the same code. $ff is not special here -- a level with no orbs has 0.
+  // Six contiguous bytes, one entry: nOrbT nHoleT nExitT nOrbM1T nSockT nAllM1T.
+  ['nOrbT', [ORBS.length, HOLELIKE.length, HOLES_AT.length,
+             ORBS.length - 1, ORBS.length + HOLES_AT.length,
+             ORBS.length + HOLELIKE.length - 1]],
   ['orbOccLoT', orbOccLo],
   ['orbOccT', process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat],
 ];
@@ -4237,11 +4271,7 @@ if (TWOLEV) {
     LVL2.tables.orbOccT = out;
   }
   LVL2.tables.orbOccLoT = [...orbOccLo];   // same base and stride now, so identical to the live one
-  const shape = (w, g) => { if (LVL2[w] !== g) throw new Error(
-    `level 2 has ${LVL2[w]} ${w} against level 1's ${g}. That count is baked into the code as an ` +
-    `immediate, so the two levels must agree on it before they can share one binary.`); };
-  shape('nOrbs', ORBS.length);
-  shape('nHoleLike', HOLELIKE.length);
+  // The counts USED to have to match, because they were immediates. They are swapped bytes now.
   for (const [n, a] of LVL_TABLES) {
     const b = LVL2.tables[n];
     if (!b) throw new Error(`level 2 dumped no ${n}: the manifest changed under the subprocess`);
@@ -4324,7 +4354,7 @@ const WALL_DELTA = WALLVAR ? (() => {
 if (process.env.LVLDUMP) {
   writeFileSync(process.env.LVLDUMP, JSON.stringify({
     level: LEVEL2 ? 2 : 1,
-    nOrbs: ORBS.length, nHoleLike: HOLELIKE.length, nextRun,
+    nOrbs: ORBS.length, nHoleLike: HOLELIKE.length, nExit: HOLES_AT.length, nextRun,
     nHaz: HAZ ? hazRec.length : 0, occBytes: OCCBYTES, pathN: PATH_N,
     // Raw, not laid out: the receiving build turns the lists into offsets into its OWN hazLstT.
     // The triples are assembler expressions naming the live run tables, so they re-emit verbatim.
@@ -5175,7 +5205,7 @@ ${DIETEST && DIE ? `        lda #${hx(ORBS.findIndex(o => o.tall) + 1)}
         sta markPa              ; the 30-degree trigger measures from the heading you start on
 ` : ''}
 ${process.env.OCCSELF ? `
-        ldx #${hx(ORBS.length - 1)}   ; OCCSELF=1: rebuild every mask at boot from orbOcc1 and
+        ldx nOrbM1T             ; OCCSELF=1: rebuild every mask at boot from orbOcc1 and
 ooSlf:  txa                     ;   leave the result. Nothing has moved yet, so the table it
         pha                     ;   produces must equal the one the build emitted -- which is
         jsr orbOcc1             ;   the whole test
@@ -9058,7 +9088,7 @@ ${FALL ? `        jsr holeOne             ; ---- the hole FIRST, before the orbs
         lda #$00
         sta oidx
 obLoop: lda oidx
-        cmp #${ORBS.length}
+        cmp nOrbT
         bcs obEnd
         tax
         lda orbHidT,x
@@ -9187,7 +9217,7 @@ oSLoop: ldx osI
         lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
         cmp #$fe                ;   below this test is always here, because ORBGATE is off by
         beq oSUpHf              ;   default and cannot be relied on to fence anything
-        cmp #${hx(ORBS.length)}
+        cmp nOrbT
         bcs oSNext
 ${ORBGATE ? `        lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
@@ -9906,7 +9936,7 @@ ocS:    sta ocol
         sta ocolN
 ocDn:
         lda oidx
-        cmp #${hx(ORBS.length)}
+        cmp nOrbT
         bcs holeTail            ; entries above the orbs in orbXCT/orbYCT are HOLES. Everything
                                 ;   up to here -- forward, right, h, ocol -- is the same
                                 ;   question for a disc on the floor as for a sphere; only the
@@ -10350,17 +10380,17 @@ hoLp:   lda hoI                 ;   biggest thing here
         jsr hlSet               ; ink and ladder for THIS one
         lda hoI
         clc
-        adc #${hx(ORBS.length)} ; hole-like entities follow the orbs in orbXCT/orbYCT
+        adc nOrbT               ; hole-like entities follow the orbs in orbXCT/orbYCT
         sta oidx
         jsr orbOne              ; orbOne branches to holeTail on the index
 hoNx:   lda hoI
-        cmp #${hx(HOLES_AT.length)}
+        cmp nExitT
         bcs hoInc               ; already past the exits: just step on
         lda #${hx(HOLES_AT.length - 1)}
         sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
 hoInc:  inc hoI
         lda hoI
-        cmp #${hx(HOLELIKE.length)}
+        cmp nHoleT
         bcc hoLp
         rts
 ` : ''}
@@ -10893,7 +10923,7 @@ tkLp:   stx odD
         sta odCell
 tkNext: ldx odD
         inx
-        cpx #${hx(ORBS.length)}
+        cpx nOrbT
         bcc tkLp
         rts
 
@@ -10935,7 +10965,7 @@ oiBlk:  lda mapT,x              ; walls first
         sta blkT,x
         inx
         bne oiBlk
-        ldx #${hx(ORBS.length - 1)}
+        ldx nOrbM1T
 oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta orbXCT,x
         lda orbY0T,x
@@ -10968,7 +10998,7 @@ oiNext: txa
         sta bfsPhase            ; NO FILL IN FLIGHT. Uninitialised this could read as phase 2,
                                 ;   which drops bfsTick straight into the expand loop with a
                                 ;   garbage bfsTail and scribbles past bfsQ.
-        ldx #${hx(HOLELIKE.length - 1)}
+        ldx #${hx(NHOLE - 1)}   ; the MAX: clearing a seat this level does not have is free
 hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         dex
         bpl hlSCl
@@ -11038,7 +11068,7 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
-        lda #${hx(ORBS.length + HOLELIKE.length - 1)}   ; orbs AND hole-like entities
+        lda nAllM1T             ; orbs AND hole-like entities
 ooAlp:  sta ooAI
         tax
         jsr orbOcc1
@@ -11048,68 +11078,6 @@ ooAlp:  sta ooAI
         bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
         rts
 
-; ---- sndInit: one sustained chord of two, and then only the detune ever changes ----
-; The SID has no reset line, so every register is cleared first -- whatever BASIC or the loader
-; left in there is otherwise still playing. Gated once and never released: this is a drone, so
-; the envelope only ever runs its attack.
-sndInit:
-        ldx #$18
-        lda #$00
-sniLp:  sta $d400,x
-        dex
-        bpl sniLp
-        lda #<${hx16(SND_FN)}
-        sta $d400
-        sta $d407
-        lda #>${hx16(SND_FN)}
-        sta $d401
-        sta $d408
-        lda #${hx(SND_PW & 0xff)}
-        sta $d402
-        sta $d409
-        lda #${hx(SND_PW >> 8)}
-        sta $d403
-        sta $d40a
-        lda #${hx(SND_AD)}
-        sta $d405
-        sta $d40c
-        lda #${hx(SND_SR)}
-        sta $d406
-        sta $d40d
-        lda #$00                ; cutoff is 11 bits: three low, then eight. Only the top matters
-        sta $d415
-        lda #${hx(SND_FC)}
-        sta $d416
-        lda #${hx((SND_RES << 4) | 7)}
-        sta $d417               ; resonance, and ALL THREE voices routed through the filter.
-                                ;   Voice 3 was unfiltered and read bright and thin next to the
-                                ;   drone; the cutoff is already low, so routing alone darkens the
-                                ;   effects a long way. The drone's own path is unchanged.
-        lda #${hx(0x10 | SND_VOLN)}
-        sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
-        lda #$41                ; pulse + gate
-        sta $d404
-${SNDTEST ? `                                ; SNDTEST: voice 2 never gets a waveform, so the drone is
-                                ;   one bare pulse and the detune is out of the picture
-        lda #${hx(SND_FC)}
-        sta sndFc
-        lda #${hx(SND_PW >> 8)}
-        sta sndPw
-        lda #$00
-        sta sndMode             ; low-pass, matching the shipping build
-        lda #$0f
-        sta sndVol
-` : `        sta $d40b
-`}
-${MELODY ? `        lda #${hx(MEL_AD)}      ; voice 3 plucks: no attack, short decay, no sustain
-        sta $d413
-        lda #${hx(MEL_SR)}
-        sta $d414
-        lda #$01                ; so the first melTick rolls straight over to note 0
-        sta melCnt
-        lda #${hx(melFn.length - 1)}
-        sta melIx
-` : ''}        rts
 
 ${MELODY ? `; ---- melTick: voice 3, called from the TOP-OF-FRAME IRQ ----
 ; In the IRQ and not the main loop, because the main loop runs at 19fps and varies: note lengths
@@ -11353,7 +11321,7 @@ stMax:  cmp sndD
         sta sndD                ; a new nearest
 stNext: ldx sndI
         inx
-        cpx #${hx(ORBS.length)}
+        cpx nOrbT
         bcc stLp
         lda sndD
         cmp #$10
@@ -11421,7 +11389,7 @@ asKeep: ldx amIdx
         sta angAccT,x
 asNext: ldx amIdx
         inx
-        cpx #${hx(ORBS.length)}
+        cpx nOrbT
         bcc asLp
         rts
 
@@ -11897,12 +11865,12 @@ dshHld: rts
 ` : ''}; ---- orbUse: take the orb in front, or set the carried one down there ----
 ; ---- hlAt: is odX/odY a SOCKET? Y = its hole-like index, or $ff ----
 ; Exits are skipped: you cannot put an orb down a hole you are about to fall through.
-hlAt:   ldy #${hx(HOLES_AT.length)}
-hlAtL:  cpy #${hx(HOLELIKE.length)}
+hlAt:   ldy nExitT
+hlAtL:  cpy nHoleT
         bcs hlAtNo
         tya
         clc
-        adc #${hx(ORBS.length)} ; hole-like entities follow the orbs in orbXCT/orbYCT
+        adc nOrbT               ; hole-like entities follow the orbs in orbXCT/orbYCT
         tax
         lda orbXCT,x
         cmp odX
@@ -12345,7 +12313,7 @@ fdfDn:  rts
 ; The six operands only need re-patching when the KIND changes, and a frame is normally one exit
 ; then a run of sockets -- so this is two patch runs a frame, not one per entity.
 hlSet:  tay
-        cpy #${hx(HOLES_AT.length)}
+        cpy nExitT
         bcs hlSsock
         lda hlFillT,y           ; an exit hole: black, and it is never anything else
         sta hlFill
@@ -12443,7 +12411,7 @@ hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -
         bcs hlNoShr             ; still the orb's part of the animation
         lda oidx                ; ...and only the socket actually doing the swallowing
         sec
-        sbc #${hx(ORBS.length - 1)}   ; hole-like index + 1, which is what sokWho holds
+        sbc nOrbM1T             ; hole-like index + 1, which is what sokWho holds
         cmp sokWho
         bne hlNoShr
         lda #${hx(SOK_SHR)}
@@ -12469,7 +12437,7 @@ hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge
         ; by the time that starts the socket is the cell you are facing -- so it was drawn this
         ; frame and these are current. ocol is the 160-column grid; doubling gives the sprite X.
         lda oidx
-        cmp #${hx(ORBS.length + HOLES_AT.length)}
+        cmp nSockT
         bcc hlNoSk              ; an exit hole, not a socket
         lda ocol
         sta sokLC
@@ -13045,7 +13013,7 @@ bfsNbN: iny
         ; fill lands sooner, so dropping an orb re-routes the angel in a fraction of the time.
         ; An angel that is walled in never gets a distance, so this never fires and the fill
         ; runs to its natural end -- which is correct, and is also when it matters least.
-        ldx #${hx(ORBS.length - 1)}
+        ldx nOrbM1T
 bfsEnL: lda orbTallT,x
         beq bfsEnN
         lda orbHidT,x
@@ -13092,10 +13060,6 @@ bfsFin: lda bfsFor
 bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
-        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
-        ; 32 bytes each. It lived in the fall's block until the sockets made it too big for the
-        ; slack there.
-holeSeeT: !byte ${holeSee.join(",")}
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
 hlFillT: !byte ${HOLELIKE.map(h => h.exit ? 0 : 15).join(',')}
@@ -13272,67 +13236,92 @@ snKTick: lda dieKik
 snKDn:  rts
 
 ` : ''}
-${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
-ddxLoT: ${chunk(ddxLo).trim()}
-        * = ${hx16(RELOC + 0xc00)}
-ddxHiT: ${chunk(ddxHi).trim()}
-        * = ${hx16(RELOC + 0xd00)}
-ddyLoT: ${chunk(ddyLo).trim()}
-        * = ${hx16(RELOC + 0xe00)}
-ddyHiT: ${chunk(ddyHi).trim()}
-`}        * = ${hx16(RELOC + 0xf00)}
-posXT:  ${chunk(posX).trim()}
-        * = ${hx16(RELOC + 0x1000)}
-posYT:  ${chunk(posY).trim()}
-        * = ${hx16(RELOC + 0x1100)}
-rayOffT: !byte ${rayOff.join(',')}
-        ; ---- the seated orb's per-variant tables ----
-        ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
-        ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
-        ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
-        * = $97a0
-seatPtrT: !byte ${SEAT.slotT.map(v => ((SEATBASE - VBANK) >> 6) + (v - SEAT.slotT[0] + SEAT.slotT[0] - 0)).join(',')}
-seatYBaseT: !byte ${SEAT.yBaseT.join(',')}
-        * = ${hx16(RELOC + 0x1200)}
-colGrpT: !byte ${colGrpT.join(',')}
-        * = $98a0
-seatFlagT: !byte ${SEAT.flagT.join(',')}
-seatXOffT: !byte ${SEAT.xOffT.join(',')}
-${SPIN ? `spinIx: !byte 0
-spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
-spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
-spinYL: !byte ${SPINPOS.map(p => Math.round(p[1]*256) & 255).join(',')}
-spinYH: !byte ${SPINPOS.map(p => Math.round(p[1]*256) >> 8).join(',')}` : ''}
-${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
-; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
-; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
-; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
-; ddx is not using. Both identities are asserted over every entry at build time.
-; The 256-entry integer-angle originals are emitted only for FINEANG=0 -- posXT/posYT/absSinT/
-; absCosT still index by the integer angle, and their page-alignment check would have to be
-; reworked for no gain.
-ddxLoTQ: ${chunk(ddxLoP).trim()}
-        * = ${hx16(RELOC + 0x1500)}
-ddxHiTQ: ${chunk(ddxHiP).trim()}
-        * = ${hx16(RELOC + 0x1700)}
-; ---- the angel-path fill's own state ----
-; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
-; do with how many levels are resident. Tucking it in there compiled fine on the default build and
-; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
-bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
-bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
-blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
-bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
-bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
-atMsk:  !byte 0                 ; the leash bit under test
-sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
-sokShrT: !byte ${[...Array(SOK_SHR)].map((_, i) => i * SOK_SSTEP).join(',')}   ; rungs down, per closing frame
-${SOUND ? `
+        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
+        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
+        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
+        ; block, and outgrew both; here it has the gap above the $9100 jsr target, which is
+        ; exactly 128 bytes and cannot be outgrown because holeSeeT is capped at 4 entities.
+        * = $9180
+holeSeeT: !byte ${holeSee.join(",")}
+
+        ; The sound effects, out here because the $9d00 block that holds the level shadow
+        ; ran out of room the moment a level was allowed to declare its own sockets: the
+        ; shadow carries the other level's tables and those grew with it. This hole is
+        ; 768 bytes and holds nothing else.
+${SOUND ? `        * = $9200
+` : ''}${SOUND ? `
 ; ---- sfx: one-shot effects on VOICE 3 ----
 ; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
 ; that borrowed one would fight it. Voice 3 is untouched by the drone and free.
 ; Everything is table-driven for the same reason the drone is: with pitch, waveform and volume
 ; all moving you cannot tell which one you are hearing.
+; RELOCATED out of the main code stream, which was down to 1 byte. sndInit runs ONCE at
+; boot and is entered by jsr only, so it has no business occupying the scarcest space in
+; the program. Relocating code into a hole is established practice here -- the rule is
+; enter by jsr/jmp only, nothing may fall in, and the block must appear in ADDRESS ORDER.
+; ---- sndInit: one sustained chord of two, and then only the detune ever changes ----
+; The SID has no reset line, so every register is cleared first -- whatever BASIC or the loader
+; left in there is otherwise still playing. Gated once and never released: this is a drone, so
+; the envelope only ever runs its attack.
+sndInit:
+        ldx #$18
+        lda #$00
+sniLp:  sta $d400,x
+        dex
+        bpl sniLp
+        lda #<${hx16(SND_FN)}
+        sta $d400
+        sta $d407
+        lda #>${hx16(SND_FN)}
+        sta $d401
+        sta $d408
+        lda #${hx(SND_PW & 0xff)}
+        sta $d402
+        sta $d409
+        lda #${hx(SND_PW >> 8)}
+        sta $d403
+        sta $d40a
+        lda #${hx(SND_AD)}
+        sta $d405
+        sta $d40c
+        lda #${hx(SND_SR)}
+        sta $d406
+        sta $d40d
+        lda #$00                ; cutoff is 11 bits: three low, then eight. Only the top matters
+        sta $d415
+        lda #${hx(SND_FC)}
+        sta $d416
+        lda #${hx((SND_RES << 4) | 7)}
+        sta $d417               ; resonance, and ALL THREE voices routed through the filter.
+                                ;   Voice 3 was unfiltered and read bright and thin next to the
+                                ;   drone; the cutoff is already low, so routing alone darkens the
+                                ;   effects a long way. The drone's own path is unchanged.
+        lda #${hx(0x10 | SND_VOLN)}
+        sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
+        lda #$41                ; pulse + gate
+        sta $d404
+${SNDTEST ? `                                ; SNDTEST: voice 2 never gets a waveform, so the drone is
+                                ;   one bare pulse and the detune is out of the picture
+        lda #${hx(SND_FC)}
+        sta sndFc
+        lda #${hx(SND_PW >> 8)}
+        sta sndPw
+        lda #$00
+        sta sndMode             ; low-pass, matching the shipping build
+        lda #$0f
+        sta sndVol
+` : `        sta $d40b
+`}
+${MELODY ? `        lda #${hx(MEL_AD)}      ; voice 3 plucks: no attack, short decay, no sustain
+        sta $d413
+        lda #${hx(MEL_SR)}
+        sta $d414
+        lda #$01                ; so the first melTick rolls straight over to note 0
+        sta melCnt
+        lda #${hx(melFn.length - 1)}
+        sta melIx
+` : ''}        rts
+
 ; An effect is a ROW OF TABLES, not code. sfxTick reads length, waveform, envelope, filter
 ; routing, peak volume and a pitch table out of them and never knows which effect is playing,
 ; so a new sound is a row plus a pitch table -- no new code, and nothing added to the main
@@ -13400,9 +13389,63 @@ sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick
                                 ;   with any effect and writes $d418 once.
 sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
 sfxK:   !byte 0                 ; which effect is loaded
-
-` : ''}${WALL_DELTA ? `
-; ---- A WALL, TAKEN OUT AND PUT BACK ----
+` : ''}
+${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
+ddxLoT: ${chunk(ddxLo).trim()}
+        * = ${hx16(RELOC + 0xc00)}
+ddxHiT: ${chunk(ddxHi).trim()}
+        * = ${hx16(RELOC + 0xd00)}
+ddyLoT: ${chunk(ddyLo).trim()}
+        * = ${hx16(RELOC + 0xe00)}
+ddyHiT: ${chunk(ddyHi).trim()}
+`}        * = ${hx16(RELOC + 0xf00)}
+posXT:  ${chunk(posX).trim()}
+        * = ${hx16(RELOC + 0x1000)}
+posYT:  ${chunk(posY).trim()}
+        * = ${hx16(RELOC + 0x1100)}
+rayOffT: !byte ${rayOff.join(',')}
+        ; ---- the seated orb's per-variant tables ----
+        ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
+        ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
+        ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
+        * = $97a0
+seatPtrT: !byte ${SEAT.slotT.map(v => ((SEATBASE - VBANK) >> 6) + (v - SEAT.slotT[0] + SEAT.slotT[0] - 0)).join(',')}
+seatYBaseT: !byte ${SEAT.yBaseT.join(',')}
+        * = ${hx16(RELOC + 0x1200)}
+colGrpT: !byte ${colGrpT.join(',')}
+        * = $98a0
+seatFlagT: !byte ${SEAT.flagT.join(',')}
+seatXOffT: !byte ${SEAT.xOffT.join(',')}
+${SPIN ? `spinIx: !byte 0
+spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
+spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
+spinYL: !byte ${SPINPOS.map(p => Math.round(p[1]*256) & 255).join(',')}
+spinYH: !byte ${SPINPOS.map(p => Math.round(p[1]*256) >> 8).join(',')}` : ''}
+${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
+; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
+; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
+; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
+; ddx is not using. Both identities are asserted over every entry at build time.
+; The 256-entry integer-angle originals are emitted only for FINEANG=0 -- posXT/posYT/absSinT/
+; absCosT still index by the integer angle, and their page-alignment check would have to be
+; reworked for no gain.
+ddxLoTQ: ${chunk(ddxLoP).trim()}
+        * = ${hx16(RELOC + 0x1500)}
+ddxHiTQ: ${chunk(ddxHiP).trim()}
+        * = ${hx16(RELOC + 0x1700)}
+; ---- the angel-path fill's own state ----
+; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
+; do with how many levels are resident. Tucking it in there compiled fine on the default build and
+; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
+bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
+bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
+blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
+bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
+bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
+atMsk:  !byte 0                 ; the leash bit under test
+sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
+sokShrT: !byte ${[...Array(SOK_SHR)].map((_, i) => i * SOK_SSTEP).join(',')}   ; rungs down, per closing frame
+${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
@@ -13591,6 +13634,17 @@ angBlkT: !byte ${angBlk.join(',')}
         ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
         ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
         ; and the manifest carries each chunk's destination, so where they live is free choice.
+; THIS level's entity counts, and the offsets derived from them. Every shared loop and every
+; boundary test reads one of these instead of an immediate, which is what lets one binary serve
+; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
+; swap copies the block, so a derived value can never drift from the count it came from.
+; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
+nOrbT:  !byte ${hx(ORBS.length)}                 ; orbs
+nHoleT: !byte ${hx(HOLELIKE.length)}                 ; hole-like entities: exits then sockets
+nExitT: !byte ${hx(HOLES_AT.length)}                 ; ...of which this many are exits
+nOrbM1T:!byte ${hx(ORBS.length - 1)}                 ; last orb index, for the down-counting loops
+nSockT: !byte ${hx(ORBS.length + HOLES_AT.length)}                 ; entity index of the first socket
+nAllM1T:!byte ${hx(ORBS.length + HOLELIKE.length - 1)}                 ; last entity index of all
 angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, when it is close
 landXT: !byte ${LANDS_AT.map(l => l[0]).join(',')}
 landYT: !byte ${LANDS_AT.map(l => l[1]).join(',')}
@@ -14045,7 +14099,7 @@ dpHav:  lda dieCl
         sta dieDir
 dpDn:   lda #$00                ; AFTER the branch above, not inside it: skipping it left the
         sta marked              ;   player marked through the whole cut scene when they WERE turning
-        ldx #${hx(ORBS.length - 1)}   ; the angel simply is not there any more -- hiding it is one
+        ldx nOrbM1T             ; the angel simply is not there any more -- hiding it is one
 dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slot.
         bne dgA2                ; TALL: that is the angel, and it is the one thing that stays
         lda #$01

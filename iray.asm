@@ -4403,7 +4403,7 @@ omNoIco:
         lda #$00
         sta oidx
 obLoop: lda oidx
-        cmp #2
+        cmp nOrbT
         bcs obEnd
         tax
         lda orbHidT,x
@@ -4494,7 +4494,7 @@ oSLoop: ldx osI
         lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
         cmp #$fe                ;   below this test is always here, because ORBGATE is off by
         beq oSUpHf              ;   default and cannot be relied on to fence anything
-        cmp #$02
+        cmp nOrbT
         bcs oSNext
 
         lda obIX,x
@@ -5202,7 +5202,7 @@ ocS:    sta ocol
         sta ocolN
 ocDn:
         lda oidx
-        cmp #$02
+        cmp nOrbT
         bcs holeTail            ; entries above the orbs in orbXCT/orbYCT are HOLES. Everything
                                 ;   up to here -- forward, right, h, ocol -- is the same
                                 ;   question for a disc on the floor as for a sphere; only the
@@ -5629,17 +5629,17 @@ hoLp:   lda hoI                 ;   biggest thing here
         jsr hlSet               ; ink and ladder for THIS one
         lda hoI
         clc
-        adc #$02 ; hole-like entities follow the orbs in orbXCT/orbYCT
+        adc nOrbT               ; hole-like entities follow the orbs in orbXCT/orbYCT
         sta oidx
         jsr orbOne              ; orbOne branches to holeTail on the index
 hoNx:   lda hoI
-        cmp #$02
+        cmp nExitT
         bcs hoInc               ; already past the exits: just step on
         lda #$01
         sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
 hoInc:  inc hoI
         lda hoI
-        cmp #$02
+        cmp nHoleT
         bcc hoLp
         rts
 
@@ -6171,7 +6171,7 @@ tkLp:   stx odD
         sta odCell
 tkNext: ldx odD
         inx
-        cpx #$02
+        cpx nOrbT
         bcc tkLp
         rts
 
@@ -6213,7 +6213,7 @@ oiBlk:  lda mapT,x              ; walls first
         sta blkT,x
         inx
         bne oiBlk
-        ldx #$01
+        ldx nOrbM1T
 oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta orbXCT,x
         lda orbY0T,x
@@ -6246,7 +6246,7 @@ oiNext: txa
         sta bfsPhase            ; NO FILL IN FLIGHT. Uninitialised this could read as phase 2,
                                 ;   which drops bfsTick straight into the expand loop with a
                                 ;   garbage bfsTail and scribbles past bfsQ.
-        ldx #$01
+        ldx #$01   ; the MAX: clearing a seat this level does not have is free
 hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         dex
         bpl hlSCl
@@ -6316,7 +6316,7 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
-        lda #$03   ; orbs AND hole-like entities
+        lda nAllM1T             ; orbs AND hole-like entities
 ooAlp:  sta ooAI
         tax
         jsr orbOcc1
@@ -6326,50 +6326,6 @@ ooAlp:  sta ooAI
         bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
         rts
 
-; ---- sndInit: one sustained chord of two, and then only the detune ever changes ----
-; The SID has no reset line, so every register is cleared first -- whatever BASIC or the loader
-; left in there is otherwise still playing. Gated once and never released: this is a drone, so
-; the envelope only ever runs its attack.
-sndInit:
-        ldx #$18
-        lda #$00
-sniLp:  sta $d400,x
-        dex
-        bpl sniLp
-        lda #<$0386
-        sta $d400
-        sta $d407
-        lda #>$0386
-        sta $d401
-        sta $d408
-        lda #$00
-        sta $d402
-        sta $d409
-        lda #$08
-        sta $d403
-        sta $d40a
-        lda #$80
-        sta $d405
-        sta $d40c
-        lda #$fa
-        sta $d406
-        sta $d40d
-        lda #$00                ; cutoff is 11 bits: three low, then eight. Only the top matters
-        sta $d415
-        lda #$1e
-        sta $d416
-        lda #$87
-        sta $d417               ; resonance, and ALL THREE voices routed through the filter.
-                                ;   Voice 3 was unfiltered and read bright and thin next to the
-                                ;   drone; the cutoff is already low, so routing alone darkens the
-                                ;   effects a long way. The drone's own path is unchanged.
-        lda #$1f
-        sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
-        lda #$41                ; pulse + gate
-        sta $d404
-        sta $d40b
-
-        rts
 
 
 ; ---- sndTick: the detune tracks the nearest angel ----
@@ -6409,7 +6365,7 @@ stMax:  cmp sndD
         sta sndD                ; a new nearest
 stNext: ldx sndI
         inx
-        cpx #$02
+        cpx nOrbT
         bcc stLp
         lda sndD
         cmp #$10
@@ -6473,7 +6429,7 @@ asKeep: ldx amIdx
         sta angAccT,x
 asNext: ldx amIdx
         inx
-        cpx #$02
+        cpx nOrbT
         bcc asLp
         rts
 
@@ -6965,12 +6921,12 @@ dshHld: rts
 ; ---- orbUse: take the orb in front, or set the carried one down there ----
 ; ---- hlAt: is odX/odY a SOCKET? Y = its hole-like index, or $ff ----
 ; Exits are skipped: you cannot put an orb down a hole you are about to fall through.
-hlAt:   ldy #$02
-hlAtL:  cpy #$02
+hlAt:   ldy nExitT
+hlAtL:  cpy nHoleT
         bcs hlAtNo
         tya
         clc
-        adc #$02 ; hole-like entities follow the orbs in orbXCT/orbYCT
+        adc nOrbT               ; hole-like entities follow the orbs in orbXCT/orbYCT
         tax
         lda orbXCT,x
         cmp odX
@@ -7413,7 +7369,7 @@ fdfDn:  rts
 ; The six operands only need re-patching when the KIND changes, and a frame is normally one exit
 ; then a run of sockets -- so this is two patch runs a frame, not one per entity.
 hlSet:  tay
-        cpy #$02
+        cpy nExitT
         bcs hlSsock
         lda hlFillT,y           ; an exit hole: black, and it is never anything else
         sta hlFill
@@ -7511,7 +7467,7 @@ hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -
         bcs hlNoShr             ; still the orb's part of the animation
         lda oidx                ; ...and only the socket actually doing the swallowing
         sec
-        sbc #$01   ; hole-like index + 1, which is what sokWho holds
+        sbc nOrbM1T             ; hole-like index + 1, which is what sokWho holds
         cmp sokWho
         bne hlNoShr
         lda #$03
@@ -7537,7 +7493,7 @@ hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge
         ; by the time that starts the socket is the cell you are facing -- so it was drawn this
         ; frame and these are current. ocol is the 160-column grid; doubling gives the sprite X.
         lda oidx
-        cmp #$04
+        cmp nSockT
         bcc hlNoSk              ; an exit hole, not a socket
         lda ocol
         sta sokLC
@@ -8494,7 +8450,7 @@ bfsNbN: iny
         ; fill lands sooner, so dropping an orb re-routes the angel in a fraction of the time.
         ; An angel that is walled in never gets a distance, so this never fires and the fill
         ; runs to its natural end -- which is correct, and is also when it matters least.
-        ldx #$01
+        ldx nOrbM1T
 bfsEnL: lda orbTallT,x
         beq bfsEnN
         lda orbHidT,x
@@ -8541,10 +8497,6 @@ bfsFin: lda bfsFor
 bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
-        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
-        ; 32 bytes each. It lived in the fall's block until the sockets made it too big for the
-        ; slack there.
-holeSeeT: !byte 0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
 hlFillT: !byte 0,0
@@ -8924,6 +8876,142 @@ snKTick: lda dieKik
 snKDn:  rts
 
 
+        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
+        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
+        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
+        ; block, and outgrew both; here it has the gap above the $9100 jsr target, which is
+        ; exactly 128 bytes and cannot be outgrown because holeSeeT is capped at 4 entities.
+        * = $9180
+holeSeeT: !byte 0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+        ; The sound effects, out here because the $9d00 block that holds the level shadow
+        ; ran out of room the moment a level was allowed to declare its own sockets: the
+        ; shadow carries the other level's tables and those grew with it. This hole is
+        ; 768 bytes and holds nothing else.
+        * = $9200
+
+; ---- sfx: one-shot effects on VOICE 3 ----
+; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
+; that borrowed one would fight it. Voice 3 is untouched by the drone and free.
+; Everything is table-driven for the same reason the drone is: with pitch, waveform and volume
+; all moving you cannot tell which one you are hearing.
+; RELOCATED out of the main code stream, which was down to 1 byte. sndInit runs ONCE at
+; boot and is entered by jsr only, so it has no business occupying the scarcest space in
+; the program. Relocating code into a hole is established practice here -- the rule is
+; enter by jsr/jmp only, nothing may fall in, and the block must appear in ADDRESS ORDER.
+; ---- sndInit: one sustained chord of two, and then only the detune ever changes ----
+; The SID has no reset line, so every register is cleared first -- whatever BASIC or the loader
+; left in there is otherwise still playing. Gated once and never released: this is a drone, so
+; the envelope only ever runs its attack.
+sndInit:
+        ldx #$18
+        lda #$00
+sniLp:  sta $d400,x
+        dex
+        bpl sniLp
+        lda #<$0386
+        sta $d400
+        sta $d407
+        lda #>$0386
+        sta $d401
+        sta $d408
+        lda #$00
+        sta $d402
+        sta $d409
+        lda #$08
+        sta $d403
+        sta $d40a
+        lda #$80
+        sta $d405
+        sta $d40c
+        lda #$fa
+        sta $d406
+        sta $d40d
+        lda #$00                ; cutoff is 11 bits: three low, then eight. Only the top matters
+        sta $d415
+        lda #$1e
+        sta $d416
+        lda #$87
+        sta $d417               ; resonance, and ALL THREE voices routed through the filter.
+                                ;   Voice 3 was unfiltered and read bright and thin next to the
+                                ;   drone; the cutoff is already low, so routing alone darkens the
+                                ;   effects a long way. The drone's own path is unchanged.
+        lda #$1f
+        sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
+        lda #$41                ; pulse + gate
+        sta $d404
+        sta $d40b
+
+        rts
+
+; An effect is a ROW OF TABLES, not code. sfxTick reads length, waveform, envelope, filter
+; routing, peak volume and a pitch table out of them and never knows which effect is playing,
+; so a new sound is a row plus a pitch table -- no new code, and nothing added to the main
+; code stream, which has 23 bytes left.
+sfxGo:  sta sfxK                ; A = effect id, 1..N
+        tax
+        lda sfxLenT-1,x
+        sta sfxN
+        lda sfxAdT-1,x          ; per-effect envelope. A clink and a rumble want different ones,
+        sta $d413               ;   and ATTACK 0 rises instantly, which IS a click -- one shared
+        lda sfxSrT-1,x          ;   envelope for every sound was half of "clippy".
+        sta $d414
+        lda sfxPLoT-1,x         ; aim the per-frame read at this effect's pitch table
+        sta sfxRd+1
+        lda sfxPHiT-1,x
+        sta sfxRd+2
+        lda #$83
+        ora sfxFltT-1,x         ; voice 3 through the filter or not, per effect -- a rumble wants
+        sta $d417               ;   it, a clink wants the sparkle. The drone's own two routing
+        rts                     ;   bits are constant either way.
+
+sfxTick:ldx sfxK
+        beq sfxQ                ; nothing has ever played
+        lda sfxN
+        bne sfxOn
+        lda sfxCtlT-1,x         ; idle: drop the GATE bit only and leave the waveform, so the
+        and #$fe                ;   release phase rings out. Clearing the whole control register
+        sta $d412               ;   yanked the oscillator mid-note -- the other half of the click.
+sfxQ:   lda sndLvl              ; and the drone has the master back
+        sta $d418
+        rts
+sfxOn:  dec sfxN
+        ldy sfxN                ; counts DOWN, so a pitch table's LAST entry is its first frame
+        lda #$00
+        sta $d40e
+sfxRd:  lda $ffff,y             ; SELF-MODIFIED by sfxGo: this effect's pitch table
+        sta $d40f
+        lda sfxCtlT-1,x
+        sta $d412
+        lda sfxVolT-1,x         ; the LOUDER of effect and drone, so the master never steps down
+        cmp sndLvl              ;   when a sound starts next to a close angel
+        bcs sfxV
+        lda sndLvl
+sfxV:   sta $d418
+        rts
+
+;         swallow  collapse  clink
+sfxLenT:!byte   8,      14,     5      ; frames
+sfxCtlT:!byte $11,     $81,   $11      ; triangle, noise, triangle. Bit 0 is the gate.
+sfxAdT: !byte $18,     $18,   $14      ; attack/decay
+sfxSrT: !byte $f8,     $f8,   $04      ; sustain/release -- the clink has none, so it plinks
+sfxVolT:!byte $19,     $19,   $17      ; peak master, low-pass bit included
+sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
+sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
+sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
+sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
+sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
+                                                        ;   crackles rather than rumbles, which
+                                                        ;   is what the old floor of 3 was doing
+sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, an octave lower,
+                                ;   and a short fall low in the register is the shape every
+                                ;   refusal sound has -- it read as the orb being rejected rather
+                                ;   than taken. Up and bright is what acknowledgement sounds like.
+sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick reconciles it
+                                ;   with any effect and writes $d418 once.
+sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
+sfxK:   !byte 0                 ; which effect is loaded
+
         * = $9500
 posXT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -9030,80 +9118,6 @@ atMsk:  !byte 0                 ; the leash bit under test
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
 sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 
-; ---- sfx: one-shot effects on VOICE 3 ----
-; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
-; that borrowed one would fight it. Voice 3 is untouched by the drone and free.
-; Everything is table-driven for the same reason the drone is: with pitch, waveform and volume
-; all moving you cannot tell which one you are hearing.
-; An effect is a ROW OF TABLES, not code. sfxTick reads length, waveform, envelope, filter
-; routing, peak volume and a pitch table out of them and never knows which effect is playing,
-; so a new sound is a row plus a pitch table -- no new code, and nothing added to the main
-; code stream, which has 23 bytes left.
-sfxGo:  sta sfxK                ; A = effect id, 1..N
-        tax
-        lda sfxLenT-1,x
-        sta sfxN
-        lda sfxAdT-1,x          ; per-effect envelope. A clink and a rumble want different ones,
-        sta $d413               ;   and ATTACK 0 rises instantly, which IS a click -- one shared
-        lda sfxSrT-1,x          ;   envelope for every sound was half of "clippy".
-        sta $d414
-        lda sfxPLoT-1,x         ; aim the per-frame read at this effect's pitch table
-        sta sfxRd+1
-        lda sfxPHiT-1,x
-        sta sfxRd+2
-        lda #$83
-        ora sfxFltT-1,x         ; voice 3 through the filter or not, per effect -- a rumble wants
-        sta $d417               ;   it, a clink wants the sparkle. The drone's own two routing
-        rts                     ;   bits are constant either way.
-
-sfxTick:ldx sfxK
-        beq sfxQ                ; nothing has ever played
-        lda sfxN
-        bne sfxOn
-        lda sfxCtlT-1,x         ; idle: drop the GATE bit only and leave the waveform, so the
-        and #$fe                ;   release phase rings out. Clearing the whole control register
-        sta $d412               ;   yanked the oscillator mid-note -- the other half of the click.
-sfxQ:   lda sndLvl              ; and the drone has the master back
-        sta $d418
-        rts
-sfxOn:  dec sfxN
-        ldy sfxN                ; counts DOWN, so a pitch table's LAST entry is its first frame
-        lda #$00
-        sta $d40e
-sfxRd:  lda $ffff,y             ; SELF-MODIFIED by sfxGo: this effect's pitch table
-        sta $d40f
-        lda sfxCtlT-1,x
-        sta $d412
-        lda sfxVolT-1,x         ; the LOUDER of effect and drone, so the master never steps down
-        cmp sndLvl              ;   when a sound starts next to a close angel
-        bcs sfxV
-        lda sndLvl
-sfxV:   sta $d418
-        rts
-
-;         swallow  collapse  clink
-sfxLenT:!byte   8,      14,     5      ; frames
-sfxCtlT:!byte $11,     $81,   $11      ; triangle, noise, triangle. Bit 0 is the gate.
-sfxAdT: !byte $18,     $18,   $14      ; attack/decay
-sfxSrT: !byte $f8,     $f8,   $04      ; sustain/release -- the clink has none, so it plinks
-sfxVolT:!byte $19,     $19,   $17      ; peak master, low-pass bit included
-sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
-sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
-sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
-sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
-sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
-                                                        ;   crackles rather than rumbles, which
-                                                        ;   is what the old floor of 3 was doing
-sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, an octave lower,
-                                ;   and a short fall low in the register is the shape every
-                                ;   refusal sound has -- it read as the orb being rejected rather
-                                ;   than taken. Up and bright is what acknowledgement sounds like.
-sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick reconciles it
-                                ;   with any effect and writes $d418 once.
-sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
-sfxK:   !byte 0                 ; which effect is loaded
-
-
 sokAn:  !byte 0                 ; frames left in the swallow; 0 = idle
 sokWho: !byte 0                 ; hole-like index+1 of the socket doing the swallowing
 sokLC:  !byte 0                 ; the last socket DRAWN: its centre column...
@@ -9123,6 +9137,17 @@ angBlkT: !byte 0,0,8,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
         ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
         ; and the manifest carries each chunk's destination, so where they live is free choice.
+; THIS level's entity counts, and the offsets derived from them. Every shared loop and every
+; boundary test reads one of these instead of an immediate, which is what lets one binary serve
+; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
+; swap copies the block, so a derived value can never drift from the count it came from.
+; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
+nOrbT:  !byte $02                 ; orbs
+nHoleT: !byte $02                 ; hole-like entities: exits then sockets
+nExitT: !byte $02                 ; ...of which this many are exits
+nOrbM1T:!byte $01                 ; last orb index, for the down-counting loops
+nSockT: !byte $04                 ; entity index of the first socket
+nAllM1T:!byte $03                 ; last entity index of all
 angPerT: !byte $78   ; 60ths between angel steps on THIS level, when it is close
 landXT: !byte 6,6
 landYT: !byte 7,7
@@ -9204,13 +9229,13 @@ lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,9,14,14
         !byte 4,4,4,4,8,9,4,4,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,120,6,0
-        !byte 0,0,1,0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255
-        !byte 0,0,0,0,$ff
+        !byte 0,0,1,0,0,2,2,2,1,4,3,0,4,8,12,48,15,43,0,48,15,43,0,48
+        !byte 15,43,0,48,15,43,0,255,0,0,0,0,$ff
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
-lvlDstLoT: !byte <mapT,<blkT,<runWT,<runET,<runNT,<runST,<runPlaneT,<runFaceT,<runByteT,<runBitT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>blkT,>runWT,>runET,>runNT,>runST,>runPlaneT,>runFaceT,>runByteT,>runBitT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$00,$00,$00,$00,$00,$19,$19,$19,$19,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$04,$10,$01,$01,$01,$01,$01,$01
+lvlDstLoT: !byte <mapT,<blkT,<runWT,<runET,<runNT,<runST,<runPlaneT,<runFaceT,<runByteT,<runBitT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>blkT,>runWT,>runET,>runNT,>runST,>runPlaneT,>runFaceT,>runByteT,>runBitT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$00,$00,$00,$00,$00,$19,$19,$19,$19,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$02,$06,$04,$10,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9262,7 +9287,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$1f
+        cmp #$21
         bne lsTab
         rts
 lsIdx:  !byte 0
@@ -9598,7 +9623,7 @@ dpHav:  lda dieCl
         sta dieDir
 dpDn:   lda #$00                ; AFTER the branch above, not inside it: skipping it left the
         sta marked              ;   player marked through the whole cut scene when they WERE turning
-        ldx #$01   ; the angel simply is not there any more -- hiding it is one
+        ldx nOrbM1T             ; the angel simply is not there any more -- hiding it is one
 dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slot.
         bne dgA2                ; TALL: that is the angel, and it is the one thing that stays
         lda #$01
