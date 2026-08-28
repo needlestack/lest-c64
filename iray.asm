@@ -2244,6 +2244,7 @@ tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
         rts
 
 ; ---- palKeys: 1 / 2 / 3 cycle the ceiling, wall and seam inks ----
+
 ; Purely for looking at. In mloop rather than readKeys so it works in the SPIN and TOUR builds
 ; too, which never call readKeys. ~30 cycles a frame; PALKEYS=0 removes it for benchmarking.
 ;
@@ -2310,7 +2311,6 @@ pk3:    lda pkEdge
         sta colS
         sta $d023
 pkDn:   rts
-
 readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
@@ -3841,6 +3841,7 @@ irq:    pha
         lda $d019
         and #$01
         beq irqd                ; not a raster IRQ
+
         ; ---- THREE regions, because the two things below the horizon want opposite polarities.
         ; The frozen scene below the horizon is drawn as MIRRORED glyphs and needs charset B; the
         ; arc's rim is floor-above/hole-below and needs A, which is the only polarity the ramp

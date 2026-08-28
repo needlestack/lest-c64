@@ -58,6 +58,57 @@ if (TESTLVL && !CHAIN) {             // standalone only: in a chain, level 3 is 
 // sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
 // Hoisted here because SEATBASE's fit check and the bank-3 overlap guard both consult it.
 const NOSOCK = process.env.NOSOCK === '1';
+// BANDS=1: distance shading on the ceiling and floor, by raster line.
+// Distance to a floor pixel goes as 1/|row - horizon|, so the bands CLUSTER toward the horizon
+// and the ramp runs white (near, at the screen edges) to dark grey (far, at the horizon). The
+// horizon stop and the arc stop keep the charset values the three-stop path used, because they
+// are the same two splits -- this table just adds stops between them.
+const BANDS = process.env.BANDS === '1';
+// The ramp, as (distance from the horizon in rasters, colour). Distance to a floor pixel goes
+// as 1/|row - horizon|, so equal steps in DISTANCE are these unequal steps in rows -- which is
+// why the bands crowd toward the horizon.
+const BAND_H = 0x96, BAND_ARC = 246;
+const BAND_RAMP = [[100, 1], [50, 15], [25, 12], [12, 11]];
+// BANDDITH=n: raster lines of 1-D ordered dither at each colour boundary. A raster split is one
+// line, so alternating two greys line by line blends them FINER than an 8x8 glyph could -- and
+// it costs table entries, not code, not charset codes, and nothing in renderSym. The zone is
+// clamped to half the gap so the boundaries nearest the horizon, which are only 12 rasters
+// apart, do not dither across their whole band.
+const BAND_DITH = +(process.env.BANDDITH ?? 3);
+const bandDither = (from, to, gap) => {           // returns colours for the lines BEFORE `to`
+  const w = Math.max(0, Math.min(BAND_DITH, gap >> 1)), out = [];
+  let acc = 0;
+  for (let i = 0; i < w; i++) { acc += (i + 1) / (w + 1); if (acc >= 1) { acc -= 1; out.push(to); }
+                                else out.push(from); }
+  return out;
+};
+const BAND_STOPS = (() => {
+  const stops = [[0x00, 0x04, BAND_RAMP[0][1]]];          // top of frame: charset A, nearest ink
+  const run = (rows, from, to, gap) => {                  // dither lines, then the boundary
+    const d = bandDither(from, to, gap);
+    // TWO rasters apart, not one. This IRQ pushes three registers, dispatches and pulls -- 60+
+    // cycles against a 65-cycle line -- so one-line spacing armed a raster that had already
+    // passed, the chain did not fire again until that line came round NEXT frame, and the
+    // charset splits fell out of step: flat shading and jagged wall bottoms.
+    d.forEach((c, k) => stops.push([rows - 2 * (d.length - k), 0xff, c]));
+    stops.push([rows, 0xff, to]);
+  };
+  let prev = null;                                        // ceiling: white at the top, dark at the split
+  for (const [off, col] of BAND_RAMP) {
+    const row = BAND_H - off;
+    if (prev) run(row, prev[1], col, row - prev[0]); else stops.push([row, 0xff, col]);
+    prev = [row, col];
+  }
+  stops.push([BAND_H, 0x06, BAND_RAMP[BAND_RAMP.length - 1][1]]);   // horizon: charset B
+  for (let k = BAND_RAMP.length - 2; k >= 0; k--)          // floor: the mirror, back out to white
+    run(BAND_H + BAND_RAMP[k][0], BAND_RAMP[k + 1][1], BAND_RAMP[k][1],
+        BAND_RAMP[k][0] - BAND_RAMP[k + 1][0]);
+  stops.push([BAND_ARC, 0x04, BAND_RAMP[0][1]]);           // arc top: charset A
+  // >= 0, not > 0: the line-0 stop is the top of frame, where the charset returns to A and
+  // frameCnt ticks. Filtering it out cost both.
+  return stops.filter(b => b[0] >= 0 && b[0] < 245).sort((a, b) => a[0] - b[0]);
+})();
+const BANDS_N = BAND_STOPS.length;
 import { png } from './png.mjs';
 await import('./d64lib.js');
 const D64 = globalThis.D64;
@@ -1821,6 +1872,14 @@ if (process.env.CELLSCAN === '1') {
 // pairs to 01, on the theory that nothing above the horizon ever needs the foreground pair.
 // That reasoning does not generalise -- a tall object rises above the horizon under
 // perspective even though the ceiling never does -- so leave A and B identical in ink.
+// FLOORDITH=1: make the EMPTY cell a 50/50 checkerboard of bit pair 00 ($d021, the ceiling and
+// floor) against pair 10 ($d023). No new charset code and no renderer change: every empty cell
+// already draws glyph 0, so redefining that glyph dithers the whole ceiling and floor at once.
+// Pair 10 is the only channel not already committed -- 01 is walls and the HUD, 11 is the
+// occluder stamps -- so the seams share the second colour. That is the price of the experiment.
+// One multicolour pixel is two screen pixels wide, so this is the FINEST dither the mode allows.
+if (process.env.FLOORDITH)
+  glyphs[0] = [...Array(8)].map((_, r) => (r & 1) ? 0x88 : 0x22);
 const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
 for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
@@ -1828,6 +1887,11 @@ for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
 // copy. That is only valid if fontB is EXACTLY fontA with the low three bits of the index flipped.
 // Asserted here rather than trusted: the failure mode is 2KB of subtly wrong glyphs below the
 // horizon, which reads as a rendering bug anywhere except where it actually is.
+if (process.env.GLYPHDUMP) {
+  const g = c => [...fontA.slice(c * 8, c * 8 + 8)].map(b => b.toString(2).padStart(8, '0')).join(' ');
+  for (const [n, c] of [['BLANK(0) ', 0], ['SOLID(1) ', 1], ['readout  ', 221], ['seam 239 ', 239], ['occB 243 ', 243], ['occB 246 ', 246], ['occB 249 ', 249], ['occW 250 ', 250], ['occW 253 ', 253], ['occW 255 ', 255], ['ramp 100 ', 100]])
+    console.error(`  ${n} ${g(c)}`);
+}
 for (let i = 0; i < fontA.length; i++)
   if (fontB[i] !== fontA[i ^ 7])
     throw new Error(`charset B is not fontA[i^7] at i=${i} (glyph ${i >> 3} row ${i & 7}): ` +
@@ -6942,6 +7006,7 @@ tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
         rts
 
 ${PALKEYS ? `; ---- palKeys: 1 / 2 / 3 cycle the ceiling, wall and seam inks ----
+
 ; Purely for looking at. In mloop rather than readKeys so it works in the SPIN and TOUR builds
 ; too, which never call readKeys. ~30 cycles a frame; PALKEYS=0 removes it for benchmarking.
 ;
@@ -7008,7 +7073,6 @@ pk3:    lda pkEdge
         sta colS
         sta $d023
 pkDn:   rts
-
 ` : ''}readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
@@ -8429,6 +8493,43 @@ irq:    pha
         lda $d019
         and #$01
         beq irqd                ; not a raster IRQ
+${BANDS ? `        ; ---- BANDS=1: shade the ceiling and floor by raster line ----
+        ; Floor and ceiling shading by ROW is geometrically exact: on a flat projection plane
+        ; every pixel of a given screen row sits at one perpendicular distance. Walls are NOT --
+        ; a row holds the tops of far walls and the middles of near ones at the same time -- so
+        ; only $d021 (bit pair 00, ceiling and floor) moves. $d022 and the wall pixels are left
+        ; exactly alone, which is what makes this correct rather than approximate.
+        ; Greys have to come from $d021 and cannot come from colour RAM: in multicolour char mode
+        ; bit 3 of colour RAM only ENABLES multicolour and bits 0-2 pick the colour, so pair 11
+        ; can be one of 0-7 and every grey the machine has is 11, 12 or 15.
+        ; Stood down during a fall, where pSplit sweeps the horizon across the screen and a band
+        ; pinned to a fixed line would land on the wrong side of it.
+        lda fallSt
+        bne irqNb
+        ldx bandI
+        lda bandDT,x
+        bmi bdNoC               ; $ff: this stop does not touch the charset
+        ora d018vm
+        sta $d018
+bdNoC:  lda bandCT,x
+        sta $d021
+        inx
+        cpx #${hx(BANDS_N)}
+        bne bdNx
+        ldx #$00
+        inc frameCnt            ; the wrap to line 0 IS the frame boundary
+        bne bdNx
+        inc frameCnt+1
+bdNx:   stx bandI
+        lda bandLT,x
+        sta $d012
+        jmp irqd
+irqNb:                          ; a fall takes the screen: hand back to the three-stop path.
+                                ;   bandI is left where it is on purpose -- resetting it cost
+                                ;   five bytes of the scarcest space in the program, and the
+                                ;   three-stop path re-arms $d012 itself, so a stale index only
+                                ;   mis-times the first band IRQ after landing and resyncs.
+` : ''}
         ; ---- THREE regions, because the two things below the horizon want opposite polarities.
         ; The frozen scene below the horizon is drawn as MIRRORED glyphs and needs charset B; the
         ; arc's rim is floor-above/hole-below and needs A, which is the only polarity the ramp
@@ -13519,7 +13620,13 @@ mrBz:   sta runBitT,x
         cpx #${hx(NRUN)}
         bcc mrB
         rts
-mrBitT: !byte 1,2,4,8,16,32,64,128
+${BANDS ? `; The raster-band table, out here because the main code stream has under 100 bytes and this
+; is indexed data with no alignment need. See the BANDS path in irq.
+bandLT: !byte ${BAND_STOPS.map(b => hx(b[0])).join(',')}
+bandCT: !byte ${BAND_STOPS.map(b => hx(b[2])).join(',')}
+bandDT: !byte ${BAND_STOPS.map(b => hx(b[1])).join(',')}
+bandI:  !byte 0
+` : ''}mrBitT: !byte 1,2,4,8,16,32,64,128
 mrNext: !byte 0
 mrWid:  !byte 0
 mrEid:  !byte 0
