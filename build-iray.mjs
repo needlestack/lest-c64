@@ -4184,13 +4184,15 @@ const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from t
 const pad = (a, n) => [...a, ...Array(Math.max(0, n - a.length)).fill(0)];
 const LVL_TABLES = [
   ['mapT', map],
-  ['blkT', blkT],
-  ['runWT', runW], ['runET', runE], ['runNT', runN], ['runST', runS],
-  ['runPlaneT', [...Array(NRUN)].map((_, r) => r ? runPlane[r] ?? 0 : 0)],
-  ['runFaceT', [...Array(NRUN)].map((_, r) =>
-      r === 0 || !runFace[r] ? 0 : { W: 0x00, E: 0x80, N: 0x01, S: 0x81 }[runFace[r]])],
-  ['runByteT', [...Array(NRUN)].map((_, r) => r >> 3)],
-  ['runBitT', [...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0)],
+  // blkT and the eight run tables USED to travel here -- 1,380 of the 1,789 bytes a level cost.
+  // They are all derived from mapT: blkT by objInit, which already copied it at boot, and the
+  // rest by mkRuns. Carrying them was more expensive than recomputing them, because the swap
+  // runs at ~29 cycles a byte: not moving 1,380 saves ~40,000 cycles and mkRuns costs ~25,000,
+  // so the drop through a hole got CHEAPER. Verified byte-identical, table by table and frame
+  // by frame, against the copies the build used to ship.
+  //   ['blkT', blkT],
+  //   ['runWT', runW], ['runET', runE], ['runNT', runN], ['runST', runS],
+  //   ['runPlaneT', ...], ['runFaceT', ...], ['runByteT', ...], ['runBitT', ...],
   ['holeSeeT', holeSee],
   // PADDED to the largest resident level. The swap exchanges in place, so a chunk that is
   // shorter here than in the other level would run off the end of this one. The padding sits
@@ -4283,8 +4285,10 @@ if (TWOLEV) {
     // run tables pad with zeros. Run ids it never uses are never read.
     while (b.length < a.length) b.push(0);
   }
-  const report = () => console.error(`two levels resident: shadow is ${LVL_TABLES.length} ` +
-    `tables, ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} bytes`);
+  const report = () => (process.env.SHADOWBREAK &&
+      LVL_TABLES.forEach(([n, a]) => console.error(`    ${n.padEnd(12)} ${String(a.length).padStart(5)}`)),
+    console.error(`two levels resident: shadow is ${LVL_TABLES.length} ` +
+    `tables, ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} bytes`));
   // The hazard tables are built here rather than dumped, because the shadow level's list POINTERS
   // have to be offsets into THIS build's hazLstT. Both sides are then padded to a common length
   // so a swap is a straight exchange -- the shorter side's tail is inert (an unreferenced cell in
@@ -4490,10 +4494,10 @@ ubH     = $8c
 saL     = $8d                   ; |u_L - k| and |u_R - k|, squeezed to 8 bits
 saH     = $8e
 sbL     = $8f
-sbH     = $90
-sPlo    = $91                   ; P = a*h_L, and the running sum P+Q
-sPhi    = $92
-sSlo    = $93
+sbH     = $9e                   ; NOT $90/$93, which the KERNAL uses for STATUS and VERCK. The
+sPlo    = $91                   ;   game banks the ROM out, but a level LOAD banks it back in and
+sPhi    = $92                   ;   those two are the only places the seam solver overlapped its
+sSlo    = $9f                   ;   workspace. Everything else LOAD needs ($ac-$c4) was already free.
 sShi    = $94
 ssK     = $95                   ; current boundary coordinate, and how many are left
 ssN     = $96
@@ -5193,7 +5197,7 @@ ${WALL_DELTA ? `        sta wsN                 ;   anything mid-animation is st
         beq wrOK                ;   too, or a restart hands you a level already solved.
         jsr wallTog             ; wallSt non-zero takes the wtBack path: no animation, just there
 wrOK:
-` : ''}        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
+` : ''}${process.env.MKRUNS ? '        jsr mkRuns              ; MKRUNS=1: derive the run tables at boot ON TOP of the ones\n                                ;   the image already carries. If the frame is byte-identical the\n                                ;   derivation is exactly right, and they need not be carried.\n' : ''}        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
                                 ;   jumping here, and their state is all live RAM
 ` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
@@ -10429,7 +10433,11 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
         ; Both are done here rather than on landing so the destination render -- which bgPh starts
         ; a slice per frame from the next frame on -- sees the new geometry from its first slice.
         jsr lvlSwap
-        jsr objInit
+        jsr mkRuns              ; the run tables no longer travel with the level -- they are
+                                ;   derived from the mapT the swap just brought in. Must come
+                                ;   AFTER the swap and BEFORE anything renders the new room.
+        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
+                                ;   blkT need not travel either.
 ` : ''}        ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
         sta px                  ;   player does not move again for the rest of the fall.
@@ -12764,10 +12772,14 @@ mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
         ; Straight from the per-level manifest, not a second copy of the same expression: these
         ; are NRUN long rather than this level's own run count, and the swap exchanges them
         ; against a shadow sized the same way. Two sources for one table is how they drift.
-runPlaneT: !byte ${LVLT('runPlaneT').join(',')}
-runFaceT: !byte ${LVLT('runFaceT').join(',')}
-runByteT: !byte ${LVLT('runByteT').join(',')}
-runBitT: !byte ${LVLT('runBitT').join(',')}
+; The LIVE level's copies, still emitted because nothing derives them until the first swap.
+; They are no longer in the manifest, so they do not travel; mkRuns rebuilds them from the new
+; mapT on arrival. NRUN-sized, so a level with more runs than this one still fits.
+runPlaneT: !byte ${[...Array(NRUN)].map((_, r) => r ? runPlane[r] ?? 0 : 0).join(',')}
+runFaceT: !byte ${[...Array(NRUN)].map((_, r) =>
+      r === 0 || !runFace[r] ? 0 : { W: 0x00, E: 0x80, N: 0x01, S: 0x81 }[runFace[r]]).join(',')}
+runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
+runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
 orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
@@ -13248,8 +13260,208 @@ holeSeeT: !byte ${holeSee.join(",")}
         ; ran out of room the moment a level was allowed to declare its own sockets: the
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
-${SOUND ? `        * = $9200
-` : ''}${SOUND ? `
+        * = $9200
+; ---- mkRuns: rebuild the wall-run tables from mapT ----
+; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
+; used to carry -- are DERIVED from the map by two passes over it. Carrying them was costing more
+; than recomputing them: the swap runs at ~29 cycles a byte, so not moving 1,124 of them saves
+; ~32,000 cycles, and this costs about 25,000. The drop through a hole gets CHEAPER, not dearer.
+;
+; The id order is load-bearing and must match the build exactly: columns first (west then east
+; per cell), then rows (north then south), ids handed out in that interleaved order. Any other
+; order renumbers every run and the merge-hazard lists, which name ids, stop meaning anything.
+;
+; No bounds checks, and none needed: the map border is solid (the build refuses one that is not),
+; so at x=0 the cell to the west is the previous ROW's x=15, always a wall, and no face is found.
+; The north and south passes DO need care, because c-16 and c+16 leave the table -- so the north
+; pass starts at row 1 and the south pass stops at row 14. Row 0 has no north face to see and row
+; 15 no south face; both still get their inward-facing side from the other pass.
+mkRuns: ldx #$00
+        txa
+mrZ:    sta runWT,x             ; 0 = "no run here"
+        sta runET,x
+        sta runNT,x
+        sta runST,x
+        inx
+        bne mrZ
+        lda #$01
+        sta mrNext              ; id 0 means no run, so ids start at 1
+
+        ; ---- vertical planes: west and east faces, contiguous in y ----
+        lda #$00
+        sta mrX
+mrVx:   lda #$00
+        sta mrWp                ; no run in progress on either face
+        sta mrEp
+        lda mrX
+        tay                     ; c = y*16 + x, walking y means stepping 16
+mrVy:   lda mapT,y
+        bne mrVw
+        sta mrWp                ; open cell: both runs end here
+        sta mrEp
+        jmp mrVn
+mrVw:   dey                     ; west face? the cell at c-1 must be open
+        lda mapT,y
+        iny                     ; restoring Y CLOBBERS the flags the load just set, so the
+        cmp #$00                ;   compare has to be redone -- without this the branch below
+        bne mrVwn               ;   tested Y and every west run came out wrong
+        lda mrWp
+        bne mrVws
+        lda mrNext              ; a new run: plane = x, face W
+        sta mrWid
+        inc mrNext
+        tax
+        lda mrX
+        sta runPlaneT,x
+        lda #$00
+        sta runFaceT,x
+mrVws:  lda mrWid
+        sta runWT,y
+        lda #$01
+        sta mrWp
+        jmp mrVe
+mrVwn:  lda #$00
+        sta mrWp
+mrVe:   iny                     ; east face? the cell at c+1 must be open
+        lda mapT,y
+        dey                     ; same trap as the west face above
+        cmp #$00
+        bne mrVen
+        lda mrEp
+        bne mrVes
+        lda mrNext              ; plane = x+1, face E
+        sta mrEid
+        inc mrNext
+        tax
+        lda mrX
+        clc
+        adc #$01
+        sta runPlaneT,x
+        lda #$80
+        sta runFaceT,x
+mrVes:  lda mrEid
+        sta runET,y
+        lda #$01
+        sta mrEp
+        jmp mrVn
+mrVen:  lda #$00
+        sta mrEp
+mrVn:   tya                     ; next row, same column
+        clc
+        adc #$10
+        tay
+        bcc mrVy
+        inc mrX
+        lda mrX
+        cmp #$10
+        bcc mrVx
+
+        ; ---- horizontal planes: north and south faces, contiguous in x ----
+        lda #$00
+        sta mrY
+        tay                     ; c = y*16, walking x means stepping 1
+mrHy:   lda #$00
+        sta mrWp                ; mrWp/mrEp do double duty as the N/S run-in-progress flags
+        sta mrEp
+        ldx #$00
+        stx mrX
+mrHx:   lda mapT,y
+        bne mrHn
+        sta mrWp
+        sta mrEp
+        jmp mrHnx
+mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-16 would leave mapT
+        beq mrHnn
+        tya
+        sec
+        sbc #$10
+        tax
+        lda mapT,x
+        bne mrHnn
+        lda mrWp
+        bne mrHns
+        lda mrNext              ; plane = y, face N
+        sta mrWid
+        inc mrNext
+        tax
+        lda mrY
+        sta runPlaneT,x
+        lda #$01
+        sta runFaceT,x
+mrHns:  lda mrWid
+        sta runNT,y
+        lda #$01
+        sta mrWp
+        jmp mrHs
+mrHnn:  lda #$00
+        sta mrWp
+mrHs:   lda mrY                 ; south face: row 15 has none, and c+16 would leave mapT
+        cmp #$0f
+        beq mrHsn
+        tya
+        clc
+        adc #$10
+        tax
+        lda mapT,x
+        bne mrHsn
+        lda mrEp
+        bne mrHss
+        lda mrNext              ; plane = y+1, face S
+        sta mrEid
+        inc mrNext
+        tax
+        lda mrY
+        clc
+        adc #$01
+        sta runPlaneT,x
+        lda #$81
+        sta runFaceT,x
+mrHss:  lda mrEid
+        sta runST,y
+        lda #$01
+        sta mrEp
+        jmp mrHnx
+mrHsn:  lda #$00
+        sta mrEp
+mrHnx:  iny
+        inc mrX
+        lda mrX
+        cmp #$10
+        bcc mrHx
+        inc mrY
+        lda mrY
+        cmp #$10
+        bcc mrHy
+
+        ; ---- the per-run bit lookups, which are pure arithmetic on the id ----
+        ldx #$00
+mrB:    txa
+        lsr
+        lsr
+        lsr
+        sta runByteT,x
+        lda #$00
+        cpx mrNext
+        bcs mrBz                ; ids past this level's count stay 0, so a stale id ORs nothing
+        txa
+        and #$07
+        tay
+        lda mrBitT,y
+mrBz:   sta runBitT,x
+        inx
+        cpx #${hx(NRUN)}
+        bcc mrB
+        rts
+mrBitT: !byte 1,2,4,8,16,32,64,128
+mrNext: !byte 0
+mrWid:  !byte 0
+mrEid:  !byte 0
+mrWp:   !byte 0
+mrEp:   !byte 0
+mrX:    !byte 0
+mrY:    !byte 0
+
+${SOUND ? `
 ; ---- sfx: one-shot effects on VOICE 3 ----
 ; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
 ; that borrowed one would fight it. Voice 3 is untouched by the drone and free.
@@ -14281,7 +14493,7 @@ try {
     { tag: 'M', name: 'IMG', at: r.org, data: [...r.bytes] },
   ];
   const { buildLoader } = await import('./loader-src.mjs');
-  const ld = buildLoader(assemble, DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first })),
+  const ld = buildLoader(assemble, DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, runtime: f.runtime })),
                          r.labels.entry);
   const d = D64.createEmpty('IRAY', '01');
   d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);   // first, so LOAD"*" finds it

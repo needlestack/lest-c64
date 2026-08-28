@@ -61,12 +61,12 @@ chr:    lda $c000,x
         lda #$37                ; KERNAL back in for the remaining loads
         sta $01
         cli
-${files.filter(f => !f.first).map(load).join('\n')}
+${files.filter(f => !f.first && !f.runtime).map(load).join('\n')}
         jmp ${hx4(entry)}
 fail:   inc $d020               ; nothing sensible to do, so at least be obvious about it
         jmp fail
 dev:    !byte $08
-${files.map(f => `n${f.tag}: !byte ${petscii(f.name)}`).join('\n')}
+${files.filter(f => !f.runtime).map(f => `n${f.tag}: !byte ${petscii(f.name)}`).join('\n')}
 `;
 }
 
