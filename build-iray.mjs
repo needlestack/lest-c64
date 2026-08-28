@@ -2928,7 +2928,15 @@ for (const [lx, ly] of LEASH_AT) {
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number), process.env.LAND.split(',').map(Number)]
-  : TESTLVL ? [[1, 1], [1, 1]] : LEVEL2 ? [[6, 7], [6, 7]] : [[2, 2], [2, 2]];   // L2: where it opens               // level 1: the drop puts you back in the room
+  : TESTLVL ? [[1, 1], [1, 1]] : LEVEL2 ? [[6, 7], [6, 7]] : [[2, 2], [2, 2]];   // L2: where it opens
+// ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
+// on both of these lands you nose-against a wall half a cell away: the whole screen goes black
+// and it reads as a broken render rather than as a wall. One byte, and it travels with the level
+// because only the level knows which way its landing spot is worth looking.
+//   level 1 (2,2): $3b, its own opening view across the room, not down the corridor axis
+//   level 2 (6,7): $80, along the ring -- the same cell and heading the level starts you at
+//   level 3 (1,1): $10, the one heading with BOTH the socket and the far-corner hole in view
+const LAND_A = +(process.env.LANDA ?? (TESTLVL ? 0x10 : LEVEL2 ? 0x80 : 0x3b));               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -4239,6 +4247,7 @@ const LVL_TABLES = [
   ['orbYCT', pad([...orbYC, ...HOLELIKE.map(h => h.y)], NOCC)],
   ['orbX0T', pad(orbXC, NORB)], ['orbY0T', pad(orbYC, NORB)],
   ['landXT', LANDS_AT.map(l => l[0])], ['landYT', LANDS_AT.map(l => l[1])],
+  ['landAT', [LAND_A]],
   ['angBlkT', angBlk],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
   ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : 15), NHOLE)],
@@ -10499,6 +10508,10 @@ lvlEnd:
         sta px+1
         lda landYT,x
         sta py+1
+        lda landAT              ; face the way THIS level wants to be entered. Keeping the old
+        sta pa                  ;   heading put you against a wall and blacked the screen out.
+        lda #$00
+        sta paF
         txa
         eor #$01
         sta hlv
@@ -12837,9 +12850,10 @@ orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte ${[...orbXC, ...HOLELIKE.map(h => h.x)].join(',')}
-orbYCT: !byte ${[...orbYC, ...HOLELIKE.map(h => h.y)].join(',')}
-orbColT2: !byte ${orbCol.join(',')}
+orbXCT: !byte ${LVLT('orbXCT').join(',')}      ; from the MANIFEST, so its length cannot
+orbYCT: !byte ${LVLT('orbYCT').join(',')}      ;   disagree with what the swap moves
+orbColT2: !byte ${pad(orbCol, NORB).join(',')}   ; NORB: a level with more orbs than this one
+                                ;   indexes it too, and a short table reads the byte after
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
 ; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
@@ -13127,10 +13141,10 @@ pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
-hlFillT: !byte ${HOLELIKE.map(h => h.exit ? 0 : 15).join(',')}
+hlFillT: !byte ${LVLT('hlFillT').join(',')}
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
-hlSeat: !fill ${HOLELIKE.length}, 0
+hlSeat: !fill ${NHOLE}, 0        ; NHOLE: hlSCl clears NHOLE of them on every restart
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte ${holeVarT.join(',')}
@@ -13162,15 +13176,15 @@ mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
 ; image segment through holeSeeT at $3240
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbPtrU: !byte ${orbPtrU.join(',')}
-orbTallT: !byte ${orbTallT.join(',')}
-orbHidT: !byte ${orbHidT.join(',')}
-orbHid0T: !byte ${orbHidT.join(',')}   ; the build's hidden flags, for objInit
-orbX0T: !byte ${orbXC.join(',')}   ; where objInit puts them back on a restart
-orbY0T: !byte ${orbYC.join(',')}
+orbTallT: !byte ${LVLT('orbTallT').join(',')}
+orbHidT: !byte ${pad(orbHidT, NORB).join(',')}
+orbHid0T: !byte ${LVLT('orbHid0T').join(',')}   ; the build's hidden flags, for objInit
+orbX0T: !byte ${LVLT('orbX0T').join(',')}   ; where objInit puts them back on a restart
+orbY0T: !byte ${LVLT('orbY0T').join(',')}
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
-orbSeenT: !byte ${[...ORBS, ...HOLELIKE].map(() => 0).join(',')}
+orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
 angAccT: !byte ${ORBS.map(() => 0).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
@@ -13916,6 +13930,7 @@ nOrbM1T:!byte ${hx(ORBS.length - 1)}                 ; last orb index, for the d
 nSockT: !byte ${hx(ORBS.length + HOLES_AT.length)}                 ; entity index of the first socket
 nAllM1T:!byte ${hx(ORBS.length + HOLELIKE.length - 1)}                 ; last entity index of all
 angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, when it is close
+landAT: !byte ${hx(LAND_A)}                 ; which way to face on arrival; see LAND_A
 landXT: !byte ${LANDS_AT.map(l => l[0]).join(',')}
 landYT: !byte ${LANDS_AT.map(l => l[1]).join(',')}
 ${TWOLEV ? `; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
@@ -14486,6 +14501,25 @@ const asmPath = DIAG.length ? './iray.diag.asm' : './iray.asm';
 writeFileSync(asmPath, asm);
 try {
   const r = assemble(asm);
+  // Every manifest table must be emitted at EXACTLY the length the swap moves. Emitted short,
+  // the swap runs off the end into whatever follows -- which is how a stray byte landed on a
+  // colour table and turned an orb black on level 2. Labels are sorted by address, so the next
+  // label is the ceiling for the one before it.
+  {
+    const byAddr = Object.entries(r.labels).sort((a, b) => a[1] - b[1]);
+    for (const [n, a] of LVL_TABLES) {
+      const i = byAddr.findIndex(([k]) => k === n);
+      if (i < 0 || i + 1 >= byAddr.length) continue;
+      const addr = byAddr[i][1], room = byAddr[i + 1][1] - addr;
+      // A span MAY cover following labels when it is a deliberate run of named bytes -- nOrbT
+      // is six of them. That is one label per byte; anything else means the next table starts
+      // inside this one.
+      const inside = byAddr.filter(([, v]) => v > addr && v < addr + a.length).length;
+      if (room > 0 && room < a.length && inside + 1 !== a.length) throw new Error(
+        `${n} is emitted with ${room} bytes before the next label, but the level swap moves ` +
+        `${a.length}. Emit it from the manifest (LVLT) so the two cannot disagree.`);
+    }
+  }
   // Layout guard. The old version only checked the charset, which is why buffer B at
   // $2000 silently ate the tail of patTab for weeks: a screen buffer looks like free RAM
   // to the assembler but is rewritten every frame. Check every region the data segment

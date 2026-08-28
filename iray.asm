@@ -5695,6 +5695,10 @@ lvlEnd:
         sta px+1
         lda landYT,x
         sta py+1
+        lda landAT              ; face the way THIS level wants to be entered. Keeping the old
+        sta pa                  ;   heading put you against a wall and blacked the screen out.
+        lda #$00
+        sta paF
         txa
         eor #$01
         sta hlv
@@ -7833,9 +7837,10 @@ orbOccLoT: !byte 0,4,8,12
 orbOccHiT: !byte 112,112,112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 6,6,6,6
-orbYCT: !byte 2,3,5,5
-orbColT2: !byte 12,12
+orbXCT: !byte 6,6,6,6      ; from the MANIFEST, so its length cannot
+orbYCT: !byte 2,3,5,5      ;   disagree with what the swap moves
+orbColT2: !byte 12,12   ; NORB: a level with more orbs than this one
+                                ;   indexes it too, and a short table reads the byte after
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
 ; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
@@ -8513,7 +8518,7 @@ pathDYT: !byte 0,0,1,255
 hlFillT: !byte 0,0
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
-hlSeat: !fill 2, 0
+hlSeat: !fill 2, 0        ; NHOLE: hlSCl clears NHOLE of them on every restart
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte 255,255,255,255,255,255,255,19,19,19,18,18,18,17,17,17,17,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -9361,6 +9366,7 @@ nOrbM1T:!byte $01                 ; last orb index, for the down-counting loops
 nSockT: !byte $04                 ; entity index of the first socket
 nAllM1T:!byte $03                 ; last entity index of all
 angPerT: !byte $78   ; 60ths between angel steps on THIS level, when it is close
+landAT: !byte $80                 ; which way to face on arrival; see LAND_A
 landXT: !byte 6,6
 landYT: !byte 7,7
 ; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
@@ -9384,17 +9390,17 @@ lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,8,9,14,14,4,4,4,4,8,9,4,4,2,2,2,2
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,120,120,6,0,0,0,1,0,0,255,2,2,2,1,4,3
-        !byte 0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0,0,0
-        !byte 0,$ff
+        !byte 59,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,120,120,6,0,0,0,1,0,0,255,2,2,2,1,4
+        !byte 3,0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0,0
+        !byte 0,0,$ff
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte <lvlShadow+0
 lvlBasHiT: !byte >lvlShadow+0
-lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$02,$01,$06,$04,$10,$01,$01,$01,$01,$01,$01
+lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$01,$20,$01,$01,$01,$02,$02,$02,$01,$06,$04,$10,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9447,7 +9453,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$19
+        cmp #$1a
         bne lsTab
         rts
 lsIdx:  !byte 0
