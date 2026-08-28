@@ -4288,7 +4288,10 @@ ofyOk:  sta ofy
         lda sokAn               ; ---- being swallowed by a socket? animate instead of holding ----
         bne omSwal
         lda carry               ; ---- the carried orb, HELD IN FRONT OF YOU ----
-        beq omNoIco             ; Was a small hi-res icon in the lower left. Now it is the orb
+        beq omNoIco
+        lda dieSt               ; ...but not once the scene has started: the room is leaving
+        bne omNoIco             ;   and an orb held in front of you goes with it
+             ; Was a small hi-res icon in the lower left. Now it is the orb
                                 ;   itself at its nearest ladder rung -- variant 0, a 21-row
                                 ;   bitmap vertically expanded to 42 -- parked centre-bottom with
                                 ;   its ground shadow off the end of the screen, so it reads as
@@ -4409,6 +4412,12 @@ obLoop: lda oidx
         tax
         lda orbHidT,x
         bne obNext              ; carried, so not in the world
+        lda dieSt               ; dying: the ANGEL keeps its sprite and nothing else does.
+        beq obLive              ;   Done here rather than by clearing omEn, because orbMove
+        lda orbTallT,x          ;   refills omEn later in the same frame -- which is exactly how
+        beq obNext              ;   the carried-orb slot came back the last time this was tried.
+obLive:
+
         lda #$80
         sta ocanO
         jsr orbOne
