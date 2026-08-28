@@ -5248,7 +5248,7 @@ mfAlive:
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
         jmp fwait
-mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
+mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
@@ -11080,8 +11080,11 @@ sniLp:  sta $d400,x
         sta $d415
         lda #${hx(SND_FC)}
         sta $d416
-        lda #${hx((SND_RES << 4) | 3)}
-        sta $d417               ; resonance, and voices 1 and 2 routed through the filter
+        lda #${hx((SND_RES << 4) | 7)}
+        sta $d417               ; resonance, and ALL THREE voices routed through the filter.
+                                ;   Voice 3 was unfiltered and read bright and thin next to the
+                                ;   drone; the cutoff is already low, so routing alone darkens the
+                                ;   effects a long way. The drone's own path is unchanged.
         lda #${hx(0x10 | SND_VOLN)}
         sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
         lda #$41                ; pulse + gate
@@ -11370,7 +11373,10 @@ stOk2:  tax                     ; everything comes straight off tables -- the cl
         sta $d408
 ${SNDTEST ? '' : `        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonance and pulse width are set once in
         ora #$10                ;   sndInit and left there -- with three things moving at once you
-        sta $d418               ;   cannot tell which one you are hearing. Low-pass, as it began.
+        sta sndLvl              ;   cannot tell which one you are hearing. Low-pass, as it began.
+                                ; NOT written to $d418 here: sfxTick runs next and is the single
+                                ;   writer, so the drone and an effect cannot fight over the
+                                ;   master and step it against each other.
 `}        rts
 
 ` : ''}; ---- angStep: give every unobserved angel its share of the clock, and move the ones that are due
@@ -11932,6 +11938,9 @@ okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may ex
         sta blkT,y
         inx
         stx carry               ; index + 1, so zero can mean empty
+${SOUND ? `        lda #$03
+        jsr sfxGo               ; the clink of it coming off the floor
+` : ''}
         lda #$01
         sta entDty
         rts
@@ -11954,6 +11963,9 @@ orbPut: jsr dropPick            ; ---- put down ----
         sty sokWho              ; index+1; the consume happens when the animation lands
         lda #${hx(SOK_ANIM)}
         sta sokAn               ; orb phase while sokAn >= SOK_SHR, socket closing at or below it
+${SOUND ? `        lda #$01
+        jsr sfxGo               ; ...and it is heard going in
+` : ''}
         lda #$00
         sta sokVar
         ; sokCX is the orb's CENTRE, not its left edge. A sprite shrinks about its left edge, so
@@ -13315,7 +13327,81 @@ bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
 sokShrT: !byte ${[...Array(SOK_SHR)].map((_, i) => i * SOK_SSTEP).join(',')}   ; rungs down, per closing frame
-${WALL_DELTA ? `
+${SOUND ? `
+; ---- sfx: one-shot effects on VOICE 3 ----
+; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
+; that borrowed one would fight it. Voice 3 is untouched by the drone and free.
+; Everything is table-driven for the same reason the drone is: with pitch, waveform and volume
+; all moving you cannot tell which one you are hearing.
+; An effect is a ROW OF TABLES, not code. sfxTick reads length, waveform, envelope, filter
+; routing, peak volume and a pitch table out of them and never knows which effect is playing,
+; so a new sound is a row plus a pitch table -- no new code, and nothing added to the main
+; code stream, which has 23 bytes left.
+sfxGo:  sta sfxK                ; A = effect id, 1..N
+        tax
+        lda sfxLenT-1,x
+        sta sfxN
+        lda sfxAdT-1,x          ; per-effect envelope. A clink and a rumble want different ones,
+        sta $d413               ;   and ATTACK 0 rises instantly, which IS a click -- one shared
+        lda sfxSrT-1,x          ;   envelope for every sound was half of "clippy".
+        sta $d414
+        lda sfxPLoT-1,x         ; aim the per-frame read at this effect's pitch table
+        sta sfxRd+1
+        lda sfxPHiT-1,x
+        sta sfxRd+2
+        lda #${hx((SND_RES << 4) | 3)}
+        ora sfxFltT-1,x         ; voice 3 through the filter or not, per effect -- a rumble wants
+        sta $d417               ;   it, a clink wants the sparkle. The drone's own two routing
+        rts                     ;   bits are constant either way.
+
+sfxTick:ldx sfxK
+        beq sfxQ                ; nothing has ever played
+        lda sfxN
+        bne sfxOn
+        lda sfxCtlT-1,x         ; idle: drop the GATE bit only and leave the waveform, so the
+        and #$fe                ;   release phase rings out. Clearing the whole control register
+        sta $d412               ;   yanked the oscillator mid-note -- the other half of the click.
+sfxQ:   lda sndLvl              ; and the drone has the master back
+        sta $d418
+        rts
+sfxOn:  dec sfxN
+        ldy sfxN                ; counts DOWN, so a pitch table's LAST entry is its first frame
+        lda #$00
+        sta $d40e
+sfxRd:  lda $ffff,y             ; SELF-MODIFIED by sfxGo: this effect's pitch table
+        sta $d40f
+        lda sfxCtlT-1,x
+        sta $d412
+        lda sfxVolT-1,x         ; the LOUDER of effect and drone, so the master never steps down
+        cmp sndLvl              ;   when a sound starts next to a close angel
+        bcs sfxV
+        lda sndLvl
+sfxV:   sta $d418
+        rts
+
+;         swallow  collapse  clink
+sfxLenT:!byte   8,      14,     5      ; frames
+sfxCtlT:!byte $11,     $81,   $11      ; triangle, noise, triangle. Bit 0 is the gate.
+sfxAdT: !byte $18,     $18,   $14      ; attack/decay
+sfxSrT: !byte $f8,     $f8,   $04      ; sustain/release -- the clink has none, so it plinks
+sfxVolT:!byte $19,     $19,   $17      ; peak master, low-pass bit included
+sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
+sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
+sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
+sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
+sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
+                                                        ;   crackles rather than rumbles, which
+                                                        ;   is what the old floor of 3 was doing
+sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, an octave lower,
+                                ;   and a short fall low in the register is the shape every
+                                ;   refusal sound has -- it read as the orb being rejected rather
+                                ;   than taken. Up and bright is what acknowledgement sounds like.
+sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick reconciles it
+                                ;   with any effect and writes $d418 once.
+sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
+sfxK:   !byte 0                 ; which effect is loaded
+
+` : ''}${WALL_DELTA ? `
 ; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
@@ -13338,6 +13424,9 @@ wallTog:lda wallSt
         bne wtBack
         lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
+${SOUND ? `        lda #$02
+        jsr sfxGo               ; only on the way OUT: wtBack is how a restart puts the wall back
+` : ''}
         ldx #$9f                ; and wipe idT, because only the ~14-26 CAST columns are written
         lda #$ff                ;   each frame and the rest still hold the cell some earlier pose
 wtClr:  sta idT,x               ;   struck there. Scanning those stale entries stretched the span
