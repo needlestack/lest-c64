@@ -5677,12 +5677,16 @@ fallChk:ldx hlv
         ; blkT from the NEW mapT and puts each entity back at the new level's build-time cell.
         ; Both are done here rather than on landing so the destination render -- which bgPh starts
         ; a slice per frame from the next frame on -- sees the new geometry from its first slice.
+        lda lvlNxtT             ; where does THIS level's hole go? $ff means nowhere -- the last
+        cmp #$ff                ;   level in the chain keeps its hole as scenery rather than
+        beq lvlEnd              ;   dropping the player into whatever happens to be in slot 0
         jsr lvlSwap
         jsr mkRuns              ; the run tables no longer travel with the level -- they are
                                 ;   derived from the mapT the swap just brought in. Must come
                                 ;   AFTER the swap and BEFORE anything renders the new room.
         jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
+lvlEnd:
         ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
         sta px                  ;   player does not move again for the rest of the fall.
@@ -9349,6 +9353,7 @@ angBlkT: !byte 0,0,8,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
+lvlNxtT:!byte $ff                 ; slot this level's hole leads to; $ff = last
 nOrbT:  !byte $02                 ; orbs
 nHoleT: !byte $02                 ; hole-like entities: exits then sockets
 nExitT: !byte $02                 ; ...of which this many are exits
@@ -9363,6 +9368,8 @@ landYT: !byte 7,7
 ; with the live tables, so this holds whichever level you are not standing in. It lives in table
 ; space (fixed off RELOC) rather than in an image hole, because holes move when the map does --
 ; which is exactly how the old $609b and $bc00 placements broke the moment a second map existed.
+; ONE BLOB PER RESIDENT LEVEL, back to back, each in manifest order and each the same length --
+; lvlSwap indexes them by slot, and the slots are the OTHERS list in ascending level order.
 lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1
         !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0
@@ -9378,14 +9385,16 @@ lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,8,9,14,14,4,4,4,4,8,9,4,4,2,2,2,2
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,120,120,6,0,0,0,1,0,0,2,2,2,1,4,3,0
-        !byte 4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0,0,0,0
-        !byte $ff
+        !byte 0,0,0,0,0,0,0,0,120,120,6,0,0,0,1,0,0,255,2,2,2,1,4,3
+        !byte 0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0,0,0
+        !byte 0,$ff
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
-lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$02,$06,$04,$10,$01,$01,$01,$01,$01,$01
+lvlBasLoT: !byte <lvlShadow+0
+lvlBasHiT: !byte >lvlShadow+0
+lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$02,$01,$06,$04,$10,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9394,11 +9403,12 @@ lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$20,$01,$01,$01,$02,$02,$02,$06,$
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
-lvlSwap:
-        lda #<lvlShadow
+lvlSwap:                        ; A = which slot to exchange with
+        tax
+        lda lvlBasLoT,x         ; the slots are one blob each, back to back, all the same length
         sta lsS+1
         sta lsS2+1
-        lda #>lvlShadow
+        lda lvlBasHiT,x
         sta lsS+2
         sta lsS2+2
         lda #$00
@@ -9437,7 +9447,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$18
+        cmp #$19
         bne lsTab
         rts
 lsIdx:  !byte 0
