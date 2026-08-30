@@ -58,6 +58,71 @@ if (TESTLVL && !CHAIN) {             // standalone only: in a chain, level 3 is 
 // sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
 // Hoisted here because SEATBASE's fit check and the bank-3 overlap guard both consult it.
 const NOSOCK = process.env.NOSOCK === '1';
+// RECORD=1: log the player's input so a real play-through becomes a repeatable benchmark.
+// 64 runs of 4 bytes. Recording stops when it fills rather than wrapping, so a truncated tour
+// is obvious instead of silently looping.
+const RECORD = process.env.RECORD === '1';
+// TOURW=1: the user's recorded route as a WAYPOINT script -- walk/run/turn until the pose
+// arrives, rather than for a fixed number of frames. Self-correcting, so a build of any speed
+// walks to the same places; a per-step tick timeout means a step that cannot arrive (a wall, a
+// target slightly off the facing axis) gives up instead of wedging the benchmark.
+// The route as WAYPOINTS, turned into hold-durations at build time. Durations, not runtime
+// position tests: a duration cannot wedge, and a tick is real time -- movement is tick-driven --
+// so the same script walks to the same places on a build of any frame rate, which is the whole
+// point of a benchmark.
+// Rates are the ones readKeys documents: running is 12 units of 1/256 cell and 6 quarter-units
+// of angle per tick, and is 3x movement / 2x turning over walking.
+const MV_WALK = 4, MV_RUN = 12;          // units of 1/256 cell per tick
+const TN_WALK = 192, TN_RUN = 384;       // 16-bit angle units per tick (a quarter unit is 64)
+const T_WALK = 0, T_BACK = 1, T_RUN = 2, T_TURNL = 3, T_TURNR = 4,
+      T_FTURNL = 5, T_FTURNR = 6, T_SPACE = 7, T_WAIT = 8, T_FALL = 9;
+const TOUR_ROUTE = [
+  ['move', T_WALK,   0x0275, 0x041e],   // out of the corner, across the room
+  ['turn', T_TURNL,  0x02c0],
+  ['move', T_WALK,   0x07dd, 0x0465],   // down the corridor to the orb
+  ['act',  T_SPACE,  2],                // take it
+  ['move', T_BACK,   0x02a1, 0x0426],   // back off, still facing the orb's cell
+  ['turn', T_TURNR,  0x4280],           // look away: the angel is free to move
+  ['act',  T_WAIT,   900, 0x44],        // until the angel reaches (4,4); the ticks are a ceiling
+  ['turn', T_TURNL,  0x169d],           // look at it: it stops. 5 deg past a1a1d -- that was
+                                        //   not quite far enough to catch the angel's eye.
+  ['move', T_RUN,    0x04c7, 0x05c3],
+  ['turn', T_FTURNL, 0xeed9],           // likewise 5 deg past af259
+  ['move', T_RUN,    0x07f1, 0x04ba],
+  ['turn', T_FTURNR, 0x0159],
+  ['move', T_RUN,    0x0c4d, 0x04ad],   // out along the corridor
+  ['turn', T_FTURNL, 0x7f99],           // face back down it: the angel stops again
+  ['act',  T_SPACE,  2],                // drop the orb
+  ['turn', T_TURNR,  0x0159],
+  ['act',  T_FALL,   400],              // walk on until the hole takes us
+];
+const TOUR_STEPS = (() => {
+  let x = 0x01f6, y = 0x0149, a = 0x3b00;    // the start pose
+  const out = [];
+  for (const r of TOUR_ROUTE) {
+    if (r[0] === 'move') {
+      const d = Math.hypot(r[2] - x, r[3] - y);
+      out.push([r[1], Math.max(1, Math.round(d / (r[1] === T_RUN ? MV_RUN : MV_WALK)))]);
+      x = r[2]; y = r[3];
+    } else if (r[0] === 'turn') {
+      // The DIRECTION the route names, not the shortest way round -- going the wrong way is
+      // still a legal turn, it just takes the complement, and the two disagree on most of this
+      // route. readKeys is unambiguous: joystick left is `sbc #$c0` per tick (the angle
+      // DECREASES) and right is `adc #$c0` (it increases).
+      const left = (r[1] === T_TURNL || r[1] === T_FTURNL);
+      const d = left ? ((a - r[2]) & 0xffff) : ((r[2] - a) & 0xffff);
+      const rate = (r[1] === T_FTURNL || r[1] === T_FTURNR) ? TN_RUN : TN_WALK;
+      out.push([r[1], Math.max(1, Math.round(d / rate))]);
+      a = r[2];
+    } else out.push([r[1], r[2], r[3] ?? 0]);
+  }
+  return out;
+})();
+if (process.env.TOURDUMP)
+  console.error('  tour: ' + TOUR_STEPS.map(t => `${t[0]}:${t[1]}`).join(' ') +
+                `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
+const RECMAX = 64;
+const TOURW = process.env.TOURW === '1';
 // BANDS=1: distance shading on the ceiling and floor, by raster line.
 // Distance to a floor pixel goes as 1/|row - horizon|, so the bands CLUSTER toward the horizon
 // and the ramp runs white (near, at the screen edges) to dark grey (far, at the horizon). The
@@ -2166,6 +2231,18 @@ const PROFILE0 = flag('PROFILE');
 // PROFILE1=1: emit ONLY the whole-frame tick, as an independent check on the phase split.
 const PROFILE1 = flag('PROFILE1');
 const PROFILE = PROFILE0 || PROFILE1;
+// PROFCOARSE=1: only the TOP-LEVEL brackets. The ray buckets sit inside castRay, which runs once
+// per cast column, so pfTick fires ~20x a frame for each of them and charges its own cost to
+// every one -- which is why the fine-grained shares summed to 119% of the frame. Dropping them
+// trades the ray breakdown for a top-level split that can be trusted.
+const PROFCOARSE = flag('PROFCOARSE');
+// SEAMCNT=1: how far down seamSpan each candidate gets. The differences between consecutive
+// counters are the reject counts, so no branch restructuring is needed -- each is simply bumped
+// at a point only reached by getting past the test above it.
+const SEAMCNT = flag('SEAMCNT');
+const CELLMERGE = flag('CELLMERGE');
+const PROFMAX = flag('PROFMAX');
+const PROFSUB = PROFILE0 && !PROFILE1 && !PROFCOARSE;
 // DOUBLE=interpSpan|marchCol calls that routine twice. Differencing two PROFILE runs then
 // gives its exact cost -- the old fps-based version of this trick was distorted by the
 // raster wait absorbing the extra work.
@@ -4682,6 +4759,16 @@ cqLo    = $8100                 ; colour queue: address low, high, and the value
 cqHi    = $8140                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $8180                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
+pfFD    = $7cfd                  ; PROFMAX: raster frames the last rendered frame spanned
+pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raster frames
+mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
+mxHi    = $7cfb
+mxStep  = $7cfc                  ;   ...and the tour step it happened in
+ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
+ssWid   = $7cf2                  ;   ...wide enough to hold a seam
+ssNear  = $7cf4                  ;   ...near enough for one to read
+ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
+ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
 pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e42
@@ -4919,6 +5006,7 @@ bfsTail = $85ef
 bfsC    = $8559
 bfsND   = $855a
 bfsN    = $855b
+bfsLast = $7ce8                  ; frameCnt when the fill last ran; see bfsExp
 hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
 hlKind  = $85dd                  ; which ladder holeTail is currently patched for
 hoI     = $85de                  ; holeOne's loop: which hole-like entity, and its
@@ -5307,7 +5395,16 @@ ${PAF ? `        lda #${hx(PAF)}
 ` : ''}${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
 ` : ''}${process.env.DROPNOW ? `        lda #$01
         sta dbgOnce` : ''}
-${DIE ? `        lda #$00
+${DIE ? `        lda #$ff                ; hazCur is READ to decide whether the run-table patches are stale
+        sta hazCur              ;   and never written anywhere, so it held power-on garbage. When
+                                ;   that garbage happened to equal the current cell, hazSet was
+                                ;   SKIPPED -- and run ids feed the occlusion masks, which decide
+                                ;   whether the angel counts as seen, which decides whether it
+                                ;   moves. VICE randomises RAM per run, so the same disk took a
+                                ;   different path every time. $ff is not a legal cell here (ids
+                                ;   are y*16+x and no map is 16 rows deep), so hazSet always runs,
+                                ;   which is the behaviour the garbage gave us MOST of the time.
+        lda #$00
         sta dieSt               ; power-on garbage here sent the loop straight into the cut scene with
         sta marked              ;   no state set up, and the program fell out to BASIC
         lda #$0f
@@ -5475,11 +5572,11 @@ ${PIVOT ? `        jsr pivPrep             ; marches 0 and 159, then a bracket p
                                 ; and leaves the stack holding the spans between them
 ` : `        sta col
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 0
-${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #${NLOG - 1}
         sta col
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 159
-${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #$00
         sta stackLT
         lda #${NLOG - 1}
@@ -5725,7 +5822,7 @@ subMid: lda spanL
                                 ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         ldx sp
         lda spanL
         sta stackLT,x
@@ -5799,7 +5896,7 @@ subInN: inx
         bcc subInL
         lda bswp
         bne subIns
-${PROFILE && !PROFILE1 ? '        ldx #7\n        jsr pfTick              ; the delimiter bubble sort\n' : ''}subEmt: ldx bcur
+${PROFSUB ? '        ldx #7\n        jsr pfTick              ; the delimiter bubble sort\n' : ''}subEmt: ldx bcur
         lda bndT,x
         sec
         sbc #$01
@@ -5822,7 +5919,7 @@ subFlush:                       ; interpolate + seam one maximal face
         cmp spanL
         bcc subFDn              ; empty
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr interpSpan
-${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #8\n        jsr pfTick              ; interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}${PROFILE && !PROFILE1 && SEAMS ? '        ldx #9\n        jsr pfTick              ; seamSpan\n' : ''}subFDn: rts
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        ldx #8\n        jsr pfTick              ; interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        ldx #9\n        jsr pfTick              ; seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
         cpx #${hx(NBND)}
@@ -5935,11 +6032,11 @@ pvMDn:
         ; tick layout the code no longer had.
         lda #$00
         sta col
-${PROFILE && !PROFILE1 ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        lda #${NLOG - 1}
+${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
+${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        lda #${NLOG - 1}
         sta col
-${PROFILE && !PROFILE1 ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}
+${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
+${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}
         lda #$00
         sta sp
         sta pvLast
@@ -5949,8 +6046,8 @@ ${RAYCNT ? '        lda pvN\n        sta pvNdbg\n' : ''}pivLp:  ldx pvI
         beq pivEnd
         dex
         stx pvI
-${PROFILE && !PROFILE1 ? '        ldx #14\n        jsr pfTick\n        ldx pvI\n' : ''}        jsr pivOne              ; A = where hint X is predicted to be now
-${PROFILE && !PROFILE1 ? '        pha                     ; pfTick clobbers A, and A is the predicted column\n        ldx #13\n        jsr pfTick              ; pivOne: the per-hint prediction arithmetic\n        pla\n' : ''}        cmp pvLast
+${PROFSUB ? '        ldx #14\n        jsr pfTick\n        ldx pvI\n' : ''}        jsr pivOne              ; A = where hint X is predicted to be now
+${PROFSUB ? '        pha                     ; pfTick clobbers A, and A is the predicted column\n        ldx #13\n        jsr pfTick              ; pivOne: the per-hint prediction arithmetic\n        pla\n' : ''}        cmp pvLast
         beq pivNx               ; predictions must come out strictly increasing, or the spans
         bcc pivNx               ; would overlap and the stack would describe nonsense. Rotation
         cmp #${hx(NLOG - 1)}    ; is monotonic but the per-boundary translation term is not, so
@@ -5973,8 +6070,8 @@ pivEnd: lda #${hx(NLOG - 1)}    ; the last span always runs to the right edge
 ; march column A, then push the span (pvLast, A) and make A the new pvLast
 pivCut: pha
         sta col
-${PROFILE && !PROFILE1 ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFILE && !PROFILE1 ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        pla
+${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
+${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        pla
 pivPush:ldx sp
         pha
         lda pvLast
@@ -7077,17 +7174,18 @@ pkDn:   rts
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
         ; keyboard scan (joystick-1 shares $dc01 with the keyboard matrix rows).
-        lda #$ff
+${TOURW ? '        jsr twStep              ; TOURW=1: the script supplies what the hardware would\n' : ''}        lda #$ff
         sta $dc00
-        lda $dc01
+        ${TOURW ? 'lda twJoy' : 'lda $dc01'}
         sta joyv
         eor #$ff
         sta joyEor
         lda #$fd
         sta $dc00
-        lda $dc01
+        ${TOURW ? 'lda twRow' : 'lda $dc01'}
         ora joyEor
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
+${RECORD && SPRITES ? '        jsr recTick             ; RECORD=1: log this frame\'s input\n' : ''}
         and #$80
         bne rkNoSh
         ; LEFT SHIFT: run. 3 cells/s and 127 deg/s, against 0.94 and 63 walking -- movement and
@@ -7461,13 +7559,13 @@ ${SEAMS ? `; ================= seamSpan: project this face's cell boundaries to 
 ;
 ; one divide per seam, no extra rays and no per-column work. Everything below is that.
 seamSpan:
-        lda spanR
+${SEAMCNT ? `        inc ssEnt\n        bne ssEntX\n        inc ssEnt+1\nssEntX:\n` : ''}        lda spanR
         sec
         sbc spanL
         cmp #$02
         bcc ssDn                ; adjacent columns: nothing between them to mark
         sta ssW                 ; span width in columns
-${SEAMFAR ? `        ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
+${SEAMCNT ? `        inc ssWid\n        bne ssWidX\n        inc ssWid+1\nssWidX:\n` : ''}${SEAMFAR ? `        ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
         ; colH is a height in ROWS, so it is 1/z up to a constant and the whole distance test is
         ; one compare -- no arithmetic, and it lands BEFORE calcU and the divide, which is where
         ; the cost actually is. Keep the TALLER end: a span running away from you still has a
@@ -7481,7 +7579,7 @@ ${SEAMFAR ? `        ; ---- SEAMFAR: drop the panel line once the wall is too sh
 ssTall: cmp #${hx(SEAMFAR)}
         bcc ssDn                ; too far for a one-pixel line to read as panelling
 ` : ''}
-        ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
+${SEAMCNT ? `        inc ssNear\n        bne ssNearX\n        inc ssNear+1\nssNearX:\n` : ''}        ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
         ; coordinate along the face is the whole question: same cell, no boundary. 65% of
         ; spans stop on this test, which is exactly why u is derived here instead of in
         ; marchCol -- computing it for all 19 marched columns spent ~2850 cycles a frame
@@ -7494,7 +7592,7 @@ ssTall: cmp #${hx(SEAMFAR)}
                                 ; of cells along ONE plane, so its cells can only differ in
                                 ; the coordinate that runs along the face -- comparing the
                                 ; raw cell ids is exactly the boundary test, no masking.
-        ldx spanL               ; now it is worth deriving u
+${SEAMCNT ? `        inc ssCalc\n        bne ssCalcX\n        inc ssCalc+1\nssCalcX:\n` : ''}        ldx spanL               ; now it is worth deriving u
         jsr calcU
         lda uwL
         sta uaL
@@ -7511,7 +7609,7 @@ ssTall: cmp #${hx(SEAMFAR)}
         lda uaH
         cmp ubH
         beq ssDn                ; same cell, no boundary crossed -- the common case
-        bcc ssUp
+${SEAMCNT ? `        inc ssDraw\n        bne ssDrawX\n        inc ssDraw+1\nssDrawX:\n` : ''}        bcc ssUp
         ; descending: boundaries at uaH, uaH-1, ... ubH+1
         lda uaH
         sta ssK
@@ -7793,7 +7891,12 @@ ${RAYCNT ? '        inc rayN\n' : ''}        jsr castRay
         sta sideT,x             ; side kept separate (avoids id/side bit collision)
         lda cell                ; castRay already maintains the cell id
         sta idT,x               ; X is still col -- nothing since the store above touches it
-        ; --- faceIdT = connected-wall-run id: "same wall" means same contiguous run,
+${CELLMERGE ? `        ; CELLMERGE=1: store the CELL id, not the run id, so the subdivision splits at every
+        ; cell boundary and finds seam positions by the same hinted binary search it already
+        ; uses for faces -- instead of merging them away and having seamSpan re-derive them.
+        ; A already holds the cell id here, so this also skips the run-table lookup below.
+        sta faceIdT,x
+` : `        ; --- faceIdT = connected-wall-run id: "same wall" means same contiguous run,
         ;     not merely same plane -> the merge cannot span a hallway gap ---
         tay                     ; Y = cell id (index into run tables)
         lda side
@@ -7809,7 +7912,8 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
         lda runNT,y
         jmp friSto
 friSo:  lda runST,y
-friSto: sta faceIdT,x           ; X still col: the run-table branch above only uses A and Y
+friSto: sta faceIdT,x
+`}           ; X still col: the run-table branch above only uses A and Y
 ${SEAMS ? `        lda remL                ; park the raw hit distance; u is derived from it later, and
         sta remLoT,x            ; only for the ~35% of spans that actually cross a boundary
         lda remH
@@ -8020,7 +8124,7 @@ faDn:` : `        tax
         sta ddy
         lda ddyHiT,x
         sta ddyH`}
-${PROFILE && !PROFILE1 ? '        ldx #3\n        jsr pfTick              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
+${PROFSUB ? '        ldx #3\n        jsr pfTick              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
         sta cell                ; The value is the player's cell, so it is the same for every
                                 ; ray in the frame -- computed once in mloop, not 11 times.
         ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
@@ -8252,7 +8356,7 @@ cySx:   lda ddyH
         bne cydone
         sta sdy
         sta sdyH
-cydone:${PROFILE && !PROFILE1 ? '\n        ldx #10\n        jsr pfTick              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
+cydone:${PROFSUB ? '\n        ldx #10\n        jsr pfTick              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
         ldy #24
         ldx cell
 cdda:   lda sdxH
@@ -8341,7 +8445,7 @@ cwallY: stx cell
         sta remH
         ; No cos correction here: it depends only on the column, so it is baked into the
         ; per-column height tables (see hTabT). This used to be a whole sideMul per ray.
-cidx:${PROFILE && !PROFILE1 ? '\n        ldx #11\n        jsr pfTick              ; ray: the DDA loop (after the label: jmp cidx skips it)' : ''}
+cidx:${PROFSUB ? '\n        ldx #11\n        jsr pfTick              ; ray: the DDA loop (after the label: jmp cidx skips it)' : ''}
         lda remH
         cmp #24
         bcc cidxok
@@ -13152,9 +13256,25 @@ bfsSd:  sta bfsD1,x             ; operand PATCHED to the work map
         lda #$02
         sta bfsPhase
         rts
-        ; ---- phase 2: expand BFS_RATE cells a frame ----
-bfsExp: lda #${hx(BFS_RATE)}
-        sta bfsN
+        ; ---- phase 2: expand cells at a rate set by TIME, not by frames ----
+        ; It used to be ${hx(BFS_RATE)} cells a FRAME, which tied the angel's route freshness to the frame
+        ; rate -- so it was least alert exactly when the scene was most expensive, and two builds
+        ; of different speed sent it to different places from the same inputs. frameCnt is the
+        ; raster IRQ at 60Hz, so its delta is real time; half a cell a tick is the same average
+        ; rate ${hx(BFS_RATE)} a frame gave at 15fps. Computed here rather than from dtt because dtt only
+        ; exists when readKeys runs, and the auto-movers replace it.
+bfsExp: lda frameCnt
+        tax
+        sec
+        sbc bfsLast
+        stx bfsLast
+        lsr
+        bne bfsE1
+        lda #$01                ; never zero: a fast frame must still make progress
+bfsE1:  cmp #$09
+        bcc bfsE2
+        lda #$08                ; and never a burst -- a long stall must not dump the whole queue
+bfsE2:  sta bfsN
 bfsExL: lda bfsHead
         cmp bfsTail
         beq bfsFin              ; queue empty -> the map is complete
@@ -14153,7 +14273,191 @@ hazHiT: !byte ${HZ_LIVE.hi.join(',') || 0}
 hazCT:  !byte ${HZ_LIVE.ct.join(',') || 0}
 hazRstT: !byte ${HZ_LIVE.rst.join(',')}
 hazLstT: !byte ${HZ_LIVE.lst.join(',') || 0}` : ''}
-        * = ${hx16(RELOC + 0x2300)}
+${TOURW ? `        ; ---- TOURW: the waypoint tour, in the tail of the hazard block ----
+        ; That page is free while every resident map splits nothing, which all three do.
+        * = $a700
+        ; Feeds readKeys the two bytes it would have read from the hardware, so every bit of
+        ; movement, run and turn logic runs exactly as it does for a player. Parallel arrays
+        ; indexed by STEP so no multiply is needed; the input masks are indexed by TYPE.
+twStep: ldy twN                 ; ---- one step, one hold, one duration in 60Hz ticks ----
+        cpy #${hx(TOUR_STEPS.length)}
+        bcs twNeu
+        ; ---- "wait UNTIL the angel reaches a cell" is a CONDITION, not a duration ----
+        ; Turned into a flat wait it was ten seconds of standing still, facing away, while the
+        ; angel closes a cell every two -- so it always arrived before the script looked back at
+        ; it, and the death scene froze the tour. The tick count is a ceiling now, not the rule.
+        lda twTypT,y
+        cmp #${hx(T_WAIT)}
+        bne twTime
+        ldx #$00
+twWaL:  lda orbTallT,x
+        bne twWaF
+        inx
+        cpx nOrbT
+        bcc twWaL
+        bcs twTime              ; no angel on this level: fall back to the ceiling
+twWaF:  lda orbYCT,x
+        asl
+        asl
+        asl
+        asl
+        ora orbXCT,x
+        cmp twOpT,y
+        beq twExp               ; arrived: this step is done NOW
+twTime:
+        ; ---- how much REAL TIME has passed, not how many frames ----
+        ; readKeys runs once a RENDER FRAME but the durations are in 60Hz ticks, and movement is
+        ; tick-driven. Counting frames held every step ~4x too long at 15fps and buried the walks
+        ; in walls. frameCnt is the raster IRQ, so its delta is the honest elapsed time -- and it
+        ; keeps the script frame-rate independent, which is the point of the benchmark.
+        lda twGo                ; FIRST CALL: anchor the clock, do not spend time on step 0.
+        bne twEl1               ;   twLast starts at 0 while frameCnt is already wherever the
+        inc twGo                ;   disk load left it, so the opening step had hundreds of ticks
+        lda frameCnt            ;   subtracted at once and was skipped outright -- by a margin
+        sta twLast              ;   that varied with load timing, which is exactly the run-to-run
+twEl1:  lda frameCnt            ;   wobble that makes this useless as a benchmark.
+        tax
+        sec
+        sbc twLast
+        stx twLast
+        sta twEl
+        lda twTk+1
+        bne twSub               ; more than a page of ticks left: cannot expire this frame
+        lda twTk
+        cmp twEl
+        bcc twExp
+        beq twExp
+twSub:  lda twTk
+        sec
+        sbc twEl
+        sta twTk
+        bcs twCnt
+        dec twTk+1
+        jmp twCnt
+twExp:  lda #$00
+        sta twTk
+        sta twTk+1
+        beq twStepOn            ; always taken
+twRunJ: jmp twRun
+        lda twTk
+        ora twTk+1
+        bne twRunJ              ; this step still has time on it
+twStepOn:
+        inc twN                 ; ...it does not: move on and load the next duration
+        ldy twN
+        cpy #${hx(TOUR_STEPS.length)}
+        bcs twNeu
+        lda twTOLoT,y
+        sta twTk
+        lda twTOHiT,y
+        sta twTk+1
+        lda twTypT,y
+        cmp #${hx(T_SPACE)}
+        bne twRun
+        jsr orbUse              ; SPACE is read by orbKey's own scan, so act directly, once,
+                                ;   at the moment its step begins
+        ; ---- the measurement: frames and ticks, EXCLUDING the angel wait ----
+        ; Standing still is where the temporal pivot and the dirty-cell cache pay off most, so
+        ; those frames are unusually cheap and would flatter the average. Counting here rather
+        ; than sampling at a fixed cycle count also makes the result immune to boot-timing phase,
+        ; which is what made the earlier fixed-cycle comparisons look non-deterministic.
+twCnt:  ldy twN
+        lda twTypT,y
+        cmp #${hx(T_WAIT)}
+        beq twRun
+        inc twFrm               ; one render frame of real work
+        bne twF1
+        inc twFrm+1
+twF1:   lda twTck               ; ...and the ticks it covered
+        clc
+        adc twEl
+        sta twTck
+        bcc twRun
+        inc twTck+1
+twRun:  ldy twN
+        lda twTypT,y
+        tax
+        lda twJoyT,x            ; the input this step holds down
+        sta twJoy
+        lda twRowT,x
+        sta twRow
+        rts
+twNeu:  lda #$ff                ; the tour is over: hands off the controls
+        sta twJoy
+        sta twRow
+        rts
+twJoy:  !byte $ff
+twRow:  !byte $ff
+twN:    !byte 0
+twTk:   !byte ${hx(TOUR_STEPS[0][1] & 255)}
+        !byte ${hx(TOUR_STEPS[0][1] >> 8)}
+twLast: !byte 0
+twGo:   !byte 0
+twFrm:  !byte 0,0               ; frames rendered outside the wait
+twTck:  !byte 0,0               ; 60Hz ticks those frames covered
+twEl:   !byte 0
+twTypT: !byte ${TOUR_STEPS.map(t => hx(t[0])).join(',')}
+twOpT:  !byte ${TOUR_STEPS.map(t => hx(t[2] ?? 0)).join(',')}   ; the wait's target cell
+twTOLoT:!byte ${TOUR_STEPS.map(t => hx(t[1] & 255)).join(',')}
+twTOHiT:!byte ${TOUR_STEPS.map(t => hx(t[1] >> 8)).join(',')}
+        ;        walk back  run  turnL turnR fturnL fturnR space angel fall
+twJoyT: !byte $fe, $fd, $fe, $fb, $f7, $fb, $f7, $ff, $ff, $fe
+twRowT: !byte $ff, $ff, $7f, $ff, $ff, $7f, $7f, $ff, $ff, $ff
+` : ''}${RECORD && SPRITES ? `        ; ---- RECORD's log, in the tail of the hazard block ----
+        ; That page is free while every resident map splits nothing, which is true of all three.
+        ; A diagnostic build only, so borrowing it is safe in a way it would not be for a ship.
+        * = $a700
+recTick:                        ; ---- the input log, run-length encoded in 60Hz TICKS ----
+        ; Ticks, not render frames. Movement is tick-driven, so a run held for N FRAMES covers
+        ; less ground on a faster build -- and comparing builds of different speed is the entire
+        ; point. frameCnt is the raster IRQ at 60Hz, so a run measured against it replays to the
+        ; same place whatever the frame rate.
+        ; orbKey runs earlier in the frame than readKeys, so okNew is already this frame's SPACE.
+        lda joyv
+        cmp recL0
+        bne recNew
+        lda rowv
+        cmp recL1
+        bne recNew
+        lda okNew
+        cmp recL2
+        beq recDn
+recNew: jsr recPut              ; close the run that just ended, then start the new one
+        lda joyv
+        sta recL0
+        lda rowv
+        sta recL1
+        lda okNew
+        sta recL2
+        lda frameCnt
+        sta recT0
+recDn:  rts
+
+recPut: lda recN
+        cmp #${hx(RECMAX)}
+        bcs rpDn                ; full: stop, do not wrap -- a truncated tour must be obvious
+        asl                     ; four bytes an entry, so the index stays inside a byte
+        asl
+        tax
+        lda recL0
+        sta recBuf,x
+        lda recL1
+        sta recBuf+1,x
+        lda recL2
+        sta recBuf+2,x
+        sec
+        lda frameCnt            ; how long the run lasted, in 60Hz ticks
+        sbc recT0
+        sta recBuf+3,x
+        inc recN
+rpDn:   rts
+recL0:  !byte $ff               ; $ff so the very first sample always counts as a change
+recL1:  !byte $ff
+recL2:  !byte $ff
+recT0:  !byte 0
+recN:   !byte 0                 ; runs logged so far -- read this first when dumping
+recBuf: !fill ${RECMAX * 4}, 0
+` : ''}        * = ${hx16(RELOC + 0x2300)}
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
 ; table landed on $c000 -- which is stackLT, the subdivision's own stack. It rendered fine until
@@ -14325,7 +14629,7 @@ pfTick: lda pfDone
         lda pfCurF
         sec
         sbc pfPrvF
-        tay
+${PROFMAX ? '        sta pfFD                ; raster frames this rendered frame spanned, before the\n' : ''}        tay
         beq pfNoF
 pfFLp:  clc                     ; one whole video frame is 263 lines
         lda pfDLo
@@ -14345,7 +14649,29 @@ pfNoF:  lda pfDHi               ; A negative delta means the raster wrapped 262-
         lda pfDHi
         adc #$01
         sta pfDHi
-pfPos:  lda pfCurF              ; this timestamp becomes the next phase's start
+pfPos:${PROFMAX ? ` lda pfDHi              ; PROFMAX: the WORST single frame, and where in the tour it
+        cmp mxHi                ;   fell. A mean over 256 frames cannot answer a question about
+        bcc pmNo                ;   the MINIMUM frame rate, and the minimum is what reads as
+        bne pmYes               ;   fluid or not.
+        lda pfDLo
+        cmp mxLo
+        bcc pmNo
+pmYes:  lda pfDLo
+        sta mxLo
+        lda pfDHi
+        sta mxHi
+${TOURW ? `        lda twN
+        sta mxStep
+` : ''}pmNo:   lda pfFD                ; ...and the DISTRIBUTION: a floor that is a rare spike is a
+        cmp #$08                ;   different problem from one that is the shape of the whole run
+        bcc pmH1
+        lda #$07
+pmH1:   tax                     ; ONE byte each: only 13 are free before pfPrvF at $7e40, and a
+        inc pfHist,x            ;   16-bit table ran straight into the profiler's own timestamps.
+                                ;   The profiler stops at 256 frames, so a bucket can only wrap
+                                ;   if EVERY frame landed in it -- which reads as a zero.
+pmH2:
+       ` : ''} lda pfCurF              ; this timestamp becomes the next phase's start
         sta pfPrvF
         lda pfCurL
         sta pfPrvL

@@ -188,6 +188,16 @@ cqLo    = $8100                 ; colour queue: address low, high, and the value
 cqHi    = $8140                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $8180                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
+pfFD    = $7cfd                  ; PROFMAX: raster frames the last rendered frame spanned
+pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raster frames
+mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
+mxHi    = $7cfb
+mxStep  = $7cfc                  ;   ...and the tour step it happened in
+ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
+ssWid   = $7cf2                  ;   ...wide enough to hold a seam
+ssNear  = $7cf4                  ;   ...near enough for one to read
+ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
+ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
 pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e42
@@ -392,6 +402,7 @@ bfsTail = $85ef
 bfsC    = $8559
 bfsND   = $855a
 bfsN    = $855b
+bfsLast = $7ce8                  ; frameCnt when the fill last ran; see bfsExp
 hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
 hlKind  = $85dd                  ; which ladder holeTail is currently patched for
 hoI     = $85de                  ; holeOne's loop: which hole-like entity, and its
@@ -770,6 +781,15 @@ ccf:    sta $d800,x
         sta pa
         jsr sndInit             ; the drone starts before the first frame and never stops
 
+        lda #$ff                ; hazCur is READ to decide whether the run-table patches are stale
+        sta hazCur              ;   and never written anywhere, so it held power-on garbage. When
+                                ;   that garbage happened to equal the current cell, hazSet was
+                                ;   SKIPPED -- and run ids feed the occlusion masks, which decide
+                                ;   whether the angel counts as seen, which decides whether it
+                                ;   moves. VICE randomises RAM per run, so the same disk took a
+                                ;   different path every time. $ff is not a legal cell here (ids
+                                ;   are y*16+x and no map is 16 rows deep), so hazSet always runs,
+                                ;   which is the behaviour the garbage gave us MOST of the time.
         lda #$00
         sta dieSt               ; power-on garbage here sent the loop straight into the cut scene with
         sta marked              ;   no state set up, and the program fell out to BASIC
@@ -2326,6 +2346,7 @@ readKeys:
         lda $dc01
         ora joyEor
         sta rowv                ; SHIFT, E and S all live in this row -- read it once
+
         and #$80
         bne rkNoSh
         ; LEFT SHIFT: run. 3 cells/s and 127 deg/s, against 0.94 and 63 walking -- movement and
@@ -3041,7 +3062,8 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
         lda runNT,y
         jmp friSto
 friSo:  lda runST,y
-friSto: sta faceIdT,x           ; X still col: the run-table branch above only uses A and Y
+friSto: sta faceIdT,x
+           ; X still col: the run-table branch above only uses A and Y
         lda remL                ; park the raw hit distance; u is derived from it later, and
         sta remLoT,x            ; only for the ~35% of spans that actually cross a boundary
         lda remH
@@ -8426,9 +8448,25 @@ bfsSd:  sta bfsD1,x             ; operand PATCHED to the work map
         lda #$02
         sta bfsPhase
         rts
-        ; ---- phase 2: expand BFS_RATE cells a frame ----
-bfsExp: lda #$02
-        sta bfsN
+        ; ---- phase 2: expand cells at a rate set by TIME, not by frames ----
+        ; It used to be $02 cells a FRAME, which tied the angel's route freshness to the frame
+        ; rate -- so it was least alert exactly when the scene was most expensive, and two builds
+        ; of different speed sent it to different places from the same inputs. frameCnt is the
+        ; raster IRQ at 60Hz, so its delta is real time; half a cell a tick is the same average
+        ; rate $02 a frame gave at 15fps. Computed here rather than from dtt because dtt only
+        ; exists when readKeys runs, and the auto-movers replace it.
+bfsExp: lda frameCnt
+        tax
+        sec
+        sbc bfsLast
+        stx bfsLast
+        lsr
+        bne bfsE1
+        lda #$01                ; never zero: a fast frame must still make progress
+bfsE1:  cmp #$09
+        bcc bfsE2
+        lda #$08                ; and never a burst -- a long stall must not dump the whole queue
+bfsE2:  sta bfsN
 bfsExL: lda bfsHead
         cmp bfsTail
         beq bfsFin              ; queue empty -> the map is complete
