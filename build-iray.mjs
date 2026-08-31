@@ -258,7 +258,21 @@ if (LEVEL2) {
               "################","################","################","################"];
   for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) M[y][x] = L2[y][x] === '#' ? 1 : 0;
 }
-const map = []; for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) map.push(M[y][x]);
+// ---- MAP SHAPE ----
+// A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
+// free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
+// exactly the old layout, so nothing about the generated code changes while these are the default.
+// The stride was written as a literal 16 (and as <<4 / >>4 / &15) in ~40 places; they read MAPW
+// now, which is what lets a level be 28x9 or 12x20 instead of only square.
+const MAPW = +(process.env.MAPW ?? 16), MAPH = +(process.env.MAPH ?? 16);
+const MAPN = MAPW * MAPH;
+if (MAPN > 256) throw new Error(`MAPW*MAPH = ${MAPN} cells; stage 1 keeps the cell id a byte (max 256)`);
+if (MAPN - 1 === 0xff) { /* the last cell IS $ff: it must stay solid, which the border check below enforces */ }
+const cellOf = (x, y) => y * MAPW + x;
+const cellX  = c => c % MAPW;
+const cellY  = c => (c / MAPW) | 0;
+const inMap  = (x, y) => x >= 0 && y >= 0 && x < MAPW && y < MAPH;
+const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) map.push(M[y][x]);
 
 // ---- The OTHER resident level, fetched EARLY ----
 // Early, because two constants below have to cover BOTH levels rather than just the live one,
@@ -311,22 +325,22 @@ const LVL2 = LVLALL ? LVLALL[0] : null;
 // also carries entities as 2 -- a fill treating those as solid would never reach the angel's own
 // cell. Movable obstacles are what the greedy pair still handles, as a fallback.
 const pathOpen = [];
-for (let c = 0; c < 256; c++) if (map[c] === 0) pathOpen.push(c);
+for (let c = 0; c < MAPN; c++) if (map[c] === 0) pathOpen.push(c);
 const PATH_N = pathOpen.length;
 { // one connected region, or an angel can be permanently marooned -- and so can the player
   const seen = new Set([pathOpen[0]]), q = [pathOpen[0]];
   for (let h = 0; h < q.length; h++) {
-    const c = q[h], cx = c & 15, cy = c >> 4;
+    const c = q[h], cx = cellX(c), cy = cellY(c);
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = cx + dx, ny = cy + dy;
-      if (nx < 0 || nx > 15 || ny < 0 || ny > 15) continue;
-      const n = ny * 16 + nx;
+      if (!inMap(nx, ny)) continue;
+      const n = cellOf(nx, ny);
       if (map[n] === 0 && !seen.has(n)) { seen.add(n); q.push(n); }
     }
   }
   if (seen.size !== PATH_N) throw new Error(
     `angel path: ${PATH_N} open cells but only ${seen.size} reachable from ` +
-    `(${pathOpen[0] & 15},${pathOpen[0] >> 4}) -- the open cells are not one connected region`);
+    `(${cellX(pathOpen[0])},${cellY(pathOpen[0])}) -- the open cells are not one connected region`);
 }
 // The queue never holds more than one entry per open cell, since a cell is enqueued when it is
 // first given a distance and never again.
@@ -507,11 +521,13 @@ for (let g = 0; g < HGROUPS; g++) for (let y = 0; y < 256; y++)
 // castRay drops its bounds check and steps a single cell index by +-1 / +-16, both of
 // which are only safe because a ray can never leave the grid. That holds iff the border is
 // solid all the way round -- assert it rather than trust it.
-for (let i = 0; i < 16; i++) {
-  if (!map[i] || !map[15 * 16 + i] || !map[i * 16] || !map[i * 16 + 15])
-    throw new Error(`map border must be solid: castRay has no bounds check (row/col ${i} is open)`);
-}
-const mapW = (x, y) => (x < 0 || y < 0 || x > 15 || y > 15) ? 1 : map[y * 16 + x];
+for (let x = 0; x < MAPW; x++)
+  if (!map[cellOf(x, 0)] || !map[cellOf(x, MAPH - 1)])
+    throw new Error(`map border must be solid: castRay has no bounds check (column ${x} is open)`);
+for (let y = 0; y < MAPH; y++)                 // two loops, not one: W and H can differ now
+  if (!map[cellOf(0, y)] || !map[cellOf(MAPW - 1, y)])
+    throw new Error(`map border must be solid: castRay has no bounds check (row ${y} is open)`);
+const mapW = (x, y) => !inMap(x, y) ? 1 : map[cellOf(x, y)];
 const runW = new Array(256).fill(0), runE = new Array(256).fill(0), runN = new Array(256).fill(0), runS = new Array(256).fill(0);
 let nextRun = 1;
 // Every run lies in ONE plane and faces one way -- W runs are a vertical strip at constant x,
@@ -523,16 +539,16 @@ for (let x = 0; x < 16; x++) {          // vertical planes: west/east faces, con
   let wp = false, ep = false, wId = 0, eId = 0;
   for (let y = 0; y < 16; y++) {
     const wf = mapW(x, y) && !mapW(x - 1, y), ef = mapW(x, y) && !mapW(x + 1, y);
-    if (wf) { if (!wp) wId = newRun(x, 'W'); runW[y * 16 + x] = wId; } wp = wf;
-    if (ef) { if (!ep) eId = newRun(x + 1, 'E'); runE[y * 16 + x] = eId; } ep = ef;
+    if (wf) { if (!wp) wId = newRun(x, 'W'); runW[cellOf(x, y)] = wId; } wp = wf;
+    if (ef) { if (!ep) eId = newRun(x + 1, 'E'); runE[cellOf(x, y)] = eId; } ep = ef;
   }
 }
 for (let y = 0; y < 16; y++) {          // horizontal planes: north/south faces, contiguous in x
   let np = false, sp = false, nId = 0, sId = 0;
   for (let x = 0; x < 16; x++) {
     const nf = mapW(x, y) && !mapW(x, y - 1), sf = mapW(x, y) && !mapW(x, y + 1);
-    if (nf) { if (!np) nId = newRun(y, 'N'); runN[y * 16 + x] = nId; } np = nf;
-    if (sf) { if (!sp) sId = newRun(y + 1, 'S'); runS[y * 16 + x] = sId; } sp = sf;
+    if (nf) { if (!np) nId = newRun(y, 'N'); runN[cellOf(x, y)] = nId; } np = nf;
+    if (sf) { if (!sp) sId = newRun(y + 1, 'S'); runS[cellOf(x, y)] = sId; } sp = sf;
   }
 }
 if (nextRun - 1 > 255) throw new Error(`too many wall runs (${nextRun - 1}) for a byte id`);
@@ -563,8 +579,8 @@ function hazCast(px, py, dx, dy) {
     let side;
     if (tx < ty) { x += sx; tx += tdx; side = 0; } else { y += sy; ty += tdy; side = 1; }
     if (x < 0 || y < 0 || x > 15 || y > 15) return null;
-    if (map[y * 16 + x]) {
-      const c = y * 16 + x;
+    if (map[cellOf(x, y)]) {
+      const c = cellOf(x, y);
       // side 0 means the ray crossed a vertical edge: travelling +x it lands on a WEST face.
       if (side === 0) return [dx > 0 ? runW[c] : runE[c], y];
       return [dy > 0 ? runN[c] : runS[c], x];
@@ -611,7 +627,7 @@ const hazCell = new Map();                        // cell index -> [{run, split}
   const t0 = Date.now();
   let flagged = 0, worst = 0;
   for (let cy = 0; cy < 16; cy++) for (let cx = 0; cx < 16; cx++) {
-    if (map[cy * 16 + cx]) continue;
+    if (map[cellOf(cx, cy)]) continue;
     const per = new Map();                        // run -> split coordinate (widest cut wins)
     for (let i = 0; i < HAZSAMP; i++) for (let j = 0; j < HAZSAMP; j++) {
       const px = cx + 0.2 + 0.6 * (HAZSAMP === 1 ? 0.5 : i / (HAZSAMP - 1));
@@ -626,7 +642,7 @@ const hazCell = new Map();                        // cell index -> [{run, split}
       }
     }
     if (per.size) {
-      hazCell.set(cy * 16 + cx, [...per].map(([run, split]) => ({ run, split })));
+      hazCell.set(cellOf(cx, cy), [...per].map(([run, split]) => ({ run, split })));
       flagged++;
     }
   }
@@ -636,7 +652,7 @@ const hazCell = new Map();                        // cell index -> [{run, split}
     `${HAZDIRS} dirs x ${HAZSAMP}x${HAZSAMP} samples in ${Date.now() - t0}ms`);
   if (flagged) {
     const ex = [...hazCell].slice(0, process.env.HAZDUMP ? 999 : 6).map(([c, hs]) =>
-      `(${c & 15},${c >> 4})->${hs.map(h => `run${h.run}@${h.split}`).join(' ')}`);
+      `(${cellX(c)},${cellY(c)})->${hs.map(h => `run${h.run}@${h.split}`).join(' ')}`);
     console.error(`  e.g. ${ex.join(process.env.HAZDUMP ? '\n       ' : '  ')}`);
     if (process.env.HAZDUMP) for (const r of new Set([...hazCell.values()].flat().map(h => h.run)))
       console.error(`  run ${r}: ${runFace[r]} face, plane ${runPlane[r]}`);
@@ -680,8 +696,8 @@ for (const [cell, hs] of hazCell) for (const h of hs) {
   const face = runFace[h.run], tbl = hazRunT[face];
   const horiz = face === 'N' || face === 'S';       // horizontal strip -> indexed by x
   const cells = [];
-  for (let c = 0; c < 256; c++)
-    if (tbl[c] === h.run && (horiz ? (c & 15) : (c >> 4)) >= h.split) cells.push(c);
+  for (let c = 0; c < MAPN; c++)
+    if (tbl[c] === h.run && (horiz ? cellX(c) : cellY(c)) >= h.split) cells.push(c);
   if (cells.length) hazRec.push({ cell, sel: HAZFACE[face], spare: hazSpare.get(h.run),
                                   orig: h.run, cells });
 }
@@ -698,7 +714,7 @@ const hazTrip = (sel, cell, val) =>
 const hazRst = [];
 for (const [run, ] of hazSpare) {
   const face = runFace[run], tbl = hazRunT[face], sel = HAZFACE[face];
-  for (let c = 0; c < 256; c++) if (tbl[c] === run) hazRst.push(hazTrip(sel, c, run));
+  for (let c = 0; c < MAPN; c++) if (tbl[c] === run) hazRst.push(hazTrip(sel, c, run));
 }
 const hazKey = r => `${r.orig}@${r.cells[0]}`;
 const hazUniq = [...new Set(hazRec.map(hazKey))];
@@ -724,7 +740,7 @@ if (HAZ) {
   // this at build time is that the guarantee is verifiable.
   for (const [cell, hs] of hazCell) for (const h of hs)
     if (!hazRec.some(r => r.cell === cell && r.orig === h.run))
-      throw new Error(`merge hazard at cell (${cell & 15},${cell >> 4}) run ${h.run} has no ` +
+      throw new Error(`merge hazard at cell (${cellX(cell)},${cellY(cell)}) run ${h.run} has no ` +
                       `patch: split ${h.split} selected no cells of the run`);
 }
 
@@ -772,10 +788,10 @@ const cpLo = new Array(nextRun).fill(0), cpHi = new Array(nextRun).fill(0);
   for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
     if (mapW(x, y)) continue;
     const W_ = mapW(x - 1, y), E_ = mapW(x + 1, y), N_ = mapW(x, y - 1), S_ = mapW(x, y + 1);
-    if (W_ && N_) addPair(runE[y * 16 + (x - 1)], runS[(y - 1) * 16 + x]);
-    if (E_ && N_) addPair(runW[y * 16 + (x + 1)], runS[(y - 1) * 16 + x]);
-    if (W_ && S_) addPair(runE[y * 16 + (x - 1)], runN[(y + 1) * 16 + x]);
-    if (E_ && S_) addPair(runW[y * 16 + (x + 1)], runN[(y + 1) * 16 + x]);
+    if (W_ && N_) addPair(runE[cellOf(x - 1, y)], runS[cellOf(x, y - 1)]);
+    if (E_ && N_) addPair(runW[cellOf(x + 1, y)], runS[cellOf(x, y - 1)]);
+    if (W_ && S_) addPair(runE[cellOf(x - 1, y)], runN[cellOf(x, y + 1)]);
+    if (E_ && S_) addPair(runW[cellOf(x + 1, y)], runN[cellOf(x, y + 1)]);
   }
   // convex ends: the wall stops, and its own end cell's perpendicular face turns the corner.
   // Pairing them keeps the line when the player sees BOTH faces of that protruding edge, and
@@ -784,17 +800,17 @@ const cpLo = new Array(nextRun).fill(0), cpHi = new Array(nextRun).fill(0);
   for (let r = 1; r < nextRun; r++) {
     const f = runFace[r], arr = ARR[f], vert = (f === 'W' || f === 'E');
     const cells = [];
-    for (let c = 0; c < 256; c++) if (arr[c] === r) cells.push({ x: c % 16, y: c >> 4 });
+    for (let c = 0; c < MAPN; c++) if (arr[c] === r) cells.push({ x: cellX(c), y: cellY(c) });
     if (!cells.length) continue;
     const key = c => vert ? c.y : c.x;
     const lo = cells.reduce((a, b) => key(a) < key(b) ? a : b);
     const hi = cells.reduce((a, b) => key(a) > key(b) ? a : b);
     if (vert) {
-      if (!mapW(lo.x, lo.y - 1)) addPair(r, runN[lo.y * 16 + lo.x]);
-      if (!mapW(hi.x, hi.y + 1)) addPair(r, runS[hi.y * 16 + hi.x]);
+      if (!mapW(lo.x, lo.y - 1)) addPair(r, runN[cellOf(lo.x, lo.y)]);
+      if (!mapW(hi.x, hi.y + 1)) addPair(r, runS[cellOf(hi.x, hi.y)]);
     } else {
-      if (!mapW(lo.x - 1, lo.y)) addPair(r, runW[lo.y * 16 + lo.x]);
-      if (!mapW(hi.x + 1, hi.y)) addPair(r, runE[hi.y * 16 + hi.x]);
+      if (!mapW(lo.x - 1, lo.y)) addPair(r, runW[cellOf(lo.x, lo.y)]);
+      if (!mapW(hi.x + 1, hi.y)) addPair(r, runE[cellOf(hi.x, hi.y)]);
     }
   }
 }
@@ -1079,13 +1095,13 @@ const refShoot = (px, py, a) => { const dx = Math.cos(a), dy = Math.sin(a);
     for (let i = 0; i < 48; i++) { if (sdx < sdy) { sdx += ddx; mx += sx; side = 0; }
       else { sdy += ddy; my += sy; side = 1; }
       if (mx < 0 || my < 0 || mx > 15 || my > 15) return [1e9, 0];
-      if (map[my * 16 + mx]) {
+      if (map[cellOf(mx, my)]) {
         // The run id, not just the distance: a cell whose four columns do not all share one
         // wall face is a STEP cell, and the sampler used to be blind to those -- it emitted a
         // ramp pattern for every cell it saw, so step patterns have never been frequency
         // ranked at all. That is why STEPQ was a hand-picked list rather than a measured one.
         const face = side === 0 ? (sx > 0 ? runW : runE) : (sy > 0 ? runN : runS);
-        return [side === 0 ? sdx - ddx : sdy - ddy, face[my * 16 + mx]]; } }
+        return [side === 0 ? sdx - ddx : sdy - ddy, face[cellOf(mx, my)]]; } }
     return [1e9, 0]; };
 const refClamp = v => Math.max(CLO, Math.min(CHI, v));
 
@@ -1098,8 +1114,8 @@ function patternFreq() {
   // only made the rarest patterns look unused, so the pairing spent its cheap slots wrong.
   const spots = [];
   for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-    if (map[y * 16 + x]) continue;
-    const solid = (cx2, cy2) => cx2 < 0 || cy2 < 0 || cx2 > 15 || cy2 > 15 || map[cy2 * 16 + cx2];
+    if (map[cellOf(x, y)]) continue;
+    const solid = (cx2, cy2) => !inMap(cx2, cy2) || map[cellOf(cx2, cy2)];
     spots.push([x + 0.5, y + 0.5]);
     const W = solid(x - 1, y), E = solid(x + 1, y), N = solid(x, y - 1), S = solid(x, y + 1);
     if (W) spots.push([x + 0.12, y + 0.5]);
@@ -1735,10 +1751,10 @@ if (process.env.CELLSCAN === '1') {
   // The collision box lets the player press to ~0.1 of a wall but no closer, so a position
   // nearer than PAD to a solid cell is not reachable and its patterns are not real.
   const PAD = 0.1;
-  const solid = (x, y) => x < 0 || y < 0 || x > 15 || y > 15 || !!map[y * 16 + x];
+  const solid = (x, y) => !inMap(x, y) || !!map[cellOf(x, y)];
   const spots = [];
   for (let cy = 0; cy < 16; cy++) for (let cx0 = 0; cx0 < 16; cx0++) {
-    if (map[cy * 16 + cx0]) continue;
+    if (map[cellOf(cx0, cy)]) continue;
     for (let gy = STEP / 2; gy < 1; gy += STEP) for (let gx = STEP / 2; gx < 1; gx += STEP) {
       const px = cx0 + gx, py = cy + gy;
       if (gx < PAD && solid(cx0 - 1, cy)) continue;
@@ -1791,7 +1807,7 @@ if (process.env.CELLSCAN === '1') {
   if (NRAND) {
     const open = [];
     for (let cy = 0; cy < 16; cy++) for (let cx0 = 0; cx0 < 16; cx0++)
-      if (!map[cy * 16 + cx0]) open.push([cx0, cy]);
+      if (!map[cellOf(cx0, cy)]) open.push([cx0, cy]);
     // mulberry32, not an LCG: rnd*1103515245 exceeds 2^53 in JS and loses the low bits, so the
     // obvious LCG degenerates into a short cycle -- it produced 3,670 unique values out of 2M.
     let rnd = +(process.env.CELLSEED ?? 12345);   // CELLSEED: an independent draw, to measure how often a fallback is really hit
@@ -2916,7 +2932,7 @@ const ORBSPACE = +(process.env.ORBSPACE ?? 2.2);
 const ORBS = [];
 if (process.env.ORBSCATTER) {
   for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
-    if (map[y * 16 + x]) continue;
+    if (map[cellOf(x, y)]) continue;
     const cx = x + 0.5, cy = y + 0.5;
     if (cx < 2 && cy < 2) continue;              // not sitting on the player's start
     if (ORBS.some(o => Math.hypot(o.x - cx, o.y - cy) < ORBSPACE)) continue;
@@ -3008,7 +3024,7 @@ const OCCBYTES = (NRUN + 7) >> 3;
 const losFree = (ax, ay, bx, by) => {
   const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
   for (let i = 1; i < n; i++) { const t = i / n, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
-    if (map[(y | 0) * 16 + (x | 0)]) return false; }
+    if (map[cellOf(x | 0, y | 0)]) return false; }
   return true;
 };
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
@@ -3100,7 +3116,7 @@ const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : LEVEL2 ? '3,1;9,1' : ''))
   .filter(Boolean).map(q => q.split(',').map(Number));
 const angBlk = new Array(32).fill(0);
 for (const [lx, ly] of LEASH_AT) {
-  if (map[ly * 16 + lx] !== 0) throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
+  if (map[cellOf(lx, ly)] !== 0) throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
   const c = ly * 16 + lx; angBlk[c >> 3] |= 1 << (c & 7);
 }
 
@@ -3295,7 +3311,7 @@ if (CARRY0) orbHidT[CARRY0 - 1] = 1;
 // tests one table and costs nothing extra, and picking an orb up is a single store into it.
 // 2 rather than 1 marks "entity, not wall", which the angel will want when it starts moving.
 const blkT = map.slice();
-ORBS.forEach((o, i) => { if (!orbHidT[i]) blkT[(Math.floor(o.y) << 4) | Math.floor(o.x)] = 2; });
+ORBS.forEach((o, i) => { if (!orbHidT[i]) blkT[cellOf(Math.floor(o.x), Math.floor(o.y))] = 2; });
 const orbExpT = ORBEXP.map(e => e);
 // Distance from the sprite's LEFT EDGE to the anchor the projection aims at. orbScale centres
 // the content in the 12-column sprite, so this is ~half the sprite whatever the ball's size;
@@ -4290,7 +4306,7 @@ if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of 
 // cycles a frame). A socket ladder is a third of that, so the scan is ~100 cycles and a page
 // is worth more than the cycles here.
 for (const h of HOLELIKE)
-  if (map[h.y * 16 + h.x] !== 0) throw new Error(
+  if (map[cellOf(h.x, h.y)] !== 0) throw new Error(
     `${h.exit ? 'exit hole' : 'socket'} at (${h.x},${h.y}) is inside a wall`);
 if (NHOLE > 4) throw new Error(
   `${NHOLE} hole-like entities across the resident levels: holeSeeT has room for 4 (32 bytes each). ` +
@@ -8498,13 +8514,13 @@ ${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
         bcc cypos
         lda #$ff
         sta stpY
-        lda #$f0                ; -16: one cell row back
+        lda #${hx((256 - MAPW) & 255)}                ; -MAPW: one cell row back
         sta stpY16
         jmp cySat               ; negative: m IS the side distance, so there is nothing to
                                 ; subtract -- but the saturation below still has to run
 cypos:  lda #$01
         sta stpY
-        lda #$10                ; +16: one cell row on
+        lda #${hx(MAPW)}                ; +MAPW: one cell row on
         sta stpY16
         sec                     ; positive: sdy = ddy - m, in place
         lda ddy
@@ -13680,7 +13696,7 @@ bfsFin: lda bfsFor
         rts
 
         ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
-bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
+bfsDCT: !byte 1,255,${MAPW},${256 - MAPW}      ; ...as a CELL delta
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
@@ -13959,12 +13975,12 @@ mrVen:  lda #$00
         sta mrEp
 mrVn:   tya                     ; next row, same column
         clc
-        adc #$10
+        adc #${hx(MAPW)}
         tay
         bcc mrVy
         inc mrX
         lda mrX
-        cmp #$10
+        cmp #${hx(MAPW)}
         bcc mrVx
 
         ; ---- horizontal planes: north and south faces, contiguous in x ----
@@ -13985,7 +14001,7 @@ mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-16 wo
         beq mrHnn
         tya
         sec
-        sbc #$10
+        sbc #${hx(MAPW)}
         tax
         lda mapT,x
         bne mrHnn
@@ -14011,7 +14027,7 @@ mrHs:   lda mrY                 ; south face: row 15 has none, and c+16 would le
         beq mrHsn
         tya
         clc
-        adc #$10
+        adc #${hx(MAPW)}
         tax
         lda mapT,x
         bne mrHsn
@@ -14037,11 +14053,11 @@ mrHsn:  lda #$00
 mrHnx:  iny
         inc mrX
         lda mrX
-        cmp #$10
+        cmp #${hx(MAPW)}
         bcc mrHx
         inc mrY
         lda mrY
-        cmp #$10
+        cmp #${hx(MAPH)}
         bcc mrHy
 
         ; ---- the per-run bit lookups, which are pure arithmetic on the id ----

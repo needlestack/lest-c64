@@ -3575,13 +3575,13 @@ cyml2:   tax
         bcc cypos
         lda #$ff
         sta stpY
-        lda #$f0                ; -16: one cell row back
+        lda #$f0                ; -MAPW: one cell row back
         sta stpY16
         jmp cySat               ; negative: m IS the side distance, so there is nothing to
                                 ; subtract -- but the saturation below still has to run
 cypos:  lda #$01
         sta stpY
-        lda #$10                ; +16: one cell row on
+        lda #$10                ; +MAPW: one cell row on
         sta stpY16
         sec                     ; positive: sdy = ddy - m, in place
         lda ddy
