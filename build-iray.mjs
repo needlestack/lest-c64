@@ -266,13 +266,22 @@ if (LEVEL2) {
 // now, which is what lets a level be 28x9 or 12x20 instead of only square.
 const MAPW = +(process.env.MAPW ?? 16), MAPH = +(process.env.MAPH ?? 16);
 const MAPN = MAPW * MAPH;
-if (MAPN > 256) throw new Error(`MAPW*MAPH = ${MAPN} cells; stage 1 keeps the cell id a byte (max 256)`);
+// WIDECELL=1: allow more than 256 cells. The cell id then needs nine bits -- see the page byte
+// and patched operands in the DDA. Sizing the tables is independent of that and comes first, so
+// the memory picture is known before any addressing changes.
+const WIDECELL = process.env.WIDECELL === '1';
+if (MAPN > 512) throw new Error(`MAPW*MAPH = ${MAPN} cells; a cell id is nine bits (max 512)`);
+if (MAPN > 256 && !WIDECELL) throw new Error(`MAPW*MAPH = ${MAPN} cells needs WIDECELL=1`);
 if (MAPN - 1 === 0xff) { /* the last cell IS $ff: it must stay solid, which the border check below enforces */ }
 const cellOf = (x, y) => y * MAPW + x;
 const cellX  = c => c % MAPW;
 const cellY  = c => (c / MAPW) | 0;
 const inMap  = (x, y) => x >= 0 && y >= 0 && x < MAPW && y < MAPH;
-const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) map.push(M[y][x]);
+// A map literal shorter or narrower than MAPW x MAPH is padded with SOLID. That is what makes
+// "the same level, but in a bigger grid" expressible: the geometry is untouched and only the
+// addressing changes, which is the only way to test a >256-cell map against a known-good render.
+const mapAt = (x, y) => (M[y] && M[y][x] !== undefined) ? M[y][x] : 1;
+const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) map.push(mapAt(x, y));
 
 // ---- The OTHER resident level, fetched EARLY ----
 // Early, because two constants below have to cover BOTH levels rather than just the live one,
@@ -528,7 +537,7 @@ for (let y = 0; y < MAPH; y++)                 // two loops, not one: W and H ca
   if (!map[cellOf(0, y)] || !map[cellOf(MAPW - 1, y)])
     throw new Error(`map border must be solid: castRay has no bounds check (row ${y} is open)`);
 const mapW = (x, y) => !inMap(x, y) ? 1 : map[cellOf(x, y)];
-const runW = new Array(256).fill(0), runE = new Array(256).fill(0), runN = new Array(256).fill(0), runS = new Array(256).fill(0);
+const runW = new Array(MAPN).fill(0), runE = new Array(MAPN).fill(0), runN = new Array(MAPN).fill(0), runS = new Array(MAPN).fill(0);
 let nextRun = 1;
 // Every run lies in ONE plane and faces one way -- W runs are a vertical strip at constant x,
 // N runs a horizontal strip at constant y. runPlane is the coordinate, runFace which side is
@@ -13461,7 +13470,7 @@ orbVarT: !byte ${orbVarT.join(',')}
         ; anPath reads the LIVE one -- and both are page-aligned because a whole cell byte
         ; indexes them. bfsD0 lives off at $ae00 because this gap is not big enough for both.
         * = $5e00
-bfsD1:  !fill 256, 255
+bfsD1:  !fill ${MAPN}, 255
         * = $5f00
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
@@ -14853,7 +14862,7 @@ ${CVXSEAM ? `; Emitted only when CVXSEAM=0. With every run-to-run boundary drawi
 cpHiT:  !byte ${cpHi.join(',')}`}
 ` : ''}
 ${PLAN === 3 ? `        * = $ae00
-bfsD0:  !fill 256, 255          ; the angel's other distance map -- see bfsD1 at $5e00
+bfsD0:  !fill ${MAPN}, 255      ; the angel's other distance map -- see bfsD1 at $5e00
         * = ${hx16(RELOC + 0x2900)}
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
 ; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the

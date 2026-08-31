@@ -9589,7 +9589,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; and the renderer no longer cares which it is.
 
         * = $ae00
-bfsD0:  !fill 256, 255          ; the angel's other distance map -- see bfsD1 at $5e00
+bfsD0:  !fill 256, 255      ; the angel's other distance map -- see bfsD1 at $5e00
         * = $af00
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
 ; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the
