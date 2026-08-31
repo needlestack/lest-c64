@@ -181,7 +181,18 @@ export function assemble(source, opts = {}) {
     let pc = opts.origin ?? 0x0801;
     const sized = [];
     parsed.forEach((item, pi) => {
-      if (item.label) symbols[item.label] = pc;
+      // A REDEFINED label used to win silently, and every branch to the earlier one then landed on
+      // the later one instead. That is how orbOcc1's `jmp ooCmp` ended up jumping into a debug
+      // loop added to orbOccAll two screens below it: the build was clean, the disk loaded, and the
+      // program ran wild with a PC in zero page. Nothing about the symptom points at a name clash,
+      // so it has to be caught here.
+      if (item.label) {
+        if (item.label in symbols)
+          throw new Error(`duplicate label: ${item.label} is defined at ` +
+            `$${symbols[item.label].toString(16)} and again at $${pc.toString(16)} -- ` +
+            `every reference resolves to the LAST one, so branches to the first go wrong`);
+        symbols[item.label] = pc;
+      }
       let t = item.text;
       if (t === '') { sized.push({ ...item, pi, kind: 'none' }); return; }
       if (t[0] === '*') {
