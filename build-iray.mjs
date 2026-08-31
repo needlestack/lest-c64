@@ -7228,8 +7228,10 @@ ${SPIN ? `; ---- spinStep: rotate one unit a frame, and hop between viewpoints -
 ; places in the same order and stay comparable.
 spinStep:
         inc pa
-        bne ssDn
-        ldx spinIx
+        bne spDn                ; spDn, not ssDn: seamSpan owns that name, and with SPIN=1 both
+        ldx spinIx              ;   were emitted -- the assembler took the LAST, so this branch
+                                ;   resolved into seamSpan. Both happen to be rts, so it was
+                                ;   harmless; the duplicate-label guard found it anyway.
         inx
         cpx #${SPINPOS.length}
         bcc ssIx
@@ -7243,7 +7245,7 @@ ssIx:   stx spinIx
         sta py
         lda spinYH,x
         sta py+1
-ssDn:   rts
+spDn:   rts
 ${false ? `
 ; tourStep: turn AND translate. Drives px/py DIRECTLY rather than calling moveFwd, because
 ; moveFwd stops dead at a wall and a benchmark that quietly stops moving still prints a
@@ -7786,8 +7788,8 @@ ${ADDX('cx0')}
         tax
         lda blkT,x
         bne mvBlk
-        lda tmp
-        ora cx1
+        lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
+${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
         bne mvBlk
@@ -7798,8 +7800,8 @@ ${ADDX('cx0')}
         tax
         lda blkT,x
         bne mvBlk
-        lda tmp
-        ora cx1
+        lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
+${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
         bne mvBlk

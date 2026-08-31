@@ -2682,8 +2682,8 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         tax
         lda blkT,x
         bne mvBlk
-        lda tmp
-        ora cx1
+        lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
+        ora cx1                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
         bne mvBlk
@@ -2697,8 +2697,8 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         tax
         lda blkT,x
         bne mvBlk
-        lda tmp
-        ora cx1
+        lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
+        ora cx1                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
         bne mvBlk
