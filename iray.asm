@@ -4041,11 +4041,17 @@ drawDbg:
         ; the cell has to be READ OFF and fed back in through ANGAT.
         lda #$04
         jsr setRow
-        ldy #37
-        lda #14                 ; 'E' for entity -- no spare glyph for a better label, and
-        jsr ddPut               ;   adding one costs a cell code out of a full charset
-        ldx #$01
-        lda orbXCT,x            ; ddPut leaves X alone, so one load covers both digits
+        ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #$0f"
+        lda #14                 ;   showed an angel at x=21 as x=5 -- a cell in the other half of
+        jsr ddPut               ;   the level, which reads exactly like it teleported.
+        ldx #$01          ; ONE LINE PER ANGEL. This was a single hardcoded findIndex, so a
+        lda orbXCT,x            ;   second angel was invisible to the readout entirely.
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda orbXCT,x
         and #$0f
         jsr ddPut
         lda orbYCT,x

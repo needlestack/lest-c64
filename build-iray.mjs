@@ -9083,19 +9083,25 @@ ${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's
         ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
         ; facing one freezes its clock, so waiting does not sweep the possibilities either --
         ; the cell has to be READ OFF and fed back in through ANGAT.
-        lda #${hx(HUDROW + 3)}
+${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
         jsr setRow
-        ldy #37
-        lda #14                 ; 'E' for entity -- no spare glyph for a better label, and
-        jsr ddPut               ;   adding one costs a cell code out of a full charset
-        ldx #${hx(ORBS.findIndex(o => o.tall))}
-        lda orbXCT,x            ; ddPut leaves X alone, so one load covers both digits
+        ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #\$0f"
+        lda #14                 ;   showed an angel at x=21 as x=5 -- a cell in the other half of
+        jsr ddPut               ;   the level, which reads exactly like it teleported.
+        ldx #${hx(ei)}          ; ONE LINE PER ANGEL. This was a single hardcoded findIndex, so a
+        lda orbXCT,x            ;   second angel was invisible to the readout entirely.
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda orbXCT,x
         and #$0f
         jsr ddPut
         lda orbYCT,x
         and #$0f
         jsr ddPut
-`}${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
+`).join('')}`}${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
         ; A single frame's count is meaningless under motion, and motion is the only condition
         ; that exercises the prediction at all.
 ${PROFAT && PROFILE ? `        lda pfArm               ; With PROFAT, use the PROFILER's window rather than a rolling

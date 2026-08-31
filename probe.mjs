@@ -262,7 +262,8 @@ sock.on('connect', async () => {
     for (const spec of [...specs, ...(val2 ? [LIVE] : [])]) {
       const n = spec.split(':')[0], b = val[n];
       const w = b.length >= 2 ? `  (16-bit: ${num(b)})` : '';
-      const d = val2 ? `   ->  ${num(val2[n])}   delta ${num(val2[n]) - num(b)}` : '';
+      const d = val2 ? `   ->  ${val2[n].join(' ')}` +
+        (b.length >= 2 ? `  (delta ${num(val2[n]) - num(b)})` : '') : '';
       console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${b.join(' ')}${w}${d}`);
     }
   } catch (e) { console.error(String(e.message || e)); stop(); process.exit(1); }
