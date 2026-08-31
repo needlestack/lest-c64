@@ -44,6 +44,11 @@ const CHAIN = process.env.CHAIN === '1';
 const LVL = +(process.env.LVL ?? (process.env.TESTLVL === '1' ? 3
                                 : (process.env.LEVEL2 ?? '1') === '1' ? 2 : 1));
 const TESTLVL = LVL === 3;
+// LVL=4: level 1 and the ring JOINED into one 28x9 room -- level 1 keeps x0-15 and the ring
+// contributes its x1-12 at x16-27, sharing level 1's east wall as its own west wall. 252 cells,
+// so a cell id is still one byte. Two orbs and two angels: the first angel can follow you down
+// the corridor and into the loop if you do not shut the door behind you with the first orb.
+const COMBO = LVL === 4;
 if (TESTLVL && !CHAIN) {             // standalone only: in a chain, level 3 is a level like any
                                      //   other and must not switch the angel or the other levels
                                      //   off. Defaults, so each is still overridable on its own.
@@ -225,7 +230,27 @@ const M = [
 // NOT `LVL === 2`: this switch means "use the L2 map slot", which holds the ring for level 2 and
 // the socket room for level 3. Level 1's map is the other branch. Everywhere it means "level 2
 // specifically" it is guarded by a TESTLVL test first -- except the angel, fixed below.
-const LEVEL2 = LVL !== 1;
+// The ring, named so the combined level can build itself from the same source rather than a
+// second transcription of it that would quietly drift.
+const RING_MAP = [
+  "################",
+  "#...........####",
+  "#.####.####.####",
+  "#.#.......#.####",
+  "#.#..###..#.####",
+  "#.#.......#.####",
+  "#.#########.####",
+  "#...........####",
+  "################",
+  "################",
+  "################",
+  "################",
+  "################",
+  "################",
+  "################",
+  "################",
+];
+const LEVEL2 = LVL !== 1 && LVL !== 4;   // 4 is the COMBINED level, which starts from level 1's grid
 if (LEVEL2) {
   // SYMMETRIC about the door. The first cut ran x1-10 with the door at x5, which left four ring
   // cells to the west corner and five to the east -- the two arcs were different lengths, so which
@@ -245,17 +270,7 @@ if (LEVEL2) {
               "################",
               "################","################","################",
               "################","################","################","################"]
-            : ["################",
-              "#...........####",   // y1  ring, north arc, x1-11
-              "#.####.####.####",   // y2  inner wall, with THE DOOR at (6,2)
-              "#.#.......#.####",   // y3  chamber x3-9, y3-5. The ANGEL starts at (6,3),
-              "#.#..###..#.####",   // y4    caged behind the orb -- and a COLUMN at (5-7,4)
-              "#.#.......#.####",   // y5  the exit hole is at (6,5): dead centre, behind the
-              "#.#########.####",   // y6    column, so the doorway cannot see it
-              "#...........####",   // y7  ring, south arc
-              "################",
-              "################","################","################",
-              "################","################","################","################"];
+            : RING_MAP;
   for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) M[y][x] = L2[y][x] === '#' ? 1 : 0;
 }
 // ---- MAP SHAPE ----
@@ -264,7 +279,7 @@ if (LEVEL2) {
 // exactly the old layout, so nothing about the generated code changes while these are the default.
 // The stride was written as a literal 16 (and as <<4 / >>4 / &15) in ~40 places; they read MAPW
 // now, which is what lets a level be 28x9 or 12x20 instead of only square.
-const MAPW = +(process.env.MAPW ?? 16), MAPH = +(process.env.MAPH ?? 16);
+const MAPW = +(process.env.MAPW ?? (COMBO ? 28 : 16)), MAPH = +(process.env.MAPH ?? (COMBO ? 9 : 16));
 const MAPN = MAPW * MAPH;
 // WIDECELL=1: allow more than 256 cells. The cell id then needs nine bits -- see the page byte
 // and patched operands in the DDA. Sizing the tables is independent of that and comes first, so
@@ -280,6 +295,12 @@ const inMap  = (x, y) => x >= 0 && y >= 0 && x < MAPW && y < MAPH;
 // A map literal shorter or narrower than MAPW x MAPH is padded with SOLID. That is what makes
 // "the same level, but in a bigger grid" expressible: the geometry is untouched and only the
 // addressing changes, which is the only way to test a >256-cell map against a known-good render.
+if (COMBO) {
+  // The ring's own west wall is dropped: level 1's east wall at x15 serves as the shared one.
+  for (let y = 0; y < 9; y++)
+    for (let x = 1; x <= 12; x++) M[y][15 + x] = RING_MAP[y][x] === '#' ? 1 : 0;
+  M[4][15] = 0;          // ...and the corridor runs on through it, into the ring's west arc
+}
 const mapAt = (x, y) => (M[y] && M[y][x] !== undefined) ? M[y][x] : 1;
 const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) map.push(mapAt(x, y));
 
@@ -2956,6 +2977,10 @@ if (process.env.ORBSCATTER) {
   // Level 2: ONE orb, and it is standing in the doorway at (5,2) -- the only way into the chamber
   // that holds the exit. It reads exactly like level 1's caging orb, which is the point: the
   // player already knows to pick it up. What is new is that they have to put it back.
+  else if (COMBO) {                              // both: the corridor mouth, and the ring's door
+    ORBS.push({ x: 8.5, y: 4.5, c: 0 });
+    ORBS.push({ x: 21.5, y: 2.5, c: 0 });        // ring (6,2) + 15
+  }
   else if (TESTLVL) ORBS.push({ x: 3.5, y: 6.5, c: 0 });  // out in the open, to walk up to
   else if (LEVEL2) ORBS.push({ x: 6.5, y: 2.5, c: 0 });   // in the doorway at (6,2)
   else ORBS.push({ x: 8.5, y: 4.5, c: 0 });      // the corridor mouth
@@ -2975,6 +3000,10 @@ if (process.env.ORBSCATTER) {
   // The socket room has no angel: it is a puzzle, not a chase, and an entity count that differs
   // from the other levels' is exactly what nOrbT was made swappable for.
   if (process.env.ANGEL !== '0' && !TESTLVL)
+    if (COMBO) {                                 // one behind each orb, as on both source levels
+      ORBS.push({ x: 9.5, y: 4.5, c: 0, tall: true });
+      ORBS.push({ x: 21.5, y: 3.5, c: 0, tall: true });   // ring (6,3) + 15
+    } else
     ORBS.push(LEVEL2 ? { x: 6.5, y: 3.5, c: 0, tall: true } : { x: 9.5, y: 4.5, c: 0, tall: true });
 }
 // ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
@@ -3047,7 +3076,7 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = TESTLVL ? [8, 8] : LEVEL2 ? [6, 5] : [14, 4];   // level 2: centred under the column
+const HOLE_D = COMBO ? [21, 5] : TESTLVL ? [8, 8] : LEVEL2 ? [6, 5] : [14, 4];   // level 2: centred under the column
 const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])],
                   [+(process.env.HOLE2X ?? HOLE_D[0]), +(process.env.HOLE2Y ?? HOLE_D[1])]];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
