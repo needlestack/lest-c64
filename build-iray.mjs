@@ -2373,6 +2373,10 @@ const NOMINMAX = flag('NOMINMAX');
 // open half of the pivot-nearside bug. An occluder inside the span is nearer than the face at the
 // ends, so it subtends at least F_COL/d columns; colH is 88/d, making the bound 1.397*colH, which
 // spanCapT holds per colH value.
+// CULLCNT=1: how many entities orbMove projects in full and then throws away. The projection is
+// ~2,900 cycles an entity and the rejects all happen AFTER it, so this is the ceiling on what an
+// early cull could save.
+const CULLCNT = flag('CULLCNT');
 const SPANCAP = flag('SPANCAP');
 const RAYCNT = flag('RAYCNT') || flag('EDGCHK');
 // EDGCHK=1: how often a cell column's colH is UNCHANGED from last frame. That is the exact key an
@@ -4873,6 +4877,12 @@ mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster l
 mxHi    = $7cfb
 mxStep  = $7cfc                  ;   ...and the tour step it happened in
 mulWY   = $7cfe                  ; mulW saves Y here; $7cfe-$7cff is free in every config
+${CULLCNT ? `culTot  = $7096                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
+culPrj  = $70a0                 ;   ...and how many orbProj rejected after doing the work
+culTAcc = $7098
+culPAcc = $709a
+culTMn  = $709c
+culPMn  = $709d` : ''}
 ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
 ssWid   = $7cf2                  ;   ...wide enough to hold a seam
 ssNear  = $7cf4                  ;   ...near enough for one to read
@@ -9163,6 +9173,19 @@ rcNm:   lda pvAcc
         bcc rcNp
         inc pvAcc+1
 rcNp:
+` : ''}${CULLCNT ? `        lda culTAcc
+        clc
+        adc culTot
+        sta culTAcc
+        bcc rcNq
+        inc culTAcc+1
+rcNq:   lda culPAcc
+        clc
+        adc culPrj
+        sta culPAcc
+        bcc rcNr
+        inc culPAcc+1
+rcNr:
 ` : ''}rcNe:   inc rayFrm
         bne rcNd
         lda rayAcc+1
@@ -9171,6 +9194,16 @@ rcNp:
         sta edgMean
         lda chnAcc+1
         sta chnMean
+${CULLCNT ? `        lda culTAcc+1
+        sta culTMn
+        lda culPAcc+1
+        sta culPMn
+        lda #$00
+        sta culTAcc
+        sta culTAcc+1
+        sta culPAcc
+        sta culPAcc+1
+` : ''}
 ${EDGCHK ? `        lda ehAcc+1
         sta ehMean
         lda ehGAcc+1
@@ -10474,7 +10507,7 @@ ohOk:   lda o1
         rts
 opjNo:  clc
         rts
-orbOne: ldx oidx
+orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rate is this against\n        bne oc1                ;   iterLo, which removes every question about where in the\n        inc culTot+1           ;   frame the per-frame reset lands\noc1:   ' : ''} ldx oidx
         sec                     ; Ix, Iy = orb cell - player cell, -15..15
         lda orbXCT,x
         sbc px+1
@@ -10484,7 +10517,12 @@ orbOne: ldx oidx
         sbc py+1
         sta oiy
         jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
-        bcc orbNo               ;   everything above needs only the cell it stands in
+${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
+        inc culPrj
+        bne oc2
+        inc culPrj+1
+oc2:    jmp orbNo
+culOk:` : `        bcc orbNo               ;   everything above needs only the cell it stands in`}
 ${DIE ? `        lda oidx                ; the death sweep steers by ONE entity's column offset, so
         cmp dieIdx              ;   test identity, not tallness: hole-like entities reach the tall
         bne odSk                ;   test below with an index PAST THE END of orbTallT, and a stray
