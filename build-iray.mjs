@@ -12206,12 +12206,14 @@ anTry:  lda amTX
         clc
         lda orbXCT,x
         adc amTX
-        and #$0f
-        sta amX
-        clc
-        lda orbYCT,x
+        cmp #${MAPW}            ; RANGE CHECK, not a mask. "and #$0f" wrapped x=16 round to 0 --
+        bcs anNo                ;   the border wall -- so an angel walking east stopped dead at
+        sta amX                 ;   the end of the corridor. A mask cannot work at a width that
+        clc                     ;   is not a power of two, and a step off the map is refused by
+        lda orbYCT,x            ;   the solid border anyway; this only has to catch the wrap.
         adc amTY
-        and #$0f
+        cmp #${MAPH}
+        bcs anNo
         sta amY
         lda amX                 ; never step ONTO the player: touching is harmless by design,
         cmp px+1                ;   but blkT under their feet would make mvFree refuse every
