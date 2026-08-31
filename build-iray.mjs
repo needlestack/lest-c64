@@ -571,17 +571,17 @@ let nextRun = 1;
 // the visible one; the seam pass uses both to place a panel line at the right column.
 const runPlane = [0], runFace = [0];    // index by run id; 0 is "no run"
 const newRun = (plane, face) => { runPlane[nextRun] = plane; runFace[nextRun] = face; return nextRun++; };
-for (let x = 0; x < 16; x++) {          // vertical planes: west/east faces, contiguous in y
+for (let x = 0; x < MAPW; x++) {          // vertical planes: west/east faces, contiguous in y
   let wp = false, ep = false, wId = 0, eId = 0;
-  for (let y = 0; y < 16; y++) {
+  for (let y = 0; y < MAPH; y++) {
     const wf = mapW(x, y) && !mapW(x - 1, y), ef = mapW(x, y) && !mapW(x + 1, y);
     if (wf) { if (!wp) wId = newRun(x, 'W'); runW[cellOf(x, y)] = wId; } wp = wf;
     if (ef) { if (!ep) eId = newRun(x + 1, 'E'); runE[cellOf(x, y)] = eId; } ep = ef;
   }
 }
-for (let y = 0; y < 16; y++) {          // horizontal planes: north/south faces, contiguous in x
+for (let y = 0; y < MAPH; y++) {          // horizontal planes: north/south faces, contiguous in x
   let np = false, sp = false, nId = 0, sId = 0;
-  for (let x = 0; x < 16; x++) {
+  for (let x = 0; x < MAPW; x++) {
     const nf = mapW(x, y) && !mapW(x, y - 1), sf = mapW(x, y) && !mapW(x, y + 1);
     if (nf) { if (!np) nId = newRun(y, 'N'); runN[cellOf(x, y)] = nId; } np = nf;
     if (sf) { if (!sp) sId = newRun(y + 1, 'S'); runS[cellOf(x, y)] = sId; } sp = sf;
@@ -662,7 +662,7 @@ const hazCell = new Map();                        // cell index -> [{run, split}
 {
   const t0 = Date.now();
   let flagged = 0, worst = 0;
-  for (let cy = 0; cy < 16; cy++) for (let cx = 0; cx < 16; cx++) {
+  for (let cy = 0; cy < MAPH; cy++) for (let cx = 0; cx < MAPW; cx++) {
     if (map[cellOf(cx, cy)]) continue;
     const per = new Map();                        // run -> split coordinate (widest cut wins)
     for (let i = 0; i < HAZSAMP; i++) for (let j = 0; j < HAZSAMP; j++) {
@@ -821,7 +821,7 @@ const cpLo = new Array(nextRun).fill(0), cpHi = new Array(nextRun).fill(0);
     }
   };
   // concave ends: an inside corner, seen from an open cell with two solid neighbours
-  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+  for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) {
     if (mapW(x, y)) continue;
     const W_ = mapW(x - 1, y), E_ = mapW(x + 1, y), N_ = mapW(x, y - 1), S_ = mapW(x, y + 1);
     if (W_ && N_) addPair(runE[cellOf(x - 1, y)], runS[cellOf(x, y - 1)]);
@@ -1149,7 +1149,7 @@ function patternFreq() {
   // and that is exactly where walls tower and the steep ramps get used. Sampling centres
   // only made the rarest patterns look unused, so the pairing spent its cheap slots wrong.
   const spots = [];
-  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+  for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) {
     if (map[cellOf(x, y)]) continue;
     const solid = (cx2, cy2) => !inMap(cx2, cy2) || map[cellOf(cx2, cy2)];
     spots.push([x + 0.5, y + 0.5]);
@@ -1789,7 +1789,7 @@ if (process.env.CELLSCAN === '1') {
   const PAD = 0.1;
   const solid = (x, y) => !inMap(x, y) || !!map[cellOf(x, y)];
   const spots = [];
-  for (let cy = 0; cy < 16; cy++) for (let cx0 = 0; cx0 < 16; cx0++) {
+  for (let cy = 0; cy < MAPH; cy++) for (let cx0 = 0; cx0 < MAPW; cx0++) {
     if (map[cellOf(cx0, cy)]) continue;
     for (let gy = STEP / 2; gy < 1; gy += STEP) for (let gx = STEP / 2; gx < 1; gx += STEP) {
       const px = cx0 + gx, py = cy + gy;
@@ -1842,7 +1842,7 @@ if (process.env.CELLSCAN === '1') {
   const samples = [];
   if (NRAND) {
     const open = [];
-    for (let cy = 0; cy < 16; cy++) for (let cx0 = 0; cx0 < 16; cx0++)
+    for (let cy = 0; cy < MAPH; cy++) for (let cx0 = 0; cx0 < MAPW; cx0++)
       if (!map[cellOf(cx0, cy)]) open.push([cx0, cy]);
     // mulberry32, not an LCG: rnd*1103515245 exceeds 2^53 in JS and loses the low bits, so the
     // obvious LCG degenerates into a short cycle -- it produced 3,670 unique values out of 2M.
@@ -13490,8 +13490,6 @@ mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 runPlaneT: !byte ${[...Array(NRUN)].map((_, r) => r ? runPlane[r] ?? 0 : 0).join(',')}
 runFaceT: !byte ${[...Array(NRUN)].map((_, r) =>
       r === 0 || !runFace[r] ? 0 : { W: 0x00, E: 0x80, N: 0x01, S: 0x81 }[runFace[r]]).join(',')}
-runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
-runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
 orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
@@ -14680,6 +14678,13 @@ lsNC:   inc lsIdx
 lsIdx:  !byte 0
 lsLen:  !byte 0
 ` : ''}
+; ---- runByteT / runBitT ----
+; Out of the ORB_SMALL block, which ends at $4000 and was full: both are pure functions of the run
+; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
+; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
+; NRUN-sized tables in that block overran it by 38 bytes.
+runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
+runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
 ${SPANCAP ? `        ; Placed in the stream, not at a fixed origin: the free run below HAZ_BASE starts at a
         ; different address in a chained build, and a hard address collided there.
 ; SPANCAP: widest span, in columns, that a face at this colH may cover without being able to

@@ -7885,8 +7885,6 @@ mMskT: !byte 7,3,1,0
 ; mapT on arrival. NRUN-sized, so a level with more runs than this one still fits.
 runPlaneT: !byte 0,1,2,3,6,5,7,8,11,10,12,1,2,3,2,3,4,5,7,6,8,0,0,0,0
 runFaceT: !byte 0,128,0,128,128,0,0,128,128,0,0,129,1,129,1,129,1,129,129,1,1,0,0,0,0
-runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3
-runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,0,0,0,0
 orbOccLoT: !byte 0,4,8,12
 orbOccHiT: !byte 112,112,112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
@@ -9530,6 +9528,13 @@ lsNC:   inc lsIdx
 lsIdx:  !byte 0
 lsLen:  !byte 0
 
+; ---- runByteT / runBitT ----
+; Out of the ORB_SMALL block, which ends at $4000 and was full: both are pure functions of the run
+; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
+; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
+; NRUN-sized tables in that block overran it by 38 bytes.
+runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,0,0,0,0
         ; The walker and all its data. The dispatcher stays down in the
         ; main code stream's headroom; only this needs somewhere with room.
         * = $a700
