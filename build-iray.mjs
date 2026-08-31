@@ -2301,6 +2301,11 @@ const PROFMAX = flag('PROFMAX');
 // Reuses the bucket indices PROFCOARSE frees, so it must be run WITH PROFCOARSE.
 const ENTPROF = flag('ENTPROF');
 // OCCLAZY=1: rebuild the occluder masks only when they can have changed.
+// STILLSKIP=1: let orbMove take its own still-frame short-circuit. The test below it was always
+// complete -- pose, quarter-angle and entDty -- and the jmp over it was placed "until the
+// occlusion stamping lands". occStamp has landed and runs unconditionally after renderSym, which
+// is what the still path was waiting for.
+const STILLSKIP = flag('STILLSKIP');
 const OCCLAZY = flag('OCCLAZY');
 // OCCCHK=1: verify the skip. Rebuilds even when it would skip, and counts bytes that differ.
 // 2 and 3 exist to BISECT it: the full version starts and then runs wild, so build up in stages.
@@ -5639,7 +5644,9 @@ ${PROFAT ? '        sta pfArm               ; PROFAT: not armed yet (A is still 
         sta chdAcc
         sta chdAcc+1
         sta pvAcc
-        sta pvAcc+1` : ''}${OCCCHK ? `        lda #$00                ; OCCCHK's counters are equates over uninitialised scratch, and a
+        sta pvAcc+1` : ''}${STILLSKIP ? `        lda #$01                ; the pose orbMove compares against is uninitialised scratch, so
+        sta entDty              ;   force the FIRST frame to project rather than risk a match
+` : ''}${OCCCHK ? `        lda #$00                ; OCCCHK's counters are equates over uninitialised scratch, and a
         sta occArm              ;   garbage occBad is exactly the answer this must never give
         sta occChk
         sta occBad` : ''}
@@ -9382,9 +9389,9 @@ orbMove:
         ; spent arriving at last frame's answer. The sprite registers already hold it. All that
         ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
         ; rewrites the screen every frame and puts plain SOLID back.
-        jmp obMoved             ; DEADCODE-OK: the still-frame short-circuit is off until the
+${STILLSKIP ? '' : `        jmp obMoved             ; DEADCODE-OK: the still-frame short-circuit is off until the
                                 ; occlusion stamping lands -- see the comment above it.
-${DIE ? `        lda dieSt               ; the cut scene owns the sprites from the swap onward. Clearing
+`}${DIE ? `        lda dieSt               ; the cut scene owns the sprites from the swap onward. Clearing
         cmp #$02                ;   omEn inside the swap did not hold: the swap runs from mfIn and
         bcs omDead              ;   the REST of that same frame still calls orbMove, which put the
 ` : ''}        lda entDty              ; an entity moved even though the player did not. Without this
