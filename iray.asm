@@ -5652,12 +5652,12 @@ orbNo:  ldx oidx
 holeOne:lda hlv                 ; the live exit hole first, so it can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
 hoLp:   lda hoI                 ;   biggest thing here
-        asl                     ; x32: this entity's LOS bitmap
+        asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
         asl
         asl
         asl
         asl
-        sta hoOf
+        sta hoOf                ;   NOT a cell multiply: it stays 32 whatever MAPW is
         lda pcell
         and #$07
         tay
@@ -5751,7 +5751,7 @@ lvlEnd:
         txa
         eor #$01
         sta hlv
-        asl
+        asl                     ; x32, the same LOS stride -- not a cell multiply
         asl
         asl
         asl
@@ -7321,7 +7321,7 @@ abLp:   jsr arcPx
         asl
         asl
         asl
-        asl
+        asl               ; hi<<4 | lo: packing two 4-bit LEVELS, not a cell
         sta apIdx
         lda apCur
         jsr arcLvl

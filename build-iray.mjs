@@ -10958,9 +10958,12 @@ ${FALL ? `
 holeOne:lda hlv                 ; the live exit hole first, so it can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
 hoLp:   lda hoI                 ;   biggest thing here
-        asl                     ; x32: this entity's LOS bitmap
-${MULW}
-        sta hoOf
+        asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
+        asl
+        asl
+        asl
+        asl
+        sta hoOf                ;   NOT a cell multiply: it stays 32 whatever MAPW is
         lda pcell
         and #$07
         tay
@@ -11054,8 +11057,11 @@ lvlEnd:
         txa
         eor #$01
         sta hlv
+        asl                     ; x32, the same LOS stride -- not a cell multiply
         asl
-${MULW}
+        asl
+        asl
+        asl
         sta hlvOf
         ldx #$ff                ; the drop starts on THIS frame -- mfIn falls into fallStep and
         stx fFrm                ;   draws frame 0, so stepping in and falling are the same frame
@@ -11584,7 +11590,7 @@ oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta orbSeenT,x
         lda orbY0T,x
 ${MULW}
-        ora orbX0T,x
+${ADDX('orbX0T,x')}
         tay
         lda #$02
         sta blkT,y              ; 2 = entity, not wall -- angStep and mvFree both rely on it
@@ -12086,7 +12092,7 @@ anGo:   inc blkVer              ; the obstacle map changed: the fill has to be r
         ldx amIdx
         lda orbYCT,x            ; the cell it is leaving opens
 ${MULW}
-        ora orbXCT,x
+${ADDX('orbXCT,x')}
         tay
         lda #$00
         sta blkT,y
@@ -12536,7 +12542,7 @@ okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may ex
         sta orbHidT,x
         lda orbYCT,x            ; and the cell it was standing in opens
 ${MULW}
-        ora orbXCT,x
+${ADDX('orbXCT,x')}
         tay
         lda #$00
         sta blkT,y
@@ -12837,7 +12843,10 @@ abLp:   jsr arcPx
         sta apBase              ; 8*row
         lda apPrev
         jsr arcLvl
-${MULW}
+        asl
+        asl
+        asl
+        asl               ; hi<<4 | lo: packing two 4-bit LEVELS, not a cell
         sta apIdx
         lda apCur
         jsr arcLvl
@@ -13509,7 +13518,7 @@ bfsD1:  !fill ${MAPN}, 255
 ; "unknown", not as "very far", or a marooned angel would run at the fast rate forever.
 angDst: lda orbYCT,x
 ${MULW}
-        ora orbXCT,x
+${ADDX('orbXCT,x')}
         tax
 apLdC:  lda bfsD0,x             ; operand PATCHED to the live map, alongside apLdA/apLdB
         rts
@@ -13520,7 +13529,7 @@ angFarT: !byte ${hx(ANG_FAR)}      ; ...where "far" starts. Per level, both swap
 anPath: ldx amIdx
         lda orbYCT,x
 ${MULW}
-        ora orbXCT,x
+${ADDX('orbXCT,x')}
         sta apC
         tax
 apLdA:  lda bfsD0,x             ; operand PATCHED to the live map
@@ -13685,7 +13694,7 @@ bfsEnL: lda orbTallT,x
         stx bfsEnI
         lda orbYCT,x
 ${MULW}
-        ora orbXCT,x
+${ADDX('orbXCT,x')}
         tax
 bfsLdE: lda bfsD1,x             ; operand PATCHED to the work map
         cmp #$ff
@@ -14674,7 +14683,7 @@ twWaL:  lda orbTallT,x
         bcs twTime              ; no angel on this level: fall back to the ceiling
 twWaF:  lda orbYCT,x
 ${MULW}
-        ora orbXCT,x
+${ADDX('orbXCT,x')}
         cmp twOpT,y
         beq twExp               ; arrived: this step is done NOW
 twTime:
