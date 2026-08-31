@@ -3628,7 +3628,11 @@ cySx:   lda ddyH
         sta sdy
         sta sdyH
 cydone:
-        ldy #24
+        ldy #32            ; the step guard must span the MAP: a ray crosses at most
+                                ;   W + H cell boundaries before it leaves the grid. At a fixed 24
+                                ;   a long sightline expires early, cfar sets pp = 1, and the
+                                ;   column ends up with no wall run -- which occWalk reads as
+                                ;   "nothing here occludes", so entities BEHIND the wall draw.
         ldx cell
 cdda:   lda sdxH
         cmp sdyH

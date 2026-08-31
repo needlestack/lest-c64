@@ -4878,6 +4878,8 @@ mxHi    = $7cfb
 mxStep  = $7cfc                  ;   ...and the tour step it happened in
 mulWY   = $7cfe                  ; mulW saves Y here; $7cfe-$7cff is free in every config
 ${CULLCNT ? `culTot  = $7096                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
+dbgRun  = $70a4                 ; CULLCNT: per entity, the run that let it show through
+dbgCol  = $70ac
 culPrj  = $70a0                 ;   ...and how many orbProj rejected after doing the work
 culTAcc = $7098
 culPAcc = $709a
@@ -8620,7 +8622,11 @@ cySx:   lda ddyH
         sta sdy
         sta sdyH
 cydone:${PROFSUB ? '\n        ldx #10\n        jsr pfTick              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
-        ldy #24
+        ldy #${Math.min(255, MAPW + MAPH)}            ; the step guard must span the MAP: a ray crosses at most
+                                ;   W + H cell boundaries before it leaves the grid. At a fixed 24
+                                ;   a long sightline expires early, cfar sets pp = 1, and the
+                                ;   column ends up with no wall run -- which occWalk reads as
+                                ;   "nothing here occludes", so entities BEHIND the wall draw.
         ldx cell
 cdda:   lda sdxH
         cmp sdyH
@@ -10782,14 +10788,28 @@ ${process.env.ORBOCCDBG ? `        lda #$03
 ohDc:
 ` : ''}        ldx ohL
         ldy faceIdT,x           ; the run this span shows
-        beq opVis               ; no run here at all, so the orb shows through
+${CULLCNT ? `        bne ohC1
+        ldx oidx                ; CULLCNT: $ff means the span showed NO run at all
+        lda #$ff
+        sta dbgRun,x
+        lda ohL
+        sta dbgCol,x
+        jmp opVis
+ohC1:` : '        beq opVis               ; no run here at all, so the orb shows through'}
         sty ohRun
         lda runByteT,y
         tay
         lda (omptr),y           ; the mask byte holding this run's bit
         ldy ohRun
         and runBitT,y
-        beq opVis               ; this run does not occlude this orb -> the orb is visible
+${CULLCNT ? `        bne ohOcc
+        ldx oidx                ; CULLCNT: which run let this entity through, and at which column
+        lda ohRun
+        sta dbgRun,x
+        lda ohL
+        sta dbgCol,x
+        jmp opVis
+ohOcc:` : '        beq opVis               ; this run does not occlude this orb -> the orb is visible'}
         lda ovProbe             ; occluding. Only on THIS path: the "span ends before the orb"
         beq ohAdv               ;   skip below reaches ohAdv having covered nothing.
         jsr ovWide
