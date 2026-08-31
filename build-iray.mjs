@@ -3167,10 +3167,15 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // which is what makes the door area read as guarded.
 const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : LEVEL2 ? '3,1;9,1' : '')).split(';')
   .filter(Boolean).map(q => q.split(',').map(Number));
+// One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
+// past 256 cells needs that changed too -- assert rather than let it go quietly wrong.
+const CELLBYTES = Math.ceil(MAPN / 8);
+if (CELLBYTES > 32) throw new Error(
+  `${MAPN} cells needs ${CELLBYTES} bytes of bitmap, but holeOne and the fall bake x32`);
 const angBlk = new Array(32).fill(0);
 for (const [lx, ly] of LEASH_AT) {
   if (map[cellOf(lx, ly)] !== 0) throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
-  const c = ly * 16 + lx; angBlk[c >> 3] |= 1 << (c & 7);
+  const c = cellOf(lx, ly); angBlk[c >> 3] |= 1 << (c & 7);
 }
 
 const LANDS_AT = process.env.LAND
@@ -3207,8 +3212,8 @@ const HOLECULL = process.env.HOLECULL !== "0";
 const holeSee = new Array(NHOLE * 32).fill(0);   // NHOLE, not this level's own count: swapped
 const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
 if (!HOLECULL) holeSee.fill(255);
-for (let cell = 0; cell < 256; cell++) {
-  const x = cell & 15, y = cell >> 4;
+for (let cell = 0; cell < MAPN; cell++) {
+  const x = cellX(cell), y = cellY(cell);
   if (map[cell]) continue;
   const cx = x + 0.5, cy = y + 0.5;
   // Line of sight from ANYWHERE in the cell, not just its centre. The player occupies the
@@ -4657,10 +4662,10 @@ const WALL_DELTA = WALLVAR ? (() => {
   // which columns are showing the doomed wall.
   let cell = -1;
   const baseMap = base ? base.mapT : LVL_TABLES.find(([n]) => n === 'mapT')[1];
-  for (let i = 0; i < 256; i++) if ((WALLVAR.tables.mapT[i] ?? 0) !== baseMap[i]) cell = i;
+  for (let i = 0; i < MAPN; i++) if ((WALLVAR.tables.mapT[i] ?? 0) !== baseMap[i]) cell = i;
   if (cell < 0) throw new Error('the wall variant changed no map cell -- WALL_LVL is wrong');
   console.error(`  wall change: ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction` +
-    `, cell ${cell & 15},${cell >> 4}`);
+    `, cell ${cellX(cell)},${cellY(cell)}`);
   return { off, on, cell };
 })() : null;
 
