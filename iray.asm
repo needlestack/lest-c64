@@ -2661,9 +2661,9 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         adc #$00
         sta cy1
         lda cx0                 ; any corner off the map (or wrapped) rejects the move
-        cmp #16
-        bcs mvBlk
-        lda cx1
+        cmp #16            ; ...against the MAP's own width and height. At a fixed 16 this
+        bcs mvBlk               ;   was an invisible wall down the x=16 line -- exactly the join
+        lda cx1                 ;   between the two halves of a combined level.
         cmp #16
         bcs mvBlk
         lda cy0
