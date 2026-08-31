@@ -193,6 +193,7 @@ pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raste
 mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
 mxHi    = $7cfb
 mxStep  = $7cfc                  ;   ...and the tour step it happened in
+mulWY   = $7cfe                  ; mulW saves Y here; $7cfe-$7cff is free in every config
 ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
 ssWid   = $7cf2                  ;   ...wide enough to hold a seam
 ssNear  = $7cf4                  ;   ...near enough for one to read

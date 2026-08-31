@@ -289,6 +289,12 @@ if (MAPN > 512) throw new Error(`MAPW*MAPH = ${MAPN} cells; a cell id is nine bi
 if (MAPN > 256 && !WIDECELL) throw new Error(`MAPW*MAPH = ${MAPN} cells needs WIDECELL=1`);
 if (MAPN - 1 === 0xff) { /* the last cell IS $ff: it must stay solid, which the border check below enforces */ }
 const cellOf = (x, y) => y * MAPW + x;
+// The runtime computes a cell as row*MAPW + col in a dozen places. It did it as four asl and an
+// ora, which is only right when MAPW is 16: the shift is the multiply and the ora is the add ONLY
+// because y*16 leaves the low four bits clear. Both halves have to follow MAPW.
+const POW2W = (MAPW & (MAPW - 1)) === 0;
+const MULW  = POW2W ? Array(Math.log2(MAPW)).fill('        asl').join('\n') : '        jsr mulW';
+const ADDX  = (x, c = '') => POW2W ? `        ora ${x}${c}` : `        clc\n        adc ${x}${c}`;
 const cellX  = c => c % MAPW;
 const cellY  = c => (c / MAPW) | 0;
 const inMap  = (x, y) => x >= 0 && y >= 0 && x < MAPW && y < MAPH;
@@ -4861,6 +4867,7 @@ pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raste
 mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
 mxHi    = $7cfb
 mxStep  = $7cfc                  ;   ...and the tour step it happened in
+mulWY   = $7cfe                  ; mulW saves Y here; $7cfe-$7cff is free in every config
 ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
 ssWid   = $7cf2                  ;   ...wide enough to hold a seam
 ssNear  = $7cf4                  ;   ...near enough for one to read
@@ -5682,10 +5689,7 @@ ${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS 
         lda #${hx(SOLID)}       ; and every wall column back to a plain fill
 ${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}` : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
-        asl
-        asl
-        asl
-        asl
+${MULW}
         clc
         adc px+1
         sta cell0
@@ -7759,12 +7763,9 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         cmp #16
         bcs mvBlk
         lda cy0                 ; all four corners must be open
-        asl
-        asl
-        asl
-        asl
+${MULW}
         sta tmp
-        ora cx0
+${ADDX('cx0')}
         tax
         lda blkT,x
         bne mvBlk
@@ -7774,12 +7775,9 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         lda blkT,x
         bne mvBlk
         lda cy1
-        asl
-        asl
-        asl
-        asl
+${MULW}
         sta tmp
-        ora cx0
+${ADDX('cx0')}
         tax
         lda blkT,x
         bne mvBlk
@@ -9656,10 +9654,7 @@ omSwTk: dec sokAn
 ${WALL_DELTA ? '        jsr wallTog             ; for now the socket is wired straight to the wall\n' : ''}omNoIco:
 ${process.env.ORBOCCDBG ? `        sta ohDbg
 ` : ''}        lda py+1                ; which cell is the player standing in?
-        asl
-        asl
-        asl
-        asl
+${MULW}
         clc
         adc px+1
         tax
@@ -10951,10 +10946,7 @@ holeOne:lda hlv                 ; the live exit hole first, so it can never lose
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
 hoLp:   lda hoI                 ;   biggest thing here
         asl                     ; x32: this entity's LOS bitmap
-        asl
-        asl
-        asl
-        asl
+${MULW}
         sta hoOf
         lda pcell
         and #$07
@@ -11050,10 +11042,7 @@ lvlEnd:
         eor #$01
         sta hlv
         asl
-        asl
-        asl
-        asl
-        asl
+${MULW}
         sta hlvOf
         ldx #$ff                ; the drop starts on THIS frame -- mfIn falls into fallStep and
         stx fFrm                ;   draws frame 0, so stepping in and falling are the same frame
@@ -11440,11 +11429,8 @@ dpCand: clc
         adc dirYT,x
         and #$0f
         sta fcY
-        asl
-        asl
-        asl
-        asl
-        ora fcX
+${MULW}
+${ADDX('fcX')}
         sta fcCell
         rts
 
@@ -11584,10 +11570,7 @@ oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta angAccT,x
         sta orbSeenT,x
         lda orbY0T,x
-        asl
-        asl
-        asl
-        asl
+${MULW}
         ora orbX0T,x
         tay
         lda #$02
@@ -12089,10 +12072,7 @@ anNoY:  jsr anPath
 anGo:   inc blkVer              ; the obstacle map changed: the fill has to be redone
         ldx amIdx
         lda orbYCT,x            ; the cell it is leaving opens
-        asl
-        asl
-        asl
-        asl
+${MULW}
         ora orbXCT,x
         tay
         lda #$00
@@ -12156,11 +12136,8 @@ anTry:  lda amTX
         cmp py+1
         beq anNo
 anT1:   lda amY
-        asl
-        asl
-        asl
-        asl
-        ora amX
+${MULW}
+${ADDX('amX')}
         sta amCell
         tay
         lda blkT,y
@@ -12545,10 +12522,7 @@ okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may ex
         lda #$01                ; out of the world, into the hands
         sta orbHidT,x
         lda orbYCT,x            ; and the cell it was standing in opens
-        asl
-        asl
-        asl
-        asl
+${MULW}
         ora orbXCT,x
         tay
         lda #$00
@@ -12850,10 +12824,7 @@ abLp:   jsr arcPx
         sta apBase              ; 8*row
         lda apPrev
         jsr arcLvl
-        asl
-        asl
-        asl
-        asl
+${MULW}
         sta apIdx
         lda apCur
         jsr arcLvl
@@ -13321,6 +13292,18 @@ oabs:   lda #$00
         sbc oaH
         sta oaH
 oabsD:  rts
+` : ''}${!POW2W ? `
+; ---- mulW: A = row -> A = row * MAPW ----
+; A power-of-two width is four asl and an ora; anything else needs a real multiply, and a table
+; of MAPH entries is both smaller and faster than shift-and-add. Y is saved because the callers
+; are spread across the cast, the collision test, the entity code and the BFS, and several hold
+; a live Y across the call.
+mulW:   sty mulWY
+        tay
+        lda rowMulT,y
+        ldy mulWY
+        rts
+rowMulT: !byte ${[...Array(MAPH)].map((_, y) => y * MAPW).join(',')}
 ` : ''}
 ${process.env.PAD ? `        !fill ${+process.env.PAD}, $ea   ; PAD=<n>: n inert bytes at the end of the code block, to
                                 ;   separate "this diagnostic's LOGIC broke the build" from "the
@@ -13512,10 +13495,7 @@ bfsD1:  !fill ${MAPN}, 255
 ; either no fill has completed yet, or the angel is walled off -- and callers must treat that as
 ; "unknown", not as "very far", or a marooned angel would run at the fast rate forever.
 angDst: lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
+${MULW}
         ora orbXCT,x
         tax
 apLdC:  lda bfsD0,x             ; operand PATCHED to the live map, alongside apLdA/apLdB
@@ -13526,10 +13506,7 @@ angFarT: !byte ${hx(ANG_FAR)}      ; ...where "far" starts. Per level, both swap
 
 anPath: ldx amIdx
         lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
+${MULW}
         ora orbXCT,x
         sta apC
         tax
@@ -13569,11 +13546,8 @@ anPHit: tya
 ; forever would mean the map never completed at all.
 bfsTick:
         lda py+1                ; where the player is NOW
-        asl
-        asl
-        asl
-        asl
-        ora px+1
+${MULW}
+${ADDX('px+1')}
         sta bfsWant
         lda bfsPhase
         bne bfsWork
@@ -13697,10 +13671,7 @@ bfsEnL: lda orbTallT,x
         bne bfsEnN              ; not in the world
         stx bfsEnI
         lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
+${MULW}
         ora orbXCT,x
         tax
 bfsLdE: lda bfsD1,x             ; operand PATCHED to the work map
@@ -14689,10 +14660,7 @@ twWaL:  lda orbTallT,x
         bcc twWaL
         bcs twTime              ; no angel on this level: fall back to the ceiling
 twWaF:  lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
+${MULW}
         ora orbXCT,x
         cmp twOpT,y
         beq twExp               ; arrived: this step is done NOW
