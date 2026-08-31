@@ -666,7 +666,10 @@ const hazCell = new Map();                        // cell index -> [{run, split}
 // (between ddxHiTQ and rayOffQS) rather than down with the rest of the scene code.
 // Literals, not RELOC + offset: RELOC is not declared until far below this. The two are checked
 // against each other where RELOC IS known, so moving RELOC cannot silently unhook them.
-const HAZ_BASE = +(process.env.HAZ_BASE ?? 0xa600);   // RELOC + $2000, above the level shadow
+// $a700, not $a600: the level shadow below it grew when each level started carrying its OWN
+// merge-hazard lists (level 3 splits 40 cells), and the shadow reached $a676. HAZ_TOP is the hard
+// ceiling, so the block simply starts a page later.
+const HAZ_BASE = +(process.env.HAZ_BASE ?? 0xa700);   // RELOC + $2100, above the level shadow
 const HAZ_TOP = 0xa900;                               // RELOC + $2300, rayOffQS: the hard ceiling
 const HAZFACE = { W: 0, E: 1, N: 2, S: 3 };
 const hazRunT = { W: runW, E: runE, N: runN, S: runS };
@@ -2242,6 +2245,23 @@ const PROFCOARSE = flag('PROFCOARSE');
 const SEAMCNT = flag('SEAMCNT');
 const CELLMERGE = flag('CELLMERGE');
 const PROFMAX = flag('PROFMAX');
+// ENTPROF=1: split the entities bucket into orbOccAll / orbMove / orbKey / bfsTick / angStep.
+// Reuses the bucket indices PROFCOARSE frees, so it must be run WITH PROFCOARSE.
+const ENTPROF = flag('ENTPROF');
+// OCCLAZY=1: rebuild the occluder masks only when they can have changed.
+const OCCLAZY = flag('OCCLAZY');
+// OCCCHK=1: verify the skip. Rebuilds even when it would skip, and counts bytes that differ.
+// 2 and 3 exist to BISECT it: the full version starts and then runs wild, so build up in stages.
+//   2 = counters only (never skip, count clean frames)   3 = 2 + the shadow copy   1 = 3 + compare
+const OCCCHK = ['1', '2', '3'].includes(process.env.OCCCHK ?? '');
+if (OCCCHK) DIAG.push('OCCCHK');
+const OCC_CPY = OCCCHK && process.env.OCCCHK !== '2';
+const OCC_CMP = OCCCHK && process.env.OCCCHK === '1';
+// PROFAT=<tick>: hold the profiler off until frameCnt reaches this, then wipe and count 256 frames
+// from there. Without it the window is always the first 256 frames after boot, which under TOURW is
+// the opening walk and nothing else -- every earlier profile of "the tour" was really that.
+const PROFAT = +(process.env.PROFAT ?? 0);
+if (PROFAT) DIAG.push('PROFAT');
 const PROFSUB = PROFILE0 && !PROFILE1 && !PROFCOARSE;
 // DOUBLE=interpSpan|marchCol calls that routine twice. Differencing two PROFILE runs then
 // gives its exact cost -- the old fps-based version of this trick was distorted by the
@@ -2270,10 +2290,10 @@ const RELOC = +(process.env.RELOC ?? 0x8600);
 // HAZ_BASE/HAZ_TOP are declared as literals above, before RELOC exists, but they NAME table
 // origins: the vacated ddy pages and rayOffQS. Tie them together here so moving RELOC fails the
 // build instead of quietly dropping the hazard lists on top of a live table.
-if (HAZ_BASE === 0xa600 && (RELOC + 0x2000 !== HAZ_BASE || RELOC + 0x2300 !== HAZ_TOP))
+if (HAZ_BASE === 0xa700 && (RELOC + 0x2100 !== HAZ_BASE || RELOC + 0x2300 !== HAZ_TOP))
   throw new Error(`RELOC=${hx16(RELOC)} moved the table block; HAZ_BASE/HAZ_TOP still say ` +
                   `${hx16(HAZ_BASE)}/${hx16(HAZ_TOP)} -- expected ` +
-                  `${hx16(RELOC + 0x1b00)}/${hx16(RELOC + 0x2300)}`);
+                  `${hx16(RELOC + 0x2100)}/${hx16(RELOC + 0x2300)}`);
 // NOEDGE=1: skip choosing a ramp/step piece and store SOLID at every wall-top cell. Renders
 // wrong on purpose -- it exists only to price the selection, which cannot be isolated any
 // other way (the cell COUNTS are unchanged, only the per-cell work).
@@ -2290,7 +2310,19 @@ const NOMINMAX = flag('NOMINMAX');
 // RAYCNT=1 shows the number of marchCol calls this frame as two hex digits on row 3. The one
 // number that says whether a change to the SUBDIVISION did what it claimed -- fps cannot, since
 // it is raster-quantised and mixes in every other phase.
-const RAYCNT = flag('RAYCNT');
+// SPANCAP=1: refuse to merge a span wider than the smallest occluder that could hide inside it.
+// subLp's merge test compares faceIdT at the two ENDS only and never looks between them, so a
+// free-standing block with the same wall behind both ends is invisible to it and vanishes -- the
+// open half of the pivot-nearside bug. An occluder inside the span is nearer than the face at the
+// ends, so it subtends at least F_COL/d columns; colH is 88/d, making the bound 1.397*colH, which
+// spanCapT holds per colH value.
+const SPANCAP = flag('SPANCAP');
+const RAYCNT = flag('RAYCNT') || flag('EDGCHK');
+// EDGCHK=1: how often a cell column's colH is UNCHANGED from last frame. That is the exact key an
+// edge-band cache would need -- the glyph is a function of colH[4x..4x+3] and the row -- so this
+// measures the ceiling on what such a cache could skip, before building one. It compares against
+// ONE frame back, not the two the double buffer would really impose, so it is an UPPER bound.
+const EDGCHK = flag('EDGCHK');
 // PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
 const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
@@ -2468,7 +2500,12 @@ const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the 
                                 //   pair, so it has no alignment or locality requirement, and
                                 //   moving it hands the code the 320 bytes up to holeSeeT.
 // SNDTEST adds ~300 bytes of live tweak keys, which is more than the slack below this
-const ORB_SMALL    = 0x3d40;    // THREE pages of per-variant and per-orb tables, and $4000
+// ORBSMALL=<hex> moves this block later, handing the difference to CODE. The block has tail slack
+// below $4000, and a diagnostic build (OCCCHK and friends) needs a few dozen bytes the shipping
+// build does not have -- see [[iray-code-ceiling]]. Nothing here is alignment-sensitive; the
+// assembler's own backward-origin error is the guard if the block is pushed past its slack.
+const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d40', 16);
+                                // THREE pages of per-variant and per-orb tables, and $4000
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
 // DEAD as of 2026-08-17, and kept only because the build still computes the lists for its own
@@ -4479,29 +4516,35 @@ if (TWOLEV) {
   }
   const report = () => (process.env.SHADOWBREAK &&
       LVL_TABLES.forEach(([n, a]) => console.error(`    ${n.padEnd(12)} ${String(a.length).padStart(5)}`)),
-    console.error(`two levels resident: shadow is ${LVL_TABLES.length} ` +
+    console.error(`${LVLALL.length + 1} levels resident: each shadow is ${LVL_TABLES.length} ` +
     `tables, ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} bytes`));
   // The hazard tables are built here rather than dumped, because the shadow level's list POINTERS
   // have to be offsets into THIS build's hazLstT. Both sides are then padded to a common length
   // so a swap is a straight exchange -- the shorter side's tail is inert (an unreferenced cell in
   // hazCT is never matched, since hazNT stops the scan first).
-  const HZ_SHAD = hazTabs(LVL2.haz);
+  // ONE SET PER SHADOW LEVEL. This built a single HZ_SHAD from LVL2 -- the FIRST other level --
+  // and the manifest's shadow override then applied it to EVERY shadow slot. With two levels that
+  // was the same thing; in a three-level chain level 3 silently inherited level 2's lists, and
+  // level 2 splits nothing, so level 3's free-standing column was merged away and vanished while
+  // strafing. The analysis had found its 40 hazard cells all along -- they just never travelled.
+  const HZ_SHAD = new Map(LVLALL.map(L => [L.level, hazTabs(L.haz)]));
   for (const [k, fill] of [['ct', 0], ['lo', 0], ['hi', 0], ['lst', 0], ['rst', '$ff'], ['n', 0xff]]) {
     // At least one byte each: a zero-length chunk would be recorded in lvlLenT as 0, which the
     // swap loop reads as 256 -- and two levels that both split nothing would otherwise produce
     // exactly that.
-    const m = Math.max(1, HZ_LIVE[k].length, HZ_SHAD[k].length);
+    const m = Math.max(1, HZ_LIVE[k].length, ...[...HZ_SHAD.values()].map(h => h[k].length));
     while (HZ_LIVE[k].length < m) HZ_LIVE[k].push(fill);
-    while (HZ_SHAD[k].length < m) HZ_SHAD[k].push(fill);
+    for (const h of HZ_SHAD.values()) while (h[k].length < m) h[k].push(fill);
   }
+  const perLvl = k => new Map([...HZ_SHAD].map(([lv, h]) => [lv, h[k]]));
   LVL_TABLES.push(
-    ['hazNT', HZ_LIVE.n, HZ_SHAD.n], ['hazCT', HZ_LIVE.ct, HZ_SHAD.ct],
-    ['hazLoT', HZ_LIVE.lo, HZ_SHAD.lo], ['hazHiT', HZ_LIVE.hi, HZ_SHAD.hi],
-    ['hazLstT', HZ_LIVE.lst, HZ_SHAD.lst], ['hazRstT', HZ_LIVE.rst, HZ_SHAD.rst]);
+    ['hazNT', HZ_LIVE.n, perLvl('n')], ['hazCT', HZ_LIVE.ct, perLvl('ct')],
+    ['hazLoT', HZ_LIVE.lo, perLvl('lo')], ['hazHiT', HZ_LIVE.hi, perLvl('hi')],
+    ['hazLstT', HZ_LIVE.lst, perLvl('lst')], ['hazRstT', HZ_LIVE.rst, perLvl('rst')]);
   report();
-  console.error(`  merge-hazard: level ${LEVEL2 ? 2 : 1} (live) splits ${hazRec.length}, ` +
-    `level ${LVL2.level} (shadow) splits ${LVL2.nHaz}; ` +
-    `${HZ_LIVE.lst.length + HZ_LIVE.rst.length} list bytes each side`);
+  console.error(`  merge-hazard: level ${LVL} (live) splits ${hazRec.length}` +
+    LVLALL.map(L => `, level ${L.level} (shadow) splits ${L.nHaz}`).join('') +
+    `; ${HZ_LIVE.lst.length + HZ_LIVE.rst.length} list bytes each side`);
 }
 
 // The hazard MACHINERY has to exist whenever any resident level needs it, not just when THIS
@@ -4787,6 +4830,8 @@ pfCurX  = $7e4f
 pfDLo   = $7e4d
 pfDHi   = $7e4e
 pfRow   = $7e44
+pfArm   = $7e43                 ; PROFAT: 0 until the start tick is reached. $7e43 is the spare byte
+                                ;   between pfPrvL and pfRow -- see the hole report, not a guess
 pfDone  = $7e45
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
@@ -4843,6 +4888,29 @@ rayAcc  = $8015                 ; 2 bytes: 256 frames of rayN. The HIGH byte is 
 rayFrm  = $8017                 ; for free -- the same trick the profiler uses
 rayMean = $8018
 pvNdbg  = $8013                 ; pvN as pivPrep saw it, before pivPrep clears it
+${SPANCAP && RAYCNT ? `scapN   = $8022                 ; SPANCAP: splits the cap forced. Saturating, never reset:
+                                ;   the question is whether the hazard fires at all.` : ''}
+${EDGCHK ? `ehShad  = $7100                 ; EDGCHK: last frame's colH, 4 per cell column ($7060-$7bff is free
+ehN     = $71a0                 ;   per the image-hole report). Cell columns whose colH is unchanged
+ehAcc   = $71a1                 ;   this frame; 2-byte accumulator and its latched mean, same shape
+ehMean  = $71a3                 ;   as rayAcc/rayMean
+ehG     = $7400                 ; EDGCHK: last frame's GLYPH per edge cell, 13 rows x 64 (832 B).
+ehGN    = $71a4                 ;   Keyed on the emitted code, not on colH -- the code comes from
+ehGAcc  = $71a5                 ;   QUANTISED levels, so it can repeat when colH does not. This is
+ehGMean = $71a7                 ;   the number that decides whether an edge cache is possible.
+edcN    = $71a8                 ; EDGCHK: cell COLUMNS with at least one edge cell. edgN/edcN is
+edcAcc  = $71a9                 ;   the row loop's trip count, which is what decides whether
+edcMean = $71ab                 ;   hoisting column-invariant work out of it can pay at all.
+chOld   = $71ac                 ; EDGCHK: the cache byte before it was overwritten, so a chain draw
+chwN    = $71ad                 ;   can report rows WRITTEN (the whole run) against rows NEEDED
+chwAcc  = $71ae                 ;   (only what the run actually gained). The gap between them is
+chwMean = $71b0                 ;   what a partial chain draw would save.
+chdN    = $71b1
+chdAcc  = $71b2
+chdMean = $71b4
+pvAcc   = $71b5                 ; EDGCHK: pvNdbg summed over the profiler's window. Rays per
+pvMean  = $71b7                 ;   BOUNDARY is what says whether the subdivision is near its
+                                ;   floor -- a boundary cannot be found without casting at it.` : ''}
 ` : ''}${TOUR ? `tourC   = $802d                 ; TOUR phase counter. Was $cb19 -- an address from BEFORE the
                                 ;   move to VIC bank 3, so it pointed into what is now sprite space.
                                 ;   Nothing caught it: $cb19 is outside the image, so the
@@ -5479,11 +5547,41 @@ ooSlf:  txa                     ;   leave the result. Nothing has moved yet, so 
         sta renderCnt
         sta fpsTens
         sta fpsOnes
-${PROFILE ? `        ldx #$2f                ; the profile accumulators live in uninitialised scratch
+${PROFILE ? `        ldx #$32                ; the profile accumulators live in uninitialised scratch. $32, not
+        lda #$00                ;   $2f: 17 phases x 3 bytes is 51, so the last index is 50 -- the
+pfInit: sta pfAcc,x             ;   old count left the top THREE bytes (bucket 16, occStamp) holding
+        dex                     ;   whatever was there. It only ever read as a wild outlier.
+        bpl pfInit
+${PROFAT ? '        sta pfArm               ; PROFAT: not armed yet (A is still 0)\\n' : ''}` : ''}${RAYCNT ? `        lda #$00                ; rayFrm/rayAcc were never initialised -- uninitialised scratch, so
+        sta rayFrm              ;   the first 256-frame latch fired after (256 - garbage) frames
+        sta rayAcc              ;   and the "mean" divided by the wrong count
+        sta rayAcc+1
+        sta edgAcc
+        sta edgAcc+1
+        sta chnAcc
+        sta chnAcc+1` : ''}${SPANCAP && RAYCNT ? `
         lda #$00
-pfInit: sta pfAcc,x
-        dex
-        bpl pfInit` : ''}
+        sta scapN` : ''}${EDGCHK ? `
+        sta ehN
+        sta ehGN
+        sta ehAcc
+        sta ehAcc+1
+        sta ehGAcc
+        sta ehGAcc+1
+        sta edcN
+        sta edcAcc
+        sta edcAcc+1
+        sta chwN
+        sta chdN
+        sta chwAcc
+        sta chwAcc+1
+        sta chdAcc
+        sta chdAcc+1
+        sta pvAcc
+        sta pvAcc+1` : ''}${OCCCHK ? `        lda #$00                ; OCCCHK's counters are equates over uninitialised scratch, and a
+        sta occArm              ;   garbage occBad is exactly the answer this must never give
+        sta occChk
+        sta occBad` : ''}
         cli
 
 mloop:
@@ -5567,7 +5665,7 @@ ${FINEANG ? `        ; ---- the view angle at QUARTER-unit resolution: paq = (pa
         rol paqH                ; and once more: >> 6, the 10 bits the tables are indexed by
 ` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
-${RAYCNT ? '        sta rayN\n        sta edgN\n        sta chnN\n' : ''}
+${RAYCNT ? '        sta rayN\n        sta edgN\n        sta chnN\n' : ''}${EDGCHK ? '        sta ehN\n        sta ehGN\n        sta edcN\n        sta chwN\n        sta chdN\n' : ''}
 ${PIVOT ? `        jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
                                 ; and leaves the stack holding the spans between them
 ` : `        sta col
@@ -5624,7 +5722,21 @@ subLp0: ldx sp
         rol
         cmp tmp2
         bne subSp
-        jmp subLp               ; merged: the interpolation happens once per FACE, at subDn
+${SPANCAP ? `        ; ---- SPANCAP: is this span narrow enough that nothing can HIDE inside it? ----
+        ; The merge test above compares faceIdT at the two ends and never looks between them, so
+        ; a free-standing block with the same wall behind both ends is invisible to it. Anything
+        ; hiding in here is nearer than this face, so it subtends at least F_COL/d columns;
+        ; colH is 88/d, so the bound is 1.397*colH and spanCapT holds it per colH.
+        ; spanL's colH, not the smaller of the two ends: one load instead of four, and the two
+        ; ends of a merge candidate are the same face, so their distances are close.
+        ldx spanL
+        lda colH,x
+        tax                     ; X = this face's height -> its own minimum occluder width
+        lda spanR
+        sec
+        sbc spanL               ; A = span width in columns
+        cmp spanCapT,x
+${SPANCAP && RAYCNT ? '        bcc scOk\n        inc scapN               ; saturating: the question is whether it fires at all\n        bne subSp\n        dec scapN\n        jmp subSp\nscOk:\n' : '        bcs subSp               ; wide enough to hide a cell -> split and look between the ends\n'}` : ''}        jmp subLp               ; merged: the interpolation happens once per FACE, at subDn
         ; The face changes somewhere in this span. Once the span is a single column wide the
         ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
         ; so record it straight into cstepT. The old route was to write a face id into all
@@ -6284,13 +6396,29 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '        jsr orbMove             ; once a frame: project every candidate the cell lists\n        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '' + (ENTPROF ? '        ldx #8\n        jsr pfTick              ; orbOccAll: every entity mask, every frame\n' : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        ldx #9\n        jsr pfTick              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        ldx #10\n        jsr pfTick              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        ldx #11\n        jsr pfTick              ; bfsTick: the distance fill\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? '        lda dbgOnce\n        beq dnSkip\n        lda #$00\n        sta dbgOnce\n        jsr orbUse              ; DROPNOW=1: one synthetic SPACE, since a headless run cannot\ndnSkip:\n' : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
 ${ANGCHAR ? '        jsr angChar             ; AFTER renderSym and occStamp, for the same reason they are\n                                ;   ordered that way: it overwrites cells they just drew\n' : ''}${PROFILE && !PROFILE1 ? '' : ''}${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
         bne pfRdy
-        inc pfN
+${PROFAT ? `        lda pfArm               ; PROFAT=<tick>: the 256-frame window is FIXED AT 256 FRAMES FROM
+        bne pfGo                ;   THE START, so at ~24fps it only ever saw the first ten seconds
+        lda frameCnt+1          ;   -- the walk out of the corner -- and never the part of the tour
+        cmp #${hx(PROFAT >> 8)}                ;   worth profiling. Wait for a chosen tick, then wipe the
+        bcc pfNd                ;   accumulators and start counting from there.
+        bne pfArmG
+        lda frameCnt
+        cmp #${hx(PROFAT & 255)}
+        bcc pfNd
+pfArmG: ldx #$32
+        lda #$00
+pfArmL: sta pfAcc,x
+        dex
+        bpl pfArmL
+        inc pfArm
+        bne pfNd                ; always: this frame is half-accumulated, so start with the next
+pfGo:   ` : '        '}inc pfN
         bne pfNd
         inc pfDone              ; latch: freezes pfTick, starts drawing the table
 pfRdy:  jsr pfShow              ; every frame from now on -- the two screen buffers alternate,
@@ -6469,7 +6597,32 @@ ${SEAMS ? '        sty rfCb3+1\n' : ''}
         ; X is the cell column and the chains index by it, so it has to survive; Y and A are
         ; free here, which is all this needs.
 rfCol:  stx colc
-        ; colH is ONE linear ramp across any cell with no delimiter inside it, so its extremes
+${EDGCHK ? `        ; EDGCHK: is this cell column's colH bit-identical to last frame's? That is exactly
+        ; what an edge-band cache would have to key on, so counting it prices the idea. X must
+        ; survive -- it is the cell column and the run-cache tests below index on it.
+        ldy col4T,x
+        lda colH,y
+        cmp ehShad,y
+        bne ehMiss
+        lda colH+1,y
+        cmp ehShad+1,y
+        bne ehMiss
+        lda colH+2,y
+        cmp ehShad+2,y
+        bne ehMiss
+        lda colH+3,y
+        cmp ehShad+3,y
+        bne ehMiss
+        inc ehN
+ehMiss: lda colH,y
+        sta ehShad,y
+        lda colH+1,y
+        sta ehShad+1,y
+        lda colH+2,y
+        sta ehShad+2,y
+        lda colH+3,y
+        sta ehShad+3,y
+` : ''}        ; colH is ONE linear ramp across any cell with no delimiter inside it, so its extremes
         ; are its END columns and the middle two need not be looked at. 97% of cells, measured.
         ; The four-way scan below is kept for the other 3%, where two linear pieces meet and the
         ; extreme can be in the middle.
@@ -6536,7 +6689,7 @@ rfRs:   sta rsv
         lda rbv
 rfCw1:  cmp cwA,x               ; operand patched above
         beq rfEdge              ; same length as this buffer already holds: leave it alone
-rfCw2:  sta cwA,x
+${EDGCHK ? '        ldy cwA,x               ; EDGCHK: the old run length, before it is lost\n        sty chOld\n' : ''}rfCw2:  sta cwA,x
         ; SHRANK -- and a shorter ceiling needs no writes at all. Rows 0..rb-1 are already
         ; blank, being a prefix of what this buffer holds, and the rows the ceiling gave up
         ; (rb..rb_old-1) are overwritten THIS frame by the edge loop, which runs rb..rs-1, or
@@ -6544,7 +6697,17 @@ rfCw2:  sta cwA,x
         ; cover the gap -- which is what makes this safe rather than merely usually right.
 ${PARTIAL ? '        bcc rfEdge\n' : ''}        cmp #$00
         beq rfEdge
-${RAYCNT ? '        inc chnN\n' : ''}
+${RAYCNT ? '        inc chnN\n' : ''}${EDGCHK ? `        clc                     ; rows this chain WRITES: the whole ceiling, 0..rb-1
+        adc chwN
+        sta chwN
+        lda rbv
+        sec
+        sbc chOld               ; rows it actually NEEDED: only what the ceiling just gained
+        clc
+        adc chdN
+        sta chdN
+        lda rbv                 ; the chain entry wants A = rb again
+` : ''}
         clc
         adc bufOff
         tay
@@ -6561,7 +6724,7 @@ ${RAYCNT ? '        inc chnN\n' : ''}
 rfEdge: lda rbv
         cmp rsv
         bcs rfSolid             ; nothing between the ceiling and the solid run
-        sta erow
+${EDGCHK ? '        inc edcN                ; this column has a band\n' : ''}        sta erow
 rfEdgeL:
 ${RAYCNT ? '        inc edgN\n' : ''}${NOEDGE ? `        lda #${hx(SOLID)}
         sta ecode
@@ -6745,6 +6908,22 @@ rfSt3:  lda stepT3,y`}
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
+${EDGCHK ? `        ldy erow                ; EDGCHK: would this write change the cell? Compare against what
+        lda ehgLoT,y            ;   the same cell held last frame. Row base is patched in rather
+        sta ehgA+1              ;   than indexed, because erow*64+colc is 0..831 and will not fit
+        sta ehgB+1              ;   an index register.
+        lda ehgHiT,y
+        sta ehgA+2
+        sta ehgB+2
+        ldx colc
+        lda ecode
+ehgA:   cmp $ffff,x
+        bne ehgM
+        inc ehGN                ; a redundant write: this is the cache's ceiling
+ehgM:   lda ecode
+ehgB:   sta $ffff,x
+        lda ecode
+` : ''}
 ${PLAN === 2 ? `        ; ---- which half of the pair does this cell show? ----
         ; The bucket is two of the four columns, because a 4D index is what costs -- not the
         ; data, which colH has all along. So one add and one table compare recover most of what
@@ -6828,12 +7007,12 @@ rfSolid:${SEAMS ? `; A seam column always redraws. The cache byte HAS room to ca
         ` : ''}lda rsv
 rfCb1:  cmp cbA,x
         beq rfNext
-rfCb2:  sta cbA,x
+${EDGCHK ? '        ldy cbA,x\n        sty chOld\n' : ''}rfCb2:  sta cbA,x
 ${PARTIAL ? `        bcs rfNext              ; rs GREW: the solid run starts later, so it only gave rows up,
                                 ; and the edge loop (rb..rs-1) has just redrawn every one of
                                 ; them. Rows rs..12 are a suffix of what the buffer holds.
 ` : ''}        jmp rfSlDr
-${SEAMS ? `rfSlSm: lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
+${SEAMS ? `rfSlSm:${EDGCHK ? ' lda #$0d\n        sta chOld               ; a seam column genuinely redraws in full: no waste to report\n       ' : ''} lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
 rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITHOUT COMPARING:
                                 ; comparing $ff against a cache that already holds $ff matches,
                                 ; and the column is skipped even though its seam may have MOVED.
@@ -6842,7 +7021,20 @@ rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITH
 ` : ''}rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         cmp #13
         bcs rfNext
+${EDGCHK ? `        lda #$0d                ; rows this chain WRITES: rs..12
+        sec
+        sbc rsv
         clc
+        adc chwN
+        sta chwN
+        lda chOld
+        sec
+        sbc rsv                 ; rows NEEDED: only what the solid run just gained upward
+        clc
+        adc chdN
+        sta chdN
+        lda rsv
+` : ''}        clc
         adc bufOff
         tay
         lda sldLoT,y
@@ -8847,7 +9039,11 @@ ${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's
 `}${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
         ; A single frame's count is meaningless under motion, and motion is the only condition
         ; that exercises the prediction at all.
-        lda rayAcc
+${PROFAT && PROFILE ? `        lda pfArm               ; With PROFAT, use the PROFILER's window rather than a rolling
+        beq rcNd                ;   one of our own, so the ray count and the phase split describe
+        lda pfDone              ;   THE SAME 256 frames. Otherwise the latch lands wherever it
+        bne rcNd                ;   lands and the two tables are about different parts of the tour.
+` : ''}        lda rayAcc
         clc
         adc rayN
         sta rayAcc
@@ -8865,7 +9061,44 @@ rcNf:   lda edgAcc
         sta edgAcc
         bcc rcNe
         inc edgAcc+1
-rcNe:   inc rayFrm
+${EDGCHK ? `        lda ehAcc
+        clc
+        adc ehN
+        sta ehAcc
+        bcc rcNh
+        inc ehAcc+1
+rcNh:   lda ehGAcc
+        clc
+        adc ehGN
+        sta ehGAcc
+        bcc rcNi
+        inc ehGAcc+1
+rcNi:   lda edcAcc
+        clc
+        adc edcN
+        sta edcAcc
+        bcc rcNj
+        inc edcAcc+1
+rcNj:   lda chwAcc
+        clc
+        adc chwN
+        sta chwAcc
+        bcc rcNk
+        inc chwAcc+1
+rcNk:   lda chdAcc
+        clc
+        adc chdN
+        sta chdAcc
+        bcc rcNm
+        inc chdAcc+1
+rcNm:   lda pvAcc
+        clc
+        adc pvNdbg
+        sta pvAcc
+        bcc rcNp
+        inc pvAcc+1
+rcNp:
+` : ''}rcNe:   inc rayFrm
         bne rcNd
         lda rayAcc+1
         sta rayMean
@@ -8873,6 +9106,32 @@ rcNe:   inc rayFrm
         sta edgMean
         lda chnAcc+1
         sta chnMean
+${EDGCHK ? `        lda ehAcc+1
+        sta ehMean
+        lda ehGAcc+1
+        sta ehGMean
+        lda edcAcc+1
+        sta edcMean
+        lda chwAcc+1
+        sta chwMean
+        lda chdAcc+1
+        sta chdMean
+        lda pvAcc+1
+        sta pvMean
+        lda #$00
+        sta ehAcc
+        sta ehAcc+1
+        sta ehGAcc
+        sta ehGAcc+1
+        sta edcAcc
+        sta edcAcc+1
+        sta chwAcc
+        sta chwAcc+1
+        sta chdAcc
+        sta chdAcc+1
+        sta pvAcc
+        sta pvAcc+1
+` : ''}
         lda #$00
         sta rayAcc
         sta rayAcc+1
@@ -9022,6 +9281,7 @@ rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
 kTabT:  !byte ${kTab.join(',')}
 col4T:  !byte ${[...Array(40)].map((_, i) => i * 4).join(',')}
+
 qmColT: !byte 0,${[1,2,3].map(qmCol).join(',')}   ; middle-sample column, indexed by kpos
 ${PLAN === 2 ? `; Colour RAM row bases. $d800 is fixed -- colour RAM is NOT double buffered -- so unlike
 ; rowLoT/rowHiT these need no per-buffer offset.
@@ -9239,8 +9499,14 @@ ofyOk:  sta ofy
         bne omSwal
         lda carry               ; ---- the carried orb, HELD IN FRONT OF YOU ----
         beq omNoIco
-${DIE ? `        lda dieSt               ; ...but not once the scene has started: the room is leaving
-        bne omNoIco             ;   and an orb held in front of you goes with it
+${DIE ? `        ldx dieSt               ; ...but not once the scene has started: the room is leaving
+        bne omNoIco             ;   and an orb held in front of you goes with it.
+                                ; THROUGH X, NOT A: A still holds carry, and the tax below is what
+                                ;   turns it into the entity index. As an lda this read
+                                ;   orbColT2 at $ff -- one byte BEFORE the table -- so the held
+                                ;   orb took its body colour from whatever sat there ($73, and the
+                                ;   VIC keeps the low nibble: 3, cyan). The world orbs were
+                                ;   unaffected, which is what made it look like a carry-only bug.
 ` : ''}             ; Was a small hi-res icon in the lower left. Now it is the orb
                                 ;   itself at its nearest ladder rung -- variant 0, a 21-row
                                 ;   bitmap vertically expanded to 42 -- parked centre-bottom with
@@ -11356,7 +11622,36 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
-        lda nAllM1T             ; orbs AND hole-like entities
+${OCCLAZY ? `        ; The masks say whether an entity is beyond a wall face's PLANE -- no camera term at
+        ; all -- so they only go stale when an entity moves or the run tables are re-patched.
+        ; blkVer catches the first (angOne, okTake, okPlain all bump it); the viewing cell
+        ; catches the second, since hazSet patches per RENDERING cell. On a map that splits
+        ; nothing -- which is every map here -- neither changes most frames, and this was
+        ; rebuilding byte-identical masks every single one.
+${OCCCHK ? `        lda #$00                ; clear the armed flag FIRST, so both dirty exits below leave it
+        sta occArm              ;   clear without a branch of their own
+` : ''}        lda blkVer
+        cmp occVer
+        bne ooDirty
+        lda cell0
+        cmp occCell
+${OCCCHK ? `        bne ooDirty             ; OCCCHK: do not skip -- copy the masks aside, rebuild them
+${OCC_CPY ? `        ldx #${hx(NOCC * OCCBYTES - 1)}      ;   anyway, and count any byte that differs. A mismatch
+ooCpy:  lda orbOccT,x           ;   means the skip would have shipped a stale mask, which is the
+        sta occShad,x           ;   exact bug orbOccAll was made per-frame to avoid.
+        dex
+        bpl ooCpy
+` : ''}        inc occChk              ; frames checked -- SATURATING, both counters. A wrapping byte can
+        bne ooCpyD              ;   turn "255 frames checked" into 0 and "256 stale masks" into a
+        dec occChk              ;   clean bill of health, which is the one answer this must not be
+ooCpyD: inc occArm              ;   able to give. The flag says a shadow exists for THIS frame;
+                                ;   without it the compare below also ran on dirty frames, against
+                                ;   whatever occShad held from some earlier one, counting
+` : '        beq ooSkip\n'}ooDirty:lda blkVer  ;   differences that mean nothing
+        sta occVer
+        lda cell0
+        sta occCell
+` : ''}        lda nAllM1T             ; orbs AND hole-like entities
 ooAlp:  sta ooAI
         tax
         jsr orbOcc1
@@ -11364,7 +11659,19 @@ ooAlp:  sta ooAI
         sec
         sbc #$01
         bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
-        rts
+${OCC_CMP ? `        lda occArm              ; NOTE the ooV prefix: ooCmp is ALREADY a label inside orbOcc1,
+        beq ooVCmpX             ;   two screens up, and the assembler took the duplicate without a
+        ldx #${hx(NOCC * OCCBYTES - 1)}            ;   word -- so orbOcc1's own \`jmp ooCmp\` landed here instead and
+ooVCmp: lda orbOccT,x           ;   the program ran wild. See the duplicate-label guard.
+        cmp occShad,x
+        beq ooVCmpN
+        inc occBad              ; a mask the lazy path would have got wrong
+        bne ooVCmpN
+        dec occBad
+ooVCmpN:dex
+        bpl ooVCmp
+ooVCmpX:
+` : ''}${OCCLAZY ? 'ooSkip:\n' : ''}        rts
 
 
 ${MELODY ? `; ---- melTick: voice 3, called from the TOP-OF-FRAME IRQ ----
@@ -12961,7 +13268,13 @@ oabs:   lda #$00
         sta oaH
 oabsD:  rts
 ` : ''}
-; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
+${process.env.PAD ? `        !fill ${+process.env.PAD}, $ea   ; PAD=<n>: n inert bytes at the end of the code block, to
+                                ;   separate "this diagnostic's LOGIC broke the build" from "the
+                                ;   build does not survive its code growing by n bytes". Nothing
+                                ;   branches here and nothing falls into it.
+` : ''}${EDGCHK ? `ehgLoT: !byte $00,$40,$80,$c0,$00,$40,$80,$c0,$00,$40,$80,$c0,$00
+ehgHiT: !byte $74,$74,$74,$74,$75,$75,$75,$75,$76,$76,$76,$76,$77
+` : ''}; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
 ; The charset is NOT in the image. It is shipped as its own compressed segment and decoded
@@ -13082,6 +13395,7 @@ absSinT: ${chunk(absSin).trim()}
 recipLoT: ${chunk(recipLo).trim()}
 recipHiT: ${chunk(recipHi).trim()}
 clampT: ${chunk(clampT).trim()}
+
 clmp16: ${chunk(clampT16).trim()}
 qIdxAT: !byte ${qIdxAT.join(',')}
 qIdxMT: !byte ${qIdxMT.join(',')}
@@ -13955,7 +14269,23 @@ ddxHiTQ: ${chunk(ddxHiP).trim()}
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
-bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
+${OCCLAZY ? `occVer: !byte $ff               ; blkVer and the cell orbOccAll last rebuilt for; $ff forces
+occCell:!byte $ff               ;   a rebuild on the first frame
+${OCCCHK ? `; EQUATES, not emitted bytes: declaring these as !byte pushed everything after this point along by
+; 19 bytes and the build stopped running, assembling clean the whole way.
+;
+; The address comes from the build's own "image holes" report, and NOWHERE ELSE. $7e50 and $7e80
+; both look free -- no label between the profiler's last variable and bndT -- and both are inside
+; the $7c00-$85ff block the report marks as HOLDING paF/smCnt/hazCur/..., so the 16-byte shadow
+; landed on live variables and the program ran wild ($01FA, then $4188). The RAM-overlap guard
+; cannot catch this: a bare equate has no declared size, so it is checked as one byte.
+; RULE: for scratch, take an address the hole report calls (free). "No label there" is not the
+; same fact.
+occShad = $7040                 ; $703e-$70ff is 194 free bytes, just above orbOccT
+occArm  = $7050
+occChk  = $7051
+occBad  = $7052
+` : ''}` : ''}bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
@@ -14177,7 +14507,7 @@ ${TWOLEV ? `; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
 ; ONE BLOB PER RESIDENT LEVEL, back to back, each in manifest order and each the same length --
 ; lvlSwap indexes them by slot, and the slots are the OTHERS list in ascending level order.
 lvlShadow: ${chunk(LVLALL.flatMap(L => LVL_TABLES.flatMap(([n, a, sh]) =>
-    pad(sh ?? L.tables[n] ?? [], a.length)))).trim()}
+    pad((sh instanceof Map ? sh.get(L.level) : sh) ?? L.tables[n] ?? [], a.length)))).trim()}
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte ${LVLALL.map((_, i) => `<lvlShadow+${i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)}`).join(',')}
@@ -14243,7 +14573,15 @@ lsNC:   inc lsIdx
 lsIdx:  !byte 0
 lsLen:  !byte 0
 ` : ''}
-${HAZRT ? `        ; The walker and all its data. The dispatcher stays down in the
+${SPANCAP ? `        ; Placed in the stream, not at a fixed origin: the free run below HAZ_BASE starts at a
+        ; different address in a chained build, and a hard address collided there.
+; SPANCAP: widest span, in columns, that a face at this colH may cover without being able to
+; hide a whole cell in front of it. F_COL/d columns per cell, colH = 88/d, so F_COL*colH/88.
+; colH 0 and 1 would give 0-1 and force a split of every single-column span, which can never
+; hide anything -- floor at 2.
+spanCapT: ${chunk(Array.from({length:256},(_,h)=>{const F=(160/2)/Math.tan(47/2/256*2*Math.PI);
+  return Math.max(2,Math.min(255,Math.round(F*h/88)));})).trim()}
+` : ''}${HAZRT ? `        ; The walker and all its data. The dispatcher stays down in the
         ; main code stream's headroom; only this needs somewhere with room.
         * = ${hx(HAZ_BASE)}
 hzRun:  ldx #$00                ; walk (addrLo, addrHi, value) triples until $ff
@@ -14991,10 +15329,14 @@ try {
       .sort((a, b) => a[1] - b[1]);
     for (const [k, v] of hits) console.log(`  @${v.toString(16)} ${k}`);
   }
-  if (process.env.LABELS)
+  // Comma-separated, because probe.mjs asks for a SET of names in the one build that also writes
+  // the disk -- a second build to resolve a second name is exactly how a stale address gets read.
+  if (process.env.LABELS) {
+    const want = process.env.LABELS.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
     for (const [k, v] of Object.entries(r.labels).sort((a, b) => a[1] - b[1]))
-      if (k.toLowerCase().includes(process.env.LABELS.toLowerCase()))
+      if (want.some(w => k.toLowerCase().includes(w)))
         console.log(`  label ${k} = $${v.toString(16)}`);
+  }
   const dataLo = r.org, dataHi = r.labels.dataEnd;
   for (const [name, lo, hi] of reserved) {
     if (dataLo < hi && dataHi > lo) {

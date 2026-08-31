@@ -216,6 +216,8 @@ pfCurX  = $7e4f
 pfDLo   = $7e4d
 pfDHi   = $7e4e
 pfRow   = $7e44
+pfArm   = $7e43                 ; PROFAT: 0 until the start tick is reached. $7e43 is the spare byte
+                                ;   between pfPrvL and pfRow -- see the hole report, not a guess
 pfDone  = $7e45
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
@@ -2144,6 +2146,7 @@ st3h:   lda stepT3hi,y
         ; to write two bytes. The stub has both addresses baked in and takes the column from
         ; X, exactly like the run chains, so the addressing mode does the arithmetic instead.
 rfStore:sta ecode
+
 lda erow
         clc
         adc bufOff
@@ -4105,6 +4108,7 @@ rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
 kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
 col4T:  !byte 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156
+
 qmColT: !byte 0,1,1,2   ; middle-sample column, indexed by kpos
 
 m32LoT: !byte 0,32,64,96,128,160,192,224,0,32,64,96,128,160,192,224,0,32,64,96,128,160,192,224
@@ -4311,8 +4315,14 @@ ofyOk:  sta ofy
         bne omSwal
         lda carry               ; ---- the carried orb, HELD IN FRONT OF YOU ----
         beq omNoIco
-        lda dieSt               ; ...but not once the scene has started: the room is leaving
-        bne omNoIco             ;   and an orb held in front of you goes with it
+        ldx dieSt               ; ...but not once the scene has started: the room is leaving
+        bne omNoIco             ;   and an orb held in front of you goes with it.
+                                ; THROUGH X, NOT A: A still holds carry, and the tax below is what
+                                ;   turns it into the entity index. As an lda this read
+                                ;   orbColT2 at $ff -- one byte BEFORE the table -- so the held
+                                ;   orb took its body colour from whatever sat there ($73, and the
+                                ;   VIC keeps the low nibble: 3, cyan). The world orbs were
+                                ;   unaffected, which is what made it look like a carry-only bug.
              ; Was a small hi-res icon in the lower left. Now it is the orb
                                 ;   itself at its nearest ladder rung -- variant 0, a 21-row
                                 ;   bitmap vertically expanded to 42 -- parked centre-bottom with
@@ -7937,6 +7947,7 @@ clampT: !byte 3,4,5,6,7,8,9,10,11,12,13,14,15,15,15,15,15,15,15,15,15,15,15,15
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2
+
 clmp16: !byte 48,64,80,96,112,128,144,160,176,192,208,224,240,240,240,240,240,240,240,240,240,240,240,240
         !byte 240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240
         !byte 240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240,240
@@ -9509,7 +9520,7 @@ lsLen:  !byte 0
 
         ; The walker and all its data. The dispatcher stays down in the
         ; main code stream's headroom; only this needs somewhere with room.
-        * = $a600
+        * = $a700
 hzRun:  ldx #$00                ; walk (addrLo, addrHi, value) triples until $ff
 hzL:    jsr hzGet
         cmp #$ff
