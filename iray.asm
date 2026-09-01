@@ -9641,6 +9641,8 @@ orbBitT: !byte 1,2,4,8,16,32,64,128
 ; one already sits is a no-op rather than a special case. Out here with the other evicted
 ; lookups, not in the ORB_SMALL block, which has no room.
 seamPairT: !byte 229,233,234,235,233,230,236,237,234,236,231,238,235,237,238,232
+
+
 kMskT: !byte 0,8,12,14
 mMskT: !byte 7,3,1,0
 bbLT:   !byte $0f,$07,$03,$01
@@ -9843,16 +9845,10 @@ sinST:  !byte 0,3,6,9,13,16,19,22,25,28,31,34,37,40,43,46,49,52,55,58,60,63,66,6
 ; 2^15. Saturates at d = 0.639 cells, where the correction is under-applied and that boundary
 ; falls back to bisection -- harmless, because a missed prediction can only cost probes.
 rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,163,153,145,137,130,124,119,113,109,104,100,97,93,90,87,84,82,79,77,75,72,70,69,67,65,64,62,61,59,58,57,55,54,53,52,51,50,49,48,47,47,46,45,44,43,43,42,41,41,40,40,39,38,38,37,37,36,36,35,35,34,34,33,33,33,32,32,31,31,31,30,30,30,29,29,29,28,28,28,27,27,27,27,26,26,26,26,25,25,25,25,24,24,24,24,23,23,23,23,23,22,22,22,22,22,22,21,21,21,21,21,21,20,20,20,20,20,20,19,19,19,19,19,19,19,18,18,18,18,18,18,18,18,18,17,17,17,17,17,17,17,17,17,16,16,16,16,16,16,16,16,16,16,15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10
-        * = $ae00
-; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its
-; corner line only when the run across the boundary is one of these; every other run-to-run
-; boundary is a convex silhouette, where the wall's edge stands against something unrelated
-; behind it and the 20-row step has already drawn the division.
-; Indexed by run id, so whole tables rather than a packed set.
-; Emitted only when CVXSEAM=0. With every run-to-run boundary drawing a line, nothing reads
-; these -- 40 bytes of corner-partner
-; tables and the whole build-time derivation exist purely to tell a corner from a silhouette,
-; and the renderer no longer cares which it is.
+; The corner-partner tables used to sit at RELOC+$2800, which IS $ae00 -- the page bfsD0 claims
+; immediately below. Nothing noticed because they are only emitted when CVXSEAM=0, and that
+; config had not been built in a long time; when it was, it died with "* = $ae00 moves backward
+; from $ae2a". They live in the stream now, with the other displaced lookups.
 
         * = $ae00
 bfsD0:  !fill 256, 255      ; the angel's other distance map -- see bfsD1 at $5e00

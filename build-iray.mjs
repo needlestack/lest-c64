@@ -14891,6 +14891,14 @@ orbBitT: !byte ${orbBitT.join(',')}
 ; one already sits is a no-op rather than a special case. Out here with the other evicted
 ; lookups, not in the ORB_SMALL block, which has no room.
 seamPairT: !byte ${seamPair.join(',')}
+
+${CVXSEAM ? '' : `; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its corner
+; line only when the run across the boundary is one of these; every other run-to-run boundary is a
+; convex silhouette, where the wall's edge stands against something unrelated behind it.
+; Indexed by run id, so whole tables rather than a packed set. Emitted only when CVXSEAM=0: with
+; every run-to-run boundary drawing a line, nothing reads them.
+cpLoT:  !byte ${cpLo.join(',')}
+cpHiT:  !byte ${cpHi.join(',')}`}
 kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
 mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 bbLT:   !byte $0f,$07,$03,$01
@@ -15282,17 +15290,10 @@ ${PLAN === 3 ? '' : `stepT3: ${chunk(stepT[2]).trim()}`}${PIVOT ? `
 ; 2^15. Saturates at d = 0.639 cells, where the correction is under-applied and that boundary
 ; falls back to bisection -- harmless, because a missed prediction can only cost probes.
 rcpDT:  !byte ${rcpD.join(',')}` : ''}
-${SEAMS ? `        * = ${hx16(RELOC + 0x2800)}
-; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its
-; corner line only when the run across the boundary is one of these; every other run-to-run
-; boundary is a convex silhouette, where the wall's edge stands against something unrelated
-; behind it and the 20-row step has already drawn the division.
-; Indexed by run id, so whole tables rather than a packed set.
-${CVXSEAM ? `; Emitted only when CVXSEAM=0. With every run-to-run boundary drawing a line, nothing reads
-; these -- ${cpLo.filter(Boolean).length + cpHi.filter(Boolean).length} bytes of corner-partner
-; tables and the whole build-time derivation exist purely to tell a corner from a silhouette,
-; and the renderer no longer cares which it is.` : `cpLoT:  !byte ${cpLo.join(',')}
-cpHiT:  !byte ${cpHi.join(',')}`}
+${SEAMS ? `; The corner-partner tables used to sit at RELOC+$2800, which IS $ae00 -- the page bfsD0 claims
+; immediately below. Nothing noticed because they are only emitted when CVXSEAM=0, and that
+; config had not been built in a long time; when it was, it died with "* = $ae00 moves backward
+; from $ae2a". They live in the stream now, with the other displaced lookups.
 ` : ''}
 ${PLAN === 3 ? `        * = $ae00
 bfsD0:  !fill ${MAPN}, 255      ; the angel's other distance map -- see bfsD1 at $5e00
