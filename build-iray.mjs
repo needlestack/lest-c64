@@ -17,6 +17,11 @@
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { assemble } from './asm6502.mjs';
+
+// Diagnostic flags read BEFORE flag() exists -- charset construction runs long before it. They
+// land in DIAG all the same, so a build that rewrites the charset writes iray.diag.asm and leaves
+// the tracked iray.asm alone.
+const DIAGEARLY = [];
 import { fitOrb, fitArt } from './fit-orb.mjs';
 import { LOADER_RUN } from './loader-src.mjs';
 const DIETEST = process.env.DIETEST === '1';
@@ -1611,7 +1616,10 @@ for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 0)));
 //
 // The marker is vertically symmetric, so charset B (built by reversing each glyph's rows) keeps
 // it identical without any special handling -- see the shape diagram at the CELLMARK block.
-if (process.env.CELLMARK === '1') {
+// Registered as a diagnostic by hand -- flag() is defined further down, and this block runs
+// during charset construction. A CELLMARK build rewrites the CHARSET, about as diagnostic as a
+// build gets, and reading it raw meant every marker build left the tracked iray.asm dirty.
+if (process.env.CELLMARK === '1' && DIAGEARLY.push('CELLMARK')) {
   // SOLID gets a GREY dot (pair 10) and every occluder a WHITE one (pair 00), so wall and stamp
   // are told apart at a glance. Always the same two columns and rows whatever the split, so the
   // dot marks the CELL's centre and the char grid can be counted directly.
@@ -2215,7 +2223,7 @@ const rowLo = [], rowHi = []; for (let R = 0; R < 25; R++) { rowLo.push((R * 40)
 // throwaway configuration (see the write site at the bottom), and the "ok:" line has to
 // say out loud which knobs are on -- NORAY and NOFILL in particular produce a build that
 // renders faster-looking nonsense and have already been mistaken for a real measurement.
-const DIAG = [];
+const DIAG = [...DIAGEARLY];
 const flag = n => { const on = process.env[n] === '1'; if (on) DIAG.push(n); return on; };
 const hexArg = (n, dflt, mask) => {
   if (process.env[n] === undefined) return dflt;
