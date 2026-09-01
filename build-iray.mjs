@@ -3136,7 +3136,11 @@ if (LVLALL) for (const L of LVLALL) {
   L.tables.lvlNxtT = [nxt < 0 ? 0xff : nxt];
 }
 const lvlMax = (f, own) => Math.max(own, ...(LVLALL ?? []).map(f));
-const NORB  = lvlMax(l => l.nOrbs,     ORBS.length);
+// At least ONE, even with no entities anywhere (NOORB=1 ANGEL=0 -- the bare level for working on
+// seams from first principles). Six tables are emitted at this length, and a zero-length !byte
+// assembles to "bad number: $", which names neither the table nor the flags that emptied it.
+// Nothing indexes them when the count is really zero, so the spare byte is inert.
+const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
 const NHOLE = lvlMax(l => l.nHoleLike, HOLELIKE.length);
 const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
 
@@ -3367,7 +3371,11 @@ const SOK_ANIM = SOK_ORB + SOK_SHR - 1;          // they overlap by one: the soc
 // orb from 42 rows only down to 30, which read as barely shrinking at all. (ANG_V0-1)/(SOK_ORB-1)
 // lands the last frame on the smallest rung: 42, 28, 15, 1.
 const SOK_VSTEP = Math.max(1, Math.floor((ANG_V0 - 1) / (SOK_ORB - 1)));
-const orbHidT = ORBS.map(() => 0);   // 1 = in the player's hands, not in the world
+// 1 = in the player's hands, not in the world. With NO entities at all (NOORB=1 ANGEL=0) the
+// tables are still one byte long -- see NORB -- and every consumer is a DO-WHILE that runs its
+// body once before testing, so that lone entry has to read as HIDDEN or a phantom entity walks
+// the BFS and the sprite allocator at cell 0.
+const orbHidT = ORBS.length ? ORBS.map(() => 0) : [1];
 // CARRY=n boots the run already holding entity n-1. Headless testing can't press SPACE, so the
 // build has to reproduce every part of the state orbUse leaves behind, not just the icon.
 const CARRY0 = +(process.env.CARRY ?? 0);
@@ -13928,7 +13936,7 @@ orbY0T: !byte ${LVLT('orbY0T').join(',')}
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
 orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
-angAccT: !byte ${ORBS.map(() => 0).join(',')}   ; 60ths banked toward this angel's next step
+angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
@@ -14691,7 +14699,7 @@ lvlNxtT:!byte ${hx(OTHERS.indexOf(LVL + 1) < 0 ? 0xff : OTHERS.indexOf(LVL + 1))
 nOrbT:  !byte ${hx(ORBS.length)}                 ; orbs
 nHoleT: !byte ${hx(HOLELIKE.length)}                 ; hole-like entities: exits then sockets
 nExitT: !byte ${hx(HOLES_AT.length)}                 ; ...of which this many are exits
-nOrbM1T:!byte ${hx(ORBS.length - 1)}                 ; last orb index, for the down-counting loops
+nOrbM1T:!byte ${hx(Math.max(0, ORBS.length - 1))}                 ; last orb index, for the down-counting loops
 nSockT: !byte ${hx(ORBS.length + HOLES_AT.length)}                 ; entity index of the first socket
 nAllM1T:!byte ${hx(ORBS.length + HOLELIKE.length - 1)}                 ; last entity index of all
 angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, when it is close
