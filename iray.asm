@@ -2795,7 +2795,9 @@ ssCnt:  cmp #17
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
         ; gets suppressed.
-ssLp: jsr seamOne
+ssLp:   jsr ssAny               ; nothing writable left: every remaining boundary is a certain
+        bcc ssDn                ; discard, so stop rather than project them
+        jsr seamOne
         dec ssN
         beq ssDn
         lda uaH                 ; step k toward the far end
@@ -2951,6 +2953,48 @@ ssNR:   tya
         adc #$ef
         sta seamT,x
 ssOne:  rts
+
+; Can ANY cell of this span still take a seam? A cell qualifies only if it AND both its
+; neighbours are unmarked -- the same three-cell rule seamOne applies below -- so a span can
+; be exhausted long before its boundaries run out. Down a hall that is the ordinary case: five
+; char cells, a corner on each outer one, their neighbours blocked by adjacency, and exactly
+; ONE cell in the middle that can ever hold a line. However long the wall is, three cells or
+; twenty, it can only ever produce that single seam, and once it is placed every remaining
+; boundary is guaranteed to be discarded -- so the walk stops instead of projecting them.
+;
+; This is the test SEAMPRE got wrong. It asked whether a cell was still SOLID, which is a much
+; weaker question than whether one can be WRITTEN: a free cell next to a corner is unusable,
+; and down a hall most free cells are exactly that. Asking the weak question, nothing ever
+; looked exhausted and the pre-test never fired.
+; Returns carry SET while a placeable cell remains.
+ssAny:  lda spanR
+        lsr
+        lsr
+        sta ssAng               ; last cell of the span (calcU's scratch, dead by now)
+        lda spanL
+        lsr
+        lsr
+        tax
+ssAnL:  lda seamT,x
+        cmp #$01
+        bne ssAnX
+        txa
+        beq ssAnA               ; column 0 has no left neighbour
+        lda seamT-1,x
+        cmp #$01
+        bne ssAnX
+ssAnA:  cpx #$27
+        beq ssAnF               ; cpx left carry set, which is the answer
+        lda seamT+1,x
+        cmp #$01
+        bne ssAnX
+ssAnF:  rts                     ; carry SET: this cell is still writable
+ssAnX:  inx
+        cpx ssAng
+        beq ssAnL
+        bcc ssAnL
+        clc                     ; the span is spoken for end to end
+        rts
 
 ; u for one marched column (X): where along the wall the ray landed, 8.8 cells.
 ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and vice
@@ -7819,7 +7863,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $3d40
+        * = $3d74
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.

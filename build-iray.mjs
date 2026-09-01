@@ -2571,7 +2571,10 @@ const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the 
 // below $4000, and a diagnostic build (OCCCHK and friends) needs a few dozen bytes the shipping
 // build does not have -- see [[iray-code-ceiling]]. Nothing here is alignment-sensitive; the
 // assembler's own backward-origin error is the guard if the block is pushed past its slack.
-const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d40', 16);
+// $3d74, not $3d40: ssAny needs the room and this block is the only slack next to the code.
+// It now ends EXACTLY at $4000 with nothing to spare, so anything added to it has to displace
+// something else -- see the run tables that already moved out below.
+const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d74', 16);
                                 // THREE pages of per-variant and per-orb tables, and $4000
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
@@ -7936,7 +7939,9 @@ ssCnt:  cmp #17
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
         ; gets suppressed.
-ssLp:${SEAMCNT ? ' inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n       ' : ''} jsr seamOne
+ssLp:   jsr ssAny               ; nothing writable left: every remaining boundary is a certain
+        bcc ssDn                ; discard, so stop rather than project them
+${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n' : ''}        jsr seamOne
         dec ssN
         beq ssDn
         lda uaH                 ; step k toward the far end
@@ -8097,6 +8102,48 @@ ssNR:   tya
         adc #${hx(SEAM0)}
         sta seamT,x
 ssOne:  rts
+
+; Can ANY cell of this span still take a seam? A cell qualifies only if it AND both its
+; neighbours are unmarked -- the same three-cell rule seamOne applies below -- so a span can
+; be exhausted long before its boundaries run out. Down a hall that is the ordinary case: five
+; char cells, a corner on each outer one, their neighbours blocked by adjacency, and exactly
+; ONE cell in the middle that can ever hold a line. However long the wall is, three cells or
+; twenty, it can only ever produce that single seam, and once it is placed every remaining
+; boundary is guaranteed to be discarded -- so the walk stops instead of projecting them.
+;
+; This is the test SEAMPRE got wrong. It asked whether a cell was still SOLID, which is a much
+; weaker question than whether one can be WRITTEN: a free cell next to a corner is unusable,
+; and down a hall most free cells are exactly that. Asking the weak question, nothing ever
+; looked exhausted and the pre-test never fired.
+; Returns carry SET while a placeable cell remains.
+ssAny:  lda spanR
+        lsr
+        lsr
+        sta ssAng               ; last cell of the span (calcU's scratch, dead by now)
+        lda spanL
+        lsr
+        lsr
+        tax
+ssAnL:  lda seamT,x
+        cmp #${hx(SOLID)}
+        bne ssAnX
+        txa
+        beq ssAnA               ; column 0 has no left neighbour
+        lda seamT-1,x
+        cmp #${hx(SOLID)}
+        bne ssAnX
+ssAnA:  cpx #${hx(NCELL - 1)}
+        beq ssAnF               ; cpx left carry set, which is the answer
+        lda seamT+1,x
+        cmp #${hx(SOLID)}
+        bne ssAnX
+ssAnF:  rts                     ; carry SET: this cell is still writable
+ssAnX:  inx
+        cpx ssAng
+        beq ssAnL
+        bcc ssAnL
+        clc                     ; the span is spoken for end to end
+        rts
 
 ; u for one marched column (X): where along the wall the ray landed, 8.8 cells.
 ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and vice
