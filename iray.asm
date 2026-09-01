@@ -113,6 +113,9 @@ hp      = $80                   ; 2 bytes: pointer into this column's height tab
 errH    = $86                   ; high byte of the interpolator's error term
 uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
 uwH     = $21
+sdCol   = $8f                   ; seamDrw: the seam's own pixel column, the window minimum
+sdMin   = $9e                   ;   around it, and the row the SEAM (not the wall) starts on
+sdSRow  = $9f
 sdPtr   = $87                   ; seamDrw: 2 bytes. Shares skL/skH deliberately -- seamSpan has
 sdCode  = $8d                   ;   finished for the frame by the time renderSym runs, so all of
 sdRow   = $8e                   ;   this scratch is dead. sdCode/sdRow share saL/saH likewise.
@@ -9661,26 +9664,78 @@ seamDrw: lda rsv
         sta sdRow
         cmp #13
         bcs sdNext              ; the run starts below the horizon: nothing to draw
-        ; The cell's MINIMUM height is the far wall's top -- the same quantity pmB3 derived rsv
-        ; from. Recomputed rather than carried: tmp does not survive the ceiling and edge runs.
-        lda colc
+        ; ---- the seam's height reference is anchored to the SEAM, not to the cell ----
+        ; It used to be min(colH) over the cell's four columns. That is the height at the cell's
+        ; RIGHT EDGE on a receding wall, and the right edge does not move while the seam slides
+        ; within the cell -- then jumps four columns nearer when the seam crosses into the next
+        ; one, while the wall's own recession drifts every height the other way. Sawtooth: the
+        ; reference measured 24,23,24,23,24,23 across six steps of one strafe, so the run start
+        ; flipped back and forth instead of stepping with the motion.
+        ;
+        ; A window CENTRED on the seam slides one column at a time, so the reference moves as
+        ; smoothly as the seam does. Same six steps, this window reads 23,23,23,23,23,23.
+        ; +/-3 is the narrowest that always contains the seam's cell wherever the seam sits in
+        ; it, and containing the cell is what makes it SAFE: the window minimum can never exceed
+        ; the cell's, so the seam can never start ABOVE the cell's solid run and paint ramp rows.
+        ldx colc
+        lda seamT,x
+        sec
+        sbc #$e5
+        cmp #$04
+        bcc sdSub
+        lda #$01                ; a PAIR: take the left line, near enough to centre a window on
+sdSub:  sta sdCode
+        txa
         asl
         asl
+        clc
+        adc sdCode
+        sta sdCol               ; the seam's pixel column
+        sec
+        sbc #$03
+        bcs sdW0
+        lda #$00                ; clamped at the left edge of the screen
+sdW0:   tay
+        lda #$ff
+        sta sdMin
+        ldx #$07
+sdWl:   cpy #160
+        bcs sdWn                ; and at the right edge
+        lda colH,y
+        cmp sdMin
+        bcs sdWn
+        sta sdMin
+sdWn:   iny
+        dex
+        bne sdWl
+        ; where the SEAM starts, which is at or below where the WALL starts
+        ldy sdMin
+        lda rsT,y
+        sta sdSRow
+        cmp #13
+        bcc sdFill
+        lda #13                 ; the seam is entirely below the horizon: all solid, no line
+        sta sdSRow
+        ; ---- rows the wall has but the seam does not: plain SOLID ----
+sdFill: lda #$01
+        sta sdCode
+sdFl:   lda sdRow
+        cmp sdSRow
+        bcs sdFd
+        ldy sdRow
+        jsr sdPut
+        lda #24
+        sec
+        sbc sdRow
         tay
-        lda colH,y
-        iny
-        cmp colH,y
-        bcc sdM1
-        lda colH,y
-sdM1:   iny
-        cmp colH,y
-        bcc sdM2
-        lda colH,y
-sdM2:   iny
-        cmp colH,y
-        bcc sdM3
-        lda colH,y
-sdM3:   tay
+        jsr sdPut
+        inc sdRow
+        jmp sdFl
+sdFd:   lda sdRow
+        cmp #13
+        bcs sdNext              ; the solid fill reached the horizon: no line to draw
+        ; ---- and the line itself, from sdRow down ----
+        ldy sdMin
         lda rsHalfT,y
         beq sdFull              ; gap already 4-8px: the full-height glyph is where it should be
         ldx colc
@@ -9693,7 +9748,7 @@ sdM3:   tay
         adc #$ef
         sta sdCode
         ldy sdRow
-        jsr sdPut               ; the run's first row...
+        jsr sdPut               ; the seam's first row...
         lda #24
         sec
         sbc sdRow
@@ -9702,7 +9757,7 @@ sdM3:   tay
         inc sdRow               ;   turns the same code into a line in rows 0-3
         lda sdRow
         cmp #13
-        bcs sdNext              ; the half row WAS the whole run
+        bcs sdNext              ; the half row WAS the whole line
 sdFull: lda sdRow
         clc
         adc bufOff
