@@ -1532,11 +1532,27 @@ for (let g = 0; g < NGLYPH; g++) {
 // wall top. Every row is identical, which makes the pattern its own vertical mirror and
 // keeps the flipped fontB free.
 const SEAM0 = glyphs.length;
-for (let k = 0; k < 4; k++) {
-  const wall = 1;               // bit pair 01, like every other wall pixel
-  const row = [0, 1, 2, 3].reduce((b, i) => b | ((i === k ? 2 : wall) << (6 - 2 * i)), 0);
-  glyphs.push(new Array(8).fill(row));
-}
+const seamRow = set => [0, 1, 2, 3]
+  .reduce((b, i) => b | ((set.includes(i) ? 2 : 1) << (6 - 2 * i)), 0);
+for (let k = 0; k < 4; k++) glyphs.push(new Array(8).fill(seamRow([k])));
+// ---- and six more holding TWO lines ----
+// A char cell is 4 logical pixels, so two corners 2-4px apart land in one cell whenever the pair
+// straddles the grid -- and with one line per code the second was simply dropped. Choosing the
+// nearer one made that deterministic but not invisible: the far line still popped as it crossed
+// the cell boundary, because "which cell" is what changes, not "how many corners". Six codes is
+// every way two of four columns can be lit, so the pair is drawn as it actually falls.
+// They cost six CELL codes (KCELL 219 -> 213 in charsetgen), which moved the predicted error
+// 0.020 -> 0.020 px/frame against a shipped 445: the tail of that ramp is the cheapest currency
+// in the build.
+const SEAMPAIRS = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
+for (const ab of SEAMPAIRS) glyphs.push(new Array(8).fill(seamRow(ab)));
+const NSEAM = 4 + SEAMPAIRS.length;
+// old sub-column * 4 + new sub-column -> the code that draws BOTH. The diagonal is a single
+// line, so a corner landing exactly where one already sits changes nothing.
+const seamPair = [];
+for (let o = 0; o < 4; o++) for (let n = 0; n < 4; n++)
+  seamPair.push(o === n ? SEAM0 + o
+    : SEAM0 + 4 + SEAMPAIRS.findIndex(([a, b]) => (a === o || a === n) && (b === o || b === n)));
 // ---- the sprite occluders: seven cells of black that CLIP ----
 // Bit pair 11, where every wall pixel is 01. In multicolor char mode 00 and 01 count as
 // BACKGROUND for sprite priority and 10 and 11 as FOREGROUND, so these clip a sprite whose
@@ -1631,13 +1647,13 @@ if (ANGCHAR) {
     `cells, ${ANGCG.length} glyphs at codes ${ANGC0}-${glyphs.length - 1} ` +
     `(${ANGCA.filter(c => c >= 0).length} of ${ANGCA.length} cells inked)`);
 }
-if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + 4 seams = ${glyphs.length} > 256`);
-console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + 4 seam + 7 occluder ` +
+if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + ${NSEAM} seams = ${glyphs.length} > 256`);
+console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + ${NSEAM} seam + 7 occluder ` +
   `+ 6 white-backed = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
-              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+3} seam, ` +
+              `${GLYPH0}-${GLYPH0+NGLYPH-1} readout, ${SEAM0}-${SEAM0+NSEAM-1} seam, ` +
               `${OCC0}-${OCC0+6} occluder on black, ${OCCW0}-${OCCW0+5} on white ` +
               `(${OCC_FULL} = whole cell)`);
 // rampT[wL*16 + wR] -> char code, for a cell covering a single wall face.
@@ -5892,25 +5908,25 @@ ${CVXSEAM ? '' : `        lda spanL
         cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
         beq subCvW              ; nothing has claimed this cell yet
         ; TWO corners inside one 4px cell, which happens whenever a pair 2-4px apart straddles
-        ; the grid. The cell can carry ONE line -- the glyph encodes a single sub-column -- so
-        ; first-come-first-served meant the pair popped in and out as you strafed across the
-        ; boundary. Pick by DEPTH instead: the nearer corner keeps the cell. colH is 1/z and
-        ; both columns were cast, so it is one compare and no new table. A convex corner is a
-        ; silhouette -- the near surface ending -- so anything still visible past it is further,
-        ; which makes "nearer" and "convex" the same choice wherever both are on screen.
+        ; the grid. Draw BOTH: seamPairT maps (sitting line, arriving line) to the code that
+        ; lights both columns. Choosing between them -- by depth, which was the previous rule --
+        ; made the choice stable but the far line still appeared and vanished as the pair crossed
+        ; a cell boundary, because what changes is which CELL they are in, not how many corners
+        ; there are.
         sec
         sbc #${hx(SEAM0)}
         cmp #$04
-        bcs subCn               ; claimed by something that is not a seam glyph: leave it alone
-        sta skL                 ; the sitting line's sub-column. skL is seamSpan's scratch, and
+        bcs subCn               ; already a PAIR: a third line in one cell is not representable,
+        asl                     ;   and at that spacing it would not read as three anyway
+        asl
+        sta skL                 ; sitting sub-column * 4. skL is seamSpan's scratch, and
         lda spanR               ;   subdivision finishes before seamSpan runs, so it is free here
-        and #$fc
+        and #$03
         ora skL
-        tay                     ; Y = the column that already owns this cell
-        lda colH,y
-        ldy spanR
-        cmp colH,y
-        bcs subCn               ; the sitting line is nearer, or level: it keeps the cell
+        tay
+        lda seamPairT,y
+        sta seamT,x
+        bne subCn               ; always taken: a seam code is never zero
 subCvW: lda spanR
         and #$03
         clc
@@ -10290,7 +10306,7 @@ oSWall: lda (osPtr),y
         beq oSWyes
         cmp #${hx(SEAM0)}
         bcc oSWno
-        cmp #${hx(SEAM0 + 4)}
+        cmp #${hx(SEAM0 + NSEAM)}
         bcs oSWno
 oSWyes: sec
         rts
@@ -10366,7 +10382,7 @@ oSDCol: ldy osDC
         lda seamT,y
         cmp #${hx(SEAM0)}
         bcc oSDNx
-        cmp #${hx(SEAM0 + 4)}
+        cmp #${hx(SEAM0 + NSEAM)}
         bcs oSDNx
         lda osRow
         sta ohSv
@@ -10387,7 +10403,7 @@ oSDR1:  cmp #$19
         lda (osPtr),y           ; the seam does not reach every row of the box: the rows above the
         cmp #${hx(SEAM0)}       ;   solid run are ceiling or edge cells and must not become SOLID
         bcc oSDRN
-        cmp #${hx(SEAM0 + 4)}
+        cmp #${hx(SEAM0 + NSEAM)}
         bcs oSDRN
         lda #${hx(SOLID)}
         sta (osPtr),y
@@ -14839,6 +14855,12 @@ occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 ; manifest, so their address is free. This lever is nearly spent -- what is left in there
 ; is cellFillT (256 B) and the two 42-byte orb colour tables, which want a real home.
 orbBitT: !byte ${orbBitT.join(',')}
+
+; (sitting line, arriving line) -> the code that draws BOTH, for two corners inside one char
+; cell. Indexed old*4 + new; the diagonal is a single line, so a corner landing exactly where
+; one already sits is a no-op rather than a special case. Out here with the other evicted
+; lookups, not in the ORB_SMALL block, which has no room.
+seamPairT: !byte ${seamPair.join(',')}
 kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
 mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 bbLT:   !byte $0f,$07,$03,$01
