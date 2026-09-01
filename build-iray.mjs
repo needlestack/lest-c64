@@ -2574,7 +2574,7 @@ const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the 
 // $3d74, not $3d40: ssAny needs the room and this block is the only slack next to the code.
 // It now ends EXACTLY at $4000 with nothing to spare, so anything added to it has to displace
 // something else -- see the run tables that already moved out below.
-const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d74', 16);
+const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d84', 16);
                                 // THREE pages of per-variant and per-orb tables, and $4000
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
@@ -3372,9 +3372,10 @@ const SOK_ANIM = SOK_ORB + SOK_SHR - 1;          // they overlap by one: the soc
 // lands the last frame on the smallest rung: 42, 28, 15, 1.
 const SOK_VSTEP = Math.max(1, Math.floor((ANG_V0 - 1) / (SOK_ORB - 1)));
 // 1 = in the player's hands, not in the world. With NO entities at all (NOORB=1 ANGEL=0) the
-// tables are still one byte long -- see NORB -- and every consumer is a DO-WHILE that runs its
-// body once before testing, so that lone entry has to read as HIDDEN or a phantom entity walks
-// the BFS and the sprite allocator at cell 0.
+// tables are still one byte long -- see NORB -- and this lone entry is never reached, because
+// every down-counting loop is guarded on nOrbT/nAllT. HIDDEN is a BACKSTOP, not the mechanism:
+// those loops are do-while, so a guard missed on some future one fails safe here instead of
+// walking a phantom entity at cell 0 through the BFS and the sprite allocator.
 const orbHidT = ORBS.length ? ORBS.map(() => 0) : [1];
 // CARRY=n boots the run already holding entity n-1. Headless testing can't press SPACE, so the
 // build has to reproduce every part of the state orbUse leaves behind, not just the icon.
@@ -4531,9 +4532,12 @@ const LVL_TABLES = [
   // overwrites this in every dump (see below).
   ['lvlNxtT', [OTHERS.indexOf(LVL + 1) < 0 ? 0xff : OTHERS.indexOf(LVL + 1)]],
   // Six contiguous bytes, one entry: nOrbT nHoleT nExitT nOrbM1T nSockT nAllM1T.
+  // SEVEN contiguous bytes now: nAllT joins them because the down-counting loops need a COUNT
+  // to test against, and an INDEX cannot express "none" -- see the guards on each loop.
   ['nOrbT', [ORBS.length, HOLELIKE.length, HOLES_AT.length,
-             ORBS.length - 1, ORBS.length + HOLES_AT.length,
-             ORBS.length + HOLELIKE.length - 1]],
+             Math.max(0, ORBS.length - 1), ORBS.length + HOLES_AT.length,
+             Math.max(0, ORBS.length + HOLELIKE.length - 1),
+             ORBS.length + HOLELIKE.length]],
   ['orbOccLoT', orbOccLo],
   ['orbOccT', process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat],
 ];
@@ -5599,6 +5603,8 @@ ${DIETEST && DIE ? `        lda #${hx(ORBS.findIndex(o => o.tall) + 1)}
         sta markPa              ; the 30-degree trigger measures from the heading you start on
 ` : ''}
 ${process.env.OCCSELF ? `
+        lda nOrbT
+        beq ooSlfD
         ldx nOrbM1T             ; OCCSELF=1: rebuild every mask at boot from orbOcc1 and
 ooSlf:  txa                     ;   leave the result. Nothing has moved yet, so the table it
         pha                     ;   produces must equal the one the build emitted -- which is
@@ -5606,7 +5612,8 @@ ooSlf:  txa                     ;   leave the result. Nothing has moved yet, so 
         pla
         tax
         dex
-        bpl ooSlf` : ''}
+        bpl ooSlf
+ooSlfD:` : ''}
         lda #${hx(SCR_A >> 8)}
         sta baseHi
         lda #$00
@@ -11738,6 +11745,8 @@ oiBlk:  lda mapT,x              ; walls first
         sta blkT,x
         inx
         bne oiBlk
+        lda nOrbT               ; a level may have NO entities at all
+        beq oiEntD
         ldx nOrbM1T
 oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta orbXCT,x
@@ -11761,7 +11770,7 @@ oiNext: txa
         tax                     ;   supposed to block, and the angel walked straight out.
         dex
         bpl oiEnt
-        lda #$00
+oiEntD: lda #$00
         sta carry
         sta marked
         sta entDty
@@ -11867,7 +11876,9 @@ ooCpyD: inc occArm              ;   able to give. The flag says a shadow exists 
         sta occVer
         lda cell0
         sta occCell
-` : ''}        lda nAllM1T             ; orbs AND hole-like entities
+` : ''}        lda nAllT               ; orbs AND hole-like entities -- the COUNT, so that none is
+        beq ooAlD               ;   sayable; the index below cannot say it
+        lda nAllM1T
 ooAlp:  sta ooAI
         tax
         jsr orbOcc1
@@ -11875,6 +11886,7 @@ ooAlp:  sta ooAI
         sec
         sbc #$01
         bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
+ooAlD:
 ${OCC_CMP ? `        lda occArm              ; NOTE the ooV prefix: ooCmp is ALREADY a label inside orbOcc1,
         beq ooVCmpX             ;   two screens up, and the assembler took the duplicate without a
         ldx #${hx(NOCC * OCCBYTES - 1)}            ;   word -- so orbOcc1's own \`jmp ooCmp\` landed here instead and
@@ -13539,11 +13551,6 @@ orbBitT: !byte ${orbBitT.join(',')}
 ;   occRT[k] -- the stamp STARTS at column k of this cell, so columns k..3 clip: "from the right"
 ;   occLT[m] -- the stamp ENDS at column m, so columns 0..m clip: "from the left"
 ; Both give the whole-cell glyph where the boundary lands on a cell edge, so no special case.
-occRT: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCC0 + 3 + (4 - k)).join(',')}
-occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
-; the same two, backed by white, for a cell on a wall's vertical silhouette
-occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
-occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 ; Which of a glyph's four columns are WALL, one bit each, bit 3 = column 0. A column counts as
 ; wall if MOST of its eight rows are NOT BACKGROUND -- not merely one of them. A cell at the wall's
 ; BASE is floor with a sliver of wall along its top edge, and "any row" handed that whole column
@@ -13846,6 +13853,8 @@ bfsNbN: iny
         ; fill lands sooner, so dropping an orb re-routes the angel in a fraction of the time.
         ; An angel that is walled in never gets a distance, so this never fires and the fill
         ; runs to its natural end -- which is correct, and is also when it matters least.
+        lda nOrbT               ; no entities: nothing to path toward
+        beq bfsFin
         ldx nOrbM1T
 bfsEnL: lda orbTallT,x
         beq bfsEnN
@@ -14701,7 +14710,10 @@ nHoleT: !byte ${hx(HOLELIKE.length)}                 ; hole-like entities: exits
 nExitT: !byte ${hx(HOLES_AT.length)}                 ; ...of which this many are exits
 nOrbM1T:!byte ${hx(Math.max(0, ORBS.length - 1))}                 ; last orb index, for the down-counting loops
 nSockT: !byte ${hx(ORBS.length + HOLES_AT.length)}                 ; entity index of the first socket
-nAllM1T:!byte ${hx(ORBS.length + HOLELIKE.length - 1)}                 ; last entity index of all
+nAllM1T:!byte ${hx(Math.max(0, ORBS.length + HOLELIKE.length - 1))}                 ; last entity index of all
+nAllT:  !byte ${hx(ORBS.length + HOLELIKE.length)}                 ; ...and how MANY, which is the one
+                                ;   an empty level can state: every loop below counts DOWN from an
+                                ;   INDEX, and index 0 means "one entity", never "none"
 angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, when it is close
 landAT: !byte ${hx(LAND_A)}                 ; which way to face on arrival; see LAND_A
 landXT: !byte ${LANDS_AT.map(l => l[0]).join(',')}
@@ -14787,6 +14799,18 @@ lsLen:  !byte 0
 ; NRUN-sized tables in that block overran it by 38 bytes.
 runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
+
+; ---- occRT / occLT / occRTW / occLTW ----
+; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
+; that block ends at $4000 with nothing spare, so the only way to give the CODE more room
+; is to need less of it. They are indexed by a clip column 0-3, are the same on every
+; level, and travel in no manifest, so their address is free. What they MEAN is explained
+; where they used to sit, next to the glyph scheme they belong to.
+occRT: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCC0 + 3 + (4 - k)).join(',')}
+occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
+; the same two, backed by white, for a cell on a wall's vertical silhouette
+occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
+occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 ${SPANCAP ? `        ; Placed in the stream, not at a fixed origin: the free run below HAZ_BASE starts at a
         ; different address in a chained build, and a hard address collided there.
 ; SPANCAP: widest span, in columns, that a face at this colH may cover without being able to
@@ -15381,7 +15405,9 @@ dpHav:  lda dieCl
         sta dieDir
 dpDn:   lda #$00                ; AFTER the branch above, not inside it: skipping it left the
         sta marked              ;   player marked through the whole cut scene when they WERE turning
-        ldx nOrbM1T             ; the angel simply is not there any more -- hiding it is one
+        lda nOrbT               ; the angel simply is not there any more -- hiding it is one
+        beq dgAD                ;   store, and orbMove then never gives it a slot.
+        ldx nOrbM1T
 dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slot.
         bne dgA2                ; TALL: that is the angel, and it is the one thing that stays
         lda #$01
@@ -15389,7 +15415,7 @@ dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slo
                                 ;   shared, so an orb cannot dim while the angel stays lit
 dgA2:   dex
         bpl dgA
-        lda #${hx(ORBBODY[0])}  ; the orb, by contrast, fades out with everything else
+dgAD:   lda #${hx(ORBBODY[0])}  ; the orb, by contrast, fades out with everything else
         sta dieInk
         inc dieN                ; how many pictures this death earns; dshEnd resets it after the
         lda #$01                ;   last one, so the sequence starts over rather than running out

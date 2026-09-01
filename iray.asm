@@ -6327,6 +6327,8 @@ oiBlk:  lda mapT,x              ; walls first
         sta blkT,x
         inx
         bne oiBlk
+        lda nOrbT               ; a level may have NO entities at all
+        beq oiEntD
         ldx nOrbM1T
 oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta orbXCT,x
@@ -6353,7 +6355,7 @@ oiNext: txa
         tax                     ;   supposed to block, and the angel walked straight out.
         dex
         bpl oiEnt
-        lda #$00
+oiEntD: lda #$00
         sta carry
         sta marked
         sta entDty
@@ -6430,7 +6432,9 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
-        lda nAllM1T             ; orbs AND hole-like entities
+        lda nAllT               ; orbs AND hole-like entities -- the COUNT, so that none is
+        beq ooAlD               ;   sayable; the index below cannot say it
+        lda nAllM1T
 ooAlp:  sta ooAI
         tax
         jsr orbOcc1
@@ -6438,6 +6442,7 @@ ooAlp:  sta ooAI
         sec
         sbc #$01
         bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
+ooAlD:
         rts
 
 
@@ -7863,7 +7868,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $3d74
+        * = $3d84
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
@@ -7889,11 +7894,6 @@ orbBitT: !byte 1,2,4,8,16,32,64,128
 ;   occRT[k] -- the stamp STARTS at column k of this cell, so columns k..3 clip: "from the right"
 ;   occLT[m] -- the stamp ENDS at column m, so columns 0..m clip: "from the left"
 ; Both give the whole-cell glyph where the boundary lands on a cell edge, so no special case.
-occRT: !byte 246,249,248,247
-occLT: !byte 243,244,245,246
-; the same two, backed by white, for a cell on a wall's vertical silhouette
-occRTW: !byte 246,255,254,253
-occLTW: !byte 250,251,252,246
 ; Which of a glyph's four columns are WALL, one bit each, bit 3 = column 0. A column counts as
 ; wall if MOST of its eight rows are NOT BACKGROUND -- not merely one of them. A cell at the wall's
 ; BASE is floor with a sliver of wall along its top edge, and "any row" handed that whole column
@@ -8585,6 +8585,8 @@ bfsNbN: iny
         ; fill lands sooner, so dropping an orb re-routes the angel in a fraction of the time.
         ; An angel that is walled in never gets a distance, so this never fires and the fill
         ; runs to its natural end -- which is correct, and is also when it matters least.
+        lda nOrbT               ; no entities: nothing to path toward
+        beq bfsFin
         ldx nOrbM1T
 bfsEnL: lda orbTallT,x
         beq bfsEnN
@@ -9484,6 +9486,9 @@ nExitT: !byte $02                 ; ...of which this many are exits
 nOrbM1T:!byte $01                 ; last orb index, for the down-counting loops
 nSockT: !byte $04                 ; entity index of the first socket
 nAllM1T:!byte $03                 ; last entity index of all
+nAllT:  !byte $04                 ; ...and how MANY, which is the one
+                                ;   an empty level can state: every loop below counts DOWN from an
+                                ;   INDEX, and index 0 means "one entity", never "none"
 angPerT: !byte $78   ; 60ths between angel steps on THIS level, when it is close
 landAT: !byte $80                 ; which way to face on arrival; see LAND_A
 landXT: !byte 6,6
@@ -9511,15 +9516,15 @@ lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 0,0,0,0,0,0,0,0,8,9,14,14,4,4,4,4,8,9,4,4,2,2,2,2
         !byte 59,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,120,120,6,0,0,0,1,0,0,255,2,2,2,1,4
-        !byte 3,0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0,0
-        !byte 0,0,$ff
+        !byte 3,4,0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0
+        !byte 0,0,0,$ff
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte <lvlShadow+0
 lvlBasHiT: !byte >lvlShadow+0
 lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$01,$20,$01,$01,$01,$02,$02,$02,$01,$06,$04,$10,$01,$01,$01,$01,$01,$01
+lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$01,$20,$01,$01,$01,$02,$02,$02,$01,$07,$04,$10,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9585,6 +9590,18 @@ lsLen:  !byte 0
 ; NRUN-sized tables in that block overran it by 38 bytes.
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,0,0,0,0
+
+; ---- occRT / occLT / occRTW / occLTW ----
+; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
+; that block ends at $4000 with nothing spare, so the only way to give the CODE more room
+; is to need less of it. They are indexed by a clip column 0-3, are the same on every
+; level, and travel in no manifest, so their address is free. What they MEAN is explained
+; where they used to sit, next to the glyph scheme they belong to.
+occRT: !byte 246,249,248,247
+occLT: !byte 243,244,245,246
+; the same two, backed by white, for a cell on a wall's vertical silhouette
+occRTW: !byte 246,255,254,253
+occLTW: !byte 250,251,252,246
         ; The walker and all its data. The dispatcher stays down in the
         ; main code stream's headroom; only this needs somewhere with room.
         * = $a700
@@ -9915,7 +9932,9 @@ dpHav:  lda dieCl
         sta dieDir
 dpDn:   lda #$00                ; AFTER the branch above, not inside it: skipping it left the
         sta marked              ;   player marked through the whole cut scene when they WERE turning
-        ldx nOrbM1T             ; the angel simply is not there any more -- hiding it is one
+        lda nOrbT               ; the angel simply is not there any more -- hiding it is one
+        beq dgAD                ;   store, and orbMove then never gives it a slot.
+        ldx nOrbM1T
 dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slot.
         bne dgA2                ; TALL: that is the angel, and it is the one thing that stays
         lda #$01
@@ -9923,7 +9942,7 @@ dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slo
                                 ;   shared, so an orb cannot dim while the angel stays lit
 dgA2:   dex
         bpl dgA
-        lda #$0c  ; the orb, by contrast, fades out with everything else
+dgAD:   lda #$0c  ; the orb, by contrast, fades out with everything else
         sta dieInk
         inc dieN                ; how many pictures this death earns; dshEnd resets it after the
         lda #$01                ;   last one, so the sequence starts over rather than running out
