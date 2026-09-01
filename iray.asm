@@ -113,6 +113,7 @@ hp      = $80                   ; 2 bytes: pointer into this column's height tab
 errH    = $86                   ; high byte of the interpolator's error term
 uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
 uwH     = $21
+sdK     = $92                   ; the seam code's offset from SEAM0, decoded once
 sdH     = $91                   ; the wall's height AT the seam's own column
 sdCol   = $8f                   ; seamDrw: the seam's own pixel column, the window minimum
 sdMin   = $9e                   ;   around it, and the row the SEAM (not the wall) starts on
@@ -9665,12 +9666,13 @@ seamDrw: lda rsv
         ; whatever sits at the edge of the window, so a step in the wall entering or leaving
         ; flips it. Measured over one strafe the window minimum read 31,32,31,32 while the wall
         ; at the seam read 32,32,32,32.
-        ; Using either number for both jobs breaks one of them, which is how this arrived here.
+        ; Using either number for both jobs breaks the other, which is how this arrived here.
         ldx colc
         lda seamT,x
         sec
         sbc #$e5
-        cmp #$04
+        sta sdK                 ; the code's offset, decoded ONCE: it answers both "which
+        cmp #$04                ;   sub-column" and, further down, "is this a pair"
         bcc sdSub
         lda #$01                ; a PAIR: measure at its left line
 sdSub:  sta sdCode
@@ -9683,18 +9685,22 @@ sdSub:  sta sdCode
         tay
         lda colH,y
         sta sdH                 ; the wall at the seam
+        ; The window is clamped so it can never run off either end, which keeps the bounds test
+        ; out of the loop. At the edges it slides rather than shrinks, and still contains the
+        ; seam's cell either way -- s<3 means cell 0, s>156 means cell 39.
         lda sdCol
         sec
         sbc #$03
         bcs sdW0
-        lda #$00                ; clamped at the left edge of the screen
-sdW0:   tay
+        lda #$00
+sdW0:   cmp #154
+        bcc sdW1
+        lda #153
+sdW1:   tay
         lda #$ff
         sta sdMin
         ldx #$07
-sdWl:   cpy #160
-        bcs sdWn                ; and at the right edge
-        lda colH,y
+sdWl:   lda colH,y
         cmp sdMin
         bcs sdWn
         sta sdMin
@@ -9706,28 +9712,20 @@ sdWn:   iny
         cmp sdRow
         bcs sdSR
         lda sdRow               ; never above the cell's solid run
-sdSR:   sta sdSRow
-        cmp #13
-        bcc sdFill
+sdSR:   cmp #13
+        bcc sdSR2
         lda #13                 ; entirely below the horizon: all solid, no line
-        sta sdSRow
+sdSR2:  sta sdSRow
         ; ---- rows the wall has and the line does not: plain SOLID ----
-sdFill: lda #$01
+        lda #$01
         sta sdCode
 sdFl:   lda sdRow
         cmp sdSRow
         bcs sdFd
-        ldy sdRow
-        jsr sdPut
-        lda #24
-        sec
-        sbc sdRow
-        tay
-        jsr sdPut
+        jsr sdPut               ; writes the row AND the row it mirrors to
         inc sdRow
         jmp sdFl
-sdFd:   lda sdRow
-        cmp #13
+sdFd:   cmp #13                 ; A is still sdRow, from the compare above
         bcs sdNext              ; the solid fill reached the horizon: no line to draw
         ; half when the gap is under 4px: 8*start - (100 - h) < 4, i.e. h < 104 - 8*start
         lda sdSRow
@@ -9741,23 +9739,14 @@ sdFd:   lda sdRow
         cmp sdH
         bcc sdFull              ; the gap is already 4-8px
         beq sdFull
-        ldx colc
-        lda seamT,x
-        sec
-        sbc #$e5
+        lda sdK
         cmp #$04
         bcs sdFull              ; a PAIR has no half variant: full height, as before
         clc
         adc #$ef
         sta sdCode
-        ldy sdRow
-        jsr sdPut               ; the line's first row...
-        lda #24
-        sec
-        sbc sdRow
-        tay
-        jsr sdPut               ; ...and the row it mirrors to below the horizon, where fontB
-        inc sdRow               ;   turns the same code into a line in rows 0-3
+        jsr sdPut               ; the line's first row, and its mirror below the horizon, where
+        inc sdRow               ;   fontB turns the same code into a line in rows 0-3
         lda sdRow
         cmp #13
         bcs sdNext              ; the half row WAS the whole line
@@ -9774,9 +9763,17 @@ sdFull: lda sdRow
         jmp (jv)                ; -> ascending chain -> jmp rfNext
 sdNext: jmp rfNext
 
-; one char into row Y of the live buffer at this column. The buffer base is page-aligned, so
-; rowLoT/rowHiT (which hold row*40) need only the high byte added.
-sdPut:  lda rowLoT,y
+; sdCode into row sdRow of the live buffer at this column, AND into the row it mirrors to below
+; the horizon -- the same pairing the solid chain does in one store, so callers never have to
+; think about the second write. The buffer base is page-aligned, so rowLoT/rowHiT (which hold
+; row*40) need only the high byte added.
+sdPut:  ldy sdRow
+        jsr sdPut1
+        lda #24
+        sec
+        sbc sdRow
+        tay
+sdPut1: lda rowLoT,y
         sta sdPtr
         lda rowHiT,y
         clc
