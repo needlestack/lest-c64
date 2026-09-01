@@ -2413,6 +2413,11 @@ const SEAMFAR = +(process.env.SEAMFAR ?? 12);
 // get discarded collide INDIVIDUALLY, mostly with corner seams, so there is no whole-span answer.
 const SEAMPRE = flag('SEAMPRE');
 const SEAMS = process.env.SEAMS !== '0';
+// SEAMPANEL=0 keeps the CORNER marks and drops only the interpolated panel lines. SEAMS=0 cannot
+// do this -- it gates the corner block in subFace as well -- and the two are worth seeing apart:
+// corners mark real structure, panel lines are decoration, and it is the decoration whose
+// selection goes unstable on a near-parallel far wall.
+const SEAMPANEL = process.env.SEAMPANEL !== '0';
 // CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
 // They were dropped from convex ends because the silhouette there already steps 20+ rows so
 // the line looked redundant, and because the boundary landed in the one cell an orb needed
@@ -6141,7 +6146,7 @@ subFlush:                       ; interpolate + seam one maximal face
         cmp spanL
         bcc subFDn              ; empty
 ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr interpSpan
-${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        ldx #8\n        jsr pfTick              ; interpSpan\n' : ''}${SEAMS ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        ldx #9\n        jsr pfTick              ; seamSpan\n' : ''}subFDn: rts
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        ldx #8\n        jsr pfTick              ; interpSpan\n' : ''}${SEAMS && SEAMPANEL ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        ldx #9\n        jsr pfTick              ; seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
         cpx #${hx(NBND)}
