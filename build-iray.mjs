@@ -1551,23 +1551,25 @@ for (let k = 0; k < 4; k++) glyphs.push(new Array(8).fill(seamRow([k])));
 // in the build.
 const SEAMPAIRS = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
 for (const ab of SEAMPAIRS) glyphs.push(new Array(8).fill(seamRow(ab)));
-// ---- and four HALF-HEIGHT singles: plain wall in rows 0-3, the line in 4-7 ----
-// The seam's top edge can only sit on a char row, so it steps 8px while the wall top moves
-// smoothly -- a 0-8px black gap that snaps back every time the wall top crosses a cell. These
-// give the top edge a second landing spot inside the first solid cell, so it steps 4px instead.
-// It makes the gap LATER, never earlier: drawing earlier means drawing into the ramp cell, which
-// is a seam variant of all 221 ramp patterns. The gap becomes 4-8px rather than 0-8px -- slightly
-// larger on average, and that is the trade.
+// ---- and twelve SUB-CELL starts: the line beginning at row 2, 4 or 6 instead of 0 ----
+// A seam's top edge can only sit on a char row, so it steps 8px while the wall top moves
+// smoothly -- a black gap sweeping 0-8px and snapping back every time the wall top crosses a
+// cell. These give the top edge three more landing spots inside the run's first row, so it can
+// step 2px. It makes the gap LATER, never earlier: drawing earlier means drawing into the ramp
+// cell, which is a seam variant of all 221 ramp patterns.
 //
 // The BOTTOM end is free. fontB is fontA mirrored row-wise and the horizon selects it below, so
-// this same code draws the line in rows 0-3 down there, which is exactly what the wall's lower
-// end needs -- and the solid chain writes a row and its mirror in one store, so one write does
-// both. PAIRS get no half variant: they exist only where two corners share a cell, which is
-// transient, and they fall back to full height.
-const SEAMHALF0 = glyphs.length;
-for (let k = 0; k < 4; k++)
-  glyphs.push([...Array(8)].map((_, r) => r < 4 ? seamRow([]) : seamRow([k])));
-const NSEAM = 4 + SEAMPAIRS.length + 4;
+// a line in rows 4-7 draws in rows 0-3 down there, which is exactly what the wall's lower end
+// needs -- and the solid chain writes a row and its mirror in ONE store. PAIRS get no sub-cell
+// variant: they exist only where two corners share a cell, which is transient, and they fall
+// back to a full-height line.
+// Indexed (v-1)*4 + k for start row 2v and column k, so SEAMSTEP can use a subset of the same
+// glyphs -- 4px wants only v=2 -- and switching costs no charset rebuild.
+const SEAMQ0 = glyphs.length;
+for (let v = 1; v <= 3; v++)
+  for (let k = 0; k < 4; k++)
+    glyphs.push([...Array(8)].map((_, r) => r < 2 * v ? seamRow([]) : seamRow([k])));
+const NSEAM = 4 + SEAMPAIRS.length + 12;
 // old sub-column * 4 + new sub-column -> the code that draws BOTH. The diagonal is a single
 // line, so a corner landing exactly where one already sits changes nothing.
 const seamPair = [];
@@ -2155,10 +2157,16 @@ const edgeSrc = (nm, base) => ROWSA.map(r => {
 // with one table lookup per column.
 const rbT = [...Array(256)].map((_, cmx) => cmx > 92 ? 0 : Math.floor((92 - cmx) / 8) + 1);
 const rsT = [...Array(256)].map((_, cmn) => cmn >= 100 ? 0 : Math.ceil((100 - cmn) / 8));
-// SEAMHALF=0 emits none of the half-cell machinery: the A/B for "is 4px better than 8px".
-// (There is no table any more. The threshold "h < 104 - 8*rs" is two shifts and a subtract, and
-// it has to be computed at runtime because rs comes from the CELL while h comes from the SEAM.)
-const SEAMHALF = process.env.SEAMHALF !== '0';
+// SEAMSTEP: how finely a seam's TOP EDGE may be placed inside the run's first row -- 2, 4 or 8.
+// 8 is off (the edge sits on a char row, as it always did). The glyph set is the same either
+// way; a coarser step just uses a subset, so this is a free A/B with no charset rebuild.
+// offset = MASK - (gap & MASK) lands the residual gap in a band of SEAMSTEP px: for 2 that is
+// {6,7}, for 4 it is {4..7}. gap itself is computed at runtime, because the start row comes from
+// the CELL while the height comes from the SEAM.
+const SEAMSTEP = +(process.env.SEAMSTEP ?? 2);
+if (![2, 4, 8].includes(SEAMSTEP)) throw new Error(`SEAMSTEP=${SEAMSTEP}: must be 2, 4 or 8`);
+const SEAMMASK = 8 - SEAMSTEP;
+const SEAMHALF = SEAMSTEP !== 8;
 // entry tables: blk indexed by rb (target row rb-1), sld indexed by rs (target row rs)
 const blkEnt = sel => ['0', ...ROWSA.map(r => `${sel}bkA${r}`)].concat(['0', ...ROWSA.map(r => `${sel}bkB${r}`)]).join(',');
 const sldEnt = sel => [...ROWSA.map(r => `${sel}slA${r}`), '0'].concat([...ROWSA.map(r => `${sel}slB${r}`), '0']).join(',');
@@ -14990,23 +14998,37 @@ sdFl:   lda sdRow
         jmp sdFl
 sdFd:   cmp #13                 ; A is still sdRow, from the compare above
         bcs sdNext              ; the solid fill reached the horizon: no line to draw
-${SEAMHALF ? `        ; half when the gap is under 4px: 8*start - (100 - h) < 4, i.e. h < 104 - 8*start
+${SEAMHALF ? `        ; gap = 8*start + h - 100, the black space between the wall at the seam and where the
+        ; line would start. Push the line down by MASK - (gap & MASK) so the residual lands in a
+        ; band SEAMSTEP px wide, and the edge steps by SEAMSTEP instead of by a whole char row.
+        lda sdK
+        cmp #$04
+        bcs sdFull              ; a PAIR has no sub-cell variant: full height, as before
         lda sdSRow
         asl
         asl
         asl
+        clc
+        adc sdH
+        sec
+        sbc #100
+        cmp #$08
+        bcs sdFull              ; the line already starts a whole row or more below the wall:
+        and #${hx(SEAMMASK)}    ;   pushing it further down would only widen the gap
         sta sdCode
-        lda #104
+        lda #${hx(SEAMMASK)}
         sec
         sbc sdCode
-        cmp sdH
-        bcc sdFull              ; the gap is already 4-8px
-        beq sdFull
-        lda sdK
-        cmp #$04
-        bcs sdFull              ; a PAIR has no half variant: full height, as before
+        beq sdFull              ; offset 0 is the plain full-height line
+        lsr                     ; v = offset/2, so 1, 2 or 3
+        sec
+        sbc #$01
+        asl
+        asl                     ; (v-1)*4
         clc
-        adc #${hx(SEAMHALF0)}
+        adc sdK                 ; + the seam's column
+        clc
+        adc #${hx(SEAMQ0)}
         sta sdCode
         jsr sdPut               ; the line's first row, and its mirror below the horizon, where
         inc sdRow               ;   fontB turns the same code into a line in rows 0-3
