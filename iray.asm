@@ -1097,8 +1097,28 @@ subCv:
         tax
         lda seamT,x
         cmp #$01       ; still a plain fill? one seam line per cell
-        bne subCn               ; a line is already claimed in this cell; one per char code
-        lda spanR
+        beq subCvW              ; nothing has claimed this cell yet
+        ; TWO corners inside one 4px cell, which happens whenever a pair 2-4px apart straddles
+        ; the grid. The cell can carry ONE line -- the glyph encodes a single sub-column -- so
+        ; first-come-first-served meant the pair popped in and out as you strafed across the
+        ; boundary. Pick by DEPTH instead: the nearer corner keeps the cell. colH is 1/z and
+        ; both columns were cast, so it is one compare and no new table. A convex corner is a
+        ; silhouette -- the near surface ending -- so anything still visible past it is further,
+        ; which makes "nearer" and "convex" the same choice wherever both are on screen.
+        sec
+        sbc #$ef
+        cmp #$04
+        bcs subCn               ; claimed by something that is not a seam glyph: leave it alone
+        sta skL                 ; the sitting line's sub-column. skL is seamSpan's scratch, and
+        lda spanR               ;   subdivision finishes before seamSpan runs, so it is free here
+        and #$fc
+        ora skL
+        tay                     ; Y = the column that already owns this cell
+        lda colH,y
+        ldy spanR
+        cmp colH,y
+        bcs subCn               ; the sitting line is nearer, or level: it keeps the cell
+subCvW: lda spanR
         and #$03
         clc
         adc #$ef
@@ -7868,7 +7888,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        * = $3d84
+        * = $3d9c
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
@@ -7888,7 +7908,6 @@ sockHT: !byte 107,94,80,67,54,40,34,27,20,13   ; DESCENDING h thresholds, scanne
 
 orbColLT: !byte 11,12,11,10,9,10,9,8,7,8,5,6,6,5,5,4,3,3,2,2,1,1,23,21,21,19,17,15,13,12,11,11,10,9,8,7,6,5,5,4,3,2
 orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14,14,11,10,9,8,7,6,6,5,4,3,2,1,0
-orbBitT: !byte 1,2,4,8,16,32,64,128
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.
 ;   occRT[k] -- the stamp STARTS at column k of this cell, so columns k..3 clip: "from the right"
@@ -7918,8 +7937,6 @@ orbBitT: !byte 1,2,4,8,16,32,64,128
 ;     would punch a hole through the first stamp.
 cellFillT: !byte 0,15,15,15,14,15,0,8,0,0,15,0,0,0,0,15,3,0,15,3,3,15,0,12,12,7,15,12,3,12,15,7,15,15,15,1,14,12,15,15,3,15,15,15,15,0,0,0,15,7,1,0,8,1,3,0,14,12,15,3,0,15,14,0,12,15,15,0,0,0,0,3,8,3,15,8,12,15,3,8,14,8,15,14,0,15,0,15,8,0,15,7,7,0,8,15,15,7,7,0,0,0,15,8,15,7,0,15,15,1,3,0,0,0,15,15,0,1,1,1,15,7,15,14,15,1,1,15,15,15,15,8,7,12,0,15,0,0,7,7,12,15,1,15,15,0,7,0,7,3,1,0,8,15,1,15,8,1,1,1,0,15,0,7,15,14,12,14,8,3,3,3,7,15,14,12,7,15,3,15,1,7,1,14,12,14,15,3,12,7,12,8,8,3,14,15,15,12,7,12,14,14,8,14,0,15,15,3,7,15,3,15,15,12,15,9,3,15,15,8,0,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,15,15,15,15,15,15,15,15,15,15,15,8,12,14,1,3,7
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
-kMskT: !byte 0,8,12,14
-mMskT: !byte 7,3,1,0
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
 ; that might be occluded, which is the only part of the test that is not O(1).
@@ -7947,8 +7964,6 @@ orbColT2: !byte 12,12   ; NORB: a level with more orbs than this one
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
 ; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
 ; which named charset twins, do not.
-bbLT:   !byte $0f,$07,$03,$01
-bbRT:   !byte $08,$0c,$0e,$0f
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
 opbBaseT: !byte 0,12,24,36,48,60,72,84
         * = $4000  ; VIC bank 0 is full -- these live above it
@@ -9602,6 +9617,18 @@ occLT: !byte 243,244,245,246
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
 occRTW: !byte 246,255,254,253
 occLTW: !byte 250,251,252,246
+
+; ---- kMskT / mMskT / bbLT / bbRT / orbBitT ----
+; Twenty-four more bytes evicted from the ORB_SMALL block, same reason as the four above:
+; that block is the only slack the CODE has, so the way to give the code room is to need
+; less of the block. All five are small fixed lookups, identical on every level and in no
+; manifest, so their address is free. This lever is nearly spent -- what is left in there
+; is cellFillT (256 B) and the two 42-byte orb colour tables, which want a real home.
+orbBitT: !byte 1,2,4,8,16,32,64,128
+kMskT: !byte 0,8,12,14
+mMskT: !byte 7,3,1,0
+bbLT:   !byte $0f,$07,$03,$01
+bbRT:   !byte $08,$0c,$0e,$0f
         ; The walker and all its data. The dispatcher stays down in the
         ; main code stream's headroom; only this needs somewhere with room.
         * = $a700

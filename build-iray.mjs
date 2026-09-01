@@ -2579,7 +2579,7 @@ const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the 
 // $3d74, not $3d40: ssAny needs the room and this block is the only slack next to the code.
 // It now ends EXACTLY at $4000 with nothing to spare, so anything added to it has to displace
 // something else -- see the run tables that already moved out below.
-const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d84', 16);
+const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d9c', 16);
                                 // THREE pages of per-variant and per-orb tables, and $4000
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
@@ -5890,8 +5890,28 @@ ${CVXSEAM ? '' : `        lda spanL
         tax
         lda seamT,x
         cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
-        bne subCn               ; a line is already claimed in this cell; one per char code
-        lda spanR
+        beq subCvW              ; nothing has claimed this cell yet
+        ; TWO corners inside one 4px cell, which happens whenever a pair 2-4px apart straddles
+        ; the grid. The cell can carry ONE line -- the glyph encodes a single sub-column -- so
+        ; first-come-first-served meant the pair popped in and out as you strafed across the
+        ; boundary. Pick by DEPTH instead: the nearer corner keeps the cell. colH is 1/z and
+        ; both columns were cast, so it is one compare and no new table. A convex corner is a
+        ; silhouette -- the near surface ending -- so anything still visible past it is further,
+        ; which makes "nearer" and "convex" the same choice wherever both are on screen.
+        sec
+        sbc #${hx(SEAM0)}
+        cmp #$04
+        bcs subCn               ; claimed by something that is not a seam glyph: leave it alone
+        sta skL                 ; the sitting line's sub-column. skL is seamSpan's scratch, and
+        lda spanR               ;   subdivision finishes before seamSpan runs, so it is free here
+        and #$fc
+        ora skL
+        tay                     ; Y = the column that already owns this cell
+        lda colH,y
+        ldy spanR
+        cmp colH,y
+        bcs subCn               ; the sitting line is nearer, or level: it keeps the cell
+subCvW: lda spanR
         and #$03
         clc
         adc #${hx(SEAM0)}
@@ -13550,7 +13570,6 @@ sockHT: !byte ${SOCK.hT.join(',')}   ; DESCENDING h thresholds, scanned by hlRun
 
 orbColLT: !byte ${orbColLT.join(',')}
 orbColRT: !byte ${orbColRT.join(',')}
-orbBitT: !byte ${orbBitT.join(',')}
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.
 ;   occRT[k] -- the stamp STARTS at column k of this cell, so columns k..3 clip: "from the right"
@@ -13586,8 +13605,6 @@ cellFillT: !byte ${[...Array(256)].map((_, c) => {
   return m;
 }).join(',')}
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
-kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
-mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
 ; that might be occluded, which is the only part of the test that is not O(1).
@@ -13616,8 +13633,6 @@ orbColT2: !byte ${pad(orbCol, NORB).join(',')}   ; NORB: a level with more orbs 
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
 ; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
 ; which named charset twins, do not.
-bbLT:   !byte $0f,$07,$03,$01
-bbRT:   !byte $08,$0c,$0e,$0f
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
 opbBaseT: !byte 0,12,24,36,48,60,72,84
 ` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
@@ -14816,6 +14831,18 @@ occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
 occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
 occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
+
+; ---- kMskT / mMskT / bbLT / bbRT / orbBitT ----
+; Twenty-four more bytes evicted from the ORB_SMALL block, same reason as the four above:
+; that block is the only slack the CODE has, so the way to give the code room is to need
+; less of the block. All five are small fixed lookups, identical on every level and in no
+; manifest, so their address is free. This lever is nearly spent -- what is left in there
+; is cellFillT (256 B) and the two 42-byte orb colour tables, which want a real home.
+orbBitT: !byte ${orbBitT.join(',')}
+kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
+mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
+bbLT:   !byte $0f,$07,$03,$01
+bbRT:   !byte $08,$0c,$0e,$0f
 ${SPANCAP ? `        ; Placed in the stream, not at a fixed origin: the free run below HAZ_BASE starts at a
         ; different address in a chained build, and a hard address collided there.
 ; SPANCAP: widest span, in columns, that a face at this colH may cover without being able to
