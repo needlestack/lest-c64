@@ -113,6 +113,7 @@ hp      = $80                   ; 2 bytes: pointer into this column's height tab
 errH    = $86                   ; high byte of the interpolator's error term
 uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
 uwH     = $21
+sdH     = $91                   ; the wall's height AT the seam's own column
 sdCol   = $8f                   ; seamDrw: the seam's own pixel column, the window minimum
 sdMin   = $9e                   ;   around it, and the row the SEAM (not the wall) starts on
 sdSRow  = $9f
@@ -9644,17 +9645,6 @@ mMskT: !byte 7,3,1,0
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
 
-rsHalfT: !byte 0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1
-        !byte 0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1
-        !byte 0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1
-        !byte 0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
 ; ---- the solid-run draw for a SEAM column ----
 ; Everything rfSlDr does, plus the half-height first row. Seam columns jmp here so the main block
@@ -9664,33 +9654,36 @@ seamDrw: lda rsv
         sta sdRow
         cmp #13
         bcs sdNext              ; the run starts below the horizon: nothing to draw
-        ; ---- the seam's height reference is anchored to the SEAM, not to the cell ----
-        ; It used to be min(colH) over the cell's four columns. That is the height at the cell's
-        ; RIGHT EDGE on a receding wall, and the right edge does not move while the seam slides
-        ; within the cell -- then jumps four columns nearer when the seam crosses into the next
-        ; one, while the wall's own recession drifts every height the other way. Sawtooth: the
-        ; reference measured 24,23,24,23,24,23 across six steps of one strafe, so the run start
-        ; flipped back and forth instead of stepping with the motion.
-        ;
-        ; A window CENTRED on the seam slides one column at a time, so the reference moves as
-        ; smoothly as the seam does. Same six steps, this window reads 23,23,23,23,23,23.
-        ; +/-3 is the narrowest that always contains the seam's cell wherever the seam sits in
-        ; it, and containing the cell is what makes it SAFE: the window minimum can never exceed
-        ; the cell's, so the seam can never start ABOVE the cell's solid run and paint ramp rows.
+        ; ---- two different questions, two different numbers ----
+        ; WHERE THE LINE STARTS wants a conservative floor: it may not begin above the cell's
+        ; solid run, or it paints ramp rows. A minimum over a window CENTRED on the seam is
+        ; always <= the cell's own minimum, so it is safe, and it slides a column at a time
+        ; instead of jumping four when the seam changes cell.
+        ; WHETHER IT DROPS HALF A CELL wants the opposite: the smoothest number available. That
+        ; is the wall AT THE SEAM'S OWN COLUMN -- the seam marks a fixed world boundary, so its
+        ; own height moves exactly as smoothly as you do. A MINIMUM cannot serve here: it is
+        ; whatever sits at the edge of the window, so a step in the wall entering or leaving
+        ; flips it. Measured over one strafe the window minimum read 31,32,31,32 while the wall
+        ; at the seam read 32,32,32,32.
+        ; Using either number for both jobs breaks one of them, which is how this arrived here.
         ldx colc
         lda seamT,x
         sec
         sbc #$e5
         cmp #$04
         bcc sdSub
-        lda #$01                ; a PAIR: take the left line, near enough to centre a window on
+        lda #$01                ; a PAIR: measure at its left line
 sdSub:  sta sdCode
         txa
         asl
         asl
         clc
         adc sdCode
-        sta sdCol               ; the seam's pixel column
+        sta sdCol
+        tay
+        lda colH,y
+        sta sdH                 ; the wall at the seam
+        lda sdCol
         sec
         sbc #$03
         bcs sdW0
@@ -9708,15 +9701,17 @@ sdWl:   cpy #160
 sdWn:   iny
         dex
         bne sdWl
-        ; where the SEAM starts, which is at or below where the WALL starts
-        ldy sdMin
+        ldy sdMin               ; where the LINE starts, at or below where the wall's run does
         lda rsT,y
-        sta sdSRow
+        cmp sdRow
+        bcs sdSR
+        lda sdRow               ; never above the cell's solid run
+sdSR:   sta sdSRow
         cmp #13
         bcc sdFill
-        lda #13                 ; the seam is entirely below the horizon: all solid, no line
+        lda #13                 ; entirely below the horizon: all solid, no line
         sta sdSRow
-        ; ---- rows the wall has but the seam does not: plain SOLID ----
+        ; ---- rows the wall has and the line does not: plain SOLID ----
 sdFill: lda #$01
         sta sdCode
 sdFl:   lda sdRow
@@ -9734,10 +9729,18 @@ sdFl:   lda sdRow
 sdFd:   lda sdRow
         cmp #13
         bcs sdNext              ; the solid fill reached the horizon: no line to draw
-        ; ---- and the line itself, from sdRow down ----
-        ldy sdMin
-        lda rsHalfT,y
-        beq sdFull              ; gap already 4-8px: the full-height glyph is where it should be
+        ; half when the gap is under 4px: 8*start - (100 - h) < 4, i.e. h < 104 - 8*start
+        lda sdSRow
+        asl
+        asl
+        asl
+        sta sdCode
+        lda #104
+        sec
+        sbc sdCode
+        cmp sdH
+        bcc sdFull              ; the gap is already 4-8px
+        beq sdFull
         ldx colc
         lda seamT,x
         sec
@@ -9748,7 +9751,7 @@ sdFd:   lda sdRow
         adc #$ef
         sta sdCode
         ldy sdRow
-        jsr sdPut               ; the seam's first row...
+        jsr sdPut               ; the line's first row...
         lda #24
         sec
         sbc sdRow
