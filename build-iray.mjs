@@ -5936,10 +5936,7 @@ ${CVXSEAM ? '' : `        lda spanL
         cmp cpHiT,x
         bne subCn               ; not a concave partner: convex silhouette, draw nothing
 `}subCv:  ${process.env.NOCSEAM === '1' ? 'jmp subCn   ; NOCSEAM=1: corner seams off, to tell the two writers apart' : ''}
-        lda spanR
-        lsr
-        lsr
-        tax
+        jsr subCvP              ; X = the cell, skH = the column -- on the NEARER of the two walls
         lda seamT,x
         cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
         beq subCvW              ; nothing has claimed this cell yet
@@ -5956,14 +5953,14 @@ ${CVXSEAM ? '' : `        lda spanL
         asl                     ;   and at that spacing it would not read as three anyway
         asl
         sta skL                 ; sitting sub-column * 4. skL is seamSpan's scratch, and
-        lda spanR               ;   subdivision finishes before seamSpan runs, so it is free here
+        lda skH                 ;   subdivision finishes before seamSpan runs, so it is free here
         and #$03
         ora skL
         tay
         lda seamPairT,y
         sta seamT,x
         bne subCn               ; always taken: a seam code is never zero
-subCvW: lda spanR
+subCvW: lda skH
         and #$03
         clc
         adc #${hx(SEAM0)}
@@ -15033,6 +15030,30 @@ sdNext: jmp rfNext
 ; the horizon -- the same pairing the solid chain does in one store, so callers never have to
 ; think about the second write. The buffer base is page-aligned, so rowLoT/rowHiT (which hold
 ; row*40) need only the high byte added.
+; Which of a corner's two columns carries its line. subFace has narrowed the span to ADJACENT
+; columns by the time it gets here, so spanL and spanR straddle the boundary: one is the near
+; wall, the other the far. Taking spanR unconditionally -- which is what this did -- put the mark
+; on whichever side happened to be on the RIGHT, so a convex corner with the near wall to its left
+; drew the line on the FAR wall, while its mirror image drew it on the near one. Same corner,
+; opposite reading, and the user saw it as one corner having a line and the other not.
+; colH is 1/z, so the taller column IS the nearer wall, and both are one table read away.
+;
+; Out of line because the block below ORB_SMALL has seven bytes left. As a jsr this is three bytes
+; at the call site against the six it replaces, so it SAVES three there, and costs ~22 cycles at a
+; corner -- a few hundred a frame against a frame of ~100,000.
+subCvP: ldx spanL
+        lda colH,x
+        ldy spanR
+        cmp colH,y
+        bcs subCvQ
+        ldx spanR               ; spanR is the taller of the two, so it is the nearer wall
+subCvQ: stx skH
+        txa
+        lsr
+        lsr
+        tax                     ; the cell it lands in
+        rts
+
 sdPut:  ldy sdRow
         jsr sdPut1
         lda #24
