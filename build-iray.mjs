@@ -1540,17 +1540,12 @@ const SEAM0 = glyphs.length;
 const seamRow = set => [0, 1, 2, 3]
   .reduce((b, i) => b | ((set.includes(i) ? 2 : 1) << (6 - 2 * i)), 0);
 for (let k = 0; k < 4; k++) glyphs.push(new Array(8).fill(seamRow([k])));
-// ---- and six more holding TWO lines ----
-// A char cell is 4 logical pixels, so two corners 2-4px apart land in one cell whenever the pair
-// straddles the grid -- and with one line per code the second was simply dropped. Choosing the
-// nearer one made that deterministic but not invisible: the far line still popped as it crossed
-// the cell boundary, because "which cell" is what changes, not "how many corners". Six codes is
-// every way two of four columns can be lit, so the pair is drawn as it actually falls.
-// They cost six CELL codes (KCELL 219 -> 213 in charsetgen), which moved the predicted error
-// 0.020 -> 0.020 px/frame against a shipped 445: the tail of that ramp is the cheapest currency
-// in the build.
-const SEAMPAIRS = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
-for (const ab of SEAMPAIRS) glyphs.push(new Array(8).fill(seamRow(ab)));
+// No TWO-LINE glyphs. Two corners 2-4px apart used to share a cell, and a cell carries one
+// line, so the second was dropped -- then drawn as a pair, to stop it popping as the two crossed
+// a cell boundary. Both were treatments of a rule keyed on "same char cell", which is DISCRETE
+// and therefore pops. Keying on COLUMN DISTANCE instead is continuous: see subCvM, where any two
+// lines closer than a cell collapse to the nearer one wherever they sit. The widest two lines can
+// be inside one cell is 3 columns, so that case is now unreachable and the six codes came back.
 // ---- and twelve SUB-CELL starts: the line beginning at row 2, 4 or 6 instead of 0 ----
 // A seam's top edge can only sit on a char row, so it steps 8px while the wall top moves
 // smoothly -- a black gap sweeping 0-8px and snapping back every time the wall top crosses a
@@ -1569,13 +1564,8 @@ const SEAMQ0 = glyphs.length;
 for (let v = 1; v <= 3; v++)
   for (let k = 0; k < 4; k++)
     glyphs.push([...Array(8)].map((_, r) => r < 2 * v ? seamRow([]) : seamRow([k])));
-const NSEAM = 4 + SEAMPAIRS.length + 12;
-// old sub-column * 4 + new sub-column -> the code that draws BOTH. The diagonal is a single
-// line, so a corner landing exactly where one already sits changes nothing.
-const seamPair = [];
-for (let o = 0; o < 4; o++) for (let n = 0; n < 4; n++)
-  seamPair.push(o === n ? SEAM0 + o
-    : SEAM0 + 4 + SEAMPAIRS.findIndex(([a, b]) => (a === o || a === n) && (b === o || b === n)));
+const NSEAM = 4 + 12;
+
 // ---- the sprite occluders: seven cells of black that CLIP ----
 // Bit pair 11, where every wall pixel is 01. In multicolor char mode 00 and 01 count as
 // BACKGROUND for sprite priority and 10 and 11 as FOREGROUND, so these clip a sprite whose
@@ -5944,35 +5934,7 @@ ${CVXSEAM ? '' : `        lda spanL
         cmp cpHiT,x
         bne subCn               ; not a concave partner: convex silhouette, draw nothing
 `}subCv:  ${process.env.NOCSEAM === '1' ? 'jmp subCn   ; NOCSEAM=1: corner seams off, to tell the two writers apart' : ''}
-        jsr subCvP              ; X = the cell, skH = the column -- on the NEARER of the two walls
-        lda seamT,x
-        cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
-        beq subCvW              ; nothing has claimed this cell yet
-        ; TWO corners inside one 4px cell, which happens whenever a pair 2-4px apart straddles
-        ; the grid. Draw BOTH: seamPairT maps (sitting line, arriving line) to the code that
-        ; lights both columns. Choosing between them -- by depth, which was the previous rule --
-        ; made the choice stable but the far line still appeared and vanished as the pair crossed
-        ; a cell boundary, because what changes is which CELL they are in, not how many corners
-        ; there are.
-        sec
-        sbc #${hx(SEAM0)}
-        cmp #$04
-        bcs subCn               ; already a PAIR: a third line in one cell is not representable,
-        asl                     ;   and at that spacing it would not read as three anyway
-        asl
-        sta skL                 ; sitting sub-column * 4. skL is seamSpan's scratch, and
-        lda skH                 ;   subdivision finishes before seamSpan runs, so it is free here
-        and #$03
-        ora skL
-        tay
-        lda seamPairT,y
-        sta seamT,x
-        bne subCn               ; always taken: a seam code is never zero
-subCvW: lda skH
-        and #$03
-        clc
-        adc #${hx(SEAM0)}
-        sta seamT,x
+        jsr subCvM              ; choose the column, settle any collision, place the mark
 subCn:` : ''}
         jsr subBnd              ; a face starts here: remember it as a span delimiter
 ${PIVOT ? `        ; ---- and remember it as NEXT frame's hint ----
@@ -14899,11 +14861,7 @@ occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 ; is cellFillT (256 B) and the two 42-byte orb colour tables, which want a real home.
 orbBitT: !byte ${orbBitT.join(',')}
 
-; (sitting line, arriving line) -> the code that draws BOTH, for two corners inside one char
-; cell. Indexed old*4 + new; the diagonal is a single line, so a corner landing exactly where
-; one already sits is a no-op rather than a special case. Out here with the other evicted
-; lookups, not in the ORB_SMALL block, which has no room.
-seamPairT: !byte ${seamPair.join(',')}
+
 
 ${CVXSEAM ? '' : `; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its corner
 ; line only when the run across the boundary is one of these; every other run-to-run boundary is a
@@ -14942,11 +14900,8 @@ seamDrw:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         lda seamT,x
         sec
         sbc #${hx(SEAM0)}
-        sta sdK                 ; the code's offset, decoded ONCE: it answers both "which
-        cmp #$04                ;   sub-column" and, further down, "is this a pair"
-        bcc sdSub
-        lda #$01                ; a PAIR: measure at its left line
-sdSub:  sta sdCode
+        sta sdK                 ; seamT holds only single lines now -- see subCvM -- so the
+        sta sdCode              ;   code's offset IS the sub-column
         txa
         asl
         asl
@@ -15001,9 +14956,6 @@ sdFd:   cmp #13                 ; A is still sdRow, from the compare above
 ${SEAMHALF ? `        ; gap = 8*start + h - 100, the black space between the wall at the seam and where the
         ; line would start. Push the line down by MASK - (gap & MASK) so the residual lands in a
         ; band SEAMSTEP px wide, and the edge steps by SEAMSTEP instead of by a whole char row.
-        lda sdK
-        cmp #$04
-        bcs sdFull              ; a PAIR has no sub-cell variant: full height, as before
         lda sdSRow
         asl
         asl
@@ -15052,29 +15004,82 @@ sdNext: jmp rfNext
 ; the horizon -- the same pairing the solid chain does in one store, so callers never have to
 ; think about the second write. The buffer base is page-aligned, so rowLoT/rowHiT (which hold
 ; row*40) need only the high byte added.
-; Which of a corner's two columns carries its line. subFace has narrowed the span to ADJACENT
-; columns by the time it gets here, so spanL and spanR straddle the boundary: one is the near
-; wall, the other the far. Taking spanR unconditionally -- which is what this did -- put the mark
-; on whichever side happened to be on the RIGHT, so a convex corner with the near wall to its left
-; drew the line on the FAR wall, while its mirror image drew it on the near one. Same corner,
-; opposite reading, and the user saw it as one corner having a line and the other not.
-; colH is 1/z, so the taller column IS the nearer wall, and both are one table read away.
+; ---- place a corner's mark: which column, and who wins a collision ----
+; WHICH COLUMN. subFace has narrowed the span to ADJACENT columns by the time it gets here, so
+; spanL and spanR straddle the boundary: one is the near wall, the other the far. Taking spanR
+; unconditionally put the mark on whichever side happened to be on the RIGHT, so mirror-image
+; corners resolved opposite ways -- one reading as a line on the corner in front of you, the other
+; as a line on the far wall. colH is 1/z, so the taller column IS the nearer wall.
 ;
-; Out of line because the block below ORB_SMALL has seven bytes left. As a jsr this is three bytes
-; at the call site against the six it replaces, so it SAVES three there, and costs ~22 cycles at a
-; corner -- a few hundred a frame against a frame of ~100,000.
-subCvP: ldx spanL
+; WHO WINS. Two lines closer than a char cell collapse to the NEARER one. The test is column
+; DISTANCE, not "same cell", and that distinction is the whole point: a cell-based rule is
+; discrete, so two lines 2-3px apart pop in and out as they drift across a cell boundary -- which
+; is exactly what the two-line pair glyphs were built to paper over. Distance is continuous: the
+; gap closes, crosses four columns once, and the far line goes for good. A step, not a flicker.
+;
+; Four columns is not arbitrary. The widest two lines can sit inside ONE cell is 3 columns, so
+; collapsing anything closer than 4 makes the same-cell case unreachable, and the pair glyphs with
+; it. Scanning cell-1..cell+1 covers the rule -- a line within 3 columns cannot be further away
+; than that -- and the distance test discards whatever the scan over-reaches into.
+subCvM: ldx spanL
         lda colH,x
         ldy spanR
         cmp colH,y
-        bcs subCvQ
+        bcs subCq
         ldx spanR               ; spanR is the taller of the two, so it is the nearer wall
-subCvQ: stx skH
+subCq:  stx skH                 ; our column
+        lda colH,x
+        sta skL                 ; ...and our depth: bigger colH is nearer
         txa
         lsr
         lsr
-        tax                     ; the cell it lands in
-        rts
+        sta saH                 ; our cell
+        sec
+        sbc #$01
+        bcs subCs
+        lda #$00                ; clamped at cell 0; over-reaching to the right is harmless,
+subCs:  sta saL                 ;   the distance test throws it out
+        lda #$03
+        sta sbH
+subCl:  ldy saL
+        cpy #${hx(NCELL)}
+        bcs subCk               ; past the last cell
+        lda seamT,y
+        cmp #${hx(SOLID)}
+        beq subCk               ; nothing claimed here
+        sec
+        sbc #${hx(SEAM0)}
+        sta sbL
+        tya
+        asl
+        asl
+        clc
+        adc sbL
+        sta sbL                 ; the column the sitting line is on
+        sec
+        sbc skH
+        bcs subCp
+        eor #$ff                ; |theirs - ours|
+        adc #$01
+subCp:  cmp #$04
+        bcs subCk               ; a cell apart or more: both lines can stand
+        ldy sbL
+        lda colH,y
+        cmp skL
+        bcs subCx               ; theirs is nearer, or level: ours is the one that goes
+        ldy saL
+        lda #${hx(SOLID)}
+        sta seamT,y             ; ours is nearer, so theirs makes way
+subCk:  inc saL
+        dec sbH
+        bne subCl
+        ldx saH                 ; nothing nearer stood in the way: place ours
+        lda skH
+        and #$03
+        clc
+        adc #${hx(SEAM0)}
+        sta seamT,x
+subCx:  rts
 
 sdPut:  ldy sdRow
         jsr sdPut1
