@@ -41,7 +41,7 @@ const scan = JSON.parse(readFileSync('./cellscan.json', 'utf8'));
 // 213, not 219: the seam codes went from 4 to 10 when two-line seam glyphs were added, and every
 // one of those comes out of the cell budget. Regenerating here moved the predicted error
 // 0.020 -> 0.020 px/frame against a shipped 445, so the six cost nothing measurable.
-const KCELL = +(process.env.KCELL ?? 213);
+const KCELL = +(process.env.KCELL ?? 209);
 const FRAMES = scan.positions * Math.ceil(256 / scan.angleStride);
 const parse = k => k.split(',').map(Number);
 const L1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);

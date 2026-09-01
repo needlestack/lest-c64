@@ -1546,7 +1546,23 @@ for (let k = 0; k < 4; k++) glyphs.push(new Array(8).fill(seamRow([k])));
 // in the build.
 const SEAMPAIRS = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
 for (const ab of SEAMPAIRS) glyphs.push(new Array(8).fill(seamRow(ab)));
-const NSEAM = 4 + SEAMPAIRS.length;
+// ---- and four HALF-HEIGHT singles: plain wall in rows 0-3, the line in 4-7 ----
+// The seam's top edge can only sit on a char row, so it steps 8px while the wall top moves
+// smoothly -- a 0-8px black gap that snaps back every time the wall top crosses a cell. These
+// give the top edge a second landing spot inside the first solid cell, so it steps 4px instead.
+// It makes the gap LATER, never earlier: drawing earlier means drawing into the ramp cell, which
+// is a seam variant of all 221 ramp patterns. The gap becomes 4-8px rather than 0-8px -- slightly
+// larger on average, and that is the trade.
+//
+// The BOTTOM end is free. fontB is fontA mirrored row-wise and the horizon selects it below, so
+// this same code draws the line in rows 0-3 down there, which is exactly what the wall's lower
+// end needs -- and the solid chain writes a row and its mirror in one store, so one write does
+// both. PAIRS get no half variant: they exist only where two corners share a cell, which is
+// transient, and they fall back to full height.
+const SEAMHALF0 = glyphs.length;
+for (let k = 0; k < 4; k++)
+  glyphs.push([...Array(8)].map((_, r) => r < 4 ? seamRow([]) : seamRow([k])));
+const NSEAM = 4 + SEAMPAIRS.length + 4;
 // old sub-column * 4 + new sub-column -> the code that draws BOTH. The diagonal is a single
 // line, so a corner landing exactly where one already sits changes nothing.
 const seamPair = [];
@@ -2131,6 +2147,16 @@ const edgeSrc = (nm, base) => ROWSA.map(r => {
 // with one table lookup per column.
 const rbT = [...Array(256)].map((_, cmx) => cmx > 92 ? 0 : Math.floor((92 - cmx) / 8) + 1);
 const rsT = [...Array(256)].map((_, cmn) => cmn >= 100 ? 0 : Math.ceil((100 - cmn) / 8));
+// rsHalfT[minHeight] = 1 when the seam should start half a cell into the run's first row.
+// The wall top is at 100-cmn and the run starts at 8*rsT, so the black gap is the difference.
+// Below 4px there is room to push the line down 4 and still not touch the ramp cell; at or above
+// 4 the full-height glyph already sits within 4-8px of the top. Either way the seam's top edge
+// lands on a multiple of 4 rather than 8, which is the whole point.
+// SEAMHALF=0 empties the table, which turns every column back onto the full-height glyph without
+// touching a line of 6502 -- the A/B for "is 4px actually better than 8px".
+const SEAMHALF = process.env.SEAMHALF !== '0';
+const rsHalfT = [...Array(256)].map((_, cmn) =>
+  (!SEAMHALF || cmn >= 100 ? 0 : (8 * rsT[cmn] - (100 - cmn)) < 4 ? 1 : 0));
 // entry tables: blk indexed by rb (target row rb-1), sld indexed by rs (target row rs)
 const blkEnt = sel => ['0', ...ROWSA.map(r => `${sel}bkA${r}`)].concat(['0', ...ROWSA.map(r => `${sel}bkB${r}`)]).join(',');
 const sldEnt = sel => [...ROWSA.map(r => `${sel}slA${r}`), '0'].concat([...ROWSA.map(r => `${sel}slB${r}`), '0']).join(',');
@@ -4843,6 +4869,9 @@ hp      = $80                   ; 2 bytes: pointer into this column's height tab
 errH    = $86                   ; high byte of the interpolator's error term
 uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
 uwH     = $21
+sdPtr   = $87                   ; seamDrw: 2 bytes. Shares skL/skH deliberately -- seamSpan has
+sdCode  = $8d                   ;   finished for the frame by the time renderSym runs, so all of
+sdRow   = $8e                   ;   this scratch is dead. sdCode/sdRow share saL/saH likewise.
 skL     = $87                   ; --- seam pass scratch, all dead outside seamSpan ---
 skH     = $88                   ; the seam's world coordinate k, as 8.8
 uaL     = $89                   ; u at spanL / spanR
@@ -7169,6 +7198,8 @@ rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITH
                                 ; and the column is skipped even though its seam may have MOVED.
                                 ; Collapsing this into the common path cost 914 -> 7117 wrong
                                 ; pixels across the six views.
+        jmp seamDrw             ; seam columns draw their run out at SEAM_BLK, which is the whole
+                                ; cost here: the block below ORB_SMALL has no room for the rest
 ` : ''}rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         cmp #13
         bcs rfNext
@@ -14865,6 +14896,85 @@ kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
 mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
+
+rsHalfT: ${chunk(rsHalfT).trim()}
+
+; ---- the solid-run draw for a SEAM column ----
+; Everything rfSlDr does, plus the half-height first row. Seam columns jmp here so the main block
+; spends three bytes; this is out of line because there was nowhere else to put it.
+; (EDGCHK/RAYCNT instrument rfSlDr and therefore no longer see seam columns. Diagnostic only.)
+seamDrw:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
+        sta sdRow
+        cmp #13
+        bcs sdNext              ; the run starts below the horizon: nothing to draw
+        ; The cell's MINIMUM height is the far wall's top -- the same quantity pmB3 derived rsv
+        ; from. Recomputed rather than carried: tmp does not survive the ceiling and edge runs.
+        lda colc
+        asl
+        asl
+        tay
+        lda colH,y
+        iny
+        cmp colH,y
+        bcc sdM1
+        lda colH,y
+sdM1:   iny
+        cmp colH,y
+        bcc sdM2
+        lda colH,y
+sdM2:   iny
+        cmp colH,y
+        bcc sdM3
+        lda colH,y
+sdM3:   tay
+        lda rsHalfT,y
+        beq sdFull              ; gap already 4-8px: the full-height glyph is where it should be
+        ldx colc
+        lda seamT,x
+        sec
+        sbc #${hx(SEAM0)}
+        cmp #$04
+        bcs sdFull              ; a PAIR has no half variant: full height, as before
+        clc
+        adc #${hx(SEAMHALF0)}
+        sta sdCode
+        ldy sdRow
+        jsr sdPut               ; the run's first row...
+        lda #24
+        sec
+        sbc sdRow
+        tay
+        jsr sdPut               ; ...and the row it mirrors to below the horizon, where fontB
+        inc sdRow               ;   turns the same code into a line in rows 0-3
+        lda sdRow
+        cmp #13
+        bcs sdNext              ; the half row WAS the whole run
+sdFull: lda sdRow
+        clc
+        adc bufOff
+        tay
+        lda sldLoT,y
+        sta jv
+        lda sldHiT,y
+        sta jv+1
+        ldx colc
+        lda seamT,x
+        jmp (jv)                ; -> ascending chain -> jmp rfNext
+sdNext: jmp rfNext
+
+; one char into row Y of the live buffer at this column. The buffer base is page-aligned, so
+; rowLoT/rowHiT (which hold row*40) need only the high byte added.
+sdPut:  lda rowLoT,y
+        sta sdPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta sdPtr+1
+        lda sdCode
+        ldy colc
+        sta (sdPtr),y
+        rts
+
 ${SPANCAP ? `        ; Placed in the stream, not at a fixed origin: the free run below HAZ_BASE starts at a
         ; different address in a chained build, and a hard address collided there.
 ; SPANCAP: widest span, in columns, that a face at this colH may cover without being able to
