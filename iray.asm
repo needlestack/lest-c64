@@ -193,12 +193,15 @@ pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raste
 mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
 mxHi    = $7cfb
 mxStep  = $7cfc                  ;   ...and the tour step it happened in
-mulWY   = $7cfe                  ; mulW saves Y here; $7cfe-$7cff is free in every config
+mulWY   = $7cfe                  ; mulW saves Y here
+ssCE    = $7cff                  ; SEAMPRE: the span's last char cell
 
 ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
 ssWid   = $7cf2                  ;   ...wide enough to hold a seam
 ssNear  = $7cf4                  ;   ...near enough for one to read
 ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
+ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
+ssTaken = $70b2                  ;   ...of which the char cell was already spoken for
 ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
 pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
@@ -1080,12 +1083,13 @@ subFace:lda spanR
         ; all -- it is simply the column we just found. Do it before the k=0 bail below:
         ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
         ;
-        ; ...but only if the corner is CONCAVE, an inside corner where two perpendicular faces
-        ; meet. There the two walls sit at the same depth, so it is black meeting black and the
-        ; line is the only thing dividing them. A CONVEX corner -- the end of a receding wall,
-        ; the kind you cannot see around -- is already drawn by the silhouette, which steps 20+
-        ; rows at that column. The grey line adds nothing to a boundary that emphatic, so
-        ; convex corners are left seam-free and render as plain two-black steps.
+        ; CVXSEAM=1 IS THE DEFAULT, so EVERY run end gets its mark, concave or convex -- not the
+        ; whole vertical run, just the column where black meets black. The block below is the
+        ; CVXSEAM=0 path and the rest of this note describes IT, not what ships:
+        ;   a CONCAVE corner is an inside corner where two perpendicular faces meet, both walls
+        ;   at the same depth, so the line is the only thing dividing them. A CONVEX corner --
+        ;   the end of a receding wall -- is already drawn by the silhouette stepping 20+ rows,
+        ;   and the argument was that a grey line adds nothing to a boundary that emphatic.
 subCv:  
         lda spanR
         lsr
@@ -2791,7 +2795,7 @@ ssCnt:  cmp #17
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
         ; gets suppressed.
-ssLp:   jsr seamOne
+ssLp: jsr seamOne
         dec ssN
         beq ssDn
         lda uaH                 ; step k toward the far end

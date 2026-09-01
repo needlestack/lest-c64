@@ -2320,7 +2320,7 @@ const OCC_CMP = OCCCHK && process.env.OCCCHK === '1';
 const PROFAT = +(process.env.PROFAT ?? 0);
 if (PROFAT) DIAG.push('PROFAT');
 const PROFSUB = PROFILE0 && !PROFILE1 && !PROFCOARSE;
-// DOUBLE=interpSpan|marchCol calls that routine twice. Differencing two PROFILE runs then
+// DOUBLE=interpSpan|marchCol|calcU calls that routine twice. Differencing two PROFILE runs then
 // gives its exact cost -- the old fps-based version of this trick was distorted by the
 // raster wait absorbing the extra work.
 const DOUBLE = process.env.DOUBLE || '';
@@ -2406,6 +2406,12 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // panelling, it is a speck with the same weight as one on a wall five times the size.
 // Default 12 -- keep seams only where there are at least two solid rows a side.
 const SEAMFAR = +(process.env.SEAMFAR ?? 12);
+// SEAMPRE=1: reject a span before deriving u when none of its char cells is still free.
+// MEASURED AND IT DOES NOT PAY -- kept only so the negative result is not re-derived. At the
+// long-hall viewpoint it NEVER fires: seamOne calls and rejections are unchanged (52877 -> 53105,
+// noise), because a span of ~5 char cells nearly always has one free. The 63% of boundaries that
+// get discarded collide INDIVIDUALLY, mostly with corner seams, so there is no whole-span answer.
+const SEAMPRE = flag('SEAMPRE');
 const SEAMS = process.env.SEAMS !== '0';
 // CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
 // They were dropped from convex ends because the silhouette there already steps 20+ rows so
@@ -4881,7 +4887,8 @@ pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raste
 mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
 mxHi    = $7cfb
 mxStep  = $7cfc                  ;   ...and the tour step it happened in
-mulWY   = $7cfe                  ; mulW saves Y here; $7cfe-$7cff is free in every config
+mulWY   = $7cfe                  ; mulW saves Y here
+ssCE    = $7cff                  ; SEAMPRE: the span's last char cell
 ${CULLCNT ? `culTot  = $7096                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
 dbgRun  = $70a4                 ; CULLCNT: per entity, the run that let it show through
 dbgCol  = $70ac
@@ -4894,6 +4901,8 @@ ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
 ssWid   = $7cf2                  ;   ...wide enough to hold a seam
 ssNear  = $7cf4                  ;   ...near enough for one to read
 ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
+ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
+ssTaken = $70b2                  ;   ...of which the char cell was already spoken for
 ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
 pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
@@ -5834,12 +5843,13 @@ ${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no
         ; all -- it is simply the column we just found. Do it before the k=0 bail below:
         ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
         ;
-        ; ...but only if the corner is CONCAVE, an inside corner where two perpendicular faces
-        ; meet. There the two walls sit at the same depth, so it is black meeting black and the
-        ; line is the only thing dividing them. A CONVEX corner -- the end of a receding wall,
-        ; the kind you cannot see around -- is already drawn by the silhouette, which steps 20+
-        ; rows at that column. The grey line adds nothing to a boundary that emphatic, so
-        ; convex corners are left seam-free and render as plain two-black steps.
+        ; CVXSEAM=1 IS THE DEFAULT, so EVERY run end gets its mark, concave or convex -- not the
+        ; whole vertical run, just the column where black meets black. The block below is the
+        ; CVXSEAM=0 path and the rest of this note describes IT, not what ships:
+        ;   a CONCAVE corner is an inside corner where two perpendicular faces meet, both walls
+        ;   at the same depth, so the line is the only thing dividing them. A CONVEX corner --
+        ;   the end of a receding wall -- is already drawn by the silhouette stepping 20+ rows,
+        ;   and the argument was that a grey line adds nothing to a boundary that emphatic.
 ${CVXSEAM ? '' : `        lda spanL
         tax
         lda faceIdT,x
@@ -7862,14 +7872,39 @@ ${SEAMCNT ? `        inc ssNear\n        bne ssNearX\n        inc ssNear+1\nssNe
                                 ; of cells along ONE plane, so its cells can only differ in
                                 ; the coordinate that runs along the face -- comparing the
                                 ; raw cell ids is exactly the boundary test, no masking.
-${SEAMCNT ? `        inc ssCalc\n        bne ssCalcX\n        inc ssCalc+1\nssCalcX:\n` : ''}        ldx spanL               ; now it is worth deriving u
-        jsr calcU
+${SEAMCNT ? `        inc ssCalc\n        bne ssCalcX\n        inc ssCalc+1\nssCalcX:\n` : ''}${SEAMPRE ? `        ; ---- is there ANYWHERE left to put a line in this span? ----
+        ; seamOne rejects a boundary whose char cell -- or either neighbour -- is already
+        ; marked, and it does that AFTER projecting it. Down a long hall 63% of them go that
+        ; way, mostly against corner seams subFace placed during the cast. The span's char
+        ; cells are known before any of it: spanL>>2 .. spanR>>2. If not one is still a plain
+        ; fill, every boundary would be discarded, so the whole span can go.
+        ; Tests the CELL ONLY, not its neighbours, which keeps this a strict subset of what
+        ; seamOne decides -- it can never suppress a seam that would have drawn.
+        lda spanR
+        lsr
+        lsr
+        sta ssCE
+        lda spanL
+        lsr
+        lsr
+        tax
+ssPre:  lda seamT,x
+        cmp #${hx(SOLID)}
+        beq ssPreO              ; a free cell: worth deriving u after all
+        inx
+        cpx ssCE
+        beq ssPre
+        bcc ssPre
+        jmp ssDn                ; nowhere left to put one
+ssPreO:
+` : ''}        ldx spanL               ; now it is worth deriving u
+${DOUBLE === 'calcU' ? '        jsr calcU               ; DOUBLE=calcU: price it by differencing two PROFILE runs.\n        ldx spanL               ;   calcU CLOBBERS X, which is its own input -- without this\n' : ''}        jsr calcU
         lda uwL
         sta uaL
         lda uwH
         sta uaH
         ldx spanR
-        jsr calcU
+${DOUBLE === 'calcU' ? '        jsr calcU\n        ldx spanR               ;   the repeat reads a different column and the seam count changes\n' : ''}        jsr calcU
         lda uwL
         sta ubL
         lda uwH
@@ -7901,7 +7936,7 @@ ssCnt:  cmp #17
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
         ; gets suppressed.
-ssLp:   jsr seamOne
+ssLp:${SEAMCNT ? ' inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n       ' : ''} jsr seamOne
         dec ssN
         beq ssDn
         lda uaH                 ; step k toward the far end
@@ -8026,7 +8061,12 @@ ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
         tax                     ; cell column
         lda seamT,x
         cmp #${hx(SOLID)}       ; still a plain fill? one seam line per cell
-        bne ssOne               ; already spoken for: one line per char code
+${SEAMCNT ? `        beq ssTkN
+        inc ssTaken
+        bne ssOne
+        inc ssTaken+1
+        jmp ssOne
+ssTkN:` : '        bne ssOne               ; already spoken for: one line per char code'}
         ; ---- and neither NEIGHBOUR is spoken for ----
         ; The per-cell guard only stops two lines landing in the SAME cell. subFace marks a
         ; corner from a pinned screen column and this marks a panel from a projected world
