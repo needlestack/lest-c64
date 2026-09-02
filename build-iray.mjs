@@ -2447,6 +2447,25 @@ const EDGCHK = flag('EDGCHK');
 // PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
 const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
+// ---- ONE criterion, asked at three points ----
+// SEAMMINH is the whole rule: the shortest line, in char rows above the horizon, worth drawing.
+// The other two are the SAME question asked earlier and more cheaply, so they are DERIVED rather
+// than set, which is what stops them disagreeing with it.
+//
+// A line needs 13 - startRow >= M rows, and the start row is rsT[colH] = ceil((100-colH)/8):
+//     ceil((100-h)/8) <= 13-M   <=>   100-h <= 104-8M   <=>   h >= 8M-4
+// so a wall shorter than 8M-4 pixels above the horizon can never carry a line M rows tall.
+// (colH is measured ABOVE the horizon and mirrored below, so M=1 is an 8px line above and 8
+// below: 16px in all. And 8M-4 at M=2 is 12, which is exactly the number SEAMFAR shipped with
+// before it was derived from anything.)
+//
+//   SEAMFAR   per SPAN, on the taller end   -- rejects before calcU and the walk
+//   SEAMNEAR  per SEAM, on its own column   -- rejects before the projection is used
+//   SEAMMINH  per SEAM, on the DRAWN height -- the decision, after the window floor
+//
+// Both early tests are conservative by construction: they only reject what SEAMMINH would.
+const SEAMMINH = +(process.env.SEAMMINH ?? 1);
+const SEAMCUT = Math.max(0, 8 * SEAMMINH - 4);
 // SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
 //
 // This is STRUCTURAL, not taste. A seam is a whole character -- SEAM0..SEAM0+3 are SOLID glyphs
@@ -2465,20 +2484,15 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // argument for culling EARLIER rather than later: on a wall 16px tall a panel line is not
 // panelling, it is a speck with the same weight as one on a wall five times the size.
 // Default 12 -- keep seams only where there are at least two solid rows a side.
-const SEAMFAR = +(process.env.SEAMFAR ?? 12);
+const SEAMFAR = +(process.env.SEAMFAR ?? SEAMCUT);
 // SEAMNEAR: the shortest wall, in rows, that still earns a panel line -- tested at the SEAM's own
 // column. SEAMFAR is a per-SPAN test on the TALLER end, so a span running from under the camera
 // to the far end of a corridor passes on its near end and every seam along it is drawn, however
 // far away it is. Down level 1's corridor that put two lines at row 96 against a horizon of 100:
 // four pixels tall, adding nothing, and the first things to flicker. colH at the seam's own
 // column varies smoothly with the player, so a receding line crosses this once and stays gone.
-const SEAMNEAR = +(process.env.SEAMNEAR ?? SEAMFAR);
-// SEAMMINH: the shortest line, in char rows above the horizon, worth drawing at all. Tested on
-// what actually gets DRAWN, which is the only test that catches both ways a line ends up as a
-// speck: genuinely far away, or floored by the window because a corner sits within +/-3 columns.
-// It also covers CORNER seams, which reach seamDrw like any other and are otherwise ungated --
-// down level 1's corridor the two useless lines at row 96 against a horizon of 100 were corners.
-const SEAMMINH = +(process.env.SEAMMINH ?? 2);
+const SEAMNEAR = +(process.env.SEAMNEAR ?? SEAMCUT);
+
 // SEAMPRE=1: reject a span before deriving u when none of its char cells is still free.
 // MEASURED AND IT DOES NOT PAY -- kept only so the negative result is not re-derived. At the
 // long-hall viewpoint it NEVER fires: seamOne calls and rejections are unchanged (52877 -> 53105,

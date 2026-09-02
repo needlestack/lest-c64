@@ -2750,7 +2750,7 @@ seamSpan:
         cmp colH,x
         bcs ssTall
         lda colH,x
-ssTall: cmp #$0c
+ssTall: cmp #$04
         bcc ssDn                ; too far for a one-pixel line to read as panelling
 
         ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
@@ -9570,7 +9570,7 @@ sdSR2:  sta sdSRow
         lda #13                 ; rows from here to the horizon: too few and the line is a
         sec                     ;   speck that flickers rather than reading as panelling
         sbc sdSRow
-        cmp #$02
+        cmp #$01
         bcs sdTall
         lda #13
         sta sdSRow              ; drop the line; the run draws plain solid
@@ -9821,7 +9821,7 @@ ssOf1:  clc                     ; + the span's left end, and round to the neares
         bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
         tay                     ; Y = the seam's logical column
         lda colH,y              ; and how tall the wall is HERE, not at the span's near end
-        cmp #$0c
+        cmp #$04
         bcc ssOne               ; too far off to read as panelling
 
         ; ---- keep at least four columns between any two lines ----
