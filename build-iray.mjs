@@ -2459,11 +2459,15 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // below: 16px in all. And 8M-4 at M=2 is 12, which is exactly the number SEAMFAR shipped with
 // before it was derived from anything.)
 //
-//   SEAMFAR   per SPAN, on the taller end   -- rejects before calcU and the walk
-//   SEAMNEAR  per SEAM, on its own column   -- rejects before the projection is used
-//   SEAMMINH  per SEAM, on the DRAWN height -- the decision, after the window floor
+//   SEAMFAR  per SPAN, the taller end   -- rejects a whole span before calcU and the walk
+//   ssCutS   per SPAN, ONE divide       -- the column where the wall crosses H, so the walk
+//                                          only has to compare, never look at colH again
+//   SEAMMINH per SEAM, the DRAWN height -- a backstop, not the rule: the +/-3 window floor can
+//                                          still shorten a line near a corner, which nothing
+//                                          derived from wall height alone can predict
 //
-// Both early tests are conservative by construction: they only reject what SEAMMINH would.
+// There WAS a fourth, SEAMNEAR, testing colH at the seam's own column. ssCutS answers the same
+// question for the whole span with one divide instead of a lookup per boundary, so it is gone.
 const SEAMMINH = +(process.env.SEAMMINH ?? 1);
 const SEAMCUT = Math.max(0, 8 * SEAMMINH - 4);
 // SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
@@ -2483,15 +2487,9 @@ const SEAMCUT = Math.max(0, 8 * SEAMMINH - 4);
 // So n=4 is free by construction. Past that it is a judgement, and the fixed 2px width is the
 // argument for culling EARLIER rather than later: on a wall 16px tall a panel line is not
 // panelling, it is a speck with the same weight as one on a wall five times the size.
-// Default 12 -- keep seams only where there are at least two solid rows a side.
+// Derived from SEAMMINH, not set: it is the both-ends-too-short case of the same crossing ssCutS
+// solves, and having it as its own number is how the two used to drift apart.
 const SEAMFAR = +(process.env.SEAMFAR ?? SEAMCUT);
-// SEAMNEAR: the shortest wall, in rows, that still earns a panel line -- tested at the SEAM's own
-// column. SEAMFAR is a per-SPAN test on the TALLER end, so a span running from under the camera
-// to the far end of a corridor passes on its near end and every seam along it is drawn, however
-// far away it is. Down level 1's corridor that put two lines at row 96 against a horizon of 100:
-// four pixels tall, adding nothing, and the first things to flicker. colH at the seam's own
-// column varies smoothly with the player, so a receding line crosses this once and stays gone.
-const SEAMNEAR = +(process.env.SEAMNEAR ?? SEAMCUT);
 
 // SEAMPRE=1: reject a span before deriving u when none of its char cells is still free.
 // MEASURED AND IT DOES NOT PAY -- kept only so the negative result is not re-derived. At the
@@ -4944,6 +4942,10 @@ sShi    = $94
 ssK     = $95                   ; current boundary coordinate, and how many are left
 ssN     = $96
 ssW     = $97                   ; span width in columns
+ssCut   = $9150                 ; the column where the wall crosses the height a line needs,
+ssCutD  = $9151                 ;   and which side of it is too short ($00 = to the right)
+ssHL    = $9152                 ; the two end heights, while that is being worked out
+ssHR    = $9153
 ssB16   = $914a                 ; the span's left end and width in SIXTEENTHS of a column, in the
 ssW16   = $914c                 ;   corrected basis, plus seamOne's scratch product. Absolute, not
 ssX16   = $914e                 ;   zero page: read once a boundary, and zp is spoken for.
@@ -8057,7 +8059,7 @@ ssCnt:  cmp #17
         ; nowhere until the boundary walk, and every gate above throws spans away -- the idT test
         ; alone stops about 65% of them. Sitting ahead of those cost ~90 cycles on every span that
         ; was about to be discarded.
-        ldx spanL
+${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}        ldx spanL
         jsr eff16               ; -> ssX16 = spanL*16 + its ray correction, 16-BIT
         lda ssX16
         sta ssB16
@@ -14982,7 +14984,72 @@ eff16p: clc
         inc ssX16+1
 eff16d: rts
 
-; ---- moved out of the main code block ----
+${SEAMCUT ? `; ---- where does this wall stop being tall enough to carry a line? ----
+; colH is LINEAR in screen column -- that is what the rectilinear projection buys -- so the two
+; end heights give the crossing exactly, once per span, with no per-boundary height lookup:
+;
+;     H  = ${SEAMCUT} = 8M-4, the height at which the solid run is M chars tall
+;     c* = spanL + W * (h_L - H) / (h_L - h_R)
+;
+; and every boundary past c* is shorter still, because a planar wall recedes one way. This is
+; one rule doing the work of the two it replaces: both ends below H means c* falls outside the
+; span and nothing is drawn (what SEAMFAR did), and a seam past c* is too short (what SEAMNEAR
+; did, but without reading colH for every boundary).
+;
+; SEAMFAR has already thrown out the both-ends-short case, so exactly one end is above H here.
+ssCutS: ldx spanL
+        lda colH,x
+        sta ssHL
+        ldx spanR
+        lda colH,x
+        sta ssHR
+        lda #$00
+        sta ssCutD
+        lda ssHL
+        cmp #${hx(SEAMCUT)}
+        bcc ssCtR               ; left end short -> the wall recedes LEFT
+        lda ssHR
+        cmp #${hx(SEAMCUT)}
+        bcs ssCtN               ; both ends tall enough: no cut anywhere
+        sec                     ; receding right: t = (h_L - H) / (h_L - h_R)
+        lda ssHL
+        sbc #${hx(SEAMCUT)}
+        sta fr
+        sec
+        lda ssHL
+        sbc ssHR
+        jmp ssCtT
+ssCtR:  lda #$ff
+        sta ssCutD              ; receding left: t = (H - h_L) / (h_R - h_L)
+        sec
+        lda #${hx(SEAMCUT)}
+        sbc ssHL
+        sta fr
+        sec
+        lda ssHR
+        sbc ssHL
+ssCtT:  tax                     ; X = the height difference across the span
+        lda recipLoT,x
+        sta mlo
+        lda recipHiT,x
+        sta mhi
+        jsr sideMul             ; s1 = fr * 256 / difference, the fraction along the span
+        lda s2
+        beq ssCtF
+        lda #$ff                ; saturated: the crossing is at the far end
+ssCtF:  sta mq
+        lda ssW
+        jsr mul8
+        lda phi
+        clc
+        adc spanL
+        sta ssCut
+        rts
+ssCtN:  lda #${hx(NLOG - 1)}    ; nothing on screen is past this
+        sta ssCut
+        rts
+
+` : ''}; ---- moved out of the main code block ----
 ; jsr-entered from the boundary walk, so its address is free, and the block below
 ; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
 ; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
@@ -15122,10 +15189,7 @@ ssOf1:  clc                     ; + the span's left end, and round to the neares
         cmp #${NLOG}
         bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
         tay                     ; Y = the seam's logical column
-${SEAMNEAR ? `        lda colH,y              ; and how tall the wall is HERE, not at the span's near end
-        cmp #${hx(SEAMNEAR)}
-        bcc ssOne               ; too far off to read as panelling
-` : ''}${SEAMDBG ? `        sty sdbgC
+${SEAMDBG ? `        sty sdbgC
         ldx sdbgN
         cpx #56
         bcs sdbgX
@@ -15150,7 +15214,19 @@ ${SEAMNEAR ? `        lda colH,y              ; and how tall the wall is HERE, n
         adc #$08
         sta sdbgN
 sdbgX:  ldy sdbgC` : ''}
-        ; ---- keep at least four columns between any two lines ----
+${SEAMCUT ? `        ; ---- past the point where this wall is too short to carry a line? ----
+        ; One compare. ssCutS worked out the column where the wall crosses the height a line
+        ; needs, so nothing here has to look at colH again.
+        lda ssCutD
+        bne ssCtL
+        cpy ssCut
+        beq ssCtK
+        bcs ssOne               ; receding to the RIGHT: past the cut is too short
+        bcc ssCtK
+ssCtL:  cpy ssCut
+        bcc ssOne               ; receding to the LEFT: before the cut is too short
+ssCtK:
+` : ''}        ; ---- keep at least four columns between any two lines ----
         ; This was "the cell and both its neighbours must be unmarked" -- the same blunt instrument
         ; the corner rule used to be, and it fails the same way. It is quantised to CELLS, so the
         ; gap it actually enforces runs anywhere from 5 to 11 columns depending where the cell
