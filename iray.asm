@@ -138,6 +138,9 @@ sShi    = $94
 ssK     = $95                   ; current boundary coordinate, and how many are left
 ssN     = $96
 ssW     = $97                   ; span width in columns
+ssB16   = $914a                 ; the span's left end and width in SIXTEENTHS of a column, in the
+ssW16   = $914c                 ;   corrected basis, plus seamOne's scratch product. Absolute, not
+ssX16   = $914e                 ;   zero page: read once a boundary, and zp is spoken for.
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -232,6 +235,9 @@ pfRow   = $7e44
 pfArm   = $7e43                 ; PROFAT: 0 until the start tick is reached. $7e43 is the spare byte
                                 ;   between pfPrvL and pfRow -- see the hole report, not a guess
 pfDone  = $7e45
+sdbgC   = $a9a0                 ; SEAMDBG only: the column being recorded, the write cursor, and
+sdbgN   = $a9a1                 ;   seven 8-byte records. NOT in the $91c0 gap: a label there
+sdbgB   = $a9a8                 ;   caps holeSeeT at 64 bytes, and LVL=3's sockets need 96.
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
@@ -2728,6 +2734,23 @@ seamSpan:
         cmp #$02
         bcc ssDn                ; adjacent columns: nothing between them to mark
         sta ssW                 ; span width in columns
+        ; ---- and the same two ends in SIXTEENTHS, corrected to where their rays really aim ----
+        ; Hoisted here because both are constant for the span: seamOne only needs the multiply.
+        ldx spanL
+        jsr eff16               ; -> ssX16 = spanL*16 + its ray correction, 16-BIT
+        lda ssX16
+        sta ssB16
+        lda ssX16+1
+        sta ssB16+1
+        ldx spanR
+        jsr eff16
+        sec                     ; width = right end - left end, still in sixteenths
+        lda ssX16
+        sbc ssB16
+        sta ssW16
+        lda ssX16+1
+        sbc ssB16+1
+        sta ssW16+1
         ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
         ; colH is a height in ROWS, so it is 1/z up to a constant and the whole distance test is
         ; one compare -- no arithmetic, and it lands BEFORE calcU and the divide, which is where
@@ -2808,150 +2831,6 @@ ssKup:  inc ssK
         jmp ssLp
 ssDn:   rts
 
-; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
-seamOne:
-        lda #$00                ; k as 8.8
-        sta skL
-        lda ssK
-        sta skH
-        sec                     ; a = |u_L - k|
-        lda uaL
-        sbc skL
-        sta saL
-        lda uaH
-        sbc skH
-        sta saH
-        bcs ssaP
-        sec                     ; negate
-        lda #$00
-        sbc saL
-        sta saL
-        lda #$00
-        sbc saH
-        sta saH
-ssaP:   sec                     ; b = |u_R - k|
-        lda ubL
-        sbc skL
-        sta sbL
-        lda ubH
-        sbc skH
-        sta sbH
-        bcs ssbP
-        sec
-        lda #$00
-        sbc sbL
-        sta sbL
-        lda #$00
-        sbc sbH
-        sta sbH
-        ; Squeeze a and b down to 8 bits together, so their ratio survives. The larger keeps
-        ; its top bit; the smaller may collapse to 0, which is the right limit anyway -- a
-        ; seam sitting on an endpoint belongs at that endpoint.
-ssbP:   lda saH
-        ora sbH
-        beq ssFit
-        lsr saH
-        ror saL
-        lsr sbH
-        ror sbL
-        jmp ssbP
-ssFit:  ldx spanL               ; P = a * h_L, Q = b * h_R, both 8x8 -> 16
-        lda colH,x
-        sta mq
-        lda saL
-        jsr mul8
-        lda plo
-        sta sPlo
-        lda phi
-        sta sPhi
-        ldx spanR
-        lda colH,x
-        sta mq
-        lda sbL
-        jsr mul8
-        clc                     ; sum = P + Q
-        lda plo
-        adc sPlo
-        sta sSlo
-        lda phi
-        adc sPhi
-        sta sShi
-        bcc ssNrm
-        ror sShi                ; a 17-bit sum: fold the carry back in, P follows below
-        ror sSlo
-        lsr sPhi
-        ror sPlo
-ssNrm:  lda sShi                ; scale P and sum until the sum is a byte: recip is indexed by it
-        beq ssDiv
-        lsr sShi
-        ror sSlo
-        lsr sPhi
-        ror sPlo
-        jmp ssNrm
-ssDiv:  lda sSlo
-        beq ssOne               ; degenerate (zero-length wall): leave it alone
-        tax
-        lda sPlo                ; t = P*256/sum, via one reciprocal multiply
-        sta fr
-        lda recipLoT,x
-        sta mlo
-        lda recipHiT,x
-        sta mhi
-        jsr sideMul
-        lda s2
-        beq ssT8
-        lda #$ff                ; t saturated at 1.0
-        jmp ssOff
-ssT8:   lda s1
-ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
-        lda ssW
-        jsr mul8
-        lda plo                 ; round to nearest column: truncating biased every seam a
-        cmp #$80                ; column low, which reads as the whole wall being off by one
-        lda phi
-        adc #$00
-        clc
-        adc spanL
-        cmp #160
-        bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
-        tay                     ; Y = the seam's logical column
-        tya
-        lsr
-        lsr
-        tax                     ; cell column
-        lda seamT,x
-        cmp #$01       ; still a plain fill? one seam line per cell
-        bne ssOne               ; already spoken for: one line per char code
-        ; ---- and neither NEIGHBOUR is spoken for ----
-        ; The per-cell guard only stops two lines landing in the SAME cell. subFace marks a
-        ; corner from a pinned screen column and this marks a panel from a projected world
-        ; coordinate, so the two reach a cell by completely different routes and routinely land
-        ; one cell apart -- drawn as a doubled line 1-4 pixels wide, most visibly where a near
-        ; object's silhouette sits just left of the far wall's first panel boundary.
-        ; Corner seams are written during subdivision, before this pass runs, so checking the
-        ; neighbours here gives the corner precedence: it marks real structure, a panel line is
-        ; decoration. It also thins panel lines wherever they bunch closer than a cell, which is
-        ; what happens as a receding wall approaches the vanishing point.
-        cpx #$00
-        beq ssNL                ; column 0 has no left neighbour
-        dex
-        lda seamT,x
-        inx
-        cmp #$01
-        bne ssOne
-ssNL:   cpx #39
-        beq ssNR
-        inx
-        lda seamT,x
-        dex
-        cmp #$01
-        bne ssOne
-ssNR:   tya
-        and #$03
-        clc
-        adc #$e3
-        sta seamT,x
-ssOne:  rts
 
 ; Can ANY cell of this span still take a seam? A cell qualifies only if it AND both its
 ; neighbours are unmarked -- the same three-cell rule seamOne applies below -- so a span can
@@ -9613,6 +9492,11 @@ mMskT: !byte 7,3,1,0
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
 
+; effD[c]: where column c's ray really points, minus c, in SIXTEENTHS of a column. In the stream
+; with the other displaced lookups rather than beside rayOffT -- the gap there is exactly the size
+; of rayOffT and a second 160-byte table walked straight off the end of it.
+effDT:  !byte 34,18,2,242,226,20,4,244,228,20,4,244,228,19,3,243,227,16,0,240,27,11,251,235,21,5,245,229,14,254,238,22,6,246,230,12,252,236,18,2,242,23,7,247,231,11,251,235,14,254,238,17,1,241,19,3,243,21,5,245,22,6,246,23,7,247,23,7,247,24,8,248,24,8,248,24,8,248,232,8,248,24,8,248,232,8,248,232,8,248,232,9,249,233,9,249,233,10,250,234,11,251,235,13,253,237,15,255,239,18,2,242,21,5,245,25,9,249,233,14,254,238,20,4,244,26,10,250,234,18,2,242,27,11,251,235,21,5,245,229,16,0,240,29,13,253,237,28,12,252,236,28,12,252,236,30,14,254,238,34
+
 
 ; ---- the solid-run draw for a SEAM column ----
 ; Everything rfSlDr does, plus the half-height first row. Seam columns jmp here so the main block
@@ -9759,6 +9643,211 @@ sdNext: jmp rfNext
 ; collapsing anything closer than 4 makes the same-cell case unreachable, and the pair glyphs with
 ; it. Scanning cell-1..cell+1 covers the rule -- a line within 3 columns cannot be further away
 ; than that -- and the distance test discards whatever the scan over-reaches into.
+; Column X in SIXTEENTHS, corrected to where its ray really aims. The multiply by 16 is 16-BIT:
+; a column runs to 159, so column*16 reaches 2544 and shifting an 8-bit accumulator four times
+; silently drops the top -- which is exactly what it did, and every seam landed somewhere else.
+; The correction is a SIGNED byte, so a negative one borrows from the high byte before the add.
+eff16:  lda #$00
+        sta ssX16+1
+        txa
+        asl
+        rol ssX16+1
+        asl
+        rol ssX16+1
+        asl
+        rol ssX16+1
+        asl
+        rol ssX16+1
+        sta ssX16
+        lda effDT,x
+        bpl eff16p
+        dec ssX16+1
+eff16p: clc
+        adc ssX16
+        sta ssX16
+        bcc eff16d
+        inc ssX16+1
+eff16d: rts
+
+; ---- moved out of the main code block ----
+; jsr-entered from the boundary walk, so its address is free, and the block below
+; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
+; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
+seamOne:
+        lda #$00                ; k as 8.8
+        sta skL
+        lda ssK
+        sta skH
+        sec                     ; a = |u_L - k|
+        lda uaL
+        sbc skL
+        sta saL
+        lda uaH
+        sbc skH
+        sta saH
+        bcs ssaP
+        sec                     ; negate
+        lda #$00
+        sbc saL
+        sta saL
+        lda #$00
+        sbc saH
+        sta saH
+ssaP:   sec                     ; b = |u_R - k|
+        lda ubL
+        sbc skL
+        sta sbL
+        lda ubH
+        sbc skH
+        sta sbH
+        bcs ssbP
+        sec
+        lda #$00
+        sbc sbL
+        sta sbL
+        lda #$00
+        sbc sbH
+        sta sbH
+        ; Squeeze a and b down to 8 bits together, so their ratio survives. The larger keeps
+        ; its top bit; the smaller may collapse to 0, which is the right limit anyway -- a
+        ; seam sitting on an endpoint belongs at that endpoint.
+ssbP:   lda saH
+        ora sbH
+        beq ssFit
+        lsr saH
+        ror saL
+        lsr sbH
+        ror sbL
+        jmp ssbP
+ssFit:  ldx spanL               ; P = a * h_L, Q = b * h_R, both 8x8 -> 16
+        lda colH,x
+        sta mq
+        lda saL
+        jsr mul8
+        lda plo
+        sta sPlo
+        lda phi
+        sta sPhi
+        ldx spanR
+        lda colH,x
+        sta mq
+        lda sbL
+        jsr mul8
+        clc                     ; sum = P + Q
+        lda plo
+        adc sPlo
+        sta sSlo
+        lda phi
+        adc sPhi
+        sta sShi
+        bcc ssNrm
+        ror sShi                ; a 17-bit sum: fold the carry back in, P follows below
+        ror sSlo
+        lsr sPhi
+        ror sPlo
+ssNrm:  lda sShi                ; scale P and sum until the sum is a byte: recip is indexed by it
+        beq ssDiv
+        lsr sShi
+        ror sSlo
+        lsr sPhi
+        ror sPlo
+        jmp ssNrm
+ssDiv:  lda sSlo
+        beq ssOne               ; degenerate (zero-length wall): leave it alone
+        tax
+        lda sPlo                ; t = P*256/sum, via one reciprocal multiply
+        sta fr
+        lda recipLoT,x
+        sta mlo
+        lda recipHiT,x
+        sta mhi
+        jsr sideMul
+        lda s2
+        beq ssT8
+        lda #$ff                ; t saturated at 1.0
+        jmp ssOff
+ssT8:   lda s1
+ssOff:  sta mq                  ; offset = (t * width) >> 8, in sixteenths of a column
+        lda ssW16
+        jsr mul8
+        lda phi
+        sta ssX16
+        lda #$00
+        sta ssX16+1
+        lda ssW16+1
+        beq ssOf1
+        jsr mul8                ; mq is still t
+        clc
+        lda plo
+        adc ssX16
+        sta ssX16
+        lda phi
+        adc ssX16+1
+        sta ssX16+1
+ssOf1:  clc                     ; + the span's left end, and round to the nearest whole column
+        lda ssX16
+        adc ssB16
+        sta ssX16
+        lda ssX16+1
+        adc ssB16+1
+        clc
+        pha
+        lda ssX16
+        adc #$08
+        sta ssX16
+        pla
+        adc #$00
+        lsr                     ; >> 4: sixteenths back to columns
+        ror ssX16
+        lsr
+        ror ssX16
+        lsr
+        ror ssX16
+        lsr
+        ror ssX16
+        lda ssX16
+        cmp #160
+        bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
+        tay                     ; Y = the seam's logical column
+
+        tya
+        lsr
+        lsr
+        tax                     ; cell column
+        lda seamT,x
+        cmp #$01       ; still a plain fill? one seam line per cell
+        bne ssOne               ; already spoken for: one line per char code
+        ; ---- and neither NEIGHBOUR is spoken for ----
+        ; The per-cell guard only stops two lines landing in the SAME cell. subFace marks a
+        ; corner from a pinned screen column and this marks a panel from a projected world
+        ; coordinate, so the two reach a cell by completely different routes and routinely land
+        ; one cell apart -- drawn as a doubled line 1-4 pixels wide, most visibly where a near
+        ; object's silhouette sits just left of the far wall's first panel boundary.
+        ; Corner seams are written during subdivision, before this pass runs, so checking the
+        ; neighbours here gives the corner precedence: it marks real structure, a panel line is
+        ; decoration. It also thins panel lines wherever they bunch closer than a cell, which is
+        ; what happens as a receding wall approaches the vanishing point.
+        cpx #$00
+        beq ssNL                ; column 0 has no left neighbour
+        dex
+        lda seamT,x
+        inx
+        cmp #$01
+        bne ssOne
+ssNL:   cpx #39
+        beq ssNR
+        inx
+        lda seamT,x
+        dex
+        cmp #$01
+        bne ssOne
+ssNR:   tya
+        and #$03
+        clc
+        adc #$e3
+        sta seamT,x
+ssOne:  rts
+
 subCvM: ldx spanL
         lda colH,x
         ldy spanR
