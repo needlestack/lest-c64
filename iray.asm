@@ -2754,7 +2754,7 @@ seamSpan:
         cmp colH,x
         bcs ssTall
         lda colH,x
-ssTall: cmp #$04
+ssTall: cmp #$0f
         bcc ssDn                ; too far for a one-pixel line to read as panelling
 
         ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
@@ -9572,14 +9572,7 @@ sdSR:   cmp #13
         bcc sdSR2
         lda #13                 ; entirely below the horizon: all solid, no line
 sdSR2:  sta sdSRow
-        lda #13                 ; rows from here to the horizon: too few and the line is a
-        sec                     ;   speck that flickers rather than reading as panelling
-        sbc sdSRow
-        cmp #$01
-        bcs sdTall
-        lda #13
-        sta sdSRow              ; drop the line; the run draws plain solid
-sdTall:
+
         ; ---- rows the wall has and the line does not: plain SOLID ----
         lda #$01
         sta sdCode
@@ -9689,7 +9682,7 @@ eff16d: rts
 ; colH is LINEAR in screen column -- that is what the rectilinear projection buys -- so the two
 ; end heights give the crossing exactly, once per span, with no per-boundary height lookup:
 ;
-;     H  = 4 = 8M-4, the height at which the solid run is M chars tall
+;     H  = 15 = 8M-4, the height at which the solid run is M chars tall
 ;     c* = spanL + W * (h_L - H) / (h_L - h_R)
 ;
 ; and every boundary past c* is shorter still, because a planar wall recedes one way. This is
@@ -9707,14 +9700,14 @@ ssCutS: ldx spanL
         lda #$00
         sta ssCutD
         lda ssHL
-        cmp #$04
+        cmp #$0f
         bcc ssCtR               ; left end short -> the wall recedes LEFT
         lda ssHR
-        cmp #$04
+        cmp #$0f
         bcs ssCtN               ; both ends tall enough: no cut anywhere
         sec                     ; receding right: t = (h_L - H) / (h_L - h_R)
         lda ssHL
-        sbc #$04
+        sbc #$0f
         sta fr
         sec
         lda ssHL
@@ -9723,7 +9716,7 @@ ssCutS: ldx spanL
 ssCtR:  lda #$ff
         sta ssCutD              ; receding left: t = (H - h_L) / (h_R - h_L)
         sec
-        lda #$04
+        lda #$0f
         sbc ssHL
         sta fr
         sec
@@ -9738,7 +9731,11 @@ ssCtT:  tax                     ; X = the height difference across the span
         lda s2
         beq ssCtF
         lda #$ff                ; saturated: the crossing is at the far end
-ssCtF:  sta mq
+        bne ssCtG               ; always
+ssCtF:  lda s1                  ; NOT s2 -- reading the high byte here made t zero every time,
+ssCtG:  sta mq                  ;   so c* collapsed to spanL: a right-receding wall lost every
+                                ;   seam past its first column while a left-receding one lost
+                                ;   none. The user spotted it as exactly that asymmetry.
         lda ssW
         jsr mul8
         lda phi
@@ -9968,6 +9965,14 @@ subCvM: ldx spanL
 subCq:  stx skH                 ; our column
         lda colH,x
         sta skL                 ; ...and our depth: bigger colH is nearer
+        cmp #$0f
+        bcc subCx               ; ---- too short here for a line to read ----
+                                ; The SAME dial the panel path uses, and corners need it stated
+                                ; separately because they never reach seamSpan: subCv places them
+                                ; during subdivision, so ssCutS cannot see them. Down level 1's
+                                ; corridor the useless lines at the far end were corners, and the
+                                ; span-side cutoff had no effect on them whatsoever.
+
         txa
         lsr
         lsr

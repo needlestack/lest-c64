@@ -2447,29 +2447,25 @@ const EDGCHK = flag('EDGCHK');
 // PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
 const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
-// ---- ONE criterion, asked at three points ----
-// SEAMMINH is the whole rule: the shortest line, in char rows above the horizon, worth drawing.
-// The other two are the SAME question asked earlier and more cheaply, so they are DERIVED rather
-// than set, which is what stops them disagreeing with it.
+// ---- ONE dial: how short a seam is allowed to get before it is not drawn at all ----
+// SEAMPIX is the line's half-height ABOVE the horizon, in pixels. The line is mirrored, and the
+// horizon char row is SHARED rather than doubled, so 8 here is a 16px line in all: one full char
+// above the axis and one below.
 //
-// A line needs 13 - startRow >= M rows, and the start row is rsT[colH] = ceil((100-colH)/8):
-//     ceil((100-h)/8) <= 13-M   <=>   100-h <= 104-8M   <=>   h >= 8M-4
-// so a wall shorter than 8M-4 pixels above the horizon can never carry a line M rows tall.
-// (colH is measured ABOVE the horizon and mirrored below, so M=1 is an 8px line above and 8
-// below: 16px in all. And 8M-4 at M=2 is 12, which is exactly the number SEAMFAR shipped with
-// before it was derived from anything.)
+// The wall height it needs follows from SEAMSTEP, not from char rows. The whole job of the
+// sub-cell glyphs is to land the gap between the wall's top and the line's top in a narrow band
+// -- g in {6,7} at SEAMSTEP=2 -- so
 //
-//   SEAMFAR  per SPAN, the taller end   -- rejects a whole span before calcU and the walk
-//   ssCutS   per SPAN, ONE divide       -- the column where the wall crosses H, so the walk
-//                                          only has to compare, never look at colH again
-//   SEAMMINH per SEAM, the DRAWN height -- a backstop, not the rule: the +/-3 window floor can
-//                                          still shorten a line near a corner, which nothing
-//                                          derived from wall height alone can predict
+//     line half-height = h - g,  worst case h - 7    =>   h >= SEAMPIX + 7
 //
-// There WAS a fourth, SEAMNEAR, testing colH at the seam's own column. ssCutS answers the same
-// question for the whole span with one divide instead of a lookup per boundary, so it is gone.
-const SEAMMINH = +(process.env.SEAMMINH ?? 1);
-const SEAMCUT = Math.max(0, 8 * SEAMMINH - 4);
+// and that bound holds for every SEAMSTEP, since all of them top out at g = 7.
+//
+// This REPLACES a char-row version (SEAMMINH, with h >= 8M-4) that was derived without the
+// sub-cell offset and was wrong because of it: at M=1 it admitted h = 4, where g = 6 puts the
+// line's top at pixel 102 -- below the axis, so no visible line at all. Counting char rows
+// measures the run the line sits in, not the line.
+const SEAMPIX = +(process.env.SEAMPIX ?? 8);
+const SEAMCUT = SEAMPIX ? SEAMPIX + 7 : 0;
 // SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
 //
 // This is STRUCTURAL, not taste. A seam is a whole character -- SEAM0..SEAM0+3 are SOLID glyphs
@@ -2487,7 +2483,7 @@ const SEAMCUT = Math.max(0, 8 * SEAMMINH - 4);
 // So n=4 is free by construction. Past that it is a judgement, and the fixed 2px width is the
 // argument for culling EARLIER rather than later: on a wall 16px tall a panel line is not
 // panelling, it is a speck with the same weight as one on a wall five times the size.
-// Derived from SEAMMINH, not set: it is the both-ends-too-short case of the same crossing ssCutS
+// Derived from SEAMPIX, not set: it is the both-ends-too-short case of the same crossing ssCutS
 // solves, and having it as its own number is how the two used to drift apart.
 const SEAMFAR = +(process.env.SEAMFAR ?? SEAMCUT);
 
@@ -14871,14 +14867,7 @@ sdSR:   cmp #13
         bcc sdSR2
         lda #13                 ; entirely below the horizon: all solid, no line
 sdSR2:  sta sdSRow
-${SEAMMINH ? `        lda #13                 ; rows from here to the horizon: too few and the line is a
-        sec                     ;   speck that flickers rather than reading as panelling
-        sbc sdSRow
-        cmp #${hx(SEAMMINH)}
-        bcs sdTall
-        lda #13
-        sta sdSRow              ; drop the line; the run draws plain solid
-sdTall:` : ''}
+
         ; ---- rows the wall has and the line does not: plain SOLID ----
         lda #${hx(SOLID)}
         sta sdCode
@@ -15037,7 +15026,11 @@ ssCtT:  tax                     ; X = the height difference across the span
         lda s2
         beq ssCtF
         lda #$ff                ; saturated: the crossing is at the far end
-ssCtF:  sta mq
+        bne ssCtG               ; always
+ssCtF:  lda s1                  ; NOT s2 -- reading the high byte here made t zero every time,
+ssCtG:  sta mq                  ;   so c* collapsed to spanL: a right-receding wall lost every
+                                ;   seam past its first column while a left-receding one lost
+                                ;   none. The user spotted it as exactly that asymmetry.
         lda ssW
         jsr mul8
         lda phi
@@ -15295,6 +15288,14 @@ subCvM: ldx spanL
 subCq:  stx skH                 ; our column
         lda colH,x
         sta skL                 ; ...and our depth: bigger colH is nearer
+${SEAMCUT ? `        cmp #${hx(SEAMCUT)}
+        bcc subCx               ; ---- too short here for a line to read ----
+                                ; The SAME dial the panel path uses, and corners need it stated
+                                ; separately because they never reach seamSpan: subCv places them
+                                ; during subdivision, so ssCutS cannot see them. Down level 1's
+                                ; corridor the useless lines at the far end were corners, and the
+                                ; span-side cutoff had no effect on them whatsoever.
+` : ''}
         txa
         lsr
         lsr
