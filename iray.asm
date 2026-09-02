@@ -2734,23 +2734,6 @@ seamSpan:
         cmp #$02
         bcc ssDn                ; adjacent columns: nothing between them to mark
         sta ssW                 ; span width in columns
-        ; ---- and the same two ends in SIXTEENTHS, corrected to where their rays really aim ----
-        ; Hoisted here because both are constant for the span: seamOne only needs the multiply.
-        ldx spanL
-        jsr eff16               ; -> ssX16 = spanL*16 + its ray correction, 16-BIT
-        lda ssX16
-        sta ssB16
-        lda ssX16+1
-        sta ssB16+1
-        ldx spanR
-        jsr eff16
-        sec                     ; width = right end - left end, still in sixteenths
-        lda ssX16
-        sbc ssB16
-        sta ssW16
-        lda ssX16+1
-        sbc ssB16+1
-        sta ssW16+1
         ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
         ; colH is a height in ROWS, so it is 1/z up to a constant and the whole distance test is
         ; one compare -- no arithmetic, and it lands BEFORE calcU and the divide, which is where
@@ -2813,6 +2796,26 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
 ssCnt:  cmp #17
         bcs ssDn                ; more than 16 cells of wall in one span means u is junk
         sta ssN                 ; (castRay's far/guard exits leave remL/remH meaningless)
+        ; ---- the span's two ends in SIXTEENTHS, corrected to where their rays really aim ----
+        ; Constant for the span, so seamOne only does the multiply. LAST, not first: it is read
+        ; nowhere until the boundary walk, and every gate above throws spans away -- the idT test
+        ; alone stops about 65% of them. Sitting ahead of those cost ~90 cycles on every span that
+        ; was about to be discarded.
+        ldx spanL
+        jsr eff16               ; -> ssX16 = spanL*16 + its ray correction, 16-BIT
+        lda ssX16
+        sta ssB16
+        lda ssX16+1
+        sta ssB16+1
+        ldx spanR
+        jsr eff16
+        sec                     ; width = right end - left end, still in sixteenths
+        lda ssX16
+        sbc ssB16
+        sta ssW16
+        lda ssX16+1
+        sbc ssB16+1
+        sta ssW16+1
         ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
