@@ -118,6 +118,11 @@ sdH     = $91                   ; the wall's height AT the seam's own column
 sdCol   = $8f                   ; seamDrw: the seam's own pixel column, the window minimum
 sdMin   = $9e                   ;   around it, and the row the SEAM (not the wall) starts on
 sdSRow  = $9f
+ssCol   = $8d                   ; seamOne's distance test: the seam's column and cell, the cell
+ssCell  = $8e                   ;   being scanned, how many are left, and a scratch. All of it is
+ssScan  = $8f                   ;   seam-pass zp the projective solve has finished with by here.
+ssCnt3  = $9e
+ssTmp   = $91
 sdPtr   = $87                   ; seamDrw: 2 bytes. Shares skL/skH deliberately -- seamSpan has
 sdCode  = $8d                   ;   finished for the frame by the time renderSym runs, so all of
 sdRow   = $8e                   ;   this scratch is dead. sdCode/sdRow share saL/saH likewise.
@@ -2856,20 +2861,15 @@ ssAny:  lda spanR
         lsr
         lsr
         tax
+        ; An UNMARKED cell is the test now, not the three-cell one: the distance rule can place a
+        ; line in a cell whose neighbours are marked, so asking the old question here would stop
+        ; the walk while placements were still possible. This is looser, so it fires less often --
+        ; correct beats clever for an early-out.
 ssAnL:  lda seamT,x
         cmp #$01
         bne ssAnX
-        txa
-        beq ssAnA               ; column 0 has no left neighbour
-        lda seamT-1,x
-        cmp #$01
-        bne ssAnX
-ssAnA:  cpx #$27
-        beq ssAnF               ; cpx left carry set, which is the answer
-        lda seamT+1,x
-        cmp #$01
-        bne ssAnX
-ssAnF:  rts                     ; carry SET: this cell is still writable
+ssAnF:  sec
+        rts                     ; carry SET: a line might still go here
 ssAnX:  inx
         cpx ssAng
         beq ssAnL
@@ -9824,38 +9824,56 @@ ssOf1:  clc                     ; + the span's left end, and round to the neares
         cmp #$0c
         bcc ssOne               ; too far off to read as panelling
 
+        ; ---- keep at least four columns between any two lines ----
+        ; This was "the cell and both its neighbours must be unmarked" -- the same blunt instrument
+        ; the corner rule used to be, and it fails the same way. It is quantised to CELLS, so the
+        ; gap it actually enforces runs anywhere from 5 to 11 columns depending where the cell
+        ; boundaries happen to fall; as seams drift across those boundaries the surviving set
+        ; changes, which is oscillation rather than thinning.
+        ; Four columns flat is uniform, and it is the number the corner rule already uses, chosen
+        ; for the same two reasons: two lines can never share a char cell (the widest they can sit
+        ; inside one is 3 columns), and nothing changes as they cross a cell boundary.
+        ; A panel never displaces what is already there. Corners are written during subdivision,
+        ; before this pass runs, so they keep precedence -- they mark real structure, a panel line
+        ; is decoration.
+        sty ssCol
         tya
         lsr
         lsr
-        tax                     ; cell column
-        lda seamT,x
-        cmp #$01       ; still a plain fill? one seam line per cell
-        bne ssOne               ; already spoken for: one line per char code
-        ; ---- and neither NEIGHBOUR is spoken for ----
-        ; The per-cell guard only stops two lines landing in the SAME cell. subFace marks a
-        ; corner from a pinned screen column and this marks a panel from a projected world
-        ; coordinate, so the two reach a cell by completely different routes and routinely land
-        ; one cell apart -- drawn as a doubled line 1-4 pixels wide, most visibly where a near
-        ; object's silhouette sits just left of the far wall's first panel boundary.
-        ; Corner seams are written during subdivision, before this pass runs, so checking the
-        ; neighbours here gives the corner precedence: it marks real structure, a panel line is
-        ; decoration. It also thins panel lines wherever they bunch closer than a cell, which is
-        ; what happens as a receding wall approaches the vanishing point.
-        cpx #$00
-        beq ssNL                ; column 0 has no left neighbour
-        dex
-        lda seamT,x
-        inx
+        sta ssCell
+        sec
+        sbc #$01
+        bcs ssD0
+        lda #$00                ; clamped at cell 0; over-reaching right is harmless, the
+ssD0:   sta ssScan              ;   distance test throws it out
+        lda #$03
+        sta ssCnt3
+ssDl:   ldy ssScan
+        cpy #$28
+        bcs ssDk                ; past the last cell
+        lda seamT,y
         cmp #$01
-        bne ssOne
-ssNL:   cpx #39
-        beq ssNR
-        inx
-        lda seamT,x
-        dex
-        cmp #$01
-        bne ssOne
-ssNR:   tya
+        beq ssDk                ; nothing claimed here
+        sec
+        sbc #$e3
+        sta ssTmp
+        tya
+        asl
+        asl
+        clc
+        adc ssTmp               ; the column that line sits on
+        sec
+        sbc ssCol
+        bcs ssDp
+        eor #$ff                ; |theirs - ours|
+        adc #$01
+ssDp:   cmp #$04
+        bcc ssOne               ; within three columns of a line already drawn
+ssDk:   inc ssScan
+        dec ssCnt3
+        bne ssDl
+        ldx ssCell
+        lda ssCol
         and #$03
         clc
         adc #$e3
