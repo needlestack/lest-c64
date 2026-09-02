@@ -2466,6 +2466,19 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // panelling, it is a speck with the same weight as one on a wall five times the size.
 // Default 12 -- keep seams only where there are at least two solid rows a side.
 const SEAMFAR = +(process.env.SEAMFAR ?? 12);
+// SEAMNEAR: the shortest wall, in rows, that still earns a panel line -- tested at the SEAM's own
+// column. SEAMFAR is a per-SPAN test on the TALLER end, so a span running from under the camera
+// to the far end of a corridor passes on its near end and every seam along it is drawn, however
+// far away it is. Down level 1's corridor that put two lines at row 96 against a horizon of 100:
+// four pixels tall, adding nothing, and the first things to flicker. colH at the seam's own
+// column varies smoothly with the player, so a receding line crosses this once and stays gone.
+const SEAMNEAR = +(process.env.SEAMNEAR ?? SEAMFAR);
+// SEAMMINH: the shortest line, in char rows above the horizon, worth drawing at all. Tested on
+// what actually gets DRAWN, which is the only test that catches both ways a line ends up as a
+// speck: genuinely far away, or floored by the window because a corner sits within +/-3 columns.
+// It also covers CORNER seams, which reach seamDrw like any other and are otherwise ungated --
+// down level 1's corridor the two useless lines at row 96 against a horizon of 100 were corners.
+const SEAMMINH = +(process.env.SEAMMINH ?? 2);
 // SEAMPRE=1: reject a span before deriving u when none of its char cells is still free.
 // MEASURED AND IT DOES NOT PAY -- kept only so the negative result is not re-derived. At the
 // long-hall viewpoint it NEVER fires: seamOne calls and rejections are unchanged (52877 -> 53105,
@@ -14839,6 +14852,14 @@ sdSR:   cmp #13
         bcc sdSR2
         lda #13                 ; entirely below the horizon: all solid, no line
 sdSR2:  sta sdSRow
+${SEAMMINH ? `        lda #13                 ; rows from here to the horizon: too few and the line is a
+        sec                     ;   speck that flickers rather than reading as panelling
+        sbc sdSRow
+        cmp #${hx(SEAMMINH)}
+        bcs sdTall
+        lda #13
+        sta sdSRow              ; drop the line; the run draws plain solid
+sdTall:` : ''}
         ; ---- rows the wall has and the line does not: plain SOLID ----
         lda #${hx(SOLID)}
         sta sdCode
@@ -15084,7 +15105,10 @@ ssOf1:  clc                     ; + the span's left end, and round to the neares
         cmp #${NLOG}
         bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
         tay                     ; Y = the seam's logical column
-${SEAMDBG ? `        sty sdbgC
+${SEAMNEAR ? `        lda colH,y              ; and how tall the wall is HERE, not at the span's near end
+        cmp #${hx(SEAMNEAR)}
+        bcc ssOne               ; too far off to read as panelling
+` : ''}${SEAMDBG ? `        sty sdbgC
         ldx sdbgN
         cpx #56
         bcs sdbgX

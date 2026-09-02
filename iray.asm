@@ -9564,6 +9564,14 @@ sdSR:   cmp #13
         bcc sdSR2
         lda #13                 ; entirely below the horizon: all solid, no line
 sdSR2:  sta sdSRow
+        lda #13                 ; rows from here to the horizon: too few and the line is a
+        sec                     ;   speck that flickers rather than reading as panelling
+        sbc sdSRow
+        cmp #$02
+        bcs sdTall
+        lda #13
+        sta sdSRow              ; drop the line; the run draws plain solid
+sdTall:
         ; ---- rows the wall has and the line does not: plain SOLID ----
         lda #$01
         sta sdCode
@@ -9809,6 +9817,9 @@ ssOf1:  clc                     ; + the span's left end, and round to the neares
         cmp #160
         bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
         tay                     ; Y = the seam's logical column
+        lda colH,y              ; and how tall the wall is HERE, not at the span's near end
+        cmp #$0c
+        bcc ssOne               ; too far off to read as panelling
 
         tya
         lsr
