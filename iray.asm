@@ -2802,9 +2802,18 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
         lda ubH
         sec
         sbc uaH
-ssCnt:  cmp #17
-        bcs ssDn                ; more than 16 cells of wall in one span means u is junk
-        sta ssN                 ; (castRay's far/guard exits leave remL/remH meaningless)
+ssCnt:  cmp #$11
+        bcs ssDn                ; ---- more cells of wall in one span than SEAMMAXN ----
+        sta ssN                 ; Written as a tripwire for junk u -- castRay's far/guard exits
+                                ; leave remL/remH meaningless. But cfar says of itself that it is
+                                ; "unreachable with a solid border", and the build ASSERTS a solid
+                                ; border (the two loops beside the run tables), so that case cannot
+                                ; arise. The guard has been dead in its stated role since that
+                                ; assert was written.
+                                ; What it still does is cap LONG WALLS: a run can be MAPW cells,
+                                ; and a span covering more than this gets no seams AT ALL -- not
+                                ; even on its near part, since this rejects before ssCutS could
+                                ; clip the far end.
         ; ---- the span's two ends in SIXTEENTHS, corrected to where their rays really aim ----
         ; Constant for the span, so seamOne only does the multiply. LAST, not first: it is read
         ; nowhere until the boundary walk, and every gate above throws spans away -- the idT test

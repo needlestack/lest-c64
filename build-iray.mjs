@@ -2464,6 +2464,9 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // sub-cell offset and was wrong because of it: at M=1 it admitted h = 4, where g = 6 puts the
 // line's top at pixel 102 -- below the axis, so no visible line at all. Counting char rows
 // measures the run the line sits in, not the line.
+// SEAMMAXN: most cells of wall one span may cover and still get seams. See the note at ssCnt --
+// it is a length cap, not the junk-u tripwire it was written as.
+const SEAMMAXN = +(process.env.SEAMMAXN ?? 16);
 const SEAMPIX = +(process.env.SEAMPIX ?? 8);
 const SEAMCUT = SEAMPIX ? SEAMPIX + 7 : 0;
 // SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
@@ -8047,9 +8050,18 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
         lda ubH
         sec
         sbc uaH
-ssCnt:  cmp #17
-        bcs ssDn                ; more than 16 cells of wall in one span means u is junk
-        sta ssN                 ; (castRay's far/guard exits leave remL/remH meaningless)
+ssCnt:  cmp #${hx(SEAMMAXN + 1)}
+        bcs ssDn                ; ---- more cells of wall in one span than SEAMMAXN ----
+        sta ssN                 ; Written as a tripwire for junk u -- castRay's far/guard exits
+                                ; leave remL/remH meaningless. But cfar says of itself that it is
+                                ; "unreachable with a solid border", and the build ASSERTS a solid
+                                ; border (the two loops beside the run tables), so that case cannot
+                                ; arise. The guard has been dead in its stated role since that
+                                ; assert was written.
+                                ; What it still does is cap LONG WALLS: a run can be MAPW cells,
+                                ; and a span covering more than this gets no seams AT ALL -- not
+                                ; even on its near part, since this rejects before ssCutS could
+                                ; clip the far end.
         ; ---- the span's two ends in SIXTEENTHS, corrected to where their rays really aim ----
         ; Constant for the span, so seamOne only does the multiply. LAST, not first: it is read
         ; nowhere until the boundary walk, and every gate above throws spans away -- the idT test
