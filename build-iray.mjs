@@ -15817,7 +15817,29 @@ twSub:  lda twTk
         bcs twCnt
         dec twTk+1
         jmp twCnt
-twExp:  lda #$00
+twExp:  ; ---- the step ends THIS frame: move only the ticks it had LEFT ----
+        ; A step expires when its remaining ticks fall below the elapsed ticks of this render,
+        ; but the movement for the frame was still the FULL elapsed -- so every step overran by
+        ; up to one render frame, about 4 ticks at 15fps, a sixteenth of a cell. Small, except
+        ; that it lands differently depending on where frame boundaries fall against the step
+        ; durations, which moves with the frame rate AND with how long the disk took to load.
+        ; That is why the same build walked the route correctly once and a hair long the next
+        ; time, and why nudging a waypoint could not fix it: the error was not in the waypoint.
+        ; Clamping here makes a step's total movement exactly duration * rate -- the earlier
+        ; frames consume twEl each, this one consumes what is left -- so the route is the same
+        ; on any build at any frame rate, which is the whole point of a scripted walkthrough.
+        ; Floored at 1 because moveApply's loop is a do-while: dtm = 0 would run it 256 times
+        ; and tunnel the player through a wall.
+        ; TOURW-only code, so the player's own movement is untouched.
+        lda twTk
+        bne twExC
+        lda #$01
+twExC:  cmp dtv
+        bcs twExZ               ; the step had more time left than this frame used: nothing to do
+        sta dtv                 ; dtm and dtt are recomputed from dtv on the RUN path, and left
+        sta dtm                 ;   alone on the walk path, so all three want clamping
+        sta dtt
+twExZ:  lda #$00
         sta twTk
         sta twTk+1
         beq twStepOn            ; always taken
