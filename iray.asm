@@ -2773,7 +2773,7 @@ seamSpan:
         cmp colH,x
         bcs ssTall
         lda colH,x
-ssTall: cmp #$0f
+ssTall: cmp #$0b
         bcc ssDn                ; too far for a one-pixel line to read as panelling
 
         ; Cheap reject FIRST. idT already holds the hit cell at both ends, and the cell
@@ -9699,7 +9699,7 @@ eff16d: rts
 ; colH is LINEAR in screen column -- that is what the rectilinear projection buys -- so the two
 ; end heights give the crossing exactly, once per span, with no per-boundary height lookup:
 ;
-;     H  = 15 = 8M-4, the height at which the solid run is M chars tall
+;     H  = 11 = 8M-4, the height at which the solid run is M chars tall
 ;     c* = spanL + W * (h_L - H) / (h_L - h_R)
 ;
 ; and every boundary past c* is shorter still, because a planar wall recedes one way. This is
@@ -9717,14 +9717,14 @@ ssCutS: ldx spanL
         lda #$00
         sta ssCutD
         lda ssHL
-        cmp #$0f
+        cmp #$0b
         bcc ssCtR               ; left end short -> the wall recedes LEFT
         lda ssHR
-        cmp #$0f
+        cmp #$0b
         bcs ssCtN               ; both ends tall enough: no cut anywhere
         sec                     ; receding right: t = (h_L - H) / (h_L - h_R)
         lda ssHL
-        sbc #$0f
+        sbc #$0b
         sta fr
         sec
         lda ssHL
@@ -9733,7 +9733,7 @@ ssCutS: ldx spanL
 ssCtR:  lda #$ff
         sta ssCutD              ; receding left: t = (H - h_L) / (h_R - h_L)
         sec
-        lda #$0f
+        lda #$0b
         sbc ssHL
         sta fr
         sec
@@ -9989,13 +9989,6 @@ subCvM: ldx spanL
 subCq:  stx skH                 ; our column
         lda colH,x
         sta skL                 ; ...and our depth: bigger colH is nearer
-        cmp #$0f
-        bcc subCx               ; ---- too short here for a line to read ----
-                                ; The SAME dial the panel path uses, and corners need it stated
-                                ; separately because they never reach seamSpan: subCv places them
-                                ; during subdivision, so ssCutS cannot see them. Down level 1's
-                                ; corridor the useless lines at the far end were corners, and the
-                                ; span-side cutoff had no effect on them whatsoever.
 
         txa
         lsr

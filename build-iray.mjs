@@ -2491,8 +2491,15 @@ const SEAMMAXN = +(process.env.SEAMMAXN ?? 0);
 // SEAMWIDE: narrowest face, in columns, that can still hold a panel line. Derived from the
 // four-column spacing rule, not chosen -- see the note at the test.
 const SEAMWIDE = +(process.env.SEAMWIDE ?? 7);
-const SEAMPIX = +(process.env.SEAMPIX ?? 8);
+const SEAMPIX = +(process.env.SEAMPIX ?? 4);
 const SEAMCUT = SEAMPIX ? SEAMPIX + 7 : 0;
+// SEAMPIXC: the same cutoff for CORNER seams, separately, and OFF by default. A corner marks real
+// structure -- where two planes meet, or where a wall ends against something behind it -- and it
+// stays legible at sizes where a panel line is just a speck, so it earns no distance rule. This
+// was briefly tied to SEAMPIX while chasing far-end clutter down a corridor, which quietly made
+// distant corners vanish; they had never had a cutoff before and did not want one.
+const SEAMPIXC = +(process.env.SEAMPIXC ?? 0);
+const SEAMCUTC = SEAMPIXC ? SEAMPIXC + 7 : 0;
 // SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
 //
 // This is STRUCTURAL, not taste. A seam is a whole character -- SEAM0..SEAM0+3 are SOLID glyphs
@@ -15341,13 +15348,11 @@ subCvM: ldx spanL
 subCq:  stx skH                 ; our column
         lda colH,x
         sta skL                 ; ...and our depth: bigger colH is nearer
-${SEAMCUT ? `        cmp #${hx(SEAMCUT)}
-        bcc subCx               ; ---- too short here for a line to read ----
-                                ; The SAME dial the panel path uses, and corners need it stated
-                                ; separately because they never reach seamSpan: subCv places them
-                                ; during subdivision, so ssCutS cannot see them. Down level 1's
-                                ; corridor the useless lines at the far end were corners, and the
-                                ; span-side cutoff had no effect on them whatsoever.
+${SEAMCUTC ? `        cmp #${hx(SEAMCUTC)}
+        bcc subCx               ; SEAMPIXC: a height cutoff for corners, off unless asked for.
+                                ; Corners never reach seamSpan -- subCv places them during
+                                ; subdivision -- so the panel path's cutoff cannot see them, and
+                                ; tying them to it made distant corners disappear.
 ` : ''}
         txa
         lsr
