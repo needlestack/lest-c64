@@ -12409,8 +12409,18 @@ asPer:  sty asPCur
         adc dtv
         cmp asPCur              ; both periods are per LEVEL, swapped with the rest of the manifest
         bcc asKeep
-        jsr angOne              ; due a step (X is the entity; angOne preserves nothing)
-        lda #$00
+        sbc asPCur              ; ---- CARRY the remainder, do not zero it ----
+        pha                     ; Carry is set from the cmp, so this is A - period. Zeroing made
+        jsr angOne              ; the effective period "period + whatever this frame overshot by",
+        pla                     ; and that overshoot is one frame of ticks -- so the angel walked
+                                ; SLOWER on a slower build, and faster down an empty corridor than
+                                ; in a dense view. Carrying it makes the average period exact at
+                                ; any frame rate, which is what the accumulator was for.
+                                ; It also un-breaks the scripted walkthrough: TOURW's "wait until
+                                ; the angel reaches (4,4)" is a CONDITION, so a drifting angel
+                                ; clock landed that step on a different tick every time the frame
+                                ; rate moved, and every step after it walked a different line.
+                                ; (X is the entity; angOne preserves nothing, hence the pha/pla.)
 asKeep: ldx amIdx
         sta angAccT,x
 asNext: ldx amIdx
