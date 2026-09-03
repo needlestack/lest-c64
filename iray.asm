@@ -2936,7 +2936,9 @@ spwDn:
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
         ; gets suppressed.
-ssLp:   jsr ssAny               ; nothing writable left: every remaining boundary is a certain
+ssLp:   jsr ssPw                ; no panel wide enough to place a line in: stop, because the
+        bcs ssDn                ;   face only gets narrower from here
+        jsr ssAny               ; nothing writable left: every remaining boundary is a certain
         bcc ssDn                ; discard, so stop rather than project them
         jsr seamOne
         dec ssN
@@ -2978,7 +2980,7 @@ ssAny:  lda spanR
 ssAnL:  lda seamT,x
         cmp #$01
         bne ssAnX
-ssAnF:  sec
+        sec
         rts                     ; carry SET: a line might still go here
 ssAnX:  inx
         cpx ssAng
@@ -9883,12 +9885,14 @@ ssCtN:  lda #$9f    ; nothing on screen is past this
 ; jsr-entered from the boundary walk, so its address is free, and the block below
 ; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
 ; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
-seamOne:
-        ; ---- is there a panel here wide enough to place a line in? ----
-        ; First test in the routine: it is the cheapest thing here and it fires on exactly the
-        ; boundaries whose projection was going to be thrown away by the four-column rule anyway,
-        ; ~1000 cycles later. rts rather than a branch to ssOne, which is a routine away.
-        lda #$00                ; s = |boundary - player| along the face, 8.8 cells
+
+; ---- ssPw: is there a panel at ssK wide enough to place a line in? ----
+; Carry CLEAR = yes. Called from the walk BEFORE ssAny because it is O(1) against ssAny's scan
+; over the span's cells, and down a hall it is the test that actually fires: a boundary too narrow
+; to place stops the walk outright, since everything further along the face is narrower still.
+; The 16-bit compare at the end already leaves the answer in carry, so the routine needs no
+; epilogue -- and the early "too far to bother" exit lands on the same rts with carry SET.
+ssPw:   lda #$00                ; s = |boundary - player| along the face, 8.8 cells
         sec
         sbc ssPUL
         sta shS
@@ -9905,7 +9909,7 @@ seamOne:
         sta shS+1
 spwSp:  lda shS+1
         cmp #$40
-        bcs spwOut              ; 64 cells along: out by any threshold, and s_q would overflow
+        bcs spwRt               ; 64 cells along: out by any threshold, and s_q would overflow
         lda shS                 ; s in QUARTER cells, rounded, on the same scale as dp
         clc
         adc #$20
@@ -9924,19 +9928,9 @@ spwSp:  lda shS+1
         cmp ssLim
         lda phi
         sbc ssLim+1
-        bcc spwIn
-        ; ---- and STOP: every boundary further along this face is worse ----
-        ; The walk starts at the near end, so |s| only grows once it starts growing. The one shape
-        ; that could dip -- a wall passing BESIDE you, |s| falling to 0 mid-span and rising again --
-        ; cannot fail here first: the foot is only in view when you look within 33 degrees of the
-        ; wall's normal, and then both ends sit inside dp*tan(33), which is far inside the
-        ; threshold at every dp (0.33 against 4.14 at dp=0.5, 5.20 against 14.62 at dp=8). So a
-        ; failure only ever happens in the monotone tail. ssN=1 makes the caller's "dec ssN / beq"
-        ; end the walk, which costs two instructions and skips every remaining projection.
-spwOut: lda #$01
-        sta ssN
-        rts
-spwIn:
+spwRt:  rts                     ; carry clear = the panel is wide enough to place a line in
+
+seamOne:
         lda #$00                ; k as 8.8
         sta skL
         lda ssK
