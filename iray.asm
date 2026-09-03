@@ -9980,12 +9980,25 @@ ssDk:   inc ssScan
         sta seamT,x
 ssOne:  rts
 
+        ; ---- and a DEAD BAND on that choice, or a concave corner dithers ----
+        ; The two candidates are adjacent columns, so at a CONCAVE corner -- where the faces meet
+        ; at the same depth -- their heights are near-tied and the comparison flips as they cross.
+        ; Measured walking forward past one: colH 50/51 -> 51/51 -> 51/52 put the mark at column
+        ; 96, 95, 96, a visible left-right jump, while the corner itself never moved (bndT read
+        ; 80,96,155 at all three). A convex corner is a near wall against a far one, never close,
+        ; which is why only concave ones did it.
+        ; So spanR only wins when it is taller by SEAMTIE or more. Inside the band the two are
+        ; equally near and "nearer" carries no information, so a fixed side is the honest answer --
+        ; and it is deterministic per frame, not hysteresis: no memory of what was chosen before.
 subCvM: ldx spanL
-        lda colH,x
         ldy spanR
-        cmp colH,y
-        bcs subCq
-        ldx spanR               ; spanR is the taller of the two, so it is the nearer wall
+        lda colH,y
+        sec
+        sbc colH,x              ; h_R - h_L
+        bcc subCq               ; spanL is taller: it is the nearer wall
+        cmp #$04
+        bcc subCq               ; too close to call: take a fixed side rather than dither
+        ldx spanR               ; spanR is taller by a margin, so it is the nearer wall
 subCq:  stx skH                 ; our column
         lda colH,x
         sta skL                 ; ...and our depth: bigger colH is nearer
