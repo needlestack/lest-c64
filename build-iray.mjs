@@ -2561,16 +2561,21 @@ const SEAMPANEL = process.env.SEAMPANEL !== '0';
 // the wall-aligned coordinates of it. So "wide enough" rearranges to
 //     s*s <= dp * (K/n - dp)
 // with no division and no trigonometry, and both inputs are subtracts on bytes already in hand:
-// runPlaneT holds the wall's plane, px/py the player, and ssK the boundary. Held in HALF cells so
-// the fractional part of the player's position survives a byte: s_h*s_h <= dp_h * (2K/n - dp_h).
+// runPlaneT holds the wall's plane, px/py the player, and ssK the boundary. Held in QUARTER cells
+// so the player's fractional position survives a byte: s_q*s_q <= dp_q * (4K/n - dp_q).
+// Quarter and not half, and ROUNDED not truncated, because the limit goes as sqrt(dp) and half
+// cells are far too coarse near the player. Walking dp from 1.027 to 0.973 truncated it from 1.0
+// to 0.5, HALVED the budget and dropped two extra seams in a single step -- reported as "two seams
+// disappear at once, earlier than I'd expect", and it was exactly that. Rounding alone does not
+// fix it: 0.75 and 1.24 would still share a bucket. This is why 4K/n must fit a byte, hence n >= 3.
 // The falloff it gives, in cells along the wall, is continuous in both distance and angle:
 //     dp 0.25 -> 2.9    dp 1 -> 5.8    dp 2 -> 8.1    dp 4 -> 11.1    dp 8 -> 14.6
 // K varies with sec^2 across the screen (138.7 at centre, 175 at the edge), so the threshold is
 // soft by about 20% either way. That is well inside how fuzzy "wide enough to read" is.
 const SEAMPW = CELLMERGE ? 0 : +(process.env.SEAMPW ?? 4);   // idT/faceIdT hold CELL ids under
                                         // CELLMERGE, so the run lookup would read gibberish
-if (SEAMPW && SEAMPW < 2) throw new Error(`SEAMPW=${SEAMPW}: 2K/n must fit a byte, so n >= 2`);
-const PW2C = SEAMPW ? Math.round(2 * NLOG / (FOV / 256 * 2 * Math.PI) / SEAMPW) : 0;
+if (SEAMPW && SEAMPW < 3) throw new Error(`SEAMPW=${SEAMPW}: 4K/n must fit a byte, so n >= 3`);
+const PW4C = SEAMPW ? Math.round(4 * NLOG / (FOV / 256 * 2 * Math.PI) / SEAMPW) : 0;
 if (SEAMPW !== 4) DIAG.push(`SEAMPW=${SEAMPW}`);
 const SEAMHYST = process.env.SEAMHYST !== '0';
 const HYSN = 12;                        // band slots. Overflow just skips the band for the extras,
@@ -8217,16 +8222,27 @@ spwA:   sta shD+1
         lda #$00
         sbc shD+1
         sta shD+1
-spwP:   lda shD                 ; dp in HALF cells = the 8.8 value >> 7 = hi*2 + bit 7 of lo
-        asl
+spwP:   lda shD+1               ; 64 cells to the side: the shift below would wrap, and SEAMFAR
+        cmp #$40                ;   threw this away long ago
+        bcs spwNo
+        lda shD                 ; dp in QUARTER cells, ROUNDED: (dp8.8 + 32) >> 6, which is the
+        clc                     ;   top byte once it has been shifted left twice
+        adc #$20
+        sta shD
         lda shD+1
-        rol
+        adc #$00
+        sta shD+1
+        asl shD
+        rol shD+1
+        asl shD
+        rol shD+1
+        lda shD+1
         bne spwNz
-        lda #$01                ; floored at half a cell: standing ON the plane is a degenerate
-spwNz:  cmp #${hx(PW2C)}        ;   reading, not a reason to cull the whole wall
+        lda #$01                ; floored at a quarter cell: standing ON the plane is a degenerate
+spwNz:  cmp #${hx(PW4C)}        ;   reading, not a reason to cull the whole wall
         bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
         sta shD
-        lda #${hx(PW2C)}        ; lim = dp_h * (2K/n - dp_h), the largest s_h*s_h worth drawing
+        lda #${hx(PW4C)}        ; lim = dp_q * (4K/n - dp_q), the largest s_q*s_q worth drawing
         sec
         sbc shD
         sta mq
@@ -15296,12 +15312,20 @@ ${SEAMPW ? `        ; ---- is there a panel here wide enough to place a line in?
         sta shS+1
 spwSp:  lda shS+1
         cmp #$40
-        bcs spwOut              ; 64 cells along: out by any threshold, and s_h would overflow
-        lda shS
-        asl                     ; s in half cells, same scale as dp
+        bcs spwOut              ; 64 cells along: out by any threshold, and s_q would overflow
+        lda shS                 ; s in QUARTER cells, rounded, on the same scale as dp
+        clc
+        adc #$20
+        sta shS
         lda shS+1
-        rol
-        sta mq                  ; A survives the store, so this is s_h squared
+        adc #$00
+        sta shS+1
+        asl shS
+        rol shS+1
+        asl shS
+        rol shS+1
+        lda shS+1
+        sta mq                  ; A survives the store, so this is s_q squared
         jsr mul8
         lda plo
         cmp ssLim

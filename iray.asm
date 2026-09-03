@@ -2895,16 +2895,27 @@ spwA:   sta shD+1
         lda #$00
         sbc shD+1
         sta shD+1
-spwP:   lda shD                 ; dp in HALF cells = the 8.8 value >> 7 = hi*2 + bit 7 of lo
-        asl
+spwP:   lda shD+1               ; 64 cells to the side: the shift below would wrap, and SEAMFAR
+        cmp #$40                ;   threw this away long ago
+        bcs spwNo
+        lda shD                 ; dp in QUARTER cells, ROUNDED: (dp8.8 + 32) >> 6, which is the
+        clc                     ;   top byte once it has been shifted left twice
+        adc #$20
+        sta shD
         lda shD+1
-        rol
+        adc #$00
+        sta shD+1
+        asl shD
+        rol shD+1
+        asl shD
+        rol shD+1
+        lda shD+1
         bne spwNz
-        lda #$01                ; floored at half a cell: standing ON the plane is a degenerate
-spwNz:  cmp #$45        ;   reading, not a reason to cull the whole wall
+        lda #$01                ; floored at a quarter cell: standing ON the plane is a degenerate
+spwNz:  cmp #$8b        ;   reading, not a reason to cull the whole wall
         bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
         sta shD
-        lda #$45        ; lim = dp_h * (2K/n - dp_h), the largest s_h*s_h worth drawing
+        lda #$8b        ; lim = dp_q * (4K/n - dp_q), the largest s_q*s_q worth drawing
         sec
         sbc shD
         sta mq
@@ -9894,12 +9905,20 @@ seamOne:
         sta shS+1
 spwSp:  lda shS+1
         cmp #$40
-        bcs spwOut              ; 64 cells along: out by any threshold, and s_h would overflow
-        lda shS
-        asl                     ; s in half cells, same scale as dp
+        bcs spwOut              ; 64 cells along: out by any threshold, and s_q would overflow
+        lda shS                 ; s in QUARTER cells, rounded, on the same scale as dp
+        clc
+        adc #$20
+        sta shS
         lda shS+1
-        rol
-        sta mq                  ; A survives the store, so this is s_h squared
+        adc #$00
+        sta shS+1
+        asl shS
+        rol shS+1
+        asl shS
+        rol shS+1
+        lda shS+1
+        sta mq                  ; A survives the store, so this is s_q squared
         jsr mul8
         lda plo
         cmp ssLim
