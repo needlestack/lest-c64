@@ -9906,7 +9906,17 @@ spwSp:  lda shS+1
         lda phi
         sbc ssLim+1
         bcc spwIn
-spwOut: rts                     ; panel narrower than SEAMPW columns: we cannot place it, so don't
+        ; ---- and STOP: every boundary further along this face is worse ----
+        ; The walk starts at the near end, so |s| only grows once it starts growing. The one shape
+        ; that could dip -- a wall passing BESIDE you, |s| falling to 0 mid-span and rising again --
+        ; cannot fail here first: the foot is only in view when you look within 33 degrees of the
+        ; wall's normal, and then both ends sit inside dp*tan(33), which is far inside the
+        ; threshold at every dp (0.33 against 4.14 at dp=0.5, 5.20 against 14.62 at dp=8). So a
+        ; failure only ever happens in the monotone tail. ssN=1 makes the caller's "dec ssN / beq"
+        ; end the walk, which costs two instructions and skips every remaining projection.
+spwOut: lda #$01
+        sta ssN
+        rts
 spwIn:
         lda #$00                ; k as 8.8
         sta skL

@@ -2541,10 +2541,15 @@ const SEAMPANEL = process.env.SEAMPANEL !== '0';
 // So round with MEMORY instead: the band is what stops it, not the accuracy.
 // Distinct from the case subCvM argues against -- there the two candidates are equally right and
 // a fixed side is honest. Here one answer is right and the noise is what moves it.
-// SEAMPW=n: draw a panel line only where we can PLACE one accurately. n is the minimum width, in
-// screen columns, that one cell of wall must subtend at that boundary. Below it the line is being
-// dropped into a panel a few pixels wide, where our own placement error (~0.4 columns, see
-// SEAMHYST) is a large fraction of the panel, so what gets drawn is noise rather than structure.
+// SEAMPW=n: draw a panel line only where we can PLACE one accurately -- and the whole rule is that
+// one question, with no separate opinion about distance or angle.
+// The reason it reduces to a WIDTH: our placement error is roughly FIXED in columns (~0.4 rms, 0.9
+// worst, measured -- see SEAMHYST) and does not shrink with distance. What shrinks is the panel it
+// lands in. At 20 columns a panel, 0.4 of error is nothing; at 2 it can put the line on the wrong
+// boundary entirely, and small changes swap which one gets drawn. So the tolerance is the RATIO,
+// error over panel width, and fixing the numerator turns it into a minimum width. n=4 columns is
+// about 10% of a panel typical, 22% worst.
+// dp and s are not the criterion -- they are only the cheapest arithmetic that yields the width.
 // This replaces two blunter rules that were tried first and thrown out. A cap on cells-along-the-
 // wall was too sudden -- on/off by cell position, no falloff, and it cut long walls near the player
 // that were not remotely edge-on. Restricting that to walls bounding the player's own square fixed
@@ -15303,7 +15308,17 @@ spwSp:  lda shS+1
         lda phi
         sbc ssLim+1
         bcc spwIn
-spwOut: rts                     ; panel narrower than SEAMPW columns: we cannot place it, so don't
+        ; ---- and STOP: every boundary further along this face is worse ----
+        ; The walk starts at the near end, so |s| only grows once it starts growing. The one shape
+        ; that could dip -- a wall passing BESIDE you, |s| falling to 0 mid-span and rising again --
+        ; cannot fail here first: the foot is only in view when you look within 33 degrees of the
+        ; wall's normal, and then both ends sit inside dp*tan(33), which is far inside the
+        ; threshold at every dp (0.33 against 4.14 at dp=0.5, 5.20 against 14.62 at dp=8). So a
+        ; failure only ever happens in the monotone tail. ssN=1 makes the caller's "dec ssN / beq"
+        ; end the walk, which costs two instructions and skips every remaining projection.
+spwOut: lda #$01
+        sta ssN
+        rts
 spwIn:
 ` : ''}        lda #$00                ; k as 8.8
         sta skL
