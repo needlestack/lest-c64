@@ -118,6 +118,9 @@ sdH     = $91                   ; the wall's height AT the seam's own column
 sdCol   = $8f                   ; seamDrw: the seam's own pixel column, the window minimum
 sdMin   = $9e                   ;   around it, and the row the SEAM (not the wall) starts on
 sdSRow  = $9f
+cuQL    = $8d                   ; calcU's fine angle: its low byte, which quarter it lands in,
+cuQF    = $8e                   ;   and a scratch for the three-quarter case. Shares the seam
+cuQT    = $8f                   ;   scratch below -- calcU runs at span setup, before the walk.
 ssCol   = $8d                   ; seamOne's distance test: the seam's column and cell, the cell
 ssCell  = $8e                   ;   being scanned, how many are left, and a scratch. All of it is
 ssScan  = $8f                   ;   seam-pass zp the projective solve has finished with by here.
@@ -2904,19 +2907,84 @@ ssAnX:  inx
 ; versa. u = p + d*dir, one sideMul: sideMul(fr, m) returns fr/256 * m, so feeding it |cos|
 ; (or |sin|) as 0..255 against the parked hit distance gives exactly d*|dir|. The sign comes
 ; from the same posXT/posYT the DDA used to choose its step. sideMul eats X, hence ssAng.
+; fr += (A - fr) * cuQF / 4, A being the next table entry. |sin| and |cos| move by at most ~6
+; between adjacent 8-bit entries, so two bits of interpolation brings the error under 2 -- which
+; is what the fine angle is worth. The slope is SIGNED, hence cmp #$80 / ror for the shifts.
+cuLerp: sec
+        sbc fr
+        cpy #$02
+        beq cuL2
+        bcs cuL3
+        cmp #$80                ; a quarter of the way: slope/4
+        ror
+        cmp #$80
+        ror
+        jmp cuLA
+cuL2:   cmp #$80                ; halfway: slope/2
+        ror
+        jmp cuLA
+cuL3:   cmp #$80                ; three quarters: slope/2 + slope/4
+        ror
+        sta cuQT
+        cmp #$80
+        ror
+        clc
+        adc cuQT
+cuLA:   clc
+        adc fr
+        sta fr
+        rts
+
 calcU:  lda remLoT,x
         sta mlo
         lda remHiT,x
         sta mhi
-        lda pa
+        ; ---- the angle the ray was actually CAST at, to quarter resolution ----
+        ; The DDA has used the fine angle since FINEANG; this was still adding the 8-bit rayOffT,
+        ; so u described a direction the ray never took -- up to half a coarse unit, about 1.5
+        ; columns, and THREE columns share one coarse entry. Same inputs as the caster: paq is
+        ; formed once a frame, rayOffQS holds the per-column quarter offsets.
+        lda rayOffQS,x
+        bmi cuAN
         clc
-        adc rayOffT,x
+        adc paqL
+        sta cuQL
+        lda paqH
+        adc #$00
+        jmp cuAH
+cuAN:   clc
+        adc paqL
+        sta cuQL
+        lda paqH
+        adc #$ff                ; sign-extended: -1 in the high byte
+cuAH:   and #$03
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl                     ; the quarter's two bits become the angle's top two
         sta ssAng
+        lda cuQL
+        and #$03
+        sta cuQF                ; which quarter WITHIN the coarse entry, 0..3
+        lda cuQL
+        lsr
+        lsr
+        ora ssAng
+        sta ssAng
+
         lda sideT,x
         bne cuX
         ldx ssAng
         lda absSinT,x
         sta fr
+        ldy cuQF
+        beq cuS0
+        inx                     ; the next entry: X wraps at 255 and the table is periodic
+        lda absSinT,x
+        jsr cuLerp
+cuS0:
         jsr sideMul
         ldx ssAng
         lda posYT,x
@@ -2940,6 +3008,12 @@ cuYp:   clc
 cuX:    ldx ssAng
         lda absCosT,x
         sta fr
+        ldy cuQF
+        beq cuC0
+        inx
+        lda absCosT,x
+        jsr cuLerp
+cuC0:
         jsr sideMul
         ldx ssAng
         lda posXT,x
@@ -9520,7 +9594,7 @@ bbRT:   !byte $08,$0c,$0e,$0f
 ; effD[c]: where column c's ray really points, minus c, in SIXTEENTHS of a column. In the stream
 ; with the other displaced lookups rather than beside rayOffT -- the gap there is exactly the size
 ; of rayOffT and a second 160-byte table walked straight off the end of it.
-effDT:  !byte 34,18,2,242,226,20,4,244,228,20,4,244,228,19,3,243,227,16,0,240,27,11,251,235,21,5,245,229,14,254,238,22,6,246,230,12,252,236,18,2,242,23,7,247,231,11,251,235,14,254,238,17,1,241,19,3,243,21,5,245,22,6,246,23,7,247,23,7,247,24,8,248,24,8,248,24,8,248,232,8,248,24,8,248,232,8,248,232,8,248,232,9,249,233,9,249,233,10,250,234,11,251,235,13,253,237,15,255,239,18,2,242,21,5,245,25,9,249,233,14,254,238,20,4,244,26,10,250,234,18,2,242,27,11,251,235,21,5,245,229,16,0,240,29,13,253,237,28,12,252,236,28,12,252,236,30,14,254,238,34
+effDT:  !byte 0,1,2,3,3,4,4,4,4,4,4,4,4,3,3,2,2,1,0,255,254,253,251,250,7,5,4,2,0,254,252,250,6,4,1,255,252,250,5,2,255,253,250,4,1,254,251,5,1,254,251,4,1,254,250,3,0,252,5,1,253,6,2,254,251,3,255,251,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,5,1,253,5,2,254,250,3,255,251,4,0,253,6,2,255,252,5,2,255,251,5,2,255,252,6,3,1,254,251,6,4,1,255,252,250,6,4,2,0,254,252,251,249,6,5,3,2,1,0,255,254,254,253,253,252,252,252,252,252,252,252,252,253,253,254,255,0
 
 
 ; ---- the solid-run draw for a SEAM column ----

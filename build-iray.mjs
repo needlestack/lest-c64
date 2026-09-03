@@ -472,9 +472,15 @@ for (let c = 0; c < NLOG; c++) {
   rayOffQ.push(Math.round(Math.atan(camX) / (2 * Math.PI) * 1024));   // signed, |v| < 128
   cosCorr.push(Math.min(255, Math.round(256 / Math.sqrt(1 + camX * camX))));
 }
+// Derived from whichever angle calcU ACTUALLY uses. With FINEANG that is the quarter-resolution
+// rayOffQ -- the same one the DDA casts at -- so the correction collapses to almost nothing, which
+// is the point: u then describes the direction its own ray took. Built from rayOff (8-bit) this
+// table was compensating for a quantiser calcU no longer has, and would have pulled seams AWAY
+// from where the ray pointed.
 for (let c = 0; c < NLOG; c++) {
-  const v = rayOff[c] < 128 ? rayOff[c] : rayOff[c] - 256;      // the angle it was rounded to
-  const eff = CTR + Math.tan(v / 256 * 2 * Math.PI) / TANHALF * CTR;
+  const eff = FINEANG
+    ? CTR + Math.tan(rayOffQ[c] / 1024 * 2 * Math.PI) / TANHALF * CTR
+    : CTR + Math.tan((rayOff[c] < 128 ? rayOff[c] : rayOff[c] - 256) / 256 * 2 * Math.PI) / TANHALF * CTR;
   effD.push(Math.max(-128, Math.min(127, Math.round((eff - c) * 16))) & 255);
 }
 // ---- PIVOT: seed the subdivision from where last frame's boundaries have moved to ----
@@ -4949,6 +4955,9 @@ sdH     = $91                   ; the wall's height AT the seam's own column
 sdCol   = $8f                   ; seamDrw: the seam's own pixel column, the window minimum
 sdMin   = $9e                   ;   around it, and the row the SEAM (not the wall) starts on
 sdSRow  = $9f
+cuQL    = $8d                   ; calcU's fine angle: its low byte, which quarter it lands in,
+cuQF    = $8e                   ;   and a scratch for the three-quarter case. Shares the seam
+cuQT    = $8f                   ;   scratch below -- calcU runs at span setup, before the walk.
 ssCol   = $8d                   ; seamOne's distance test: the seam's column and cell, the cell
 ssCell  = $8e                   ;   being scanned, how many are left, and a scratch. All of it is
 ssScan  = $8f                   ;   seam-pass zp the projective solve has finished with by here.
@@ -8186,20 +8195,89 @@ ssAnX:  inx
 ; versa. u = p + d*dir, one sideMul: sideMul(fr, m) returns fr/256 * m, so feeding it |cos|
 ; (or |sin|) as 0..255 against the parked hit distance gives exactly d*|dir|. The sign comes
 ; from the same posXT/posYT the DDA used to choose its step. sideMul eats X, hence ssAng.
-calcU:  lda remLoT,x
+${FINEANG ? `; fr += (A - fr) * cuQF / 4, A being the next table entry. |sin| and |cos| move by at most ~6
+; between adjacent 8-bit entries, so two bits of interpolation brings the error under 2 -- which
+; is what the fine angle is worth. The slope is SIGNED, hence cmp #$80 / ror for the shifts.
+cuLerp: sec
+        sbc fr
+        cpy #$02
+        beq cuL2
+        bcs cuL3
+        cmp #$80                ; a quarter of the way: slope/4
+        ror
+        cmp #$80
+        ror
+        jmp cuLA
+cuL2:   cmp #$80                ; halfway: slope/2
+        ror
+        jmp cuLA
+cuL3:   cmp #$80                ; three quarters: slope/2 + slope/4
+        ror
+        sta cuQT
+        cmp #$80
+        ror
+        clc
+        adc cuQT
+cuLA:   clc
+        adc fr
+        sta fr
+        rts
+
+` : ''}calcU:  lda remLoT,x
         sta mlo
         lda remHiT,x
         sta mhi
-        lda pa
+${FINEANG ? `        ; ---- the angle the ray was actually CAST at, to quarter resolution ----
+        ; The DDA has used the fine angle since FINEANG; this was still adding the 8-bit rayOffT,
+        ; so u described a direction the ray never took -- up to half a coarse unit, about 1.5
+        ; columns, and THREE columns share one coarse entry. Same inputs as the caster: paq is
+        ; formed once a frame, rayOffQS holds the per-column quarter offsets.
+        lda rayOffQS,x
+        bmi cuAN
+        clc
+        adc paqL
+        sta cuQL
+        lda paqH
+        adc #$00
+        jmp cuAH
+cuAN:   clc
+        adc paqL
+        sta cuQL
+        lda paqH
+        adc #$ff                ; sign-extended: -1 in the high byte
+cuAH:   and #$03
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl                     ; the quarter's two bits become the angle's top two
+        sta ssAng
+        lda cuQL
+        and #$03
+        sta cuQF                ; which quarter WITHIN the coarse entry, 0..3
+        lda cuQL
+        lsr
+        lsr
+        ora ssAng
+        sta ssAng
+` : `        lda pa
         clc
         adc rayOffT,x
         sta ssAng
+`}
         lda sideT,x
         bne cuX
         ldx ssAng
         lda absSinT,x
         sta fr
-        jsr sideMul
+${FINEANG ? `        ldy cuQF
+        beq cuS0
+        inx                     ; the next entry: X wraps at 255 and the table is periodic
+        lda absSinT,x
+        jsr cuLerp
+cuS0:
+` : ''}        jsr sideMul
         ldx ssAng
         lda posYT,x
         bne cuYp
@@ -8222,7 +8300,13 @@ cuYp:   clc
 cuX:    ldx ssAng
         lda absCosT,x
         sta fr
-        jsr sideMul
+${FINEANG ? `        ldy cuQF
+        beq cuC0
+        inx
+        lda absCosT,x
+        jsr cuLerp
+cuC0:
+` : ''}        jsr sideMul
         ldx ssAng
         lda posXT,x
         bne cuXp
