@@ -87,7 +87,9 @@ const TN_WALK = 192, TN_RUN = 384;       // 16-bit angle units per tick (a quart
 const T_WALK = 0, T_BACK = 1, T_RUN = 2, T_TURNL = 3, T_TURNR = 4,
       T_FTURNL = 5, T_FTURNR = 6, T_SPACE = 7, T_WAIT = 8, T_FALL = 9;
 const TOUR_ROUTE = [
-  ['move', T_WALK,   0x0275, 0x041e],   // out of the corner, across the room
+  ['move', T_WALK,   0x0287, 0x0483],   // out of the corner, across the room. Pushed 0.4 cells
+                                        //   further along the same heading: the left turn was
+                                        //   coming too early and the walk missed the hallway.
   ['turn', T_TURNL,  0x02c0],
   ['move', T_WALK,   0x07dd, 0x0465],   // down the corridor to the orb
   ['act',  T_SPACE,  2],                // take it
