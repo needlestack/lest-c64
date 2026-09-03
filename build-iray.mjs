@@ -410,8 +410,14 @@ for (let a = 0; a < 256; a++) {
 // columns march the identical ray and a wall's far end can only sit on a run edge -- it jumps a
 // whole character instead of scrolling. Two fractional bits make every column distinct.
 //
-// ONLY these four tables grow. absSinT/absCosT feed u for seams, which is already +-1-2
-// columns, so they stay on the integer angle; posXT/posYT likewise, for calcU's own ssAng.
+// ONLY these four tables grow -- and that used to be the whole story, with the note here saying
+// absSinT/absCosT could stay on the integer angle because "u for seams is already +-1-2 columns".
+// That reasoning was circular: u was +-1-2 columns BECAUSE calcU added the 8-bit rayOffT while the
+// rays were cast fine, describing a direction the ray never took. calcU builds the fine angle now
+// and interpolates these two tables with the spare two bits, so they need not grow either.
+// posXT/posYT genuinely can stay coarse, and not by luck: they hold the SIGN of cos/sin, which
+// flips only at coarse 0 and 128 -- fine 0 and 512, both multiples of four. ssAng is fine>>2, so a
+// coarse bucket can never straddle a sign change.
 // castRay itself no longer forms a coarse angle at all -- its step signs come from rqH.
 // ON by default: the byte angle gave only 48 distinct ray directions across 160 columns, which
 // made every wall's far end jump a whole character instead of scrolling. FINEANG=0 restores it.
