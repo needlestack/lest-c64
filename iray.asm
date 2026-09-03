@@ -126,6 +126,9 @@ ssCell  = $8e                   ;   being scanned, how many are left, and a scra
 ssScan  = $8f                   ;   seam-pass zp the projective solve has finished with by here.
 ssCnt3  = $9e
 ssTmp   = $91
+ssFH    = $91                   ; SHARES ssTmp: the unrounded column, live only from the multiply
+                                ;   to the band test. ssTmp's own user is the distance scan, which
+                                ;   has not started yet -- same reuse the block above documents.
 sdPtr   = $87                   ; seamDrw: 2 bytes. Shares skL/skH deliberately -- seamSpan has
 sdCode  = $8d                   ;   finished for the frame by the time renderSym runs, so all of
 sdRow   = $8e                   ;   this scratch is dead. sdCode/sdRow share saL/saH likewise.
@@ -150,6 +153,9 @@ ssCut   = $9150                 ; the column where the wall crosses the height a
 ssCutD  = $9151                 ;   and which side of it is too short ($00 = to the right)
 ssHL    = $9152                 ; the two end heights, while that is being worked out
 ssHR    = $9153
+ssPar   = $9155                 ;   ...and whether this face is a wall of the player's own square
+ssPU    = $9154                 ; SEAMHALL: the player's own cell on THIS face's running axis,
+                                ;   worked out once per span because every boundary shares it
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -799,15 +805,15 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-        lda #$80
+        lda #$f6
         sta px
-        lda #$06
+        lda #$01
         sta px+1
-        lda #$80
+        lda #$49
         sta py
-        lda #$07
+        lda #$01
         sta py+1
-        lda #$80
+        lda #$3b
         sta pa
         jsr sndInit             ; the drone starts before the first frame and never stops
 
@@ -1008,6 +1014,15 @@ rayAll:
         sta seamT+37
         sta seamT+38
         sta seamT+39
+        ldx #11        ; roll the band forward one frame. A is dead here -- the profile
+sHyCp:  lda sHyC,x              ;   tick and the "lda py+1" below both reload it.
+        sta sHyP,x
+        dex
+        bpl sHyCp
+        lda sHyN
+        sta sHyPN
+        lda #$00
+        sta sHyN
         lda py+1                ; the DDA's starting cell, once for the whole frame
         asl
         asl
@@ -2781,6 +2796,31 @@ ssTall: cmp #$0b
         ; spans stop on this test, which is exactly why u is derived here instead of in
         ; marchCol -- computing it for all 19 marched columns spent ~2850 cycles a frame
         ; to use about a third of the answer.
+        ; ---- is this a wall of the player's own square, and where is the player along it? ----
+        ; sideT picks the axis the same way calcU does, so the two cannot disagree about which
+        ; coordinate u is. Once per span: every boundary in the walk shares the face, and so shares
+        ; the plane, the axis, and the answer.
+        ldx spanL
+        lda sideT,x
+        bne shX
+        lda py+1                ; side 0: u counts along Y, so the plane is an X
+        sta ssPU
+        ldy faceIdT,x           ; the RUN id -- idT holds the CELL id, which is what seamSpan's
+        lda runPlaneT,y         ;   first test compares; runPlaneT is indexed by run
+        sec
+        sbc px+1
+        jmp shC
+shX:    lda px+1                ; otherwise u counts along X and the plane is a Y
+        sta ssPU
+        ldy faceIdT,x
+        lda runPlaneT,y
+        sec
+        sbc py+1
+shC:    cmp #$02                ; 0 = the near side of my square, 1 = the far side; anything else
+        lda #$00                ;   is a wall further out, which this rule does not touch
+        bcs shNP
+        lda #$01
+shNP:   sta ssPar
         ldx spanL               ; now it is worth deriving u
         jsr calcU
         lda uwL
@@ -4040,30 +4080,6 @@ drawDbg:
         lsr
         jsr ddPut
         lda py
-        and #$0f
-        jsr ddPut
-        ; ---- the angel's CELL ----
-        ; x/y/a pin the CAMERA, and that used to be the whole story. It is not any more: an angel
-        ; wanders while unobserved, so the same three numbers put a different scene in front of it
-        ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
-        ; facing one freezes its clock, so waiting does not sweep the possibilities either --
-        ; the cell has to be READ OFF and fed back in through ANGAT.
-        lda #$04
-        jsr setRow
-        ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #$0f"
-        lda #14                 ;   showed an angel at x=21 as x=5 -- a cell in the other half of
-        jsr ddPut               ;   the level, which reads exactly like it teleported.
-        ldx #$01          ; ONE LINE PER ANGEL. This was a single hardcoded findIndex, so a
-        lda orbXCT,x            ;   second angel was invisible to the readout entirely.
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda orbXCT,x
-        and #$0f
-        jsr ddPut
-        lda orbYCT,x
         and #$0f
         jsr ddPut
 ddAng:  lda #$03
@@ -5718,10 +5734,10 @@ hoInc:  inc hoI
 ; fallChk: standing in the hole's cell? Then go.
 fallChk:ldx hlv
         lda px+1
-        cmp orbXCT+2,x
+        cmp orbXCT+0,x
         bne fcNo
         lda py+1
-        cmp orbYCT+2,x
+        cmp orbYCT+0,x
         bne fcNo
         lda #$00                ; sprites away: they belong to the level being left. Clear the
         sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
@@ -7886,15 +7902,15 @@ cellFillT: !byte 0,15,15,15,14,15,0,8,0,0,15,0,0,0,0,15,3,0,15,3,3,15,0,12,12,7,
 ; The LIVE level's copies, still emitted because nothing derives them until the first swap.
 ; They are no longer in the manifest, so they do not travel; mkRuns rebuilds them from the new
 ; mapT on arrival. NRUN-sized, so a level with more runs than this one still fits.
-runPlaneT: !byte 0,1,2,3,6,5,7,8,11,10,12,1,2,3,2,3,4,5,7,6,8,0,0,0,0
-runFaceT: !byte 0,128,0,128,128,0,0,128,128,0,0,129,1,129,1,129,1,129,129,1,1,0,0,0,0
-orbOccLoT: !byte 0,4,8,12
-orbOccHiT: !byte 112,112,112,112
+runPlaneT: !byte 0,1,1,2,3,3,6,6,7,7,8,8,15,1,1,2,3,3,4,6,5,6,7,8,8
+runFaceT: !byte 0,128,128,128,0,0,128,128,0,0,0,0,0,129,129,129,1,1,129,129,1,129,1,1,1
+orbOccLoT: !byte 0,4,8
+orbOccHiT: !byte 112,112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 6,6,6,6      ; from the MANIFEST, so its length cannot
-orbYCT: !byte 2,3,5,5      ;   disagree with what the swap moves
-orbColT2: !byte 12,12   ; NORB: a level with more orbs than this one
+orbXCT: !byte 14,14,0      ; from the MANIFEST, so its length cannot
+orbYCT: !byte 4,4,0      ;   disagree with what the swap moves
+orbColT2: !byte 0   ; NORB: a level with more orbs than this one
                                 ;   indexes it too, and a short table reads the byte after
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -8614,7 +8630,7 @@ arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
 ; highest, so each rim sits in the charset its polarity needs
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
-blkT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,1,1,1,1,2,1,1,1,1,0,1,1,1,1,1,0,1,0,0,0,2,0,0,0,1,0,1,1,1,1,1,0,1,0,0,1,1,1,0,0,1,0,1,1,1,1,1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+blkT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
@@ -8622,16 +8638,16 @@ mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
 ; image segment through holeSeeT at $3240
 orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15,16,18,20,22,24,26,28,16,18,20,22,24,26,28,30,31,32,33,34,35
 orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,17,19,21,23,25,27,29,17,19,21,23,25,27,29,0,0,0,0,0,0
-orbTallT: !byte 0,1
-orbHidT: !byte 0,0
-orbHid0T: !byte 0,0   ; the build's hidden flags, for objInit
-orbX0T: !byte 6,6   ; where objInit puts them back on a restart
-orbY0T: !byte 2,3
+orbTallT: !byte 0
+orbHidT: !byte 1
+orbHid0T: !byte 1   ; the build's hidden flags, for objInit
+orbX0T: !byte 0   ; where objInit puts them back on a restart
+orbY0T: !byte 0
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
-orbSeenT: !byte 0,0,0,0
-angAccT: !byte 0,0   ; 60ths banked toward this angel's next step
+orbSeenT: !byte 0,0,0
+angAccT: !byte 0   ; 60ths banked toward this angel's next step
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6,1,1,1,1,1,1,1,6,6,6,6,6,6,6,6,6,6,6,6,6
 orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,129,129
@@ -8696,7 +8712,7 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,
         * = $7000
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte 164,241,6,0,164,81,6,0,164,81,5,0,164,81,5,0
+orbOccT: !byte 48,15,43,0,48,15,43,0
 ; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
@@ -8874,22 +8890,22 @@ f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,
         !byte 217,218,219,220,221,222,223,224,225,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239
         !byte 240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
         * = $8a00
-runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,2,0,0,0,0,6,0,0,0,0,10,0,0,0,0,0,2,0,0,0,0,0,0,0,9,0,10,0,0,0,0,0,2,0,0,5,0,0,0,0,9,0,10,0,0,0,0,0,2,0,0,0,0,0,0,0,9,0,10,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0,0,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8b00
-runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,4,0,0,0,0,8,0,0,0,0,0,1,0,3,0,0,0,0,0,0,0,8,0,0,0,0,0,1,0,3,0,0,0,0,7,0,0,8,0,0,0,0,0,1,0,3,0,0,0,0,0,0,0,8,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,6,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8c00
-runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,12,12,12,12,0,14,14,14,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,16,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,19,19,19,19,19,19,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,20,20,20,20,20,20,20,20,20,20,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,0,0,0,0,0,17,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,20,20,20,20,20,20,20,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,22,22,0,0,0,0,0,0,0,0,0,0,0,23,23,0,0,0,24,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8d00
-runST: !byte 0,11,11,11,11,11,11,11,11,11,11,11,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,13,13,13,0,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,17,17,17,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,18,18,18,18,18,18,18,18,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+runST: !byte 0,13,13,0,0,0,14,14,0,0,0,0,0,0,0,0,0,0,0,15,15,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,18,18,18,18,18,18,18,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,19,0,0,0,0,0,21,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $8e00
 mapT:   !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1
-        !byte 1,0,1,1,1,1,0,1,1,1,1,0,1,1,1,1
-        !byte 1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1
-        !byte 1,0,1,0,0,1,1,1,0,0,1,0,1,1,1,1
-        !byte 1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1
-        !byte 1,0,1,1,1,1,1,1,1,1,1,0,1,1,1,1
-        !byte 1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1
+        !byte 1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1
+        !byte 1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1
+        !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1
+        !byte 1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1
+        !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1
+        !byte 1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1
+        !byte 1,0,0,1,1,1,0,0,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -8970,7 +8986,7 @@ snKDn:  rts
         ; block, and outgrew both; here it has the gap above the $9100 jsr target, which is
         ; exactly 128 bytes and cannot be outgrown because holeSeeT is capped at 4 entities.
         * = $9180
-holeSeeT: !byte 0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+holeSeeT: !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
         ; The sound effects, out here because the $9d00 block that holds the level shadow
         ; ran out of room the moment a level was allowed to declare its own sockets: the
@@ -9421,7 +9437,7 @@ sokDY:  !byte 0
 bfsQ:   !fill 52, 0
         ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
         ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
-angBlkT: !byte 0,0,8,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
         ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
         ; and the manifest carries each chunk's destination, so where they live is free choice.
@@ -9430,20 +9446,20 @@ angBlkT: !byte 0,0,8,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
-lvlNxtT:!byte $ff                 ; slot this level's hole leads to; $ff = last
-nOrbT:  !byte $02                 ; orbs
+lvlNxtT:!byte $00                 ; slot this level's hole leads to; $ff = last
+nOrbT:  !byte $00                 ; orbs
 nHoleT: !byte $02                 ; hole-like entities: exits then sockets
 nExitT: !byte $02                 ; ...of which this many are exits
-nOrbM1T:!byte $01                 ; last orb index, for the down-counting loops
-nSockT: !byte $04                 ; entity index of the first socket
-nAllM1T:!byte $03                 ; last entity index of all
-nAllT:  !byte $04                 ; ...and how MANY, which is the one
+nOrbM1T:!byte $00                 ; last orb index, for the down-counting loops
+nSockT: !byte $02                 ; entity index of the first socket
+nAllM1T:!byte $01                 ; last entity index of all
+nAllT:  !byte $02                 ; ...and how MANY, which is the one
                                 ;   an empty level can state: every loop below counts DOWN from an
                                 ;   INDEX, and index 0 means "one entity", never "none"
 angPerT: !byte $78   ; 60ths between angel steps on THIS level, when it is close
-landAT: !byte $80                 ; which way to face on arrival; see LAND_A
-landXT: !byte 6,6
-landYT: !byte 7,7
+landAT: !byte $3b                 ; which way to face on arrival; see LAND_A
+landXT: !byte 2,2
+landYT: !byte 2,2
 ; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
 ; Level 2's copy of every per-level table, in manifest order, as one blob. lvlSwap EXCHANGES it
 ; with the live tables, so this holds whichever level you are not standing in. It lives in table
@@ -9451,31 +9467,30 @@ landYT: !byte 7,7
 ; which is exactly how the old $609b and $bc00 placements broke the moment a second map existed.
 ; ONE BLOB PER RESIDENT LEVEL, back to back, each in manifest order and each the same length --
 ; lvlSwap indexes them by slot, and the slots are the OTHERS list in ascending level order.
-lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
-        !byte 1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1
-        !byte 1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1
-        !byte 1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
+lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0
+        !byte 0,0,0,0,1,1,1,1,1,0,1,1,1,1,0,1,1,1,1,0,1,1,1,1
+        !byte 1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1,1,0,1,0,0,1,1,1
+        !byte 0,0,1,0,1,1,1,1,1,0,1,0,0,0,0,0,0,0,1,0,1,1,1,1
+        !byte 1,0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,0,0,0,0,0,0,0
+        !byte 0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,124,0
-        !byte 252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,8,9,14,14,4,4,4,4,8,9,4,4,2,2,2,2
-        !byte 59,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,120,120,6,0,0,0,1,0,0,255,2,2,2,1,4
-        !byte 3,4,0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0
-        !byte 0,0,0,$ff
+        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0
+        !byte 24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,24,3,248,3,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,6,6,0,5,5,0,0,0,6,6,7,7,128,0,0,8
+        !byte 2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,120,120,6,0,0,0,1,255,0,2,2,0,2,1,2,0,4,8,0
+        !byte 0,0,0,0,0,0,0,255,0,0,0,0,$ff
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte <lvlShadow+0
 lvlBasHiT: !byte >lvlShadow+0
 lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$01,$20,$01,$01,$01,$02,$02,$02,$01,$07,$04,$10,$01,$01,$01,$01,$01,$01
+lvlLenT: !byte $00,$40,$03,$03,$01,$01,$02,$02,$01,$20,$01,$01,$01,$02,$01,$01,$01,$07,$03,$08,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9539,8 +9554,18 @@ lsLen:  !byte 0
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
+; ---- SEAMHYST: last frame's panel columns, and this frame's being collected ----
+; Two arrays and not one: a line placed earlier in THIS frame must not become a band centre for a
+; later one. Only panel lines go in. Corner marks are pinned to a cast column and were already
+; steady, and the four-column rule keeps a panel far enough from one that it could never match.
+; No seam identity is needed or wanted here -- run ids renumber every frame -- so the match is
+; pure proximity, which is exactly what the band means.
+sHyP:   !byte 255,255,255,255,255,255,255,255,255,255,255,255
+sHyC:   !byte 255,255,255,255,255,255,255,255,255,255,255,255
+sHyPN:  !byte 0
+sHyN:   !byte 0
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3
-runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,0,0,0,0
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1
 
 ; ---- occRT / occLT / occRTW / occLTW ----
 ; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
@@ -9793,6 +9818,22 @@ ssCtN:  lda #$9f    ; nothing on screen is past this
 ; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
 ; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
 seamOne:
+        ; ---- too far down my own corridor to be worth a line ----
+        ; First test in the routine: it is the cheapest one here and it fires on exactly the
+        ; boundaries whose projection was going to be thrown away. rts rather than a branch to
+        ; ssOne, which is a routine's length away and out of range.
+        lda ssPar
+        beq shIn                ; not a wall of my own square: no cap, however far along it runs
+        lda ssK
+        sec
+        sbc ssPU
+        bcs shAb
+        eor #$ff                ; |k - player|; carry is clear from the borrow, so adc #1 negates
+        adc #$01
+shAb:   cmp #$05
+        bcc shIn
+        rts
+shIn:
         lda #$00                ; k as 8.8
         sta skL
         lda ssK
@@ -9886,16 +9927,36 @@ ssDiv:  lda sSlo
         lda #$ff                ; t saturated at 1.0
         jmp ssOff
 ssT8:   lda s1
-ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
+ssOff:  sta mq                  ; offset = (t * width) >> 8
         lda ssW
         jsr mul8
-        lda plo                 ; round to nearest column: truncating biased every seam a
-        cmp #$80                ; column low, which reads as the whole wall being off by one
-        lda phi
+        clc                     ; FH = spanL + (t*W >> 8): the column BEFORE rounding, which is
+        lda phi                 ;   what the band has to be measured against -- rounding is the
+        adc spanL               ;   step it exists to override, so it cannot come first.
+        sta ssFH
+        ; ---- hold last frame's line while the solve stays within one column of it ----
+        ; The target is FH + plo/256, so a previous line at c is inside the open band (FH-1, FH+1)
+        ; exactly when c - FH is 0 or 1: at c = FH the gap is plo/256 < 1, at c = FH+1 it is
+        ; 1 - plo/256 < 1, and at c = FH-1 it is 1 + plo/256, which is not. So the whole test is
+        ; one subtract and "cmp #2" -- no distances, no fractions, and c < FH borrows to a value
+        ; well above 1 and fails it for free.
+        ldx sHyPN
+        beq ssHyR               ; first frame, or nothing placed last frame
+        dex
+ssHyL:  lda sHyP,x
+        sec
+        sbc ssFH
+        cmp #$02
+        bcc ssHyH
+        dex
+        bpl ssHyL
+ssHyR:  lda plo                 ; nothing to hold: round to nearest, as it always did
+        cmp #$80
+        lda ssFH
         adc #$00
-        clc
-        adc spanL
-        cmp #160
+        jmp ssHyD
+ssHyH:  lda sHyP,x              ; inside the band -- last frame's answer stands
+ssHyD:  cmp #160
         bcs ssOne               ; ---- off screen: REACHABLE, and the only thing stopping a write
                                 ; past seamT (40 bytes, indexed col>>2). It used to be unreachable
                                 ; -- the column was interpolated between spanL and spanR, both
@@ -9972,6 +10033,12 @@ ssDk:   inc ssScan
         clc
         adc #$e3
         sta seamT,x
+        ldx sHyN                ; only lines that SURVIVED every test become band centres:
+        cpx #12            ;   a rejected one is not on screen to be held still
+        bcs ssOne
+        lda ssCol
+        sta sHyC,x
+        inc sHyN
 ssOne:  rts
 
         ; ---- and a DEAD BAND on that choice, or a concave corner dithers ----

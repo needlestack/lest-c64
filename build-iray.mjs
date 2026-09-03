@@ -2528,6 +2528,44 @@ const SEAMS = process.env.SEAMS !== '0';
 // corners mark real structure, panel lines are decoration, and it is the decoration whose
 // selection goes unstable on a near-parallel far wall.
 const SEAMPANEL = process.env.SEAMPANEL !== '0';
+// SEAMHYST: hold a panel line where it was last frame while the newly solved position stays
+// within one column of it. NOT a precision fix and not a substitute for one -- it exists because
+// precision cannot win this fight. Measured on the centre seam at PX=05a5 PY=061b PA=0d PAF=40,
+// walking forward: the line's TRUE column moves 84.28 -> 84.38, nine hundredths of a column, and
+// sits 0.12-0.22 from the .5 that decides which column it rounds to. Three noise sources of
+// comparable size push it across -- calcU's u (0.22 rms), colH's integer heights (~0.2), and the
+// fixed-point solve itself (0.30, the largest: S must shrink to a byte to index recipLoT, and the
+// seven shifts that takes truncate P 82.69 -> 82, one percent, half a column). Fixing all three
+// still leaves ~0.3 against a 0.15 margin, and the next viewpoint puts the true value nearer .5
+// still. A quantity that is genuinely between two columns has no still answer to round to.
+// So round with MEMORY instead: the band is what stops it, not the accuracy.
+// Distinct from the case subCvM argues against -- there the two candidates are equally right and
+// a fixed side is honest. Here one answer is right and the noise is what moves it.
+// SEAMHALL=n: a PARALLEL WALL is one whose plane, extended, forms a side of the square the player
+// is standing in -- the walls of your own corridor, the four directions you can look down. Only
+// those get capped, and only past n squares along them. Every other wall is left alone.
+// Both halves are already in hand, which is why this costs about twenty cycles a span:
+//   WHICH WALL -- runPlaneT holds each run's plane coordinate (a W run's x, an N run's y), and a
+//     run lies in ONE plane by construction. A W run is seen from the west so its plane can only
+//     be the player's EAST side, an E run only the west side; same for N/S. So "forms a side of my
+//     square" is runPlane - player_cell being 0 or 1, whichever face it is -- one subtract, cmp #2.
+//   HOW FAR ALONG -- calcU shows u is a world coordinate on the face's running axis, Y when sideT
+//     is 0 and X otherwise, and ssK is an integer cell boundary in it. So squares-down-the-corridor
+//     is |ssK - py+1| or |ssK - px+1|.
+// Why cells are the right unit: two boundaries on a wall dp cells to your side and s cells along it
+// land 138.7*dp/(dp*dp + s*s) screen columns apart (160 columns over a 47/256 turn). Down your own
+// corridor, dp < 1, that is 8.2 columns at s=4, 5.3 at s=5, 3.7 at s=6, 2.1 at s=8 -- they collapse
+// into the vanishing point, and everything from s=6 out was ALREADY being thrown away by the
+// four-column rule AFTER paying ~1000 cycles to project it. This drops it for twelve.
+// The parallel test is what keeps that honest. Capping on distance alone also cut walls across a
+// room -- at dp=2, s=5 the lines are still 9.6 columns apart and perfectly readable.
+// Corner marks are untouched by construction: subFace and subCvM place those, not seamOne.
+const SEAMHALL = CELLMERGE ? 0 : +(process.env.SEAMHALL ?? 4);   // idT holds CELL ids under
+                                        // CELLMERGE, so the run-id lookup would read gibberish
+if (SEAMHALL !== 4) DIAG.push(`SEAMHALL=${SEAMHALL}`);
+const SEAMHYST = process.env.SEAMHYST !== '0';
+const HYSN = 12;                        // band slots. Overflow just skips the band for the extras,
+                                        // which is last frame's behaviour, so it degrades quietly.
 // CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
 // They were dropped from convex ends because the silhouette there already steps 20+ rows so
 // the line looked redundant, and because the boundary landed in the one cell an orb needed
@@ -4950,6 +4988,9 @@ ssCell  = $8e                   ;   being scanned, how many are left, and a scra
 ssScan  = $8f                   ;   seam-pass zp the projective solve has finished with by here.
 ssCnt3  = $9e
 ssTmp   = $91
+ssFH    = $91                   ; SHARES ssTmp: the unrounded column, live only from the multiply
+                                ;   to the band test. ssTmp's own user is the distance scan, which
+                                ;   has not started yet -- same reuse the block above documents.
 sdPtr   = $87                   ; seamDrw: 2 bytes. Shares skL/skH deliberately -- seamSpan has
 sdCode  = $8d                   ;   finished for the frame by the time renderSym runs, so all of
 sdRow   = $8e                   ;   this scratch is dead. sdCode/sdRow share saL/saH likewise.
@@ -4974,6 +5015,9 @@ ssCut   = $9150                 ; the column where the wall crosses the height a
 ssCutD  = $9151                 ;   and which side of it is too short ($00 = to the right)
 ssHL    = $9152                 ; the two end heights, while that is being worked out
 ssHR    = $9153
+ssPar   = $9155                 ;   ...and whether this face is a wall of the player's own square
+ssPU    = $9154                 ; SEAMHALL: the player's own cell on THIS face's running axis,
+                                ;   worked out once per span because every boundary shares it
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -5876,7 +5920,16 @@ ${NORAY ? '        jmp subDn' : ''}
         lda #$00
 ${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS ? `
         lda #${hx(SOLID)}       ; and every wall column back to a plain fill
-${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}${SEAMDBG ? '\n        pha\n        lda #$00\n        sta sdbgN\n        pla' : ''}` : ''}
+${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}${SEAMDBG ? '\n        pha\n        lda #$00\n        sta sdbgN\n        pla' : ''}${SEAMHYST ? `
+        ldx #${HYSN - 1}        ; roll the band forward one frame. A is dead here -- the profile
+sHyCp:  lda sHyC,x              ;   tick and the "lda py+1" below both reload it.
+        sta sHyP,x
+        dex
+        bpl sHyCp
+        lda sHyN
+        sta sHyPN
+        lda #$00
+        sta sHyN` : ''}` : ''}
 ${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
 ${MULW}
         clc
@@ -8055,6 +8108,31 @@ ssPre:  lda seamT,x
         bcc ssPre
         jmp ssDn                ; nowhere left to put one
 ssPreO:
+` : ''}${SEAMHALL ? `        ; ---- is this a wall of the player's own square, and where is the player along it? ----
+        ; sideT picks the axis the same way calcU does, so the two cannot disagree about which
+        ; coordinate u is. Once per span: every boundary in the walk shares the face, and so shares
+        ; the plane, the axis, and the answer.
+        ldx spanL
+        lda sideT,x
+        bne shX
+        lda py+1                ; side 0: u counts along Y, so the plane is an X
+        sta ssPU
+        ldy faceIdT,x           ; the RUN id -- idT holds the CELL id, which is what seamSpan's
+        lda runPlaneT,y         ;   first test compares; runPlaneT is indexed by run
+        sec
+        sbc px+1
+        jmp shC
+shX:    lda px+1                ; otherwise u counts along X and the plane is a Y
+        sta ssPU
+        ldy faceIdT,x
+        lda runPlaneT,y
+        sec
+        sbc py+1
+shC:    cmp #$02                ; 0 = the near side of my square, 1 = the far side; anything else
+        lda #$00                ;   is a wall further out, which this rule does not touch
+        bcs shNP
+        lda #$01
+shNP:   sta ssPar
 ` : ''}        ldx spanL               ; now it is worth deriving u
 ${DOUBLE === 'calcU' ? '        jsr calcU               ; DOUBLE=calcU: price it by differencing two PROFILE runs.\n        ldx spanL               ;   calcU CLOBBERS X, which is its own input -- without this\n' : ''}        jsr calcU
         lda uwL
@@ -14863,7 +14941,17 @@ lsLen:  !byte 0
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
-runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
+${SEAMHYST ? `; ---- SEAMHYST: last frame's panel columns, and this frame's being collected ----
+; Two arrays and not one: a line placed earlier in THIS frame must not become a band centre for a
+; later one. Only panel lines go in. Corner marks are pinned to a cast column and were already
+; steady, and the four-column rule keeps a panel far enough from one that it could never match.
+; No seam identity is needed or wanted here -- run ids renumber every frame -- so the match is
+; pure proximity, which is exactly what the band means.
+sHyP:   !byte ${Array(HYSN).fill(255).join(',')}
+sHyC:   !byte ${Array(HYSN).fill(255).join(',')}
+sHyPN:  !byte 0
+sHyN:   !byte 0
+` : ''}runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
 
 ; ---- occRT / occLT / occRTW / occLTW ----
@@ -15123,7 +15211,23 @@ ssCtN:  lda #${hx(NLOG - 1)}    ; nothing on screen is past this
 ; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
 ; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
 seamOne:
-        lda #$00                ; k as 8.8
+${SEAMHALL ? `        ; ---- too far down my own corridor to be worth a line ----
+        ; First test in the routine: it is the cheapest one here and it fires on exactly the
+        ; boundaries whose projection was going to be thrown away. rts rather than a branch to
+        ; ssOne, which is a routine's length away and out of range.
+        lda ssPar
+        beq shIn                ; not a wall of my own square: no cap, however far along it runs
+        lda ssK
+        sec
+        sbc ssPU
+        bcs shAb
+        eor #$ff                ; |k - player|; carry is clear from the borrow, so adc #1 negates
+        adc #$01
+shAb:   cmp #${hx(SEAMHALL + 1)}
+        bcc shIn
+        rts
+shIn:
+` : ''}        lda #$00                ; k as 8.8
         sta skL
         lda ssK
         sta skH
@@ -15216,16 +15320,40 @@ ssDiv:  lda sSlo
         lda #$ff                ; t saturated at 1.0
         jmp ssOff
 ssT8:   lda s1
-ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
+ssOff:  sta mq                  ; offset = (t * width) >> 8
         lda ssW
         jsr mul8
-        lda plo                 ; round to nearest column: truncating biased every seam a
-        cmp #$80                ; column low, which reads as the whole wall being off by one
-        lda phi
+        clc                     ; FH = spanL + (t*W >> 8): the column BEFORE rounding, which is
+        lda phi                 ;   what the band has to be measured against -- rounding is the
+        adc spanL               ;   step it exists to override, so it cannot come first.
+        sta ssFH
+${SEAMHYST ? `        ; ---- hold last frame's line while the solve stays within one column of it ----
+        ; The target is FH + plo/256, so a previous line at c is inside the open band (FH-1, FH+1)
+        ; exactly when c - FH is 0 or 1: at c = FH the gap is plo/256 < 1, at c = FH+1 it is
+        ; 1 - plo/256 < 1, and at c = FH-1 it is 1 + plo/256, which is not. So the whole test is
+        ; one subtract and "cmp #2" -- no distances, no fractions, and c < FH borrows to a value
+        ; well above 1 and fails it for free.
+        ldx sHyPN
+        beq ssHyR               ; first frame, or nothing placed last frame
+        dex
+ssHyL:  lda sHyP,x
+        sec
+        sbc ssFH
+        cmp #$02
+        bcc ssHyH
+        dex
+        bpl ssHyL
+ssHyR:  lda plo                 ; nothing to hold: round to nearest, as it always did
+        cmp #$80
+        lda ssFH
         adc #$00
-        clc
-        adc spanL
-        cmp #${NLOG}
+        jmp ssHyD
+ssHyH:  lda sHyP,x              ; inside the band -- last frame's answer stands
+ssHyD:  cmp #${NLOG}` : `        lda plo                 ; round to nearest column: truncating biased every seam a
+        cmp #$80                ; column low, which reads as the whole wall being off by one
+        lda ssFH
+        adc #$00
+        cmp #${NLOG}`}
         bcs ssOne               ; ---- off screen: REACHABLE, and the only thing stopping a write
                                 ; past seamT (40 bytes, indexed col>>2). It used to be unreachable
                                 ; -- the column was interpolated between spanL and spanR, both
@@ -15330,7 +15458,13 @@ ssDk:   inc ssScan
         clc
         adc #${hx(SEAM0)}
         sta seamT,x
-ssOne:  rts
+${SEAMHYST ? `        ldx sHyN                ; only lines that SURVIVED every test become band centres:
+        cpx #${HYSN}            ;   a rejected one is not on screen to be held still
+        bcs ssOne
+        lda ssCol
+        sta sHyC,x
+        inc sHyN
+` : ''}ssOne:  rts
 
         ; ---- and a DEAD BAND on that choice, or a concave corner dithers ----
         ; The two candidates are adjacent columns, so at a CONCAVE corner -- where the faces meet
