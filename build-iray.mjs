@@ -607,6 +607,26 @@ for (let y = 0; y < MAPH; y++) {          // horizontal planes: north/south face
   }
 }
 if (nextRun - 1 > 255) throw new Error(`too many wall runs (${nextRun - 1}) for a byte id`);
+// ---- and no single run may be longer than a byte ----
+// A seam span lies on ONE run, so seamSpan's boundary count ssN is bounded by that run's length.
+// ssN is a byte and the walk is `dec ssN / bne`, so a run past 255 cells would wrap and the walk
+// would not terminate. Checked against the runs THEMSELVES rather than against max(MAPW, MAPH),
+// which is only an upper bound on it: a map can be wide without containing a long unbroken face,
+// and once the 9-bit cell lands the two numbers part company (512 cells as a 170x3 corridor is a
+// 168-cell run; the same 512 as 32x16 cannot exceed 32).
+// This is only sufficient because the border assert above rules out a ray leaving the grid -- one
+// that could would make u meaningless and the count arbitrary, whatever the runs look like.
+{
+  const runLen = new Map();
+  for (const arr of [runW, runE, runN, runS])
+    for (const id of arr) if (id) runLen.set(id, (runLen.get(id) ?? 0) + 1);
+  let worst = 0, worstId = 0;
+  for (const [id, n] of runLen) if (n > worst) { worst = n; worstId = id; }
+  if (worst > 255)
+    throw new Error(`wall run ${worstId} is ${worst} cells long: seamSpan counts boundaries in ` +
+                    `a byte, so a run past 255 would wrap its walk`);
+  console.error(`  longest wall run: ${worst} cells (the seam walk counts these in a byte)`);
+}
 console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by run, gap-safe, no precompute`);
 
 // ================= MERGE HAZARD: runs an occluder breaks into two pieces =================
@@ -2467,15 +2487,7 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // SEAMMAXN: most cells of wall one span may cover and still get seams. 0 = no cap, which is the
 // default, because the bound is PROVED at build time instead -- see the assert below.
 const SEAMMAXN = +(process.env.SEAMMAXN ?? 0);
-// A span lies on ONE run, and a run cannot be longer than the map's longest dimension, so the
-// boundary count ssN is bounded by that. ssN is a byte and the walk is `dec ssN / bne`, so the
-// walk terminates iff the bound fits one. Asserted rather than trusted, in the same spirit as the
-// solid-border check that makes castRay's exits unreachable -- and it is that check which makes
-// THIS one sufficient, since a ray that could leave the grid would make u meaningless and the
-// count arbitrary.
-if (Math.max(MAPW, MAPH) > 255)
-  throw new Error(`map is ${MAPW}x${MAPH}: a wall run can exceed 255 cells, so seamSpan's ` +
-                  `boundary count would not fit the byte its walk counts down`);
+
 const SEAMPIX = +(process.env.SEAMPIX ?? 8);
 const SEAMCUT = SEAMPIX ? SEAMPIX + 7 : 0;
 // SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
