@@ -9891,7 +9891,14 @@ ssOf1:  clc                     ; + the span's left end, and round to the neares
         ror ssX16
         lda ssX16
         cmp #160
-        bcs ssOne               ; off screen; cannot happen, but a stray write would corrupt
+        bcs ssOne               ; ---- off screen: REACHABLE, and the only thing stopping a write
+                                ; past seamT (40 bytes, indexed col>>2). It used to be unreachable
+                                ; -- the column was interpolated between spanL and spanR, both
+                                ; <= 159 -- but the effective-column basis moved the ends: the ray
+                                ; nominally at 159 has an angle corresponding to column 161.15, so
+                                ; a seam near the right edge can compute 160 or 161 legitimately.
+                                ; Also catches an underflow at the left edge, since a negative
+                                ; 16-bit value shifts down to something well past 159.
         tay                     ; Y = the seam's logical column
 
         ; ---- past the point where this wall is too short to carry a line? ----
