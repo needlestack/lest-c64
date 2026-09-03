@@ -3359,7 +3359,14 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // far too much rope -- it could shadow you along the entire length of the room. Two squares means
 // slipping past it is a matter of a step or two, not a plan. The rest of the loop is safe ground,
 // which is what makes the door area read as guarded.
-const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : LEVEL2 ? '3,1;9,1' : '')).split(';')
+// The COMBINED level carries the ring's leash too, shifted by the +15 the join applies to every
+// ring cell (see the orb at "ring (6,2) + 15"): (3,1) and (9,1) become (18,1) and (24,1), penning
+// the ring angel to the same door cell and two either side. It had NO leash before -- LEVEL2 is
+// false on the combined map, so this expression fell through to '' -- and with no fence at all the
+// second angel simply followed the player out of the ring, down the corridor and into the first
+// room. Reported from play, and the give-away is that it followed ALL the way: an angel that runs
+// out of rope stops facing you, it does not escort you home.
+const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : COMBO ? '18,1;24,1' : LEVEL2 ? '3,1;9,1' : '')).split(';')
   .filter(Boolean).map(q => q.split(',').map(Number));
 // One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
 // past 256 cells needs that changed too -- assert rather than let it go quietly wrong.
@@ -5045,9 +5052,11 @@ ssHL    = $9152                 ; the two end heights, while that is being worke
 ssHR    = $9153
 ssPU    = $9154                 ; SEAMPW: the player's position on THIS face's running axis, the
 ssPUL   = $9155                 ;   two bytes of it, worked out once per span
-ssLim   = $9156                 ;   ...and the largest s*s that still leaves a placeable panel
-shD     = $9158                 ;   dp while it is being formed, then dp in half cells
-shS     = $915a                 ;   s while it is being formed
+ssKLo   = $9156                 ;   ...and the FIRST and LAST cell boundary worth a line, so the
+ssKHi   = $9157                 ;   per-boundary test is two compares (see ssPwS)
+shD     = $9158                 ;   dp while it is being formed, then dp in quarter cells
+smLo    = $915a                 ;   s_max scaled to 8.8 while the range is formed
+smHi    = $915b
 ssDir   = $915c                 ; which way the boundary walk steps: 0 = up, 1 = down
 ; ---- SEAMHYST: last frame's panel columns, and this frame's being collected ----
 ; Two arrays and not one: a line placed earlier in THIS frame must not become a band centre for a
@@ -15021,7 +15030,15 @@ lsLen:  !byte 0
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
-runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
+${SEAMPW ? `; ---- sMaxT: the largest s that still leaves a placeable panel, per dp ----
+; s*s <= dp*(4K/n - dp) has ONE unknown at run time once dp is known, so the whole test collapses
+; to a bound on s -- and that bound is a pure function of dp_q and a build constant. Precomputing
+; it turns the per-boundary work from a subtract, an abs, a rounding, two shifts, a multiply and a
+; 16-bit compare into two compares against a range worked out once per span.
+; Quarter cells in and out. 128 entries: dp_q past that is a wall plane 32 cells to the side, which
+; SEAMFAR threw away long before.
+sMaxT:  !byte ${[...Array(128)].map((_, d) => Math.floor(Math.sqrt(Math.max(0, d * (PW4C - d))))).join(',')}
+` : ''}runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
 
 ; ---- occRT / occLT / occRTW / occLTW ----
@@ -15340,24 +15357,50 @@ spwP:   lda shD+1               ; 64 cells to the side: the shift below would wr
         lda shD+1
         bne spwNz
         lda #$01                ; floored at a quarter cell: standing ON the plane is a degenerate
-spwNz:  cmp #${hx(PW4C)}        ;   reading, not a reason to cull the whole wall
-        bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
-        sta shD
-        lda #${hx(PW4C)}        ; lim = dp_q * (4K/n - dp_q), the largest s_q*s_q worth drawing
-        sec
-        sbc shD
-        sta mq
-        lda shD
-        jsr mul8
-        lda plo
-        sta ssLim
-        lda phi
-        sta ssLim+1
-        jmp spwDn
-spwNo:  lda #$00
-        sta ssLim
-        sta ssLim+1
-spwDn:  rts
+spwNz:  cmp #$80                ; dp_q past 127 is a plane 32 cells to the side, which SEAMFAR
+        bcs spwNo               ;   threw away long ago -- and it is the table's bound
+        tay
+        lda sMaxT,y             ; the largest s that still leaves a placeable panel, quarter cells
+        beq spwNo
+        sta smHi                ; s_max as 8.8 cells is q*64, so take (q,0) down two bits
+        lda #$00
+        sta smLo
+        lsr smHi
+        ror smLo
+        lsr smHi
+        ror smLo
+        lda smLo                ; +half a quarter cell. The test this replaces ROUNDED s to quarter
+        clc                     ;   cells before squaring, so an s of 5.859 rounded down to 5.75
+        adc #$20                ;   and passed; comparing against an exact s_max is half a quarter
+        sta smLo                ;   tighter and dropped a seam the old rule kept. The low six bits
+                                ;   of q*64 are clear, so this can never carry.
+        clc                     ; kHi = floor(p_along + s_max)
+        lda ssPUL
+        adc smLo
+        lda ssPU
+        adc smHi
+        sta ssKHi
+        sec                     ; kLo = CEIL(p_along - s_max): a boundary on the band's lower edge
+        lda ssPUL               ;   counts only if at or above it, so a fraction rounds UP
+        sbc smLo
+        tax
+        lda ssPU
+        sbc smHi
+        bcc spwLo0              ; the band runs off the near end of the map
+        cpx #$00
+        beq spwLoS
+        clc
+        adc #$01
+spwLoS: sta ssKLo
+        rts
+spwLo0: lda #$00
+        sta ssKLo
+        rts
+spwNo:  lda #$01                ; an EMPTY range -- kLo above kHi -- rejects every boundary
+        sta ssKLo
+        lda #$00
+        sta ssKHi
+        rts
 ` : ''}
 ${SEAMPW ? `
 ; ---- ssPw: is there a panel at ssK wide enough to place a line in? ----
@@ -15366,43 +15409,16 @@ ${SEAMPW ? `
 ; to place stops the walk outright, since everything further along the face is narrower still.
 ; The 16-bit compare at the end already leaves the answer in carry, so the routine needs no
 ; epilogue -- and the early "too far to bother" exit lands on the same rts with carry SET.
-ssPw:   lda #$00                ; s = |boundary - player| along the face, 8.8 cells
-        sec
-        sbc ssPUL
-        sta shS
-        lda ssK
-        sbc ssPU
-        sta shS+1
-        bpl spwSp
-        lda #$00
-        sec
-        sbc shS
-        sta shS
-        lda #$00
-        sbc shS+1
-        sta shS+1
-spwSp:  lda shS+1
-        cmp #$40
-        bcs spwRt               ; 64 cells along: out by any threshold, and s_q would overflow
-        lda shS                 ; s in QUARTER cells, rounded, on the same scale as dp
-        clc
-        adc #$20
-        sta shS
-        lda shS+1
-        adc #$00
-        sta shS+1
-        asl shS
-        rol shS+1
-        asl shS
-        rol shS+1
-        lda shS+1
-        sta mq                  ; A survives the store, so this is s_q squared
-        jsr mul8
-        lda plo
-        cmp ssLim
-        lda phi
-        sbc ssLim+1
-spwRt:  rts                     ; carry clear = the panel is wide enough to place a line in
+ssPw:   lda ssK                 ; two compares against the range ssPwS worked out per span
+        cmp ssKLo
+        bcc ssPwNo
+        cmp ssKHi
+        bcc ssPwOk
+        beq ssPwOk
+ssPwNo: sec                     ; outside the band: stop the walk, the face only narrows from here
+        rts
+ssPwOk: clc
+        rts                     ; carry clear = the panel is wide enough to place a line in
 ` : ''}
 seamOne:
         lda #$00                ; k as 8.8
