@@ -2488,6 +2488,9 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // default, because the bound is PROVED at build time instead -- see the assert below.
 const SEAMMAXN = +(process.env.SEAMMAXN ?? 0);
 
+// SEAMWIDE: narrowest face, in columns, that can still hold a panel line. Derived from the
+// four-column spacing rule, not chosen -- see the note at the test.
+const SEAMWIDE = +(process.env.SEAMWIDE ?? 7);
 const SEAMPIX = +(process.env.SEAMPIX ?? 8);
 const SEAMCUT = SEAMPIX ? SEAMPIX + 7 : 0;
 // SEAMFAR=n: skip a span's seams once BOTH its ends are shorter than n rows. 0 = off.
@@ -7981,11 +7984,30 @@ ${SEAMS ? `; ================= seamSpan: project this face's cell boundaries to 
 ;
 ; one divide per seam, no extra rays and no per-column work. Everything below is that.
 seamSpan:
-${SEAMCNT ? `        inc ssEnt\n        bne ssEntX\n        inc ssEnt+1\nssEntX:\n` : ''}        lda spanR
+${SEAMCNT ? `        inc ssEnt\n        bne ssEntX\n        inc ssEnt+1\nssEntX:\n` : ''}        ; ---- cheapest and most exclusive FIRST ----
+        ; Measured over 405 frames at the hall viewpoint: this rejects HALF of everything offered,
+        ; for two loads and a compare. It used to run third, behind the width and SEAMFAR tests,
+        ; which reject 10% and 11% and cost more between them.
+        ; A run is a contiguous line of cells along ONE plane, so its cells can only differ in the
+        ; coordinate that runs along the face -- comparing raw cell ids IS the boundary test, with
+        ; no masking and no knowledge of which way the wall faces.
+        ldx spanL
+        lda idT,x
+        ldx spanR
+        cmp idT,x
+        beq ssDn                ; identical cell -> no boundary between the ends
+        lda spanR
         sec
         sbc spanL
-        cmp #$02
-        bcc ssDn                ; adjacent columns: nothing between them to mark
+        cmp #${hx(SEAMWIDE)}
+        bcc ssDn                ; ---- too narrow a face to hold a line at all ----
+                                ; A face carries corner marks at spanL and spanR+1, and a panel
+                                ; line must clear both by four columns: it needs c >= spanL+4 and
+                                ; c <= spanR-3, impossible below seven columns wide. Anything
+                                ; narrower used to be walked, projected, and then thrown out by
+                                ; the distance rule against its own corners.
+                                ; Not quite free: the height cutoff can drop a corner, and then a
+                                ; narrow face could have held a line after all.
         sta ssW                 ; span width in columns
 ${SEAMCNT ? `        inc ssWid\n        bne ssWidX\n        inc ssWid+1\nssWidX:\n` : ''}${SEAMFAR ? `        ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
         ; colH is a height in ROWS, so it is 1/z up to a constant and the whole distance test is
@@ -8006,14 +8028,6 @@ ${SEAMCNT ? `        inc ssNear\n        bne ssNearX\n        inc ssNear+1\nssNe
         ; spans stop on this test, which is exactly why u is derived here instead of in
         ; marchCol -- computing it for all 19 marched columns spent ~2850 cycles a frame
         ; to use about a third of the answer.
-        ldx spanL
-        lda idT,x
-        ldx spanR
-        cmp idT,x
-        beq ssDn                ; identical cell -> no boundary. A run is a contiguous line
-                                ; of cells along ONE plane, so its cells can only differ in
-                                ; the coordinate that runs along the face -- comparing the
-                                ; raw cell ids is exactly the boundary test, no masking.
 ${SEAMCNT ? `        inc ssCalc\n        bne ssCalcX\n        inc ssCalc+1\nssCalcX:\n` : ''}${SEAMPRE ? `        ; ---- is there ANYWHERE left to put a line in this span? ----
         ; seamOne rejects a boundary whose char cell -- or either neighbour -- is already
         ; marked, and it does that AFTER projecting it. Down a long hall 63% of them go that

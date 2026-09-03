@@ -2737,11 +2737,30 @@ mvBlk:  sec
 ;
 ; one divide per seam, no extra rays and no per-column work. Everything below is that.
 seamSpan:
+        ; ---- cheapest and most exclusive FIRST ----
+        ; Measured over 405 frames at the hall viewpoint: this rejects HALF of everything offered,
+        ; for two loads and a compare. It used to run third, behind the width and SEAMFAR tests,
+        ; which reject 10% and 11% and cost more between them.
+        ; A run is a contiguous line of cells along ONE plane, so its cells can only differ in the
+        ; coordinate that runs along the face -- comparing raw cell ids IS the boundary test, with
+        ; no masking and no knowledge of which way the wall faces.
+        ldx spanL
+        lda idT,x
+        ldx spanR
+        cmp idT,x
+        beq ssDn                ; identical cell -> no boundary between the ends
         lda spanR
         sec
         sbc spanL
-        cmp #$02
-        bcc ssDn                ; adjacent columns: nothing between them to mark
+        cmp #$07
+        bcc ssDn                ; ---- too narrow a face to hold a line at all ----
+                                ; A face carries corner marks at spanL and spanR+1, and a panel
+                                ; line must clear both by four columns: it needs c >= spanL+4 and
+                                ; c <= spanR-3, impossible below seven columns wide. Anything
+                                ; narrower used to be walked, projected, and then thrown out by
+                                ; the distance rule against its own corners.
+                                ; Not quite free: the height cutoff can drop a corner, and then a
+                                ; narrow face could have held a line after all.
         sta ssW                 ; span width in columns
         ; ---- SEAMFAR: drop the panel line once the wall is too short to show one ----
         ; colH is a height in ROWS, so it is 1/z up to a constant and the whole distance test is
@@ -2762,14 +2781,6 @@ ssTall: cmp #$0f
         ; spans stop on this test, which is exactly why u is derived here instead of in
         ; marchCol -- computing it for all 19 marched columns spent ~2850 cycles a frame
         ; to use about a third of the answer.
-        ldx spanL
-        lda idT,x
-        ldx spanR
-        cmp idT,x
-        beq ssDn                ; identical cell -> no boundary. A run is a contiguous line
-                                ; of cells along ONE plane, so its cells can only differ in
-                                ; the coordinate that runs along the face -- comparing the
-                                ; raw cell ids is exactly the boundary test, no masking.
         ldx spanL               ; now it is worth deriving u
         jsr calcU
         lda uwL
