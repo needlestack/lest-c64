@@ -153,9 +153,12 @@ ssCut   = $9150                 ; the column where the wall crosses the height a
 ssCutD  = $9151                 ;   and which side of it is too short ($00 = to the right)
 ssHL    = $9152                 ; the two end heights, while that is being worked out
 ssHR    = $9153
-ssPar   = $9155                 ;   ...and whether this face is a wall of the player's own square
-ssPU    = $9154                 ; SEAMHALL: the player's own cell on THIS face's running axis,
-                                ;   worked out once per span because every boundary shares it
+ssPU    = $9154                 ; SEAMPW: the player's position on THIS face's running axis, the
+ssPUL   = $9155                 ;   two bytes of it, worked out once per span
+ssLim   = $9156                 ;   ...and the largest s*s that still leaves a placeable panel
+shD     = $9158                 ;   dp while it is being formed, then dp in half cells
+shS     = $915a                 ;   s while it is being formed
+ssDir   = $915c                 ; which way the boundary walk steps: 0 = up, 1 = down
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -2796,31 +2799,6 @@ ssTall: cmp #$0b
         ; spans stop on this test, which is exactly why u is derived here instead of in
         ; marchCol -- computing it for all 19 marched columns spent ~2850 cycles a frame
         ; to use about a third of the answer.
-        ; ---- is this a wall of the player's own square, and where is the player along it? ----
-        ; sideT picks the axis the same way calcU does, so the two cannot disagree about which
-        ; coordinate u is. Once per span: every boundary in the walk shares the face, and so shares
-        ; the plane, the axis, and the answer.
-        ldx spanL
-        lda sideT,x
-        bne shX
-        lda py+1                ; side 0: u counts along Y, so the plane is an X
-        sta ssPU
-        ldy faceIdT,x           ; the RUN id -- idT holds the CELL id, which is what seamSpan's
-        lda runPlaneT,y         ;   first test compares; runPlaneT is indexed by run
-        sec
-        sbc px+1
-        jmp shC
-shX:    lda px+1                ; otherwise u counts along X and the plane is a Y
-        sta ssPU
-        ldy faceIdT,x
-        lda runPlaneT,y
-        sec
-        sbc py+1
-shC:    cmp #$02                ; 0 = the near side of my square, 1 = the far side; anything else
-        lda #$00                ;   is a wall further out, which this rule does not touch
-        bcs shNP
-        lda #$01
-shNP:   sta ssPar
         ldx spanL               ; now it is worth deriving u
         jsr calcU
         lda uwL
@@ -2838,21 +2816,35 @@ shNP:   sta ssPar
         lda uaH
         cmp ubH
         beq ssDn                ; same cell, no boundary crossed -- the common case
-        bcc ssUp
-        ; descending: boundaries at uaH, uaH-1, ... ubH+1
-        lda uaH
+        ; ---- walk the NEAR end of the face FIRST ----
+        ; The old walk always started at spanL, which is the left of the SCREEN and has nothing to
+        ; do with which end is near. It matters because ssAny stops the walk once the span has no
+        ; writable cell left: whatever is reached first is what survives. A near line is wider,
+        ; steadier and better placed, so it should be the one that gets the room.
+        ; The taller end is the near one -- colH is 1/z up to a constant, so this is one compare.
+        ldx spanL
+        lda colH,x
+        ldx spanR
+        cmp colH,x
+        bcc ssNrR
+        lda uaH                 ; spanL is the near end
         sta ssK
-        lda uaH
         sec
         sbc ubH
-        jmp ssCnt
-ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
-        clc
-        adc #$01
+        jmp ssNc
+ssNrR:  lda ubH                 ; spanR is the near end
         sta ssK
-        lda ubH
         sec
         sbc uaH
+ssNc:   bcs ssNp                ; near u > far u: walk DOWN away from the player
+        eor #$ff                ; near u < far u: walk UP; carry is clear, so this negates
+        adc #$01
+        inc ssK                 ;   and the first boundary above the near end is near+1
+        ldx #$00
+        stx ssDir
+        jmp ssCnt
+ssNp:   ldx #$01
+        stx ssDir
         ; This USED to reject a span covering more than 16 cells, on the grounds that u must be
         ; junk -- castRay's far/guard exits leave remL/remH meaningless. It was dead in that role:
         ; cfar says of itself "unreachable with a solid border", and the build asserts a solid
@@ -2863,6 +2855,70 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
         ; experiments.
 ssCnt:  sta ssN
         jsr ssCutS              ; the column where this wall gets too short for a line
+        ; ---- how wide is one panel on this wall, and how far along does that last? ----
+        ; dp is the perpendicular distance from the player to the wall PLANE, and runPlaneT holds
+        ; that plane per run -- a run lies in one plane by construction. sideT picks the axis the
+        ; same way calcU does, so the two cannot disagree about which coordinate u is.
+        ; Once per span, and only here: 65% of spans die on the uaH/ubH test above without ever
+        ; reaching the walk, and paying a multiply for those would cost more than this saves.
+        ldx spanL
+        ldy faceIdT,x           ; the RUN id. idT holds the CELL id -- that is what seamSpan's
+        lda sideT,x             ;   first test compares -- and runPlaneT is indexed by run.
+        bne spwX
+        lda py                  ; side 0: u runs along Y, so the plane is an X
+        sta ssPUL
+        lda py+1
+        sta ssPU
+        lda #$00
+        sec
+        sbc px
+        sta shD
+        lda runPlaneT,y
+        sbc px+1
+        jmp spwA
+spwX:   lda px                  ; otherwise u runs along X and the plane is a Y
+        sta ssPUL
+        lda px+1
+        sta ssPU
+        lda #$00
+        sec
+        sbc py
+        sta shD
+        lda runPlaneT,y
+        sbc py+1
+spwA:   sta shD+1
+        bpl spwP
+        lda #$00                ; |plane - player| as 8.8 cells
+        sec
+        sbc shD
+        sta shD
+        lda #$00
+        sbc shD+1
+        sta shD+1
+spwP:   lda shD                 ; dp in HALF cells = the 8.8 value >> 7 = hi*2 + bit 7 of lo
+        asl
+        lda shD+1
+        rol
+        bne spwNz
+        lda #$01                ; floored at half a cell: standing ON the plane is a degenerate
+spwNz:  cmp #$45        ;   reading, not a reason to cull the whole wall
+        bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
+        sta shD
+        lda #$45        ; lim = dp_h * (2K/n - dp_h), the largest s_h*s_h worth drawing
+        sec
+        sbc shD
+        sta mq
+        lda shD
+        jsr mul8
+        lda plo
+        sta ssLim
+        lda phi
+        sta ssLim+1
+        jmp spwDn
+spwNo:  lda #$00
+        sta ssLim
+        sta ssLim+1
+spwDn:
 
 
         ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
@@ -2874,12 +2930,11 @@ ssLp:   jsr ssAny               ; nothing writable left: every remaining boundar
         jsr seamOne
         dec ssN
         beq ssDn
-        lda uaH                 ; step k toward the far end
-        cmp ubH
-        bcc ssKup
-        dec ssK
+        lda ssDir               ; step k toward the far end, in the order chosen at setup
+        bne ssKdn
+        inc ssK
         jmp ssLp
-ssKup:  inc ssK
+ssKdn:  dec ssK
         jmp ssLp
 ssDn:   rts
 
@@ -9818,22 +9873,41 @@ ssCtN:  lda #$9f    ; nothing on screen is past this
 ; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
 ; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
 seamOne:
-        ; ---- too far down my own corridor to be worth a line ----
-        ; First test in the routine: it is the cheapest one here and it fires on exactly the
-        ; boundaries whose projection was going to be thrown away. rts rather than a branch to
-        ; ssOne, which is a routine's length away and out of range.
-        lda ssPar
-        beq shIn                ; not a wall of my own square: no cap, however far along it runs
-        lda ssK
+        ; ---- is there a panel here wide enough to place a line in? ----
+        ; First test in the routine: it is the cheapest thing here and it fires on exactly the
+        ; boundaries whose projection was going to be thrown away by the four-column rule anyway,
+        ; ~1000 cycles later. rts rather than a branch to ssOne, which is a routine away.
+        lda #$00                ; s = |boundary - player| along the face, 8.8 cells
         sec
+        sbc ssPUL
+        sta shS
+        lda ssK
         sbc ssPU
-        bcs shAb
-        eor #$ff                ; |k - player|; carry is clear from the borrow, so adc #1 negates
-        adc #$01
-shAb:   cmp #$07
-        bcc shIn
-        rts
-shIn:
+        sta shS+1
+        bpl spwSp
+        lda #$00
+        sec
+        sbc shS
+        sta shS
+        lda #$00
+        sbc shS+1
+        sta shS+1
+spwSp:  lda shS+1
+        cmp #$40
+        bcs spwOut              ; 64 cells along: out by any threshold, and s_h would overflow
+        lda shS
+        asl                     ; s in half cells, same scale as dp
+        lda shS+1
+        rol
+        sta mq                  ; A survives the store, so this is s_h squared
+        jsr mul8
+        lda plo
+        cmp ssLim
+        lda phi
+        sbc ssLim+1
+        bcc spwIn
+spwOut: rts                     ; panel narrower than SEAMPW columns: we cannot place it, so don't
+spwIn:
         lda #$00                ; k as 8.8
         sta skL
         lda ssK

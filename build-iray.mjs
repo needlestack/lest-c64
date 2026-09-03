@@ -2541,33 +2541,32 @@ const SEAMPANEL = process.env.SEAMPANEL !== '0';
 // So round with MEMORY instead: the band is what stops it, not the accuracy.
 // Distinct from the case subCvM argues against -- there the two candidates are equally right and
 // a fixed side is honest. Here one answer is right and the noise is what moves it.
-// SEAMHALL=n: a PARALLEL WALL is one whose plane, extended, forms a side of the square the player
-// is standing in -- the walls of your own corridor, the four directions you can look down. Only
-// those get capped, and only past n squares along them. Every other wall is left alone.
-// n is SIX, which is where the spacing figures below say the lines stop being separable at all:
-// past s=6 they are under four columns apart, which is the gap the distance rule already demands,
-// so six removes only what was going to be discarded anyway and keeps every line that could still
-// be read. Four also worked and looked right, but it was cutting lines still 5-8 columns apart --
-// a judgement about how much panelling a far wall should show, which is not this rule's job.
-// Both halves are already in hand, which is why this costs about twenty cycles a span:
-//   WHICH WALL -- runPlaneT holds each run's plane coordinate (a W run's x, an N run's y), and a
-//     run lies in ONE plane by construction. A W run is seen from the west so its plane can only
-//     be the player's EAST side, an E run only the west side; same for N/S. So "forms a side of my
-//     square" is runPlane - player_cell being 0 or 1, whichever face it is -- one subtract, cmp #2.
-//   HOW FAR ALONG -- calcU shows u is a world coordinate on the face's running axis, Y when sideT
-//     is 0 and X otherwise, and ssK is an integer cell boundary in it. So squares-down-the-corridor
-//     is |ssK - py+1| or |ssK - px+1|.
-// Why cells are the right unit: two boundaries on a wall dp cells to your side and s cells along it
-// land 138.7*dp/(dp*dp + s*s) screen columns apart (160 columns over a 47/256 turn). Down your own
-// corridor, dp < 1, that is 8.2 columns at s=4, 5.3 at s=5, 3.7 at s=6, 2.1 at s=8 -- they collapse
-// into the vanishing point, and everything from s=6 out was ALREADY being thrown away by the
-// four-column rule AFTER paying ~1000 cycles to project it. This drops it for twelve.
-// The parallel test is what keeps that honest. Capping on distance alone also cut walls across a
-// room -- at dp=2, s=5 the lines are still 9.6 columns apart and perfectly readable.
-// Corner marks are untouched by construction: subFace and subCvM place those, not seamOne.
-const SEAMHALL = CELLMERGE ? 0 : +(process.env.SEAMHALL ?? 6);   // idT holds CELL ids under
-                                        // CELLMERGE, so the run-id lookup would read gibberish
-if (SEAMHALL !== 6) DIAG.push(`SEAMHALL=${SEAMHALL}`);
+// SEAMPW=n: draw a panel line only where we can PLACE one accurately. n is the minimum width, in
+// screen columns, that one cell of wall must subtend at that boundary. Below it the line is being
+// dropped into a panel a few pixels wide, where our own placement error (~0.4 columns, see
+// SEAMHYST) is a large fraction of the panel, so what gets drawn is noise rather than structure.
+// This replaces two blunter rules that were tried first and thrown out. A cap on cells-along-the-
+// wall was too sudden -- on/off by cell position, no falloff, and it cut long walls near the player
+// that were not remotely edge-on. Restricting that to walls bounding the player's own square fixed
+// the false positives but left the same cliff, and said nothing about a wall a square or two over,
+// which needs culling in the distance just as much.
+// The graceful version is one formula. One cell of wall at perpendicular distance dp from the
+// player and s cells along it subtends K*dp/(dp*dp + s*s) columns, K = NLOG/FOV in radians = 138.7
+// -- and dp*dp + s*s is exactly D*D, the squared distance to that boundary, because dp and s ARE
+// the wall-aligned coordinates of it. So "wide enough" rearranges to
+//     s*s <= dp * (K/n - dp)
+// with no division and no trigonometry, and both inputs are subtracts on bytes already in hand:
+// runPlaneT holds the wall's plane, px/py the player, and ssK the boundary. Held in HALF cells so
+// the fractional part of the player's position survives a byte: s_h*s_h <= dp_h * (2K/n - dp_h).
+// The falloff it gives, in cells along the wall, is continuous in both distance and angle:
+//     dp 0.25 -> 2.9    dp 1 -> 5.8    dp 2 -> 8.1    dp 4 -> 11.1    dp 8 -> 14.6
+// K varies with sec^2 across the screen (138.7 at centre, 175 at the edge), so the threshold is
+// soft by about 20% either way. That is well inside how fuzzy "wide enough to read" is.
+const SEAMPW = CELLMERGE ? 0 : +(process.env.SEAMPW ?? 4);   // idT/faceIdT hold CELL ids under
+                                        // CELLMERGE, so the run lookup would read gibberish
+if (SEAMPW && SEAMPW < 2) throw new Error(`SEAMPW=${SEAMPW}: 2K/n must fit a byte, so n >= 2`);
+const PW2C = SEAMPW ? Math.round(2 * NLOG / (FOV / 256 * 2 * Math.PI) / SEAMPW) : 0;
+if (SEAMPW !== 4) DIAG.push(`SEAMPW=${SEAMPW}`);
 const SEAMHYST = process.env.SEAMHYST !== '0';
 const HYSN = 12;                        // band slots. Overflow just skips the band for the extras,
                                         // which is last frame's behaviour, so it degrades quietly.
@@ -5020,9 +5019,12 @@ ssCut   = $9150                 ; the column where the wall crosses the height a
 ssCutD  = $9151                 ;   and which side of it is too short ($00 = to the right)
 ssHL    = $9152                 ; the two end heights, while that is being worked out
 ssHR    = $9153
-ssPar   = $9155                 ;   ...and whether this face is a wall of the player's own square
-ssPU    = $9154                 ; SEAMHALL: the player's own cell on THIS face's running axis,
-                                ;   worked out once per span because every boundary shares it
+ssPU    = $9154                 ; SEAMPW: the player's position on THIS face's running axis, the
+ssPUL   = $9155                 ;   two bytes of it, worked out once per span
+ssLim   = $9156                 ;   ...and the largest s*s that still leaves a placeable panel
+shD     = $9158                 ;   dp while it is being formed, then dp in half cells
+shS     = $915a                 ;   s while it is being formed
+ssDir   = $915c                 ; which way the boundary walk steps: 0 = up, 1 = down
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -8113,31 +8115,6 @@ ssPre:  lda seamT,x
         bcc ssPre
         jmp ssDn                ; nowhere left to put one
 ssPreO:
-` : ''}${SEAMHALL ? `        ; ---- is this a wall of the player's own square, and where is the player along it? ----
-        ; sideT picks the axis the same way calcU does, so the two cannot disagree about which
-        ; coordinate u is. Once per span: every boundary in the walk shares the face, and so shares
-        ; the plane, the axis, and the answer.
-        ldx spanL
-        lda sideT,x
-        bne shX
-        lda py+1                ; side 0: u counts along Y, so the plane is an X
-        sta ssPU
-        ldy faceIdT,x           ; the RUN id -- idT holds the CELL id, which is what seamSpan's
-        lda runPlaneT,y         ;   first test compares; runPlaneT is indexed by run
-        sec
-        sbc px+1
-        jmp shC
-shX:    lda px+1                ; otherwise u counts along X and the plane is a Y
-        sta ssPU
-        ldy faceIdT,x
-        lda runPlaneT,y
-        sec
-        sbc py+1
-shC:    cmp #$02                ; 0 = the near side of my square, 1 = the far side; anything else
-        lda #$00                ;   is a wall further out, which this rule does not touch
-        bcs shNP
-        lda #$01
-shNP:   sta ssPar
 ` : ''}        ldx spanL               ; now it is worth deriving u
 ${DOUBLE === 'calcU' ? '        jsr calcU               ; DOUBLE=calcU: price it by differencing two PROFILE runs.\n        ldx spanL               ;   calcU CLOBBERS X, which is its own input -- without this\n' : ''}        jsr calcU
         lda uwL
@@ -8155,21 +8132,35 @@ ${DOUBLE === 'calcU' ? '        jsr calcU\n        ldx spanR               ;   t
         lda uaH
         cmp ubH
         beq ssDn                ; same cell, no boundary crossed -- the common case
-${SEAMCNT ? `        inc ssDraw\n        bne ssDrawX\n        inc ssDraw+1\nssDrawX:\n` : ''}        bcc ssUp
-        ; descending: boundaries at uaH, uaH-1, ... ubH+1
-        lda uaH
+${SEAMCNT ? `        inc ssDraw\n        bne ssDrawX\n        inc ssDraw+1\nssDrawX:\n` : ''}        ; ---- walk the NEAR end of the face FIRST ----
+        ; The old walk always started at spanL, which is the left of the SCREEN and has nothing to
+        ; do with which end is near. It matters because ssAny stops the walk once the span has no
+        ; writable cell left: whatever is reached first is what survives. A near line is wider,
+        ; steadier and better placed, so it should be the one that gets the room.
+        ; The taller end is the near one -- colH is 1/z up to a constant, so this is one compare.
+        ldx spanL
+        lda colH,x
+        ldx spanR
+        cmp colH,x
+        bcc ssNrR
+        lda uaH                 ; spanL is the near end
         sta ssK
-        lda uaH
         sec
         sbc ubH
-        jmp ssCnt
-ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
-        clc
-        adc #$01
+        jmp ssNc
+ssNrR:  lda ubH                 ; spanR is the near end
         sta ssK
-        lda ubH
         sec
         sbc uaH
+ssNc:   bcs ssNp                ; near u > far u: walk DOWN away from the player
+        eor #$ff                ; near u < far u: walk UP; carry is clear, so this negates
+        adc #$01
+        inc ssK                 ;   and the first boundary above the near end is near+1
+        ldx #$00
+        stx ssDir
+        jmp ssCnt
+ssNp:   ldx #$01
+        stx ssDir
         ; This USED to reject a span covering more than 16 cells, on the grounds that u must be
         ; junk -- castRay's far/guard exits leave remL/remH meaningless. It was dead in that role:
         ; cfar says of itself "unreachable with a solid border", and the build asserts a solid
@@ -8181,7 +8172,71 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
 ssCnt:  ${SEAMMAXN ? `cmp #${hx(SEAMMAXN + 1)}
         bcs ssDn
         ` : ''}sta ssN
-${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}
+${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}${SEAMPW ? `        ; ---- how wide is one panel on this wall, and how far along does that last? ----
+        ; dp is the perpendicular distance from the player to the wall PLANE, and runPlaneT holds
+        ; that plane per run -- a run lies in one plane by construction. sideT picks the axis the
+        ; same way calcU does, so the two cannot disagree about which coordinate u is.
+        ; Once per span, and only here: 65% of spans die on the uaH/ubH test above without ever
+        ; reaching the walk, and paying a multiply for those would cost more than this saves.
+        ldx spanL
+        ldy faceIdT,x           ; the RUN id. idT holds the CELL id -- that is what seamSpan's
+        lda sideT,x             ;   first test compares -- and runPlaneT is indexed by run.
+        bne spwX
+        lda py                  ; side 0: u runs along Y, so the plane is an X
+        sta ssPUL
+        lda py+1
+        sta ssPU
+        lda #$00
+        sec
+        sbc px
+        sta shD
+        lda runPlaneT,y
+        sbc px+1
+        jmp spwA
+spwX:   lda px                  ; otherwise u runs along X and the plane is a Y
+        sta ssPUL
+        lda px+1
+        sta ssPU
+        lda #$00
+        sec
+        sbc py
+        sta shD
+        lda runPlaneT,y
+        sbc py+1
+spwA:   sta shD+1
+        bpl spwP
+        lda #$00                ; |plane - player| as 8.8 cells
+        sec
+        sbc shD
+        sta shD
+        lda #$00
+        sbc shD+1
+        sta shD+1
+spwP:   lda shD                 ; dp in HALF cells = the 8.8 value >> 7 = hi*2 + bit 7 of lo
+        asl
+        lda shD+1
+        rol
+        bne spwNz
+        lda #$01                ; floored at half a cell: standing ON the plane is a degenerate
+spwNz:  cmp #${hx(PW2C)}        ;   reading, not a reason to cull the whole wall
+        bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
+        sta shD
+        lda #${hx(PW2C)}        ; lim = dp_h * (2K/n - dp_h), the largest s_h*s_h worth drawing
+        sec
+        sbc shD
+        sta mq
+        lda shD
+        jsr mul8
+        lda plo
+        sta ssLim
+        lda phi
+        sta ssLim+1
+        jmp spwDn
+spwNo:  lda #$00
+        sta ssLim
+        sta ssLim+1
+spwDn:
+` : ''}
 
         ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
@@ -8192,12 +8247,11 @@ ssLp:   jsr ssAny               ; nothing writable left: every remaining boundar
 ${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n' : ''}        jsr seamOne
         dec ssN
         beq ssDn
-        lda uaH                 ; step k toward the far end
-        cmp ubH
-        bcc ssKup
-        dec ssK
+        lda ssDir               ; step k toward the far end, in the order chosen at setup
+        bne ssKdn
+        inc ssK
         jmp ssLp
-ssKup:  inc ssK
+ssKdn:  dec ssK
         jmp ssLp
 ssDn:   rts
 
@@ -15216,22 +15270,41 @@ ssCtN:  lda #${hx(NLOG - 1)}    ; nothing on screen is past this
 ; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
 ; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
 seamOne:
-${SEAMHALL ? `        ; ---- too far down my own corridor to be worth a line ----
-        ; First test in the routine: it is the cheapest one here and it fires on exactly the
-        ; boundaries whose projection was going to be thrown away. rts rather than a branch to
-        ; ssOne, which is a routine's length away and out of range.
-        lda ssPar
-        beq shIn                ; not a wall of my own square: no cap, however far along it runs
-        lda ssK
+${SEAMPW ? `        ; ---- is there a panel here wide enough to place a line in? ----
+        ; First test in the routine: it is the cheapest thing here and it fires on exactly the
+        ; boundaries whose projection was going to be thrown away by the four-column rule anyway,
+        ; ~1000 cycles later. rts rather than a branch to ssOne, which is a routine away.
+        lda #$00                ; s = |boundary - player| along the face, 8.8 cells
         sec
+        sbc ssPUL
+        sta shS
+        lda ssK
         sbc ssPU
-        bcs shAb
-        eor #$ff                ; |k - player|; carry is clear from the borrow, so adc #1 negates
-        adc #$01
-shAb:   cmp #${hx(SEAMHALL + 1)}
-        bcc shIn
-        rts
-shIn:
+        sta shS+1
+        bpl spwSp
+        lda #$00
+        sec
+        sbc shS
+        sta shS
+        lda #$00
+        sbc shS+1
+        sta shS+1
+spwSp:  lda shS+1
+        cmp #$40
+        bcs spwOut              ; 64 cells along: out by any threshold, and s_h would overflow
+        lda shS
+        asl                     ; s in half cells, same scale as dp
+        lda shS+1
+        rol
+        sta mq                  ; A survives the store, so this is s_h squared
+        jsr mul8
+        lda plo
+        cmp ssLim
+        lda phi
+        sbc ssLim+1
+        bcc spwIn
+spwOut: rts                     ; panel narrower than SEAMPW columns: we cannot place it, so don't
+spwIn:
 ` : ''}        lda #$00                ; k as 8.8
         sta skL
         lda ssK
