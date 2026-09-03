@@ -2544,6 +2544,11 @@ const SEAMPANEL = process.env.SEAMPANEL !== '0';
 // SEAMHALL=n: a PARALLEL WALL is one whose plane, extended, forms a side of the square the player
 // is standing in -- the walls of your own corridor, the four directions you can look down. Only
 // those get capped, and only past n squares along them. Every other wall is left alone.
+// n is SIX, which is where the spacing figures below say the lines stop being separable at all:
+// past s=6 they are under four columns apart, which is the gap the distance rule already demands,
+// so six removes only what was going to be discarded anyway and keeps every line that could still
+// be read. Four also worked and looked right, but it was cutting lines still 5-8 columns apart --
+// a judgement about how much panelling a far wall should show, which is not this rule's job.
 // Both halves are already in hand, which is why this costs about twenty cycles a span:
 //   WHICH WALL -- runPlaneT holds each run's plane coordinate (a W run's x, an N run's y), and a
 //     run lies in ONE plane by construction. A W run is seen from the west so its plane can only
@@ -2560,9 +2565,9 @@ const SEAMPANEL = process.env.SEAMPANEL !== '0';
 // The parallel test is what keeps that honest. Capping on distance alone also cut walls across a
 // room -- at dp=2, s=5 the lines are still 9.6 columns apart and perfectly readable.
 // Corner marks are untouched by construction: subFace and subCvM place those, not seamOne.
-const SEAMHALL = CELLMERGE ? 0 : +(process.env.SEAMHALL ?? 4);   // idT holds CELL ids under
+const SEAMHALL = CELLMERGE ? 0 : +(process.env.SEAMHALL ?? 6);   // idT holds CELL ids under
                                         // CELLMERGE, so the run-id lookup would read gibberish
-if (SEAMHALL !== 4) DIAG.push(`SEAMHALL=${SEAMHALL}`);
+if (SEAMHALL !== 6) DIAG.push(`SEAMHALL=${SEAMHALL}`);
 const SEAMHYST = process.env.SEAMHYST !== '0';
 const HYSN = 12;                        // band slots. Overflow just skips the band for the extras,
                                         // which is last frame's behaviour, so it degrades quietly.

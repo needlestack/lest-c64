@@ -9830,7 +9830,7 @@ seamOne:
         bcs shAb
         eor #$ff                ; |k - player|; carry is clear from the borrow, so adc #1 negates
         adc #$01
-shAb:   cmp #$05
+shAb:   cmp #$07
         bcc shIn
         rts
 shIn:
