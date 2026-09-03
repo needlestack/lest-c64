@@ -2381,7 +2381,16 @@ const ENTPROF = flag('ENTPROF');
 // occlusion stamping lands". occStamp has landed and runs unconditionally after renderSym, which
 // is what the still path was waiting for.
 const STILLSKIP = flag('STILLSKIP');
-const OCCLAZY = flag('OCCLAZY');
+// ON by default since 2026-09-03, and it is the single biggest win in the frame. The masks say
+// whether an entity is beyond a wall face's PLANE -- no camera term -- so they only change when an
+// entity moves or the run tables are re-patched, and on a map that splits nothing neither happens
+// most frames. Rebuilding them regardless cost 216 lines a frame on the combined level, 16% of
+// everything, because the cost is entities x runs and that level has 4 and 44.
+//   orbOccAll 216.0 -> 4.0 lines, whole frame 1315 -> 1052 = 4 video frames = 10 -> 15 fps.
+// Verified with its own OCCCHK harness rather than by eye: rebuild anyway, compare byte for byte,
+// count differences. 255+ skipped frames checked while walking through cells with both angels
+// moving, occBad = 0. OCCLAZY=0 restores the unconditional rebuild.
+const OCCLAZY = process.env.OCCLAZY !== '0';
 // OCCCHK=1: verify the skip. Rebuilds even when it would skip, and counts bytes that differ.
 // 2 and 3 exist to BISECT it: the full version starts and then runs wild, so build up in stages.
 //   2 = counters only (never skip, count clean frames)   3 = 2 + the shadow copy   1 = 3 + compare
@@ -14730,10 +14739,15 @@ ${OCCCHK ? `; EQUATES, not emitted bytes: declaring these as !byte pushed everyt
 ; cannot catch this: a bare equate has no declared size, so it is checked as one byte.
 ; RULE: for scratch, take an address the hole report calls (free). "No label there" is not the
 ; same fact.
-occShad = $7040                 ; $703e-$70ff is 194 free bytes, just above orbOccT
-occArm  = $7050
-occChk  = $7051
-occBad  = $7052
+; Moved again 2026-09-03: $7040 was free when it was chosen and is not now -- the image grew into
+; it and the SEAMCNT counters took the top of that page -- so the guard refused to build, which is
+; the guard working. $60a8-$60ff is 88 bytes the report calls (free); the shadow needs 31 of them.
+; NOT $91c0, which the report also calls free: a label there caps holeSeeT at 64 bytes and LVL=3's
+; sockets need 96. Re-read the report before trusting any of these again.
+occShad = $60a8
+occArm  = $60e0
+occChk  = $60e1
+occBad  = $60e2
 ` : ''}` : ''}bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
