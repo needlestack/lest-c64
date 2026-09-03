@@ -5047,6 +5047,19 @@ ssLim   = $9156                 ;   ...and the largest s*s that still leaves a p
 shD     = $9158                 ;   dp while it is being formed, then dp in half cells
 shS     = $915a                 ;   s while it is being formed
 ssDir   = $915c                 ; which way the boundary walk steps: 0 = up, 1 = down
+; ---- SEAMHYST: last frame's panel columns, and this frame's being collected ----
+; Two arrays and not one: a line placed earlier in THIS frame must not become a band centre for a
+; later one. Only panel lines go in. Corner marks are pinned to a cast column and were already
+; steady, and the four-column rule keeps a panel far enough from one that it could never match.
+; No seam identity is needed or wanted here -- run ids renumber every frame -- so the match is
+; pure proximity, which is exactly what the band means.
+; At fixed addresses in this gap rather than in the free-run stream: that stream runs up to
+; HAZ_BASE and TOURW's waypoint script sits in its tail, so 26 bytes there is 26 the tour cannot
+; have. The gap below holeSeeT at $9180 was doing nothing.
+sHyP    = $915d                 ; 12 columns
+sHyC    = $9169                 ; 12 columns
+sHyPN   = $9175
+sHyN    = $9176
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -8197,82 +8210,7 @@ ssNp:   ldx #$01
 ssCnt:  ${SEAMMAXN ? `cmp #${hx(SEAMMAXN + 1)}
         bcs ssDn
         ` : ''}sta ssN
-${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}${SEAMPW ? `        ; ---- how wide is one panel on this wall, and how far along does that last? ----
-        ; dp is the perpendicular distance from the player to the wall PLANE, and runPlaneT holds
-        ; that plane per run -- a run lies in one plane by construction. sideT picks the axis the
-        ; same way calcU does, so the two cannot disagree about which coordinate u is.
-        ; Once per span, and only here: 65% of spans die on the uaH/ubH test above without ever
-        ; reaching the walk, and paying a multiply for those would cost more than this saves.
-        ldx spanL
-        ldy faceIdT,x           ; the RUN id. idT holds the CELL id -- that is what seamSpan's
-        lda sideT,x             ;   first test compares -- and runPlaneT is indexed by run.
-        bne spwX
-        lda py                  ; side 0: u runs along Y, so the plane is an X
-        sta ssPUL
-        lda py+1
-        sta ssPU
-        lda #$00
-        sec
-        sbc px
-        sta shD
-        lda runPlaneT,y
-        sbc px+1
-        jmp spwA
-spwX:   lda px                  ; otherwise u runs along X and the plane is a Y
-        sta ssPUL
-        lda px+1
-        sta ssPU
-        lda #$00
-        sec
-        sbc py
-        sta shD
-        lda runPlaneT,y
-        sbc py+1
-spwA:   sta shD+1
-        bpl spwP
-        lda #$00                ; |plane - player| as 8.8 cells
-        sec
-        sbc shD
-        sta shD
-        lda #$00
-        sbc shD+1
-        sta shD+1
-spwP:   lda shD+1               ; 64 cells to the side: the shift below would wrap, and SEAMFAR
-        cmp #$40                ;   threw this away long ago
-        bcs spwNo
-        lda shD                 ; dp in QUARTER cells, ROUNDED: (dp8.8 + 32) >> 6, which is the
-        clc                     ;   top byte once it has been shifted left twice
-        adc #$20
-        sta shD
-        lda shD+1
-        adc #$00
-        sta shD+1
-        asl shD
-        rol shD+1
-        asl shD
-        rol shD+1
-        lda shD+1
-        bne spwNz
-        lda #$01                ; floored at a quarter cell: standing ON the plane is a degenerate
-spwNz:  cmp #${hx(PW4C)}        ;   reading, not a reason to cull the whole wall
-        bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
-        sta shD
-        lda #${hx(PW4C)}        ; lim = dp_q * (4K/n - dp_q), the largest s_q*s_q worth drawing
-        sec
-        sbc shD
-        sta mq
-        lda shD
-        jsr mul8
-        lda plo
-        sta ssLim
-        lda phi
-        sta ssLim+1
-        jmp spwDn
-spwNo:  lda #$00
-        sta ssLim
-        sta ssLim+1
-spwDn:
-` : ''}
+${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}${SEAMPW ? '        jsr ssPwS               ; dp, and the widest s that still leaves a placeable panel\n' : ''}
 
         ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
@@ -15055,17 +14993,7 @@ lsLen:  !byte 0
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
-${SEAMHYST ? `; ---- SEAMHYST: last frame's panel columns, and this frame's being collected ----
-; Two arrays and not one: a line placed earlier in THIS frame must not become a band centre for a
-; later one. Only panel lines go in. Corner marks are pinned to a cast column and were already
-; steady, and the four-column rule keeps a panel far enough from one that it could never match.
-; No seam identity is needed or wanted here -- run ids renumber every frame -- so the match is
-; pure proximity, which is exactly what the band means.
-sHyP:   !byte ${Array(HYSN).fill(255).join(',')}
-sHyC:   !byte ${Array(HYSN).fill(255).join(',')}
-sHyPN:  !byte 0
-sHyN:   !byte 0
-` : ''}runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
+runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
 
 ; ---- occRT / occLT / occRTW / occLTW ----
@@ -15324,6 +15252,85 @@ ssCtN:  lda #${hx(NLOG - 1)}    ; nothing on screen is past this
 ; jsr-entered from the boundary walk, so its address is free, and the block below
 ; ORB_SMALL had 26 bytes when the effective-column basis needed 135.
 ; One boundary, at world coordinate ssK. Leaves seamT marked if it lands on a free cell.
+${SEAMPW ? `; ---- ssPwS: dp for this face, and the largest s*s that still leaves a placeable panel ----
+; Out here in the free run rather than inline in seamSpan, which lives in the MAIN block below
+; ORB_SMALL: that block was down to 41 bytes and this is 60 of them, while the stream has room to
+; spare in every build that is not TOURW. A jsr per walking span, about 65 cycles a frame.
+        ; dp is the perpendicular distance from the player to the wall PLANE, and runPlaneT holds
+        ; that plane per run -- a run lies in one plane by construction. sideT picks the axis the
+        ; same way calcU does, so the two cannot disagree about which coordinate u is.
+        ; Once per span, and only here: 65% of spans die on the uaH/ubH test above without ever
+        ; reaching the walk, and paying a multiply for those would cost more than this saves.
+ssPwS:  ldx spanL
+        ldy faceIdT,x           ; the RUN id. idT holds the CELL id -- that is what seamSpan's
+        lda sideT,x             ;   first test compares -- and runPlaneT is indexed by run.
+        bne spwX
+        lda py                  ; side 0: u runs along Y, so the plane is an X
+        sta ssPUL
+        lda py+1
+        sta ssPU
+        lda #$00
+        sec
+        sbc px
+        sta shD
+        lda runPlaneT,y
+        sbc px+1
+        jmp spwA
+spwX:   lda px                  ; otherwise u runs along X and the plane is a Y
+        sta ssPUL
+        lda px+1
+        sta ssPU
+        lda #$00
+        sec
+        sbc py
+        sta shD
+        lda runPlaneT,y
+        sbc py+1
+spwA:   sta shD+1
+        bpl spwP
+        lda #$00                ; |plane - player| as 8.8 cells
+        sec
+        sbc shD
+        sta shD
+        lda #$00
+        sbc shD+1
+        sta shD+1
+spwP:   lda shD+1               ; 64 cells to the side: the shift below would wrap, and SEAMFAR
+        cmp #$40                ;   threw this away long ago
+        bcs spwNo
+        lda shD                 ; dp in QUARTER cells, ROUNDED: (dp8.8 + 32) >> 6, which is the
+        clc                     ;   top byte once it has been shifted left twice
+        adc #$20
+        sta shD
+        lda shD+1
+        adc #$00
+        sta shD+1
+        asl shD
+        rol shD+1
+        asl shD
+        rol shD+1
+        lda shD+1
+        bne spwNz
+        lda #$01                ; floored at a quarter cell: standing ON the plane is a degenerate
+spwNz:  cmp #${hx(PW4C)}        ;   reading, not a reason to cull the whole wall
+        bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
+        sta shD
+        lda #${hx(PW4C)}        ; lim = dp_q * (4K/n - dp_q), the largest s_q*s_q worth drawing
+        sec
+        sbc shD
+        sta mq
+        lda shD
+        jsr mul8
+        lda plo
+        sta ssLim
+        lda phi
+        sta ssLim+1
+        jmp spwDn
+spwNo:  lda #$00
+        sta ssLim
+        sta ssLim+1
+spwDn:  rts
+` : ''}
 ${SEAMPW ? `
 ; ---- ssPw: is there a panel at ssK wide enough to place a line in? ----
 ; Carry CLEAR = yes. Called from the walk BEFORE ssAny because it is O(1) against ssAny's scan
@@ -15744,8 +15751,15 @@ hazCT:  !byte ${HZ_LIVE.ct.join(',') || 0}
 hazRstT: !byte ${HZ_LIVE.rst.join(',')}
 hazLstT: !byte ${HZ_LIVE.lst.join(',') || 0}` : ''}
 ${TOURW ? `        ; ---- TOURW: the waypoint tour, in the tail of the hazard block ----
-        ; That page is free while every resident map splits nothing, which all three do.
-        * = $a700
+        ; FLOWS on from the hazard tables rather than re-originning at $a700. It used to say
+        ; "* = $a700", reasoning that the page is free while every resident map splits nothing --
+        ; and the DATA is, but the hazard block also emits hzRun and its table stubs there, 39
+        ; bytes of them, whenever HAZRT is on. So the tour asked for an address the block it is
+        ; meant to sit BEHIND had already taken, and every TWOLEV build of the walkthrough died
+        ; with "* = $a700 moves backward from $a727". Exactly those 39 bytes, and it had nothing
+        ; to do with how big the tour or the seam code had grown.
+        ; With HAZRT off there is no block to follow and this just continues the stream, which is
+        ; where it wanted to be anyway -- and is the rule the rest of this file already follows.
         ; Feeds readKeys the two bytes it would have read from the hardware, so every bit of
         ; movement, run and turn logic runs exactly as it does for a player. Parallel arrays
         ; indexed by STEP so no multiply is needed; the input masks are indexed by TYPE.
@@ -15871,9 +15885,8 @@ twTOHiT:!byte ${TOUR_STEPS.map(t => hx(t[1] >> 8)).join(',')}
 twJoyT: !byte $fe, $fd, $fe, $fb, $f7, $fb, $f7, $ff, $ff, $fe
 twRowT: !byte $ff, $ff, $7f, $ff, $ff, $7f, $7f, $ff, $ff, $ff
 ` : ''}${RECORD && SPRITES ? `        ; ---- RECORD's log, in the tail of the hazard block ----
-        ; That page is free while every resident map splits nothing, which is true of all three.
-        ; A diagnostic build only, so borrowing it is safe in a way it would not be for a ship.
-        * = $a700
+        ; Flows on from the hazard tables, for the reason spelled out at TOURW above: hzRun and
+        ; its stubs already hold $a700 whenever HAZRT is on, so re-originning there moves backward.
 recTick:                        ; ---- the input log, run-length encoded in 60Hz TICKS ----
         ; Ticks, not render frames. Movement is tick-driven, so a run held for N FRAMES covers
         ; less ground on a faster build -- and comparing builds of different speed is the entire
