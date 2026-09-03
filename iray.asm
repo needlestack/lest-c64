@@ -150,9 +150,6 @@ ssCut   = $9150                 ; the column where the wall crosses the height a
 ssCutD  = $9151                 ;   and which side of it is too short ($00 = to the right)
 ssHL    = $9152                 ; the two end heights, while that is being worked out
 ssHR    = $9153
-ssB16   = $914a                 ; the span's left end and width in SIXTEENTHS of a column, in the
-ssW16   = $914c                 ;   corrected basis, plus seamOne's scratch product. Absolute, not
-ssX16   = $914e                 ;   zero page: read once a boundary, and zp is spoken for.
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -2825,27 +2822,9 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
         ; is proved at build time from the map's dimensions. SEAMMAXN=n restores a cap for
         ; experiments.
 ssCnt:  sta ssN
-        ; ---- the span's two ends in SIXTEENTHS, corrected to where their rays really aim ----
-        ; Constant for the span, so seamOne only does the multiply. LAST, not first: it is read
-        ; nowhere until the boundary walk, and every gate above throws spans away -- the idT test
-        ; alone stops about 65% of them. Sitting ahead of those cost ~90 cycles on every span that
-        ; was about to be discarded.
         jsr ssCutS              ; the column where this wall gets too short for a line
-        ldx spanL
-        jsr eff16               ; -> ssX16 = spanL*16 + its ray correction, 16-BIT
-        lda ssX16
-        sta ssB16
-        lda ssX16+1
-        sta ssB16+1
-        ldx spanR
-        jsr eff16
-        sec                     ; width = right end - left end, still in sixteenths
-        lda ssX16
-        sbc ssB16
-        sta ssW16
-        lda ssX16+1
-        sbc ssB16+1
-        sta ssW16+1
+
+
         ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
@@ -9591,10 +9570,7 @@ mMskT: !byte 7,3,1,0
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
 
-; effD[c]: where column c's ray really points, minus c, in SIXTEENTHS of a column. In the stream
-; with the other displaced lookups rather than beside rayOffT -- the gap there is exactly the size
-; of rayOffT and a second 160-byte table walked straight off the end of it.
-effDT:  !byte 0,1,2,3,3,4,4,4,4,4,4,4,4,3,3,2,2,1,0,255,254,253,251,250,7,5,4,2,0,254,252,250,6,4,1,255,252,250,5,2,255,253,250,4,1,254,251,5,1,254,251,4,1,254,250,3,0,252,5,1,253,6,2,254,251,3,255,251,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,4,0,252,5,1,253,5,2,254,250,3,255,251,4,0,253,6,2,255,252,5,2,255,251,5,2,255,252,6,3,1,254,251,6,4,1,255,252,250,6,4,2,0,254,252,251,249,6,5,3,2,1,0,255,254,254,253,253,252,252,252,252,252,252,252,252,253,253,254,255,0
+
 
 
 ; ---- the solid-run draw for a SEAM column ----
@@ -9743,32 +9719,6 @@ sdNext: jmp rfNext
 ; collapsing anything closer than 4 makes the same-cell case unreachable, and the pair glyphs with
 ; it. Scanning cell-1..cell+1 covers the rule -- a line within 3 columns cannot be further away
 ; than that -- and the distance test discards whatever the scan over-reaches into.
-; Column X in SIXTEENTHS, corrected to where its ray really aims. The multiply by 16 is 16-BIT:
-; a column runs to 159, so column*16 reaches 2544 and shifting an 8-bit accumulator four times
-; silently drops the top -- which is exactly what it did, and every seam landed somewhere else.
-; The correction is a SIGNED byte, so a negative one borrows from the high byte before the add.
-eff16:  lda #$00
-        sta ssX16+1
-        txa
-        asl
-        rol ssX16+1
-        asl
-        rol ssX16+1
-        asl
-        rol ssX16+1
-        asl
-        rol ssX16+1
-        sta ssX16
-        lda effDT,x
-        bpl eff16p
-        dec ssX16+1
-eff16p: clc
-        adc ssX16
-        sta ssX16
-        bcc eff16d
-        inc ssX16+1
-eff16d: rts
-
 ; ---- where does this wall stop being tall enough to carry a line? ----
 ; colH is LINEAR in screen column -- that is what the rectilinear projection buys -- so the two
 ; end heights give the crossing exactly, once per span, with no per-boundary height lookup:
@@ -9936,45 +9886,15 @@ ssDiv:  lda sSlo
         lda #$ff                ; t saturated at 1.0
         jmp ssOff
 ssT8:   lda s1
-ssOff:  sta mq                  ; offset = (t * width) >> 8, in sixteenths of a column
-        lda ssW16
+ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
+        lda ssW
         jsr mul8
+        lda plo                 ; round to nearest column: truncating biased every seam a
+        cmp #$80                ; column low, which reads as the whole wall being off by one
         lda phi
-        sta ssX16
-        lda #$00
-        sta ssX16+1
-        lda ssW16+1
-        beq ssOf1
-        jsr mul8                ; mq is still t
-        clc
-        lda plo
-        adc ssX16
-        sta ssX16
-        lda phi
-        adc ssX16+1
-        sta ssX16+1
-ssOf1:  clc                     ; + the span's left end, and round to the nearest whole column
-        lda ssX16
-        adc ssB16
-        sta ssX16
-        lda ssX16+1
-        adc ssB16+1
-        clc
-        pha
-        lda ssX16
-        adc #$08
-        sta ssX16
-        pla
         adc #$00
-        lsr                     ; >> 4: sixteenths back to columns
-        ror ssX16
-        lsr
-        ror ssX16
-        lsr
-        ror ssX16
-        lsr
-        ror ssX16
-        lda ssX16
+        clc
+        adc spanL
         cmp #160
         bcs ssOne               ; ---- off screen: REACHABLE, and the only thing stopping a write
                                 ; past seamT (40 bytes, indexed col>>2). It used to be unreachable

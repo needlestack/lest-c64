@@ -456,15 +456,6 @@ const NBND = +(process.env.NBND ?? (FINEANG ? 64 : NLOG / 8));
 // RECTILINEAR projection: columns spaced by atan (flat image plane) + per-column
 // cos-correction of the distance. Fixes the fisheye arch AND makes wall height linear.
 const CTR = (NLOG - 1) / 2, HALF_UNITS = FOV / 2, TANHALF = Math.tan(HALF_UNITS / 256 * 2 * Math.PI);
-// effD[c]: where column c's ray really points, minus c, in SIXTEENTHS of a column.
-// rayOff is an 8-bit angle, so ~160 columns share only ~48 distinct directions -- about five
-// columns each. u derived at column c is therefore the hit point of a ray aimed at some OTHER
-// column, up to a couple away, and pairing it with c skews any interpolation between two such
-// samples. Worse, the skew CHANGES as a span end walks across a quantisation boundary, which is
-// what made a wall seam hop a column left and back as the player strafed.
-// Inverting the quantisation costs one signed byte a column and makes the pairing honest.
-// Sixteenths because the correction is only a few columns wide but half-column steps matter.
-const effD = [];
 const rayOff = [], cosCorr = [], rayOffQ = [];
 for (let c = 0; c < NLOG; c++) {
   const camX = (c - CTR) / CTR * TANHALF;
@@ -472,17 +463,7 @@ for (let c = 0; c < NLOG; c++) {
   rayOffQ.push(Math.round(Math.atan(camX) / (2 * Math.PI) * 1024));   // signed, |v| < 128
   cosCorr.push(Math.min(255, Math.round(256 / Math.sqrt(1 + camX * camX))));
 }
-// Derived from whichever angle calcU ACTUALLY uses. With FINEANG that is the quarter-resolution
-// rayOffQ -- the same one the DDA casts at -- so the correction collapses to almost nothing, which
-// is the point: u then describes the direction its own ray took. Built from rayOff (8-bit) this
-// table was compensating for a quantiser calcU no longer has, and would have pulled seams AWAY
-// from where the ray pointed.
-for (let c = 0; c < NLOG; c++) {
-  const eff = FINEANG
-    ? CTR + Math.tan(rayOffQ[c] / 1024 * 2 * Math.PI) / TANHALF * CTR
-    : CTR + Math.tan((rayOff[c] < 128 ? rayOff[c] : rayOff[c] - 256) / 256 * 2 * Math.PI) / TANHALF * CTR;
-  effD.push(Math.max(-128, Math.min(127, Math.round((eff - c) * 16))) & 255);
-}
+
 // ---- PIVOT: seed the subdivision from where last frame's boundaries have moved to ----
 // The subdivision bisects, so it spends ~7.3 marches locating each boundary from scratch every
 // frame -- and boundaries barely move between frames. Predict each one forward and start the
@@ -4987,9 +4968,6 @@ ssCut   = $9150                 ; the column where the wall crosses the height a
 ssCutD  = $9151                 ;   and which side of it is too short ($00 = to the right)
 ssHL    = $9152                 ; the two end heights, while that is being worked out
 ssHR    = $9153
-ssB16   = $914a                 ; the span's left end and width in SIXTEENTHS of a column, in the
-ssW16   = $914c                 ;   corrected basis, plus seamOne's scratch product. Absolute, not
-ssX16   = $914e                 ;   zero page: read once a boundary, and zp is spoken for.
 ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
@@ -8114,26 +8092,8 @@ ssUp:   lda uaH                 ; ascending: boundaries at uaH+1 ... ubH
 ssCnt:  ${SEAMMAXN ? `cmp #${hx(SEAMMAXN + 1)}
         bcs ssDn
         ` : ''}sta ssN
-        ; ---- the span's two ends in SIXTEENTHS, corrected to where their rays really aim ----
-        ; Constant for the span, so seamOne only does the multiply. LAST, not first: it is read
-        ; nowhere until the boundary walk, and every gate above throws spans away -- the idT test
-        ; alone stops about 65% of them. Sitting ahead of those cost ~90 cycles on every span that
-        ; was about to be discarded.
-${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}        ldx spanL
-        jsr eff16               ; -> ssX16 = spanL*16 + its ray correction, 16-BIT
-        lda ssX16
-        sta ssB16
-        lda ssX16+1
-        sta ssB16+1
-        ldx spanR
-        jsr eff16
-        sec                     ; width = right end - left end, still in sixteenths
-        lda ssX16
-        sbc ssB16
-        sta ssW16
-        lda ssX16+1
-        sbc ssB16+1
-        sta ssW16+1
+${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}
+
         ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
@@ -14934,10 +14894,7 @@ mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
 
-; effD[c]: where column c's ray really points, minus c, in SIXTEENTHS of a column. In the stream
-; with the other displaced lookups rather than beside rayOffT -- the gap there is exactly the size
-; of rayOffT and a second 160-byte table walked straight off the end of it.
-effDT:  !byte ${effD.join(',')}
+
 
 
 ; ---- the solid-run draw for a SEAM column ----
@@ -15086,32 +15043,6 @@ sdNext: jmp rfNext
 ; collapsing anything closer than 4 makes the same-cell case unreachable, and the pair glyphs with
 ; it. Scanning cell-1..cell+1 covers the rule -- a line within 3 columns cannot be further away
 ; than that -- and the distance test discards whatever the scan over-reaches into.
-; Column X in SIXTEENTHS, corrected to where its ray really aims. The multiply by 16 is 16-BIT:
-; a column runs to 159, so column*16 reaches 2544 and shifting an 8-bit accumulator four times
-; silently drops the top -- which is exactly what it did, and every seam landed somewhere else.
-; The correction is a SIGNED byte, so a negative one borrows from the high byte before the add.
-eff16:  lda #$00
-        sta ssX16+1
-        txa
-        asl
-        rol ssX16+1
-        asl
-        rol ssX16+1
-        asl
-        rol ssX16+1
-        asl
-        rol ssX16+1
-        sta ssX16
-        lda effDT,x
-        bpl eff16p
-        dec ssX16+1
-eff16p: clc
-        adc ssX16
-        sta ssX16
-        bcc eff16d
-        inc ssX16+1
-eff16d: rts
-
 ${SEAMCUT ? `; ---- where does this wall stop being tall enough to carry a line? ----
 ; colH is LINEAR in screen column -- that is what the rectilinear projection buys -- so the two
 ; end heights give the crossing exactly, once per span, with no per-boundary height lookup:
@@ -15279,45 +15210,15 @@ ssDiv:  lda sSlo
         lda #$ff                ; t saturated at 1.0
         jmp ssOff
 ssT8:   lda s1
-ssOff:  sta mq                  ; offset = (t * width) >> 8, in sixteenths of a column
-        lda ssW16
+ssOff:  sta mq                  ; offset = (t * width) >> 8, rounded
+        lda ssW
         jsr mul8
+        lda plo                 ; round to nearest column: truncating biased every seam a
+        cmp #$80                ; column low, which reads as the whole wall being off by one
         lda phi
-        sta ssX16
-        lda #$00
-        sta ssX16+1
-        lda ssW16+1
-        beq ssOf1
-        jsr mul8                ; mq is still t
-        clc
-        lda plo
-        adc ssX16
-        sta ssX16
-        lda phi
-        adc ssX16+1
-        sta ssX16+1
-ssOf1:  clc                     ; + the span's left end, and round to the nearest whole column
-        lda ssX16
-        adc ssB16
-        sta ssX16
-        lda ssX16+1
-        adc ssB16+1
-        clc
-        pha
-        lda ssX16
-        adc #$08
-        sta ssX16
-        pla
         adc #$00
-        lsr                     ; >> 4: sixteenths back to columns
-        ror ssX16
-        lsr
-        ror ssX16
-        lsr
-        ror ssX16
-        lsr
-        ror ssX16
-        lda ssX16
+        clc
+        adc spanL
         cmp #${NLOG}
         bcs ssOne               ; ---- off screen: REACHABLE, and the only thing stopping a write
                                 ; past seamT (40 bytes, indexed col>>2). It used to be unreachable
