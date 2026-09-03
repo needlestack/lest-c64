@@ -2572,6 +2572,18 @@ const SEAMPANEL = process.env.SEAMPANEL !== '0';
 //     dp 0.25 -> 2.9    dp 1 -> 5.8    dp 2 -> 8.1    dp 4 -> 11.1    dp 8 -> 14.6
 // K varies with sec^2 across the screen (138.7 at centre, 175 at the edge), so the threshold is
 // soft by about 20% either way. That is well inside how fuzzy "wide enough to read" is.
+// SEAMANY=1 restores ssAny, the "is any cell of this span still writable" early-out. Measured
+// 2026-09-03 with SEAMCNT over 13,000 spans at two viewpoints -- the long hall and the level 1
+// walking spot -- it ended a walk EXACTLY ZERO times, so it is off by default.
+// It is not that the idea was wrong; SEAMPW took its job. ssAny stopped the walk once the span had
+// no unmarked cell left, and the way a span fills up is by walking far enough down a receding face.
+// SEAMPW now stops the walk before that, at the first boundary too narrow to place. And ssAny got
+// weaker in the other direction too when the "cell and both neighbours" rule became the flat
+// four-column rule: a line can now go in a cell whose neighbours are marked, so the honest
+// predicate is looser and fires less. Two changes pushing the same way left it at zero.
+// Worth ~25 cycles and a jsr per boundary, plus 30-odd bytes against a ceiling that keeps binding.
+// Restore it if a viewpoint ever shows spans filling: the counters to watch are ssAnyX vs ssPwX.
+const SEAMANY = flag('SEAMANY');
 const SEAMPW = CELLMERGE ? 0 : +(process.env.SEAMPW ?? 4);   // idT/faceIdT hold CELL ids under
                                         // CELLMERGE, so the run lookup would read gibberish
 if (SEAMPW && SEAMPW < 3) throw new Error(`SEAMPW=${SEAMPW}: 4K/n must fit a byte, so n >= 3`);
@@ -5114,6 +5126,9 @@ ssNear  = $7cf4                  ;   ...near enough for one to read
 ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
 ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
 ssTaken = $70b2                  ;   ...of which the char cell was already spoken for
+ssPwN   = $70b4                  ; SEAMCNT: ssPw calls, and how many ENDED the walk -- the two
+ssPwX   = $70b6                  ;   numbers that say whether the panel test is earning its place
+ssAnyX  = $70b8                  ;   ...and how many walks ssAny ended instead
 ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
 pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
@@ -8263,10 +8278,26 @@ spwDn:
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
         ; gets suppressed.
-ssLp:${SEAMPW ? `   jsr ssPw                ; no panel wide enough to place a line in: stop, because the
+ssLp:${SEAMPW ? (SEAMCNT ? `   inc ssPwN
+        bne ssPwNX
+        inc ssPwN+1
+ssPwNX: jsr ssPw
+        bcc ssPwOk
+        inc ssPwX
+        bne ssPwXX
+        inc ssPwX+1
+ssPwXX: jmp ssDn
+ssPwOk:${SEAMANY ? ` jsr ssAny
+        bcs ssAnyOk
+        inc ssAnyX
+        bne ssAnyXX
+        inc ssAnyX+1
+ssAnyXX: jmp ssDn
+ssAnyOk:` : ''}` : `   jsr ssPw                ; no panel wide enough to place a line in: stop, because the
         bcs ssDn                ;   face only gets narrower from here
-        ` : '   '}jsr ssAny               ; nothing writable left: every remaining boundary is a certain
-        bcc ssDn                ; discard, so stop rather than project them
+${SEAMANY ? `jsr ssAny               ; nothing writable left: every remaining boundary is a certain
+        bcc ssDn                ; discard, so stop rather than project them` : ''}`) : `   ${SEAMANY ? `jsr ssAny
+        bcc ssDn` : ''}`}
 ${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n' : ''}        jsr seamOne
         dec ssN
         beq ssDn
@@ -8291,7 +8322,7 @@ ssDn:   rts
 ; weaker question than whether one can be WRITTEN: a free cell next to a corner is unusable,
 ; and down a hall most free cells are exactly that. Asking the weak question, nothing ever
 ; looked exhausted and the pre-test never fired.
-; Returns carry SET while a placeable cell remains.
+${SEAMANY ? `; Returns carry SET while a placeable cell remains.
 ssAny:  lda spanR
         lsr
         lsr
@@ -8315,6 +8346,7 @@ ssAnX:  inx
         bcc ssAnL
         clc                     ; the span is spoken for end to end
         rts
+` : ''}
 
 ; u for one marched column (X): where along the wall the ray landed, 8.8 cells.
 ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and vice

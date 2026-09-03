@@ -231,6 +231,9 @@ ssNear  = $7cf4                  ;   ...near enough for one to read
 ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
 ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
 ssTaken = $70b2                  ;   ...of which the char cell was already spoken for
+ssPwN   = $70b4                  ; SEAMCNT: ssPw calls, and how many ENDED the walk -- the two
+ssPwX   = $70b6                  ;   numbers that say whether the panel test is earning its place
+ssAnyX  = $70b8                  ;   ...and how many walks ssAny ended instead
 ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
 pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
@@ -2938,8 +2941,7 @@ spwDn:
         ; gets suppressed.
 ssLp:   jsr ssPw                ; no panel wide enough to place a line in: stop, because the
         bcs ssDn                ;   face only gets narrower from here
-        jsr ssAny               ; nothing writable left: every remaining boundary is a certain
-        bcc ssDn                ; discard, so stop rather than project them
+
         jsr seamOne
         dec ssN
         beq ssDn
@@ -2964,30 +2966,7 @@ ssDn:   rts
 ; weaker question than whether one can be WRITTEN: a free cell next to a corner is unusable,
 ; and down a hall most free cells are exactly that. Asking the weak question, nothing ever
 ; looked exhausted and the pre-test never fired.
-; Returns carry SET while a placeable cell remains.
-ssAny:  lda spanR
-        lsr
-        lsr
-        sta ssAng               ; last cell of the span (calcU's scratch, dead by now)
-        lda spanL
-        lsr
-        lsr
-        tax
-        ; An UNMARKED cell is the test now, not the three-cell one: the distance rule can place a
-        ; line in a cell whose neighbours are marked, so asking the old question here would stop
-        ; the walk while placements were still possible. This is looser, so it fires less often --
-        ; correct beats clever for an early-out.
-ssAnL:  lda seamT,x
-        cmp #$01
-        bne ssAnX
-        sec
-        rts                     ; carry SET: a line might still go here
-ssAnX:  inx
-        cpx ssAng
-        beq ssAnL
-        bcc ssAnL
-        clc                     ; the span is spoken for end to end
-        rts
+
 
 ; u for one marched column (X): where along the wall the ray landed, 8.8 cells.
 ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and vice
