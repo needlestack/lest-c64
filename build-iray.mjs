@@ -84,8 +84,14 @@ const RECORD = process.env.RECORD === '1';
 // of angle per tick, and is 3x movement / 2x turning over walking.
 const MV_WALK = 4, MV_RUN = 12;          // units of 1/256 cell per tick
 const TN_WALK = 192, TN_RUN = 384;       // 16-bit angle units per tick (a quarter unit is 64)
+// 10-13 hold forward AND a turn at the same time, which no recorded step ever did: joyv carries
+// both bits, and readKeys already runs moveFwd and the turn loop independently off it. They exist
+// because walking and turning SEPARATELY leaves the renderer's commonest real input untested --
+// the temporal pivot's translation term and its rotation term are exercised one at a time and
+// never together, and a seam's stability under motion is precisely a question about both at once.
 const T_WALK = 0, T_BACK = 1, T_RUN = 2, T_TURNL = 3, T_TURNR = 4,
-      T_FTURNL = 5, T_FTURNR = 6, T_SPACE = 7, T_WAIT = 8, T_FALL = 9;
+      T_FTURNL = 5, T_FTURNR = 6, T_SPACE = 7, T_WAIT = 8, T_FALL = 9,
+      T_ARCL = 10, T_ARCR = 11, T_RARCL = 12, T_RARCR = 13;
 const TOUR_ROUTE = [
   ['move', T_WALK,   0x0287, 0x0483],   // out of the corner, across the room. Pushed 0.4 cells
                                         //   further along the same heading: the left turn was
@@ -108,7 +114,10 @@ const TOUR_ROUTE = [
   ['turn', T_TURNR,  0x0159],
   ['act',  T_FALL,   400],              // walk on until the hole takes us
 ];
-const TOUR_STEPS = (() => {
+// ROUTE=seam selects SEAM_ROUTE instead (see below, next to the movement tables it has to model
+// exactly). Both compile to the same (type, ticks) steps, so twStep neither knows nor cares.
+const ROUTE = process.env.ROUTE ?? 'walk';
+const WALK_STEPS = (() => {
   let x = 0x01f6, y = 0x0149, a = 0x3b00;    // the start pose
   const out = [];
   for (const r of TOUR_ROUTE) {
@@ -130,9 +139,6 @@ const TOUR_STEPS = (() => {
   }
   return out;
 })();
-if (process.env.TOURDUMP)
-  console.error('  tour: ' + TOUR_STEPS.map(t => `${t[0]}:${t[1]}`).join(' ') +
-                `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
 const RECMAX = 64;
 const TOURW = process.env.TOURW === '1';
 // BANDS=1: distance shading on the ceiling and floor, by raster line.
@@ -903,6 +909,269 @@ console.error(`  corner partners (line kept): ` +
 const MOVE_STEP = 64, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
+
+// ================= ROUTE=seam: a scripted walk with NO objects in it =================
+// The renderer benchmark the seam work needs, and the reason it is a second route rather than a
+// reuse of the walkthrough above: that one is a GAME script. It takes an orb, waits on an angel
+// and falls down a hole, so a third of its running time is standing still and the rest is priced
+// with entity work on top. Neither belongs in a measurement of the wall renderer.
+//
+// Authored as PLACES rather than as inputs. Every waypoint below names where to be; the compiler
+// works out the bearing, the direction to turn and the tick counts, and -- this is the part the
+// recorded route cannot do -- it advances the pose by what the HARDWARE will actually do, not by
+// the waypoint it was given. The recorded route sets `x = r[2]` after a move, so its nominal pose
+// and its real one drift apart and every later waypoint inherits the error; here a move ends
+// wherever `floor(ticks * moveX[pa] / 16)` puts it, which is exactly where the machine ends up.
+//
+// Three primitives, and each one is exact for a different reason:
+//   to/run   a straight walk. moveApply CARRIES the shift remainder (see the long comment there),
+//            so the total displacement is floor of the exact sum however the frames fall -- the
+//            same on a 12 fps build and a 30 fps one.
+//   spin     a turn on the spot. readKeys turns once per TICK in a `dex/bne` loop, so the
+//            heading after N ticks is exact and frame-rate independent too.
+//   arc      forward and turn held together. This one is NOT exact across frame rates: moveFwd
+//            reads `pa` before the frame's turn loop runs, so the path is a polygon whose
+//            vertices are frame boundaries. The error is half a frame's turn applied over the
+//            arc -- 1.6 degrees between a 12 fps build and a 30 fps one, about 0.06 cells of
+//            endpoint. Accepted deliberately: no movement model on this machine can hold a
+//            curve exactly, and simultaneous walk-and-turn is the input the seams are judged
+//            under. Keep arcs short and do not put one immediately before a tight gap.
+const SEAM_ROUTE = [
+  ['spin',  360],                 // out of the start corner: one full sweep of the room from
+                                  //   a spot where two stepped walls are close and oblique
+  ['to',    4.5, 4.5],            // into the middle
+  ['spin', -360],                 // every wall of the room at close range -- the many-short-faces
+                                  //   case, which is where the corner seams live
+  ['to',    6.5, 2.5],            // the north-east step, seen along its short face
+  ['to',    6.5, 6.5],            // straight down the east side: both side walls recede
+  ['to',    2.5, 6.5],            // along the south wall
+  ['to',    2.5, 3.5],            // and up the west one -- stopping short of the north-west step,
+                                  //   which the arc below needs the room to swing through
+  ['arc',   90],                  // curve away from the wall, walking and turning at once
+  ['to',    6.5, 4.5],            // out to the doorway throat, which frames the corridor
+  ['to',   12.5, 4.5],            // down the corridor: ONE long receding face each side, which
+                                  //   is the many-seams-per-span case and the slowest view here
+  ['spin', 180],                  // turn round at the far end and look back up it
+  ['run',   7.5, 4.5],            // run back: same geometry, three times the motion per frame
+  ['arc',  -90, 1],               // a running curve into the room
+  ['to',    4.5, 4.5],
+];
+// Compile a place-list into twStep's (type, ticks). Pose is carried in the machine's own units:
+// x/y in 1/256 cells, a as the 16-bit pa:paF angle, 0 = +x and rising toward +y (moveXT is
+// cos/sin of a/256 turns, so that convention is the movement table's, not a choice made here).
+const compileRoute = (ops, start) => {
+  let [x, y, a] = start, out = [], poses = [];
+  // the model's pose after each emitted step, so TOURPOSE can check it against the machine
+  const emit = (t, ticks) => { while (poses.length < out.length) poses.push([x, y, a]); out.push([t, Math.max(1, Math.round(ticks))]); };
+  // A turn of `d` 16-bit units in `dir` (+1 = right = pa rising). Returns the ticks spent, and
+  // leaves `a` where the hardware will leave it -- ticks*rate, NOT the bearing that was asked
+  // for, because the tick count is a whole number and the two differ by up to half a tick.
+  const turn = (d, dir, run) => {
+    const rate = run ? TN_RUN : TN_WALK, n = Math.max(1, Math.round(d / rate));
+    emit(dir > 0 ? (run ? T_FTURNR : T_TURNR) : (run ? T_FTURNL : T_TURNL), n);
+    a = (a + dir * n * rate) & 0xffff;
+    return n;
+  };
+  // Face a point by the SHORT way round. The recorded route names its direction because it is
+  // reproducing what a hand on a joystick did; a route authored as places has no such history.
+  const faceTo = (tx, ty, run) => {
+    const want = Math.round(Math.atan2(ty - y, tx - x) / (2 * Math.PI) * 65536) & 0xffff;
+    const right = (want - a) & 0xffff;
+    if (right === 0) return;
+    if (right <= 32768) turn(right, +1, run); else turn(65536 - right, -1, run);
+  };
+  // A straight walk of `n` ticks, stepped as the hardware steps it. The floor is the whole point:
+  // moveApply accumulates dxv per tick into a 16-bit sum and shifts once, keeping the remainder,
+  // so this is floor(n * moveX / 16) exactly and not n * (moveX / 16) rounded.
+  const walk = (n, run) => {
+    const sx = moveX[a >> 8] > 127 ? moveX[a >> 8] - 256 : moveX[a >> 8];
+    const sy = moveY[a >> 8] > 127 ? moveY[a >> 8] - 256 : moveY[a >> 8];
+    const t = n * (run ? 3 : 1);   // readKeys feeds moveApply dtm = 3 * dtv while SHIFT is held
+    x += Math.floor(t * sx / (1 << MOVE_SHIFT));
+    y += Math.floor(t * sy / (1 << MOVE_SHIFT));
+  };
+  for (const op of ops) {
+    if (op[0] === 'to' || op[0] === 'run') {
+      const run = op[0] === 'run', tx = Math.round(op[1] * 256), ty = Math.round(op[2] * 256);
+      faceTo(tx, ty, run);
+      const n = Math.max(1, Math.round(Math.hypot(tx - x, ty - y) / (run ? MV_RUN : MV_WALK)));
+      emit(run ? T_RUN : T_WALK, n);
+      walk(n, run);
+    } else if (op[0] === 'spin') {
+      const deg = op[1], run = !!op[2];
+      turn(Math.abs(deg) / 360 * 65536, Math.sign(deg), run);
+    } else if (op[0] === 'arc') {
+      // Sized by the TURN, because that is the half a viewer notices: `deg` of heading change,
+      // and the distance is whatever the walk covers in the same time. Walking, 90 degrees is
+      // 1.33 cells (radius 0.85); running, 2.0 cells (radius 1.27).
+      const deg = op[1], run = !!op[2], dir = Math.sign(deg);
+      const rate = run ? TN_RUN : TN_WALK;
+      const n = Math.max(1, Math.round(Math.abs(deg) / 360 * 65536 / rate));
+      emit(dir > 0 ? (run ? T_RARCR : T_ARCR) : (run ? T_RARCL : T_ARCL), n);
+      // Integrate per tick. The machine integrates per FRAME, which is the approximation the
+      // block comment above prices; per tick is the limit of that as the frame rate rises and is
+      // the only frame-rate-free answer available, so it is the one the later waypoints use.
+      const mv = run ? MV_RUN : MV_WALK;
+      for (let i = 0; i < n; i++) {
+        const b = a >> 8;
+        x += (moveX[b] > 127 ? moveX[b] - 256 : moveX[b]) * mv / MOVE_STEP;
+        y += (moveY[b] > 127 ? moveY[b] - 256 : moveY[b]) * mv / MOVE_STEP;
+        a = (a + dir * rate) & 0xffff;
+      }
+      x = Math.round(x); y = Math.round(y);
+    } else throw new Error(`ROUTE=seam: unknown op ${op[0]}`);
+  }
+  while (poses.length < out.length) poses.push([x, y, a]);
+  return { steps: out, end: [x, y, a], poses };   // poses[i] = the model's pose when step i ENDS
+};
+// ROUTE=cover: the SAMPLING route -- not a benchmark, the thing the benchmark was chosen from.
+// Snakes every open cell of level 1 with the player walking and running, so FRAMELOG sees each
+// cell approached from the headings the geometry allows, in motion. It never stops: what a cell
+// costs standing still is not a question anyone is asking.
+// Ends short of the corridor's far end -- (13.5, 4.5) -- because the exit hole is at (14, 4).
+const COVER_ROUTE = [
+  //    x: 0123456789ABCDEF
+  // y=1    #..###..#          row 1 is two alcoves; row 2 spans x1-7; rows 3 and 5 span x2-6;
+  // y=2    #.......#          row 4 is x2-14 including the corridor; row 6 is x1-7; row 7 is
+  // y=3    ##.....#           two alcoves again. The player starts in the (1,1) alcove.
+  // y=4    ##.............#
+  // y=5    ##.....#
+  // y=6    #.......#
+  // y=7    #..###..#
+  ['to',  2.5, 1.5], ['to',  2.5, 2.5], ['to',  7.5, 2.5],      // out of the alcove, row 2 east
+  ['to',  7.5, 1.5], ['to',  6.5, 1.5], ['to',  6.5, 2.5],      // the north-east alcove
+  ['to',  1.5, 2.5], ['to',  2.5, 2.5], ['to',  2.5, 3.5],      // row 2 west; NOT diagonally
+  ['to',  6.5, 3.5],                                            //   into (2,3): the (1,3) corner
+                                                                //   is inside the collision box
+                                                                //   on a 45-degree cut. Row 3 east.
+  ['to',  6.5, 4.5], ['run', 2.5, 4.5], ['to',  2.5, 5.5],      // row 4 west, running
+  ['to',  6.5, 5.5], ['to',  6.5, 6.5], ['to',  7.5, 6.5],      // row 5 east, down, then row 6
+  ['to',  1.5, 6.5],                                            //   west
+  ['to',  1.5, 7.5], ['to',  2.5, 7.5], ['to',  2.5, 6.5],      // the south-west alcove
+  ['to',  6.5, 6.5], ['to',  6.5, 7.5], ['to',  7.5, 7.5],      // the south-east alcove
+  ['to',  6.5, 6.5], ['to',  6.5, 4.5], ['to',  7.5, 4.5],      // back up the east side to the
+  ['run', 13.5, 4.5],                                           //   throat -- (7,5) is wall -- and
+                                                                //   run the corridor
+  ['to',  8.5, 4.5], ['run', 6.5, 4.5],                         // walk back to the mouth, run
+  ['run', 4.5, 2.5],                                            //   in through the throat first --
+                                                                //   straight from the mouth to
+                                                                //   (4.5,2.5) clips the (7,3) corner ['run', 2.5, 4.5], ['run', 4.5, 6.5],      // diagonals across the room
+  ['run', 5.5, 4.5], ['run', 4.5, 2.5], ['run', 2.5, 2.5],      //   a 45-degree run toward x=6.5
+                                                                //   grazes the (7,3)/(7,5) corners:
+                                                                //   the collision box is 0.1 cells
+                                                                //   and a cut past a corner puts
+                                                                //   it inside. 5.5 clears both.
+];
+// ================= ROUTE=bench: THE benchmark =================
+// One route, walked and run like a player would, and chosen by measurement (ROUTE=cover +
+// FRAMELOG=1, read with flog.mjs, then two drafts of this route logged the same way, 2026-09-15).
+//
+// What the three logs said, in order, because each corrected the last:
+//   1. By CELL, the worst places are the alcoves, the west notches and the throat. A route through
+//      them on long straight legs ran at 19.5 fps -- faster than the seam tour's 15.9. Long legs
+//      are cheap: the corridor holds the single worst frame on the map (3,147 lines) and is still
+//      one of the cheaper places to WALK, ~1,000 a frame, because its two faces barely change.
+//   2. By LEG, the expensive ones were the short hops in and out of the alcoves. A route that
+//      worked every alcove ran at 17.8 -- and its own log showed the alcoves were the CHEAPEST
+//      third of it (774 lines a frame) and the open room the dearest (1,013).
+//   3. So the coverage legs were expensive for which way they FACED, not where they were: out of
+//      an alcove you face the whole room, seven stepped walls of short oblique faces; into one you
+//      face two walls a cell away and nothing else. The cost on this level is the open room with
+//      all of it in view, which is also what a player looks at most.
+// Hence this: the room crossed on long diagonals FACING ITS FAR WALLS, with the turn a player
+// makes at each end to look where they are going next, the corridor once each way for the worst
+// frame, and no time spent looking into corners. No spins, no oscillation, no waits, no hole --
+// but turns are not artificial, a player turns at every corner, and the two "look round" turns
+// are the two places a player genuinely would.
+// Straight walks and spot turns are frame-rate exact (see compileRoute), so any build walks the
+// same line. Under 90 seconds, so a FRAMELOG at FLOGDIV=4 does not wrap.
+const BENCH_ROUTE = [
+  //    x: 0123456789ABCDEF
+  // y=1    #..###..#
+  // y=2    #.......#
+  // y=3    ##.....#
+  // y=4    ##.............#
+  // y=5    ##.....#
+  // y=6    #.......#
+  // y=7    #..###..#
+  ['to',  2.5, 2.5],              // out of the alcove, facing the room
+  ['to',  6.5, 6.5],              // the long diagonal, the south-east walls ahead the whole way
+  ['to',  6.5, 2.5],              // up the east side, the north step and alcove coming at you
+  ['to',  2.5, 6.5],              // the other diagonal, the south-west walls ahead
+  ['to',  2.5, 4.5],              // up into the west notch, facing along it
+  ['to',  6.5, 4.5],              // across the middle of the room to the throat, the corridor
+  ['to',  7.5, 4.5],              //   opening ahead -- the worst frame on the map, walked into
+  ['to',  12.5, 4.5],             // the corridor, walked
+  ['run', 7.5, 4.5],              // and run back, the room opening up in the throat
+  ['run', 4.5, 2.5],              // run out into the room, facing its north-west
+  ['to',  4.5, 6.5],              // walk down the middle, the south step ahead
+  ['to',  1.5, 6.5],              // to the south-west corner, facing the west wall's steps
+  ['to',  2.5, 6.5],              // a step back out -- (1,5) is wall, so the diagonal must start
+  ['to',  6.5, 2.5],              //   from x=2.5. The long diagonal back, the alcove ahead
+  ['run', 2.5, 2.5],              // run the top of the room, facing west
+  ['run', 6.5, 4.5],              // run for the throat
+  ['run', 13.5, 4.5],             // run the corridor out
+  ['to',  7.5, 4.5],              // walk it back
+  ['to',  2.5, 2.5],              // across the room, home
+  ['to',  1.5, 1.5],
+];
+const BENCH_COMPILED = compileRoute(BENCH_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+const COVER_COMPILED = compileRoute(COVER_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
+                 : ROUTE === 'cover' ? COVER_COMPILED.steps
+                 : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
+if (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'bench') {
+  DIAGEARLY.push(`ROUTE=${ROUTE}`);
+  // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
+  // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
+  // the tick budget is spent anyway, and every later waypoint is somewhere else. That reads as
+  // "the benchmark moved" rather than as an error, so the build has to catch it here.
+  const R = 26;                                  // mvFree's half-box, in 1/256 cells
+  const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || M[cy][cx];
+  const blocked = (X, Y) => {
+    for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
+      if (solid(bx, by)) return true;
+    return false;
+  };
+  let [x, y, a] = [0x01f6, 0x0149, 0x3b00], bad = [];
+  for (const [i, [t, n]] of TOUR_STEPS.entries()) {
+    const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
+    const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
+             : (t === T_ARCL || t === T_ARCR) ? MV_WALK
+             : (t === T_RARCL || t === T_RARCR) ? MV_RUN : 0;
+    const tn = (t === T_TURNL || t === T_ARCL) ? -TN_WALK : (t === T_TURNR || t === T_ARCR) ? TN_WALK
+             : (t === T_FTURNL || t === T_RARCL) ? -TN_RUN : (t === T_FTURNR || t === T_RARCR) ? TN_RUN : 0;
+    for (let k = 0; k < n; k++) {
+      const b = a >> 8;
+      x += (moveX[b] > 127 ? moveX[b] - 256 : moveX[b]) * mv / MOVE_STEP;
+      y += (moveY[b] > 127 ? moveY[b] - 256 : moveY[b]) * mv / MOVE_STEP;
+      a = (a + tn) & 0xffff;
+      if (blocked(Math.round(x), Math.round(y)))
+        bad.push(`step ${i} (type ${t}) tick ${k}: (${(x / 256).toFixed(2)}, ${(y / 256).toFixed(2)})`);
+    }
+  }
+  if (bad.length) throw new Error(
+    `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
+    `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
+    `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
+  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, bench: BENCH_COMPILED })[ROUTE].end;
+  console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
+    `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
+    `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
+    `ends at (${(ex / 256).toFixed(2)}, ${(ey / 256).toFixed(2)}) facing $${(ea >> 8).toString(16)}`);
+}
+if (process.env.TOURDUMP)
+  console.error('  tour: ' + TOUR_STEPS.map(t => `${t[0]}:${t[1]}`).join(' ') +
+                `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
+// POSEDUMP=1: the compiler's pose at the end of each step, one line a step, for posecheck.mjs.
+if (process.env.POSEDUMP && ROUTE !== 'walk') {
+  const c = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, bench: BENCH_COMPILED })[ROUTE];
+  for (let i = 0; i < TOUR_STEPS.length; i++) {
+    const [x, y, a] = c.poses[i + 1] ?? c.end;    // poses[i] is the pose at the START of step i
+    console.log(`  pose ${i} ${TOUR_STEPS[i][0]} ${TOUR_STEPS[i][1]} ${x} ${y} ${a}`);
+  }
+}
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
 for (let i = 0; i < 256; i++) { const v = Math.floor(i * i / 4); f0Lo.push(v & 255); f0Hi.push((v >> 8) & 255); }
 for (let i = 256; i < 512; i++) { const v = Math.floor(i * i / 4); f1Lo.push(v & 255); f1Hi.push((v >> 8) & 255); }
@@ -2390,6 +2659,16 @@ const STILLSKIP = flag('STILLSKIP');
 // Verified with its own OCCCHK harness rather than by eye: rebuild anyway, compare byte for byte,
 // count differences. 255+ skipped frames checked while walking through cells with both angels
 // moving, occBad = 0. OCCLAZY=0 restores the unconditional rebuild.
+// ENTFOV: reject an entity that is beside the camera before the reciprocal and the column
+// arithmetic, from |right| and forward alone. On by default since 2026-09-15; ENTFOV=0 to A/B.
+const ENTFOV = process.env.ENTFOV !== '0';
+// ENTGATE: skip orbMove's frame trig when no entity can possibly be projected. ENTGATE=0 to A/B.
+const ENTGATE = process.env.ENTGATE !== '0';
+// FOVCHK=1: verify ENTFOV. The pre-cull only NOTES that it would have rejected, the full path
+// runs, and two counters say what happened: fovDis = orbProj accepted what the cull would have
+// dropped (the box tests may still throw it out), fovBad = it got a SPRITE. fovBad must be 0.
+const FOVCHK = flag('FOVCHK');
+if (FOVCHK && !ENTFOV) throw new Error('FOVCHK=1 verifies ENTFOV, which is off');
 const OCCLAZY = process.env.OCCLAZY !== '0';
 // OCCCHK=1: verify the skip. Rebuilds even when it would skip, and counts bytes that differ.
 // 2 and 3 exist to BISECT it: the full version starts and then runs wild, so build up in stages.
@@ -2403,6 +2682,22 @@ const OCC_CMP = OCCCHK && process.env.OCCCHK === '1';
 // the opening walk and nothing else -- every earlier profile of "the tour" was really that.
 const PROFAT = +(process.env.PROFAT ?? 0);
 if (PROFAT) DIAG.push('PROFAT');
+// PROFTOUR=1 (with TOURW=1): make the window the WHOLE TOUR instead of 256 frames. 256 frames is
+// about a quarter of a route, so a profile of "the tour" was always a profile of one quarter of
+// it, and PROFAT only moves which quarter -- three runs and an argument about how to add them up.
+// The whole tour is the better window for a reason beyond coverage: the script is driven in 60Hz
+// TICKS, so a route takes the same REAL TIME on a build of any speed. The accumulated lines in a
+// phase are therefore that phase's share of a fixed wall-clock second, directly comparable
+// between builds, and no per-frame denominator has to be agreed on first. twFrm alongside them
+// says how many frames that time bought, which is the fps.
+// Accumulators are 24-bit and a phase can at most take the whole tour: 3,606 ticks x 262 lines =
+// 945k, comfortably inside 16.7M. It is pfN, one byte, that could not have counted the frames.
+const PROFTOUR = flag('PROFTOUR');
+if (PROFTOUR && !TOURW) throw new Error('PROFTOUR=1 needs TOURW=1: the window it uses is the tour');
+if (PROFTOUR && PROFAT) throw new Error('PROFTOUR and PROFAT are two different windows; pick one');
+// PROFN=1: count how often each bucket is closed, so pfTick's own cost can be SUBTRACTED rather
+// than estimated. See the counter in pfTick for why that is not optional at PROFSUB.
+const PROFN = flag('PROFN');
 const PROFSUB = PROFILE0 && !PROFILE1 && !PROFCOARSE;
 // DOUBLE=interpSpan|marchCol|calcU calls that routine twice. Differencing two PROFILE runs then
 // gives its exact cost -- the old fps-based version of this trick was distorted by the
@@ -2417,6 +2712,26 @@ const NOHUD = flag('NOHUD');
 // all. Any change is drift, and it is measurable in one run rather than felt over a minute of
 // walking. This is how the arithmetic-shift asymmetry was confirmed and then confirmed fixed.
 const WIGGLE = flag('WIGGLE');
+// FRAMELOG=1 (with TOURW=1 PROFILE=1): one 4-byte record per rendered frame -- cell, heading,
+// and the raster lines of WORK the frame took (flip to the tick that closes the wait, so the
+// wait itself is excluded). Filled while the tour runs, read out by probe.mjs afterwards.
+// This is the sampler the torture route was chosen from: which cells and headings are expensive
+// WHILE MOVING THROUGH THEM. A hop-and-hold scan would have measured settled poses, and a settled
+// frame is the one case the pivot and the run cache flatter -- the benchmark does not care what
+// standing still costs, and neither should the search for its waypoints.
+// 2,816 bytes at $7100 = 704 records. The coverage route is 109s, ~1,600 frames at 15 fps, so
+// the log takes every FOURTH frame (FLOGDIV=4; 1 logs all, and it must be a power of two).
+// Thinning the sample does not move the per-(cell, heading) means it is read for -- each pose
+// still gets several frames -- and it beats wrapping, which silently keeps only the tail of the
+// route. The reader checks flogN against the buffer and refuses a wrapped log.
+const FRAMELOG = flag('FRAMELOG');
+const TOURPOSE = flag('TOURPOSE');   // with TOURW: record the pose at the end of each step
+if (TOURPOSE && TOUR_STEPS.length > 42) throw new Error('TOURPOSE: 42 steps x 6 bytes is the 256 bytes at twPose');
+const FLOGDIV = +(process.env.FLOGDIV ?? 4);
+if (FLOGDIV & (FLOGDIV - 1)) throw new Error(`FLOGDIV=${FLOGDIV}: must be a power of two (it is an AND mask)`);
+if (FRAMELOG && !(TOURW && PROFILE)) throw new Error('FRAMELOG=1 needs TOURW=1 and PROFILE=1 (it reads the profiler timestamps)');
+if (FRAMELOG && process.env.EDGCHK === '1') throw new Error('FRAMELOG and EDGCHK both use $7100');
+const FLOG_N = 704;
 
 // Where the CPU-only tables start, and so the ceiling on how much code there may be. A build
 // that adds code ahead of this has run into it twice, and the failure is SILENT: the assembler
@@ -2534,6 +2849,16 @@ const SEAMFAR = +(process.env.SEAMFAR ?? SEAMCUT);
 // get discarded collide INDIVIDUALLY, mostly with corner seams, so there is no whole-span answer.
 const SEAMPRE = flag('SEAMPRE');
 const SEAMS = process.env.SEAMS !== '0';
+// SEAMDRAW=0: compute every seam exactly as usual -- seamSpan, seamT, the corner marks, all of it
+// byte for byte -- but have renderSym ignore seamT and take its ordinary cached path. A
+// DIAGNOSTIC build only; the screen comes out with no lines on it.
+// It exists because SEAMS=0 cannot answer the question. That removes the pass AND the drawing at
+// once, so the renderSym half has to be inferred from a build whose seamSpan is also gone and
+// whose frame rate has moved. With this one, seamSpan is identical in both halves of the A/B and
+// the only thing that differs is what renderSym does with the answer -- which is exactly the
+// quantity we are trying to price.
+const SEAMDRAW = process.env.SEAMDRAW !== '0';
+if (!SEAMDRAW) DIAGEARLY.push('SEAMDRAW=0');
 // SEAMPANEL=0 keeps the CORNER marks and drops only the interpolated panel lines. SEAMS=0 cannot
 // do this -- it gates the corner block in subFace as well -- and the two are worth seeing apart:
 // corners mark real structure, panel lines are decoration, and it is the decoration whose
@@ -2915,6 +3240,18 @@ const ANGART = JSON.parse(readFileSync('./angel-art.json', 'utf8'));
 // The death cut scene, on by default. The face ships INSIDE the image at $7100 -- there is no
 // packer and no staging any more, so nothing about it is size-constrained. See fit-angel.mjs.
 const DIE      = process.env.DIE !== '0' && process.env.SNDTEST !== '1';
+// PROFILE and the cut scene both want $bc00 and there is no longer room for both, so say which
+// two things collided instead of letting the assembler report "* = $bc00 moves backward from
+// $bd0a" -- which names neither of them and reads like a corrupt build.
+// This is not a new clash, it is a SILENT one: the profiler took RELOC+$3600 when that page was
+// empty, dieChk/dieGo were relocated onto the same page for the cut scene, and nothing tested
+// the pair. Every PROFILE=1 build since has failed, which is why the last round of seam work
+// counted the pass with SEAMCNT instead of timing it.
+// DIE=0 is the right fix rather than a new address for the profiler: a build being profiled has
+// no use for a cut scene, and the two pages of code it frees are the only two anywhere near.
+if (PROFILE && DIE) throw new Error(
+  'PROFILE=1 needs DIE=0: the profiler is at $bc00 (RELOC+$3600) and the relocated dieChk/dieGo ' +
+  'group claims the same page. Add DIE=0 -- a profiled build has no use for the cut scene.');
 // ---- the cut scene's pictures ----
 // death-pics.json is produced by build-facetest3.mjs (ASSET=1) and carries ONE 256-glyph charset
 // plus a screen map per picture. The charset is trained over a wider set than it ships -- the top
@@ -5145,14 +5482,14 @@ mxHi    = $7cfb
 mxStep  = $7cfc                  ;   ...and the tour step it happened in
 mulWY   = $7cfe                  ; mulW saves Y here
 ssCE    = $7cff                  ; SEAMPRE: the span's last char cell
-${CULLCNT ? `culTot  = $7096                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
+${CULLCNT ? `culTot  = $70d0                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
 dbgRun  = $70a4                 ; CULLCNT: per entity, the run that let it show through
 dbgCol  = $70ac
-culPrj  = $70a0                 ;   ...and how many orbProj rejected after doing the work
-culTAcc = $7098
-culPAcc = $709a
-culTMn  = $709c
-culPMn  = $709d` : ''}
+culPrj  = $70d2                 ;   ...and how many orbProj rejected after doing the work
+culTAcc = $70d4
+culPAcc = $70d6
+culTMn  = $70d8
+culPMn  = $70d9` : ''}
 ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
 ssWid   = $7cf2                  ;   ...wide enough to hold a seam
 ssNear  = $7cf4                  ;   ...near enough for one to read
@@ -5162,8 +5499,26 @@ ssTaken = $70b2                  ;   ...of which the char cell was already spoke
 ssPwN   = $70b4                  ; SEAMCNT: ssPw calls, and how many ENDED the walk -- the two
 ssPwX   = $70b6                  ;   numbers that say whether the panel test is earning its place
 ssAnyX  = $70b8                  ;   ...and how many walks ssAny ended instead
-ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
-pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
+${SEAMCNT ? `sdColN  = $70ba                  ; SEAMCNT: COLUMNS that took the seam draw path, free-running.
+                                ;   The cost renderSym pays for seams is this count times what one
+                                ;   such column costs, and neither half was ever counted -- the
+                                ;   pass's own counters stop at seamOne, which is a different unit
+                                ;   (a seam) from the one renderSym is billed in (a column).
+` : ''}ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
+${PROFN ? `pfNum   = $70c4                 ; PROFN: 17 phases x 2 bytes, times each bucket was closed.
+                                ;   In the SEAMCNT/FRAMELOG scratch run at $70b0; $7100 up is the
+                                ;   frame log's.
+` : ''}${FRAMELOG ? `flogB   = $7100                 ; FRAMELOG: ${FLOG_N} x (cellLo, pa, workLo, workHi)
+flogN   = $70bc                 ;   write cursor (16-bit, byte offset)
+flogW   = $70be                 ;   scratch for the work computation
+flgTF   = $70c0                 ;   the opening tick of the frame being rendered: frameCnt,
+flgTL   = $70c1                 ;   raster line low, raster line high bit
+flgTH   = $70c2
+` : ''}${TOURPOSE ? `twPose  = $a600                 ; TOURPOSE: 42 x (pxL pxH pyL pyH paF pa), in the $a486-$a8ff hole
+` : ''}${CULLCNT ? `ogSkip  = $70cc                 ; CULLCNT: frames entGate closed, 16-bit free-running\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
+fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
+fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
+` : ''}pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e42
 pfCurH  = $7e46                 ; ninth raster bit, current and previous
@@ -5909,7 +6264,19 @@ ${PROFILE ? `        ldx #$32                ; the profile accumulators live in 
 pfInit: sta pfAcc,x             ;   old count left the top THREE bytes (bucket 16, occStamp) holding
         dex                     ;   whatever was there. It only ever read as a wild outlier.
         bpl pfInit
-${PROFAT ? '        sta pfArm               ; PROFAT: not armed yet (A is still 0)\\n' : ''}` : ''}${RAYCNT ? `        lda #$00                ; rayFrm/rayAcc were never initialised -- uninitialised scratch, so
+${PROFN ? `        ldx #$21                ; ...and the tick counts, same uninitialised scratch
+pfNIni: sta pfNum,x
+        dex
+        bpl pfNIni
+` : ''}${FOVCHK ? `        sta fovDis              ; FOVCHK: counters start clean (A is still 0)
+        sta fovBad
+        sta fovWld
+` : ''}${FRAMELOG ? `        sta flogN               ; FRAMELOG: the cursor starts at record 0 (A is still 0)
+        sta flogN+1
+        sta flgTF
+        sta flgTL
+        sta flgTH
+` : ''}${PROFAT || PROFTOUR ? '        sta pfArm               ; PROFAT/PROFTOUR: not armed yet (A is still 0)\\n' : ''}` : ''}${RAYCNT ? `        lda #$00                ; rayFrm/rayAcc were never initialised -- uninitialised scratch, so
         sta rayFrm              ;   the first 256-frame latch fired after (256 - garbage) frames
         sta rayAcc              ;   and the "mean" divided by the wrong count
         sta rayAcc+1
@@ -6782,11 +7149,33 @@ pfArmG: ldx #$32
 pfArmL: sta pfAcc,x
         dex
         bpl pfArmL
-        inc pfArm
+${PROFN ? `        ldx #$21
+pfArmN: sta pfNum,x
+        dex
+        bpl pfArmN
+` : ''}        inc pfArm
         bne pfNd                ; always: this frame is half-accumulated, so start with the next
-pfGo:   ` : '        '}inc pfN
+pfGo:   ` : ''}${PROFTOUR ? `        lda pfArm               ; PROFTOUR=1: the window is the WHOLE TOUR. Arm on the frame
+        bne pfTGo               ;   twStep anchors its clock -- that is the first frame after the
+        lda twGo                ;   load, and it is the only signal here that the load is over;
+        beq pfNd                ;   frameCnt has been running throughout it.
+        ldx #$32
+        lda #$00
+pfTArm: sta pfAcc,x
+        dex
+        bpl pfTArm
+${PROFN ? `        ldx #$21
+pfTArN: sta pfNum,x
+        dex
+        bpl pfTArN
+` : ''}        inc pfArm
+        bne pfNd                ; always: this frame is half-accumulated, so start with the next
+pfTGo:  lda twN                 ; ...and latch when the script runs out of steps. No frame count
+        cmp #${hx(TOUR_STEPS.length)}                ;   is involved, so the window is a fixed number of TICKS
+        bcc pfNd                ;   and every build profiles exactly the same journey.
+` : `${PROFAT ? '' : '        '}inc pfN
         bne pfNd
-        inc pfDone              ; latch: freezes pfTick, starts drawing the table
+`}        inc pfDone              ; latch: freezes pfTick, starts drawing the table
 pfRdy:  jsr pfShow              ; every frame from now on -- the two screen buffers alternate,
 pfNd:                           ; so a one-shot draw is only in one of them
 ` : ''}${DUMPH ? '        jsr dumpH      ; AFTER the readout: drawDbg writes rows 0-2 at cols 36-39' : ''}
@@ -6950,7 +7339,7 @@ rfCbS:  sta rfCw1+1
         sta rfCw2+1
         sty rfCb1+1
         sty rfCb2+1
-${SEAMS ? '        sty rfCb3+1\n' : ''}
+${SEAMS && SEAMDRAW ? '        sty rfCb3+1\n' : ''}
 
         ldx rsHi                ; X = cell column throughout; the chains use it as their index.
                                 ; A RANGE, not always 39..0: the fall renders the destination
@@ -7357,7 +7746,7 @@ rcHave: sta cqtmp
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc rfEdgeL
-rfSolid:${SEAMS ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
+rfSolid:${SEAMS && SEAMDRAW ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
         ; rs is 0..13, so the top nibble is spare -- and that was tried and MEASURED: 25 chain
         ; draws of 80 with it, 25 without. Not one extra hit.
         ;
@@ -7370,6 +7759,8 @@ rfSolid:${SEAMS ? `; A seam column always redraws. The cache byte HAS room to ca
         lda seamT,x
         cmp #${hx(SOLID)}
         bne rfSlSm              ; a seam column bypasses the COMPARE entirely -- see below
+        ` : ''}${SEAMS && !SEAMDRAW ? `; SEAMDRAW=0: seamT is written exactly as usual and simply not read here, so
+        ; every column takes the ordinary cached path and no line is drawn.
         ` : ''}lda rsv
 rfCb1:  cmp cbA,x
         beq rfNext
@@ -7378,13 +7769,21 @@ ${PARTIAL ? `        bcs rfNext              ; rs GREW: the solid run starts lat
                                 ; and the edge loop (rb..rs-1) has just redrawn every one of
                                 ; them. Rows rs..12 are a suffix of what the buffer holds.
 ` : ''}        jmp rfSlDr
-${SEAMS ? `rfSlSm:${EDGCHK ? ' lda #$0d\n        sta chOld               ; a seam column genuinely redraws in full: no waste to report\n       ' : ''} lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
+${SEAMS && SEAMDRAW ? `rfSlSm:${SEAMCNT ? `${PROFTOUR ? ` lda pfDone              ; STOP COUNTING WHEN THE PROFILER DOES. Free-running was wrong by 6x:
+        bne rfSlSn              ;   the tour ends, twFrm stops, and the program goes on rendering
+                                ;   idle frames for as long as it takes the host to poll -- which
+                                ;   at warp is thousands. A counter and its denominator have to
+                                ;   close on the same frame.
+       ` : ''} inc sdColN
+        bne rfSlSc
+        inc sdColN+1
+rfSlSc:${EDGCHK ? ' lda #$0d\n        sta chOld\n       ' : ''}` : `${EDGCHK ? ' lda #$0d\n        sta chOld               ; a seam column genuinely redraws in full: no waste to report\n       ' : ''}`} lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
 rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITHOUT COMPARING:
                                 ; comparing $ff against a cache that already holds $ff matches,
                                 ; and the column is skipped even though its seam may have MOVED.
                                 ; Collapsing this into the common path cost 914 -> 7117 wrong
                                 ; pixels across the six views.
-        jmp seamDrw             ; seam columns draw their run out at SEAM_BLK, which is the whole
+${SEAMCNT && PROFTOUR ? 'rfSlSn:\n' : ''}        jmp seamDrw             ; seam columns draw their run out at SEAM_BLK, which is the whole
                                 ; cost here: the block below ORB_SMALL has no room for the rest
 ` : ''}rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         cmp #13
@@ -8251,12 +8650,12 @@ ssLp:${SEAMPW ? (SEAMCNT ? `   inc ssPwN
         bne ssPwNX
         inc ssPwN+1
 ssPwNX: jsr ssPw
-        bcc ssPwOk
+        bcc ssPwCk
         inc ssPwX
         bne ssPwXX
         inc ssPwX+1
 ssPwXX: jmp ssDn
-ssPwOk:${SEAMANY ? ` jsr ssAny
+ssPwCk:${SEAMANY ? ` jsr ssAny
         bcs ssAnyOk
         inc ssAnyX
         bne ssAnyXX
@@ -9821,7 +10220,11 @@ ${DIE ? `omDead: rts
         sta opaqL
         lda paqH
         sta opaqH
-        ; |cos| and |sin| at quarter-unit resolution, folded out of one quarter circle.
+${ENTGATE ? `        jsr entGate             ; ---- anything to project at all? ---- (out of line: the
+        bcc ogFull              ;   main block is full; see entGate for what it tests)
+        rts                     ; carry set: nothing in sight, registers already cleared
+ogFull:
+` : ''}        ; |cos| and |sin| at quarter-unit resolution, folded out of one quarter circle.
         ; cos: a = paq mod 512.  sin: |sin(x)| = |cos(x + quarter turn)|, so a = (paq+256) mod 512.
         lda paqL
         sta oqa
@@ -10736,7 +11139,68 @@ ofwOk:  ; right = Iy*cos - Ix*sin + kr
         lda rgtH
         adc krH
         sta rgtH
-        ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
+${ENTFOV ? `        ; ---- beside the camera: off screen by construction, so stop HERE ----
+        ; The column is F_COL * |right| / forward with F_COL ~ 184. The widest thing drawn is the
+        ; exit hole at 36 columns each side of its centre (holeXOffT; the orbs reach 24), and
+        ; holeTail draws a pair whose start is under 160 or whose end is under 72 -- so a centre
+        ; up to 80 + 36 = 116 columns off axis can still put pixels on screen, and NOTHING past
+        ; that can: |right| / forward > 116/184 = 0.63. Everything below this point (the
+        ; reciprocal, three multiplies, then the box tests) exists to discover that at ~800
+        ; cycles a time, and on the benchmark 56% of the entities that got this far were thrown
+        ; away there. Test |right| > forward * 3/4 = forward/2 + forward/4: LOOSER than 0.63, so
+        ; it can only reject what the box tests would have rejected anyway, and it is two shifts
+        ; and a 16-bit compare. The band 0.63..0.75 still takes the long road; it is thin.
+        ; The first cut used 5/8 = 0.625 from the ORB width, one column inside the hole's real
+        ; bound, and FOVCHK caught it: 4 sprites in a walkthrough that the cull would have
+        ; dropped. Verified at 3/4: fovBad = 0 on both walkthroughs. Do not tighten this without
+        ; re-running FOVCHK=1 on a route that shows the hole at the screen edge.
+        ; Signed compare: right can be negative; forward is known positive here (tested above).
+        lda rgtL                ; |right| -> o0:o1. o0..o2 and ogL/ogH are orbProj's own
+        sta o0                  ;   scratch, all written AFTER this point, so they are free here
+        lda rgtH
+        sta o1
+        bpl ofvP
+        sec
+        lda #$00
+        sbc o0
+        sta o0
+        lda #$00
+        sbc o1
+        sta o1
+ofvP:   lda fwdH                ; bound = fwd/2 + fwd/4: fwd is positive, so plain shifts
+        lsr
+        sta ogH
+        lda fwdL
+        ror
+        sta ogL                 ; fwd/2
+        lda ogH
+        lsr
+        sta o2
+        lda ogL
+        ror                     ; fwd/4
+        clc
+        adc ogL
+        sta ogL
+        lda o2
+        adc ogH
+        sta ogH
+        lda o1                  ; |right| > bound ?
+        cmp ogH
+        bcc ofvOk
+        bne ofvNo
+        lda o0
+        cmp ogL
+        bcc ofvOk
+        beq ofvOk
+${FOVCHK ? `ofvNo:  lda #$01                ; FOVCHK: do NOT reject. Note that the cull WOULD have, then run
+        sta fovWld              ;   the full path and see whether it agrees. Counted at orbOne.
+        bne ofvOk2              ; always
+ofvOk:  lda #$00
+        sta fovWld
+ofvOk2:
+` : `ofvNo:  jmp opjNo
+ofvOk:
+`}` : ''}        ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
         ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
         ; of forward costs under 0.4% -- less than half a column at the screen edge.
         lda fwdL
@@ -10870,6 +11334,11 @@ ${CULLCNT ? `        bcs culOk               ;   everything above needs only the
         inc culPrj+1
 oc2:    jmp orbNo
 culOk:` : `        bcc orbNo               ;   everything above needs only the cell it stands in`}
+${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull said off screen, orbProj said on --
+        beq fovAgr              ;   that is a disagreement at the projection level; the box tests
+        inc fovDis              ;   below may still reject it, so also count what SURVIVES them
+fovAgr:
+` : ''}
 ${DIE ? `        lda oidx                ; the death sweep steers by ONE entity's column offset, so
         cmp dieIdx              ;   test identity, not tallness: hole-like entities reach the tall
         bne odSk                ;   test below with an index PAST THE END of orbTallT, and a stray
@@ -11340,7 +11809,11 @@ oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EX
 orbYes: ldx oidx                ; it got a sprite slot, so a pixel of it is on screen. The
         lda #$01                ;   renderer already culls anything off screen or wholly
         sta orbSeenT,x          ;   occluded, so this IS the "unobserved" test, for free
-        rts
+${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull would have dropped something that got a
+        beq fovYok              ;   SPRITE. This must read zero, always.
+        inc fovBad
+fovYok:
+` : ''}        rts
 orbNo:  ldx oidx
         lda #$00
         sta orbSeenT,x
@@ -15434,7 +15907,74 @@ ssPwNo: sec                     ; outside the band: stop the walk, the face only
 ssPwOk: clc
         rts                     ; carry clear = the panel is wide enough to place a line in
 ` : ''}
-seamOne:
+${ENTGATE ? `; ---- entGate: can ANY entity be projected this frame? Carry SET = no, and the sprite
+; registers have been cleared; carry CLEAR = yes, run the frame trig and the loops.
+; The frame trig in orbMove -- two qTrig, four oFrac, four kSgn, ~800 cycles -- was computed
+; before anything asked whether an entity would use it. Exact conditions under which nothing
+; can: no un-hidden orb exists, no hole-like entity is in line of sight from this cell
+; (holeSeeT is the per-cell LOS bitmap the hole loop already tests, hoisted), and no icon wants
+; a slot (the carried orb, a socket animation). This pays on an empty level -- the benchmark --
+; and in any corridor with nothing in sight; a level with an orb placed always has something to
+; project and takes the full path from the first test. Orbs have no LOS bitmap because they move.
+entGate:
+        lda carry
+        ora sokAn
+        bne ogYes
+        ldx nOrbT               ; any orb not hidden?
+        beq ogHole
+ogOrbL: lda orbHidT-1,x
+        beq ogYes              ; one is in the world: project
+        dex
+        bne ogOrbL
+ogHole: lda py+1                ; the player's cell, for the LOS test
+${MULW}
+${ADDX('px+1')}
+        sta pcell
+        and #$07
+        tay
+        lda pcell
+        lsr
+        lsr
+        lsr
+        sta rgtL                ; byte within a 32-byte LOS row. rgtL/rgtH are orbProj's,
+                                ;   and orbProj has not run yet this frame
+        ldx hlv                 ; the live exit hole, then every socket: the same set holeOne walks
+ogHoLp: txa
+        asl
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc rgtL
+        stx rgtH
+        tax
+        lda holeSeeT,x
+        and orbBitT,y
+        bne ogYes              ; in sight: project
+        ldx rgtH
+        cpx nExitT
+        bcs ogHoIn
+        ldx #$01                ; past the exits: only hlv's hole is live, so step over the other
+ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then inc -> first socket)
+        cpx nHoleT
+        bcc ogHoLp
+${CULLCNT ? `${PROFILE ? '        lda pfDone              ; stop with the profiler, so frames and closures share a window\n        bne ogSk1\n' : ''}        inc ogSkip              ; CULLCNT: frames the gate closed
+        bne ogSk1
+        inc ogSkip+1
+ogSk1:
+` : ''}        lda #$00                ; nothing in sight: an empty frame, registers cleared as usual
+        sta omEn
+        sta omXX
+        sta omYY
+        sta omPri
+        sta omX8
+        sta onv
+        sec
+        rts
+ogYes:  clc
+        rts
+` : ''}seamOne:
         lda #$00                ; k as 8.8
         sta skL
         lda ssK
@@ -15849,17 +16389,30 @@ twTime:
         ; tick-driven. Counting frames held every step ~4x too long at 15fps and buried the walks
         ; in walls. frameCnt is the raster IRQ, so its delta is the honest elapsed time -- and it
         ; keeps the script frame-rate independent, which is the point of the benchmark.
-        lda twGo                ; FIRST CALL: anchor the clock, do not spend time on step 0.
-        bne twEl1               ;   twLast starts at 0 while frameCnt is already wherever the
-        inc twGo                ;   disk load left it, so the opening step had hundreds of ticks
-        lda frameCnt            ;   subtracted at once and was skipped outright -- by a margin
-        sta twLast              ;   that varied with load timing, which is exactly the run-to-run
-twEl1:  lda frameCnt            ;   wobble that makes this useless as a benchmark.
-        tax
-        sec
-        sbc twLast
-        stx twLast
+        lda twAdv               ; the previous call expired a step: advance to the next NOW,
+        beq twNoAdv             ;   before this frame's ticks are charged to anything
+        lda #$00
+        sta twAdv
+        inc twAdv2              ; tell twStepOn to come back and charge this frame
+        jmp twStepOn
+twNoAdv:
+        ; ---- ONE CLOCK: the step is charged exactly what the movement will use ----
+        ; This used to keep its own elapsed-tick count off frameCnt (twLast), and the movement
+        ; code keeps another (tickDelta's dtv, off lastMv). Both read frameCnt, but at different
+        ; instants -- tickDelta runs before readKeys, this runs inside it -- so an IRQ landing
+        ; between the two reads made this clock see one tick MORE than the movement used. The
+        ; step then expired a frame early and its last tick of movement never happened. Measured
+        ; with TOURPOSE: every turn came up 2 ticks short (384 angle units), walks likewise, and
+        ; it COMPOUNDS -- forty steps in, the heading was 4,800 units off and the run legs were
+        ; landing in walls. dtv is capped at DT_MAX, and so must this be, for the same reason: a
+        ; hitch that moved the player DT_MAX ticks' worth must charge the step DT_MAX ticks.
+        lda dtv
         sta twEl
+        lda twGo                ; the FIRST call only arms: PROFTOUR starts on twGo, and the
+        bne twEl1               ;   opening frame's dtv is the whole disk load capped at DT_MAX --
+        inc twGo                ;   32 ticks of movement no step asked for. Hands off this frame,
+        jmp twNeu               ;   so the route starts from the start pose and not 32 ticks on.
+twEl1:
         lda twTk+1
         bne twSub               ; more than a page of ticks left: cannot expire this frame
         lda twTk
@@ -15898,13 +16451,46 @@ twExC:  cmp dtv
 twExZ:  lda #$00
         sta twTk
         sta twTk+1
-        beq twStepOn            ; always taken
+        ; ---- and HOLD THIS STEP'S INPUT for the clamped frame; advance next call ----
+        ; This used to fall straight into twStepOn, which loaded the NEXT step and set the
+        ; joystick for it -- so the clamped ticks, step N's last, were executed as step N+1's
+        ; input. Every turn lost its final partial frame to the walk that followed, and how much
+        ; depended on where the frame boundary fell: measured with TOURPOSE, one to five ticks a
+        ; step, not the same twice, compounding to 4,800 angle units by step forty and the run legs
+        ; landing in walls. Now the expiring frame moves step N's remaining ticks as step N, the
+        ; rest of that frame is stillness, and the next call advances. A step's movement is
+        ; exactly ticks x rate, and the route is the same on any build at any frame rate --
+        ; which was the claim all along, and is now true.
+        lda #$01
+        sta twAdv
+        jmp twRun
 twRunJ: jmp twRun
         lda twTk
         ora twTk+1
         bne twRunJ              ; this step still has time on it
 twStepOn:
-        inc twN                 ; ...it does not: move on and load the next duration
+${TOURPOSE ? `        ; TOURPOSE=1: the pose at the END of every step -- px, py, pa:paF, 6 bytes a step at
+        ; twPose -- so the route compiler's model can be checked against what the machine did.
+        ; This is how the run-leg drift was found: the model and the hardware agreed on every
+        ; walk and disagreed on the long diagonal runs, which nothing else could have shown.
+        lda twN
+        asl
+        adc twN                 ; x3
+        asl                     ; x6
+        tay
+        lda px
+        sta twPose,y
+        lda px+1
+        sta twPose+1,y
+        lda py
+        sta twPose+2,y
+        lda py+1
+        sta twPose+3,y
+        lda paF
+        sta twPose+4,y
+        lda pa
+        sta twPose+5,y
+` : ''}        inc twN                 ; ...it does not: move on and load the next duration
         ldy twN
         cpy #${hx(TOUR_STEPS.length)}
         bcs twNeu
@@ -15914,9 +16500,14 @@ twStepOn:
         sta twTk+1
         lda twTypT,y
         cmp #${hx(T_SPACE)}
-        bne twRun
+        bne twChg
         jsr orbUse              ; SPACE is read by orbKey's own scan, so act directly, once,
                                 ;   at the moment its step begins
+twChg:  lda twAdv2              ; reached from the advance at the top of a call: this frame's
+        beq twCnt               ;   ticks belong to the NEW step, so go and charge them
+        lda #$00
+        sta twAdv2
+        jmp twTime
         ; ---- the measurement: frames and ticks, EXCLUDING the angel wait ----
         ; Standing still is where the temporal pivot and the dirty-cell cache pay off most, so
         ; those frames are unusually cheap and would flatter the average. Counting here rather
@@ -15926,7 +16517,78 @@ twCnt:  ldy twN
         lda twTypT,y
         cmp #${hx(T_WAIT)}
         beq twRun
-        inc twFrm               ; one render frame of real work
+${FRAMELOG ? `        ; ---- FRAMELOG: the frame just rendered, and what it cost ----
+        ; ORDER OF EVENTS, which the first cut got wrong: ... work ... wait -> flip (fT0 = frameCnt,
+        ; at raster 250) -> mloop -> pfTick (pfPrvF/L/H) -> here. So pfPrvF - fT0 is the gap from the
+        ; flip to the tick right after it: a constant few dozen lines, which is what it read.
+        ; The frame's work runs from the tick at the top of ITS iteration to ITS flip. That tick is
+        ; the one saved LAST time through here (flgTF/L/H), and the flip is fT0 at raster 250:
+        ;     work = (fT0 - flgTF) * 263 + 250 - (flgTL + flgTH * 256)
+        ; The first frame has no saved tick and logs garbage once; the reader drops record 0.
+${FLOGDIV > 1 ? `        lda twFrm               ; every FLOGDIV-th frame only -- but the tick is saved EVERY
+        and #${hx(FLOGDIV - 1)}    ;   frame, or the interval measured would be two frames' worth
+        bne flgSv
+` : ''}        lda fT0
+        sec
+        sbc flgTF
+        tax                     ; X = whole raster frames from that tick to the flip
+        lda #250
+        sec
+        sbc flgTL
+        sta flogW
+        lda #$00
+        sbc flgTH
+        sta flogW+1
+flgFr:  cpx #$00
+        beq flgSt
+        lda flogW
+        clc
+        adc #<263
+        sta flogW
+        lda flogW+1
+        adc #>263
+        sta flogW+1
+        dex
+        jmp flgFr
+flgSt:  lda flogN+1             ; wrap at ${FLOG_N} records: keep the LAST ${FLOG_N}
+        cmp #${hx((FLOG_N * 4) >> 8)}
+        bcc flgOk
+        lda #$00
+        sta flogN
+        sta flogN+1
+flgOk:  lda flogN               ; jv is renderSym's chain vector and is dead here -- twStep runs
+        sta jv                  ;   from readKeys at the top of the frame, before any drawing
+        lda flogN+1
+        clc
+        adc #>flogB
+        sta jv+1
+        ldy #$00
+        lda py+1
+${MULW}
+${ADDX('px+1')}
+        sta (jv),y              ; 0: cell
+        iny
+        lda pa
+        sta (jv),y              ; 1: heading
+        iny
+        lda flogW
+        sta (jv),y              ; 2-3: work, raster lines
+        iny
+        lda flogW+1
+        sta (jv),y
+        lda flogN
+        clc
+        adc #$04
+        sta flogN
+        bcc flgSv
+        inc flogN+1
+flgSv:  lda pfPrvF              ; this iteration's opening tick: the START of the frame about to
+        sta flgTF               ;   be rendered, for next time through
+        lda pfPrvL
+        sta flgTL
+        lda pfPrvH
+        sta flgTH
+` : ''}        inc twFrm               ; one render frame of real work
         bne twF1
         inc twFrm+1
 twF1:   lda twTck               ; ...and the ticks it covered
@@ -15954,6 +16616,8 @@ twTk:   !byte ${hx(TOUR_STEPS[0][1] & 255)}
         !byte ${hx(TOUR_STEPS[0][1] >> 8)}
 twLast: !byte 0
 twGo:   !byte 0
+twAdv:  !byte 0                 ; the last call expired a step; advance before charging
+twAdv2: !byte 0                 ; ...and having advanced, charge this frame to the new step
 twFrm:  !byte 0,0               ; frames rendered outside the wait
 twTck:  !byte 0,0               ; 60Hz ticks those frames covered
 twEl:   !byte 0
@@ -15961,9 +16625,13 @@ twTypT: !byte ${TOUR_STEPS.map(t => hx(t[0])).join(',')}
 twOpT:  !byte ${TOUR_STEPS.map(t => hx(t[2] ?? 0)).join(',')}   ; the wait's target cell
 twTOLoT:!byte ${TOUR_STEPS.map(t => hx(t[1] & 255)).join(',')}
 twTOHiT:!byte ${TOUR_STEPS.map(t => hx(t[1] >> 8)).join(',')}
-        ;        walk back  run  turnL turnR fturnL fturnR space angel fall
-twJoyT: !byte $fe, $fd, $fe, $fb, $f7, $fb, $f7, $ff, $ff, $fe
-twRowT: !byte $ff, $ff, $7f, $ff, $ff, $7f, $7f, $ff, $ff, $ff
+        ; Active LOW, as the hardware is: joyv bit 0 = forward, 1 = back, 2 = turn left,
+        ; 3 = turn right, and twRow bit 7 clear is SHIFT, i.e. run. The arc types are just two
+        ; bits held at once -- readKeys tests forward and the turn independently, so nothing in
+        ; it had to change to walk and turn in the same frame.
+        ;        walk back  run  turnL turnR fturnL fturnR space angel fall  arcL arcR rarcL rarcR
+twJoyT: !byte $fe, $fd, $fe, $fb, $f7, $fb, $f7, $ff, $ff, $fe, $fa, $f6, $fa, $f6
+twRowT: !byte $ff, $ff, $7f, $ff, $ff, $7f, $7f, $ff, $ff, $ff, $ff, $ff, $7f, $7f
 ` : ''}${RECORD && SPRITES ? `        ; ---- RECORD's log, in the tail of the hazard block ----
         ; Flows on from the hazard tables, for the reason spelled out at TOURW above: hzRun and
         ; its stubs already hold $a700 whenever HAZRT is on, so re-originning there moves backward.
@@ -16095,7 +16763,12 @@ ${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the 
                             ; and the build dies with an overlap error.
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
 ; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
-; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
+; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.${PROFTOUR ? `
+; NOT UNDER PROFTOUR: the window is the tour, not 256 frames, so what these digits show is the
+; 24-bit TOTAL divided by 256 and is a mean of nothing. The screen is not the readout in that
+; mode -- seamprof.mjs reads pfAcc and twFrm out of RAM and divides by the frames actually
+; rendered. The digits are left drawing because they still say at a glance that the run
+; finished, and their RATIO between two builds is meaningful even when their scale is not.` : ''}
 pfShow: lda #$00
         sta pfRow
         ; TWO COLUMNS of five. Ten rows starting at 4 would reach rows 12-13, which are BELOW
@@ -16248,7 +16921,21 @@ pmH2:
         lda pfAcc,y
         adc #$00
         sta pfAcc,y
-pfOff:  rts
+${PROFN ? `        ; ---- PROFN: how many times each bucket was closed ----
+        ; pfTick charges its OWN cost to the bucket it closes, and the fine-grained buckets close
+        ; ~20 times a frame each, so their raw shares are mostly instrumentation -- that is how a
+        ; split once summed to 119% of the frame. The correction is raw - N x cost, and until now
+        ; N was inferred from the code's shape (20 rays, 13 spans) rather than counted, which is
+        ; only right for the frame it was inferred from. Counting it makes the correction exact
+        ; and, with two builds that differ only in tick sites, makes the cost itself measurable
+        ; instead of being the 220 someone wrote down in August.
+        lda pfCurX              ; X, not Y: there is no INC abs,y. X already held the phase on
+        asl                     ;   entry and every tick site reloads it, so clobbering it here
+        tax                     ;   costs nothing.
+        inc pfNum,x
+        bne pfOff
+        inc pfNum+1,x
+` : ''}pfOff:  rts
 
 ` : ''}
 ${DIE ? `        ; ---- dieChk and dieGo, relocated ----
@@ -16827,6 +17514,9 @@ try {
       // arc scratch, and it took a freeze to notice.
       obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
       obL: 8, obR: 8, obBL: 8, obBR: 8,
+      pfNum: 34,                       // PROFN: the same seventeen phases, x 2
+      flogB: 2816,                     // FRAMELOG: $7100-$7bff, 704 x 4
+      twPose: 252,                     // TOURPOSE: 42 steps x 6
       pfAcc: 51,                       // SEVENTEEN phases x 3. It said 13 while the code used 15,
                                        //   so two phases' worth of room was undeclared and the
                                        //   next variable placed there would have collided.

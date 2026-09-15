@@ -35,13 +35,27 @@ const wantWait = +((args.find(a => a === '--wait') ? args[args.indexOf('--wait')
 // over. Without --at, everything is read once, whenever the program is first seen running.
 const atArg = args.find(a => a === '--at') ? args[args.indexOf('--at') + 1] : '';
 const marks = atArg.split(',').map(Number).filter(n => n > 0);
+// --until "name>=N": poll a NAMED variable and read once it satisfies the test, instead of
+// waiting on a frameCnt tick. --at exists to hit a specific MOMENT and has to turn warp off to
+// do it; waiting for something to FINISH has no such problem, so --until keeps warp on and a
+// sixty-second scripted tour costs a few seconds of wall clock. It is also the honest condition:
+// "the tour has ended" is a fact about the program, where "tick 3606 has passed" is a guess about
+// it that goes wrong the moment the route or the load time changes.
+const untilArg = args.find(a => a === '--until') ? args[args.indexOf('--until') + 1] : '';
+const until = untilArg ? (() => {
+  const m = untilArg.match(/^(\w+)\s*(<=|>=|==|<|>)\s*(\d+)$/);
+  if (!m) { console.error(`bad --until: ${untilArg} (want "name>=N")`); process.exit(2); }
+  return { name: m[1], op: m[2], lim: +m[3] };
+})() : null;
 const expects = [];
 const specs = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--wait' || args[i] === '--at') { i++; continue; }
+  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until') { i++; continue; }
   if (args[i] === '--expect') { expects.push(args[++i]); continue; }
   specs.push(args[i]);
 }
+// The polled name has to be one of the labels resolved below, or its address is never looked up.
+if (until && !specs.some(s => s.split(':')[0] === until.name)) specs.push(until.name);
 const names = specs.map(s => s.split(':')[0]);
 
 // ---- ONE build: it writes the disk AND tells us the addresses in that disk ----
@@ -210,6 +224,22 @@ sock.on('connect', async () => {
     };
     if (alive && marks.length && !(await waitFor(marks[0])))
       bail(`${LIVE} never reached tick ${marks[0]} -- the program is running but not getting there.`);
+    // --until: poll the named byte. The deadline is generous because the thing being waited for
+    // is usually a whole scripted run, and a build that got SLOWER is exactly what one is often
+    // measuring -- a timeout tuned to the fast build would report the slow one as broken.
+    if (alive && until) {
+      const test = v => ({ '<=': v <= until.lim, '>=': v >= until.lim, '==': v === until.lim,
+                           '<': v < until.lim, '>': v > until.lim })[until.op];
+      let last = null, ok = false;
+      for (const t0 = Date.now(); Date.now() - t0 < 600000 && !ok; ) {
+        last = (await memGet(addr[until.name], 1))[0];
+        await resume();
+        if (test(last)) { ok = true; break; }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (!ok) bail(`--until ${untilArg} never came true; ${until.name} was last ${last}. ` +
+                    `The program is running, so either the condition cannot happen or it needs longer.`);
+    }
     if (!alive) {
       // Show the KERNAL screen: "READY." means autostart never loaded anything, a LOAD line means
       // it is still loading, garbage means the program is up and frameCnt is at the wrong address.

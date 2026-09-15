@@ -155,9 +155,11 @@ ssHL    = $9152                 ; the two end heights, while that is being worke
 ssHR    = $9153
 ssPU    = $9154                 ; SEAMPW: the player's position on THIS face's running axis, the
 ssPUL   = $9155                 ;   two bytes of it, worked out once per span
-ssLim   = $9156                 ;   ...and the largest s*s that still leaves a placeable panel
-shD     = $9158                 ;   dp while it is being formed, then dp in half cells
-shS     = $915a                 ;   s while it is being formed
+ssKLo   = $9156                 ;   ...and the FIRST and LAST cell boundary worth a line, so the
+ssKHi   = $9157                 ;   per-boundary test is two compares (see ssPwS)
+shD     = $9158                 ;   dp while it is being formed, then dp in quarter cells
+smLo    = $915a                 ;   s_max scaled to 8.8 while the range is formed
+smHi    = $915b
 ssDir   = $915c                 ; which way the boundary walk steps: 0 = up, 1 = down
 ; ---- SEAMHYST: last frame's panel columns, and this frame's being collected ----
 ; Two arrays and not one: a line placed earlier in THIS frame must not become a band centre for a
@@ -4234,6 +4236,10 @@ obMoved:lda #$00
         sta opaqL
         lda paqH
         sta opaqH
+        jsr entGate             ; ---- anything to project at all? ---- (out of line: the
+        bcc ogFull              ;   main block is full; see entGate for what it tests)
+        rts                     ; carry set: nothing in sight, registers already cleared
+ogFull:
         ; |cos| and |sin| at quarter-unit resolution, folded out of one quarter circle.
         ; cos: a = paq mod 512.  sin: |sin(x)| = |cos(x + quarter turn)|, so a = (paq+256) mod 512.
         lda paqL
@@ -5102,6 +5108,61 @@ ofwOk:  ; right = Iy*cos - Ix*sin + kr
         lda rgtH
         adc krH
         sta rgtH
+        ; ---- beside the camera: off screen by construction, so stop HERE ----
+        ; The column is F_COL * |right| / forward with F_COL ~ 184. The widest thing drawn is the
+        ; exit hole at 36 columns each side of its centre (holeXOffT; the orbs reach 24), and
+        ; holeTail draws a pair whose start is under 160 or whose end is under 72 -- so a centre
+        ; up to 80 + 36 = 116 columns off axis can still put pixels on screen, and NOTHING past
+        ; that can: |right| / forward > 116/184 = 0.63. Everything below this point (the
+        ; reciprocal, three multiplies, then the box tests) exists to discover that at ~800
+        ; cycles a time, and on the benchmark 56% of the entities that got this far were thrown
+        ; away there. Test |right| > forward * 3/4 = forward/2 + forward/4: LOOSER than 0.63, so
+        ; it can only reject what the box tests would have rejected anyway, and it is two shifts
+        ; and a 16-bit compare. The band 0.63..0.75 still takes the long road; it is thin.
+        ; The first cut used 5/8 = 0.625 from the ORB width, one column inside the hole's real
+        ; bound, and FOVCHK caught it: 4 sprites in a walkthrough that the cull would have
+        ; dropped. Verified at 3/4: fovBad = 0 on both walkthroughs. Do not tighten this without
+        ; re-running FOVCHK=1 on a route that shows the hole at the screen edge.
+        ; Signed compare: right can be negative; forward is known positive here (tested above).
+        lda rgtL                ; |right| -> o0:o1. o0..o2 and ogL/ogH are orbProj's own
+        sta o0                  ;   scratch, all written AFTER this point, so they are free here
+        lda rgtH
+        sta o1
+        bpl ofvP
+        sec
+        lda #$00
+        sbc o0
+        sta o0
+        lda #$00
+        sbc o1
+        sta o1
+ofvP:   lda fwdH                ; bound = fwd/2 + fwd/4: fwd is positive, so plain shifts
+        lsr
+        sta ogH
+        lda fwdL
+        ror
+        sta ogL                 ; fwd/2
+        lda ogH
+        lsr
+        sta o2
+        lda ogL
+        ror                     ; fwd/4
+        clc
+        adc ogL
+        sta ogL
+        lda o2
+        adc ogH
+        sta ogH
+        lda o1                  ; |right| > bound ?
+        cmp ogH
+        bcc ofvOk
+        bne ofvNo
+        lda o0
+        cmp ogL
+        bcc ofvOk
+        beq ofvOk
+ofvNo:  jmp opjNo
+ofvOk:
         ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
         ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
         ; of forward costs under 0.4% -- less than half a column at the screen edge.
@@ -5231,6 +5292,7 @@ orbOne: ldx oidx
         sta oiy
         jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
         bcc orbNo               ;   everything above needs only the cell it stands in
+
         lda oidx                ; the death sweep steers by ONE entity's column offset, so
         cmp dieIdx              ;   test identity, not tallness: hole-like entities reach the tall
         bne odSk                ;   test below with an index PAST THE END of orbTallT, and a stray
@@ -6166,15 +6228,20 @@ fwDn:   rts
 ; toward the one you have just left. Eight rather than four because "the square most in front of
 ; you" means exactly that when you are facing a corner, and because the angels move in eight.
 ; ---- dpCand: the neighbouring cell one step along direction X, and its parts ----
-dpCand: clc
+dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
+        ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
+        ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
+        ; orb was placed most of a map away from the player, which is exactly how it looked.
+        ; Nothing is needed in its place. dirXT/dirYT are -1, 0 or +1, the map border is solid on
+        ; all four sides (asserted at build), and the player cannot stand in a wall -- so px+1 is
+        ; within 1..MAPW-2 and the candidate is always inside the grid. Same for y.
+        ; See orbProj's "RANGE CHECK, not a mask" for the same bug caught in another place.
         lda px+1
         adc dirXT,x
-        and #$0f
         sta fcX
         clc
         lda py+1
         adc dirYT,x
-        and #$0f
         sta fcY
         asl
         asl
@@ -6414,6 +6481,22 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
+        ; The masks say whether an entity is beyond a wall face's PLANE -- no camera term at
+        ; all -- so they only go stale when an entity moves or the run tables are re-patched.
+        ; blkVer catches the first (angOne, okTake, okPlain all bump it); the viewing cell
+        ; catches the second, since hazSet patches per RENDERING cell. On a map that splits
+        ; nothing -- which is every map here -- neither changes most frames, and this was
+        ; rebuilding byte-identical masks every single one.
+        lda blkVer
+        cmp occVer
+        bne ooDirty
+        lda cell0
+        cmp occCell
+        beq ooSkip
+ooDirty:lda blkVer  ;   differences that mean nothing
+        sta occVer
+        lda cell0
+        sta occCell
         lda nAllT               ; orbs AND hole-like entities -- the COUNT, so that none is
         beq ooAlD               ;   sayable; the index below cannot say it
         lda nAllM1T
@@ -6425,6 +6508,7 @@ ooAlp:  sta ooAI
         sbc #$01
         bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
 ooAlD:
+ooSkip:
         rts
 
 
@@ -6524,8 +6608,18 @@ asPer:  sty asPCur
         adc dtv
         cmp asPCur              ; both periods are per LEVEL, swapped with the rest of the manifest
         bcc asKeep
-        jsr angOne              ; due a step (X is the entity; angOne preserves nothing)
-        lda #$00
+        sbc asPCur              ; ---- CARRY the remainder, do not zero it ----
+        pha                     ; Carry is set from the cmp, so this is A - period. Zeroing made
+        jsr angOne              ; the effective period "period + whatever this frame overshot by",
+        pla                     ; and that overshoot is one frame of ticks -- so the angel walked
+                                ; SLOWER on a slower build, and faster down an empty corridor than
+                                ; in a dense view. Carrying it makes the average period exact at
+                                ; any frame rate, which is what the accumulator was for.
+                                ; It also un-breaks the scripted walkthrough: TOURW's "wait until
+                                ; the angel reaches (4,4)" is a CONDITION, so a drifting angel
+                                ; clock landed that step on a different tick every time the frame
+                                ; rate moved, and every step after it walked a different line.
+                                ; (X is the entity; angOne preserves nothing, hence the pha/pla.)
 asKeep: ldx amIdx
         sta angAccT,x
 asNext: ldx amIdx
@@ -9426,6 +9520,8 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
+occVer: !byte $ff               ; blkVer and the cell orbOccAll last rebuilt for; $ff forces
+occCell:!byte $ff               ;   a rebuild on the first frame
 bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
@@ -9565,6 +9661,14 @@ lsLen:  !byte 0
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
+; ---- sMaxT: the largest s that still leaves a placeable panel, per dp ----
+; s*s <= dp*(4K/n - dp) has ONE unknown at run time once dp is known, so the whole test collapses
+; to a bound on s -- and that bound is a pure function of dp_q and a build constant. Precomputing
+; it turns the per-boundary work from a subtract, an abs, a rounding, two shifts, a multiply and a
+; 16-bit compare into two compares against a range worked out once per span.
+; Quarter cells in and out. 128 entries: dp_q past that is a wall plane 32 cells to the side, which
+; SEAMFAR threw away long before.
+sMaxT:  !byte 0,11,16,20,23,25,28,30,32,34,35,37,39,40,41,43,44,45,46,47,48,49,50,51,52,53,54,54,55,56,57,57,58,59,59,60,60,61,61,62,62,63,63,64,64,65,65,65,66,66,66,66,67,67,67,67,68,68,68,68,68,68,69,69,69,69,69,69,69,69,69,69,69,69,69,69,69,69,68,68,68,68,68,68,67,67,67,67,66,66,66,66,65,65,65,64,64,63,63,62,62,61,61,60,60,59,59,58,57,57,56,55,54,54,53,52,51,50,49,48,47,46,45,44,43,41,40,39
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,0,0,0,0
 
@@ -9878,24 +9982,50 @@ spwP:   lda shD+1               ; 64 cells to the side: the shift below would wr
         lda shD+1
         bne spwNz
         lda #$01                ; floored at a quarter cell: standing ON the plane is a degenerate
-spwNz:  cmp #$8b        ;   reading, not a reason to cull the whole wall
-        bcs spwNo               ; dp has eaten the entire budget: nothing here is placeable
-        sta shD
-        lda #$8b        ; lim = dp_q * (4K/n - dp_q), the largest s_q*s_q worth drawing
-        sec
-        sbc shD
-        sta mq
-        lda shD
-        jsr mul8
-        lda plo
-        sta ssLim
-        lda phi
-        sta ssLim+1
-        jmp spwDn
-spwNo:  lda #$00
-        sta ssLim
-        sta ssLim+1
-spwDn:  rts
+spwNz:  cmp #$80                ; dp_q past 127 is a plane 32 cells to the side, which SEAMFAR
+        bcs spwNo               ;   threw away long ago -- and it is the table's bound
+        tay
+        lda sMaxT,y             ; the largest s that still leaves a placeable panel, quarter cells
+        beq spwNo
+        sta smHi                ; s_max as 8.8 cells is q*64, so take (q,0) down two bits
+        lda #$00
+        sta smLo
+        lsr smHi
+        ror smLo
+        lsr smHi
+        ror smLo
+        lda smLo                ; +half a quarter cell. The test this replaces ROUNDED s to quarter
+        clc                     ;   cells before squaring, so an s of 5.859 rounded down to 5.75
+        adc #$20                ;   and passed; comparing against an exact s_max is half a quarter
+        sta smLo                ;   tighter and dropped a seam the old rule kept. The low six bits
+                                ;   of q*64 are clear, so this can never carry.
+        clc                     ; kHi = floor(p_along + s_max)
+        lda ssPUL
+        adc smLo
+        lda ssPU
+        adc smHi
+        sta ssKHi
+        sec                     ; kLo = CEIL(p_along - s_max): a boundary on the band's lower edge
+        lda ssPUL               ;   counts only if at or above it, so a fraction rounds UP
+        sbc smLo
+        tax
+        lda ssPU
+        sbc smHi
+        bcc spwLo0              ; the band runs off the near end of the map
+        cpx #$00
+        beq spwLoS
+        clc
+        adc #$01
+spwLoS: sta ssKLo
+        rts
+spwLo0: lda #$00
+        sta ssKLo
+        rts
+spwNo:  lda #$01                ; an EMPTY range -- kLo above kHi -- rejects every boundary
+        sta ssKLo
+        lda #$00
+        sta ssKHi
+        rts
 
 
 ; ---- ssPw: is there a panel at ssK wide enough to place a line in? ----
@@ -9904,44 +10034,83 @@ spwDn:  rts
 ; to place stops the walk outright, since everything further along the face is narrower still.
 ; The 16-bit compare at the end already leaves the answer in carry, so the routine needs no
 ; epilogue -- and the early "too far to bother" exit lands on the same rts with carry SET.
-ssPw:   lda #$00                ; s = |boundary - player| along the face, 8.8 cells
-        sec
-        sbc ssPUL
-        sta shS
-        lda ssK
-        sbc ssPU
-        sta shS+1
-        bpl spwSp
-        lda #$00
-        sec
-        sbc shS
-        sta shS
-        lda #$00
-        sbc shS+1
-        sta shS+1
-spwSp:  lda shS+1
-        cmp #$40
-        bcs spwRt               ; 64 cells along: out by any threshold, and s_q would overflow
-        lda shS                 ; s in QUARTER cells, rounded, on the same scale as dp
-        clc
-        adc #$20
-        sta shS
-        lda shS+1
-        adc #$00
-        sta shS+1
-        asl shS
-        rol shS+1
-        asl shS
-        rol shS+1
-        lda shS+1
-        sta mq                  ; A survives the store, so this is s_q squared
-        jsr mul8
-        lda plo
-        cmp ssLim
-        lda phi
-        sbc ssLim+1
-spwRt:  rts                     ; carry clear = the panel is wide enough to place a line in
+ssPw:   lda ssK                 ; two compares against the range ssPwS worked out per span
+        cmp ssKLo
+        bcc ssPwNo
+        cmp ssKHi
+        bcc ssPwOk
+        beq ssPwOk
+ssPwNo: sec                     ; outside the band: stop the walk, the face only narrows from here
+        rts
+ssPwOk: clc
+        rts                     ; carry clear = the panel is wide enough to place a line in
 
+; ---- entGate: can ANY entity be projected this frame? Carry SET = no, and the sprite
+; registers have been cleared; carry CLEAR = yes, run the frame trig and the loops.
+; The frame trig in orbMove -- two qTrig, four oFrac, four kSgn, ~800 cycles -- was computed
+; before anything asked whether an entity would use it. Exact conditions under which nothing
+; can: no un-hidden orb exists, no hole-like entity is in line of sight from this cell
+; (holeSeeT is the per-cell LOS bitmap the hole loop already tests, hoisted), and no icon wants
+; a slot (the carried orb, a socket animation). This pays on an empty level -- the benchmark --
+; and in any corridor with nothing in sight; a level with an orb placed always has something to
+; project and takes the full path from the first test. Orbs have no LOS bitmap because they move.
+entGate:
+        lda carry
+        ora sokAn
+        bne ogYes
+        ldx nOrbT               ; any orb not hidden?
+        beq ogHole
+ogOrbL: lda orbHidT-1,x
+        beq ogYes              ; one is in the world: project
+        dex
+        bne ogOrbL
+ogHole: lda py+1                ; the player's cell, for the LOS test
+        asl
+        asl
+        asl
+        asl
+        ora px+1
+        sta pcell
+        and #$07
+        tay
+        lda pcell
+        lsr
+        lsr
+        lsr
+        sta rgtL                ; byte within a 32-byte LOS row. rgtL/rgtH are orbProj's,
+                                ;   and orbProj has not run yet this frame
+        ldx hlv                 ; the live exit hole, then every socket: the same set holeOne walks
+ogHoLp: txa
+        asl
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc rgtL
+        stx rgtH
+        tax
+        lda holeSeeT,x
+        and orbBitT,y
+        bne ogYes              ; in sight: project
+        ldx rgtH
+        cpx nExitT
+        bcs ogHoIn
+        ldx #$01                ; past the exits: only hlv's hole is live, so step over the other
+ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then inc -> first socket)
+        cpx nHoleT
+        bcc ogHoLp
+        lda #$00                ; nothing in sight: an empty frame, registers cleared as usual
+        sta omEn
+        sta omXX
+        sta omYY
+        sta omPri
+        sta omX8
+        sta onv
+        sec
+        rts
+ogYes:  clc
+        rts
 seamOne:
         lda #$00                ; k as 8.8
         sta skL
