@@ -598,6 +598,15 @@ ohLstW  = $8524
 ohFstM  = $8525                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
 ohLstM  = $8526                 ;   what the cell shows outside the stamp, which picks the backing
 ohMsk   = $8527                 ; oSBack scratch: the mask under test, and the saved X
+osSrc   = $a0                   ; OCCSYN: source glyph pointer (2). The destinations are patched
+                                ;   into oSPut's own stores (oSPa/oSPb), not held here.
+osCov   = $a2                   ;   the covered-column pair mask
+osTmp   = $a3                   ;   the code being built, and a byte temp (2)
+osGly   = $a5                   ;   the fallback split glyphs, black- and white-backed
+osGlyW  = $a6
+osSyn   = $a7                   ;   the next scratch glyph, and the first one past this buffer's half
+osLim   = $a8
+osPY    = $a9                   ;   Y saved across the row loop
 ohMsX   = $8528
 o2r     = $8529                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
                                 ;   Not zero page: it is touched a handful of times per orb, in
@@ -4052,12 +4061,12 @@ drawFps:
         ldy #$00
         lda fpsTens
         clc
-        adc #$d1
+        adc #$cb
         sta (ppPtr),y
         iny
         lda fpsOnes
         clc
-        adc #$d1
+        adc #$cb
         sta (ppPtr),y
         rts
 
@@ -4166,7 +4175,7 @@ ddAng:  lda #$03
         and #$0f                ; off and feed them straight back in as PA=c0 PAF=40.
         jmp ddPut
 ddPut:  clc
-        adc #$d1
+        adc #$cb
         sta (ppPtr),y
         iny
         rts
@@ -4199,8 +4208,8 @@ moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
 rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
 kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
-vsplitL: !byte 0,7,23,4   ; VSPLIT: solid LEFT of boundary column 1,2,3: #... ##.. ###.
-vsplitR: !byte 0,31,16,125   ;   solid RIGHT: .### ..## ...#
+vsplitL: !byte 0,5,10,11   ; VSPLIT: solid LEFT of boundary column 1,2,3: #... ##.. ###.
+vsplitR: !byte 0,4,63,35   ;   solid RIGHT: .### ..## ...#
 ; ---- sMaxT (in the MAIN block since 2026-09-16: the $9d00 stream hit rayOffQS with the two-level
 ; build; this is 128 bytes of build constant with no alignment need, and the main block had 235 free): the largest s that still leaves a placeable panel, per dp ----
 ; s*s <= dp*(4K/n - dp) has ONE unknown at run time once dp is known, so the whole test collapses
@@ -4506,6 +4515,16 @@ qtLo:   ldx oqa
 occStamp:
         lda onv
         beq oSDn
+        ldy #$03   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
+        ldx baseHi              ;   Buffer A ($e0) takes the first half, B the second; see OCCSYN.
+        cpx #$e0                ;   (A still holds onv for the store below, so X and Y do the test)
+        beq oSSynA
+        ldx #$03
+        ldy #$06
+        bne oSSynB              ; always
+oSSynA: ldx #$00
+oSSynB: stx osSyn
+        sty osLim
         sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
         lda #$00                ;   selection below leaves the cache base in A, and with this store
         sta osI                 ;   after it, osN got #<cbA / #<cbB -- 80 or 120 -- so the loop
@@ -4761,22 +4780,28 @@ oSCR2:  sta ohRun               ; last cell
         ; With both ends interior there is still no glyph for it, and it stays the from-the-right
         ; one: over-covering takes a small bite out of the orb, while under-covering leaves orb
         ; drawn ON the wall, which is the error that reads as broken.
+        ; With synthesis the single-cell case is exact: the covered columns are k..m, i.e. those
+        ; in NEITHER mask, and the fallback glyph (used only when the scratch slots run out) is
+        ; whichever edge glyph the old rule chose.
+        lda ohFstM
+        ora ohLstM              ; showing = left of k OR right of m
+        pha
         lda osL
         and #$03
         bne oSC1r
-        lda ohLstM              ; k = 0: clip from the LEFT, exactly m+1 columns
-        jsr oSBack
-        lda ohLst
-        bcs oSC1s
-        lda ohLstW
-        jmp oSC1s
-oSC1r:  lda ohFstM
-        jsr oSBack              ; single-cell stamp: pick the backing, do not skip
-        lda ohFst
-        bcs oSC1s
-        lda ohFstW
-oSC1s:  sta (osPtr),y
+        ldx ohLst
+        stx osGly
+        ldx ohLstW
+        stx osGlyW
+        jmp oSC1g
+oSC1r:  ldx ohFst
+        stx osGly
+        ldx ohFstW
+        stx osGlyW
+oSC1g:  pla
+        jsr oSPut
         jmp oSCNx
+
         ; ---- only stamp cells that actually HOLD WALL ----
         ; The stamp covers the ORB's rows, on the assumption that a wall which occludes an orb
         ; extends below its feet. Where that does not hold -- a receding wall whose base has risen
@@ -4792,28 +4817,27 @@ oSC1s:  sta (osPtr),y
         ; paints its floor half black. That is the black block below the wall's lower bound.
         ; Skipping them leaves up to 8px of orb showing over the wall's bottom edge instead, which
         ; is the smaller error and the one that reads as a soft edge rather than a stray block.
-oSCMid: lda ohFstM
-        jsr oSBack        ; the FIRST cell straddles the wall's edge, so it is stamped
-        lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
-        bcs oSCMs               ;   not fully wall has floor or ceiling beyond the silhouette, and
-        lda ohFstW              ;   the white-backed split leaves that showing.
-oSCMs:               ; first cell: the stamp starts part way in, so clip from the right
-        sta (osPtr),y
+oSCMid: lda ohFstM              ; the columns this split leaves showing; oSPut covers the rest
+        ldx ohFst
+        stx osGly
+        ldx ohFstW
+        stx osGlyW
+        jsr oSPut
 oSCCol: iny
         cpy ohRun
         beq oSCLst
-        jsr oSWall
-        bcc oSCCol              ; ditto for every interior cell
-        lda #$f6
-        sta (osPtr),y
+        lda #$00                ; interior: every column covered
+        ldx #$f0
+        stx osGly
+        stx osGlyW
+        jsr oSPut
         jmp oSCCol
 oSCLst: lda ohLstM
-        jsr oSBack
-        lda ohLst
-        bcs oSCLs
-        lda ohLstW
-oSCLs:               ; last cell: the stamp ends part way in, so clip from the left
-        sta (osPtr),y
+        ldx ohLst
+        stx osGly
+        ldx ohLstW
+        stx osGlyW
+        jsr oSPut
 oSCNx:  inc ohSv
         jmp oSCRow
 ; oSWall: carry set if the cell at (osPtr),y is FULLY wall -- SOLID, or a seam variant, which is
@@ -4822,9 +4846,9 @@ oSCNx:  inc ohSv
 oSWall: lda (osPtr),y
         cmp #$01
         beq oSWyes
-        cmp #$e3
+        cmp #$dd
         bcc oSWno
-        cmp #$f3
+        cmp #$ed
         bcs oSWno
 oSWyes: sec
         rts
@@ -4898,9 +4922,9 @@ oSDc1:  sta osR
         ; loop, and cost the same 3 fps.
 oSDCol: ldy osDC
         lda seamT,y
-        cmp #$e3
+        cmp #$dd
         bcc oSDNx
-        cmp #$f3
+        cmp #$ed
         bcs oSDNx
         lda osRow
         sta ohSv
@@ -4919,9 +4943,9 @@ oSDR1:  cmp #$19
         sta osPtr+1
         ldy osDC
         lda (osPtr),y           ; the seam does not reach every row of the box: the rows above the
-        cmp #$e3       ;   solid run are ceiling or edge cells and must not become SOLID
+        cmp #$dd       ;   solid run are ceiling or edge cells and must not become SOLID
         bcc oSDRN
-        cmp #$f3
+        cmp #$ed
         bcs oSDRN
         lda #$01
         sta (osPtr),y
@@ -6984,8 +7008,11 @@ dsCol:  lda #$08  ; bit 3 keeps the cell multicolor; the face wants black here
         sta $db00,x
         inx
         bne dsCol
-        lda #$06                ; the angel charset in all three raster regions
-        sta pCh0
+        lda #$02        ; the picture charset -- it was copied over charset B -- in all
+        sta pCh0                ;   three raster regions. This was a literal $06, the $d018 nibble
+                                ;   for $d800, and it survived the charsets' move to $c000/$c800
+                                ;   (2026-09-16) for exactly one play session: the death scene
+                                ;   selected an empty page and drew nothing. The user caught it.
         sta pCh1
         sta pCh2
         lda #$00                ; still black: phase 2 ramps up from here
@@ -7953,7 +7980,7 @@ sockHT: !byte 107,94,80,67,54,40,34,27,20,13   ; DESCENDING h thresholds, scanne
 ;     it runs at oSDone, AFTER every cell of the orb has already been stamped and read.)
 ;   pair 11, another entity's occluder, where two stamps overlap. Opaque, and backing it white
 ;     would punch a hole through the first stamp.
-cellFillT: !byte 0,15,15,15,14,15,0,8,0,0,15,0,0,0,0,15,3,0,15,3,3,15,0,12,12,7,15,12,3,12,15,7,15,15,15,1,14,12,15,15,3,15,15,15,15,0,0,0,15,7,1,0,8,1,3,0,14,12,15,3,0,15,14,0,12,15,15,0,0,0,0,3,8,3,15,8,12,15,3,8,14,8,15,14,0,15,0,15,8,0,15,7,7,0,8,15,15,7,7,0,0,0,15,8,15,7,0,15,15,1,3,0,0,0,15,15,0,1,1,1,15,7,15,14,15,1,1,15,15,15,15,8,7,12,0,15,0,0,7,7,12,15,3,15,15,0,7,0,7,3,1,0,8,15,1,15,8,1,1,1,0,15,0,7,15,14,12,14,8,3,3,3,7,15,14,12,7,15,3,15,1,7,1,14,12,14,15,3,12,7,12,8,8,3,14,15,15,12,7,12,14,14,8,14,0,15,15,3,7,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,8,12,14,1,3,7
+cellFillT: !byte 0,15,15,8,7,8,15,0,0,1,12,14,15,15,15,0,3,15,15,15,15,15,14,0,15,0,0,12,15,15,14,7,7,14,0,1,0,15,3,0,15,1,0,0,14,12,14,14,0,0,12,0,15,7,15,0,15,15,0,15,15,15,7,3,15,7,3,15,15,3,15,3,0,0,7,15,0,12,15,3,0,7,15,0,0,0,15,15,15,12,15,1,15,8,7,15,12,15,3,1,15,14,1,3,8,12,0,15,7,3,1,1,7,15,8,0,15,1,15,0,8,8,12,14,0,7,15,15,12,15,8,15,15,15,8,14,15,1,1,15,15,14,0,15,12,15,3,0,0,7,3,7,7,15,14,15,12,15,0,14,12,15,12,8,0,1,0,8,8,1,12,15,8,15,15,3,14,3,0,8,12,1,1,0,15,3,0,15,12,7,12,15,15,15,0,0,12,14,15,14,12,15,15,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,8,12,14,1,3,7,0,0,0,0,0,0
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
@@ -9374,6 +9401,12 @@ sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick
 sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
 sfxK:   !byte 0                 ; which effect is loaded
 
+        ; The angel fill's queue. Pure scratch, nothing swaps it, and it grows with the open-cell
+        ; count, so it wants a slot with slack. It sat in the stream until OCCSYN's oSPut needed
+        ; the room there (2026-09-16); the 100 bytes fit the hole under the page-aligned
+        ; posXT exactly, and "* = moves backward" is the guard if the sound block or the level
+        ; ever grows into it.
+bfsQ:   !fill 100, 0
         * = $9500
 posXT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -9665,10 +9698,6 @@ sokCX:  !byte 0                 ; and where it is, walked by sokDX/sokDY
 sokCY:  !byte 0
 sokDX:  !byte 0
 sokDY:  !byte 0
-        ; The fill's queue. Moved out of the $3d40 block, which the wider level 2 map pushed three
-        ; bytes past $6100 -- this grows with the open-cell count, so it is exactly the thing that
-        ; should not live in a block with no slack. Pure scratch: nothing swaps it.
-bfsQ:   !fill 100, 0
         ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
         ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
 angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0
@@ -9796,11 +9825,11 @@ runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,
 ; is to need less of it. They are indexed by a clip column 0-3, are the same on every
 ; level, and travel in no manifest, so their address is free. What they MEAN is explained
 ; where they used to sit, next to the glyph scheme they belong to.
-occRT: !byte 246,249,248,247
-occLT: !byte 243,244,245,246
+occRT: !byte 240,243,242,241
+occLT: !byte 237,238,239,240
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
-occRTW: !byte 246,255,254,253
-occLTW: !byte 250,251,252,246
+occRTW: !byte 240,249,248,247
+occLTW: !byte 244,245,246,240
 
 ; ---- kMskT / mMskT / bbLT / bbRT / orbBitT ----
 ; Twenty-four more bytes evicted from the ORB_SMALL block, same reason as the four above:
@@ -9814,6 +9843,11 @@ orbBitT: !byte 1,2,4,8,16,32,64,128
 
 
 kMskT: !byte 0,8,12,14
+; synMskT: a cellFillT column mask of the columns left SHOWING (bit 3 = column 0) -> the HIGH bit
+; of each COVERED column's pixel pair (column c is bits 7-2c,6-2c), so that (b & $55) << 1 &
+; synMskT[m] turns exactly the covered columns' 01 pairs into 11. The 01 -> 11 map is what makes wall pixels stamp ink and leaves 00
+; (sky/floor) and 10 (seam) alone.
+synMskT: !byte 170,168,162,160,138,136,130,128,42,40,34,32,10,8,2,0
 mMskT: !byte 7,3,1,0
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
@@ -9844,7 +9878,7 @@ seamDrw: lda rsv
         ldx colc
         lda seamT,x
         sec
-        sbc #$e3
+        sbc #$dd
         sta sdK                 ; seamT holds only single lines now -- see subCvM -- so the
         sta sdCode              ;   code's offset IS the sub-column
         txa
@@ -9926,7 +9960,7 @@ sdFd:   cmp #13                 ; A is still sdRow, from the compare above
         clc
         adc sdK                 ; + the seam's column
         clc
-        adc #$e7
+        adc #$e1
         sta sdCode
         jsr sdPut               ; the line's first row, and its mirror below the horizon, where
         inc sdRow               ;   fontB turns the same code into a line in rows 0-3
@@ -10226,6 +10260,92 @@ ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then i
         sec
         rts
 ogYes:  clc
+        rts
+; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
+; A = the columns the stamp leaves SHOWING (cellFillT mask, bit 3 = column 0); osGly / osGlyW =
+; the whole-column split glyphs to fall back on, black- and white-backed; Y = the column, (osPtr),y
+; the cell. Preserves Y.
+;   BLANK           nothing to occlude: leave it (sky or floor; the orb is in front)
+;   SOLID or seam   fully wall: the split glyph, black-backed, as before
+;   a ramp / step   a wall EDGE: copy its 8 rows into the next scratch glyph with 01 -> 11 on the
+;                   covered columns, in BOTH charsets (B is the row-reversed copy), store that code
+;   scratch full    fall back to the old rule: oSBack picks the backing, the split glyph goes in
+; The synthesis is the whole point: at a wall's base the cell is floor with a sliver of wall along
+; its top, and stamping a whole-column split there hung the stamp 7 px over the floor. Now the ink
+; follows the wall's own outline in that cell, pixel for pixel.
+oSPut:  sta ohMsk
+        tax
+        lda synMskT,x           ; the pair-high-bit mask for the COVERED columns
+        sta osCov
+        lda (osPtr),y
+        beq oSPdn               ; BLANK: leave it
+        cmp #$cb
+        bcc oSPedg              ; a ramp or a step (SOLID is caught below)
+        cmp #$dd
+        bcc oSPdn               ; a readout: leave it
+        cmp #$ed
+        bcc oSPsol              ; a seam is a whole wall
+        rts                     ; an occluder or scratch code already
+oSPedg: cmp #$01
+        beq oSPsol
+        ldx osSyn
+        cpx osLim
+        bcs oSPfb               ; this buffer's scratch exhausted this frame: the old whole-column stamp
+        sty osPY
+        ; source glyph: charset A + code * 8
+        sta osSrc
+        lda #$00
+        sta osSrc+1
+        asl osSrc
+        rol osSrc+1
+        asl osSrc
+        rol osSrc+1
+        asl osSrc
+        rol osSrc+1             ; C = 0 after this: the code is a byte
+        lda osSrc+1
+        adc #>charset
+        sta osSrc+1
+        ; destination: scratch glyph X, in A and in B. The scratch codes are the top of the charset,
+        ; so every one lies in the charset's last page: the high bytes are constants and only the
+        ; low byte is patched into the two stores below.
+        txa
+        adc #$fa        ; C is still 0
+        sta osTmp               ; the code we will store
+        txa
+        asl
+        asl
+        asl
+        adc #$d0   ; C = 0: X <= 6
+        sta oSPa+1
+        sta oSPb+1
+        ; 8 rows: t = b | (((b & $55) << 1) & cov). A gets row Y, B (the mirror) gets row X = 7 - Y.
+        ldy #$00
+        ldx #$07
+oSPrw:  lda (osSrc),y
+        sta osTmp+1
+        and #$55
+        asl
+        and osCov
+        ora osTmp+1
+oSPa:   sta $c7d0,y
+oSPb:   sta $cfd0,x
+        iny
+        dex
+        bpl oSPrw
+        inc osSyn
+        ldy osPY
+        lda osTmp
+        sta (osPtr),y
+        rts
+oSPfb:  lda ohMsk               ; fallback: the old rule
+        jsr oSBack
+        lda osGly
+        bcs oSPst
+        lda osGlyW
+oSPst:  sta (osPtr),y
+oSPdn:  rts
+oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
+        sta (osPtr),y
         rts
 ; ---- omTrig: once a frame, the trig and the shared product halves every entity projection uses ----
 ; This was inline in orbMove. It is ~110 bytes with four local labels and no early exit, called
@@ -10545,7 +10665,7 @@ ssDl:   ldy ssScan
         cmp #$01
         beq ssDk                ; nothing claimed here
         sec
-        sbc #$e3
+        sbc #$dd
         sta ssTmp
         tya
         asl
@@ -10566,7 +10686,7 @@ ssDk:   inc ssScan
         lda ssCol
         and #$03
         clc
-        adc #$e3
+        adc #$dd
         sta seamT,x
         ldx sHyN                ; only lines that SURVIVED every test become band centres:
         cpx #12            ;   a rejected one is not on screen to be held still
@@ -10617,7 +10737,7 @@ subCl:  ldy saL
         cmp #$01
         beq subCk               ; nothing claimed here
         sec
-        sbc #$e3
+        sbc #$dd
         sta sbL
         tya
         asl
@@ -10646,7 +10766,7 @@ subCk:  inc saL
         lda skH
         and #$03
         clc
-        adc #$e3
+        adc #$dd
         sta seamT,x
 subCx:  rts
 
@@ -10743,109 +10863,109 @@ bfsD0:  !fill 253, 255      ; the angel's other distance map -- see bfsD1 at $5e
 ; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the
 ; hottest lookup in the renderer. The single-copy rampT/stepT are not emitted at all under
 ; PLAN=3, which pays back four of these twelve pages.
-rampTlo: !byte 22,22,22,22,101,160,112,158,50,50,159,28,28,28,170,170,22,22,22,22,101,160,162,157
-        !byte 157,154,20,169,169,169,178,78,22,22,22,22,101,111,93,53,154,154,20,169,169,169,78,172
-        !byte 22,22,22,22,51,99,116,119,154,20,20,169,149,149,172,172,22,22,22,89,14,68,100,109
-        !byte 35,71,54,149,149,25,25,92,22,22,69,12,55,11,63,126,19,110,105,25,25,25,97,97
-        !byte 151,6,6,113,45,8,70,59,187,91,163,146,146,146,97,139,156,75,113,131,94,72,37,2
-        !byte 43,33,82,144,144,128,128,127,88,75,52,52,29,57,140,18,3,48,114,44,128,128,127,127
-        !byte 192,52,52,76,29,184,62,143,26,34,85,115,15,15,15,177,202,27,76,24,199,174,123,108
-        !byte 74,65,21,42,42,5,5,5,27,24,24,24,190,36,165,124,120,141,30,5,5,5,5,5
-        !byte 27,24,24,175,190,36,167,124,120,10,30,5,5,5,5,5,27,24,24,175,36,36,167,122
-        !byte 38,10,61,5,5,5,5,5,27,175,175,175,36,80,80,122,96,10,61,5,5,5,5,5
-        !byte 23,175,175,175,183,80,201,196,96,102,61,5,5,5,5,5
+rampTlo: !byte 34,34,34,34,34,106,51,99,117,165,181,150,150,150,150,63,34,34,34,34,34,106,84,182
+        !byte 111,71,71,150,98,98,98,65,34,34,34,34,34,23,84,182,91,71,103,98,98,98,98,65
+        !byte 34,34,34,34,115,23,73,137,91,71,103,98,98,98,65,65,85,85,85,39,42,36,124,41
+        !byte 102,66,69,98,98,94,94,108,55,55,158,158,26,15,48,110,38,175,112,152,152,94,108,108
+        !byte 55,195,195,76,166,72,25,79,185,62,189,125,95,95,108,92,104,114,114,172,93,3,105,2
+        !byte 157,12,75,95,95,92,92,100,168,114,167,167,93,122,128,59,21,18,88,6,201,201,118,118
+        !byte 120,167,167,162,156,190,47,60,14,19,68,54,29,29,29,57,163,27,162,96,30,30,135,192
+        !byte 171,52,17,126,126,20,20,20,27,96,96,196,196,141,101,101,28,78,24,20,20,20,20,20
+        !byte 27,96,96,196,196,141,101,101,191,161,24,20,20,20,20,20,27,96,96,196,22,141,101,143
+        !byte 191,161,40,20,20,20,20,20,27,160,196,22,22,33,33,143,97,161,40,20,20,20,20,20
+        !byte 144,22,22,22,33,33,143,143,97,198,40,20,20,20,20,20
         * = $b000
-rampThi: !byte 22,22,22,22,101,111,162,157,157,142,159,178,170,169,169,78,22,22,22,22,101,111,93,157
-        !byte 154,142,20,78,169,169,78,172,22,22,22,22,51,111,116,119,154,142,20,172,149,149,78,208
-        !byte 22,22,22,22,9,147,116,117,35,20,54,172,149,78,172,208,22,22,89,84,14,86,13,109
-        !byte 71,207,54,92,25,25,92,176,69,69,69,47,60,11,46,73,19,91,25,97,97,97,97,132
-        !byte 6,6,113,113,145,17,70,121,98,91,82,146,146,139,139,132,6,75,131,81,94,133,83,2
-        !byte 129,107,82,44,44,128,127,173,75,52,52,52,29,57,56,90,3,87,39,127,127,127,127,179
-        !byte 79,76,76,76,166,62,62,32,77,34,66,15,15,177,177,177,79,27,24,199,199,36,108,108
-        !byte 130,58,21,5,5,5,5,5,197,175,175,183,183,80,167,122,96,10,61,5,5,5,5,5
-        !byte 24,24,175,175,36,80,167,122,96,10,61,5,5,5,5,5,24,24,175,175,36,80,201,122
-        !byte 96,102,61,5,5,5,5,5,24,175,175,175,183,80,201,196,96,102,61,5,5,5,5,5
-        !byte 197,183,194,194,194,203,200,195,41,102,61,5,5,5,5,5
+rampThi: !byte 34,34,34,34,34,23,84,9,111,71,150,63,150,150,98,65,34,34,34,34,34,23,186,182
+        !byte 91,71,71,65,98,98,98,65,34,34,34,34,115,23,186,137,91,71,103,65,98,98,98,65
+        !byte 34,34,34,34,8,119,73,138,91,71,69,65,98,98,65,65,85,85,39,7,42,142,41,41
+        !byte 66,69,69,94,94,94,65,4,158,158,158,58,83,15,147,146,38,62,112,108,108,108,108,149
+        !byte 195,178,178,76,164,43,25,81,31,62,125,95,95,108,92,53,114,114,172,93,93,3,44,2
+        !byte 155,140,75,187,187,92,100,64,114,167,167,167,156,122,154,139,21,107,193,118,118,118,118,113
+        !byte 163,162,162,162,188,30,47,116,61,19,90,29,29,57,57,57,163,27,96,96,30,30,135,192
+        !byte 70,132,17,20,20,20,20,20,160,22,22,22,33,33,101,143,97,161,40,20,20,20,20,20
+        !byte 96,96,196,196,141,33,101,143,97,161,40,20,20,20,20,20,144,96,196,196,22,33,33,143
+        !byte 97,198,40,20,20,20,20,20,144,196,196,22,22,33,143,86,97,198,40,20,20,20,20,20
+        !byte 22,22,22,22,11,197,199,86,129,198,40,20,20,20,20,20
         * = $b100
-stepT1lo: !byte 89,101,111,162,158,50,50,159,125,9,134,86,134,117,181,49,198,172,181,49,49,49,49,138
-        !byte 138,138,189,22,14,106,67,109,35,142,20,182,47,13,86,13,73,19,207,54,149,185,183,49
-        !byte 49,49,138,138,138,176,69,12,204,11,63,19,19,20,180,47,60,8,46,126,19,110,105,25
-        !byte 185,183,80,201,122,132,87,138,97,151,6,204,8,59,150,50,50,125,113,145,8,70,59,187
-        !byte 91,163,193,185,183,80,201,122,132,87,205,132,156,156,191,103,157,103,150,50,125,131,94,72
-        !byte 103,2,2,33,82,144,185,183,80,201,122,96,87,205,127,88,88,88,103,157,186,150,28,182
-        !byte 52,29,57,140,2,186,3,48,161,185,183,80,201,122,96,87,39,127,192,191,192,192,192,186
-        !byte 150,28,182,64,64,184,140,18,3,34,164,104,188,185,36,32,32,77,34,66,15,168,168,152
-        !byte 168,168,155,150,155,182,79,199,152,140,135,153,153,164,118,188,188,36,167,108,130,65,21,42
-        !byte 7,7,152,152,7,7,152,152,182,27,24,152,152,135,155,153,164,155,23,183,80,201,122,120
-        !byte 141,30,30
+stepT1lo: !byte 183,34,23,84,9,117,165,181,35,183,80,80,138,138,74,74,98,65,183,32,74,74,74,32
+        !byte 32,32,4,85,42,36,36,41,102,117,181,35,7,43,142,147,146,38,69,69,94,22,33,33
+        !byte 32,32,4,32,151,4,55,26,15,15,41,102,38,103,169,26,83,15,147,110,38,175,112,152
+        !byte 22,33,33,143,143,149,151,151,149,195,195,15,15,25,102,185,189,35,178,164,72,25,25,185
+        !byte 62,189,125,22,33,33,143,143,151,151,151,53,104,104,3,3,2,91,71,131,35,172,93,3
+        !byte 3,2,2,145,75,95,22,33,33,143,143,64,107,127,100,168,168,120,128,182,91,71,131,169
+        !byte 167,156,122,128,2,21,12,18,13,22,33,33,143,143,61,107,127,118,121,120,179,179,121,91
+        !byte 71,131,35,77,156,122,128,47,14,18,68,67,89,33,33,101,116,61,19,17,29,5,130,179
+        !byte 179,179,134,134,37,56,163,180,179,134,37,136,18,68,202,89,180,30,135,192,70,52,17,126
+        !byte 5,130,130,179,130,5,179,17,5,27,96,179,134,37,136,136,87,37,10,33,33,101,143,28
+        !byte 28,24,202
         * = $b200
-stepT1hi: !byte 9,9,147,116,117,154,142,20,16,9,134,134,181,181,49,198,198,208,181,49,49,49,49,138
-        !byte 138,138,31,89,14,68,100,109,71,71,54,149,47,13,13,13,181,49,198,198,92,185,183,49
-        !byte 49,49,138,138,176,176,47,60,11,63,63,19,19,54,40,47,60,17,46,73,148,91,25,97
-        !byte 185,183,80,201,122,132,138,132,132,113,45,8,63,59,187,150,54,40,81,145,17,37,59,98
-        !byte 91,205,139,185,183,80,201,122,132,205,132,132,75,191,8,103,157,103,150,50,40,81,29,133
-        !byte 83,2,43,107,82,144,185,183,80,201,122,96,205,173,173,75,191,191,103,157,186,150,28,40
-        !byte 29,29,57,56,90,3,48,114,128,185,183,80,201,122,96,39,179,179,192,191,152,103,192,186
-        !byte 150,28,40,76,166,184,62,32,77,34,85,15,175,185,36,32,32,77,58,66,177,202,191,152
-        !byte 152,135,155,150,155,40,24,199,174,123,108,74,34,21,42,175,183,80,201,130,130,58,21,5
-        !byte 7,152,152,152,135,155,153,21,40,24,190,152,135,135,153,141,21,42,4,4,203,200,195,41
-        !byte 102,61,42
+stepT1hi: !byte 183,8,80,73,138,91,71,103,63,183,80,80,74,74,74,32,32,65,123,4,4,4,4,4
+        !byte 4,4,4,39,42,142,124,41,66,66,103,109,7,43,43,147,81,74,32,32,108,22,33,33
+        !byte 32,32,4,151,4,4,58,26,15,48,146,38,38,112,109,26,83,43,147,146,155,140,32,108
+        !byte 22,33,33,143,143,149,151,149,149,76,166,15,25,25,185,185,189,109,76,164,43,25,81,155
+        !byte 140,151,108,22,33,33,143,143,151,151,151,53,114,93,3,3,2,91,71,131,109,172,93,3
+        !byte 105,2,157,140,75,92,22,33,33,143,143,64,127,64,64,120,167,3,128,182,91,71,131,109
+        !byte 156,156,122,154,139,21,18,88,201,22,33,33,143,143,61,127,113,113,120,120,179,128,121,91
+        !byte 71,131,56,162,188,190,47,116,14,19,90,56,89,33,33,101,61,61,132,57,57,120,130,179
+        !byte 134,179,134,134,37,56,96,30,30,135,192,171,19,17,56,196,176,33,101,70,97,132,82,20
+        !byte 5,130,179,134,134,37,87,17,56,144,141,134,134,37,133,87,17,202,11,11,197,199,86,97
+        !byte 161,40,126
         * = $b300
-stepT2lo: !byte 137,101,111,112,158,157,50,159,125,89,9,134,134,181,49,54,172,172,23,9,86,134,181,49
-        !byte 138,138,189,22,22,106,67,53,154,154,159,182,89,14,86,13,73,19,54,25,92,23,14,86
-        !byte 13,181,49,138,138,176,69,55,106,11,63,19,110,20,180,47,60,8,46,73,19,110,54,97
-        !byte 23,55,8,46,73,49,138,138,97,151,6,8,8,8,150,150,118,180,113,145,8,70,59,187
-        !byte 150,163,193,23,145,8,37,121,129,87,205,132,156,191,191,103,103,43,107,40,40,131,94,8
-        !byte 103,103,43,33,206,206,23,23,133,37,2,129,87,205,127,88,191,191,103,2,3,48,39,40
-        !byte 52,29,57,140,2,186,48,48,161,23,23,29,140,18,77,87,39,127,192,191,191,152,2,3
-        !byte 34,85,40,64,52,184,140,18,26,3,164,104,188,185,184,32,32,77,34,66,15,168,191,152
-        !byte 152,135,153,34,21,40,79,79,174,140,135,153,34,164,104,188,188,188,123,95,130,65,21,42
-        !byte 7,7,152,152,135,153,153,21,40,27,27,152,135,135,153,153,164,42,23,23,197,95,95,38
-        !byte 10,30,30
+stepT2lo: !byte 183,34,23,51,9,111,71,150,35,39,8,80,138,138,74,69,98,65,10,8,80,138,74,74
+        !byte 32,32,4,85,34,36,36,182,102,71,16,150,39,26,142,147,146,69,69,94,108,39,26,142
+        !byte 147,81,74,32,151,4,158,26,15,48,41,102,175,103,169,158,83,15,147,146,38,175,112,109
+        !byte 89,26,15,147,81,155,151,151,149,55,195,15,15,15,102,185,189,169,178,164,72,25,25,185
+        !byte 185,189,169,89,200,50,25,81,155,151,151,53,104,114,3,3,2,157,177,16,63,114,93,3
+        !byte 3,2,157,145,145,131,89,200,50,45,2,155,107,127,100,168,120,167,128,2,21,18,16,63
+        !byte 170,156,122,128,2,2,18,18,13,89,200,50,45,59,14,107,127,118,121,120,179,179,2,14
+        !byte 18,90,56,77,156,190,128,47,14,12,68,67,89,180,33,101,116,61,19,17,29,5,130,179
+        !byte 134,37,136,18,17,56,163,180,30,134,37,136,19,68,202,89,180,50,135,192,70,52,17,126
+        !byte 5,130,130,134,37,136,87,17,56,27,27,179,134,37,136,87,87,56,10,200,50,45,174,191
+        !byte 161,24,24
         * = $b400
-stepT2hi: !byte 9,51,147,93,119,142,142,171,16,89,9,134,134,181,49,198,198,208,23,9,86,134,181,49
-        !byte 138,138,31,89,14,86,13,109,71,171,171,16,89,14,13,13,181,49,198,92,92,23,14,86
-        !byte 13,181,49,138,138,176,47,60,11,63,63,19,110,40,40,47,17,17,46,73,148,107,97,97
-        !byte 23,55,8,46,73,49,138,97,132,6,45,8,63,59,187,91,163,40,81,145,17,70,121,148
-        !byte 107,205,40,23,145,8,37,121,129,87,132,132,75,45,8,103,103,43,107,40,40,131,133,133
-        !byte 83,2,129,107,205,144,23,23,133,37,2,129,205,173,173,75,191,8,103,2,3,48,39,40
-        !byte 64,29,57,56,90,3,87,39,128,23,23,29,140,18,77,39,127,179,75,191,152,152,2,3
-        !byte 34,85,40,64,64,184,62,32,77,34,85,15,185,185,32,32,32,58,58,66,177,202,202,152
-        !byte 152,135,153,34,21,40,188,199,174,123,108,74,34,21,42,175,183,80,167,130,130,58,21,5
-        !byte 202,152,152,152,135,153,153,21,40,27,24,36,36,108,153,34,21,42,4,4,203,200,195,41
-        !byte 102,61,30
+stepT2hi: !byte 49,115,119,49,137,71,16,16,63,39,8,80,138,74,74,74,32,65,10,8,80,138,74,74
+        !byte 32,4,4,39,42,142,124,41,66,69,16,109,39,26,43,147,146,74,32,94,108,39,26,142
+        !byte 147,81,74,32,151,4,158,83,15,48,146,38,175,109,109,83,43,43,147,146,31,140,108,108
+        !byte 10,26,15,147,81,155,151,151,149,178,166,15,25,25,185,177,125,109,164,164,43,25,81,31
+        !byte 177,125,173,10,200,50,25,81,155,151,151,53,114,93,3,3,2,157,177,16,63,170,93,3
+        !byte 44,2,155,140,75,173,10,200,50,45,2,155,127,100,64,114,167,3,128,2,21,18,16,63
+        !byte 77,156,122,154,139,21,107,193,201,10,200,50,45,59,14,127,127,113,120,120,179,128,2,14
+        !byte 18,90,56,77,180,190,47,116,61,19,90,56,22,176,176,61,116,61,132,29,57,163,130,179
+        !byte 134,37,136,18,17,56,89,180,180,135,192,171,19,17,56,22,176,176,101,70,70,132,82,20
+        !byte 5,130,179,134,37,136,87,17,56,144,180,96,135,133,133,87,17,56,11,11,197,199,86,129
+        !byte 161,40,202
         * = $b500
-stepT3lo: !byte 137,101,160,112,158,50,50,50,125,9,9,93,116,119,154,142,159,170,172,172,172,172,172,172
-        !byte 172,171,78,22,14,106,67,53,50,50,50,182,13,13,13,13,109,71,207,54,149,92,92,92
-        !byte 92,92,92,25,25,92,69,12,11,11,11,11,182,182,182,47,60,11,63,126,19,110,105,180
-        !byte 97,97,97,97,97,97,25,25,97,6,45,8,8,8,150,150,180,180,17,17,17,70,59,187
-        !byte 150,118,118,185,139,139,139,139,139,107,146,139,156,94,8,103,75,75,150,180,118,81,133,72
-        !byte 103,2,2,33,206,206,185,185,203,205,205,205,107,82,144,75,29,8,103,52,186,150,118,118
-        !byte 29,29,57,140,2,186,3,161,161,4,4,203,200,127,39,39,39,44,192,29,29,140,79,79
-        !byte 150,118,118,185,166,184,62,18,3,26,164,104,185,185,32,32,32,77,34,85,115,202,29,29
-        !byte 62,27,155,155,155,206,199,199,174,123,108,26,34,164,104,194,194,203,58,58,58,58,21,21
-        !byte 27,24,24,167,27,155,155,155,155,175,190,36,165,124,120,65,21,21,194,194,203,196,196,96
-        !byte 10,30,21
+stepT3lo: !byte 115,34,106,51,99,99,165,181,35,183,80,119,49,137,91,71,150,150,46,46,65,65,65,65
+        !byte 65,16,65,85,148,36,84,9,99,165,181,35,7,43,142,41,41,66,69,69,98,46,46,46
+        !byte 108,108,108,108,94,94,158,26,15,15,15,102,102,181,35,83,83,15,48,110,38,38,169,169
+        !byte 46,46,46,108,108,108,62,94,108,195,26,15,15,15,102,102,169,169,43,43,43,25,25,185
+        !byte 185,169,169,46,46,46,46,46,92,140,75,95,114,93,3,3,114,114,114,169,169,3,3,3
+        !byte 3,2,2,145,131,131,46,46,46,46,46,92,140,75,92,168,93,3,128,128,128,128,169,169
+        !byte 123,122,122,128,2,21,12,13,13,46,46,46,199,86,118,107,193,6,120,156,122,128,163,163
+        !byte 163,169,169,123,188,190,47,60,14,14,68,13,159,159,61,61,61,61,19,90,54,163,156,30
+        !byte 30,27,27,27,27,131,196,30,30,135,135,14,19,68,67,159,176,176,70,70,70,132,17,202
+        !byte 27,96,96,27,27,27,27,27,27,22,196,141,135,101,28,87,17,202,11,11,197,199,86,97
+        !byte 161,24,202
         * = $b600
-stepT3hi: !byte 9,51,147,116,157,157,50,159,125,9,9,147,13,117,35,20,20,169,172,172,172,172,172,172
-        !byte 172,78,31,84,14,68,100,100,53,182,182,182,13,13,13,13,71,19,54,54,25,92,92,92
-        !byte 92,92,92,25,25,176,47,55,11,11,11,11,180,180,180,17,17,17,46,73,19,91,25,118
-        !byte 97,97,97,97,97,97,25,97,132,136,45,8,8,8,150,150,118,118,17,17,17,59,121,148
-        !byte 91,163,206,185,139,139,139,139,139,107,146,132,81,94,8,103,75,75,150,180,118,81,83,133
-        !byte 37,2,43,107,82,206,185,185,203,205,205,205,205,205,173,52,29,29,140,52,186,150,118,118
-        !byte 185,185,90,56,18,3,48,114,161,4,4,203,200,127,39,39,39,127,76,29,29,140,79,79
-        !byte 150,118,118,185,185,32,32,143,26,34,164,104,185,185,203,32,32,58,58,66,15,76,199,174
-        !byte 62,27,155,155,155,206,185,185,36,167,108,74,65,21,21,4,4,203,200,195,41,58,21,5
-        !byte 23,190,36,167,27,155,155,155,155,194,183,80,201,122,38,10,30,21,4,4,203,200,195,41
-        !byte 102,61,30
+stepT3hi: !byte 183,115,119,73,182,117,117,181,35,183,80,119,138,138,66,71,103,98,46,46,65,65,65,65
+        !byte 65,98,4,7,42,36,124,41,117,102,102,35,7,43,142,146,41,38,69,69,94,46,46,46
+        !byte 108,108,108,108,94,4,83,83,15,15,15,102,102,102,169,43,43,43,147,146,38,175,112,169
+        !byte 46,46,46,108,108,108,62,108,149,194,166,72,25,25,185,169,169,169,123,43,43,25,81,31
+        !byte 62,125,131,46,46,46,46,46,92,140,92,53,172,93,3,3,114,114,114,169,169,123,44,44
+        !byte 44,2,155,140,75,184,46,46,46,46,46,92,107,187,64,167,156,122,128,128,128,128,169,169
+        !byte 123,123,139,139,139,21,18,88,153,46,46,46,199,86,118,107,193,118,162,156,122,128,163,163
+        !byte 163,169,169,159,159,116,116,116,14,19,68,67,11,176,176,61,61,61,132,17,29,162,96,30
+        !byte 30,27,27,27,27,131,159,176,176,135,192,171,52,17,202,11,11,197,199,86,129,132,82,20
+        !byte 160,200,50,27,27,27,27,27,27,22,33,33,101,143,191,161,24,202,11,11,197,199,86,129
+        !byte 198,40,24
         * = $b700
-rampThrT: !byte 0,0,0,0,0,1,1,1,2,3,0,7,5,6,6,9,0,0,0,0,0,1,2,0,3,5,0,9,0,0,10,12,0,0,0,0,1,0,3,4,0,5,0,10,9,9,0,13,0,0,0,0,2,3,0,5,5,0,8,11,0,10,0,13,0,0,1,2,0,4,5,0,6,7,0,11,10,0,12,14,1,1,0,3,4,0,6,7,0,9,10,12,12,12,0,15,1,0,3,0,5,6,0,8,8,0,11,0,0,13,14,15,1,0,4,5,0,7,8,0,10,11,0,13,13,0,15,16,2,3,0,0,0,0,8,10,0,12,13,14,15,15,0,16,3,5,5,0,7,9,0,11,12,0,14,15,0,16,16,0,3,0,7,8,0,10,11,0,13,14,0,16,16,0,0,0,7,9,10,11,11,12,12,13,14,15,16,0,0,0,0,0,5,0,9,0,10,12,0,13,15,0,16,0,0,0,0,0,6,0,9,0,0,12,13,0,15,16,0,0,0,0,0,0,6,0,0,0,12,0,14,15,0,16,0,0,0,0,0,0,9,12,13,13,14,15,15,16,16,0,0,0,0,0,0,0
+rampThrT: !byte 0,0,0,0,0,1,1,1,2,3,3,7,0,0,6,9,0,0,0,0,0,1,2,0,3,0,0,9,0,0,0,0,0,0,0,0,1,0,2,4,0,0,0,10,0,0,0,0,0,0,0,0,2,3,0,5,0,0,8,11,0,0,0,0,0,0,1,2,0,4,5,0,6,7,0,11,10,0,12,14,1,1,0,2,4,0,6,7,0,9,0,12,12,12,0,15,1,2,2,0,5,6,0,8,8,0,10,12,0,13,14,15,1,0,4,5,0,0,8,0,10,11,0,13,13,0,15,16,2,3,0,0,6,0,8,10,0,12,13,14,15,15,0,16,3,5,5,0,7,9,0,11,12,0,13,15,0,16,16,0,0,0,7,0,0,0,0,0,13,14,0,16,16,0,0,0,7,9,10,11,11,12,0,13,14,15,16,0,0,0,0,0,5,0,9,0,10,12,0,13,15,0,16,0,0,0,0,0,5,0,9,0,0,12,13,0,15,16,0,0,0,0,0,0,6,10,0,0,0,0,14,15,0,16,0,0,0,0,0,0,9,0,0,0,14,15,15,16,16,0,0,0,0,0,0,0
         * = $b800
-stepThrT1: !byte 2,1,3,3,3,3,4,4,5,0,0,6,7,7,9,11,0,13,0,0,0,0,0,0,0,0,16,1,0,3,4,0,6,6,7,5,0,0,6,0,8,9,11,11,11,0,0,0,0,0,0,0,15,0,2,3,4,5,0,0,0,7,6,0,0,6,0,7,9,9,10,11,0,0,0,0,0,0,14,15,16,2,3,4,5,0,6,1,1,6,5,0,6,7,0,8,0,11,12,0,0,0,0,0,0,14,15,0,1,1,3,0,0,0,0,0,5,5,6,7,7,0,9,11,0,0,0,0,0,0,0,0,14,15,16,1,1,1,0,0,0,0,0,5,5,0,0,8,9,10,11,12,13,0,0,0,0,0,0,14,15,16,0,0,3,3,0,0,0,0,6,6,7,0,8,10,11,0,13,14,9,0,0,0,0,0,14,0,16,1,2,0,1,1,0,0,0,5,6,0,8,9,10,11,11,13,9,9,9,12,13,13,0,14,0,16,0,1,0,0,3,3,5,5,6,7,8,0,7,0,9,11,13,11,12,14,15,15,15,15,15,15,15
+stepThrT1: !byte 0,1,3,3,3,3,4,4,5,0,0,0,7,8,0,11,11,0,11,15,14,15,14,14,14,15,0,1,0,3,4,0,6,3,5,6,0,0,6,0,8,9,11,11,13,0,0,0,0,0,0,14,15,0,2,0,0,5,6,6,0,7,6,0,0,6,0,7,9,10,11,11,0,0,0,0,0,0,0,15,0,2,3,0,5,0,6,0,0,6,4,0,6,0,7,9,11,11,12,0,0,0,0,0,0,0,0,0,1,3,0,0,0,0,0,0,3,0,0,0,7,0,9,11,0,13,0,0,0,0,0,0,14,15,16,1,1,3,0,0,0,0,0,5,5,0,0,8,9,0,11,12,13,0,0,0,0,0,0,14,15,16,1,0,0,5,0,0,0,0,3,6,7,8,8,10,0,12,13,14,0,0,0,0,13,0,14,15,16,1,0,0,5,0,0,0,0,0,6,8,8,9,10,11,12,13,14,9,11,12,12,13,14,14,15,16,0,0,3,5,3,1,5,0,5,6,8,6,0,0,11,11,13,11,12,15,15,15,15,14,14,15,15
         * = $b900
-stepThrT2: !byte 2,1,2,2,3,4,3,4,5,0,0,0,0,0,0,10,12,13,0,0,0,0,0,0,0,0,16,1,1,3,4,4,5,6,6,7,0,0,6,0,8,9,11,12,0,0,0,0,0,0,0,0,0,0,2,3,3,5,0,0,0,8,9,0,6,6,0,0,8,11,10,0,0,0,0,0,0,0,0,15,16,1,3,0,5,5,6,7,7,7,5,0,6,0,7,8,9,11,10,0,0,0,0,0,0,0,15,0,1,3,4,0,0,0,0,0,0,0,6,6,7,7,9,10,11,11,0,0,0,0,0,0,14,15,16,1,0,4,0,0,0,0,0,0,5,0,0,8,9,9,11,12,12,0,0,0,0,0,0,14,15,16,1,0,4,0,0,0,0,0,0,0,6,0,8,10,11,11,13,13,8,0,10,0,0,14,14,0,16,1,3,0,0,0,0,0,0,0,6,6,0,8,9,11,0,13,14,10,10,11,12,12,0,14,0,16,1,3,0,0,0,0,0,0,0,0,6,8,9,10,0,12,13,0,12,13,13,14,14,15,15,16,0
+stepThrT2: !byte 3,1,2,2,3,5,6,6,5,0,0,0,0,8,0,10,12,0,0,0,0,0,0,0,0,15,0,1,1,3,4,4,5,6,0,7,0,0,6,0,0,9,11,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,6,6,0,8,9,5,6,6,0,0,9,10,11,12,8,0,0,0,0,0,0,0,0,1,3,0,5,5,6,7,8,8,5,0,6,0,7,8,9,10,10,8,0,0,0,0,0,0,0,0,1,3,0,0,0,0,0,0,0,4,0,0,7,0,9,10,11,11,8,0,0,0,0,0,14,15,16,1,3,4,0,0,0,0,0,0,5,0,0,8,9,9,11,12,12,8,0,0,0,0,0,14,0,16,1,0,0,5,0,0,0,0,0,0,6,0,9,10,11,11,13,14,9,9,13,13,0,0,14,15,16,1,0,0,0,0,0,0,0,0,6,0,8,8,10,11,0,13,14,9,10,11,12,13,0,14,15,16,0,0,3,0,0,0,0,0,0,6,7,7,9,10,11,0,13,0,12,13,13,14,14,15,0,16,12
         * = $ba00
-stepThrT3: !byte 2,1,2,2,1,1,0,1,0,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,0,3,3,3,1,1,1,0,0,0,0,0,6,7,9,0,10,0,0,0,0,0,0,0,0,15,3,3,0,0,0,0,3,3,3,6,6,6,6,7,0,9,10,6,0,0,0,0,0,0,0,12,15,3,0,0,0,0,0,0,5,5,0,0,0,7,7,8,8,9,7,0,0,0,0,0,0,0,0,15,4,0,0,0,0,0,0,0,0,0,8,7,7,0,9,10,10,0,0,0,0,0,0,0,13,13,15,3,0,6,6,0,0,0,0,0,9,9,9,8,9,10,11,11,0,0,0,0,0,0,0,0,0,14,4,0,0,0,0,0,0,0,0,0,11,10,11,10,11,12,0,0,0,0,14,0,0,14,14,14,15,4,7,7,0,0,0,0,0,0,11,10,10,11,0,12,13,13,13,15,15,0,15,15,15,0,0,15,7,8,8,0,0,0,0,0,0,13,11,11,12,13,14,14,14,0,16,16,0,16,16,16,16,16,15
+stepThrT3: !byte 2,1,2,2,1,1,1,0,0,0,0,0,5,5,5,0,6,7,0,0,0,0,0,0,0,9,14,1,2,0,3,3,2,3,3,0,0,0,0,6,0,7,0,0,10,0,0,0,0,0,0,0,0,15,3,3,0,0,0,0,0,3,4,6,6,6,6,7,0,8,7,0,0,0,0,0,0,0,0,12,15,3,4,5,5,5,5,5,0,0,7,0,0,0,7,8,8,9,7,0,0,0,0,0,0,0,13,14,4,0,0,0,0,0,0,0,0,8,7,7,7,0,9,10,10,9,0,0,0,0,0,0,13,13,15,4,6,6,0,0,0,0,0,0,0,9,9,9,9,0,11,11,11,0,0,0,0,0,0,0,0,14,4,0,0,0,0,0,0,0,0,11,11,10,11,11,0,12,0,11,14,14,14,0,0,0,14,14,15,4,7,0,0,0,0,0,0,0,11,10,10,0,11,12,13,13,13,15,15,15,15,15,15,0,15,15,6,9,8,0,0,0,0,0,0,0,12,12,12,13,14,14,14,0,0,0,0,0,0,16,16,16,15
         * = $bb00
 clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8

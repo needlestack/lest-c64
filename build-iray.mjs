@@ -1879,7 +1879,25 @@ const occRow = (n, fromRight, bg) => [0, 1, 2, 3].reduce((b, i) => {
 }, 0);
 for (let n = 1; n <= 4; n++) glyphs.push(new Array(8).fill(occRow(n, false, 1)));
 for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 1)));
+// OCCSYN: synthesise the occluder glyph for a wall-EDGE cell instead of stamping a whole-column
+// split over it. The stamp used to quantise to 8-pixel char rows at the wall's base, so a stamp
+// at the foot of a wall hung up to 7 px over the floor below it (the user saw 5-6 at X12B Y9CA
+// AEF00). The cell at the base already holds a glyph of exactly the right shape -- the wall-edge
+// ramp -- with the wrong bit pairs: 01 (wall) where the stamp needs 11 (ink). Copy it into a
+// scratch glyph with 01 -> 11 on the columns the stamp covers and store that code. Pixel-exact.
+// OCCSYN_N scratch codes, HALF for each screen buffer: the front buffer is on display for the
+// whole of the frame being rendered, and a scratch glyph it still shows cannot be rewritten
+// under it -- the cell would flip to next frame's outline a refresh early. So buffer A's stamps
+// use codes SYN0..SYN0+N/2-1 and buffer B's the rest; a frame needing more than its half falls
+// back to the old whole-column stamp for the rest. The user's own idea, costed in August,
+// buildable now that the charsets are plain RAM (2026-09-16). OCCSYN=0 to A/B.
+const OCCSYN = process.env.OCCSYN !== '0';
+const OCCSYN_N = +(process.env.OCCSYNN ?? 6);
+if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
+// The synthesis scratch codes are the LAST OCCSYN_N of the charset. They must be free: the plan
+// was refit at KCELL=201 to free six (3.416 -> 3.438 wrong px/frame on the 2M scan, crossfit).
+const SYN0 = 256 - OCCSYN_N;
 
 // ---- and the same splits backed by WHITE ----
 // A cell straddling a wall's VERTICAL silhouette has floor or ceiling beyond the edge, not more
@@ -1955,6 +1973,10 @@ if (ANGCHAR) {
     `(${ANGCA.filter(c => c >= 0).length} of ${ANGCA.length} cells inked)`);
 }
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + ${NSEAM} seams = ${glyphs.length} > 256`);
+// OCCSYN's scratch codes are the top OCCSYN_N: they must not be allocated to anything. Checked
+// here, where the glyph list is final, rather than trusting that KCELL was refit low enough.
+if (OCCSYN && glyphs.length > 256 - OCCSYN_N) throw new Error(
+  `charset has ${glyphs.length} codes; OCCSYN needs the top ${OCCSYN_N} free -- refit with a smaller KCELL, or OCCSYN=0`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + ${NSEAM} seam + 7 occluder ` +
   `+ 6 white-backed = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
@@ -6001,7 +6023,16 @@ ohLstW  = $8524
 ohFstM  = $8525                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
 ohLstM  = $8526                 ;   what the cell shows outside the stamp, which picks the backing
 ohMsk   = $8527                 ; oSBack scratch: the mask under test, and the saved X
-ohMsX   = $8528
+${OCCSYN ? `osSrc   = $a0                   ; OCCSYN: source glyph pointer (2). The destinations are patched
+                                ;   into oSPut's own stores (oSPa/oSPb), not held here.
+osCov   = $a2                   ;   the covered-column pair mask
+osTmp   = $a3                   ;   the code being built, and a byte temp (2)
+osGly   = $a5                   ;   the fallback split glyphs, black- and white-backed
+osGlyW  = $a6
+osSyn   = $a7                   ;   the next scratch glyph, and the first one past this buffer's half
+osLim   = $a8
+osPY    = $a9                   ;   Y saved across the row loop
+` : ''}ohMsX   = $8528
 o2r     = $8529                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
                                 ;   Not zero page: it is touched a handful of times per orb, in
                                 ;   the projection, never in a per-column loop.
@@ -10632,7 +10663,17 @@ ${DBGORB ? `        lda #$00
         sta oSSpn
 ` : ''}        lda onv
         beq oSDn
-        sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
+${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
+        ldx baseHi              ;   Buffer A ($e0) takes the first half, B the second; see OCCSYN.
+        cpx #$e0                ;   (A still holds onv for the store below, so X and Y do the test)
+        beq oSSynA
+        ldx #${hx(OCCSYN_N / 2)}
+        ldy #${hx(OCCSYN_N)}
+        bne oSSynB              ; always
+oSSynA: ldx #$00
+oSSynB: stx osSyn
+        sty osLim
+` : ''}        sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
         lda #$00                ;   selection below leaves the cache base in A, and with this store
         sta osI                 ;   after it, osN got #<cbA / #<cbB -- 80 or 120 -- so the loop
                                 ;   walked a hundred slots of an eight-slot array and stamped
@@ -10895,7 +10936,28 @@ oSCR2:  sta ohRun               ; last cell
         ; With both ends interior there is still no glyph for it, and it stays the from-the-right
         ; one: over-covering takes a small bite out of the orb, while under-covering leaves orb
         ; drawn ON the wall, which is the error that reads as broken.
+${OCCSYN ? `        ; With synthesis the single-cell case is exact: the covered columns are k..m, i.e. those
+        ; in NEITHER mask, and the fallback glyph (used only when the scratch slots run out) is
+        ; whichever edge glyph the old rule chose.
+        lda ohFstM
+        ora ohLstM              ; showing = left of k OR right of m
+        pha
         lda osL
+        and #$03
+        bne oSC1r
+        ldx ohLst
+        stx osGly
+        ldx ohLstW
+        stx osGlyW
+        jmp oSC1g
+oSC1r:  ldx ohFst
+        stx osGly
+        ldx ohFstW
+        stx osGlyW
+oSC1g:  pla
+        jsr oSPut
+        jmp oSCNx
+` : `        lda osL
         and #$03
         bne oSC1r
         lda ohLstM              ; k = 0: clip from the LEFT, exactly m+1 columns
@@ -10911,6 +10973,7 @@ oSC1r:  lda ohFstM
         lda ohFstW
 oSC1s:  sta (osPtr),y
         jmp oSCNx
+`}
         ; ---- only stamp cells that actually HOLD WALL ----
         ; The stamp covers the ORB's rows, on the assumption that a wall which occludes an orb
         ; extends below its feet. Where that does not hold -- a receding wall whose base has risen
@@ -10927,29 +10990,47 @@ oSC1s:  sta (osPtr),y
         ; Skipping them leaves up to 8px of orb showing over the wall's bottom edge instead, which
         ; is the smaller error and the one that reads as a soft edge rather than a stray block.
 oSCMid: ${DBGORB ? `inc oSCnt
-        ` : ''}lda ohFstM
+        ` : ''}${OCCSYN ? `lda ohFstM              ; the columns this split leaves showing; oSPut covers the rest
+        ldx ohFst
+        stx osGly
+        ldx ohFstW
+        stx osGlyW
+        jsr oSPut
+` : `lda ohFstM
         jsr oSBack        ; the FIRST cell straddles the wall's edge, so it is stamped
         lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
         bcs oSCMs               ;   not fully wall has floor or ceiling beyond the silhouette, and
         lda ohFstW              ;   the white-backed split leaves that showing.
 oSCMs:               ; first cell: the stamp starts part way in, so clip from the right
         sta (osPtr),y
-oSCCol: iny
+`}oSCCol: iny
         cpy ohRun
         beq oSCLst
-        jsr oSWall
+${OCCSYN ? `        lda #$00                ; interior: every column covered
+        ldx #${hx(OCC_FULL)}
+        stx osGly
+        stx osGlyW
+        jsr oSPut
+        jmp oSCCol
+` : `        jsr oSWall
         bcc oSCCol              ; ditto for every interior cell
         lda #${hx(OCC_FULL)}
         sta (osPtr),y
         jmp oSCCol
-oSCLst: lda ohLstM
+`}oSCLst: ${OCCSYN ? `lda ohLstM
+        ldx ohLst
+        stx osGly
+        ldx ohLstW
+        stx osGlyW
+        jsr oSPut
+` : `lda ohLstM
         jsr oSBack
         lda ohLst
         bcs oSCLs
         lda ohLstW
 oSCLs:               ; last cell: the stamp ends part way in, so clip from the left
         sta (osPtr),y
-oSCNx:  inc ohSv
+`}oSCNx:  inc ohSv
         jmp oSCRow
 ; oSWall: carry set if the cell at (osPtr),y is FULLY wall -- SOLID, or a seam variant, which is
 ; SOLID with a panel line on it. Ramp and step cells are part ceiling or part floor and cannot be
@@ -13385,8 +13466,11 @@ dsCol:  lda #${hx(8 | FACEART.colram)}  ; bit 3 keeps the cell multicolor; the f
         sta $db00,x
         inx
         bne dsCol
-        lda #$06                ; the angel charset in all three raster regions
-        sta pCh0
+        lda #${hx(CB_B)}        ; the picture charset -- it was copied over charset B -- in all
+        sta pCh0                ;   three raster regions. This was a literal $06, the $d018 nibble
+                                ;   for $d800, and it survived the charsets' move to $c000/$c800
+                                ;   (2026-09-16) for exactly one play session: the death scene
+                                ;   selected an empty page and drew nothing. The user caught it.
         sta pCh1
         sta pCh2
         lda #$00                ; still black: phase 2 ramps up from here
@@ -13438,8 +13522,11 @@ ${SOUND ? '        jsr snKTick             ; the kick keeps falling while the pi
 dshRun: lda frameCnt            ; elapsed since this picture went up
         sec
         sbc dieT0
-        cmp #${hx(DIE_SHOW)}
-        bcc dshHld              ; still showing it
+${DIE_SHOW >= 256 ? `        jmp dshHld              ; DIESHOW>=256: hold the picture for ever. The counters are
+                                ;   bytes, so this is the only way a headless run at warp can be
+                                ;   caught with a picture up (-exitscreenshot lands wherever it lands)` :
+`        cmp #${hx(DIE_SHOW)}
+        bcc dshHld              ; still showing it`}
         ; ---- this picture is done: black FIRST, always ----
         ; Going black before deciding what comes next is what makes the next cut hard. The copy
         ; takes about a frame and a half and both buffers are displayed in turn, so it cannot
@@ -15216,6 +15303,12 @@ sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick
 sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
 sfxK:   !byte 0                 ; which effect is loaded
 ` : ''}
+        ; The angel fill's queue. Pure scratch, nothing swaps it, and it grows with the open-cell
+        ; count, so it wants a slot with slack. It sat in the stream until OCCSYN's oSPut needed
+        ; the room there (2026-09-16); the ${BFS_Q} bytes fit the hole under the page-aligned
+        ; posXT exactly, and "* = moves backward" is the guard if the sound block or the level
+        ; ever grows into it.
+bfsQ:   !fill ${BFS_Q}, 0
 ${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
 ddxLoT: ${chunk(ddxLo).trim()}
         * = ${hx16(RELOC + 0xc00)}
@@ -15476,10 +15569,6 @@ sokCX:  !byte 0                 ; and where it is, walked by sokDX/sokDY
 sokCY:  !byte 0
 sokDX:  !byte 0
 sokDY:  !byte 0
-        ; The fill's queue. Moved out of the $3d40 block, which the wider level 2 map pushed three
-        ; bytes past $6100 -- this grows with the open-cell count, so it is exactly the thing that
-        ; should not live in a block with no slack. Pure scratch: nothing swaps it.
-bfsQ:   !fill ${BFS_Q}, 0
         ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
         ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
 angBlkT: !byte ${angBlk.join(',')}
@@ -15630,7 +15719,12 @@ ${CVXSEAM ? '' : `; The (at most two) runs each run meets at a CONCAVE corner, 0
 ; every run-to-run boundary drawing a line, nothing reads them.
 cpLoT:  !byte ${cpLo.join(',')}
 cpHiT:  !byte ${cpHi.join(',')}`}
-kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
+kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}${OCCSYN ? `
+; synMskT: a cellFillT column mask of the columns left SHOWING (bit 3 = column 0) -> the HIGH bit
+; of each COVERED column's pixel pair (column c is bits 7-2c,6-2c), so that (b & $55) << 1 &
+; synMskT[m] turns exactly the covered columns' 01 pairs into 11. The 01 -> 11 map is what makes wall pixels stamp ink and leaves 00
+; (sky/floor) and 10 (seam) alone.
+synMskT: !byte ${[...Array(16)].map((_, m) => [0,1,2,3].reduce((b, c) => b | ((m >> (3 - c)) & 1 ? 0 : 1 << (7 - 2 * c)), 0)).join(',')}` : ''}
 mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
@@ -16046,6 +16140,92 @@ ogSk1:
         sec
         rts
 ogYes:  clc
+        rts
+` : ''}${OCCSYN ? `; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
+; A = the columns the stamp leaves SHOWING (cellFillT mask, bit 3 = column 0); osGly / osGlyW =
+; the whole-column split glyphs to fall back on, black- and white-backed; Y = the column, (osPtr),y
+; the cell. Preserves Y.
+;   BLANK           nothing to occlude: leave it (sky or floor; the orb is in front)
+;   SOLID or seam   fully wall: the split glyph, black-backed, as before
+;   a ramp / step   a wall EDGE: copy its 8 rows into the next scratch glyph with 01 -> 11 on the
+;                   covered columns, in BOTH charsets (B is the row-reversed copy), store that code
+;   scratch full    fall back to the old rule: oSBack picks the backing, the split glyph goes in
+; The synthesis is the whole point: at a wall's base the cell is floor with a sliver of wall along
+; its top, and stamping a whole-column split there hung the stamp 7 px over the floor. Now the ink
+; follows the wall's own outline in that cell, pixel for pixel.
+oSPut:  sta ohMsk
+        tax
+        lda synMskT,x           ; the pair-high-bit mask for the COVERED columns
+        sta osCov
+        lda (osPtr),y
+        beq oSPdn               ; BLANK: leave it
+        cmp #${hx(CELLCODES)}
+        bcc oSPedg              ; a ramp or a step (SOLID is caught below)
+        cmp #${hx(SEAM0)}
+        bcc oSPdn               ; a readout: leave it
+        cmp #${hx(SEAM0 + NSEAM)}
+        bcc oSPsol              ; a seam is a whole wall
+        rts                     ; an occluder or scratch code already
+oSPedg: cmp #${hx(SOLID)}
+        beq oSPsol
+        ldx osSyn
+        cpx osLim
+        bcs oSPfb               ; this buffer's scratch exhausted this frame: the old whole-column stamp
+        sty osPY
+        ; source glyph: charset A + code * 8
+        sta osSrc
+        lda #$00
+        sta osSrc+1
+        asl osSrc
+        rol osSrc+1
+        asl osSrc
+        rol osSrc+1
+        asl osSrc
+        rol osSrc+1             ; C = 0 after this: the code is a byte
+        lda osSrc+1
+        adc #>charset
+        sta osSrc+1
+        ; destination: scratch glyph X, in A and in B. The scratch codes are the top of the charset,
+        ; so every one lies in the charset's last page: the high bytes are constants and only the
+        ; low byte is patched into the two stores below.
+        txa
+        adc #${hx(SYN0)}        ; C is still 0
+        sta osTmp               ; the code we will store
+        txa
+        asl
+        asl
+        asl
+        adc #${hx((SYN0 * 8) & 255)}   ; C = 0: X <= ${OCCSYN_N}
+        sta oSPa+1
+        sta oSPb+1
+        ; 8 rows: t = b | (((b & $55) << 1) & cov). A gets row Y, B (the mirror) gets row X = 7 - Y.
+        ldy #$00
+        ldx #$07
+oSPrw:  lda (osSrc),y
+        sta osTmp+1
+        and #$55
+        asl
+        and osCov
+        ora osTmp+1
+oSPa:   sta ${hx16(CHARSET + SYN0 * 8)},y
+oSPb:   sta ${hx16(CHARSET_B + SYN0 * 8)},x
+        iny
+        dex
+        bpl oSPrw
+        inc osSyn
+        ldy osPY
+        lda osTmp
+        sta (osPtr),y
+        rts
+oSPfb:  lda ohMsk               ; fallback: the old rule
+        jsr oSBack
+        lda osGly
+        bcs oSPst
+        lda osGlyW
+oSPst:  sta (osPtr),y
+oSPdn:  rts
+oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
+        sta (osPtr),y
         rts
 ` : ''}; ---- omTrig: once a frame, the trig and the shared product halves every entity projection uses ----
 ; This was inline in orbMove. It is ~110 bytes with four local labels and no early exit, called
@@ -17784,6 +17964,7 @@ try {
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
       ...RUNTIME_BUFS,
       opx: 2, opy: 2,
+      osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
       rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
       tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
     };
