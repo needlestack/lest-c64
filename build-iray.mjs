@@ -2689,6 +2689,9 @@ const STILLSKIP = flag('STILLSKIP');
 const ENTFOV = process.env.ENTFOV !== '0';
 // ENTGATE: skip orbMove's frame trig when no entity can possibly be projected. ENTGATE=0 to A/B.
 const ENTGATE = process.env.ENTGATE !== '0';
+// BNDCNT=1: per frame, boundaries pinned by the subdivision and how many of them are shared
+// corners (both faces at the same height at the boundary: the second end ray is redundant).
+const BNDCNT = flag('BNDCNT');
 // FOVCHK=1: verify ENTFOV. The pre-cull only NOTES that it would have rejected, the full path
 // runs, and two counters say what happened: fovDis = orbProj accepted what the cull would have
 // dropped (the box tests may still throw it out), fovBad = it got a SPRITE. fovBad must be 0.
@@ -5547,7 +5550,9 @@ flgTF   = $70c0                 ;   the opening tick of the frame being rendered
 flgTL   = $70c1                 ;   raster line low, raster line high bit
 flgTH   = $70c2
 ` : ''}${TOURPOSE ? `twPose  = $a600                 ; TOURPOSE: 42 x (pxL pxH pyL pyH paF pa), in the $a486-$a8ff hole
-` : ''}${CULLCNT ? `ogSkip  = $70cc                 ; CULLCNT: frames entGate closed, 16-bit free-running\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
+` : ''}${CULLCNT ? `ogSkip  = $70cc                 ; CULLCNT: frames entGate closed, 16-bit free-running\n` : ''}${BNDCNT ? `bcN     = $70ec                 ; BNDCNT: boundaries pinned, 16-bit, stopped at pfDone
+bcSame  = $70ee                 ;   ...of which shared corners (same height both sides)
+` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
 ` : ''}pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
@@ -6303,6 +6308,10 @@ pfNIni: sta pfNum,x
 ` : ''}${FOVCHK ? `        sta fovDis              ; FOVCHK: counters start clean (A is still 0)
         sta fovBad
         sta fovWld
+` : ''}${BNDCNT ? `        sta bcN                 ; BNDCNT: counters start clean (A is still 0)
+        sta bcN+1
+        sta bcSame
+        sta bcSame+1
 ` : ''}${FRAMELOG ? `        sta flogN               ; FRAMELOG: the cursor starts at record 0 (A is still 0)
         sta flogN+1
         sta flgTF
@@ -6518,7 +6527,24 @@ subFace:lda spanR
         sbc spanL
         cmp #$02
         bcs subMid              ; still wide -> split further
-${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no projection at
+${BNDCNT ? `${PROFILE ? '        lda pfDone              ; BNDCNT: stop with the profiler, so the two share a window\n        bne bcSkip\n' : ''}        inc bcN                 ; a boundary was pinned between spanL and spanR
+        bne bcN1
+        inc bcN+1
+bcN1:   ldx spanL               ; ...and do the two faces meet at the same height there?
+        lda colH,x
+        ldx spanR
+        sec
+        sbc colH,x
+        bcs bcAbs
+        eor #$ff
+        adc #$01
+bcAbs:  cmp #$03                ; within 2 rows: a shared corner, B's end height = A's
+        bcs bcSkip
+        inc bcSame
+        bne bcSkip
+        inc bcSame+1
+bcSkip:
+` : ''}${SEAMS ? `        ; A corner is pinned to one column, so its seam line needs no projection at
         ; all -- it is simply the column we just found. Do it before the k=0 bail below:
         ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
         ;
@@ -17624,7 +17650,7 @@ try {
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
       ...RUNTIME_BUFS,
       opx: 2, opy: 2,
-      rayAcc: 2, edgAcc: 2, chnAcc: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
+      rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
       tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
     };
     {
