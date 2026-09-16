@@ -3812,7 +3812,7 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // second angel simply followed the player out of the ring, down the corridor and into the first
 // room. Reported from play, and the give-away is that it followed ALL the way: an angel that runs
 // out of rope stops facing you, it does not escort you home.
-const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : COMBO ? '18,1;24,1' : COMBO2 ? '13,4;13,6' : LEVEL2 ? '3,1;9,1' : '')).split(';')
+const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : COMBO ? '18,1;24,1' : COMBO2 ? '21,2;21,8' : LEVEL2 ? '3,1;9,1' : '')).split(';')
   .filter(Boolean).map(q => q.split(',').map(Number));
 // One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
 // past 256 cells needs that changed too -- assert rather than let it go quietly wrong.
