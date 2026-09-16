@@ -5764,12 +5764,15 @@ hoInc:  inc hoI
 ; this moves the screen matrix ONLY -- half the work a scrolling game would do here.
 
 ; fallChk: standing in the hole's cell? Then go.
-fallChk:ldx hlv
-        lda px+1
-        cmp orbXCT+4,x
+fallChk:lda hlv                 ; the live hole's entity index is nOrbT + hlv -- the SWAPPED count,
+        clc                     ;   not this build's ORBS.length. Level 1 has four orbs and angels
+        adc nOrbT               ;   before its hole; the socket room has one. With the immediate
+        tax                     ;   baked in, the socket room's hole was compared at index 4 -- past
+        lda px+1                ;   its three entities -- and could never be fallen through.
+        cmp orbXCT,x
         bne fcNo
         lda py+1
-        cmp orbYCT+4,x
+        cmp orbYCT,x
         bne fcNo
         lda #$00                ; sprites away: they belong to the level being left. Clear the
         sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,

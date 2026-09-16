@@ -41,6 +41,12 @@ const marks = atArg.split(',').map(Number).filter(n => n > 0);
 // sixty-second scripted tour costs a few seconds of wall clock. It is also the honest condition:
 // "the tour has ended" is a fact about the program, where "tick 3606 has passed" is a guess about
 // it that goes wrong the moment the route or the load time changes.
+// --trap lo,hi: an EXECUTE checkpoint on that address range. The emulator stops the moment the PC
+// lands in it; we then print PC, the stack, and the bytes asked for. For a program that ends up in
+// BASIC with the KERNAL vectors back, the question is "who jumped there first", and a checkpoint on
+// $e000-$ffff (ROM space, where our code never runs with the port at $35) answers it in one run.
+const trapArg = args.find(a => a === '--trap') ? args[args.indexOf('--trap') + 1] : '';
+const trap = trapArg ? trapArg.split(',').map(h => parseInt(h, 16)) : null;
 const untilArg = args.find(a => a === '--until') ? args[args.indexOf('--until') + 1] : '';
 const until = untilArg ? (() => {
   const m = untilArg.match(/^(\w+)\s*(<=|>=|==|<|>)\s*(\d+)$/);
@@ -50,7 +56,7 @@ const until = untilArg ? (() => {
 const expects = [];
 const specs = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until') { i++; continue; }
+  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until' || args[i] === '--trap') { i++; continue; }
   if (args[i] === '--expect') { expects.push(args[++i]); continue; }
   specs.push(args[i]);
 }
@@ -111,7 +117,7 @@ const LOG = `/tmp/probe-vice-${process.pid}.log`;
 // already passed -- an early checkpoint is simply unreachable, and `waitFor` returns instantly on
 // a condition that was true before it was asked. Real time makes a tick a tick. It costs about a
 // second of wall clock per 60 ticks, which is the price of hitting a specific moment.
-execSync(`${VICE} ${marks.length ? '' : '-warp '}-ntsc +drive8truedrive -virtualdev8 +minimized -jamaction 1 ` +
+execSync(`${VICE} ${(marks.length || trap) ? '' : '-warp '}-ntsc +drive8truedrive -virtualdev8 +minimized -jamaction 1 ` +
   `-binarymonitor -binarymonitoraddress ip4://127.0.0.1:${PORT} ` +
   `-autostart ${DISK} >${LOG} 2>&1 &`);
 const stop = () => {
@@ -145,7 +151,7 @@ sock.on('error', e => {
 // Dial only after --wait, never during the load. Each monitor command stops the CPU until the
 // resume lands, so polling through a 219-block true-drive load slows it to a crawl and the program
 // never comes up -- which looks exactly like a build that will not start.
-setTimeout(dial, wantWait);
+setTimeout(dial, trap ? 1500 : wantWait);   // a trap must be armed before the program runs: dial at once
 let buf = Buffer.alloc(0); const pend = new Map(); let rid = 1;
 sock.on('data', d => {
   buf = Buffer.concat([buf, d]);
@@ -191,6 +197,18 @@ const pcGet = () => new Promise((res, rej) => {
   sock.write(Buffer.concat([h, b]));
 });
 
+const cpSet = (lo, hi) => new Promise((res, rej) => {
+  const id = rid++, b = Buffer.alloc(8);
+  b.writeUInt16LE(lo, 0); b.writeUInt16LE(hi, 2); b[4] = 1; b[5] = 1; b[6] = 4; b[7] = 0;
+  const h = Buffer.alloc(11);
+  h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(b.length, 2); h.writeUInt32LE(id, 6); h[10] = 0x12;
+  pend.set(id, (err, body) => err ? rej(new Error(`checkpoint set failed: ${err}`)) : res(body.readUInt32LE(0)));
+  sock.write(Buffer.concat([h, b]));
+});
+// A checkpoint hit arrives as an UNSOLICITED response (request id $ffffffff, type 0x11 with
+// hit=1, or a STOPPED event 0x62). We watch for it by polling PC: while the CPU runs, PC moves;
+// once the checkpoint stops it, PC holds inside the trap range. The monitor's own stop is the
+// point -- we never resume past it.
 const resume = () => new Promise(res => {
   const h = Buffer.alloc(11);
   h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(0, 2); h.writeUInt32LE(rid++, 6); h[10] = 0xaa;
@@ -200,6 +218,35 @@ const resume = () => new Promise(res => {
 sock.on('connect', async () => {
   try {
     await resume();                       // in case the connection itself left it stopped
+    if (trap) {                           // arm NOW, while the disk is still loading, then let it run
+      await cpSet(trap[0], trap[1]); await resume();
+      // The KERNAL's own loader runs in ROM space, so wait for OUR code to take over before
+      // treating a hit as the fault: poll until frameCnt has moved (the program is up), THEN watch.
+      let a0 = (await memGet(addr[LIVE], 2)).reduce((x, y, i) => x + y * (i ? 256 : 1), 0); await resume();
+      for (const t0 = Date.now(); Date.now() - t0 < 300000; ) {
+        await new Promise(r => setTimeout(r, 200));
+        const pc = await pcGet();
+        const a1 = (await memGet(addr[LIVE], 2)).reduce((x, y, i) => x + y * (i ? 256 : 1), 0);
+        if (pc >= trap[0] && pc <= trap[1] && a1 !== a0 && a1 > 2) {
+          // stopped in the range, and the program had started (frameCnt moved): this is the hit
+          const sp = await (() => new Promise((res, rej) => {
+            const id = rid++, h = Buffer.alloc(11); h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(1, 2); h.writeUInt32LE(id, 6); h[10] = 0x31;
+            pend.set(id, (err, body) => { for (let i = 2; i + 3 < body.length; i += body[i] + 1) if (body[i + 1] === 4) return res(body.readUInt16LE(i + 2) & 255); rej(new Error('no SP')); });
+            sock.write(Buffer.concat([h, Buffer.alloc(1)]));
+          }))();
+          const stack = await memGet(0x100 + sp + 1, Math.min(32, 255 - sp));
+          console.log(`TRAP: PC = $${pc.toString(16)}  SP = $${sp.toString(16)}  frameCnt ${a1}`);
+          const words = []; for (let i = 0; i + 1 < stack.length; i++) words.push(`$${(stack[i] + 256 * stack[i + 1]).toString(16)}`);
+          console.log(`  stack: ${stack.join(' ')}`);
+          console.log(`  as words: ${words.join(' ')}`);
+          for (const spec of specs) { const [n, cnt] = spec.split(':'); const v = await memGet(addr[n], +(cnt || 1)); console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v.join(' ')}`); }
+          stop(); process.exit(0);
+        }
+        if (pc >= trap[0] && pc <= trap[1]) await resume();   // the KERNAL loading: let it go on
+        a0 = a1;
+      }
+      bail('--trap: the program ran for 5 minutes without entering the range');
+    }
     // POLL for liveness rather than trusting one deadline. Warp speed is not a constant: with the
     // display asleep VICE slows by an order of magnitude, so a wait that was ample an hour ago
     // lands mid-load. Give up only after the deadline, and say what the screen shows when we do.
@@ -242,6 +289,14 @@ sock.on('connect', async () => {
       }
       if (!ok) bail(`--until ${untilArg} never came true; ${until.name} was last ${last}. ` +
                     `The program is running, so either the condition cannot happen or it needs longer.`);
+    }
+    if (!alive && process.env.PROBE_DEAD === '1') {
+      // PROBE_DEAD=1: read the requested bytes ANYWAY. For a hang, the stack and vectors at the
+      // moment the IRQ stopped are exactly the evidence, and the liveness bail was throwing it away.
+      const v = {};
+      for (const spec of specs) { const [n, cnt] = spec.split(':'); v[n] = await memGet(addr[n], +(cnt || 1)); await resume(); }
+      for (const spec of specs) { const n = spec.split(':')[0]; console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v[n].join(' ')}`); }
+      stop(); process.exit(3);
     }
     if (!alive) {
       // Show the KERNAL screen: "READY." means autostart never loaded anything, a LOAD line means

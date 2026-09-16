@@ -10,7 +10,12 @@
 //   * The image covers $0801-$bfff, which includes this stub. So the body relocates itself into
 //     bank 3's free tail and runs from there while the image lands on top of where it started.
 // Hence the order: charset to $c000, copy it away, THEN the orb ladder over the top of it.
-export const LOADER_RUN = 0xcf00;   // ABOVE the sprite data in bank 3: ISEAT loads to $c940
+// $cd00, not $cf00 (2026-09-16). At $cf00 the body had exactly 256 bytes before the I/O hole at
+// $d000, and it was ALREADY 264 -- the last filename sat in VIC registers and loaded by luck. The
+// fifth disk file (ILVL) pushed it to 300, the name 'ILVL' landed on $d011 (the raster control
+// register), SETNAM read back one garbage byte, and the disk asked for a file called 'I'. The
+// program never started. IPIC ends at $cce8, so $cd00 is the lowest page above it: 768 bytes.
+export const LOADER_RUN = 0xcd00;   // ABOVE the sprite data in bank 3: ISEAT loads to $c940
                                     // and runs to $cc7f, which used to land straight on the
                                     // loader body and drop the machine back to BASIC
 const hx4 = n => '$' + n.toString(16).padStart(4, '0');
@@ -74,6 +79,11 @@ ${files.filter(f => !f.runtime).map(f => `n${f.tag}: !byte ${petscii(f.name)}`).
 // bank 3, and the body itself as data.
 export function buildLoader(assemble, files, entry) {
   const body = assemble(bodySource(files, entry));
+  // The body runs at LOADER_RUN with the port at $37 -- I/O mapped -- so anything of it past $d000
+  // is written to and read from VIC/SID/CIA registers, not RAM. Fail here, not on the C64.
+  if (LOADER_RUN + body.bytes.length > 0xd000) throw new Error(
+    `the boot loader is ${body.bytes.length} bytes and runs into the I/O hole from ` +
+    `$${LOADER_RUN.toString(16)}: ${LOADER_RUN + body.bytes.length - 0xd000} bytes past $d000`);
   const pages = Math.ceil(body.bytes.length / 256);
   const copy = [...Array(pages)].map((_, p) =>
     `        lda body+${p * 256},x\n        sta ${hx4(LOADER_RUN + p * 256)},x`).join('\n');

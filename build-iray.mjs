@@ -5123,7 +5123,7 @@ const LVL_TABLES = [
   // like everything else, so the level that arrives brings its own idea of where it leads. The
   // slots are global to the chain and a level's own build cannot know them, so the main build
   // overwrites this in every dump (see below).
-  ['lvlNxtT', [TWOLEV ? OTHERS.indexOf(nextLevel(LVL)) : 0xff]],   // $ff standalone: the hole is scenery
+  ['lvlNxtT', [TWOLEV && !process.env.NOFALL ? OTHERS.indexOf(nextLevel(LVL)) : 0xff]],   // $ff standalone (or NOFALL=1): the hole is scenery
   // Six contiguous bytes, one entry: nOrbT nHoleT nExitT nOrbM1T nSockT nAllM1T.
   // SEVEN contiguous bytes now: nAllT joins them because the down-counting loops need a COUNT
   // to test against, and an INDEX cannot express "none" -- see the guards on each loop.
@@ -5588,7 +5588,7 @@ bcSame  = $70ee                 ;   ...of which shared corners (same height both
 ` : ''}${MARCHCNT ? `mcPiv   = $70f0                 ; MARCHCNT: marches at pivot hint brackets
 mcMid   = $70f2                 ;   ...at bisection midpoints
 mcHint  = $70f4                 ;   hints offered per frame, summed
-` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
+` : ''}${process.env.FALLMARK ? `fallMk  = $70fc                 ; FALLMARK: how far the fall's level change got\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
 ` : ''}pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
@@ -11942,12 +11942,15 @@ ${FALL ? `
 ; this moves the screen matrix ONLY -- half the work a scrolling game would do here.
 
 ; fallChk: standing in the hole's cell? Then go.
-fallChk:ldx hlv
-        lda px+1
-        cmp orbXCT+${ORBS.length},x
+fallChk:lda hlv                 ; the live hole's entity index is nOrbT + hlv -- the SWAPPED count,
+        clc                     ;   not this build's ORBS.length. Level 1 has four orbs and angels
+        adc nOrbT               ;   before its hole; the socket room has one. With the immediate
+        tax                     ;   baked in, the socket room's hole was compared at index 4 -- past
+        lda px+1                ;   its three entities -- and could never be fallen through.
+        cmp orbXCT,x
         bne fcNo
         lda py+1
-        cmp orbYCT+${ORBS.length},x
+        cmp orbYCT,x
         bne fcNo
         lda #$00                ; sprites away: they belong to the level being left. Clear the
         sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
@@ -11964,13 +11967,13 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
         lda lvlNxtT             ; where does THIS level's hole go? $ff means nowhere -- the last
         cmp #$ff                ;   level in the chain keeps its hole as scenery rather than
         beq lvlEnd              ;   dropping the player into whatever happens to be in slot 0
-        jsr lvlSwap
-        jsr mkRuns              ; the run tables no longer travel with the level -- they are
+${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}        jsr lvlSwap
+${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped, about to mkRuns\n' : ''}        jsr mkRuns              ; the run tables no longer travel with the level -- they are
                                 ;   derived from the mapT the swap just brought in. Must come
                                 ;   AFTER the swap and BEFORE anything renders the new room.
-        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
+${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 3: runs made, about to objInit\n' : ''}        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
-lvlEnd:
+${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}lvlEnd:
 ` : ''}        ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
         sta px                  ;   player does not move again for the rest of the fall.
@@ -15490,7 +15493,7 @@ angBlkT: !byte ${angBlk.join(',')}
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
-lvlNxtT:!byte ${hx(TWOLEV ? OTHERS.indexOf(nextLevel(LVL)) : 0xff)}                 ; slot this level's hole leads to; $ff = standalone
+lvlNxtT:!byte ${hx(TWOLEV && !process.env.NOFALL ? OTHERS.indexOf(nextLevel(LVL)) : 0xff)}                 ; slot this level's hole leads to; $ff = standalone
 nOrbT:  !byte ${hx(ORBS.length)}                 ; orbs
 nHoleT: !byte ${hx(HOLELIKE.length)}                 ; hole-like entities: exits then sockets
 nExitT: !byte ${hx(HOLES_AT.length)}                 ; ...of which this many are exits
@@ -17496,8 +17499,28 @@ try {
     // pushed onto LVL_TABLES after that point, and a shadow built early was 435 bytes short of
     // them -- lvlSwap would have exchanged the hazard lists with whatever followed the file.
     ...(TWOLEV ? [{ tag: 'L', name: 'ILVL', at: LVLSHADOW, data: (() => {
+      // THE SHADOW IS RAW BYTES NOW, NOT ASSEMBLED -- so every entry the manifest expresses as an
+      // assembler expression has to be resolved here. The hazard pointer tables are '<hazLstT+N'
+      // and '>hazLstT+N', and hazRstT ends in '$ff'. Written through Buffer.from as-is, a string
+      // is NaN is 0: every list pointer in the socket room's shadow was $0000, the hazard walker
+      // jsr'd through zero page on the first render after the fall, and the machine reset into
+      // BASIC with frameCnt at 5. Standalone builds were fine (no shadow) and so was a two-level
+      // build with the fall disabled (the walker never ran), which is what pinned it here.
+      const resolve = v => {
+        if (typeof v === 'number') return v;
+        if (/^\d+$/.test(v)) return +v & 255;               // decimal text, from a split(',')
+        const m = /^([<>])?([A-Za-z_][A-Za-z0-9_]*)(?:\+(\d+))?$/.exec(v);
+        if (m) {
+          const base = r.labels[m[2]];
+          if (base === undefined) throw new Error(`ILVL: unknown label in shadow table: ${v}`);
+          const addr = base + (+(m[3] ?? 0));
+          return m[1] === '<' ? addr & 255 : m[1] === '>' ? addr >> 8 : addr & 255;
+        }
+        if (/^\$[0-9a-fA-F]+$/.test(v)) return parseInt(v.slice(1), 16) & 255;
+        throw new Error(`ILVL: cannot resolve shadow table entry ${JSON.stringify(v)}`);
+      };
       const bytes = LVLALL.flatMap(L => LVL_TABLES.flatMap(([n, a, sh]) =>
-        pad((sh instanceof Map ? sh.get(L.level) : sh) ?? L.tables[n] ?? [], a.length)));
+        pad((sh instanceof Map ? sh.get(L.level) : sh) ?? L.tables[n] ?? [], a.length).map(resolve)));
       if (LVLSHADOW + bytes.length > 0xfff9) throw new Error(
         `the level shadow is ${bytes.length} bytes and does not fit above $${LVLSHADOW.toString(16)} in bank 3`);
       LVLSHAD_BYTES.push(...bytes);      // for the bank-3 accounting below
