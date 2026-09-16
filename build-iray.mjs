@@ -2692,6 +2692,9 @@ const ENTGATE = process.env.ENTGATE !== '0';
 // BNDCNT=1: per frame, boundaries pinned by the subdivision and how many of them are shared
 // corners (both faces at the same height at the boundary: the second end ray is redundant).
 const BNDCNT = flag('BNDCNT');
+// MARCHCNT=1: marches by SITE -- pivot hint brackets (pivCut) vs bisection midpoints (subMid) --
+// plus hints per frame, so the pivot's residue (what bisection still has to find) is measured.
+const MARCHCNT = flag('MARCHCNT');
 // FOVCHK=1: verify ENTFOV. The pre-cull only NOTES that it would have rejected, the full path
 // runs, and two counters say what happened: fovDis = orbProj accepted what the cull would have
 // dropped (the box tests may still throw it out), fovBad = it got a SPRITE. fovBad must be 0.
@@ -5552,6 +5555,9 @@ flgTH   = $70c2
 ` : ''}${TOURPOSE ? `twPose  = $a600                 ; TOURPOSE: 42 x (pxL pxH pyL pyH paF pa), in the $a486-$a8ff hole
 ` : ''}${CULLCNT ? `ogSkip  = $70cc                 ; CULLCNT: frames entGate closed, 16-bit free-running\n` : ''}${BNDCNT ? `bcN     = $70ec                 ; BNDCNT: boundaries pinned, 16-bit, stopped at pfDone
 bcSame  = $70ee                 ;   ...of which shared corners (same height both sides)
+` : ''}${MARCHCNT ? `mcPiv   = $70f0                 ; MARCHCNT: marches at pivot hint brackets
+mcMid   = $70f2                 ;   ...at bisection midpoints
+mcHint  = $70f4                 ;   hints offered per frame, summed
 ` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
@@ -6308,6 +6314,12 @@ pfNIni: sta pfNum,x
 ` : ''}${FOVCHK ? `        sta fovDis              ; FOVCHK: counters start clean (A is still 0)
         sta fovBad
         sta fovWld
+` : ''}${MARCHCNT ? `        sta mcPiv
+        sta mcPiv+1
+        sta mcMid
+        sta mcMid+1
+        sta mcHint
+        sta mcHint+1
 ` : ''}${BNDCNT ? `        sta bcN                 ; BNDCNT: counters start clean (A is still 0)
         sta bcN+1
         sta bcSame
@@ -6719,7 +6731,11 @@ subMid: lda spanL
         ror                     ; ROR not LSR: at 160 columns spanL+spanR reaches 318, so the
                                 ; sum is 9 bits and the carry IS bit 8 of the midpoint
         sta col                 ; mid = (L+R)/2
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
+${MARCHCNT ? `${PROFILE ? '        lda pfDone\n        bne mcM1\n' : ''}        inc mcMid
+        bne mcM1
+        inc mcMid+1
+mcM1:
+` : ''}${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
 ${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         ldx sp
         lda spanL
@@ -6940,7 +6956,14 @@ ${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + heigh
         sta pvLast
         lda pvN                 ; the hint list is DESCENDING (see pvInsL), so walking it from
         sta pvI                 ; the end is what yields ascending columns here
-${RAYCNT ? '        lda pvN\n        sta pvNdbg\n' : ''}pivLp:  ldx pvI
+${RAYCNT ? '        lda pvN\n        sta pvNdbg\n' : ''}${MARCHCNT ? `${PROFILE ? '        lda pfDone\n        bne mcH1\n' : ''}        lda mcHint
+        clc
+        adc pvN
+        sta mcHint
+        bcc mcH1
+        inc mcHint+1
+mcH1:
+` : ''}pivLp:  ldx pvI
         beq pivEnd
         dex
         stx pvI
@@ -6968,7 +6991,11 @@ pivEnd: lda #${hx(NLOG - 1)}    ; the last span always runs to the right edge
 ; march column A, then push the span (pvLast, A) and make A the new pvLast
 pivCut: pha
         sta col
-${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
+${MARCHCNT ? `${PROFILE ? '        lda pfDone\n        bne mcP1\n' : ''}        inc mcPiv
+        bne mcP1
+        inc mcPiv+1
+mcP1:
+` : ''}${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
 ${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        pla
 pivPush:ldx sp
         pha
@@ -17650,7 +17677,7 @@ try {
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
       ...RUNTIME_BUFS,
       opx: 2, opy: 2,
-      rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
+      rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
       tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
     };
     {
