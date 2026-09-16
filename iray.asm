@@ -6799,10 +6799,19 @@ alMsk:  dex                     ;   once per attempted step, which is once every
         asl
         bne alMsk               ; always taken: bit 7 is the last one that can be set
 alGot:  sta atMsk
+        lda amIdx               ; THIS angel's row: entity slot x 32 -- the same x32 the LOS
+        asl                     ;   bitmaps use, and for the same reason (ceil(256/8) = 32)
+        asl
+        asl
+        asl
+        asl
+        sta atTmp
         lda amCell
         lsr
         lsr
         lsr
+        clc
+        adc atTmp
         tay
         lda angBlkT,y
         and atMsk
@@ -9561,6 +9570,7 @@ occCell:!byte $ff               ;   a rebuild on the first frame
 bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
+atTmp:  !byte 0                 ; ...and this angel's row offset into angBlkT
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
 sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 
@@ -9579,7 +9589,7 @@ sokDY:  !byte 0
 bfsQ:   !fill 52, 0
         ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
         ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
-angBlkT: !byte 0,0,8,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
         ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
         ; and the manifest carries each chunk's destination, so where they live is free choice.
@@ -9624,16 +9634,17 @@ lvlShadow: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,0,0
         !byte 0,0,0,0,0,0,124,0,252,127,124,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,8,9,14,14,4,4,4,4,8,9,4,4,2,2,2,2
         !byte 59,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-        !byte 0,0,0,0,0,0,0,0,0,120,120,6,0,0,0,1,0,0,255,2,2,2,1,4
-        !byte 3,4,0,4,8,12,48,15,43,0,48,15,43,0,48,15,43,0,48,15,43,0,255,0
-        !byte 0,0,0,$ff
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,120,6,0,0,0,1
+        !byte 0,0,255,2,2,2,1,4,3,4,0,4,8,12,48,15,43,0,48,15,43,0,48,15
+        !byte 43,0,48,15,43,0,255,0,0,0,0,$ff
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte <lvlShadow+0
 lvlBasHiT: !byte >lvlShadow+0
 lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$01,$20,$01,$01,$01,$02,$02,$02,$01,$07,$04,$10,$01,$01,$01,$01,$01,$01
+lvlLenT: !byte $00,$40,$04,$04,$02,$02,$02,$02,$01,$40,$01,$01,$01,$02,$02,$02,$01,$07,$04,$10,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles

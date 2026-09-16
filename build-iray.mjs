@@ -3768,6 +3768,37 @@ const lvlMax = (f, own) => Math.max(own, ...(LVLALL ?? []).map(f));
 // assembles to "bad number: $", which names neither the table nor the flags that emptied it.
 // Nothing indexes them when the count is really zero, so the spare byte is inert.
 const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
+// ---- the leash is PER ANGEL (2026-09-15) ----
+// It was one bit per cell for the whole level, so every angel shared one territory, and "the
+// first angel roams free, the second stays by its door" -- which is what LVL=5 wants -- could not
+// be said at all. LEASH now takes one group per angel, in angel order (the order of the `tall`
+// entries in ORBS), separated by '|': LEASH="|21,2;21,8" leashes the second angel only. A group
+// is cells the angel may NOT enter, as before; an empty group is an unleashed angel.
+// The table is NORB x 32 bytes, indexed by entity slot -- so an orb's slots are wasted (all
+// zero) and the angels' rows land where amIdx x 32 says. 32 bytes an entity is the price of
+// not needing a second index register in anTry, which has none to spare.
+const LEASH_GROUPS = (process.env.LEASH ?? (TESTLVL ? '' : COMBO ? '18,1;24,1|18,1;24,1' : COMBO2 ? '|21,2;21,8' : LEVEL2 ? '3,1;9,1' : ''))
+  .split('|').map(g => g.split(';').filter(Boolean).map(q => q.split(',').map(Number)));
+const LEASH_AT = LEASH_GROUPS.flat();     // every leash cell, for the checks that only care WHERE
+// One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
+// past 256 cells needs that changed too -- assert rather than let it go quietly wrong.
+const CELLBYTES = Math.ceil(MAPN / 8);
+if (CELLBYTES > 32) throw new Error(
+  `${MAPN} cells needs ${CELLBYTES} bytes of bitmap, but holeOne and the fall bake x32`);
+for (const [lx, ly] of LEASH_AT)
+  if (map[cellOf(lx, ly)] !== 0) throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
+// The per-angel leash rows: entity slot -> 32-byte cell bitmap of cells it may not enter.
+const angBlk = (() => {
+  const rows = new Array(NORB * 32).fill(0);
+  const angels = ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0);   // entity slots that are angels
+  if (LEASH_GROUPS.some(g => g.length) && LEASH_GROUPS.length > angels.length)
+    throw new Error(`LEASH has ${LEASH_GROUPS.length} groups but the level has ${angels.length} angel(s)`);
+  LEASH_GROUPS.forEach((g, k) => {
+    const slot = angels[k]; if (slot === undefined) return;
+    for (const [lx, ly] of g) { const c = cellOf(lx, ly); rows[slot * 32 + (c >> 3)] |= 1 << (c & 7); }
+  });
+  return rows;
+})();
 const NHOLE = lvlMax(l => l.nHoleLike, HOLELIKE.length);
 const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
 
@@ -3812,18 +3843,6 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // second angel simply followed the player out of the ring, down the corridor and into the first
 // room. Reported from play, and the give-away is that it followed ALL the way: an angel that runs
 // out of rope stops facing you, it does not escort you home.
-const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : COMBO ? '18,1;24,1' : COMBO2 ? '21,2;21,8' : LEVEL2 ? '3,1;9,1' : '')).split(';')
-  .filter(Boolean).map(q => q.split(',').map(Number));
-// One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
-// past 256 cells needs that changed too -- assert rather than let it go quietly wrong.
-const CELLBYTES = Math.ceil(MAPN / 8);
-if (CELLBYTES > 32) throw new Error(
-  `${MAPN} cells needs ${CELLBYTES} bytes of bitmap, but holeOne and the fall bake x32`);
-const angBlk = new Array(32).fill(0);
-for (const [lx, ly] of LEASH_AT) {
-  if (map[cellOf(lx, ly)] !== 0) throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
-  const c = cellOf(lx, ly); angBlk[c >> 3] |= 1 << (c & 7);
-}
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number), process.env.LAND.split(',').map(Number)]
@@ -13252,10 +13271,19 @@ alMsk:  dex                     ;   once per attempted step, which is once every
         asl
         bne alMsk               ; always taken: bit 7 is the last one that can be set
 alGot:  sta atMsk
+        lda amIdx               ; THIS angel's row: entity slot x 32 -- the same x32 the LOS
+        asl                     ;   bitmaps use, and for the same reason (ceil(256/8) = 32)
+        asl
+        asl
+        asl
+        asl
+        sta atTmp
         lda amCell
         lsr
         lsr
         lsr
+        clc
+        adc atTmp
         tay
         lda angBlkT,y
         and atMsk
@@ -15411,6 +15439,7 @@ occBad  = $60e2
 ` : ''}` : ''}bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
+atTmp:  !byte 0                 ; ...and this angel's row offset into angBlkT
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
 sokShrT: !byte ${[...Array(SOK_SHR)].map((_, i) => i * SOK_SSTEP).join(',')}   ; rungs down, per closing frame
 ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
