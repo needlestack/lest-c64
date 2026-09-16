@@ -56,13 +56,21 @@ for (const r of co.slice(0, 16))
 
 if (process.argv.includes('--map')) {
   const H = Math.max(...rows.map(r => r.y)) + 1;
-  console.log('\nmean work per cell, as a map (lines/frame; . = never visited):');
+  // A cell's mean is over the HEADINGS the route happened to have there, and a route walks most
+  // corridors one way. The heading-octant count is printed under each number so a lopsided figure
+  // announces itself: 1 means "seen facing one way only", and its mirror cell may say otherwise.
+  const octs = new Map();
+  for (const r of recs) { const k = r.cell; (octs.get(k) ?? octs.set(k, new Set()).get(k)).add(oct(r.pa)); }
+  console.log('\nmean work per cell, as a map (lines/frame; . = never visited).');
+  console.log('Under each: how many of 8 heading octants fed it -- a 1 is one direction only, not the cell.');
+  console.log('263 lines = one video frame: 780 = 20 fps, 1043 = 15, 1306 = 12, 1569 = 10.');
   for (let y = 0; y < H; y++) {
-    let line = `  y=${y} `;
+    let line = `  y=${String(y).padStart(2)} `, sub = '      ';
     for (let x = 0; x < MAPW; x++) {
       const r = rows.find(r => r.x === x && r.y === y);
       line += r ? r.mean.toFixed(0).padStart(5) : '    .';
+      sub += r ? String(octs.get(r.cell).size).padStart(5) : '     ';
     }
-    console.log(line);
+    console.log(line); console.log(sub);
   }
 }
