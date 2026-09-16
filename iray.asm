@@ -1,6 +1,6 @@
 
-charset = $d000        ; where the VIC reads them: under the I/O hole
-charsetB = $d800
+charset = $c000        ; where the VIC reads them: under the I/O hole
+charsetB = $c800
 px      = $02
 py      = $04
 pa      = $06
@@ -658,20 +658,15 @@ entry:
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
         ; CIA registers rather than memory (the build refuses an image past $c000 for the same
         ; reason). Charset A is therefore not loaded at all in the usual sense: the self-extracting
-        ; loader decodes it STRAIGHT into $d000 with the port at $34. All that is left to do here is
-        ; build the mirror, charset B, from the copy already in place.
+        ; loader lands it at $c000. All that is left to do here is build the mirror, charset B,
+        ; from the copy already in place.
         ;
-        ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
-        ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
-        ; is safe to have the VIC's registers unmapped for the duration (2KB read, 4KB written).
-        ;
-        ; ORDER MATTERS AND IT IS SUBTLE. The colour-RAM fill above had to run with I/O MAPPED,
-        ; because colour RAM is a separate 1K chip at $d800-$dbff. Charset B also lives at $d800 --
-        ; in the DRAM underneath, which is what the VIC reads. Two different memories at one
-        ; address, each reached in a different port mode, and the writes above and below must not
-        ; be swapped.
-        lda #$34
-        sta $01
+        ; NO PORT DANCE ANY MORE (2026-09-16). The charsets sat under the I/O hole and this block
+        ; ran with the port at $34 -- RAM everywhere, VIC registers unmapped -- with a long note
+        ; about why the colour-RAM fill above and this copy could not be reordered (two memories
+        ; at one address). They are at $c000/$c800 now, plain RAM in the engine's own mode $35,
+        ; so this is a copy loop and nothing else. The hole ladder took the spot under the hole,
+        ; being the one thing in bank 3 the CPU never reads or writes.
         ; Charset B is DERIVED here, not loaded. It is charset A with every glyph's eight rows
         ; reversed, and for a byte at index x within a glyph the mirrored row is simply x EOR 7:
         ; 7-n == n EOR 7 for n in 0..7, and the EOR leaves the glyph's base address alone. Each
@@ -706,8 +701,6 @@ cpChr:  txa
         sta charsetB+1792,x
         inx
         bne cpChr
-        lda #$35                ; back to mode 5: I/O mapped, both ROMs still out
-        sta $01
         lda #$00
         sta $d01a
         lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
@@ -729,10 +722,10 @@ cpChr:  txa
         sta pSplit              ; the pending splits start where the renderer wants them
         lda #246
         sta pSplit2
-        lda #$04        ; AND THE PENDING CHARSETS. mnext publishes these into the IRQ's
+        lda #$00        ; AND THE PENDING CHARSETS. mnext publishes these into the IRQ's
         sta pCh0                ;   three "ora #" operands every frame, not just during a fall,
         sta pCh2                ;   so leaving them as power-on garbage ORed random bits into
-        lda #$06        ;   $d018 from the first frame: the whole screen came up as
+        lda #$02        ;   $d018 from the first frame: the whole screen came up as
         sta pCh1                ;   noise. deadvars cannot see it -- they ARE written, just not
         lda #$00                ;   before they are first read.
         sta arcSkip
@@ -743,7 +736,7 @@ cpChr:  txa
         sta fT0
         lda #$80
         sta d018vm              ; display buffer A; IRQ ORs the charset bits per half-screen
-        lda #$84
+        lda #$80
         sta $d018
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
@@ -3954,19 +3947,19 @@ irqCmp: cmp #$96   ; operands PATCHED, not variable reads: "cmp abs" is two cycl
 irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the line.
         bcs irqA2
         lda d018vm              ; --- horizon..arc: the mirrored half ---
-irqC1:  ora #$06
+irqC1:  ora #$02
         sta $d018
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
 irqA2:  lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
-irqC2:  ora #$04
+irqC2:  ora #$00
         sta $d018
         lda #$00
         sta $d012
         jmp irqd
 irqTop: lda d018vm              ; --- top of frame: charset A, arm the horizon ---
-irqC0:  ora #$04
+irqC0:  ora #$00
         sta $d018
 irqArm: lda #$96
         sta $d012
@@ -4346,7 +4339,7 @@ ogFull:
         dex                     ; carry is index+1, so zero can mean empty
         lda orbColT2,x
         sta obC                 ; the orb's OWN body colour, not the icon's fixed grey
-        lda #$00
+        lda #$a0
         sta obP
         lda #$a0
         sta obX
@@ -5896,19 +5889,19 @@ fstFOk: stx fFrm
         sta pSplit              ;   charset B; arcPrep sets the second split, at the top of the
         lda #$00                ;   arc, where A has to come back for the rim glyph.
         sta arcInv
-        lda #$04        ; DROP: A above the horizon, B below it, A again for the rim
+        lda #$00        ; DROP: A above the horizon, B below it, A again for the rim
         sta pCh0
         sta pCh2
-        lda #$06
+        lda #$02
         sta pCh1
         lda #$00
         sta arcSkip             ; the drop lets arcPrep place the arc's split
         beq fsDone              ; always taken
 fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, in the mirrored
-        lda #$06        ;   polarity, then the new room's ceiling half, then its floor
+        lda #$02        ;   polarity, then the new room's ceiling half, then its floor
         sta pCh0                ;   half. The room is held clear of the arc (see ARC_GAP) so no
         sta pCh2                ;   scanline ever has to serve both.
-        lda #$04
+        lda #$00
         sta pCh1
         lda arcSp2T,x           ; white rising to replace the black, over the NEW room sliding up
         sta pSplit              ;   into place. The rim is SOLID above and
@@ -5918,9 +5911,9 @@ fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, i
                                 ;   the same frame, so one raster line does the whole job.
         cpx #4     ; still inside the overlap window? then the screen is the two
         bcs fsL2                ;   RIMS and nothing else: A for the departing one at the top,
-        lda #$04        ;   B for the arriving one below it. The new room is held off
+        lda #$00        ;   B for the arriving one below it. The new room is held off
         sta pCh0                ;   screen this early, so two regions is all it takes.
-        lda #$06
+        lda #$02
         sta pCh1
         sta pCh2
         lda arcOvSpT,x
@@ -5941,10 +5934,10 @@ fstEnd: lda #$96
                                 ;   lands with the settled frame drawn just below
         lda #246                ; a settled frame wants A above the horizon and B below it
         sta pSplit2
-        lda #$04        ; AND THE CHARSET PLAN BACK. Restoring the split lines but not
+        lda #$00        ; AND THE CHARSET PLAN BACK. Restoring the split lines but not
         sta pCh0                ;   these left the renderer running the landing's B,A,B -- both
         sta pCh2                ;   halves of every frame mirrored until the next fall.
-        lda #$06
+        lda #$02
         sta pCh1
         jsr fdWarp              ; and it wants the ROOM, in place. The last landing block is the
                                 ;   identity, so this is a straight copy -- filling white here
@@ -6961,32 +6954,28 @@ dfDn:   rts
 
 ; ---- dieSwap: hand the screen to the face, in ONE frame, on black ----
 dfEnd:
-        sei                     ; charset B is under the I/O hole: port $34, and no IRQ while it
-        lda #$34                ;   is banked out. 1,280 bytes = five pages, ~12,800 cycles.
-        sta $01
-        ldx #$00                ; unrolled per page and GENERATED from the glyph count -- this
+        ldx #$00                ; charset B is plain RAM now: no port dance, no sei. (It was five
+                                ;   pages under the I/O hole, ~12,800 cycles with interrupts off.)
+                                ; unrolled per page and GENERATED from the glyph count -- this
 dsLp:
         lda faceChrT+$0000,x
-        sta $d800,x
+        sta $c800,x
         lda faceChrT+$0100,x
-        sta $d900,x
+        sta $c900,x
         lda faceChrT+$0200,x
-        sta $da00,x
+        sta $ca00,x
         lda faceChrT+$0300,x
-        sta $db00,x
+        sta $cb00,x
         lda faceChrT+$0400,x
-        sta $dc00,x
+        sta $cc00,x
         lda faceChrT+$0500,x
-        sta $dd00,x
+        sta $cd00,x
         lda faceChrT+$0600,x
-        sta $de00,x
+        sta $ce00,x
         lda faceChrT+$0700,x
-        sta $df00,x
+        sta $cf00,x
         inx
         bne dsLp
-        lda #$35
-        sta $01
-        cli
         ldx #$00                ; colour RAM is the OTHER memory at $d800 and needs I/O back in.
 dsCol:  lda #$08  ; bit 3 keeps the cell multicolor; the face wants black here
         sta $d800,x
@@ -7922,14 +7911,14 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
-holePtrT: !byte 160,162,165,168,171,174,177,180,182,184,186,188,190,192,193,194,195,196,197,198
+holePtrT: !byte 64,66,69,72,75,78,81,84,86,88,90,92,94,96,97,98,99,100,101,102
 holeXOffT: !byte 24,36,36,36,36,36,36,24,24,24,24,24,24,12,12,6,6,6,6,6
 holeYBaseT: !byte 121,124,127,130,133,135,137,139,141,143,143,145,147,147,148,149,149,150,150,150
 holeFlagT: !byte 6,7,7,7,15,15,15,14,14,6,6,6,6,5,5,1,1,1,1,1
         ; ---- the socket's ladder: same tables, half the radius ----
         ; No 256-byte h -> rung table for this one. The hole earned its page at 35 rungs; a
         ; socket has 10, so hlRungS scans and the page stays spent on something else.
-sockPtrT: !byte 190,190,190,192,193,194,195,196,197,198
+sockPtrT: !byte 94,94,94,96,97,98,99,100,101,102
 sockXOffT: !byte 24,24,24,12,12,6,6,6,6,6
 sockYBaseT: !byte 138,140,143,145,146,148,148,149,150,150
 sockFlagT: !byte 14,14,14,13,13,9,9,9,9,9
@@ -8705,8 +8694,8 @@ mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,20
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
 ; the per-VARIANT tables live out here: the angel's rungs doubled their length and pushed the
 ; image segment through holeSeeT at $3240
-orbPtrT: !byte 0,1,2,3,4,5,6,7,8,9,10,0,2,4,6,8,10,11,12,13,14,15,16,18,20,22,24,26,28,16,18,20,22,24,26,28,30,31,32,33,34,35
-orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,17,19,21,23,25,27,29,17,19,21,23,25,27,29,0,0,0,0,0,0
+orbPtrT: !byte 160,161,162,163,164,165,166,167,168,169,170,160,162,164,166,168,170,171,172,173,174,175,176,178,180,182,184,186,188,176,178,180,182,184,186,188,190,191,192,193,194,195
+orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,177,179,181,183,185,187,189,177,179,181,183,185,187,189,0,0,0,0,0,0
 orbTallT: !byte 0,0,1,1
 orbHidT: !byte 0,0,0,0
 orbHid0T: !byte 0,0,0,0   ; the build's hidden flags, for objInit
@@ -8793,7 +8782,7 @@ sndVolT: !byte 15,12,10,8,7,6,5,4,3,3,3,3,2,2,2,2
 ; Where each picture's map lives. The first is inside the image next to the charset; the rest
 ; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
 picLoT: !byte <faceScrT,$00
-picHiT: !byte >faceScrT,$c9
+picHiT: !byte >faceScrT,$f1
 ; dieN is the death counter and it is DATA, not an equate, on purpose: dieKey restarts with
 ; "jmp entry", which reloads nothing, so an emitted 0 is the only initialisation it ever gets --
 ; and that is exactly what makes it survive the restart and count deaths rather than resetting.
@@ -9416,7 +9405,7 @@ rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,2
         ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
         * = $97a0
-seatPtrT: !byte 36,37,37,38,38,39,39,40,41,41,42,36,37,38,39,41,42,43,44,45,46,47
+seatPtrT: !byte 196,197,197,198,198,199,199,200,201,201,202,196,197,198,199,201,202,203,204,205,206,207
 seatYBaseT: !byte 132,134,134,134,134,136,136,138,140,140,142,141,142,142,143,145,146,146,147,147,148,149
         * = $9800
 colGrpT: !byte 0,0,0,0,1,1,1,1,2,2,3,3,3,3,4,4,4,5,5,5,5,6,6,6,7,7,7,7,8,8,8,9,9,9,9,10,10,10,10,11,11,11,11,11,12,12,12,12,13,13,13,13,13,13,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,11,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,7,7,7,7,6,6,6,5,5,5,5,4,4,4,3,3,3,3,2,2,1,1,1,1,0,0,0,0
@@ -9713,7 +9702,7 @@ landYT: !byte 2,2
 ; ONE BLOB PER RESIDENT LEVEL, back to back, each in manifest order and each the same length --
 ; lvlSwap indexes them by slot, and the slots are the OTHERS list in ascending level order.
 ; THE SHADOW IS NOT HERE ANY MORE (2026-09-16). It rides in VIC bank 3 as the disk file ILVL, at
-; LVLSHADOW = $f200 -- plain RAM under both port modes (only $d000-$dfff is the
+; LVLSHADOW = $f600 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
 ; tables) as level 1's shadow and the leash per angel, the shadow is 1011 bytes, and the
@@ -9724,7 +9713,7 @@ landYT: !byte 2,2
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte $00
-lvlBasHiT: !byte $f2
+lvlBasHiT: !byte $f6
 lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
 lvlLenT: !byte $fd,$60,$07,$07,$04,$04,$02,$02,$01,$80,$01,$01,$01,$03,$04,$04,$01,$07,$07,$2a,$01,$28,$28,$28,$da,$61

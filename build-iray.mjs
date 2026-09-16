@@ -702,7 +702,7 @@ const HAZ_TOP = 0xa900;                               // RELOC + $2300, rayOffQS
 // The other level's tables live in VIC bank 3, above the sprite ladders -- see lvlBasLoT for why.
 // $f200: the ladders end by $f1c0 in every build so far, and a page boundary keeps the arithmetic
 // readable. Plain RAM to the CPU under both port modes; the VIC never looks here.
-const LVLSHADOW = +(process.env.LVLSHADOW ?? 0xf200);
+const LVLSHADOW = +(process.env.LVLSHADOW ?? 0xf600);   // above IPIC ($f100 + 1000 = $f4e8), page-rounded
 const LVLSHAD_BYTES = [];
 const HAZFACE = { W: 0, E: 1, N: 2, S: 3 };
 const hazRunT = { W: runW, E: runE, N: runN, S: runS };
@@ -3028,8 +3028,16 @@ const AUTOMOVE = TOUR ? 'tourStep' : SPIN ? 'spinStep' : WIGGLE ? 'wiggleStep'
 const VBANK = 0xc000;                   // VIC bank 3
 const SCR_A = 0xe000;                   // both screens must stay CPU-writable: renderSym
 const SCR_B = 0xe400;                   //   writes one of them every frame
-const CHARSET = 0xd000;                 // charset A: upright glyphs, above the horizon
-const CHARSET_B = 0xd800;               // charset B: every glyph flipped, below the horizon
+// THE CHARSETS ARE PLAIN RAM NOW (2026-09-16). They sat under the I/O hole at $d000/$d800 so
+// the hole -- 4K the VIC reads but the CPU cannot see in port mode $35 -- held something the CPU
+// touched least. But the CPU DOES touch them: cpChr builds B from A at boot, the death scene
+// copies a picture charset over B, and the occluder-stamp synthesis (next) wants to write one
+// glyph a frame. Every one of those needed sei / port $34 / write / $35 / cli. The thing that
+// truly needs no CPU access at all is SPRITE DATA, so the hole ladder lives under the hole now
+// (see HOLEBASE) and the charsets are at $c000/$c800, where a store is a store.
+// Bank 3 has no char-ROM shadow (that is banks 0 and 2 at $1000-$1fff), so $c000 is clean.
+const CHARSET = 0xc000;                 // charset A: upright glyphs, above the horizon
+const CHARSET_B = 0xc800;               // charset B: every glyph flipped, below the horizon
 // Charset B is DERIVED from A at startup (see cpChr), so only ONE charset exists anywhere --
 // and it is never in the image: the loader decodes it straight into $d000, which is the one
 // thing a KERNAL LOAD cannot do. The paragraph that used to be here described a low "source"
@@ -3090,7 +3098,7 @@ const ORBNOCELL = process.env.ORBNOCELL === '1';
 // The sprite bitmaps are their own disk file, loaded straight into VIC bank 3 ($c000, 64-byte
 // aligned, first of the 159 free slots) rather than emitted into the image. They were at $2000
 // in bank 0 before the bank-3 move, which is now the code's growth room.
-const SPRBASE = 0xc000;
+const SPRBASE = 0xe800;                 // orb ladder: above the screens, plain RAM (was $c000, now the charsets)
 // The orb tables go at the TOP of the hole above the code, ending at $4000 where the first
 // emitted table begins. Placing them at the top rather than the bottom keeps the code's growth
 // room ONE contiguous piece below them instead of splitting the hole in two. RELOC+0x1300,
@@ -4575,7 +4583,8 @@ const fRowT = (() => {
 // Rim thickness in BITMAP pixels. The rim is what makes one bitmap serve as both the exit
 // hole and a socket -- see the grid build below.
 const HOLE_RIM = +(process.env.HOLERIM ?? 1);
-const HOLEBASE = 0xe800;                         // above the charsets: 75 slots do not fit in
+const HOLEBASE = 0xd000;                         // UNDER THE I/O HOLE: the VIC reads it, the CPU never does.
+                                                 // The loader lands it at $d000 via a $34 two-step. (was $e800)
                                                  //   the 48 between $c400 and the I/O hole, and
                                                  //   $e800-$ffb9 is the bank.s other free run
 // A rung is a target apparent WIDTH; both magnification bits then follow from the SHAPE rather
@@ -4946,7 +4955,7 @@ if (process.env.SEATDUMP === 'steps') {
   }
 }
 
-fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, 0x10000);
+fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, SCR_A);   // under the hole, below the screens
 
 
 // ---- PICSEG: cut-scene pictures 2..N, in the socket ladder's space ----
@@ -4957,10 +4966,10 @@ fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, 0x100
 // separate job and this build is a look at the SEQUENCE, not the final layout.
 const PICSEG = DIE && NPIC > 1 ? PICS.maps.slice(1).flatMap(m => m.map) : [];
 if (PICSEG.length) {
-  const room = LOADER_RUN - SEATBASE;
+  const room = LVLSHADOW - SEATBASE;     // up to the level shadow, the next tenant of bank 3's tail
   if (PICSEG.length > room) throw new Error(
     `IPIC is ${PICSEG.length} bytes but only ${room} are free between $${SEATBASE.toString(16)} ` +
-    `and the loader at $${LOADER_RUN.toString(16)} -- ${NPIC} pictures do not fit`);
+    `and the level shadow at $${LVLSHADOW.toString(16)} -- ${NPIC} pictures do not fit`);
   console.error(`  cut scene: ${NPIC} pictures, 1 in the image + ${NPIC - 1} as IPIC` +
                 ` at $${SEATBASE.toString(16)} (${PICSEG.length} of ${room} bytes)`);
 }
@@ -6052,20 +6061,15 @@ entry:
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
         ; CIA registers rather than memory (the build refuses an image past $c000 for the same
         ; reason). Charset A is therefore not loaded at all in the usual sense: the self-extracting
-        ; loader decodes it STRAIGHT into $d000 with the port at $34. All that is left to do here is
-        ; build the mirror, charset B, from the copy already in place.
+        ; loader lands it at $c000. All that is left to do here is build the mirror, charset B,
+        ; from the copy already in place.
         ;
-        ; The port goes to $34 -- mode 4, RAM everywhere -- for the duration. Interrupts are still
-        ; off (this is well before cli) and nothing here touches I/O, which is the only reason it
-        ; is safe to have the VIC's registers unmapped for the duration (2KB read, 4KB written).
-        ;
-        ; ORDER MATTERS AND IT IS SUBTLE. The colour-RAM fill above had to run with I/O MAPPED,
-        ; because colour RAM is a separate 1K chip at $d800-$dbff. Charset B also lives at $d800 --
-        ; in the DRAM underneath, which is what the VIC reads. Two different memories at one
-        ; address, each reached in a different port mode, and the writes above and below must not
-        ; be swapped.
-        lda #$34
-        sta $01
+        ; NO PORT DANCE ANY MORE (2026-09-16). The charsets sat under the I/O hole and this block
+        ; ran with the port at $34 -- RAM everywhere, VIC registers unmapped -- with a long note
+        ; about why the colour-RAM fill above and this copy could not be reordered (two memories
+        ; at one address). They are at $c000/$c800 now, plain RAM in the engine's own mode $35,
+        ; so this is a copy loop and nothing else. The hole ladder took the spot under the hole,
+        ; being the one thing in bank 3 the CPU never reads or writes.
         ; Charset B is DERIVED here, not loaded. It is charset A with every glyph's eight rows
         ; reversed, and for a byte at index x within a glyph the mirrored row is simply x EOR 7:
         ; 7-n == n EOR 7 for n in 0..7, and the EOR leaves the glyph's base address alone. Each
@@ -6100,8 +6104,6 @@ cpChr:  txa
         sta charsetB+1792,x
         inx
         bne cpChr
-        lda #$35                ; back to mode 5: I/O mapped, both ROMs still out
-        sta $01
         lda #$00
         sta $d01a
         lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
@@ -13367,18 +13369,14 @@ dfDn:   rts
 
 ; ---- dieSwap: hand the screen to the face, in ONE frame, on black ----
 dfEnd:
-        sei                     ; charset B is under the I/O hole: port $34, and no IRQ while it
-        lda #$34                ;   is banked out. 1,280 bytes = five pages, ~12,800 cycles.
-        sta $01
-        ldx #$00                ; unrolled per page and GENERATED from the glyph count -- this
+        ldx #$00                ; charset B is plain RAM now: no port dance, no sei. (It was five
+                                ;   pages under the I/O hole, ~12,800 cycles with interrupts off.)
+                                ; unrolled per page and GENERATED from the glyph count -- this
 dsLp:${[...Array(Math.ceil(FACE_NCHR / 256))].map((_, pg) => `
         lda faceChrT+${hx16(pg * 256)},x
-        sta ${hx16(0xd800 + pg * 256)},x`).join('')}
+        sta ${hx16(CHARSET_B + pg * 256)},x`).join('')}
         inx
         bne dsLp
-        lda #$35
-        sta $01
-        cli
         ldx #$00                ; colour RAM is the OTHER memory at $d800 and needs I/O back in.
 dsCol:  lda #${hx(8 | FACEART.colram)}  ; bit 3 keeps the cell multicolor; the face wants black here
         sta $d800,x
@@ -17484,10 +17482,15 @@ try {
   const prgOf = (addr, data) => Buffer.from([addr & 255, addr >> 8, ...data]);
   const DISK = [
     // name, load address, bytes, and whether it must land BEFORE the charset copy
-    { tag: 'C', name: 'ICHR', first: true, at: 0xc000, data: [...fontA] },
-    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: 0xc000, data: ORBBM.flat() },
-                   { tag: 'H', name: 'IHOL', at: HOLEBASE, data: HOLEBM.flat() },
-                   ] : []),   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
+    // ---- IHOL FIRST: it is the file that goes UNDER THE I/O HOLE ----
+    // KERNAL LOAD runs with I/O mapped and cannot write $d000-$dfff, so the hole ladder lands at
+    // $c000 and the loader copies it under with the port at $34. THEN the charsets load straight
+    // to $c000/$c800 over the top -- they are plain RAM now -- and the orb ladder to $e800.
+    // (Until 2026-09-16 the charset took the trip and the ladders lived in plain RAM. The user's
+    // rule: bank 3 is for what the VIC reads; what the CPU never touches belongs under the hole.)
+    ...(SPRITES ? [{ tag: 'H', name: 'IHOL', first: true, at: 0xc000, data: HOLEBM.flat(), length: HOLEBM.length * 64 }] : []),
+    { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
+    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.flat() }] : []),   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
     // socket ladder vacates under NOSOCK. This is DATA the VIC never reads -- it is copied to a
@@ -17532,7 +17535,7 @@ try {
     { tag: 'M', name: 'IMG', at: r.org, data: [...r.bytes] },
   ];
   const { buildLoader } = await import('./loader-src.mjs');
-  const ld = buildLoader(assemble, DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, runtime: f.runtime })),
+  const ld = buildLoader(assemble, DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, runtime: f.runtime, length: f.length ?? f.data.length })),
                          r.labels.entry);
   const d = D64.createEmpty('IRAY', '01');
   d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);   // first, so LOAD"*" finds it
