@@ -2712,6 +2712,10 @@ const NOHUD = flag('NOHUD');
 // all. Any change is drift, and it is measurable in one run rather than felt over a minute of
 // walking. This is how the arithmetic-shift asymmetry was confirmed and then confirmed fixed.
 const WIGGLE = flag('WIGGLE');
+// PADIN=n: burn n x ~13 cycles in the input phase doing nothing, pose untouched. A DIAGNOSTIC to
+// answer one question: does the cost of the phases AFTER input depend on WHEN they start?
+const PADIN = +(process.env.PADIN ?? 0);
+if (PADIN) DIAG.push(`PADIN=${PADIN}`);
 // FRAMELOG=1 (with TOURW=1 PROFILE=1): one 4-byte record per rendered frame -- cell, heading,
 // and the raster lines of WORK the frame took (flip to the tick that closes the wait, so the
 // wait itself is excluded). Filled while the tour runs, read out by probe.mjs afterwards.
@@ -6315,7 +6319,13 @@ ${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster
 ${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}
 ${SNDTEST ? '        jsr sndKeys             ; 4/5 cutoff, 6/7 pulse width\n' : ''}
 ` : ''}        jsr tickDelta
-${FALL ? `${DIE ? `        lda dieSt               ; the face is arriving: no input, no rays, no renderSym, and
+${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
+pdInL:  ldx #$01
+pdInM:  dex
+        bne pdInM
+        dey
+        bne pdInL
+` : ''}${FALL ? `${DIE ? `        lda dieSt               ; the face is arriving: no input, no rays, no renderSym, and
         cmp #$02                ;   the same three-period pacing the fall runs at
         bcc mfAlive
         jsr dieShow
