@@ -54,6 +54,26 @@ const TESTLVL = LVL === 3;
 // so a cell id is still one byte. Two orbs and two angels: the first angel can follow you down
 // the corridor and into the loop if you do not shut the door behind you with the first orb.
 const COMBO = LVL === 4;
+// LVL=5: the same two levels, the ring ROTATED 90 degrees clockwise and set beside a taller,
+// narrower level 1 -- the user's layout of 2026-09-15. 23 x 11 = 253 cells, 102 open. Level 1's
+// room is 6 x 9 with its alcoves and notch; the corridor at y5 runs x6-13 into the ring's west
+// arc; the ring's chamber is x15-19 x y3-7 with a TWO-wide column at x16-17 and its door on the
+// EAST side at (20,5). The exit hole sits at (15,5), west of the column, inside the chamber the
+// second angel guards -- opening the door frees the angel, and the hole is round the column.
+const COMBO2 = LVL === 5;
+const COMBO2_MAP = [
+  "#######################",
+  "#..##..######.........#",
+  "#......######.#######.#",
+  "##....#######.#.....#.#",
+  "##....#######.#.##..#.#",
+  "##............#.##....#",
+  "##....#######.#.##..#.#",
+  "##....#######.#.....#.#",
+  "#......######.#######.#",
+  "#..##..######.........#",
+  "#######################",
+];
 if (TESTLVL && !CHAIN) {             // standalone only: in a chain, level 3 is a level like any
                                      //   other and must not switch the angel or the other levels
                                      //   off. Defaults, so each is still overridable on its own.
@@ -263,7 +283,7 @@ const RING_MAP = [
   "################",
   "################",
 ];
-const LEVEL2 = LVL !== 1 && LVL !== 4;   // 4 is the COMBINED level, which starts from level 1's grid
+const LEVEL2 = LVL !== 1 && LVL !== 4 && LVL !== 5;   // 4 is the COMBINED level, which starts from level 1's grid
 if (LEVEL2) {
   // SYMMETRIC about the door. The first cut ran x1-10 with the door at x5, which left four ring
   // cells to the west corner and five to the east -- the two arcs were different lengths, so which
@@ -292,7 +312,7 @@ if (LEVEL2) {
 // exactly the old layout, so nothing about the generated code changes while these are the default.
 // The stride was written as a literal 16 (and as <<4 / >>4 / &15) in ~40 places; they read MAPW
 // now, which is what lets a level be 28x9 or 12x20 instead of only square.
-const MAPW = +(process.env.MAPW ?? (COMBO ? 28 : 16)), MAPH = +(process.env.MAPH ?? (COMBO ? 9 : 16));
+const MAPW = +(process.env.MAPW ?? (COMBO ? 28 : COMBO2 ? 23 : 16)), MAPH = +(process.env.MAPH ?? (COMBO ? 9 : COMBO2 ? 11 : 16));
 const MAPN = MAPW * MAPH;
 // WIDECELL=1: allow more than 256 cells. The cell id then needs nine bits -- see the page byte
 // and patched operands in the DDA. Sizing the tables is independent of that and comes first, so
@@ -319,6 +339,10 @@ if (COMBO) {
   for (let y = 0; y < 9; y++)
     for (let x = 1; x <= 12; x++) M[y][15 + x] = RING_MAP[y][x] === '#' ? 1 : 0;
   M[4][15] = 0;          // ...and the corridor runs on through it, into the ring's west arc
+}
+if (COMBO2) {
+  M.length = 0;                                  // level 1's 16 rows are not underneath this one
+  for (let y = 0; y < MAPH; y++) { M[y] = []; for (let x = 0; x < MAPW; x++) M[y][x] = COMBO2_MAP[y][x] === '#' ? 1 : 0; }
 }
 const mapAt = (x, y) => (M[y] && M[y][x] !== undefined) ? M[y][x] : 1;
 const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) map.push(mapAt(x, y));
@@ -1117,11 +1141,42 @@ const BENCH_ROUTE = [
 ];
 const BENCH_COMPILED = compileRoute(BENCH_ROUTE, [0x01f6, 0x0149, 0x3b00]);
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+// ROUTE=cover5: the same idea for LVL=5 -- every open cell of the room, the corridor, and the
+// ring's outer loop and chamber, walking and running, never stopping. The chamber is entered by
+// its east door at (20,5); the two-wide column at x16-17 splits it, so both halves are walked.
+const COVER5_ROUTE = [
+  //    x: 0        1         2
+  //       0123456789012345678901 2
+  // y=1    #..##..######.........#
+  // y=2    #......######.#######.#
+  // y=3    ##....#######.#.....#.#
+  // y=4    ##....#######.#.##..#.#
+  // y=5    ##............#.##....#
+  // y=6    ##....#######.#.##..#.#
+  // y=7    ##....#######.#.....#.#
+  // y=8    #......######.#######.#
+  // y=9    #..##..######.........#
+  ['to',  1.5, 1.5], ['to',  2.5, 1.5], ['to',  2.5, 2.5], ['to',  6.5, 2.5],   // NW alcove, row 2 east
+  ['to',  6.5, 1.5], ['to',  5.5, 1.5], ['to',  5.5, 2.5],                      // NE alcove
+  ['to',  2.5, 2.5], ['to',  2.5, 8.5], ['to',  1.5, 8.5], ['to',  1.5, 9.5],   // down the west notch, SW alcove
+  ['to',  2.5, 9.5], ['to',  2.5, 8.5], ['to',  5.5, 8.5], ['to',  5.5, 9.5],   // row 8 east, SE alcove
+  ['to',  6.5, 9.5], ['to',  6.5, 8.5], ['to',  5.5, 8.5], ['to',  5.5, 3.5],   // up the east side
+  ['to',  3.5, 3.5], ['to',  3.5, 7.5], ['to',  4.5, 7.5], ['to',  4.5, 3.5],   // the middle, both ways
+  ['to',  4.5, 5.5], ['run', 13.5, 5.5],                                        // out the corridor, running
+  ['to',  13.5, 1.5], ['to',  21.5, 1.5], ['to',  21.5, 9.5], ['to',  13.5, 9.5],// the outer loop, clockwise
+  ['to',  13.5, 5.5], ['run', 13.5, 1.5], ['run', 21.5, 1.5], ['run', 21.5, 5.5],// ...and part of it running
+  ['to',  19.5, 5.5], ['to',  18.5, 5.5], ['to',  18.5, 3.5], ['to',  15.5, 3.5],// into the chamber, north half
+  ['to',  15.5, 7.5], ['to',  18.5, 7.5], ['to',  18.5, 5.5], ['to',  21.5, 5.5],// south half, out the door
+  ['run', 21.5, 9.5], ['run', 13.5, 9.5], ['run', 13.5, 5.5], ['run', 6.5, 5.5],  // run home
+  ['to',  2.5, 5.5],
+];
 const COVER_COMPILED = compileRoute(COVER_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+const COVER5_COMPILED = compileRoute(COVER5_ROUTE, [0x0280, 0x0280, 0x1000]);
 const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
                  : ROUTE === 'cover' ? COVER_COMPILED.steps
+                 : ROUTE === 'cover5' ? COVER5_COMPILED.steps
                  : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
-if (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'bench') {
+if (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench') {
   DIAGEARLY.push(`ROUTE=${ROUTE}`);
   // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
@@ -1134,7 +1189,7 @@ if (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'bench') {
       if (solid(bx, by)) return true;
     return false;
   };
-  let [x, y, a] = [0x01f6, 0x0149, 0x3b00], bad = [];
+  let [x, y, a] = ROUTE === 'cover5' ? [0x0280, 0x0280, 0x1000] : [0x01f6, 0x0149, 0x3b00], bad = [];
   for (const [i, [t, n]] of TOUR_STEPS.entries()) {
     const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
     const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
@@ -1155,7 +1210,7 @@ if (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'bench') {
     `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
     `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
     `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, bench: BENCH_COMPILED })[ROUTE].end;
+  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED })[ROUTE].end;
   console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
     `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
     `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
@@ -1166,7 +1221,7 @@ if (process.env.TOURDUMP)
                 `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
 // POSEDUMP=1: the compiler's pose at the end of each step, one line a step, for posecheck.mjs.
 if (process.env.POSEDUMP && ROUTE !== 'walk') {
-  const c = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, bench: BENCH_COMPILED })[ROUTE];
+  const c = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED })[ROUTE];
   for (let i = 0; i < TOUR_STEPS.length; i++) {
     const [x, y, a] = c.poses[i + 1] ?? c.end;    // poses[i] is the pose at the START of step i
     console.log(`  pose ${i} ${TOUR_STEPS[i][0]} ${TOUR_STEPS[i][1]} ${x} ${y} ${a}`);
@@ -2593,7 +2648,9 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', LEVEL2 ? 0x80 : 0x3b, 0xff);   // L1: across the room, NOT down the corridor axis
+const PA = hexArg('PA', LEVEL2 ? 0x80 : COMBO2 ? 0x10 : 0x3b, 0xff);   // L1: across the room, NOT down the corridor axis
+                                                                    // COMBO2: from (2,2) toward the room's far wall and the corridor mouth; the room is
+                                                                    //   tall now, and $3b looked straight along its length at 12 fps where this is 15
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
 // the ray tables at QUARTER-unit resolution, so pa:paF = C000, C040, C080 and C0C0 are four
 // DIFFERENT renders that all read "AC0" on screen. A cold start left paF at zero, so three of
@@ -2614,8 +2671,8 @@ const PAF = hexArg('PAF', 0x00, 0xff);
 // then simply walked back and finished the level without it ever mattering again. Starting
 // opposite, with the angel ON the door, means every route to the goal has the angel somewhere
 // along it, and the tie means it has no preferred arc until the player picks one.
-const PX = hexArg('PX', LEVEL2 ? 0x0680 : 0x01f6, 0xffff);
-const PY = hexArg('PY', LEVEL2 ? 0x0780 : 0x0149, 0xffff);
+const PX = hexArg('PX', LEVEL2 ? 0x0680 : COMBO2 ? 0x0280 : 0x01f6, 0xffff);   // COMBO2: PP at (2,2)
+const PY = hexArg('PY', LEVEL2 ? 0x0780 : COMBO2 ? 0x0280 : 0x0149, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
@@ -3567,6 +3624,10 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 8.5, y: 4.5, c: 0 });
     ORBS.push({ x: 21.5, y: 2.5, c: 0 });        // ring (6,2) + 15
   }
+  else if (COMBO2) {                             // the user's markers: OO at (7,5), 00 at (20,5)
+    ORBS.push({ x: 7.5, y: 5.5, c: 0 });
+    ORBS.push({ x: 20.5, y: 5.5, c: 0 });
+  }
   else if (TESTLVL) ORBS.push({ x: 3.5, y: 6.5, c: 0 });  // out in the open, to walk up to
   else if (LEVEL2) ORBS.push({ x: 6.5, y: 2.5, c: 0 });   // in the doorway at (6,2)
   else ORBS.push({ x: 8.5, y: 4.5, c: 0 });      // the corridor mouth
@@ -3589,6 +3650,10 @@ if (process.env.ORBSCATTER) {
     if (COMBO) {                                 // one behind each orb, as on both source levels
       ORBS.push({ x: 9.5, y: 4.5, c: 0, tall: true });
       ORBS.push({ x: 21.5, y: 3.5, c: 0, tall: true });   // ring (6,3) + 15
+    }
+    else if (COMBO2) {                           // AA at (8,5) and (19,5)
+      ORBS.push({ x: 8.5, y: 5.5, c: 0, tall: true });
+      ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
     } else
     ORBS.push(LEVEL2 ? { x: 6.5, y: 3.5, c: 0, tall: true } : { x: 9.5, y: 4.5, c: 0, tall: true });
 }
@@ -3662,7 +3727,7 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = COMBO ? [21, 5] : TESTLVL ? [8, 8] : LEVEL2 ? [6, 5] : [14, 4];   // level 2: centred under the column
+const HOLE_D = COMBO ? [21, 5] : COMBO2 ? [15, 5] : TESTLVL ? [8, 8] : LEVEL2 ? [6, 5] : [14, 4];   // level 2: centred under the column
 const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])],
                   [+(process.env.HOLE2X ?? HOLE_D[0]), +(process.env.HOLE2Y ?? HOLE_D[1])]];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
@@ -3747,7 +3812,7 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // second angel simply followed the player out of the ring, down the corridor and into the first
 // room. Reported from play, and the give-away is that it followed ALL the way: an angel that runs
 // out of rope stops facing you, it does not escort you home.
-const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : COMBO ? '18,1;24,1' : LEVEL2 ? '3,1;9,1' : '')).split(';')
+const LEASH_AT = (process.env.LEASH ?? (TESTLVL ? '' : COMBO ? '18,1;24,1' : COMBO2 ? '13,4;13,6' : LEVEL2 ? '3,1;9,1' : '')).split(';')
   .filter(Boolean).map(q => q.split(',').map(Number));
 // One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
 // past 256 cells needs that changed too -- assert rather than let it go quietly wrong.
