@@ -69,7 +69,7 @@ for (const kv of envStr.split(/\s+/).filter(Boolean)) {
 // data, not runtime state. Reading a not-yet-running program is what produced a whole afternoon of
 // plausible nonsense, so it is checked before anything is interpreted -- never assumed from a wait.
 const LIVE = 'frameCnt';
-env.LABELS = [...names, LIVE].join(',');   // the hook prints every label whose name contains one
+env.LABELS = [...names.filter(n => !n.startsWith('@')), LIVE].join(',');   // the hook prints every label whose name contains one
 let out = '';
 try {
   out = execSync(`node build-iray.mjs`, { env, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
@@ -83,7 +83,10 @@ if (!/^ok:/m.test(build)) {
 }
 // LABELS matches by substring, so ask once per name and take the exact hit.
 const addr = {};
+// A bare hex address -- "@e000:1000" -- reads RAM that has no label: the screen buffers, a
+// table's interior, the I/O area's underlying RAM. Nothing to resolve, so nothing can be stale.
 for (const n of [...names, LIVE]) {
+  if (n.startsWith('@')) { addr[n] = parseInt(n.slice(1), 16); continue; }
   const m = build.match(new RegExp(`^\\s*label ${n} = \\$([0-9a-f]+)\\s*$`, 'm'));
   if (!m) { console.error(`LABEL NOT FOUND: ${n} -- it does not exist in this configuration.`); process.exit(1); }
   addr[n] = parseInt(m[1], 16);

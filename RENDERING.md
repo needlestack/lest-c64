@@ -72,12 +72,31 @@ of faces is everything priced per face or per boundary: the rays that find the b
 spans `interpSpan` fills and `seamSpan` walks, the seams drawn, the run-cache misses where the
 top moves. Level 1's room shows 7-10 faces where a corridor shows 2-4.
 
-A note on how this was got wrong first. `EDGCHK`'s `edcN` was read as "columns with an edge
-band" = 5, against `edgN` = 40, and the ratio 8 was taken as the depth of the jump stacks. A
-fast path for repeated cells in a jump column was built on that -- exact, byte-identical, and
-it fired on ZERO cells, because there are no stacks at ordinary views. The `colH` dump above is
-what should have been looked at first. **A ratio of two counters is only as good as the
-definition of the denominator; read the counter's comment before dividing by it.**
+### Stacks are real, close to a corner
+
+Pressed near a step corner -- X1EF Y1AC A13 -- column 14 has `colH = 83 82 82 17`, a 66-row
+jump, and **nine edge cells stacked in rows 2..10**. The emitted codes down that column are
+
+    0 0 185 4 4 4 4 4 4 4 41 229 229
+
+Row 2 is the near wall's top with the vertical edge under it (`..../..../##../###.`), rows 3..9
+are the pure split `###.` (code 4), row 10 is where the far top lands. The renderer was already
+choosing these correctly -- the step path re-selects per row -- but at ~200 cycles a row for an
+answer that, between the two tops, cannot be anything but the split at the boundary column.
+`VSPLIT` (renderSym, `vsPrep`/`vsChk`) emits those middle rows directly: which side is near from
+the two heights, the far top's row from `rbT`, the code from a six-entry table looked up in the
+charset at build time. Exact -- pixel-identical on eight pinned views -- and worth ~1,700 cycles
+a frame at that pose, ~0 on the benchmark route (which rarely hugs a corner). It only prepares
+when the band is at least three rows deep; on every step cell it cost more than it saved.
+
+How this was got wrong twice first, for the record. (1) `edgN/edcN = 40/5` was read from ONE
+mid-tour frame as "8 cells per jump column, everywhere" -- a `colH` dump from the room's middle
+shows one cell per column and no stacks at all. (2) A fast path that repeated the code ABOVE was
+built on that reading; it fired on zero cells from the middle of the room, and at the corner it
+would have been WRONG, stamping the top cell's glyph (with two rows of sky) down the whole stack.
+A screen dump taken from a build that still contained it was then misread as the shipping
+renderer's output. **Dump `colH` and the screen bytes at the pose in question, from a clean
+build, before theorising** -- both are one probe.mjs call (`@e000:1000`).
 
 ## The frame, by share (benchmark route, level 1, no objects, 2026-09-15)
 

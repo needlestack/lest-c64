@@ -79,6 +79,9 @@ dpy     = $55
 ppHi    = $56
 ppLo    = $57
 tmp2    = $58
+vsOn    = $70e8                 ; VSPLIT: this column is a step column with a stack in progress
+vsRow   = $70e9                 ;   the row the FAR wall's top lands in (rbT of the far height)
+vsCode  = $70ea                 ;   the pure-split glyph for this column's kpos and side
 kpos    = $6c                   ; step path: boundary position, and qB held across the
 qbv     = $6b                   ;   middle-column read that needs A and X
 spanL   = $60
@@ -1946,6 +1949,8 @@ rfCbS:  sta rfCw1+1
         ; X is the cell column and the chains index by it, so it has to survive; Y and A are
         ; free here, which is all this needs.
 rfCol:  stx colc
+        lda #$00
+        sta vsOn                ; VSPLIT: no stack in progress
         ; colH is ONE linear ramp across any cell with no delimiter inside it, so its extremes
         ; are its END columns and the middle two need not be looked at. 97% of cells, measured.
         ; The four-way scan below is kept for the other 3%, where two linear pieces meet and the
@@ -2119,6 +2124,16 @@ rmpHi:  lda rampThi,y
         ; corners grew a horizontal cap. Sampling the height at the LAST column before the
         ; boundary as well lets the plateau slope: 1.57 -> 0.65 wrong logical columns a frame.
 rfStep: sta kpos                ; boundary position, 1..3
+        ; VSPLIT: only worth preparing if the column's edge band is at least three rows --
+        ; top cell, one or more split cells, far-top cell. A band of one or two rows has no
+        ; middle, and vsPrep on every step cell cost the benchmark more than the stacks saved.
+        lda rsv
+        sec
+        sbc rbv
+        cmp #$03
+        bcc vsNo
+        jsr vsPrep              ; side, far-top row and split code for this column
+vsNo:
         lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
         lsr
         lsr
@@ -2215,7 +2230,26 @@ lda erow
         ; ---- solid run: rows rs .. 12 ----
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
-        bcc rfEdgeL
+        bcc vsChk
+        jmp rfSolid
+vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ----
+        beq rfEdgeL             ; no: the ordinary selection
+        cmp vsRow               ; A = erow: before the far top's row, the pure split
+        bcs vsEnd
+        clc
+        adc bufOff
+        tay
+        lda edgLoT,y
+        sta jv
+        lda edgHiT,y
+        sta jv+1
+        ldx colc
+        lda vsCode
+        sta ecode
+        jmp (jv)                ; -> edA<row> -> inc erow -> jmp rfEdgeT
+vsEnd:  lda #$00                ; the far top's row and below: back to real selection
+        sta vsOn
+        jmp rfEdgeL
 rfSolid:; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
         ; rs is 0..13, so the top nibble is spare -- and that was tried and MEASURED: 25 chain
         ; draws of 80 with it, 25 without. Not one extra hit.
@@ -4151,6 +4185,8 @@ moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
 rowLoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192
 rowHiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3
 kTabT:  !byte 164,172,180,188,196,204,212,220,228,236,244,252,4
+vsplitL: !byte 0,7,23,4   ; VSPLIT: solid LEFT of boundary column 1,2,3: #... ##.. ###.
+vsplitR: !byte 0,31,16,125   ;   solid RIGHT: .### ..## ...#
 col4T:  !byte 0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156
 
 qmColT: !byte 0,1,1,2   ; middle-sample column, indexed by kpos
@@ -10110,6 +10146,34 @@ ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then i
         sec
         rts
 ogYes:  clc
+        rts
+; ---- vsPrep: a step column's near side, the row its far top lands in, the split code ----
+; Called once, on the top step cell of the column (kpos is set). Rows after that one and strictly
+; before vsRow are the pure split; vsRow itself, the far top, gets a real selection. The taller
+; end is the near wall. Out of line because the main block is within 20 bytes of its ceiling.
+vsPrep:
+        ldx colc
+        lda col4T,x
+        tax
+        lda colH,x              ; left height...
+        cmp colH+3,x            ; ...against right
+        bcc vsRgt
+        lda colH+3,x            ; left is near: the far top is the right height
+        tay
+        lda rbT,y
+        sta vsRow
+        ldy kpos
+        lda vsplitL,y
+        sta vsCode
+        jmp vsSet
+vsRgt:  tay                     ; right is near: A = left height = the far one
+        lda rbT,y
+        sta vsRow
+        ldy kpos
+        lda vsplitR,y
+        sta vsCode
+vsSet:  lda #$01
+        sta vsOn
         rts
 seamOne:
         lda #$00                ; k as 8.8

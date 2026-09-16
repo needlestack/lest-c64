@@ -2339,9 +2339,34 @@ for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
 // horizon, which reads as a rendering bug anywhere except where it actually is.
 if (process.env.GLYPHDUMP) {
   const g = c => [...fontA.slice(c * 8, c * 8 + 8)].map(b => b.toString(2).padStart(8, '0')).join(' ');
+  // GLYPHDUMP=n[,n...]: draw those codes as 4x8 pixel pictures. # = wall (pair 01), . = sky (00),
+  // = = seam ink (10), + = colour-RAM ink (11). This is how the stack artefact was seen: code 185
+  // at X1EF Y1AC A13 rows 2..9 was ..../..../##../###./... eight times down one column.
+  if (/^\d/.test(process.env.GLYPHDUMP)) for (const c of process.env.GLYPHDUMP.split(',').map(Number)) {
+    console.error(`  glyph ${c}:`);
+    for (let r = 0; r < 8; r++) { const b = fontA[c * 8 + r]; let line = '    ';
+      for (let k = 0; k < 4; k++) { const pr = (b >> (6 - 2 * k)) & 3; line += '.#=+'[pr]; }
+      console.error(line); }
+  }
   for (const [n, c] of [['BLANK(0) ', 0], ['SOLID(1) ', 1], ['readout  ', 221], ['seam 239 ', 239], ['occB 243 ', 243], ['occB 246 ', 246], ['occB 249 ', 249], ['occW 250 ', 250], ['occW 253 ', 253], ['occW 255 ', 255], ['ramp 100 ', 100]])
     console.error(`  ${n} ${g(c)}`);
 }
+// VSPLIT: in a step column, the cells BETWEEN the near wall's top and the far wall's top are the
+// pure vertical split at the boundary column -- solid on the near side, sky on the far -- and are
+// emitted as that without a selection. A CORRECTION as much as a saving: the step path was
+// stamping the TOP cell's glyph (the near top AND the edge, e.g. ..../..../##../###./...) down the
+// whole stack, so every cell under the top carried two rows of sky it should not have -- a notched
+// ladder down every close corner. Measured at X1EF Y1AC A13: column 14, colH 83 82 82 17, rows
+// 2..9 all one code; rows 3..9 should be the pure ###. split. VSPLIT=0 to A/B.
+const VSPLIT = process.env.VSPLIT !== '0';
+// The six pure vertical splits, looked up in the charset rather than assumed: a code number is
+// an output of the k-medians fit and moves whenever the plan is refit.
+const vsplitFind = rowByte => { for (let c = 0; c < 256; c++) if ([...Array(8)].every((_, r) => fontA[c * 8 + r] === rowByte)) return c; return -1; };
+const wallRow = cols => cols.reduce((b, on, k) => b | ((on ? 1 : 0) << (6 - 2 * k)), 0);   // pair 01 = wall
+const VSPLIT_L = [1, 2, 3].map(p => vsplitFind(wallRow([0, 1, 2, 3].map(k => k < p))));    // #... ##.. ###.
+const VSPLIT_R = [1, 2, 3].map(p => vsplitFind(wallRow([0, 1, 2, 3].map(k => k >= p))));   // .### ..## ...#
+if (VSPLIT && [...VSPLIT_L, ...VSPLIT_R].some(c => c < 0))
+  throw new Error(`VSPLIT: the charset lacks a pure vertical split glyph: L=${VSPLIT_L} R=${VSPLIT_R}`);
 for (let i = 0; i < fontA.length; i++)
   if (fontB[i] !== fontA[i ^ 7])
     throw new Error(`charset B is not fontA[i^7] at i=${i} (glyph ${i >> 3} row ${i & 7}): ` +
@@ -5326,7 +5351,10 @@ dpy     = $55
 ppHi    = $56
 ppLo    = $57
 tmp2    = $58
-kpos    = $6c                   ; step path: boundary position, and qB held across the
+${VSPLIT ? `vsOn    = $70e8                 ; VSPLIT: this column is a step column with a stack in progress
+vsRow   = $70e9                 ;   the row the FAR wall's top lands in (rbT of the far height)
+vsCode  = $70ea                 ;   the pure-split glyph for this column's kpos and side
+` : ''}kpos    = $6c                   ; step path: boundary position, and qB held across the
 qbv     = $6b                   ;   middle-column read that needs A and X
 spanL   = $60
 spanR   = $61
@@ -7362,7 +7390,7 @@ ${SEAMS && SEAMDRAW ? '        sty rfCb3+1\n' : ''}
         ; X is the cell column and the chains index by it, so it has to survive; Y and A are
         ; free here, which is all this needs.
 rfCol:  stx colc
-${EDGCHK ? `        ; EDGCHK: is this cell column's colH bit-identical to last frame's? That is exactly
+${VSPLIT ? '        lda #$00\n        sta vsOn                ; VSPLIT: no stack in progress\n' : ''}${EDGCHK ? `        ; EDGCHK: is this cell column's colH bit-identical to last frame's? That is exactly
         ; what an edge-band cache would have to key on, so counting it prices the idea. X must
         ; survive -- it is the cell column and the run-cache tests below index on it.
         ldy col4T,x
@@ -7585,7 +7613,17 @@ rmpHi:  lda rampThi,y
         ; corners grew a horizontal cap. Sampling the height at the LAST column before the
         ; boundary as well lets the plateau slope: 1.57 -> 0.65 wrong logical columns a frame.
 rfStep: sta kpos                ; boundary position, 1..3
-        lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
+${VSPLIT ? `        ; VSPLIT: only worth preparing if the column's edge band is at least three rows --
+        ; top cell, one or more split cells, far-top cell. A band of one or two rows has no
+        ; middle, and vsPrep on every step cell cost the benchmark more than the stacks saved.
+        lda rsv
+        sec
+        sbc rbv
+        cmp #$03
+        bcc vsNo
+        jsr vsPrep              ; side, far-top row and split code for this column
+vsNo:
+` : ''}        lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
         lsr
         lsr
         lsr
@@ -7755,8 +7793,27 @@ rcHave: sta cqtmp
         ; ---- solid run: rows rs .. 12 ----
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
-        bcc rfEdgeL
-rfSolid:${SEAMS && SEAMDRAW ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
+        bcc ${VSPLIT ? 'vsChk' : 'rfEdgeL'}
+${VSPLIT ? `        jmp rfSolid
+vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ----
+        beq rfEdgeL             ; no: the ordinary selection
+        cmp vsRow               ; A = erow: before the far top's row, the pure split
+        bcs vsEnd
+        clc
+        adc bufOff
+        tay
+        lda edgLoT,y
+        sta jv
+        lda edgHiT,y
+        sta jv+1
+        ldx colc
+        lda vsCode
+        sta ecode
+        jmp (jv)                ; -> edA<row> -> inc erow -> jmp rfEdgeT
+vsEnd:  lda #$00                ; the far top's row and below: back to real selection
+        sta vsOn
+        jmp rfEdgeL
+` : ''}rfSolid:${SEAMS && SEAMDRAW ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
         ; rs is 0..13, so the top nibble is spare -- and that was tried and MEASURED: 25 chain
         ; draws of 80 with it, 25 without. Not one extra hit.
         ;
@@ -10133,7 +10190,9 @@ moveXT: ${chunk(moveX).trim()}
 moveYT: ${chunk(moveY).trim()}
 rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
-kTabT:  !byte ${kTab.join(',')}
+kTabT:  !byte ${kTab.join(',')}${VSPLIT ? `
+vsplitL: !byte 0,${VSPLIT_L.join(',')}   ; VSPLIT: solid LEFT of boundary column 1,2,3: #... ##.. ###.
+vsplitR: !byte 0,${VSPLIT_R.join(',')}   ;   solid RIGHT: .### ..## ...#` : ''}
 col4T:  !byte ${[...Array(40)].map((_, i) => i * 4).join(',')}
 
 qmColT: !byte 0,${[1,2,3].map(qmCol).join(',')}   ; middle-sample column, indexed by kpos
@@ -15983,6 +16042,34 @@ ogSk1:
         sec
         rts
 ogYes:  clc
+        rts
+` : ''}${VSPLIT ? `; ---- vsPrep: a step column's near side, the row its far top lands in, the split code ----
+; Called once, on the top step cell of the column (kpos is set). Rows after that one and strictly
+; before vsRow are the pure split; vsRow itself, the far top, gets a real selection. The taller
+; end is the near wall. Out of line because the main block is within 20 bytes of its ceiling.
+vsPrep:
+        ldx colc
+        lda col4T,x
+        tax
+        lda colH,x              ; left height...
+        cmp colH+3,x            ; ...against right
+        bcc vsRgt
+        lda colH+3,x            ; left is near: the far top is the right height
+        tay
+        lda rbT,y
+        sta vsRow
+        ldy kpos
+        lda vsplitL,y
+        sta vsCode
+        jmp vsSet
+vsRgt:  tay                     ; right is near: A = left height = the far one
+        lda rbT,y
+        sta vsRow
+        ldy kpos
+        lda vsplitR,y
+        sta vsCode
+vsSet:  lda #$01
+        sta vsOn
         rts
 ` : ''}seamOne:
         lda #$00                ; k as 8.8
