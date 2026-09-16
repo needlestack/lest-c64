@@ -2648,15 +2648,15 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', LEVEL2 ? 0x80 : COMBO2 ? 0x10 : 0x3b, 0xff);   // L1: across the room, NOT down the corridor axis
-                                                                    // COMBO2: from (2,2) toward the room's far wall and the corridor mouth; the room is
-                                                                    //   tall now, and $3b looked straight along its length at 12 fps where this is 15
+const PA = hexArg('PA', LEVEL2 ? 0x80 : COMBO2 ? 0x19 : 0x3b, 0xff);   // L1: across the room, NOT down the corridor axis
+                                                                    // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
+                                                                    //   room's far wall and the corridor mouth
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
 // the ray tables at QUARTER-unit resolution, so pa:paF = C000, C040, C080 and C0C0 are four
 // DIFFERENT renders that all read "AC0" on screen. A cold start left paF at zero, so three of
 // every four reachable views could not be replayed from a screenshot at all, and a reported
 // glitch that lived on one of them looked like it simply did not reproduce.
-const PAF = hexArg('PAF', 0x00, 0xff);
+const PAF = hexArg('PAF', COMBO2 ? 0xc0 : 0x00, 0xff);   // COMBO2: the user's A19C0
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
 // Level 1 opens in the room's north-west corner looking diagonally across it. The old start
@@ -3624,8 +3624,8 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 8.5, y: 4.5, c: 0 });
     ORBS.push({ x: 21.5, y: 2.5, c: 0 });        // ring (6,2) + 15
   }
-  else if (COMBO2) {                             // the user's markers: OO at (7,5), 00 at (20,5)
-    ORBS.push({ x: 7.5, y: 5.5, c: 0 });
+  else if (COMBO2) {                             // the user's markers: OO at (6,5), 00 at (20,5)
+    ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });
   }
   else if (TESTLVL) ORBS.push({ x: 3.5, y: 6.5, c: 0 });  // out in the open, to walk up to
@@ -3651,8 +3651,8 @@ if (process.env.ORBSCATTER) {
       ORBS.push({ x: 9.5, y: 4.5, c: 0, tall: true });
       ORBS.push({ x: 21.5, y: 3.5, c: 0, tall: true });   // ring (6,3) + 15
     }
-    else if (COMBO2) {                           // AA at (8,5) and (19,5)
-      ORBS.push({ x: 8.5, y: 5.5, c: 0, tall: true });
+    else if (COMBO2) {                           // AA at (7,5) and (19,5)
+      ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
     } else
     ORBS.push(LEVEL2 ? { x: 6.5, y: 3.5, c: 0, tall: true } : { x: 9.5, y: 4.5, c: 0, tall: true });
