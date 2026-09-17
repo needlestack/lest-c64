@@ -6050,12 +6050,33 @@ fdNoF:
         adc baseHi
         sta fdD+1
         jsr arcBand             ; the curve itself, at pixel resolution via the ramps
-        lda arcBlw              ; ---- and only the rows that just CHANGED ----
-        sta fdCol               ; The arc only ever rises, so everything below where it was last
-        ldx #<phA               ; time this buffer was drawn is already painted. Fill from the
-        lda baseHi              ; new edge to the old one and no further: four rows on a typical
-        cmp #$e0  ; frame instead of up to twenty-five. Per buffer, because each is
-        beq fdPhA               ; two animation frames behind the other.
+        lda arcBlw              ; ---- and the rows below the arc ----
+        sta fdCol
+        lda arcInv
+        beq fdIncr
+        ; LANDING: from the arc's bottom down to the room's first row, every frame. See fRowT's
+        ; block byte 26 for why this is not incremental.
+        lda fwLd+1              ; the block fdWarp just used
+        sta fdRm+1
+        lda fwLd+2
+        sta fdRm+2
+        ldy #26
+fdRm:   lda $ffff,y             ; the room's first row this frame
+        sec
+        sbc arcHi
+        bcc fdTail              ; the room has reached the arc: nothing between them
+        beq fdTail
+        jsr fdFill
+        jmp fdTail
+fdIncr:
+        ; DROP: only the rows that just CHANGED. The arc only ever rises, so everything below
+        ; where it was last time this buffer was drawn is already hole. Fill from the new edge to
+        ; the old one and no further: four rows on a typical frame instead of up to twenty-five.
+        ; Per buffer, because each is two animation frames behind the other.
+        ldx #<phA
+        lda baseHi
+        cmp #$e0
+        beq fdPhA
         ldx #<phB
 fdPhA:  stx fdPh+1              ; both operands patched: one reads it, one writes it back
         stx fdPhW+1
@@ -6069,6 +6090,7 @@ fdPh2:  pha
 fdPhW:  sta phA                 ; remember where it is now, for this buffer
         pla
         jsr fdFill
+fdTail:
         ; ---- the DEPARTING arc, drawn over the top of an arriving one ----
         ; Only for the first ARC_OVERLAP frames of the landing, and only ever above it: the two
         ; rims never share a row (see arcOvSpT). Its polarity is the drop's -- floor above, hole
@@ -7271,37 +7293,6 @@ bgFin:  lda #$03
         sta bgPh
 bgDn:   rts
 
-; bgCopy: columns rsLo..rsHi of the back buffer, into the same columns of fallBuf2.
-bgCopy: lda #$00
-        sta fdS
-        sta fdD
-        lda baseHi
-        sta fdS+1
-        lda #$49
-        sta fdD+1
-        ldx #25
-bgcRow: ldy rsLo
-bgcB:   lda (fdS),y
-        sta (fdD),y
-        cpy rsHi
-        beq bgcAdv
-        iny
-        jmp bgcB
-bgcAdv: clc
-        lda fdS
-        adc #40
-        sta fdS
-        bcc bgcS1
-        inc fdS+1
-bgcS1:  clc
-        lda fdD
-        adc #40
-        sta fdD
-        bcc bgcS2
-        inc fdD+1
-bgcS2:  dex
-        bne bgcRow
-        rts
 
 ; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
@@ -8692,6 +8683,40 @@ hlFillT: !byte 0,0,0
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
 hlSeat: !fill 3, 0        ; NHOLE: hlSCl clears NHOLE of them on every restart
+; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
+; into the hole under holeVarT: entered by jsr only, nothing falls in, and "* = $6100 moves
+; backward" is the guard if this block grows into it.
+; bgCopy: columns rsLo..rsHi of the back buffer, into the same columns of fallBuf2.
+bgCopy: lda #$00
+        sta fdS
+        sta fdD
+        lda baseHi
+        sta fdS+1
+        lda #$49
+        sta fdD+1
+        ldx #25
+bgcRow: ldy rsLo
+bgcB:   lda (fdS),y
+        sta (fdD),y
+        cpy rsHi
+        beq bgcAdv
+        iny
+        jmp bgcB
+bgcAdv: clc
+        lda fdS
+        adc #40
+        sta fdS
+        bcc bgcS1
+        inc fdS+1
+bgcS1:  clc
+        lda fdD
+        adc #40
+        sta fdD
+        bcc bgcS2
+        inc fdD+1
+bgcS2:  dex
+        bne bgcRow
+        rts
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte 255,255,255,255,255,255,255,19,19,19,18,18,18,17,17,17,17,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -8715,7 +8740,13 @@ arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
 ; highest, so each rim sits in the charset its polarity needs
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
-blkT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,0,0,0,0,1,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,1,1,0,0,1,0,1,1,1,0,0,0,0,2,2,0,0,0,0,0,0,1,0,1,1,0,2,2,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,1,1,0,0,1,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,0,0,0,0,1,0,1,1,0,0,0,0,0,0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,0,1,1,0,0,1,1,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+; PADDED TO A PAGE. objInit rebuilds this from mapT with a 256-iteration "inx / bne" copy -- the
+; cheapest loop there is -- and a 253-cell map made the last three stores land on whatever came
+; next: mul40LoT[0..2], which the fall uses to find rows 0, 1 and 2. Rows 1 and 2 of every fall
+; frame went to row 0 instead, leftover rim black sat in row 2 for the last five landing frames,
+; and the two buffers flickered it against each other (2026-09-17). The pad is what those three
+; stores hit now; the level change that shrank the map to 253 cells is what exposed it.
+blkT: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,0,0,0,0,1,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,1,1,0,0,1,0,1,1,1,0,0,0,0,2,2,0,0,0,0,0,0,1,0,1,1,0,2,2,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,1,1,0,0,1,0,1,1,1,0,0,0,0,1,1,1,1,1,1,1,0,1,0,0,0,0,0,1,0,1,1,0,0,0,0,0,0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,0,1,1,0,0,1,1,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte 0,40,80,120,160,200,240,24,64,104,144,184,224,8,48,88,128,168,208,248,32,72,112,152,192,232
 mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
@@ -8774,25 +8805,25 @@ fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
         !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,0,0,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,0,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,25,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,25,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,25,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,24,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,0,22,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,0,20,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,0,19,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,0,18,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,0,16,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,0,15,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,0,13,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,0,11,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0,9,0,0,0,0,0
+        !byte 255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,0,7,0,0,0,0,0
+        !byte 255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,0,5,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
+        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
         !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,0,0,0,0,0,0,0
         * = $7000
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
@@ -8998,7 +9029,7 @@ mapT:   !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,0,1,1,1,1,1,1,1,0,1,1
         !byte 0,0,1,1,0,0,1,1,1,1,1,1,0,0,0,0
         !byte 0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1
-        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1
+        !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1   ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
         * = $8f00
 rbT:    !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
         !byte 9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6
@@ -9080,7 +9111,10 @@ holeSeeT: !byte 0,0,0,0,0,0,0,0,0,0,48,0,0,8,0,0,4,0,0,2,0,0,3,0,0,0,0,0,0,0,0,0
         * = $9200
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
-; used to carry -- are DERIVED from the map by two passes over it. Carrying them was costing more
+; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
+; tail): the merge-hazard lists split runs into pieces with ids of their own, which no pass over
+; the map can produce, and this routine used to leave those ids' plane and face holding the level
+; you fell FROM -- the socket room's column then occluded against level 1's planes. Carrying them was costing more
 ; than recomputing them: the swap runs at ~29 cycles a byte, so not moving 1,124 of them saves
 ; ~32,000 cycles, and this costs about 25,000. The drop through a hole gets CHEAPER, not dearer.
 ;
@@ -9088,11 +9122,25 @@ holeSeeT: !byte 0,0,0,0,0,0,0,0,0,0,48,0,0,8,0,0,4,0,0,2,0,0,3,0,0,0,0,0,0,0,0,0
 ; per cell), then rows (north then south), ids handed out in that interleaved order. Any other
 ; order renumbers every run and the merge-hazard lists, which name ids, stop meaning anything.
 ;
-; No bounds checks, and none needed: the map border is solid (the build refuses one that is not),
-; so at x=0 the cell to the west is the previous ROW's x=15, always a wall, and no face is found.
-; The north and south passes DO need care, because c-16 and c+16 leave the table -- so the north
-; pass starts at row 1 and the south pass stops at row 14. Row 0 has no north face to see and row
-; 15 no south face; both still get their inward-facing side from the other pass.
+; The map border is solid (the build refuses one that is not), so a border cell never has an
+; outward face and the neighbour reads at x=0 (c-1) and x=MAPW-1 (c+1) only have to be DEFINED,
+; not right: for cell 0 and cell MAPN-1 they leave the map, and mapT is padded to a full page of
+; walls so they read wall. The north and south passes would leave the TABLE (c-MAPW, c+MAPW), so
+; the north pass starts at row 1 and the south pass stops at row MAPH-2; row 0 has no north face
+; to see and the last row no south face, and both get their inward side from the other pass.
+;
+; THE 23x11 LEVELS BROKE THIS THREE WAYS (2026-09-17), every one a 16x16 assumption:
+;   - the vertical pass walked y until the cell index WRAPPED, which on a 253-cell map visits the
+;     three bytes past the map for x=0..2 -- so it now counts MAPH rows;
+;   - the south pass stopped at "row 15" (cmp #$0f), so on an 11-row map the last row read c+23
+;     past the table and grew a south face along the bottom border;
+;   - the bytes past mapT were 0 = open, so cell 0 saw an open west neighbour and cell 252 an open
+;     east one, and each grew a run of its own.
+; Three phantom runs took ids 1, 6 and 11, the socket room's column renumbered from 2/3/6/7 to
+; 3/4/8/9, and its 40 merge-hazard lists -- which name the BUILD's ids -- spliced the column onto
+; whichever wall held the old number: "the central column stretches as if attached to another
+; wall off screen" (the user). Level 1 was untouched because mkRuns only runs after a fall.
+; MKRUNS=1 boots through this routine on top of the build's tables so the two can be compared.
 mkRuns: ldx #$00
         txa
 mrZ:    sta runWT,x             ; 0 = "no run here"
@@ -9110,8 +9158,9 @@ mrZ:    sta runWT,x             ; 0 = "no run here"
 mrVx:   lda #$00
         sta mrWp                ; no run in progress on either face
         sta mrEp
+        sta mrY                 ; the row, counted: the index wrapping is NOT the end of a column
         lda mrX
-        tay                     ; c = y*16 + x, walking y means stepping 16
+        tay                     ; c = y*MAPW + x, walking y means stepping MAPW
 mrVy:   lda mapT,y
         bne mrVw
         sta mrWp                ; open cell: both runs end here
@@ -9167,6 +9216,9 @@ mrVn:   tya                     ; next row, same column
         clc
         adc #$17
         tay
+        inc mrY
+        lda mrY
+        cmp #$0b
         bcc mrVy
         inc mrX
         lda mrX
@@ -9187,7 +9239,7 @@ mrHx:   lda mapT,y
         sta mrWp
         sta mrEp
         jmp mrHnx
-mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-16 would leave mapT
+mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW would leave mapT
         beq mrHnn
         tya
         sec
@@ -9212,8 +9264,8 @@ mrHns:  lda mrWid
         jmp mrHs
 mrHnn:  lda #$00
         sta mrWp
-mrHs:   lda mrY                 ; south face: row 15 has none, and c+16 would leave mapT
-        cmp #$0f
+mrHs:   lda mrY                 ; south face: the last row has none, and c+MAPW would leave mapT
+        cmp #$0a
         beq mrHsn
         tya
         clc
@@ -9251,32 +9303,29 @@ mrHnx:  iny
         bcc mrHy
 
         ; ---- the per-run bit lookups, which are pure arithmetic on the id ----
+        ; EVERY id gets its bit, not just the ones below mrNext. The merge-hazard lists hand out
+        ; ids of their own for the pieces a run is split into (the socket room's 8 runs become 12),
+        ; and those never pass through the passes above -- so zeroing "ids past this level's
+        ; count" zeroed exactly the ids the hazard patches write, and an entity behind a split
+        ; run had an empty occluder bit: it popped in and out with the player's cell (2026-09-17).
+        ; No id in the live tables can be stale: the swap is followed by this rebuild, and the
+        ; masks are remade from the live tables every frame.
         ldx #$00
 mrB:    txa
         lsr
         lsr
         lsr
         sta runByteT,x
-        lda #$00
-        cpx mrNext
-        bcs mrBz                ; ids past this level's count stay 0, so a stale id ORs nothing
         txa
         and #$07
         tay
         lda mrBitT,y
-mrBz:   sta runBitT,x
+        sta runBitT,x
         inx
         cpx #$2d
         bcc mrB
-        rts
-mrBitT: !byte 1,2,4,8,16,32,64,128
-mrNext: !byte 0
-mrWid:  !byte 0
-mrEid:  !byte 0
-mrWp:   !byte 0
-mrEp:   !byte 0
-mrX:    !byte 0
-mrY:    !byte 0
+        jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
+                                ;   ends at bfsQ with nothing to spare.
 
 
 ; ---- sfx: one-shot effects on VOICE 3 ----
@@ -9734,7 +9783,7 @@ landYT: !byte 2,2
 ; LVLSHADOW = $f600 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 1011 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 1020 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -9743,9 +9792,9 @@ landYT: !byte 2,2
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte $00
 lvlBasHiT: !byte $f6
-lvlDstLoT: !byte <mapT,<holeSeeT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>holeSeeT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $fd,$60,$07,$07,$04,$04,$02,$02,$01,$80,$01,$01,$01,$03,$04,$04,$01,$07,$07,$2a,$01,$28,$28,$28,$da,$61
+lvlDstLoT: !byte <mapT,<holeSeeT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>holeSeeT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $fd,$60,$09,$07,$07,$04,$04,$02,$02,$01,$80,$01,$01,$01,$03,$04,$04,$01,$07,$07,$2a,$01,$28,$28,$28,$da,$61
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9798,7 +9847,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$1a
+        cmp #$1b
         bne lsTab
         rts
 lsIdx:  !byte 0
@@ -9817,7 +9866,7 @@ orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5
-runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16   ; every id, as mkRuns rebuilds it: split ids come from the hazard lists
 
 ; ---- occRT / occLT / occRTW / occLTW ----
 ; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
@@ -10347,6 +10396,37 @@ oSPdn:  rts
 oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
         sta (osPtr),y
         rts
+; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
+; mkRuns's tail. A spare id never appears in mapT's faces, so the two passes cannot give it a
+; plane; hazSpT (per level, swapped) says which run it was split from. Until this existed the
+; spare slots held whatever the PREVIOUS level's mkRuns had written there (2026-09-17).
+hazSpFix:
+        ldx #$00
+hsfLp:  lda hazSpT,x            ; parent id, or $ff at the end
+        cmp #$ff
+        beq hsfDn
+        tay
+        lda runPlaneT,y
+        pha
+        lda runFaceT,y
+        inx
+        ldy hazSpT,x            ; the spare id
+        sta runFaceT,y
+        pla
+        sta runPlaneT,y
+        inx
+        bne hsfLp               ; always: the table is far shorter than a page
+hsfDn:  rts
+; mkRuns's bit table and scratch. Out of the $9200 block, which the row-counted vertical pass
+; (2026-09-17) filled to the byte -- bfsQ sits at its end and the page boundary is hard.
+mrBitT: !byte 1,2,4,8,16,32,64,128
+mrNext: !byte 0
+mrWid:  !byte 0
+mrEid:  !byte 0
+mrWp:   !byte 0
+mrEp:   !byte 0
+mrX:    !byte 0
+mrY:    !byte 0
 ; ---- omTrig: once a frame, the trig and the shared product halves every entity projection uses ----
 ; This was inline in orbMove. It is ~110 bytes with four local labels and no early exit, called
 ; exactly once a frame, and the main code block below ORB_SMALL ran out of room when the two-level
@@ -10822,6 +10902,7 @@ hazHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 hazCT:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 hazRstT: !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff
 hazLstT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+hazSpT: !byte 255,255,255,255,255,255,255,255,255   ; (parent, spare) pairs for hazSpFix; $ff ends
         * = $a900
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi

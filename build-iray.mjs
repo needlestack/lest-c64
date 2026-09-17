@@ -719,6 +719,14 @@ for (const [cell, hs] of hazCell) for (const h of hs) {
                                   orig: h.run, cells });
 }
 const HAZ = hazRec.length > 0 && process.env.NOHAZ !== '1';   // NOHAZ=1: A/B the fix
+// (parent, spare) id pairs for mkRuns's tail, $ff-terminated, padded to the largest resident
+// level with $ff so the terminator is where the shorter level put it. Travels in the manifest.
+const hazSpTab = (() => {
+  const own = [...hazSpare].flatMap(([run, spare]) => [run, spare]).concat([0xff]);
+  const n = Math.max(own.length, ...(LVLALL ?? []).map(l => l.tables.hazSpT?.length ?? 0));
+  while (own.length < n) own.push(0xff);
+  return own;
+})();
 // cell, table selector, spare id, original id, count, then that many wall-cell indices; $ff ends.
 // hazSet advances by count+5 in one 8-bit add, so a record may not be longer than that allows.
 const HAZTBL = { 0: 'runWT', 1: 'runET', 2: 'runNT', 3: 'runST' };
@@ -4598,7 +4606,17 @@ const fRowT = (() => {
       blk[R] = (sr < 0 || sr > 24) ? 255 : sr;       // 255 = this row has no source yet
     }
     blk[25] = 0;                                     // the landing's content runs off..24, at the
-    out.push(...blk);                                //   BOTTOM, so the hole fill starts at row 0
+                                                     //   BOTTOM, so the hole fill starts at row 0
+    // ...and where it starts, for the fill BETWEEN the rim and the room. The landing used to fill
+    // only the rows the arc had vacated since this buffer's last frame (the drop's trick, where
+    // everything below the arc is hole for good). Here the room's top edge moves too, and the
+    // rows between the arc's bottom and the room's first row were written by nobody: one buffer
+    // kept a row of the rim's black from two frames earlier and the two buffers flickered it
+    // against each other for the last five landing frames (2026-09-17, "char blocks flickering
+    // near the top of the screen"). Now every row is written every frame: SOLID to the arc, the
+    // arc, BLANK to the room, the room.
+    blk[26] = Math.min(25, Math.max(0, off));
+    out.push(...blk);
   }
   return out;
 })();
@@ -5132,7 +5150,14 @@ const LVL_TABLES = [
   //   ['blkT', blkT],
   //   ['runWT', runW], ['runET', runE], ['runNT', runN], ['runST', runS],
   //   ['runPlaneT', ...], ['runFaceT', ...], ['runByteT', ...], ['runBitT', ...],
+  //   (runPlaneT/runFaceT for the hazard SPLIT ids come from hazSpT below -- see mkRuns)
   ['holeSeeT', holeSee],
+  // The merge-hazard SPLIT ids: (parent run, spare id) pairs, $ff-terminated, padded to the
+  // larger level. mkRuns gives every run the map shows a plane and a face, but a spare id exists
+  // only in the hazard lists, so its plane and face -- the parent's -- are copied from this after
+  // every rebuild. Without it the socket room's column, split by its 40 hazard cells, occluded
+  // and seamed against whatever level 1 had left in those slots (2026-09-17).
+  ['hazSpT', hazSpTab],
   // PADDED to the largest resident level. The swap exchanges in place, so a chunk that is
   // shorter here than in the other level would run off the end of this one. The padding sits
   // AFTER the real entries, so the packed orbs-then-holes layout is untouched and nothing
@@ -5293,7 +5318,10 @@ if (!Number.isInteger(WS_SH)) throw new Error(`WALLSINK must be a power of two, 
 // frames -- 512 assembled as `lda #$200`, truncated to 0, and the sink free-ran forever.
 if (WS_N > 255) throw new Error(`WALLSINK must be <= 255 frames (wsN is one byte), got ${WS_N}`);
 const WALL_DELTA = WALLVAR ? (() => {
-  const SKIP = new Set(['orbOccLoT', 'orbOccT']);
+  // hazSpT too: the hazard lists themselves do not toggle with the wall (they are pushed onto the
+  // manifest after the dump), so the split ids they write go into the vanished column's cells,
+  // which no ray can hit -- their planes do not matter, and 48 bytes of delta would say so.
+  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT']);
   const off = [], on = [];
   // The baseline is LEVEL 3's tables with the wall PRESENT -- not the live level's. Diffing
   // against whatever happens to be on screen produced a delta describing the difference between
@@ -12135,7 +12163,12 @@ fallStep:
         cpx #${ARC_DROP_N}
         jmp fstLimD
 fstLim3:cpx #${ARC_N}
-fstLimD:bcc fstFOk
+${process.env.FALLHOLD ? `        bcs fstLimD
+        cpx #${+process.env.FALLHOLD + 1}
+        bcc fstLimD
+        ldx #${+process.env.FALLHOLD}   ; FALLHOLD=n: hold the landing at frame n for ever, so a
+        jmp fstFOk              ;   headless run at warp can be caught on one chosen frame
+` : ''}fstLimD:bcc fstFOk
         dex                     ; ---- this phase has run its course ----
         stx fFrm
         lda fallSt
@@ -12295,12 +12328,33 @@ fdNoF:
         adc baseHi
         sta fdD+1
         jsr arcBand             ; the curve itself, at pixel resolution via the ramps
-        lda arcBlw              ; ---- and only the rows that just CHANGED ----
-        sta fdCol               ; The arc only ever rises, so everything below where it was last
-        ldx #<phA               ; time this buffer was drawn is already painted. Fill from the
-        lda baseHi              ; new edge to the old one and no further: four rows on a typical
-        cmp #${hx(SCR_A >> 8)}  ; frame instead of up to twenty-five. Per buffer, because each is
-        beq fdPhA               ; two animation frames behind the other.
+        lda arcBlw              ; ---- and the rows below the arc ----
+        sta fdCol
+${FALLSCENE ? `        lda arcInv
+        beq fdIncr
+        ; LANDING: from the arc's bottom down to the room's first row, every frame. See fRowT's
+        ; block byte 26 for why this is not incremental.
+        lda fwLd+1              ; the block fdWarp just used
+        sta fdRm+1
+        lda fwLd+2
+        sta fdRm+2
+        ldy #26
+fdRm:   lda $ffff,y             ; the room's first row this frame
+        sec
+        sbc arcHi
+        bcc fdTail              ; the room has reached the arc: nothing between them
+        beq fdTail
+        jsr fdFill
+        jmp fdTail
+fdIncr:
+` : ''}        ; DROP: only the rows that just CHANGED. The arc only ever rises, so everything below
+        ; where it was last time this buffer was drawn is already hole. Fill from the new edge to
+        ; the old one and no further: four rows on a typical frame instead of up to twenty-five.
+        ; Per buffer, because each is two animation frames behind the other.
+        ldx #<phA
+        lda baseHi
+        cmp #${hx(SCR_A >> 8)}
+        beq fdPhA
         ldx #<phB
 fdPhA:  stx fdPh+1              ; both operands patched: one reads it, one writes it back
         stx fdPhW+1
@@ -12314,6 +12368,7 @@ fdPh2:  pha
 fdPhW:  sta phA                 ; remember where it is now, for this buffer
         pla
         jsr fdFill
+fdTail:
         ; ---- the DEPARTING arc, drawn over the top of an arriving one ----
         ; Only for the first ARC_OVERLAP frames of the landing, and only ever above it: the two
         ; rims never share a row (see arcOvSpT). Its polarity is the drop's -- floor above, hole
@@ -13730,37 +13785,6 @@ bgFin:  lda #$03
         sta bgPh
 bgDn:   rts
 
-; bgCopy: columns rsLo..rsHi of the back buffer, into the same columns of fallBuf2.
-bgCopy: lda #$00
-        sta fdS
-        sta fdD
-        lda baseHi
-        sta fdS+1
-        lda #${hx(FALLBUF2 >> 8)}
-        sta fdD+1
-        ldx #25
-bgcRow: ldy rsLo
-bgcB:   lda (fdS),y
-        sta (fdD),y
-        cpy rsHi
-        beq bgcAdv
-        iny
-        jmp bgcB
-bgcAdv: clc
-        lda fdS
-        adc #40
-        sta fdS
-        bcc bgcS1
-        inc fdS+1
-bgcS1:  clc
-        lda fdD
-        adc #40
-        sta fdD
-        bcc bgcS2
-        inc fdD+1
-bgcS2:  dex
-        bne bgcRow
-        rts
 
 ; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
@@ -14773,6 +14797,40 @@ hlFillT: !byte ${LVLT('hlFillT').join(',')}
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
 hlSeat: !fill ${NHOLE}, 0        ; NHOLE: hlSCl clears NHOLE of them on every restart
+; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
+; into the hole under holeVarT: entered by jsr only, nothing falls in, and "* = $6100 moves
+; backward" is the guard if this block grows into it.
+; bgCopy: columns rsLo..rsHi of the back buffer, into the same columns of fallBuf2.
+bgCopy: lda #$00
+        sta fdS
+        sta fdD
+        lda baseHi
+        sta fdS+1
+        lda #${hx(FALLBUF2 >> 8)}
+        sta fdD+1
+        ldx #25
+bgcRow: ldy rsLo
+bgcB:   lda (fdS),y
+        sta (fdD),y
+        cpy rsHi
+        beq bgcAdv
+        iny
+        jmp bgcB
+bgcAdv: clc
+        lda fdS
+        adc #40
+        sta fdS
+        bcc bgcS1
+        inc fdS+1
+bgcS1:  clc
+        lda fdD
+        adc #40
+        sta fdD
+        bcc bgcS2
+        inc fdD+1
+bgcS2:  dex
+        bne bgcRow
+        rts
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte ${holeVarT.join(',')}
@@ -14796,7 +14854,13 @@ arcTopT: !byte ${arcTopT.join(',')}
 ; highest, so each rim sits in the charset its polarity needs
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
 ; record per cell would have been 768 and the lists have 21 bytes spare.
-blkT: !byte ${blkT.join(',')}
+; PADDED TO A PAGE. objInit rebuilds this from mapT with a 256-iteration "inx / bne" copy -- the
+; cheapest loop there is -- and a 253-cell map made the last three stores land on whatever came
+; next: mul40LoT[0..2], which the fall uses to find rows 0, 1 and 2. Rows 1 and 2 of every fall
+; frame went to row 0 instead, leftover rim black sat in row 2 for the last five landing frames,
+; and the two buffers flickered it against each other (2026-09-17). The pad is what those three
+; stores hit now; the level change that shrank the map to 253 cells is what exposed it.
+blkT: !byte ${[...blkT, ...Array(256 - MAPN).fill(1)].join(',')}
 ${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
 mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
@@ -14896,7 +14960,7 @@ runNT: !byte ${runN.join(',')}
         * = ${hx16(RELOC + 0x700)}
 runST: !byte ${runS.join(',')}
         * = ${hx16(RELOC + 0x800)}
-mapT:   ${chunk(map, 16).trim()}
+mapT:   ${chunk([...map, ...Array(256 - MAPN).fill(1)], 16).trim()}   ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
         * = ${hx16(RELOC + 0x900)}
 rbT:    ${chunk(rbT).trim()}
         * = ${hx16(RELOC + 0xa00)}
@@ -14958,7 +15022,10 @@ holeSeeT: !byte ${holeSee.join(",")}
         * = $9200
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
-; used to carry -- are DERIVED from the map by two passes over it. Carrying them was costing more
+; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
+; tail): the merge-hazard lists split runs into pieces with ids of their own, which no pass over
+; the map can produce, and this routine used to leave those ids' plane and face holding the level
+; you fell FROM -- the socket room's column then occluded against level 1's planes. Carrying them was costing more
 ; than recomputing them: the swap runs at ~29 cycles a byte, so not moving 1,124 of them saves
 ; ~32,000 cycles, and this costs about 25,000. The drop through a hole gets CHEAPER, not dearer.
 ;
@@ -14966,11 +15033,25 @@ holeSeeT: !byte ${holeSee.join(",")}
 ; per cell), then rows (north then south), ids handed out in that interleaved order. Any other
 ; order renumbers every run and the merge-hazard lists, which name ids, stop meaning anything.
 ;
-; No bounds checks, and none needed: the map border is solid (the build refuses one that is not),
-; so at x=0 the cell to the west is the previous ROW's x=15, always a wall, and no face is found.
-; The north and south passes DO need care, because c-16 and c+16 leave the table -- so the north
-; pass starts at row 1 and the south pass stops at row 14. Row 0 has no north face to see and row
-; 15 no south face; both still get their inward-facing side from the other pass.
+; The map border is solid (the build refuses one that is not), so a border cell never has an
+; outward face and the neighbour reads at x=0 (c-1) and x=MAPW-1 (c+1) only have to be DEFINED,
+; not right: for cell 0 and cell MAPN-1 they leave the map, and mapT is padded to a full page of
+; walls so they read wall. The north and south passes would leave the TABLE (c-MAPW, c+MAPW), so
+; the north pass starts at row 1 and the south pass stops at row MAPH-2; row 0 has no north face
+; to see and the last row no south face, and both get their inward side from the other pass.
+;
+; THE 23x11 LEVELS BROKE THIS THREE WAYS (2026-09-17), every one a 16x16 assumption:
+;   - the vertical pass walked y until the cell index WRAPPED, which on a 253-cell map visits the
+;     three bytes past the map for x=0..2 -- so it now counts MAPH rows;
+;   - the south pass stopped at "row 15" (cmp #$0f), so on an 11-row map the last row read c+23
+;     past the table and grew a south face along the bottom border;
+;   - the bytes past mapT were 0 = open, so cell 0 saw an open west neighbour and cell 252 an open
+;     east one, and each grew a run of its own.
+; Three phantom runs took ids 1, 6 and 11, the socket room's column renumbered from 2/3/6/7 to
+; 3/4/8/9, and its 40 merge-hazard lists -- which name the BUILD's ids -- spliced the column onto
+; whichever wall held the old number: "the central column stretches as if attached to another
+; wall off screen" (the user). Level 1 was untouched because mkRuns only runs after a fall.
+; MKRUNS=1 boots through this routine on top of the build's tables so the two can be compared.
 mkRuns: ldx #$00
         txa
 mrZ:    sta runWT,x             ; 0 = "no run here"
@@ -14988,8 +15069,9 @@ mrZ:    sta runWT,x             ; 0 = "no run here"
 mrVx:   lda #$00
         sta mrWp                ; no run in progress on either face
         sta mrEp
+        sta mrY                 ; the row, counted: the index wrapping is NOT the end of a column
         lda mrX
-        tay                     ; c = y*16 + x, walking y means stepping 16
+        tay                     ; c = y*MAPW + x, walking y means stepping MAPW
 mrVy:   lda mapT,y
         bne mrVw
         sta mrWp                ; open cell: both runs end here
@@ -15045,6 +15127,9 @@ mrVn:   tya                     ; next row, same column
         clc
         adc #${hx(MAPW)}
         tay
+        inc mrY
+        lda mrY
+        cmp #${hx(MAPH)}
         bcc mrVy
         inc mrX
         lda mrX
@@ -15065,7 +15150,7 @@ mrHx:   lda mapT,y
         sta mrWp
         sta mrEp
         jmp mrHnx
-mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-16 would leave mapT
+mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW would leave mapT
         beq mrHnn
         tya
         sec
@@ -15090,8 +15175,8 @@ mrHns:  lda mrWid
         jmp mrHs
 mrHnn:  lda #$00
         sta mrWp
-mrHs:   lda mrY                 ; south face: row 15 has none, and c+16 would leave mapT
-        cmp #$0f
+mrHs:   lda mrY                 ; south face: the last row has none, and c+MAPW would leave mapT
+        cmp #${hx(MAPH - 1)}
         beq mrHsn
         tya
         clc
@@ -15129,39 +15214,36 @@ mrHnx:  iny
         bcc mrHy
 
         ; ---- the per-run bit lookups, which are pure arithmetic on the id ----
+        ; EVERY id gets its bit, not just the ones below mrNext. The merge-hazard lists hand out
+        ; ids of their own for the pieces a run is split into (the socket room's 8 runs become 12),
+        ; and those never pass through the passes above -- so zeroing "ids past this level's
+        ; count" zeroed exactly the ids the hazard patches write, and an entity behind a split
+        ; run had an empty occluder bit: it popped in and out with the player's cell (2026-09-17).
+        ; No id in the live tables can be stale: the swap is followed by this rebuild, and the
+        ; masks are remade from the live tables every frame.
         ldx #$00
 mrB:    txa
         lsr
         lsr
         lsr
         sta runByteT,x
-        lda #$00
-        cpx mrNext
-        bcs mrBz                ; ids past this level's count stay 0, so a stale id ORs nothing
         txa
         and #$07
         tay
         lda mrBitT,y
-mrBz:   sta runBitT,x
+        sta runBitT,x
         inx
         cpx #${hx(NRUN)}
         bcc mrB
-        rts
+        jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
+                                ;   ends at bfsQ with nothing to spare.
 ${BANDS ? `; The raster-band table, out here because the main code stream has under 100 bytes and this
 ; is indexed data with no alignment need. See the BANDS path in irq.
 bandLT: !byte ${BAND_STOPS.map(b => hx(b[0])).join(',')}
 bandCT: !byte ${BAND_STOPS.map(b => hx(b[2])).join(',')}
 bandDT: !byte ${BAND_STOPS.map(b => hx(b[1])).join(',')}
 bandI:  !byte 0
-` : ''}mrBitT: !byte 1,2,4,8,16,32,64,128
-mrNext: !byte 0
-mrWid:  !byte 0
-mrEid:  !byte 0
-mrWp:   !byte 0
-mrEp:   !byte 0
-mrX:    !byte 0
-mrY:    !byte 0
-
+` : ''}
 ${SOUND ? `
 ; ---- sfx: one-shot effects on VOICE 3 ----
 ; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
@@ -15688,7 +15770,7 @@ orbColRT: !byte ${orbColRT.join(',')}
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
 runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
-runBitT: !byte ${[...Array(NRUN)].map((_, r) => r < nextRun ? 1 << (r & 7) : 0).join(',')}
+runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it: split ids come from the hazard lists
 
 ; ---- occRT / occLT / occRTW / occLTW ----
 ; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
@@ -16227,7 +16309,38 @@ oSPdn:  rts
 oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
         sta (osPtr),y
         rts
-` : ''}; ---- omTrig: once a frame, the trig and the shared product halves every entity projection uses ----
+` : ''}; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
+; mkRuns's tail. A spare id never appears in mapT's faces, so the two passes cannot give it a
+; plane; hazSpT (per level, swapped) says which run it was split from. Until this existed the
+; spare slots held whatever the PREVIOUS level's mkRuns had written there (2026-09-17).
+hazSpFix:
+        ldx #$00
+hsfLp:  lda hazSpT,x            ; parent id, or $ff at the end
+        cmp #$ff
+        beq hsfDn
+        tay
+        lda runPlaneT,y
+        pha
+        lda runFaceT,y
+        inx
+        ldy hazSpT,x            ; the spare id
+        sta runFaceT,y
+        pla
+        sta runPlaneT,y
+        inx
+        bne hsfLp               ; always: the table is far shorter than a page
+hsfDn:  rts
+; mkRuns's bit table and scratch. Out of the $9200 block, which the row-counted vertical pass
+; (2026-09-17) filled to the byte -- bfsQ sits at its end and the page boundary is hard.
+mrBitT: !byte 1,2,4,8,16,32,64,128
+mrNext: !byte 0
+mrWid:  !byte 0
+mrEid:  !byte 0
+mrWp:   !byte 0
+mrEp:   !byte 0
+mrX:    !byte 0
+mrY:    !byte 0
+; ---- omTrig: once a frame, the trig and the shared product halves every entity projection uses ----
 ; This was inline in orbMove. It is ~110 bytes with four local labels and no early exit, called
 ; exactly once a frame, and the main code block below ORB_SMALL ran out of room when the two-level
 ; build met VSPLIT and ENTFOV. A jsr/rts here is 12 cycles against ~800 of arithmetic.
@@ -16747,6 +16860,7 @@ hazHiT: !byte ${HZ_LIVE.hi.join(',') || 0}
 hazCT:  !byte ${HZ_LIVE.ct.join(',') || 0}
 hazRstT: !byte ${HZ_LIVE.rst.join(',')}
 hazLstT: !byte ${HZ_LIVE.lst.join(',') || 0}` : ''}
+hazSpT: !byte ${LVLT('hazSpT').join(',')}   ; (parent, spare) pairs for hazSpFix; $ff ends
 ${TOURW ? `        ; ---- TOURW: the waypoint tour, in the tail of the hazard block ----
         ; FLOWS on from the hazard tables rather than re-originning at $a700. It used to say
         ; "* = $a700", reasoning that the page is free while every resident map splits nothing --

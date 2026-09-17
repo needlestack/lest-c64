@@ -47,6 +47,12 @@ const marks = atArg.split(',').map(Number).filter(n => n > 0);
 // $e000-$ffff (ROM space, where our code never runs with the port at $35) answers it in one run.
 const trapArg = args.find(a => a === '--trap') ? args[args.indexOf('--trap') + 1] : '';
 const trap = trapArg ? trapArg.split(',').map(h => parseInt(h, 16)) : null;
+// --watch lo,hi: a STORE checkpoint on that address range, armed once --until has come true (or
+// at once without --until), so a write that happens legitimately a thousand times before the
+// moment in question does not stop the machine first. Prints PC and the stack at the store --
+// the answer to "who wrote this byte", which no amount of reading it back can give.
+const watchArg = args.find(a => a === '--watch') ? args[args.indexOf('--watch') + 1] : '';
+const watch = watchArg ? watchArg.split(',').map(h => parseInt(h, 16)) : null;
 const untilArg = args.find(a => a === '--until') ? args[args.indexOf('--until') + 1] : '';
 const until = untilArg ? (() => {
   const m = untilArg.match(/^(\w+)\s*(<=|>=|==|<|>)\s*(\d+)$/);
@@ -56,7 +62,7 @@ const until = untilArg ? (() => {
 const expects = [];
 const specs = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until' || args[i] === '--trap') { i++; continue; }
+  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until' || args[i] === '--trap' || args[i] === '--watch') { i++; continue; }
   if (args[i] === '--expect') { expects.push(args[++i]); continue; }
   specs.push(args[i]);
 }
@@ -152,14 +158,17 @@ sock.on('error', e => {
 // resume lands, so polling through a 219-block true-drive load slows it to a crawl and the program
 // never comes up -- which looks exactly like a build that will not start.
 setTimeout(dial, trap ? 1500 : wantWait);   // a trap must be armed before the program runs: dial at once
-let buf = Buffer.alloc(0); const pend = new Map(); let rid = 1;
+let buf = Buffer.alloc(0); const pend = new Map(); let rid = 1, cpHit = false;
 sock.on('data', d => {
   buf = Buffer.concat([buf, d]);
   while (buf.length >= 12) {
     const blen = buf.readUInt32BE ? buf.readUInt32LE(2) : 0;
     if (buf.length < 12 + blen) return;
-    const body = buf.subarray(12, 12 + blen), err = buf[7], id = buf.readUInt32LE(8);
+    const body = buf.subarray(12, 12 + blen), err = buf[7], id = buf.readUInt32LE(8), type = buf[6];
     buf = buf.subarray(12 + blen);
+    // A checkpoint HIT arrives unsolicited: type $11 with the hit flag set, request id $ffffffff.
+    // Polling PC cannot see it -- every monitor command pauses the machine, so PC always "holds".
+    if (id === 0xffffffff && type === 0x11 && body.length > 4 && body[4]) cpHit = true;
     const cb = pend.get(id); if (cb) { pend.delete(id); cb(err, body); }
   }
 });
@@ -197,9 +206,9 @@ const pcGet = () => new Promise((res, rej) => {
   sock.write(Buffer.concat([h, b]));
 });
 
-const cpSet = (lo, hi) => new Promise((res, rej) => {
+const cpSet = (lo, hi, op = 4) => new Promise((res, rej) => {   // op: 1 load, 2 store, 4 exec
   const id = rid++, b = Buffer.alloc(8);
-  b.writeUInt16LE(lo, 0); b.writeUInt16LE(hi, 2); b[4] = 1; b[5] = 1; b[6] = 4; b[7] = 0;
+  b.writeUInt16LE(lo, 0); b.writeUInt16LE(hi, 2); b[4] = 1; b[5] = 1; b[6] = op; b[7] = 0;
   const h = Buffer.alloc(11);
   h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(b.length, 2); h.writeUInt32LE(id, 6); h[10] = 0x12;
   pend.set(id, (err, body) => err ? rej(new Error(`checkpoint set failed: ${err}`)) : res(body.readUInt32LE(0)));
@@ -289,6 +298,30 @@ sock.on('connect', async () => {
       }
       if (!ok) bail(`--until ${untilArg} never came true; ${until.name} was last ${last}. ` +
                     `The program is running, so either the condition cannot happen or it needs longer.`);
+    }
+    if (alive && watch) {
+      cpHit = false;
+      await cpSet(watch[0], watch[1], 2); await resume();
+      for (const t0 = Date.now(); Date.now() - t0 < 120000; ) {
+        await new Promise(r => setTimeout(r, 150));
+        if (!cpHit) continue;                 // still running (the hit arrives on the socket by itself)
+        const p1 = await pcGet();
+        const regs = await (() => new Promise((res, rej) => {
+          const id = rid++, h = Buffer.alloc(11); h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(1, 2); h.writeUInt32LE(id, 6); h[10] = 0x31;
+          pend.set(id, (err, body) => { const r = {}; for (let i = 2; i + 3 < body.length; i += body[i] + 1) r[body[i + 1]] = body.readUInt16LE(i + 2); res(r); });
+          sock.write(Buffer.concat([h, Buffer.alloc(1)]));
+        }))();
+        const sp = regs[4] & 255;
+        const stack = await memGet(0x100 + sp + 1, Math.min(32, 255 - sp));
+        console.log(`WATCH: a store into $${watch[0].toString(16)}-$${watch[1].toString(16)} stopped at PC = $${p1.toString(16)}  SP = $${sp.toString(16)}` +
+          `  A = $${(regs[0] & 255).toString(16)}  X = $${(regs[1] & 255).toString(16)}  Y = $${(regs[2] & 255).toString(16)}`);
+        const words = []; for (let i = 0; i + 1 < stack.length; i++) words.push(`$${(stack[i] + 256 * stack[i + 1]).toString(16)}`);
+        console.log(`  stack: ${stack.join(' ')}`);
+        console.log(`  as words: ${words.join(' ')}`);
+        for (const spec of specs) { const [n, cnt] = spec.split(':'); const v = await memGet(addr[n], +(cnt || 1)); console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v.join(' ')}`); }
+        stop(); process.exit(0);
+      }
+      bail('--watch: nothing stored there within two minutes');
     }
     if (!alive && process.env.PROBE_DEAD === '1') {
       // PROBE_DEAD=1: read the requested bytes ANYWAY. For a hang, the stack and vectors at the
