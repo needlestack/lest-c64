@@ -121,7 +121,7 @@ const L4_MAP = [
 // takes out, $ff for none. Per level; only one level in a chain may have walls (WALL_LVL).
 const LEVEL_WALLS = {
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
-  5: { walls: [[[5, 5], [6, 5], [7, 5], [5, 6], [5, 7]],        // S1 (4,4): the chamber's north and west
+  5: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
               [[11, 10], [12, 10], [10, 11], [10, 12]]],        // S2 (7,7): the exit's corner
        sockWall: [0, 1] },
 };
@@ -134,17 +134,18 @@ const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): grou
   return g.map(r => r.join(''));
 };
 // LEVEL 5, the user's 14x14 (2026-09-18): "interesting rooms are about 1/4-1/3 the size of the
-// map; with pillars a space can be bigger as a whole but broken up." A chamber in the middle
-// whose north and west sides go when S1 (4,4) is fed, a second socket S2 (7,7) inside it that
-// opens the exit's corner at the south-east, angels in two corners, orbs at (12,9) and (9,12).
+// map; with pillars a space can be bigger as a whole but broken up." A 2x2 chamber in the
+// middle with an angel INSIDE it, whose north-west corner (two cells) goes when S1 (5,5) is
+// fed; a second socket S2 (7,7) inside it opens the exit's corner at the south-east; angels in
+// two corners as well, orbs at (12,9) and (9,12). (Revised the same day from a 4x4 chamber.)
 const L5_MAP = [
   "##############",
   "#............#",
   "#............#",
   "#............#",
-  "#............#",
-  "#....####....#",
-  "#....#..#....#",
+  "#.....#......#",
+  "#.....###....#",
+  "#...##..#....#",
   "#....#..#....#",
   "#....####....#",
   "#............#",
@@ -1233,11 +1234,10 @@ const BLOCK_ROUTE = [
 const SOCK5_ROUTE = [
   ['to', 12.5, 1.5], ['to', 12.5, 8.5],            // along the top, down to the orb, facing it
   ['act', T_SPACE, 2],
-  ['to', 12.5, 4.5], ['to', 5.5, 4.5],             // back up, west to the socket, facing it
+  ['to', 12.5, 3.5], ['to', 4.5, 3.5], ['to', 4.5, 5.5],   // back up, west, down beside the socket
+  ['spin', -90],                                   // facing east at (5,5)
   ['act', T_SPACE, 2],
-  ['act', T_WAIT, 60],
-  ['to', 5.5, 3.5], ['spin', 90],                  // step aside and look south into the chamber
-  ['act', T_WAIT, 120],
+  ['act', T_WAIT, 180],                            // the corner goes; the caged angel is 2 cells off
 ];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
 const SOCK5_COMPILED = compileRoute(SOCK5_ROUTE, [0x0180, 0x0180, 0x2000]);
@@ -3799,9 +3799,10 @@ if (process.env.ORBSCATTER) {
       ORBS.push({ x: 14.5, y: 1.5, c: 0, tall: true });
       ORBS.push({ x: 1.5, y: 14.5, c: 0, tall: true });
     }
-    else if (CHAMBER) {                           // level 5: likewise, one map smaller
-      ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });
+    else if (CHAMBER) {                           // level 5: likewise, one map smaller, and one
+      ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });   //   caged in the chamber
       ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
+      ORBS.push({ x: 6.5, y: 6.5, c: 0, tall: true });
     }
     else {                                        // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
@@ -3904,7 +3905,7 @@ const HOLES_AT = HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0
 // the placeholder in would have quietly put two sockets into the ring level. A level declares
 // sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
 // level keeps its own.
-const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '4,4;7,7' : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '5,5;7,7' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -10276,7 +10277,9 @@ ${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's
         ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
         ; facing one freezes its clock, so waiting does not sweep the possibilities either --
         ; the cell has to be READ OFF and fed back in through ANGAT.
-${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
+        ; THE FIRST TWO ANGELS ONLY: a third line is ~40 bytes the main block does not have
+        ; (level 5's caged angel, 2026-09-18), and two rows of E is already most of the corner.
+${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).slice(0, 2).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
         jsr setRow
         ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #\$0f"
         lda #14                 ;   showed an angel at x=21 as x=5 -- a cell in the other half of
