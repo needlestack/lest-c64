@@ -60,7 +60,12 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // an unleashed angel on a short spine, with the exit hole in the spine's south nub. Two orbs,
 // one socket, one angel. It sits in the same 23 x 11 grid as level 1, because every resident
 // level shares one grid. (Until then it was an 8x8 room with a vanishing column, no angel.)
-const LVL = +(process.env.LVL ?? 1);
+// CHAIN=1,2: the resident levels, in fall order, wrapping. CHAIN=2 (the current default, for
+// playtesting level 2 on its own) makes level 2 its OWN shadow, so its hole drops into a reset
+// copy of itself. Level 1 and level 2 cannot be resident together yet: level 2 is 16x16 and
+// level 1 is 23x11, and every resident level shares one W x H grid of at most 256 cells.
+const CHAIN = (process.env.CHAIN ?? '2').split(',').map(Number);
+const LVL = +(process.env.LVL ?? CHAIN[0]);
 if (LVL !== 1 && LVL !== 2) throw new Error(`LVL=${LVL}: the game has levels 1 and 2`);
 const SOCKROOM = LVL === 2;
 const L1_MAP = [
@@ -76,28 +81,40 @@ const L1_MAP = [
   "#..##..######.........#",
   "#######################",
 ];
-// LEVEL 2, the user's layout of 2026-09-18 (16 wide, padded to the shared 23-column grid):
-//   a 5-wide room with two orb alcoves at (6,2) and (6,8); the socket at (6,5) IS the doorway
-//   into a 2x3 pocket; the pocket's far wall at (8,5) is the one that goes when an orb is
-//   seated, and behind it a one-wide corridor runs to the angel at (13,5) on a short spine
-//   (x13, y1-9) with a nub at each end. The exit hole is in the south nub (14,9) -- MY guess,
-//   the sketch had no XX; move HOLE_D below if it belongs elsewhere.
-const SOCK_MAP = (col => [
-  "#######################",
-  "#......######..########",
-  "#......######.#########",
-  "#.....#######.#########",
-  "#.....#..####.#########",
-  col ? "#.......#.....#########"       // the wall at (8,5): the pocket's far side...
-      : "#.............#########",      // ...or WALLOFF=1: the same level with it taken out
-  "#.....#..####.#########",
-  "#.....#######.#########",
-  "#......######.#########",
-  "#......######..########",
-  "#######################",
-])(!process.env.WALLOFF);
-const L2_WALL = [8, 5];   // the cell that goes: the connectivity check below opens it, since with
-                          //   it in place the angel's side is a separate region until an orb is seated
+// LEVEL 2, the user's layout of 2026-09-18, fleshed out the same day: 16 x 16 = 256 cells.
+//   PP (2,2) in a 5x9 room with an orb alcove at (6,2) and (6,8); the socket at (6,5) IS the
+//   doorway into a 2x3 pocket whose far wall (8,5) goes when it is fed, freeing the angel (13,5)
+//   down a one-wide corridor. Past it: a third orb at (11,3) on the spine, the only way down
+//   through (9,10), and two more socket/wall pairs in series -- (12,14) opens (11,14), then
+//   (9,13) opens (8,13) -- before the exit at (2,11). Three orbs, three sockets, one carried
+//   at a time, so the corridor is walked twice with the angel loose.
+// L2_WALLS lists the removable cells; L2_SOCK_WALL says which wall each socket (in SOCKETS_AT
+// order) takes out. WALLOFF=k (1-based) builds the level with wall k-1 gone, for its delta.
+const L2_WALLS = [[8, 5], [8, 13], [11, 14]];
+const L2_SOCK_WALL = [0, 1, 2];
+const SOCK_MAP = (() => {
+  const rows = [
+    "################",
+    "#......####....#",
+    "#......####.#.##",
+    "#.....#####.#.##",
+    "#.....#..####.##",
+    "#.......#.....##",
+    "#.....#..####.##",
+    "#.....###...#.##",
+    "#......##.#.#.##",
+    "#......##.#....#",
+    "#########.######",
+    "#...#####......#",
+    "#...##########.#",
+    "#...##..#..#...#",
+    "#......##..#...#",
+    "################",
+  ].map(r => r.split(''));
+  const k = +(process.env.WALLOFF ?? 0);
+  if (k) { const [x, y] = L2_WALLS[k - 1]; rows[y][x] = '.'; }
+  return rows.map(r => r.join(''));
+})();
 if (SOCKROOM && process.env.TWOLEV === '0') {   // built ALONE, for looking at things: one
   process.env.NPIC ??= '1';                       //   picture. Defaults, each still overridable.
 }
@@ -244,7 +261,9 @@ const M = (SOCKROOM ? SOCK_MAP : L1_MAP).map(r => r.split('').map(c => c === '#'
 // exactly the old layout, so nothing about the generated code changes while these are the default.
 // The stride was written as a literal 16 (and as <<4 / >>4 / &15) in ~40 places; they read MAPW
 // now, which is what lets a level be 28x9 or 12x20 instead of only square.
-const MAPW = +(process.env.MAPW ?? 23), MAPH = +(process.env.MAPH ?? 11);   // both levels, one grid
+// A one-level chain takes its own map's shape; two resident levels share 23 x 11.
+const MAPW = +(process.env.MAPW ?? (CHAIN.length === 1 ? M[0].length : 23));
+const MAPH = +(process.env.MAPH ?? (CHAIN.length === 1 ? M.length : 11));
 const MAPN = MAPW * MAPH;
 // WIDECELL=1: allow more than 256 cells. The cell id then needs nine bits -- see the page byte
 // and patched operands in the DDA. Sizing the tables is independent of that and comes first, so
@@ -279,7 +298,7 @@ const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) ma
 // orb 1's two-byte mask. One orb occluded correctly and the other was visible through walls.
 const TWOLEV = !process.env.LVLDUMP && process.env.TWOLEV !== '0';
 // Which levels ride along, in ascending order. That order IS the slot order.
-const OTHERS = !TWOLEV ? [] : [1, 2].filter(n => n !== LVL);
+const OTHERS = !TWOLEV ? [] : CHAIN.length === 1 ? [LVL] : CHAIN.filter(n => n !== LVL);
 const LVLALL = TWOLEV ? (() => {
   // The other level is built with the SOCKETS environment left alone, so it declares whatever
   // its own map declares. It used to be forced empty on both sides, because the entity counts
@@ -326,7 +345,7 @@ const PATH_N = pathOpen.length;
   // Judged with the removable wall OPEN: level 2 keeps its angel behind that wall on purpose,
   // and the two regions join the moment an orb is seated.
   const mapC = map.slice();
-  if (SOCKROOM) mapC[cellOf(...L2_WALL)] = 0;
+  if (SOCKROOM) for (const w of L2_WALLS) mapC[cellOf(...w)] = 0;
   const open = []; for (let c = 0; c < MAPN; c++) if (mapC[c] === 0) open.push(c);
   const seen = new Set([open[0]]), q = [open[0]];
   for (let h = 0; h < q.length; h++) {
@@ -1106,13 +1125,26 @@ const FALL_ROUTE = [
 // orb, carry it to the doorway, seat it, and stand looking east through the pocket at the wall
 // that should now be gone. Ends there for the same reason FALL_ROUTE ends on the hole: the map
 // has changed and the wall check below cannot know.
+// Then (ANGEL=0 for this, the route walks the angel's cell) through the corridor for the spine's
+// orb, down through (9,10) and round to the third socket at (12,14) from its east side. Ends
+// facing west at it with wall 2 (11,14) gone: wallStT reads 1,0,1.
 const SOCK_ROUTE = [
   ['to',  5.5, 2.5],                               // up to the orb at (6,2), facing it
   ['act', T_SPACE, 2],                             // take it
   ['to',  5.5, 5.5],                               // down to the doorway, facing south
   ['spin', -90],                                   // ...east, at the socket
   ['act', T_SPACE, 2],                             // seat it: the wall at (8,5) goes
-  ['act', T_WAIT, 300],                            // and watch the corridor open
+  ['act', T_WAIT, 60],                             // the collapse
+  ['run', 7.5, 5.5], ['run', 13.5, 5.5],           // through the pocket and the corridor
+  ['run', 13.5, 1.5], ['run', 11.5, 1.5],          // round to the spine's orb
+  ['to',  11.5, 2.5],                              // facing south at (11,3)
+  ['act', T_SPACE, 2],                             // take it
+  ['to',  11.5, 1.5], ['run', 13.5, 1.5], ['run', 13.5, 9.5], ['run', 11.5, 9.5],
+  ['run', 11.5, 7.5], ['run', 9.5, 7.5], ['run', 9.5, 11.5], ['run', 14.5, 11.5],
+  ['run', 14.5, 13.5], ['to', 13.5, 13.5], ['to', 13.5, 14.5],   // beside the socket
+  ['spin', 90],                                    // facing west at (12,14)
+  ['act', T_SPACE, 2],                             // seat it: the wall at (11,14) goes
+  ['act', T_WAIT, 120],
 ];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
 const FALL_COMPILED = compileRoute(FALL_ROUTE, [0x0280, 0x0280, 0x19c0]);
@@ -1163,7 +1195,10 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
   // the tick budget is spent anyway, and every later waypoint is somewhere else. That reads as
   // "the benchmark moved" rather than as an error, so the build has to catch it here.
   const R = 26;                                  // mvFree's half-box, in 1/256 cells
-  const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || M[cy][cx];
+  // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
+  // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
+  const openW = ROUTE === 'sock' && SOCKROOM ? new Set(L2_WALLS.map(w => cellOf(...w))) : new Set();
+  const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || (M[cy][cx] && !openW.has(cellOf(cx, cy)));
   const blocked = (X, Y) => {
     for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
       if (solid(bx, by)) return true;
@@ -3631,9 +3666,10 @@ if (process.env.ORBSCATTER) {
   // Level 2: ONE orb, and it is standing in the doorway at (5,2) -- the only way into the chamber
   // that holds the exit. It reads exactly like level 1's caging orb, which is the point: the
   // player already knows to pick it up. What is new is that they have to put it back.
-  else if (SOCKROOM) {                         // level 2: OO in each alcove, either feeds the socket
+  else if (SOCKROOM) {                         // level 2: OO in each alcove and one on the spine
     ORBS.push({ x: 6.5, y: 2.5, c: 0 });
     ORBS.push({ x: 6.5, y: 8.5, c: 0 });
+    ORBS.push({ x: 11.5, y: 3.5, c: 0 });
   }
   else {                                         // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
@@ -3701,13 +3737,16 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // the third room and the delta has to exist from boot. The triples name LIVE table addresses,
 // so they are correct exactly when level 3's data is the live data, which is when they fire.
 const WALL_LVL = 2;
-const WALLVAR = (!process.env.WALLOFF && !process.env.LVLDUMP && (SOCKROOM || TWOLEV)) ? (() => {
-  const tmp = './.wall-tables.json';
+// ONE VARIANT PER REMOVABLE WALL: each is the level with that wall alone taken out, and each
+// yields its own delta. WALLVARS[k] goes with L2_WALLS[k].
+const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && (SOCKROOM || TWOLEV)) ? L2_WALLS.map((_, k) => {
+  const tmp = `./.wall${k}-tables.json`;
   execFileSync(process.execPath, [process.argv[1]],
     { env: { ...process.env, LVL: String(WALL_LVL),
-             WALLOFF: '1', LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
+             WALLOFF: String(k + 1), LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
   return JSON.parse(readFileSync(tmp, 'utf8'));
-})() : null;
+}) : null;
+const WALLVAR = WALLVARS ? WALLVARS[0] : null;   // "is there a wall mechanic at all"
 
 // Sized to the LARGER level, both of them. A run id past a level's own count has runBitT = 0, so
 // it sets no bit and costs only the loop iteration -- the padding is inert, not merely harmless.
@@ -3732,9 +3771,11 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = SOCKROOM ? [14, 9] : [15, 5];   // level 2: the south nub (a guess -- see SOCK_MAP)
-const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])],
-                  [+(process.env.HOLE2X ?? HOLE_D[0]), +(process.env.HOLE2Y ?? HOLE_D[1])]];
+const HOLE_D = SOCKROOM ? [2, 11] : [15, 5];   // level 2: XX behind the last socket
+// ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
+// with two holes; every level since has had both at the same cell, and the second slot cost a
+// holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
+const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
 // orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
@@ -3745,7 +3786,7 @@ const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOL
 // the placeholder in would have quietly put two sockets into the ring level. A level declares
 // sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
 // level keeps its own.
-const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5' : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -3767,13 +3808,13 @@ const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
 // order is OTHERS -- every resident level but the live one, ascending -- so "level N's next" is
 // N+1 wrapped round to 1, and its slot is where that level sits in the live build's OTHERS list.
 // The live level itself is not in OTHERS, so its own next resolves in its own emission below.
-const LEVELS = [1, 2];
+const LEVELS = CHAIN;
 const nextLevel = n => LEVELS[(LEVELS.indexOf(n) + 1) % LEVELS.length];
 if (LVLALL) for (const L of LVLALL) {
   const nxt = nextLevel(L.level);
   // From the SHADOW level's point of view, once it is live, the slots hold the levels that are
   // not it -- which is the same OTHERS list re-centred. With two levels that is always slot 0.
-  const slots = LEVELS.filter(n => n !== L.level);
+  const slots = LEVELS.length === 1 ? [L.level] : LEVELS.filter(n => n !== L.level);
   L.tables.lvlNxtT = [slots.indexOf(nxt)];
 }
 const lvlMax = (f, own) => Math.max(own, ...(LVLALL ?? []).map(f));
@@ -3859,8 +3900,8 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // out of rope stops facing you, it does not escort you home.
 
 const LANDS_AT = process.env.LAND
-  ? [process.env.LAND.split(',').map(Number), process.env.LAND.split(',').map(Number)]
-  : SOCKROOM ? [[2, 2], [2, 2]] : [[2, 2], [2, 2]];
+  ? [process.env.LAND.split(',').map(Number)]
+  : [[2, 2]];                                   // both levels land at (2,2)
 // ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
 // on both of these lands you nose-against a wall half a cell away: the whole screen goes black
 // and it reads as a broken render rather than as a wall. One byte, and it travels with the level
@@ -5358,19 +5399,19 @@ if (!Number.isInteger(WS_SH)) throw new Error(`WALLSINK must be a power of two, 
 // wsN is a single byte and 0 is the idle state, so the collapse cannot be longer than 255
 // frames -- 512 assembled as `lda #$200`, truncated to 0, and the sink free-ran forever.
 if (WS_N > 255) throw new Error(`WALLSINK must be <= 255 frames (wsN is one byte), got ${WS_N}`);
-const WALL_DELTA = WALLVAR ? (() => {
+const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   // hazSpT too: the hazard lists themselves do not toggle with the wall (they are pushed onto the
   // manifest after the dump), so the split ids they write go into the vanished column's cells,
   // which no ray can hit -- their planes do not matter, and 48 bytes of delta would say so.
   const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT']);
   const off = [], on = [];
-  // The baseline is LEVEL 3's tables with the wall PRESENT -- not the live level's. Diffing
+  // The baseline is the wall level's tables with the wall PRESENT -- not the live level's. Diffing
   // against whatever happens to be on screen produced a delta describing the difference between
   // two different rooms, which named the wrong cell entirely.
   const base = LVL === WALL_LVL ? null : (LVLALL ?? []).find(l => l.level === WALL_LVL)?.tables;
   for (const [n, liveT] of LVL_TABLES) {
     const live = base ? (base[n] ?? liveT) : liveT;
-    const v = WALLVAR.tables[n];
+    const v = WV.tables[n];
     if (!v || SKIP.has(n)) continue;
     for (let i = 0; i < live.length; i++)
       if ((v[i] ?? 0) !== (live[i] ?? 0)) {
@@ -5382,12 +5423,13 @@ const WALL_DELTA = WALLVAR ? (() => {
   // which columns are showing the doomed wall.
   let cell = -1;
   const baseMap = base ? base.mapT : LVL_TABLES.find(([n]) => n === 'mapT')[1];
-  for (let i = 0; i < MAPN; i++) if ((WALLVAR.tables.mapT[i] ?? 0) !== baseMap[i]) cell = i;
-  if (cell < 0) throw new Error('the wall variant changed no map cell -- WALL_LVL is wrong');
-  console.error(`  wall change: ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction` +
-    `, cell ${cellX(cell)},${cellY(cell)}`);
+  for (let i = 0; i < MAPN; i++) if ((WV.tables.mapT[i] ?? 0) !== baseMap[i]) cell = i;
+  if (cell < 0) throw new Error(`wall variant ${k} changed no map cell -- WALL_LVL or L2_WALLS is wrong`);
+  if (cell !== cellOf(...L2_WALLS[k])) throw new Error(`wall variant ${k} removed cell ${cell}, not ${L2_WALLS[k]}`);
+  console.error(`  wall ${k} at ${cellX(cell)},${cellY(cell)}: ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction`);
   return { off, on, cell };
-})() : null;
+}) : null;
+const WALL_DELTA = WALL_DELTAS ? WALL_DELTAS[0] : null;   // the flag; per-wall data is WALL_DELTAS
 
 // LVLDUMP: this build exists only to hand its per-level tables to another one. Stop before
 // assembling -- the .d64 it would write is not wanted and would clobber the real disk.
@@ -5662,12 +5704,14 @@ ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
 ssWid   = $7cf2                  ;   ...wide enough to hold a seam
 ssNear  = $7cf4                  ;   ...near enough for one to read
 ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
-ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
+${SEAMCNT ? `ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
 ssTaken = $70b2                  ;   ...of which the char cell was already spoken for
 ssPwN   = $70b4                  ; SEAMCNT: ssPw calls, and how many ENDED the walk -- the two
 ssPwX   = $70b6                  ;   numbers that say whether the panel test is earning its place
 ssAnyX  = $70b8                  ;   ...and how many walks ssAny ended instead
-${SEAMCNT ? `sdColN  = $70ba                  ; SEAMCNT: COLUMNS that took the seam draw path, free-running.
+                                ; (SEAMCNT only: level 2's 64 runs pushed orbOccT over $70b0, and
+                                ;   the overlap guard rightly refused these while they were unconditional)
+sdColN  = $70ba                  ; SEAMCNT: COLUMNS that took the seam draw path, free-running.
                                 ;   The cost renderSym pays for seams is this count times what one
                                 ;   such column costs, and neither half was ever counted -- the
                                 ;   pass's own counters stop at seamOne, which is a different unit
@@ -6363,11 +6407,9 @@ ${DIE ? `        lda #$ff                ; hazCur is READ to decide whether the 
         sta sndD
 ` : ''}${SPRITES ? `        lda #$00
         sta sokAn               ; RETURN restarts by JUMPING to entry, not by reloading, so
-${WALL_DELTA ? `        sta wsN                 ;   anything mid-animation is still live RAM and has to be
-        lda wallSt              ;   cleared by hand. A wall the sockets took out must come back
-        beq wrOK                ;   too, or a restart hands you a level already solved.
-        jsr wallTog             ; wallSt non-zero takes the wtBack path: no animation, just there
-wrOK:
+${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is still live RAM and has to be
+                                ;   cleared by hand. A wall the sockets took out must come back
+                                ;   too, or a restart hands you a level already solved.
 ` : ''}${process.env.MKRUNS ? '        jsr mkRuns              ; MKRUNS=1: derive the run tables at boot ON TOP of the ones\n                                ;   the image already carries. If the frame is byte-identical the\n                                ;   derivation is exactly right, and they need not be carried.\n' : ''}        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
                                 ;   jumping here, and their state is all live RAM
 ` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
@@ -10606,7 +10648,16 @@ omSwTk: dec sokAn
         sty sockHit
         lda #$01
         sta entDty
-${WALL_DELTA ? '        jsr wallTog             ; for now the socket is wired straight to the wall\n' : ''}omNoIco:
+${WALL_DELTA ? `        lda sokWho              ; hole-like index + 1: exits first, then the sockets
+        sec
+        sbc nExitT
+        tay
+        dey                     ; -> the socket's own index
+        lda sockWallT,y         ; ...names its wall, or $ff for a socket that opens nothing
+        bmi omNoIco
+        sta wsWall
+        jsr wallTog
+` : ''}omNoIco:
 ${process.env.ORBOCCDBG ? `        sta ohDbg
 ` : ''}        lda py+1                ; which cell is the player standing in?
 ${MULW}
@@ -12119,7 +12170,7 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
         lda lvlNxtT             ; where does THIS level's hole go? $ff means nowhere -- the last
         cmp #$ff                ;   level in the chain keeps its hole as scenery rather than
         beq lvlEnd              ;   dropping the player into whatever happens to be in slot 0
-${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}        jsr lvlSwap
+${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}        jsr lvlSwap
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped, about to mkRuns\n' : ''}        jsr mkRuns              ; the run tables no longer travel with the level -- they are
                                 ;   derived from the mapT the swap just brought in. Must come
                                 ;   AFTER the swap and BEFORE anything renders the new room.
@@ -12139,7 +12190,7 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit 
         lda #$00
         sta paF
         txa
-        eor #$01
+        ${HOLES_AT.length > 1 ? 'eor #$01' : 'and #$00'}   ; the other hole is live now -- if there is one
         sta hlv
         asl                     ; x32, the same LOS stride -- not a cell multiply
         asl
@@ -15404,23 +15455,6 @@ sfxRd:  lda $ffff,y             ; SELF-MODIFIED by sfxGo: this effect's pitch ta
 sfxV:   sta $d418
         rts
 
-;         swallow  collapse  clink
-sfxLenT:!byte   8,      14,     5      ; frames
-sfxCtlT:!byte $11,     $81,   $11      ; triangle, noise, triangle. Bit 0 is the gate.
-sfxAdT: !byte $18,     $18,   $14      ; attack/decay
-sfxSrT: !byte $f8,     $f8,   $04      ; sustain/release -- the clink has none, so it plinks
-sfxVolT:!byte $19,     $19,   $17      ; peak master, low-pass bit included
-sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
-sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
-sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
-sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
-sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
-                                                        ;   crackles rather than rumbles, which
-                                                        ;   is what the old floor of 3 was doing
-sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, an octave lower,
-                                ;   and a short fall low in the register is the shape every
-                                ;   refusal sound has -- it read as the orb being rejected rather
-                                ;   than taken. Up and bright is what acknowledgement sounds like.
 sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick reconciles it
                                 ;   with any effect and writes $d418 once.
 sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
@@ -15453,11 +15487,32 @@ rayOffT: !byte ${rayOff.join(',')}
         * = $97a0
 seatPtrT: !byte ${SEAT.slotT.map(v => ((SEATBASE - VBANK) >> 6) + (v - SEAT.slotT[0] + SEAT.slotT[0] - 0)).join(',')}
 seatYBaseT: !byte ${SEAT.yBaseT.join(',')}
+${SOUND ? `; The sound effects' parameter tables, in the tail of this page and the next: the $9200 block
+; they lived in overran $9500 by eight bytes when level 2's 117 open cells grew bfsQ (2026-09-18).
+` + `;         swallow  collapse  clink
+sfxLenT:!byte   8,      14,     5      ; frames
+sfxCtlT:!byte $11,     $81,   $11      ; triangle, noise, triangle. Bit 0 is the gate.
+sfxAdT: !byte $18,     $18,   $14      ; attack/decay
+sfxSrT: !byte $f8,     $f8,   $04      ; sustain/release -- the clink has none, so it plinks
+sfxVolT:!byte $19,     $19,   $17      ; peak master, low-pass bit included
+sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
+sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
+sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
+` : ''}
         * = ${hx16(RELOC + 0x1200)}
 colGrpT: !byte ${colGrpT.join(',')}
         * = $98a0
 seatFlagT: !byte ${SEAT.flagT.join(',')}
 seatXOffT: !byte ${SEAT.xOffT.join(',')}
+${SOUND ? `sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
+sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
+                                                        ;   crackles rather than rumbles, which
+                                                        ;   is what the old floor of 3 was doing
+sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, an octave lower,
+                                ;   and a short fall low in the register is the shape every
+                                ;   refusal sound has -- it read as the orb being rejected rather
+                                ;   than taken. Up and bright is what acknowledgement sounds like.
+` : ''}
 ${SPIN ? `spinIx: !byte 0
 spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
 spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
@@ -15520,14 +15575,26 @@ ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; NOT in the delta, deliberately: stepT (map-independent since STEPFB), orbOccT (orbOccAll
 ; rebuilds every mask every frame) and the charset (canonical -- fontA is byte-identical with the
 ; column present and removed).
-wallOffT: !byte ${WALL_DELTA.off.join(',')},$ff
-wallOnT: !byte ${WALL_DELTA.on.join(',')},$ff
-
-wallSt: !byte 0                 ; 0 = the wall is there
+; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
+; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
+${WALL_DELTAS.map((d, k) => `wallOffT${k}: !byte ${d.off.join(',')},$ff
+wallOnT${k}: !byte ${d.on.join(',')},$ff`).join('\n')}
+wallOffLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallOffT${k}`).join(',')}
+wallOffHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallOffT${k}`).join(',')}
+wallOnLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallOnT${k}`).join(',')}
+wallOnHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallOnT${k}`).join(',')}
+wallCellT: !byte ${WALL_DELTAS.map(d => hx(d.cell)).join(',')}   ; the doomed cell's map id, per wall
+sockWallT: !byte ${SOCKETS_AT.map((_, i) => hx(L2_SOCK_WALL[i] ?? 0xff)).join(',')}   ; socket -> wall, $ff = none
+wallStT: !fill ${WALL_DELTAS.length}, 0   ; per wall: 0 = it is there
+wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
+wsCell: !byte 0                 ;   ...and its map id, for the sink's column scan
 dbgOnce2: !byte 1               ; WALLNOW's one-shot
 
 ; ---- wallTog: flip it, either way ----
-wallTog:lda wallSt
+wallTog:ldy wsWall
+        lda wallCellT,y
+        sta wsCell
+        lda wallStT,y
         bne wtBack
         lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
@@ -15541,28 +15608,52 @@ wtClr:  sta idT,x               ;   struck there. Scanning those stale entries s
         cpx #$ff                ;   doomed one. ($ff is safe as "no cell": ids are y*16+x and no
         bne wtClr               ;   map here is 16 rows deep.)
         rts
-wtBack: lda #<wallOnT           ; coming back: no animation, just put it there
+wtBack: ldy wsWall              ; coming back: no animation, just put it there
+        lda wallOnLoT,y
         sta hzRd+1
-        lda #>wallOnT
+        lda wallOnHiT,y
         sta hzRd+2
         lda #$00
         beq wtGo                ; always taken
-wtOff:  lda #<wallOffT
+wtOff:  ldy wsWall
+        lda wallOffLoT,y
         sta hzRd+1
-        lda #>wallOffT
+        lda wallOffHiT,y
         sta hzRd+2
         lda #$01
-wtGo:   sta wallSt
-        jsr hzRun
-        lda mapT+${hx16(WALL_DELTA.cell)}   ; the delta no longer carries blkT or the run tables,
-        sta blkT+${hx16(WALL_DELTA.cell)}   ;   because neither travels with a level any more. One
+wtGo:   sta wallStT,y
+        jsr hzRun               ; hzRun sets its own X and walks to the $ff
+        ldy wsWall
+        ldx wallCellT,y
+        lda mapT,x              ; the delta no longer carries blkT or the run tables,
+        sta blkT,x              ;   because neither travels with a level any more. One
         jsr mkRuns              ;   cell of blkT changed and the runs renumber wholesale, so fix
-                                ;   the cell by hand and re-derive the rest from the new mapT.               ; hzRun sets its own X and walks to the $ff
+                                ;   the cell by hand and re-derive the rest from the new mapT.
         inc blkVer              ; the obstacle map moved: the angel's fill must be redone
         lda #$01
         sta entDty              ; ...and the frame redrawn even if nothing else moved
         jmp fallInv             ; renderSym's run cache still believes the old geometry -- a
                                 ;   column it thinks is unchanged is a column it will not repaint
+
+; ---- wallsBack: put back every wall that is out, no animation ----
+; The restart jumps to entry and reloads nothing, and a fall EXCHANGES the level's tables with
+; the shadow -- so a level has to leave in the state it arrived in, or the shadow keeps the
+; solved map and hands it back on the next drop.
+wallsBack:
+        lda #$00
+        sta wsN                 ; a collapse in progress is abandoned
+        ldx #${hx(WALL_DELTAS.length - 1)}
+wbLp:   stx wsWall
+        lda wallStT,x
+        beq wbNx
+        txa
+        pha
+        jsr wallTog             ; wallStT non-zero takes the wtBack path
+        pla
+        tax
+wbNx:   dex
+        bpl wbLp
+        rts
 
 ; ---- wallSink: the doomed wall dropping into the floor, one frame at a time ----
 ; Called just before renderSym, which is the only place this can go: renderSym derives each
@@ -15583,7 +15674,7 @@ wsBusy: lda #$ff                ; find the doomed wall's SPAN this frame. Scanni
         sta wsHi                ;   once (guarded below) and wsLo keeps falling to the leftmost.
         ldx #$9f
 wsFind: lda idT,x
-        cmp #${hx(WALL_DELTA.cell)}  ; the doomed cell's map id (y*16+x)
+        cmp wsCell              ; the doomed cell's map id (y*MAPW+x)
         bne wsFN
         stx wsLo
         lda wsHi
@@ -16245,7 +16336,7 @@ ogHoLp: txa
         ldx rgtH
         cpx nExitT
         bcs ogHoIn
-        ldx #$01                ; past the exits: only hlv's hole is live, so step over the other
+        ldx #${hx(HOLES_AT.length - 1)}   ; past the exits: only hlv's hole is live, so step over the other
 ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then inc -> first socket)
         cpx nHoleT
         bcc ogHoLp
