@@ -66,9 +66,10 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // level 1 is 23x11, and every resident level shares one W x H grid of at most 256 cells.
 const CHAIN = (process.env.CHAIN ?? '2').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-if (![1, 2, 3, 4].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 4`);
+if (![1, 2, 3, 4, 5].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 5`);
 const SOCKROOM = LVL === 2;
 const ARENA = LVL === 3 || LVL === 4;   // the look-and-feel arenas: same corners, same cast
+const CHAMBER = LVL === 5;              // ...and level 5 keeps their corners and adds sockets
 const L1_MAP = [
   "#######################",
   "#..##..######.........#",
@@ -115,8 +116,43 @@ const L4_MAP = [
   "#...........#..#",
   "################",
 ];
-const L2_WALLS = [[8, 5], [8, 13], [11, 14]];
-const L2_SOCK_WALL = [0, 1, 2];
+// A removable "wall" is a GROUP of cells that go together (2026-09-18, level 5's L-shaped
+// ones). WALLS[k] is group k's cells; SOCK_WALL[i] is the group socket i (SOCKETS_AT order)
+// takes out, $ff for none. Per level; only one level in a chain may have walls (WALL_LVL).
+const LEVEL_WALLS = {
+  2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
+  5: { walls: [[[5, 5], [6, 5], [7, 5], [5, 6], [5, 7]],        // S1 (4,4): the chamber's north and west
+              [[11, 10], [12, 10], [10, 11], [10, 12]]],        // S2 (7,7): the exit's corner
+       sockWall: [0, 1] },
+};
+const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
+const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
+const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
+  const k = +(process.env.WALLOFF ?? 0);
+  const g = rows.map(r => r.split(''));
+  if (k) for (const [x, y] of groups[k - 1]) g[y][x] = '.';
+  return g.map(r => r.join(''));
+};
+// LEVEL 5, the user's 14x14 (2026-09-18): "interesting rooms are about 1/4-1/3 the size of the
+// map; with pillars a space can be bigger as a whole but broken up." A chamber in the middle
+// whose north and west sides go when S1 (4,4) is fed, a second socket S2 (7,7) inside it that
+// opens the exit's corner at the south-east, angels in two corners, orbs at (12,9) and (9,12).
+const L5_MAP = [
+  "##############",
+  "#............#",
+  "#............#",
+  "#............#",
+  "#............#",
+  "#....####....#",
+  "#....#..#....#",
+  "#....#..#....#",
+  "#....####....#",
+  "#............#",
+  "#..........###",
+  "#.........#..#",
+  "#.........#..#",
+  "##############",
+];
 const SOCK_MAP = (() => {
   const rows = [
     "################",
@@ -136,9 +172,7 @@ const SOCK_MAP = (() => {
     "#......##..#...#",
     "################",
   ].map(r => r.split(''));
-  const k = +(process.env.WALLOFF ?? 0);
-  if (k) { const [x, y] = L2_WALLS[k - 1]; rows[y][x] = '.'; }
-  return rows.map(r => r.join(''));
+  return punchWalls(rows.map(r => r.join('')), LEVEL_WALLS[2].walls);
 })();
 if (SOCKROOM && process.env.TWOLEV === '0') {   // built ALONE, for looking at things: one
   process.env.NPIC ??= '1';                       //   picture. Defaults, each still overridable.
@@ -279,7 +313,8 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 
 // The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
 // grid; the old 16 x 16 literals and the ring's are gone.
-const M = (SOCKROOM ? SOCK_MAP : LVL === 3 ? L3_MAP : LVL === 4 ? L4_MAP : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
+const M = (SOCKROOM ? SOCK_MAP : LVL === 3 ? L3_MAP : LVL === 4 ? L4_MAP
+         : LVL === 5 ? punchWalls(L5_MAP, LEVEL_WALLS[5].walls) : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
 // free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
@@ -377,7 +412,7 @@ const PATH_N = pathOpen.length;
   // Judged with the removable wall OPEN: level 2 keeps its angel behind that wall on purpose,
   // and the two regions join the moment an orb is seated.
   const mapC = map.slice();
-  if (SOCKROOM) for (const w of L2_WALLS) mapC[cellOf(...w)] = 0;
+  for (const g of WALLS) for (const w of g) mapC[cellOf(...w)] = 0;
   const open = []; for (let c = 0; c < MAPN; c++) if (mapC[c] === 0) open.push(c);
   const seen = new Set([open[0]]), q = [open[0]];
   for (let h = 0; h < q.length; h++) {
@@ -1193,7 +1228,19 @@ const BLOCK_ROUTE = [
   ['spin', 180],                                    // look away
   ['act', T_WAIT, 600],                             // and give the angel ten seconds
 ];
+// ROUTE=sock5 (CHAIN=5 TWOLEV=0 TOURW=1 ANGEL=0): level 5's east orb into S1 -- the chamber's
+// north and west walls go -- then stand in the opening looking in.
+const SOCK5_ROUTE = [
+  ['to', 12.5, 1.5], ['to', 12.5, 8.5],            // along the top, down to the orb, facing it
+  ['act', T_SPACE, 2],
+  ['to', 12.5, 4.5], ['to', 5.5, 4.5],             // back up, west to the socket, facing it
+  ['act', T_SPACE, 2],
+  ['act', T_WAIT, 60],
+  ['to', 5.5, 3.5], ['spin', 90],                  // step aside and look south into the chamber
+  ['act', T_WAIT, 120],
+];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+const SOCK5_COMPILED = compileRoute(SOCK5_ROUTE, [0x0180, 0x0180, 0x2000]);
 const BLOCK_COMPILED = compileRoute(BLOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
 const FALL_COMPILED = compileRoute(FALL_ROUTE, [0x0280, 0x0280, 0x19c0]);
 const SOCK_COMPILED = compileRoute(SOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
@@ -1234,10 +1281,11 @@ const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
                  : ROUTE === 'fall' ? FALL_COMPILED.steps
                  : ROUTE === 'sock' ? SOCK_COMPILED.steps
                  : ROUTE === 'block' ? BLOCK_COMPILED.steps
+                 : ROUTE === 'sock5' ? SOCK5_COMPILED.steps
                  : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
 // Not in an LVLDUMP subprocess: that is the OTHER level being built as a shadow, and a route
 // authored for the live level walks straight through its walls.
-if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block')) {
+if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5')) {
   DIAGEARLY.push(`ROUTE=${ROUTE}`);
   // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
@@ -1246,7 +1294,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
   const R = 26;                                  // mvFree's half-box, in 1/256 cells
   // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
   // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
-  const openW = (ROUTE === 'sock' || ROUTE === 'block') && SOCKROOM ? new Set(L2_WALLS.map(w => cellOf(...w))) : new Set();
+  const openW = (ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5') ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
   const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || (M[cy][cx] && !openW.has(cellOf(cx, cy)));
   const blocked = (X, Y) => {
     for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
@@ -1254,7 +1302,8 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     return false;
   };
   let [x, y, a] = ROUTE === 'cover5' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0]
-                : ROUTE === 'sock' || ROUTE === 'block' ? [0x0280, 0x0280, 0x1a00] : [0x01f6, 0x0149, 0x3b00], bad = [];
+                : ROUTE === 'sock' || ROUTE === 'block' ? [0x0280, 0x0280, 0x1a00]
+                : ROUTE === 'sock5' ? [0x0180, 0x0180, 0x2000] : [0x01f6, 0x0149, 0x3b00], bad = [];
   for (const [i, [t, n]] of TOUR_STEPS.entries()) {
     const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
     const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
@@ -1275,7 +1324,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
     `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
     `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED })[ROUTE].end;
+  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED, sock5: SOCK5_COMPILED })[ROUTE].end;
   console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
     `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
     `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
@@ -2735,7 +2784,7 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', SOCKROOM ? 0x1a : ARENA ? 0x20 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
+const PA = hexArg('PA', SOCKROOM ? 0x1a : ARENA || CHAMBER ? 0x20 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
                                                                     // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
                                                                     //   room's far wall and the corridor mouth
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
@@ -2743,7 +2792,7 @@ const PA = hexArg('PA', SOCKROOM ? 0x1a : ARENA ? 0x20 : 0x19, 0xff);   // L3: t
 // DIFFERENT renders that all read "AC0" on screen. A cold start left paF at zero, so three of
 // every four reachable views could not be replayed from a screenshot at all, and a reported
 // glitch that lived on one of them looked like it simply did not reproduce.
-const PAF = hexArg('PAF', SOCKROOM || ARENA ? 0x00 : 0xc0, 0xff);
+const PAF = hexArg('PAF', SOCKROOM || ARENA || CHAMBER ? 0x00 : 0xc0, 0xff);
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
 // Level 1 opens in the room's north-west corner looking diagonally across it. The old start
@@ -2758,8 +2807,8 @@ const PAF = hexArg('PAF', SOCKROOM || ARENA ? 0x00 : 0xc0, 0xff);
 // then simply walked back and finished the level without it ever mattering again. Starting
 // opposite, with the angel ON the door, means every route to the goal has the angel somewhere
 // along it, and the tie means it has no preferred arc until the player picks one.
-const PX = hexArg('PX', ARENA ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3
-const PY = hexArg('PY', ARENA ? 0x0180 : 0x0280, 0xffff);
+const PX = hexArg('PX', ARENA || CHAMBER ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3-5
+const PY = hexArg('PY', ARENA || CHAMBER ? 0x0180 : 0x0280, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
@@ -3721,6 +3770,10 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 11.5, y: 3.5, c: 0 });
   }
   else if (ARENA) ORBS.push({ x: 14.5, y: 14.5, c: 0 });   // level 3: the far corner
+  else if (CHAMBER) {                          // level 5: one east, one south
+    ORBS.push({ x: 12.5, y: 9.5, c: 0 });
+    ORBS.push({ x: 9.5, y: 12.5, c: 0 });
+  }
   else {                                         // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
@@ -3745,6 +3798,10 @@ if (process.env.ORBSCATTER) {
     else if (ARENA) {                             // level 3: the two other corners
       ORBS.push({ x: 14.5, y: 1.5, c: 0, tall: true });
       ORBS.push({ x: 1.5, y: 14.5, c: 0, tall: true });
+    }
+    else if (CHAMBER) {                           // level 5: likewise, one map smaller
+      ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });
+      ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
     }
     else {                                        // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
@@ -3790,10 +3847,15 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // again with the wall out and diff, whether or not it is the one on screen -- in a chain it is
 // the third room and the delta has to exist from boot. The triples name LIVE table addresses,
 // so they are correct exactly when level 3's data is the live data, which is when they fire.
-const WALL_LVL = 2;
+const WALL_LVL = (() => {                       // the level in the chain that has walls
+  const w = CHAIN.filter(n => LEVEL_WALLS[n]);
+  if (w.length > 1) throw new Error(`levels ${w.join(' and ')} both have removable walls; the wall tables serve one level per chain`);
+  return w[0] ?? 0;
+})();
+const WALL_GROUPS = LEVEL_WALLS[WALL_LVL]?.walls ?? [];
 // ONE VARIANT PER REMOVABLE WALL: each is the level with that wall alone taken out, and each
 // yields its own delta. WALLVARS[k] goes with L2_WALLS[k].
-const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && CHAIN.includes(WALL_LVL)) ? L2_WALLS.map((_, k) => {
+const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALL_LVL) ? WALL_GROUPS.map((_, k) => {
   const tmp = `./.wall${k}-tables.json`;
   execFileSync(process.execPath, [process.argv[1]],
     { env: { ...process.env, LVL: String(WALL_LVL),
@@ -3825,7 +3887,7 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = SOCKROOM ? [2, 11] : ARENA ? null : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+const HOLE_D = SOCKROOM ? [2, 11] : ARENA ? null : CHAMBER ? [12, 12] : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
@@ -3842,7 +3904,7 @@ const HOLES_AT = HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0
 // the placeholder in would have quietly put two sockets into the ring level. A level declares
 // sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
 // level keeps its own.
-const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '4,4;7,7' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -3888,7 +3950,7 @@ const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
 // The table is NORB x 32 bytes, indexed by entity slot -- so an orb's slots are wasted (all
 // zero) and the angels' rows land where amIdx x 32 says. 32 bytes an entity is the price of
 // not needing a second index register in anTry, which has none to spare.
-const LEASH_GROUPS = (process.env.LEASH ?? (SOCKROOM || ARENA ? '' : '|21,2;21,8'))
+const LEASH_GROUPS = (process.env.LEASH ?? (LVL === 1 ? '|21,2;21,8' : ''))
   .split('|').map(g => g.split(';').filter(Boolean).map(q => q.split(',').map(Number)));
 const LEASH_AT = LEASH_GROUPS.flat();     // every leash cell, for the checks that only care WHERE
 // One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
@@ -3957,7 +4019,7 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number)]
-  : ARENA ? [[1, 1]] : [[2, 2]];
+  : ARENA || CHAMBER ? [[1, 1]] : [[2, 2]];
 // ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
 // on both of these lands you nose-against a wall half a cell away: the whole screen goes black
 // and it reads as a broken render rather than as a wall. One byte, and it travels with the level
@@ -3965,7 +4027,7 @@ const LANDS_AT = process.env.LAND
 //   level 1 (2,2): $3b, its own opening view across the room, not down the corridor axis
 //   level 2 (6,7): $80, along the ring -- the same cell and heading the level starts you at
 //   level 3 (1,1): $10, the one heading with BOTH the socket and the far-corner hole in view
-const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : ARENA ? 0x20 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
+const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : ARENA || CHAMBER ? 0x20 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -5479,16 +5541,17 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
         on.push(`<${n}+${i},>${n}+${i},${live[i] ?? 0}`);
       }
   }
-  // which cell actually goes -- the one mapT byte that differs. The sink pass needs it to know
-  // which columns are showing the doomed wall.
-  let cell = -1;
+  // which cells actually go -- the mapT bytes that differ. The sink pass marks them in doomT to
+  // know which columns are showing the doomed wall.
   const baseMap = base ? base.mapT : LVL_TABLES.find(([n]) => n === 'mapT')[1];
-  for (let i = 0; i < 256; i++) if ((WV.tables.mapT[i] ?? 0) !== (baseMap[i] ?? 0)) cell = i;
-  if (cell < 0) throw new Error(`wall variant ${k} changed no map cell -- WALL_LVL or L2_WALLS is wrong`);
-  const L2W = SOCK_MAP[0].length;                  // level 2's OWN width: the live grid may differ
-  if (cell !== L2_WALLS[k][1] * L2W + L2_WALLS[k][0]) throw new Error(`wall variant ${k} removed cell ${cell}, not ${L2_WALLS[k]}`);
-  console.error(`  wall ${k} at ${cell % L2W},${(cell / L2W) | 0}: ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction`);
-  return { off, on, cell };
+  const cells = [];
+  for (let i = 0; i < 256; i++) if ((WV.tables.mapT[i] ?? 0) !== (baseMap[i] ?? 0)) cells.push(i);
+  // in the WALL level's own width: the live grid may differ
+  const WW = (WALL_LVL === 2 ? SOCK_MAP : L5_MAP)[0].length;
+  const want = WALL_GROUPS[k].map(([x, y]) => y * WW + x).sort((a, b) => a - b);
+  if (cells.join() !== want.join()) throw new Error(`wall variant ${k} removed cells ${cells}, not ${want}`);
+  console.error(`  wall ${k} (${cells.length} cells): ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction`);
+  return { off, on, cells };
 }) : null;
 const WALL_DELTA = WALL_DELTAS ? WALL_DELTAS[0] : null;   // the flag; per-wall data is WALL_DELTAS
 
@@ -6080,6 +6143,10 @@ runFaceT  = $fd00                ;   visible. Derived by mkRuns at boot and afte
                                  ;   change; a page each because a level may have up to 255 runs.
                                  ;   Bank-3 squatters like bfsQ below: level 4's 100 runs outgrew
                                  ;   the image block they were emitted in (2026-09-18).
+doomT   = $fb00                  ; per cell: 1 while it belongs to a wall mid-collapse. wallSink
+                                 ;   matches the columns showing the doomed group through it, so a
+                                 ;   group can be any shape. Written only by wtCells, in bank 3
+                                 ;   because it must be a whole clear page and the image has none.
 bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. It lived in the image until
                                  ;   level 3's 196 open cells (2026-09-18); no image hole holds a
@@ -15661,19 +15728,20 @@ wallOffLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallOffT${k}`).join(',')}
 wallOffHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallOffT${k}`).join(',')}
 wallOnLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallOnT${k}`).join(',')}
 wallOnHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallOnT${k}`).join(',')}
-wallCellT: !byte ${WALL_DELTAS.map(d => hx(d.cell)).join(',')}   ; the doomed cell's map id, per wall
-sockWallT: !byte ${SOCKETS_AT.map((_, i) => hx(L2_SOCK_WALL[i] ?? 0xff)).join(',')}   ; socket -> wall, $ff = none
+${WALL_DELTAS.map((d, k) => `wallCells${k}: !byte ${d.cells.map(hx).join(',')},$ff`).join('\n')}   ; each wall's cells, $ff-ended
+wallCLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallCells${k}`).join(',')}
+wallCHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallCells${k}`).join(',')}
+sockWallT: !byte ${SOCKETS_AT.map((_, i) => hx((LEVEL_WALLS[WALL_LVL]?.sockWall ?? [])[i] ?? 0xff)).join(',')}   ; socket -> wall, $ff = none
 wallStT: !fill ${WALL_DELTAS.length}, 0   ; per wall: 0 = it is there
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
-wsCell: !byte 0                 ;   ...and its map id, for the sink's column scan
 dbgOnce2: !byte 1               ; WALLNOW's one-shot
 
 ; ---- wallTog: flip it, either way ----
 wallTog:ldy wsWall
-        lda wallCellT,y
-        sta wsCell
         lda wallStT,y
         bne wtBack
+        lda #$01
+        jsr wtCells             ; doomT[cell] = 1 for the group: the sink's column scan reads it
         lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
 ${SOUND ? `        lda #$02
@@ -15701,24 +15769,47 @@ wtOff:  ldy wsWall
         lda #$01
 wtGo:   sta wallStT,y
         jsr hzRun               ; hzRun sets its own X and walks to the $ff
-        ldy wsWall
-        ldx wallCellT,y
-        lda mapT,x              ; the delta no longer carries blkT or the run tables,
-        sta blkT,x              ;   because neither travels with a level any more. One
-        jsr mkRuns              ;   cell of blkT changed and the runs renumber wholesale, so fix
-                                ;   the cell by hand and re-derive the rest from the new mapT.
+        lda #$00
+        jsr wtCells             ; every cell of the group: blkT from the new mapT (the delta no
+                                ;   longer carries blkT or the run tables, since neither travels
+                                ;   with a level), and doomT back to 0
+        jsr mkRuns              ; ...and the runs renumber wholesale, so re-derive the rest
         inc blkVer              ; the obstacle map moved: the angel's fill must be redone
         lda #$01
         sta entDty              ; ...and the frame redrawn even if nothing else moved
         jmp fallInv             ; renderSym's run cache still believes the old geometry -- a
                                 ;   column it thinks is unchanged is a column it will not repaint
 
+; ---- wtCells: walk wall wsWall's cell list: doomT[cell] = A, and blkT[cell] = mapT[cell] ----
+wtCells:sta wtDoom+1
+        ldy wsWall
+        lda wallCLoT,y
+        sta wtLd+1
+        lda wallCHiT,y
+        sta wtLd+2
+        ldy #$00
+wtLd:   lda $ffff,y             ; operand patched: the group's $ff-ended cell list
+        cmp #$ff
+        beq wtCDn
+        tax
+        lda mapT,x
+        sta blkT,x
+wtDoom: lda #$00
+        sta doomT,x
+        iny
+        bne wtLd                ; always: a group is far shorter than a page
+wtCDn:  rts
+
 ; ---- wallsBack: put back every wall that is out, no animation ----
 ; The restart jumps to entry and reloads nothing, and a fall EXCHANGES the level's tables with
 ; the shadow -- so a level has to leave in the state it arrived in, or the shadow keeps the
 ; solved map and hands it back on the next drop.
 wallsBack:
-        lda #$00
+        ldx #$00                ; doomT is a bank-3 page no file loads: clear it, or the first
+        txa                     ;   collapse's column scan matches power-on garbage. (Here rather
+dmClr:  sta doomT,x             ;   than at entry because the main block had no room for it.)
+        inx
+        bne dmClr
         sta wsN                 ; a collapse in progress is abandoned
         ldx #${hx(WALL_DELTAS.length - 1)}
 wbLp:   stx wsWall
@@ -15751,9 +15842,9 @@ wsBusy: lda #$ff                ; find the doomed wall's SPAN this frame. Scanni
         sta wsLo                ;   the first match is the rightmost column, so wsHi is written
         sta wsHi                ;   once (guarded below) and wsLo keeps falling to the leftmost.
         ldx #$9f
-wsFind: lda idT,x
-        cmp wsCell              ; the doomed cell's map id (y*MAPW+x)
-        bne wsFN
+wsFind: ldy idT,x
+        lda doomT,y             ; is the cell this column struck one of the doomed group? (idT's
+        beq wsFN                ;   $ff "no cell" reads doomT[255], the border, never doomed)
         stx wsLo
         lda wsHi
         cmp #$ff
@@ -18290,7 +18381,7 @@ try {
       // died the instant an angel reached you, standing still. Anything referenced as name+1
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
       ...RUNTIME_BUFS,
-      bfsQ: 256, runPlaneT: 256, runFaceT: 256,
+      bfsQ: 256, runPlaneT: 256, runFaceT: 256, doomT: 256,
       opx: 2, opy: 2,
       osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
       rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean

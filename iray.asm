@@ -476,6 +476,10 @@ runFaceT  = $fd00                ;   visible. Derived by mkRuns at boot and afte
                                  ;   change; a page each because a level may have up to 255 runs.
                                  ;   Bank-3 squatters like bfsQ below: level 4's 100 runs outgrew
                                  ;   the image block they were emitted in (2026-09-18).
+doomT   = $fb00                  ; per cell: 1 while it belongs to a wall mid-collapse. wallSink
+                                 ;   matches the columns showing the doomed group through it, so a
+                                 ;   group can be any shape. Written only by wtCells, in bank 3
+                                 ;   because it must be a whole clear page and the image has none.
 bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. It lived in the image until
                                  ;   level 3's 196 open cells (2026-09-18); no image hole holds a
@@ -9591,19 +9595,22 @@ wallOffLoT: !byte <wallOffT0,<wallOffT1,<wallOffT2
 wallOffHiT: !byte >wallOffT0,>wallOffT1,>wallOffT2
 wallOnLoT: !byte <wallOnT0,<wallOnT1,<wallOnT2
 wallOnHiT: !byte >wallOnT0,>wallOnT1,>wallOnT2
-wallCellT: !byte $58,$d8,$eb   ; the doomed cell's map id, per wall
+wallCells0: !byte $58,$ff
+wallCells1: !byte $d8,$ff
+wallCells2: !byte $eb,$ff   ; each wall's cells, $ff-ended
+wallCLoT: !byte <wallCells0,<wallCells1,<wallCells2
+wallCHiT: !byte >wallCells0,>wallCells1,>wallCells2
 sockWallT: !byte $00,$01,$02   ; socket -> wall, $ff = none
 wallStT: !fill 3, 0   ; per wall: 0 = it is there
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
-wsCell: !byte 0                 ;   ...and its map id, for the sink's column scan
 dbgOnce2: !byte 1               ; WALLNOW's one-shot
 
 ; ---- wallTog: flip it, either way ----
 wallTog:ldy wsWall
-        lda wallCellT,y
-        sta wsCell
         lda wallStT,y
         bne wtBack
+        lda #$01
+        jsr wtCells             ; doomT[cell] = 1 for the group: the sink's column scan reads it
         lda #$04        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
         lda #$02
@@ -9631,24 +9638,47 @@ wtOff:  ldy wsWall
         lda #$01
 wtGo:   sta wallStT,y
         jsr hzRun               ; hzRun sets its own X and walks to the $ff
-        ldy wsWall
-        ldx wallCellT,y
-        lda mapT,x              ; the delta no longer carries blkT or the run tables,
-        sta blkT,x              ;   because neither travels with a level any more. One
-        jsr mkRuns              ;   cell of blkT changed and the runs renumber wholesale, so fix
-                                ;   the cell by hand and re-derive the rest from the new mapT.
+        lda #$00
+        jsr wtCells             ; every cell of the group: blkT from the new mapT (the delta no
+                                ;   longer carries blkT or the run tables, since neither travels
+                                ;   with a level), and doomT back to 0
+        jsr mkRuns              ; ...and the runs renumber wholesale, so re-derive the rest
         inc blkVer              ; the obstacle map moved: the angel's fill must be redone
         lda #$01
         sta entDty              ; ...and the frame redrawn even if nothing else moved
         jmp fallInv             ; renderSym's run cache still believes the old geometry -- a
                                 ;   column it thinks is unchanged is a column it will not repaint
 
+; ---- wtCells: walk wall wsWall's cell list: doomT[cell] = A, and blkT[cell] = mapT[cell] ----
+wtCells:sta wtDoom+1
+        ldy wsWall
+        lda wallCLoT,y
+        sta wtLd+1
+        lda wallCHiT,y
+        sta wtLd+2
+        ldy #$00
+wtLd:   lda $ffff,y             ; operand patched: the group's $ff-ended cell list
+        cmp #$ff
+        beq wtCDn
+        tax
+        lda mapT,x
+        sta blkT,x
+wtDoom: lda #$00
+        sta doomT,x
+        iny
+        bne wtLd                ; always: a group is far shorter than a page
+wtCDn:  rts
+
 ; ---- wallsBack: put back every wall that is out, no animation ----
 ; The restart jumps to entry and reloads nothing, and a fall EXCHANGES the level's tables with
 ; the shadow -- so a level has to leave in the state it arrived in, or the shadow keeps the
 ; solved map and hands it back on the next drop.
 wallsBack:
-        lda #$00
+        ldx #$00                ; doomT is a bank-3 page no file loads: clear it, or the first
+        txa                     ;   collapse's column scan matches power-on garbage. (Here rather
+dmClr:  sta doomT,x             ;   than at entry because the main block had no room for it.)
+        inx
+        bne dmClr
         sta wsN                 ; a collapse in progress is abandoned
         ldx #$02
 wbLp:   stx wsWall
@@ -9681,9 +9711,9 @@ wsBusy: lda #$ff                ; find the doomed wall's SPAN this frame. Scanni
         sta wsLo                ;   the first match is the rightmost column, so wsHi is written
         sta wsHi                ;   once (guarded below) and wsLo keeps falling to the leftmost.
         ldx #$9f
-wsFind: lda idT,x
-        cmp wsCell              ; the doomed cell's map id (y*MAPW+x)
-        bne wsFN
+wsFind: ldy idT,x
+        lda doomT,y             ; is the cell this column struck one of the doomed group? (idT's
+        beq wsFN                ;   $ff "no cell" reads doomT[255], the border, never doomed)
         stx wsLo
         lda wsHi
         cmp #$ff
