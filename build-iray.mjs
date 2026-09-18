@@ -66,9 +66,9 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // level 1 is 23x11, and every resident level shares one W x H grid of at most 256 cells.
 const CHAIN = (process.env.CHAIN ?? '2').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-if (![1, 2, 3].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1, 2 and 3`);
+if (![1, 2, 3, 4].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 4`);
 const SOCKROOM = LVL === 2;
-const ARENA = LVL === 3;
+const ARENA = LVL === 3 || LVL === 4;   // the look-and-feel arenas: same corners, same cast
 const L1_MAP = [
   "#######################",
   "#..##..######.........#",
@@ -95,6 +95,26 @@ const L1_MAP = [
 // an angel in each of the two far corners, the orb in the fourth. No exit, no sockets, no walls
 // -- the first level with nothing to hide behind.
 const L3_MAP = ['################', ...Array(14).fill('#..............#'), '################'];
+// LEVEL 4: the arena with two diagonals of single blocks touching only at their corners -- a
+// wall a ray can see between every cell of. Same cast as level 3.
+const L4_MAP = [
+  "################",
+  "#..#...........#",
+  "#...#..........#",
+  "##...#.........#",
+  "#.#...#........#",
+  "#..#...#.......#",
+  "#...#...#......#",
+  "#....#...#.....#",
+  "#.....#...#....#",
+  "#......#...#...#",
+  "#.......#...#..#",
+  "#........#...#.#",
+  "#.........#...##",
+  "#..........#...#",
+  "#...........#..#",
+  "################",
+];
 const L2_WALLS = [[8, 5], [8, 13], [11, 14]];
 const L2_SOCK_WALL = [0, 1, 2];
 const SOCK_MAP = (() => {
@@ -259,7 +279,7 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 
 // The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
 // grid; the old 16 x 16 literals and the ring's are gone.
-const M = (SOCKROOM ? SOCK_MAP : ARENA ? L3_MAP : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
+const M = (SOCKROOM ? SOCK_MAP : LVL === 3 ? L3_MAP : LVL === 4 ? L4_MAP : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
 // free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
@@ -369,9 +389,11 @@ const PATH_N = pathOpen.length;
       if (mapC[n] === 0 && !seen.has(n)) { seen.add(n); q.push(n); }
     }
   }
-  if (seen.size !== open.length) throw new Error(
-    `angel path: ${open.length} open cells but only ${seen.size} reachable from ` +
-    `(${cellX(open[0])},${cellY(open[0])}) -- the open cells are not one connected region`);
+  const msg = `angel path: ${open.length} open cells but only ${seen.size} reachable from ` +
+    `(${cellX(open[0])},${cellY(open[0])}) -- the open cells are not one connected region`;
+  // The look-and-feel arenas (level 4's corner-touching diagonals cut the room in three) are
+  // allowed to maroon their angels: the user is testing what a shape looks like, not a level.
+  if (seen.size !== open.length) { if (ARENA) console.error(`  NOTE: ${msg}`); else throw new Error(msg); }
 }
 // The queue never holds more than one entry per open cell, since a cell is enqueued when it is
 // first given a distance and never again.
@@ -6053,6 +6075,11 @@ ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res s
 ; ONLY at runtime -- nothing is emitted into them -- so before they were named here the hole
 ; report counted both as free space and handed them out twice: the angel path table landed on
 ; $4900 and the BFS distance maps on $6200, and the drop came up as a screenful of garbage.
+runPlaneT = $fc00                ; per run id: the wall's plane coordinate and which face is
+runFaceT  = $fd00                ;   visible. Derived by mkRuns at boot and after every level
+                                 ;   change; a page each because a level may have up to 255 runs.
+                                 ;   Bank-3 squatters like bfsQ below: level 4's 100 runs outgrew
+                                 ;   the image block they were emitted in (2026-09-18).
 bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. It lived in the image until
                                  ;   level 3's 196 open cells (2026-09-18); no image hole holds a
@@ -6454,7 +6481,12 @@ ${DIE ? `        lda #$ff                ; hazCur is READ to decide whether the 
 ${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is still live RAM and has to be
                                 ;   cleared by hand. A wall the sockets took out must come back
                                 ;   too, or a restart hands you a level already solved.
-` : ''}${process.env.MKRUNS ? '        jsr mkRuns              ; MKRUNS=1: derive the run tables at boot ON TOP of the ones\n                                ;   the image already carries. If the frame is byte-identical the\n                                ;   derivation is exactly right, and they need not be carried.\n' : ''}        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
+` : ''}        jsr mkRuns              ; ALWAYS at boot now: runPlaneT/runFaceT are not emitted at all
+                                ;   (bank-3 scratch), so the live level derives them exactly as a
+                                ;   swapped-in one does. The four per-cell run tables are still
+                                ;   carried, and this rewrites them byte for byte (MKRUNS=1 was
+                                ;   the proof of that, and is now simply the default).
+        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
                                 ;   jumping here, and their state is all live RAM
 ` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
@@ -14609,12 +14641,9 @@ cellFillT: !byte ${[...Array(256)].map((_, c) => {
         ; Straight from the per-level manifest, not a second copy of the same expression: these
         ; are NRUN long rather than this level's own run count, and the swap exchanges them
         ; against a shadow sized the same way. Two sources for one table is how they drift.
-; The LIVE level's copies, still emitted because nothing derives them until the first swap.
-; They are no longer in the manifest, so they do not travel; mkRuns rebuilds them from the new
-; mapT on arrival. NRUN-sized, so a level with more runs than this one still fits.
-runPlaneT: !byte ${[...Array(NRUN)].map((_, r) => r ? runPlane[r] ?? 0 : 0).join(',')}
-runFaceT: !byte ${[...Array(NRUN)].map((_, r) =>
-      r === 0 || !runFace[r] ? 0 : { W: 0x00, E: 0x80, N: 0x01, S: 0x81 }[runFace[r]]).join(',')}
+; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
+; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
+; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
 orbOccLoT: !byte ${orbOccLo.join(',')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
@@ -18261,7 +18290,7 @@ try {
       // died the instant an angel reached you, standing still. Anything referenced as name+1
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
       ...RUNTIME_BUFS,
-      bfsQ: 256,
+      bfsQ: 256, runPlaneT: 256, runFaceT: 256,
       opx: 2, opy: 2,
       osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
       rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
