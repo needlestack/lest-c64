@@ -261,9 +261,12 @@ const M = (SOCKROOM ? SOCK_MAP : L1_MAP).map(r => r.split('').map(c => c === '#'
 // exactly the old layout, so nothing about the generated code changes while these are the default.
 // The stride was written as a literal 16 (and as <<4 / >>4 / &15) in ~40 places; they read MAPW
 // now, which is what lets a level be 28x9 or 12x20 instead of only square.
-// A one-level chain takes its own map's shape; two resident levels share 23 x 11.
-const MAPW = +(process.env.MAPW ?? (CHAIN.length === 1 ? M[0].length : 23));
-const MAPH = +(process.env.MAPH ?? (CHAIN.length === 1 ? M.length : 11));
+// EVERY LEVEL HAS ITS OWN SHAPE (2026-09-18, the user's call: "some square, some long and
+// narrow -- swapped when you fall"). The build's grid is the live level's; the other levels are
+// built in their own, and every runtime use of the stride reads the swapped lvlDimT/rowMulT/
+// bfsDCT instead of an immediate. What has to hold across the chain is only W x H <= 256.
+const MAPW = +(process.env.MAPW ?? M[0].length);
+const MAPH = +(process.env.MAPH ?? M.length);
 const MAPN = MAPW * MAPH;
 // WIDECELL=1: allow more than 256 cells. The cell id then needs nine bits -- see the page byte
 // and patched operands in the DDA. Sizing the tables is independent of that and comes first, so
@@ -276,9 +279,13 @@ const cellOf = (x, y) => y * MAPW + x;
 // The runtime computes a cell as row*MAPW + col in a dozen places. It did it as four asl and an
 // ora, which is only right when MAPW is 16: the shift is the multiply and the ora is the add ONLY
 // because y*16 leaves the low four bits clear. Both halves have to follow MAPW.
-const POW2W = (MAPW & (MAPW - 1)) === 0;
-const MULW  = POW2W ? Array(Math.log2(MAPW)).fill('        asl').join('\n') : '        jsr mulW';
-const ADDX  = (x, c = '') => POW2W ? `        ora ${x}${c}` : `        clc\n        adc ${x}${c}`;
+// ALWAYS the general form now: the width is the level's, not the build's, so a shift chain for
+// 16 would be wrong the moment a 23-wide level was swapped in. mulW is a table lookup (rowMulT,
+// swapped per level); the asl chain it replaces was worth ~15 cycles a call at a few calls a
+// frame, and the DDA -- the one hot stride user -- steps by a variable it already loaded.
+const POW2W = false;
+const MULW  = '        jsr mulW';
+const ADDX  = (x, c = '') => `        clc\n        adc ${x}${c}`;
 const cellX  = c => c % MAPW;
 const cellY  = c => (c / MAPW) | 0;
 const inMap  = (x, y) => x >= 0 && y >= 0 && x < MAPW && y < MAPH;
@@ -1146,7 +1153,21 @@ const SOCK_ROUTE = [
   ['act', T_SPACE, 2],                             // seat it: the wall at (11,14) goes
   ['act', T_WAIT, 120],
 ];
+// ROUTE=block (LVL=2 TWOLEV=0 TOURW=1, angel ON): open the corridor, then drop the second orb
+// in the vanished wall's cell -- the one-wide chokepoint -- and look away for ten seconds. The
+// angel must still be east of (8,5) afterwards.
+const BLOCK_ROUTE = [
+  ['to',  5.5, 2.5], ['act', T_SPACE, 2],           // orb A
+  ['to',  5.5, 5.5], ['spin', -90], ['act', T_SPACE, 2],   // seat it: (8,5) goes
+  ['act', T_WAIT, 60],
+  ['to',  5.5, 8.5], ['spin', -90], ['act', T_SPACE, 2],   // orb B, from the south alcove
+  ['to',  5.5, 5.5], ['to', 7.5, 5.5],              // into the pocket, facing east at (8,5)
+  ['act', T_SPACE, 2],                              // put it down in the corridor mouth
+  ['spin', 180],                                    // look away
+  ['act', T_WAIT, 600],                             // and give the angel ten seconds
+];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+const BLOCK_COMPILED = compileRoute(BLOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
 const FALL_COMPILED = compileRoute(FALL_ROUTE, [0x0280, 0x0280, 0x19c0]);
 const SOCK_COMPILED = compileRoute(SOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
 // ROUTE=cover5: the same idea for LVL=5 -- every open cell of the room, the corridor, and the
@@ -1185,10 +1206,11 @@ const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
                  : ROUTE === 'cover5' ? COVER5_COMPILED.steps
                  : ROUTE === 'fall' ? FALL_COMPILED.steps
                  : ROUTE === 'sock' ? SOCK_COMPILED.steps
+                 : ROUTE === 'block' ? BLOCK_COMPILED.steps
                  : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
 // Not in an LVLDUMP subprocess: that is the OTHER level being built as a shadow, and a route
 // authored for the live level walks straight through its walls.
-if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock')) {
+if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block')) {
   DIAGEARLY.push(`ROUTE=${ROUTE}`);
   // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
@@ -1197,7 +1219,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
   const R = 26;                                  // mvFree's half-box, in 1/256 cells
   // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
   // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
-  const openW = ROUTE === 'sock' && SOCKROOM ? new Set(L2_WALLS.map(w => cellOf(...w))) : new Set();
+  const openW = (ROUTE === 'sock' || ROUTE === 'block') && SOCKROOM ? new Set(L2_WALLS.map(w => cellOf(...w))) : new Set();
   const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || (M[cy][cx] && !openW.has(cellOf(cx, cy)));
   const blocked = (X, Y) => {
     for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
@@ -1205,7 +1227,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     return false;
   };
   let [x, y, a] = ROUTE === 'cover5' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0]
-                : ROUTE === 'sock' ? [0x0280, 0x0280, 0x1a00] : [0x01f6, 0x0149, 0x3b00], bad = [];
+                : ROUTE === 'sock' || ROUTE === 'block' ? [0x0280, 0x0280, 0x1a00] : [0x01f6, 0x0149, 0x3b00], bad = [];
   for (const [i, [t, n]] of TOUR_STEPS.entries()) {
     const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
     const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
@@ -1226,7 +1248,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
     `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
     `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED })[ROUTE].end;
+  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED })[ROUTE].end;
   console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
     `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
     `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
@@ -3739,7 +3761,7 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 const WALL_LVL = 2;
 // ONE VARIANT PER REMOVABLE WALL: each is the level with that wall alone taken out, and each
 // yields its own delta. WALLVARS[k] goes with L2_WALLS[k].
-const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && (SOCKROOM || TWOLEV)) ? L2_WALLS.map((_, k) => {
+const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && CHAIN.includes(WALL_LVL)) ? L2_WALLS.map((_, k) => {
   const tmp = `./.wall${k}-tables.json`;
   execFileSync(process.execPath, [process.argv[1]],
     { env: { ...process.env, LVL: String(WALL_LVL),
@@ -5222,7 +5244,7 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from the manifest
 const pad = (a, n) => [...a, ...Array(Math.max(0, n - a.length)).fill(0)];
 const LVL_TABLES = [
-  ['mapT', map],
+  ['mapT', pad(map, 256).map((v, i) => i < MAPN ? v : 1)],   // a full page of WALL past the map: see the emitted mapT
   // blkT and the eight run tables USED to travel here -- 1,380 of the 1,789 bytes a level cost.
   // They are all derived from mapT: blkT by objInit, which already copied it at boot, and the
   // rest by mkRuns. Carrying them was more expensive than recomputing them, because the swap
@@ -5234,6 +5256,10 @@ const LVL_TABLES = [
   //   ['runPlaneT', ...], ['runFaceT', ...], ['runByteT', ...], ['runBitT', ...],
   //   (runPlaneT/runFaceT for the hazard SPLIT ids come from hazSpT below -- see mkRuns)
   ['holeSeeT', holeSee],
+  // THE LEVEL'S SHAPE. Padded to 32 rows: a level 8 wide can be 32 tall.
+  ['rowMulT', pad([...Array(MAPH)].map((_, y) => y * MAPW), 32)],
+  ['bfsDCT', [1, 255, MAPW, (256 - MAPW) & 255]],   // the four orthogonal steps as cell deltas
+  ['lvlDimT', [MAPW, MAPH, (256 - MAPW) & 255, Math.min(255, MAPW + MAPH), MAPH - 1]],
   // The merge-hazard SPLIT ids: (parent run, spare id) pairs, $ff-terminated, padded to the
   // larger level. mkRuns gives every run the map shows a plane and a face, but a spare id exists
   // only in the hazard lists, so its plane and face -- the parent's -- are copied from this after
@@ -5423,10 +5449,11 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   // which columns are showing the doomed wall.
   let cell = -1;
   const baseMap = base ? base.mapT : LVL_TABLES.find(([n]) => n === 'mapT')[1];
-  for (let i = 0; i < MAPN; i++) if ((WV.tables.mapT[i] ?? 0) !== baseMap[i]) cell = i;
+  for (let i = 0; i < 256; i++) if ((WV.tables.mapT[i] ?? 0) !== (baseMap[i] ?? 0)) cell = i;
   if (cell < 0) throw new Error(`wall variant ${k} changed no map cell -- WALL_LVL or L2_WALLS is wrong`);
-  if (cell !== cellOf(...L2_WALLS[k])) throw new Error(`wall variant ${k} removed cell ${cell}, not ${L2_WALLS[k]}`);
-  console.error(`  wall ${k} at ${cellX(cell)},${cellY(cell)}: ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction`);
+  const L2W = SOCK_MAP[0].length;                  // level 2's OWN width: the live grid may differ
+  if (cell !== L2_WALLS[k][1] * L2W + L2_WALLS[k][0]) throw new Error(`wall variant ${k} removed cell ${cell}, not ${L2_WALLS[k]}`);
+  console.error(`  wall ${k} at ${cell % L2W},${(cell / L2W) | 0}: ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction`);
   return { off, on, cell };
 }) : null;
 const WALL_DELTA = WALL_DELTAS ? WALL_DELTAS[0] : null;   // the flag; per-wall data is WALL_DELTAS
@@ -8756,16 +8783,16 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         adc #$00
         sta cy1
         lda cx0                 ; any corner off the map (or wrapped) rejects the move
-        cmp #${MAPW}            ; ...against the MAP's own width and height. At a fixed 16 this
-        bcs mvBlk               ;   was an invisible wall down the x=16 line -- exactly the join
-        lda cx1                 ;   between the two halves of a combined level.
-        cmp #${MAPW}
+        cmp lvlDimT             ; ...against the LIVE LEVEL's width and height (lvlDimT is
+        bcs mvBlk               ;   swapped with the level). At a fixed 16 this was an invisible
+        lda cx1                 ;   wall down the x=16 line -- the join of a combined level.
+        cmp lvlDimT
         bcs mvBlk
         lda cy0
-        cmp #${MAPH}
+        cmp lvlDimT+1
         bcs mvBlk
         lda cy1
-        cmp #${MAPH}
+        cmp lvlDimT+1
         bcs mvBlk
         lda cy0                 ; all four corners must be open
 ${MULW}
@@ -9603,13 +9630,13 @@ ${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
         bcc cypos
         lda #$ff
         sta stpY
-        lda #${hx((256 - MAPW) & 255)}                ; -MAPW: one cell row back
+        lda lvlDimT+2           ; -MAPW: one cell row back
         sta stpY16
         jmp cySat               ; negative: m IS the side distance, so there is nothing to
                                 ; subtract -- but the saturation below still has to run
 cypos:  lda #$01
         sta stpY
-        lda #${hx(MAPW)}                ; +MAPW: one cell row on
+        lda lvlDimT             ; +MAPW: one cell row on
         sta stpY16
         sec                     ; positive: sdy = ddy - m, in place
         lda ddy
@@ -9654,7 +9681,7 @@ cySx:   lda ddyH
         sta sdy
         sta sdyH
 cydone:${PROFSUB ? '\n        ldx #10\n        jsr pfTick              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
-        ldy #${Math.min(255, MAPW + MAPH)}            ; the step guard must span the MAP: a ray crosses at most
+        ldy lvlDimT+3           ; the step guard must span the MAP: a ray crosses at most
                                 ;   W + H cell boundaries before it leaves the grid. At a fixed 24
                                 ;   a long sightline expires early, cfar sets pp = 1, and the
                                 ;   column ends up with no wall run -- which occWalk reads as
@@ -12224,26 +12251,6 @@ fcGB:   lda #${hx(SCR_A >> 8)}
 fcGrab: jsr fallSnap
 fcNo:   rts
 
-; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
-; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
-fallSnap:
-        sta fdS+1
-        lda #${hx(FALLBUF >> 8)}
-        sta fdD+1
-        lda #$00
-        sta fdS
-        sta fdD
-        ldx #$04
-        ldy #$00
-fsnLp:  lda (fdS),y
-        sta (fdD),y
-        iny
-        bne fsnLp
-        inc fdS+1
-        inc fdD+1
-        dex
-        bne fsnLp
-        rts
 
 ; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
 fallStep:
@@ -13323,13 +13330,13 @@ anTry:  lda amTX
         clc
         lda orbXCT,x
         adc amTX
-        cmp #${MAPW}            ; RANGE CHECK, not a mask. "and #$0f" wrapped x=16 round to 0 --
-        bcs anNo                ;   the border wall -- so an angel walking east stopped dead at
-        sta amX                 ;   the end of the corridor. A mask cannot work at a width that
-        clc                     ;   is not a power of two, and a step off the map is refused by
-        lda orbYCT,x            ;   the solid border anyway; this only has to catch the wrap.
+        cmp lvlDimT             ; RANGE CHECK, not a mask, against the live level's width. "and
+        bcs anNo                ;   #$0f" wrapped x=16 round to 0 -- the border wall -- so an angel
+        sta amX                 ;   walking east stopped dead at the end of the corridor. A mask
+        clc                     ;   cannot work at a width that is not a power of two, and a step
+        lda orbYCT,x            ;   off the map is refused by the solid border; this catches the wrap.
         adc amTY
-        cmp #${MAPH}
+        cmp lvlDimT+1
         bcs anNo
         sta amY
         lda amX                 ; never step ONTO the player: touching is harmless by design,
@@ -13809,8 +13816,10 @@ ${SOUND ? `        lda #$01
         sta entDty
         rts
 okPlain:inc blkVer              ; ...and setting one down closes a cell
-        lda #$02
-        sta blkT,x
+        ldx odCell              ; NOT the X orbPut loaded: hlAt walks the sockets through X on
+        lda #$02                ;   its way here, so on any level WITH sockets the wall went to
+        sta blkT,x              ;   a border cell and the angel walked straight through the
+                                ;   orb (level 2, 2026-09-18, reported from play)
         ldx carry
         dex
         lda odX                 ; cell coordinates ARE the position, so it lands centred
@@ -14478,7 +14487,7 @@ oabs:   lda #$00
         sbc oaH
         sta oaH
 oabsD:  rts
-` : ''}${!POW2W ? `
+` : ''}${`
 ; ---- mulW: A = row -> A = row * MAPW ----
 ; A power-of-two width is four asl and an ora; anything else needs a real multiply, and a table
 ; of MAPH entries is both smaller and faster than shift-and-add. Y is saved because the callers
@@ -14489,8 +14498,8 @@ mulW:   sty mulWY
         lda rowMulT,y
         ldy mulWY
         rts
-rowMulT: !byte ${[...Array(MAPH)].map((_, y) => y * MAPW).join(',')}
-` : ''}
+rowMulT: !byte ${LVLT('rowMulT').join(',')}   ; from the MANIFEST: the live level's stride
+`}
 ${process.env.PAD ? `        !fill ${+process.env.PAD}, $ea   ; PAD=<n>: n inert bytes at the end of the code block, to
                                 ;   separate "this diagnostic's LOGIC broke the build" from "the
                                 ;   build does not survive its code growing by n bytes". Nothing
@@ -14880,7 +14889,9 @@ bfsFin: lda bfsFor
         rts
 
         ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
-bfsDCT: !byte 1,255,${MAPW},${256 - MAPW}      ; ...as a CELL delta
+bfsDCT: !byte ${LVLT('bfsDCT').join(',')}      ; ...as a CELL delta (manifest: the live level's width)
+lvlDimT: !byte ${LVLT('lvlDimT').join(',')}   ; W, H, -W, W+H, H-1: the live level's shape, for every
+                                ;   stride the code used to carry as an immediate
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
@@ -15052,7 +15063,7 @@ runNT: !byte ${runN.join(',')}
         * = ${hx16(RELOC + 0x700)}
 runST: !byte ${runS.join(',')}
         * = ${hx16(RELOC + 0x800)}
-mapT:   ${chunk([...map, ...Array(256 - MAPN).fill(1)], 16).trim()}   ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
+mapT:   ${chunk(LVLT('mapT'), 16).trim()}   ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
         * = ${hx16(RELOC + 0x900)}
 rbT:    ${chunk(rbT).trim()}
         * = ${hx16(RELOC + 0xa00)}
@@ -15217,15 +15228,15 @@ mrVen:  lda #$00
         sta mrEp
 mrVn:   tya                     ; next row, same column
         clc
-        adc #${hx(MAPW)}
+        adc lvlDimT             ; + MAPW
         tay
         inc mrY
         lda mrY
-        cmp #${hx(MAPH)}
+        cmp lvlDimT+1           ; MAPH
         bcc mrVy
         inc mrX
         lda mrX
-        cmp #${hx(MAPW)}
+        cmp lvlDimT             ; MAPW
         bcc mrVx
 
         ; ---- horizontal planes: north and south faces, contiguous in x ----
@@ -15246,7 +15257,7 @@ mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW 
         beq mrHnn
         tya
         sec
-        sbc #${hx(MAPW)}
+        sbc lvlDimT             ; c - MAPW
         tax
         lda mapT,x
         bne mrHnn
@@ -15268,11 +15279,11 @@ mrHns:  lda mrWid
 mrHnn:  lda #$00
         sta mrWp
 mrHs:   lda mrY                 ; south face: the last row has none, and c+MAPW would leave mapT
-        cmp #${hx(MAPH - 1)}
+        cmp lvlDimT+4           ; MAPH - 1
         beq mrHsn
         tya
         clc
-        adc #${hx(MAPW)}
+        adc lvlDimT             ; c + MAPW
         tax
         lda mapT,x
         bne mrHsn
@@ -15298,11 +15309,11 @@ mrHsn:  lda #$00
 mrHnx:  iny
         inc mrX
         lda mrX
-        cmp #${hx(MAPW)}
+        cmp lvlDimT             ; MAPW
         bcc mrHx
         inc mrY
         lda mrY
-        cmp #${hx(MAPH)}
+        cmp lvlDimT+1           ; MAPH
         bcc mrHy
 
         ; ---- the per-run bit lookups, which are pure arithmetic on the id ----
@@ -15466,7 +15477,30 @@ sfxK:   !byte 0                 ; which effect is loaded
         ; posXT exactly, and "* = moves backward" is the guard if the sound block or the level
         ; ever grows into it.
 bfsQ:   !fill ${BFS_Q}, 0
-${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
+${FALL ? `; Out of the main block (11 bytes over once level 1's two angel readouts met the per-level
+; stride reads, 2026-09-18) into the tail of the bfsQ page. jsr-only; "* = $9500 moves
+; backward" guards it.
+` + `; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
+; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
+fallSnap:
+        sta fdS+1
+        lda #${hx(FALLBUF >> 8)}
+        sta fdD+1
+        lda #$00
+        sta fdS
+        sta fdD
+        ldx #$04
+        ldy #$00
+fsnLp:  lda (fdS),y
+        sta (fdD),y
+        iny
+        bne fsnLp
+        inc fdS+1
+        inc fdD+1
+        dex
+        bne fsnLp
+        rts
+` : ''}${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
 ddxLoT: ${chunk(ddxLo).trim()}
         * = ${hx16(RELOC + 0xc00)}
 ddxHiT: ${chunk(ddxHi).trim()}

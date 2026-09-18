@@ -1048,10 +1048,7 @@ sHyCp:  lda sHyC,x              ;   tick and the "lda py+1" below both reload it
         lda #$00
         sta sHyN
         lda py+1                ; the DDA's starting cell, once for the whole frame
-        asl
-        asl
-        asl
-        asl
+        jsr mulW
         clc
         adc px+1
         sta cell0
@@ -2750,44 +2747,42 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         adc #$00
         sta cy1
         lda cx0                 ; any corner off the map (or wrapped) rejects the move
-        cmp #16            ; ...against the MAP's own width and height. At a fixed 16 this
-        bcs mvBlk               ;   was an invisible wall down the x=16 line -- exactly the join
-        lda cx1                 ;   between the two halves of a combined level.
-        cmp #16
+        cmp lvlDimT             ; ...against the LIVE LEVEL's width and height (lvlDimT is
+        bcs mvBlk               ;   swapped with the level). At a fixed 16 this was an invisible
+        lda cx1                 ;   wall down the x=16 line -- the join of a combined level.
+        cmp lvlDimT
         bcs mvBlk
         lda cy0
-        cmp #16
+        cmp lvlDimT+1
         bcs mvBlk
         lda cy1
-        cmp #16
+        cmp lvlDimT+1
         bcs mvBlk
         lda cy0                 ; all four corners must be open
-        asl
-        asl
-        asl
-        asl
+        jsr mulW
         sta tmp
-        ora cx0
+        clc
+        adc cx0
         tax
         lda blkT,x
         bne mvBlk
         lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
-        ora cx1                  ;   y*MAPW so there is no MULW in front of it to spot
+        clc
+        adc cx1                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
         bne mvBlk
         lda cy1
-        asl
-        asl
-        asl
-        asl
+        jsr mulW
         sta tmp
-        ora cx0
+        clc
+        adc cx0
         tax
         lda blkT,x
         bne mvBlk
         lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
-        ora cx1                  ;   y*MAPW so there is no MULW in front of it to spot
+        clc
+        adc cx1                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
         bne mvBlk
@@ -3644,13 +3639,13 @@ cyml2:   tax
         bcc cypos
         lda #$ff
         sta stpY
-        lda #$f0                ; -MAPW: one cell row back
+        lda lvlDimT+2           ; -MAPW: one cell row back
         sta stpY16
         jmp cySat               ; negative: m IS the side distance, so there is nothing to
                                 ; subtract -- but the saturation below still has to run
 cypos:  lda #$01
         sta stpY
-        lda #$10                ; +MAPW: one cell row on
+        lda lvlDimT             ; +MAPW: one cell row on
         sta stpY16
         sec                     ; positive: sdy = ddy - m, in place
         lda ddy
@@ -3695,7 +3690,7 @@ cySx:   lda ddyH
         sta sdy
         sta sdyH
 cydone:
-        ldy #32            ; the step guard must span the MAP: a ray crosses at most
+        ldy lvlDimT+3           ; the step guard must span the MAP: a ray crosses at most
                                 ;   W + H cell boundaries before it leaves the grid. At a fixed 24
                                 ;   a long sightline expires early, cfar sets pp = 1, and the
                                 ;   column ends up with no wall run -- which occWalk reads as
@@ -4416,10 +4411,7 @@ omSwTk: dec sokAn
         jsr wallTog
 omNoIco:
         lda py+1                ; which cell is the player standing in?
-        asl
-        asl
-        asl
-        asl
+        jsr mulW
         clc
         adc px+1
         tax
@@ -5850,26 +5842,6 @@ fcGB:   lda #$e0
 fcGrab: jsr fallSnap
 fcNo:   rts
 
-; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
-; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
-fallSnap:
-        sta fdS+1
-        lda #$62
-        sta fdD+1
-        lda #$00
-        sta fdS
-        sta fdD
-        ldx #$04
-        ldy #$00
-fsnLp:  lda (fdS),y
-        sta (fdD),y
-        iny
-        bne fsnLp
-        inc fdS+1
-        inc fdD+1
-        dex
-        bne fsnLp
-        rts
 
 ; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
 fallStep:
@@ -6235,11 +6207,9 @@ dpCand: clc                     ; ---- the eight cells around the player, as a C
         lda py+1
         adc dirYT,x
         sta fcY
-        asl
-        asl
-        asl
-        asl
-        ora fcX
+        jsr mulW
+        clc
+        adc fcX
         sta fcCell
         rts
 
@@ -6381,11 +6351,9 @@ oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta angAccT,x
         sta orbSeenT,x
         lda orbY0T,x
-        asl
-        asl
-        asl
-        asl
-        ora orbX0T,x
+        jsr mulW
+        clc
+        adc orbX0T,x
         tay
         lda #$02
         sta blkT,y              ; 2 = entity, not wall -- angStep and mvFree both rely on it
@@ -6667,11 +6635,9 @@ anNoY:  jsr anPath
 anGo:   inc blkVer              ; the obstacle map changed: the fill has to be redone
         ldx amIdx
         lda orbYCT,x            ; the cell it is leaving opens
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
+        jsr mulW
+        clc
+        adc orbXCT,x
         tay
         lda #$00
         sta blkT,y
@@ -6720,13 +6686,13 @@ anTry:  lda amTX
         clc
         lda orbXCT,x
         adc amTX
-        cmp #16            ; RANGE CHECK, not a mask. "and #$0f" wrapped x=16 round to 0 --
-        bcs anNo                ;   the border wall -- so an angel walking east stopped dead at
-        sta amX                 ;   the end of the corridor. A mask cannot work at a width that
-        clc                     ;   is not a power of two, and a step off the map is refused by
-        lda orbYCT,x            ;   the solid border anyway; this only has to catch the wrap.
+        cmp lvlDimT             ; RANGE CHECK, not a mask, against the live level's width. "and
+        bcs anNo                ;   #$0f" wrapped x=16 round to 0 -- the border wall -- so an angel
+        sta amX                 ;   walking east stopped dead at the end of the corridor. A mask
+        clc                     ;   cannot work at a width that is not a power of two, and a step
+        lda orbYCT,x            ;   off the map is refused by the solid border; this catches the wrap.
         adc amTY
-        cmp #16
+        cmp lvlDimT+1
         bcs anNo
         sta amY
         lda amX                 ; never step ONTO the player: touching is harmless by design,
@@ -6736,11 +6702,9 @@ anTry:  lda amTX
         cmp py+1
         beq anNo
 anT1:   lda amY
-        asl
-        asl
-        asl
-        asl
-        ora amX
+        jsr mulW
+        clc
+        adc amX
         sta amCell
         tay
         lda blkT,y
@@ -7149,11 +7113,9 @@ okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may ex
         lda #$01                ; out of the world, into the hands
         sta orbHidT,x
         lda orbYCT,x            ; and the cell it was standing in opens
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
+        jsr mulW
+        clc
+        adc orbXCT,x
         tay
         lda #$00
         sta blkT,y
@@ -7225,8 +7187,10 @@ orbPut: jsr dropPick            ; ---- put down ----
         sta entDty
         rts
 okPlain:inc blkVer              ; ...and setting one down closes a cell
-        lda #$02
-        sta blkT,x
+        ldx odCell              ; NOT the X orbPut loaded: hlAt walks the sockets through X on
+        lda #$02                ;   its way here, so on any level WITH sockets the wall went to
+        sta blkT,x              ;   a border cell and the angel walked straight through the
+                                ;   orb (level 2, 2026-09-18, reported from play)
         ldx carry
         dex
         lda odX                 ; cell coordinates ARE the position, so it lands centred
@@ -7895,6 +7859,18 @@ oabs:   lda #$00
         sta oaH
 oabsD:  rts
 
+; ---- mulW: A = row -> A = row * MAPW ----
+; A power-of-two width is four asl and an ora; anything else needs a real multiply, and a table
+; of MAPH entries is both smaller and faster than shift-and-add. Y is saved because the callers
+; are spread across the cast, the collision test, the entity code and the BFS, and several hold
+; a live Y across the call.
+mulW:   sty mulWY
+        tay
+        lda rowMulT,y
+        ldy mulWY
+        rts
+rowMulT: !byte 0,16,32,48,64,80,96,112,128,144,160,176,192,208,224,240,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0   ; from the MANIFEST: the live level's stride
+
 ; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
@@ -8446,11 +8422,9 @@ bfsD1:  !fill 256, 255
 ; either no fill has completed yet, or the angel is walled off -- and callers must treat that as
 ; "unknown", not as "very far", or a marooned angel would run at the fast rate forever.
 angDst: lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
+        jsr mulW
+        clc
+        adc orbXCT,x
         tax
 apLdC:  lda bfsD0,x             ; operand PATCHED to the live map, alongside apLdA/apLdB
         rts
@@ -8460,11 +8434,9 @@ angFarT: !byte $06      ; ...where "far" starts. Per level, both swapped with an
 
 anPath: ldx amIdx
         lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
+        jsr mulW
+        clc
+        adc orbXCT,x
         sta apC
         tax
 apLdA:  lda bfsD0,x             ; operand PATCHED to the live map
@@ -8503,11 +8475,9 @@ anPHit: tya
 ; forever would mean the map never completed at all.
 bfsTick:
         lda py+1                ; where the player is NOW
-        asl
-        asl
-        asl
-        asl
-        ora px+1
+        jsr mulW
+        clc
+        adc px+1
         sta bfsWant
         lda bfsPhase
         bne bfsWork
@@ -8633,11 +8603,9 @@ bfsEnL: lda orbTallT,x
         bne bfsEnN              ; not in the world
         stx bfsEnI
         lda orbYCT,x
-        asl
-        asl
-        asl
-        asl
-        ora orbXCT,x
+        jsr mulW
+        clc
+        adc orbXCT,x
         tax
 bfsLdE: lda bfsD1,x             ; operand PATCHED to the work map
         cmp #$ff
@@ -8670,7 +8638,9 @@ bfsFin: lda bfsFor
         rts
 
         ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
-bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta
+bfsDCT: !byte 1,255,16,240      ; ...as a CELL delta (manifest: the live level's width)
+lvlDimT: !byte 16,16,240,32,15   ; W, H, -W, W+H, H-1: the live level's shape, for every
+                                ;   stride the code used to carry as an immediate
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
@@ -9210,15 +9180,15 @@ mrVen:  lda #$00
         sta mrEp
 mrVn:   tya                     ; next row, same column
         clc
-        adc #$10
+        adc lvlDimT             ; + MAPW
         tay
         inc mrY
         lda mrY
-        cmp #$10
+        cmp lvlDimT+1           ; MAPH
         bcc mrVy
         inc mrX
         lda mrX
-        cmp #$10
+        cmp lvlDimT             ; MAPW
         bcc mrVx
 
         ; ---- horizontal planes: north and south faces, contiguous in x ----
@@ -9239,7 +9209,7 @@ mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW 
         beq mrHnn
         tya
         sec
-        sbc #$10
+        sbc lvlDimT             ; c - MAPW
         tax
         lda mapT,x
         bne mrHnn
@@ -9261,11 +9231,11 @@ mrHns:  lda mrWid
 mrHnn:  lda #$00
         sta mrWp
 mrHs:   lda mrY                 ; south face: the last row has none, and c+MAPW would leave mapT
-        cmp #$0f
+        cmp lvlDimT+4           ; MAPH - 1
         beq mrHsn
         tya
         clc
-        adc #$10
+        adc lvlDimT             ; c + MAPW
         tax
         lda mapT,x
         bne mrHsn
@@ -9291,11 +9261,11 @@ mrHsn:  lda #$00
 mrHnx:  iny
         inc mrX
         lda mrX
-        cmp #$10
+        cmp lvlDimT             ; MAPW
         bcc mrHx
         inc mrY
         lda mrY
-        cmp #$10
+        cmp lvlDimT+1           ; MAPH
         bcc mrHy
 
         ; ---- the per-run bit lookups, which are pure arithmetic on the id ----
@@ -9435,6 +9405,29 @@ sfxK:   !byte 0                 ; which effect is loaded
         ; posXT exactly, and "* = moves backward" is the guard if the sound block or the level
         ; ever grows into it.
 bfsQ:   !fill 118, 0
+; Out of the main block (11 bytes over once level 1's two angel readouts met the per-level
+; stride reads, 2026-09-18) into the tail of the bfsQ page. jsr-only; "* = $9500 moves
+; backward" guards it.
+; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
+; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
+fallSnap:
+        sta fdS+1
+        lda #$62
+        sta fdD+1
+        lda #$00
+        sta fdS
+        sta fdD
+        ldx #$04
+        ldy #$00
+fsnLp:  lda (fdS),y
+        sta (fdD),y
+        iny
+        bne fsnLp
+        inc fdS+1
+        inc fdD+1
+        dex
+        bne fsnLp
+        rts
         * = $9500
 posXT:  !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -9823,7 +9816,7 @@ landYT: !byte 2
 ; LVLSHADOW = $f600 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 649 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 690 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -9832,9 +9825,9 @@ landYT: !byte 2
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
 lvlBasLoT: !byte $00
 lvlBasHiT: !byte $f6
-lvlDstLoT: !byte <mapT,<holeSeeT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>holeSeeT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$80,$01,$08,$08,$04,$04,$01,$01,$01,$80,$01,$01,$01,$04,$04,$04,$01,$07,$08,$48,$01,$01,$01,$01,$01,$01
+lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$80,$20,$04,$05,$01,$08,$08,$04,$04,$01,$01,$01,$80,$01,$01,$01,$04,$04,$04,$01,$07,$08,$48,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -9887,7 +9880,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$1b
+        cmp #$1e
         bne lsTab
         rts
 lsIdx:  !byte 0
@@ -10306,11 +10299,9 @@ ogOrbL: lda orbHidT-1,x
         dex
         bne ogOrbL
 ogHole: lda py+1                ; the player's cell, for the LOS test
-        asl
-        asl
-        asl
-        asl
-        ora px+1
+        jsr mulW
+        clc
+        adc px+1
         sta pcell
         and #$07
         tay
