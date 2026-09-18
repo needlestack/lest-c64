@@ -66,8 +66,9 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // level 1 is 23x11, and every resident level shares one W x H grid of at most 256 cells.
 const CHAIN = (process.env.CHAIN ?? '2').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-if (LVL !== 1 && LVL !== 2) throw new Error(`LVL=${LVL}: the game has levels 1 and 2`);
+if (![1, 2, 3].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1, 2 and 3`);
 const SOCKROOM = LVL === 2;
+const ARENA = LVL === 3;
 const L1_MAP = [
   "#######################",
   "#..##..######.........#",
@@ -90,6 +91,10 @@ const L1_MAP = [
 //   at a time, so the corridor is walked twice with the angel loose.
 // L2_WALLS lists the removable cells; L2_SOCK_WALL says which wall each socket (in SOCKETS_AT
 // order) takes out. WALLOFF=k (1-based) builds the level with wall k-1 gone, for its delta.
+// LEVEL 3 (2026-09-18, the user's sketch while playtesting 2): an empty 14x14 arena. PP (1,1),
+// an angel in each of the two far corners, the orb in the fourth. No exit, no sockets, no walls
+// -- the first level with nothing to hide behind.
+const L3_MAP = ['################', ...Array(14).fill('#..............#'), '################'];
 const L2_WALLS = [[8, 5], [8, 13], [11, 14]];
 const L2_SOCK_WALL = [0, 1, 2];
 const SOCK_MAP = (() => {
@@ -254,7 +259,7 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 
 // The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
 // grid; the old 16 x 16 literals and the ring's are gone.
-const M = (SOCKROOM ? SOCK_MAP : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
+const M = (SOCKROOM ? SOCK_MAP : ARENA ? L3_MAP : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
 // free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
@@ -2708,7 +2713,7 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', SOCKROOM ? 0x1a : 0x19, 0xff);   // L1: $19c0 with PAF, the user's choice after playing --
+const PA = hexArg('PA', SOCKROOM ? 0x1a : ARENA ? 0x20 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
                                                                     // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
                                                                     //   room's far wall and the corridor mouth
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
@@ -2716,7 +2721,7 @@ const PA = hexArg('PA', SOCKROOM ? 0x1a : 0x19, 0xff);   // L1: $19c0 with PAF, 
 // DIFFERENT renders that all read "AC0" on screen. A cold start left paF at zero, so three of
 // every four reachable views could not be replayed from a screenshot at all, and a reported
 // glitch that lived on one of them looked like it simply did not reproduce.
-const PAF = hexArg('PAF', SOCKROOM ? 0x00 : 0xc0, 0xff);
+const PAF = hexArg('PAF', SOCKROOM || ARENA ? 0x00 : 0xc0, 0xff);
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
 // Level 1 opens in the room's north-west corner looking diagonally across it. The old start
@@ -2731,8 +2736,8 @@ const PAF = hexArg('PAF', SOCKROOM ? 0x00 : 0xc0, 0xff);
 // then simply walked back and finished the level without it ever mattering again. Starting
 // opposite, with the angel ON the door, means every route to the goal has the angel somewhere
 // along it, and the tie means it has no preferred arc until the player picks one.
-const PX = hexArg('PX', 0x0280, 0xffff);   // PP at (2,2) in both levels
-const PY = hexArg('PY', 0x0280, 0xffff);
+const PX = hexArg('PX', ARENA ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3
+const PY = hexArg('PY', ARENA ? 0x0180 : 0x0280, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
@@ -3693,6 +3698,7 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 6.5, y: 8.5, c: 0 });
     ORBS.push({ x: 11.5, y: 3.5, c: 0 });
   }
+  else if (ARENA) ORBS.push({ x: 14.5, y: 14.5, c: 0 });   // level 3: the far corner
   else {                                         // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
@@ -3714,6 +3720,10 @@ if (process.env.ORBSCATTER) {
   // from the other levels' is exactly what nOrbT was made swappable for.
   if (process.env.ANGEL !== '0') {
     if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
+    else if (ARENA) {                             // level 3: the two other corners
+      ORBS.push({ x: 14.5, y: 1.5, c: 0, tall: true });
+      ORBS.push({ x: 1.5, y: 14.5, c: 0, tall: true });
+    }
     else {                                        // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
@@ -3793,11 +3803,13 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = SOCKROOM ? [2, 11] : [15, 5];   // level 2: XX behind the last socket
+const HOLE_D = SOCKROOM ? [2, 11] : ARENA ? null : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
-const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]];
+// ...or NONE: a level with no exit (level 3 for now) has nExitT 0, and every hole-like loop and
+// fallChk test the count before touching entity nOrbT+0, which would be the byte past the last.
+const HOLES_AT = HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]] : [];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
 // orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
@@ -3854,7 +3866,7 @@ const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
 // The table is NORB x 32 bytes, indexed by entity slot -- so an orb's slots are wasted (all
 // zero) and the angels' rows land where amIdx x 32 says. 32 bytes an entity is the price of
 // not needing a second index register in anTry, which has none to spare.
-const LEASH_GROUPS = (process.env.LEASH ?? (SOCKROOM ? '' : '|21,2;21,8'))
+const LEASH_GROUPS = (process.env.LEASH ?? (SOCKROOM || ARENA ? '' : '|21,2;21,8'))
   .split('|').map(g => g.split(';').filter(Boolean).map(q => q.split(',').map(Number)));
 const LEASH_AT = LEASH_GROUPS.flat();     // every leash cell, for the checks that only care WHERE
 // One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
@@ -3876,7 +3888,7 @@ const angBlk = (() => {
   });
   return rows;
 })();
-const NHOLE = lvlMax(l => l.nHoleLike, HOLELIKE.length);
+const NHOLE = Math.max(1, lvlMax(l => l.nHoleLike, HOLELIKE.length));   // at least one row: holeSeeT is emitted
 const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
 
 // Masks for the ORBS *and* the hole-like entities, in the same order as orbXCT/orbYCT. Holes
@@ -3923,7 +3935,7 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number)]
-  : [[2, 2]];                                   // both levels land at (2,2)
+  : ARENA ? [[1, 1]] : [[2, 2]];
 // ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
 // on both of these lands you nose-against a wall half a cell away: the whole screen goes black
 // and it reads as a broken render rather than as a wall. One byte, and it travels with the level
@@ -3931,7 +3943,7 @@ const LANDS_AT = process.env.LAND
 //   level 1 (2,2): $3b, its own opening view across the room, not down the corridor axis
 //   level 2 (6,7): $80, along the ring -- the same cell and heading the level starts you at
 //   level 3 (1,1): $10, the one heading with BOTH the socket and the far-corner hole in view
-const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
+const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : ARENA ? 0x20 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -6041,6 +6053,11 @@ ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res s
 ; ONLY at runtime -- nothing is emitted into them -- so before they were named here the hole
 ; report counted both as free space and handed them out twice: the angel path table landed on
 ; $4900 and the BFS distance maps on $6200, and the drop came up as a screenful of garbage.
+bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
+                                 ;   Pure scratch, nothing swaps it. It lived in the image until
+                                 ;   level 3's 196 open cells (2026-09-18); no image hole holds a
+                                 ;   page, so it squats a bank-3 page -- CPU-only data in VIC
+                                 ;   space, against the guideline, like IPIC and ILVL.
 fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
 fallSnapS = $6200                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
@@ -12114,7 +12131,9 @@ ${FALL ? `
 ; LOS bitmap, its own fill ink and (for sockets) its own ladder -- hlSet points holeTail at the
 ; right one. The exits come first in HOLELIKE and only the live one is drawn, so the loop skips
 ; the other; sockets are always live.
-holeOne:lda hlv                 ; the live exit hole first, so it can never lose a slot to a
+holeOne:lda nHoleT              ; a level with no hole-likes at all (level 3): nothing to walk
+        beq hoRts
+        lda hlv                 ; the live exit hole first, so it can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
 hoLp:   lda hoI                 ;   biggest thing here
         asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
@@ -12149,13 +12168,13 @@ hoLp:   lda hoI                 ;   biggest thing here
 hoNx:   lda hoI
         cmp nExitT
         bcs hoInc               ; already past the exits: just step on
-        lda #${hx(HOLES_AT.length - 1)}
+        lda #${hx(Math.max(0, HOLES_AT.length - 1))}
         sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
 hoInc:  inc hoI
         lda hoI
         cmp nHoleT
         bcc hoLp
-        rts
+hoRts:  rts
 ` : ''}
 ${FALL ? `
 ; ================= the drop =================
@@ -12172,7 +12191,9 @@ ${FALL ? `
 ; this moves the screen matrix ONLY -- half the work a scrolling game would do here.
 
 ; fallChk: standing in the hole's cell? Then go.
-fallChk:lda hlv                 ; the live hole's entity index is nOrbT + hlv -- the SWAPPED count,
+fallChk:lda nExitT              ; no exit on this level: nothing to fall through
+        beq fcNo
+        lda hlv                 ; the live hole's entity index is nOrbT + hlv -- the SWAPPED count,
         clc                     ;   not this build's ORBS.length. Level 1 has four orbs and angels
         adc nOrbT               ;   before its hole; the socket room has one. With the immediate
         tax                     ;   baked in, the socket room's hole was compared at index 4 -- past
@@ -15471,12 +15492,6 @@ sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick
 sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
 sfxK:   !byte 0                 ; which effect is loaded
 ` : ''}
-        ; The angel fill's queue. Pure scratch, nothing swaps it, and it grows with the open-cell
-        ; count, so it wants a slot with slack. It sat in the stream until OCCSYN's oSPut needed
-        ; the room there (2026-09-16); the ${BFS_Q} bytes fit the hole under the page-aligned
-        ; posXT exactly, and "* = moves backward" is the guard if the sound block or the level
-        ; ever grows into it.
-bfsQ:   !fill ${BFS_Q}, 0
 ${FALL ? `; Out of the main block (11 bytes over once level 1's two angel readouts met the per-level
 ; stride reads, 2026-09-18) into the tail of the bfsQ page. jsr-only; "* = $9500 moves
 ; backward" guards it.
@@ -16341,7 +16356,9 @@ ogOrbL: lda orbHidT-1,x
         beq ogYes              ; one is in the world: project
         dex
         bne ogOrbL
-ogHole: lda py+1                ; the player's cell, for the LOS test
+ogHole: lda nHoleT              ; no hole-likes on this level: the gate is shut
+        beq ogNone
+        lda py+1                ; the player's cell, for the LOS test
 ${MULW}
 ${ADDX('px+1')}
         sta pcell
@@ -16370,10 +16387,11 @@ ogHoLp: txa
         ldx rgtH
         cpx nExitT
         bcs ogHoIn
-        ldx #${hx(HOLES_AT.length - 1)}   ; past the exits: only hlv's hole is live, so step over the other
+        ldx #${hx(Math.max(0, HOLES_AT.length - 1))}   ; past the exits: only hlv's hole is live, so step over the other
 ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then inc -> first socket)
         cpx nHoleT
         bcc ogHoLp
+ogNone:
 ${CULLCNT ? `${PROFILE ? '        lda pfDone              ; stop with the profiler, so frames and closures share a window\n        bne ogSk1\n' : ''}        inc ogSkip              ; CULLCNT: frames the gate closed
         bne ogSk1
         inc ogSkip+1
@@ -18243,6 +18261,7 @@ try {
       // died the instant an angel reached you, standing still. Anything referenced as name+1
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
       ...RUNTIME_BUFS,
+      bfsQ: 256,
       opx: 2, opy: 2,
       osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
       rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
