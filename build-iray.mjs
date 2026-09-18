@@ -54,9 +54,12 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // first level." The old level 1, the standalone ring, and the 28x9 side-by-side join (LVL=4)
 // are gone; they live in git before 2026-09-15.
 //
-// LEVEL 2 is the socket room: 8 x 8, one column, one orb, one socket at (5,2), the exit hole
-// in the far corner at (8,8). Seating the orb in the socket takes the column away (WALL_DELTA).
-// It sits in the same 23 x 11 grid as level 1, because every resident level shares one grid.
+// LEVEL 2 is the user's layout of 2026-09-18 (see SOCK_MAP): a 5x9 room with an orb alcove
+// top and bottom, a socket in the doorway at (6,5) into a 2x3 pocket, and the pocket's far wall
+// at (8,5) is what seating an orb takes away (WALL_DELTA) -- behind it a one-wide corridor to
+// an unleashed angel on a short spine, with the exit hole in the spine's south nub. Two orbs,
+// one socket, one angel. It sits in the same 23 x 11 grid as level 1, because every resident
+// level shares one grid. (Until then it was an 8x8 room with a vanishing column, no angel.)
 const LVL = +(process.env.LVL ?? 1);
 if (LVL !== 1 && LVL !== 2) throw new Error(`LVL=${LVL}: the game has levels 1 and 2`);
 const SOCKROOM = LVL === 2;
@@ -73,23 +76,30 @@ const L1_MAP = [
   "#..##..######.........#",
   "#######################",
 ];
+// LEVEL 2, the user's layout of 2026-09-18 (16 wide, padded to the shared 23-column grid):
+//   a 5-wide room with two orb alcoves at (6,2) and (6,8); the socket at (6,5) IS the doorway
+//   into a 2x3 pocket; the pocket's far wall at (8,5) is the one that goes when an orb is
+//   seated, and behind it a one-wide corridor runs to the angel at (13,5) on a short spine
+//   (x13, y1-9) with a nub at each end. The exit hole is in the south nub (14,9) -- MY guess,
+//   the sketch had no XX; move HOLE_D below if it belongs elsewhere.
 const SOCK_MAP = (col => [
   "#######################",
-  "#........##############",
-  "#........##############",
-  "#........##############",
-  col ? "#...#....##############"       // the column at (4,4)...
-      : "#........##############",      // ...or WALLOFF=1: the same room with it taken out
-  "#........##############",
-  "#........##############",
-  "#........##############",
-  "#........##############",
-  "#######################",
+  "#......######..########",
+  "#......######.#########",
+  "#.....#######.#########",
+  "#.....#..####.#########",
+  col ? "#.......#.....#########"       // the wall at (8,5): the pocket's far side...
+      : "#.............#########",      // ...or WALLOFF=1: the same level with it taken out
+  "#.....#..####.#########",
+  "#.....#######.#########",
+  "#......######.#########",
+  "#......######..########",
   "#######################",
 ])(!process.env.WALLOFF);
-if (SOCKROOM && process.env.TWOLEV === '0') {   // built ALONE, for looking at things: no angel,
-  process.env.NPIC ??= '1';                       //   one picture. Defaults, each still overridable.
-  process.env.ANGEL ??= '0';
+const L2_WALL = [8, 5];   // the cell that goes: the connectivity check below opens it, since with
+                          //   it in place the angel's side is a separate region until an orb is seated
+if (SOCKROOM && process.env.TWOLEV === '0') {   // built ALONE, for looking at things: one
+  process.env.NPIC ??= '1';                       //   picture. Defaults, each still overridable.
 }
 // NOSOCK=1 drops the socket AND seated-orb bitmaps. They are emitted even in levels with no
 // sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
@@ -312,20 +322,25 @@ const LVL2 = LVLALL ? LVLALL[0] : null;
 const pathOpen = [];
 for (let c = 0; c < MAPN; c++) if (map[c] === 0) pathOpen.push(c);
 const PATH_N = pathOpen.length;
-{ // one connected region, or an angel can be permanently marooned -- and so can the player
-  const seen = new Set([pathOpen[0]]), q = [pathOpen[0]];
+{ // one connected region, or an angel can be permanently marooned -- and so can the player.
+  // Judged with the removable wall OPEN: level 2 keeps its angel behind that wall on purpose,
+  // and the two regions join the moment an orb is seated.
+  const mapC = map.slice();
+  if (SOCKROOM) mapC[cellOf(...L2_WALL)] = 0;
+  const open = []; for (let c = 0; c < MAPN; c++) if (mapC[c] === 0) open.push(c);
+  const seen = new Set([open[0]]), q = [open[0]];
   for (let h = 0; h < q.length; h++) {
     const c = q[h], cx = cellX(c), cy = cellY(c);
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = cx + dx, ny = cy + dy;
       if (!inMap(nx, ny)) continue;
       const n = cellOf(nx, ny);
-      if (map[n] === 0 && !seen.has(n)) { seen.add(n); q.push(n); }
+      if (mapC[n] === 0 && !seen.has(n)) { seen.add(n); q.push(n); }
     }
   }
-  if (seen.size !== PATH_N) throw new Error(
-    `angel path: ${PATH_N} open cells but only ${seen.size} reachable from ` +
-    `(${cellX(pathOpen[0])},${cellY(pathOpen[0])}) -- the open cells are not one connected region`);
+  if (seen.size !== open.length) throw new Error(
+    `angel path: ${open.length} open cells but only ${seen.size} reachable from ` +
+    `(${cellX(open[0])},${cellY(open[0])}) -- the open cells are not one connected region`);
 }
 // The queue never holds more than one entry per open cell, since a cell is enqueued when it is
 // first given a distance and never again.
@@ -806,7 +821,12 @@ const cpLo = new Array(nextRun).fill(0), cpHi = new Array(nextRun).fill(0);
     for (const [x, y] of [[a, b], [b, a]]) {
       if (cpLo[x] === y || cpHi[x] === y) continue;
       if (!cpLo[x]) cpLo[x] = y; else if (!cpHi[x]) cpHi[x] = y;
-      else throw new Error(`run ${x} has more than two corner partners`);
+      // A third partner happens where two walls touch only at a corner point with open cells on
+      // both diagonals (level 2's removable wall at (8,5) against (9,4)/(9,6)): the run's end is
+      // convex from one side and part of a concave corner from the other. The two-byte table
+      // cannot hold it -- but the table is only READ under CVXSEAM=0, which is not what ships
+      // (see CVXSEAM), so it is only an error there.
+      else if (process.env.CVXSEAM === '0') throw new Error(`run ${x} has more than two corner partners (CVXSEAM=0 needs the table)`);
     }
   };
   // concave ends: an inside corner, seen from an open cell with two solid neighbours
@@ -1082,8 +1102,21 @@ const FALL_ROUTE = [
   ['to',  15.5, 5.5],                              // onto the hole
   ['act', T_FALL, 600],                            // and wait for the drop. Nothing after it: the
 ];                                                 //   map has changed and the wall check cannot know
+// ROUTE=sock (LVL=2 TWOLEV=0 TOURW=1): the socket mechanic, headless. Take the north alcove's
+// orb, carry it to the doorway, seat it, and stand looking east through the pocket at the wall
+// that should now be gone. Ends there for the same reason FALL_ROUTE ends on the hole: the map
+// has changed and the wall check below cannot know.
+const SOCK_ROUTE = [
+  ['to',  5.5, 2.5],                               // up to the orb at (6,2), facing it
+  ['act', T_SPACE, 2],                             // take it
+  ['to',  5.5, 5.5],                               // down to the doorway, facing south
+  ['spin', -90],                                   // ...east, at the socket
+  ['act', T_SPACE, 2],                             // seat it: the wall at (8,5) goes
+  ['act', T_WAIT, 300],                            // and watch the corridor open
+];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
 const FALL_COMPILED = compileRoute(FALL_ROUTE, [0x0280, 0x0280, 0x19c0]);
+const SOCK_COMPILED = compileRoute(SOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
 // ROUTE=cover5: the same idea for LVL=5 -- every open cell of the room, the corridor, and the
 // ring's outer loop and chamber, walking and running, never stopping. The chamber is entered by
 // its east door at (20,5); the two-wide column at x16-17 splits it, so both halves are walked.
@@ -1119,10 +1152,11 @@ const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
                  : ROUTE === 'cover' ? COVER_COMPILED.steps
                  : ROUTE === 'cover5' ? COVER5_COMPILED.steps
                  : ROUTE === 'fall' ? FALL_COMPILED.steps
+                 : ROUTE === 'sock' ? SOCK_COMPILED.steps
                  : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
 // Not in an LVLDUMP subprocess: that is the OTHER level being built as a shadow, and a route
 // authored for the live level walks straight through its walls.
-if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall')) {
+if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock')) {
   DIAGEARLY.push(`ROUTE=${ROUTE}`);
   // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
@@ -1135,7 +1169,8 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
       if (solid(bx, by)) return true;
     return false;
   };
-  let [x, y, a] = ROUTE === 'cover5' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0] : [0x01f6, 0x0149, 0x3b00], bad = [];
+  let [x, y, a] = ROUTE === 'cover5' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0]
+                : ROUTE === 'sock' ? [0x0280, 0x0280, 0x1a00] : [0x01f6, 0x0149, 0x3b00], bad = [];
   for (const [i, [t, n]] of TOUR_STEPS.entries()) {
     const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
     const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
@@ -1156,7 +1191,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
     `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
     `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED })[ROUTE].end;
+  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED })[ROUTE].end;
   console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
     `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
     `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
@@ -2616,7 +2651,7 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', SOCKROOM ? 0x10 : 0x19, 0xff);   // L1: $19c0 with PAF, the user's choice after playing --
+const PA = hexArg('PA', SOCKROOM ? 0x1a : 0x19, 0xff);   // L1: $19c0 with PAF, the user's choice after playing --
                                                                     // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
                                                                     //   room's far wall and the corridor mouth
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
@@ -2639,8 +2674,8 @@ const PAF = hexArg('PAF', SOCKROOM ? 0x00 : 0xc0, 0xff);
 // then simply walked back and finished the level without it ever mattering again. Starting
 // opposite, with the angel ON the door, means every route to the goal has the angel somewhere
 // along it, and the tie means it has no preferred arc until the player picks one.
-const PX = hexArg('PX', SOCKROOM ? 0x0180 : 0x0280, 0xffff);   // L1: PP at (2,2); socket room: (1.5,1.5), the one
-const PY = hexArg('PY', SOCKROOM ? 0x0180 : 0x0280, 0xffff);   //   heading with both socket and hole in view
+const PX = hexArg('PX', 0x0280, 0xffff);   // PP at (2,2) in both levels
+const PY = hexArg('PY', 0x0280, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
@@ -3596,7 +3631,10 @@ if (process.env.ORBSCATTER) {
   // Level 2: ONE orb, and it is standing in the doorway at (5,2) -- the only way into the chamber
   // that holds the exit. It reads exactly like level 1's caging orb, which is the point: the
   // player already knows to pick it up. What is new is that they have to put it back.
-  else if (SOCKROOM) ORBS.push({ x: 3.5, y: 6.5, c: 0 });  // out in the open, to walk up to
+  else if (SOCKROOM) {                         // level 2: OO in each alcove, either feeds the socket
+    ORBS.push({ x: 6.5, y: 2.5, c: 0 });
+    ORBS.push({ x: 6.5, y: 8.5, c: 0 });
+  }
   else {                                         // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
@@ -3616,9 +3654,12 @@ if (process.env.ORBSCATTER) {
   // finds no tall entity, marked stays 0, and the HUD's E readout is gated on one existing).
   // The socket room has no angel: it is a puzzle, not a chase, and an entity count that differs
   // from the other levels' is exactly what nOrbT was made swappable for.
-  if (process.env.ANGEL !== '0' && !SOCKROOM) {   // AA at (7,5) and (19,5): one behind each orb
-    ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
-    ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
+  if (process.env.ANGEL !== '0') {
+    if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
+    else {                                        // AA at (7,5) and (19,5): one behind each orb
+      ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
+      ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
+    }
   }
 }
 // ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
@@ -3691,7 +3732,7 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = SOCKROOM ? [8, 8] : [15, 5];   // level 2: centred under the column
+const HOLE_D = SOCKROOM ? [14, 9] : [15, 5];   // level 2: the south nub (a guess -- see SOCK_MAP)
 const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])],
                   [+(process.env.HOLE2X ?? HOLE_D[0]), +(process.env.HOLE2Y ?? HOLE_D[1])]];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
@@ -3704,7 +3745,7 @@ const HOLES_AT = [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOL
 // the placeholder in would have quietly put two sockets into the ring level. A level declares
 // sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
 // level keeps its own.
-const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '5,2' : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -3819,7 +3860,7 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number), process.env.LAND.split(',').map(Number)]
-  : SOCKROOM ? [[1, 1], [1, 1]] : [[2, 2], [2, 2]];
+  : SOCKROOM ? [[2, 2], [2, 2]] : [[2, 2], [2, 2]];
 // ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
 // on both of these lands you nose-against a wall half a cell away: the whole screen goes black
 // and it reads as a broken render rather than as a wall. One byte, and it travels with the level
@@ -3827,7 +3868,7 @@ const LANDS_AT = process.env.LAND
 //   level 1 (2,2): $3b, its own opening view across the room, not down the corridor axis
 //   level 2 (6,7): $80, along the ring -- the same cell and heading the level starts you at
 //   level 3 (1,1): $10, the one heading with BOTH the socket and the far-corner hole in view
-const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x10 : 0x19));               // level 1: the drop puts you back in the room
+const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -5300,7 +5341,7 @@ if (TWOLEV) {
 // The hazard MACHINERY has to exist whenever any resident level needs it, not just when THIS
 // level does. Level 1 splits nothing, so on its own it emits none of this -- but level 2 rides
 // along in the shadow and does, and the code is shared. hazNT is what turns it off per level.
-const HAZRT = HAZ || TWOLEV;
+const HAZRT = HAZ || TWOLEV || !!WALLVAR;   // ...and the wall delta is walked by hzRun too
 
 // The delta, as two lists of hzRun triples -- one to take the wall out, one to put it back.
 // hzRun already walks (addrLo, addrHi, value) until $ff, which is exactly this job at a larger

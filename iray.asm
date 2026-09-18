@@ -9568,15 +9568,15 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
-; wall goes -- 13 runs become 5 here -- which is why this is 14 bytes and
+; wall goes -- 13 runs become 5 here -- which is why this is 3 bytes and
 ; not the one map byte you would guess.
 ; The format is hzRun's: (addrLo, addrHi, value) until $ff. That routine already exists for the
 ; per-cell run splits, so the runtime cost of changing a wall is a call to proven code.
 ; NOT in the delta, deliberately: stepT (map-independent since STEPFB), orbOccT (orbOccAll
 ; rebuilds every mask every frame) and the charset (canonical -- fontA is byte-identical with the
 ; column present and removed).
-wallOffT: !byte <mapT+96,>mapT+96,0,<holeSeeT+3,>holeSeeT+3,255,<holeSeeT+6,>holeSeeT+6,127,<holeSeeT+9,>holeSeeT+9,63,<holeSeeT+12,>holeSeeT+12,31,<holeSeeT+35,>holeSeeT+35,255,<holeSeeT+38,>holeSeeT+38,127,<holeSeeT+41,>holeSeeT+41,63,<holeSeeT+44,>holeSeeT+44,31,<holeSeeT+76,>holeSeeT+76,31,<holeSeeT+81,>holeSeeT+81,248,<holeSeeT+84,>holeSeeT+84,252,<holeSeeT+87,>holeSeeT+87,248,<lvlNxtT+0,>lvlNxtT+0,255,$ff
-wallOnT: !byte <mapT+96,>mapT+96,1,<holeSeeT+3,>holeSeeT+3,254,<holeSeeT+6,>holeSeeT+6,126,<holeSeeT+9,>holeSeeT+9,62,<holeSeeT+12,>holeSeeT+12,30,<holeSeeT+35,>holeSeeT+35,254,<holeSeeT+38,>holeSeeT+38,126,<holeSeeT+41,>holeSeeT+41,62,<holeSeeT+44,>holeSeeT+44,30,<holeSeeT+76,>holeSeeT+76,30,<holeSeeT+81,>holeSeeT+81,200,<holeSeeT+84,>holeSeeT+84,224,<holeSeeT+87,>holeSeeT+87,240,<lvlNxtT+0,>lvlNxtT+0,0,$ff
+wallOffT: !byte <mapT+123,>mapT+123,0,<holeSeeT+79,>holeSeeT+79,255,<lvlNxtT+0,>lvlNxtT+0,255,$ff
+wallOnT: !byte <mapT+123,>mapT+123,1,<holeSeeT+79,>holeSeeT+79,7,<lvlNxtT+0,>lvlNxtT+0,0,$ff
 
 wallSt: !byte 0                 ; 0 = the wall is there
 dbgOnce2: !byte 1               ; WALLNOW's one-shot
@@ -9609,8 +9609,8 @@ wtOff:  lda #<wallOffT
         lda #$01
 wtGo:   sta wallSt
         jsr hzRun
-        lda mapT+$0060   ; the delta no longer carries blkT or the run tables,
-        sta blkT+$0060   ;   because neither travels with a level any more. One
+        lda mapT+$007b   ; the delta no longer carries blkT or the run tables,
+        sta blkT+$007b   ;   because neither travels with a level any more. One
         jsr mkRuns              ;   cell of blkT changed and the runs renumber wholesale, so fix
                                 ;   the cell by hand and re-derive the rest from the new mapT.               ; hzRun sets its own X and walks to the $ff
         inc blkVer              ; the obstacle map moved: the angel's fill must be redone
@@ -9638,7 +9638,7 @@ wsBusy: lda #$ff                ; find the doomed wall's SPAN this frame. Scanni
         sta wsHi                ;   once (guarded below) and wsLo keeps falling to the leftmost.
         ldx #$9f
 wsFind: lda idT,x
-        cmp #$60  ; the doomed cell's map id (y*16+x)
+        cmp #$7b  ; the doomed cell's map id (y*16+x)
         bne wsFN
         stx wsLo
         lda wsHi
@@ -9783,7 +9783,7 @@ landYT: !byte 2,2
 ; LVLSHADOW = $f600 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 1020 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 582 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -9794,7 +9794,7 @@ lvlBasLoT: !byte $00
 lvlBasHiT: !byte $f6
 lvlDstLoT: !byte <mapT,<holeSeeT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>holeSeeT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $fd,$60,$09,$07,$07,$04,$04,$02,$02,$01,$80,$01,$01,$01,$03,$04,$04,$01,$07,$07,$2a,$01,$28,$28,$28,$da,$61
+lvlLenT: !byte $fd,$60,$01,$07,$07,$04,$04,$02,$02,$01,$80,$01,$01,$01,$03,$04,$04,$01,$07,$07,$2a,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
@@ -10897,12 +10897,12 @@ hzRd:   lda $ffff,x
         ; offsets into it, rather than a label each, because a label resolves to an address and
         ; the other level's copy has to mean the same thing after it is swapped in.
 hazNT:  !byte $ff
-hazLoT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-hazHiT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-hazCT:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-hazRstT: !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff
-hazLstT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-hazSpT: !byte 255,255,255,255,255,255,255,255,255   ; (parent, spare) pairs for hazSpFix; $ff ends
+hazLoT: !byte 0
+hazHiT: !byte 0
+hazCT:  !byte 0
+hazRstT: !byte $ff
+hazLstT: !byte 0
+hazSpT: !byte 255   ; (parent, spare) pairs for hazSpFix; $ff ends
         * = $a900
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
