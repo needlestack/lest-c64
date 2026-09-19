@@ -1232,12 +1232,14 @@ const BLOCK_ROUTE = [
 // ROUTE=sock5 (CHAIN=5 TWOLEV=0 TOURW=1 ANGEL=0): level 5's east orb into S1 -- the chamber's
 // north and west walls go -- then stand in the opening looking in.
 const SOCK5_ROUTE = [
-  ['to', 12.5, 1.5], ['to', 12.5, 8.5],            // along the top, down to the orb, facing it
+  ['to', 12.5, 2.5], ['to', 12.5, 8.5],            // along row 2 (row 1 ends in an angel), down to the orb
   ['act', T_SPACE, 2],
   ['to', 12.5, 3.5], ['to', 4.5, 3.5], ['to', 4.5, 5.5],   // back up, west, down beside the socket
   ['spin', -90],                                   // facing east at (5,5)
   ['act', T_SPACE, 2],
-  ['act', T_WAIT, 180],                            // the corner goes; the caged angel is 2 cells off
+  ['act', T_WAIT, 60],                             // the corner goes
+  ['to', 5.5, 5.5], ['spin', 45],                  // onto the spent socket, facing the caged angel
+  ['act', T_WAIT, 120],                            //   diagonally adjacent (DIE=0 ANGFREEZE=1 to look)
 ];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
 const SOCK5_COMPILED = compileRoute(SOCK5_ROUTE, [0x0180, 0x0180, 0x2000]);
@@ -6148,6 +6150,9 @@ doomT   = $fb00                  ; per cell: 1 while it belongs to a wall mid-co
                                  ;   matches the columns showing the doomed group through it, so a
                                  ;   group can be any shape. Written only by wtCells, in bank 3
                                  ;   because it must be a whole clear page and the image has none.
+obKT    = $7e50                  ; obOrder: the smallest key so far, its entity, and the keys
+obKI    = $7e51
+obKeyT  = $7e52                  ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
 bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. It lived in the image until
                                  ;   level 3's 196 open cells (2026-09-18); no image hole holds a
@@ -10822,27 +10827,7 @@ ${FALL ? `        jsr holeOne             ; ---- the hole FIRST, before the orbs
         ; entities the list was never the expensive part -- projecting is -- so the loop just walks
         ; them all and lets orbOne reject what is off screen. ocanO goes conservative: ask the
         ; occlusion test rather than trust a build-time answer about where things used to be.
-        lda #$00
-        sta oidx
-obLoop: lda oidx
-        cmp nOrbT
-        bcs obEnd
-        tax
-        lda orbHidT,x
-        bne obNext              ; carried, so not in the world
-${DIE ? `        lda dieSt               ; dying: the ANGEL keeps its sprite and nothing else does.
-        beq obLive              ;   Done here rather than by clearing omEn, because orbMove
-        lda orbTallT,x          ;   refills omEn later in the same frame -- which is exactly how
-        beq obNext              ;   the carried-orb slot came back the last time this was tried.
-obLive:
-` : ''}
-        lda #$80
-        sta ocanO
-        jsr orbOne
-obNext: inc oidx
-        lda onv
-        cmp onvH
-        bcc obLoop
+        jsr obOrder             ; NEAREST FIRST, out of line -- see obOrder for why
 obEnd:  ${DBGORB ? `lda osI
         sta odb                 ; the loop counter and its bound, against what set the bound
         lda osN
@@ -15614,7 +15599,70 @@ fsnLp:  lda (fdS),y
         dex
         bne fsnLp
         rts
-` : ''}${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
+` : ''}
+; ---- obOrder: project every entity, nearest first, until the sprite slots run out ----
+; The walk used to go in entity order, and the slots ran out on whoever came last: level 5's
+; third angel (entity 4, two sprites) simply did not draw whenever the two orbs, the hole and
+; a socket had taken theirs -- "still blocks me, still kills me, but doesn't render" (the user,
+; 2026-09-18). Now each entity gets a key of |dx|+|dy| cells from the player and the nearest is
+; projected first, so what drops when eight is not enough is the smallest thing on screen.
+; Up to eight entities, so the selection is a plain repeated minimum: ~600 cycles a frame.
+; Out here because the main block has no room; jsr-only.
+obOrder:ldx nOrbT
+        beq obODn
+obKLp:  dex
+        lda #$ff                ; $ff = never: hidden, or not an angel while dying
+        ldy orbHidT,x
+        bne obKSt
+${DIE ? `        ldy dieSt               ; dying: the ANGEL keeps its sprite and nothing else does.
+        beq obKLiv              ;   Done here rather than by clearing omEn, because orbMove
+        ldy orbTallT,x          ;   refills omEn later in the same frame -- which is exactly how
+        beq obKSt               ;   the carried-orb slot came back the last time this was tried.
+obKLiv:
+` : ''}        lda orbXCT,x
+        sec
+        sbc px+1
+        bcs obKx
+        eor #$ff                ; negative: negate. The borrow left C clear, so the +1 is free
+        adc #$01
+obKx:   sta obKT
+        lda orbYCT,x
+        sec
+        sbc py+1
+        bcs obKy
+        eor #$ff
+        adc #$01
+obKy:   clc
+        adc obKT                ; |dx| + |dy| in cells: at most 30, so never $ff
+obKSt:  sta obKeyT,x
+        txa
+        bne obKLp
+obPick: lda #$ff
+        sta obKT                ; the smallest key so far
+        ldx nOrbT
+obPLp:  dex
+        lda obKeyT,x
+        cmp obKT
+        bcs obPNx
+        sta obKT
+        stx obKI
+obPNx:  txa
+        bne obPLp
+        lda obKT
+        cmp #$ff
+        beq obODn               ; every entity done (or never)
+        ldx obKI
+        lda #$ff
+        sta obKeyT,x            ; consumed
+        stx oidx
+        lda #$80
+        sta ocanO
+        jsr orbOne
+        lda onv
+        cmp onvH
+        bcc obPick              ; slots left: the next nearest
+obODn:  rts
+${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
 ddxLoT: ${chunk(ddxLo).trim()}
         * = ${hx16(RELOC + 0xc00)}
 ddxHiT: ${chunk(ddxHi).trim()}
@@ -18384,7 +18432,7 @@ try {
       // died the instant an angel reached you, standing still. Anything referenced as name+1
       // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
       ...RUNTIME_BUFS,
-      bfsQ: 256, runPlaneT: 256, runFaceT: 256, doomT: 256,
+      bfsQ: 256, runPlaneT: 256, runFaceT: 256, doomT: 256, obKeyT: 8,
       opx: 2, opy: 2,
       osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
       rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
