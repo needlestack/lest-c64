@@ -54,3 +54,5 @@ vice-screen-*.png
 # one per resident level, written by the per-level subprocess builds
 .lvl1-tables.json
 .lvl3-tables.json
+.lvl*-tables.json
+.wall*-tables.json
