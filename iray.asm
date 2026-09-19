@@ -4128,8 +4128,8 @@ drawDbg:
         ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
         ; facing one freezes its clock, so waiting does not sweep the possibilities either --
         ; the cell has to be READ OFF and fed back in through ANGAT.
-        ; THE FIRST TWO ANGELS ONLY: a third line is ~40 bytes the main block does not have
-        ; (level 5's caged angel, 2026-09-18), and two rows of E is already most of the corner.
+        ; ONE LINE PER ANGEL, every angel: level 5's third was cut for 31 bytes of main block
+        ; until obOrder moved out of it (2026-09-19).
         lda #$04
         jsr setRow
         ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #$0f"

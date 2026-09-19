@@ -1240,6 +1240,8 @@ const SOCK5_ROUTE = [
   ['act', T_WAIT, 60],                             // the corner goes
   ['to', 5.5, 5.5], ['spin', 45],                  // onto the spent socket, facing the caged angel
   ['act', T_WAIT, 120],                            //   diagonally adjacent (DIE=0 ANGFREEZE=1 to look)
+  ['to', 3.5, 3.5], ['spin', 360], ['spin', -360], // then a slow look round from the open floor:
+  ['act', T_WAIT, 60],                             //   with ENTLOG, every entity in view must draw
 ];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
 const SOCK5_COMPILED = compileRoute(SOCK5_ROUTE, [0x0180, 0x0180, 0x2000]);
@@ -10282,9 +10284,9 @@ ${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's
         ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
         ; facing one freezes its clock, so waiting does not sweep the possibilities either --
         ; the cell has to be READ OFF and fed back in through ANGAT.
-        ; THE FIRST TWO ANGELS ONLY: a third line is ~40 bytes the main block does not have
-        ; (level 5's caged angel, 2026-09-18), and two rows of E is already most of the corner.
-${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).slice(0, 2).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
+        ; ONE LINE PER ANGEL, every angel: level 5's third was cut for 31 bytes of main block
+        ; until obOrder moved out of it (2026-09-19).
+${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
         jsr setRow
         ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #\$0f"
         lda #14                 ;   showed an angel at x=21 as x=5 -- a cell in the other half of
@@ -17439,12 +17441,26 @@ ${ADDX('px+1')}
         lda pa
         sta (jv),y              ; 1: heading
         iny
-        lda flogW
+${process.env.ENTLOG ? `        ldx #$00                ; ENTLOG=k: bytes 2-3 are the entity-seen bits and entity
+        lda #$00                ;   k's cell instead of the work -- for "it was in view and
+elgLp:  lsr orbSeenT,x          ;   did not draw" reports (2026-09-18). Bit x = entity x got
+        ror                     ;   a sprite slot this frame (orbSeenT is 0/1).
+        inx
+        cpx #$08
+        bne elgLp
+        sta (jv),y
+        iny
+        ldx #${hx(+process.env.ENTLOG)}
+        lda orbYCT,x
+${MULW}
+${ADDX('orbXCT,x')}
+        sta (jv),y
+` : `        lda flogW
         sta (jv),y              ; 2-3: work, raster lines
         iny
         lda flogW+1
         sta (jv),y
-        lda flogN
+`}        lda flogN
         clc
         adc #$04
         sta flogN
