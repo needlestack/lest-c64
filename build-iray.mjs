@@ -1243,7 +1243,18 @@ const SOCK5_ROUTE = [
   ['to', 3.5, 3.5], ['spin', 360], ['spin', -360], // then a slow look round from the open floor:
   ['act', T_WAIT, 60],                             //   with ENTLOG, every entity in view must draw
 ];
+// ROUTE=l5rep (CHAIN=5 TWOLEV=0 TOURW=1 DIE=0 ANGFREEZE=1 ANGAT=4.5,1.5;1.5,6.5;6.5,6.5): the
+// user's readout X133 Y127 A2F00 E041 E016 E066 after seating S1 -- the angel at (1,6) is 21
+// degrees right of centre, five cells off, and did not draw.
+const L5REP_ROUTE = [
+  ['to', 12.5, 2.5], ['to', 12.5, 8.5], ['act', T_SPACE, 2],
+  ['to', 12.5, 3.5], ['to', 4.5, 3.5], ['to', 4.5, 5.5], ['spin', -90], ['act', T_SPACE, 2],
+  ['act', T_WAIT, 60],
+  ['to', 1.2, 1.15], ['spin', -149],                // facing ~$2f
+  ['act', T_WAIT, 60],
+];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
+const L5REP_COMPILED = compileRoute(L5REP_ROUTE, [0x0180, 0x0180, 0x2000]);
 const SOCK5_COMPILED = compileRoute(SOCK5_ROUTE, [0x0180, 0x0180, 0x2000]);
 const BLOCK_COMPILED = compileRoute(BLOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
 const FALL_COMPILED = compileRoute(FALL_ROUTE, [0x0280, 0x0280, 0x19c0]);
@@ -1286,10 +1297,11 @@ const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
                  : ROUTE === 'sock' ? SOCK_COMPILED.steps
                  : ROUTE === 'block' ? BLOCK_COMPILED.steps
                  : ROUTE === 'sock5' ? SOCK5_COMPILED.steps
+                 : ROUTE === 'l5rep' ? L5REP_COMPILED.steps
                  : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
 // Not in an LVLDUMP subprocess: that is the OTHER level being built as a shadow, and a route
 // authored for the live level walks straight through its walls.
-if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5')) {
+if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5' || ROUTE === 'l5rep')) {
   DIAGEARLY.push(`ROUTE=${ROUTE}`);
   // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
@@ -1298,7 +1310,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
   const R = 26;                                  // mvFree's half-box, in 1/256 cells
   // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
   // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
-  const openW = (ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5') ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
+  const openW = (ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5' || ROUTE === 'l5rep') ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
   const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || (M[cy][cx] && !openW.has(cellOf(cx, cy)));
   const blocked = (X, Y) => {
     for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
@@ -1307,7 +1319,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
   };
   let [x, y, a] = ROUTE === 'cover5' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0]
                 : ROUTE === 'sock' || ROUTE === 'block' ? [0x0280, 0x0280, 0x1a00]
-                : ROUTE === 'sock5' ? [0x0180, 0x0180, 0x2000] : [0x01f6, 0x0149, 0x3b00], bad = [];
+                : ROUTE === 'sock5' || ROUTE === 'l5rep' ? [0x0180, 0x0180, 0x2000] : [0x01f6, 0x0149, 0x3b00], bad = [];
   for (const [i, [t, n]] of TOUR_STEPS.entries()) {
     const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
     const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
@@ -1328,7 +1340,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
     `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
     `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED, sock5: SOCK5_COMPILED })[ROUTE].end;
+  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED, sock5: SOCK5_COMPILED, l5rep: L5REP_COMPILED })[ROUTE].end;
   console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
     `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
     `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
@@ -3818,10 +3830,13 @@ if (process.env.ORBSCATTER) {
 // where the entity stands, and a wandering angel puts a different configuration in front of the
 // camera on every headless run -- so a reported one cannot be reproduced at all without this.
 // Pair it with ANGFREEZE=1 to hold it there.
+// ANGAT=x,y;x,y;... places the angels in order (a lone pair places every one), so a HUD
+// readout of E lines can be fed straight back in.
 if (process.env.ANGAT) {
-  const [ax, ay] = process.env.ANGAT.split(',').map(Number);
-  if (!isFinite(ax) || !isFinite(ay)) throw new Error(`ANGAT wants "x,y", got "${process.env.ANGAT}"`);
-  ORBS.forEach(o => { if (o.tall) { o.x = ax; o.y = ay; } });
+  const at = process.env.ANGAT.split(';').map(p => p.split(',').map(Number));
+  if (at.some(([x, y]) => !isFinite(x) || !isFinite(y))) throw new Error(`ANGAT wants "x,y[;x,y...]", got "${process.env.ANGAT}"`);
+  let k = 0;
+  ORBS.forEach(o => { if (o.tall) { const [ax, ay] = at[Math.min(k++, at.length - 1)]; o.x = ax; o.y = ay; } });
 }
 if (process.env.ORBWHERE)
   ORBS.forEach((o, i) => { if (String(i) === process.env.ORBWHERE)
@@ -3871,7 +3886,12 @@ const WALLVAR = WALLVARS ? WALLVARS[0] : null;   // "is there a wall mechanic at
 
 // Sized to the LARGER level, both of them. A run id past a level's own count has runBitT = 0, so
 // it sets no bit and costs only the loop iteration -- the padding is inert, not merely harmless.
-const NRUN = Math.max(nextRun, ...(LVLALL ?? []).map(l => l.nextRun));
+// ...AND THE WALL VARIANTS: removing a wall can SPLIT runs and raise the count (level 5's
+// corner: 26 -> 30). Sized to the base level only, runByteT/runBitT stopped at 26 and orbOcc1's
+// walk never masked ids 27-30, so after the corner opened an angel behind one of the new runs
+// read a garbage occluder bit and vanished while it still blocked and killed (2026-09-19, the
+// user, three readouts in).
+const NRUN = Math.max(nextRun, ...(LVLALL ?? []).map(l => l.nextRun), ...(WALLVARS ?? []).map(v => v.nextRun));
 const OCCBYTES = (NRUN + 7) >> 3;
 
 
