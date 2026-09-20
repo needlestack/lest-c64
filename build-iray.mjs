@@ -5531,7 +5531,9 @@ const HZ_LIVE = hazTabs(HAZ_SELF);
 //
 // Why not repoint the reads at a second set of tables instead of moving bytes? 81 instruction
 // sites index these tables, several as `orbXCT+N,x`. Patching 81 operands at every transition is
-// both bigger and easier to get quietly wrong than swapping 1,786 bytes once.
+// both bigger and easier to get quietly wrong than swapping one shadow's worth of bytes once --
+// the figure the build prints as "each shadow is N tables, M bytes", not a number written here
+// that stopped being true the day blkT and the run tables left the manifest.
 //
 // The shadow build runs THIS FILE in a subprocess with LEVEL2=1. Building both maps in one
 // process would mean untangling `map` and its two dozen module-level derivations into a function;
@@ -5642,11 +5644,18 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   // hazSpT too: the hazard lists themselves do not toggle with the wall (they are pushed onto the
   // manifest after the dump), so the split ids they write go into the vanished column's cells,
   // which no ray can hit -- their planes do not matter, and 48 bytes of delta would say so.
-  // lvlNxtT too: a WALLOFF variant is built with LVLDUMP set, so it is a standalone build and
-  // its lvlNxtT is $ff. Shipped in the delta, opening a wall would turn the level's own exit
-  // into scenery until wallsBack ran. Latent while the value was 0 (the wallOn triple put it
-  // back); a live bug the moment it names a level.
-  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT', 'lvlNxtT']);
+  // ...AND EVERY CHAIN_GLOBAL TABLE. A WALLOFF variant is built with LVLDUMP set, so it is a
+  // standalone build: everything it numbers across the chain it numbers as if it were alone,
+  // exactly as a shadow dump does. Carried in the delta, opening a wall would write those
+  // lone-level values over the ones the main build patched in --
+  //   lvlNxtT   -> $ff, turning the level's own exit into scenery until wallsBack ran;
+  //   sockWallT -> local ids, so level 3's second socket would toggle LEVEL 2's wall. That is
+  //                the bug that reached the user, re-created by the fix for it: patching the
+  //                shadow made the variant DIFFER from it, and the diff shipped. Caught because
+  //                the comment above was made to print the real delta sizes and two of them
+  //                grew by three quads.
+  // Derived from CHAIN_GLOBAL rather than listed, so a table added there cannot miss this.
+  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT', ...Object.keys(CHAIN_GLOBAL)]);
   const off = [], on = [], quad = [];
   // The baseline is the wall level's tables with the wall PRESENT -- not the live level's. Diffing
   // against whatever happens to be on screen produced a delta describing the difference between
@@ -15998,8 +16007,9 @@ ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
-; wall goes -- 13 runs become 5 here -- which is why this is ${WALL_DELTA.off.length} bytes and
-; not the one map byte you would guess.
+; wall goes, so the delta is never the one map byte you would guess: these ${WALL_DELTAS.length} come to
+; ${WALL_DELTAS.map(d => d.quad.length * 4 + 1).join(', ')} bytes. (It said "13 runs become 5 here" when there was one wall on one
+; level to point at, and reported wall 0's count as if it were every wall's.)
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
 ; the two sets together overran rayOffQS at $a900: the addresses were stored twice.
@@ -16324,8 +16334,8 @@ lvlLenT: !byte ${LVL_TABLES.map(([, a]) => hx(a.length & 255)).join(',')}
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
-; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are 1,730
-; of them. The table index lives in lsIdx for the same reason.
+; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
+; ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} of them. The table index lives in lsIdx for the same reason.
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
@@ -16353,7 +16363,7 @@ lsByte:
 lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
 lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
 lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over 1,730 bytes is most of an extra frame.
+        txa                     ;   a byte, which over ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} bytes is most of an extra frame.
 lsD2:   sta $ffff,y
         iny
         cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page

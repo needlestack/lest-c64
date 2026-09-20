@@ -9718,8 +9718,9 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
-; wall goes -- 13 runs become 5 here -- which is why this is 2 bytes and
-; not the one map byte you would guess.
+; wall goes, so the delta is never the one map byte you would guess: these 5 come to
+; 9, 17, 17, 57, 97 bytes. (It said "13 runs become 5 here" when there was one wall on one
+; level to point at, and reported wall 0's count as if it were every wall's.)
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
 ; the two sets together overran rayOffQS at $a900: the addresses were stored twice.
@@ -9731,8 +9732,8 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 wallDT0: !byte <mapT+88,>mapT+88,0,1,<holeSeeT+43,>holeSeeT+43,31,0,$ff
 wallDT1: !byte <mapT+216,>mapT+216,0,1,<holeSeeT+90,>holeSeeT+90,192,0,<holeSeeT+91,>holeSeeT+91,7,6,<holeSeeT+92,>holeSeeT+92,120,0,$ff
 wallDT2: !byte <mapT+235,>mapT+235,0,1,<holeSeeT+93,>holeSeeT+93,62,6,<holeSeeT+123,>holeSeeT+123,118,112,<holeSeeT+125,>holeSeeT+125,126,112,$ff
-wallDT3: !byte <mapT+76,>mapT+76,0,1,<mapT+89,>mapT+89,0,1,<holeSeeT+38,>holeSeeT+38,57,1,<holeSeeT+41,>holeSeeT+41,31,15,<holeSeeT+43,>holeSeeT+43,14,12,<holeSeeT+48,>holeSeeT+48,2,0,<holeSeeT+49,>holeSeeT+49,128,0,<holeSeeT+51,>holeSeeT+51,32,0,<holeSeeT+67,>holeSeeT+67,128,0,<holeSeeT+68,>holeSeeT+68,1,0,<holeSeeT+69,>holeSeeT+69,240,32,<holeSeeT+71,>holeSeeT+71,60,48,<holeSeeT+73,>holeSeeT+73,30,12,<holeSeeT+75,>holeSeeT+75,14,12,<sockWallT+0,>sockWallT+0,0,3,<sockWallT+1,>sockWallT+1,1,4,<sockWallT+2,>sockWallT+2,0,255,$ff
-wallDT4: !byte <mapT+151,>mapT+151,0,1,<mapT+152,>mapT+152,0,1,<mapT+164,>mapT+164,0,1,<mapT+178,>mapT+178,0,1,<holeSeeT+2,>holeSeeT+2,224,0,<holeSeeT+3,>holeSeeT+3,7,0,<holeSeeT+4,>holeSeeT+4,248,0,<holeSeeT+5,>holeSeeT+5,1,0,<holeSeeT+6,>holeSeeT+6,124,0,<holeSeeT+8,>holeSeeT+8,31,0,<holeSeeT+9,>holeSeeT+9,128,0,<holeSeeT+10,>holeSeeT+10,7,0,<holeSeeT+11,>holeSeeT+11,224,0,<holeSeeT+12,>holeSeeT+12,25,0,<holeSeeT+13,>holeSeeT+13,120,0,<holeSeeT+14,>holeSeeT+14,30,0,<holeSeeT+15,>holeSeeT+15,158,0,<holeSeeT+16,>holeSeeT+16,255,128,<holeSeeT+17,>holeSeeT+17,231,1,<holeSeeT+18,>holeSeeT+18,255,96,<holeSeeT+19,>holeSeeT+19,249,0,<holeSeeT+20,>holeSeeT+20,127,96,<holeSeeT+21,>holeSeeT+21,254,0,<holeSeeT+22,>holeSeeT+22,31,24,<sockWallT+0,>sockWallT+0,0,3,<sockWallT+1,>sockWallT+1,1,4,<sockWallT+2,>sockWallT+2,0,255,$ff
+wallDT3: !byte <mapT+76,>mapT+76,0,1,<mapT+89,>mapT+89,0,1,<holeSeeT+38,>holeSeeT+38,57,1,<holeSeeT+41,>holeSeeT+41,31,15,<holeSeeT+43,>holeSeeT+43,14,12,<holeSeeT+48,>holeSeeT+48,2,0,<holeSeeT+49,>holeSeeT+49,128,0,<holeSeeT+51,>holeSeeT+51,32,0,<holeSeeT+67,>holeSeeT+67,128,0,<holeSeeT+68,>holeSeeT+68,1,0,<holeSeeT+69,>holeSeeT+69,240,32,<holeSeeT+71,>holeSeeT+71,60,48,<holeSeeT+73,>holeSeeT+73,30,12,<holeSeeT+75,>holeSeeT+75,14,12,$ff
+wallDT4: !byte <mapT+151,>mapT+151,0,1,<mapT+152,>mapT+152,0,1,<mapT+164,>mapT+164,0,1,<mapT+178,>mapT+178,0,1,<holeSeeT+2,>holeSeeT+2,224,0,<holeSeeT+3,>holeSeeT+3,7,0,<holeSeeT+4,>holeSeeT+4,248,0,<holeSeeT+5,>holeSeeT+5,1,0,<holeSeeT+6,>holeSeeT+6,124,0,<holeSeeT+8,>holeSeeT+8,31,0,<holeSeeT+9,>holeSeeT+9,128,0,<holeSeeT+10,>holeSeeT+10,7,0,<holeSeeT+11,>holeSeeT+11,224,0,<holeSeeT+12,>holeSeeT+12,25,0,<holeSeeT+13,>holeSeeT+13,120,0,<holeSeeT+14,>holeSeeT+14,30,0,<holeSeeT+15,>holeSeeT+15,158,0,<holeSeeT+16,>holeSeeT+16,255,128,<holeSeeT+17,>holeSeeT+17,231,1,<holeSeeT+18,>holeSeeT+18,255,96,<holeSeeT+19,>holeSeeT+19,249,0,<holeSeeT+20,>holeSeeT+20,127,96,<holeSeeT+21,>holeSeeT+21,254,0,<holeSeeT+22,>holeSeeT+22,31,24,$ff
 wallDLoT: !byte <wallDT0,<wallDT1,<wallDT2,<wallDT3,<wallDT4
 wallDHiT: !byte >wallDT0,>wallDT1,>wallDT2,>wallDT3,>wallDT4
 wallCells0: !byte $58,$ff
@@ -10052,8 +10053,8 @@ lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$01,$01,$01,$a0,$01,$01,$
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
-; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are 1,730
-; of them. The table index lives in lsIdx for the same reason.
+; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
+; 741 of them. The table index lives in lsIdx for the same reason.
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
@@ -10081,7 +10082,7 @@ lsByte:
 lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
 lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
 lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over 1,730 bytes is most of an extra frame.
+        txa                     ;   a byte, which over 741 bytes is most of an extra frame.
 lsD2:   sta $ffff,y
         iny
         cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
