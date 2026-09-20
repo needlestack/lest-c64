@@ -40,9 +40,9 @@ if (DIETEST) {                       // defaults only: each is still overridable
 //   - a socket is a hole-like entity, so the entity count stops matching level 1 and the two
 //     levels can no longer share one binary.
 // ---- WHICH LEVEL IS THIS BUILD? ----
-// LVL=1|2, and the two are a LOOP: level 1's hole drops into level 2, and level 2's hole brings
-// you back to a reset level 1 (objInit on arrival restores every entity). Both resident by
-// default (TWOLEV), each built as the other's shadow in a subprocess.
+// LVL=1|2|3, and the three are a LOOP: 1's hole drops into 2, 2's into 3, and 3's brings you
+// back to a RESET level 1 (objInit on arrival restores every entity). All three resident by
+// default (TWOLEV), each of the others built as a shadow in its own subprocess.
 //
 // LEVEL 1 is the user's layout of 2026-09-15: the old level 1's room, 6 x 9 with its alcoves
 // and notch, joined by a 7-cell corridor to the ring rotated 90 degrees clockwise. 23 x 11 =
@@ -51,25 +51,36 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // chamber the second angel guards -- opening the door frees the angel, and the hole is round
 // the column from it. Two orbs, two angels; the first angel is unleashed and WILL corner you.
 // The user's verdict: "the first two levels separate was too simple. This feels like a real
-// first level." The old level 1, the standalone ring, and the 28x9 side-by-side join (LVL=4)
-// are gone; they live in git before 2026-09-15.
+// first level." The old level 1, the standalone ring, and the 28x9 side-by-side join are gone;
+// they live in git before 2026-09-15.
 //
-// LEVEL 2 is the user's layout of 2026-09-18 (see SOCK_MAP): a 5x9 room with an orb alcove
-// top and bottom, a socket in the doorway at (6,5) into a 2x3 pocket, and the pocket's far wall
-// at (8,5) is what seating an orb takes away (WALL_DELTA) -- behind it a one-wide corridor to
-// an unleashed angel on a short spine, with the exit hole in the spine's south nub. Two orbs,
-// one socket, one angel. It sits in the same 23 x 11 grid as level 1, because every resident
-// level shares one grid. (Until then it was an 8x8 room with a vanishing column, no angel.)
-// CHAIN=1,2: the resident levels, in fall order, wrapping. CHAIN=2 (the current default, for
-// playtesting level 2 on its own) makes level 2 its OWN shadow, so its hole drops into a reset
-// copy of itself. Level 1 and level 2 cannot be resident together yet: level 2 is 16x16 and
-// level 1 is 23x11, and every resident level shares one W x H grid of at most 256 cells.
-const CHAIN = (process.env.CHAIN ?? '2').split(',').map(Number);
+// LEVEL 2 is the user's layout of 2026-09-18 (see SOCK_MAP): 16 x 16, a 5x9 room with an orb
+// alcove top and bottom, a socket in the doorway at (6,5) into a 2x3 pocket, and the pocket's
+// far wall at (8,5) is what seating an orb takes away -- behind it a one-wide corridor to an
+// unleashed angel on a short spine. Two more socket/wall pairs in series past it, then the exit
+// at (2,11). Three orbs, three sockets, one angel; one orb carried at a time, so the corridor
+// is walked twice with the angel loose.
+//
+// LEVEL 3 is the user's 14 x 14 of 2026-09-18 (L3_MAP, built as LVL=3 until it joined the
+// chain): a 2x2 chamber in the middle with an angel caged INSIDE it, whose north-west corner
+// goes when S1 (5,5) is fed; a second socket S2 (7,7) inside the chamber opens the exit's
+// corner at the south-east. Angels in two more corners, orbs at (12,9) and (9,12).
+// "Interesting rooms are about 1/4-1/3 the size of the map; with pillars a space can be bigger
+// as a whole but broken up."
+//
+// CHAIN lists the resident levels in FALL ORDER, wrapping. A one-level chain (CHAIN=2, say)
+// makes that level its OWN shadow, so its hole drops into a reset copy of itself -- which is
+// how a single level is playtested. Levels do NOT share a grid: lvlDimT/rowMulT/bfsDCT travel
+// with the level and every stride site reads them, so the only rule is W x H <= 256 per level.
+// The shipping chain is 1,2,3 (2026-09-19). CHAIN=<n> alone playtests one level, making it its
+// own shadow. NOTE: the live level is CHAIN[0], and with three resident only levels 1 and 2 fit
+// under the code ceiling as the live one -- level 3 live in a three-chain is ~17 bytes over, so
+// playtest it with CHAIN=3 rather than by rotating the chain.
+const CHAIN = (process.env.CHAIN ?? '1,2,3').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-if (![1, 2, 3, 4, 5].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 5`);
+if (![1, 2, 3].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 3`);
 const SOCKROOM = LVL === 2;
-const ARENA = LVL === 3 || LVL === 4;   // the look-and-feel arenas: same corners, same cast
-const CHAMBER = LVL === 5;              // ...and level 5 keeps their corners and adds sockets
+const CHAMBER = LVL === 3;              // the chamber level: corners like the old arenas, plus sockets
 const L1_MAP = [
   "#######################",
   "#..##..######.........#",
@@ -92,39 +103,19 @@ const L1_MAP = [
 //   at a time, so the corridor is walked twice with the angel loose.
 // L2_WALLS lists the removable cells; L2_SOCK_WALL says which wall each socket (in SOCKETS_AT
 // order) takes out. WALLOFF=k (1-based) builds the level with wall k-1 gone, for its delta.
-// LEVEL 3 (2026-09-18, the user's sketch while playtesting 2): an empty 14x14 arena. PP (1,1),
-// an angel in each of the two far corners, the orb in the fourth. No exit, no sockets, no walls
-// -- the first level with nothing to hide behind.
-const L3_MAP = ['################', ...Array(14).fill('#..............#'), '################'];
-// LEVEL 4: the arena with two diagonals of single blocks touching only at their corners -- a
-// wall a ray can see between every cell of. Same cast as level 3.
-const L4_MAP = [
-  "################",
-  "#..#...........#",
-  "#...#..........#",
-  "##...#.........#",
-  "#.#...#........#",
-  "#..#...#.......#",
-  "#...#...#......#",
-  "#....#...#.....#",
-  "#.....#...#....#",
-  "#......#...#...#",
-  "#.......#...#..#",
-  "#........#...#.#",
-  "#.........#...##",
-  "#..........#...#",
-  "#...........#..#",
-  "################",
-];
-// A removable "wall" is a GROUP of cells that go together (2026-09-18, level 5's L-shaped
+// A removable "wall" is a GROUP of cells that go together (2026-09-18, level 3's L-shaped
 // ones). WALLS[k] is group k's cells; SOCK_WALL[i] is the group socket i (SOCKETS_AT order)
-// takes out, $ff for none. Per level; only one level in a chain may have walls (WALL_LVL).
+// takes out, $ff for none. Per level, and ANY NUMBER of levels in a chain may have walls --
+// see WALLS_ALL, which flattens them into one global id space.
 const LEVEL_WALLS = {
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
-  5: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
+  3: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
               [[11, 10], [12, 10], [10, 11], [10, 12]]],        // S2 (7,7): the exit's corner
        sockWall: [0, 1] },
 };
+// Any level's map by number, for the few places that need a level OTHER than the live one --
+// a wall's cell ids are in its own level's width, which need not be the live one's.
+const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : L1_MAP;
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
 const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
@@ -138,7 +129,7 @@ const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): grou
 // middle with an angel INSIDE it, whose north-west corner (two cells) goes when S1 (5,5) is
 // fed; a second socket S2 (7,7) inside it opens the exit's corner at the south-east; angels in
 // two corners as well, orbs at (12,9) and (9,12). (Revised the same day from a 4x4 chamber.)
-const L5_MAP = [
+const L3_MAP = [
   "##############",
   "#............#",
   "#............#",
@@ -314,8 +305,8 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 
 // The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
 // grid; the old 16 x 16 literals and the ring's are gone.
-const M = (SOCKROOM ? SOCK_MAP : LVL === 3 ? L3_MAP : LVL === 4 ? L4_MAP
-         : LVL === 5 ? punchWalls(L5_MAP, LEVEL_WALLS[5].walls) : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
+const M = (SOCKROOM ? SOCK_MAP : CHAMBER ? punchWalls(L3_MAP, LEVEL_WALLS[3].walls)
+         : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
 // free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
@@ -385,8 +376,6 @@ const LVLALL = TWOLEV ? (() => {
     return JSON.parse(readFileSync(tmp, 'utf8'));
   });
 })() : null;
-// Most of the build only ever asked about ONE other level; that is still the first of them.
-const LVL2 = LVLALL ? LVLALL[0] : null;
 
 // ---- ANGEL PATHING: a breadth-first distance map, filled a few cells per frame ----
 // The greedy chase this replaces tried three steps, all straight at the player, and stopped when
@@ -427,16 +416,17 @@ const PATH_N = pathOpen.length;
   }
   const msg = `angel path: ${open.length} open cells but only ${seen.size} reachable from ` +
     `(${cellX(open[0])},${cellY(open[0])}) -- the open cells are not one connected region`;
-  // The look-and-feel arenas (level 4's corner-touching diagonals cut the room in three) are
-  // allowed to maroon their angels: the user is testing what a shape looks like, not a level.
-  if (seen.size !== open.length) { if (ARENA) console.error(`  NOTE: ${msg}`); else throw new Error(msg); }
+  // Every shipping level must be one connected region: the look-and-feel arenas that were
+  // allowed to maroon an angel are gone, so this is an error again rather than a note.
+  if (seen.size !== open.length) throw new Error(msg);
 }
 // The queue never holds more than one entry per open cell, since a cell is enqueued when it is
 // first given a distance and never again.
-// Sized for the LARGER level, not this one: bfsQ is emitted once and both levels' fills run
-// through it. A queue cut to the live level would overflow the moment the shadow level had more
-// open floor -- silently, since it is just the next table's bytes.
-const BFS_Q = Math.max(PATH_N, LVL2?.pathN ?? 0) + 1;
+// Sized for the LARGEST resident level, not this one: bfsQ is emitted once and every level's
+// fill runs through it. A queue cut to the live level would overflow the moment a shadow level
+// had more open floor -- silently, since it is just the next table's bytes. Every shadow, not
+// just the first: with three resident it is not the first one that is necessarily the biggest.
+const BFS_Q = Math.max(PATH_N, ...(LVLALL ?? []).map(l => l.pathN)) + 1;
 // Cells expanded per frame. A fill is PATH_N expansions plus the array clear, so this sets how
 // many frames it takes; anything well under ANG_PERIOD is free.
 const BFS_RATE = +(process.env.BFSRATE ?? 2);
@@ -803,10 +793,17 @@ const hazCell = new Map();                        // cell index -> [{run, split}
 // ceiling, so the block simply starts a page later.
 const HAZ_BASE = +(process.env.HAZ_BASE ?? 0xa700);   // RELOC + $2100, above the level shadow
 const HAZ_TOP = 0xa900;                               // RELOC + $2300, rayOffQS: the hard ceiling
-// The other level's tables live in VIC bank 3, above the sprite ladders -- see lvlBasLoT for why.
-// $f200: the ladders end by $f1c0 in every build so far, and a page boundary keeps the arithmetic
-// readable. Plain RAM to the CPU under both port modes; the VIC never looks here.
-const LVLSHADOW = +(process.env.LVLSHADOW ?? 0xf600);   // above IPIC ($f100 + 1000 = $f4e8), page-rounded
+// The other levels' tables live in VIC bank 3, above the sprite ladders -- see lvlBasLoT for why.
+// Plain RAM to the CPU under both port modes; the VIC never looks here.
+//
+// $f500, not $f600 (2026-09-19, for the three-level chain): the shadows are one blob per OTHER
+// level, so a three-level chain needs two of them and $f600 left only 1,280 bytes before doomT --
+// 100 short. $f500 gives 1,536 and is the LOWEST it can go: IPIC ends at $f4e8 and its own guard
+// (the PICSEG check) is down to 24 bytes of slack, so a third cut-scene picture and a third level
+// are mutually exclusive at this layout. The price is 11 sprite slots, which nothing was using.
+// Deliberately NOT config-dependent: one address for every build is worth more than the slots,
+// because a layout that moves with the flags is a layout nobody can reason about from the report.
+const LVLSHADOW = +(process.env.LVLSHADOW ?? 0xf500);   // above IPIC ($f100 + 1000 = $f4e8), page-rounded
 const LVLSHAD_BYTES = [];
 const HAZFACE = { W: 0, E: 1, N: 2, S: 3 };
 const hazRunT = { W: runW, E: runE, N: runN, S: runS };
@@ -1229,9 +1226,9 @@ const BLOCK_ROUTE = [
   ['spin', 180],                                    // look away
   ['act', T_WAIT, 600],                             // and give the angel ten seconds
 ];
-// ROUTE=sock5 (CHAIN=5 TWOLEV=0 TOURW=1 ANGEL=0): level 5's east orb into S1 -- the chamber's
+// ROUTE=sock3 (CHAIN=3 TWOLEV=0 TOURW=1 ANGEL=0): level 3's east orb into S1 -- the chamber's
 // north and west walls go -- then stand in the opening looking in.
-const SOCK5_ROUTE = [
+const SOCK3_ROUTE = [
   ['to', 12.5, 2.5], ['to', 12.5, 8.5],            // along row 2 (row 1 ends in an angel), down to the orb
   ['act', T_SPACE, 2],
   ['to', 12.5, 3.5], ['to', 4.5, 3.5], ['to', 4.5, 5.5],   // back up, west, down beside the socket
@@ -1243,10 +1240,10 @@ const SOCK5_ROUTE = [
   ['to', 3.5, 3.5], ['spin', 360], ['spin', -360], // then a slow look round from the open floor:
   ['act', T_WAIT, 60],                             //   with ENTLOG, every entity in view must draw
 ];
-// ROUTE=l5rep (CHAIN=5 TWOLEV=0 TOURW=1 DIE=0 ANGFREEZE=1 ANGAT=4.5,1.5;1.5,6.5;6.5,6.5): the
+// ROUTE=l3rep (CHAIN=3 TWOLEV=0 TOURW=1 DIE=0 ANGFREEZE=1 ANGAT=4.5,1.5;1.5,6.5;6.5,6.5): the
 // user's readout X133 Y127 A2F00 E041 E016 E066 after seating S1 -- the angel at (1,6) is 21
 // degrees right of centre, five cells off, and did not draw.
-const L5REP_ROUTE = [
+const L3REP_ROUTE = [
   ['to', 12.5, 2.5], ['to', 12.5, 8.5], ['act', T_SPACE, 2],
   ['to', 12.5, 3.5], ['to', 4.5, 3.5], ['to', 4.5, 5.5], ['spin', -90], ['act', T_SPACE, 2],
   ['act', T_WAIT, 60],
@@ -1254,15 +1251,15 @@ const L5REP_ROUTE = [
   ['act', T_WAIT, 60],
 ];
 const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
-const L5REP_COMPILED = compileRoute(L5REP_ROUTE, [0x0180, 0x0180, 0x2000]);
-const SOCK5_COMPILED = compileRoute(SOCK5_ROUTE, [0x0180, 0x0180, 0x2000]);
+const L3REP_COMPILED = compileRoute(L3REP_ROUTE, [0x0180, 0x0180, 0x2000]);
+const SOCK3_COMPILED = compileRoute(SOCK3_ROUTE, [0x0180, 0x0180, 0x2000]);
 const BLOCK_COMPILED = compileRoute(BLOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
 const FALL_COMPILED = compileRoute(FALL_ROUTE, [0x0280, 0x0280, 0x19c0]);
 const SOCK_COMPILED = compileRoute(SOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
-// ROUTE=cover5: the same idea for LVL=5 -- every open cell of the room, the corridor, and the
+// ROUTE=cover3: the same idea for LVL=3 -- every open cell of the room, the corridor, and the
 // ring's outer loop and chamber, walking and running, never stopping. The chamber is entered by
 // its east door at (20,5); the two-wide column at x16-17 splits it, so both halves are walked.
-const COVER5_ROUTE = [
+const COVER3_ROUTE = [
   //    x: 0        1         2
   //       0123456789012345678901 2
   // y=1    #..##..######.........#
@@ -1289,19 +1286,19 @@ const COVER5_ROUTE = [
   ['to',  2.5, 5.5],
 ];
 const COVER_COMPILED = compileRoute(COVER_ROUTE, [0x01f6, 0x0149, 0x3b00]);
-const COVER5_COMPILED = compileRoute(COVER5_ROUTE, [0x0280, 0x0280, 0x1000]);
+const COVER3_COMPILED = compileRoute(COVER3_ROUTE, [0x0280, 0x0280, 0x1000]);
 const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
                  : ROUTE === 'cover' ? COVER_COMPILED.steps
-                 : ROUTE === 'cover5' ? COVER5_COMPILED.steps
+                 : ROUTE === 'cover3' ? COVER3_COMPILED.steps
                  : ROUTE === 'fall' ? FALL_COMPILED.steps
                  : ROUTE === 'sock' ? SOCK_COMPILED.steps
                  : ROUTE === 'block' ? BLOCK_COMPILED.steps
-                 : ROUTE === 'sock5' ? SOCK5_COMPILED.steps
-                 : ROUTE === 'l5rep' ? L5REP_COMPILED.steps
+                 : ROUTE === 'sock3' ? SOCK3_COMPILED.steps
+                 : ROUTE === 'l3rep' ? L3REP_COMPILED.steps
                  : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
 // Not in an LVLDUMP subprocess: that is the OTHER level being built as a shadow, and a route
 // authored for the live level walks straight through its walls.
-if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover5' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5' || ROUTE === 'l5rep')) {
+if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover3' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock3' || ROUTE === 'l3rep')) {
   DIAGEARLY.push(`ROUTE=${ROUTE}`);
   // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
@@ -1310,16 +1307,16 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
   const R = 26;                                  // mvFree's half-box, in 1/256 cells
   // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
   // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
-  const openW = (ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock5' || ROUTE === 'l5rep') ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
+  const openW = (ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock3' || ROUTE === 'l3rep') ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
   const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || (M[cy][cx] && !openW.has(cellOf(cx, cy)));
   const blocked = (X, Y) => {
     for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
       if (solid(bx, by)) return true;
     return false;
   };
-  let [x, y, a] = ROUTE === 'cover5' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0]
+  let [x, y, a] = ROUTE === 'cover3' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0]
                 : ROUTE === 'sock' || ROUTE === 'block' ? [0x0280, 0x0280, 0x1a00]
-                : ROUTE === 'sock5' || ROUTE === 'l5rep' ? [0x0180, 0x0180, 0x2000] : [0x01f6, 0x0149, 0x3b00], bad = [];
+                : ROUTE === 'sock3' || ROUTE === 'l3rep' ? [0x0180, 0x0180, 0x2000] : [0x01f6, 0x0149, 0x3b00], bad = [];
   for (const [i, [t, n]] of TOUR_STEPS.entries()) {
     const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
     const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
@@ -1340,7 +1337,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
     `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
     `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED, sock5: SOCK5_COMPILED, l5rep: L5REP_COMPILED })[ROUTE].end;
+  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover3: COVER3_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED, sock3: SOCK3_COMPILED, l3rep: L3REP_COMPILED })[ROUTE].end;
   console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
     `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
     `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
@@ -1351,7 +1348,7 @@ if (process.env.TOURDUMP)
                 `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
 // POSEDUMP=1: the compiler's pose at the end of each step, one line a step, for posecheck.mjs.
 if (process.env.POSEDUMP && ROUTE !== 'walk') {
-  const c = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover5: COVER5_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED })[ROUTE];
+  const c = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover3: COVER3_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED })[ROUTE];
   for (let i = 0; i < TOUR_STEPS.length; i++) {
     const [x, y, a] = c.poses[i + 1] ?? c.end;    // poses[i] is the pose at the START of step i
     console.log(`  pose ${i} ${TOUR_STEPS[i][0]} ${TOUR_STEPS[i][1]} ${x} ${y} ${a}`);
@@ -2800,7 +2797,7 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', SOCKROOM ? 0x1a : ARENA || CHAMBER ? 0x20 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
+const PA = hexArg('PA', SOCKROOM ? 0x1a : CHAMBER ? 0x20 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
                                                                     // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
                                                                     //   room's far wall and the corridor mouth
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
@@ -2808,7 +2805,7 @@ const PA = hexArg('PA', SOCKROOM ? 0x1a : ARENA || CHAMBER ? 0x20 : 0x19, 0xff);
 // DIFFERENT renders that all read "AC0" on screen. A cold start left paF at zero, so three of
 // every four reachable views could not be replayed from a screenshot at all, and a reported
 // glitch that lived on one of them looked like it simply did not reproduce.
-const PAF = hexArg('PAF', SOCKROOM || ARENA || CHAMBER ? 0x00 : 0xc0, 0xff);
+const PAF = hexArg('PAF', SOCKROOM || CHAMBER ? 0x00 : 0xc0, 0xff);
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
 // Level 1 opens in the room's north-west corner looking diagonally across it. The old start
@@ -2823,8 +2820,8 @@ const PAF = hexArg('PAF', SOCKROOM || ARENA || CHAMBER ? 0x00 : 0xc0, 0xff);
 // then simply walked back and finished the level without it ever mattering again. Starting
 // opposite, with the angel ON the door, means every route to the goal has the angel somewhere
 // along it, and the tie means it has no preferred arc until the player picks one.
-const PX = hexArg('PX', ARENA || CHAMBER ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3-5
-const PY = hexArg('PY', ARENA || CHAMBER ? 0x0180 : 0x0280, 0xffff);
+const PX = hexArg('PX', CHAMBER ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3-5
+const PY = hexArg('PY', CHAMBER ? 0x0180 : 0x0280, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
@@ -3785,8 +3782,7 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 6.5, y: 8.5, c: 0 });
     ORBS.push({ x: 11.5, y: 3.5, c: 0 });
   }
-  else if (ARENA) ORBS.push({ x: 14.5, y: 14.5, c: 0 });   // level 3: the far corner
-  else if (CHAMBER) {                          // level 5: one east, one south
+  else if (CHAMBER) {                          // level 3: one east, one south
     ORBS.push({ x: 12.5, y: 9.5, c: 0 });
     ORBS.push({ x: 9.5, y: 12.5, c: 0 });
   }
@@ -3811,11 +3807,7 @@ if (process.env.ORBSCATTER) {
   // from the other levels' is exactly what nOrbT was made swappable for.
   if (process.env.ANGEL !== '0') {
     if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
-    else if (ARENA) {                             // level 3: the two other corners
-      ORBS.push({ x: 14.5, y: 1.5, c: 0, tall: true });
-      ORBS.push({ x: 1.5, y: 14.5, c: 0, tall: true });
-    }
-    else if (CHAMBER) {                           // level 5: likewise, one map smaller, and one
+    else if (CHAMBER) {                           // level 3: one in each far corner, and one
       ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });   //   caged in the chamber
       ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
       ORBS.push({ x: 6.5, y: 6.5, c: 0, tall: true });
@@ -3863,30 +3855,46 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // A wall cannot be recomputed at runtime -- the merge-hazard analysis alone is 1024 directions by
 // 3x3 samples -- so both configurations are built and the DIFFERENCE is shipped. Run ids renumber
 // wholesale when a wall goes (13 runs here become 5), which is why this is 81 bytes and not one.
-// The removable wall belongs to LEVEL 3, not to "whichever level is live". Build that level
-// again with the wall out and diff, whether or not it is the one on screen -- in a chain it is
-// the third room and the delta has to exist from boot. The triples name LIVE table addresses,
-// so they are correct exactly when level 3's data is the live data, which is when they fire.
-const WALL_LVL = (() => {                       // the level in the chain that has walls
-  const w = CHAIN.filter(n => LEVEL_WALLS[n]);
-  if (w.length > 1) throw new Error(`levels ${w.join(' and ')} both have removable walls; the wall tables serve one level per chain`);
-  return w[0] ?? 0;
-})();
-const WALL_GROUPS = LEVEL_WALLS[WALL_LVL]?.walls ?? [];
-// ONE VARIANT PER REMOVABLE WALL: each is the level with that wall alone taken out, and each
-// yields its own delta. WALLVARS[k] goes with L2_WALLS[k].
-const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALL_LVL) ? WALL_GROUPS.map((_, k) => {
-  const tmp = `./.wall${k}-tables.json`;
+// A removable wall belongs to a LEVEL, not to "whichever level is live". Build that level again
+// with the wall out and diff, whether or not it is the one on screen -- the delta has to exist
+// from boot. The triples name LIVE table addresses, so they are correct exactly when that wall's
+// own level is the live data, which is when they fire.
+// MORE THAN ONE RESIDENT LEVEL MAY HAVE WALLS (2026-09-19; levels 2 and 3 both do). WALLS_ALL
+// is every removable wall in the chain, flattened in CHAIN order, and a wall's position in it is
+// its GLOBAL ID -- what sockWallT names and what wallStT indexes.
+//
+// Global ids rather than a per-level wall table, because the wall tables are shared unswapped
+// code and data: making them per level would mean putting them in the shadow, which has ~90
+// spare bytes. The reason it is safe is an invariant worth stating plainly, because every
+// routine here leans on it: a wall's delta triples name LIVE table addresses, so they mean
+// anything only while that wall's own level is live -- and wallsBack puts every open wall back
+// BEFORE each lvlSwap, so a level that is not live has wallStT 0 for every one of its walls.
+// Nothing therefore has to range-check by level: the other levels' entries are already zero and
+// every walk over the global list skips them.
+// RESIDENT levels only. A wall's delta is a diff against its OWN level's tables, which exist
+// only if that level is live or riding along as a shadow. Under TWOLEV=0 the base silently fell
+// back to the live level's tables, so a build of level 1 alone tried to diff level 2's opened
+// wall against level 1's room and reported 113 changed cells instead of 1.
+const RESIDENT = new Set([LVL, ...OTHERS]);
+const WALL_LVLS = CHAIN.filter(n => LEVEL_WALLS[n] && RESIDENT.has(n));
+const WALLS_ALL = WALL_LVLS.flatMap(lv => LEVEL_WALLS[lv].walls.map((cells, k) => ({ lvl: lv, k, cells })));
+const WALL_BASE = Object.fromEntries(WALL_LVLS.map(lv =>
+  [lv, WALLS_ALL.findIndex(w => w.lvl === lv)]));   // level -> its first global wall id
+// ONE VARIANT PER REMOVABLE WALL: each is that wall's OWN level rebuilt with that wall alone
+// taken out, and each yields its own delta. WALLVARS[i] goes with WALLS_ALL[i]. WALLOFF stays
+// level-local (1-based within the level's own groups) -- only the id is global.
+const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.length) ? WALLS_ALL.map((w, i) => {
+  const tmp = `./.wall${i}-tables.json`;
   execFileSync(process.execPath, [process.argv[1]],
-    { env: { ...process.env, LVL: String(WALL_LVL),
-             WALLOFF: String(k + 1), LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
+    { env: { ...process.env, LVL: String(w.lvl),
+             WALLOFF: String(w.k + 1), LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
   return JSON.parse(readFileSync(tmp, 'utf8'));
 }) : null;
 const WALLVAR = WALLVARS ? WALLVARS[0] : null;   // "is there a wall mechanic at all"
 
 // Sized to the LARGER level, both of them. A run id past a level's own count has runBitT = 0, so
 // it sets no bit and costs only the loop iteration -- the padding is inert, not merely harmless.
-// ...AND THE WALL VARIANTS: removing a wall can SPLIT runs and raise the count (level 5's
+// ...AND THE WALL VARIANTS: removing a wall can SPLIT runs and raise the count (level 3's
 // corner: 26 -> 30). Sized to the base level only, runByteT/runBitT stopped at 26 and orbOcc1's
 // walk never masked ids 27-30, so after the corner opened an angel behind one of the new runs
 // read a garbage occluder bit and vanished while it still blocked and killed (2026-09-19, the
@@ -3912,12 +3920,13 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = SOCKROOM ? [2, 11] : ARENA ? null : CHAMBER ? [12, 12] : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12] : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
-// ...or NONE: a level with no exit (level 3 for now) has nExitT 0, and every hole-like loop and
-// fallChk test the count before touching entity nOrbT+0, which would be the byte past the last.
+// ...or NONE: nExitT 0 is sayable, and every hole-like loop and fallChk test the count before
+// touching entity nOrbT+0, which would be the byte past the last. No shipping level is exitless
+// now that the arenas are gone, so nothing exercises this -- keep the guards, they are 12 bytes.
 const HOLES_AT = HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]] : [];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
@@ -3953,13 +3962,14 @@ const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
 // The live level itself is not in OTHERS, so its own next resolves in its own emission below.
 const LEVELS = CHAIN;
 const nextLevel = n => LEVELS[(LEVELS.indexOf(n) + 1) % LEVELS.length];
-if (LVLALL) for (const L of LVLALL) {
-  const nxt = nextLevel(L.level);
-  // From the SHADOW level's point of view, once it is live, the slots hold the levels that are
-  // not it -- which is the same OTHERS list re-centred. With two levels that is always slot 0.
-  const slots = LEVELS.length === 1 ? [L.level] : LEVELS.filter(n => n !== L.level);
-  L.tables.lvlNxtT = [slots.indexOf(nxt)];
-}
+// A LEVEL NUMBER, NOT A SLOT (2026-09-19). lvlSwap is a TRANSPOSITION -- live <-> slot k -- so
+// the slots PERMUTE as you fall, and a slot index baked at build time is only self-consistent
+// while there is one slot to choose. Tracing (live, slot0, slot1) for CHAIN=1,2,3:
+//     (1,2,3) -> (2,1,3) -> (3,1,2) -> (1,3,2) -> ...
+// the first lap is right and then level 1 still says "slot 0", which by then holds level 3: the
+// game oscillates 1<->3 and level 2 becomes unreachable. Three good falls and then a silently
+// wrong one. The runtime now looks the wanted level up in lvlAtT, which tracks the permutation.
+if (LVLALL) for (const L of LVLALL) L.tables.lvlNxtT = [nextLevel(L.level)];
 const lvlMax = (f, own) => Math.max(own, ...(LVLALL ?? []).map(f));
 // At least ONE, even with no entities anywhere (NOORB=1 ANGEL=0 -- the bare level for working on
 // seams from first principles). Six tables are emitted at this length, and a zero-length !byte
@@ -3968,14 +3978,17 @@ const lvlMax = (f, own) => Math.max(own, ...(LVLALL ?? []).map(f));
 const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
 // ---- the leash is PER ANGEL (2026-09-15) ----
 // It was one bit per cell for the whole level, so every angel shared one territory, and "the
-// first angel roams free, the second stays by its door" -- which is what LVL=5 wants -- could not
+// first angel roams free, the second stays by its door" -- which is what LVL=3 wants -- could not
 // be said at all. LEASH now takes one group per angel, in angel order (the order of the `tall`
 // entries in ORBS), separated by '|': LEASH="|21,2;21,8" leashes the second angel only. A group
 // is cells the angel may NOT enter, as before; an empty group is an unleashed angel.
 // The table is NORB x 32 bytes, indexed by entity slot -- so an orb's slots are wasted (all
 // zero) and the angels' rows land where amIdx x 32 says. 32 bytes an entity is the price of
 // not needing a second index register in anTry, which has none to spare.
-const LEASH_GROUPS = (process.env.LEASH ?? (LVL === 1 ? '|21,2;21,8' : ''))
+// ANGEL=0 takes the angels out, so it takes the leashes with them -- otherwise the consistency
+// check below fires on a level whose default leash names angels the flag has just removed, and
+// "ANGEL=0" stops being a thing you can simply say about any level.
+const LEASH_GROUPS = (process.env.ANGEL === '0' ? '' : process.env.LEASH ?? (LVL === 1 ? '|21,2;21,8' : ''))
   .split('|').map(g => g.split(';').filter(Boolean).map(q => q.split(',').map(Number)));
 const LEASH_AT = LEASH_GROUPS.flat();     // every leash cell, for the checks that only care WHERE
 // One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
@@ -3999,6 +4012,23 @@ const angBlk = (() => {
 })();
 const NHOLE = Math.max(1, lvlMax(l => l.nHoleLike, HOLELIKE.length));   // at least one row: holeSeeT is emitted
 const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
+// Sockets are the hole-likes that are not exits. At least one byte: sockWallT is emitted either
+// way, and a zero-length table would be recorded in lvlLenT as 0, which the swap reads as 256.
+const NSOCK = Math.max(1, NHOLE - NEXIT);
+// ...AND sockWallT NAMES GLOBAL WALL IDS, which a level's own build cannot know either -- the
+// same trap as lvlNxtT, and it shipped. A LVLDUMP subprocess has TWOLEV false, so its RESIDENT
+// set is just itself and WALL_BASE starts its ids at 0: level 3's dump said "socket 0 opens wall
+// 0", which in the chain is LEVEL 2's first wall. Seating level 3's S1 applied that wall's delta
+// -- mapT+88 -- and 88 in level 3's own 14-wide grid is (4,6), which is the cell the user watched
+// vanish while the two that should have gone stayed put.
+// Patched HERE, in the main build, because this is where WALL_BASE spans the whole chain; and
+// here rather than beside the lvlNxtT patch because NSOCK does not exist until now.
+// $ff for the padding, NOT the 0 the generic pad would leave: 0 is a perfectly valid wall id.
+if (LVLALL) for (const L of LVLALL) {
+  const sw = LEVEL_WALLS[L.level]?.sockWall ?? [];
+  L.tables.sockWallT = [...Array(NSOCK)].map((_, i) =>
+    i < sw.length ? WALL_BASE[L.level] + sw[i] : 0xff);
+}
 
 // Masks for the ORBS *and* the hole-like entities, in the same order as orbXCT/orbYCT. Holes
 // were left out of this originally, which is the whole reason they had no occlusion test: the
@@ -4044,15 +4074,15 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number)]
-  : ARENA || CHAMBER ? [[1, 1]] : [[2, 2]];
+  : CHAMBER ? [[1, 1]] : [[2, 2]];
 // ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
 // on both of these lands you nose-against a wall half a cell away: the whole screen goes black
 // and it reads as a broken render rather than as a wall. One byte, and it travels with the level
 // because only the level knows which way its landing spot is worth looking.
-//   level 1 (2,2): $3b, its own opening view across the room, not down the corridor axis
-//   level 2 (6,7): $80, along the ring -- the same cell and heading the level starts you at
-//   level 3 (1,1): $10, the one heading with BOTH the socket and the far-corner hole in view
-const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : ARENA || CHAMBER ? 0x20 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
+//   level 1 (2,2): $19, back into the room, the same heading the level opens on
+//   level 2 (2,2): $1a, looking at the socket doorway
+//   level 3 (1,1): $20, the one heading with BOTH the socket and the far-corner hole in view
+const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : CHAMBER ? 0x20 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -5399,16 +5429,26 @@ const LVL_TABLES = [
   ['angBlkT', angBlk],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
   ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : 15), NHOLE)],
+  // Socket -> the GLOBAL wall id it opens, $ff for a socket that opens nothing. It TRAVELS,
+  // because two levels' socket 0 are different sockets opening different walls. It used to be
+  // shared, sized from the live level's socket count and valued from the single wall level: a
+  // chain whose live level had no sockets emitted an empty `!byte` and failed to assemble as
+  // "bad number: $", and a chain with two wall levels would have had level 2's sockets toggling
+  // level 3's walls. Padded to the chain's widest socket count so the swap exchanges in place.
+  ['sockWallT', [...Array(NSOCK)].map((_, i) => {
+    const sw = LEVEL_WALLS[LVL]?.sockWall ?? [];
+    return i < sw.length ? WALL_BASE[LVL] + sw[i] : 0xff;
+  })],
   ['orbTallT', pad(orbTallT, NORB)],
   ['orbHid0T', pad(orbHidT, NORB)], // per-entity and per-level: which entities start out of the world
   // The live counts. Shared loops read these instead of an immediate, which is the whole point:
   // a level with a socket has one more hole-like entity than a level without one, and the code
   // between them is the same code. $ff is not special here -- a level with no orbs has 0.
-  // Which SLOT this level's hole drops into -- $ff for the last level in the chain. It travels
-  // like everything else, so the level that arrives brings its own idea of where it leads. The
-  // slots are global to the chain and a level's own build cannot know them, so the main build
-  // overwrites this in every dump (see below).
-  ['lvlNxtT', [TWOLEV && !process.env.NOFALL ? OTHERS.indexOf(nextLevel(LVL)) : 0xff]],   // $ff standalone (or NOFALL=1): the hole is scenery
+  // Which LEVEL this level's hole drops into -- $ff for "nowhere", which is what a standalone
+  // or NOFALL build emits. It travels like everything else, so the level that arrives brings its
+  // own idea of where it leads. A level's own build cannot know the chain it will sit in, so the
+  // main build overwrites this in every dump (see nextLevel below).
+  ['lvlNxtT', [TWOLEV && !process.env.NOFALL ? nextLevel(LVL) : 0xff]],   // $ff standalone (or NOFALL=1): the hole is scenery
   // Six contiguous bytes, one entry: nOrbT nHoleT nExitT nOrbM1T nSockT nAllM1T.
   // SEVEN contiguous bytes now: nAllT joins them because the down-counting loops need a COUNT
   // to test against, and an INDEX cannot express "none" -- see the guards on each loop.
@@ -5465,34 +5505,51 @@ if (TWOLEV) {
   // orbOccT is a per-orb mask at OCCBYTES stride, and the shadow build sized its own stride from
   // its own run count. Re-lay it on ours BEFORE anything pads the tail, or every orb after the
   // first reads its mask from the middle of the previous one's.
-  if (LVL2.occBytes !== OCCBYTES) {
-    const src = LVL2.tables.orbOccT, out = [];
-    // THE SHADOW'S entity count, orbs and hole-likes both -- not ours. This loop used ORBS.length,
-    // this level's orb count, which happened to equal the shadow's whole entity count for as long
-    // as the two levels had the same population. The socket room (1 orb + hole + socket) as the
-    // live level with level 1 (2 orbs + 2 angels + hole) as its shadow truncated the shadow's six
-    // masks to one and the size check downstream caught the shortfall.
-    const n = LVL2.nOrbs + LVL2.nHoleLike;
-    for (let i = 0; i < n; i++) {
-      const m = src.slice(i * LVL2.occBytes, (i + 1) * LVL2.occBytes);
-      while (m.length < OCCBYTES) m.push(0);
-      out.push(...m);
+  // ONE PASS PER SHADOW LEVEL. Both of these ran on the FIRST other level alone, which was the
+  // same thing while only one rode along. With three resident, the second shadow kept its own
+  // stride and its own orbOccLoT bases while orbOcc1's `ldx #OCCBYTES-1` and orbOccHiT (which is
+  // not swapped) used ours -- the "one orb occluded correctly and the other visible through a
+  // wall" bug, one level further along where nothing was looking for it.
+  for (const L of LVLALL) {
+    if (L.occBytes !== OCCBYTES) {
+      const src = L.tables.orbOccT, out = [];
+      // THE SHADOW'S entity count, orbs and hole-likes both -- not ours. This loop used ORBS.length,
+      // this level's orb count, which happened to equal the shadow's whole entity count for as long
+      // as the two levels had the same population. The socket room (1 orb + hole + socket) as the
+      // live level with level 1 (2 orbs + 2 angels + hole) as its shadow truncated the shadow's six
+      // masks to one and the size check downstream caught the shortfall.
+      const n = L.nOrbs + L.nHoleLike;
+      for (let i = 0; i < n; i++) {
+        const m = src.slice(i * L.occBytes, (i + 1) * L.occBytes);
+        while (m.length < OCCBYTES) m.push(0);
+        out.push(...m);
+      }
+      L.tables.orbOccT = out;
     }
-    LVL2.tables.orbOccT = out;
+    // Positive proof that it happened, because the failure is silent: an un-restrided table is
+    // merely SHORT, and the padding below fills it to the right LENGTH with zeros while every
+    // mask past the first sits at the wrong offset. Length is not the invariant -- stride is.
+    const want = (L.nOrbs + L.nHoleLike) * OCCBYTES;
+    if (L.tables.orbOccT.length !== want) throw new Error(
+      `level ${L.level}'s orbOccT is ${L.tables.orbOccT.length} bytes after the re-lay, not ` +
+      `${L.nOrbs + L.nHoleLike} entities x ${OCCBYTES} -- every mask but the first would be read ` +
+      `from the middle of the one before it`);
+    L.tables.orbOccLoT = [...orbOccLo];   // same base and stride now, so identical to the live one
+    // The counts USED to have to match, because they were immediates. They are swapped bytes now.
+    for (const [n, a] of LVL_TABLES) {
+      const b = L.tables[n];
+      if (!b) throw new Error(`level ${L.level} dumped no ${n}: the manifest changed under the subprocess`);
+      if (b.length > a.length) throw new Error(
+        `level ${L.level}'s ${n} is ${b.length} bytes but level ${LVL}'s is only ${a.length}, and the ` +
+        `swap exchanges in place. Pad level ${LVL}'s copy to ${b.length} (for the run tables that ` +
+        `means raising nextRun) or the extra bytes have nowhere to go.`);
+      // Short is fine and is the normal case -- a level with fewer wall runs than the live one
+      // pads with zeros. Run ids it never uses are never read.
+      while (b.length < a.length) b.push(0);
+    }
   }
-  LVL2.tables.orbOccLoT = [...orbOccLo];   // same base and stride now, so identical to the live one
-  // The counts USED to have to match, because they were immediates. They are swapped bytes now.
-  for (const [n, a] of LVL_TABLES) {
-    const b = LVL2.tables[n];
-    if (!b) throw new Error(`level 2 dumped no ${n}: the manifest changed under the subprocess`);
-    if (b.length > a.length) throw new Error(
-      `level 2's ${n} is ${b.length} bytes but level 1's is only ${a.length}, and the swap ` +
-      `exchanges in place. Pad level 1's copy to ${b.length} (for the run tables that means ` +
-      `raising nextRun) or the extra bytes have nowhere to go.`);
-    // Short is fine and is the normal case -- level 2 has 11 wall runs to level 1's 25, so its
-    // run tables pad with zeros. Run ids it never uses are never read.
-    while (b.length < a.length) b.push(0);
-  }
+  console.error(`  occluder stride: live ${OCCBYTES} bytes/entity` +
+    LVLALL.map(L => `, level ${L.level} ${L.occBytes}${L.occBytes !== OCCBYTES ? ' re-laid' : ''}`).join(''));
   const report = () => (process.env.SHADOWBREAK &&
       LVL_TABLES.forEach(([n, a]) => console.error(`    ${n.padEnd(12)} ${String(a.length).padStart(5)}`)),
     console.error(`${LVLALL.length + 1} levels resident: each shadow is ${LVL_TABLES.length} ` +
@@ -5501,7 +5558,7 @@ if (TWOLEV) {
   // have to be offsets into THIS build's hazLstT. Both sides are then padded to a common length
   // so a swap is a straight exchange -- the shorter side's tail is inert (an unreferenced cell in
   // hazCT is never matched, since hazNT stops the scan first).
-  // ONE SET PER SHADOW LEVEL. This built a single HZ_SHAD from LVL2 -- the FIRST other level --
+  // ONE SET PER SHADOW LEVEL. This built a single HZ_SHAD from the FIRST other level alone --
   // and the manifest's shadow override then applied it to EVERY shadow slot. With two levels that
   // was the same thing; in a three-level chain level 3 silently inherited level 2's lists, and
   // level 2 splits nothing, so level 3's free-standing column was merged away and vanished while
@@ -5550,12 +5607,17 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   // hazSpT too: the hazard lists themselves do not toggle with the wall (they are pushed onto the
   // manifest after the dump), so the split ids they write go into the vanished column's cells,
   // which no ray can hit -- their planes do not matter, and 48 bytes of delta would say so.
-  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT']);
-  const off = [], on = [];
+  // lvlNxtT too: a WALLOFF variant is built with LVLDUMP set, so it is a standalone build and
+  // its lvlNxtT is $ff. Shipped in the delta, opening a wall would turn the level's own exit
+  // into scenery until wallsBack ran. Latent while the value was 0 (the wallOn triple put it
+  // back); a live bug the moment it names a level.
+  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT', 'lvlNxtT']);
+  const off = [], on = [], quad = [];
   // The baseline is the wall level's tables with the wall PRESENT -- not the live level's. Diffing
   // against whatever happens to be on screen produced a delta describing the difference between
   // two different rooms, which named the wrong cell entirely.
-  const base = LVL === WALL_LVL ? null : (LVLALL ?? []).find(l => l.level === WALL_LVL)?.tables;
+  const base = LVL === WALLS_ALL[k].lvl ? null
+             : (LVLALL ?? []).find(l => l.level === WALLS_ALL[k].lvl)?.tables;
   for (const [n, liveT] of LVL_TABLES) {
     const live = base ? (base[n] ?? liveT) : liveT;
     const v = WV.tables[n];
@@ -5564,6 +5626,9 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
       if ((v[i] ?? 0) !== (live[i] ?? 0)) {
         off.push(`<${n}+${i},>${n}+${i},${v[i] ?? 0}`);
         on.push(`<${n}+${i},>${n}+${i},${live[i] ?? 0}`);
+        // ONE list, both directions: the address is the same either way and was being stored
+        // twice. See hzRunW for why 4 bytes a changed byte rather than 6.
+        quad.push(`<${n}+${i},>${n}+${i},${v[i] ?? 0},${live[i] ?? 0}`);
       }
   }
   // which cells actually go -- the mapT bytes that differ. The sink pass marks them in doomT to
@@ -5572,11 +5637,22 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   const cells = [];
   for (let i = 0; i < 256; i++) if ((WV.tables.mapT[i] ?? 0) !== (baseMap[i] ?? 0)) cells.push(i);
   // in the WALL level's own width: the live grid may differ
-  const WW = (WALL_LVL === 2 ? SOCK_MAP : L5_MAP)[0].length;
-  const want = WALL_GROUPS[k].map(([x, y]) => y * WW + x).sort((a, b) => a - b);
-  if (cells.join() !== want.join()) throw new Error(`wall variant ${k} removed cells ${cells}, not ${want}`);
-  console.error(`  wall ${k} (${cells.length} cells): ${off.length} bytes differ, ${off.length * 3 + 1} bytes a direction`);
-  return { off, on, cells };
+  const WW = MAP_OF(WALLS_ALL[k].lvl)[0].length;
+  const want = WALLS_ALL[k].cells.map(([x, y]) => y * WW + x).sort((a, b) => a - b);
+  if (cells.join() !== want.join()) throw new Error(
+    `wall variant ${k} (level ${WALLS_ALL[k].lvl}) removed cells ${cells}, not ${want}`);
+  // The quad list must say exactly what the two triple lists said -- same addresses, same
+  // values, same order. Checked rather than assumed: an encoding slip here is a wall that comes
+  // back subtly wrong, which reads as a rendering bug anywhere except where it is.
+  const tri = l => l.flatMap(t => t.split(','));
+  const q = quad.flatMap(t => t.split(','));
+  const reOff = q.flatMap((_, i) => i % 4 === 0 ? [q[i], q[i + 1], q[i + 2]] : []);
+  const reOn  = q.flatMap((_, i) => i % 4 === 0 ? [q[i], q[i + 1], q[i + 3]] : []);
+  if (reOff.join() !== tri(off).join() || reOn.join() !== tri(on).join())
+    throw new Error(`wall ${k}: the quad list does not reproduce the off/on triples`);
+  console.error(`  wall ${k} (level ${WALLS_ALL[k].lvl}, ${cells.length} cells): ${off.length} ` +
+    `bytes differ, ${quad.length * 4 + 1} bytes both ways (was ${off.length * 6 + 2})`);
+  return { off, on, quad, cells };
 }) : null;
 const WALL_DELTA = WALL_DELTAS ? WALL_DELTAS[0] : null;   // the flag; per-wall data is WALL_DELTAS
 
@@ -6132,6 +6208,12 @@ amX     = $84fc
 amY     = $84fd
 entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gate must not skip
 dbgOnce = $84f5                  ; DROPNOW only
+${process.env.FALLNOW ? `fnCnt   = $7100                  ; FALLNOW: how many forced falls have been triggered
+fnLog   = $7101                  ;   ...and the level each one left, in order (16 of them).
+                                 ;   $7100 is the death picture's page in a shipping build, so
+                                 ;   like FRAMELOG and PROFN this needs DIE=0 -- which a FALLNOW
+                                 ;   build wants anyway, for the 691 bytes.
+` : ''}
 odBest  = $84f0                  ; the drop/take chooser: best |columns from centre| so far,
 odCell  = $84f1                  ;   what won ($ff = nothing in reach), and the loop counter
 odX     = $84f2
@@ -6730,7 +6812,27 @@ mfAlive:
         jsr fallStep
         jmp fwait
 mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
-${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
+${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
+        and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two), so a headless run falls again and again. It sets only
+        bne fnSkip              ;   the player's CELL and lets fallChk find it the normal way, so
+        lda fallSt              ;   the whole path -- fallStep, wallsBack, the slot lookup, lvlSwap,
+        bne fnSkip              ;   mkRuns, objInit -- runs exactly as it does in play. Not while a
+        ldx fnCnt               ;   fall is already running, or it would retrigger mid-animation.
+        cpx #$10
+        bcs fnNoLog             ; the log is 16 entries; keep falling after that, just stop writing
+        lda lvlMeT              ; RECORD the level being left, so ONE run yields the whole sequence
+        sta fnLog,x             ;   -- 1,2,3,1,2,3 for CHAIN=1,2,3. The FOURTH entry is the one
+fnNoLog:inc fnCnt               ;   that matters: a build-time slot index is right for three falls
+        lda hlv                 ;   and wrong from there (see lvlNxtT).
+        clc
+        adc nOrbT               ; the live exit's entity index, the same arithmetic fallChk uses
+        tax
+        lda orbXCT,x
+        sta px+1
+        lda orbYCT,x
+        sta py+1
+fnSkip:
+` : ''}${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
         jsr fallStep            ; the destination render is a background job now -- no state
@@ -10304,7 +10406,7 @@ ${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's
         ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
         ; facing one freezes its clock, so waiting does not sweep the possibilities either --
         ; the cell has to be READ OFF and fed back in through ANGAT.
-        ; ONE LINE PER ANGEL, every angel: level 5's third was cut for 31 bytes of main block
+        ; ONE LINE PER ANGEL, every angel: level 3's third was cut for 31 bytes of main block
         ; until obOrder moved out of it (2026-09-19).
 ${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
         jsr setRow
@@ -12240,7 +12342,7 @@ ${FALL ? `
 ; LOS bitmap, its own fill ink and (for sockets) its own ladder -- hlSet points holeTail at the
 ; right one. The exits come first in HOLELIKE and only the live one is drawn, so the loop skips
 ; the other; sockets are always live.
-holeOne:lda nHoleT              ; a level with no hole-likes at all (level 3): nothing to walk
+holeOne:lda nHoleT              ; a level with no hole-likes at all: nothing to walk
         beq hoRts
         lda hlv                 ; the live exit hole first, so it can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
@@ -12324,10 +12426,25 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
         ; blkT from the NEW mapT and puts each entity back at the new level's build-time cell.
         ; Both are done here rather than on landing so the destination render -- which bgPh starts
         ; a slice per frame from the next frame on -- sees the new geometry from its first slice.
-        lda lvlNxtT             ; where does THIS level's hole go? $ff means nowhere -- the last
-        cmp #$ff                ;   level in the chain keeps its hole as scenery rather than
-        beq lvlEnd              ;   dropping the player into whatever happens to be in slot 0
-${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}        jsr lvlSwap
+        lda lvlNxtT             ; which LEVEL does THIS level's hole go to? $ff means nowhere --
+        cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
+        beq lvlEnd
+${LVLALL.length > 1 ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
+${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        pla
+        ldx #${hx(LVLALL.length - 1)}   ; WHICH SLOT is it in now? Not a build-time constant: the
+lvFind: cmp lvlAtT,x            ;   swap is an exchange, so the level being left takes the slot
+        beq lvGot               ;   the level being entered came out of, and the layout permutes
+        dex                     ;   every fall. nextLevel only ever names a level in the chain,
+        bpl lvFind              ;   so this always finds one.
+        bmi lvlEnd              ; belt and braces: a level not in any slot is a dead hole, never
+lvGot:  ldy lvlMeT              ;   a swap against X = $ff
+        sta lvlMeT              ; A is the level being entered: it is the live one now...
+        tya
+        sta lvlAtT,x            ;   ...and the one being left lands in the slot it came out of
+        txa` : `${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        lda #$00                ; ONE slot, so it is always slot 0 -- but say so rather than
+                                ;   leaning on wallsBack happening to leave A zero, which is what
+                                ;   made this correct by accident before lvlNxtT named a level`}
+${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}        jsr lvlSwap
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped, about to mkRuns\n' : ''}        jsr mkRuns              ; the run tables no longer travel with the level -- they are
                                 ;   derived from the mapT the swap just brought in. Must come
                                 ;   AFTER the swap and BEFORE anything renders the new room.
@@ -14779,6 +14896,7 @@ hrsHit: tya
 hlRungE:lda orbVarT,x
         rts
 
+
         * = ${hx16(HTABLE)}
 hTabT:  ${chunk(hTab, 32).trim()}
         * = ${hx16(ORB_VART)}
@@ -15623,7 +15741,7 @@ fsnLp:  lda (fdS),y
         rts
 ` : ''}
 ; ---- obOrder: project every entity, nearest first, until the sprite slots run out ----
-; The walk used to go in entity order, and the slots ran out on whoever came last: level 5's
+; The walk used to go in entity order, and the slots ran out on whoever came last: level 3's
 ; third angel (entity 4, two sprites) simply did not draw whenever the two orbs, the hole and
 ; a socket had taken theirs -- "still blocks me, still kills me, but doesn't render" (the user,
 ; 2026-09-18). Now each entity gets a key of |dx|+|dy| cells from the player and the nearest is
@@ -15781,6 +15899,12 @@ bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 atMsk:  !byte 0                 ; the leash bit under test
 atTmp:  !byte 0                 ; ...and this angel's row offset into angBlkT
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
+; Socket -> the GLOBAL wall id it opens, $ff = opens nothing. NOT inside the WALL_DELTA block
+; below, even though only a wall build reads it: it is a LVL_TABLES entry, so lvlDstLoT names it
+; in every build, and a chain with no removable walls anywhere (CHAIN=1) failed to assemble on
+; an undefined symbol. Sockets and removable walls are separate features and the manifest should
+; not couple them.
+sockWallT: !byte ${LVLT('sockWallT').map(hx).join(',')}
 sokShrT: !byte ${[...Array(SOK_SHR)].map((_, i) => i * SOK_SSTEP).join(',')}   ; rungs down, per closing frame
 ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
@@ -15788,25 +15912,24 @@ ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
 ; wall goes -- 13 runs become 5 here -- which is why this is ${WALL_DELTA.off.length} bytes and
 ; not the one map byte you would guess.
-; The format is hzRun's: (addrLo, addrHi, value) until $ff. That routine already exists for the
-; per-cell run splits, so the runtime cost of changing a wall is a call to proven code.
+; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
+; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
+; the two sets together overran rayOffQS at $a900: the addresses were stored twice.
 ; NOT in the delta, deliberately: stepT (map-independent since STEPFB), orbOccT (orbOccAll
 ; rebuilds every mask every frame) and the charset (canonical -- fontA is byte-identical with the
 ; column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
-${WALL_DELTAS.map((d, k) => `wallOffT${k}: !byte ${d.off.join(',')},$ff
-wallOnT${k}: !byte ${d.on.join(',')},$ff`).join('\n')}
-wallOffLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallOffT${k}`).join(',')}
-wallOffHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallOffT${k}`).join(',')}
-wallOnLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallOnT${k}`).join(',')}
-wallOnHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallOnT${k}`).join(',')}
+${WALL_DELTAS.map((d, k) => `wallDT${k}: !byte ${d.quad.join(',')},$ff`).join('\n')}
+wallDLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallDT${k}`).join(',')}
+wallDHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallDT${k}`).join(',')}
 ${WALL_DELTAS.map((d, k) => `wallCells${k}: !byte ${d.cells.map(hx).join(',')},$ff`).join('\n')}   ; each wall's cells, $ff-ended
 wallCLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallCells${k}`).join(',')}
 wallCHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallCells${k}`).join(',')}
-sockWallT: !byte ${SOCKETS_AT.map((_, i) => hx((LEVEL_WALLS[WALL_LVL]?.sockWall ?? [])[i] ?? 0xff)).join(',')}   ; socket -> wall, $ff = none
-wallStT: !fill ${WALL_DELTAS.length}, 0   ; per wall: 0 = it is there
+wallStT: !fill ${WALLS_ALL.length}, 0   ; per wall, global across the chain: 0 = it is there
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
+wsDir:  !byte 0                 ; ...and which way: 1 = taking it out, 0 = putting it back
+hzWv:   !byte 0                 ; hzRunW's held "out" value while it reads the "back" one
 dbgOnce2: !byte 1               ; WALLNOW's one-shot
 
 ; ---- wallTog: flip it, either way ----
@@ -15828,20 +15951,17 @@ wtClr:  sta idT,x               ;   struck there. Scanning those stale entries s
         bne wtClr               ;   map here is 16 rows deep.)
         rts
 wtBack: ldy wsWall              ; coming back: no animation, just put it there
-        lda wallOnLoT,y
-        sta hzRd+1
-        lda wallOnHiT,y
-        sta hzRd+2
         lda #$00
         beq wtGo                ; always taken
 wtOff:  ldy wsWall
-        lda wallOffLoT,y
-        sta hzRd+1
-        lda wallOffHiT,y
-        sta hzRd+2
         lda #$01
 wtGo:   sta wallStT,y
-        jsr hzRun               ; hzRun sets its own X and walks to the $ff
+        sta wsDir               ; the state IS the direction: 1 = out, 0 = back
+        lda wallDLoT,y
+        sta hzRd+1
+        lda wallDHiT,y
+        sta hzRd+2
+        jsr hzRunW              ; sets its own X and walks to the $ff
         lda #$00
         jsr wtCells             ; every cell of the group: blkT from the new mapT (the delta no
                                 ;   longer carries blkT or the run tables, since neither travels
@@ -15873,6 +15993,32 @@ wtDoom: lda #$00
         bne wtLd                ; always: a group is far shorter than a page
 wtCDn:  rts
 
+; ---- hzRunW: walk one wall's (addrLo, addrHi, outValue, backValue) quads ----
+; Both directions in ONE list. They used to be two hzRun triple lists over the SAME addresses,
+; so every changed byte cost 6 bytes rather than 4 -- fine while one level had walls, and 19
+; bytes over the rayOffQS ceiling the day levels 2 and 3 both did. This is 111 of them back.
+; Both values are read every time, whichever way we are going, so the stride stays 4 and the
+; walk needs no branch to skip a byte. hzGet/hzRd are hzRun's, shared deliberately: hzRd is the
+; self-modified source pointer both routines walk, and wtGo above has just pointed it here.
+hzRunW: ldx #$00
+hzWL:   jsr hzGet
+        cmp #$ff
+        beq hzWRt
+        sta hzW+1
+        jsr hzGet
+        sta hzW+2
+        jsr hzGet
+        sta hzWv                ; the value that takes the wall out...
+        jsr hzGet               ; ...and the one that puts it back, now in A
+        ldy wsDir
+        beq hzWS                ; going back: A is already the byte to store
+        lda hzWv
+hzWS:
+hzW:    sta $ffff               ; self-modified: the table byte this quad names
+        jmp hzWL
+hzWRt:  rts                     ; hzRun's own hzRt is in the hazard block, out of branch range
+
+
 ; ---- wallsBack: put back every wall that is out, no animation ----
 ; The restart jumps to entry and reloads nothing, and a fall EXCHANGES the level's tables with
 ; the shadow -- so a level has to leave in the state it arrived in, or the shadow keeps the
@@ -15884,8 +16030,13 @@ dmClr:  sta doomT,x             ;   than at entry because the main block had no 
         inx
         bne dmClr
         sta wsN                 ; a collapse in progress is abandoned
-        ldx #${hx(WALL_DELTAS.length - 1)}
-wbLp:   stx wsWall
+        ldx #${hx(WALLS_ALL.length - 1)}   ; EVERY wall in the chain, not just the live level's:
+wbLp:   stx wsWall              ;   a wall's triples name LIVE table addresses, so applying one
+                                ;   belonging to another level would write that room's bytes into
+                                ;   this one. Safe because this routine runs before every lvlSwap,
+                                ;   so a level that is not live has wallStT 0 throughout and the
+                                ;   branch below skips it -- which is the invariant the whole
+                                ;   global-wall-id scheme rests on.
         lda wallStT,x
         beq wbNx
         txa
@@ -16036,7 +16187,7 @@ angBlkT: !byte ${angBlk.join(',')}
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
-lvlNxtT:!byte ${hx(TWOLEV && !process.env.NOFALL ? OTHERS.indexOf(nextLevel(LVL)) : 0xff)}                 ; slot this level's hole leads to; $ff = standalone
+lvlNxtT:!byte ${hx(LVLT('lvlNxtT')[0])}                 ; LEVEL this level's hole leads to; $ff = nowhere
 nOrbT:  !byte ${hx(ORBS.length)}                 ; orbs
 nHoleT: !byte ${hx(HOLELIKE.length)}                 ; hole-like entities: exits then sockets
 nExitT: !byte ${hx(HOLES_AT.length)}                 ; ...of which this many are exits
@@ -16068,7 +16219,16 @@ ${TWOLEV ? `; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
 ; FROM, exactly as it did in the image.
 ; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
 ; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
-lvlBasLoT: !byte ${LVLALL.map((_, i) => hx((LVLSHADOW + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) & 255)).join(',')}
+${LVLALL.length > 1 ? `; WHICH LEVEL IS IN WHICH SLOT, RIGHT NOW. lvlSwap exchanges, so every fall permutes the slots
+; and no build-time slot number stays true past the first lap -- see lvlNxtT. They must NOT be in
+; LVL_TABLES: a table in the manifest is exchanged by the very swap it is describing, which would
+; undo each update as it was made.
+; Only emitted with TWO OR MORE slots. With one there is nothing to permute -- the transposition
+; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
+; the ceiling does not have.
+lvlAtT: !byte ${LVLALL.map(L => hx(L.level)).join(',')}   ; slot -> the level now in it
+lvlMeT: !byte ${hx(LVL)}                 ; ...and the level that is live
+` : ''}lvlBasLoT: !byte ${LVLALL.map((_, i) => hx((LVLSHADOW + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) & 255)).join(',')}
 lvlBasHiT: !byte ${LVLALL.map((_, i) => hx((LVLSHADOW + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) >> 8)).join(',')}
 lvlDstLoT: !byte ${LVL_TABLES.map(([n]) => `<${n}`).join(',')}
 lvlDstHiT: !byte ${LVL_TABLES.map(([n]) => `>${n}`).join(',')}
@@ -18085,6 +18245,13 @@ qcosT: !byte ${qcos.join(',')}
 // path leaves junk in `git status` that gets swept into the next stash or commit. It has
 // happened. Diagnostic builds therefore emit to an ignored side path; labels are still
 // there to look up, the tracked reference just stays honest.
+// CPU equates still living in VIC bank 3 -- bank 3 is meant to be graphics-only and is not yet.
+// A squatter's extent is unknown from an equate, so both consumers round its page down and treat
+// the whole page as taken. Scanned once: the ILVL fit guard and the free-space accounting below
+// disagreeing about what is in the bank is exactly how a shadow grew over doomT unnoticed.
+const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)/gm)]
+  .map(m => [m[1], parseInt(m[2], 16)])
+  .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB');
 const asmPath = DIAG.length ? './iray.diag.asm' : './iray.asm';
 writeFileSync(asmPath, asm);
 try {
@@ -18209,8 +18376,21 @@ try {
       };
       const bytes = LVLALL.flatMap(L => LVL_TABLES.flatMap(([n, a, sh]) =>
         pad((sh instanceof Map ? sh.get(L.level) : sh) ?? L.tables[n] ?? [], a.length).map(resolve)));
-      if (LVLSHADOW + bytes.length > 0xfff9) throw new Error(
-        `the level shadow is ${bytes.length} bytes and does not fit above $${LVLSHADOW.toString(16)} in bank 3`);
+      // $fff9 is NOT the first thing above the shadow. Bank 3 is meant to be graphics-only and
+      // is not yet: doomT, runPlaneT, runFaceT and bfsQ are CPU equates squatting in its tail,
+      // and a shadow that runs into them assembles perfectly and corrupts geometry the first time
+      // a wall collapses. Tested against $fff9 alone, CHAIN=1,2,3 built clean and silently wrote
+      // 100 bytes of level tables over doomT -- the only tell was the free-space line losing a gap.
+      // Same scan as the bank-3 accounting below; see BANK3_SQUATTERS for why it is page-rounded.
+      const wall = Math.min(0xfff9, ...BANK3_SQUATTERS.map(([, a]) => a & ~255).filter(a => a >= LVLSHADOW));
+      if (LVLSHADOW + bytes.length > wall) throw new Error(
+        `the level shadow is ${bytes.length} bytes (${LVLALL.length} levels x ` +
+        `${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)}) and does not fit between ` +
+        `$${LVLSHADOW.toString(16)} and $${wall.toString(16)} in bank 3` +
+        (wall < 0xfff9 ? ` -- $${wall.toString(16)} is ` +
+          `${BANK3_SQUATTERS.filter(([, a]) => (a & ~255) === wall).map(([n]) => n).join('/')}, a CPU ` +
+          `table squatting in the graphics bank` : '') +
+        `. Move LVLSHADOW down (IPIC below it has its own guard), or evict the squatter.`);
       LVLSHAD_BYTES.push(...bytes);      // for the bank-3 accounting below
       return bytes;
     })() }] : []),
@@ -18296,9 +18476,7 @@ try {
   // ...and any CPU equate still squatting in the bank. Bank 3 is meant to be graphics-only; until
   // every one of these is evicted the free figure would be a lie, and a lie in the direction that
   // gets sprite data written over the span stack.
-  const squatters = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)/gm)]
-    .map(m => [m[1], parseInt(m[2], 16)])
-    .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB');
+  const squatters = BANK3_SQUATTERS;
   const used = [[SCR_A, SCR_A + 0x400], [SCR_B, SCR_B + 0x400],
                 [CHARSET, CHARSET + 0x800], [CHARSET_B, CHARSET_B + 0x800],
                 [0xfffa, 0x10000],
