@@ -3969,7 +3969,8 @@ const nextLevel = n => LEVELS[(LEVELS.indexOf(n) + 1) % LEVELS.length];
 // the first lap is right and then level 1 still says "slot 0", which by then holds level 3: the
 // game oscillates 1<->3 and level 2 becomes unreachable. Three good falls and then a silently
 // wrong one. The runtime now looks the wanted level up in lvlAtT, which tracks the permutation.
-if (LVLALL) for (const L of LVLALL) L.tables.lvlNxtT = [nextLevel(L.level)];
+// ...and the shadows' copies are written by CHAIN_GLOBAL below, which is where every table
+// naming something chain-global now lives. Not here, because sockWallT needs NSOCK.
 const lvlMax = (f, own) => Math.max(own, ...(LVLALL ?? []).map(f));
 // At least ONE, even with no entities anywhere (NOORB=1 ANGEL=0 -- the bare level for working on
 // seams from first principles). Six tables are emitted at this length, and a zero-length !byte
@@ -4015,20 +4016,33 @@ const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
 // Sockets are the hole-likes that are not exits. At least one byte: sockWallT is emitted either
 // way, and a zero-length table would be recorded in lvlLenT as 0, which the swap reads as 256.
 const NSOCK = Math.max(1, NHOLE - NEXIT);
-// ...AND sockWallT NAMES GLOBAL WALL IDS, which a level's own build cannot know either -- the
-// same trap as lvlNxtT, and it shipped. A LVLDUMP subprocess has TWOLEV false, so its RESIDENT
-// set is just itself and WALL_BASE starts its ids at 0: level 3's dump said "socket 0 opens wall
-// 0", which in the chain is LEVEL 2's first wall. Seating level 3's S1 applied that wall's delta
-// -- mapT+88 -- and 88 in level 3's own 14-wide grid is (4,6), which is the cell the user watched
-// vanish while the two that should have gone stayed put.
-// Patched HERE, in the main build, because this is where WALL_BASE spans the whole chain; and
-// here rather than beside the lvlNxtT patch because NSOCK does not exist until now.
-// $ff for the padding, NOT the 0 the generic pad would leave: 0 is a perfectly valid wall id.
-if (LVLALL) for (const L of LVLALL) {
-  const sw = LEVEL_WALLS[L.level]?.sockWall ?? [];
-  L.tables.sockWallT = [...Array(NSOCK)].map((_, i) =>
-    i < sw.length ? WALL_BASE[L.level] + sw[i] : 0xff);
-}
+// ---- CHAIN_GLOBAL: tables that name something GLOBAL TO THE CHAIN ----
+// A LEVEL'S OWN BUILD CANNOT KNOW THE CHAIN IT WILL SIT IN. A LVLDUMP subprocess runs with
+// TWOLEV false, so its OTHERS is empty, its RESIDENT set is just itself, and anything it numbers
+// across the chain it numbers as if it were alone. So the MAIN build computes these for every
+// shadow, and a dump's own value for them is always discarded.
+//
+// This trap has caught both entries below, one of them in the user's hands:
+//   lvlNxtT   -- a dump has no fall order at all and emits $ff.
+//   sockWallT -- a dump's WALL_BASE starts at 0, so level 3's said "socket 0 opens wall 0",
+//                which in the chain is LEVEL 2's first wall. Seating level 3's S1 applied that
+//                wall's delta, mapT+88, and 88 in level 3's own 14-wide grid is (4,6) -- the cell
+//                that vanished while the two that should have gone stayed put. Levels 1 and 2
+//                were fine only because level 2 is FIRST and its local ids happened to match.
+//
+// Adding a table here is still a human step. The tell that one belongs: its value is computed
+// from CHAIN, OTHERS, WALL_BASE or anything else derived from the whole resident set. The
+// assertions below are the backstop -- they check MEANING, not just that a patch ran, which is
+// what would have caught the sockWallT bug the moment level 3 got a socket.
+const CHAIN_GLOBAL = {
+  lvlNxtT: L => [TWOLEV && !process.env.NOFALL ? nextLevel(L.level) : 0xff],
+  // $ff for the padding, NOT the 0 a generic pad would leave: 0 is a perfectly valid wall id.
+  sockWallT: L => {
+    const sw = LEVEL_WALLS[L.level]?.sockWall ?? [];
+    return [...Array(NSOCK)].map((_, i) => i < sw.length ? WALL_BASE[L.level] + sw[i] : 0xff);
+  },
+};
+if (LVLALL) for (const L of LVLALL) for (const [n, f] of Object.entries(CHAIN_GLOBAL)) L.tables[n] = f(L);
 
 // Masks for the ORBS *and* the hole-like entities, in the same order as orbXCT/orbYCT. Holes
 // were left out of this originally, which is the whole reason they had no occlusion test: the
@@ -5393,6 +5407,7 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 // The order here is the order of the shadow blob, so it is also the swap order. Anything added
 // here must be swapped, or the new level renders with the old level's geometry.
 const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from the manifest
+
 const pad = (a, n) => [...a, ...Array(Math.max(0, n - a.length)).fill(0)];
 const LVL_TABLES = [
   ['mapT', pad(map, 256).map((v, i) => i < MAPN ? v : 1)],   // a full page of WALL past the map: see the emitted mapT
@@ -5459,6 +5474,17 @@ const LVL_TABLES = [
   ['orbOccLoT', orbOccLo],
   ['orbOccT', process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat],
 ];
+// Every resident level, live one included: what each entry MEANS, checked against the chain.
+for (const L of [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...(LVLALL ?? [])]) {
+  const nxt = L.tables.lvlNxtT?.[0];
+  if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt)) throw new Error(
+    `level ${L.level}'s lvlNxtT names level ${nxt}, which is not in the chain ${CHAIN.join(',')}`);
+  for (const [i, w] of (L.tables.sockWallT ?? []).entries())
+    if (w !== 0xff && WALLS_ALL[w]?.lvl !== L.level) throw new Error(
+      `level ${L.level}'s socket ${i} names wall ${w}, which belongs to level ` +
+      `${WALLS_ALL[w]?.lvl ?? '(no such wall)'}. sockWallT holds GLOBAL wall ids and a level may ` +
+      `only open its own walls -- see CHAIN_GLOBAL.`);
+}
 // ---- The merge-hazard data, FLATTENED so it can travel between levels ----
 // It used to be emitted as a label per shared list (hazL0..hazL7) with hazLoT/hazHiT holding
 // `<hazL3` style references, and a COUNT baked into hazSet as an immediate. None of that can be
