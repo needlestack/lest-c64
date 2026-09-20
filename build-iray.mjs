@@ -1172,7 +1172,6 @@ const BENCH_ROUTE = [
   ['to',  2.5, 2.5],              // across the room, home
   ['to',  1.5, 1.5],
 ];
-const BENCH_COMPILED = compileRoute(BENCH_ROUTE, [0x01f6, 0x0149, 0x3b00]);
 // ROUTE=fall: the shortest honest path from level 1's start to its hole, with the two orbs left
 // where they are -- the door orb is IN the way, so this goes round the ring's north arc, into the
 // chamber by... it cannot: the chamber's only door is plugged. So it takes the door orb (SPACE)
@@ -1250,12 +1249,6 @@ const L3REP_ROUTE = [
   ['to', 1.2, 1.15], ['spin', -149],                // facing ~$2f
   ['act', T_WAIT, 60],
 ];
-const SEAM_COMPILED = compileRoute(SEAM_ROUTE, [0x01f6, 0x0149, 0x3b00]);
-const L3REP_COMPILED = compileRoute(L3REP_ROUTE, [0x0180, 0x0180, 0x2000]);
-const SOCK3_COMPILED = compileRoute(SOCK3_ROUTE, [0x0180, 0x0180, 0x2000]);
-const BLOCK_COMPILED = compileRoute(BLOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
-const FALL_COMPILED = compileRoute(FALL_ROUTE, [0x0280, 0x0280, 0x19c0]);
-const SOCK_COMPILED = compileRoute(SOCK_ROUTE, [0x0280, 0x0280, 0x1a00]);
 // ROUTE=cover3: the same idea for LVL=3 -- every open cell of the room, the corridor, and the
 // ring's outer loop and chamber, walking and running, never stopping. The chamber is entered by
 // its east door at (20,5); the two-wide column at x16-17 splits it, so both halves are walked.
@@ -1285,20 +1278,38 @@ const COVER3_ROUTE = [
   ['run', 21.5, 9.5], ['run', 13.5, 9.5], ['run', 13.5, 5.5], ['run', 6.5, 5.5],  // run home
   ['to',  2.5, 5.5],
 ];
-const COVER_COMPILED = compileRoute(COVER_ROUTE, [0x01f6, 0x0149, 0x3b00]);
-const COVER3_COMPILED = compileRoute(COVER3_ROUTE, [0x0280, 0x0280, 0x1000]);
-const TOUR_STEPS = ROUTE === 'seam' ? SEAM_COMPILED.steps
-                 : ROUTE === 'cover' ? COVER_COMPILED.steps
-                 : ROUTE === 'cover3' ? COVER3_COMPILED.steps
-                 : ROUTE === 'fall' ? FALL_COMPILED.steps
-                 : ROUTE === 'sock' ? SOCK_COMPILED.steps
-                 : ROUTE === 'block' ? BLOCK_COMPILED.steps
-                 : ROUTE === 'sock3' ? SOCK3_COMPILED.steps
-                 : ROUTE === 'l3rep' ? L3REP_COMPILED.steps
-                 : ROUTE === 'bench' ? BENCH_COMPILED.steps : WALK_STEPS;
+// ---- ROUTES: one entry per scripted tour, and ONE statement of each fact ----
+// A route used to be spread across five lists that all had to agree -- the steps ternary, the
+// "is this validated" list, the "does it open walls" list, the start-pose ternary and the .end
+// lookup -- with the START POSE STATED TWICE, once to compileRoute and again to the validator.
+// Two sources for one fact is how they drift, and a sixth list had already fallen behind:
+// POSEDUMP's knew five of the nine routes, so POSEDUMP=1 ROUTE=sock read poses of undefined.
+// Adding a route is now one entry.
+const ROUTES = {
+  seam:   { route: SEAM_ROUTE,   start: [0x01f6, 0x0149, 0x3b00] },
+  cover:  { route: COVER_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
+  cover3: { route: COVER3_ROUTE, start: [0x0280, 0x0280, 0x1000] },
+  bench:  { route: BENCH_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
+  fall:   { route: FALL_ROUTE,   start: [0x0280, 0x0280, 0x19c0] },
+  // opensWalls: the route walks through walls its own sockets have taken out, so the validator
+  // has to judge it with them OPEN. One that arrives at a wall still standing simply stalls there.
+  sock:   { route: SOCK_ROUTE,   start: [0x0280, 0x0280, 0x1a00], opensWalls: true },
+  block:  { route: BLOCK_ROUTE,  start: [0x0280, 0x0280, 0x1a00], opensWalls: true },
+  sock3:  { route: SOCK3_ROUTE,  start: [0x0180, 0x0180, 0x2000], opensWalls: true },
+  l3rep:  { route: L3REP_ROUTE,  start: [0x0180, 0x0180, 0x2000], opensWalls: true },
+};
+for (const r of Object.values(ROUTES)) r.compiled = compileRoute(r.route, r.start);
+// Not in a dump: a LVLDUMP subprocess inherits ROUTE, has no use for it (the validator below
+// skips entirely), and would throw first -- turning a good message into the parent's opaque
+// "Command failed", which is the whole reason subprocess stdio being ignored is a trap.
+if (!process.env.LVLDUMP && ROUTE !== 'walk' && !ROUTES[ROUTE]) throw new Error(
+  `ROUTE=${ROUTE} is not a route. Known: walk, ${Object.keys(ROUTES).join(', ')}. ` +
+  `An unknown one used to fall back silently to the free walk, which looks like the route ran.`);
+const ROUTEDEF = ROUTES[ROUTE];                 // undefined for ROUTE=walk, the unscripted default
+const TOUR_STEPS = ROUTEDEF ? ROUTEDEF.compiled.steps : WALK_STEPS;
 // Not in an LVLDUMP subprocess: that is the OTHER level being built as a shadow, and a route
 // authored for the live level walks straight through its walls.
-if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 'cover3' || ROUTE === 'bench' || ROUTE === 'fall' || ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock3' || ROUTE === 'l3rep')) {
+if (!process.env.LVLDUMP && ROUTEDEF) {
   DIAGEARLY.push(`ROUTE=${ROUTE}`);
   // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
@@ -1307,16 +1318,14 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
   const R = 26;                                  // mvFree's half-box, in 1/256 cells
   // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
   // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
-  const openW = (ROUTE === 'sock' || ROUTE === 'block' || ROUTE === 'sock3' || ROUTE === 'l3rep') ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
+  const openW = ROUTEDEF.opensWalls ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
   const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || (M[cy][cx] && !openW.has(cellOf(cx, cy)));
   const blocked = (X, Y) => {
     for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
       if (solid(bx, by)) return true;
     return false;
   };
-  let [x, y, a] = ROUTE === 'cover3' ? [0x0280, 0x0280, 0x1000] : ROUTE === 'fall' ? [0x0280, 0x0280, 0x19c0]
-                : ROUTE === 'sock' || ROUTE === 'block' ? [0x0280, 0x0280, 0x1a00]
-                : ROUTE === 'sock3' || ROUTE === 'l3rep' ? [0x0180, 0x0180, 0x2000] : [0x01f6, 0x0149, 0x3b00], bad = [];
+  let [x, y, a] = [...ROUTEDEF.start], bad = [];
   for (const [i, [t, n]] of TOUR_STEPS.entries()) {
     const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
     const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
@@ -1337,7 +1346,7 @@ if (!process.env.LVLDUMP && (ROUTE === 'seam' || ROUTE === 'cover' || ROUTE === 
     `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
     `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
     `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover3: COVER3_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED, sock: SOCK_COMPILED, block: BLOCK_COMPILED, sock3: SOCK3_COMPILED, l3rep: L3REP_COMPILED })[ROUTE].end;
+  const [ex, ey, ea] = ROUTEDEF.compiled.end;
   console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
     `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
     `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
@@ -1348,7 +1357,7 @@ if (process.env.TOURDUMP)
                 `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
 // POSEDUMP=1: the compiler's pose at the end of each step, one line a step, for posecheck.mjs.
 if (process.env.POSEDUMP && ROUTE !== 'walk') {
-  const c = ({ seam: SEAM_COMPILED, cover: COVER_COMPILED, cover3: COVER3_COMPILED, bench: BENCH_COMPILED, fall: FALL_COMPILED })[ROUTE];
+  const c = ROUTEDEF.compiled;    // every route, not the five this list used to know
   for (let i = 0; i < TOUR_STEPS.length; i++) {
     const [x, y, a] = c.poses[i + 1] ?? c.end;    // poses[i] is the pose at the START of step i
     console.log(`  pose ${i} ${TOUR_STEPS[i][0]} ${TOUR_STEPS[i][1]} ${x} ${y} ${a}`);
@@ -17593,10 +17602,9 @@ twExZ:  lda #$00
         lda #$01
         sta twAdv
         jmp twRun
-twRunJ: jmp twRun
-        lda twTk
-        ora twTk+1
-        bne twRunJ              ; this step still has time on it
+        ; The "does this step still have time on it?" test that used to stand here went dead the
+        ; moment the jmp above was added, and sat unreachable after it until the reachability
+        ; guard found it (2026-09-20). twAdv answers the same question now, one call later.
 twStepOn:
 ${TOURPOSE ? `        ; TOURPOSE=1: the pose at the END of every step -- px, py, pa:paF, 6 bytes a step at
         ; twPose -- so the route compiler's model can be checked against what the machine did.
@@ -18358,7 +18366,6 @@ const lintReach = src => {
     `with no label, so nothing can reach it. Almost always a routine spliced into the middle of ` +
     `a straight-line sequence; move it below the sequence it interrupted.\n  ` + bad.join('\n  '));
 };
-lintReach(asm);
 
 // CPU equates still living in VIC bank 3 -- bank 3 is meant to be graphics-only and is not yet.
 // A squatter's extent is unknown from an equate, so both consumers round its page down and treat
@@ -18369,6 +18376,7 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
   .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB');
 const asmPath = DIAG.length ? './iray.diag.asm' : './iray.asm';
 writeFileSync(asmPath, asm);
+lintReach(asm);            // AFTER the write: a failure should leave the file to look at
 try {
   const r = assemble(asm);
   // Every manifest table must be emitted at EXACTLY the length the swap moves. Emitted short,
