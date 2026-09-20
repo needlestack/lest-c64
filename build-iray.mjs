@@ -18298,6 +18298,42 @@ qcosT: !byte ${qcos.join(',')}
 // path leaves junk in `git status` that gets swept into the next stash or commit. It has
 // happened. Diagnostic builds therefore emit to an ignored side path; labels are still
 // there to look up, the tracked reference just stays honest.
+// ---- UNREACHABLE CODE: an instruction after an unconditional exit, with no label on it ----
+// Nothing can branch to a line that has no label, so an instruction sitting after an rts/jmp/rti
+// with no label between them is dead -- and the way it gets there is a routine spliced INTO a
+// straight-line sequence, which is easy to do in a file that builds assembly out of template
+// literals. It happened on 2026-09-20: hzRunW's body was inserted between `jsr hzRunW` and the
+// `lda #$00 / jsr wtCells` that followed it, so wtCells -- which copies mapT into blkT and clears
+// doomT after a wall opens -- ended up after an rts and never ran. The wall vanished from the map
+// and stayed solid to walk into, and it reached the user in play.
+//
+// Comments and blank lines do NOT break the chain (they change nothing about reachability); data
+// directives and a new origin DO, since neither is a fall-through from the instruction above.
+// DEADCODE-OK on the exit line waives it. That convention already existed before this check did
+// -- orbMove's still-frame short-circuit is jmp'd over while the occlusion stamping is unfinished
+// -- which is the argument for the check rather than against it: the situation is real enough to
+// have been annotated by hand, and everything NOT annotated is then a mistake.
+// One waived site across the whole emitted file when this was written, so it throws rather than
+// warns. For anything else, give the block a label: that is what makes it reachable, and what
+// says so to the next reader.
+const lintReach = src => {
+  const UNCOND = /^(?:[A-Za-z_]\w*:)?\s+(?:rts|rti|jmp)\b/;
+  const LABEL = /^[A-Za-z_][A-Za-z0-9_]*:/, INSTR = /^\s+[a-z]{3}\b/;
+  const bad = []; let prev = false, waived = false;
+  for (const [i, l] of src.split('\n').entries()) {
+    if (/^\s*(;|$)/.test(l)) { if (/DEADCODE-OK/.test(l)) waived = true; continue; }
+    if (/^\s*(\*|!)/.test(l)) { prev = waived = false; continue; }   // origin or data: no fall-through
+    if (prev && !waived && INSTR.test(l) && !LABEL.test(l)) bad.push(`line ${i + 1}: ${l.trim()}`);
+    prev = UNCOND.test(l);
+    waived = prev && /DEADCODE-OK/.test(l);
+  }
+  if (bad.length) throw new Error(
+    `${bad.length} unreachable instruction(s) -- an instruction follows an unconditional exit ` +
+    `with no label, so nothing can reach it. Almost always a routine spliced into the middle of ` +
+    `a straight-line sequence; move it below the sequence it interrupted.\n  ` + bad.join('\n  '));
+};
+lintReach(asm);
+
 // CPU equates still living in VIC bank 3 -- bank 3 is meant to be graphics-only and is not yet.
 // A squatter's extent is unknown from an equate, so both consumers round its page down and treat
 // the whole page as taken. Scanned once: the ILVL fit guard and the free-space accounting below
