@@ -8310,6 +8310,48 @@ hrsHit: tya
 hlRungE:lda orbVarT,x
         rts
 
+        ; Out here for the same reason the rung finders are: the bfsTick block ends 21 bytes
+        ; short of $6100 and this needs 30. jsr-entered, nothing falls into it.
+; ---- bfsSeed: queue every entity cell the main wave reached, for the deferred second wave ----
+; The main wave never expands THROUGH an entity, so an orb parked in a one-wide corridor leaves
+; every cell beyond it at $ff. The angel behind it reads $ff for its own cell, anPath returns
+; $ff, and angStep's "it is walled in, so it WAITS" freezes it on the spot -- rooms away, not at
+; the obstacle. (The user, 2026-09-20, blocking level 1's corridor: "the angel no longer follows".)
+;
+; So when the queue runs dry, seed it from the entity cells that DID get a distance and keep
+; going. Because a cell is only written when it is still $ff, this second wave can ONLY fill
+; cells the first could not reach: a route that goes round an orb is still found by wave 1 and is
+; still exactly as short as it was. Nothing about the preferred case changes.
+; Every cell it does fill got its distance from a neighbour one less, so the strictly-decreasing
+; guarantee still holds across both waves and anPath is untouched. The angel descends normally to
+; the cell beside the orb, where its only d-1 neighbour IS the orb -- which anPath refuses on
+; blkT -- and stops there facing the player, which is the whole point.
+;
+; blkT == 2 SPECIFICALLY, not "blocked": bfsStN writes a distance for EVERY cell including walls,
+; and seeding from a wall would expand a route straight through it.
+; Scanning blkT rather than walking the entity table: 256 cheap iterations beat nAllT of them
+; once each needs a row multiply to turn (x,y) back into a cell -- 30 bytes against 73, and this
+; block has 21 to spare. ~3,000 cycles, once per fill, which is once in ~120 frames.
+; The whole 256 is safe: blkT is padded to a full page with WALL, so the bytes past the map read
+; as 1 and can never match. (A 256-iteration loop over a MAPN table is otherwise the standing
+; trap here -- a 253-cell map has three bytes of something else behind it.)
+; It also handles entities that are not really there: a carried or hidden orb leaves its old cell
+; unblocked, so it simply is not a 2 and is not seeded.
+bfsSeed:ldx #$00
+bfsSdL: lda blkT,x
+        cmp #$02
+        bne bfsSdN              ; wall, floor, or an entity that is not here: not an obstacle
+bfsSdQ: lda bfsD1,x             ; operand PATCHED to the work map
+        cmp #$ff
+        beq bfsSdN              ; wave 1 never reached this one either: nothing to expand from
+        txa
+        ldy bfsTail
+        sta bfsQ,y
+        inc bfsTail
+bfsSdN: inx
+        bne bfsSdL
+        rts
+
 
         * = $4d00
 hTabT:  !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,238,222,209,196,185,176,167,159,152,145,139,133,128,124,119,115,111,108
@@ -8542,7 +8584,7 @@ bfsGo:  lda bfsWant
 bfsWork:
         lda bfsPhase
         cmp #$02
-        beq bfsExp
+        bcs bfsExp              ; 2 = the main wave, 3 = the deferred entity wave (see bfsSeed)
         ; ---- phase 1: clear the work map, 64 bytes a frame ----
         ldx bfsCl
         ldy #64
@@ -8590,7 +8632,7 @@ bfsE1:  cmp #$09
 bfsE2:  sta bfsN
 bfsExL: lda bfsHead
         cmp bfsTail
-        beq bfsFin              ; queue empty -> the map is complete
+        beq bfsQE               ; queue empty -> the main wave is done; is there a second?
         tax
         lda bfsQ,x
         sta bfsC
@@ -8657,6 +8699,16 @@ bfsEnN: dex
         jmp bfsFin              ; every angel has its answer
 bfsRts: rts
         ; ---- the fill is done: swap the maps over ----
+        ; ---- the queue has run dry ----
+bfsQE:  lda bfsPhase
+        cmp #$03
+        beq bfsFin              ; the entity wave has already run: the map really is complete
+        lda #$03
+        sta bfsPhase
+        jsr bfsSeed
+        jmp bfsExL              ; straight on with whatever it queued -- if nothing, we come
+                                ;   back here, phase is 3, and the fill ends
+
 bfsFin: lda bfsFor
         sta bfsDone
         lda bfsBVF
@@ -8675,6 +8727,7 @@ bfsFin: lda bfsFor
         sta bfsLdC+2
         sta bfsLdN+2
         sta bfsStN+2
+        sta bfsSdQ+2            ; bfsSeed reads the WORK map too, so it swaps with the rest
         sta bfsLdE+2            ; the early-out reads the WORK map, so it swaps with the rest
         rts
 
