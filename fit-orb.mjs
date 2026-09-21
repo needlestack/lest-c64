@@ -152,3 +152,25 @@ if (process.argv[1]?.endsWith('fit-orb.mjs') && process.argv[2]) {
       [...r.px.slice(y * W, y * W + W)].map(v => CH[v]).join(''));
   console.log(r.bytes.join(','));
 }
+
+// ---- fatBits: read a hand-drawn W x H cell straight out of a pixel-editor screenshot ----
+// A "fat bits" grab is a magnified grid drawn on a black canvas, so it is the CANVAS, not the
+// ink, that bounds the cell -- taking the ink's bounding box would crop to the symbol and lose
+// which grid squares it actually sits in. Sampling the centre of each grid square then ignores
+// the editor's gridlines and any half-pixel at the edges, which is what makes this exact:
+// fitArt's box filter and dither exist for photographs and would soften a two-colour bitmap.
+export function fatBits(file, W, H) {
+  const [sw, sh] = execFileSync('magick', ['identify', '-format', '%w %h', file])
+    .toString().split(' ').map(Number);
+  const raw = execFileSync('magick', [file, '-colorspace', 'gray', '-depth', '8', 'gray:-'],
+    { maxBuffer: 1 << 28 });
+  const at = (x, y) => raw[y * sw + x];
+  let x0 = sw, x1 = -1, y0 = sh, y1 = -1;
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++)
+    if (at(x, y) < 40) { if (x < x0) x0 = x; if (x > x1) x1 = x;
+                         if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) throw new Error(`${file}: no dark canvas -- is it a fat-bits grab?`);
+  const cw = (x1 - x0 + 1) / W, rh = (y1 - y0 + 1) / H;
+  return [...Array(W * H)].map((_, i) =>
+    at(Math.round(x0 + cw * ((i % W) + 0.5)), Math.round(y0 + rh * ((i / W | 0) + 0.5))) > 40);
+}

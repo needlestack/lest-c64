@@ -22,7 +22,7 @@ import { assemble } from './asm6502.mjs';
 // land in DIAG all the same, so a build that rewrites the charset writes iray.diag.asm and leaves
 // the tracked iray.asm alone.
 const DIAGEARLY = [];
-import { fitOrb, fitArt } from './fit-orb.mjs';
+import { fitOrb, fitArt, fatBits } from './fit-orb.mjs';
 import { LOADER_RUN } from './loader-src.mjs';
 const DIETEST = process.env.DIETEST === '1';
 if (DIETEST) {                       // defaults only: each is still overridable on its own
@@ -131,6 +131,14 @@ const LEVEL_IDOL = { 4: [21.5, 1.5] };
 // the rest. Applied at boot for the starting level and after every lvlSwap for the one arrived
 // at, so it travels with the level rather than with the slot.
 const LEVEL_PAL = { 4: { ceil: 0x0b, seam: 0x0e } };   // level 4: grey 1 ground, light blue seams
+// ---- a mark in the middle of every solid wall cell, per level ----
+// Drawn as fat bits over the 4x8 multicolor cell and installed at RUNTIME, because it is a
+// property of the LEVEL, not of the charset: falling out of a marked level has to take it away
+// again. SOLID (code 1) only. Occluders and seam cells are deliberately left alone -- an
+// occluder is a foreground-black char whose whole job is to clip sprites, and pair 11 there
+// reads colour RAM, which is $08 (black) everywhere; a seam is a solid cell with a full-height
+// pair-10 column that this symbol's columns would collide with.
+const LEVEL_SYM = { 4: 'sym1.png' };
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -3079,6 +3087,13 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 const PAL_DEF = { ceil: 0x01, wall: 0x00, seam: SEAMCOL };
 const palOf = n => ({ ...PAL_DEF, ...(LEVEL_PAL[n] ?? {}) });
 const PAL_N = Math.max(...CHAIN);              // indexed by level id - 1, so it must reach the highest
+// SOLID is every-column-pair-01 in all eight rows ($55), so a pair-00 mark is just those bit
+// pairs CLEARED -- no pristine copy to keep, and "plain" is eight $55s.
+const symRows = f => [...Array(8)].map((_, r) => {
+  const px = fatBits(f, 4, 8);
+  return [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c] ? (b & ~(3 << (6 - 2 * c))) : b, 0x55);
+});
+const ANYSYM = CHAIN.some(n => LEVEL_SYM[n]);
 // ---- ONE dial: how short a seam is allowed to get before it is not drawn at all ----
 // SEAMPIX is the line's half-height ABOVE the horizon, in pixels. The line is mirrored, and the
 // horizon char row is SHARED rather than doubled, so 8 here is a 16px line in all: one full char
@@ -6790,7 +6805,7 @@ cpChr:  txa
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry. These are the
                                 ; STARTING level's three inks; lvlPal re-applies per level.
-${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
+${ANYSYM ? '        jsr symPut              ; ...and the starting level\'s wall mark, if it has one\n' : ''}${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
         sta hlvOf
@@ -12714,7 +12729,7 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped,
                                 ;   AFTER the swap and BEFORE anything renders the new room.
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 3: runs made, about to objInit\n' : ''}        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
-${TWOLEV ? (() => {
+${ANYSYM ? '        jsr symPut              ; the wall mark of the level just arrived at\n' : ''}${TWOLEV ? (() => {
   // Only the inks some level actually overrides get a table and three instructions; an ink every
   // level agrees on is already correct from boot and costs nothing here. Indexed by level id - 1,
   // and lvlMeT is the level just ARRIVED at because lvGot above has already stored it.
@@ -15722,7 +15737,32 @@ faceChrT: ${chunk(PICS.chars, 32).trim()}
 faceScrT: ${chunk(PICS.maps[0].map, 32).trim()}` : ''}
 ${SOUND ? `${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
 melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
-        * = ${hx16(RELOC)}
+${ANYSYM ? `        * = $7e00
+; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
+; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
+; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
+; mirror, so a baked-in A would render it upside down below the horizon. Writing both charsets
+; explicitly is what gives an above-horizon and a below-horizon glyph, and it costs nothing at
+; all: the two charsets are separate 2K blocks picked by $d018 per raster half, and nothing
+; re-derives B after boot. Both get the mark the same way up.
+symPut: ldx lvlMeT
+        dex
+        lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
+        clc
+        adc #7                  ; walk both halves of symT backwards, row 7 down to 0
+        tax
+        ldy #7
+spLp:   lda symT,x
+        sta ${hx16(CHARSET + 8)},y      ; SOLID is code 1, so its glyph is base + 8
+        sta ${hx16(CHARSET_B + 8)},y
+        dex
+        dey
+        bpl spLp
+        rts
+symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
+        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
+lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
+` : ''}        * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
 f0HiT:  ${chunk(f0Hi).trim()}
