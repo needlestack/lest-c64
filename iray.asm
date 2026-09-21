@@ -269,9 +269,7 @@ pfRow   = $7e44
 pfArm   = $7e43                 ; PROFAT: 0 until the start tick is reached. $7e43 is the spare byte
                                 ;   between pfPrvL and pfRow -- see the hole report, not a guess
 pfDone  = $7e45
-sdbgC   = $a9a0                 ; SEAMDBG only: the column being recorded, the write cursor, and
-sdbgN   = $a9a1                 ;   seven 8-byte records. NOT in the $91c0 gap: a label there
-sdbgB   = $a9a8                 ;   caps holeSeeT at 64 bytes, and LVL=3's sockets need 96.
+
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
@@ -5579,8 +5577,8 @@ opDone:
         sta omEn
         ldy ovar
         lda orbPtrT,y
+        ldy oidx                ; the ENTITY, not the variant
         sta obP,x               ; buffered, not written: see osFlush
-        ldy oidx
         lda orbColT2,y
         sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
         ldy ovar
@@ -8902,6 +8900,7 @@ mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
 orbPtrT: !byte 160,161,162,163,164,165,166,167,168,169,170,160,162,164,166,168,170,171,172,173,174,175,176,178,180,182,184,186,188,176,178,180,182,184,186,188,190,191,192,193,194,195
 orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,177,179,181,183,185,187,189,177,179,181,183,185,187,189,0,0,0,0,0,0
 orbTallT: !byte 0,0,1,1,0
+
 orbHidT: !byte 0,0,0,0,0
 orbHid0T: !byte 0,0,0,0,0   ; the build's hidden flags, for objInit
 orbX0T: !byte 6,20,7,19,0   ; where objInit puts them back on a restart

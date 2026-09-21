@@ -78,8 +78,9 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // playtest it with CHAIN=3 rather than by rotating the chain.
 const CHAIN = (process.env.CHAIN ?? '1,2,3').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-if (![1, 2, 3].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 3`);
+if (![1, 2, 3, 4].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 4`);
 const SOCKROOM = LVL === 2;
+const IDOLROOM = LVL === 4;             // the level with an idol in it
 const CHAMBER = LVL === 3;              // the chamber level: corners like the old arenas, plus sockets
 const L1_MAP = [
   "#######################",
@@ -109,6 +110,9 @@ const L1_MAP = [
 // see WALLS_ALL, which flattens them into one global id space.
 const LEVEL_WALLS = {
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
+  4: { walls: [[[11, 2]],                                     // S1 (11,3): up to the exit
+              [[20, 9]]],                                     // S2 (19,9): into the idol's column
+       sockWall: [0, 1] },
   3: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
               [[11, 10], [12, 10], [10, 11], [10, 12]]],        // S2 (7,7): the exit's corner
        sockWall: [0, 1] },
@@ -116,6 +120,11 @@ const LEVEL_WALLS = {
 // Any level's map by number, for the few places that need a level OTHER than the live one --
 // a wall's cell ids are in its own level's width, which need not be the live one's.
 const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : L1_MAP;
+// Which levels carry an IDOL, and where. Declared up here with the other level facts because
+// the sprite ladder is built long before ORBS exists, and a ladder nothing uses is 1K of bank 3
+// -- which bank 3 does not have. Levels 1-3 are unaffected by the idol existing at all.
+const LEVEL_IDOL = { 4: [21.5, 1.5] };
+const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
 const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
@@ -145,6 +154,27 @@ const L3_MAP = [
   "#.........#..#",
   "##############",
 ];
+// LEVEL 4, the user's layout of 2026-09-21: 23 x 11 = 253, the first level with an IDOL in it.
+// A long west hall, a comb of north-south slots down the east side, and two socket/wall pairs
+// that gate the only two things worth reaching: S1 (11,3) opens (11,2) to the exit above it, and
+// S2 (19,9) opens (20,9) into the dead-end column that holds the idol. Two orbs, one angel, and
+// one orb short of opening both -- which is the level.
+const L4_MAP = [
+  "#######################",
+  "#........O#X#...#...#I#",
+  "#.#########|#.#.#.#.#.#",
+  "#.........#S#.#.#.#.#.#",
+  "#.............#.#.#.#.#",
+  "#.........#.#.#.#.#.#.#",
+  "#############.#.#.#.#.#",
+  "#......###....#.O.#.#.#",
+  "#P....A....########.#.#",
+  "#......###.........S|.#",
+  "#######################",
+// '|' is a removable wall and is SOLID in the base map -- punchWalls is what takes it out, and
+// with it left as floor the wall delta diffed two identical maps and removed nothing. Every
+// other marker (orb, idol, exit, socket, player, angel) stands on open floor.
+].map(r => r.replace(/\|/g, '#').replace(/[OXISPA]/g, '.'));
 const SOCK_MAP = (() => {
   const rows = [
     "################",
@@ -306,7 +336,7 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 // The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
 // grid; the old 16 x 16 literals and the ring's are gone.
 const M = (SOCKROOM ? SOCK_MAP : CHAMBER ? punchWalls(L3_MAP, LEVEL_WALLS[3].walls)
-         : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
+         : LVL === 4 ? punchWalls(L4_MAP, LEVEL_WALLS[4].walls) : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
 // free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
@@ -2808,7 +2838,7 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', SOCKROOM ? 0x1a : CHAMBER ? 0x20 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
+const PA = hexArg('PA', SOCKROOM ? 0x1a : CHAMBER ? 0x20 : IDOLROOM ? 0x00 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
                                                                     // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
                                                                     //   room's far wall and the corridor mouth
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
@@ -2831,8 +2861,8 @@ const PAF = hexArg('PAF', SOCKROOM || CHAMBER ? 0x00 : 0xc0, 0xff);
 // then simply walked back and finished the level without it ever mattering again. Starting
 // opposite, with the angel ON the door, means every route to the goal has the angel somewhere
 // along it, and the tie means it has no preferred arc until the player picks one.
-const PX = hexArg('PX', CHAMBER ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3-5
-const PY = hexArg('PY', CHAMBER ? 0x0180 : 0x0280, 0xffff);
+const PX = hexArg('PX', CHAMBER ? 0x0180 : IDOLROOM ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3-5
+const PY = hexArg('PY', CHAMBER ? 0x0180 : IDOLROOM ? 0x0880 : 0x0280, 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
@@ -3704,6 +3734,59 @@ for (const r of ANGLAD) {
   ORBWIDE.push(angW(r.h) * (r.exp ? 4 : 2));
   ORBTALL.push(r.h * (r.exp ? 2 : 1));
 }
+// ---- THE IDOL: the orb's ladder exactly, a different bitmap at every rung ----
+// goat-art.json is a finished 12x21 multicolor sprite -- drawn in GMC64's spritemaker, not
+// fitted from a render -- so the values ARE the VIC bit pairs and nothing has to be quantised.
+// Resampled by the same majority-of-16 vote the orb uses, over the goat's own content box.
+//
+// IT ADDS NO RUNGS. Both content boxes fill the whole 12x21 frame, so idolW and orbW are the
+// same function and the two ladders are geometrically identical -- same widths, same heights,
+// same expand flags. Everything a rung carries (width, height, offsets, anchor, expand) is
+// therefore already right; the ONLY thing that differs is which bitmap it points at. So the
+// idol is one per-entity byte added to orbPtrT at the point of use, and NOT 22 more entries in
+// each of the nine ovar-indexed tables -- which was the first attempt, and cost 198 bytes of
+// image the block it lives in did not have.
+const GOAT = JSON.parse(readFileSync('./goat-art.json', 'utf8')).rows
+  .map(r => [...r].map(Number));
+const _gc = [...Array(12).keys()].filter(x => GOAT.some(r => r[x]));
+const _gr = [...Array(21).keys()].filter(y => GOAT[y].some(v => v));
+const GX0 = Math.min(..._gc), GY0 = Math.min(..._gr);
+const GW = Math.max(..._gc) - GX0 + 1, GH = Math.max(..._gr) - GY0 + 1;
+function idolScale(w, h) {
+  const out = [...Array(21)].map(() => new Array(12).fill(0));
+  const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, standing on the floor
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
+    const t = [0, 0, 0, 0];
+    for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
+      const sx = Math.floor(GX0 + GW * (dx + (i + 0.5) / ORBSAMP) / w);
+      const sy = Math.floor(GY0 + GH * (dy + (j + 0.5) / ORBSAMP) / h);
+      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[GOAT[sy][sx]]++;
+    }
+    let bn = -1, v = 0;
+    for (let k = 0; k < 4; k++) if (t[k] >= bn) { bn = t[k]; v = k; }
+    out[oy + dy][ox + dx] = v;
+  }
+  return out;
+}
+const idolW = h => Math.max(1, Math.round(GW * h / GH));
+// The idol's bitmaps sit in ORBBM in the SAME ORDER as the orb's, so one constant added to an
+// orb pointer lands on the matching idol bitmap. That constant is IDOLBM0.
+const IDOLBM0 = ORBBM.length;
+if (HAS_IDOL) {
+  if (ORBBMH.some(h => idolW(h) !== orbW(h))) throw new Error(
+    `the idol's widths differ from the orb's, so they are no longer the same ladder and the ` +
+    `single-constant pointer offset is wrong -- give the idol its own rungs, or its own art box`);
+  for (const h of ORBBMH) {
+    const g = idolScale(idolW(h), h), bytes = [];
+    for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
+      bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
+    bytes.push(0);
+    ORBBM.push(bytes);
+  }
+  console.error(`  idol ladder: ${ORBBMH.length} bitmaps at ${IDOLBM0}, sharing the orb's ` +
+                `${ANG_V0} rungs (+${ORBBMH.length * 64} bytes of sprite, 0 of image)`);
+}
+
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
 NORBBM = ORBBM.length;
@@ -3797,6 +3880,14 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 12.5, y: 9.5, c: 0 });
     ORBS.push({ x: 9.5, y: 12.5, c: 0 });
   }
+  else if (IDOLROOM) {                         // level 4: two orbs for two sockets, and the idol
+    ORBS.push({ x: 9.5, y: 1.5, c: 0 });       //   in the hall's north wall
+    ORBS.push({ x: 16.5, y: 7.5, c: 0 });      //   in the comb
+    // The IDOL is luggage like an orb -- carried, dropped, and a real obstacle where it stands.
+    // What it is NOT is a key: hlAt still finds the socket under it and okPlain still puts it
+    // down, but nothing seats. Everything else it does, it does because it is an orb.
+    ORBS.push({ x: LEVEL_IDOL[4][0], y: LEVEL_IDOL[4][1], c: 0, idol: true });
+  }
   else {                                         // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
@@ -3818,6 +3909,7 @@ if (process.env.ORBSCATTER) {
   // from the other levels' is exactly what nOrbT was made swappable for.
   if (process.env.ANGEL !== '0') {
     if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
+    else if (IDOLROOM) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // level 4: in the hall
     else if (CHAMBER) {                           // level 3: one in each far corner, and one
       ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });   //   caged in the chamber
       ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
@@ -3931,7 +4023,7 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12] : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12] : IDOLROOM ? [11, 1] : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
@@ -3949,7 +4041,8 @@ const HOLES_AT = HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0
 // the placeholder in would have quietly put two sockets into the ring level. A level declares
 // sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
 // level keeps its own.
-const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '5,5;7,7' : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '5,5;7,7'
+                    : IDOLROOM ? '11,3;19,9' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -4099,7 +4192,7 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 
 const LANDS_AT = process.env.LAND
   ? [process.env.LAND.split(',').map(Number)]
-  : CHAMBER ? [[1, 1]] : [[2, 2]];
+  : CHAMBER ? [[1, 1]] : IDOLROOM ? [[1, 8]] : [[2, 2]];
 // ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
 // on both of these lands you nose-against a wall half a cell away: the whole screen goes black
 // and it reads as a broken render rather than as a wall. One byte, and it travels with the level
@@ -4107,7 +4200,7 @@ const LANDS_AT = process.env.LAND
 //   level 1 (2,2): $19, back into the room, the same heading the level opens on
 //   level 2 (2,2): $1a, looking at the socket doorway
 //   level 3 (1,1): $20, the one heading with BOTH the socket and the far-corner hole in view
-const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : CHAMBER ? 0x20 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
+const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : CHAMBER ? 0x20 : IDOLROOM ? 0x00 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
                                                  //   the OTHER hole and nowhere near this one,
                                                  //   so only one is ever in the same region
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
@@ -4258,6 +4351,11 @@ const orbVarT = [...Array(256)].map((_, h) => {
 const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
 const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
 const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
+// Which BITMAP an entity draws with, as an offset added to the orb's pointer at the rung it is
+// already using. 0 is the orb's own art. Not folded into orbTallT: that one means "is an angel"
+// and is read as a boolean in five other places (luggage, pathing, the BFS early-out), where a
+// third value would quietly make the idol an angel.
+const orbArtT = ORBS.map(o => o.idol ? IDOLBM0 : 0);
 // Where the carried orb sits. Expanded both ways it is 48 hires pixels wide, so X centres it on
 // the 320-wide display whose left edge is sprite X 24: 24 + 160 - 24. Y is chosen so the ball
 // clears the bottom of the screen and the ground shadow underneath it does not -- the sprite is
@@ -4555,6 +4653,10 @@ if (orbXOffT.some(v => v < 0 || v > 12))
 // orbXOffT). While X was a hires quantity that got its low bit snapped off at the end, the box
 // had to round outward to cover the half column the snap could take.
 const orbBoxT = LADDER.map((r, v) => {
+  // The ANGEL's width does not match orbW is round(12h/42), half of orbW at the same bitmap height, so its
+  // box has been computed from the orb's function all along -- at h=42 that asks for 24 columns
+  // of a 12-column sprite. Left alone deliberately: correcting it moves where the angel's
+  // occluder stamp lands, which is a rendering change and wants verification of its own.
   const w = orbW(r.h), ox = (12 - w) >> 1, xx = r.exp ? 2 : 1;
   const left = ox * xx, wide = w * xx;                   // logical columns, from the sprite's left
   return { l: orbHalfCT[v] - left, r: left + wide - 1 - orbHalfCT[v] };
@@ -4566,8 +4668,14 @@ const orbColLT = orbBoxT.map(b => b.l);          // columns from ocol to the bal
 // writes cells that are already fully wall, and the occluder is black on black there. It is
 // UNDER-covering that shows, which is the bug this whole table exists to fix.
 const orbColRT = orbBoxT.map(b => Math.max(0, b.r));
-if (orbBoxT.filter(b => b.r < 0).length > 1)
-  throw new Error('more than the smallest rung has a negative right offset -- the ladder changed');
+// A negative right offset is only ever legitimate on a ONE-COLUMN rung, which sits entirely
+// left of ocol. On anything wider it means the box and the sprite have come apart.
+{
+  const bad = orbBoxT.map((b, v) => [b, v]).filter(([b, v]) => b.r < 0 && orbW(LADDER[v].h) > 1);
+  if (bad.length) throw new Error(
+    `${bad.length} rung(s) wider than one column have a negative right offset ` +
+    `(variants ${bad.map(([, v]) => v).join(',')}) -- the ladder and orbBoxT disagree`);
+}
 if (process.env.ORBBOX === '1')
   orbBoxT.forEach((b, v) => console.error(`  raw rung ${v+1}: l=${b.l} r=${b.r}`));
 if (process.env.ORBBOX === '1')
@@ -5286,7 +5394,10 @@ fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, SCR_A
 // separate job and this build is a look at the SEQUENCE, not the final layout.
 const PICSEG = DIE && NPIC > 1 ? PICS.maps.slice(1).flatMap(m => m.map) : [];
 if (PICSEG.length) {
-  const room = LVLSHADOW - SEATBASE;     // up to the level shadow, the next tenant of bank 3's tail
+  // Up to the level shadow -- or, with no shadow to collide with, up to doomT, the lowest CPU
+  // squatter in bank 3's tail. A standalone build was being held to the chain's budget and
+  // refusing a picture it had 1.5K of room for.
+  const room = (TWOLEV ? LVLSHADOW : 0xfb00) - SEATBASE;
   if (PICSEG.length > room) throw new Error(
     `IPIC is ${PICSEG.length} bytes but only ${room} are free between $${SEATBASE.toString(16)} ` +
     `and the level shadow at $${LVLSHADOW.toString(16)} -- ${NPIC} pictures do not fit`);
@@ -5466,6 +5577,10 @@ const LVL_TABLES = [
     return i < sw.length ? WALL_BASE[LVL] + sw[i] : 0xff;
   })],
   ['orbTallT', pad(orbTallT, NORB)],
+  // Only where a resident level has an idol. Everything about the idol is gated the same way:
+  // the table, its three uses, and the 17 bytes of code they cost. A chain with no idol in it
+  // emits none of this -- which matters, because that chain has TWO bytes of headroom.
+  ...(HAS_IDOL ? [['orbArtT', pad(orbArtT, NORB)]] : []),
   // Per-entity body colour, and it TRAVELS. It was emitted once from the LIVE level and padded
   // to NORB with 0 -- so on a level with more entities than the live one, every slot past the
   // live level's count read 0 and drew BLACK. Level 1 is live with 4 entities, level 3 has 5,
@@ -6034,9 +6149,12 @@ pfRow   = $7e44
 pfArm   = $7e43                 ; PROFAT: 0 until the start tick is reached. $7e43 is the spare byte
                                 ;   between pfPrvL and pfRow -- see the hole report, not a guess
 pfDone  = $7e45
-sdbgC   = $a9a0                 ; SEAMDBG only: the column being recorded, the write cursor, and
+${SEAMDBG ? `sdbgC   = $a9a0                 ; SEAMDBG only: the column being recorded, the write cursor, and
 sdbgN   = $a9a1                 ;   seven 8-byte records. NOT in the $91c0 gap: a label there
 sdbgB   = $a9a8                 ;   caps holeSeeT at 64 bytes, and LVL=3's sockets need 96.
+                                ; GATED, because an equate is a RESERVATION: ungated these three
+                                ; held the whole of $a900-$a9ff out of the free map in every
+                                ; shipping build, for a diagnostic that was switched off.` : ''}
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
 ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they were seen from ----
@@ -10905,7 +11023,10 @@ ${DIE ? `        ldx dieSt               ; ...but not once the scene has started
         lda orbColT2,x
         sta obC                 ; the orb's OWN body colour, not the icon's fixed grey
         lda #${hx(orbPtrT[0])}
-        sta obP
+${HAS_IDOL ? `        clc                     ; what you are CARRYING is drawn with its own art too. X is
+        adc orbArtT,x           ;   still the entity index from the dex above; without this the
+                                ;   idol was held in front of you as an orb.
+` : ''}        sta obP
         lda #${hx(ORB_HOLD_X)}
         sta obX
         lda #${hx(ORB_HOLD_Y)}
@@ -12246,8 +12367,11 @@ ovW2:   sec
         sta omEn
         ldy ovar
         lda orbPtrT,y
-        sta obP,x               ; buffered, not written: see osFlush
-        ldy oidx
+        ldy oidx                ; the ENTITY, not the variant
+${HAS_IDOL ? `        clc                     ; 0 for an orb; the idol's bitmap base for the idol. The two
+        adc orbArtT,y           ;   ladders are geometrically identical, so the idol borrows the
+                                ;   orb's rung wholesale and swaps only the picture.
+` : ''}        sta obP,x               ; buffered, not written: see osFlush
         lda orbColT2,y
         sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
         ldy ovar
@@ -14076,7 +14200,11 @@ orbPut: jsr dropPick            ; ---- put down ----
         jsr hlAt                ; a socket? then it goes IN rather than on the floor
         cpy #$ff
         beq okPlain
-        lda hlSeat,y
+${HAS_IDOL ? `        ldx carry               ; ...unless what you are holding is not an ORB. The idol is
+        dex                     ;   luggage, not a key: it can be set down on a socket and picked
+        lda orbArtT,x           ;   straight back up, and nothing seats. orbArtT is 0 exactly for
+        bne okPlain             ;   the orb's own art, so "draws as an orb" IS "acts as a key".
+` : ''}        lda hlSeat,y
         bmi okDone              ; already used: bit 7 now means CONSUMED, and it is one-way
         ; ---- ONE WAY. The orb and the socket both leave the world. ----
         ; They used to seat: the orb stayed orbHidT and drew as a half-ball sitting in the dish,
@@ -15421,6 +15549,7 @@ mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbPtrU: !byte ${orbPtrU.join(',')}
 orbTallT: !byte ${LVLT('orbTallT').join(',')}
+${HAS_IDOL ? `orbArtT: !byte ${LVLT('orbArtT').map(hx).join(',')}   ; bitmap offset per entity; 0 = the orb's art` : ''}
 orbHidT: !byte ${pad(orbHidT, NORB).join(',')}
 orbHid0T: !byte ${LVLT('orbHid0T').join(',')}   ; the build's hidden flags, for objInit
 orbX0T: !byte ${LVLT('orbX0T').join(',')}   ; where objInit puts them back on a restart
