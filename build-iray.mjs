@@ -138,7 +138,8 @@ const LEVEL_PAL = { 4: { ceil: 0x0b, seam: 0x0e } };   // level 4: grey 1 ground
 // occluder is a foreground-black char whose whole job is to clip sprites, and pair 11 there
 // reads colour RAM, which is $08 (black) everywhere; a seam is a solid cell with a full-height
 // pair-10 column that this symbol's columns would collide with.
-const LEVEL_SYM = { 4: 'sym2.png' };
+// A single dot, as [column, row] in the 4x8 cell -- or a .png read as fat bits.
+const LEVEL_SYM = { 4: [[1, 3]] };
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -2140,6 +2141,14 @@ const OCCSYN = process.env.OCCSYN !== '0';
 const OCCSYN_N = +(process.env.OCCSYNN ?? 6);
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
+// ---- the fall's BLACK, which is not SOLID ----
+// The drop fills the hole below the rim, and the landing fills above it, with a black cell --
+// and that used to be SOLID, the very char the mark is stamped into, so the mark rained down
+// the inside of the hole all the way. OCC_FULL is already all-pair-11 and pair 11 reads colour
+// RAM, which is $08 = black everywhere: the same black, a char symPut never touches. Its
+// foreground priority is moot here because the fall clears every sprite on the frame it starts
+// (they belong to the level being left). So a plain black char cost no new code at all.
+const VOIDCH = OCC_FULL;
 // The synthesis scratch codes are the LAST OCCSYN_N of the charset. They must be free: the plan
 // was refit at KCELL=201 to free six (3.416 -> 3.438 wrong px/frame on the 2M scan, crossfit).
 const SYN0 = 256 - OCCSYN_N;
@@ -3089,10 +3098,12 @@ const palOf = n => ({ ...PAL_DEF, ...(LEVEL_PAL[n] ?? {}) });
 const PAL_N = Math.max(...CHAIN);              // indexed by level id - 1, so it must reach the highest
 // SOLID is every-column-pair-01 in all eight rows ($55), so a pair-00 mark is just those bit
 // pairs CLEARED -- no pristine copy to keep, and "plain" is eight $55s.
-const symRows = f => [...Array(8)].map((_, r) => {
-  const px = fatBits(f, 4, 8);
-  return [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c] ? (b & ~(3 << (6 - 2 * c))) : b, 0x55);
-});
+const symRows = art => {
+  const px = typeof art === 'string' ? fatBits(art, 4, 8)
+           : [...Array(32)].map((_, i) => art.some(([c, r]) => r * 4 + c === i));
+  return [...Array(8)].map((_, r) =>
+    [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c] ? (b & ~(3 << (6 - 2 * c))) : b, 0x55));
+};
 const ANYSYM = CHAIN.some(n => LEVEL_SYM[n]);
 // ---- ONE dial: how short a seam is allowed to get before it is not drawn at all ----
 // SEAMPIX is the line's half-height ABOVE the horizon, in pixels. The line is mirrored, and the
@@ -3866,11 +3877,8 @@ const ORBANCH = ORBEXP.map(e => e ? 42 : 21);   // row pitch: one sprite height
 // The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
 // and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
 // ORBPAL=colour brings back light blue / light red / light green bodies.
-// ...and one step DARKER than the scene's own greys, 2026-09-21: grey 1 -> black, grey 2 ->
-// grey 1, grey 3 -> grey 2. Applies to orbs, angels and the idol alike -- every entity's colour
-// is an index into ORBBODY, so there is one palette here and not one per kind.
-const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [11, 11, 11];
-const ORBUNDER = 0, ORBHILITE = 12;              // shared: $d025 underside, $d026 highlight
+const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
+const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
 
 // Placement. Greedy over the open cells with a minimum spacing, which spreads them through
 // every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
@@ -12945,10 +12953,10 @@ fallDraw:
 ${FALLSCENE ? `        jsr fdWarp              ; the room, slid up. No shear -- see fRowT.
 ` : ''}
         ldx #${hx(BLANK)}       ; drop: floor above, hole below
-        ldy #${hx(SOLID)}
+        ldy #${hx(VOIDCH)}
         lda arcInv
         beq fdPol
-        ldx #${hx(SOLID)}       ; landing: the other way round, and charset B has already been
+        ldx #${hx(VOIDCH)}      ; landing: the other way round, and charset B has already been
         ldy #${hx(BLANK)}       ;   selected to give the rim glyph the matching polarity
 fdPol:  stx fdCol
         sty arcBlw              ; arcBand fills below its glyph with this
@@ -13031,7 +13039,7 @@ fdTail:
         jsr arcPrep
         lda #${hx(BLANK)}
         sta fdCol
-        lda #${hx(SOLID)}
+        lda #${hx(VOIDCH)}
         sta arcBlw
         lda #$00
         sta fdD

@@ -760,11 +760,11 @@ cpChr:  txa
         lda #$ff
         sta $d01c               ; ALL eight in multicolor: orbMove hands out slots as it finds
                                 ; visible orbs, so any of them can be in use
-        lda #$00
-        sta $d025               ; sprite bit pair 01 = the shaded underside
-        lda #$0c
-        sta $d026               ; sprite bit pair 11 = highlight and ground shadow
         lda #$0b
+        sta $d025               ; sprite bit pair 01 = the shaded underside
+        lda #$0f
+        sta $d026               ; sprite bit pair 11 = highlight and ground shadow
+        lda #$0c
         sta $d027               ; sprite bit pair 10 = the body. Per-sprite, so osFlush rewrites
                                 ; it; this is only the first frame's value.
                                 ;
@@ -6027,10 +6027,10 @@ fallDraw:
         jsr fdWarp              ; the room, slid up. No shear -- see fRowT.
 
         ldx #$00       ; drop: floor above, hole below
-        ldy #$01
+        ldy #$f0
         lda arcInv
         beq fdPol
-        ldx #$01       ; landing: the other way round, and charset B has already been
+        ldx #$f0      ; landing: the other way round, and charset B has already been
         ldy #$00       ;   selected to give the rim glyph the matching polarity
 fdPol:  stx fdCol
         sty arcBlw              ; arcBand fills below its glyph with this
@@ -6112,7 +6112,7 @@ fdTail:
         jsr arcPrep
         lda #$00
         sta fdCol
-        lda #$01
+        lda #$f0
         sta arcBlw
         lda #$00
         sta fdD
@@ -7979,7 +7979,7 @@ orbOccHiT: !byte 112,112,112,112,112,112,112,112,112
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 orbXCT: !byte 6,20,7,19,15,0,0,0,0      ; from the MANIFEST, so its length cannot
 orbYCT: !byte 5,5,5,5,5,0,0,0,0      ;   disagree with what the swap moves
-orbColT2: !byte 11,11,11,11,0   ; from the MANIFEST and SWAPPED: a level with
+orbColT2: !byte 12,12,12,12,0   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -9106,7 +9106,7 @@ spLp:   lda symT,x
         bpl spLp
         rts
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
-        !byte $55,$55,$55,$11,$45,$55,$55,$55
+        !byte $55,$55,$55,$45,$55,$55,$55,$55
 lvlSymT: !byte 0,0,0,8
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
@@ -11564,7 +11564,7 @@ dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slo
                                 ;   shared, so an orb cannot dim while the angel stays lit
 dgA2:   dex
         bpl dgA
-dgAD:   lda #$0b  ; the orb, by contrast, fades out with everything else
+dgAD:   lda #$0c  ; the orb, by contrast, fades out with everything else
         sta dieInk
         inc dieN                ; how many pictures this death earns; dshEnd resets it after the
         lda #$01                ;   last one, so the sequence starts over rather than running out
