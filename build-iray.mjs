@@ -124,6 +124,13 @@ const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : L1_MAP;
 // the sprite ladder is built long before ORBS exists, and a ladder nothing uses is 1K of bank 3
 // -- which bank 3 does not have. Levels 1-3 are unaffected by the idol existing at all.
 const LEVEL_IDOL = { 4: [21.5, 1.5] };
+// ---- a level's whole LOOK is three bytes ----
+// The three inks each own a register (00 = $d021 ceiling and floor, 01 = $d022 walls,
+// 10 = $d023 seams -- see the charset note), which is precisely so a level can be re-toned
+// without touching a single charset entry. Only the overrides are listed; PAL_DEF below fills
+// the rest. Applied at boot for the starting level and after every lvlSwap for the one arrived
+// at, so it travels with the level rather than with the slot.
+const LEVEL_PAL = { 4: { ceil: 0x0b, seam: 0x0e } };   // level 4: grey 1 ground, light blue seams
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -3068,6 +3075,10 @@ const EDGCHK = flag('EDGCHK');
 // PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
 const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
+// white ground, black walls, SEAMCOL seams -- what every level had before LEVEL_PAL existed.
+const PAL_DEF = { ceil: 0x01, wall: 0x00, seam: SEAMCOL };
+const palOf = n => ({ ...PAL_DEF, ...(LEVEL_PAL[n] ?? {}) });
+const PAL_N = Math.max(...CHAIN);              // indexed by level id - 1, so it must reach the highest
 // ---- ONE dial: how short a seam is allowed to get before it is not drawn at all ----
 // SEAMPIX is the line's half-height ABOVE the horizon, in pixels. The line is mirrored, and the
 // horizon char row is SHARED rather than doubled, so 8 here is a 16px line in all: one full char
@@ -6768,16 +6779,17 @@ cpChr:  txa
         sta $d018
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
-        lda #$01
+        lda #${hx(palOf(LVL).ceil)}
         sta colW
         sta $d021               ; 00 = ceiling and floor
-        lda #$00
+        lda #${hx(palOf(LVL).wall)}
         sta colB
         sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured)
-        lda #${hx(SEAMCOL)}
+        lda #${hx(palOf(LVL).seam)}
         sta colS
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
-                                ; be retuned without touching a charset entry.
+                                ; be retuned without touching a charset entry. These are the
+                                ; STARTING level's three inks; lvlPal re-applies per level.
 ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -12702,6 +12714,18 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped,
                                 ;   AFTER the swap and BEFORE anything renders the new room.
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 3: runs made, about to objInit\n' : ''}        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
+${TWOLEV ? (() => {
+  // Only the inks some level actually overrides get a table and three instructions; an ink every
+  // level agrees on is already correct from boot and costs nothing here. Indexed by level id - 1,
+  // and lvlMeT is the level just ARRIVED at because lvGot above has already stored it.
+  const REG = { ceil: ['colW', '$d021'], wall: ['colB', '$d022'], seam: ['colS', '$d023'] };
+  const vary = Object.keys(REG).filter(k =>
+    CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]));
+  if (!vary.length) return '';
+  return `        ldx lvlMeT              ; ---- this level's inks ----\n        dex\n` +
+    vary.map(k => `        lda lvlPal${k}T,x\n        sta ${REG[k][0]}\n        sta ${REG[k][1]}\n`).join('') +
+    vary.map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}\n`).join('');
+})() : ''}
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}lvlEnd:
 ` : ''}        ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The

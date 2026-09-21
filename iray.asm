@@ -746,7 +746,8 @@ cpChr:  txa
         lda #$0b
         sta colS
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
-                                ; be retuned without touching a charset entry.
+                                ; be retuned without touching a charset entry. These are the
+                                ; STARTING level's three inks; lvlPal re-applies per level.
         ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -5813,6 +5814,7 @@ lvGot:  ldy lvlMeT              ;   a swap against X = $ff
                                 ;   AFTER the swap and BEFORE anything renders the new room.
         jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
+
 lvlEnd:
         ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
