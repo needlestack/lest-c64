@@ -6127,13 +6127,22 @@ cqCol   = $8180                 ; NOT double buffered, so an inline write repain
                                 ; ungated these held 144 bytes of $80f1-$8180 -- and two bytes
                                 ; of ZERO PAGE -- out of the free map in every PLAN=3 build,
                                 ; for a flush that PLAN=3 does not emit at all.` : ''}
-pfFD    = $7cfd                  ; PROFMAX: raster frames the last rendered frame spanned
-pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raster frames
-mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
-mxHi    = $7cfb
-mxStep  = $7cfc                  ;   ...and the tour step it happened in
-mulWY   = $7cfe                  ; mulW saves Y here
-ssCE    = $7cff                  ; SEAMPRE: the span's last char cell
+${PROFMAX ? `pfFD    = $7e3e                 ; PROFMAX: raster frames the last rendered frame spanned
+pfHist  = $7e33                 ;   8 bytes: how many frames spanned 0..7 raster frames
+mxLo    = $7e3b                 ; PROFMAX: worst whole-frame delta, in raster lines
+mxHi    = $7e3c
+mxStep  = $7e3d                 ;   ...and the tour step it happened in
+` : ''}${SEAMPRE ? `ssCE    = $7e5a                 ; SEAMPRE: the span's last char cell
+` : ''}; bfsLast and mulWY were the ONLY live equates on page $7c00 -- everything else there is the
+; PROFMAX/SEAMPRE/SEAMCNT clusters, now gated above. The hole report reserves a whole PAGE per
+; squatter, so these two bytes were holding 256 out of the free map, and deleting the dead
+; equates around them would have freed NOTHING while they stayed. Parked beside obKeyT on
+; page $7c00's 24-byte tail, and the PROFILE/PROFMAX/SEAMCNT/SEAMPRE clusters take page $7e00
+; in exchange -- gated, so only their own builds reserve it. That trades 24 bytes for 256.
+; (Not $70xx: that is orbOccT's emitted range, which grows with the level's run count -- the
+; overlap guard caught exactly that.)
+bfsLast = $7ce8                 ; frameCnt when the fill last ran; see bfsExp
+mulWY   = $7ce9                 ; mulW saves Y here
 ${CULLCNT ? `culTot  = $70d0                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
 dbgRun  = $70a4                 ; CULLCNT: per entity, the run that let it show through
 dbgCol  = $70ac
@@ -6142,11 +6151,11 @@ culTAcc = $70d4
 culPAcc = $70d6
 culTMn  = $70d8
 culPMn  = $70d9` : ''}
-ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
-ssWid   = $7cf2                  ;   ...wide enough to hold a seam
-ssNear  = $7cf4                  ;   ...near enough for one to read
-ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
-${SEAMCNT ? `ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
+${SEAMCNT ? `ssEnt   = $7e50                 ; SEAMCNT: spans offered to seamSpan
+ssWid   = $7e52                 ;   ...wide enough to hold a seam
+ssNear  = $7e54                 ;   ...near enough for one to read
+ssCalc  = $7e56                 ;   ...cells differ, so calcU runs (TWICE per span)
+` : ''}${SEAMCNT ? `ssNCnt  = $70b0                  ; SEAMCNT: seamOne CALLS -- one per cell boundary walked
 ssTaken = $70b2                  ;   ...of which the char cell was already spoken for
 ssPwN   = $70b4                  ; SEAMCNT: ssPw calls, and how many ENDED the walk -- the two
 ssPwX   = $70b6                  ;   numbers that say whether the panel test is earning its place
@@ -6158,7 +6167,7 @@ sdColN  = $70ba                  ; SEAMCNT: COLUMNS that took the seam draw path
                                 ;   such column costs, and neither half was ever counted -- the
                                 ;   pass's own counters stop at seamOne, which is a different unit
                                 ;   (a seam) from the one renderSym is billed in (a column).
-` : ''}ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
+` : ''}${SEAMCNT ? `ssDraw  = $7e58                 ;   ...and a boundary really is crossed` : ''}
 ${PROFN ? `pfNum   = $70c4                 ; PROFN: 17 phases x 2 bytes, times each bucket was closed.
                                 ;   In the SEAMCNT/FRAMELOG scratch run at $70b0; $7100 up is the
                                 ;   frame log's.
@@ -6177,7 +6186,7 @@ mcHint  = $70f4                 ;   hints offered per frame, summed
 ` : ''}${process.env.FALLMARK ? `fallMk  = $70fc                 ; FALLMARK: how far the fall's level change got\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
-` : ''}pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
+` : ''}${PROFILE ? `pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e42
 pfCurH  = $7e46                 ; ninth raster bit, current and previous
@@ -6198,7 +6207,7 @@ pfRow   = $7e44
 pfArm   = $7e43                 ; PROFAT: 0 until the start tick is reached. $7e43 is the spare byte
                                 ;   between pfPrvL and pfRow -- see the hole report, not a guess
 pfDone  = $7e45
-${SEAMDBG ? `sdbgC   = $a9a0                 ; SEAMDBG only: the column being recorded, the write cursor, and
+` : ''}${SEAMDBG ? `sdbgC   = $a9a0                 ; SEAMDBG only: the column being recorded, the write cursor, and
 sdbgN   = $a9a1                 ;   seven 8-byte records. NOT in the $91c0 gap: a label there
 sdbgB   = $a9a8                 ;   caps holeSeeT at 64 bytes, and LVL=3's sockets need 96.
                                 ; GATED, because an equate is a RESERVATION: ungated these three
@@ -6451,7 +6460,6 @@ bfsTail = $85ef
 bfsC    = $8559
 bfsND   = $855a
 bfsN    = $855b
-bfsLast = $7ce8                  ; frameCnt when the fill last ran; see bfsExp
 hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
 hlKind  = $85dd                  ; which ladder holeTail is currently patched for
 hoI     = $85de                  ; holeOne's loop: which hole-like entity, and its
@@ -6474,9 +6482,9 @@ doomT   = $fb00                  ; per cell: 1 while it belongs to a wall mid-co
                                  ;   matches the columns showing the doomed group through it, so a
                                  ;   group can be any shape. Written only by wtCells, in bank 3
                                  ;   because it must be a whole clear page and the image has none.
-obKT    = $7e50                  ; obOrder: the smallest key so far, its entity, and the keys
-obKI    = $7e51
-obKeyT  = $7e52                  ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
+obKT    = $7cea                 ; obOrder: the smallest key so far, its entity, and the keys
+obKI    = $7ceb
+obKeyT  = $7cec                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
 bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. It lived in the image until
                                  ;   level 3's 196 open cells (2026-09-18); no image hole holds a

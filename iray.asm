@@ -230,40 +230,18 @@ cqtmp   = $80f2                 ; the colour this cell needs, while both its row
 cmtmp   = $80f4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
 cmv     = $80f5                 ; the ninth index bit -- the two columns the bucket throws away
 
-pfFD    = $7cfd                  ; PROFMAX: raster frames the last rendered frame spanned
-pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raster frames
-mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
-mxHi    = $7cfb
-mxStep  = $7cfc                  ;   ...and the tour step it happened in
-mulWY   = $7cfe                  ; mulW saves Y here
-ssCE    = $7cff                  ; SEAMPRE: the span's last char cell
+; bfsLast and mulWY were the ONLY live equates on page $7c00 -- everything else there is the
+; PROFMAX/SEAMPRE/SEAMCNT clusters, now gated above. The hole report reserves a whole PAGE per
+; squatter, so these two bytes were holding 256 out of the free map, and deleting the dead
+; equates around them would have freed NOTHING while they stayed. Parked beside obKeyT on
+; page $7c00's 24-byte tail, and the PROFILE/PROFMAX/SEAMCNT/SEAMPRE clusters take page $7e00
+; in exchange -- gated, so only their own builds reserve it. That trades 24 bytes for 256.
+; (Not $70xx: that is orbOccT's emitted range, which grows with the level's run count -- the
+; overlap guard caught exactly that.)
+bfsLast = $7ce8                 ; frameCnt when the fill last ran; see bfsExp
+mulWY   = $7ce9                 ; mulW saves Y here
 
-ssEnt   = $7cf0                  ; SEAMCNT: spans offered to seamSpan
-ssWid   = $7cf2                  ;   ...wide enough to hold a seam
-ssNear  = $7cf4                  ;   ...near enough for one to read
-ssCalc  = $7cf6                  ;   ...cells differ, so calcU runs (TWICE per span)
-ssDraw  = $7cf8                  ;   ...and a boundary really is crossed
-pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
-pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
-pfPrvL  = $7e42
-pfCurH  = $7e46                 ; ninth raster bit, current and previous
-pfPrvH  = $7e47
-pfTmp   = $7e48
-pfTmp2  = $7e49
-pfN     = $7e4c                 ; frames accumulated so far -- ONE byte. It is incremented and
-                                ;   the WRAP to zero is what counts 256 (inc pfN / bne / inc pfDone),
-                                ;   so pfDone is the high byte in effect. The comment here said
-                                ;   "2 bytes" and pfDLo sits at $7e3d, which made the new overlap
-                                ;   guard fire -- correctly, on the comment rather than the code.
-pfCurF  = $7e4a                 ; scratch for one timestamp read and the delta
-pfCurL  = $7e4b
-pfCurX  = $7e4f
-pfDLo   = $7e4d
-pfDHi   = $7e4e
-pfRow   = $7e44
-pfArm   = $7e43                 ; PROFAT: 0 until the start tick is reached. $7e43 is the spare byte
-                                ;   between pfPrvL and pfRow -- see the hole report, not a guess
-pfDone  = $7e45
+
 
 seamT   = $84c8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
@@ -451,7 +429,6 @@ bfsTail = $85ef
 bfsC    = $8559
 bfsND   = $855a
 bfsN    = $855b
-bfsLast = $7ce8                  ; frameCnt when the fill last ran; see bfsExp
 hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
 hlKind  = $85dd                  ; which ladder holeTail is currently patched for
 hoI     = $85de                  ; holeOne's loop: which hole-like entity, and its
@@ -474,9 +451,9 @@ doomT   = $fb00                  ; per cell: 1 while it belongs to a wall mid-co
                                  ;   matches the columns showing the doomed group through it, so a
                                  ;   group can be any shape. Written only by wtCells, in bank 3
                                  ;   because it must be a whole clear page and the image has none.
-obKT    = $7e50                  ; obOrder: the smallest key so far, its entity, and the keys
-obKI    = $7e51
-obKeyT  = $7e52                  ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
+obKT    = $7cea                 ; obOrder: the smallest key so far, its entity, and the keys
+obKI    = $7ceb
+obKeyT  = $7cec                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
 bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. It lived in the image until
                                  ;   level 3's 196 open cells (2026-09-18); no image hole holds a
