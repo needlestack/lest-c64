@@ -748,6 +748,7 @@ cpChr:  txa
         sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
                                 ; be retuned without touching a charset entry. These are the
                                 ; STARTING level's three inks; lvlPal re-applies per level.
+        jsr symPut              ; ...and the starting level's wall mark, if it has one
         ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -759,11 +760,11 @@ cpChr:  txa
         lda #$ff
         sta $d01c               ; ALL eight in multicolor: orbMove hands out slots as it finds
                                 ; visible orbs, so any of them can be in use
-        lda #$0b
+        lda #$00
         sta $d025               ; sprite bit pair 01 = the shaded underside
-        lda #$0f
-        sta $d026               ; sprite bit pair 11 = highlight and ground shadow
         lda #$0c
+        sta $d026               ; sprite bit pair 11 = highlight and ground shadow
+        lda #$0b
         sta $d027               ; sprite bit pair 10 = the body. Per-sprite, so osFlush rewrites
                                 ; it; this is only the first frame's value.
                                 ;
@@ -4345,6 +4346,9 @@ ogFull:
         lda orbColT2,x
         sta obC                 ; the orb's OWN body colour, not the icon's fixed grey
         lda #$a0
+        clc                     ; what you are CARRYING is drawn with its own art too. X is
+        adc orbArtT,x           ;   still the entity index from the dex above; without this the
+                                ;   idol was held in front of you as an orb.
         sta obP
         lda #$a0
         sta obX
@@ -5556,6 +5560,9 @@ opDone:
         ldy ovar
         lda orbPtrT,y
         ldy oidx                ; the ENTITY, not the variant
+        clc                     ; 0 for an orb; the idol's bitmap base for the idol. The two
+        adc orbArtT,y           ;   ladders are geometrically identical, so the idol borrows the
+                                ;   orb's rung wholesale and swaps only the picture.
         sta obP,x               ; buffered, not written: see osFlush
         lda orbColT2,y
         sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
@@ -5797,7 +5804,7 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         pha                     ; wallsBack does not preserve A, and the stack is cheaper here
         jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes
         pla
-        ldx #$01   ; WHICH SLOT is it in now? Not a build-time constant: the
+        ldx #$02   ; WHICH SLOT is it in now? Not a build-time constant: the
 lvFind: cmp lvlAtT,x            ;   swap is an exchange, so the level being left takes the slot
         beq lvGot               ;   the level being entered came out of, and the layout permutes
         dex                     ;   every fall. nextLevel only ever names a level in the chain,
@@ -5882,6 +5889,23 @@ fstLimD:bcc fstFOk
         beq fstEnd
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
+        jsr symPut              ; the wall mark of the level just arrived at
+        ldx lvlMeT              ; ---- this level's inks ----
+        dex
+        lda lvlPalceilT,x
+        sta colW
+        sta $d021
+        lda lvlPalseamT,x
+        sta colS
+        sta $d023
+lvlPalceilT: !byte $01,$01,$01,$0b
+lvlPalseamT: !byte $0b,$0b,$0b,$0e
+                                ; ^ the arriving level's LOOK lands here, not at the swap:
+                                ;   the swap happens the moment you step into the hole (the
+                                ;   destination render needs the new geometry from its first
+                                ;   slice), but the drop is still showing the room being LEFT,
+                                ;   so repainting its ceiling and stamping its walls there was
+                                ;   recolouring the wrong room for the whole descent.
         ldx #25                 ;   is nothing to stall for here. Neither buffer holds any of the
         stx phA                 ;   landing's colour yet.
         stx phB
@@ -7067,7 +7091,7 @@ dshRun: lda frameCnt            ; elapsed since this picture went up
 dshEnd: lda #$03                ; nothing sounds here: the dark is silent
         sta dieSt
         lda dieN                ; the sequence ran its full length: start the next death over
-        cmp #$02
+        cmp #$01
         bcc dshHld
         lda #$00
         sta dieN
@@ -7129,6 +7153,10 @@ orbPut: jsr dropPick            ; ---- put down ----
         jsr hlAt                ; a socket? then it goes IN rather than on the floor
         cpy #$ff
         beq okPlain
+        ldx carry               ; ...unless what you are holding is not an ORB. The idol is
+        dex                     ;   luggage, not a key: it can be set down on a socket and picked
+        lda orbArtT,x           ;   straight back up, and nothing seats. orbArtT is 0 exactly for
+        bne okPlain             ;   the orb's own art, so "draws as an orb" IS "acts as a key".
         lda hlSeat,y
         bmi okDone              ; already used: bit 7 now means CONSUMED, and it is one-way
         ; ---- ONE WAY. The orb and the socket both leave the world. ----
@@ -7951,7 +7979,7 @@ orbOccHiT: !byte 112,112,112,112,112,112,112,112,112
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 orbXCT: !byte 6,20,7,19,15,0,0,0,0      ; from the MANIFEST, so its length cannot
 orbYCT: !byte 5,5,5,5,5,0,0,0,0      ;   disagree with what the swap moves
-orbColT2: !byte 12,12,12,12,0   ; from the MANIFEST and SWAPPED: a level with
+orbColT2: !byte 11,11,11,11,0   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -8853,7 +8881,7 @@ mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3
 orbPtrT: !byte 160,161,162,163,164,165,166,167,168,169,170,160,162,164,166,168,170,171,172,173,174,175,176,178,180,182,184,186,188,176,178,180,182,184,186,188,190,191,192,193,194,195
 orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,177,179,181,183,185,187,189,177,179,181,183,185,187,189,0,0,0,0,0,0
 orbTallT: !byte 0,0,1,1,0
-
+orbArtT: !byte $00,$00,$00,$00,$00   ; bitmap offset per entity; 0 = the orb's art
 orbHidT: !byte 0,0,0,0,0
 orbHid0T: !byte 0,0,0,0,0   ; the build's hidden flags, for objInit
 orbX0T: !byte 6,20,7,19,0   ; where objInit puts them back on a restart
@@ -8938,7 +8966,7 @@ sndVolT: !byte 15,12,10,8,7,6,5,4,3,3,3,3,2,2,2,2
 ; Where each picture's map lives. The first is inside the image next to the charset; the rest
 ; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
 picLoT: !byte <faceScrT,$00
-picHiT: !byte >faceScrT,$f1
+picHiT: !byte >faceScrT,$f5
 ; dieN is the death counter and it is DATA, not an equate, on purpose: dieKey restarts with
 ; "jmp entry", which reloads nothing, so an emitted 0 is the only initialisation it ever gets --
 ; and that is exactly what makes it survive the restart and count deaths rather than resetting.
@@ -9055,6 +9083,31 @@ faceScrT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,190,52,137,185,78,175,157,57,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0
 
+        * = $7e00
+; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
+; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
+; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
+; mirror, so a baked-in A would render it upside down below the horizon. Writing both charsets
+; explicitly is what gives an above-horizon and a below-horizon glyph, and it costs nothing at
+; all: the two charsets are separate 2K blocks picked by $d018 per raster half, and nothing
+; re-derives B after boot. Both get the mark the same way up.
+symPut: ldx lvlMeT
+        dex
+        lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
+        clc
+        adc #7                  ; walk both halves of symT backwards, row 7 down to 0
+        tax
+        ldy #7
+spLp:   lda symT,x
+        sta $c008,y      ; SOLID is code 1, so its glyph is base + 8
+        sta $c808,y
+        dex
+        dey
+        bpl spLp
+        rts
+symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
+        !byte $55,$55,$55,$11,$45,$55,$55,$55
+lvlSymT: !byte 0,0,0,8
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40
@@ -9648,7 +9701,7 @@ rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,2
         ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
         * = $97a0
-seatPtrT: !byte 196,197,197,198,198,199,199,200,201,201,202,196,197,198,199,201,202,203,204,205,206,207
+seatPtrT: !byte 212,213,213,214,214,215,215,216,217,217,218,212,213,214,215,217,218,219,220,221,222,223
 seatYBaseT: !byte 132,134,134,134,134,136,136,138,140,140,142,141,142,142,143,145,146,146,147,147,148,149
 ; The sound effects' parameter tables, in the tail of this page and the next: the $9200 block
 ; they lived in overran $9500 by eight bytes when level 2's 117 open cells grew bfsQ (2026-09-18).
@@ -9756,8 +9809,8 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
-; wall goes, so the delta is never the one map byte you would guess: these 5 come to
-; 9, 17, 17, 57, 97 bytes. (It said "13 runs become 5 here" when there was one wall on one
+; wall goes, so the delta is never the one map byte you would guess: these 7 come to
+; 9, 17, 17, 57, 97, 33, 13 bytes. (It said "13 runs become 5 here" when there was one wall on one
 ; level to point at, and reported wall 0's count as if it were every wall's.)
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
@@ -9772,16 +9825,20 @@ wallDT1: !byte <mapT+216,>mapT+216,0,1,<holeSeeT+90,>holeSeeT+90,192,0,<holeSeeT
 wallDT2: !byte <mapT+235,>mapT+235,0,1,<holeSeeT+93,>holeSeeT+93,62,6,<holeSeeT+123,>holeSeeT+123,118,112,<holeSeeT+125,>holeSeeT+125,126,112,$ff
 wallDT3: !byte <mapT+76,>mapT+76,0,1,<mapT+89,>mapT+89,0,1,<holeSeeT+38,>holeSeeT+38,57,1,<holeSeeT+41,>holeSeeT+41,31,15,<holeSeeT+43,>holeSeeT+43,14,12,<holeSeeT+48,>holeSeeT+48,2,0,<holeSeeT+49,>holeSeeT+49,128,0,<holeSeeT+51,>holeSeeT+51,32,0,<holeSeeT+67,>holeSeeT+67,128,0,<holeSeeT+68,>holeSeeT+68,1,0,<holeSeeT+69,>holeSeeT+69,240,32,<holeSeeT+71,>holeSeeT+71,60,48,<holeSeeT+73,>holeSeeT+73,30,12,<holeSeeT+75,>holeSeeT+75,14,12,$ff
 wallDT4: !byte <mapT+151,>mapT+151,0,1,<mapT+152,>mapT+152,0,1,<mapT+164,>mapT+164,0,1,<mapT+178,>mapT+178,0,1,<holeSeeT+2,>holeSeeT+2,224,0,<holeSeeT+3,>holeSeeT+3,7,0,<holeSeeT+4,>holeSeeT+4,248,0,<holeSeeT+5,>holeSeeT+5,1,0,<holeSeeT+6,>holeSeeT+6,124,0,<holeSeeT+8,>holeSeeT+8,31,0,<holeSeeT+9,>holeSeeT+9,128,0,<holeSeeT+10,>holeSeeT+10,7,0,<holeSeeT+11,>holeSeeT+11,224,0,<holeSeeT+12,>holeSeeT+12,25,0,<holeSeeT+13,>holeSeeT+13,120,0,<holeSeeT+14,>holeSeeT+14,30,0,<holeSeeT+15,>holeSeeT+15,158,0,<holeSeeT+16,>holeSeeT+16,255,128,<holeSeeT+17,>holeSeeT+17,231,1,<holeSeeT+18,>holeSeeT+18,255,96,<holeSeeT+19,>holeSeeT+19,249,0,<holeSeeT+20,>holeSeeT+20,127,96,<holeSeeT+21,>holeSeeT+21,254,0,<holeSeeT+22,>holeSeeT+22,31,24,$ff
-wallDLoT: !byte <wallDT0,<wallDT1,<wallDT2,<wallDT3,<wallDT4
-wallDHiT: !byte >wallDT0,>wallDT1,>wallDT2,>wallDT3,>wallDT4
+wallDT5: !byte <mapT+57,>mapT+57,0,1,<holeSeeT+7,>holeSeeT+7,2,0,<holeSeeT+10,>holeSeeT+10,1,0,<holeSeeT+12,>holeSeeT+12,192,0,<holeSeeT+13,>holeSeeT+13,1,0,<holeSeeT+15,>holeSeeT+15,64,0,<holeSeeT+36,>holeSeeT+36,4,0,<holeSeeT+39,>holeSeeT+39,2,0,$ff
+wallDT6: !byte <mapT+227,>mapT+227,0,1,<holeSeeT+89,>holeSeeT+89,40,8,<holeSeeT+92,>holeSeeT+92,31,7,$ff
+wallDLoT: !byte <wallDT0,<wallDT1,<wallDT2,<wallDT3,<wallDT4,<wallDT5,<wallDT6
+wallDHiT: !byte >wallDT0,>wallDT1,>wallDT2,>wallDT3,>wallDT4,>wallDT5,>wallDT6
 wallCells0: !byte $58,$ff
 wallCells1: !byte $d8,$ff
 wallCells2: !byte $eb,$ff
 wallCells3: !byte $4c,$59,$ff
-wallCells4: !byte $97,$98,$a4,$b2,$ff   ; each wall's cells, $ff-ended
-wallCLoT: !byte <wallCells0,<wallCells1,<wallCells2,<wallCells3,<wallCells4
-wallCHiT: !byte >wallCells0,>wallCells1,>wallCells2,>wallCells3,>wallCells4
-wallStT: !fill 5, 0   ; per wall, global across the chain: 0 = it is there
+wallCells4: !byte $97,$98,$a4,$b2,$ff
+wallCells5: !byte $39,$ff
+wallCells6: !byte $e3,$ff   ; each wall's cells, $ff-ended
+wallCLoT: !byte <wallCells0,<wallCells1,<wallCells2,<wallCells3,<wallCells4,<wallCells5,<wallCells6
+wallCHiT: !byte >wallCells0,>wallCells1,>wallCells2,>wallCells3,>wallCells4,>wallCells5,>wallCells6
+wallStT: !fill 7, 0   ; per wall, global across the chain: 0 = it is there
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
 wsDir:  !byte 0                 ; ...and which way: 1 = taking it out, 0 = putting it back
 hzWv:   !byte 0                 ; hzRunW's held "out" value while it reads the "back" one
@@ -9885,7 +9942,7 @@ dmClr:  sta doomT,x             ;   than at entry because the main block had no 
         inx
         bne dmClr
         sta wsN                 ; a collapse in progress is abandoned
-        ldx #$04   ; EVERY wall in the chain, not just the live level's:
+        ldx #$06   ; EVERY wall in the chain, not just the live level's:
 wbLp:   stx wsWall              ;   a wall's triples name LIVE table addresses, so applying one
                                 ;   belonging to another level would write that room's bytes into
                                 ;   this one. Safe because this routine runs before every lvlSwap,
@@ -10072,7 +10129,7 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; LVLSHADOW = $f500 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 746 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 751 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -10086,17 +10143,17 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; Only emitted with TWO OR MORE slots. With one there is nothing to permute -- the transposition
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
-lvlAtT: !byte $02,$03   ; slot -> the level now in it
-lvlBasLoT: !byte $00,$ea
-lvlBasHiT: !byte $f5,$f7
-lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbColT2,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$01,$01,$01,$a0,$01,$01,$01,$04,$03,$05,$05,$05,$01,$07,$09,$51,$01,$01,$01,$01,$01,$01
+lvlAtT: !byte $02,$03,$04   ; slot -> the level now in it
+lvlBasLoT: !byte $00,$ef,$de
+lvlBasHiT: !byte $f5,$f7,$fa
+lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbArtT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbArtT,>orbColT2,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$01,$01,$01,$a0,$01,$01,$01,$04,$03,$05,$05,$05,$05,$01,$07,$09,$51,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
 ; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
-; 746 of them. The table index lives in lsIdx for the same reason.
+; 751 of them. The table index lives in lsIdx for the same reason.
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
@@ -10124,7 +10181,7 @@ lsByte:
 lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
 lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
 lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over 746 bytes is most of an extra frame.
+        txa                     ;   a byte, which over 751 bytes is most of an extra frame.
 lsD2:   sta $ffff,y
         iny
         cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
@@ -10144,7 +10201,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$20
+        cmp #$21
         bne lsTab
         rts
 lsIdx:  !byte 0
@@ -11507,7 +11564,7 @@ dgA:    lda orbTallT,x          ;   store, and orbMove then never gives it a slo
                                 ;   shared, so an orb cannot dim while the angel stays lit
 dgA2:   dex
         bpl dgA
-dgAD:   lda #$0c  ; the orb, by contrast, fades out with everything else
+dgAD:   lda #$0b  ; the orb, by contrast, fades out with everything else
         sta dieInk
         inc dieN                ; how many pictures this death earns; dshEnd resets it after the
         lda #$01                ;   last one, so the sequence starts over rather than running out

@@ -76,7 +76,7 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // own shadow. NOTE: the live level is CHAIN[0], and with three resident only levels 1 and 2 fit
 // under the code ceiling as the live one -- level 3 live in a three-chain is ~17 bytes over, so
 // playtest it with CHAIN=3 rather than by rotating the chain.
-const CHAIN = (process.env.CHAIN ?? '1,2,3').split(',').map(Number);
+const CHAIN = (process.env.CHAIN ?? '1,2,3,4').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
 if (![1, 2, 3, 4].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 4`);
 const SOCKROOM = LVL === 2;
@@ -138,7 +138,7 @@ const LEVEL_PAL = { 4: { ceil: 0x0b, seam: 0x0e } };   // level 4: grey 1 ground
 // occluder is a foreground-black char whose whole job is to clip sprites, and pair 11 there
 // reads colour RAM, which is $08 (black) everywhere; a seam is a solid cell with a full-height
 // pair-10 column that this symbol's columns would collide with.
-const LEVEL_SYM = { 4: 'sym1.png' };
+const LEVEL_SYM = { 4: 'sym2.png' };
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -3582,7 +3582,9 @@ for (const m of PICS.maps) if (m.map.length !== 1000)
   throw new Error(`death-pics.json ${m.name} is ${m.map.length} cells, not 1000`);
 // NPIC caps how many of death-pics.json's pictures ship. Capping to 1 frees SEATBASE, which is
 // the socket ladder's home -- the two cannot both have it.
-const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? 99));
+// A fourth resident level and a second cut-scene picture are mutually exclusive: three shadows
+// leave IPIC no room below them. The chain wins, so a four-level build defaults to one picture.
+const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? (CHAIN.length >= 4 ? 1 : 99)));
 const FACEART = { colram: PICS.colram & 7 };
 const FACE_NCHR = PICS.chars.length;      // 8 bytes a glyph, so 2048 is the full 256
 const FACE_BLANK = 0;
@@ -3864,8 +3866,11 @@ const ORBANCH = ORBEXP.map(e => e ? 42 : 21);   // row pitch: one sprite height
 // The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
 // and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
 // ORBPAL=colour brings back light blue / light red / light green bodies.
-const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
-const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
+// ...and one step DARKER than the scene's own greys, 2026-09-21: grey 1 -> black, grey 2 ->
+// grey 1, grey 3 -> grey 2. Applies to orbs, angels and the idol alike -- every entity's colour
+// is an index into ORBBODY, so there is one palette here and not one per kind.
+const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [11, 11, 11];
+const ORBUNDER = 0, ORBHILITE = 12;              // shared: $d025 underside, $d026 highlight
 
 // Placement. Greedy over the open cells with a minimum spacing, which spreads them through
 // every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
@@ -12729,18 +12734,7 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped,
                                 ;   AFTER the swap and BEFORE anything renders the new room.
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 3: runs made, about to objInit\n' : ''}        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
-${ANYSYM ? '        jsr symPut              ; the wall mark of the level just arrived at\n' : ''}${TWOLEV ? (() => {
-  // Only the inks some level actually overrides get a table and three instructions; an ink every
-  // level agrees on is already correct from boot and costs nothing here. Indexed by level id - 1,
-  // and lvlMeT is the level just ARRIVED at because lvGot above has already stored it.
-  const REG = { ceil: ['colW', '$d021'], wall: ['colB', '$d022'], seam: ['colS', '$d023'] };
-  const vary = Object.keys(REG).filter(k =>
-    CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]));
-  if (!vary.length) return '';
-  return `        ldx lvlMeT              ; ---- this level's inks ----\n        dex\n` +
-    vary.map(k => `        lda lvlPal${k}T,x\n        sta ${REG[k][0]}\n        sta ${REG[k][1]}\n`).join('') +
-    vary.map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}\n`).join('');
-})() : ''}
+
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}lvlEnd:
 ` : ''}        ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
@@ -12813,6 +12807,23 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         beq fstEnd
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
+${ANYSYM ? '        jsr symPut              ; the wall mark of the level just arrived at\n' : ''}${TWOLEV ? (() => {
+  // Only the inks some level actually overrides get a table and three instructions; an ink every
+  // level agrees on is already correct from boot and costs nothing here. Indexed by level id - 1,
+  // and lvlMeT is the level just ARRIVED at because lvGot above has already stored it.
+  const REG = { ceil: ['colW', '$d021'], wall: ['colB', '$d022'], seam: ['colS', '$d023'] };
+  const vary = Object.keys(REG).filter(k =>
+    CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]));
+  if (!vary.length) return '';
+  return `        ldx lvlMeT              ; ---- this level's inks ----\n        dex\n` +
+    vary.map(k => `        lda lvlPal${k}T,x\n        sta ${REG[k][0]}\n        sta ${REG[k][1]}\n`).join('') +
+    vary.map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}\n`).join('');
+})() : ''}                                ; ^ the arriving level's LOOK lands here, not at the swap:
+                                ;   the swap happens the moment you step into the hole (the
+                                ;   destination render needs the new geometry from its first
+                                ;   slice), but the drop is still showing the room being LEFT,
+                                ;   so repainting its ceiling and stamping its walls there was
+                                ;   recolouring the wrong room for the whole descent.
         ldx #25                 ;   is nothing to stall for here. Neither buffer holds any of the
         stx phA                 ;   landing's colour yet.
         stx phB
