@@ -737,18 +737,12 @@ cpChr:  txa
         sta $d018
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
-        lda #$01
-        sta colW
-        sta $d021               ; 00 = ceiling and floor
         lda #$00
         sta colB
-        sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured)
-        lda #$0b
-        sta colS
-        sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
-                                ; be retuned without touching a charset entry. These are the
-                                ; STARTING level's three inks; lvlPal re-applies per level.
-        jsr symPut              ; ...and the starting level's wall mark, if it has one
+        sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured).
+                                ;   The only ink no level overrides, so it is set once here; the
+                                ;   other two come from lvlLook with the starting level's values.
+        jsr lvlLook
         ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -2409,6 +2403,9 @@ palKeys:
         and #$0f
         sta colW
         sta $d021
+        sta irqB0+1             ; or the next IRQ puts the old ink straight back
+        sta irqB2+1
+
 pk2:    lda pkEdge
         and #$08
         beq pk3
@@ -3959,12 +3956,19 @@ irqAr2: lda #246                ; next stop: the top of the arc
 irqA2:  lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
 irqC2:  ora #$00
         sta $d018
+irqB2:  lda #$01      ; ...and the GROUND colour of whatever is seen through
+        sta $d021               ;   the hole. AFTER the $d018 store, never before it: that one is
+                                ;   the cycle-critical half -- see the cmp # note above -- and a
+                                ;   late background write only frets one line, in a band that is
+                                ;   a single flat colour anyway.
         lda #$00
         sta $d012
         jmp irqd
 irqTop: lda d018vm              ; --- top of frame: charset A, arm the horizon ---
 irqC0:  ora #$00
         sta $d018
+irqB0:  lda #$01      ; the ground colour ABOVE the rim: during a drop that is
+        sta $d021               ;   still the level being LEFT. The middle region inherits it.
 irqArm: lda #$96
         sta $d012
         inc frameCnt
@@ -5822,6 +5826,7 @@ lvGot:  ldy lvlMeT              ;   a swap against X = $ff
         jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
 
+        jsr lvlLo               ; what you see THROUGH the hole is already the new level
 lvlEnd:
         ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
@@ -5889,17 +5894,7 @@ fstLimD:bcc fstFOk
         beq fstEnd
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
-        jsr symPut              ; the wall mark of the level just arrived at
-        ldx lvlMeT              ; ---- this level's inks ----
-        dex
-        lda lvlPalceilT,x
-        sta colW
-        sta $d021
-        lda lvlPalseamT,x
-        sta colS
-        sta $d023
-lvlPalceilT: !byte $01,$01,$01,$0b
-lvlPalseamT: !byte $0b,$0b,$0b,$0e
+        jsr lvlLook             ; the arriving level's inks and wall mark
                                 ; ^ the arriving level's LOOK lands here, not at the swap:
                                 ;   the swap happens the moment you step into the hole (the
                                 ;   destination render needs the new geometry from its first
@@ -8860,7 +8855,7 @@ arcD: !byte 255,227,202,178,156,136,118,101,85,71,59,47,37,28,21,14,9,5,2,1,0,1,
 arcTrT: !byte 0,7,23,39,55,71,87,103,119,135,151,164,175,186,198,209,221,232,244,255
 arcSpT: !byte 150,143,127,111,95,79,63,51,51,51,51,51,51,51,51,51,51,51,51,51
 arcSp2T: !byte 246,246,242,226,210,194,186,178,162,154,138,122,106,90,74,58,58,58,58,58
-arcSp2bT: !byte 246,246,246,246,246,246,246,246,246,246,246,238,222,206,190,174,174,174,174,150
+arcSp2bT: !byte 246,246,246,246,246,246,246,246,246,246,246,238,222,206,190,174,166,166,158,150
 arcTopT: !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0
 ; the split for an overlap frame: between the departing arc's lowest row and the arriving one's
 ; highest, so each rim sits in the charset its polarity needs
@@ -8947,8 +8942,8 @@ fwK:    !byte 0
 fwLo:   !byte 0
 fwHi:   !byte 0
 fwBlk:  !fill 32, 0             ; the block fdWarp reads, rebuilt once a frame
-fKT:    !byte 0,1,3,5,7,9,11,13,15,17,19,21,22,23,0,0,0,0,0,0,0,0,0,232,234,236,237,238,240,241,243,245,247,249,251,253,253,253,253,0
-fLoT:   !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,25,25,25,25,25,25,25,25,25,24,22,20,19,18,16,15,13,11,9,7,5,3,3,3,3,0
+fKT:    !byte 0,1,3,5,7,9,11,13,15,17,19,21,22,23,0,0,0,0,0,0,0,0,0,232,234,236,237,238,240,241,243,245,247,249,251,253,254,254,255,0
+fLoT:   !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,25,25,25,25,25,25,25,25,25,24,22,20,19,18,16,15,13,11,9,7,5,3,2,2,1,0
 fHiT:   !byte 22,22,21,19,17,15,13,11,9,7,5,3,2,1,0,0,0,0,0,0,0,0,0,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24
 fNT:    !byte 23,23,22,20,18,16,14,12,10,8,6,4,3,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $7000
@@ -9091,6 +9086,30 @@ faceScrT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; explicitly is what gives an above-horizon and a below-horizon glyph, and it costs nothing at
 ; all: the two charsets are separate 2K blocks picked by $d018 per raster half, and nothing
 ; re-derives B after boot. Both get the mark the same way up.
+; ...and the level's three inks with it, out of the main block too: they are a table and three
+; instructions per ink that some level overrides, and the main block is the tightest resource in
+; the project. One jsr at each of the two sites instead.
+; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
+; already swapped underneath but the drop is still showing the room being left above the rim.
+; Two $d021s for the two levels on screen at once -- the overlap frames used to have to pick one,
+; which made whichever lost look as though IT had changed colour.
+lvlLo:  ldx lvlMeT
+        dex
+        lda lvlPalceilT,x
+        sta irqB2+1
+        rts
+lvlLook: ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level ARRIVED at
+        dex
+        lda lvlPalceilT,x
+        sta colW
+        sta $d021
+        lda lvlPalseamT,x
+        sta colS
+        sta $d023
+
+        lda colW                ; the drop is over: both regions are this level now
+        sta irqB0+1
+        sta irqB2+1
 symPut: ldx lvlMeT
         dex
         lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
@@ -9108,6 +9127,8 @@ spLp:   lda symT,x
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
         !byte $55,$55,$55,$45,$55,$55,$55,$55
 lvlSymT: !byte 0,0,0,8
+lvlPalceilT: !byte $01,$01,$01,$0b
+lvlPalseamT: !byte $0b,$0b,$0b,$0e
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40

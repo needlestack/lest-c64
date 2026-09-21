@@ -3105,6 +3105,9 @@ const symRows = art => {
     [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c] ? (b & ~(3 << (6 - 2 * c))) : b, 0x55));
 };
 const ANYSYM = CHAIN.some(n => LEVEL_SYM[n]);
+// Does any level's GROUND colour differ from the first's? If not there is nothing for a split to
+// show, and none of the two-tone machinery below is emitted.
+const CEILVARY = CHAIN.some(n => palOf(n).ceil !== palOf(CHAIN[0]).ceil);
 // ---- ONE dial: how short a seam is allowed to get before it is not drawn at all ----
 // SEAMPIX is the line's half-height ABOVE the horizon, in pixels. The line is mirrored, and the
 // horizon char row is SHARED rather than doubled, so 8 here is a 16px line in all: one full char
@@ -4976,12 +4979,26 @@ const arcHi2T = arcYT2.map((y, n) => arcSpan(y, (arcET2[n] << 24) >> 24)[1]);
 // The landing's split travels too: the new room's horizon starts below the screen and rises into
 // place, so charset A covers its ceiling half and B its floor half exactly as in an ordinary
 // frame. It reaches SPLITLINE on the last frame, which is where the renderer wants it.
-// ...but it must still SETTLE. The hold is tapered over the last few frames so the room reaches
-// its resting place instead of stopping ARC_GAP rows short of it -- by then the arc is a row or
-// two from the top and any overlap is off the edge of the screen.
-const arcLandOff = arcTr2T.map((t, n) =>
-  Math.min(Math.max(Math.round((arcTr2T[ARC_N - 1] - t) / 8), arcHi2T[n] + ARC_GAP),
-           (ARC_N - 1 - n) * 3));
+// ...but it must still SETTLE. That was the INTENT here and the code never did it: the hold was
+// released in one step by the cap below, not tapered. See the easing under arcLandOff.
+// ---- ...and the last frames EASED, not held and then dropped ----
+// arcYT2 saturates at 0 five frames before the end, so arcHi2T stops falling and the gap floor
+// pins the room three rows short while its natural slide has already reached home. The cap then
+// took the whole three rows on the final frame. On screen that is a room that stalls just below
+// the horizon and pops into place -- which is exactly what it looked like.
+// The plateau is the only stretch where the gap MAY close, because the room is about to cover
+// the arc regardless; so ramp the held value down to 0 across it instead of holding and jumping.
+const arcLandOff = (() => {
+  const off = arcTr2T.map((t, n) =>
+    Math.min(Math.max(Math.round((arcTr2T[ARC_N - 1] - t) / 8), arcHi2T[n] + ARC_GAP),
+             (ARC_N - 1 - n) * 3));
+  const held = off[ARC_N - 2];
+  let p = ARC_N - 2;
+  while (p > 0 && off[p - 1] === held) p--;          // first frame of the trailing plateau
+  const span = ARC_N - 1 - p;
+  if (span > 1) for (let n = p; n < ARC_N; n++) off[n] = Math.round(held * (ARC_N - 1 - n) / span);
+  return off;
+})();
 const arcSp2T  = arcHi2T.map(h => Math.max(51, Math.min(246, 50 + h * 8)));        // below the rim
 const arcSp2bT = arcLandOff.map(o => Math.max(51, Math.min(246, 150 + o * 8)));    // room horizon
 // FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
@@ -6807,18 +6824,13 @@ cpChr:  txa
         sta $d018
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
-        lda #${hx(palOf(LVL).ceil)}
-        sta colW
-        sta $d021               ; 00 = ceiling and floor
         lda #${hx(palOf(LVL).wall)}
         sta colB
-        sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured)
-        lda #${hx(palOf(LVL).seam)}
-        sta colS
-        sta $d023               ; 10 = panel seam. Its own register precisely so the tone can
-                                ; be retuned without touching a charset entry. These are the
-                                ; STARTING level's three inks; lvlPal re-applies per level.
-${ANYSYM ? '        jsr symPut              ; ...and the starting level\'s wall mark, if it has one\n' : ''}${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
+        sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured).
+                                ;   The only ink no level overrides, so it is set once here; the
+                                ;   other two come from lvlLook with the starting level's values.
+        jsr lvlLook
+${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
         sta hlvOf
@@ -8961,6 +8973,7 @@ palKeys:
         and #$0f
         sta colW
         sta $d021
+${CEILVARY ? '        sta irqB0+1             ; or the next IRQ puts the old ink straight back\n        sta irqB2+1\n' : ''}
 pk2:    lda pkEdge
         and #$08
         beq pk3
@@ -10508,13 +10521,20 @@ irqAr2: lda #246                ; next stop: the top of the arc
 irqA2:  lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
 irqC2:  ora #${hx(CB_A)}
         sta $d018
-        lda #$00
+${CEILVARY ? `irqB2:  lda #${hx(palOf(LVL).ceil)}      ; ...and the GROUND colour of whatever is seen through
+        sta $d021               ;   the hole. AFTER the $d018 store, never before it: that one is
+                                ;   the cycle-critical half -- see the cmp # note above -- and a
+                                ;   late background write only frets one line, in a band that is
+                                ;   a single flat colour anyway.
+` : ''}        lda #$00
         sta $d012
         jmp irqd
 irqTop: lda d018vm              ; --- top of frame: charset A, arm the horizon ---
 irqC0:  ora #${hx(CB_A)}
         sta $d018
-irqArm: lda #${hx(SPLITLINE)}
+${CEILVARY ? `irqB0:  lda #${hx(palOf(LVL).ceil)}      ; the ground colour ABOVE the rim: during a drop that is
+        sta $d021               ;   still the level being LEFT. The middle region inherits it.
+` : ''}irqArm: lda #${hx(SPLITLINE)}
         sta $d012
         inc frameCnt
         bne irqNf
@@ -12743,7 +12763,7 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped,
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 3: runs made, about to objInit\n' : ''}        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
 
-${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}lvlEnd:
+${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}${CEILVARY ? '        jsr lvlLo               ; what you see THROUGH the hole is already the new level\n' : ''}lvlEnd:
 ` : ''}        ldx hlv                 ; go to the landing spot NOW and let the main loop render it
         lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
         sta px                  ;   player does not move again for the rest of the fall.
@@ -12815,18 +12835,8 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         beq fstEnd
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
-${ANYSYM ? '        jsr symPut              ; the wall mark of the level just arrived at\n' : ''}${TWOLEV ? (() => {
-  // Only the inks some level actually overrides get a table and three instructions; an ink every
-  // level agrees on is already correct from boot and costs nothing here. Indexed by level id - 1,
-  // and lvlMeT is the level just ARRIVED at because lvGot above has already stored it.
-  const REG = { ceil: ['colW', '$d021'], wall: ['colB', '$d022'], seam: ['colS', '$d023'] };
-  const vary = Object.keys(REG).filter(k =>
-    CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]));
-  if (!vary.length) return '';
-  return `        ldx lvlMeT              ; ---- this level's inks ----\n        dex\n` +
-    vary.map(k => `        lda lvlPal${k}T,x\n        sta ${REG[k][0]}\n        sta ${REG[k][1]}\n`).join('') +
-    vary.map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}\n`).join('');
-})() : ''}                                ; ^ the arriving level's LOOK lands here, not at the swap:
+        jsr lvlLook             ; the arriving level's inks and wall mark
+                                ; ^ the arriving level's LOOK lands here, not at the swap:
                                 ;   the swap happens the moment you step into the hole (the
                                 ;   destination render needs the new geometry from its first
                                 ;   slice), but the drop is still showing the room being LEFT,
@@ -15764,7 +15774,34 @@ ${ANYSYM ? `        * = $7e00
 ; explicitly is what gives an above-horizon and a below-horizon glyph, and it costs nothing at
 ; all: the two charsets are separate 2K blocks picked by $d018 per raster half, and nothing
 ; re-derives B after boot. Both get the mark the same way up.
-symPut: ldx lvlMeT
+; ...and the level's three inks with it, out of the main block too: they are a table and three
+; instructions per ink that some level overrides, and the main block is the tightest resource in
+; the project. One jsr at each of the two sites instead.
+; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
+; already swapped underneath but the drop is still showing the room being left above the rim.
+; Two $d021s for the two levels on screen at once -- the overlap frames used to have to pick one,
+; which made whichever lost look as though IT had changed colour.
+${CEILVARY ? `lvlLo:  ldx lvlMeT
+        dex
+        lda lvlPalceilT,x
+        sta irqB2+1
+        rts
+` : ''}lvlLook:${TWOLEV ? (() => {
+  const REG = { ceil: ['colW', '$d021'], wall: ['colB', '$d022'], seam: ['colS', '$d023'] };
+  const vary = Object.keys(REG).filter(k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]));
+  if (!vary.length) return '';
+  return ` ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level ARRIVED at
+        dex
+` +
+    vary.map(k => `        lda lvlPal${k}T,x
+        sta ${REG[k][0]}
+        sta ${REG[k][1]}
+`).join('');
+})() : ''}
+${CEILVARY ? `        lda colW                ; the drop is over: both regions are this level now
+        sta irqB0+1
+        sta irqB2+1
+` : ''}symPut: ldx lvlMeT
         dex
         lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
         clc
@@ -15781,6 +15818,12 @@ spLp:   lda symT,x
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
         !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
 lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
+${TWOLEV ? (() => {
+  const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
+  return Object.keys(REG).filter(k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]))
+    .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
+    .join('\n');
+})() : ''}
 ` : ''}        * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
