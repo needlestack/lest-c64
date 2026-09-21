@@ -4965,6 +4965,51 @@ const FALLSCENE = process.env.FALLSCENE !== '0';   // the sheared scene is the d
 // per frame (fwN, at offset 25) says where the content stops. 32-byte blocks so the index is a
 // shift; frame-indexed rather than fPosH-indexed because fPosH is quadratic and sharing a block
 // between two frames would read as a stall.
+// ---- and its compressed form ----
+// EVERY one of the forty blocks is exactly `src = row + k` outside a single run of $ff at ONE
+// end -- measured, not assumed: 25 blocks have the run as a prefix, 14 as a suffix, none in the
+// middle, which is what the construction above says in words ("JUST A SLIDE", and below-horizon
+// rows losing their source from the bottom up). So the 1,280 bytes carry 40 quadruples:
+//   k    the constant offset, signed
+//   lo   first row with a source, hi last -- outside them the answer is $ff
+//   n    what used to sit at offset 25: where content stops
+// 160 bytes instead of 1,280, and fdWarp GENERATES the block for the frame it is on rather than
+// loading one of forty stored copies. Nothing downstream changes -- the fall is the most
+// bug-prone thing here, so this touches only the fetch. It does DELETE the self-modifying
+// operand the two readers used to share: with one fixed buffer they both just index fwBlk.
+//
+// It is affordable because fRowT is not in any hot path -- fdWarp runs 25 rows per animation
+// frame of a fall, ~40 frames per level transition, and nothing per rendered frame.
+const fRowPack = () => {
+  const K = [], LO = [], HI = [], N = [];
+  for (let b = 0; b < fRowT.length / 32; b++) {
+    const blk = fRowT.slice(b * 32, b * 32 + 32), rows = blk.slice(0, 25);
+    const good = rows.map((v, i) => [v, i]).filter(([v]) => v !== 255).map(([, i]) => i);
+    const k = good.length ? rows[good[0]] - good[0] : 0;
+    const lo = good.length ? good[0] : 25, hi = good.length ? good[good.length - 1] : 0;
+    // The whole saving rests on this reproducing the table byte for byte. Checked here, so the
+    // table can be deleted with the proof standing rather than the argument.
+    for (let R = 0; R < 25; R++) {
+      const want = (R < lo || R > hi) ? 255 : R + k;
+      if (blk[R] !== want) throw new Error(
+        `fRowT block ${b} row ${R} is ${blk[R]}, but k=${k} lo=${lo} hi=${hi} says ${want} -- ` +
+        `the blocks are no longer a plain slide and fwGenB cannot stand in for the table`);
+    }
+    // Offset 26 is the landing's "room's first row", and in a LANDING block it is always lo:
+    // the landing sets it to clamp(off) and its content starts at exactly row off. So fwGenB
+    // writes fwLo there and no fifth table is needed. Proved rather than argued, because a zero
+    // here silently skips the landing's hole fill and brings back the 2026-09-17 flicker.
+    // A DROP block's byte 26 is dead: fdNoF reads it only under arcInv, and arcInv is the same
+    // flag that adds ARC_N to the block index -- reading it at all means being in the second
+    // half. (Block 14 is entirely $ff, where the packer's empty convention lo=25 disagrees with
+    // the table's unset 0. Harmless there and nowhere else.)
+    if (b >= ARC_N ? blk[26] !== lo : blk[26] !== 0) throw new Error(
+      `fRowT block ${b} byte 26 is ${blk[26]}, expected ${b >= ARC_N ? lo : 0} -- ` +
+      `fwGenB writes fwLo to offset 26 and the landing's fill depends on it`);
+    K.push(k & 255); LO.push(lo); HI.push(hi); N.push(blk[25]);
+  }
+  return { K, LO, HI, N };
+};
 const fRowT = (() => {
   const out = [];
   // FIRST ARC_N blocks: the drop. Slide up, and compress the below-horizon half into it.
@@ -12874,12 +12919,7 @@ ${FALLSCENE ? `        lda arcInv
         beq fdIncr
         ; LANDING: from the arc's bottom down to the room's first row, every frame. See fRowT's
         ; block byte 26 for why this is not incremental.
-        lda fwLd+1              ; the block fdWarp just used
-        sta fdRm+1
-        lda fwLd+2
-        sta fdRm+2
-        ldy #26
-fdRm:   lda $ffff,y             ; the room's first row this frame
+        lda fwBlk+26            ; the room's first row this frame, written by fwGenB
         sec
         sbc arcHi
         bcc fdTail              ; the room has reached the arc: nothing between them
@@ -12963,28 +13003,11 @@ fdWarp: lda arcInv               ; the landing's blocks follow the drop's in the
         jmp fdwI
 fdwD:   lda fFrm
 fdwI:   sta apT
-        and #$07                 ; point the load at this frame's 32-byte block. Patched rather
-        asl                      ;   than held in zero page: the table is not page aligned, and
-        asl                      ;   a crossing costs one cycle on 25 reads.
-        asl
-        asl
-        asl
-        clc
-        adc #<fRowT
-        sta fwLd+1
-        lda #$00
-        adc #$00
-        sta tmp                  ; carry out of the low byte
-        lda apT
-        lsr
-        lsr
-        lsr
-        clc
-        adc tmp
-        adc #>fRowT
-        sta fwLd+2
+        jsr fwGenB              ; build this frame's row map into fwBlk. Was twenty instructions
+                                ;   of pointer arithmetic to pick one of forty stored blocks --
+                                ;   all of which held the same thing a slide and two bounds say.
         ldy #25
-fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
+        lda fwBlk,y             ; offset 25 is where content stops
         sta fwN
         lda #$00
         sta fwRow
@@ -12992,11 +13015,7 @@ fwLp:   lda fwRow
         cmp #25
         bcs fwDn
         tay
-        lda fwLd+1               ; re-read the row map through the same patched operand
-        sta fwT+1
-        lda fwLd+2
-        sta fwT+2
-fwT:    lda $ffff,y
+        lda fwBlk,y              ; the row map is a fixed buffer now, not one of forty blocks
         cmp #255
         beq fwSkip              ; no source for this row -- the landing's room has not reached it
         tax
@@ -15587,8 +15606,46 @@ hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT
 hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
         !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
         !byte >hlRungE,>seatYBaseT,>seatPtrT,>seatFlagT,>seatXOffT
-${FALLSCENE ? `        * = ${hx16(FROWT + 0x500)}
-fRowT: ${chunk(fRowT, 32).trim()}` : ''}
+${FALLSCENE ? (() => { const P = fRowPack(); return `        * = ${hx16(FROWT + 0x500)}
+; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
+; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
+; run of $ff at one end. Now four 40-byte tables and the 25 rows generated on entry to fdWarp.
+; ~500 cycles per animation frame of a fall, against nothing per rendered frame -- see fRowPack.
+; fwBlk is a FIXED buffer, so both readers -- fdWarp's row loop and fdNoF's landing fill --
+; index it directly; they used to share fdWarp's patched operand to find the block of the frame.
+fwGenB: ldx apT
+        lda fKT,x
+        sta fwK
+        lda fLoT,x
+        sta fwLo
+        sta fwBlk+26            ; ...and offset 26, the landing's first room row: same number
+        lda fHiT,x
+        sta fwHi
+        lda fNT,x
+        sta fwBlk+25            ; offset 25 is where content stops, as it was in the table
+        ldy #24
+fwGl:   tya
+        cmp fwLo
+        bcc fwG255              ; before the content starts
+        cmp fwHi
+        beq fwGok
+        bcs fwG255              ; ...or after it ends
+fwGok:  clc
+        adc fwK                 ; src = row + k, k signed
+        jmp fwGst
+fwG255: lda #$ff
+fwGst:  sta fwBlk,y
+        dey
+        bpl fwGl
+        rts
+fwK:    !byte 0
+fwLo:   !byte 0
+fwHi:   !byte 0
+fwBlk:  !fill 32, 0             ; the block fdWarp reads, rebuilt once a frame
+fKT:    !byte ${P.K.join(',')}
+fLoT:   !byte ${P.LO.join(',')}
+fHiT:   !byte ${P.HI.join(',')}
+fNT:    !byte ${P.N.join(',')}`; })() : ''}
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.

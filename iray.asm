@@ -6055,12 +6055,7 @@ fdNoF:
         beq fdIncr
         ; LANDING: from the arc's bottom down to the room's first row, every frame. See fRowT's
         ; block byte 26 for why this is not incremental.
-        lda fwLd+1              ; the block fdWarp just used
-        sta fdRm+1
-        lda fwLd+2
-        sta fdRm+2
-        ldy #26
-fdRm:   lda $ffff,y             ; the room's first row this frame
+        lda fwBlk+26            ; the room's first row this frame, written by fwGenB
         sec
         sbc arcHi
         bcc fdTail              ; the room has reached the arc: nothing between them
@@ -6144,28 +6139,11 @@ fdWarp: lda arcInv               ; the landing's blocks follow the drop's in the
         jmp fdwI
 fdwD:   lda fFrm
 fdwI:   sta apT
-        and #$07                 ; point the load at this frame's 32-byte block. Patched rather
-        asl                      ;   than held in zero page: the table is not page aligned, and
-        asl                      ;   a crossing costs one cycle on 25 reads.
-        asl
-        asl
-        asl
-        clc
-        adc #<fRowT
-        sta fwLd+1
-        lda #$00
-        adc #$00
-        sta tmp                  ; carry out of the low byte
-        lda apT
-        lsr
-        lsr
-        lsr
-        clc
-        adc tmp
-        adc #>fRowT
-        sta fwLd+2
+        jsr fwGenB              ; build this frame's row map into fwBlk. Was twenty instructions
+                                ;   of pointer arithmetic to pick one of forty stored blocks --
+                                ;   all of which held the same thing a slide and two bounds say.
         ldy #25
-fwLd:   lda $ffff,y              ; operand patched above; offset 25 is where content stops
+        lda fwBlk,y             ; offset 25 is where content stops
         sta fwN
         lda #$00
         sta fwRow
@@ -6173,11 +6151,7 @@ fwLp:   lda fwRow
         cmp #25
         bcs fwDn
         tay
-        lda fwLd+1               ; re-read the row map through the same patched operand
-        sta fwT+1
-        lda fwLd+2
-        sta fwT+2
-fwT:    lda $ffff,y
+        lda fwBlk,y              ; the row map is a fixed buffer now, not one of forty blocks
         cmp #255
         beq fwSkip              ; no source for this row -- the landing's room has not reached it
         tax
@@ -8926,46 +8900,45 @@ hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
         !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
         !byte >hlRungE,>seatYBaseT,>seatPtrT,>seatFlagT,>seatXOffT
         * = $6b00
-fRowT: !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,255,255,23,0,0,0,0,0,0
-        !byte 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,255,255,23,0,0,0,0,0,0
-        !byte 3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,22,0,0,0,0,0,0
-        !byte 5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,20,0,0,0,0,0,0
-        !byte 7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,18,0,0,0,0,0,0
-        !byte 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,16,0,0,0,0,0,0
-        !byte 11,12,13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,14,0,0,0,0,0,0
-        !byte 13,14,15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,12,0,0,0,0,0,0
-        !byte 15,16,17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,10,0,0,0,0,0,0
-        !byte 17,18,19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,8,0,0,0,0,0,0
-        !byte 19,20,21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,6,0,0,0,0,0,0
-        !byte 21,22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,4,0,0,0,0,0,0
-        !byte 22,23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,3,0,0,0,0,0,0
-        !byte 23,24,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,2,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,25,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,25,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,25,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,24,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,0,22,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,0,20,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,0,19,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,0,18,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,0,16,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,0,15,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,0,13,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,0,11,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0,9,0,0,0,0,0
-        !byte 255,255,255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,0,7,0,0,0,0,0
-        !byte 255,255,255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,0,5,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
-        !byte 255,255,255,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,0,3,0,0,0,0,0
-        !byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,0,0,0,0,0,0,0
+; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
+; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
+; run of $ff at one end. Now four 40-byte tables and the 25 rows generated on entry to fdWarp.
+; ~500 cycles per animation frame of a fall, against nothing per rendered frame -- see fRowPack.
+; fwBlk is a FIXED buffer, so both readers -- fdWarp's row loop and fdNoF's landing fill --
+; index it directly; they used to share fdWarp's patched operand to find the block of the frame.
+fwGenB: ldx apT
+        lda fKT,x
+        sta fwK
+        lda fLoT,x
+        sta fwLo
+        sta fwBlk+26            ; ...and offset 26, the landing's first room row: same number
+        lda fHiT,x
+        sta fwHi
+        lda fNT,x
+        sta fwBlk+25            ; offset 25 is where content stops, as it was in the table
+        ldy #24
+fwGl:   tya
+        cmp fwLo
+        bcc fwG255              ; before the content starts
+        cmp fwHi
+        beq fwGok
+        bcs fwG255              ; ...or after it ends
+fwGok:  clc
+        adc fwK                 ; src = row + k, k signed
+        jmp fwGst
+fwG255: lda #$ff
+fwGst:  sta fwBlk,y
+        dey
+        bpl fwGl
+        rts
+fwK:    !byte 0
+fwLo:   !byte 0
+fwHi:   !byte 0
+fwBlk:  !fill 32, 0             ; the block fdWarp reads, rebuilt once a frame
+fKT:    !byte 0,1,3,5,7,9,11,13,15,17,19,21,22,23,0,0,0,0,0,0,0,0,0,232,234,236,237,238,240,241,243,245,247,249,251,253,253,253,253,0
+fLoT:   !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,25,25,25,25,25,25,25,25,25,24,22,20,19,18,16,15,13,11,9,7,5,3,3,3,3,0
+fHiT:   !byte 22,22,21,19,17,15,13,11,9,7,5,3,2,1,0,0,0,0,0,0,0,0,0,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24
+fNT:    !byte 23,23,22,20,18,16,14,12,10,8,6,4,3,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $7000
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
