@@ -7998,8 +7998,8 @@ orbOccHiT: !byte 112,112,112,112,112,112,112,112,112
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 orbXCT: !byte 6,20,7,19,15,0,0,0,0      ; from the MANIFEST, so its length cannot
 orbYCT: !byte 5,5,5,5,5,0,0,0,0      ;   disagree with what the swap moves
-orbColT2: !byte 12,12,12,12,0   ; NORB: a level with more orbs than this one
-                                ;   indexes it too, and a short table reads the byte after
+orbColT2: !byte 12,12,12,12,0   ; from the MANIFEST and SWAPPED: a level with
+                                ;   more entities than this one indexes past this one's count
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
 ; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
@@ -10029,7 +10029,7 @@ landYT: !byte 2
 ; LVLSHADOW = $f500 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 741 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 746 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -10045,16 +10045,16 @@ landYT: !byte 2
 ; the ceiling does not have.
 lvlAtT: !byte $02,$03   ; slot -> the level now in it
 lvlMeT: !byte $01                 ; ...and the level that is live
-lvlBasLoT: !byte $00,$e5
+lvlBasLoT: !byte $00,$ea
 lvlBasHiT: !byte $f5,$f7
-lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$01,$01,$01,$a0,$01,$01,$01,$04,$03,$05,$05,$01,$07,$09,$51,$01,$01,$01,$01,$01,$01
+lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>landXT,>landYT,>landAT,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbColT2,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$01,$01,$01,$a0,$01,$01,$01,$04,$03,$05,$05,$05,$01,$07,$09,$51,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
 ; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
-; 741 of them. The table index lives in lsIdx for the same reason.
+; 746 of them. The table index lives in lsIdx for the same reason.
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
@@ -10082,7 +10082,7 @@ lsByte:
 lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
 lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
 lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over 741 bytes is most of an extra frame.
+        txa                     ;   a byte, which over 746 bytes is most of an extra frame.
 lsD2:   sta $ffff,y
         iny
         cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
@@ -10102,7 +10102,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$1f
+        cmp #$20
         bne lsTab
         rts
 lsIdx:  !byte 0

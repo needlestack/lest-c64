@@ -80,6 +80,9 @@ for (const kv of envStr.split(/\s+/).filter(Boolean)) {
 // between two reads the machine is still in the loader (or jammed) and every other byte is image
 // data, not runtime state. Reading a not-yet-running program is what produced a whole afternoon of
 // plausible nonsense, so it is checked before anything is interpreted -- never assumed from a wait.
+// Captured before anything is added to `env`: the environment a plain `node build-iray.mjs`
+// would see, which is what `stop` rebuilds the shipping disk with.
+const SHIPENV = { ...process.env };
 const LIVE = 'frameCnt';
 env.LABELS = [...names.filter(n => !n.startsWith('@')), LIVE].join(',');   // the hook prints every label whose name contains one
 let out = '';
@@ -129,6 +132,14 @@ execSync(`${VICE} ${(marks.length || trap) ? '' : '-warp '}-ntsc +drive8truedriv
 const stop = () => {
   for (const p of execSync('pgrep -f x64sc || true').toString().split('\n').filter(Boolean))
     if (!before.has(p)) { try { execSync(`kill ${p}`); } catch {} }
+  // PUT THE SHIPPING DISK BACK. The build above runs with THIS probe's env, so latest.d64 is
+  // left holding whatever diagnostic was being measured -- and latest.d64 is the one disk, the
+  // thing a person loads to play. A FALLNOW build handed over this way drops the player through
+  // the floor every 256 frames, which reads as the game being broken rather than the disk being
+  // the wrong one. Three times before this was added. NOPROBEREBUILD=1 skips it for a run where
+  // the diagnostic disk is the point.
+  if (!process.env.NOPROBEREBUILD)
+    try { execSync('node build-iray.mjs', { env: SHIPENV, stdio: 'ignore' }); } catch {}
 };
 // Anything that goes wrong below is nearly always explained by a line VICE printed at startup
 // (a failed bind, a missing image), so show them rather than leaving a bare protocol error.

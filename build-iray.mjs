@@ -5464,6 +5464,13 @@ const LVL_TABLES = [
     return i < sw.length ? WALL_BASE[LVL] + sw[i] : 0xff;
   })],
   ['orbTallT', pad(orbTallT, NORB)],
+  // Per-entity body colour, and it TRAVELS. It was emitted once from the LIVE level and padded
+  // to NORB with 0 -- so on a level with more entities than the live one, every slot past the
+  // live level's count read 0 and drew BLACK. Level 1 is live with 4 entities, level 3 has 5,
+  // and level 3's third angel is index 4: the user, 2026-09-20, "the 3rd angel's custom color
+  // got somehow set to black". Sized across the levels but valued from one of them, which is
+  // exactly what orbOccT's stride did.
+  ['orbColT2', pad(orbCol, NORB)],
   ['orbHid0T', pad(orbHidT, NORB)], // per-entity and per-level: which entities start out of the world
   // The live counts. Shared loops read these instead of an immediate, which is the whole point:
   // a level with a socket has one more hole-like entity than a level without one, and the code
@@ -6863,10 +6870,13 @@ ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: te
         bne fnSkip              ;   mkRuns, objInit -- runs exactly as it does in play. Not while a
         ldx fnCnt               ;   fall is already running, or it would retrigger mid-animation.
         cpx #$10
-        bcs fnNoLog             ; the log is 16 entries; keep falling after that, just stop writing
+        bcs fnSkip              ; SIXTEEN FALLS AND STOP. It used to keep falling for ever, so the
+                                ;   run ended only when the poller happened to catch it -- asked
+                                ;   for 7 falls and read at 212, which looks exactly like a test
+                                ;   that hangs. Stopping leaves the state still for the read.
         lda lvlMeT              ; RECORD the level being left, so ONE run yields the whole sequence
         sta fnLog,x             ;   -- 1,2,3,1,2,3 for CHAIN=1,2,3. The FOURTH entry is the one
-fnNoLog:inc fnCnt               ;   that matters: a build-time slot index is right for three falls
+        inc fnCnt               ;   that matters: a build-time slot index is right for three falls
         lda hlv                 ;   and wrong from there (see lvlNxtT).
         clc
         adc nOrbT               ; the live exit's entity index, the same arithmetic fallChk uses
@@ -14888,8 +14898,8 @@ orbOccHiT: !byte ${orbOccHi.join(',')}
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 orbXCT: !byte ${LVLT('orbXCT').join(',')}      ; from the MANIFEST, so its length cannot
 orbYCT: !byte ${LVLT('orbYCT').join(',')}      ;   disagree with what the swap moves
-orbColT2: !byte ${pad(orbCol, NORB).join(',')}   ; NORB: a level with more orbs than this one
-                                ;   indexes it too, and a short table reads the byte after
+orbColT2: !byte ${LVLT('orbColT2').join(',')}   ; from the MANIFEST and SWAPPED: a level with
+                                ;   more entities than this one indexes past this one's count
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
 ; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
