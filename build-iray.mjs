@@ -6876,10 +6876,12 @@ ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: te
                                 ;   run ended only when the poller happened to catch it -- asked
                                 ;   for 7 falls and read at 212, which looks exactly like a test
                                 ;   that hangs. Stopping leaves the state still for the read.
-        lda lvlMeT              ; RECORD the level being left, so ONE run yields the whole sequence
-        sta fnLog,x             ;   -- 1,2,3,1,2,3 for CHAIN=1,2,3. The FOURTH entry is the one
-        inc fnCnt               ;   that matters: a build-time slot index is right for three falls
-        lda hlv                 ;   and wrong from there (see lvlNxtT).
+        lda lvlNxtT             ; RECORD THE SWAPPED lvlNxtT, NOT lvlMeT. lvlMeT is set FROM
+        sta fnLog,x             ;   lvlNxtT, so logging it recorded the INTENT and a broken swap
+        inc fnCnt               ;   still produced a perfect sequence -- which is exactly what it
+        lda hlv                 ;   did, and the bug reached the user. lvlNxtT travels WITH the
+                                ;   level, so it is a witness to which tables are actually live:
+                                ;   levels 1,2,3 read 2,3,1.
         clc
         adc nOrbT               ; the live exit's entity index, the same arithmetic fallChk uses
         tax
@@ -12487,8 +12489,6 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
         lda lvlNxtT             ; which LEVEL does THIS level's hole go to? $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
-        sta lvlMeT              ; A is the level being entered, and this is the one place both
-                                ;   paths still have it: wallsBack below clobbers A
 ${LVLALL.length > 1 ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        pla
         ldx #${hx(LVLALL.length - 1)}   ; WHICH SLOT is it in now? Not a build-time constant: the
@@ -12501,7 +12501,13 @@ lvGot:  ldy lvlMeT              ;   a swap against X = $ff
         sta lvlMeT              ; A is the level being entered: it is the live one now...
         tya
         sta lvlAtT,x            ;   ...and the one being left lands in the slot it came out of
-        txa` : `${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        lda #$00                ; ONE slot, so it is always slot 0 -- but say so rather than
+        txa` : `        sta lvlMeT              ; A is the level being entered. ONLY on this path: the search
+                                ;   below reads lvlMeT for the level being LEFT, and storing it
+                                ;   here first made that read the DESTINATION -- so the departing
+                                ;   level never went into lvlAtT, the table drifted from where the
+                                ;   slots really were, and by level 3 the search found nothing and
+                                ;   silently skipped the swap while the HUD already said "1".
+${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        lda #$00                ; ONE slot, so it is always slot 0 -- but say so rather than
                                 ;   leaning on wallsBack happening to leave A zero, which is what
                                 ;   made this correct by accident before lvlNxtT named a level`}
 ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}        jsr lvlSwap

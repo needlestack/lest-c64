@@ -5818,8 +5818,6 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         lda lvlNxtT             ; which LEVEL does THIS level's hole go to? $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
-        sta lvlMeT              ; A is the level being entered, and this is the one place both
-                                ;   paths still have it: wallsBack below clobbers A
         pha                     ; wallsBack does not preserve A, and the stack is cheaper here
         jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes
         pla
