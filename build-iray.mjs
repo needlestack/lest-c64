@@ -6072,12 +6072,16 @@ rqH     = $80fc                 ; rqH (0..3) picks which quarter of the 1024-ent
 cqtmp   = $80f2                 ; the colour this cell needs, while both its rows are queued
 cmtmp   = $80f4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
 cmv     = $80f5                 ; the ninth index bit -- the two columns the bucket throws away
-cqN     = $80f3                 ; entries in the colour queue
+${PLAN === 2 ? `cqN     = $80f3                 ; entries in the colour queue
 cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only
 cqLo    = $8100                 ; colour queue: address low, high, and the value to write.
 cqHi    = $8140                 ; Written after the buffer flip, never inline -- colour RAM is
 cqCol   = $8180                 ; NOT double buffered, so an inline write repaints the frame
                                 ; still on screen. That is the shimmer the old pairing hit.
+                                ; PLAN=2 ONLY, and gated because an equate is a RESERVATION:
+                                ; ungated these held 144 bytes of $80f1-$8180 -- and two bytes
+                                ; of ZERO PAGE -- out of the free map in every PLAN=3 build,
+                                ; for a flush that PLAN=3 does not emit at all.` : ''}
 pfFD    = $7cfd                  ; PROFMAX: raster frames the last rendered frame spanned
 pfHist  = $7e33                  ;   8 bytes: how many frames spanned 0..7 raster frames
 mxLo    = $7cfa                  ; PROFMAX: worst whole-frame delta, in raster lines
