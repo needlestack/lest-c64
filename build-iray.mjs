@@ -6473,23 +6473,28 @@ ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res s
 ; ONLY at runtime -- nothing is emitted into them -- so before they were named here the hole
 ; report counted both as free space and handed them out twice: the angel path table landed on
 ; $4900 and the BFS distance maps on $6200, and the drop came up as a screenful of garbage.
-runPlaneT = $fc00                ; per run id: the wall's plane coordinate and which face is
-runFaceT  = $fd00                ;   visible. Derived by mkRuns at boot and after every level
-                                 ;   change; a page each because a level may have up to 255 runs.
-                                 ;   Bank-3 squatters like bfsQ below: level 4's 100 runs outgrew
-                                 ;   the image block they were emitted in (2026-09-18).
-doomT   = $fb00                  ; per cell: 1 while it belongs to a wall mid-collapse. wallSink
+; ---- $6c00-$6fff: the four CPU pages, back in the image where they belong ----
+; All four were exiled into VIC bank 3 for ONE reason, each comment saying so in its own words:
+; the image had no free PAGE. Deleting fRowT (40 blocks x 32 bytes, all of it derivable) made
+; that false -- it left exactly four contiguous page-aligned pages here. Bringing them home
+; costs nothing in file bytes (the assembler pads holes either way) and buys 1,024 bytes of
+; bank 3, which is the scarce resource: it is what lets a FOURTH level be resident, and it
+; finally makes bank 3 graphics-only, which the build has been nagging about.
+runPlaneT = $6d00                ; per run id: the wall's plane coordinate and which face is
+runFaceT  = $6e00                ;   visible. Derived by mkRuns at boot and after every level
+                                 ;   change; a page each because a level may have up to 255 runs
+                                 ;   (level 4 has 100, which is what outgrew its old home).
+doomT   = $6c00                  ; per cell: 1 while it belongs to a wall mid-collapse. wallSink
                                  ;   matches the columns showing the doomed group through it, so a
-                                 ;   group can be any shape. Written only by wtCells, in bank 3
-                                 ;   because it must be a whole clear page and the image has none.
+                                 ;   group can be any shape. Written only by wtCells; needs a whole
+                                 ;   clear page, which the image now has again.
 obKT    = $7cea                 ; obOrder: the smallest key so far, its entity, and the keys
 obKI    = $7ceb
 obKeyT  = $7cec                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
-bfsQ    = $fe00                  ; the angel fill's queue: one byte per open cell, so up to 254.
-                                 ;   Pure scratch, nothing swaps it. It lived in the image until
-                                 ;   level 3's 196 open cells (2026-09-18); no image hole holds a
-                                 ;   page, so it squats a bank-3 page -- CPU-only data in VIC
-                                 ;   space, against the guideline, like IPIC and ILVL.
+bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cell, so up to 254.
+                                 ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
+                                 ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
+                                 ;   image hole held a page; back in the image since fRowT left.
 fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
 fallSnapS = $6200                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
