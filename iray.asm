@@ -1811,6 +1811,8 @@ subFin:
         lda #$13                ; DEN on: there is a rendered frame to show now
         sta pd11
         jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew
+        jsr hudX                ; the raster count, the LEVEL line and the 'L' key. Outside the
+                                ;   NOHUD gate: the key is a control, not a readout.
         jsr drawFps
         jsr drawDbg
 
@@ -4077,12 +4079,12 @@ drawFps:
         ldy #$00
         lda fpsTens
         clc
-        adc #$cb
+        adc #$c9
         sta (ppPtr),y
         iny
         lda fpsOnes
         clc
-        adc #$cb
+        adc #$c9
         sta (ppPtr),y
         rts
 
@@ -4193,7 +4195,7 @@ ddAng:  lda #$03
         and #$0f                ; off and feed them straight back in as PA=c0 PAF=40.
         jmp ddPut
 ddPut:  clc
-        adc #$cb
+        adc #$c9
         sta (ppPtr),y
         iny
         rts
@@ -5816,6 +5818,8 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         lda lvlNxtT             ; which LEVEL does THIS level's hole go to? $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
+        sta lvlMeT              ; A is the level being entered, and this is the one place both
+                                ;   paths still have it: wallsBack below clobbers A
         pha                     ; wallsBack does not preserve A, and the stack is cheaper here
         jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes
         pla
@@ -7977,7 +7981,7 @@ sockHT: !byte 107,94,80,67,54,40,34,27,20,13   ; DESCENDING h thresholds, scanne
 ;     it runs at oSDone, AFTER every cell of the orb has already been stamped and read.)
 ;   pair 11, another entity's occluder, where two stamps overlap. Opaque, and backing it white
 ;     would punch a hole through the first stamp.
-cellFillT: !byte 0,15,15,8,7,8,15,0,0,1,12,14,15,15,15,0,3,15,15,15,15,15,14,0,15,0,0,12,15,15,14,7,7,14,0,1,0,15,3,0,15,1,0,0,14,12,14,14,0,0,12,0,15,7,15,0,15,15,0,15,15,15,7,3,15,7,3,15,15,3,15,3,0,0,7,15,0,12,15,3,0,7,15,0,0,0,15,15,15,12,15,1,15,8,7,15,12,15,3,1,15,14,1,3,8,12,0,15,7,3,1,1,7,15,8,0,15,1,15,0,8,8,12,14,0,7,15,15,12,15,8,15,15,15,8,14,15,1,1,15,15,14,0,15,12,15,3,0,0,7,3,7,7,15,14,15,12,15,0,14,12,15,12,8,0,1,0,8,8,1,12,15,8,15,15,3,14,3,0,8,12,1,1,0,15,3,0,15,12,7,12,15,15,15,0,0,12,14,15,14,12,15,15,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,8,12,14,1,3,7,0,0,0,0,0,0
+cellFillT: !byte 0,15,15,8,7,8,15,0,0,1,12,14,15,15,15,0,3,15,15,15,15,15,14,0,15,0,0,12,15,15,14,7,7,14,0,1,0,15,3,0,15,1,0,0,14,12,14,14,0,0,12,0,15,7,15,0,15,15,0,15,15,15,7,3,15,7,3,15,15,3,15,3,0,0,7,15,0,12,15,3,0,7,15,0,0,0,15,15,15,12,15,1,15,8,7,15,12,15,3,1,15,14,1,3,8,12,0,15,7,3,1,1,7,15,8,0,15,1,15,0,8,8,12,14,0,7,15,15,12,15,8,15,15,15,8,14,15,1,1,15,15,14,0,15,12,15,3,0,0,7,3,7,7,15,14,15,12,15,0,14,12,15,12,8,0,1,0,8,8,1,12,15,8,15,15,3,14,3,0,8,12,1,1,0,15,3,0,15,12,7,12,15,15,15,0,0,12,14,15,14,12,10,4,10,2,2,10,10,4,10,10,10,8,8,8,8,8,10,0,8,10,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,8,12,14,1,3,7,0,0,0,0,0,0
 ; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
 ; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
 ; instead of three lsrs and an and per column: this runs once per logical column under every orb
@@ -8006,6 +8010,91 @@ orbColT2: !byte 12,12,12,12,0   ; from the MANIFEST and SWAPPED: a level with
 ; which named charset twins, do not.
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
 opbBaseT: !byte 0,12,24,36,48,60,72,84
+
+        ; ---- hudX: the per-frame raster count, the LEVEL line, and the 'L' key ----
+        ; Out here in the slack above ORB_SMALL because the main block has about fifteen bytes
+        ; and this is a hundred and thirty. jsr-entered from mloop; nothing falls into it.
+        * = $3f5f
+        ; ---- how many raster interrupts the frame just drawn took ----
+        ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
+        ; front of you, not an average. Six of these is about 10 fps.
+        ; It is the CLAMPED value, deliberately: tickDelta floors it at 1 and caps it at 32, and
+        ; neither bound is reachable while the game is running. 0 needs two renders inside one
+        ; raster tick, and this engine does 8-22 fps against a 50Hz IRQ; the cap bites only on the
+        ; BOOT frame, whose delta is the whole disk load, and after a cut scene. Those frames read
+        ; $20 instead of the truth, and they are the frames whose duration means nothing anyway.
+hudX:
+        lda #$02
+        jsr setRow
+        ldy #$00
+        lda dtv
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda dtv
+        and #$0f
+        jsr ddPut
+        ; ---- LEVEL n ----
+        ; RAYCNT=1 draws two hex digits on this row too and will sit on the "LE". It is opt-in
+        ; and this is not, so the diagnostic wins on the build that asks for it.
+        lda #$03
+        jsr setRow
+        ldy #$00
+        ldx #$00
+hxLv:   lda hxLvT,x
+        jsr ddPut               ; ddPut adds GLYPH0, so the table holds glyph INDICES
+        inx
+        cpx #$05
+        bne hxLv
+        lda #$00                ; BLANK is char code 0, not a readout glyph: it goes direct
+        sta (ppPtr),y
+        iny
+        lda lvlMeT
+        jsr ddPut
+        ; ---- 'L': go to the next level ----
+        ; Row $df bit 2, which nothing else in the build reads.
+        ; It does NOT call the level change: it stands the player on the live exit cell and lets
+        ; fallChk find them there, so the skip runs the REAL transition -- fallStep, wallsBack,
+        ; the slot lookup, lvlSwap, mkRuns, objInit -- rather than a second copy that could drift
+        ; from the one play uses. Same trick FALLNOW uses to test the chain headlessly.
+        ; JOYSTICK 1 SHARES $dc01 WITH THE KEYBOARD COLUMNS, and joy-1 LEFT pulls bit 2 -- the
+        ; very bit 'L' sits on. Read the port with NO row selected first: whatever is low then is
+        ; the stick, and it is forced back high before any key is believed. palKeys learned this
+        ; by cycling the walls every time the stick went right.
+        lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta hxJoy               ; 1 where a joystick line is active
+        lda #$df
+        sta $dc00
+        lda $dc01
+        ora hxJoy
+        eor #$ff
+        and #$04                ; bit 2 = 'L'
+        tax
+        beq hxDn                ; not pressed
+        cpx hxOld
+        beq hxDn                ; still down from last frame: one level a press, not one a frame
+        lda nExitT              ; a level with no exit has nowhere to skip to
+        beq hxDn
+        lda hlv                 ; the live exit's entity index, the arithmetic fallChk uses
+        clc
+        adc nOrbT
+        tay
+        lda orbXCT,y
+        sta px+1
+        lda orbYCT,y
+        sta py+1
+hxDn:   stx hxOld
+        lda #$ff
+        sta $dc00               ; leave the port neutral for the joystick read in readKeys
+        rts
+hxOld:  !byte 0                 ; 'L' last frame, for the edge test
+hxJoy:  !byte 0
+hxLvT:  !byte 18,14,19,14,18   ; L E V E L as glyph indices -- 14 is the hex digit E
         * = $4000  ; VIC bank 0 is full -- these live above it
 absCosT: !byte 255,255,255,255,255,254,253,252,251,250,248,247,245,243,241,239,237,234,231,229,226,223,220,216
         !byte 213,209,206,202,198,194,190,185,181,177,172,167,162,157,152,147,142,137,132,126,121,115,109,104
@@ -10018,6 +10107,11 @@ angPerT: !byte $78   ; 60ths between angel steps on THIS level, when it is close
 landAT: !byte $19                 ; which way to face on arrival; see LAND_A
 landXT: !byte 2
 landYT: !byte 2
+lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV block below,
+                                ;   because the HUD's LEVEL line reads it in every build -- a
+                                ;   standalone one included, where it is simply a constant. A
+                                ;   single-slot chain still CHANGES level, it just never has to
+                                ;   search for the slot.
 ; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
 ; Level 2's copy of every per-level table, in manifest order, as one blob. lvlSwap EXCHANGES it
 ; with the live tables, so this holds whichever level you are not standing in. It lives in table
@@ -10044,7 +10138,6 @@ landYT: !byte 2
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
 lvlAtT: !byte $02,$03   ; slot -> the level now in it
-lvlMeT: !byte $01                 ; ...and the level that is live
 lvlBasLoT: !byte $00,$ea
 lvlBasHiT: !byte $f5,$f7
 lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<landXT,<landYT,<landAT,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
@@ -10586,7 +10679,7 @@ oSPut:  sta ohMsk
         sta osCov
         lda (osPtr),y
         beq oSPdn               ; BLANK: leave it
-        cmp #$cb
+        cmp #$c9
         bcc oSPedg              ; a ramp or a step (SOLID is caught below)
         cmp #$dd
         bcc oSPdn               ; a readout: leave it
@@ -11207,7 +11300,7 @@ rampTlo: !byte 34,34,34,34,34,106,51,99,117,165,181,150,150,150,150,63,34,34,34,
         !byte 34,34,34,34,115,23,73,137,91,71,103,98,98,98,65,65,85,85,85,39,42,36,124,41
         !byte 102,66,69,98,98,94,94,108,55,55,158,158,26,15,48,110,38,175,112,152,152,94,108,108
         !byte 55,195,195,76,166,72,25,79,185,62,189,125,95,95,108,92,104,114,114,172,93,3,105,2
-        !byte 157,12,75,95,95,92,92,100,168,114,167,167,93,122,128,59,21,18,88,6,201,201,118,118
+        !byte 157,12,75,95,95,92,92,100,168,114,167,167,93,122,128,59,21,18,88,6,6,6,118,118
         !byte 120,167,167,162,156,190,47,60,14,19,68,54,29,29,29,57,163,27,162,96,30,30,135,192
         !byte 171,52,17,126,126,20,20,20,27,96,96,196,196,141,101,101,28,78,24,20,20,20,20,20
         !byte 27,96,96,196,196,141,101,101,191,161,24,20,20,20,20,20,27,96,96,196,22,141,101,143
@@ -11234,9 +11327,9 @@ stepT1lo: !byte 183,34,23,84,9,117,165,181,35,183,80,80,138,138,74,74,98,65,183,
         !byte 3,2,2,145,75,95,22,33,33,143,143,64,107,127,100,168,168,120,128,182,91,71,131,169
         !byte 167,156,122,128,2,21,12,18,13,22,33,33,143,143,61,107,127,118,121,120,179,179,121,91
         !byte 71,131,35,77,156,122,128,47,14,18,68,67,89,33,33,101,116,61,19,17,29,5,130,179
-        !byte 179,179,134,134,37,56,163,180,179,134,37,136,18,68,202,89,180,30,135,192,70,52,17,126
+        !byte 179,179,134,134,37,56,163,180,179,134,37,136,18,68,67,89,180,30,135,192,70,52,17,126
         !byte 5,130,130,179,130,5,179,17,5,27,96,179,134,37,136,136,87,37,10,33,33,101,143,28
-        !byte 28,24,202
+        !byte 28,24,17
         * = $b200
 stepT1hi: !byte 183,8,80,73,138,91,71,103,63,183,80,80,74,74,74,32,32,65,123,4,4,4,4,4
         !byte 4,4,4,39,42,142,124,41,66,66,103,109,7,43,43,147,81,74,32,32,108,22,33,33
@@ -11244,10 +11337,10 @@ stepT1hi: !byte 183,8,80,73,138,91,71,103,63,183,80,80,74,74,74,32,32,65,123,4,4
         !byte 22,33,33,143,143,149,151,149,149,76,166,15,25,25,185,185,189,109,76,164,43,25,81,155
         !byte 140,151,108,22,33,33,143,143,151,151,151,53,114,93,3,3,2,91,71,131,109,172,93,3
         !byte 105,2,157,140,75,92,22,33,33,143,143,64,127,64,64,120,167,3,128,182,91,71,131,109
-        !byte 156,156,122,154,139,21,18,88,201,22,33,33,143,143,61,127,113,113,120,120,179,128,121,91
+        !byte 156,156,122,154,139,21,18,88,6,22,33,33,143,143,61,127,113,113,120,120,179,128,121,91
         !byte 71,131,56,162,188,190,47,116,14,19,90,56,89,33,33,101,61,61,132,57,57,120,130,179
         !byte 134,179,134,134,37,56,96,30,30,135,192,171,19,17,56,196,176,33,101,70,97,132,82,20
-        !byte 5,130,179,134,134,37,87,17,56,144,141,134,134,37,133,87,17,202,11,11,197,199,86,97
+        !byte 5,130,179,134,134,37,87,17,56,144,141,134,134,37,133,87,17,56,11,11,197,199,86,97
         !byte 161,40,126
         * = $b300
 stepT2lo: !byte 183,34,23,51,9,111,71,150,35,39,8,80,138,138,74,69,98,65,10,8,80,138,74,74
@@ -11258,7 +11351,7 @@ stepT2lo: !byte 183,34,23,51,9,111,71,150,35,39,8,80,138,138,74,69,98,65,10,8,80
         !byte 3,2,157,145,145,131,89,200,50,45,2,155,107,127,100,168,120,167,128,2,21,18,16,63
         !byte 170,156,122,128,2,2,18,18,13,89,200,50,45,59,14,107,127,118,121,120,179,179,2,14
         !byte 18,90,56,77,156,190,128,47,14,12,68,67,89,180,33,101,116,61,19,17,29,5,130,179
-        !byte 134,37,136,18,17,56,163,180,30,134,37,136,19,68,202,89,180,50,135,192,70,52,17,126
+        !byte 134,37,136,18,17,56,163,180,30,134,37,136,19,68,67,89,180,50,135,192,70,52,17,126
         !byte 5,130,130,134,37,136,87,17,56,27,27,179,134,37,136,87,87,56,10,200,50,45,174,191
         !byte 161,24,24
         * = $b400
@@ -11268,11 +11361,11 @@ stepT2hi: !byte 49,115,119,49,137,71,16,16,63,39,8,80,138,74,74,74,32,65,10,8,80
         !byte 10,26,15,147,81,155,151,151,149,178,166,15,25,25,185,177,125,109,164,164,43,25,81,31
         !byte 177,125,173,10,200,50,25,81,155,151,151,53,114,93,3,3,2,157,177,16,63,170,93,3
         !byte 44,2,155,140,75,173,10,200,50,45,2,155,127,100,64,114,167,3,128,2,21,18,16,63
-        !byte 77,156,122,154,139,21,107,193,201,10,200,50,45,59,14,127,127,113,120,120,179,128,2,14
+        !byte 77,156,122,154,139,21,107,193,6,10,200,50,45,59,14,127,127,113,120,120,179,128,2,14
         !byte 18,90,56,77,180,190,47,116,61,19,90,56,22,176,176,61,116,61,132,29,57,163,130,179
         !byte 134,37,136,18,17,56,89,180,180,135,192,171,19,17,56,22,176,176,101,70,70,132,82,20
         !byte 5,130,179,134,37,136,87,17,56,144,180,96,135,133,133,87,17,56,11,11,197,199,86,129
-        !byte 161,40,202
+        !byte 161,40,126
         * = $b500
 stepT3lo: !byte 115,34,106,51,99,99,165,181,35,183,80,119,49,137,91,71,150,150,46,46,65,65,65,65
         !byte 65,16,65,85,148,36,84,9,99,165,181,35,7,43,142,41,41,66,69,69,98,46,46,46
@@ -11282,9 +11375,9 @@ stepT3lo: !byte 115,34,106,51,99,99,165,181,35,183,80,119,49,137,91,71,150,150,4
         !byte 3,2,2,145,131,131,46,46,46,46,46,92,140,75,92,168,93,3,128,128,128,128,169,169
         !byte 123,122,122,128,2,21,12,13,13,46,46,46,199,86,118,107,193,6,120,156,122,128,163,163
         !byte 163,169,169,123,188,190,47,60,14,14,68,13,159,159,61,61,61,61,19,90,54,163,156,30
-        !byte 30,27,27,27,27,131,196,30,30,135,135,14,19,68,67,159,176,176,70,70,70,132,17,202
-        !byte 27,96,96,27,27,27,27,27,27,22,196,141,135,101,28,87,17,202,11,11,197,199,86,97
-        !byte 161,24,202
+        !byte 30,27,27,27,27,131,196,30,30,135,135,14,19,68,67,159,176,176,70,70,70,132,17,17
+        !byte 27,96,96,27,27,27,27,27,27,22,196,141,135,101,28,87,17,17,11,11,197,199,86,97
+        !byte 161,24,17
         * = $b600
 stepT3hi: !byte 183,115,119,73,182,117,117,181,35,183,80,119,138,138,66,71,103,98,46,46,65,65,65,65
         !byte 65,98,4,7,42,36,124,41,117,102,102,35,7,43,142,146,41,38,69,69,94,46,46,46
@@ -11294,8 +11387,8 @@ stepT3hi: !byte 183,115,119,73,182,117,117,181,35,183,80,119,138,138,66,71,103,9
         !byte 44,2,155,140,75,184,46,46,46,46,46,92,107,187,64,167,156,122,128,128,128,128,169,169
         !byte 123,123,139,139,139,21,18,88,153,46,46,46,199,86,118,107,193,118,162,156,122,128,163,163
         !byte 163,169,169,159,159,116,116,116,14,19,68,67,11,176,176,61,61,61,132,17,29,162,96,30
-        !byte 30,27,27,27,27,131,159,176,176,135,192,171,52,17,202,11,11,197,199,86,129,132,82,20
-        !byte 160,200,50,27,27,27,27,27,27,22,33,33,101,143,191,161,24,202,11,11,197,199,86,129
+        !byte 30,27,27,27,27,131,159,176,176,135,192,171,52,17,17,11,11,197,199,86,129,132,82,20
+        !byte 160,200,50,27,27,27,27,27,27,22,33,33,101,143,191,161,24,17,11,11,197,199,86,129
         !byte 198,40,24
         * = $b700
 rampThrT: !byte 0,0,0,0,0,1,1,1,2,3,3,7,0,0,6,9,0,0,0,0,0,1,2,0,3,0,0,9,0,0,0,0,0,0,0,0,1,0,2,4,0,0,0,10,0,0,0,0,0,0,0,0,2,3,0,5,0,0,8,11,0,0,0,0,0,0,1,2,0,4,5,0,6,7,0,11,10,0,12,14,1,1,0,2,4,0,6,7,0,9,0,12,12,12,0,15,1,2,2,0,5,6,0,8,8,0,10,12,0,13,14,15,1,0,4,5,0,0,8,0,10,11,0,13,13,0,15,16,2,3,0,0,6,0,8,10,0,12,13,14,15,15,0,16,3,5,5,0,7,9,0,11,12,0,13,15,0,16,16,0,0,0,7,0,0,0,0,0,13,14,0,16,16,0,0,0,7,9,10,11,11,12,0,13,14,15,16,0,0,0,0,0,5,0,9,0,10,12,0,13,15,0,16,0,0,0,0,0,5,0,9,0,0,12,13,0,15,16,0,0,0,0,0,0,6,10,0,0,0,0,14,15,0,16,0,0,0,0,0,0,9,0,0,0,14,15,15,16,16,0,0,0,0,0,0,0

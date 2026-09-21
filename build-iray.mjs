@@ -1509,7 +1509,9 @@ const digGlyph = [
  7,5,5,5,7, 2,6,2,2,7, 7,1,7,4,7, 7,1,7,1,7, 5,5,7,1,1,          // 0-4
  7,4,7,1,7, 7,4,7,5,7, 7,1,2,2,2, 7,5,7,5,7, 7,5,7,1,7,          // 5-9
  2,5,7,5,5, 6,5,6,5,6, 7,4,4,4,7, 6,5,5,5,6, 7,4,6,4,7, 7,4,6,4,4, // A-F (glyph idx = nibble)
- 5,5,2,5,5, 5,5,2,2,2];                                          // X (16), Y (17) labels
+ 5,5,2,5,5, 5,5,2,2,2,                                          // X (16), Y (17) labels
+ 4,4,4,4,7, 5,5,5,5,2];                                         // L (18), V (19): "LEVEL" reuses
+                                                                //   hex E for its two Es
 const NGLYPH = digGlyph.length / 5;
 
 // ================= ANGCHAR=1: the angel's SILHOUETTE drawn in CHARACTERS =================
@@ -7722,7 +7724,9 @@ dnSkip:                         ;   headless run can TAKE and then PUT DOWN. One
                                 ;   exercised the pick-up half, which is why the drop path could
                                 ;   carry a 16-wide coordinate mask for as long as it did.
 ` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
-${ANGCHAR ? '        jsr angChar             ; AFTER renderSym and occStamp, for the same reason they are\n                                ;   ordered that way: it overwrites cells they just drew\n' : ''}${PROFILE && !PROFILE1 ? '' : ''}${NOHUD ? '' : `        jsr drawFps
+${ANGCHAR ? '        jsr angChar             ; AFTER renderSym and occStamp, for the same reason they are\n                                ;   ordered that way: it overwrites cells they just drew\n' : ''}${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the raster count, the LEVEL line and the 'L' key. Outside the
+                                ;   NOHUD gate: the key is a control, not a readout.
+${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
 ${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
@@ -10419,7 +10423,7 @@ dieDbg: lda #$01                ; the readout is drawn in $d022, which the fade 
         jmp dbHex
 ` : ''}
 drawDbg:
-${NOHUD ? '        jmp ddAng               ; angle only: SPIN measurement still needs it' : ''}
+${NOHUD ? "        jmp ddAng               ; DEADCODE-OK: angle only, so the X/Y block below is\n                                ;   jumped over rather than compiled out -- SPIN measurement\n                                ;   still needs ddAng, and the rest is cheaper left in place." : ''}
         lda #${hx(HUDROW)}      ; see drawFps: the top character row is half under the border
         jsr setRow
         ldy #36
@@ -12483,6 +12487,8 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
         lda lvlNxtT             ; which LEVEL does THIS level's hole go to? $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
+        sta lvlMeT              ; A is the level being entered, and this is the one place both
+                                ;   paths still have it: wallsBack below clobbers A
 ${LVLALL.length > 1 ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        pla
         ldx #${hx(LVLALL.length - 1)}   ; WHICH SLOT is it in now? Not a build-time constant: the
@@ -14906,6 +14912,91 @@ orbColT2: !byte ${LVLT('orbColT2').join(',')}   ; from the MANIFEST and SWAPPED:
 ; which named charset twins, do not.
 popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
 opbBaseT: !byte 0,12,24,36,48,60,72,84
+
+        ; ---- hudX: the per-frame raster count, the LEVEL line, and the 'L' key ----
+        ; Out here in the slack above ORB_SMALL because the main block has about fifteen bytes
+        ; and this is a hundred and thirty. jsr-entered from mloop; nothing falls into it.
+        * = $3f5f
+${NOHUD ? '' : `        ; ---- how many raster interrupts the frame just drawn took ----
+        ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
+        ; front of you, not an average. Six of these is about 10 fps.
+        ; It is the CLAMPED value, deliberately: tickDelta floors it at 1 and caps it at ${DT_MAX}, and
+        ; neither bound is reachable while the game is running. 0 needs two renders inside one
+        ; raster tick, and this engine does 8-22 fps against a 50Hz IRQ; the cap bites only on the
+        ; BOOT frame, whose delta is the whole disk load, and after a cut scene. Those frames read
+        ; ${hx(DT_MAX)} instead of the truth, and they are the frames whose duration means nothing anyway.
+`}hudX:
+${NOHUD ? '' : `        lda #${hx(HUDROW + 1)}
+        jsr setRow
+        ldy #$00
+        lda dtv
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda dtv
+        and #$0f
+        jsr ddPut
+        ; ---- LEVEL n ----
+        ; RAYCNT=1 draws two hex digits on this row too and will sit on the "LE". It is opt-in
+        ; and this is not, so the diagnostic wins on the build that asks for it.
+        lda #${hx(HUDROW + 2)}
+        jsr setRow
+        ldy #$00
+        ldx #$00
+hxLv:   lda hxLvT,x
+        jsr ddPut               ; ddPut adds GLYPH0, so the table holds glyph INDICES
+        inx
+        cpx #$05
+        bne hxLv
+        lda #$00                ; BLANK is char code 0, not a readout glyph: it goes direct
+        sta (ppPtr),y
+        iny
+        lda lvlMeT
+        jsr ddPut
+`}        ; ---- 'L': go to the next level ----
+        ; Row $df bit 2, which nothing else in the build reads.
+        ; It does NOT call the level change: it stands the player on the live exit cell and lets
+        ; fallChk find them there, so the skip runs the REAL transition -- fallStep, wallsBack,
+        ; the slot lookup, lvlSwap, mkRuns, objInit -- rather than a second copy that could drift
+        ; from the one play uses. Same trick FALLNOW uses to test the chain headlessly.
+        ; JOYSTICK 1 SHARES $dc01 WITH THE KEYBOARD COLUMNS, and joy-1 LEFT pulls bit 2 -- the
+        ; very bit 'L' sits on. Read the port with NO row selected first: whatever is low then is
+        ; the stick, and it is forced back high before any key is believed. palKeys learned this
+        ; by cycling the walls every time the stick went right.
+        lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta hxJoy               ; 1 where a joystick line is active
+        lda #$df
+        sta $dc00
+        lda $dc01
+        ora hxJoy
+        eor #$ff
+        and #$04                ; bit 2 = 'L'
+        tax
+        beq hxDn                ; not pressed
+        cpx hxOld
+        beq hxDn                ; still down from last frame: one level a press, not one a frame
+        lda nExitT              ; a level with no exit has nowhere to skip to
+        beq hxDn
+        lda hlv                 ; the live exit's entity index, the arithmetic fallChk uses
+        clc
+        adc nOrbT
+        tay
+        lda orbXCT,y
+        sta px+1
+        lda orbYCT,y
+        sta py+1
+hxDn:   stx hxOld
+        lda #$ff
+        sta $dc00               ; leave the port neutral for the joystick read in readKeys
+        rts
+hxOld:  !byte 0                 ; 'L' last frame, for the edge test
+hxJoy:  !byte 0
+${NOHUD ? '' : `hxLvT:  !byte 18,14,19,14,18   ; L E V E L as glyph indices -- 14 is the hex digit E`}
 ` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
 absCosT: ${chunk(absCos).trim()}
 absSinT: ${chunk(absSin).trim()}
@@ -16309,6 +16400,11 @@ angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, wh
 landAT: !byte ${hx(LAND_A)}                 ; which way to face on arrival; see LAND_A
 landXT: !byte ${LANDS_AT.map(l => l[0]).join(',')}
 landYT: !byte ${LANDS_AT.map(l => l[1]).join(',')}
+lvlMeT: !byte ${hx(LVL)}                 ; the level that is live. OUTSIDE the TWOLEV block below,
+                                ;   because the HUD's LEVEL line reads it in every build -- a
+                                ;   standalone one included, where it is simply a constant. A
+                                ;   single-slot chain still CHANGES level, it just never has to
+                                ;   search for the slot.
 ${TWOLEV ? `; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
 ; Level 2's copy of every per-level table, in manifest order, as one blob. lvlSwap EXCHANGES it
 ; with the live tables, so this holds whichever level you are not standing in. It lives in table
@@ -16335,7 +16431,6 @@ ${LVLALL.length > 1 ? `; WHICH LEVEL IS IN WHICH SLOT, RIGHT NOW. lvlSwap exchan
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
 lvlAtT: !byte ${LVLALL.map(L => hx(L.level)).join(',')}   ; slot -> the level now in it
-lvlMeT: !byte ${hx(LVL)}                 ; ...and the level that is live
 ` : ''}lvlBasLoT: !byte ${LVLALL.map((_, i) => hx((LVLSHADOW + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) & 255)).join(',')}
 lvlBasHiT: !byte ${LVLALL.map((_, i) => hx((LVLSHADOW + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) >> 8)).join(',')}
 lvlDstLoT: !byte ${LVL_TABLES.map(([n]) => `<${n}`).join(',')}
