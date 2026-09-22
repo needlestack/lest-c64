@@ -2377,14 +2377,16 @@ palKeys:
         lda $dc01
         ora pkJoy               ; force the stick's bits high = "not pressed" in this active-low
         eor #$ff                ; read, THEN invert so 1 means pressed
-        and #$09
+        and #$49                ; row 7: bit0 '1', bit3 '2', bit6 'Q'
         sta pkNew
         lda #$fd
         sta $dc00
         lda $dc01
         ora pkJoy
         eor #$ff
-        and #$01
+        and #$03                ; row 1: bit0 '3', bit1 'W'
+        asl                     ;   -> bits 4 and 5, which nothing else in pkEdge uses
+        asl
         asl
         asl
         ora pkNew
@@ -2396,17 +2398,10 @@ palKeys:
         sta pkOld
         lda #$ff
         sta $dc00               ; leave the port neutral for the joystick read in readKeys
-        lda pkEdge
-        and #$01
-        beq pk2
-        inc colW
-        lda colW
-        and #$0f
-        sta colW
-        sta $d021
-        sta irqB0+1             ; or the next IRQ puts the old ink straight back
-        sta irqB2+1
-
+        jsr palCol              ; '1' both grounds, 'Q' the floor, 'W' the ceiling.
+                                ;   Out of the main block: three keys' worth of advance does not
+                                ;   fit in what is left of it, and this frees what the one key
+                                ;   used to cost.
 pk2:    lda pkEdge
         and #$08
         beq pk3
@@ -2416,7 +2411,7 @@ pk2:    lda pkEdge
         sta colB
         sta $d022
 pk3:    lda pkEdge
-        and #$04
+        and #$10                ; '3' sits at bit 4 now
         beq pkDn
         inc colS
         lda colS
@@ -9117,6 +9112,40 @@ faceScrT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
+; ---- palCol: the ground inks, by key ----
+; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
+; floor alone and 'W' the ceiling alone. They are separable because the raster split gave the two
+; their own registers: irqB0 is everything above the horizon, irqB1 everything below it. Pressing
+; '1' used to move only the ceiling once irqB1 existed, which is the bug that found this feature.
+; No $d021 store: the IRQ writes both regions from these two operands every frame anyway.
+palCol: lda pkEdge
+        and #$01
+        beq pcQ
+        jsr pcCei
+        jsr pcFlr
+pcQ:    lda pkEdge
+        and #$40                ; 'Q'
+        beq pcW
+        jsr pcFlr
+pcW:    lda pkEdge
+        and #$20                ; 'W'
+        beq pcDn
+        jsr pcCei
+pcDn:   rts
+pcCei:  inc colW
+        lda colW
+        and #$0f
+        sta colW
+        sta irqB0+1
+        rts
+pcFlr:  inc colF
+        lda colF
+        and #$0f
+        sta colF
+        sta irqB1+1
+        rts
+colF:   !byte $01             ; the FLOOR's ink. colW is the ceiling's now.
+
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
 ; because the main block is the tightest resource in the project and this runs once.
 lvlBoot:lda #$00
@@ -9129,6 +9158,8 @@ lvlBoot:lda #$00
 ; the whole point of the split.
 lvlHi:  lda colW
         sta irqB0+1
+        lda colF                ; and the floor's, which the overlap split had borrowed
+        sta irqB1+1
         rts
 
 ; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
@@ -9150,6 +9181,7 @@ lvlLook: ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level A
         sta $d023
 
         lda colW                ; the two regions BELOW the departing rim are this level
+        sta colF                ;   ceiling and floor back in step: a level names one ground
         sta irqB1+1             ;   now -- but NOT irqB0. The overlap frames still have the old
         sta irqB2+1             ;   level's rim at the top, and lvlHi hands that over later.
 symPut: ldx lvlMeT
