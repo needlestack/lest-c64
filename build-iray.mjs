@@ -3108,6 +3108,11 @@ const ANYSYM = CHAIN.some(n => LEVEL_SYM[n]);
 // Does any level's GROUND colour differ from the first's? If not there is nothing for a split to
 // show, and none of the two-tone machinery below is emitted.
 const CEILVARY = CHAIN.some(n => palOf(n).ceil !== palOf(CHAIN[0]).ceil);
+// How far BELOW the arc's split the ground colour changes, in raster lines. The charset split
+// has to sit at the arc's TOP -- that is where the rim glyph needs charset A -- but the arc's
+// top rows still draw the upper level's floor around the curve, so swapping colour there tints
+// the last line or two of the room you are leaving. 16 = two character rows.
+const CSPLIT = +(process.env.CSPLIT ?? 16);
 // ---- ONE dial: how short a seam is allowed to get before it is not drawn at all ----
 // SEAMPIX is the line's half-height ABOVE the horizon, in pixels. The line is mirrored, and the
 // horizon char row is SHARED rather than doubled, so 8 here is a 16px line in all: one full char
@@ -8047,6 +8052,12 @@ mvs:    lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
+${CEILVARY ? `        lda #$ff                ; region 4 off until region 3 arms it. Its compare is
+        sta irqCm3+1            ;   PATCHED by region 3, so left alone it holds last frame's
+                                ;   line -- and when pSplit2 jumps back to 246 at a fall's end
+                                ;   that stale line is below it, so region 4 would match first
+                                ;   and region 3's charset store would never run.
+` : ''}
         lda pCh0
         sta irqC0+1
         lda pCh1
@@ -10518,14 +10529,31 @@ irqC1:  ora #${hx(CB_B)}
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
-irqA2:  lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
+irqA2:${CEILVARY ? `
+irqCm3: cmp #$ff                ; --- past the COLOUR line? then this is region 4 --- (patched
+        bcs irqA3               ;   by region 3 below, so it always trails it by CSPLIT)` : ''}
+        lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
 irqC2:  ora #${hx(CB_A)}
         sta $d018
-${CEILVARY ? `irqB2:  lda #${hx(palOf(LVL).ceil)}      ; ...and the GROUND colour of whatever is seen through
-        sta $d021               ;   the hole. AFTER the $d018 store, never before it: that one is
-                                ;   the cycle-critical half -- see the cmp # note above -- and a
-                                ;   late background write only frets one line, in a band that is
-                                ;   a single flat colour anyway.
+${CEILVARY ? `        lda irqCm2+1            ; arm the colour line: CSPLIT rasters below this one, because
+        clc                     ;   the arc's top rows still draw the DEPARTING level's floor
+        adc #${hx(CSPLIT)}              ;   around the curve, so flipping colour up there tints the
+        bcs irqNo               ;   last line or two of the room being left.
+        cmp #246                ; no room below? then region 4 simply does not run this frame.
+        bcs irqNo               ;   NOT clamped to 245: in normal play pSplit2 IS 246, so a clamp
+        sta $d012               ;   puts the colour line ABOVE the charset line, region 4 matches
+        sta irqCm3+1            ;   first, and region 3's $d018 store never runs at all.
+        jmp irqd
+irqNo:  lda #$ff                ; $ff never matches: region 4 is skipped this frame
+        sta irqCm3+1
+        bne irqA3x              ; always taken
+irqA3:  ; --- the colour line: the charset is region 3's already, only the ground flips ---
+irqB2:  lda #${hx(palOf(LVL).ceil)}      ; the ground of whatever is seen THROUGH the hole. After
+        sta $d021               ;   region 3's $d018 store, so that one keeps its timing -- it is
+                                ;   the cycle-critical half (see the cmp # note above). A late
+                                ;   background write only frets one line, in a band that is one
+                                ;   flat colour anyway.
+irqA3x:
 ` : ''}        lda #$00
         sta $d012
         jmp irqd
