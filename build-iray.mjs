@@ -10511,7 +10511,7 @@ ${BANDS ? `        ; ---- BANDS=1: shade the ceiling and floor by raster line --
         ora d018vm
         sta $d018
 bdNoC:  lda bandCT,x
-        sta $d021
+        jsr setGnd
         inx
         cpx #${hx(BANDS_N)}
         bne bdNx
@@ -14156,7 +14156,7 @@ dfLN:   sec
         sbc phi
         sta pa
 dfLD:   lda #$00                ; the room has already gone; $d023 is untouched, so the seams
-        sta $d021               ;   stay and the angel is not left alone in the black
+        jsr setGnd               ;   stay and the angel is not left alone in the black
         sta $d022
         lda frameCnt            ; re-date, so "elapsed >= DIE_OUT" fires DIE_PAUSE frames from now
         sec
@@ -14190,7 +14190,7 @@ dffOk:  tax
         and #$0f                ;   SET -- white reads as $f1, not $01, which indexed a 16-entry
         tax                     ;   table 241 bytes past its end
         lda darkerT,x
-        sta $d021
+        jsr setGnd
         lda $d022
         and #$0f
         tax
@@ -14239,7 +14239,7 @@ dsCol:  lda #${hx(8 | FACEART.colram)}  ; bit 3 keeps the cell multicolor; the f
         sta pCh1
         sta pCh2
         lda #$00                ; still black: phase 2 ramps up from here
-        sta $d021
+        jsr setGnd
         sta $d022
         sta $d023
         lda #$00                ; which edge the face arrives at. Increasing pa sweeps world
@@ -14297,7 +14297,7 @@ ${DIE_SHOW >= 256 ? `        jmp dshHld              ; DIESHOW>=256: hold the pi
         ; takes about a frame and a half and both buffers are displayed in turn, so it cannot
         ; happen while a picture is up without showing itself.
         lda #$00
-        sta $d021
+        jsr setGnd
         sta $d022
         sta $d023
 
@@ -15983,6 +15983,15 @@ ${TWOLEV ? (() => {
     .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
     .join('\n');
 })() : ''}
+; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
+; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
+; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
+; pictures -- goes through here, which costs each site nothing: jsr is the same three bytes the
+; store was. A is preserved, so a site that also writes $d022 still can.
+setGnd: sta $d021
+        sta irqB0+1
+        sta irqB1+1
+        rts
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
@@ -18773,7 +18782,7 @@ dgD:    ; ---- which way round, and unhide it ----
         ; the signed difference from the current heading gives both the direction to turn and a
         ; first estimate of how far. dieOff starts far from centre so the stop cannot fire early.
         lda #$0f                ; white -> grey3 at once: the room starts leaving as you are grabbed
-        sta $d021
+        jsr setGnd
         lda #$ff                ; unsigned "never projected", far outside the lock window
         sta dieOff
         lda #${hx(DIE_CAP)}
@@ -18899,7 +18908,7 @@ ppWB:   sta $ffff,y
 ; One write per palette register, on a frame that is already black. No ramp and no slide: between
 ; one frame and the next the picture is simply there.
 picOn:  ${SOUND ? 'jsr snBoom\n        ' : ''}lda #${hx(PICS.d021)}
-        sta $d021
+        jsr setGnd
         lda #${hx(PICS.d022)}
         sta $d022
         lda #${hx(PICS.d023)}
@@ -18945,30 +18954,32 @@ idolLat:lda idolWk
 ; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
 ; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
 ; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda idolOn              ; ---- above the split: the world's ----
-        beq spW0
-        lda #${hx(IDOL_SPR.under)}
+sprPal: lda dieSt               ; ---- the death scene wants the inks to SIT STILL ----
+        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
+        lda idolOn              ;   before any of this existed, and the scene's fade was written
+        beq spLvl               ;   against it. "The world no longer goes black correctly."
+        lda #${hx(IDOL_SPR.under)}      ; ---- above the split: the world's ----
         ldy #${hx(IDOL_SPR.hi)}
         bne spWSt               ; always: brown is not zero
-spW0:   lda sprU                ; whatever lvlLook left for this level
+spLvl:  lda sprU                ; whatever lvlLook left for this level
         ldy sprH
-spWSt:  sta $d025               ; written HERE, at raster ~250, because osFlush runs just after
-        sty $d026               ;   the buffer flip spins on it -- so it lands below the split
-                                ;   and before the next frame's sprites, and needs no region of
-                                ;   its own at the top of the frame.
-        ldx carry               ; ---- below it: whatever is in your hand ----
-        beq spH0                ; empty: match the world, so the split shows nothing
+spWSt:  sta $d025
+        sty $d026
+        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
+        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
+                                ;   tinting things and walks down into the last few rows.
+        lda dieSt
+        bne spDn
+        ldx carry               ; ---- below the split: only if something special is in hand ----
+        beq spDn
         dex                     ;   carry is the entity index PLUS ONE
         lda orbArtT,x
-        beq spH0                ; an orb holds no special inks
+        beq spDn                ; an orb holds no special inks
         lda #${hx(IDOL_SPR.under)}
         ldy #${hx(IDOL_SPR.hi)}
-        bne spHSt               ; always
-spH0:   lda sprU
-        ldy sprH
-spHSt:  sta irqSpU+1
+        sta irqSpU+1
         sty irqSpH+1
-        rts
+spDn:   rts
 ` : ''}        * = $be00
 angMidT: !byte ${angMidT.join(',')}` : ''}
         * = ${hx(QCOSBASE)}

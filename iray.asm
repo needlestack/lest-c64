@@ -6954,7 +6954,7 @@ dfLN:   sec
         sbc phi
         sta pa
 dfLD:   lda #$00                ; the room has already gone; $d023 is untouched, so the seams
-        sta $d021               ;   stay and the angel is not left alone in the black
+        jsr setGnd               ;   stay and the angel is not left alone in the black
         sta $d022
         lda frameCnt            ; re-date, so "elapsed >= DIE_OUT" fires DIE_PAUSE frames from now
         sec
@@ -6989,7 +6989,7 @@ dffOk:  tax
         and #$0f                ;   SET -- white reads as $f1, not $01, which indexed a 16-entry
         tax                     ;   table 241 bytes past its end
         lda darkerT,x
-        sta $d021
+        jsr setGnd
         lda $d022
         and #$0f
         tax
@@ -7052,7 +7052,7 @@ dsCol:  lda #$08  ; bit 3 keeps the cell multicolor; the face wants black here
         sta pCh1
         sta pCh2
         lda #$00                ; still black: phase 2 ramps up from here
-        sta $d021
+        jsr setGnd
         sta $d022
         sta $d023
         lda #$00                ; which edge the face arrives at. Increasing pa sweeps world
@@ -7108,7 +7108,7 @@ dshRun: lda frameCnt            ; elapsed since this picture went up
         ; takes about a frame and a half and both buffers are displayed in turn, so it cannot
         ; happen while a picture is up without showing itself.
         lda #$00
-        sta $d021
+        jsr setGnd
         sta $d022
         sta $d023
 
@@ -9253,6 +9253,15 @@ lvlSymT: !byte 0,0,0,8
 lvlSprunderT: !byte $0b,$0b,$0b,$00
 lvlPalceilT: !byte $01,$01,$01,$0b
 lvlPalseamT: !byte $0b,$0b,$0b,$0e
+; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
+; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
+; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
+; pictures -- goes through here, which costs each site nothing: jsr is the same three bytes the
+; store was. A is preserved, so a site that also writes $d022 still can.
+setGnd: sta $d021
+        sta irqB0+1
+        sta irqB1+1
+        rts
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40
@@ -11639,7 +11648,7 @@ dgD:    ; ---- which way round, and unhide it ----
         ; the signed difference from the current heading gives both the direction to turn and a
         ; first estimate of how far. dieOff starts far from centre so the stop cannot fire early.
         lda #$0f                ; white -> grey3 at once: the room starts leaving as you are grabbed
-        sta $d021
+        jsr setGnd
         lda #$ff                ; unsigned "never projected", far outside the lock window
         sta dieOff
         lda #$ff
@@ -11767,7 +11776,7 @@ ppWB:   sta $ffff,y
 ; one frame and the next the picture is simply there.
 picOn:  jsr snBoom
         lda #$0c
-        sta $d021
+        jsr setGnd
         lda #$0b
         sta $d022
         lda #$0f
@@ -11813,30 +11822,32 @@ idolLat:lda idolWk
 ; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
 ; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
 ; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda idolOn              ; ---- above the split: the world's ----
-        beq spW0
-        lda #$09
+sprPal: lda dieSt               ; ---- the death scene wants the inks to SIT STILL ----
+        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
+        lda idolOn              ;   before any of this existed, and the scene's fade was written
+        beq spLvl               ;   against it. "The world no longer goes black correctly."
+        lda #$09      ; ---- above the split: the world's ----
         ldy #$07
         bne spWSt               ; always: brown is not zero
-spW0:   lda sprU                ; whatever lvlLook left for this level
+spLvl:  lda sprU                ; whatever lvlLook left for this level
         ldy sprH
-spWSt:  sta $d025               ; written HERE, at raster ~250, because osFlush runs just after
-        sty $d026               ;   the buffer flip spins on it -- so it lands below the split
-                                ;   and before the next frame's sprites, and needs no region of
-                                ;   its own at the top of the frame.
-        ldx carry               ; ---- below it: whatever is in your hand ----
-        beq spH0                ; empty: match the world, so the split shows nothing
+spWSt:  sta $d025
+        sty $d026
+        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
+        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
+                                ;   tinting things and walks down into the last few rows.
+        lda dieSt
+        bne spDn
+        ldx carry               ; ---- below the split: only if something special is in hand ----
+        beq spDn
         dex                     ;   carry is the entity index PLUS ONE
         lda orbArtT,x
-        beq spH0                ; an orb holds no special inks
+        beq spDn                ; an orb holds no special inks
         lda #$09
         ldy #$07
-        bne spHSt               ; always
-spH0:   lda sprU
-        ldy sprH
-spHSt:  sta irqSpU+1
+        sta irqSpU+1
         sty irqSpH+1
-        rts
+spDn:   rts
         * = $be00
 angMidT: !byte 3,3,2,2,1,1,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,255,255,1,1,0,0,0,255,255,1,1,1,0,0,255,255,1,1,1,0,0,255,255,2,1,1,0,0,255,255,255,1,1,0,0,255,255,255,1,1,0,0,0,255,255,1,1,0,0,0,255,255,254,254,253,253,253,252,252,251,251,251,250,250,249,249,248,248,248,247,247,246,246,246,245,245,244,244,243,243,243,242,242,241,241,240,240,240,239,239,238,238,238,237,237,236,236,235,235,235,234,234,233,233,232,232,232,231,231,230,230,230,229,229,228,228,227,227,227,226,226,225,225,225,224,224,223,223,222,222,222,221,221,220,220,219,219,219,218,218,217,217,217,216,216,215,215,214,214,214,213,213,212,212,211,211,211,210,210,209,209,209,208,208,207,207,206,206,206,205,205,204,204,204,203,203,202,202,201,201,201,200,200,199,199,198,198,198,197,197,196,196,196,195,195,194,194,193,193,193,192,192,191,191
         * = $bf00
