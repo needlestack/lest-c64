@@ -146,6 +146,16 @@ if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Nu
 // pair-10 column that this symbol's columns would collide with.
 // A single dot, as [column, row] in the 4x8 cell -- or a .png read as fat bits.
 const LEVEL_SYM = { 4: [[1, 3]] };
+// ---- per-level SPRITE inks, and the idol's own ----
+// A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
+// per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
+// by all eight sprites; only the body is per-sprite. Level 4 takes the underside to black, so
+// its cast reads black / grey 2 / grey 3.
+const LEVEL_SPR = { 4: { under: 0x00 } };
+// ...and while the IDOL is on screen the two shared inks swap to brown and yellow, with the
+// idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
+// just the idol -- which is the point: seeing it changes the light in the room.
+const IDOL_SPR = { under: 0x09, hi: 0x07 }, IDOL_BODY = 0x08;
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -3893,6 +3903,9 @@ const ORBANCH = ORBEXP.map(e => e ? 42 : 21);   // row pitch: one sprite height
 // ORBPAL=colour brings back light blue / light red / light green bodies.
 const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
 const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
+const SPR_DEF = { under: ORBUNDER, hi: ORBHILITE };
+const sprOf = n => ({ ...SPR_DEF, ...(LEVEL_SPR[n] ?? {}) });
+const SPRVARY = CHAIN.some(n => ['under', 'hi'].some(k => sprOf(n)[k] !== sprOf(CHAIN[0])[k]));
 
 // Placement. Greedy over the open cells with a minimum spacing, which spreads them through
 // every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
@@ -4308,7 +4321,7 @@ for (const o of ORBS) if ((o.x % 1) !== 0.5 || (o.y % 1) !== 0.5)
   throw new Error(`orb at (${o.x},${o.y}) is not cell-centred; orbOne assumes it is`);
 const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
 
-const orbCol = ORBS.map(o => ORBBODY[o.c]);
+const orbCol = ORBS.map(o => o.idol ? IDOL_BODY : ORBBODY[o.c]);
 // h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
 // locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
 // h = 88, i.e. how big it looks one cell away.
@@ -6847,9 +6860,9 @@ ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change
         lda #$ff
         sta $d01c               ; ALL eight in multicolor: orbMove hands out slots as it finds
                                 ; visible orbs, so any of them can be in use
-        lda #${hx(ORBUNDER)}
+        lda #${hx(sprOf(LVL).under)}
         sta $d025               ; sprite bit pair 01 = the shaded underside
-        lda #${hx(ORBHILITE)}
+        lda #${hx(sprOf(LVL).hi)}
         sta $d026               ; sprite bit pair 11 = highlight and ground shadow
         lda #${hx(ORBBODY[0])}
         sta $d027               ; sprite bit pair 10 = the body. Per-sprite, so osFlush rewrites
@@ -10524,12 +10537,12 @@ irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the
         lda d018vm              ; --- horizon..arc: the mirrored half ---
 irqC1:  ora #${hx(CB_B)}
         sta $d018
-${CEILVARY ? `irqB1:  lda #${hx(palOf(LVL).ceil)}      ; on an OVERLAP frame this line sits between the two
+irqB1:  lda #${hx(palOf(LVL).ceil)}      ; on an OVERLAP frame this line sits between the two
         sta $d021               ;   rims, so this is where the ground colour changes -- region 4
                                 ;   cannot do it there, because pSplit2 is parked at 246 and the
                                 ;   between-arcs line is pSplit. Equal to irqB0 the rest of the
                                 ;   time, so it changes nothing then.
-` : ''}
+
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
@@ -10564,9 +10577,9 @@ irqA3x:
 irqTop: lda d018vm              ; --- top of frame: charset A, arm the horizon ---
 irqC0:  ora #${hx(CB_A)}
         sta $d018
-${CEILVARY ? `irqB0:  lda #${hx(palOf(LVL).ceil)}      ; the ground colour ABOVE the rim: during a drop that is
+irqB0:  lda #${hx(palOf(LVL).ceil)}      ; the ground colour ABOVE the rim: during a drop that is
         sta $d021               ;   still the level being LEFT. The middle region inherits it.
-` : ''}irqArm: lda #${hx(SPLITLINE)}
+irqArm: lda #${hx(SPLITLINE)}
         sta $d012
         inc frameCnt
         bne irqNf
@@ -11140,7 +11153,7 @@ ogFull:
 ` : ''}        jsr omTrig              ; the frame's trig and the shared halves of every projection
                                 ;   -- out of line, the main block is at its ceiling; see omTrig
         lda #$00                ; the per-sprite bit registers are built up a bit at a time and
-        sta omEn                ; written once, so an unused slot is simply never set
+${HAS_IDOL ? '        sta idolOn              ; ...and whether the idol is among them this frame\n' : ''}        sta omEn                ; written once, so an unused slot is simply never set
         sta omXX
         sta omYY
         sta omPri
@@ -11884,7 +11897,8 @@ osLp:   dex                     ;   allocate DOWNWARD from 7, so a loop bounded 
         sta $d027,x
         cpx #$00
         bne osLp
-osBits: lda omEn
+${HAS_IDOL ? `        jsr sprPal              ; the shared inks: the idol's if it is in view
+` : ''}osBits: lda omEn
         sta $d015
         lda omMc
         sta $d01c
@@ -12526,7 +12540,11 @@ ${HAS_IDOL ? `        clc                     ; 0 for an orb; the idol's bitmap 
         adc orbArtT,y           ;   ladders are geometrically identical, so the idol borrows the
                                 ;   orb's rung wholesale and swaps only the picture.
 ` : ''}        sta obP,x               ; buffered, not written: see osFlush
-        lda orbColT2,y
+${HAS_IDOL ? `        lda orbArtT,y           ; non-zero only for the idol, and we reach here only when
+        beq obNotI              ;   this entity actually TOOK a slot -- so this means "the idol
+        sta idolOn              ;   is on screen", not "the level has one"
+obNotI:
+` : ''}        lda orbColT2,y
         sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
         ldy ovar
         lda orbExpT,y
@@ -15806,7 +15824,7 @@ faceChrT: ${chunk(PICS.chars, 32).trim()}
 faceScrT: ${chunk(PICS.maps[0].map, 32).trim()}` : ''}
 ${SOUND ? `${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
 melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
-${ANYSYM ? `        * = $7e00
+        * = $7e00
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -15817,6 +15835,24 @@ ${ANYSYM ? `        * = $7e00
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
+${HAS_IDOL ? `; ---- sprPal: the two SHARED sprite inks, once a frame ----
+; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
+; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
+; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
+; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
+sprPal: lda idolOn
+        beq spNorm
+        lda #${hx(IDOL_SPR.under)}
+        sta $d025
+        lda #${hx(IDOL_SPR.hi)}
+        sta $d026
+        rts
+spNorm: lda sprU                ; back to whatever lvlLook left for this level
+        sta $d025
+        lda sprH
+        sta $d026
+        rts
+` : ''}
 ; ---- palCol: the ground inks, by key ----
 ; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
 ; floor alone and 'W' the ceiling alone. They are separable because the raster split gave the two
@@ -15850,6 +15886,10 @@ pcFlr:  inc colF
         sta irqB1+1
         rts
 colF:   !byte ${hx(palOf(LVL).ceil)}             ; the FLOOR's ink. colW is the ceiling's now.
+${SPRVARY || HAS_IDOL ? `sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
+sprH:   !byte ${hx(sprOf(LVL).hi)}             ;   because the idol swap borrows the registers
+` : ''}${HAS_IDOL ? `idolOn: !byte $00               ; set while the idol holds a sprite slot this frame
+` : ''}
 
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
 ; because the main block is the tightest resource in the project and this runs once.
@@ -15888,11 +15928,15 @@ ${CEILVARY ? `lvlLo:  ldx lvlMeT
         sta ${REG[k][1]}
 `).join('');
 })() : ''}
-${CEILVARY ? `        lda colW                ; the two regions BELOW the departing rim are this level
+${SPRVARY ? (() => {
+  const vary = ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]));
+  return vary.map(k => `        lda lvlSpr${k}T,x\n        sta spr${k === 'under' ? 'U' : 'H'}\n` +
+    `        sta ${k === 'under' ? '$d025' : '$d026'}\n`).join('');
+})() : ''}${CEILVARY ? `        lda colW                ; the two regions BELOW the departing rim are this level
         sta colF                ;   ceiling and floor back in step: a level names one ground
         sta irqB1+1             ;   now -- but NOT irqB0. The overlap frames still have the old
         sta irqB2+1             ;   level's rim at the top, and lvlHi hands that over later.
-` : ''}symPut: ldx lvlMeT
+` : ''}${ANYSYM ? `symPut: ldx lvlMeT
         dex
         lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
         clc
@@ -15908,14 +15952,17 @@ spLp:   lda symT,x
         rts
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
         !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
-lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
+lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}` : `        rts`}
+${SPRVARY ? ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]))
+  .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
+  .join('\n') : ''}
 ${TWOLEV ? (() => {
   const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
   return Object.keys(REG).filter(k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]))
     .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
     .join('\n');
 })() : ''}
-` : ''}        * = ${hx16(RELOC)}
+        * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
 f0HiT:  ${chunk(f0Hi).trim()}

@@ -4332,6 +4332,7 @@ ogFull:
         jsr omTrig              ; the frame's trig and the shared halves of every projection
                                 ;   -- out of line, the main block is at its ceiling; see omTrig
         lda #$00                ; the per-sprite bit registers are built up a bit at a time and
+        sta idolOn              ; ...and whether the idol is among them this frame
         sta omEn                ; written once, so an unused slot is simply never set
         sta omXX
         sta omYY
@@ -4991,6 +4992,7 @@ osLp:   dex                     ;   allocate DOWNWARD from 7, so a loop bounded 
         sta $d027,x
         cpx #$00
         bne osLp
+        jsr sprPal              ; the shared inks: the idol's if it is in view
 osBits: lda omEn
         sta $d015
         lda omMc
@@ -5587,6 +5589,10 @@ opDone:
         adc orbArtT,y           ;   ladders are geometrically identical, so the idol borrows the
                                 ;   orb's rung wholesale and swaps only the picture.
         sta obP,x               ; buffered, not written: see osFlush
+        lda orbArtT,y           ; non-zero only for the idol, and we reach here only when
+        beq obNotI              ;   this entity actually TOOK a slot -- so this means "the idol
+        sta idolOn              ;   is on screen", not "the level has one"
+obNotI:
         lda orbColT2,y
         sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
         ldy ovar
@@ -9112,6 +9118,24 @@ faceScrT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
+; ---- sprPal: the two SHARED sprite inks, once a frame ----
+; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
+; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
+; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
+; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
+sprPal: lda idolOn
+        beq spNorm
+        lda #$09
+        sta $d025
+        lda #$07
+        sta $d026
+        rts
+spNorm: lda sprU                ; back to whatever lvlLook left for this level
+        sta $d025
+        lda sprH
+        sta $d026
+        rts
+
 ; ---- palCol: the ground inks, by key ----
 ; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
 ; floor alone and 'W' the ceiling alone. They are separable because the raster split gave the two
@@ -9145,6 +9169,10 @@ pcFlr:  inc colF
         sta irqB1+1
         rts
 colF:   !byte $01             ; the FLOOR's ink. colW is the ceiling's now.
+sprU:   !byte $0b             ; this level's shared sprite inks, shadowed
+sprH:   !byte $0f             ;   because the idol swap borrows the registers
+idolOn: !byte $00               ; set while the idol holds a sprite slot this frame
+
 
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
 ; because the main block is the tightest resource in the project and this runs once.
@@ -9180,6 +9208,9 @@ lvlLook: ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level A
         sta colS
         sta $d023
 
+        lda lvlSprunderT,x
+        sta sprU
+        sta $d025
         lda colW                ; the two regions BELOW the departing rim are this level
         sta colF                ;   ceiling and floor back in step: a level names one ground
         sta irqB1+1             ;   now -- but NOT irqB0. The overlap frames still have the old
@@ -9201,6 +9232,7 @@ spLp:   lda symT,x
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
         !byte $55,$55,$55,$45,$55,$55,$55,$55
 lvlSymT: !byte 0,0,0,8
+lvlSprunderT: !byte $0b,$0b,$0b,$00
 lvlPalceilT: !byte $01,$01,$01,$0b
 lvlPalseamT: !byte $0b,$0b,$0b,$0e
         * = $8600
