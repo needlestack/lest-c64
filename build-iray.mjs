@@ -10555,13 +10555,17 @@ irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
 ${HAS_IDOL ? `irqSp:  jmp sprSpl              ; out of the main block; rejoins at irqd
+` : ''}${HAS_IDOL ? `        ; region 3 -- below the split, before the next frame's sprites -- is where the
+        ; WORLD's inks come back. It used to be done from osFlush, which runs once per RENDERED
+        ; frame: at 20fps that is one restore every three raster frames, so for two frames in
+        ; three the whole screen kept the HELD palette. That was the 60Hz flicker.
 ` : ''}irqA2:${CEILVARY ? `
 irqCm3: cmp #$ff                ; --- past the COLOUR line? then this is region 4 --- (patched
         bcs irqA3               ;   by region 3 below, so it always trails it by CSPLIT)` : ''}
         lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
 irqC2:  ora #${hx(CB_A)}
         sta $d018
-${CEILVARY ? `        lda irqCm2+1            ; arm the colour line: CSPLIT rasters below this one, because
+${HAS_IDOL ? '        jsr sprPal              ; ...and the WORLD sprite inks back, every raster frame\n' : ''}${CEILVARY ? `        lda irqCm2+1            ; arm the colour line: CSPLIT rasters below this one, because
         clc                     ;   the arc's top rows still draw the DEPARTING level's floor
         adc #${hx(CSPLIT)}              ;   around the curve, so flipping colour up there tints the
         bcs irqNo               ;   last line or two of the room being left.
@@ -11161,8 +11165,8 @@ ${ENTGATE ? `        jsr entGate             ; ---- anything to project at all? 
 ogFull:
 ` : ''}        jsr omTrig              ; the frame's trig and the shared halves of every projection
                                 ;   -- out of line, the main block is at its ceiling; see omTrig
-        lda #$00                ; the per-sprite bit registers are built up a bit at a time and
-${HAS_IDOL ? '        sta idolOn              ; ...and whether the idol is among them this frame\n' : ''}        sta omEn                ; written once, so an unused slot is simply never set
+${HAS_IDOL ? '        jsr idolLat             ; last frame\'s finding becomes the one the IRQ reads\n' : ''}        lda #$00                ; the per-sprite bit registers are built up a bit at a time and
+        sta omEn                ; written once, so an unused slot is simply never set
         sta omXX
         sta omYY
         sta omPri
@@ -11906,8 +11910,7 @@ osLp:   dex                     ;   allocate DOWNWARD from 7, so a loop bounded 
         sta $d027,x
         cpx #$00
         bne osLp
-${HAS_IDOL ? `        jsr sprPal              ; the shared inks: the idol's if it is in view
-` : ''}osBits: lda omEn
+osBits: lda omEn
         sta $d015
         lda omMc
         sta $d01c
@@ -12551,7 +12554,7 @@ ${HAS_IDOL ? `        clc                     ; 0 for an orb; the idol's bitmap 
 ` : ''}        sta obP,x               ; buffered, not written: see osFlush
 ${HAS_IDOL ? `        lda orbArtT,y           ; non-zero only for the idol, and we reach here only when
         beq obNotI              ;   this entity actually TOOK a slot -- so this means "the idol
-        sta idolOn              ;   is on screen", not "the level has one"
+        sta idolWk              ;   is on screen", not "the level has one"
 obNotI:
 ` : ''}        lda orbColT2,y
         sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
@@ -15906,7 +15909,7 @@ pcFlr:  inc colF
 colF:   !byte ${hx(palOf(LVL).ceil)}             ; the FLOOR's ink. colW is the ceiling's now.
 ${SPRVARY || HAS_IDOL ? `sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
 sprH:   !byte ${hx(sprOf(LVL).hi)}             ;   because the idol swap borrows the registers
-` : ''}${HAS_IDOL ? `idolOn: !byte $00               ; set while the idol holds a sprite slot this frame
+` : ''}${HAS_IDOL ? `idolOn: !byte $00               ; the idol is on screen. LATCHED: the IRQ reads this sixty
 ` : ''}
 
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
@@ -18927,6 +18930,16 @@ ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
 ${HAS_IDOL ? `        * = $bdb6
+idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
+                                ;   reading the working flag direct would show 0 for any raster
+                                ;   frame whose IRQ landed inside the projection -- one bad frame
+                                ;   in roughly four, which is exactly the flicker this chases.
+idolLat:lda idolWk
+        sta idolOn
+        lda #$00
+        sta idolWk
+        rts
+
 ; ---- sprPal: the two SHARED sprite inks, once a frame ----
 ; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
 ; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
