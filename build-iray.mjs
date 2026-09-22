@@ -151,7 +151,7 @@ const LEVEL_SYM = { 4: [[1, 3]] };
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
 // by all eight sprites; only the body is per-sprite. Level 4 takes the underside to black, so
 // its cast reads black / grey 2 / grey 3.
-const LEVEL_SPR = { 4: { under: 0x00 } };
+const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) } };
 // ...and while the IDOL is on screen the two shared inks swap to brown and yellow, with the
 // idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
 // just the idol -- which is the point: seeing it changes the light in the room.
@@ -4428,6 +4428,11 @@ const orbArtT = ORBS.map(o => o.idol ? IDOLBM0 : 0);
 // 42 rasters tall expanded and the last visible line is about 250.
 const ORB_HOLD_X = +(process.env.ORBHOLDX ?? 160);
 const ORB_HOLD_Y = +(process.env.ORBHOLDY ?? 210);
+// The raster line that separates the HELD object from the world's sprites. The held one is slot
+// 0 at ORB_HOLD_Y, Y-expanded to 42 rows, so it owns everything from there down; one split just
+// above it gives it its own $d025/$d026. Anything in the world whose sprite reaches below this
+// line takes the held object's inks instead -- which is the artefact to watch for.
+const SPRSPL = ORB_HOLD_Y - 1;
 // ---- the swallow: the orb shrinking into a socket ----
 // Frames, not sixtieths, and deliberately: this is four DRAWN steps, so it has to advance once
 // per rendered frame or a step is skipped and the flourish stutters. Durations that matter get
@@ -6546,8 +6551,9 @@ hoI     = $85de                  ; holeOne's loop: which hole-like entity, and i
 hoOf    = $85df                  ;   LOS bitmap offset (index x 32)
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
-ooCY    = $8516                  ; buffered $d01c. The icon is the only hi-res sprite, so this is
-                                 ;   $ff every frame except while carrying
+ooCY    = $8516                  ; buffered $d01c. STALE: the held object was a hi-res icon once;
+                                 ;   it is the full multicolor sprite now, so this is $ff always
+                                 ;   and the held object shares $d025/$d026 like everything else
 ; ---- the fall's two SCREEN SNAPSHOTS, 1000 bytes each ----
 ; fallDraw scrolls one room past another by copying rows out of these. They are written and read
 ; ONLY at runtime -- nothing is emitted into them -- so before they were named here the hole
@@ -8066,7 +8072,7 @@ mvs:    lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
-${CEILVARY ? `        lda #$ff                ; region 4 off until region 3 arms it. Its compare is
+${HAS_IDOL ? '        jsr sprArm              ; ...and whether the held object gets its own inks\n' : ''}${CEILVARY ? `        lda #$ff                ; region 4 off until region 3 arms it. Its compare is
         sta irqCm3+1            ;   PATCHED by region 3, so left alone it holds last frame's
                                 ;   line -- and when pSplit2 jumps back to 246 at a fall's end
                                 ;   that stale line is below it, so region 4 would match first
@@ -10534,6 +10540,8 @@ irqCmp: cmp #${hx(SPLITLINE)}   ; operands PATCHED, not variable reads: "cmp abs
         bcc irqTop              ;   more than "cmp #" and that was once enough to push the
 irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the line.
         bcs irqA2
+${HAS_IDOL ? `irqSpC: cmp #$ff                ; the HELD object's split, $ff while it is switched off
+        bcs irqSp` : ''}
         lda d018vm              ; --- horizon..arc: the mirrored half ---
 irqC1:  ora #${hx(CB_B)}
         sta $d018
@@ -10546,7 +10554,8 @@ irqB1:  lda #${hx(palOf(LVL).ceil)}      ; on an OVERLAP frame this line sits be
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
-irqA2:${CEILVARY ? `
+${HAS_IDOL ? `irqSp:  jmp sprSpl              ; out of the main block; rejoins at irqd
+` : ''}irqA2:${CEILVARY ? `
 irqCm3: cmp #$ff                ; --- past the COLOUR line? then this is region 4 --- (patched
         bcs irqA3               ;   by region 3 below, so it always trails it by CSPLIT)` : ''}
         lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
@@ -15835,22 +15844,31 @@ melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
-${HAS_IDOL ? `; ---- sprPal: the two SHARED sprite inks, once a frame ----
-; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
-; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
-; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
-; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda idolOn
-        beq spNorm
-        lda #${hx(IDOL_SPR.under)}
+${HAS_IDOL ? `; ---- sprSpl: the HELD object's inks, from its own raster line down ----
+; Bit pairs 01 and 11 are one register each for all eight sprites, so the only way to give the
+; thing in your hand its own tones is to change them partway down the screen. It is slot 0 at
+; ORB_HOLD_Y, Y-expanded to 42 rows, so it owns everything below SPRSPL and one split does it.
+; Anything in the WORLD whose sprite reaches below that line takes these inks too -- there is no
+; per-sprite escape from a shared register, only a per-SCANLINE one.
+sprSpl:
+irqSpU: lda #${hx(SPR_DEF.under)}
         sta $d025
-        lda #${hx(IDOL_SPR.hi)}
+irqSpH: lda #${hx(SPR_DEF.hi)}
         sta $d026
+        lda irqCm2+1            ; on to whatever the arc split wants next
+        sta $d012
+        jmp irqd
+
+; sprArm: the split is off during a FALL -- every sprite is cleared on the frame one starts, and
+; the arc's own split can sit ABOVE this line, which would strand region 3 behind it.
+sprArm: lda fallSt
+        bne saOff
+        lda #${hx(SPRSPL)}
+        sta irqSpC+1
+        sta irqAr2+1            ; region 1 now ends here rather than at the arc split
         rts
-spNorm: lda sprU                ; back to whatever lvlLook left for this level
-        sta $d025
-        lda sprH
-        sta $d026
+saOff:  lda #$ff                ; never matches, and irqAr2 keeps the arc split
+        sta irqSpC+1
         rts
 ` : ''}
 ; ---- palCol: the ground inks, by key ----
@@ -18908,7 +18926,37 @@ ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather
         ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
-        * = $be00
+${HAS_IDOL ? `        * = $bdb6
+; ---- sprPal: the two SHARED sprite inks, once a frame ----
+; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
+; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
+; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
+; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
+sprPal: lda idolOn              ; ---- above the split: the world's ----
+        beq spW0
+        lda #${hx(IDOL_SPR.under)}
+        ldy #${hx(IDOL_SPR.hi)}
+        bne spWSt               ; always: brown is not zero
+spW0:   lda sprU                ; whatever lvlLook left for this level
+        ldy sprH
+spWSt:  sta $d025               ; written HERE, at raster ~250, because osFlush runs just after
+        sty $d026               ;   the buffer flip spins on it -- so it lands below the split
+                                ;   and before the next frame's sprites, and needs no region of
+                                ;   its own at the top of the frame.
+        ldx carry               ; ---- below it: whatever is in your hand ----
+        beq spH0                ; empty: match the world, so the split shows nothing
+        dex                     ;   carry is the entity index PLUS ONE
+        lda orbArtT,x
+        beq spH0                ; an orb holds no special inks
+        lda #${hx(IDOL_SPR.under)}
+        ldy #${hx(IDOL_SPR.hi)}
+        bne spHSt               ; always
+spH0:   lda sprU
+        ldy sprH
+spHSt:  sta irqSpU+1
+        sty irqSpH+1
+        rts
+` : ''}        * = $be00
 angMidT: !byte ${angMidT.join(',')}` : ''}
         * = ${hx(QCOSBASE)}
 qcosT: !byte ${qcos.join(',')}
