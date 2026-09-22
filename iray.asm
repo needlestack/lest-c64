@@ -737,12 +737,7 @@ cpChr:  txa
         sta $d018
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
-        lda #$00
-        sta colB
-        sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured).
-                                ;   The only ink no level overrides, so it is set once here; the
-                                ;   other two come from lvlLook with the starting level's values.
-        jsr lvlLook
+        jsr lvlBoot             ; the three inks and the wall mark of the STARTING level
         ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -3956,6 +3951,12 @@ irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the
         lda d018vm              ; --- horizon..arc: the mirrored half ---
 irqC1:  ora #$02
         sta $d018
+irqB1:  lda #$01      ; on an OVERLAP frame this line sits between the two
+        sta $d021               ;   rims, so this is where the ground colour changes -- region 4
+                                ;   cannot do it there, because pSplit2 is parked at 246 and the
+                                ;   between-arcs line is pSplit. Equal to irqB0 the rest of the
+                                ;   time, so it changes nothing then.
+
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
@@ -5970,7 +5971,11 @@ fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, i
         lda #246
         sta pSplit2
         jmp fsL3
-fsL2:   lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+fsL2:   jsr lvlHi               ; past the overlap window: the DEPARTING rim has left the
+                                ;   screen, so the top of the frame can finally take the new
+                                ;   level's ground colour too. Until here it must not -- that is
+                                ;   what made the upper level go dark while it was still visible.
+                lda arcSp2bT,x          ; and the room's own horizon, where B resumes
         sta pSplit2
 fsL3:
         lda #$ff
@@ -9112,6 +9117,20 @@ faceScrT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
+; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
+; because the main block is the tightest resource in the project and this runs once.
+lvlBoot:lda #$00
+        sta colB
+        sta $d022               ; 01 = walls, and the readout glyphs which are wall-coloured.
+        jsr lvlLook             ;   The one ink no level overrides, so it is set once, here.
+        ; fall through to lvlHi: at boot there is no departing level, so all three agree
+; lvlHi: the region ABOVE the rim catches up with the rest. Called when the DEPARTING rim has
+; finally left the screen -- until then it must keep the colour of the level being left, which is
+; the whole point of the split.
+lvlHi:  lda colW
+        sta irqB0+1
+        rts
+
 ; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
 ; already swapped underneath but the drop is still showing the room being left above the rim.
 ; Two $d021s for the two levels on screen at once -- the overlap frames used to have to pick one,
@@ -9130,9 +9149,9 @@ lvlLook: ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level A
         sta colS
         sta $d023
 
-        lda colW                ; the drop is over: both regions are this level now
-        sta irqB0+1
-        sta irqB2+1
+        lda colW                ; the two regions BELOW the departing rim are this level
+        sta irqB1+1             ;   now -- but NOT irqB0. The overlap frames still have the old
+        sta irqB2+1             ;   level's rim at the top, and lvlHi hands that over later.
 symPut: ldx lvlMeT
         dex
         lda lvlSymT,x           ; 0 = plain, 8 = this level is marked

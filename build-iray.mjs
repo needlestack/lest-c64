@@ -130,7 +130,13 @@ const LEVEL_IDOL = { 4: [21.5, 1.5] };
 // without touching a single charset entry. Only the overrides are listed; PAL_DEF below fills
 // the rest. Applied at boot for the starting level and after every lvlSwap for the one arrived
 // at, so it travels with the level rather than with the slot.
-const LEVEL_PAL = { 4: { ceil: 0x0b, seam: 0x0e } };   // level 4: grey 1 ground, light blue seams
+// level 4: grey 1 ground, light blue seams. Overridable so a colour can be tried without an
+// edit -- CEIL4=2 SEAM4=7, say -- which also makes the raster split visible when it is loud.
+const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env.SEAM4 ?? 0x0e) } };
+// PALTEST=<level>:<ceil colour> overrides one level's ground, for trying a colour or for making
+// a raster split visible by giving it something loud enough to read off a screenshot.
+if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Number);
+  LEVEL_PAL[lv] = { ...(LEVEL_PAL[lv] ?? {}), ceil: c }; }
 // ---- a mark in the middle of every solid wall cell, per level ----
 // Drawn as fat bits over the 4x8 multicolor cell and installed at RUNTIME, because it is a
 // property of the LEVEL, not of the charset: falling out of a marked level has to take it away
@@ -6829,12 +6835,7 @@ cpChr:  txa
         sta $d018
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
-        lda #${hx(palOf(LVL).wall)}
-        sta colB
-        sta $d022               ; 01 = walls (and the readout glyphs, which are wall-coloured).
-                                ;   The only ink no level overrides, so it is set once here; the
-                                ;   other two come from lvlLook with the starting level's values.
-        jsr lvlLook
+        jsr lvlBoot             ; the three inks and the wall mark of the STARTING level
 ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -10526,6 +10527,12 @@ irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the
         lda d018vm              ; --- horizon..arc: the mirrored half ---
 irqC1:  ora #${hx(CB_B)}
         sta $d018
+${CEILVARY ? `irqB1:  lda #${hx(palOf(LVL).ceil)}      ; on an OVERLAP frame this line sits between the two
+        sta $d021               ;   rims, so this is where the ground colour changes -- region 4
+                                ;   cannot do it there, because pSplit2 is parked at 246 and the
+                                ;   between-arcs line is pSplit. Equal to irqB0 the rest of the
+                                ;   time, so it changes nothing then.
+` : ''}
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
@@ -12848,7 +12855,11 @@ fallStep:
         cpy #$03                ; the DROP hands over ARC_OVERLAP frames early; its last frames
         beq fstLim3             ;   are drawn on top of the landing's first ones
         cpx #${ARC_DROP_N}
-        jmp fstLimD
+${process.env.DROPHOLD ? `        bcs fstLimD             ; DROPHOLD=n: the drop's half of FALLHOLD -- hold the DROP
+        cpx #${+process.env.DROPHOLD + 1}             ;   at frame n for ever, so a frame with BOTH levels on
+        bcc fstLimD             ;   screen can be screenshotted and read off row by row. Every
+        ldx #${+process.env.DROPHOLD}                ;   path branches, so no jmp fstLimD follows (the
+        jmp fstFOk              ;   reachability lint catches one if it does)` : `        jmp fstLimD`}
 fstLim3:cpx #${ARC_N}
 ${process.env.FALLHOLD ? `        bcs fstLimD
         cpx #${+process.env.FALLHOLD + 1}
@@ -12916,7 +12927,11 @@ fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, i
         lda #246
         sta pSplit2
         jmp fsL3
-fsL2:   lda arcSp2bT,x          ; and the room's own horizon, where B resumes
+fsL2:${CEILVARY ? `   jsr lvlHi               ; past the overlap window: the DEPARTING rim has left the
+                                ;   screen, so the top of the frame can finally take the new
+                                ;   level's ground colour too. Until here it must not -- that is
+                                ;   what made the upper level go dark while it was still visible.
+` : ''}                lda arcSp2bT,x          ; and the room's own horizon, where B resumes
         sta pSplit2
 fsL3:
         lda #$ff
@@ -15805,6 +15820,20 @@ ${ANYSYM ? `        * = $7e00
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
+; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
+; because the main block is the tightest resource in the project and this runs once.
+lvlBoot:lda #${hx(palOf(LVL).wall)}
+        sta colB
+        sta $d022               ; 01 = walls, and the readout glyphs which are wall-coloured.
+        jsr lvlLook             ;   The one ink no level overrides, so it is set once, here.
+        ; fall through to lvlHi: at boot there is no departing level, so all three agree
+; lvlHi: the region ABOVE the rim catches up with the rest. Called when the DEPARTING rim has
+; finally left the screen -- until then it must keep the colour of the level being left, which is
+; the whole point of the split.
+lvlHi:  lda colW
+        sta irqB0+1
+        rts
+
 ; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
 ; already swapped underneath but the drop is still showing the room being left above the rim.
 ; Two $d021s for the two levels on screen at once -- the overlap frames used to have to pick one,
@@ -15826,9 +15855,9 @@ ${CEILVARY ? `lvlLo:  ldx lvlMeT
         sta ${REG[k][1]}
 `).join('');
 })() : ''}
-${CEILVARY ? `        lda colW                ; the drop is over: both regions are this level now
-        sta irqB0+1
-        sta irqB2+1
+${CEILVARY ? `        lda colW                ; the two regions BELOW the departing rim are this level
+        sta irqB1+1             ;   now -- but NOT irqB0. The overlap frames still have the old
+        sta irqB2+1             ;   level's rim at the top, and lvlHi hands that over later.
 ` : ''}symPut: ldx lvlMeT
         dex
         lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
