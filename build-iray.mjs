@@ -7171,7 +7171,7 @@ fnSkip:
         beq mfRnd
         jsr fallStep            ; the destination render is a background job now -- no state
         jmp mvs                 ;   between walking and falling
-mfRnd:  lda #$00
+mfRnd:${FALLTAIL && process.env.FTDBG ? '  jsr fallTail          ; FTDBG: build the tail every frame, readable at any pose\n      ' : ''}  lda #$00
         sta bgOn                ; the player's own frame is never capped, and draws every column
         sta rsLo
         lda #39
@@ -8371,7 +8371,7 @@ ${RAYCNT ? '        inc edgN\n' : ''}${NOEDGE ? `        lda #${hx(SOLID)}
         lda col4T,x
         tax                     ; X = 4*column -> logical column of this cell
         lda colH,x              ; cap here, not over all 160 columns: (h + K) has to fit a
-        cmp #101                ; signed byte, and colH is deliberately left uncapped so the
+        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; signed byte, and colH is deliberately left uncapped so the
         bcc rfCp0               ; interpolator's merged spans stay linear
         lda #100
 rfCp0:  clc
@@ -8380,7 +8380,7 @@ rfCp0:  clc
         lda clmp16,y
         sta hh0                 ; left level, already shifted into the high nibble
         lda colH+3,x
-        cmp #101
+        cmp ${FALLTAIL ? 'hCap' : '#101'}
         bcc rfCp3
         lda #100
 rfCp3:  clc
@@ -8423,7 +8423,7 @@ ${PLAN === 2 ? `        sty bidx                ; the pair's threshold is indexe
         ; The three step sites still call calcM; they clobber X and only 2.7 cells a frame
         ; reach them, so a second inlined copy there would be 40 bytes for nothing.
         lda colH+1,x
-        cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
+        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rmpM1
         lda #100
 rmpM1:  clc
@@ -8432,7 +8432,7 @@ rmpM1:  clc
         lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
-        cmp #101
+        cmp ${FALLTAIL ? 'hCap' : '#101'}
         bcc rmpM2
         lda #100
 rmpM2:  clc
@@ -8486,7 +8486,7 @@ vsNo:
         adc qmColT,y
         tax
         lda colH,x
-        cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
+        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rfMc
         lda #100
 rfMc:   clc
@@ -8578,7 +8578,7 @@ ${PLAN === 2 ? `        ; ---- which half of the pair does this cell show? ----
         lda col4T,x
         tax
         lda colH+1,x
-        cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
+        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rcM1
         lda #100
 rcM1:   clc
@@ -8587,7 +8587,7 @@ rcM1:   clc
         lda clamp8T,y           ; LEVEL 0..8, matching the offline thresholds -- not clampT
         sta cqtmp               ; free scratch: the colour is not chosen until below
         lda colH+2,x
-        cmp #101
+        cmp ${FALLTAIL ? 'hCap' : '#101'}
         bcc rcM2
         lda #100
 rcM2:   clc
@@ -8735,7 +8735,7 @@ calcM:  ldx colc
         lda col4T,x
         tax
         lda colH+1,x
-        cmp #101
+        cmp ${FALLTAIL ? 'hCap' : '#101'}
         bcc cm1
         lda #100
 cm1:    clc
@@ -8744,7 +8744,7 @@ cm1:    clc
         lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
-        cmp #101
+        cmp ${FALLTAIL ? 'hCap' : '#101'}
         bcc cm2
         lda #100
 cm2:    clc
@@ -15956,6 +15956,8 @@ ${FALLTAIL ? `; ---- fallTail: the five source rows BELOW the screen ----
 ; bufOff 15 + erow 13..17 lands on chain entries 28..32, clear of buffer A's 0..13 and B's 14..27.
 ; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
 fallTail:
+        lda #$ff                ; no height cap up here: see hCap
+        sta hCap
         lda #15                 ; erow 13..17 + 15 -> chain entries 28..32
         sta bufOff
         ldx #39
@@ -15997,6 +15999,8 @@ ftNext: ldy ftR
         ldx colc
         dex
         bpl ftCol
+        lda #101                ; and back, before anything renders the screen again
+        sta hCap
         rts
 
 ` : ''}; ---- palCol: the ground inks, by key ----
@@ -18581,6 +18585,12 @@ recT0:  !byte 0
 recN:   !byte 0                 ; runs logged so far -- read this first when dumping
 recBuf: !fill ${RECMAX * 4}, 0
 ` : ''}${FALLTAIL ? `        * = $a8c8               ; the tail's data and store stubs, in the hole above it
+hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
+                                ;   where K is +4 at the horizon and an uncapped h would wrap the
+                                ;   index; $ff for the tail rows, where K is -100 to -132 and the
+                                ;   cap is the whole problem -- it flattens every wall with h>100
+                                ;   to exactly 100, so all the edge cells pick the SAME glyph and
+                                ;   the boundary comes out as a staircase of whole cells.
 ftMin:  !byte 0
 ftMax:  !byte 0
 ftR:    !byte 0
