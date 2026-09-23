@@ -5037,6 +5037,12 @@ const arcSpan = (Y, E) => {                        // [topmost row, first row en
 };
 const arcTopT = arcYT.map((y, n) => arcSpan(y, (arcET[n] << 24) >> 24)[0]);
 const arcHi2T = arcYT2.map((y, n) => arcSpan(y, (arcET2[n] << 24) >> 24)[1]);
+// ...and the DROP's band bottom. fdNoF fills from the room's last row down to here with fdCol,
+// which on the drop is BLANK -- so with the room stopping at the band's TOP, the whole band
+// height was painted white straight over the geometry. That is the white rows. Run the room to
+// the band's BOTTOM instead and the fill becomes nothing; arcBand still draws the curve cell
+// and the hole below it over the top.
+const arcHiT = arcYT.map((y, n) => arcSpan(y, (arcET[n] << 24) >> 24)[1]);
 // The landing's split travels too: the new room's horizon starts below the screen and rises into
 // place, so charset A covers its ceiling half and B its floor half exactly as in an ordinary
 // frame. It reaches SPLITLINE on the last frame, which is where the renderer wants it.
@@ -5050,8 +5056,12 @@ const arcHi2T = arcYT2.map((y, n) => arcSpan(y, (arcET2[n] << 24) >> 24)[1]);
 // The plateau is the only stretch where the gap MAY close, because the room is about to cover
 // the arc regardless; so ramp the held value down to 0 across it instead of holding and jumping.
 const arcLandOff = (() => {
+  // The floor holds the room clear of the arc. Under FALLTAIL there IS no clearance -- the
+  // geometry runs to the screen edge -- and keeping it just pins the room one row short of home
+  // for the last frames, which reads as a pause and then a snap. Let the natural slide win.
   const off = arcTr2T.map((t, n) =>
-    Math.min(Math.max(Math.round((arcTr2T[ARC_N - 1] - t) / 8), arcHi2T[n] + ARC_GAP),
+    Math.min(FALLTAIL ? Math.round((arcTr2T[ARC_N - 1] - t) / 8)
+                      : Math.max(Math.round((arcTr2T[ARC_N - 1] - t) / 8), arcHi2T[n] + ARC_GAP),
              (ARC_N - 1 - n) * 3));
   const held = off[ARC_N - 2];
   let p = ARC_N - 2;
@@ -5139,7 +5149,9 @@ const fRowT = (() => {
       if (sr < 0 || sr > SRCMAX) { if (nsrc === 25) nsrc = R; blk[R] = 255; }
       else blk[R] = sr;
     }
-    const lim = Math.max(0, arcTopT[n] - ARC_GAP);   // never let the scene reach the arc
+    // arcHiT exactly, not one past it: fdNoF computes the fill as arcHi - fwN and fdFill only
+    // guards a count of ZERO, so one row past would wrap to 255 and blit ten kilobytes.
+    const lim = Math.max(0, (FALLTAIL ? arcHiT[n] : arcTopT[n]) - ARC_GAP);
     if (nsrc > lim) { for (let R = lim; R < 25; R++) blk[R] = 255; nsrc = lim; }
     blk[25] = nsrc;                                  // the drop's content runs 0..nsrc-1
     out.push(...blk);
