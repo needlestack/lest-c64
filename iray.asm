@@ -811,18 +811,7 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
-        lda #$80
-        sta px
-        lda #$02
-        sta px+1
-        lda #$80
-        sta py
-        lda #$02
-        sta py+1
-        lda #$19
-        sta pa
-        lda #$c0
-        sta paF                 ; PAF: the sub-unit angle the readout cannot show
+        jsr lvlStart            ; the LIVE level's start -- boot and every death come here
         jsr sndInit             ; the drone starts before the first frame and never stops
 
         lda #$ff                ; hazCur is READ to decide whether the run-table patches are stale
@@ -11423,6 +11412,32 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
         ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
+        * = $a9a0
+; ---- lvlStart: put the player at the LIVE level's official start ----
+; Boot and every death go through here. dieKey restarts with "jmp entry", but lvlMeT is RAM and
+; still names the level you died on, so reading the start from a table indexed by it is what
+; makes a death return you to THAT level's spot rather than the build's.
+lvlStart: ldx lvlMeT
+        dex
+        lda lvlStXLoT,x
+        sta px
+        lda lvlStXHiT,x
+        sta px+1
+        lda lvlStYLoT,x
+        sta py
+        lda lvlStYHiT,x
+        sta py+1
+        lda lvlStAT,x
+        sta pa
+        lda lvlStAFT,x
+        sta paF
+        rts
+lvlStXLoT: !byte $80,$6e,$80,$80
+lvlStXHiT: !byte $02,$04,$01,$01
+lvlStYLoT: !byte $80,$dc,$80,$80
+lvlStYHiT: !byte $02,$07,$01,$08
+lvlStAT:  !byte $19,$db,$20,$00
+lvlStAFT: !byte $c0,$00,$00,$00
         * = $aa00
 
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the

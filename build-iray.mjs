@@ -2878,7 +2878,20 @@ const DUMPH = flag('DUMPH');
 // under SPIN -- a fixed angle makes the frame reproducible, so a plain -exitscreenshot run
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
-const PA = hexArg('PA', SOCKROOM ? 0x1a : CHAMBER ? 0x20 : IDOLROOM ? 0x00 : 0x19, 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
+// ---- where each level STARTS ----
+// Per level, not per build: dieKey restarts with "jmp entry", and lvlMeT is RAM, so after dying
+// on level 4 the boot used to place you at the BUILD's start -- level 1's (2.5, 2.5) -- on level
+// 4's map, which is inside a wall. lvlStart reads the live level instead, so a death always
+// returns you to the official start point of the level you died on.
+const LEVEL_START = {
+  1: [0x0280, 0x0280, 0x19, 0xc0],
+  2: [0x046e, 0x07dc, 0xdb, 0x00],   // the user's spot, 2026-09-22
+  3: [0x0180, 0x0180, 0x20, 0x00],
+  4: [0x0180, 0x0880, 0x00, 0x00],
+};
+const ST0 = LEVEL_START[LVL] ?? LEVEL_START[1];
+const startOf = n => n === LVL ? [PX, PY, PA, PAF] : (LEVEL_START[n] ?? LEVEL_START[1]);
+const PA = hexArg('PA', ST0[2], 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
                                                                     // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
                                                                     //   room's far wall and the corridor mouth
 // PAF: the LOW byte of the 16-bit angle, which the HUD does not show. Not a nicety -- paq indexes
@@ -2886,7 +2899,7 @@ const PA = hexArg('PA', SOCKROOM ? 0x1a : CHAMBER ? 0x20 : IDOLROOM ? 0x00 : 0x1
 // DIFFERENT renders that all read "AC0" on screen. A cold start left paF at zero, so three of
 // every four reachable views could not be replayed from a screenshot at all, and a reported
 // glitch that lived on one of them looked like it simply did not reproduce.
-const PAF = hexArg('PAF', SOCKROOM || CHAMBER ? 0x00 : 0xc0, 0xff);
+const PAF = hexArg('PAF', ST0[3], 0xff);
 // PX/PY: exact 8.8 start position, matching the on-screen readout's cell.frac hex
 // (e.g. the readout showing X=273 is PX=273). Lets a screenshot be replayed exactly.
 // Level 1 opens in the room's north-west corner looking diagonally across it. The old start
@@ -2901,8 +2914,8 @@ const PAF = hexArg('PAF', SOCKROOM || CHAMBER ? 0x00 : 0xc0, 0xff);
 // then simply walked back and finished the level without it ever mattering again. Starting
 // opposite, with the angel ON the door, means every route to the goal has the angel somewhere
 // along it, and the tie means it has no preferred arc until the player picks one.
-const PX = hexArg('PX', CHAMBER ? 0x0180 : IDOLROOM ? 0x0180 : 0x0280, 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3-5
-const PY = hexArg('PY', CHAMBER ? 0x0180 : IDOLROOM ? 0x0880 : 0x0280, 0xffff);
+const PX = hexArg('PX', ST0[0], 0xffff);   // PP at (2,2) in levels 1 and 2, (1,1) in 3-5
+const PY = hexArg('PY', ST0[1], 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
@@ -6931,19 +6944,8 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta cqN                 ; of 64 or more makes every push hit the full check silently,
                                 ; and the first flush walks 64 garbage pointers writing colour
                                 ; bytes wherever they happen to point.
-` : ''}        lda #${hx(PX & 255)}
-        sta px
-        lda #${hx(PX >> 8)}
-        sta px+1
-        lda #${hx(PY & 255)}
-        sta py
-        lda #${hx(PY >> 8)}
-        sta py+1
-        lda #${hx(PA)}
-        sta pa
-${PAF ? `        lda #${hx(PAF)}
-        sta paF                 ; PAF: the sub-unit angle the readout cannot show
-` : ''}${SLOWMO ? `        lda #$01
+` : ''}        jsr lvlStart            ; the LIVE level's start -- boot and every death come here
+${SLOWMO ? `        lda #$01
         sta smCnt               ; 1, not SLOWMO: step on the FIRST frame, so the traverse starts
                                 ; from the requested position rather than SLOWMO frames into it
 ` : ''}${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
@@ -18463,6 +18465,32 @@ rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
 ` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
+        * = $a9a0
+; ---- lvlStart: put the player at the LIVE level's official start ----
+; Boot and every death go through here. dieKey restarts with "jmp entry", but lvlMeT is RAM and
+; still names the level you died on, so reading the start from a table indexed by it is what
+; makes a death return you to THAT level's spot rather than the build's.
+lvlStart: ldx lvlMeT
+        dex
+        lda lvlStXLoT,x
+        sta px
+        lda lvlStXHiT,x
+        sta px+1
+        lda lvlStYLoT,x
+        sta py
+        lda lvlStYHiT,x
+        sta py+1
+        lda lvlStAT,x
+        sta pa
+        lda lvlStAFT,x
+        sta paF
+        rts
+lvlStXLoT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[0] & 255)).join(',')}
+lvlStXHiT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[0] >> 8)).join(',')}
+lvlStYLoT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] & 255)).join(',')}
+lvlStYHiT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] >> 8)).join(',')}
+lvlStAT:  !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[2])).join(',')}
+lvlStAFT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[3])).join(',')}
         * = ${hx16(RELOC + 0x2400)}
 ${PLAN === 3 ? '' : `stepT1: ${chunk(stepT[0]).trim()}`}${PIVOT ? `
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
