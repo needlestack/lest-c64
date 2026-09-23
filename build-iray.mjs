@@ -158,8 +158,8 @@ const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) } };
 // the rows we want below row 24 are cell rows -1..-5 -- above the top -- and the mirror makes
 // them fall out of the same arithmetic. Deepest source any drop frame asks for is row 29.
 const FALLTAIL = process.env.FALLTAIL === '1';
-const SRCMAX = FALLTAIL ? 30 : 24;
-const FTROWS = FALLTAIL ? 6 : 0;   // source rows 25..30
+const SRCMAX = FALLTAIL ? 31 : 24;
+const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
 // ...and while the IDOL is on screen the two shared inks swap to brown and yellow, with the
 // idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
 // just the idol -- which is the point: seeing it changes the light in the room.
@@ -5009,7 +5009,7 @@ const arcTr2T = arcYT2.map(y => Math.max(0, Math.min(255, arcYT2[0] - y)));
 // BLANK -- white. With no tail the content stopped short anyway and the gap was invisible among
 // the flat cut; with one, it is the only thing left down there, a white band under the geometry.
 // One row less of it, and the tail supplies the row that takes its place.
-const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 1 : 2));
+const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 0 : 2));
 // ---- the two arcs OVERLAP ----
 // The drop hands over ARC_OVERLAP frames early and its last few frames are drawn on top of the
 // landing's first few, so the white arriving from the bottom is already climbing while the black
@@ -6613,7 +6613,7 @@ bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cel
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
                                  ;   image hole held a page; back in the image since fRowT left.
-${FALLTAIL ? `fallTailB = $a810               ; FALLTAIL: source rows 25..29, five rows of 40. NOT after
+${FALLTAIL ? `fallTailB = $a7e8               ; FALLTAIL: source rows 25..29, five rows of 40. NOT after
                                  ;   fallSnapS -- its 1024 at $6200 runs into the fall's own
                                  ;   tables at $6600 -- so fdWarp switches base above row 24.
 ` : ''}fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
@@ -15999,7 +15999,7 @@ ftSolid:lda #${hx(SOLID)}
         jsr rfStore
 ftNext: ldy ftR
         iny
-        cpy #$06
+        cpy #$07
         bcc ftRow
         ldx colc
         dex
@@ -18589,30 +18589,6 @@ recL2:  !byte $ff
 recT0:  !byte 0
 recN:   !byte 0                 ; runs logged so far -- read this first when dumping
 recBuf: !fill ${RECMAX * 4}, 0
-` : ''}${FALLTAIL ? `        * = $a7e1               ; the tail's data and stubs, BELOW the buffer: six rows of
-hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
-                                ;   where K is +4 at the horizon and an uncapped h would wrap the
-                                ;   index; $ff for the tail rows, where K is -100 to -132 and the
-                                ;   cap is the whole problem -- it flattens every wall with h>100
-                                ;   to exactly 100, so all the edge cells pick the SAME glyph and
-                                ;   the boundary comes out as a staircase of whole cells.
-ftMin:  !byte 0
-ftMax:  !byte 0
-ftR:    !byte 0
-ftT1T:  !byte ${ftT1.join(',')}
-ftTbT:  !byte ${ftTb.join(',')}
-edT0:	sta fallTailB,x
-	rts
-edT1:	sta fallTailB+40,x
-	rts
-edT2:	sta fallTailB+80,x
-	rts
-edT3:	sta fallTailB+120,x
-	rts
-edT4:	sta fallTailB+160,x
-	rts
-edT5:	sta fallTailB+200,x
-	rts
 ` : ''}        * = ${hx16(RELOC + 0x2300)}
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
@@ -19174,6 +19150,32 @@ spWSt:  sta $d025
         sta irqSpU+1
         sty irqSpH+1
 spDn:   rts
+` : ''}${FALLTAIL ? `        * = $bdb6               ; the tail's data and store stubs, out of the buffer's way
+hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
+                                ;   where K is +4 at the horizon and an uncapped h would wrap the
+                                ;   index; $ff for the tail rows, where K is -100 to -132 and the
+                                ;   cap is the whole problem -- it flattens every wall with h>100
+                                ;   to exactly 100, so all the edge cells pick the SAME glyph and
+                                ;   the boundary comes out as a staircase of whole cells.
+ftMin:  !byte 0
+ftMax:  !byte 0
+ftR:    !byte 0
+ftT1T:  !byte ${ftT1.join(',')}
+ftTbT:  !byte ${ftTb.join(',')}
+edT0:	sta fallTailB,x
+	rts
+edT1:	sta fallTailB+40,x
+	rts
+edT2:	sta fallTailB+80,x
+	rts
+edT3:	sta fallTailB+120,x
+	rts
+edT4:	sta fallTailB+160,x
+	rts
+edT5:	sta fallTailB+200,x
+	rts
+edT6:	sta fallTailB+240,x
+	rts
 ` : ''}        * = $be00
 angMidT: !byte ${angMidT.join(',')}` : ''}
         * = ${hx(QCOSBASE)}
