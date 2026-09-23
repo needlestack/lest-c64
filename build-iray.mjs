@@ -14647,9 +14647,9 @@ apT1:   lda arcY
 apT2:   lsr
         lsr
         lsr                     ; -> character row
-        cmp #25                 ; CLAMP FIRST. arcY is 255 while the arc is off the foot, which
+        cmp #26                 ; CLAMP FIRST. arcY is 255 while the arc is off the foot, which
         bcc apT2b               ;   gives row 31 -> 248 -> +50 = 298, and that wrapped to 42:
-        lda #24                 ;   below pSplit, so the clamp collapsed region B to nothing and
+        lda #${FALLTAIL ? '25' : '24'}                 ;   below pSplit, so the clamp collapsed region B to nothing and
 apT2b:  asl                     ;   drew the whole lower screen in charset A.
         asl
         asl
