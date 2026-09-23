@@ -5149,9 +5149,7 @@ const fRowT = (() => {
       if (sr < 0 || sr > SRCMAX) { if (nsrc === 25) nsrc = R; blk[R] = 255; }
       else blk[R] = sr;
     }
-    // arcHiT exactly, not one past it: fdNoF computes the fill as arcHi - fwN and fdFill only
-    // guards a count of ZERO, so one row past would wrap to 255 and blit ten kilobytes.
-    const lim = Math.max(0, (FALLTAIL ? arcHiT[n] : arcTopT[n]) - ARC_GAP);
+    const lim = Math.max(0, arcTopT[n] - ARC_GAP);   // never let the scene reach the arc
     if (nsrc > lim) { for (let R = lim; R < 25; R++) blk[R] = 255; nsrc = lim; }
     blk[25] = nsrc;                                  // the drop's content runs 0..nsrc-1
     out.push(...blk);
