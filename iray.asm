@@ -4330,7 +4330,6 @@ obMoved:lda #$00
 ogFull:
         jsr omTrig              ; the frame's trig and the shared halves of every projection
                                 ;   -- out of line, the main block is at its ceiling; see omTrig
-        jsr idolLat             ; last frame's finding becomes the one the IRQ reads
         lda #$00                ; the per-sprite bit registers are built up a bit at a time and
         sta omEn                ; written once, so an unused slot is simply never set
         sta omXX
@@ -4991,6 +4990,12 @@ osLp:   dex                     ;   allocate DOWNWARD from 7, so a loop bounded 
         sta $d027,x
         cpx #$00
         bne osLp
+        jsr idolLat             ; THIS frame's finding, not last frame's. Latched at the start
+                                ;   of the projection it lagged a whole rendered frame: on the
+                                ;   frame you set the idol down, carry is already 0 and the world
+                                ;   entity is already placed, but idolOn still said "not in view"
+                                ;   -- so the palette fell back to the level's greys for 50ms
+                                ;   between the button and the idol appearing.
 osBits: lda omEn
         sta $d015
         lda omMc
