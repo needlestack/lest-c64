@@ -158,7 +158,8 @@ const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) } };
 // the rows we want below row 24 are cell rows -1..-5 -- above the top -- and the mirror makes
 // them fall out of the same arithmetic. Deepest source any drop frame asks for is row 29.
 const FALLTAIL = process.env.FALLTAIL === '1';
-const SRCMAX = FALLTAIL ? 29 : 24;
+const SRCMAX = FALLTAIL ? 30 : 24;
+const FTROWS = FALLTAIL ? 6 : 0;   // source rows 25..30
 // ...and while the IDOL is on screen the two shared inks swap to brown and yellow, with the
 // idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
 // just the idol -- which is the point: seeing it changes the light in the room.
@@ -2775,7 +2776,7 @@ const SEAMHALF = SEAMSTEP !== 8;
 // entry tables: blk indexed by rb (target row rb-1), sld indexed by rs (target row rs)
 const blkEnt = sel => ['0', ...ROWSA.map(r => `${sel}bkA${r}`)].concat(['0', ...ROWSA.map(r => `${sel}bkB${r}`)]).join(',');
 const sldEnt = sel => [...ROWSA.map(r => `${sel}slA${r}`), '0'].concat([...ROWSA.map(r => `${sel}slB${r}`), '0']).join(',');
-const edgEnt = sel => [...ROWSA.map(r => `${sel}edA${r}`), '0'].concat([...ROWSA.map(r => `${sel}edB${r}`), '0']).concat(FALLTAIL ? [...Array(5)].map((_, r) => `${sel}edT${r}`) : []).join(',');
+const edgEnt = sel => [...ROWSA.map(r => `${sel}edA${r}`), '0'].concat([...ROWSA.map(r => `${sel}edB${r}`), '0']).concat(FALLTAIL ? [...Array(FTROWS)].map((_, r) => `${sel}edT${r}`) : []).join(',');
 // clampT[(h + K) as signed byte] -> level 0..12. K = 8R-92 is negative for every row above
 // the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
 const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
@@ -2824,7 +2825,7 @@ if (PLAN === 3) {
 
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
 const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255)
-  .concat(FALLTAIL ? [...Array(5)].map((_, i) => (8 * (-1 - i) - 92) & 255) : []);
+  .concat(FALLTAIL ? [...Array(FTROWS)].map((_, i) => (8 * (-1 - i) - 92) & 255) : []);
 // per cell-row: cell is fully solid when min height >= t1, fully blank when max < tb.
 // fill = h + 8R - 92, so solid at fill>=8 and blank at fill<=0.
 const t1Tab = [], tbTab = [];
@@ -2834,7 +2835,7 @@ for (let R = 0; R < 13; R++) { t1Tab.push(100 - 8 * R); tbTab.push(Math.max(0, 9
 // actually contain the boundary -- so blank floor picked up a ramp glyph and the whole width
 // rose as rows of dots.
 const ftT1 = [], ftTb = [];
-if (FALLTAIL) for (let i = 1; i <= 5; i++) { ftT1.push(100 + 8 * i); ftTb.push(93 + 8 * i); }
+if (FALLTAIL) for (let i = 1; i <= FTROWS; i++) { ftT1.push(100 + 8 * i); ftTb.push(93 + 8 * i); }
 const rowLo = [], rowHi = []; for (let R = 0; R < 25; R++) { rowLo.push((R * 40) & 255); rowHi.push((R * 40) >> 8); }
 
 // ---- diagnostic knobs ----
@@ -5004,7 +5005,11 @@ const arcTr2T = arcYT2.map(y => Math.max(0, Math.min(255, arcYT2[0] - y)));
 // Both ends, because the scene has to be kept clear of it: a horizontal split cannot serve two
 // polarities on one scanline, so instead of drawing the rim per-column we simply never let the
 // room and the arc share a raster. ARC_GAP rows of slack, so the split has somewhere to land.
-const ARC_GAP = +(process.env.ARC_GAP ?? 2);
+// The rows between the room's content and the arc are filled with fdCol, which on the drop is
+// BLANK -- white. With no tail the content stopped short anyway and the gap was invisible among
+// the flat cut; with one, it is the only thing left down there, a white band under the geometry.
+// One row less of it, and the tail supplies the row that takes its place.
+const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 1 : 2));
 // ---- the two arcs OVERLAP ----
 // The drop hands over ARC_OVERLAP frames early and its last few frames are drawn on top of the
 // landing's first few, so the white arriving from the bottom is already climbing while the black
@@ -6608,7 +6613,7 @@ bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cel
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
                                  ;   image hole held a page; back in the image since fRowT left.
-${FALLTAIL ? `fallTailB = $a800               ; FALLTAIL: source rows 25..29, five rows of 40. NOT after
+${FALLTAIL ? `fallTailB = $a810               ; FALLTAIL: source rows 25..29, five rows of 40. NOT after
                                  ;   fallSnapS -- its 1024 at $6200 runs into the fall's own
                                  ;   tables at $6600 -- so fdWarp switches base above row 24.
 ` : ''}fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
@@ -15994,7 +15999,7 @@ ftSolid:lda #${hx(SOLID)}
         jsr rfStore
 ftNext: ldy ftR
         iny
-        cpy #$05
+        cpy #$06
         bcc ftRow
         ldx colc
         dex
@@ -18584,7 +18589,7 @@ recL2:  !byte $ff
 recT0:  !byte 0
 recN:   !byte 0                 ; runs logged so far -- read this first when dumping
 recBuf: !fill ${RECMAX * 4}, 0
-` : ''}${FALLTAIL ? `        * = $a8c8               ; the tail's data and store stubs, in the hole above it
+` : ''}${FALLTAIL ? `        * = $a7e1               ; the tail's data and stubs, BELOW the buffer: six rows of
 hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
                                 ;   where K is +4 at the horizon and an uncapped h would wrap the
                                 ;   index; $ff for the tail rows, where K is -100 to -132 and the
@@ -18605,6 +18610,8 @@ edT2:	sta fallTailB+80,x
 edT3:	sta fallTailB+120,x
 	rts
 edT4:	sta fallTailB+160,x
+	rts
+edT5:	sta fallTailB+200,x
 	rts
 ` : ''}        * = ${hx16(RELOC + 0x2300)}
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
