@@ -2829,6 +2829,12 @@ const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255)
 // fill = h + 8R - 92, so solid at fill>=8 and blank at fill<=0.
 const t1Tab = [], tbTab = [];
 for (let R = 0; R < 13; R++) { t1Tab.push(100 - 8 * R); tbTab.push(Math.max(0, 93 - 8 * R)); }
+// ...and FALLTAIL's five rows BELOW the screen, which are cell rows -1..-5: 108..140 and
+// 101..133. Without these every cell went to rfEdgeL, which is only valid for cells that
+// actually contain the boundary -- so blank floor picked up a ramp glyph and the whole width
+// rose as rows of dots.
+const ftT1 = [], ftTb = [];
+if (FALLTAIL) for (let i = 1; i <= 5; i++) { ftT1.push(100 + 8 * i); ftTb.push(93 + 8 * i); }
 const rowLo = [], rowHi = []; for (let R = 0; R < 25; R++) { rowLo.push((R * 40) & 255); rowHi.push((R * 40) >> 8); }
 
 // ---- diagnostic knobs ----
@@ -15950,33 +15956,48 @@ ${FALLTAIL ? `; ---- fallTail: the five source rows BELOW the screen ----
 ; bufOff 15 + erow 13..17 lands on chain entries 28..32, clear of buffer A's 0..13 and B's 14..27.
 ; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
 fallTail:
-        lda #15
+        lda #15                 ; erow 13..17 + 15 -> chain entries 28..32
         sta bufOff
-        lda #18
-        sta rsv
         ldx #39
 ftCol:  stx colc
-        lda #13
+        lda col4T,x
+        tax                     ; X = 4*col: the cell's four ray columns
+        lda colH,x              ; min and max over the cell, from its two ENDPOINTS: the
+        sta ftMin               ;   interpolator keeps a span linear between them, so the two
+        sta ftMax               ;   inner columns cannot lie outside the pair
+        lda colH+3,x
+        cmp ftMax
+        bcc ftLo
+        sta ftMax
+        bcs ftHi                ; always
+ftLo:   sta ftMin
+ftHi:   ldy #$00
+ftRow:  sty ftR                 ; ---- blank, solid, or an edge? ----
+        tya                     ; rfEdgeL is ONLY valid for a cell holding the boundary. On
+        clc                     ;   screen rbv/rsv keep blank and solid cells away from it;
+        adc #13                 ;   up here nothing does, so this is that test.
         sta erow
-        jsr rfEdgeL
+        lda ftMax
+        cmp ftTbT,y
+        bcc ftBlank             ; the whole cell is above the wall: floor
+        lda ftMin
+        cmp ftT1T,y
+        bcs ftSolid             ; the whole cell is inside it
+        jsr rfEdgeL             ; an edge: the real chooser, ramps, steps and all
+        jmp ftNext
+ftBlank:lda #${hx(BLANK)}
+        jsr rfStore
+        jmp ftNext
+ftSolid:lda #${hx(SOLID)}
+        jsr rfStore
+ftNext: ldy ftR
+        iny
+        cpy #$05
+        bcc ftRow
         ldx colc
         dex
         bpl ftCol
         rts
-edT0:	sta fallTailB,x
-	inc erow
-	jmp rfEdgeT
-edT1:	sta fallTailB+40,x
-	inc erow
-	jmp rfEdgeT
-edT2:	sta fallTailB+80,x
-	inc erow
-	jmp rfEdgeT
-edT3:	sta fallTailB+120,x
-	inc erow
-	jmp rfEdgeT
-edT4:	sta fallTailB+160,x
-	rts
 
 ` : ''}; ---- palCol: the ground inks, by key ----
 ; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
@@ -18559,6 +18580,22 @@ recL2:  !byte $ff
 recT0:  !byte 0
 recN:   !byte 0                 ; runs logged so far -- read this first when dumping
 recBuf: !fill ${RECMAX * 4}, 0
+` : ''}${FALLTAIL ? `        * = $a8c8               ; the tail's data and store stubs, in the hole above it
+ftMin:  !byte 0
+ftMax:  !byte 0
+ftR:    !byte 0
+ftT1T:  !byte ${ftT1.join(',')}
+ftTbT:  !byte ${ftTb.join(',')}
+edT0:	sta fallTailB,x
+	rts
+edT1:	sta fallTailB+40,x
+	rts
+edT2:	sta fallTailB+80,x
+	rts
+edT3:	sta fallTailB+120,x
+	rts
+edT4:	sta fallTailB+160,x
+	rts
 ` : ''}        * = ${hx16(RELOC + 0x2300)}
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
