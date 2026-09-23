@@ -14437,6 +14437,32 @@ ${SOUND ? `        lda #$01
         sta entDty
         rts
 okPlain:inc blkVer              ; ...and setting one down closes a cell
+        ; ---- pull the player off the cell boundary FIRST ----
+        ; mvFree tests a box of radius 26 around the DESTINATION, so if the orb lands in a cell
+        ; that box already reaches into, every single-frame move keeps reaching into it and is
+        ; refused. A walk step is 4 per tick, about 12 a frame -- less than 26 -- so the player
+        ; can never get out and is trapped for good. (Running is ~36 and does escape, which is
+        ; why this only bit "once in a while".) dropPick tests blkT but never the player's own
+        ; footprint, and the eight candidates are all NEIGHBOURS -- so clamping the fraction to
+        ; [26,230] puts the whole box inside the player's own cell, which no candidate can be.
+        ; At most 26/256 of a cell, and the integer part never changes, so the cell dropPick
+        ; already chose stays the right one.
+        lda px
+        cmp #26
+        bcs okpX1
+        lda #26
+okpX1:  cmp #230
+        bcc okpX2
+        lda #230
+okpX2:  sta px
+        lda py
+        cmp #26
+        bcs okpY1
+        lda #26
+okpY1:  cmp #230
+        bcc okpY2
+        lda #230
+okpY2:  sta py
         ldx odCell              ; NOT the X orbPut loaded: hlAt walks the sockets through X on
         lda #$02                ;   its way here, so on any level WITH sockets the wall went to
         sta blkT,x              ;   a border cell and the angel walked straight through the
