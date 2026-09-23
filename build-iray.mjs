@@ -152,6 +152,13 @@ const LEVEL_SYM = { 4: [[1, 3]] };
 // by all eight sprites; only the body is per-sprite. Level 4 takes the underside to black, so
 // its cast reads black / grey 2 / grey 3.
 const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) } };
+// ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
+// The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
+// that rises with the room. The renderer only ever computes 13 cell rows and MIRRORS them, so
+// the rows we want below row 24 are cell rows -1..-5 -- above the top -- and the mirror makes
+// them fall out of the same arithmetic. Deepest source any drop frame asks for is row 29.
+const FALLTAIL = process.env.FALLTAIL === '1';
+const SRCMAX = FALLTAIL ? 29 : 24;
 // ...and while the IDOL is on screen the two shared inks swap to brown and yellow, with the
 // idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
 // just the idol -- which is the point: seeing it changes the light in the room.
@@ -2768,7 +2775,7 @@ const SEAMHALF = SEAMSTEP !== 8;
 // entry tables: blk indexed by rb (target row rb-1), sld indexed by rs (target row rs)
 const blkEnt = sel => ['0', ...ROWSA.map(r => `${sel}bkA${r}`)].concat(['0', ...ROWSA.map(r => `${sel}bkB${r}`)]).join(',');
 const sldEnt = sel => [...ROWSA.map(r => `${sel}slA${r}`), '0'].concat([...ROWSA.map(r => `${sel}slB${r}`), '0']).join(',');
-const edgEnt = sel => [...ROWSA.map(r => `${sel}edA${r}`), '0'].concat([...ROWSA.map(r => `${sel}edB${r}`), '0']).join(',');
+const edgEnt = sel => [...ROWSA.map(r => `${sel}edA${r}`), '0'].concat([...ROWSA.map(r => `${sel}edB${r}`), '0']).concat(FALLTAIL ? [...Array(5)].map((_, r) => `${sel}edT${r}`) : []).join(',');
 // clampT[(h + K) as signed byte] -> level 0..12. K = 8R-92 is negative for every row above
 // the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
 const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
@@ -2816,7 +2823,8 @@ if (PLAN === 3) {
 }
 
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
-const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255);
+const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255)
+  .concat(FALLTAIL ? [...Array(5)].map((_, i) => (8 * (-1 - i) - 92) & 255) : []);
 // per cell-row: cell is fully solid when min height >= t1, fully blank when max < tb.
 // fill = h + 8R - 92, so solid at fill>=8 and blank at fill<=0.
 const t1Tab = [], tbTab = [];
@@ -4850,7 +4858,7 @@ const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 3);   // was 2 = 30fps, measu
 // that was right, is unchanged to within 1% -- and the exit is shorter because the crown is now
 // moving faster through it.
 const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 16);   // 16 * 2 / 60 = 0.53s
-const mul40 = [...Array(26)].map((_, i) => i * 40);
+const mul40 = [...Array(FALLTAIL ? 31 : 26)].map((_, i) => i * 40);
 // ---- the hole's RIM: one equation, and the shape is FORCED, not tuned ----
 // A floor point at perpendicular distance d projects to row 100 + 88*s/d, where s is the eye
 // height as a fraction of standing height. The rim is a circle of radius r about the player, so
@@ -5117,7 +5125,7 @@ const fRowT = (() => {
     for (let R = 0; R < 25; R++) {
       const ps = R * 8 + 4 + t;                            // JUST A SLIDE. No shear, no
       const sr = Math.floor(ps / 8);                       //   compression, no recalculation.
-      if (sr < 0 || sr > 24) { if (nsrc === 25) nsrc = R; blk[R] = 255; }
+      if (sr < 0 || sr > SRCMAX) { if (nsrc === 25) nsrc = R; blk[R] = 255; }
       else blk[R] = sr;
     }
     const lim = Math.max(0, arcTopT[n] - ARC_GAP);   // never let the scene reach the arc
@@ -6594,7 +6602,10 @@ bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cel
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
                                  ;   image hole held a page; back in the image since fRowT left.
-fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
+${FALLTAIL ? `fallTailB = $a800               ; FALLTAIL: source rows 25..29, five rows of 40. NOT after
+                                 ;   fallSnapS -- its 1024 at $6200 runs into the fall's own
+                                 ;   tables at $6600 -- so fdWarp switches base above row 24.
+` : ''}fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
 fallSnapS = $6200                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
@@ -12877,6 +12888,7 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit 
         bne fcGrab              ; always taken: a page number, never zero
 fcGB:   lda #${hx(SCR_A >> 8)}
 fcGrab: jsr fallSnap
+${FALLTAIL ? '        jsr fallTail            ; ...and the five rows below the screen it cannot see\n' : ''}
 fcNo:   rts
 
 
@@ -13186,7 +13198,21 @@ fwLp:   lda fwRow
         adc #>${hx16(FALLBUF2)}
         sta fdS+1
         jmp fwSrcD
-fwSrcA: lda mul40LoT,x
+fwSrcA:${FALLTAIL ? ` cpx #25
+        bcc fwSlo               ; rows 25..29 are the tail, in their own buffer
+        txa
+        sec
+        sbc #25
+        tax
+        lda mul40LoT,x
+        clc
+        adc #<fallTailB
+        sta fdS
+        lda mul40HiT,x
+        adc #>fallTailB
+        sta fdS+1
+        jmp fwSrcD
+fwSlo:` : ''} lda mul40LoT,x
         clc
         adc #<${hx16(FALLBUF)}
         sta fdS
@@ -15906,7 +15932,53 @@ saOff:  lda #$ff                ; never matches, and irqAr2 keeps the arc split
         sta irqSpC+1
         rts
 ` : ''}
-; ---- palCol: the ground inks, by key ----
+${FALLTAIL ? `; ---- fallTail: the five source rows BELOW the screen ----
+; The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat cut that rises
+; with the room. These are the rows that should be under it.
+;
+; It does not re-implement anything. renderSym computes 13 cell rows and MIRRORS them, so screen
+; row 25 IS cell row -1 -- and rfEdgeL already takes a cell row in erow and a column in colc and
+; picks the right ramp or step glyph for it. Five more kTab entries give it the K for rows -1..-5,
+; five more chain entries give rfStore somewhere to put the answer, and it walks the columns.
+; The step path, VSPLIT and calcM all come along for free because it IS the chooser.
+;
+; No height cap here, unlike the on-screen path: that cap exists because K is +4 at the horizon,
+; where an uncapped h would wrap the index. Up here K is -100 to -132, so h - 100 is what the
+; tables want, and they already handle both ends -- clampT saturates at 15 (solid) going up and
+; is 0 (blank) through the wrapped negatives.
+;
+; bufOff 15 + erow 13..17 lands on chain entries 28..32, clear of buffer A's 0..13 and B's 14..27.
+; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
+fallTail:
+        lda #15
+        sta bufOff
+        lda #18
+        sta rsv
+        ldx #39
+ftCol:  stx colc
+        lda #13
+        sta erow
+        jsr rfEdgeL
+        ldx colc
+        dex
+        bpl ftCol
+        rts
+edT0:	sta fallTailB,x
+	inc erow
+	jmp rfEdgeT
+edT1:	sta fallTailB+40,x
+	inc erow
+	jmp rfEdgeT
+edT2:	sta fallTailB+80,x
+	inc erow
+	jmp rfEdgeT
+edT3:	sta fallTailB+120,x
+	inc erow
+	jmp rfEdgeT
+edT4:	sta fallTailB+160,x
+	rts
+
+` : ''}; ---- palCol: the ground inks, by key ----
 ; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
 ; floor alone and 'W' the ceiling alone. They are separable because the raster split gave the two
 ; their own registers: irqB0 is everything above the horizon, irqB1 everything below it. Pressing

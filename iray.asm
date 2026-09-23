@@ -5899,6 +5899,7 @@ lvlEnd:
         bne fcGrab              ; always taken: a page number, never zero
 fcGB:   lda #$e0
 fcGrab: jsr fallSnap
+
 fcNo:   rts
 
 
