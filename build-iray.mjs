@@ -14740,10 +14740,19 @@ abLp:   jsr arcPx
         sta fdS+1
         sty apY
         ldy #$00
+        lda apRow               ; ---- and only if this column's rim is ON the screen ----
+        cmp #25                 ; apRow is a pixel midpoint shifted right three, so it reaches
+        bcs abNx                ;   31 while the arc is still below the foot. mul40T has no such
+                                ;   row, so the address above is off the end of it and the store
+                                ;   goes wherever that lands -- four dots in the top right, and
+                                ;   only in one of the two buffers, which is why they flicker.
         lda apCode
         sta (fdS),y
         lda arcHi               ; and solid hole from the row below it down to arcHi
-        sec
+        cmp #25                 ; ...but no further than the screen: arcHi is off the foot while
+        bcc abHOk               ;   the arc still is, and this walk adds 40 a row with nothing to
+        lda #24                 ;   stop it -- the stray black line low on the right in dots-2.
+abHOk:  sec
         sbc apRow
         bcc abNx
         beq abNx
