@@ -16011,17 +16011,14 @@ pcFlr:  inc colF
         sta irqB1+1
         rts
 colF:   !byte ${hx(palOf(LVL).ceil)}             ; the FLOOR's ink. colW is the ceiling's now.
-${SPRVARY || HAS_IDOL ? `sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
+sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
 sprH:   !byte ${hx(sprOf(LVL).hi)}             ;   because the idol swap borrows the registers
-` : ''}${HAS_IDOL ? `idolOn: !byte $00               ; the idol is on screen. LATCHED: the IRQ reads this sixty
+${HAS_IDOL ? `idolOn: !byte $00               ; the idol is on screen. LATCHED: the IRQ reads this sixty
 ` : ''}
 
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
 ; because the main block is the tightest resource in the project and this runs once.
-lvlBoot:lda #${hx(palOf(LVL).wall)}
-        sta colB
-        sta $d022               ; 01 = walls, and the readout glyphs which are wall-coloured.
-        jsr lvlLook             ;   The one ink no level overrides, so it is set once, here.
+lvlBoot:jsr lvlLook             ; all five inks, then fall through to lvlHi
         ; fall through to lvlHi: at boot there is no departing level, so all three agree
 ; lvlHi: the region ABOVE the rim catches up with the rest. Called when the DEPARTING rim has
 ; finally left the screen -- until then it must keep the colour of the level being left, which is
@@ -16041,18 +16038,31 @@ ${CEILVARY ? `lvlLo:  ldx lvlMeT
         lda lvlPalceilT,x
         sta irqB2+1
         rts
-` : ''}lvlLook:${TWOLEV ? (() => {
+` : ''}lvlLook:${(() => {
+  // EVERY ink is set here, whether it varies across the chain or not. It used to emit only the
+  // ones that vary, on the grounds that the rest were "already correct from boot" -- true when
+  // the boot set them itself, and false the moment lvlBoot started calling this instead. On a
+  // chain whose levels agree (CHAIN=1,2,3 among them) the whole routine collapsed to an rts,
+  // colW/colF/colS were never written at all, and lvlHi fed uninitialised RAM to the IRQ's
+  // ground operands. A table when it varies, an immediate when it does not; same instruction
+  // count either way.
   const REG = { ceil: ['colW', '$d021'], wall: ['colB', '$d022'], seam: ['colS', '$d023'] };
-  const vary = Object.keys(REG).filter(k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]));
-  if (!vary.length) return '';
-  return ` ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level ARRIVED at
-        dex
-` +
-    vary.map(k => `        lda lvlPal${k}T,x
-        sta ${REG[k][0]}
-        sta ${REG[k][1]}
-`).join('');
-})() : ''}
+  const varies = k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]);
+  const sprV = k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]);
+  const anyT = Object.keys(REG).some(varies) || ['under', 'hi'].some(sprV);
+  let out = anyT ? ` ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level ARRIVED at\n        dex\n` : `\n`;
+  // The register is only stored where nothing else paints it. $d021 comes from irqB0/irqB1
+  // every raster frame and $d025/$d026 from sprPal, so storing them here is three dead bytes
+  // each; $d022 and $d023 have no such owner and must be written.
+  const OWNED = { ceil: true, wall: false, seam: false };
+  for (const [k, [sh, reg]] of Object.entries(REG))
+    out += (varies(k) ? `        lda lvlPal${k}T,x\n` : `        lda #${hx(palOf(CHAIN[0])[k])}\n`)
+         + `        sta ${sh}\n` + (OWNED[k] ? '' : `        sta ${reg}\n`);
+  for (const [k, sh, reg] of [['under', 'sprU', '$d025'], ['hi', 'sprH', '$d026']])
+    out += (sprV(k) ? `        lda lvlSpr${k}T,x\n` : `        lda #${hx(sprOf(CHAIN[0])[k])}\n`)
+         + `        sta ${sh}\n` + (HAS_IDOL ? '' : `        sta ${reg}\n`);
+  return out;
+})()}
 ${SPRVARY ? (() => {
   const vary = ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]));
   return vary.map(k => `        lda lvlSpr${k}T,x\n        sta spr${k === 'under' ? 'U' : 'H'}\n` +
@@ -16078,15 +16088,6 @@ spLp:   lda symT,x
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
         !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
 lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}` : `        rts`}
-${SPRVARY ? ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]))
-  .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
-  .join('\n') : ''}
-${TWOLEV ? (() => {
-  const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
-  return Object.keys(REG).filter(k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]))
-    .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
-    .join('\n');
-})() : ''}
 ; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
@@ -18593,6 +18594,15 @@ lvlStYLoT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] & 255)).
 lvlStYHiT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] >> 8)).join(',')}
 lvlStAT:  !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[2])).join(',')}
 lvlStAFT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[3])).join(',')}
+${SPRVARY ? ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]))
+  .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
+  .join('\n') : ''}
+${TWOLEV ? (() => {
+  const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
+  return Object.keys(REG).filter(k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]))
+    .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
+    .join('\n');
+})() : ''}
         * = ${hx16(RELOC + 0x2400)}
 ${PLAN === 3 ? '' : `stepT1: ${chunk(stepT[0]).trim()}`}${PIVOT ? `
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the

@@ -9213,10 +9213,7 @@ idolOn: !byte $00               ; the idol is on screen. LATCHED: the IRQ reads 
 
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
 ; because the main block is the tightest resource in the project and this runs once.
-lvlBoot:lda #$00
-        sta colB
-        sta $d022               ; 01 = walls, and the readout glyphs which are wall-coloured.
-        jsr lvlLook             ;   The one ink no level overrides, so it is set once, here.
+lvlBoot:jsr lvlLook             ; all five inks, then fall through to lvlHi
         ; fall through to lvlHi: at boot there is no departing level, so all three agree
 ; lvlHi: the region ABOVE the rim catches up with the rest. Called when the DEPARTING rim has
 ; finally left the screen -- until then it must keep the colour of the level being left, which is
@@ -9240,10 +9237,16 @@ lvlLook: ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level A
         dex
         lda lvlPalceilT,x
         sta colW
-        sta $d021
+        lda #$00
+        sta colB
+        sta $d022
         lda lvlPalseamT,x
         sta colS
         sta $d023
+        lda lvlSprunderT,x
+        sta sprU
+        lda #$0f
+        sta sprH
 
         lda lvlSprunderT,x
         sta sprU
@@ -9269,9 +9272,6 @@ spLp:   lda symT,x
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
         !byte $55,$55,$55,$45,$55,$55,$55,$55
 lvlSymT: !byte 0,0,0,8
-lvlSprunderT: !byte $0b,$0b,$0b,$00
-lvlPalceilT: !byte $01,$01,$01,$0b
-lvlPalseamT: !byte $0b,$0b,$0b,$0e
 ; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
@@ -11468,6 +11468,9 @@ lvlStYLoT: !byte $80,$dc,$80,$80
 lvlStYHiT: !byte $02,$07,$01,$08
 lvlStAT:  !byte $19,$db,$20,$00
 lvlStAFT: !byte $c0,$00,$00,$00
+lvlSprunderT: !byte $0b,$0b,$0b,$00
+lvlPalceilT: !byte $01,$01,$01,$0b
+lvlPalseamT: !byte $0b,$0b,$0b,$0e
         * = $aa00
 
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
