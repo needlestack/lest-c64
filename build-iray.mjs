@@ -13079,7 +13079,14 @@ ${FALLSCENE ? `        jsr fdWarp              ; the room, slid up. No shear -- 
         ldy #${hx(BLANK)}       ;   selected to give the rim glyph the matching polarity
 fdPol:  stx fdCol
         sty arcBlw              ; arcBand fills below its glyph with this
-${FALLSCENE ? `        ldx fwN                 ; the warped scene already fills rows 0..fwN-1, so the band
+${FALLSCENE ? `${FALLTAIL ? `        lda fwN                 ; ---- nothing below the room at all? then draw nothing ----
+        cmp #25                 ; arcPrep CLAMPS the arc's row to 24 while it is still off the
+        bcs fdTail              ;   bottom of the screen, so arcBand lays a cell there even on
+                                ;   frame 0 -- over the wall's last row, in the only four pixels
+                                ;   of row 24 that 24-row mode shows. It was invisible until the
+                                ;   room started reaching row 24: before that those rows were
+                                ;   fill anyway. "Four pixels cleared before anything moves."
+` : ''}        ldx fwN                 ; the warped scene already fills rows 0..fwN-1, so the band
         lda arcHi               ;   starts where its content stopped. Filling from row 0 here
         sec                     ;   erased the copy that had just been made -- paying for the
         sbc fwN                 ;   scene twice and then throwing it away.
