@@ -5851,18 +5851,16 @@ lvGot:  ldy lvlMeT              ;   a swap against X = $ff
 
         jsr lvlLo               ; what you see THROUGH the hole is already the new level
 lvlEnd:
-        ldx hlv                 ; go to the landing spot NOW and let the main loop render it
-        lda #$80                ;   next frame -- fallLand snapshots it and starts the drop. The
-        sta px                  ;   player does not move again for the rest of the fall.
-        sta py
-        lda landXT,x
-        sta px+1
-        lda landYT,x
-        sta py+1
-        lda landAT              ; face the way THIS level wants to be entered. Keeping the old
-        sta pa                  ;   heading put you against a wall and blacked the screen out.
-        lda #$00
-        sta paF
+        jsr lvlStart            ; go to the arriving level's OFFICIAL START now, and let the
+                                ;   main loop render it next frame -- fallLand snapshots it and
+                                ;   starts the drop; the player does not move again for the rest
+                                ;   of the fall. This used to be landXT/landYT/landAT, a SECOND
+                                ;   per-level spot that happened to agree with the start until
+                                ;   the starts became a table -- at which point falling (and 'L',
+                                ;   which fakes a fall) still went to the old cell while boot and
+                                ;   death went to the new one. One place a level begins, however
+                                ;   you got there.
+        ldx hlv                 ; ...and X back, for the store below
         txa
         and #$00   ; the other hole is live now -- if there is one
         sta hlv
