@@ -6627,7 +6627,9 @@ entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gat
 dbgOnce = $84f5                  ; DROPNOW only
 ${process.env.FALLNOW ? `fnCnt   = $7100                  ; FALLNOW: how many forced falls have been triggered
 fnLog   = $7101                  ;   ...and the level each one left, in order (16 of them).
-${process.env.FTFREEZE ? `ftFrz   = $711f                  ; FTFREEZE: set once the chosen frame is on screen
+${process.env.CEILLOG ? `clP     = $711e                  ; CEILLOG: write cursor into clBuf
+clBuf   = $7120                  ;   per fall frame: irqB0 irqB1 pSplit + row 0 of both buffers
+` : ''}${process.env.FTFREEZE ? `ftFrz   = $711f                  ; FTFREEZE: set once the chosen frame is on screen
 ` : ''}${process.env.FTCAP ? `ftBuf   = $7120                  ; FTCAP: per frame, the A/B buffer mismatch and its column at +64
 ` : ''}
                                  ;   $7100 is the death picture's page in a shipping build, so
@@ -7225,7 +7227,7 @@ mfAlive:
 ` : ''}        lda fallSt              ; falling? then no input, no rays, no renderSym -- one block
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
-${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}        jmp fwait
+${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}${process.env.CEILLOG ? '        jsr ceilLog\n' : ''}        jmp fwait
 mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
         and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two), so a headless run falls again and again. It sets only
@@ -8177,7 +8179,15 @@ mvs:    lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
-${HAS_IDOL ? '        jsr sprArm              ; ...and whether the held object gets its own inks\n' : ''}${CEILVARY ? `        lda #$ff                ; region 4 off until region 3 arms it. Its compare is
+${HAS_IDOL ? '        jsr sprArm              ; ...and whether the held object gets its own inks\n' : ''}${CEILVARY ? `        lda colF                ; THE GROUND TRAVELS WITH ITS OWN SPLIT LINE.
+        sta irqB1+1             ;   lvlLook used to store this the moment the landing
+                                ;   began, while pSplit -- the line region 1 STARTS at --
+                                ;   is pending and does not land until here. For the rest
+                                ;   of that frame the IRQ painted the arriving level's
+                                ;   ground from the OLD pSplit, which by then is 51: the
+                                ;   top of the display. That is the one-frame flash of the
+                                ;   next level's colour over the whole screen.
+` : ''}${CEILVARY ? `        lda #$ff                ; region 4 off until region 3 arms it. Its compare is
         sta irqCm3+1            ;   PATCHED by region 3, so left alone it holds last frame's
                                 ;   line -- and when pSplit2 jumps back to 246 at a fall's end
                                 ;   that stale line is below it, so region 4 would match first
@@ -16011,6 +16021,32 @@ ddPut:  clc
         iny
         rts
 
+${process.env.CEILLOG ? `        * = $7c80               ; in the slack the HUD's move left behind
+; ---- CEILLOG: the ground operands, and whether anything is THERE to show them ----
+; The flash is "the whole upper screen takes the next level's colour for one frame". irqB0 paints
+; the ground ABOVE the rim, so the question is which frame it changes on AND what is drawn up
+; there when it does: VOIDCH is bit pair 11, i.e. colour RAM, so the ground never shows through
+; it. If the top is void on that frame the flash cannot be irqB0's doing.
+ceilLog:lda clP
+        cmp #200
+        bcs clDn
+        tax
+        lda fFrm
+        sta clBuf,x
+        lda fallSt
+        sta clBuf+1,x
+        lda irqB0+1
+        sta clBuf+2,x
+        lda irqB1+1
+        sta clBuf+3,x
+        lda ${hx16(SCR_A)}+14           ; row 0, column 14 -- mid screen, above the rim
+        sta clBuf+4,x
+        txa
+        clc
+        adc #$05
+        sta clP
+clDn:   rts
+` : ''}
         * = $7e00
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
@@ -16095,10 +16131,8 @@ lvlBoot:jsr lvlLook             ; all five inks, then fall through to lvlHi
 ; finally left the screen -- until then it must keep the colour of the level being left, which is
 ; the whole point of the split.
 lvlHi:  lda colW
-        sta irqB0+1
-        lda colF                ; and the floor's, which the overlap split had borrowed
-        sta irqB1+1
-        rts
+        sta irqB0+1             ; irqB1 needs nothing here: it tracks colF through mnext's
+        rts                     ;   publish, and lvlLook has already set colF.
 
 ; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
 ; already swapped underneath but the drop is still showing the room being left above the rim.
@@ -16139,9 +16173,12 @@ ${SPRVARY ? (() => {
   return vary.map(k => `        lda lvlSpr${k}T,x\n        sta spr${k === 'under' ? 'U' : 'H'}\n` +
     `        sta ${k === 'under' ? '$d025' : '$d026'}\n`).join('');
 })() : ''}${CEILVARY ? `        lda colW                ; the two regions BELOW the departing rim are this level
-        sta colF                ;   ceiling and floor back in step: a level names one ground
-        sta irqB1+1             ;   now -- but NOT irqB0. The overlap frames still have the old
+        sta colF                ;   now -- but NOT irqB0. The overlap frames still have the old
         sta irqB2+1             ;   level's rim at the top, and lvlHi hands that over later.
+                                ; irqB1 is NOT stored here: mnext publishes it from colF at raster
+                                ;   250, with the pSplit that says where region 1 begins. Storing
+                                ;   it here put the new ground on screen a whole frame before the
+                                ;   line that bounds it.
 ` : ''}${ANYSYM ? `symPut: ldx lvlMeT
         dex
         lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
