@@ -14449,7 +14449,23 @@ abSet:  sta apCode              ;   answer has to be translated.
         lda arcHi               ; and solid hole from the row below it down to arcHi
         cmp #25                 ; ...but no further than the screen: arcHi is off the foot while
         bcc abHOk               ;   the arc still is, and this walk adds 40 a row with nothing to
-        lda #24                 ;   stop it -- the stray black line low on the right in dots-2.
+        lda #25                 ;   stop it -- the stray black line low on the right in dots-2.
+                                ;
+                                ; TWENTY-FIVE, not 24, and the difference is one frame of one
+                                ; row. The loop below fills apRow+1 .. A-1, leaving row A itself
+                                ; to the incremental pass -- which is right while the arc's foot
+                                ; is ON screen, because that pass owns the rows the arc has just
+                                ; vacated. But on the FIRST frame the rim reaches row 24, arcHi
+                                ; is still 25: the foot is off the bottom, so the incremental
+                                ; pass computes phA - arcHi = 25 - 25 = 0 and fills nothing,
+                                ; while a clamp of 24 stopped this loop at row 23. Row 24 then
+                                ; kept the band fill from ABOVE the rim -- BLANK on the drop and
+                                ; VOIDCH on the landing, i.e. the floor's ink where the hole's
+                                ; belonged. Visible as exactly four pixels, because 24-row mode
+                                ; shows only the top half of row 24, and gone on the next frame,
+                                ; when arcHi comes on screen and the incremental pass takes over.
+                                ; With 25 the count is 24 - apRow, so the fill runs to row 24
+                                ; INCLUSIVE and stops there; at apRow 24 it is 0, as it must be.
 abHOk:  sec
         sbc apRow
         bcc abNx
