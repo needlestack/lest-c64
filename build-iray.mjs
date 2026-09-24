@@ -7184,7 +7184,7 @@ fnSkip:
 ` : ''}${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
-        jsr fallStep            ; the destination render is a background job now -- no state
+${FALLTAIL && process.env.FTCAP ? '        jsr ftCap               ; FTCAP: latch row 0 of the chosen drop frame\n' : ''}        jsr fallStep            ; the destination render is a background job now -- no state
         jmp mvs                 ;   between walking and falling
 mfRnd:${FALLTAIL && process.env.FTDBG ? '  jsr fallTail          ; FTDBG: build the tail every frame, readable at any pose\n      ' : ''}  lda #$00
         sta bgOn                ; the player's own frame is never capped, and draws every column
@@ -13102,7 +13102,12 @@ ${FALLSCENE ? `${FALLTAIL ? `        lda fwN                 ; ---- nothing belo
         pla
         jsr fdFill              ; everything between the scene and the arc, whole rows
 fdNoF:
-        ldx arcHi               ; point fdD at the band explicitly rather than relying on the
+${FALLTAIL ? `        lda arcHi               ; bounded: arcHi is off the foot while the arc still is, and
+        cmp #25                 ;   mul40T now HAS rows 25..30 for the tail -- so an unbounded
+        bcc fdnOk               ;   index builds a real-looking address past the screen instead
+        lda #24                 ;   of reading off the end of a 26-entry table as it used to.
+fdnOk:  tax
+` : '        ldx arcHi'}               ; point fdD at the band explicitly rather than relying on the
         lda mul40LoT,x          ;   fills to have walked there
         sta fdD
         clc
@@ -16032,6 +16037,11 @@ ftNext: ldy ftR
         bpl ftCol
         lda #101                ; and back, before anything renders the screen again
         sta hCap
+        lda #$00                ; ...and bufOff, which rfStore turns into a chain index. Left at
+        sta bufOff              ;   15 it points the NEXT store at entries 28..34 -- the tail's
+                                ;   own stubs, which write into fallTailB. The background render
+                                ;   of the destination room runs DURING the drop, so this is not
+                                ;   hypothetical.
         rts
 
 ` : ''}; ---- palCol: the ground inks, by key ----
@@ -18650,6 +18660,25 @@ lvlStYLoT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] & 255)).
 lvlStYHiT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] >> 8)).join(',')}
 lvlStAT:  !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[2])).join(',')}
 lvlStAFT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[3])).join(',')}
+${FALLTAIL && process.env.FTCAP ? `; ---- ftCap: the real bytes of one drop frame ----
+; DROPHOLD cannot answer this: the drop's fill is incremental, so parking a frame drives it into
+; a state the moving fall never reaches -- a held frame reads as garbage in the PLAIN build too.
+; So latch screen row 0 on the chosen frame instead, into a buffer that outlives the fall, and
+; read it afterwards. FTCAP=n picks the frame; ftBuf holds row 0 columns 24..39.
+ftCap:  lda fFrm
+        cmp #${+process.env.FTCAP}
+        bne ftcDn
+        ldy #$07                ; row 0, columns 32..39 of BOTH buffers at the same instant.
+ftcL:   lda $e020,y             ;   Not via baseHi: that is the BACK buffer, and the dots
+        sta ftBuf,y             ;   flicker frame to frame, which says the two buffers DIFFER.
+        lda $e420,y             ;   Reading one of them can only ever show half the story.
+        sta ftBuf+8,y
+        dey
+        bpl ftcL
+ftcDn:  rts
+ftBuf:  !fill 16, 0
+
+` : ''}
 ${SPRVARY ? ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]))
   .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
   .join('\n') : ''}
