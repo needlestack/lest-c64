@@ -6566,6 +6566,8 @@ entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gat
 dbgOnce = $84f5                  ; DROPNOW only
 ${process.env.FALLNOW ? `fnCnt   = $7100                  ; FALLNOW: how many forced falls have been triggered
 fnLog   = $7101                  ;   ...and the level each one left, in order (16 of them).
+${process.env.FTCAP ? `ftBuf   = $7120                  ; FTCAP: per frame, the A/B buffer mismatch and its column at +64
+` : ''}
                                  ;   $7100 is the death picture's page in a shipping build, so
                                  ;   like FRAMELOG and PROFN this needs DIE=0 -- which a FALLNOW
                                  ;   build wants anyway, for the 691 bytes.
@@ -7154,7 +7156,7 @@ mfAlive:
 ` : ''}        lda fallSt              ; falling? then no input, no rays, no renderSym -- one block
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
-        jmp fwait
+${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}        jmp fwait
 mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
         and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two), so a headless run falls again and again. It sets only
@@ -7184,7 +7186,7 @@ fnSkip:
 ` : ''}${FALL ? `        jsr fallChk             ; stepped into the hole? the cut-scene starts on this frame
         lda fallSt
         beq mfRnd
-${FALLTAIL && process.env.FTCAP ? '        jsr ftCap               ; FTCAP: latch row 0 of the chosen drop frame\n' : ''}        jsr fallStep            ; the destination render is a background job now -- no state
+        jsr fallStep            ; the destination render is a background job now -- no state
         jmp mvs                 ;   between walking and falling
 mfRnd:${FALLTAIL && process.env.FTDBG ? '  jsr fallTail          ; FTDBG: build the tail every frame, readable at any pose\n      ' : ''}  lda #$00
         sta bgOn                ; the player's own frame is never capped, and draws every column
@@ -12915,7 +12917,16 @@ fcNo:   rts
 
 ; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
 fallStep:
-        ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
+${process.env.FTFREEZE ? `        lda fFrm                ; FTFREEZE=n[,phase]: hang with interrupts STILL ON at frame n,
+        cmp #${+process.env.FTFREEZE.split(',')[0]}${process.env.FTFREEZE.split(',')[1] ? `
+        bne ftfNo
+        lda fallSt
+        cmp #${+process.env.FTFREEZE.split(',')[1]}` : ''}
+        bne ftfNo               ;   so the raster splits and the display keep running and a
+ftfHg:  jmp ftfHg               ;   screenshot is EXACTLY what the player sees, frozen. Unlike
+ftfNo:                          ;   DROPHOLD it never redraws, so the drop's incremental hole
+                                ;   fill is not driven into a state that never occurs in play.
+` : ''}        ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
         inx                     ;   counter. Up here because everything below is a branch target
         ldy fallSt              ;   -- putting it lower hid it behind a branch once already.
         cpy #$03                ; the DROP hands over ARC_OVERLAP frames early; its last frames
@@ -18660,23 +18671,27 @@ lvlStYLoT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] & 255)).
 lvlStYHiT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] >> 8)).join(',')}
 lvlStAT:  !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[2])).join(',')}
 lvlStAFT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[3])).join(',')}
-${FALLTAIL && process.env.FTCAP ? `; ---- ftCap: the real bytes of one drop frame ----
+${process.env.FTCAP ? `; ---- ftCap: the real bytes of one drop frame ----
 ; DROPHOLD cannot answer this: the drop's fill is incremental, so parking a frame drives it into
 ; a state the moving fall never reaches -- a held frame reads as garbage in the PLAIN build too.
 ; So latch screen row 0 on the chosen frame instead, into a buffer that outlives the fall, and
 ; read it afterwards. FTCAP=n picks the frame; ftBuf holds row 0 columns 24..39.
-ftCap:  lda fFrm
-        cmp #${+process.env.FTCAP}
-        bne ftcDn
-        ldy #$07                ; rows 0 and 1, columns 32..39 -- the top right corner. Not
-ftcL:   lda $e020,y             ;   the sprite pointers: $d015 and omEn both read 0 during a
-        sta ftBuf,y             ;   fall, so nothing is enabled and the dots are not sprites.
-        lda $e420,y             ;   ...and the OTHER buffer: the fall is three-period paced, so
-        sta ftBuf+8,y           ;   several passes share one animation frame and they alternate.
-        dey
+ftCap:  lda fFrm                 ; ---- where do the two BUFFERS disagree, per frame? ----
+        and #$1f                ; The dots flicker while the image is still, which is the user's
+        ldx arcInv              ;   own reading: "it could be that it's different between two
+        beq ftc0                ;   identical buffers getting swapped". During a fall both
+        ora #$20                ;   buffers should be showing the same thing, so any column of
+ftc0:   tax                     ;   row 0 where they differ IS the flicker. Indexed by frame,
+        ldy #39                 ;   with the landing's frames at +32: one run names them all.
+ftcL:   lda ${hx16(SCR_A)},y
+        cmp ${hx16(SCR_B)},y
+        beq ftcNx
+        sta ftBuf,x             ; what buffer A has there...
+        tya                     ; sty has no abs,x -- and A is already stored
+        sta ftBuf+64,x          ; ...and the column
+ftcNx:  dey
         bpl ftcL
-ftcDn:  rts
-ftBuf:  !fill 16, 0
+        rts
 
 ` : ''}
 ${SPRVARY ? ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]))
