@@ -18668,11 +18668,11 @@ ${FALLTAIL && process.env.FTCAP ? `; ---- ftCap: the real bytes of one drop fram
 ftCap:  lda fFrm
         cmp #${+process.env.FTCAP}
         bne ftcDn
-        ldy #$07                ; row 0, columns 32..39 of BOTH buffers at the same instant.
-ftcL:   lda $e020,y             ;   Not via baseHi: that is the BACK buffer, and the dots
-        sta ftBuf,y             ;   flicker frame to frame, which says the two buffers DIFFER.
-        lda $e420,y             ;   Reading one of them can only ever show half the story.
-        sta ftBuf+8,y
+        ldy #$07                ; the SPRITE POINTERS of both buffers, $e3f8 and $e7f8 -- which
+ftcL:   lda $e3f8,y             ;   in 40-column terms is "row 25, columns 16..23". Anything
+        sta ftBuf,y             ;   that writes a row past 24 lands on them, the VIC draws the
+        lda $e7f8,y             ;   garbage, and osFlush rewrites them every frame from obP --
+        sta ftBuf+8,y           ;   which is a 60Hz flicker over a still image exactly.
         dey
         bpl ftcL
 ftcDn:  rts
