@@ -18668,11 +18668,11 @@ ${FALLTAIL && process.env.FTCAP ? `; ---- ftCap: the real bytes of one drop fram
 ftCap:  lda fFrm
         cmp #${+process.env.FTCAP}
         bne ftcDn
-        ldy #$07                ; the SPRITE POINTERS of both buffers, $e3f8 and $e7f8 -- which
-ftcL:   lda $e3f8,y             ;   in 40-column terms is "row 25, columns 16..23". Anything
-        sta ftBuf,y             ;   that writes a row past 24 lands on them, the VIC draws the
-        lda $e7f8,y             ;   garbage, and osFlush rewrites them every frame from obP --
-        sta ftBuf+8,y           ;   which is a 60Hz flicker over a still image exactly.
+        ldy #$07                ; rows 0 and 1, columns 32..39 -- the top right corner. Not
+ftcL:   lda $e020,y             ;   the sprite pointers: $d015 and omEn both read 0 during a
+        sta ftBuf,y             ;   fall, so nothing is enabled and the dots are not sprites.
+        lda $e420,y             ;   ...and the OTHER buffer: the fall is three-period paced, so
+        sta ftBuf+8,y           ;   several passes share one animation frame and they alternate.
         dey
         bpl ftcL
 ftcDn:  rts
