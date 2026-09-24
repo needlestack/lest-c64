@@ -157,7 +157,11 @@ const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) } };
 // that rises with the room. The renderer only ever computes 13 cell rows and MIRRORS them, so
 // the rows we want below row 24 are cell rows -1..-5 -- above the top -- and the mirror makes
 // them fall out of the same arithmetic. Deepest source any drop frame asks for is row 29.
-const FALLTAIL = process.env.FALLTAIL === '1';
+// SHIPPING as of 2026-09-24, in the four-level chain, on the one disk. FALLTAIL=0 turns it off.
+// The room it needed: the pivot's scratch went to VIC bank 3 (PVBASE) so fallTail could have the
+// $ad00 page whole, the tail buffer followed it up there (fallTailB), and arcPx/arcLvl/arcClp
+// moved out of the main block to pay for its 72 bytes of dispersed edits.
+const FALLTAIL = (process.env.FALLTAIL ?? '1') === '1';
 const SRCMAX = FALLTAIL ? 31 : 24;
 const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
 // ...and while the IDOL is on screen the two shared inks swap to brown and yellow, with the
@@ -3109,7 +3113,16 @@ const FLOG_N = 704;
 // $a700 and the hole report offered $a800-$a8ff as 256 spendable bytes -- the tail's own last
 // four rows, which scroll to the top of the screen late in a drop. Nothing has been placed
 // there yet; the report was simply ready to hand it to the next thing that wanted a page.
-const RUNTIME_BUFS = { fallSnapD: 1000, fallSnapS: 1000, fallTailB: FTROWS * 40 || 1 };
+// ---- PVBASE: the pivot's three NBND-byte scratch tables, in VIC bank 3 ----
+// They were at $ad00, taking 192 bytes of a 256-byte page in the IMAGE -- and the image is the
+// scarce resource now (306 bytes free in 26 fragments, largest 36) while bank 3 still has room
+// above the level shadows. They are per-frame scratch that nothing loads, so moving them costs
+// no file bytes and no cycles: every access is `lda pvBnd,y` with y < NBND either way, and none
+// of the three is in the page-aligned set. What it buys is a whole free PAGE at $ad00, which is
+// the only place left in a four-level image that can hold fallTail in one piece.
+const PVBASE = 0xfe00;
+const RUNTIME_BUFS = { fallSnapD: 1000, fallSnapS: 1000, fallTailB: FTROWS * 40 || 1,
+                       pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
 const RELOC = +(process.env.RELOC ?? 0x8600);
 // HAZ_BASE/HAZ_TOP are declared as literals above, before RELOC exists, but they NAME table
 // origins: the vacated ddy pages and rayOffQS. Tie them together here so moving RELOC fails the
@@ -6369,9 +6382,9 @@ ${PIVOT ? `; ---- PIVOT state: last frame's boundaries, and the viewpoint they w
 ; place for RAM: it is only free because of where its neighbours' page counts happen to land, so
 ; any table gaining a page silently overwrites the pivot state. They now live in the reclaimed
 ; charset-B source, which is free by construction after cpChr rather than by coincidence.
-pvBnd   = $ad00                 ; the column the boundary was pinned at
-pvAng   = ${hx16(0xad00 + NBND)}                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
-pvRcp   = ${hx16(0xad00 + 2 * NBND)}                 ; 163/distance, for the translation term
+pvBnd   = ${hx16(PVBASE)}                 ; the column the boundary was pinned at
+pvAng   = ${hx16(PVBASE + NBND)}                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
+pvRcp   = ${hx16(PVBASE + 2 * NBND)}                 ; 163/distance, for the translation term
 pvN     = $8000                 ; how many of them there are; 0 disables the hint for a frame
 opaL    = $8001                 ; the 16-bit angle those bearings were taken at
 opaH    = $8002
@@ -6644,9 +6657,16 @@ bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cel
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
                                  ;   image hole held a page; back in the image since fRowT left.
-${FALLTAIL ? `fallTailB = $a7e8               ; FALLTAIL: source rows 25..29, five rows of 40. NOT after
-                                 ;   fallSnapS -- its 1024 at $6200 runs into the fall's own
-                                 ;   tables at $6600 -- so fdWarp switches base above row 24.
+${FALLTAIL ? `fallTailB = $fec0               ; FALLTAIL: the source rows BELOW the screen, ${FTROWS} x 40.
+                                 ;   In VIC bank 3 behind the pivot scratch (see PVBASE): the
+                                 ;   four-level image has no contiguous ${FTROWS * 40} bytes anywhere.
+                                 ;   A RAM buffer, not loaded data, so it costs no file bytes
+                                 ;   and needs no loader entry -- only bank-3 sprite slots,
+                                 ;   which is the cheaper currency. CPU-addressable because the
+                                 ;   port is $35 all through play: HIRAM=0, so $e000-$ffff is
+                                 ;   RAM, the same reason the screen can live at $e000/$e400.
+                                 ;   Stops short of $fffa, which with the KERNAL banked out has
+                                 ;   to hold the real NMI/RESET/IRQ vectors.
 ` : ''}fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
 fallSnapS = $6200                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
@@ -14703,29 +14723,6 @@ apT3:   cmp #246
 apT4:   sta pSplit2
         rts
 
-; ---- arcPx: the boundary's pixel row at cell edge Y ----
-; px = crown + (|E| * arcD[edge] >> 8), signed by arcNg. mul8 keeps Y, which is what lets the
-; caller walk the 41 edges with the index in Y throughout.
-arcPx:  lda arcD,y
-        sta mq
-        lda arcA
-        jsr mul8
-        lda arcNg
-        bne apxN
-        clc
-        lda arcY
-        adc phi
-        bcs apxLo               ; past the foot of the screen
-        cmp #200
-        bcc apxD
-apxLo:  lda #199
-        rts
-apxN:   lda arcY
-        sec
-        sbc phi
-        bcs apxD
-        lda #$00                ; past the top
-apxD:   rts
 
 ; ---- arcBand: the arc at PIXEL resolution, out of the existing ramp dictionary ----
 ; A character cell gets the ramp whose left and right endpoints match the boundary's height at
@@ -14829,36 +14826,6 @@ abNx:   ldy apY
         cpy #41
         bcc abLp
         rts
-
-; px -> rampThi nibble. rampThi holds BLANK-above/SOLID-below glyphs with the level counted in
-; pixels UP FROM THE CELL FLOOR. The landing needs the opposite polarity and gets it from charset
-; B, which mirrors the glyph vertically -- so there the level is measured from the cell TOP
-; instead, and the same table serves both.
-arcLvl: sta apT
-        lda arcInv
-        bne alvB
-        lda apBase              ; drop:    level = 8 + 8*row - px
-        clc
-        adc #$08
-        sec
-        sbc apT
-        jmp arcClp
-alvB:   lda apT                 ; landing: level = px - 8*row, and B flips it on the way out
-        sec
-        sbc apBase
-        jmp arcClp
-
-; level -> rampThi nibble: clamp to CLO..CHI and bias by -CLO. A level arrives as a signed byte
-; and both ends really do occur -- the arc leaves the cell at the steep columns.
-arcClp: clc
-        adc #$03
-        bmi aclZ
-        cmp #$10
-        bcc aclD
-        lda #$0f
-        rts
-aclZ:   lda #$00
-aclD:   rts
 
 ${FALLSCENE ? `` : ''}fdFill: sta fdN                 ; A rows of black, advancing the destination only
         cmp #$00                ; explicit, not inherited: a zero count here would run the
@@ -16021,77 +15988,7 @@ saOff:  lda #$ff                ; never matches, and irqAr2 keeps the arc split
         sta irqSpC+1
         rts
 ` : ''}
-${FALLTAIL ? `; ---- fallTail: the five source rows BELOW the screen ----
-; The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat cut that rises
-; with the room. These are the rows that should be under it.
-;
-; It does not re-implement anything. renderSym computes 13 cell rows and MIRRORS them, so screen
-; row 25 IS cell row -1 -- and rfEdgeL already takes a cell row in erow and a column in colc and
-; picks the right ramp or step glyph for it. Five more kTab entries give it the K for rows -1..-5,
-; five more chain entries give rfStore somewhere to put the answer, and it walks the columns.
-; The step path, VSPLIT and calcM all come along for free because it IS the chooser.
-;
-; No height cap here, unlike the on-screen path: that cap exists because K is +4 at the horizon,
-; where an uncapped h would wrap the index. Up here K is -100 to -132, so h - 100 is what the
-; tables want, and they already handle both ends -- clampT saturates at 15 (solid) going up and
-; is 0 (blank) through the wrapped negatives.
-;
-; bufOff 15 + erow 13..17 lands on chain entries 28..32, clear of buffer A's 0..13 and B's 14..27.
-; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
-fallTail:
-        lda #$ff                ; no height cap up here: see hCap
-        sta hCap
-        lda #15                 ; erow 13..17 + 15 -> chain entries 28..32
-        sta bufOff
-        ldx #39
-ftCol:  stx colc
-        lda col4T,x
-        tax                     ; X = 4*col: the cell's four ray columns
-        lda colH,x              ; min and max over the cell, from its two ENDPOINTS: the
-        sta ftMin               ;   interpolator keeps a span linear between them, so the two
-        sta ftMax               ;   inner columns cannot lie outside the pair
-        lda colH+3,x
-        cmp ftMax
-        bcc ftLo
-        sta ftMax
-        bcs ftHi                ; always
-ftLo:   sta ftMin
-ftHi:   ldy #$00
-ftRow:  sty ftR                 ; ---- blank, solid, or an edge? ----
-        tya                     ; rfEdgeL is ONLY valid for a cell holding the boundary. On
-        clc                     ;   screen rbv/rsv keep blank and solid cells away from it;
-        adc #13                 ;   up here nothing does, so this is that test.
-        sta erow
-        lda ftMax
-        cmp ftTbT,y
-        bcc ftBlank             ; the whole cell is above the wall: floor
-        lda ftMin
-        cmp ftT1T,y
-        bcs ftSolid             ; the whole cell is inside it
-        jsr rfEdgeL             ; an edge: the real chooser, ramps, steps and all
-        jmp ftNext
-ftBlank:lda #${hx(BLANK)}
-        jsr rfStore
-        jmp ftNext
-ftSolid:lda #${hx(SOLID)}
-        jsr rfStore
-ftNext: ldy ftR
-        iny
-        cpy #$07
-        bcc ftRow
-        ldx colc
-        dex
-        bpl ftCol
-        lda #101                ; and back, before anything renders the screen again
-        sta hCap
-        lda #$00                ; ...and bufOff, which rfStore turns into a chain index. Left at
-        sta bufOff              ;   15 it points the NEXT store at entries 28..34 -- the tail's
-                                ;   own stubs, which write into fallTailB. The background render
-                                ;   of the destination room runs DURING the drop, so this is not
-                                ;   hypothetical.
-        rts
-
-` : ''}; ---- palCol: the ground inks, by key ----
+; ---- palCol: the ground inks, by key ----
 ; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
 ; floor alone and 'W' the ceiling alone. They are separable because the raster split gave the two
 ; their own registers: irqB0 is everything above the horizon, irqB1 everything below it. Pressing
@@ -18764,6 +18661,166 @@ ${SEAMS ? `; The corner-partner tables used to sit at RELOC+$2800, which IS $ae0
 ; config had not been built in a long time; when it was, it died with "* = $ae00 moves backward
 ; from $ae2a". They live in the stream now, with the other displaced lookups.
 ` : ''}
+        * = $ad00               ; ---- the arc's pixel solver, and the fall's tail ----
+; The page the pivot's three scratch tables vacated for VIC bank 3 (see PVBASE), and the only
+; free run left in a four-level image big enough to hold fallTail in ONE piece -- the next
+; largest is 36 bytes.
+;
+; arcPx is out here for the room, not for tidiness. FALLTAIL's dispersed edits -- cmp hCap at
+; nine sites, fwSrcA's redirect for source rows past 24, fdNoF's bound on arcHi -- cost 72 bytes
+; of a main block that has 3. arcPx is a jsr target only and runs once per arc COLUMN during a
+; fall, which is a cold path, so the move costs nothing; hlRungH/S/E at $48c3 and fallSnap at
+; $9500 are here for exactly the same reason.
+; ---- arcPx: the boundary's pixel row at cell edge Y ----
+; px = crown + (|E| * arcD[edge] >> 8), signed by arcNg. mul8 keeps Y, which is what lets the
+; caller walk the 41 edges with the index in Y throughout.
+arcPx:  lda arcD,y
+        sta mq
+        lda arcA
+        jsr mul8
+        lda arcNg
+        bne apxN
+        clc
+        lda arcY
+        adc phi
+        bcs apxLo               ; past the foot of the screen
+        cmp #200
+        bcc apxD
+apxLo:  lda #199
+        rts
+apxN:   lda arcY
+        sec
+        sbc phi
+        bcs apxD
+        lda #$00                ; past the top
+apxD:   rts
+
+; px -> rampThi nibble. rampThi holds BLANK-above/SOLID-below glyphs with the level counted in
+; pixels UP FROM THE CELL FLOOR. The landing needs the opposite polarity and gets it from charset
+; B, which mirrors the glyph vertically -- so there the level is measured from the cell TOP
+; instead, and the same table serves both.
+arcLvl: sta apT
+        lda arcInv
+        bne alvB
+        lda apBase              ; drop:    level = 8 + 8*row - px
+        clc
+        adc #$08
+        sec
+        sbc apT
+        jmp arcClp
+alvB:   lda apT                 ; landing: level = px - 8*row, and B flips it on the way out
+        sec
+        sbc apBase
+        jmp arcClp
+
+; level -> rampThi nibble: clamp to CLO..CHI and bias by -CLO. A level arrives as a signed byte
+; and both ends really do occur -- the arc leaves the cell at the steep columns.
+arcClp: clc
+        adc #$03
+        bmi aclZ
+        cmp #$10
+        bcc aclD
+        lda #$0f
+        rts
+aclZ:   lda #$00
+aclD:   rts
+${FALLTAIL ? `
+; ---- fallTail: the five source rows BELOW the screen ----
+; The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat cut that rises
+; with the room. These are the rows that should be under it.
+;
+; It does not re-implement anything. renderSym computes 13 cell rows and MIRRORS them, so screen
+; row 25 IS cell row -1 -- and rfEdgeL already takes a cell row in erow and a column in colc and
+; picks the right ramp or step glyph for it. Five more kTab entries give it the K for rows -1..-5,
+; five more chain entries give rfStore somewhere to put the answer, and it walks the columns.
+; The step path, VSPLIT and calcM all come along for free because it IS the chooser.
+;
+; No height cap here, unlike the on-screen path: that cap exists because K is +4 at the horizon,
+; where an uncapped h would wrap the index. Up here K is -100 to -132, so h - 100 is what the
+; tables want, and they already handle both ends -- clampT saturates at 15 (solid) going up and
+; is 0 (blank) through the wrapped negatives.
+;
+; bufOff 15 + erow 13..17 lands on chain entries 28..32, clear of buffer A's 0..13 and B's 14..27.
+; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
+fallTail:
+        lda #$ff                ; no height cap up here: see hCap
+        sta hCap
+        lda #15                 ; erow 13..17 + 15 -> chain entries 28..32
+        sta bufOff
+        ldx #39
+ftCol:  stx colc
+        lda col4T,x
+        tax                     ; X = 4*col: the cell's four ray columns
+        lda colH,x              ; min and max over the cell, from its two ENDPOINTS: the
+        sta ftMin               ;   interpolator keeps a span linear between them, so the two
+        sta ftMax               ;   inner columns cannot lie outside the pair
+        lda colH+3,x
+        cmp ftMax
+        bcc ftLo
+        sta ftMax
+        bcs ftHi                ; always
+ftLo:   sta ftMin
+ftHi:   ldy #$00
+ftRow:  sty ftR                 ; ---- blank, solid, or an edge? ----
+        tya                     ; rfEdgeL is ONLY valid for a cell holding the boundary. On
+        clc                     ;   screen rbv/rsv keep blank and solid cells away from it;
+        adc #13                 ;   up here nothing does, so this is that test.
+        sta erow
+        lda ftMax
+        cmp ftTbT,y
+        bcc ftBlank             ; the whole cell is above the wall: floor
+        lda ftMin
+        cmp ftT1T,y
+        bcs ftSolid             ; the whole cell is inside it
+        jsr rfEdgeL             ; an edge: the real chooser, ramps, steps and all
+        jmp ftNext
+ftBlank:lda #${hx(BLANK)}
+        jsr rfStore
+        jmp ftNext
+ftSolid:lda #${hx(SOLID)}
+        jsr rfStore
+ftNext: ldy ftR
+        iny
+        cpy #$07
+        bcc ftRow
+        ldx colc
+        dex
+        bpl ftCol
+        lda #101                ; and back, before anything renders the screen again
+        sta hCap
+        lda #$00                ; ...and bufOff, which rfStore turns into a chain index. Left at
+        sta bufOff              ;   15 it points the NEXT store at entries 28..34 -- the tail's
+                                ;   own stubs, which write into fallTailB. The background render
+                                ;   of the destination room runs DURING the drop, so this is not
+                                ;   hypothetical.
+        rts
+        ; ---- the tail's data and store stubs ----
+hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
+                                ;   where K is +4 at the horizon and an uncapped h would wrap the
+                                ;   index; $ff for the tail rows, where K is -100 to -132 and the
+                                ;   cap is the whole problem -- it flattens every wall with h>100
+                                ;   to exactly 100, so all the edge cells pick the SAME glyph and
+                                ;   the boundary comes out as a staircase of whole cells.
+ftMin:  !byte 0
+ftMax:  !byte 0
+ftR:    !byte 0
+ftT1T:  !byte ${ftT1.join(',')}
+ftTbT:  !byte ${ftTb.join(',')}
+edT0:	sta fallTailB,x
+	rts
+edT1:	sta fallTailB+40,x
+	rts
+edT2:	sta fallTailB+80,x
+	rts
+edT3:	sta fallTailB+120,x
+	rts
+edT4:	sta fallTailB+160,x
+	rts
+edT5:	sta fallTailB+200,x
+	rts
+edT6:	sta fallTailB+240,x
+	rts
+` : ''}
 ${PLAN === 3 ? `        * = $ae00
 bfsD0:  !fill ${MAPN}, 255      ; the angel's other distance map -- see bfsD1 at $5e00
         * = ${hx16(RELOC + 0x2900)}
@@ -19256,32 +19313,6 @@ spWSt:  sta $d025
         sta irqSpU+1
         sty irqSpH+1
 spDn:   rts
-` : ''}${FALLTAIL ? `        * = $bdb6               ; the tail's data and store stubs, out of the buffer's way
-hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
-                                ;   where K is +4 at the horizon and an uncapped h would wrap the
-                                ;   index; $ff for the tail rows, where K is -100 to -132 and the
-                                ;   cap is the whole problem -- it flattens every wall with h>100
-                                ;   to exactly 100, so all the edge cells pick the SAME glyph and
-                                ;   the boundary comes out as a staircase of whole cells.
-ftMin:  !byte 0
-ftMax:  !byte 0
-ftR:    !byte 0
-ftT1T:  !byte ${ftT1.join(',')}
-ftTbT:  !byte ${ftTb.join(',')}
-edT0:	sta fallTailB,x
-	rts
-edT1:	sta fallTailB+40,x
-	rts
-edT2:	sta fallTailB+80,x
-	rts
-edT3:	sta fallTailB+120,x
-	rts
-edT4:	sta fallTailB+160,x
-	rts
-edT5:	sta fallTailB+200,x
-	rts
-edT6:	sta fallTailB+240,x
-	rts
 ` : ''}        * = $be00
 angMidT: !byte ${angMidT.join(',')}` : ''}
         * = ${hx(QCOSBASE)}
@@ -19566,7 +19597,11 @@ try {
                 [CHARSET, CHARSET + 0x800], [CHARSET_B, CHARSET_B + 0x800],
                 [0xfffa, 0x10000],
                 // a squatter's extent is unknown, so reserve to the next page boundary
-                ...squatters.map(([, a]) => [a & ~255, (a & ~255) + 256]),
+                // RUNTIME_BUFS names the ones whose size we know. fallTailB is ${FTROWS * 40} bytes and
+                // straddles a page wherever it is put; page-rounding alone reported the second
+                // half as free, which is the same under-reservation that once let a level
+                // shadow grow over doomT.
+                ...squatters.map(([n, a]) => [a & ~255, ((a + (RUNTIME_BUFS[n] ?? 1) - 1) | 255) + 1]),
                ];
   if (squatters.length) console.log(`  bank 3 still has ${squatters.length} CPU equate(s) in it ` +
     `($${Math.min(...squatters.map(x => x[1])).toString(16)}-` +
@@ -19628,6 +19663,12 @@ try {
     // 10K gap used to make all 10K read as occupied, which is a lie in the safe direction and
     // exactly as unhelpful as the sprite-slot figure that counted the orbs as free room. A
     // squatter's extent is unknown, so reserve its whole page and report what is left either side.
+    if (process.env.RAWHOLES) {   // RAWHOLES=1: the real gaps, before squatter page-rounding.
+      console.log('  raw gaps (nothing emitted), largest first:');   // A page listed as "holds
+      for (const [lo, hi] of [...(r.holes ?? [])]                    // <three byte variables>"
+        .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, 14)) // is mostly free, and the
+        console.log(`    $${lo.toString(16)}-$${(hi - 1).toString(16)}  ${hi - lo}`); // report cannot say so.
+    }
     const holes = (r.holes ?? []).flatMap(([lo, hi]) => {
       // A squatter reserves every page its size touches, not just the page its address is in.
       // fallSnapD/fallSnapS are 1000 bytes each, and reserving one page of each would still
