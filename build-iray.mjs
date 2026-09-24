@@ -19571,6 +19571,13 @@ try {
   // An "lda table,x" indexed by a full byte costs an extra cycle every time the index
   // crosses a page. These are the ones indexed that way; keeping them page-aligned is free
   // as long as nobody quietly moves them, so make moving them a build error.
+  if (process.env.LABELMAP) {   // LABELMAP=1: every label with the gap to the next one, which
+    const ls = Object.entries(r.labels).sort((a, b) => a[1] - b[1]);   // is its size when the
+    for (let i = 0; i < ls.length; i++) {                              // labels are dense.
+      const [n, a] = ls[i], nx = i + 1 < ls.length ? ls[i + 1][1] : a;
+      console.log(`LBL ${a.toString(16).padStart(4,'0')} ${String(nx - a).padStart(5)} ${n}`);
+    }
+  }
   const aligned = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
@@ -19666,7 +19673,7 @@ try {
     if (process.env.RAWHOLES) {   // RAWHOLES=1: the real gaps, before squatter page-rounding.
       console.log('  raw gaps (nothing emitted), largest first:');   // A page listed as "holds
       for (const [lo, hi] of [...(r.holes ?? [])]                    // <three byte variables>"
-        .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, 14)) // is mostly free, and the
+        .sort((a, b) => a[0] - b[0])) // is mostly free, and the
         console.log(`    $${lo.toString(16)}-$${(hi - 1).toString(16)}  ${hi - lo}`); // report cannot say so.
     }
     const holes = (r.holes ?? []).flatMap(([lo, hi]) => {
