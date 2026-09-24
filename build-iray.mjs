@@ -6566,7 +6566,8 @@ entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gat
 dbgOnce = $84f5                  ; DROPNOW only
 ${process.env.FALLNOW ? `fnCnt   = $7100                  ; FALLNOW: how many forced falls have been triggered
 fnLog   = $7101                  ;   ...and the level each one left, in order (16 of them).
-${process.env.FTCAP ? `ftBuf   = $7120                  ; FTCAP: per frame, the A/B buffer mismatch and its column at +64
+${process.env.FTFREEZE ? `ftFrz   = $711f                  ; FTFREEZE: set once the chosen frame is on screen
+` : ''}${process.env.FTCAP ? `ftBuf   = $7120                  ; FTCAP: per frame, the A/B buffer mismatch and its column at +64
 ` : ''}
                                  ;   $7100 is the death picture's page in a shipping build, so
                                  ;   like FRAMELOG and PROFN this needs DIE=0 -- which a FALLNOW
@@ -12917,15 +12918,17 @@ fcNo:   rts
 
 ; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
 fallStep:
-${process.env.FTFREEZE ? `        lda fFrm                ; FTFREEZE=n[,phase]: hang with interrupts STILL ON at frame n,
+${process.env.FTFREEZE ? `        lda ftFrz               ; FTFREEZE=n[,phase]: stop DRAWING at frame n and never draw
+        bne ftfHg               ;   again, while the main loop, the raster splits and the buffer
+        lda fFrm                ;   flip all keep running. Hanging here instead (jmp *) froze the
         cmp #${+process.env.FTFREEZE.split(',')[0]}${process.env.FTFREEZE.split(',')[1] ? `
         bne ftfNo
         lda fallSt
         cmp #${+process.env.FTFREEZE.split(',')[1]}` : ''}
-        bne ftfNo               ;   so the raster splits and the display keep running and a
-ftfHg:  jmp ftfHg               ;   screenshot is EXACTLY what the player sees, frozen. Unlike
-ftfNo:                          ;   DROPHOLD it never redraws, so the drop's incremental hole
-                                ;   fill is not driven into a state that never occurs in play.
+        bne ftfNo               ;   main loop too, and probe.mjs polls a machine that has to be
+        inc ftFrz               ;   ALIVE -- it waited for a tick that could no longer come.
+ftfHg:  rts                     ; Unlike DROPHOLD it never REDRAWS, so the drop's incremental
+ftfNo:                          ;   hole fill is not driven into a state that never occurs.
 ` : ''}        ldx fFrm                ; BOTH phases run the same arc table now, so both advance the same
         inx                     ;   counter. Up here because everything below is a branch target
         ldy fallSt              ;   -- putting it lower hid it behind a branch once already.
