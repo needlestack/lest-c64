@@ -2337,6 +2337,20 @@ if (PLAN === 3) {
     planCode.has(`r${i}.h`) ? fineHit++ : fineMiss++;
     rampThi[i] = planCode.get(`r${i}.h`) ?? fb;
     rampTlo[i] = planCode.get(`r${i}.l`) ?? rampThi[i];
+    // ---- the two DEGENERATE ends get the EXACT glyph, not the nearest one ----
+    // a and b are levels+(-CLO), so a<=(-CLO) means the boundary is at or below the cell floor
+    // and the cell holds no wall at all; a>=8-CLO means it is entirely wall -- EIGHT, the cell's
+    // height in pixels, not CHI: CHI is 12 and levels 9..12 are simply over-full, so a test
+    // against CHI would have caught only the very last one and left level 8, which is exactly
+    // the case the arc's crown produces. The k-medians
+    // search has no code for either -- BLANK and SOLID live outside the ramp space -- so it
+    // returned the NEAREST ramp: code 34, one pixel in the corner, and code 20, one pixel
+    // MISSING from it. Reached by only one cell that is invisible; reached by a RUN of them it
+    // draws a dotted line, which is the arc's flat crown (measured: landing frame 12, columns
+    // 16..23 all index $33). renderSym never asks -- rbv/rsv classify blank and solid cells out
+    // before the chooser -- so this is free there and correct wherever it is asked.
+    if (a <= -CLO && b <= -CLO) rampThi[i] = rampTlo[i] = BLANK;
+    else if (a >= 8 - CLO && b >= 8 - CLO) rampThi[i] = rampTlo[i] = SOLID;
   }
   stepThi = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
   stepTlo = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
@@ -14749,8 +14763,23 @@ abLp:   jsr arcPx
         jsr arcLvl
         ora apIdx
         tax
-        lda rampThi,x
-        sta apCode
+        ; ---- the two DEGENERATE ends, which rampThi does not define ----
+        ; rampThi is only valid for a cell the boundary actually CROSSES. On screen rbv/rsv
+        ; classify blank and solid cells out before the chooser ever sees them ("rfEdgeL is
+        ; ONLY valid for a cell holding the boundary"); arcBand has no such filter and asks it
+        ; about every column. At the arc's flat crown every column lands on the same degenerate
+        ; entry -- and those entries are NOT blank and solid. The k-medians charset's nearest
+        ; glyph to "no wall" is 34, which is one pixel in the cell's corner, and to "all wall"
+        ; is 20, which is one pixel MISSING from it. So a run of them draws a DOTTED LINE: dark
+        ; dots at one end, light dots at the other. Measured at landing frame 12, columns 16..23
+        ; all had pxL = pxR = 48 with apRow 6 -> index $33 -> code 34 -> eight dots 8px apart.
+        ; Both answers are polarity-independent: a cell the rim misses is floor either way
+        ; (BLANK is fdCol on the drop and arcBlw on the landing), and one it has passed is hole.
+        lda rampThi,x           ; the degenerate ends are BLANK and SOLID in the table now
+        cmp #${hx(SOLID)}                ;   (see rampThi's build), and BLANK is already right here:
+        bne abSet               ;   a cell the rim misses is floor in BOTH polarities. A cell it
+        lda #${hx(VOIDCH)}              ;   has passed is the HOLE though, not wall ink, so that one
+abSet:  sta apCode              ;   answer has to be translated.
         ldx apRow               ; screen address = base + 40*row + column, column = Y-1
         tya
         sec
