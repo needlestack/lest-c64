@@ -3909,9 +3909,26 @@ if (HAS_IDOL) {
                 `${ANG_V0} rungs (+${ORBBMH.length * 64} bytes of sprite, 0 of image)`);
 }
 
+// ---- the idol ships UNDER THE I/O HOLE, behind the exit ladder ----
+// Sprite bitmaps are the only data the VIC reads and the CPU never does, so they are what that
+// region is FOR. The idol qualifies and the orb does not: an orb has a ground shadow, and
+// recolouring it when the floor's ink changes means writing new bit pairs into the bitmap --
+// a CPU write, which under the hole costs a port dance with interrupts off. The angel has no
+// shadow either but stays with the orbs for now; there is only room for one of them here.
+//
+// It costs NOTHING to reach. The runtime already forms an idol pointer as
+// `orbPtrT[e] + orbArtT[e]`, one constant added to the matching orb's pointer, because the two
+// ladders are geometrically identical. Moving the base only changes that constant -- it goes
+// NEGATIVE (the hole is below SPRBASE) and the adc wraps, which is exactly right for a byte of
+// pointer. Still non-zero, which the three "is this the idol" tests rely on.
+//
+// And it needs no new loader entry: the file marked `first` is landed at $c000 and copied under
+// the hole page by page, so the idol simply follows the exit ladder in that same file and lands
+// at HOLEBASE + the exit ladder's length.
+const IDOLBM = HAS_IDOL ? ORBBM.slice(IDOLBM0) : [];
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
-NORBBM = ORBBM.length;
+NORBBM = IDOLBM0;               // what still ships AT SPRBASE; the idol is counted separately
 // ---- SPRBOX=1: outline EVERY entity sprite, so the hardware grid is visible on screen ----
 // Where each sprite begins and ends, whether the angel's two halves abut or overlap, and how
 // much of a sprite is empty headroom. Applied to the finished bitmaps rather than inside each
@@ -4472,7 +4489,6 @@ const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
 // already using. 0 is the orb's own art. Not folded into orbTallT: that one means "is an angel"
 // and is read as a boolean in five other places (luggage, pathing, the BFS early-out), where a
 // third value would quietly make the idol an angel.
-const orbArtT = ORBS.map(o => o.idol ? IDOLBM0 : 0);
 // Where the carried orb sits. Expanded both ways it is 48 hires pixels wide, so X centres it on
 // the 320-wide display whose left edge is sprite X 24: 24 + 160 - 24. Y is chosen so the ball
 // clears the bottom of the screen and the ground shadow underneath it does not -- the sprite is
@@ -5611,6 +5627,13 @@ if (NHOLE > 4) throw new Error(
   `${NHOLE} hole-like entities across the resident levels: holeSeeT has room for 4 (32 bytes each). ` +
   `More wants the per-level loading, not another table squeezed in.`);
 const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM)];
+// ---- and now the exit ladder's length is known, so the idol's base is too ----
+const IDOLBASE = HOLEBASE + HOLEBM.length * 64;   // straight behind it, under the hole
+const IDOL_PTR = ((IDOLBASE - SPRBASE) >> 6) & 255;
+if (HAS_IDOL && IDOL_PTR === 0) throw new Error(
+  `the idol's pointer offset came out 0, and 0 is the value that MEANS "not the idol" in ` +
+  `orbArtT -- IDOLBASE ${hx16(IDOLBASE)} landed exactly on SPRBASE, so the two collide`);
+const orbArtT = ORBS.map(o => o.idol ? IDOL_PTR : 0);   // a pointer DELTA now, not a bitmap index
 // SPRBOX boxes the ORB bitmaps up at their generator; the hole and socket ladders are built much
 // later, so they get the same treatment here. Without this the one case where the hardware grid
 // matters most -- a wide flat ellipse spread across two or three sprites -- was the one case you
@@ -19443,9 +19466,14 @@ try {
     // to $c000/$c800 over the top -- they are plain RAM now -- and the orb ladder to $e800.
     // (Until 2026-09-16 the charset took the trip and the ladders lived in plain RAM. The user's
     // rule: bank 3 is for what the VIC reads; what the CPU never touches belongs under the hole.)
-    ...(SPRITES ? [{ tag: 'H', name: 'IHOL', first: true, at: 0xc000, data: HOLEBM.flat(), length: HOLEBM.length * 64 }] : []),
+    // IHOL carries the idol too: `first` means "landed at $c000 and copied under the I/O hole
+    // page by page", and the idol's base is defined as HOLEBASE + the exit ladder's length, so
+    // appending its bytes here puts them exactly where IDOLBASE says they are.
+    ...(SPRITES ? [{ tag: 'H', name: 'IHOL', first: true, at: 0xc000,
+                     data: [...HOLEBM.flat(), ...IDOLBM.flat()],
+                     length: (HOLEBM.length + IDOLBM.length) * 64 }] : []),
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
-    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.flat() }] : []),   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
+    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.slice(0, NORBBM).flat() }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
     // socket ladder vacates under NOSOCK. This is DATA the VIC never reads -- it is copied to a
@@ -19610,7 +19638,7 @@ try {
   // holds either the seat ladder or IPIC depending on the build. All three are as occupied as any
   // table; leaving them out is how "3K free" turned into a socket ladder that did not fit.
   const sprSeg = SPRITES ? [[SPRBASE, SPRBASE + NORBBM * 64],
-                            [HOLEBASE, HOLEBASE + HOLEBM.length * 64],
+                            [HOLEBASE, HOLEBASE + (HOLEBM.length + IDOLBM.length) * 64],
                             [LOADER_RUN, 0xd000],
                             ...(PICSEG.length ? [[SEATBASE, SEATBASE + PICSEG.length]] : []),
                             ...(LVLSHAD_BYTES.length ? [[LVLSHADOW, LVLSHADOW + LVLSHAD_BYTES.length]] : [])] : [];
