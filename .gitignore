@@ -56,3 +56,9 @@ vice-screen-*.png
 .lvl3-tables.json
 .lvl*-tables.json
 .wall*-tables.json
+
+# fit-ram.mjs previews, same rule as the others above
+ram-sprite-*.png
+ram-sprites-all*.png
+ram-sweep.png
+CLEANUP-REVIEW.md
