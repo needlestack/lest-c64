@@ -3091,7 +3091,11 @@ const FLOG_N = 704;
 // it is measuring, or the number describes a different program.
 // Buffers that exist ONLY at runtime -- nothing is ever emitted into them, so every checker
 // that works from the emitted image is blind to them and must be told. See fallSnapD/fallSnapS.
-const RUNTIME_BUFS = { fallSnapD: 1000, fallSnapS: 1000 };
+// fallTailB is 280 bytes at $a7e8, so it spans TWO pages. Left out of here it reserved only
+// $a700 and the hole report offered $a800-$a8ff as 256 spendable bytes -- the tail's own last
+// four rows, which scroll to the top of the screen late in a drop. Nothing has been placed
+// there yet; the report was simply ready to hand it to the next thing that wanted a page.
+const RUNTIME_BUFS = { fallSnapD: 1000, fallSnapS: 1000, fallTailB: FTROWS * 40 || 1 };
 const RELOC = +(process.env.RELOC ?? 0x8600);
 // HAZ_BASE/HAZ_TOP are declared as literals above, before RELOC exists, but they NAME table
 // origins: the vacated ddy pages and rayOffQS. Tie them together here so moving RELOC fails the
