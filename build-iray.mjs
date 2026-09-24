@@ -4315,19 +4315,11 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // room. Reported from play, and the give-away is that it followed ALL the way: an angel that runs
 // out of rope stops facing you, it does not escort you home.
 
-const LANDS_AT = process.env.LAND
-  ? [process.env.LAND.split(',').map(Number)]
-  : CHAMBER ? [[1, 1]] : IDOLROOM ? [[1, 8]] : [[2, 2]];
-// ...and which way to FACE on arrival. A fall used to keep the heading you jumped in with, which
-// on both of these lands you nose-against a wall half a cell away: the whole screen goes black
-// and it reads as a broken render rather than as a wall. One byte, and it travels with the level
-// because only the level knows which way its landing spot is worth looking.
-//   level 1 (2,2): $19, back into the room, the same heading the level opens on
-//   level 2 (2,2): $1a, looking at the socket doorway
-//   level 3 (1,1): $20, the one heading with BOTH the socket and the far-corner hole in view
-const LAND_A = +(process.env.LANDA ?? (SOCKROOM ? 0x1a : CHAMBER ? 0x20 : IDOLROOM ? 0x00 : 0x19));   // level 2 (2,2): $1a looks at the socket doorway               // level 1: the drop puts you back in the room
-                                                 //   the OTHER hole and nowhere near this one,
-                                                 //   so only one is ever in the same region
+// LANDS_AT / LAND_A were the fall's landing spot and heading, one pair per level. DELETED
+// 2026-09-24 with the landXT/landYT/landAT tables they fed: lvlStart replaced them on 2026-09-22
+// with the level's OFFICIAL start point, so a fall and a death now arrive at the same place --
+// which was the bug that found them ("when you die on level 4 you start at x280 y280 and appear
+// stuck"). The LAND= and LANDA= env knobs went with them; they had been read and discarded since.
 // ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
 // An orb is only projected if it survives the per-cell candidate list and a bearing window;
 // a culled orb is ~20 cycles against ~2,400 projected, and that ratio is the entire reason 34
@@ -5764,8 +5756,6 @@ const LVL_TABLES = [
   ['orbXCT', pad([...orbXC, ...HOLELIKE.map(h => h.x)], NOCC)],
   ['orbYCT', pad([...orbYC, ...HOLELIKE.map(h => h.y)], NOCC)],
   ['orbX0T', pad(orbXC, NORB)], ['orbY0T', pad(orbYC, NORB)],
-  ['landXT', LANDS_AT.map(l => l[0])], ['landYT', LANDS_AT.map(l => l[1])],
-  ['landAT', [LAND_A]],
   ['angBlkT', angBlk],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
   ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : 15), NHOLE)],
@@ -12870,8 +12860,9 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         sta omPri               ;   hanging in space while the world scrolled away behind it
         sta omX8
 ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
-        ; Order is load-bearing twice over. lvlSwap must run before landXT is read, or the player
-        ; is placed at the spot they just left; and objInit must run after it, because it rebuilds
+        ; Order is load-bearing twice over. lvlSwap must run before lvlStart reads the destination's
+        ; start point, or the player is placed at the spot they just left (it named landXT until
+        ; 2026-09-22); and objInit must run after it, because it rebuilds
         ; blkT from the NEW mapT and puts each entity back at the new level's build-time cell.
         ; Both are done here rather than on landing so the destination render -- which bgPh starts
         ; a slice per frame from the next frame on -- sees the new geometry from its first slice.
@@ -16747,7 +16738,6 @@ wallStT: !fill ${WALLS_ALL.length}, 0   ; per wall, global across the chain: 0 =
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
 wsDir:  !byte 0                 ; ...and which way: 1 = taking it out, 0 = putting it back
 hzWv:   !byte 0                 ; hzRunW's held "out" value while it reads the "back" one
-dbgOnce2: !byte 1               ; WALLNOW's one-shot
 
 ; ---- wallTog: flip it, either way ----
 wallTog:ldy wsWall
@@ -17015,9 +17005,6 @@ nAllT:  !byte ${hx(ORBS.length + HOLELIKE.length)}                 ; ...and how 
                                 ;   an empty level can state: every loop below counts DOWN from an
                                 ;   INDEX, and index 0 means "one entity", never "none"
 angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, when it is close
-landAT: !byte ${hx(LAND_A)}                 ; which way to face on arrival; see LAND_A
-landXT: !byte ${LANDS_AT.map(l => l[0]).join(',')}
-landYT: !byte ${LANDS_AT.map(l => l[1]).join(',')}
 lvlMeT: !byte ${hx(LVL)}                 ; the level that is live. OUTSIDE the TWOLEV block below,
                                 ;   because the HUD's LEVEL line reads it in every build -- a
                                 ;   standalone one included, where it is simply a constant. A
