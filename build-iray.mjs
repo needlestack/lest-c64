@@ -3186,8 +3186,18 @@ const CEILVARY = CHAIN.some(n => palOf(n).ceil !== palOf(CHAIN[0]).ceil);
 // How far BELOW the arc's split the ground colour changes, in raster lines. The charset split
 // has to sit at the arc's TOP -- that is where the rim glyph needs charset A -- but the arc's
 // top rows still draw the upper level's floor around the curve, so swapping colour there tints
-// the last line or two of the room you are leaving. 16 = two character rows.
-const CSPLIT = +(process.env.CSPLIT ?? 16);
+// the last line or two of the room you are leaving.
+//
+// ELEVEN ROWS, which is the MIDPOINT BETWEEN THE TWO ARCS. The two ride up the screen a fixed
+// 22 rows apart (measured: the mean of arcTop2T[n] - arcTopT[ARC_DROP_N + n] over the overlap
+// window) with a wide band of black between them, so their midpoint is always over black and a
+// flip there cannot be seen at all -- the user's rule, and it needs no table, because the arc's
+// top split is already in hand and the gap is a constant.
+//
+// It was 16 -- TWO rows -- which is inside the curve: the arc is 2 to 4 rows deep below its top
+// split, so the arriving level's ground started partway down the arc and greyed the corners at
+// its edge. 88 clears the foot with room to spare and still sits well inside the 22-row gap.
+const CSPLIT = +(process.env.CSPLIT ?? 88);
 // ---- ONE dial: how short a seam is allowed to get before it is not drawn at all ----
 // SEAMPIX is the line's half-height ABOVE the horizon, in pixels. The line is mirrored, and the
 // horizon char row is SHARED rather than doubled, so 8 here is a 16px line in all: one full char
@@ -15524,7 +15534,10 @@ angVarT: !byte ${angVarT.join(',')}
 arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const d = arcSpan(arcYT[ARC_DROP_N + n], (arcET[ARC_DROP_N + n] << 24) >> 24)[1];
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
-  return Math.max(51, Math.min(246, 50 + Math.min(d, l) * 8));
+  // The MIDPOINT of the black band between the departing arc's foot and the arriving arc's
+  // crown, not its top edge -- the same rule CSPLIT follows on the drop, so the line the ground
+  // colour flips at is the middle of the black the whole way through a fall.
+  return Math.max(51, Math.min(246, 50 + ((d + l) >> 1) * 8));
 }).join(',')}
         ; ---- which ladder each kind uses: rung finder, yBase, ptr, flag, xOff ----
         ; 0 = the exit hole, 1 = an empty socket, 2 = an orb seated in one. hlSet indexes this
