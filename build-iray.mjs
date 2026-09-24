@@ -5597,13 +5597,20 @@ if (process.env.SEATDUMP === 'steps') {
 fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, SCR_A);   // under the hole, below the screens
 
 
-// ---- PICSEG: cut-scene pictures 2..N, in the socket ladder's space ----
-// A picture map is 1,000 bytes and the image's largest free hole is 256, so only the FIRST
-// picture fits inside the image (in the 3,048 the old single face occupied). The rest live here,
-// between the orb ladder and the loader -- which is the socket ladder's ground, so this needs
-// NOSOCK for now. The permanent answer is to trim the 75-slot exit-hole ladder; that is a
-// separate job and this build is a look at the SEQUENCE, not the final layout.
-const PICSEG = DIE && NPIC > 1 ? PICS.maps.slice(1).flatMap(m => m.map) : [];
+// ---- PICSEG: EVERY cut-scene picture map, in the space the orb ladder vacated ----
+// A picture map is 1,000 bytes and the image's largest free run is 36, so none of them can live
+// in the image any more. The first one used to (as faceScrT, in the 3,048 the old single face
+// occupied); moving the idol's sprites under the I/O hole pulled SEATBASE down from $f500 to
+// $f100 and left exactly the 1,000 bytes it needs up here, on the CPU-reachable side of the
+// hole -- which is where it belongs, because picPut COPIES it and a copy from under the hole
+// would cost a port dance with interrupts off.
+//
+// What it buys is not bank-3 space, which is a wash: it is 1,000 PAGE-ALIGNED bytes of image at
+// $7900, the only run left big enough to take moveXT/moveYT and the HUD out of the main block.
+//
+// picLoT/picHiT already indirect through a table, so picture 0 joining the others is a change of
+// two bytes in it and nothing at all at runtime.
+const PICSEG = DIE ? PICS.maps.slice(0, NPIC).flatMap(m => m.map) : [];
 if (PICSEG.length) {
   // Up to the level shadow -- or, with no shadow to collide with, up to doomT, the lowest CPU
   // squatter in bank 3's tail. A standalone build was being held to the chain's budget and
@@ -5612,7 +5619,7 @@ if (PICSEG.length) {
   if (PICSEG.length > room) throw new Error(
     `IPIC is ${PICSEG.length} bytes but only ${room} are free between $${SEATBASE.toString(16)} ` +
     `and the level shadow at $${LVLSHADOW.toString(16)} -- ${NPIC} pictures do not fit`);
-  console.error(`  cut scene: ${NPIC} pictures, 1 in the image + ${NPIC - 1} as IPIC` +
+  console.error(`  cut scene: ${NPIC} picture(s), all as IPIC` +
                 ` at $${SEATBASE.toString(16)} (${PICSEG.length} of ${room} bytes)`);
 }
 
@@ -10706,376 +10713,6 @@ nmi:    pha
         rti
 
 ; ---- fps = 960 / (frames per 16 renders) ----
-computeFps:
-        sec
-        lda frameCnt
-        sbc lastFrame
-        sta deltaL
-        lda frameCnt+1
-        sbc lastFrame+1
-        sta deltaH
-        lda frameCnt
-        sta lastFrame
-        lda frameCnt+1
-        sta lastFrame+1
-        lda deltaL
-        ora deltaH
-        bne cf1
-        rts
-cf1:    lda #$c0
-        sta dpx
-        lda #$03
-        sta dpy                 ; dividend 960
-        lda #$00
-        sta fpsv
-cfdiv:  sec
-        lda dpx
-        sbc deltaL
-        tax
-        lda dpy
-        sbc deltaH
-        bcc cfdd
-        stx dpx
-        sta dpy
-        inc fpsv
-        jmp cfdiv
-cfdd:   ldx #$00
-        lda fpsv
-cft:    cmp #10
-        bcc cfo
-        sec
-        sbc #10
-        inx
-        jmp cft
-cfo:    sta fpsOnes
-        stx fpsTens
-        rts
-
-; ---- readout: fps top-left, X/Y/A top-right ----
-; The overlay no longer plots pixels. In the 4x8 scheme a char code is an INDEX into the
-; cell-pattern set, not a bitmap, so there is nothing to OR bits into -- instead the last
-; 18 codes are literal digit glyphs and the readout just pokes them into screen RAM. That
-; also removes the whole class of bug where the overlay reached into renderer tables.
-setRow:                         ; A = char row -> ppPtr
-        tax
-        lda rowLoT,x
-        sta ppPtr
-        lda rowHiT,x
-        clc
-        adc baseHi
-        sta ppPtr+1
-        rts
-
-drawFps:
-        lda #${hx(HUDROW)}      ; not row 0: 24-row mode crops the top four pixels, and the
-        jsr setRow              ;   glyph ink starts on the second line of the cell
-        ldy #$00
-        lda fpsTens
-        clc
-        adc #${hx(GLYPH0)}
-        sta (ppPtr),y
-        iny
-        lda fpsOnes
-        clc
-        adc #${hx(GLYPH0)}
-        sta (ppPtr),y
-        rts
-
-; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
-; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
-${DIEDBG ? `dbHex:  pha                     ; A as two hex digits at Y, Y advanced
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        pla
-        and #$0f
-        jmp ddPut
-dieDbg: lda #$01                ; the readout is drawn in $d022, which the fade walks to black
-        sta $d022               ;   -- hold it lit or the diagnostic disappears with the room
-        lda #$06
-        jsr setRow
-        ldy #$1c
-        lda dieOff
-        jsr dbHex
-        lda dieRem
-        jsr dbHex
-        lda dieDir
-        jsr dbHex
-        lda dieDirF
-        jsr dbHex
-        lda pa                  ; and the angle itself: the rate bytes say -3.75 units a frame,
-        jsr dbHex               ;   but the observed sweep is nearer -0.35, so watch what pa
-        lda paF                 ;   ACTUALLY does per frame rather than what the rate claims
-        jmp dbHex
-` : ''}
-drawDbg:
-${NOHUD ? "        jmp ddAng               ; DEADCODE-OK: angle only, so the X/Y block below is\n                                ;   jumped over rather than compiled out -- SPIN measurement\n                                ;   still needs ddAng, and the rest is cheaper left in place." : ''}
-        lda #${hx(HUDROW)}      ; see drawFps: the top character row is half under the border
-        jsr setRow
-        ldy #36
-        lda #16                 ; 'X'
-        jsr ddPut
-        lda px+1
-        and #$0f
-        jsr ddPut
-        lda px
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda px
-        and #$0f
-        jsr ddPut
-        lda #${hx(HUDROW + 1)}
-        jsr setRow
-        ldy #36
-        lda #17                 ; 'Y'
-        jsr ddPut
-        lda py+1
-        and #$0f
-        jsr ddPut
-        lda py
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda py
-        and #$0f
-        jsr ddPut
-${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's CELL ----
-        ; x/y/a pin the CAMERA, and that used to be the whole story. It is not any more: an angel
-        ; wanders while unobserved, so the same three numbers put a different scene in front of it
-        ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
-        ; facing one freezes its clock, so waiting does not sweep the possibilities either --
-        ; the cell has to be READ OFF and fed back in through ANGAT.
-        ; ONE LINE PER ANGEL, every angel: level 3's third was cut for 31 bytes of main block
-        ; until obOrder moved out of it (2026-09-19).
-${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
-        jsr setRow
-        ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #\$0f"
-        lda #14                 ;   showed an angel at x=21 as x=5 -- a cell in the other half of
-        jsr ddPut               ;   the level, which reads exactly like it teleported.
-        ldx #${hx(ei)}          ; ONE LINE PER ANGEL. This was a single hardcoded findIndex, so a
-        lda orbXCT,x            ;   second angel was invisible to the readout entirely.
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda orbXCT,x
-        and #$0f
-        jsr ddPut
-        lda orbYCT,x
-        and #$0f
-        jsr ddPut
-`).join('')}`}${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
-        ; A single frame's count is meaningless under motion, and motion is the only condition
-        ; that exercises the prediction at all.
-${PROFAT && PROFILE ? `        lda pfArm               ; With PROFAT, use the PROFILER's window rather than a rolling
-        beq rcNd                ;   one of our own, so the ray count and the phase split describe
-        lda pfDone              ;   THE SAME 256 frames. Otherwise the latch lands wherever it
-        bne rcNd                ;   lands and the two tables are about different parts of the tour.
-` : ''}        lda rayAcc
-        clc
-        adc rayN
-        sta rayAcc
-        bcc rcNc
-        inc rayAcc+1
-rcNc:   lda chnAcc
-        clc
-        adc chnN
-        sta chnAcc
-        bcc rcNf
-        inc chnAcc+1
-rcNf:   lda edgAcc
-        clc
-        adc edgN
-        sta edgAcc
-        bcc rcNe
-        inc edgAcc+1
-${EDGCHK ? `        lda ehAcc
-        clc
-        adc ehN
-        sta ehAcc
-        bcc rcNh
-        inc ehAcc+1
-rcNh:   lda ehGAcc
-        clc
-        adc ehGN
-        sta ehGAcc
-        bcc rcNi
-        inc ehGAcc+1
-rcNi:   lda edcAcc
-        clc
-        adc edcN
-        sta edcAcc
-        bcc rcNj
-        inc edcAcc+1
-rcNj:   lda chwAcc
-        clc
-        adc chwN
-        sta chwAcc
-        bcc rcNk
-        inc chwAcc+1
-rcNk:   lda chdAcc
-        clc
-        adc chdN
-        sta chdAcc
-        bcc rcNm
-        inc chdAcc+1
-rcNm:   lda pvAcc
-        clc
-        adc pvNdbg
-        sta pvAcc
-        bcc rcNp
-        inc pvAcc+1
-rcNp:
-` : ''}${CULLCNT ? `        lda culTAcc
-        clc
-        adc culTot
-        sta culTAcc
-        bcc rcNq
-        inc culTAcc+1
-rcNq:   lda culPAcc
-        clc
-        adc culPrj
-        sta culPAcc
-        bcc rcNr
-        inc culPAcc+1
-rcNr:
-` : ''}rcNe:   inc rayFrm
-        bne rcNd
-        lda rayAcc+1
-        sta rayMean
-        lda edgAcc+1
-        sta edgMean
-        lda chnAcc+1
-        sta chnMean
-${CULLCNT ? `        lda culTAcc+1
-        sta culTMn
-        lda culPAcc+1
-        sta culPMn
-        lda #$00
-        sta culTAcc
-        sta culTAcc+1
-        sta culPAcc
-        sta culPAcc+1
-` : ''}
-${EDGCHK ? `        lda ehAcc+1
-        sta ehMean
-        lda ehGAcc+1
-        sta ehGMean
-        lda edcAcc+1
-        sta edcMean
-        lda chwAcc+1
-        sta chwMean
-        lda chdAcc+1
-        sta chdMean
-        lda pvAcc+1
-        sta pvMean
-        lda #$00
-        sta ehAcc
-        sta ehAcc+1
-        sta ehGAcc
-        sta ehGAcc+1
-        sta edcAcc
-        sta edcAcc+1
-        sta chwAcc
-        sta chwAcc+1
-        sta chdAcc
-        sta chdAcc+1
-        sta pvAcc
-        sta pvAcc+1
-` : ''}
-        lda #$00
-        sta rayAcc
-        sta rayAcc+1
-        sta edgAcc
-        sta edgAcc+1
-        sta chnAcc
-        sta chnAcc+1
-rcNd:   lda #$03
-        jsr setRow
-        ldy #37
-        lda #14                 ; 'E' -- MEAN rays/frame over the last 256 frames, hex
-        jsr ddPut
-        lda rayMean
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda rayMean
-        and #$0f
-        jsr ddPut
-${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had to work with. If this is
-        jsr setRow              ; 0 every frame the prediction is not running at all, which
-        ldy #38                 ; no amount of staring at the ray count would reveal.
-        lda pvNdbg
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda pvNdbg
-        and #$0f
-        jsr ddPut
-` : ''}        lda #$05                ; row 5: MEAN edge cells a frame -- rows the run cache
-        jsr setRow              ; cannot skip, each one a full ramp/step selection
-        ldy #38
-        lda edgMean
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda edgMean
-        and #$0f
-        jsr ddPut
-        lda #$06                ; row 6: MEAN chain draws a frame, of 80. The run cache's miss
-        jsr setRow              ; rate -- the direct read on whether the RLE is doing its job
-        ldy #38
-        lda chnMean
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda chnMean
-        and #$0f
-        jsr ddPut
-` : ''}ddAng:  lda #${hx(HUDROW + 2)}
-        jsr setRow
-        ldy #35                 ; one column left of X/Y: the angle is FOUR digits, not two
-        lda #10                 ; 'A'
-        jsr ddPut
-        lda pa
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda pa
-        and #$0f
-        jsr ddPut
-        lda paF                 ; ---- and the SUB-UNIT half of it ----
-        lsr                     ; pa alone is ambiguous: paq indexes the ray tables at
-        lsr                     ; quarter-unit resolution, so pa:paF = C000, C040, C080 and C0C0
-        lsr                     ; are four DIFFERENT renders that all used to read "AC0" on
-        lsr                     ; screen. Three of every four reachable views could not be
-        jsr ddPut               ; replayed from a screenshot, and a glitch living on one of them
-        lda paF                 ; looked like it simply did not reproduce. Read all four digits
-        and #$0f                ; off and feed them straight back in as PA=c0 PAF=40.
-        jmp ddPut
-ddPut:  clc
-        adc #${hx(GLYPH0)}
-        sta (ppPtr),y
-        iny
-        rts
 
 ${ANGCHAR ? `; ---- angChar: stamp the angel's silhouette into the char buffer ----
 ; Runs AFTER renderSym, so it overwrites the wall image the renderer just drew, and into the
@@ -11134,8 +10771,6 @@ angcAT: !byte ${ANGCA.map(c => c < 0 ? 0 : ANGC0 + c).join(',')}
 angcBT: !byte ${ANGCB.map(c => c < 0 ? 0 : ANGC0 + c).join(',')}
 ` : ''}dirXT:  !byte 1,1,0,255,255,255,0,1
 dirYT:  !byte 0,1,1,1,0,255,255,255
-moveXT: ${chunk(moveX).trim()}
-moveYT: ${chunk(moveY).trim()}
 rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
 kTabT:  !byte ${kTab.join(',')}${VSPLIT ? `
@@ -15939,8 +15574,8 @@ sndV2H: !byte ${sndV2.map(v => v >> 8).join(',')}
 sndVolT: !byte ${sndVolT.join(',')}` : ''}
 ${DIE ? `; Where each picture's map lives. The first is inside the image next to the charset; the rest
 ; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
-picLoT: !byte <faceScrT${PICS.maps.slice(1).map((_, k) => `,${hx((SEATBASE + k * 1000) & 255)}`).join('')}
-picHiT: !byte >faceScrT${PICS.maps.slice(1).map((_, k) => `,${hx((SEATBASE + k * 1000) >> 8)}`).join('')}
+picLoT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((SEATBASE + k * 1000) & 255)).join(',')}
+picHiT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((SEATBASE + k * 1000) >> 8)).join(',')}
 ; dieN is the death counter and it is DATA, not an equate, on purpose: dieKey restarts with
 ; "jmp entry", which reloads nothing, so an emitted 0 is the only initialisation it ever gets --
 ; and that is exactly what makes it survive the restart and count deaths rather than resetting.
@@ -15953,17 +15588,400 @@ darkerT: !byte ${darkerT.join(',')}
 ; the main stream, and $7100 sits inside the main stream's own staged copy -- so the face was
 ; overwriting the compressed bytes the main decode then read, and the program never started.
 ; Every other placed segment targets $c000 or above, clear of the staging area. That is the rule.
-; faceScrT is PAGE ALIGNED: the screen copy adds a row offset straight onto its page byte.
-; ONLY THE FIRST PICTURE LIVES HERE. The charset is 2,048 and a map is 1,000, so picture 1 fills
-; exactly the 3,048 the single face used to occupy -- no image space had to be found for it. Every
-; picture after the first has nowhere contiguous to go (the largest free hole in the image is 256
-; bytes), so it ships as its own loaded segment in bank 3; see PICSEG.
+; ONLY THE CHARSET LIVES HERE NOW. The MAPS all ship as IPIC in bank 3 (see PICSEG): a map is
+; 1,000 bytes the CPU copies to a screen, so it wants to be on the CPU-reachable side of the I/O
+; hole, and moving the first one out is what freed the page-aligned kilobyte at $7900. The
+; charset stays because it is 2,048 and there is no 2K of bank 3 left to put it in -- and it is
+; read exactly once, by dieSwap, straight into charset B's slot.
         * = $7100
-faceChrT: ${chunk(PICS.chars, 32).trim()}
-        * = $7900
-faceScrT: ${chunk(PICS.maps[0].map, 32).trim()}` : ''}
+faceChrT: ${chunk(PICS.chars, 32).trim()}` : ''}
 ${SOUND ? `${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
 melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
+        * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
+; moveXT/moveYT are 512 bytes of TABLE that were sitting inside the code block -- the scarcest
+; resource on the machine -- at $1f3e, which is not even page-aligned, so a byte-indexed read
+; crossing $2000 was paying an extra cycle. Here they are one page each: the ceiling gets 512
+; bytes back AND the movement code gets marginally faster.
+moveXT: ${chunk(moveX).trim()}
+        * = $7a00
+moveYT: ${chunk(moveY).trim()}
+
+        * = $7b00               ; ---- and the whole readout ----
+; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
+; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
+; that drawFps falling through into whatever follows it still does. The only branches that
+; reach these labels are computeFps's own (cf1/cfdd/cfo), so nothing outside needs a longer arm.
+computeFps:
+        sec
+        lda frameCnt
+        sbc lastFrame
+        sta deltaL
+        lda frameCnt+1
+        sbc lastFrame+1
+        sta deltaH
+        lda frameCnt
+        sta lastFrame
+        lda frameCnt+1
+        sta lastFrame+1
+        lda deltaL
+        ora deltaH
+        bne cf1
+        rts
+cf1:    lda #$c0
+        sta dpx
+        lda #$03
+        sta dpy                 ; dividend 960
+        lda #$00
+        sta fpsv
+cfdiv:  sec
+        lda dpx
+        sbc deltaL
+        tax
+        lda dpy
+        sbc deltaH
+        bcc cfdd
+        stx dpx
+        sta dpy
+        inc fpsv
+        jmp cfdiv
+cfdd:   ldx #$00
+        lda fpsv
+cft:    cmp #10
+        bcc cfo
+        sec
+        sbc #10
+        inx
+        jmp cft
+cfo:    sta fpsOnes
+        stx fpsTens
+        rts
+
+; ---- readout: fps top-left, X/Y/A top-right ----
+; The overlay no longer plots pixels. In the 4x8 scheme a char code is an INDEX into the
+; cell-pattern set, not a bitmap, so there is nothing to OR bits into -- instead the last
+; 18 codes are literal digit glyphs and the readout just pokes them into screen RAM. That
+; also removes the whole class of bug where the overlay reached into renderer tables.
+setRow:                         ; A = char row -> ppPtr
+        tax
+        lda rowLoT,x
+        sta ppPtr
+        lda rowHiT,x
+        clc
+        adc baseHi
+        sta ppPtr+1
+        rts
+
+drawFps:
+        lda #${hx(HUDROW)}      ; not row 0: 24-row mode crops the top four pixels, and the
+        jsr setRow              ;   glyph ink starts on the second line of the cell
+        ldy #$00
+        lda fpsTens
+        clc
+        adc #${hx(GLYPH0)}
+        sta (ppPtr),y
+        iny
+        lda fpsOnes
+        clc
+        adc #${hx(GLYPH0)}
+        sta (ppPtr),y
+        rts
+
+; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
+; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
+${DIEDBG ? `dbHex:  pha                     ; A as two hex digits at Y, Y advanced
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        pla
+        and #$0f
+        jmp ddPut
+dieDbg: lda #$01                ; the readout is drawn in $d022, which the fade walks to black
+        sta $d022               ;   -- hold it lit or the diagnostic disappears with the room
+        lda #$06
+        jsr setRow
+        ldy #$1c
+        lda dieOff
+        jsr dbHex
+        lda dieRem
+        jsr dbHex
+        lda dieDir
+        jsr dbHex
+        lda dieDirF
+        jsr dbHex
+        lda pa                  ; and the angle itself: the rate bytes say -3.75 units a frame,
+        jsr dbHex               ;   but the observed sweep is nearer -0.35, so watch what pa
+        lda paF                 ;   ACTUALLY does per frame rather than what the rate claims
+        jmp dbHex
+` : ''}
+drawDbg:
+${NOHUD ? "        jmp ddAng               ; DEADCODE-OK: angle only, so the X/Y block below is\n                                ;   jumped over rather than compiled out -- SPIN measurement\n                                ;   still needs ddAng, and the rest is cheaper left in place." : ''}
+        lda #${hx(HUDROW)}      ; see drawFps: the top character row is half under the border
+        jsr setRow
+        ldy #36
+        lda #16                 ; 'X'
+        jsr ddPut
+        lda px+1
+        and #$0f
+        jsr ddPut
+        lda px
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda px
+        and #$0f
+        jsr ddPut
+        lda #${hx(HUDROW + 1)}
+        jsr setRow
+        ldy #36
+        lda #17                 ; 'Y'
+        jsr ddPut
+        lda py+1
+        and #$0f
+        jsr ddPut
+        lda py
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda py
+        and #$0f
+        jsr ddPut
+${!SPRITES || ORBS.findIndex(o => o.tall) < 0 ? '' : `        ; ---- the angel's CELL ----
+        ; x/y/a pin the CAMERA, and that used to be the whole story. It is not any more: an angel
+        ; wanders while unobserved, so the same three numbers put a different scene in front of it
+        ; every run and a reported artefact cannot be reproduced at all. Worse, a camera parked
+        ; facing one freezes its clock, so waiting does not sweep the possibilities either --
+        ; the cell has to be READ OFF and fed back in through ANGAT.
+        ; ONE LINE PER ANGEL, every angel: level 3's third was cut for 31 bytes of main block
+        ; until obOrder moved out of it (2026-09-19).
+${ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0).map((ei, n) => `        lda #${hx(HUDROW + 3 + n)}
+        jsr setRow
+        ldy #36                 ; 36, not 37: x needs TWO digits. On a 28-wide map "and #\$0f"
+        lda #14                 ;   showed an angel at x=21 as x=5 -- a cell in the other half of
+        jsr ddPut               ;   the level, which reads exactly like it teleported.
+        ldx #${hx(ei)}          ; ONE LINE PER ANGEL. This was a single hardcoded findIndex, so a
+        lda orbXCT,x            ;   second angel was invisible to the readout entirely.
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda orbXCT,x
+        and #$0f
+        jsr ddPut
+        lda orbYCT,x
+        and #$0f
+        jsr ddPut
+`).join('')}`}${RAYCNT ? `        ; Accumulate rayN over exactly 256 frames; the high byte of the total IS the mean.
+        ; A single frame's count is meaningless under motion, and motion is the only condition
+        ; that exercises the prediction at all.
+${PROFAT && PROFILE ? `        lda pfArm               ; With PROFAT, use the PROFILER's window rather than a rolling
+        beq rcNd                ;   one of our own, so the ray count and the phase split describe
+        lda pfDone              ;   THE SAME 256 frames. Otherwise the latch lands wherever it
+        bne rcNd                ;   lands and the two tables are about different parts of the tour.
+` : ''}        lda rayAcc
+        clc
+        adc rayN
+        sta rayAcc
+        bcc rcNc
+        inc rayAcc+1
+rcNc:   lda chnAcc
+        clc
+        adc chnN
+        sta chnAcc
+        bcc rcNf
+        inc chnAcc+1
+rcNf:   lda edgAcc
+        clc
+        adc edgN
+        sta edgAcc
+        bcc rcNe
+        inc edgAcc+1
+${EDGCHK ? `        lda ehAcc
+        clc
+        adc ehN
+        sta ehAcc
+        bcc rcNh
+        inc ehAcc+1
+rcNh:   lda ehGAcc
+        clc
+        adc ehGN
+        sta ehGAcc
+        bcc rcNi
+        inc ehGAcc+1
+rcNi:   lda edcAcc
+        clc
+        adc edcN
+        sta edcAcc
+        bcc rcNj
+        inc edcAcc+1
+rcNj:   lda chwAcc
+        clc
+        adc chwN
+        sta chwAcc
+        bcc rcNk
+        inc chwAcc+1
+rcNk:   lda chdAcc
+        clc
+        adc chdN
+        sta chdAcc
+        bcc rcNm
+        inc chdAcc+1
+rcNm:   lda pvAcc
+        clc
+        adc pvNdbg
+        sta pvAcc
+        bcc rcNp
+        inc pvAcc+1
+rcNp:
+` : ''}${CULLCNT ? `        lda culTAcc
+        clc
+        adc culTot
+        sta culTAcc
+        bcc rcNq
+        inc culTAcc+1
+rcNq:   lda culPAcc
+        clc
+        adc culPrj
+        sta culPAcc
+        bcc rcNr
+        inc culPAcc+1
+rcNr:
+` : ''}rcNe:   inc rayFrm
+        bne rcNd
+        lda rayAcc+1
+        sta rayMean
+        lda edgAcc+1
+        sta edgMean
+        lda chnAcc+1
+        sta chnMean
+${CULLCNT ? `        lda culTAcc+1
+        sta culTMn
+        lda culPAcc+1
+        sta culPMn
+        lda #$00
+        sta culTAcc
+        sta culTAcc+1
+        sta culPAcc
+        sta culPAcc+1
+` : ''}
+${EDGCHK ? `        lda ehAcc+1
+        sta ehMean
+        lda ehGAcc+1
+        sta ehGMean
+        lda edcAcc+1
+        sta edcMean
+        lda chwAcc+1
+        sta chwMean
+        lda chdAcc+1
+        sta chdMean
+        lda pvAcc+1
+        sta pvMean
+        lda #$00
+        sta ehAcc
+        sta ehAcc+1
+        sta ehGAcc
+        sta ehGAcc+1
+        sta edcAcc
+        sta edcAcc+1
+        sta chwAcc
+        sta chwAcc+1
+        sta chdAcc
+        sta chdAcc+1
+        sta pvAcc
+        sta pvAcc+1
+` : ''}
+        lda #$00
+        sta rayAcc
+        sta rayAcc+1
+        sta edgAcc
+        sta edgAcc+1
+        sta chnAcc
+        sta chnAcc+1
+rcNd:   lda #$03
+        jsr setRow
+        ldy #37
+        lda #14                 ; 'E' -- MEAN rays/frame over the last 256 frames, hex
+        jsr ddPut
+        lda rayMean
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda rayMean
+        and #$0f
+        jsr ddPut
+${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had to work with. If this is
+        jsr setRow              ; 0 every frame the prediction is not running at all, which
+        ldy #38                 ; no amount of staring at the ray count would reveal.
+        lda pvNdbg
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda pvNdbg
+        and #$0f
+        jsr ddPut
+` : ''}        lda #$05                ; row 5: MEAN edge cells a frame -- rows the run cache
+        jsr setRow              ; cannot skip, each one a full ramp/step selection
+        ldy #38
+        lda edgMean
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda edgMean
+        and #$0f
+        jsr ddPut
+        lda #$06                ; row 6: MEAN chain draws a frame, of 80. The run cache's miss
+        jsr setRow              ; rate -- the direct read on whether the RLE is doing its job
+        ldy #38
+        lda chnMean
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda chnMean
+        and #$0f
+        jsr ddPut
+` : ''}ddAng:  lda #${hx(HUDROW + 2)}
+        jsr setRow
+        ldy #35                 ; one column left of X/Y: the angle is FOUR digits, not two
+        lda #10                 ; 'A'
+        jsr ddPut
+        lda pa
+        lsr
+        lsr
+        lsr
+        lsr
+        jsr ddPut
+        lda pa
+        and #$0f
+        jsr ddPut
+        lda paF                 ; ---- and the SUB-UNIT half of it ----
+        lsr                     ; pa alone is ambiguous: paq indexes the ray tables at
+        lsr                     ; quarter-unit resolution, so pa:paF = C000, C040, C080 and C0C0
+        lsr                     ; are four DIFFERENT renders that all used to read "AC0" on
+        lsr                     ; screen. Three of every four reachable views could not be
+        jsr ddPut               ; replayed from a screenshot, and a glitch living on one of them
+        lda paF                 ; looked like it simply did not reproduce. Read all four digits
+        and #$0f                ; off and feed them straight back in as PA=c0 PAF=40.
+        jmp ddPut
+ddPut:  clc
+        adc #${hx(GLYPH0)}
+        sta (ppPtr),y
+        iny
+        rts
+
         * = $7e00
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
