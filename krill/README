@@ -1,0 +1,22 @@
+Krill's Loader, repository version 194, built for this project.
+
+    make prg PLATFORM=c64 VERSION=194 PROJECT=c64fps \
+             EXTCONFIGPATH=<this dir> INSTALL=0400 RESIDENT=8000 ZP=e8
+
+loaderconfig.inc is ours; everything else here is Krill's output. Prerequisites are ca65/ld65
+(cc65), make and perl -- NOT acme, whatever the Makefile's zip list suggests. On macOS the
+build needs VERSION= passed by hand, because the Makefile derives it with `grep -oP`, which
+BSD grep does not have, and an empty VERSION makes the symbol step fail after the binaries
+have already assembled fine.
+
+WHY THIS CONFIG (measured, resident size at each step):
+    bare load-raw                  225 B
+    + NTSC_COMPATIBILITY           226 B   +1, and we are NTSC -- the prebuilts have it OFF
+    + LOAD_VIA_KERNAL_FALLBACK     531 B   +305, and it is what makes the disk work on a
+                                           stock VICE and a real C64 with no settings changed
+    + LOAD_UNDER_D000_DFFF         647 B   +116, lands IHOL under the I/O hole directly
+                                           instead of via $c000 and a hand-written copy
+
+ATTRIBUTION IS REQUIRED. BSD-3-clause, and condition 2 asks for "Loader by Krill" in the
+production itself and/or accompanying documentation. Copyright 2022 Gunnar Ruthenberg.
+See README-krill for the full text.
