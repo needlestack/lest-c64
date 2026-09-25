@@ -6609,6 +6609,13 @@ dieT0   = $858e                  ; frameCnt when they died: everything is measur
 dieTck  = $858f                  ; the last palette tick written, so a fill happens once
 dieEl   = $8590
 dkJoy   = $8591
+dieLat  = $8562                  ; dieSt, LATCHED at raster 250. sprPal runs in the IRQ and read
+                                 ;   dieSt direct, so the frame dieGo set it the shared sprite
+                                 ;   inks changed WITHIN that frame -- while obC goes out through
+                                 ;   osFlush at raster 250 and lands the frame after. One frame
+                                 ;   apart, every time. Same trick as idolOn/idolWk, and for the
+                                 ;   same reason: what the IRQ reads sixty times a second must
+                                 ;   not change under it halfway down the screen.
 dieInk  = $8561                  ; the orb's body colour, walked down to black with the room
 ovProbe = $8550                  ; the span walk is counting columns, not allocating a sprite
 ovVis   = $8551                  ; columns of the entity a span SHOWS
@@ -8210,6 +8217,9 @@ mvs:    lda $d012
         sta irqAr2+1
 ${HAS_IDOL ? '        jsr sprArm              ; ...and whether the held object gets its own inks\n' : ''}        lda colT                ; BOTH HALVES OF THE GROUND, PUBLISHED TOGETHER -- see colT
         sta irqB0+1
+${DIE ? `        lda dieSt               ; ...and the death's sprite palette with them, so the flash,
+        sta dieLat              ;   the shared inks and the per-sprite inks are ONE frame
+` : ''}
 ${CEILVARY ? `        lda colF                ; THE GROUND TRAVELS WITH ITS OWN SPLIT LINE.
         sta irqB1+1             ;   lvlLook used to store this the moment the landing
                                 ;   began, while pSplit -- the line region 1 STARTS at --
@@ -16168,7 +16178,7 @@ ${HAS_IDOL ? `
 ; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
 ; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
 ; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda dieSt               ; ---- the death scene wants the inks to SIT STILL ----
+sprPal: lda dieLat              ; ---- the death scene wants the inks to SIT STILL ----
         bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
         lda idolOn              ;   before any of this existed, and the scene's fade was written
         bne spTint              ;   against it. "The world no longer goes black correctly."
@@ -16185,7 +16195,7 @@ spWSt:  sta $d025
         sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
         sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
                                 ;   tinting things and walks down into the last few rows.
-        lda dieSt
+        lda dieLat
         bne spDn
         ldx carry               ; ---- below the split: only if something special is in hand ----
         beq spDn
