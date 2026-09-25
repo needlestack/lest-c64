@@ -6143,7 +6143,7 @@ const PEDTBL = 5 * Math.max(1, PED.L.length);
 // "* = $3d9c moves backward" is the guard if it ever stops matching.
 const PEDCODE = 18;
 // seamEdge's own size, hand-counted like PEDCODE; the assembler's "moves backward" is the guard.
-const SEAMCODE = ANYSEAM ? 237 : 1;
+const SEAMCODE = ANYSEAM ? 249 : 1;
 if (process.env.PEDDUMP && HAS_PED) {
   console.error(`pedestal ladder: r=${PEDR} u=${PEDH}, ${PED.L.length} rungs, ` +
     `${PED.BM.length} slots (${PED.BM.length * 64} bytes), slots ${PED.slotT[0]}..${PED.slotEnd - 1}`);
@@ -15765,9 +15765,11 @@ ${ANYSEAM ? `        ldx lvlMeT
         lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
         sta seMsk               ;   so a level that does not want it still gets NORMALISED.
         lda #<${hx16(CHARSET + 16)}
-        sta seStA+1
-        sta seStB+1
+        sta seLdA+1             ; the READ operand walks too. It did not, and every one of the
+        sta seStA+1             ;   199 glyphs got code 2's rows written into it: the whole
+        sta seStB+1             ;   level came out in flat blocks with no boundary cells at all.
         lda #>${hx16(CHARSET + 16)}
+        sta seLdA+2
         sta seStA+2
         clc
         adc #$08                ; charset B is charset A plus $800, so the low byte is shared
@@ -15853,12 +15855,14 @@ seStB:  sta ${hx16(CHARSET_B + 16)},x
         inx
         dey
         bpl seOut
-        lda seStA+1             ; on to the next glyph, eight bytes along in both
+        lda seStA+1             ; on to the next glyph, eight bytes along in all three
         clc
         adc #$08
+        sta seLdA+1
         sta seStA+1
         sta seStB+1
         bcc seNC
+        inc seLdA+2
         inc seStA+2
         inc seStB+2
 seNC:   dec seN

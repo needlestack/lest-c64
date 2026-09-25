@@ -7949,7 +7949,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = $3b6b
+        * = $3b5f
 ; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
 ; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
 ; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
@@ -7970,9 +7970,11 @@ seamEdge:
         lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
         sta seMsk               ;   so a level that does not want it still gets NORMALISED.
         lda #<$c010
-        sta seStA+1
-        sta seStB+1
+        sta seLdA+1             ; the READ operand walks too. It did not, and every one of the
+        sta seStA+1             ;   199 glyphs got code 2's rows written into it: the whole
+        sta seStB+1             ;   level came out in flat blocks with no boundary cells at all.
         lda #>$c010
+        sta seLdA+2
         sta seStA+2
         clc
         adc #$08                ; charset B is charset A plus $800, so the low byte is shared
@@ -8058,12 +8060,14 @@ seStB:  sta $c810,x
         inx
         dey
         bpl seOut
-        lda seStA+1             ; on to the next glyph, eight bytes along in both
+        lda seStA+1             ; on to the next glyph, eight bytes along in all three
         clc
         adc #$08
+        sta seLdA+1
         sta seStA+1
         sta seStB+1
         bcc seNC
+        inc seLdA+2
         inc seStA+2
         inc seStB+2
 seNC:   dec seN
