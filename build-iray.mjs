@@ -3206,7 +3206,32 @@ const FLOG_N = 704;
 // no file bytes and no cycles: every access is `lda pvBnd,y` with y < NBND either way, and none
 // of the three is in the page-aligned set. What it buys is a whole free PAGE at $ad00, which is
 // the only place left in a four-level image that can hold fallTail in one piece.
-const PVBASE = 0xfe00;
+// ---- LOW RAM: $0200-$03ff, which NOTHING was using and NOTHING was checking ----
+// It was never reserved. The free-space report starts at $0801 (where a ,8,1 PRG lands) and the
+// RAM-overlap guard started at $0400, so 512 bytes sat in neither. The reason it stayed empty is
+// prosaic: it is KERNAL workspace and it is LIVE DURING BOOT, because the loader calls LOAD
+// through $ffd5 seven times and that uses the input buffer, the file tables and the vectors. At
+// the only moment anyone looked at it, it was busy. Once the last file has landed nothing in this
+// program touches it -- the IRQ runs off the HARDWARE vectors at $fffe with the ROM banked out,
+// not the KERNAL's $0314 indirection.
+//
+// The two halves are NOT equally free, and what goes where depends on WHEN it is first written:
+//   $0200-$033b  input buffer, file tables, BASIC/KERNAL vectors. Free only after the last
+//                KERNAL LOAD -- so: buffers that are not written until well after boot.
+//   $033c-$03fb  the cassette buffer, exactly 192 bytes. Disk LOAD never touches it, so this
+//                half is free from the first instruction.
+// Both are PURE RAM: anything here is runtime scratch, never loaded data, because the loader
+// would have to write it and the KERNAL would be using the same bytes to do so.
+const LOWBOOT = 0x0200, LOWSAFE = 0x033c, LOWEND = 0x03fc;
+// ---- and the two tenants evicted from VIC bank 3 to make room for a fourth resident level ----
+// The shadow region runs from LVLSHADOW up to the first CPU squatter in bank 3, and these two
+// WERE that squatter, capping it at $fe00. Moving them here lifts the wall to $fff9 -- 2,304
+// bytes to 2,809 -- which is what lets four levels be resident at once.
+// The pivot scratch takes the CASSETTE half because it is written from the very first frame.
+// fallTailB takes the boot half because it is not written until a fall, which is minutes after
+// the last KERNAL LOAD -- and even a KERNAL-fallback load during play only clobbers bytes that
+// ftCap rewrites from scratch on the next drop.
+const PVBASE = LOWSAFE;
 const RUNTIME_BUFS = { fallSnapD: 1000, fallSnapS: 1000, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
 const RELOC = +(process.env.RELOC ?? 0x8600);
@@ -7345,15 +7370,16 @@ bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cel
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
                                  ;   image hole held a page; back in the image since fRowT left.
-${FALLTAIL ? `fallTailB = $fec0               ; FALLTAIL: the source rows BELOW the screen, ${FTROWS} x 40.
-                                 ;   In VIC bank 3 behind the pivot scratch (see PVBASE): the
-                                 ;   four-level image has no contiguous ${FTROWS * 40} bytes anywhere.
+${FALLTAIL ? `fallTailB = ${hx16(LOWBOOT)}               ; FALLTAIL: the source rows BELOW the screen, ${FTROWS} x 40.
+                                 ;   In LOW RAM (see LOWBOOT): the KERNAL's input buffer and file
+                                 ;   tables, dead from the moment the last file has loaded, and
+                                 ;   this is not written until the first fall. It was in bank 3
+                                 ;   behind the pivot scratch, where it was half of what capped
+                                 ;   the level shadow at $fe00 and held the chain to three levels.
                                  ;   A RAM buffer, not loaded data, so it costs no file bytes
-                                 ;   and needs no loader entry -- only bank-3 sprite slots,
-                                 ;   which is the cheaper currency. CPU-addressable because the
-                                 ;   port is $35 all through play: HIRAM=0, so $e000-$ffff is
-                                 ;   RAM, the same reason the screen can live at $e000/$e400.
-                                 ;   Stops short of $fffa, which with the KERNAL banked out has
+                                 ;   and needs no loader entry.
+                                 ;   (The old note, still true of where it came from: CPU-
+                                 ;   addressable because the port is $35 all through play --
                                  ;   to hold the real NMI/RESET/IRQ vectors.
 ` : ''}fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
 fallSnapS = $6200                ; the room being left
@@ -20875,6 +20901,15 @@ try {
     console.log(`TOTAL SPENDABLE: ${spendable + (VBANK - r.end)} bytes, in ` +
                 `${holes.filter(h => !h[2].length).length + 1} fragments`);
   }
+  {
+    // LOW RAM, which nothing reported on until the pivot scratch and fallTailB moved into it.
+    const low = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
+      .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= LOWBOOT && a < LOWEND)
+      .sort((x, y) => x[1] - y[1]);
+    const used = low.reduce((n, [k]) => n + (RUNTIME_BUFS[k] ?? 1), 0);
+    console.log(`low RAM $${LOWBOOT.toString(16)}-$${(LOWEND - 1).toString(16)}: ${used} of ` +
+      `${LOWEND - LOWBOOT} bytes used by ${low.map(([k]) => k).join(' ') || '(nothing)'}`);
+  }
   console.log(`VIC bank 3 free: ${bank3.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
     `  = ${free} bytes, ${free >> 6} sprite slots` +
@@ -20957,8 +20992,18 @@ try {
     };
     {
       const all = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
-        .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0400)
+        // $0200, not $0400. The threshold was $0400 because everything below it was BASIC's and
+        // the KERNAL's -- and that is exactly why $0200-$03ff went unnoticed for so long: the
+        // free-space report starts at $0801 and this check started at $0400, so 512 bytes of
+        // real RAM sat in NEITHER. Now that the pivot scratch and fallTailB live there, the
+        // region needs the same protection as the rest. Below $0200 is the hardware stack and
+        // the zero page, which have their own checker.
+        .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
         .map(([n, a]) => [n, a, SIZES[n] ?? 1]).sort((x, y) => x[1] - y[1]);
+      for (const [n, a, sz] of all)
+        if (a < 0x0200 || (a < 0x0400 && a + sz > LOWEND)) throw new Error(
+          `${n}=$${a.toString(16)} (${sz}B) runs past $${(LOWEND - 1).toString(16)} into the ` +
+          `default screen at $0400 (stackLT and the rest), or below $0200 into the stack.`);
       for (let i = 1; i < all.length; i++) {
         const [pn, pa, ps] = all[i - 1], [n, a, sz] = all[i];
         if (a < pa + ps) throw new Error(
@@ -20971,7 +21016,7 @@ try {
     const inHole = (a, n) => holes.some(([lo, hi]) => a >= lo && a + n <= hi);
     const eq = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
       .map(m => [m[1], parseInt(m[2], 16)])
-      .filter(([n, a]) => a >= 0x0400 && !(n in OK));
+      .filter(([n, a]) => a >= 0x0200 && !(n in OK));
     const clash = eq.filter(([, a]) => a >= r.org && a < r.end && !inHole(a, 1));
     if (clash.length) throw new Error(
       `${clash.length} RAM equate(s) sit inside the emitted image $${r.org.toString(16)}-` +

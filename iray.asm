@@ -254,9 +254,9 @@ seamT   = $84c8                 ; per cell-column (40): char code for the solid 
 ; place for RAM: it is only free because of where its neighbours' page counts happen to land, so
 ; any table gaining a page silently overwrites the pivot state. They now live in the reclaimed
 ; charset-B source, which is free by construction after cpChr rather than by coincidence.
-pvBnd   = $fe00                 ; the column the boundary was pinned at
-pvAng   = $fe40                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
-pvRcp   = $fe80                 ; 163/distance, for the translation term
+pvBnd   = $033c                 ; the column the boundary was pinned at
+pvAng   = $037c                 ; its WORLD bearing as a byte angle, pa + rayOffT[col]
+pvRcp   = $03bc                 ; 163/distance, for the translation term
 pvN     = $8000                 ; how many of them there are; 0 disables the hint for a frame
 opaL    = $8001                 ; the 16-bit angle those bearings were taken at
 opaH    = $8002
@@ -472,15 +472,16 @@ bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cel
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
                                  ;   image hole held a page; back in the image since fRowT left.
-fallTailB = $fec0               ; FALLTAIL: the source rows BELOW the screen, 7 x 40.
-                                 ;   In VIC bank 3 behind the pivot scratch (see PVBASE): the
-                                 ;   four-level image has no contiguous 280 bytes anywhere.
+fallTailB = $0200               ; FALLTAIL: the source rows BELOW the screen, 7 x 40.
+                                 ;   In LOW RAM (see LOWBOOT): the KERNAL's input buffer and file
+                                 ;   tables, dead from the moment the last file has loaded, and
+                                 ;   this is not written until the first fall. It was in bank 3
+                                 ;   behind the pivot scratch, where it was half of what capped
+                                 ;   the level shadow at $fe00 and held the chain to three levels.
                                  ;   A RAM buffer, not loaded data, so it costs no file bytes
-                                 ;   and needs no loader entry -- only bank-3 sprite slots,
-                                 ;   which is the cheaper currency. CPU-addressable because the
-                                 ;   port is $35 all through play: HIRAM=0, so $e000-$ffff is
-                                 ;   RAM, the same reason the screen can live at $e000/$e400.
-                                 ;   Stops short of $fffa, which with the KERNAL banked out has
+                                 ;   and needs no loader entry.
+                                 ;   (The old note, still true of where it came from: CPU-
+                                 ;   addressable because the port is $35 all through play --
                                  ;   to hold the real NMI/RESET/IRQ vectors.
 fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
 fallSnapS = $6200                ; the room being left
