@@ -76,11 +76,18 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // own shadow. NOTE: the live level is CHAIN[0], and with three resident only levels 1 and 2 fit
 // under the code ceiling as the live one -- level 3 live in a three-chain is ~17 bytes over, so
 // playtest it with CHAIN=3 rather than by rotating the chain.
-// 1,2,3,5 -- NOT 1,2,3,4. Level 4 is the HUB now and it has FOUR exits, which takes every one
-// of holeSeeT's four hole-like slots; level 2 needs three of them for its sockets. NHOLE is
-// capped at 4 and the exit/socket split is global, so the hub cannot join a chain with a socket
-// level until that budget changes. It builds standalone (CHAIN=4 -> level4.d64) meanwhile.
-const CHAIN = (process.env.CHAIN ?? '1,2,3,5').split(',').map(Number);
+// 1,4,5: level 1, then THE HUB, then the idol level its red hole leads to, then back to 1.
+// Levels 2 and 3 are out of the shipping chain for the moment and that is a SPACE limit, not a
+// design one -- measured 2026-09-25, with the hub's pedestals in:
+//     1,4,5     3 shadows x 826 = 2478   fits ($f500-$fe00 is 2304... see below)
+//     1,2,4,5   3 shadows x 837 = 2511   207 bytes over
+//     1,2,3,4,5 4 shadows x 884 = 3536   over by more than a page
+// The 207 is reachable: $fe00-$ffd8 is pvBnd/pvAng/pvRcp/fallTailB, CPU tables squatting in the
+// graphics bank, and moving them out gives the shadow region $f500-$fff9 = 2809. They need ~470
+// contiguous bytes of image to go to, which today is most of the code headroom. Five resident
+// levels needs more than that again and wants the shadow to shrink or a second ILVL region.
+// CHAIN=<n> alone still playtests one level (CHAIN=4 -> the hub by itself).
+const CHAIN = (process.env.CHAIN ?? '1,4,5').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
 if (![1, 2, 3, 4, 5].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 5`);
 const SOCKROOM = LVL === 2;
@@ -3571,6 +3578,7 @@ const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the 
 // It now ends EXACTLY at $4000 with nothing to spare, so anything added to it has to displace
 // something else -- see the run tables that already moved out below.
 const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d9c', 16);
+const HUD_AT       = parseInt(process.env.HUDAT ?? '3f72', 16);   // see hudX: the block below it grows with NOCC
                                 // THREE pages of per-variant and per-orb tables, and $4000
                                 //   made every per-variant table 22 entries instead of 18, and
                                 //   the stamp pass added orbAnchT, so two pages stopped fitting.
@@ -3749,7 +3757,13 @@ for (const m of PICS.maps) if (m.map.length !== 1000)
 // the socket ladder's home -- the two cannot both have it.
 // A fourth resident level and a second cut-scene picture are mutually exclusive: three shadows
 // leave IPIC no room below them. The chain wins, so a four-level build defaults to one picture.
-const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? (CHAIN.length >= 4 ? 1 : 99)));
+// How many of them fit is decided by the LEVEL SHADOW, not by the chain's LENGTH. IPIC loads at
+// $f100 and a shadow starts at $f500 whenever TWOLEV, which leaves 1024 bytes against a second
+// picture's 2000 -- so two have never fitted alongside a shadow of ANY size, one level's
+// included (the fit check reads LVLSHADOW, not the level count). The old rule keyed off
+// "4 or more levels" and so demanded two pictures for every shorter chain, which is why
+// CHAIN=4 on its own has always had to be told NPIC=1 by hand. Two pictures need TWOLEV=0.
+const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? (TWOLEV ? 1 : 99)));
 const FACEART = { colram: PICS.colram & 7 };
 const FACE_NCHR = PICS.chars.length;      // 8 bytes a glyph, so 2048 is the full 256
 const FACE_BLANK = 0;
@@ -4386,6 +4400,17 @@ const PED_COLS = (process.env.PEDCOLS ?? '2,5,6').split(',').map(Number);
 // seated, so it is NOT an errand and is deliberately not one of the three -- it stays black,
 // the way every other exit in the game reads.
 const LEVEL_EXITCOL = { 4: [2, 5, 0, 6] };
+// ---- and where each exit GOES ----
+// lvlNxtT was one byte a level, so a level's exits all led to the same place -- fine while
+// every level had exactly one. The hub has four, and the whole point of the room is that they
+// are four CHOICES. It is nExit bytes a level now, indexed by the exit fallChk matched.
+// null = follow the chain order (nextLevel), which is what every one-exit level wants and
+// keeps them all exactly as they were. $ff = this hole is scenery: standing on it does
+// nothing, which is the honest state for an exit whose destination has not been built.
+// The hub: RED goes to the idol level, per the user. The other three are marked and not yet
+// wired -- green and blue are errands with nowhere to run to, and black is the way onward,
+// which needs the level after the hub to exist.
+const LEVEL_EXITDST = { 4: [5, 0xff, 0xff, 0xff] };
 const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').split(',')
   .filter(v => v !== '').map(Number);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
@@ -4535,7 +4560,21 @@ const NSOCK = Math.max(1, lvlMax(l => l.nHoleLike - l.nExit, HOLELIKE.length - H
 // assertions below are the backstop -- they check MEANING, not just that a patch ran, which is
 // what would have caught the sockWallT bug the moment level 3 got a socket.
 const CHAIN_GLOBAL = {
-  lvlNxtT: L => [TWOLEV && !process.env.NOFALL ? nextLevel(L.level) : 0xff],
+  lvlNxtT: L => {
+    const n = Math.max(1, NEXIT), d = LEVEL_EXITDST[L.level];
+    return [...Array(n)].map((_, i) => {
+      if (!TWOLEV || process.env.NOFALL) return 0xff;
+      const v = d?.[i];
+      // Past this level's own exit count the entry is padding and never read; $ff anyway.
+      if (i >= (L.nExit ?? 1)) return 0xff;
+      if (v === undefined || v === null) return nextLevel(L.level);
+      // A destination that is not resident is $ff -- but ONLY when this is a ONE-LEVEL
+      // playtest build (CHAIN=4 on its own). In a real chain a name that is not in it is a
+      // typo, and the assertion below is what catches it; silently turning that into scenery
+      // would hide exactly the thing worth knowing.
+      return CHAIN.length === 1 && !CHAIN.includes(v) ? 0xff : v;
+    });
+  },
   // $ff for the padding, NOT the 0 a generic pad would leave: 0 is a perfectly valid wall id.
   sockWallT: L => {
     const sw = LEVEL_WALLS[L.level]?.sockWall ?? [];
@@ -6313,7 +6352,7 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 // here must be swapped, or the new level renders with the old level's geometry.
 const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from the manifest
 
-const pad = (a, n) => [...a, ...Array(Math.max(0, n - a.length)).fill(0)];
+const pad = (a, n, fill = 0) => [...a, ...Array(Math.max(0, n - a.length)).fill(fill)];
 const LVL_TABLES = [
   ['mapT', pad(map, 256).map((v, i) => i < MAPN ? v : 1)],   // a full page of WALL past the map: see the emitted mapT
   // blkT and the eight run tables USED to travel here -- 1,380 of the 1,789 bytes a level cost.
@@ -6384,7 +6423,18 @@ const LVL_TABLES = [
   // or NOFALL build emits. It travels like everything else, so the level that arrives brings its
   // own idea of where it leads. A level's own build cannot know the chain it will sit in, so the
   // main build overwrites this in every dump (see nextLevel below).
-  ['lvlNxtT', [TWOLEV && !process.env.NOFALL ? nextLevel(LVL) : 0xff]],   // $ff standalone (or NOFALL=1): the hole is scenery
+  // One byte per EXIT, padded to NEXIT -- see LEVEL_EXITDST. $ff standalone (or NOFALL=1),
+  // and $ff for an exit whose destination has not been built: the hole is then scenery.
+  ['lvlNxtT', pad([...Array(Math.max(1, HOLES_AT.length))].map((_, i) => {
+    if (!TWOLEV || process.env.NOFALL) return 0xff;
+    const v = LEVEL_EXITDST[LVL]?.[i];
+    if (v === undefined || v === null) return nextLevel(LVL);
+      // A destination that is not resident is $ff -- but ONLY when this is a ONE-LEVEL
+      // playtest build (CHAIN=4 on its own). In a real chain a name that is not in it is a
+      // typo, and the assertion below is what catches it; silently turning that into scenery
+      // would hide exactly the thing worth knowing.
+    return CHAIN.length === 1 && !CHAIN.includes(v) ? 0xff : v;
+  }), Math.max(1, NEXIT), 0xff)],
   // Six contiguous bytes, one entry: nOrbT nHoleT nExitT nOrbM1T nSockT nAllM1T.
   // SEVEN contiguous bytes now: nAllT joins them because the down-counting loops need a COUNT
   // to test against, and an INDEX cannot express "none" -- see the guards on each loop.
@@ -6402,9 +6452,10 @@ const LVL_TABLES = [
 ];
 // Every resident level, live one included: what each entry MEANS, checked against the chain.
 for (const L of [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...(LVLALL ?? [])]) {
-  const nxt = L.tables.lvlNxtT?.[0];
-  if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt)) throw new Error(
-    `level ${L.level}'s lvlNxtT names level ${nxt}, which is not in the chain ${CHAIN.join(',')}`);
+  // EVERY exit, not just the first: the hub's four each name their own destination.
+  for (const [i, nxt] of (L.tables.lvlNxtT ?? []).entries())
+    if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt)) throw new Error(
+      `level ${L.level}'s exit ${i} names level ${nxt}, which is not in the chain ${CHAIN.join(',')}`);
   for (const [i, w] of (L.tables.sockWallT ?? []).entries())
     if (w !== 0xff && WALLS_ALL[w]?.lvl !== L.level) throw new Error(
       `level ${L.level}'s socket ${i} names wall ${w}, which belongs to level ` +
@@ -7824,7 +7875,8 @@ ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: te
                                 ;   run ended only when the poller happened to catch it -- asked
                                 ;   for 7 falls and read at 212, which looks exactly like a test
                                 ;   that hangs. Stopping leaves the state still for the read.
-        lda lvlNxtT             ; RECORD THE SWAPPED lvlNxtT, NOT lvlMeT. lvlMeT is set FROM
+        ldy hlv                 ; the exit taken, so the log names where THAT one goes
+        lda lvlNxtT,y           ; RECORD THE SWAPPED lvlNxtT, NOT lvlMeT. lvlMeT is set FROM
         sta fnLog,x             ;   lvlNxtT, so logging it recorded the INTENT and a broken swap
         inc fnCnt               ;   still produced a perfect sequence -- which is exactly what it
         lda hlv                 ;   did, and the bug reached the user. lvlNxtT travels WITH the
@@ -13138,9 +13190,12 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         ; and 1, so on the hub's four exits two of them could not be fallen through at all.
         ldx nOrbT               ; entity index of exit 0
         ldy #$00
-fcLp:   lda px+1
-        cmp orbXCT,x
-        bne fcNx
+fcLp:   lda lvlNxtT,y           ; an exit with nowhere to go is NOT an exit: walk straight over
+        cmp #$ff                ;   it. Without this the drop ran anyway and lvlEnd put you back
+        beq fcNx                ;   at the same level's start -- a hole that falls you on the
+        lda px+1                ;   spot, which is worse than one that does nothing. Three of the
+        cmp orbXCT,x            ;   hub's four are marked and unwired, so this is now reachable
+        bne fcNx                ;   in a chain build for the first time.
         lda py+1
         cmp orbYCT,x
         beq fcHit
@@ -13170,7 +13225,9 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
         ; blkT from the NEW mapT and puts each entity back at the new level's build-time cell.
         ; Both are done here rather than on landing so the destination render -- which bgPh starts
         ; a slice per frame from the next frame on -- sees the new geometry from its first slice.
-        lda lvlNxtT             ; which LEVEL does THIS level's hole go to? $ff means nowhere --
+        ldx hlv                 ; WHICH exit did fallChk match? Its destination is lvlNxtT's
+        lda lvlNxtT,x           ;   entry for that exit -- one byte per exit since the hub got
+                                ;   four of them. $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
 ${LVLALL.length > 1 ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
@@ -15778,7 +15835,12 @@ opbBaseT: !byte 0,12,24,36,48,60,72,84
         ; ---- hudX: the per-frame raster count, the LEVEL line, and the 'L' key ----
         ; Out here in the slack above ORB_SMALL because the main block has about fifteen bytes
         ; and this is a hundred and thirty. jsr-entered from mloop; nothing falls into it.
-        * = $3f5f
+        ; The address is a knob because the block BELOW it grows with NOCC -- five resident
+        ; levels with pedestals put twelve more bytes of per-entity table under it. hudX is 130
+        ; bytes and $4000 is absCosT, so there is room to slide it to about $3f80 and no
+        ; further; past that it wants a different home. Both ends are guarded by the
+        ; assembler's own "moves backward".
+        * = ${hx16(HUD_AT)}
 ${NOHUD ? '' : `        ; ---- how many raster interrupts the frame just drawn took ----
         ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
         ; front of you, not an average. Six of these is about 10 fps.
@@ -17937,7 +17999,9 @@ angBlkT: !byte ${angBlk.join(',')}
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
-lvlNxtT:!byte ${hx(LVLT('lvlNxtT')[0])}                 ; LEVEL this level's hole leads to; $ff = nowhere
+lvlNxtT:!byte ${LVLT('lvlNxtT').map(hx).join(',')}   ; the LEVEL each EXIT leads to, one byte
+                                ;   each; $ff = nowhere, and fallChk walks over such a hole
+                                ;   rather than dropping you back where you stand
 nOrbT:  !byte ${hx(ORBS.length)}                 ; orbs
 nHoleT: !byte ${hx(HOLELIKE.length)}                 ; hole-like entities: exits then sockets
 nExitT: !byte ${hx(HOLES_AT.length)}                 ; ...of which this many are exits
@@ -20289,17 +20353,29 @@ try {
   // label is the ceiling for the one before it.
   {
     const byAddr = Object.entries(r.labels).sort((a, b) => a[1] - b[1]);
+    const MANIFEST_NAMES = new Set(LVL_TABLES.map(([k]) => k));
     for (const [n, a] of LVL_TABLES) {
       const i = byAddr.findIndex(([k]) => k === n);
       if (i < 0 || i + 1 >= byAddr.length) continue;
       const addr = byAddr[i][1], room = byAddr[i + 1][1] - addr;
       // A span MAY cover following labels when it is a deliberate run of named bytes -- nOrbT
-      // is six of them. That is one label per byte; anything else means the next table starts
+      // is eight of them. That is one label per byte; anything else means the next table starts
       // inside this one.
-      const inside = byAddr.filter(([, v]) => v > addr && v < addr + a.length).length;
-      if (room > 0 && room < a.length && inside + 1 !== a.length) throw new Error(
+      //
+      // ...but "one label per byte" is a COINCIDENCE waiting to happen, and it happened
+      // (2026-09-25): lvlNxtT grew to one byte per exit in the manifest while its emission
+      // still wrote `[0]`, a single byte, and the three labels of the nOrbT run that follow it
+      // made the count come out at exactly four. The guard stayed silent and the swap wrote
+      // four bytes over nOrbT/nHoleT/nExitT -- lvlMeT 0, the player at cell 35205. So a covered
+      // label that is ITSELF a manifest table is never a named-byte run: it is this table
+      // ending early and the next one starting inside it, which is the whole failure being
+      // guarded against.
+      const insideL = byAddr.filter(([, v]) => v > addr && v < addr + a.length);
+      const clash = insideL.find(([k]) => MANIFEST_NAMES.has(k));
+      if (room > 0 && room < a.length && (clash || insideL.length + 1 !== a.length)) throw new Error(
         `${n} is emitted with ${room} bytes before the next label, but the level swap moves ` +
-        `${a.length}. Emit it from the manifest (LVLT) so the two cannot disagree.`);
+        `${a.length}` + (clash ? ` -- and ${clash[0]}, itself a swapped table, starts inside it` : '') +
+        `. Emit it from the manifest (LVLT) so the two cannot disagree.`);
     }
   }
   // Layout guard. The old version only checked the charset, which is why buffer B at

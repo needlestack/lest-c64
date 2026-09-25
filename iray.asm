@@ -5672,9 +5672,12 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         ; and 1, so on the hub's four exits two of them could not be fallen through at all.
         ldx nOrbT               ; entity index of exit 0
         ldy #$00
-fcLp:   lda px+1
-        cmp orbXCT,x
-        bne fcNx
+fcLp:   lda lvlNxtT,y           ; an exit with nowhere to go is NOT an exit: walk straight over
+        cmp #$ff                ;   it. Without this the drop ran anyway and lvlEnd put you back
+        beq fcNx                ;   at the same level's start -- a hole that falls you on the
+        lda px+1                ;   spot, which is worse than one that does nothing. Three of the
+        cmp orbXCT,x            ;   hub's four are marked and unwired, so this is now reachable
+        bne fcNx                ;   in a chain build for the first time.
         lda py+1
         cmp orbYCT,x
         beq fcHit
@@ -5704,13 +5707,15 @@ fcHit:  sty hlv                 ; the one we are dropping through
         ; blkT from the NEW mapT and puts each entity back at the new level's build-time cell.
         ; Both are done here rather than on landing so the destination render -- which bgPh starts
         ; a slice per frame from the next frame on -- sees the new geometry from its first slice.
-        lda lvlNxtT             ; which LEVEL does THIS level's hole go to? $ff means nowhere --
+        ldx hlv                 ; WHICH exit did fallChk match? Its destination is lvlNxtT's
+        lda lvlNxtT,x           ;   entry for that exit -- one byte per exit since the hub got
+                                ;   four of them. $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
         pha                     ; wallsBack does not preserve A, and the stack is cheaper here
         jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes
         pla
-        ldx #$02   ; WHICH SLOT is it in now? Not a build-time constant: the
+        ldx #$01   ; WHICH SLOT is it in now? Not a build-time constant: the
 lvFind: cmp lvlAtT,x            ;   swap is an exchange, so the level being left takes the slot
         beq lvGot               ;   the level being entered came out of, and the layout permutes
         dex                     ;   every fall. nextLevel only ever names a level in the chain,
@@ -6317,7 +6322,7 @@ oiEntD: lda #$00
         sta bfsPhase            ; NO FILL IN FLIGHT. Uninitialised this could read as phase 2,
                                 ;   which drops bfsTick straight into the expand loop with a
                                 ;   garbage bfsTail and scribbles past bfsQ.
-        ldx #$03   ; the MAX: clearing a seat this level does not have is free
+        ldx #$06   ; the MAX: clearing a seat this level does not have is free
 hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         dex
         bpl hlSCl
@@ -6356,7 +6361,7 @@ orbOcc1:
         lda orbYCT,x
         sta ooCY
         lda #$00
-        ldx #$08
+        ldx #$07
 ooCl:   sta $ffff,x
         dex
         bpl ooCl
@@ -6379,7 +6384,7 @@ ooLd:   lda $ffff,x
         ora runBitT,y
 ooSt:   sta $ffff,x
 ooNx:   iny
-        cpy #$41        ; NRUN, not this level's own count: the loops are shared
+        cpy #$39        ; NRUN, not this level's own count: the loops are shared
         bcc ooLp
         rts
 
@@ -7944,7 +7949,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = $3d01
+        * = $3c58
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
         ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
         ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
@@ -7954,32 +7959,32 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         ; there is no right half to increment onto.
         ; A build with NO pedestals anywhere still emits these as one zero byte: hlSrcL names
         ; the labels unconditionally, and an empty !byte assembles as "bad number: $".
-pedPtrT: !byte 0
-pedXOffT: !byte 0
-pedYBaseT: !byte 0
-pedFlagT: !byte 0
-pedHT: !byte 0   ; DESCENDING, scanned by hlRungP
+pedPtrT: !byte 95,96,97,98,99,100,101,102,103,104,105,106,107,108,109
+pedXOffT: !byte 12,12,12,12,12,12,6,6,6,6,6,6,6,6,6
+pedYBaseT: !byte 126,128,131,133,136,138,139,141,143,144,145,146,147,147,149
+pedFlagT: !byte 13,13,13,13,5,5,1,1,1,1,1,1,1,1,1
+pedHT: !byte 86,79,72,65,57,50,43,36,29,25,22,18,14,11,7   ; DESCENDING, scanned by hlRungP
 ; Here rather than with the other two rung finders at $48c3, which has five bytes left and
 ; runs into fallSnapD at $4900 the moment it does not. Its only table is the one above it.
-; The pedestal scans like the socket: 0 rungs does not earn a 256-byte page, and the
+; The pedestal scans like the socket: 15 rungs does not earn a 256-byte page, and the
 ; hole already spent the one that was going.
 hlRungP:txa
         ldy #$00
 hrpL:   cmp pedHT,y
         bcs hrpHit
         iny
-        cpy #$01
+        cpy #$0f
         bcc hrpL
         lda #$ff
         rts
 hrpHit: tya
         rts
-holeSeeT: !byte 0,0,0,0,0,0,0,0,0,0,48,0,0,8,0,0,4,0,0,2,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+holeSeeT: !byte 0,0,0,0,0,0,0,0,0,0,48,0,0,8,0,0,4,0,0,2,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
         ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
         ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
         ; over; one run of NHOLE-sized things in one place is what makes that cost legible.
-hlSeat: !fill 4, 0
+hlSeat: !fill 7, 0
 
         * = $3d9c
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
@@ -8042,13 +8047,13 @@ cellFillT: !byte 0,15,15,8,7,8,15,0,0,1,12,14,15,15,15,0,3,15,15,15,15,15,14,0,1
 ; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
 ; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
 ; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
-orbOccLoT: !byte 0,9,18,27,36,45,54,63,72
-orbOccHiT: !byte 112,112,112,112,112,112,112,112,112
+orbOccLoT: !byte 0,8,16,24,32,40,48,56,64,72,80
+orbOccHiT: !byte 112,112,112,112,112,112,112,112,112,112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 6,20,7,19,15,0,0,0,0      ; from the MANIFEST, so its length cannot
-orbYCT: !byte 5,5,5,5,5,0,0,0,0      ;   disagree with what the swap moves
-orbColT2: !byte 12,12,12,12,0   ; from the MANIFEST and SWAPPED: a level with
+orbXCT: !byte 6,20,7,19,15,0,0,0,0,0,0      ; from the MANIFEST, so its length cannot
+orbYCT: !byte 5,5,5,5,5,0,0,0,0,0,0      ;   disagree with what the swap moves
+orbColT2: !byte 12,12,12,12   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -8060,7 +8065,12 @@ opbBaseT: !byte 0,12,24,36,48,60,72,84
         ; ---- hudX: the per-frame raster count, the LEVEL line, and the 'L' key ----
         ; Out here in the slack above ORB_SMALL because the main block has about fifteen bytes
         ; and this is a hundred and thirty. jsr-entered from mloop; nothing falls into it.
-        * = $3f5f
+        ; The address is a knob because the block BELOW it grows with NOCC -- five resident
+        ; levels with pedestals put twelve more bytes of per-entity table under it. hudX is 130
+        ; bytes and $4000 is absCosT, so there is room to slide it to about $3f80 and no
+        ; further; past that it wants a different home. Both ends are guarded by the
+        ; assembler's own "moves backward".
+        * = $3f72
         ; ---- how many raster interrupts the frame just drawn took ----
         ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
         ; front of you, not an average. Six of these is about 10 fps.
@@ -8874,7 +8884,7 @@ pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
-hlFillT: !byte 0,0,0,0
+hlFillT: !byte 0,0,0,0,0,0,0
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
 ; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
@@ -8948,17 +8958,17 @@ mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3,4,4,4,4,4
 ; image segment through holeSeeT at $3240
 orbPtrT: !byte 160,161,162,163,164,165,166,167,168,169,170,160,162,164,166,168,170,171,172,173,174,175,176,178,180,182,184,186,188,176,178,180,182,184,186,188,190,191,192,193,194,195
 orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,177,179,181,183,185,187,189,177,179,181,183,185,187,189,0,0,0,0,0,0
-orbTallT: !byte 0,0,1,1,0
-orbArtT: !byte $00,$00,$00,$00,$00   ; bitmap offset per entity; 0 = the orb's art
-orbHidT: !byte 0,0,0,0,0
-orbHid0T: !byte 0,0,0,0,0   ; the build's hidden flags, for objInit
-orbX0T: !byte 6,20,7,19,0   ; where objInit puts them back on a restart
-orbY0T: !byte 5,5,5,5,0
+orbTallT: !byte 0,0,1,1
+orbArtT: !byte $00,$00,$00,$00   ; bitmap offset per entity; 0 = the orb's art
+orbHidT: !byte 0,0,0,0
+orbHid0T: !byte 0,0,0,0   ; the build's hidden flags, for objInit
+orbX0T: !byte 6,20,7,19   ; where objInit puts them back on a restart
+orbY0T: !byte 5,5,5,5
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
-orbSeenT: !byte 0,0,0,0,0,0,0,0,0
-angAccT: !byte 0,0,0,0,0   ; 60ths banked toward this angel's next step
+orbSeenT: !byte 0,0,0,0,0,0,0,0,0,0,0
+angAccT: !byte 0,0,0,0   ; 60ths banked toward this angel's next step
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6,1,1,1,1,1,1,1,6,6,6,6,6,6,6,6,6,6,6,6,6
 orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,129,129
@@ -9029,7 +9039,7 @@ fNT:    !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0,0,0,0,0,0,0,0
         * = $7000
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte 48,179,38,104,233,0,0,0,0,48,79,61,104,233,0,0,0,0,48,191,38,104,233,0,0,0,0,48,79,37,104,233,0,0,0,0,48,79,38,104,233,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+orbOccT: !byte 48,179,38,104,233,0,0,0,48,79,61,104,233,0,0,0,48,191,38,104,233,0,0,0,48,79,37,104,233,0,0,0,48,79,38,104,233,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
@@ -9934,7 +9944,7 @@ mrB:    txa
         lda mrBitT,y
         sta runBitT,x
         inx
-        cpx #$41
+        cpx #$39
         bcc mrB
         jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
                                 ;   ends at bfsQ with nothing to spare.
@@ -10270,8 +10280,8 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
-; wall goes, so the delta is never the one map byte you would guess: these 7 come to
-; 9, 17, 17, 57, 97, 33, 13 bytes. (It said "13 runs become 5 here" when there was one wall on one
+; wall goes, so the delta is never the one map byte you would guess: these 3 come to
+; 197, 33, 13 bytes. (It said "13 runs become 5 here" when there was one wall on one
 ; level to point at, and reported wall 0's count as if it were every wall's.)
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
@@ -10281,25 +10291,17 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
-wallDT0: !byte <mapT+88,>mapT+88,0,1,<holeSeeT+43,>holeSeeT+43,31,0,$ff
-wallDT1: !byte <mapT+216,>mapT+216,0,1,<holeSeeT+90,>holeSeeT+90,192,0,<holeSeeT+91,>holeSeeT+91,7,6,<holeSeeT+92,>holeSeeT+92,120,0,$ff
-wallDT2: !byte <mapT+235,>mapT+235,0,1,<holeSeeT+93,>holeSeeT+93,62,6,<holeSeeT+123,>holeSeeT+123,118,112,<holeSeeT+125,>holeSeeT+125,126,112,$ff
-wallDT3: !byte <mapT+76,>mapT+76,0,1,<mapT+89,>mapT+89,0,1,<holeSeeT+38,>holeSeeT+38,57,1,<holeSeeT+41,>holeSeeT+41,31,15,<holeSeeT+43,>holeSeeT+43,14,12,<holeSeeT+48,>holeSeeT+48,2,0,<holeSeeT+49,>holeSeeT+49,128,0,<holeSeeT+51,>holeSeeT+51,32,0,<holeSeeT+67,>holeSeeT+67,128,0,<holeSeeT+68,>holeSeeT+68,1,0,<holeSeeT+69,>holeSeeT+69,240,32,<holeSeeT+71,>holeSeeT+71,60,48,<holeSeeT+73,>holeSeeT+73,30,12,<holeSeeT+75,>holeSeeT+75,14,12,$ff
-wallDT4: !byte <mapT+151,>mapT+151,0,1,<mapT+152,>mapT+152,0,1,<mapT+164,>mapT+164,0,1,<mapT+178,>mapT+178,0,1,<holeSeeT+2,>holeSeeT+2,224,0,<holeSeeT+3,>holeSeeT+3,7,0,<holeSeeT+4,>holeSeeT+4,248,0,<holeSeeT+5,>holeSeeT+5,1,0,<holeSeeT+6,>holeSeeT+6,124,0,<holeSeeT+8,>holeSeeT+8,31,0,<holeSeeT+9,>holeSeeT+9,128,0,<holeSeeT+10,>holeSeeT+10,7,0,<holeSeeT+11,>holeSeeT+11,224,0,<holeSeeT+12,>holeSeeT+12,25,0,<holeSeeT+13,>holeSeeT+13,120,0,<holeSeeT+14,>holeSeeT+14,30,0,<holeSeeT+15,>holeSeeT+15,158,0,<holeSeeT+16,>holeSeeT+16,255,128,<holeSeeT+17,>holeSeeT+17,231,1,<holeSeeT+18,>holeSeeT+18,255,96,<holeSeeT+19,>holeSeeT+19,249,0,<holeSeeT+20,>holeSeeT+20,127,96,<holeSeeT+21,>holeSeeT+21,254,0,<holeSeeT+22,>holeSeeT+22,31,24,$ff
-wallDT5: !byte <mapT+57,>mapT+57,0,1,<holeSeeT+7,>holeSeeT+7,2,0,<holeSeeT+10,>holeSeeT+10,1,0,<holeSeeT+12,>holeSeeT+12,192,0,<holeSeeT+13,>holeSeeT+13,1,0,<holeSeeT+15,>holeSeeT+15,64,0,<holeSeeT+36,>holeSeeT+36,4,0,<holeSeeT+39,>holeSeeT+39,2,0,$ff
-wallDT6: !byte <mapT+227,>mapT+227,0,1,<holeSeeT+89,>holeSeeT+89,40,8,<holeSeeT+92,>holeSeeT+92,31,7,$ff
-wallDLoT: !byte <wallDT0,<wallDT1,<wallDT2,<wallDT3,<wallDT4,<wallDT5,<wallDT6
-wallDHiT: !byte >wallDT0,>wallDT1,>wallDT2,>wallDT3,>wallDT4,>wallDT5,>wallDT6
-wallCells0: !byte $58,$ff
-wallCells1: !byte $d8,$ff
-wallCells2: !byte $eb,$ff
-wallCells3: !byte $4c,$59,$ff
-wallCells4: !byte $97,$98,$a4,$b2,$ff
-wallCells5: !byte $39,$ff
-wallCells6: !byte $e3,$ff   ; each wall's cells, $ff-ended
-wallCLoT: !byte <wallCells0,<wallCells1,<wallCells2,<wallCells3,<wallCells4,<wallCells5,<wallCells6
-wallCHiT: !byte >wallCells0,>wallCells1,>wallCells2,>wallCells3,>wallCells4,>wallCells5,>wallCells6
-wallStT: !fill 7, 0   ; per wall, global across the chain: 0 = it is there
+wallDT0: !byte <mapT+58,>mapT+58,0,1,<mapT+74,>mapT+74,0,1,<mapT+90,>mapT+90,0,1,<holeSeeT+7,>holeSeeT+7,15,3,<holeSeeT+9,>holeSeeT+9,127,3,<holeSeeT+11,>holeSeeT+11,63,3,<holeSeeT+13,>holeSeeT+13,29,5,<holeSeeT+15,>holeSeeT+15,8,0,<holeSeeT+37,>holeSeeT+37,29,17,<holeSeeT+39,>holeSeeT+39,63,3,<holeSeeT+41,>holeSeeT+41,127,3,<holeSeeT+43,>holeSeeT+43,63,3,<holeSeeT+45,>holeSeeT+45,29,17,<holeSeeT+66,>holeSeeT+66,56,0,<holeSeeT+68,>holeSeeT+68,252,0,<holeSeeT+69,>holeSeeT+69,29,28,<holeSeeT+70,>holeSeeT+70,254,0,<holeSeeT+71,>holeSeeT+71,63,56,<holeSeeT+72,>holeSeeT+72,254,0,<holeSeeT+73,>holeSeeT+73,127,120,<holeSeeT+74,>holeSeeT+74,254,0,<holeSeeT+75,>holeSeeT+75,63,56,<holeSeeT+76,>holeSeeT+76,252,0,<holeSeeT+77,>holeSeeT+77,29,28,<holeSeeT+78,>holeSeeT+78,56,0,<holeSeeT+99,>holeSeeT+99,8,0,<holeSeeT+101,>holeSeeT+101,29,5,<holeSeeT+103,>holeSeeT+103,63,3,<holeSeeT+105,>holeSeeT+105,127,3,<holeSeeT+107,>holeSeeT+107,15,3,<holeSeeT+133,>holeSeeT+133,29,13,<holeSeeT+135,>holeSeeT+135,63,3,<holeSeeT+137,>holeSeeT+137,127,3,<holeSeeT+139,>holeSeeT+139,63,3,<holeSeeT+141,>holeSeeT+141,29,1,<holeSeeT+143,>holeSeeT+143,8,0,<holeSeeT+163,>holeSeeT+163,8,0,<holeSeeT+165,>holeSeeT+165,29,1,<holeSeeT+167,>holeSeeT+167,63,3,<holeSeeT+169,>holeSeeT+169,127,3,<holeSeeT+171,>holeSeeT+171,63,3,<holeSeeT+173,>holeSeeT+173,29,1,<holeSeeT+175,>holeSeeT+175,8,0,<holeSeeT+195,>holeSeeT+195,8,0,<holeSeeT+197,>holeSeeT+197,29,1,<holeSeeT+199,>holeSeeT+199,63,3,<holeSeeT+201,>holeSeeT+201,127,3,<holeSeeT+203,>holeSeeT+203,63,3,<holeSeeT+205,>holeSeeT+205,29,13,$ff
+wallDT1: !byte <mapT+57,>mapT+57,0,1,<holeSeeT+7,>holeSeeT+7,2,0,<holeSeeT+10,>holeSeeT+10,1,0,<holeSeeT+12,>holeSeeT+12,192,0,<holeSeeT+13,>holeSeeT+13,1,0,<holeSeeT+15,>holeSeeT+15,64,0,<holeSeeT+36,>holeSeeT+36,4,0,<holeSeeT+39,>holeSeeT+39,2,0,$ff
+wallDT2: !byte <mapT+227,>mapT+227,0,1,<holeSeeT+89,>holeSeeT+89,40,8,<holeSeeT+92,>holeSeeT+92,31,7,$ff
+wallDLoT: !byte <wallDT0,<wallDT1,<wallDT2
+wallDHiT: !byte >wallDT0,>wallDT1,>wallDT2
+wallCells0: !byte $3a,$4a,$5a,$ff
+wallCells1: !byte $39,$ff
+wallCells2: !byte $e3,$ff   ; each wall's cells, $ff-ended
+wallCLoT: !byte <wallCells0,<wallCells1,<wallCells2
+wallCHiT: !byte >wallCells0,>wallCells1,>wallCells2
+wallStT: !fill 3, 0   ; per wall, global across the chain: 0 = it is there
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
 wsDir:  !byte 0                 ; ...and which way: 1 = taking it out, 0 = putting it back
 hzWv:   !byte 0                 ; hzRunW's held "out" value while it reads the "back" one
@@ -10402,7 +10404,7 @@ dmClr:  sta doomT,x             ;   than at entry because the main block had no 
         inx
         bne dmClr
         sta wsN                 ; a collapse in progress is abandoned
-        ldx #$06   ; EVERY wall in the chain, not just the live level's:
+        ldx #$02   ; EVERY wall in the chain, not just the live level's:
 wbLp:   stx wsWall              ;   a wall's triples name LIVE table addresses, so applying one
                                 ;   belonging to another level would write that room's bytes into
                                 ;   this one. Safe because this routine runs before every lvlSwap,
@@ -10550,7 +10552,7 @@ sokDX:  !byte 0
 sokDY:  !byte 0
         ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
         ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
-angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0
         ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
         ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
         ; and the manifest carries each chunk's destination, so where they live is free choice.
@@ -10559,7 +10561,9 @@ angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
-lvlNxtT:!byte $02                 ; LEVEL this level's hole leads to; $ff = nowhere
+lvlNxtT:!byte $04,$ff,$ff,$ff   ; the LEVEL each EXIT leads to, one byte
+                                ;   each; $ff = nowhere, and fallChk walks over such a hole
+                                ;   rather than dropping you back where you stand
 nOrbT:  !byte $04                 ; orbs
 nHoleT: !byte $01                 ; hole-like entities: exits then sockets
 nExitT: !byte $01                 ; ...of which this many are exits
@@ -10589,7 +10593,7 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; LVLSHADOW = $f500 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 749 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 826 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -10603,17 +10607,17 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; Only emitted with TWO OR MORE slots. With one there is nothing to permute -- the transposition
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
-lvlAtT: !byte $02,$03,$05   ; slot -> the level now in it
-lvlBasLoT: !byte $00,$ed,$da
-lvlBasHiT: !byte $f5,$f7,$fa
+lvlAtT: !byte $04,$05   ; slot -> the level now in it
+lvlBasLoT: !byte $00,$3a
+lvlBasHiT: !byte $f5,$f8
 lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbArtT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbArtT,>orbColT2,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$a0,$01,$01,$01,$04,$03,$05,$05,$05,$05,$01,$08,$09,$51,$01,$01,$01,$01,$01,$01
+lvlLenT: !byte $00,$e0,$20,$04,$05,$01,$0b,$0b,$04,$04,$80,$01,$01,$01,$07,$03,$04,$04,$04,$04,$04,$08,$0b,$58,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
 ; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
-; 749 of them. The table index lives in lsIdx for the same reason.
+; 826 of them. The table index lives in lsIdx for the same reason.
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
@@ -10641,7 +10645,7 @@ lsByte:
 lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
 lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
 lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over 749 bytes is most of an extra frame.
+        txa                     ;   a byte, which over 826 bytes is most of an extra frame.
 lsD2:   sta $ffff,y
         iny
         cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
@@ -10679,8 +10683,8 @@ orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
-runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8
-runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1   ; every id, as mkRuns rebuilds it: split ids come from the hazard lists
+runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1   ; every id, as mkRuns rebuilds it: split ids come from the hazard lists
 
 ; ---- occRT / occLT / occRTW / occLTW ----
 ; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
