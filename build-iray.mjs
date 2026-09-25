@@ -4287,13 +4287,29 @@ const losFree = (ax, ay, bx, by) => {
 };
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
 const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
+const ORBSCALE = +(process.env.ORBSCALE ?? 49);   // the ball's DIAMETER in screen pixels at d=1
 // ---- the pedestal's world size, up here because the LOS cull needs its reach ----
-// A drum 0.6 cells across. Its TRUE aspect is 2.096*r/uh (F_COL*1.5 columns per unit of x
-// against 88*2 rows per cell of height, a logical column being 1.5 true units wide at PAR 0.75),
-// so r == uh is very close to the 1.99 of the reference photo.
-const PEDR  = +(process.env.PEDR  ?? 0.30);
-const PEDH  = +(process.env.PEDH  ?? 0.25);
+// DERIVED, not chosen. The user's brief: "they should look the same size as the idols which
+// will eventually be placed on them", and the idol rides the orb's ladder, so the drum is
+// exactly as wide as an orb at every distance. ORBSCALE is that diameter in SCREEN pixels at
+// d = 1 and a logical column is two of those, so 2*F_COL*r = ORBSCALE/2.
+//
+// Getting this wrong is what the user saw: at 0.30 the drum was three times an orb, its widest
+// rung landed 3.07 cells out, and from there in it could not grow -- ONE sprite is 24 apparent
+// columns and that is the end of it -- so walking up to a pedestal only slid it down the
+// screen. At an orb's size the widest rung is 1.02 cells, where the drum's near edge is already
+// at screen row 195 of 200: it reaches full size exactly as it runs off the bottom, which is
+// what was asked for, and is why the orb has never shown this.
+const PEDR  = +(process.env.PEDR ?? ORBSCALE / (4 * F_COL));
+// Height from the reference photo's own aspect: true aspect = F_COL*1.5*r / (88*uh), a logical
+// column being 1.5 true units wide at PAR 0.75 against 2*88 rows per cell of height.
+const PEDASP = PEDART.box[2] / PEDART.box[3];
+const PEDH  = +(process.env.PEDH ?? F_COL * 1.5 * PEDR / (88 * PEDASP));
 const PEDSTEP = +(process.env.PEDSTEP ?? 2);
+// Two columns, not four. At an orb's size the four-column rung runs out at 6.1 cells and the
+// hub has sightlines twice that; the user is content for them to read as small in the distance,
+// not to vanish out of it.
+const PEDWMIN = +(process.env.PEDWMIN ?? 2);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
 // one you land next to takes you back where you came from. Same maze both ways for now -- only
 // the hole cell and the landing spot differ, which is all the level transition actually needs.
@@ -4535,7 +4551,7 @@ for (let cell = 0; cell < MAPN; cell++) {
     // further than either, and taking the socket's half-range cut it off at 6.6 cells -- where
     // it is still eleven columns across. (The user, 2026-09-24: "they disappear when far away
     // but they are still large just before they disappear.") Same formula, its own radius.
-    const maxD = h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / 4 : HOLE_MAX_D / 2;
+    const maxD = h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2;
     if (Math.hypot(h.x + 0.5 - cx, h.y + 0.5 - cy) < maxD &&
         eye.some(([ex, ey]) => losFree(ex, ey, h.x + 0.5, h.y + 0.5)))
       holeSee[L * 32 + (cell >> 3)] |= 1 << (cell & 7);
@@ -4561,7 +4577,7 @@ const orbCol = ORBS.map(o => o.idol ? IDOL_BODY : ORBBODY[o.c]);
 // the largest variant needed h > 103 while orbOne rejects h >= HMAX, so orb6 could never be
 // chosen at all -- the ladder topped out one rung short. Scaled so the top rung lands where
 // the second-from-top used to, which shifts every band down with it.
-const ORBSCALE = +(process.env.ORBSCALE ?? 49);
+// (declared up beside F_COL, because the pedestal is sized off it -- see PEDR.)
 // The largest h any variant can still show at: $d001 = (150 - anchor) + h must stay under 251.
 // Selection is by apparent HEIGHT, not width. The ladder steps height evenly, and width -- with
 // only 12 levels against height's 21 -- cannot follow: five rungs repeat the width of the rung
@@ -5863,9 +5879,12 @@ if (NHOLE > 8) throw new Error(
 //     an orb lights the whole drum rather than a two-row lid you cannot see from across a room.
 //   TOP  = pair 3, $d026, the light grey the orbs already use for their highlight.
 // Light top over a darker body, which is the way round the reference photo has it.
-function makePedLadder(r, uh, wStep, slot0, wMax = 24) {
+function makePedLadder(r, uh, wStep, slot0, wMax = 24, wMin = 4) {
   const L = [];
-  for (let w = wMax; w >= 4; w -= (w > 12 ? wStep : Math.max(2, wStep >> 1)))
+  // Three step sizes, because a COLUMN is a different fraction of the shape at each end: 24->22
+  // is 8%, but 4->2 is half the drum gone in one rung. Single columns below eight, which is two
+  // extra slots and is what keeps the far end from stepping in visible jumps.
+  for (let w = wMax; w >= wMin; w -= (w > 12 ? wStep : w > 8 ? Math.max(2, wStep >> 1) : 1))
     L.push({ w, d: 2 * F_COL * r / w });
   L.sort((a, b) => a.d - b.d);
   const K = 1 - 2 * uh;                    // the top plane's row factor; > 0 while uh < 0.5
@@ -5975,7 +5994,7 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24) {
 }
 // Behind the exit ladder in the same region; sockets own no slots, so HOLE.slotEnd is the end
 // of everything emitted there so far.
-const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, HOLE.slotEnd)
+const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, HOLE.slotEnd, 24, PEDWMIN)
                     : { L: [], BM: [], slotT: [], hT: [], varT: [], xOffT: [], yBaseT: [],
                         flagT: [], slotEnd: HOLE.slotEnd };
 // Five tables of one byte a rung, emitted as a single run under holeSeeT.
