@@ -165,9 +165,14 @@ const LEVEL_SYM = { 4: [[1, 3]], 5: [[1, 3]] };
 // ---- per-level SPRITE inks, and the idol's own ----
 // A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
-// by all eight sprites; only the body is per-sprite. Level 4 takes the underside to black, so
+// by all eight sprites; only the body is per-sprite. Level 5 takes the underside to black, so
 // its cast reads black / grey 2 / grey 3.
-const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) },
+// THE HUB DOES NOT. It is back on the default grey 1 so the pedestals get the full THREE-GREY
+// palette -- grey1 shadow, grey2 body, grey3 top -- which black cannot give them: against the
+// dotted wall a pedestal stands in front of, a black shadow side read as a hole punched in the
+// stone rather than as stone. Free here because the hub has no orbs and no angel to re-tone,
+// and no sockets (whose rim is the only other thing on pair 01).
+const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x0b) },
                     5: { under: +(process.env.SPRU5 ?? 0x00) } };
 // ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
 // The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
@@ -3953,40 +3958,97 @@ const pedLum = (band, u, v) => {            // u, v in [0,1); band 'top' or 'sid
   const y = Math.max(0, Math.min(H - 1, Math.floor(v * H)));
   return parseInt(PEDART[band][y].substr(x * 2, 2), 16);
 };
-// ---- luminance -> one of the THREE inks a sprite has, ordered-dithered ----
-// A multicolor sprite gets bit pair 1 ($d025, black here), pair 2 (obC) and pair 3 ($d026),
-// apparent brightnesses roughly 0 / 118 / 187. Two dither bands, and that is the whole palette.
+// ---- the stone, BAKED ONCE into a fixed surface texture ----
+// WHY a texture and not a per-pixel dither. Ordered-dithering each rung as it is rasterised
+// indexes the threshold by BITMAP pixel, so when the rung changes the same point on the stone
+// lands on a different threshold and the whole pattern reshuffles -- the drum appears to
+// transform rather than scale. (The user, 2026-09-25: "as the scaling happens the dither moves
+// enough that it looks like some type of transformation instead of scaling. This does not
+// happen with the orb".) It does not happen with the orb because the orb's dither is drawn INTO
+// its art and every rung is a RESAMPLE of that one bitmap: the pattern is a property of the
+// object, and it scales with it.
 //
-// The photo supplies VARIATION, not absolute tone. Quantising its own luminance drove the left
-// third of the drum to solid black and the right third to solid light grey -- three hard
-// vertical bands, no stone at all, because the reference is lit hard from one side and a
-// three-level palette has no headroom for that. So each band is re-centred on a BASE ink -- the
-// side on obC, the top on $d026 -- and the photo's deviation from that band's own mean is what
-// dithers around it. The drum then reads as a light top over a mid body (which is the structure
-// the photo actually has) with the stone's mottle across both.
-// Base tones sit ABOVE obC, not on it. Centred on obC exactly, half the drum fell below it and
-// dithered toward $d025 -- and $d025 is BLACK, so the shadow side read as a hole punched in the
-// stone rather than as stone. The body now rides between obC and grey3 with black only in the
-// deepest speckle, and the top face is pinned solidly at grey3 so it reads as a lid at every
-// distance, including the rungs where it is a single row.
-const PED_GAIN = +(process.env.PEDGAIN ?? 0.7);
-const PED_LEV = [0, 118, 187];
-const PED_BASE = { top: +(process.env.PEDTOP ?? 200), side: +(process.env.PEDBODY ?? 145) };
-const PED_MEAN = Object.fromEntries(['top', 'side'].map(k => {
-  const v = PEDART[k].join('').match(/../g).map(x => parseInt(x, 16)).filter(x => x < 235);
-  return [k, v.reduce((a, b) => a + b, 0) / v.length];
-}));
-const BAYER4 = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-const pedInk = (band, L, bx, by, dither) => {
-  const v = Math.max(0, Math.min(255, PED_BASE[band] + (L - PED_MEAN[band]) * PED_GAIN));
-  const k = v > PED_LEV[1] ? 1 : 0;
-  const lo = PED_LEV[k], hi = PED_LEV[k + 1];
-  const f = (v - lo) / (hi - lo);
-  // Far rungs do NOT dither. Three rows of speckle that reshuffles every time the rung changes
-  // reads as sparkle, not stone, and motion granularity is a veto axis here -- see the
-  // smoothness memory. Under four rows the whole drum takes its mean ink and sits still.
-  const th = dither ? (BAYER4[by & 3][bx & 3] + 0.5) / 16 : 0.5;
-  return 1 + k + (f > th ? 1 : 0);
+// So the pedestal gets the same deal. The side is dithered once, here, on a grid in SURFACE
+// coordinates (across the drum by height down it), and every rung resamples that by the same
+// majority vote orbScale uses. A given patch of stone then keeps its ink at every distance.
+//
+// TEXW is the widest rung's bitmap width, so the widest rung is a 1:1 copy and nothing else can
+// ever be sharper than the texture is.
+const TEXW = 12, TEXH = +(process.env.PEDTEXH ?? 10);   // ~= the widest rung's side height in bitmap rows, so that rung is 1:1
+// The tone across the drum, in ink numbers: 1 = grey1 ($d025), 2 = grey2 (obC), 3 = grey3
+// ($d026). The user's brief: "primarily gray 2, with only the tiniest hint of gray 3 on the
+// right and a significant amount of gray 1 on the left, perhaps 30% of the base."
+const PED_L1 = +(process.env.PEDL1 ?? 0.42);   // the shadow band: solid grey1 to grey2 by here
+const PED_SOL = +(process.env.PEDSOL ?? 0.12); // ...solid grey1 out to here
+const PED_LTW = +(process.env.PEDLTW ?? 0.16); // the lit band at the right edge
+const PED_LT = +(process.env.PEDLT ?? 0.25);   // ...and how much grey3 it reaches
+const PED_MOT = +(process.env.PEDMOT ?? 0.35); // how hard the photo's mottle breaks the boundary
+// 8x8, not 4x4. On a 16-row texture a 4x4 threshold repeats four times down the drum and the
+// eye reads the repeat as banding; 8x8 gives the shadow boundary a longer period than the
+// object has, so it reads as ragged instead of as a pattern.
+const BAYER8 = (() => {
+  const m = [[0]];
+  for (let n = 1; n < 8; n *= 2) { const o = [];
+    for (let y = 0; y < n * 2; y++) { o.push([]);
+      for (let x = 0; x < n * 2; x++) {
+        const q = (y < n ? 0 : 2) + (x < n ? 0 : 1), v = m[y % n][x % n] * 4;
+        o[y].push(v + [0, 2, 3, 1][q]); } }
+    m.length = 0; m.push(...o); }
+  return m;
+})();
+const PEDTEX = (() => {
+  const mean = (() => { const v = PEDART.side.join('').match(/../g).map(x => parseInt(x, 16));
+    return v.reduce((a, b) => a + b, 0) / v.length; })();
+  const rows = [];
+  for (let j = 0; j < TEXH; j++) { const r = [];
+    for (let i = 0; i < TEXW; i++) {
+      const u = (i + 0.5) / TEXW, v = (j + 0.5) / TEXH;
+      // Target tone on a 1..3 scale: a shadow ramp over the left PED_L1 of the width, flat
+      // grey2 across the middle, and a touch of grey3 at the very right.
+      let t = 2;
+      if (u < PED_L1) t = 1 + Math.min(1, Math.max(0, (u - PED_SOL) / (PED_L1 - PED_SOL)));
+      else if (u > 1 - PED_LTW) t = 2 + PED_LT * (u - (1 - PED_LTW)) / PED_LTW;
+      // The photo's own mottle, as a perturbation rather than as the tone: it is what stops the
+      // boundary being a clean vertical line, which is the difference between stone and a ramp.
+      const L = parseInt(PEDART.side[Math.min(PEDART.sideH - 1, Math.floor(v * PEDART.sideH))]
+                         .substr(Math.floor(u * PEDART.sideW) * 2, 2), 16);
+      t += (L - mean) / 128 * PED_MOT;
+      // The mottle may DARKEN anywhere -- that is stone -- but it may only lighten past grey2
+      // inside the lit band. Without this the photo's bright right half scattered grey3 across
+      // the whole body and "the tiniest hint of grey 3 on the right" came out at 10%.
+      if (u <= 1 - PED_LTW) t = Math.min(t, 2);
+      t = Math.max(1, Math.min(3, t));
+      const k = Math.min(2, Math.floor(t));
+      r.push(k + ((t - k) > (BAYER8[j & 7][i & 7] + 0.5) / 64 ? 1 : 0));
+    }
+    rows.push(r); }
+  return rows;
+})();
+if (process.env.PEDTEXDUMP) {
+  const n = [0, 0, 0, 0];
+  console.error('pedestal side texture (1 = grey1, 2 = grey2, 3 = grey3):');
+  for (const r of PEDTEX) { console.error('   ' + r.join('')); for (const v of r) n[v]++; }
+  const tot = TEXW * TEXH;
+  console.error(`   grey1 ${(100 * n[1] / tot).toFixed(0)}%  grey2 ${(100 * n[2] / tot).toFixed(0)}%` +
+                `  grey3 ${(100 * n[3] / tot).toFixed(0)}%`);
+}
+// Majority vote over the footprint, exactly as orbScale resamples the orb: a target pixel that
+// covers several texels takes whichever ink covers most of it, so shrinking degrades to solid
+// tone instead of to whichever texel the point sample happened to land on.
+const pedTex = (u0, u1, v0, v1) => {
+  const n = [0, 0, 0, 0];
+  const ia = Math.floor(Math.min(u0, u1) * TEXW), ib = Math.max(ia + 1, Math.ceil(Math.max(u0, u1) * TEXW));
+  const ja = Math.floor(Math.min(v0, v1) * TEXH), jb = Math.max(ja + 1, Math.ceil(Math.max(v0, v1) * TEXH));
+  const at = (j, i) => PEDTEX[Math.max(0, Math.min(TEXH - 1, j))][Math.max(0, Math.min(TEXW - 1, i))];
+  for (let j = ja; j < jb; j++) for (let i = ia; i < ib; i++) n[at(j, i)]++;
+  if (n[1] > n[2] && n[1] > n[3]) return 1;
+  if (n[3] > n[1] && n[3] > n[2]) return 3;
+  if (n[2] > n[1] && n[2] > n[3]) return 2;
+  // A TIE takes the footprint's CENTRE, not the first ink that sorts. At the widest rung a
+  // pixel covers about 1.1 texels vertically, so it straddles two of them half the time -- and
+  // a checkerboard straddled by two cells is always a tie. Resolving those to a fixed ink
+  // flattened every dithered transition into a clean edge, which is the opposite of the point.
+  return at(Math.floor((v0 + v1) / 2 * TEXH), Math.floor((u0 + u1) / 2 * TEXW));
 };
 const GOAT = JSON.parse(readFileSync('./goat-art.json', 'utf8')).rows
   .map(r => [...r].map(Number));
@@ -5926,30 +5988,24 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24, wMin = 4) {
       const Z = (-b - Math.sqrt(disc)) / (2 * a);
       return Z > 0.05 ? Z : -1;
     };
-    // Dithering is for rungs with room for it; see pedInk.
-    const dith = g.vis >= 4;
     g.grid = [...Array(21)].map((_, by) => {
       const y = g.far + by * ch + ch / 2;
       return [...Array(g.px)].map((_, bx) => {
         const c = (bx - g.px / 2 + 0.5) * cw;
         // u runs across the drum the way the photo's own width does: both are a cylinder
         // projected, so the silhouette's horizontal extent IS +-r in both, foreshortening
-        // included, and no arc-length correction belongs here.
-        const u = 0.5 + c / Math.max(1e-6, g.w);
-        const tw = topAt(y);
-        if (Math.abs(c) <= tw) {
-          // Which way back along the top face? Solve the plane for this row again: bigger Z is
-          // farther, which is higher up the screen AND the back of the photo's top band.
-          const Zt = 88 * K / Math.max(1e-6, y - 100);
-          const half = Math.sqrt(Math.max(0, r * r - (c * Zt / F_COL) * (c * Zt / F_COL)));
-          const dn = half > 1e-6 ? (Zt - d) / half : 0;          // +1 back edge, -1 front rim
-          return pedInk('top', pedLum('top', u, (1 - dn) / 2), bx, by, dith);
-        }
+        // included, and no arc-length correction belongs here. u0/u1 are this PIXEL's footprint
+        // on the surface, which is what the texture is resampled over.
+        const u = 0.5 + c / Math.max(1e-6, g.w), du = cw / Math.max(1e-6, g.w);
+        if (Math.abs(c) <= topAt(y)) return 3;    // the top face is solid grey3, at every rung
         const Z = sideZ(c);
         if (Z > 0 && y >= rowAt(Z, uh) && y <= rowAt(Z, 0)) {
           const top = rowAt(Z, uh), bot = rowAt(Z, 0);
-          const t = bot > top ? (bot - y) / (bot - top) : 0;     // 1 at the rim, 0 at the floor
-          return pedInk('side', pedLum('side', u, 1 - t), bx, by, dith);
+          // v runs DOWN the side from the rim, and dv is the pixel's own height on it. Both are
+          // surface coordinates, so the texture stays put on the stone as the rung changes.
+          const t = bot > top ? (bot - y) / (bot - top) : 0;
+          const dv = bot > top ? ch / (bot - top) : 1;
+          return pedTex(u - du / 2, u + du / 2, 1 - t - dv / 2, 1 - t + dv / 2);
         }
         return 0;
       });
@@ -6038,7 +6094,7 @@ if (process.env.LADDERSHEET) {
   // Pepto's C64 greys, for a ladder whose inks are known. Without this the sheet paints pair 1
   // as mid grey and pair 3 as white, which for the pedestal -- black / grey2 / grey3 on a grey1
   // floor -- flattered it by about two shades and hid how much of the drum is actually black.
-  const C64 = { 0: [0, 0, 0], 11: [68, 68, 68], 12: [108, 108, 108], 15: [149, 149, 149] };
+  const C64 = { 0: [0, 0, 0], 6: [64, 49, 141], 11: [68, 68, 68], 12: [108, 108, 108], 15: [149, 149, 149] };
   const sheet = (name, rungs, pal, bg) => {
     const GAP = 6;
     const wOf = r => Math.max(...r.parts.map(p => p.ox + p.w)) * (r.xmag ? 2 : 1);
@@ -6080,13 +6136,14 @@ if (process.env.LADDERSHEET) {
       at: (x, y) => (r.grid[y] ?? [])[k * 12 + x] ?? 0 })) })));
   // the pedestal: one sprite a rung, so one part -- but it magnifies on BOTH axes, which is
   // the whole reason it fits in one.
-  // Its REAL inks on its real ground: pair 1 = $d025 black, pair 2 = obC (12 while empty, the
-  // orb's colour once seated), pair 3 = $d026 grey3, all on the hub's grey1 floor.
+  // Its REAL inks: pair 1 = $d025 grey1, pair 2 = obC (grey2 while empty, the orb's colour
+  // once seated), pair 3 = $d026 grey3. On blue, not on the floor grey, because three greys on a
+  // fourth grey is exactly the comparison the eye cannot make.
   if (HAS_PED) sheet('pedestal', PED.L.map(r => ({
     xmag: r.mag, ymag: r.vmag,
     parts: [{ w: 12, h: r.grid.length, ox: 0, oy: 0,
               at: (x, y) => (r.grid[y] ?? [])[x] ?? 0 }] })),
-    { 1: C64[0], 2: C64[12], 3: C64[15] }, C64[11]);
+    { 1: C64[11], 2: C64[12], 3: C64[15] }, C64[6]);
   // orb and angel share one ladder: a lower sprite always, an upper one when it is tall enough
   sheet('entity', LADDER.map((r, i) => {
     const lo = ORBSRC[i], up = ORBSRCU[i];
