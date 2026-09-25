@@ -168,6 +168,13 @@ const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
 // idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
 // just the idol -- which is the point: seeing it changes the light in the room.
 const IDOL_SPR = { under: 0x09, hi: 0x07 }, IDOL_BODY = 0x08;
+// ---- what the WORLD looks like while the idol is in your hands ----
+// The idol's own three inks, taken off the sprite and put on the room: brown ground, orange
+// walls, yellow seams. Not a raster split -- the WHOLE screen, so there is no mistaking whose
+// rules are running. Override with IDOLCEIL/IDOLWALL/IDOLSEAM to taste.
+const IDOL_LOOK = { ceil: +(process.env.IDOLCEIL ?? IDOL_SPR.under),
+                    wall: +(process.env.IDOLWALL ?? IDOL_BODY),
+                    seam: +(process.env.IDOLSEAM ?? IDOL_SPR.hi) };
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -6737,7 +6744,10 @@ arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce
-pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
+${HAS_IDOL ? `idolHd  = $81da                  ; 1 while the IDOL is the thing in your hands. The angel
+                                 ;   step reads it: carrying it, being looked at no longer stops
+                                 ;   them. That is the whole cost of the thing.
+` : ''}pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
 pCh0    = $81e1                  ; which charset each of the three regions uses. The DROP wants
 pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
 arcSkip = $81e4                  ; the landing places its own splits
@@ -6973,6 +6983,7 @@ cpChr:  txa
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
         jsr lvlBoot             ; the three inks and the wall mark of the STARTING level
+
 ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -7084,6 +7095,12 @@ ${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is st
                                 ;   jumping here, and their state is all live RAM
 ` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
+${HAS_IDOL ? `        jsr idolLk              ; AFTER carry is set, not with lvlBoot: this is what puts
+                                ;   idolHd in a known state, and it is RAM that powers up as
+                                ;   garbage -- a non-zero one there and the angels would never
+                                ;   freeze under your gaze at all until you first picked
+                                ;   something up. It also gives CARRY=n the right look for free.
+` : ''}
 ${DIETEST && DIE ? `        lda #${hx(ORBS.findIndex(o => o.tall) + 1)}
         sta marked              ; DIETEST: already cornered. This has to come after objInit, which
         lda #${hx(ORBS.findIndex(o => o.tall))}   ;   ends by clearing carry, marked and entDty --
@@ -12662,6 +12679,7 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
         jsr lvlLook             ; the arriving level's inks and wall mark
+${HAS_IDOL ? '        jsr idolLk              ; ...unless the idol is in hand, which wins\n' : ''}
                                 ; ^ the arriving level's LOOK lands here, not at the swap:
                                 ;   the swap happens the moment you step into the hole (the
                                 ;   destination render needs the new geometry from its first
@@ -13592,7 +13610,12 @@ asLp:   stx amIdx
         lda orbHidT,x
         bne asNext              ; not in the world
         lda orbSeenT,x
-        bne asNext              ; one visible pixel freezes it, and its clock with it
+        beq asFree              ; unobserved: it moves, as it always has
+${HAS_IDOL ? `        lda idolHd              ; seen -- but holding the IDOL a gaze no longer holds them,
+        beq asNext              ;   and they come for you in plain sight
+        bne asFree              ; always
+` : ''}        bne asNext              ; one visible pixel freezes it, and its clock with it
+asFree:
         ; ---- how long until this angel's next step? It depends how far away it is. ----
         ; Y holds the answer rather than A because the accumulator has to be loaded after this and
         ; there is no cmp with a Y-indexed operand -- hence the one-byte parking spot.
@@ -13817,6 +13840,17 @@ anSqOk:
         jsr orbOcc1
         lda ovVis
         beq anYes               ; nothing of it shows there at all
+${HAS_IDOL ? `        lda idolHd              ; ---- and the IDOL suspends the covering rule too ----
+        beq anCov               ; This is the DEEPER of the angel's two rules: the freeze stops
+                                ;   a watched angel's clock, but THIS is what stops it stepping
+                                ;   into the open at all -- watch one down a corridor and every
+                                ;   cell toward you is fully in view, so every candidate is
+                                ;   rejected and it never moves however loudly its clock runs.
+                                ;   Bypassing only the freeze changes nothing you can see, which
+                                ;   is exactly what the first build of this did.
+        bne anYes               ; always: carrying it, they walk at you in the open
+anCov:  lda ovVis
+` : ''}
 ${'        asl\n'.repeat(ANG_OBSC)}        cmp ovOcc
         beq anYes
         bcc anYes               ; at least half of it is covered: it may creep in
@@ -14147,6 +14181,12 @@ ${ADDX('orbXCT,x')}
         sta blkT,y
         inx
         stx carry               ; index + 1, so zero can mean empty
+${HAS_IDOL ? `        txa                     ; the room takes the idol's colours while you hold it
+        pha
+        jsr idolLk
+        pla
+        tax
+` : ''}
 ${SOUND ? `        lda #$03
         jsr sfxGo               ; the clink of it coming off the floor
 ` : ''}
@@ -14256,7 +14296,12 @@ okpY2:  sta py
         lda #$00
         sta orbHidT,x
         sta carry
-        lda #$01
+${HAS_IDOL ? `        txa                     ; ...and gives them back when you set it down
+        pha
+        jsr idolLk
+        pla
+        tax
+` : ''}        lda #$01
         sta entDty              ; leaves X alone, and X is still the entity index orbOcc1 wants
         jmp orbOcc1             ; X is still the entity index. Its build-time occluder mask is
                                 ;   about the cell it came from and is now wrong.
@@ -16047,6 +16092,35 @@ ceilLog:lda clP
         sta clP
 clDn:   rts
 ` : ''}
+${HAS_IDOL ? `; ---- idolLk: the world's look follows what is in your hands ----
+; Called wherever carry changes -- picked up, put down, and after a fall, because lvlLook puts
+; the arriving level's inks back and would undo this. Cold: those events only, never per frame.
+;
+; colW/colF rather than the IRQ operands directly: irqB1 is PUBLISHED from colF at raster 250
+; (see mnext), so a store straight into irqB1+1 is overwritten on the next frame anyway -- and
+; storing it early is exactly the bug that flashed the whole screen during a fall.
+idolLk: ldy carry
+        beq idlOff              ; empty hands
+        dey
+        lda orbArtT,y           ; 0 = an orb. Only the idol changes the rules.
+        beq idlOff
+        lda #$01
+        sta idolHd
+        lda #${hx(IDOL_LOOK.ceil)}          ; ground, both halves: no split, the WHOLE screen
+        sta colW
+        sta colF
+${CEILVARY ? `        sta irqB2+1             ; ...including whatever is seen through a hole
+` : ''}        lda #${hx(IDOL_LOOK.wall)}
+        sta $d022
+        lda #${hx(IDOL_LOOK.seam)}
+        sta $d023
+        jmp lvlHi               ; colW -> irqB0; mnext carries colF -> irqB1
+idlOff: lda #$00
+        sta idolHd
+        jsr lvlLook             ; every ink back from the live level's own tables
+        jmp lvlHi
+` : ''}
+
         * = $7e00
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
