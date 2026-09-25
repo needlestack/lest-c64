@@ -6737,7 +6737,11 @@ arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce
-${HAS_IDOL ? `idolHd  = $81da                  ; 1 while the IDOL is the thing in your hands. The angel
+${DIE ? `anKx    = $81db                  ; the reach test's dx+1 and dy+1, kept so the DIAGONAL case
+anKy    = $81dc                  ;   can be told from the orthogonal one
+markSaw = $81dd                  ; was the angel being WATCHED when it reached you? Then there is
+                                 ;   no "look away and back" left to wait for -- see dieChk.
+` : ''}${HAS_IDOL ? `idolHd  = $81da                  ; 1 while the IDOL is the thing in your hands. The angel
                                  ;   step reads it: carrying it, being looked at no longer stops
                                  ;   them. That is the whole cost of the thing.
 ` : ''}pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
@@ -13711,6 +13715,7 @@ ${DIE ? `        sec                     ; did that land it beside the player? t
         sbc px+1                ;   which is exactly why walking into one yourself is harmless.
         clc                     ;   and needs no "who moved last" bookkeeping at all.
         adc #$01
+        sta anKx                ; 1 = same column; 0 or 2 = one cell to a side
         cmp #$03
         bcs anNoMk
         sec
@@ -13718,12 +13723,45 @@ ${DIE ? `        sec                     ; did that land it beside the player? t
         sbc py+1
         clc
         adc #$01
+        sta anKy
         cmp #$03
         bcs anNoMk
+        ; ---- ON THE DIAGONAL, BOTH corner cells have to be clear ----
+        ; "if it's at an angle but there's nothing at all between you, death. But if you're
+        ; around a corner, it has to clear the corner." Orthogonally adjacent there is nothing
+        ; between you by definition, so this only runs for the corner case. blkT is non-zero for
+        ; a wall AND for an entity, so an orb parked in the gap blocks the reach too, which is
+        ; the same answer for the same reason.
+        lda anKx
+        cmp #$01
+        beq anReach             ; same column: orthogonal, nothing to clear
+        lda anKy
+        cmp #$01
+        beq anReach             ; same row
+        lda py+1                ; corner one: the angel's column, your row
+        jsr mulW                ; mulW leaves X alone -- anGo relies on that too
+        clc
+        adc orbXCT,x
+        tay
+        lda blkT,y
+        bne anNoMk
+        lda orbYCT,x            ; corner two: your column, the angel's row
+        jsr mulW
+        clc
+        adc px+1
+        tay
+        lda blkT,y
+        bne anNoMk
+anReach:
         ldx amIdx
-        lda #$01                ; it stops rendering ENTIRELY from here. Nothing after this has
-        sta orbHidT,x           ;   to reason about where the sprite is or whether it shows --
-        inx                     ;   the whole trigger is one angle comparison.
+        lda orbSeenT,x          ; were you LOOKING at it when it reached you?
+        sta markSaw
+        beq anHide              ; no: it hides and waits for the turn, as it always has
+        lda #$00                ; yes: it stays on screen and dieChk starts the scene at once
+        beq anMark              ; always
+anHide: lda #$01                ; it stops rendering ENTIRELY from here. Nothing after this has
+anMark: sta orbHidT,x           ;   to reason about where the sprite is or whether it shows.
+        inx
         stx marked
         lda pa                  ; the heading it caught you at, for the turn trigger
         sta markPa
@@ -19253,7 +19291,10 @@ dckLive:
         adc #$01
         cmp #$03
         bcs dcClr
-        sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
+${DIE ? `        lda markSaw             ; caught you while you were WATCHING it? Then the scene starts
+        bne dcGo                ;   on the spot: there is no "look away and back" left to wait
+                                ;   for, and it is still on screen to rotate onto.
+` : ''}        sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
         lda pa                  ;   them? The angel is hidden, so there is no sprite to see and
         sbc markPa              ;   nothing to project. Turn 30 degrees either way and you die.
         bpl dcPos
@@ -19431,7 +19472,7 @@ ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather
         ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
-${HAS_IDOL ? `        * = $bdb6
+${HAS_IDOL ? `        * = $bdbc
 
 ; ---- sprPal: the two SHARED sprite inks, once a frame ----
 ; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
