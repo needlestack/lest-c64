@@ -380,6 +380,13 @@ dieT0   = $858e                  ; frameCnt when they died: everything is measur
 dieTck  = $858f                  ; the last palette tick written, so a fill happens once
 dieEl   = $8590
 dkJoy   = $8591
+dieLat  = $8562                  ; dieSt, LATCHED at raster 250. sprPal runs in the IRQ and read
+                                 ;   dieSt direct, so the frame dieGo set it the shared sprite
+                                 ;   inks changed WITHIN that frame -- while obC goes out through
+                                 ;   osFlush at raster 250 and lands the frame after. One frame
+                                 ;   apart, every time. Same trick as idolOn/idolWk, and for the
+                                 ;   same reason: what the IRQ reads sixty times a second must
+                                 ;   not change under it halfway down the screen.
 dieInk  = $8561                  ; the orb's body colour, walked down to black with the room
 ovProbe = $8550                  ; the span walk is counting columns, not allocating a sprite
 ovVis   = $8551                  ; columns of the entity a span SHOWS
@@ -513,6 +520,13 @@ arcBlw  = $81d8                  ; what fills BELOW the rim this phase
 arcInv  = $81d9                  ; 0 on the drop, $ff on the landing: the colours swap
 pd11    = $81cd                  ; PENDING $d011 and split line, published at the buffer flip.
 pSplit  = $81ce
+anKx    = $81db                  ; the reach test's dx+1 and dy+1, kept so the DIAGONAL case
+anKy    = $81dc                  ;   can be told from the orthogonal one
+markSaw = $81dd                  ; was the angel being WATCHED when it reached you? Then there is
+                                 ;   no "look away and back" left to wait for -- see dieChk.
+idolHd  = $81da                  ; 1 while the IDOL is the thing in your hands. The angel
+                                 ;   step reads it: carrying it, being looked at no longer stops
+                                 ;   them. That is the whole cost of the thing.
 pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
 pCh0    = $81e1                  ; which charset each of the three regions uses. The DROP wants
 pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
@@ -749,6 +763,7 @@ cpChr:  txa
         ; Three inks, one register each, and each held in a variable so keys 1/2/3 can walk it
         ; round the palette. Bit pair 11 is unused -- see the charset note.
         jsr lvlBoot             ; the three inks and the wall mark of the STARTING level
+
         ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
@@ -852,6 +867,12 @@ ccf:    sta $d800,x
                                 ;   jumping here, and their state is all live RAM
         lda #$00
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
+        jsr idolLk              ; AFTER carry is set, not with lvlBoot: this is what puts
+                                ;   idolHd in a known state, and it is RAM that powers up as
+                                ;   garbage -- a non-zero one there and the angels would never
+                                ;   freeze under your gaze at all until you first picked
+                                ;   something up. It also gives CARRY=n the right look for free.
+
 
 
         lda #$e0
@@ -1822,6 +1843,11 @@ mvs:    lda $d012
         sta irqCm2+1
         sta irqAr2+1
         jsr sprArm              ; ...and whether the held object gets its own inks
+        lda colT                ; BOTH HALVES OF THE GROUND, PUBLISHED TOGETHER -- see colT
+        sta irqB0+1
+        lda dieSt               ; ...and the death's sprite palette with them, so the flash,
+        sta dieLat              ;   the shared inks and the per-sprite inks are ONE frame
+
         lda colF                ; THE GROUND TRAVELS WITH ITS OWN SPLIT LINE.
         sta irqB1+1             ;   lvlLook used to store this the moment the landing
                                 ;   began, while pSplit -- the line region 1 STARTS at --
@@ -6433,7 +6459,12 @@ asLp:   stx amIdx
         lda orbHidT,x
         bne asNext              ; not in the world
         lda orbSeenT,x
+        beq asFree              ; unobserved: it moves, as it always has
+        lda idolHd              ; seen -- but holding the IDOL a gaze no longer holds them,
+        beq asNext              ;   and they come for you in plain sight
+        bne asFree              ; always
         bne asNext              ; one visible pixel freezes it, and its clock with it
+asFree:
         ; ---- how long until this angel's next step? It depends how far away it is. ----
         ; Y holds the answer rather than A because the accumulator has to be loaded after this and
         ; there is no cmp with a Y-indexed operand -- hence the one-byte parking spot.
@@ -6538,6 +6569,7 @@ anGo:   inc blkVer              ; the obstacle map changed: the fill has to be r
         sbc px+1                ;   which is exactly why walking into one yourself is harmless.
         clc                     ;   and needs no "who moved last" bookkeeping at all.
         adc #$01
+        sta anKx                ; 1 = same column; 0 or 2 = one cell to a side
         cmp #$03
         bcs anNoMk
         sec
@@ -6545,15 +6577,56 @@ anGo:   inc blkVer              ; the obstacle map changed: the fill has to be r
         sbc py+1
         clc
         adc #$01
+        sta anKy
         cmp #$03
         bcs anNoMk
+        ; ---- ON THE DIAGONAL, BOTH corner cells have to be clear ----
+        ; "if it's at an angle but there's nothing at all between you, death. But if you're
+        ; around a corner, it has to clear the corner." Orthogonally adjacent there is nothing
+        ; between you by definition, so this only runs for the corner case. blkT is non-zero for
+        ; a wall AND for an entity, so an orb parked in the gap blocks the reach too, which is
+        ; the same answer for the same reason.
+        lda anKx
+        cmp #$01
+        beq anReach             ; same column: orthogonal, nothing to clear
+        lda anKy
+        cmp #$01
+        beq anReach             ; same row
+        lda py+1                ; corner one: the angel's column, your row
+        jsr mulW                ; mulW leaves X alone -- anGo relies on that too
+        clc
+        adc orbXCT,x
+        tay
+        lda blkT,y
+        bne anNoMk
+        lda orbYCT,x            ; corner two: your column, the angel's row
+        jsr mulW
+        clc
+        adc px+1
+        tay
+        lda blkT,y
+        bne anNoMk
+anReach:
         ldx amIdx
+        lda orbSeenT,x          ; were you LOOKING at it when it reached you?
+        beq anHide              ; no: it hides and waits for the turn, as it always has
+        lda #$1e              ; yes: it stays on screen, and the scene starts after this
+        sta markSaw             ;   many 60ths -- half a second of "it has you" in which nothing
+        lda #$00                ;   changes at all. markSaw is the countdown AND the flag.
+        beq anMark              ; always
+anHide: sta markSaw             ; A is 0 here, which is the "wait for the turn" case
         lda #$01                ; it stops rendering ENTIRELY from here. Nothing after this has
-        sta orbHidT,x           ;   to reason about where the sprite is or whether it shows --
-        inx                     ;   the whole trigger is one angle comparison.
+anMark: sta orbHidT,x           ;   to reason about where the sprite is or whether it shows.
+        inx
         stx marked
         lda pa                  ; the heading it caught you at, for the turn trigger
         sta markPa
+dckPnt: ldx #$07               ; A -> every sprite's own colour
+dckLp:  sta obC,x
+        dex
+        bpl dckLp
+        rts
+
 anNoMk: ldx amIdx
         jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
 anDone: rts
@@ -6660,6 +6733,17 @@ anSqOk:
         jsr orbOcc1
         lda ovVis
         beq anYes               ; nothing of it shows there at all
+        lda idolHd              ; ---- and the IDOL suspends the covering rule too ----
+        beq anCov               ; This is the DEEPER of the angel's two rules: the freeze stops
+                                ;   a watched angel's clock, but THIS is what stops it stepping
+                                ;   into the open at all -- watch one down a corridor and every
+                                ;   cell toward you is fully in view, so every candidate is
+                                ;   rejected and it never moves however loudly its clock runs.
+                                ;   Bypassing only the freeze changes nothing you can see, which
+                                ;   is exactly what the first build of this did.
+        bne anYes               ; always: carrying it, they walk at you in the open
+anCov:  lda ovVis
+
         cmp ovOcc
         beq anYes
         bcc anYes               ; at least half of it is covered: it may creep in
@@ -6845,6 +6929,13 @@ dfDn:   rts
 
 ; ---- dieSwap: hand the screen to the face, in ONE frame, on black ----
 dfEnd:
+        lda #$00                ; ---- BLACK FIRST, THEN SWAP ----
+        sta $d022               ; The ground is already black from the fade, but the walls and the
+        sta $d023               ;   SEAMS were still lit while the charset was overwritten
+                                ;   underneath them -- half a screen of world codes drawn through
+                                ;   a charset that is turning into the picture. That is the char
+                                ;   corruption, and it is confined to the bottom half because
+                                ;   that is the half the split draws from charset B.
         ldx #$00                ; charset B is plain RAM now: no port dance, no sei. (It was five
                                 ;   pages under the I/O hole, ~12,800 cycles with interrupts off.)
                                 ; unrolled per page and GENERATED from the glyph count -- this
@@ -7004,6 +7095,12 @@ okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may ex
         sta blkT,y
         inx
         stx carry               ; index + 1, so zero can mean empty
+        txa                     ; the room takes the idol's colours while you hold it
+        pha
+        jsr idolLk
+        pla
+        tax
+
         lda #$03
         jsr sfxGo               ; the clink of it coming off the floor
 
@@ -7113,6 +7210,11 @@ okpY2:  sta py
         lda #$00
         sta orbHidT,x
         sta carry
+        txa                     ; ...and gives them back when you set it down
+        pha
+        jsr idolLk
+        pla
+        tax
         lda #$01
         sta entDty              ; leaves X alone, and X is still the entity index orbOcc1 wants
         jmp orbOcc1             ; X is still the entity index. Its build-time occluder mask is
@@ -7789,18 +7891,29 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
+        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
+        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
+        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
+        ; block, and outgrew both, and then sat at $9180 where the gap above the $9100 jsr target
+        ; is exactly 128 bytes -- which is the ONLY reason NHOLE was capped at four.
+        ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
+        ; chain that needs more rows takes them out of the code headroom below and the headroom
+        ; report says so, instead of the build dying on an origin that moves backward.
+        * = $3d1c
+holeSeeT: !byte 0,0,0,0,0,0,0,0,0,0,48,0,0,8,0,0,4,0,0,2,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
         * = $3d9c
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
 ; two-sprite rung needs one pointer and an increment.
-holePtrT: !byte 64,66,69,72,75,78,81,84,86,88,90,92,94,96,97,98,99,100,101,102
+holePtrT: !byte 64,66,66,66,69,72,75,78,80,82,84,86,88,90,91,92,93,94,94,94
 holeXOffT: !byte 24,36,36,36,36,36,36,24,24,24,24,24,24,12,12,6,6,6,6,6
 holeYBaseT: !byte 121,124,127,130,133,135,137,139,141,143,143,145,147,147,148,149,149,150,150,150
 holeFlagT: !byte 6,7,7,7,15,15,15,14,14,6,6,6,6,5,5,1,1,1,1,1
         ; ---- the socket's ladder: same tables, half the radius ----
         ; No 256-byte h -> rung table for this one. The hole earned its page at 35 rungs; a
         ; socket has 10, so hlRungS scans and the page stays spent on something else.
-sockPtrT: !byte 94,94,94,96,97,98,99,100,101,102
+sockPtrT: !byte 88,88,88,90,91,92,93,94,94,94
 sockXOffT: !byte 24,24,24,12,12,6,6,6,6,6
 sockYBaseT: !byte 138,140,143,145,146,148,148,149,150,150
 sockFlagT: !byte 14,14,14,13,13,9,9,9,9,9
@@ -9149,6 +9262,77 @@ ddPut:  clc
         rts
 
 
+symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
+        !byte $55,$55,$55,$45,$55,$55,$55,$55
+symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
+        !byte $ff,$ff,$ff,$cf,$ff,$ff,$ff,$ff
+lvlSymT: !byte 0,0,0,8,8
+
+; ---- idolLk: is the IDOL the thing in your hands? ----
+; Called wherever carry changes. It sets one flag and touches nothing else -- the room keeps the
+; level's own colours, and the tell is on the SPRITES: see sprPal, where holding the idol tints
+; an angel the same brown/orange/yellow that seeing one in the world does.
+;
+; An earlier cut of this repainted the whole room. It read well but it was wrong twice over: the
+; level stopped being recognisable as itself, and the death scene inherited the tint, because
+; dieSwap runs against whatever inks were live and lvlLook never gets a chance to put them back.
+
+; ---- sprPal: the two SHARED sprite inks, once a frame ----
+; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
+; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
+; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
+; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
+sprPal: lda dieLat              ; ---- the death scene wants the inks to SIT STILL ----
+        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
+        lda idolOn              ;   before any of this existed, and the scene's fade was written
+        bne spTint              ;   against it. "The world no longer goes black correctly."
+        lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
+        beq spLvl               ;   angels have stopped caring whether you are looking
+spTint:
+        lda #$09      ; ---- above the split: the world's ----
+        ldy #$07
+        bne spWSt               ; always: brown is not zero
+spLvl:  lda sprU                ; whatever lvlLook left for this level
+        ldy sprH
+spWSt:  sta $d025
+        sty $d026
+        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
+        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
+                                ;   tinting things and walks down into the last few rows.
+        lda dieLat
+        bne spDn
+        ldx carry               ; ---- below the split: only if something special is in hand ----
+        beq spDn
+        dex                     ;   carry is the entity index PLUS ONE
+        lda orbArtT,x
+        beq spDn                ; an orb holds no special inks
+        lda #$09
+        ldy #$07
+        sta irqSpU+1
+        sty irqSpH+1
+spDn:   rts
+
+idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
+                                ;   reading the working flag direct would show 0 for any raster
+                                ;   frame whose IRQ landed inside the projection -- one bad frame
+                                ;   in roughly four, which is exactly the flicker this chases.
+idolLat:lda idolWk
+        sta idolOn
+        lda #$00
+        sta idolWk
+        rts
+
+idolLk: ldx #$00                ; assume not
+        ldy carry
+        beq idlPut              ; empty hands
+        dey
+        lda orbArtT,y           ; 0 = an orb. Only the idol changes the rules.
+        beq idlPut
+        inx
+idlPut: stx idolHd
+        rts
+
+
         * = $7e00
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
@@ -9211,7 +9395,7 @@ pcCei:  inc colW
         lda colW
         and #$0f
         sta colW
-        sta irqB0+1
+        sta colT                ; through the shadow, like everything else that paints the ground
         rts
 pcFlr:  inc colF
         lda colF
@@ -9219,6 +9403,16 @@ pcFlr:  inc colF
         sta colF
         sta irqB1+1
         rts
+colT:   !byte $01             ; the TOP region's pending ink. irqB0 is read at the top of
+                                ;   the frame and irqB1 at pSplit, so a store that reaches one of
+                                ;   them immediately can NEVER reach the other on the same frame:
+                                ;   the two halves were a frame apart through the whole death
+                                ;   fade, white over the top half while the bottom was still the
+                                ;   room and so on down the ramp. Both are published at raster
+                                ;   250 now, so both take effect at the same top of frame.
+                                ;   NOT colW: colW is the level's ceiling ink and lvlLook sets it
+                                ;   the moment a fall hands over, which is a frame before the top
+                                ;   of the screen is allowed to change. lvlHi is what moves it.
 colF:   !byte $01             ; the FLOOR's ink. colW is the ceiling's now.
 sprU:   !byte $0b             ; this level's shared sprite inks, shadowed
 sprH:   !byte $0f             ;   because the idol swap borrows the registers
@@ -9233,8 +9427,9 @@ lvlBoot:jsr lvlLook             ; all five inks, then fall through to lvlHi
 ; finally left the screen -- until then it must keep the colour of the level being left, which is
 ; the whole point of the split.
 lvlHi:  lda colW
-        sta irqB0+1             ; irqB1 needs nothing here: it tracks colF through mnext's
-        rts                     ;   publish, and lvlLook has already set colF.
+        sta colT                ; THE moment the top of the screen is allowed to become the
+        rts                     ;   arriving level. irqB1 needs nothing here: it tracks colF
+                                ;   through mnext's publish, and lvlLook has already set colF.
 
 ; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
 ; already swapped underneath but the drop is still showing the room being left above the rim.
@@ -9280,22 +9475,23 @@ symPut: ldx lvlMeT
 spLp:   lda symT,x
         sta $c008,y      ; SOLID is code 1, so its glyph is base + 8
         sta $c808,y
-        dex
+        lda symOT,x             ; ...and the FULL OCCLUDER, which is solid wall to the eye and
+        sta $c780,y   ;   was the one cell on a marked level with no
+        sta $cf80,y ;   mark on it -- a blank black block in a dotted
+        dex                     ;   wall. Same X, so it follows SOLID's plain/marked choice.
         dey
         bpl spLp
         rts
-symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
-        !byte $55,$55,$55,$45,$55,$55,$55,$55
-lvlSymT: !byte 0,0,0,8
+
 ; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
 ; pictures -- goes through here, which costs each site nothing: jsr is the same three bytes the
 ; store was. A is preserved, so a site that also writes $d022 still can.
-setGnd: sta $d021
-        sta irqB0+1
-        sta irqB1+1
-        rts
+setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster 250, so the two
+        sta colW                ;   halves change at the same top of frame instead of a frame
+        sta colF                ;   apart -- and there is no mid-frame $d021 store to paint a
+        rts                     ;   partial band down the middle of the one it lands in.
         * = $8600
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40
@@ -9434,14 +9630,6 @@ snKTick: lda dieKik
         sta $d401
 snKDn:  rts
 
-
-        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
-        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
-        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
-        ; block, and outgrew both; here it has the gap above the $9100 jsr target, which is
-        ; exactly 128 bytes and cannot be outgrown because holeSeeT is capped at 4 entities.
-        * = $9180
-holeSeeT: !byte 0,0,0,0,0,0,0,0,0,0,48,0,0,8,0,0,4,0,0,2,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
         ; The sound effects, out here because the $9d00 block that holds the level shadow
         ; ran out of room the moment a level was allowed to declare its own sockets: the
@@ -10327,7 +10515,7 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; Only emitted with TWO OR MORE slots. With one there is nothing to permute -- the transposition
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
-lvlAtT: !byte $02,$03,$04   ; slot -> the level now in it
+lvlAtT: !byte $02,$03,$05   ; slot -> the level now in it
 lvlBasLoT: !byte $00,$ec,$d8
 lvlBasHiT: !byte $f5,$f7,$fa
 lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbArtT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
@@ -11473,16 +11661,16 @@ lvlStart: ldx lvlMeT
         lda lvlStAFT,x
         sta paF
         rts
-lvlStXLoT: !byte $80,$6e,$80,$80
-lvlStXHiT: !byte $02,$04,$01,$01
-lvlStYLoT: !byte $80,$dc,$80,$80
-lvlStYHiT: !byte $02,$07,$01,$08
-lvlStAT:  !byte $19,$db,$20,$00
-lvlStAFT: !byte $c0,$00,$00,$00
+lvlStXLoT: !byte $80,$6e,$80,$80,$80
+lvlStXHiT: !byte $02,$04,$01,$03,$01
+lvlStYLoT: !byte $80,$dc,$80,$80,$80
+lvlStYHiT: !byte $02,$07,$01,$04,$08
+lvlStAT:  !byte $19,$db,$20,$00,$00
+lvlStAFT: !byte $c0,$00,$00,$00,$00
 
-lvlSprunderT: !byte $0b,$0b,$0b,$00
-lvlPalceilT: !byte $01,$01,$01,$0b
-lvlPalseamT: !byte $0b,$0b,$0b,$0e
+lvlSprunderT: !byte $0b,$0b,$0b,$00,$00
+lvlPalceilT: !byte $01,$01,$01,$0b,$0b
+lvlPalseamT: !byte $0b,$0b,$0b,$0e,$0e
         * = $aa00
 
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
@@ -11807,13 +11995,18 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
 ; The trigger is ONE angle comparison. Contact hides the angel outright, so there is no sprite to
 ; see and nothing to project -- turn DIE_TURN either way and the cut scene fires.
 dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
-        beq dckLive             ;   the sprites. obC is rewritten by orbMove every frame and
-        ldx #$07                ;   flushed to $d027+n after us, so this is the last word on it.
-dckSp:  lda dieInk
-        sta obC,x
-        dex
-        bpl dckSp
-        rts
+        beq dckIdl              ;   the sprites. obC is rewritten by orbMove every frame and
+        lda dieInk              ;   flushed to $d027+n after us, so this is the last word on it.
+        jmp dckPnt              ; the scene owns everything else: nothing live to check
+dckIdl: lda idolHd              ; ---- and the MID-TONE follows the idol as well ----
+        beq dckLive             ; $d025/$d026 are shared and sprPal already tints them, but the
+        lda #$08              ;   body is per-sprite ($d027+n, out of obC) and kept the
+        jsr dckPnt              ;   level's grey, which reads as disjoint against the brown and
+                                ;   yellow around it. Orbs and angels both, for the same reason.
+                                ; jsr, NOT a tail jump: carrying the idol this ran and RETURNED,
+                                ;   so the live check below never happened and an angel could
+                                ;   walk up to you all day without killing you.
+
 dckLive:
         sec                     ; the turn they are ACTUALLY making, as a signed 16-bit rate over
         lda paF                 ;   pa:paF. The whole-byte version dropped the fraction, and the
@@ -11848,6 +12041,16 @@ dckLive:
         adc #$01
         cmp #$03
         bcs dcClr
+        lda markSaw             ; ---- caught you while you were WATCHING it ----
+        beq dcTurn              ; There is no "look away and back" left to wait for, so the turn
+        sec                     ;   trigger below is not the rule. Instead: half a second in which
+        sbc dtv                 ;   NOTHING changes, then the scene, with the angel still on
+        bcs dcHold              ;   screen to rotate onto. Drained by dtv, so the half second is
+        lda #$00                ;   half a second whatever the frame rate is doing.
+dcHold: sta markSaw
+        bne dcNo                ; still owed: nothing happens yet
+        beq dcGo                ; just hit zero: go
+dcTurn:
         sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
         lda pa                  ;   them? The angel is hidden, so there is no sprite to see and
         sbc markPa              ;   nothing to project. Turn 30 degrees either way and you die.
@@ -11867,8 +12070,12 @@ dgD:    ; ---- which way round, and unhide it ----
         ; back. The cell delta is one of eight neighbours; angBearT turns that into a bearing, and
         ; the signed difference from the current heading gives both the direction to turn and a
         ; first estimate of how far. dieOff starts far from centre so the stop cannot fire early.
-        lda #$0f                ; white -> grey3 at once: the room starts leaving as you are grabbed
-        jsr setGnd
+        lda #$01                ; ---- ONE FRAME OF WHITE, ceiling and floor together ----
+        jsr setGnd              ; setGnd writes colW AND colF, so both halves flash on the SAME
+                                ;   frame -- they used to change on different ones. The ramp
+                                ;   below takes it down from here, so the white lasts exactly the
+                                ;   frame the angel reaches you, and the sprites lose the idol's
+                                ;   fire on the same frame (sprPal stands down once dieSt is set).
         lda #$ff                ; unsigned "never projected", far outside the lock window
         sta dieOff
         lda #$ff
@@ -11940,6 +12147,10 @@ dgA2:   dex
         bpl dgA
 dgAD:   lda #$0c  ; the orb, by contrast, fades out with everything else
         sta dieInk
+        jsr dckPnt              ; ...and EVERY sprite takes it right now. While dying the main
+                                ;   loop runs dieFade and never dieChk, so nothing repainted obC
+                                ;   at all: it kept whatever the last live frame left, which with
+                                ;   the idol in hand is orange. It held that for the whole fade.
         inc dieN                ; how many pictures this death earns; dshEnd resets it after the
         lda #$01                ;   last one, so the sequence starts over rather than running out
         sta dieSt
@@ -12026,48 +12237,6 @@ dkNo:   lda #$ff
         ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
-        * = $bdb6
-idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
-                                ;   reading the working flag direct would show 0 for any raster
-                                ;   frame whose IRQ landed inside the projection -- one bad frame
-                                ;   in roughly four, which is exactly the flicker this chases.
-idolLat:lda idolWk
-        sta idolOn
-        lda #$00
-        sta idolWk
-        rts
-
-; ---- sprPal: the two SHARED sprite inks, once a frame ----
-; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
-; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
-; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
-; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda dieSt               ; ---- the death scene wants the inks to SIT STILL ----
-        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
-        lda idolOn              ;   before any of this existed, and the scene's fade was written
-        beq spLvl               ;   against it. "The world no longer goes black correctly."
-        lda #$09      ; ---- above the split: the world's ----
-        ldy #$07
-        bne spWSt               ; always: brown is not zero
-spLvl:  lda sprU                ; whatever lvlLook left for this level
-        ldy sprH
-spWSt:  sta $d025
-        sty $d026
-        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
-        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
-                                ;   tinting things and walks down into the last few rows.
-        lda dieSt
-        bne spDn
-        ldx carry               ; ---- below the split: only if something special is in hand ----
-        beq spDn
-        dex                     ;   carry is the entity index PLUS ONE
-        lda orbArtT,x
-        beq spDn                ; an orb holds no special inks
-        lda #$09
-        ldy #$07
-        sta irqSpU+1
-        sty irqSpH+1
-spDn:   rts
         * = $be00
 angMidT: !byte 3,3,2,2,1,1,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,255,255,1,1,0,0,0,255,255,1,1,1,0,0,255,255,1,1,1,0,0,255,255,2,1,1,0,0,255,255,255,1,1,0,0,255,255,255,1,1,0,0,0,255,255,1,1,0,0,0,255,255,254,254,253,253,253,252,252,251,251,251,250,250,249,249,248,248,248,247,247,246,246,246,245,245,244,244,243,243,243,242,242,241,241,240,240,240,239,239,238,238,238,237,237,236,236,235,235,235,234,234,233,233,232,232,232,231,231,230,230,230,229,229,228,228,227,227,227,226,226,225,225,225,224,224,223,223,222,222,222,221,221,220,220,219,219,219,218,218,217,217,217,216,216,215,215,214,214,214,213,213,212,212,211,211,211,210,210,209,209,209,208,208,207,207,206,206,206,205,205,204,204,204,203,203,202,202,201,201,201,200,200,199,199,198,198,198,197,197,196,196,196,195,195,194,194,193,193,193,192,192,191,191
         * = $bf00

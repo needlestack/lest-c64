@@ -4330,7 +4330,13 @@ const NHOLE = Math.max(1, lvlMax(l => l.nHoleLike, HOLELIKE.length));   // at le
 const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
 // Sockets are the hole-likes that are not exits. At least one byte: sockWallT is emitted either
 // way, and a zero-length table would be recorded in lvlLenT as 0, which the swap reads as 256.
-const NSOCK = Math.max(1, NHOLE - NEXIT);
+const NSOCK = Math.max(1, lvlMax(l => l.nHoleLike - l.nExit, HOLELIKE.length - HOLES_AT.length));
+// NOT `NHOLE - NEXIT`. Those are two INDEPENDENT maxima and a level need not achieve both:
+// the hub has 4 exits and 0 sockets, level 2 has 1 exit and 3 sockets, so NHOLE=4, NEXIT=4
+// and the difference is 0 -- a one-byte sockWallT, with level 2's second and third sockets
+// reading the byte past it for the wall they open. It emitted clean and corrupted silently.
+// nExitT is a SWAPPED byte, so the exit/socket boundary is per level; only the table SIZE
+// is chain-global, and the right bound for it is the largest level's own socket count.
 // ---- CHAIN_GLOBAL: tables that name something GLOBAL TO THE CHAIN ----
 // A LEVEL'S OWN BUILD CANNOT KNOW THE CHAIN IT WILL SIT IN. A LVLDUMP subprocess runs with
 // TWOLEV false, so its OTHERS is empty, its RESIDENT set is just itself, and anything it numbers
@@ -5499,7 +5505,44 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
 // 4 gives 39, and the stepping it introduces is invisible next to what the far-end fudge fixed.
 // User's call after playing both: 4. HOLESTEP=2 brings the smooth ladder back.
 const HOLESTEP = +(process.env.HOLESTEP ?? 4);
-const HOLE = makeHoleLadder(HOLER, HOLESTEP, 0);
+// ---- rungs that are the same SHAPE share one set of bitmaps ----
+// Measured, not guessed: rungs 1, 2 and 3 of the exit ladder differ from each other by 3% and 2%
+// of their set pixels, against 42% and 53% either side of them, and 17, 18 and 19 differ by two
+// pixels apiece. What changes across each group is not the art, it is where the dome SITS -- vis
+// goes 9, 14, 19 while the bounding box stays 21 rows -- and that is a sprite Y coordinate.
+// So the rungs keep their own yBase, xOff, h threshold and distance band; only the bitmaps are
+// shared. The user picked the survivors by eye off the filmstrip: keep 2 for the first group and
+// 18 for the second.
+//
+// Every rung in a group must want the same NUMBER of sprites, or the pointer arithmetic (left
+// half's slot, right half is the next) stops meaning anything -- asserted below.
+const shareRungs = (lad, groups) => {
+  const use = new Map();
+  for (const g of groups) for (const r of g.rungs) {
+    if (lad.L[r].spr !== lad.L[g.use].spr) throw new Error(
+      `rung ${r} wants ${lad.L[r].spr} sprites and rung ${g.use} ${lad.L[g.use].spr}: ` +
+      `they cannot share bitmaps`);
+    use.set(r, g.use);
+  }
+  const base = lad.slotT[0], BM = [], slotT = [], at = new Map();
+  lad.L.forEach((g, i) => {
+    const c = use.get(i) ?? i;
+    if (!at.has(c)) {
+      at.set(c, base + BM.length);
+      const from = lad.slotT[c] - base;
+      for (let k = 0; k < lad.L[c].spr; k++) BM.push(lad.BM[from + k]);
+    }
+    slotT.push(at.get(c));
+  });
+  const saved = lad.BM.length - BM.length;
+  console.error(`  hole ladder: ${lad.BM.length} -> ${BM.length} bitmaps, ${saved} slots freed ` +
+                `(${saved * 64} bytes) across ${groups.length} shared group(s)`);
+  return { ...lad, BM, slotT, slotEnd: base + BM.length };
+};
+const HOLE = shareRungs(makeHoleLadder(HOLER, HOLESTEP, 0), [
+  { rungs: [1, 2, 3],    use: 2 },      // the three domes: 3% and 2% apart
+  { rungs: [17, 18, 19], use: 18 },     // the last slivers: two pixels apart
+]);
 // A socket is orb-shadow sized. HOLER is 0.43 cells across and an orb is roughly 0.2, so half.
 // Coarser width steps than the exit hole: a socket is small enough that a size step is a pixel
 // or two, and the slots matter more than the smoothness.
@@ -5699,9 +5742,15 @@ if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of 
 for (const h of HOLELIKE)
   if (map[cellOf(h.x, h.y)] !== 0) throw new Error(
     `${h.exit ? 'exit hole' : 'socket'} at (${h.x},${h.y}) is inside a wall`);
-if (NHOLE > 4) throw new Error(
-  `${NHOLE} hole-like entities across the resident levels: holeSeeT has room for 4 (32 bytes each). ` +
-  `More wants the per-level loading, not another table squeezed in.`);
+// 8, not 4. The old cap was not a design limit at all -- it was the SIZE OF THE GAP holeSeeT
+// happened to be parked in ($9180, 128 bytes below the $9200 sound block). It is placed against
+// ORB_SMALL now and sized to NHOLE, so it costs exactly what the chain uses and the ceiling is
+// the real one: hlSee indexes it as `lda holeSeeT,x` with x = entity*32 + (cell>>3), so entity 7
+// ends at byte 255 and an eighth row would need a second page and 16-bit addressing.
+if (NHOLE > 8) throw new Error(
+  `${NHOLE} hole-like entities across the resident levels: holeSeeT is indexed by a single byte ` +
+  `(entity*32 + cell>>3), so 8 rows of 32 is the whole of it. More wants a second page and a ` +
+  `16-bit index, or per-level loading.`);
 const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM)];
 // ---- and now the exit ladder's length is known, so the idol's base is too ----
 const IDOLBASE = HOLEBASE + HOLEBM.length * 64;   // straight behind it, under the hole
@@ -5769,6 +5818,30 @@ if (process.env.LADDERSHEET) {
                               at: (x, y) => bmPix(ORBBM[up] ?? [], x, y) });
     return { xmag: 0, ymag: r.exp, parts };
   }));
+  console.error('  entity ladder: rung:h, x2 = the hardware doubles it vertically');
+  console.error('    ' + LADDER.map((r, i) => `${i}:${r.h}${r.exp ? 'x2' : ''}`).join('  '));
+  // How different is each hole rung from the one before it, as SHAPE rather than as numbers?
+  console.error('  rung  spr  set-px  bbox(w x h)   vs prev: px differing / union');
+  let prevG = null;
+  HOLE.L.forEach((r, i) => {
+    const g = [];
+    for (const row of r.grid) for (let k = 0; k < (r.vmag ? 2 : 1); k++) g.push(row);
+    let n = 0, x0 = 99, x1 = -1, y0 = 99, y1 = -1;
+    g.forEach((row, y) => row.forEach((v, x) => { if (v) { n++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } }));
+    let cmp = '';
+    if (prevG) {
+      const H2 = Math.max(g.length, prevG.length); let diff = 0, uni = 0;
+      for (let y = 0; y < H2; y++) for (let x = 0; x < 36; x++) {
+        const a = ((g[y] ?? [])[x] ?? 0) ? 1 : 0, b = ((prevG[y] ?? [])[x] ?? 0) ? 1 : 0;
+        if (a || b) uni++; if (a !== b) diff++;
+      }
+      cmp = `${String(diff).padStart(5)} / ${String(uni).padStart(4)}  = ${String(Math.round(100*diff/uni)).padStart(3)}%`;
+    }
+    console.error(`    ${String(i).padStart(2)}   ${r.spr}   ${String(n).padStart(5)}` +
+                  `   ${String(x1-x0+1).padStart(2)} x ${String(y1-y0+1).padStart(2)}      ${cmp}`);
+    prevG = g;
+  });
   for (const [nm, bms] of [['hole', HOLE.BM], ['orb+angel', ORBBM.slice(0, IDOLBM0)]]) {
     const seen = new Set(); let dup = 0;
     bms.forEach(b => { const k = b.join(','); seen.has(k) ? dup++ : seen.add(k); });
@@ -15167,6 +15240,17 @@ ${SPRITES ? `; ================= orb tables =================
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
+        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
+        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
+        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
+        ; block, and outgrew both, and then sat at $9180 where the gap above the $9100 jsr target
+        ; is exactly 128 bytes -- which is the ONLY reason NHOLE was capped at four.
+        ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
+        ; chain that needs more rows takes them out of the code headroom below and the headroom
+        ; report says so, instead of the build dying on an origin that moves backward.
+        * = ${hx16(ORB_SMALL - NHOLE * 32)}
+holeSeeT: !byte ${holeSee.join(",")}
+
         * = ${hx16(ORB_SMALL)}
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -16581,14 +16665,6 @@ snKTick: lda dieKik
 snKDn:  rts
 
 ` : ''}
-        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
-        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
-        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
-        ; block, and outgrew both; here it has the gap above the $9100 jsr target, which is
-        ; exactly 128 bytes and cannot be outgrown because holeSeeT is capped at 4 entities.
-        * = $9180
-holeSeeT: !byte ${holeSee.join(",")}
-
         ; The sound effects, out here because the $9d00 block that holds the level shadow
         ; ran out of room the moment a level was allowed to declare its own sockets: the
         ; shadow carries the other level's tables and those grew with it. This hole is
