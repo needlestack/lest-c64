@@ -5750,7 +5750,53 @@ if (process.env.LADDERSHEET) {
   sheet('orb',   ORBBM.slice(0, nOrb).map((bm, i) => ({ bm, h: ORBBMH[i] ?? 0 })));
   sheet('angel', ORBBM.slice(nOrb, IDOLBM0).map(bm => ({ bm, h: 0 })));
   if (HAS_IDOL) sheet('idol', ORBBM.slice(IDOLBM0).map((bm, i) => ({ bm, h: ORBBMH[i] ?? 0 })));
-  sheet('hole',  HOLE.BM.map(bm => ({ bm, h: 0 })));
+  // ---- the HOLE ladder is drawn by RUNG, not by bitmap ----
+  // A wide rung is three sprites side by side, so one bitmap per column showed a single rung as
+  // three unrelated pieces -- which is what made rungs 2, 3 and 4 look like nine near-identical
+  // columns that could be collapsed. Each rung carries the assembled shape in `grid`, and vmag
+  // says whether the hardware doubles it vertically, so this draws what is actually on screen.
+  {
+    const sc = 2, GAP = 4;
+    const gs = HOLE.L.map(r => {
+      const g = [];
+      for (const row of r.grid) for (let k = 0; k < (r.vmag ? 2 : 1); k++) g.push(row);
+      return g;
+    });
+    const cw = Math.max(...HOLE.L.map(r => r.px)) * sc + GAP;
+    const H = Math.max(...gs.map(g => g.length)) * sc + 16;
+    const W = cw * gs.length + GAP;
+    const rgb = new Uint8Array(W * H * 3).fill(24);
+    gs.forEach((g, i) => {
+      const x0 = GAP + i * cw, y0 = H - 12 - g.length * sc;
+      g.forEach((row, y) => row.forEach((v, x) => {
+        if (!v) return;
+        for (let a = 0; a < sc; a++) for (let b = 0; b < sc; b++) {
+          const o = ((y0 + y * sc + a) * W + x0 + x * sc + b) * 3;
+          rgb[o] = 200; rgb[o + 1] = 200; rgb[o + 2] = 210;
+        }
+      }));
+      for (let t = 0; t < HOLE.L[i].spr; t++) {          // one tick per hardware sprite
+        for (let b = 0; b < 6; b++) { const o = ((H - 5) * W + x0 + t * 8 + b) * 3;
+          rgb[o] = 255; rgb[o + 1] = 190; rgb[o + 2] = 0; }
+      }
+    });
+    writeFileSync('ladder-hole.png', png(W, H, rgb));
+    console.error(`  ladder-hole.png: ${gs.length} RUNGS (ticks below = hardware sprites)`);
+  }
+  // Are any bitmaps byte-identical? A wide dome's MIDDLE sprite is a flat-topped block, and
+  // the same block may serve several rungs -- each duplicate is 64 bytes of bank 3.
+  for (const [nm, bms] of [['hole', HOLE.BM], ['orb+angel', ORBBM.slice(0, IDOLBM0)]]) {
+    const seen = new Map(); let dup = 0;
+    bms.forEach((b, i) => { const k = b.join(','); 
+      if (seen.has(k)) dup++; else seen.set(k, i); });
+    console.error(`  ${nm}: ${bms.length} bitmaps, ${seen.size} distinct, ${dup} exact duplicates` +
+                  ` (${dup * 64} bytes = ${dup} sprite slots)`);
+  }
+  console.error('  rung   w   px spr vis  mag vmag   far..near');
+  HOLE.L.forEach((r, i) => console.error(
+    `    ${String(i).padStart(2)}  ${String(Math.round(r.w)).padStart(4)} ${String(r.px).padStart(4)}` +
+    `${String(r.spr).padStart(3)} ${String(Math.round(r.vis)).padStart(4)} ${String(r.mag).padStart(4)}` +
+    `${String(r.vmag).padStart(4)}   ${r.far}..${Math.round(r.near)}`));
   if (SOCK.BM.length) sheet('socket', SOCK.BM.map(bm => ({ bm, h: 0 })));
   console.error(`  (sockets own ${SOCK.BM.length} bitmaps: they borrow the exit hole's for all ` +
                 `but the closest rungs -- see "SOCKETS BORROW THE EXIT HOLE'S BITMAPS")`);
