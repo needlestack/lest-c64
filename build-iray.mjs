@@ -4082,6 +4082,9 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 12.5, y: 9.5, c: 0 });
     ORBS.push({ x: 9.5, y: 12.5, c: 0 });
   }
+  else if (HUBROOM) { }                        // THE HUB IS EMPTY. No orbs, no angel: it is the
+                                               //   room you come back to, and the only things in
+                                               //   it are the three pedestals and four holes.
   else if (IDOLROOM) {                         // level 5: two orbs for two sockets, and the idol
     ORBS.push({ x: 9.5, y: 1.5, c: 0 });       //   in the hall's north wall
     ORBS.push({ x: 16.5, y: 7.5, c: 0 });      //   in the comb
@@ -4111,6 +4114,7 @@ if (process.env.ORBSCATTER) {
   // from the other levels' is exactly what nOrbT was made swappable for.
   if (process.env.ANGEL !== '0') {
     if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
+    else if (HUBROOM) { }                      // no angel in the hub either
     else if (IDOLROOM) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // level 5: in the hall
     else if (CHAMBER) {                           // level 3: one in each far corner, and one
       ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });   //   caged in the chamber
@@ -5706,6 +5710,51 @@ if (HAS_IDOL && IDOL_PTR === 0) throw new Error(
   `the idol's pointer offset came out 0, and 0 is the value that MEANS "not the idol" in ` +
   `orbArtT -- IDOLBASE ${hx16(IDOLBASE)} landed exactly on SPRBASE, so the two collide`);
 const orbArtT = ORBS.map(o => o.idol ? IDOL_PTR : 0);   // a pointer DELTA now, not a bitmap index
+// ---- LADDERSHEET=1: every rung of every ladder, side by side, as a PNG ----
+// One column per rung, in ladder order, each drawn at its own apparent size on a common
+// baseline -- so a step that changes nothing is visible as two identical columns. Written
+// because "are there really no sub-2px steps at the small end?" is a question a table of
+// numbers answers badly and a picture answers in a second.
+if (process.env.LADDERSHEET) {
+  const PAL = [[0,0,0],[80,80,80],[170,170,170],[255,255,255]];   // pair 00..11, just for looking
+  const draw = (bm, sc) => {                     // one 12x21 multicolor bitmap -> 12*sc x 21*sc px
+    const w = 12, h = 21, out = [];
+    for (let y = 0; y < h; y++) for (let r = 0; r < sc; r++) {
+      const row = [];
+      for (let x = 0; x < w; x++) {
+        const b = bm[y * 3 + (x >> 2)] ?? 0, pr = (b >> (6 - 2 * (x & 3))) & 3;
+        for (let c = 0; c < sc; c++) row.push(PAL[pr]);
+      }
+      out.push(row);
+    }
+    return out;
+  };
+  const sheet = (name, rungs) => {
+    const GAP = 3, sc = 2;
+    const cw = 12 * sc + GAP, ch = 21 * sc + 14;
+    const W = cw * rungs.length + GAP, H = ch;
+    const rgb = new Uint8Array(W * H * 3).fill(24);
+    rungs.forEach(({ bm, h }, i) => {
+      const px = draw(bm, sc), x0 = GAP + i * cw, y0 = H - px.length - 10;
+      px.forEach((row, y) => row.forEach((c, x) => {
+        const o = ((y0 + y) * W + x0 + x) * 3; rgb[o] = c[0]; rgb[o+1] = c[1]; rgb[o+2] = c[2];
+      }));
+      for (let t = 0; t < Math.min(h, 8); t++) {   // a tick mark per height unit, so steps show
+        const o = ((H - 4) * W + x0 + t) * 3; rgb[o] = 255; rgb[o+1] = 200; rgb[o+2] = 0;
+      }
+    });
+    writeFileSync(`ladder-${name}.png`, png(W, H, rgb));
+    console.error(`  ladder-${name}.png: ${rungs.length} rungs`);
+  };
+  const nOrb = ORBBMH.length;                    // the orb's own bitmaps come first
+  sheet('orb',   ORBBM.slice(0, nOrb).map((bm, i) => ({ bm, h: ORBBMH[i] ?? 0 })));
+  sheet('angel', ORBBM.slice(nOrb, IDOLBM0).map(bm => ({ bm, h: 0 })));
+  if (HAS_IDOL) sheet('idol', ORBBM.slice(IDOLBM0).map((bm, i) => ({ bm, h: ORBBMH[i] ?? 0 })));
+  sheet('hole',  HOLE.BM.map(bm => ({ bm, h: 0 })));
+  if (SOCK.BM.length) sheet('socket', SOCK.BM.map(bm => ({ bm, h: 0 })));
+  console.error(`  (sockets own ${SOCK.BM.length} bitmaps: they borrow the exit hole's for all ` +
+                `but the closest rungs -- see "SOCKETS BORROW THE EXIT HOLE'S BITMAPS")`);
+}
 // SPRBOX boxes the ORB bitmaps up at their generator; the hole and socket ladders are built much
 // later, so they get the same treatment here. Without this the one case where the hardware grid
 // matters most -- a wide flat ellipse spread across two or three sprites -- was the one case you
@@ -5967,7 +6016,9 @@ if (TWOLEV) {
       // as the two levels had the same population. The socket room (1 orb + hole + socket) as the
       // live level with level 1 (2 orbs + 2 angels + hole) as its shadow truncated the shadow's six
       // masks to one and the size check downstream caught the shortfall.
-      const n = L.nOrbs + L.nHoleLike;
+      // Math.max(1, ...) to match NORB's own floor: the emitted tables always reserve ONE orb
+      // row even for a level that has none (the hub), so a shadow with nOrbs 0 still occupies it.
+      const n = Math.max(1, L.nOrbs) + L.nHoleLike;
       for (let i = 0; i < n; i++) {
         const m = src.slice(i * L.occBytes, (i + 1) * L.occBytes);
         while (m.length < OCCBYTES) m.push(0);
@@ -5978,10 +6029,11 @@ if (TWOLEV) {
     // Positive proof that it happened, because the failure is silent: an un-restrided table is
     // merely SHORT, and the padding below fills it to the right LENGTH with zeros while every
     // mask past the first sits at the wrong offset. Length is not the invariant -- stride is.
-    const want = (L.nOrbs + L.nHoleLike) * OCCBYTES;
+    const want = (Math.max(1, L.nOrbs) + L.nHoleLike) * OCCBYTES;   // NORB's floor, as above
     if (L.tables.orbOccT.length !== want) throw new Error(
       `level ${L.level}'s orbOccT is ${L.tables.orbOccT.length} bytes after the re-lay, not ` +
-      `${L.nOrbs + L.nHoleLike} entities x ${OCCBYTES} -- every mask but the first would be read ` +
+      `${Math.max(1, L.nOrbs) + L.nHoleLike} entities x ${OCCBYTES} -- every mask but the first ` +
+      `would be read ` +
       `from the middle of the one before it`);
     L.tables.orbOccLoT = [...orbOccLo];   // same base and stride now, so identical to the live one
     // The counts USED to have to match, because they were immediates. They are swapped bytes now.
