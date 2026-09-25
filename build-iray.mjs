@@ -3264,18 +3264,22 @@ const PAL_N = Math.max(...CHAIN);              // indexed by level id - 1, so it
 // level it has to carry the mark too -- otherwise the stamped cells read as blank black holes in
 // an otherwise dotted wall, which is exactly what the user saw. The dot is pair 00 either way
 // (the ground's colour showing through), so this is symRows with $ff for the field.
-const symRowsOcc = art => {
+const symRowsOcc = art => symRowsInk(art, 0xff, 0);
+const symRows = art => symRowsInk(art, 0x55, 0);
+// ...and the same mark in any ink. The dot has always been pair 00 -- the GROUND showing through
+// the wall -- which is invisible the moment a level paints its ground the same colour as its
+// walls. Level 5 does exactly that (black on black, so the outline is the only ink in the room),
+// and there the dot wants the SEAM ink instead: pair 10, the one colour that level has.
+const symRowsInk = (art, field, ink) => {
   const px = typeof art === 'string' ? fatBits(art, 4, 8)
            : [...Array(32)].map((_, i) => art.some(([c, r]) => r * 4 + c === i));
   return [...Array(8)].map((_, r) =>
-    [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c] ? (b & ~(3 << (6 - 2 * c))) : b, 0xff));
+    [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c]
+      ? (b & ~(3 << (6 - 2 * c))) | (ink << (6 - 2 * c)) : b, field));
 };
-const symRows = art => {
-  const px = typeof art === 'string' ? fatBits(art, 4, 8)
-           : [...Array(32)].map((_, i) => art.some(([c, r]) => r * 4 + c === i));
-  return [...Array(8)].map((_, r) =>
-    [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c] ? (b & ~(3 << (6 - 2 * c))) : b, 0x55));
-};
+// Which levels paint that mark in the SEAM ink rather than in the ground's. A level whose
+// ground and walls are the same colour has no ground to show through -- see symRowsInk.
+const LEVEL_SYMSEAM = { 5: 1 };
 const ANYSYM = CHAIN.some(n => LEVEL_SYM[n]);
 // Does any level's GROUND colour differ from the first's? If not there is nothing for a split to
 // show, and none of the two-tone machinery below is emitted.
@@ -17026,10 +17030,12 @@ ceilLog:lda clP
 clDn:   rts
 ` : ''}
 ${ANYSYM ? `symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
-        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
+        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}   ; +8: dot in the GROUND
+        !byte ${symRowsInk(Object.values(LEVEL_SYM)[0], 0x55, 2).map(hx).join(',')}   ; +16: in the SEAM
 symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
         !byte ${symRowsOcc(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
-lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
+        !byte ${symRowsInk(Object.values(LEVEL_SYM)[0], 0xff, 2).map(hx).join(',')}
+lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? (LEVEL_SYMSEAM[i + 1] ? 16 : 8) : 0).join(',')}   ; 0 plain, 8 ground-ink dot, 16 seam-ink
 ; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather than
 ; a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no branch.
 lvlSeamT: !byte ${[...Array(PAL_N)].map((_, i) =>

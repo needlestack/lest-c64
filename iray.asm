@@ -9482,10 +9482,12 @@ ddPut:  clc
 
 
 symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
-        !byte $55,$55,$55,$45,$55,$55,$55,$55
+        !byte $55,$55,$55,$45,$55,$55,$55,$55   ; +8: dot in the GROUND
+        !byte $55,$55,$55,$65,$55,$55,$55,$55   ; +16: in the SEAM
 symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
         !byte $ff,$ff,$ff,$cf,$ff,$ff,$ff,$ff
-lvlSymT: !byte 0,0,0,8,8
+        !byte $ff,$ff,$ff,$ef,$ff,$ff,$ff,$ff
+lvlSymT: !byte 0,0,0,8,16   ; 0 plain, 8 ground-ink dot, 16 seam-ink
 ; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather than
 ; a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no branch.
 lvlSeamT: !byte $00,$00,$00,$00,$55
