@@ -11753,7 +11753,7 @@ lvlStYHiT: !byte $02,$07,$01,$04,$08
 lvlStAT:  !byte $19,$db,$20,$00,$00
 lvlStAFT: !byte $c0,$00,$00,$00,$00
 
-lvlSprunderT: !byte $0b,$0b,$0b,$0b,$00
+lvlSprunderT: !byte $0b,$0b,$0b,$00,$00
 lvlPalceilT: !byte $01,$01,$01,$0b,$0b
 lvlPalseamT: !byte $0b,$0b,$0b,$0e,$0e
         * = $aa00

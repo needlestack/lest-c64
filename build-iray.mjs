@@ -165,14 +165,14 @@ const LEVEL_SYM = { 4: [[1, 3]], 5: [[1, 3]] };
 // ---- per-level SPRITE inks, and the idol's own ----
 // A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
-// by all eight sprites; only the body is per-sprite. Level 5 takes the underside to black, so
-// its cast reads black / grey 2 / grey 3.
-// THE HUB DOES NOT. It is back on the default grey 1 so the pedestals get the full THREE-GREY
-// palette -- grey1 shadow, grey2 body, grey3 top -- which black cannot give them: against the
-// dotted wall a pedestal stands in front of, a black shadow side read as a hole punched in the
-// stone rather than as stone. Free here because the hub has no orbs and no angel to re-tone,
-// and no sockets (whose rim is the only other thing on pair 01).
-const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x0b) },
+// by all eight sprites; only the body is per-sprite. Levels 4 and 5 take the underside to
+// black, so their cast reads black / body / grey 3.
+// The hub tried grey1 there while its pedestals were grey (a three-grey drum needs all three),
+// but grey1 is also the hub's FLOOR, so the drum's shadow side dissolved into the ground it
+// stood on. Colouring the bodies made that moot: black separates a coloured body from the
+// floor better than any grey, and it is what puts the dark red/green/blue ABOVE the shadow in
+// brightness instead of below it, which is the way round the modelling needs.
+const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) },
                     5: { under: +(process.env.SPRU5 ?? 0x00) } };
 // ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
 // The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
@@ -4372,11 +4372,10 @@ const PEDSTEP = +(process.env.PEDSTEP ?? 2);
 // hub has sightlines twice that; the user is content for them to read as small in the distance,
 // not to vanish out of it.
 const PEDWMIN = +(process.env.PEDWMIN ?? 2);
-// One body colour per pedestal, cycled. The project's existing "colour" triple is light blue /
-// light red / light green (see ORBBODY under ORBPAL=colour); these are the same three in the
-// order the user asked to see them. LIGHT red/green/blue, not 2/5/6: the drum's top is grey3
-// and its shadow grey1, and the dark trio sits below the shadow, which inverts the modelling.
-const PED_COLS = (process.env.PEDCOLS ?? '10,13,14').split(',').map(Number);
+// One body colour per pedestal, cycled. The DARK trio -- red 2, green 5, blue 6 -- which works
+// because the shadow is black: the light trio was needed only while it was grey1, which the
+// dark bodies would have sat below. Top stays grey3, so each drum still reads lit from above.
+const PED_COLS = (process.env.PEDCOLS ?? '2,5,6').split(',').map(Number);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
 // one you land next to takes you back where you came from. Same maze both ways for now -- only
 // the hole cell and the landing spot differ, which is all the level transition actually needs.
