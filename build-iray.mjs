@@ -87,7 +87,7 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // contiguous bytes of image to go to, which today is most of the code headroom. Five resident
 // levels needs more than that again and wants the shadow to shrink or a second ILVL region.
 // CHAIN=<n> alone still playtests one level (CHAIN=4 -> the hub by itself).
-const CHAIN = (process.env.CHAIN ?? '1,4,5').split(',').map(Number);
+const CHAIN = (process.env.CHAIN ?? '1,2,3,4').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
 if (![1, 2, 3, 4, 5].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 5`);
 const SOCKROOM = LVL === 2;
@@ -3823,6 +3823,49 @@ for (const m of PICS.maps) if (m.map.length !== 1000)
 // CHAIN=4 on its own has always had to be told NPIC=1 by hand. Two pictures need TWOLEV=0.
 const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? (TWOLEV ? 1 : 99)));
 const FACEART = { colram: PICS.colram & 7 };
+// ---- REPACK THE CUT-SCENE CHARSET TO THE GLYPHS THE SHIPPED PICTURES ACTUALLY REACH ----
+// death-pics.json carries a full 256-glyph charset, but one picture only uses 196 of them. The
+// rest is 2,048 bytes of image holding cells nothing draws -- and the image is the scarce
+// resource (a four-level chain overran the $9d00 block by 113 bytes).
+//
+// The catch is the picture CYCLING: a glyph's twin is `code EOR $0f`, so a glyph is only
+// droppable if its twin is too. The used set is closed under that first, which took 196 to 214.
+//
+// EOR $0f only ever touches the low nibble, so it never leaves a glyph's aligned block of 16 --
+// which means whole blocks can be moved and pairs repacked WITHIN a block, both preserving the
+// twin relation exactly. A block holds 8 pairs; 107 pairs need 14 blocks, so two blocks fall out
+// = 256 bytes = one whole page off the charset AND one page off dsLp, which is generated from
+// FACE_NCHR and shortens by itself.
+// Blocks are emitted in PAIRS so the charset stays a whole number of 256-byte pages.
+const FACE_PACK = (() => {
+  if (!DIE || process.env.FACEPACK === '0') return null;
+  const used = new Set(PICS.maps.slice(0, NPIC).flatMap(m => m.map));
+  for (const c of [...used]) used.add(c ^ 0x0f);              // a glyph is only droppable with its twin
+  // Pair up: each pair is {lo, lo^15} within one block, and exactly one of the two has lo < 8.
+  const pairs = [...used].filter(c => (c & 0x0f) < 8).map(c => [c, c ^ 0x0f]);
+  for (const [a, b] of pairs) if (!used.has(a) || !used.has(b))
+    throw new Error(`cut-scene charset: glyph pair ${a}/${b} is not closed under EOR $0f`);
+  const blocks = Math.max(2, Math.ceil(Math.ceil(pairs.length / 8) / 2) * 2);   // even, for whole pages
+  if (blocks >= 16) return null;                              // nothing to gain
+  const map = new Map();                                      // old code -> new code
+  pairs.forEach(([a, b], i) => { const nb = (i / 8) | 0, np = i % 8;
+    map.set(a, nb * 16 + np); map.set(b, nb * 16 + (15 - np)); });
+  for (const [a, b] of pairs) if ((map.get(a) ^ 0x0f) !== map.get(b))
+    throw new Error(`cut-scene charset repack broke the EOR $0f twin of glyph ${a}`);
+  const chars = [];
+  for (let n = 0; n < blocks * 16; n++) {
+    const old = [...map.entries()].find(([, v]) => v === n)?.[0];
+    for (let r = 0; r < 8; r++) chars.push(old === undefined ? 0 : PICS.chars[old * 8 + r]);
+  }
+  const drawn = new Set(PICS.maps.slice(0, NPIC).flatMap(m => m.map)).size;
+  console.error(`  cut-scene charset: ${drawn} glyphs drawn + ${used.size - drawn} EOR $0f twins ` +
+    `= ${used.size} -> ${blocks} blocks, ${chars.length} B instead of ${PICS.chars.length} ` +
+    `(saves ${PICS.chars.length - chars.length})`);
+  return { chars, map };
+})();
+if (FACE_PACK) { PICS.chars = FACE_PACK.chars;
+  PICS.maps = PICS.maps.map((m, i) => i < NPIC
+    ? { ...m, map: m.map.map(c => FACE_PACK.map.get(c) ?? 0) } : m); }
 const FACE_NCHR = PICS.chars.length;      // 8 bytes a glyph, so 2048 is the full 256
 const FACE_BLANK = 0;
 // ---- EVERYTHING HERE IS IN SIXTIETHS, off frameCnt ----
@@ -4468,7 +4511,12 @@ const LEVEL_EXITCOL = { 4: [2, 5, 0, 6] };
 // The hub: RED goes to the idol level, per the user. The other three are marked and not yet
 // wired -- green and blue are errands with nowhere to run to, and black is the way onward,
 // which needs the level after the hub to exist.
-const LEVEL_EXITDST = { 4: [5, 0xff, 0xff, 0xff], 5: [4] };
+// THE HUB'S FOUR ALL GO BACK TO 1 for now. Levels 5-7 are the ones the coloured exits are FOR
+// -- red to the idol level, green and blue to its siblings -- but none of them is resident in a
+// 1,2,3,4 chain and none can be until the loader brings them in at the hub. Sending all four to
+// level 1 keeps every hole fallable and the loop closed while that is built; it is the only
+// entry here that is a placeholder rather than a decision.
+const LEVEL_EXITDST = { 4: [1, 1, 1, 1], 5: [4] };
 const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').split(',')
   .filter(v => v !== '').map(Number);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
@@ -16641,7 +16689,17 @@ darkerT: !byte ${darkerT.join(',')}
 ; charset stays because it is 2,048 and there is no 2K of bank 3 left to put it in -- and it is
 ; read exactly once, by dieSwap, straight into charset B's slot.
         * = $7100
-faceChrT: ${chunk(PICS.chars, 32).trim()}` : ''}
+faceChrT: ${chunk(PICS.chars, 32).trim()}
+
+        ; ---- runByteT / runBitT: a run id as a byte index and a bit mask ----
+        ; Here, in the page the cut-scene charset vacated when it was repacked to the glyphs its
+        ; picture actually reaches (see FACE_PACK). They were in the $9d00 block, which a
+        ; four-level chain overran by 113 bytes -- the wall deltas grew when NHOLE went to seven
+        ; for the hub's pedestals, because opening a wall changes the LOS bitmap and the delta
+        ; carries every byte of it that moved.
+        * = ${hx16(0x7100 + PICS.chars.length)}
+runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
+runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it` : ''}
 ${SOUND ? `${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
 melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
         * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
@@ -18325,8 +18383,6 @@ orbColRT: !byte ${orbColRT.join(',')}
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
-runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
-runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it: split ids come from the hazard lists
 
 ; ---- occRT / occLT / occRTW / occLTW ----
 ; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:

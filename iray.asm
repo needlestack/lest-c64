@@ -525,9 +525,6 @@ anKx    = $81db                  ; the reach test's dx+1 and dy+1, kept so the D
 anKy    = $81dc                  ;   can be told from the orthogonal one
 markSaw = $81dd                  ; was the angel being WATCHED when it reached you? Then there is
                                  ;   no "look away and back" left to wait for -- see dieChk.
-idolHd  = $81da                  ; 1 while the IDOL is the thing in your hands. The angel
-                                 ;   step reads it: carrying it, being looked at no longer stops
-                                 ;   them. That is the whole cost of the thing.
 pSplit2 = $81de                  ; the arc's split: charset A again from the rim down
 pCh0    = $81e1                  ; which charset each of the three regions uses. The DROP wants
 pCh1    = $81e2                  ;   A,B,A -- scene above the horizon, mirrored scene below it,
@@ -868,11 +865,6 @@ ccf:    sta $d800,x
                                 ;   jumping here, and their state is all live RAM
         lda #$00
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
-        jsr idolLk              ; AFTER carry is set, not with lvlBoot: this is what puts
-                                ;   idolHd in a known state, and it is RAM that powers up as
-                                ;   garbage -- a non-zero one there and the angels would never
-                                ;   freeze under your gaze at all until you first picked
-                                ;   something up. It also gives CARRY=n the right look for free.
 
 
 
@@ -1843,7 +1835,6 @@ mvs:    lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
-        jsr sprArm              ; ...and whether the held object gets its own inks
         lda colT                ; BOTH HALVES OF THE GROUND, PUBLISHED TOGETHER -- see colT
         sta irqB0+1
         lda dieSt               ; ...and the death's sprite palette with them, so the flash,
@@ -3979,8 +3970,7 @@ irqCmp: cmp #$96   ; operands PATCHED, not variable reads: "cmp abs" is two cycl
         bcc irqTop              ;   more than "cmp #" and that was once enough to push the
 irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the line.
         bcs irqA2
-irqSpC: cmp #$ff                ; the HELD object's split, $ff while it is switched off
-        bcs irqSp
+
         lda d018vm              ; --- horizon..arc: the mirrored half ---
 irqC1:  ora #$02
         sta $d018
@@ -3993,18 +3983,12 @@ irqB1:  lda #$01      ; on an OVERLAP frame this line sits between the two
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
-irqSp:  jmp sprSpl              ; out of the main block; rejoins at irqd
-        ; region 3 -- below the split, before the next frame's sprites -- is where the
-        ; WORLD's inks come back. It used to be done from osFlush, which runs once per RENDERED
-        ; frame: at 20fps that is one restore every three raster frames, so for two frames in
-        ; three the whole screen kept the HELD palette. That was the 60Hz flicker.
 irqA2:
 irqCm3: cmp #$ff                ; --- past the COLOUR line? then this is region 4 --- (patched
         bcs irqA3               ;   by region 3 below, so it always trails it by CSPLIT)
         lda d018vm              ; --- arc top and below: back to A for the rim glyph ---
 irqC2:  ora #$00
         sta $d018
-        jsr sprPal              ; ...and the WORLD sprite inks back, every raster frame
         lda irqCm2+1            ; arm the colour line: CSPLIT rasters below this one, because
         clc                     ;   the arc's top rows still draw the DEPARTING level's floor
         adc #$58              ;   around the curve, so flipping colour up there tints the
@@ -4205,9 +4189,6 @@ ogFull:
         lda orbColT2,x
         sta obC                 ; the orb's OWN body colour, not the icon's fixed grey
         lda #$a0
-        clc                     ; what you are CARRYING is drawn with its own art too. X is
-        adc orbArtT,x           ;   still the entity index from the dex above; without this the
-                                ;   idol was held in front of you as an orb.
         sta obP
         lda #$a0
         sta obX
@@ -4844,12 +4825,6 @@ osLp:   dex                     ;   allocate DOWNWARD from 7, so a loop bounded 
         sta $d027,x
         cpx #$00
         bne osLp
-        jsr idolLat             ; THIS frame's finding, not last frame's. Latched at the start
-                                ;   of the projection it lagged a whole rendered frame: on the
-                                ;   frame you set the idol down, carry is already 0 and the world
-                                ;   entity is already placed, but idolOn still said "not in view"
-                                ;   -- so the palette fell back to the level's greys for 50ms
-                                ;   between the button and the idol appearing.
 osBits: lda omEn
         sta $d015
         lda omMc
@@ -5442,14 +5417,7 @@ opDone:
         ldy ovar
         lda orbPtrT,y
         ldy oidx                ; the ENTITY, not the variant
-        clc                     ; 0 for an orb; the idol's bitmap base for the idol. The two
-        adc orbArtT,y           ;   ladders are geometrically identical, so the idol borrows the
-                                ;   orb's rung wholesale and swaps only the picture.
         sta obP,x               ; buffered, not written: see osFlush
-        lda orbArtT,y           ; non-zero only for the idol, and we reach here only when
-        beq obNotI              ;   this entity actually TOOK a slot -- so this means "the idol
-        sta idolWk              ;   is on screen", not "the level has one"
-obNotI:
         lda orbColT2,y
         sta obC,x               ; the ONE thing that can differ per orb: bit pair 10
         ldy ovar
@@ -5716,7 +5684,7 @@ fcHit:  sty hlv                 ; the one we are dropping through
         pha                     ; wallsBack does not preserve A, and the stack is cheaper here
         jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes
         pla
-        ldx #$01   ; WHICH SLOT is it in now? Not a build-time constant: the
+        ldx #$02   ; WHICH SLOT is it in now? Not a build-time constant: the
 lvFind: cmp lvlAtT,x            ;   swap is an exchange, so the level being left takes the slot
         beq lvGot               ;   the level being entered came out of, and the layout permutes
         dex                     ;   every fall. nextLevel only ever names a level in the chain,
@@ -6362,7 +6330,7 @@ orbOcc1:
         lda orbYCT,x
         sta ooCY
         lda #$00
-        ldx #$07
+        ldx #$08
 ooCl:   sta $ffff,x
         dex
         bpl ooCl
@@ -6385,7 +6353,7 @@ ooLd:   lda $ffff,x
         ora runBitT,y
 ooSt:   sta $ffff,x
 ooNx:   iny
-        cpy #$39        ; NRUN, not this level's own count: the loops are shared
+        cpy #$41        ; NRUN, not this level's own count: the loops are shared
         bcc ooLp
         rts
 
@@ -6503,9 +6471,6 @@ asLp:   stx amIdx
         bne asNext              ; not in the world
         lda orbSeenT,x
         beq asFree              ; unobserved: it moves, as it always has
-        lda idolHd              ; seen -- but holding the IDOL a gaze no longer holds them,
-        beq asNext              ;   and they come for you in plain sight
-        bne asFree              ; always
         bne asNext              ; one visible pixel freezes it, and its clock with it
 asFree:
         ; ---- how long until this angel's next step? It depends how far away it is. ----
@@ -6776,16 +6741,6 @@ anSqOk:
         jsr orbOcc1
         lda ovVis
         beq anYes               ; nothing of it shows there at all
-        lda idolHd              ; ---- and the IDOL suspends the covering rule too ----
-        beq anCov               ; This is the DEEPER of the angel's two rules: the freeze stops
-                                ;   a watched angel's clock, but THIS is what stops it stepping
-                                ;   into the open at all -- watch one down a corridor and every
-                                ;   cell toward you is fully in view, so every candidate is
-                                ;   rejected and it never moves however loudly its clock runs.
-                                ;   Bypassing only the freeze changes nothing you can see, which
-                                ;   is exactly what the first build of this did.
-        bne anYes               ; always: carrying it, they walk at you in the open
-anCov:  lda ovVis
 
         cmp ovOcc
         beq anYes
@@ -6997,8 +6952,6 @@ dsLp:
         sta $cd00,x
         lda faceChrT+$0600,x
         sta $ce00,x
-        lda faceChrT+$0700,x
-        sta $cf00,x
         inx
         bne dsLp
         ldx #$00                ; colour RAM is the OTHER memory at $d800 and needs I/O back in.
@@ -7138,11 +7091,6 @@ okTake: inc blkVer              ; lifting an orb OPENS its cell -- a path may ex
         sta blkT,y
         inx
         stx carry               ; index + 1, so zero can mean empty
-        txa                     ; the room takes the idol's colours while you hold it
-        pha
-        jsr idolLk
-        pla
-        tax
 
         lda #$03
         jsr sfxGo               ; the clink of it coming off the floor
@@ -7157,10 +7105,6 @@ orbPut: jsr dropPick            ; ---- put down ----
         jsr hlAt                ; a socket? then it goes IN rather than on the floor
         cpy #$ff
         beq okPlain
-        ldx carry               ; ...unless what you are holding is not an ORB. The idol is
-        dex                     ;   luggage, not a key: it can be set down on a socket and picked
-        lda orbArtT,x           ;   straight back up, and nothing seats. orbArtT is 0 exactly for
-        bne okPlain             ;   the orb's own art, so "draws as an orb" IS "acts as a key".
         lda hlSeat,y
         bmi okDone              ; already used: bit 7 now means CONSUMED, and it is one-way
         ; ---- ONE WAY. The orb and the socket both leave the world. ----
@@ -7253,11 +7197,6 @@ okpY2:  sta py
         lda #$00
         sta orbHidT,x
         sta carry
-        txa                     ; ...and gives them back when you set it down
-        pha
-        jsr idolLk
-        pla
-        tax
         lda #$01
         sta entDty              ; leaves X alone, and X is still the entity index orbOcc1 wants
         jmp orbOcc1             ; X is still the entity index. Its build-time occluder mask is
@@ -7950,7 +7889,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = $3b5f
+        * = $3c57
 ; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
 ; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
 ; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
@@ -7966,113 +7905,6 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; and a pair is flipped by EOR with (m | m<<1): 01 EOR 11 = 10, and 10 EOR 11 = 01, which is
 ; why the same trick both sets the outline and takes it away again.
 seamEdge:
-        ldx lvlMeT
-        dex
-        lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
-        sta seMsk               ;   so a level that does not want it still gets NORMALISED.
-        lda #<$c010
-        sta seLdA+1             ; the READ operand walks too. It did not, and every one of the
-        sta seStA+1             ;   199 glyphs got code 2's rows written into it: the whole
-        sta seStB+1             ;   level came out in flat blocks with no boundary cells at all.
-        lda #>$c010
-        sta seLdA+2
-        sta seStA+2
-        clc
-        adc #$08                ; charset B is charset A plus $800, so the low byte is shared
-        sta seStB+2
-        lda #$c7         ; codes 2..200
-        sta seN
-        ; ---- pass 1: undo any previous outline, and record where the ceiling is ----
-seGly:  ldy #$07
-seP1:
-seLdA:  lda $c010,y
-        sta seB
-        lsr
-        and #$55
-        sta seHi
-        lda seB
-        and #$55
-        eor #$55
-        sta seNL                ; ~lo
-        and seHi
-        sta seW                 ; w10: a seam pixel this routine left last time
-        lda seHi
-        eor #$55
-        and seNL
-        sta seC00,y             ; c00
-        lda seW
-        asl
-        ora seW
-        eor seB
-        sta seNB,y              ; ...and the row with every 10 back to 01
-        dey
-        bpl seP1
-        ; ---- pass 2: a wall pixel with ground beside it, above it or below it ----
-        ldy #$07
-seP2:   lda seC00,y
-        asl
-        asl                     ; the pixel one to the side
-        sta seT
-        lda seC00,y
-        lsr
-        lsr                     ; ...and the other side. Pairs shifted off the ends are pixels
-        ora seT                 ;   in the NEXT CELL, which a per-glyph pass cannot see.
-        sta seT
-        cpy #$07
-        beq seNoD               ; row 7: nothing below it inside this glyph
-        iny
-        lda seC00,y
-        dey
-        ora seT
-        sta seT
-seNoD:  tya
-        beq seNoU               ; row 0: nothing above it
-        dey
-        lda seC00,y
-        iny
-        ora seT
-        sta seT
-seNoU:  lda seNB,y
-        sta seB
-        lsr
-        and #$55
-        sta seHi
-        lda seB
-        and #$55
-        sta seLo
-        lda seHi
-        eor #$55
-        and seLo                ; w01: a wall pixel
-        and seT                 ; ...with ground orthogonally next to it
-        and seMsk               ; ...on a level that asked for it. No branch.
-        sta seW
-        asl
-        ora seW
-        eor seB
-        sta seNB,y
-        dey
-        bpl seP2
-        ; ---- pass 3: out to BOTH charsets, B taking row 7-y ----
-        ldy #$07
-        ldx #$00
-seOut:  lda seNB,y
-seStA:  sta $c010,y
-seStB:  sta $c810,x
-        inx
-        dey
-        bpl seOut
-        lda seStA+1             ; on to the next glyph, eight bytes along in all three
-        clc
-        adc #$08
-        sta seLdA+1
-        sta seStA+1
-        sta seStB+1
-        bcc seNC
-        inc seLdA+2
-        inc seStA+2
-        inc seStB+2
-seNC:   dec seN
-        bne seGly
         rts
 
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
@@ -8172,13 +8004,13 @@ cellFillT: !byte 0,15,15,8,7,8,15,0,0,1,12,14,15,15,15,0,3,15,15,15,15,15,14,0,1
 ; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
 ; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
 ; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
-orbOccLoT: !byte 0,8,16,24,32,40,48,56,64,72,80
-orbOccHiT: !byte 112,112,112,112,112,112,112,112,112,112,112
+orbOccLoT: !byte 0,9,18,27,36,45,54,63,72,81,90,99
+orbOccHiT: !byte 112,112,112,112,112,112,112,112,112,112,112,112
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte 6,20,7,19,15,0,0,0,0,0,0      ; from the MANIFEST, so its length cannot
-orbYCT: !byte 5,5,5,5,5,0,0,0,0,0,0      ;   disagree with what the swap moves
-orbColT2: !byte 12,12,12,12   ; from the MANIFEST and SWAPPED: a level with
+orbXCT: !byte 6,20,7,19,15,0,0,0,0,0,0,0      ; from the MANIFEST, so its length cannot
+orbYCT: !byte 5,5,5,5,5,0,0,0,0,0,0,0      ;   disagree with what the swap moves
+orbColT2: !byte 12,12,12,12,0   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -9083,17 +8915,17 @@ mul40HiT: !byte 0,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2,2,3,3,3,3,3,3,4,4,4,4,4
 ; image segment through holeSeeT at $3240
 orbPtrT: !byte 160,161,162,163,164,165,166,167,168,169,170,160,162,164,166,168,170,171,172,173,174,175,176,178,180,182,184,186,188,176,178,180,182,184,186,188,190,191,192,193,194,195
 orbPtrU: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,177,179,181,183,185,187,189,177,179,181,183,185,187,189,0,0,0,0,0,0
-orbTallT: !byte 0,0,1,1
-orbArtT: !byte $00,$00,$00,$00   ; bitmap offset per entity; 0 = the orb's art
-orbHidT: !byte 0,0,0,0
-orbHid0T: !byte 0,0,0,0   ; the build's hidden flags, for objInit
-orbX0T: !byte 6,20,7,19   ; where objInit puts them back on a restart
-orbY0T: !byte 5,5,5,5
+orbTallT: !byte 0,0,1,1,0
+
+orbHidT: !byte 0,0,0,0,0
+orbHid0T: !byte 0,0,0,0,0   ; the build's hidden flags, for objInit
+orbX0T: !byte 6,20,7,19,0   ; where objInit puts them back on a restart
+orbY0T: !byte 5,5,5,5,0
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
-orbSeenT: !byte 0,0,0,0,0,0,0,0,0,0,0
-angAccT: !byte 0,0,0,0   ; 60ths banked toward this angel's next step
+orbSeenT: !byte 0,0,0,0,0,0,0,0,0,0,0,0
+angAccT: !byte 0,0,0,0,0   ; 60ths banked toward this angel's next step
 orbExpT: !byte 1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,1,0,1,0,1,6,6,6,6,6,6,6,6,6,6,6,1,1,1,1,1,1,1,6,6,6,6,6,6,6,6,6,6,6,6,6
 orbYBaseT: !byte 108,108,108,108,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,108,108,108,108,108,108,108,129,129,129,129,129,129,129,129,129,129,129,129,129
@@ -9164,7 +8996,7 @@ fNT:    !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0,0,0,0,0,0,0,0
         * = $7000
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte 48,179,38,104,233,0,0,0,48,79,61,104,233,0,0,0,48,191,38,104,233,0,0,0,48,79,37,104,233,0,0,0,48,79,38,104,233,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+orbOccT: !byte 48,179,38,104,233,0,0,0,0,48,79,61,104,233,0,0,0,0,48,191,38,104,233,0,0,0,0,48,79,37,104,233,0,0,0,0,48,79,38,104,233,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
@@ -9195,70 +9027,72 @@ darkerT: !byte 0,15,11,12,11,12,0,15,11,0,12,0,11,15,12,12
 ; charset stays because it is 2,048 and there is no 2K of bank 3 left to put it in -- and it is
 ; read exactly once, by dieSwap, straight into charset B's slot.
         * = $7100
-faceChrT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,191,255,255,255,255,255,255,255,254,255,255,255,255,255,247,255,255
-        !byte 255,255,255,255,255,255,254,252,255,255,255,255,255,255,63,63,255,255,255,255,255,255,255,253,255,253,255,255,255,255,255,255
-        !byte 255,255,255,253,255,255,255,255,255,255,255,255,255,255,252,252,255,255,223,255,255,255,125,255,255,255,255,255,255,254,252,252
-        !byte 191,255,255,255,255,255,255,255,85,255,255,255,255,255,255,255,255,255,255,255,255,255,191,191,255,255,255,255,255,191,63,127
-        !byte 255,255,255,255,247,255,255,255,255,255,127,255,255,255,255,255,255,255,255,127,255,255,255,255,255,255,255,255,255,255,255,247
-        !byte 255,255,255,255,255,3,170,128,255,255,255,255,255,255,175,43,255,255,255,255,226,144,72,81,255,255,255,255,43,66,40,80
-        !byte 255,255,255,255,255,254,242,241,255,255,255,255,255,168,43,74,255,255,255,255,255,255,191,175,240,245,198,192,24,11,93,85
-        !byte 69,95,157,127,127,255,125,255,211,211,214,246,254,244,222,246,253,241,247,247,229,149,63,63,80,85,221,116,245,244,194,213
+faceChrT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,252,255,255,255,255,255,3,170,128,255,255,255,255,255,255,175,43
+        !byte 255,255,255,255,226,144,72,81,255,255,255,255,43,66,40,80,255,255,255,255,255,255,255,191,255,255,255,255,255,255,255,254
+        !byte 85,255,255,255,255,255,255,255,255,255,255,255,255,255,191,191,255,255,255,255,255,254,242,241,255,255,255,255,255,168,43,74
+        !byte 255,255,255,255,255,255,191,175,240,245,198,192,24,11,93,85,255,255,255,255,255,254,252,252,255,255,255,255,255,191,63,127
         !byte 69,217,112,53,63,157,167,83,63,111,79,95,3,67,94,246,229,229,205,215,207,213,223,207,81,252,212,255,253,255,119,255
         !byte 47,99,128,34,76,218,215,244,255,255,255,255,255,63,191,239,253,241,240,240,240,224,199,149,19,3,77,31,31,247,125,55
         !byte 254,246,118,214,244,214,242,214,255,255,255,252,254,253,252,254,55,215,63,95,255,127,255,127,255,253,92,92,84,213,211,213
         !byte 255,127,85,137,1,80,81,64,247,211,212,253,255,245,254,252,196,237,197,237,193,197,197,197,244,244,116,253,255,247,221,255
-        !byte 207,175,43,35,218,88,84,45,4,82,16,89,65,73,5,3,61,87,253,95,93,215,125,87,255,255,119,255,223,255,119,223
-        !byte 245,116,244,244,213,209,244,209,255,255,255,255,63,191,63,47,255,255,255,249,244,231,247,245,127,55,255,223,127,119,255,255
-        !byte 95,221,213,252,247,223,215,223,83,215,71,31,215,215,83,67,253,221,221,213,245,245,253,127,255,63,63,63,143,95,251,255
-        !byte 215,213,221,149,23,21,93,21,255,223,247,255,255,247,221,255,255,255,119,247,255,255,221,253,209,72,210,90,246,210,116,212
-        !byte 191,191,63,63,63,175,15,143,252,249,241,243,241,237,220,212,37,85,29,85,84,81,69,13,245,83,245,93,125,85,93,29
-        !byte 255,223,93,255,127,215,29,221,125,245,253,221,255,253,223,247,79,15,35,96,216,81,213,87,247,245,215,87,95,125,127,245
-        !byte 223,127,255,63,79,211,245,209,247,221,197,119,117,85,66,8,83,71,97,65,80,66,40,111,255,253,253,253,255,53,21,5
-        !byte 79,207,112,119,29,85,253,79,252,248,241,48,32,64,69,84,23,23,93,87,93,87,117,119,127,247,119,127,255,215,93,223
-        !byte 127,221,119,253,127,253,119,125,245,247,119,215,245,221,93,221,139,131,67,71,210,80,65,1,224,224,192,196,194,212,212,214
-        !byte 37,21,13,13,5,87,95,81,23,23,92,85,197,193,205,213,247,255,93,95,221,119,87,95,255,255,125,247,255,127,223,247
-        !byte 245,252,214,214,250,208,80,193,1,225,5,5,163,21,81,99,93,84,213,69,92,244,212,66,8,174,106,65,21,5,73,21
-        !byte 46,62,168,0,0,82,41,64,117,93,17,20,53,95,135,160,8,47,3,79,91,68,8,202,213,55,221,197,229,229,183,35
-        !byte 119,119,253,213,221,119,253,93,223,127,93,223,215,93,213,255,253,221,245,221,127,215,117,215,244,125,253,93,245,119,247,223
-        !byte 0,0,32,0,1,0,32,0,146,180,48,48,20,93,84,20,81,80,85,209,1,81,85,81,221,245,212,117,21,85,95,31
-        !byte 247,117,87,117,215,247,117,127,255,223,127,247,255,127,221,125,216,68,80,68,89,71,31,85,44,28,125,252,85,93,29,13
-        !byte 40,42,11,43,42,2,84,80,199,193,226,160,137,129,100,21,67,11,82,2,0,0,64,80,128,170,250,190,60,40,34,0
-        !byte 122,118,61,63,149,53,116,84,161,137,129,96,96,216,116,54,119,213,253,223,95,215,124,119,215,119,85,119,115,119,93,95
-        !byte 127,95,95,87,223,221,245,125,213,119,87,93,213,215,93,215,73,209,81,208,86,244,84,212,191,63,127,127,127,63,63,191
-        !byte 255,247,255,255,255,253,255,255,2,16,80,64,64,64,64,1,21,85,93,5,5,5,7,71,5,21,85,21,5,5,20,21
-        !byte 247,93,85,125,127,95,93,119,253,221,117,247,255,247,215,221,240,248,8,32,16,0,34,8,165,79,15,23,133,143,151,15
-        !byte 85,85,215,85,116,84,244,84,17,5,68,20,20,49,88,208,5,5,1,85,21,20,16,80,85,4,16,16,81,81,64,64
-        !byte 58,212,212,212,210,212,240,212,156,5,175,179,177,169,161,136,55,149,93,71,199,209,245,85,93,87,85,93,247,253,85,221
-        !byte 247,85,117,93,119,85,85,93,117,95,125,85,117,119,85,117,70,196,80,192,66,64,192,80,191,191,127,63,127,63,63,191
-        !byte 8,64,65,81,81,55,117,85,129,19,5,5,132,16,85,68,85,85,244,213,93,85,93,87,119,125,85,119,119,119,87,247
-        !byte 253,245,220,245,245,116,113,212,136,128,42,32,128,0,0,0,103,87,7,83,133,65,252,79,85,213,223,93,221,116,247,117
-        !byte 80,65,65,16,86,81,64,85,81,69,5,1,0,129,161,161,85,65,69,0,21,81,89,77,218,212,244,211,196,213,84,223
-        !byte 170,168,116,84,168,0,100,216,87,83,85,23,23,7,13,7,117,221,21,93,93,87,85,87,93,93,31,87,93,117,85,253
-        !byte 241,85,117,85,213,85,85,85,66,80,192,80,80,244,116,124,191,191,63,127,63,127,127,63,81,84,80,80,66,80,84,84
-        !byte 68,208,85,84,4,16,21,21,87,87,93,85,71,85,93,23,223,221,87,255,247,127,125,125,213,213,83,83,95,85,29,79
-        !byte 84,80,85,69,85,71,87,111,185,172,11,10,34,84,221,247,93,255,61,225,168,9,87,253,117,7,70,127,127,117,213,255
-        !byte 1,192,112,86,220,253,93,223,127,127,0,191,59,162,84,253,84,79,255,250,250,32,81,93,22,76,5,81,16,50,126,252
-        !byte 103,67,113,51,21,53,28,156,87,215,85,215,223,253,221,253,215,117,85,85,125,85,85,85,116,85,93,87,119,93,21,93
-        !byte 84,244,84,84,0,84,68,84,191,191,63,191,191,191,63,191,18,148,212,212,198,196,196,196,4,69,21,21,5,19,5,21
-        !byte 85,21,93,23,87,85,245,119,253,117,117,119,124,221,117,125,125,93,92,93,125,116,117,116,79,79,95,79,79,79,95,79
-        !byte 223,221,255,247,255,119,255,223,253,253,253,253,253,125,220,253,253,253,93,119,247,117,125,127,127,87,255,119,255,87,93,21
-        !byte 221,253,255,247,247,245,253,245,133,149,69,101,64,202,208,208,117,125,85,125,117,125,85,125,221,85,85,87,119,85,85,71
-        !byte 112,213,221,69,212,85,92,69,0,20,20,70,6,7,71,15,255,255,252,240,244,210,10,97,251,175,2,186,176,130,137,65
-        !byte 255,255,239,250,170,2,81,85,215,255,255,127,23,15,7,65,255,248,229,197,148,80,87,213,10,140,104,73,41,20,232,1
-        !byte 8,66,34,64,79,220,65,82,255,175,139,43,6,128,96,88,255,255,255,255,255,252,252,248,255,251,234,128,128,5,85,87
-        !byte 255,255,138,251,171,10,91,82,255,255,47,235,254,184,10,15,255,255,255,255,255,63,191,63,253,249,252,241,228,212,24,86
-        !byte 15,84,74,32,33,133,129,23,71,87,127,93,255,127,255,221,93,255,253,255,119,255,255,255,35,91,215,214,82,214,244,116
-        !byte 252,251,245,255,229,205,199,5,28,116,221,213,125,221,127,127,33,53,221,253,242,208,214,212,208,118,221,127,31,15,135,71
-        !byte 20,173,39,0,93,209,116,221,191,15,79,207,95,95,2,37,248,241,241,245,241,245,231,229,85,95,255,221,119,255,127,255
-        !byte 85,253,255,221,247,223,255,253,83,37,44,74,83,208,214,253,143,211,50,80,0,48,60,44,255,255,255,255,63,255,191,63
-        !byte 255,255,252,252,249,245,237,212,22,16,65,79,92,144,96,0,127,255,85,95,63,63,55,127,255,255,255,125,255,255,127,253
-        !byte 223,255,255,255,221,255,255,255,212,246,220,246,86,246,244,118,254,252,253,255,253,253,252,255,65,247,255,255,125,255,223,95
-        !byte 221,95,253,253,247,247,255,255,80,66,74,84,253,125,252,253,35,49,40,64,95,255,63,63,245,117,127,29,127,95,255,87
-        !byte 0,211,255,255,85,117,213,212,255,63,63,63,191,255,255,63,245,245,247,247,241,245,247,243,215,255,255,127,221,255,255,127
-        !byte 127,255,255,255,223,255,255,255,221,127,221,253,255,127,215,255,75,67,194,222,93,209,88,214,15,143,195,226,226,187,58,46
-        !byte 255,255,255,255,255,255,252,253,250,224,192,144,136,1,5,5,17,5,99,71,95,95,215,221,255,255,93,255,255,127,119,253
-        !byte 255,255,255,125,255,255,253,223,221,255,255,253,247,255,255,255,86,214,214,214,70,82,212,82,254,241,245,239,199,213,215,195
-        !byte 255,95,127,255,255,255,255,255,223,213,215,209,215,245,247,221,252,124,198,84,30,22,69,95,63,157,129,129,136,144,72,208
+        !byte 207,175,43,35,218,88,84,45,255,255,255,255,255,255,63,63,4,82,16,89,65,73,5,3,61,87,253,95,93,215,125,87
+        !byte 255,255,119,255,223,255,119,223,245,116,244,244,213,209,244,209,255,255,255,255,63,191,63,47,255,255,255,249,244,231,247,245
+        !byte 83,215,71,31,215,215,83,67,253,221,221,213,245,245,253,127,255,63,63,63,143,95,251,255,215,213,221,149,23,21,93,21
+        !byte 255,223,247,255,255,247,221,255,255,255,119,247,255,255,221,253,255,255,223,255,255,255,125,255,209,72,210,90,246,210,116,212
+        !byte 127,55,255,223,127,119,255,255,191,191,63,63,63,175,15,143,252,249,241,243,241,237,220,212,37,85,29,85,84,81,69,13
+        !byte 245,83,245,93,125,85,93,29,255,223,93,255,127,215,29,221,125,245,253,221,255,253,223,247,79,15,35,96,216,81,213,87
+        !byte 247,221,197,119,117,85,66,8,83,71,97,65,80,66,40,111,255,253,253,253,255,53,21,5,79,207,112,119,29,85,253,79
+        !byte 252,248,241,48,32,64,69,84,23,23,93,87,93,87,117,119,127,247,119,127,255,215,93,223,95,221,213,252,247,223,215,223
+        !byte 247,245,215,87,95,125,127,245,127,221,119,253,127,253,119,125,245,247,119,215,245,221,93,221,139,131,67,71,210,80,65,1
+        !byte 224,224,192,196,194,212,212,214,37,21,13,13,5,87,95,81,23,23,92,85,197,193,205,213,247,255,93,95,221,119,87,95
+        !byte 1,225,5,5,163,21,81,99,93,84,213,69,92,244,212,66,8,174,106,65,21,5,73,21,46,62,168,0,0,82,41,64
+        !byte 117,93,17,20,53,95,135,160,8,47,3,79,91,68,8,202,213,55,221,197,229,229,183,35,223,127,255,63,79,211,245,209
+        !byte 255,255,125,247,255,127,223,247,119,119,253,213,221,119,253,93,223,127,93,223,215,93,213,255,253,221,245,221,127,215,117,215
+        !byte 244,125,253,93,245,119,247,223,146,180,48,48,20,93,84,20,81,80,85,209,1,81,85,81,221,245,212,117,21,85,95,31
+        !byte 247,117,87,117,215,247,117,127,255,223,127,247,255,127,221,125,216,68,80,68,89,71,31,85,40,42,11,43,42,2,84,80
+        !byte 199,193,226,160,137,129,100,21,67,11,82,2,0,0,64,80,128,170,250,190,60,40,34,0,245,252,214,214,250,208,80,193
+        !byte 0,0,32,0,1,0,32,0,122,118,61,63,149,53,116,84,161,137,129,96,96,216,116,54,119,213,253,223,95,215,124,119
+        !byte 215,119,85,119,115,119,93,95,127,95,95,87,223,221,245,125,213,119,87,93,213,215,93,215,73,209,81,208,86,244,84,212
+        !byte 2,16,80,64,64,64,64,1,21,85,93,5,5,5,7,71,5,21,85,21,5,5,20,21,247,93,85,125,127,95,93,119
+        !byte 253,221,117,247,255,247,215,221,240,248,8,32,16,0,34,8,165,79,15,23,133,143,151,15,44,28,125,252,85,93,29,13
+        !byte 191,63,127,127,127,63,63,191,85,85,215,85,116,84,244,84,17,5,68,20,20,49,88,208,5,5,1,85,21,20,16,80
+        !byte 85,4,16,16,81,81,64,64,58,212,212,212,210,212,240,212,156,5,175,179,177,169,161,136,55,149,93,71,199,209,245,85
+        !byte 117,95,125,85,117,119,85,117,70,196,80,192,66,64,192,80,191,191,127,63,127,63,63,191,8,64,65,81,81,55,117,85
+        !byte 129,19,5,5,132,16,85,68,85,85,244,213,93,85,93,87,119,125,85,119,119,119,87,247,255,247,255,255,255,253,255,255
+        !byte 93,87,85,93,247,253,85,221,253,245,220,245,245,116,113,212,136,128,42,32,128,0,0,0,103,87,7,83,133,65,252,79
+        !byte 85,213,223,93,221,116,247,117,80,65,65,16,86,81,64,85,81,69,5,1,0,129,161,161,85,65,69,0,21,81,89,77
+        !byte 87,83,85,23,23,7,13,7,117,221,21,93,93,87,85,87,93,93,31,87,93,117,85,253,241,85,117,85,213,85,85,85
+        !byte 66,80,192,80,80,244,116,124,191,191,63,127,63,127,127,63,81,84,80,80,66,80,84,84,247,85,117,93,119,85,85,93
+        !byte 218,212,244,211,196,213,84,223,68,208,85,84,4,16,21,21,87,87,93,85,71,85,93,23,223,221,87,255,247,127,125,125
+        !byte 213,213,83,83,95,85,29,79,84,80,85,69,85,71,87,111,185,172,11,10,34,84,221,247,93,255,61,225,168,9,87,253
+        !byte 127,127,0,191,59,162,84,253,84,79,255,250,250,32,81,93,22,76,5,81,16,50,126,252,103,67,113,51,21,53,28,156
+        !byte 87,215,85,215,223,253,221,253,215,117,85,85,125,85,85,85,116,85,93,87,119,93,21,93,170,168,116,84,168,0,100,216
+        !byte 117,7,70,127,127,117,213,255,84,244,84,84,0,84,68,84,191,191,63,191,191,191,63,191,18,148,212,212,198,196,196,196
+        !byte 4,69,21,21,5,19,5,21,85,21,93,23,87,85,245,119,253,117,117,119,124,221,117,125,125,93,92,93,125,116,117,116
+        !byte 253,253,253,253,253,125,220,253,253,253,93,119,247,117,125,127,127,87,255,119,255,87,93,21,221,253,255,247,247,245,253,245
+        !byte 133,149,69,101,64,202,208,208,117,125,85,125,117,125,85,125,221,85,85,87,119,85,85,71,1,192,112,86,220,253,93,223
+        !byte 79,79,95,79,79,79,95,79,112,213,221,69,212,85,92,69,0,20,20,70,6,7,71,15,255,255,93,255,255,127,119,253
+        !byte 255,255,255,255,255,247,255,255,255,255,255,125,255,255,127,253,255,255,255,255,255,255,255,253,255,255,255,255,255,255,255,247
+        !byte 69,95,157,127,127,255,125,255,255,255,255,255,255,255,252,252,0,211,255,255,85,117,213,212,191,255,255,255,255,255,255,255
+        !byte 255,255,255,125,255,255,253,223,255,255,255,255,255,63,191,63,253,249,252,241,228,212,24,86,223,221,255,247,255,119,255,223
+        !byte 255,255,255,127,255,255,255,255,255,255,127,255,255,255,255,255,255,255,255,255,247,255,255,255,255,255,252,252,249,245,237,212
+        !byte 223,255,255,255,221,255,255,255,127,255,85,95,63,63,55,127,22,16,65,79,92,144,96,0,221,127,221,253,255,127,215,255
+        !byte 252,124,198,84,30,22,69,95,245,245,247,247,241,245,247,243,255,63,63,63,191,255,255,63,245,117,127,29,127,95,255,87
+        !byte 215,255,255,127,221,255,255,127,80,85,221,116,245,244,194,213,253,241,247,247,229,149,63,63,211,211,214,246,254,244,222,246
+        !byte 17,5,99,71,95,95,215,221,75,67,194,222,93,209,88,214,254,252,253,255,253,253,252,255,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        !byte 0,0,0,0,0,0,0,0,80,66,74,84,253,125,252,253,223,213,215,209,215,245,247,221,221,255,255,253,247,255,255,255
+
+        ; ---- runByteT / runBitT: a run id as a byte index and a bit mask ----
+        ; Here, in the page the cut-scene charset vacated when it was repacked to the glyphs its
+        ; picture actually reaches (see FACE_PACK). They were in the $9d00 block, which a
+        ; four-level chain overran by 113 bytes -- the wall deltas grew when NHOLE went to seven
+        ; for the hub's pedestals, because opening a wall changes the LOS bitmap and the delta
+        ; carries every byte of it that moved.
+        * = $7800
+runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1   ; every id, as mkRuns rebuilds it
 
         * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
 ; moveXT/moveYT are 512 bytes of TABLE that were sitting inside the code block -- the scarcest
@@ -9488,74 +9322,11 @@ symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair
 symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
         !byte $ff,$ff,$ff,$cf,$ff,$ff,$ff,$ff
         !byte $ff,$ff,$ff,$ef,$ff,$ff,$ff,$ff
-lvlSymT: !byte 0,0,0,8,16   ; 0 plain, 8 ground-ink dot, 16 seam-ink
+lvlSymT: !byte 0,0,0,8   ; 0 plain, 8 ground-ink dot, 16 seam-ink
 ; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather than
 ; a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no branch.
-lvlSeamT: !byte $00,$00,$00,$00,$55
+lvlSeamT: !byte $00,$00,$00,$00
 
-; ---- idolLk: is the IDOL the thing in your hands? ----
-; Called wherever carry changes. It sets one flag and touches nothing else -- the room keeps the
-; level's own colours, and the tell is on the SPRITES: see sprPal, where holding the idol tints
-; an angel the same brown/orange/yellow that seeing one in the world does.
-;
-; An earlier cut of this repainted the whole room. It read well but it was wrong twice over: the
-; level stopped being recognisable as itself, and the death scene inherited the tint, because
-; dieSwap runs against whatever inks were live and lvlLook never gets a chance to put them back.
-
-; ---- sprPal: the two SHARED sprite inks, once a frame ----
-; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
-; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
-; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
-; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda dieLat              ; ---- the death scene wants the inks to SIT STILL ----
-        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
-        lda idolOn              ;   before any of this existed, and the scene's fade was written
-        bne spTint              ;   against it. "The world no longer goes black correctly."
-        lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
-        beq spLvl               ;   angels have stopped caring whether you are looking
-spTint:
-        lda #$00      ; ---- above the split: the world's ----
-        ldy #$0f
-        bne spWSt               ; always: brown is not zero
-spLvl:  lda sprU                ; whatever lvlLook left for this level
-        ldy sprH
-spWSt:  sta $d025
-        sty $d026
-        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
-        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
-                                ;   tinting things and walks down into the last few rows.
-        lda dieLat
-        bne spDn
-        ldx carry               ; ---- below the split: only if something special is in hand ----
-        beq spDn
-        dex                     ;   carry is the entity index PLUS ONE
-        lda orbArtT,x
-        beq spDn                ; an orb holds no special inks
-        lda #$00
-        ldy #$0f
-        sta irqSpU+1
-        sty irqSpH+1
-spDn:   rts
-
-idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
-                                ;   reading the working flag direct would show 0 for any raster
-                                ;   frame whose IRQ landed inside the projection -- one bad frame
-                                ;   in roughly four, which is exactly the flicker this chases.
-idolLat:lda idolWk
-        sta idolOn
-        lda #$00
-        sta idolWk
-        rts
-
-idolLk: ldx #$00                ; assume not
-        ldy carry
-        beq idlPut              ; empty hands
-        dey
-        lda orbArtT,y           ; 0 = an orb. Only the idol changes the rules.
-        beq idlPut
-        inx
-idlPut: stx idolHd
-        rts
 
 
         * = $7e00
@@ -9569,32 +9340,6 @@ idlPut: stx idolHd
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
-; ---- sprSpl: the HELD object's inks, from its own raster line down ----
-; Bit pairs 01 and 11 are one register each for all eight sprites, so the only way to give the
-; thing in your hand its own tones is to change them partway down the screen. It is slot 0 at
-; ORB_HOLD_Y, Y-expanded to 42 rows, so it owns everything below SPRSPL and one split does it.
-; Anything in the WORLD whose sprite reaches below that line takes these inks too -- there is no
-; per-sprite escape from a shared register, only a per-SCANLINE one.
-sprSpl:
-irqSpU: lda #$0b
-        sta $d025
-irqSpH: lda #$0f
-        sta $d026
-        lda irqCm2+1            ; on to whatever the arc split wants next
-        sta $d012
-        jmp irqd
-
-; sprArm: the split is off during a FALL -- every sprite is cleared on the frame one starts, and
-; the arc's own split can sit ABOVE this line, which would strand region 3 behind it.
-sprArm: lda fallSt
-        bne saOff
-        lda #$d1
-        sta irqSpC+1
-        sta irqAr2+1            ; region 1 now ends here rather than at the arc split
-        rts
-saOff:  lda #$ff                ; never matches, and irqAr2 keeps the arc split
-        sta irqSpC+1
-        rts
 
 ; ---- palCol: the ground inks, by key ----
 ; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
@@ -9641,7 +9386,6 @@ colT:   !byte $01             ; the TOP region's pending ink. irqB0 is read at t
 colF:   !byte $01             ; the FLOOR's ink. colW is the ceiling's now.
 sprU:   !byte $0b             ; this level's shared sprite inks, shadowed
 sprH:   !byte $0f             ;   because the idol swap borrows the registers
-idolOn: !byte $00               ; the idol is on screen. LATCHED: the IRQ reads this sixty
 
 
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
@@ -9677,8 +9421,10 @@ lvlLook: ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level A
         sta $d023
         lda lvlSprunderT,x
         sta sprU
+        sta $d025
         lda #$0f
         sta sprH
+        sta $d026
 
         lda lvlSprunderT,x
         sta sprU
@@ -10074,7 +9820,7 @@ mrB:    txa
         lda mrBitT,y
         sta runBitT,x
         inx
-        cpx #$39
+        cpx #$41
         bcc mrB
         jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
                                 ;   ends at bfsQ with nothing to spare.
@@ -10423,8 +10169,8 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
-; wall goes, so the delta is never the one map byte you would guess: these 3 come to
-; 197, 33, 13 bytes. (It said "13 runs become 5 here" when there was one wall on one
+; wall goes, so the delta is never the one map byte you would guess: these 6 come to
+; 9, 17, 17, 57, 97, 197 bytes. (It said "13 runs become 5 here" when there was one wall on one
 ; level to point at, and reported wall 0's count as if it were every wall's.)
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
@@ -10434,17 +10180,23 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
-wallDT0: !byte <mapT+58,>mapT+58,0,1,<mapT+74,>mapT+74,0,1,<mapT+90,>mapT+90,0,1,<holeSeeT+7,>holeSeeT+7,15,3,<holeSeeT+9,>holeSeeT+9,127,3,<holeSeeT+11,>holeSeeT+11,63,3,<holeSeeT+13,>holeSeeT+13,29,5,<holeSeeT+15,>holeSeeT+15,8,0,<holeSeeT+37,>holeSeeT+37,29,17,<holeSeeT+39,>holeSeeT+39,63,3,<holeSeeT+41,>holeSeeT+41,127,3,<holeSeeT+43,>holeSeeT+43,63,3,<holeSeeT+45,>holeSeeT+45,29,17,<holeSeeT+66,>holeSeeT+66,56,0,<holeSeeT+68,>holeSeeT+68,252,0,<holeSeeT+69,>holeSeeT+69,29,28,<holeSeeT+70,>holeSeeT+70,254,0,<holeSeeT+71,>holeSeeT+71,63,56,<holeSeeT+72,>holeSeeT+72,254,0,<holeSeeT+73,>holeSeeT+73,127,120,<holeSeeT+74,>holeSeeT+74,254,0,<holeSeeT+75,>holeSeeT+75,63,56,<holeSeeT+76,>holeSeeT+76,252,0,<holeSeeT+77,>holeSeeT+77,29,28,<holeSeeT+78,>holeSeeT+78,56,0,<holeSeeT+99,>holeSeeT+99,8,0,<holeSeeT+101,>holeSeeT+101,29,5,<holeSeeT+103,>holeSeeT+103,63,3,<holeSeeT+105,>holeSeeT+105,127,3,<holeSeeT+107,>holeSeeT+107,15,3,<holeSeeT+133,>holeSeeT+133,29,13,<holeSeeT+135,>holeSeeT+135,63,3,<holeSeeT+137,>holeSeeT+137,127,3,<holeSeeT+139,>holeSeeT+139,63,3,<holeSeeT+141,>holeSeeT+141,29,1,<holeSeeT+143,>holeSeeT+143,8,0,<holeSeeT+163,>holeSeeT+163,8,0,<holeSeeT+165,>holeSeeT+165,29,1,<holeSeeT+167,>holeSeeT+167,63,3,<holeSeeT+169,>holeSeeT+169,127,3,<holeSeeT+171,>holeSeeT+171,63,3,<holeSeeT+173,>holeSeeT+173,29,1,<holeSeeT+175,>holeSeeT+175,8,0,<holeSeeT+195,>holeSeeT+195,8,0,<holeSeeT+197,>holeSeeT+197,29,1,<holeSeeT+199,>holeSeeT+199,63,3,<holeSeeT+201,>holeSeeT+201,127,3,<holeSeeT+203,>holeSeeT+203,63,3,<holeSeeT+205,>holeSeeT+205,29,13,$ff
-wallDT1: !byte <mapT+57,>mapT+57,0,1,<holeSeeT+7,>holeSeeT+7,2,0,<holeSeeT+10,>holeSeeT+10,1,0,<holeSeeT+12,>holeSeeT+12,192,0,<holeSeeT+13,>holeSeeT+13,1,0,<holeSeeT+15,>holeSeeT+15,64,0,<holeSeeT+36,>holeSeeT+36,4,0,<holeSeeT+39,>holeSeeT+39,2,0,$ff
-wallDT2: !byte <mapT+227,>mapT+227,0,1,<holeSeeT+89,>holeSeeT+89,40,8,<holeSeeT+92,>holeSeeT+92,31,7,$ff
-wallDLoT: !byte <wallDT0,<wallDT1,<wallDT2
-wallDHiT: !byte >wallDT0,>wallDT1,>wallDT2
-wallCells0: !byte $3a,$4a,$5a,$ff
-wallCells1: !byte $39,$ff
-wallCells2: !byte $e3,$ff   ; each wall's cells, $ff-ended
-wallCLoT: !byte <wallCells0,<wallCells1,<wallCells2
-wallCHiT: !byte >wallCells0,>wallCells1,>wallCells2
-wallStT: !fill 3, 0   ; per wall, global across the chain: 0 = it is there
+wallDT0: !byte <mapT+88,>mapT+88,0,1,<holeSeeT+43,>holeSeeT+43,31,0,$ff
+wallDT1: !byte <mapT+216,>mapT+216,0,1,<holeSeeT+90,>holeSeeT+90,192,0,<holeSeeT+91,>holeSeeT+91,7,6,<holeSeeT+92,>holeSeeT+92,120,0,$ff
+wallDT2: !byte <mapT+235,>mapT+235,0,1,<holeSeeT+93,>holeSeeT+93,62,6,<holeSeeT+123,>holeSeeT+123,118,112,<holeSeeT+125,>holeSeeT+125,126,112,$ff
+wallDT3: !byte <mapT+76,>mapT+76,0,1,<mapT+89,>mapT+89,0,1,<holeSeeT+38,>holeSeeT+38,57,1,<holeSeeT+41,>holeSeeT+41,31,15,<holeSeeT+43,>holeSeeT+43,14,12,<holeSeeT+48,>holeSeeT+48,2,0,<holeSeeT+49,>holeSeeT+49,128,0,<holeSeeT+51,>holeSeeT+51,32,0,<holeSeeT+67,>holeSeeT+67,128,0,<holeSeeT+68,>holeSeeT+68,1,0,<holeSeeT+69,>holeSeeT+69,240,32,<holeSeeT+71,>holeSeeT+71,60,48,<holeSeeT+73,>holeSeeT+73,30,12,<holeSeeT+75,>holeSeeT+75,14,12,$ff
+wallDT4: !byte <mapT+151,>mapT+151,0,1,<mapT+152,>mapT+152,0,1,<mapT+164,>mapT+164,0,1,<mapT+178,>mapT+178,0,1,<holeSeeT+2,>holeSeeT+2,224,0,<holeSeeT+3,>holeSeeT+3,7,0,<holeSeeT+4,>holeSeeT+4,248,0,<holeSeeT+5,>holeSeeT+5,1,0,<holeSeeT+6,>holeSeeT+6,124,0,<holeSeeT+8,>holeSeeT+8,31,0,<holeSeeT+9,>holeSeeT+9,128,0,<holeSeeT+10,>holeSeeT+10,7,0,<holeSeeT+11,>holeSeeT+11,224,0,<holeSeeT+12,>holeSeeT+12,25,0,<holeSeeT+13,>holeSeeT+13,120,0,<holeSeeT+14,>holeSeeT+14,30,0,<holeSeeT+15,>holeSeeT+15,158,0,<holeSeeT+16,>holeSeeT+16,255,128,<holeSeeT+17,>holeSeeT+17,231,1,<holeSeeT+18,>holeSeeT+18,255,96,<holeSeeT+19,>holeSeeT+19,249,0,<holeSeeT+20,>holeSeeT+20,127,96,<holeSeeT+21,>holeSeeT+21,254,0,<holeSeeT+22,>holeSeeT+22,31,24,$ff
+wallDT5: !byte <mapT+58,>mapT+58,0,1,<mapT+74,>mapT+74,0,1,<mapT+90,>mapT+90,0,1,<holeSeeT+7,>holeSeeT+7,15,3,<holeSeeT+9,>holeSeeT+9,127,3,<holeSeeT+11,>holeSeeT+11,63,3,<holeSeeT+13,>holeSeeT+13,29,5,<holeSeeT+15,>holeSeeT+15,8,0,<holeSeeT+37,>holeSeeT+37,29,17,<holeSeeT+39,>holeSeeT+39,63,3,<holeSeeT+41,>holeSeeT+41,127,3,<holeSeeT+43,>holeSeeT+43,63,3,<holeSeeT+45,>holeSeeT+45,29,17,<holeSeeT+66,>holeSeeT+66,56,0,<holeSeeT+68,>holeSeeT+68,252,0,<holeSeeT+69,>holeSeeT+69,29,28,<holeSeeT+70,>holeSeeT+70,254,0,<holeSeeT+71,>holeSeeT+71,63,56,<holeSeeT+72,>holeSeeT+72,254,0,<holeSeeT+73,>holeSeeT+73,127,120,<holeSeeT+74,>holeSeeT+74,254,0,<holeSeeT+75,>holeSeeT+75,63,56,<holeSeeT+76,>holeSeeT+76,252,0,<holeSeeT+77,>holeSeeT+77,29,28,<holeSeeT+78,>holeSeeT+78,56,0,<holeSeeT+99,>holeSeeT+99,8,0,<holeSeeT+101,>holeSeeT+101,29,5,<holeSeeT+103,>holeSeeT+103,63,3,<holeSeeT+105,>holeSeeT+105,127,3,<holeSeeT+107,>holeSeeT+107,15,3,<holeSeeT+133,>holeSeeT+133,29,13,<holeSeeT+135,>holeSeeT+135,63,3,<holeSeeT+137,>holeSeeT+137,127,3,<holeSeeT+139,>holeSeeT+139,63,3,<holeSeeT+141,>holeSeeT+141,29,1,<holeSeeT+143,>holeSeeT+143,8,0,<holeSeeT+163,>holeSeeT+163,8,0,<holeSeeT+165,>holeSeeT+165,29,1,<holeSeeT+167,>holeSeeT+167,63,3,<holeSeeT+169,>holeSeeT+169,127,3,<holeSeeT+171,>holeSeeT+171,63,3,<holeSeeT+173,>holeSeeT+173,29,1,<holeSeeT+175,>holeSeeT+175,8,0,<holeSeeT+195,>holeSeeT+195,8,0,<holeSeeT+197,>holeSeeT+197,29,1,<holeSeeT+199,>holeSeeT+199,63,3,<holeSeeT+201,>holeSeeT+201,127,3,<holeSeeT+203,>holeSeeT+203,63,3,<holeSeeT+205,>holeSeeT+205,29,13,$ff
+wallDLoT: !byte <wallDT0,<wallDT1,<wallDT2,<wallDT3,<wallDT4,<wallDT5
+wallDHiT: !byte >wallDT0,>wallDT1,>wallDT2,>wallDT3,>wallDT4,>wallDT5
+wallCells0: !byte $58,$ff
+wallCells1: !byte $d8,$ff
+wallCells2: !byte $eb,$ff
+wallCells3: !byte $4c,$59,$ff
+wallCells4: !byte $97,$98,$a4,$b2,$ff
+wallCells5: !byte $3a,$4a,$5a,$ff   ; each wall's cells, $ff-ended
+wallCLoT: !byte <wallCells0,<wallCells1,<wallCells2,<wallCells3,<wallCells4,<wallCells5
+wallCHiT: !byte >wallCells0,>wallCells1,>wallCells2,>wallCells3,>wallCells4,>wallCells5
+wallStT: !fill 6, 0   ; per wall, global across the chain: 0 = it is there
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
 wsDir:  !byte 0                 ; ...and which way: 1 = taking it out, 0 = putting it back
 hzWv:   !byte 0                 ; hzRunW's held "out" value while it reads the "back" one
@@ -10547,7 +10299,7 @@ dmClr:  sta doomT,x             ;   than at entry because the main block had no 
         inx
         bne dmClr
         sta wsN                 ; a collapse in progress is abandoned
-        ldx #$02   ; EVERY wall in the chain, not just the live level's:
+        ldx #$05   ; EVERY wall in the chain, not just the live level's:
 wbLp:   stx wsWall              ;   a wall's triples name LIVE table addresses, so applying one
                                 ;   belonging to another level would write that room's bytes into
                                 ;   this one. Safe because this routine runs before every lvlSwap,
@@ -10695,7 +10447,7 @@ sokDX:  !byte 0
 sokDY:  !byte 0
         ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
         ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
-angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0
+angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
         ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
         ; and the manifest carries each chunk's destination, so where they live is free choice.
@@ -10704,7 +10456,7 @@ angBlkT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
-lvlNxtT:!byte $04,$ff,$ff,$ff   ; the LEVEL each EXIT leads to, one byte
+lvlNxtT:!byte $02,$ff,$ff,$ff   ; the LEVEL each EXIT leads to, one byte
                                 ;   each; $ff = nowhere, and fallChk walks over such a hole
                                 ;   rather than dropping you back where you stand
 nOrbT:  !byte $04                 ; orbs
@@ -10736,7 +10488,7 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; LVLSHADOW = $f500 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 826 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 882 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -10750,17 +10502,17 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; Only emitted with TWO OR MORE slots. With one there is nothing to permute -- the transposition
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
-lvlAtT: !byte $04,$05   ; slot -> the level now in it
-lvlBasLoT: !byte $00,$3a
-lvlBasHiT: !byte $f5,$f8
-lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbArtT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
-lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbArtT,>orbColT2,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$e0,$20,$04,$05,$01,$0b,$0b,$04,$04,$80,$01,$01,$01,$07,$03,$04,$04,$04,$04,$04,$08,$0b,$58,$01,$01,$01,$01,$01,$01
+lvlAtT: !byte $02,$03,$04   ; slot -> the level now in it
+lvlBasLoT: !byte $00,$72,$e4
+lvlBasHiT: !byte $f5,$f8,$fb
+lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
+lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbColT2,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
+lvlLenT: !byte $00,$e0,$20,$04,$05,$01,$0c,$0c,$05,$05,$a0,$01,$01,$01,$07,$03,$05,$05,$05,$04,$08,$0c,$6c,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
 ; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
-; 826 of them. The table index lives in lsIdx for the same reason.
+; 882 of them. The table index lives in lsIdx for the same reason.
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
@@ -10788,7 +10540,7 @@ lsByte:
 lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
 lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
 lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over 826 bytes is most of an extra frame.
+        txa                     ;   a byte, which over 882 bytes is most of an extra frame.
 lsD2:   sta $ffff,y
         iny
         cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
@@ -10808,7 +10560,7 @@ lsPg:   inc lsS+2
         inc lsS2+2
 lsNC:   inc lsIdx
         lda lsIdx
-        cmp #$1e
+        cmp #$1d
         bne lsTab
         rts
 lsIdx:  !byte 0
@@ -10826,8 +10578,6 @@ orbColRT: !byte 12,9,10,9,10,7,8,7,6,5,6,5,4,4,3,2,2,1,1,0,0,0,24,22,20,18,16,14
 ; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
 ; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
 ; NRUN-sized tables in that block overran it by 38 bytes.
-runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7
-runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1   ; every id, as mkRuns rebuilds it: split ids come from the hazard lists
 
 ; ---- occRT / occLT / occRTW / occLTW ----
 ; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
@@ -11893,16 +11643,16 @@ lvlStart: ldx lvlMeT
         lda lvlStAFT,x
         sta paF
         rts
-lvlStXLoT: !byte $80,$6e,$80,$80,$80
-lvlStXHiT: !byte $02,$04,$01,$03,$01
-lvlStYLoT: !byte $80,$dc,$80,$80,$80
-lvlStYHiT: !byte $02,$07,$01,$04,$08
-lvlStAT:  !byte $19,$db,$20,$00,$00
-lvlStAFT: !byte $c0,$00,$00,$00,$00
+lvlStXLoT: !byte $80,$6e,$80,$80
+lvlStXHiT: !byte $02,$04,$01,$03
+lvlStYLoT: !byte $80,$dc,$80,$80
+lvlStYHiT: !byte $02,$07,$01,$04
+lvlStAT:  !byte $19,$db,$20,$00
+lvlStAFT: !byte $c0,$00,$00,$00
 
-lvlSprunderT: !byte $0b,$0b,$0b,$00,$00
-lvlPalceilT: !byte $01,$01,$01,$0b,$00
-lvlPalseamT: !byte $0b,$0b,$0b,$0e,$0e
+lvlSprunderT: !byte $0b,$0b,$0b,$00
+lvlPalceilT: !byte $01,$01,$01,$0b
+lvlPalseamT: !byte $0b,$0b,$0b,$0e
         * = $aa00
 
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
@@ -12230,15 +11980,7 @@ dieChk: lda dieSt               ; once it has started, the only thing left to do
         beq dckIdl              ;   the sprites. obC is rewritten by orbMove every frame and
         lda dieInk              ;   flushed to $d027+n after us, so this is the last word on it.
         jmp dckPnt              ; the scene owns everything else: nothing live to check
-dckIdl: lda idolHd              ; ---- and the MID-TONE follows the idol as well ----
-        beq dckLive             ; $d025/$d026 are shared and sprPal already tints them, but the
-        lda #$02              ;   body is per-sprite ($d027+n, out of obC) and kept the
-        jsr dckPnt              ;   level's grey, which reads as disjoint against the brown and
-                                ;   yellow around it. Orbs and angels both, for the same reason.
-                                ; jsr, NOT a tail jump: carrying the idol this ran and RETURNED,
-                                ;   so the live check below never happened and an angel could
-                                ;   walk up to you all day without killing you.
-
+dckIdl:
 dckLive:
         sec                     ; the turn they are ACTUALLY making, as a signed 16-bit rate over
         lda paF                 ;   pa:paF. The whole-byte version dropped the fraction, and the
