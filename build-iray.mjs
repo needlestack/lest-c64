@@ -13765,6 +13765,12 @@ anMark: sta orbHidT,x           ;   to reason about where the sprite is or wheth
         stx marked
         lda pa                  ; the heading it caught you at, for the turn trigger
         sta markPa
+dckPnt: ldx #$07               ; A -> every sprite's own colour
+dckLp:  sta obC,x
+        dex
+        bpl dckLp
+        rts
+
 anNoMk: ldx amIdx
 ` : ''}        jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
 anDone: rts
@@ -19292,18 +19298,16 @@ ${DIE ? `        ; ---- dieChk and dieGo, relocated ----
 dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
         beq dckIdl              ;   the sprites. obC is rewritten by orbMove every frame and
         lda dieInk              ;   flushed to $d027+n after us, so this is the last word on it.
-        bne dckSp               ; always: dieInk is never black
+        jmp dckPnt              ; the scene owns everything else: nothing live to check
 ${HAS_IDOL ? `dckIdl: lda idolHd              ; ---- and the MID-TONE follows the idol as well ----
         beq dckLive             ; $d025/$d026 are shared and sprPal already tints them, but the
         lda #${hx(IDOL_BODY)}              ;   body is per-sprite ($d027+n, out of obC) and kept the
-                                ;   level's grey -- which reads as disjoint against the brown and
+        jsr dckPnt              ;   level's grey, which reads as disjoint against the brown and
                                 ;   yellow around it. Orbs and angels both, for the same reason.
+                                ; jsr, NOT a tail jump: carrying the idol this ran and RETURNED,
+                                ;   so the live check below never happened and an angel could
+                                ;   walk up to you all day without killing you.
 ` : 'dckIdl:'}
-dckSp:  ldx #$07
-dckLp:  sta obC,x
-        dex
-        bpl dckLp
-        rts
 dckLive:
         sec                     ; the turn they are ACTUALLY making, as a signed 16-bit rate over
         lda paF                 ;   pa:paF. The whole-byte version dropped the fraction, and the
