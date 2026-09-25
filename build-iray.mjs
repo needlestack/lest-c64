@@ -115,11 +115,13 @@ const L1_MAP = [
 // see WALLS_ALL, which flattens them into one global id space.
 const LEVEL_WALLS = {
   // THE HUB. Column 9's two gaps are the only way through the pedestal wall; column 10 shuts
-  // them off again. One group per pedestal, so filling a pedestal opens its own pair.
-  4: { walls: [[[9, 3], [10, 2]],                             // top pedestal (9,2)
-               [[10, 4]],                                     // middle pedestal (9,4)
-               [[9, 5], [10, 6]]],                            // bottom pedestal (9,6)
-       sockWall: [0, 1, 2] },
+  // them off again. ONE group, not one per pedestal: nothing opens until all three are seated
+  // and then everything opens at once, so there is only ever one collapse to animate -- and
+  // wallTog is single-wall state (wsWall, wsN), so three of them in one frame would leave the
+  // first two with doomT set and a map that never changed. All three pedestals name wall 0;
+  // the gate that holds it shut until the last one is fed is in orbMove, at omPdC.
+  4: { walls: [[[9, 3], [10, 2], [10, 4], [9, 5], [10, 6]]],
+       sockWall: [0, 0, 0] },
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
   5: { walls: [[[11, 2]],                                     // S1 (11,3): up to the exit
               [[20, 9]]],                                     // S2 (19,9): into the idol's column
@@ -182,6 +184,12 @@ const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
 // just the idol -- which is the point: seeing it changes the light in the room.
 const IDOL_SPR = { under: 0x09, hi: 0x07 }, IDOL_BODY = 0x08;
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
+// Which levels stand pedestals, and where. Keyed by level like LEVEL_WALLS rather than derived
+// from HUBROOM, because HAS_PED has to be true for the whole CHAIN -- the ladder is emitted once
+// and every resident level's pedestals draw from it, so asking only about the live level would
+// leave a shadow level's pedestals pointing at bitmaps that were never built.
+const LEVEL_PEDESTALS = { 4: '9,2;9,4;9,6' };
+const HAS_PED = CHAIN.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
 const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
@@ -4082,7 +4090,14 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 12.5, y: 9.5, c: 0 });
     ORBS.push({ x: 9.5, y: 12.5, c: 0 });
   }
-  else if (HUBROOM) { }                        // THE HUB IS EMPTY. No orbs, no angel: it is the
+  else if (HUBROOM) {
+    // HUBTEST=1 drops three orbs beside the pedestals so the all-three gate can be exercised
+    // before the rest of the game can deliver an orb here. Not shipped: the hub is EMPTY, and
+    // the orbs that feed it are meant to be carried in from the levels its four exits lead to.
+    if (process.env.HUBTEST) { ORBS.push({ x: 7.5, y: 2.5, c: 0 });
+                               ORBS.push({ x: 7.5, y: 4.5, c: 1 });
+                               ORBS.push({ x: 7.5, y: 6.5, c: 2 }); }
+  }                                            // THE HUB IS EMPTY. No orbs, no angel: it is the
                                                //   room you come back to, and the only things in
                                                //   it are the three pedestals and four holes.
   else if (IDOLROOM) {                         // level 5: two orbs for two sockets, and the idol
@@ -4257,8 +4272,19 @@ const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBE
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
+// ---- PEDESTALS: a socket you can SEE across a room ----
+// Mechanically a socket -- it seats an orb, it names a wall through sockWallT, hlSeat holds its
+// state -- so every one of those paths is untouched. What differs is ART: a socket is a mark in
+// the floor and reads as nothing from across a room, and the hub is a room you are meant to
+// survey from the middle and plan a route through. A pedestal stands up, so it is a landmark.
+// It costs one hole-like slot each, which is what NHOLE's ceiling is now spent on.
+const PEDESTALS_AT = (process.env.PEDESTALS ?? LEVEL_PEDESTALS[LVL] ?? '').split(';')
+  .filter(Boolean).map(p => p.split(',').map(Number));
+// Exits first, then the seatable things. A pedestal IS a socket to everything but hlSet, which
+// reads `ped` to pick the ladder; the exit/socket boundary the runtime walks is still nExitT.
 const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
-                  ...SOCKETS_AT.map(h => ({ x: h[0], y: h[1], exit: false }))];
+                  ...SOCKETS_AT.map(h => ({ x: h[0], y: h[1], exit: false, ped: false })),
+                  ...PEDESTALS_AT.map(h => ({ x: h[0], y: h[1], exit: false, ped: true }))];
 
 // Entity counts differ between levels -- a level with a socket has a hole-like entity a level
 // without one does not. Every TABLE is sized to the largest resident level so the swap has room,
@@ -5551,6 +5577,8 @@ const SOCKR = +(process.env.SOCKR ?? HOLER / 2);
 // FLAT -- rim 0. The exit hole is rimless because a rim ate a pixel each side and read as a
 // SMALLER hole; the socket now borrows its art anyway, so colour is what tells them apart.
 const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, 0);
+
+
 // ---- SOCKETS BORROW THE EXIT HOLE'S BITMAPS AND OWN NONE ----
 // A disc of HALF the radius at distance d is the same shape as a full-size one at 2d stretched
 // twice vertically -- exactly, not approximately. Rasterising row by row, the socket's half-width
@@ -5751,7 +5779,147 @@ if (NHOLE > 8) throw new Error(
   `${NHOLE} hole-like entities across the resident levels: holeSeeT is indexed by a single byte ` +
   `(entity*32 + cell>>3), so 8 rows of 32 is the whole of it. More wants a second page and a ` +
   `16-bit index, or per-level loading.`);
-const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM)];
+// ---- makePedLadder: a pedestal is the exit hole's disc EXTRUDED ----
+// A stone drum standing on the floor. Deliberately NOT an art asset: the shape is a cylinder,
+// and the same inverted projection makeHoleLadder already uses draws one exactly -- the top face
+// IS a hole's ellipse lifted to height uh, and the side is that ellipse's near half swept down
+// to the floor. So it costs a rasteriser and no bytes of source art, it is correct at every
+// rung instead of resampled, and it picks up the look-down-on-it foreshortening for free.
+//
+//   row of a point at world height u and ground distance Z:  100 + (88/Z)(1 - 2u)
+//     (u is in cells, 0 = floor. A 1-cell wall at Z spans 100-88/Z .. 100+88/Z, so the eye is
+//      at 0.5 cells and one cell of height is 2*88/Z rows. That is the engine's own projection.)
+//   apparent column of world x at ground distance Z:         F_COL * x / Z
+//
+// Two inks, and a sprite has only three to pick from: pair 1 is $d025, pair 3 is $d026, and
+// both are SHARED with every other sprite on screen -- only pair 2 (obC) is per-sprite and so
+// only pair 2 can say anything about THIS pedestal. $d025 is black, which against the wall a
+// pedestal is usually standing in front of is no shape at all (measured: the drum rendered as a
+// bare one-row bar with its whole body invisible). So:
+//   SIDE = pair 2, obC, what hlFill drives -- the body is what carries the colour, and seating
+//     an orb lights the whole drum rather than a two-row lid you cannot see from across a room.
+//   TOP  = pair 3, $d026, the light grey the orbs already use for their highlight.
+// Light top over a darker body, which is the way round the reference photo has it.
+function makePedLadder(r, uh, wStep, slot0, wMax = 24) {
+  const L = [];
+  for (let w = wMax; w >= 4; w -= (w > 12 ? wStep : Math.max(2, wStep >> 1)))
+    L.push({ w, d: 2 * F_COL * r / w });
+  L.sort((a, b) => a.d - b.d);
+  const K = 1 - 2 * uh;                    // the top plane's row factor; > 0 while uh < 0.5
+  if (K <= 0) throw new Error(`pedestal height ${uh} is at or above eye level: it would be a wall`);
+  const rowAt = (Z, u) => 100 + (88 / Z) * (1 - 2 * u);
+  for (const g of L) {
+    const d = g.d;
+    // Topmost row is the FAR edge of the top face; bottom is the floor under the NEAR edge.
+    g.far  = Math.round(rowAt(d + r, uh));
+    g.near = rowAt(Math.max(0.05, d - r), 0);
+    g.vis  = Math.min(200, g.near) - g.far;
+    g.w    = 2 * F_COL * r / d;            // the silhouette is widest at Z = d, where x = +-r
+    // ONE SPRITE, like the idol. 12 multicolor pixels, magnified to 24 apparent columns when the
+    // shape needs them -- past that the near-field clamp holds it, exactly as the orb's does.
+    g.spr  = 1;
+    g.px   = 12;
+    g.mag  = g.w > g.px ? 1 : 0;
+    g.vmag = g.vis > 21 ? 1 : 0;
+    const cw = g.mag ? 2 : 1, ch = g.vmag ? 2 : 1;
+    if (g.vis > 21 * ch)
+      throw new Error(`pedestal rung at d=${d.toFixed(2)} shows ${g.vis.toFixed(1)} rows: too tall`);
+    if (g.w > g.px * cw)
+      throw new Error(`pedestal rung at d=${d.toFixed(2)} is ${g.w.toFixed(1)}c: past one sprite`);
+    // ---- the two surface tests, both closed form ----
+    // TOP: row y is on the top plane at ground distance Zt = 88*K/(y-100); it is on the disc
+    // when |Zt - d| <= r, and the half-width there is the circle's chord.
+    const topAt = y => {
+      if (y <= 100) return -1;
+      const Zt = 88 * K / (y - 100), t = r * r - (Zt - d) * (Zt - d);
+      return t <= 0 ? -1 : F_COL * Math.sqrt(t) / Zt;
+    };
+    // SIDE: for a column offset c, x = c*Z/F_COL, and the NEAR semicircle wants
+    //   (cZ/F_COL)^2 + (Z-d)^2 = r^2  ->  Z^2 (c^2/F_COL^2 + 1) - 2dZ + (d^2 - r^2) = 0.
+    // Take the smaller root: that is the near half, which is the half a cylinder shows you.
+    const sideZ = c => {
+      const a = (c / F_COL) * (c / F_COL) + 1, b = -2 * d, cc = d * d - r * r;
+      const disc = b * b - 4 * a * cc;
+      if (disc < 0) return -1;
+      const Z = (-b - Math.sqrt(disc)) / (2 * a);
+      return Z > 0.05 ? Z : -1;
+    };
+    g.grid = [...Array(21)].map((_, by) => {
+      const y = g.far + by * ch + ch / 2;
+      return [...Array(g.px)].map((_, bx) => {
+        const c = (bx - g.px / 2 + 0.5) * cw;
+        if (Math.abs(c) <= topAt(y)) return 3;          // top face: $d026, the shared light grey
+        const Z = sideZ(c);
+        if (Z > 0 && y >= rowAt(Z, uh) && y <= rowAt(Z, 0)) return 2;   // side: obC, per pedestal
+        return 0;
+      });
+    });
+    // Same far-end reality as the hole: below a row or two there is no shape left to draw, only
+    // a mark, and a mark that lands ON the wall base reads as a glitch. Drop it one row and give
+    // it its real width. See the REALITY FUDGE note in makeHoleLadder.
+    if (g.vis < LOW_ROWS) {
+      g.grid = [new Array(g.px).fill(0), ...g.grid.slice(0, 20)];
+      if (!g.grid.some(row => row.some(v => v)))
+        g.grid[1] = [...Array(g.px)].map((_, bx) =>
+          Math.abs((bx - g.px / 2 + 0.5) * cw) <= g.w / 2 ? 2 : 0);
+    }
+    if (!g.grid.some(row => row.some(v => v)))
+      throw new Error(`pedestal rung at d=${d.toFixed(2)} rasterised to nothing`);
+    if (50 + g.far > 250) throw new Error(`pedestal rung ${g.w.toFixed(1)}c starts at row ${g.far}, off screen`);
+  }
+  const sprite = g => {
+    const b = [];
+    for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
+      b.push([0, 1, 2, 3].reduce((v, i) => v | (g.grid[y][k * 4 + i] << (6 - 2 * i)), 0));
+    b.push(0);
+    return b;
+  };
+  const BM = L.map(sprite);
+  let _pslot = slot0;
+  const slotT = L.map(() => _pslot++);
+  const hOf = g => Math.round(88 / g.d);
+  const hT = L.map(hOf);
+  const varT = [...Array(256)].map((_, h) => {
+    if (h >= hT[0]) return 0;
+    const v = hT.findIndex(t => t <= h);
+    return v < 0 ? 0xff : v;
+  });
+  if (hT.some((h, i) => i && h >= hT[i - 1]))
+    throw new Error('pedestal h thresholds are not strictly descending -- the scan needs them sorted');
+  const xOffT = L.map(g => (g.px / 2) * (g.mag ? 2 : 1));
+  const yBaseT = L.map(g => 50 + g.far - hOf(g));
+  if (yBaseT.some(v => v < 0 || v > 255)) throw new Error('pedestal yBaseT out of byte range');
+  const flagT = L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
+  return { L, BM, slotT, hT, varT, xOffT, yBaseT, flagT, hOf, slotEnd: _pslot };
+}
+// A drum half a cell across. Its TRUE aspect is 2.096*r/uh (F_COL*1.5 columns per unit of x
+// against 88*2 rows per cell of height, a logical column being 1.5 true units wide at PAR 0.75),
+// so r == uh is very close to the 1.99 of the reference photo.
+const PEDR  = +(process.env.PEDR  ?? 0.30);
+const PEDH  = +(process.env.PEDH  ?? 0.25);
+const PEDSTEP = +(process.env.PEDSTEP ?? 2);
+// Behind the exit ladder in the same region; sockets own no slots, so HOLE.slotEnd is the end
+// of everything emitted there so far.
+const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, HOLE.slotEnd)
+                    : { L: [], BM: [], slotT: [], hT: [], varT: [], xOffT: [], yBaseT: [],
+                        flagT: [], slotEnd: HOLE.slotEnd };
+// Five tables of one byte a rung, emitted as a single run under holeSeeT.
+const PEDTBL = 5 * Math.max(1, PED.L.length);
+// ...plus hlRungP itself, which is emitted in the same run. Hand-counted, and the assembler's
+// "* = $3d9c moves backward" is the guard if it ever stops matching.
+const PEDCODE = 18;
+if (process.env.PEDDUMP && HAS_PED) {
+  console.error(`pedestal ladder: r=${PEDR} u=${PEDH}, ${PED.L.length} rungs, ` +
+    `${PED.BM.length} slots (${PED.BM.length * 64} bytes), slots ${PED.slotT[0]}..${PED.slotEnd - 1}`);
+  PED.L.forEach((g, i) => {
+    console.error(`  rung ${String(i).padStart(2)}  d=${g.d.toFixed(2)}  h=${PED.hT[i]}  ` +
+      `w=${g.w.toFixed(1)}c vis=${g.vis.toFixed(1)}r  ${g.mag ? 'xmag ' : '     '}` +
+      `${g.vmag ? 'ymag' : '    '}  apparent ${(g.w).toFixed(0)}x${Math.min(200, g.vis).toFixed(0)}`);
+    for (const row of g.grid) console.error('      ' + row.map(v => ' .:#'[v]).join(''));
+  });
+  process.exit(0);
+}
+const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM), ...PED.BM];
 // ---- and now the exit ladder's length is known, so the idol's base is too ----
 const IDOLBASE = HOLEBASE + HOLEBM.length * 64;   // straight behind it, under the hole
 const IDOL_PTR = ((IDOLBASE - SPRBASE) >> 6) & 255;
@@ -5805,10 +5973,16 @@ if (process.env.LADDERSHEET) {
   };
   // the hole: `grid` is the whole assembled rung, `spr` hardware sprites of 12 across it
   sheet('hole', HOLE.L.map(r => ({
-    xmag: 0, ymag: r.vmag,
+    xmag: r.mag, ymag: r.vmag,
     parts: [...Array(r.spr)].map((_, k) => ({
       w: 12, h: r.grid.length, ox: k * 12, oy: 0,
       at: (x, y) => (r.grid[y] ?? [])[k * 12 + x] ?? 0 })) })));
+  // the pedestal: one sprite a rung, so one part -- but it magnifies on BOTH axes, which is
+  // the whole reason it fits in one.
+  if (HAS_PED) sheet('pedestal', PED.L.map(r => ({
+    xmag: r.mag, ymag: r.vmag,
+    parts: [{ w: 12, h: r.grid.length, ox: 0, oy: 0,
+              at: (x, y) => (r.grid[y] ?? [])[x] ?? 0 }] })));
   // orb and angel share one ladder: a lower sprite always, an upper one when it is tall enough
   sheet('entity', LADDER.map((r, i) => {
     const lo = ORBSRC[i], up = ORBSRCU[i];
@@ -5995,7 +6169,10 @@ const LVL_TABLES = [
   ['orbX0T', pad(orbXC, NORB)], ['orbY0T', pad(orbYC, NORB)],
   ['angBlkT', angBlk],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
-  ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : 15), NHOLE)],
+  // 0 = an exit hole (black, always). 15 = an empty socket's grey3 inside its grey1 rim.
+  // 12 = an empty pedestal's stone body: it has to sit BELOW the $d026 light grey its own top
+  // face is painted in, or the drum reads as one flat blob.
+  ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : h.ped ? 12 : 15), NHOLE)],
   // Socket -> the GLOBAL wall id it opens, $ff for a socket that opens nothing. It TRAVELS,
   // because two levels' socket 0 are different sockets opening different walls. It used to be
   // shared, sized from the live level's socket count and valued from the single wall level: a
@@ -6030,10 +6207,15 @@ const LVL_TABLES = [
   // Six contiguous bytes, one entry: nOrbT nHoleT nExitT nOrbM1T nSockT nAllM1T.
   // SEVEN contiguous bytes now: nAllT joins them because the down-counting loops need a COUNT
   // to test against, and an INDEX cannot express "none" -- see the guards on each loop.
+  // EIGHT now: nPedT, the HOLE-LIKE index where the pedestals start. A boundary byte rather
+  // than a kind per entity, exactly as nExitT already separates exits from sockets -- one byte
+  // a level instead of NHOLE of them, and it costs nothing when a level has no pedestals
+  // (nPedT == nHoleT, so the test is never true).
   ['nOrbT', [ORBS.length, HOLELIKE.length, HOLES_AT.length,
              Math.max(0, ORBS.length - 1), ORBS.length + HOLES_AT.length,
              Math.max(0, ORBS.length + HOLELIKE.length - 1),
-             ORBS.length + HOLELIKE.length]],
+             ORBS.length + HOLELIKE.length,
+             HOLES_AT.length + SOCKETS_AT.length]],
   ['orbOccLoT', orbOccLo],
   ['orbOccT', process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat],
 ];
@@ -11253,12 +11435,29 @@ omSwTk: dec sokAn
         sty sockHit
         lda #$01
         sta entDty
-${WALL_DELTA ? `        lda sokWho              ; hole-like index + 1: exits first, then the sockets
+${WALL_DELTA ? `        ; ---- seating opens a wall... unless it is a PEDESTAL ----
+        ; A socket opens its own wall the instant it is fed. A pedestal opens NOTHING until
+        ; every pedestal on the level is seated: the hub is one puzzle about collecting three
+        ; things, not three independent doors. On a level with no pedestals nPedT == nHoleT and
+        ; the test is never true, so this costs those levels one compare.
+        lda sokWho              ; hole-like index + 1: exits, then sockets, then pedestals
         sec
-        sbc nExitT
+        sbc #$01
+        cmp nPedT
+        bcc omWTog              ; a socket: its own wall, now
+        ldy nPedT
+omPdC:  lda hlSeat,y            ; bit 7 = seated
+        bpl omNoIco             ; one still empty, so this seating changes nothing else
+        iny
+        cpy nHoleT
+        bcc omPdC
+        lda sokWho              ; the last one: open the wall all three of them name
+        sec
+        sbc #$01
+omWTog: sec
+        sbc nExitT              ; -> the socket's own index, which is what sockWallT is keyed by
         tay
-        dey                     ; -> the socket's own index
-        lda sockWallT,y         ; ...names its wall, or $ff for a socket that opens nothing
+        lda sockWallT,y         ; ...names its wall, or $ff for a seat that opens nothing
         bmi omNoIco
         sta wsWall
         jsr wallTog
@@ -14855,12 +15054,20 @@ hlSsock:lda hlSeat,y            ; bit 7 = an orb is sitting in this one, low nib
         lda hlFillT,y           ; empty: grey3 inside a grey1 rim
         sta hlFill
         lda #$01
-        bne hlSk
+        bne hlSped              ; always taken
 hlSfull:and #$0f
         tax                     ; seated: the ORB's own body colour fills it
         lda orbColT2,x
         sta hlFill
         lda #$02
+        ; ---- and a PEDESTAL is a socket that stands up ----
+        ; Kinds 1,2 are the socket's empty and seated; 3,4 are the pedestal's. Pedestals sit past
+        ; the sockets in HOLELIKE, so ONE boundary byte tells them apart and +2 lands on the
+        ; matching pedestal kind -- no per-entity kind table, and nothing to swap but nPedT.
+hlSped: cpy nPedT
+        bcc hlSk
+        clc
+        adc #$02
 hlSk:   cmp hlKind
         beq hlSdn               ; already pointed the right way -- the usual case
         sta hlKind
@@ -15248,8 +15455,42 @@ ${SPRITES ? `; ================= orb tables =================
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = ${hx16(ORB_SMALL - NHOLE * 32)}
+        * = ${hx16(ORB_SMALL - NHOLE * 33 - PEDTBL - PEDCODE)}
+        ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
+        ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
+        ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
+        ; are one run taken off the top of the code headroom and the report prices them as one.
+        ; Same five tables again, so hlSet's patch run does not know or care that this kind
+        ; stands up. One sprite a rung (see makePedLadder), so pedPtrT is the whole pointer --
+        ; there is no right half to increment onto.
+        ; A build with NO pedestals anywhere still emits these as one zero byte: hlSrcL names
+        ; the labels unconditionally, and an empty !byte assembles as "bad number: $".
+pedPtrT: !byte ${PED.slotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',') || '0'}
+pedXOffT: !byte ${PED.xOffT.join(',') || '0'}
+pedYBaseT: !byte ${PED.yBaseT.join(',') || '0'}
+pedFlagT: !byte ${PED.flagT.join(',') || '0'}
+pedHT: !byte ${PED.hT.join(',') || '0'}   ; DESCENDING, scanned by hlRungP
+; Here rather than with the other two rung finders at $48c3, which has five bytes left and
+; runs into fallSnapD at $4900 the moment it does not. Its only table is the one above it.
+; The pedestal scans like the socket: ${PED.L.length} rungs does not earn a 256-byte page, and the
+; hole already spent the one that was going.
+hlRungP:txa
+        ldy #$00
+hrpL:   cmp pedHT,y
+        bcs hrpHit
+        iny
+        cpy #${hx(Math.max(1, PED.L.length))}
+        bcc hrpL
+        lda #$ff
+        rts
+hrpHit: tya
+        rts
 holeSeeT: !byte ${holeSee.join(",")}
+        ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
+        ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
+        ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
+        ; over; one run of NHOLE-sized things in one place is what makes that cost legible.
+hlSeat: !fill ${NHOLE}, 0
 
         * = ${hx16(ORB_SMALL)}
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
@@ -15762,7 +16003,6 @@ pathDYT: !byte 0,0,1,255
 hlFillT: !byte ${LVLT('hlFillT').join(',')}
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
-hlSeat: !fill ${NHOLE}, 0        ; NHOLE: hlSCl clears NHOLE of them on every restart
 ; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
 ; into the hole under holeVarT: entered by jsr only, nothing falls in, and "* = $6100 moves
 ; backward" is the guard if this block grows into it.
@@ -15865,13 +16105,20 @@ arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
         ; ---- which ladder each kind uses: rung finder, yBase, ptr, flag, xOff ----
         ; 0 = the exit hole, 1 = an empty socket, 2 = an orb seated in one. hlSet indexes this
         ; instead of carrying three copies of the same six stores.
-hlK5T:  !byte 0,5,10
+; Five kinds now: exit, socket empty, socket seated, pedestal empty, pedestal seated. The two
+; pedestal rows are IDENTICAL -- seating changes only hlFill, not the shape -- and they are both
+; here so that "seated is the next kind up" stays one adc #1 in hlSet for every seatable thing.
+hlK5T:  !byte 0,5,10,15,20
 hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT
         !byte <hlRungS,<sockYBaseT,<sockPtrT,<sockFlagT,<sockXOffT
         !byte <hlRungE,<seatYBaseT,<seatPtrT,<seatFlagT,<seatXOffT
+        !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT
+        !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT
 hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
         !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
         !byte >hlRungE,>seatYBaseT,>seatPtrT,>seatFlagT,>seatXOffT
+        !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT
+        !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT
 ${FALLSCENE ? (() => { const P = fRowPack(); return `        * = ${hx16(FROWT + 0x500)}
 ; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
 ; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
@@ -17499,6 +17746,9 @@ nAllM1T:!byte ${hx(Math.max(0, ORBS.length + HOLELIKE.length - 1))}             
 nAllT:  !byte ${hx(ORBS.length + HOLELIKE.length)}                 ; ...and how MANY, which is the one
                                 ;   an empty level can state: every loop below counts DOWN from an
                                 ;   INDEX, and index 0 means "one entity", never "none"
+nPedT:  !byte ${hx(HOLES_AT.length + SOCKETS_AT.length)}                 ; HOLE-LIKE index where the pedestals
+                                ;   start -- hlSet's only way to tell a pedestal from a socket.
+                                ;   Equal to nHoleT on a level with none, so the test never fires.
 angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, when it is close
 lvlMeT: !byte ${hx(LVL)}                 ; the level that is live. OUTSIDE the TWOLEV block below,
                                 ;   because the HUD's LEVEL line reads it in every build -- a

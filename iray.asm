@@ -4285,12 +4285,29 @@ omSwTk: dec sokAn
         sty sockHit
         lda #$01
         sta entDty
-        lda sokWho              ; hole-like index + 1: exits first, then the sockets
+        ; ---- seating opens a wall... unless it is a PEDESTAL ----
+        ; A socket opens its own wall the instant it is fed. A pedestal opens NOTHING until
+        ; every pedestal on the level is seated: the hub is one puzzle about collecting three
+        ; things, not three independent doors. On a level with no pedestals nPedT == nHoleT and
+        ; the test is never true, so this costs those levels one compare.
+        lda sokWho              ; hole-like index + 1: exits, then sockets, then pedestals
         sec
-        sbc nExitT
+        sbc #$01
+        cmp nPedT
+        bcc omWTog              ; a socket: its own wall, now
+        ldy nPedT
+omPdC:  lda hlSeat,y            ; bit 7 = seated
+        bpl omNoIco             ; one still empty, so this seating changes nothing else
+        iny
+        cpy nHoleT
+        bcc omPdC
+        lda sokWho              ; the last one: open the wall all three of them name
+        sec
+        sbc #$01
+omWTog: sec
+        sbc nExitT              ; -> the socket's own index, which is what sockWallT is keyed by
         tay
-        dey                     ; -> the socket's own index
-        lda sockWallT,y         ; ...names its wall, or $ff for a socket that opens nothing
+        lda sockWallT,y         ; ...names its wall, or $ff for a seat that opens nothing
         bmi omNoIco
         sta wsWall
         jsr wallTog
@@ -7512,12 +7529,20 @@ hlSsock:lda hlSeat,y            ; bit 7 = an orb is sitting in this one, low nib
         lda hlFillT,y           ; empty: grey3 inside a grey1 rim
         sta hlFill
         lda #$01
-        bne hlSk
+        bne hlSped              ; always taken
 hlSfull:and #$0f
         tax                     ; seated: the ORB's own body colour fills it
         lda orbColT2,x
         sta hlFill
         lda #$02
+        ; ---- and a PEDESTAL is a socket that stands up ----
+        ; Kinds 1,2 are the socket's empty and seated; 3,4 are the pedestal's. Pedestals sit past
+        ; the sockets in HOLELIKE, so ONE boundary byte tells them apart and +2 lands on the
+        ; matching pedestal kind -- no per-entity kind table, and nothing to swap but nPedT.
+hlSped: cpy nPedT
+        bcc hlSk
+        clc
+        adc #$02
 hlSk:   cmp hlKind
         beq hlSdn               ; already pointed the right way -- the usual case
         sta hlKind
@@ -7899,8 +7924,42 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = $3d1c
+        * = $3d01
+        ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
+        ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
+        ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
+        ; are one run taken off the top of the code headroom and the report prices them as one.
+        ; Same five tables again, so hlSet's patch run does not know or care that this kind
+        ; stands up. One sprite a rung (see makePedLadder), so pedPtrT is the whole pointer --
+        ; there is no right half to increment onto.
+        ; A build with NO pedestals anywhere still emits these as one zero byte: hlSrcL names
+        ; the labels unconditionally, and an empty !byte assembles as "bad number: $".
+pedPtrT: !byte 0
+pedXOffT: !byte 0
+pedYBaseT: !byte 0
+pedFlagT: !byte 0
+pedHT: !byte 0   ; DESCENDING, scanned by hlRungP
+; Here rather than with the other two rung finders at $48c3, which has five bytes left and
+; runs into fallSnapD at $4900 the moment it does not. Its only table is the one above it.
+; The pedestal scans like the socket: 0 rungs does not earn a 256-byte page, and the
+; hole already spent the one that was going.
+hlRungP:txa
+        ldy #$00
+hrpL:   cmp pedHT,y
+        bcs hrpHit
+        iny
+        cpy #$01
+        bcc hrpL
+        lda #$ff
+        rts
+hrpHit: tya
+        rts
 holeSeeT: !byte 0,0,0,0,0,0,0,0,0,0,48,0,0,8,0,0,4,0,0,2,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+        ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
+        ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
+        ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
+        ; over; one run of NHOLE-sized things in one place is what makes that cost legible.
+hlSeat: !fill 4, 0
 
         * = $3d9c
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
@@ -8798,7 +8857,6 @@ pathDYT: !byte 0,0,1,255
 hlFillT: !byte 0,0,0,0
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
-hlSeat: !fill 4, 0        ; NHOLE: hlSCl clears NHOLE of them on every restart
 ; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
 ; into the hole under holeVarT: entered by jsr only, nothing falls in, and "* = $6100 moves
 ; backward" is the guard if this block grows into it.
@@ -8894,13 +8952,20 @@ arcOvSpT: !byte 170,154,146,130
         ; ---- which ladder each kind uses: rung finder, yBase, ptr, flag, xOff ----
         ; 0 = the exit hole, 1 = an empty socket, 2 = an orb seated in one. hlSet indexes this
         ; instead of carrying three copies of the same six stores.
-hlK5T:  !byte 0,5,10
+; Five kinds now: exit, socket empty, socket seated, pedestal empty, pedestal seated. The two
+; pedestal rows are IDENTICAL -- seating changes only hlFill, not the shape -- and they are both
+; here so that "seated is the next kind up" stays one adc #1 in hlSet for every seatable thing.
+hlK5T:  !byte 0,5,10,15,20
 hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT
         !byte <hlRungS,<sockYBaseT,<sockPtrT,<sockFlagT,<sockXOffT
         !byte <hlRungE,<seatYBaseT,<seatPtrT,<seatFlagT,<seatXOffT
+        !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT
+        !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT
 hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
         !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
         !byte >hlRungE,>seatYBaseT,>seatPtrT,>seatFlagT,>seatXOffT
+        !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT
+        !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT
         * = $6b00
 ; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
 ; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
@@ -10484,6 +10549,9 @@ nAllM1T:!byte $04                 ; last entity index of all
 nAllT:  !byte $05                 ; ...and how MANY, which is the one
                                 ;   an empty level can state: every loop below counts DOWN from an
                                 ;   INDEX, and index 0 means "one entity", never "none"
+nPedT:  !byte $01                 ; HOLE-LIKE index where the pedestals
+                                ;   start -- hlSet's only way to tell a pedestal from a socket.
+                                ;   Equal to nHoleT on a level with none, so the test never fires.
 angPerT: !byte $78   ; 60ths between angel steps on THIS level, when it is close
 lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV block below,
                                 ;   because the HUD's LEVEL line reads it in every build -- a
@@ -10501,7 +10569,7 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; LVLSHADOW = $f500 -- plain RAM under both port modes (only $d000-$dfff is the
 ; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
 ; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is 748 bytes, and the
+; tables) as level 1's shadow and the leash per angel, the shadow is 749 bytes, and the
 ; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
 ; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
 ; `jmp entry` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
@@ -10516,16 +10584,16 @@ lvlMeT: !byte $01                 ; the level that is live. OUTSIDE the TWOLEV b
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
 lvlAtT: !byte $02,$03,$05   ; slot -> the level now in it
-lvlBasLoT: !byte $00,$ec,$d8
+lvlBasLoT: !byte $00,$ed,$da
 lvlBasHiT: !byte $f5,$f7,$fa
 lvlDstLoT: !byte <mapT,<holeSeeT,<rowMulT,<bfsDCT,<lvlDimT,<hazSpT,<orbXCT,<orbYCT,<orbX0T,<orbY0T,<angBlkT,<angPerT,<angPerFT,<angFarT,<hlFillT,<sockWallT,<orbTallT,<orbArtT,<orbColT2,<orbHid0T,<lvlNxtT,<nOrbT,<orbOccLoT,<orbOccT,<hazNT,<hazCT,<hazLoT,<hazHiT,<hazLstT,<hazRstT
 lvlDstHiT: !byte >mapT,>holeSeeT,>rowMulT,>bfsDCT,>lvlDimT,>hazSpT,>orbXCT,>orbYCT,>orbX0T,>orbY0T,>angBlkT,>angPerT,>angPerFT,>angFarT,>hlFillT,>sockWallT,>orbTallT,>orbArtT,>orbColT2,>orbHid0T,>lvlNxtT,>nOrbT,>orbOccLoT,>orbOccT,>hazNT,>hazCT,>hazLoT,>hazHiT,>hazLstT,>hazRstT
-lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$a0,$01,$01,$01,$04,$03,$05,$05,$05,$05,$01,$07,$09,$51,$01,$01,$01,$01,$01,$01
+lvlLenT: !byte $00,$80,$20,$04,$05,$01,$09,$09,$05,$05,$a0,$01,$01,$01,$04,$03,$05,$05,$05,$05,$01,$08,$09,$51,$01,$01,$01,$01,$01,$01
 
 ; ---- lvlSwap: exchange the live per-level tables with the shadow ----
 ; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
 ; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
-; 748 of them. The table index lives in lsIdx for the same reason.
+; 749 of them. The table index lives in lsIdx for the same reason.
 ; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
 ; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
 ; so the fall runs in both directions and dying never has to reload anything.
@@ -10553,7 +10621,7 @@ lsByte:
 lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
 lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
 lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over 748 bytes is most of an extra frame.
+        txa                     ;   a byte, which over 749 bytes is most of an extra frame.
 lsD2:   sta $ffff,y
         iny
         cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
