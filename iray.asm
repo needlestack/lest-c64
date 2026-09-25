@@ -5601,7 +5601,7 @@ orbNo:  ldx oidx
 ; the other; sockets are always live.
 holeOne:lda nHoleT              ; a level with no hole-likes at all: nothing to walk
         beq hoRts
-        lda hlv                 ; the live exit hole first, so it can never lose a slot to a
+        lda #$00                ; the exits first, so they can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
 hoLp:   lda hoI                 ;   biggest thing here
         asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
@@ -5633,12 +5633,13 @@ hoLp:   lda hoI                 ;   biggest thing here
         adc nOrbT               ; hole-like entities follow the orbs in orbXCT/orbYCT
         sta oidx
         jsr orbOne              ; orbOne branches to holeTail on the index
-hoNx:   lda hoI
-        cmp nExitT
-        bcs hoInc               ; already past the exits: just step on
-        lda #$00
-        sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
-hoInc:  inc hoI
+        ; ---- EVERY exit draws, not just hlv's ----
+        ; This used to jump hoI past the other exits, because a level had two holes that took
+        ; turns and only one of them was real. The hub has FOUR and all four are ways out, so
+        ; three of them were invisible floor. (The user, 2026-09-24: "would love the holes to be
+        ; on the floor as well -- currently only one shows".) Which LEVEL each leads to is still
+        ; one byte for the whole level; that is the next thing this wants, not this.
+hoNx:   inc hoI
         lda hoI
         cmp nHoleT
         bcc hoLp
@@ -5661,16 +5662,35 @@ hoRts:  rts
 ; fallChk: standing in the hole's cell? Then go.
 fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         beq fcNo
-        lda hlv                 ; the live hole's entity index is nOrbT + hlv -- the SWAPPED count,
-        clc                     ;   not this build's ORBS.length. Level 1 has four orbs and angels
-        adc nOrbT               ;   before its hole; the socket room has one. With the immediate
-        tax                     ;   baked in, the socket room's hole was compared at index 4 -- past
-        lda px+1                ;   its three entities -- and could never be fallen through.
+        ; ---- ANY exit, not just hlv's ----
+        ; The entity index of exit n is nOrbT + n -- the SWAPPED count, not this build's
+        ; ORBS.length. Level 1 has four orbs and angels before its hole; the socket room has one.
+        ; With the immediate baked in, the socket room's hole was compared at index 4 -- past its
+        ; three entities -- and could never be fallen through.
+        ; hlv still records WHICH exit was used, because the drop animation reads its cell; what
+        ; it no longer does is decide which one is real. Its old eor #$01 only ever toggled 0
+        ; and 1, so on the hub's four exits two of them could not be fallen through at all.
+        ldx nOrbT               ; entity index of exit 0
+        ldy #$00
+fcLp:   lda px+1
         cmp orbXCT,x
-        bne fcNo
+        bne fcNx
         lda py+1
         cmp orbYCT,x
-        bne fcNo
+        beq fcHit
+fcNx:   inx
+        iny
+        cpy nExitT
+        bcc fcLp
+        bcs fcNo                ; always taken: none of them is under us
+fcHit:  sty hlv                 ; the one we are dropping through
+        tya
+        asl                     ; x32, the LOS stride -- see hlvOf
+        asl
+        asl
+        asl
+        asl
+        sta hlvOf
         lda #$00                ; sprites away: they belong to the level being left. Clear the
         sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
         sta omXX                ;   which is past where the fall path rejoins the loop, so it
@@ -5719,9 +5739,9 @@ lvlEnd:
                                 ;   which fakes a fall) still went to the old cell while boot and
                                 ;   death went to the new one. One place a level begins, however
                                 ;   you got there.
-        ldx hlv                 ; ...and X back, for the store below
-        txa
-        and #$00   ; the other hole is live now -- if there is one
+        ; Every exit is live now (see fallChk), so there is nothing to alternate: hlv is only a
+        ; record of which one the last drop used, and the level being arrived at has not used one.
+        lda #$00
         sta hlv
         asl                     ; x32, the same LOS stride -- not a cell multiply
         asl
@@ -11074,7 +11094,7 @@ ogHole: lda nHoleT              ; no hole-likes on this level: the gate is shut
         lsr
         sta rgtL                ; byte within a 32-byte LOS row. rgtL/rgtH are orbProj's,
                                 ;   and orbProj has not run yet this frame
-        ldx hlv                 ; the live exit hole, then every socket: the same set holeOne walks
+        ldx #$00                ; every exit, then every socket: the same set holeOne walks
 ogHoLp: txa
         asl
         asl
@@ -11089,10 +11109,7 @@ ogHoLp: txa
         and orbBitT,y
         bne ogYes              ; in sight: project
         ldx rgtH
-        cpx nExitT
-        bcs ogHoIn
-        ldx #$00   ; past the exits: only hlv's hole is live, so step over the other
-ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then inc -> first socket)
+ogHoIn: inx                     ; exactly the set holeOne walks, in the same order
         cpx nHoleT
         bcc ogHoLp
 ogNone:

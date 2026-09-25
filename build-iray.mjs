@@ -114,13 +114,15 @@ const L1_MAP = [
 // takes out, $ff for none. Per level, and ANY NUMBER of levels in a chain may have walls --
 // see WALLS_ALL, which flattens them into one global id space.
 const LEVEL_WALLS = {
-  // THE HUB. Column 9's two gaps are the only way through the pedestal wall; column 10 shuts
-  // them off again. ONE group, not one per pedestal: nothing opens until all three are seated
+  // THE HUB (revised by the user 2026-09-24). Column 9 is open only at rows 3-5, where the
+  // three pedestals stand; column 10 is the removable wall behind them. Feed all three and the
+  // whole of column 10 goes, which is the only way into the east half and its exit. ONE group,
+  // not one per pedestal: nothing opens until all three are seated
   // and then everything opens at once, so there is only ever one collapse to animate -- and
   // wallTog is single-wall state (wsWall, wsN), so three of them in one frame would leave the
   // first two with doomT set and a map that never changed. All three pedestals name wall 0;
   // the gate that holds it shut until the last one is fed is in orbMove, at omPdC.
-  4: { walls: [[[9, 3], [10, 2], [10, 4], [9, 5], [10, 6]]],
+  4: { walls: [[[10, 3], [10, 4], [10, 5]]],
        sockWall: [0, 0, 0] },
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
   5: { walls: [[[11, 2]],                                     // S1 (11,3): up to the exit
@@ -188,7 +190,7 @@ const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 // from HUBROOM, because HAS_PED has to be true for the whole CHAIN -- the ladder is emitted once
 // and every resident level's pedestals draw from it, so asking only about the live level would
 // leave a shadow level's pedestals pointing at bitmaps that were never built.
-const LEVEL_PEDESTALS = { 4: '9,2;9,4;9,6' };
+const LEVEL_PEDESTALS = { 4: '9,3;9,4;9,5' };
 const HAS_PED = CHAIN.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -232,13 +234,13 @@ const L3_MAP = [
 // (9,3) and (9,5), and column 10 shuts those off again at rows 2, 4 and 6.
 const L4_MAP = [
   "################",
-  "###.X....#...###",
-  "##.......T|...##",
-  "#........|.....#",
+  "###.X.#.###.####",
+  "##.......#...###",
+  "#........T|...##",
   "#X.P.....T|...X#",
-  "#........|.....#",
-  "##.......T|...##",
-  "###.X....#...###",
+  "#........T|...##",
+  "##.......#...###",
+  "###.X.#.###.####",
   "################",
 // T = pedestal and X = exit, markers for the reader like O/S/A/P elsewhere: the real positions
 // come from the tables. '|' is a removable wall and must be SOLID in the base map, or the wall
@@ -3936,6 +3938,56 @@ for (const r of ANGLAD) {
 // idol is one per-entity byte added to orbPtrT at the point of use, and NOT 22 more entries in
 // each of the nine ovar-indexed tables -- which was the first attempt, and cost 198 bytes of
 // image the block it lives in did not have.
+// ---- the pedestal's stone, as two luminance bands off the reference photo ----
+// See make-pedestal-art.mjs. NOT a silhouette: the drum's outline is drawn procedurally per
+// rung (its top ellipse opens and closes with distance, and the photo is one fixed camera), so
+// what the photo contributes is MATERIAL. Sampling by surface coordinate rather than by
+// bounding box is what keeps the stone sitting still on the drum as you walk around it.
+const PEDART = JSON.parse(readFileSync('./pedestal-art.json', 'utf8'));
+for (const k of ['top', 'side'])
+  if (PEDART[k].length !== PEDART[k === 'top' ? 'topH' : 'sideH'])
+    throw new Error(`pedestal-art.json: ${k} is ${PEDART[k].length} rows, not ${PEDART[k === 'top' ? 'topH' : 'sideH']}`);
+const pedLum = (band, u, v) => {            // u, v in [0,1); band 'top' or 'side'
+  const W = PEDART[band === 'top' ? 'topW' : 'sideW'], H = PEDART[band === 'top' ? 'topH' : 'sideH'];
+  const x = Math.max(0, Math.min(W - 1, Math.floor(u * W)));
+  const y = Math.max(0, Math.min(H - 1, Math.floor(v * H)));
+  return parseInt(PEDART[band][y].substr(x * 2, 2), 16);
+};
+// ---- luminance -> one of the THREE inks a sprite has, ordered-dithered ----
+// A multicolor sprite gets bit pair 1 ($d025, black here), pair 2 (obC) and pair 3 ($d026),
+// apparent brightnesses roughly 0 / 118 / 187. Two dither bands, and that is the whole palette.
+//
+// The photo supplies VARIATION, not absolute tone. Quantising its own luminance drove the left
+// third of the drum to solid black and the right third to solid light grey -- three hard
+// vertical bands, no stone at all, because the reference is lit hard from one side and a
+// three-level palette has no headroom for that. So each band is re-centred on a BASE ink -- the
+// side on obC, the top on $d026 -- and the photo's deviation from that band's own mean is what
+// dithers around it. The drum then reads as a light top over a mid body (which is the structure
+// the photo actually has) with the stone's mottle across both.
+// Base tones sit ABOVE obC, not on it. Centred on obC exactly, half the drum fell below it and
+// dithered toward $d025 -- and $d025 is BLACK, so the shadow side read as a hole punched in the
+// stone rather than as stone. The body now rides between obC and grey3 with black only in the
+// deepest speckle, and the top face is pinned solidly at grey3 so it reads as a lid at every
+// distance, including the rungs where it is a single row.
+const PED_GAIN = +(process.env.PEDGAIN ?? 0.7);
+const PED_LEV = [0, 118, 187];
+const PED_BASE = { top: +(process.env.PEDTOP ?? 200), side: +(process.env.PEDBODY ?? 145) };
+const PED_MEAN = Object.fromEntries(['top', 'side'].map(k => {
+  const v = PEDART[k].join('').match(/../g).map(x => parseInt(x, 16)).filter(x => x < 235);
+  return [k, v.reduce((a, b) => a + b, 0) / v.length];
+}));
+const BAYER4 = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+const pedInk = (band, L, bx, by, dither) => {
+  const v = Math.max(0, Math.min(255, PED_BASE[band] + (L - PED_MEAN[band]) * PED_GAIN));
+  const k = v > PED_LEV[1] ? 1 : 0;
+  const lo = PED_LEV[k], hi = PED_LEV[k + 1];
+  const f = (v - lo) / (hi - lo);
+  // Far rungs do NOT dither. Three rows of speckle that reshuffles every time the rung changes
+  // reads as sparkle, not stone, and motion granularity is a veto axis here -- see the
+  // smoothness memory. Under four rows the whole drum takes its mean ink and sits still.
+  const th = dither ? (BAYER4[by & 3][bx & 3] + 0.5) / 16 : 0.5;
+  return 1 + k + (f > th ? 1 : 0);
+};
 const GOAT = JSON.parse(readFileSync('./goat-art.json', 'utf8')).rows
   .map(r => [...r].map(Number));
 const _gc = [...Array(12).keys()].filter(x => GOAT.some(r => r[x]));
@@ -4235,6 +4287,13 @@ const losFree = (ax, ay, bx, by) => {
 };
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
 const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
+// ---- the pedestal's world size, up here because the LOS cull needs its reach ----
+// A drum 0.6 cells across. Its TRUE aspect is 2.096*r/uh (F_COL*1.5 columns per unit of x
+// against 88*2 rows per cell of height, a logical column being 1.5 true units wide at PAR 0.75),
+// so r == uh is very close to the 1.99 of the reference photo.
+const PEDR  = +(process.env.PEDR  ?? 0.30);
+const PEDH  = +(process.env.PEDH  ?? 0.25);
+const PEDSTEP = +(process.env.PEDSTEP ?? 2);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
 // one you land next to takes you back where you came from. Same maze both ways for now -- only
 // the hole cell and the landing spot differ, which is all the level transition actually needs.
@@ -4472,7 +4531,11 @@ for (let cell = 0; cell < MAPN; cell++) {
     // Each is capped by ITS OWN ladder's reach: a socket is half the radius, so its smallest
     // rung runs out at half the distance and listing it further would cost a projection to
     // draw nothing.
-    const maxD = h.exit ? HOLE_MAX_D : HOLE_MAX_D / 2;
+    // A PEDESTAL is not a socket here. It is BIGGER than the exit hole and its ladder reaches
+    // further than either, and taking the socket's half-range cut it off at 6.6 cells -- where
+    // it is still eleven columns across. (The user, 2026-09-24: "they disappear when far away
+    // but they are still large just before they disappear.") Same formula, its own radius.
+    const maxD = h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / 4 : HOLE_MAX_D / 2;
     if (Math.hypot(h.x + 0.5 - cx, h.y + 0.5 - cy) < maxD &&
         eye.some(([ex, ey]) => losFree(ex, ey, h.x + 0.5, h.y + 0.5)))
       holeSee[L * 32 + (cell >> 3)] |= 1 << (cell & 7);
@@ -5844,13 +5907,31 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24) {
       const Z = (-b - Math.sqrt(disc)) / (2 * a);
       return Z > 0.05 ? Z : -1;
     };
+    // Dithering is for rungs with room for it; see pedInk.
+    const dith = g.vis >= 4;
     g.grid = [...Array(21)].map((_, by) => {
       const y = g.far + by * ch + ch / 2;
       return [...Array(g.px)].map((_, bx) => {
         const c = (bx - g.px / 2 + 0.5) * cw;
-        if (Math.abs(c) <= topAt(y)) return 3;          // top face: $d026, the shared light grey
+        // u runs across the drum the way the photo's own width does: both are a cylinder
+        // projected, so the silhouette's horizontal extent IS +-r in both, foreshortening
+        // included, and no arc-length correction belongs here.
+        const u = 0.5 + c / Math.max(1e-6, g.w);
+        const tw = topAt(y);
+        if (Math.abs(c) <= tw) {
+          // Which way back along the top face? Solve the plane for this row again: bigger Z is
+          // farther, which is higher up the screen AND the back of the photo's top band.
+          const Zt = 88 * K / Math.max(1e-6, y - 100);
+          const half = Math.sqrt(Math.max(0, r * r - (c * Zt / F_COL) * (c * Zt / F_COL)));
+          const dn = half > 1e-6 ? (Zt - d) / half : 0;          // +1 back edge, -1 front rim
+          return pedInk('top', pedLum('top', u, (1 - dn) / 2), bx, by, dith);
+        }
         const Z = sideZ(c);
-        if (Z > 0 && y >= rowAt(Z, uh) && y <= rowAt(Z, 0)) return 2;   // side: obC, per pedestal
+        if (Z > 0 && y >= rowAt(Z, uh) && y <= rowAt(Z, 0)) {
+          const top = rowAt(Z, uh), bot = rowAt(Z, 0);
+          const t = bot > top ? (bot - y) / (bot - top) : 0;     // 1 at the rim, 0 at the floor
+          return pedInk('side', pedLum('side', u, 1 - t), bx, by, dith);
+        }
         return 0;
       });
     });
@@ -5892,12 +5973,6 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24) {
   const flagT = L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
   return { L, BM, slotT, hT, varT, xOffT, yBaseT, flagT, hOf, slotEnd: _pslot };
 }
-// A drum half a cell across. Its TRUE aspect is 2.096*r/uh (F_COL*1.5 columns per unit of x
-// against 88*2 rows per cell of height, a logical column being 1.5 true units wide at PAR 0.75),
-// so r == uh is very close to the 1.99 of the reference photo.
-const PEDR  = +(process.env.PEDR  ?? 0.30);
-const PEDH  = +(process.env.PEDH  ?? 0.25);
-const PEDSTEP = +(process.env.PEDSTEP ?? 2);
 // Behind the exit ladder in the same region; sockets own no slots, so HOLE.slotEnd is the end
 // of everything emitted there so far.
 const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, HOLE.slotEnd)
@@ -5941,14 +6016,20 @@ if (process.env.LADDERSHEET) {
   const bmPix = (bm, x, y) => { const byt = bm[y * 3 + (x >> 2)] ?? 0;
                                 return (byt >> (6 - 2 * (x & 3))) & 3; };
   // rung: { parts: [{ w, h, at(x,y)->pair, ox, oy }], xmag, ymag }
-  const sheet = (name, rungs) => {
+  // Pepto's C64 greys, for a ladder whose inks are known. Without this the sheet paints pair 1
+  // as mid grey and pair 3 as white, which for the pedestal -- black / grey2 / grey3 on a grey1
+  // floor -- flattered it by about two shades and hid how much of the drum is actually black.
+  const C64 = { 0: [0, 0, 0], 11: [68, 68, 68], 12: [108, 108, 108], 15: [149, 149, 149] };
+  const sheet = (name, rungs, pal, bg) => {
     const GAP = 6;
     const wOf = r => Math.max(...r.parts.map(p => p.ox + p.w)) * (r.xmag ? 2 : 1);
     const hOf = r => Math.max(...r.parts.map(p => p.oy + p.h)) * (r.ymag ? 2 : 1);
     const cw = Math.max(...rungs.map(wOf)) * CW + GAP;
     const H = Math.max(...rungs.map(hOf)) * CH + 14;
     const W = cw * rungs.length + GAP;
-    const rgb = new Uint8Array(W * H * 3).fill(22);
+    const rgb = new Uint8Array(W * H * 3);
+    for (let i = 0; i < W * H; i++) { const c = bg ?? [22, 22, 22];
+      rgb[i*3] = c[0]; rgb[i*3+1] = c[1]; rgb[i*3+2] = c[2]; }
     const put = (x, y, c) => { if (x < 0 || y < 0 || x >= W || y >= H) return;
       const o = (y * W + x) * 3; rgb[o] = c[0]; rgb[o + 1] = c[1]; rgb[o + 2] = c[2]; };
     rungs.forEach((r, i) => {
@@ -5960,7 +6041,8 @@ if (process.env.LADDERSHEET) {
           if (!v) continue;
           const px = x0 + (p.ox * xm + x) * CW, py = y0 + (p.oy * ym + y) * CH;
           for (let b = 0; b < CH; b++) for (let c = 0; c < CW; c++)
-            put(px + c, py + b, v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
+            put(px + c, py + b, pal ? pal[v]
+              : v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
         }
         const bx = x0 + p.ox * xm * CW, by = y0 + p.oy * ym * CH;          // the hardware box
         const bw = p.w * xm * CW, bh = p.h * ym * CH;
@@ -5979,10 +6061,13 @@ if (process.env.LADDERSHEET) {
       at: (x, y) => (r.grid[y] ?? [])[k * 12 + x] ?? 0 })) })));
   // the pedestal: one sprite a rung, so one part -- but it magnifies on BOTH axes, which is
   // the whole reason it fits in one.
+  // Its REAL inks on its real ground: pair 1 = $d025 black, pair 2 = obC (12 while empty, the
+  // orb's colour once seated), pair 3 = $d026 grey3, all on the hub's grey1 floor.
   if (HAS_PED) sheet('pedestal', PED.L.map(r => ({
     xmag: r.mag, ymag: r.vmag,
     parts: [{ w: 12, h: r.grid.length, ox: 0, oy: 0,
-              at: (x, y) => (r.grid[y] ?? [])[x] ?? 0 }] })));
+              at: (x, y) => (r.grid[y] ?? [])[x] ?? 0 }] })),
+    { 1: C64[0], 2: C64[12], 3: C64[15] }, C64[11]);
   // orb and angel share one ladder: a lower sprite always, an upper one when it is tall enough
   sheet('entity', LADDER.map((r, i) => {
     const lo = ORBSRC[i], up = ORBSRCU[i];
@@ -12886,7 +12971,7 @@ ${FALL ? `
 ; the other; sockets are always live.
 holeOne:lda nHoleT              ; a level with no hole-likes at all: nothing to walk
         beq hoRts
-        lda hlv                 ; the live exit hole first, so it can never lose a slot to a
+        lda #$00                ; the exits first, so they can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
 hoLp:   lda hoI                 ;   biggest thing here
         asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
@@ -12918,12 +13003,13 @@ hoLp:   lda hoI                 ;   biggest thing here
         adc nOrbT               ; hole-like entities follow the orbs in orbXCT/orbYCT
         sta oidx
         jsr orbOne              ; orbOne branches to holeTail on the index
-hoNx:   lda hoI
-        cmp nExitT
-        bcs hoInc               ; already past the exits: just step on
-        lda #${hx(Math.max(0, HOLES_AT.length - 1))}
-        sta hoI                 ; skip the OTHER exit hole -- only hlv's is live
-hoInc:  inc hoI
+        ; ---- EVERY exit draws, not just hlv's ----
+        ; This used to jump hoI past the other exits, because a level had two holes that took
+        ; turns and only one of them was real. The hub has FOUR and all four are ways out, so
+        ; three of them were invisible floor. (The user, 2026-09-24: "would love the holes to be
+        ; on the floor as well -- currently only one shows".) Which LEVEL each leads to is still
+        ; one byte for the whole level; that is the next thing this wants, not this.
+hoNx:   inc hoI
         lda hoI
         cmp nHoleT
         bcc hoLp
@@ -12946,16 +13032,35 @@ ${FALL ? `
 ; fallChk: standing in the hole's cell? Then go.
 fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         beq fcNo
-        lda hlv                 ; the live hole's entity index is nOrbT + hlv -- the SWAPPED count,
-        clc                     ;   not this build's ORBS.length. Level 1 has four orbs and angels
-        adc nOrbT               ;   before its hole; the socket room has one. With the immediate
-        tax                     ;   baked in, the socket room's hole was compared at index 4 -- past
-        lda px+1                ;   its three entities -- and could never be fallen through.
+        ; ---- ANY exit, not just hlv's ----
+        ; The entity index of exit n is nOrbT + n -- the SWAPPED count, not this build's
+        ; ORBS.length. Level 1 has four orbs and angels before its hole; the socket room has one.
+        ; With the immediate baked in, the socket room's hole was compared at index 4 -- past its
+        ; three entities -- and could never be fallen through.
+        ; hlv still records WHICH exit was used, because the drop animation reads its cell; what
+        ; it no longer does is decide which one is real. Its old eor #$01 only ever toggled 0
+        ; and 1, so on the hub's four exits two of them could not be fallen through at all.
+        ldx nOrbT               ; entity index of exit 0
+        ldy #$00
+fcLp:   lda px+1
         cmp orbXCT,x
-        bne fcNo
+        bne fcNx
         lda py+1
         cmp orbYCT,x
-        bne fcNo
+        beq fcHit
+fcNx:   inx
+        iny
+        cpy nExitT
+        bcc fcLp
+        bcs fcNo                ; always taken: none of them is under us
+fcHit:  sty hlv                 ; the one we are dropping through
+        tya
+        asl                     ; x32, the LOS stride -- see hlvOf
+        asl
+        asl
+        asl
+        asl
+        sta hlvOf
         lda #$00                ; sprites away: they belong to the level being left. Clear the
         sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
         sta omXX                ;   which is past where the fall path rejoins the loop, so it
@@ -13010,9 +13115,9 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit 
                                 ;   which fakes a fall) still went to the old cell while boot and
                                 ;   death went to the new one. One place a level begins, however
                                 ;   you got there.
-        ldx hlv                 ; ...and X back, for the store below
-        txa
-        ${HOLES_AT.length > 1 ? 'eor #$01' : 'and #$00'}   ; the other hole is live now -- if there is one
+        ; Every exit is live now (see fallChk), so there is nothing to alternate: hlv is only a
+        ; record of which one the last drop used, and the level being arrived at has not used one.
+        lda #$00
         sta hlv
         asl                     ; x32, the same LOS stride -- not a cell multiply
         asl
@@ -18276,7 +18381,7 @@ ${ADDX('px+1')}
         lsr
         sta rgtL                ; byte within a 32-byte LOS row. rgtL/rgtH are orbProj's,
                                 ;   and orbProj has not run yet this frame
-        ldx hlv                 ; the live exit hole, then every socket: the same set holeOne walks
+        ldx #$00                ; every exit, then every socket: the same set holeOne walks
 ogHoLp: txa
         asl
         asl
@@ -18291,10 +18396,7 @@ ogHoLp: txa
         and orbBitT,y
         bne ogYes              ; in sight: project
         ldx rgtH
-        cpx nExitT
-        bcs ogHoIn
-        ldx #${hx(Math.max(0, HOLES_AT.length - 1))}   ; past the exits: only hlv's hole is live, so step over the other
-ogHoIn: inx                     ;   one exactly as holeOne does (hoI = 1, then inc -> first socket)
+ogHoIn: inx                     ; exactly the set holeOne walks, in the same order
         cpx nHoleT
         bcc ogHoLp
 ogNone:
