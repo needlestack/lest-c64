@@ -27,7 +27,15 @@ const args = process.argv.slice(2);
 if (!args.length) { console.error('usage: node probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
 
 const envStr = args.shift();
-const wantWait = +((args.find(a => a === '--wait') ? args[args.indexOf('--wait') + 1] : 0)) || 45000;
+// How long to sit still before dialling the monitor. It exists because POLLING THROUGH THE LOAD
+// slows the load to a crawl (see dial below), not because the load needs this long: with true
+// drive emulation off the whole 57K lands in a couple of seconds at warp. It was 45000, which
+// cost every single probe run 45 seconds of nothing -- ~4x the rest of the run put together.
+// 8000 measured safe with room to spare; the liveness loop below is the real safety net and it
+// now has its own deadline rather than a multiple of this one, so lowering this cannot shorten
+// the recovery window. --wait N overrides it if a slower machine ever needs it.
+const wantWait = +((args.find(a => a === '--wait') ? args[args.indexOf('--wait') + 1] : 0)) || 8000;
+const LIVE_DEADLINE = 90000;    // how long to keep polling for signs of life, independent of the above
 // --at A[,B]: read when frameCnt first reaches tick A, and again at B. ABSOLUTE ticks since the
 // program started, not "N from now" -- at warp the client cannot connect before a good deal of game
 // time has already passed, and how much varies, so "N from now" lands somewhere different in every
@@ -272,7 +280,7 @@ sock.on('connect', async () => {
     // lands mid-load. Give up only after the deadline, and say what the screen shows when we do.
     const live = async () => { const m = await memGet(addr[LIVE], 2); return m[0] + 256 * m[1]; };
     let a = 0, b = 0, alive = false;
-    for (const t = Date.now(); Date.now() - t < wantWait * 3 && !alive; ) {
+    for (const t = Date.now(); Date.now() - t < LIVE_DEADLINE && !alive; ) {
       a = await live();
       await resume();
       await new Promise(r => setTimeout(r, 2000));
@@ -362,7 +370,7 @@ sock.on('connect', async () => {
           '  |' + s.slice(r * 40, r * 40 + 40).map(ch).join('') + '|')
           .filter(l => l.replace(/[ |.]/g, '')).join('\n');
       } catch {}
-      bail(`NOT RUNNING: ${LIVE} ($${addr[LIVE].toString(16)}) held at ${a} for ${wantWait * 3 / 1000}s.` +
+      bail(`NOT RUNNING: ${LIVE} ($${addr[LIVE].toString(16)}) held at ${a} for ${LIVE_DEADLINE / 1000}s.` +
         ` The program has not started -- everything else would be image data.${pc}${scr}`);
     }
     const readAll = async () => {

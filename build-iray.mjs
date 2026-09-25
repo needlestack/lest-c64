@@ -168,13 +168,6 @@ const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
 // idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
 // just the idol -- which is the point: seeing it changes the light in the room.
 const IDOL_SPR = { under: 0x09, hi: 0x07 }, IDOL_BODY = 0x08;
-// ---- what the WORLD looks like while the idol is in your hands ----
-// The idol's own three inks, taken off the sprite and put on the room: brown ground, orange
-// walls, yellow seams. Not a raster split -- the WHOLE screen, so there is no mistaking whose
-// rules are running. Override with IDOLCEIL/IDOLWALL/IDOLSEAM to taste.
-const IDOL_LOOK = { ceil: +(process.env.IDOLCEIL ?? IDOL_SPR.under),
-                    wall: +(process.env.IDOLWALL ?? IDOL_BODY),
-                    seam: +(process.env.IDOLSEAM ?? IDOL_SPR.hi) };
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
@@ -12679,7 +12672,6 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
         jsr lvlLook             ; the arriving level's inks and wall mark
-${HAS_IDOL ? '        jsr idolLk              ; ...unless the idol is in hand, which wins\n' : ''}
                                 ; ^ the arriving level's LOOK lands here, not at the swap:
                                 ;   the swap happens the moment you step into the hole (the
                                 ;   destination render needs the new geometry from its first
@@ -16092,33 +16084,33 @@ ceilLog:lda clP
         sta clP
 clDn:   rts
 ` : ''}
-${HAS_IDOL ? `; ---- idolLk: the world's look follows what is in your hands ----
-; Called wherever carry changes -- picked up, put down, and after a fall, because lvlLook puts
-; the arriving level's inks back and would undo this. Cold: those events only, never per frame.
+${HAS_IDOL ? `; ---- idolLk: is the IDOL the thing in your hands? ----
+; Called wherever carry changes. It sets one flag and touches nothing else -- the room keeps the
+; level's own colours, and the tell is on the SPRITES: see sprPal, where holding the idol tints
+; an angel the same brown/orange/yellow that seeing one in the world does.
 ;
-; colW/colF rather than the IRQ operands directly: irqB1 is PUBLISHED from colF at raster 250
-; (see mnext), so a store straight into irqB1+1 is overwritten on the next frame anyway -- and
-; storing it early is exactly the bug that flashed the whole screen during a fall.
-idolLk: ldy carry
-        beq idlOff              ; empty hands
+; An earlier cut of this repainted the whole room. It read well but it was wrong twice over: the
+; level stopped being recognisable as itself, and the death scene inherited the tint, because
+; dieSwap runs against whatever inks were live and lvlLook never gets a chance to put them back.
+idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
+                                ;   reading the working flag direct would show 0 for any raster
+                                ;   frame whose IRQ landed inside the projection -- one bad frame
+                                ;   in roughly four, which is exactly the flicker this chases.
+idolLat:lda idolWk
+        sta idolOn
+        lda #$00
+        sta idolWk
+        rts
+
+idolLk: ldx #$00                ; assume not
+        ldy carry
+        beq idlPut              ; empty hands
         dey
         lda orbArtT,y           ; 0 = an orb. Only the idol changes the rules.
-        beq idlOff
-        lda #$01
-        sta idolHd
-        lda #${hx(IDOL_LOOK.ceil)}          ; ground, both halves: no split, the WHOLE screen
-        sta colW
-        sta colF
-${CEILVARY ? `        sta irqB2+1             ; ...including whatever is seen through a hole
-` : ''}        lda #${hx(IDOL_LOOK.wall)}
-        sta $d022
-        lda #${hx(IDOL_LOOK.seam)}
-        sta $d023
-        jmp lvlHi               ; colW -> irqB0; mnext carries colF -> irqB1
-idlOff: lda #$00
-        sta idolHd
-        jsr lvlLook             ; every ink back from the live level's own tables
-        jmp lvlHi
+        beq idlPut
+        inx
+idlPut: stx idolHd
+        rts
 ` : ''}
 
         * = $7e00
@@ -19440,15 +19432,6 @@ ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
 ${HAS_IDOL ? `        * = $bdb6
-idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
-                                ;   reading the working flag direct would show 0 for any raster
-                                ;   frame whose IRQ landed inside the projection -- one bad frame
-                                ;   in roughly four, which is exactly the flicker this chases.
-idolLat:lda idolWk
-        sta idolOn
-        lda #$00
-        sta idolWk
-        rts
 
 ; ---- sprPal: the two SHARED sprite inks, once a frame ----
 ; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
@@ -19458,7 +19441,10 @@ idolLat:lda idolWk
 sprPal: lda dieSt               ; ---- the death scene wants the inks to SIT STILL ----
         bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
         lda idolOn              ;   before any of this existed, and the scene's fade was written
-        beq spLvl               ;   against it. "The world no longer goes black correctly."
+        bne spTint              ;   against it. "The world no longer goes black correctly."
+        lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
+        beq spLvl               ;   angels have stopped caring whether you are looking
+spTint:
         lda #${hx(IDOL_SPR.under)}      ; ---- above the split: the world's ----
         ldy #${hx(IDOL_SPR.hi)}
         bne spWSt               ; always: brown is not zero
