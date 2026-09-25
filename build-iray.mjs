@@ -76,11 +76,16 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // own shadow. NOTE: the live level is CHAIN[0], and with three resident only levels 1 and 2 fit
 // under the code ceiling as the live one -- level 3 live in a three-chain is ~17 bytes over, so
 // playtest it with CHAIN=3 rather than by rotating the chain.
-const CHAIN = (process.env.CHAIN ?? '1,2,3,4').split(',').map(Number);
+// 1,2,3,5 -- NOT 1,2,3,4. Level 4 is the HUB now and it has FOUR exits, which takes every one
+// of holeSeeT's four hole-like slots; level 2 needs three of them for its sockets. NHOLE is
+// capped at 4 and the exit/socket split is global, so the hub cannot join a chain with a socket
+// level until that budget changes. It builds standalone (CHAIN=4 -> level4.d64) meanwhile.
+const CHAIN = (process.env.CHAIN ?? '1,2,3,5').split(',').map(Number);
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-if (![1, 2, 3, 4].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 4`);
+if (![1, 2, 3, 4, 5].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 5`);
 const SOCKROOM = LVL === 2;
-const IDOLROOM = LVL === 4;             // the level with an idol in it
+const IDOLROOM = LVL === 5;             // the level with an idol in it (was 4 until the hub took that number)
+const HUBROOM  = LVL === 4;             // THE HUB: four holes in the floor and three pedestals
 const CHAMBER = LVL === 3;              // the chamber level: corners like the old arenas, plus sockets
 const L1_MAP = [
   "#######################",
@@ -109,8 +114,14 @@ const L1_MAP = [
 // takes out, $ff for none. Per level, and ANY NUMBER of levels in a chain may have walls --
 // see WALLS_ALL, which flattens them into one global id space.
 const LEVEL_WALLS = {
+  // THE HUB. Column 9's two gaps are the only way through the pedestal wall; column 10 shuts
+  // them off again. One group per pedestal, so filling a pedestal opens its own pair.
+  4: { walls: [[[9, 3], [10, 2]],                             // top pedestal (9,2)
+               [[10, 4]],                                     // middle pedestal (9,4)
+               [[9, 5], [10, 6]]],                            // bottom pedestal (9,6)
+       sockWall: [0, 1, 2] },
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
-  4: { walls: [[[11, 2]],                                     // S1 (11,3): up to the exit
+  5: { walls: [[[11, 2]],                                     // S1 (11,3): up to the exit
               [[20, 9]]],                                     // S2 (19,9): into the idol's column
        sockWall: [0, 1] },
   3: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
@@ -119,11 +130,11 @@ const LEVEL_WALLS = {
 };
 // Any level's map by number, for the few places that need a level OTHER than the live one --
 // a wall's cell ids are in its own level's width, which need not be the live one's.
-const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : L1_MAP;
+const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : n === 4 ? L4_MAP : n === 5 ? L5_MAP : L1_MAP;
 // Which levels carry an IDOL, and where. Declared up here with the other level facts because
 // the sprite ladder is built long before ORBS exists, and a ladder nothing uses is 1K of bank 3
 // -- which bank 3 does not have. Levels 1-3 are unaffected by the idol existing at all.
-const LEVEL_IDOL = { 4: [21.5, 1.5] };
+const LEVEL_IDOL = { 5: [21.5, 1.5] };
 // ---- a level's whole LOOK is three bytes ----
 // The three inks each own a register (00 = $d021 ceiling and floor, 01 = $d022 walls,
 // 10 = $d023 seams -- see the charset note), which is precisely so a level can be re-toned
@@ -132,7 +143,8 @@ const LEVEL_IDOL = { 4: [21.5, 1.5] };
 // at, so it travels with the level rather than with the slot.
 // level 4: grey 1 ground, light blue seams. Overridable so a colour can be tried without an
 // edit -- CEIL4=2 SEAM4=7, say -- which also makes the raster split visible when it is loud.
-const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env.SEAM4 ?? 0x0e) } };
+const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env.SEAM4 ?? 0x0e) },
+                    5: { ceil: +(process.env.CEIL5 ?? 0x0b), seam: +(process.env.SEAM5 ?? 0x0e) } };
 // PALTEST=<level>:<ceil colour> overrides one level's ground, for trying a colour or for making
 // a raster split visible by giving it something loud enough to read off a screenshot.
 if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Number);
@@ -145,13 +157,14 @@ if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Nu
 // reads colour RAM, which is $08 (black) everywhere; a seam is a solid cell with a full-height
 // pair-10 column that this symbol's columns would collide with.
 // A single dot, as [column, row] in the 4x8 cell -- or a .png read as fat bits.
-const LEVEL_SYM = { 4: [[1, 3]] };
+const LEVEL_SYM = { 4: [[1, 3]], 5: [[1, 3]] };
 // ---- per-level SPRITE inks, and the idol's own ----
 // A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
 // by all eight sprites; only the body is per-sprite. Level 4 takes the underside to black, so
 // its cast reads black / grey 2 / grey 3.
-const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) } };
+const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) },
+                    5: { under: +(process.env.SPRU5 ?? 0x00) } };
 // ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
 // The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
 // that rises with the room. The renderer only ever computes 13 cell rows and MIRRORS them, so
@@ -203,7 +216,27 @@ const L3_MAP = [
 // that gate the only two things worth reaching: S1 (11,3) opens (11,2) to the exit above it, and
 // S2 (19,9) opens (20,9) into the dead-end column that holds the idol. Two orbs, one angel, and
 // one orb short of opening both -- which is the level.
+// ---- LEVEL 4: THE HUB ----
+// Four ways down and three pedestals. The three exits in the left chamber are the levels you go
+// and fetch an idol from; the fourth, behind the pedestal wall on the right, is the way onward
+// and only opens when all three are filled. The barrier is deliberately awkward: column 9 is
+// pedestal/wall/pedestal/wall/pedestal, so the only way through is the two removable cells at
+// (9,3) and (9,5), and column 10 shuts those off again at rows 2, 4 and 6.
 const L4_MAP = [
+  "################",
+  "###.X....#...###",
+  "##.......T|...##",
+  "#........|.....#",
+  "#X.P.....T|...X#",
+  "#........|.....#",
+  "##.......T|...##",
+  "###.X....#...###",
+  "################",
+// T = pedestal and X = exit, markers for the reader like O/S/A/P elsewhere: the real positions
+// come from the tables. '|' is a removable wall and must be SOLID in the base map, or the wall
+// delta diffs two identical maps and removes nothing -- which is exactly what it did first try.
+].map(r => r.replace(/\|/g, '#').replace(/[TXP]/g, '.'));
+const L5_MAP = [
   "#######################",
   "#........O#X#...#...#I#",
   "#.#########|#.#.#.#.#.#",
@@ -380,6 +413,7 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 // The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
 // grid; the old 16 x 16 literals and the ring's are gone.
 const M = (SOCKROOM ? SOCK_MAP : CHAMBER ? punchWalls(L3_MAP, LEVEL_WALLS[3].walls)
+         : LVL === 5 ? punchWalls(L5_MAP, LEVEL_WALLS[5].walls)
          : LVL === 4 ? punchWalls(L4_MAP, LEVEL_WALLS[4].walls) : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
@@ -2920,7 +2954,8 @@ const LEVEL_START = {
   1: [0x0280, 0x0280, 0x19, 0xc0],
   2: [0x046e, 0x07dc, 0xdb, 0x00],   // the user's spot, 2026-09-22
   3: [0x0180, 0x0180, 0x20, 0x00],
-  4: [0x0180, 0x0880, 0x00, 0x00],
+  4: [0x0380, 0x0480, 0x00, 0x00],   // the hub: the player's cell (3,4), facing the three holes
+  5: [0x0180, 0x0880, 0x00, 0x00],
 };
 const ST0 = LEVEL_START[LVL] ?? LEVEL_START[1];
 const startOf = n => n === LVL ? [PX, PY, PA, PAF] : (LEVEL_START[n] ?? LEVEL_START[1]);
@@ -4047,13 +4082,13 @@ if (process.env.ORBSCATTER) {
     ORBS.push({ x: 12.5, y: 9.5, c: 0 });
     ORBS.push({ x: 9.5, y: 12.5, c: 0 });
   }
-  else if (IDOLROOM) {                         // level 4: two orbs for two sockets, and the idol
+  else if (IDOLROOM) {                         // level 5: two orbs for two sockets, and the idol
     ORBS.push({ x: 9.5, y: 1.5, c: 0 });       //   in the hall's north wall
     ORBS.push({ x: 16.5, y: 7.5, c: 0 });      //   in the comb
     // The IDOL is luggage like an orb -- carried, dropped, and a real obstacle where it stands.
     // What it is NOT is a key: hlAt still finds the socket under it and okPlain still puts it
     // down, but nothing seats. Everything else it does, it does because it is an orb.
-    ORBS.push({ x: LEVEL_IDOL[4][0], y: LEVEL_IDOL[4][1], c: 0, idol: true });
+    ORBS.push({ x: LEVEL_IDOL[5][0], y: LEVEL_IDOL[5][1], c: 0, idol: true });
   }
   else {                                         // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
@@ -4076,7 +4111,7 @@ if (process.env.ORBSCATTER) {
   // from the other levels' is exactly what nOrbT was made swappable for.
   if (process.env.ANGEL !== '0') {
     if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
-    else if (IDOLROOM) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // level 4: in the hall
+    else if (IDOLROOM) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // level 5: in the hall
     else if (CHAMBER) {                           // level 3: one in each far corner, and one
       ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });   //   caged in the chamber
       ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
@@ -4190,14 +4225,19 @@ const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 // Level 2's hole sits BEHIND the chamber's column, at (6,5). Not for distance -- the chamber is
 // small -- but so that standing in the doorway you cannot see the way out, and getting to it means
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
-const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12] : IDOLROOM ? [11, 1] : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+// THE HUB HAS FOUR. One exit per level was the rule from 2026-09-18 (see below); the hub is the
+// level that needs it back, so HOLE_D may now be a LIST of cells as well as a single one.
+const HUB_HOLES = [[4, 1], [1, 4], [14, 4], [4, 7]];   // N, W, E(behind the wall), S
+const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12] : IDOLROOM ? [11, 1]
+             : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
 // ...or NONE: nExitT 0 is sayable, and every hole-like loop and fallChk test the count before
 // touching entity nOrbT+0, which would be the byte past the last. No shipping level is exitless
 // now that the arenas are gone, so nothing exercises this -- keep the guards, they are 12 bytes.
-const HOLES_AT = HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]] : [];
+const HOLES_AT = Array.isArray(HOLE_D?.[0]) ? HOLE_D
+               : HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]] : [];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
 // orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
@@ -16164,6 +16204,12 @@ ceilLog:lda clP
         sta clP
 clDn:   rts
 ` : ''}
+${ANYSYM ? `symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
+        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
+symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
+        !byte ${symRowsOcc(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
+lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
+` : ''}
 ${HAS_IDOL ? `; ---- idolLk: is the IDOL the thing in your hands? ----
 ; Called wherever carry changes. It sets one flag and touches nothing else -- the room keeps the
 ; level's own colours, and the tell is on the SPRITES: see sprPal, where holding the idol tints
@@ -16208,12 +16254,7 @@ spWSt:  sta $d025
         sty irqSpH+1
 spDn:   rts
 ` : ''}
-${ANYSYM ? `symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
-        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
-symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
-        !byte ${symRowsOcc(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
-lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
-` : ''}idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
+idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
                                 ;   reading the working flag direct would show 0 for any raster
                                 ;   frame whose IRQ landed inside the projection -- one bad frame
                                 ;   in roughly four, which is exactly the flicker this chases.
