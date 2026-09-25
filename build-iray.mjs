@@ -4376,6 +4376,18 @@ const PEDWMIN = +(process.env.PEDWMIN ?? 2);
 // because the shadow is black: the light trio was needed only while it was grey1, which the
 // dark bodies would have sat below. Top stays grey3, so each drum still reads lit from above.
 const PED_COLS = (process.env.PEDCOLS ?? '2,5,6').split(',').map(Number);
+// ---- and the EXITS take colours too ----
+// An exit hole is already a single flat bit pair 2 -- obC, the per-sprite ink (makeHoleLadder
+// emits no rim for one, and a build guard below asserts it) -- so it has always been able to be
+// any colour; it was simply black on every level so far.
+// The hub's four, in HUB_HOLES order (N, W, E, S). The three the player can REACH are the
+// pedestals' three colours, because those are the three errands: go and bring back that orb.
+// The fourth is the one behind the pedestal wall, which nothing opens until all three are
+// seated, so it is NOT an errand and is deliberately not one of the three -- it stays black,
+// the way every other exit in the game reads.
+const LEVEL_EXITCOL = { 4: [2, 5, 0, 6] };
+const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').split(',')
+  .filter(v => v !== '').map(Number);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
 // one you land next to takes you back where you came from. Same maze both ways for now -- only
 // the hole cell and the landing spot differ, which is all the level transition actually needs.
@@ -4423,7 +4435,7 @@ const PEDESTALS_AT = (process.env.PEDESTALS ?? LEVEL_PEDESTALS[LVL] ?? '').split
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Exits first, then the seatable things. A pedestal IS a socket to everything but hlSet, which
 // reads `ped` to pick the ladder; the exit/socket boundary the runtime walks is still nExitT.
-const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
+const HOLELIKE = [...HOLES_AT.map((h, i) => ({ x: h[0], y: h[1], exit: true, ei: i })),
                   ...SOCKETS_AT.map(h => ({ x: h[0], y: h[1], exit: false, ped: false })),
                   ...PEDESTALS_AT.map((h, i) => ({ x: h[0], y: h[1], exit: false, ped: true, pi: i }))];
 
@@ -6334,12 +6346,14 @@ const LVL_TABLES = [
   ['orbX0T', pad(orbXC, NORB)], ['orbY0T', pad(orbYC, NORB)],
   ['angBlkT', angBlk],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
-  // 0 = an exit hole (black, always). 15 = an empty socket's grey3 inside its grey1 rim.
+  // An exit hole is black unless its level names a colour (LEVEL_EXITCOL); 15 is an empty
+  // socket's grey3 inside its grey1 rim.
   // A PEDESTAL takes one of PED_COLS. This is the ONLY ink on the drum that can differ from
   // one pedestal to the next: bit pair 10 is $d027+n, per sprite, and it is the body -- 61% of
   // the stone. Pairs 01 and 11 are $d025 and $d026, shared by all eight sprites, so the shadow
   // and the lit top are necessarily the same on every pedestal on screen.
-  ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : h.ped ? PED_COLS[h.pi % PED_COLS.length] : 15), NHOLE)],
+  ['hlFillT', pad(HOLELIKE.map(h => h.exit ? (EXIT_COLS[h.ei] ?? 0)
+                                    : h.ped ? PED_COLS[h.pi % PED_COLS.length] : 15), NHOLE)],
   // Socket -> the GLOBAL wall id it opens, $ff for a socket that opens nothing. It TRAVELS,
   // because two levels' socket 0 are different sockets opening different walls. It used to be
   // shared, sized from the live level's socket count and valued from the single wall level: a
