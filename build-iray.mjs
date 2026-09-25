@@ -20767,9 +20767,31 @@ try {
 
     { tag: 'M', name: 'IMG', at: r.org, data: [...r.bytes] },
   ];
-  const { buildLoader } = await import('./loader-src.mjs');
-  const ld = buildLoader(assemble, DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, runtime: f.runtime, length: f.length ?? f.data.length })),
-                         r.labels.entry);
+  const { buildLoader, QUOTE_SCR, QUOTE_CHR } = await import('./loader-src.mjs');
+  const quoteAddrs = { QUOTE_SCR, QUOTE_CHR };
+  // ---- IQOT: the boot quote, a charset and a 40x25 map (see make-quote.mjs) ----
+  // ONE file spanning both, with the gap between them padded, so the boot body needs one load
+  // call and not two. It lands where IPIC and ILVL eventually go -- the only bank-3 space free
+  // for the length of the load -- so those two are marked `last` and go behind a blanked screen.
+  const QUOTE = (() => {
+    if (!DIE || process.env.NOQUOTE) return null;             // the picture machinery owns bank 3's tail
+    let q; try { q = JSON.parse(readFileSync('./quote-screen.json', 'utf8')); }
+    catch { return null; }                                    // not generated: ship without it
+    const { QUOTE_SCR, QUOTE_CHR } = quoteAddrs;
+    if (q.chars.length > 0x10000 - QUOTE_CHR) throw new Error('the quote charset runs off the top of memory');
+    const data = [...q.screen, ...Array(QUOTE_CHR - QUOTE_SCR - q.screen.length).fill(0), ...q.chars];
+    console.error(`  boot quote: ${q.glyphs} glyphs + ${q.screen.length} screen = ${data.length} B ` +
+                  `at $${QUOTE_SCR.toString(16)}, shown for the whole load`);
+    return { tag: 'Q', name: 'IQOT', at: QUOTE_SCR, data };
+  })();
+  if (QUOTE) DISK.push(QUOTE);
+  // IPIC and ILVL land ON the quote, so they load last, after the screen is blanked.
+  for (const f of DISK) if (f.name === 'IPIC' || f.name === 'ILVL') f.last = true;
+  const ld = buildLoader(assemble, DISK.filter(f => f !== QUOTE).map(f =>
+                           ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
+                              runtime: f.runtime, length: f.length ?? f.data.length })),
+                         r.labels.entry,
+                         QUOTE && { tag: 'Q', name: 'IQOT' });
   const d = D64.createEmpty('IRAY', '01');
   d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);   // first, so LOAD"*" finds it
   for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG);

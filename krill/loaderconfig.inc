@@ -42,7 +42,7 @@ DECOMPRESSOR                    = DECOMPRESSORS::NONE; available are NONE, BITNA
 
 .define FILE_EXISTS_API           0 ; include the fileexists call for simple multi-disk handling
 
-.define LOAD_UNDER_D000_DFFF      1 ; C-64/128: enable loading (and decompression) to the RAM at $D000..$DFFF,
+.define LOAD_UNDER_D000_DFFF      0 ; C-64/128: enable loading (and decompression) to the RAM at $D000..$DFFF,
                                     ; note that this does not slow down loading when not loading to RAM at $D000..$DFFF,
                                     ; as there are two separate routines to load data (one regular, the other to RAM at $D000..$DFFF).
                                     ; the IRQ handlers will need to change $01 ($FF00 on C-128) to enable the I/O registers at $D000..$DFFF,
