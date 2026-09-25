@@ -7949,7 +7949,127 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = $3c58
+        * = $3b6b
+; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
+; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
+; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
+; is written from the same answer instead of being re-derived.
+;
+; Per row byte, four bit pairs, and everything below is ONE BIT PER PAIR sitting at the pair's
+; low bit (so every mask is a subset of $55):
+;     hi   = (b >> 1) & $55        the high bit of each pair, brought into line
+;     lo   = b & $55
+;     w01  = lo & ~hi              a WALL pixel
+;     w10  = ~lo & hi              a seam pixel: only this routine can have made one
+;     c00  = ~lo & ~hi             ground or ceiling
+; and a pair is flipped by EOR with (m | m<<1): 01 EOR 11 = 10, and 10 EOR 11 = 01, which is
+; why the same trick both sets the outline and takes it away again.
+seamEdge:
+        ldx lvlMeT
+        dex
+        lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
+        sta seMsk               ;   so a level that does not want it still gets NORMALISED.
+        lda #<$c010
+        sta seStA+1
+        sta seStB+1
+        lda #>$c010
+        sta seStA+2
+        clc
+        adc #$08                ; charset B is charset A plus $800, so the low byte is shared
+        sta seStB+2
+        lda #$c7         ; codes 2..200
+        sta seN
+        ; ---- pass 1: undo any previous outline, and record where the ceiling is ----
+seGly:  ldy #$07
+seP1:
+seLdA:  lda $c010,y
+        sta seB
+        lsr
+        and #$55
+        sta seHi
+        lda seB
+        and #$55
+        eor #$55
+        sta seNL                ; ~lo
+        and seHi
+        sta seW                 ; w10: a seam pixel this routine left last time
+        lda seHi
+        eor #$55
+        and seNL
+        sta seC00,y             ; c00
+        lda seW
+        asl
+        ora seW
+        eor seB
+        sta seNB,y              ; ...and the row with every 10 back to 01
+        dey
+        bpl seP1
+        ; ---- pass 2: a wall pixel with ground beside it, above it or below it ----
+        ldy #$07
+seP2:   lda seC00,y
+        asl
+        asl                     ; the pixel one to the side
+        sta seT
+        lda seC00,y
+        lsr
+        lsr                     ; ...and the other side. Pairs shifted off the ends are pixels
+        ora seT                 ;   in the NEXT CELL, which a per-glyph pass cannot see.
+        sta seT
+        cpy #$07
+        beq seNoD               ; row 7: nothing below it inside this glyph
+        iny
+        lda seC00,y
+        dey
+        ora seT
+        sta seT
+seNoD:  tya
+        beq seNoU               ; row 0: nothing above it
+        dey
+        lda seC00,y
+        iny
+        ora seT
+        sta seT
+seNoU:  lda seNB,y
+        sta seB
+        lsr
+        and #$55
+        sta seHi
+        lda seB
+        and #$55
+        sta seLo
+        lda seHi
+        eor #$55
+        and seLo                ; w01: a wall pixel
+        and seT                 ; ...with ground orthogonally next to it
+        and seMsk               ; ...on a level that asked for it. No branch.
+        sta seW
+        asl
+        ora seW
+        eor seB
+        sta seNB,y
+        dey
+        bpl seP2
+        ; ---- pass 3: out to BOTH charsets, B taking row 7-y ----
+        ldy #$07
+        ldx #$00
+seOut:  lda seNB,y
+seStA:  sta $c010,y
+seStB:  sta $c810,x
+        inx
+        dey
+        bpl seOut
+        lda seStA+1             ; on to the next glyph, eight bytes along in both
+        clc
+        adc #$08
+        sta seStA+1
+        sta seStB+1
+        bcc seNC
+        inc seStA+2
+        inc seStB+2
+seNC:   dec seN
+        bne seGly
+        rts
+
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
         ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
         ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
@@ -9362,6 +9482,9 @@ symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair
 symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
         !byte $ff,$ff,$ff,$cf,$ff,$ff,$ff,$ff
 lvlSymT: !byte 0,0,0,8,8
+; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather than
+; a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no branch.
+lvlSeamT: !byte $00,$00,$00,$00,$55
 
 ; ---- idolLk: is the IDOL the thing in your hands? ----
 ; Called wherever carry changes. It sets one flag and touches nothing else -- the room keeps the
@@ -9384,8 +9507,8 @@ sprPal: lda dieLat              ; ---- the death scene wants the inks to SIT STI
         lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
         beq spLvl               ;   angels have stopped caring whether you are looking
 spTint:
-        lda #$09      ; ---- above the split: the world's ----
-        ldy #$07
+        lda #$00      ; ---- above the split: the world's ----
+        ldy #$0f
         bne spWSt               ; always: brown is not zero
 spLvl:  lda sprU                ; whatever lvlLook left for this level
         ldy sprH
@@ -9401,8 +9524,8 @@ spWSt:  sta $d025
         dex                     ;   carry is the entity index PLUS ONE
         lda orbArtT,x
         beq spDn                ; an orb holds no special inks
-        lda #$09
-        ldy #$07
+        lda #$00
+        ldy #$0f
         sta irqSpU+1
         sty irqSpH+1
 spDn:   rts
@@ -9576,7 +9699,7 @@ spLp:   lda symT,x
         dex                     ;   wall. Same X, so it follows SOLID's plain/marked choice.
         dey
         bpl spLp
-        rts
+        jmp seamEdge            ; ...and the wall/ceiling outline, which is per level too
 
 ; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
@@ -10259,6 +10382,19 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
 ; do with how many levels are resident. Tucking it in there compiled fine on the default build and
 ; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
+; ---- seamEdge's scratch, 24 bytes ----
+; $bdd4-$bdff is 44 bytes the hole report calls (free) -- the rule for picking one of these is
+; the REPORT, not "no label there"; see the occShad note above.
+seB     = $bdd4                 ; the row being worked on
+seHi    = $bdd5                 ; its high bits, brought into line with the low ones
+seNL    = $bdd6                 ; ~lo
+seLo    = $bdd7
+seT     = $bdd8                 ; the adjacency union
+seW     = $bdd9                 ; the pairs about to be flipped
+seMsk   = $bdda                 ; $55 or $00: does this level want the outline
+seN     = $bddb                 ; glyphs left
+seC00   = $bddc                 ; 8 bytes: ground/ceiling pixels, per row
+seNB    = $bde4                 ; 8 bytes: the row being built
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -11758,7 +11894,7 @@ lvlStAT:  !byte $19,$db,$20,$00,$00
 lvlStAFT: !byte $c0,$00,$00,$00,$00
 
 lvlSprunderT: !byte $0b,$0b,$0b,$00,$00
-lvlPalceilT: !byte $01,$01,$01,$0b,$0b
+lvlPalceilT: !byte $01,$01,$01,$0b,$00
 lvlPalseamT: !byte $0b,$0b,$0b,$0e,$0e
         * = $aa00
 
@@ -12089,7 +12225,7 @@ dieChk: lda dieSt               ; once it has started, the only thing left to do
         jmp dckPnt              ; the scene owns everything else: nothing live to check
 dckIdl: lda idolHd              ; ---- and the MID-TONE follows the idol as well ----
         beq dckLive             ; $d025/$d026 are shared and sprPal already tints them, but the
-        lda #$08              ;   body is per-sprite ($d027+n, out of obC) and kept the
+        lda #$02              ;   body is per-sprite ($d027+n, out of obC) and kept the
         jsr dckPnt              ;   level's grey, which reads as disjoint against the brown and
                                 ;   yellow around it. Orbs and angels both, for the same reason.
                                 ; jsr, NOT a tail jump: carrying the idol this ran and RETURNED,

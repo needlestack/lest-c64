@@ -154,8 +154,10 @@ const LEVEL_IDOL = { 5: [21.5, 1.5] };
 // at, so it travels with the level rather than with the slot.
 // level 4: grey 1 ground, light blue seams. Overridable so a colour can be tried without an
 // edit -- CEIL4=2 SEAM4=7, say -- which also makes the raster split visible when it is loud.
+// LEVEL 5: ground and ceiling BLACK, so with $d022 black as well the seam is the only ink in
+// the room and the wall/ceiling outline (LEVEL_SEAM) is the whole image.
 const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env.SEAM4 ?? 0x0e) },
-                    5: { ceil: +(process.env.CEIL5 ?? 0x0b), seam: +(process.env.SEAM5 ?? 0x0e) } };
+                    5: { ceil: +(process.env.CEIL5 ?? 0x00), seam: +(process.env.SEAM5 ?? 0x0e) } };
 // PALTEST=<level>:<ceil colour> overrides one level's ground, for trying a colour or for making
 // a raster split visible by giving it something loud enough to read off a screenshot.
 if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Number);
@@ -169,6 +171,28 @@ if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Nu
 // pair-10 column that this symbol's columns would collide with.
 // A single dot, as [column, row] in the 4x8 cell -- or a .png read as fat bits.
 const LEVEL_SYM = { 4: [[1, 3]], 5: [[1, 3]] };
+// ---- per level: outline the wall where it meets the ceiling, in the SEAM ink ----
+// Any bit-pair-01 (wall) pixel orthogonally touching a bit-pair-00 (ground/ceiling) pixel
+// becomes bit pair 10 (seam). Done at RUNTIME over the ramp and step glyphs, codes 2..200.
+//
+// WHY IT NEEDS NO PRISTINE COPY, which is the whole reason it is affordable: those glyphs hold
+// ONLY pairs 00 and 01. Measured off the shipped charset -- 3139 pixels of 00, 3229 of 01, and
+// ZERO of 10 or 11. So a 10 in one of them can only have been put there by this pass, and
+// leaving a level is "every 10 back to 01". There is no second charset to keep, which matters
+// because there is only ONE in memory anyway: charset B is derived from A, not loaded.
+// It is also mirror-invariant -- a vertical flip preserves orthogonal adjacency -- so the same
+// answer is written to A at row r and to B at row 7-r, and cpChr never has to run again.
+// ORTHOGONAL, not 8-way (the user's call). And per GLYPH, so a boundary that lands exactly on
+// a character row gets no line: the cell above is plain BLANK and the one below plain SOLID,
+// neither with an internal 01/00 edge. Deliberately not chased (the user's call again) -- the
+// fix wants renderSym to hand SOLID a variant, which is more work than all of this.
+// LEVEL 5 is the one that wants it, and wants it for a reason: its ground register goes BLACK
+// too (below), and $d022 is already black on every level, so the only ink left anywhere in the
+// room is the seam. The outline then IS the picture -- a wireframe of the geometry rather than
+// a decoration on it. The hub is deliberately left plain, which is the per-level switch doing
+// the job it was asked for.
+const LEVEL_SEAM = { 5: 1 };
+const ANYSEAM = CHAIN.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDGE === n : LEVEL_SEAM[n]));
 // ---- per-level SPRITE inks, and the idol's own ----
 // A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
@@ -193,10 +217,15 @@ const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) },
 const FALLTAIL = (process.env.FALLTAIL ?? '1') === '1';
 const SRCMAX = FALLTAIL ? 31 : 24;
 const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
-// ...and while the IDOL is on screen the two shared inks swap to brown and yellow, with the
-// idol's own body orange. Because 01 and 11 are shared, this re-tones every sprite in view, not
-// just the idol -- which is the point: seeing it changes the light in the room.
-const IDOL_SPR = { under: 0x09, hi: 0x07 }, IDOL_BODY = 0x08;
+// ...and while the IDOL is on screen the sprite inks become the hub's own: black underside,
+// grey3 highlight, and a body in the colour of the HOLE THE IDOL CAME OUT OF -- red, for the
+// one level 5 is reached through. Because 01 and 11 are shared this re-tones every sprite in
+// view, which on the hub is a no-op (they are already black and grey3) and elsewhere is the
+// tell that you are carrying something that belongs to another room.
+// It was brown/orange/yellow while the idol was a blinding light rather than a key. What it
+// says now is which PEDESTAL the thing in your hands belongs on.
+const IDOL_SPR = { under: +(process.env.IDOLU ?? 0x00), hi: +(process.env.IDOLH ?? 0x0f) };
+const IDOL_BODY = +(process.env.IDOLB ?? 0x02);
 const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
 // Which levels stand pedestals, and where. Keyed by level like LEVEL_WALLS rather than derived
 // from HUBROOM, because HAS_PED has to be true for the whole CHAIN -- the ladder is emitted once
@@ -4410,7 +4439,7 @@ const LEVEL_EXITCOL = { 4: [2, 5, 0, 6] };
 // The hub: RED goes to the idol level, per the user. The other three are marked and not yet
 // wired -- green and blue are errands with nowhere to run to, and black is the way onward,
 // which needs the level after the hub to exist.
-const LEVEL_EXITDST = { 4: [5, 0xff, 0xff, 0xff] };
+const LEVEL_EXITDST = { 4: [5, 0xff, 0xff, 0xff], 5: [4] };
 const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').split(',')
   .filter(v => v !== '').map(Number);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
@@ -6113,6 +6142,8 @@ const PEDTBL = 5 * Math.max(1, PED.L.length);
 // ...plus hlRungP itself, which is emitted in the same run. Hand-counted, and the assembler's
 // "* = $3d9c moves backward" is the guard if it ever stops matching.
 const PEDCODE = 18;
+// seamEdge's own size, hand-counted like PEDCODE; the assembler's "moves backward" is the guard.
+const SEAMCODE = ANYSEAM ? 237 : 1;
 if (process.env.PEDDUMP && HAS_PED) {
   console.error(`pedestal ladder: r=${PEDR} u=${PEDH}, ${PED.L.length} rungs, ` +
     `${PED.BM.length} slots (${PED.BM.length * 64} bytes), slots ${PED.slotT[0]}..${PED.slotEnd - 1}`);
@@ -15713,7 +15744,127 @@ ${SPRITES ? `; ================= orb tables =================
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = ${hx16(ORB_SMALL - NHOLE * 33 - PEDTBL - PEDCODE)}
+        * = ${hx16(ORB_SMALL - NHOLE * 33 - PEDTBL - PEDCODE - SEAMCODE)}
+; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
+; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
+; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
+; is written from the same answer instead of being re-derived.
+;
+; Per row byte, four bit pairs, and everything below is ONE BIT PER PAIR sitting at the pair's
+; low bit (so every mask is a subset of $55):
+;     hi   = (b >> 1) & $55        the high bit of each pair, brought into line
+;     lo   = b & $55
+;     w01  = lo & ~hi              a WALL pixel
+;     w10  = ~lo & hi              a seam pixel: only this routine can have made one
+;     c00  = ~lo & ~hi             ground or ceiling
+; and a pair is flipped by EOR with (m | m<<1): 01 EOR 11 = 10, and 10 EOR 11 = 01, which is
+; why the same trick both sets the outline and takes it away again.
+seamEdge:
+${ANYSEAM ? `        ldx lvlMeT
+        dex
+        lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
+        sta seMsk               ;   so a level that does not want it still gets NORMALISED.
+        lda #<${hx16(CHARSET + 16)}
+        sta seStA+1
+        sta seStB+1
+        lda #>${hx16(CHARSET + 16)}
+        sta seStA+2
+        clc
+        adc #$08                ; charset B is charset A plus $800, so the low byte is shared
+        sta seStB+2
+        lda #${hx(199)}         ; codes 2..200
+        sta seN
+        ; ---- pass 1: undo any previous outline, and record where the ceiling is ----
+seGly:  ldy #$07
+seP1:
+seLdA:  lda ${hx16(CHARSET + 16)},y
+        sta seB
+        lsr
+        and #$55
+        sta seHi
+        lda seB
+        and #$55
+        eor #$55
+        sta seNL                ; ~lo
+        and seHi
+        sta seW                 ; w10: a seam pixel this routine left last time
+        lda seHi
+        eor #$55
+        and seNL
+        sta seC00,y             ; c00
+        lda seW
+        asl
+        ora seW
+        eor seB
+        sta seNB,y              ; ...and the row with every 10 back to 01
+        dey
+        bpl seP1
+        ; ---- pass 2: a wall pixel with ground beside it, above it or below it ----
+        ldy #$07
+seP2:   lda seC00,y
+        asl
+        asl                     ; the pixel one to the side
+        sta seT
+        lda seC00,y
+        lsr
+        lsr                     ; ...and the other side. Pairs shifted off the ends are pixels
+        ora seT                 ;   in the NEXT CELL, which a per-glyph pass cannot see.
+        sta seT
+        cpy #$07
+        beq seNoD               ; row 7: nothing below it inside this glyph
+        iny
+        lda seC00,y
+        dey
+        ora seT
+        sta seT
+seNoD:  tya
+        beq seNoU               ; row 0: nothing above it
+        dey
+        lda seC00,y
+        iny
+        ora seT
+        sta seT
+seNoU:  lda seNB,y
+        sta seB
+        lsr
+        and #$55
+        sta seHi
+        lda seB
+        and #$55
+        sta seLo
+        lda seHi
+        eor #$55
+        and seLo                ; w01: a wall pixel
+        and seT                 ; ...with ground orthogonally next to it
+        and seMsk               ; ...on a level that asked for it. No branch.
+        sta seW
+        asl
+        ora seW
+        eor seB
+        sta seNB,y
+        dey
+        bpl seP2
+        ; ---- pass 3: out to BOTH charsets, B taking row 7-y ----
+        ldy #$07
+        ldx #$00
+seOut:  lda seNB,y
+seStA:  sta ${hx16(CHARSET + 16)},y
+seStB:  sta ${hx16(CHARSET_B + 16)},x
+        inx
+        dey
+        bpl seOut
+        lda seStA+1             ; on to the next glyph, eight bytes along in both
+        clc
+        adc #$08
+        sta seStA+1
+        sta seStB+1
+        bcc seNC
+        inc seStA+2
+        inc seStB+2
+seNC:   dec seN
+        bne seGly
+` : ''}        rts
+
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
         ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
         ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
@@ -16875,6 +17026,10 @@ ${ANYSYM ? `symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every
 symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
         !byte ${symRowsOcc(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
 lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
+; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather than
+; a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no branch.
+lvlSeamT: !byte ${[...Array(PAL_N)].map((_, i) =>
+  hx((process.env.SEAMEDGE ? +process.env.SEAMEDGE === i + 1 : LEVEL_SEAM[i + 1]) ? 0x55 : 0)).join(',')}
 ` : ''}
 ${HAS_IDOL ? `; ---- idolLk: is the IDOL the thing in your hands? ----
 ; Called wherever carry changes. It sets one flag and touches nothing else -- the room keeps the
@@ -17100,8 +17255,8 @@ spLp:   lda symT,x
         dex                     ;   wall. Same X, so it follows SOLID's plain/marked choice.
         dey
         bpl spLp
-        rts
-` : `        rts`}
+        jmp seamEdge            ; ...and the wall/ceiling outline, which is per level too
+` : `        jmp seamEdge`}
 ; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
@@ -17682,6 +17837,19 @@ ddxHiTQ: ${chunk(ddxHiP).trim()}
 ; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
 ; do with how many levels are resident. Tucking it in there compiled fine on the default build and
 ; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
+; ---- seamEdge's scratch, 24 bytes ----
+; $bdd4-$bdff is 44 bytes the hole report calls (free) -- the rule for picking one of these is
+; the REPORT, not "no label there"; see the occShad note above.
+seB     = $bdd4                 ; the row being worked on
+seHi    = $bdd5                 ; its high bits, brought into line with the low ones
+seNL    = $bdd6                 ; ~lo
+seLo    = $bdd7
+seT     = $bdd8                 ; the adjacency union
+seW     = $bdd9                 ; the pairs about to be flipped
+seMsk   = $bdda                 ; $55 or $00: does this level want the outline
+seN     = $bddb                 ; glyphs left
+seC00   = $bddc                 ; 8 bytes: ground/ceiling pixels, per row
+seNB    = $bde4                 ; 8 bytes: the row being built
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
