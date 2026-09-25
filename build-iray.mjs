@@ -8208,7 +8208,9 @@ mvs:    lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
-${HAS_IDOL ? '        jsr sprArm              ; ...and whether the held object gets its own inks\n' : ''}${CEILVARY ? `        lda colF                ; THE GROUND TRAVELS WITH ITS OWN SPLIT LINE.
+${HAS_IDOL ? '        jsr sprArm              ; ...and whether the held object gets its own inks\n' : ''}        lda colT                ; BOTH HALVES OF THE GROUND, PUBLISHED TOGETHER -- see colT
+        sta irqB0+1
+${CEILVARY ? `        lda colF                ; THE GROUND TRAVELS WITH ITS OWN SPLIT LINE.
         sta irqB1+1             ;   lvlLook used to store this the moment the landing
                                 ;   began, while pSplit -- the line region 1 STARTS at --
                                 ;   is pending and does not land until here. For the rest
@@ -16284,7 +16286,7 @@ pcCei:  inc colW
         lda colW
         and #$0f
         sta colW
-        sta irqB0+1
+        sta colT                ; through the shadow, like everything else that paints the ground
         rts
 pcFlr:  inc colF
         lda colF
@@ -16292,6 +16294,16 @@ pcFlr:  inc colF
         sta colF
         sta irqB1+1
         rts
+colT:   !byte ${hx(palOf(LVL).ceil)}             ; the TOP region's pending ink. irqB0 is read at the top of
+                                ;   the frame and irqB1 at pSplit, so a store that reaches one of
+                                ;   them immediately can NEVER reach the other on the same frame:
+                                ;   the two halves were a frame apart through the whole death
+                                ;   fade, white over the top half while the bottom was still the
+                                ;   room and so on down the ramp. Both are published at raster
+                                ;   250 now, so both take effect at the same top of frame.
+                                ;   NOT colW: colW is the level's ceiling ink and lvlLook sets it
+                                ;   the moment a fall hands over, which is a frame before the top
+                                ;   of the screen is allowed to change. lvlHi is what moves it.
 colF:   !byte ${hx(palOf(LVL).ceil)}             ; the FLOOR's ink. colW is the ceiling's now.
 sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
 sprH:   !byte ${hx(sprOf(LVL).hi)}             ;   because the idol swap borrows the registers
@@ -16306,8 +16318,9 @@ lvlBoot:jsr lvlLook             ; all five inks, then fall through to lvlHi
 ; finally left the screen -- until then it must keep the colour of the level being left, which is
 ; the whole point of the split.
 lvlHi:  lda colW
-        sta irqB0+1             ; irqB1 needs nothing here: it tracks colF through mnext's
-        rts                     ;   publish, and lvlLook has already set colF.
+        sta colT                ; THE moment the top of the screen is allowed to become the
+        rts                     ;   arriving level. irqB1 needs nothing here: it tracks colF
+                                ;   through mnext's publish, and lvlLook has already set colF.
 
 ; lvlLo: the region BELOW the rim only. Called the moment a fall starts, when the level has
 ; already swapped underneath but the drop is still showing the room being left above the rim.
@@ -16377,14 +16390,10 @@ spLp:   lda symT,x
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
 ; pictures -- goes through here, which costs each site nothing: jsr is the same three bytes the
 ; store was. A is preserved, so a site that also writes $d022 still can.
-setGnd: sta $d021
-        sta irqB0+1
-${CEILVARY ? `        sta colW                ; THROUGH THE SHADOWS. irqB1 is published from colF at raster
-        sta colF                ;   250 every frame now, so a store straight into irqB1+1 is
-` : `        sta irqB1+1
-`}        rts                     ;   stamped back to the level's floor on the very next frame --
-                                ;   which is why the death fade's lower half kept snapping back
-                                ;   to the level's ground while the upper half faded correctly.
+setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster 250, so the two
+${CEILVARY ? `        sta colW                ;   halves change at the same top of frame instead of a frame
+` : ''}        sta colF                ;   apart -- and there is no mid-frame $d021 store to paint a
+        rts                     ;   partial band down the middle of the one it lands in.
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
@@ -19479,6 +19488,10 @@ dgA2:   dex
         bpl dgA
 dgAD:   lda #${hx(ORBBODY[0])}  ; the orb, by contrast, fades out with everything else
         sta dieInk
+        jsr dckPnt              ; ...and EVERY sprite takes it right now. While dying the main
+                                ;   loop runs dieFade and never dieChk, so nothing repainted obC
+                                ;   at all: it kept whatever the last live frame left, which with
+                                ;   the idol in hand is orange. It held that for the whole fade.
         inc dieN                ; how many pictures this death earns; dshEnd resets it after the
         lda #$01                ;   last one, so the sequence starts over rather than running out
         sta dieSt
