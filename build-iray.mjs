@@ -3173,6 +3173,17 @@ const palOf = n => ({ ...PAL_DEF, ...(LEVEL_PAL[n] ?? {}) });
 const PAL_N = Math.max(...CHAIN);              // indexed by level id - 1, so it must reach the highest
 // SOLID is every-column-pair-01 in all eight rows ($55), so a pair-00 mark is just those bit
 // pairs CLEARED -- no pristine copy to keep, and "plain" is eight $55s.
+// The same mark again, for a cell that is all bit pair 11 rather than all 01. OCC_FULL is the
+// wall-base overhang's stamp and it is solid wall as far as the eye is concerned, so on a marked
+// level it has to carry the mark too -- otherwise the stamped cells read as blank black holes in
+// an otherwise dotted wall, which is exactly what the user saw. The dot is pair 00 either way
+// (the ground's colour showing through), so this is symRows with $ff for the field.
+const symRowsOcc = art => {
+  const px = typeof art === 'string' ? fatBits(art, 4, 8)
+           : [...Array(32)].map((_, i) => art.some(([c, r]) => r * 4 + c === i));
+  return [...Array(8)].map((_, r) =>
+    [0, 1, 2, 3].reduce((b, c) => px[r * 4 + c] ? (b & ~(3 << (6 - 2 * c))) : b, 0xff));
+};
 const symRows = art => {
   const px = typeof art === 'string' ? fatBits(art, 4, 8)
            : [...Array(32)].map((_, i) => art.some(([c, r]) => r * 4 + c === i));
@@ -3733,6 +3744,10 @@ const DIE_CTR  = +(process.env.DIECTR ?? 24);     // columns
 const COL_FINE = Math.round(256 / (NLOG / FOV));
 const DIE_CAP  = +(process.env.DIECAP ?? 255);    // frames before giving up: a backstop only
 const DIE_PAUSE = +(process.env.DIEPAUSE ?? 120); // two seconds held on the angel before the cut
+// Caught in plain sight, the scene does NOT start on the touching frame: it has you, and then
+// half a second passes with nothing changing at all before the room begins to go. Counted in
+// 60ths and drained by dtv, so it is half a second at any frame rate.
+const DIE_MARKDLY = +(process.env.DIEMARKDLY ?? 30);
 // Three frames a shade, so the room is gone in a dozen frames and the rest of the turn happens in
 // the dark -- which is the point: you are still being turned when there is nothing left to see.
 const DIE_FSTEP = +(process.env.DIEFSTEP ?? 3);
@@ -13755,11 +13770,13 @@ ${DIE ? `        sec                     ; did that land it beside the player? t
 anReach:
         ldx amIdx
         lda orbSeenT,x          ; were you LOOKING at it when it reached you?
-        sta markSaw
         beq anHide              ; no: it hides and waits for the turn, as it always has
-        lda #$00                ; yes: it stays on screen and dieChk starts the scene at once
+        lda #${hx(DIE_MARKDLY)}              ; yes: it stays on screen, and the scene starts after this
+        sta markSaw             ;   many 60ths -- half a second of "it has you" in which nothing
+        lda #$00                ;   changes at all. markSaw is the countdown AND the flag.
         beq anMark              ; always
-anHide: lda #$01                ; it stops rendering ENTIRELY from here. Nothing after this has
+anHide: sta markSaw             ; A is 0 here, which is the "wait for the turn" case
+        lda #$01                ; it stops rendering ENTIRELY from here. Nothing after this has
 anMark: sta orbHidT,x           ;   to reason about where the sprite is or whether it shows.
         inx
         stx marked
@@ -14071,6 +14088,13 @@ dfDn:   rts
 
 ; ---- dieSwap: hand the screen to the face, in ONE frame, on black ----
 dfEnd:
+        lda #$00                ; ---- BLACK FIRST, THEN SWAP ----
+        sta $d022               ; The ground is already black from the fade, but the walls and the
+        sta $d023               ;   SEAMS were still lit while the charset was overwritten
+                                ;   underneath them -- half a screen of world codes drawn through
+                                ;   a charset that is turning into the picture. That is the char
+                                ;   corruption, and it is confined to the bottom half because
+                                ;   that is the half the split draws from charset B.
         ldx #$00                ; charset B is plain RAM now: no port dance, no sei. (It was five
                                 ;   pages under the I/O hole, ~12,800 cycles with interrupts off.)
                                 ; unrolled per page and GENERATED from the glyph count -- this
@@ -16172,7 +16196,12 @@ spWSt:  sta $d025
         sty irqSpH+1
 spDn:   rts
 ` : ''}
-idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
+${ANYSYM ? `symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
+        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
+symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
+        !byte ${symRowsOcc(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
+lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}
+` : ''}idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
                                 ;   reading the working flag direct would show 0 for any raster
                                 ;   frame whose IRQ landed inside the projection -- one bad frame
                                 ;   in roughly four, which is exactly the flicker this chases.
@@ -16335,13 +16364,14 @@ ${SPRVARY ? (() => {
 spLp:   lda symT,x
         sta ${hx16(CHARSET + 8)},y      ; SOLID is code 1, so its glyph is base + 8
         sta ${hx16(CHARSET_B + 8)},y
-        dex
+        lda symOT,x             ; ...and the FULL OCCLUDER, which is solid wall to the eye and
+        sta ${hx16(CHARSET + OCC_FULL * 8)},y   ;   was the one cell on a marked level with no
+        sta ${hx16(CHARSET_B + OCC_FULL * 8)},y ;   mark on it -- a blank black block in a dotted
+        dex                     ;   wall. Same X, so it follows SOLID's plain/marked choice.
         dey
         bpl spLp
         rts
-symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
-        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
-lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(',')}` : `        rts`}
+` : `        rts`}
 ; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
@@ -19342,9 +19372,16 @@ dckLive:
         adc #$01
         cmp #$03
         bcs dcClr
-${DIE ? `        lda markSaw             ; caught you while you were WATCHING it? Then the scene starts
-        bne dcGo                ;   on the spot: there is no "look away and back" left to wait
-                                ;   for, and it is still on screen to rotate onto.
+${DIE ? `        lda markSaw             ; ---- caught you while you were WATCHING it ----
+        beq dcTurn              ; There is no "look away and back" left to wait for, so the turn
+        sec                     ;   trigger below is not the rule. Instead: half a second in which
+        sbc dtv                 ;   NOTHING changes, then the scene, with the angel still on
+        bcs dcHold              ;   screen to rotate onto. Drained by dtv, so the half second is
+        lda #$00                ;   half a second whatever the frame rate is doing.
+dcHold: sta markSaw
+        bne dcNo                ; still owed: nothing happens yet
+        beq dcGo                ; just hit zero: go
+dcTurn:
 ` : ''}        sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
         lda pa                  ;   them? The angel is hidden, so there is no sprite to see and
         sbc markPa              ;   nothing to project. Turn 30 degrees either way and you die.
@@ -19366,8 +19403,12 @@ dgD:    ; ---- which way round, and unhide it ----
         ; back. The cell delta is one of eight neighbours; angBearT turns that into a bearing, and
         ; the signed difference from the current heading gives both the direction to turn and a
         ; first estimate of how far. dieOff starts far from centre so the stop cannot fire early.
-        lda #$0f                ; white -> grey3 at once: the room starts leaving as you are grabbed
-        jsr setGnd
+        lda #$01                ; ---- ONE FRAME OF WHITE, ceiling and floor together ----
+        jsr setGnd              ; setGnd writes colW AND colF, so both halves flash on the SAME
+                                ;   frame -- they used to change on different ones. The ramp
+                                ;   below takes it down from here, so the white lasts exactly the
+                                ;   frame the angel reaches you, and the sprites lose the idol's
+                                ;   fire on the same frame (sprPal stands down once dieSt is set).
         lda #$ff                ; unsigned "never projected", far outside the lock window
         sta dieOff
         lda #${hx(DIE_CAP)}
