@@ -5710,96 +5710,70 @@ if (HAS_IDOL && IDOL_PTR === 0) throw new Error(
   `the idol's pointer offset came out 0, and 0 is the value that MEANS "not the idol" in ` +
   `orbArtT -- IDOLBASE ${hx16(IDOLBASE)} landed exactly on SPRBASE, so the two collide`);
 const orbArtT = ORBS.map(o => o.idol ? IDOL_PTR : 0);   // a pointer DELTA now, not a bitmap index
-// ---- LADDERSHEET=1: every rung of every ladder, side by side, as a PNG ----
-// One column per rung, in ladder order, each drawn at its own apparent size on a common
-// baseline -- so a step that changes nothing is visible as two identical columns. Written
-// because "are there really no sub-2px steps at the small end?" is a question a table of
-// numbers answers badly and a picture answers in a second.
+// ---- LADDERSHEET=1: every RUNG of every ladder, as it actually appears on screen ----
+// One column per rung, not per bitmap: a wide hole rung is three hardware sprites side by side
+// and a tall entity is two stacked, so drawing bitmaps invents redundancy that is not there.
+// Each rung is assembled from its parts, magnified the way the hardware magnifies it, and drawn
+// at the C64's NTSC pixel aspect -- a multicolor pixel is TWO hires pixels wide and a hires pixel
+// is 0.75 as wide as it is tall, so a multicolor pixel is 1.5 : 1. Square pixels made every
+// sprite look half as tall as it really is. A thin box marks each hardware sprite.
 if (process.env.LADDERSHEET) {
-  const PAL = [[0,0,0],[80,80,80],[170,170,170],[255,255,255]];   // pair 00..11, just for looking
-  const draw = (bm, sc) => {                     // one 12x21 multicolor bitmap -> 12*sc x 21*sc px
-    const w = 12, h = 21, out = [];
-    for (let y = 0; y < h; y++) for (let r = 0; r < sc; r++) {
-      const row = [];
-      for (let x = 0; x < w; x++) {
-        const b = bm[y * 3 + (x >> 2)] ?? 0, pr = (b >> (6 - 2 * (x & 3))) & 3;
-        for (let c = 0; c < sc; c++) row.push(PAL[pr]);
-      }
-      out.push(row);
-    }
-    return out;
-  };
+  const PAR = +(process.env.PAR ?? 0.75);        // NTSC. PAL is nearer 0.936
+  const SC = 4;                                  // output rows per source row
+  const CW = Math.round(SC * 2 * PAR), CH = SC;  // one multicolor pixel
+  const bmPix = (bm, x, y) => { const byt = bm[y * 3 + (x >> 2)] ?? 0;
+                                return (byt >> (6 - 2 * (x & 3))) & 3; };
+  // rung: { parts: [{ w, h, at(x,y)->pair, ox, oy }], xmag, ymag }
   const sheet = (name, rungs) => {
-    const GAP = 3, sc = 2;
-    const cw = 12 * sc + GAP, ch = 21 * sc + 14;
-    const W = cw * rungs.length + GAP, H = ch;
-    const rgb = new Uint8Array(W * H * 3).fill(24);
-    rungs.forEach(({ bm, h }, i) => {
-      const px = draw(bm, sc), x0 = GAP + i * cw, y0 = H - px.length - 10;
-      px.forEach((row, y) => row.forEach((c, x) => {
-        const o = ((y0 + y) * W + x0 + x) * 3; rgb[o] = c[0]; rgb[o+1] = c[1]; rgb[o+2] = c[2];
-      }));
-      for (let t = 0; t < Math.min(h, 8); t++) {   // a tick mark per height unit, so steps show
-        const o = ((H - 4) * W + x0 + t) * 3; rgb[o] = 255; rgb[o+1] = 200; rgb[o+2] = 0;
+    const GAP = 6;
+    const wOf = r => Math.max(...r.parts.map(p => p.ox + p.w)) * (r.xmag ? 2 : 1);
+    const hOf = r => Math.max(...r.parts.map(p => p.oy + p.h)) * (r.ymag ? 2 : 1);
+    const cw = Math.max(...rungs.map(wOf)) * CW + GAP;
+    const H = Math.max(...rungs.map(hOf)) * CH + 14;
+    const W = cw * rungs.length + GAP;
+    const rgb = new Uint8Array(W * H * 3).fill(22);
+    const put = (x, y, c) => { if (x < 0 || y < 0 || x >= W || y >= H) return;
+      const o = (y * W + x) * 3; rgb[o] = c[0]; rgb[o + 1] = c[1]; rgb[o + 2] = c[2]; };
+    rungs.forEach((r, i) => {
+      const xm = r.xmag ? 2 : 1, ym = r.ymag ? 2 : 1;
+      const x0 = GAP + i * cw, y0 = H - 10 - hOf(r) * CH;
+      for (const p of r.parts) {
+        for (let y = 0; y < p.h * ym; y++) for (let x = 0; x < p.w * xm; x++) {
+          const v = p.at((x / xm) | 0, (y / ym) | 0);
+          if (!v) continue;
+          const px = x0 + (p.ox * xm + x) * CW, py = y0 + (p.oy * ym + y) * CH;
+          for (let b = 0; b < CH; b++) for (let c = 0; c < CW; c++)
+            put(px + c, py + b, v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
+        }
+        const bx = x0 + p.ox * xm * CW, by = y0 + p.oy * ym * CH;          // the hardware box
+        const bw = p.w * xm * CW, bh = p.h * ym * CH;
+        for (let x = 0; x < bw; x++) { put(bx + x, by, [70, 60, 0]); put(bx + x, by + bh - 1, [70, 60, 0]); }
+        for (let y = 0; y < bh; y++) { put(bx, by + y, [70, 60, 0]); put(bx + bw - 1, by + y, [70, 60, 0]); }
       }
     });
     writeFileSync(`ladder-${name}.png`, png(W, H, rgb));
-    console.error(`  ladder-${name}.png: ${rungs.length} rungs`);
+    console.error(`  ladder-${name}.png: ${rungs.length} rungs, ${W}x${H}`);
   };
-  const nOrb = ORBBMH.length;                    // the orb's own bitmaps come first
-  sheet('orb',   ORBBM.slice(0, nOrb).map((bm, i) => ({ bm, h: ORBBMH[i] ?? 0 })));
-  sheet('angel', ORBBM.slice(nOrb, IDOLBM0).map(bm => ({ bm, h: 0 })));
-  if (HAS_IDOL) sheet('idol', ORBBM.slice(IDOLBM0).map((bm, i) => ({ bm, h: ORBBMH[i] ?? 0 })));
-  // ---- the HOLE ladder is drawn by RUNG, not by bitmap ----
-  // A wide rung is three sprites side by side, so one bitmap per column showed a single rung as
-  // three unrelated pieces -- which is what made rungs 2, 3 and 4 look like nine near-identical
-  // columns that could be collapsed. Each rung carries the assembled shape in `grid`, and vmag
-  // says whether the hardware doubles it vertically, so this draws what is actually on screen.
-  {
-    const sc = 2, GAP = 4;
-    const gs = HOLE.L.map(r => {
-      const g = [];
-      for (const row of r.grid) for (let k = 0; k < (r.vmag ? 2 : 1); k++) g.push(row);
-      return g;
-    });
-    const cw = Math.max(...HOLE.L.map(r => r.px)) * sc + GAP;
-    const H = Math.max(...gs.map(g => g.length)) * sc + 16;
-    const W = cw * gs.length + GAP;
-    const rgb = new Uint8Array(W * H * 3).fill(24);
-    gs.forEach((g, i) => {
-      const x0 = GAP + i * cw, y0 = H - 12 - g.length * sc;
-      g.forEach((row, y) => row.forEach((v, x) => {
-        if (!v) return;
-        for (let a = 0; a < sc; a++) for (let b = 0; b < sc; b++) {
-          const o = ((y0 + y * sc + a) * W + x0 + x * sc + b) * 3;
-          rgb[o] = 200; rgb[o + 1] = 200; rgb[o + 2] = 210;
-        }
-      }));
-      for (let t = 0; t < HOLE.L[i].spr; t++) {          // one tick per hardware sprite
-        for (let b = 0; b < 6; b++) { const o = ((H - 5) * W + x0 + t * 8 + b) * 3;
-          rgb[o] = 255; rgb[o + 1] = 190; rgb[o + 2] = 0; }
-      }
-    });
-    writeFileSync('ladder-hole.png', png(W, H, rgb));
-    console.error(`  ladder-hole.png: ${gs.length} RUNGS (ticks below = hardware sprites)`);
-  }
-  // Are any bitmaps byte-identical? A wide dome's MIDDLE sprite is a flat-topped block, and
-  // the same block may serve several rungs -- each duplicate is 64 bytes of bank 3.
+  // the hole: `grid` is the whole assembled rung, `spr` hardware sprites of 12 across it
+  sheet('hole', HOLE.L.map(r => ({
+    xmag: 0, ymag: r.vmag,
+    parts: [...Array(r.spr)].map((_, k) => ({
+      w: 12, h: r.grid.length, ox: k * 12, oy: 0,
+      at: (x, y) => (r.grid[y] ?? [])[k * 12 + x] ?? 0 })) })));
+  // orb and angel share one ladder: a lower sprite always, an upper one when it is tall enough
+  sheet('entity', LADDER.map((r, i) => {
+    const lo = ORBSRC[i], up = ORBSRCU[i];
+    const parts = [{ w: 12, h: 21, ox: 0, oy: up >= 0 ? 21 : 0,
+                     at: (x, y) => bmPix(ORBBM[lo] ?? [], x, y) }];
+    if (up >= 0) parts.push({ w: 12, h: 21, ox: 0, oy: 0,
+                              at: (x, y) => bmPix(ORBBM[up] ?? [], x, y) });
+    return { xmag: 0, ymag: r.exp, parts };
+  }));
   for (const [nm, bms] of [['hole', HOLE.BM], ['orb+angel', ORBBM.slice(0, IDOLBM0)]]) {
-    const seen = new Map(); let dup = 0;
-    bms.forEach((b, i) => { const k = b.join(','); 
-      if (seen.has(k)) dup++; else seen.set(k, i); });
-    console.error(`  ${nm}: ${bms.length} bitmaps, ${seen.size} distinct, ${dup} exact duplicates` +
-                  ` (${dup * 64} bytes = ${dup} sprite slots)`);
+    const seen = new Set(); let dup = 0;
+    bms.forEach(b => { const k = b.join(','); seen.has(k) ? dup++ : seen.add(k); });
+    console.error(`  ${nm}: ${bms.length} bitmaps, ${seen.size} distinct, ${dup} exact duplicate(s)`);
   }
-  console.error('  rung   w   px spr vis  mag vmag   far..near');
-  HOLE.L.forEach((r, i) => console.error(
-    `    ${String(i).padStart(2)}  ${String(Math.round(r.w)).padStart(4)} ${String(r.px).padStart(4)}` +
-    `${String(r.spr).padStart(3)} ${String(Math.round(r.vis)).padStart(4)} ${String(r.mag).padStart(4)}` +
-    `${String(r.vmag).padStart(4)}   ${r.far}..${Math.round(r.near)}`));
-  if (SOCK.BM.length) sheet('socket', SOCK.BM.map(bm => ({ bm, h: 0 })));
-  console.error(`  (sockets own ${SOCK.BM.length} bitmaps: they borrow the exit hole's for all ` +
-                `but the closest rungs -- see "SOCKETS BORROW THE EXIT HOLE'S BITMAPS")`);
 }
 // SPRBOX boxes the ORB bitmaps up at their generator; the hole and socket ladders are built much
 // later, so they get the same treatment here. Without this the one case where the hardware grid
