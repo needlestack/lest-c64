@@ -4372,6 +4372,11 @@ const PEDSTEP = +(process.env.PEDSTEP ?? 2);
 // hub has sightlines twice that; the user is content for them to read as small in the distance,
 // not to vanish out of it.
 const PEDWMIN = +(process.env.PEDWMIN ?? 2);
+// One body colour per pedestal, cycled. The project's existing "colour" triple is light blue /
+// light red / light green (see ORBBODY under ORBPAL=colour); these are the same three in the
+// order the user asked to see them. LIGHT red/green/blue, not 2/5/6: the drum's top is grey3
+// and its shadow grey1, and the dark trio sits below the shadow, which inverts the modelling.
+const PED_COLS = (process.env.PEDCOLS ?? '10,13,14').split(',').map(Number);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
 // one you land next to takes you back where you came from. Same maze both ways for now -- only
 // the hole cell and the landing spot differ, which is all the level transition actually needs.
@@ -4421,7 +4426,7 @@ const PEDESTALS_AT = (process.env.PEDESTALS ?? LEVEL_PEDESTALS[LVL] ?? '').split
 // reads `ped` to pick the ladder; the exit/socket boundary the runtime walks is still nExitT.
 const HOLELIKE = [...HOLES_AT.map(h => ({ x: h[0], y: h[1], exit: true })),
                   ...SOCKETS_AT.map(h => ({ x: h[0], y: h[1], exit: false, ped: false })),
-                  ...PEDESTALS_AT.map(h => ({ x: h[0], y: h[1], exit: false, ped: true }))];
+                  ...PEDESTALS_AT.map((h, i) => ({ x: h[0], y: h[1], exit: false, ped: true, pi: i }))];
 
 // Entity counts differ between levels -- a level with a socket has a hole-like entity a level
 // without one does not. Every TABLE is sized to the largest resident level so the swap has room,
@@ -6331,9 +6336,11 @@ const LVL_TABLES = [
   ['angBlkT', angBlk],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
   // 0 = an exit hole (black, always). 15 = an empty socket's grey3 inside its grey1 rim.
-  // 12 = an empty pedestal's stone body: it has to sit BELOW the $d026 light grey its own top
-  // face is painted in, or the drum reads as one flat blob.
-  ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : h.ped ? 12 : 15), NHOLE)],
+  // A PEDESTAL takes one of PED_COLS. This is the ONLY ink on the drum that can differ from
+  // one pedestal to the next: bit pair 10 is $d027+n, per sprite, and it is the body -- 61% of
+  // the stone. Pairs 01 and 11 are $d025 and $d026, shared by all eight sprites, so the shadow
+  // and the lit top are necessarily the same on every pedestal on screen.
+  ['hlFillT', pad(HOLELIKE.map(h => h.exit ? 0 : h.ped ? PED_COLS[h.pi % PED_COLS.length] : 15), NHOLE)],
   // Socket -> the GLOBAL wall id it opens, $ff for a socket that opens nothing. It TRAVELS,
   // because two levels' socket 0 are different sockets opening different walls. It used to be
   // shared, sized from the live level's socket count and valued from the single wall level: a
