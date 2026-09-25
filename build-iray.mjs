@@ -16130,6 +16130,42 @@ ${HAS_IDOL ? `; ---- idolLk: is the IDOL the thing in your hands? ----
 ; An earlier cut of this repainted the whole room. It read well but it was wrong twice over: the
 ; level stopped being recognisable as itself, and the death scene inherited the tint, because
 ; dieSwap runs against whatever inks were live and lvlLook never gets a chance to put them back.
+${HAS_IDOL ? `
+; ---- sprPal: the two SHARED sprite inks, once a frame ----
+; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
+; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
+; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
+; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
+sprPal: lda dieSt               ; ---- the death scene wants the inks to SIT STILL ----
+        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
+        lda idolOn              ;   before any of this existed, and the scene's fade was written
+        bne spTint              ;   against it. "The world no longer goes black correctly."
+        lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
+        beq spLvl               ;   angels have stopped caring whether you are looking
+spTint:
+        lda #${hx(IDOL_SPR.under)}      ; ---- above the split: the world's ----
+        ldy #${hx(IDOL_SPR.hi)}
+        bne spWSt               ; always: brown is not zero
+spLvl:  lda sprU                ; whatever lvlLook left for this level
+        ldy sprH
+spWSt:  sta $d025
+        sty $d026
+        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
+        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
+                                ;   tinting things and walks down into the last few rows.
+        lda dieSt
+        bne spDn
+        ldx carry               ; ---- below the split: only if something special is in hand ----
+        beq spDn
+        dex                     ;   carry is the entity index PLUS ONE
+        lda orbArtT,x
+        beq spDn                ; an orb holds no special inks
+        lda #${hx(IDOL_SPR.under)}
+        ldy #${hx(IDOL_SPR.hi)}
+        sta irqSpU+1
+        sty irqSpH+1
+spDn:   rts
+` : ''}
 idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
                                 ;   reading the working flag direct would show 0 for any raster
                                 ;   frame whose IRQ landed inside the projection -- one bad frame
@@ -16307,8 +16343,12 @@ lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? 8 : 0).join(
 ; store was. A is preserved, so a site that also writes $d022 still can.
 setGnd: sta $d021
         sta irqB0+1
-        sta irqB1+1
-        rts
+${CEILVARY ? `        sta colW                ; THROUGH THE SHADOWS. irqB1 is published from colF at raster
+        sta colF                ;   250 every frame now, so a store straight into irqB1+1 is
+` : `        sta irqB1+1
+`}        rts                     ;   stamped back to the level's floor on the very next frame --
+                                ;   which is why the death fade's lower half kept snapping back
+                                ;   to the level's ground while the upper half faded correctly.
         * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
@@ -19250,12 +19290,19 @@ ${DIE ? `        ; ---- dieChk and dieGo, relocated ----
 ; The trigger is ONE angle comparison. Contact hides the angel outright, so there is no sprite to
 ; see and nothing to project -- turn DIE_TURN either way and the cut scene fires.
 dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
-        beq dckLive             ;   the sprites. obC is rewritten by orbMove every frame and
-        ldx #$07                ;   flushed to $d027+n after us, so this is the last word on it.
-dckSp:  lda dieInk
-        sta obC,x
+        beq dckIdl              ;   the sprites. obC is rewritten by orbMove every frame and
+        lda dieInk              ;   flushed to $d027+n after us, so this is the last word on it.
+        bne dckSp               ; always: dieInk is never black
+${HAS_IDOL ? `dckIdl: lda idolHd              ; ---- and the MID-TONE follows the idol as well ----
+        beq dckLive             ; $d025/$d026 are shared and sprPal already tints them, but the
+        lda #${hx(IDOL_BODY)}              ;   body is per-sprite ($d027+n, out of obC) and kept the
+                                ;   level's grey -- which reads as disjoint against the brown and
+                                ;   yellow around it. Orbs and angels both, for the same reason.
+` : 'dckIdl:'}
+dckSp:  ldx #$07
+dckLp:  sta obC,x
         dex
-        bpl dckSp
+        bpl dckLp
         rts
 dckLive:
         sec                     ; the turn they are ACTUALLY making, as a signed 16-bit rate over
@@ -19472,43 +19519,7 @@ ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather
         ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
-${HAS_IDOL ? `        * = $bdbc
-
-; ---- sprPal: the two SHARED sprite inks, once a frame ----
-; Bit pairs 01 and 11 are one register each for ALL eight sprites, so this cannot be per entity.
-; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
-; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
-; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda dieSt               ; ---- the death scene wants the inks to SIT STILL ----
-        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
-        lda idolOn              ;   before any of this existed, and the scene's fade was written
-        bne spTint              ;   against it. "The world no longer goes black correctly."
-        lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
-        beq spLvl               ;   angels have stopped caring whether you are looking
-spTint:
-        lda #${hx(IDOL_SPR.under)}      ; ---- above the split: the world's ----
-        ldy #${hx(IDOL_SPR.hi)}
-        bne spWSt               ; always: brown is not zero
-spLvl:  lda sprU                ; whatever lvlLook left for this level
-        ldy sprH
-spWSt:  sta $d025
-        sty $d026
-        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
-        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
-                                ;   tinting things and walks down into the last few rows.
-        lda dieSt
-        bne spDn
-        ldx carry               ; ---- below the split: only if something special is in hand ----
-        beq spDn
-        dex                     ;   carry is the entity index PLUS ONE
-        lda orbArtT,x
-        beq spDn                ; an orb holds no special inks
-        lda #${hx(IDOL_SPR.under)}
-        ldy #${hx(IDOL_SPR.hi)}
-        sta irqSpU+1
-        sty irqSpH+1
-spDn:   rts
-` : ''}        * = $be00
+        * = $be00
 angMidT: !byte ${angMidT.join(',')}` : ''}
         * = ${hx(QCOSBASE)}
 qcosT: !byte ${qcos.join(',')}
