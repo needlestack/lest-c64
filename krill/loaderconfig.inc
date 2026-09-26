@@ -69,7 +69,7 @@ DECOMPRESSOR                    = DECOMPRESSORS::NONE; available are NONE, BITNA
                                     ; load raw files: use the address set in loadaddrlo/loadaddrhi as absolute loading address
                                     ; load compressed files: use relative loading address offset in loadaddroffslo/loadaddroffshi, it is added to the load/depack addresses
 
-.define END_ADDRESS_API           0 ; during and after loading, the file's current and then final end address (address of last file byte + 1) is stored in
+.define END_ADDRESS_API           1 ; progress displays: poll endaddr - loadaddr
                                     ; endaddrlo and endaddrhi. for loading compressed files using loadcompd, the end address of the compressed data is stored.
                                     ; the file's loading address can be found in loadaddrlo/loadaddrhi during and after loading, so polling the current
                                     ; difference of endaddrlo/hi and loadaddrlo/hi can be used to implement progress displays.

@@ -20793,17 +20793,43 @@ try {
     if (q.packedAt !== QUOTE_SCR || q.packedLen !== blob.length) throw new Error(
       `quote-screen.json was packed for $${(q.packedAt ?? 0).toString(16)} +${q.packedLen} B, but ` +
       `this build wants $${QUOTE_SCR.toString(16)} +${blob.length} B. Re-run make-quote.mjs.`);
-    const built = buildQuote(assemble, q, 'IRAY');
-    console.error(`  boot quote: ${q.glyphs} glyphs + ${q.screen.length} screen = ${blob.length} B, ` +
-                  `exomizer ${q.packed.length} B -> IQOT ${built.len} B at $${QUOTE_RUN.toString(16)}`);
-    return { name: 'IQOT', prg: built.prg, len: built.len };
+    // ASSEMBLED LATER: IQOT carries the sweep's page total, and that total includes IRAY's own
+    // length, which is not known until buildLoader has run.
+    return { name: 'IQOT', q, blob };
   })();
   // IPIC and ILVL land ON the quote, so they load last, after the screen is blanked.
   for (const f of DISK) if (f.name === 'IPIC' || f.name === 'ILVL') f.last = true;
-  const ld = buildLoader(assemble, DISK.map(f =>
-                           ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
-                              runtime: f.runtime, length: f.length ?? f.data.length })),
-                         r.labels.entry);
+  const ldFiles = DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
+                                  runtime: f.runtime, length: f.length ?? f.data.length }));
+  // How many 256-byte pages arrive WHILE THE QUOTE IS UP -- the denominator of the sweep. IRAY
+  // itself counts (IQOT reads it a byte at a time and ticks per page); IPIC and ILVL do not,
+  // because they land after the screen is blanked. Two passes because IRAY's own length is part
+  // of its own total; the constant is an immediate, so pass 2 cannot change the length again.
+  // Split the 40 columns between the two phases BY TIME, not by bytes. IRAY is a twentieth of
+  // the bytes and more than half the wait, because it comes down the KERNAL's ~290 B/s while
+  // everything after it rides Krill's ~4.9 KB/s. Each phase then gets a Bresenham step of
+  // columns*256/pages, and the tick carries a column whenever the accumulator's high byte moves.
+  const KERNAL_BPS = 290, KRILL_BPS = 4920, SW_COLS = 40;
+  const p2 = ldFiles.filter(f => !f.last);
+  const p2Bytes = p2.reduce((n, f) => n + f.length, 0);
+  const p2Pages = p2.reduce((n, f) => n + Math.floor(f.length / 256), 0);
+  let ld = buildLoader(assemble, ldFiles, r.labels.entry, 1);
+  const irayBytes = ld.prg.length - 2, irayPages = Math.floor(irayBytes / 256);
+  const t1 = irayBytes / KERNAL_BPS, t2 = p2Bytes / KRILL_BPS;
+  const col1 = Math.max(1, Math.min(SW_COLS - 1, Math.round(SW_COLS * t1 / (t1 + t2))));
+  const step1 = Math.round(col1 * 256 / irayPages), step2 = Math.round((SW_COLS - col1) * 256 / p2Pages);
+  if (step1 > 0xffff || step2 < 1) throw new Error(`sweep steps out of range: ${step1}/${step2}`);
+  ld = buildLoader(assemble, ldFiles, r.labels.entry, step2);
+  if (ld.prg.length - 2 !== irayBytes) throw new Error('IRAY changed length between sweep passes');
+  console.error(`  sweep: ${col1} columns over IRAY's ${t1.toFixed(1)}s (step ${step1}), ` +
+                `${SW_COLS - col1} over Krill's ${t2.toFixed(1)}s (step ${step2})`);
+  if (QUOTE) {
+    const built = buildQuote(assemble, QUOTE.q, 'IRAY', step1);
+    QUOTE.prg = built.prg; QUOTE.len = built.len;
+    console.error(`  boot quote: ${QUOTE.q.glyphs} glyphs + ${QUOTE.q.screen.length} screen = ` +
+      `${QUOTE.blob.length} B, exomizer ${QUOTE.q.packed.length} B -> IQOT ${built.len} B at ` +
+      `$${QUOTE_RUN.toString(16)}`);
+  }
   // With no quote there is no IQOT, so the autorun stub chains straight to Krill.
   const run = buildAutorun(assemble, QUOTE ? 'IQOT' : 'IRAY', QUOTE ? QUOTE_RUN : IRAY_ENTRY);
   const d = D64.createEmpty('IRAY', '01');

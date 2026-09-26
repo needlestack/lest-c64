@@ -28,7 +28,8 @@
 // worth 116.
 import { readFileSync } from 'fs';
 
-export const LOADER_RUN = 0x0620;
+export const LOADER_RUN = 0x0630;   // clear of Krill's resident, which END_ADDRESS_API made
+                                    // 556 bytes: $0400-$062b. buildLoader asserts it.
 const krillPrg = n => [...readFileSync(`./krill/${n}`)];
 const krillAt = p => p[0] | (p[1] << 8);
 const KRILL_RES_PRG = krillPrg('loader-c64.prg'), KRILL_INST_PRG = krillPrg('install-c64.prg');
@@ -38,7 +39,7 @@ const KRILL_RES = KRILL_RES_PRG.slice(2), KRILL_INST = KRILL_INST_PRG.slice(2);
 // boot PRG, which is the one file loaded at KERNAL speed (~290 B/s), so every byte between the
 // stub's end and the installer's start is dead air on the loading screen: at the default it was
 // 654 bytes = 2.3 seconds of nothing.
-const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x0960;
+const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x09c0;
 // Where the KERNAL's screen goes so that install() cannot print on Krill's resident at $0400 --
 // and, just as important, cannot print on the QUOTE. $cc00 is the 1K above IHOL in bank 3 and is
 // exactly the 1000 bytes a screen needs; buildLoader guards that IHOL never grows into it.
@@ -100,7 +101,89 @@ export const EXO_TABLE = 0xc000;
 export const EXO_GETBYTE = QUOTE_RUN + 3;    // the byte fetcher, right after IQOT's entry jmp
 export const EXO_CODE = QUOTE_RUN + 0x14;    // the decruncher itself, after the fetcher
 
-function bodySource(files, entry, pages, first) {
+// ---- the loading sweep ---------------------------------------------------------------------
+// The quote is inked grey2; as the load progresses its columns turn grey3, left to right. Real
+// progress, not a timer: PAGES ARRIVED, counted by the two things that actually see the bytes.
+//
+// COLOUR IS PER 8x8 CELL. This is hi-res TEXT mode -- a sampled charset plus a 40x25 map -- so
+// each cell's foreground is one nybble of colour RAM at $d800 and the background is the global
+// $d021. A column is 25 bytes, $d800 + col + 40*row, and 40 columns is the whole resolution
+// available. (Hi-res BITMAP mode takes the colour from the screen RAM nybbles instead; either
+// way the unit is the cell, never the pixel.)
+//
+// The routines live in LOW RAM, assembled once and copied down by IQOT, because BOTH phases need
+// them and neither can host them: IQOT at $4000 is buried by IMG while the sweep is still
+// running, and Krill's resident plus the boot body already want more than the 1,024 bytes
+// between $0400 and $0801. $0334-$03bf is free for the whole boot -- above IRUN's $02a7-$0303,
+// below the resident -- and the game's own use of low RAM starts long after the sweep is gone.
+const SW_COL = 0x0334, SW_ACC = 0x0335, SW_PG = 0x0337, SW_BASE = 0x0338,
+      SW_WANT = 0x0339, SW_STEP = 0x033a;
+export const SWEEP_AT = 0x0340;
+const SW_IRQ = SWEEP_AT, SW_TICK = SWEEP_AT + 3;  // a two-entry jump table, so neither address
+                                                  // depends on how long the code turns out to be
+const sweepSource = () => `        * = ${hx4(SWEEP_AT)}
+        jmp swIrq
+        jmp swTick
+
+swIrq:  lda $e3                 ; pages of the file in flight = end page - load page. Krill's
+        sec                     ;   loads are blocking, so nothing in the mainline can watch
+        sbc $e1                 ;   them -- but Krill is "arbitrarily interruptible" and
+        bcs swi1                ;   END_ADDRESS_API keeps this pair current while it loads, for
+        lda #$00                ;   26 bytes of resident. So the KERNAL's own 60 Hz IRQ, chained,
+swi1:   clc                     ;   is the entire progress display.
+        adc ${hx4(SW_BASE)}
+        sta ${hx4(SW_WANT)}
+swi2:   lda ${hx4(SW_PG)}       ; the sweep only ever moves FORWARD, so a momentarily lower
+        cmp ${hx4(SW_WANT)}     ;   target simply does nothing
+        bcs swi3
+        jsr swTick
+        jmp swi2
+swi3:   jmp $ea31               ; on to the KERNAL's own handler
+
+        ; One page has arrived. Bresenham with a denominator of 256, so "carry a column" is just
+        ; a non-zero high byte -- and the STEP is per phase, because the two phases move at wildly
+        ; different speeds. IRAY is 7% of the bytes and 57% of the WAIT: 4 KB at the KERNAL's
+        ; ~290 B/s against 53 KB at Krill's ~4.9 KB/s. A sweep proportional to bytes sits still
+        ; for the first fourteen seconds and then runs across in ten. Proportional to TIME is
+        ; what a progress display means.
+swTick: inc ${hx4(SW_PG)}
+        lda ${hx4(SW_ACC)}
+        clc
+        adc ${hx4(SW_STEP)}
+        sta ${hx4(SW_ACC)}
+        lda ${hx4(SW_ACC + 1)}
+        adc ${hx4(SW_STEP + 1)}
+        sta ${hx4(SW_ACC + 1)}
+stk1:   lda ${hx4(SW_ACC + 1)}
+        beq stk9
+        dec ${hx4(SW_ACC + 1)}
+        jsr swPant
+        jmp stk1
+stk9:   rts
+
+swPant: lda ${hx4(SW_COL)}      ; one column of colour RAM to grey3, all 25 rows
+        cmp #$28
+        bcs spn9
+        inc ${hx4(SW_COL)}
+        sta $fb                 ; $fb/$fc: free zero page, and clear of Krill's $e0-$e7
+        lda #$d8
+        sta $fc
+        ldx #$19
+        ldy #$00
+spn1:   lda #$0f
+        sta ($fb),y
+        lda $fb
+        clc
+        adc #$28
+        sta $fb
+        bcc spn2
+        inc $fc
+spn2:   dex
+        bne spn1
+spn9:   rts
+`;
+
+function bodySource(files, entry, pages, first, step2) {
   let step = 0;
   const load = f => `
         lda #${'$' + (++step).toString(16).padStart(2, '0')}
@@ -126,7 +209,13 @@ hdbg:   jmp hdbg
         lda #$0b
         sta $d011
 cdbg:   jmp cdbg
-` : ''}        bcs fail`;
+` : ''}        bcs fail` + (f.last ? '' : `
+        lda $e1                 ; file in: collapse the in-flight delta to zero BEFORE crediting
+        sta $e3                 ;   its pages, so the two can never both be counted
+        lda ${hx4(SW_BASE)}
+        clc
+        adc #${'$' + Math.floor(f.length / 256).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_BASE)}`);
   const names = files.map(f => `n${f.tag}: !byte ${petscii(f.name)},0`).join('\n');
   return `        * = ${hx4(LOADER_RUN)}
         lda #$00                ; no KERNAL messages: "SEARCHING FOR" would scroll the screen,
@@ -196,7 +285,21 @@ ${process.env.BOOTDBG === 'res2' ? `        lda ${hx4(KRILL_RESIDENT + 4)}      
         lda #$0b
         sta $d011
 r2dbg:  jmp r2dbg
-` : ''}${files.filter(f => f.first).map(load).join('\n')}
+` : ''}        lda ${hx4(SW_PG)}       ; phase 2: carry on from where IQOT's byte loop stopped
+        sta ${hx4(SW_BASE)}
+        lda $e1
+        sta $e3                 ; nothing in flight yet
+        lda #${'$' + (step2 & 255).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP)}     ; Krill's pages are ${Math.round(256 / step2 * 10) / 10}x cheaper in time than the KERNAL's
+        lda #${'$' + (step2 >> 8).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP + 1)}
+        sei
+        lda #<${hx4(SW_IRQ)}
+        sta $0314
+        lda #>${hx4(SW_IRQ)}
+        sta $0315
+        cli
+${files.filter(f => f.first).map(load).join('\n')}
         sei                     ; the HOLE LADDER goes under the I/O hole: it lands at $c000 (the
         lda #$34                ;   only place a loader with I/O mapped can put it), then
         sta $01                 ;   $c000 -> $d000 with the port at $34.
@@ -233,6 +336,12 @@ ${files.filter(f => !f.first && !f.last).map(load).join('\n')}
         lda #$0b                ; screen OFF: the last two files land on the quote, and black is
         sta $d011               ;   a better last frame than the picture coming apart
 ${files.filter(f => f.last).map(load).join('\n')}
+        sei                     ; $0314 must not point into a boot body IMG has already buried,
+        lda #$31                ;   not even for the one frame before the game sets its own
+        sta $0314
+        lda #$ea
+        sta $0315
+        cli
         jmp ${hx4(entry)}
 
 fail:   sta $03                 ; the status byte Krill returned, beside the step in $02
@@ -249,7 +358,7 @@ ${names}
 
 // Returns the PRG bytes for the stub: BASIC header, a copy loop that lifts Krill's resident and
 // the body into place below $0801, the two as data, and Krill's install routine at KRILL_INSTALL.
-export function buildLoader(assemble, files, entry) {
+export function buildLoader(assemble, files, entry, step2) {
   const first = files.find(f => f.first);
   const holePages = Math.ceil((first.length ?? 2048) / 256);
   if (holePages > 16) throw new Error(`the file under the I/O hole is ${first.length} bytes; the hole is 4K`);
@@ -257,7 +366,7 @@ export function buildLoader(assemble, files, entry) {
     `${first.name} is ${first.length} bytes at $c000 and reaches ${hx4(0xc000 + holePages * 256 - 1)}, ` +
     `into the KERNAL's scratch screen at ${hx4(KSCR)} that install() prints on. Move KSCR ` +
     `(loader-src.mjs) -- and note it needs 1000 contiguous bytes clear of every boot-time load.`);
-  const body = assemble(bodySource(files, entry, holePages, first));
+  const body = assemble(bodySource(files, entry, holePages, first, step2));
   if (LOADER_RUN + body.bytes.length > 0x0800) throw new Error(
     `the boot body is ${body.bytes.length} bytes and runs past $0800 from ${hx4(LOADER_RUN)}, ` +
     `into the image it is about to load. Krill's resident takes $0400-$0612 below it.`);
@@ -351,7 +460,7 @@ nq:     !byte ${petscii(nextName)}
 // destination from the stream's first three bytes, and a raw stream has no such header.
 // Backward is exomizer's default and the pairing exodecrunch.asm expects with DECRUNCH_FORWARDS
 // left at 0: the packed bytes are read from the END downwards, so the pointer starts one past.
-export function buildQuote(assemble, q, irayName) {
+export function buildQuote(assemble, q, irayName, step1) {
   const d018 = (((QUOTE_SCR - 0xc000) >> 10) << 4) | (((QUOTE_CHR - 0xc000) >> 11) << 1);
   if (q.decr.at !== EXO_CODE) throw new Error(
     `the decruncher in quote-screen.json is assembled for ${hx4(q.decr.at)} but this build puts ` +
@@ -360,6 +469,10 @@ export function buildQuote(assemble, q, irayName) {
   // baked in when acme assembled it. Its last instruction's OPERAND is the read pointer, so the
   // two bytes that qrun writes are inside the code, at a fixed offset. Both are checked below.
   const qbLo = EXO_GETBYTE + 12;
+  const sweep = [...assemble(sweepSource()).bytes];
+  if (SWEEP_AT + sweep.length > 0x0400) throw new Error(
+    `the sweep block is ${sweep.length} bytes at ${hx4(SWEEP_AT)} and runs into $0400, where ` +
+    `Krill's resident goes`);
   const src = `        * = ${hx4(QUOTE_RUN)}
         jmp qrun                ; IRUN enters here; the fetcher has to own ${hx4(EXO_GETBYTE)}
 qbLo = ${hx4(qbLo)}
@@ -413,21 +526,71 @@ qcol:   lda #$0c                ; grey2 over all of colour RAM, which the charse
         lda #$1b
         sta $d011               ; and the quote is up. It stays up for the rest of the boot.
 
+        ldx #$00                ; the sweep's routines go to low RAM, where BOTH phases reach
+swcp:   lda swDat,x             ;   them -- IMG buries this file while they are still running
+        sta ${hx4(SWEEP_AT)},x
+        inx
+        cpx #${'$' + sweep.length.toString(16).padStart(2, '0')}
+        bne swcp
+        lda #$00                ; column 0, nothing loaded
+        sta ${hx4(SW_COL)}
+        sta ${hx4(SW_ACC)}
+        sta ${hx4(SW_ACC + 1)}
+        sta ${hx4(SW_PG)}
+        sta ${hx4(SW_BASE)}
+        lda #${'$' + (step1 & 255).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP)}     ; ${step1}/256 of a column per page: ${Math.round(step1 * 100 / 256) / 100} columns each
+        lda #${'$' + (step1 >> 8).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP + 1)}
+
+        ; ---- Krill, read a byte at a time, so the sweep can move DURING a KERNAL load ----
+        ; LOAD is one blocking call with no progress hook, and this is the longest single wait in
+        ; the boot: 4 KB at ~290 B/s. OPEN/CHKIN/BASIN is the same serial transfer with the byte
+        ; loop in our hands, for a little KERNAL dispatch per byte -- nothing beside 3.4 ms of
+        ; bus time. Secondary address 2 means the file arrives raw, so its own two-byte load
+        ; address comes down the wire first; check it rather than skip it.
         lda #$04
         ldx #<nr
         ldy #>nr
-        jsr $ffbd
+        jsr $ffbd               ; SETNAM
         lda #$01
         ldx #$08
-        ldy #$01
-        jsr $ffba
-        lda #$00
-        jsr $ffd5               ; the 3.8 K of Krill, behind the quote
+        ldy #$02
+        jsr $ffba               ; SETLFS
+        jsr $ffc0               ; OPEN
         bcs qstop
+        ldx #$01
+        jsr $ffc6               ; CHKIN
+        bcs qstop
+        jsr $ffcf
+        cmp #<${hx4(IRAY_ENTRY)}
+        bne qstop
+        jsr $ffcf
+        cmp #>${hx4(IRAY_ENTRY)}
+        bne qstop
+        lda #<${hx4(IRAY_ENTRY)}
+        sta $fd
+        lda #>${hx4(IRAY_ENTRY)}
+        sta $fe
+qrd:    jsr $ffcf               ; BASIN
+        ldy #$00
+        sta ($fd),y
+        inc $fd
+        bne qrd2
+        inc $fe
+        jsr ${hx4(SW_TICK)}     ; a page boundary -- the unit the sweep counts
+qrd2:   lda $90                 ; ST stays 0 until the byte that carries EOI, which is a REAL
+        beq qrd                 ;   byte and has already been stored
+        and #$bf                ; EOI alone is the normal end; any other bit is an error
+        bne qstop
+        jsr $ffcc               ; CLRCHN
+        lda #$01
+        jsr $ffc3               ; CLOSE
         jmp ${hx4(IRAY_ENTRY)}
 qstop:  inc $d020
         jmp qstop
 nr:     !byte ${petscii(irayName)}
+swDat:  !byte ${sweep.join(',')}
 pkDat:  !byte ${q.packed.join(',')}
 pkEnd:
 `;
