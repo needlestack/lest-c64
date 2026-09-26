@@ -38,7 +38,7 @@ const KRILL_RES = KRILL_RES_PRG.slice(2), KRILL_INST = KRILL_INST_PRG.slice(2);
 // boot PRG, which is the one file loaded at KERNAL speed (~290 B/s), so every byte between the
 // stub's end and the installer's start is dead air on the loading screen: at the default it was
 // 654 bytes = 2.3 seconds of nothing.
-const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x0940;
+const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x0960;
 // Where the KERNAL's screen goes so that install() cannot print on Krill's resident at $0400 --
 // and, just as important, cannot print on the QUOTE. $cc00 is the 1K above IHOL in bank 3 and is
 // exactly the 1000 bytes a screen needs; buildLoader guards that IHOL never grows into it.
@@ -100,7 +100,7 @@ export const EXO_TABLE = 0xc000;
 export const EXO_GETBYTE = QUOTE_RUN + 3;    // the byte fetcher, right after IQOT's entry jmp
 export const EXO_CODE = QUOTE_RUN + 0x14;    // the decruncher itself, after the fetcher
 
-function bodySource(files, entry, pages) {
+function bodySource(files, entry, pages, first) {
   let step = 0;
   const load = f => `
         lda #${'$' + (++step).toString(16).padStart(2, '0')}
@@ -201,11 +201,32 @@ r2dbg:  jmp r2dbg
         lda #$34                ;   only place a loader with I/O mapped can put it), then
         sta $01                 ;   $c000 -> $d000 with the port at $34.
         ldx #$00
-hcp:${[...Array(pages)].map((_, p) =>
-    `\n        lda $c0${p.toString(16).padStart(2, '0')},x\n        sta $d0${p.toString(16).padStart(2, '0')},x`).join('')}
+        ; ARITHMETIC, not string concatenation. This was a $c0 prefix with a 2-digit page, giving
+        ; $c000,$c001..$c00b -- a stride of ONE, not 256. Every pair then copied the same bytes
+        ; and the net effect was 267 bytes of a 2,944-byte ladder. The first page survived, so
+        ; holes, sockets and pedestals rendered as rows of $ff: horizontal grey lines. It shipped
+        ; for three commits because nothing downstream can tell a short copy from a real ladder.
+hcp:${[...Array(pages)].map((_, p) => `
+        lda $${(0xc000 + p * 256).toString(16)},x
+        sta $${(0xd000 + p * 256).toString(16)},x`).join('')}
         inx
         bne hcp
-        lda #$37
+        ; ...and CHECK it arrived. A wrong stride is silent at every later stage, so compare the
+        ; two ends of the ladder while the port is still at $34 and $d000 is still RAM.
+        lda $${(0xc000 + first.length - 1).toString(16)}
+        cmp $${(0xd000 + first.length - 1).toString(16)}
+        bne hcpbad
+        lda $${(0xc000 + (pages - 1) * 256).toString(16)}
+        cmp $${(0xd000 + (pages - 1) * 256).toString(16)}
+        beq hcpok
+hcpbad: lda #$37
+        sta $01
+        lda #$02                ; RED border, screen on: the ladder did not arrive whole
+        sta $d020
+        lda #$1b
+        sta $d011
+hb:     jmp hb
+hcpok:  lda #$37
         sta $01
         cli
 ${files.filter(f => !f.first && !f.last).map(load).join('\n')}
@@ -236,7 +257,7 @@ export function buildLoader(assemble, files, entry) {
     `${first.name} is ${first.length} bytes at $c000 and reaches ${hx4(0xc000 + holePages * 256 - 1)}, ` +
     `into the KERNAL's scratch screen at ${hx4(KSCR)} that install() prints on. Move KSCR ` +
     `(loader-src.mjs) -- and note it needs 1000 contiguous bytes clear of every boot-time load.`);
-  const body = assemble(bodySource(files, entry, holePages));
+  const body = assemble(bodySource(files, entry, holePages, first));
   if (LOADER_RUN + body.bytes.length > 0x0800) throw new Error(
     `the boot body is ${body.bytes.length} bytes and runs past $0800 from ${hx4(LOADER_RUN)}, ` +
     `into the image it is about to load. Krill's resident takes $0400-$0612 below it.`);
