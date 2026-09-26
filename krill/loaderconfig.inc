@@ -74,7 +74,7 @@ DECOMPRESSOR                    = DECOMPRESSORS::NONE; available are NONE, BITNA
                                     ; the file's loading address can be found in loadaddrlo/loadaddrhi during and after loading, so polling the current
                                     ; difference of endaddrlo/hi and loadaddrlo/hi can be used to implement progress displays.
 
-.define LOAD_VIA_KERNAL_FALLBACK  1 ; loads via the KERNAL API if drive code installation was not successful
+.define LOAD_VIA_KERNAL_FALLBACK  1 ; set by krill/build.sh
                                     ; (i.e., if it cannot installed due to an incompatible drive - possible if it is not
                                     ; a 1541, 1541-C, 1541-II, 1541U, 1570, 1571, 1571CR, 1581, or FD2000/4000),
                                     ; or true drive emulation being disabled.
@@ -127,5 +127,5 @@ DECOMPRESSOR                    = DECOMPRESSORS::NONE; available are NONE, BITNA
 
 ; this reduces host-side install code
 
-.define ONLY_1541_AND_COMPATIBLE  0 ; reduces host-side install code by omitting any native custom drive code for non-1541 compatible
+.define ONLY_1541_AND_COMPATIBLE  1 ; set by krill/build.sh
                                     ; drives, treats any drive as 1541, using an incompatible drive will cause undefined behaviour

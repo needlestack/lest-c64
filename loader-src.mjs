@@ -29,17 +29,29 @@
 import { readFileSync } from 'fs';
 
 export const LOADER_RUN = 0x0620;
-const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x0c00;
+const krill = n => [...readFileSync(`./krill/${n}`)].slice(2);
+const KRILL_RES = krill('loader-c64.prg'), KRILL_INST = krill('install-c64.prg');
+// $0980 is NOT Krill's default install address ($1000) -- krill/build.sh must be given the same
+// one, and krill/loaderconfig.inc is the config it builds against. The installer sits inside the
+// boot PRG, which is the one file loaded at KERNAL speed (~290 B/s), so every byte between the
+// stub's end and the installer's start is dead air on the loading screen: at the default it was
+// 654 bytes = 2.3 seconds of nothing.
+const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x09c0;
 // WHERE THE RESIDENT'S BYTES WAIT. They cannot simply be copied to $0400 by the stub and left
 // there: $0400 is the default SCREEN, and install() calls KERNAL routines that write to it. The
 // README says this for "below $0400"; it is just as true AT $0400, and the symptom was loadraw
 // returning $f0 -- not a status at all, because it was not loadraw any more. So the bytes ride
 // in the PRG above the install routine and the BODY copies them down once install has finished.
-const KRILL_RESDATA = 0x2800;
+// DERIVED, and NOT page-aligned. It was a fixed $2800, which is fine while the installer is 7,056
+// bytes and ends just short of it -- and silently wastes 3.9 KB of PRG, and so of LOAD TIME, the
+// moment a smaller installer is built. A 1541-only Krill is half the size and the boot did not get
+// one second faster, because the gap was still being loaded. Nothing here wants a page boundary:
+// the copy loop that lifts this to KRILL_RESIDENT is absolute-indexed and aligns to the
+// DESTINATION, so aligning the source only bought up to 255 more bytes of dead air.
+const KRILL_RESDATA = KRILL_INSTALL + KRILL_INST.length;
 // Krill's two binaries, PRG files with a 2-byte load address we drop: the resident is placed by
 // our copy loop, the install routine is simply part of the image at KRILL_INSTALL.
-const krill = n => [...readFileSync(`./krill/${n}`)].slice(2);
-const KRILL_RES = krill('loader-c64.prg'), KRILL_INST = krill('install-c64.prg');
+
 
 const hx4 = n => '$' + n.toString(16).padStart(4, '0');
 const petscii = s => [...s].map(c => c.charCodeAt(0)).join(',');
@@ -105,20 +117,23 @@ cdbg:   jmp cdbg
         sta $0288
         jsr $e544               ; CLRSCR
 
-        ldx #$00                ; now the resident, with $0400 no longer the screen
-rcp0:   lda ${hx4(KRILL_RESDATA)},x
-        sta ${hx4(KRILL_RESIDENT)},x
-        lda ${hx4(KRILL_RESDATA + 256)},x
-        sta ${hx4(KRILL_RESIDENT + 256)},x
-        inx
+        ldx #$00                ; now the resident, with $0400 no longer the screen.
+                                ; GENERATED from the resident's actual length, never hardcoded:
+                                ; this was two whole pages plus a remainder for the 530-byte
+                                ; all-drives resident, and the 1541-only one is 226 bytes -- the
+                                ; fixed loop copied 738 and ran through $0620, which is THIS CODE.
+${[...Array(Math.floor(KRILL_RES.length / 256))].map((_, p) =>
+`rcp${p}:  lda ${hx4(KRILL_RESDATA + p * 256)},x
+        sta ${hx4(KRILL_RESIDENT + p * 256)},x
+`).join('')}${Math.floor(KRILL_RES.length / 256) ? `        inx
         bne rcp0
         ldx #$00
-rcp1:   lda ${hx4(KRILL_RESDATA + 512)},x
-        sta ${hx4(KRILL_RESIDENT + 512)},x
+` : ''}${KRILL_RES.length & 255 ? `rcpr:   lda ${hx4(KRILL_RESDATA + (KRILL_RES.length & ~255))},x
+        sta ${hx4(KRILL_RESIDENT + (KRILL_RES.length & ~255))},x
         inx
         cpx #${'$' + (KRILL_RES.length & 255).toString(16).padStart(2, '0')}
-        bne rcp1
-
+        bne rcpr
+` : ''}
 ${process.env.BOOTDBG === 'instc' ? `        jsr ${hx4(KRILL_INSTALL)}
         lda #$00
         rol                     ; BOOTDBG: border = install's CARRY, 0 = installed natively
