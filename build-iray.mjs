@@ -20767,36 +20767,56 @@ try {
 
     { tag: 'M', name: 'IMG', at: r.org, data: [...r.bytes] },
   ];
-  const { buildLoader, QUOTE_SCR, QUOTE_CHR } = await import('./loader-src.mjs');
+  const { buildLoader, buildAutorun, buildQuote, QUOTE_SCR, QUOTE_CHR, QUOTE_RUN, IRAY_ENTRY } =
+    await import('./loader-src.mjs');
   const quoteAddrs = { QUOTE_SCR, QUOTE_CHR };
   // ---- IQOT: the boot quote, a charset and a 40x25 map (see make-quote.mjs) ----
   // ONE file spanning both, with the gap between them padded, so the boot body needs one load
   // call and not two. It lands where IPIC and ILVL eventually go -- the only bank-3 space free
   // for the length of the load -- so those two are marked `last` and go behind a blanked screen.
+  // The quote is NOT loaded by Krill any more -- it is its own stage, ahead of Krill, because
+  // Krill is the 13 seconds it was waiting behind. It arrives PACKED (see make-quote.mjs) and
+  // IQOT decrunches it to $f400 itself.
   const QUOTE = (() => {
     if (!DIE || process.env.NOQUOTE) return null;             // the picture machinery owns bank 3's tail
     let q; try { q = JSON.parse(readFileSync('./quote-screen.json', 'utf8')); }
     catch { return null; }                                    // not generated: ship without it
     const { QUOTE_SCR, QUOTE_CHR } = quoteAddrs;
     if (q.chars.length > 0x10000 - QUOTE_CHR) throw new Error('the quote charset runs off the top of memory');
-    const data = [...q.screen, ...Array(QUOTE_CHR - QUOTE_SCR - q.screen.length).fill(0), ...q.chars];
-    console.error(`  boot quote: ${q.glyphs} glyphs + ${q.screen.length} screen = ${data.length} B ` +
-                  `at $${QUOTE_SCR.toString(16)}, shown for the whole load`);
-    return { tag: 'Q', name: 'IQOT', at: QUOTE_SCR, data };
+    const blob = [...q.screen, ...Array(QUOTE_CHR - QUOTE_SCR - q.screen.length).fill(0), ...q.chars];
+    // The packed bytes are OPAQUE: nothing downstream can notice that they decrunch to the wrong
+    // address, or that they are the previous image. exomizer wrote the destination into the
+    // stream, so the addresses have to be checked HERE, against the json's record of them.
+    if (!q.packed || !q.decr) throw new Error(
+      'quote-screen.json has no packed stream. Re-run make-quote.mjs (it needs exomizer; see the ' +
+      'error it prints).');
+    if (q.packedAt !== QUOTE_SCR || q.packedLen !== blob.length) throw new Error(
+      `quote-screen.json was packed for $${(q.packedAt ?? 0).toString(16)} +${q.packedLen} B, but ` +
+      `this build wants $${QUOTE_SCR.toString(16)} +${blob.length} B. Re-run make-quote.mjs.`);
+    const built = buildQuote(assemble, q, 'IRAY');
+    console.error(`  boot quote: ${q.glyphs} glyphs + ${q.screen.length} screen = ${blob.length} B, ` +
+                  `exomizer ${q.packed.length} B -> IQOT ${built.len} B at $${QUOTE_RUN.toString(16)}`);
+    return { name: 'IQOT', prg: built.prg, len: built.len };
   })();
-  if (QUOTE) DISK.push(QUOTE);
   // IPIC and ILVL land ON the quote, so they load last, after the screen is blanked.
   for (const f of DISK) if (f.name === 'IPIC' || f.name === 'ILVL') f.last = true;
-  const ld = buildLoader(assemble, DISK.filter(f => f !== QUOTE).map(f =>
+  const ld = buildLoader(assemble, DISK.map(f =>
                            ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
                               runtime: f.runtime, length: f.length ?? f.data.length })),
-                         r.labels.entry,
-                         QUOTE && { tag: 'Q', name: 'IQOT' });
+                         r.labels.entry);
+  // With no quote there is no IQOT, so the autorun stub chains straight to Krill.
+  const run = buildAutorun(assemble, QUOTE ? 'IQOT' : 'IRAY', QUOTE ? QUOTE_RUN : IRAY_ENTRY);
   const d = D64.createEmpty('IRAY', '01');
-  d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);   // first, so LOAD"*" finds it
+  d.writeFile('IRUN', Buffer.from(run), D64.FILE_TYPE_PRG);     // FIRST, so LOAD"*",8,1 finds it
+  if (QUOTE) d.writeFile('IQOT', Buffer.from(QUOTE.prg), D64.FILE_TYPE_PRG);
+  d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);
   for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG);
   writeFileSync('./latest.d64', Buffer.from(d.getData()));
-  console.log(`disk: loader ${ld.prg.length}B + ` +
+  const kern = (run.length - 2) + (QUOTE ? QUOTE.len : 0) + ld.prg.length;
+  console.log(`boot: IRUN ${run.length - 2}B` + (QUOTE ? ` + IQOT ${QUOTE.len}B` : '') +
+    ` + IRAY ${ld.prg.length}B = ${kern}B at KERNAL speed (~${(kern / 290).toFixed(1)}s); ` +
+    `quote up after ~${(((run.length - 2) + (QUOTE ? QUOTE.len : 0)) / 290).toFixed(1)}s`);
+  console.log(`disk: ` +
     DISK.map(f => `${f.name} ${(f.data.length / 1024).toFixed(1)}K@$${f.at.toString(16)}`).join(' + ') +
     `  = ${d.getFreeBlocks()} blocks free`);
 

@@ -1,5 +1,5 @@
-; repository version 194, built on Fri, 25 Sep 2026 17:55:36 -0700 for project "loader" using
-; make PLATFORM=c64 prg INSTALL=09c0 RESIDENT=0400 ZP=e0 PROJECT=
+; repository version 194, built on Fri, 25 Sep 2026 18:36:49 -0700 for project "loader" using
+; make PLATFORM=c64 prg INSTALL=0940 RESIDENT=0400 ZP=e0 PROJECT=
 
 ; configuration
 config_ALLOW_2_MHZ_ON_C128      = 0
@@ -38,8 +38,8 @@ endaddrlo                       = $e2
 endaddrhi                       = $e3
 loader_zp_last                  = $e7
 
-; install $09c0-$1694
-install                         = $09c0
+; install $0940-$1614
+install                         = $0940
 
 ; resident $0400-$0612
 loadraw                         = $0400
