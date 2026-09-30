@@ -5126,6 +5126,20 @@ const WALLS_ALL = WALL_LVLS.flatMap(lv => LEVEL_WALLS[lv].walls.map((cells, k) =
 // the engine's wall tables must not change size when a level is added, so this is a promise the
 // engine makes and levels are checked against, rather than a number derived from them.
 const NWALL = +(process.env.NWALL ?? 4);
+// ---- NDOOM: how many cells one wall GROUP may hold ----
+// wallSink used to answer "is the cell this column struck one of the doomed group?" with
+// doomT -- a 256-byte page marking at most four cells. It is now an unrolled compare against
+// the group's cells held in dcT, so the page is gone and the cost is NDOOM compares on each of
+// the 160 columns, for the four frames of a collapse.
+// Sized to the largest group that exists rather than padded for headroom, because every unused
+// slot is still a compare on every column of every frame of every collapse.
+const NDOOM = +(process.env.NDOOM ?? 4);
+for (const lv of Object.keys(LEVEL_WALLS))
+  for (const [k, g] of LEVEL_WALLS[lv].walls.entries())
+    if (g.length > NDOOM) throw new Error(
+      `level ${lv}'s wall ${k} has ${g.length} cells and the engine's budget is NDOOM=${NDOOM}. ` +
+      `Raise NDOOM -- it costs 5 cycles per screen column per frame of a collapse, so about ` +
+      `800 cycles a frame for each extra cell -- or split the group into two walls.`);
 for (const lv of Object.keys(LEVEL_WALLS))
   if (LEVEL_WALLS[lv].walls.length > NWALL) throw new Error(
     `level ${lv} has ${LEVEL_WALLS[lv].walls.length} removable walls and the engine's budget is ` +
@@ -5538,8 +5552,6 @@ const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
 // Over-declaring is safe and under-declaring is not -- a table reserved short is how a level
 // shadow once grew over doomT -- so where the true extent is not obvious the whole page is named.
 Object.assign(RUNTIME_BUFS, {
-  doomT: 256,           // per cell, but its clear loop is `ldx #0 / sta doomT,x / inx / bne`:
-                        //   256 deliberately, so power-on garbage cannot survive above MAPN
   runPlaneT: NRUN,      // per run id, and NRUN is 65 -- these two are the worst ratio in the
   runFaceT: NRUN,       //   build, 65 bytes each on a page of their own
   bfsQ: 254,            // one byte per open cell
@@ -9492,10 +9504,6 @@ runFaceT  = ${hx16(0x6d00 + NRUN)}                ;   visible. Derived by mkRuns
                                  ;   holds while NRUN <= 128.
                                  ;   change; a page each because a level may have up to 255 runs
                                  ;   (level 4 has 100, which is what outgrew its old home).
-doomT   = $6c00                  ; per cell: 1 while it belongs to a wall mid-collapse. wallSink
-                                 ;   matches the columns showing the doomed group through it, so a
-                                 ;   group can be any shape. Written only by wtCells; needs a whole
-                                 ;   clear page, which the image now has again.
 obKT    = $5b                   ; obOrder: the smallest key so far, its entity, and the keys
 obKI    = $5c  
 obKeyT  = $a8b3                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
@@ -21365,8 +21373,8 @@ hzWv:   !byte 0                 ; hzRunW's held "out" value while it reads the "
 wallTog:ldy wsWall
         lda wallStT,y
         bne wtBack
-        lda #$01
-        jsr wtCells             ; doomT[cell] = 1 for the group: the sink's column scan reads it
+        jsr wtDoom              ; load the group's cells into dcT: the sink's column scan tests
+                                ;   them directly now that doomT is gone
         lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
 ${SOUND ? `        lda #$02
@@ -21391,7 +21399,6 @@ wtGo:   sta wallStT,y
         lda wallDHiT,y
         sta hzRd+2
         jsr hzRunW              ; sets its own X and walks to the $ff
-        lda #$00
         jsr wtCells             ; every cell of the group: blkT from the new mapT (the delta no
                                 ;   longer carries blkT or the run tables, since neither travels
                                 ;   with a level), and doomT back to 0
@@ -21402,9 +21409,12 @@ wtGo:   sta wallStT,y
         jmp fallInv             ; renderSym's run cache still believes the old geometry -- a
                                 ;   column it thinks is unchanged is a column it will not repaint
 
-; ---- wtCells: walk wall wsWall's cell list: doomT[cell] = A, and blkT[cell] = mapT[cell] ----
-wtCells:sta wtDoom+1
-        ldy wsWall
+; ---- wtCells: walk wall wsWall's cell list: blkT[cell] = mapT[cell] ----
+; It used to set doomT[cell] = A as well, which is why it took an argument and why it was called
+; twice -- once on the way out purely to MARK the group (the map does not change until the last
+; frame, so the blkT copy that call did was a no-op), once on the way back to rebuild blkT.
+; With doomT gone the marking call went with it and this takes no argument.
+wtCells:ldy wsWall
         lda wallCLoT,y
         sta wtLd+1
         lda wallCHiT,y
@@ -21416,11 +21426,40 @@ wtLd:   lda $ffff,y             ; operand patched: the group's $ff-ended cell li
         tax
         lda mapT,x
         sta blkT,x
-wtDoom: lda #$00
-        sta doomT,x
         iny
         bne wtLd                ; always: a group is far shorter than a page
 wtCDn:  rts
+
+; ---- wtDoom: load the doomed group's cells into the compare slots wallSink tests ----
+; Replaces doomT, a 256-byte page that marked at most ${hx(NDOOM)} cells. Runs once, when the collapse
+; starts.
+; The unused slots are filled with a DUPLICATE of the first cell rather than a sentinel: idT
+; uses $ff for "a column that struck nothing", so an $ff in a slot would match those columns and
+; every empty column would read as doomed. A duplicate can only match what the real list matches.
+wtDoom: ldy wsWall
+        lda wallCLoT,y
+        sta wdF+1
+        sta wdLd+1
+        lda wallCHiT,y
+        sta wdF+2
+        sta wdLd+2
+        ldy #$00
+wdF:    lda $ffff,y             ; operand patched: the first cell -- a group always has one
+        ldx #${hx(NDOOM - 1)}
+wdFil:  sta dcT,x
+        dex
+        bpl wdFil
+        ldx #$00
+wdLd:   lda $ffff,y             ; operand patched: ...then the slots the group actually uses
+        cmp #$ff
+        beq wdDn
+        sta dcT,x
+        iny
+        inx
+        cpx #${hx(NDOOM)}       ; the NDOOM guard makes a longer list a build error, so this can
+        bcc wdLd                ;   only stop early -- but it must not walk off the end of dcT
+wdDn:   rts
+dcT:    !fill ${NDOOM}, 0       ; the doomed cells, one slot each; see wallSink
 
 ; ---- hzRunW: walk one wall's (addrLo, addrHi, outValue, backValue) quads ----
 ; Both directions in ONE list. They used to be two hzRun triple lists over the SAME addresses,
@@ -21453,12 +21492,12 @@ hzWRt:  rts                     ; hzRun's own hzRt is in the hazard block, out o
 ; the shadow -- so a level has to leave in the state it arrived in, or the shadow keeps the
 ; solved map and hands it back on the next drop.
 wallsBack:
-        ldx #$00                ; doomT is a bank-3 page no file loads: clear it, or the first
-        txa                     ;   collapse's column scan matches power-on garbage. (Here rather
-dmClr:  sta doomT,x             ;   than at entry because the main block had no room for it.)
-        inx
-        bne dmClr
-        sta wsN                 ; a collapse in progress is abandoned
+        lda #$00                ; a collapse in progress is abandoned. (This used to clear all
+        sta wsN                 ;   256 bytes of doomT as well -- a page that existed to mark at
+                                ;   most four cells, and had to be wiped on every level change
+                                ;   and restart because no file loads it. dcT needs no clearing:
+                                ;   wallSink only reads it while wsN says a collapse is running,
+                                ;   and wtDoom fills it when one starts.)
         ldx #${hx(NWALL - 1)}   ; EVERY id the engine has room for, which since wall ids went
 wbLp:   stx wsWall              ;   level-local is at most this level's own walls -- the ids
                                 ;   above its count have wallStT 0 and are skipped. It used to
@@ -21496,8 +21535,16 @@ wsBusy: lda #$ff                ; find the doomed wall's SPAN this frame. Scanni
         sta wsHi                ;   once (guarded below) and wsLo keeps falling to the leftmost.
         ldx #$9f
 wsFind: ldy idT,x
-        lda doomT,y             ; is the cell this column struck one of the doomed group? (idT's
-        beq wsFN                ;   $ff "no cell" reads doomT[255], the border, never doomed)
+        ; is the cell this column struck one of the doomed group? This was one indexed load from
+        ; doomT, a 256-byte page marking at most ${NDOOM} cells; it is now ${NDOOM} compares against the
+        ; cells themselves -- about ${NDOOM * 5} cycles a column more, for the four frames of a collapse
+        ; and nothing else, which is roughly two thirds of one frame over the whole animation.
+        ; A column that struck nothing holds $ff, which no slot can equal: $ff terminates the
+        ; cell list, so it is not a representable cell, and wtDoom pads with a duplicate.
+${[...Array(NDOOM)].map((_, i) => `        cpy dcT${i ? '+' + i : ''}
+        beq wsHit`).join('\n')}
+        bne wsFN                ; the last compare failed, so Z is clear: always taken
+wsHit:
         stx wsLo
         lda wsHi
         cmp #$ff
@@ -24112,7 +24159,15 @@ const ALIGNED_T = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     // player's own cell held $ff, so every angel descended a stale gradient toward nothing, took
     // one step and froze. Same shape as hTabT above -- an alignment the hand-placed layout
     // happened to satisfy, so nothing had ever had to state it.
-    bfsD0: 256, bfsD1: 256 };
+    bfsD0: 256, bfsD1: 256,
+    // ---- THE FALL SNAPSHOTS ARE ADDRESSED BY PAGE ----
+    // fallSnap hands snapCp a PAGE, not an address (`lda #>fallSnapS / sta snDst`), and snapCp
+    // builds each row as `mul40LoT,x` for the low byte and `mul40HiT,x + snDst` for the high --
+    // so the destination's low byte is assumed to be zero, exactly as the comment one line above
+    // it says of the SOURCE ("screens are page-aligned, so no low-byte carry"). The destination
+    // had the same requirement and never stated it. Both were page-aligned by luck at $5000 and
+    // $5300; at any other offset every row of both snapshots lands skewed by the low byte.
+    fallSnapD: 256, fallSnapS: 256 };
 const SIZES_T = {
     stackLT: 128, stackRT: 128, sideT: 256, idT: 256, colH: 256,
     faceIdT: 256, remLoT: 256, remHiT: 256,
