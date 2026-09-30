@@ -246,25 +246,45 @@ export function assemble(source, opts = {}) {
 
   // ---- pass 2: emit bytes ----
   const org = opts.origin ?? (sized.find(s => s.kind === 'org')?.pc) ?? 0x0801;
-  const out = [];
+  // ---- ADDRESS-INDEXED OUTPUT, not a contiguous push ----
+  // It used to be `out.push()`, which made the output a stream: an origin could only ever move
+  // FORWARD, and "* = $x moves backward" was the only overlap check there was. That forced every
+  // relocated table to be emitted at a hand-placed point in the SOURCE where the stream happened
+  // to be below its address -- the single biggest source of mistakes in the image packer, and the
+  // reason it needed markers at all.
+  // Writing by address instead: an origin may go anywhere that is still UNWRITTEN, so a table can
+  // declare where it lives and be written wherever it is convenient to say so. The overlap check
+  // gets stronger as a side effect -- it is per BYTE now, so two blocks that interleave without
+  // either origin moving backward are caught too, which the old check could not see.
+  const SPAN = 0x10000;
+  const mem = new Uint8Array(SPAN);
+  const wrote = new Uint8Array(SPAN);   // 1 = a byte was emitted here
   const listing = [];
-  const emitAt = new Map(); // pc -> index in out (contiguous assumed)
   const holes = [];         // [lo, hi) ranges the image pads rather than fills -- see the org case
-  let cur = org;
-  const emit = (b) => { out.push(b & 0xFF); cur++; };
+  let cur = org, hiWater = org;
+  const out = {             // enough of the old array's surface for the listing slices below
+    get length() { return hiWater - org; },
+    slice(from) { return [...mem.subarray(org + from, hiWater)]; },
+  };
+  const put = (addr, v) => {
+    if (addr < org || addr >= SPAN) throw new Error(`emit at $${addr.toString(16)} is outside the image`);
+    if (wrote[addr]) throw new Error(`OVERLAPPING OUTPUT at $${addr.toString(16)}: two things claim ` +
+      `this byte. With address-indexed output an origin may move backward into free space, so this ` +
+      `is the check that catches a collision -- it is per byte, not per origin.`);
+    mem[addr] = v & 0xFF; wrote[addr] = 1;
+    if (addr >= hiWater) hiWater = addr + 1;
+  };
+  const emit = (b) => { put(cur, b); cur++; };
 
   for (const s of sized) {
     if (s.kind === 'org') {
       // forward origin jump pads the contiguous output with zeros so the
       // load image stays gap-free (e.g. code at $0801, bitmap at $2000)
-      if (s.pc < cur)
-        throw new Error(`* = $${s.pc.toString(16)} moves backward from $${cur.toString(16)} (overlapping output not supported)`);
-      // Record the hole before filling it. Callers cannot recover these from the image afterwards:
-      // the padding is zeros and so is plenty of real table data, so a zero-run scan guesses. The
-      // holes are the whole of the image's unused space, which is the number a layout decision
-      // turns on -- worth three lines here rather than an estimate at every call site.
+      // BACKWARD IS FINE now, as long as the destination is unwritten -- put() says so per byte.
+      // A forward jump still leaves a hole; those are reported, because the padding is zeros and
+      // so is plenty of real table data, so a zero-run scan of the image afterwards only guesses.
       if (cur < s.pc) holes.push([cur, s.pc]);
-      while (cur < s.pc) { out.push(0); cur++; }
+      cur = s.pc;
       continue;
     }
     if (s.kind === 'equ' || s.kind === 'none') continue;
@@ -283,7 +303,10 @@ export function assemble(source, opts = {}) {
         const val = args.length > 1 ? evalExpr(args[1], symbols, cur) : 0;
         for (let i = 0; i < count; i++) emit(val);
       }
-      listing.push({ at: start, bytes: out.slice(start - org), src: s.text });
+      // `len` is THIS statement's own byte count. `bytes` cannot give it: out.slice(from) runs to
+      // the high-water mark, so every entry's `bytes` is "everything from here on" -- fine for the
+      // debug dump it was written for, silently wrong for anyone measuring a statement.
+      listing.push({ at: start, ln: s.ln, len: cur - start, bytes: out.slice(start - org), src: s.text });
       continue;
     }
     // insn
@@ -295,7 +318,7 @@ export function assemble(source, opts = {}) {
       emit(0x03);
       emit(0x4C);                          // JMP abs
       emit(target & 0xFF); emit((target >> 8) & 0xFF);
-      listing.push({ at: s.at, bytes: out.slice(startIdx), src: `${s.mnem} ${s.operand} ;far` });
+      listing.push({ at: s.at, ln: s.ln, len: cur - s.at, bytes: out.slice(startIdx), src: `${s.mnem} ${s.operand} ;far` });
       continue;
     }
     const op = OPCODES[s.mnem][s.mode];
@@ -314,10 +337,19 @@ export function assemble(source, opts = {}) {
       const v = evalExpr(s.expr, symbols, cur);
       emit(v & 0xFF); emit((v >> 8) & 0xFF);
     }
-    listing.push({ at: s.at, bytes: out.slice(startIdx), src: `${s.mnem} ${s.operand}`.trim() });
+    listing.push({ at: s.at, ln: s.ln, len: cur - s.at, bytes: out.slice(startIdx), src: `${s.mnem} ${s.operand}`.trim() });
   }
 
-  const bytes = Uint8Array.from(out);
+  // Unwritten bytes below the high-water mark are the image's holes and load as zeros, exactly
+  // as the forward-jump padding used to. Recompute the hole list from `wrote` rather than from
+  // the origin jumps: with backward origins a hole can be filled in later, and the old list
+  // would still be claiming it is free.
+  holes.length = 0;
+  for (let a = org, st = -1; a <= hiWater; a++) {
+    if (a < hiWater && !wrote[a]) { if (st < 0) st = a; }
+    else if (st >= 0) { holes.push([st, a]); st = -1; }
+  }
+  const bytes = mem.subarray(org, hiWater);
   const prg = new Uint8Array(bytes.length + 2);
   prg[0] = org & 0xFF; prg[1] = (org >> 8) & 0xFF;
   prg.set(bytes, 2);

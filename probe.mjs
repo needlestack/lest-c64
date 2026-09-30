@@ -123,18 +123,36 @@ const before = new Set(execSync('pgrep -f x64sc || true').toString().split('\n')
 // still connects happily to the OLD emulator. Every read then comes from a machine running some
 // other disk, and nothing about it looks wrong. One leaked instance cost an afternoon of that.
 const PORT = 6600 + (process.pid % 300);
-// -virtualdev8 turns ON the kernal-trap fast loader ("general mechanisms for fast disk emulation")
-// and +drive8truedrive turns OFF the cycle-exact 1541. That pair is what makes the 221-block disk
-// load in seconds. Get either backwards and you get minutes per run, or ?LOAD ERROR with no drive
-// mechanism at all -- which reads exactly like a broken build. Both are passed explicitly because
-// VICE writes vicerc on exit and drops resources that are at their defaults, so the file cannot be
-// relied on to still say what it said. +minimized because the user wants to see the window.
+// THE PAIR IS THE OPPOSITE OF WHAT IT WAS, AND IT HAD TO INVERT (2026-09-25). It used to be
+// -virtualdev8 +drive8truedrive: the kernal-trap fast loader ON and the cycle-exact 1541 OFF,
+// which is what made the disk load in seconds. Krill's loader ended that. It talks to a REAL
+// drive, so with no drive to talk to it loads IRUN and IQOT through the KERNAL fallback -- the
+// quote comes up, looking like a healthy boot -- and then stalls for ever on the game itself.
+// Every probe run died at "NOT RUNNING: frameCnt held at 0", which reads exactly like a build
+// that crashes on entry. So: the true 1541 ON and the trap loader OFF, and -autostart-handle-tde
+// so autostart uses that drive rather than side-loading the first file past it. Both drive
+// resources are still passed explicitly because VICE writes vicerc on exit and drops resources
+// that are at their defaults, so the file cannot be relied on to still say what it said.
+// +minimized because the user wants to see the window.
+// The cost is real time: a true 1541 puts the boot at ~25 emulated seconds, against ~2 before.
 const LOG = `/tmp/probe-vice-${process.pid}.log`;
+// --trap AND --watch KEEP WARP. A checkpoint is event-driven: it fires when the PC enters the
+// range or a store lands in it, however fast the machine is running, so warp costs nothing but
+// the risk that the event happens before the client connects -- which matters only for something
+// in the first moments of the run. These used to turn warp off along with --at, which made a
+// trap on anything minutes into a session unusable, and that is a limit of this script and not
+// of VICE. Pair a trap with --until if the interesting event is early.
 // --at turns WARP OFF. Under warp the client cannot connect until thousands of game ticks have
 // already passed -- an early checkpoint is simply unreachable, and `waitFor` returns instantly on
 // a condition that was true before it was asked. Real time makes a tick a tick. It costs about a
 // second of wall clock per 60 ticks, which is the price of hitting a specific moment.
-execSync(`${VICE} ${(marks.length || trap) ? '' : '-warp '}-ntsc +drive8truedrive -virtualdev8 +minimized -jamaction 1 ` +
+// -config: a PRIVATE, empty settings file. Without it VICE reads the user's vicerc, and if that
+// enables the binary monitor the socket is already bound by whatever they have open -- every run
+// then dies on "bind() failed: Address already in use" no matter which port this picks, because
+// the address in the config wins. It also keeps every other resource this run needs off whatever
+// they last left set, which is the same trap the drive flags are in.
+const CFG = `/tmp/probe-vice-${process.pid}.vrc`;
+execSync(`${VICE} ${marks.length ? '' : '-warp '}-ntsc -config ${CFG} -drive8truedrive +virtualdev8 -autostart-handle-tde +minimized -jamaction 1 ` +
   `-binarymonitor -binarymonitoraddress ip4://127.0.0.1:${PORT} ` +
   `-autostart ${DISK} >${LOG} 2>&1 &`);
 const stop = () => {
@@ -191,9 +209,47 @@ sock.on('data', d => {
     const cb = pend.get(id); if (cb) { pend.delete(id); cb(err, body); }
   }
 });
-const memGet = (start, count) => new Promise((res, rej) => {
+// BANK matters, and defaulting it is a trap this tool exists to prevent. Bank 0 is "default":
+// whatever the CPU currently sees. At the engine's port ($35) that makes every read of
+// $d000-$dfff come back as I/O -- $de40 is the expansion-port area, so a 280-byte read of the
+// arc's glyph dictionary returned 280 copies of $1d (open bus) and looked exactly like a
+// dictionary wiped clean. The RAM the VIC reads there is only reachable through the "ram" bank.
+// MON_CMD_BANKS_AVAILABLE ($82): name -> id, straight from the emulator. Hardcoding "ram = 2"
+// would be one more number that is right until it is not.
+const banksAvail = () => new Promise((res, rej) => {
+  const id = rid++, h = Buffer.alloc(11);
+  h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(0, 2); h.writeUInt32LE(id, 6); h[10] = 0x82;
+  pend.set(id, (err, body) => {
+    if (err) return rej(new Error(`monitor error ${err} listing banks`));
+    const out = {}; let o = 2;
+    for (let n = body.readUInt16LE(0); n > 0 && o < body.length; n--) {
+      const item = body[o], bid = body.readUInt16LE(o + 1), len = body[o + 3];
+      out[body.toString('ascii', o + 4, o + 4 + len)] = bid; o += item + 1;
+    }
+    res(out);
+  });
+  sock.write(h);
+});
+// A spec is name[:count[:bank]]. The bank part only means anything for RAM the CPU cannot see
+// at the engine's port -- in practice anything under the I/O hole, which in bank 3 is charsets
+// and the arc dictionaries. `banks` is filled from the emulator once the socket is up.
+let banks = null;
+const bankOf = spec => {
+  const nm = spec.split(':')[2];
+  if (!nm) return 0;
+  if (!banks || banks[nm] === undefined) {
+    console.error(`UNKNOWN BANK "${nm}" -- this VICE offers: ${Object.keys(banks ?? {}).join(', ')}`);
+    process.exit(2);
+  }
+  return banks[nm];
+};
+const readSpec = async spec => {
+  const [n, cnt] = spec.split(':');
+  return memGet(addr[n], +(cnt || 1), bankOf(spec));
+};
+const memGet = (start, count, bank = 0) => new Promise((res, rej) => {
   const id = rid++, b = Buffer.alloc(8);
-  b[0] = 0; b.writeUInt16LE(start, 1); b.writeUInt16LE(start + count - 1, 3); b[5] = 0; b.writeUInt16LE(0, 6);
+  b[0] = 0; b.writeUInt16LE(start, 1); b.writeUInt16LE(start + count - 1, 3); b[5] = 0; b.writeUInt16LE(bank, 6);
   const h = Buffer.alloc(11);
   h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(b.length, 2); h.writeUInt32LE(id, 6); h[10] = 0x01;
   pend.set(id, (err, body) => {
@@ -246,6 +302,7 @@ const resume = () => new Promise(res => {
 sock.on('connect', async () => {
   try {
     await resume();                       // in case the connection itself left it stopped
+    banks = await banksAvail();           // name -> id, before any spec is read
     if (trap) {                           // arm NOW, while the disk is still loading, then let it run
       await cpSet(trap[0], trap[1]); await resume();
       // The KERNAL's own loader runs in ROM space, so wait for OUR code to take over before
@@ -267,7 +324,7 @@ sock.on('connect', async () => {
           const words = []; for (let i = 0; i + 1 < stack.length; i++) words.push(`$${(stack[i] + 256 * stack[i + 1]).toString(16)}`);
           console.log(`  stack: ${stack.join(' ')}`);
           console.log(`  as words: ${words.join(' ')}`);
-          for (const spec of specs) { const [n, cnt] = spec.split(':'); const v = await memGet(addr[n], +(cnt || 1)); console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v.join(' ')}`); }
+          for (const spec of specs) { const n = spec.split(':')[0]; const v = await readSpec(spec); console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v.join(' ')}`); }
           stop(); process.exit(0);
         }
         if (pc >= trap[0] && pc <= trap[1]) await resume();   // the KERNAL loading: let it go on
@@ -337,7 +394,7 @@ sock.on('connect', async () => {
         const words = []; for (let i = 0; i + 1 < stack.length; i++) words.push(`$${(stack[i] + 256 * stack[i + 1]).toString(16)}`);
         console.log(`  stack: ${stack.join(' ')}`);
         console.log(`  as words: ${words.join(' ')}`);
-        for (const spec of specs) { const [n, cnt] = spec.split(':'); const v = await memGet(addr[n], +(cnt || 1)); console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v.join(' ')}`); }
+        for (const spec of specs) { const n = spec.split(':')[0]; const v = await readSpec(spec); console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v.join(' ')}`); }
         stop(); process.exit(0);
       }
       bail('--watch: nothing stored there within two minutes');
@@ -346,7 +403,7 @@ sock.on('connect', async () => {
       // PROBE_DEAD=1: read the requested bytes ANYWAY. For a hang, the stack and vectors at the
       // moment the IRQ stopped are exactly the evidence, and the liveness bail was throwing it away.
       const v = {};
-      for (const spec of specs) { const [n, cnt] = spec.split(':'); v[n] = await memGet(addr[n], +(cnt || 1)); await resume(); }
+      for (const spec of specs) { const n = spec.split(':')[0]; v[n] = await readSpec(spec); await resume(); }
       for (const spec of specs) { const n = spec.split(':')[0]; console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v[n].join(' ')}`); }
       stop(); process.exit(3);
     }
@@ -370,14 +427,21 @@ sock.on('connect', async () => {
           '  |' + s.slice(r * 40, r * 40 + 40).map(ch).join('') + '|')
           .filter(l => l.replace(/[ |.]/g, '')).join('\n');
       } catch {}
-      bail(`NOT RUNNING: ${LIVE} ($${addr[LIVE].toString(16)}) held at ${a} for ${LIVE_DEADLINE / 1000}s.` +
-        ` The program has not started -- everything else would be image data.${pc}${scr}`);
+      // DEADOK=1: read anyway. A jammed machine still has its RAM, and when the question is "how
+      // far did it get" the answer is IN that RAM -- did the level land, did objInit derive its
+      // tables, did anything render. Refusing to read is right by default (the values would be
+      // image data, not runtime state, and that has misled before) but useless while debugging a
+      // build that dies before the first frame.
+      if (!process.env.DEADOK)
+        bail(`NOT RUNNING: ${LIVE} ($${addr[LIVE].toString(16)}) held at ${a} for ${LIVE_DEADLINE / 1000}s.` +
+          ` The program has not started -- everything else would be image data.${pc}${scr}` +
+          `\n  (DEADOK=1 reads it anyway.)`);
+      console.error(`DEADOK: ${LIVE} never moved${pc} -- reading the corpse.${scr}`);
     }
     const readAll = async () => {
       const v = {};
       for (const spec of specs) {
-        const [n, cnt] = spec.split(':');
-        v[n] = await memGet(addr[n], +(cnt || 1));
+        v[spec.split(':')[0]] = await readSpec(spec);
       }
       v[LIVE] = await memGet(addr[LIVE], 2);
       await resume();

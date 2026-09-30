@@ -13,6 +13,7 @@ import { execFileSync } from 'child_process';
 const LU = [null, 68, 108, 149];              // luminance of pixel values 1..3
 const LEVELS = [1, 2, 3];
 const BG     = +(process.env.ORBBG ?? 235);   // source is on white; above this is background
+const BGDARK = +(process.env.ORBBGDARK ?? 24);  // ...or on black; BELOW this is background
 const COVER  = +(process.env.ORBCOVER ?? 0.5);// destination pixel needs this much ink to exist
 const DITHER = process.env.ORBDITHER !== '0';
 // The renders are lit from the RIGHT; the hand-drawn orb has its highlight at upper LEFT. Mirror
@@ -23,8 +24,12 @@ const MIRROR = process.env.ORBMIRROR !== '0';
 // dozen sizes out of the same render -- see fitArt's note on why every rung is fitted from the
 // SOURCE rather than resampled from the biggest one.
 const srcCache = new Map();
-function loadArt(file, mirror) {
-  const key = `${file}|${mirror}`;
+// dark: the background is BLACK rather than white. The sphere renders sit dark on white, so the
+// flood fill looks for bright pixels reachable from the border; art that is lit-on-black (the ram
+// statues) has no bright border to start from, every pixel comes back as ink, and the fit returns
+// a filled rectangle. One comparison, flipped.
+function loadArt(file, mirror, dark) {
+  const key = `${file}|${mirror}|${dark ? 'd' : 'l'}`;
   if (srcCache.has(key)) return srcCache.get(key);
   const [sw, sh] = execFileSync('magick', ['identify', '-format', '%w %h', file])
     .toString().split(' ').map(Number);
@@ -44,7 +49,7 @@ function loadArt(file, mirror) {
     const y = stack.pop(), x = stack.pop();
     if (x < 0 || x >= sw || y < 0 || y >= sh) continue;
     const i = y * sw + x;
-    if (bg[i] || at(x, y) < BG) continue;
+    if (bg[i] || (dark ? at(x, y) > BGDARK : at(x, y) < BG)) continue;
     bg[i] = 1;
     stack.push(x + 1, y); stack.push(x - 1, y); stack.push(x, y + 1); stack.push(x, y - 1);
   }
@@ -64,7 +69,7 @@ function loadArt(file, mirror) {
 
 // Fit to a W x H grid of sprite pixel values (0 transparent, 1/2/3 the three greys).
 export function fitArt(file, W, H, opts = {}) {
-  const { at, isInk, x0, y0, bw, bh } = loadArt(file, opts.mirror ?? MIRROR);
+  const { at, isInk, x0, y0, bw, bh } = loadArt(file, opts.mirror ?? MIRROR, opts.dark);
   const dither = opts.dither ?? DITHER;
 
   // Box-filter each destination pixel: mean luminance over its footprint, and what fraction of

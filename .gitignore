@@ -62,3 +62,12 @@ ram-sprite-*.png
 ram-sprites-all*.png
 ram-sweep.png
 CLEANUP-REVIEW.md
+
+# compact.mjs's inputs and output. build-iray.mjs writes the first three each run (the RAM
+# buffer sizes, the page-alignment requirements, and the level region to keep clear) and
+# compact.mjs writes the fourth. Same rule as the .d64: regenerated in under a second, and a
+# stale copy of any of them would relayout the image against a build that no longer exists.
+iray.aligned.json
+iray.bufsizes.json
+iray.reserve.json
+iray.compact.asm

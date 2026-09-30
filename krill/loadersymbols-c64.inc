@@ -1,4 +1,4 @@
-; repository version 194, built on Fri, 25 Sep 2026 20:39:16 -0700 for project "loader" using
+; repository version 194, built on Sat, 26 Sep 2026 23:29:34 -0700 for project "loader" using
 ; make PLATFORM=c64 prg INSTALL=09c0 RESIDENT=0400 ZP=e0 PROJECT=
 
 ; configuration
@@ -14,7 +14,7 @@ config_LOAD_COMPD_API           = 0
 config_LOAD_RAW_API             = 1
 config_LOAD_TO_API              = 0
 config_LOAD_UNDER_D000_DFFF     = 0
-config_LOAD_VIA_KERNAL_FALLBACK = 1
+config_LOAD_VIA_KERNAL_FALLBACK = 0
 config_MEM_DECOMP_API           = 0
 config_MEM_DECOMP_TO_API        = 0
 config_NTSC_COMPATIBILITY       = 1
@@ -30,16 +30,16 @@ status_GENERIC_KERNAL_ERROR     = $fd
 status_DEVICE_NOT_PRESENT       = $fe
 status_FILE_NOT_FOUND           = $ff
 
-; zeropage $e0-$e8
+; zeropage $e0-$e7
 loader_zp_first                 = $e0
 loadaddrlo                      = $e0
 loadaddrhi                      = $e1
 endaddrlo                       = $e2
 endaddrhi                       = $e3
-loader_zp_last                  = $e7
+loader_zp_last                  = $e6
 
-; install $09c0-$1694
+; install $09c0-$1658
 install                         = $09c0
 
-; resident $0400-$062c
+; resident $0400-$04fb
 loadraw                         = $0400

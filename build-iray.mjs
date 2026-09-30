@@ -14,7 +14,7 @@
 // 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
 // code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
-import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { assemble } from './asm6502.mjs';
 
@@ -23,7 +23,7 @@ import { assemble } from './asm6502.mjs';
 // the tracked iray.asm alone.
 const DIAGEARLY = [];
 import { fitOrb, fitArt, fatBits } from './fit-orb.mjs';
-import { LOADER_RUN } from './loader-src.mjs';
+import { LOADER_RUN, KSTAGE, KRILL_RT_LEN, KRILL_RT_AT, KRILL_RESIDENT_AT } from './loader-src.mjs';
 const DIETEST = process.env.DIETEST === '1';
 if (DIETEST) {                       // defaults only: each is still overridable on its own
   process.env.PX ??= '0480';         // cell 4.5, 4.5 -- the middle of the room
@@ -35,7 +35,7 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // TESTLVL=1: a bare room for LOOKING at things -- not a level. 8x8, one column, one orb, one
 // socket, the exit hole in a corner, no angel. It sets everything else it needs, because the
 // combination is not obvious and getting any of it wrong fails in a different file:
-//   - sockets and the SECOND cut-scene picture both want SEATBASE, so a socket build ships one
+//   - sockets and the SECOND cut-scene picture both want PICBASE, so a socket build ships one
 //     picture (see the PICSEG check);
 //   - a socket is a hole-like entity, so the entity count stops matching level 1 and the two
 //     levels can no longer share one binary.
@@ -87,13 +87,54 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // contiguous bytes of image to go to, which today is most of the code headroom. Five resident
 // levels needs more than that again and wants the shadow to shrink or a second ILVL region.
 // CHAIN=<n> alone still playtests one level (CHAIN=4 -> the hub by itself).
-const CHAIN = (process.env.CHAIN ?? '1,2,3,4').split(',').map(Number);
+const CHAIN = (process.env.CHAIN ?? '1,2').split(',').map(Number);
+// D64=<name> writes somewhere other than latest.d64. A variant build -- a level-wiring test, a
+// profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
+// before every run, so a diagnostic run destroys the playable disk as a side effect.
+const D64OUT = process.env.D64 ?? 'latest.d64';
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-if (![1, 2, 3, 4, 5].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 5`);
+// ---- LATE: levels that are NOT resident at boot and arrive from disk while the game runs ----
+// The hub's three coloured exits name them. Until the loader that brings them in exists they are
+// exits with nowhere to go: lvlNxtT carries the level number, the runtime looks it up in lvlAtT,
+// finds it in no slot and does nothing -- which is the same "dead hole" a level out of the chain
+// has always been, and is the honest behaviour for a destination that has not arrived yet.
+// They are declared rather than inferred so the exit guard can tell "not built" from "typo".
+const LATE = (process.env.LATE ?? '').split(',').filter(v => v.trim() !== '')
+  .map(Number).filter(n => n > 0 && !CHAIN.includes(n));
+// EVERY level the image has to be able to RUN, resident or not. A level loaded from disk brings
+// its tables with it and nothing else: its code -- the seam outline, the idol, the pedestals --
+// has to be in the image already, because there is nowhere for code to arrive into. So every
+// per-feature flag keys off this list and not off CHAIN, and the cost of a late level's features
+// is paid at build time whether or not it is resident at boot.
+const ALLLVL = [...CHAIN, ...LATE];
+if (![1, 2, 3, 4, 5, 6, 7].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 7`);
 const SOCKROOM = LVL === 2;
-const IDOLROOM = LVL === 5;             // the level with an idol in it (was 4 until the hub took that number)
+// LEVEL 5 IS BACK (2026-09-28). It was retired to a 6x6 stub on 2026-09-27 while the carry
+// mechanic was built; its map and wall groups were kept here unreferenced so that bringing it
+// back would be deleting a comment rather than reading git, and that is exactly what it was.
+// It keeps the STUB's look -- red ground, dithered floor, black walls, light red seams -- and
+// gains the room: two orbs, two sockets, two removable walls, an angel, and the idol at the top
+// of the column the second socket opens. 6 and 7 stay stubs.
 const HUBROOM  = LVL === 4;             // THE HUB: four holes in the floor and three pedestals
 const CHAMBER = LVL === 3;              // the chamber level: corners like the old arenas, plus sockets
+// ---- 5, 6 and 7: the hub's three errands ----
+// One room, one idol, one hole, straight back to the hub. Deliberately the SAME map for all
+// three, because what distinguishes them is COLOUR: red, green and blue for the hub's three
+// coloured holes, and an idol whose body is the light version of the room it stands in. Three
+// rooms that differ only in colour are the cleanest possible test of the carry mechanic --
+// anything that behaves differently between them is a bug in per-level data, not in the level.
+// NO LEVEL IS A STUB ANY MORE (2026-09-28): 5, 6 and 7 all have their own design. Kept as a
+// constant rather than torn out because STUB_MAP and the empty placement branches are what a
+// FOURTH errand room would start from, and the throw below still catches a level with no branch.
+const ERRAND = false;
+const STUB_MAP = [
+  "######",
+  "#....#",                             // PP at (1,1)
+  "#....#",
+  "#..I.#",                             // ID at (3,3) -- the idol, see LEVEL_IDOL
+  "#...X#",                             // XX at (4,4)
+  "######",
+].map(r => r.replace(/[IX]/g, '.'));    // markers stand on open floor, like every other map
 const L1_MAP = [
   "#######################",
   "#..##..######.........#",
@@ -132,8 +173,16 @@ const LEVEL_WALLS = {
   4: { walls: [[[10, 3], [10, 4], [10, 5]]],
        sockWall: [0, 0, 0] },
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
-  5: { walls: [[[11, 2]],                                     // S1 (11,3): up to the exit
-              [[20, 9]]],                                     // S2 (19,9): into the idol's column
+  5: { walls: [[[11, 2]], [[20, 9]]],                // S1 up to the exit,
+       sockWall: [0, 1] },                           //   S2 into the idol's column
+  // (7,6) IS IN BOTH GROUPS on purpose: it opens on either socket. Each group is punched on its
+  // own to make its delta, so either one opens it, and within a level walls only ever open --
+  // wallsBack closes them all before a swap, so the two can never disagree about it.
+  6: { walls: [[[5, 5], [3, 7], [7, 6]],             // S1 frees the angel in col 3, and the orbs
+              [[3, 5], [5, 7], [7, 6]]],             // S2 frees the one in col 5, and the orbs
+       sockWall: [0, 1] },
+  7: { walls: [[[2, 10], [12, 10]],                  // S1: east to the second orb, and col 1's foot
+              [[13, 5]]],                            // S2: the only way up to the exit
        sockWall: [0, 1] },
   3: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
               [[11, 10], [12, 10], [10, 11], [10, 12]]],        // S2 (7,7): the exit's corner
@@ -141,11 +190,42 @@ const LEVEL_WALLS = {
 };
 // Any level's map by number, for the few places that need a level OTHER than the live one --
 // a wall's cell ids are in its own level's width, which need not be the live one's.
-const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : n === 4 ? L4_MAP : n === 5 ? L5_MAP : L1_MAP;
+const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : n === 4 ? L4_MAP
+                 : n === 5 ? L5_MAP : n === 6 ? L6_MAP : n === 7 ? L7_MAP : L1_MAP;
 // Which levels carry an IDOL, and where. Declared up here with the other level facts because
 // the sprite ladder is built long before ORBS exists, and a ladder nothing uses is 1K of bank 3
 // -- which bank 3 does not have. Levels 1-3 are unaffected by the idol existing at all.
-const LEVEL_IDOL = { 5: [21.5, 1.5] };
+// One per errand room. 6 and 7 are stubs and hold theirs at (3,3) -- see STUB_MAP. Level 5's
+// stands at the top of the column its SECOND socket opens, so reaching it is the room.
+const LEVEL_IDOL = { 5: [21.5, 1.5], 6: [12.5, 6.5], 7: [7.5, 8.5] };
+// ---- ...and an idol is a GAME object, not a level object ----
+// Which is the whole difference between it and an orb. An orb belongs to the room it is in and
+// objInit puts it back on every arrival; an idol has a PLACE in the game that outlives the room
+// and outlives dying -- "everything resets except the idols", so a delivered one stays on its
+// pedestal and stays gone from the room it came out of.
+// So each idol gets an ID, every level that can hold one declares a SLOT for it, and one byte
+// per idol says which level it is actually in. objInit still resets everything from the build
+// data; idolPlace then applies those three bytes over the top. That is much less invasive than
+// making arrival stop resetting -- and it is what makes death cheap, because the three bytes
+// are simply not among the things a restart touches.
+// 7 IS IDOL 1 AND 6 IS IDOL 2, deliberately out of level order: the idol INDEX has to match the
+// PEDESTAL index, because pedGate's rule is "idol n belongs on drum n" and the player reads the
+// rule off the COLOURS. Pedestals are red/green/blue (PED_COLS) and level 7 is the green room,
+// so 7's idol must be idol 1. Left in level order, the blue idol belonged on the green drum.
+const IDOL_HOME = { 5: 0, 7: 1, 6: 2 };           // level -> the idol that lives there
+// Its IDENTITY colour -- the light version of its home room, carried wherever it goes, which is
+// what says which pedestal it belongs on once it is out of that room. Distinct from idolCar,
+// the tint the room you are standing in puts on whatever is in your hands.
+// THE one source. It was duplicated in LEVEL_IDOL_SPR's `body` entries -- the same three
+// numbers written twice -- which is how a held idol came to take the room's value instead of
+// its own. IDOLB<home level> overrides one.
+const IDOL_BODY_OF = [0x02, 0x05, 0x06].map((c, i) => {   // red, green, blue -- PED_COLS' order
+  const home = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0);
+  return process.env[`IDOLB${home}`] === undefined ? c : +process.env[`IDOLB${home}`];
+});   // ...the PEDESTALS' own three, so a seated idol matches the drum it
+      // stands on, and a dark body reads as a midtone against the grey1/grey2 shared pair
+      // rather than as a second highlight competing with the grey3 cap.
+const IDOL_N = 3;
 // ---- a level's whole LOOK is three bytes ----
 // The three inks each own a register (00 = $d021 ceiling and floor, 01 = $d022 walls,
 // 10 = $d023 seams -- see the charset note), which is precisely so a level can be re-toned
@@ -156,8 +236,16 @@ const LEVEL_IDOL = { 5: [21.5, 1.5] };
 // edit -- CEIL4=2 SEAM4=7, say -- which also makes the raster split visible when it is loud.
 // LEVEL 5: ground and ceiling BLACK, so with $d022 black as well the seam is the only ink in
 // the room and the wall/ceiling outline (LEVEL_SEAM) is the whole image.
+// 6 and 7 are told apart by their CEILING, and by nothing else: they share one map, so the
+// colour is the whole signal that the green hole and the blue hole went to different places.
 const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env.SEAM4 ?? 0x0e) },
-                    5: { ceil: +(process.env.CEIL5 ?? 0x00), seam: +(process.env.SEAM5 ?? 0x0e) } };
+                    5: { ceil: +(process.env.CEIL5 ?? 0x02), seam: +(process.env.SEAM5 ?? 0x0a) },
+                    // 6 is BLUE and 7 is GREEN, because the hub's blue hole leads to 6 and its
+                    // green one to 7. They were the other way round, left over from the wiring
+                    // that had green->6: the destinations were fixed and these were not, so the
+                    // blue hole dropped you into a green room.
+                    6: { ceil: +(process.env.CEIL6 ?? 0x06), seam: +(process.env.SEAM6 ?? 0x0e) },
+                    7: { ceil: +(process.env.CEIL7 ?? 0x05), seam: +(process.env.SEAM7 ?? 0x0d) } };
 // PALTEST=<level>:<ceil colour> overrides one level's ground, for trying a colour or for making
 // a raster split visible by giving it something loud enough to read off a screenshot.
 if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Number);
@@ -170,7 +258,30 @@ if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Nu
 // reads colour RAM, which is $08 (black) everywhere; a seam is a solid cell with a full-height
 // pair-10 column that this symbol's columns would collide with.
 // A single dot, as [column, row] in the 4x8 cell -- or a .png read as fat bits.
-const LEVEL_SYM = { 4: [[1, 3]], 5: [[1, 3]] };
+const LEVEL_SYM = { 4: [[1, 3]] };   // 5 was marked while it was a real level; the stubs are plain
+// ---- FLOOR DITHER: the only way to get a darker ground on a coloured level ----
+// Floor and ceiling are the SAME register ($d021, bit pair 00) because the render is mirrored,
+// so a coloured room's floor is exactly as light as its sky and reads as fog rather than ground.
+// There is no darker shade to reach for -- one register, one colour. So the darkening comes
+// from DITHER: bit pair 01 is $d022, which is black on every one of these levels, checkered
+// over the ground's pair 00 at 50%.
+// Written into CHARSET B ONLY, and that is what makes it a floor treatment rather than a room
+// treatment: B is the half below the horizon, so the ceiling keeps the flat colour and only the
+// ground goes dark. BLANK (code 0) is the whole of it -- the solid-colour char the ceiling and
+// floor runs are painted with.
+// FLOORDKPAT=xx,xx,... overrides the eight rows; the default is the finest checker the cell
+// allows, one multicolor pixel on and one off, offset every row.
+// FLOORDK=n,n,... overrides the table outright, so a level can be tried dithered without an
+// edit -- and so a DROP can be photographed leaving a dithered level, which the shipped table
+// cannot do on its own: the hub is the only level you can fall out of and it is not in it.
+const LEVEL_FLOORDK = process.env.FLOORDK
+  ? Object.fromEntries(process.env.FLOORDK.split(',').map(n => [+n.trim(), 1]))
+  : { 5: 1, 6: 1, 7: 1 };
+const FLOORDK_PAT = (process.env.FLOORDKPAT ?? '44,11,44,11,44,11,44,11')
+  .split(',').map(v => parseInt(v.trim(), 16));
+if (FLOORDK_PAT.length !== 8 || FLOORDK_PAT.some(v => !(v >= 0 && v <= 255)))
+  throw new Error('FLOORDKPAT wants eight hex bytes, one per glyph row');
+const ANYFLOORDK = ALLLVL.some(n => LEVEL_FLOORDK[n]);
 // ---- per level: outline the wall where it meets the ceiling, in the SEAM ink ----
 // Any bit-pair-01 (wall) pixel orthogonally touching a bit-pair-00 (ground/ceiling) pixel
 // becomes bit pair 10 (seam). Done at RUNTIME over the ramp and step glyphs, codes 2..200.
@@ -191,8 +302,8 @@ const LEVEL_SYM = { 4: [[1, 3]], 5: [[1, 3]] };
 // room is the seam. The outline then IS the picture -- a wireframe of the geometry rather than
 // a decoration on it. The hub is deliberately left plain, which is the per-level switch doing
 // the job it was asked for.
-const LEVEL_SEAM = { 5: 1 };
-const ANYSEAM = CHAIN.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDGE === n : LEVEL_SEAM[n]));
+const LEVEL_SEAM = {};   // was { 5: 1 } -- the all-black wireframe, retired with level 5's design
+const ANYSEAM = ALLLVL.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDGE === n : LEVEL_SEAM[n]));
 // ---- per-level SPRITE inks, and the idol's own ----
 // A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
@@ -203,8 +314,12 @@ const ANYSEAM = CHAIN.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDGE ==
 // stood on. Colouring the bodies made that moot: black separates a coloured body from the
 // floor better than any grey, and it is what puts the dark red/green/blue ABOVE the shadow in
 // brightness instead of below it, which is the way round the modelling needs.
-const LEVEL_SPR = { 4: { under: +(process.env.SPRU4 ?? 0x00) },
-                    5: { under: +(process.env.SPRU5 ?? 0x00) } };
+// SPRU<n>/SPRH<n> override any level's, not just 4 and 5 -- the env hooks were written inline
+// here one level at a time, so a level with no literal in this table had no way to be tried
+// without an edit. Applied in sprOf, below, next to the idol scheme's identical hooks.
+const LEVEL_SPR = { 4: { under: 0x00, hi: 0x0c } };   // 5's black underside went with its black
+                                            //   room; the hub's highlight is grey2, not grey3
+const SPR_ENV = { under: 'SPRU', hi: 'SPRH' };
 // ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
 // The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
 // that rises with the room. The renderer only ever computes 13 cell rows and MIRRORS them, so
@@ -224,15 +339,101 @@ const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
 // tell that you are carrying something that belongs to another room.
 // It was brown/orange/yellow while the idol was a blinding light rather than a key. What it
 // says now is which PEDESTAL the thing in your hands belongs on.
-const IDOL_SPR = { under: +(process.env.IDOLU ?? 0x00), hi: +(process.env.IDOLH ?? 0x0f) };
-const IDOL_BODY = +(process.env.IDOLB ?? 0x02);
-const HAS_IDOL = CHAIN.some(n => LEVEL_IDOL[n]);
+// PER LEVEL, like every other level fact. The idol is LUGGAGE -- it is carried out of the room
+// it belongs to -- so the tint it puts on the cast is a property of the room you are IN, not of
+// the room the idol came from, and it has to be able to differ level by level. The scheme is
+// all three inks: the two shared ones (01 = $d025, 11 = $d026) and the idol's own body (10 =
+// $d027+n), which is per sprite and so is painted separately by dieChk.
+// IDOLU/IDOLH/IDOLB set the default for every level; IDOLU<n>/IDOLH<n>/IDOLB<n> override one,
+// the same shape as CEIL<n>/SEAM<n>/SPRU<n>. A level listed in LEVEL_IDOL_SPR overrides it in
+// the source. Nothing overrides anything yet, so this build is byte-identical to the one before
+// it -- the mechanism is what was missing, not the numbers.
+// grey1 / grey2 for the two SHARED inks on every level that has an idol. Keeping them out of
+// the per-level table is not tidiness, it is bytes: an ink only earns a row and a shadow byte
+// and six instructions in lvlLook if some level disagrees about it, so a scheme whose shared
+// half is constant costs one row instead of three.
+const IDOL_SPR_DEF = { under: +(process.env.IDOLU ?? 0x0b), hi: +(process.env.IDOLH ?? 0x0c) };
+// ...and the BODY is the light version of the room it stands in, which is the whole signal:
+// three rooms identical but for colour, and an idol that tells you which one you took it from
+// after you have carried it somewhere else. red -> lt red, green -> lt green, blue -> lt blue.
+// Per-level overrides of the two SHARED inks. No `body` here: the body is per SPRITE, so it
+// travels in orbColT2 and is set where the idol is placed.
+// THE HUB: black / colour / grey3, which is what the PEDESTALS already are (lvlSprunderT[4] is
+// black and ORBHILITE is grey3). So a seated idol is the same material as the drum it stands
+// on -- and, because sprPal overrides $d025/$d026 whenever an idol is on screen, writing back
+// exactly what was already there means nothing else in the room re-tones when you pick one up.
+// THE ERRAND ROOMS: brown / orange / yellow, the old scheme -- gold in the room it belongs to,
+// stone once it is seated. The change happens as you drop through the hole, which is what
+// lvlLook establishing the inks on arrival is for.
+const LEVEL_IDOL_SPR = { 4: 'room',                        // ...the room's own: see idolSprOf
+                         5: { under: 0x09, hi: 0x07 },     // brown ... yellow
+                         6: { under: 0x09, hi: 0x07 },
+                         7: { under: 0x09, hi: 0x07 } };
+// The body an idol takes in the room it is GATHERED from: orange, the midtone of that ramp.
+// In the hub it takes its identity colour instead (IDOL_BODY_OF), because there the colour has
+// a job -- saying which pedestal it belongs on.
+const IDOL_ROOM_BODY = +(process.env.IDOLROOMB ?? 0x08);
+const IDOL_ENV = { under: 'IDOLU', hi: 'IDOLH' };
+const idolSprOf = n => {
+  // 'room' means THE LEVEL'S OWN SHARED INKS, derived rather than repeated. sprPal overrides
+  // $d025/$d026 whenever an idol is on screen, so a level that wants nothing to re-tone when you
+  // pick one up needs the idol's scheme to equal the room's EXACTLY -- and the hub is that level,
+  // because a seated idol there is meant to be the same material as the drum it stands on.
+  // It used to be written out as literal black/grey3 with a comment saying it matched. Changing
+  // the hub's highlight to grey2 then changed one of the two, and the whole cast jumped back to
+  // grey3 the moment you carried an idol home: the tint was no longer a no-op. One source now.
+  const base = LEVEL_IDOL_SPR[n] === 'room' ? sprOf(n) : { ...IDOL_SPR_DEF, ...(LEVEL_IDOL_SPR[n] ?? {}) };
+  const v = { ...base };
+  for (const [k, nm] of Object.entries(IDOL_ENV))
+    if (process.env[nm + n] !== undefined) v[k] = +process.env[nm + n];
+  return v;
+};
+// Does the scheme differ anywhere? Same "a table when it varies, an immediate when it does not"
+// rule the palette and the shared sprite inks already use -- so a build where every level agrees
+// pays nothing at all, and the IRQ keeps its immediates.
+const IDOLVARY = k => ALLLVL.some(n => idolSprOf(n)[k] !== idolSprOf(ALLLVL[0])[k]);
+const HAS_IDOL = ALLLVL.some(n => LEVEL_IDOL[n]);
 // Which levels stand pedestals, and where. Keyed by level like LEVEL_WALLS rather than derived
 // from HUBROOM, because HAS_PED has to be true for the whole CHAIN -- the ladder is emitted once
 // and every resident level's pedestals draw from it, so asking only about the live level would
 // leave a shadow level's pedestals pointing at bitmaps that were never built.
 const LEVEL_PEDESTALS = { 4: '9,3;9,4;9,5' };
-const HAS_PED = CHAIN.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
+const HAS_PED = ALLLVL.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
+const PED_LVL = +(Object.keys(LEVEL_PEDESTALS)[0] ?? 0);   // only one level has them
+// IDOLHUB=1: every idol already in the pedestal room, for testing the wall without three
+// errands first. Shorthand for IDOLLOC=<that level> repeated, because that is the only thing
+// anyone ever wants out of IDOLLOC and spelling it out is three numbers to get wrong.
+if (process.env.IDOLHUB === '1') process.env.IDOLLOC ??= Array(IDOL_N).fill(PED_LVL).join(',');
+// IDOLSEAT=1: ...and already standing ON the drums, which is the state AFTER the puzzle. The
+// wall is still shut (wallStT is runtime state and pedGate only fires on a put-down), so pair
+// it with WALLOFF=1 to get the solved room: idols seated, wall gone, east half open. That is
+// the build that proves a seated idol does not block the corridor it just unlocked.
+// IDOLSEAT=1 seats every idol on ITS OWN drum. IDOLSEAT=2,1,3 (1-based pedestal numbers) seats
+// them swapped, which is the only way to test that a wrong arrangement does NOT open the wall --
+// the whole point of the rule, and not otherwise reachable without playing it by hand.
+const IDOLSEAT = (process.env.IDOLSEAT ?? '') !== '';
+const IDOLSEAT_ON = i => {
+  const v = (process.env.IDOLSEAT ?? '').split(',');
+  return v.length > 1 ? +v[i] - 1 : i;          // which pedestal idol i starts on, 0-based
+};
+if (IDOLSEAT) process.env.IDOLLOC ??= Array(IDOL_N).fill(PED_LVL).join(',');
+// Where each idol STARTS -- its home room's cell, unless IDOLLOC has put it somewhere else,
+// in which case it starts BESIDE the pedestal it would have been delivered to: one cell west,
+// on the floor, where you can pick it up and set it down again.
+// NOT on the pedestal, which is where this used to put it. That state is unreachable in play
+// and incoherent as a test: the wall opens on the PUT-DOWN (see pedGate), so three idols that
+// begin on their drums leave the wall shut with nothing left to do about it. Beside them, the
+// whole mechanism is three steps away.
+// The offset is west because column 9 is pedestal/wall/pedestal/wall/pedestal and column 8 is
+// the open aisle in front of it -- the only side you can stand on to reach them anyway.
+const IDOL_XY = [...Array(IDOL_N)].map((_, i) => {
+  const home = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0);
+  const at = +((process.env.IDOLLOC ?? '').split(',')[i] ?? home);
+  if (at === home) return (LEVEL_IDOL[home] ?? [3.5, 3.5]).map(Math.floor);
+  const peds = (LEVEL_PEDESTALS[at] ?? '').split(';').filter(Boolean).map(p => p.split(',').map(Number));
+  if (!peds[i]) return (LEVEL_IDOL[home] ?? [3.5, 3.5]).map(Math.floor);
+  return IDOLSEAT ? (peds[IDOLSEAT_ON(i)] ?? peds[i]) : [peds[i][0] - 1, peds[i][1]];
+});
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
 const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
@@ -303,6 +504,55 @@ const L5_MAP = [
 // with it left as floor the wall delta diffed two identical maps and removed nothing. Every
 // other marker (orb, idol, exit, socket, player, angel) stands on open floor.
 ].map(r => r.replace(/\|/g, '#').replace(/[OXISPA]/g, '.'));
+// ---- LEVEL 6, the user's 16x14 (2026-09-28): four corridors and a room ----
+// Cols 1, 3, 5 and 7 are parallel north-south corridors. Row 1 runs the full width and is the
+// ONLY way between them and the east room; row 11 joins the corridors to each other but stops at
+// col 8. The east room holds the idol.
+// Each of cols 3 and 5 has an ANGEL sealed in a one-cell pocket at row 6,
+// walled above and below -- and those walls are the removable ones, so feeding a socket lets an
+// angel out. Col 7 holds the two orbs, split by a wall of its own.
+// |1 is (5,5) and (3,7); |2 is (3,5) and (5,7); |# is (7,6) and is in BOTH groups -- the first
+// wall in this game to be, which is how "opens on EITHER socket" is expressed. One variant per
+// GROUP, each a rebuild with that group alone punched, so either delta opens the shared cell.
+const L6_MAP = [
+  "################",
+  "#..............#",
+  "#.#.#.#.#......#",
+  "#.#.#.#.#......#",
+  "#.#.#.#.#..##..#",
+  "#.#|#|#O#..#...#",
+  "#X#A#A#|####I..#",
+  "#P#|#|#O#..#...#",
+  "#.#S#S#.#..##..#",
+  "#.#.#.#.#......#",
+  "#.#.#.#.#......#",
+  "#.......#......#",
+  "################",
+// '|' is a removable wall and must be SOLID in the base map -- see L5_MAP for what happens when
+// it is not. X exit, P player, A angel, O orb, S socket, I idol: markers for the reader only.
+].map(r => r.replace(/\|/g, '#').replace(/[XAOPSI]/g, '.'));
+// ---- LEVEL 7, the user's 16x12 (2026-09-28): the EXIT is what is locked ----
+// The idol at (7,8) sits two cells north of the start, in a pocket open only to the south, and is
+// free for the taking. The way OUT is the puzzle. From the start you can reach the idol, and --
+// round by the top left -- col 1 with the first orb and S1. Feeding S1 opens |1, both halves of
+// it: (12,10) is the only way east to the second orb, the second angel and S2, and (2,10) opens
+// col 1's foot behind you. Feeding S2 opens |2 at (13,5), which is the only route up the east
+// side to the exit at (5,1). So: idol free, exit earned, and an angel let out at each step.
+// Note (5,1) is an EXIT, which is a one-way trap -- it is what keeps row 1's two halves apart.
+const L7_MAP = [
+  "################",
+  "#...#X......#..#",
+  "#.#..#...#..#..#",
+  "#.##..#..#.....#",
+  "#.###..#######.#",
+  "#.OA#..#...S.|.#",
+  "#.###..#...#####",
+  "#.#...####.....#",
+  "#.#...#I#AO....#",
+  "#.#.##...####..#",
+  "#S|....P....|..#",
+  "################",
+].map(r => r.replace(/\|/g, '#').replace(/[XAOPSI]/g, '.'));
 const SOCK_MAP = (() => {
   const rows = [
     "################",
@@ -327,9 +577,10 @@ const SOCK_MAP = (() => {
 if (SOCKROOM && process.env.TWOLEV === '0') {   // built ALONE, for looking at things: one
   process.env.NPIC ??= '1';                       //   picture. Defaults, each still overridable.
 }
-// NOSOCK=1 drops the socket AND seated-orb bitmaps. They are emitted even in levels with no
+// NOSOCK=1 drops the socket bitmaps (the seated-orb ones went in 2026-09-26; see PICBASE).
+// They are emitted even in levels with no
 // sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
-// Hoisted here because SEATBASE's fit check and the bank-3 overlap guard both consult it.
+// Hoisted here because PICBASE's fit check and the bank-3 overlap guard both consult it.
 const NOSOCK = process.env.NOSOCK === '1';
 // RECORD=1: log the player's input so a real play-through becomes a repeatable benchmark.
 // 64 runs of 4 bytes. Recording stops when it fills rather than wrapping, so a truncated tour
@@ -463,9 +714,16 @@ const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 
 
 // The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
 // grid; the old 16 x 16 literals and the ring's are gone.
-const M = (SOCKROOM ? SOCK_MAP : CHAMBER ? punchWalls(L3_MAP, LEVEL_WALLS[3].walls)
-         : LVL === 5 ? punchWalls(L5_MAP, LEVEL_WALLS[5].walls)
-         : LVL === 4 ? punchWalls(L4_MAP, LEVEL_WALLS[4].walls) : L1_MAP).map(r => r.split('').map(c => c === '#' ? 1 : 0));
+// THROUGH MAP_OF, so there is exactly ONE place that answers "which map is level n?". There
+// were two -- this chain and MAP_OF -- and when 6 and 7 were added only MAP_OF learned about
+// them, so the live map for both fell through the chain's final `: L1_MAP` and they were built
+// as level 1 with a hole punched in it. A second selector that agrees with the first today is
+// a bug waiting for the next level.
+// punchWalls is a no-op unless WALLOFF=k is set (it is how a wall's delta gets built), so it is
+// safe on a level with no removable walls; SOCK_MAP punches its own group and the second pass
+// sets the same cells to '.' again, which changes nothing.
+const M = punchWalls(MAP_OF(LVL), LEVEL_WALLS[LVL]?.walls ?? [])
+  .map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
 // free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
@@ -514,10 +772,76 @@ const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) ma
 // Sized to the live level alone they are wrong for the other one: level 1 has 25 wall runs (4
 // mask bytes an orb) and level 2 has 11 (2), so after a swap orb 0's four-byte clear ran over
 // orb 1's two-byte mask. One orb occluded correctly and the other was visible through walls.
-const TWOLEV = !process.env.LVLDUMP && process.env.TWOLEV !== '0';
+// ---- SOLO=1: AN IMAGE WITH NO LEVEL IN IT ----
+// The first real step of the engine/level split. Every per-level table stops being emitted and
+// becomes an EQUATE at its offset inside a page-aligned SLOT; the bytes ship as their own disk
+// file and land there. Nothing about the engine's code changes -- all ~146 absolute references
+// still name the same labels, which now resolve into the slot.
+//
+// This is NOT what BOOTSLOT=1 did. That swapped a disk-loaded blob with a level the image still
+// carried, so two levels were resident and dropping out of one landed in the other. Here the
+// image has no level to fall back to, which is the whole point of the exercise.
+// ---- THE DEFAULT IS NOW THE SEPARATED ARCHITECTURE ----
+// The image is engine only; every per-level table is an equate into a region in bank 3 that
+// arrives as its own disk file. SOLO=0 builds the old world, where the live level is baked into
+// the image and only the shadows come off disk -- kept for A/B, not for shipping.
+// CHAIN defaults to 1,2 because four levels' blobs (4 x 893) no longer fit bank 3 alongside the
+// graphics; more than two waits on the arena, which compact.mjs has measured but not yet built.
+const SOLO = process.env.SOLO !== '0';
+// ---- ...AND THE COMPACTED LAYOUT IS THE DEFAULT TOO ----
+// engine code up from $0801, the level arena, then the data tables down from $c000. COMPACT=0
+// builds the old scattered layout, which is the only way to A/B a suspected layout regression.
+// It costs an extra assembly pass: the relayout needs the buffer sizes the RAM-overlap guard
+// publishes, and that guard only runs after assembly. The inner pass sets COMPACT=0 to stop it
+// recursing.
+// OPT-IN AGAIN, not the default: making the relayout PRIMARY (measuring in a stripped layout so
+// the hand-placed one need not assemble) is half done and does not run. It gets the layout right
+// -- every aligned table lands on a page and the arena measures 3,510 -- but the machine jams,
+// and the cause is run boundaries that do not correspond to anything safe to cut. See
+// [[iray-compaction]]. COMPACT=1 still builds the older post-pass relayout, which does run.
+const COMPACT = process.env.COMPACT !== '0';
+// Where the slot lives. Bank 3, above ARC_MAP's end ($f430) and below the arc's charset window
+// at $f800 -- the window is a d018 base the VIC reads during a fall, and although only the rim
+// glyphs are ever written into it, a level's tables have no business inside a charset.
+// Page-aligned because mapT sits at offset 0 and is the one table that must be (alignment audit,
+// 2026-09-29: every other per-level table is small and unaligned already).
+const SLOT_AT = +(process.env.SLOT_AT ?? 0xf500);
+const SLOT_PAGES = +(process.env.SLOT_PAGES ?? 3);      // 768 bytes; level 2's blob is 705
+// WHICH level file the boot stub names. Every level in CHAIN ships as its own file at the same
+// address; this picks the one the loader asks for. It is the ONLY thing that differs between a
+// disk that starts in level 1 and one that starts in level 2 -- the name string in the boot PRG.
+// The game image is not rebuilt and does not change.
+const BOOTLVL = +(process.env.BOOTLVL ?? CHAIN[0]);
+if (SOLO && !CHAIN.includes(BOOTLVL)) throw new Error(
+  `BOOTLVL=${BOOTLVL} is not in CHAIN=${CHAIN.join(',')}, so no file for it is built`);
+// MULTI vs TWOLEV. These used to be one flag and they are two different facts:
+//   MULTI  -- this build KNOWS several levels. It has their tables, so every shared table is
+//             sized to the largest and the per-level palette rows get emitted. Without it the
+//             image is sized and inked for ONE level, and a different level loaded into it
+//             renders in the wrong colours with tables too small for its contents.
+//   TWOLEV -- a level sits in a SHADOW in bank 3 and lvlSwap exchanges it with the live one.
+// SOLO wants the first and not the second: every level is its own disk file, so the image must
+// be sized for all of them and privileged toward none, but there is no shadow and nothing swaps.
+const MULTI = !process.env.LVLDUMP && process.env.TWOLEV !== '0';
+// SOLO no longer turns the shadow off. The point was never to lose the other levels -- it was to
+// get the LIVE level's bytes out of the image, and the way to do that while keeping falls is to
+// make the live level slot 0 of the same region the shadows already live in. lvlSwap exchanges
+// live tables with a shadow blob and does not care where the live tables are, so it needs no
+// change at all: the equates simply name bank 3 instead of the image.
+// ---- LVLLOAD: the destination level is READ OFF THE DISK on every fall ----
+// This is what makes the level count unbounded. With it there is no shadow and nothing to swap:
+// one live slot, and the arriving level is loaded over the departing one during the drop. A level
+// is ~705 bytes, about 0.15s at Krill's ~4.9 KB/s, inside a 0.53s fall -- and the same machinery
+// LATE already uses, which is why LATE and this are mutually exclusive rather than layered.
+const LVLLOAD = SOLO && MULTI && !LATE.length && process.env.NOLOAD !== '1';
+// TWOLEV is the SHADOW: a second level parked in RAM, exchanged by lvlSwap. Loading replaces it.
+const TWOLEV = MULTI && !LVLLOAD;
+// BOOTSLOT=1: install slot 0 before the first frame, so play begins in the level that came off
+// the disk rather than the one baked into the image. Needs a slot to exist and a level in it.
+const BOOTSLOT = process.env.BOOTSLOT === '1';
 // Which levels ride along, in ascending order. That order IS the slot order.
-const OTHERS = !TWOLEV ? [] : CHAIN.length === 1 ? [LVL] : CHAIN.filter(n => n !== LVL);
-const LVLALL = TWOLEV ? (() => {
+const OTHERS = !MULTI ? [] : CHAIN.length === 1 ? [LVL] : CHAIN.filter(n => n !== LVL);
+const LVLALL = MULTI ? (() => {
   // The other level is built with the SOCKETS environment left alone, so it declares whatever
   // its own map declares. It used to be forced empty on both sides, because the entity counts
   // were immediates and the two levels had to agree; they are swapped bytes now (nOrbT/nHoleT/
@@ -535,6 +859,34 @@ const LVLALL = TWOLEV ? (() => {
     return JSON.parse(readFileSync(tmp, 'utf8'));
   });
 })() : null;
+// ---- ...and the LATE levels, built the same way but not resident ----
+// They arrive from disk at the hub, over the slots levels 1-3 vacate, so their tables have to be
+// laid out to the SAME shape as a shadow's -- same table list, same padding, same 882 bytes --
+// or the swap would exchange the wrong bytes. Building them here is what guarantees that: they
+// go through the identical dump, and every shared maximum below (NRUN, NHOLE, OCCBYTES, the
+// entity counts) is taken across residents AND late levels together. Size a table to the
+// residents alone and the level that arrives at the hub overruns it.
+// Not in an LVLDUMP subprocess, which is the dump of ONE level and has no chain of its own.
+const LATEALL = (TWOLEV && LATE.length) ? (() => {
+  const { SOCKETS, ...envNoSock } = process.env;
+  return LATE.map(n => {
+    const tmp = `./.lvl${n}-tables.json`;
+    // CHAIN=n, not the inherited chain: a late level is not IN the chain, so inheriting it
+    // leaves the level resident in no chain at all -- WALL_LVLS comes out empty, WALL_BASE has
+    // no entry for it, and its sockets name wall NaN. Its own chain of one is what a dump is
+    // anyway (TWOLEV is off under LVLDUMP), and the global wall ids are patched in by
+    // CHAIN_GLOBAL here, exactly as they are for a shadow's dump.
+    // LATE='' so the child cannot try to build late levels of its own.
+    execFileSync(process.execPath, [process.argv[1]],
+      { env: { ...envNoSock, CHAIN: String(n), LATE: '', LVL: String(n), LVLDUMP: tmp },
+        stdio: ['ignore', 'ignore', 'ignore'] });
+    return JSON.parse(readFileSync(tmp, 'utf8'));
+  });
+})() : null;
+// Every level whose tables this build has to accommodate, resident or arriving. The distinction
+// that matters for SIZING is not which slot a level is in -- it is whether its bytes ever land
+// in these tables at all, and a late level's do.
+const LVLSIZED = [...(LVLALL ?? []), ...(LATEALL ?? [])];
 
 // ---- ANGEL PATHING: a breadth-first distance map, filled a few cells per frame ----
 // The greedy chase this replaces tried three steps, all straight at the player, and stopped when
@@ -962,7 +1314,14 @@ const HAZ_TOP = 0xa900;                               // RELOC + $2300, rayOffQS
 // are mutually exclusive at this layout. The price is 11 sprite slots, which nothing was using.
 // Deliberately NOT config-dependent: one address for every build is worth more than the slots,
 // because a layout that moves with the flags is a layout nobody can reason about from the report.
-const LVLSHADOW = +(process.env.LVLSHADOW ?? 0xf500);   // above IPIC ($f100 + 1000 = $f4e8), page-rounded
+// $f450, NOT the old $f500: a four-level chain's third slot ran to $fee9 and ARC_GLY starts at
+// $fe40, so the arc's glyph dictionary was stamped over the parked level's tables -- see the
+// bank-3 overlap guard, which exists because of this. Moving the shadow DOWN is what there is
+// room for: ARC_GLY cannot move without moving the arc's codes, and everything above it is the
+// top of the bank. $f450 is the lowest that clears ARC_MAP ($f380 + CELLCODES, ending $f448).
+// Bank 3 is now full around the shadow -- 8 bytes below it and a handful above -- so the next
+// thing that grows here fails the build rather than corrupting a level. That is the point.
+const LVLSHADOW = +(process.env.LVLSHADOW ?? 0xf431);   // hard against ARC_MAP's end, below ARC_GLY
 const LVLSHAD_BYTES = [];
 const HAZFACE = { W: 0, E: 1, N: 2, S: 3 };
 const hazRunT = { W: runW, E: runE, N: runN, S: runS };
@@ -2261,10 +2620,62 @@ const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // RAM, which is $08 = black everywhere: the same black, a char symPut never touches. Its
 // foreground priority is moot here because the fall clears every sprite on the frame it starts
 // (they belong to the level being left). So a plain black char cost no new code at all.
-const VOIDCH = OCC_FULL;
 // The synthesis scratch codes are the LAST OCCSYN_N of the charset. They must be free: the plan
 // was refit at KCELL=201 to free six (3.416 -> 3.438 wrong px/frame on the 2M scan, crossfit).
 const SYN0 = 256 - OCCSYN_N;
+// ---- and what happens when those run out, which on the hub is FIFTEEN CELLS A FRAME ----
+// Measured at the user's viewpoint (level 4, PX=06b5 PY=037d PA=eb PAF=80): oSFbN = 15. Three
+// pedestals are the hub's only stamping entities and their spans cross far more wall-base cells
+// than there are scratch codes, so the budget is gone almost immediately and the rest take the
+// fallback -- which stamps OCC_FULL, a whole black cell, over a cell that is mostly floor. That
+// is the pre-OCCSYN overhang bug, and it is what the user saw: a ramp at the wall's base
+// replaced by a block, in the mirrored half only, coming and going as the spans move.
+// Raising OCCSYN_N cannot fix it -- fifteen is far beyond anything the charset can spare.
+// So the fallback SKIPS the cell instead. oSCells' own comment already argues this is the right
+// trade: not stamping "leaves up to 8px of orb showing over the wall's bottom edge instead,
+// which is the smaller error and the one that reads as a soft edge rather than a stray block."
+// That was written about deliberately-skipped cells; the exhaustion path was never revisited
+// when OCCSYN made the block the worse of the two. OCCFB=block restores the old behaviour.
+const OCCFB = process.env.OCCFB ?? 'skip';
+if (!['skip', 'block'].includes(OCCFB)) throw new Error(`OCCFB must be skip or block, not ${OCCFB}`);
+// ---- ...and the fall's black BORROWS ONE OF THEM, rather than sharing OCC_FULL ----
+// It was OCC_FULL, and that is wrong on a level with LEVEL_SYM: symPut deliberately marks
+// OCC_FULL, because it is the wall-base overhang's stamp and a stamped cell with no dot reads as
+// a blank black block in an otherwise dotted wall. The fall shared the glyph, so the level's wall
+// speckle rained down the inside of a shaft that is meant to be nothing at all.
+// The charset is exactly full -- 250 codes plus these six -- so there is no code to add. But a
+// SCRATCH code is the one thing that needs no code of its own: oSPut writes a scratch glyph
+// immediately before every use of it, so whatever the fall leaves there cannot outlive the fall.
+// And a fall clears every sprite on the frame it starts, so nothing synthesises while one runs.
+// fallDraw writes the eight $ff bytes itself, every frame: stateless, ~130 cycles on a frame
+// that is not frame-rate bound, and nothing to restore afterwards. (If a held object ever
+// survives a fall, this is the line that has to be revisited -- it would put oSPut and the fall
+// in the same frame for the first time.)
+const VOIDCH = SYN0;
+// ---- ...and a SECOND borrowed scratch code, for the fall's GROUND ----
+// The drop fills above the rim, and the landing below it, with the floor -- and that was BLANK,
+// which is the same code the CEILING's sky is painted with. So it cannot carry the floor
+// checker: dithering BLANK's glyph in charset A would dither the sky with it, and region 3 of
+// the raster IRQ renders the rim and everything under it from A (the rim's polarity is
+// floor-above/hole-below, the only one the ramp dictionary holds). The result was a bright flat
+// ring around the hole on every drop out of a dithered level, against the checkered floor above.
+// A code of its own fixes it, and the fall can borrow one for the same reason VOIDCH can: the
+// fall replaces the whole renderer, so nothing stamps an occluder while it runs.
+// Its glyph is COPIED FROM BLANK's every fall frame rather than built from the level's pattern,
+// which is what makes it right in both directions for free: floorDk writes BLANK on ARRIVAL, so
+// during a drop it still holds the level being LEFT, and by the landing lvlLook has run and it
+// holds the one arrived at. Exactly what each phase is showing.
+// How many glyphs fdGlTk converts per landing frame. 13 x 16 frames covers the 199, with the
+// flush at fstEnd as the backstop. Raising it shortens the sweep and costs more per frame; the
+// fall runs at 60fps and has about 17,000 cycles to play with.
+const FDGL_N = +(process.env.FDGLN ?? 13);
+const FDGND = ANYFLOORDK ? SYN0 + 1 : BLANK;   // no dithered level: nothing to carry, stay BLANK
+// ...and a THIRD, for the ground ABOVE the drop's rim, which is the level being LEFT.
+// FDGND follows BLANK every fall frame, which is right for the landing and wrong for the drop:
+// lvlLook rewrites BLANK at the handover, four frames before the drop has finished drawing, and
+// the departing floor promptly inherited the arriving level's checker. This one is stamped once
+// as the fall begins and never touched again, so it cannot follow anything anywhere.
+const FDOUT = ANYFLOORDK ? SYN0 + 2 : BLANK;
 
 // ---- and the same splits backed by WHITE ----
 // A cell straddling a wall's VERTICAL silhouette has floor or ceiling beyond the edge, not more
@@ -3006,10 +3417,31 @@ const LEVEL_START = {
   2: [0x046e, 0x07dc, 0xdb, 0x00],   // the user's spot, 2026-09-22
   3: [0x0180, 0x0180, 0x20, 0x00],
   4: [0x0380, 0x0480, 0x00, 0x00],   // the hub: the player's cell (3,4), facing the three holes
-  5: [0x0180, 0x0880, 0x00, 0x00],
+  5: [0x0180, 0x0880, 0x00, 0x00],   // (1.5, 8.5), the west end of the hall, facing east
+  6: [0x0180, 0x0780, 0xc0, 0x00],   // (1.5, 7.5) facing NORTH, straight at the exit one cell away
+  7: [0x0780, 0x0a80, 0xc0, 0x00],   // (7.5, 10.5) facing NORTH, the idol two cells ahead
 };
 const ST0 = LEVEL_START[LVL] ?? LEVEL_START[1];
 const startOf = n => n === LVL ? [PX, PY, PA, PAF] : (LEVEL_START[n] ?? LEVEL_START[1]);
+// ---- every declared cell must be an OPEN cell of its OWN level's map ----
+// Level 5 was redesigned from 14x14 to 6x6 and this table still said (1.5, 8.5): the player
+// spawned off the edge of the map, in a room that rendered as two flat colours. The same shape
+// of mistake put the player inside a wall when 6 and 7 were built as level 1 by mistake. Both
+// are one comparison to catch, and neither is visible in a build log.
+// LEVEL_START, not the PX/PY overrides: a diagnostic pose is free to be anywhere, but the pose
+// a level SHIPS with is data, and data gets checked.
+for (const n of ALLLVL) {
+  const m = MAP_OF(n);
+  for (const [what, xy] of [['start', LEVEL_START[n] && [LEVEL_START[n][0] / 256, LEVEL_START[n][1] / 256]],
+                            ['idol', LEVEL_IDOL[n]]]) {
+    if (!xy) continue;
+    const cx = Math.floor(xy[0]), cy = Math.floor(xy[1]);
+    const ok = cy >= 0 && cy < m.length && cx >= 0 && cx < m[cy].length && m[cy][cx] !== '#';
+    if (!ok) throw new Error(`level ${n}'s ${what} is at cell (${cx},${cy}), which is ` +
+      (cy >= m.length || cx >= (m[0]?.length ?? 0) ? `outside its ${m[0]?.length}x${m.length} map`
+                                                   : 'a solid wall'));
+  }
+}
 const PA = hexArg('PA', ST0[2], 0xff);   // L3: the diagonal, at the orb   // L1: $19c0 with PAF, the user's choice after playing --
                                                                     // COMBO2: $19c0 with PAF, the user's choice after playing -- from (2,2) toward the
                                                                     //   room's far wall and the corridor mouth
@@ -3232,8 +3664,43 @@ const LOWBOOT = 0x0200, LOWSAFE = 0x033c, LOWEND = 0x03fc;
 // the last KERNAL LOAD -- and even a KERNAL-fallback load during play only clobbers bytes that
 // ftCap rewrites from scratch on the next drop.
 const PVBASE = LOWSAFE;
-const RUNTIME_BUFS = { fallSnapD: 1000, fallSnapS: 1000, fallTailB: FTROWS * 40 || 1,
+// The fall's snapshots are HALF HEIGHT: renderSym writes the identical byte to both halves of the
+// screen, so a frame is its own vertical mirror about row 12 and only rows 0-12 are stored.
+// Declared here because RUNTIME_BUFS is built long before the tables that use it.
+const SNAP_ROWS = 13;
+// (historical) fallSnapS used to be 1024, NOT 1000. A screen is 1000 bytes, but `fallSnap` copies it with
+// `ldx #$04` and a 256-byte inner loop -- FOUR WHOLE PAGES -- so it writes 24 bytes past the
+// screen it grabbed. Declared as 1000, those 24 bytes were reported as free space and the packer
+// was entitled to put a table in them, to be wiped on the first fall. Same shape as the MAPN
+// tails: the declared length described the DATA, not the domain the writer actually reaches.
+// (fallSnapD really is 1000 -- bgCopy fills it row by row, 25 rows of 40.)
+const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
+// ---- what a RAM equate actually reserves ----
+// PAGE-ROUNDING IS THE SAFE DEFAULT and stays the default: an equate with no declared length
+// could be a 256-byte table as easily as a byte, and under-reserving one is how a level shadow
+// once grew over doomT. It is also why a whole page vanishes from "free" because one scalar sits
+// in it -- about 1.7K of this build was unspendable for that reason and no other.
+// So the rule is per PAGE, and it pays for knowledge: a page whose every equate has a declared
+// length is reserved EXACTLY, and whatever is left of it is reported as the free space it is. A
+// page with even one undeclared equate keeps the old rounding, so the conservative case is the
+// one you get by doing nothing.
+const reserveOf = eqs => {
+  const byPage = new Map();
+  for (const [n, a] of eqs) {
+    const p = a & ~255;
+    if (!byPage.has(p)) byPage.set(p, []);
+    byPage.get(p).push([n, a]);
+  }
+  const out = [];
+  for (const [p, list] of byPage) {
+    if (list.every(([n]) => RUNTIME_BUFS[n] !== undefined))
+      for (const [n, a] of list) out.push([a, a + RUNTIME_BUFS[n]]);
+    else
+      out.push([p, (Math.max(...list.map(([n, a]) => a + (RUNTIME_BUFS[n] ?? 1) - 1)) | 255) + 1]);
+  }
+  return out;
+};
 const RELOC = +(process.env.RELOC ?? 0x8600);
 // HAZ_BASE/HAZ_TOP are declared as literals above, before RELOC exists, but they NAME table
 // origins: the vacated ddy pages and rayOffQS. Tie them together here so moving RELOC fails the
@@ -3281,7 +3748,15 @@ const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1
 // white ground, black walls, SEAMCOL seams -- what every level had before LEVEL_PAL existed.
 const PAL_DEF = { ceil: 0x01, wall: 0x00, seam: SEAMCOL };
 const palOf = n => ({ ...PAL_DEF, ...(LEVEL_PAL[n] ?? {}) });
-const PAL_N = Math.max(...CHAIN);              // indexed by level id - 1, so it must reach the highest
+// ALLLVL, not CHAIN. These tables are indexed by LEVEL ID - 1 and there is one row per table,
+// so the count has to reach the highest level the build can ever be IN -- and a late level is
+// one of those. Sized off CHAIN, a LATE=5,6,7 build stopped at 4, and levels 5, 6 and 7 read
+// index 4, 5 and 6: past the end of every one of them, into the next table along. The whole
+// of the user's report fell out of this one expression -- dropped into an unrecognisable room
+// (start pose from lvlStXLoT+4), trapped in a wall (an X,Y that is not a floor cell), no seams
+// (lvlSeamT past its end), "grey1 and black" (lvlPalceilT+4 IS lvlPalseamT+0, which is SEAMCOL,
+// which is grey 1). Nothing was wrong with the levels or with the load.
+const PAL_N = Math.max(...ALLLVL);             // indexed by level id - 1, so it must reach the highest
 // SOLID is every-column-pair-01 in all eight rows ($55), so a pair-00 mark is just those bit
 // pairs CLEARED -- no pristine copy to keep, and "plain" is eight $55s.
 // The same mark again, for a cell that is all bit pair 11 rather than all 01. OCC_FULL is the
@@ -3304,11 +3779,14 @@ const symRowsInk = (art, field, ink) => {
 };
 // Which levels paint that mark in the SEAM ink rather than in the ground's. A level whose
 // ground and walls are the same colour has no ground to show through -- see symRowsInk.
-const LEVEL_SYMSEAM = { 5: 1 };
-const ANYSYM = CHAIN.some(n => LEVEL_SYM[n]);
+// Was { 5: 1 }, for level 5's all-black design: ground and walls the same colour, so the mark
+// had no ground to show through. Level 5 is red on black now and does, so nothing wants this --
+// kept as a mechanism for whichever level next paints itself one colour.
+const LEVEL_SYMSEAM = {};
+const ANYSYM = ALLLVL.some(n => LEVEL_SYM[n]);   // ALLLVL, not CHAIN: see it there
 // Does any level's GROUND colour differ from the first's? If not there is nothing for a split to
 // show, and none of the two-tone machinery below is emitted.
-const CEILVARY = CHAIN.some(n => palOf(n).ceil !== palOf(CHAIN[0]).ceil);
+const CEILVARY = ALLLVL.some(n => palOf(n).ceil !== palOf(ALLLVL[0]).ceil);
 // How far BELOW the arc's split the ground colour changes, in raster lines. The charset split
 // has to sit at the arc's TOP -- that is where the rim glyph needs charset A -- but the arc's
 // top rows still draw the upper level's floor around the curve, so swapping colour there tints
@@ -3721,9 +4199,26 @@ function orbScale(w, h) {
 // that resolution -- the orb shrinks vertically for one rung before its width catches up, about
 // +-5% of aspect wobble. That is the trade: a small squash instead of a large jump.
 const orbW = h => Math.max(1, Math.round(SW * h / SH));
+// ---- the rung heights, STATED (2026-09-27, chosen off the animated ladders) ----
+// Was: every height 21..11 magnified, then 21,19,...,1 plain -- 22 rungs from 16 bitmaps.
+// That is linear in HEIGHT, and linear in height is not even in APPEARANCE: what the eye reads
+// is the RATIO between one rung and the next, and a fixed -2 runs 21/19 = 1.11 at the near end
+// to 3/1 = 3.00 at the far one. The last rung was a third the size of its neighbour.
+// These ten are h = 4 + 17*f^0.9, f running 1 -> 0: linear-ish, biased slightly toward the
+// large end where the player actually stands, and floored at 4 because a one- or two-pixel
+// rung is a dot rather than a ball and costs 64 bytes of bank 3 to say nothing.
+// Chosen by playing the ladders back as 8fps animations rather than by comparing neighbours in
+// a strip -- every adjacent pair looks fine in a strip, which is exactly the trap.
+//   apparent  42 38 36 32 28 24 | 21 19 18 16 14 12 10 8 6 4
+//   ratios    1.11 1.06 1.13 1.14 1.17 | 1.14 | 1.11 1.06 1.13 1.14 1.17 1.20 1.25 1.33 1.50
+// 16 rungs from 10 bitmaps, against 22 from 16. The far end CLAMPS: orbVarT picks the nearest
+// rung by apparent height, so anything smaller than the last one simply holds there.
+const ORB_H = [21, 19, 18, 16, 14, 12, 10, 8, 6, 4];
 const LADDER = [];
-for (let h = SH; 2 * h >= SH; h--) LADDER.push({ h, exp: 1 });
-for (let h = SH; h >= 1; h -= 2)   LADDER.push({ h, exp: 0 });
+// Magnified only while it beats the largest plain rung -- below that the plain ladder already
+// covers the size and the rung would be a duplicate. That boundary is h > SH/2.
+for (const h of ORB_H) if (2 * h > SH) LADDER.push({ h, exp: 1 });
+for (const h of ORB_H) LADDER.push({ h, exp: 0 });
 const ORBBMH = [...new Set(LADDER.map(r => r.h))].sort((a, b) => b - a);   // distinct bitmaps
 const ORBBM = ORBBMH.map(h => {
   const g = orbScale(orbW(h), h), bytes = [];
@@ -3768,6 +4263,19 @@ if (process.env.ORBSHEET === '1') {
   console.error(`${nm}: ${ORBBM.length} bitmaps, heights ${ORBBMH.join(',')}`);
 }
 const ORBSRC = LADDER.map(r => ORBBMH.indexOf(r.h));
+// ORBDBG: rungs are not bitmaps. A rung is a bitmap PLUS a magnification, so the same picture
+// serves two rungs -- once at x2 for the near band, once plain for the band twice as far away.
+// This prints what is actually distinct, which is what a bitmap costs 64 bytes of bank 3 for.
+if (process.env.ORBDBG) {
+  const seen = new Map();
+  LADDER.forEach((r, v) => { const k = ORBSRC[v];
+    (seen.get(k) ?? seen.set(k, []).get(k)).push(`${v}${r.exp ? 'x2' : ''}`); });
+  for (const [bm, vs] of [...seen].sort((a, b) => a[0] - b[0]))
+    console.error(`    orb bm${String(bm).padStart(2)}  ${ORBBMH[bm]}h  used by rung${
+      vs.length > 1 ? 's' : ' '} ${vs.join(', ')}`);
+  console.error(`  orb ladder: ${LADDER.length} rungs from ${ORBBMH.length} distinct bitmaps ` +
+    `(${LADDER.length - ORBBMH.length} are a bitmap reused at another magnification)`);
+}
 const ORBEXP = LADDER.map(r => r.exp);
 const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent width, screen px
 const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent height, screen px
@@ -3811,7 +4319,7 @@ if (PICS.chars.length !== 2048) throw new Error(`death-pics.json charset is ${PI
 if (!PICS.maps.length) throw new Error('death-pics.json carries no pictures');
 for (const m of PICS.maps) if (m.map.length !== 1000)
   throw new Error(`death-pics.json ${m.name} is ${m.map.length} cells, not 1000`);
-// NPIC caps how many of death-pics.json's pictures ship. Capping to 1 frees SEATBASE, which is
+// NPIC caps how many of death-pics.json's pictures ship. Capping to 1 frees PICBASE, which is
 // the socket ladder's home -- the two cannot both have it.
 // A fourth resident level and a second cut-scene picture are mutually exclusive: three shadows
 // leave IPIC no room below them. The chain wins, so a four-level build defaults to one picture.
@@ -3821,7 +4329,11 @@ for (const m of PICS.maps) if (m.map.length !== 1000)
 // included (the fit check reads LVLSHADOW, not the level count). The old rule keyed off
 // "4 or more levels" and so demanded two pictures for every shorter chain, which is why
 // CHAIN=4 on its own has always had to be told NPIC=1 by hand. Two pictures need TWOLEV=0.
-const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? (TWOLEV ? 1 : 99)));
+// MULTI, not TWOLEV: the reason a chain build gets one picture is that several levels' tables
+// leave less room, and that is just as true when the levels are disk files as when one is a
+// shadow. Keyed on TWOLEV, the first SOLO chain build asked for two pictures and died in the
+// cut-scene charset fit check -- a failure with no visible connection to levels at all.
+const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? (MULTI ? 1 : 99)));
 const FACEART = { colram: PICS.colram & 7 };
 // ---- REPACK THE CUT-SCENE CHARSET TO THE GLYPHS THE SHIPPED PICTURES ACTUALLY REACH ----
 // death-pics.json carries a full 256-glyph charset, but one picture only uses 196 of them. The
@@ -4171,9 +4683,34 @@ const _gc = [...Array(12).keys()].filter(x => GOAT.some(r => r[x]));
 const _gr = [...Array(21).keys()].filter(y => GOAT[y].some(v => v));
 const GX0 = Math.min(..._gc), GY0 = Math.min(..._gr);
 const GW = Math.max(..._gc) - GX0 + 1, GH = Math.max(..._gr) - GY0 + 1;
+// ---- the idol is FITTED FROM SOURCE ART now, rung by rung, exactly as the orb is ----
+// It used to box-filter GOAT, the hand-tuned 21x12 in goat-art.json -- a resample of something
+// already crushed to sprite resolution and four colours. That is why its small rungs collapsed
+// into a cross and a dash while the orb's stayed round: the orb re-resolves from 1254x1254 at
+// every rung and keeps its grain, the idol was averaging an average. ORBRUNG=0 shows the orb
+// done the old way and it has the same blotchy failure.
+// goat6.png is the render with the silhouette painted back over it by hand -- bold strokes for
+// the horns and ring, stippling across the face -- because a plain render cannot survive twelve
+// columns: at h=12 one sprite pixel covers 143x96 source pixels, so any mark thinner than that
+// averages away. Chosen over five earlier passes and over a blend with the hand-tuned master,
+// on 8fps animations rather than strips: NOT dithered, because the dither pattern re-resolves
+// at every rung and shimmers between frames, and it only differs at the two largest rungs
+// anyway (66 of 1107 pixels, 37 of them at h=21 and h=19).
+// IDOLART=hand restores the old box-filter of goat-art.json.
+const IDOLART = process.env.IDOLART ?? 'goat6.png';
+const IDOLCON = +(process.env.IDOLCON ?? 1.6);
+const IDOLDITH = process.env.IDOLDITH === '1';
 function idolScale(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, standing on the floor
+  if (IDOLART !== 'hand') {
+    // dark: the art is lit-on-black, so the background flood fill looks for DARK from the
+    // border. Without it every pixel reads as ink and the fit is a filled rectangle.
+    const px = fitArt(IDOLART, w, h, { dither: IDOLDITH, contrast: IDOLCON, dark: true }).px;
+    for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
+      out[oy + dy][ox + dx] = px[dy * w + dx];
+    return out;
+  }
   for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
     const t = [0, 0, 0, 0];
     for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
@@ -4187,7 +4724,10 @@ function idolScale(w, h) {
   }
   return out;
 }
-const idolW = h => Math.max(1, Math.round(GW * h / GH));
+// THE ORB'S OWN WIDTH RULE. It used to come from goat-art.json's content box, which happened
+// to agree; fitting from other art it need not, and the guard below turns a disagreement into a
+// build error rather than a wrong pointer. Same ladder, same widths, by construction now.
+const idolW = h => orbW(h);
 // The idol's bitmaps sit in ORBBM in the SAME ORDER as the orb's, so one constant added to an
 // orb pointer lands on the matching idol bitmap. That constant is IDOLBM0.
 const IDOLBM0 = ORBBM.length;
@@ -4202,8 +4742,44 @@ if (HAS_IDOL) {
     bytes.push(0);
     ORBBM.push(bytes);
   }
+  // ---- IDOLDROP: rungs whose picture is a NEIGHBOUR's, or nothing at all ----
+  // The idol has no ladder of its own -- its bitmap is orbPtrT[variant] plus one constant, so
+  // picture k is bolted to orb rung k and the bands are the ORB's. A picture therefore cannot
+  // be removed, only REPLACED: `k>j` copies j's art into k, and `k-` blanks it.
+  // Which matters because pictures are shared between columns: the unmagnified half of the
+  // sheet reuses bm0,2,4,6,8,10, so those six each serve TWO columns and the odd ones serve
+  // one. The odd ones are the cheap cut -- collapsing them steps the wide end half as often
+  // and touches nothing else.
+  // Nothing comes back from bank 3 this way: the slot still exists, it just holds a copy. That
+  // is deliberate for now -- see the note by IDOLBM0 about giving the idol its own rungs.
+  // Nothing dropped by default any more: the orb ladder is ten rungs now and the idol has
+  // one picture per orb picture, so the two are already in step. IDOLDROP stays for tuning.
+  const IDOLDROP = process.env.IDOLDROP ?? '';
+  const src = new Map();
+  for (const spec of IDOLDROP.split(',').filter(t => t.trim() !== '')) {
+    const m = /^(\d+)(?:>(\d+)|-)$/.exec(spec.trim());
+    if (!m) throw new Error(`IDOLDROP: "${spec}" is not k>j (copy j into k) or k- (blank k)`);
+    const k = +m[1], j = m[2] === undefined ? -1 : +m[2];
+    if (k >= ORBBMH.length || j >= ORBBMH.length) throw new Error(
+      `IDOLDROP: "${spec}" names a bitmap past the idol's ${ORBBMH.length}`);
+    if (src.has(k)) throw new Error(`IDOLDROP: bitmap ${k} is given a source twice`);
+    src.set(k, j);
+  }
+  // RESOLVE THE CHAINS before copying anything. "7>6" beside "6>4" means 7 wants what 6 ends up
+  // holding, not what 6 held first -- and which of those you get would otherwise depend on the
+  // order they were typed in. Follow each target to a survivor (or to a blank), with a length
+  // guard so a cycle is a build error rather than a hang.
+  const resolve = k => { const seen = new Set(); let v = k;
+    while (src.has(v)) { if (seen.has(v)) throw new Error(`IDOLDROP: ${k} chases a cycle`);
+      seen.add(v); v = src.get(v); if (v < 0) return -1; }
+    return v; };
+  const blank = new Array(64).fill(0);
+  const from = [...src.keys()].map(k => [k, resolve(k)]);
+  const was = ORBBM.slice(IDOLBM0, IDOLBM0 + ORBBMH.length);
+  for (const [k, j] of from) ORBBM[IDOLBM0 + k] = j < 0 ? [...blank] : [...was[j]];
   console.error(`  idol ladder: ${ORBBMH.length} bitmaps at ${IDOLBM0}, sharing the orb's ` +
-                `${ANG_V0} rungs (+${ORBBMH.length * 64} bytes of sprite, 0 of image)`);
+                `${ANG_V0} rungs (+${ORBBMH.length * 64} bytes of sprite, 0 of image)` +
+                `; IDOLDROP ${IDOLDROP}`);
 }
 
 // ---- the idol ships UNDER THE I/O HOLE, behind the exit ladder ----
@@ -4226,6 +4802,49 @@ const IDOLBM = HAS_IDOL ? ORBBM.slice(IDOLBM0) : [];
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
 NORBBM = IDOLBM0;               // what still ships AT SPRBASE; the idol is counted separately
+// ---- THE TAIL OF THE ORB LADDER MOVES UNDER THE I/O HOLE, to buy back low RAM ----
+// Krill's resident has to live at $0400-$062c (it refuses to assemble above $d000), and that is
+// exactly where stackLT/stackRT/sideT/idT sit. Something has to give, and a sprite bitmap is the
+// right thing to move: it is data only the VIC reads, so it is the one kind of thing that does
+// not care about being under the hole, where the CPU cannot reach it. The renderer's scratch
+// then takes the CPU-addressable slots it vacates. Nothing gets slower -- see the scratch
+// equates for why those tables never wanted zero page in the first place.
+// The ladder does NOT have to be contiguous: orbPtrT is a per-bitmap table of sprite pointers,
+// so a split costs one branch at build time and nothing at all at run time.
+// ORBHI_N=0 puts everything back where it was: the whole ladder at SPRBASE and the scratch in
+// low RAM, which is the layout to fall back to if the loader ends up not needing $0400 -- and
+// the only way to build a chain with BOTH the hub's pedestals and the idol until bank 3 has
+// twelve slots to spare again.
+// DEFAULT 0 AGAIN (2026-09-26). The move existed to free $0400-$062c for Krill's resident,
+// and it no longer has to: packing runFaceT in behind runPlaneT opened $6d82-$6eff, 382
+// contiguous bytes below $d000, and a load-raw-only resident is 251. So the scratch stays in
+// low RAM, the orb ladder keeps its tail, and the twelve sprite slots the move cost come
+// back -- which is what makes a chain with both the hub's pedestals and the idol fit at all.
+// ORBHI_N=12 still builds, and is the fallback if the runtime resident ever outgrows $6e00.
+const ORBHI_N = +(process.env.ORBHI_N ?? 0);   // 768 bytes = stackLT + stackRT + sideT + idT
+if (ORBHI_N !== 0 && ORBHI_N !== 12) throw new Error(
+  `ORBHI_N=${ORBHI_N}: it is 12 (the scratch moves to bank 3) or 0 (it stays in low RAM). ` +
+  `Anything between would leave part of $0400-$062c under Krill's resident.`);
+// Where the four moved tables live. Page-aligned either way, and in the same relative layout --
+// including stackRT's half-page offset -- so nothing about the addressing changes with them.
+const SCRATCH_AT = ORBHI_N
+  ? { sideT: 0xee00, idT: 0xef00, stackLT: 0xf000, stackRT: 0xf080 }
+  : { sideT: 0x0500, idT: 0x0600, stackLT: 0x0400, stackRT: 0x0480 };
+const ORBLO_N = NORBBM - ORBHI_N;               // what is left at SPRBASE
+// ORBHI -- where the tail actually lands -- is down beside IDOLBASE, which it follows and which
+// is not known until the hole ladder has been built. So is orbPtrT, which needs it.
+// The idol's art is found by ADDING a constant to the orb's pointer (orbArtT), which is only a
+// constant while every rung shares one base. It does today because the idol has no bitmaps of
+// its own -- it rides the orb's ladder. If it ever gets its own, the two cannot be split.
+// It stays constant as long as every bitmap the idol can reach is still at SPRBASE: the idol has
+// one bitmap per orb bitmap, from index 0 up, so what it can reach is exactly the first
+// IDOLBM.length of them. The split takes bitmaps off the END, so the two only collide when the
+// idol's run is longer than what is left behind.
+if (IDOLBM.length > ORBLO_N) throw new Error(
+  `the idol has ${IDOLBM.length} bitmaps and only ${ORBLO_N} orb bitmaps are left at SPRBASE, so ` +
+  `orbArtT's pointer DELTA would span two bases. Move fewer (ORBHI_N=${ORBHI_N}), or give the ` +
+  `idol its own pointer table.`);
+if (ORBLO_N < 1) throw new Error(`ORBHI_N=${ORBHI_N} moves the whole orb ladder (${NORBBM})`);
 // ---- SPRBOX=1: outline EVERY entity sprite, so the hardware grid is visible on screen ----
 // Where each sprite begins and ends, whether the angel's two halves abut or overlap, and how
 // much of a sprite is empty headroom. Applied to the finished bitmaps rather than inside each
@@ -4277,8 +4896,13 @@ const ORBANCH = ORBEXP.map(e => e ? 42 : 21);   // row pitch: one sprite height
 const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
 const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
 const SPR_DEF = { under: ORBUNDER, hi: ORBHILITE };
-const sprOf = n => ({ ...SPR_DEF, ...(LEVEL_SPR[n] ?? {}) });
-const SPRVARY = CHAIN.some(n => ['under', 'hi'].some(k => sprOf(n)[k] !== sprOf(CHAIN[0])[k]));
+const sprOf = n => {
+  const v = { ...SPR_DEF, ...(LEVEL_SPR[n] ?? {}) };
+  for (const [k, nm] of Object.entries(SPR_ENV))
+    if (process.env[nm + n] !== undefined) v[k] = +process.env[nm + n];
+  return v;
+};
+const SPRVARY = ALLLVL.some(n => ['under', 'hi'].some(k => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]));
 
 // Placement. Greedy over the open cells with a minimum spacing, which spreads them through
 // every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
@@ -4329,18 +4953,58 @@ if (process.env.ORBSCATTER) {
   }                                            // THE HUB IS EMPTY. No orbs, no angel: it is the
                                                //   room you come back to, and the only things in
                                                //   it are the three pedestals and four holes.
-  else if (IDOLROOM) {                         // level 5: two orbs for two sockets, and the idol
-    ORBS.push({ x: 9.5, y: 1.5, c: 0 });       //   in the hall's north wall
-    ORBS.push({ x: 16.5, y: 7.5, c: 0 });      //   in the comb
-    // The IDOL is luggage like an orb -- carried, dropped, and a real obstacle where it stands.
-    // What it is NOT is a key: hlAt still finds the socket under it and okPlain still puts it
-    // down, but nothing seats. Everything else it does, it does because it is an orb.
-    ORBS.push({ x: LEVEL_IDOL[5][0], y: LEVEL_IDOL[5][1], c: 0, idol: true });
+  // The errand rooms hold no ORBS. The idol they do hold is pushed below, from LEVEL_IDOL,
+  // because "which levels have an idol and where" is already written down there and a second
+  // list that has to agree with it is the bug this file keeps re-learning.
+  // Spelled out rather than left to fall through: the branch below is level 1's, and its orbs
+  // stand at (6,5) and (20,5), which are outside a 6x6 map entirely.
+  else if (ERRAND) { }
+  else if (LVL === 5) {                          // the O markers in L5_MAP: one in the north
+    ORBS.push({ x: 9.5, y: 1.5, c: 0 });         //   gallery, one in the east hall
+    ORBS.push({ x: 16.5, y: 7.5, c: 0 });
   }
-  else {                                         // the user's markers: OO at (6,5), 00 at (20,5)
+  else if (LVL === 6) {                          // col 7, one either side of the wall that
+    ORBS.push({ x: 7.5, y: 5.5, c: 0 });         //   splits it
+    ORBS.push({ x: 7.5, y: 7.5, c: 0 });
+  }
+  else if (LVL === 7) {                          // one beside each angel: west behind col 1,
+    ORBS.push({ x: 2.5, y: 5.5, c: 0 });         //   east behind |1
+    ORBS.push({ x: 10.5, y: 8.5, c: 0 });
+  }
+  else if (LVL === 1) {                          // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
   }
+  // Loudly, not by inheriting level 1. A new level that nobody remembered to give a branch to
+  // used to be built with level 1's entities standing at level 1's coordinates -- which is how
+  // 6 and 7 came to have two orbs and two angels each, off the edge of a 6x6 room.
+  else throw new Error(`no orb placement for level ${LVL} -- add a branch (an empty one is fine)`);
+  // ---- the IDOL, from LEVEL_IDOL, for whichever level is being built ----
+  // Driven by the declaration rather than by a branch of its own, so a level gets an idol by
+  // being listed there and by nothing else. It used to be pushed inside level 5's branch with
+  // LEVEL_IDOL[5] hardcoded, which meant the table said where the idol was and the placement
+  // said which level had one, and only one of them was true for levels 6 and 7.
+  // Pushed AFTER the orbs and BEFORE the angels, which is the order level 5 had.
+  // The IDOL is luggage like an orb -- carried, dropped, and a real obstacle where it stands.
+  // What it is NOT is a key: hlAt still finds the socket under it and okPlain still puts it
+  // down, but nothing seats. Everything else it does, it does because it is an orb.
+  if (LEVEL_IDOL[LVL])
+    ORBS.push({ x: LEVEL_IDOL[LVL][0], y: LEVEL_IDOL[LVL][1], c: 0, idol: true,
+                idolId: IDOL_HOME[LVL], body: IDOL_ROOM_BODY });
+  // ---- the hub declares a SLOT for every idol, standing on its pedestal, HIDDEN ----
+  // A delivered idol has to exist as an entity in the hub, and an entity's art, colour and
+  // cell are build-time per-level data -- there is no way to conjure one at runtime. So the
+  // hub carries all three from the start with orbHid0T set, and delivering one is un-hiding
+  // the slot that was always there. Costs three entity slots in the hub's tables, which NORB
+  // already had spare because the hub has no orbs of its own.
+  // They stand ON the pedestals, in pedestal order, so idol i belongs to pedestal i.
+  // LEVEL_PEDESTALS, not PEDESTALS_AT: that is declared further down, and entity placement
+  // runs before it. Same string, parsed here.
+  if (HUBROOM) (LEVEL_PEDESTALS[LVL] ?? '').split(';').filter(Boolean)
+      .map(p => p.split(',').map(Number)).forEach(([px_, py_], i) => {
+    if (i < IDOL_N) ORBS.push({ x: px_ + 0.5, y: py_ + 0.5, c: 0, idol: true,
+                                idolId: i, body: IDOL_BODY_OF[i], hidden: true });
+  });
   // The angel starts IMMEDIATELY BEHIND the orb. Walking up to the orb -- the one thing a new
   // player is drawn to -- then puts them at nearly the closest range, so they get the heartbeat
   // end of the detune straight away instead of the far-off flange. It also stops the encounter
@@ -4359,16 +5023,27 @@ if (process.env.ORBSCATTER) {
   if (process.env.ANGEL !== '0') {
     if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
     else if (HUBROOM) { }                      // no angel in the hub either
-    else if (IDOLROOM) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // level 5: in the hall
+    // (retired with level 5's design: an angel at 6.5,8.5 in the hall)
     else if (CHAMBER) {                           // level 3: one in each far corner, and one
       ORBS.push({ x: 12.5, y: 1.5, c: 0, tall: true });   //   caged in the chamber
       ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
       ORBS.push({ x: 6.5, y: 6.5, c: 0, tall: true });
     }
-    else {                                        // AA at (7,5) and (19,5): one behind each orb
+    else if (ERRAND) { }                          // 6 and 7: no angel, same as no orb
+    else if (LVL === 5) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // the A in the hall
+    else if (LVL === 6) {                         // one sealed in each pocket, until a socket
+      ORBS.push({ x: 3.5, y: 6.5, c: 0, tall: true });   //   is fed and the walls come out
+      ORBS.push({ x: 5.5, y: 6.5, c: 0, tall: true });
+    }
+    else if (LVL === 7) {                         // each standing next to an orb
+      ORBS.push({ x: 3.5, y: 5.5, c: 0, tall: true });
+      ORBS.push({ x: 9.5, y: 8.5, c: 0, tall: true });
+    }
+    else if (LVL === 1) {                         // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
     }
+    else throw new Error(`no angel placement for level ${LVL} -- add a branch (an empty one is fine)`);
   }
 }
 // ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
@@ -4428,22 +5103,152 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // only if that level is live or riding along as a shadow. Under TWOLEV=0 the base silently fell
 // back to the live level's tables, so a build of level 1 alone tried to diff level 2's opened
 // wall against level 1's room and reported 113 changed cells instead of 1.
-const RESIDENT = new Set([LVL, ...OTHERS]);
-const WALL_LVLS = CHAIN.filter(n => LEVEL_WALLS[n] && RESIDENT.has(n));
+// LATE included: a wall's delta is a diff against its own level's tables, and those exist for a
+// late level too -- LATEALL builds them. It is not about which slot a level occupies at boot but
+// whether this build has its tables at all, and the wall ids are global to the whole chain a
+// level can ever join, not to the four that happen to be resident.
+const RESIDENT = new Set([LVL, ...OTHERS, ...LATE]);
+const WALL_LVLS = ALLLVL.filter(n => LEVEL_WALLS[n] && RESIDENT.has(n));
 const WALLS_ALL = WALL_LVLS.flatMap(lv => LEVEL_WALLS[lv].walls.map((cells, k) => ({ lvl: lv, k, cells })));
-const WALL_BASE = Object.fromEntries(WALL_LVLS.map(lv =>
-  [lv, WALLS_ALL.findIndex(w => w.lvl === lv)]));   // level -> its first global wall id
+// ---- WALL IDS ARE LEVEL-LOCAL (2026-09-30) ----
+// A wall's id is its index within ITS OWN level (the `k` above), never its position in the
+// chain. WALLS_ALL survives as a build-time enumeration -- one variant subprocess per wall --
+// but nothing at runtime indexes by it any more.
+//
+// It used to be global: sockWallT held WALL_BASE[lvl]+k, wallStT was one byte per wall in the
+// chain, and the four pointer tables were sized to the chain. That works only because every
+// wall in the chain is addressable at once, which is the assumption a loadable-level engine
+// exists to break -- and it made a level's meaning depend on which levels it shipped beside.
+// Worse, it put EVERY level's wall deltas in EVERY level file (see the ILVn builder): 547
+// bytes of other rooms' patch lists in each of seven files.
+//
+// NWALL is a DECLARED BUDGET, not a measurement over the known levels. That is the whole point:
+// the engine's wall tables must not change size when a level is added, so this is a promise the
+// engine makes and levels are checked against, rather than a number derived from them.
+const NWALL = +(process.env.NWALL ?? 4);
+for (const lv of Object.keys(LEVEL_WALLS))
+  if (LEVEL_WALLS[lv].walls.length > NWALL) throw new Error(
+    `level ${lv} has ${LEVEL_WALLS[lv].walls.length} removable walls and the engine's budget is ` +
+    `NWALL=${NWALL}. Raise NWALL (costs ${4} bytes per level in the blob per wall, and ` +
+    `${1} byte of engine state) or give the level fewer wall groups.`);
+// Local id -> the WALLS_ALL index, which is what WALL_DELTAS and the *_AT maps are keyed by.
+// Build-time only: nothing at runtime can compute this, which is the point.
+const wallGid = (lv, k) => WALLS_ALL.findIndex(w => w.lvl === lv && w.k === k);
+// Per-level values for the four wall pointer tables, level -> NWALL bytes. Declared here and
+// filled by wallPtrs() once the slot layout is known; LVL_TABLES names these Maps as its
+// per-level override, the same hook the hazard lists use, so the live level and every shadow
+// get their own addresses out of one manifest entry.
+const WALL_PTR = { wallDLoT: new Map(), wallDHiT: new Map(),
+                   wallCLoT: new Map(), wallCHiT: new Map() };
+// ---- PACK: cold, pointer-addressed data into the image's SCRAPS ----
+// The image is ~1.5K free in ~47 fragments, none of them big enough to be worth a hand-written
+// origin, so every overflow used to be an afternoon of hunting. This places such tables
+// automatically and turns "I need 63 bytes" into a build error naming the item and the biggest
+// hole left.
+//
+// WHAT MAY BE PACKED. All four have to hold, and wall deltas are the first thing that qualifies:
+//   1. addressed through a POINTER table, never a literal -- wallDLoT/wallDHiT hold <wallDTk and
+//      >wallDTk, so the assembler resolves wherever it lands;
+//   2. no page-alignment requirement (the `aligned` check above covers the tables that do);
+//   3. no sibling arithmetic -- each is its own $ff-terminated list, nobody walks from one to
+//      the next;
+//   4. COLD, so a page-crossing read costs nothing that matters. A wall delta is read once,
+//      when that wall opens.
+//
+// WHAT MAY BE A HOLE, and this is the dangerous half: a gap has to be free in EVERY chain and
+// flag combination, not just the one it was measured in. The 112-byte gaps in the $8a00-$8d00
+// pages are the trap -- they are runWT/NT/ET/ST's tails, they shrink as MAPN grows, and they
+// collapse to three bytes on a chain whose live level has 253 cells. The same mistake with
+// ARC_GLY and the level shadow cost a day (see the bank-3 overlap guard). So every entry below
+// says WHY it is stable, and a wrong one fails the build ("origin moves backward") rather than
+// corrupting a level quietly.
+//
+// No markers any more: packAll() emits the lot at the end of the source, because the assembler
+// is address-indexed and an origin may move backward into unwritten space.
+// ---- TWO PASSES: the holes are MEASURED, not written down ----
+// Pass 1 (PACKPROBE) builds with the packable items emitted as `name = $ffff` equates -- the
+// symbols resolve, no bytes are written, so the block they came out of fits and the assembler
+// reports the image's real hole map. Pass 2 packs into that map. Because every packed item
+// declares its own origin and the assembler is address-indexed, filling a hole moves nothing
+// else: the map measured in pass 1 is still true in pass 2.
+//
+// This replaces a hand-curated list, which was wrong three times in one session -- a hole that
+// existed in every resident chain and not in a LATE one, a hole 5 bytes smaller than recorded
+// after a map changed, and the $8a00-$8d00 gaps that look like the biggest in the image and are
+// MAPN tails the program overwrites. A measured map cannot be stale by construction.
+const PACK_PROBE = process.env.PACKPROBE ?? '';
+// Which items the probe leaves out. The FIRST probe omits everything, which over-reports: the
+// block the items came from shrinks and its tail becomes a hole that pass 2 then fills again
+// with whatever could not be placed. So the probe is run to a FIXPOINT -- omit the set that was
+// actually packed, measure again, re-assign -- and only a map measured with the true remainder
+// inline describes the layout that ships.
+const PACK_OMIT = new Set((process.env.PACKOMIT ?? '').split(',').filter(Boolean));
+const PACK_HOLES = [];
+
+// NOPACK=1: skip the probe and pack nothing, for comparing against an unpacked layout.
+const PACK_AT = new Map();
+const PACKED = new Map();            // item name -> the hole it went in
+// First fit, largest item first. Fragmentation, not the total, is what limits this: a 97-byte
+// item cannot use three 30-byte holes, and on the LATE build 47 bytes of hole sat unused for
+// exactly that reason. So the big items have to choose first.
+const packInto = items => {
+  PACK_AT.clear(); PACKED.clear();          // re-run once per fixpoint iteration
+  for (const h of PACK_HOLES) PACK_AT.set(h.at, []);
+  const left = new Map(PACK_HOLES.map(h => [h.at, h.len]));
+  for (const it of [...items].sort((x, y) => y.size - x.size)) {
+    const h = PACK_HOLES.find(h => left.get(h.at) >= it.size);
+    if (!h) continue;                // stays where it was; the block has to hold it
+    left.set(h.at, left.get(h.at) - it.size);
+    PACK_AT.get(h.at).push(it);
+    PACKED.set(it.name, h.at);
+  }
+};
+// Emitted at the marker: an origin, then whatever landed in that hole.
+// EVERYTHING, at the end of the source. The assembler is address-indexed now (see asm6502),
+// so an origin may go backward into unwritten space -- which means a relocated table can simply
+// declare where it lives instead of being emitted at a hand-found point in the stream where the
+// output pointer happened to be below it. That constraint is what the ${packAt(...)} markers
+// existed to satisfy, and every packer bug so far came from getting one wrong: a marker inside
+// a branch this build did not take, a marker naming a hole that had been renamed, a marker
+// above the line where the assignment was computed.
+const packAll = () => [...PACK_AT].filter(([, got]) => got.length)
+  .sort((x, y) => x[0] - y[0])
+  .map(([at, got]) => `        * = ${hx16(at)}                 ; PACKED: `
+    + `${(PACK_HOLES.find(h => h.at === at) ?? {}).why ?? ''}\n`
+    + got.map(it => `${it.name}: !byte ${it.text}`).join('\n')).join('\n') + '\n';
+// The wall the PEDESTALS open, which pedGate needs as an immediate. See PED_LVL: only one level
+// has pedestals, so this cannot vary while the code that reads it can run. $ff when the pedestal
+// level has no sockets at all.
+// A LOCAL id now, so it no longer depends on the chain: it used to be WALL_BASE[PED_LVL] + the
+// socket's wall, which meant adding a level ahead of the hub silently renumbered the wall
+// pedGate opens. It is also no longer gated on the hub being RESIDENT -- a local id is just
+// "the hub's wall 0" and means that whether or not the hub is in this build.
+const PED_WALL = (LEVEL_WALLS[PED_LVL]?.sockWall ?? []).length
+  ? LEVEL_WALLS[PED_LVL].sockWall[0] : 0xff;
 // ONE VARIANT PER REMOVABLE WALL: each is that wall's OWN level rebuilt with that wall alone
 // taken out, and each yields its own delta. WALLVARS[i] goes with WALLS_ALL[i]. WALLOFF stays
 // level-local (1-based within the level's own groups) -- only the id is global.
 const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.length) ? WALLS_ALL.map((w, i) => {
   const tmp = `./.wall${i}-tables.json`;
   execFileSync(process.execPath, [process.argv[1]],
-    { env: { ...process.env, LVL: String(w.lvl),
+    // CHAIN=lvl for a LATE level's wall, exactly as its dump does: inheriting the chain leaves
+    // the level resident in no chain and its own walls unreachable. See LATEALL.
+    { env: { ...process.env, LVL: String(w.lvl), LATE: '',
+             ...(CHAIN.includes(w.lvl) ? {} : { CHAIN: String(w.lvl) }),
              WALLOFF: String(w.k + 1), LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
   return JSON.parse(readFileSync(tmp, 'utf8'));
 }) : null;
 const WALLVAR = WALLVARS ? WALLVARS[0] : null;   // "is there a wall mechanic at all"
+// ---- A LATE LEVEL'S WALL DATA TRAVELS WITH THE LEVEL, not with the engine ----
+// A wall delta is a patch list for ONE level's tables: the bytes that change when that level's
+// wall opens. It is meaningless while that level is not live, and yet every wall's list was
+// resident at once -- level 4's 197 bytes sat in memory for the whole of levels 1-3. That is the
+// one thing in the build that is per-level and paid for globally, and it is what overflowed the
+// hazard block by exactly 46 bytes the moment level 5's two walls appeared.
+// So: a CHAIN level's walls stay in the image, because that level is resident anyway. A LATE
+// level's go in bank 3 with the level tables, to be loaded when the level is. The pointer tables
+// carry the address either way, so wallTog neither knows nor cares which kind it is reading.
+const LATEWALL = WALLS_ALL.map((w, i) => i).filter(i => !CHAIN.includes(WALLS_ALL[i].lvl));
 
 // Sized to the LARGER level, both of them. A run id past a level's own count has runBitT = 0, so
 // it sets no bit and costs only the loop iteration -- the padding is inert, not merely harmless.
@@ -4452,8 +5257,25 @@ const WALLVAR = WALLVARS ? WALLVARS[0] : null;   // "is there a wall mechanic at
 // walk never masked ids 27-30, so after the corner opened an angel behind one of the new runs
 // read a garbage occluder bit and vanished while it still blocked and killed (2026-09-19, the
 // user, three readouts in).
-const NRUN = Math.max(nextRun, ...(LVLALL ?? []).map(l => l.nextRun), ...(WALLVARS ?? []).map(v => v.nextRun));
+const NRUN = Math.max(nextRun, ...LVLSIZED.map(l => l.nextRun), ...(WALLVARS ?? []).map(v => v.nextRun));
 const OCCBYTES = (NRUN + 7) >> 3;
+// runPlaneT and runFaceT are packed nose to tail from $6d00 and both are read with an absolute,X
+// in the hot loops, so what must hold is that NEITHER ONE CROSSES THE PAGE -- not that either
+// happens to fit somewhere. 2*NRUN <= 256 says exactly that. (The overlap guard would catch the
+// two tables colliding; nothing but this catches the second one merely spilling past $6dff, which
+// costs a cycle on every read that lands beyond it and corrupts whatever is at $6e00 -- Krill's
+// runtime resident, which would not show up as a rendering bug at all.)
+if (2 * NRUN > 256)
+  throw new Error(`NRUN=${NRUN}: runPlaneT+runFaceT need ${2 * NRUN} bytes and page $6d00 holds 256. `
+    + `They cannot both stay in one page -- give runFaceT a page of its own and pay the origin.`);
+// Where those two tables live: flush against the END of the cut-scene charset's region, the same
+// address in every build. They used to start immediately after faceChrT, which made the address
+// depend on how tightly FACE_PACK happened to pack the pictures -- and in a DIE=0 build, with no
+// charset ahead of them, dropped them onto $7100, which is exactly where FALLNOW parks fnCnt and
+// fnLog. (The image-vs-equate guard caught that; the debug equates only fit there BECAUSE the
+// death picture is gone.) Anchored to $7900 they clear the equates in both builds.
+const RUNTAB = 0x7900 - 2 * NRUN;
+// The rung -> rows tables (see visRows) are anchored just below them, in the same idle stretch.
 
 
 const losFree = (ax, ay, bx, by) => {
@@ -4482,6 +5304,27 @@ const PEDR  = +(process.env.PEDR ?? ORBSCALE / (4 * F_COL));
 // column being 1.5 true units wide at PAR 0.75 against 2*88 rows per cell of height.
 const PEDASP = PEDART.box[2] / PEDART.box[3];
 const PEDH  = +(process.env.PEDH ?? F_COL * 1.5 * PEDR / (88 * PEDASP));
+// ---- how far a SEATED entity is lifted, as a fraction of its own apparent height ----
+// An entity's screen Y is bottom-anchored to the FLOOR plane: obY = orbYBaseT[var] + ohgt,
+// where ohgt is its apparent height in rows. The pedestal's top plane at the same distance is
+// rowAt(Z, PEDH) = 100 + h*(1 - 2*PEDH), i.e. 2*PEDH*h rows ABOVE the floor -- and h IS ohgt
+// (the ladder's own band print is 22528/h/256 cells, and 22528/256 = 88, so h = 88/Z exactly
+// as rowAt uses it). So the lift is not a distance calculation at all: it is a fixed FRACTION
+// of the apparent height the projection already has in hand. No table, no divide.
+const PEDLIFT = 2 * PEDH;
+// Expressed as eighths so the runtime can do it in shifts and adds.
+const PEDLIFT8 = Math.round(PEDLIFT * 8);
+// Indexed by ohgt>>1, so 64 bytes covers every apparent height a sprite can have. Halving the
+// index costs at most half a row of precision on a lift that is ~18 rows at its largest, and
+// buys back 64 bytes in a page that has none to spare. A table rather than a shift chain
+// because 0.21 is not a sum of two or three negative powers of two, and the alternatives all
+// wanted a scratch byte the projection does not have.
+const PEDLIFT_N = 64;
+const pedLiftT = [...Array(PEDLIFT_N)].map((_, i) => Math.min(255, Math.round(2 * i * PEDLIFT)));
+if (process.env.PEDDBG) console.error(`  seated lift: ${PEDLIFT8}/8 of apparent height (PEDH=${PEDH.toFixed(3)}, PEDLIFT=${PEDLIFT.toFixed(3)})`);
+if (PEDLIFT8 < 1 || PEDLIFT8 > 8) throw new Error(
+  `PEDLIFT ${PEDLIFT.toFixed(3)} is outside 1/8..8/8 of the apparent height -- the shift chain ` +
+  `below assumes a seated entity sits between an eighth and a whole height up`);
 const PEDSTEP = +(process.env.PEDSTEP ?? 2);
 // Two columns, not four. At an orb's size the four-column rung runs out at 6.1 cells and the
 // hub has sightlines twice that; the user is content for them to read as small in the distance,
@@ -4491,6 +5334,25 @@ const PEDWMIN = +(process.env.PEDWMIN ?? 2);
 // because the shadow is black: the light trio was needed only while it was grey1, which the
 // dark bodies would have sat below. Top stays grey3, so each drum still reads lit from above.
 const PED_COLS = (process.env.PEDCOLS ?? '2,5,6').split(',').map(Number);
+// THE INVARIANT pedGate leans on: idol n belongs on drum n, and the player is told which by
+// COLOUR. So drum n's colour must be the colour of the ROOM idol n comes from -- checked against
+// LEVEL_PAL, the source of truth, and not against IDOL_BODY_OF, which is a parallel hand-written
+// list. A first version compared those two lists and passed happily while the mapping was wrong,
+// because I had set both of them myself: a guard over two constants you edit together tests
+// nothing. The only visible symptom would have been a puzzle refusing the arrangement its own
+// colours ask for.
+if (HAS_PED) for (let i = 0; i < IDOL_N; i++) {
+  const home = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0);
+  const room = LEVEL_PAL[home]?.ceil;
+  if (room === undefined) continue;
+  if (room !== PED_COLS[i]) throw new Error(
+    `idol ${i} comes from level ${home}, whose colour is $${room.toString(16)}, but drum ${i} is `
+    + `$${PED_COLS[i].toString(16)}. pedGate requires idol n on drum n and the player reads that `
+    + `off the colours -- reorder IDOL_HOME so idol ${i} is the level matching drum ${i}.`);
+  if (IDOL_BODY_OF[i] !== room) throw new Error(
+    `idol ${i}'s body is $${IDOL_BODY_OF[i].toString(16)} but its home level ${home} is `
+    + `$${room.toString(16)}; IDOL_BODY_OF has drifted from LEVEL_PAL.`);
+}
 // ---- and the EXITS take colours too ----
 // An exit hole is already a single flat bit pair 2 -- obC, the per-sprite ink (makeHoleLadder
 // emits no rim for one, and a build guard below asserts it) -- so it has always been able to be
@@ -4500,7 +5362,7 @@ const PED_COLS = (process.env.PEDCOLS ?? '2,5,6').split(',').map(Number);
 // The fourth is the one behind the pedestal wall, which nothing opens until all three are
 // seated, so it is NOT an errand and is deliberately not one of the three -- it stays black,
 // the way every other exit in the game reads.
-const LEVEL_EXITCOL = { 4: [2, 5, 0, 6] };
+const LEVEL_EXITCOL = { 4: [2, 5, 6, 0] };   // red, green, blue -- the black one went with its hole
 // ---- and where each exit GOES ----
 // lvlNxtT was one byte a level, so a level's exits all led to the same place -- fine while
 // every level had exactly one. The hub has four, and the whole point of the room is that they
@@ -4516,7 +5378,62 @@ const LEVEL_EXITCOL = { 4: [2, 5, 0, 6] };
 // 1,2,3,4 chain and none can be until the loader brings them in at the hub. Sending all four to
 // level 1 keeps every hole fallable and the loop closed while that is built; it is the only
 // entry here that is a placeholder rather than a decision.
-const LEVEL_EXITDST = { 4: [1, 1, 1, 1], 5: [4] };
+// THE HUB'S THREE COLOURED EXITS NOW GO WHERE THEY ARE PAINTED (2026-09-26): red to the idol
+// level, green and blue to its two siblings. They are not resident in a 1,2,3,4 chain -- the
+// loader brings all three in at the hub, over the slots levels 1-3 vacate -- so falling into one
+// before the load has finished is what the fall's hold is for. BLACK stays pointed at level 1:
+// it is the way onward, and the level after the hub does not exist.
+// The hub's coloured exits go where they are PAINTED only when those levels are being built at
+// all -- resident OR late. It used to test LATE alone, which meant CHAIN=4,5,6,7 built all four
+// levels into memory and then still wired every hole back to level 1: the one build that
+// separates "are the late LEVELS right?" from "is the LOADER right?" could not be made.
+// Without 5-7 they fall back to level 1, so the shipping disk stays whole.
+const HUB_WIRED = [5, 6, 7].every(n => ALLLVL.includes(n));
+// Index 2 is the east hole, behind the pedestal wall: nothing opens it until all three orbs are
+// seated, so it is not an errand and has no level of its own. It still needs to name a level
+// that is RESIDENT, not level 1 -- which the late load discards -- so that if it is ever opened
+// the fall lands somewhere real instead of swapping in a block that is no longer there.
+// By COLOUR, which is what the player reads: LEVEL_EXITCOL[4] is [2,5,0,6] -- red, green, black,
+// blue -- so red goes to 5, green to 7, blue to 6. The BLACK one is the hole behind the wall; it
+// By COLOUR, which is what the player reads: LEVEL_EXITCOL[4] is [2,5,6] -- red, green, blue --
+// and they were wired red->5, green->6, blue->7, which is green and blue the wrong way round.
+const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, 0xff] : [1, 1, 1, 0xff], 5: [4], 6: [4], 7: [4] };
+// The level whose exits name a late one: arriving there is what triggers the load. Derived
+// rather than written down, so wiring a different room to the late levels moves the trigger too.
+const LATEHUB = LATE.length
+  ? +(Object.keys(LEVEL_EXITDST).find(n => (LEVEL_EXITDST[n] ?? []).some(d => LATE.includes(d))) ?? 0)
+  : 0;
+// FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
+// hlv, and hlv is reset to 0 after every drop (see fallDone), so a headless run can only ever
+// take exit 0: on the hub that is 4->5->4->5 for ever and levels 6 and 7 are never entered.
+// Not a rotation, because the hub's exit 2 is the one behind the pedestal wall -- it is
+// deliberately unreachable in play and its destination is a placeholder.
+const FALLEXIT = process.env.FALLEXIT === undefined ? null : +process.env.FALLEXIT;
+// FALLHOLD=n -- park the DROP at frame n and stay there. A drop is ARC_DROP_N frames and a
+// headless -exitscreenshot lands where it lands, so any question about what the descent LOOKS
+// like was down to re-running until the frame came up. Held, the run is deterministic: pair it
+// with FALLNOW to trigger the fall and the machine sits on frame n for ever. Debug only, and
+// the level never arrives, so nothing downstream of the landing can be tested this way.
+const FALLHOLD = process.env.FALLHOLD === undefined ? null : +process.env.FALLHOLD;
+// FALLMARK=1234 -- `inc fallMk` at each stage of the level change, so a fall that never returns
+// says WHICH stage it died in. WHICH marks, not just on/off: four of them are 12 bytes and the
+// main block has 11 spare, so asking for all four fails the build with "origin moves backward"
+// -- a ceiling error, from a debug flag, which reads like the code is broken. Pick three
+// (FALLMARK=123 for the swap, FALLMARK=234 to tell objInit from what follows it) and the counts
+// add across falls: the first fall contributes its full set, so subtract before reading.
+// 1-4 are the stages of the level change in lvGot; 5 and 6 are inside objInit (blkT rebuilt,
+// entities placed), which is where a fall was found to die and the four outer marks could not see.
+const FALLMARK = (process.env.FALLMARK ?? '').split('').map(Number).filter(n => n >= 1 && n <= 6);
+if (process.env.FALLMARK && !FALLMARK.length)
+  throw new Error(`FALLMARK is a list of mark numbers, like 123 or 234, not ${process.env.FALLMARK}`);
+// FALLHOLDL=n -- the same for the LANDING phase, which FALLHOLD cannot reach: holding the drop
+// means the handover never happens. Frames 0..ARC_OVERLAP-1 are the window where both rims are
+// on screen at once, and that is the only way to photograph it.
+const FALLHOLDL = process.env.FALLHOLDL === undefined ? null : +process.env.FALLHOLDL;
+// It has to sit BELOW the phase's frame limit or the hold never holds: the limit is tested on
+// the incremented counter, and a held value at or past it ends the phase every frame instead.
+if (FALLHOLD !== null && !(FALLHOLD >= 0 && FALLHOLD < 15))
+  throw new Error(`FALLHOLD must be 0..14, not ${FALLHOLD}`);
 const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').split(',')
   .filter(v => v !== '').map(Number);
 // TWO holes, alternating, so the drop can be exercised over and over without reloading: the
@@ -4530,8 +5447,13 @@ const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').
 // committing to one side of the column. "Am I trapped in here?" for about a second and a half.
 // THE HUB HAS FOUR. One exit per level was the rule from 2026-09-18 (see below); the hub is the
 // level that needs it back, so HOLE_D may now be a LIST of cells as well as a single one.
-const HUB_HOLES = [[4, 1], [1, 4], [14, 4], [4, 7]];   // N, W, E(behind the wall), S
-const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12] : IDOLROOM ? [11, 1]
+// THREE, not four. The fourth was the BLACK one behind the wall, kept for a level 8 that does
+// not exist -- and an exit costs a holeSeeT row, an lvlNxtT byte, a fill colour and an entity's
+// worth of tables whether anything is through it or not. It comes back with level 8. The wall
+// that hides it stays: it is what the three pedestals open, and it now reveals an empty alcove.
+const HUB_HOLES = [[4, 1], [1, 4], [4, 7], [14, 4]];   // N(red), W(green), S(blue), E(black)
+const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
+             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : ERRAND ? [4, 4]
              : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
@@ -4552,7 +5474,8 @@ const HOLES_AT = Array.isArray(HOLE_D?.[0]) ? HOLE_D
 // sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
 // level keeps its own.
 const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '5,5;7,7'
-                    : IDOLROOM ? '11,3;19,9' : '')).split(';')
+                    : LVL === 5 ? '11,3;19,9' : LVL === 6 ? '3,8;5,8'
+                    : LVL === 7 ? '1,10;11,5' : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -4562,6 +5485,11 @@ const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBE
 // the floor and reads as nothing from across a room, and the hub is a room you are meant to
 // survey from the middle and plan a route through. A pedestal stands up, so it is a landmark.
 // It costs one hole-like slot each, which is what NHOLE's ceiling is now spent on.
+// Which wall the pedestals open, as a GLOBAL id. It is a CONSTANT -- pedestals exist on exactly
+// one level, so the answer cannot vary while the code that reads it can run -- and pedGate takes
+// it as an immediate rather than walking sockWallT at runtime, which costs nine bytes it does
+// not have. Computed by the MAIN build, the rule for anything chain-global: a dump's WALL_BASE
+// starts at 0 and would name a different level's wall. Asserted against sockWallT below.
 const PEDESTALS_AT = (process.env.PEDESTALS ?? LEVEL_PEDESTALS[LVL] ?? '').split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Exits first, then the seatable things. A pedestal IS a socket to everything but hlSet, which
@@ -4596,12 +5524,51 @@ const nextLevel = n => LEVELS[(LEVELS.indexOf(n) + 1) % LEVELS.length];
 // wrong one. The runtime now looks the wanted level up in lvlAtT, which tracks the permutation.
 // ...and the shadows' copies are written by CHAIN_GLOBAL below, which is where every table
 // naming something chain-global now lives. Not here, because sockWallT needs NSOCK.
-const lvlMax = (f, own) => Math.max(own, ...(LVLALL ?? []).map(f));
+const lvlMax = (f, own) => Math.max(own, ...LVLSIZED.map(f));   // late levels count too
 // At least ONE, even with no entities anywhere (NOORB=1 ANGEL=0 -- the bare level for working on
 // seams from first principles). Six tables are emitted at this length, and a zero-length !byte
 // assembles to "bad number: $", which names neither the table nor the flags that emptied it.
 // Nothing indexes them when the count is really zero, so the spare byte is inert.
 const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
+// ---- and now the sizes of the RAM buffers that needed NRUN/NORB to state ----
+// See RUNTIME_BUFS. Declaring a length is what lets the accounting stop reserving a whole PAGE
+// around an equate: a page all of whose equates are declared is reserved exactly, and the rest of
+// it is reported as the free space it is. 1.7K of this build was unspendable purely because a
+// single scalar made the accounting write off the page it sat in.
+// Over-declaring is safe and under-declaring is not -- a table reserved short is how a level
+// shadow once grew over doomT -- so where the true extent is not obvious the whole page is named.
+Object.assign(RUNTIME_BUFS, {
+  doomT: 256,           // per cell, but its clear loop is `ldx #0 / sta doomT,x / inx / bne`:
+                        //   256 deliberately, so power-on garbage cannot survive above MAPN
+  runPlaneT: NRUN,      // per run id, and NRUN is 65 -- these two are the worst ratio in the
+  runFaceT: NRUN,       //   build, 65 bytes each on a page of their own
+  bfsQ: 254,            // one byte per open cell
+  vsOn: 1, vsRow: 1, vsCode: 1,
+  bfsLast: 1, mulWY: 1, obKT: 1, obKI: 1,
+  obKeyT: NORB,         // at most 8: the sprite budget bounds the cast
+  // 176, not 256. It is indexed by screen COLUMN -- `remHiT,x` and `remHiT+1,y` with x,y in
+  // 0..159 -- so 161 bytes are reachable and the rest was "named whole rather than guessed at".
+  // That mattered once it had to move: no 256-byte run is free in all three chain shapes, and a
+  // 176-byte one is. Slack of 15 over the highest index anything can form.
+  remHiT: 176,
+  krillRt: 251,         // Krill's RUNTIME resident -- see krillRt
+  // The seam-stability and seam-edge scratch, declared so their two pages stop being written off
+  // whole. Between them they are 63 bytes; they were holding down 512.
+  ssCut: 1, ssCutD: 1, ssHL: 1, ssHR: 1, ssPU: 1, ssPUL: 1, ssKLo: 1, ssKHi: 1,
+  shD: 2, smLo: 1, smHi: 1, ssDir: 1, sHyP: 12, sHyC: 12, sHyPN: 1, sHyN: 1,
+  seB: 1, seHi: 1, seNL: 1, seLo: 1, seT: 1, seW: 1, seMsk: 1, seN: 1,
+  seC00: 8, seNB: 8,
+  // The per-column and per-char-column tables. Each was reserved as a whole page for want of a
+  // declared length; these are their real extents, and they are what the indexing already
+  // assumes -- bndT by span index (< NBND), faceIdT/remLoT by logical column, the six caches by
+  // the 40 character columns of the screen.
+  bndT: NBND, faceIdT: NLOG, remLoT: NLOG,
+  cwA: 40, cwB: 40, cbA: 40, cbB: 40, cstepT: 40, seamT: 40,
+  // The renderer's per-column scratch. These were the tool's own blind spot: 1,024 bytes counted
+  // as five, which flattered a packing report by four pages. sideT/idT/colH are 160 entries on a
+  // page each; the two stacks are half-pages.
+  sideT: 256, idT: 256, colH: 256, stackLT: 128, stackRT: 128,
+});
 // ---- the leash is PER ANGEL (2026-09-15) ----
 // It was one bit per cell for the whole level, so every angel shared one territory, and "the
 // first angel roams free, the second stays by its door" -- which is what LVL=3 wants -- could not
@@ -4624,17 +5591,41 @@ if (CELLBYTES > 32) throw new Error(
   `${MAPN} cells needs ${CELLBYTES} bytes of bitmap, but holeOne and the fall bake x32`);
 for (const [lx, ly] of LEASH_AT)
   if (map[cellOf(lx, ly)] !== 0) throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
-// The per-angel leash rows: entity slot -> 32-byte cell bitmap of cells it may not enter.
-const angBlk = (() => {
-  const rows = new Array(NORB * 32).fill(0);
+// ---- the leash is a SPARSE LIST, not a bitmap (2026-09-30) ----
+// It was one bit per cell per entity slot -- NORB x 32 bytes -- which is up to 160 bytes to say
+// that two cells are off limits to one angel on one level. Measured across levels 1-7: an
+// average of 137 ZERO bytes a level, and the only level that leashes anything at all sets two
+// bits. A bitmap is the right shape for a dense predicate over cells; this one is empty on six
+// levels in seven, and it was the most wasteful table in the build by a wide margin.
+//
+// It hid from the sizing survey because that ranked tables by max-min SPREAD across levels, and
+// this one is uniformly large: it scales with the ENTITY count, not with leash usage, so every
+// level pays a full table whether or not it leashes anything. Spread measures padding waste and
+// is blind to a table that is uniformly big and uniformly empty.
+//
+// So: (entity slot, cell) pairs, $ff-terminated -- 5 bytes on level 1, 1 byte everywhere else.
+// Padded to a declared budget it is ~9 bytes a level instead of up to 160, which is a bigger
+// saving than making it dynamically sized would have been, and needs no machinery to do it.
+// anTry scans it once per attempted step -- once every two seconds per angel -- so the scan is
+// free, and it needs ONE register where the bitmap needed two plus two bytes of scratch.
+const NLEASH = +(process.env.NLEASH ?? 4);     // declared budget in PAIRS, like every other budget
+const angLeash = (() => {
   const angels = ORBS.map((o, i) => o.tall ? i : -1).filter(i => i >= 0);   // entity slots that are angels
   if (LEASH_GROUPS.some(g => g.length) && LEASH_GROUPS.length > angels.length)
     throw new Error(`LEASH has ${LEASH_GROUPS.length} groups but the level has ${angels.length} angel(s)`);
+  const out = [];
   LEASH_GROUPS.forEach((g, k) => {
     const slot = angels[k]; if (slot === undefined) return;
-    for (const [lx, ly] of g) { const c = cellOf(lx, ly); rows[slot * 32 + (c >> 3)] |= 1 << (c & 7); }
+    for (const [lx, ly] of g) out.push(slot, cellOf(lx, ly));
   });
-  return rows;
+  if (out.length / 2 > NLEASH) throw new Error(
+    `level ${LVL} leashes ${out.length / 2} cells and the engine's budget is NLEASH=${NLEASH} ` +
+    `(2 bytes a cell). Raise NLEASH, or leash fewer cells.`);
+  // The PADDING is the terminator: +1 guarantees at least one $ff even on a level that fills the
+  // budget. Only the SLOT byte of a pair is tested against $ff, so a leashed cell 255 is safe.
+  // Filled by hand rather than with pad(), which is declared further down the file than this.
+  const n = NLEASH * 2 + 1;
+  return [...out, ...new Array(n - out.length).fill(0xff)];
 })();
 const NHOLE = Math.max(1, lvlMax(l => l.nHoleLike, HOLELIKE.length));   // at least one row: holeSeeT is emitted
 const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
@@ -4655,21 +5646,33 @@ const NSOCK = Math.max(1, lvlMax(l => l.nHoleLike - l.nExit, HOLELIKE.length - H
 //
 // This trap has caught both entries below, one of them in the user's hands:
 //   lvlNxtT   -- a dump has no fall order at all and emits $ff.
-//   sockWallT -- a dump's WALL_BASE starts at 0, so level 3's said "socket 0 opens wall 0",
-//                which in the chain is LEVEL 2's first wall. Seating level 3's S1 applied that
-//                wall's delta, mapT+88, and 88 in level 3's own 14-wide grid is (4,6) -- the cell
-//                that vanished while the two that should have gone stayed put. Levels 1 and 2
-//                were fine only because level 2 is FIRST and its local ids happened to match.
+//   sockWallT -- (HISTORICAL, and the reason wall ids are local now.) A dump's WALL_BASE started
+//                at 0, so level 3's said "socket 0 opens wall 0", which in the chain was LEVEL
+//                2's first wall. Seating level 3's S1 applied that wall's delta, mapT+88, and 88
+//                in level 3's own 14-wide grid is (4,6) -- the cell that vanished while the two
+//                that should have gone stayed put. Levels 1 and 2 were fine only because level 2
+//                is FIRST and its local ids happened to match. A local id cannot express this
+//                bug: there is no longer a number a level could get wrong by being moved.
 //
-// Adding a table here is still a human step. The tell that one belongs: its value is computed
-// from CHAIN, OTHERS, WALL_BASE or anything else derived from the whole resident set. The
+// Adding a table here is still a human step. The tell that one belongs: its value or its LENGTH
+// is computed from CHAIN, OTHERS or anything else derived from the whole resident set. The
 // assertions below are the backstop -- they check MEANING, not just that a patch ran, which is
 // what would have caught the sockWallT bug the moment level 3 got a socket.
+// ---- a level's START POSE travels WITH the level ----
+// It was six tables indexed by `lvlMeT - 1`, which is the shape that makes levels privileged:
+// the table has to be as long as every level the build can ever BE in (PAL_N), and sizing that
+// off CHAIN is what once made every late level a grey room you spawn inside a wall. A level
+// that carries its own pose needs no id, no table length, and no entry in anything global.
+// Computed HERE for every level rather than in each level's own dump, because PX/PY/PA override
+// the LIVE level's start only -- a dump inherits that env and would apply it to itself.
+const startBytes = n => { const [x, y, a, af] = startOf(n);
+  return [x & 255, x >> 8, y & 255, y >> 8, a, af]; };
 const CHAIN_GLOBAL = {
+  lvlStartT: L => startBytes(L.level),
   lvlNxtT: L => {
     const n = Math.max(1, NEXIT), d = LEVEL_EXITDST[L.level];
     return [...Array(n)].map((_, i) => {
-      if (!TWOLEV || process.env.NOFALL) return 0xff;
+      if ((!TWOLEV && !LVLLOAD) || process.env.NOFALL) return 0xff;
       const v = d?.[i];
       // Past this level's own exit count the entry is padding and never read; $ff anyway.
       if (i >= (L.nExit ?? 1)) return 0xff;
@@ -4682,12 +5685,17 @@ const CHAIN_GLOBAL = {
     });
   },
   // $ff for the padding, NOT the 0 a generic pad would leave: 0 is a perfectly valid wall id.
+  // The VALUE is level-local now and a dump gets it right on its own -- but the LENGTH is still
+  // chain-global (NSOCK is the widest socket count in this build, not the dump's), so this stays
+  // here to resize it. That is the only thing chain-global left about a socket.
   sockWallT: L => {
     const sw = LEVEL_WALLS[L.level]?.sockWall ?? [];
-    return [...Array(NSOCK)].map((_, i) => i < sw.length ? WALL_BASE[L.level] + sw[i] : 0xff);
+    return [...Array(NSOCK)].map((_, i) => i < sw.length ? sw[i] : 0xff);
   },
 };
-if (LVLALL) for (const L of LVLALL) for (const [n, f] of Object.entries(CHAIN_GLOBAL)) L.tables[n] = f(L);
+// LATEALL as well: a late level's lvlNxtT and sockWallT are global to the chain it will JOIN,
+// and its own dump could not know them -- it was built as a chain of one.
+for (const L of LVLSIZED) for (const [n, f] of Object.entries(CHAIN_GLOBAL)) L.tables[n] = f(L);
 
 // Masks for the ORBS *and* the hole-like entities, in the same order as orbXCT/orbYCT. Holes
 // were left out of this originally, which is the whole reason they had no occlusion test: the
@@ -4792,7 +5800,22 @@ for (const o of ORBS) if ((o.x % 1) !== 0.5 || (o.y % 1) !== 0.5)
   throw new Error(`orb at (${o.x},${o.y}) is not cell-centred; orbOne assumes it is`);
 const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
 
-const orbCol = ORBS.map(o => o.idol ? IDOL_BODY : ORBBODY[o.c]);
+// idolSprOf(LVL), not a global: this is the idol's body colour as the level it is STANDING in
+// paints it. Once picked up it is dieChk that repaints it, from the level you are carrying it
+// through -- which is the level whose scheme should win, since the idol is luggage.
+// o.body is the idol's IDENTITY colour, from IDOL_BODY_OF, and it travels with the idol --
+// including into your hands, where the carried icon reads it straight back out of orbColT2.
+// An orb takes its colour from its own index. No fallback: an idol with no identity colour is
+// a level-data mistake, and a silent default is how the two sources drifted in the first place.
+const orbCol = ORBS.map(o => {
+  if (!o.idol) return ORBBODY[o.c];
+  if (o.body === undefined) throw new Error(`idol at (${o.x},${o.y}) has no body colour`);
+  return o.body;
+});
+// Which idol each slot is, or $ff for "not an idol". SWAPPED, because slot 2 is an idol in the
+// hub and an angel in level 1 -- the answer is per level, and orbArtT (which is global) can
+// only say "some idol", never which.
+const orbIdolT = ORBS.map(o => (o.idolId ?? 0xff));
 // h -> size variant. The walls are 88/d tall, so scaling the orbs off the same h keeps them
 // locked to the world rather than to the screen. ORBSCALE is the ball's diameter in pixels at
 // h = 88, i.e. how big it looks one cell away.
@@ -4885,7 +5908,8 @@ const orbVarT = [...Array(256)].map((_, h) => {
 // pointer*64. This read (SPRBASE >> 6) when bank 0 made the two the same thing -- the identical
 // latent assumption that vm()/cb() carried into the bank-3 move. In bank 3 the absolute form
 // would give 768, which does not even fit in a pointer byte.
-const orbPtrT = ORBSRC.map(b => ((SPRBASE - VBANK) >> 6) + b);
+// orbPtrT is built further down, with ORBHI: the ladder is split across two bases now and the
+// second one is not known until the hole ladder's length is.
 const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
 const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
 // Which BITMAP an entity draws with, as an offset added to the orb's pointer at the rung it is
@@ -4921,11 +5945,21 @@ const SOK_VSTEP = Math.max(1, Math.floor((ANG_V0 - 1) / (SOK_ORB - 1)));
 // every down-counting loop is guarded on nOrbT/nAllT. HIDDEN is a BACKSTOP, not the mechanism:
 // those loops are do-while, so a guard missed on some future one fails safe here instead of
 // walking a phantom entity at cell 0 through the BFS and the sprite allocator.
-const orbHidT = ORBS.length ? ORBS.map(() => 0) : [1];
+// o.hidden: an entity the level carries a SLOT for but is not currently showing. The hub's
+// three idols are the case that needed it -- they exist from boot so that delivering one is a
+// store rather than a creation. objInit restores these from orbHid0T on every arrival, and
+// idolPlace then overrides the idol slots from where the idols actually are.
+const orbHidT = ORBS.length ? ORBS.map(o => o.hidden ? 1 : 0) : [1];
 // CARRY=n boots the run already holding entity n-1. Headless testing can't press SPACE, so the
 // build has to reproduce every part of the state orbUse leaves behind, not just the icon.
 const CARRY0 = +(process.env.CARRY ?? 0);
-if (CARRY0) orbHidT[CARRY0 - 1] = 1;
+// ...but only where that entity EXISTS. CARRY=n is inherited by the per-level sub-builds, and
+// a level with fewer entities than n got orbHidT[n-1] written past its end -- which does not
+// extend a JS array, it makes it SPARSE, and join() renders a hole as an empty field. The
+// table then emitted as "0,,1": one byte short, every byte after the gap shifted, and the
+// failure surfaced as "ILVL: unknown label in shadow table: null" three stages later.
+// Same trap holeSee hit at 64 entities; see the note there.
+if (CARRY0 && CARRY0 <= orbHidT.length) orbHidT[CARRY0 - 1] = 1;
 // ---- blkT: what MOVEMENT collides with, as opposed to what the renderer draws ----
 // mapT stays exactly the walls, because that is what the raycaster and the run/seam tables are
 // built from -- an orb must not become a wall to look at. blkT is walls OR entities, so mvFree
@@ -5281,6 +6315,13 @@ const FALLBUF2 = 0x4900;                         // the DESTINATION room, render
                                                  //   At frame zero the screen has not moved yet, so
                                                  //   the same stall is invisible.
 const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: the frozen frame
+// BOTH MUST BE PAGE-ALIGNED. fallSnap and bgCopy set only the HIGH byte of their pointer and
+// store 0 into the low one (`lda #>fallSnapS / sta fdD+1 / lda #$00 / sta fdD`), so a buffer at
+// a non-page address would be written 256-aligned anyway -- over whatever is below it. The code
+// says so in one place now, by symbol; this is what keeps the constants honest.
+for (const [n, a] of [['FALLBUF2', FALLBUF2], ['FALLBUF', FALLBUF]])
+  if (a & 255) throw new Error(`${n} = $${a.toString(16)} is not page-aligned, and fallSnap/bgCopy ` +
+    `only ever write its high byte -- the snapshot would land on the previous page boundary`);
 const FALL_END = 200;                            // pixels of travel per phase = screen height
 // ---- how long the drop takes, and how smooth it can possibly be ----
 // FALL_PERIODS raster periods per animation frame, FALL_FRAMES frames to cover FALL_END pixels.
@@ -5308,6 +6349,21 @@ const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 3);   // was 2 = 30fps, measu
 // moving faster through it.
 const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 16);   // 16 * 2 / 60 = 0.53s
 const mul40 = [...Array(FALLTAIL ? 31 : 26)].map((_, i) => i * 40);
+// ---- the half-height snapshot's two tables ----
+// SNAP_MUL[x] = the byte offset of screen row x INSIDE the snapshot. Rows fold about 12, so x and
+// 24-x share a slot. That fold is the whole saving and it costs nothing at runtime: the reader
+// indexes this table instead of mul40, same instruction, same cycles.
+// SAME LENGTH AS mul40, not 25. The fall indexes its source row through this table and the row
+// can run past 24 -- the drop's tail rows exist, and `cmp #255 / beq fwSkip` filters them only
+// after the address has been formed. A 25-entry table was read off the end and handed the copy a
+// garbage source: fallSnapD came back all zeros and the first drop frame was a blank screen.
+// Rows past 24 fold to 0 rather than to a negative offset; the tail has its own buffer anyway.
+const SNAP_MUL = [...Array(mul40.length)].map((_, x) => 40 * (x <= 24 ? Math.min(x, 24 - x) : 0));
+// SNAP_SRC[slot] = the screen row that slot is COPIED FROM. Identity, except slots 1-5, which take
+// rows 23-19 -- their own mirrors. The HUD is drawn over rows 1-5 AFTER renderSym, so those are the
+// only rows on screen that are not symmetric, and their mirrors hold exactly the render the HUD is
+// covering. So this drops the HUD from the fall (wanted) without losing the geometry under it.
+const SNAP_SRC = [...Array(SNAP_ROWS)].map((_, o) => (o >= 1 && o <= 5) ? 24 - o : o);
 // ---- the hole's RIM: one equation, and the shape is FORCED, not tuned ----
 // A floor point at perpendicular distance d projects to row 100 + 88*s/d, where s is the eye
 // height as a fraction of standing height. The rim is a circle of radius r about the player, so
@@ -5485,6 +6541,50 @@ const arcHi2T = arcYT2.map((y, n) => arcSpan(y, (arcET2[n] << 24) >> 24)[1]);
 // the band's BOTTOM instead and the fill becomes nothing; arcBand still draws the curve cell
 // and the hole below it over the top.
 const arcHiT = arcYT.map((y, n) => arcSpan(y, (arcET[n] << 24) >> 24)[1]);
+// ---- ARCCODES=1: which charset codes the arc's RIM actually uses, over a whole fall ----
+// The rim is the one thing below the arc's top split that the floor dither cannot reach: it is
+// drawn from the shared ramp dictionary in charset A (the ceiling's charset), so dithering those
+// glyphs would speckle the frozen room's wall tops too. Whether that is affordable is a question
+// about the SIZE of the set and whether it overlaps what the ceiling is using -- so count it
+// here rather than guess. Walks arcPx -> arcLvl -> rampThi[wL*16+wR] exactly as arcBand does,
+// including the apRow < 25 filter, which is the test that decides whether the glyph is stored.
+// The walk is UNCONDITIONAL: arcDth needs the code list itself, not just the report.
+const ARC_RIM_CODES = (() => {
+  const lvl = (px, base, inv) => Math.max(0, Math.min(15, (inv ? px - base : 8 + base - px) + 3));
+  const walk = (y0, e8, inv) => {
+    const e = (e8 << 24) >> 24, neg = e < 0, a = Math.abs(e);      // arcET is a SIGNED byte
+    const pxOf = c => { const phi = (a * arcD[c]) >> 8;            // mul8 returns the high byte
+      return neg ? Math.max(0, y0 - phi) : Math.min(199, y0 + phi); };
+    const got = [];
+    let prev = pxOf(0);
+    for (let c = 1; c < arcD.length; c++) {
+      const cur = pxOf(c), row = ((prev + cur) >> 1) >> 3, base = (row * 8) & 255;
+      if (row < 25) got.push(rampThi[(lvl(prev, base, inv) << 4) | lvl(cur, base, inv)]);
+      prev = cur;
+    }
+    return got;
+  };
+  const tally = (yT, eT, inv) => { const m = new Map();
+    yT.forEach((y, n) => walk(y, eT[n], inv).forEach(c => m.set(c, (m.get(c) || 0) + 1)));
+    return m; };
+  const drop = tally(arcYT, arcET, false), land = tally(arcYT2, arcET2, true);
+  const real = m => [...m.entries()].filter(([c]) => c !== BLANK && c !== SOLID);
+  if (process.env.ARCCODES) {
+    const show = (name, m, frames) => {
+      const r = real(m).sort((a, b) => b[1] - a[1]);
+      const deg = (m.get(BLANK) || 0) + (m.get(SOLID) || 0);
+      console.error(`  ${name}: ${r.length} distinct rim codes over ${frames} frames ` +
+        `(+${deg} degenerate cells -> BLANK/SOLID, which are handled)`);
+      console.error(`    codes: ${r.map(([c, n]) => `${c}x${n}`).join(' ')}`);
+    };
+    show('DROP   (charset A -- the one that matters)', drop, arcYT.length);
+    show('LANDING(charset B -- already dithered)    ', land, arcYT2.length);
+    console.error(`  pSplit per drop frame: ${arcSpT.slice(0, ARC_DROP_N).join(' ')}`);
+    console.error(`  region 1 (the ceiling, charset A) collapses at frame ` +
+      `${arcSpT.findIndex(v => v <= 51)} of ${ARC_DROP_N}`);
+  }
+  return real(drop).map(([c]) => c).sort((a, b) => a - b);
+})();
 // The landing's split travels too: the new room's horizon starts below the screen and rises into
 // place, so charset A covers its ceiling half and B its floor half exactly as in an ordinary
 // frame. It reaches SPLITLINE on the last frame, which is where the renderer wants it.
@@ -5903,6 +7003,8 @@ const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, 0);
   const ok = Math.max(0, SOCK.L.findIndex((g, i) => Math.abs(HOLE.L[idx[i]].vis * 2 - g.vis) < 1.2));
   for (let i = 0; i < ok; i++) idx[i] = idx[ok];
   SOCK.BM = [];                                   // nothing of its own is emitted
+  SOCK.srcIdx = idx;                              // which exit rung each socket rung borrows --
+                                                  //   the only place its DRAWN size is knowable
   SOCK.slotT = idx.map(i => HOLE.slotT[i]);
   SOCK.xOffT = idx.map(i => HOLE.xOffT[i]);       // the BORROWED bitmap's width, not the socket's
   SOCK.flagT = idx.map(i => (HOLE.flagT[i] & 0x07) | 8);   // its sprite count and hmag, vmag forced
@@ -5917,132 +7019,29 @@ const SOK_SSTEP = Math.max(1, Math.floor((SOCK.L.length - 1) / SOK_SHR));
 
 // yBaseT stays the SOCKET's own: the borrowed bitmap is placed at the socket's top row and expands
 // downward from there, which lands every row exactly where the socket's own projection wanted it.
-// ---- an orb SEATED in a socket: the ball's top half rising out of the socket's own arc ----
-// Not a flat cut. The bottom of the shape IS the socket rung's ellipse, so the orb reads as
-// sitting down in it rather than balanced on it, and the cut automatically has the right
-// perspective at every distance. Above that sits the top half of the ball, resampled from the
-// same source art as the orb -- so it keeps its shading and its highlight.
-//   ball rows 0..14 of ORBSRC12, centre row 7; 15..17 gap; 18..20 the ground shadow, which a
-//   seated orb has no use for.
-// The seat ladder does NOT follow the others at HOLEBASE: $e800 runs to $ffff, which is exactly
-// 96 slots, and the exit hole plus the socket already take 88. It lives in bank 3's other free
-// run instead. $c940 is 64-byte aligned, which a sprite pointer requires.
-// Immediately above the orb ladder, not a fixed address. $c940 was chosen when that ladder was
-// 37 bitmaps and landed exactly at its end; the six-sprite angel grew it to 51, so the ISEAT
-// segment loaded ON TOP of bitmaps 37 onward and every angel rung based past 37 drew half-orbs.
-// Derived, so it cannot rot again -- and checked below, because nothing was checking it.
-const SEATBASE = SPRBASE + NORBBM * 64;
-const BALL_MID = 7;
-// the same inverse-projection the holes use: half-width in columns of a disc of radius r,
-// centred at ground distance d, at screen row y
-const discSpan = (r, d, y) => {
-  const Z = 88 / (y - 100), t = r * r - (Z - d) * (Z - d);
-  return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
-};
-// ---- the seated orb, built in SOURCE ART coordinates ----
-// Take the orb as drawn, slide it DOWN until the ball's midpoint sits on the widest row of its
-// own ground shadow, and trim whatever falls below the shadow's silhouette. Doing it here rather
-// than per rung means the shape is decided once and every scale inherits it, and the ball keeps
-// its real shading and highlight instead of a procedural dome.
-//   rows 0..14 ball (midpoint 7), 15..17 gap, 18..20 shadow (widest row 19)
-const ORBSEAT12 = (() => {
-  const SHADOW_MID = 19, drop = SHADOW_MID - BALL_MID;
-  // how far down each column the shadow reaches -- this is the trim line
-  const foot = [...Array(12)].map((_, x) => {
-    let f = -1;
-    for (let y = 18; y <= 20; y++) if (ORBSRC12[y][x]) f = y;
-    return f;
-  });
-  return [...Array(21)].map((_, y) => [...Array(12)].map((_, x) => {
-    if (foot[x] < 0 || y > foot[x]) return 0;   // past the shadow: trimmed away
-    const sy = y - drop;
-    return (sy >= 0 && sy <= 14) ? ORBSRC12[sy][x] : 0;
-  }));
-})();
-{ const n = ORBSEAT12.flat().filter(Boolean).length;
-  if (!n) throw new Error('the seated orb came out empty'); }
-const _sc = [...Array(12).keys()].filter(x => ORBSEAT12.some(r => r[x]));
-const _sr = [...Array(21).keys()].filter(y => ORBSEAT12[y].some(v => v));
-const EX0 = Math.min(..._sc), EX1 = Math.max(..._sc);
-const EY0 = Math.min(..._sr), EY1 = Math.max(..._sr);
-const EW = EX1 - EX0 + 1, EH = EY1 - EY0 + 1;
-// the same majority-of-NxN-samples rule orbScale uses, so it degrades the same way
-function seatScale(w, h) {
-  const out = [...Array(h)].map(() => new Array(w).fill(0));
-  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
-    const t = [0, 0, 0, 0];
-    for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
-      const sx = Math.floor(EX0 + EW * (dx + (i + 0.5) / ORBSAMP) / w);
-      const sy = Math.floor(EY0 + EH * (dy + (j + 0.5) / ORBSAMP) / h);
-      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[ORBSEAT12[sy][sx]]++;
-    }
-    let best = 0;
-    for (let v = 1; v < 4; v++) if (t[v] >= t[best]) best = v;
-    out[dy][dx] = best;
-  }
-  return out;
-}
-// ---- the seated orb rides the ORB's ladder, not the socket's ----
-// Keying it to the socket's rungs gave it eight coarse steps and two widths, so it barely
-// shrank with distance and its hmag flipped while its width did not. It is an ORB, so it should
-// step exactly as one: index the same 256-byte orbVarT the orb uses, and give every orb variant
-// a seated bitmap of the same width the standing orb would have.
-// Only the WIDTHS are distinct -- the seated art is 3/4 as tall as it is wide, so the twenty-odd
-// orb heights collapse onto twelve bitmaps.
-function makeSeatLadder(slot0) {
-  const MIDF = (19 - EY0 + 0.5) / EH;          // the shadow line's place inside the art
-  const widths = [...new Set(ORBSRC.slice(0, ANG_V0)
-    .map(b => Math.max(1, orbW(ORBBMH[b]))))].sort((a, b) => b - a);
-  const BM = widths.map(w => {
-    const h = Math.max(1, Math.round(EH * w / EW));
-    const art = seatScale(w, h);
-    const ox = (12 - w) >> 1;                  // centred in the sprite, like orbScale
-    const grid = [...Array(21)].map((_, y) => [...Array(12)].map((_, x) =>
-      (y < h && x >= ox && x - ox < w) ? art[y][x - ox] : 0));
-    const b = [];
-    for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
-      b.push([0, 1, 2, 3].reduce((v, q) => v | (grid[y][k * 4 + q] << (6 - 2 * q)), 0));
-    b.push(0);
-    return b;
-  });
-  const midOf = w => Math.round(Math.max(1, Math.round(EH * w / EW)) * MIDF);
-  // per ORB VARIANT, so orbVarT selects it
-  const src = [], flag = [], xOff = [], yBase = [];
-  for (let v = 0; v < ANG_V0; v++) {
-    const w = Math.max(1, orbW(ORBBMH[ORBSRC[v]])), e = ORBEXP[v] ? 1 : 0;
-    src.push(widths.indexOf(w));
-    // ONE sprite always: a seated orb is the top of a ball, never tall enough for two the way a
-    // standing one can be. exp drives both magnifications, exactly as it does for the orb.
-    flag.push(1 | (e ? 4 : 0) | (e ? 8 : 0));
-    xOff.push(6 * (e ? 2 : 1));
-    // the art's shadow line lands on the floor row, 100 + h, and yBase is that minus h
-    yBase.push(150 - midOf(w) * (e ? 2 : 1));
-  }
-  if (yBase.some(y => y < 0 || y > 255)) throw new Error('seat yBase out of byte range');
-  return { BM, slotT: src.map(i => slot0 + i), flagT: flag, xOffT: xOff, yBaseT: yBase,
-           slotEnd: slot0 + BM.length, nBM: BM.length };
-}
-const SEAT = makeSeatLadder(0);
-if (process.env.SEATDUMP === 'steps') {
-  console.error('   d     h  var  orbW  seatBM  flag xOff yBase');
-  for (const d of [0.7,0.9,1.2,1.6,2,3,4,6,8,12,20]) {
-    const h = Math.min(255, Math.round(88 / d)), v = orbVarT[h];
-    if (v >= ANG_V0) { console.error(`  ${d} -> angel variant`); continue; }
-    const w = Math.max(1, orbW(ORBBMH[ORBSRC[v]]));
-    console.error(`  ${String(d).padStart(4)} ${String(h).padStart(3)} ${String(v).padStart(4)}` +
-      ` ${String(w).padStart(5)} ${String(SEAT.slotT[v]).padStart(7)}` +
-      ` ${String(SEAT.flagT[v]).padStart(5)} ${String(SEAT.xOffT[v]).padStart(4)}` +
-      ` ${String(SEAT.yBaseT[v]).padStart(6)}`);
-  }
-}
-
-fitsBank('hole+socket ladders', HOLEBASE, HOLE.BM.length + SOCK.BM.length, SCR_A);   // under the hole, below the screens
-
-
+// ---- THE SEATED ORB IS GONE (2026-09-26) ----
+// There was a whole ladder for the ball's top half rising out of a socket's arc. The design
+// it drew went away: an orb dropped into a socket now disappears WITH the socket, and
+// holeOne skips a consumed socket outright -- 'a CONSUMED socket is not in the world at all
+// any more' -- so nothing ever selected it. Its bitmaps were not even shipped: seatPtrT
+// pointed at PICBASE, where the cut-scene pictures live, so drawing one would have painted
+// a picture as sprites.
+// AND THE KINDS WENT WITH IT (2026-09-27). Kinds 2 and 4 -- "socket seated", "pedestal
+// seated" -- outlived the art as byte-for-byte copies of 1 and 3 in hlSrcL/hlSrcH/hlK5T/
+// hlVisL, plus the hlSfull branch that selected them. 24 bytes of table and about 12 of code
+// for a state nothing can enter. hlSfull also read orbColT2 + the low nibble of hlSeat, which
+// the one-way seating sets to $ff -- index 15, well past the table -- so the one way to reach
+// it was also wrong. Kinds are 0 exit, 1 socket, 2 pedestal, and hlSped adds 1 not 2.
+// A pedestal takes an IDOL, and that is a Y OFFSET, not a kind: both sprites stay on screen
+// and the idol is drawn on the drum's top plane. See PEDLIFT.
+// What DID survive the seat is its address. The cut-scene pictures live here -- straight after
+// the orb ladder -- and the two used to compete for it, which is what NPIC capping was about.
+// With the seat gone it is simply where IPIC goes, so it is named for that now.
+const PICBASE = SPRBASE + NORBBM * 64;
 // ---- PICSEG: EVERY cut-scene picture map, in the space the orb ladder vacated ----
 // A picture map is 1,000 bytes and the image's largest free run is 36, so none of them can live
 // in the image any more. The first one used to (as faceScrT, in the 3,048 the old single face
-// occupied); moving the idol's sprites under the I/O hole pulled SEATBASE down from $f500 to
+// occupied); moving the idol's sprites under the I/O hole pulled PICBASE down from $f500 to
 // $f100 and left exactly the 1,000 bytes it needs up here, on the CPU-reachable side of the
 // hole -- which is where it belongs, because picPut COPIES it and a copy from under the hole
 // would cost a port dance with interrupts off.
@@ -6057,15 +7056,13 @@ if (PICSEG.length) {
   // Up to the level shadow -- or, with no shadow to collide with, up to doomT, the lowest CPU
   // squatter in bank 3's tail. A standalone build was being held to the chain's budget and
   // refusing a picture it had 1.5K of room for.
-  const room = (TWOLEV ? LVLSHADOW : 0xfb00) - SEATBASE;
+  const room = (TWOLEV ? LVLSHADOW : 0xfb00) - PICBASE;
   if (PICSEG.length > room) throw new Error(
-    `IPIC is ${PICSEG.length} bytes but only ${room} are free between $${SEATBASE.toString(16)} ` +
+    `IPIC is ${PICSEG.length} bytes but only ${room} are free between $${PICBASE.toString(16)} ` +
     `and the level shadow at $${LVLSHADOW.toString(16)} -- ${NPIC} pictures do not fit`);
   console.error(`  cut scene: ${NPIC} picture(s), all as IPIC` +
-                ` at $${SEATBASE.toString(16)} (${PICSEG.length} of ${room} bytes)`);
+                ` at $${PICBASE.toString(16)} (${PICSEG.length} of ${room} bytes)`);
 }
-
-if (SEAT.yBaseT.some(v => v < 0 || v > 255)) throw new Error('seat yBase out of byte range');
 // The hole moved from a scan to a 256-byte h -> rung table when it reached 35 rungs (~600
 // cycles a frame). A socket ladder is a third of that, so the scan is ~100 cycles and a page
 // is worth more than the cycles here.
@@ -6104,11 +7101,15 @@ if (NHOLE > 8) throw new Error(
 // Light top over a darker body, which is the way round the reference photo has it.
 function makePedLadder(r, uh, wStep, slot0, wMax = 24, wMin = 4) {
   const L = [];
-  // Three step sizes, because a COLUMN is a different fraction of the shape at each end: 24->22
-  // is 8%, but 4->2 is half the drum gone in one rung. Single columns below eight, which is two
-  // extra slots and is what keeps the far end from stepping in visible jumps.
-  for (let w = wMax; w >= wMin; w -= (w > 12 ? wStep : w > 8 ? Math.max(2, wStep >> 1) : 1))
-    L.push({ w, d: 2 * F_COL * r / w });
+  // ---- the rung widths, STATED (2026-09-27, off the user's marked-up sheet) ----
+  // They used to come from a three-rate step, which produced 24,22,20,18,16,14,12,10,8,7,6,5,
+  // 4,3,2. Four of those are gone and the reason is not size, it is SHAPE: at 22, 18, 14 and 7
+  // the rasterised top disc shrinks faster than the silhouette does, so the drum reads as a
+  // ball. Stepping 4 at the wide end skips every rung where that happened.
+  // 2 is gone as well -- you cannot get far enough away in these rooms to ask for it, and
+  // hlRungP clamps past the end now instead of returning "no rung".
+  const PED_W = [24, 20, 16, 12, 10, 8, 6, 5, 4, 3];
+  for (const w of PED_W) L.push({ w, d: 2 * F_COL * r / w });
   L.sort((a, b) => a.d - b.d);
   const K = 1 - 2 * uh;                    // the top plane's row factor; > 0 while uh < 0.5
   if (K <= 0) throw new Error(`pedestal height ${uh} is at or above eye level: it would be a wall`);
@@ -6180,10 +7181,86 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24, wMin = 4) {
         g.grid[1] = [...Array(g.px)].map((_, bx) =>
           Math.abs((bx - g.px / 2 + 0.5) * cw) <= g.w / 2 ? 2 : 0);
     }
+    // ---- round a NUB off the top ----
+    // Where the cap's first row lands narrower than half the row beneath it, the disc reads as
+    // a spike rather than a curve -- the 12-column rung put TWO grey3 pixels straight onto a
+    // full twelve-pixel row. One pixel of grey3 on each side is the whole fix, and the half
+    // test keeps it off the rungs that do not have the problem: 6-over-10, 8-over-10 and
+    // 6-over-8 are all corners the raster got right, and widening those would flatten them.
+    {
+      const t = g.grid.findIndex(row => row.some(v => v));
+      const wOf = row => row.filter(v => v).length;
+      if (t >= 0 && g.grid[t + 1] && wOf(g.grid[t]) * 2 < wOf(g.grid[t + 1])) {
+        const row = g.grid[t];
+        const first = row.findIndex(v => v);
+        let last = -1; row.forEach((v, c) => { if (v) last = c; });
+        if (first > 0) row[first - 1] = 3;
+        if (last >= 0 && last < g.px - 1) row[last + 1] = 3;
+      }
+    }
     if (!g.grid.some(row => row.some(v => v)))
       throw new Error(`pedestal rung at d=${d.toFixed(2)} rasterised to nothing`);
     if (50 + g.far > 250) throw new Error(`pedestal rung ${g.w.toFixed(1)}c starts at row ${g.far}, off screen`);
   }
+  // ---- THE FOUR SMALLEST ARE STATED, NOT RASTERISED ----
+  // Below about six columns the projection has nothing left to say: at 6 and 5 the top disc has
+  // vanished from the raster entirely (not one grey3 pixel), and at 4 and 3 it survives as two
+  // pixels over a four-pixel body -- a cap narrower than the thing it caps, which is exactly
+  // what made them read as balls. So the cap is asserted instead: ONE row of grey3 over the top
+  // of what is already there, never a new row.
+  //   6c, 5c: grey3 across the top row's own width.
+  //   4c, 3c: grey3 across the FULL width, because at that size the body IS the pedestal.
+  // The two smallest are drawn outright rather than resampled -- 4px and 2px wide, a cap over a
+  // body -- because a mark that small is a decision, not a projection.
+  const PED_CAPN = 4;
+  L.forEach((g, gi) => {
+    const k = L.length - 1 - gi;                 // 0 = the smallest rung
+    if (k >= PED_CAPN) return;
+    // ---- WIDTH FROM THE TRUE SILHOUETTE, not from what the raster rounded to ----
+    // The 5-column rung was drawing 6px wide -- the rasteriser rounding up -- which made it
+    // 2.25 wide-to-tall against its neighbours' 1.80, and it read as a squashed ball rather
+    // than a drum. A multicolor pixel is 1.5 : 1, so the drawn aspect is px*1.5/rows and the
+    // only way to hold it is to take both numbers from the geometry: round(w) by round(vis).
+    // The smallest keeps its stated 2px, and drops to two rows to match -- 2x2 is 1.50, the
+    // same as the rung above it, where 2x3 was 1.00 and the narrowest thing on the ladder.
+    // ROWS = PX, which is an aspect of exactly 1.50 -- and 1.50 is not arbitrary, it is where
+    // the ladder has already arrived: 10c and 8c both draw 10x10 and 8x8. A receding drum gets
+    // relatively wider as its top face foreshortens and its sides shorten, so the whole ladder
+    // climbs 1.06 -> 1.38 -> 1.50 and then should simply stay there. Taking rows from round(vis)
+    // instead gave 1.80 / 1.88 / 1.50 / 1.00 -- a wobble of half the shape, on the four rungs
+    // small enough that half the shape is one pixel.
+    const px   = k === 0 ? 2 : Math.max(2, Math.round(g.w));
+    const rows = px;
+    const lo = (g.px - px) >> 1;
+    // ---- the body, dithered the way the 8-column rung is ----
+    // That rung is the last one the projection still renders properly, so it is the reference:
+    //     ..###-----..     a TWO-pixel dark edge, widened by one on the top and bottom rows
+    //     ..##------..
+    //     ..##-----3..     and a single light-grey pixel at the RIGHT edge, a row or two in
+    //     ..##------..
+    //     ..##-----3..
+    //     ..###-----..
+    // So: dark against the dark edge on the left, light against the shade on the right, one or
+    // two pixels of each and not a run down the whole side. An earlier pass walked ONE dark
+    // pixel down every row, which read as a stripe rather than as stone.
+    const bodyRows = rows - 1;
+    const darkW = Math.min(2, px - 1);           // the lit edge, two pixels wide where it fits
+    const row = j => [...Array(g.px)].map((_, c) => {
+      const x = c - lo;
+      if (x < 0 || x >= px) return 0;
+      if (j === 0) return 3;                     // the cap: one asserted row of grey3
+      const b = j - 1;
+      const wide = px >= 5 && bodyRows >= 3 && (b === 0 || b === bodyRows - 1);
+      if (x < darkW + (wide ? 1 : 0)) return 1;
+      // The SECOND light pixel only once there are rows to separate them by: on a four-row
+      // body b===1 and b===bodyRows-2 are adjacent, which reads as a streak down the edge
+      // rather than as two marks.
+      const lit = px >= 4 && bodyRows >= 3 && (b === 1 || (bodyRows >= 5 && b === bodyRows - 2));
+      return (lit && x === px - 1) ? 3 : 2;
+    });
+    g.grid = [...Array(21)].map((_, y) => y < rows ? row(y) : new Array(g.px).fill(0));
+  });
+
   const sprite = g => {
     const b = [];
     for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
@@ -6205,6 +7282,16 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24, wMin = 4) {
     throw new Error('pedestal h thresholds are not strictly descending -- the scan needs them sorted');
   const xOffT = L.map(g => (g.px / 2) * (g.mag ? 2 : 1));
   const yBaseT = L.map(g => 50 + g.far - hOf(g));
+  if (process.env.PEDGRID) L.forEach((g, i) => {
+    console.error(`    --- ped rung ${i} w=${g.w.toFixed(1)}c mag=${g.mag} vmag=${g.vmag}`);
+    g.grid.forEach((row, y) => { if (row.some(v => v))
+      console.error('      ' + row.map(v => '.#-3'[v]).join('')); });
+  });
+  if (process.env.PEDDBG) L.forEach((g, i) => console.error(
+    `    ped rung ${String(i).padStart(2)}  d=${g.d.toFixed(2)}  w=${g.w.toFixed(1)}c` +
+    `  vis=${g.vis.toFixed(1)}r  h=${hOf(g)}  mag=${g.mag}${g.vmag ? ' vmag' : ''}` +
+    `  inked=${g.grid.reduce((n, r) => n + (r.some(v => v) ? 1 : 0), 0)}r` +
+    ` x${Math.max(...g.grid.map(r => r.filter(v => v).length))}px`));
   if (yBaseT.some(v => v < 0 || v > 255)) throw new Error('pedestal yBaseT out of byte range');
   const flagT = L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
   return { L, BM, slotT, hT, varT, xOffT, yBaseT, flagT, hOf, slotEnd: _pslot };
@@ -6220,7 +7307,8 @@ const PEDTBL = 5 * Math.max(1, PED.L.length);
 // "* = $3d9c moves backward" is the guard if it ever stops matching.
 const PEDCODE = 18;
 // seamEdge's own size, hand-counted like PEDCODE; the assembler's "moves backward" is the guard.
-const SEAMCODE = ANYSEAM ? 249 : 1;
+const SEAMEDGE_AT = 0x7f00;     // the page bndT vacated; 249 of 256 used
+const SEAMCODE = ANYSEAM ? 249 : 1;   // still hand-counted, but now against SEAMEDGE_AT's page
 if (process.env.PEDDUMP && HAS_PED) {
   console.error(`pedestal ladder: r=${PEDR} u=${PEDH}, ${PED.L.length} rungs, ` +
     `${PED.BM.length} slots (${PED.BM.length * 64} bytes), slots ${PED.slotT[0]}..${PED.slotEnd - 1}`);
@@ -6233,6 +7321,96 @@ if (process.env.PEDDUMP && HAS_PED) {
   process.exit(0);
 }
 const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM), ...PED.BM];
+// ---- HOW MANY SCREEN ROWS EACH SOCKET-LIKE RUNG COVERS, so occStamp can box it ----
+// The stamp needs one thing from a slot it did not project: the row extent of what is drawn
+// there. For an orb it reads that from orbBlankT/orbAnchT by variant; a socket's rung cannot go
+// in those tables, because the block they sit in has four bytes of slack and three ladders would
+// need ninety. So the SLOT carries the number instead (obV), and these are where holeTail looks
+// it up. Blank rows need no table at all: a hole-like ellipse is drawn from the top of its frame,
+// so the count is always zero, which is why only the height is here.
+// vis is already in SCREEN rows -- magnification included -- which is exactly what the box wants.
+// Indexed differently per kind, and that is fine: all any of them has to answer is "the number
+// this kind's rung finder just returned". For a socket or a pedestal that is a rung of its own
+// ladder -- there is no third answer now that the seated kinds are gone.
+// No table for the exit hole: it is the wall's own black, so a partly-hidden one melts into the
+// wall, and it keeps holeTail's cheap all-or-nothing test.
+// MEASURED OFF THE BITMAP THAT IS ACTUALLY DRAWN, never off the rung's own projection. A socket
+// owns no bitmaps: it BORROWS an exit-hole rung of about half its size and forces vmag, so its
+// drawn height is that rung's inked rows doubled -- and shareRungs accepts a match within 1.2
+// rows, with the closest rungs clamped outright, so the socket's own g.vis is off by a row or
+// more. That row is not academic: it put the last row of the ellipse in the char row BELOW the
+// stamped box, and a wall that occluded the socket left a single pixel row of it showing.
+// Inked rows, not the 21-row frame: the frame is mostly blank and stamping it would black out
+// cells the socket never reaches.
+const inkedRows = grid => {
+  let n = 0;
+  for (let by = 0; by < grid.length; by++) if (grid[by].some(p => p)) n = by + 1;
+  return n;
+};
+const drawnRows = (grid, flag) => inkedRows(grid) * ((flag & 8) ? 2 : 1);   // bit 3 is vmag
+const visRows = rows => rows.map(v => Math.max(1, Math.min(255, Math.round(v))));
+const sockVisT = visRows(SOCK.L.map((g, i) => drawnRows(HOLE.L[SOCK.srcIdx[i]].grid, SOCK.flagT[i])));
+// ...and the EXIT hole's own. It had none, because it was the one kind occStamp skipped: a pit
+// was the wall's own black, so a sprite half behind a corner melted into it and only "wholly
+// behind" ever had to be handled. Colouring the holes ended that -- a coloured pit hanging over
+// the wall in front of it is exactly what the stamp exists to cut.
+const exitVisT = visRows(HOLE.L.map((g, i) => drawnRows(g.grid, HOLE.flagT[i])));
+const pedVisT = visRows(PED.L.map((g, i) => drawnRows(g.grid, PED.flagT[i])));
+if (process.env.SOCKDUMP) {                    // rung -> what you actually see, against h
+  console.error('  socket rungs:  h>=   d     drawn rows   borrowed exit rung');
+  SOCK.L.forEach((g, i) => console.error(
+    `    ${String(i).padStart(2)}      ${String(SOCK.hT[i]).padStart(3)}  ` +
+    `${g.d.toFixed(2).padStart(5)}      ${String(sockVisT[i]).padStart(2)}px` +
+    `            ${SOCK.srcIdx[i]}`));
+}
+// They live in the $7100-$7900 page, anchored below the run tables: that page holds the
+// cut-scene charset, which FACE_PACK has packed down to 1,792 of its 2,048 bytes, and its tail
+// is the only free run anywhere near the ladder tables -- whose own block ends exactly at $4000
+// with nothing to spare. Anchoring means neither table depends on how tightly the pictures
+// happened to pack; what it gives up is the guarantee that faceChrT still fits ahead of them,
+// which is what the check below is for.
+// Not in an LVLDUMP subprocess: that build stops before it assembles anything, so it has no
+// image for the two to collide in -- and it is the one build where FACE_PACK stays null, which
+// would make this fire on every chain build from the inside.
+// +5 for hlVisL, the per-kind pointer, which lives here rather than beside hlK5T: the block that
+// one sits in has four spare bytes, and it is the table's low byte ONLY -- all three ladders fit
+// in a single page, so the high byte never changes and hlSet patches one byte instead of two.
+// The fall tests' scratch goes in the SAME page, in the run the packed charset leaves ahead of
+// the tables -- see the FALLNOW equates. It used to be $7100, which is free only when DIE=0
+// deletes the cut-scene picture, and DIE=0 does not run. Derived rather than written down: the
+// run moves whenever FACE_PACK packs differently, and the image-vs-equate guard is what says so
+// if it ever stops being big enough (FTCAP's 128-byte buffer will not fit, and should move to
+// its own home the day someone needs it).
+// FNDBG: the fall tests' scratch (fnCnt/fnLog, and CEILLOG/FTCAP's buffers behind them).
+// IT USED TO BE `0x7100 + PICS.chars.length` -- the run the packed cut-scene charset leaves
+// ahead of the rung tables. That run is CODE now: fdGlyph's tail flows straight on from
+// faceChrT, and the 65 bytes it takes are exactly the ones fnLog was writing into. A derived
+// address is not the same as a SAFE one -- this one tracked the charset and had no idea the
+// gap behind it had been let to someone else, so FALLNOW silently scribbled on the renderer.
+// (The image-vs-equate guard caught it, which is the only reason this is a comment and not a
+// bug report.) Low RAM instead: it is never emitted, so nothing can be let into it behind our
+// back, and the boot half is the right half -- it is free "after the last KERNAL LOAD", and a
+// forced fall happens in play, minutes later, exactly like the real fallTailB beside it.
+const FNDBG = LOWBOOT + (FALLTAIL ? FTROWS * 40 : 0);
+// What each flag actually needs behind FNDBG. Checked rather than assumed, because the boot
+// half has 36 bytes spare and FTCAP's buffer alone is 128: it does NOT fit, and the failure
+// mode of finding that out at runtime is the pivot scratch being overwritten every frame.
+const FNDBG_N = process.env.FTCAP ? 0x20 + 128 : process.env.CEILLOG ? 0x20 + 40 : 0x11;
+if (process.env.FALLNOW && FNDBG + FNDBG_N > LOWSAFE) throw new Error(
+  `the fall tests need ${FNDBG_N} bytes at $${FNDBG.toString(16)} and low RAM's boot half ends `
+  + `at $${(LOWSAFE - 1).toString(16)} -- ${LOWSAFE - FNDBG} spare. fnCnt/fnLog fit; `
+  + `CEILLOG and FTCAP do not, and need a home of their own (a free run in the image, named `
+  + `here, not a gap someone else can be given later).`);
+const VISN = 5 + exitVisT.length + sockVisT.length + Math.max(1, pedVisT.length);
+const VISTAB = RUNTAB - VISN;
+if ((VISTAB >> 8) !== ((VISTAB + VISN - 1) >> 8)) throw new Error(
+  `the rung -> rows tables straddle a page ($${VISTAB.toString(16)}..` +
+  `$${(VISTAB + VISN - 1).toString(16)}), so hlVisL's low byte alone no longer selects one -- ` +
+  `hlSet has to patch hlVB+2 as well`);
+if (DIE && !process.env.LVLDUMP && 0x7100 + PICS.chars.length > VISTAB)
+  throw new Error(`cut-scene charset is ${PICS.chars.length}B, so faceChrT runs to ` +
+    `$${(0x7100 + PICS.chars.length).toString(16)} and overruns sockVisT at $${VISTAB.toString(16)} ` +
+    `(NRUN=${NRUN}, ${VISN}B of rung heights). Pack the pictures harder, or move the tables.`);
 // ---- and now the exit ladder's length is known, so the idol's base is too ----
 const IDOLBASE = HOLEBASE + HOLEBM.length * 64;   // straight behind it, under the hole
 const IDOL_PTR = ((IDOLBASE - SPRBASE) >> 6) & 255;
@@ -6240,6 +7418,18 @@ if (HAS_IDOL && IDOL_PTR === 0) throw new Error(
   `the idol's pointer offset came out 0, and 0 is the value that MEANS "not the idol" in ` +
   `orbArtT -- IDOLBASE ${hx16(IDOLBASE)} landed exactly on SPRBASE, so the two collide`);
 const orbArtT = ORBS.map(o => o.idol ? IDOL_PTR : 0);   // a pointer DELTA now, not a bitmap index
+// ---- and here, at last, is where the orb ladder's tail lands (see ORBHI_N) ----
+// Straight after the idol, which is straight after the exit ladder -- so this is simply "the end
+// of the IHOL file", and appending to that file is all the placement there is.
+const ORBHI = IDOLBASE + IDOLBM.length * 64;
+// Split across two bases: the low run is still at SPRBASE, the tail is under the I/O hole. A
+// sprite pointer is only "which 64-byte slot of the bank", so either base costs the same byte.
+const orbPtrT = ORBSRC.map(b => b < ORBLO_N
+  ? ((SPRBASE - VBANK) >> 6) + b
+  : ((ORBHI - VBANK) >> 6) + (b - ORBLO_N));
+if (ORBHI + ORBHI_N * 64 > 0xe000) throw new Error(
+  `the orb ladder's tail runs to $${(ORBHI + ORBHI_N * 64).toString(16)}, past the end of the ` +
+  `I/O hole -- the whole point of moving it is that the CPU never needs to see it`);
 // ---- LADDERSHEET=1: every RUNG of every ladder, as it actually appears on screen ----
 // One column per rung, not per bitmap: a wide hole rung is three hardware sprites side by side
 // and a tall entity is two stacked, so drawing bitmaps invents redundancy that is not there.
@@ -6258,6 +7448,29 @@ if (process.env.LADDERSHEET) {
   // as mid grey and pair 3 as white, which for the pedestal -- black / grey2 / grey3 on a grey1
   // floor -- flattered it by about two shades and hid how much of the drum is actually black.
   const C64 = { 0: [0, 0, 0], 6: [64, 49, 141], 11: [68, 68, 68], 12: [108, 108, 108], 15: [149, 149, 149] };
+  // ---- ONE COLUMN PER DISTINCT RENDERING, not per rung ----
+  // Two rungs that name the same bitmap at the same magnification put the identical pixels on
+  // screen, so a column each says nothing and buries the steps that are real. Grouped by what is
+  // actually drawn -- bitmap AND both mag bits -- and the map under every sheet says which rungs
+  // fell into each column, so a column can still be named by the rungs it covers. A ladder whose
+  // sheet is much shorter than its rung count has already been collapsed as far as art goes;
+  // what is left there is distance banding, which costs table bytes and not sprite slots.
+  const groupBy = (idx, keyOf) => {
+    const seen = new Map();
+    for (const i of idx) {
+      const k = keyOf(i);
+      if (!seen.has(k)) seen.set(k, []);
+      seen.get(k).push(i);
+    }
+    return [...seen.values()];
+  };
+  const runsOf = g => g.length === 1 ? `${g[0]}`
+    : g.every((v, j) => !j || v === g[j - 1] + 1) ? `${g[0]}-${g[g.length - 1]}` : g.join(',');
+  const mapLine = (what, groups, label) => {
+    console.error(`  ${what}: column -> rung(s) -> bitmap; a column covering several rungs is ` +
+      `already ONE bitmap`);
+    console.error('    ' + groups.map((g, c) => `${c}:r${runsOf(g)}=${label(g[0])}`).join('  '));
+  };
   const sheet = (name, rungs, pal, bg) => {
     const GAP = 6;
     const wOf = r => Math.max(...r.parts.map(p => p.ox + p.w)) * (r.xmag ? 2 : 1);
@@ -6292,30 +7505,500 @@ if (process.env.LADDERSHEET) {
     console.error(`  ladder-${name}.png: ${rungs.length} rungs, ${W}x${H}`);
   };
   // the hole: `grid` is the whole assembled rung, `spr` hardware sprites of 12 across it
-  sheet('hole', HOLE.L.map(r => ({
+  const holeRung = i => { const r = HOLE.L[i]; return {
     xmag: r.mag, ymag: r.vmag,
     parts: [...Array(r.spr)].map((_, k) => ({
       w: 12, h: r.grid.length, ox: k * 12, oy: 0,
-      at: (x, y) => (r.grid[y] ?? [])[k * 12 + x] ?? 0 })) })));
+      at: (x, y) => (r.grid[y] ?? [])[k * 12 + x] ?? 0 })) }; };
+  const holeG = groupBy(HOLE.L.map((r, i) => i),
+    i => `${HOLE.slotT[i]}/${HOLE.L[i].spr}/${HOLE.L[i].mag}/${HOLE.L[i].vmag}`);
+  sheet('hole', holeG.map(g => holeRung(g[0])));
+  mapLine('hole', holeG, i => `s${HOLE.slotT[i]}x${HOLE.L[i].spr}`);
   // the pedestal: one sprite a rung, so one part -- but it magnifies on BOTH axes, which is
   // the whole reason it fits in one.
   // Its REAL inks: pair 1 = $d025 grey1, pair 2 = obC (grey2 while empty, the orb's colour
   // once seated), pair 3 = $d026 grey3. On blue, not on the floor grey, because three greys on a
   // fourth grey is exactly the comparison the eye cannot make.
-  if (HAS_PED) sheet('pedestal', PED.L.map(r => ({
-    xmag: r.mag, ymag: r.vmag,
-    parts: [{ w: 12, h: r.grid.length, ox: 0, oy: 0,
-              at: (x, y) => (r.grid[y] ?? [])[x] ?? 0 }] })),
-    { 1: C64[11], 2: C64[12], 3: C64[15] }, C64[6]);
+  if (HAS_PED) {
+    const pedRung = i => { const r = PED.L[i]; return {
+      xmag: r.mag, ymag: r.vmag,
+      parts: [{ w: 12, h: r.grid.length, ox: 0, oy: 0,
+                at: (x, y) => (r.grid[y] ?? [])[x] ?? 0 }] }; };
+    const pedG = groupBy(PED.L.map((r, i) => i),
+      i => `${PED.slotT[i]}/${PED.L[i].mag}/${PED.L[i].vmag}`);
+    sheet('pedestal', pedG.map(g => pedRung(g[0])),
+      { 1: C64[11], 2: C64[12], 3: C64[15] }, C64[6]);
+    mapLine('pedestal', pedG, i => `s${PED.slotT[i]}`);
+  }
   // orb and angel share one ladder: a lower sprite always, an upper one when it is tall enough
-  sheet('entity', LADDER.map((r, i) => {
+  // ---- orb and angel: ONE ladder, but two sheets ----
+  // They share LADDER -- variants below ANG_V0 are orbs, the rest angels -- and sheeting them
+  // together put a 42-column strip on screen in which the two families were hard to compare
+  // against themselves. Split, each is its own ladder to judge.
+  // BOTH axes are magnified: opDone sets omXX and omYY from the same orbExpT byte, so an
+  // expanded variant is twice as WIDE as well as twice as tall. Sheeting them unmagnified drew
+  // every large rung at half its real width -- the user, 2026-09-26.
+  const entRung = i => {
     const lo = ORBSRC[i], up = ORBSRCU[i];
     const parts = [{ w: 12, h: 21, ox: 0, oy: up >= 0 ? 21 : 0,
                      at: (x, y) => bmPix(ORBBM[lo] ?? [], x, y) }];
     if (up >= 0) parts.push({ w: 12, h: 21, ox: 0, oy: 0,
                               at: (x, y) => bmPix(ORBBM[up] ?? [], x, y) });
-    return { xmag: 0, ymag: r.exp, parts };
-  }));
+    return { xmag: LADDER[i].exp, ymag: LADDER[i].exp, parts };
+  };
+  const entKey = i => `${ORBSRC[i]}/${ORBSRCU[i]}/${LADDER[i].exp}`;
+  const entLbl = i => `bm${ORBSRC[i]}` + (ORBSRCU[i] >= 0 ? `+u${ORBSRCU[i]}` : '');
+  const orbG = groupBy(LADDER.map((r, i) => i).filter(i => i < ANG_V0), entKey);
+  sheet('orb', orbG.map(g => entRung(g[0])));
+  mapLine('orb', orbG, entLbl);
+  const angG = groupBy(LADDER.map((r, i) => i).filter(i => i >= ANG_V0), entKey);
+  if (angG.length) {
+    sheet('angel', angG.map(g => entRung(g[0])));
+    mapLine('angel', angG, entLbl);
+  }
+  // ---- the socket: it OWNS no bitmaps, so sheet what it actually draws ----
+  // Every rung borrows an exit-hole rung roughly half its size and forces vmag, which is why
+  // its heights come out in even numbers and why five of its ten rungs are the same 4px tall.
+  // Sheeting the borrowed grid rather than the socket's own projection is the only way to see
+  // that: the numbers in SOCK.L describe a shape that is never drawn.
+  if (!NOSOCK && SOCK.L.length) {
+    const sokRung = i => { const src = HOLE.L[SOCK.srcIdx[i]];
+      return { xmag: SOCK.flagT[i] & 4, ymag: SOCK.flagT[i] & 8,
+               parts: [...Array(SOCK.flagT[i] & 3)].map((_, k) => ({
+                 w: 12, h: src.grid.length, ox: k * 12, oy: 0,
+                 at: (x, y) => (src.grid[y] ?? [])[k * 12 + x] ?? 0 })) }; };
+    const sokG = groupBy(SOCK.L.map((r, i) => i),
+      i => `${SOCK.srcIdx[i]}/${SOCK.flagT[i]}`);
+    sheet('socket', sokG.map(g => sokRung(g[0])),
+      { 1: C64[11], 2: C64[12], 3: C64[15] }, C64[6]);
+    mapLine('socket', sokG, i => `exit${SOCK.srcIdx[i]}`);
+  }
+  // ---- the idol: 16 bitmaps of its own, and the reason bank 3 is full ----
+  // It rides the ORB's rungs -- one idol bitmap per orb bitmap, from index 0 up -- so it is
+  // sheeted against the same variants. If two neighbours here are indistinguishable, collapsing
+  // them is 64 bytes of bank 3 each, which is exactly what the hub's loader needs back.
+  // Only the rungs it can REACH: the idol has one bitmap per orb bitmap from index 0 up, so a
+  // variant whose orb bitmap is past the end of IDOLBM has no idol art and would sheet blank.
+  if (IDOLBM.length) {
+    const reach = LADDER.map((r, i) => i).filter(i => ORBSRC[i] < IDOLBM.length);
+    const idolRung = i => ({
+      xmag: LADDER[i].exp, ymag: LADDER[i].exp,
+      parts: [{ w: 12, h: 21, ox: 0, oy: 0,
+                at: (x, y) => bmPix(IDOLBM[ORBSRC[i]] ?? [], x, y) }] });
+    const idolG = groupBy(reach, i => `${ORBSRC[i]}/${LADDER[i].exp}`);
+    // ---- IN THE GAME'S OWN INKS, not the sheet's generic ramp ----
+    // Every idol sheet before this was drawn white / light grey / mid grey, so months of
+    // comparing art judged SHAPE and said nothing about colour -- and the first build that
+    // reached the screen looked wrong for a reason no strip could have shown: the three inks
+    // were grey1 / dark red / grey2, a ramp whose MIDDLE is darker than its shadow.
+    // These are measured off VICE screenshots, not guessed. IDOLPAL=hub for the other one.
+    const C64 = { black: [0,0,0], brown: [151,64,0], orange: [196,98,65], yellow: [255,248,141],
+                  grey3: [205,205,205], red: [169,71,100] };
+    const idolPal = process.env.IDOLPAL === 'hub'
+      ? [null, C64.black, C64.red, C64.grey3]          // seated: what a pedestal is made of
+      : [null, C64.brown, C64.orange, C64.yellow];     // at home in its errand room
+    sheet('idol', idolG.map(g => idolRung(g[0])), idolPal, [16, 16, 16]);
+    mapLine('idol', idolG, i => `bm${ORBSRC[i]}`);
+    // IDOLDBG: the sheet's columns, numbered as drawn, with what each one IS and the distance
+    // band it covers -- so a rung can be named by its position in the PNG.
+    // ---- IDOLFIT: the idol fitted from goat.png at every rung, the way the orb is ----
+    // The shipping idol is box-filtered down from goat-art.json, a 21x12 grid -- a resample of
+    // something already crushed to sprite resolution and four colours. The orb is fitted from
+    // sphere-rough.png (1254x1254) at each rung instead, which is what keeps its grain constant
+    // all the way down; ORBRUNG=0 shows what the orb looks like done the idol's way, and it is
+    // the same blotchy collapse. goat.png is 718x846 and the build has never touched it.
+    // Strips only -- nothing here changes what is built.
+    if (process.env.IDOLFIT) {
+      for (const mode of (process.env.IDOLFIT === '1'
+            ? 'd1c1.0,d1c1.6,d0c1.0,d0c1.6' : process.env.IDOLFIT).split(',')) {
+        const m = /^d([01])c([\d.]+)$/.exec(mode.trim());
+        if (!m) throw new Error(`IDOLFIT: "${mode}" is not d<0|1>c<contrast>`);
+        const dith = m[1] === '1', con = +m[2];
+        const grid = h => {
+          const w = orbW(h), out = [...Array(21)].map(() => new Array(12).fill(0));
+          const px = fitArt(process.env.IDOLART ?? 'ram5.png', w, h,
+                            { dither: dith, contrast: con, dark: true }).px;
+          const ox = (12 - w) >> 1, oy = 21 - h;
+          for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
+            out[oy + dy][ox + dx] = px[dy * w + dx];
+          return out;
+        };
+        const rung = (h, e) => { const g = grid(h);
+          return { xmag: e, ymag: e,
+                   parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; };
+        const magH = ORB_H.filter(h => 2 * h > SH);
+        const all = [...magH.map(h => rung(h, 1)), ...ORB_H.map(h => rung(h, 0))];
+        sheet(`idol-fit-${mode}`, all);
+        // one frame per rung, same framing as the orb's: fixed canvas, bottom-anchored,
+        // centred on the sprite centre, no hardware box.
+        if (process.env.IDOLFRAMES) {
+          const FW = 12 * 2 * CW + 12, FH = 21 * 2 * CH + 12;
+          all.forEach((r, i) => {
+            const rgbF = new Uint8Array(FW * FH * 3);
+            for (let q = 0; q < FW * FH; q++) { rgbF[q*3]=22; rgbF[q*3+1]=22; rgbF[q*3+2]=22; }
+            const putF = (x, y, c) => { if (x<0||y<0||x>=FW||y>=FH) return;
+              const o=(y*FW+x)*3; rgbF[o]=c[0]; rgbF[o+1]=c[1]; rgbF[o+2]=c[2]; };
+            const xm = r.xmag ? 2 : 1, ym = r.ymag ? 2 : 1, pt = r.parts[0];
+            const x0 = ((FW - pt.w*xm*CW) >> 1), y0 = FH - 6 - pt.h*ym*CH;
+            for (let y = 0; y < pt.h*ym; y++) for (let x = 0; x < pt.w*xm; x++) {
+              const v = pt.at((x/xm)|0, (y/ym)|0);
+              if (!v) continue;
+              const px2 = x0 + x*CW, py2 = y0 + y*CH;
+              for (let b2 = 0; b2 < CH; b2++) for (let c2 = 0; c2 < CW; c2++)
+                putF(px2+c2, py2+b2,
+                  v===3?[255,255,255]:v===2?[186,186,196]:[118,118,128]);
+            }
+            writeFileSync(`gif-idolfit-${String(i).padStart(2,'0')}.png`, png(FW, FH, rgbF));
+          });
+          console.error(`  gif-idolfit-NN.png: ${all.length} frames (${mode})`);
+        }
+      }
+    }
+    // ---- IDOLBLEND=<w>: EVERY rung is a per-pixel blend of the two sources ----
+    // Not a crossover -- switching sources at one rung makes the silhouette change shape as you
+    // walk toward it, because the two do not agree about the animal. Blending every rung keeps
+    // one shape throughout and lets each source contribute what it is good at: the hand-tuned
+    // master supplies solid strokes, the fitted art supplies the eyes and the ring.
+    // w = 0 is all hand-tuned, 1 is all fitted.
+    // PRESENCE is decided before LEVEL. A pixel inked in only one source is not "half ink" --
+    // averaging 0 with 3 would put dark-grey fringe everywhere the two silhouettes disagree, so
+    // the weight decides whether that pixel exists at all, and only then do the levels mix.
+    if (process.env.IDOLBLEND) {
+      for (const ws of process.env.IDOLBLEND.split(',')) {
+        const w0 = +ws;
+        const gridOf = h => {
+          const w = orbW(h), hand = idolScale(idolW(h), h);
+          const out = [...Array(21)].map(() => new Array(12).fill(0));
+          const px = fitArt(process.env.IDOLART ?? 'goat5.png', w, h,
+                            { dither: false, contrast: +(process.env.IDOLMIXC ?? 1.6), dark: true }).px;
+          const ox = (12 - w) >> 1, oy = 21 - h;
+          for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
+            const f = px[dy * w + dx], g = hand[oy + dy][ox + dx];
+            let v;
+            if (f && g) v = Math.round(w0 * f + (1 - w0) * g);      // both: mix the levels
+            else if (f) v = (w0 >= 0.5) ? f : 0;                    // only the fit has it
+            else if (g) v = (w0 < 0.5) ? g : 0;                     // only the hand has it
+            else v = 0;
+            out[oy + dy][ox + dx] = Math.max(0, Math.min(3, v));
+          }
+          return out;
+        };
+        const rung = (h, e) => { const g = gridOf(h);
+          return { xmag: e, ymag: e,
+                   parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; };
+        const magH = ORB_H.filter(h => 2 * h > SH);
+        const tag = `idol-blend${String(w0).replace('.', '')}`;
+        const all = [...magH.map(h => rung(h, 1)), ...ORB_H.map(h => rung(h, 0))];
+        sheet(tag, all);
+        // ...and one frame per rung on a fixed canvas, for the animation. Same rules as the
+        // orb's: bottom-anchored, centred on the sprite centre, no hardware box.
+        const FW = 12 * 2 * CW + 12, FH = 21 * 2 * CH + 12;
+        all.forEach((r, i) => {
+          const rgbF = new Uint8Array(FW * FH * 3);
+          for (let q = 0; q < FW * FH; q++) { rgbF[q*3] = 22; rgbF[q*3+1] = 22; rgbF[q*3+2] = 22; }
+          const putF = (x, y, c) => { if (x < 0 || y < 0 || x >= FW || y >= FH) return;
+            const o = (y * FW + x) * 3; rgbF[o] = c[0]; rgbF[o+1] = c[1]; rgbF[o+2] = c[2]; };
+          const xm = r.xmag ? 2 : 1, ym = r.ymag ? 2 : 1, pt = r.parts[0];
+          const x0 = ((FW - pt.w * xm * CW) >> 1), y0 = FH - 6 - pt.h * ym * CH;
+          for (let y = 0; y < pt.h * ym; y++) for (let x = 0; x < pt.w * xm; x++) {
+            const v = pt.at((x / xm) | 0, (y / ym) | 0);
+            if (!v) continue;
+            const px2 = x0 + x * CW, py2 = y0 + y * CH;
+            for (let b2 = 0; b2 < CH; b2++) for (let c2 = 0; c2 < CW; c2++)
+              putF(px2 + c2, py2 + b2,
+                v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
+          }
+          writeFileSync(`gif-${tag}-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
+        });
+        console.error(`  gif-${tag}-NN.png: ${all.length} frames`);
+      }
+    }
+    // ---- IDOLMIX=<h>: hi-res art above this bitmap height, the hand-tuned 12x21 below ----
+    // The two sources fail in opposite directions. Fitted hi-res art carries the eyes, the ring
+    // and the modelling at the large rungs and averages to mush at the small ones, because a
+    // horned head inside a ring cannot be said in seven columns. The hand-tuned 12x21 is already
+    // a bold simplification, so box-filtering it KEEPS strokes solid all the way down -- and it
+    // has nothing extra to give at the top, where its own resolution runs out.
+    // So: take each where it wins. The seam is the thing to watch, since the two do not agree
+    // about what the face looks like and the crossover rung can pop.
+    if (process.env.IDOLMIX) {
+      const cut = +process.env.IDOLMIX;
+      const con = +(process.env.IDOLMIXC ?? 1.6);
+      const gridOf = h => {
+        const w = orbW(h);
+        if (h < cut) return idolScale(idolW(h), h);        // the hand-tuned master, filtered
+        const out = [...Array(21)].map(() => new Array(12).fill(0));
+        const px = fitArt(process.env.IDOLART ?? 'goat4.png', w, h,
+                          { dither: false, contrast: con, dark: true }).px;
+        const ox = (12 - w) >> 1, oy = 21 - h;
+        for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
+          out[oy + dy][ox + dx] = px[dy * w + dx];
+        return out;
+      };
+      const rung = (h, e) => { const g = gridOf(h);
+        return { xmag: e, ymag: e,
+                 parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; };
+      const magH = ORB_H.filter(h => 2 * h > SH);
+      sheet(`idol-mix${cut}`, [...magH.map(h => rung(h, 1)), ...ORB_H.map(h => rung(h, 0))]);
+      console.error(`    idol mix at h<${cut}: hand-tuned for ` +
+        ORB_H.filter(h => h < cut).join(',') + '; fitted for ' +
+        ORB_H.filter(h => h >= cut).join(','));
+    }
+    // ---- the idol as frames, on the same fixed canvas as the orb's ----
+    // It rides the orb's rungs, so this is the same sixteen sizes with a different picture --
+    // which is the point: played side by side, the two ladders should step together.
+    if (process.env.ORBSHRINK) {
+      const FW = 12 * 2 * CW + 12, FH = 21 * 2 * CH + 12;
+      reach.forEach((v, i) => {
+        const bm = IDOLBM[ORBSRC[v]] ?? [];
+        const rgbF = new Uint8Array(FW * FH * 3);
+        for (let q = 0; q < FW * FH; q++) { rgbF[q*3] = 22; rgbF[q*3+1] = 22; rgbF[q*3+2] = 22; }
+        const putF = (x, y, c) => { if (x < 0 || y < 0 || x >= FW || y >= FH) return;
+          const o = (y * FW + x) * 3; rgbF[o] = c[0]; rgbF[o+1] = c[1]; rgbF[o+2] = c[2]; };
+        const xm = LADDER[v].exp ? 2 : 1, ym = xm;
+        const x0 = ((FW - 12 * xm * CW) >> 1), y0 = FH - 6 - 21 * ym * CH;
+        for (let y = 0; y < 21 * ym; y++) for (let x = 0; x < 12 * xm; x++) {
+          const vv = bmPix(bm, (x / xm) | 0, (y / ym) | 0);
+          if (!vv) continue;
+          const px = x0 + x * CW, py = y0 + y * CH;
+          for (let b = 0; b < CH; b++) for (let c = 0; c < CW; c++)
+            putF(px + c, py + b,
+              vv === 3 ? [255, 255, 255] : vv === 2 ? [186, 186, 196] : [118, 118, 128]);
+        }
+        writeFileSync(`gif-idol-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
+      });
+      console.error(`  gif-idol-NN.png: ${reach.length} frames`);
+    }
+    if (process.env.IDOLDBG) idolG.forEach((g, n) => {
+      const hs = [...Array(256).keys()].filter(h => g.includes(orbVarT[h]));
+      const far = hs.length ? (22528 / hs[0] / 256) : 0;
+      const near = hs.length ? (22528 / hs[hs.length - 1] / 256) : 0;
+      console.error(`    idol col ${String(n + 1).padStart(2)}  bm${String(ORBSRC[g[0]]).padStart(2)}` +
+        `  ${ORBTALL[g[0]]}h${LADDER[g[0]].exp ? ' x2' : '   '}` +
+        `  variants ${g.join(',')}  ${near.toFixed(2)}-${far.toFixed(2)} cells`);
+    });
+  }
+  // ---- ORBSHRINK=1: a ladder PEELED from the full-size rung instead of refitted ----
+  // The shipping ladder fits every rung from the source art, which keeps the dither grain
+  // constant per pixel (see orbScale). This is the other idea: take the biggest unmagnified
+  // rung and take one pixel off each side, over and over, so the ball closes evenly on its
+  // own centre. Magnification ignored on purpose -- this is about the shape, not the bands.
+  // Note where it runs out: 12 wide loses two per step, so the WIDTH is spent after six rungs
+  // while the height still has room. That is the thing to look at.
+  if (process.env.ORBSHRINK) {
+    const box = g => { let x0 = 99, y0 = 99, x1 = -1, y1 = -1;
+      g.forEach((row, y) => row.forEach((v, x) => { if (v) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } }));
+      return [x0, y0, x1, y1]; };
+    // Resample the previous rung's content box into one a pixel smaller all round, by the same
+    // majority vote orbScale uses, so the two are compared on equal terms.
+    const peel = g => {
+      const [x0, y0, x1, y1] = box(g), w = x1 - x0 + 1, h = y1 - y0 + 1;
+      const nw = w - 2, nh = h - 2;
+      if (nw < 1 || nh < 1) return null;
+      const out = [...Array(21)].map(() => new Array(12).fill(0));
+      const ox = (12 - nw) >> 1, oy = 21 - nh;
+      for (let dy = 0; dy < nh; dy++) for (let dx = 0; dx < nw; dx++) {
+        const t = [0, 0, 0, 0];
+        for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+          const sx = x0 + Math.floor(w * (dx + (i + 0.5) / 4) / nw);
+          const sy = y0 + Math.floor(h * (dy + (j + 0.5) / 4) / nh);
+          if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[g[sy][sx]]++;
+        }
+        let bn = -1, v = 0;
+        for (let k = 0; k < 4; k++) if (t[k] >= bn) { bn = t[k]; v = k; }
+        out[oy + dy][ox + dx] = v;
+      }
+      return out;
+    };
+    const grids = [orbScale(orbW(SH), SH)];
+    for (let g = peel(grids[0]); g; g = peel(g)) grids.push(g);
+    console.error(`    orb shrink: ${grids.length} rungs by peeling ` +
+      grids.map(g => { const [x0, y0, x1, y1] = box(g);
+                       return `${x1 - x0 + 1}x${y1 - y0 + 1}`; }).join(' '));
+    sheet('orb-shrink', grids.map(g => ({ xmag: 0, ymag: 0,
+      parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] })));
+    // ---- and the same idea at the RIGHT rate ----
+    // A pixel off each side is not an even shrink on this sprite: 2 of 12 columns is 17% of the
+    // width against 2 of 21 rows at 10%, so the ball turns into an egg and then a sliver, and
+    // the width is spent while the height still has ten rungs to give. The ladder's own widths
+    // (orbW: round(12*h/21)) step ONCE per two rows, which is the rate that keeps it round.
+    // So: the same peel-from-the-rung-above, but to the sizes the ladder actually uses. This
+    // is the honest A/B against the shipping art, which refits each rung from the source.
+    const to = (g, nw, nh) => {
+      const [x0, y0, x1, y1] = box(g), w = x1 - x0 + 1, h = y1 - y0 + 1;
+      const out = [...Array(21)].map(() => new Array(12).fill(0));
+      const ox = (12 - nw) >> 1, oy = 21 - nh;
+      for (let dy = 0; dy < nh; dy++) for (let dx = 0; dx < nw; dx++) {
+        const t = [0, 0, 0, 0];
+        for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+          const sx = x0 + Math.floor(w * (dx + (i + 0.5) / 4) / nw);
+          const sy = y0 + Math.floor(h * (dy + (j + 0.5) / 4) / nh);
+          if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[g[sy][sx]]++;
+        }
+        let bn = -1, v = 0;
+        for (let k = 0; k < 4; k++) if (t[k] >= bn) { bn = t[k]; v = k; }
+        out[oy + dy][ox + dx] = v;
+      }
+      return out;
+    };
+    const chain = [orbScale(orbW(SH), SH)];
+    for (let h = SH - 2; h >= 1; h -= 2) chain.push(to(chain[chain.length - 1], orbW(h), h));
+    console.error(`    orb chain : ${chain.length} rungs, each peeled from the one above, at ` +
+      `the ladder's own sizes ` + [...Array(chain.length)].map((_, i) =>
+        `${orbW(SH - 2 * i)}x${SH - 2 * i}`).join(' '));
+    sheet('orb-chain', chain.map(g => ({ xmag: 0, ymag: 0,
+      parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] })));
+    // ---- WIDTH drives, height follows, every rung fit from the ORIGINAL ----
+    // The peel strip failed for two separate reasons and this separates them: it took two off
+    // BOTH axes (so the ball went oval) and it resampled a resample (so the grain washed out).
+    // Here the width steps by two -- one pixel off each side, the rule as stated -- the height
+    // follows from the source's own aspect, and every rung is fit from the art. Six rungs,
+    // because twelve columns only has six pairs to give.
+    const wfit = [];
+    for (let w = 12; w >= 2; w -= 2) wfit.push([w, Math.max(1, Math.round(SH * w / SW))]);
+    console.error(`    orb wfit  : ${wfit.length} rungs, width -2 a step, height following: ` +
+      wfit.map(([w, h]) => `${w}x${h}`).join(' ') + `  -- apparent-height steps ` +
+      wfit.slice(1).map(([, h], i) => `${(100 * (wfit[i][1] - h) / wfit[i][1]).toFixed(0)}%`).join(' '));
+    sheet('orb-wfit', wfit.map(([w, h]) => { const g = orbScale(w, h);
+      return { xmag: 0, ymag: 0,
+               parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; }));
+    // ...and the shipping ladder's unmagnified rungs, refit from source, for the same sizes.
+    const fit = [];
+    for (let h = SH; h >= 1; h -= 2) fit.push(orbScale(orbW(h), h));
+    sheet('orb-fit', fit.map(g => ({ xmag: 0, ymag: 0,
+      parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] })));
+    // ...and the SHIPPING unmagnified rungs, decoded from the packed bitmaps the disk carries.
+    // If this is pixel-identical to orb-fit then that strip is not an approximation of the
+    // bottom half of the ladder, it IS the bottom half of the ladder.
+    // v < ANG_V0: the ANGEL's rungs are appended to this same list and are unmagnified too,
+    // so a plain "not expanded" filter pulls in twenty of them.
+    const ship = LADDER.map((r, v) => v).filter(v => v < ANG_V0 && !LADDER[v].exp);
+    sheet('orb-ship11', ship.map(v => ({ xmag: 0, ymag: 0,
+      parts: [{ w: 12, h: 21, ox: 0, oy: 0,
+                at: (x, y) => bmPix(ORBBM[ORBSRC[v]], x, y) }] })));
+    console.error(`    orb ship11: ${ship.length} unmagnified rungs, variants ${ship[0]}..${
+      ship[ship.length - 1]}, bitmap heights ` + ship.map(v => LADDER[v].h).join(','));
+    // ---- ORBN=n: the same ladder at n steps, LINEAR and GEOMETRIC, side by side ----
+    // The shipping rule is linear in height: 21,19,17,...,1, two off each rung. Linear in
+    // HEIGHT is not even in APPEARANCE, because what the eye reads is the ratio between one
+    // rung and the next -- and that ratio runs 21/19 = 1.11 at the near end to 3/1 = 3.00 at
+    // the far one. The last rung is three times smaller than its neighbour while the first is
+    // a tenth smaller. A geometric ladder holds the ratio constant instead, which is what
+    // "shrinking evenly" means once the thing is far enough away to be small.
+    const rungs = +(process.env.ORBN ?? 8);
+    const ratios = hs => hs.slice(1).map((h, i) => (hs[i] / h).toFixed(2));
+    // ---- where the magnified half stops ----
+    // A bitmap magnified is 2h apparent and plain is h, so the SAME picture serves two rungs.
+    // The magnified half only needs to run down to where the largest plain rung takes over:
+    // the last useful magnified slot is the smallest h with 2h > SH. Below that its apparent
+    // height is under 21 and the plain ladder already covers it, so it would be a duplicate.
+    const mag = hs => hs.filter(h => 2 * h > SH);
+    const both = hs => [...mag(hs).map(h => 2 * h), ...hs];
+    const strip = (nm, hs) => {
+      const m = mag(hs), full = both(hs);
+      console.error(`    ${nm}: slots 1..${m.length} reuse magnified (h ${m.join(',')}` +
+        ` -> apparent ${m.map(h => 2 * h).join(',')}), slots ${m.length + 1}..${hs.length}` +
+        ` are plain only\n      ${full.length} rungs from ${hs.length} bitmaps: ${full.join(' ')}` +
+        `\n      ratios ` + full.slice(1).map((h, i) => (full[i] / h).toFixed(2)).join(' '));
+      stripDraw(nm, hs);
+      // ...and the LADDER AS PLAYED: the magnified slots at their magnification, then the
+      // plain ones. Same ten bitmaps, sixteen rungs, in the order you meet them walking back.
+      const rung = (h, e) => { const g = orbScale(orbW(h), h);
+        return { xmag: e, ymag: e,
+                 parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; };
+      sheet(`${nm}-full`, [...m.map(h => rung(h, 1)), ...hs.map(h => rung(h, 0))]);
+      // ---- ONE PNG PER RUNG, on a fixed canvas, for an animation ----
+      // Comparing neighbours in a strip is exactly what misleads: every pair looks fine and the
+      // eye cannot integrate ten of them. Played as frames the uneven steps announce themselves.
+      // Fixed canvas, bottom-anchored and centred, no hardware box -- the orb has to shrink in
+      // place, because a box that resizes with it reads as the thing that is moving.
+      const all = [...m.map(h => rung(h, 1)), ...hs.map(h => rung(h, 0))];
+      const FW = 12 * 2 * CW + 12, FH = 21 * 2 * CH + 12;
+      all.forEach((r, i) => {
+        const rgbF = new Uint8Array(FW * FH * 3);
+        for (let q = 0; q < FW * FH; q++) { rgbF[q*3] = 22; rgbF[q*3+1] = 22; rgbF[q*3+2] = 22; }
+        const putF = (x, y, c) => { if (x < 0 || y < 0 || x >= FW || y >= FH) return;
+          const o = (y * FW + x) * 3; rgbF[o] = c[0]; rgbF[o+1] = c[1]; rgbF[o+2] = c[2]; };
+        const xm = r.xmag ? 2 : 1, ym = r.ymag ? 2 : 1, pt = r.parts[0];
+        // bottom-anchored, and centred on the SPRITE's centre -- which is where the runtime
+        // anchors it too (see orbHalfT), so the ball does not swim as its width changes
+        const x0 = ((FW - pt.w * xm * CW) >> 1), y0 = FH - 6 - pt.h * ym * CH;
+        for (let y = 0; y < pt.h * ym; y++) for (let x = 0; x < pt.w * xm; x++) {
+          const v = pt.at((x / xm) | 0, (y / ym) | 0);
+          if (!v) continue;
+          const px = x0 + x * CW, py = y0 + y * CH;
+          for (let b = 0; b < CH; b++) for (let c = 0; c < CW; c++)
+            putF(px + c, py + b,
+              v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
+        }
+        writeFileSync(`gif-${nm}-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
+      });
+      console.error(`  gif-${nm}-NN.png: ${all.length} frames, ${FW}x${FH}`);
+      return;
+    };
+    const stripDraw = (nm, hs) => {
+      console.error(`    orb ${nm.padEnd(6)}: ${hs.length} rungs  ` +
+        hs.map(h => `${orbW(h)}x${h}`).join(' ') + `\n              ratios ` +
+        ratios(hs).join(' ') + `  (spread ${Math.min(...ratios(hs).map(Number)).toFixed(2)}-` +
+        `${Math.max(...ratios(hs).map(Number)).toFixed(2)})`);
+      sheet(nm, hs.map(h => { const g = orbScale(orbW(h), h);
+        return { xmag: 0, ymag: 0,
+                 parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; }));
+    };
+    // LINEAR: equal steps in height, the shipping rule at a coarser pitch.
+    const lin = [...Array(rungs)].map((_, i) =>
+      Math.max(1, Math.round(SH - i * (SH - 1) / (rungs - 1))));
+    strip(`orb-lin${rungs}`, [...new Set(lin)]);
+    // GEOMETRIC: equal RATIOS. Stops at 2 rather than 1 -- the last two rounds collide at 1,
+    // and a one-pixel rung is a dot rather than a ball anyway.
+    const k = Math.pow(2 / SH, 1 / (rungs - 1));
+    const geo = [...Array(rungs)].map((_, i) => Math.max(1, Math.round(SH * Math.pow(k, i))));
+    strip(`orb-geo${rungs}`, [...new Set(geo)]);
+    // ---- and the tunable one: n rungs from SH down to a STATED floor, biased by a power ----
+    // h = lo + (SH - lo) * f^p, f running 1 -> 0 across the ladder.
+    //   p = 1    linear, the shipping shape
+    //   p < 1    h falls slowly at first: MORE rungs spent on the large end, which is where
+    //            the player actually stands, and a coarser far end as the price
+    // The floor is stated rather than 1 because a one-pixel rung is a dot, not a ball -- it
+    // costs 64 bytes of bank 3 to draw something the eye reads as dirt on the screen. Whatever
+    // is smaller than the floor holds at the floor, the way hlRungP clamps the pedestal now.
+    // The SHIPPING ladder as frames too, as the baseline any candidate has to beat. Taken
+    // from LADDER itself rather than re-derived, so it is the real thing: 22 rungs, the first
+    // 11 magnified stepping the bitmap by one, then 11 plain stepping by two.
+    {
+      const all = LADDER.slice(0, ANG_V0);
+      const FW = 12 * 2 * CW + 12, FH = 21 * 2 * CH + 12;
+      all.forEach((r, i) => {
+        const g = orbScale(orbW(r.h), r.h);
+        const rgbF = new Uint8Array(FW * FH * 3);
+        for (let q = 0; q < FW * FH; q++) { rgbF[q*3] = 22; rgbF[q*3+1] = 22; rgbF[q*3+2] = 22; }
+        const putF = (x, y, c) => { if (x < 0 || y < 0 || x >= FW || y >= FH) return;
+          const o = (y * FW + x) * 3; rgbF[o] = c[0]; rgbF[o+1] = c[1]; rgbF[o+2] = c[2]; };
+        const xm = r.exp ? 2 : 1, ym = xm;
+        const x0 = ((FW - 12 * xm * CW) >> 1), y0 = FH - 6 - 21 * ym * CH;
+        for (let y = 0; y < 21 * ym; y++) for (let x = 0; x < 12 * xm; x++) {
+          const v = g[(y / ym) | 0][(x / xm) | 0];
+          if (!v) continue;
+          const px = x0 + x * CW, py = y0 + y * CH;
+          for (let b = 0; b < CH; b++) for (let c = 0; c < CW; c++)
+            putF(px + c, py + b,
+              v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
+        }
+        writeFileSync(`gif-orb-ship-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
+      });
+      console.error(`  gif-orb-ship-NN.png: ${all.length} frames (the shipping ladder)`);
+    }
+    for (const spec of (process.env.ORBSET ?? '10:3:1,10:5:1,10:5:0.85').split(',')) {
+      const [n, lo, pw] = spec.split(':').map(Number);
+      const hs = [...new Set([...Array(n)].map((_, i) => {
+        const f = (n - 1 - i) / (n - 1);
+        return Math.max(1, Math.round(lo + (SH - lo) * Math.pow(f, pw)));
+      }))];
+      strip(`orb-n${n}lo${lo}p${String(pw).replace('.', '')}`, hs);
+    }
+  }
+
   console.error('  entity ladder: rung:h, x2 = the hardware doubles it vertically');
   console.error('    ' + LADDER.map((r, i) => `${i}:${r.h}${r.exp ? 'x2' : ''}`).join('  '));
   // How different is each hole rung from the one before it, as SHAPE rather than as numbers?
@@ -6356,13 +8039,19 @@ console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} s
 // The three sprite blocks share VIC bank 3 and are loaded as SEPARATE FILES, so an overlap is
 // silent: the later file simply overwrites the earlier one's art and the wrong sprites appear on
 // screen with everything else -- pointers, positions, enable bits -- looking perfectly correct.
-// That is exactly how a fixed SEATBASE survived the orb ladder growing past it.
+// That is exactly how a fixed PICBASE survived the orb ladder growing past it.
 {
   // The LOADER itself lives in this bank and is RUNNING while the segments arrive, so a segment
   // that reaches it overwrites itself mid-load and the machine drops back to BASIC. That has
   // happened before -- it is why LOADER_RUN moved from $cb00 to $cf00.
-  const blocks = [['orb ladder', SPRBASE, NORBBM * 64],
-
+  const blocks = [['orb ladder', SPRBASE, ORBLO_N * 64],
+                  // The tail of the ladder, and what took its place. The scratch is in here
+                  // because it is the whole point of the split: if a sprite block ever grows
+                  // back over $ee00-$f0ff it would land on sideT/idT/stackLT/stackRT, and the
+                  // symptom would be geometry corruption rather than a wrong-looking sprite.
+                  ['orb ladder tail', ORBHI, ORBHI_N * 64],
+                  ...(ORBHI_N ? [['renderer scratch', 0xee00, ORBHI_N * 64]] : []),
+                  ['idol', IDOLBASE, IDOLBM.length * 64],
                   ['hole ladder', HOLEBASE, HOLEBM.length * 64],
                   ['the loader', LOADER_RUN, 0x100]];
   for (const [an, aa, al] of blocks) for (const [bn, ba, bl] of blocks)
@@ -6435,6 +8124,49 @@ const HTABLE = 0x4d00;                  // page-aligned: 16 height tables x 3 pa
 const vm = scr => (((scr - VBANK) >> 10) & 15) << 4;
 const cb = cs => (((cs - VBANK) >> 11) & 7) << 1;
 const CB_A = cb(CHARSET), CB_B = cb(CHARSET_B);
+// ---- THE DEPARTING ARC'S OWN DICTIONARY, in a 2KB block of its own ----
+// The rim cannot take the floor's dither out of charset A, because A is also the CEILING's and
+// the two are on screen together: marking A's glyphs marks the wall tops of the room being left.
+// But $d018 is PER RASTER REGION -- pCh0/pCh1/pCh2 are published every frame -- so region 3 can
+// read a different 2KB block, and then the rim's glyphs are nobody else's.
+//
+// The block does not have to BE a charset. Only the ~35 codes the rim can reach are ever named
+// down there, so the other 1768 bytes stay whatever already lives at that address (sprite data).
+// What it costs is a free RUN at the codes we pick. Block 7 ($f800) has $fe40-$fff9 free, which
+// is codes 200-255; block 5 ($d800) has $dcc0-$dfff, codes 152-255. They OVERLAP at 200-255, so
+// putting both arcs' sets at the SAME code numbers in their different blocks will let one map
+// serve both. Only the departing set exists so far.
+const ARC_BLK = 0xf800, ARC_CB = cb(ARC_BLK);
+// 213, not 200. This is only WHERE the dictionary sits inside its 2K block -- the codes are
+// private to the arc blocks, so the constraints are just that the set clears $10000 and misses
+// VOIDCH's own stamp at ARC_BLK + 250*8. Pushing it up buys the LEVEL SHADOW the room the hub's
+// fourth exit needs: the shadow runs from ARC_MAP's end up to ARC_GLY, and a fourth hole-like
+// entity adds 46 bytes to every level's blob -- 138 across three slots.
+const ARC_C0 = 215;                                  // ($feb8 - $f800) / 8; ARC_FILL must stay under VOIDCH
+const ARC_VOID = ARC_C0 + ARC_RIM_CODES.length;      // the hole: all pair 11 -> colour RAM -> black
+const ARC_FILL = ARC_VOID + 1;                       // the flat ground either side of the curve
+const ARC_GLY = ARC_BLK + ARC_C0 * 8;
+// ...and the map lives in bank 3 too, in block 6's free run. It is READ by the CPU, and $f000
+// is plain RAM at the engine's port value, so the only thing it costs is 201 of those bytes --
+// against 201 in the image, which has no run that size to spare. Built from a 33-byte list.
+const ARC_MAP = 0xf368;   // hard against PICBASE's end -- see LVLSHADOW, which follows it
+// ---- ...AND THE ARRIVING ARC'S, in block 5, at the SAME code numbers ----
+// fsLand is B,A,B: region 1 is the arriving rim and region 3 is the new room's floor, both
+// charset B on the same frame and needing opposite dither states -- the rim's surround is the
+// CEILING you came through, which is never dithered, while the floor is. So it needs a set too.
+// Same codes as the departing one, in a different block, so ARC_MAP serves both.
+// Its glyphs never change: they are charset B's own, clean, which is what cpChr has just built
+// when this runs. So it is stamped ONCE at boot, not per fall -- which is what makes the port
+// dance affordable: $d000-$dfff is I/O to the CPU at the engine's $35, and only $34 shows the RAM
+// underneath. The VIC reads it either way.
+const ARC_BLK5 = 0xd800, ARC_CB5 = cb(ARC_BLK5);
+const ARC_GLY5 = ARC_BLK5 + ARC_C0 * 8;
+const ARC_GLY_N = (ARC_FILL + 1 - ARC_C0) * 8;
+if (ARC_FILL > 255) throw new Error(`arc set overruns code 255: ${ARC_RIM_CODES.length} rim codes`);
+// The map itself is built at runtime, into ARC_MAP -- see arcBld. Cell code -> its code in the
+// arc block: SOLID is a cell the rim has already passed, so it becomes the hole; BLANK and
+// anything the walk never saw become the FILL, so a gap in ARC_RIM_CODES draws flat ground
+// rather than sprite data.
 // Raster line of the horizon. The 25-row display window starts at raster 51, so logical
 // row 100 is raster 151; arm the split one line early so the swap lands before that line's
 // character fetch.
@@ -6443,6 +8175,12 @@ const SPLITLINE = 150;
 // and the readout glyphs put their ink on lines 1-5 of the cell.
 const HUDROW = 1;
 const hx = n => '$' + n.toString(16).padStart(2, '0');
+// The stores that rewrite lvlAtT once the late file is in. Built here rather than inside the asm
+// template -- three levels of nested backtick were one too many, and the join leaked into the
+// output as literal text -- and here rather than with LATEHUB, because hx is not declared yet up
+// there and a const in the temporal dead zone throws in every build that has a late level.
+const LATE_AT_CODE = LATE.map((n, i) =>
+  `        lda #${hx(n)}\n        sta lvlAtT+${i}`).join('\n');
 const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 
 // ---- THE PER-LEVEL TABLES, IN ONE PLACE ----
@@ -6491,7 +8229,7 @@ const LVL_TABLES = [
   ['orbXCT', pad([...orbXC, ...HOLELIKE.map(h => h.x)], NOCC)],
   ['orbYCT', pad([...orbYC, ...HOLELIKE.map(h => h.y)], NOCC)],
   ['orbX0T', pad(orbXC, NORB)], ['orbY0T', pad(orbYC, NORB)],
-  ['angBlkT', angBlk],
+  ['angLeashT', angLeash],
   ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
   // An exit hole is black unless its level names a colour (LEVEL_EXITCOL); 15 is an empty
   // socket's grey3 inside its grey1 rim.
@@ -6501,16 +8239,26 @@ const LVL_TABLES = [
   // and the lit top are necessarily the same on every pedestal on screen.
   ['hlFillT', pad(HOLELIKE.map(h => h.exit ? (EXIT_COLS[h.ei] ?? 0)
                                     : h.ped ? PED_COLS[h.pi % PED_COLS.length] : 15), NHOLE)],
-  // Socket -> the GLOBAL wall id it opens, $ff for a socket that opens nothing. It TRAVELS,
-  // because two levels' socket 0 are different sockets opening different walls. It used to be
-  // shared, sized from the live level's socket count and valued from the single wall level: a
-  // chain whose live level had no sockets emitted an empty `!byte` and failed to assemble as
-  // "bad number: $", and a chain with two wall levels would have had level 2's sockets toggling
-  // level 3's walls. Padded to the chain's widest socket count so the swap exchanges in place.
+  // Socket -> the wall id it opens, LOCAL TO THIS LEVEL, $ff for a socket that opens nothing.
+  // It TRAVELS, because two levels' socket 0 are different sockets opening different walls. It
+  // used to be shared, sized from the live level's socket count and valued from the single wall
+  // level: a chain whose live level had no sockets emitted an empty `!byte` and failed to
+  // assemble as "bad number: $", and a chain with two wall levels would have had level 2's
+  // sockets toggling level 3's walls. Padded to the chain's widest socket count.
   ['sockWallT', [...Array(NSOCK)].map((_, i) => {
     const sw = LEVEL_WALLS[LVL]?.sockWall ?? [];
-    return i < sw.length ? WALL_BASE[LVL] + sw[i] : 0xff;
+    return i < sw.length ? sw[i] : 0xff;
   })],
+  // ---- WHERE THIS LEVEL'S WALL DELTAS LIE, one entry per local wall id ----
+  // The four pointer tables used to be image data sized to every wall in the chain, which is
+  // what forced global ids and what put all seven levels' deltas in all seven level files.
+  // In the blob they arrive with the room they describe, so a level names only its own walls
+  // and the engine's wall tables stop growing when a level is added.
+  // Filled in by wallPtrs() below, once the slot layout is known -- a dump cannot compute an
+  // address in a slot it has never seen. Zero for an id this level does not use; nothing reads
+  // those, because wallStT for them is never set.
+  ...['wallDLoT', 'wallDHiT', 'wallCLoT', 'wallCHiT']
+    .map(n => [n, [...Array(NWALL)].map(() => 0), WALL_PTR[n]]),
   ['orbTallT', pad(orbTallT, NORB)],
   // Only where a resident level has an idol. Everything about the idol is gated the same way:
   // the table, its three uses, and the 17 bytes of code they cost. A chain with no idol in it
@@ -6523,6 +8271,7 @@ const LVL_TABLES = [
   // got somehow set to black". Sized across the levels but valued from one of them, which is
   // exactly what orbOccT's stride did.
   ['orbColT2', pad(orbCol, NORB)],
+  ['orbIdolT', pad(orbIdolT, NORB, 0xff)], // which IDOL each slot is, $ff for none -- see IDOL_HOME
   ['orbHid0T', pad(orbHidT, NORB)], // per-entity and per-level: which entities start out of the world
   // The live counts. Shared loops read these instead of an immediate, which is the whole point:
   // a level with a socket has one more hole-like entity than a level without one, and the code
@@ -6534,7 +8283,7 @@ const LVL_TABLES = [
   // One byte per EXIT, padded to NEXIT -- see LEVEL_EXITDST. $ff standalone (or NOFALL=1),
   // and $ff for an exit whose destination has not been built: the hole is then scenery.
   ['lvlNxtT', pad([...Array(Math.max(1, HOLES_AT.length))].map((_, i) => {
-    if (!TWOLEV || process.env.NOFALL) return 0xff;
+    if ((!TWOLEV && !LVLLOAD) || process.env.NOFALL) return 0xff;
     const v = LEVEL_EXITDST[LVL]?.[i];
     if (v === undefined || v === null) return nextLevel(LVL);
       // A destination that is not resident is $ff -- but ONLY when this is a ONE-LEVEL
@@ -6555,20 +8304,40 @@ const LVL_TABLES = [
              Math.max(0, ORBS.length + HOLELIKE.length - 1),
              ORBS.length + HOLELIKE.length,
              HOLES_AT.length + SOCKETS_AT.length]],
+  ['lvlStartT', startBytes(LVL)],   // px lo/hi, py lo/hi, pa, paF -- see startBytes
   ['orbOccLoT', orbOccLo],
   ['orbOccT', process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat],
 ];
+// PED_WALL is an IMMEDIATE in pedGate, so nothing at runtime can notice it drifting from the
+// table the same fact lives in. Check the MEANING: every pedestal on the pedestal level must
+// name exactly the wall pedGate is about to open. If a second level ever grows pedestals, or
+// the hub's three stop agreeing, this fires instead of the wall quietly opening somewhere else.
+if (PED_WALL !== 0xff && HAS_IDOL && CHAIN.includes(PED_LVL)) {
+  const nPed = (LEVEL_PEDESTALS[PED_LVL] ?? '').split(';').filter(Boolean).length;
+  const sw = LEVEL_WALLS[PED_LVL]?.sockWall ?? [];
+  const want = sw.slice(sw.length - nPed);
+  if (!want.length || want.some(w => w !== PED_WALL)) throw new Error(
+    `PED_WALL is ${PED_WALL}, but level ${PED_LVL}'s ${nPed} pedestals name walls ` +
+    `[${want.join(',')}] -- pedGate opens ONE wall as an immediate, so they must agree`);
+  if (ALLLVL.filter(n => LEVEL_PEDESTALS[n]).length > 1) throw new Error(
+    `more than one resident level has pedestals, so PED_WALL cannot be a constant any more -- ` +
+    `pedGate has to read sockWallT the way omWTog does`);
+}
 // Every resident level, live one included: what each entry MEANS, checked against the chain.
-for (const L of [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...(LVLALL ?? [])]) {
+for (const L of [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...LVLSIZED]) {
   // EVERY exit, not just the first: the hub's four each name their own destination.
   for (const [i, nxt] of (L.tables.lvlNxtT ?? []).entries())
-    if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt)) throw new Error(
-      `level ${L.level}'s exit ${i} names level ${nxt}, which is not in the chain ${CHAIN.join(',')}`);
+    if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt) && !LATE.includes(nxt))
+      throw new Error(`level ${L.level}'s exit ${i} names level ${nxt}, which is neither in the ` +
+        `chain ${CHAIN.join(',')} nor declared LATE (${LATE.join(',') || 'none'})`);
+  // Wall ids are LOCAL, so "belongs to another level" is no longer expressible -- the check that
+  // replaces it is that the id names a wall this level actually has. A socket pointing past its
+  // own wall list would index a zero pointer pair and apply a delta from address $0000.
+  const nw = (LEVEL_WALLS[L.level]?.walls ?? []).length;
   for (const [i, w] of (L.tables.sockWallT ?? []).entries())
-    if (w !== 0xff && WALLS_ALL[w]?.lvl !== L.level) throw new Error(
-      `level ${L.level}'s socket ${i} names wall ${w}, which belongs to level ` +
-      `${WALLS_ALL[w]?.lvl ?? '(no such wall)'}. sockWallT holds GLOBAL wall ids and a level may ` +
-      `only open its own walls -- see CHAIN_GLOBAL.`);
+    if (w !== 0xff && w >= nw) throw new Error(
+      `level ${L.level}'s socket ${i} names wall ${w}, but the level declares ${nw} wall group(s) ` +
+      `(ids 0..${nw - 1}). Wall ids are local to a level -- see NWALL.`);
 }
 // ---- The merge-hazard data, FLATTENED so it can travel between levels ----
 // It used to be emitted as a label per shared list (hazL0..hazL7) with hazLoT/hazHiT holding
@@ -6679,7 +8448,12 @@ if (TWOLEV) {
   // was the same thing; in a three-level chain level 3 silently inherited level 2's lists, and
   // level 2 splits nothing, so level 3's free-standing column was merged away and vanished while
   // strafing. The analysis had found its 40 hazard cells all along -- they just never travelled.
-  const HZ_SHAD = new Map(LVLALL.map(L => [L.level, hazTabs(L.haz)]));
+  // LVLSIZED, not LVLALL: a LATE level needs its merge-hazard lists as much as a resident one,
+  // and a level missing from this Map falls back to an empty table that pads to ZERO -- which is
+  // a list pointer of $0000. The first render after swapping into that level then jsr's through
+  // it, and the tell is a PC of $0000. This codebase has had exactly that once before, when
+  // every list pointer in the socket room's shadow came out $0000.
+  const HZ_SHAD = new Map(LVLSIZED.map(L => [L.level, hazTabs(L.haz)]));
   for (const [k, fill] of [['ct', 0], ['lo', 0], ['hi', 0], ['lst', 0], ['rst', '$ff'], ['n', 0xff]]) {
     // At least one byte each: a zero-length chunk would be recorded in lvlLenT as 0, which the
     // swap loop reads as 256 -- and two levels that both split nothing would otherwise produce
@@ -6698,6 +8472,46 @@ if (TWOLEV) {
     LVLALL.map(L => `, level ${L.level} (shadow) splits ${L.nHaz}`).join('') +
     `; ${HZ_LIVE.lst.length + HZ_LIVE.rst.length} list bytes each side`);
 }
+
+// ---- THE SLOT LAYOUT (SOLO=1) ----
+// Computed HERE and not beside LVL_TABLES, because the hazard tables are pushed onto the manifest
+// above and a layout built earlier would be six tables short -- the same trap that made an early
+// ILVL shadow 435 bytes small. Manifest order IS slot order, so mapT (first) lands at offset 0.
+//
+// Eight of these bytes are defined in the image as eight SEPARATE labels under one manifest entry
+// (the entity counts), so the equate block has to name each. Anything else is one label per entry.
+const SLOT_SUB = { nOrbT: ['nOrbT', 'nHoleT', 'nExitT', 'nOrbM1T', 'nSockT', 'nAllM1T', 'nAllT', 'nPedT'] };
+// WHICH LEVEL THIS IS travels with the level. It is one byte and it is read by the HUD, but it is
+// the level's own identity, so leaving it in the image would leave the image knowing which level
+// it was built for -- exactly the privilege SOLO exists to remove.
+if (SOLO) LVL_TABLES.push(['lvlMeT', [LVL]]);
+const SLOT_OFF = {};
+let SLOT_LEN = 0;
+for (const [n, a] of LVL_TABLES) {
+  for (const [i, sub] of (SLOT_SUB[n] ?? [n]).entries()) SLOT_OFF[sub] = SLOT_LEN + i;
+  SLOT_LEN += a.length;
+}
+// The equates the image emits instead of the tables. `name = $addr` writes no bytes, so the
+// image simply has a hole where the level used to be -- and every reference still resolves.
+const slotEquates = () => LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n]))
+  .map(n => `${n} = ${hx16(SLOT_AT + SLOT_OFF[n])}`).join('\n');
+// Every per-level DEFINITION in the source goes through this, so SOLO can delete it in one place.
+// The label survives as an equate; only the bytes go. Written as (name, body, sep) rather than
+// wrapping each site in a nested template literal, because a backtick inside this file's one big
+// template literal has broken the build twice.
+//
+// SUPPRESSED ONLY IF THE SLOT ACTUALLY HOLDS IT. Some of these tables join the manifest
+// conditionally -- the six hazard tables only when a resident level needs a run split, orbArtT
+// only with an idol -- and a level that does not put one in the slot still needs the bytes in the
+// image. Keyed off SLOT_OFF, so the two can never disagree: a label is either an equate into the
+// slot or a definition here, and the guard after the template checks it is exactly one of them.
+const SLOT_DROPPED = new Set();
+const LD = (name, body, sep = ': !byte ') => {
+  if (SOLO && SLOT_OFF[name] !== undefined) { SLOT_DROPPED.add(name); return ''; }
+  return name + sep + body;
+};
+if (SOLO && (SLOT_AT & 255)) throw new Error(
+  `SOLO: SLOT_AT must be page-aligned (mapT sits at offset 0)`);
 
 // The hazard MACHINERY has to exist whenever any resident level needs it, not just when THIS
 // level does. Level 1 splits nothing, so on its own it emits none of this -- but level 2 rides
@@ -6733,14 +8547,25 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   //                shadow made the variant DIFFER from it, and the diff shipped. Caught because
   //                the comment above was made to print the real delta sizes and two of them
   //                grew by three quads.
+  //   wall*T    -> the four wall pointer tables, for the same reason one step removed: they are
+  //                filled by wallPtrs() in the MAIN build, from a slot layout the variant's own
+  //                run knows nothing about, so the variant holds its own addresses and every one
+  //                of them differs. They also cannot change when a wall opens -- they say where
+  //                the patch lists are, and a list does not move because it was applied -- so a
+  //                delta over them is meaningless as well as wrong. (It is not enough that they
+  //                are filled after this runs: the variant's values are non-zero.)
   // Derived from CHAIN_GLOBAL rather than listed, so a table added there cannot miss this.
-  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT', ...Object.keys(CHAIN_GLOBAL)]);
+  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT',
+                        ...Object.keys(WALL_PTR), ...Object.keys(CHAIN_GLOBAL)]);
   const off = [], on = [], quad = [];
   // The baseline is the wall level's tables with the wall PRESENT -- not the live level's. Diffing
   // against whatever happens to be on screen produced a delta describing the difference between
   // two different rooms, which named the wrong cell entirely.
+  // LVLSIZED, not LVLALL: a LATE level's walls have a base too, and it is that level's own dump.
+  // Searching the residents alone returned undefined, which fell back to the LIVE level's map --
+  // so level 5's one-cell wall came out as "removed 120 cells", diffed against level 1's room.
   const base = LVL === WALLS_ALL[k].lvl ? null
-             : (LVLALL ?? []).find(l => l.level === WALLS_ALL[k].lvl)?.tables;
+             : LVLSIZED.find(l => l.level === WALLS_ALL[k].lvl)?.tables;
   for (const [n, liveT] of LVL_TABLES) {
     const live = base ? (base[n] ?? liveT) : liveT;
     const v = WV.tables[n];
@@ -6777,6 +8602,197 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
     `bytes differ, ${quad.length * 4 + 1} bytes both ways (was ${off.length * 6 + 2})`);
   return { off, on, quad, cells };
 }) : null;
+
+// ---- where a LATE level's wall lists land in bank 3, laid out here so both ends agree ----
+// Straight after the level blocks, in the same region and so in the same file: the tables and
+// the walls of a level arrive together or not at all. The image's pointer tables are built from
+// these addresses, so wallTog reads a late level's list exactly as it reads a resident one.
+// Sized and guarded rather than assumed -- the region's slack is small, and the failure if it
+// ever ran past would be a wall that patches whatever came next.
+const LATEWALL_AT = {};
+let LATEWALL_END = 0;   // for the shadow guard, which knows the real ceiling
+// ---- and now decide which wall deltas go in the image's scraps ----
+// AT MODULE LEVEL, before the template is built: packAll() reads the assignment.
+// ...and NOT under SOLO: the deltas are not in the image at all there, they ride in the slot,
+// so there is nothing to place and the probe would be measuring a layout that never ships.
+if (WALL_DELTAS && !PACK_PROBE && !SOLO && process.env.NOPACK !== '1'
+    && !process.env.LVLDUMP && !process.env.WALLOFF) {
+  // ---- THE PROBE, RUN TO A FIXPOINT ----
+  // Each pass builds us again with a stated set of items left out, and reports the holes that
+  // leaves. Omitting everything (the first pass) over-reports, because the remainder pass 2
+  // cannot place goes back inline and eats the space it freed. So: assign from that map, then
+  // re-probe omitting exactly what was placed, and stop when the set stops changing. Two passes
+  // is the normal case; three is the cap, and the last assignment is the one that ships.
+  const probe = `./.packprobe-${process.pid}.json`;
+  const ITEMS = WALL_DELTAS.map((d, k) => LATEWALL.includes(k) ? null
+    : { name: `wallDT${k}`, text: [...d.quad, '$ff'].join(','),
+        size: d.quad.length * 4 + 1 }).filter(Boolean);
+  try {
+    let omit = ITEMS.map(i => i.name), settled = false;
+    for (let pass = 0; pass < 3 && !settled; pass++) {
+      execFileSync(process.execPath, [process.argv[1]],
+        { env: { ...process.env, PACKPROBE: probe, PACKOMIT: omit.join(',') },
+          stdio: ['ignore', 'ignore', 'inherit'] });
+      const { holes, eq } = JSON.parse(readFileSync(probe, 'utf8'));
+      PACK_HOLES.length = 0;
+      // A hole is free of EMITTED data; it is not necessarily free of the PROGRAM. Subtract every
+      // equate's RESERVED EXTENT -- the probe computes those with reserveOf, the build's own rule.
+      const bans = eq.slice().sort((x, y) => x[0] - y[0]);
+      for (const [lo, hi] of holes) {
+        let at = lo;
+        while (at < hi) {
+          const b = bans.find(([bl, bh]) => at >= bl && at < bh);
+          if (b) { at = b[1]; continue; }                       // inside a reservation: step past it
+          const nxt = bans.filter(([bl]) => bl > at).map(([bl]) => bl);
+          const end = Math.min(hi, nxt.length ? Math.min(...nxt) : hi);
+          if (end > at) PACK_HOLES.push({ at, len: end - at, why: `measured hole $${at.toString(16)}` });
+          at = Math.max(end, at + 1);
+        }
+      }
+      // Adjacent survivors merge, or a 200-byte run split at every page boundary would hold
+      // nothing bigger than a page fragment.
+      PACK_HOLES.sort((a, b) => a.at - b.at);
+      for (let i = PACK_HOLES.length - 1; i > 0; i--)
+        if (PACK_HOLES[i - 1].at + PACK_HOLES[i - 1].len === PACK_HOLES[i].at) {
+          PACK_HOLES[i - 1].len += PACK_HOLES[i].len; PACK_HOLES.splice(i, 1);
+        }
+      PACK_HOLES.sort((a, b) => b.len - a.len);
+      packInto(ITEMS);
+      const got = [...PACKED.keys()].sort();
+      settled = got.length === omit.length && got.every((n, x) => n === [...omit].sort()[x]);
+      omit = got;
+    }
+    // PACKMAP=<file>: the SETTLED hole map, for choosing a home for something by hand.
+    if (process.env.PACKMAP) writeFileSync(process.env.PACKMAP,
+      JSON.stringify(PACK_HOLES.map(h => [h.at, h.at + h.len])));
+    if (!settled) console.error('  packer: the probe did not settle in three passes; '
+      + 'the last assignment is used and the equate guard is the backstop');
+  } catch (e) { console.error('  packer: probe pass failed, packing nothing --', e.message.split('\n')[0]); }
+  try { unlinkSync(probe); } catch {}
+}
+if (WALL_DELTAS && !PACK_PROBE && PACKED.size && !process.env.LVLDUMP && !process.env.WALLOFF)
+  console.error(`  packed ${PACKED.size} of ${WALL_DELTAS.length} wall deltas into the image's `
+    + `scraps: ` + [...PACKED].map(([n, at]) => `${n}->$${at.toString(16)}`).join(' '));
+{
+  let at = LVLSHADOW + (LVLALL ?? []).length * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0);
+  // WALL_DELTAS is null in an LVLDUMP subprocess -- it builds no wall variants, being the dump of
+  // one level -- and LATEWALL is a list of indices into it, so this has to stand down there.
+  for (const k of (WALL_DELTAS ? LATEWALL : [])) {
+    const d = WALL_DELTAS[k];
+    // A QUAD ENTRY IS FOUR BYTES, not one: each is the string "addrLo,addrHi,open,closed", which
+    // is why lateWallBytes below splits on commas before resolving. This used to advance by
+    // quad.length + 1 and so handed every late wall after the first an address inside the one
+    // before it -- the same miscount that once put a 221-byte table in a 64-byte hole. It never
+    // showed because the LATE chain has not been buildable since the hub grew its fourth exit.
+    const dN = d.quad.length * 4 + 1;
+    LATEWALL_AT[k] = { d: at, c: at + dN };
+    at += dN + d.cells.length + 1;
+  }
+  // Against the top of the bank only: BANK3_SQUATTERS -- the CPU tables still squatting in bank
+  // 3's tail -- is not built until the disk is assembled, so the STRICT ceiling is checked there,
+  // where the level blocks are already checked against it. This catches the gross case early,
+  // with a message that names the cause.
+  if (LATEWALL.length && at > 0xfff9) throw new Error(
+    `the late levels' wall lists run to $${at.toString(16)}, past the top of bank 3. They sit ` +
+    `above the ${(LVLALL ?? []).length} level blocks; either the blocks or the lists have to ` +
+    `move, or a late level needs fewer walls.`);
+  // ONLY IF THERE ARE LATE WALLS. `at` is seeded past the shadow whether the loop ran or not, so
+  // setting this unconditionally claimed a late-wall region on every build that has none -- it
+  // just happened to be harmless while nothing else was allocated up there. The first SOLO chain
+  // build put its slot at $f500 and the overlap guard reported a 493-byte clash with a region
+  // that does not exist. LATEWALL_END means "the top of the late walls"; with no late walls there
+  // is no such thing, and 0 is what the guard below already tests for.
+  LATEWALL_END = LATEWALL.length ? at : 0;
+}
+// ---- SOLO: the live level's wall lists ride in the slot, behind the manifest blob ----
+// Same treatment a LATE level's walls already get, and for the same reason: the bytes are the
+// level's, so they travel with it and the image only names where they will land. Without this
+// the image still carries 50 bytes describing how ONE level's walls collapse -- and those bytes
+// hold mapT ADDRESSES, which is precisely the data that cannot stay behind when the level moves.
+// ---- WHERE THE LEVEL REGION SITS ----
+// SOLO: one contiguous run in bank 3 holding [live blob][shadow blobs][wall lists], all of it off
+// the disk. The live slot is page-aligned because mapT sits at its offset 0; the shadows are only
+// ever parked bytes, so they need no alignment of their own.
+// Not SOLO: the old layout, live tables in the image and shadows from LVLSHADOW.
+const LVLBLOB = LVL_TABLES.reduce((n, [, a]) => n + a.length, 0);
+const SHADOW_BASE = SOLO ? SLOT_AT + LVLBLOB : LVLSHADOW;
+// ---- A LEVEL'S WALL LISTS SIT BEHIND ITS OWN BLOB, and only its own ----
+// Every level file used to end with EVERY wall in the chain -- seven copies of the same 547
+// bytes, because the pointer tables lived in the image and had to name one address whichever
+// level was in the slot. With the pointers in the blob each file carries its own walls and
+// nothing else, so a file's size follows its level and adding a level changes no other file.
+// Keyed by GLOBAL index (the WALLS_ALL position) because that is what WALL_DELTAS is indexed
+// by; the runtime never sees it -- wallPtrs() below turns it into the local id's slot entry.
+const SOLO_WALL_AT = {};
+let SOLO_WALL_LEN = 0;
+if (SOLO && WALL_DELTAS) {
+  const BASE = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBLOB);
+  // LVLLOAD: one slot, one level in it at a time, so every level's walls start at the same
+  // address and the region is as long as the WORST level's -- not the sum. Without it (all
+  // levels resident at once) they must not overlap, so they run on from each other.
+  let at = BASE;
+  for (const lv of WALL_LVLS) {
+    if (LVLLOAD) at = BASE;
+    for (const [k, w] of WALLS_ALL.entries()) {
+      if (w.lvl !== lv) continue;
+      const d = WALL_DELTAS[k], dN = d.quad.length * 4 + 1;
+      SOLO_WALL_AT[k] = { d: at, c: at + dN };
+      at += dN + d.cells.length + 1;
+    }
+    SOLO_WALL_LEN = Math.max(SOLO_WALL_LEN, at - BASE);
+  }
+}
+// ---- wallPtrs: fill each level's four pointer tables with ITS OWN walls ----
+// Three ways a wall's bytes can be addressed, and the tables hold whichever applies, so wallTog
+// reads one pointer pair and never learns which kind it got:
+//   SOLO      -- behind the level's blob in the slot, a number this build computed;
+//   LATEWALL  -- parked in bank 3 with a level loaded mid-game, likewise a number;
+//   otherwise -- `wallDT${k}` in the image, an assembler expression lvlResolve looks up.
+// An id the level does not use gets 0. That is safe rather than merely unused: wallsBack only
+// applies a wall whose wallStT is set, and only a socket or pedestal naming the id can set it --
+// which the sockWallT guard above has already checked against the level's real wall count.
+const wallPtrs = () => {
+  for (const lv of ALLLVL) {
+    const ent = { wallDLoT: [], wallDHiT: [], wallCLoT: [], wallCHiT: [] };
+    for (let j = 0; j < NWALL; j++) {
+      // No deltas in this build (WALLOFF=k ships the level with a wall already out, and a wall
+      // variant builds none of its own) means there is nothing to point AT -- and the level still
+      // declares its walls, so wallGid finds one. Zero, or the fallback below names a wallDT
+      // label no build emitted.
+      const k = WALL_DELTAS ? wallGid(lv, j) : -1;
+      const at = k < 0 ? null : SOLO ? SOLO_WALL_AT[k] : LATEWALL.includes(k) ? LATEWALL_AT[k] : null;
+      if (k < 0) { for (const n of Object.keys(ent)) ent[n].push(0); continue; }
+      ent.wallDLoT.push(at ? at.d & 255 : `<wallDT${k}`);
+      ent.wallDHiT.push(at ? at.d >> 8 : `>wallDT${k}`);
+      ent.wallCLoT.push(at ? at.c & 255 : `<wallCells${k}`);
+      ent.wallCHiT.push(at ? at.c >> 8 : `>wallCells${k}`);
+    }
+    for (const n of Object.keys(ent)) WALL_PTR[n].set(lv, ent[n]);
+  }
+  // The LIVE level's values also go into the manifest array itself, because that is what a
+  // non-SOLO build emits as `!byte` (the Map is only consulted when a block is assembled from
+  // raw bytes). Same numbers either way.
+  for (const [n, a] of LVL_TABLES)
+    if (WALL_PTR[n]) (WALL_PTR[n].get(LVL) ?? []).forEach((v, i) => { a[i] = v; });
+};
+wallPtrs();
+// The whole level region: live slot, the shadows behind it, then the chain's wall lists. Checked
+// HERE because the wall lists are only sized now, and against the TOP OF THE BANK rather than a
+// slot size -- there is no fixed slot count any more, the region is as long as the chain is.
+const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBLOB) + SOLO_WALL_LEN;
+// The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
+// on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
+// requirements are published -- compaction is a separate pass and can only respect what it is told.
+if (SOLO) writeFileSync('./iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));
+// Above $c000 the ceiling is the top of bank 3; inside the image it is the arena, and the relayout
+// is what decides where that is -- so a region there is checked by the overlap guards instead.
+if (SOLO && SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
+  `SOLO: ${CHAIN.length} levels need $${SLOT_AT.toString(16)}-$${LVLREGION_END.toString(16)} ` +
+  `(${LVLBLOB} bytes each + ${SOLO_WALL_LEN} of wall lists) and bank 3 ends at $fff9. ` +
+  `Fewer resident levels, or the region moves into the image's arena.`);
+if (SOLO) console.error(`level region: ${LVLBLOB} bytes of tables + ${SOLO_WALL_LEN} of wall ` +
+  `lists = ${LVLREGION_END - SLOT_AT} per slot, ${Math.ceil((LVLREGION_END - SLOT_AT) / 256)} pages` +
+  (LVLLOAD ? `; ${CHAIN.length} level file(s), one live slot` : `; ${CHAIN.length} resident`));
 const WALL_DELTA = WALL_DELTAS ? WALL_DELTAS[0] : null;   // the flag; per-wall data is WALL_DELTAS
 
 // LVLDUMP: this build exists only to hand its per-level tables to another one. Stop before
@@ -6796,7 +8812,14 @@ if (process.env.LVLDUMP) {
   process.exit(0);
 }
 
-const asm = `
+let asm = `${!SOLO ? '' : `
+; ---- SOLO=1: THE LEVEL IS NOT IN THIS IMAGE ----
+; Every per-level table is an EQUATE into the slot at ${hx16(SLOT_AT)}, in manifest order, mapT first
+; so it lands page-aligned at offset 0. The bytes arrive as their own disk file. Nothing below
+; changes: every reference still names the label, which now resolves into the slot instead of
+; into a run of !byte the image carries.
+${slotEquates()}
+`}
 charset = ${hx(CHARSET)}        ; where the VIC reads them: under the I/O hole
 charsetB = ${hx(CHARSET_B)}
 px      = $02
@@ -6804,6 +8827,9 @@ py      = $04
 pa      = $06
 ; $07 is free: it was rang, the coarse byte ray angle, dead since castRay's step
 ; signs moved to the fine angle.
+snSrc   = $6d                    ; the snapshot copy's source screen page...
+snDst   = $6e                    ;   ...and its destination page. Zero page: two bytes shorter
+                                 ;   per access, which is what keeps bgCopy inside its block.
 sdx     = $0a
 sdy     = $0b
 ddx     = $0c
@@ -6989,12 +9015,28 @@ cy1     = $85
 ; deadvars is what makes it safe rather than an argument: it reports 0 variables read before being
 ; written, so nothing here is ever consumed before the subdivision pushes to it. If that check ever
 ; comes back non-zero for a $04xx array, this is the first thing to suspect.
-stackLT = $0400
-stackRT = $0480
+; ---- $0400-$062c IS KRILL'S RESIDENT LOADER, AND IT IS PERMANENT ----
+; Declared so the region is RESERVED rather than merely unused -- which is the whole history of
+; low RAM in this build: $0200-$03ff was never reserved, only never counted, and things drifted
+; into it. The hub loads levels 5-7 from disk while the game is running, so these bytes have to
+; survive gameplay; the first rendered frame used to write stackLT straight over them.
+${ORBHI_N ? 'krillRes = $0400' : '; (ORBHI_N=0: the scratch is back in low RAM and there is no room for one)'}
+; ---- FOUR OF THE FIVE MOVED OUT OF $04xx-$06xx (see ORBHI_N) ----
+; $0400-$062c is Krill's resident, and it has to be there: the loader refuses to assemble above
+; $d000, and everything below it is either the image or the charsets. So these four went to the
+; slots the tail of the orb ladder vacated, and the ladder went under the I/O hole.
+; IT COSTS NOTHING. These are NOT in zero page and never were -- $04xx is ordinary absolute
+; memory, and for an indexed array zero page is not even faster: lda zp,x and lda abs,x are both
+; 4 cycles, and only a STORE saves one. What the old addresses actually bought was PAGE
+; ALIGNMENT, so a column index never needs a 16-bit add, and the new ones are aligned the same
+; way -- including stackRT's half-page offset. Same addressing modes, same cycle counts.
+; colH stays: it has 42 of the 65 accesses between the five, and it sits above the resident.
+sideT   = ${hx16(SCRATCH_AT.sideT)}
+idT     = ${hx16(SCRATCH_AT.idT)}
+stackLT = ${hx16(SCRATCH_AT.stackLT)}
+stackRT = ${hx16(SCRATCH_AT.stackRT)}
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
 ; index never needs a 16-bit add.
-sideT   = $0500
-idT     = $0600
 colH    = $0700
 ; ---- the per-frame arrays: ALL of them live in the reclaimed charset source, $3000-$37ff ----
 ; Two evictions got them here, both for the same reason -- an array in the code's growth room is
@@ -7051,8 +9093,32 @@ mxStep  = $7e3d                 ;   ...and the tour step it happened in
 ; in exchange -- gated, so only their own builds reserve it. That trades 24 bytes for 256.
 ; (Not $70xx: that is orbOccT's emitted range, which grows with the level's run count -- the
 ; overlap guard caught exactly that.)
-bfsLast = $7ce8                 ; frameCnt when the fill last ran; see bfsExp
-mulWY   = $7ce9                 ; mulW saves Y here
+; ---- rehomed 2026-09-29: $7ce8/$7d00 is free in every RESIDENT chain and NOT in a LATE one ----
+; There the $7b00 run reaches $7d18 and the program's own scratch sat inside emitted data. The
+; image-vs-equate guard says so, but only once assembly gets far enough to run it, which it did
+; not until the packer freed the block above.
+; The four single bytes go to ZERO PAGE, which is genuinely spare -- 130 bytes unclaimed, and
+; PROFILE says there is no promotion worth making from the hot paths (colH and idT are the big
+; absolute references there and are 160- and 256-byte TABLES; everything else is pivPrep, ~0.3%
+; of a frame). So zero page here is not an optimisation, it is just the safest free space:
+; unclaimed in every chain shape, and a LATE load runs Krill's resident, which owns $e0-$e6 only.
+; obKeyT (NORB bytes) and remHiT (a whole page) are too big for that and take measured-free
+; image space instead -- chosen from the PACKPROBE hole maps of all three shapes, not from one
+; build's report. An equate's reservation is banned from packing, so the packer avoids them
+; without being told.
+; ---- $6300/$6400: pages free in EVERY chain shape ----
+; These six lived at $7ce8/$7d00, which is free in every RESIDENT chain and NOT in a LATE one --
+; there the $7b00 run reaches $7d18 and the program's own scratch sat inside emitted data. The
+; image-vs-equate guard says so, but only once assembly gets far enough to run it, which it did
+; not until the packer freed the block above.
+; $6300 and $6400 were chosen from the MEASURED hole maps of all three shapes (see PACKPROBE),
+; not from reading the report of one. And because an equate's page is banned from packing, the
+; packer avoids them automatically -- the two mechanisms agree without being told to.
+; NOT zero page, though 130 bytes of it are unclaimed: the KERNAL uses $90-$fa during a load and
+; a LATE build loads DURING PLAY. Zero page is worth having for the CYCLES, which is a job for
+; PROFILE to direct, not for a table that only needs somewhere to live.
+bfsLast = $59                   ; frameCnt when the fill last ran; see bfsExp
+mulWY   = $5a                   ; mulW saves Y here
 ${CULLCNT ? `culTot  = $70d0                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
 dbgRun  = $70a4                 ; CULLCNT: per entity, the run that let it show through
 dbgCol  = $70ac
@@ -7093,7 +9159,7 @@ bcSame  = $70ee                 ;   ...of which shared corners (same height both
 ` : ''}${MARCHCNT ? `mcPiv   = $70f0                 ; MARCHCNT: marches at pivot hint brackets
 mcMid   = $70f2                 ;   ...at bisection midpoints
 mcHint  = $70f4                 ;   hints offered per frame, summed
-` : ''}${process.env.FALLMARK ? `fallMk  = $70fc                 ; FALLMARK: how far the fall's level change got\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
+` : ''}${FALLMARK ? `fallMk  = $70fc                 ; FALLMARK=${process.env.FALLMARK}: how far the fall's level change got\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
 ` : ''}${PROFILE ? `pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
@@ -7354,16 +9420,21 @@ amX     = $84fc
 amY     = $84fd
 entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gate must not skip
 dbgOnce = $84f5                  ; DROPNOW only
-${process.env.FALLNOW ? `fnCnt   = $7100                  ; FALLNOW: how many forced falls have been triggered
-fnLog   = $7101                  ;   ...and the level each one left, in order (16 of them).
-${process.env.CEILLOG ? `clP     = $711e                  ; CEILLOG: write cursor into clBuf
-clBuf   = $7120                  ;   per fall frame: irqB0 irqB1 pSplit + row 0 of both buffers
-` : ''}${process.env.FTFREEZE ? `ftFrz   = $711f                  ; FTFREEZE: set once the chosen frame is on screen
-` : ''}${process.env.FTCAP ? `ftBuf   = $7120                  ; FTCAP: per frame, the A/B buffer mismatch and its column at +64
+${process.env.FALLNOW ? `fnCnt   = ${hx16(FNDBG)}                  ; FALLNOW: how many forced falls have been triggered
+fnLog   = ${hx16(FNDBG + 1)}                  ;   ...and the level each one left, in order (16 of them).
+${process.env.CEILLOG ? `clP     = ${hx16(FNDBG + 0x1e)}                  ; CEILLOG: write cursor into clBuf
+clBuf   = ${hx16(FNDBG + 0x20)}                  ;   per fall frame: irqB0 irqB1 pSplit + row 0 of both buffers
+` : ''}${process.env.FTFREEZE ? `ftFrz   = ${hx16(FNDBG + 0x1f)}                  ; FTFREEZE: set once the chosen frame is on screen
+` : ''}${process.env.FTCAP ? `ftBuf   = ${hx16(FNDBG + 0x20)}                  ; FTCAP: per frame, the A/B buffer mismatch and its column at +64
 ` : ''}
-                                 ;   $7100 is the death picture's page in a shipping build, so
-                                 ;   like FRAMELOG and PROFN this needs DIE=0 -- which a FALLNOW
-                                 ;   build wants anyway, for the 691 bytes.
+                                 ;   IN THE RUN THE PACKED CUT-SCENE CHARSET LEAVES FREE, not at
+                                 ;   $7100. $7100 is that charset's own page, so these used to
+                                 ;   demand DIE=0 -- and DIE=0 does not RUN: it stopped
+                                 ;   assembling at all (see RUNTAB) and, once it assembled,
+                                 ;   booted to a garbage screen. A fall test that needs the death
+                                 ;   scene gone in order to watch the fall is testing a machine
+                                 ;   nobody plays. See FNDBG; the image-vs-equate guard names
+                                 ;   these by address if the run ever stops being free.
 ` : ''}
 odBest  = $84f0                  ; the drop/take chooser: best |columns from centre| so far,
 odCell  = $84f1                  ;   what won ($ff = nothing in reach), and the loop counter
@@ -7404,16 +9475,30 @@ ooCY    = $8516                  ; buffered $d01c. STALE: the held object was a 
 ; bank 3, which is the scarce resource: it is what lets a FOURTH level be resident, and it
 ; finally makes bank 3 graphics-only, which the build has been nagging about.
 runPlaneT = $6d00                ; per run id: the wall's plane coordinate and which face is
-runFaceT  = $6e00                ;   visible. Derived by mkRuns at boot and after every level
+runFaceT  = ${hx16(0x6d00 + NRUN)}                ;   visible. Derived by mkRuns at boot and after every level
+                                 ; PACKED IN BEHIND runPlaneT, not given a page of its own.
+                                 ;   NRUN is ${NRUN}, so a page each spent ${512 - 2 * NRUN} bytes on two
+                                 ;   tables that fit in ${2 * NRUN} -- and $6e00-$6eff comes free
+                                 ;   as a whole aligned page, which is where Krill's
+                                 ;   runtime resident goes (251 bytes, load-raw only) so
+                                 ;   that the renderer's scratch never has to leave low
+                                 ;   RAM and the orb ladder keeps all its sprite slots.
+                                 ; runFaceT's ADDRESS IS DERIVED, not written down. It was the
+                                 ;   literal $6d41 until level 7 took NRUN from 65 to 71 and the
+                                 ;   two tables overlapped by six bytes -- silent corruption if
+                                 ;   the overlap guard had not been watching. The ONLY constraint
+                                 ;   is that ${NRUN} entries from ${hx16(0x6d00 + NRUN)} end at ${hx16(0x6cff + 2 * NRUN)}, inside the same
+                                 ;   page, so the indexed reads still cost what they did. That
+                                 ;   holds while NRUN <= 128.
                                  ;   change; a page each because a level may have up to 255 runs
                                  ;   (level 4 has 100, which is what outgrew its old home).
 doomT   = $6c00                  ; per cell: 1 while it belongs to a wall mid-collapse. wallSink
                                  ;   matches the columns showing the doomed group through it, so a
                                  ;   group can be any shape. Written only by wtCells; needs a whole
                                  ;   clear page, which the image now has again.
-obKT    = $7cea                 ; obOrder: the smallest key so far, its entity, and the keys
-obKI    = $7ceb
-obKeyT  = $7cec                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
+obKT    = $5b                   ; obOrder: the smallest key so far, its entity, and the keys
+obKI    = $5c  
+obKeyT  = $a8b3                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
 bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
@@ -7429,8 +9514,8 @@ ${FALLTAIL ? `fallTailB = ${hx16(LOWBOOT)}               ; FALLTAIL: the source 
                                  ;   (The old note, still true of where it came from: CPU-
                                  ;   addressable because the port is $35 all through play --
                                  ;   to hold the real NMI/RESET/IRQ vectors.
-` : ''}fallSnapD = $4900                ; the destination room, snapshotted before the drop begins
-fallSnapS = $6200                ; the room being left
+` : ''}fallSnapD = ${hx16(FALLBUF2)}                ; the destination room, snapshotted before the drop begins
+fallSnapS = ${hx16(FALLBUF)}                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
 fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing
@@ -7575,8 +9660,16 @@ osDC    = $85fb                 ; occStamp: the de-seam's current cell column
 oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
 oSSpn   = $85fe
+oSFbN   = $85ff                 ; OCCFBN: edge cells THIS FRAME that wanted a synthesised glyph
+                                ;   and could not get one -- the scratch codes ran out and oSPfb
+                                ;   stamped the old whole-column block instead. Per frame, zeroed
+                                ;   by occStamp, so a static pose reads the steady-state count.
 ohSv    = $85fa                 ; span right edge / row counter, reused
-osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
+${ANYFLOORDK ? `arcTopR = $3c                   ; region 3's first character row, and the same clamped into the
+arcTopC = $3d                   ;   fill band -- zero page, which is what makes fdSpl fit
+fdA     = $38                   ; fdGlyph's source/destination pointers. Zero page because
+fdB     = $3a                   ;   the glyph walk is (zp),y -- there is no absolute form of it.
+` : ''}osPtr   = $9e                   ; SHARES ocptr: the candidate walk is finished by the time
                                 ;   occStamp runs, so its pointer is free
 omptr   = $87                   ; 2 bytes: this orb's occluder mask. Deliberately SHARES oaL/oaH,
                                 ;   the multiply accumulator, which is dead once the projection
@@ -7589,9 +9682,16 @@ ohDbg   = $85f3                 ; ORBOCCDBG: furthest stage any orb reached this
 ocolN   = $8597                 ; centre column went left of 0: ocol holds the magnitude
 ocanO   = $85e8                 ; the same bit while the candidate list is being walked
 ` : ''}
-bndT    = $7f00                 ; columns where a face or saturation state begins (${hx(NBND)} max)
+bndT    = $9180                 ; columns where a face or saturation state begins (${hx(NBND)} max)
+                                ; MOVED OFF $7f00 (2026-09-26). It is 64 bytes and it was
+                                ;   holding a page down on its own -- the best ratio in the
+                                ;   build -- while the 192 above it sat free. Emptying it
+                                ;   gives seamEdge a whole page to be placed in, which is
+                                ;   what it needs to stop growing into the code headroom.
+                                ;   64 entries from $9180 end at $91bf: no page crossed, so
+                                ;   the indexed reads cost exactly what they did.
 remLoT  = $8300                 ; per marched column: castRay's raw hit distance, 8.8 cells.
-remHiT  = $7d00                 ;   Parked so u can be derived later, only where it is needed.
+remHiT  = $a803                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
@@ -7623,7 +9723,15 @@ entry:
                                 ; $fffa/$fffe out of RAM, so this must install them itself --
                                 ; see below. Writes always land in RAM on a 6510, so the order
                                 ; of the banking and the vector stores does not matter.
-        ; ---- copy both charsets into the RAM under the I/O hole ----
+${process.env.FALLNOW ? `        lda #$00                ; ---- zero the fall-test state ----
+        sta fnCnt               ; It lives in a HOLE in the image (see the equates), and a hole is
+${process.env.FTFREEZE ? `        sta ftFrz               ;   the one place the loader never writes: it powers up holding
+` : ''}                                ;   whatever the machine left there. An uninitialised ftFrz
+                                ;   froze the fall at a RANDOM frame, and two runs of the same
+                                ;   build differed by 5,400 pixels -- which looks exactly like the
+                                ;   rendering change you are trying to measure.
+` : ''}${LATE.length || LVLLOAD ? `        jsr klPark              ; park the LIVE loader before the renderer writes over it
+` : ''}        ; ---- copy both charsets into the RAM under the I/O hole ----
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
         ; CIA registers rather than memory (the build refuses an image past $c000 for the same
         ; reason). Charset A is therefore not loaded at all in the usual sense: the self-extracting
@@ -7670,11 +9778,60 @@ cpChr:  txa
         sta charsetB+1792,x
         inx
         bne cpChr
-        lda #$00
+${ANYFLOORDK ? `        lda #$01                ; entry is the RESTART too, and cpChr has just rebuilt charset B
+        sta fdWas               ;   clean from A -- so fdGlyph's memory of what B holds is stale.
+                                ;   $01 is neither state, so the next arrival rebuilds whatever it
+                                ;   wants rather than trusting a value from before the restart.
+` : ''}${!ANYFLOORDK ? '' : `        jsr arcBl2              ; the arriving arc's set, off charset B while it is still clean
+`}        lda #$00
         sta $d01a
-        lda $dd00               ; VIC bank 3 ($c000-$ffff). The bits are INVERTED, so bank 3 is
-        and #$fc                ; %00 -- "and", where bank 0 was "ora #$03".
+        ; ---- VIC bank 3 ($c000-$ffff), WRITTEN WHOLE, NOT read-modify-written ----
+        ; This was a read-modify-write of $dd00, which is correct C64 practice: bits 0-1
+        ; are the bank, inverted, and the upper bits are the serial lines, so you preserve them.
+        ; With KRILL'S LOADER INSTALLED it is wrong, and its README says so outright -- "the
+        ; upper 6 bits must always be set to 0 [...] no masking of the value read from $dd00
+        ; must be performed". The loader owns those lines and zero is its idle state.
+        ; Leaving them set cost most of a day: loadraw worked when called before this write and
+        ; hung waiting for the drive when called after it, for any file, and every other
+        ; difference between those two moments -- banking, interrupts, badlines, zero page, the
+        ; resident's address and state -- was ruled out one at a time before reading this page.
+        ; The value is Krill's, not the hardware's: it does not invert, so $03 is $0000-$3fff and
+        ; $00 is the $c000 bank we want. Same low bits as before; it is the other six that matter.
+        lda #$00
         sta $dd00
+${process.env.LATENOW ? `        ; LATENOW=1: the BISECT. Call loadraw here, the instant the boot has handed over and
+        ; before the game has done anything at all. If it works here and not at the hub, what
+        ; breaks it is something the game does in between; if it fails here too, it is the
+        ; machine state entry itself sets up. The resident is still at $0400 untouched, so this
+        ; is the same call the hub makes, minus sixty seconds of play.
+${process.env.LATENOW === 'delay' ? `        ; LATENOW=delay: the same call, ~10 seconds later. If the immediate one works and this
+        ; one does not, what breaks the load is ELAPSED TIME -- the drive's own code idling out
+        ; -- and not anything the game does.
+        lda #$20
+dlyA:   ldx #$00
+dlyB:   ldy #$00
+dlyC:   dey
+        bne dlyC
+        dex
+        bne dlyB
+        sec
+        sbc #$01
+        bne dlyA
+` : ''}        lda #$00
+        sta $99
+        lda #$03
+        sta $9a
+        lda #$08
+        sta $ba
+        ldx #<nILAT
+        ldy #>nILAT
+        jsr ${hx16(KRILL_RESIDENT_AT)}
+        sta llErr
+        bcs lnBad
+        lda #$01
+        sta lateOK
+lnBad:
+` : ''}
         lda #$03                ; 24-ROW MODE, ALWAYS -- but DEN OFF until the first frame is
         sta pd11                ;   drawn. entry is the RESTART too, and a death picture is still
         sta $d011               ;   in both buffers while cpChr rebuilds the cell charset beneath
@@ -7771,12 +9928,17 @@ rfCz:   sta cwA,x
                                 ; per cell was removed at 66bc8cf.
                                 ;
                                 ; It is still the live hook for two-patterns-per-code, and
-                                ; more so than before -- every wall pixel is pair 11 now, so
-                                ; $08/$09 per cell would flip that cell's whole wall between
-                                ; black and white. The old encoding's other two values are
-                                ; also still where they were: 01 = $d022 black, 00 = $d021
-                                ; white. What killed it was the per-frame write, not the
-                                ; charset trick.
+                                ; more so than before. THIS SAID "every wall pixel is pair 11
+                                ; now", which is FALSE and cost an afternoon: patBytes builds
+                                ; every cell glyph from FGPX = $40/$10/$04/$01, so a wall pixel
+                                ; is pair 01 = $d022, and pair 11 is deliberately unused (see
+                                ; patBytes for why -- colour RAM only reaches eight colours).
+                                ; It describes PLAN=2, where SOLID becomes $55 and colour RAM
+                                ; means something. Believing it suggested recolouring $d022 per
+                                ; raster region to hide the floor dither above the horizon --
+                                ; which would have repainted every wall in the room.
+                                ; What killed the per-cell trick was the per-frame write, not
+                                ; the charset trick.
 ccf:    sta $d800,x
         sta $d900,x
         sta $da00,x
@@ -7787,7 +9949,23 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta cqN                 ; of 64 or more makes every push hit the full check silently,
                                 ; and the first flush walks 64 garbage pointers writing colour
                                 ; bytes wherever they happen to point.
-` : ''}        jsr lvlStart            ; the LIVE level's start -- boot and every death come here
+` : ''}${!BOOTSLOT ? '' : `        ; ---- BOOTSLOT=1: START IN THE LEVEL THAT ARRIVED FROM ITS OWN FILE ----
+        ; The proof that a level is a loadable pack rather than part of the engine. Slot 0's
+        ; blob is ILVL, which the BOOT LOADER pulls off the disk before any of this runs -- so
+        ; the engine starts, installs a level it did not ship with, and plays it. Everything
+        ; downstream is untouched: mkRuns derives the run tables from the mapT that just
+        ; arrived, objInit places the entities it names, and lvlStart reads the pose out of
+        ; lvlStartT, which now travels WITH the level rather than being indexed by its id.
+        lda #$00
+        jsr lvlSwap             ; live tables <-> slot 0
+${LVLALL.length > 1 ? `        ldx lvlMeT              ; ...and the bookkeeping follows the exchange
+        lda lvlAtT
+        sta lvlMeT
+        stx lvlAtT
+` : `        ldx lvlMeT              ; one slot: which level is in it is known at build time,
+        lda #${hx(LVLALL[0]?.level ?? 0)}                 ;   and lvlAtT is not emitted for a single slot
+        sta lvlMeT
+`}` }        jsr lvlStart            ; the LIVE level's start -- boot and every death come here
 ${SLOWMO ? `        lda #$01
         sta smCnt               ; 1, not SLOWMO: step on the FIRST frame, so the traverse starts
                                 ; from the requested position rather than SLOWMO frames into it
@@ -7822,6 +10000,7 @@ ${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is st
                                 ;   jumping here, and their state is all live RAM
 ` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
+
 ${HAS_IDOL ? `        jsr idolLk              ; AFTER carry is set, not with lvlBoot: this is what puts
                                 ;   idolHd in a known state, and it is RAM that powers up as
                                 ;   garbage -- a non-zero one there and the angels would never
@@ -7953,9 +10132,17 @@ pfNIni: sta pfNum,x
 
 mloop:
 ${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
-${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}
-${SNDTEST ? '        jsr sndKeys             ; 4/5 cutoff, 6/7 pulse width\n' : ''}
-` : ''}        jsr tickDelta
+` : ''}${LATE.length ? `        jsr lateLoad            ; at the hub: pull in the levels its coloured holes lead to.
+                                ; HERE and not in the fall's drop->landing hand-over, which is
+                                ; where it was: that point is mid-animation with the raster split
+                                ; reprogrammed and the buffers part-way through a flip, and the
+                                ; same call that works at entry fails there. Top of a normal
+                                ; frame is the quietest moment the main loop has.
+                                ; NOT nested inside the PALKEYS block, which is where this and
+                                ; dieKey both were: PALKEYS=0 is a BENCHMARKING flag, and it was
+                                ; silently switching off the late load and the restart key with
+                                ; the palette cycling. A thing is gated on its own flag.
+` : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}${SNDTEST ? '        jsr sndKeys             ; 4/5 cutoff, 6/7 pulse width\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
 pdInL:  ldx #$01
 pdInM:  dex
@@ -7984,7 +10171,12 @@ ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: te
                                 ;   run ended only when the poller happened to catch it -- asked
                                 ;   for 7 falls and read at 212, which looks exactly like a test
                                 ;   that hangs. Stopping leaves the state still for the read.
-        ldy hlv                 ; the exit taken, so the log names where THAT one goes
+${FALLEXIT === null ? '' : `        lda #${hx(FALLEXIT)}                 ; FALLEXIT: take THIS exit rather than whichever one hlv
+        cmp nExitT              ;   still names -- but only on a level that HAS it. Forcing an
+        bcc fxOk                ;   index onto the one-exit levels read past the exit list onto a
+        lda #$00                ;   junk cell, so no fall started at all and the run never even
+fxOk:   sta hlv                 ;   reached the hub. fallChk overwrites hlv on a hit anyway.
+`}        ldy hlv                 ; the exit taken, so the log names where THAT one goes
         lda lvlNxtT,y           ; RECORD THE SWAPPED lvlNxtT, NOT lvlMeT. lvlMeT is set FROM
         sta fnLog,x             ;   lvlNxtT, so logging it recorded the INTENT and a broken swap
         inc fnCnt               ;   still produced a perfect sequence -- which is exactly what it
@@ -8823,7 +11015,15 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '' + (ENTPROF ? '        ldx #8\n        jsr pfTick              ; orbOccAll: every entity mask, every frame\n' : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        ldx #9\n        jsr pfTick              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        ldx #10\n        jsr pfTick              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        ldx #11\n        jsr pfTick              ; bfsTick: the distance fill\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
+${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '' + (ENTPROF ? '        ldx #8\n        jsr pfTick              ; orbOccAll: every entity mask, every frame\n' : '') + (ANYFLOORDK ? `        jsr lvlSpr              ; the level's SHARED sprite inks, beside the projection
+                                ;   that decides what osFlush will write. The two have to land on
+                                ;   the SAME frame or the cast recolours in two steps: the bodies
+                                ;   follow the projection, so the shared pair has to as well.
+                                ; Here and not at mnext: fwait falls THROUGH into mnext, so a fall
+                                ;   reaches it -- and this must not run during one, or the idol in
+                                ;   your hands changes colour mid-descent. This half of the loop
+                                ;   is the half a fall skips, which is exactly the property wanted.
+` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        ldx #9\n        jsr pfTick              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        ldx #10\n        jsr pfTick              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        ldx #11\n        jsr pfTick              ; bfsTick: the distance fill\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
         bne dnSkip
         lda iterLo
         cmp #${hx(+process.env.DROPNOW & 255)}
@@ -11579,8 +13779,8 @@ sldLoT: !byte ${sldEnt('<')}
 sldHiT: !byte ${sldEnt('>')}
 edgLoT: !byte ${edgEnt('<')}
 edgHiT: !byte ${edgEnt('>')}
-t1TabT: !byte ${t1Tab.join(',')}
-tbTabT: !byte ${tbTab.join(',')}
+; REMOVED 2026-09-26, nothing in the image named it: t1TabT/tbTabT: the SUPERSEDED form of the fill early-out. kTab two lines above is what
+; ships -- fill = h + kTab[R] -- and these were the per-cell-row thresholds it replaced.
 ${SPRITES ? `
 ; ==================== orbs: projection and placement ====================
 ; Ported from ddfa4bc^ (the pass deleted at ddfa4bc) with three changes for the current map:
@@ -11693,7 +13893,16 @@ ${DIE ? `        ldx dieSt               ; ...but not once the scene has started
                                 ;   the corner would have drawn over it.
         tax
         dex                     ; carry is index+1, so zero can mean empty
-        lda orbColT2,x
+        lda orbColT2,x          ; the idol's OWN body colour, out of THIS level's slot table.
+                                ; It briefly came from idolCar, the room's idol tint, on the
+                                ; grounds that a carried idol has no entry here -- which stopped
+                                ; being true when every level that can hold one started
+                                ; declaring a slot for it. The room's tint made every idol held
+                                ; in the hub light red, whatever you were carrying, and correct
+                                ; again the moment you put it down.
+                                ; The two SHARED inks still re-tone per room (idolU/idolH, and
+                                ; they have to: one pair of registers serves all eight sprites).
+                                ; The body is per sprite, so it answers to nothing but the idol.
         sta obC                 ; the orb's OWN body colour, not the icon's fixed grey
         lda #${hx(orbPtrT[0])}
 ${HAS_IDOL ? `        clc                     ; what you are CARRYING is drawn with its own art too. X is
@@ -11908,8 +14117,15 @@ ${DBGORB ? `        lda #$00
         sta oSOrb
         sta oSSpn
 ` : ''}        lda onv
-        beq oSDn
-${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
+                                ; NO EARLY-OUT ON ZERO any more: a SOCKET can hold a slot when no
+                                ; orb does, its slots are at the far end of the array, and the
+                                ; scratch-glyph and run-cache setup below has to run for it too.
+                                ; The test moved to just above oSLoop, where the setup is done.
+${process.env.OCCFBN ? `        lda #$00
+        sta oSFbN               ; OCCFBN: per frame, so a static pose reads a steady number --
+                                ;   and so it can never be the uninitialised-scratch trap that
+                                ;   FALLNOW's counter was.
+` : ''}${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
         ldx baseHi              ;   Buffer A ($e0) takes the first half, B the second; see OCCSYN.
         cpx #$e0                ;   (A still holds onv for the store below, so X and Y do the test)
         beq oSSynA
@@ -11946,12 +14162,21 @@ oSCbS:  sta oSInv+1
         jmp oSCwS               ;   already poisoned -- but a stamp in the BLANK run was invisible
 oSCwB:  lda #<cwB               ;   to both, so rfCw1's compare kept matching and those rows were
 oSCwS:  sta oSInvW+1            ;   never redrawn again.
+        lda osN
+        beq oSHole              ; no orb slots at all: straight to the hole-like ones
 oSLoop: ldx osI
         lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
         cmp #$fe                ;   below this test is always here, because ORBGATE is off by
         beq oSUpHf              ;   default and cannot be relied on to fence anything
+        cmp #$ff
+        beq oSNext              ; the CARRIED orb's icon: not an entity, and it fills no state
         cmp nOrbT
-        bcs oSNext
+        bcc oSEnt               ; an orb, which always carries it
+        lda obOcc,x             ; hole-like, so only a SOCKET does: holeSlot sets bit 7 on one,
+        bpl oSNext              ;   where an exit hole's obOcc is its fill colour (0-15). The
+                                ;   exit hole keeps holeTail's all-or-nothing test instead --
+                                ;   it is the wall's own black and has nothing to clip.
+oSEnt:
 ${ORBGATE ? `        lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
 ` : ''}
@@ -11965,25 +14190,42 @@ ${DBGORB ? `        inc oSOrb
         ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
         ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
         ; Display y is raster - 50, and a char row is eight of those.
+        ; ---- blank and anchor: from the variant tables for an orb, from the SLOT for a socket ----
+        ; A socket's obV is NOT a variant. holeSlot puts the rung's height in rows there, because
+        ; three hole-like ladders would not fit in orbAnchT's block (four spare bytes; see
+        ; visRows). Its blank count needs no table at all: a hole-like ellipse is drawn from the
+        ; top of its frame, so it is zero. osL/osR are the span-intersection scratch and nothing
+        ; has written them yet this slot -- oSCells is the only reader and the span loop is below.
         ldy obV,x
+        lda obIX,x
+        cmp nOrbT
+        bcs oSRhl
+        lda orbBlankT,y
+        sta osL
+        lda orbAnchT,y
+        sta osR
+        jmp oSRgo
+oSRhl:  lda #$00
+        sta osL
+        sty osR
         ; Display y is raster - 50, and a char row is eight of those. SUBTRACT THE 50 FIRST: obY
         ; is 150 - anchor + h, so obY + anchor is 150 + h, which passes 255 once h > 105 and wraps.
         ; The bottom row then came out tiny, the stamp ran from a bogus row, and black cells landed
         ; on the white CEILING -- long vertical bars, with the de-seam stripping seams nowhere near
         ; the orb. One overflow, both symptoms.
-        lda obY,x
+oSRgo:  lda obY,x
         sec
         sbc #$32
         sta ohSv                ; display y of the sprite frame's top row
         clc
-        adc orbBlankT,y         ; ... plus the blank rows above the content
+        adc osL                 ; ... plus the blank rows above the content
         lsr
         lsr
         lsr
         sta osRow
         lda ohSv
         clc
-        adc orbAnchT,y
+        adc osR
         sec
         sbc #$01                ; the last inked row
         lsr
@@ -12083,7 +14325,7 @@ ${ORBDESEAM ? `        jsr oSDeseam` : `        nop                      ; ORBDE
 oSDsk:  inc osI
         lda osI
         cmp osN
-        bcs oSDn
+        bcs oSHole              ; end of this pass -- there may be a second one
         jmp oSLoop
 ; ---- the UPPER half of a tall entity: take the priority bit, stamp nothing ----
 ; Its rows are already covered -- orbBlankT is negative for a two-sprite variant so the LOWER
@@ -12104,6 +14346,22 @@ oSNext: inc osI
         lda osI
         cmp osN
         bcc oSLoop
+        ; ---- and round again over the HOLE-LIKE slots, which are at the OTHER END ----
+        ; Entity slots run upward from 0 and hole-like ones downward from 8, so the orb loop's
+        ; bound cannot reach a socket however high it counts -- which is why letting sockets past
+        ; the gate above changed nothing at all until this existed. One re-entry rather than a
+        ; second copy of the loop; osN = 8 is also the flag that says this pass has been done,
+        ; and it cannot collide with the first pass, since onv = 8 leaves no slots for holes.
+oSHole: lda osN
+        cmp #$08
+        beq oSDn
+        lda onvH
+        cmp #$08
+        beq oSDn                ; nothing hole-like took a slot this frame
+        sta osI
+        lda #$08
+        sta osN
+        jmp oSLoop
 oSDn:   rts
 
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
@@ -12194,13 +14452,11 @@ ${OCCSYN ? `        ; With synthesis the single-cell case is exact: the covered 
         ldx ohLst
         stx osGly
         ldx ohLstW
-        stx osGlyW
-        jmp oSC1g
+${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jmp oSC1g
 oSC1r:  ldx ohFst
         stx osGly
         ldx ohFstW
-        stx osGlyW
-oSC1g:  pla
+${OCCFB === 'block' ? '        stx osGlyW\n' : ''}oSC1g:  pla
         jsr oSPut
         jmp oSCNx
 ` : `        lda osL
@@ -12240,8 +14496,7 @@ oSCMid: ${DBGORB ? `inc oSCnt
         ldx ohFst
         stx osGly
         ldx ohFstW
-        stx osGlyW
-        jsr oSPut
+${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jsr oSPut
 ` : `lda ohFstM
         jsr oSBack        ; the FIRST cell straddles the wall's edge, so it is stamped
         lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
@@ -12255,8 +14510,7 @@ oSCMs:               ; first cell: the stamp starts part way in, so clip from th
 ${OCCSYN ? `        lda #$00                ; interior: every column covered
         ldx #${hx(OCC_FULL)}
         stx osGly
-        stx osGlyW
-        jsr oSPut
+${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jsr oSPut
         jmp oSCCol
 ` : `        jsr oSWall
         bcc oSCCol              ; ditto for every interior cell
@@ -12267,8 +14521,7 @@ ${OCCSYN ? `        lda #$00                ; interior: every column covered
         ldx ohLst
         stx osGly
         ldx ohLstW
-        stx osGlyW
-        jsr oSPut
+${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jsr oSPut
 ` : `lda ohLstM
         jsr oSBack
         lda ohLst
@@ -12838,6 +15091,34 @@ ${ANGMID ? `        pha                     ; ---- centre a TALL entity on its i
         jmp oMidNo
 oMidSk: pla
 oMidNo:` : ''}
+${HAS_IDOL ? `        ; ---- an idol standing ON a pedestal sits on its TOP plane, not the floor ----
+        ; Everything else is anchored to the floor line at 100 + h. The drum's top is
+        ; 2*PEDH*h above that at every distance -- a fixed fraction of the apparent height the
+        ; projection is already holding -- so this is one table lookup, no distance maths and
+        ; no second art. X still holds ovar for the cap below, so only A and Y move.
+        pha                     ; the floor-anchored Y, while A does the asking
+        ; orbIdolT is nOrbT long and oidx indexes orbs AND holes -- but ocDn above has
+        ; already sent everything at or past nOrbT to holeTail, so nothing reaching here can be
+        ; out of range. Said out loud because the table is short enough to look unsafe.
+        ldy oidx
+        lda orbIdolT,y
+        bmi oPedNo              ; $ff: not an idol, so never raised
+        tay
+        lda idolOnPedT,y
+        beq oPedNo              ; an idol, but standing on the floor like everything else
+        lda ohgt
+        lsr                     ; pedLiftT is indexed by ohgt>>1 -- 64 bytes instead of 128
+        cmp #${hx(PEDLIFT_N)}   ; ...but ohgt is NOT bounded by 127. A cell from a pedestal it
+        bcc oPedIx              ;   is about 147, which indexed ten bytes PAST the table and
+        lda #${hx(PEDLIFT_N - 1)}  ;   lifted the sprite by whatever idolXT happened to hold.
+oPedIx: tay                     ;   Clamped: at that range the drum is taller than the screen
+                                ;   and a row or two of lift is not what you would notice.
+        pla
+        sec
+        sbc pedLiftT,y
+        jmp oPedDn
+oPedNo: pla
+oPedDn:` : ''}
         cmp orbYCapT,x
         bcc orbYok
 orbYCp: lda orbYCapT,x          ; PINNED rather than dropped: an entity you are pressed against
@@ -13321,13 +15602,31 @@ fcHit:  sty hlv                 ; the one we are dropping through
         asl
         asl
         sta hlvOf
-        lda #$00                ; sprites away: they belong to the level being left. Clear the
-        sta omEn                ;   BUFFER, not $d015 -- osFlush runs after the buffer flip,
-        sta omXX                ;   which is past where the fall path rejoins the loop, so it
-        sta omYY                ;   would put the register straight back and leave an orb
-        sta omPri               ;   hanging in space while the world scrolled away behind it
-        sta omX8
-${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
+        ; ---- sprites away: they belong to the level being left ----
+        ; The BUFFER, not $d015 -- osFlush runs after the buffer flip, which is past where the
+        ; fall path rejoins the loop, so it would put the register straight back and leave an
+        ; orb hanging in space while the world scrolled away behind it.
+        ; ...EXCEPT what is in your hands, which is coming with you. The carried icon is slot 0
+        ; and nothing else is, so ONE BIT of each buffer keeps it and drops the rest.
+        ; omEn/omXX/omYY/omPri/omX8 are five CONSECUTIVE bytes, which is what lets one masked
+        ; loop do all five. Enable alone was not enough: omXX and omYY are $d01d and $d017, the
+        ; two expands, and zeroing them left the held idol un-magnified for the whole drop and
+        ; snapping back to size on landing.
+        ldx #$04
+${HAS_IDOL ? `        ldy carry
+        beq fdZap
+fdKeep: lda omEn,x              ; something in hand: keep its slot-0 bit in all five
+        and #$01
+        sta omEn,x
+        dex
+        bpl fdKeep
+        bmi fdSpr               ; always
+` : ''}fdZap:  lda #$00
+fdZLp:  sta omEn,x
+        dex
+        bpl fdZLp
+fdSpr:
+${TWOLEV || LVLLOAD ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
         ; Order is load-bearing twice over. lvlSwap must run before lvlStart reads the destination's
         ; start point, or the player is placed at the spot they just left (it named landXT until
         ; 2026-09-22); and objInit must run after it, because it rebuilds
@@ -13339,7 +15638,13 @@ ${TWOLEV ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DES
                                 ;   four of them. $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
-${LVLALL.length > 1 ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
+${LVLLOAD ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
+${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the arriving file carries its\n                                ;   own, and wallStT is engine state that must not follow us out\n' : ''}        pla
+        jsr lvlLoad             ; A = the level being entered. No slot search and no exchange:
+                                ;   there is one slot, and the arriving level is read over the
+                                ;   departing one. lvlMeT rides in the file, so identity arrives
+                                ;   with the geometry rather than being stored ahead of it.
+` : LVLALL.length > 1 ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        pla
         ldx #${hx(LVLALL.length - 1)}   ; WHICH SLOT is it in now? Not a build-time constant: the
 lvFind: cmp lvlAtT,x            ;   swap is an exchange, so the level being left takes the slot
@@ -13348,10 +15653,15 @@ lvFind: cmp lvlAtT,x            ;   swap is an exchange, so the level being left
         bpl lvFind              ;   so this always finds one.
         bmi lvlEnd              ; belt and braces: a level not in any slot is a dead hole, never
 lvGot:  ldy lvlMeT              ;   a swap against X = $ff
-        sta lvlMeT              ; A is the level being entered: it is the live one now...
+${SOLO ? '' : `        sta lvlMeT              ; A is the level being entered: it is the live one now...`}
         tya
         sta lvlAtT,x            ;   ...and the one being left lands in the slot it came out of
-        txa` : `        sta lvlMeT              ; A is the level being entered. ONLY on this path: the search
+        txa` : `${SOLO ? `        ; ---- lvlMeT IS NOT WRITTEN HERE UNDER SOLO ----
+        ; It travels IN the level's blob now, so the swap below brings the arriving level's own
+        ; id in with everything else. Storing the destination first made two mechanisms fight for
+        ; one byte: the store put 2 in the LIVE copy, the swap then moved that 2 into the SHADOW,
+        ; and the departing level's blob carried the wrong id for ever after. Levels 1 and 2 then
+        ; alternated correctly in geometry while the HUD drifted one transition behind.` : `        sta lvlMeT              ; A is the level being entered. ONLY on this path: the search`}
                                 ;   below reads lvlMeT for the level being LEFT, and storing it
                                 ;   here first made that read the DESTINATION -- so the departing
                                 ;   level never went into lvlAtT, the table drifted from where the
@@ -13360,14 +15670,14 @@ lvGot:  ldy lvlMeT              ;   a swap against X = $ff
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        lda #$00                ; ONE slot, so it is always slot 0 -- but say so rather than
                                 ;   leaning on wallsBack happening to leave A zero, which is what
                                 ;   made this correct by accident before lvlNxtT named a level`}
-${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}        jsr lvlSwap
-${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 2: swapped, about to mkRuns\n' : ''}        jsr mkRuns              ; the run tables no longer travel with the level -- they are
+${FALLMARK.includes(1) ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}${LVLLOAD ? '' : '        jsr lvlSwap'}
+${FALLMARK.includes(2) ? '        inc fallMk              ; FALLMARK 2: swapped, about to mkRuns\n' : ''}        jsr mkRuns              ; the run tables no longer travel with the level -- they are
                                 ;   derived from the mapT the swap just brought in. Must come
                                 ;   AFTER the swap and BEFORE anything renders the new room.
-${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 3: runs made, about to objInit\n' : ''}        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
+${FALLMARK.includes(3) ? '        inc fallMk              ; FALLMARK 3: runs made, about to objInit\n' : ''}        jsr objInit             ; ...and this rebuilds blkT from that same mapT, which is why
                                 ;   blkT need not travel either.
 
-${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}${CEILVARY ? '        jsr lvlLo               ; what you see THROUGH the hole is already the new level\n' : ''}lvlEnd:
+${FALLMARK.includes(4) ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}${CEILVARY ? '        jsr lvlLo               ; what you see THROUGH the hole is already the new level\n' : ''}lvlEnd:
 ` : ''}        jsr lvlStart            ; go to the arriving level's OFFICIAL START now, and let the
                                 ;   main loop render it next frame -- fallLand snapshots it and
                                 ;   starts the drop; the player does not move again for the rest
@@ -13392,7 +15702,9 @@ ${process.env.FALLMARK ? '        inc fallMk              ; FALLMARK 4: objInit 
         ldx #25
         stx phA
         stx phB
-        lda #$01
+${!ANYFLOORDK ? '' : `        jsr arcBld              ; the departing arc's dictionary, while charset B is still the
+                                ;   level being LEFT -- lvlLook does not run until the handover
+`}        lda #$01
         sta fallSt
         sta bgPh                ; and start rendering the destination room IN THE BACKGROUND,
                                 ;   a slice per frame in the slack the fall leaves
@@ -13454,6 +15766,7 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
         jsr lvlLook             ; the arriving level's inks and wall mark
+
                                 ; ^ the arriving level's LOOK lands here, not at the swap:
                                 ;   the swap happens the moment you step into the hole (the
                                 ;   destination render needs the new geometry from its first
@@ -13465,7 +15778,12 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         stx phB
         jsr fallInv             ; the fall scribbled both buffers behind renderSym's run cache
         ldx #$00                ; and THIS frame is landing frame 0, drawn without a gap
-fstFOk: stx fFrm
+fstFOk: ${FALLHOLD === null ? '' : `ldx #${hx(FALLHOLD)}    ; FALLHOLD: the drop never advances past this frame.
+        ` }${FALLHOLDL === null ? '' : `ldy fallSt              ; FALLHOLDL: ...and the landing never past this one
+        cpy #$03
+        bne fhL1
+        ldx #${hx(FALLHOLDL)}
+fhL1:   ` }stx fFrm
         lda fallSt              ; ---- which way round is the arc drawn? ----
         cmp #$03
         beq fsLand
@@ -13474,9 +15792,11 @@ fstFOk: stx fFrm
         sta pSplit              ;   charset B; arcPrep sets the second split, at the top of the
         lda #$00                ;   arc, where A has to come back for the rim glyph.
         sta arcInv
-        lda #${hx(CB_A)}        ; DROP: A above the horizon, B below it, A again for the rim
-        sta pCh0
+        lda #${hx(CB_A)}        ; DROP: A above the horizon, B below it, and the ARC'S OWN block
+        sta pCh0                ;   for the rim -- which is what keeps the rim's dither out of the
+${!ANYFLOORDK ? '        sta pCh2\n' : `        lda #${hx(ARC_CB)}      ;   ceiling, since region 1 up there is still reading A
         sta pCh2
+`}
         lda #${hx(CB_B)}
         sta pCh1
         lda #$00
@@ -13484,8 +15804,12 @@ fstFOk: stx fFrm
         beq fsDone              ; always taken
 fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, in the mirrored
         lda #${hx(CB_B)}        ;   polarity, then the new room's ceiling half, then its floor
-        sta pCh0                ;   half. The room is held clear of the arc (see ARC_GAP) so no
-        sta pCh2                ;   scanline ever has to serve both.
+        sta pCh2                ;   half. The room is held clear of the arc (see ARC_GAP) so no
+${!ANYFLOORDK ? '        sta pCh0\n' : `        lda #${hx(ARC_CB5)}     ;   scanline ever has to serve both. Region 1 is the RIM, and it
+        sta pCh0                ;   reads its own block: its surround is the ceiling, undithered,
+                                ;   while region 3 below is the floor, dithered -- one charset
+                                ;   could not be both, which is what this set is for.
+`}
         lda #${hx(CB_A)}
         sta pCh1
         lda arcSp2T,x           ; white rising to replace the black, over the NEW room sliding up
@@ -13496,29 +15820,42 @@ fsLand: ldx fFrm                ; LANDING: B,A,B -- the rim is at the TOP now, i
                                 ;   the same frame, so one raster line does the whole job.
         cpx #${ARC_OVERLAP}     ; still inside the overlap window? then the screen is the two
         bcs fsL2                ;   RIMS and nothing else: A for the departing one at the top,
-        lda #${hx(CB_A)}        ;   B for the arriving one below it. The new room is held off
-        sta pCh0                ;   screen this early, so two regions is all it takes.
-        lda #${hx(CB_B)}
-        sta pCh1
-        sta pCh2
-        lda arcOvSpT,x
+        lda #${hx(ANYFLOORDK ? ARC_CB : CB_A)}        ;   B for the arriving one below it. The new room is held off
+        sta pCh0                ;   screen this early, so two regions is all it takes. The
+                                ;   departing rim keeps its own block through the window.
+        lda #${hx(ANYFLOORDK ? ARC_CB5 : CB_B)}
+        sta pCh1                ; ...and the arriving rim below it reads set 2's
+${!ANYFLOORDK ? '        sta pCh2\n' : `        lda #${hx(CB_A)}        ; ...but region 3 is the NEW ROOM. "held off screen this early"
+        sta pCh2                ;   is only true for the first frame or two: it slides in from the
+                                ;   foot before the window ends, a row at a time, and its entering
+                                ;   rows are its ceiling half -- BLANK, code 0. BLANK is
+                                ;   byte-identical in A and B, which is why this never mattered
+                                ;   while both rims were charset B. Block 5 cannot give it: code 0
+                                ;   there is $d800, which is the hole ladder. So region 3 keeps the
+                                ;   room's own charset and pSplit2 follows the room's leading edge.
+`}        lda arcOvSpT,x
         sta pSplit
-        lda #246
+${!ANYFLOORDK ? `        lda #246
         sta pSplit2
-        jmp fsL3
-fsL2:${CEILVARY ? `   jsr lvlHi               ; past the overlap window: the DEPARTING rim has left the
+` : `        jsr fsOv                ; region 3 begins where the room does
+`}        jmp fsL3
+fsL2:${!ANYFLOORDK ? '' : `   cpx #${hx(ARC_OVERLAP)}             ; the FIRST frame past the window, and only that one: the
+        bne fsL2a               ;   departing room has gone, so the charset can change now
+        jsr lvlChr
+fsL2a:`}${CEILVARY ? `   jsr lvlHi               ; past the overlap window: the DEPARTING rim has left the
                                 ;   screen, so the top of the frame can finally take the new
                                 ;   level's ground colour too. Until here it must not -- that is
                                 ;   what made the upper level go dark while it was still visible.
 ` : ''}                lda arcSp2bT,x          ; and the room's own horizon, where B resumes
         sta pSplit2
-fsL3:
-        lda #$ff
+fsL3:${!ANYFLOORDK ? '' : `   jsr fdGlTk              ; a slice of the charset rebuild, if one is pending
+`}        lda #$ff
         sta arcSkip             ; arcPrep must not overwrite pSplit2 on the landing
 fsDone: lda #$13
         sta pd11
         jmp fallDraw
-fstEnd: lda #${hx(SPLITLINE)}
+fstEnd: ${!ANYFLOORDK ? '' : `jsr fdGlFl              ; whatever is left of the rebuild, before the renderer
+        ` }lda #${hx(SPLITLINE)}
         sta pSplit              ; horizon back where the renderer expects it -- pending, so it
                                 ;   lands with the settled frame drawn just below
         lda #246                ; a settled frame wants A above the horizon and B below it
@@ -13584,15 +15921,34 @@ fallDraw:
         jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
 ${FALLSCENE ? `        jsr fdWarp              ; the room, slid up. No shear -- see fRowT.
 ` : ''}
-        ldx #${hx(BLANK)}       ; drop: floor above, hole below
-        ldy #${hx(VOIDCH)}
+        ldx #${hx(FDOUT)}       ; drop: floor above, hole below. The floor is charset B's code
+        ldy #${hx(ANYFLOORDK ? ARC_VOID : VOIDCH)}              ;   until the band crosses the arc's top -- see arcTopR
         lda arcInv
         beq fdPol
-        ldx #${hx(VOIDCH)}      ; landing: the other way round, and charset B has already been
-        ldy #${hx(BLANK)}       ;   selected to give the rim glyph the matching polarity
+        ldx #${hx(ANYFLOORDK ? ARC_VOID : VOIDCH)}      ; landing: the other way round -- the shaft above the rim,
+        ldy #${hx(ANYFLOORDK ? ARC_FILL : FDGND)}       ;   and the new room's CEILING below it, which is never dithered
 fdPol:  stx fdCol
         sty arcBlw              ; arcBand fills below its glyph with this
-${FALLSCENE ? `${FALLTAIL ? `        lda fwN                 ; ---- nothing below the room at all? then draw nothing ----
+        ldy #$07                ; the hole's black is a SCRATCH code (see VOIDCH): lay its glyph
+vdLp:   lda #$ff                ;   down here rather than own a charset code for it. All pair 11,
+        sta ${hx16(CHARSET + VOIDCH * 8)},y     ;   which reads colour RAM, which is $08 -- black
+        sta ${hx16(CHARSET_B + VOIDCH * 8)},y   ;   everywhere -- and never marked by symPut.
+        dey
+        bpl vdLp
+${ANYFLOORDK ? `        ldy #$07                ; ...and the fall's GROUND, carrying this level's floor checker
+                                ;   (see FDGND). Copied from BLANK, which floorDk wrote on arrival:
+fgLp:   lda ${hx16(CHARSET_B + BLANK * 8)},y  ;  so a DROP gets the level being left and a
+        sta ${hx16(CHARSET_B + FDGND * 8)},y  ;  LANDING the one arrived at, with nothing kept.
+        sta ${hx16(CHARSET + FDGND * 8)},y    ;  NOT ROW-REVERSED, though every other A-from-B copy
+        dey                     ;   in this program is. The mirror is right for GEOMETRY and wrong
+        bpl fgLp                ;   for a TEXTURE: the checker alternates every row, so 7-r always
+                                ;   has the opposite parity to r, and A's copy came out one
+                                ;   multicolour pixel off B's -- a permanent horizontal seam
+                                ;   wherever the two met. And they meet by construction: one fdFill
+                                ;   band spans the arc's top split, so the SAME code is drawn
+                                ;   through B above it and through A below. arcDth takes its mask
+                                ;   from here too, so the rim inherited the same offset.
+` : ''}${FALLSCENE ? `${FALLTAIL ? `        lda fwN                 ; ---- nothing below the room at all? then draw nothing ----
         cmp #25                 ; arcPrep CLAMPS the arc's row to 24 while it is still off the
         bcs fdTail              ;   bottom of the screen, so arcBand lays a cell there even on
                                 ;   frame 0 -- over the wall's last row, in the only four pixels
@@ -13613,7 +15969,8 @@ ${FALLSCENE ? `${FALLTAIL ? `        lda fwN                 ; ---- nothing belo
         adc baseHi
         sta fdD+1
         pla
-        jsr fdFill              ; everything between the scene and the arc, whole rows
+${!ANYFLOORDK ? '' : `        jsr fdSpl               ; a DROP's band crosses the arc's top: two fills, not one
+`}        jsr fdFill              ; everything between the scene and the arc, whole rows
 fdNoF:
 ${FALLTAIL ? `        lda arcHi               ; bounded: arcHi is off the foot while the arc still is, and
         cmp #25                 ;   mul40T now HAS rows 25..30 for the tail -- so an unbounded
@@ -13628,8 +15985,8 @@ fdnOk:  tax
         adc baseHi
         sta fdD+1
         jsr arcBand             ; the curve itself, at pixel resolution via the ramps
-        lda arcBlw              ; ---- and the rows below the arc ----
-        sta fdCol
+${!ANYFLOORDK ? `        lda arcBlw              ; ---- and the rows below the arc ----
+        sta fdCol` : `        jsr fdBlw               ; ---- and the rows below the arc ----`}
 ${FALLSCENE ? `        lda arcInv
         beq fdIncr
         ; LANDING: from the arc's bottom down to the room's first row, every frame. See fRowT's
@@ -13681,9 +16038,9 @@ fdTail:
         lda #$00
         sta arcInv              ; drop tables, drop polarity
         jsr arcPrep
-        lda #${hx(BLANK)}
-        sta fdCol
-        lda #${hx(VOIDCH)}
+        lda #${hx(ANYFLOORDK ? ARC_FILL : FDGND)}
+        sta fdCol               ; the departing arc's tail is entirely region 1, and region 1 is
+        lda #${hx(ANYFLOORDK ? ARC_VOID : VOIDCH)}              ;   reading the arc's own block through the overlap window
         sta arcBlw
         lda #$00
         sta fdD
@@ -13736,12 +16093,12 @@ fwLp:   lda fwRow
         tax
         lda arcInv              ; the landing slides the DESTINATION room, snapshotted before
         beq fwSrcA              ;   the drop began; the drop slides the one being left
-        lda mul40LoT,x
+        lda mulSnapLoT,x
         clc
-        adc #<${hx16(FALLBUF2)}
+        adc #<fallSnapD
         sta fdS
-        lda mul40HiT,x
-        adc #>${hx16(FALLBUF2)}
+        lda mulSnapHiT,x
+        adc #>fallSnapD
         sta fdS+1
         jmp fwSrcD
 fwSrcA:${FALLTAIL ? ` cpx #25
@@ -13758,12 +16115,12 @@ fwSrcA:${FALLTAIL ? ` cpx #25
         adc #>fallTailB
         sta fdS+1
         jmp fwSrcD
-fwSlo:` : ''} lda mul40LoT,x
+fwSlo:` : ''} lda mulSnapLoT,x
         clc
-        adc #<${hx16(FALLBUF)}
+        adc #<fallSnapS
         sta fdS
-        lda mul40HiT,x
-        adc #>${hx16(FALLBUF)}
+        lda mulSnapHiT,x
+        adc #>fallSnapS
         sta fdS+1
 fwSrcD:
         ldx fwRow
@@ -13796,25 +16153,6 @@ fwDn:   rts
 ; toward the one you have just left. Eight rather than four because "the square most in front of
 ; you" means exactly that when you are facing a corner, and because the angels move in eight.
 ; ---- dpCand: the neighbouring cell one step along direction X, and its parts ----
-dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
-        ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
-        ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
-        ; orb was placed most of a map away from the player, which is exactly how it looked.
-        ; Nothing is needed in its place. dirXT/dirYT are -1, 0 or +1, the map border is solid on
-        ; all four sides (asserted at build), and the player cannot stand in a wall -- so px+1 is
-        ; within 1..MAPW-2 and the candidate is always inside the grid. Same for y.
-        ; See orbProj's "RANGE CHECK, not a mask" for the same bug caught in another place.
-        lda px+1
-        adc dirXT,x
-        sta fcX
-        clc
-        lda py+1
-        adc dirYT,x
-        sta fcY
-${MULW}
-${ADDX('fcX')}
-        sta fcCell
-        rts
 
 ; ---- dropPick: which neighbouring cell the carried orb should go in ----
 ; NOT the one the facing rounds to. An entity is drawn at its cell's CENTRE, and the centre of
@@ -13829,6 +16167,8 @@ dropPick:
         sta odCell              ; nothing placeable in reach
         ldx #$07
 dpLp:   stx odD
+        jsr dpDiag              ; ...and not THROUGH a corner, which is a cell away that the
+        bcs dpNext              ;   route to cannot pass. See dpDiag.
         jsr dpCand
         ldx fcCell
         lda blkT,x
@@ -13931,6 +16271,32 @@ okUp:   lda #$00
         sta okOld
 okDone: rts
 
+; ================= WHAT ENTERING A LEVEL ESTABLISHES =================
+; There are THREE ways into a level -- boot, a fall, and RETURN after a death -- and each one
+; used to write its own sequence. They drifted, and the way you find out is a bug report about
+; colour. So: every piece of per-level state has exactly ONE owner below, and a new one goes to
+; whichever owner already holds the thing it depends on. Nothing is set at a call site.
+;
+;   lvlSwap    THE LEVEL ITSELF. Every table in the manifest -- map, dimensions, entity cells
+;              and colours, counts, exits, hazards. The arriving level's bytes replace the
+;              departing level's in place.
+;   mkRuns     everything derived from the map: the run tables. After the swap, before anything
+;              renders.
+;   objInit    all ENTITY and player state: entity cells, blkT, carry (and therefore idolHd --
+;              see the note at its tail), marked, entDty, bfsPhase, hlSeat, bfsDone.
+;   lvlStart   the PLAYER's pose. One place a level begins, however you got there.
+;   lvlLook    every INK: the three screen registers (ceiling, wall, seam) and the two shared
+;              sprite registers, plus the idol's own pair -- then falls through to symPut and
+;              seamEdge for the per-level charset edits. The fall calls it in three stages
+;              (lvlLo / lvlLook / lvlHi) because two levels are on screen at once during a drop;
+;              boot calls it once through lvlBoot. The STAGING differs, the CONTENT must not.
+;
+; idolCar -- the colour of the thing in your hands -- was briefly an exception to this, latched
+; at pick-up and carried. It is NOT: the shared sprite inks are one pair of registers for all
+; eight sprites, so an idol's colours have to work against whatever else the room it is now in
+; puts on screen. So it is ordinary per-level data, established by lvlLook like the rest, and
+; the idol re-tones as you drop through the hole.
+;
 ; ---- objInit: every entity back to its starting cell ----
 ; A restart is a jmp to entry, and entity state lives in tables the game edits IN PLACE. blkT is
 ; rebuilt from mapT rather than kept as a second copy -- 256 bytes of table saved, and it can
@@ -13941,7 +16307,7 @@ oiBlk:  lda mapT,x              ; walls first
         sta blkT,x
         inx
         bne oiBlk
-        lda nOrbT               ; a level may have NO entities at all
+${FALLMARK.includes(5) ? '        inc fallMk              ; FALLMARK 5: blkT rebuilt, about to place entities\n' : ''}        lda nOrbT               ; a level may have NO entities at all
         beq oiEntD
         ldx nOrbM1T
 oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
@@ -13966,7 +16332,8 @@ oiNext: txa
         tax                     ;   supposed to block, and the angel walked straight out.
         dex
         bpl oiEnt
-oiEntD: lda #$00
+oiEntD:
+${FALLMARK.includes(6) ? '        inc fallMk              ; FALLMARK 6: every entity placed\n' : ''}        lda #$00
         sta carry
         sta marked
         sta entDty
@@ -13979,7 +16346,24 @@ hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         bpl hlSCl
         lda #$ff                ; a cell the player can never be in, so the first frame always
         sta bfsDone             ;   starts a fill
-        rts
+${HAS_IDOL ? `        jsr idolPlace           ; ---- ...then put the IDOLS where they actually are ----
+                                ; objInit has just restored every entity from the build data,
+                                ; which says each idol is at home. Three of them may not be.
+        jsr idolLk              ; ---- carry was just cleared, so RE-DERIVE what depends on it ----
+                                ; idolHd is a pure function of carry (see idolLk) and is the one
+                                ; piece of entity state that was not being re-derived here. Boot
+                                ; called idolLk for itself and the FALL did not, so the two
+                                ; arrival paths disagreed: pick the idol up, drop through a hole,
+                                ; and you arrived holding nothing with idolHd still saying you
+                                ; held the idol. That left the arriving level permanently wearing
+                                ; the idol's shared inks, and -- until dckIdl stopped repainting
+                                ; the cast -- every sprite in it flooded with the idol's body
+                                ; colour. It also suspends the gaze rule and the covering rule,
+                                ; so the angels stopped freezing when looked at.
+                                ; Here rather than at the fall's call site: objInit is what owns
+                                ; carry, so objInit is what owes the invariant. Every caller gets
+                                ; it, including the next one nobody has written yet.
+` : ''}        rts
 
 ; ---- orbOcc1: rebuild entity X's occluder mask from the cell it stands in NOW ----
 ; orbOccT answers "is this entity beyond that wall run's plane" -- the facing rule, and the only
@@ -14588,33 +16972,25 @@ ${ADDX('amX')}
         tay
         lda blkT,y
         bne anNo                ; wall, orb or another angel
-        ; ---- the leash. One bit per cell; see LEASH_AT for why the fill ignores it. ----
-        lda amCell
-        and #$07
-        tax
-        lda #$01                ; 1 << (cell & 7), by shifting rather than a table -- this runs
-alMsk:  dex                     ;   once per attempted step, which is once every two seconds
-        bmi alGot
-        asl
-        bne alMsk               ; always taken: bit 7 is the last one that can be set
-alGot:  sta atMsk
-        lda amIdx               ; THIS angel's row: entity slot x 32 -- the same x32 the LOS
-        asl                     ;   bitmaps use, and for the same reason (ceil(256/8) = 32)
-        asl
-        asl
-        asl
-        asl
-        sta atTmp
-        lda amCell
-        lsr
-        lsr
-        lsr
-        clc
-        adc atTmp
-        tay
-        lda angBlkT,y
-        and atMsk
-        bne anNo                ; leashed: this one does not go there
+        ; ---- the leash: a SPARSE (entity slot, cell) list, $ff-terminated ----
+        ; See LEASH_AT for why the fill ignores it, and angLeash for why this is a list and not
+        ; the one-bit-per-cell bitmap it used to be. Scanned once per attempted step -- once
+        ; every two seconds per angel -- so the walk is free at any plausible NLEASH, and it
+        ; leaves X alone, which the bitmap version could not (it needed X for the bit shift and
+        ; two bytes of scratch for the mask and the row offset).
+        ldy #$00
+alLp:   lda angLeashT,y
+        cmp #$ff
+        beq anSqOk              ; end of the list: nothing leashes anything here
+        cmp amIdx
+        bne alNx                ; some other angel's entry
+        lda angLeashT+1,y       ; this angel: is this the cell it may not enter?
+        cmp amCell
+        beq anNo                ; leashed: this one does not go there
+alNx:   iny
+        iny
+        bne alLp                ; always taken -- NLEASH is far below the 128 pairs that would
+                                ;   wrap Y, and the $ff above is what actually ends the walk
 anSqOk:
         ; ---- how much of it would the player SEE standing there? ----
         ; It MAY step into view -- an angel easing round a corner and freezing mid-peek is the
@@ -15007,7 +17383,8 @@ ${ADDX('orbXCT,x')}
 ${HAS_IDOL ? `        txa                     ; the room takes the idol's colours while you hold it
         pha
         jsr idolLk
-        pla
+${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : `        jsr pedOff              ; ...and lifting one OFF a pedestal empties that pedestal
+` }        pla
         tax
 ` : ''}
 ${SOUND ? `        lda #$03
@@ -15024,9 +17401,9 @@ orbPut: jsr dropPick            ; ---- put down ----
         cpy #$ff
         beq okPlain
 ${HAS_IDOL ? `        ldx carry               ; ...unless what you are holding is not an ORB. The idol is
-        dex                     ;   luggage, not a key: it can be set down on a socket and picked
-        lda orbArtT,x           ;   straight back up, and nothing seats. orbArtT is 0 exactly for
-        bne okPlain             ;   the orb's own art, so "draws as an orb" IS "acts as a key".
+        dex                     ;   luggage, not a key to a SOCKET: it is set down on a pedestal
+        lda orbArtT,x           ;   and stands there, both sprites drawn, the idol simply raised
+        bne okPlain             ;   onto the drum's top plane. Nothing is consumed and no art
 ` : ''}        lda hlSeat,y
         bmi okDone              ; already used: bit 7 now means CONSUMED, and it is one-way
         ; ---- ONE WAY. The orb and the socket both leave the world. ----
@@ -15116,6 +17493,49 @@ okpY2:  sta py
         sta orbXCT,x
         lda odY
         sta orbYCT,x
+${HAS_IDOL ? `        ldy orbIdolT,x          ; an IDOL remembers where you put it, because its cell
+        bmi odNotI              ;   has to survive objInit on the next arrival -- see idolXT
+        lda odX
+        sta idolXT,y
+        lda odY
+        sta idolYT,y
+        ; ---- ...and whether it is standing ON something ----
+        ; hlAt answers "which hole-like entity is at odX/odY", and at or past nPedT that is a
+        ; PEDESTAL. Asked once here, when the idol is set down, rather than per frame in the
+        ; projection. It clobbers X, and X is the entity slot the caller still needs, so both
+        ; it and the idol id go through the stack -- slot pushed first so the id comes back
+        ; first, since the id is what the store below is indexed by.
+        txa
+        pha
+        tya
+        pha
+        jsr hlAt                ; Y = the hole-like index at this cell, or $ff
+        ldx #$00                ; assume it is standing on the floor
+        cpy #$ff
+        beq odPSt
+        cpy nPedT
+        bcc odPSt
+        ; ---- WHICH pedestal, not just "a pedestal" ----
+        ; Stored as the pedestal's index PLUS ONE, so 0 still means "on the floor" and the two
+        ; other readers (the sprite lift, and idolPlace's blkT rule) keep working unchanged --
+        ; both only ever ask zero / non-zero, and an idol up on ANY drum is lifted and does not
+        ; block. Only pedGate cares which one, and it is the only place the puzzle is decided.
+        tya                     ; hole-like index -> pedestal index
+        sec
+        sbc nPedT
+        tax
+        inx                     ; ...+1, so 0 stays "floor"
+odPSt:  pla
+        tay                     ; the idol id
+        txa
+        sta idolOnPedT,y
+${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : `        jsr pedGate             ; ---- three idols on three pedestals opens the wall ----
+                                ;   Clobbers X and Y; the entity slot comes back off the stack
+                                ;   below, which is why the call sits inside the push/pull.
+` }        pla
+        tax                     ; ...and the caller's entity slot, back again
+odNotI:
+` : ''}
         lda #$00
         sta orbHidT,x
         sta carry
@@ -15258,6 +17678,13 @@ apT3:   cmp #246
                                 ;   buffer flip spins on that line and a split IRQ there costs
                                 ;   it a whole frame. Third time; see [[iray-fall]].
 apT4:   sta pSplit2
+${!ANYFLOORDK ? '' : `        sec                     ; ...and the same line as a character ROW, because that is where
+        sbc #50                 ;   the fill has to change from charset B's code to the arc
+        lsr                     ;   block's: region 3 begins here, and a column whose rim is lower
+        lsr                     ;   than the crown has fill rows sitting below the split. Taken
+        lsr                     ;   from the CLAMPED pSplit2, not the raw arc row, or the two
+        sta arcTopR             ;   disagree exactly when the clamps fire.
+`}
         rts
 
 
@@ -15309,11 +17736,19 @@ abLp:   jsr arcPx
         ; all had pxL = pxR = 48 with apRow 6 -> index $33 -> code 34 -> eight dots 8px apart.
         ; Both answers are polarity-independent: a cell the rim misses is floor either way
         ; (BLANK is fdCol on the drop and arcBlw on the landing), and one it has passed is hole.
-        lda rampThi,x           ; the degenerate ends are BLANK and SOLID in the table now
-        cmp #${hx(SOLID)}                ;   (see rampThi's build), and BLANK is already right here:
-        bne abSet               ;   a cell the rim misses is floor in BOTH polarities. A cell it
-        lda #${hx(VOIDCH)}              ;   has passed is the HOLE though, not wall ink, so that one
-abSet:  sta apCode              ;   answer has to be translated.
+${!ANYFLOORDK ? '' : `        lda rampThi,x           ; BOTH phases draw their rim from an arc block now, and the two
+        tax                     ;   sets share code numbers, so one map serves them: the block
+        lda ${hx16(ARC_MAP)},x  ;   differs, not the code. The degenerate ends translate with the
+        bne abSet               ;   33 real ones -- a cell the rim missed is ground, one it has
+` }        lda rampThi,x           ;   passed is the hole. (always taken: ARC_C0 is not zero)
+        cmp #${hx(SOLID)}                ;   (see rampThi's build). A cell the rim misses is floor in
+        bne ${ANYFLOORDK ? 'abNS' : 'abSet'}               ;   BOTH polarities and a cell it has passed is the HOLE,
+        lda #${hx(VOIDCH)}              ;   not wall ink, so that one answer has to be translated.
+${ANYFLOORDK ? `        bne abSet               ; always: VOIDCH is never 0
+abNS:   cmp #${hx(BLANK)}                ; ...and so does the floor, once it is a code of its own
+        bne abSet               ;   rather than BLANK -- see FDGND
+        lda #${hx(FDGND)}
+` : ''}abSet:  sta apCode
         ldx apRow               ; screen address = base + 40*row + column, column = Y-1
         tya
         sec
@@ -15416,25 +17851,24 @@ hlSet:  tay
         sta hlFill
         lda #$00
         beq hlSk                ; always taken
-hlSsock:lda hlSeat,y            ; bit 7 = an orb is sitting in this one, low nibble its colour
-        bmi hlSfull
-        lda hlFillT,y           ; empty: grey3 inside a grey1 rim
+hlSsock:lda hlFillT,y           ; grey3 inside a grey1 rim. hlSeat is a CONSUMED flag and
+                                ;   nothing but bit 7 of it is read any more
         sta hlFill
         lda #$01
-        bne hlSped              ; always taken
-hlSfull:and #$0f
-        tax                     ; seated: the ORB's own body colour fills it
-        lda orbColT2,x
-        sta hlFill
-        lda #$02
-        ; ---- and a PEDESTAL is a socket that stands up ----
-        ; Kinds 1,2 are the socket's empty and seated; 3,4 are the pedestal's. Pedestals sit past
-        ; the sockets in HOLELIKE, so ONE boundary byte tells them apart and +2 lands on the
-        ; matching pedestal kind -- no per-entity kind table, and nothing to swap but nPedT.
+        ; ---- THERE IS NO "SEATED" KIND ----
+        ; There was: hlSeat bit 7 picked a second ladder that drew a half-ball sitting in the
+        ; dish. Nothing has reached it since seating became one-way -- the entity loop skips a
+        ; consumed socket outright ("lda hlSeat,y / bmi hoNx") before hlSet is ever called, and
+        ; kinds 2 and 4 were byte-for-byte copies of 1 and 3 anyway. It would have read
+        ; orbColT2+15 if it ever ran, $ff's low nibble being 15.
+        ; The pedestal does not want one either: an idol set down on one keeps its own sprite
+        ; and is simply RAISED onto the drum's top plane. No new art, just a y offset.
+        ; Kinds are 0 exit, 1 socket, 2 pedestal. Pedestals sit past the sockets in HOLELIKE,
+        ; so ONE boundary byte tells them apart and +1 lands on the pedestal kind.
 hlSped: cpy nPedT
         bcc hlSk
         clc
-        adc #$02
+        adc #$01
 hlSk:   cmp hlKind
         beq hlSdn               ; already pointed the right way -- the usual case
         sta hlKind
@@ -15443,7 +17877,9 @@ hlSk:   cmp hlKind
         ; base addresses per kind and one run of stores. BOTH bytes of every operand, because
         ; the table sets are emitted next to each other and may straddle a page.
         tax
-        ldy hlK5T,x             ; five entries a kind
+${process.env.SOCKOCC === '0' ? '' : `        lda hlVisL,x            ; where this kind's rung -> rows table lives, for occStamp's box
+        sta hlVB+1              ;   -- low byte only, see hlVisL
+`}        ldy hlK5T,x             ; five entries a kind
         lda hlSrcL,y
         sta hlRung+1
         lda hlSrcH,y
@@ -15531,6 +17967,16 @@ hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -
         lda #${hx(SOCK.L.length - 1)}   ; never past the smallest rung it has
 hlShrX: tax
 hlNoShr:
+        ; ---- how many rows this rung covers, resolved NOW while the rung is still in X ----
+        ; holeSlot is called once per slice and takes X for the slot, so the rung is gone by the
+        ; second slice; looking it up there would read a slot number as a rung and box the stamp
+        ; at the wrong height. ocl2 is dead from here to the end of the entity -- the probe above
+        ; was its last reader -- so it carries the answer rather than costing a byte of its own.
+        ; 0 means "do not stamp this one": every real rung covers at least one row.
+${process.env.SOCKOCC === '0' ? `        lda #$00                ; SOCKOCC=0: back to the all-or-nothing test, for comparison
+        beq hlVst               ; always taken` : `hlVB:   lda sockVisT,x          ; PATCHED by hlSet to this kind's table. EVERY kind has one
+                                ;   now, the exit hole included -- see exitVisT.`}
+hlVst:  sta ocl2
 hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
         adc ohgt
@@ -15666,9 +18112,18 @@ holeSlot:
         sta omBit
         ora omEn
         sta omEn
+        ; ---- priority: blanket for an exit hole, EARNED for a socket ----
+        ; The exit hole goes behind foreground unconditionally, because the $d01b bit is the only
+        ; occlusion it has. A socket is stamped instead, and occStamp sets the bit itself on the
+        ; slots it actually stamped -- which is also what keeps its de-seam sweep honest, since
+        ; that sweep fires on exactly this bit and would otherwise strip seams around every
+        ; socket on screen whether or not a wall was ever in front of it.
+        lda ocl2
+        bne ohNoPri
+        lda omBit
         ora omPri               ; behind foreground: a wall in front of the hole has to win, and
         sta omPri               ;   the floor it lies in is background, so it still draws there
-        lda ohP
+ohNoPri:lda ohP
         sta obP,x
         lda hlFill              ; bit pair 10 is the per-sprite colour: the ONE ink that can
         sta obC,x               ;   differ per sprite, and so the whole difference between a pit
@@ -15681,6 +18136,59 @@ holeSlot:
                                 ;   OFF by default -- so the stamp was walking these slots with
                                 ;   a stale obL/obR and scribbling occluders over a garbage cell
                                 ;   range. 29,510 cycles for a hole that costs 2,400 to project.
+        ; ---- ...and a SOCKET fills that stamp state in, so occStamp treats it as an orb ----
+        ; Same span walk, same per-run occluder mask, same edge glyphs. That is what gets a
+        ; socket clipped at a cell edge by the corner in front of it, instead of the whole thing
+        ; blinking out the moment its CENTRE column goes behind a wall.
+        lda ocl2
+        beq hsNoSt              ; 0: an exit hole, which is not stamped
+        sta obV,x               ; the rows this slice covers -- occStamp's box, straight out of
+                                ;   the slot, where an orb's comes from orbAnchT by variant
+        lda #$80
+        sta obOcc,x             ; conservative, exactly as the probe above sets ocanO
+        ; This slice's own columns, s .. s+ohWc-1, clipped to the screen -- and each slice is
+        ; judged separately, because each is its own sprite. b is s+12 and (ohBH:ohBL) carries
+        ; it SIGNED: b >= 0 does not mean s >= 0, since the twelve columns of the offset can
+        ; still be hanging off the left edge.
+        lda ohBL
+        sec
+        sbc #$0c
+        sta ocmax               ; s, low byte -- kept for the right edge below
+        lda ohBH
+        sbc #$00
+        sta ohtmp               ; s, high byte: $00 or $ff. Dead since the slot check above.
+        bmi hsL0
+        lda ocmax
+        bpl hsLst               ; s is 0..127 here: a slice starting past 160 never got placed
+hsL0:   lda #$00                ; s < 0: the visible part starts at column 0
+hsLst:  sta obL,x
+        lda ocmax
+        clc
+        adc ohWc
+        tay                     ; s + width, low
+        lda ohtmp
+        adc #$00
+        bmi hsNoSt              ; the whole slice is still left of column 0
+        bne hsRhi               ; ...or past 255, so it ends at the right edge
+        cpy #$00
+        beq hsNoSt              ; s + width == 0: it ends exactly at column -1
+        dey                     ; the LAST column, not one past it
+        cpy #${hx(NLOG)}
+        bcc hsRst
+hsRhi:  ldy #${hx(NLOG - 1)}
+hsRst:  tya
+        sta obR,x
+        lda obL,x               ; and the two edge cells, for the partial-cell glyphs
+        and #$03
+        tay
+        lda bbLT,y
+        sta obBL,x
+        lda obR,x
+        and #$03
+        tay
+        lda bbRT,y
+        sta obBR,x
+hsNoSt:
         lda ohF                 ; the two magnifications are decided SEPARATELY, from the
         and #$04                ;   ellipse's own visible width and height -- which is what lets
         beq ohNoX               ;   a near rung be 48 columns wide and 33 rows tall on two
@@ -15788,7 +18296,7 @@ mulW:   sty mulWY
         lda rowMulT,y
         ldy mulWY
         rts
-rowMulT: !byte ${LVLT('rowMulT').join(',')}   ; from the MANIFEST: the live level's stride
+${LD('rowMulT', LVLT('rowMulT').join(','), ': !byte ')}   ; from the MANIFEST: the live level's stride
 `}
 ${process.env.PAD ? `        !fill ${+process.env.PAD}, $ea   ; PAD=<n>: n inert bytes at the end of the code block, to
                                 ;   separate "this diagnostic's LOGIC broke the build" from "the
@@ -15810,6 +18318,31 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; still built in JS -- charsetgen and the readout glyph checks compare against it -- but nothing
 ; is emitted, which is the point: it was a permutation of bytes already in the image.
 
+; ---- the per-level sprite and palette rows ----
+; In the main code stream, not with lvlStart's own tables at $a9a0: that block is the tail of
+; rayOffQS's page, 96 bytes, and once PAL_N counted the LATE levels the nine rows came to 99.
+; These are the movable three (the other six are read by lvlStart's straight-line code and want
+; to stay next to it), so they are the ones that come down here and get priced as code headroom.
+;
+; ALLLVL, not CHAIN, in the "do the levels actually differ?" filter as well as in PAL_N. A row
+; is emitted only when some level disagrees with the first -- and asking only the CHAIN levels
+; meant a property that is constant across 1-4 but different on 5, 6 or 7 emitted NO row at all,
+; so the late level silently inherited the hardcoded default instead of its own value.
+${SPRVARY ? ['under', 'hi'].filter(k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]))
+  .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
+  .join('\n') : ''}
+${MULTI ? (() => {
+  // MULTI, not TWOLEV: under SOLO there is no shadow, but there are still several levels and
+  // lvlBoot still indexes these rows by lvlMeT. Gated on TWOLEV, a SOLO build emitted no rows at
+  // all and every level would have rendered in the inks of the one the image was built around.
+  const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
+  return Object.keys(REG).filter(k => ALLLVL.some(n => palOf(n)[k] !== palOf(ALLLVL[0])[k]))
+    .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
+    .join('\n');
+})() : ''}
+${HAS_IDOL ? ['under', 'hi'].filter(IDOLVARY)
+  .map(k => `lvlIdol${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(idolSprOf(i + 1)[k])).join(',')}`)
+  .join('\n') : ''}
 ${SPRITES ? `; ================= orb tables =================
 ; These sit in the hole between the code and the first emitted table. Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
@@ -15822,131 +18355,7 @@ ${SPRITES ? `; ================= orb tables =================
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-        * = ${hx16(ORB_SMALL - NHOLE * 33 - PEDTBL - PEDCODE - SEAMCODE)}
-; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
-; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
-; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
-; is written from the same answer instead of being re-derived.
-;
-; Per row byte, four bit pairs, and everything below is ONE BIT PER PAIR sitting at the pair's
-; low bit (so every mask is a subset of $55):
-;     hi   = (b >> 1) & $55        the high bit of each pair, brought into line
-;     lo   = b & $55
-;     w01  = lo & ~hi              a WALL pixel
-;     w10  = ~lo & hi              a seam pixel: only this routine can have made one
-;     c00  = ~lo & ~hi             ground or ceiling
-; and a pair is flipped by EOR with (m | m<<1): 01 EOR 11 = 10, and 10 EOR 11 = 01, which is
-; why the same trick both sets the outline and takes it away again.
-seamEdge:
-${ANYSEAM ? `        ldx lvlMeT
-        dex
-        lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
-        sta seMsk               ;   so a level that does not want it still gets NORMALISED.
-        lda #<${hx16(CHARSET + 16)}
-        sta seLdA+1             ; the READ operand walks too. It did not, and every one of the
-        sta seStA+1             ;   199 glyphs got code 2's rows written into it: the whole
-        sta seStB+1             ;   level came out in flat blocks with no boundary cells at all.
-        lda #>${hx16(CHARSET + 16)}
-        sta seLdA+2
-        sta seStA+2
-        clc
-        adc #$08                ; charset B is charset A plus $800, so the low byte is shared
-        sta seStB+2
-        lda #${hx(199)}         ; codes 2..200
-        sta seN
-        ; ---- pass 1: undo any previous outline, and record where the ceiling is ----
-seGly:  ldy #$07
-seP1:
-seLdA:  lda ${hx16(CHARSET + 16)},y
-        sta seB
-        lsr
-        and #$55
-        sta seHi
-        lda seB
-        and #$55
-        eor #$55
-        sta seNL                ; ~lo
-        and seHi
-        sta seW                 ; w10: a seam pixel this routine left last time
-        lda seHi
-        eor #$55
-        and seNL
-        sta seC00,y             ; c00
-        lda seW
-        asl
-        ora seW
-        eor seB
-        sta seNB,y              ; ...and the row with every 10 back to 01
-        dey
-        bpl seP1
-        ; ---- pass 2: a wall pixel with ground beside it, above it or below it ----
-        ldy #$07
-seP2:   lda seC00,y
-        asl
-        asl                     ; the pixel one to the side
-        sta seT
-        lda seC00,y
-        lsr
-        lsr                     ; ...and the other side. Pairs shifted off the ends are pixels
-        ora seT                 ;   in the NEXT CELL, which a per-glyph pass cannot see.
-        sta seT
-        cpy #$07
-        beq seNoD               ; row 7: nothing below it inside this glyph
-        iny
-        lda seC00,y
-        dey
-        ora seT
-        sta seT
-seNoD:  tya
-        beq seNoU               ; row 0: nothing above it
-        dey
-        lda seC00,y
-        iny
-        ora seT
-        sta seT
-seNoU:  lda seNB,y
-        sta seB
-        lsr
-        and #$55
-        sta seHi
-        lda seB
-        and #$55
-        sta seLo
-        lda seHi
-        eor #$55
-        and seLo                ; w01: a wall pixel
-        and seT                 ; ...with ground orthogonally next to it
-        and seMsk               ; ...on a level that asked for it. No branch.
-        sta seW
-        asl
-        ora seW
-        eor seB
-        sta seNB,y
-        dey
-        bpl seP2
-        ; ---- pass 3: out to BOTH charsets, B taking row 7-y ----
-        ldy #$07
-        ldx #$00
-seOut:  lda seNB,y
-seStA:  sta ${hx16(CHARSET + 16)},y
-seStB:  sta ${hx16(CHARSET_B + 16)},x
-        inx
-        dey
-        bpl seOut
-        lda seStA+1             ; on to the next glyph, eight bytes along in all three
-        clc
-        adc #$08
-        sta seLdA+1
-        sta seStA+1
-        sta seStB+1
-        bcc seNC
-        inc seLdA+2
-        inc seStA+2
-        inc seStB+2
-seNC:   dec seN
-        bne seGly
-` : ''}        rts
-
+        * = ${hx16(ORB_SMALL - NHOLE * 33 - PEDTBL - PEDCODE)}
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
         ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
         ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
@@ -15972,11 +18381,16 @@ hrpL:   cmp pedHT,y
         iny
         cpy #${hx(Math.max(1, PED.L.length))}
         bcc hrpL
-        lda #$ff
-        rts
+        ; ---- past the far end, CLAMP: the smallest rung, not "no rung" ----
+        ; It used to return $ff and draw nothing. That was right while the ladder ran down to
+        ; two columns, which is further than any of these rooms can put you from a pedestal;
+        ; with that rung gone the first thing past the end is a distance you CAN stand at, and
+        ; a pedestal that blinks out because you took a step back is worse than one drawn a
+        ; column too wide. Y is the rung count here, so dey is the last rung.
+        dey
 hrpHit: tya
         rts
-holeSeeT: !byte ${holeSee.join(",")}
+${LD('holeSeeT', holeSee.join(","), ': !byte ')}
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
         ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
         ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
@@ -16050,13 +18464,13 @@ cellFillT: !byte ${[...Array(256)].map((_, c) => {
 ; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
 ; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
 ; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
-orbOccLoT: !byte ${orbOccLo.join(',')}
+${LD('orbOccLoT', orbOccLo.join(','), ': !byte ')}
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
-orbXCT: !byte ${LVLT('orbXCT').join(',')}      ; from the MANIFEST, so its length cannot
-orbYCT: !byte ${LVLT('orbYCT').join(',')}      ;   disagree with what the swap moves
-orbColT2: !byte ${LVLT('orbColT2').join(',')}   ; from the MANIFEST and SWAPPED: a level with
+${LD('orbXCT', LVLT('orbXCT').join(','), ': !byte ')}      ; from the MANIFEST, so its length cannot
+${LD('orbYCT', LVLT('orbYCT').join(','), ': !byte ')}      ;   disagree with what the swap moves
+${LD('orbColT2', LVLT('orbColT2').join(','), ': !byte ')}   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 ; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
 ; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
@@ -16194,9 +18608,6 @@ hrsL:   cmp sockHT,y
         rts
 hrsHit: tya
         rts
-; A seated orb steps exactly as a standing one, so it reads the SAME table the orb does.
-hlRungE:lda orbVarT,x
-        rts
 
         ; Out here for the same reason the rung finders are: the bfsTick block ends 21 bytes
         ; short of $6100 and this needs 30. jsr-entered, nothing falls into it.
@@ -16253,7 +18664,7 @@ orbVarT: !byte ${orbVarT.join(',')}
         ; anPath reads the LIVE one -- and both are page-aligned because a whole cell byte
         ; indexes them. bfsD0 lives off at $ae00 because this gap is not big enough for both.
         * = $5e00
-bfsD1:  !fill ${MAPN}, 255
+bfsD1:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps
         * = $5f00
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
@@ -16272,8 +18683,8 @@ ${ADDX('orbXCT,x')}
 apLdC:  lda bfsD0,x             ; operand PATCHED to the live map, alongside apLdA/apLdB
         rts
 asPCur: !byte 0                 ; the period angStep settled on for the angel it is looking at
-angPerFT: !byte ${hx(ANG_PERIOD_FAR)}  ; 60ths between steps when the player is far off...
-angFarT: !byte ${hx(ANG_FAR)}      ; ...where "far" starts. Per level, both swapped with angPerT.
+${LD('angPerFT', hx(ANG_PERIOD_FAR), ': !byte ')}  ; 60ths between steps when the player is far off...
+${LD('angFarT', hx(ANG_FAR), ': !byte ')}      ; ...where "far" starts. Per level, both swapped with angPerT.
 
 anPath: ldx amIdx
         lda orbYCT,x
@@ -16489,50 +18900,30 @@ bfsFin: lda bfsFor
         rts
 
         ; the four orthogonal steps, in one order everywhere: 0 = +x, 1 = -x, 2 = +y, 3 = -y
-bfsDCT: !byte ${LVLT('bfsDCT').join(',')}      ; ...as a CELL delta (manifest: the live level's width)
-lvlDimT: !byte ${LVLT('lvlDimT').join(',')}   ; W, H, -W, W+H, H-1: the live level's shape, for every
+${LD('bfsDCT', LVLT('bfsDCT').join(','), ': !byte ')}      ; ...as a CELL delta (manifest: the live level's width)
+${LD('lvlDimT', LVLT('lvlDimT').join(','), ': !byte ')}   ; W, H, -W, W+H, H-1: the live level's shape, for every
                                 ;   stride the code used to carry as an immediate
 pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
 pathDYT: !byte 0,0,1,255
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
-hlFillT: !byte ${LVLT('hlFillT').join(',')}
+${LD('hlFillT', LVLT('hlFillT').join(','), ': !byte ')}
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
 ; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
 ; into the hole under holeVarT: entered by jsr only, nothing falls in, and "* = $6100 moves
 ; backward" is the guard if this block grows into it.
 ; bgCopy: columns rsLo..rsHi of the back buffer, into the same columns of fallBuf2.
-bgCopy: lda #$00
-        sta fdS
-        sta fdD
-        lda baseHi
-        sta fdS+1
-        lda #${hx(FALLBUF2 >> 8)}
-        sta fdD+1
-        ldx #25
-bgcRow: ldy rsLo
-bgcB:   lda (fdS),y
-        sta (fdD),y
-        cpy rsHi
-        beq bgcAdv
-        iny
-        jmp bgcB
-bgcAdv: clc
-        lda fdS
-        adc #40
-        sta fdS
-        bcc bgcS1
-        inc fdS+1
-bgcS1:  clc
-        lda fdD
-        adc #40
-        sta fdD
-        bcc bgcS2
-        inc fdD+1
-bgcS2:  dex
-        bne bgcRow
-        rts
+; bgCopy / snapCp: copy the top 13 rows of a screen into a half-height snapshot, columns
+; rsLo..rsHi. bgCopy names the background render's buffers; fallSnap (in the fall block, which has
+; no room to spare) sets the same two bytes and jumps straight in. One walk, two callers -- they
+; were the same loop written twice, and the second copy is what pushed its block past $9500.
+bgCopy: lda baseHi
+        sta snSrc
+        lda #>fallSnapD
+        sta snDst
+        jmp snapCp              ; ...the shared walk, parked in a free run of its own
+
         * = $6100
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte ${holeVarT.join(',')}
@@ -16547,11 +18938,11 @@ arcET: !byte ${arcET.join(',')}
 arcYT2: !byte ${arcYT2.join(',')}    ; the landing's mirrored schedule
 arcET2: !byte ${arcET2.join(',')}
 arcD: !byte ${arcD.join(',')}
-arcTrT: !byte ${arcTrT.join(',')}
+; REMOVED 2026-09-26, nothing in the image named it: arcTrT/arcTopT: BUILD-TIME inputs that were emitted out of habit. arcTrT feeds arcSpT and
+; arcTopT feeds the fall's clamp; the derived tables ship and are read, the inputs are not.
 arcSpT: !byte ${arcSpT.join(',')}
 arcSp2T: !byte ${arcSp2T.join(',')}
 arcSp2bT: !byte ${arcSp2bT.join(',')}
-arcTopT: !byte ${arcTopT.join(',')}
 ; the split for an overlap frame: between the departing arc's lowest row and the arriving one's
 ; highest, so each rim sits in the charset its polarity needs
 ; One bit per cell: can the hole be seen from anywhere in it? 32 bytes, where a fourth candidate
@@ -16565,17 +18956,33 @@ arcTopT: !byte ${arcTopT.join(',')}
 blkT: !byte ${[...blkT, ...Array(256 - MAPN).fill(1)].join(',')}
 ${FALL ? `; fallDraw indexes these by whole rows of offset, 0..25, to place its two block pointers.
 mul40LoT: !byte ${mul40.map(v => v & 255).join(',')}
-mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}` : ''}
+mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}
+; ---- THE FALL'S SNAPSHOTS ARE HALF HEIGHT ----
+; renderSym writes the identical byte to both halves of the screen (charset B is charset A flipped
+; and the raster split selects it below the horizon), so a frame is its own vertical mirror about
+; row 12 and only rows 0-12 need storing. 520 bytes instead of 1000.
+; mulSnapT is 40*min(x, 24-x): the row offset INTO the snapshot for screen row x. It replaces
+; mul40 at the two snapshot reads, so the mirror costs no cycles at all -- same instruction, a
+; different table.
+mulSnapLoT: !byte ${SNAP_MUL.map(v => v & 255).join(',')}
+mulSnapHiT: !byte ${SNAP_MUL.map(v => v >> 8).join(',')}
+; Which SCREEN row each slot copies from. Slots 1-5 take rows 23-19 -- their own mirrors -- because
+; the HUD is drawn over rows 1-5 AFTER renderSym, so those rows are the only asymmetric ones on
+; screen. Their mirrors hold exactly the render the HUD is covering, so this both loses the HUD
+; for the fall (which is wanted) and keeps the geometry underneath it (which storing a blank
+; would not). Everything else stores itself.
+snapSrcT: !byte ${SNAP_SRC.join(',')}` : ''}
 ; the per-VARIANT tables live out here: the angel's rungs doubled their length and pushed the
 ; image segment through holeSeeT at $3240
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbPtrU: !byte ${orbPtrU.join(',')}
-orbTallT: !byte ${LVLT('orbTallT').join(',')}
-${HAS_IDOL ? `orbArtT: !byte ${LVLT('orbArtT').map(hx).join(',')}   ; bitmap offset per entity; 0 = the orb's art` : ''}
+${LD('orbTallT', LVLT('orbTallT').join(','), ': !byte ')}
+${HAS_IDOL ? `${LD('orbArtT', LVLT('orbArtT').map(hx).join(','), ': !byte ')}   ; bitmap offset per entity; 0 = the orb's art` : ''}
 orbHidT: !byte ${pad(orbHidT, NORB).join(',')}
-orbHid0T: !byte ${LVLT('orbHid0T').join(',')}   ; the build's hidden flags, for objInit
-orbX0T: !byte ${LVLT('orbX0T').join(',')}   ; where objInit puts them back on a restart
-orbY0T: !byte ${LVLT('orbY0T').join(',')}
+${LD('orbIdolT', LVLT('orbIdolT').map(hx).join(','), ': !byte ')}   ; which idol each slot is, $ff = none
+${LD('orbHid0T', LVLT('orbHid0T').join(','), ': !byte ')}   ; the build's hidden flags, for objInit
+${LD('orbX0T', LVLT('orbX0T').join(','), ': !byte ')}   ; where objInit puts them back on a restart
+${LD('orbY0T', LVLT('orbY0T').join(','), ': !byte ')}
 ; Did this entity take a sprite slot last frame -- which is exactly "is any pixel of it on
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
@@ -16588,7 +18995,7 @@ orbYCapT: !byte ${orbYCapT.join(',')}
 orbBlankT: !byte ${orbBlankT.join(',')}
 orbAnchT: !byte ${ORBANCH.join(',')}
 
-orbHgtT: !byte ${orbHgtT.join(',')}
+; REMOVED 2026-09-26, nothing in the image named it: orbHgtT: sprite height per variant, 21 or 42. Nothing read it; it is one shift from ORBEXP.
 angVarT: !byte ${angVarT.join(',')}
 arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const d = arcSpan(arcYT[ARC_DROP_N + n], (arcET[ARC_DROP_N + n] << 24) >> 24)[1];
@@ -16604,18 +19011,125 @@ arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
 ; Five kinds now: exit, socket empty, socket seated, pedestal empty, pedestal seated. The two
 ; pedestal rows are IDENTICAL -- seating changes only hlFill, not the shape -- and they are both
 ; here so that "seated is the next kind up" stays one adc #1 in hlSet for every seatable thing.
-hlK5T:  !byte 0,5,10,15,20
+hlK5T:  !byte 0,5,10
+        ; The sixth operand -- this kind's rung -> rows table -- is patched from hlVisL, which
+        ; sits with the tables themselves; this block has four spare bytes. Low byte only: they
+        ; share a page, and the build checks that they still do.
 hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT
         !byte <hlRungS,<sockYBaseT,<sockPtrT,<sockFlagT,<sockXOffT
-        !byte <hlRungE,<seatYBaseT,<seatPtrT,<seatFlagT,<seatXOffT
-        !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT
         !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT
 hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
         !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
-        !byte >hlRungE,>seatYBaseT,>seatPtrT,>seatFlagT,>seatXOffT
         !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT
-        !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT
-${FALLSCENE ? (() => { const P = fRowPack(); return `        * = ${hx16(FROWT + 0x500)}
+${ANYFLOORDK ? `
+; ---- fdGlyph: carry the floor's dither THROUGH the ramps and steps ----
+; Dithering BLANK alone leaves an 8-pixel stairstep along every wall base: the cell where floor
+; meets wall is a ramp, its lower half is ground at bit pair 00, and that half stayed flat while
+; everything around it went dark. So the same checker has to land on the 00 pairs of every ramp
+; and step glyph -- codes 2..${CELLCODES - 1} -- in charset B.
+;
+; NOT REVERSIBLE IN PLACE, which is what decides the shape of this. The outline trick (seamEdge)
+; can undo itself because the ramps hold ZERO bit pair 10, so anything that is 10 was put there
+; and can be taken away. Here the dither is pair 01, which is exactly what a ramp's WALL pixels
+; already are -- a 01 we added is indistinguishable from one that was always there. So a level
+; that does not want the dither cannot subtract it; it has to REBUILD from charset A.
+; That is affordable because cpChr's relationship still holds: B is A with the low three bits of
+; the index flipped, so rebuilding is a copy with the rows reversed.
+;
+; fdWas remembers what charset B currently holds, so this runs on a CHANGE of state, not on
+; every arrival -- walking 5,6,7 or walking 1,2,3,4 costs nothing after the first.
+fdGlyph:lda fdWant
+        cmp fdWas
+        beq fdGDn               ; charset B already says what this level wants
+        sta fdWas
+        lda #${hx(CELLCODES - 2)}
+        sta fdCnt               ; ...and that is ALL this does now -- no pointers. See fdGlTk.
+fdGDn:  jmp fdGEnd              ; ...which decides whether anything will ever TICK this. Was a
+                                ;   plain "jmp seamEdge"; the redirect is free, where a call at
+                                ;   the boot site was three bytes a full block did not have.
+
+; ---- fdGlTk: the rebuild, ${FDGL_N} glyphs at a time, once per landing frame ----
+; All ${CELLCODES - 2} in one call is about 108,000 cycles -- five or six frames of stall, and it showed as
+; a hitch a few frames into the landing however it was scheduled. The pointers and the counter
+; were already the whole of the state, so slicing it costs a wrapper and nothing else.
+; SAFE HERE because charset B is not read between the end of the overlap window and the moment
+; the new room's horizon rises into region 3: the rim comes from an arc block and the room's
+; ceiling half from charset A. It must not start EARLIER than the window's end, though -- the
+; buffer on display through the window still holds the drop's last frame, whose cells are
+; charset B's, and re-dithering them under it is the bug this was moved off the handover to fix.
+fdGlTk: lda #${hx(FDGL_N)}      ; the per-frame slice; fdGlFl enters below with $ff, and a slice
+fdGlF2: sta fdSlc               ;   that big is a flush
+        lda fdCnt
+        beq fdGtD
+        lda #$00                ; NOT in X. The glyph body's second instruction is "ldx #$00" --
+                                ;   X is its fdBuf index -- so a slice counter there is destroyed
+                                ;   before it is ever tested, dex/bne always loops, and it runs
+                                ;   all ${CELLCODES - 2} glyphs in one call: the whole stall, straight back.
+        ; ---- THE POINTERS ARE REBUILT EVERY TICK, and fdCnt is the only thing that crosses a
+        ; frame. They used to be set once by the arm and carried, which is fine for a routine
+        ; that runs to completion inside one call and fatal for one spread over sixteen frames:
+        ; fdA/fdB are zero page and shared -- arcBld uses the same pair -- so anything running
+        ; between two ticks moved the destination, and the loop wrote glyphs over whatever it
+        ; then pointed at. A hard freeze, a few rows into the sweep.
+        ; The glyph to do next is CELLCODES - fdCnt: 201 - 199 = 2, the first cell code.
+        sta fdA+1
+        lda #${hx(CELLCODES)}
+        sec
+        sbc fdCnt
+        asl
+        rol fdA+1
+        asl
+        rol fdA+1
+        asl
+        rol fdA+1               ; index * 8; a code is a byte, so no carry out
+        sta fdA
+        sta fdB                 ; both charsets are 2KB apart, so the low byte is shared
+        lda fdA+1               ; no clc: index*8 is at most $640, so the last rol left C clear
+        adc #${hx(CHARSET >> 8)}
+        sta fdA+1               ; ...and $c0 + 6 does not carry either, for the add below
+        adc #$08
+        sta fdB+1
+fdGl:   ldy #$07                ; A's rows 7..0 into the buffer in B's order (y EOR 7)
+        ldx #$00
+fdCp:   lda (fdA),y
+        sta fdBuf,x
+        inx
+        dey
+        bpl fdCp
+        ldy #$07
+fdDi:   lda fdBuf,y
+        sta fdT                 ; ---- set the checker's bits on the pairs that are 00 ----
+        and #$55                ;   lo bits
+        sta fdT2
+        lda fdT
+        lsr
+        and #$55                ;   hi bits, brought into line
+        ora fdT2                ;   1 at the low bit of every NON-00 pair
+        eor #$55                ;   ...so this is 1 at every 00 pair
+        and ${hx16(CHARSET_B)},y ;   the checker, already masked by the level -- BLANK's own
+        ora fdT                 ;   glyph was written from it a moment ago, so it is the mask
+        sta (fdB),y
+        dey
+        bpl fdDi
+        lda fdA                 ; on to the next glyph, both pointers
+        clc
+        adc #$08
+        sta fdA
+        bcc fdG1
+        inc fdA+1
+fdG1:   lda fdB
+        clc
+        adc #$08
+        sta fdB
+        bcc fdG2
+        inc fdB+1
+fdG2:   dec fdCnt
+        beq fdGtD
+        dec fdSlc
+        bne fdGl
+fdGtD:  rts
+
+` : ''}${FALLSCENE ? (() => { const P = fRowPack(); return `        * = ${hx16(FROWT + 0x500)}
 ; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
 ; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
 ; run of $ff at one end. Now four 40-byte tables and the 25 rows generated on entry to fdWarp.
@@ -16650,15 +19164,167 @@ fwGst:  sta fwBlk,y
 fwK:    !byte 0
 fwLo:   !byte 0
 fwHi:   !byte 0
-fwBlk:  !fill 32, 0             ; the block fdWarp reads, rebuilt once a frame
 fKT:    !byte ${P.K.join(',')}
 fLoT:   !byte ${P.LO.join(',')}
 fHiT:   !byte ${P.HI.join(',')}
-fNT:    !byte ${P.N.join(',')}`; })() : ''}
+`; })() : ''}
+; ---- $6d82: lateLoad, sitting directly below the loader it calls ----
+        * = $6d82
+${LATE.length ? '' : `; ---- dpCand and dpDiag live here, in the space lateLoad wants when a level is LATE ----
+; The two are mutually exclusive by construction: a build with no LATE level has no lateLoad, and
+; this is the only stretch big enough. They are here rather than in the main code block because
+; that block is at ZERO headroom and these are COLD -- eight calls on a keypress -- so they had no
+; business holding the tightest bytes in the program. Moving dpCand out is what paid for dpDiag.
+
+
+${!ANYFLOORDK ? '' : ``}`}${LATE.length ? `; ---- lateLoad: the hub pulls levels ${LATE.join(', ')} off the disk ----
+; Called from the fall's drop->landing hand-over, which is the one moment a load is free: the
+; screen is showing the arc, nothing is being rendered, and the destination was snapshotted
+; before the drop began. It BLOCKS, and that is deliberate -- the wait is spent inside an
+; animation that is already playing.
+; What it loads is one file at one address: ILAT is the three level blocks in slot order plus
+; level ${LATE[0]}'s wall lists above them, landing on the slots levels 1-3 occupied. They are
+; discarded wholesale, so it does not matter which slot held which -- lvlAtT is simply rewritten.
+lateLoad:
+        lda lateOK
+        bne llRts               ; once only: they stay in for the rest of the game
+        lda lvlMeT
+        cmp #${hx(LATEHUB)}
+        bne llRts               ; only at the hub
+        ; ---- the three KERNAL zero-page bytes the resident reads, and the engine owns ----
+        ; Krill's resident uses FA, DFLTN and DFLTO and nothing else of the KERNAL's; its own
+        ; workspace is $e0-$e7, which this engine does not claim. $99 and $9a ARE engine
+        ; variables, so by now they hold geometry rather than the idle 0/3 the loader expects.
+        ; Three bytes, named: a blanket $90-$a9 save was 26 bytes of buffer and a pair of loops,
+        ; and lateLoad does not have them to spare.
+        lda $99
+        sta llZP
+        lda $9a
+        sta llZP+1
+        lda #$00
+        sta $99                 ; DFLTN: input from the keyboard
+        lda #$03
+        sta $9a                 ; DFLTO: output to the screen
+        lda #$08
+        sta $ba                 ; FA: the drive to talk to
+        ; ---- the loader back where it was built to run ----
+        ; It costs the renderer's span stack, which is rebuilt from scratch every frame, and we
+        ; are inside a fall with nothing being drawn.
+        ; (Krill's own $e0-$e7 was snapshotted here and restored too -- it made no difference,
+        ;  so the workspace is not what drifts. Removed rather than left as cargo.)
+        ldx #$00
+klUn:   lda krillRt,x
+        sta ${hx16(KRILL_RESIDENT_AT)},x
+        inx
+        cpx #${hx(KRILL_RT_LEN)}
+        bne klUn
+        ; NOT under sei, and NOT at port $37. Both were tried and both make it WORSE: with
+        ; interrupts held off the loader waits for the drive for ever (PC parks inside the
+        ; resident), where with them on it gives up and returns. The drive is not answering
+        ; either way -- see lateLoad's note -- so neither is the cause, and a hang is harder to
+        ; diagnose than a clean failure.
+        ; ---- BLANK THE DISPLAY ACROSS THE TRANSFER ----
+        ; At entry this same call works, and the one thing different about entry is that DEN is
+        ; still off: no badlines, no sprite DMA, nothing stealing cycles from the serial
+        ; handshake. The fall is on screen when this runs, so it costs a blank frame or two in
+        ; the middle of an animation -- which is the cheapest thing here to spend.
+        lda $d011
+        pha
+        and #$ef                ; DEN off
+        sta $d011
+        ldx #<nILAT
+        ldy #>nILAT
+        jsr ${hx16(KRILL_RESIDENT_AT)}   ; = loadraw, at the address it was assembled for
+        tax                     ; the status, across the $d011 restore
+        pla
+        sta $d011
+        txa
+        sta llErr               ; A is Krill's status; carry set means it did not arrive
+        bcs llBack
+        lda #$01
+        sta lateOK
+${LATE_AT_CODE}
+llBack: lda llZP                ; $ba is not saved: FA is the KERNAL's, not the engine's --
+        sta $99                 ;   nothing here reads it, so it only needs SETTING above.
+        lda llZP+1
+        sta $9a
+llRts:  rts
+nILAT:  !byte ${[...(process.env.LATEFILE ?? 'ILAT')].map(c => hx(c.charCodeAt(0))).join(',')},0
+llZP:   !fill 2, 0              ; DFLTN, DFLTO
+lateOK: !byte 0                 ; 0 = not in yet, which is what the fall's hold tests
+llErr:  !byte 0                 ; the last loadraw status, for probing
+` : ''}; ---- $6e00: WHERE THE LIVE LOADER IS PARKED ----
+; NOT a second build of Krill. That was tried and it hangs: the protocol is STATEFUL across
+; loads, and a pristine copy has none of the state install() and the boot's own loads left in
+; the live one -- the drive simply does not answer it, and the resident spins at $6ec7 for ever.
+; So there is ONE resident, the boot's, built for $0400. entry copies it up here before the
+; first frame writes stackLT over it, and lateLoad copies it back down to run it. It keeps its
+; address and its state, and what it clobbers on the way back is per-frame scratch.
+${LATE.length || LVLLOAD ? `        * = ${hx16(KRILL_RT_AT)}
+krillRt: !fill ${KRILL_RT_LEN}, 0` : ''}
+${!(LVLLOAD || LATE.length) ? '' : `        * = $6408
+; ---- klPark / lvlLoad: THE LEVEL COMES OFF THE DISK ----
+; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
+; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
+; one; a second pristine build at another address hangs waiting for a reply that never comes.
+klPark: ldx #$00
+kpL:    lda ${hx16(KRILL_RESIDENT_AT)},x
+        sta krillRt,x
+        inx
+        cpx #${hx(KRILL_RT_LEN)}
+        bne kpL
+        rts
+`}${!LVLLOAD ? '' : `
+; lvlLoad: A = the level to bring in. Called from the fall where lvlSwap used to be. With one
+; slot there is nothing to exchange, so the arriving level is simply read over the departing one:
+; the room being left was snapshotted a moment earlier and is what the drop animates, and the
+; destination render starts a slice per frame once this returns. It BLOCKS, deliberately -- ~705
+; bytes is about 0.15s, spent inside an animation that is already playing.
+lvlLoad:
+        ora #$30                ; the file is ILV<n>: the level number IS its last character,
+        sta nILV+3              ;   so choosing a level is one byte of self-modification
+        lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
+        sta llZP
+        lda $9a
+        sta llZP+1
+        lda #$00
+        sta $99                 ; DFLTN: input from the keyboard
+        lda #$03
+        sta $9a                 ; DFLTO: output to the screen
+        lda #$08
+        sta $ba                 ; FA: the drive to talk to
+        ldx #$00                ; the loader back where it was built to run
+klUn:   lda krillRt,x
+        sta ${hx16(KRILL_RESIDENT_AT)},x
+        inx
+        cpx #${hx(KRILL_RT_LEN)}
+        bne klUn
+        lda $d011               ; DEN off across the transfer: badlines and sprite DMA steal the
+        pha                     ;   cycles the serial handshake needs, and the fall is on screen
+        and #$ef
+        sta $d011
+        ldx #<nILV
+        ldy #>nILV
+        jsr ${hx16(KRILL_RESIDENT_AT)}   ; = loadraw, at the address it was assembled for
+        tax                     ; the status, across the $d011 restore
+        pla
+        sta $d011
+        txa
+        sta llErr               ; carry set means it did not arrive; llErr is for probing
+        lda llZP
+        sta $99
+        lda llZP+1
+        sta $9a
+        rts
+nILV:   !byte ${[...'ILV1'].map(c => hx(c.charCodeAt(0))).join(',')},0
+llZP:   !fill 2, 0              ; DFLTN, DFLTO
+llErr:  !byte 0
+`}
+
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-orbOccT: !byte ${(process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat).join(',')}
+${LD('orbOccT', (process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat).join(','), ': !byte ')}
 ${SOUND ? `; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
@@ -16669,8 +19335,8 @@ sndV2H: !byte ${sndV2.map(v => v >> 8).join(',')}
 sndVolT: !byte ${sndVolT.join(',')}` : ''}
 ${DIE ? `; Where each picture's map lives. The first is inside the image next to the charset; the rest
 ; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
-picLoT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((SEATBASE + k * 1000) & 255)).join(',')}
-picHiT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((SEATBASE + k * 1000) >> 8)).join(',')}
+picLoT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((PICBASE + k * 1000) & 255)).join(',')}
+picHiT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((PICBASE + k * 1000) >> 8)).join(',')}
 ; dieN is the death counter and it is DATA, not an equate, on purpose: dieKey restarts with
 ; "jmp entry", which reloads nothing, so an emitted 0 is the only initialisation it ever gets --
 ; and that is exactly what makes it survive the restart and count deaths rather than resetting.
@@ -16689,7 +19355,75 @@ darkerT: !byte ${darkerT.join(',')}
 ; charset stays because it is 2,048 and there is no 2K of bank 3 left to put it in -- and it is
 ; read exactly once, by dieSwap, straight into charset B's slot.
         * = $7100
-faceChrT: ${chunk(PICS.chars, 32).trim()}
+faceChrT: ${chunk(PICS.chars, 32).trim()}` : ''}${!ANYFLOORDK ? '' : `
+
+
+; ---- four COLD routines, rehoused out of the block under $a900 ----
+; They sat beside arcBld with the hazard tables, and level 5's real design pushed that block
+; 96 bytes over. Each runs a handful of times per FALL, so none had any claim on contested
+; space; this is the run the packed cut-scene charset leaves ahead of the ladder tables, which
+; FALLNOW's scratch already uses the same way. VISTAB's guard says if it stops fitting.
+; ---- fsOv: where region 3 begins during the overlap window ----
+; It used to be parked at 246 -- the bottom -- because the window was "the two rims and nothing
+; else". The new room reaches the foot of the screen before the window ends, though, and it needs
+; its own charset rather than the arriving rim's block. So the split follows its leading edge.
+fsOv:   lda arcSp2T,x           ; region 3 begins at the ARRIVING arc's BOTTOM -- the same line
+        sta pSplit2             ;   the post-window frames use for it. Below that is the gap and
+        rts                     ;   the room, both of them charset A's.
+                                ; It was the room's own first row, which cut through the arriving
+                                ;   rim: arcOvSpT separates the two RIMS, so the arriving one sits
+                                ;   below it, and its cells then landed in charset A -- where
+                                ;   200-232 are the readout glyphs. A row of HUD characters.
+
+; ---- fdBlw: what fills the rows BELOW the arc, which is not one answer ----
+; On a DROP it is the hole, and region 3 down there reads the arc's own block, so it is the
+; block's code. On a LANDING it is the gap between the arc and the room, and every region below
+; the arc's bottom is a CHARSET -- so it has to be the charset's ground, BLANK. The arc block's
+; ground code is 234, which in charset A is a seam glyph.
+fdBlw:  lda arcBlw              ; drop: the hole, in the arc's own block
+        ldy arcInv
+        beq fdBlwS
+        lda #${hx(BLANK)}       ; landing: the charset's ground. NOT a branch on this value --
+fdBlwS: sta fdCol               ;   BLANK is zero, and the obvious "bne" never fires.
+        rts
+
+
+; ---- fdSpl: a drop's fill band crosses the arc's top, so it is TWO fills ----
+; The band runs from the frozen scene down to the arc's FOOT, and region 3 -- with its own
+; dictionary -- begins at the arc's CROWN. Every column whose rim is lower than the crown
+; therefore has fill rows below the split, where charset B's ground code is sprite data.
+; Does the first fill itself and hands the caller the count for the second, so the main block
+; pays three bytes for this: it has no headroom left.
+fdSpl:  ldy arcInv              ; A is the row count and the landing path leaves it alone; the
+        bne fdS1                ;   drop path computes both of its own from arcHi/fwN/arcTopC,
+                                ;   so nothing has to be stashed across the branch
+        lda arcTopR             ; the split row, clamped into the band
+        cmp fwN
+        bcs fdSa
+        lda fwN
+fdSa:   cmp arcHi
+        bcc fdSb
+        lda arcHi
+fdSb:   sta arcTopC
+        sec                     ; ...the rows above it, in charset B's own ground code
+        sbc fwN                 ;   (no zero test: fdFill's own first act is one)
+        jsr fdFill
+        lda #${hx(ARC_FILL)}    ; ...and the rest in the arc block's, fdD having walked there
+        sta fdCol
+        lda arcHi
+        sec
+        sbc arcTopC
+fdS1:   rts
+`}
+
+        ; ---- rung -> rows on screen, the one thing occStamp cannot derive for a socket ----
+        ; See visRows. Anchored just below the run tables, in the tail the packed cut-scene
+        ; charset leaves free -- the ladder tables' own block ends exactly at $4000.
+        * = ${hx16(VISTAB)}
+hlVisL: !byte <exitVisT,<sockVisT,<pedVisT
+exitVisT: !byte ${exitVisT.join(',')}
+sockVisT: !byte ${sockVisT.join(',')}
+pedVisT: !byte ${pedVisT.join(',') || '0'}
 
         ; ---- runByteT / runBitT: a run id as a byte index and a bit mask ----
         ; Here, in the page the cut-scene charset vacated when it was repacked to the glyphs its
@@ -16697,9 +19431,13 @@ faceChrT: ${chunk(PICS.chars, 32).trim()}
         ; four-level chain overran by 113 bytes -- the wall deltas grew when NHOLE went to seven
         ; for the hub's pedestals, because opening a wall changes the LOS bitmap and the delta
         ; carries every byte of it that moved.
-        * = ${hx16(0x7100 + PICS.chars.length)}
+        ; NOT gated on DIE, though they LIVE in the death scene's page: orbOcc reads them every
+        ; frame of every build. They were inside the DIE block, so DIE=0 stopped assembling with
+        ; "undefined symbol: runByteT" -- a table's HOME is not its OWNER. Their address is
+        ; anchored to $7900 rather than to the end of faceChrT: see RUNTAB.
+        * = ${hx16(RUNTAB)}
 runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
-runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it` : ''}
+runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it
 ${SOUND ? `${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
 melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
         * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
@@ -17120,8 +19858,14 @@ symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column p
         !byte ${symRowsOcc(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
         !byte ${symRowsInk(Object.values(LEVEL_SYM)[0], 0xff, 2).map(hx).join(',')}
 lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? (LEVEL_SYMSEAM[i + 1] ? 16 : 8) : 0).join(',')}   ; 0 plain, 8 ground-ink dot, 16 seam-ink
-; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather than
-; a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no branch.
+` : ''}${ANYSEAM ? `; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather
+; than a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no
+; branch.
+; GATED ON ANYSEAM, NOT ANYSYM. It was inside the symbol block, so the two could disagree: the
+; speckle and the outline are different features on different levels, and a chain that wanted one
+; without the other either emitted a table nothing reads or -- the way round that actually bit --
+; emitted seamEdge's body with no lvlSeamT for it to read, which is an undefined symbol at the
+; very end of a build. A table belongs with its reader.
 lvlSeamT: !byte ${[...Array(PAL_N)].map((_, i) =>
   hx((process.env.SEAMEDGE ? +process.env.SEAMEDGE === i + 1 : LEVEL_SEAM[i + 1]) ? 0x55 : 0)).join(',')}
 ` : ''}
@@ -17146,9 +19890,14 @@ sprPal: lda dieLat              ; ---- the death scene wants the inks to SIT STI
         lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
         beq spLvl               ;   angels have stopped caring whether you are looking
 spTint:
-        lda #${hx(IDOL_SPR.under)}      ; ---- above the split: the world's ----
-        ldy #${hx(IDOL_SPR.hi)}
-        bne spWSt               ; always: brown is not zero
+        lda idolU               ; ---- above the split: the world's ----
+        ldy idolH
+        jmp spWSt               ; jmp, NOT "bne ... always". The branch only ever worked because
+                                ;   the ldy above it happened to load a non-zero highlight and
+                                ;   set the flags last -- the lda loads the UNDERSIDE, which is
+                                ;   black ($00) on every level that has an idol. A per-level
+                                ;   highlight is free to be black too, and then the branch falls
+                                ;   through into spLvl and the tint silently never happens.
 spLvl:  lda sprU                ; whatever lvlLook left for this level
         ldy sprH
 spWSt:  sta $d025
@@ -17163,8 +19912,8 @@ spWSt:  sta $d025
         dex                     ;   carry is the entity index PLUS ONE
         lda orbArtT,x
         beq spDn                ; an orb holds no special inks
-        lda #${hx(IDOL_SPR.under)}
-        ldy #${hx(IDOL_SPR.hi)}
+        lda idolU
+        ldy idolH
         sta irqSpU+1
         sty irqSpH+1
 spDn:   rts
@@ -17179,18 +19928,73 @@ idolLat:lda idolWk
         sta idolWk
         rts
 
-idolLk: ldx #$00                ; assume not
-        ldy carry
-        beq idlPut              ; empty hands
-        dey
-        lda orbArtT,y           ; 0 = an orb. Only the idol changes the rules.
-        beq idlPut
-        inx
-idlPut: stx idolHd
-        rts
 ` : ''}
 
-        * = $7e00
+${!ANYFLOORDK ? '' : `; ---- arcBl2: the ARRIVING arc's dictionary, stamped once at boot ----
+; Its glyphs are charset B's own, unchanged: the landing's rim is hole-above/floor-below, which
+; is the mirror of what the dictionary holds, and charset B IS that mirror. Clean, because the
+; surround is the new room's CEILING -- charset B gets dithered later and this must not.
+; Called from entry right after cpChr, which is where charset B is clean by construction.
+; $d000-$dfff is I/O to the CPU at the engine's $35; $34 shows the RAM the VIC has been reading
+; all along. Interrupts off across it -- the raster handler writes $d018 and $d021, and neither
+; is there while the port is down.
+arcBl2: php                     ; SAVE AND RESTORE THE I FLAG, do not assume it. This runs from
+        sei                     ;   entry, before $0314 is pointed anywhere and before $d01a is
+        lda #$34                ;   even cleared -- a bare cli here enables interrupts into
+        sta $01                 ;   nothing with the KERNAL banked out, and the machine is gone
+                                ;   before the first frame. Cost me a black screen.
+                                ; The PORT is restored to a literal $35 below rather than saved:
+                                ;   cpChr runs immediately above this and reads the charsets as
+                                ;   plain RAM, which is only true in $35. Three bytes, and the
+                                ;   block was one over.
+        lda #<${hx16(ARC_GLY5)}
+        sta fdB
+        lda #>${hx16(ARC_GLY5)}
+        sta fdB+1
+        ldx #$00
+a2Lp:   jsr agPt                ; ...then up two pages, to charset B's copy of the same glyph
+        lda fdA+1
+        clc
+        adc #$08
+        sta fdA+1
+        ldy #$07
+a2Rw:   lda (fdA),y
+        sta (fdB),y
+        dey
+        bpl a2Rw
+        jsr agNx
+        inx
+        cpx #${hx(ARC_RIM_CODES.length)}
+        bne a2Lp
+        lda #$ff                ; the shaft above the rim
+        ldy #$07
+a2V:    sta (fdB),y
+        dey
+        bpl a2V
+        jsr agNx
+        lda #$00                ; ...and the new room's ceiling below it, flat and never dithered
+        ldy #$07
+a2F:    sta (fdB),y
+        dey
+        bpl a2F
+        lda #$35
+        sta $01
+        plp
+        ; ---- ARC_MAP's entry 0, which arcBld's fill deliberately cannot reach ----
+        ; That fill counts DOWN and ends on bne, so it writes ${CELLCODES - 1}..1 and never 0.
+        ; It cannot use bpl instead -- bpl tests the SIGN bit and the table is ${CELLCODES} long, which
+        ; is what the bug was. Index 0 is BLANK, a cell the rim MISSED, and a miss is ground in
+        ; both polarities -- a CONSTANT. So it is written once, here, rather than costing three
+        ; bytes a fall in a block that is already one over; see the note on that fill.
+        lda #${hx(ARC_FILL)}
+        sta ${hx16(ARC_MAP)}
+        rts
+
+; ...it is HERE, and not beside arcBld and the rest of the arc code, because that block sits
+; under $a900 with the hazard tables and level 5's real design pushed it 96 bytes over. This
+; routine runs ONCE, at boot, and never again -- so it was the obvious thing to move out of
+; contested space. Same reasoning that moved dpCand out of the main block.
+`}        * = $7e00
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -17273,12 +20077,31 @@ colT:   !byte ${hx(palOf(LVL).ceil)}             ; the TOP region's pending ink.
 colF:   !byte ${hx(palOf(LVL).ceil)}             ; the FLOOR's ink. colW is the ceiling's now.
 sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
 sprH:   !byte ${hx(sprOf(LVL).hi)}             ;   because the idol swap borrows the registers
-${HAS_IDOL ? `idolOn: !byte $00               ; the idol is on screen. LATCHED: the IRQ reads this sixty
+${HAS_IDOL ? `; ---- WHERE EACH IDOL IS: the one piece of state a death does not undo ----
+; DATA, not an equate, for exactly the reason dieN is: dieKey restarts with "jmp entry", which
+; reloads nothing, so the emitted bytes are the only initialisation these ever get -- and that
+; is what makes them survive a restart while everything else goes back to its build state.
+; "Everything resets except the idols." One byte each: the level the idol is currently in, or
+; $ff while it is in your hands and belongs to no room.
+idolLoc: !byte ${(() => {
+  // IDOLLOC=a,b,c starts the run with the idols already in those levels -- the only way to see
+  // a delivered one without playing the errand, and the only way a headless run can.
+  const home = [...Array(IDOL_N)].map((_, i) =>
+    +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0));
+  const env = (process.env.IDOLLOC ?? '').split(',').filter(v => v.trim() !== '').map(Number);
+  return home.map((h, i) => hx(env[i] ?? h)).join(',');
+})()}
+idolU:  !byte ${hx(idolSprOf(LVL).under)}             ; the idol's three inks for the LIVE level. lvlLook
+idolH:  !byte ${hx(idolSprOf(LVL).hi)}             ;   rewrites all three on arrival, whether or not they
+` : ''}${HAS_IDOL ? `idolOn: !byte $00               ; the idol is on screen. LATCHED: the IRQ reads this sixty
 ` : ''}
 
 ; lvlBoot: the starting level's whole look. The wall ink lives here rather than at the boot site
 ; because the main block is the tightest resource in the project and this runs once.
 lvlBoot:jsr lvlLook             ; all five inks, then fall through to lvlHi
+${!ANYFLOORDK ? '' : `        jsr lvlSpr              ; ...the sprite inks, which only the FALL defers...
+        jsr lvlChr              ; ...and the charset, which it defers differently -- see fdGEnd
+`}
         ; fall through to lvlHi: at boot there is no departing level, so all three agree
 ; lvlHi: the region ABOVE the rim catches up with the rest. Called when the DEPARTING rim has
 ; finally left the screen -- until then it must keep the colour of the level being left, which is
@@ -17306,24 +20129,49 @@ ${CEILVARY ? `lvlLo:  ldx lvlMeT
   // ground operands. A table when it varies, an immediate when it does not; same instruction
   // count either way.
   const REG = { ceil: ['colW', '$d021'], wall: ['colB', '$d022'], seam: ['colS', '$d023'] };
-  const varies = k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]);
-  const sprV = k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]);
-  const anyT = Object.keys(REG).some(varies) || ['under', 'hi'].some(sprV);
+  // ALLLVL, and it MUST be the same set the row emitter asks about. These two tests decide
+  // opposite halves of one decision -- emit a row / read that row -- and while the emitter
+  // asked about ALLLVL and this asked about CHAIN, a property that is constant across 1-4 but
+  // different on a late level had its row emitted and then never read: the level's own colour
+  // sat in the image and lvlLook loaded an immediate over the top of it.
+  const varies = k => ALLLVL.some(n => palOf(n)[k] !== palOf(ALLLVL[0])[k]);
+  const sprV = k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]);
+  // ALL THREE, and UNCONDITIONALLY -- a table where the levels disagree, an immediate where
+  // they do not, but always written. The idol's inks are per-level data like any other, so they
+  // are established on arrival like any other; see the contract above objInit. idolCar in
+  // particular is the colour of the idol IN YOUR HANDS, and the decision is that it takes the
+  // arriving room's value as you drop in, because the shared inks have to work against whatever
+  // else that room puts on screen.
+  // under/hi only. The BODY is per sprite and belongs to the idol, not the room, so it needs
+  // no shadow and no row: it lives in orbColT2, which every level carries a slot of.
+  const IDOLK = HAS_IDOL ? ['under', 'hi'] : [];
+  // The SPRITE inks move out to lvlSpr when there is a fall to keep them steady through; see
+  // there. Without that split they stay here and nothing changes.
+  const anyT = Object.keys(REG).some(varies) ||
+    (!ANYFLOORDK && (['under', 'hi'].some(sprV) || IDOLK.length > 0));
   let out = anyT ? ` ldx lvlMeT             ; indexed by level id - 1; lvlMeT is the level ARRIVED at\n        dex\n` : `\n`;
   // The register is only stored where nothing else paints it. $d021 comes from irqB0/irqB1
   // every raster frame and $d025/$d026 from sprPal, so storing them here is three dead bytes
   // each; $d022 and $d023 have no such owner and must be written.
   const OWNED = { ceil: true, wall: false, seam: false };
   for (const [k, [sh, reg]] of Object.entries(REG))
-    out += (varies(k) ? `        lda lvlPal${k}T,x\n` : `        lda #${hx(palOf(CHAIN[0])[k])}\n`)
+    out += (varies(k) ? `        lda lvlPal${k}T,x\n` : `        lda #${hx(palOf(ALLLVL[0])[k])}\n`)
          + `        sta ${sh}\n` + (OWNED[k] ? '' : `        sta ${reg}\n`);
-  for (const [k, sh, reg] of [['under', 'sprU', '$d025'], ['hi', 'sprH', '$d026']])
-    out += (sprV(k) ? `        lda lvlSpr${k}T,x\n` : `        lda #${hx(sprOf(CHAIN[0])[k])}\n`)
+  for (const [k, sh, reg] of (ANYFLOORDK ? [] : [['under', 'sprU', '$d025'], ['hi', 'sprH', '$d026']]))
+    out += (sprV(k) ? `        lda lvlSpr${k}T,x\n` : `        lda #${hx(sprOf(ALLLVL[0])[k])}\n`)
          + `        sta ${sh}\n` + (HAS_IDOL ? '' : `        sta ${reg}\n`);
+  // ---- and the IDOL's scheme for THIS level, resolved once here, not in the IRQ ----
+  // sprPal runs sixty times a second, so it reads a shadow byte rather than indexing a table
+  // by lvlMeT: the level only changes on a fall, and this is where a fall already lands.
+  // Only the inks that actually differ between levels get a byte and a row; the rest stay
+  // immediates in sprPal exactly as before.
+  for (const k of (ANYFLOORDK ? [] : IDOLK))
+    out += (IDOLVARY(k) ? `        lda lvlIdol${k}T,x\n` : `        lda #${hx(idolSprOf(ALLLVL[0])[k])}\n`)
+         + `        sta idol${{ under: 'U', hi: 'H' }[k]}\n`;
   return out;
 })()}
-${SPRVARY ? (() => {
-  const vary = ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]));
+${SPRVARY && !ANYFLOORDK ? (() => {
+  const vary = ['under', 'hi'].filter(k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]));
   return vary.map(k => `        lda lvlSpr${k}T,x\n        sta spr${k === 'under' ? 'U' : 'H'}\n` +
     `        sta ${k === 'under' ? '$d025' : '$d026'}\n`).join('');
 })() : ''}${CEILVARY ? `        lda colW                ; the two regions BELOW the departing rim are this level
@@ -17333,7 +20181,44 @@ ${SPRVARY ? (() => {
                                 ;   250, with the pSplit that says where region 1 begins. Storing
                                 ;   it here put the new ground on screen a whole frame before the
                                 ;   line that bounds it.
-` : ''}${ANYSYM ? `symPut: ldx lvlMeT
+` : ''}${!ANYFLOORDK ? '' : `        rts
+
+
+; ---- lvlSpr: the SPRITE inks, which must not change while the fall is still running ----
+; These used to sit in lvlLook, and the fall calls that at the HANDOVER -- ARC_OVERLAP frames
+; before the drop has finished drawing. So the idol in your hands changed colour mid-descent and
+; then the rest of the level's cast arrived in the same scheme a moment later: two changes where
+; there should be one. Called from fstEnd instead, which is the frame the renderer takes the
+; screen back and draws the level's own sprites, so the cast and its palette appear together.
+; The idol keeps the DEPARTING level's inks for the whole fall, which is what it is wearing.
+lvlSpr:${(() => {
+  const sprV = k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]);
+  const IDOLK = HAS_IDOL ? ['under', 'hi'] : [];
+  const anyT = ['under', 'hi'].some(sprV) || IDOLK.some(k => IDOLVARY(k));
+  let out = anyT ? ` ldx lvlMeT             ; indexed by level id - 1, as lvlLook is\n        dex\n` : `\n`;
+  // No sta $d025/$d026: sprPal republishes both from these shadows every RASTER frame, so the
+  // direct write is at most one frame earlier and costs three bytes each in a page that has none.
+  for (const [k, sh] of [['under', 'sprU'], ['hi', 'sprH']])
+    out += (sprV(k) ? `        lda lvlSpr${k}T,x\n` : `        lda #${hx(sprOf(ALLLVL[0])[k])}\n`)
+         + `        sta ${sh}\n`;
+  for (const k of IDOLK)
+    out += (IDOLVARY(k) ? `        lda lvlIdol${k}T,x\n` : `        lda #${hx(idolSprOf(ALLLVL[0])[k])}\n`)
+         + `        sta idol${{ under: 'U', hi: 'H' }[k]}\n`;
+  return out;
+})()}        rts
+
+; ---- lvlChr: the arriving level's CHARSET, which must NOT happen at the handover ----
+; The inks above are per-region and can change the moment the phase does -- there are two $d021s
+; for the two levels on screen. The charset is one object for the whole screen, and rewriting it
+; at the handover caught the DEPARTING room: the buffer still on display then holds the drop's
+; last frame, whose top rows are the old room's own cells, and floorDk/fdGlyph dither code 0 and
+; codes 2..200 underneath them. One frame of the arriving level's checker on the floor you just
+; left. Deferred to the end of the overlap window, which costs nothing because charset B is not
+; read AT ALL while it runs: both rims are drawn from the arc blocks up there.
+lvlChr:
+
+
+` }${ANYSYM ? `symPut: ldx lvlMeT
         dex
         lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
         clc
@@ -17349,8 +20234,8 @@ spLp:   lda symT,x
         dex                     ;   wall. Same X, so it follows SOLID's plain/marked choice.
         dey
         bpl spLp
-        jmp seamEdge            ; ...and the wall/ceiling outline, which is per level too
-` : `        jmp seamEdge`}
+        jmp ${ANYFLOORDK ? 'floorDk' : 'seamEdge'}
+` : `        jmp ${ANYFLOORDK ? 'floorDk' : 'seamEdge'}`}
 ; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
@@ -17360,7 +20245,393 @@ setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster
 ${CEILVARY ? `        sta colW                ;   halves change at the same top of frame instead of a frame
 ` : ''}        sta colF                ;   apart -- and there is no mid-frame $d021 store to paint a
         rts                     ;   partial band down the middle of the one it lands in.
-        * = ${hx16(RELOC)}
+        ; ---- seamEdge has a PAGE of its own now (2026-09-26), and is not in the block below ----
+        ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
+        ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
+        ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
+        ; it is COLD, jsr-entered from symPut once per level entry, and it fits whole in the page
+        ; bndT was holding down on its own. See bndT for the move that freed it.
+        * = ${hx16(SEAMEDGE_AT)}
+${HAS_IDOL ? `; ---- the idol subsystem lives in the front of seamEdge's page ----
+; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
+; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
+; while no level asks for the wall/ceiling outline (SEAMCODE, and LEVEL_SEAM is empty since
+; level 5 became a stub). The two cannot both live here: turn the outline back on anywhere and
+; seamEdge's 249 bytes leave no room, and the "* = $8000" guard below says so at build time
+; rather than letting them overlap. Whoever turns it on has to rehome one of them.
+${ANYFLOORDK ? `
+; ---- floorDk: the ground's dither, per level, into charset B's BLANK ----
+; lvlFloorT holds $ff for a level that wants it and $00 for one that does not, so the same eight
+; stores serve both: ANDing the pattern with the flag writes the checker or writes zeros. A
+; branch would need a second loop and this is on the level-entry path, not a hot one.
+floorDk:ldx lvlMeT
+        dex
+        lda lvlFloorT,x
+        sta fdM+1
+        sta fdWant              ; fdGlyph compares this against what charset B already holds
+        ldy #$07
+fdLp:   lda fdPatT,y
+fdM:    and #$00                ; operand patched above: $ff keeps the dither, $00 clears it
+        sta ${hx16(CHARSET_B)},y
+        dey
+        bpl fdLp
+        jmp fdGlyph             ; ...then the ramps and steps, then the wall/ceiling outline
+fdPatT: !byte ${FLOORDK_PAT.map(hx).join(',')}
+lvlFloorT: !byte ${[...Array(PAL_N)].map((_, i) => hx(LEVEL_FLOORDK[i + 1] ? 0xff : 0)).join(',')}
+` : ''}
+; ---- idolLk: what is in your hands, as both a flag and an identity ----
+; idolHd is "is it the idol" and drives the gaze and covering rules. idolHand is WHICH idol,
+; and unlike carry it survives a fall -- carry indexes the live level's entity table and
+; objInit clears it, so idolPlace rebuilds carry from idolHand on the other side.
+; Both are derived from carry, so every write to carry must come back through here.
+idolLk: ldx #$00                ; assume not
+        ldy #$ff
+        sty idolHand
+        ldy carry
+        beq idlPut              ; empty hands
+        dey
+        lda orbArtT,y           ; 0 = an orb. Only the idol changes the rules.
+        beq idlPut
+        lda orbIdolT,y          ; ...and WHICH idol, out of this level's slot table
+        sta idolHand
+        inx
+idlPut: stx idolHd
+        rts
+; WHICH idol is in your hands, $ff for none. Persistent alongside idolLoc and for the same
+; reason: carry is an index into the LIVE level's entity table and objInit clears it on every
+; arrival, so it cannot survive a fall. This can, and idolPlace rebuilds carry from it.
+idolHand: !byte $ff
+; ---- and WHERE it is in that level ----
+; Presence was persistent and position was not, so an idol left in the middle of the hub was
+; back on its pedestal when you returned -- objInit restores every entity's cell from the
+; build data and idolPlace only decided whether to SHOW it. These two bytes per idol are
+; written when you set it down and applied by idolPlace, so an idol stays where you left it.
+; Is this idol standing ON a pedestal? Then its sprite is raised onto the drum's top plane
+; instead of the floor. Persistent with the rest: where an idol is includes whether it is up
+; on something, and that has to survive leaving the room like its cell does.
+idolOnPedT: !byte ${IDOL_XY.map((_, i) => {
+  const home = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0);
+  // the pedestal's index + 1, so 0 means the floor -- see the store in orbUse
+  return IDOLSEAT && +((process.env.IDOLLOC ?? '').split(',')[i] ?? home) !== home
+    ? IDOLSEAT_ON(i) + 1 : 0;
+}).join(',')}   ; IDOLLOC drops an idol BESIDE its pedestal,
+                                ;   on the floor; only IDOLSEAT starts it up on the drum
+; Rows to raise a seated sprite, indexed by ohgt>>1. See PEDLIFT: the pedestal's top plane is
+; 2*PEDH*h above the floor at every distance, and h IS the apparent height the projection
+; already holds -- so the lift is a fraction of it, not a distance calculation.
+pedLiftT: !byte ${pedLiftT.join(',')}
+idolXT: !byte ${IDOL_XY.map(([x]) => hx(x)).join(',')}
+idolYT: !byte ${IDOL_XY.map(([, y]) => hx(y)).join(',')}
+; Where each idol came from, for sending a dropped-by-dying one back. Build-time constant.
+idolHomeT: !byte ${[...Array(IDOL_N)].map((_, i) =>
+  hx(+(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0))).join(',')}
+; ---- idolPlace: every idol slot in THIS level, shown or hidden by where the idol is ----
+; Runs straight after objInit, which has just restored orbHidT from the build's orbHid0T -- i.e.
+; "every idol is at home". This is the overlay that makes that true or false per idol.
+; One rule, no per-level special cases: a slot showing idol n is visible exactly when idolLoc,n
+; names the level we are in. That covers a room whose idol has been taken (hide it), the hub
+; with a delivered one standing on its pedestal (show it), and the slot of an idol that is
+; somewhere else entirely (stay hidden) -- the same three lines for all of them.
+; blkT is fixed up too: a hidden entity must not block movement and a shown one must.
+idolPlace:
+        ; The idol in your hands is, by definition, in the level you are in. So the fall does
+        ; not have to hand it over -- it just becomes true here, after lvlMeT has become the
+        ; destination. That is why nothing was added to the fall's swap bookkeeping, where A,
+        ; X and Y are all live and a spare byte is hard to come by.
+        ldy idolHand
+        bmi ipHands             ; $ff = empty hands, and 0..2 never set bit 7
+        lda lvlMeT
+        sta idolLoc,y
+ipHands:ldx nOrbM1T             ; every entity slot, high to low
+ipLp:   ldy orbIdolT,x
+        cpy #$ff
+        beq ipNext              ; not an idol slot
+        ; THREE cases, TWO outcomes: in another level, in this one on the floor, or in this
+        ; one in your hands. Held and elsewhere both mean "no world sprite, cell open" -- the
+        ; only thing held adds is taking hold of it again -- so they share an arm.
+        lda idolLoc,y
+        cmp lvlMeT
+        bne ipAway
+        lda idolXT,y            ; in THIS level: at the cell you last set it down in, not the
+        sta orbXCT,x            ;   build-time one objInit just restored
+        lda idolYT,y
+        sta orbYCT,x
+        cpy idolHand
+        beq ipHeld
+        lda #$00                ; here, standing on the floor
+        beq ipSet               ; always
+ipHeld: txa                     ; here, in your hands: carry is an index into THIS level's
+        clc                     ;   entity table and objInit cleared it, so rebuild it from
+        adc #$01                ;   idolHand -- which is the whole reason idolHand exists
+        sta carry
+ipAway: lda #$01
+ipSet:  sta orbHidT,x
+${!HAS_PED ? '' : `        lda idolOnPedT,y        ; UP ON A DRUM? then it does not block. The drum itself does
+        bne ipOpen              ;   not -- blkT is 0 at a pedestal cell, you walk over it -- and
+                                ;   once the wall goes the ONLY way east is across the three of
+                                ;   them. Three seated idols would plug the corridor they just
+                                ;   unlocked, which is exactly what they did. Y is still the
+                                ;   idol id here: every path into ipSet leaves it alone.
+` }        lda orbHidT,x           ; and blkT follows from it: shown = 2 (entity), hidden = 0.
+        eor #$01                ;   0 eor 1 = 1, asl = 2;  1 eor 1 = 0, asl = 0 -- so the two
+        asl                     ;   values fall out of the flag and need no second branch
+${!HAS_PED ? '' : `        bpl ipBlk               ; always taken: 2 and 0 are both positive
+ipOpen: lda #$00
+ipBlk:  pha                     ; the cell calculation below needs Y, which is the idol id until
+` }        lda orbYCT,x            ; the cell it stands in
+        jsr mulW
+        clc
+        adc orbXCT,x
+        tay
+${!HAS_PED ? '' : `        pla                     ;   ...here
+` }        sta blkT,y
+ipNext: dex
+        bpl ipLp
+        rts
+; ---- and seamEdge itself starts wherever the idol code ended ----
+` : ''}; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
+; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
+; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
+; is written from the same answer instead of being re-derived.
+;
+; Per row byte, four bit pairs, and everything below is ONE BIT PER PAIR sitting at the pair's
+; low bit (so every mask is a subset of $55):
+;     hi   = (b >> 1) & $55        the high bit of each pair, brought into line
+;     lo   = b & $55
+;     w01  = lo & ~hi              a WALL pixel
+;     w10  = ~lo & hi              a seam pixel: only this routine can have made one
+;     c00  = ~lo & ~hi             ground or ceiling
+; and a pair is flipped by EOR with (m | m<<1): 01 EOR 11 = 10, and 10 EOR 11 = 01, which is
+; why the same trick both sets the outline and takes it away again.
+seamEdge:
+${ANYSEAM ? `        ldx lvlMeT
+        dex
+        lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
+        sta seMsk               ;   so a level that does not want it still gets NORMALISED.
+        lda #<${hx16(CHARSET + 16)}
+        sta seLdA+1             ; the READ operand walks too. It did not, and every one of the
+        sta seStA+1             ;   199 glyphs got code 2's rows written into it: the whole
+        sta seStB+1             ;   level came out in flat blocks with no boundary cells at all.
+        lda #>${hx16(CHARSET + 16)}
+        sta seLdA+2
+        sta seStA+2
+        clc
+        adc #$08                ; charset B is charset A plus $800, so the low byte is shared
+        sta seStB+2
+        lda #${hx(199)}         ; codes 2..200
+        sta seN
+        ; ---- pass 1: undo any previous outline, and record where the ceiling is ----
+seGly:  ldy #$07
+seP1:
+seLdA:  lda ${hx16(CHARSET + 16)},y
+        sta seB
+        lsr
+        and #$55
+        sta seHi
+        lda seB
+        and #$55
+        eor #$55
+        sta seNL                ; ~lo
+        and seHi
+        sta seW                 ; w10: a seam pixel this routine left last time
+        lda seHi
+        eor #$55
+        and seNL
+        sta seC00,y             ; c00
+        lda seW
+        asl
+        ora seW
+        eor seB
+        sta seNB,y              ; ...and the row with every 10 back to 01
+        dey
+        bpl seP1
+        ; ---- pass 2: a wall pixel with ground beside it, above it or below it ----
+        ldy #$07
+seP2:   lda seC00,y
+        asl
+        asl                     ; the pixel one to the side
+        sta seT
+        lda seC00,y
+        lsr
+        lsr                     ; ...and the other side. Pairs shifted off the ends are pixels
+        ora seT                 ;   in the NEXT CELL, which a per-glyph pass cannot see.
+        sta seT
+        cpy #$07
+        beq seNoD               ; row 7: nothing below it inside this glyph
+        iny
+        lda seC00,y
+        dey
+        ora seT
+        sta seT
+seNoD:  tya
+        beq seNoU               ; row 0: nothing above it
+        dey
+        lda seC00,y
+        iny
+        ora seT
+        sta seT
+seNoU:  lda seNB,y
+        sta seB
+        lsr
+        and #$55
+        sta seHi
+        lda seB
+        and #$55
+        sta seLo
+        lda seHi
+        eor #$55
+        and seLo                ; w01: a wall pixel
+        and seT                 ; ...with ground orthogonally next to it
+        and seMsk               ; ...on a level that asked for it. No branch.
+        sta seW
+        asl
+        ora seW
+        eor seB
+        sta seNB,y
+        dey
+        bpl seP2
+        ; ---- pass 3: out to BOTH charsets, B taking row 7-y ----
+        ldy #$07
+        ldx #$00
+seOut:  lda seNB,y
+seStA:  sta ${hx16(CHARSET + 16)},y
+seStB:  sta ${hx16(CHARSET_B + 16)},x
+        inx
+        dey
+        bpl seOut
+        lda seStA+1             ; on to the next glyph, eight bytes along in all three
+        clc
+        adc #$08
+        sta seLdA+1
+        sta seStA+1
+        sta seStB+1
+        bcc seNC
+        inc seLdA+2
+        inc seStA+2
+        inc seStB+2
+seNC:   dec seN
+        bne seGly
+` : ''}        rts
+
+        ; The guard: seamEdge is hand-counted (SEAMCODE) and the next origin was
+        ; $8600, so an overrun would have run silently into the RAM equates at
+        ; $8000 rather than failing. This origin makes it "moves backward" instead.
+        * = $8000
+
+        ; ---- $82a0: the tail faceIdT leaves in its page ----
+        ; faceIdT is 160 bytes -- one per ray column -- in a 256-byte page, and rays is the one
+        ; dimension in this program that never changes, so these 96 bytes are stable in a way the
+        ; !fill MAPN tails are NOT: those collapse to three bytes on a build whose live level is
+        ; the 253-cell one. Code, not data, because the blocks that were full held code.
+        * = $82a0
+arcCdT: !byte ${ARC_RIM_CODES.join(',')}
+
+; ---- dpDiag: is this direction a squeeze THROUGH a corner? ----
+; dropPick walks all eight neighbours and used to reject a candidate only if the destination cell
+; itself was blocked -- nothing looked at the two cells you would pass BETWEEN. So a diagonal could
+; land an idol on an open cell whose two orthogonal neighbours were both solid: behind a pedestal
+; in a corner, those two are the pedestal (an entity in blkT) and the wall. The idol went through
+; the corner, vanished behind the geometry, and was still an 8-neighbour so it could be picked up
+; again. Same rule the angel's pathing needed, for the same reason -- see anPath's orthogonal steps.
+; ONE open side is enough: going ROUND a corner is legal, going through it is not.
+; dirXT/dirYT make the test cheap -- the odd indices are the diagonals, and a diagonal's two
+; orthogonal neighbours are simply d-1 and d+1, mod 8.
+; Returns C set to REJECT, and leaves X = odD for the caller either way.
+dpDiag: lda odD
+        lsr
+        bcc dpDok               ; an orthogonal step: nothing to squeeze past
+        ldx odD
+        dex
+        jsr dpCnr
+        beq dpDok               ; one side open: this goes round the corner, not through it
+        ldx odD
+        inx
+        txa
+        and #$07
+        tax
+        jsr dpCnr
+        beq dpDok
+        ldx odD                 ; both sides solid: there is no way to put it there
+        sec
+        rts
+dpDok:  ldx odD
+        clc
+        rts
+dpCnr:  jsr dpCand              ; Z set when that corner cell is open
+        ldx fcCell
+        lda blkT,x
+        rts
+
+        ; ...and $83a0 is the same again in the next page. NOT $6d82, which is where these were:
+        ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
+        ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
+${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : `        * = $82f1
+; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
+; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
+; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
+; orbUse is in the main block -- see pedGate.
+pedOff: ldy idolHand
+        bmi poNo
+        lda #$00
+        sta idolOnPedT,y
+poNo:   rts
+` }        * = $83a0
+dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
+        ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
+        ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
+        ; orb was placed most of a map away from the player, which is exactly how it looked.
+        ; Nothing is needed in its place. dirXT/dirYT are -1, 0 or +1, the map border is solid on
+        ; all four sides (asserted at build), and the player cannot stand in a wall -- so px+1 is
+        ; within 1..MAPW-2 and the candidate is always inside the grid. Same for y.
+        ; See orbProj's "RANGE CHECK, not a mask" for the same bug caught in another place.
+        lda px+1
+        adc dirXT,x
+        sta fcX
+        clc
+        lda py+1
+        adc dirYT,x
+        sta fcY
+        jsr mulW
+        clc
+        adc fcX
+        sta fcCell
+        rts
+${!ANYFLOORDK ? '' : `
+; ---- fdGEnd: fdGlyph only ARMS, and something has to tick it ----
+; The slices hang off fsL3, which is the LANDING. Boot and death come through lvlBoot and have no
+; landing at all, so nothing ever ticked and the ramps came back UNDITHERED after dying. Outside a
+; fall, do the whole thing here and now: the stall is invisible on a path with no frame on screen.
+fdGEnd: lda fallSt
+        bne fdGE1
+        jsr fdGlFl
+fdGE1:  jmp seamEdge
+
+; ---- fdGlFl: whatever is left of the charset sweep, on the frame the landing ends ----
+; So a landing shorter than fdGlTk's arithmetic assumes cannot leave the charset half converted.
+fdGlFl: lda #$ff
+        jmp fdGlF2
+
+agNx:   lda fdB                 ; on to the next glyph slot
+        clc
+        adc #$08
+        sta fdB
+        bcc agN1
+        inc fdB+1
+agN1:   rts
+
+; fdGlyph's state, rehoused: its own block ran 8 bytes over when level 6 landed, and these
+; are DATA -- they do not care which block they sit in, where its code does.
+fdBuf:  !fill 8, 0
+fdT:    !byte 0                 ; the row byte, and its low bits -- absolute, not zero page:
+fdT2:   !byte 0                 ;   only the two POINTERS need (zp),y
+fdCnt:    !byte 0
+fdSlc:    !byte 0               ; glyphs left in THIS slice; fdCnt is the whole job
+fdWant: !byte 0
+fdWas:  !byte $01               ; not $00 and not $ff: neither state, so the FIRST level always
+                                ;   builds and nothing depends on what powers up here
+`}
+
+${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : ``}        * = ${hx16(RELOC)}
 f0LoT:  ${chunk(f0Lo).trim()}
         * = ${hx16(RELOC + 0x100)}
 f0HiT:  ${chunk(f0Hi).trim()}
@@ -17369,15 +20640,49 @@ f1LoT:  ${chunk(f1Lo).trim()}
         * = ${hx16(RELOC + 0x300)}
 f1HiT:  ${chunk(f1Hi).trim()}
         * = ${hx16(RELOC + 0x400)}
-runWT: !byte ${runW.join(',')}
+; A FULL PAGE, not MAPN bytes. mkRuns clears these with "ldx #0 ... inx / bne", so all 256 are
+; WRITTEN however few cells the live level has -- the remainder is part of the table, not a hole.
+; Emitted short, the free-space report called those bytes spendable (618 of them on a 153-cell
+; live level) and anything placed there would be wiped on the next level change. Same reason
+; mapT and blkT are padded to a page. See the MAPN note above MAPW.
+runWT: !byte ${[...runW, ...Array(256 - MAPN).fill(0)].join(',')}
         * = ${hx16(RELOC + 0x500)}
-runET: !byte ${runE.join(',')}
+runET: !byte ${[...runE, ...Array(256 - MAPN).fill(0)].join(',')}
+; ---- snapCp: the half-height snapshot copy, out here because both its callers' blocks are
+; full. 64 bytes of stable slack; the origin after it puts the cursor back.
+        * = $91c0
+snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
+bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
+        tay
+        lda mul40LoT,y          ; source: the screen, row snapSrcT[x]
+        sta fdS
+        lda mul40HiT,y
+        clc
+        adc snSrc               ; screens are page-aligned, so no low-byte carry
+        sta fdS+1
+        lda mul40LoT,x          ; destination: slot x, packed from the base
+        sta fdD
+        lda mul40HiT,x
+        clc
+        adc snDst
+        sta fdD+1
+        ldy rsLo
+bgcB:   lda (fdS),y
+        sta (fdD),y
+        cpy rsHi
+        beq bgcAdv
+        iny
+        jmp bgcB
+bgcAdv: inx
+        cpx #${hx(SNAP_ROWS)}
+        bne bgcRow
+        rts
         * = ${hx16(RELOC + 0x600)}
-runNT: !byte ${runN.join(',')}
+runNT: !byte ${[...runN, ...Array(256 - MAPN).fill(0)].join(',')}
         * = ${hx16(RELOC + 0x700)}
-runST: !byte ${runS.join(',')}
+runST: !byte ${[...runS, ...Array(256 - MAPN).fill(0)].join(',')}
         * = ${hx16(RELOC + 0x800)}
-mapT:   ${chunk(LVLT('mapT'), 16).trim()}   ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
+${LD('mapT', chunk(LVLT('mapT'), 16).trim(), ':   ')}   ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
         * = ${hx16(RELOC + 0x900)}
 rbT:    ${chunk(rbT).trim()}
         * = ${hx16(RELOC + 0xa00)}
@@ -17780,26 +21085,20 @@ sfxK:   !byte 0                 ; which effect is loaded
 ${FALL ? `; Out of the main block (11 bytes over once level 1's two angel readouts met the per-level
 ; stride reads, 2026-09-18) into the tail of the bfsQ page. jsr-only; "* = $9500 moves
 ; backward" guards it.
-` + `; fallSnap: A = page of a screen buffer -> copy it into fallBuf. Four pages, not 1000 bytes:
-; the tail past the matrix is the sprite pointers, and copying them costs nothing and is simpler.
+` + `; fallSnap: A = page of a screen buffer -> copy its TOP HALF into fallSnapS.
+; 13 rows, not four pages: the frame is its own vertical mirror about row 12 (see mulSnapLoT), so
+; rows 13-24 are read back through the mirror and never stored. The sprite pointers past the
+; matrix are no longer swept up either -- fallDraw only ever writes 40-byte rows, so the copy it
+; used to make of them was never read.
 fallSnap:
-        sta fdS+1
-        lda #${hx(FALLBUF >> 8)}
-        sta fdD+1
-        lda #$00
-        sta fdS
-        sta fdD
-        ldx #$04
-        ldy #$00
-fsnLp:  lda (fdS),y
-        sta (fdD),y
-        iny
-        bne fsnLp
-        inc fdS+1
-        inc fdD+1
-        dex
-        bne fsnLp
-        rts
+        sta snSrc               ; the screen page to grab
+        lda #>fallSnapS
+        sta snDst
+        lda #$00                ; all 40 columns. rsLo/rsHi are the background render's slice
+        sta rsLo                ;   window and are rewritten every frame that renders, and the
+        lda #39                 ;   first slice comes after this, so borrowing them is free.
+        sta rsHi
+        jmp snapCp              ; ...the shared walk, over in bgCopy's block
 ` : ''}
 ; ---- obOrder: project every entity, nearest first, until the sprite slots run out ----
 ; The walk used to go in entity order, and the slots ran out on whoever came last: level 3's
@@ -17879,11 +21178,9 @@ posYT:  ${chunk(posY).trim()}
 rayOffT: !byte ${rayOff.join(',')}
         ; ---- the seated orb's per-variant tables ----
         ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
-        ; hlRungE reads the same orbVarT. Out here in the tails of two pages the ray tables do
+        ; Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
         * = $97a0
-seatPtrT: !byte ${SEAT.slotT.map(v => ((SEATBASE - VBANK) >> 6) + (v - SEAT.slotT[0] + SEAT.slotT[0] - 0)).join(',')}
-seatYBaseT: !byte ${SEAT.yBaseT.join(',')}
 ${SOUND ? `; The sound effects' parameter tables, in the tail of this page and the next: the $9200 block
 ; they lived in overran $9500 by eight bytes when level 2's 117 open cells grew bfsQ (2026-09-18).
 ` + `;         swallow  collapse  clink
@@ -17896,11 +21193,50 @@ sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
 sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
 sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
 ` : ''}
+${!FALLSCENE ? '' : `; ---- fwBlk and fNT live up here, away from the fall's other tables ----
+; They were at the foot of the $6c00 block with fKT/fLoT/fHiT, and level 7's tables push that run
+; down until it overlaps runFaceT -- 65 bytes of it. These two are 72, and the sfx pages leave
+; exactly that much in their tails. Neither is hot: fwBlk is rebuilt once a frame and fNT is read
+; once per fall frame, so a page of their own costs nothing but the two origins.
+fwBlk:  !fill 32, 0             ; the block fdWarp reads, rebuilt once a frame
+${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : `; ---- pedGate: every pedestal filled opens the wall ----
+; In this tail, not in orbUse where it was first written: orbUse is in the main block, the most
+; contested space in the build, and thirty-seven bytes there went straight over the code ceiling
+; the moment FALLNOW was also on. It runs once per SPACE press. The faceIdT tails are the STABLE
+; slack (see $82a0) -- rays never change, unlike the !fill MAPN tails, which collapse to nothing
+; on a chain whose live level has a bigger map.
+; The SOCKET gate in orbMove (omPdC) could never have served: it fires when a socket EATS an orb,
+; and reads hlSeat bit 7 -- which ALSO means "gone from the world", the flag that stops a filled
+; socket drawing at all. An idol is not eaten. It stands on the drum, visible, and can be taken
+; back, so seating a pedestal that way would make the pedestal itself vanish.
+pedGate:beq pgNo               ; A is the byte orbUse just stored: 0 = set down on plain floor.
+                               ;   A drop that is not onto a drum can neither complete the set
+                               ;   nor need the fix below.
+        ldx odCell             ; ON A DRUM: undo the block the put-down stamped a moment ago --
+        lda #$00               ;   see idolPlace for why a seated idol must not block
+        sta blkT,x
+        ldy #${hx(IDOL_N - 1)}
+        ; EACH IDOL ON ITS OWN DRUM. idolOnPedT holds the pedestal's index + 1, and idol n
+        ; belongs on pedestal n (they are declared in pedestal order), so the test is simply
+        ; "does the byte equal y+1". Any-idol-on-any-drum was the old behaviour and made the
+        ; three colours decorative -- the pedestals are inked to say which one goes where.
+pgC:    tya
+        clc
+        adc #$01               ; the drum THIS idol belongs on
+        cmp idolOnPedT,y
+        bne pgNo               ; missing, or on the wrong one
+        dey
+        bpl pgC
+        ldy #${hx(PED_WALL)}                 ; the wall all of them name -- see PED_WALL
+        lda wallStT,y          ; ALREADY OPEN? wallTog TOGGLES, so taking an idol back off and
+        bne pgNo               ;   setting it down again would SHUT the wall again.
+        sty wsWall
+        jmp wallTog            ; tail call -- there is nothing to do afterwards
+pgNo:   rts
+` }` }
         * = ${hx16(RELOC + 0x1200)}
 colGrpT: !byte ${colGrpT.join(',')}
         * = $98a0
-seatFlagT: !byte ${SEAT.flagT.join(',')}
-seatXOffT: !byte ${SEAT.xOffT.join(',')}
 ${SOUND ? `sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
 sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
                                                         ;   crackles rather than rumbles, which
@@ -17910,7 +21246,8 @@ sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, 
                                 ;   refusal sound has -- it read as the orb being rejected rather
                                 ;   than taken. Up and bright is what acknowledgement sounds like.
 ` : ''}
-${SPIN ? `spinIx: !byte 0
+${!FALLSCENE ? '' : (() => { const P = fRowPack(); return `fNT:    !byte ${P.N.join(',')}
+`; })()}${SPIN ? `spinIx: !byte 0
 spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
 spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
 spinYL: !byte ${SPINPOS.map(p => Math.round(p[1]*256) & 255).join(',')}
@@ -17932,18 +21269,23 @@ ddxHiTQ: ${chunk(ddxHiP).trim()}
 ; do with how many levels are resident. Tucking it in there compiled fine on the default build and
 ; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
 ; ---- seamEdge's scratch, 24 bytes ----
-; $bdd4-$bdff is 44 bytes the hole report calls (free) -- the rule for picking one of these is
-; the REPORT, not "no label there"; see the occShad note above.
-seB     = $bdd4                 ; the row being worked on
-seHi    = $bdd5                 ; its high bits, brought into line with the low ones
-seNL    = $bdd6                 ; ~lo
-seLo    = $bdd7
-seT     = $bdd8                 ; the adjacency union
-seW     = $bdd9                 ; the pairs about to be flipped
-seMsk   = $bdda                 ; $55 or $00: does this level want the outline
-seN     = $bddb                 ; glyphs left
-seC00   = $bddc                 ; 8 bytes: ground/ceiling pixels, per row
-seNB    = $bde4                 ; 8 bytes: the row being built
+; The hole below $be00 is what the dieChk block at $bc00 does not use, and the rule for picking
+; one of these is the hole REPORT, not "no label there"; see the occShad note above.
+; PACKED AGAINST $be00, not against the code. It used to start at $bdd4, the hole's first byte,
+; with the DIE block ending at $bdd3 -- so the block had ZERO bytes of slack and the next single
+; instruction added to it (one "lda #imm" becoming "lda abs") pushed emitted data over seB and
+; failed the build. Ending at $bdff instead leaves that growth room in front of the scratch
+; rather than behind it, where nothing can use it.
+seB     = $bde8                 ; the row being worked on
+seHi    = $bde9                 ; its high bits, brought into line with the low ones
+seNL    = $bdea                 ; ~lo
+seLo    = $bdeb
+seT     = $bdec                 ; the adjacency union
+seW     = $bded                 ; the pairs about to be flipped
+seMsk   = $bdee                 ; $55 or $00: does this level want the outline
+seN     = $bdef                 ; glyphs left
+seC00   = $bdf0                 ; 8 bytes: ground/ceiling pixels, per row
+seNB    = $bdf8                 ; 8 bytes: the row being built, ending exactly at $bdff
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -17970,15 +21312,20 @@ occChk  = $60e1
 occBad  = $60e2
 ` : ''}` : ''}bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
-atMsk:  !byte 0                 ; the leash bit under test
-atTmp:  !byte 0                 ; ...and this angel's row offset into angBlkT
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
-; Socket -> the GLOBAL wall id it opens, $ff = opens nothing. NOT inside the WALL_DELTA block
-; below, even though only a wall build reads it: it is a LVL_TABLES entry, so lvlDstLoT names it
-; in every build, and a chain with no removable walls anywhere (CHAIN=1) failed to assemble on
-; an undefined symbol. Sockets and removable walls are separate features and the manifest should
-; not couple them.
-sockWallT: !byte ${LVLT('sockWallT').map(hx).join(',')}
+; Socket -> the wall id it opens, LOCAL TO THIS LEVEL, $ff = opens nothing. NOT inside the
+; WALL_DELTA block below, even though only a wall build reads it: it is a LVL_TABLES entry, so
+; lvlDstLoT names it in every build, and a chain with no removable walls anywhere (CHAIN=1)
+; failed to assemble on an undefined symbol. Sockets and removable walls are separate features
+; and the manifest should not couple them.
+${LD('sockWallT', LVLT('sockWallT').map(hx).join(','), ': !byte ')}
+; ---- THIS LEVEL'S WALL DELTAS: where each local wall id's two lists lie ----
+; In the blob for the same reason sockWallT is: they describe one room. Emitted here (outside
+; the WALL_DELTA block) so a chain with no removable walls still defines the symbols the
+; manifest names -- the tables are then NWALL zeros nothing ever reads.
+${['wallDLoT', 'wallDHiT', 'wallCLoT', 'wallCHiT']
+  .map(n => LD(n, LVLT(n).map(v => typeof v === 'string' ? v : hx(v)).join(','), ': !byte '))
+  .filter(Boolean).join('\n')}
 sokShrT: !byte ${[...Array(SOK_SHR)].map((_, i) => i * SOK_SSTEP).join(',')}   ; rungs down, per closing frame
 ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
@@ -17995,13 +21342,21 @@ ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
-${WALL_DELTAS.map((d, k) => `wallDT${k}: !byte ${d.quad.join(',')},$ff`).join('\n')}
-wallDLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallDT${k}`).join(',')}
-wallDHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallDT${k}`).join(',')}
-${WALL_DELTAS.map((d, k) => `wallCells${k}: !byte ${d.cells.map(hx).join(',')},$ff`).join('\n')}   ; each wall's cells, $ff-ended
-wallCLoT: !byte ${WALL_DELTAS.map((_, k) => `<wallCells${k}`).join(',')}
-wallCHiT: !byte ${WALL_DELTAS.map((_, k) => `>wallCells${k}`).join(',')}
-wallStT: !fill ${WALLS_ALL.length}, 0   ; per wall, global across the chain: 0 = it is there
+; A LATE level's two lists are NOT here (see LATEWALL): they ride in bank 3 with that level's
+; tables and the pointer tables below simply name where they will land, so nothing at runtime has
+; to know which kind of wall it is looking at.
+${PACK_PROBE ? 'packHere:\n' : ''}${WALL_DELTAS.map((d, k) => LATEWALL.includes(k) || SOLO ? ''
+  : PACK_PROBE && PACK_OMIT.has(`wallDT${k}`) ? `wallDT${k} = $ffff`   // probe: symbol only, no bytes
+  : PACKED.has(`wallDT${k}`) ? ''              // placed by packAll at the end
+  : `wallDT${k}: !byte ${d.quad.join(',')},$ff`).filter(Boolean).join('\n')}
+${WALL_DELTAS.map((d, k) => LATEWALL.includes(k) || SOLO ? '' :
+  `wallCells${k}: !byte ${d.cells.map(hx).join(',')},$ff`).filter(Boolean).join('\n')}   ; each wall's cells, $ff-ended
+; The four pointer tables that used to stand here are LVL_TABLES entries now (see wallPtrs):
+; sized to the chain, they were the last thing forcing a global wall id space.
+; ONE BYTE PER LOCAL WALL ID, not per wall in the chain: 0 = the wall is there. It is engine
+; state and does not travel -- wallsBack puts every wall back before a level leaves, so an
+; arriving level always finds this clear and a level's solved-ness is never carried out of it.
+wallStT: !fill ${NWALL}, 0
 wsWall: !byte 0                 ; which wall wallTog / wallSink are working on
 wsDir:  !byte 0                 ; ...and which way: 1 = taking it out, 0 = putting it back
 hzWv:   !byte 0                 ; hzRunW's held "out" value while it reads the "back" one
@@ -18104,13 +21459,13 @@ dmClr:  sta doomT,x             ;   than at entry because the main block had no 
         inx
         bne dmClr
         sta wsN                 ; a collapse in progress is abandoned
-        ldx #${hx(WALLS_ALL.length - 1)}   ; EVERY wall in the chain, not just the live level's:
-wbLp:   stx wsWall              ;   a wall's triples name LIVE table addresses, so applying one
-                                ;   belonging to another level would write that room's bytes into
-                                ;   this one. Safe because this routine runs before every lvlSwap,
-                                ;   so a level that is not live has wallStT 0 throughout and the
-                                ;   branch below skips it -- which is the invariant the whole
-                                ;   global-wall-id scheme rests on.
+        ldx #${hx(NWALL - 1)}   ; EVERY id the engine has room for, which since wall ids went
+wbLp:   stx wsWall              ;   level-local is at most this level's own walls -- the ids
+                                ;   above its count have wallStT 0 and are skipped. It used to
+                                ;   walk every wall in the chain, and was correct only because
+                                ;   this runs before every swap: a level that was not live had
+                                ;   wallStT 0 throughout, which is the invariant the whole
+                                ;   global-id scheme rested on. Local ids need no such argument.
         lda wallStT,x
         beq wbNx
         txa
@@ -18252,7 +21607,7 @@ sokDX:  !byte 0
 sokDY:  !byte 0
         ; One bit per cell, per level, swapped with the rest of the manifest. 32 bytes rather than
         ; 256: it is consulted once per angel step, so the shift costs nothing that matters.
-angBlkT: !byte ${angBlk.join(',')}
+${LD('angLeashT', angLeash.join(','), ': !byte ')}
         ; More per-level manifest bytes, moved here from the $3d40 block when the wider level 2
         ; map grew the run tables and pushed it three bytes past $6100. They are label-addressed
         ; and the manifest carries each chunk's destination, so where they live is free choice.
@@ -18261,23 +21616,23 @@ angBlkT: !byte ${angBlk.join(',')}
 ; levels holding different numbers of things. SIX CONTIGUOUS BYTES and one manifest entry -- the
 ; swap copies the block, so a derived value can never drift from the count it came from.
 ; nOrbT doubles as the ORB/HOLE boundary in orbXCT/orbYCT because the layout is packed.
-lvlNxtT:!byte ${LVLT('lvlNxtT').map(hx).join(',')}   ; the LEVEL each EXIT leads to, one byte
+${LD('lvlNxtT', LVLT('lvlNxtT').map(hx).join(','), ':!byte ')}   ; the LEVEL each EXIT leads to, one byte
                                 ;   each; $ff = nowhere, and fallChk walks over such a hole
                                 ;   rather than dropping you back where you stand
-nOrbT:  !byte ${hx(ORBS.length)}                 ; orbs
-nHoleT: !byte ${hx(HOLELIKE.length)}                 ; hole-like entities: exits then sockets
-nExitT: !byte ${hx(HOLES_AT.length)}                 ; ...of which this many are exits
-nOrbM1T:!byte ${hx(Math.max(0, ORBS.length - 1))}                 ; last orb index, for the down-counting loops
-nSockT: !byte ${hx(ORBS.length + HOLES_AT.length)}                 ; entity index of the first socket
-nAllM1T:!byte ${hx(Math.max(0, ORBS.length + HOLELIKE.length - 1))}                 ; last entity index of all
-nAllT:  !byte ${hx(ORBS.length + HOLELIKE.length)}                 ; ...and how MANY, which is the one
+${LD('nOrbT', hx(ORBS.length), ':  !byte ')}                 ; orbs
+${LD('nHoleT', hx(HOLELIKE.length), ': !byte ')}                 ; hole-like entities: exits then sockets
+${LD('nExitT', hx(HOLES_AT.length), ': !byte ')}                 ; ...of which this many are exits
+${LD('nOrbM1T', hx(Math.max(0, ORBS.length - 1)), ':!byte ')}                 ; last orb index, for the down-counting loops
+${LD('nSockT', hx(ORBS.length + HOLES_AT.length), ': !byte ')}                 ; entity index of the first socket
+${LD('nAllM1T', hx(Math.max(0, ORBS.length + HOLELIKE.length - 1)), ':!byte ')}                 ; last entity index of all
+${LD('nAllT', hx(ORBS.length + HOLELIKE.length), ':  !byte ')}                 ; ...and how MANY, which is the one
                                 ;   an empty level can state: every loop below counts DOWN from an
                                 ;   INDEX, and index 0 means "one entity", never "none"
-nPedT:  !byte ${hx(HOLES_AT.length + SOCKETS_AT.length)}                 ; HOLE-LIKE index where the pedestals
+${LD('nPedT', hx(HOLES_AT.length + SOCKETS_AT.length), ':  !byte ')}                 ; HOLE-LIKE index where the pedestals
                                 ;   start -- hlSet's only way to tell a pedestal from a socket.
                                 ;   Equal to nHoleT on a level with none, so the test never fires.
-angPerT: !byte ${hx(ANG_PERIOD)}   ; 60ths between angel steps on THIS level, when it is close
-lvlMeT: !byte ${hx(LVL)}                 ; the level that is live. OUTSIDE the TWOLEV block below,
+${LD('angPerT', hx(ANG_PERIOD), ': !byte ')}   ; 60ths between angel steps on THIS level, when it is close
+${LD('lvlMeT', hx(LVL), ': !byte ')}                 ; the level that is live. OUTSIDE the TWOLEV block below,
                                 ;   because the HUD's LEVEL line reads it in every build -- a
                                 ;   standalone one included, where it is simply a constant. A
                                 ;   single-slot chain still CHANGES level, it just never has to
@@ -18308,8 +21663,8 @@ ${LVLALL.length > 1 ? `; WHICH LEVEL IS IN WHICH SLOT, RIGHT NOW. lvlSwap exchan
 ; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
 ; the ceiling does not have.
 lvlAtT: !byte ${LVLALL.map(L => hx(L.level)).join(',')}   ; slot -> the level now in it
-` : ''}lvlBasLoT: !byte ${LVLALL.map((_, i) => hx((LVLSHADOW + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) & 255)).join(',')}
-lvlBasHiT: !byte ${LVLALL.map((_, i) => hx((LVLSHADOW + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) >> 8)).join(',')}
+` : ''}lvlBasLoT: !byte ${LVLALL.map((_, i) => hx((SHADOW_BASE + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) & 255)).join(',')}
+lvlBasHiT: !byte ${LVLALL.map((_, i) => hx((SHADOW_BASE + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) >> 8)).join(',')}
 lvlDstLoT: !byte ${LVL_TABLES.map(([n]) => `<${n}`).join(',')}
 lvlDstHiT: !byte ${LVL_TABLES.map(([n]) => `>${n}`).join(',')}
 lvlLenT: !byte ${LVL_TABLES.map(([, a]) => hx(a.length & 255)).join(',')}
@@ -18911,13 +22266,16 @@ oSPb:   sta ${hx16(CHARSET_B + SYN0 * 8)},x
         lda osTmp
         sta (osPtr),y
         rts
-oSPfb:  lda ohMsk               ; fallback: the old rule
+oSPfb:  ${process.env.OCCFBN ? 'inc oSFbN               ; OCCFBN: count the overflows\n        ' : ''}${OCCFB === 'block' ? `lda ohMsk               ; fallback: the old rule
         jsr oSBack
         lda osGly
         bcs oSPst
         lda osGlyW
 oSPst:  sta (osPtr),y
-oSPdn:  rts
+` : `                        ; OCCFB=skip: fall through to the rts and leave the cell as drawn.
+                        ; See OCCFB -- stamping OCC_FULL here is the wall-base overhang bug,
+                        ; and it fires fifteen times a frame on the hub.
+`}oSPdn:  rts
 oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
         sta (osPtr),y
         rts
@@ -19466,14 +22824,116 @@ hzRd:   lda $ffff,x
         ; hazards costs one branch. The shared lists are ONE flat run with the pointers held as
         ; offsets into it, rather than a label each, because a label resolves to an address and
         ; the other level's copy has to mean the same thing after it is swapped in.
-hazNT:  !byte ${hx(HZ_LIVE.n[0])}
-hazLoT: !byte ${HZ_LIVE.lo.join(',') || 0}
-hazHiT: !byte ${HZ_LIVE.hi.join(',') || 0}
-hazCT:  !byte ${HZ_LIVE.ct.join(',') || 0}
-hazRstT: !byte ${HZ_LIVE.rst.join(',')}
-hazLstT: !byte ${HZ_LIVE.lst.join(',') || 0}` : ''}
-hazSpT: !byte ${LVLT('hazSpT').join(',')}   ; (parent, spare) pairs for hazSpFix; $ff ends
-${TOURW ? `        ; ---- TOURW: the waypoint tour, in the tail of the hazard block ----
+${LD('hazNT', hx(HZ_LIVE.n[0]), ': !byte ')}
+${LD('hazLoT', HZ_LIVE.lo.join(',') || 0, ': !byte ')}
+${LD('hazHiT', HZ_LIVE.hi.join(',') || 0, ': !byte ')}
+${LD('hazCT', HZ_LIVE.ct.join(',') || 0, ': !byte ')}
+${LD('hazRstT', HZ_LIVE.rst.join(','), ': !byte ')}
+${LD('hazLstT', HZ_LIVE.lst.join(',') || 0, ': !byte ')}` : ''}
+${LD('hazSpT', LVLT('hazSpT').join(','), ': !byte ')}   ; (parent, spare) pairs for hazSpFix; $ff ends
+${!ANYFLOORDK ? '' : `
+; ---- arcBld: stamp the departing arc's dictionary into its own block, once per fall ----
+; Called as the fall STARTS, which is the one moment charset B still holds the level being LEFT
+; -- lvlLook does not run until the handover. So the rim carries the departing floor's checker
+; for the whole descent without anything having to remember it.
+; The checker comes from charset B's BLANK at the SAME row index, not the mirrored one: see fgLp.
+; A glyph here is charset A's, unmirrored, because the drop's rim is floor-above/hole-below, and
+; that is the polarity the dictionary holds.
+arcBld: lda #${hx(ARC_FILL)}     ; ---- the map first: every code is ground unless said otherwise
+        ldx #${hx(CELLCODES - 1)}   ;   (a code the walk never saw then draws flat, not sprite data)
+agM:    sta ${hx16(ARC_MAP)},x  ; counting DOWN: dex already sets the flag, where counting up
+        dex                     ;   needs a cpx. Two bytes, and the block was one over.
+        ; BNE, NOT BPL. bpl tests the SIGN bit, so a countdown from ${CELLCODES - 1} ($${hx(CELLCODES - 1)}) exits on
+        ; the FIRST dex -- $${hx(CELLCODES - 2)} is still negative -- and the loop filled exactly ONE entry.
+        ; The other ${CELLCODES - 1} stayed as whatever was in RAM, so every cell code the rim walk never
+        ; saw translated to junk: zeros fell through the bne abSet below (which asserts the map
+        ; is never 0) and stored the RAW cell code, which the arc block then drew from sprite
+        ; data -- one wrong 8x8 char, the same one everywhere that code appeared. bpl is only
+        ; safe counting down from <= $7f; this table is ${CELLCODES} long and always will be.
+        bne agM                 ; ...which leaves index 0 unwritten, because dex hits 0 first.
+                                ;   BLANK's entry is a CONSTANT (a miss is ground either way), so
+                                ;   arcBl2 writes it once at boot -- see there. Doing it here cost
+                                ;   three bytes a fall in a block that had none.
+        lda #${hx(ARC_VOID)}    ; ...except SOLID, which is a cell the rim has already passed
+        sta ${hx16(ARC_MAP + SOLID)}
+        ldx #$00
+agR:    lda arcCdT,x
+        tay
+        txa
+        clc
+        adc #${hx(ARC_C0)}
+        sta ${hx16(ARC_MAP)},y
+        inx
+        cpx #${hx(ARC_RIM_CODES.length)}
+        bne agR
+        lda #<${hx16(ARC_GLY)}  ; ---- then the glyphs themselves ----
+        sta fdB
+        lda #>${hx16(ARC_GLY)}
+        sta fdB+1
+        ldx #$00
+agLp:   jsr agPt
+        ldy #$07
+agRw:   lda (fdA),y
+        sta fdT                 ; ---- the checker, on the pairs that are 00 ----
+        and #$55
+        sta fdT2
+        lda fdT
+        lsr
+        and #$55
+        ora fdT2                ;   1 at the low bit of every NON-00 pair
+        eor #$55                ;   ...so this is 1 at every 00 pair
+        and ${hx16(CHARSET_B)},y ;   and this is the level's checker: BLANK's own glyph, at the
+        ora fdT                 ;   SAME row index -- the phase has to match the fill (see fgLp)
+        sta (fdB),y
+        dey
+        bpl agRw
+        jsr agNx
+        inx
+        cpx #${hx(ARC_RIM_CODES.length)}
+        bne agLp
+        lda #$ff                ; the hole: all pair 11, which reads colour RAM -- $08, black
+        ldy #$07                ;   everywhere, and a code symPut never marks
+agV:    sta (fdB),y
+        sta ${hx16(ARC_BLK + VOIDCH * 8)},y   ; ...and VOIDCH, the same picture at the code the
+        dey                     ;   LANDING lays above its rim. Region 1 reads this block through
+        bpl agV                 ;   the overlap window and what is up there is not only fdTail's
+        jsr agNx                ;   output; unbacked, code 250 here is $ffd0 and drew as four rows
+                                ;   of wall over four of ground, repeating, between the two rims.
+        ldy #$07                ; ...and the flat ground either side of the curve, which is the
+agG:    lda ${hx16(CHARSET_B)},y ;   checker itself
+        sta (fdB),y
+        sta ${hx16(CHARSET_B + FDOUT * 8)},y  ; ...which is also the departing floor ABOVE the
+        sta ${hx16(ARC_BLK + FDGND * 8)},y    ;   rim, in charset B, frozen here for the whole fall
+        sta ${hx16(ARC_BLK + FDOUT * 8)},y    ;   (see FDOUT)
+        dey
+        bpl agG
+        ; ---- and the SCRATCH codes, backed in this block as well ----
+        ; Region 1 reads this block through the overlap window, and what is up there is not only
+        ; fdTail's own output: the landing has already filled its hole area with VOIDCH, which
+        ; fdTail does not always overwrite as far down as the region reaches. VOIDCH is code 250,
+        ; and code 250 in THIS block is $ffd0 -- unwritten RAM, which drew as four rows of wall
+        ; over four rows of ground, repeating, between the two rims. The pictures are the same in
+        ; both blocks, so backing them here makes it not matter which code the cell holds.
+        ; Stops at ${hx(SYN0 + 4)}: code 255's slot would land on the CPU vectors at $fffa.
+        rts
+agPt:   lda #$00                ; fdA -> charset A's glyph for rim code X. X survives, which is
+        sta fdA+1               ;   what lets it carry the loop count in both builders.
+        lda arcCdT,x
+        asl
+        rol fdA+1
+        asl
+        rol fdA+1
+        asl
+        rol fdA+1               ; code * 8; a code is a byte, so no carry out
+        sta fdA
+        lda fdA+1               ; no clc: code*8 is at most $640, so the last rol left C clear
+        adc #${hx(CHARSET >> 8)}
+        sta fdA+1
+        rts
+
+
+
+`}${TOURW ? `        ; ---- TOURW: the waypoint tour, in the tail of the hazard block ----
         ; FLOWS on from the hazard tables rather than re-originning at $a700. It used to say
         ; "* = $a700", reasoning that the page is free while every resident map splits nothing --
         ; and the DATA is, but the hazard block also emits hzRun and its table stubs there, 39
@@ -19837,27 +23297,22 @@ rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
 ; Boot and every death go through here. dieKey restarts with "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
 ; makes a death return you to THAT level's spot rather than the build's.
-lvlStart: ldx lvlMeT
-        dex
-        lda lvlStXLoT,x
-        sta px
-        lda lvlStXHiT,x
+lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no table length
+        sta px               ;   -- lvlSwap brought them in with everything else
+        lda lvlStartT+1
         sta px+1
-        lda lvlStYLoT,x
+        lda lvlStartT+2
         sta py
-        lda lvlStYHiT,x
+        lda lvlStartT+3
         sta py+1
-        lda lvlStAT,x
+        lda lvlStartT+4
         sta pa
-        lda lvlStAFT,x
+        lda lvlStartT+5
         sta paF
         rts
-lvlStXLoT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[0] & 255)).join(',')}
-lvlStXHiT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[0] >> 8)).join(',')}
-lvlStYLoT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] & 255)).join(',')}
-lvlStYHiT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[1] >> 8)).join(',')}
-lvlStAT:  !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[2])).join(',')}
-lvlStAFT: !byte ${[...Array(PAL_N)].map((_, i) => hx(startOf(i + 1)[3])).join(',')}
+; The live level's own start pose. A LVL_TABLES entry, so lvlSwap exchanges it with the shadow's
+; like any other per-level table -- which is the whole point: no level id, no PAL_N.
+${LD('lvlStartT', startBytes(LVL).map(hx).join(','), ': !byte ')}
 ${process.env.FTCAP ? `; ---- ftCap: the real bytes of one drop frame ----
 ; DROPHOLD cannot answer this: the drop's fill is incremental, so parking a frame drives it into
 ; a state the moving fall never reaches -- a held frame reads as garbage in the PLAIN build too.
@@ -19881,15 +23336,6 @@ ftcNx:  dey
         rts
 
 ` : ''}
-${SPRVARY ? ['under', 'hi'].filter(k => CHAIN.some(n => sprOf(n)[k] !== sprOf(CHAIN[0])[k]))
-  .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
-  .join('\n') : ''}
-${TWOLEV ? (() => {
-  const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
-  return Object.keys(REG).filter(k => CHAIN.some(n => palOf(n)[k] !== palOf(CHAIN[0])[k]))
-    .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
-    .join('\n');
-})() : ''}
         * = ${hx16(RELOC + 0x2400)}
 ${PLAN === 3 ? '' : `stepT1: ${chunk(stepT[0]).trim()}`}${PIVOT ? `
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
@@ -20076,7 +23522,7 @@ edT6:	sta fallTailB+240,x
 	rts
 ` : ''}
 ${PLAN === 3 ? `        * = $ae00
-bfsD0:  !fill ${MAPN}, 255      ; the angel's other distance map -- see bfsD1 at $5e00
+bfsD0:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps      ; the angel's other distance map -- see bfsD1 at $5e00
         * = ${hx16(RELOC + 0x2900)}
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
 ; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the
@@ -20309,15 +23755,16 @@ dieChk: lda dieSt               ; once it has started, the only thing left to do
         beq dckIdl              ;   the sprites. obC is rewritten by orbMove every frame and
         lda dieInk              ;   flushed to $d027+n after us, so this is the last word on it.
         jmp dckPnt              ; the scene owns everything else: nothing live to check
-${HAS_IDOL ? `dckIdl: lda idolHd              ; ---- and the MID-TONE follows the idol as well ----
-        beq dckLive             ; $d025/$d026 are shared and sprPal already tints them, but the
-        lda #${hx(IDOL_BODY)}              ;   body is per-sprite ($d027+n, out of obC) and kept the
-        jsr dckPnt              ;   level's grey, which reads as disjoint against the brown and
-                                ;   yellow around it. Orbs and angels both, for the same reason.
-                                ; jsr, NOT a tail jump: carrying the idol this ran and RETURNED,
-                                ;   so the live check below never happened and an angel could
-                                ;   walk up to you all day without killing you.
-` : 'dckIdl:'}
+dckIdl:                         ; ---- holding the idol no longer repaints the whole CAST ----
+                                ; It used to: "lda idolB / jsr dckPnt", every sprite's body set
+                                ; to the idol's colour, from when the tint was brown/yellow and
+                                ; the idea was that the cast catches the light off it. With a
+                                ; per-level scheme that is just a flood -- carry the red idol
+                                ; back and the hub's three pedestals and four holes all turn
+                                ; light red, losing the one thing their colour is FOR.
+                                ; The two SHARED inks still swap while you hold it (sprPal), and
+                                ; the idol's own body is per sprite and set where it is drawn.
+                                ; dckPnt survives for the death scene, which does want all eight.
 dckLive:
         sec                     ; the turn they are ACTUALLY making, as a signed 16-bit rate over
         lda paF                 ;   pa:paF. The whole-byte version dropped the fraction, and the
@@ -20372,7 +23819,24 @@ dcTurn:
 dcPos:  cmp #${hx(DIE_TURN)}
         bcc dcNo
 dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
-dieGo:  ${process.env.DIEDIR ? `lda #${hx(+process.env.DIEDIR & 255)}
+dieGo:  ${!HAS_IDOL ? '' : `ldy idolHand            ; ---- THE IDOL FALLS WHERE YOU DO ----
+        bmi dgNI                ; $ff = empty hands, and 0..2 never set bit 7
+        ; IT HAS TO BE RECORDED HERE, because the restart cannot work it out. dieKey does
+        ; jmp entry, and entry stores 0 into carry and calls idolLk -- which derives idolHand
+        ; FROM carry, so the hand is already empty by the time objInit runs. idolPlace then
+        ; skips its "this idol is in the level we are in" store and takes the floor arm, which
+        ; puts the idol at idolXT/idolYT. Those have exactly ONE writer, orbUse's put-down, so
+        ; they still name the cell you last DELIBERATELY set it down in -- in whichever room
+        ; that was. Read on a different room's map that is an arbitrary cell, usually inside a
+        ; wall: the idol is not destroyed, it is filed under an address from the wrong room,
+        ; and it cannot be found or reached. Reported from play, 2026-09-28.
+        lda lvlMeT              ; on THIS level's floor from now on...
+        sta idolLoc,y
+        lda px+1                ; ...at the cell you died in. px/py are 16-bit with the cell in
+        sta idolXT,y            ;   the HIGH byte, which is what idolXT/idolYT hold.
+        lda py+1
+        sta idolYT,y
+dgNI:   ` }${process.env.DIEDIR ? `lda #${hx(+process.env.DIEDIR & 255)}
         sta dieDir      ; DIEDIR forces the turn direction, to test both entry sides
         ` : ''}lda dieDir
         bne dgD
@@ -20552,7 +24016,7 @@ ${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather
 angMidT: !byte ${angMidT.join(',')}` : ''}
         * = ${hx(QCOSBASE)}
 qcosT: !byte ${qcos.join(',')}
-`;
+${packAll()}`;
 
 // iray.asm is deliberately tracked (see .gitignore): diffing the generated assembly is how
 // a JS change gets reviewed. But a diagnostic build bakes throwaway state into it -- a
@@ -20601,12 +24065,131 @@ const lintReach = src => {
 // disagreeing about what is in the bank is exactly how a shadow grew over doomT unnoticed.
 const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)/gm)]
   .map(m => [m[1], parseInt(m[2], 16)])
-  .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB');
+  // ...but the SOLO slot's tables are not squatters. They are one deliberate allocation with a
+  // known extent, declared as the SOLO_SLOT segment, and a squatter reserves a whole PAGE -- so
+  // counting all 36 of them separately made every pair inside a page "overlap" every other.
+  .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB'
+                      && SLOT_OFF[n] === undefined);
+// ---- SOLO: every table the slot holds must have LOST its definition, and vice versa ----
+// The failure this prevents is silent and nasty: a manifest table whose emission site was missed
+// would be BOTH an equate at the slot and a run of bytes in the image. The engine would read the
+// slot (correct), the image would carry a stale copy of the level (the thing SOLO exists to
+// remove), and nothing would look wrong until a level with different contents was loaded.
+if (SOLO) {
+  const want = new Set(Object.keys(SLOT_OFF));
+  const missed = [...want].filter(n => !SLOT_DROPPED.has(n));
+  if (missed.length) throw new Error(
+    `SOLO: these tables are in the slot but their definition is still emitted into the image: ` +
+    `${missed.join(' ')} -- route each one's site through LD()`);
+}
+// ---- WHAT THE RELAYOUT NEEDS, PUBLISHED BEFORE ANY ASSEMBLY ----
+// These two maps are plain constants: which tables must start on a page, and how big each RAM
+// buffer is. compact.mjs needs both, and they used to be written by guards that run AFTER the
+// image assembles -- so COMPACT had to spawn an inner build purely to produce them. That inner
+// build assembles the HAND layout, which is exactly the layout compaction exists to replace, and
+// it overflows the moment the engine is sized for seven levels. Neither map needs an assembly.
+const ALIGNED_T = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
+    runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
+    ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
+    rayOffT: NLOG, colGrpT: NLOG, clampT: 256, clmp16: 256,
+    // hTabT MUST start on a page, and this list is where that is said. The height lookup builds
+    // its pointer out of the HIGH BYTE ALONE and forces the low byte to zero:
+    //     lda colGrpT,x / adc #>hTabT / sta hp+1 / lda #$00 / sta hp / lda (hp),y
+    // -- the group IS the page. At a non-page address it reads from the page BELOW the table.
+    // It was missing here and never mattered, because the hand-placed layout happened to put it
+    // at $4d00; the relayout moved it to $975e and every wall came back the height of a wall
+    // $5e bytes further down the table ("everything looked stretched vertically" -- the user).
+    // 256, not 4096: the requirement is where it STARTS, and the guard tests (a & 255) + n > 256.
+    hTabT: 256,
+    // ---- THE ANGEL'S TWO DISTANCE MAPS MUST SHARE A LOW BYTE ----
+    // bfsFin promotes the finished fill by swapping the patched HIGH BYTES of the operands and
+    // nothing else ("live <-> work, by swapping the patched high bytes"). That is only an address
+    // swap when both maps sit at the same offset within their pages; page-aligning both is the
+    // strongest way to say it, and the clear loop ("runs until X wraps") already assumes offset 0.
+    // Missing here, the relayout put them at $7b82 and $955e -- low bytes $82 and $5e -- so the
+    // swap produced $9582 and $7b5e, two addresses that are neither map. The completed fill stayed
+    // in the work buffer and anPath kept reading a live buffer nothing had ever written: the
+    // player's own cell held $ff, so every angel descended a stale gradient toward nothing, took
+    // one step and froze. Same shape as hTabT above -- an alignment the hand-placed layout
+    // happened to satisfy, so nothing had ever had to state it.
+    bfsD0: 256, bfsD1: 256 };
+const SIZES_T = {
+    stackLT: 128, stackRT: 128, sideT: 256, idT: 256, colH: 256,
+    faceIdT: 256, remLoT: 256, remHiT: 256,
+    cwA: 40, cwB: 40, cbA: 40, cbB: 40, cstepT: 40, seamT: 40,
+    bndT: NBND, pvBnd: NBND, pvAng: NBND, pvRcp: NBND,
+    cqLo: 64, cqHi: 64, cqCol: 64,
+    // eight sprite slots each. Without these the checker treats them as ONE byte and happily
+    // lets a new variable land inside obX -- which is exactly what happened to the fall's
+    // arc scratch, and it took a freeze to notice.
+    obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
+    obL: 8, obR: 8, obBL: 8, obBR: 8,
+    pfNum: 34,                       // PROFN: the same seventeen phases, x 2
+    flogB: 2816,                     // FRAMELOG: $7100-$7bff, 704 x 4
+    twPose: 252,                     // TOURPOSE: 42 steps x 6
+    pfAcc: 51,                       // SEVENTEEN phases x 3. It said 13 while the code used 15,
+                                     //   so two phases' worth of room was undeclared and the
+                                     //   next variable placed there would have collided.
+    // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
+    // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
+    // player's projected X overwrote the death trigger's reference angle every frame and you
+    // died the instant an angel reached you, standing still. Anything referenced as name+1
+    // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
+    ...RUNTIME_BUFS,
+    // These five come from RUNTIME_BUFS now rather than being written twice: the free-space
+    // accounting and this overlap check disagreeing is exactly how a table gets reserved
+    // one way and packed the other. runPlaneT/runFaceT were 256 here and are NRUN=65 in
+    // truth, which is what let them be packed onto one page.
+    ...RUNTIME_BUFS,
+    opx: 2, opy: 2,
+    osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
+    rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
+    tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
+  };
+writeFileSync('./iray.aligned.json', JSON.stringify(ALIGNED_T));
+writeFileSync('./iray.bufsizes.json', JSON.stringify(Object.fromEntries(
+  [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
+    .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
+    .filter(([n]) => SIZES_T[n] !== undefined).map(([n]) => [n, SIZES_T[n]]))));
+
 const asmPath = DIAG.length ? './iray.diag.asm' : './iray.asm';
 writeFileSync(asmPath, asm);
+// ---- COMPACT: relayout into code / arena / tables before assembling ----
+// compact.mjs reads the file we just wrote, moves every emitted run into one of the two sections,
+// rehomes the RAM buffers into the alignment slack, and writes iray.compact.asm. Run as a
+// subprocess rather than imported so the tool stays usable on its own; it costs one extra
+// assembly pass, which is the price of knowing the layout before committing to it.
+if (COMPACT) {
+  // The inner build is GONE: both maps it existed to produce are published above, before any
+  // assembly. It assembled the hand layout, which is what compaction replaces -- and what fails
+  // first when the engine grows.
+  execFileSync(process.execPath, ['./compact.mjs'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  asm = readFileSync('./iray.compact.asm', 'utf8');
+  writeFileSync(asmPath, asm);          // so everything downstream reads the layout that ships
+}
 lintReach(asm);            // AFTER the write: a failure should leave the file to look at
 try {
   const r = assemble(asm);
+  if (PACK_PROBE) {
+    // The map pass-2 packs into. Equate addresses go with it: a hole with a RAM equate in it is
+    // NOT free -- the program writes there at runtime and would overwrite whatever we placed.
+    // (?:;.*)? -- MOST equates carry a trailing comment, and without this the scan found almost
+    // none of them.
+    // And report the RESERVED EXTENT, not the address. An equate with a declared size in
+    // RUNTIME_BUFS covers that many bytes: fallSnapD at $4900 is ONE THOUSAND of them, so the
+    // page it starts in says nothing about $4a00. Banning only its own page is how wall deltas
+    // came to be placed inside the fall's snapshot buffer -- a corruption that would only show
+    // after a fall, on the next wall to open. reserveOf() is the build's own answer to "what
+    // does this equate actually claim"; use it rather than a second opinion.
+    const eqs = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
+      .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= r.org && a < 0xc000);
+    const eq = reserveOf(eqs);   // [lo, hi) pairs
+    // WHERE the omitted items would have been. Everything after it shifted DOWN by their total
+    // size, so the block's tail hole is inflated by exactly the bytes pass 2 may put back inline.
+    // Handing that hole out is how remHiT came to be placed in space the remainder then took.
+    writeFileSync(PACK_PROBE, JSON.stringify({ holes: r.holes, eq, here: r.labels.packHere ?? 0 }));
+    process.exit(0);
+  }
   // Every manifest table must be emitted at EXACTLY the length the swap moves. Emitted short,
   // the swap runs off the end into whatever follows -- which is how a stray byte landed on a
   // colour table and turned an orb black on level 2. Labels are sorted by address, so the next
@@ -20655,7 +24238,13 @@ try {
   // because the NEXT thing shipped as a segment -- sprites -- will want the same check if it ever
   // needs a staging area inside the image.
   const reserved = [];
-  if (r.labels.chainEnd > HTABLE)
+  // NOT UNDER COMPACT. This compares a label against HTABLE, a build CONSTANT naming where the
+  // height tables sit in the hand-placed layout -- which the relayout is precisely what replaces.
+  // It is a hand-layout invariant, not a semantic one: what it is really guarding against is the
+  // fill chains growing into another table, and under compaction the assembler's per-byte overlap
+  // check does that for every pair at once. Left in place for the uncompacted build, where HTABLE
+  // still describes reality.
+  if (!COMPACT && r.labels.chainEnd > HTABLE)
     throw new Error(`fill chains end at $${r.labels.chainEnd.toString(16)}, past the height tables at $${HTABLE.toString(16)}`);
   // LABELS=<substr> prints matching label addresses, so a debugger can be pointed at a routine
   // without hand-assembling. The listing has the labels; only the assembler knows their addresses.
@@ -20695,6 +24284,42 @@ try {
   // constraint left is that the program fits in the machine, which it does with 9K to spare.
   // Compression was only ever buying load TIME, and a fastloader buys that better.
   const prgOf = (addr, data) => Buffer.from([addr & 255, addr >> 8, ...data]);
+  // ---- one level block builder, used by BOTH the resident shadows and the late levels ----
+  // They must be byte-for-byte the same shape: lvlSwap exchanges a fixed-size run, and a late
+  // level lands on the slots the resident ones vacate. Two copies of this would be two chances
+  // for the layouts to drift apart, and the failure would be a level that renders as garbage
+  // after a swap rather than anything that names itself.
+  // Every entry the manifest expresses as an assembler expression is resolved here, because the
+  // block is RAW BYTES and not assembled: '<hazLstT+N', '>hazLstT+N', '$ff'. Written through
+  // Buffer.from as-is a string is NaN is 0, which once put $0000 in every hazard list pointer.
+  const lvlResolve = v => {
+    if (typeof v === 'number') return v;
+    if (/^\d+$/.test(v)) return +v & 255;
+    const m = /^([<>])?([A-Za-z_][A-Za-z0-9_]*)(?:\+(\d+))?$/.exec(v);
+    if (m) {
+      const base = r.labels[m[2]];
+      if (base === undefined) throw new Error(`level block: unknown label ${v}`);
+      const addr = base + (+(m[3] ?? 0));
+      return m[1] === '<' ? addr & 255 : m[1] === '>' ? addr >> 8 : addr & 255;
+    }
+    if (/^\$[0-9a-fA-F]+$/.test(v)) return parseInt(v.slice(1), 16) & 255;
+    throw new Error(`level block: cannot resolve ${JSON.stringify(v)}`);
+  };
+  // FLATTEN BEFORE PADDING. A hazard list entry can arrive as one string of several bytes --
+  // '<mapT+57,>mapT+57,0,1' -- where a resident level gets it pre-split from the shared Map. Pad
+  // first and the count is wrong; resolve first and the resolver chokes on the commas.
+  const lvlBlocks = list => list.flatMap(L => LVL_TABLES.flatMap(([n, a, sh]) => {
+    const raw = (sh instanceof Map ? sh.get(L.level) : sh) ?? L.tables[n] ?? [];
+    const flat = raw.flatMap(v => typeof v === 'string' && v.includes(',') ? v.split(',') : [v]);
+    return pad(flat, a.length).map(lvlResolve);
+  }));
+  // ...and the late levels' wall lists, in the order LATEWALL_AT laid them out. Each is the quad
+  // delta then the cell list, both $ff-terminated, exactly as the image emits a resident one.
+  // A quad entry is FOUR bytes in one string -- address lo, address hi, the value closed, the
+  // value open -- which is why the image emits them with `.join(',')`. Split before resolving.
+  const lateWallBytes = () => (WALL_DELTAS ? LATEWALL : []).flatMap(k =>
+    [...WALL_DELTAS[k].quad.flatMap(q => q.split(',')).map(lvlResolve), 0xff,
+     ...WALL_DELTAS[k].cells, 0xff]);
   const DISK = [
     // name, load address, bytes, and whether it must land BEFORE the charset copy
     // ---- IHOL FIRST: it is the file that goes UNDER THE I/O HOLE ----
@@ -20706,22 +24331,34 @@ try {
     // IHOL carries the idol too: `first` means "landed at $c000 and copied under the I/O hole
     // page by page", and the idol's base is defined as HOLEBASE + the exit ladder's length, so
     // appending its bytes here puts them exactly where IDOLBASE says they are.
-    ...(SPRITES ? [{ tag: 'H', name: 'IHOL', first: true, at: 0xc000,
-                     data: [...HOLEBM.flat(), ...IDOLBM.flat()],
-                     length: (HOLEBM.length + IDOLBM.length) * 64 }] : []),
+    // ...and the tail of the ORB ladder rides along on the end of it, because that file is the
+    // one that lands under the hole. See ORBHI_N: the bytes it frees at SPRBASE are what the
+    // renderer's scratch moves into, so that Krill's resident can have $0400 back.
+    ...(SPRITES ? [{ tag: 'H', name: 'IHOL', first: true, at: KSTAGE,
+                     data: [...HOLEBM.flat(), ...IDOLBM.flat(),
+                            ...ORBBM.slice(ORBLO_N, NORBBM).flat()],
+                     length: (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64 }] : []),
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
-    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.slice(0, NORBBM).flat() }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
+    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.slice(0, ORBLO_N).flat() }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
     // socket ladder vacates under NOSOCK. This is DATA the VIC never reads -- it is copied to a
     // screen slot when its turn comes -- so it only has to be RAM that nothing else touches, and
     // it has to survive a warm restart, because dieKey does `jmp entry` and reloads nothing.
-    ...(DIE && PICSEG.length ? [{ tag: 'P', name: 'IPIC', at: SEATBASE, data: PICSEG }] : []),
+    ...(DIE && PICSEG.length ? [{ tag: 'P', name: 'IPIC', at: PICBASE, data: PICSEG }] : []),
     // ---- ILVL: the other level's tables, exchanged into place by lvlSwap at each fall ----
     // Built HERE, at the end, and not where the manifest is first assembled: the hazard tables are
     // pushed onto LVL_TABLES after that point, and a shadow built early was 435 bytes short of
     // them -- lvlSwap would have exchanged the hazard lists with whatever followed the file.
-    ...(TWOLEV ? [{ tag: 'L', name: 'ILVL', at: LVLSHADOW, data: (() => {
+    // ---- ILAT: the LATE levels, as one file at the same address the shadows live at ----
+    // Three blocks in slot order plus level 5's wall lists above them -- everything that has to
+    // travel, in one contiguous run, so the hub's load is ONE seek. It lands on the slots levels
+    // 1-3 vacate: their blocks and their wall lists are exactly what this replaces, which is the
+    // whole design. Built with the same resolver and the same manifest as ILVL, because the
+    // layout has to be byte-for-byte the shape lvlSwap exchanges.
+    ...(LATEALL && LATEALL.length ? [{ tag: 'A', name: 'ILAT', at: LVLSHADOW, runtime: true,
+      data: lvlBlocks(LATEALL).concat(lateWallBytes()) }] : []),
+    ...(TWOLEV && !SOLO ? [{ tag: 'L', name: 'ILVL', at: LVLSHADOW, data: (() => {
       // THE SHADOW IS RAW BYTES NOW, NOT ASSEMBLED -- so every entry the manifest expresses as an
       // assembler expression has to be resolved here. The hazard pointer tables are '<hazLstT+N'
       // and '>hazLstT+N', and hazRstT ends in '$ff'. Written through Buffer.from as-is, a string
@@ -20751,8 +24388,13 @@ try {
       // 100 bytes of level tables over doomT -- the only tell was the free-space line losing a gap.
       // Same scan as the bank-3 accounting below; see BANK3_SQUATTERS for why it is page-rounded.
       const wall = Math.min(0xfff9, ...BANK3_SQUATTERS.map(([, a]) => a & ~255).filter(a => a >= LVLSHADOW));
-      if (LVLSHADOW + bytes.length > wall) throw new Error(
+      // The late levels' wall lists sit ABOVE the blocks in the same region (see LATEWALL_AT) and
+      // are not in `bytes`, so the ceiling has to be measured against whichever reaches higher.
+      const top = Math.max(LVLSHADOW + bytes.length, LATEWALL_END);
+      if (top > wall) throw new Error(
         `the level shadow is ${bytes.length} bytes (${LVLALL.length} levels x ` +
+        (LATEWALL_END > LVLSHADOW + bytes.length
+          ? `, and the late walls above it reach $${LATEWALL_END.toString(16)}` : '') +
         `${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)}) and does not fit between ` +
         `$${LVLSHADOW.toString(16)} and $${wall.toString(16)} in bank 3` +
         (wall < 0xfff9 ? ` -- $${wall.toString(16)} is ` +
@@ -20762,6 +24404,61 @@ try {
       LVLSHAD_BYTES.push(...bytes);      // for the bank-3 accounting below
       return bytes;
     })() }] : []),
+    // ---- ILVn: THE LEVEL ITSELF, as its own file (SOLO=1) ----
+    // Not a shadow and not a spare copy: this IS the level the engine plays. The image carries
+    // none of it -- every table it names is an equate into this file's landing ground -- so the
+    // engine cannot run until this has loaded, which is exactly the property the split is for.
+    // Built through lvlBlocks, the same resolver ILVL and ILAT use, so a table that is an
+    // assembler expression (the hazard lists are '<hazLstT+N') resolves against the equates.
+    // ---- ILVn: ONE FILE PER LEVEL, all landing on the single live slot ----
+    // Under LVLLOAD there is no shadow: the fall READS the destination over the departing level,
+    // so every file goes to the same address and they are interchangeable. Only the starting
+    // level is in the boot list; the rest sit on the disk until a hole asks for them. The wall
+    // lists ride in every file at the same offset, because wallDLoT lives in the image and has
+    // to name one address whichever level is in the slot.
+    // Without LVLLOAD this is the old shape: one file holding [live][shadows][walls].
+    ...(SOLO ? (LVLLOAD ? CHAIN : [LVL]).map(n => {
+      const L = n === LVL ? { level: LVL, tables: Object.fromEntries(LVL_TABLES) }
+                          : (LVLALL ?? []).find(l => l.level === n);
+      if (!L) throw new Error(`SOLO: no tables for level ${n} -- in CHAIN but never built`);
+      // ONLY THIS LEVEL'S WALLS. It used to be every wall in the chain, in every file: the
+      // pointer tables lived in the image and had to name one address whichever level was in
+      // the slot, so each of seven files ended with all seven levels' patch lists. Now the
+      // pointers ride in the blob, so a file describes one room and nothing else -- which is
+      // what makes a level expungable and what stops file N growing when level N+1 is written.
+      // WALL_DELTAS is null when this build has no wall mechanic (WALLOFF=k builds the level with
+      // a wall already punched out, and a wall variant has no variants of its own) -- and
+      // WALLS_ALL is NOT empty then, because the level still declares its walls. Iterating the
+      // declarations and indexing the deltas is what made that combination throw.
+      const walls = !WALL_DELTAS ? [] : WALLS_ALL.flatMap((w, k) => w.lvl !== n ? []
+        : [...WALL_DELTAS[k].quad.flatMap(q => q.split(',')).map(lvlResolve), 0xff,
+           ...WALL_DELTAS[k].cells, 0xff]);
+      const body = LVLLOAD ? lvlBlocks([L])
+                           : lvlBlocks([L, ...(LVLALL ?? [])]);
+      if (LVLLOAD && body.length !== LVLBLOB) throw new Error(
+        `SOLO: level ${n}'s blob is ${body.length} bytes but the slot layout says ${LVLBLOB} -- ` +
+        `every level's file has to be the same length, since they share one landing address`);
+      const data = body.concat(walls);
+      // ---- THE POINTERS MUST NAME BYTES THIS FILE ACTUALLY CARRIES ----
+      // Checks the MEANING of the decoupling, not that wallPtrs ran: a level may only name its
+      // own wall lists, and they are only in memory while it is the level in the slot. The bug
+      // this is here for is silent -- a stale pointer reads whatever the last level left at that
+      // address and hzRunW applies it as a patch list, writing arbitrary bytes over the live
+      // tables. It would look like a corrupted room, not a wrong pointer.
+      for (let j = 0; j < NWALL; j++) {
+        const lo = body[SLOT_OFF.wallDLoT + j], hi = body[SLOT_OFF.wallDHiT + j];
+        const clo = body[SLOT_OFF.wallCLoT + j], chi = body[SLOT_OFF.wallCHiT + j];
+        for (const [what, a] of [['delta', lo | (hi << 8)], ['cells', clo | (chi << 8)]]) {
+          if (!a) continue;                     // 0 = an id this level does not use
+          if (a < SLOT_AT + LVLBLOB || a >= SLOT_AT + data.length) throw new Error(
+            `level ${n}'s wall ${j} ${what} list is at $${a.toString(16)}, outside the bytes ILV${n} ` +
+            `carries ($${(SLOT_AT + LVLBLOB).toString(16)}-$${(SLOT_AT + data.length - 1).toString(16)}). ` +
+            `A level may only point at its own wall data -- see wallPtrs.`);
+        }
+      }
+      return { tag: 'V' + n, name: 'ILV' + n, at: SLOT_AT,
+               runtime: LVLLOAD && n !== LVL, data };
+    }) : []),
     // HOLEBMHASH=1: checksum just the EXIT hole's bitmaps, so a change to the socket
     // ladder cannot be mistaken for a change to the hole.
 
@@ -20797,8 +24494,20 @@ try {
     // length, which is not known until buildLoader has run.
     return { name: 'IQOT', q, blob };
   })();
-  // IPIC and ILVL land ON the quote, so they load last, after the screen is blanked.
-  for (const f of DISK) if (f.name === 'IPIC' || f.name === 'ILVL') f.last = true;
+  // ---- ANYTHING THAT LANDS ON THE QUOTE LOADS LAST, behind a blanked screen ----
+  // This was a hardcoded pair of names, and a name list cannot notice a NEW file landing there.
+  // SOLO's level files sit at $f500, which is inside the quote's screen ($f400 + 1000 bytes), so
+  // they were written straight over the quote while it was still being displayed -- the charset
+  // and screen visibly garbled partway through every load. Computed from the addresses now, so a
+  // file added later is covered by where it goes rather than by being remembered here.
+  // IPIC stays named: it sits just BELOW the quote ($ef80 + 1000 = $f368) and so is not caught by
+  // the overlap test, but it has loaded last since before this check existed and the boot is not
+  // the place to find out why that was wrong.
+  const QSEG = [[QUOTE_SCR, QUOTE_SCR + 1000], [QUOTE_CHR, QUOTE_CHR + 0x800]];
+  for (const f of DISK) {
+    const lo = f.at, hi = f.at + (f.length ?? f.data.length);
+    if (f.name === 'IPIC' || QSEG.some(([a, b]) => hi > a && lo < b)) f.last = true;
+  }
   const ldFiles = DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
                                   runtime: f.runtime, length: f.length ?? f.data.length }));
   // How many 256-byte pages arrive WHILE THE QUOTE IS UP -- the denominator of the sweep. IRAY
@@ -20810,7 +24519,7 @@ try {
   // everything after it rides Krill's ~4.9 KB/s. Each phase then gets a Bresenham step of
   // columns*256/pages, and the tick carries a column whenever the accumulator's high byte moves.
   const KERNAL_BPS = 290, KRILL_BPS = 4920, SW_COLS = 40;
-  const p2 = ldFiles.filter(f => !f.last);
+  const p2 = ldFiles.filter(f => !f.last && !f.runtime);   // a runtime file is not in the boot
   const p2Bytes = p2.reduce((n, f) => n + f.length, 0);
   const p2Pages = p2.reduce((n, f) => n + Math.floor(f.length / 256), 0);
   let ld = buildLoader(assemble, ldFiles, r.labels.entry, 1);
@@ -20837,14 +24546,20 @@ try {
   if (QUOTE) d.writeFile('IQOT', Buffer.from(QUOTE.prg), D64.FILE_TYPE_PRG);
   d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);
   for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG);
-  writeFileSync('./latest.d64', Buffer.from(d.getData()));
+  writeFileSync('./' + D64OUT, Buffer.from(d.getData()));
   const kern = (run.length - 2) + (QUOTE ? QUOTE.len : 0) + ld.prg.length;
   console.log(`boot: IRUN ${run.length - 2}B` + (QUOTE ? ` + IQOT ${QUOTE.len}B` : '') +
     ` + IRAY ${ld.prg.length}B = ${kern}B at KERNAL speed (~${(kern / 290).toFixed(1)}s); ` +
     `quote up after ~${(((run.length - 2) + (QUOTE ? QUOTE.len : 0)) / 290).toFixed(1)}s`);
   console.log(`disk: ` +
-    DISK.map(f => `${f.name} ${(f.data.length / 1024).toFixed(1)}K@$${f.at.toString(16)}`).join(' + ') +
+    DISK.map(f => `${f.name} ${(f.data.length / 1024).toFixed(1)}K@$${f.at.toString(16)}` +
+                  (f.last ? '*' : '') + (f.runtime ? '~' : '')).join(' + ') +
     `  = ${d.getFreeBlocks()} blocks free`);
+  // * = lands on the quote, so it loads behind a blanked screen; ~ = not in the boot list at all.
+  // Printed because getting this wrong is INVISIBLE in the build and obvious on a real machine:
+  // the quote garbles halfway through the load and the disk is otherwise perfect.
+  console.log(`      * loads behind the blanked screen (lands on the quote at ` +
+    `$${QUOTE_SCR.toString(16)}/$${QUOTE_CHR.toString(16)});  ~ is on the disk but not boot-loaded`);
 
   // Say how much room is left below the screen buffer. The data segment has nowhere to
   // grow -- charset A is at $3000 and buffer B sits in the way at $2400 -- so this going
@@ -20898,10 +24613,12 @@ try {
       console.log(`LBL ${a.toString(16).padStart(4,'0')} ${String(nx - a).padStart(5)} ${n}`);
     }
   }
-  const aligned = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
-    runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
-    ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
-    rayOffT: NLOG, colGrpT: NLOG, clampT: 256, clmp16: 256 };
+  const aligned = ALIGNED_T;
+  // PUBLISHED, like the buffer sizes. The relayout has to know which tables must start on a page
+  // and cannot infer it -- inferring it from "this one happens to be page-aligned today" only
+  // works while the hand-placed layout exists, which is exactly what compaction replaces. This is
+  // the authoritative list; the check below is what it is authoritative FOR.
+  writeFileSync('./iray.aligned.json', JSON.stringify(aligned));
   for (const [t, n] of Object.entries(aligned)) {
     const a = r.labels[t];
     if (a === undefined) continue;
@@ -20920,15 +24637,24 @@ try {
   // every one of these is evicted the free figure would be a lie, and a lie in the direction that
   // gets sprite data written over the span stack.
   const squatters = BANK3_SQUATTERS;
-  const used = [[SCR_A, SCR_A + 0x400], [SCR_B, SCR_B + 0x400],
-                [CHARSET, CHARSET + 0x800], [CHARSET_B, CHARSET_B + 0x800],
-                [0xfffa, 0x10000],
+  // NAMED for the overlap guard below, exactly as the sprite-side segments are. The first cut of
+  // that guard checked only the sprite side, which would have missed a shadow landing on a SCREEN
+  // or a charset -- the two things in bank 3 whose corruption you would actually SEE.
+  const usedNamed = [['SCR_A', SCR_A, SCR_A + 0x400], ['SCR_B', SCR_B, SCR_B + 0x400],
+                ['CHARSET', CHARSET, CHARSET + 0x800], ['CHARSET_B', CHARSET_B, CHARSET_B + 0x800],
+                // The SOLO slot is as occupied as any screen: it is where the level lands, and
+                // everything the engine reads about the level resolves into it. Named so the
+                // pairwise guard covers it -- picking a slot address by eye is exactly the kind
+                // of choice that put ARC_GLY on the level shadow's tail (see iray-bank3-overlap).
+                ...(SOLO ? [['LEVELS', SLOT_AT, LVLREGION_END]] : []),
+                ['VECTORS', 0xfffa, 0x10000]];
+  const used = [...usedNamed.map(([, lo, hi]) => [lo, hi]),
                 // a squatter's extent is unknown, so reserve to the next page boundary
                 // RUNTIME_BUFS names the ones whose size we know. fallTailB is ${FTROWS * 40} bytes and
                 // straddles a page wherever it is put; page-rounding alone reported the second
                 // half as free, which is the same under-reservation that once let a level
                 // shadow grow over doomT.
-                ...squatters.map(([n, a]) => [a & ~255, ((a + (RUNTIME_BUFS[n] ?? 1) - 1) | 255) + 1]),
+                ...reserveOf(squatters),
                ];
   if (squatters.length) console.log(`  bank 3 still has ${squatters.length} CPU equate(s) in it ` +
     `($${Math.min(...squatters.map(x => x[1])).toString(16)}-` +
@@ -20939,14 +24665,59 @@ try {
   // can have; gross is kept alongside it so the difference reads as "spent", not as a correction.
   // ...and neither is anything else that reaches bank 3 by a route the assembler cannot see. The
   // figure was reporting 47 free slots where 27 were real, every time, because it counted only the
-  // two sprite ladders: the LOADER relocates its body to LOADER_RUN and runs there, and SEATBASE
+  // two sprite ladders: the LOADER relocates its body to LOADER_RUN and runs there, and PICBASE
   // holds either the seat ladder or IPIC depending on the build. All three are as occupied as any
   // table; leaving them out is how "3K free" turned into a socket ladder that did not fit.
-  const sprSeg = SPRITES ? [[SPRBASE, SPRBASE + NORBBM * 64],
-                            [HOLEBASE, HOLEBASE + (HOLEBM.length + IDOLBM.length) * 64],
-                            [LOADER_RUN, 0xd000],
-                            ...(PICSEG.length ? [[SEATBASE, SEATBASE + PICSEG.length]] : []),
-                            ...(LVLSHAD_BYTES.length ? [[LVLSHADOW, LVLSHADOW + LVLSHAD_BYTES.length]] : [])] : [];
+  // SPRBASE's run still reaches NORBBM slots: ORBLO_N of them are the ladder and the rest are
+  // the renderer's scratch that replaced its tail (see ORBHI_N). Both are occupied; what the
+  // split changed is which of them the VIC reads, not whether the bytes are spoken for.
+  // The arc's dictionary is as occupied as any sprite -- it is bank 3 RAM the VIC reads as a
+  // charset -- and nothing else in this accounting would know it is there.
+  // NAMED, because the free-space sum below cannot tell a collision from an adjacency: slotsIn
+  // MERGES its input (`at = Math.max(at, hi)`), so two segments sitting on the same bytes simply
+  // vanish into one and the total looks fine. That is not hypothetical -- it shipped. ARC_GLY
+  // ($fe40) ran 170 bytes into the level shadow's tail, which in a four-level chain is the THIRD
+  // slot, so the arc's glyph dictionary was stamped over the parked level's tables. It rendered
+  // perfectly until you fell back into that level: the swap loaded nOrbT = $55 and objInit placed
+  // 85 entities through garbage pointers. The image has had an overlap guard for ages; bank 3 had
+  // only a calculator, and a calculator that merges cannot be one.
+  const arcSeg = ANYFLOORDK ? [['ARC_GLY', ARC_GLY, ARC_GLY + ARC_GLY_N],
+                              ['ARC_GLY5', ARC_GLY5, ARC_GLY5 + ARC_GLY_N],
+                              // VOIDCH's backing is stamped by arcBld at the code's own offset in
+                              // each block, nowhere near ARC_GLY -- see the `sta ARC_BLK+VOIDCH*8`
+                              // there. Eight bytes, and they are as occupied as the other 280.
+                              ['ARC_VOIDCH', ARC_BLK + VOIDCH * 8, ARC_BLK + VOIDCH * 8 + 8],
+                              ['ARC_VOIDCH5', ARC_BLK5 + VOIDCH * 8, ARC_BLK5 + VOIDCH * 8 + 8],
+                              ['ARC_MAP', ARC_MAP, ARC_MAP + CELLCODES]] : [];
+  const sprNamed = SPRITES ? [...arcSeg, ['SPRBASE', SPRBASE, SPRBASE + NORBBM * 64],
+                            ['HOLEBASE', HOLEBASE, HOLEBASE + (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64],
+                            ['LOADER_RUN', LOADER_RUN, 0xd000],
+                            ...(PICSEG.length ? [['PICBASE', PICBASE, PICBASE + PICSEG.length]] : []),
+                            ...(LVLSHAD_BYTES.length ? [['LVLSHADOW', LVLSHADOW, LVLSHADOW + LVLSHAD_BYTES.length]] : []),
+                            // A LATE level's wall lists ride ABOVE the shadow and are NOT in
+                            // LVLSHAD_BYTES, so this guard could not see them -- and they land
+                            // on ARC_GLY, which begins one byte after the shadow ends. Neither
+                            // this nor the shadow-fit guard (which only tests against $fff9)
+                            // caught it, so the LATE build has been writing its wall deltas over
+                            // the arc's glyph dictionary.
+                            ...(LATEWALL_END > LVLSHADOW
+                              ? [['LATEWALL', Math.max(LVLSHADOW + LVLSHAD_BYTES.length, 0), LATEWALL_END]] : [])] : [];
+  {
+    // LOADER_RUN is excluded: it is not an allocation but a COVERAGE marker for "everything below
+    // $d000 is the image the loader relocates into", so it overlaps the charsets and both screens
+    // by design. Including it makes the guard cry wolf on its first run, which is how guards die.
+    const all = [...usedNamed, ...sprNamed.filter(([n]) => n !== 'LOADER_RUN'),
+                 ...squatters.map(([n, a]) => [n, a, (a & ~255) + 256])];
+    const hits = [];
+    for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+      const lo = Math.max(all[i][1], all[j][1]), hi = Math.min(all[i][2], all[j][2]);
+      if (hi > lo) hits.push(`${all[i][0]} x ${all[j][0]}: $${lo.toString(16)}-` +
+        `$${(hi - 1).toString(16)} (${hi - lo} bytes)`);
+    }
+    if (hits.length) throw new Error(`VIC bank 3 overlap -- these share the same RAM, and whichever ` +
+      `is written second wins at runtime:\n  ${hits.join('\n  ')}`);
+  }
+  const sprSeg = sprNamed.map(([, lo, hi]) => [lo, hi]);
   const slotsIn = occupied => {
     const gaps = []; let at = VBANK;
     for (const [lo, hi] of [...occupied].sort((a, b) => a[0] - b[0])) {
@@ -21001,7 +24772,7 @@ try {
       // fallSnapD/fallSnapS are 1000 bytes each, and reserving one page of each would still
       // have offered the other three -- which is the bug this block exists to prevent.
       const squat = eqs.filter(([, a]) => a >= lo && a < hi)
-        .map(([n, a]) => [a & ~255, (a + (RUNTIME_BUFS[n] ?? 1) - 1) | 255]);
+        .flatMap(e => reserveOf([e]).map(([lo, hi]) => [lo, hi - 1]));
       const pages = [...new Set(squat.map(([p]) => p))].sort((a, b) => a - b);
       if (!pages.length) return [[lo, hi, []]];
       const endOf = p => Math.max(...squat.filter(([q]) => q === p).map(([, e]) => e)) + 1;
@@ -21018,12 +24789,121 @@ try {
     const spendable = holes.filter(h => !h[2].length).reduce((a, [lo, hi]) => a + (hi - lo), 0);
     console.log(`image holes: ${holes.length}, ${spendable} bytes with nothing living in them` +
                 ` (+ ${VBANK - r.end} bytes above the image, below $c000)`);
+    // A hole that is the TAIL OF A MAPN-SIZED TABLE is not spendable, however big it looks: it
+    // shrinks as the map grows and collapses to nothing on a chain whose live level has 253
+    // cells. Saying so here, rather than in a comment 4,000 lines away, because the 112-byte
+    // gaps in the $8a00-$8d00 pages are the most inviting thing in this report and are exactly
+    // those tails. (The faceIdT tails at $82a0 are the stable ones -- rays never change.)
+    const mapnEnds = new Set(Object.entries(r.labels ?? {})
+      .filter(([n]) => /^(runWT|runNT|runET|runST|bfsD0|bfsD1)$/.test(n))
+      .map(([, a]) => a + MAPN));
+    const shaky = lo => [...mapnEnds].some(e => lo >= e && lo < (e | 255) + 1);
     for (const [lo, hi, sq] of holes)
       console.log(`  $${lo.toString(16)}-$${(hi - 1).toString(16)}  ${String(hi - lo).padStart(5)}` +
                   `  ${sq.length ? 'holds ' + sq.slice(0, 6).join(' ') + (sq.length > 6 ? ' ...' : '')
+                                 : shaky(lo) ? '(free, but a MAPN tail -- shrinks on a bigger map)'
                                  : '(free)'}`);
-    console.log(`TOTAL SPENDABLE: ${spendable + (VBANK - r.end)} bytes, in ` +
-                `${holes.filter(h => !h[2].length).length + 1} fragments`);
+    // SPENDABLE excludes the MAPN tails. Counting them overstated this by ~600 bytes, and an
+    // inflated total is worse than no total: it says "there is room" when the room evaporates
+    // on the next chain with a bigger map.
+    const shakyB = holes.filter(h => !h[2].length && shaky(h[0])).reduce((a, [lo, hi]) => a + (hi - lo), 0);
+    console.log(`TOTAL SPENDABLE: ${spendable - shakyB + (VBANK - r.end)} bytes, in ` +
+                `${holes.filter(h => !h[2].length && !shaky(h[0])).length + 1} fragments` +
+                (shakyB ? `  (+ ${shakyB} more in MAPN tails, which do not count)` : ''));
+    // ---- byte-identical emitted tables ----
+    // Folding ddy onto ddx once recovered 2K at zero cycles, and nothing noticed it was possible
+    // until someone looked. This notices. Reported, not thrown: some duplicates are meant (blkT
+    // is emitted with mapT's contents and objInit rewrites it from mapT at boot anyway).
+    {
+      const body = new Map();
+      for (const m of asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*):\s*!byte\s+([^;\n]*)/gm)) {
+        const vals = m[2].split(',').map(v => v.trim()).filter(Boolean);
+        if (vals.length >= 16) body.set(m[1], vals.join(','));
+      }
+      const same = new Map();
+      for (const [n, v] of body) same.set(v, [...(same.get(v) ?? []), n]);
+      for (const [v, ns] of same) if (ns.length > 1)
+        console.log(`  DUPLICATE TABLE: ${ns.join(' == ')} (${v.split(',').length} bytes each)`);
+    }
+    // ---- zero page, which is the only space that is also CYCLES ----
+    // An absolute,x read is 4 cycles and 3 bytes; the zero-page form is 4 and 2, and plain
+    // absolute vs zp is 4/3 against 3/2. So an unclaimed ZP byte is worth more than an image
+    // byte, and this build has barely touched it. NOT auto-allocated: which variables are HOT
+    // is a question for PROFILE, not for a reference count, and promoting the wrong ones just
+    // moves bytes around.
+    {
+      const zp = Object.entries(r.labels ?? {}).filter(([, a]) => a < 0x100).map(([, a]) => a);
+      const used = new Set(zp);
+      const runs = []; let st = null;
+      for (let a = 2; a <= 0x100; a++) {
+        if (a < 0x100 && !used.has(a)) { if (st === null) st = a; }
+        else if (st !== null) { runs.push([st, a - 1]); st = null; }
+      }
+      // $e0-$e6 is Krill's (loader_zp_first/last) and $90-$fa is the KERNAL's during a LOAD --
+      // the same two-zone problem low RAM has, so a free list alone is not a safe-to-use list.
+      const free = runs.reduce((n, [a, b]) => n + (b - a + 1), 0);
+      console.log(`zero page: ${used.size} named, ${free} bytes unclaimed` +
+        ` -- biggest runs ${runs.sort((x, y) => (y[1] - y[0]) - (x[1] - x[0])).slice(0, 4)
+             .map(([a, b]) => `$${a.toString(16)}-$${b.toString(16)}(${b - a + 1})`).join(' ')}` +
+        `  [Krill owns $e0-$e6; the KERNAL uses $90-$fa during a load]`);
+    }
+    // ---- PAGEFIT=1: how few pages would hold every RAM table, if they were repacked? ----
+    // The constraint that makes this a bin-packing problem rather than a sum is that a table
+    // must not CROSS a page boundary: an indexed read that crosses costs a cycle, which is the
+    // whole reason so many of these sit alone on a page of their own. Within a page, where a
+    // table starts is free -- abs,x is 4 cycles at $bd04 exactly as at $bd00 -- so any packing
+    // that keeps each table whole inside some page costs nothing at run time.
+    // First-fit-decreasing, which for bins this size is at worst 11/9 of optimal, and the exact
+    // lower bound (total/256, rounded up) is printed beside it so the gap is visible.
+    // Buffers larger than a page are listed separately: they need a contiguous RUN, so they are
+    // not bin-packable and their tail waste is what it is.
+    if (process.env.PAGEFIT) {
+      const items = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{4})/gm)]
+        .map(m => [m[1], parseInt(m[2], 16), RUNTIME_BUFS[m[1]] ?? 1])
+        .filter(([, a]) => a >= 0x0200 && a < VBANK);
+      // A page-ALIGNED equate with no declared length is the shape a missed table takes: nobody
+      // aligns a scalar. Named rather than assumed, because counting one as a byte is what makes
+      // a packing report claim pages that are not there.
+      const suspect = items.filter(([n, a, sz]) => sz === 1 && (a & 255) === 0);
+      if (suspect.length) console.log(`  SUSPECT (page-aligned, no declared length -- likely ` +
+        `tables counted as one byte): ${suspect.map(([n]) => n).join(' ')}`);
+      const big = items.filter(i => i[2] > 256).sort((a, b) => b[2] - a[2]);
+      const small = items.filter(i => i[2] <= 256).sort((a, b) => b[2] - a[2]);
+      const pagesNow = new Set();
+      for (const [, a, sz] of items) for (let q = a & ~255; q < a + sz; q += 256) pagesNow.add(q);
+      const bins = [];
+      for (const it of small) {
+        let b = bins.find(x => x.left >= it[2]);
+        if (!b) bins.push(b = { left: 256, items: [] });
+        b.left -= it[2]; b.items.push(it);
+      }
+      const smallTot = small.reduce((t, i) => t + i[2], 0);
+      const bigPages = big.reduce((t, i) => t + Math.ceil(i[2] / 256), 0);
+      console.log(`PAGEFIT: ${items.length} RAM tables, ${smallTot} bytes in the ${small.length} ` +
+        `that fit a page, ${big.reduce((t, i) => t + i[2], 0)} in the ${big.length} that do not`);
+      console.log(`  they occupy ${pagesNow.size} pages today; repacked they need ` +
+        `${bins.length + bigPages} (${Math.ceil(smallTot / 256)} + ${bigPages} is the floor) ` +
+        `-- ${pagesNow.size - bins.length - bigPages} pages, ` +
+        `${(pagesNow.size - bins.length - bigPages) * 256} bytes, would come free`);
+      // What it would COST: the pages that are barely used today are the cheap ones to empty,
+      // and the count of tables on each is the size of the job. A page holding one table is one
+      // move; a page holding forty scalars is forty, and not worth 256 bytes.
+      const now = new Map();
+      for (const [n, a, sz] of items) {
+        const q = a & ~255;
+        if (!now.has(q)) now.set(q, { used: 0, n: 0 });
+        now.get(q).used += sz; now.get(q).n++;
+      }
+      console.log('  emptiest pages today (bytes used / tables on it -- the cheap ones to clear):');
+      for (const [q, v] of [...now].sort((a, b) => a[1].used - b[1].used).slice(0, 8))
+        console.log(`    $${q.toString(16)}  ${String(v.used).padStart(3)} used  ` +
+          `${String(v.n).padStart(3)} table(s)`);
+      for (const [i, b] of bins.entries())
+        console.log(`  page ${i}: ${256 - b.left} used, ${b.left} spare  ` +
+          b.items.map(([n, , sz]) => `${n}:${sz}`).join(' '));
+      if (big.length) console.log('  contiguous runs (not bin-packable): ' +
+        big.map(([n, , sz]) => `${n}:${sz}`).join(' '));
+    }
   }
   {
     // LOW RAM, which nothing reported on until the pivot scratch and fallTailB moved into it.
@@ -21039,6 +24919,24 @@ try {
     `  = ${free} bytes, ${free >> 6} sprite slots` +
     (SPRITES ? ` (${gross >> 6} gross, ${NORBBM} spent on the orb ladder` +
                ` and ${HOLEBM.length} on the hole ladder)` : ''));
+  // BANK3MAP=1: the whole bank as a sorted occupancy list. The free-space line above says how
+  // much is left but not WHERE the walls are, and the slot design has to answer a different
+  // question -- which runs are CPU-readable at port $35 (so $d000-$dfff is out) and big enough
+  // to hold a level in place. That is a layout question, not a free-space one.
+  if (process.env.BANK3MAP) {
+    const segs = [...usedNamed, ...sprNamed, ...squatters.map(([n, a]) => [n, a, (a & ~255) + 256])]
+      .sort((a, b) => a[1] - b[1] || a[2] - b[2]);
+    console.log('  VIC bank 3 occupancy:');
+    let at = VBANK;
+    const gap = (lo, hi) => { if (hi > lo) console.log(`    $${lo.toString(16)}-$${(hi - 1).toString(16)}` +
+      `${String(hi - lo).padStart(7)}  -- free${lo >= 0xd000 && lo < 0xe000 ? ' (I/O hole: VIC only)' : ''}`); };
+    for (const [n, lo, hi] of segs) {
+      gap(at, Math.min(lo, 0x10000));
+      console.log(`    $${lo.toString(16)}-$${(hi - 1).toString(16)}${String(hi - lo).padStart(7)}  ${n}`);
+      at = Math.max(at, hi);
+    }
+    gap(at, 0x10000);
+  }
   // $a000-$bfff is BASIC ROM unless LORAM is cleared, and $d000-$dfff is I/O no matter what.
   // Reading a table through either returns something other than what was written there.
   // ---- no RAM equate may sit inside the emitted image ----
@@ -21085,35 +24983,7 @@ try {
     // Sizes have to be declared because an equate carries none. Only multi-byte arrays need an
     // entry; everything else is assumed to be one byte, which is the common case and the safe
     // default (a missed entry under-reports, it never invents an overlap).
-    const SIZES = {
-      stackLT: 128, stackRT: 128, sideT: 256, idT: 256, colH: 256,
-      faceIdT: 256, remLoT: 256, remHiT: 256,
-      cwA: 40, cwB: 40, cbA: 40, cbB: 40, cstepT: 40, seamT: 40,
-      bndT: NBND, pvBnd: NBND, pvAng: NBND, pvRcp: NBND,
-      cqLo: 64, cqHi: 64, cqCol: 64,
-      // eight sprite slots each. Without these the checker treats them as ONE byte and happily
-      // lets a new variable land inside obX -- which is exactly what happened to the fall's
-      // arc scratch, and it took a freeze to notice.
-      obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
-      obL: 8, obR: 8, obBL: 8, obBR: 8,
-      pfNum: 34,                       // PROFN: the same seventeen phases, x 2
-      flogB: 2816,                     // FRAMELOG: $7100-$7bff, 704 x 4
-      twPose: 252,                     // TOURPOSE: 42 steps x 6
-      pfAcc: 51,                       // SEVENTEEN phases x 3. It said 13 while the code used 15,
-                                       //   so two phases' worth of room was undeclared and the
-                                       //   next variable placed there would have collided.
-      // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
-      // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
-      // player's projected X overwrote the death trigger's reference angle every frame and you
-      // died the instant an angel reached you, standing still. Anything referenced as name+1
-      // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
-      ...RUNTIME_BUFS,
-      bfsQ: 256, runPlaneT: 256, runFaceT: 256, doomT: 256, obKeyT: 8,
-      opx: 2, opy: 2,
-      osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
-      rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
-      tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
-    };
+    const SIZES = SIZES_T;
     {
       const all = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
         // $0200, not $0400. The threshold was $0400 because everything below it was BASIC's and
@@ -21128,6 +24998,18 @@ try {
         if (a < 0x0200 || (a < 0x0400 && a + sz > LOWEND)) throw new Error(
           `${n}=$${a.toString(16)} (${sz}B) runs past $${(LOWEND - 1).toString(16)} into the ` +
           `default screen at $0400 (stackLT and the rest), or below $0200 into the stack.`);
+      // PUBLISH the sizes. compact.mjs relocates these buffers and has no way to know how big
+      // they are -- it guessed, got runPlaneT (NRUN, so it VARIES with the chain) 21 bytes short,
+      // and placed dieRlT inside it. This map is the build's own answer and the only correct one,
+      // so it is written into the asm where the relayout can read it back.
+      // ONLY THE ONES ACTUALLY DECLARED. Publishing `SIZES[n] ?? 1` for every equate tells the
+      // relayout that an undeclared buffer is ONE BYTE -- which is a safe assumption for this
+      // guard (it only ever under-claims) and a disastrous one for a tool that then places the
+      // next buffer one byte later. Leave the unknowns out so they fall through to the relayout's
+      // own rules instead of being confidently wrong.
+      writeFileSync('./iray.bufsizes.json',
+        JSON.stringify(Object.fromEntries(all.filter(([n]) => SIZES[n] !== undefined)
+                                             .map(([n, , sz]) => [n, sz]))));
       for (let i = 1; i < all.length; i++) {
         const [pn, pa, ps] = all[i - 1], [n, a, sz] = all[i];
         if (a < pa + ps) throw new Error(
@@ -21142,6 +25024,10 @@ try {
       .map(m => [m[1], parseInt(m[2], 16)])
       .filter(([n, a]) => a >= 0x0200 && !(n in OK));
     const clash = eq.filter(([, a]) => a >= r.org && a < r.end && !inHole(a, 1));
+    if (clash.length && process.env.HOLEDBG) console.error('HOLEDBG near clash:',
+      clash.map(([n, a]) => `${n}=$${a.toString(16)}`).join(' '), '| holes:',
+      holes.filter(([lo, hi]) => hi > 0xbc00 && lo < 0xbf00)
+           .map(([lo, hi]) => `$${lo.toString(16)}-$${hi.toString(16)}`).join(' '));
     if (clash.length) throw new Error(
       `${clash.length} RAM equate(s) sit inside the emitted image $${r.org.toString(16)}-` +
       `$${r.end.toString(16)} and NOT in one of its ${holes.length} holes, so the program's own ` +
@@ -21155,6 +25041,6 @@ try {
   if (r.end > VBANK) throw new Error(
     `program ends at $${r.end.toString(16)}, past $${VBANK.toString(16)} -- bank 3 is graphics-only. ` +
     `${r.end - VBANK} bytes over; the single-load ceiling is $0801-$bfff (47.5KB).`);
-  console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> latest.d64`
+  console.log(`ok: rays=${NLOG} org=$${r.org.toString(16)} end=$${r.end.toString(16)} bytes=${r.bytes.length} -> ${D64OUT}`
     + (DIAG.length ? `\nDIAGNOSTIC BUILD [${DIAG.join(' ')}] -- asm to ${asmPath}, not for fps numbers` : ''));
 } catch (e) { console.error('ASM ERROR:', e.message); process.exit(1); }

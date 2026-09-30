@@ -44,6 +44,20 @@ const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x09c0;
 // and, just as important, cannot print on the QUOTE. $cc00 is the 1K above IHOL in bank 3 and is
 // exactly the 1000 bytes a screen needs; buildLoader guards that IHOL never grows into it.
 const KSCR = 0xcc00;
+// WHERE THE UNDER-HOLE FILE IS STAGED before the port flips to $34 and it is copied to $d000.
+// It was $c000, which put it in the same page as KSCR and capped the ladder at 3K -- and the
+// ladder had to grow past that when the orb ladder's tail moved under the hole. Nothing wanted
+// bank 3 in particular: this file is the FIRST thing loaded, so the whole image region is still
+// empty, and $b000 gives the full 4K of the hole to stage in with KSCR left where it is.
+export const KSTAGE = 0xb000;
+// ---- and where the game PARKS the live resident ----
+// There is ONE resident and it has to be this one: Krill's protocol is stateful across loads, so
+// a second pristine build at another address is not the party the drive is talking to -- it
+// hangs waiting for a reply that never comes (PC stuck at $6ec7). $0400 is about to become
+// stackLT, so entry copies it out of the way and lateLoad copies it back to run it in place.
+export const KRILL_RESIDENT_AT = KRILL_RESIDENT;
+export const KRILL_RT_AT = 0x6e00;
+export const KRILL_RT_LEN = KRILL_RES.length;
 // WHERE THE RESIDENT'S BYTES WAIT. They cannot simply be copied to $0400 by the stub and left
 // there: $0400 is the default SCREEN, and install() calls KERNAL routines that write to it. The
 // README says this for "below $0400"; it is just as true AT $0400, and the symptom was loadraw
@@ -216,7 +230,10 @@ cdbg:   jmp cdbg
         clc
         adc #${'$' + Math.floor(f.length / 256).toString(16).padStart(2, '0')}
         sta ${hx4(SW_BASE)}`);
-  const names = files.map(f => `n${f.tag}: !byte ${petscii(f.name)},0`).join('\n');
+  // A runtime file's NAME belongs to whoever loads it, and that is the game, not this stub. The
+  // boot PRG comes down at KERNAL speed, so every byte in it is time on a black screen.
+  const names = files.filter(f => !f.runtime)
+    .map(f => `n${f.tag}: !byte ${petscii(f.name)},0`).join('\n');
   return `        * = ${hx4(LOADER_RUN)}
         lda #$00                ; no KERNAL messages: "SEARCHING FOR" would scroll the screen,
         sta $9d                 ;   and the screen is about to be somewhere much more useful
@@ -299,7 +316,7 @@ r2dbg:  jmp r2dbg
         lda #>${hx4(SW_IRQ)}
         sta $0315
         cli
-${files.filter(f => f.first).map(load).join('\n')}
+${files.filter(f => f.first && !f.runtime).map(load).join('\n')}
         sei                     ; the HOLE LADDER goes under the I/O hole: it lands at $c000 (the
         lda #$34                ;   only place a loader with I/O mapped can put it), then
         sta $01                 ;   $c000 -> $d000 with the port at $34.
@@ -310,16 +327,16 @@ ${files.filter(f => f.first).map(load).join('\n')}
         ; holes, sockets and pedestals rendered as rows of $ff: horizontal grey lines. It shipped
         ; for three commits because nothing downstream can tell a short copy from a real ladder.
 hcp:${[...Array(pages)].map((_, p) => `
-        lda $${(0xc000 + p * 256).toString(16)},x
+        lda $${(KSTAGE + p * 256).toString(16)},x
         sta $${(0xd000 + p * 256).toString(16)},x`).join('')}
         inx
         bne hcp
         ; ...and CHECK it arrived. A wrong stride is silent at every later stage, so compare the
         ; two ends of the ladder while the port is still at $34 and $d000 is still RAM.
-        lda $${(0xc000 + first.length - 1).toString(16)}
+        lda $${(KSTAGE + first.length - 1).toString(16)}
         cmp $${(0xd000 + first.length - 1).toString(16)}
         bne hcpbad
-        lda $${(0xc000 + (pages - 1) * 256).toString(16)}
+        lda $${(KSTAGE + (pages - 1) * 256).toString(16)}
         cmp $${(0xd000 + (pages - 1) * 256).toString(16)}
         beq hcpok
 hcpbad: lda #$37
@@ -332,10 +349,10 @@ hb:     jmp hb
 hcpok:  lda #$37
         sta $01
         cli
-${files.filter(f => !f.first && !f.last).map(load).join('\n')}
+${files.filter(f => !f.first && !f.last && !f.runtime).map(load).join('\n')}
         lda #$0b                ; screen OFF: the last two files land on the quote, and black is
         sta $d011               ;   a better last frame than the picture coming apart
-${files.filter(f => f.last).map(load).join('\n')}
+${files.filter(f => f.last && !f.runtime).map(load).join('\n')}
         sei                     ; $0314 must not point into a boot body IMG has already buried,
         lda #$31                ;   not even for the one frame before the game sets its own
         sta $0314
@@ -362,10 +379,11 @@ export function buildLoader(assemble, files, entry, step2) {
   const first = files.find(f => f.first);
   const holePages = Math.ceil((first.length ?? 2048) / 256);
   if (holePages > 16) throw new Error(`the file under the I/O hole is ${first.length} bytes; the hole is 4K`);
-  if (0xc000 + holePages * 256 > KSCR) throw new Error(
-    `${first.name} is ${first.length} bytes at $c000 and reaches ${hx4(0xc000 + holePages * 256 - 1)}, ` +
-    `into the KERNAL's scratch screen at ${hx4(KSCR)} that install() prints on. Move KSCR ` +
-    `(loader-src.mjs) -- and note it needs 1000 contiguous bytes clear of every boot-time load.`);
+  // The staging run must stay clear of bank 3, where ICHR and KSCR both live.
+  if (KSTAGE + holePages * 256 > 0xc000) throw new Error(
+    `${first.name} is ${first.length} bytes staged at ${hx4(KSTAGE)} and reaches ` +
+    `${hx4(KSTAGE + holePages * 256 - 1)}, past $c000 into the charset and the KERNAL's scratch ` +
+    `screen at ${hx4(KSCR)}. Lower KSTAGE -- everything below it is still empty at this point.`);
   const body = assemble(bodySource(files, entry, holePages, first, step2));
   if (LOADER_RUN + body.bytes.length > 0x0800) throw new Error(
     `the boot body is ${body.bytes.length} bytes and runs past $0800 from ${hx4(LOADER_RUN)}, ` +
