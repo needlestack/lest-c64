@@ -5,9 +5,9 @@
 //   node fpsr.mjs "ANGEL=0"            the same segments with a build flag
 //   node fpsr.mjs "" walk              one segment by name
 //
-// WHY NOT bench.sh / seamprof / fps.sh: ROUTE=bench walks into walls on the current level 1,
-// seamprof needs the full profiler, and fps.sh cannot run because SPIN=1 does not build. All
-// three predate the 23x11 map and the compaction relayout.
+// WHY NOT bench.sh / seamprof: ROUTE=bench walks into walls on the current level 1, and
+// seamprof needs a profiler that compaction was dropping. Both predate the 23x11 map and the
+// relayout. fps.sh should work again now that SPIN=1 builds, but it only spins.
 //
 // HOW IT WORKS, and why each piece is there:
 //
@@ -36,9 +36,10 @@ const SEGMENTS = [
     note: 'north-east across the west room, its far wall in view the whole way' },
   { name: 'strafe', env: 'STRAFE=1 PX=0466 PY=08df PA=80 PAF=80', moves: true,
     note: 'sidestepping north up the room -- the walls slide across the view' },
-  // SPIN=1 does not build (it fails on its own, not from anything here). Restore this when it
-  // does: a spin is the only motion that exercises every one of the 256 cast angles.
-  // { name: 'spin', env: 'SPIN=1 PX=044d PY=0579', moves: false, note: 'standing turn' },
+  // A spin is the only motion that exercises every one of the 256 cast angles, and the only one
+  // where the player does not move, so there is no wall to bump and no travel to check.
+  { name: 'spin',   env: 'SPIN=1 PX=044d PY=0579 PA=00 PAF=80', moves: false,
+    note: 'standing in the corridor mouth, turning through every angle' },
 ];
 
 const extra = process.argv[2] ?? '';

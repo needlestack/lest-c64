@@ -5563,7 +5563,12 @@ const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
 // ...or NONE: nExitT 0 is sayable, and every hole-like loop and fallChk test the count before
 // touching entity nOrbT+0, which would be the byte past the last. No shipping level is exitless
 // now that the arenas are gone, so nothing exercises this -- keep the guards, they are 12 bytes.
-const HOLES_AT = Array.isArray(HOLE_D?.[0]) ? HOLE_D
+// NOHOLE=1: no exit at all, for measuring a level with NOTHING in it. NOORB=1 and ANGEL=0
+// take the orbs and the angels; the exit is level data rather than a flag, so without this
+// there was no way to ask what the room alone costs -- which is the baseline every other
+// entity measurement is against.
+const HOLES_AT = process.env.NOHOLE === '1' ? []
+               : Array.isArray(HOLE_D?.[0]) ? HOLE_D
                : HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]] : [];
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
@@ -12033,10 +12038,12 @@ ${SPIN ? `; ---- spinStep: rotate one unit a frame, and hop between viewpoints -
 ; places in the same order and stay comparable.
 spinStep:
         inc pa
-        bne spDn                ; spDn, not ssDn: seamSpan owns that name, and with SPIN=1 both
-        ldx spinIx              ;   were emitted -- the assembler took the LAST, so this branch
-                                ;   resolved into seamSpan. Both happen to be rts, so it was
-                                ;   harmless; the duplicate-label guard found it anyway.
+        bne spinDn              ; spinDn, because the two shorter names are both taken: ssDn by
+        ldx spinIx              ;   seamSpan, and spDn by spLvl's sprite-ink path. This label was
+                                ;   renamed ssDn -> spDn once already and landed on the second
+                                ;   owner, so SPIN=1 has not built since spLvl appeared. Both
+                                ;   collisions were caught by the duplicate-label guard, which is
+                                ;   the only reason a branch into the wrong routine never shipped.
         inx
         cpx #${SPINPOS.length}
         bcc ssIx
@@ -12050,7 +12057,7 @@ ssIx:   stx spinIx
         sta py
         lda spinYH,x
         sta py+1
-spDn:   rts
+spinDn: rts
 ${false ? `
 ; tourStep: turn AND translate. Drives px/py DIRECTLY rather than calling moveFwd, because
 ; moveFwd stops dead at a wall and a benchmark that quietly stops moving still prints a
