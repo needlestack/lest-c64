@@ -3558,6 +3558,11 @@ const PROFMAX = flag('PROFMAX');
 // ENTPROF=1: split the entities bucket into orbOccAll / orbMove / orbKey / bfsTick / angStep.
 // Reuses the bucket indices PROFCOARSE frees, so it must be run WITH PROFCOARSE.
 const ENTPROF = flag('ENTPROF');
+// A requirement stated in a comment is not a requirement. Run without PROFCOARSE, the fine ray
+// buckets stay live inside castRay and write to the SAME indices the entity split uses, so both
+// readings are sums of two unrelated phases -- and they look plausible, which is worse.
+if (ENTPROF && !PROFCOARSE) throw new Error('ENTPROF=1 needs PROFCOARSE=1: it reuses the bucket ' +
+  'indices PROFCOARSE frees, and without it the fine ray buckets are summed into the entity ones');
 // OCCLAZY=1: rebuild the occluder masks only when they can have changed.
 // STILLSKIP=1: let orbMove take its own still-frame short-circuit. The test below it was always
 // complete -- pose, quarter-angle and entDty -- and the jmp over it was placed "until the

@@ -49,14 +49,27 @@ for (const [seg, pose] of Object.entries(SEGMENTS)) {
   if (!only && !PROFILABLE.has(seg)) continue;            // see PROFILABLE
   if (!PROFILABLE.has(seg)) console.log(`${seg}: NOT PROFILABLE -- it bumps a wall long before ` +
     `the 256-frame window closes, so most of this is a stationary view. See PROFILABLE.`);
-  const env = `CHAIN=1 PROFILE=1 ${entMode ? 'ENTPROF=1 ' : 'PROFCOARSE=1 '}${pose}${extra ? ' ' + extra : ''}`;
+  // ENTPROF reuses the bucket indices PROFCOARSE FREES, so it is PROFCOARSE *plus* the entity
+  // split, never an alternative to it. Passed alone, the fine ray buckets are still live inside
+  // castRay and land on top of the entity ones -- which is how a keypress test came out at 108
+  // raster lines a frame and the cast at 85, and why this file's first entity numbers were junk.
+  const env = `CHAIN=1 PROFILE=1 PROFCOARSE=1 ${entMode ? 'ENTPROF=1 ' : ''}${pose}${extra ? ' ' + extra : ''}`;
   let out;
   try {
-    out = execFileSync(process.execPath, ['probe.mjs', env, 'pfAcc:51', 'pfDone:1', 'pfN:1', '--wait', '20000'],
+    // --until, NOT a long --wait. The window is 256 FRAMES and the emulator runs at warp, so it
+    // closes in about a second of wall clock; a blind "--wait 20000" then sat there for another
+    // nineteen before it so much as dialled the monitor, which is the whole reason a profile
+    // seemed to hang. pfDone is the honest condition -- "the window has closed" -- and probe keeps
+    // warp on for --until precisely because waiting for something to FINISH does not need real
+    // time. The default 8s pre-connect wait stays: polling THROUGH the disk load slows the load.
+    out = execFileSync(process.execPath,
+      ['probe.mjs', env, 'pfAcc:51', 'pfDone:1', 'pfN:1', '--until', 'pfDone>=1'],
       { cwd: '/Users/jfield/c64fps', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, DEADOK: '1' } });   // the profiler HALTS when it is done
   } catch (e) { console.log(`${seg}: build or run failed`); continue; }
-  const row = n => new RegExp(`^${n}\\s+\\S+\\s+([0-9 ]+?)\\s*\\(`, 'm').exec(out)?.[1].trim().split(/\s+/).map(Number);
+  // The trailing "(16-bit: n)" is only printed for MULTI-byte specs, so a regex that requires the
+  // paren silently fails on every 1-byte read -- which is why pfDone always reported unreadable.
+  const row = n => new RegExp(`^${n}\\s+\\S+\\s+([0-9 ]+?)\\s*(?:\\(|$)`, 'm').exec(out)?.[1].trim().split(/\s+/).map(Number);
   const acc = row('pfAcc'), done = row('pfDone');
   if (!acc || acc.length < 51) { console.log(`${seg}: could not read pfAcc`); continue; }
   // The divisor is how many frames actually accumulated, not 256: pfN counts them and wraps at
