@@ -3626,13 +3626,36 @@ const CONE_BQ = [...Array(64)].map((_, i) => {
 // single worst-case number for the whole shift class would have thrown that away.
 const CONE_DMAX = 31;                  // covers any delta a 28-wide or 16-tall level can produce
 const coneShift = c => c <= 7 ? 0 : c <= 15 ? 1 : 2;
+// The slack is MEASURED, not bounded. It was atan(0.707/(c - 0.707)), which measures the angle
+// subtended at the CLOSEST possible approach and so double-counts: 20.4 units at Chebyshev 2 where
+// the true worst case over the whole cell is 13.1 and even asin(0.707/c) only needs 14.7. Six units
+// of 256 sounds small; it was the entire margin by which level 2's orb at (6,8) -- which the user
+// could see was plainly off to the right of the viewport -- was being culled at all.
+// This is a BUILD-TIME table, so there is no reason to use a bound when the exact figure is a loop:
+// for every delta at this Chebyshev distance, the largest bearing change the player can cause by
+// standing anywhere in their own cell. Boundary AND interior sampled, because "the maximum of this
+// is at a corner" is the kind of assumption that has cost all day.
+const coneSlack = c => {
+  let m = 0;
+  for (let dx = -CONE_DMAX; dx <= CONE_DMAX; dx++) for (let dy = -CONE_DMAX; dy <= CONE_DMAX; dy++) {
+    if (Math.max(Math.abs(dx), Math.abs(dy)) !== c) continue;
+    const b0 = Math.atan2(dy, dx);
+    for (let i = 0; i <= 16; i++) for (let j = 0; j <= 16; j++) {
+      const ex = -0.5 + i / 16, ey = -0.5 + j / 16;
+      let d = (Math.atan2(dy - ey, dx - ex) - b0) / (2 * Math.PI) * 256;
+      d = ((d + 128) % 256 + 256) % 256 - 128;
+      m = Math.max(m, Math.abs(d));
+    }
+  }
+  return m;
+};
 const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
   if (c < 2) return 127;               // adjacent: no cell-level bearing means anything (bypassed)
   const sh = coneShift(c);
-  const slack = Math.atan(0.707 / (c - 0.707));
-  const quant = sh ? Math.atan(0.707 * (1 << sh) / c) : 0;
+  const quant = sh ? Math.atan(0.707 * (1 << sh) / c) / (2 * Math.PI) * 256 : 0;
+  // +1 for the rounding in the sampling and in the table itself.
   // <= 127 so that 2*tol still fits a byte -- the range test is (b - pa + tol) >= 2*tol.
-  return Math.min(127, CONE_HALF + Math.ceil((slack + quant) / (2 * Math.PI) * 256));
+  return Math.min(127, CONE_HALF + Math.ceil(coneSlack(c) + quant) + 1);
 });
 // CONECHK=1: verify it, the way FOVCHK verifies ENTFOV. The cone only NOTES that it would have
 // rejected; the full path still runs. coneBad = the cone said no and the entity got a SPRITE, and
@@ -8775,6 +8798,14 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
         // twice. See hzRunW for why 4 bytes a changed byte rather than 6.
         quad.push(`<${n}+${i},>${n}+${i},${v[i] ?? 0},${live[i] ?? 0}`);
       }
+  }
+  // WALLDUMP=1: which TABLES a wall delta actually patches. The question "is visibility carried
+  // in the delta" should be answerable from a build rather than from reading the diff loop.
+  if (process.env.WALLDUMP === '1') {
+    const by = {};
+    for (const t of off) { const n = t.slice(1).split('+')[0]; by[n] = (by[n] ?? 0) + 1; }
+    console.error(`  WALLDUMP wall ${k}: ` +
+      Object.entries(by).sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}:${c}`).join(' '));
   }
   // which cells actually go -- the mapT bytes that differ. The sink pass marks them in doomT to
   // know which columns are showing the doomed wall.
