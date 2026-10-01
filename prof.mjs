@@ -63,8 +63,13 @@ for (const [seg, pose] of Object.entries(SEGMENTS)) {
   // 256, which is what sets pfDone. Dividing a partial window by 256 understates every phase
   // equally -- the shares stay right, the lines-a-frame figure does not.
   const nf = row('pfN');
-  const frames = (done && done[0]) ? 256 : (nf ? nf[0] : 256);
-  if (!done || !done[0]) console.log(`${seg}: partial window -- ${frames} frames, shares are still valid`);
+  // pfN is ONE byte and the window is 256 frames, so a finished run reads pfN == 0 -- which is
+  // why the flag has to be pfDone and not "pfN == 256". Falling back to pfN when pfDone cannot be
+  // read would divide by zero on exactly the runs that went fine, so a missing pfDone is reported
+  // as a missing pfDone, not silently patched.
+  const frames = (done && done[0]) ? 256 : (nf && nf[0] ? nf[0] : 256);
+  if (!done) console.log(`${seg}: could not read pfDone -- assuming the full ${frames}-frame window`);
+  else if (!done[0]) console.log(`${seg}: window did not close -- ${frames} frames, shares are still valid`);
   const v = [...Array(17)].map((_, i) => acc[i * 3] + acc[i * 3 + 1] * 256 + acc[i * 3 + 2] * 65536);
   const total = v.reduce((a, b) => a + b, 0);
   console.log(`\n${seg}  --  ${(total / frames).toFixed(0)} raster lines a frame, over ${frames} frames`);

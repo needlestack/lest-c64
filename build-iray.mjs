@@ -3432,36 +3432,9 @@ const hexArg = (n, dflt, mask) => {
 };
 
 const MEASURE = flag('MEASURE');
-// TOUR=1: spinStep's rotation PLUS a forward/back oscillation. Exists because every test we had
-// left half the temporal pivot unexercised -- runviews pins the viewpoint (rotation AND
-// translation both zero, so the prediction is a bare table round trip) and SPIN only rotates
-// (translation still zero). The pivot's translation term -- two multiplies, the sign handling,
-// the reciprocal, the 24-bit product -- had never run on a non-zero input.
-//
-// Oscillating rather than walking: moveFwd stops dead at a wall, so a plain walk test decays
-// into a standing test after a few seconds and reports a flattering number for the wrong reason.
-// Out 32 frames, back 32, while turning, cannot wedge.
-// It does NOT hop viewpoints, and that is the whole point. The first version reused spinStep,
-// which hops on the angle wrap every 256 frames -- exactly the period of the ray-count mean.
-// So each sample reported ONE viewpoint, and WHICH one depended on how many frames had elapsed
-// in the cycle budget, which depends on the frame rate, which is the thing being measured. Three
-// configs landed on three different scenes and produced 9 / 16 / 8 rays; I nearly reported that
-// as proof the translation term works. It compares nothing.
-//
-// Fixed viewpoint + 1 angle unit a frame + a 16-frame oscillation means a 256-frame window is
-// exactly one full rotation and a whole number of oscillations -- identical in composition for
-// every build, whatever its frame rate. PX/PY choose the scene.
-const TOUR = flag('TOUR');
+// SPIN=1: hold the turn key. One pose, one control, no translation -- the only benchmark move
+// that sweeps all 256 cast angles and the only one that cannot bump a wall. See spinStep.
 const SPIN = flag('SPIN');
-// Viewpoints a SPIN benchmark cycles through, one per full rotation: the start corridor, the
-// busiest cell on the map, and two rooms away from both.
-// auto-rotate, ignore input. TOUR gets a FIFTH stop that SPIN does not: the four spin
-// viewpoints are all simple scenes -- 8-9 rays a frame against 28 at the corridor around
-// (3.5,13.5) -- so a tour of them exercises the pivot's code without exercising its workload,
-// and reported +1.0% where the hard viewpoint alone gives +25%. SPIN's four are deliberately
-// left untouched: fps.sh's ruler changed once before (5f07f0a) and every number from before it
-// became incomparable. Do not repeat that to make a graph look better.
-const SPINPOS = [[1.5, 1.5], [8.5, 4.5], [12.5, 9.5], [9.5, 12.5]];    // auto-rotate, ignore input
 const NORAY = flag('NORAY');   // skip marching/subdivision
 const NOFILL = flag('NOFILL'); // skip renderSym (fill)
 // DUMPH: print colH as hex over the top 8 rows, so the interpolated heights can be read
@@ -3654,11 +3627,6 @@ if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
 // NOHUD=1 drops the fps counter and the X/Y readout, keeping only the two hex digits of
 // the angle so SPIN can still be measured. That is what the shipping build would look like.
 const NOHUD = flag('NOHUD');
-// WIGGLE=1: step forward and back on alternate frames, driving moveFwd/moveBack directly. A
-// forward step and a back step must be exact inverses, so X/Y in the readout must not move at
-// all. Any change is drift, and it is measurable in one run rather than felt over a minute of
-// walking. This is how the arithmetic-shift asymmetry was confirmed and then confirmed fixed.
-const WIGGLE = flag('WIGGLE');
 // PADIN=n: burn n x ~13 cycles in the input phase doing nothing, pose untouched. A DIAGNOSTIC to
 // answer one question: does the cost of the phases AFTER input depend on WHEN they start?
 const PADIN = +(process.env.PADIN ?? 0);
@@ -3752,7 +3720,7 @@ const PROF_BUFS = {
   pfAcc: 17 * 3,   // 17 phases, 24-bit raster-line accumulators
   pfPrvF: 2, pfPrvL: 2, pfCurF: 1, pfCurL: 1, pfCurH: 1, pfPrvH: 1,
   pfTmp: 1, pfTmp2: 1, pfN: 1, pfCurX: 1, pfDLo: 1, pfDHi: 1,
-  pfRow: 1, pfArm: 1, pfDone: 1,
+  pfRow: 1, pfArm: 1, pfDone: 1, pfWant: 1,
 };
 const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
@@ -4044,12 +4012,6 @@ const PARTIAL = process.env.PARTIAL !== '0';
 if (!SEAMS) DIAG.push('SEAMS=0');
 const WALK = flag('WALK');     // auto-walk forward (sweeps frac through 0)
 const STRAFE = flag('STRAFE'); // auto-strafe (parallel to walls)
-const BACK = flag('BACK');     // auto-walk backward
-// STRAFEL=1: auto-strafe the OTHER way. Not symmetry for its own sake -- the pivot's prediction
-// is left/right asymmetric (a hint takes its distance from spanL, which is the near surface for
-// a right-facing silhouette and the FAR one for a left-facing silhouette), so a glitch that
-// needs the mispredicted direction cannot be reproduced by strafeR at all.
-const STRAFEL = flag('STRAFEL');
 // SLOWMO=n: let the auto-mover take a step only every n-th frame. The auto-walk and auto-strafe
 // move at PLAYER speed, so a 3-cell traverse is over in about a second -- and a glitch that lives
 // on two or three frames of it cannot be caught by -limitcycles at all, because the whole window
@@ -4061,9 +4023,14 @@ const PVNEAR = process.env.PVNEAR !== '0';
 if (!PVNEAR) DIAG.push('PVNEAR=0');
 const SLOWMO = +(process.env.SLOWMO ?? 0);
 if (SLOWMO) DIAG.push(`SLOWMO=${SLOWMO}`);
-const AUTOMOVE = TOUR ? 'tourStep' : SPIN ? 'spinStep' : WIGGLE ? 'wiggleStep'
-               : WALK ? 'moveFwd' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL'
-               : BACK ? 'moveBack' : null;
+// ---- THE ONLY AUTO-MOVERS ARE THE BENCHMARK'S OWN THREE ----
+// WALK, STRAFE and SPIN each hold ONE control from the caller's pose, which is exactly what the
+// user described holding on a real machine, and is the whole of what fpsr.mjs and prof.mjs drive.
+// Everything else that used to live here (TOUR's oscillation, WIGGLE, auto-back, strafe-left, and
+// SPIN's own hop to the next of four preset viewpoints) was benchmark machinery that had outlived
+// the level it was authored against and was reporting confident numbers for scenes nobody chose --
+// the hop in particular teleported the player inside a wall, mid-run, on the current map.
+const AUTOMOVE = SPIN ? 'spinStep' : WALK ? 'moveFwd' : STRAFE ? 'strafeR' : null;
 
 // ---- VIC bank 0 memory layout ----
 // The double buffer flips between two 1KB screen matrices. Both are RAM the renderer
@@ -9349,6 +9316,8 @@ pfN     = $7e4c                 ; frames accumulated so far -- ONE byte. It is i
 pfCurF  = $7e4a                 ; scratch for one timestamp read and the delta
 pfCurL  = $7e4b
 pfCurX  = $7e4f
+pfWant  = $7e50                 ; the bucket, handed over in memory so a call site clobbers
+                                ;   no register at all -- see the shell above pfTBody
 pfDLo   = $7e4d
 pfDHi   = $7e4e
 pfRow   = $7e44
@@ -9397,8 +9366,8 @@ pvI2    = $8011                 ; the hint index, saved across mul8 (which needs
 pvYs    = $8012                 ; the bearing, saved across the first multiply
 pvMode  = $802a                 ; 0 = predict in full, 1 = turned in place (the translation
                                 ;   term is identically zero), 2 = nothing moved at all.
-                                ; NOT beside pvYs: $cb13-$cb29 are claimed by the RAYCNT,
-                                ; TOUR and PALKEYS blocks below, which are separate build
+                                ; NOT beside pvYs: $cb13-$cb29 are claimed by the RAYCNT
+                                ; and PALKEYS blocks below, which are separate build
                                 ; flags -- a PIVOT variable landing in that range collides
                                 ; only in the diagnostic builds, i.e. silently.
 ` : ''}${RAYCNT ? `; RAYCNT diagnostics. Declared OUTSIDE the PIVOT block: a RAYCNT build with PIVOT=0 is the
@@ -9439,24 +9408,6 @@ chdMean = $71b4
 pvAcc   = $71b5                 ; EDGCHK: pvNdbg summed over the profiler's window. Rays per
 pvMean  = $71b7                 ;   BOUNDARY is what says whether the subdivision is near its
                                 ;   floor -- a boundary cannot be found without casting at it.` : ''}
-` : ''}${TOUR ? `tourC   = $802d                 ; TOUR phase counter. Was $cb19 -- an address from BEFORE the
-                                ;   move to VIC bank 3, so it pointed into what is now sprite space.
-                                ;   Nothing caught it: $cb19 is outside the image, so the
-                                ;   image-vs-equate guard had nothing to say, and TOUR is a
-                                ;   diagnostic build nobody diffs.
-tourF   = $802b                 ; 2 bytes: frames elapsed, for the 512-frame freeze. It was at
-                                ;   $8022, whose HIGH byte $8023 is colW -- so in any TOUR build
-                                ;   "inc tourF+1" recoloured the walls, and colW's value decided
-                                ;   when the freeze happened. That defeats the one thing TOUR is
-                                ;   for: freezing at exactly PX/PY/PA so a stale row left by a bad
-                                ;   run-cache skip stays on screen to be scored.
-                                ;
-                                ;   Found by the RAM-overlap guard, which is also why the guard
-                                ;   needs SIZES: as a 1-byte variable tourF looked harmless.
-                                ;   NOTE there is a dead "tourF: rts" label in the FIRST tourStep
-                                ;   above, which is disabled by a false template guard and never
-                                ;   emitted. The LIVE tourStep is the second one, and it uses this
-                                ;   as a 2-byte variable.
 ` : ''}colW    = $8023                 ; the three ink colours, one register each. NOT inside the PALKEYS
 colB    = $8024                 ;   block: init loads $d021/$d022/$d023 from these in EVERY build,
 colS    = $8025                 ;   so PALKEYS=0 failed to assemble on an undefined colW. It is the
@@ -10308,7 +10259,7 @@ pfNIni: sta pfNum,x
         cli
 
 mloop:
-${PROFILE ? '        ldx #6\n        jsr pfTick              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
+${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
 ` : ''}${LATE.length ? `        jsr lateLoad            ; at the hub: pull in the levels its coloured holes lead to.
                                 ; HERE and not in the fall's drop->landing hand-over, which is
                                 ; where it was: that point is mid-animation with the raster split
@@ -10383,7 +10334,7 @@ mfRnd:${FALLTAIL && process.env.FTDBG ? '  jsr fallTail          ; FTDBG: build 
 rayCont:jmp subLp               ; resume a capped cast: everything it needs is still in RAM
 rayAll:
 ` : ''}
-${PROFILE && !PROFILE1 ? '        ldx #0\n        jsr pfTick              ; input\n' : ''}
+${PROFILE && !PROFILE1 ? '        jsr pfT0              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
         ; ---- adaptive subdivision: march only at connected-wall-run boundaries ----
         ; cstepT is filled by the subdivision itself now (see subFace), so it has to start
@@ -10404,7 +10355,7 @@ sHyCp:  lda sHyC,x              ;   tick and the "lda py+1" below both reload it
         sta sHyPN
         lda #$00
         sta sHyN` : ''}` : ''}
-${PROFILE && !PROFILE1 ? '        ldx #1\n        jsr pfTick              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
+${PROFILE && !PROFILE1 ? '        jsr pfT1              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
 ${MULW}
         clc
         adc px+1
@@ -10443,12 +10394,12 @@ ${RAYCNT ? '        sta rayN\n        sta edgN\n        sta chnN\n' : ''}${EDGCH
 ${PIVOT ? `        jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
                                 ; and leaves the stack holding the spans between them
 ` : `        sta col
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 0
-${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        jsr pfT2\n' : ''}        jsr marchCol            ; column 0
+${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #${NLOG - 1}
         sta col
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol            ; column 159
-${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+${PROFILE && !PROFILE1 ? '        jsr pfT2\n' : ''}        jsr marchCol            ; column 159
+${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         lda #$00
         sta stackLT
         lda #${NLOG - 1}
@@ -10718,8 +10669,8 @@ ${MARCHCNT ? `${PROFILE ? '        lda pfDone\n        bne mcM1\n' : ''}        
         bne mcM1
         inc mcMid+1
 mcM1:
-` : ''}${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
+` : ''}${PROFILE && !PROFILE1 ? '        jsr pfT2\n' : ''}        jsr marchCol
+${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}${DOUBLE === 'marchCol' ? '        jsr marchCol\n' : ''}
         ldx sp
         lda spanL
         sta stackLT,x
@@ -10742,8 +10693,7 @@ ${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + heigh
         ; end is not an approximation -- it is the right answer, and it is cheaper, because
         ; span setup happens once per face instead of once per interval.
 subDn:${PROFILE && !PROFILE1 ? `
-        ldx #2
-        jsr pfTick              ; closes subLp's span-stack machine before the sort` : ''}
+        jsr pfT2                ; closes subLp's span-stack machine before the sort` : ''}
         lda #$00                ; the first face always starts at column 0
         sta spanL
         sta bcur
@@ -10793,7 +10743,7 @@ subInN: inx
         bcc subInL
         lda bswp
         bne subIns
-${PROFSUB ? '        ldx #7\n        jsr pfTick              ; the delimiter bubble sort\n' : ''}subEmt: ldx bcur
+${PROFSUB ? '        jsr pfT7              ; the delimiter bubble sort\n' : ''}subEmt: ldx bcur
         lda bndT,x
         sec
         sbc #$01
@@ -10815,8 +10765,8 @@ subFlush:                       ; interpolate + seam one maximal face
         lda spanR
         cmp spanL
         bcc subFDn              ; empty
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick\n' : ''}        jsr interpSpan
-${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        ldx #8\n        jsr pfTick              ; interpSpan\n' : ''}${SEAMS && SEAMPANEL ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        ldx #9\n        jsr pfTick              ; seamSpan\n' : ''}subFDn: rts
+${PROFILE && !PROFILE1 ? '        jsr pfT2\n' : ''}        jsr interpSpan
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        jsr pfT8              ; interpSpan\n' : ''}${SEAMS && SEAMPANEL ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        jsr pfT9              ; seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
         cpx #${hx(NBND)}
@@ -10929,11 +10879,11 @@ pvMDn:
         ; tick layout the code no longer had.
         lda #$00
         sta col
-${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        lda #${NLOG - 1}
+${PROFSUB ? '        jsr pfT14\n' : ''}        jsr marchCol
+${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}        lda #${NLOG - 1}
         sta col
-${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}
+${PROFSUB ? '        jsr pfT14\n' : ''}        jsr marchCol
+${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}
         lda #$00
         sta sp
         sta pvLast
@@ -10950,8 +10900,8 @@ mcH1:
         beq pivEnd
         dex
         stx pvI
-${PROFSUB ? '        ldx #14\n        jsr pfTick\n        ldx pvI\n' : ''}        jsr pivOne              ; A = where hint X is predicted to be now
-${PROFSUB ? '        pha                     ; pfTick clobbers A, and A is the predicted column\n        ldx #13\n        jsr pfTick              ; pivOne: the per-hint prediction arithmetic\n        pla\n' : ''}        cmp pvLast
+${PROFSUB ? '        jsr pfT14\n        ldx pvI\n' : ''}        jsr pivOne              ; A = where hint X is predicted to be now
+${PROFSUB ? '        pha                     ; pfTick clobbers A, and A is the predicted column\n        jsr pfT13              ; pivOne: the per-hint prediction arithmetic\n        pla\n' : ''}        cmp pvLast
         beq pivNx               ; predictions must come out strictly increasing, or the spans
         bcc pivNx               ; would overlap and the stack would describe nonsense. Rotation
         cmp #${hx(NLOG - 1)}    ; is monotonic but the per-boundary translation term is not, so
@@ -10978,8 +10928,8 @@ ${MARCHCNT ? `${PROFILE ? '        lda pfDone\n        bne mcP1\n' : ''}        
         bne mcP1
         inc mcPiv+1
 mcP1:
-` : ''}${PROFSUB ? '        ldx #14\n        jsr pfTick\n' : ''}        jsr marchCol
-${PROFSUB ? '        ldx #12\n        jsr pfTick              ; ray: hit + height + marchCol stores\n' : ''}        pla
+` : ''}${PROFSUB ? '        jsr pfT14\n' : ''}        jsr marchCol
+${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}        pla
 pivPush:ldx sp
         pha
         lda pvLast
@@ -11192,7 +11142,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '' + (ENTPROF ? '        ldx #8\n        jsr pfTick              ; orbOccAll: every entity mask, every frame\n' : '') + (ANYFLOORDK ? `        jsr lvlSpr              ; the level's SHARED sprite inks, beside the projection
+${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '' + (ENTPROF ? '        jsr pfT8              ; orbOccAll: every entity mask, every frame\n' : '') + (ANYFLOORDK ? `        jsr lvlSpr              ; the level's SHARED sprite inks, beside the projection
                                 ;   that decides what osFlush will write. The two have to land on
                                 ;   the SAME frame or the cast recolours in two steps: the bodies
                                 ;   follow the projection, so the shared pair has to as well.
@@ -11200,7 +11150,7 @@ ${PROFILE && !PROFILE1 ? '        ldx #2\n        jsr pfTick              ; cast
                                 ;   reaches it -- and this must not run during one, or the idol in
                                 ;   your hands changes colour mid-descent. This half of the loop
                                 ;   is the half a fall skips, which is exactly the property wanted.
-` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        ldx #9\n        jsr pfTick              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        ldx #10\n        jsr pfTick              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        ldx #11\n        jsr pfTick              ; bfsTick: the distance fill\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        ldx #15\n        jsr pfTick              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
+` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
         bne dnSkip
         lda iterLo
         cmp #${hx(+process.env.DROPNOW & 255)}
@@ -11211,13 +11161,13 @@ dnGo:   jsr orbUse              ; DROPNOW=n: a synthetic SPACE on frame n and ag
 dnSkip:                         ;   headless run can TAKE and then PUT DOWN. One press only ever
                                 ;   exercised the pick-up half, which is why the drop path could
                                 ;   carry a 16-wide coordinate mask for as long as it did.
-` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        ldx #4\n        jsr pfTick              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        ldx #16\n        jsr pfTick              ; occStamp: the partial-occlusion pass' : ''}
+` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        jsr pfT4              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr pfT16              ; occStamp: the partial-occlusion pass' : ''}
 ${ANGCHAR ? '        jsr angChar             ; AFTER renderSym and occStamp, for the same reason they are\n                                ;   ordered that way: it overwrites cells they just drew\n' : ''}${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the raster count, the LEVEL line and the 'L' key. Outside the
                                 ;   NOHUD gate: the key is a control, not a readout.
 ${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
 ${SNDTEST ? '        jsr drawSnd\n' : ''}`}
-${PROFILE && !PROFILE1 ? '        ldx #5\n        jsr pfTick              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
+${PROFILE && !PROFILE1 ? '        jsr pfT5              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
         bne pfRdy
 ${PROFAT ? `        lda pfArm               ; PROFAT=<tick>: the 256-frame window is FIXED AT 256 FRAMES FROM
         bne pfGo                ;   THE START, so at ~24fps it only ever saw the first ten seconds
@@ -12044,134 +11994,36 @@ dhJ:    lda colH,x
         rts
 ` : ''}
 ; ================= ESDF keyboard =================
-${SPIN ? `; ---- spinStep: rotate one unit a frame, and hop between viewpoints ----
-; pa doubles as the frame counter for fps.sh, so the rotation has to stay exactly one unit a
-; frame. Every full rotation the player is teleported to the next preset, so a benchmark run
-; averages over several parts of the map instead of measuring one spot forever. The hop is
-; frame-locked, not time-locked, so two builds at different frame rates still visit the same
-; places in the same order and stay comparable.
+${SPIN ? `
+; spinStep -- A PLAYER'S TURN, and nothing else.
+; This used to add one unit of pa a FRAME and, on the wrap, TELEPORT to the next of four
+; preset viewpoints. Both were wrong. A player covers 192 units of the 16-bit angle per
+; TICK, so the old rate was frame-locked (a faster build span faster, and two builds never
+; saw the same sequence) and about a third of a real turn, and it never moved paF at all,
+; so paq = (pa:paF) >> 6 only ever took every fourth value -- all of which flatters the
+; cast, because the subdivision is seeded from last frame's boundaries and a gentler turn
+; churns fewer of them.
+; The teleport was worse: the presets were authored for a level 1 that no longer exists,
+; so two were inside walls and one was off the bottom of an eleven-row map. Nobody had
+; seen it because at the old rate a run never completed a revolution, so the hop never
+; fired. Correcting the turn made it fire, and the viewpoint landed inside geometry.
+; A benchmark move is one pose and one control held down. The pose is the caller's
+; (PX/PY/PA/PAF); this only turns.
 spinStep:
-        inc pa
-        bne spinDn              ; spinDn, because the two shorter names are both taken: ssDn by
-        ldx spinIx              ;   seamSpan, and spDn by spLvl's sprite-ink path. This label was
-                                ;   renamed ssDn -> spDn once already and landed on the second
-                                ;   owner, so SPIN=1 has not built since spLvl appeared. Both
-                                ;   collisions were caught by the duplicate-label guard, which is
-                                ;   the only reason a branch into the wrong routine never shipped.
-        inx
-        cpx #${SPINPOS.length}
-        bcc ssIx
-        ldx #$00
-ssIx:   stx spinIx
-        lda spinXL,x
-        sta px
-        lda spinXH,x
-        sta px+1
-        lda spinYL,x
-        sta py
-        lda spinYH,x
-        sta py+1
+        ldx dtv
+        beq spinDn
+spTick: lda paF
+        clc
+        adc #$c0                ; 192 = TN_WALK, the rate readKeys turns at
+        sta paF
+        lda pa
+        adc #$00
+        sta pa
+        dex
+        bne spTick
 spinDn: rts
-${false ? `
-; tourStep: turn AND translate. Drives px/py DIRECTLY rather than calling moveFwd, because
-; moveFwd stops dead at a wall and a benchmark that quietly stops moving still prints a
-; confident number. The first cut of this used moveFwd and read 7 rays/frame for every config
-; including plain bisection -- the player had wedged in a corner and most frames were a blank
-; wall at arm's length. A test that cannot fail loudly is worse than no test.
-;
-; +-0.25 cells on both axes around the spin viewpoint, reversing every 8 frames. The viewpoints
-; are cell centres, so 0.25 stays 0.25 clear of the wall against a collision box of 0.102 -- no
-; collision test is needed and the motion therefore cannot stop. 8/256 a frame at ~20 fps is
-; 0.63 cells/s against a player's 0.94, so the deltas are the right order of magnitude.
-tourStep:
-        jsr spinStep            ; rotation, and the viewpoint hop on a full turn
-        inc tourC
-        lda tourC
-        and #$08                ; 8 frames one way, 8 the other
-        beq tourF
-        lda px
-        sec
-        sbc #$08
-        sta px
-        lda px+1
-        sbc #$00
-        sta px+1
-        lda py
-        sec
-        sbc #$08
-        sta py
-        lda py+1
-        sbc #$00
-        sta py+1
-        rts
-tourF:  rts
-` : ''}` : ''}
-${TOUR ? `
-; ---- tourStep: rotate AND translate, at a FIXED viewpoint ----
-; The benchmark motion that actually exercises the temporal pivot. Rotation alone (SPIN) leaves
-; the prediction's translation term -- two multiplies, the signs, the reciprocal, the 24-bit
-; product -- running on zero every frame, which is how it went untested into a commit.
-;
-; One angle unit a frame and a 16-frame position cycle, so 256 frames is exactly one rotation
-; and 16 whole oscillations. Every 256-frame window is therefore IDENTICAL in composition no
-; matter how fast the build runs, which is what makes two configs comparable. No viewpoint hop,
-; for the same reason -- see the TOUR comment above for how that went the first time.
-;
-; px/py are driven directly rather than through moveFwd: moveFwd stops at a wall, and a
-; benchmark that silently stops moving still prints a confident number. +-0.25 cells around a
-; cell centre clears the 0.102 collision box, so it cannot stop.
-tourStep:
-        ; TOURSTOP: move for 512 frames, then FREEZE. That is what makes the run cache
-        ; testable. A pinned viewpoint never changes rb or rs, so the equality test always
-        ; hits and the shrink/grow skips never execute -- the six views would pass with those
-        ; paths completely broken. Moving first exercises them; freezing afterwards makes the
-        ; result scoreable, because a stale row left behind by a wrong skip is never redrawn
-        ; once nothing is changing, so it sits there until the screenshot catches it.
-        ; 512 is a whole number of rotations (1 angle unit a frame) and of the 16-frame
-        ; oscillation, so the frozen viewpoint is exactly PX/PY/PA again.
-        lda tourF+1
-        cmp #$02
-        bcs tourDn
-        inc tourF
-        bne tsNc
-        inc tourF+1
-tsNc:   inc pa
-        inc tourC
-        lda tourC
-        and #$08                ; 8 frames out, 8 back: period 16, net displacement zero
-        bne tourBk
-        lda px
-        clc
-        adc #$08
-        sta px
-        lda px+1
-        adc #$00
-        sta px+1
-        lda py
-        clc
-        adc #$08
-        sta py
-        lda py+1
-        adc #$00
-        sta py+1
-        rts
-tourDn: rts
-tourBk: lda px
-        sec
-        sbc #$08
-        sta px
-        lda px+1
-        sbc #$00
-        sta px+1
-        lda py
-        sec
-        sbc #$08
-        sta py
-        lda py+1
-        sbc #$00
-        sta py+1
-        rts
-` : ''}; ---- tickDelta: how much time has passed, in 60ths ----
+` : ''}
+; ---- tickDelta: how much time has passed, in 60ths ----
 ; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
 ; down an empty corridor, slowest where the geometry is dense, which is exactly backwards.
 ; frameCnt is bumped by the top-of-frame raster IRQ, so it counts 60ths of a second no matter
@@ -12199,7 +12051,7 @@ tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
 
 ${PALKEYS ? `; ---- palKeys: 1 / 2 / 3 cycle the ceiling, wall and seam inks ----
 
-; Purely for looking at. In mloop rather than readKeys so it works in the SPIN and TOUR builds
+; Purely for looking at. In mloop rather than readKeys so it works in the auto-mover builds
 ; too, which never call readKeys. ~30 cycles a frame; PALKEYS=0 removes it for benchmarking.
 ;
 ; Matrix rows: '1' and '2' are both row $7f (bits 0 and 3), '3' is row $fd bit 0. The three are
@@ -12359,13 +12211,7 @@ rkTlR2: dex
         sty pa
 rkJD:   rts
 
-${WIGGLE ? `wiggleStep:
-        lda iterLo              ; alternate frames: forward, back, forward, back...
-        and #$01
-        bne wgBack
-        jmp moveFwd
-wgBack: jmp moveBack
-` : ''}moveFwd:
+moveFwd:
         ldx pa
         lda moveXT,x
         sta dxv
@@ -12459,7 +12305,7 @@ maLp:   clc
         ; floor remainder in two's complement, so one AND per axis and next frame's accumulation
         ; starts from it. Sum of steps then equals the floor of the sum however the frame times
         ; and the heading wander, forward and back are exact inverses again (r returns to what
-        ; it was -- verify with WIGGLE=1), and no facing is slow.
+        ; it was), and no facing is slow.
         lda dxs
         and #${hx((1 << MOVE_SHIFT) - 1)}
         sta rxF
@@ -13259,7 +13105,7 @@ faDn:` : `        tax
         sta ddy
         lda ddyHiT,x
         sta ddyH`}
-${PROFSUB ? '        ldx #3\n        jsr pfTick              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
+${PROFSUB ? '        jsr pfT3              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
         sta cell                ; The value is the player's cell, so it is the same for every
                                 ; ray in the frame -- computed once in mloop, not 11 times.
         ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
@@ -13491,7 +13337,7 @@ cySx:   lda ddyH
         bne cydone
         sta sdy
         sta sdyH
-cydone:${PROFSUB ? '\n        ldx #10\n        jsr pfTick              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
+cydone:${PROFSUB ? '\n        jsr pfT10              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
         ldy lvlDimT+3           ; the step guard must span the MAP: a ray crosses at most
                                 ;   W + H cell boundaries before it leaves the grid. At a fixed 24
                                 ;   a long sightline expires early, cfar sets pp = 1, and the
@@ -13584,7 +13430,7 @@ cwallY: stx cell
         sta remH
         ; No cos correction here: it depends only on the column, so it is baked into the
         ; per-column height tables (see hTabT). This used to be a whole sideMul per ray.
-cidx:${PROFSUB ? '\n        ldx #11\n        jsr pfTick              ; ray: the DDA loop (after the label: jmp cidx skips it)' : ''}
+cidx:${PROFSUB ? '\n        jsr pfT11              ; ray: the DDA loop (after the label: jmp cidx skips it)' : ''}
         lda remH
         cmp #24
         bcc cidxok
@@ -21432,12 +21278,7 @@ sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, 
                                 ;   than taken. Up and bright is what acknowledgement sounds like.
 ` : ''}
 ${!FALLSCENE ? '' : (() => { const P = fRowPack(); return `fNT:    !byte ${P.N.join(',')}
-`; })()}${SPIN ? `spinIx: !byte 0
-spinXL: !byte ${SPINPOS.map(p => Math.round(p[0]*256) & 255).join(',')}
-spinXH: !byte ${SPINPOS.map(p => Math.round(p[0]*256) >> 8).join(',')}
-spinYL: !byte ${SPINPOS.map(p => Math.round(p[1]*256) & 255).join(',')}
-spinYH: !byte ${SPINPOS.map(p => Math.round(p[1]*256) >> 8).join(',')}` : ''}
-${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
+`; })()}${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
 ; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
 ; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
 ; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
@@ -23872,7 +23713,31 @@ psCol:  lda pfRow               ; byte offset = row*3 + 1 (skip the low byte: /2
 ; line, then read it again -- if it moved, the two halves came from different frames and
 ; the pair is meaningless. Costs ~60 cycles, 8 times a frame: 0.8%, and it lands in the
 ; phase being measured, so subtract ~60 lines/256 frames per phase if you care.
-pfTick: lda pfDone
+; ---- THE REGISTER-SAFE SHELL ----
+; pfTick clobbered A, X and Y with no save, and every call site was an ldx #n before the jsr, which
+; destroyed X before the call even happened. These sit BETWEEN the routines of the main loop --
+; orbMove, orbKey, bfsTick, angStep, dieChk -- so anything one routine handed the next in a
+; register was lost, and only in a profiled build. The user found it as an angel walking through
+; an orb that seals the only corridor into the first room: a profiled build was not playing the
+; same game, which makes every number it reports a number about a different program.
+; One stub per bucket, so a call site is a bare jsr and the bucket number arrives in memory.
+${[...Array(17)].map((_, i) => `pfT${i}:${i < 10 ? ' ' : ''}  pha
+        lda #${hx(i)}
+        jmp pfTEnt`).join('\n')}
+pfTEnt: sta pfWant
+        txa
+        pha
+        tya
+        pha
+        jsr pfTBody
+        pla
+        tay
+        pla
+        tax
+        pla
+        rts
+
+pfTBody:lda pfDone
         bne pfOff
         lda frameCnt
         sta pfCurF
@@ -23885,7 +23750,7 @@ pfTick: lda pfDone
         sta pfCurH
         lda frameCnt
         cmp pfCurF
-        bne pfTick
+        bne pfTBody             ; re-read: back into the BODY, not the shell, which would push again
         sec                     ; delta = (f - pf)*263 + (l - pl), l a full 9 bits.
         lda pfCurL              ; One unbroken borrow chain: nothing may touch the carry
         sbc pfPrvL              ; between these two subtracts.
@@ -23944,7 +23809,8 @@ pmH2:
         sta pfPrvL
         lda pfCurH
         sta pfPrvH
-        stx pfCurX              ; X = phase -> byte offset X*3
+        ldx pfWant              ; the phase, from the stub -- NOT from X, which the histogram
+        stx pfCurX              ;   above may have taken. X = phase -> byte offset X*3
         txa
         asl
         clc
@@ -24391,7 +24257,6 @@ const SIZES_T = {
     opx: 2, opy: 2,
     osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
     rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
-    tourF: 2,                        // TOUR: frames elapsed, for the 512-frame freeze
   };
 writeFileSync('./iray.aligned.json', JSON.stringify(ALIGNED_T));
 writeFileSync('./iray.bufsizes.json', JSON.stringify(Object.fromEntries(
