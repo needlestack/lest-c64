@@ -3739,8 +3739,26 @@ const SNAP_ROWS = 13;
 // was entitled to put a table in them, to be wiped on the first fall. Same shape as the MAPN
 // tails: the declared length described the DATA, not the domain the writer actually reaches.
 // (fallSnapD really is 1000 -- bgCopy fills it row by row, 25 rows of 40.)
+// ---- THE PROFILER'S STATE IS DECLARED, not placed (2026-09-30) ----
+// It used to be fifteen hardcoded equates from $7e00, and compaction -- which rebuilds the image
+// from the runs and buffers it is TOLD about -- dropped every one of them. The result was the
+// worst kind of failure: PROFILE=1 built cleanly, printed "DIAGNOSTIC BUILD [PROFILE]", and
+// contained no profiler at all. Four separate attempts to measure this engine died on it, and
+// the only way back was COMPACT=0, which no longer assembles.
+// Declared here, the relayout places them like anything else and they cannot vanish.
+// Same lesson as hTabT, bfsD0/bfsD1, fallSnapS and the compactor's align guess: a requirement
+// stated as a fixed address is a requirement the build cannot honour.
+const PROF_BUFS = {
+  pfAcc: 17 * 3,   // 17 phases, 24-bit raster-line accumulators
+  pfPrvF: 2, pfPrvL: 2, pfCurF: 1, pfCurL: 1, pfCurH: 1, pfPrvH: 1,
+  pfTmp: 1, pfTmp2: 1, pfN: 1, pfCurX: 1, pfDLo: 1, pfDHi: 1,
+  pfRow: 1, pfArm: 1, pfDone: 1,
+};
 const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
+// Only when the profiler is built: on an ordinary build these names do not exist and a size
+// declared for them would reserve space for nothing.
+if (PROFILE) Object.assign(RUNTIME_BUFS, PROF_BUFS);
 // ---- what a RAM equate actually reserves ----
 // PAGE-ROUNDING IS THE SAFE DEFAULT and stays the default: an equate with no declared length
 // could be a 256-byte table as easily as a byte, and under-reserving one is how a level shadow
@@ -24371,7 +24389,7 @@ if (COMPACT) {
   // The inner build is GONE: both maps it existed to produce are published above, before any
   // assembly. It assembled the hand layout, which is what compaction replaces -- and what fails
   // first when the engine grows.
-  execFileSync(process.execPath, ['./compact.mjs'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  execFileSync(process.execPath, ['./compact.mjs', asmPath], { stdio: ['ignore', 'inherit', 'inherit'] });
   asm = readFileSync('./iray.compact.asm', 'utf8');
   writeFileSync(asmPath, asm);          // so everything downstream reads the layout that ships
 }

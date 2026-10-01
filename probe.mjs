@@ -117,6 +117,28 @@ for (const n of [...names, LIVE]) {
 if (!existsSync(DISK)) { console.error('no latest.d64'); process.exit(1); }
 
 // ---- run it, never touching an emulator that was already open ----
+// ---- REFUSE TO START IF THE MONITOR PORT IS TAKEN ----
+// A leaked emulator from an interrupted run keeps 6502 bound. VICE then prints
+//   vice_network_server(): bind() failed: Address already in use
+// into its own log, starts anyway WITHOUT a monitor, and this script attaches to nothing and
+// grinds for the full 90-second liveness deadline before reporting "NOT RUNNING" -- which reads
+// exactly like a jammed program and has sent more than one debugging session chasing a bug in
+// the build. The port is the whole protocol, so not having it is fatal, not a warning.
+{
+  // Wait a moment first: a probe that has just finished may still be tearing its emulator down,
+  // and the port lingers for a beat after the process is told to go. Only a port still held after
+  // that is a leak rather than a handover.
+  const portHeld = () => execSync('lsof -nP -iTCP:6502 -sTCP:LISTEN -t 2>/dev/null || true').toString().trim();
+  let held = portHeld();
+  for (let i = 0; held && i < 10; i++) { execSync('sleep 0.5'); held = portHeld(); }
+  if (held) {
+    const pids = held.split('\n').join(' ');
+    console.error(`port 6502 is already bound (pid ${pids}) -- a leaked emulator from an earlier ` +
+      `run.\nVICE would start without a monitor and this would wait 90s for a machine it can ` +
+      `never see.\nkill it first:   kill ${pids}`);
+    process.exit(2);
+  }
+}
 const before = new Set(execSync('pgrep -f x64sc || true').toString().split('\n').filter(Boolean));
 // A PRIVATE monitor port, not the default 6502. Another x64sc holding 6502 -- the user's own
 // window, or a leaked run of this script -- makes the new instance's bind() fail while the client

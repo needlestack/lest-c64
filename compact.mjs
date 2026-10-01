@@ -16,7 +16,15 @@
 import { readFileSync, writeFileSync } from 'fs';
 import { assemble } from '/Users/jfield/c64fps/asm6502.mjs';
 
-const SRC = '/Users/jfield/c64fps/iray.asm';
+// The source is the file the BUILD JUST WROTE, handed over as argv[2] -- not a fixed name.
+// Hardcoding iray.asm meant that on a DIAGNOSTIC build, which writes iray.diag.asm so it cannot
+// clobber the tracked reference copy, compaction read the PREVIOUS non-diagnostic build's
+// assembly and the disk was built from that. Every DIAG flag -- PROFILE, ROUTE, PX/PY/PA --
+// therefore shipped a program that was not the one it had just generated. It is why the profiler
+// appeared to vanish, why two ROUTE builds with and without entities measured identically (they
+// were the same stale image), and why the build prints "not for fps numbers" on a DIAG build --
+// a symptom someone recorded without finding the cause.
+const SRC = process.argv[2] || '/Users/jfield/c64fps/iray.asm';
 const OUT = '/Users/jfield/c64fps/iray.compact.asm';
 const ORG = 0x0801, CEIL = 0xc000;
 
