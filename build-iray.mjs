@@ -5794,7 +5794,14 @@ const HOLECULL = process.env.HOLECULL !== "0";
 // grew SPARSE past 64, and `join` renders a hole as an empty field, so holeSeeT emitted
 // "!byte ...,,..." -- 81 fields with 2 empty, every byte after the gap shifted, and the socket's
 // visibility bitmap silently wrong. It assembled cleanly the whole time.
-const holeSee = new Array(NHOLE * 32).fill(0);   // NHOLE, not this level's own count: swapped
+// ---- SIZED TO THIS LEVEL, not to the chain's widest (2026-09-30) ----
+// It was NHOLE * 32 -- a 32-byte visibility bitmap per hole-like entity, padded to the most
+// any resident level has. Measured over levels 1-7 the padding is 192 bytes on level 1, 128
+// on most of the others: 416 bytes across a four-level set, for rows no loop ever reaches.
+// Natural sizing only works for a table at the END of the manifest, where a varying length
+// shifts nothing after it -- see where this is pushed. Its BASE is still fixed (everything
+// before it is budget-sized), which it has to be: two instructions name it directly.
+const holeSee = new Array(Math.max(1, HOLELIKE.length) * 32).fill(0);
 const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
 if (!HOLECULL) holeSee.fill(255);
 for (let cell = 0; cell < MAPN; cell++) {
@@ -8243,7 +8250,6 @@ const LVL_TABLES = [
   //   ['runWT', runW], ['runET', runE], ['runNT', runN], ['runST', runS],
   //   ['runPlaneT', ...], ['runFaceT', ...], ['runByteT', ...], ['runBitT', ...],
   //   (runPlaneT/runFaceT for the hazard SPLIT ids come from hazSpT below -- see mkRuns)
-  ['holeSeeT', holeSee],
   // THE LEVEL'S SHAPE. Padded to 32 rows: a level 8 wide can be 32 tall.
   ['rowMulT', pad([...Array(MAPH)].map((_, y) => y * MAPW), 32)],
   ['bfsDCT', [1, 255, MAPW, (256 - MAPW) & 255]],   // the four orthogonal steps as cell deltas
@@ -8517,6 +8523,13 @@ const SLOT_SUB = { nOrbT: ['nOrbT', 'nHoleT', 'nExitT', 'nOrbM1T', 'nSockT', 'nA
 // the level's own identity, so leaving it in the image would leave the image knowing which level
 // it was built for -- exactly the privilege SOLO exists to remove.
 if (SOLO) LVL_TABLES.push(['lvlMeT', [LVL]]);
+// ---- THE VARIABLE-LENGTH TAIL ----
+// Everything above is budget-sized, so its offset into the blob is identical for every level
+// and the engine names it with a fixed equate. holeSeeT is sized to the level instead, which
+// is only safe LAST: a table whose length varies moves everything after it, and there is
+// nothing after it. Its own base stays fixed, which two `lda holeSeeT,x` sites require.
+// Anything added later goes BEFORE this line unless it is pointer-reached and variable too.
+LVL_TABLES.push(['holeSeeT', holeSee]);
 const SLOT_OFF = {};
 let SLOT_LEN = 0;
 for (const [n, a] of LVL_TABLES) {
@@ -8747,8 +8760,22 @@ if (WALL_DELTAS && !PACK_PROBE && PACKED.size && !process.env.LVLDUMP && !proces
 // the disk. The live slot is page-aligned because mapT sits at its offset 0; the shadows are only
 // ever parked bytes, so they need no alignment of their own.
 // Not SOLO: the old layout, live tables in the image and shadows from LVLSHADOW.
+// ---- WHICH TABLES ARE SIZED TO THE LEVEL rather than to the chain's widest ----
+// Only tables at the END of the manifest may be in here: a varying length moves everything
+// after it, and the engine names the rest with fixed equates. lvlBlocks must not pad these
+// (that is what would hand the saving straight back), so it reads this set too.
+const LVL_VARLEN = new Set(['holeSeeT']);
+// This level's blob, and any other level's. The fixed part is identical for all of them by
+// construction; only the tail differs, so a level's length is the live one's with its own tail
+// swapped in. The MAX is what the slot region has to be big enough for.
 const LVLBLOB = LVL_TABLES.reduce((n, [, a]) => n + a.length, 0);
-const SHADOW_BASE = SOLO ? SLOT_AT + LVLBLOB : LVLSHADOW;
+const blobOf = L => LVL_TABLES.reduce((n, [k, a]) =>
+  n + (LVL_VARLEN.has(k) ? (L.tables?.[k]?.length ?? a.length) : a.length), 0);
+const ALLBLOBS = [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...LVLSIZED];
+const LVLBLOB_MAX = Math.max(...ALLBLOBS.map(blobOf));
+// LVLBLOB_MAX, not the LIVE level's blob: every level lands at SLOT_AT and the region has to
+// clear the LONGEST of them, which since holeSeeT went variable is not necessarily this one.
+const SHADOW_BASE = SOLO ? SLOT_AT + LVLBLOB_MAX : LVLSHADOW;
 // ---- A LEVEL'S WALL LISTS SIT BEHIND ITS OWN BLOB, and only its own ----
 // Every level file used to end with EVERY wall in the chain -- seven copies of the same 547
 // bytes, because the pointer tables lived in the image and had to name one address whichever
@@ -8761,20 +8788,24 @@ let SOLO_WALL_LEN = 0;
 // .length, not truthiness: WALL_DELTAS is [] in a build that compiles the mechanic but has no
 // deltas to lay out (a WALLOFF variant, whose own walls are already punched out of its map).
 if (SOLO && WALL_DELTAS.length) {
-  const BASE = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBLOB);
+  // Behind the level's OWN blob, which since holeSeeT went variable is no longer the same
+  // length for every level. The pointer tables are per-level (see wallPtrs), so each level's
+  // walls can start wherever its blob ends -- no padding to a common length.
+  const baseOf = lv => SLOT_AT + (LVLLOAD ? blobOf(ALLBLOBS.find(L => L.level === lv) ?? {})
+                                          : LVLBLOB_MAX * (LVLALL ?? []).length + LVLBLOB_MAX);
   // LVLLOAD: one slot, one level in it at a time, so every level's walls start at the same
   // address and the region is as long as the WORST level's -- not the sum. Without it (all
   // levels resident at once) they must not overlap, so they run on from each other.
-  let at = BASE;
+  let at = 0;
   for (const lv of WALL_LVLS) {
-    if (LVLLOAD) at = BASE;
+    if (LVLLOAD || !at) at = baseOf(lv);
     for (const [k, w] of WALLS_ALL.entries()) {
       if (w.lvl !== lv) continue;
       const d = WALL_DELTAS[k], dN = d.quad.length * 4 + 1;
       SOLO_WALL_AT[k] = { d: at, c: at + dN };
       at += dN + d.cells.length + 1;
     }
-    SOLO_WALL_LEN = Math.max(SOLO_WALL_LEN, at - BASE);
+    SOLO_WALL_LEN = Math.max(SOLO_WALL_LEN, at - baseOf(lv));
   }
 }
 // ---- wallPtrs: fill each level's four pointer tables with ITS OWN walls ----
@@ -8814,7 +8845,7 @@ wallPtrs();
 // The whole level region: live slot, the shadows behind it, then the chain's wall lists. Checked
 // HERE because the wall lists are only sized now, and against the TOP OF THE BANK rather than a
 // slot size -- there is no fixed slot count any more, the region is as long as the chain is.
-const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBLOB) + SOLO_WALL_LEN;
+const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBLOB_MAX) + SOLO_WALL_LEN;
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
@@ -8825,7 +8856,9 @@ if (SOLO && SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
   `SOLO: ${CHAIN.length} levels need $${SLOT_AT.toString(16)}-$${LVLREGION_END.toString(16)} ` +
   `(${LVLBLOB} bytes each + ${SOLO_WALL_LEN} of wall lists) and bank 3 ends at $fff9. ` +
   `Fewer resident levels, or the region moves into the image's arena.`);
-if (SOLO) console.error(`level region: ${LVLBLOB} bytes of tables + ${SOLO_WALL_LEN} of wall ` +
+if (SOLO) console.error(`level region: ${LVLBLOB_MAX} bytes of tables (live ${LVLBLOB}, saved `
+  + `${ALLBLOBS.reduce((t, L) => t + LVLBLOB_MAX - blobOf(L), 0)} across ${ALLBLOBS.length} levels by `
+  + `natural sizing) + ${SOLO_WALL_LEN} of wall ` +
   `lists = ${LVLREGION_END - SLOT_AT} per slot, ${Math.ceil((LVLREGION_END - SLOT_AT) / 256)} pages` +
   (LVLLOAD ? `; ${CHAIN.length} level file(s), one live slot` : `; ${CHAIN.length} resident`));
 // ---- THE FLAG IS THE ENGINE'S; THE DELTAS ARE THE LEVELS' ----
@@ -24400,7 +24433,10 @@ try {
   const lvlBlocks = list => list.flatMap(L => LVL_TABLES.flatMap(([n, a, sh]) => {
     const raw = (sh instanceof Map ? sh.get(L.level) : sh) ?? L.tables[n] ?? [];
     const flat = raw.flatMap(v => typeof v === 'string' && v.includes(',') ? v.split(',') : [v]);
-    return pad(flat, a.length).map(lvlResolve);
+    // A variable-length table keeps ITS OWN length -- padding it to the live level's would
+    // hand back exactly the bytes natural sizing just saved. Safe only because these are
+    // last in the manifest; see LVL_VARLEN.
+    return (LVL_VARLEN.has(n) ? flat : pad(flat, a.length)).map(lvlResolve);
   }));
   // ...and the late levels' wall lists, in the order LATEWALL_AT laid them out. Each is the quad
   // delta then the cell list, both $ff-terminated, exactly as the image emits a resident one.
@@ -24524,9 +24560,12 @@ try {
            ...WALL_DELTAS[k].cells, 0xff]);
       const body = LVLLOAD ? lvlBlocks([L])
                            : lvlBlocks([L, ...(LVLALL ?? [])]);
-      if (LVLLOAD && body.length !== LVLBLOB) throw new Error(
-        `SOLO: level ${n}'s blob is ${body.length} bytes but the slot layout says ${LVLBLOB} -- ` +
-        `every level's file has to be the same length, since they share one landing address`);
+      // Blobs no longer have to MATCH -- holeSeeT is sized to its level (see LVL_VARLEN), so a
+      // file is as long as its own room needs. What still has to hold is that none overflows the
+      // region the slot reserves, since they all land at the same address.
+      if (LVLLOAD && body.length > LVLBLOB_MAX) throw new Error(
+        `SOLO: level ${n}'s blob is ${body.length} bytes and the slot reserves ${LVLBLOB_MAX} -- ` +
+        `the region is sized to the longest level, so this one was measured wrong`);
       const data = body.concat(walls);
       // ---- THE POINTERS MUST NAME BYTES THIS FILE ACTUALLY CARRIES ----
       // Checks the MEANING of the decoupling, not that wallPtrs ran: a level may only name its
@@ -24539,9 +24578,12 @@ try {
         const clo = body[SLOT_OFF.wallCLoT + j], chi = body[SLOT_OFF.wallCHiT + j];
         for (const [what, a] of [['delta', lo | (hi << 8)], ['cells', clo | (chi << 8)]]) {
           if (!a) continue;                     // 0 = an id this level does not use
-          if (a < SLOT_AT + LVLBLOB || a >= SLOT_AT + data.length) throw new Error(
+          // body.length, not LVLBLOB: a level's walls start where ITS OWN blob ends, and blobs
+          // differ now that holeSeeT is sized to the level. Against the live level's length the
+          // range came out inverted and every other level looked out of bounds.
+          if (a < SLOT_AT + body.length || a >= SLOT_AT + data.length) throw new Error(
             `level ${n}'s wall ${j} ${what} list is at $${a.toString(16)}, outside the bytes ILV${n} ` +
-            `carries ($${(SLOT_AT + LVLBLOB).toString(16)}-$${(SLOT_AT + data.length - 1).toString(16)}). ` +
+            `carries ($${(SLOT_AT + body.length).toString(16)}-$${(SLOT_AT + data.length - 1).toString(16)}). ` +
             `A level may only point at its own wall data -- see wallPtrs.`);
         }
       }
