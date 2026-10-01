@@ -3606,7 +3606,6 @@ if (!ENTCONE) DIAG.push('ENTCONE=0');
 // |right| > forward * 3/4, so atan(3/4) is the angle it is already verified safe at (FOVCHK, 3/4
 // vs the 5/8 first cut that dropped 4 real sprites). Rejecting at the true 116/184 = 0.63 would
 // be sound in theory and is not worth being clever about: two extra units of margin on top.
-const CONE_HALF = Math.ceil(Math.atan(0.75) / (2 * Math.PI) * 256) + 2;   // 29
 // The bearing of a cell delta, folded to the FIRST QUADRANT: 8x8 at stride 8 = 64 bytes, both
 // magnitudes in 0..7. The quadrant comes back from the two signs at runtime for ~12 cycles, which
 // is far cheaper than the 1KB a signed table would need. Deltas beyond 7 are HALVED until they
@@ -3649,14 +3648,6 @@ const coneSlack = c => {
   }
   return m;
 };
-const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
-  if (c < 2) return 127;               // adjacent: no cell-level bearing means anything (bypassed)
-  const sh = coneShift(c);
-  const quant = sh ? Math.atan(0.707 * (1 << sh) / c) / (2 * Math.PI) * 256 : 0;
-  // +1 for the rounding in the sampling and in the table itself.
-  // <= 127 so that 2*tol still fits a byte -- the range test is (b - pa + tol) >= 2*tol.
-  return Math.min(127, CONE_HALF + Math.ceil(coneSlack(c) + quant) + 1);
-});
 // CONECHK=1: verify it, the way FOVCHK verifies ENTFOV. The cone only NOTES that it would have
 // rejected; the full path still runs. coneBad = the cone said no and the entity got a SPRITE, and
 // it must be 0. coneDis = orbProj disagreed but the box tests threw it out anyway, which is
@@ -8269,6 +8260,40 @@ if (HOLE.L.some(g => g.grid.some(row => row.some(v => v === 1))))
   throw new Error('the exit hole has rim pixels: it must be a single ink, see makeHoleLadder');
 const holeSlotT = HOLE.slotT, holeHT = HOLE.hT, holeVarT = HOLE.varT;
 const holeXOffT = HOLE.xOffT, holeYBaseT = HOLE.yBaseT, holeFlagT = HOLE.flagT;
+
+// ---- ENTCONE's half-cone is ENTFOV's bound, and it has to be ----
+// The question "should the cone be narrower for an orb, whose sprite is far smaller than its cell"
+// is a good one and the answer is no, for a reason that has nothing to do with sprite width: the
+// cone is the FIRST of two tests, and orbProj's ENTFOV is the second. ENTFOV rejects when
+// |right| > forward * 3/4 for EVERY entity, so anything this cone passes beyond atan(3/4) is
+// thrown out a moment later regardless -- a narrower cone here could only reject what ENTFOV would
+// have rejected anyway, and a WIDER one would buy nothing. Derive it from ENTFOV's own constant so
+// the two cannot drift apart.
+//
+// Measured on the way to that conclusion, and worth recording because the figures are not where
+// the source says they are. F_COL is 122.9 (FOV=47, 80/tan(47/2 of a turn)), NOT the 184 in
+// ENTFOV's comment -- so "116/184 = 0.63" there is arithmetic on a wrong scale. The real bounds:
+//   orb / angel   half-width 12 logical columns (max of orbHalfCT)  ->  (80+12)/122.9 = 0.749
+//   hole-like     half-width 36 (max of holeXOffT)                  ->  (80+36)/122.9 = 0.944
+// So ENTFOV's 3/4 is almost exactly the ORB's true bound, and it is TIGHTER than a hole-like's.
+// That is a latent risk in ENTFOV, not here: a hole whose near field really reached 36 columns at
+// the screen edge could be dropped by it. FOVCHK found zero instances over two walkthroughs, and
+// its own comment already says not to tighten it without a route that shows a hole at the edge --
+// so it is unexercised rather than disproved. Left alone deliberately; this cone is not the place.
+const ENTFOV_BOUND = 0.75;                       // orbProj's own test, the binding constraint
+const CONE_HALF = Math.ceil(Math.atan(ENTFOV_BOUND) / (2 * Math.PI) * 256) + 2;   // 29
+const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
+  if (c < 2) return 127;               // adjacent: no cell-level bearing means anything (bypassed)
+  const sh = coneShift(c);
+  const quant = sh ? Math.atan(0.707 * (1 << sh) / c) / (2 * Math.PI) * 256 : 0;
+  // +1 for the rounding in the sampling and in the table itself.
+  // <= 127 so that 2*tol still fits a byte -- the range test is (b - pa + tol) >= 2*tol.
+  return Math.min(127, CONE_HALF + Math.ceil(coneSlack(c) + quant) + 1);
+});
+if (ENTCONE) console.error(`  cone: half ${CONE_HALF} (ENTFOV's atan(${ENTFOV_BOUND})); true bounds ` +
+  `orb ${((NLOG / 2 + Math.max(...orbHalfCT)) / F_COL).toFixed(3)} ` +
+  `hole ${((NLOG / 2 + Math.max(...holeXOffT)) / F_COL).toFixed(3)}; ` +
+  `tol at cheb 2 = ${CONE_TOL[2]}, at 7 = ${CONE_TOL[7]}, at 27 = ${CONE_TOL[27]}`);
 const holeHOf = HOLE.hOf;
 if (process.env.HOLEDUMP === '1') {
   console.error(`  hole ladder: r=${HOLER} (${(2 * HOLER).toFixed(2)} cells across), ` +
