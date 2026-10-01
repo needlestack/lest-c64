@@ -4387,7 +4387,12 @@ const DIE      = process.env.DIE !== '0' && process.env.SNDTEST !== '1';
 // counted the pass with SEAMCNT instead of timing it.
 // DIE=0 is the right fix rather than a new address for the profiler: a build being profiled has
 // no use for a cut scene, and the two pages of code it frees are the only two anywhere near.
-if (PROFILE && DIE) throw new Error(
+// OBSOLETE UNDER COMPACTION, and left here only as a comment: the profiler has no fixed
+// address any more. Its code and its buffers are placed by the relayout like everything
+// else -- pfAcc lands at $5c00 on a CHAIN=1 build, nowhere near $bc00 -- so there is no page
+// to contend for and no reason to demand DIE=0. Enforcing it made PROFILE depend on a flag
+// that does not itself boot, which is why the profiler looked broken when it was not.
+if (false && PROFILE && DIE) throw new Error(
   'PROFILE=1 needs DIE=0: the profiler is at $bc00 (RELOC+$3600) and the relocated dieChk/dieGo ' +
   'group claims the same page. Add DIE=0 -- a profiled build has no use for the cut scene.');
 // ---- the cut scene's pictures ----
@@ -10237,6 +10242,15 @@ ${PROFILE ? `        ldx #$32                ; the profile accumulators live in 
 pfInit: sta pfAcc,x             ;   old count left the top THREE bytes (bucket 16, occStamp) holding
         dex                     ;   whatever was there. It only ever read as a wild outlier.
         bpl pfInit
+        sta pfN                 ; ---- AND THE SCALARS, which this never used to touch ----
+        sta pfDone              ; They lived at $7e4c, in a page that happened to be zero, so
+        sta pfArm               ;   starting them was free. Declared as buffers and placed by the
+        sta pfRow               ;   relayout they begin as whatever is there -- and pfN came up
+                                ;   $ff, so the inc wrapped on the FIRST frame, the run declared
+                                ;   itself finished after one, printed its hex over the game's own
+                                ;   charset (which reads as colour noise) and halted. The main
+                                ;   loop never ran, which is what "PROFILE builds do not boot"
+                                ;   actually was.
 ${PROFN ? `        ldx #$21                ; ...and the tick counts, same uninitialised scratch
 pfNIni: sta pfNum,x
         dex
