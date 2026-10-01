@@ -8128,9 +8128,25 @@ const orbOccFlat = orbOcc.flat();
 // the shadow's extra masks. The pad is never read: every loop stops at the live count.
 
 const NOCC = NORB + NHOLE;                       // every entity orbOne can be asked about
+// ---- the occluder masks are a RUNTIME buffer, not level data ----
+// They used to be a constant emitted at $7000 and, under SOLO, a LVL_TABLES entry as well:
+// 108 bytes shipped in every level file to an address no instruction names. orbOccAll
+// rebuilds every mask against the live run numbering and orbOcc1 clears each one before
+// filling it, so nothing ever read what the level carried. Declared as a sized buffer here
+// so the relayout places it and the overlap guards cover it -- it was an unreserved hole
+// that orbOcc1 wrote through, which had simply not been landed on yet.
+// It stays EMITTED (see the !byte below) rather than becoming a RAM equate: the assembler then
+// reserves it and relocation moves it with everything else, which is what the <orbOccT+n pointers
+// need. Its contents are irrelevant -- orbOcc1 clears each mask before building it.
 while (orbOccFlat.length < NOCC * OCCBYTES) orbOccFlat.push(0);   // see the note above orbOccFlat
-const orbOccLo = [...Array(NOCC)].map((_, i) => (OCCBASE + i * OCCBYTES) & 255);
-const orbOccHi = [...Array(NOCC)].map((_, i) => (OCCBASE + i * OCCBYTES) >> 8);
+// ---- EXPRESSIONS, not numbers baked from OCCBASE ----
+// These were (ORB_OCC + i*OCCBYTES) split into bytes, which pinned the masks to $7000 for ever.
+// orbOccT is a relocatable buffer now, so let the assembler say where it is: lvlResolve
+// understands '<name+n' and the image's own !byte does too. Get this wrong and orbOcc1 clears,
+// builds and reads its masks at an address nothing owns -- silently, because every mask it reads
+// back is one it just wrote.
+const orbOccLo = [...Array(NOCC)].map((_, i) => `<orbOccT+${i * OCCBYTES}`);
+const orbOccHi = [...Array(NOCC)].map((_, i) => `>orbOccT+${i * OCCBYTES}`);
 // Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
 // coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
 // solve needs into another one. 1024 bytes, all above VIC bank 0.
@@ -8344,7 +8360,6 @@ const LVL_TABLES = [
              HOLES_AT.length + SOCKETS_AT.length]],
   ['lvlStartT', startBytes(LVL)],   // px lo/hi, py lo/hi, pa, paF -- see startBytes
   ['orbOccLoT', orbOccLo],
-  ['orbOccT', process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat],
 ];
 // PED_WALL is an IMMEDIATE in pedGate, so nothing at runtime can notice it drifting from the
 // table the same fact lives in. Check the MEANING: every pedestal on the pedestal level must
