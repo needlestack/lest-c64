@@ -10344,6 +10344,11 @@ pfNIni: sta pfNum,x
         sta cnV
 ` : ''}${CULLCNT && ENTCONE ? `        sta culCone
         sta culCone+1
+` : ''}${CULLCNT && CONEGATE ? `        ldx #${hx(NOCC * 2 - 1)}
+ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass counts start clean
+        dex
+        bpl ogCk0
+        lda #$00
 ` : ''}${MARCHCNT ? `        sta mcPiv
         sta mcPiv+1
         sta mcMid
@@ -19276,7 +19281,8 @@ ${LD('orbY0T', LVLT('orbY0T').join(','), ': !byte ')}
 orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
 ${CONEGATE ? `; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
 ; orbSeenT, so the hole-likes' indices -- which share oidx -- land inside it.
-cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}` : ''}
+cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}
+${CULLCNT ? `culOkT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: frames each entity PASSED the gate, 16-bit, free-running` : ''}` : ''}
 angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
@@ -22542,7 +22548,14 @@ ogETst: ldx cnI                 ; the cell delta, exactly as orbOne computes it
         ldx cnI
         sta cnOkT,x
         sta cnAny
-        jmp ogENx
+${CULLCNT ? `        txa                     ; CULLCNT: how often THIS entity survived the gate, 16-bit.
+        asl                     ;   One number per object rather than one for the level: a rate of
+        tax                     ;   85% says nothing about WHICH object is never culled, and on a
+        inc culOkT,x            ;   level with an orb parked in the corridor you are always facing
+        bne ogEC1               ;   that is the whole story.
+        inc culOkT+1,x
+ogEC1:
+` : ''}        jmp ogENx
 ogENo:  ldx cnI
         lda #$00
         sta cnOkT,x

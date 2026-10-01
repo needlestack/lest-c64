@@ -34,6 +34,11 @@ const envStr = args.shift();
 // 8000 measured safe with room to spare; the liveness loop below is the real safety net and it
 // now has its own deadline rather than a multiple of this one, so lowering this cannot shorten
 // the recovery window. --wait N overrides it if a slower machine ever needs it.
+const waitGiven = args.includes('--wait');
+// How long to let the program RUN before a bare read -- not how long to wait for it to start.
+// 4s of warp is a few hundred to a few thousand frames, which is what a free-running counter needs
+// to mean anything. --wait N overrides it and also restores the old sleep-then-connect behaviour.
+const RUNFOR = 4000;
 const wantWait = +((args.find(a => a === '--wait') ? args[args.indexOf('--wait') + 1] : 0)) || 8000;
 const LIVE_DEADLINE = 90000;    // how long to keep polling for signs of life, independent of the above
 // --at A[,B]: read when frameCnt first reaches tick A, and again at B. ABSOLUTE ticks since the
@@ -114,6 +119,10 @@ for (const n of [...names, LIVE]) {
   if (!m) { console.error(`LABEL NOT FOUND: ${n} -- it does not exist in this configuration.`); process.exit(1); }
   addr[n] = parseInt(m[1], 16);
 }
+// Every label's FINAL address, written by compact.mjs after the assembly that ships. Used to set
+// an execution checkpoint by name; absent (an older build) it simply falls back to the old wait.
+let SYMS = {};
+try { SYMS = JSON.parse(readFileSync('./iray.syms.json', 'utf8')); } catch { /* optional */ }
 if (!existsSync(DISK)) { console.error('no latest.d64'); process.exit(1); }
 
 // ---- run it, never touching an emulator that was already open ----
@@ -164,17 +173,18 @@ const LOG = `/tmp/probe-vice-${process.pid}.log`;
 // in the first moments of the run. These used to turn warp off along with --at, which made a
 // trap on anything minutes into a session unusable, and that is a limit of this script and not
 // of VICE. Pair a trap with --until if the interesting event is early.
-// --at turns WARP OFF. Under warp the client cannot connect until thousands of game ticks have
-// already passed -- an early checkpoint is simply unreachable, and `waitFor` returns instantly on
-// a condition that was true before it was asked. Real time makes a tick a tick. It costs about a
-// second of wall clock per 60 ticks, which is the price of hitting a specific moment.
+// --at turns WARP OFF, but not until the program is RUNNING. Under warp a 50ms poll overshoots an
+// exact tick by hundreds, so the window itself needs real time -- about a second of wall clock per
+// 60 ticks. What it does NOT need is for the disk load to happen in real time too, which is what
+// launching without warp used to cost: ~25 of the 46 seconds a segment took. The mloop checkpoint
+// stops the machine at frame 1, so warp covers the load and real time starts at the window.
 // -config: a PRIVATE, empty settings file. Without it VICE reads the user's vicerc, and if that
 // enables the binary monitor the socket is already bound by whatever they have open -- every run
 // then dies on "bind() failed: Address already in use" no matter which port this picks, because
 // the address in the config wins. It also keeps every other resource this run needs off whatever
 // they last left set, which is the same trap the drive flags are in.
 const CFG = `/tmp/probe-vice-${process.pid}.vrc`;
-execSync(`${VICE} ${marks.length ? '' : '-warp '}-ntsc -config ${CFG} -drive8truedrive +virtualdev8 -autostart-handle-tde +minimized -jamaction 1 ` +
+execSync(`${VICE} -warp -ntsc -config ${CFG} -drive8truedrive +virtualdev8 -autostart-handle-tde +minimized -jamaction 1 ` +
   `-binarymonitor -binarymonitoraddress ip4://127.0.0.1:${PORT} ` +
   `-autostart ${DISK} >${LOG} 2>&1 &`);
 const stop = () => {
@@ -216,7 +226,16 @@ sock.on('error', e => {
 // Dial only after --wait, never during the load. Each monitor command stops the CPU until the
 // resume lands, so polling through a 219-block true-drive load slows it to a crawl and the program
 // never comes up -- which looks exactly like a build that will not start.
-setTimeout(dial, trap ? 1500 : wantWait);   // a trap must be armed before the program runs: dial at once
+// ---- DIAL EARLY AND ARM A CHECKPOINT, rather than sleeping and hoping ----
+// The 8-second wait was HALF the wall clock of a probe run (16.2s total: 3.9 build, 8.0 asleep,
+// ~4 working) and it was a guess in both directions -- too long on this machine, too short on a
+// slower one, which is why it used to be 45. What it protects against is POLLING through the load:
+// every monitor command stops the CPU, and stopping mid-transfer while true drive emulation clocks
+// bits down the serial bus can leave the machine executing the stack page.
+// A checkpoint does not poll. One command arms it, then the hit arrives on the socket BY ITSELF --
+// zero monitor traffic while the load runs -- and "mloop was reached" is the honest condition that
+// a sleep was standing in for. --wait N still forces the old behaviour if a machine ever needs it.
+setTimeout(dial, (trap || !waitGiven) ? 1500 : wantWait);
 let buf = Buffer.alloc(0); const pend = new Map(); let rid = 1, cpHit = false;
 sock.on('data', d => {
   buf = Buffer.concat([buf, d]);
@@ -311,6 +330,23 @@ const cpSet = (lo, hi, op = 4) => new Promise((res, rej) => {   // op: 1 load, 2
   pend.set(id, (err, body) => err ? rej(new Error(`checkpoint set failed: ${err}`)) : res(body.readUInt32LE(0)));
   sock.write(Buffer.concat([h, b]));
 });
+// MON_CMD_RESOURCE_SET. Lets warp be turned OFF once the program is up, which is what makes --at
+// affordable: the LOAD no longer has to happen in real time.
+const resSet = (name, val) => new Promise(res => {
+  const id = rid++, nb = Buffer.from(name, 'ascii'), vb = Buffer.from([val & 255]);
+  const b = Buffer.concat([Buffer.from([0x01, nb.length]), nb, Buffer.from([vb.length]), vb]);
+  const h = Buffer.alloc(11);
+  h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(b.length, 2); h.writeUInt32LE(id, 6); h[10] = 0x32;
+  pend.set(id, () => res());
+  sock.write(Buffer.concat([h, b]));
+});
+const cpDel = n => new Promise(res => {                          // MON_CMD_CHECKPOINT_DELETE
+  const id = rid++, b = Buffer.alloc(4); b.writeUInt32LE(n, 0);
+  const h = Buffer.alloc(11);
+  h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(4, 2); h.writeUInt32LE(id, 6); h[10] = 0x13;
+  pend.set(id, () => res());
+  sock.write(Buffer.concat([h, b]));
+});
 // A checkpoint hit arrives as an UNSOLICITED response (request id $ffffffff, type 0x11 with
 // hit=1, or a STOPPED event 0x62). We watch for it by polling PC: while the CPU runs, PC moves;
 // once the checkpoint stops it, PC holds inside the trap range. The monitor's own stop is the
@@ -359,6 +395,35 @@ sock.on('connect', async () => {
     // lands mid-load. Give up only after the deadline, and say what the screen shows when we do.
     const live = async () => { const m = await memGet(addr[LIVE], 2); return m[0] + 256 * m[1]; };
     let a = 0, b = 0, alive = false;
+    // The main loop was REACHED -- which is what the sleep above was a proxy for, and strictly
+    // better: it proves the load finished AND that the renderer is running, in one event, as fast
+    // as the machine can get there. iray.syms.json is written by compact.mjs, so the address is
+    // the one that ships rather than build-iray's pre-relayout guess.
+    if (!waitGiven && SYMS.mloop) {
+      const cp = await cpSet(SYMS.mloop, SYMS.mloop);
+      await resume();
+      for (const t0 = Date.now(); Date.now() - t0 < LIVE_DEADLINE && !cpHit; )
+        await new Promise(r => setTimeout(r, 25));
+      if (cpHit) {
+        alive = true; cpHit = false; await cpDel(cp);
+        // ---- WARP OFF ONLY NOW, AND ONLY FOR --at ----
+        // --at reads at an exact tick, and at warp a 50ms poll overshoots by hundreds of them, so
+        // it needs real time. It used to get that by launching WITHOUT warp -- which also made the
+        // 219-block true-drive load happen in real time, ~25 seconds of the 46 a segment took.
+        // The checkpoint stops the machine at frame 1, so the load can run at warp and real time
+        // can start where it is actually needed. --until and bare reads keep warp throughout.
+        if (marks.length) await resSet('WarpMode', 0);
+        await resume();
+        // ---- THE WAIT WAS DOING TWO JOBS. Separate them. ----
+        // It let the LOAD finish (the checkpoint does that exactly, and faster) and it let the
+        // program RUN long enough to have produced something (which the checkpoint does not do at
+        // all -- it fires on frame 1). A read with no --at, --until or --watch has no stopping
+        // condition of its own, so it still needs a run period, and free-running counters like
+        // CULLCNT's are meaningless without one: without this a bare read came back at iterLo 5.
+        // --at and --until express their own window, so they get none of this and keep the saving.
+        if (!marks.length && !until && !watch) await new Promise(r => setTimeout(r, RUNFOR));
+      } else console.error('  (the mloop checkpoint never fired -- falling back to the liveness poll)');
+    }
     for (const t = Date.now(); Date.now() - t < LIVE_DEADLINE && !alive; ) {
       a = await live();
       await resume();

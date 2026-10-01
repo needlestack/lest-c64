@@ -282,6 +282,13 @@ console.log(`  ARENA         $${codeEnd.toString(16)}-$${(dataStart - 1).toStrin
             `${dataStart - codeEnd} bytes = ${K(dataStart - codeEnd)}`);
 console.log(`  assembled: org $${out.org.toString(16)} end $${out.end.toString(16)}`);
 
+// ---- EVERY LABEL'S FINAL ADDRESS, for the tools ----
+// Written HERE, not by build-iray.mjs, because this is the assembly that ships: the relayout moves
+// code, so build-iray's own label table is pre-compaction and wrong by thousands of bytes.
+// probe.mjs needs it to set an EXECUTION checkpoint on a routine by name, which is what lets it
+// wait for "mloop was reached" instead of sleeping eight seconds and hoping the load finished.
+writeFileSync('./iray.syms.json', JSON.stringify(out.labels));
+
 // ---- 5. what would still have to move: RAM equates that used to live in the old holes ----
 // A buffer declared as `name = $xxxx` is not emitted, so compaction cannot see it. Any that now
 // fall inside the code or table sections have to be rehomed -- into the arena, or above the
