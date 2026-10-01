@@ -3641,6 +3641,14 @@ const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
 // eye and hard to attribute -- so it gets a counter, not a playtest.
 const CONECHK = flag('CONECHK');
 if (CONECHK && !ENTCONE) throw new Error('CONECHK=1 verifies ENTCONE, which is off');
+// CONEGATE: run cnTest for every entity in entGate instead of in orbOne, keep the verdicts in
+// cnOkT, and let the gate SHUT when nothing is in the cone -- which is what finally skips omTrig.
+// CONEGATE=0 restores the per-entity test inside orbOne and the old "does an orb exist" gate, so
+// the two can be compared as the only difference between two builds.
+// Off under CONECHK: that harness verifies the cone against orbProj entity by entity inside
+// orbOne, which is where the comparison has to happen.
+const CONEGATE = ENTCONE && ENTGATE && !CONECHK && process.env.CONEGATE !== '0';
+if (ENTCONE && ENTGATE && !CONECHK && !CONEGATE) DIAG.push('CONEGATE=0');
 // BNDCNT=1: per frame, boundaries pinned by the subdivision and how many of them are shared
 // corners (both faces at the same height at the boundary: the second end ray is redundant).
 const BNDCNT = flag('BNDCNT');
@@ -9531,6 +9539,10 @@ cnT     = $ab                    ;   ...then its distance's tolerance, then twic
                                  ;   for every entity every frame, where oax/oay below are only
                                  ;   reached by the ones it lets through.
 ${CONECHK ? `cnV     = $ac                    ; CONECHK: the verdict, held instead of acted on
+` : ''}${CONEGATE ? `cnI     = $ad                    ; CONEGATE: entGate's entity index, its end, whether ANY
+cnEnd   = $ae                    ;   entity passed, and which bit of the LOS row the player's cell
+cnAny   = $af                    ;   is. All four die with the gate; none outlives a frame.
+cnBit   = $b0
 ` : ''}` : ''}
 ocos    = $8500
 ocosS   = $8501
@@ -15116,20 +15128,11 @@ ohOk:   lda o1
         rts
 opjNo:  clc
         rts
-orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rate is this against\n        bne oc1                ;   iterLo, which removes every question about where in the\n        inc culTot+1           ;   frame the per-frame reset lands\noc1:   ' : ''} ldx oidx
-        sec                     ; Ix, Iy = orb cell - player cell, -15..15
-        lda orbXCT,x
-        sbc px+1
-        sta oix
-        sec
-        lda orbYCT,x
-        sbc py+1
-        sta oiy
-${ENTCONE ? `        ; ---- in the view cone at all? Decided from the GRID, with no multiply ----
-        ; ~45 cycles against the four oTerm products orbProj needs to reach the same verdict. The
-        ; magnitudes and signs it leaves behind are exactly orbProj's own prologue; it recomputes
-        ; them, which costs the 15% that get through about 30 cycles and keeps the two routines
-        ; independent of each other.
+${ENTCONE ? `; ---- cnTest: is the entity at (oix, oiy) in the view cone at all? ----
+; Carry SET = no. Reads oix/oiy and pa; writes cnB and cnT. ONE implementation, because entGate and
+; orbOne both ask, and a gate whose verdict could differ from the loop's would be worse than no
+; gate at all -- it would delete entities the loop meant to draw.
+cnTest:
         lda oix
         bpl cnXP
         eor #$ff
@@ -15146,7 +15149,7 @@ cnYP:   sta cnT                 ; |dy|
         bcs cnChb
         lda cnB
 cnChb:  cmp #$02                ; Chebyshev distance, and the tolerance index
-        bcc ${CONECHK ? 'cnNear' : 'cnYes'}               ; ADJACENT OR UNDER US: the cell centres are up to 45 degrees from
+        bcc cnNear               ; ADJACENT OR UNDER US: the cell centres are up to 45 degrees from
                                 ;   the true bearing here, so there is no tolerance that both
                                 ;   rejects anything and is safe. Let it through; it is one entity
                                 ;   and it is almost certainly on screen anyway.
@@ -15186,24 +15189,60 @@ cnQY:   lda coneTolT,y          ; Y still holds the UNSHIFTED distance
         adc cnT                 ; the standard range test: (b - pa + tol) >= 2*tol is outside
         asl cnT
         cmp cnT
+        lda coneTolT,y          ; (Y still holds the UNSHIFTED distance)
+        sta cnT
+        lda cnB
+        sec
+        sbc pa                  ; how far off the heading, as a signed 8-bit difference
+        clc
+        adc cnT                 ; the standard range test: (b - pa + tol) >= 2*tol is outside
+        asl cnT
+        cmp cnT
+        bcc cnOk
+${CULLCNT ? `        inc culCone             ; CULLCNT: rejected before any multiply ran
+        bne cnCn1
+        inc culCone+1
+cnCn1:
+` : ''}${CONECHK ? `        inc coneRej
+        bne cnCn2
+        inc coneRej+1
+cnCn2:
+` : ''}        sec
+        rts
+cnNear:                         ; adjacent or under us: no cell-level bearing means anything
+cnOk:   clc
+        rts
+` : ''}orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rate is this against\n        bne oc1                ;   iterLo, which removes every question about where in the\n        inc culTot+1           ;   frame the per-frame reset lands\noc1:   ' : ''} ldx oidx
+        sec                     ; Ix, Iy = orb cell - player cell, -15..15
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+${ENTCONE ? (CONEGATE ? `        ; ---- the cone's verdict, decided ONCE, in entGate ----
+        ; 8 cycles. entGate now runs the bearing test for every entity BEFORE omTrig, which is the
+        ; whole point: omTrig's ~800 cycles of frame trig used to run before anything asked whether
+        ; an entity would use them, and the gate could not answer because all it tested was whether
+        ; an un-hidden orb exists ANYWHERE on the level -- always yes, so it closed on zero frames
+        ; of a 4,630-frame run. The test is not new work here, it is the SAME work moved up.
+        lda ovProbe
+        bne cnYes               ; PROBING a hypothetical cell (angStep): the cached verdict is for
+                                ;   where the angel really IS, so it says nothing about where it is
+                                ;   thinking of going. Take the full path -- it runs at most once
+                                ;   per angel per two seconds, and a wrong "not visible" here is
+                                ;   exactly what would let one walk into the open.
+        ldx oidx
+        lda cnOkT,x
+        bne cnYes
+        jmp orbNo
+` : `        jsr cnTest              ; CONEGATE=0: the old arrangement, per entity, in here
         ${CONECHK ? `ldx #$00                ; CONECHK: note the verdict, do NOT act on it
         bcc cnKeep
         dex
-        inc coneRej
-        bne cnKeep
-        inc coneRej+1
-cnKeep: stx cnV
-        jmp cnYes
-cnNear: lda #$00                ; the near-field bypass lands here so cnV is CLEARED. Left stale it
-        sta cnV                 ;   held the LAST entity's verdict, which can only invent a failure
-                                ;   that did not happen -- but an instrument that can cry wolf is
-                                ;   worthless on the day it is quiet. Cycles do not matter here;
-                                ;   CONECHK is never a build anyone measures.` : CULLCNT ? `bcc cnYes
-        inc culCone             ; CULLCNT: rejected before any multiply ran
-        bne cnCn1
-        inc culCone+1
-cnCn1:  jmp orbNo` : 'bcs orbNo               ; outside the cone: nothing else needs computing'}
-cnYes:
+cnKeep: stx cnV` : 'bcs orbNo               ; outside the cone: nothing else needs computing'}
+`) + `cnYes:
 ` : ''}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
 ${ENT1PROF ? "        php                     ; ENT1PROF: orbProj itself. php/plp because pfTick does NOT\n        jsr pfT7                ;   preserve the carry, and the carry is orbProj's return value\n        plp\n" : ''}
 ${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
@@ -19235,6 +19274,9 @@ ${LD('orbY0T', LVLT('orbY0T').join(','), ': !byte ')}
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
 orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
+${CONEGATE ? `; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
+; orbSeenT, so the hole-likes' indices -- which share oidx -- land inside it.
+cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}` : ''}
 angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
@@ -22425,10 +22467,94 @@ ${ENTGATE ? `; ---- entGate: can ANY entity be projected this frame? Carry SET =
 ; and in any corridor with nothing in sight; a level with an orb placed always has something to
 ; project and takes the full path from the first test. Orbs have no LOS bitmap because they move.
 entGate:
-        lda carry
+${CONEGATE ? '' : `        lda carry
         ora sokAn
         bne ogYes
-        ldx nOrbT               ; any orb not hidden?
+`}${CONEGATE ? `        ; ---- ASK THE CONE, FOR EVERY ENTITY, ONCE ----
+        ; THE CARRY/sokAn TEST MOVED BELOW THE LOOP. It used to return "yes" before anything else
+        ; ran, which was free when the gate's only other job was a scan. Now the loop FILLS cnOkT
+        ; and orbOne reads it, so an early exit here would leave orbOne reading last frame's
+        ; verdicts -- entities appearing and vanishing by one frame of history, every time you
+        ; picked something up.
+        ; This gate's whole job is to spare omTrig's ~800 cycles of frame trig when nothing will
+        ; use them, and it could not do it: all it asked was whether an un-hidden orb exists
+        ; ANYWHERE on the level. On any level with an orb that is always yes, and CULLCNT measured
+        ; it closing on ZERO frames of a 4,630-frame run.
+        ; cnTest can answer it, and orbOne was already paying for it once per entity -- so it moves
+        ; up here, the verdicts go in cnOkT, and orbOne reads one byte. Same cycles spent on the
+        ; test; omTrig skipped whenever nothing is in front of you, which on the spin pose is 82%
+        ; of frames. One loop over the orbs and then the hole-likes, in holeOne's own order.
+        ; It does NOT early-out on the first entity that passes: every verdict has to be stored,
+        ; because orbOne reads all of them.
+        lda nHoleT
+        beq ogNoH               ; no hole-likes: the LOS row below is never indexed
+        lda py+1                ; the player's cell, for the LOS test
+${MULW}
+${ADDX('px+1')}
+        sta pcell
+        and #$07
+        sta cnBit               ; which bit of a 32-byte LOS row this cell is
+        lda pcell
+        lsr
+        lsr
+        lsr
+        sta rgtL                ; ...and which byte. rgtL is orbProj's, and orbProj has not run yet
+ogNoH:  clc
+        lda nOrbT
+        adc nHoleT
+        sta cnEnd
+        lda #$00
+        sta cnAny
+        sta cnI
+ogEnL:  lda cnI
+        cmp nOrbT
+        bcs ogEHol
+        ldx cnI                 ; ---- an orb or an angel ----
+        lda orbHidT,x
+        beq ogETst              ; in the world: ask the cone
+        bne ogENo               ; hidden: no verdict to give
+ogEHol: sec                     ; ---- a hole-like: its per-cell LOS bitmap first ----
+        sbc nOrbT               ; A = the hole index, as holeSeeT is keyed
+        asl
+        asl
+        asl
+        asl
+        asl                     ; x32 -- ceil(MAPN/8) per entity, whatever MAPW is
+        clc
+        adc rgtL
+        tax
+        ldy cnBit
+        lda holeSeeT,x
+        and orbBitT,y
+        beq ogENo               ; cannot be seen from this cell at all
+ogETst: ldx cnI                 ; the cell delta, exactly as orbOne computes it
+        sec
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+        jsr cnTest
+        bcs ogENo
+        lda #$ff
+        ldx cnI
+        sta cnOkT,x
+        sta cnAny
+        jmp ogENx
+ogENo:  ldx cnI
+        lda #$00
+        sta cnOkT,x
+ogENx:  inc cnI
+        lda cnI
+        cmp cnEnd
+        bcc ogEnL
+        lda cnAny
+        ora carry               ; ...and the two things that want a slot without being in the world
+        ora sokAn
+        bne ogYes
+` : `        ldx nOrbT               ; any orb not hidden?
         beq ogHole
 ogOrbL: lda orbHidT-1,x
         beq ogYes              ; one is in the world: project
@@ -22466,7 +22592,7 @@ ogHoLp: txa
 ogHoIn: inx                     ; exactly the set holeOne walks, in the same order
         cpx nHoleT
         bcc ogHoLp
-ogNone:
+`}ogNone:
 ${CULLCNT ? `${PROFILE ? '        lda pfDone              ; stop with the profiler, so frames and closures share a window\n        bne ogSk1\n' : ''}        inc ogSkip              ; CULLCNT: frames the gate closed
         bne ogSk1
         inc ogSkip+1
@@ -22478,7 +22604,18 @@ ogSk1:
         sta omPri
         sta omX8
         sta onv
-        sec
+${CONEGATE ? `        ; ---- AND NOTHING WAS SEEN ----
+        ; orbSeenT is "did this entity take a sprite slot last frame", which is the angels' whole
+        ; observation test. orbOne writes it, and when this gate shuts orbOne never runs -- so the
+        ; flags would keep LAST frame's values for as long as the gate stays shut. The old gate got
+        ; away with it by never shutting on a level with an orb; this one shuts constantly, and a
+        ; stale 1 here means an angel you have turned away from stays frozen for ever.
+        ldx #${hx(NOCC - 1)}
+ogSn:   sta orbSeenT,x
+        dex
+        bpl ogSn
+        lda #$00                ; (the loop left A alone, but say so rather than rely on it)
+` : ''}        sec
         rts
 ogYes:  clc
         rts
