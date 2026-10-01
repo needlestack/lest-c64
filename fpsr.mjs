@@ -51,7 +51,16 @@ const num = (out, n) => {
   const m = new RegExp(`^${n}\\s.*\\(16-bit: (-?\\d+)\\).*\\(delta (-?\\d+)\\)`, 'm').exec(out);
   return m ? { at0: +m[1], delta: +m[2] } : null;
 };
-console.log(`segment   fps     frames  ticks   travelled`);
+// ---- AND WHAT THE NUMBER CANNOT TELL YOU ----
+// fps here is an integer frame count over a fixed window, so its resolution is ONE FRAME: at 11
+// fps over 300 ticks that is 57 frames, and +-1 of them is +-1.8%. A 1% change -- which is what a
+// decent cull or a few hundred cycles looks like -- is INSIDE that, and reading it as a result is
+// how ENTCONE first looked like a 2.4% regression on walk and a 3.2% win on strafe in the same
+// pair of runs. The window cannot simply be lengthened: walk and strafe bump a wall at ~5s, which
+// is what the distance check guards. For anything smaller than the figure printed here, use
+// prof.mjs -- raster lines summed over 256 frames resolves ~0.09% -- and accept that it only
+// works on spin.
+console.log(`segment   fps     frames  ticks   +-1 frame   travelled`);
 for (const s of want) {
   const env = `CHAIN=1 ${s.env}${extra ? ' ' + extra : ''}`;
   let out;
@@ -72,5 +81,5 @@ for (const s of want) {
       (pct < 97 ? `  *** BUMPED at ${pct.toFixed(0)}% -- shorten the window or move the pose ***` : '');
   }
   console.log(`${s.name.padEnd(9)} ${fps.toFixed(2).padStart(6)}  ${String(it.delta).padStart(6)}  ` +
-              `${String(fc.delta).padStart(5)}   ${travel}`);
+              `${String(fc.delta).padStart(5)}   ${(100 / it.delta).toFixed(1).padStart(5)}%     ${travel}`);
 }

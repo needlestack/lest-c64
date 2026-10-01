@@ -279,18 +279,18 @@ cbA     = $5a50                 ; ... and the solid run start, or $ff for "alway
 cbB     = $5a78
 faceIdT = $5c00                 ; page-aligned: a column index must never need a 16-bit add
 cstepT  = $5aa0                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $56fc                ; PLAN=2: the bucket index the code came from, and which
-thsel   = $56fd                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
-paqL    = $53fc                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
-paqH    = $53fd
-rqL     = $53fe                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $56ff                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+bidx    = $53fc                ; PLAN=2: the bucket index the code came from, and which
+thsel   = $53fd                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+paqL    = $5dd0                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
+paqH    = $5dd1
+rqL     = $5dd2                 ; and this ray's 10-bit angle: rqL is the table index,
+rqH     = $5aff                 ; rqH (0..3) picks which quarter of the 1024-entry table.
                                 ; It was declared TWICE, at $cbf9 and here; the assembler takes
                                 ; the last, so $cbf9 was never the live one. Removed rather
                                 ; than left as a trap for the next reader.
-cqtmp   = $56fe                 ; the colour this cell needs, while both its rows are queued
-cmtmp   = $53fa                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
-cmv     = $53fb                 ; the ninth index bit -- the two columns the bucket throws away
+cqtmp   = $53fe                 ; the colour this cell needs, while both its rows are queued
+cmtmp   = $5dce                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $5dcf                 ; the ninth index bit -- the two columns the bucket throws away
 
 ; bfsLast and mulWY were the ONLY live equates on page $7c00 -- everything else there is the
 ; PROFMAX/SEAMPRE/SEAMCNT clusters, now gated above. The hole report reserves a whole PAGE per
@@ -399,6 +399,12 @@ ivL     = $97
 ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
 ohgt    = $9d
 ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
+cnB     = $aa                    ; ENTCONE: the cell delta's bearing, as the quadrant is applied
+cnT     = $ab                    ;   ...then its distance's tolerance, then twice it. ZERO PAGE
+                                 ;   because this is the hottest test in the entity pass -- it runs
+                                 ;   for every entity every frame, where oax/oay below are only
+                                 ;   reached by the ones it lets through.
+
 ocos    = $5f00
 ocosS   = $5f01
 osin    = $5f02
@@ -435,15 +441,15 @@ omYY    = $5f1d
 omPri   = $5f1e
 omX8    = $5f1f
 omBit   = $5f20
-melCnt  = $53a5                  ; 60ths left on this note, where we are in the figure, and the
-melIx   = $53a6                  ;   shimmer phase plus the waveform byte it selects
-melPh   = $53a7
-melWav  = $53a8
-skJoy   = $53a9                  ; SNDTEST: the live cutoff / pulse-width tweak keys
-skTmp   = $53aa
-skOld   = $53ab
-skNew   = $53ae
-skEdge  = $53af
+melCnt  = $5938                  ; 60ths left on this note, where we are in the figure, and the
+melIx   = $5939                  ;   shimmer phase plus the waveform byte it selects
+melPh   = $593a
+melWav  = $593b
+skJoy   = $593c                  ; SNDTEST: the live cutoff / pulse-width tweak keys
+skTmp   = $593d
+skOld   = $593e
+skNew   = $5941
+skEdge  = $5942
 marked  = $5dc0                  ; 0, or the index+1 of the angel that stepped up beside you
 dieSt   = $5dc1                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
 dieCnt  = $5dc2
@@ -481,18 +487,18 @@ ovOcc   = $5f52                  ;   ... and columns a span HIDES
 ovSpR   = $5f54                  ; the span's right edge, kept for the overlap width
 ovTmp   = $5f55
 ovSvS   = $5f56                  ; orbSeenT saved across a probe -- orbNo writes it
-sdL     = $53ba                  ; STAMPDBG: the cell range the last stamped span covered, and
-sdR     = $53bb                  ;   how many spans were stamped this frame. Recorded by the
-sdN     = $53bc                  ;   stamp ITSELF, so it can be read at a single breakpoint --
-sdEnt   = $53bd                  ;   watchpoints shift raster timing and this engine notices.
+sdL     = $594d                  ; STAMPDBG: the cell range the last stamped span covered, and
+sdR     = $594e                  ;   how many spans were stamped this frame. Recorded by the
+sdN     = $594f                  ;   stamp ITSELF, so it can be read at a single breakpoint --
+sdEnt   = $5950                  ;   watchpoints shift raster timing and this engine notices.
 markPa  = $5f53                  ; heading when the angel cornered you: the turn trigger's origin
-sndMode = $53b0                  ; index into sndModeT: low / band / high / notch
-sndVol  = $53b1
-sndFc   = $53ac
-sndPw   = $53ad
-sndD    = $53a2                  ; nearest angel, in cells; and the scratch the search needs
-sndI    = $53a3
-sndT    = $53a4
+sndMode = $5943                  ; index into sndModeT: low / band / high / notch
+sndVol  = $5944
+sndFc   = $593f
+sndPw   = $5940
+sndD    = $5935                  ; nearest angel, in cells; and the scratch the search needs
+sndI    = $5936
+sndT    = $5937
 
 omMc    = $5f0e
 amIdx   = $5af6                  ; angel movement scratch: entity, chosen step, target cell
@@ -513,20 +519,20 @@ odY     = $5af3
 odD     = $5af4
 apC     = $5f57                  ; anPath: the angel's cell, and the distance it is looking for
 apD     = $5f58
-bfsPhase = $53cb                 ; the incremental distance fill: 0 idle, 1 clearing, 2 expanding
-bfsCl   = $53cc                  ;   clear cursor, the cell each map is FOR, the queue ends,
-bfsFor  = $53cd                  ;   the cell being expanded and its distance+1, and the
-bfsDone = $53ce                  ;   per-frame expansion counter
-bfsWant = $53cf
-bfsHead = $53d0
-bfsTail = $53d1
+bfsPhase = $595e                 ; the incremental distance fill: 0 idle, 1 clearing, 2 expanding
+bfsCl   = $595f                  ;   clear cursor, the cell each map is FOR, the queue ends,
+bfsFor  = $5960                  ;   the cell being expanded and its distance+1, and the
+bfsDone = $5961                  ;   per-frame expansion counter
+bfsWant = $5962
+bfsHead = $5963
+bfsTail = $5964
 bfsC    = $5f59
 bfsND   = $5f5a
 bfsN    = $5f5b
-hlFill  = $53be                  ; the fill ink of the hole-like entity being projected
-hlKind  = $53bf                  ; which ladder holeTail is currently patched for
-hoI     = $53c0                  ; holeOne's loop: which hole-like entity, and its
-hoOf    = $53c1                  ;   LOS bitmap offset (index x 32)
+hlFill  = $5951                  ; the fill ink of the hole-like entity being projected
+hlKind  = $5952                  ; which ladder holeTail is currently patched for
+hoI     = $5953                  ; holeOne's loop: which hole-like entity, and its
+hoOf    = $5954                  ;   LOS bitmap offset (index x 32)
 ooCX    = $5f11                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $5dc8                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $5f16                  ; buffered $d01c. STALE: the held object was a hi-res icon once;
@@ -584,7 +590,20 @@ fallSnapD = $5400                ; the destination room, snapshotted before the 
 fallSnapS = $5700                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
-fallSt  = $5aff                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing
+fallSt  = $5bfe                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
+                                 ; CLEARED AT ENTRY -- see fsZero. It used to be initialised by
+                                 ; nothing at all, which was free only while it sat in a page that
+                                 ; happened to come up zero. The relayout rehomed it ($5aff in the
+                                 ; shipping build) and the main loop's first "lda fallSt / beq" then
+                                 ; read whatever the decruncher left: non-zero means the FIRST frame
+                                 ; of the game calls fallStep, which animates a drop out of
+                                 ; uninitialised snapshot buffers. The user saw it as "the benchmark
+                                 ; sometimes starts with a corrupt looking hole fall", and
+                                 ; "sometimes" is the tell -- which byte lands there depends on the
+                                 ; build, so it comes and goes with unrelated flags.
+                                 ; EXACTLY the pfN bug (see pfInit), second instance. The rule it
+                                 ; teaches: a variable's initialisation is not free because its page
+                                 ; is zero today, and a layout tool is allowed to move it.
 fdN     = $5ca0
 ohP     = $5f21                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohT     = $5f0f
@@ -685,25 +704,25 @@ oax     = $5dac
 oay     = $5dad
 oixS    = $5dae
 oiyS    = $5daf
-ocl2    = $5375                 ; the bounding box in COLUMNS, not cells
-ocmax   = $5376
-obCL    = $537a                 ; per sprite slot, for the second pass: cell range and
-obCR    = $5382                 ; bounding-box edge masks, so pass 2 need not reproject
-obBL    = $538a
-obBR    = $5392
-obIX    = $539a
-obV     = $53b2                 ; size variant per slot, so orbSeam can find the sprite's
-obOcc   = $53c2                 ; per slot: bit 7 = this orb has a possible occluder here
+ocl2    = $5908                 ; the bounding box in COLUMNS, not cells
+ocmax   = $5909
+obCL    = $590d                 ; per sprite slot, for the second pass: cell range and
+obCR    = $5915                 ; bounding-box edge masks, so pass 2 need not reproject
+obBL    = $591d
+obBR    = $5925
+obIX    = $592d
+obV     = $5945                 ; size variant per slot, so orbSeam can find the sprite's
+obOcc   = $5955                 ; per slot: bit 7 = this orb has a possible occluder here
 obL     = $5db0                 ; per slot: the orb's TIGHT column range, which the cell range
 obR     = $5db8                 ;   cannot give -- a cell is 4 columns and a box starts inside one
-osI     = $53d6                 ; occStamp: slot being stamped, and how many there are
-osN     = $53d7
-osL     = $53d8                 ; the span/box intersection being stamped
-osR     = $53d9
-osRow   = $53da                 ; char row range
-osRowB  = $53db
-ohFst   = $5377                 ; the stamp's two edge glyphs, chosen once per span
-ohLst   = $5378
+osI     = $5969                 ; occStamp: slot being stamped, and how many there are
+osN     = $596a
+osL     = $596b                 ; the span/box intersection being stamped
+osR     = $596c
+osRow   = $596d                 ; char row range
+osRowB  = $596e
+ohFst   = $590a                 ; the stamp's two edge glyphs, chosen once per span
+ohLst   = $590b
 ohFstW  = $5f23                 ; the same two edge glyphs backed by white
 ohLstW  = $5f24
 ohFstM  = $5f25                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
@@ -722,15 +741,15 @@ ohMsX   = $5f28
 o2r     = $5f29                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
                                 ;   Not zero page: it is touched a handful of times per orb, in
                                 ;   the projection, never in a per-column loop.
-osDC    = $53dd                 ; occStamp: the de-seam's current cell column
-oSCnt   = $53de                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
-oSOrb   = $53df                 ;   and spans visited -- the three numbers the cost is made of
-oSSpn   = $53e0
-oSFbN   = $53e1                 ; OCCFBN: edge cells THIS FRAME that wanted a synthesised glyph
+osDC    = $5970                 ; occStamp: the de-seam's current cell column
+oSCnt   = $5971                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
+oSOrb   = $5972                 ;   and spans visited -- the three numbers the cost is made of
+oSSpn   = $5973
+oSFbN   = $5974                 ; OCCFBN: edge cells THIS FRAME that wanted a synthesised glyph
                                 ;   and could not get one -- the scratch codes ran out and oSPfb
                                 ;   stamped the old whole-column block instead. Per frame, zeroed
                                 ;   by occStamp, so a static pose reads the steady-state count.
-ohSv    = $53dc                 ; span right edge / row counter, reused
+ohSv    = $596f                 ; span right edge / row counter, reused
 arcTopR = $3c                   ; region 3's first character row, and the same clamped into the
 arcTopC = $3d                   ;   fill band -- zero page, which is what makes fdSpl fit
 fdA     = $38                   ; fdGlyph's source/destination pointers. Zero page because
@@ -741,12 +760,12 @@ omptr   = $87                   ; 2 bytes: this orb's occluder mask. Deliberatel
                                 ;   the multiply accumulator, which is dead once the projection
                                 ;   has produced a column range -- the same aliasing the original
                                 ;   used. Anything calling oabs after this point would break it.
-ohRun   = $53d2                 ; the run id, held across the mask-byte lookup
-ohL     = $53d3                 ; the span being tested: its left column, and the index into bndT
-ohBX    = $53d4
-ohDbg   = $53d5                 ; ORBOCCDBG: furthest stage any orb reached this frame
-ocolN   = $5379                 ; centre column went left of 0: ocol holds the magnitude
-ocanO   = $53ca                 ; the same bit while the candidate list is being walked
+ohRun   = $5965                 ; the run id, held across the mask-byte lookup
+ohL     = $5966                 ; the span being tested: its left column, and the index into bndT
+ohBX    = $5967
+ohDbg   = $5968                 ; ORBOCCDBG: furthest stage any orb reached this frame
+ocolN   = $590c                 ; centre column went left of 0: ocol holds the magnitude
+ocanO   = $595d                 ; the same bit while the candidate list is being walked
 
 bndT    = $56bc                 ; columns where a face or saturation state begins ($40 max)
                                 ; MOVED OFF $7f00 (2026-09-26). It is 64 bytes and it was
@@ -973,6 +992,12 @@ ccf:    sta $d800,x
         sta $db00,x
         inx
         bne ccf
+        lda #$00                ; ---- NOT FALLING. Say so. ----
+        sta fallSt              ; fsZero: the main loop's first act is "lda fallSt / beq mfIn", and
+                                ;   nothing had ever written this. See fallSt's own note: it worked
+                                ;   only while its page came up zero, and the relayout moved it.
+                                ;   entry is also the RETURN restart, so a restart mid-drop needs
+                                ;   this too -- that path could not have worked either.
         jsr lvlStart            ; the LIVE level's start -- boot and every death come here
         jsr sndInit             ; the drone starts before the first frame and never stops
 
@@ -5334,6 +5359,69 @@ orbOne: ldx oidx
         lda orbYCT,x
         sbc py+1
         sta oiy
+        ; ---- in the view cone at all? Decided from the GRID, with no multiply ----
+        ; ~45 cycles against the four oTerm products orbProj needs to reach the same verdict. The
+        ; magnitudes and signs it leaves behind are exactly orbProj's own prologue; it recomputes
+        ; them, which costs the 15% that get through about 30 cycles and keeps the two routines
+        ; independent of each other.
+        lda oix
+        bpl cnXP
+        eor #$ff
+        clc
+        adc #$01
+cnXP:   sta cnB                 ; |dx| (cnB is the bearing later; it is free until then)
+        lda oiy
+        bpl cnYP
+        eor #$ff
+        clc
+        adc #$01
+cnYP:   sta cnT                 ; |dy|
+        cmp cnB
+        bcs cnChb
+        lda cnB
+cnChb:  cmp #$02                ; Chebyshev distance, and the tolerance index
+        bcc cnYes               ; ADJACENT OR UNDER US: the cell centres are up to 45 degrees from
+                                ;   the true bearing here, so there is no tolerance that both
+                                ;   rejects anything and is safe. Let it through; it is one entity
+                                ;   and it is almost certainly on screen anyway.
+        tay
+cnHlv:  cmp #$08                ; halve both until each fits the 8x8 quadrant table. max() and
+        bcc cnIx                ;   >>1 commute, so the Chebyshev value tracks the halving
+        lsr cnB
+        lsr cnT
+        lsr
+        jmp cnHlv
+cnIx:   lda cnT                 ; index = (|dy| << 3) | |dx|
+        asl
+        asl
+        asl
+        ora cnB
+        tax
+        lda coneBQT,x           ; the first-quadrant bearing...
+        sta cnB
+        lda oix                 ; ...and the quadrant, from the two signs: dx < 0 mirrors about
+        bpl cnQX                ;   the y axis (128 - b), dy < 0 about the x axis (-b), and
+        lda #$80                ;   applying them in that order gives all four quadrants
+        sec
+        sbc cnB
+        sta cnB
+cnQX:   lda oiy
+        bpl cnQY
+        lda #$00
+        sec
+        sbc cnB
+        sta cnB
+cnQY:   lda coneTolT,y          ; Y still holds the UNSHIFTED distance
+        sta cnT
+        lda cnB
+        sec
+        sbc pa                  ; how far off the heading, as a signed 8-bit difference
+        clc
+        adc cnT                 ; the standard range test: (b - pa + tol) >= 2*tol is outside
+        asl cnT
+        cmp cnT
+        bcs orbNo               ; outside the cone: nothing else needs computing
+cnYes:
         jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
         bcc orbNo               ;   everything above needs only the cell it stands in
 
@@ -8520,7 +8608,7 @@ opbBaseT: !byte 0,12,24,36,48,60,72,84
         ; further; past that it wants a different home. Both ends are guarded by the
         ; assembler's own "moves backward".
 ; [origin folded into the run above by compact.mjs]
-        * = $3c11
+        * = $3c80
         ; ---- how many raster interrupts the frame just drawn took ----
         ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
         ; front of you, not an average. Six of these is about 10 fps.
@@ -8888,7 +8976,7 @@ chainEnd:
         ; Out here only because the main code block ends a few bytes short of ORB_SMALL once
         ; PROFILE adds its ticks. Reached by a patched jsr from holeTail, so nothing falls in.
 ; [origin folded into the run above by compact.mjs]
-        * = $3c94
+        * = $3d03
 ; X = h. A = the rung, or $ff for "past the smallest".
 hlRungH:lda holeVarT,x
         rts
@@ -9093,7 +9181,7 @@ orbVarT: !byte 15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12
         * = $b000
 bfsD1:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps
 ; [origin folded into the run above by compact.mjs]
-        * = $3cc8
+        * = $3d37
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
 ; BFS guarantees one exists for every reachable cell, so the only $ff cases are a map that has
@@ -9366,7 +9454,7 @@ holeVarT: !byte 255,255,255,255,255,255,255,19,19,19,18,18,18,17,17,17,17,16,16,
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
 ; [origin folded into the run above by compact.mjs]
-        * = $8d48
+        * = $8ce8
 arcYT: !byte 255,248,232,216,200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte 20,20,20,20,20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
 arcYT2: !byte 200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0,0,0,0,0    ; the landing's mirrored schedule
@@ -9431,6 +9519,16 @@ orbAnchT: !byte 42,42,42,42,42,42,21,21,21,21,21,21,21,21,21,21,42,42,42,42,42,4
 
 ; REMOVED 2026-09-26, nothing in the image named it: orbHgtT: sprite height per variant, 21 or 42. Nothing read it; it is one shift from ORBEXP.
 angVarT: !byte 35,35,35,35,35,35,35,35,35,34,34,34,34,33,33,33,33,32,32,32,31,31,31,31,30,30,30,29,29,29,29,28,28,28,27,27,27,27,26,26,26,26,25,25,25,24,24,24,24,23,23,23,23,23,22,22,22,22,22,22,22,21,21,21,21,21,21,21,20,20,20,20,20,20,20,19,19,19,19,19,19,19,19,18,18,18,18,18,18,18,17,17,17,17,17,17,17,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16
+; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
+; 64 + 32 bytes of PURE GEOMETRY. atan2 of a cell delta is the same on every level, so unlike
+; holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
+; First quadrant only, stride 8, both magnitudes 0..7; the other three come from the signs.
+coneBQT: !byte 0,0,0,0,0,0,0,0,64,32,19,13,10,8,7,6,64,45,32,24,19,16,13,11,64,51,40,32,26,22,19,16,64,54,45,38,32,27,24,21,64,56,48,42,37,32,28,25,64,57,51,45,40,36,32,29,64,58,53,48,43,39,35,32
+; Indexed by Chebyshev distance. 29 is half the cone (atan(3/4), ENTFOV's own verified bound,
+; plus two units); the rest is how far the cell-centre bearing can be from the true one -- the
+; player's 0.707 of slack inside their own cell, and the rounding the >>1 folding introduces.
+; Entry 0 and 1 are never read: the test bails out below distance 2, where no tolerance is safe.
+coneTolT: !byte 127,127,50,42,38,36,35,34,41,39,38,38,37,36,36,35,39,38,38,37,37,36,36,36,36,35,35,35,35,34,34,34
 arcOvSpT: !byte 170,154,146,130
         ; ---- which ladder each kind uses: rung finder, yBase, ptr, flag, xOff ----
         ; 0 = the exit hole, 1 = an empty socket, 2 = an orb seated in one. hlSet indexes this
@@ -9557,7 +9655,7 @@ fdG2:   dec fdCnt
 fdGtD:  rts
 
 ; [origin folded into the run above by compact.mjs]
-        * = $8c90
+        * = $8c30
 ; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
 ; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
 ; run of $ff at one end. Now four 40-byte tables and the 25 rows generated on entry to fdWarp.
@@ -9613,10 +9711,10 @@ fHiT:   !byte 24,24,24,24,24,22,20,18,16,14,12,10,9,7,6,4,2,0,0,0,0,24,24,24,24,
 ; first frame writes stackLT over it, and lateLoad copies it back down to run it. It keeps its
 ; address and its state, and what it clobbers on the way back is per-frame scratch.
 ; [origin folded into the run above by compact.mjs]
-        * = $8b95
+        * = $8b35
 krillRt: !fill 251, 0
 ; [origin folded into the run above by compact.mjs]
-        * = $3e84
+        * = $3ef3
 ; ---- klPark / lvlLoad: THE LEVEL COMES OFF THE DISK ----
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
 ; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
@@ -9676,7 +9774,7 @@ llErr:  !byte 0
 
 
 ; [origin folded into the run above by compact.mjs]
-        * = $8ad1
+        * = $8a71
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
 orbOccT: !byte 48,179,38,104,233,0,0,0,0,48,79,61,104,233,0,0,0,0,48,191,38,104,233,0,0,0,0,48,79,37,104,233,0,0,0,0,48,79,38,104,233,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
@@ -9710,7 +9808,7 @@ darkerT: !byte 0,15,11,12,11,12,0,15,11,0,12,0,11,15,12,12
 ; charset stays because it is 2,048 and there is no 2K of bank 3 left to put it in -- and it is
 ; read exactly once, by dieSwap, straight into charset B's slot.
 ; [origin folded into the run above by compact.mjs]
-        * = $8390
+        * = $8330
 faceChrT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,252,255,255,255,255,255,3,170,128,255,255,255,255,255,255,175,43
         !byte 255,255,255,255,226,144,72,81,255,255,255,255,43,66,40,80,255,255,255,255,255,255,255,191,255,255,255,255,255,255,255,254
         !byte 85,255,255,255,255,255,255,255,255,255,255,255,255,255,191,191,255,255,255,255,255,254,242,241,255,255,255,255,255,168,43,74
@@ -9848,12 +9946,12 @@ pedVisT: !byte 34,26,18,13,10,8,6,5,4,2
         ; "undefined symbol: runByteT" -- a table's HOME is not its OWNER. Their address is
         ; anchored to $7900 rather than to the end of faceChrT: see RUNTAB.
 ; [origin folded into the run above by compact.mjs]
-        * = $830e
+        * = $82ae
 runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8
 runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1   ; every id, as mkRuns rebuilds it
 
 ; [origin folded into the run above by compact.mjs]
-        * = $820e
+        * = $81ae
 ; moveXT/moveYT are 512 bytes of TABLE that were sitting inside the code block -- the scarcest
 ; resource on the machine -- at $1f3e, which is not even page-aligned, so a byte-indexed read
 ; crossing $2000 was paying an extra cycle. Here they are one page each: the ceiling gets 512
@@ -9870,7 +9968,7 @@ moveXT: !byte 64,64,64,64,64,64,63,63,63,62,62,62,61,61,60,60,59,59,58,57,56,56,
         !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
         !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64
 ; [origin folded into the run above by compact.mjs]
-        * = $810e
+        * = $80ae
 moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
         !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
         !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64,64,64,64,64,64,64,63,63
@@ -9884,7 +9982,7 @@ moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
         !byte 232,233,234,236,237,239,240,242,244,245,247,248,250,251,253,254
 
 ; [origin folded into the run above by compact.mjs]
-        * = $3ee6
+        * = $3f55
 ; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
 ; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
 ; that drawFps falling through into whatever follows it still does. The only branches that
@@ -10211,7 +10309,7 @@ a2F:    sta (fdB),y
 ; routine runs ONCE, at boot, and never again -- so it was the obvious thing to move out of
 ; contested space. Same reasoning that moved dpCand out of the main block.
 ; [origin folded into the run above by compact.mjs]
-        * = $40fe
+        * = $416d
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -10415,7 +10513,7 @@ setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster
         ; it is COLD, jsr-entered from symPut once per level entry, and it fits whole in the page
         ; bndT was holding down on its own. See bndT for the move that freed it.
 ; [origin folded into the run above by compact.mjs]
-        * = $41fc
+        * = $426b
 ; ---- the idol subsystem lives in the front of seamEdge's page ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
 ; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
@@ -10575,7 +10673,7 @@ seamEdge:
         ; !fill MAPN tails are NOT: those collapse to three bytes on a build whose live level is
         ; the 253-cell one. Code, not data, because the blocks that were full held code.
 ; [origin folded into the run above by compact.mjs]
-        * = $42f4
+        * = $4363
 arcCdT: !byte 2,7,8,15,17,19,20,21,25,29,40,41,42,43,44,58,61,70,81,83,90,107,116,119,132,139,140,142,147,155,161,164,193
 
 ; ---- dpDiag: is this direction a squeeze THROUGH a corner? ----
@@ -10618,7 +10716,7 @@ dpCnr:  jsr dpCand              ; Z set when that corner cell is open
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
         ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
 ; [origin folded into the run above by compact.mjs]
-        * = $4345
+        * = $43b4
 ; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
 ; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
 ; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
@@ -10629,7 +10727,7 @@ pedOff: ldy idolHand
         sta idolOnPedT,y
 poNo:   rts
 ; [origin folded into the run above by compact.mjs]
-        * = $4350
+        * = $43bf
 dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
         ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
         ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
@@ -10751,7 +10849,7 @@ runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,6,0,0,0,0,0,0
 ; ---- snapCp: the half-height snapshot copy, out here because both its callers' blocks are
 ; full. 64 bytes of stable slack; the origin after it puts the cursor back.
 ; [origin folded into the run above by compact.mjs]
-        * = $4397
+        * = $4406
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         tay
@@ -10813,7 +10911,7 @@ rsT:    !byte 13,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $43cd
+        * = $443c
         ; coarse delta tables vacated. It used to sit at $609b, a hole that only LEVEL 1's map
         ; leaves -- level 2's data ran straight through it and the build died. Everything from
         ; RELOC on is engine table space at fixed origins, so it is free on EVERY map.
@@ -10860,7 +10958,7 @@ snKDn:  rts
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
 ; [origin folded into the run above by compact.mjs]
-        * = $4417
+        * = $4486
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
 ; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
@@ -11357,7 +11455,7 @@ pgNo:   rts
         * = $be00
 colGrpT: !byte 0,0,0,0,1,1,1,1,2,2,3,3,3,3,4,4,4,5,5,5,5,6,6,6,7,7,7,7,8,8,8,9,9,9,9,10,10,10,10,11,11,11,11,11,12,12,12,12,13,13,13,13,13,13,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,11,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,7,7,7,7,6,6,6,5,5,5,5,4,4,4,3,3,3,3,2,2,1,1,1,1,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $80cb
+        * = $806b
 sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
 sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
                                                         ;   crackles rather than rumbles, which
@@ -11369,7 +11467,7 @@ sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, 
 
 fNT:    !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $7ecb
+        * = $7e6b
 ; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
 ; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
 ; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
@@ -11400,7 +11498,7 @@ ddxLoTQ: !byte 0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,3
         !byte 5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,1,1,1,0,0
         !byte 0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $7ccb
+        * = $7c6b
 ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -11436,17 +11534,17 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; instruction added to it (one "lda #imm" becoming "lda abs") pushed emitted data over seB and
 ; failed the build. Ending at $bdff instead leaves that growth room in front of the scratch
 ; rather than behind it, where nothing can use it.
-seB     = $53e2                 ; the row being worked on
-seHi    = $53e3                 ; its high bits, brought into line with the low ones
-seNL    = $53e4                 ; ~lo
-seLo    = $53e5
-seT     = $53e6                 ; the adjacency union
-seW     = $53e7                 ; the pairs about to be flipped
-seMsk   = $53e8                 ; $55 or $00: does this level want the outline
-seN     = $53e9                 ; glyphs left
-seC00   = $53ea                 ; 8 bytes: ground/ceiling pixels, per row
-seNB    = $53f2                 ; 8 bytes: the row being built, ending exactly at $bdff
-        * = $4702
+seB     = $53e4                 ; the row being worked on
+seHi    = $53e5                 ; its high bits, brought into line with the low ones
+seNL    = $53e6                 ; ~lo
+seLo    = $53e7
+seT     = $53e8                 ; the adjacency union
+seW     = $53e9                 ; the pairs about to be flipped
+seMsk   = $53ea                 ; $55 or $00: does this level want the outline
+seN     = $53eb                 ; glyphs left
+seC00   = $53ec                 ; 8 bytes: ground/ceiling pixels, per row
+seNB    = $53f4                 ; 8 bytes: the row being built, ending exactly at $bdff
+        * = $4771
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -12982,7 +13080,7 @@ agPt:   lda #$00                ; fdA -> charset A's glyph for rim code X. X sur
 
 
 ; [origin folded into the run above by compact.mjs]
-        * = $7c2b
+        * = $7bcb
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
 ; table landed on $c000 -- which is stackLT, the subdivision's own stack. It rendered fine until
@@ -12992,7 +13090,7 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
 ; [origin folded into the run above by compact.mjs]
-        * = $5081
+        * = $50f0
 ; ---- lvlStart: put the player at the LIVE level's official start ----
 ; Boot and every death go through here. dieKey restarts with "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
@@ -13015,7 +13113,7 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 
 
 ; [origin folded into the run above by compact.mjs]
-        * = $7b2b
+        * = $7acb
 
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
 ; lo/hi pair up at 0x2900 and emit nothing here. There is no room above the tables (the
@@ -13027,11 +13125,11 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 ; spacing lives here instead of in an atan.
 qToColT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,24,25,26,27,28,29,30,31,31,32,33,34,35,36,37,37,38,39,40,41,42,42,43,44,45,46,46,47,48,49,50,50,51,52,53,54,54,55,56,57,58,58,59,60,61,61,62,63,64,64,65,66,67,67,68,69,70,70,71,72,73,73,74,75,76,77,77,78,79,80,80,81,82,82,83,84,85,86,86,87,88,89,89,90,91,92,92,93,94,95,95,96,97,98,98,99,100,101,101,102,103,104,105,105,106,107,108,109,109,110,111,112,113,113,114,115,116,117,117,118,119,120,121,122,122,123,124,125,126,127,128,128,129,130,131,132,133,134,135,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159
 ; [origin folded into the run above by compact.mjs]
-        * = $7a2b
+        * = $79cb
 
 sinST:  !byte 0,3,6,9,13,16,19,22,25,28,31,34,37,40,43,46,49,52,55,58,60,63,66,68,71,74,76,79,81,84,86,88,91,93,95,97,99,101,103,105,106,108,110,111,113,114,116,117,118,119,121,122,122,123,124,125,126,126,127,127,127,127,127,127,127,127,127,127,127,127,127,126,126,125,124,123,122,122,121,119,118,117,116,114,113,111,110,108,106,105,103,101,99,97,95,93,91,88,86,84,81,79,76,74,71,68,66,63,60,58,55,52,49,46,43,40,37,34,31,28,25,22,19,16,13,9,6,3,0,253,250,247,243,240,237,234,231,228,225,222,219,216,213,210,207,204,201,198,196,193,190,188,185,182,180,177,175,172,170,168,165,163,161,159,157,155,153,151,150,148,146,145,143,142,140,139,138,137,135,134,134,133,132,131,130,130,129,129,129,128,128,128,128,128,128,128,129,129,129,130,130,131,132,133,134,134,135,137,138,139,140,142,143,145,146,148,150,151,153,155,157,159,161,163,165,168,170,172,175,177,180,182,185,188,190,193,196,198,201,204,207,210,213,216,219,222,225,228,231,234,237,240,243,247,250,253
 ; [origin folded into the run above by compact.mjs]
-        * = $792b
+        * = $78cb
 
 ; 163/d as a byte, d in 1/16 cells. 163 is the constant that makes the final shift exactly
 ; 2^15. Saturates at d = 0.639 cells, where the correction is under-applied and that boundary
@@ -13043,7 +13141,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; from $ae2a". They live in the stream now, with the other displaced lookups.
 
 ; [origin folded into the run above by compact.mjs]
-        * = $50a1
+        * = $5110
 ; The page the pivot's three scratch tables vacated for VIC bank 3 (see PVBASE), and the only
 ; free run left in a four-level image big enough to hold fallTail in ONE piece -- the next
 ; largest is 36 bytes.
@@ -13207,7 +13305,7 @@ edT6:	sta fallTailB+240,x
         * = $bf00
 bfsD0:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps      ; the angel's other distance map -- see bfsD1 at $5e00
 ; [origin folded into the run above by compact.mjs]
-        * = $782b
+        * = $77cb
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
 ; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the
 ; hottest lookup in the renderer. The single-copy rampT/stepT are not emitted at all under
@@ -13224,7 +13322,7 @@ rampTlo: !byte 0,0,0,0,34,106,51,99,117,165,181,150,150,150,150,63,0,0,0,0,34,10
         !byte 191,161,40,1,1,1,1,1,27,160,196,22,22,33,33,143,97,161,40,1,1,1,1,1
         !byte 144,22,22,22,33,33,143,143,97,198,40,1,1,1,1,1
 ; [origin folded into the run above by compact.mjs]
-        * = $772b
+        * = $76cb
 rampThi: !byte 0,0,0,0,34,23,84,9,111,71,150,63,150,150,98,65,0,0,0,0,34,23,186,182
         !byte 91,71,71,65,98,98,98,65,0,0,0,0,115,23,186,137,91,71,103,65,98,98,98,65
         !byte 0,0,0,0,8,119,73,138,91,71,69,65,98,98,65,65,85,85,39,7,42,142,41,41
@@ -13237,7 +13335,7 @@ rampThi: !byte 0,0,0,0,34,23,84,9,111,71,150,63,150,150,98,65,0,0,0,0,34,23,186,
         !byte 97,198,40,1,1,1,1,1,144,196,196,22,22,33,143,86,97,198,40,1,1,1,1,1
         !byte 22,22,22,22,11,197,199,86,129,198,40,1,1,1,1,1
 ; [origin folded into the run above by compact.mjs]
-        * = $7638
+        * = $75d8
 stepT1lo: !byte 183,34,23,84,9,117,165,181,35,183,80,80,138,138,74,74,98,65,183,32,74,74,74,32
         !byte 32,32,4,85,42,36,36,41,102,117,181,35,7,43,142,147,146,38,69,69,94,22,33,33
         !byte 32,32,4,32,151,4,55,26,15,15,41,102,38,103,169,26,83,15,147,110,38,175,112,152
@@ -13250,7 +13348,7 @@ stepT1lo: !byte 183,34,23,84,9,117,165,181,35,183,80,80,138,138,74,74,98,65,183,
         !byte 5,130,130,179,130,5,179,17,5,27,96,179,134,37,136,136,87,37,10,33,33,101,143,28
         !byte 28,24,17
 ; [origin folded into the run above by compact.mjs]
-        * = $7545
+        * = $74e5
 stepT1hi: !byte 183,8,80,73,138,91,71,103,63,183,80,80,74,74,74,32,32,65,123,4,4,4,4,4
         !byte 4,4,4,39,42,142,124,41,66,66,103,109,7,43,43,147,81,74,32,32,108,22,33,33
         !byte 32,32,4,151,4,4,58,26,15,48,146,38,38,112,109,26,83,43,147,146,155,140,32,108
@@ -13263,7 +13361,7 @@ stepT1hi: !byte 183,8,80,73,138,91,71,103,63,183,80,80,74,74,74,32,32,65,123,4,4
         !byte 5,130,179,134,134,37,87,17,56,144,141,134,134,37,133,87,17,56,11,11,197,199,86,97
         !byte 161,40,126
 ; [origin folded into the run above by compact.mjs]
-        * = $7452
+        * = $73f2
 stepT2lo: !byte 183,34,23,51,9,111,71,150,35,39,8,80,138,138,74,69,98,65,10,8,80,138,74,74
         !byte 32,32,4,85,34,36,36,182,102,71,16,150,39,26,142,147,146,69,69,94,108,39,26,142
         !byte 147,81,74,32,151,4,158,26,15,48,41,102,175,103,169,158,83,15,147,146,38,175,112,109
@@ -13276,7 +13374,7 @@ stepT2lo: !byte 183,34,23,51,9,111,71,150,35,39,8,80,138,138,74,69,98,65,10,8,80
         !byte 5,130,130,134,37,136,87,17,56,27,27,179,134,37,136,87,87,56,10,200,50,45,174,191
         !byte 161,24,24
 ; [origin folded into the run above by compact.mjs]
-        * = $735f
+        * = $72ff
 stepT2hi: !byte 49,115,119,49,137,71,16,16,63,39,8,80,138,74,74,74,32,65,10,8,80,138,74,74
         !byte 32,4,4,39,42,142,124,41,66,69,16,109,39,26,43,147,146,74,32,94,108,39,26,142
         !byte 147,81,74,32,151,4,158,83,15,48,146,38,175,109,109,83,43,43,147,146,31,140,108,108
@@ -13289,7 +13387,7 @@ stepT2hi: !byte 49,115,119,49,137,71,16,16,63,39,8,80,138,74,74,74,32,65,10,8,80
         !byte 5,130,179,134,37,136,87,17,56,144,180,96,135,133,133,87,17,56,11,11,197,199,86,129
         !byte 161,40,126
 ; [origin folded into the run above by compact.mjs]
-        * = $726c
+        * = $720c
 stepT3lo: !byte 115,34,106,51,99,99,165,181,35,183,80,119,49,137,91,71,150,150,46,46,65,65,65,65
         !byte 65,16,65,85,148,36,84,9,99,165,181,35,7,43,142,41,41,66,69,69,98,46,46,46
         !byte 108,108,108,108,94,94,158,26,15,15,15,102,102,181,35,83,83,15,48,110,38,38,169,169
@@ -13302,7 +13400,7 @@ stepT3lo: !byte 115,34,106,51,99,99,165,181,35,183,80,119,49,137,91,71,150,150,4
         !byte 27,96,96,27,27,27,27,27,27,22,196,141,135,101,28,87,17,17,11,11,197,199,86,97
         !byte 161,24,17
 ; [origin folded into the run above by compact.mjs]
-        * = $7179
+        * = $7119
 stepT3hi: !byte 183,115,119,73,182,117,117,181,35,183,80,119,138,138,66,71,103,98,46,46,65,65,65,65
         !byte 65,98,4,7,42,36,124,41,117,102,102,35,7,43,142,146,41,38,69,69,94,46,46,46
         !byte 108,108,108,108,94,4,83,83,15,15,15,102,102,102,169,43,43,43,147,146,38,175,112,169
@@ -13315,19 +13413,19 @@ stepT3hi: !byte 183,115,119,73,182,117,117,181,35,183,80,119,138,138,66,71,103,9
         !byte 160,200,50,27,27,27,27,27,27,22,33,33,101,143,191,161,24,17,11,11,197,199,86,129
         !byte 198,40,24
 ; [origin folded into the run above by compact.mjs]
-        * = $7079
+        * = $7019
 rampThrT: !byte 0,0,0,0,0,1,1,1,2,3,3,7,0,0,6,9,0,0,0,0,0,1,2,0,3,0,0,9,0,0,0,0,0,0,0,0,1,0,2,4,0,0,0,10,0,0,0,0,0,0,0,0,2,3,0,5,0,0,8,11,0,0,0,0,0,0,1,2,0,4,5,0,6,7,0,11,10,0,12,14,1,1,0,2,4,0,6,7,0,9,0,12,12,12,0,15,1,2,2,0,5,6,0,8,8,0,10,12,0,13,14,15,1,0,4,5,0,0,8,0,10,11,0,13,13,0,15,16,2,3,0,0,6,0,8,10,0,12,13,14,15,15,0,16,3,5,5,0,7,9,0,11,12,0,13,15,0,16,16,0,0,0,7,0,0,0,0,0,13,14,0,16,16,0,0,0,7,9,10,11,11,12,0,13,14,15,16,0,0,0,0,0,5,0,9,0,10,12,0,13,15,0,16,0,0,0,0,0,5,0,9,0,0,12,13,0,15,16,0,0,0,0,0,0,6,10,0,0,0,0,14,15,0,16,0,0,0,0,0,0,9,0,0,0,14,15,15,16,16,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $6f86
+        * = $6f26
 stepThrT1: !byte 0,1,3,3,3,3,4,4,5,0,0,0,7,8,0,11,11,0,11,15,14,15,14,14,14,15,0,1,0,3,4,0,6,3,5,6,0,0,6,0,8,9,11,11,13,0,0,0,0,0,0,14,15,0,2,0,0,5,6,6,0,7,6,0,0,6,0,7,9,10,11,11,0,0,0,0,0,0,0,15,0,2,3,0,5,0,6,0,0,6,4,0,6,0,7,9,11,11,12,0,0,0,0,0,0,0,0,0,1,3,0,0,0,0,0,0,3,0,0,0,7,0,9,11,0,13,0,0,0,0,0,0,14,15,16,1,1,3,0,0,0,0,0,5,5,0,0,8,9,0,11,12,13,0,0,0,0,0,0,14,15,16,1,0,0,5,0,0,0,0,3,6,7,8,8,10,0,12,13,14,0,0,0,0,13,0,14,15,16,1,0,0,5,0,0,0,0,0,6,8,8,9,10,11,12,13,14,9,11,12,12,13,14,14,15,16,0,0,3,5,3,1,5,0,5,6,8,6,0,0,11,11,13,11,12,15,15,15,15,14,14,15,15
 ; [origin folded into the run above by compact.mjs]
-        * = $6e93
+        * = $6e33
 stepThrT2: !byte 3,1,2,2,3,5,6,6,5,0,0,0,0,8,0,10,12,0,0,0,0,0,0,0,0,15,0,1,1,3,4,4,5,6,0,7,0,0,6,0,0,9,11,0,0,0,0,0,0,0,0,0,0,0,0,3,0,0,6,6,0,8,9,5,6,6,0,0,9,10,11,12,8,0,0,0,0,0,0,0,0,1,3,0,5,5,6,7,8,8,5,0,6,0,7,8,9,10,10,8,0,0,0,0,0,0,0,0,1,3,0,0,0,0,0,0,0,4,0,0,7,0,9,10,11,11,8,0,0,0,0,0,14,15,16,1,3,4,0,0,0,0,0,0,5,0,0,8,9,9,11,12,12,8,0,0,0,0,0,14,0,16,1,0,0,5,0,0,0,0,0,0,6,0,9,10,11,11,13,14,9,9,13,13,0,0,14,15,16,1,0,0,0,0,0,0,0,0,6,0,8,8,10,11,0,13,14,9,10,11,12,13,0,14,15,16,0,0,3,0,0,0,0,0,0,6,7,7,9,10,11,0,13,0,12,13,13,14,14,15,0,16,12
 ; [origin folded into the run above by compact.mjs]
-        * = $6da0
+        * = $6d40
 stepThrT3: !byte 2,1,2,2,1,1,1,0,0,0,0,0,5,5,5,0,6,7,0,0,0,0,0,0,0,9,14,1,2,0,3,3,2,3,3,0,0,0,0,6,0,7,0,0,10,0,0,0,0,0,0,0,0,15,3,3,0,0,0,0,0,3,4,6,6,6,6,7,0,8,7,0,0,0,0,0,0,0,0,12,15,3,4,5,5,5,5,5,0,0,7,0,0,0,7,8,8,9,7,0,0,0,0,0,0,0,13,14,4,0,0,0,0,0,0,0,0,8,7,7,7,0,9,10,10,9,0,0,0,0,0,0,13,13,15,4,6,6,0,0,0,0,0,0,0,9,9,9,9,0,11,11,11,0,0,0,0,0,0,0,0,14,4,0,0,0,0,0,0,0,0,11,11,10,11,11,0,12,0,11,14,14,14,0,0,0,14,14,15,4,7,0,0,0,0,0,0,0,11,10,10,0,11,12,13,13,13,15,15,15,15,15,15,0,15,15,6,9,8,0,0,0,0,0,0,0,12,12,12,13,14,14,14,0,0,0,0,0,0,16,16,16,15
 ; [origin folded into the run above by compact.mjs]
-        * = $6ca0
+        * = $6c40
 clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         !byte 8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
@@ -13350,7 +13448,7 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         ; the same address and only fitted because level 1 has no hazard cells. They live in
         ; table space now (see HAZ_BASE), which is the same address on every map.
 ; [origin folded into the run above by compact.mjs]
-        * = $5196
+        * = $5205
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
@@ -13618,9 +13716,9 @@ dkNo:   lda #$ff
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
 ; [origin folded into the run above by compact.mjs]
-        * = $6ba0
+        * = $6b40
 angMidT: !byte 3,3,2,2,1,1,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,255,255,1,1,0,0,0,255,255,1,1,1,0,0,255,255,1,1,1,0,0,255,255,2,1,1,0,0,255,255,255,1,1,0,0,255,255,255,1,1,0,0,0,255,255,1,1,0,0,0,255,255,254,254,253,253,253,252,252,251,251,251,250,250,249,249,248,248,248,247,247,246,246,246,245,245,244,244,243,243,243,242,242,241,241,240,240,240,239,239,238,238,238,237,237,236,236,235,235,235,234,234,233,233,232,232,232,231,231,230,230,230,229,229,228,228,227,227,227,226,226,225,225,225,224,224,223,223,222,222,222,221,221,220,220,219,219,219,218,218,217,217,217,216,216,215,215,214,214,214,213,213,212,212,211,211,211,210,210,209,209,209,208,208,207,207,206,206,206,205,205,204,204,204,203,203,202,202,201,201,201,200,200,199,199,198,198,198,197,197,196,196,196,195,195,194,194,193,193,193,192,192,191,191
 ; [origin folded into the run above by compact.mjs]
-        * = $6aa0
+        * = $6a40
 qcosT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,254,253,253,253,253,252,252,252,252,251,251,251,250,250,250,249,249,249,248,248,248,247,247,246,246,245,245,245,244,244,243,243,242,242,241,241,240,239,239,238,238,237,237,236,235,235,234,233,233,232,231,231,230,229,229,228,227,227,226,225,224,224,223,222,221,220,220,219,218,217,216,215,215,214,213,212,211,210,209,208,207,207,206,205,204,203,202,201,200,199,198,197,196,195,194,193,192,191,190,189,188,186,185,184,183,182,181,180,179,178,177,175,174,173,172,171,170,168,167,166,165,164,162,161,160,159,157,156,155,154,152,151,150,149,147,146,145,144,142,141,140,138,137,136,134,133,132,130,129,128,126,125,123,122,121,119,118,117,115,114,112,111,109,108,107,105,104,102,101,99,98,97,95,94,92,91,89,88,86,85,83,82,80,79,77,76,74,73,71,70,68,67,65,64,62,61,59,58,56,55,53,51,50,48,47,45,44,42,41,39,38,36,34,33,31,30,28,27,25,24,22,20,19,17,16,14,13,11,9,8,6,5,3,2
 

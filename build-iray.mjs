@@ -3583,6 +3583,64 @@ const STILLSKIP = flag('STILLSKIP');
 const ENTFOV = process.env.ENTFOV !== '0';
 // ENTGATE: skip orbMove's frame trig when no entity can possibly be projected. ENTGATE=0 to A/B.
 const ENTGATE = process.env.ENTGATE !== '0';
+// ---- ENTCONE: reject an entity on its CELL BEARING, before any multiply at all ----
+// orbProj's own rejects are cheap for what they are, but nothing is rejected until forward =
+// Ix*cos + Iy*sin and (usually) right = Iy*cos - Ix*sin have been computed: four oTerm/mul8
+// products, and CULLCNT says 85% of the entities walked are thrown out after paying for them.
+// The entity count IS the candidate count -- orbMove walks every entity every frame, with no
+// pre-filter of any kind -- so this is paid per entity per frame, forever.
+//
+// This is the same question asked from the CELL GRID, where it costs no multiply: the vector
+// between two cell CENTRES is exactly the integer delta (both sit at +0.5), so its bearing is a
+// pure function of (dx, dy) and lives in a table. Compare that against pa, allow for the fact
+// that the player is somewhere in their cell rather than at its centre, and reject outside.
+//
+// STATELESS ON PURPOSE. Every input is current: no cached value, nothing to dirty, nothing to
+// audit across a level load, a death or the fall, and no writer that has to remember to
+// invalidate -- which is the bug class orbOccT already shipped once (see orbOccAll). The caching
+// version of this test measured no cheaper anyway: "check the key" costs about what "recompute"
+// costs. Caching is for the OCCLUSION question, which cannot be answered per frame at all.
+const ENTCONE = process.env.ENTCONE !== '0';
+if (!ENTCONE) DIAG.push('ENTCONE=0');
+// Half the cone, in 256ths of a turn. ENTFOV's bound, NOT the tighter true one: it tests
+// |right| > forward * 3/4, so atan(3/4) is the angle it is already verified safe at (FOVCHK, 3/4
+// vs the 5/8 first cut that dropped 4 real sprites). Rejecting at the true 116/184 = 0.63 would
+// be sound in theory and is not worth being clever about: two extra units of margin on top.
+const CONE_HALF = Math.ceil(Math.atan(0.75) / (2 * Math.PI) * 256) + 2;   // 29
+// The bearing of a cell delta, folded to the FIRST QUADRANT: 8x8 at stride 8 = 64 bytes, both
+// magnitudes in 0..7. The quadrant comes back from the two signs at runtime for ~12 cycles, which
+// is far cheaper than the 1KB a signed table would need. Deltas beyond 7 are HALVED until they
+// fit -- the bearing of (dx,dy) is the bearing of (dx/2,dy/2), and the rounding error that
+// introduces is folded into the tolerance below.
+const CONE_BQ = [...Array(64)].map((_, i) => {
+  const dy = i >> 3, dx = i & 7;
+  return (dx || dy) ? Math.round(Math.atan2(dy, dx) / (2 * Math.PI) * 256) & 255 : 0;
+});
+// Tolerance per CHEBYSHEV distance: the cone, plus how far the bearing can be wrong. Two sources,
+// both conservative:
+//   the player is anywhere in their cell, up to 0.707 from its centre -> asin-ish slack that
+//     shrinks with distance. Divided by (c - 0.707), the CLOSEST the entity can be, not c.
+//   the halving above rounds each magnitude down by up to 0.5 at the shifted scale, which is
+//     0.5 * 2^sh at the real one.
+// Indexed by the UNSHIFTED distance so a far entity gets the tight tolerance it deserves; a
+// single worst-case number for the whole shift class would have thrown that away.
+const CONE_DMAX = 31;                  // covers any delta a 28-wide or 16-tall level can produce
+const coneShift = c => c <= 7 ? 0 : c <= 15 ? 1 : 2;
+const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
+  if (c < 2) return 127;               // adjacent: no cell-level bearing means anything (bypassed)
+  const sh = coneShift(c);
+  const slack = Math.atan(0.707 / (c - 0.707));
+  const quant = sh ? Math.atan(0.707 * (1 << sh) / c) : 0;
+  // <= 127 so that 2*tol still fits a byte -- the range test is (b - pa + tol) >= 2*tol.
+  return Math.min(127, CONE_HALF + Math.ceil((slack + quant) / (2 * Math.PI) * 256));
+});
+// CONECHK=1: verify it, the way FOVCHK verifies ENTFOV. The cone only NOTES that it would have
+// rejected; the full path still runs. coneBad = the cone said no and the entity got a SPRITE, and
+// it must be 0. coneDis = orbProj disagreed but the box tests threw it out anyway, which is
+// allowed. A cull that wrongly rejects shows up as an entity popping, which is easy to miss by
+// eye and hard to attribute -- so it gets a counter, not a playtest.
+const CONECHK = flag('CONECHK');
+if (CONECHK && !ENTCONE) throw new Error('CONECHK=1 verifies ENTCONE, which is off');
 // BNDCNT=1: per frame, boundaries pinned by the subdivision and how many of them are shared
 // corners (both faces at the same height at the boundary: the second end ray is redundant).
 const BNDCNT = flag('BNDCNT');
@@ -9267,6 +9325,7 @@ ${CULLCNT ? `culTot  = $70d0                 ; CULLCNT: entities orbOne looked a
 dbgRun  = $70a4                 ; CULLCNT: per entity, the run that let it show through
 dbgCol  = $70ac
 culPrj  = $70d2                 ;   ...and how many orbProj rejected after doing the work
+culCone = $70da                 ;   ...and how many the CELL BEARING rejected before any multiply
 culTAcc = $70d4
 culPAcc = $70d6
 culTMn  = $70d8
@@ -9306,6 +9365,9 @@ mcHint  = $70f4                 ;   hints offered per frame, summed
 ` : ''}${FALLMARK ? `fallMk  = $70fc                 ; FALLMARK=${process.env.FALLMARK}: how far the fall's level change got\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
+` : ''}${CONECHK ? `coneRej = $70dc                 ; CONECHK: entities the CELL BEARING would have rejected, 16-bit
+coneDis = $70de                 ;   ...of which orbProj disagreed (the box tests may still drop it)
+coneBad = $70e0                 ;   ...and which then got a SPRITE. MUST be zero.
 ` : ''}${PROFILE ? `pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e42
@@ -9442,6 +9504,13 @@ ivL     = $97
 ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
 ohgt    = $9d
 ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
+${ENTCONE ? `cnB     = $aa                    ; ENTCONE: the cell delta's bearing, as the quadrant is applied
+cnT     = $ab                    ;   ...then its distance's tolerance, then twice it. ZERO PAGE
+                                 ;   because this is the hottest test in the entity pass -- it runs
+                                 ;   for every entity every frame, where oax/oay below are only
+                                 ;   reached by the ones it lets through.
+${CONECHK ? `cnV     = $ac                    ; CONECHK: the verdict, held instead of acted on
+` : ''}` : ''}
 ocos    = $8500
 ocosS   = $8501
 osin    = $8502
@@ -9642,7 +9711,20 @@ ${FALLTAIL ? `fallTailB = ${hx16(LOWBOOT)}               ; FALLTAIL: the source 
 fallSnapS = ${hx16(FALLBUF)}                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
-fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing
+fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
+                                 ; CLEARED AT ENTRY -- see fsZero. It used to be initialised by
+                                 ; nothing at all, which was free only while it sat in a page that
+                                 ; happened to come up zero. The relayout rehomed it ($5aff in the
+                                 ; shipping build) and the main loop's first "lda fallSt / beq" then
+                                 ; read whatever the decruncher left: non-zero means the FIRST frame
+                                 ; of the game calls fallStep, which animates a drop out of
+                                 ; uninitialised snapshot buffers. The user saw it as "the benchmark
+                                 ; sometimes starts with a corrupt looking hole fall", and
+                                 ; "sometimes" is the tell -- which byte lands there depends on the
+                                 ; build, so it comes and goes with unrelated flags.
+                                 ; EXACTLY the pfN bug (see pfInit), second instance. The rule it
+                                 ; teaches: a variable's initialisation is not free because its page
+                                 ; is zero today, and a layout tool is allowed to move it.
 fdN     = $81c7
 ohP     = $8521                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohT     = $850f
@@ -10089,7 +10171,13 @@ ${LVLALL.length > 1 ? `        ldx lvlMeT              ; ...and the bookkeeping 
 ` : `        ldx lvlMeT              ; one slot: which level is in it is known at build time,
         lda #${hx(LVLALL[0]?.level ?? 0)}                 ;   and lvlAtT is not emitted for a single slot
         sta lvlMeT
-`}` }        jsr lvlStart            ; the LIVE level's start -- boot and every death come here
+`}` }${FALL ? `        lda #$00                ; ---- NOT FALLING. Say so. ----
+        sta fallSt              ; fsZero: the main loop's first act is "lda fallSt / beq mfIn", and
+                                ;   nothing had ever written this. See fallSt's own note: it worked
+                                ;   only while its page came up zero, and the relayout moved it.
+                                ;   entry is also the RETURN restart, so a restart mid-drop needs
+                                ;   this too -- that path could not have worked either.
+` : ''}        jsr lvlStart            ; the LIVE level's start -- boot and every death come here
 ${SLOWMO ? `        lda #$01
         sta smCnt               ; 1, not SLOWMO: step on the FIRST frame, so the traverse starts
                                 ; from the requested position rather than SLOWMO frames into it
@@ -10214,6 +10302,15 @@ pfNIni: sta pfNum,x
 ` : ''}${FOVCHK ? `        sta fovDis              ; FOVCHK: counters start clean (A is still 0)
         sta fovBad
         sta fovWld
+` : ''}${CONECHK ? `        sta coneRej             ; CONECHK: counters start clean (A is still 0)
+        sta coneRej+1
+        sta coneDis
+        sta coneDis+1
+        sta coneBad
+        sta coneBad+1
+        sta cnV
+` : ''}${CULLCNT && ENTCONE ? `        sta culCone
+        sta culCone+1
 ` : ''}${MARCHCNT ? `        sta mcPiv
         sta mcPiv+1
         sta mcMid
@@ -15007,7 +15104,86 @@ orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rat
         lda orbYCT,x
         sbc py+1
         sta oiy
-        jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+${ENTCONE ? `        ; ---- in the view cone at all? Decided from the GRID, with no multiply ----
+        ; ~45 cycles against the four oTerm products orbProj needs to reach the same verdict. The
+        ; magnitudes and signs it leaves behind are exactly orbProj's own prologue; it recomputes
+        ; them, which costs the 15% that get through about 30 cycles and keeps the two routines
+        ; independent of each other.
+        lda oix
+        bpl cnXP
+        eor #$ff
+        clc
+        adc #$01
+cnXP:   sta cnB                 ; |dx| (cnB is the bearing later; it is free until then)
+        lda oiy
+        bpl cnYP
+        eor #$ff
+        clc
+        adc #$01
+cnYP:   sta cnT                 ; |dy|
+        cmp cnB
+        bcs cnChb
+        lda cnB
+cnChb:  cmp #$02                ; Chebyshev distance, and the tolerance index
+        bcc ${CONECHK ? 'cnNear' : 'cnYes'}               ; ADJACENT OR UNDER US: the cell centres are up to 45 degrees from
+                                ;   the true bearing here, so there is no tolerance that both
+                                ;   rejects anything and is safe. Let it through; it is one entity
+                                ;   and it is almost certainly on screen anyway.
+        tay
+cnHlv:  cmp #$08                ; halve both until each fits the 8x8 quadrant table. max() and
+        bcc cnIx                ;   >>1 commute, so the Chebyshev value tracks the halving
+        lsr cnB
+        lsr cnT
+        lsr
+        jmp cnHlv
+cnIx:   lda cnT                 ; index = (|dy| << 3) | |dx|
+        asl
+        asl
+        asl
+        ora cnB
+        tax
+        lda coneBQT,x           ; the first-quadrant bearing...
+        sta cnB
+        lda oix                 ; ...and the quadrant, from the two signs: dx < 0 mirrors about
+        bpl cnQX                ;   the y axis (128 - b), dy < 0 about the x axis (-b), and
+        lda #$80                ;   applying them in that order gives all four quadrants
+        sec
+        sbc cnB
+        sta cnB
+cnQX:   lda oiy
+        bpl cnQY
+        lda #$00
+        sec
+        sbc cnB
+        sta cnB
+cnQY:   lda coneTolT,y          ; Y still holds the UNSHIFTED distance
+        sta cnT
+        lda cnB
+        sec
+        sbc pa                  ; how far off the heading, as a signed 8-bit difference
+        clc
+        adc cnT                 ; the standard range test: (b - pa + tol) >= 2*tol is outside
+        asl cnT
+        cmp cnT
+        ${CONECHK ? `ldx #$00                ; CONECHK: note the verdict, do NOT act on it
+        bcc cnKeep
+        dex
+        inc coneRej
+        bne cnKeep
+        inc coneRej+1
+cnKeep: stx cnV
+        jmp cnYes
+cnNear: lda #$00                ; the near-field bypass lands here so cnV is CLEARED. Left stale it
+        sta cnV                 ;   held the LAST entity's verdict, which can only invent a failure
+                                ;   that did not happen -- but an instrument that can cry wolf is
+                                ;   worthless on the day it is quiet. Cycles do not matter here;
+                                ;   CONECHK is never a build anyone measures.` : CULLCNT ? `bcc cnYes
+        inc culCone             ; CULLCNT: rejected before any multiply ran
+        bne cnCn1
+        inc culCone+1
+cnCn1:  jmp orbNo` : 'bcs orbNo               ; outside the cone: nothing else needs computing'}
+cnYes:
+` : ''}        jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
 ${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
         inc culPrj
         bne oc2
@@ -15018,6 +15194,13 @@ ${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull said off scre
         beq fovAgr              ;   that is a disagreement at the projection level; the box tests
         inc fovDis              ;   below may still reject it, so also count what SURVIVES them
 fovAgr:
+` : ''}${CONECHK ? `        lda cnV                 ; CONECHK: the cone said no and orbProj said yes. Allowed --
+        beq cnAgr               ;   the box tests below may still drop it -- but counted, because
+        inc coneDis             ;   the ones that reach a SPRITE are the real failures
+        bne cnDs1
+        inc coneDis+1
+cnDs1:
+cnAgr:
 ` : ''}
 ${DIE ? `        lda oidx                ; the death sweep steers by ONE entity's column offset, so
         cmp dieIdx              ;   test identity, not tallness: hole-like entities reach the tall
@@ -15528,6 +15711,13 @@ ${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull would have dr
         beq fovYok              ;   SPRITE. This must read zero, always.
         inc fovBad
 fovYok:
+` : ''}${CONECHK ? `        lda cnV                 ; CONECHK: the cone would have dropped something that got a
+        beq cnYok               ;   SPRITE -- a visible entity deleted. This must read zero.
+        inc coneBad
+        bne cnBd1
+        inc coneBad+1
+cnBd1:
+cnYok:
 ` : ''}        rts
 orbNo:  ldx oidx
         lda #$00
@@ -19033,6 +19223,16 @@ orbAnchT: !byte ${ORBANCH.join(',')}
 
 ; REMOVED 2026-09-26, nothing in the image named it: orbHgtT: sprite height per variant, 21 or 42. Nothing read it; it is one shift from ORBEXP.
 angVarT: !byte ${angVarT.join(',')}
+${ENTCONE ? `; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
+; 64 + ${CONE_DMAX + 1} bytes of PURE GEOMETRY. atan2 of a cell delta is the same on every level, so unlike
+; holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
+; First quadrant only, stride 8, both magnitudes 0..7; the other three come from the signs.
+coneBQT: !byte ${CONE_BQ.join(',')}
+; Indexed by Chebyshev distance. ${CONE_HALF} is half the cone (atan(3/4), ENTFOV's own verified bound,
+; plus two units); the rest is how far the cell-centre bearing can be from the true one -- the
+; player's 0.707 of slack inside their own cell, and the rounding the >>1 folding introduces.
+; Entry 0 and 1 are never read: the test bails out below distance 2, where no tolerance is safe.
+coneTolT: !byte ${CONE_TOL.join(',')}` : ''}
 arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const d = arcSpan(arcYT[ARC_DROP_N + n], (arcET[ARC_DROP_N + n] << 24) >> 24)[1];
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
