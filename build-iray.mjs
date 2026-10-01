@@ -2674,7 +2674,22 @@ for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 1)));
 // scratch codes a buffer has and the rest went unstamped -- the bottom of an orb showing through
 // a wall it was standing behind (the user, 2026-09-30, at X57D Y860 A9C40).
 const OCC_VRT = glyphs.map(g => g.every(r => r === g[0]) ? 1 : 0);
-const OCCSYN = process.env.OCCSYN !== '0';
+// OCCSYN: use oSPut -- the per-cell dispatch with the pre-built splits. Always on now: the
+// OCCSYN=0 path was the PRE-oSPut code, whose interior loop stamps only cells that are FULLY wall
+// ("jsr oSWall / bcc oSCCol") and skips every ramp or step. On a wall edge that is most of them, so
+// it stamped nothing at all at the user's pose -- a stale A/B that reads as "occlusion is broken",
+// which is the silent trap this file warns about elsewhere. Removed rather than kept as a choice.
+const OCCSYN = true;
+// OCCSYNTH=1 brings back the SYNTHESIS ARM: copying a wall-edge cell's own ramp into a scratch
+// glyph with 01 -> 11. DEFAULT OFF (the user, 2026-10-01: "I'm inclined to turn it off completely
+// and revisit if we ever see anything that needs it again... the occlusion stamp only needs to
+// worry about the closer wall line"). With it off, a cell a pre-built split cannot express takes
+// the split anyway, which is what OCCFB=block already does when the scratch budget runs out.
+// What it was for is the WALL-BASE OVERHANG: at a wall's foot the cell is floor with a sliver of
+// wall along its top, and a whole-column split there hangs the stamp up to 7px over the floor
+// (reported at X12B Y9CA AEF00). If that does not come back, this can be deleted outright.
+const OCCSYNTH = process.env.OCCSYNTH === '1';
+if (OCCSYNTH) DIAG.push('OCCSYNTH=1');
 const OCCSYN_N = +(process.env.OCCSYNN ?? 6);
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
@@ -3828,11 +3843,13 @@ const PROF_BUFS = {
   pfTmp: 1, pfTmp2: 1, pfN: 1, pfCurX: 1, pfDLo: 1, pfDHi: 1,
   pfRow: 1, pfArm: 1, pfDone: 1, pfWant: 1,
 };
+const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8 } : {};
 const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
 // Only when the profiler is built: on an ordinary build these names do not exist and a size
 // declared for them would reserve space for nothing.
 if (PROFILE) Object.assign(RUNTIME_BUFS, PROF_BUFS);
+Object.assign(RUNTIME_BUFS, OCC_BUFS);
 // ---- what a RAM equate actually reserves ----
 // PAGE-ROUNDING IS THE SAFE DEFAULT and stays the default: an equate with no declared length
 // could be a 256-byte table as easily as a byte, and under-reserving one is how a level shadow
@@ -10085,6 +10102,15 @@ osDC    = $85fb                 ; occStamp: the de-seam's current cell column
 oSCnt   = $85fc                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $85fd                 ;   and spans visited -- the three numbers the cost is made of
 oSSpn   = $85fe
+oSHbase = $70ee                 ; OCCFBN: baseHi as occStamp saw it, latched
+oSHist  = $70e8                 ; OCCFBN: oSPut's branch histogram, 6 bytes, FREE-RUNNING.
+                                ;   NOT in the $8500 page: that is the orb scratch page and it is
+                                ;   densely occupied, $8580 included -- and a 6-byte array declared
+                                ;   as ONE equate is only guarded for its first byte, so the
+                                ;   overlap check said nothing and all six read zero for ever. -- asked / BLANK /
+                                ;   readout / already-stamped / pre-built split / synthesised.
+                                ;   "Which branch does the cell that goes unstamped take" is not a
+                                ;   question to answer by reading the dispatch.
 oSFbN   = $85ff                 ; OCCFBN: edge cells THIS FRAME that wanted a synthesised glyph
                                 ;   and could not get one -- the scratch codes ran out and oSPfb
                                 ;   stamped the old whole-column block instead. Per frame, zeroed
@@ -14486,11 +14512,13 @@ ${DBGORB ? `        lda #$00
                                 ; orb does, its slots are at the far end of the array, and the
                                 ; scratch-glyph and run-cache setup below has to run for it too.
                                 ; The test moved to just above oSLoop, where the setup is done.
-${process.env.OCCFBN ? `        lda #$00
+${process.env.OCCFBN === '2' ? '' : `        lda #$00
         sta oSFbN               ; OCCFBN: per frame, so a static pose reads a steady number --
                                 ;   and so it can never be the uninitialised-scratch trap that
-                                ;   FALLNOW's counter was.
-` : ''}${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
+                                ;   FALLNOW's counter was. OCCFBN=2 drops the reset so it
+                                ;   FREE-RUNS -- a per-frame counter read once can be caught in
+                                ;   the prologue just after the reset, which reads as "never".
+`}${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
         ldx baseHi              ;   Buffer A ($e0) takes the first half, B the second; see OCCSYN.
         cpx #$e0                ;   (A still holds onv for the store below, so X and Y do the test)
         beq oSSynA
@@ -14500,6 +14528,9 @@ ${process.env.OCCFBN ? `        lda #$00
 oSSynA: ldx #$00
 oSSynB: stx osSyn
         sty osLim
+${process.env.OCCFBN ? `        ldx baseHi              ; OCCFBN: latched HERE. Read after the frame, baseHi has already
+        stx oSHbase             ;   flipped, so every sample looked like the halves were inverted.
+` : ''}
 ` : ''}        sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
         lda #$00                ;   selection below leaves the cache base in A, and with this store
         sta osI                 ;   after it, osN got #<cbA / #<cbB -- 80 or 120 -- so the loop
@@ -14732,7 +14763,7 @@ oSDn:   rts
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
-oSCells:${ORBNOCELL ? `rts
+oSCells:${process.env.OCCFBN ? ' inc oSHist+6           ; OCCFBN: oSCells ENTRIES, free-running\n       ' : ''}${ORBNOCELL ? `rts
 ` : ''}        lda osL
         and #$03
         tay
@@ -14771,7 +14802,7 @@ oSCR1:  cmp #$19
                                 ; the loop's own counters. That is how one bad row became a
                                 ; runaway loop writing across the machine.
         tay
-        lda rowLoT,y
+${process.env.OCCFBN ? '        inc oSHist+7            ; OCCFBN: ...and rows that got past the bounds checks\n' : ''}        lda rowLoT,y
         sta osPtr
         lda rowHiT,y
         clc
@@ -23032,16 +23063,20 @@ oSPut:  sta ohMsk
         tax
         lda synMskT,x           ; the pair-high-bit mask for the COVERED columns
         sta osCov
-        lda (osPtr),y
-        beq oSPdn               ; BLANK: leave it
+${process.env.OCCFBN ? '        inc oSHist+0            ; OCCFBN: cells oSPut was ASKED to stamp\n' : ''}        lda (osPtr),y
+        beq ${process.env.OCCFBN ? 'oSHbl' : 'oSPdn'}               ; BLANK: leave it
         cmp #${hx(CELLCODES)}
         bcc oSPedg              ; a ramp or a step (SOLID is caught below)
         cmp #${hx(SEAM0)}
-        bcc oSPdn               ; a readout: leave it
+        bcc ${process.env.OCCFBN ? 'oSHro' : 'oSPdn'}               ; a readout: leave it
         cmp #${hx(SEAM0 + NSEAM)}
         bcc oSPsol              ; a seam is a whole wall
-        rts                     ; an occluder or scratch code already
-oSPedg: cmp #${hx(SOLID)}
+${process.env.OCCFBN ? '        inc oSHist+3            ; OCCFBN: ALREADY an occluder or scratch code -- left alone\n' : ''}        rts                     ; an occluder or scratch code already
+${process.env.OCCFBN ? `oSHbl:  inc oSHist+1            ; OCCFBN: BLANK
+        jmp oSPdn
+oSHro:  inc oSHist+2            ; OCCFBN: a readout
+        jmp oSPdn
+` : ''}oSPedg: cmp #${hx(SOLID)}
         beq oSPsol
         ; ---- can a PRE-BUILT split say this cell? ----
         ; A vertical boundary can be said by one of the seven occluders (or their white-backed
@@ -23049,16 +23084,20 @@ oSPedg: cmp #${hx(SOLID)}
         ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
         ; whole scratch budget and leaving its lower cells unstamped.
         tax
-        lda occVrtT,x
-        beq oSPsyn
-        lda ohMsk               ; oSBack reads the cell again and says which backing is right:
+${OCCSYNTH ? `        lda occVrtT,x
+        beq oSPsyn` : `                                ; OCCSYNTH=0: no synthesis, so EVERY edge cell takes the
+                                ; pre-built split -- which is what the scratch-budget fallback
+                                ; already does when it runs out. oSPsyn below is then reachable
+                                ; only as dead code behind its own label.`}
+${process.env.OCCFBN ? '        inc oSHist+4            ; OCCFBN: a PRE-BUILT split says it -- no scratch code needed\n' : ''}        lda ohMsk               ; oSBack reads the cell again and says which backing is right:
         jsr oSBack              ;   carry set = wall beyond the split, clear = floor beyond
         lda osGly
         bcs oSPvs
         lda osGlyW
 oSPvs:  sta (osPtr),y
         rts
-oSPsyn: ldx osSyn
+oSPsyn:${process.env.OCCFBN ? ` inc oSHist+5            ; OCCFBN: ...and this one needs SYNTHESISING
+       ` : ''} ldx osSyn
         cpx osLim
         bcs oSPfb               ; this buffer's scratch exhausted this frame: the old whole-column stamp
         sty osPY

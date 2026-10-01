@@ -125,7 +125,7 @@ dpy     = $55
 ppHi    = $56
 ppLo    = $57
 tmp2    = $58
-vsOn    = $9fd2                 ; VSPLIT: this column is a step column with a stack in progress
+vsOn    = $54ff                 ; VSPLIT: this column is a step column with a stack in progress
 vsRow   = $9fd3                 ;   the row the FAR wall's top lands in (rbT of the far height)
 vsCode  = $9fd4                 ;   the pure-split glyph for this column's kpos and side
 kpos    = $6c                   ; step path: boundary position, and qB held across the
@@ -284,7 +284,7 @@ thsel   = $5efd                 ; threshold table to read it out of (0 = ramp, 1
 paqL    = $54fc                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
 paqH    = $54fd
 rqL     = $54fe                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $5bff                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+rqH     = $5cfe                 ; rqH (0..3) picks which quarter of the 1024-entry table.
                                 ; It was declared TWICE, at $cbf9 and here; the assembler takes
                                 ; the last, so $cbf9 was never the live one. Removed rather
                                 ; than left as a trap for the next reader.
@@ -328,7 +328,7 @@ bfsLast = $59                   ; frameCnt when the fill last ran; see bfsExp
 mulWY   = $5a                   ; mulW saves Y here
 
 
-fallMk  = $54ff                 ; FALLMARK=undefined: how far the fall's level change got
+fallMk  = $5eff                 ; FALLMARK=undefined: how far the fall's level change got
 
 seamT   = $5bc8                 ; per cell-column (40): char code for the solid run --
                                 ;   SOLID, or a seam variant when a panel line lands here
@@ -594,7 +594,7 @@ fallSnapD = $5500                ; the destination room, snapshotted before the 
 fallSnapS = $5800                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
-fallSt  = $5eff                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
+fallSt  = $5cff                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
                                  ; CLEARED AT ENTRY -- see fsZero. It used to be initialised by
                                  ; nothing at all, which was free only while it sat in a page that
                                  ; happened to come up zero. The relayout rehomed it ($5aff in the
@@ -749,6 +749,15 @@ osDC    = $5770                 ; occStamp: the de-seam's current cell column
 oSCnt   = $5771                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $5772                 ;   and spans visited -- the three numbers the cost is made of
 oSSpn   = $5773
+oSHbase = $5bff                 ; OCCFBN: baseHi as occStamp saw it, latched
+oSHist  = $9fd2                 ; OCCFBN: oSPut's branch histogram, 6 bytes, FREE-RUNNING.
+                                ;   NOT in the $8500 page: that is the orb scratch page and it is
+                                ;   densely occupied, $8580 included -- and a 6-byte array declared
+                                ;   as ONE equate is only guarded for its first byte, so the
+                                ;   overlap check said nothing and all six read zero for ever. -- asked / BLANK /
+                                ;   readout / already-stamped / pre-built split / synthesised.
+                                ;   "Which branch does the cell that goes unstamped take" is not a
+                                ;   question to answer by reading the dispatch.
 oSFbN   = $5774                 ; OCCFBN: edge cells THIS FRAME that wanted a synthesised glyph
                                 ;   and could not get one -- the scratch codes ran out and oSPfb
                                 ;   stamped the old whole-column block instead. Per frame, zeroed
@@ -4563,6 +4572,12 @@ occStamp:
                                 ; orb does, its slots are at the far end of the array, and the
                                 ; scratch-glyph and run-cache setup below has to run for it too.
                                 ; The test moved to just above oSLoop, where the setup is done.
+        lda #$00
+        sta oSFbN               ; OCCFBN: per frame, so a static pose reads a steady number --
+                                ;   and so it can never be the uninitialised-scratch trap that
+                                ;   FALLNOW's counter was. OCCFBN=2 drops the reset so it
+                                ;   FREE-RUNS -- a per-frame counter read once can be caught in
+                                ;   the prologue just after the reset, which reads as "never".
         ldy #$03   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
         ldx baseHi              ;   Buffer A ($e0) takes the first half, B the second; see OCCSYN.
         cpx #$e0                ;   (A still holds onv for the store below, so X and Y do the test)
@@ -4573,6 +4588,7 @@ occStamp:
 oSSynA: ldx #$00
 oSSynB: stx osSyn
         sty osLim
+
         sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
         lda #$00                ;   selection below leaves the cache base in A, and with this store
         sta osI                 ;   after it, osN got #<cbA / #<cbB -- 80 or 120 -- so the loop
@@ -8634,7 +8650,7 @@ opbBaseT: !byte 0,12,24,36,48,60,72,84
         ; further; past that it wants a different home. Both ends are guarded by the
         ; assembler's own "moves backward".
 ; [origin folded into the run above by compact.mjs]
-        * = $3c91
+        * = $3c96
         ; ---- how many raster interrupts the frame just drawn took ----
         ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
         ; front of you, not an average. Six of these is about 10 fps.
@@ -9002,7 +9018,7 @@ chainEnd:
         ; Out here only because the main code block ends a few bytes short of ORB_SMALL once
         ; PROFILE adds its ticks. Reached by a patched jsr from holeTail, so nothing falls in.
 ; [origin folded into the run above by compact.mjs]
-        * = $3d14
+        * = $3d19
 ; X = h. A = the rung, or $ff for "past the smallest".
 hlRungH:lda holeVarT,x
         rts
@@ -9207,7 +9223,7 @@ orbVarT: !byte 15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12
         * = $b000
 bfsD1:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps
 ; [origin folded into the run above by compact.mjs]
-        * = $3d48
+        * = $3d4d
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
 ; BFS guarantees one exists for every reachable cell, so the only $ff cases are a map that has
@@ -9744,7 +9760,7 @@ fHiT:   !byte 24,24,24,24,24,22,20,18,16,14,12,10,9,7,6,4,2,0,0,0,0,24,24,24,24,
         * = $8b1f
 krillRt: !fill 251, 0
 ; [origin folded into the run above by compact.mjs]
-        * = $3f04
+        * = $3f09
 ; ---- klPark / lvlLoad: THE LEVEL COMES OFF THE DISK ----
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
 ; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
@@ -10012,7 +10028,7 @@ moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
         !byte 232,233,234,236,237,239,240,242,244,245,247,248,250,251,253,254
 
 ; [origin folded into the run above by compact.mjs]
-        * = $3f66
+        * = $3f6b
 ; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
 ; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
 ; that drawFps falling through into whatever follows it still does. The only branches that
@@ -10321,7 +10337,7 @@ a2F:    sta (fdB),y
 ; routine runs ONCE, at boot, and never again -- so it was the obvious thing to move out of
 ; contested space. Same reasoning that moved dpCand out of the main block.
 ; [origin folded into the run above by compact.mjs]
-        * = $4156
+        * = $415b
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -10525,7 +10541,7 @@ setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster
         ; it is COLD, jsr-entered from symPut once per level entry, and it fits whole in the page
         ; bndT was holding down on its own. See bndT for the move that freed it.
 ; [origin folded into the run above by compact.mjs]
-        * = $4254
+        * = $4259
 ; ---- the idol subsystem lives in the front of seamEdge's page ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
 ; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
@@ -10685,7 +10701,7 @@ seamEdge:
         ; !fill MAPN tails are NOT: those collapse to three bytes on a build whose live level is
         ; the 253-cell one. Code, not data, because the blocks that were full held code.
 ; [origin folded into the run above by compact.mjs]
-        * = $434c
+        * = $4351
 arcCdT: !byte 2,7,8,15,17,19,20,21,25,29,40,41,42,43,44,58,61,70,81,83,90,107,116,119,132,139,140,142,147,155,161,164,193
 
 ; ---- dpDiag: is this direction a squeeze THROUGH a corner? ----
@@ -10728,7 +10744,7 @@ dpCnr:  jsr dpCand              ; Z set when that corner cell is open
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
         ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
 ; [origin folded into the run above by compact.mjs]
-        * = $439d
+        * = $43a2
 ; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
 ; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
 ; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
@@ -10739,7 +10755,7 @@ pedOff: ldy idolHand
         sta idolOnPedT,y
 poNo:   rts
 ; [origin folded into the run above by compact.mjs]
-        * = $43a8
+        * = $43ad
 dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
         ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
         ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
@@ -10861,7 +10877,7 @@ runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,19,0,0,0,0,0,1,
 ; ---- snapCp: the half-height snapshot copy, out here because both its callers' blocks are
 ; full. 64 bytes of stable slack; the origin after it puts the cursor back.
 ; [origin folded into the run above by compact.mjs]
-        * = $43ef
+        * = $43f4
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         tay
@@ -10923,7 +10939,7 @@ rsT:    !byte 13,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $4425
+        * = $442a
         ; coarse delta tables vacated. It used to sit at $609b, a hole that only LEVEL 1's map
         ; leaves -- level 2's data ran straight through it and the build died. Everything from
         ; RELOC on is engine table space at fixed origins, so it is free on EVERY map.
@@ -10970,7 +10986,7 @@ snKDn:  rts
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
 ; [origin folded into the run above by compact.mjs]
-        * = $446f
+        * = $4474
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
 ; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
@@ -11556,7 +11572,7 @@ seMsk   = $5f88                 ; $55 or $00: does this level want the outline
 seN     = $5f89                 ; glyphs left
 seC00   = $5f8a                 ; 8 bytes: ground/ceiling pixels, per row
 seNB    = $5f92                 ; 8 bytes: the row being built, ending exactly at $bdff
-        * = $475a
+        * = $475f
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -12472,8 +12488,10 @@ oSPedg: cmp #$01
         ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
         ; whole scratch budget and leaving its lower cells unstamped.
         tax
-        lda occVrtT,x
-        beq oSPsyn
+                                ; OCCSYNTH=0: no synthesis, so EVERY edge cell takes the
+                                ; pre-built split -- which is what the scratch-budget fallback
+                                ; already does when it runs out. oSPsyn below is then reachable
+                                ; only as dead code behind its own label.
         lda ohMsk               ; oSBack reads the cell again and says which backing is right:
         jsr oSBack              ;   carry set = wall beyond the split, clear = floor beyond
         lda osGly
