@@ -2624,6 +2624,18 @@ for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 1)));
 // use codes SYN0..SYN0+N/2-1 and buffer B's the rest; a frame needing more than its half falls
 // back to the old whole-column stamp for the rest. The user's own idea, costed in August,
 // buildable now that the charsets are plain RAM (2026-09-16). OCCSYN=0 to A/B.
+// ---- WHICH CELLS A PRE-BUILT SPLIT CAN ALREADY EXPRESS ----
+// The seven occluders above are `new Array(8).fill(occRow(...))` -- every row identical, because
+// a column split is a VERTICAL boundary. So a cell glyph whose eight rows are all equal has a
+// vertical boundary too, and one of the pre-built splits (black-backed, or the white-backed set
+// for a silhouette with floor beyond) covers it exactly. A cell whose rows DIFFER is split across
+// rows -- the wall's base -- which no column split can say, and that is the case OCCSYN exists
+// for: "the stamp used to quantise to 8-pixel char rows at the wall's base".
+// Without this test oSPut sent EVERY ramp cell to synthesis, including plain vertical wall edges,
+// which are the commonest stamp there is. Five of them against one edge exhausted the three
+// scratch codes a buffer has and the rest went unstamped -- the bottom of an orb showing through
+// a wall it was standing behind (the user, 2026-09-30, at X57D Y860 A9C40).
+const OCC_VRT = glyphs.map(g => g.every(r => r === g[0]) ? 1 : 0);
 const OCCSYN = process.env.OCCSYN !== '0';
 const OCCSYN_N = +(process.env.OCCSYNN ?? 6);
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
@@ -14542,11 +14554,13 @@ ${OCCSYN ? `        ; With synthesis the single-cell case is exact: the covered 
         ldx ohLst
         stx osGly
         ldx ohLstW
-${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jmp oSC1g
+        stx osGlyW              ; the white-backed twin: oSPut picks between them
+        jmp oSC1g
 oSC1r:  ldx ohFst
         stx osGly
         ldx ohFstW
-${OCCFB === 'block' ? '        stx osGlyW\n' : ''}oSC1g:  pla
+        stx osGlyW              ; the white-backed twin: oSPut picks between them
+oSC1g:  pla
         jsr oSPut
         jmp oSCNx
 ` : `        lda osL
@@ -14586,7 +14600,8 @@ oSCMid: ${DBGORB ? `inc oSCnt
         ldx ohFst
         stx osGly
         ldx ohFstW
-${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jsr oSPut
+        stx osGlyW              ; the white-backed twin: oSPut picks between them
+        jsr oSPut
 ` : `lda ohFstM
         jsr oSBack        ; the FIRST cell straddles the wall's edge, so it is stamped
         lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
@@ -14600,7 +14615,8 @@ oSCMs:               ; first cell: the stamp starts part way in, so clip from th
 ${OCCSYN ? `        lda #$00                ; interior: every column covered
         ldx #${hx(OCC_FULL)}
         stx osGly
-${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jsr oSPut
+        stx osGlyW              ; the white-backed twin: oSPut picks between them
+        jsr oSPut
         jmp oSCCol
 ` : `        jsr oSWall
         bcc oSCCol              ; ditto for every interior cell
@@ -14611,7 +14627,8 @@ ${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jsr oSPut
         ldx ohLst
         stx osGly
         ldx ohLstW
-${OCCFB === 'block' ? '        stx osGlyW\n' : ''}        jsr oSPut
+        stx osGlyW              ; the white-backed twin: oSPut picks between them
+        jsr oSPut
 ` : `lda ohLstM
         jsr oSBack
         lda ohLst
@@ -18533,6 +18550,7 @@ sockHT: !byte ${SOCK.hT.join(',')}   ; DESCENDING h thresholds, scanned by hlRun
 ;     it runs at oSDone, AFTER every cell of the orb has already been stamped and read.)
 ;   pair 11, another entity's occluder, where two stamps overlap. Opaque, and backing it white
 ;     would punch a hole through the first stamp.
+occVrtT: !byte ${OCC_VRT.join(',')}   ; 1 = a column split expresses this cell; see OCC_VRT
 cellFillT: !byte ${[...Array(256)].map((_, c) => {
   const g = glyphs[c] || new Array(8).fill(0);
   let m = 0;
@@ -22346,7 +22364,22 @@ oSPut:  sta ohMsk
         rts                     ; an occluder or scratch code already
 oSPedg: cmp #${hx(SOLID)}
         beq oSPsol
-        ldx osSyn
+        ; ---- can a PRE-BUILT split say this cell? ----
+        ; A vertical boundary can be said by one of the seven occluders (or their white-backed
+        ; twins) and costs no scratch code. Only a cell split across ROWS -- the wall's base --
+        ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
+        ; whole scratch budget and leaving its lower cells unstamped.
+        tax
+        lda occVrtT,x
+        beq oSPsyn
+        lda ohMsk               ; oSBack reads the cell again and says which backing is right:
+        jsr oSBack              ;   carry set = wall beyond the split, clear = floor beyond
+        lda osGly
+        bcs oSPvs
+        lda osGlyW
+oSPvs:  sta (osPtr),y
+        rts
+oSPsyn: ldx osSyn
         cpx osLim
         bcs oSPfb               ; this buffer's scratch exhausted this frame: the old whole-column stamp
         sty osPY
