@@ -107,7 +107,22 @@ const LATE = (process.env.LATE ?? '').split(',').filter(v => v.trim() !== '')
 // per-feature flag keys off this list and not off CHAIN, and the cost of a late level's features
 // is paid at build time whether or not it is resident at boot.
 const ALLLVL = [...CHAIN, ...LATE];
-if (![1, 2, 3, 4, 5, 6, 7].includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels 1 to 7`);
+// ---- EVERY LEVEL THE SOURCE DEFINES, whatever this build happens to carry ----
+// The per-feature flags below used to key off ALLLVL -- "does any level IN THIS BUILD use the
+// idol?" -- so the engine's mechanics, and therefore its size, depended on which levels the
+// chain named. HAS_IDOL alone is 43 sites: CHAIN=1,2,3,4 compiled the whole idol mechanic out
+// and CHAIN=1..7 compiled it in, a 1,166-byte difference in code. That made a small chain a
+// DISHONEST measurement of the engine (and a weaker test), and it meant adding a level could
+// push the image over a ceiling for reasons having nothing to do with that level.
+//
+// A mechanic is part of the engine. Whether the four levels on this particular disk happen to
+// use it is not the engine's business -- a level loaded later may, and under LVLLOAD there is
+// nowhere for code to arrive into. So every feature flag now asks "does any level THE GAME HAS
+// use it", which is constant, and the engine is byte-identical whatever CHAIN says.
+// Bounded by how many mechanics exist, not by how many levels do.
+const LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7];
+if (!LEVEL_IDS.includes(LVL)) throw new Error(
+  `LVL=${LVL}: the game has levels ${LEVEL_IDS[0]} to ${LEVEL_IDS[LEVEL_IDS.length - 1]}`);
 const SOCKROOM = LVL === 2;
 // LEVEL 5 IS BACK (2026-09-28). It was retired to a 6x6 stub on 2026-09-27 while the carry
 // mechanic was built; its map and wall groups were kept here unreferenced so that bringing it
@@ -281,7 +296,7 @@ const FLOORDK_PAT = (process.env.FLOORDKPAT ?? '44,11,44,11,44,11,44,11')
   .split(',').map(v => parseInt(v.trim(), 16));
 if (FLOORDK_PAT.length !== 8 || FLOORDK_PAT.some(v => !(v >= 0 && v <= 255)))
   throw new Error('FLOORDKPAT wants eight hex bytes, one per glyph row');
-const ANYFLOORDK = ALLLVL.some(n => LEVEL_FLOORDK[n]);
+const ANYFLOORDK = LEVEL_IDS.some(n => LEVEL_FLOORDK[n]);        // LEVEL_IDS, not ALLLVL: see there
 // ---- per level: outline the wall where it meets the ceiling, in the SEAM ink ----
 // Any bit-pair-01 (wall) pixel orthogonally touching a bit-pair-00 (ground/ceiling) pixel
 // becomes bit pair 10 (seam). Done at RUNTIME over the ramp and step glyphs, codes 2..200.
@@ -303,7 +318,7 @@ const ANYFLOORDK = ALLLVL.some(n => LEVEL_FLOORDK[n]);
 // a decoration on it. The hub is deliberately left plain, which is the per-level switch doing
 // the job it was asked for.
 const LEVEL_SEAM = {};   // was { 5: 1 } -- the all-black wireframe, retired with level 5's design
-const ANYSEAM = ALLLVL.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDGE === n : LEVEL_SEAM[n]));
+const ANYSEAM = LEVEL_IDS.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDGE === n : LEVEL_SEAM[n]));
 // ---- per-level SPRITE inks, and the idol's own ----
 // A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
@@ -391,14 +406,14 @@ const idolSprOf = n => {
 // Does the scheme differ anywhere? Same "a table when it varies, an immediate when it does not"
 // rule the palette and the shared sprite inks already use -- so a build where every level agrees
 // pays nothing at all, and the IRQ keeps its immediates.
-const IDOLVARY = k => ALLLVL.some(n => idolSprOf(n)[k] !== idolSprOf(ALLLVL[0])[k]);
-const HAS_IDOL = ALLLVL.some(n => LEVEL_IDOL[n]);
+const IDOLVARY = k => LEVEL_IDS.some(n => idolSprOf(n)[k] !== idolSprOf(LEVEL_IDS[0])[k]);
+const HAS_IDOL = LEVEL_IDS.some(n => LEVEL_IDOL[n]);             // the mechanic is the ENGINE's, not the chain's
 // Which levels stand pedestals, and where. Keyed by level like LEVEL_WALLS rather than derived
 // from HUBROOM, because HAS_PED has to be true for the whole CHAIN -- the ladder is emitted once
 // and every resident level's pedestals draw from it, so asking only about the live level would
 // leave a shadow level's pedestals pointing at bitmaps that were never built.
 const LEVEL_PEDESTALS = { 4: '9,3;9,4;9,5' };
-const HAS_PED = ALLLVL.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
+const HAS_PED = LEVEL_IDS.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
 const PED_LVL = +(Object.keys(LEVEL_PEDESTALS)[0] ?? 0);   // only one level has them
 // IDOLHUB=1: every idol already in the pedestal room, for testing the wall without three
 // errands first. Shorthand for IDOLLOC=<that level> repeated, because that is the only thing
@@ -3756,7 +3771,7 @@ const palOf = n => ({ ...PAL_DEF, ...(LEVEL_PAL[n] ?? {}) });
 // (start pose from lvlStXLoT+4), trapped in a wall (an X,Y that is not a floor cell), no seams
 // (lvlSeamT past its end), "grey1 and black" (lvlPalceilT+4 IS lvlPalseamT+0, which is SEAMCOL,
 // which is grey 1). Nothing was wrong with the levels or with the load.
-const PAL_N = Math.max(...ALLLVL);             // indexed by level id - 1, so it must reach the highest
+const PAL_N = Math.max(...LEVEL_IDS);             // indexed by level id - 1, so it must reach the highest
 // SOLID is every-column-pair-01 in all eight rows ($55), so a pair-00 mark is just those bit
 // pairs CLEARED -- no pristine copy to keep, and "plain" is eight $55s.
 // The same mark again, for a cell that is all bit pair 11 rather than all 01. OCC_FULL is the
@@ -3783,10 +3798,10 @@ const symRowsInk = (art, field, ink) => {
 // had no ground to show through. Level 5 is red on black now and does, so nothing wants this --
 // kept as a mechanism for whichever level next paints itself one colour.
 const LEVEL_SYMSEAM = {};
-const ANYSYM = ALLLVL.some(n => LEVEL_SYM[n]);   // ALLLVL, not CHAIN: see it there
+const ANYSYM = LEVEL_IDS.some(n => LEVEL_SYM[n]);   // LEVEL_IDS, not CHAIN: see it there
 // Does any level's GROUND colour differ from the first's? If not there is nothing for a split to
 // show, and none of the two-tone machinery below is emitted.
-const CEILVARY = ALLLVL.some(n => palOf(n).ceil !== palOf(ALLLVL[0]).ceil);
+const CEILVARY = LEVEL_IDS.some(n => palOf(n).ceil !== palOf(LEVEL_IDS[0]).ceil);
 // How far BELOW the arc's split the ground colour changes, in raster lines. The charset split
 // has to sit at the arc's TOP -- that is where the rim glyph needs charset A -- but the arc's
 // top rows still draw the upper level's floor around the curve, so swapping colour there tints
@@ -4902,7 +4917,7 @@ const sprOf = n => {
     if (process.env[nm + n] !== undefined) v[k] = +process.env[nm + n];
   return v;
 };
-const SPRVARY = ALLLVL.some(n => ['under', 'hi'].some(k => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]));
+const SPRVARY = LEVEL_IDS.some(n => ['under', 'hi'].some(k => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]));
 
 // Placement. Greedy over the open cells with a minimum spacing, which spreads them through
 // every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
@@ -5252,7 +5267,12 @@ const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.leng
              WALLOFF: String(w.k + 1), LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
   return JSON.parse(readFileSync(tmp, 'utf8'));
 }) : null;
-const WALLVAR = WALLVARS ? WALLVARS[0] : null;   // "is there a wall mechanic at all"
+// "is there a wall mechanic at all" -- an ENGINE question, so it asks LEVEL_IDS and not what
+// this build's levels happen to need. See WALL_DELTA: the flag and the per-level delta data
+// are two different things and sharing one answer made the engine shrink on a chain whose
+// levels had no removable walls. HAZRT below reads this, and hzRunW walks the delta lists.
+const WALL_MECH = LEVEL_IDS.some(n => LEVEL_WALLS[n]);
+const WALLVAR = WALL_MECH ? (WALLVARS?.[0] ?? true) : null;
 // ---- A LATE LEVEL'S WALL DATA TRAVELS WITH THE LEVEL, not with the engine ----
 // A wall delta is a patch list for ONE level's tables: the bytes that change when that level's
 // wall opens. It is meaningless while that level is not live, and yet every wall's list was
@@ -8613,7 +8633,8 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   console.error(`  wall ${k} (level ${WALLS_ALL[k].lvl}, ${cells.length} cells): ${off.length} ` +
     `bytes differ, ${quad.length * 4 + 1} bytes both ways (was ${off.length * 6 + 2})`);
   return { off, on, quad, cells };
-}) : null;
+}) : [];   // [] not null: with the mechanic always compiled (see WALL_DELTA) a build
+           //   whose levels have no removable walls has an EMPTY list, not an absent one
 
 // ---- where a LATE level's wall lists land in bank 3, laid out here so both ends agree ----
 // Straight after the level blocks, in the same region and so in the same file: the tables and
@@ -8737,7 +8758,9 @@ const SHADOW_BASE = SOLO ? SLOT_AT + LVLBLOB : LVLSHADOW;
 // by; the runtime never sees it -- wallPtrs() below turns it into the local id's slot entry.
 const SOLO_WALL_AT = {};
 let SOLO_WALL_LEN = 0;
-if (SOLO && WALL_DELTAS) {
+// .length, not truthiness: WALL_DELTAS is [] in a build that compiles the mechanic but has no
+// deltas to lay out (a WALLOFF variant, whose own walls are already punched out of its map).
+if (SOLO && WALL_DELTAS.length) {
   const BASE = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBLOB);
   // LVLLOAD: one slot, one level in it at a time, so every level's walls start at the same
   // address and the region is as long as the WORST level's -- not the sum. Without it (all
@@ -8805,7 +8828,18 @@ if (SOLO && SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
 if (SOLO) console.error(`level region: ${LVLBLOB} bytes of tables + ${SOLO_WALL_LEN} of wall ` +
   `lists = ${LVLREGION_END - SLOT_AT} per slot, ${Math.ceil((LVLREGION_END - SLOT_AT) / 256)} pages` +
   (LVLLOAD ? `; ${CHAIN.length} level file(s), one live slot` : `; ${CHAIN.length} resident`));
-const WALL_DELTA = WALL_DELTAS ? WALL_DELTAS[0] : null;   // the flag; per-wall data is WALL_DELTAS
+// ---- THE FLAG IS THE ENGINE'S; THE DELTAS ARE THE LEVELS' ----
+// These are two different questions and they used to share one answer. "Is the removable-wall
+// mechanic compiled in?" belongs to the engine and must not depend on which levels this disk
+// carries -- CHAIN=1 has no level with walls, so wallTog, wallSink, hzRunW, wtCells and
+// wallsBack all vanished and the engine measured 636 bytes smaller than the same engine built
+// with level 2 in it. A level loaded later may have walls and there is nowhere for code to
+// arrive into.
+// The DELTA DATA is the opposite: it is per level, each one a diff against its own room, and
+// building it means a subprocess per wall. That stays tied to the levels this build carries.
+// So: the flag asks LEVEL_IDS, the data asks the chain. A build whose levels have no walls now
+// emits the mechanic with an empty list for it to work on, which is exactly inert.
+const WALL_DELTA = WALL_MECH ? (WALL_DELTAS?.[0] ?? true) : null;
 
 // LVLDUMP: this build exists only to hand its per-level tables to another one. Stop before
 // assembling -- the .d64 it would write is not wanted and would clobber the real disk.
@@ -18336,7 +18370,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; is emitted only when some level disagrees with the first -- and asking only the CHAIN levels
 ; meant a property that is constant across 1-4 but different on 5, 6 or 7 emitted NO row at all,
 ; so the late level silently inherited the hardcoded default instead of its own value.
-${SPRVARY ? ['under', 'hi'].filter(k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]))
+${SPRVARY ? ['under', 'hi'].filter(k => LEVEL_IDS.some(n => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]))
   .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
   .join('\n') : ''}
 ${MULTI ? (() => {
@@ -18344,7 +18378,7 @@ ${MULTI ? (() => {
   // lvlBoot still indexes these rows by lvlMeT. Gated on TWOLEV, a SOLO build emitted no rows at
   // all and every level would have rendered in the inks of the one the image was built around.
   const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
-  return Object.keys(REG).filter(k => ALLLVL.some(n => palOf(n)[k] !== palOf(ALLLVL[0])[k]))
+  return Object.keys(REG).filter(k => LEVEL_IDS.some(n => palOf(n)[k] !== palOf(LEVEL_IDS[0])[k]))
     .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
     .join('\n');
 })() : ''}
@@ -20142,8 +20176,8 @@ ${CEILVARY ? `lvlLo:  ldx lvlMeT
   // asked about ALLLVL and this asked about CHAIN, a property that is constant across 1-4 but
   // different on a late level had its row emitted and then never read: the level's own colour
   // sat in the image and lvlLook loaded an immediate over the top of it.
-  const varies = k => ALLLVL.some(n => palOf(n)[k] !== palOf(ALLLVL[0])[k]);
-  const sprV = k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]);
+  const varies = k => LEVEL_IDS.some(n => palOf(n)[k] !== palOf(LEVEL_IDS[0])[k]);
+  const sprV = k => LEVEL_IDS.some(n => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]);
   // ALL THREE, and UNCONDITIONALLY -- a table where the levels disagree, an immediate where
   // they do not, but always written. The idol's inks are per-level data like any other, so they
   // are established on arrival like any other; see the contract above objInit. idolCar in
@@ -20179,7 +20213,7 @@ ${CEILVARY ? `lvlLo:  ldx lvlMeT
   return out;
 })()}
 ${SPRVARY && !ANYFLOORDK ? (() => {
-  const vary = ['under', 'hi'].filter(k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]));
+  const vary = ['under', 'hi'].filter(k => LEVEL_IDS.some(n => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]));
   return vary.map(k => `        lda lvlSpr${k}T,x\n        sta spr${k === 'under' ? 'U' : 'H'}\n` +
     `        sta ${k === 'under' ? '$d025' : '$d026'}\n`).join('');
 })() : ''}${CEILVARY ? `        lda colW                ; the two regions BELOW the departing rim are this level
@@ -20200,7 +20234,7 @@ ${SPRVARY && !ANYFLOORDK ? (() => {
 ; screen back and draws the level's own sprites, so the cast and its palette appear together.
 ; The idol keeps the DEPARTING level's inks for the whole fall, which is what it is wearing.
 lvlSpr:${(() => {
-  const sprV = k => ALLLVL.some(n => sprOf(n)[k] !== sprOf(ALLLVL[0])[k]);
+  const sprV = k => LEVEL_IDS.some(n => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]);
   const IDOLK = HAS_IDOL ? ['under', 'hi'] : [];
   const anyT = ['under', 'hi'].some(sprV) || IDOLK.some(k => IDOLVARY(k));
   let out = anyT ? ` ldx lvlMeT             ; indexed by level id - 1, as lvlLook is\n        dex\n` : `\n`;
