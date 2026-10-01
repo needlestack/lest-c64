@@ -3681,6 +3681,27 @@ if (PROFTOUR && PROFAT) throw new Error('PROFTOUR and PROFAT are two different w
 // PROFN=1: count how often each bucket is closed, so pfTick's own cost can be SUBTRACTED rather
 // than estimated. See the counter in pfTick for why that is not optional at PROFSUB.
 const PROFN = flag('PROFN');
+// ---- ENT1PROF=1: split orbONE, the way ENTPROF splits the entity bucket ----
+// orbMove's 84 lines are only ~32 accounted for (omTrig, the cone tests, the full orbProj the
+// survivors run), leaving ~3,400 cycles a frame on 0.61 entities. Three estimates of where that
+// goes have now been wrong, twice by more than 2x, so it gets measured per STAGE instead:
+//   3   the cell delta and the cone test            (every entity)
+//   7   orbProj                                     (every entity the cone lets through)
+//   12  variant, centre column, screen X and Y, the bounding box
+//   13  the occluder SPAN WALK -- the suspect, because it is the only part whose cost scales
+//       with apparent width, which is what tells a near angel from a far orb
+//   14  taking the sprite slot, and the tall entity's second one
+// Buckets 3/7/12/13/14 are the FINE RAY ones, which PROFCOARSE frees -- same arrangement ENTPROF
+// uses for 8-11, and the same requirement.
+// READ THE NUMBERS WITH PROFN. These closes fire PER ENTITY, four times a frame, so five of them
+// is twenty pfTick calls a frame at ~220 cycles each -- more than the thing being measured. PROFN
+// counts closures per bucket, so the instrument is subtractable; without it these shares are as
+// fictional as the first ENTPROF run was.
+const ENT1PROF = flag('ENT1PROF');
+if (ENT1PROF && !PROFCOARSE) throw new Error('ENT1PROF=1 needs PROFCOARSE=1: it uses the bucket ' +
+  'indices PROFCOARSE frees, and without it the fine ray buckets are summed into the stage ones');
+if (ENT1PROF && !PROFN) throw new Error('ENT1PROF=1 needs PROFN=1: five closes per entity is ~20 ' +
+  'pfTick calls a frame, which is larger than the cost being attributed. PROFN makes it subtractable');
 const PROFSUB = PROFILE0 && !PROFILE1 && !PROFCOARSE;
 // DOUBLE=interpSpan|marchCol|calcU calls that routine twice. Differencing two PROFILE runs then
 // gives its exact cost -- the old fps-based version of this trick was distorted by the
@@ -15183,7 +15204,8 @@ cnNear: lda #$00                ; the near-field bypass lands here so cnV is CLE
         inc culCone+1
 cnCn1:  jmp orbNo` : 'bcs orbNo               ; outside the cone: nothing else needs computing'}
 cnYes:
-` : ''}        jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+` : ''}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+${ENT1PROF ? "        php                     ; ENT1PROF: orbProj itself. php/plp because pfTick does NOT\n        jsr pfT7                ;   preserve the carry, and the carry is orbProj's return value\n        plp\n" : ''}
 ${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
         inc culPrj
         bne oc2
@@ -15461,7 +15483,7 @@ ohDb:
         ;
         ; So this needs nothing added to the interpolator or to the wall drawing. It reads what
         ; the subdivision already produced, and it stops at the first span that does not occlude.
-        lda #$00
+${ENT1PROF ? "        jsr pfT12               ; ENT1PROF: variant, centre column, screen X/Y, bounding box\n" : ''}        lda #$00
         sta ohL                 ; the first span starts at column 0
         sta ohBX
 ohSpan: ldx ohBX                ; this span's right edge
@@ -15554,7 +15576,7 @@ ovW2:   sec
         adc #$01
         rts
 `}` : ''}opDone:
-        ; --- take a sprite slot ---
+${ENT1PROF ? "        jsr pfT13               ; ENT1PROF: the occluder span walk -- the suspect\n" : ''}        ; --- take a sprite slot ---
         ldx onv
         lda orbBitT,x
         sta omBit
@@ -15704,7 +15726,7 @@ oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EX
         lda obBR,y
         sta obBR,x
         inc onv
-orbYes: ldx oidx                ; it got a sprite slot, so a pixel of it is on screen. The
+orbYes: ${ENT1PROF ? "jsr pfT14               ; ENT1PROF: taking the slot, and a tall entity's second one\n        " : ''}ldx oidx                ; it got a sprite slot, so a pixel of it is on screen. The
         lda #$01                ;   renderer already culls anything off screen or wholly
         sta orbSeenT,x          ;   occluded, so this IS the "unobserved" test, for free
 ${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull would have dropped something that got a

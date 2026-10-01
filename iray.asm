@@ -5423,6 +5423,7 @@ cnQY:   lda coneTolT,y          ; Y still holds the UNSHIFTED distance
         bcs orbNo               ; outside the cone: nothing else needs computing
 cnYes:
         jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+
         bcc orbNo               ;   everything above needs only the cell it stands in
 
         lda oidx                ; the death sweep steers by ONE entity's column offset, so
