@@ -345,8 +345,21 @@ const sized = sorted.map(([n, a], i) => ({ n, a, size: sizeOf(n, a, i) }));
 const bufs = [];
 for (const b of sized) {
   const last = bufs[bufs.length - 1];
-  if (last && b.a === last.a + last.size) { last.size += b.size; last.members.push(b); continue; }
-  bufs.push({ n: b.n, a: b.a, size: b.size, align: (b.a & 255) === 0, members: [b] });
+  // A buffer that DECLARES alignment cannot be a cluster member: a cluster is placed as one run
+  // and aligned at its start, so a declared buffer sitting 520 bytes in lands wherever it lands.
+  // fallSnapD and fallSnapS are adjacent and both declared -- merged, the second was never on a
+  // page and the straddle guard refused the image.
+  if (last && b.a === last.a + last.size && ALIGNED[b.n] === undefined) {
+    last.size += b.size; last.members.push(b); continue;
+  }
+  // ALIGNED is the DECLARATION; (b.a & 255) === 0 is only a guess from where the buffer sits
+  // today. Guessing was enough while every aligned buffer happened to start on a page in the
+  // pre-compaction layout, and it silently stopped being enough the moment one did not: the
+  // relayout then felt free to move it off a page, and the build's own straddle guard refused
+  // the image (fallSnapS at $59ff, on any TOURW build). A requirement has to be read, not
+  // inferred -- the same lesson as hTabT and bfsD0/bfsD1.
+  const mustAlign = (b.a & 255) === 0 || ALIGNED[b.n] !== undefined;
+  bufs.push({ n: b.n, a: b.a, size: b.size, align: mustAlign, members: [b] });
 }
 bufs.sort((x, y) => y.size - x.size);                       // largest first: first-fit wants it
 const bufB = bufs.reduce((t, b) => t + b.size, 0);

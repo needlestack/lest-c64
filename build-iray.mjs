@@ -1675,6 +1675,43 @@ const COVER_ROUTE = [
 // are the two places a player genuinely would.
 // Straight walks and spot turns are frame-rate exact (see compileRoute), so any build walks the
 // same line. Under 90 seconds, so a FRAMELOG at FLOGDIV=4 does not wrap.
+// ================= ROUTE=b1: the benchmark for the CURRENT level 1 =================
+// BENCH_ROUTE below was authored for the old 16-wide level 1 -- its own sketch is a map with
+// alcoves that no longer exists -- and has walked into walls since the 23x11 room-corridor-ring
+// landed on 2026-09-16. This is the replacement, and the map it is drawn on:
+//        0123456789012345678901 2
+//    y=1 #..##..######.........#
+//    y=2 #......######.#######.#
+//    y=3 ##....#######.#.....#.#
+//    y=4 ##....#######.#.##..#.#
+//    y=5 ##............#.##....#     <- the corridor, x2..x13
+//    y=6 ##....#######.#.##..#.#
+//    y=7 ##....#######.#.....#.#
+//    y=8 #......######.#######.#
+//    y=9 #..##..######.........#
+// Three kinds of motion, because the engine's cost is not the same for any two of them: long
+// WALKS across open space facing a far wall (the dear case -- the whole room in view), RUNS
+// along the corridor and the ring's straights (cheap per frame, but twice the ground), and two
+// SPINS standing still in open room, which is the only way the full 256-angle cast gets
+// exercised. No leg faces a near wall head-on and no leg ends against one: walking into a
+// surface a cell away is the cheapest frame on the map and measuring it flatters any build.
+const BENCH1_ROUTE = [
+  // FOUR SPOTS, and at each the same three things: walk a few cells, run a few, half turn.
+  // Every leg runs along a LONG SIGHTLINE, because this map has only three of them -- north/south
+  // in the west room, the corridor, and the ring's straights -- and the engine's cost is what is
+  // in view, not where you stand. The west room is six cells wide, so any east/west leg is a flat
+  // wall five cells off: the cheapest frame on the map, and measuring it flatters everything.
+  // Nothing starts or ends facing a near wall; the half turns happen where there is depth behind
+  // you as well as ahead.
+  // --- 1: the west room, walked up its long axis with the whole room in view
+  ['to',  2.5, 1.5], ['run', 2.5, 6.5], ['spin', 180],
+  // --- 2: the corridor, entered from the room end -- eleven cells of depth ahead
+  ['to',  3.5, 5.5], ['to',  9.5, 5.5], ['run', 13.5, 5.5], ['spin', 180],
+  // --- 3: the ring's top straight
+  ['to', 13.5, 1.5], ['to', 18.5, 1.5], ['run', 20.5, 1.5], ['spin', 180],
+  // --- 4: down the ring's right column, then its bottom straight
+  ['to', 21.5, 1.5], ['to', 21.5, 9.5], ['to', 17.5, 9.5], ['run', 14.5, 9.5], ['spin', 180],
+];
 const BENCH_ROUTE = [
   //    x: 0123456789ABCDEF
   // y=1    #..###..#
@@ -1823,6 +1860,7 @@ const ROUTES = {
   cover:  { route: COVER_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
   cover3: { route: COVER3_ROUTE, start: [0x0280, 0x0280, 0x1000] },
   bench:  { route: BENCH_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
+  b1:     { route: BENCH1_ROUTE, start: [0x0280, 0x0880, 0xc000] },   // cell (2,8), facing NORTH up the room
   fall:   { route: FALL_ROUTE,   start: [0x0280, 0x0280, 0x19c0] },
   // opensWalls: the route walks through walls its own sockets have taken out, so the validator
   // has to judge it with them OPEN. One that arrives at a wall still standing simply stalls there.
