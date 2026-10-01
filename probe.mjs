@@ -72,15 +72,26 @@ const until = untilArg ? (() => {
   if (!m) { console.error(`bad --until: ${untilArg} (want "name>=N")`); process.exit(2); }
   return { name: m[1], op: m[2], lim: +m[3] };
 })() : null;
+// --abort "name>=N": a condition that means the run is RUINED, polled alongside --until. Without
+// it, a profile whose window never closes waits out the 600s deadline and reports "build or run
+// failed" -- which is how "the angels killed the player, so the 256-frame window never finished"
+// looked for two attempts. A wait needs a reason to give up as much as a reason to stop.
+const abortArg = args.find(a => a === '--abort') ? args[args.indexOf('--abort') + 1] : '';
+const abortC = abortArg ? (() => {
+  const m = abortArg.match(/^(\w+)\s*(<=|>=|==|<|>)\s*(\d+)$/);
+  if (!m) { console.error(`bad --abort: ${abortArg} (want "name>=N")`); process.exit(2); }
+  return { name: m[1], op: m[2], lim: +m[3] };
+})() : null;
 const expects = [];
 const specs = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until' || args[i] === '--trap' || args[i] === '--watch') { i++; continue; }
+  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until' || args[i] === '--trap' || args[i] === '--watch' || args[i] === '--abort') { i++; continue; }
   if (args[i] === '--expect') { expects.push(args[++i]); continue; }
   specs.push(args[i]);
 }
 // The polled name has to be one of the labels resolved below, or its address is never looked up.
 if (until && !specs.some(s => s.split(':')[0] === until.name)) specs.push(until.name);
+if (abortC && !specs.some(s => s.split(':')[0] === abortC.name)) specs.push(abortC.name);
 const names = specs.map(s => s.split(':')[0]);
 
 // ---- ONE build: it writes the disk AND tells us the addresses in that disk ----
@@ -457,6 +468,13 @@ sock.on('connect', async () => {
         last = (await memGet(addr[until.name], 1))[0];
         await resume();
         if (test(last)) { ok = true; break; }
+        if (abortC) {                         // the run is ruined; say so now, not in ten minutes
+          const av = (await memGet(addr[abortC.name], 1))[0]; await resume();
+          const bad = ({ '<=': av <= abortC.lim, '>=': av >= abortC.lim, '==': av === abortC.lim,
+                         '<': av < abortC.lim, '>': av > abortC.lim })[abortC.op];
+          if (bad) bail(`--abort ${abortArg} came true (${abortC.name} = ${av}): the run is not ` +
+            `measuring what was asked. --until ${untilArg} had ${until.name} at ${last}.`);
+        }
         await new Promise(r => setTimeout(r, 100));
       }
       if (!ok) bail(`--until ${untilArg} never came true; ${until.name} was last ${last}. ` +

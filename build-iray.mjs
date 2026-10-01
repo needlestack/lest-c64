@@ -10345,7 +10345,8 @@ pfNIni: sta pfNum,x
 ` : ''}${CULLCNT && ENTCONE ? `        sta culCone
         sta culCone+1
 ` : ''}${CULLCNT && CONEGATE ? `        ldx #${hx(NOCC * 2 - 1)}
-ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass counts start clean
+ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass and draw counts start clean
+        sta culDrwT,x
         dex
         bpl ogCk0
         lda #$00
@@ -15770,7 +15771,15 @@ oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EX
         lda obBR,y
         sta obBR,x
         inc onv
-orbYes: ${ENT1PROF ? "jsr pfT14               ; ENT1PROF: taking the slot, and a tall entity's second one\n        " : ''}ldx oidx                ; it got a sprite slot, so a pixel of it is on screen. The
+orbYes: ${CULLCNT && CONEGATE ? `ldx oidx
+        txa                     ; CULLCNT: frames this entity really took a SPRITE. Against
+        asl                     ;   culOkT (frames it passed the gate) this is the whole measure of
+        tax                     ;   wasted projection: passed-but-never-drawn is an entity the cone
+        inc culDrwT,x           ;   let through and the SPAN WALK then discarded -- occlusion found
+        bne oyD1                ;   at the end of a ~2,900-cycle projection instead of the start.
+        inc culDrwT+1,x
+oyD1:   ldx oidx
+        ` : ''}${ENT1PROF ? "jsr pfT14               ; ENT1PROF: taking the slot, and a tall entity's second one\n        " : ''}ldx oidx                ; it got a sprite slot, so a pixel of it is on screen. The
         lda #$01                ;   renderer already culls anything off screen or wholly
         sta orbSeenT,x          ;   occluded, so this IS the "unobserved" test, for free
 ${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull would have dropped something that got a
@@ -17047,7 +17056,11 @@ ${SNDTEST ? '' : `        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonan
 ; Per angel, not global: two angels in different directions have to keep separate time, which is
 ; the whole squeeze. dtv is 60ths elapsed, capped at 32 by tickDelta, so the sum cannot carry.
 angStep:
-${process.env.ANGFREEZE === '1' ? `        rts                     ; ANGFREEZE=1: the angel never steps, so it stays at its build-time
+${process.env.ANGFREEZE === '1' ? `        rts                     ; DEADCODE-OK: ANGFREEZE=1 pins the angel by returning before the
+                                ;   body, which the reachability lint rightly calls dead -- so the
+                                ;   flag had not BUILT since that lint landed, and every attempt to
+                                ;   profile "angels only" read as "build or run failed".
+                                ; ANGFREEZE=1: the angel never steps, so it stays at its build-time
                                 ;   cell. Occlusion artefacts depend on WHERE the entity is, and an
                                 ;   angel that wanders makes a headless capture show a different
                                 ;   configuration every run -- unreproducible by construction.
@@ -19282,7 +19295,8 @@ orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
 ${CONEGATE ? `; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
 ; orbSeenT, so the hole-likes' indices -- which share oidx -- land inside it.
 cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}
-${CULLCNT ? `culOkT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: frames each entity PASSED the gate, 16-bit, free-running` : ''}` : ''}
+${CULLCNT ? `culOkT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: frames each entity PASSED the gate, 16-bit, free-running
+culDrwT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: ...and frames it actually took a sprite` : ''}` : ''}
 angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
