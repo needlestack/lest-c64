@@ -2689,7 +2689,11 @@ const OCCSYN = true;
 // wall along its top, and a whole-column split there hangs the stamp up to 7px over the floor
 // (reported at X12B Y9CA AEF00). If that does not come back, this can be deleted outright.
 const OCCSYNTH = process.env.OCCSYNTH === '1';
-if (OCCSYNTH) DIAG.push('OCCSYNTH=1');
+// DIAGEARLY, not DIAG: DIAG is declared ~750 lines further down and is BUILT from this one, so
+// touching DIAG up here throws "Cannot access 'DIAG' before initialization" -- and only when the
+// flag is SET, so the default built fine while OCCSYNTH=1 died inside a level-dump subprocess
+// whose stderr the parent discards. The same TDZ trap as the PROFN guard earlier today.
+if (OCCSYNTH) DIAGEARLY.push('OCCSYNTH=1');
 const OCCSYN_N = +(process.env.OCCSYNN ?? 6);
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
@@ -3843,7 +3847,7 @@ const PROF_BUFS = {
   pfTmp: 1, pfTmp2: 1, pfN: 1, pfCurX: 1, pfDLo: 1, pfDHi: 1,
   pfRow: 1, pfArm: 1, pfDone: 1, pfWant: 1,
 };
-const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8 } : {};
+const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8, oSDbg: 4 } : {};
 const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
 // Only when the profiler is built: on an ordinary build these names do not exist and a size
@@ -10111,6 +10115,13 @@ oSHist  = $70e8                 ; OCCFBN: oSPut's branch histogram, 6 bytes, FRE
                                 ;   readout / already-stamped / pre-built split / synthesised.
                                 ;   "Which branch does the cell that goes unstamped take" is not a
                                 ;   question to answer by reading the dispatch.
+oSDbg   = $70f0                 ; OCCFBN: 4 bytes. [0] occStamp entries, [2] renderCnt bumps as
+                                ;   the REFERENCE. PAST oSHist's eight, not on top of them: both
+                                ;   live under the same flag, so sharing $70e8 would have had
+                                ;   oSDbg+0 and oSHist+0 counting into one byte. Declared here AND
+                                ;   sized in OCC_BUFS -- an equate with no size is reserved for
+                                ;   one byte, which is how an 8-byte array ended up reading other
+                                ;   variables twice.
 oSFbN   = $85ff                 ; OCCFBN: edge cells THIS FRAME that wanted a synthesised glyph
                                 ;   and could not get one -- the scratch codes ran out and oSPfb
                                 ;   stamped the old whole-column block instead. Per frame, zeroed
@@ -11579,7 +11590,7 @@ pfTGo:  lda twN                 ; ...and latch when the script runs out of steps
 pfRdy:  jsr pfShow              ; every frame from now on -- the two screen buffers alternate,
 pfNd:                           ; so a one-shot draw is only in one of them
 ` : ''}${DUMPH ? '        jsr dumpH      ; AFTER the readout: drawDbg writes rows 0-2 at cols 36-39' : ''}
-        inc renderCnt
+${process.env.OCCFBN ? '        inc oSDbg+2             ; OCCFBN: the REFERENCE. renderCnt is bumped once per\n                                ;   render pass by code that predates me -- if my counter does\n                                ;   not track it, my counter is wrong, not the engine.\n' : ''}        inc renderCnt
         lda renderCnt
         cmp #16
         bcc noFps
@@ -14502,7 +14513,7 @@ qtLo:   ldx oqa
 ;     in the charset. So every seam inside the orb's box becomes plain black. Its whole box, not
 ;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
 ;     wall is occluding at the edge.
-occStamp:
+occStamp:${process.env.OCCFBN ? ' inc oSDbg+0             ; OCCFBN: occStamp entries, free-running\n       ' : ''}
 ${DBGORB ? `        lda #$00
         sta oSCnt
         sta oSOrb
@@ -14512,13 +14523,7 @@ ${DBGORB ? `        lda #$00
                                 ; orb does, its slots are at the far end of the array, and the
                                 ; scratch-glyph and run-cache setup below has to run for it too.
                                 ; The test moved to just above oSLoop, where the setup is done.
-${process.env.OCCFBN === '2' ? '' : `        lda #$00
-        sta oSFbN               ; OCCFBN: per frame, so a static pose reads a steady number --
-                                ;   and so it can never be the uninitialised-scratch trap that
-                                ;   FALLNOW's counter was. OCCFBN=2 drops the reset so it
-                                ;   FREE-RUNS -- a per-frame counter read once can be caught in
-                                ;   the prologue just after the reset, which reads as "never".
-`}${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
+${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
         ldx baseHi              ;   Buffer A ($e0) takes the first half, B the second; see OCCSYN.
         cpx #$e0                ;   (A still holds onv for the store below, so X and Y do the test)
         beq oSSynA
@@ -14532,7 +14537,12 @@ ${process.env.OCCFBN ? `        ldx baseHi              ; OCCFBN: latched HERE. 
         stx oSHbase             ;   flipped, so every sample looked like the halves were inverted.
 ` : ''}
 ` : ''}        sta osN                 ; the slot count, taken BEFORE anything else touches A. The buffer
-        lda #$00                ;   selection below leaves the cache base in A, and with this store
+${process.env.OCCFBN && process.env.OCCFBN !== '2' ? `        lda #$00                ; OCCFBN: per frame. Placed AFTER "sta osN" -- see the note on that
+        sta oSFbN               ;   store. Sited above it (where it was) this reset sat between
+                                ;   "lda onv" and the store, osN took 0, and the slot loop stamped
+                                ;   NOTHING: the same A-clobber the store's own comment describes,
+                                ;   re-made by an instrument instead of by the buffer select.
+` : ''}        lda #$00                ;   selection below leaves the cache base in A, and with this store
         sta osI                 ;   after it, osN got #<cbA / #<cbB -- 80 or 120 -- so the loop
                                 ;   walked a hundred slots of an eight-slot array and stamped
                                 ;   garbage. It alternated with the buffer, which is exactly why
