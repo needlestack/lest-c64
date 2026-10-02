@@ -2757,18 +2757,21 @@ const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
 // it (2 px, white correctly let through), and every other pose is unchanged. At most 2 cells a
 // frame synthesise on any pose measured, against the 4 per buffer OCCSYN_N=8 buys, and oSFbN
 // stays 0 -- which is why the budget had to go up before the trigger could be widened.
-// DEFAULT OFF, on fps. It is CORRECT -- it fixes the nub and a second one-pixel backing error,
-// and changes nothing else on any pose measured -- but edge cells are two per stamp row where
-// the bottom-row rule is one per stamp, so it fires several times more often. At the benchmark
-// viewpoint (X4C8 Y6E4 A0E00, CHAIN=1,2,3,4) that is 19 fps -> 15: a whole raster frame, 60/3 to
-// 60/4. Synthesis with the bottom-row gate alone costs nothing measurable there (19 either way).
+// ON, by the user's call after seeing it ("since it's so rare, let's leave it on for now").
 //
-// Not shipped rather than not worth having: motion granularity is this project's veto axis, and
-// a one-character artefact is a smaller price than a third of the frame rate at a common view.
-// What it needs before it can go on is a CYCLE measurement (PROFILE bucket 16) rather than a
-// quantised fps reading -- 19 -> 15 is one 60/n step and could be a few hundred cycles over a
-// boundary or several thousand, and those are different conclusions.
-const OCCSYNEDGE = process.env.OCCSYNEDGE === '1';
+// IT IS NOT FREE, and the thing that is rare is the ARTEFACT, not the trigger. Edge cells are two
+// per stamp ROW where the bottom-row rule is one per STAMP, so this fires several times more
+// often than the visible defect appears:
+//
+//   synthesis off      19 fps      X4C8 Y6E4 A0E00, CHAIN=1,2,3,4
+//   bottom-row gate    19 fps
+//   + this             15 fps      a whole raster frame, 60/3 -> 60/4
+//
+// OCCSYNEDGE=0 turns it off. What would make it cheap, if the frame rate ever has to come back:
+// synthesise only the edge cell that actually straddles a wall boundary rather than both edges of
+// every row -- and measure it in CYCLES (PROFILE bucket 16), because one 60/n step could be a few
+// hundred cycles over a boundary or several thousand and those argue differently.
+const OCCSYNEDGE = process.env.OCCSYNEDGE !== '0';
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // ---- the fall's BLACK, which is not SOLID ----
