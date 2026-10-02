@@ -5594,11 +5594,30 @@ const RUNTAB = 0x7900 - 2 * NRUN;
 // The rung -> rows tables (see visRows) are anchored just below them, in the same idle stretch.
 
 
+// EXACT, not sampled. This used to take 8 point samples per cell of distance and ask whether any
+// landed in a wall -- which misses a wall the line only clips, because no sample happens to land
+// inside it. Raising the rate does not fix that in kind: any finite rate has a thin enough clip.
+// Measured on level 2 before the change: 9 of 468 cell/entity pairs (1.9%) read as SEEN where a
+// 1/64 walk said blocked. It is a BUILD-TIME table, so there is no reason to approximate at all.
+//
+// Steps cell to cell along the segment (Amanatides & Woo), visiting exactly the cells whose
+// interior it crosses. The eye's own cell and the TARGET's own cell never block -- the hole is in
+// the floor of a cell that may itself be listed as open, and the player is standing somewhere.
 const losFree = (ax, ay, bx, by) => {
-  const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 8);
-  for (let i = 1; i < n; i++) { const t = i / n, x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
-    if (map[cellOf(x | 0, y | 0)]) return false; }
-  return true;
+  const ex = bx | 0, ey = by | 0;
+  let cx = ax | 0, cy = ay | 0;
+  if (cx === ex && cy === ey) return true;
+  const dx = bx - ax, dy = by - ay;
+  const stepX = dx > 0 ? 1 : -1, stepY = dy > 0 ? 1 : -1;
+  const invX = dx ? 1 / Math.abs(dx) : Infinity, invY = dy ? 1 / Math.abs(dy) : Infinity;
+  let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * invX : Infinity;
+  let tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * invY : Infinity;
+  for (;;) {
+    if (tX < tY) { if (tX > 1) return true; cx += stepX; tX += invX; }
+    else         { if (tY > 1) return true; cy += stepY; tY += invY; }
+    if (cx === ex && cy === ey) return true;
+    if (map[cellOf(cx, cy)]) return false;
+  }
 };
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
 const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
@@ -7394,6 +7413,58 @@ const SOCK = makeHoleLadder(SOCKR, 4, SOCK_OWN ? 0 : HOLE.slotEnd, 32, false, 0,
   touch: (process.env.SOCKTOUCH ?? '').split(',').filter(Boolean)
            .map(t => t.split(':').map(Number)),
 } : {});
+
+// HSDUMP=1: what holeSeeT says for ONE cell -- "which hole-likes can be seen from here at all".
+// Build-time, so it answers without an emulator; the gate reads exactly this bit.
+if (process.env.HSDUMP) {
+  const [sx, sy] = [ST0[0] >> 8, ST0[1] >> 8];
+  const cell = sy * MAPW + sx, cx = sx + 0.5, cy = sy + 0.5;
+  const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
+  // How much the 3x3 eye grid adds over a single centre sample, and how much the 1/8-cell point
+  // sampling adds over a denser walk -- the two places this test is generous, measured not asserted.
+  {
+    let cells = 0, byGrid = 0, byStep = 0, total = 0;
+    const fine = (ax, ay, bx, by) => {            // 64 samples/cell: what a near-exact walk says
+      const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 64);
+      for (let i = 1; i < n; i++) { const t = i / n;
+        if (map[cellOf((ax + (bx - ax) * t) | 0, (ay + (by - ay) * t) | 0)]) return false; }
+      return true; };
+    for (let c = 0; c < MAPN; c++) {
+      if (map[c]) continue;
+      cells++;
+      const gx = cellX(c) + 0.5, gy = cellY(c) + 0.5;
+      const eyes = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [gx + ox, gy + oy]));
+      HOLELIKE.forEach(h => {
+        total++;
+        const tx = h.x + 0.5, ty = h.y + 0.5;
+        const centre = losFree(gx, gy, tx, ty);
+        const grid = eyes.some(([ex, ey]) => losFree(ex, ey, tx, ty));
+        if (grid && !centre) byGrid++;                       // the 3x3 let it through
+        if (grid && !eyes.some(([ex, ey]) => fine(ex, ey, tx, ty))) byStep++;  // sampling missed a wall
+      });
+    }
+    console.error(`  holeSeeT generosity over ${cells} open cells x ${HOLELIKE.length} entities = ${total} pairs:`);
+    console.error(`    3x3 eye grid says SEEN where the centre alone says blocked: ${byGrid} (${(100*byGrid/total).toFixed(1)}%)`);
+    console.error(`    1/8-cell sampling says SEEN where a 1/64 walk says blocked: ${byStep} (${(100*byStep/total).toFixed(1)}%)`);
+  }
+  console.error(`  cap vs LADDER REACH -- the cap is a formula, the reach is the ladder's last rung:`);
+  console.error(`    socket: cap ${(HOLE_MAX_D / 2).toFixed(2)}   ladder's smallest rung at d=` +
+    `${SOCK.L[SOCK.L.length - 1].d.toFixed(2)} (${SOCK.L[SOCK.L.length - 1].w.toFixed(1)}c)` +
+    `   ${Math.abs(HOLE_MAX_D / 2 - SOCK.L[SOCK.L.length - 1].d) < 0.01 ? 'MATCH' : '*** MISMATCH ***'}`);
+  console.error(`    exit:   cap ${HOLE_MAX_D.toFixed(2)}   ladder's smallest rung at d=` +
+    `${HOLE.L[HOLE.L.length - 1].d.toFixed(2)} (${HOLE.L[HOLE.L.length - 1].w.toFixed(1)}c)` +
+    `   ${Math.abs(HOLE_MAX_D - HOLE.L[HOLE.L.length - 1].d) < 0.01 ? 'MATCH' : '*** MISMATCH ***'}`);
+  console.error(`  holeSeeT from the spawn cell (${sx},${sy}) = cell ${cell}:`);
+  HOLELIKE.forEach((h, L) => {
+    const maxD = h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2;
+    const d = Math.hypot(h.x + 0.5 - cx, h.y + 0.5 - cy);
+    const los = eye.some(([ex, ey]) => losFree(ex, ey, h.x + 0.5, h.y + 0.5));
+    const bit = (holeSee[L * 32 + (cell >> 3)] >> (cell & 7)) & 1;
+    console.error(`    ent ${L + ORBS.length}  ${(h.exit ? 'exit hole' : h.ped ? 'pedestal' : 'socket').padEnd(9)}` +
+      ` at (${h.x},${h.y})  d=${d.toFixed(2)} (cap ${maxD.toFixed(2)}${d < maxD ? ' ok' : ' TOO FAR'})` +
+      `  line of sight ${los ? 'FREE' : 'blocked'}  ->  holeSeeT bit ${bit}`);
+  });
+}
 
 
 // ---- SOCKETS BORROW THE EXIT HOLE'S BITMAPS AND OWN NONE ----

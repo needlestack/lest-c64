@@ -11694,7 +11694,7 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
 ; wall goes, so the delta is never the one map byte you would guess: these 6 come to
-; 9, 17, 17, 57, 97, 197 bytes. (It said "13 runs become 5 here" when there was one wall on one
+; 9, 17, 17, 45, 97, 205 bytes. (It said "13 runs become 5 here" when there was one wall on one
 ; level to point at, and reported wall 0's count as if it were every wall's.)
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
