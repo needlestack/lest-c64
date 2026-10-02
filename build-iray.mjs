@@ -2688,7 +2688,21 @@ const OCCSYN = true;
 // What it was for is the WALL-BASE OVERHANG: at a wall's foot the cell is floor with a sliver of
 // wall along its top, and a whole-column split there hangs the stamp up to 7px over the floor
 // (reported at X12B Y9CA AEF00). If that does not come back, this can be deleted outright.
-const OCCSYNTH = process.env.OCCSYNTH === '1';
+// ON by default again 2026-10-02, but ONLY for the bottom cell of a stamp. The user's rule:
+// "we shouldn't even be considering synthesis for anything but the last occluder in a column and
+// only if it goes past the bottom edge of the wall... take the shape that was already there,
+// make a copy, and change its black from background to foreground black. leave the white alone."
+//
+// The glyph transform was never the problem -- oSPut already does exactly that (01 -> 11 over the
+// covered columns, pair 00 untouched). The TRIGGER was: it fired on every cell of every stamp,
+// so a mid-wall cell came back with a floor-coloured gap punched through a solid occluder, and
+// the entity could draw in the hole. Measured on the user's own test set, where three views that
+// render perfectly without it each changed by 48px.
+//
+// So the gate is osLast -- set only on the final row of the stamp -- plus occVrtT, which says the
+// cell has a boundary ACROSS rows at all. A cell that is not the bottom of its column takes the
+// pre-built split exactly as it did before.
+const OCCSYNTH = process.env.OCCSYNTH !== '0';
 // DIAGEARLY, not DIAG: DIAG is declared ~750 lines further down and is BUILT from this one, so
 // touching DIAG up here throws "Cannot access 'DIAG' before initialization" -- and only when the
 // flag is SET, so the default built fine while OCCSYNTH=1 died inside a level-dump subprocess
@@ -10296,6 +10310,9 @@ osGlyW  = $a6
 osSyn   = $a7                   ;   the next scratch glyph, and the first one past this buffer's half
 osLim   = $a8
 osPY    = $a9                   ;   Y saved across the row loop
+osLast  = $b1                   ;   1 on the BOTTOM row of the stamp, 0 above it. The only row
+                                ;   where a cell can run past the wall's base, so the only row
+                                ;   synthesis is allowed to consider -- see OCCSYNTH.
 ` : ''}ohMsX   = $8528
 o2r     = $8529                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
                                 ;   Not zero page: it is touched a handful of times per orb, in
@@ -15001,8 +15018,15 @@ ${process.env.ORBFGDBG ? `        lda osRow
         sta ohSv
 oSCRow: lda ohSv
         cmp osRowB
-        beq oSCR1
-        bcs oSCDn
+        beq oSCRlo              ; the LAST row of the stamp: the only one that can hang past the
+        bcs oSCDn               ;   wall's base, so the only one allowed to synthesise
+        lda #$00
+        sta osLast
+        lda ohSv
+        bcc oSCR1               ; always: carry is clear on this path
+oSCRlo: lda #$01
+        sta osLast
+        lda ohSv
 oSCR1:  cmp #$19
         bcs oSCDn               ; rowLoT/rowHiT hold 25 entries. Indexing past them gives a
                                 ; garbage high byte, osPtr then points ANYWHERE, and the store
@@ -23359,8 +23383,11 @@ oSHro:  inc oSHist+2            ; OCCFBN: a readout
         ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
         ; whole scratch budget and leaving its lower cells unstamped.
         tax
-${OCCSYNTH ? `        lda occVrtT,x
-        beq oSPsyn` : `                                ; OCCSYNTH=0: no synthesis, so EVERY edge cell takes the
+${OCCSYNTH ? `        lda osLast              ; not the bottom of this column: a split is right, and
+        beq oSPnos              ;   synthesising here punches a gap through a solid occluder
+        lda occVrtT,x
+        beq oSPsyn
+oSPnos:` : `                                ; OCCSYNTH=0: no synthesis, so EVERY edge cell takes the
                                 ; pre-built split -- which is what the scratch-budget fallback
                                 ; already does when it runs out. oSPsyn below is then reachable
                                 ; only as dead code behind its own label.`}
