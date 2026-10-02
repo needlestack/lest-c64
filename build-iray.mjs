@@ -18793,9 +18793,19 @@ ohNoPri:lda ohP
         lda ohBH
         sbc #$00
         sta ohtmp               ; s, high byte: $00 or $ff. Dead since the slot check above.
-        bmi hsL0
+        bmi hsL0                ; s < 0: the HIGH byte is the only honest sign test
+        ; The screen is 160 COLUMNS WIDE, so columns 128-159 have bit 7 set and a bpl on the
+        ; low byte reads every one of them as negative. This clamped obL to 0 for any slice on
+        ; the right third of the screen, and the stamp row then ran from column 0 to the slice's
+        ; real right edge -- the whole screen. Visible wherever a cell along that bogus span was
+        ; a wall-base ramp rather than wall or blank: a black bar on the floor, nowhere near the
+        ; entity, with nothing to occlude (the user, 2026-10-01, at X444 Y63F ADE00, s = 141).
+        ; The sign already lives in ohtmp and the bmi above has used it; the second test only
+        ; has to fence off a slice that starts off the RIGHT edge.
         lda ocmax
-        bpl hsLst               ; s is 0..127 here: a slice starting past 160 never got placed
+        cmp #$a0
+        bcc hsLst               ; 0-159: a real column, bit 7 and all
+        bcs hsNoSt              ; >= 160: the slice starts past the right edge, nothing to stamp
 hsL0:   lda #$00                ; s < 0: the visible part starts at column 0
 hsLst:  sta obL,x
         lda ocmax
