@@ -3298,6 +3298,29 @@ for (let i = 0; i < fontA.length; i++)
   if (fontB[i] !== fontA[i ^ 7])
     throw new Error(`charset B is not fontA[i^7] at i=${i} (glyph ${i >> 3} row ${i & 7}): ` +
       `fontB=${fontB[i]} fontA[i^7]=${fontA[i ^ 7]} -- cpChr's EOR derivation is invalid`);
+// GRIDDOT=1: one pixel at the TOP-LEFT of every glyph, bit pair 10 ($d023, grey), so the
+// character grid reads straight off the screen -- where a cell starts, which cell a stamp landed
+// in, how a nub lines up against a seam. Every code, not just SOLID and the occluders the way
+// CELLMARK does, so the grid is continuous across wall, floor and stamp alike.
+//
+// AFTER EVERY CONSUMER, WHICH IS WHY IT IS DOWN HERE AND NOT BESIDE CELLMARK. Half the build
+// reads glyph CONTENT and a corner dot changes the answers: VSPLIT above hunts for a glyph whose
+// eight rows are all one byte and a dot breaks every candidate (its guard fires, which is how
+// this was caught), and occVrtT asks whether every row has wall ink -- a dot landing on row 0's
+// only wall pixel flips that and changes which cells synthesise. A marker build that stamps
+// differently from the real one is worse than no marker at all.
+//
+// fontA and fontB are kept in step by hand here because the guard just above has already run:
+// cpChr derives B from A with an EOR of the row index, so row 0 of A is row 7 of B. THE DOT
+// THEREFORE SITS BOTTOM-LEFT BELOW THE HORIZON -- same cell, far edge of it. CELLMARK's marker
+// is its own vertical mirror on purpose to dodge exactly this; a corner dot cannot be.
+//
+// Pair 10 is a FOREGROUND pair, so the dot clips sprites where it sits. Diagnostic builds only.
+if (process.env.GRIDDOT === '1' && DIAGEARLY.push('GRIDDOT'))
+  for (let c = 0; c < 256; c++) {
+    fontA[c * 8]     = (fontA[c * 8]     & 0x3f) | 0x80;   // pixel 0 of row 0
+    fontB[c * 8 + 7] = (fontB[c * 8 + 7] & 0x3f) | 0x80;   // ...which is row 7 of the mirror
+  }
 // qA*(LM*LB) exceeds a byte once the slot does, so the single fold table becomes three small
 // ones. qM*LB + qB can never carry (max (LM-1)*LB + LB-1 = LM*LB - 1 < 256 for every legal
 // shape), which is what keeps the whole sum to ONE 16-bit add instead of two.
