@@ -7231,12 +7231,24 @@ const SOCKR = +(process.env.SOCKR ?? HOLER / 2);
 // for why that worked at all (the half-radius/double-distance identity) and what it cost.
 const SOCK_OWN = process.env.SOCKOWN !== '0';
 // Spaced by hand rather than by a step: an even walk put two rungs where they rasterise to the
-// same pixels and left a 0.73-cell hole in the middle. These eight all render distinctly.
-const SOCK_W = (process.env.SOCKW ?? '32,23,18,14,11,9,6,4').split(',').map(Number);
-// Rung 0 takes hmag on two sprites rather than a third sprite: there are only eight hardware
-// sprites and level 2 has three sockets, so the near rung is the one place a sprite is dearer
-// than a pixel. Every other rung is unmagnified in both axes.
-const SOCK_SPR = (process.env.SOCKSPR ?? '2,2,2,2,1,1,1,1').split(',').map(Number);
+// same pixels and left a 0.73-cell hole in the middle. These ten all render distinctly, and
+// monotonically -- width and height both only ever shrink as you walk away.
+//
+// NO 32c RUNG. It was the widest the socket can be drawn at all (d = 0.82, closer than you can
+// stand), two sprites wide and magnified, and the user never saw it in play: "as far as I can
+// tell we never use the 2-sprite largest rung... I'd love to reassign those two sprites to the
+// smaller end where the pops are kind of big". So the top of the ladder is the old second rung
+// and its two slots buy three more rungs at the bottom, where the steps were 3 rows to 1.
+// Rows now go 15,10,5,4,3,3,2,1,1,1 and the reach is 8.8 cells instead of 6.56 -- which matters
+// on a 16x16 level, where you can stand further from a socket than the old ladder could draw.
+//
+// Only TWO rungs may exceed 12 columns: past that a rung needs a second sprite (ceil(w/12)), and
+// the budget is the twelve slots the eight-rung version used.
+const SOCK_W = (process.env.SOCKW ?? '23,18,12,11,10,9,8,6,4,3').split(',').map(Number);
+// Empty = the crisp rule's own count for every rung, which is now 2,2 then 1 all the way down.
+// The override existed for the 32c rung, to spend magnification rather than a third sprite; with
+// that rung gone nothing in the ladder is magnified at all.
+const SOCK_SPR = (process.env.SOCKSPR ?? '').split(',').map(Number);
 // Its OWN region, not the tail of the exit hole's. HOLEBASE stacks hole ladder -> idol -> orb
 // tail and the whole stack ends 504 bytes short of ARC_GLY5, so twelve more slots there overflow
 // by 264 bytes -- and eight rungs cannot cost less than nine slots (rung 0 needs two sprites even
@@ -7685,6 +7697,13 @@ if (process.env.SOCKSTRIP && !process.env.LVLDUMP) {   // the subprocess would r
   }
   writeFileSync('./sock-rungs.png', png(W, H, rgb));
   console.error(`  sock-rungs.png: ${W}x${H}, tiles (hires px) ${tiles.map(t => t.w + 'x' + t.h).join(' ')}`);
+  // Row widths, in COLUMNS: the number a flat top or a non-monotonic step shows up in long
+  // before it is visible in a 5x-zoomed strip.
+  SOCK.L.forEach((_, i) => {
+    const fl = SOCK.flagT[i], cw = (fl & 4) ? 2 : 1;
+    const w = sockGrid(i).filter(r => r.some(v => v)).map(r => r.filter(v => v).length * cw);
+    console.error(`    rung ${String(i).padStart(2)}  ${SOCK.L[i].w.toFixed(1).padStart(5)}c  rows ${w.join(',')}`);
+  });
   // Does the magnification EARN its place? A sprite is 12 multicolour pixels wide and 21 rows
   // tall. hmag/vmag do not add detail, they double the pixel -- so each is only REQUIRED when the
   // inked shape at its on-screen size will not fit the bitmap unmagnified. Measured on the INK,
