@@ -7242,9 +7242,23 @@ const SOCK_OWN = process.env.SOCKOWN !== '0';
 // Rows now go 15,10,5,4,3,3,2,1,1,1 and the reach is 8.8 cells instead of 6.56 -- which matters
 // on a 16x16 level, where you can stand further from a socket than the old ladder could draw.
 //
-// Only TWO rungs may exceed 12 columns: past that a rung needs a second sprite (ceil(w/12)), and
-// the budget is the twelve slots the eight-rung version used.
-const SOCK_W = (process.env.SOCKW ?? '23,18,12,11,10,9,8,6,4,3').split(',').map(Number);
+// A rung past 12 columns needs a SECOND sprite (ceil(w/12)), so the six widest cost two slots
+// each and the four from 12c down cost one: 6*2 + 4 = 16.
+//
+// WEIGHTED TO THE LARGE END, which is the lesson the orb ladder already learned. A "pop" is the
+// RATIO between one rung and the next, not the absolute sizes, so an even ladder has even
+// percentages -- and the first attempt had it backwards: it stepped 22% at the top and 9% in the
+// middle, coarsest exactly where the shape is biggest and the change most visible. Measured as
+// apparent AREA, that ladder lost half the socket on each of its first two steps:
+//
+//   was   -50 -53 -29 -33 -25 -20 -33 -63 -33 -50
+//   now   -27 -25 -18 -31 -36 -44 -40 -33 -75
+//
+// The tail is the price and it is not avoidable at ten rungs: a 48x15 dish down to a 4x1 mark is
+// a 180:1 change in area, so nine steps average -44% however they are placed. Cutting the top
+// finely means spending what is left coarsely at the bottom, where the shape is a dash and the
+// absolute change is a few pixels. SOCKSTRIP prints this table; tune against it, not the strip.
+const SOCK_W = (process.env.SOCKW ?? '23,21,19,17,15,13,11,9,7,4').split(',').map(Number);
 // Empty = the crisp rule's own count for every rung, which is now 2,2 then 1 all the way down.
 // The override existed for the 32c rung, to spend magnification rather than a third sprite; with
 // that rung gone nothing in the ladder is magnified at all.
@@ -7257,7 +7271,13 @@ const SOCK_SPR = (process.env.SOCKSPR ?? '').split(',').map(Number);
 const SOCKBASE = +(process.env.SOCKBASE ?? 0xf880);
 const SOCK = makeHoleLadder(SOCKR, 4, SOCK_OWN ? 0 : HOLE.slotEnd, 32, false, 0, SOCK_OWN ? {
   widths: SOCK_W, crisp: true, spr: SOCK_SPR, cover: true,
-  touch: [[5, 0, 1]],                             // the 9c rung's flat top -- see HAND TOUCH-UPS
+  // "<rung>:<lit row>:<pixels each side>", EMPTY by default. One rung was hand-trimmed while the
+  // ladder was still coarse enough for a flat top to stand out; with the steps evened up the user
+  // dropped it ("toss my manual adjustments to the 3 row hole"). Indices are positions in SOCK_W,
+  // so any touch has to move when the width list does -- edit the two together, or it silently
+  // trims the rung next door and leaves the intended one alone, which is what happened once.
+  touch: (process.env.SOCKTOUCH ?? '').split(',').filter(Boolean)
+           .map(t => t.split(':').map(Number)),
 } : {});
 
 
@@ -7697,6 +7717,21 @@ if (process.env.SOCKSTRIP && !process.env.LVLDUMP) {   // the subprocess would r
   }
   writeFileSync('./sock-rungs.png', png(W, H, rgb));
   console.error(`  sock-rungs.png: ${W}x${H}, tiles (hires px) ${tiles.map(t => t.w + 'x' + t.h).join(' ')}`);
+  // PER-STEP SHRINKAGE, which is what a "pop" actually is: the eye reads the RATIO between one
+  // rung and the next, not the absolute sizes. An even ladder has even percentages. The socket's
+  // first attempt stepped 22% at the top and 9% in the middle -- coarsest exactly where the shape
+  // is biggest and the change most visible, which is backwards, and is what the user saw.
+  console.error('  rung    d      tile     dw%    dh%   darea%');
+  let prev = null;
+  SOCK.L.forEach((g, i) => {
+    const fl = SOCK.flagT[i], cw = (fl & 4) ? 2 : 1, ch = (fl & 8) ? 2 : 1;
+    const rows = sockGrid(i).filter(r => r.some(v => v));
+    const w = Math.max(...rows.map(r => r.filter(v => v).length)) * 2 * cw, h = rows.length * ch;
+    const pc = (a, b) => prev ? `${(100 * (b - a) / a).toFixed(0).padStart(4)}%` : '    -';
+    console.error(`   ${String(i).padStart(2)}  ${g.d.toFixed(2).padStart(5)}  ${String(w).padStart(3)}x${String(h).padStart(2)}  ` +
+      `${pc(prev?.w, w)}  ${pc(prev?.h, h)}  ${pc(prev ? prev.w * prev.h : 0, w * h)}`);
+    prev = { w, h };
+  });
   // Row widths, in COLUMNS: the number a flat top or a non-monotonic step shows up in long
   // before it is visible in a 5x-zoomed strip.
   SOCK.L.forEach((_, i) => {
