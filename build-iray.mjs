@@ -10420,7 +10420,7 @@ osGlyW  = $a6
 osSyn   = $a7                   ;   the next scratch glyph, and the first one past this buffer's half
 osLim   = $a8
 osPY    = $a9                   ;   Y saved across the row loop
-osLast  = $b1                   ;   1 on the BOTTOM row of the stamp, 0 above it. The only row
+osLast  = $cf                   ;   1 on the BOTTOM row of the stamp, 0 above it. The only row
                                 ;   where a cell can run past the wall's base, so the only row
                                 ;   synthesis is allowed to consider -- see OCCSYNTH.
 ` : ''}ohMsX   = $8528
@@ -15798,7 +15798,12 @@ ${ENTLOS ? '        sta cnA                 ; kept: the depth test turns this sa
         sta lsC                 ;   so no wrapped column reading colH somewhere plausible
         ldy cnD
         lda losWT,y             ; the BALL's extent in columns at this range, from orbColLT/RT over
-        sta lsW                 ;   both ladders -- the angel is ~70% wider than an orb, and
+${process.env.LOSPAD ? `        clc                     ; LOSPAD: ...plus slack for the CENTRE being wrong. lsC comes
+        adc #${(+process.env.LOSPAD).toString(16).padStart(2,'0').replace(/^/,'$')}                 ;   from a CELL-level bearing, which at short range names the
+        bcc lsWok               ;   column only roughly -- the cone carries coneTolT for exactly
+        lda #$9f                ;   this and the depth scan carries nothing, so it can sit several
+lsWok:  ` : ''}        sta lsW                 ;   columns off and sample walls either side of the gap the
+                                ;   entity actually shows through. The angel is ~70% wider than an orb, and
                                 ;   orbHalfCT would have been the sprite BOX, flat with distance
         ; losHT is [32 distances][16 cosCorr groups]; point at this entity's row once, then each
         ; column is compared against ITS OWN group. Taking the worst group across the whole span
@@ -15837,7 +15842,11 @@ lsL0:   tax
 lsR0:   sta lsR
 lsLoop: ldy colGrpT,x           ; REJECT only if EVERY column has a wall nearer. The first that
         lda (lsHP),y            ;   does not is a column the entity shows through.
-        cmp colH,x              ; threshold >= colH: that wall is FURTHER, so the entity shows
+${process.env.LOSBIAS ? `        clc                     ; LOSBIAS: raise the threshold -- a false rejection means we
+        adc #${(+process.env.LOSBIAS).toString(16).padStart(2,'0').replace(/^/,'$')}                 ;   hid something visible, i.e. the bar a wall had to clear
+        bcc lsBok               ;   was set too low. Sweeping this says whether the row is wrong
+        lda #$ff                ;   by a constant or wrong in kind.
+lsBok:  ` : ''}        cmp colH,x              ; threshold >= colH: that wall is FURTHER, so the entity shows
         bcs cnOk
         inx
         cpx lsR
