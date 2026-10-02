@@ -8281,6 +8281,10 @@ if (HOLE.L.some(g => g.grid.some(row => row.some(v => v === 1))))
   throw new Error('the exit hole has rim pixels: it must be a single ink, see makeHoleLadder');
 const holeSlotT = HOLE.slotT, holeHT = HOLE.hT, holeVarT = HOLE.varT;
 const holeXOffT = HOLE.xOffT, holeYBaseT = HOLE.yBaseT, holeFlagT = HOLE.flagT;
+// The widest half-width ANY hole-like kind can have, over every rung. The occlusion probe below
+// uses it to widen its box, so the box always CONTAINS the entity whatever rung it lands on --
+// which is what makes "no visible column in the box" a safe reason to cull.
+const HL_HALFMAX = Math.max(...HOLE.xOffT, ...SOCK.xOffT, ...PED.xOffT);
 
 // ---- ENTCONE's half-cone is ENTFOV's bound, and it has to be ----
 // The question "should the cone be narrower for an orb, whose sprite is far smaller than its cell"
@@ -18559,8 +18563,33 @@ holeTail:
         lda ocol
         cmp #${hx(NLOG)}
         bcs hlOcDn              ; ...or off the right
-        sta ocl2
-        sta ocmax               ; a one-column box: ovWide then measures just that column
+        ; ---- the box is the entity's WIDTH, not its centre column ----
+        ; This was a ONE-COLUMN box at ocol, so the whole thing was culled the instant its CENTRE
+        ; crossed a wall edge -- with up to ${HL_HALFMAX} columns of it still on screen. The user saw a
+        ; socket vanish "quite a long way before it's actually behind the wall" (2026-10-01,
+        ; X4ED Y6FC ADEC0 visible, X4F9 Y707 ADEC0 gone). The reasoning it inherited -- "a hole is
+        ; the wall's own colour, so partial occlusion needs no handling, it melts into the wall"
+        ; -- dates from when an exit hole was always BLACK. Sockets and exits are both in the
+        ; FLOOR and neither melts into anything now that level 4 gives an exit a fill colour.
+        ;
+        ; HL_HALFMAX, not this rung's own half-width: the rung is not resolved until hlRung, two
+        ; dozen instructions below, and the half-width lives in a table patched per kind. Widening
+        ; to the maximum keeps the box a SUPERSET of the entity at every rung, so a cull is still
+        ; only ever made when nothing of it could have shown. It culls less often than an exact
+        ; span would -- never more -- and an entity drawn when it was in fact hidden is covered by
+        ; its own occluder stamp, which is why erring this way is the safe direction.
+        sec
+        sbc #${hx(HL_HALFMAX)}
+        bcs hlPbL
+        lda #$00                ; the box runs off the left edge
+hlPbL:  sta ocl2
+        lda ocol
+        clc
+        adc #${hx(HL_HALFMAX)}  ; ocol <= ${NLOG - 1} here, so this cannot carry past 255
+        cmp #${hx(NLOG)}
+        bcc hlPbR
+        lda #${hx(NLOG - 1)}    ; ...or off the right
+hlPbR:  sta ocmax
         lda #$00
         sta ovVis
         sta ovOcc
@@ -18805,7 +18834,7 @@ ohNoPri:lda ohP
         lda ocmax
         cmp #$a0
         bcc hsLst               ; 0-159: a real column, bit 7 and all
-        bcs hsNoSt              ; >= 160: the slice starts past the right edge, nothing to stamp
+        bcs hsDrop              ; >= 160: the slice starts past the right edge, nothing to stamp
 hsL0:   lda #$00                ; s < 0: the visible part starts at column 0
 hsLst:  sta obL,x
         lda ocmax
@@ -18814,10 +18843,10 @@ hsLst:  sta obL,x
         tay                     ; s + width, low
         lda ohtmp
         adc #$00
-        bmi hsNoSt              ; the whole slice is still left of column 0
+        bmi hsDrop              ; the whole slice is still left of column 0
         bne hsRhi               ; ...or past 255, so it ends at the right edge
         cpy #$00
-        beq hsNoSt              ; s + width == 0: it ends exactly at column -1
+        beq hsDrop              ; s + width == 0: it ends exactly at column -1
         dey                     ; the LAST column, not one past it
         cpy #${hx(NLOG)}
         bcc hsRst
@@ -18834,6 +18863,16 @@ hsRst:  tya
         tay
         lda bbRT,y
         sta obBR,x
+hsDrop: lda #$00                ; RETRACT the stamp claim. obOcc bit 7 is the only thing that
+        sta obOcc,x             ;   makes occStamp walk a hole-like slot, and it is set well
+                                ;   above -- BEFORE the clipping tests that land here. Falling
+                                ;   through with it still set left the slot carrying a half
+                                ;   written obL (0, from the left clamp) and an obR stale from
+                                ;   the previous frame: a one-cell occluder at column 0 for a
+                                ;   socket entirely off the left edge (the user, 2026-10-01, at
+                                ;   X46E Y7DC AF6C0). The exit-hole early-out above must NOT
+                                ;   come here -- it jumps straight to hsNoSt, because for a hole
+                                ;   obOcc still holds the fill colour hlSet put there.
 hsNoSt:
         lda ohF                 ; the two magnifications are decided SEPARATELY, from the
         and #$04                ;   ellipse's own visible width and height -- which is what lets
