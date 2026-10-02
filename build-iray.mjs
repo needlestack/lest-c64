@@ -14523,7 +14523,7 @@ ${DBGORB ? `        lda #$00
                                 ; orb does, its slots are at the far end of the array, and the
                                 ; scratch-glyph and run-cache setup below has to run for it too.
                                 ; The test moved to just above oSLoop, where the setup is done.
-${OCCSYN ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
+${OCCSYNTH ? `        ldy #${hx(OCCSYN_N / 2)}   ; OCCSYN: this buffer's half of the scratch glyphs is free again.
         ldx baseHi              ;   Buffer A ($e0) takes the first half, B the second; see OCCSYN.
         cpx #$e0                ;   (A still holds onv for the store below, so X and Y do the test)
         beq oSSynA
@@ -23106,7 +23106,7 @@ ${process.env.OCCFBN ? '        inc oSHist+4            ; OCCFBN: a PRE-BUILT sp
         lda osGlyW
 oSPvs:  sta (osPtr),y
         rts
-oSPsyn:${process.env.OCCFBN ? ` inc oSHist+5            ; OCCFBN: ...and this one needs SYNTHESISING
+${OCCSYNTH ? `oSPsyn:${process.env.OCCFBN ? ` inc oSHist+5            ; OCCFBN: ...and this one needs SYNTHESISING
        ` : ''} ldx osSyn
         cpx osLim
         bcs oSPfb               ; this buffer's scratch exhausted this frame: the old whole-column stamp
@@ -23165,6 +23165,11 @@ oSPst:  sta (osPtr),y
 ` : `                        ; OCCFB=skip: fall through to the rts and leave the cell as drawn.
                         ; See OCCFB -- stamping OCC_FULL here is the wall-base overhang bug,
                         ; and it fires fifteen times a frame on the hub.
+`}` : `                                ; OCCSYNTH=0: the synthesis arm and its scratch-budget
+                                ; fallback are NOT EMITTED. oSPedg never branches here, so
+                                ; assembling them cost 83 bytes of image and the per-frame
+                                ; allocator in occStamp ~19 cycles for a facility nothing
+                                ; could call. A flag that is off should emit nothing.
 `}oSPdn:  rts
 oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
         sta (osPtr),y
