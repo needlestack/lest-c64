@@ -2673,7 +2673,29 @@ for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 1)));
 // which are the commonest stamp there is. Five of them against one edge exhausted the three
 // scratch codes a buffer has and the rest went unstamped -- the bottom of an orb showing through
 // a wall it was standing behind (the user, 2026-09-30, at X57D Y860 A9C40).
-const OCC_VRT = glyphs.map(g => g.every(r => r === g[0]) ? 1 : 0);
+// 1 = a pre-built split says this cell; 0 = only synthesis can.
+//
+// THE QUESTION IS "DOES THE WALL END INSIDE THIS CELL", not "are the rows identical". The rows
+// test was the first version and it is too strict in the way that matters: a sloped VERTICAL
+// silhouette edge has rows that differ by a pixel, fails it, and gets synthesised -- and then
+// synthesis paints only that cell's wall pixels where the split painted the whole column, which
+// is a HOLE punched through a solid occluder (the user, 2026-10-02, at X436 Y65B A1940: "parts
+// of the wall that were correct before showing holes now"). A wall-free row is the thing that
+// actually distinguishes the two: at a wall's BASE the lower rows have no wall at all, and a
+// full-height split paints them anyway -- the overhang. On a sloped edge every row still has
+// wall in it, so the split is right to within a pixel.
+//
+// Paired with osLast, which restricts this to the bottom cell of a stamp: the user's rule is
+// "the last occluder in a column AND only if it goes past the bottom edge of the wall", and this
+// is the second half of it.
+const occWallInRow = row => {           // any of the cell's 4 multicolor pixels at pair 01?
+  for (let i = 0; i < 4; i++) if (((row >> (6 - 2 * i)) & 3) === 1) return true;
+  return false;
+};
+const OCC_VRT = glyphs.map(g => g.every(occWallInRow) ? 1 : 0);
+if (process.env.OCCVRTDUMP) console.error(
+  `  occVrtT: ${OCC_VRT.filter(x => x).length}/${glyphs.length} cells a pre-built split can say ` +
+  `(the rows-identical rule gave ${glyphs.filter(g => g.every(r => r === g[0])).length})`);
 // OCCSYN: use oSPut -- the per-cell dispatch with the pre-built splits. Always on now: the
 // OCCSYN=0 path was the PRE-oSPut code, whose interior loop stamps only cells that are FULLY wall
 // ("jsr oSWall / bcc oSCCol") and skips every ramp or step. On a wall edge that is most of them, so
