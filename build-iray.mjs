@@ -7567,6 +7567,54 @@ const sockVisT = visRows(SOCK.L.map((g, i) => drawnRows(HOLE.L[SOCK.srcIdx[i]].g
 // the wall in front of it is exactly what the stamp exists to cut.
 const exitVisT = visRows(HOLE.L.map((g, i) => drawnRows(g.grid, HOLE.flagT[i])));
 const pedVisT = visRows(PED.L.map((g, i) => drawnRows(g.grid, PED.flagT[i])));
+// SOCKSTRIP=1 writes sock-rungs.png: the rungs as they are actually DRAWN, side by side.
+// Each grid cell is 2 hires pixels because the sprite is MULTICOLOUR, doubled again by hmag
+// (flag bit 2); each row is doubled by vmag (bit 3). So the tiles here are true on-screen sizes,
+// not bitmap sizes -- which is the whole point, since every socket rung has vmag on and the near
+// five have hmag too. ZOOM is a plain integer; the 1.2 on Y is the 4:3 pixel aspect of 320x200,
+// applied here so the shapes are the proportions the player actually sees.
+if (process.env.SOCKSTRIP && !process.env.LVLDUMP) {   // the subprocess would race the same file
+  const PAL = ['000000','FFFFFF','68372B','70A4B2','6F3D86','588D43','352879','B8C76F',
+               '6F4F25','433900','9A6759','444444','6C6C6C','9AD284','6C5EB5','959595'];
+  const INK = { 1: 11, 2: 15 };          // 1 = rim ($d025 = $0b), 2 = fill (hlFillT = 15)
+  const ZOOM = +(process.env.SOCKZOOM ?? 4), GAP = 6;
+  // The ground, because that is what a socket is cut INTO -- and the rim is $0b dark
+  // grey, which vanishes against any dark backdrop. SOCKBG overrides it.
+  const BG = parseInt(process.env.SOCKBG ?? 'FFFFFF', 16);
+  const tiles = SOCK.L.map((_, i) => {
+    const grid = HOLE.L[SOCK.srcIdx[i]].grid, fl = SOCK.flagT[i];
+    const hm = (fl & 4) ? 2 : 1, vm = (fl & 8) ? 2 : 1;
+    let t = grid.findIndex(r => r.some(v => v)); if (t < 0) t = 0;
+    let b = grid.length - 1; while (b > t && !grid[b].some(v => v)) b--;
+    const rows = grid.slice(t, b + 1);
+    return { rows, hm, vm, w: rows[0].length * 2 * hm, h: rows.length * vm };
+  });
+  const W0 = tiles.reduce((a, t) => a + t.w + GAP, GAP), H0 = Math.max(...tiles.map(t => t.h)) + GAP * 2;
+  const W = W0 * ZOOM, H = Math.round(H0 * ZOOM * 1.2);
+  const rgb = Buffer.alloc(W * H * 3);
+  for (let p = 0; p < W * H; p++) rgb.writeUIntBE(BG, p * 3, 3);
+  const put = (x, y, c) => {                      // one hires pixel -> a ZOOM x 1.2*ZOOM block
+    const yA = Math.round(y * ZOOM * 1.2), yB = Math.round((y + 1) * ZOOM * 1.2);
+    for (let py = yA; py < yB; py++) for (let px = x * ZOOM; px < (x + 1) * ZOOM; px++)
+      if (px < W && py < H) rgb.writeUIntBE(c, (py * W + px) * 3, 3);
+  };
+  let x0 = GAP;
+  for (const t of tiles) {
+    const y0 = H0 - GAP - t.h;                    // bottom-aligned: a socket sits IN the floor
+    t.rows.forEach((row, ry) => row.forEach((v, rx) => {
+      if (!INK[v]) return;
+      const c = parseInt(PAL[INK[v]], 16);
+      for (let dy = 0; dy < t.vm; dy++) for (let dx = 0; dx < 2 * t.hm; dx++)
+        put(x0 + rx * 2 * t.hm + dx, y0 + ry * t.vm + dy, c);
+    }));
+    x0 += t.w + GAP;
+  }
+  writeFileSync('./sock-rungs.png', png(W, H, rgb));
+  console.error(`  sock-rungs.png: ${W}x${H}, tiles (hires px) ${tiles.map(t => t.w + 'x' + t.h).join(' ')}`);
+  console.error('  bit pairs per rung: ' + SOCK.L.map((_, i) => {
+    const c = {}; for (const r of HOLE.L[SOCK.srcIdx[i]].grid) for (const v of r) c[v] = (c[v] || 0) + 1;
+    return i + ':' + [1, 2, 3].map(v => v + 'x' + (c[v] || 0)).join('/'); }).join('  '));
+}
 if (process.env.SOCKDUMP) {                    // rung -> what you actually see, against h
   console.error('  socket rungs:  h>=   d     drawn rows   borrowed exit rung');
   SOCK.L.forEach((g, i) => console.error(
