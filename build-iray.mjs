@@ -18539,9 +18539,11 @@ ${process.env.SOCKOCC === '0' ? '' : `        lda hlVisL,x            ; where th
         lda hlSrcL+4,y
         sta hlXO1+1
         sta hlXO2+1
+        sta hlXO3+1
         lda hlSrcH+4,y
         sta hlXO1+2
         sta hlXO2+2
+        sta hlXO3+2
 hlSdn:  rts
 
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
@@ -18556,53 +18558,7 @@ holeTail:
         ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
         ; The real test is the span walk in orbOne, and it works for any entity with an occluder
         ; mask; holes had none, which is the only reason they were excluded. They have one now.
-        ; ONE COLUMN, the hole's centre. A hole is the wall's own colour, so partial occlusion
-        ; needs no handling -- it melts into the wall. Only "wholly behind" must stop drawing.
-        lda ocolN
-        bne hlOcDn              ; centre is off the left edge; the column tests below decide
-        lda ocol
-        cmp #${hx(NLOG)}
-        bcs hlOcDn              ; ...or off the right
-        ; ---- the box is the entity's WIDTH, not its centre column ----
-        ; This was a ONE-COLUMN box at ocol, so the whole thing was culled the instant its CENTRE
-        ; crossed a wall edge -- with up to ${HL_HALFMAX} columns of it still on screen. The user saw a
-        ; socket vanish "quite a long way before it's actually behind the wall" (2026-10-01,
-        ; X4ED Y6FC ADEC0 visible, X4F9 Y707 ADEC0 gone). The reasoning it inherited -- "a hole is
-        ; the wall's own colour, so partial occlusion needs no handling, it melts into the wall"
-        ; -- dates from when an exit hole was always BLACK. Sockets and exits are both in the
-        ; FLOOR and neither melts into anything now that level 4 gives an exit a fill colour.
-        ;
-        ; HL_HALFMAX, not this rung's own half-width: the rung is not resolved until hlRung, two
-        ; dozen instructions below, and the half-width lives in a table patched per kind. Widening
-        ; to the maximum keeps the box a SUPERSET of the entity at every rung, so a cull is still
-        ; only ever made when nothing of it could have shown. It culls less often than an exact
-        ; span would -- never more -- and an entity drawn when it was in fact hidden is covered by
-        ; its own occluder stamp, which is why erring this way is the safe direction.
-        sec
-        sbc #${hx(HL_HALFMAX)}
-        bcs hlPbL
-        lda #$00                ; the box runs off the left edge
-hlPbL:  sta ocl2
-        lda ocol
-        clc
-        adc #${hx(HL_HALFMAX)}  ; ocol <= ${NLOG - 1} here, so this cannot carry past 255
-        cmp #${hx(NLOG)}
-        bcc hlPbR
-        lda #${hx(NLOG - 1)}    ; ...or off the right
-hlPbR:  sta ocmax
-        lda #$00
-        sta ovVis
-        sta ovOcc
-        lda #$01
-        sta ovProbe             ; probe: the walk returns instead of drawing or rejecting
-        lda #$80
-        sta ocanO               ; conservative, exactly as obLoop and the angel probe do
-        jsr occWalk
-        lda #$00
-        sta ovProbe
-        lda ovVis
-        beq orbNo               ; no visible column: it is wholly behind a wall
-hlOcDn: ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
+        ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
 hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -> rung table,
                                 ;   hlRungS scans the socket's ${SOCK.L.length} rungs
         cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
@@ -18632,6 +18588,65 @@ hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -
         lda #${hx(SOCK.L.length - 1)}   ; never past the smallest rung it has
 hlShrX: tax
 hlNoShr:
+        ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
+        ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
+        ; points across the player's whole cell, ANY of which seeing the hole means it is drawn.
+        ; Deliberately a superset -- it was added because orbs popped in and out along a corridor
+        ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
+        ;
+        ; THE BOX IS THIS RUNG'S OWN WIDTH. Two earlier versions of it were wrong in opposite
+        ; directions, and both were visible:
+        ;   - ONE COLUMN at ocol culled the entity the instant its CENTRE crossed a wall edge,
+        ;     with up to 24 columns of socket still showing ("it disappears quite a long way
+        ;     before it's actually behind the wall", X4ED Y6FC ADEC0 against X4F9 Y707 ADEC0).
+        ;   - ocol +/- HL_HALFMAX, the widest half-width ANY kind has, asked about a box twelve
+        ;     times too big for a far socket and kept finding a visible column long after the
+        ;     thing was buried ("stamping long after it's fully occluded", X4F3 Y855 AD740).
+        ; The reasoning the one-column version inherited -- "a hole is the wall's own colour, so
+        ; partial occlusion needs no handling, it melts into the wall" -- dates from when an exit
+        ; hole was always BLACK. Sockets and exits are both in the FLOOR and neither melts into
+        ; anything now that level 4 gives an exit a fill colour.
+        ;
+        ; This is why the probe lives HERE and not above hlRung, where it used to: the rung is
+        ; only final after the shrink, and the half-width is a per-kind table. ocl2 is free until
+        ; hlVst, three instructions down, which is the one window where both are true.
+        txa
+        pha                     ; occWalk clobbers X, and the rung indexes every table below
+hlXO3:  lda holeXOffT,x         ; PATCHED by hlSet alongside hlXO1/hlXO2 -- the SAME table they
+        sta ohtmp               ;   place the sprites from, so the box cannot disagree with them
+        lda ocolN
+        bne hlOcSk              ; centre off the left edge; the column tests below decide
+        lda ocol
+        cmp #${hx(NLOG)}
+        bcs hlOcSk              ; ...or off the right
+        sec
+        sbc ohtmp
+        bcs hlPbL
+        lda #$00                ; the box runs off the left edge
+hlPbL:  sta ocl2
+        lda ocol
+        clc
+        adc ohtmp               ; ocol <= ${NLOG - 1} and the half-width <= ${HL_HALFMAX}, so no carry past 255
+        cmp #${hx(NLOG)}
+        bcc hlPbR
+        lda #${hx(NLOG - 1)}    ; ...or off the right
+hlPbR:  sta ocmax
+        lda #$00
+        sta ovVis
+        sta ovOcc
+        lda #$01
+        sta ovProbe             ; probe: the walk returns instead of drawing or rejecting
+        lda #$80
+        sta ocanO               ; conservative, exactly as obLoop and the angel probe do
+        jsr occWalk
+        lda #$00
+        sta ovProbe
+        lda ovVis
+        bne hlOcSk
+        pla                     ; nothing of it shows: balance the stack, then drop the entity
+        jmp orbNo
+hlOcSk: pla
+        tax                     ; the rung, back where everything below expects it
         ; ---- how many rows this rung covers, resolved NOW while the rung is still in X ----
         ; holeSlot is called once per slice and takes X for the slot, so the rung is gone by the
         ; second slice; looking it up there would read a slot number as a rung and box the stamp
