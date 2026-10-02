@@ -2729,7 +2729,11 @@ const OCCSYNTH = process.env.OCCSYNTH !== '0';
 // touching DIAG up here throws "Cannot access 'DIAG' before initialization" -- and only when the
 // flag is SET, so the default built fine while OCCSYNTH=1 died inside a level-dump subprocess
 // whose stderr the parent discards. The same TDZ trap as the PROFN guard earlier today.
-if (OCCSYNTH) DIAGEARLY.push('OCCSYNTH=1');
+// Registered when it DEVIATES from the default, which is now ON. Left as "if (OCCSYNTH)" after
+// the default flipped, every ordinary build flagged itself diagnostic and wrote iray.diag.asm --
+// so iray.asm would quietly stop tracking the shipping build, which is the stale-asm trap that
+// cost three wrong readings in one session.
+if (!OCCSYNTH) DIAGEARLY.push('OCCSYNTH=0');
 // EIGHT, four per screen buffer. Six was not a judgement about how many cells an entity needs --
 // it was every spare code the charset had, halved. The real figure is up to two per entity (the
 // occluding wall's base, and where a distant wall ends inside the same cell), so four per buffer
@@ -2772,6 +2776,7 @@ const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
 // every row -- and measure it in CYCLES (PROFILE bucket 16), because one 60/n step could be a few
 // hundred cycles over a boundary or several thousand and those argue differently.
 const OCCSYNEDGE = process.env.OCCSYNEDGE !== '0';
+if (!OCCSYNEDGE) DIAGEARLY.push('OCCSYNEDGE=0');   // registered HERE, below its own declaration
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // ---- the fall's BLACK, which is not SOLID ----
