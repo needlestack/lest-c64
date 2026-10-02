@@ -2737,6 +2737,38 @@ if (OCCSYNTH) DIAGEARLY.push('OCCSYNTH=1');
 // 201 cell codes -> 199, predicted error 6,932,472 -> 6,963,243 px over 512M frames, which is
 // 0.014 px/frame either way. The charset's tail is nearly free -- see the char-headroom note.
 const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
+// OCCSYNEDGE: also synthesise a PARTIALLY COVERED cell, whatever its glyph says.
+//
+// occVrtT answers "can a column split draw this cell's shape", and that is not the only way a
+// pre-built split goes wrong. A split also paints the columns it does NOT cover, with a backing
+// chosen black or white -- and that is a guess. Where the uncovered part holds a distant wall's
+// end and some floor, black backing flattens both: a black nub sticking out of the wall with
+// nothing behind it (the user, 2026-10-02, at X277 Y5BB AF040, "a little black nub sticking out
+// to the left under the orb that shouldn't be there").
+//
+// The user's own framing, which is what this implements: "it's also true if it extends below a
+// wall, further in the distance, in that same glyph... it could (should) synthesize a glyph that
+// a) leaves white alone and b) only inks fg black where the occluding wall is. It can't just do
+// all black." Synthesis has no backing at all -- pixels outside osCov keep the cell's own value,
+// so white stays white AND a distant wall's black stays black -- so the fix is just to send these
+// cells to it. osCov == $aa is full coverage; anything else is an edge cell.
+//
+// Measured: the nub goes (12 px), a second one-pixel backing error at X436 Y65B A1940 goes with
+// it (2 px, white correctly let through), and every other pose is unchanged. At most 2 cells a
+// frame synthesise on any pose measured, against the 4 per buffer OCCSYN_N=8 buys, and oSFbN
+// stays 0 -- which is why the budget had to go up before the trigger could be widened.
+// DEFAULT OFF, on fps. It is CORRECT -- it fixes the nub and a second one-pixel backing error,
+// and changes nothing else on any pose measured -- but edge cells are two per stamp row where
+// the bottom-row rule is one per stamp, so it fires several times more often. At the benchmark
+// viewpoint (X4C8 Y6E4 A0E00, CHAIN=1,2,3,4) that is 19 fps -> 15: a whole raster frame, 60/3 to
+// 60/4. Synthesis with the bottom-row gate alone costs nothing measurable there (19 either way).
+//
+// Not shipped rather than not worth having: motion granularity is this project's veto axis, and
+// a one-character artefact is a smaller price than a third of the frame rate at a common view.
+// What it needs before it can go on is a CYCLE measurement (PROFILE bucket 16) rather than a
+// quantised fps reading -- 19 -> 15 is one 60/n step and could be a few hundred cycles over a
+// boundary or several thousand, and those are different conclusions.
+const OCCSYNEDGE = process.env.OCCSYNEDGE === '1';
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // ---- the fall's BLACK, which is not SOLID ----
@@ -23443,9 +23475,14 @@ oSHro:  inc oSHist+2            ; OCCFBN: a readout
         ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
         ; whole scratch budget and leaving its lower cells unstamped.
         tax
-${OCCSYNTH ? `        lda osLast              ; not the bottom of this column: a split is right, and
-        beq oSPnos              ;   synthesising here punches a gap through a solid occluder
-        lda occVrtT,x
+${OCCSYNTH ? `${OCCSYNEDGE ? `        lda osCov               ; OCCSYNEDGE: a PARTIALLY covered cell. A pre-built split paints
+        cmp #$aa                ;   the columns it does NOT cover with its backing, black or white,
+        bne oSPsyn              ;   and that is a guess -- wrong wherever the uncovered part holds
+                                ;   a distant wall's end plus floor. Synthesis has no backing: it
+                                ;   keeps the cell's own pixels outside osCov untouched.
+` : ''}${process.env.OCCSYNROW === 'all' ? '' : `        lda osLast              ; bottom of this column only -- see OCCSYNROW
+        beq oSPnos
+`}        lda occVrtT,x
         beq oSPsyn
 oSPnos:` : `                                ; OCCSYNTH=0: no synthesis, so EVERY edge cell takes the
                                 ; pre-built split -- which is what the scratch-budget fallback
