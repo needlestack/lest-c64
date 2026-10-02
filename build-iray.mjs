@@ -25985,9 +25985,16 @@ try {
     console.log(`low RAM $${LOWBOOT.toString(16)}-$${(LOWEND - 1).toString(16)}: ${used} of ` +
       `${LOWEND - LOWBOOT} bytes used by ${low.map(([k]) => k).join(' ') || '(nothing)'}`);
   }
+  // SLOTS ARE 64-BYTE ALIGNED -- a sprite pointer addresses a 64-byte block, so a slot cannot
+  // straddle the end of one free run and the start of the next. free>>6 over the TOTAL counts
+  // slots that do not exist: at the shipping chain it reported 35 where only 34 can be placed,
+  // because two of the three runs end 56 bytes past their last aligned slot. Count per run.
+  const slotsOf = rs => rs.reduce((n, [lo, hi]) => n + Math.max(0, (hi - ((lo + 63) & ~63)) >> 6), 0);
+  const slots = slotsOf(bank3), slack = free - slots * 64;
   console.log(`VIC bank 3 free: ${bank3.map(([lo, hi]) =>
     `$${lo.toString(16)}-$${(hi - 1).toString(16)}`).join(', ')}` +
-    `  = ${free} bytes, ${free >> 6} sprite slots` +
+    `  = ${free} bytes, ${slots} sprite slots (${slack} B lost to 64-byte alignment across ` +
+    `${bank3.length} run${bank3.length === 1 ? '' : 's'})` +
     (SPRITES ? ` (${gross >> 6} gross, ${NORBBM} spent on the orb ladder` +
                ` and ${HOLEBM.length} on the hole ladder)` : ''));
   // BANK3MAP=1: the whole bank as a sorted occupancy list. The free-space line above says how
