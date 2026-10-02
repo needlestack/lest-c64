@@ -18863,6 +18863,13 @@ hsRst:  tya
         tay
         lda bbRT,y
         sta obBR,x
+        jmp hsNoSt              ; OVER the retract below. This is the SUCCESS path and it used to
+                                ;   fall straight into hsNoSt; dropping hsDrop in front of that
+                                ;   label put the retract in its way, so every correctly placed
+                                ;   socket cleared its own obOcc and NOTHING was stamped at all
+                                ;   (the user, 2026-10-01). A label does not stop a fall-through,
+                                ;   and the stranded-instruction lint cannot see one that lands
+                                ;   on a label -- only a test for a stamp that SHOULD appear can.
 hsDrop: lda #$00                ; RETRACT the stamp claim. obOcc bit 7 is the only thing that
         sta obOcc,x             ;   makes occStamp walk a hole-like slot, and it is set well
                                 ;   above -- BEFORE the clipping tests that land here. Falling
