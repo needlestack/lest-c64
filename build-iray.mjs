@@ -2761,9 +2761,19 @@ const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
 // it (2 px, white correctly let through), and every other pose is unchanged. At most 2 cells a
 // frame synthesise on any pose measured, against the 4 per buffer OCCSYN_N=8 buys, and oSFbN
 // stays 0 -- which is why the budget had to go up before the trigger could be widened.
-// ON, by the user's call after seeing it ("since it's so rare, let's leave it on for now").
+// ---- OVERSTAMPING AT A WALL EDGE IS SOLVED. IT IS OFF FOR FPS, NOT BECAUSE IT DOES NOT WORK ----
 //
-// IT IS NOT FREE, and the thing that is rare is the ARTEFACT, not the trigger. Edge cells are two
+// If a stamp is ever reported squaring off a wall edge, or a black nub sticking out of a wall
+// with nothing behind it, or an occluder painting floor it should have left alone: THIS FIXES IT.
+// Build with OCCSYNEDGE=1. It is not a bug to go and find, it is a switch, and the only question
+// is whether that view is worth the frame rate.
+//
+// Verified on the user's own poses: nub gone at X277 Y5BB AF040 (12 px), a second one-pixel
+// backing error gone at X436 Y65B A1940 (2 px), X513 Y725 A0D40 / X4C4 Y707 A0D40 /
+// X5A4 Y362 AD2C0 all unchanged, <= 2 synthesised cells a frame, oSFbN 0.
+//
+// THE COST IS PAID ON EVERY FRAME AND THE BENEFIT IS ALMOST NEVER VISIBLE, which is the whole
+// argument: what is rare is the ARTEFACT, not the trigger. Edge cells are two
 // per stamp ROW where the bottom-row rule is one per STAMP, so this fires several times more
 // often than the visible defect appears:
 //
@@ -2771,12 +2781,12 @@ const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
 //   bottom-row gate    19 fps
 //   + this             15 fps      a whole raster frame, 60/3 -> 60/4
 //
-// OCCSYNEDGE=0 turns it off. What would make it cheap, if the frame rate ever has to come back:
+// What would make it cheap, if it is ever wanted on:
 // synthesise only the edge cell that actually straddles a wall boundary rather than both edges of
 // every row -- and measure it in CYCLES (PROFILE bucket 16), because one 60/n step could be a few
 // hundred cycles over a boundary or several thousand and those argue differently.
-const OCCSYNEDGE = process.env.OCCSYNEDGE !== '0';
-if (!OCCSYNEDGE) DIAGEARLY.push('OCCSYNEDGE=0');   // registered HERE, below its own declaration
+const OCCSYNEDGE = process.env.OCCSYNEDGE === '1';
+if (OCCSYNEDGE) DIAGEARLY.push('OCCSYNEDGE=1');   // registered HERE, below its own declaration
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // ---- the fall's BLACK, which is not SOLID ----
