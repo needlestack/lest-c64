@@ -7611,9 +7611,25 @@ if (process.env.SOCKSTRIP && !process.env.LVLDUMP) {   // the subprocess would r
   }
   writeFileSync('./sock-rungs.png', png(W, H, rgb));
   console.error(`  sock-rungs.png: ${W}x${H}, tiles (hires px) ${tiles.map(t => t.w + 'x' + t.h).join(' ')}`);
-  console.error('  bit pairs per rung: ' + SOCK.L.map((_, i) => {
-    const c = {}; for (const r of HOLE.L[SOCK.srcIdx[i]].grid) for (const v of r) c[v] = (c[v] || 0) + 1;
-    return i + ':' + [1, 2, 3].map(v => v + 'x' + (c[v] || 0)).join('/'); }).join('  '));
+  // Does the magnification EARN its place? A sprite is 12 multicolour pixels wide and 21 rows
+  // tall. hmag/vmag do not add detail, they double the pixel -- so each is only REQUIRED when the
+  // inked shape at its on-screen size will not fit the bitmap unmagnified. Measured on the INK,
+  // not the grid: the grid is the full sprite pair and is mostly empty at every rung.
+  console.error('  rung  sprites  ink(mc)  on screen   hmag        vmag');
+  SOCK.L.forEach((_, i) => {
+    const g = HOLE.L[SOCK.srcIdx[i]].grid, fl = SOCK.flagT[i];
+    const n = fl & 3, hm = (fl & 4) ? 2 : 1, vm = (fl & 8) ? 2 : 1;
+    let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
+    g.forEach((r, y) => r.forEach((v, x) => {
+      if (!v) return; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }));
+    const iw = x1 - x0 + 1, ih = y1 - y0 + 1;
+    const sw = iw * 2 * hm, sh = ih * vm;             // hires px on screen
+    const needH = iw * hm > 12 * n, needV = sh > 21;  // unmagnified capacity: 12 mc px/sprite, 21 rows
+    console.error(`   ${String(i).padStart(2)}      ${n}     ${String(iw).padStart(2)}x${String(ih).padStart(2)}    ` +
+      `${String(sw).padStart(3)}x${String(sh).padStart(2)}    ` +
+      `${hm > 1 ? (needH ? 'on, NEEDED ' : 'on, spare  ') : 'off        '}` +
+      `${vm > 1 ? (needV ? 'on, NEEDED' : 'on, spare') : 'off'}`);
+  });
 }
 if (process.env.SOCKDUMP) {                    // rung -> what you actually see, against h
   console.error('  socket rungs:  h>=   d     drawn rows   borrowed exit rung');
