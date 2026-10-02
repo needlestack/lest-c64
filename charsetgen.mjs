@@ -41,7 +41,15 @@ const scan = JSON.parse(readFileSync('./cellscan.json', 'utf8'));
 // 207: the seam codes are 16 -- 4 singles and 12 sub-cell starts (rows 2/4/6 x 4 columns). The
 // six two-line PAIRS are gone: two lines closer than a cell now collapse to the nearer one, so
 // 0.020 -> 0.020 px/frame against a shipped 445, so the six cost nothing measurable.
-const KCELL = +(process.env.KCELL ?? 207);
+// 197, not 207: OCCSYN_N went 6 -> 8 so the occluder synthesiser gets four scratch codes per
+// screen buffer instead of three, and those come off the top of the charset. 207 fitted 201 cell
+// codes into 250 of 256; 197 fits 199 into 248, leaving the 8. Cost on the 2M scan: predicted
+// error 6,932,472 -> 6,963,243 px over 512M frames, i.e. 0.014 px/frame either way -- the tail of
+// this codebook is nearly free, which is the whole point of the char-headroom measurement.
+// charset-plan.json is derived and untracked, so THIS DEFAULT IS THE RESERVATION: regenerating
+// at 207 builds a plan the eight scratch codes have no room in, and the build's charset guard
+// fires rather than anything silently overlapping.
+const KCELL = +(process.env.KCELL ?? 197);
 const FRAMES = scan.positions * Math.ceil(256 / scan.angleStride);
 const parse = k => k.split(',').map(Number);
 const L1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);

@@ -2730,7 +2730,13 @@ const OCCSYNTH = process.env.OCCSYNTH !== '0';
 // flag is SET, so the default built fine while OCCSYNTH=1 died inside a level-dump subprocess
 // whose stderr the parent discards. The same TDZ trap as the PROFN guard earlier today.
 if (OCCSYNTH) DIAGEARLY.push('OCCSYNTH=1');
-const OCCSYN_N = +(process.env.OCCSYNN ?? 6);
+// EIGHT, four per screen buffer. Six was not a judgement about how many cells an entity needs --
+// it was every spare code the charset had, halved. The real figure is up to two per entity (the
+// occluding wall's base, and where a distant wall ends inside the same cell), so four per buffer
+// covers one wide entity or two small ones. Paid for by refitting the cell codebook at KCELL=197:
+// 201 cell codes -> 199, predicted error 6,932,472 -> 6,963,243 px over 512M frames, which is
+// 0.014 px/frame either way. The charset's tail is nearly free -- see the char-headroom note.
+const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
 const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // ---- the fall's BLACK, which is not SOLID ----
@@ -8769,10 +8775,19 @@ const CB_A = cb(CHARSET), CB_B = cb(CHARSET_B);
 const ARC_BLK = 0xf800, ARC_CB = cb(ARC_BLK);
 // 213, not 200. This is only WHERE the dictionary sits inside its 2K block -- the codes are
 // private to the arc blocks, so the constraints are just that the set clears $10000 and misses
-// VOIDCH's own stamp at ARC_BLK + 250*8. Pushing it up buys the LEVEL SHADOW the room the hub's
+// VOIDCH's own stamp at ARC_BLK + 254*8 (it was 250 until VOIDCH moved to the top of the
+// charset -- see VOIDCH). Pushing it up buys the LEVEL SHADOW the room the hub's
 // fourth exit needs: the shadow runs from ARC_MAP's end up to ARC_GLY, and a fourth hole-like
 // entity adds 46 bytes to every level's blob -- 138 across three slots.
-const ARC_C0 = 215;                                  // ($feb8 - $f800) / 8; ARC_FILL must stay under VOIDCH
+// DERIVED from VOIDCH, not a literal. The set has to end one code below VOIDCH's own stamp, and
+// VOIDCH is SYN0 -- so every scratch code added to OCCSYN_N pushes VOIDCH DOWN and the arc set
+// must follow. As the literal 215 that invariant held by luck: OCCSYN_N=8 put VOIDCH on 248 and
+// the arc's last two codes landed under it, which the bank 3 guard caught as ARC_GLY x
+// ARC_VOIDCH. Moving VOIDCH to the TOP of the charset instead looks tidier and BREAKS THE FALL --
+// measured as a black frame, with OCCSYN_N held at 6 to prove it was the move and not the budget.
+// So the arc moves and VOIDCH does not. At OCCSYN_N=8 this is 213, which is where it sat before
+// it was pushed up to 215; the 16 bytes that bought the level shadow go back.
+const ARC_C0 = VOIDCH - ARC_RIM_CODES.length - 2;    // ARC_FILL then lands on VOIDCH - 1
 const ARC_VOID = ARC_C0 + ARC_RIM_CODES.length;      // the hole: all pair 11 -> colour RAM -> black
 const ARC_FILL = ARC_VOID + 1;                       // the flat ground either side of the curve
 const ARC_GLY = ARC_BLK + ARC_C0 * 8;
