@@ -6972,14 +6972,22 @@ const fitsBank = (name, at, slots, end) => {
 // socket is half the radius its rungs are mostly one sprite, so the second ladder is cheap.
 // slot0 is where its bitmaps start in the shared HOLEBASE block.
 const LOW_ROWS = +(process.env.HOLELOW ?? 2);   // a rung this short gets the far-end fudge
-function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
+// opt lets ONE ladder opt into a different shape policy without moving the others. The socket
+// uses all of it; the exit hole and the pedestal pass nothing and rasterise exactly as before.
+//   widths  explicit rung widths instead of the wStep walk, so a ladder can be spaced by hand
+//   crisp   sprite count from ceil(w/12), the UNMAGNIFIED capacity, instead of ceil(w/24)
+//   spr     per-rung sprite count override, to spend magnification instead of a sprite
+//   cover   sample the centre of the row's COVERED part rather than the row centre
+//   touch   [rung, lit-row, trim each side] hand edits, applied after rasterising
+function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0, opt = {}) {
   const L = [];
   // Rungs are evenly spaced in apparent WIDTH, which is evenly spaced in 1/d -- so a step that
   // is reasonable up close covers an enormous span of world distance once the shape is small.
   // At step 4 the last two rungs are 8 columns at 6.6 cells and 4 columns at 13.1: one rung for
   // half the visible range, and it reads as the hole not changing size at all as you walk. Below
   // 12 columns the step halves, which costs one slot a rung (they are all single-sprite there).
-  for (let w = wMax; w >= 4; w -= (w > 12 ? wStep : Math.max(2, wStep >> 1)))
+  if (opt.widths) for (const w of opt.widths) L.push({ w, d: 2 * F_COL * r / w });
+  else for (let w = wMax; w >= 4; w -= (w > 12 ? wStep : Math.max(2, wStep >> 1)))
     L.push({ w, d: 2 * F_COL * r / w });
   // The near family exists because a BIG disc's widest part goes below row 200 and
   // width stops keying the table. A socket never gets that big -- its widest rung is
@@ -6994,7 +7002,20 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
     const Z = 88 / (y - 100), t = r * r - (Z - d) * (Z - d);
     return t <= 0 ? 0 : F_COL * Math.sqrt(t) / Z;
   };
-  for (const g of L) {
+  // A pixel row covers a WHOLE screen row (two under vmag), and these discs get under one row
+  // tall at distance -- so sampling the row's CENTRE catches an arbitrary slice, or misses the
+  // shape entirely. Sampling the centre of the row's COVERED part is identical for a row wholly
+  // inside the shape, so round middles are untouched, and representative for one it only clips.
+  // (Taking the row's WIDEST span also fixes the far end, but reports the same maximum for every
+  // row near the middle and squares the sides off -- visible immediately as a flat-sided rung.)
+  const sample = opt.cover
+    ? (d, y, ch) => {
+        const fa = 100 + 88 / (d + r), ne = 100 + 88 / (d - r);
+        const lo = Math.max(y - ch / 2, fa), hi = Math.min(y + ch / 2, ne);
+        return lo >= hi ? 0 : span(d, (lo + hi) / 2);
+      }
+    : (d, y) => span(d, y);
+  for (const [gi, g] of L.entries()) {
     g.far = Math.round(100 + 88 / (g.d + r));  // screen row of the sprite's TOP
     g.near = 100 + 88 / (g.d - r);
     // Everything below is sized by what is ON SCREEN, not by the whole ellipse. Past d=1.09 the
@@ -7021,7 +7042,8 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
     // is the honest count on its own. The rule used to force a second sprite for anything over 12
     // columns, which spent two slots on rungs a single magnified sprite could draw -- three of
     // them, at 24, 20 and 16 columns. Those slots pay for the extra far-field rungs below.
-    g.spr = Math.max(1, Math.min(3, Math.ceil(g.w / 24)));
+    g.spr = Math.max(1, Math.min(3, Math.ceil(g.w / (opt.crisp ? 12 : 24))));
+    if (opt.spr?.[gi]) g.spr = opt.spr[gi];      // spend hmag rather than a third sprite
     g.px = g.spr * 12;                             // logical bitmap width in multicolor pixels
     g.mag = g.w > g.px ? 1 : 0;
     g.vmag = g.vis > 21 ? 1 : 0;                   // taller than a sprite: expand it vertically
@@ -7031,7 +7053,7 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
     if (g.w > g.px * cw)
       throw new Error(`hole rung at d=${g.d.toFixed(2)} is ${g.w.toFixed(1)}c: past 3 sprites`);
     g.grid = [...Array(21)].map((_, by) => {
-      const y = g.far + by * ch + ch / 2, s = span(g.d, y);
+      const y = g.far + by * ch + ch / 2, s = sample(g.d, y, ch);
       return [...Array(g.px)].map((_, bx) => {
         const off = (bx - g.px / 2 + 0.5) * cw;    // apparent columns from centre
         const a = Math.abs(off);
@@ -7092,6 +7114,22 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0) {
   // dash. There is no drawing fix for that, because there is no shape there to draw. Cutting the
   // ladder short caps the render distance for free -- varT returns $ff past the smallest rung, so
   // beyond it the hole is simply not drawn.
+  // ---- HAND TOUCH-UPS ----
+  // At three rows tall the projection has no sub-pixel room to taper with, so a rung can come out
+  // flat-topped while the arithmetic is perfectly right: the socket's 9c rung rasterises its top
+  // row as the same 8 pixels as its middle, and reads as a bar rather than a disc. Indexed by LIT
+  // row so the far-end fudge above (which shifts the shape down a row) cannot move the target.
+  // An explicit list, deliberately not folded into the rasteriser: these are the only pixels in
+  // any ladder that are authored rather than projected, and that should stay obvious.
+  for (const [ri, ry, n] of (opt.touch ?? [])) {
+    const g = L[ri];
+    if (!g) throw new Error(`touch names rung ${ri}, ladder has ${L.length}`);
+    const lit = g.grid.filter(row => row.some(v => v));
+    if (!lit[ry]) throw new Error(`touch names lit row ${ry} of rung ${ri}, which has ${lit.length}`);
+    const on = lit[ry].map((v, x) => v ? x : -1).filter(x => x >= 0);
+    if (on.length <= 2 * n) throw new Error(`touch would erase rung ${ri} row ${ry}`);
+    for (let k = 0; k < n; k++) { lit[ry][on[k]] = 0; lit[ry][on[on.length - 1 - k]] = 0; }
+  }
   const minRows = +(process.env.HOLEMINROWS ?? 0);   // 0 = keep every rung; see the fudge below
   // Off unless asked for: the far-end fudge above keeps these rungs legible, and a rung whose
   // true height is NEGATIVE still has real width, which is the dimension that matters out there.
@@ -7189,7 +7227,26 @@ const HOLE = shareRungs(makeHoleLadder(HOLER, HOLESTEP, 0), [
 const SOCKR = +(process.env.SOCKR ?? HOLER / 2);
 // FLAT -- rim 0. The exit hole is rimless because a rim ate a pixel each side and read as a
 // SMALLER hole; the socket now borrows its art anyway, so colour is what tells them apart.
-const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, 0);
+// SOCKOWN=0 goes back to borrowing the exit hole's bitmaps for zero slots -- see the block below
+// for why that worked at all (the half-radius/double-distance identity) and what it cost.
+const SOCK_OWN = process.env.SOCKOWN !== '0';
+// Spaced by hand rather than by a step: an even walk put two rungs where they rasterise to the
+// same pixels and left a 0.73-cell hole in the middle. These eight all render distinctly.
+const SOCK_W = (process.env.SOCKW ?? '32,23,18,14,11,9,6,4').split(',').map(Number);
+// Rung 0 takes hmag on two sprites rather than a third sprite: there are only eight hardware
+// sprites and level 2 has three sockets, so the near rung is the one place a sprite is dearer
+// than a pixel. Every other rung is unmagnified in both axes.
+const SOCK_SPR = (process.env.SOCKSPR ?? '2,2,2,2,1,1,1,1').split(',').map(Number);
+// Its OWN region, not the tail of the exit hole's. HOLEBASE stacks hole ladder -> idol -> orb
+// tail and the whole stack ends 504 bytes short of ARC_GLY5, so twelve more slots there overflow
+// by 264 bytes -- and eight rungs cannot cost less than nine slots (rung 0 needs two sprites even
+// magnified), so NO dedicated ladder fits in that gap. Sprite data only has to be 64-byte aligned
+// RAM inside the VIC bank, so it ships as its own file instead, like ISPR and IPIC already do.
+const SOCKBASE = +(process.env.SOCKBASE ?? 0xf880);
+const SOCK = makeHoleLadder(SOCKR, 4, SOCK_OWN ? 0 : HOLE.slotEnd, 32, false, 0, SOCK_OWN ? {
+  widths: SOCK_W, crisp: true, spr: SOCK_SPR, cover: true,
+  touch: [[5, 0, 1]],                             // the 9c rung's flat top -- see HAND TOUCH-UPS
+} : {});
 
 
 // ---- SOCKETS BORROW THE EXIT HOLE'S BITMAPS AND OWN NONE ----
@@ -7207,7 +7264,13 @@ const SOCK = makeHoleLadder(SOCKR, 4, HOLE.slotEnd, 32, false, 0);
 // This spends more sprites on screen than a dedicated ladder would -- a one-sprite version was
 // tried, at 6 slots and a 23% smaller socket with 2-column pixels up close, and this looked
 // better. Zero slots is the other half of the argument.
-{
+//
+// SUPERSEDED by SOCK_OWN (2026-10-01), kept behind SOCKOWN=0. The dedicated ladder that was tried
+// and rejected was ONE sprite at 6 slots; this one is two, at 12, and the user judged it from a
+// rendered strip. What the borrow could never give: the two closest rungs clamp (the similarity
+// breaks once the disc's near edge passes row 200), so the three nearest distances all drew at
+// one size, and vmag halved the vertical sampling of every rung.
+if (!SOCK_OWN) {
   const near2 = d => HOLE.L.reduce((best, g, i) =>
     Math.abs(g.d - 2 * d) < Math.abs(HOLE.L[best].d - 2 * d) ? i : best, 0);
   const idx = SOCK.L.map(g => near2(g.d));
@@ -7507,11 +7570,12 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24, wMin = 4) {
   const flagT = L.map(g => g.spr | (g.mag ? 4 : 0) | (g.vmag ? 8 : 0));
   return { L, BM, slotT, hT, varT, xOffT, yBaseT, flagT, hOf, slotEnd: _pslot };
 }
-// Behind the exit ladder in the same region; sockets own no slots, so HOLE.slotEnd is the end
+// Behind the exit ladder in the same region, and behind the SOCKET's slots too when it owns
+// any -- SOCK.slotEnd equals HOLE.slotEnd exactly when the socket is borrowing (SOCKOWN=0)
 // of everything emitted there so far.
-const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, HOLE.slotEnd, 24, PEDWMIN)
+const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, SOCK_OWN ? HOLE.slotEnd : SOCK.slotEnd, 24, PEDWMIN)
                     : { L: [], BM: [], slotT: [], hT: [], varT: [], xOffT: [], yBaseT: [],
-                        flagT: [], slotEnd: HOLE.slotEnd };
+                        flagT: [], slotEnd: SOCK_OWN ? HOLE.slotEnd : SOCK.slotEnd };
 // Five tables of one byte a rung, emitted as a single run under holeSeeT.
 const PEDTBL = 5 * Math.max(1, PED.L.length);
 // ...plus hlRungP itself, which is emitted in the same run. Hand-counted, and the assembler's
@@ -7531,7 +7595,7 @@ if (process.env.PEDDUMP && HAS_PED) {
   });
   process.exit(0);
 }
-const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK ? [] : SOCK.BM), ...PED.BM];
+const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK || SOCK_OWN ? [] : SOCK.BM), ...PED.BM];
 // ---- HOW MANY SCREEN ROWS EACH SOCKET-LIKE RUNG COVERS, so occStamp can box it ----
 // The stamp needs one thing from a slot it did not project: the row extent of what is drawn
 // there. For an orb it reads that from orbBlankT/orbAnchT by variant; a socket's rung cannot go
@@ -7560,7 +7624,10 @@ const inkedRows = grid => {
 };
 const drawnRows = (grid, flag) => inkedRows(grid) * ((flag & 8) ? 2 : 1);   // bit 3 is vmag
 const visRows = rows => rows.map(v => Math.max(1, Math.min(255, Math.round(v))));
-const sockVisT = visRows(SOCK.L.map((g, i) => drawnRows(HOLE.L[SOCK.srcIdx[i]].grid, SOCK.flagT[i])));
+// Whichever grid the socket is actually drawn from: its own when it owns a ladder, the exit
+// hole's borrowed one when SOCKOWN=0. Every consumer below goes through this.
+const sockGrid = i => SOCK.srcIdx ? HOLE.L[SOCK.srcIdx[i]].grid : SOCK.L[i].grid;
+const sockVisT = visRows(SOCK.L.map((g, i) => drawnRows(sockGrid(i), SOCK.flagT[i])));
 // ...and the EXIT hole's own. It had none, because it was the one kind occStamp skipped: a pit
 // was the wall's own black, so a sprite half behind a corner melted into it and only "wholly
 // behind" ever had to be handled. Colouring the holes ended that -- a coloured pit hanging over
@@ -7582,11 +7649,18 @@ if (process.env.SOCKSTRIP && !process.env.LVLDUMP) {   // the subprocess would r
   // grey, which vanishes against any dark backdrop. SOCKBG overrides it.
   const BG = parseInt(process.env.SOCKBG ?? 'FFFFFF', 16);
   const tiles = SOCK.L.map((_, i) => {
-    const grid = HOLE.L[SOCK.srcIdx[i]].grid, fl = SOCK.flagT[i];
+    const grid = sockGrid(i), fl = SOCK.flagT[i];
     const hm = (fl & 4) ? 2 : 1, vm = (fl & 8) ? 2 : 1;
     let t = grid.findIndex(r => r.some(v => v)); if (t < 0) t = 0;
     let b = grid.length - 1; while (b > t && !grid[b].some(v => v)) b--;
-    const rows = grid.slice(t, b + 1);
+    // Cropped in BOTH axes: the grid is the whole sprite pair and a rung's ink is a fraction of
+    // it, so a tile sized from grid width shows padding as if it were the shape. The on-screen
+    // width of a rung is its INK, which is also what xOff and the occlusion probe talk about.
+    let cx0 = Infinity, cx1 = -1;
+    for (let y = t; y <= b; y++) grid[y].forEach((v, x) => {
+      if (v) { if (x < cx0) cx0 = x; if (x > cx1) cx1 = x; } });
+    if (cx1 < 0) { cx0 = 0; cx1 = 0; }
+    const rows = grid.slice(t, b + 1).map(r => r.slice(cx0, cx1 + 1));
     return { rows, hm, vm, w: rows[0].length * 2 * hm, h: rows.length * vm };
   });
   const W0 = tiles.reduce((a, t) => a + t.w + GAP, GAP), H0 = Math.max(...tiles.map(t => t.h)) + GAP * 2;
@@ -7617,7 +7691,7 @@ if (process.env.SOCKSTRIP && !process.env.LVLDUMP) {   // the subprocess would r
   // not the grid: the grid is the full sprite pair and is mostly empty at every rung.
   console.error('  rung  sprites  ink(mc)  on screen   hmag        vmag');
   SOCK.L.forEach((_, i) => {
-    const g = HOLE.L[SOCK.srcIdx[i]].grid, fl = SOCK.flagT[i];
+    const g = sockGrid(i), fl = SOCK.flagT[i];
     const n = fl & 3, hm = (fl & 4) ? 2 : 1, vm = (fl & 8) ? 2 : 1;
     let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
     g.forEach((r, y) => r.forEach((v, x) => {
@@ -7636,7 +7710,7 @@ if (process.env.SOCKDUMP) {                    // rung -> what you actually see,
   SOCK.L.forEach((g, i) => console.error(
     `    ${String(i).padStart(2)}      ${String(SOCK.hT[i]).padStart(3)}  ` +
     `${g.d.toFixed(2).padStart(5)}      ${String(sockVisT[i]).padStart(2)}px` +
-    `            ${SOCK.srcIdx[i]}`));
+    `            ${SOCK.srcIdx ? SOCK.srcIdx[i] : 'own'}`));
 }
 // They live in the $7100-$7900 page, anchored below the run tables: that page holds the
 // cut-scene charset, which FACE_PACK has packed down to 1,792 of its 2,048 bytes, and its tail
@@ -7837,16 +7911,16 @@ if (process.env.LADDERSHEET) {
   // Sheeting the borrowed grid rather than the socket's own projection is the only way to see
   // that: the numbers in SOCK.L describe a shape that is never drawn.
   if (!NOSOCK && SOCK.L.length) {
-    const sokRung = i => { const src = HOLE.L[SOCK.srcIdx[i]];
+    const sokRung = i => { const src = { grid: sockGrid(i) };
       return { xmag: SOCK.flagT[i] & 4, ymag: SOCK.flagT[i] & 8,
                parts: [...Array(SOCK.flagT[i] & 3)].map((_, k) => ({
                  w: 12, h: src.grid.length, ox: k * 12, oy: 0,
                  at: (x, y) => (src.grid[y] ?? [])[k * 12 + x] ?? 0 })) }; };
     const sokG = groupBy(SOCK.L.map((r, i) => i),
-      i => `${SOCK.srcIdx[i]}/${SOCK.flagT[i]}`);
+      i => `${SOCK.srcIdx ? SOCK.srcIdx[i] : i}/${SOCK.flagT[i]}`);
     sheet('socket', sokG.map(g => sokRung(g[0])),
       { 1: C64[11], 2: C64[12], 3: C64[15] }, C64[6]);
-    mapLine('socket', sokG, i => `exit${SOCK.srcIdx[i]}`);
+    mapLine('socket', sokG, i => SOCK.srcIdx ? `exit${SOCK.srcIdx[i]}` : `rung${i}`);
   }
   // ---- the idol: 16 bitmaps of its own, and the reason bank 3 is full ----
   // It rides the ORB's rungs -- one idol bitmap per orb bitmap, from index 0 up -- so it is
@@ -8328,6 +8402,8 @@ console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} s
                   ...(ORBHI_N ? [['renderer scratch', 0xee00, ORBHI_N * 64]] : []),
                   ['idol', IDOLBASE, IDOLBM.length * 64],
                   ['hole ladder', HOLEBASE, HOLEBM.length * 64],
+                  ...(SOCK_OWN && !NOSOCK && SOCK.BM.length
+                        ? [['socket ladder', SOCKBASE, SOCK.BM.length * 64]] : []),
                   ['the loader', LOADER_RUN, 0x100]];
   for (const [an, aa, al] of blocks) for (const [bn, ba, bl] of blocks)
     if (an < bn && aa < ba + bl && ba < aa + al)
@@ -19179,7 +19255,7 @@ holeFlagT: !byte ${holeFlagT.join(',')}
         ; ---- the socket's ladder: same tables, half the radius ----
         ; No 256-byte h -> rung table for this one. The hole earned its page at 35 rungs; a
         ; socket has ${SOCK.L.length}, so hlRungS scans and the page stays spent on something else.
-sockPtrT: !byte ${SOCK.slotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
+sockPtrT: !byte ${SOCK.slotT.map(s => (((SOCK_OWN ? SOCKBASE : HOLEBASE) - VBANK) >> 6) + s).join(',')}
 sockXOffT: !byte ${SOCK.xOffT.join(',')}
 sockYBaseT: !byte ${SOCK.yBaseT.join(',')}
 sockFlagT: !byte ${SOCK.flagT.join(',')}
@@ -25403,6 +25479,8 @@ try {
                      data: [...HOLEBM.flat(), ...IDOLBM.flat(),
                             ...ORBBM.slice(ORBLO_N, NORBBM).flat()],
                      length: (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64 }] : []),
+    ...(SPRITES && SOCK_OWN && !NOSOCK && SOCK.BM.length
+          ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: SOCK.BM.flat() }] : []),
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
     ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.slice(0, ORBLO_N).flat() }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
@@ -25762,6 +25840,13 @@ try {
                               ['ARC_MAP', ARC_MAP, ARC_MAP + CELLCODES]] : [];
   const sprNamed = SPRITES ? [...arcSeg, ['SPRBASE', SPRBASE, SPRBASE + NORBBM * 64],
                             ['HOLEBASE', HOLEBASE, HOLEBASE + (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64],
+                            // The socket's own ladder, which is NOT in the HOLEBASE stack -- it
+                            // ships as ISOK at its own address. Registered here and not just in
+                            // the file list because this array feeds the free-space calculator
+                            // as well as the guard: left out, 768 bytes of live sprite data read
+                            // as free space, and the next thing placed there would land on it.
+                            ...(SOCK_OWN && !NOSOCK && SOCK.BM.length
+                              ? [['SOCKBASE', SOCKBASE, SOCKBASE + SOCK.BM.length * 64]] : []),
                             ['LOADER_RUN', LOADER_RUN, 0xd000],
                             ...(PICSEG.length ? [['PICBASE', PICBASE, PICBASE + PICSEG.length]] : []),
                             ...(LVLSHAD_BYTES.length ? [['LVLSHADOW', LVLSHADOW, LVLSHADOW + LVLSHAD_BYTES.length]] : []),
