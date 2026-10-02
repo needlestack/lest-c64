@@ -23421,12 +23421,22 @@ ${process.env.OCCFBN ? '        inc oSHist+4            ; OCCFBN: a PRE-BUILT sp
 oSPvs:  sta (osPtr),y
         rts
 ${OCCSYNTH ? `oSPsyn:${process.env.OCCFBN ? ` inc oSHist+5            ; OCCFBN: ...and this one needs SYNTHESISING
-       ` : ''} ldx osSyn
+       ` : ''} txa                     ; THE CELL CODE, out of X.
+        sta osSrc               ;   A does NOT hold it here: oSPedg's "lda occVrtT,x / beq oSPsyn"
+                                ;   leaves A = 0 on the branch taken, so building the source
+                                ;   pointer from A read charset code 0 -- BLANK -- and every
+                                ;   synthesised glyph came out 48 bytes of zero. Broken since
+                                ;   occVrtT was added (7c25c05); X has held the code since the
+                                ;   "tax" in oSPedg, and ldx osSyn below is what takes it away.
+                                ;   The symptom reads as the OPPOSITE thing depending on the view:
+                                ;   where the stamp overhung, a blank glyph looks like the fix;
+                                ;   where it did not, it is a hole punched through a solid
+                                ;   occluder. Same bug (the user, 2026-10-02, X372 Y5A5 A1540 --
+                                ;   screen cell held scratch code 250 with $c7d0 all zeroes).
+        ldx osSyn
         cpx osLim
         bcs oSPfb               ; this buffer's scratch exhausted this frame: the old whole-column stamp
         sty osPY
-        ; source glyph: charset A + code * 8
-        sta osSrc
         lda #$00
         sta osSrc+1
         asl osSrc
