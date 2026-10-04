@@ -8849,6 +8849,15 @@ while (orbOccFlat.length < NOCC * OCCBYTES) orbOccFlat.push(0);   // see the not
 // back is one it just wrote.
 const orbOccLo = [...Array(NOCC)].map((_, i) => `<orbOccT+${i * OCCBYTES}`);
 const orbOccHi = [...Array(NOCC)].map((_, i) => `>orbOccT+${i * OCCBYTES}`);
+// THE MASK LAYOUT IS ENGINE-WIDE, AND THIS IS WHERE IT IS CHECKED. orbOcc1 writes OCCBYTES bytes
+// from orbOccLoT/HiT[i] for every entity index a level can have (< NOCC), and a run's byte is
+// run>>3 for every run id up to NRUN. Any of those landing past the emitted orbOccT writes over
+// whatever follows it -- which on 2026-10-03 was the parked disk loader.
+if (orbOccFlat.length < NOCC * OCCBYTES) throw new Error(
+  `orbOccT is ${orbOccFlat.length} bytes but NOCC=${NOCC} entities x OCCBYTES=${OCCBYTES} masks need ` +
+  `${NOCC * OCCBYTES}: the last masks would be built over whatever follows the table`);
+if (((NRUN - 1) >> 3) >= OCCBYTES) throw new Error(
+  `NRUN=${NRUN} run ids need ${((NRUN - 1) >> 3) + 1} mask bytes but OCCBYTES is ${OCCBYTES}`);
 // Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
 // coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
 // solve needs into another one. 1024 bytes, all above VIC bank 0.
@@ -9070,7 +9079,11 @@ const LVL_TABLES = [
              ORBS.length + HOLELIKE.length,
              HOLES_AT.length + SOCKETS_AT.length]],
   ['lvlStartT', startBytes(LVL)],   // px lo/hi, py lo/hi, pa, paF -- see startBytes
-  ['orbOccLoT', orbOccLo],
+  // orbOccLoT is NOT here any more. It says where the ENGINE keeps entity i's mask (orbOccT +
+  // i*OCCBYTES) -- engine layout, not level data. Shipped per level, each level file carried the
+  // stride ITS OWN build computed (4, 7, 8 against the engine's 9): masks overlapped, ran past
+  // orbOccT and zeroed the parked Krill loader, so the next disk load hung (2026-10-03). The
+  // re-lay that once fixed this only ran under TWOLEV, which LVLLOAD switched off.
 ];
 // PED_WALL is an IMMEDIATE in pedGate, so nothing at runtime can notice it drifting from the
 // table the same fact lives in. Check the MEANING: every pedestal on the pedestal level must
@@ -9183,7 +9196,6 @@ if (TWOLEV) {
       `${Math.max(1, L.nOrbs) + L.nHoleLike} entities x ${OCCBYTES} -- every mask but the first ` +
       `would be read ` +
       `from the middle of the one before it`);
-    L.tables.orbOccLoT = [...orbOccLo];   // same base and stride now, so identical to the live one
     // The counts USED to have to match, because they were immediates. They are swapped bytes now.
     for (const [n, a] of LVL_TABLES) {
       const b = L.tables[n];
@@ -19580,7 +19592,7 @@ cellFillT: !byte ${[...Array(256)].map((_, c) => {
 ; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
 ; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
 ; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
-${LD('orbOccLoT', orbOccLo.join(','), ': !byte ')}
+orbOccLoT: !byte ${orbOccLo.join(',')}   ; ENGINE layout, beside its high bytes -- see LVL_TABLES
 orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
@@ -20414,13 +20426,22 @@ ${!(LVLLOAD || LATE.length) ? '' : `        * = $6408
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
 ; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
 ; one; a second pristine build at another address hangs waiting for a reply that never comes.
-klPark: ldx #$00
+; ONCE PER POWER-ON, NEVER AGAIN. Entry runs on every death restart too (dieKey is "jmp entry"),
+; and by then $0400 is the renderer's span stack: re-parking copied stackLT/stackRT over the live
+; loader's code, and the NEXT disk load ran the stack as code and hung on a black screen
+; (2026-10-04: die once on level 3, then drop to 4). klParked is DATA, not an equate, for the
+; reason dieN is: an emitted 0 is the only initialisation a restart never repeats.
+klPark: lda klParked
+        bne kpDn
+        ldx #$00
 kpL:    lda ${hx16(KRILL_RESIDENT_AT)},x
         sta krillRt,x
         inx
         cpx #${hx(KRILL_RT_LEN)}
         bne kpL
-        rts
+        inc klParked
+kpDn:   rts
+klParked: !byte 0
 `}${!LVLLOAD ? '' : `
 ; lvlLoad: A = the level to bring in. Called from the fall where lvlSwap used to be. With one
 ; slot there is nothing to exchange, so the arriving level is simply read over the departing one:
@@ -25738,6 +25759,13 @@ try {
     // A variable-length table keeps ITS OWN length -- padding it to the live level's would
     // hand back exactly the bytes natural sizing just saved. Safe only because these are
     // last in the manifest; see LVL_VARLEN.
+    // A LEVEL FILE MAY NOT NAME AN ENGINE SYMBOL. Such an entry was resolved from the level's OWN
+    // build -- its own strides, its own layout -- and the engine it lands in has different ones:
+    // orbOccLoT shipped like this and its masks overwrote the parked disk loader (2026-10-03). If
+    // a table needs an engine address, it belongs in the engine, not in every level file.
+    const syms = [...new Set(flat.filter(v => typeof v === 'string' && /[A-Za-z]/.test(v)))];
+    if (syms.length) throw new Error(`level ${L.level}'s ${n} names engine symbols (${syms.slice(0, 4).join(' ')}): ` +
+      `that value comes from the level's own build, not this engine -- emit the table in the engine instead`);
     return (LVL_VARLEN.has(n) ? flat : pad(flat, a.length)).map(lvlResolve);
   }));
   // ...and the late levels' wall lists, in the order LATEWALL_AT laid them out. Each is the quad
