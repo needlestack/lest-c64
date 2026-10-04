@@ -373,7 +373,10 @@ for (const b of sized) {
   // relayout then felt free to move it off a page, and the build's own straddle guard refused
   // the image (fallSnapS at $59ff, on any TOURW build). A requirement has to be read, not
   // inferred -- the same lesson as hTabT and bfsD0/bfsD1.
-  const mustAlign = (b.a & 255) === 0 || ALIGNED[b.n] !== undefined;
+  // ...and a declaration can also say NO: alignment 1 means "this only starts on a page by
+  // accident". The $8500 run of ~100 scalars (ocos, osin, ovar...) was inferred aligned purely for
+  // its address, and a page-rounded 100-byte run is what kept four level slots from fitting.
+  const mustAlign = ALIGNED[b.n] !== undefined ? ALIGNED[b.n] > 1 : (b.a & 255) === 0;
   bufs.push({ n: b.n, a: b.a, size: b.size, align: mustAlign, members: [b] });
 }
 bufs.sort((x, y) => y.size - x.size);                       // largest first: first-fit wants it
