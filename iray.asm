@@ -13448,6 +13448,7 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 ; like any other per-level table -- which is the whole point: no level id, no PAL_N.
 
 
+
 ; [origin folded into the run above by compact.mjs]
         * = $7c35
 
