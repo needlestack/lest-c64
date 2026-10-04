@@ -7907,7 +7907,15 @@ const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 0 : 2));
 // a cut-scene. It stays TWO charset regions through the window because the new room is held
 // off-screen that early: A for the departing rim (floor above, hole below), B for the arriving
 // one (hole above, floor below).
-const ARC_OVERLAP = +(process.env.ARC_OVERLAP ?? 4);
+// FALLMID (user 2026-10-04, default): ALL level work in one black moment at the MIDDLE of the
+// fall. The top arc leaves the screen completely (no overlap, so there is a frame of pure hole), the
+// display is blanked -- indistinguishable from the black it replaces -- and the level change, every
+// load, the inks, the charset and a FULL render of the destination happen there, before the bottom
+// arc comes up. Nothing at the hole but the drop itself. fmTk records how many ticks the blank took.
+// Effective only where the level LOADS (LVLLOAD): the per-level dump subprocesses inherit the env
+// but build no fall worth the name, and have no lvlLoad for fallMid to call.
+const FALLMID = process.env.FALLMID !== '0' && LVLLOAD;   // DEFAULT since 2026-10-04 (user: "let's keep it"); FALLMID=0 restores the overlapped drop
+const ARC_OVERLAP = +(process.env.ARC_OVERLAP ?? (FALLMID ? 0 : 4));
 // Which drop frame asks for the destination render. NOT frame 0: a render is ~4 raster periods
 // and at frame 0 nothing has moved yet, so it reads as hitting something rather than falling.
 // Two frames in, the room is already sliding and the hitch lands inside motion.
@@ -18822,7 +18830,16 @@ fdZLp:  sta omEn,x
         dex
         bpl fdZLp
 fdSpr:
-${TWOLEV || LVLLOAD ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
+${FALLMID ? `        ldx hlv                 ; FALLMID: the destination's NUMBER is all the hole needs. The level
+        lda lvlNxtT,x           ;   change, the loads and the render all wait for fallMid; the colour
+        cmp #$ff                ;   seen THROUGH the hole is an engine palette entry, so it can be
+        beq fmHole              ;   the arriving level's already, as it always was
+${CEILVARY ? `        tax
+        dex
+        lda lvlPalceilT,x
+        sta irqB2+1
+` : ''}fmHole:
+` : `${TWOLEV || LVLLOAD ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
         ; Order is load-bearing twice over. lvlSwap must run before lvlStart reads the destination's
         ; start point, or the player is placed at the spot they just left (it named landXT until
         ; 2026-09-22); and objInit must run after it, because it rebuilds
@@ -18893,7 +18910,7 @@ ${FALLMARK.includes(4) ? '        inc fallMk              ; FALLMARK 4: objInit 
         asl
         asl
         sta hlvOf
-        ldx #$ff                ; the drop starts on THIS frame -- mfIn falls into fallStep and
+`}        ldx #$ff                ; the drop starts on THIS frame -- mfIn falls into fallStep and
         stx fFrm                ;   draws frame 0, so stepping in and falling are the same frame
         ldx #25
         stx phA
@@ -18902,7 +18919,8 @@ ${!ANYFLOORDK ? '' : `        jsr arcBld              ; the departing arc's dict
                                 ;   level being LEFT -- lvlLook does not run until the handover
 `}        lda #$01
         sta fallSt
-        sta bgPh                ; and start rendering the destination room IN THE BACKGROUND,
+${FALLMID ? `        lda #$00                ; FALLMID: no background render -- fallMid renders the room whole
+` : ''}        sta bgPh                ; and start rendering the destination room IN THE BACKGROUND,
                                 ;   a slice per frame in the slack the fall leaves
         jsr fallInv             ; THE RENDER COMING IN A FEW FRAMES DRAWS INTO A BUFFER A PREVIOUS
                                 ; FALL SCRIBBLED. Without this renderSym skips every column whose
@@ -18921,7 +18939,54 @@ fcGB:   lda #${hx(SCR_A >> 8)}
 fcGrab: jsr fallSnap
 ${FALLTAIL ? '        jsr fallTail            ; ...and the five rows below the screen it cannot see\n' : ''}
 fcNo:   rts
-
+${FALLMID ? `
+; ---- fallMid: EVERY piece of level work, in one black moment between the two arcs ----
+; Called at the handover, when the top arc has left the screen and the bottom one has not appeared:
+; the display is pure hole, so blanking it is invisible. Then the level change (and with VSLOTS the
+; arriving level's whole load list), and the destination rendered in FULL -- bgStep driven to
+; completion rather than a slice a frame. DEN stays off until the landing's first flip publishes
+; pd11. fmTk = the ticks it all took, so the pause can be measured rather than guessed.
+fallMid:lda $d011
+        and #$ef
+        sta $d011
+        lda frameCnt
+        sta fmT0
+        ldx hlv                 ; the exit taken -- still the departing level's numbering here
+        lda lvlNxtT,x
+        cmp #$ff
+        beq fmSame
+        pha                     ; wallsBack does not preserve A
+${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place, exactly as at the hole before\n' : ''}        pla
+        jsr ${VSLOTS ? 'vsEnter' : 'lvlLoad'}             ; the arriving level (and its load list); lvlLoad keeps DEN off
+        jsr mkRuns
+        jsr objInit
+fmSame: jsr lvlStart            ; the arriving level's start: what the render below looks from
+        lda #$00
+        sta hlv
+        sta hlvOf
+        lda #$01
+        sta bgPh
+        jsr fallInv
+fmBg:   jsr bgStep              ; the whole destination room, into fallBuf2
+        lda bgPh
+        cmp #$03
+        bne fmBg
+        lda frameCnt
+        sec
+        sbc fmT0
+        sta fmTk
+        ldx fmN                 ; ...and a log of every one, so each kind of drop can be timed
+        sta fmLog,x
+        inx
+        txa
+        and #$0f
+        sta fmN
+        rts
+fmT0:   !byte 0
+fmTk:   !byte 0                 ; ticks the last midpoint took (60 a second)
+fmN:    !byte 0
+fmLog:  !fill 16, 0             ; the last 16 midpoints, oldest first until it wraps
+` : ''}
 
 ; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
 fallStep:
@@ -18961,8 +19026,10 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         beq fstEnd
         lda #$03                ; drop over -- straight into the landing. The destination room
         sta fallSt              ;   was rendered and snapshotted before the drop began, so there
-        jsr lvlLook             ; the arriving level's inks and wall mark
-
+${FALLMID ? '        jsr fallMid             ; FALLMID: the level work, all of it, while the screen is black\n' : ''}        jsr lvlLook             ; the arriving level's inks and wall mark
+${FALLMID && ANYFLOORDK ? `        jsr lvlChr              ; FALLMID: the charset too, and the WHOLE rebuild -- still blanked
+        jsr fdGlFl
+` : ''}
                                 ; ^ the arriving level's LOOK lands here, not at the swap:
                                 ;   the swap happens the moment you step into the hole (the
                                 ;   destination render needs the new geometry from its first
@@ -19035,7 +19102,7 @@ ${!ANYFLOORDK ? `        lda #246
         sta pSplit2
 ` : `        jsr fsOv                ; region 3 begins where the room does
 `}        jmp fsL3
-fsL2:${!ANYFLOORDK ? '' : `   cpx #${hx(ARC_OVERLAP)}             ; the FIRST frame past the window, and only that one: the
+fsL2:${!ANYFLOORDK || FALLMID ? '' : `   cpx #${hx(ARC_OVERLAP)}             ; the FIRST frame past the window, and only that one: the
         bne fsL2a               ;   departing room has gone, so the charset can change now
         jsr lvlChr
 fsL2a:`}${CEILVARY ? `   jsr lvlHi               ; past the overlap window: the DEPARTING rim has left the
