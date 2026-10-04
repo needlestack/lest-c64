@@ -40,7 +40,7 @@ const waitGiven = args.includes('--wait');
 // to mean anything. --wait N overrides it and also restores the old sleep-then-connect behaviour.
 const RUNFOR = 4000;
 const wantWait = +((args.find(a => a === '--wait') ? args[args.indexOf('--wait') + 1] : 0)) || 8000;
-const LIVE_DEADLINE = 90000;    // how long to keep polling for signs of life, independent of the above
+const LIVE_DEADLINE = +(process.env.PROBE_DEADLINE ?? 90000);    // how long to keep polling for signs of life, independent of the above
 // --at A[,B]: read when frameCnt first reaches tick A, and again at B. ABSOLUTE ticks since the
 // program started, not "N from now" -- at warp the client cannot connect before a good deal of game
 // time has already passed, and how much varies, so "N from now" lands somewhere different in every
@@ -59,6 +59,19 @@ const marks = atArg.split(',').map(Number).filter(n => n > 0);
 // BASIC with the KERNAL vectors back, the question is "who jumped there first", and a checkpoint on
 // $e000-$ffff (ROM space, where our code never runs with the port at $35) answers it in one run.
 const trapArg = args.find(a => a === '--trap') ? args[args.indexOf('--trap') + 1] : '';
+// --watchall lo,hi: a STORE checkpoint armed from POWER-ON, logging EVERY hit (PC, registers, the
+// top of the stack) and resuming, instead of stopping at the first. --watch arms only once the main
+// loop is reached, which misses anything in the first frame or two -- and a log of every writer,
+// boot's legitimate ones included, is an audit rather than a guess. Up to 40 hits or 45 seconds.
+// --snapshot file.vsf: start from a VICE SNAPSHOT instead of booting -- the user's exact machine,
+// a step before the bug. Loaded with the binary monitor's UNDUMP. VICE is launched WITHOUT
+// -autostart then (the disk attached only): autostart types RUN when it sees READY, and those
+// keystrokes would land in the game. The build this probe makes must be the one the snapshot was
+// taken on, or every label is wrong -- the plain env builds latest.d64, which is what the user plays.
+const require_path = p => p.startsWith('/') ? p : process.cwd() + '/' + p;
+const snapArg = args.find(a => a === '--snapshot') ? args[args.indexOf('--snapshot') + 1] : '';
+const watchAllArg = args.find(a => a === '--watchall') ? args[args.indexOf('--watchall') + 1] : '';
+const watchAll = watchAllArg ? watchAllArg.split(',').map(h => parseInt(h, 16)) : null;
 const trap = trapArg ? trapArg.split(',').map(h => parseInt(h, 16)) : null;
 // --watch lo,hi: a STORE checkpoint on that address range, armed once --until has come true (or
 // at once without --until), so a write that happens legitimately a thousand times before the
@@ -85,7 +98,7 @@ const abortC = abortArg ? (() => {
 const expects = [];
 const specs = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until' || args[i] === '--trap' || args[i] === '--watch' || args[i] === '--abort') { i++; continue; }
+  if (args[i] === '--wait' || args[i] === '--at' || args[i] === '--until' || args[i] === '--trap' || args[i] === '--watch' || args[i] === '--watchall' || args[i] === '--snapshot' || args[i] === '--abort') { i++; continue; }
   if (args[i] === '--expect') { expects.push(args[++i]); continue; }
   specs.push(args[i]);
 }
@@ -197,7 +210,7 @@ const LOG = `/tmp/probe-vice-${process.pid}.log`;
 const CFG = `/tmp/probe-vice-${process.pid}.vrc`;
 execSync(`${VICE} -warp -ntsc -config ${CFG} -drive8truedrive +virtualdev8 -autostart-handle-tde +minimized -jamaction 1 ` +
   `-binarymonitor -binarymonitoraddress ip4://127.0.0.1:${PORT} ` +
-  `-autostart ${DISK} >${LOG} 2>&1 &`);
+  (snapArg ? `-8 ${DISK} >${LOG} 2>&1 &` : `-autostart ${DISK} >${LOG} 2>&1 &`));
 const stop = () => {
   for (const p of execSync('pgrep -f x64sc || true').toString().split('\n').filter(Boolean))
     if (!before.has(p)) { try { execSync(`kill ${p}`); } catch {} }
@@ -372,6 +385,47 @@ sock.on('connect', async () => {
   try {
     await resume();                       // in case the connection itself left it stopped
     banks = await banksAvail();           // name -> id, before any spec is read
+    if (snapArg) {
+      // MON_CMD_UNDUMP ($42): a length-prefixed filename. The machine is stopped afterwards.
+      await new Promise((res, rej) => {
+        const id = rid++, nb = Buffer.from(require_path(snapArg), 'ascii');
+        const b = Buffer.concat([Buffer.from([nb.length]), nb]), h = Buffer.alloc(11);
+        h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(b.length, 2); h.writeUInt32LE(id, 6); h[10] = 0x42;
+        pend.set(id, err => err ? rej(new Error(`snapshot load failed (monitor error ${err}): ${snapArg}`)) : res());
+        sock.write(Buffer.concat([h, b]));
+      });
+      console.error(`  (started from snapshot ${snapArg}, PC $${(await pcGet()).toString(16)})`);
+      if (!watchAll) {           // a straight read of the snapshot's state, nothing run
+        for (const spec of specs) { const n = spec.split(':')[0]; const v = await readSpec(spec); console.log(`${n.padEnd(10)} $${addr[n].toString(16)}  ${v.join(' ')}`); }
+        stop(); process.exit(0);
+      }
+    }
+    if (watchAll) {
+      await cpSet(watchAll[0], watchAll[1], 2); cpHit = false; await resume();
+      const regsGet = () => new Promise(res => {
+        const id = rid++, h = Buffer.alloc(11); h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(1, 2); h.writeUInt32LE(id, 6); h[10] = 0x31;
+        pend.set(id, (err, body) => { const r = {}; for (let i = 2; i + 3 < body.length; i += body[i] + 1) r[body[i + 1]] = body.readUInt16LE(i + 2); res(r); });
+        sock.write(Buffer.concat([h, Buffer.alloc(1)]));
+      });
+      // Hits are SUMMARISED by writer: the first time each PC stores here it is printed in full,
+      // after that only counted. A boot that parks a 251-byte block would otherwise use the whole
+      // budget on the one store everybody already knows about.
+      let n = 0; const seen = new Map();
+      for (const t0 = Date.now(); Date.now() - t0 < 45000 && n < 3000; ) {
+        await new Promise(r => setTimeout(r, 20));
+        if (!cpHit) continue;
+        cpHit = false; n++;
+        const r = await regsGet(), sp = r[4] & 255;
+        const st = sp >= 0xff ? [] : await memGet(0x100 + sp + 1, Math.min(8, 255 - sp));
+        const lab = (() => { let b = null; for (const [k, v] of Object.entries(SYMS)) if (v <= r[3] && (!b || v > b[1])) b = [k, v]; return b ? `${b[0]}+${r[3] - b[1]}` : '?'; })();
+        const line = `PC $${r[3].toString(16)} (${lab})  A $${(r[0] & 255).toString(16)} X $${(r[1] & 255).toString(16)} Y $${(r[2] & 255).toString(16)} SP $${sp.toString(16)}  stack ${st.join(' ')}`;
+        if (!seen.has(r[3])) { seen.set(r[3], 0); console.log(`HIT ${n} (first from this PC): ${line}`); }
+        seen.set(r[3], seen.get(r[3]) + 1);
+        await resume();
+      }
+      console.log(`watchall: ${n} hits from ${seen.size} writer(s): ` + [...seen].map(([pc, c]) => `$${pc.toString(16)} x${c}`).join(', '));
+      stop(); process.exit(0);
+    }
     if (trap) {                           // arm NOW, while the disk is still loading, then let it run
       await cpSet(trap[0], trap[1]); await resume();
       // The KERNAL's own loader runs in ROM space, so wait for OUR code to take over before
@@ -388,7 +442,9 @@ sock.on('connect', async () => {
             pend.set(id, (err, body) => { for (let i = 2; i + 3 < body.length; i += body[i] + 1) if (body[i + 1] === 4) return res(body.readUInt16LE(i + 2) & 255); rej(new Error('no SP')); });
             sock.write(Buffer.concat([h, Buffer.alloc(1)]));
           }))();
-          const stack = await memGet(0x100 + sp + 1, Math.min(32, 255 - sp));
+          // SP = $ff is an EMPTY stack (a store from top level, e.g. boot code): a zero-length read is a
+        // monitor error, and it used to throw away the PC we stopped for.
+        const stack = sp >= 0xff ? [] : await memGet(0x100 + sp + 1, Math.min(32, 255 - sp));
           console.log(`TRAP: PC = $${pc.toString(16)}  SP = $${sp.toString(16)}  frameCnt ${a1}`);
           const words = []; for (let i = 0; i + 1 < stack.length; i++) words.push(`$${(stack[i] + 256 * stack[i + 1]).toString(16)}`);
           console.log(`  stack: ${stack.join(' ')}`);
@@ -493,7 +549,9 @@ sock.on('connect', async () => {
           sock.write(Buffer.concat([h, Buffer.alloc(1)]));
         }))();
         const sp = regs[4] & 255;
-        const stack = await memGet(0x100 + sp + 1, Math.min(32, 255 - sp));
+        // SP = $ff is an EMPTY stack (a store from top level, e.g. boot code): a zero-length read is a
+        // monitor error, and it used to throw away the PC we stopped for.
+        const stack = sp >= 0xff ? [] : await memGet(0x100 + sp + 1, Math.min(32, 255 - sp));
         console.log(`WATCH: a store into $${watch[0].toString(16)}-$${watch[1].toString(16)} stopped at PC = $${p1.toString(16)}  SP = $${sp.toString(16)}` +
           `  A = $${(regs[0] & 255).toString(16)}  X = $${(regs[1] & 255).toString(16)}  Y = $${(regs[2] & 255).toString(16)}`);
         const words = []; for (let i = 0; i + 1 < stack.length; i++) words.push(`$${(stack[i] + 256 * stack[i + 1]).toString(16)}`);
