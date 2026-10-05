@@ -4077,8 +4077,12 @@ const WALKB = flag('WALKB'), STRAFEL = flag('STRAFEL');
 // build, so a routine's cycle count over those n frames differs ONLY because its code does.
 // tools/vprof.mjs --until benchEnd profiles from boot to there.
 const SPINF = flag('SPINF');
+// WALKF: SPINF's walking twin -- forward by a fixed 3 ticks' worth per RENDERED frame (dtm = 3,
+// about what a 20 fps frame gets), so every build walks through the same frames. A wall stops
+// the player at the same frame in every build, so even a bump is still a fair A/B.
+const WALKF = flag('WALKF');
 const BENCHF = +(process.env.BENCHF ?? 0);
-const AUTOMOVE = SPINF ? 'spinFrm' : SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
+const AUTOMOVE = SPINF ? 'spinFrm' : WALKF ? 'walkFrm' : SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
 
 // ---- VIC bank 0 memory layout ----
 // The double buffer flips between two 1KB screen matrices. Both are RAM the renderer
@@ -12373,6 +12377,10 @@ spinFrm:lda pa                  ; SPINF: a fixed turn per RENDERED frame, whatev
         adc #$03
         sta pa
         rts
+` : ''}${WALKF ? `
+walkFrm:lda #$03                ; WALKF: a fixed step per RENDERED frame (see WALKF)
+        sta dtm
+        jmp moveFwd
 ` : ''}
 ; ---- tickDelta: how much time has passed, in 60ths ----
 ; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
@@ -13410,6 +13418,14 @@ ${DOUBLE === 'sideMulRay' ? `        lda px                  ; DOUBLE=sideMulRay
         ; All six are zero page, so the copies bought nothing and cost 18 cycles an axis --
         ; 36 a ray, ~720 a frame. The names only ever existed as sideMul's argument protocol,
         ; and an inlined body has no protocol to honour.
+        ; ---- ddxH == 1: THE HIGH HALF IS THE FRACTION ITSELF ----
+        ; The delta is SCALE/|cos| with SCALE = 256, so its high byte is exactly 1 whenever
+        ; |cos| > 0.5 -- and every ray has at least one such axis. fr * 1 needs no quarter-square
+        ; pair: it is fr, exactly (f(fr+1) - f(fr-1) = fr with no rounding), so the result is
+        ; byte-identical. 17 cycles against ~60; the full product pays 10 for the test.
+        ldx ddxH
+        dex
+        beq cxm1
         lda px                  ; --- high half: fr * mhi -> sdxH:s1 ---
         clc
         adc ddxH
@@ -13438,7 +13454,11 @@ cxmh2:   tax
         lda sdxH
         sbc f0HiT,x
         sta sdxH
-        lda px                  ; --- low half: only the HIGH byte survives the >>8 ---
+        jmp cxmL
+cxm1:   lda px                  ; ddxH == 1: sdxH:sdx = 0:fr (X is 0 after the dex)
+        sta sdx
+        stx sdxH
+cxmL:   lda px                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
         adc ddx
         tax
@@ -13507,6 +13527,14 @@ cydo:${DOUBLE === 'sideMulRay' ? `   lda py                  ; see the X axis: o
         sta mhi
 ` : ''}
         ; --- sideMul inlined; reads py / ddyH / ddy directly, see the X axis above ---
+        ; ---- ddyH == 1: THE HIGH HALF IS THE FRACTION ITSELF ----
+        ; The delta is SCALE/|sin| with SCALE = 256, so its high byte is exactly 1 whenever
+        ; |sin| > 0.5 -- and every ray has at least one such axis. fr * 1 needs no quarter-square
+        ; pair: it is fr, exactly (f(fr+1) - f(fr-1) = fr with no rounding), so the result is
+        ; byte-identical. 17 cycles against ~60; the full product pays 10 for the test.
+        ldx ddyH
+        dex
+        beq cym1
         lda py                  ; --- high half: fr * mhi -> sdyH:s1 ---
         clc
         adc ddyH
@@ -13535,7 +13563,11 @@ cymh2:   tax
         lda sdyH
         sbc f0HiT,x
         sta sdyH
-        lda py                  ; --- low half: only the HIGH byte survives the >>8 ---
+        jmp cymL
+cym1:   lda py                  ; ddyH == 1: sdyH:sdy = 0:fr (X is 0 after the dex)
+        sta sdy
+        stx sdyH
+cymL:   lda py                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
         adc ddy
         tax

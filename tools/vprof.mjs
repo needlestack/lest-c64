@@ -26,7 +26,7 @@
 //   node tools/vprof.mjs "CHAIN=1 SPINF=1 BENCHF=2000 ANGFREEZE=1 NOHUD=1" --until benchEnd
 // Hard cap: the emulator is killed after --secs + 60 s whatever happens (one-minute rule).
 import { execSync, spawn } from 'child_process';
-import { readFileSync, writeFileSync, mkdtempSync } from 'fs';
+import { readFileSync, writeFileSync, mkdtempSync, unlinkSync, existsSync } from 'fs';
 import net from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -40,6 +40,10 @@ const OUT = opt('--out', '');
 // moment the monitor answers until the CPU is parked at LABEL (benchEnd), so every build is
 // measured over exactly the same n rendered frames. --t0/--secs are ignored.
 const UNTIL = opt('--until', '');
+// --dump e000-e7ff,fe00-fe9f (with --until): once parked, bsave each range to <--out>.<lo>.bin.
+// The parked state is a fixed frame of a fixed workload, so two builds' dumps must be byte-identical
+// when their output is: one run is both the cycle profile and the bitmap check.
+const DUMP = opt('--dump', '');
 const ROOT = new URL('..', import.meta.url).pathname;
 const X64 = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
 const PORT = 6510;
@@ -121,6 +125,15 @@ const rd16 = async a => {
     if (pc !== at) throw new Error(`never reached ${UNTIL}`);
     const [flat] = await session(['prof off', `prof flat ${TOP}`]).then(o => [o[1]]);
     const frames = await rd16(addrOf('iterLo') ?? 0x29);
+    if (DUMP) {
+      if (!OUT) throw new Error('--dump needs --out');
+      for (const r of DUMP.split(',')) {
+        const [lo, hi] = r.split('-');
+        const f = `${OUT}.${lo}.bin`; try { unlinkSync(f); } catch {}
+        await session([`bsave "${f}" 0 ${lo} ${hi}`]);
+        if (!existsSync(f)) throw new Error(`bsave wrote nothing for ${r}`);
+      }
+    }
     const names = [...flat.matchAll(/^\s*[\d,]+\s+[\d.na]+%\s+([\d,]+)\s+[\d.na]+%\s+(\S+)/gm)].map(m => m[2]).filter(n => n !== 'ROOT');
     const dis = [];
     for (const n of names.slice(0, NDIS)) { const [o] = await session([`prof disass ${n}`]); dis.push(`==== ${n}\n${o}`); }
