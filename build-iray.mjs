@@ -25262,6 +25262,11 @@ const SIZES_T = {
     rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
   };
 writeFileSync('./iray.aligned.json', JSON.stringify(ALIGNED_T));
+// HOT LOOPS: a taken branch whose target is on another page costs a cycle, and a loop that
+// straddles a page boundary pays it on EVERY iteration -- castRay's DDA loop did, for 89 cy/frame,
+// because an unrelated edit moved code by a few bytes. Name a loop by its top label; compact.mjs
+// finds its extent (to the last branch or jmp back to it) and pads its run until it fits a page.
+writeFileSync('./iray.hotloops.json', JSON.stringify(['cdda', 'sdWl']));
 writeFileSync('./iray.bufsizes.json', JSON.stringify(Object.fromEntries(
   [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
     .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)

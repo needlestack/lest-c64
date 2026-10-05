@@ -53,6 +53,9 @@ const isCode = s => /^\s*(adc|and|asl|bcc|bcs|beq|bit|bmi|bne|bpl|brk|bvc|bvs|cl
 // on a page.
 let ALIGNED = {};
 try { ALIGNED = JSON.parse(readFileSync('/Users/jfield/c64fps/iray.aligned.json', 'utf8')); } catch {}
+// HOT LOOPS, also from the build: each must sit inside one page (see step 3's re-measure).
+let HOTLOOPS = [];
+try { HOTLOOPS = JSON.parse(readFileSync('/Users/jfield/c64fps/iray.hotloops.json', 'utf8')); } catch {}
 const labelLine = new Map();          // first source line that defines each label
 lines.forEach((l, i) => { const m = /^([a-zA-Z][a-zA-Z0-9_]*):/.exec(l); if (m && !labelLine.has(m[1])) labelLine.set(m[1], i); });
 // a run must begin where an origin is, and also at any table the build says must be page-aligned
@@ -185,6 +188,7 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
   let up = ORG;
     for (const b of code) {
     if (b.phase !== undefined) { const a = up + ((b.phase - up) & 255); if (a > up) PAD.push([up, a]); up = a; }
+    if (b.hotPad) { PAD.push([up, up + b.hotPad]); up += b.hotPad; }   // see HOT LOOPS below
     b.to = up; up += b.len;
   }
   // BISECT: data runs in SOURCE ORDER, no gap-filling. Reordering is safe in principle -- data has
@@ -265,8 +269,30 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
     if (i >= 0) got[i] += e.len;
   }
   settled = runs.every((b, k) => b.len === got[k]);
+  // ---- HOT LOOPS: no page boundary inside one ----
+  // A loop runs from its label to the end of the last branch or jmp that targets it. If that span
+  // straddles a page, pad before the loop's run by exactly enough to start the loop on the next
+  // page: at most the loop's own length, and the padding is scratch space like any other PAD.
+  // Sticky (it accumulates), so a later pass cannot undo it; it is re-checked every pass, since
+  // earlier runs changing size can move the loop again.
+  for (const name of HOTLOOPS) {
+    const s = out.labels[name];
+    if (s === undefined) { console.error(`compact: hot loop ${name} is not a label`); process.exit(1); }
+    const back = new RegExp(`^\\s*(b(cc|cs|eq|ne|mi|pl|vc|vs)|jmp)\\s+${name}\\b`, 'i');
+    let e = -1;
+    for (const x of out.listing) if (x.len && x.at > s && back.test(lines2[x.ln - 1] ?? '')) e = Math.max(e, x.at + x.len);
+    if (e < 0) { console.error(`compact: hot loop ${name} has no branch back to it`); process.exit(1); }
+    if (e - s > 256) { console.error(`compact: hot loop ${name} is ${e - s} bytes -- cannot fit a page`); process.exit(1); }
+    if ((s >> 8) === ((e - 1) >> 8)) continue;
+    const k = runs.findIndex((b, j) => b.isCode && b.to <= s && s < b.to + got[j]);
+    if (k < 0) { console.error(`compact: hot loop ${name} is in no code run`); process.exit(1); }
+    const need = ((e - 1) & ~255) - s;
+    runs[k].hotPad = (runs[k].hotPad ?? 0) + need;
+    console.log(`  hot loop ${name} ($${s.toString(16)}-$${(e - 1).toString(16)}) straddled a page: +${need} bytes before its run`);
+    settled = false;
+  }
   const moved = runs.filter((b, k) => b.len !== got[k]).length;
-  console.log(`  pass ${pass + 1}: ${settled ? 'sizes settled' : `${moved} run(s) changed size, going again`}`);
+  console.log(`  pass ${pass + 1}: ${settled ? 'sizes settled' : moved ? `${moved} run(s) changed size, going again` : 'hot-loop padding added, going again'}`);
   if (!settled) runs.forEach((b, k) => { b.len = got[k]; });
 }
 if (!settled) { console.error('compact: run sizes never settled after 6 passes'); process.exit(1); }
