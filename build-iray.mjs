@@ -13403,10 +13403,7 @@ faOdd:  lda ddxLoTQ+256,y       ; odd quarter: the two pages swap roles
         lda ddxHiTQ,y
         sta ddyH
 faDn:
-${PROFSUB ? '        jsr pfT3              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
-        sta cell                ; The value is the player's cell, so it is the same for every
-                                ; ray in the frame -- computed once in mloop, not 11 times.
-        ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
+${PROFSUB ? '        jsr pfT3              ; ray: angle + quarter-angle dispatch\n' : ''}        ; X side dist: m = frac*ddx>>8 ; -x -> sdx=m ; +x -> sdx=ddx-m
         ; (standard form: full cell at frac=0, avoids the fr=256->0 wrap spike)
 ${DOUBLE === 'sideMulRay' ? `        lda px                  ; DOUBLE=sideMulRay calls the SUBROUTINE below, which reads
         sta fr                  ; fr/mlo/mhi; the inlined copy no longer sets them up
@@ -13666,7 +13663,9 @@ cydone:${PROFSUB ? '\n        jsr pfT10              ; ray: initial side distanc
                                 ;   a long sightline expires early, cfar sets pp = 1, and the
                                 ;   column ends up with no wall run -- which occWalk reads as
                                 ;   "nothing here occludes", so entities BEHIND the wall draw.
-        ldx cell
+        ldx cell0               ; the march starts in the player's cell (computed once a frame in
+                                ;   mloop) and lives in X; every exit (cwallX/cwallY/cfar) stores it
+                                ;   to cell, so cell itself is never written here first
 cdda:   lda sdxH
         cmp sdyH
         bcc cstepX
