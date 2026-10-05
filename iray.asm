@@ -4642,6 +4642,8 @@ oSLoop: ldx osI
                                 ;   it is the wall's own black and has nothing to clip.
 oSEnt:
 
+
+
         lda obIX,x
         tay
         lda orbOccLoT,y
@@ -4843,6 +4845,7 @@ oSNext: inc osI
 oSHole: lda osN
         cmp #$08
         beq oSDn
+
         lda onvH
         cmp #$08
         beq oSDn                ; nothing hole-like took a slot this frame

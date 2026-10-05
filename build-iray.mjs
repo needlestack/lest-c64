@@ -11703,8 +11703,60 @@ if (SOLO) LVL_TABLES.push(['lvlMeT', [LVL]]);
 // is only safe LAST: a table whose length varies moves everything after it, and there is
 // nothing after it. Its own base stays fixed, which two `lda holeSeeT,x` sites require.
 // Anything added later goes BEFORE this line unless it is pointer-reached and variable too.
+// ---- STAMP LIST: from which player cells can a pedestal or socket be PARTLY hidden by a wall? ----
+// occStamp spent ~580 cycles per visible pedestal per frame on the hub concluding "nothing to
+// stamp" -- and the user pointed out the pedestals' placement makes partial occlusion possible from
+// only a handful of cells. So, per level: the cells from which ANY sampled point of the cell sees
+// part of a hole-like's disc while another sampled sightline to it is blocked -- with openable walls
+// shut AND open, OR'd, so it holds in either state. Stored sparse, [count, (cell, hole-like mask)...];
+// the gate looks the player's cell up once a frame and occStamp skips a hole-like whose bit is clear.
+// Exit holes are floor discs and never stamped (obOcc carries their fill colour), so only sockets and
+// pedestals are listed; orbs and angels move and keep the full path. STMP=0 turns it off.
+const STMP = process.env.STMP !== '0' && ZONES;
+const STMP_LIST = (() => {
+  if (!STMP) return [0];
+  const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
+  const walk = (wallAt) => (ax, ay, bx, by) => {          // losFree against a chosen wall set
+    const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
+    if (cx === ex && cy === ey) return true;
+    const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
+    const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
+    let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity, tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
+    for (;;) {
+      if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; } else { if (tY > 1) return true; cy += sY; tY += iY; }
+      if (cx === ex && cy === ey) return true;
+      if (!inMap(cx, cy) || wallAt(cellOf(cx, cy))) return false;
+    }
+  };
+  const states = [walk(c => !!map[c]), walk(c => !!map[c] && !openable.has(c))];
+  const PS = [0.02, 0.21, 0.4, 0.6, 0.79, 0.98];
+  const out = new Map();                                  // cell -> mask
+  HOLELIKE.forEach((h, L) => {
+    if (h.exit) return;
+    const r = h.ped ? PEDR : HOLER / 2, ex = h.x + 0.5, ey = h.y + 0.5;
+    const Q = [[ex, ey], ...[...Array(24)].map((_, k) => [ex + r * Math.cos(k * Math.PI / 12), ey + r * Math.sin(k * Math.PI / 12)]),
+               ...[...Array(12)].map((_, k) => [ex + r / 2 * Math.cos(k * Math.PI / 6), ey + r / 2 * Math.sin(k * Math.PI / 6)])];
+    for (let c = 0; c < MAPN; c++) {
+      if (map[c] && !openable.has(c)) continue;
+      let hit = false;
+      for (const los of states) {
+        let seen = false, blocked = false;
+        for (const px of PS) for (const py of PS) for (const [qx, qy] of Q) {
+          if (los(cellX(c) + px, cellY(c) + py, qx, qy)) seen = true; else blocked = true;
+          if (seen && blocked) break;
+        }
+        if (seen && blocked) { hit = true; break; }
+      }
+      if (hit) out.set(c, (out.get(c) ?? 0) | (1 << L));
+    }
+  });
+  const cellsSorted = [...out.keys()].sort((a, b) => a - b);
+  return [cellsSorted.length, ...cellsSorted.flatMap(c => [c, out.get(c)])];
+})();
+if (STMP) console.error(`  STMP level ${LVL}: ${STMP_LIST[0]} cell(s) where a pedestal/socket can be partly hidden (${STMP_LIST.length} bytes)`);
 if (ZONES) LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT], ['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);
 else LVL_TABLES.push(['holeSeeT', holeSee]);   // ZONES: the hole-likes' zone masks replace it
+if (STMP) LVL_TABLES.push(['stmpT', STMP_LIST]);       // LAST: variable length -- see LVL_VARLEN
 const SLOT_OFF = {};
 let SLOT_LEN = 0;
 for (const [n, a] of LVL_TABLES) {
@@ -11947,7 +11999,7 @@ if (WALL_DELTAS && !PACK_PROBE && PACKED.size && !process.env.LVLDUMP && !proces
 // Only tables at the END of the manifest may be in here: a varying length moves everything
 // after it, and the engine names the rest with fixed equates. lvlBlocks must not pad these
 // (that is what would hand the saving straight back), so it reads this set too.
-const LVL_VARLEN = new Set(['holeSeeT']);
+const LVL_VARLEN = new Set(['holeSeeT', 'stmpT']);
 // This level's blob, and any other level's. The fixed part is identical for all of them by
 // construction; only the tail differs, so a level's length is the live one's with its own tail
 // swapped in. The MAX is what the slot region has to be big enough for.
@@ -17499,7 +17551,10 @@ qtLo:   ldx oqa
 ;     in the charset. So every seam inside the orb's box becomes plain black. Its whole box, not
 ;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
 ;     wall is occluding at the edge.
-occStamp:${process.env.OCCFBN ? ' inc oSDbg+0             ; OCCFBN: occStamp entries, free-running\n       ' : ''}
+occStamp:${process.env.OCCFBN ? ' inc oSDbg+0             ; OCCFBN: occStamp entries, free-running\n       ' : ''}${process.env.OSVIS === '1' ? `
+        lda #$00                ; OSVIS: this frame's on-screen run set is built on first need
+        sta osVOk
+` : ''}
 ${DBGORB ? `        lda #$00
         sta oSCnt
         sta oSOrb
@@ -17565,10 +17620,18 @@ oSLoop:${process.env.OSCNT ? ' inc osCntV             ; OSCNT: slots occStamp vi
         cmp nOrbT
         bcc oSEnt               ; an orb, which always carries it
         lda obOcc,x             ; hole-like, so only a SOCKET does: holeSlot sets bit 7 on one,
-        bpl oSNext              ;   where an exit hole's obOcc is its fill colour (0-15). The
+        bpl oSNext              ;   where an exit hole's obOcc is its fill colour (0-15). The${STMP ? `
+        lda obIX,x              ; STMP: can a wall partly hide THIS one from the player's cell at all?
+        sec                     ;   Almost never (the build lists the few cells where it can) -- and
+        sbc nOrbT               ;   without this a hub pedestal paid ~580 cycles a frame to find out
+        tay
+        lda orbBitT,y
+        and stmpM
+        beq oSNext` : ''}
                                 ;   exit hole keeps holeTail's all-or-nothing test instead --
                                 ;   it is the wall's own black and has nothing to clip.
 oSEnt:
+
 ${process.env.OSCNT ? `        inc osCntE              ; OSCNT: slots taking the FULL path
         bne oSCe
         inc osCntE+1
@@ -17583,7 +17646,21 @@ ${DBGORB ? `        inc oSOrb
         sta omptr
         lda orbOccHiT,y
         sta omptr+1
-        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
+${process.env.OSVIS === '1' ? `        lda osVOk               ; OSVIS: IS ANY RUN IN ITS MASK ON SCREEN THIS FRAME? A mask bit only says
+        bne osVHave             ;   "beyond that face's PLANE" -- a hub pedestal has one for the pedestal
+        jsr osVBld              ;   wall even when that wall covers none of it. The set is the run at
+osVHave:ldy #${hx(OCCBYTES - 1)}             ;   every span's left column -- exactly what the scan below tests --
+osVT:   lda (omptr),y           ;   so a slot whose mask misses it entirely can only end in "nothing".
+        and osVis,y
+        bne osVHit
+        dey
+        bpl osVT
+${process.env.OSCNT ? `        inc osCntR              ; OSCNT: slots rejected here
+        bne oSCr
+        inc osCntR+1
+oSCr:` : ''}        jmp oSDone
+osVHit: ldx osI
+` : ''}        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
         ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
         ; Display y is raster - 50, and a char row is eight of those.
         ; ---- blank and anchor: from the variant tables for an orb, from the SLOT for a socket ----
@@ -17791,7 +17868,38 @@ ${process.env.OSPROF ? '        jsr pfT7              ; OSPROF: the ORB slots (t
         sta osN
         jmp oSLoop
 oSDn:   rts
-
+${process.env.OSVIS === '1' ? `
+; osVBld: the set of runs on screen this frame, one bit per run as the masks hold them -- the run at
+; each span's LEFT column, spans 0..nbnd (span i starts at bndT[i-1], span 0 at column 0).
+osVBld: inc osVOk
+        ldx #${hx(OCCBYTES - 1)}
+        lda #$00
+osVZ:   sta osVis,x
+        dex
+        bpl osVZ
+        sta osVi
+osVL:   ldx osVi
+        lda #$00
+        cpx #$00
+        beq osV0
+        lda bndT-1,x
+osV0:   tax
+        ldy faceIdT,x
+        beq osVN
+        ldx runByteT,y
+        lda osVis,x
+        ora runBitT,y
+        sta osVis,x
+osVN:   inc osVi
+        lda osVi
+        cmp nbnd
+        bcc osVL
+        beq osVL
+        rts
+osVOk:  !byte 0
+osVi:   !byte 0
+osVis:  !fill ${OCCBYTES}, 0
+` : ''}
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
@@ -22274,7 +22382,9 @@ hrpHit: tya
         rts
 ${ZONES ? `${LD('zoneT', ZN_BUILD.zoneT.join(','), ': !byte ')}   ; ZONES: every cell's zone, two to a byte
 ${LD('hzMskT', pad(ZN_BUILD.hmask, NHOLE).join(','), ': !byte ')}   ; ZONES: each hole-like's zones (its disc)
-zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0' : ''}
+zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask${STMP ? `
+${LD('stmpT', STMP_LIST.join(','), ': !byte ')}   ; STMP: [count, (cell, hole-like mask)...]
+stmpM:  !byte 0                 ; STMP: this frame's hole-likes that CAN be partly hidden from here` : ''}${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0\nosCntR: !byte 0,0' : ''}
 znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame` : LD('holeSeeT', holeSee.join(","), ': !byte ')}
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
         ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
@@ -26648,7 +26758,24 @@ ${ADDX('px+1')}
         tax
         lda mapT,x
         sta znP
-` : `        lda nHoleT
+${STMP ? `        lda #$00                ; STMP: which pedestals/sockets could a wall partly hide from this cell?
+        sta stmpM               ;   (a short sorted list; most cells are not in it)
+        ldx stmpT
+        beq ogStD
+        ldy #$01
+ogStL:  lda stmpT,y
+        cmp pcell
+        beq ogStH
+        bcs ogStD               ; sorted: past it, so it is not listed
+        iny
+        iny
+        dex
+        bne ogStL
+        beq ogStD
+ogStH:  lda stmpT+1,y
+        sta stmpM
+ogStD:
+` : ''}` : `        lda nHoleT
         beq ogNoH               ; no hole-likes: the LOS row below is never indexed
         lda py+1                ; the player's cell, for the LOS test
 ${MULW}
