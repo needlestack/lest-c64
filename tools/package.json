@@ -1,0 +1,6 @@
+{
+  "name": "c64fps-tools",
+  "private": true,
+  "description": "Source tools for build-iray.mjs. Run `npm install` here once; the build itself needs no dependencies.",
+  "dependencies": { "acorn": "^8.14.0", "acorn-walk": "^8.3.4" }
+}

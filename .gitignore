@@ -71,3 +71,6 @@ iray.aligned.json
 iray.bufsizes.json
 iray.reserve.json
 iray.compact.asm
+tools/node_modules/
+tools/package-lock.json
+tools/.ship/

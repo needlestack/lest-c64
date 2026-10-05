@@ -9155,7 +9155,6 @@ stpY    = $0f
 side    = $10
 pp      = $11
 fr      = $12
-qlo     = $15
 qhi     = $16
 col     = $17
 tmp     = $1f
@@ -9168,9 +9167,6 @@ hazCur  = $805f                  ; the cell whose run-table patches are currentl
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
 opaqL   = $8076                  ; the paq the cached frame trig was taken at
 opaqH   = $8077
-acRow   = $8078                  ; ANGCHAR: the silhouette stamp's cell walk -- row, running
-acIx    = $8079                  ;   index into the cell map, and which charset half the row
-acB     = $807a                  ;   falls in (0 = A above the horizon, 1 = B below it)
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
@@ -9253,7 +9249,6 @@ cell0   = $13                  ; the player's own cell index, constant for the f
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 hp      = $80                   ; 2 bytes: pointer into this column's height table
-errH    = $86                   ; high byte of the interpolator's error term
 uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
 uwH     = $21
 sdK     = $92                   ; the seam code's offset from SEAM0, decoded once
@@ -9439,7 +9434,6 @@ dbgRun  = $70a4                 ; CULLCNT: per entity, the run that let it show 
 dbgCol  = $70ac
 culPrj  = $70d2                 ;   ...and how many orbProj rejected after doing the work
 culCone = $70da                 ;   ...and how many the CELL BEARING rejected before any multiply
-culLos  = $70e2                 ;   ...and how many a WALL hid, also before any multiply
 culTAcc = $70d4
 culPAcc = $70d6
 culTMn  = $70d8
@@ -9452,7 +9446,6 @@ ssCalc  = $7e56                 ;   ...cells differ, so calcU runs (TWICE per sp
 ssTaken = $70b2                  ;   ...of which the char cell was already spoken for
 ssPwN   = $70b4                  ; SEAMCNT: ssPw calls, and how many ENDED the walk -- the two
 ssPwX   = $70b6                  ;   numbers that say whether the panel test is earning its place
-ssAnyX  = $70b8                  ;   ...and how many walks ssAny ended instead
                                 ; (SEAMCNT only: level 2's 64 runs pushed orbOccT over $70b0, and
                                 ;   the overlap guard rightly refused these while they were unconditional)
 sdColN  = $70ba                  ; SEAMCNT: COLUMNS that took the seam draw path, free-running.
@@ -9568,7 +9561,7 @@ ${EDGCHK ? `ehShad  = $7100                 ; EDGCHK: last frame's colH, 4 per c
 ehN     = $71a0                 ;   per the image-hole report). Cell columns whose colH is unchanged
 ehAcc   = $71a1                 ;   this frame; 2-byte accumulator and its latched mean, same shape
 ehMean  = $71a3                 ;   as rayAcc/rayMean
-ehG     = $7400                 ; EDGCHK: last frame's GLYPH per edge cell, 13 rows x 64 (832 B).
+                                ; EDGCHK: (ehG, never built) last frame's GLYPH per edge cell, 13 rows x 64 (832 B).
 ehGN    = $71a4                 ;   Keyed on the emitted code, not on colH -- the code comes from
 ehGAcc  = $71a5                 ;   QUANTISED levels, so it can repeat when colH does not. This is
 ehGMean = $71a7                 ;   the number that decides whether an edge cache is possible.
@@ -9613,7 +9606,6 @@ o2      = $96
 ivL     = $97
 ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
 ohgt    = $9d
-ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
 cnB     = $aa                    ; ENTCONE: the cell delta's bearing, as the quadrant is applied
 cnT     = $ab                    ;   ...then its distance's tolerance, then twice it. ZERO PAGE
                                  ;   because this is the hottest test in the entity pass -- it runs
@@ -9622,7 +9614,6 @@ cnT     = $ab                    ;   ...then its distance's tolerance, then twic
 cnI     = $ad                    ; CONEGATE: entGate's entity index, its end, whether ANY
 cnEnd   = $ae                    ;   entity passed, and which bit of the LOS row the player's cell
 cnAny   = $af                    ;   is. All four die with the gate; none outlives a frame.
-cnBit   = $b0
 
 ocos    = $8500
 ocosS   = $8501
@@ -9642,8 +9633,6 @@ ocol    = $8510
 ocl     = $8512
 ocr     = $8513
 oidx    = $8517
-ocn     = $8518
-ocy     = $8519
 onv     = $851a
 ohtmp   = $81f0
 carry   = $81f1                  ; 0 = empty hands, else the held entity's index + 1
@@ -9660,10 +9649,6 @@ omYY    = $851d
 omPri   = $851e
 omX8    = $851f
 omBit   = $8520
-melCnt  = $85c3                  ; 60ths left on this note, where we are in the figure, and the
-melIx   = $85c4                  ;   shimmer phase plus the waveform byte it selects
-melPh   = $85c5
-melWav  = $85c6
 skJoy   = $85c7                  ; SNDTEST: the live cutoff / pulse-width tweak keys
 skTmp   = $85c8
 skOld   = $85c9
@@ -9671,13 +9656,11 @@ skNew   = $85cc
 skEdge  = $85cd
 marked  = $8584                  ; 0, or the index+1 of the angel that stepped up beside you
 dieSt   = $8585                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
-dieCnt  = $8586
 dieDir  = $8587                  ; the turn the player was making, locked in
 dieOpa  = $8588
 dieP    = $8589                  ; which picture of this death's sequence is on screen
 dieRem  = $858a                  ; whole angle units the sweep still owes
 dieCl   = $858b                  ; scratch: dx+1 and dy+1 while the bearing index is built
-dieRlT  = $8069                  ; frames before the landing note's gate drops
 dieKik  = $8068                  ; frames left in the kick's downward sweep
 dieFqL  = $8066                  ; the rising tone's 16-bit frequency
 dieFqH  = $8067
@@ -9690,7 +9673,6 @@ dieCy   = $8060                  ; ($8060-$8073 came free with the six-sprite an
 dieOff  = $858d                  ; the angel's column offset from centre, from the projection
 dieT0   = $858e                  ; frameCnt when they died: everything is measured from here
 dieTck  = $858f                  ; the last palette tick written, so a fill happens once
-dieEl   = $8590
 dkJoy   = $8591
 dieLat  = $8562                  ; dieSt, LATCHED at raster 250. sprPal runs in the IRQ and read
                                  ;   dieSt direct, so the frame dieGo set it the shared sprite
@@ -9706,10 +9688,6 @@ ovOcc   = $8552                  ;   ... and columns a span HIDES
 ovSpR   = $8554                  ; the span's right edge, kept for the overlap width
 ovTmp   = $8555
 ovSvS   = $8556                  ; orbSeenT saved across a probe -- orbNo writes it
-sdL     = $85d8                  ; STAMPDBG: the cell range the last stamped span covered, and
-sdR     = $85d9                  ;   how many spans were stamped this frame. Recorded by the
-sdN     = $85da                  ;   stamp ITSELF, so it can be read at a single breakpoint --
-sdEnt   = $85db                  ;   watchpoints shift raster timing and this engine notices.
 markPa  = $8553                  ; heading when the angel cornered you: the turn trigger's origin
 sndMode = $85ce                  ; index into sndModeT: low / band / high / notch
 sndVol  = $85cf
@@ -9765,8 +9743,7 @@ bfsND   = $855a
 bfsN    = $855b
 hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
 hlKind  = $85dd                  ; which ladder holeTail is currently patched for
-hoI     = $85de                  ; holeOne's loop: which hole-like entity, and its
-hoOf    = $85df                  ;   LOS bitmap offset (index x 32)
+hoI     = $85de                  ; holeOne's loop: which hole-like entity
 ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. STALE: the held object was a hi-res icon once;
@@ -9847,7 +9824,6 @@ ohT     = $850f
 ohWc    = $852b                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
 ohBL    = $852c                  ; this slice's column + 12, signed and 16-bit: it runs to
 ohBH    = $852d                  ;   249, so bit 7 of the low byte cannot carry the sign
-arcC    = $81c8                  ; arcCalc/arcBand: the column being worked
 arcA    = $81c9                  ; the rim's amplitude this frame, 88s/r -- the whole animation
 arcHi   = $81ca                  ; the LOWEST rim row over all 40 columns: whole rows below it are
                                  ;   solid hole and fill fast, so only the thin band above it
@@ -9917,7 +9893,6 @@ hlvOf   = $852f                  ;   per-hole line-of-sight map
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
 pcell   = $8515                  ; the cell the player stands in, for the hole's LOS gate
 odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
-ocn3    = $852a
 obX     = $8530
 obY     = $8538
 obP     = $8540
@@ -18911,12 +18886,6 @@ ${LD('orbXCT', LVLT('orbXCT').join(','), ': !byte ')}      ; from the MANIFEST, 
 ${LD('orbYCT', LVLT('orbYCT').join(','), ': !byte ')}      ;   disagree with what the swap moves
 ${LD('orbColT2', LVLT('orbColT2').join(','), ': !byte ')}   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
-; bbLT / bbRT: a bounding box starts and ends part-way through a cell, so these give the columns
-; of that first and last cell which lie inside it. Bit 3 is the leftmost column. These are about
-; the BOUNDING BOX, not the charset -- which is why they come back while fgCodeT and kMaskT,
-; which named charset twins, do not.
-popcT:  !byte 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4
-opbBaseT: !byte 0,12,24,36,48,60,72,84
 
         ; ---- hudX: the per-frame raster count, the LEVEL line, and the 'L' key ----
         ; Out here in the slack above ORB_SMALL because the main block has about fifteen bytes
@@ -21106,9 +21075,6 @@ idolOnPedT: !byte ${IDOL_XY.map((_, i) => {
 pedLiftT: !byte ${pedLiftT.join(',')}
 idolXT: !byte ${IDOL_XY.map(([x]) => hx(x)).join(',')}
 idolYT: !byte ${IDOL_XY.map(([, y]) => hx(y)).join(',')}
-; Where each idol came from, for sending a dropped-by-dying one back. Build-time constant.
-idolHomeT: !byte ${[...Array(IDOL_N)].map((_, i) =>
-  hx(+(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0))).join(',')}
 ; ---- idolPlace: every idol slot in THIS level, shown or hidden by where the idol is ----
 ; Runs straight after objInit, which has just restored orbHidT from the build's orbHid0T -- i.e.
 ; "every idol is at home". This is the overlay that makes that true or false per idol.
@@ -24132,7 +24098,6 @@ twRow:  !byte $ff
 twN:    !byte 0
 twTk:   !byte ${hx(TOUR_STEPS[0][1] & 255)}
         !byte ${hx(TOUR_STEPS[0][1] >> 8)}
-twLast: !byte 0
 twGo:   !byte 0
 twAdv:  !byte 0                 ; the last call expired a step; advance before charging
 twAdv2: !byte 0                 ; ...and having advanced, charge this frame to the new step
