@@ -877,7 +877,7 @@ let VS_SLOTLEN = 896;    // PROVISIONAL: set to the real level region once it is
 // line ~246 hands control back for the flip. With loads that cheap, two slots are enough: the live
 // level, and slot 0 as the landing zone for the next one.
 const BGLOAD = VSLOTS && process.env.BGLOAD === '1';
-const VS_N = BGLOAD ? 2 : 4;                      // slot 0 (bank 3) + the arena slots
+const VS_N = +(process.env.VS_N ?? (BGLOAD ? 2 : 4));   // slot 0 (bank 3) + the arena slots
 const VS_ARENA = ['lvlSlot1', 'lvlSlot2', 'lvlSlot3'].slice(0, VS_N - 1);
 // VSLOTS needs ~217 more arena bytes than chain 1-4 leaves. The scratch cluster $8000-$807a (123
 // bytes: the pivot state, the movement step, the death scene's sound, ...) moves WHOLE -- same
@@ -26289,9 +26289,14 @@ ${LOSCHK ? `        ldx cnI                 ; LOSCHK: the verdict is PER ENTITY.
         lda lsV                 ;   last entity entGate tested, not the one orbOne later draws --
         sta lsVT,x              ;   which is how losBad came out LARGER than losRej.
 ` : ''}        bcs ogENo
-${ENTHZN && !HZCHK && !process.env.VHNOLOOK ? `        ldx cnI                 ; ENTHZN: in the cone -- is it past this cell's horizon?
+${ENTHZN && !HZCHK && !process.env.VHNOLOOK ? `        lda cnI                 ; ENTHZN: not for a HOLE-LIKE. holeSeeT has already said it is visible
+        cmp nOrbT               ;   from somewhere in this cell, exactly and for the walls as they are,
+        bcs ogHzS               ;   and the horizon is a coarser answer to the same question: it never
+                                ;   culled one (HZCNT, levels 1, 2 and the hub, 2026-10-04). ~150-200 cy each.
+        ldx cnI                 ; ENTHZN: in the cone -- is it past this cell's horizon?
         jsr vhTest              ;   (Y = the Chebyshev distance, left there by cnTest)
         bcs ogENo
+ogHzS:
 ` : ''}${HZCHK ? `        ldx cnI                 ; HZCHK: ask, note the verdict, do NOT act on it
         jsr vhTest
         lda #$00
