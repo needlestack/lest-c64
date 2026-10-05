@@ -7,8 +7,12 @@ S=$(cd "$(dirname "$0")" && pwd)/.ship
 mkdir -p "$S"
 cd /Users/jfield/c64fps
 typeset -A CFG
-CFG=(latest "" leveltest "CHAIN=4,5,6,7" game7 "CHAIN=1,2,3,4,5,6,7 VSLOTS=1" game7bg "CHAIN=1,2,3,4,5,6,7 VSLOTS=1 BGLOAD=1")
-for k in latest leveltest game7 game7bg; do
+# The two disks that ship. The 7-level build is retired (user, 2026-10-05: the largest set ever
+# resident is 4-7). The 4-7 RESIDENT builds (VSLOTS, with or without BGLOAD) do not fit since the
+# edge chain became the default -- parked by the user ("let's not worry about that now"); add
+# them back here once they assemble.
+CFG=(latest "" leveltest "CHAIN=4,5,6,7")
+for k in latest leveltest; do
   out=$(env ${=CFG[$k]} D64=zz-$k.d64 node build-iray.mjs 2>&1 | grep -E "^ok:|ASM ERROR|Error" | head -2)
   [[ "$out" == ok:* ]] || { echo "$k: BUILD FAILED: $out"; continue; }
   mv zz-$k.d64 $S/sh-$k.d64; cp iray.asm $S/sh-$k.asm

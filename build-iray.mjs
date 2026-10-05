@@ -3236,23 +3236,6 @@ const SEAMHALF = SEAMSTEP !== 8;
 const blkEnt = sel => ['0', ...ROWSA.map(r => `${sel}bkA${r}`)].concat(['0', ...ROWSA.map(r => `${sel}bkB${r}`)]).join(',');
 const sldEnt = sel => [...ROWSA.map(r => `${sel}slA${r}`), '0'].concat([...ROWSA.map(r => `${sel}slB${r}`), '0']).join(',');
 const edgEnt = sel => [...ROWSA.map(r => `${sel}edA${r}`), '0'].concat([...ROWSA.map(r => `${sel}edB${r}`), '0']).concat(FALLTAIL ? [...Array(FTROWS)].map((_, r) => `${sel}edT${r}`) : []).join(',');
-// clampT[(h + K) as signed byte] -> level 0..12. K = 8R-92 is negative for every row above
-// the horizon, so the sum is genuinely signed; h is pre-capped at 100 so it cannot wrap.
-const clampT = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
-  return Math.max(CLO, Math.min(CHI, v)) - CLO; });
-// clamp8T: the same index straight to the LEVEL C8 uses, 0..8. clampT returns 0..15 -- an index
-// into the 16-level clamp, where the level is value+CLO and anything at or above 11 is a full
-// column. calcM needs the level, because the thresholds it compares against were computed
-// offline on 0..8 shapes; summing clampT instead compares a 0..30 quantity against a 0..17
-// threshold, which is the bug this fixes. Doing the arithmetic inline would be `sbc #3` plus a
-// clamp at each end, ~20 cycles twice on the hottest path. A second 256-byte table is free:
-// the lookup happens either way.
-const clamp8T = [...Array(256)].map((_, i) => { const v = i < 128 ? i : i - 256;
-  return Math.max(0, Math.min(8, v)); });
-// Same table with the value pre-shifted into the high nibble. rampT is indexed by
-// wL*16 + wR, and the left level was being shifted left four times right after clampT
-// handed it over -- 8 cycles per edge cell to undo a table lookup's own output.
-const clampT16 = clampT.map(v => v << 4);
 if (PLAN === 3) {
   // ---- the two invariants renderSym's skip-calcM shortcut RELIES on, asserted ----
   // Both were comments until now, and a comment does not fail the build. The shortcut reads the
@@ -3260,16 +3243,16 @@ if (PLAN === 3) {
   // only sound while:
   //
   //   (a) m cannot be negative, so "m >= thr" at thr = 0 is a tautology. m is the sum of two
-  //       clamp8T entries, so this is a claim about clamp8T's RANGE -- which is enforced by a
+  //       ecM8 entries, so this is a claim about clamp8T's RANGE -- which is enforced by a
   //       Math.max(0, ...) today and would be silently broken by anyone widening it.
   //   (b) thr == 0 implies lo == hi. The normaliser above guarantees the forward direction, but
   //       NOT the converse: if a future charset plan ever emitted a real threshold of 0 for a
   //       slot whose halves differ, every cell landing there would render the hi half forever.
   //       Nothing else in the pipeline would notice -- it is a wrong CODE, not a wrong shape,
   //       so verify-render would report a handful of stray pixels with no hint of the cause.
-  const c8 = clamp8T.findIndex(v => v < 0 || v > 8);
+  const c8 = [...Array(392)].map((_, j) => Math.max(0, Math.min(8, j - 132))).findIndex(v => v < 0 || v > 8);
   if (c8 >= 0) throw new Error(
-    `clamp8T[${c8}] = ${clamp8T[c8]} is outside 0..8, so m could go negative and renderSym's ` +
+    `ecM8[${c8}] is outside 0..8, so m could go negative and renderSym's ` +
     `thr == 0 shortcut (skip calcM, take the hi half) is no longer a tautology`);
   const offenders = [];
   for (let i = 0; i < 256; i++)
@@ -3293,7 +3276,17 @@ const capCmp = () => {
   return `${l}: cmp #101`;
 };
 const hCapPatch = () => HCAP_SITES.map(l => `        sta ${l}+1`).join('\n');
-// ---- EDGECHAIN=1 (PROTOTYPE): the edge cells of rows 1..12 as one routine PER ROW ----
+// ---- THE CLAMP TABLES, UNSIGNED (2026-10-05) ----
+// A cell row's fill is f(h + K), K = 8R - 92 for screen rows 0..12 and -100..-132 for the fall
+// tail's rows. These used to be 256-byte tables indexed by (h + K) as a SIGNED byte, which is
+// why h had to be capped at 100. Now one offset covers everything: W[j] = f(j - 148), 408
+// entries, so the generic chooser indexes with h' + kTab (kTab = K + 148 >= 0, the sum never
+// wraps) and the edge chain indexes W + 8R + 56 with the RAW height in Y. Three tables, shared
+// by both -- the old clampT / clmp16 / clamp8T are gone.
+//   ecMT  = the clamp index 0..15 (level + 3; >= 11 is a full column)
+//   ecM16 = the same, pre-shifted into the high nibble (rampT is indexed wL*16 + wR)
+//   ecM8  = the LEVEL 0..8, which calcM's offline thresholds were computed on
+// ---- EDGECHAIN (default; EDGECHAIN=0 for the generic chooser only): edge cells of rows 1..12 as one routine PER ROW ----
 // Measured in VICE's per-instruction profile: about half of an edge cell's ~210 cycles depend only
 // on WHICH ROW it is -- the row offset kr, the cap and `clc / adc kr / tay` on every height
 // sample, the dispatch to that row's store, the loop between rows -- yet were redone per cell.
@@ -3304,20 +3297,20 @@ const hCapPatch = () => HCAP_SITES.map(l => `        sta ${l}+1`).join('\n');
 // the generic chooser: for row 0 the cap is not a no-op (CHI = 12 > 8 at K = -92).
 // The stores name buffer A's addresses; ecPatch rewrites their high bytes for the buffer being
 // drawn, once a frame (~110 cycles), instead of a second copy of every row.
-const EDGECHAIN = process.env.EDGECHAIN === '1' && PLAN === 3;
-// ecMT[8r + h] = clampT's value for h + K(r), K(r) = 8r - 92: index 0..351 covers h 0..255, r 0..12.
-const ECW = 96 + 256;
+const EDGECHAIN = process.env.EDGECHAIN !== '0' && PLAN === 3;
+// W[j] = f(j - 148): the chain's row R reads W + 8R + 56 with Y = h (0..255), so j runs to 407.
+const ECW = 408, ECOFF = 148;   // 148 = -K of the deepest tail row (R = -7)
 const ecF = v => Math.max(CLO, Math.min(CHI, v)) - CLO;
-const ecMT  = [...Array(ECW)].map((_, j) => ecF(j - 92));
+const ecMT  = [...Array(ECW)].map((_, j) => ecF(j - ECOFF));
 const ecM16 = ecMT.map(v => v << 4);
-const ecM8  = [...Array(ECW)].map((_, j) => Math.max(0, Math.min(8, j - 92)));
+const ecM8  = [...Array(ECW)].map((_, j) => Math.max(0, Math.min(8, j - ECOFF)));
 const ecRow = r => {
   const a = 0xe000 + 40 * r, m = 0xe000 + 40 * (24 - r);
   return `ecR${r}:  ldy colH,x              ; row ${r}: X = 4*column for the whole chain
-        lda ecM16+${8 * r},y
+        lda ecM16+${8 * r + 56},y
         sta hh0
         ldy colH+3,x
-        lda ecMT+${8 * r},y
+        lda ecMT+${8 * r + 56},y
         ora hh0
         tay
         lda rampThrT,y
@@ -3325,10 +3318,10 @@ const ecRow = r => {
         sta cmv
         sty bidx
         ldy colH+1,x
-        lda ecM8+${8 * r},y
+        lda ecM8+${8 * r + 56},y
         sta cmtmp
         ldy colH+2,x
-        lda ecM8+${8 * r},y
+        lda ecM8+${8 * r + 56},y
         clc
         adc cmtmp
         ldy bidx
@@ -3351,9 +3344,11 @@ for (let r = 1; r <= 12; r++) { EC_SITES.push([`ecA${r}`, (40 * r) >> 8]); if (r
 // the store operands' high bytes for the buffer about to be drawn: baseHi + page offset (0..3)
 const ecPatch = () => [0, 1, 2, 3].map(k => (k === 0 ? '        ldx baseHi\n' : '        inx\n') +
   EC_SITES.filter(([, p]) => p === k).map(([l]) => `        stx ${l}+2`).join('\n')).join('\n');
-// kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
-const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255)
-  .concat(FALLTAIL ? [...Array(FTROWS)].map((_, i) => (8 * (-1 - i) - 92) & 255) : []);
+// kTab[R] = K + 148 (see the unsigned clamp tables): the generic chooser's index is h' + kTab[R],
+// h' capped, into ecMT/ecM16/ecM8. Screen rows 8R + 56 (h' <= 100: at most 252), tail 48 - 8i.
+const kTab = [...Array(13)].map((_, R) => 8 * R - 92 + ECOFF)
+  .concat(FALLTAIL ? [...Array(FTROWS)].map((_, i) => 8 * (-1 - i) - 92 + ECOFF) : []);
+if (kTab.some(k => k < 0 || k > 255)) throw new Error('kTab out of 0..255');
 // per cell-row: cell is fully solid when min height >= t1, fully blank when max < tb.
 // fill = h + 8R - 92, so solid at fill>=8 and blank at fill<=0.
 const t1Tab = [], tbTab = [];
@@ -11885,7 +11880,7 @@ ${RAYCNT ? '        inc edgN\n' : ''}${NOEDGE ? `        lda #${hx(SOLID)}
 rfCp0:  clc
         adc kr
         tay
-        lda clmp16,y
+        lda ecM16,y
         sta hh0                 ; left level, already shifted into the high nibble
         lda colH+3,x
         ${capCmp()}
@@ -11894,7 +11889,7 @@ rfCp0:  clc
 rfCp3:  clc
         adc kr
         tay
-        lda clampT,y
+        lda ecMT,y
         sta hh1                 ; right level (0..12)
         ldy colc                ; through Y, NOT X: X still holds 4*col from the h0/h3 loads
         lda cstepT,y            ; above, and the ramp path's inlined calcM below needs it. The
@@ -11937,7 +11932,7 @@ ${PLAN === 2 ? `        sty bidx                ; the pair's threshold is indexe
 rmpM1:  clc
         adc kr
         tay
-        lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
+        lda ecM8,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
         ${capCmp()}
@@ -11946,7 +11941,7 @@ rmpM1:  clc
 rmpM2:  clc
         adc kr
         tay
-        lda clamp8T,y
+        lda ecM8,y
         clc
         adc cmtmp               ; A = m
         ldy bidx
@@ -12000,7 +11995,7 @@ vsNo:
 rfMc:   clc
         adc kr
         tay
-        lda clampT,y
+        lda ecMT,y
         tax
         lda qIdxMT,x
         ora tmp                 ; qA*8 + qM
@@ -12092,7 +12087,7 @@ ${PLAN === 2 ? `        ; ---- which half of the pair does this cell show? ----
 rcM1:   clc
         adc kr
         tay
-        lda clamp8T,y           ; LEVEL 0..8, matching the offline thresholds -- not clampT
+        lda ecM8,y           ; LEVEL 0..8, matching the offline thresholds -- not clampT
         sta cqtmp               ; free scratch: the colour is not chosen until below
         lda colH+2,x
         ${capCmp()}
@@ -12101,7 +12096,7 @@ rcM1:   clc
 rcM2:   clc
         adc kr
         tay
-        lda clamp8T,y
+        lda ecM8,y
         clc
         adc cqtmp               ; A = m, and the compares below only need the carry
         ldy bidx
@@ -12144,9 +12139,6 @@ rcHave: sta cqtmp
 ${EDGECHAIN ? `        ; ---- EDGECHAIN: rows 1..12, one routine each (see ecRow) ----
 ${[...Array(12)].map((_, i) => ecRow(i + 1)).join('')}ecLoT:  !byte ${[...Array(12)].map((_, i) => `<ecR${i + 1}`).join(',')}
 ecHiT:  !byte ${[...Array(12)].map((_, i) => `>ecR${i + 1}`).join(',')}
-ecMT:   !byte ${ecMT.join(',')}
-ecM16:  !byte ${ecM16.join(',')}
-ecM8:   !byte ${ecM8.join(',')}
 ` : ''}rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc vsChk
@@ -12254,7 +12246,7 @@ calcM:  ldx colc
 cm1:    clc
         adc kr
         tay
-        lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
+        lda ecM8,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
         ${capCmp()}
@@ -12263,7 +12255,7 @@ cm1:    clc
 cm2:    clc
         adc kr
         tay
-        lda clamp8T,y
+        lda ecM8,y
         clc
         adc cmtmp
         rts
@@ -19103,9 +19095,11 @@ absCosT: ${chunk(absCos).trim()}
 absSinT: ${chunk(absSin).trim()}
 recipLoT: ${chunk(recipLo).trim()}
 recipHiT: ${chunk(recipHi).trim()}
-clampT: ${chunk(clampT).trim()}
-
-clmp16: ${chunk(clampT16).trim()}
+; the unsigned clamp tables (see ECOFF): here among the data, NOT beside the code that reads
+; them -- an aligned table opens a run, and the code after it would be classed as data.
+ecMT:   !byte ${ecMT.join(',')}
+ecM16:  !byte ${ecM16.join(',')}
+ecM8:   !byte ${ecM8.join(',')}
 qIdxAT: !byte ${qIdxAT.join(',')}
 qIdxMT: !byte ${qIdxMT.join(',')}
 qIdxBT: !byte ${qIdxBT.join(',')}
@@ -24451,10 +24445,11 @@ ${FALLTAIL ? `
 ; bufOff 15 + erow 13..17 lands on chain entries 28..32, clear of buffer A's 0..13 and B's 14..27.
 ; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
 fallTail:
-        lda #$ff                ; no height cap up here: see hCap
+        lda #200                ; tail rows: K is -100..-148, so 200 is already fully solid -- the
 ${hCapPatch()}
-        sta vsOn                ; ...and no VSPLIT stack: vsOn names a column, and renderSym's
-                                ;   last one could match a tail column (A is $ff already)
+                                ;   cap only keeps h' + kTab (<= 200 + 48) inside a byte
+        lda #$ff                ; ...and no VSPLIT stack: vsOn names a column, and renderSym's
+        sta vsOn                ;   last one could match a tail column
         lda #15                 ; erow 13..17 + 15 -> chain entries 28..32
         sta bufOff
         ldx #39
@@ -24562,7 +24557,6 @@ stepThrT2: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(1, i)).join(',')}
         * = ${hx16(RELOC + 0x3400)}
 stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(2, i)).join(',')}
         * = ${hx16(RELOC + 0x3500)}
-clamp8T: ${chunk(clamp8T).trim()}
 ` : ''}
 ; The image used to be padded out to $bfff to buy load-time headroom -- the staged copy of the
 ; compressed stream was pinned to the image's top, so a taller image lifted it. There is no
@@ -25131,7 +25125,7 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 256])), ocos: 1, runPlaneT: 1, remLoT: 1 } : {}), ...(BGLOAD ? { stackLT: 256 } : {}), mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
-    rayOffT: NLOG, colGrpT: NLOG, clampT: 256, clmp16: 256,
+    rayOffT: NLOG, colGrpT: NLOG, ecMT: 256, ecM16: 256, ecM8: 256,
     // ---- THE CELL CHOOSER'S BYTE-INDEXED TABLES (2026-10-05) ----
     // Their source puts each at a `* = RELOC+$xx00` origin with a comment saying why ("a page
     // crossing here would tax the hottest lookup in the renderer") -- but compaction strips
@@ -25142,7 +25136,6 @@ const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 2
     // compact.mjs -- two pages of padding to fix a crossing the current layout does not have.)
     ...(PLAN === 3 ? { rampTlo: 256, rampThi: 256, rampThrT: 256, stepThrT1: 256, stepThrT2: 256, stepThrT3: 256,
         stepT1lo: 256, stepT1hi: 256, stepT2lo: 256, stepT2hi: 256, stepT3lo: 256, stepT3hi: 256 } : {}),
-    clamp8T: 256,
     // hTabT MUST start on a page, and this list is where that is said. The height lookup builds
     // its pointer out of the HIGH BYTE ALONE and forces the low byte to zero:
     //     lda colGrpT,x / adc #>hTabT / sta hp+1 / lda #$00 / sta hp / lda (hp),y
