@@ -777,18 +777,10 @@ const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) ma
 // labels, which resolve into the slot. (SOLO=0, the old world with the live level baked into the
 // image, and BOOTSLOT, which swapped a disk-loaded blob with a level the image still carried, are
 // both gone.)
-// ---- ...AND THE COMPACTED LAYOUT IS THE DEFAULT TOO ----
-// engine code up from $0801, the level arena, then the data tables down from $c000. COMPACT=0
-// builds the old scattered layout, which is the only way to A/B a suspected layout regression.
-// It costs an extra assembly pass: the relayout needs the buffer sizes the RAM-overlap guard
-// publishes, and that guard only runs after assembly. The inner pass sets COMPACT=0 to stop it
-// recursing.
-// OPT-IN AGAIN, not the default: making the relayout PRIMARY (measuring in a stripped layout so
-// the hand-placed one need not assemble) is half done and does not run. It gets the layout right
-// -- every aligned table lands on a page and the arena measures 3,510 -- but the machine jams,
-// and the cause is run boundaries that do not correspond to anything safe to cut. See
-// [[iray-compaction]]. COMPACT=1 still builds the older post-pass relayout, which does run.
-const COMPACT = process.env.COMPACT !== '0';
+// ---- ...AND THE LAYOUT IS ALWAYS COMPACTED ----
+// engine code up from $0801, the level arena, then the data tables down from $c000: compact.mjs
+// relays out the emitted source before it is assembled (see [[iray-compaction]]). COMPACT=0, the
+// old scattered layout, is gone -- it no longer assembled anyway.
 // Where the slot lives. Bank 3, above ARC_MAP's end ($f430) and below the arc's charset window
 // at $f800 -- the window is a d018 base the VIC reads during a fall, and although only the rim
 // glyphs are ever written into it, a level's tables have no business inside a charset.
@@ -941,7 +933,7 @@ for (let a = 0; a < 256; a++) {
   ddxLo.push(dx & 255); ddxHi.push(dx >> 8); ddyLo.push(dy & 255); ddyHi.push(dy >> 8);
   posX.push(cx >= 0 ? 1 : 0); posY.push(sy >= 0 ? 1 : 0);
 }
-// FINEANG=1: the DDA deltas at QUARTER-angle resolution, 1024 entries instead of 256.
+// FINEANG: the DDA deltas at QUARTER-angle resolution, 1024 entries instead of 256.
 // The angle byte gives only 48 distinct ray directions across 160 columns, so 3-5 adjacent
 // columns march the identical ray and a wall's far end can only sit on a run edge -- it jumps a
 // whole character instead of scrolling. Two fractional bits make every column distinct.
@@ -956,8 +948,7 @@ for (let a = 0; a < 256; a++) {
 // coarse bucket can never straddle a sign change.
 // castRay itself no longer forms a coarse angle at all -- its step signs come from rqH.
 // ON by default: the byte angle gave only 48 distinct ray directions across 160 columns, which
-// made every wall's far end jump a whole character instead of scrolling. FINEANG=0 restores it.
-const FINEANG = process.env.FINEANG !== '0';
+// made every wall's far end jump a whole character instead of scrolling.
 
 const ddxLoQ = [], ddxHiQ = [], ddyLoQ = [], ddyHiQ = [];
 for (let q = 0; q < 1024; q++) {
@@ -994,7 +985,7 @@ const NCELL = NLOG / 4;                 // 4x8 cells across the screen (40)
 // the search happened to leave it -- 100+ rows of wrong wall, always at the right of the screen
 // because that is what gets searched last. bndT owns a whole page, so the cap was never about
 // space. The build reports the worst SAMPLED frame so this cannot silently re-fill.
-const NBND = +(process.env.NBND ?? (FINEANG ? 64 : NLOG / 8));
+const NBND = +(process.env.NBND ?? (64));
 // RECTILINEAR projection: columns spaced by atan (flat image plane) + per-column
 // cos-correction of the distance. Fixes the fisheye arch AND makes wall height linear.
 const CTR = (NLOG - 1) / 2, HALF_UNITS = FOV / 2, TANHALF = Math.tan(HALF_UNITS / 256 * 2 * Math.PI);
@@ -1023,12 +1014,11 @@ for (let c = 0; c < NLOG; c++) {
 // -inf, which is -0.4 of a column every frame and at w=0 there is no slack for it.
 // Requires FINEANG (for rayOffQS) and PLAN=3 (for the three table pages it frees; see the
 // emission site). Both are the defaults, so this is on unless something else is being tested.
-const PIVOT = FINEANG && +(process.env.PLAN ?? 3) === 3 && process.env.PIVOT !== '0';
+const PIVOT = +(process.env.PLAN ?? 3) === 3 && true;
 // PIVTRANS=0 zeroes the translation delta, leaving the rotation-only prediction. Not a tuning
 // knob -- it is the A/B that says whether the translation term earns the two multiplies, and
 // the only way to tell a WORKING translation term from a broken one, since a broken one cannot
 // corrupt the image (extra cuts only split spans) and shows up purely as lost rays.
-const PIVTRANS = process.env.PIVTRANS !== '0';
 // signed sin * 128, by BYTE angle. absSinT/absCosT hold the magnitudes but put the sign in a
 // separate table, which is a second lookup and a branch on a path that multiplies twice per
 // boundary per frame. Only SIN is stored: cos(a) = sin(a + 64) at 256 units to the turn, and
@@ -1409,13 +1399,11 @@ const cpLo = new Array(nextRun).fill(0), cpHi = new Array(nextRun).fill(0);
     if (!a || !b || a === b) return;
     for (const [x, y] of [[a, b], [b, a]]) {
       if (cpLo[x] === y || cpHi[x] === y) continue;
-      if (!cpLo[x]) cpLo[x] = y; else if (!cpHi[x]) cpHi[x] = y;
       // A third partner happens where two walls touch only at a corner point with open cells on
       // both diagonals (level 2's removable wall at (8,5) against (9,4)/(9,6)): the run's end is
       // convex from one side and part of a concave corner from the other. The two-byte table
-      // cannot hold it -- but the table is only READ under CVXSEAM=0, which is not what ships
-      // (see CVXSEAM), so it is only an error there.
-      else if (process.env.CVXSEAM === '0') throw new Error(`run ${x} has more than two corner partners (CVXSEAM=0 needs the table)`);
+      // cannot hold it, and need not: it was only READ under CVXSEAM=0, which is gone.
+      if (!cpLo[x]) cpLo[x] = y; else if (!cpHi[x]) cpHi[x] = y;
     }
   };
   // concave ends: an inside corner, seen from an open cell with two solid neighbours
@@ -2011,7 +1999,6 @@ const C8 = x => Math.max(0, Math.min(8, x));
 // viewpoints, three of them up against the column where step cells actually live.
 // Full STEPA (deleted) looked worse for a reason worth remembering: it hits `continue` before ever reading
 // planCode, so it throws away the 546 GOOD answers to make the 183 leftovers go away.
-const STEPFB = process.env.STEPFB !== '0';
 // Which column the MIDDLE sample reads. It was always w[kb-1] -- "the last column before the
 // boundary" -- which for kb=1 is w[0], i.e. qA itself. That wasted a third of the key exactly
 // where two walls meet: the s0 bucket class measures 0.812 px/cell against 0.31-0.41 for s1/s2,
@@ -2891,12 +2878,11 @@ if (PLAN === 3) {
   stepThi = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
   stepTlo = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
   for (let k = 0; k < 3; k++) for (let slot = 0; slot < SLOTN; slot++) {
-    // STEPFB=1: the plan still answers every slot it covers -- 546 of 729 -- and only the
+    // STEPFB: the plan still answers every slot it covers -- 546 of 729 -- and only the
     // LEFTOVERS come from the formula instead of from this room's sampling. That is the whole
     // map dependence (183 slots) removed without giving up a single plan answer, which is what
     // full STEPA does and why it reads as a degradation: it replaces the good 546 too.
-    const fb = nearestCode(STEPFB ? stepAPat(k, slot)
-                                  : (STEPS.assign[k].get(slot) ?? [0, 0, 0, 0]));
+    const fb = nearestCode(stepAPat(k, slot));
     planCode.has(`s${k}.${slot}.h`) ? fineHit++ : fineMiss++;
     stepThi[k][slot] = planCode.get(`s${k}.${slot}.h`) ?? fb;
     stepTlo[k][slot] = planCode.get(`s${k}.${slot}.l`) ?? stepThi[k][slot];
@@ -3181,15 +3167,14 @@ if (process.env.GLYPHDUMP) {
 // stamping the TOP cell's glyph (the near top AND the edge, e.g. ..../..../##../###./...) down the
 // whole stack, so every cell under the top carried two rows of sky it should not have -- a notched
 // ladder down every close corner. Measured at X1EF Y1AC A13: column 14, colH 83 82 82 17, rows
-// 2..9 all one code; rows 3..9 should be the pure ###. split. VSPLIT=0 to A/B.
-const VSPLIT = process.env.VSPLIT !== '0';
+// 2..9 all one code; rows 3..9 should be the pure ###. split.
 // The six pure vertical splits, looked up in the charset rather than assumed: a code number is
 // an output of the k-medians fit and moves whenever the plan is refit.
 const vsplitFind = rowByte => { for (let c = 0; c < 256; c++) if ([...Array(8)].every((_, r) => fontA[c * 8 + r] === rowByte)) return c; return -1; };
 const wallRow = cols => cols.reduce((b, on, k) => b | ((on ? 1 : 0) << (6 - 2 * k)), 0);   // pair 01 = wall
 const VSPLIT_L = [1, 2, 3].map(p => vsplitFind(wallRow([0, 1, 2, 3].map(k => k < p))));    // #... ##.. ###.
 const VSPLIT_R = [1, 2, 3].map(p => vsplitFind(wallRow([0, 1, 2, 3].map(k => k >= p))));   // .### ..## ...#
-if (VSPLIT && [...VSPLIT_L, ...VSPLIT_R].some(c => c < 0))
+if ([...VSPLIT_L, ...VSPLIT_R].some(c => c < 0))
   throw new Error(`VSPLIT: the charset lacks a pure vertical split glyph: L=${VSPLIT_L} R=${VSPLIT_R}`);
 for (let i = 0; i < fontA.length; i++)
   if (fontB[i] !== fontA[i ^ 7])
@@ -3537,7 +3522,7 @@ const ENTPROF = flag('ENTPROF');
 // readings are sums of two unrelated phases -- and they look plausible, which is worse.
 if (ENTPROF && !PROFCOARSE) throw new Error('ENTPROF=1 needs PROFCOARSE=1: it reuses the bucket ' +
   'indices PROFCOARSE frees, and without it the fine ray buckets are summed into the entity ones');
-// OCCLAZY=1: rebuild the occluder masks only when they can have changed.
+// OCCLAZY: rebuild the occluder masks only when they can have changed.
 // ON by default since 2026-09-03, and it is the single biggest win in the frame. The masks say
 // whether an entity is beyond a wall face's PLANE -- no camera term -- so they only change when an
 // entity moves or the run tables are re-patched, and on a map that splits nothing neither happens
@@ -3546,12 +3531,10 @@ if (ENTPROF && !PROFCOARSE) throw new Error('ENTPROF=1 needs PROFCOARSE=1: it re
 //   orbOccAll 216.0 -> 4.0 lines, whole frame 1315 -> 1052 = 4 video frames = 10 -> 15 fps.
 // Verified with its own OCCCHK harness rather than by eye: rebuild anyway, compare byte for byte,
 // count differences. 255+ skipped frames checked while walking through cells with both angels
-// moving, occBad = 0. OCCLAZY=0 restores the unconditional rebuild.
+// moving, occBad = 0.
 // ENTFOV: reject an entity that is beside the camera before the reciprocal and the column
-// arithmetic, from |right| and forward alone. On by default since 2026-09-15; ENTFOV=0 to A/B.
-const ENTFOV = process.env.ENTFOV !== '0';
-// ENTGATE: skip orbMove's frame trig when no entity can possibly be projected. ENTGATE=0 to A/B.
-const ENTGATE = process.env.ENTGATE !== '0';
+// arithmetic, from |right| and forward alone. On since 2026-09-15.
+// ENTGATE: skip orbMove's frame trig when no entity can possibly be projected.
 // ---- ENTCONE: reject an entity on its CELL BEARING, before any multiply at all ----
 // orbProj's own rejects are cheap for what they are, but nothing is rejected until forward =
 // Ix*cos + Iy*sin and (usually) right = Iy*cos - Ix*sin have been computed: four oTerm/mul8
@@ -3569,8 +3552,7 @@ const ENTGATE = process.env.ENTGATE !== '0';
 // invalidate -- which is the bug class orbOccT already shipped once (see orbOccAll). The caching
 // version of this test measured no cheaper anyway: "check the key" costs about what "recompute"
 // costs. Caching is for the OCCLUSION question, which cannot be answered per frame at all.
-const ENTCONE = process.env.ENTCONE !== '0';
-if (!ENTCONE) DIAG.push('ENTCONE=0');
+
 // Half the cone, in 256ths of a turn. ENTFOV's bound, NOT the tighter true one: it tests
 // |right| > forward * 3/4, so atan(3/4) is the angle it is already verified safe at (FOVCHK, 3/4
 // vs the 5/8 first cut that dropped 4 real sprites). Rejecting at the true 116/184 = 0.63 would
@@ -3617,21 +3599,11 @@ const coneSlack = c => {
   }
   return m;
 };
-// CONECHK=1: verify it, the way FOVCHK verifies ENTFOV. The cone only NOTES that it would have
-// rejected; the full path still runs. coneBad = the cone said no and the entity got a SPRITE, and
-// it must be 0. coneDis = orbProj disagreed but the box tests threw it out anyway, which is
-// allowed. A cull that wrongly rejects shows up as an entity popping, which is easy to miss by
-// eye and hard to attribute -- so it gets a counter, not a playtest.
-const CONECHK = flag('CONECHK');
-if (CONECHK && !ENTCONE) throw new Error('CONECHK=1 verifies ENTCONE, which is off');
-// CONEGATE: run cnTest for every entity in entGate instead of in orbOne, keep the verdicts in
-// cnOkT, and let the gate SHUT when nothing is in the cone -- which is what finally skips omTrig.
-// CONEGATE=0 restores the per-entity test inside orbOne and the old "does an orb exist" gate, so
-// the two can be compared as the only difference between two builds.
-// Off under CONECHK: that harness verifies the cone against orbProj entity by entity inside
-// orbOne, which is where the comparison has to happen.
-const CONEGATE = ENTCONE && ENTGATE && !CONECHK && process.env.CONEGATE !== '0';
-if (ENTCONE && ENTGATE && !CONECHK && !CONEGATE) DIAG.push('CONEGATE=0');
+// CONEGATE (now simply how it works): cnTest runs for every entity in entGate rather than in
+// orbOne, the verdicts are kept in cnOkT, and the gate SHUTS when nothing is in the cone -- which
+// is what skips omTrig. (CONECHK, its in-orbOne checker, no longer built and is gone; GATECHK
+// checks the gate's inlined cone against cnTest.)
+
 // BNDCNT=1: per frame, boundaries pinned by the subdivision and how many of them are shared
 // corners (both faces at the same height at the boundary: the second end ray is redundant).
 const BNDCNT = flag('BNDCNT');
@@ -3642,19 +3614,18 @@ const MARCHCNT = flag('MARCHCNT');
 // runs, and two counters say what happened: fovDis = orbProj accepted what the cull would have
 // dropped (the box tests may still throw it out), fovBad = it got a SPRITE. fovBad must be 0.
 const FOVCHK = flag('FOVCHK');
-if (FOVCHK && !ENTFOV) throw new Error('FOVCHK=1 verifies ENTFOV, which is off');
-const OCCLAZY = process.env.OCCLAZY !== '0';
+
 // OCCLAZYE: build an entity's occluder mask only when it SURVIVES the culls, not for every entity
 // in subFin. orbOccAll keeps OCCLAZY's dirty test (blkVer moved, or the viewing cell changed) but on
 // a dirty frame only marks every mask stale (ooFrT = 0); orbOne rebuilds an entity's mask right
 // after cnYes -- i.e. once the cone (and the horizon) have passed it -- and marks it fresh. Every
 // other reader comes later in the frame (occStamp: slot-takers, all through orbOne) or rebuilds for
 // itself (angStep's probes). Flags rather than per-entity version numbers: blkVer is 8 bits, and an
-// entity left unprojected long enough would see it wrap round to an exact match. OCCLAZYE=0 to A/B.
+// entity left unprojected long enough would see it wrap round to an exact match.
 // LAZYCHK=1 (with OCCLAZYE): whenever orbOne is about to TRUST a mask as fresh, rebuild it anyway and
 // count every byte that differs (lzBad, must be 0) against the uses checked (lzN).
 const LAZYCHK = process.env.LAZYCHK === '1';
-const OCCLAZYE = OCCLAZY && process.env.OCCLAZYE !== '0' && process.env.ENTCONE !== '0' && !['1', '2', '3'].includes(process.env.OCCCHK ?? '');
+const OCCLAZYE = !['1', '2', '3'].includes(process.env.OCCCHK ?? '');
 // OCCCHK=1: verify the skip. Rebuilds even when it would skip, and counts bytes that differ.
 // 2 and 3 exist to BISECT it: the full version starts and then runs wild, so build up in stages.
 //   2 = counters only (never skip, count clean frames)   3 = 2 + the shadow copy   1 = 3 + compare
@@ -4007,21 +3978,6 @@ const SEAMFAR = +(process.env.SEAMFAR ?? SEAMCUT);
 // char cells nearly always has one free. The 63% of boundaries that get discarded collide
 // INDIVIDUALLY, mostly with corner seams, so there is no whole-span answer.)
 const SEAMS = process.env.SEAMS !== '0';
-// SEAMDRAW=0: compute every seam exactly as usual -- seamSpan, seamT, the corner marks, all of it
-// byte for byte -- but have renderSym ignore seamT and take its ordinary cached path. A
-// DIAGNOSTIC build only; the screen comes out with no lines on it.
-// It exists because SEAMS=0 cannot answer the question. That removes the pass AND the drawing at
-// once, so the renderSym half has to be inferred from a build whose seamSpan is also gone and
-// whose frame rate has moved. With this one, seamSpan is identical in both halves of the A/B and
-// the only thing that differs is what renderSym does with the answer -- which is exactly the
-// quantity we are trying to price.
-const SEAMDRAW = process.env.SEAMDRAW !== '0';
-if (!SEAMDRAW) DIAGEARLY.push('SEAMDRAW=0');
-// SEAMPANEL=0 keeps the CORNER marks and drops only the interpolated panel lines. SEAMS=0 cannot
-// do this -- it gates the corner block in subFace as well -- and the two are worth seeing apart:
-// corners mark real structure, panel lines are decoration, and it is the decoration whose
-// selection goes unstable on a near-parallel far wall.
-const SEAMPANEL = process.env.SEAMPANEL !== '0';
 // SEAMHYST: hold a panel line where it was last frame while the newly solved position stays
 // within one column of it. NOT a precision fix and not a substitute for one -- it exists because
 // precision cannot win this fight. Measured on the centre seam at PX=05a5 PY=061b PA=0d PAF=40,
@@ -4081,10 +4037,9 @@ const SEAMPW = +(process.env.SEAMPW ?? 4);
 if (SEAMPW && SEAMPW < 3) throw new Error(`SEAMPW=${SEAMPW}: 4K/n must fit a byte, so n >= 3`);
 const PW4C = SEAMPW ? Math.round(4 * NLOG / (FOV / 256 * 2 * Math.PI) / SEAMPW) : 0;
 if (SEAMPW !== 4) DIAG.push(`SEAMPW=${SEAMPW}`);
-const SEAMHYST = process.env.SEAMHYST !== '0';
 const HYSN = 12;                        // band slots. Overflow just skips the band for the extras,
                                         // which is last frame's behaviour, so it degrades quietly.
-// CVXSEAM=1 (default): a run end gets its seam whether the corner is concave or convex.
+// CVXSEAM (now simply how it works): a run end gets its seam whether the corner is concave or convex.
 // They were dropped from convex ends because the silhouette there already steps 20+ rows so
 // the line looked redundant, and because the boundary landed in the one cell an orb needed
 // per-column occlusion in. The orb reason is gone, and the line is NOT redundant where it
@@ -4092,8 +4047,6 @@ const HYSN = 12;                        // band slots. Overflow just skips the b
 // thing dividing them. seamT applies to the SOLID run only -- rows rs..12, where rs comes
 // from the cell's MINIMUM height, i.e. the far wall's top -- so the line automatically starts
 // where the step pieces end and never runs up the near wall's full height.
-// CVXSEAM=0 restores the concave-only rule (and with it the need for cpLoT/cpHiT).
-const CVXSEAM = process.env.CVXSEAM !== '0';
 // PARTIAL=0 restores the pure equality test on both run caches -- redraw the whole chain on any
 // change. The A/B for the shrink/grow skip, and the only way to tell a stale-pixel bug in it
 // from ordinary model disagreement, since the pinned six views never exercise either path.
@@ -4106,10 +4059,7 @@ const STRAFE = flag('STRAFE'); // auto-strafe (parallel to walls)
 // on two or three frames of it cannot be caught by -limitcycles at all, because the whole window
 // is narrower than the jitter in when the disk finishes loading. Stretching the traverse does not
 // change what is rendered at any given position, only how long the emulator sits there.
-// PVNEAR=0 restores the old "always spanL" reciprocal, so the before/after of that fix can be
-// benchmarked as the only difference between two builds. Keep it until the number is recorded.
-const PVNEAR = process.env.PVNEAR !== '0';
-if (!PVNEAR) DIAG.push('PVNEAR=0');
+
 const SLOWMO = +(process.env.SLOWMO ?? 0);
 if (SLOWMO) DIAG.push(`SLOWMO=${SLOWMO}`);
 // ---- THE ONLY AUTO-MOVERS ARE THE BENCHMARK'S OWN THREE ----
@@ -4198,19 +4148,11 @@ const DBGORB = process.env.DBGORB === '1';
 // ORBOCC=0 switches the whole-orb occlusion test off, so it can be A/B'd in one run the way
 // SPRITES=0 does. With it off every projected orb draws, including ones entirely behind a wall.
 const ORBOCC = process.env.ORBOCC !== '0';
-// ORBINV=0: stamp but do NOT invalidate the run cache. Renders with trails; exists to price the
-// invalidation separately from the stamping, which is the only way to know which one costs.
-const ORBINV = process.env.ORBINV !== '0';
-// ORBDESEAM=0: skip the seam sweep, to price it against the stamping.
-const ORBDESEAM = process.env.ORBDESEAM !== '0';
 // ORBFG=<n>: tint the OCCLUDERS. Bit pair 11 takes its colour from the low three bits of colour
 // RAM, so filling it with $08|n paints every stamped cell colour n while walls (pair 01, $d022)
 // and ceiling (00, $d021) stay as they are. ORBFG=6 makes every cell the stamp touches blue,
 // which is the only way to see WHERE it is drawing rather than infer it from what looks wrong.
 const ORBFG = process.env.ORBFG;
-// ORBSTAMP=0 disables PARTIAL occlusion. On by default: the slot-count clobber that made this
-// walk a hundred garbage slots per frame is fixed -- see occStamp's entry.
-const ORBSTAMP = process.env.ORBSTAMP !== '0';
 // (ORBGATE, deleted: the build-time canOcc gate on the STAMP pass.)
 // canOcc comes from blockers(), which marches from 9 eye positions in the cell across +-0.25
 // cells of the orb. That answers "can this orb be occluded from this cell" well enough for the
@@ -4301,7 +4243,7 @@ const ORBSAMP = 4;                              // NxN point samples per destina
 function orbScale(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, and standing on the floor
-  if (ORBART && process.env.ORBRUNG !== '0') {   // ORBRUNG=0: A/B the per-rung fit
+  if (ORBART) {
     // ---- fit every rung from the SOURCE, not from the biggest rung ----
     // Majority-of-16-samples is what flattens a dithered ball as it shrinks: the vote resolves
     // each destination pixel to whichever level dominates its footprint, so the grain averages
@@ -4488,7 +4430,7 @@ const FACEART = { colram: PICS.colram & 7 };
 // FACE_NCHR and shortens by itself.
 // Blocks are emitted in PAIRS so the charset stays a whole number of 256-byte pages.
 const FACE_PACK = (() => {
-  if (!DIE || process.env.FACEPACK === '0') return null;
+  if (!DIE || false) return null;
   const used = new Set(PICS.maps.slice(0, NPIC).flatMap(m => m.map));
   for (const c of [...used]) used.add(c ^ 0x0f);              // a glyph is only droppable with its twin
   // Pair up: each pair is {lo, lo^15} within one block, and exactly one of the two has lo < 8.
@@ -4621,7 +4563,7 @@ const angW = h => Math.max(1, Math.round(12 * h / 42));
 // is built around the one 12x42 canvas the two sprites hold, so the fitting rule stays in one
 // place if a rung ever wants a different canvas again.
 function angPx(w, h) {
-  if (ANGELART && process.env.ORBRUNG !== '0') {
+  if (ANGELART && true) {
     // Same reason as the orb: majority voting flattens a dithered figure as it shrinks, so
     // every rung is fitted from the source at its own resolution instead. fitArt box-filters
     // from the full-resolution render -- a destination pixel's footprint is bw*dx/W -- so a
@@ -5986,9 +5928,8 @@ if (process.env.ANGDUMP === '1') {
 // jumps the figure slides down with the ground line, then the top leaps by the whole step. Split
 // the error and it grows both ways, so the top moves half as far. ovar is itself a function of
 // ohgt, so the offset is entirely precomputable -- one signed byte per h, one add at runtime.
-const ANGMID = process.env.ANGMID !== '0';
 const angMidT = [...Array(256)].map((_, h) => {
-  if (!ANGMID) return 0;
+  
   const off = Math.round((ORBTALL[angVarT[h]] - 2 * h * ANGH) / 2);
   return Math.max(-128, Math.min(127, off)) & 255;      // two's complement in a byte
 });
@@ -6604,7 +6545,7 @@ const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 0 : 2));
 // arc comes up. Nothing at the hole but the drop itself. fmTk records how many ticks the blank took.
 // Effective only where the level LOADS (LVLLOAD): the per-level dump subprocesses inherit the env
 // but build no fall worth the name, and have no lvlLoad for fallMid to call.
-const FALLMID = process.env.FALLMID !== '0' && LVLLOAD;   // DEFAULT since 2026-10-04 (user: "let's keep it"); FALLMID=0 restores the overlapped drop
+const FALLMID = LVLLOAD;   // all level work in the drop's black middle (2026-10-04, user: "let's keep it")
 const ARC_OVERLAP = +(process.env.ARC_OVERLAP ?? (FALLMID ? 0 : 4));
 // Which drop frame asks for the destination render. NOT frame 0: a render is ~4 raster periods
 // and at frame 0 nothing has moved yet, so it reads as hitting something rather than falling.
@@ -6704,10 +6645,6 @@ const arcLandOff = (() => {
 })();
 const arcSp2T  = arcHi2T.map(h => Math.max(51, Math.min(246, 50 + h * 8)));        // below the rim
 const arcSp2bT = arcLandOff.map(o => Math.max(51, Math.min(246, 150 + o * 8)));    // room horizon
-// FALLSCENE=1 brings back fdWarp and fRowT -- the camera-height remap of the frozen frame. Off
-// while the arc is being judged on its own: the scene sliding is a second effect competing for
-// attention with the one that has to work first.
-const FALLSCENE = process.env.FALLSCENE !== '0';   // the sheared scene is the default now
 // ---- fRowT: the camera HEIGHT, as a destination-row -> source-row remap ----
 // Every floor-plane feature's distance from the horizon scales by s, and everything above it by
 // (2-s). Written per row that is one statement: A ROW MOVES UP BY ITS DISTANCE FROM THE HORIZON
@@ -7076,9 +7013,6 @@ const HOLE = shareRungs(makeHoleLadder(HOLER, HOLESTEP, 0), [
 const SOCKR = +(process.env.SOCKR ?? HOLER / 2);
 // FLAT -- rim 0. The exit hole is rimless because a rim ate a pixel each side and read as a
 // SMALLER hole; the socket now borrows its art anyway, so colour is what tells them apart.
-// SOCKOWN=0 goes back to borrowing the exit hole's bitmaps for zero slots -- see the block below
-// for why that worked at all (the half-radius/double-distance identity) and what it cost.
-const SOCK_OWN = process.env.SOCKOWN !== '0';
 // Spaced by hand rather than by a step: an even walk put two rungs where they rasterise to the
 // same pixels and left a 0.73-cell hole in the middle. These ten all render distinctly, and
 // monotonically -- width and height both only ever shrink as you walk away.
@@ -7118,7 +7052,7 @@ const SOCK_SPR = (process.env.SOCKSPR ?? '').split(',').map(Number);
 // magnified), so NO dedicated ladder fits in that gap. Sprite data only has to be 64-byte aligned
 // RAM inside the VIC bank, so it ships as its own file instead, like ISPR and IPIC already do.
 const SOCKBASE = +(process.env.SOCKBASE ?? 0xf880);
-const SOCK = makeHoleLadder(SOCKR, 4, SOCK_OWN ? 0 : HOLE.slotEnd, 32, false, 0, SOCK_OWN ? {
+const SOCK = makeHoleLadder(SOCKR, 4, 0, 32, false, 0, {
   widths: SOCK_W, crisp: true, spr: SOCK_SPR, cover: true,
   // "<rung>:<lit row>:<pixels each side>", EMPTY by default. One rung was hand-trimmed while the
   // ladder was still coarse enough for a flat top to stand out; with the steps evened up the user
@@ -7127,7 +7061,7 @@ const SOCK = makeHoleLadder(SOCKR, 4, SOCK_OWN ? 0 : HOLE.slotEnd, 32, false, 0,
   // trims the rung next door and leaves the intended one alone, which is what happened once.
   touch: (process.env.SOCKTOUCH ?? '').split(',').filter(Boolean)
            .map(t => t.split(':').map(Number)),
-} : {});
+});
 
 // ---- SOCKETS BORROW THE EXIT HOLE'S BITMAPS AND OWN NONE ----
 // A disc of HALF the radius at distance d is the same shape as a full-size one at 2d stretched
@@ -7145,27 +7079,12 @@ const SOCK = makeHoleLadder(SOCKR, 4, SOCK_OWN ? 0 : HOLE.slotEnd, 32, false, 0,
 // tried, at 6 slots and a 23% smaller socket with 2-column pixels up close, and this looked
 // better. Zero slots is the other half of the argument.
 //
-// SUPERSEDED by SOCK_OWN (2026-10-01), kept behind SOCKOWN=0. The dedicated ladder that was tried
+// SUPERSEDED by SOCK_OWN (2026-10-01); the borrowing code is gone, this is its record. The dedicated ladder that was tried
 // and rejected was ONE sprite at 6 slots; this one is two, at 12, and the user judged it from a
 // rendered strip. What the borrow could never give: the two closest rungs clamp (the similarity
 // breaks once the disc's near edge passes row 200), so the three nearest distances all drew at
 // one size, and vmag halved the vertical sampling of every rung.
-if (!SOCK_OWN) {
-  const near2 = d => HOLE.L.reduce((best, g, i) =>
-    Math.abs(g.d - 2 * d) < Math.abs(HOLE.L[best].d - 2 * d) ? i : best, 0);
-  const idx = SOCK.L.map(g => near2(g.d));
-  const ok = Math.max(0, SOCK.L.findIndex((g, i) => Math.abs(HOLE.L[idx[i]].vis * 2 - g.vis) < 1.2));
-  for (let i = 0; i < ok; i++) idx[i] = idx[ok];
-  SOCK.BM = [];                                   // nothing of its own is emitted
-  SOCK.srcIdx = idx;                              // which exit rung each socket rung borrows --
-                                                  //   the only place its DRAWN size is knowable
-  SOCK.slotT = idx.map(i => HOLE.slotT[i]);
-  SOCK.xOffT = idx.map(i => HOLE.xOffT[i]);       // the BORROWED bitmap's width, not the socket's
-  SOCK.flagT = idx.map(i => (HOLE.flagT[i] & 0x07) | 8);   // its sprite count and hmag, vmag forced
-  SOCK.slotEnd = HOLE.slotEnd;                    // ...so it consumes no slots
-  console.error(`  sockets: ${SOCK.L.length} rungs, 0 slots of their own -- borrowed from the ` +
-    `exit ladder${ok ? `, closest ${ok} clamped to rung ${ok}` : ''}`);
-}
+
 // Rungs the socket skips per frame as it closes, sized the same way: SOK_SHR frames walk its
 // whole ladder. It has to live here rather than beside SOK_VSTEP because the ladder it measures
 // is not built until now.
@@ -7451,9 +7370,9 @@ function makePedLadder(r, uh, wStep, slot0, wMax = 24, wMin = 4) {
 // Behind the exit ladder in the same region, and behind the SOCKET's slots too when it owns
 // any -- SOCK.slotEnd equals HOLE.slotEnd exactly when the socket is borrowing (SOCKOWN=0)
 // of everything emitted there so far.
-const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, SOCK_OWN ? HOLE.slotEnd : SOCK.slotEnd, 24, PEDWMIN)
+const PED = HAS_PED ? makePedLadder(PEDR, PEDH, PEDSTEP, HOLE.slotEnd, 24, PEDWMIN)
                     : { L: [], BM: [], slotT: [], hT: [], varT: [], xOffT: [], yBaseT: [],
-                        flagT: [], slotEnd: SOCK_OWN ? HOLE.slotEnd : SOCK.slotEnd };
+                        flagT: [], slotEnd: HOLE.slotEnd };
 // Five tables of one byte a rung, emitted as a single run under holeSeeT.
 const PEDTBL = 5 * Math.max(1, PED.L.length);
 // ...plus hlRungP itself, which is emitted in the same run. Hand-counted, and the assembler's
@@ -7472,7 +7391,7 @@ if (process.env.PEDDUMP && HAS_PED) {
   });
   process.exit(0);
 }
-const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(SOCK_OWN ? [] : SOCK.BM), ...PED.BM];
+const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...([]), ...PED.BM];
 // ---- HOW MANY SCREEN ROWS EACH SOCKET-LIKE RUNG COVERS, so occStamp can box it ----
 // The stamp needs one thing from a slot it did not project: the row extent of what is drawn
 // there. For an orb it reads that from orbBlankT/orbAnchT by variant; a socket's rung cannot go
@@ -8301,7 +8220,7 @@ console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} s
                   ...(ORBHI_N ? [['renderer scratch', 0xee00, ORBHI_N * 64]] : []),
                   ['idol', IDOLBASE, IDOLBM.length * 64],
                   ['hole ladder', HOLEBASE, HOLEBM.length * 64],
-                  ...(SOCK_OWN && true && SOCK.BM.length
+                  ...(SOCK.BM.length
                         ? [['socket ladder', SOCKBASE, SOCK.BM.length * 64]] : []),
                   ['the loader', LOADER_RUN, 0x100]];
   for (const [an, aa, al] of blocks) for (const [bn, ba, bl] of blocks)
@@ -8368,7 +8287,7 @@ const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
 
 
 
-if (ENTCONE) console.error(`  cone: half ${CONE_HALF} (ENTFOV's atan(${ENTFOV_BOUND})); true bounds ` +
+console.error(`  cone: half ${CONE_HALF} (ENTFOV's atan(${ENTFOV_BOUND})); true bounds ` +
   `orb ${((NLOG / 2 + Math.max(...orbHalfCT)) / F_COL).toFixed(3)} ` +
   `hole ${((NLOG / 2 + Math.max(...holeXOffT)) / F_COL).toFixed(3)}; ` +
   `tol at cheb 2 = ${CONE_TOL[2]}, at 7 = ${CONE_TOL[7]}, at 27 = ${CONE_TOL[27]}`);
@@ -8527,9 +8446,7 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 // GATEFAST (default with ZONES): the gate's per-entity loop with the cone INLINED (no jsr/rts, Y and A
 // only, so the loop keeps the entity index in X instead of reloading cnI), the cell delta in zero page,
 // and the per-cell lookups (mapT mask, stamp list) redone only when the player's cell changes. Off for
-// the builds whose extra stages read cnTest's leftovers or count inside the loop. GATEFAST=0 to A/B.
-const GATEFAST = !process.env.CULLCNT && true &&
-                 process.env.GATEFAST !== '0';
+// the builds whose extra stages read cnTest's leftovers or count inside the loop.
 const hzBearing = (dx, dy) => {                  // cnTest's bearing, step for step
   let b = Math.abs(dx), t = Math.abs(dy); let a = Math.max(b, t);
   while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
@@ -8970,10 +8887,9 @@ LVL_TABLES.push(['lvlMeT', [LVL]]);
 // shut AND open, OR'd, so it holds in either state. Stored sparse, [count, (cell, hole-like mask)...];
 // the gate looks the player's cell up once a frame and occStamp skips a hole-like whose bit is clear.
 // Exit holes are floor discs and never stamped (obOcc carries their fill colour), so only sockets and
-// pedestals are listed; orbs and angels move and keep the full path. STMP=0 turns it off.
-const STMP = process.env.STMP !== '0' && true;
+// pedestals are listed; orbs and angels move and keep the full path.
 const STMP_LIST = (() => {
-  if (!STMP) return [0];
+  
   const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
   const walk = (wallAt) => (ax, ay, bx, by) => {          // losFree against a chosen wall set
     const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
@@ -9012,9 +8928,9 @@ const STMP_LIST = (() => {
   const cellsSorted = [...out.keys()].sort((a, b) => a - b);
   return [cellsSorted.length, ...cellsSorted.flatMap(c => [c, out.get(c)])];
 })();
-if (STMP) console.error(`  STMP level ${LVL}: ${STMP_LIST[0]} cell(s) where a pedestal/socket can be partly hidden (${STMP_LIST.length} bytes)`);
+console.error(`  STMP level ${LVL}: ${STMP_LIST[0]} cell(s) where a pedestal/socket can be partly hidden (${STMP_LIST.length} bytes)`);
 LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT], ['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);   // ZONES: the hole-likes' zone masks replace it
-if (STMP) LVL_TABLES.push(['stmpT', STMP_LIST]);       // LAST: variable length -- see LVL_VARLEN
+LVL_TABLES.push(['stmpT', STMP_LIST]);       // LAST: variable length -- see LVL_VARLEN
 const SLOT_OFF = {};
 let SLOT_LEN = 0;
 for (const [n, a] of LVL_TABLES) {
@@ -9386,10 +9302,10 @@ dpy     = $55
 ppHi    = $56
 ppLo    = $57
 tmp2    = $58
-${VSPLIT ? `vsOn    = $70e8                 ; VSPLIT: this column is a step column with a stack in progress
+vsOn    = $70e8                 ; VSPLIT: this column is a step column with a stack in progress
 vsRow   = $70e9                 ;   the row the FAR wall's top lands in (rbT of the far height)
 vsCode  = $70ea                 ;   the pure-split glyph for this column's kpos and side
-` : ''}kpos    = $6c                   ; step path: boundary position, and qB held across the
+kpos    = $6c                   ; step path: boundary position, and qB held across the
 qbv     = $6b                   ;   middle-column read that needs A and X
 spanL   = $60
 spanR   = $61
@@ -9646,9 +9562,6 @@ mcHint  = $70f4                 ;   hints offered per frame, summed
 ` : ''}${FALLMARK ? `fallMk  = $70fc                 ; FALLMARK=${process.env.FALLMARK}: how far the fall's level change got\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
-` : ''}${CONECHK ? `coneRej = $70dc                 ; CONECHK: entities the CELL BEARING would have rejected, 16-bit
-coneDis = $70de                 ;   ...of which orbProj disagreed (the box tests may still drop it)
-coneBad = $70e0                 ;   ...and which then got a SPRITE. MUST be zero.
 ` : ''}${PROFILE ? `pfAcc   = $7e00                 ; PROFILE: 17 phases x 3 bytes, raster lines summed
 pfPrvF  = $7e40                 ; previous timestamp: frame counter, then raster line
 pfPrvL  = $7e42
@@ -9784,17 +9697,16 @@ ivL     = $97
 ivH     = $9c                    ; $98-$9b is mul8's mp/mq/plo/phi -- step over it
 ohgt    = $9d
 ocptr   = $9e                    ; 2 bytes: into the cell's visibility list
-${ENTCONE ? `cnB     = $aa                    ; ENTCONE: the cell delta's bearing, as the quadrant is applied
+cnB     = $aa                    ; ENTCONE: the cell delta's bearing, as the quadrant is applied
 cnT     = $ab                    ;   ...then its distance's tolerance, then twice it. ZERO PAGE
                                  ;   because this is the hottest test in the entity pass -- it runs
                                  ;   for every entity every frame, where oax/oay below are only
                                  ;   reached by the ones it lets through.
-${CONECHK ? `cnV     = $ac                    ; CONECHK: the verdict, held instead of acted on
-` : ''}${CONEGATE ? `cnI     = $ad                    ; CONEGATE: entGate's entity index, its end, whether ANY
+cnI     = $ad                    ; CONEGATE: entGate's entity index, its end, whether ANY
 cnEnd   = $ae                    ;   entity passed, and which bit of the LOS row the player's cell
 cnAny   = $af                    ;   is. All four die with the gate; none outlives a frame.
 cnBit   = $b0
-` : ''}` : ''}
+
 ocos    = $8500
 ocosS   = $8501
 osin    = $8502
@@ -10106,8 +10018,8 @@ kfL     = $856a
 kfH     = $856b
 krL     = $856c
 krH     = $856d
-oix     = ${GATEFAST && process.env.GFZP !== '0' ? '$d0' : '$856e'}   ; GATEFAST: zero page -- the gate's inlined cone and orbProj both hit these
-oiy     = ${GATEFAST && process.env.GFZP !== '0' ? '$d1' : '$856f'}
+oix     = $d0   ; GATEFAST: zero page -- the gate's inlined cone and orbProj both hit these
+oiy     = $d1
 oax     = $8570
 oay     = $8571
 oixS    = $8572
@@ -10572,16 +10484,9 @@ pfNIni: sta pfNum,x
 ` : ''}${FOVCHK ? `        sta fovDis              ; FOVCHK: counters start clean (A is still 0)
         sta fovBad
         sta fovWld
-` : ''}${CONECHK ? `        sta coneRej             ; CONECHK: counters start clean (A is still 0)
-        sta coneRej+1
-        sta coneDis
-        sta coneDis+1
-        sta coneBad
-        sta coneBad+1
-        sta cnV
-` : ''}${CULLCNT && ENTCONE ? `        sta culCone
+` : ''}${CULLCNT && true ? `        sta culCone
         sta culCone+1
-` : ''}${CULLCNT && CONEGATE ? `        ldx #${hx(NOCC * 2 - 1)}
+` : ''}${CULLCNT && true ? `        ldx #${hx(NOCC * 2 - 1)}
 ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts start clean
         sta culDrwT,x
         sta culLosT,x
@@ -10710,7 +10615,7 @@ ${NORAY ? '        jmp subDn' : ''}
         lda #$00
 ${[...Array(NCELL)].map((_, i) => `        sta cstepT+${i}`).join('\n')}${SEAMS ? `
         lda #${hx(SOLID)}       ; and every wall column back to a plain fill
-${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}${SEAMDBG ? '\n        pha\n        lda #$00\n        sta sdbgN\n        pla' : ''}${SEAMHYST ? `
+${[...Array(NCELL)].map((_, i) => `        sta seamT+${i}`).join('\n')}${SEAMDBG ? '\n        pha\n        lda #$00\n        sta sdbgN\n        pla' : ''}
         ldx #${HYSN - 1}        ; roll the band forward one frame. A is dead here -- the profile
 sHyCp:  lda sHyC,x              ;   tick and the "lda py+1" below both reload it.
         sta sHyP,x
@@ -10719,7 +10624,7 @@ sHyCp:  lda sHyC,x              ;   tick and the "lda py+1" below both reload it
         lda sHyN
         sta sHyPN
         lda #$00
-        sta sHyN` : ''}` : ''}
+        sta sHyN` : ''}
 ${PROFILE && !PROFILE1 ? '        jsr pfT1              ; per-frame table clears\n' : ''}        lda py+1                ; the DDA's starting cell, once for the whole frame
 ${MULW}
         clc
@@ -10727,9 +10632,9 @@ ${MULW}
         sta cell0
 ${HAZRT ? `        cmp hazCur              ; the run tables are patched for the cell being RENDERED
         beq hzOk                ;   from, so this stays consistent even when the fall renders a
-${process.env.HAZCALL === '0' ? '' : '        jsr hazSet              ;   different cell than the player stands in'}
+        jsr hazSet              ;   different cell than the player stands in
 hzOk:` : ''}
-${FINEANG ? `        ; ---- the view angle at QUARTER-unit resolution: paq = (pa:paF) >> 6 ----
+        ; ---- the view angle at QUARTER-unit resolution: paq = (pa:paF) >> 6 ----
         ; Once a frame, not once a ray: it is constant across the whole frame and the rays only
         ; add their own offset.
         ;
@@ -10753,7 +10658,7 @@ ${FINEANG ? `        ; ---- the view angle at QUARTER-unit resolution: paq = (pa
         asl tmp
         rol paqL
         rol paqH                ; and once more: >> 6, the 10 bits the tables are indexed by
-` : ''}        lda #$00                ; explicit: the clears above leave A holding their own fill
+        lda #$00                ; explicit: the clears above leave A holding their own fill
         sta nbnd
 ${RAYCNT ? '        sta rayN\n        sta edgN\n        sta chnN\n' : ''}${EDGCHK ? '        sta ehN\n        sta ehGN\n        sta edcN\n        sta chwN\n        sta chdN\n' : ''}
 ${PIVOT ? `        jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
@@ -10852,17 +10757,7 @@ bcSkip:
         ;   at the same depth, so the line is the only thing dividing them. A CONVEX corner --
         ;   the end of a receding wall -- is already drawn by the silhouette stepping 20+ rows,
         ;   and the argument was that a grey line adds nothing to a boundary that emphatic.
-${CVXSEAM ? '' : `        lda spanL
-        tax
-        lda faceIdT,x
-        tax                     ; X = the run on this side
-        ldy spanR
-        lda faceIdT,y           ; A = the run on the other side
-        cmp cpLoT,x
-        beq subCv
-        cmp cpHiT,x
-        bne subCn               ; not a concave partner: convex silhouette, draw nothing
-`}subCv:  ${process.env.NOCSEAM === '1' ? 'jmp subCn   ; NOCSEAM=1: corner seams off, to tell the two writers apart' : ''}
+subCv:  ${process.env.NOCSEAM === '1' ? 'jmp subCn   ; NOCSEAM=1: corner seams off, to tell the two writers apart' : ''}
         jsr subCvM              ; choose the column, settle any collision, place the mark
 subCn:` : ''}
         jsr subBnd              ; a face starts here: remember it as a span delimiter
@@ -10913,7 +10808,7 @@ pvInsD: lda tmp2
         clc
         adc pa
         sta pvAng,x
-${PVNEAR ? `        ; ---- the reciprocal must come from the NEARER side, not from spanL ----
+        ; ---- the reciprocal must come from the NEARER side, not from spanL ----
         ; A silhouette boundary is a physical edge on the near surface, so it moves with THAT
         ; surface's parallax. spanL is the near side for a right-facing silhouette and the FAR
         ; side for a left-facing one, so taking the distance from spanL unconditionally
@@ -10931,7 +10826,7 @@ ${PVNEAR ? `        ; ---- the reciprocal must come from the NEARER side, not fr
         cmp remHiT,y
         bcs pvNL                ; right is no nearer -> keep spanL
         iny                     ; right is nearer -> spanR
-pvNL:` : ''}        lda remHiT,y
+pvNL:        lda remHiT,y
         cmp #16
         bcs pvRcFar             ; 16+ cells: the translation term is under a quarter-unit at
         asl                     ; any plausible speed, so a constant is as good as a lookup
@@ -11117,7 +11012,7 @@ subFlush:                       ; interpolate + seam one maximal face
         cmp spanL
         bcc subFDn              ; empty
 ${PROFILE && !PROFILE1 ? '        jsr pfT2\n' : ''}        jsr interpSpan
-${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        jsr pfT8              ; interpSpan\n' : ''}${SEAMS && SEAMPANEL ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        jsr pfT9              ; seamSpan\n' : ''}subFDn: rts
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        jsr pfT8              ; interpSpan\n' : ''}${SEAMS && true ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        jsr pfT9              ; seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
         cpx #${hx(NBND)}
@@ -11183,7 +11078,7 @@ pivPrep:
         sbc opxH
         sta pvTH
         jsr pvClmp
-${PIVTRANS ? '        sta pvDX' : '        lda #$00\n        sta pvDX                ; PIVTRANS=0: rotation-only prediction'}
+        sta pvDX
         lda py
         sec
         sbc opyL
@@ -11192,7 +11087,7 @@ ${PIVTRANS ? '        sta pvDX' : '        lda #$00\n        sta pvDX           
         sbc opyH
         sta pvTH
         jsr pvClmp
-${PIVTRANS ? '        sta pvDY' : '        lda #$00\n        sta pvDY'}
+        sta pvDY
         ; ---- how much of the prediction does this frame actually need? ----
         ; pivOne is 890 cycles a hint -- measured, 11% of the worst frame at nine hints -- and
         ; almost all of it is the translation term: two signed multiplies for the displacement
@@ -11512,7 +11407,7 @@ dnGo:   jsr orbUse              ; DROPNOW=n: a synthetic SPACE on frame n and ag
 dnSkip:                         ;   headless run can TAKE and then PUT DOWN. One press only ever
                                 ;   exercised the pick-up half, which is why the drop path could
                                 ;   carry a 16-wide coordinate mask for as long as it did.
-` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        ldy wsWall              ; WALLNOW: not on a level with no such wall -- its pointer\n        lda wallDHiT,y          ;   is 0 and the toggle would apply a list read from page 0\n        beq wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        jsr pfT4              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr pfT16              ; occStamp: the partial-occlusion pass' : ''}
+` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        ldy wsWall              ; WALLNOW: not on a level with no such wall -- its pointer\n        lda wallDHiT,y          ;   is 0 and the toggle would apply a list read from page 0\n        beq wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        jsr pfT4              ; renderSym alone' : ''}${SPRITES && ORBOCC && true ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && true ? '\n        jsr pfT16              ; occStamp: the partial-occlusion pass' : ''}
 ${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the raster count, the LEVEL line and the 'L' key. Outside the
                                 ;   NOHUD gate: the key is a control, not a readout.
 ${NOHUD ? '' : `        jsr drawFps
@@ -11831,7 +11726,7 @@ rfCbS:  sta rfCw1+1
         sta rfCw2+1
         sty rfCb1+1
         sty rfCb2+1
-${SEAMS && SEAMDRAW ? '        sty rfCb3+1\n' : ''}
+${SEAMS && true ? '        sty rfCb3+1\n' : ''}
 
         ldx rsHi                ; X = cell column throughout; the chains use it as their index.
                                 ; A RANGE, not always 39..0: the fall renders the destination
@@ -11844,7 +11739,7 @@ ${SEAMS && SEAMDRAW ? '        sty rfCb3+1\n' : ''}
         ; X is the cell column and the chains index by it, so it has to survive; Y and A are
         ; free here, which is all this needs.
 rfCol:  stx colc
-${VSPLIT ? '        lda #$00\n        sta vsOn                ; VSPLIT: no stack in progress\n' : ''}${EDGCHK ? `        ; EDGCHK: is this cell column's colH bit-identical to last frame's? That is exactly
+        lda #$00\n        sta vsOn                ; VSPLIT: no stack in progress\n${EDGCHK ? `        ; EDGCHK: is this cell column's colH bit-identical to last frame's? That is exactly
         ; what an edge-band cache would have to key on, so counting it prices the idea. X must
         ; survive -- it is the cell column and the run-cache tests below index on it.
         ldy col4T,x
@@ -12067,7 +11962,7 @@ rmpHi:  lda rampThi,y
         ; corners grew a horizontal cap. Sampling the height at the LAST column before the
         ; boundary as well lets the plateau slope: 1.57 -> 0.65 wrong logical columns a frame.
 rfStep: sta kpos                ; boundary position, 1..3
-${VSPLIT ? `        ; VSPLIT: only worth preparing if the column's edge band is at least three rows --
+        ; VSPLIT: only worth preparing if the column's edge band is at least three rows --
         ; top cell, one or more split cells, far-top cell. A band of one or two rows has no
         ; middle, and vsPrep on every step cell cost the benchmark more than the stacks saved.
         lda rsv
@@ -12077,7 +11972,7 @@ ${VSPLIT ? `        ; VSPLIT: only worth preparing if the column's edge band is 
         bcc vsNo
         jsr vsPrep              ; side, far-top row and split code for this column
 vsNo:
-` : ''}        lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
+        lda hh0                 ; hh0 arrives pre-shifted for the ramp path; undo that here
         lsr
         lsr
         lsr
@@ -12247,8 +12142,8 @@ rcHave: sta cqtmp
         ; ---- solid run: rows rs .. 12 ----
 rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
-        bcc ${VSPLIT ? 'vsChk' : 'rfEdgeL'}
-${VSPLIT ? `        jmp rfSolid
+        bcc vsChk
+        jmp rfSolid
 vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ----
         beq rfEdgeL             ; no: the ordinary selection
         cmp vsRow               ; A = erow: before the far top's row, the pure split
@@ -12267,7 +12162,7 @@ vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ---
 vsEnd:  lda #$00                ; the far top's row and below: back to real selection
         sta vsOn
         jmp rfEdgeL
-` : ''}rfSolid:${SEAMS && SEAMDRAW ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
+rfSolid:${SEAMS && true ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
         ; rs is 0..13, so the top nibble is spare -- and that was tried and MEASURED: 25 chain
         ; draws of 80 with it, 25 without. Not one extra hit.
         ;
@@ -12280,8 +12175,6 @@ vsEnd:  lda #$00                ; the far top's row and below: back to real sele
         lda seamT,x
         cmp #${hx(SOLID)}
         bne rfSlSm              ; a seam column bypasses the COMPARE entirely -- see below
-        ` : ''}${SEAMS && !SEAMDRAW ? `; SEAMDRAW=0: seamT is written exactly as usual and simply not read here, so
-        ; every column takes the ordinary cached path and no line is drawn.
         ` : ''}lda rsv
 rfCb1:  cmp cbA,x
         beq rfNext
@@ -12290,7 +12183,7 @@ ${PARTIAL ? `        bcs rfNext              ; rs GREW: the solid run starts lat
                                 ; and the edge loop (rb..rs-1) has just redrawn every one of
                                 ; them. Rows rs..12 are a suffix of what the buffer holds.
 ` : ''}        jmp rfSlDr
-${SEAMS && SEAMDRAW ? `rfSlSm:${SEAMCNT ? `${PROFTOUR ? ` lda pfDone              ; STOP COUNTING WHEN THE PROFILER DOES. Free-running was wrong by 6x:
+${SEAMS && true ? `rfSlSm:${SEAMCNT ? `${PROFTOUR ? ` lda pfDone              ; STOP COUNTING WHEN THE PROFILER DOES. Free-running was wrong by 6x:
         bne rfSlSn              ;   the tour ends, twFrm stops, and the program goes on rendering
                                 ;   idle frames for as long as it takes the host to poll -- which
                                 ;   at warp is thousands. A counter and its denominator have to
@@ -13081,7 +12974,7 @@ ssDn:   rts
 ; versa. u = p + d*dir, one sideMul: sideMul(fr, m) returns fr/256 * m, so feeding it |cos|
 ; (or |sin|) as 0..255 against the parked hit distance gives exactly d*|dir|. The sign comes
 ; from the same posXT/posYT the DDA used to choose its step. sideMul eats X, hence ssAng.
-${FINEANG ? `; fr += (A - fr) * cuQF / 4, A being the next table entry. |sin| and |cos| move by at most ~6
+; fr += (A - fr) * cuQF / 4, A being the next table entry. |sin| and |cos| move by at most ~6
 ; between adjacent 8-bit entries, so two bits of interpolation brings the error under 2 -- which
 ; is what the fine angle is worth. The slope is SIGNED, hence cmp #$80 / ror for the shifts.
 cuLerp: sec
@@ -13109,11 +13002,11 @@ cuLA:   clc
         sta fr
         rts
 
-` : ''}calcU:  lda remLoT,x
+calcU:  lda remLoT,x
         sta mlo
         lda remHiT,x
         sta mhi
-${FINEANG ? `        ; ---- the angle the ray was actually CAST at, to quarter resolution ----
+        ; ---- the angle the ray was actually CAST at, to quarter resolution ----
         ; The DDA has used the fine angle since FINEANG; this was still adding the 8-bit rayOffT,
         ; so u described a direction the ray never took -- up to half a coarse unit, about 1.5
         ; columns, and THREE columns share one coarse entry. Same inputs as the caster: paq is
@@ -13147,23 +13040,19 @@ cuAH:   and #$03
         lsr
         ora ssAng
         sta ssAng
-` : `        lda pa
-        clc
-        adc rayOffT,x
-        sta ssAng
-`}
+
         lda sideT,x
         bne cuX
         ldx ssAng
         lda absSinT,x
         sta fr
-${FINEANG ? `        ldy cuQF
+        ldy cuQF
         beq cuS0
         inx                     ; the next entry: X wraps at 255 and the table is periodic
         lda absSinT,x
         jsr cuLerp
 cuS0:
-` : ''}        jsr sideMul
+        jsr sideMul
         ldx ssAng
         lda posYT,x
         bne cuYp
@@ -13186,13 +13075,13 @@ cuYp:   clc
 cuX:    ldx ssAng
         lda absCosT,x
         sta fr
-${FINEANG ? `        ldy cuQF
+        ldy cuQF
         beq cuC0
         inx
         lda absCosT,x
         jsr cuLerp
 cuC0:
-` : ''}        jsr sideMul
+        jsr sideMul
         ldx ssAng
         lda posXT,x
         bne cuXp
@@ -13425,7 +13314,7 @@ castRay:
         ldx col
         ; The coarse angle is gone: the step signs now come from the fine angle's quarter, and
         ; posXT/posYT/absSinT/absCosT are only read by calcU, which builds its own ssAng.
-${FINEANG ? `        ; ---- 10-bit ray angle for the DDA deltas ----
+        ; ---- 10-bit ray angle for the DDA deltas ----
         ; Dispatch on the quarter rather than patching four operands: rqH is 0..3, so four load
         ; blocks with the page folded into the absolute address cost ~8 cycles, against ~40 to
         ; self-modify. Only 13.2 rays are cast a frame, so this is ~400 cycles total.
@@ -13473,15 +13362,7 @@ faOdd:  lda ddxLoTQ+256,y       ; odd quarter: the two pages swap roles
         sta ddy
         lda ddxHiTQ,y
         sta ddyH
-faDn:` : `        tax
-        lda ddxLoT,x
-        sta ddx
-        lda ddxHiT,x
-        sta ddxH
-        lda ddyLoT,x
-        sta ddy
-        lda ddyHiT,x
-        sta ddyH`}
+faDn:
 ${PROFSUB ? '        jsr pfT3              ; ray: angle + quarter-angle dispatch\n' : ''}        lda cell0               ; cell = mapY*16 + mapX, stepped by +-1 / +-16 from here on.
         sta cell                ; The value is the player's cell, so it is the same for every
                                 ; ray in the frame -- computed once in mloop, not 11 times.
@@ -14109,9 +13990,9 @@ dirXT:  !byte 1,1,0,255,255,255,0,1
 dirYT:  !byte 0,1,1,1,0,255,255,255
 rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
-kTabT:  !byte ${kTab.join(',')}${VSPLIT ? `
+kTabT:  !byte ${kTab.join(',')}
 vsplitL: !byte 0,${VSPLIT_L.join(',')}   ; VSPLIT: solid LEFT of boundary column 1,2,3: #... ##.. ###.
-vsplitR: !byte 0,${VSPLIT_R.join(',')}   ;   solid RIGHT: .### ..## ...#` : ''}
+vsplitR: !byte 0,${VSPLIT_R.join(',')}   ;   solid RIGHT: .### ..## ...#
 ${SEAMPW ? `; ---- sMaxT (in the MAIN block since 2026-09-16: the $9d00 stream hit rayOffQS with the two-level
 ; build; this is 128 bytes of build constant with no alignment need, and the main block had 235 free): the largest s that still leaves a placeable panel, per dp ----
 ; s*s <= dp*(4K/n - dp) has ONE unknown at run time once dp is known, so the whole test collapses
@@ -14218,14 +14099,14 @@ ${DIE ? `omDead: rts
         sta opaqL
         lda paqH
         sta opaqH
-${ENTGATE ? `        jsr entGate             ; ---- anything to project at all? ---- (out of line: the
+        jsr entGate             ; ---- anything to project at all? ---- (out of line: the
 ${process.env.GATEPROF ? `        php                     ; GATEPROF: the gate alone, in bucket 10 (orbKey's ~6 lines share it)
         jsr pfT10
         plp
 ` : ''}        bcc ogFull              ;   main block is full; see entGate for what it tests)
         rts                     ; carry set: nothing in sight, registers already cleared
 ogFull:
-` : ''}        jsr omTrig              ; the frame's trig and the shared halves of every projection
+        jsr omTrig              ; the frame's trig and the shared halves of every projection
 ${process.env.GATEPROF ? '        jsr pfT11              ; GATEPROF: omTrig alone, in bucket 11 (bfsTick shares it)\n' : ''}                                ;   -- out of line, the main block is at its ceiling; see omTrig
         lda #$00                ; the per-sprite bit registers are built up a bit at a time and
         sta omEn                ; written once, so an unused slot is simply never set
@@ -14544,16 +14425,16 @@ oSLoop:${process.env.OSCNT ? ' inc osCntV             ; OSCNT: slots occStamp vi
         cmp #$ff
         beq oSNext              ; the CARRIED orb's icon: not an entity, and it fills no state
         cmp nOrbT
-        bcc ${HAS_IDOL && STMP ? 'oSIdl' : 'oSEnt'}               ; an orb, which always carries it
+        bcc ${HAS_IDOL && true ? 'oSIdl' : 'oSEnt'}               ; an orb, which always carries it
         lda obOcc,x             ; hole-like, so only a SOCKET does: holeSlot sets bit 7 on one,
-        bpl oSNext              ;   where an exit hole's obOcc is its fill colour (0-15). The${STMP ? `
+        bpl oSNext              ;   where an exit hole's obOcc is its fill colour (0-15). The
         lda obIX,x              ; STMP: can a wall partly hide THIS one from the player's cell at all?
         sec                     ;   Almost never (the build lists the few cells where it can) -- and
         sbc nOrbT               ;   without this a hub pedestal paid ~580 cycles a frame to find out
         tay
         lda orbBitT,y
         and stmpM
-        beq oSNext` : ''}${HAS_IDOL && STMP ? `
+        beq oSNext${HAS_IDOL && true ? `
         jmp oSEnt
 oSIdl:  tay                     ; STMP: an IDOL up on a drum stands in the drum's footprint (PEDR is the
         lda orbIdolT,y          ;   orb's radius by construction) and is just as static, so the drum's
@@ -14749,7 +14630,7 @@ oSDone: lda omPri            ; was anything stamped for this orb? then its seams
         ldx osI
         and orbBitT,x
         beq oSDsk
-${ORBDESEAM ? `        jsr oSDeseam` : `        nop                      ; ORBDESEAM=0`}
+        jsr oSDeseam
 oSDsk:  inc osI
         lda osI
         cmp osN
@@ -14984,7 +14865,7 @@ oSCDn:  lda osL                 ; invalidate the cache for every cell column jus
         lsr
         sta ohSv
 oSCIv:  lda #$ff
-${ORBINV ? `oSInv:  sta cbA,y               ; operand patched above to this buffer's cache` : `oSInv:  bit $ffff                ; ORBINV=0: invalidation off, so the stamp leaves trails`}
+oSInv:  sta cbA,y               ; operand patched above to this buffer's cache
         lda #$00                ; The two tests are ordered compares in OPPOSITE directions,
 oSInvW: sta cwA,y               ;   so they need opposite poisons: $ff would read as a SHRUNK
                                 ;   ceiling and be skipped, and 0 is a length rs can take.
@@ -15051,7 +14932,7 @@ oSDR1:  cmp #$19
         lda #${hx(SOLID)}
         sta (osPtr),y
         lda #$ff
-${ORBINV ? `oSDIn:  sta cbA,y               ; operand shares oSInv's patch target` : `oSDIn:  bit $ffff                ; ORBINV=0`}
+oSDIn:  sta cbA,y               ; operand shares oSInv's patch target
 oSDRN:  inc ohSv
         jmp oSDRow
 oSDNx:  ldy osDC
@@ -15256,7 +15137,7 @@ ofwOk:  ; right = Iy*cos - Ix*sin + kr
         lda rgtH
         adc krH
         sta rgtH
-${ENTFOV ? `        ; ---- beside the camera: off screen by construction, so stop HERE ----
+        ; ---- beside the camera: off screen by construction, so stop HERE ----
         ; The column is F_COL * |right| / forward with F_COL ~ 184. The widest thing drawn is the
         ; exit hole at 36 columns each side of its centre (holeXOffT; the orbs reach 24), and
         ; holeTail draws a pair whose start is under 160 or whose end is under 72 -- so a centre
@@ -15317,7 +15198,7 @@ ofvOk:  lda #$00
 ofvOk2:
 ` : `ofvNo:  jmp opjNo
 ofvOk:
-`}` : ''}        ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
+`}        ; iv = 1048576 / forward, via the existing 65536/n table. Normalise G = forward*2 down
         ; to 8 bits (n in 128..255, e shifts) and iv = recip[n] << (5-e). Dropping the low bits
         ; of forward costs under 0.4% -- less than half a column at the screen edge.
         lda fwdL
@@ -15435,7 +15316,7 @@ ohOk:   lda o1
         rts
 opjNo:  clc
         rts
-${ENTCONE ? `; ---- cnTest: is the entity at (oix, oiy) in the view cone at all? ----
+; ---- cnTest: is the entity at (oix, oiy) in the view cone at all? ----
 ; Carry SET = no. Reads oix/oiy and pa; writes cnB and cnT. ONE implementation, because entGate and
 ; orbOne both ask, and a gate whose verdict could differ from the loop's would be worse than no
 ; gate at all -- it would delete entities the loop meant to draw.
@@ -15501,16 +15382,12 @@ ${CULLCNT ? `        inc culCone             ; CULLCNT: rejected before any mult
         bne cnCn1
         inc culCone+1
 cnCn1:
-` : ''}${CONECHK ? `        inc coneRej
-        bne cnCn2
-        inc coneRej+1
-cnCn2:
 ` : ''}        sec
         rts
 cnNear:                         ; adjacent or under us: no cell-level bearing means anything
 cnOk:   clc
         rts
-` : ''}orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rate is this against\n        bne oc1                ;   iterLo, which removes every question about where in the\n        inc culTot+1           ;   frame the per-frame reset lands\noc1:   ' : ''} ldx oidx
+orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rate is this against\n        bne oc1                ;   iterLo, which removes every question about where in the\n        inc culTot+1           ;   frame the per-frame reset lands\noc1:   ' : ''} ldx oidx
         sec                     ; Ix, Iy = orb cell - player cell, -15..15
         lda orbXCT,x
         sbc px+1
@@ -15519,7 +15396,7 @@ cnOk:   clc
         lda orbYCT,x
         sbc py+1
         sta oiy
-${ENTCONE ? (CONEGATE ? `        ; ---- the cone's verdict, decided ONCE, in entGate ----
+${(`        ; ---- the cone's verdict, decided ONCE, in entGate ----
         ; 8 cycles. entGate now runs the bearing test for every entity BEFORE omTrig, which is the
         ; whole point: omTrig's ~800 cycles of frame trig used to run before anything asked whether
         ; an entity would use them, and the gate could not answer because all it tested was whether
@@ -15535,11 +15412,6 @@ ${ENTCONE ? (CONEGATE ? `        ; ---- the cone's verdict, decided ONCE, in ent
         lda cnOkT,x
         bne cnYes
         jmp orbNo
-` : `        jsr cnTest              ; CONEGATE=0: the old arrangement, per entity, in here
-        ${CONECHK ? `ldx #$00                ; CONECHK: note the verdict, do NOT act on it
-        bcc cnKeep
-        dex
-cnKeep: stx cnV` : 'bcs orbNo               ; outside the cone: nothing else needs computing'}
 `) + `cnYes:
 ${OCCLAZYE ? `        ldx oidx                ; OCCLAZYE: it survived the culls -- now its occluder mask is
         lda ooFrT,x             ;   worth building, if this frame's is not built yet
@@ -15576,7 +15448,7 @@ lzOk:   dey
         bne olChkD
         inc lzN+1
 olChkD: ldx oidx
-` : ''}` : ''}` : ''}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr ${HAS_IDOL ? 'orbProjC' : 'orbProj'}             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+` : ''}` : ''}`}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr ${HAS_IDOL ? 'orbProjC' : 'orbProj'}             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
 ${ENT1PROF ? "        php                     ; ENT1PROF: orbProj itself. php/plp because pfTick does NOT\n        jsr pfT7                ;   preserve the carry, and the carry is orbProj's return value\n        plp\n" : ''}
 ${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
         inc culPrj
@@ -15588,13 +15460,6 @@ ${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull said off scre
         beq fovAgr              ;   that is a disagreement at the projection level; the box tests
         inc fovDis              ;   below may still reject it, so also count what SURVIVES them
 fovAgr:
-` : ''}${CONECHK ? `        lda cnV                 ; CONECHK: the cone said no and orbProj said yes. Allowed --
-        beq cnAgr               ;   the box tests below may still drop it -- but counted, because
-        inc coneDis             ;   the ones that reach a SPRITE are the real failures
-        bne cnDs1
-        inc coneDis+1
-cnDs1:
-cnAgr:
 ` : ''}
 ${DIE ? `        lda oidx                ; the death sweep steers by ONE entity's column offset, so
         cmp dieIdx              ;   test identity, not tallness: hole-like entities reach the tall
@@ -15696,7 +15561,7 @@ oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         clc
         adc ohgt
         bcs orbYCp              ; the sum passed 255, so it is far below the screen
-${ANGMID ? `        pha                     ; ---- centre a TALL entity on its ideal height ----
+        pha                     ; ---- centre a TALL entity on its ideal height ----
         ldy oidx                ;   the offset is half the rung's quantisation error, signed,
         lda orbTallT,y          ;   precomputed per ohgt -- see angMidT in the build. X holds
         beq oMidSk              ;   ovar for the cap below, so only A and Y are touched here.
@@ -15706,7 +15571,7 @@ ${ANGMID ? `        pha                     ; ---- centre a TALL entity on its i
         adc angMidT,y
         jmp oMidNo
 oMidSk: pla
-oMidNo:` : ''}
+oMidNo:
 ${HAS_IDOL ? `        ; ---- an idol standing ON a pedestal sits on its TOP plane, not the floor ----
         ; Everything else is anchored to the floor line at 100 + h. The drum's top is
         ; 2*PEDH*h above that at every distance -- a fixed fraction of the apparent height the
@@ -16102,7 +15967,7 @@ oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EX
         lda obBR,y
         sta obBR,x
         inc onv
-orbYes: ${CULLCNT && CONEGATE ? `ldx oidx
+orbYes: ${CULLCNT && true ? `ldx oidx
         txa                     ; CULLCNT: frames this entity really took a SPRITE. Against
         asl                     ;   culOkT (frames it passed the gate) this is the whole measure of
         tax                     ;   wasted projection: passed-but-never-drawn is an entity the cone
@@ -16117,13 +15982,6 @@ ${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull would have dr
         beq fovYok              ;   SPRITE. This must read zero, always.
         inc fovBad
 fovYok:
-` : ''}${CONECHK ? `        lda cnV                 ; CONECHK: the cone would have dropped something that got a
-        beq cnYok               ;   SPRITE -- a visible entity deleted. This must read zero.
-        inc coneBad
-        bne cnBd1
-        inc coneBad+1
-cnBd1:
-cnYok:
 ` : ''}        rts
 orbNo:  ldx oidx
         lda #$00
@@ -16574,8 +16432,8 @@ fallDraw:
                                 ;   this line left arcPrep reading whatever the tail draw set
                                 ;   last, and the arc appeared late and in the wrong place.
         jsr arcPrep             ; the crown, the depth, and where the arc bottoms out
-${FALLSCENE ? `        jsr fdWarp              ; the room, slid up. No shear -- see fRowT.
-` : ''}
+        jsr fdWarp              ; the room, slid up. No shear -- see fRowT.
+
         ldx #${hx(FDOUT)}       ; drop: floor above, hole below. The floor is charset B's code
         ldy #${hx(ANYFLOORDK ? ARC_VOID : VOIDCH)}              ;   until the band crosses the arc's top -- see arcTopR
         lda arcInv
@@ -16603,7 +16461,7 @@ fgLp:   lda ${hx16(CHARSET_B + BLANK * 8)},y  ;  so a DROP gets the level being 
                                 ;   band spans the arc's top split, so the SAME code is drawn
                                 ;   through B above it and through A below. arcDth takes its mask
                                 ;   from here too, so the rim inherited the same offset.
-` : ''}${FALLSCENE ? `${FALLTAIL ? `        lda fwN                 ; ---- nothing below the room at all? then draw nothing ----
+` : ''}${FALLTAIL ? `        lda fwN                 ; ---- nothing below the room at all? then draw nothing ----
         cmp #25                 ; arcPrep CLAMPS the arc's row to 24 while it is still off the
         bcs fdTail              ;   bottom of the screen, so arcBand lays a cell there even on
                                 ;   frame 0 -- over the wall's last row, in the only four pixels
@@ -16614,8 +16472,7 @@ fgLp:   lda ${hx16(CHARSET_B + BLANK * 8)},y  ;  so a DROP gets the level being 
         lda arcHi               ;   starts where its content stopped. Filling from row 0 here
         sec                     ;   erased the copy that had just been made -- paying for the
         sbc fwN                 ;   scene twice and then throwing it away.
-        bcc fdNoF` : `        ldx #$00
-        lda arcHi`}
+        bcc fdNoF
         pha
         lda mul40LoT,x
         sta fdD
@@ -16642,7 +16499,7 @@ fdnOk:  tax
         jsr arcBand             ; the curve itself, at pixel resolution via the ramps
 ${!ANYFLOORDK ? `        lda arcBlw              ; ---- and the rows below the arc ----
         sta fdCol` : `        jsr fdBlw               ; ---- and the rows below the arc ----`}
-${FALLSCENE ? `        lda arcInv
+        lda arcInv
         beq fdIncr
         ; LANDING: from the arc's bottom down to the room's first row, every frame. See fRowT's
         ; block byte 26 for why this is not incremental.
@@ -16654,7 +16511,7 @@ ${FALLSCENE ? `        lda arcInv
         jsr fdFill
         jmp fdTail
 fdIncr:
-` : ''}        ; DROP: only the rows that just CHANGED. The arc only ever rises, so everything below
+        ; DROP: only the rows that just CHANGED. The arc only ever rises, so everything below
         ; where it was last time this buffer was drawn is already hole. Fill from the new edge to
         ; the old one and no further: four rows on a typical frame instead of up to twenty-five.
         ; Per buffer, because each is two animation frames behind the other.
@@ -16715,7 +16572,7 @@ fdTail:
         sta arcInv              ; put it back: the landing owns the rest of the phase
 fdTDn:  rts
 
-${FALLSCENE ? `; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
+; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
 ; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
 ; destination row pulls from wherever that piece of the world has moved to -- so wall bases rise
 ; toward the horizon while the ceiling opens away from it, and both stop dead at row 100.
@@ -16803,7 +16660,7 @@ fwSkip: inc fwRow
         jmp fwLp
 fwDn:   rts
 
-` : ''}; ---- faceCell: the cell directly in front, to the nearest of eight ----
+; ---- faceCell: the cell directly in front, to the nearest of eight ----
 ; pa is a full byte of turn, so +16 then >>5 rounds to the nearest octant instead of truncating
 ; toward the one you have just left. Eight rather than four because "the square most in front of
 ; you" means exactly that when you are facing a corner, and because the angels move in eight.
@@ -16957,9 +16814,9 @@ okDone: rts
 ; rebuilt from mapT rather than kept as a second copy -- 256 bytes of table saved, and it can
 ; never drift out of step with the walls.
 objInit:
-${GATEFAST ? `        lda #$00                ; GATEFAST: a new level (or a restart) -- the cached cell is meaningless
+        lda #$00                ; GATEFAST: a new level (or a restart) -- the cached cell is meaningless
         sta ogPcV
-` : ''}        ldx #$00
+        ldx #$00
 oiBlk:  lda mapT,x              ; walls first
         cmp #$01                ; mapT is $00 for a wall and a zone mask otherwise;
         lda #$00                ;   blkT still wants 1 = wall, 0 = open
@@ -17093,7 +16950,7 @@ ooNx:   iny
 ; Called from subFin, where the subdivision is done and the run table will not change again this
 ; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
 orbOccAll:
-${OCCLAZY ? `        ; The masks say whether an entity is beyond a wall face's PLANE -- no camera term at
+        ; The masks say whether an entity is beyond a wall face's PLANE -- no camera term at
         ; all -- so they only go stale when an entity moves or the run tables are re-patched.
         ; blkVer catches the first (angOne, okTake, okPlain all bump it); the viewing cell
         ; catches the second, since hazSet patches per RENDERING cell. On a map that splits
@@ -17122,7 +16979,7 @@ ooCpyD: inc occArm              ;   able to give. The flag says a shadow exists 
         sta occVer
         lda cell0
         sta occCell
-` : ''}${OCCLAZYE ? `        lda #$00                ; OCCLAZYE: dirty -- every mask is stale; orbOne rebuilds the
+${OCCLAZYE ? `        lda #$00                ; OCCLAZYE: dirty -- every mask is stale; orbOne rebuilds the
         ldx #${hx(NOCC - 1)}               ;   ones that survive the culls, when it gets to them
 ooFrC:  sta ooFrT,x
         dex
@@ -17150,7 +17007,7 @@ ooVCmp: lda orbOccT,x           ;   the program ran wild. See the duplicate-labe
 ooVCmpN:dex
         bpl ooVCmp
 ooVCmpX:
-` : ''}${OCCLAZY ? 'ooSkip:\n' : ''}        rts
+` : ''}ooSkip:\n        rts
 
 
 
@@ -18442,7 +18299,7 @@ abNx:   ldy apY
         bcc abLp
         rts
 
-${FALLSCENE ? `` : ''}fdFill: sta fdN                 ; A rows of black, advancing the destination only
+fdFill: sta fdN                 ; A rows of black, advancing the destination only
         cmp #$00                ; explicit, not inherited: a zero count here would run the
         beq fdfDn              ;   dec/bne loop 256 times and blit 10KB over the program
 fdfRow: lda fdCol
@@ -18504,9 +18361,9 @@ hlSk:   cmp hlKind
         ; base addresses per kind and one run of stores. BOTH bytes of every operand, because
         ; the table sets are emitted next to each other and may straddle a page.
         tax
-${process.env.SOCKOCC === '0' ? '' : `        lda hlVisL,x            ; where this kind's rung -> rows table lives, for occStamp's box
+        lda hlVisL,x            ; where this kind's rung -> rows table lives, for occStamp's box
         sta hlVB+1              ;   -- low byte only, see hlVisL
-`}        ldy hlK5T,x             ; five entries a kind
+        ldy hlK5T,x             ; five entries a kind
         lda hlSrcL,y
         sta hlRung+1
         lda hlSrcH,y
@@ -18640,9 +18497,8 @@ hlOcSk: pla
         ; at the wrong height. ocl2 is dead from here to the end of the entity -- the probe above
         ; was its last reader -- so it carries the answer rather than costing a byte of its own.
         ; 0 means "do not stamp this one": every real rung covers at least one row.
-${process.env.SOCKOCC === '0' ? `        lda #$00                ; SOCKOCC=0: back to the all-or-nothing test, for comparison
-        beq hlVst               ; always taken` : `hlVB:   lda sockVisT,x          ; PATCHED by hlSet to this kind's table. EVERY kind has one
-                                ;   now, the exit hole included -- see exitVisT.`}
+hlVB:   lda sockVisT,x          ; PATCHED by hlSet to this kind's table. EVERY kind has one
+                                ;   now, the exit hole included -- see exitVisT.
 hlVst:  sta ocl2
 hlYB:   lda holeYBaseT,x        ; PATCHED. The TOP row is the ellipse's FAR edge, 100+88/(d+r),
         clc                     ;   so the base folds in the offset from h that the rung implies
@@ -19086,11 +18942,11 @@ hrpHit: tya
         rts
 ${LD('zoneT', ZN_BUILD.zoneT.join(','), ': !byte ')}   ; ZONES: every cell's zone, two to a byte
 ${LD('hzMskT', pad(ZN_BUILD.hmask, NHOLE).join(','), ': !byte ')}   ; ZONES: each hole-like's zones (its disc)
-zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask${GATEFAST ? `
+zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask
 ogPcV:  !byte 0                 ; GATEFAST: pcell/znP/stmpM are valid for the live level (objInit clears)
-ogTol:  !byte 0                 ; GATEFAST: the inlined cone's tolerance for this distance` : ''}${STMP ? `
+ogTol:  !byte 0                 ; GATEFAST: the inlined cone's tolerance for this distance
 ${LD('stmpT', STMP_LIST.join(','), ': !byte ')}   ; STMP: [count, (cell, hole-like mask)...]
-stmpM:  !byte 0                 ; STMP: this frame's hole-likes that CAN be partly hidden from here` : ''}${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0\nosCntR: !byte 0,0' : ''}
+stmpM:  !byte 0                 ; STMP: this frame's hole-likes that CAN be partly hidden from here${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0\nosCntR: !byte 0,0' : ''}
 znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
         ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
@@ -19109,7 +18965,7 @@ holeFlagT: !byte ${holeFlagT.join(',')}
         ; ---- the socket's ladder: same tables, half the radius ----
         ; No 256-byte h -> rung table for this one. The hole earned its page at 35 rungs; a
         ; socket has ${SOCK.L.length}, so hlRungS scans and the page stays spent on something else.
-sockPtrT: !byte ${SOCK.slotT.map(s => (((SOCK_OWN ? SOCKBASE : HOLEBASE) - VBANK) >> 6) + s).join(',')}
+sockPtrT: !byte ${SOCK.slotT.map(s => (((SOCKBASE) - VBANK) >> 6) + s).join(',')}
 sockXOffT: !byte ${SOCK.xOffT.join(',')}
 sockYBaseT: !byte ${SOCK.yBaseT.join(',')}
 sockFlagT: !byte ${SOCK.flagT.join(',')}
@@ -19697,7 +19553,7 @@ ${LD('orbY0T', LVLT('orbY0T').join(','), ': !byte ')}
 ; which shares oidx, lands somewhere harmless rather than past the end.
 orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
 ohHiB:  !byte 0                 ; occStamp's binary search: the upper bound
-${CONEGATE ? `; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
+; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
 ; orbSeenT, so the hole-likes' indices -- which share oidx -- land inside it.
 cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}
 ${OCCLAZYE ? `ooFrT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; OCCLAZYE: this entity's mask is built for this frame's runs` : ''}
@@ -19706,7 +19562,7 @@ lzBad:  !byte 0,0                ; LAZYCHK: bytes a trusted mask got wrong -- MU
 lzN:    !byte 0,0                ; LAZYCHK: trusted masks checked` : ''}
 ${CULLCNT ? `culOkT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: frames each entity PASSED the gate, 16-bit, free-running
 culDrwT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: ...and frames it actually took a sprite
-culLosT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: ...and frames LINE OF SIGHT rejected it (hole-likes only)` : ''}` : ''}
+culLosT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: ...and frames LINE OF SIGHT rejected it (hole-likes only)` : ''}
 ${PROFWIN.length ? `pwOn:   !byte 0                  ; PROFWIN: anchor taken; anchor tick; ticks since; frames in window
 pwA:    !byte 0,0
 pwT:    !byte 0,0
@@ -19725,7 +19581,7 @@ orbAnchT: !byte ${ORBANCH.join(',')}
 
 ; REMOVED 2026-09-26, nothing in the image named it: orbHgtT: sprite height per variant, 21 or 42. Nothing read it; it is one shift from ORBEXP.
 angVarT: !byte ${angVarT.slice(0, VAR_CLAMP + 1).join(',')}
-${ENTCONE ? `; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
+; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
 ; 64 + ${CONE_DMAX + 1} bytes of PURE GEOMETRY. atan2 of a cell delta is the same on every level, so unlike
 ; holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
 ; First quadrant only, stride 8, both magnitudes 0..7; the other three come from the signs.
@@ -19734,7 +19590,7 @@ coneBQT: !byte ${CONE_BQ.join(',')}
 ; plus two units); the rest is how far the cell-centre bearing can be from the true one -- the
 ; player's 0.707 of slack inside their own cell, and the rounding the >>1 folding introduces.
 ; Entry 0 and 1 are never read: the test bails out below distance 2, where no tolerance is safe.
-coneTolT: !byte ${CONE_TOL.join(',')}` : ''}
+coneTolT: !byte ${CONE_TOL.join(',')}
 arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const d = arcSpan(arcYT[ARC_DROP_N + n], (arcET[ARC_DROP_N + n] << 24) >> 24)[1];
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
@@ -19867,7 +19723,7 @@ fdG2:   dec fdCnt
         bne fdGl
 fdGtD:  rts
 
-` : ''}${FALLSCENE ? (() => { const P = fRowPack(); return `        * = ${hx16(FROWT + 0x500)}
+` : ''}${(() => { const P = fRowPack(); return `        * = ${hx16(FROWT + 0x500)}
 ; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
 ; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
 ; run of $ff at one end. Now four 40-byte tables and the 25 rows generated on entry to fdWarp.
@@ -19905,7 +19761,7 @@ fwHi:   !byte 0
 fKT:    !byte ${P.K.join(',')}
 fLoT:   !byte ${P.LO.join(',')}
 fHiT:   !byte ${P.HI.join(',')}
-`; })() : ''}
+`; })()}
 ; ---- $6d82: lateLoad, sitting directly below the loader it calls ----
         * = $6d82
 ; ---- dpCand and dpDiag live here, in the space lateLoad wants when a level is LATE ----
@@ -21738,7 +21594,7 @@ ${LD('mapT', chunk(LVLT('mapT'), 16).trim(), ':   ')}   ; padded to the page wit
 rbT:    ${chunk(rbT).trim()}
         * = ${hx16(RELOC + 0xa00)}
 rsT:    ${chunk(rsT).trim()}
-${FINEANG && DIE && SOUND ? `        * = ${hx16(RELOC + 0xb00)}     ; a jsr target, in the page FINEANG's
+${DIE && SOUND ? `        * = ${hx16(RELOC + 0xb00)}     ; a jsr target, in the page FINEANG's
         ; coarse delta tables vacated. It used to sit at $609b, a hole that only LEVEL 1's map
         ; leaves -- level 2's data ran straight through it and the build died. Everything from
         ; RELOC on is engine table space at fixed origins, so it is free on EVERY map.
@@ -22210,15 +22066,7 @@ obPNx:  txa
         cmp onvH
         bcc obPick              ; slots left: the next nearest
 obODn:  rts
-${FINEANG ? '' : `        * = ${hx16(RELOC + 0xb00)}
-ddxLoT: ${chunk(ddxLo).trim()}
-        * = ${hx16(RELOC + 0xc00)}
-ddxHiT: ${chunk(ddxHi).trim()}
-        * = ${hx16(RELOC + 0xd00)}
-ddyLoT: ${chunk(ddyLo).trim()}
-        * = ${hx16(RELOC + 0xe00)}
-ddyHiT: ${chunk(ddyHi).trim()}
-`}        * = ${hx16(RELOC + 0xf00)}
+        * = ${hx16(RELOC + 0xf00)}
 posXT:  ${chunk(posX).trim()}
         * = ${hx16(RELOC + 0x1000)}
 posYT:  ${chunk(posY).trim()}
@@ -22241,7 +22089,7 @@ sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
 sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
 sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
 ` : ''}
-${!FALLSCENE ? '' : `; ---- fwBlk and fNT live up here, away from the fall's other tables ----
+; ---- fwBlk and fNT live up here, away from the fall's other tables ----
 ; They were at the foot of the $6c00 block with fKT/fLoT/fHiT, and level 7's tables push that run
 ; down until it overlaps runFaceT -- 65 bytes of it. These two are 72, and the sfx pages leave
 ; exactly that much in their tails. Neither is hot: fwBlk is rebuilt once a frame and fNT is read
@@ -22281,7 +22129,7 @@ pgC:    tya
         sty wsWall
         jmp wallTog            ; tail call -- there is nothing to do afterwards
 pgNo:   rts
-` }` }
+` }
         * = ${hx16(RELOC + 0x1200)}
 colGrpT: !byte ${colGrpT.join(',')}
         * = $98a0
@@ -22294,8 +22142,8 @@ sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, 
                                 ;   refusal sound has -- it read as the orb being rejected rather
                                 ;   than taken. Up and bright is what acknowledgement sounds like.
 ` : ''}
-${!FALLSCENE ? '' : (() => { const P = fRowPack(); return `fNT:    !byte ${P.N.join(',')}
-`; })()}${FINEANG ? `        * = ${hx16(RELOC + 0x1300)}
+${(() => { const P = fRowPack(); return `fNT:    !byte ${P.N.join(',')}
+`; })()}        * = ${hx16(RELOC + 0x1300)}
 ; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
 ; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
 ; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
@@ -22332,7 +22180,7 @@ seNB    = $bdf8                 ; 8 bytes: the row being built, ending exactly a
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
-${OCCLAZY ? `occVer: !byte $ff               ; blkVer and the cell orbOccAll last rebuilt for; $ff forces
+occVer: !byte $ff               ; blkVer and the cell orbOccAll last rebuilt for; $ff forces
 occCell:!byte $ff               ;   a rebuild on the first frame
 ${OCCCHK ? `; EQUATES, not emitted bytes: declaring these as !byte pushed everything after this point along by
 ; 19 bytes and the build stopped running, assembling clean the whole way.
@@ -22353,7 +22201,7 @@ occShad = $60a8
 occArm  = $60e0
 occChk  = $60e1
 occBad  = $60e2
-` : ''}` : ''}bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
+` : ''}bfsBVF: !byte 0                 ; the blkT version the fill in progress is for
 bfsBVD: !byte 0                 ; ...and the one the LIVE map was built from
 sockHit: !byte 0                ; socket index+1 the last orb was spent on; 0 = none
 ; Socket -> the wall id it opens, LOCAL TO THIS LEVEL, $ff = opens nothing. NOT inside the
@@ -22750,13 +22598,7 @@ orbBitT: !byte ${orbBitT.join(',')}
 
 
 
-${CVXSEAM ? '' : `; The (at most two) runs each run meets at a CONCAVE corner, 0 for none. subFace keeps its corner
-; line only when the run across the boundary is one of these; every other run-to-run boundary is a
-; convex silhouette, where the wall's edge stands against something unrelated behind it.
-; Indexed by run id, so whole tables rather than a packed set. Emitted only when CVXSEAM=0: with
-; every run-to-run boundary drawing a line, nothing reads them.
-cpLoT:  !byte ${cpLo.join(',')}
-cpHiT:  !byte ${cpHi.join(',')}`}
+
 kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
 ; synMskT: a cellFillT column mask of the columns left SHOWING (bit 3 = column 0) -> the HIGH bit
 ; of each COVERED column's pixel pair (column c is bits 7-2c,6-2c), so that (b & $55) << 1 &
@@ -23112,7 +22954,7 @@ ssPwNo: sec                     ; outside the band: stop the walk, the face only
 ssPwOk: clc
         rts                     ; carry clear = the panel is wide enough to place a line in
 ` : ''}
-${ENTGATE ? `; ---- entGate: can ANY entity be projected this frame? Carry SET = no, and the sprite
+; ---- entGate: can ANY entity be projected this frame? Carry SET = no, and the sprite
 ; registers have been cleared; carry CLEAR = yes, run the frame trig and the loops.
 ; The frame trig in orbMove -- two qTrig, four oFrac, four kSgn, ~800 cycles -- was computed
 ; before anything asked whether an entity would use it. Exact conditions under which nothing
@@ -23122,10 +22964,7 @@ ${ENTGATE ? `; ---- entGate: can ANY entity be projected this frame? Carry SET =
 ; and in any corridor with nothing in sight; a level with an orb placed always has something to
 ; project and takes the full path from the first test. Orbs have no LOS bitmap because they move.
 entGate:
-${CONEGATE ? '' : `        lda carry
-        ora sokAn
-        bne ogYes
-`}${CONEGATE ? `        ; ---- ASK THE CONE, FOR EVERY ENTITY, ONCE ----
+        ; ---- ASK THE CONE, FOR EVERY ENTITY, ONCE ----
         ; THE CARRY/sokAn TEST MOVED BELOW THE LOOP. It used to return "yes" before anything else
         ; ran, which was free when the gate's only other job was a scan. Now the loop FILLS cnOkT
         ; and orbOne reads it, so an early exit here would leave orbOne reading last frame's
@@ -23146,17 +22985,17 @@ ${[...Array(IDOL_N)].map((_, i) => `        sta pcP+${i}`).join('\n')}
 ` : ''}        lda py+1                ; ZONES: the player's cell, and the zones visible from anywhere in it --
 ${MULW}
 ${ADDX('px+1')}
-${GATEFAST && process.env.GFCACHE !== '0' ? `        ldx ogPcV               ; GATEFAST: the same cell as when znP and stmpM were worked out? Then
+        ldx ogPcV               ; GATEFAST: the same cell as when znP and stmpM were worked out? Then
         beq ogPcN               ;   they still hold -- the cell changes about every ten frames walking,
         cmp pcell               ;   and the stamp-list scan alone was up to ~460 cycles on the hub.
         beq ogPcS               ;   objInit clears ogPcV on every level change and restart.
 ogPcN:  ldx #$01
         stx ogPcV
-` : ''}        sta pcell               ;   one mapT read a frame, for every entity's test below
+        sta pcell               ;   one mapT read a frame, for every entity's test below
         tax
         lda mapT,x
         sta znP
-${STMP ? `        lda #$00                ; STMP: which pedestals/sockets could a wall partly hide from this cell?
+        lda #$00                ; STMP: which pedestals/sockets could a wall partly hide from this cell?
         sta stmpM               ;   (a short sorted list; most cells are not in it)
         ldx stmpT
         beq ogStD
@@ -23173,7 +23012,7 @@ ogStL:  lda stmpT,y
 ogStH:  lda stmpT+1,y
         sta stmpM
 ogStD:
-` : ''}${GATEFAST ? 'ogPcS:\n' : ''}ogNoH:
+ogPcS:\nogNoH:
         clc
         lda nOrbT
         adc nHoleT
@@ -23181,13 +23020,10 @@ ogStD:
         lda #$00
         sta cnAny
         sta cnI
-${GATEFAST ? `        tax                     ; GATEFAST: X IS the entity index for the whole loop
+        tax                     ; GATEFAST: X IS the entity index for the whole loop
 ogEnL:  cpx nOrbT
         bcs ogEHol
-` : `ogEnL:  lda cnI
-        cmp nOrbT
-        bcs ogEHol
-        ldx cnI                 ; ---- an orb or an angel ----`}
+
         lda orbHidT,x
         bne ogENo               ; hidden: no verdict to give
         ldy orbYCT,x            ; ZONES: its zone's bit against mapT[player cell] -- BEFORE the cone,
@@ -23208,15 +23044,15 @@ ogZe:   and #$07
         and znP
         beq ogENo               ; no part of its zone is visible from anywhere in this cell
         bne ogETst              ; always
-ogEHol: ${GATEFAST ? `txa                     ; GATEFAST: A must BE the entity index here -- the old loop head left it
-        ` : ''}sec                     ; ---- a hole-like: its fixed zone mask (its whole disc) ----
+ogEHol: txa                     ; GATEFAST: A must BE the entity index here -- the old loop head left it
+        sec                     ; ---- a hole-like: its fixed zone mask (its whole disc) ----
         sbc nOrbT
         tax
         lda hzMskT,x
         and znP
-        beq ogENo${GATEFAST ? `
-        ldx cnI                 ; GATEFAST: back to the entity index for the cone` : ''}
-${GATEFAST ? `ogETst:                         ; GATEFAST: cnTest INLINED, Y and A only -- X keeps the entity
+        beq ogENo
+        ldx cnI                 ; GATEFAST: back to the entity index for the cone
+ogETst:                         ; GATEFAST: cnTest INLINED, Y and A only -- X keeps the entity
         sec                     ; the cell delta, exactly as orbOne computes it (zero page now)
         lda orbXCT,x
         sbc px+1
@@ -23310,7 +23146,16 @@ gkN:    !byte 0,0
 `}ogPass: lda #$ff
         sta cnOkT,x
         sta cnAny
-        bne ogENx               ; always
+${CULLCNT ? `        txa                     ; CULLCNT: how often THIS entity survived the gate, 16-bit.
+        asl                     ;   One number per object rather than one for the level: a rate of
+        tax                     ;   85% says nothing about WHICH object is never culled.
+        inc culOkT,x
+        bne ogEC1
+        inc culOkT+1,x
+ogEC1:  ldx cnI                 ;   cnI is always X's twin in this loop -- and the ldx sets Z
+        jmp ogENx               ;   from it, so the bne below would fall through for entity 0
+` : `        bne ogENx               ; always: A is $ff
+`}
 ogENo:  ldx cnI
         lda #$00
         sta cnOkT,x
@@ -23318,87 +23163,11 @@ ogENx:  inx
         stx cnI
         cpx cnEnd
         bcc ogEnL
-` : `ogETst: ldx cnI                 ; the cell delta, exactly as orbOne computes it
-        sec
-        lda orbXCT,x
-        sbc px+1
-        sta oix
-        sec
-        lda orbYCT,x
-        sbc py+1
-        sta oiy
-        jsr cnTest
-        bcs ogENo
-        lda #$ff
-        ldx cnI
-        sta cnOkT,x
-        sta cnAny
-${CULLCNT ? `        txa                     ; CULLCNT: how often THIS entity survived the gate, 16-bit.
-        asl                     ;   One number per object rather than one for the level: a rate of
-        tax                     ;   85% says nothing about WHICH object is never culled, and on a
-        inc culOkT,x            ;   level with an orb parked in the corridor you are always facing
-        bne ogEC1               ;   that is the whole story.
-        inc culOkT+1,x
-ogEC1:
-` : ''}        jmp ogENx
-${CULLCNT ? `ogELos: ldx cnI                 ; CULLCNT: rejected by LINE OF SIGHT, not by the cone. Two
-        txa                     ;   mechanisms reject here and "culled" without a reason cannot
-        asl                     ;   tell a wall from a heading -- which is the whole question when
-        tax                     ;   asking what the cull is failing to do.
-        inc culLosT,x
-        bne ogEL1
-        inc culLosT+1,x
-ogEL1:
-` : ''}ogENo:  ldx cnI
-        lda #$00
-        sta cnOkT,x
-ogENx:  inc cnI
-        lda cnI
-        cmp cnEnd
-        bcc ogEnL
-`}        lda cnAny
+        lda cnAny
         ora carry               ; ...and the two things that want a slot without being in the world
         ora sokAn
         bne ogYes
-` : `        ldx nOrbT               ; any orb not hidden?
-        beq ogHole
-ogOrbL: lda orbHidT-1,x
-        beq ogYes              ; one is in the world: project
-        dex
-        bne ogOrbL
-ogHole: lda nHoleT              ; no hole-likes on this level: the gate is shut
-        beq ogNone
-        lda py+1                ; the player's cell, for the LOS test
-${MULW}
-${ADDX('px+1')}
-        sta pcell
-        and #$07
-        tay
-        lda pcell
-        lsr
-        lsr
-        lsr
-        sta rgtL                ; byte within a 32-byte LOS row. rgtL/rgtH are orbProj's,
-                                ;   and orbProj has not run yet this frame
-        ldx #$00                ; every exit, then every socket: the same set holeOne walks
-ogHoLp: txa
-        asl
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc rgtL
-        stx rgtH
-        tax
-        lda holeSeeT,x
-        and orbBitT,y
-        bne ogYes              ; in sight: project
-        ldx rgtH
-ogHoIn: inx                     ; exactly the set holeOne walks, in the same order
-        cpx nHoleT
-        bcc ogHoLp
-`}ogNone:
+ogNone:
 ${CULLCNT ? `${PROFILE ? '        lda pfDone              ; stop with the profiler, so frames and closures share a window\n        bne ogSk1\n' : ''}        inc ogSkip              ; CULLCNT: frames the gate closed
         bne ogSk1
         inc ogSkip+1
@@ -23417,7 +23186,7 @@ ogSk1:
                                 ;   stale slot data, every shut frame (~20 raster lines on level 1's
                                 ;   strafe). The third "a gate that shuts" contract, after orbSeenT
                                 ;   and the carry/sokAn exit.
-${CONEGATE ? `        ; ---- AND NOTHING WAS SEEN ----
+        ; ---- AND NOTHING WAS SEEN ----
         ; orbSeenT is "did this entity take a sprite slot last frame", which is the angels' whole
         ; observation test. orbOne writes it, and when this gate shuts orbOne never runs -- so the
         ; flags would keep LAST frame's values for as long as the gate stays shut. The old gate got
@@ -23428,11 +23197,11 @@ ogSn:   sta orbSeenT,x
         dex
         bpl ogSn
         lda #$00                ; (the loop left A alone, but say so rather than rely on it)
-` : ''}        sec
+        sec
         rts
 ogYes:  clc
         rts
-` : ''}; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
+; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
 ; A = the columns the stamp leaves SHOWING (cellFillT mask, bit 3 = column 0); osGly / osGlyW =
 ; the whole-column split glyphs to fall back on, black- and white-backed; Y = the column, (osPtr),y
 ; the cell. Preserves Y.
@@ -23711,7 +23480,7 @@ ofyOk:  sta ofy
         sbc tmp2
         sta krH
         rts
-${VSPLIT ? `; ---- vsPrep: a step column's near side, the row its far top lands in, the split code ----
+; ---- vsPrep: a step column's near side, the row its far top lands in, the split code ----
 ; Called once, on the top step cell of the column (kpos is set). Rows after that one and strictly
 ; before vsRow are the pure split; vsRow itself, the far top, gets a real selection. The taller
 ; end is the near wall. Out of line because the main block is within 20 bytes of its ceiling.
@@ -23739,7 +23508,7 @@ vsRgt:  tay                     ; right is near: A = left height = the far one
 vsSet:  lda #$01
         sta vsOn
         rts
-` : ''}seamOne:
+seamOne:
         lda #$00                ; k as 8.8
         sta skL
         lda ssK
@@ -23840,7 +23609,7 @@ ssOff:  sta mq                  ; offset = (t * width) >> 8
         lda phi                 ;   what the band has to be measured against -- rounding is the
         adc spanL               ;   step it exists to override, so it cannot come first.
         sta ssFH
-${SEAMHYST ? `        ; ---- hold last frame's line while the solve stays within one column of it ----
+        ; ---- hold last frame's line while the solve stays within one column of it ----
         ; The target is FH + plo/256, so a previous line at c is inside the open band (FH-1, FH+1)
         ; exactly when c - FH is 0 or 1: at c = FH the gap is plo/256 < 1, at c = FH+1 it is
         ; 1 - plo/256 < 1, and at c = FH-1 it is 1 + plo/256, which is not. So the whole test is
@@ -23862,11 +23631,7 @@ ssHyR:  lda plo                 ; nothing to hold: round to nearest, as it alway
         adc #$00
         jmp ssHyD
 ssHyH:  lda sHyP,x              ; inside the band -- last frame's answer stands
-ssHyD:  cmp #${NLOG}` : `        lda plo                 ; round to nearest column: truncating biased every seam a
-        cmp #$80                ; column low, which reads as the whole wall being off by one
-        lda ssFH
-        adc #$00
-        cmp #${NLOG}`}
+ssHyD:  cmp #${NLOG}
         bcs ssOne               ; ---- off screen: REACHABLE, and the only thing stopping a write
                                 ; past seamT (40 bytes, indexed col>>2). It used to be unreachable
                                 ; -- the column was interpolated between spanL and spanR, both
@@ -23971,13 +23736,13 @@ ssDk:   inc ssScan
         clc
         adc #${hx(SEAM0)}
         sta seamT,x
-${SEAMHYST ? `        ldx sHyN                ; only lines that SURVIVED every test become band centres:
+        ldx sHyN                ; only lines that SURVIVED every test become band centres:
         cpx #${HYSN}            ;   a rejected one is not on screen to be held still
         bcs ssOne
         lda ssCol
         sta sHyC,x
         inc sHyN
-` : ''}ssOne:  rts
+ssOne:  rts
 
         ; ---- and a DEAD BAND on that choice, or a concave corner dithers ----
         ; The two candidates are adjacent columns, so at a CONCAVE corner -- where the faces meet
@@ -24569,7 +24334,7 @@ recBuf: !fill ${RECMAX * 4}, 0
 ; table landed on $c000 -- which is stackLT, the subdivision's own stack. It rendered fine until
 ; the recursion got deep enough to reach it, then corrupted every span from mid-screen right.
 rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
-` : ''}        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
+        ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
         * = $a9a0
@@ -25314,12 +25079,12 @@ dkNo:   lda #$ff
         sta $dc00
         rts
 ` : ''}
-${ANGMID ? `        ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
+        ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
         ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
         * = $be00
-angMidT: !byte ${angMidT.join(',')}` : ''}
+angMidT: !byte ${angMidT.join(',')}
         * = ${hx(QCOSBASE)}
 qcosT: !byte ${qcos.join(',')}
 ${packAll()}`;
@@ -25506,14 +25271,14 @@ writeFileSync(asmPath, asm);
 // rehomes the RAM buffers into the alignment slack, and writes iray.compact.asm. Run as a
 // subprocess rather than imported so the tool stays usable on its own; it costs one extra
 // assembly pass, which is the price of knowing the layout before committing to it.
-if (COMPACT) {
+
   // The inner build is GONE: both maps it existed to produce are published above, before any
   // assembly. It assembled the hand layout, which is what compaction replaces -- and what fails
   // first when the engine grows.
   execFileSync(process.execPath, ['./compact.mjs', asmPath], { stdio: ['ignore', 'inherit', 'inherit'] });
   asm = readFileSync('./iray.compact.asm', 'utf8');
   writeFileSync(asmPath, asm);          // so everything downstream reads the layout that ships
-}
+
 lintReach(asm);            // AFTER the write: a failure should leave the file to look at
 try {
   const r = assemble(asm);
@@ -25591,8 +25356,7 @@ try {
   // fill chains growing into another table, and under compaction the assembler's per-byte overlap
   // check does that for every pair at once. Left in place for the uncompacted build, where HTABLE
   // still describes reality.
-  if (!COMPACT && r.labels.chainEnd > HTABLE)
-    throw new Error(`fill chains end at $${r.labels.chainEnd.toString(16)}, past the height tables at $${HTABLE.toString(16)}`);
+  
   // LABELS=<substr> prints matching label addresses, so a debugger can be pointed at a routine
   // without hand-assembling. The listing has the labels; only the assembler knows their addresses.
   // LABELAT=<hex> lists every label whose address falls in that page, which is how a
@@ -25688,7 +25452,7 @@ try {
                      data: [...HOLEBM.flat(), ...IDOLBM.flat(),
                             ...ORBBM.slice(ORBLO_N, NORBBM).flat()],
                      length: (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64 }] : []),
-    ...(SPRITES && SOCK_OWN && true && SOCK.BM.length
+    ...(SPRITES && true && true && SOCK.BM.length
           ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: SOCK.BM.flat() }] : []),
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
     ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.slice(0, ORBLO_N).flat() }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
@@ -26014,7 +25778,7 @@ try {
                             // the file list because this array feeds the free-space calculator
                             // as well as the guard: left out, 768 bytes of live sprite data read
                             // as free space, and the next thing placed there would land on it.
-                            ...(SOCK_OWN && true && SOCK.BM.length
+                            ...(SOCK.BM.length
                               ? [['SOCKBASE', SOCKBASE, SOCKBASE + SOCK.BM.length * 64]] : []),
                             ['LOADER_RUN', LOADER_RUN, 0xd000],
                             ...(PICSEG.length ? [['PICBASE', PICBASE, PICBASE + PICSEG.length]] : []),

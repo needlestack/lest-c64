@@ -12753,7 +12753,8 @@ ogQY:   sec
 ogPass: lda #$ff
         sta cnOkT,x
         sta cnAny
-        bne ogENx               ; always
+        bne ogENx               ; always: A is $ff
+
 ogENo:  ldx cnI
         lda #$00
         sta cnOkT,x
