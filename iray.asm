@@ -2026,9 +2026,10 @@ fwait:  lda frameCnt
         sbc fT0
         cmp #3
         bcc fwait
-mvs:    lda $d012
+mvs:
+mvsW:   lda $d012
         cmp #250
-        bne mvs
+        bne mvsW
         lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
         sta fT0                 ;   frame, so the next deadline is exactly fT0 + 3
         lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
@@ -9928,7 +9929,7 @@ klUn:   lda krillRt,x
         lda $d011               ; DEN off across the transfer: badlines and sprite DMA steal the
         pha                     ;   cycles the serial handshake needs, and the fall is on screen
         and #$ef
-        sta $d011
+        sta $d011               ; (LLDEN=1, a test: leave the display ON -- can Krill load under badlines?)
         ldx #<nILV
         ldy #>nILV
         jsr $0400   ; = loadraw, at the address it was assembled for

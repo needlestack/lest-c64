@@ -30,7 +30,14 @@ import { readFileSync } from 'fs';
 
 export const LOADER_RUN = 0x0630;   // clear of Krill's resident, which END_ADDRESS_API made
                                     // 556 bytes: $0400-$062b. buildLoader asserts it.
-const krillPrg = n => [...readFileSync(`./krill/${n}`)];
+// BGLOAD=1 loads levels in the frame SLACK, which starves the loader for whole game frames -- and
+// the 1541's watchdog resets the drive after 65,536 cycles (~4 video frames) of silence mid-transfer.
+// krill-bg/ is the same Krill v194 built with DISABLE_WATCHDOG = 1 in loader/include/loader.inc (the
+// only change: a rebuild of the untouched source reproduces krill/ byte for byte). Its README says
+// exactly this for a loader "starved for multiple video frames"; the cost is that a crash or reset
+// MID-LOAD leaves the drive needing a power-cycle.
+const KDIR = process.env.BGLOAD === '1' ? 'krill-bg' : 'krill';
+const krillPrg = n => [...readFileSync(`./${KDIR}/${n}`)];
 const krillAt = p => p[0] | (p[1] << 8);
 const KRILL_RES_PRG = krillPrg('loader-c64.prg'), KRILL_INST_PRG = krillPrg('install-c64.prg');
 const KRILL_RES = KRILL_RES_PRG.slice(2), KRILL_INST = KRILL_INST_PRG.slice(2);
@@ -77,7 +84,7 @@ const KRILL_RESDATA = KRILL_INSTALL + KRILL_INST.length;
 for (const [name, prg, want] of [['install-c64.prg', KRILL_INST_PRG, KRILL_INSTALL],
                                  ['loader-c64.prg', KRILL_RES_PRG, KRILL_RESIDENT]])
   if (krillAt(prg) !== want) throw new Error(
-    `krill/${name} is assembled for $${krillAt(prg).toString(16)} but loader-src.mjs expects ` +
+    `${KDIR}/${name} is assembled for $${krillAt(prg).toString(16)} but loader-src.mjs expects ` +
     `$${want.toString(16)}. Re-run krill/build.sh with matching INSTALL=/RESIDENT=.`);
 // Krill's two binaries, PRG files with a 2-byte load address we drop: the resident is placed by
 // our copy loop, the install routine is simply part of the image at KRILL_INSTALL.

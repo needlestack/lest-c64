@@ -871,7 +871,14 @@ const VSLOTS = LVLLOAD && process.env.VSLOTS === '1';
 // A FIXED engine constant, not derived from any chain: 3.5 pages. Every level file must fit (the
 // build checks); the largest today is 868 bytes (level 4 with the chain-4-7 padding).
 let VS_SLOTLEN = 896;    // PROVISIONAL: set to the real level region once it is known (see LVLREGION_END)
-const VS_N = 4;                                  // slot 0 (bank 3) + three in the arena
+// BGLOAD=1 (prototype, 2026-10-04): load levels in the FRAME SLACK while playing. Krill's resident
+// stays at $0400 for good (the span stacks move out), a second execution context runs its blocking
+// load call, the raster-wait loop hands it the time the game would have spun away, and the IRQ at
+// line ~246 hands control back for the flip. With loads that cheap, two slots are enough: the live
+// level, and slot 0 as the landing zone for the next one.
+const BGLOAD = VSLOTS && process.env.BGLOAD === '1';
+const VS_N = BGLOAD ? 2 : 4;                      // slot 0 (bank 3) + the arena slots
+const VS_ARENA = ['lvlSlot1', 'lvlSlot2', 'lvlSlot3'].slice(0, VS_N - 1);
 // VSLOTS needs ~217 more arena bytes than chain 1-4 leaves. The scratch cluster $8000-$807a (123
 // bytes: the pivot state, the movement step, the death scene's sound, ...) moves WHOLE -- same
 // layout, shifted -- into bank 3's free run at $f42f-$f4ff. It is RAM the boot quote unpacks over,
@@ -4028,7 +4035,7 @@ const PROF_BUFS = {
 const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8, oSDbg: 4 } : {};
 const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND,
-                       ...(VSLOTS ? { lvlSlot1: VS_SLOTLEN, lvlSlot2: VS_SLOTLEN, lvlSlot3: VS_SLOTLEN } : {}) };
+                       ...(VSLOTS ? Object.fromEntries(VS_ARENA.map(n => [n, VS_SLOTLEN])) : {}) };
 // Only when the profiler is built: on an ordinary build these names do not exist and a size
 // declared for them would reserve space for nothing.
 if (PROFILE) Object.assign(RUNTIME_BUFS, PROF_BUFS);
@@ -5190,7 +5197,10 @@ if (ORBHI_N !== 0 && ORBHI_N !== 12) throw new Error(
 // including stackRT's half-page offset -- so nothing about the addressing changes with them.
 const SCRATCH_AT = ORBHI_N
   ? { sideT: 0xee00, idT: 0xef00, stackLT: 0xf000, stackRT: 0xf080 }
-  : { sideT: 0x0500, idT: 0x0600, stackLT: 0x0400, stackRT: 0x0480 };
+  : { sideT: 0x0500, idT: 0x0600, ...(BGLOAD
+      // BGLOAD: $0400 is Krill's for good, so the span stacks become ordinary scratch the relayout
+      // places (stackLT declared page-aligned; stackRT is its +$80 neighbour and moves with it)
+      ? { stackLT: 0x7800, stackRT: 0x7880 } : { stackLT: 0x0400, stackRT: 0x0480 }) };
 const ORBLO_N = NORBBM - ORBHI_N;               // what is left at SPRBASE
 // ORBHI -- where the tail actually lands -- is down beside IDOLBASE, which it follows and which
 // is not known until the hole ladder has been built. So is orbPtrT, which needs it.
@@ -6083,8 +6093,11 @@ const startBytes = n => { const [x, y, a, af] = startOf(n);
 // which is why it is computed here and not in each level's own dump.
 const LEVEL_WANT = { 1: [2, 3, 4], 4: [5, 6, 7] };
 const VS_LW = 3;                                  // list bytes per level, $ff-padded
+// BGLOAD: one level ahead -- the destination of exit 0, prefetched in the slack. (The hub's other
+// exits still load in the midpoint black; a level with several exits wants more slots or a guess.)
 const wantOf = n => {
-  const w = (LEVEL_WANT[n] ?? []).filter(m => ALLLVL.includes(m));
+  const w = (BGLOAD ? [LEVEL_EXITDST[n]?.[0] ?? nextLevel(n)].filter(m => m !== n && m !== 0xff)
+                    : (LEVEL_WANT[n] ?? [])).filter(m => ALLLVL.includes(m));
   if (w.includes(n)) throw new Error(`level ${n}'s load list names itself`);
   // The live level plus its list must fit the slots, or the victim search finds nothing to evict.
   if (w.length > VS_N - 1) throw new Error(`level ${n} wants ${w.length} levels resident; ${VS_N} slots hold it and ${VS_N - 1} more`);
@@ -11623,7 +11636,7 @@ if (VSLOTS) {
   if (LVLREGION_END - SLOT_AT > 896) throw new Error(
     `VSLOTS: a level region is ${LVLREGION_END - SLOT_AT} bytes and slot 0 holds 896 ($f500-$f880)`);
   VS_SLOTLEN = LVLREGION_END - SLOT_AT;
-  for (const n of ['lvlSlot1', 'lvlSlot2', 'lvlSlot3']) RUNTIME_BUFS[n] = VS_SLOTLEN;
+  for (const n of VS_ARENA) RUNTIME_BUFS[n] = VS_SLOTLEN;
 }
 if (SOLO) console.error(`level region: ${LVLBLOB_MAX} bytes of tables (live ${LVLBLOB}, saved `
   + `${ALLBLOBS.reduce((t, L) => t + LVLBLOB_MAX - blobOf(L), 0)} across ${ALLBLOBS.length} levels by `
@@ -12381,9 +12394,9 @@ ${FALLTAIL ? `fallTailB = ${hx16(LOWBOOT)}               ; FALLTAIL: the source 
                                  ;   addressable because the port is $35 all through play --
                                  ;   to hold the real NMI/RESET/IRQ vectors.
 ` : ''}${VSLOTS ? `lvlSlot1 = $7c00                 ; VSLOTS: level slots 1-3, page-aligned -- the relayout rehomes them
-lvlSlot2 = $7800                 ;   into the arena with their declared size and alignment
+${VS_N > 2 ? `lvlSlot2 = $7800                 ;   into the arena with their declared size and alignment
 lvlSlot3 = $7400
-` : ''}fallSnapD = ${hx16(FALLBUF2)}                ; the destination room, snapshotted before the drop begins
+` : ''}` : ''}fallSnapD = ${hx16(FALLBUF2)}                ; the destination room, snapshotted before the drop begins
 fallSnapS = ${hx16(FALLBUF)}                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
@@ -12598,7 +12611,13 @@ remHiT  = $a803                 ;   Parked so u can be derived later, only where
         !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
 entry:
         sei
-${VSLOTS ? `        ldx #${hx(VS_MOVE.to - VS_MOVE.from)}               ; VSLOTS: the moved scratch starts at 0, as it did in the image
+${process.env.STKFILL ? `        ldx #$00                ; STKFILL (debug): mark $0100-$01bf, to see how deep the stack goes
+        lda #$ee
+skF:    sta $0100,x
+        inx
+        cpx #$c0
+        bne skF
+` : ''}${VSLOTS ? `        ldx #${hx(VS_MOVE.to - VS_MOVE.from)}               ; VSLOTS: the moved scratch starts at 0, as it did in the image
         lda #$00
 vsZ:    sta ${hx16(VS_MOVE.at)},x
         dex
@@ -12636,7 +12655,7 @@ ${process.env.FTFREEZE ? `        sta ftFrz               ;   the one place the 
                                 ;   froze the fall at a RANDOM frame, and two runs of the same
                                 ;   build differed by 5,400 pixels -- which looks exactly like the
                                 ;   rendering change you are trying to measure.
-` : ''}${LATE.length || LVLLOAD ? `        jsr klPark              ; park the LIVE loader before the renderer writes over it
+` : ''}${(LATE.length || LVLLOAD) && !BGLOAD ? `        jsr klPark              ; park the LIVE loader before the renderer writes over it
 ` : ''}${VSLOTS ? `        jsr vsBoot              ; VSLOTS: the boot level's load list (once per power-on)
 ` : ''}        ; ---- copy both charsets into the RAM under the I/O hole ----
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
@@ -14124,9 +14143,37 @@ fwait:  lda frameCnt
         sbc fT0
         cmp #${FALL_PERIODS}
         bcc fwait
-mvs:    lda $d012
+mvs:
+${BGLOAD && !process.env.BGNOYIELD ? `        lda zlOn                ; BGLOAD: a job waiting, and this is an ordinary frame with real
+        beq mvsW                ;   slack before the flip? Hand it to the loader; the IRQ near line
+        lda fallSt              ;   246 hands it back. Not between 230 and 250: too short to be
+        bne mvsW                ;   worth a switch, and the IRQ's window starts at 240. AFTER the
+${process.env.BGHOLD ? `        lda frameCnt+1          ; BGHOLD=n (debug): no yielding before tick n, so a whole job lands
+        bne bgHk                ;   inside a measured window instead of in the boot's first frames
+        lda frameCnt
+        cmp #${+process.env.BGHOLD}
+        bcc mvsW
+bgHk:
+` : ''}
+        lda $d012               ;   label: every path into the wait jumps to mvs.
+        cmp #230
+        bcc mvsY
+        cmp #251
+        bcc mvsW
+mvsY:   lda zlFr            ; first slice of this job? note the tick (zlY0), for zlYT below
+        ora zlFr+1
+        bne mvsY1
+        lda frameCnt
+        sta zlY0
+        lda frameCnt+1
+        sta zlY0+1
+mvsY1:  inc zlFr                ; game frames rendered while a job was live -- with zlYT, the
+        bne mvsY2               ;   frame rate DURING loading, to set against the same view without
+        inc zlFr+1
+mvsY2:  jsr zlGo
+` : ''}mvsW:   lda $d012
         cmp #250
-        bne mvs
+        bne mvsW
         lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
         sta fT0                 ;   frame, so the next deadline is exactly fT0 + ${FALL_PERIODS}
         lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
@@ -16577,7 +16624,26 @@ irqNf:${MELODY && SOUND ? `        jsr melTick             ; 60Hz, and the next 
 ` : ''}
 irqd:   lda #$ff
         sta $d019
-        pla
+${BGLOAD ? `        lda zlIn                ; BGLOAD: in the loader at the bottom of the frame? the game is
+        beq irqR                ;   waiting to flip at 250, so hand it back. This IRQ's own A X Y
+        lda zlSync              ;   are on the LOADER's stack -- that IS the loader's saved frame.
+        bne irqR
+        lda frameCnt            ; a new video frame since the slice began? then the band was never
+        cmp zlYF                ;   reached -- the IRQ lines are whatever the game last PUBLISHED, and
+        bne irqBk               ;   just after a landing none of them fall in it. Hand back NOW (the
+        lda $d012               ;   top-of-frame IRQ exists in every mode); the game waits out to 250.
+        cmp #240
+        bcc irqR
+        cmp #251
+        bcs irqR
+irqBk:
+        lda #$00
+        sta zlIn
+        tsx
+        stx zlLSP
+        ldx zlGSP
+        txs
+irqR:` : ''}        pla
         tay
         pla
         tax
@@ -18951,14 +19017,17 @@ fallMid:lda $d011
         sta $d011
         lda frameCnt
         sta fmT0
-        ldx hlv                 ; the exit taken -- still the departing level's numbering here
+${BGLOAD ? `        jsr zlRun               ; BGLOAD: whatever the slack did not finish, finish now -- the
+                                ;   directory must be settled before vsEnter reads it
+` : ''}        ldx hlv                 ; the exit taken -- still the departing level's numbering here
         lda lvlNxtT,x
         cmp #$ff
         beq fmSame
         pha                     ; wallsBack does not preserve A
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place, exactly as at the hole before\n' : ''}        pla
         jsr ${VSLOTS ? 'vsEnter' : 'lvlLoad'}             ; the arriving level (and its load list); lvlLoad keeps DEN off
-        jsr mkRuns
+${BGLOAD ? `        jsr zlPrep              ; BGLOAD: live out of slot 0 if the next job will land there
+` : ''}        jsr mkRuns
         jsr objInit
 fmSame: jsr lvlStart            ; the arriving level's start: what the render below looks from
         lda #$00
@@ -18971,7 +19040,8 @@ fmBg:   jsr bgStep              ; the whole destination room, into fallBuf2
         lda bgPh
         cmp #$03
         bne fmBg
-        lda frameCnt
+${BGLOAD ? `        jsr zlStart             ; BGLOAD: and the arriving level's list, in the slack from here on
+` : ''}        lda frameCnt
         sec
         sbc fmT0
         sta fmTk
@@ -22709,7 +22779,17 @@ lvlLoad:
 ${VSLOTS ? `        inc vsLoads             ; VSLOTS: disk loads since boot, so a resident fall can be SEEN not to load
 ` : ''}        ora #$30                ; the file is ILV<n>: the level number IS its last character,
         sta nILV+3              ;   so choosing a level is one byte of self-modification
-        lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
+${BGLOAD ? `        ; BGLOAD: the resident lives at $0400 for good, so nothing is copied down; and this may
+        ; run in the LOADER context, between game frames, so it touches neither $d011 (the game
+        ; owns the display -- the midpoint blanks it itself) nor $99/$9a/$ba: the resident never
+        ; reads them (its code was scanned), and the engine uses $99/$9a as mq/plo. (The comment
+        ; below about "the three KERNAL bytes the resident reads" predates that scan.)
+        ldx #<nILV
+        ldy #>nILV
+        jsr ${hx16(KRILL_RESIDENT_AT)}   ; = loadraw
+        sta llErr
+        rts
+` : ''}${BGLOAD ? '' : `        lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
         sta llZP
         lda $9a
         sta llZP+1
@@ -22727,8 +22807,8 @@ klUn:   lda krillRt,x
         bne klUn
         lda $d011               ; DEN off across the transfer: badlines and sprite DMA steal the
         pha                     ;   cycles the serial handshake needs, and the fall is on screen
-        and #$ef
-        sta $d011
+${process.env.LLDEN ? '' : `        and #$ef
+`}        sta $d011               ; (LLDEN=1, a test: leave the display ON -- can Krill load under badlines?)
         ldx #<nILV
         ldy #>nILV
         jsr ${hx16(KRILL_RESIDENT_AT)}   ; = loadraw, at the address it was assembled for
@@ -22742,14 +22822,14 @@ klUn:   lda krillRt,x
         lda llZP+1
         sta $9a
         rts
-nILV:   !byte ${[...'ILV1'].map(c => hx(c.charCodeAt(0))).join(',')},0
+`}nILV:   !byte ${[...'ILV1'].map(c => hx(c.charCodeAt(0))).join(',')},0
 llZP:   !fill 2, 0              ; DFLTN, DFLTO
 llErr:  !byte 0
 ${VSLOTS ? `
 ; ---- VSLOTS: which level is in which slot, and pointing the engine at the live one ----
 ; Slot 0 is the bank-3 slot the disk loader fills; slot 1 is a page-aligned buffer in the arena.
-vsLvT:  !byte $ff,$ff,$ff,$ff   ; the level each slot holds ($ff = empty)
-vsPgT:  !byte ${hx(SLOT_AT >> 8)},>lvlSlot1,>lvlSlot2,>lvlSlot3   ; ...and the page it starts on
+vsLvT:  !byte ${Array(VS_N).fill('$ff').join(',')}   ; the level each slot holds ($ff = empty)
+vsPgT:  !byte ${hx(SLOT_AT >> 8)},${VS_ARENA.map(n => '>' + n).join(',')}   ; ...and the page it starts on
 vsLive: !byte 0                 ; the slot the live level is in
 vsBooted:!byte 0                ; set once: entry is also the death RESTART, which must not re-run vsBoot
 vsX:    !byte 0                 ; vsList's place in the load list
@@ -22928,8 +23008,160 @@ vsBoot: lda vsBooted
         sta vsLvT
         lda #$00
         sta vsLive
-        jmp vsList
+${BGLOAD ? `        jsr zlPrep              ; BGLOAD: live out of slot 0 if anything must land there...
+${process.env.BGSYNCTEST ? `        jsr zlStart             ; BGSYNCTEST: the same job, run to COMPLETION at once -- the loader
+        jmp zlRun               ;   context without a single suspension, to separate the two causes` : `        jmp zlStart             ;   ...and the list loads in the slack from the first frame on`}` : `        jmp vsList`}
 vsBDn:  rts
+${BGLOAD ? `
+; ---- BGLOAD: loading in the FRAME SLACK ----
+; Two execution contexts share the stack page: the game below $0200 from $01ff down (it never
+; goes deeper than 64 bytes -- measured with STKFILL), the loader from $017f down. A context is
+; saved as an IRQ frame, PCH PCL P A X Y, exactly the layout irq: pushes and irqd pops, so the
+; IRQ can switch contexts on its way out and either kind of switch resumes through zlPop.
+zlOn:   !byte 0                 ; a background job exists (the loader context is resumable)
+zlIn:   !byte 0                 ; the CPU is in the loader context right now
+zlSync: !byte 0                 ; run the loader to completion: the IRQ must not hand back
+zlGSP:  !byte 0                 ; the game's saved stack pointer
+zlLSP:  !byte 0                 ; the loader's
+zlTk:   !byte 0,0               ; ticks the current job has been running, wall clock (frameCnt)
+zlT0:   !byte 0,0
+zlLog:  !fill 8, 0              ; the last jobs' durations in ticks (low bytes), for probing
+zlLogF: !fill 8, 0              ; ...and how many slices each took
+zlY0:   !byte 0,0               ; tick of the job's first slice
+zlYF:   !byte 0                 ; frameCnt when the current slice began
+zlYT:   !byte 0,0               ; ticks from first slice to done: the job's real length in play
+zlFr:   !byte 0,0               ; game frames that yielded to it in that time
+zlLN:   !byte 0
+
+; zlNeed: carry SET if the live level's list names a level that is not resident.
+zlNeed: ldx #$00
+zlNL:   lda lvlWantT,x
+        cmp #$ff
+        beq zlNNo
+        stx vsX
+        jsr vsRes
+        ldx vsX
+        bcc zlNYes
+        inx
+        cpx #${hx(VS_LW)}
+        bne zlNL
+zlNNo:  clc
+        rts
+zlNYes: sec
+        rts
+
+; zlPrep: if a background load will be needed and the live level sits in slot 0 -- the loader's
+; landing zone -- move it out now, while the caller can afford a repoint (boot, or the midpoint's
+; black). The background job then never touches the live level or the engine's pointers.
+zlPrep: jsr zlNeed
+        bcc zlPDn
+        lda vsLive
+        bne zlPDn
+        jsr vsOut               ; copies it over vsVic's slot and repoints the engine there
+zlPDn:  rts
+
+; zlStart: a fresh loader context whose first resume enters zlBody. Only if there is work.
+zlStart:jsr zlNeed
+        bcc zlSDn
+        lda #>zlBody
+        sta $017f
+        lda #<zlBody
+        sta $017e
+${process.env.BGSYNCTEST ? `        php                     ; BGSYNCTEST: the starter's P -- I SET at boot, where the raster IRQ
+        pla                     ;   is not installed yet
+` : `        lda #$20                ; P: I CLEAR, always. The job is STARTED at boot (I set) but only ever
+                                ;   RESUMED from the raster wait, where the IRQ is live -- and the IRQ
+                                ;   is what hands the CPU back. Inheriting the boot's I flag made the
+                                ;   whole load one slice with the game frozen (zlFr was 1).
+`}        sta $017d
+        lda #$00
+        sta $017c
+        sta $017b
+        sta $017a
+        lda #$79
+        sta zlLSP
+        lda #$00                ; a new job: its own slice count (and so its own first-slice tick)
+        sta zlFr
+        sta zlFr+1
+        lda frameCnt
+        sta zlT0
+        lda frameCnt+1
+        sta zlT0+1
+        lda #$01
+        sta zlOn
+zlSDn:  rts
+
+; zlBody: the loader context's whole program. vsList is the same code the synchronous path ran;
+; zlPrep guaranteed slot 0 is not the live level, so it only ever loads and copies.
+zlBody: jsr vsList
+        lda frameCnt
+        sec
+        sbc zlY0
+        sta zlYT
+        lda frameCnt+1
+        sbc zlY0+1
+        sta zlYT+1
+        lda frameCnt            ; how long the job took on the wall clock
+        sec
+        sbc zlT0
+        sta zlTk
+        lda frameCnt+1
+        sbc zlT0+1
+        sta zlTk+1
+        ldx zlLN
+        lda zlYT                ; per job: its length in play (first slice to done) and its slices
+        sta zlLog,x
+        lda zlFr
+        sta zlLogF,x
+        inx
+        txa
+        and #$07
+        sta zlLN
+        sei
+        lda #$00
+        sta zlOn                ; done: this context is never resumed again
+        sta zlIn
+        ldx zlGSP
+        txs
+        jmp zlPop
+
+; zlGo: game -> loader. Called by jsr; returns when the game is resumed (by the IRQ at the end of
+; the slack, or by zlBody finishing). Builds the game's IRQ frame out of the jsr's return address.
+zlGo:   php
+        sei
+        pha
+        txa
+        pha
+        tya
+        pha
+        tsx
+        inc $0105,x             ; rti returns to the address itself, jsr pushed it minus one
+        bne zlG1
+        inc $0106,x
+zlG1:   stx zlGSP
+        lda frameCnt            ; the video frame this slice began in: if the IRQ finds a NEWER one,
+        sta zlYF                ;   the band below was missed and the game gets the CPU back at once
+        ldx zlLSP
+        txs
+        lda #$01
+        sta zlIn
+zlPop:  pla
+        tay
+        pla
+        tax
+        pla
+        rti
+
+; zlRun: run the job to COMPLETION, now (the midpoint's black, where nothing is waiting).
+zlRun:  lda zlOn
+        beq zlRDn
+        lda #$01
+        sta zlSync
+        jsr zlGo
+        lda #$00
+        sta zlSync
+zlRDn:  rts
+` : ''}
 
 ; vsEnter: A = the level being entered, from the fall. Resident: repoint at it. Not: it lands in slot 0
 ; -- whose occupant is kept only if there is an EMPTY slot for it, since the arriving level's list is
@@ -22956,8 +23188,8 @@ vsELd:  pla
         ldy #$00
 vsEHit: sty vsLive
         lda vsPgT,y
-        jsr lvlLive
-        jmp vsList
+${BGLOAD ? `        jmp lvlLive             ; BGLOAD: the list is fallMid's background job, not run here` : `        jsr lvlLive
+        jmp vsList`}
 ;@@VSTAB@@
 ` : ''}`}
 
@@ -28149,7 +28381,7 @@ if (SOLO) {
 // rounding is exactly what four slots could not afford. runPlaneT/runFaceT likewise: indexed by run id
 // (< NRUN), never by a whole byte, so a page boundary is at most a cycle, never a wrong read.
 // remLoT too: by logical column (< NLOG), exactly as remHiT already is, unaligned. VSLOTS-only so the default layout stays put.
-const ALIGNED_T = { ...(VSLOTS ? { lvlSlot1: 256, lvlSlot2: 256, lvlSlot3: 256, ocos: 1, runPlaneT: 1, remLoT: 1 } : {}), mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
+const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 256])), ocos: 1, runPlaneT: 1, remLoT: 1 } : {}), ...(BGLOAD ? { stackLT: 256 } : {}), mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
     rayOffT: NLOG, colGrpT: NLOG, clampT: 256, clmp16: 256,
