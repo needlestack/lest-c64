@@ -3282,6 +3282,17 @@ if (PLAN === 3) {
     `and would always pick the hi half there`);
 }
 
+// The height cap the cell chooser applies (see hCap's note at the fall tail). An IMMEDIATE at every
+// site: `cmp hCap` was 4 cycles on 2-4 samples of every edge cell, `cmp #` is 2. With the fall's
+// tail compiled in, each site is labelled and the two places that change the cap patch them all
+// (hCapPatch) -- a few dozen cycles a tail frame, against two on every sample of every frame.
+const HCAP_SITES = [];
+const capCmp = () => {
+  if (!FALLTAIL) return 'cmp #101';
+  const l = `hcp${HCAP_SITES.length}`; HCAP_SITES.push(l);
+  return `${l}: cmp #101`;
+};
+const hCapPatch = () => HCAP_SITES.map(l => `        sta ${l}+1`).join('\n');
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
 const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255)
   .concat(FALLTAIL ? [...Array(FTROWS)].map((_, i) => (8 * (-1 - i) - 92) & 255) : []);
@@ -9371,7 +9382,7 @@ cbA     = $8450                 ; ... and the solid run start, or $ff for "alway
 cbB     = $8478
 faceIdT = $8200                 ; page-aligned: a column index must never need a 16-bit add
 cstepT  = $84a0                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $80f0                ; PLAN=2: the bucket index the code came from, and which
+bidx    = $15                  ; PLAN=2: the bucket index the code came from, and which
 thsel   = $80f1                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
 paqL    = $80f6                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
 paqH    = $80f7
@@ -9381,8 +9392,8 @@ rqH     = $80fc                 ; rqH (0..3) picks which quarter of the 1024-ent
                                 ; the last, so $cbf9 was never the live one. Removed rather
                                 ; than left as a trap for the next reader.
 cqtmp   = $80f2                 ; the colour this cell needs, while both its rows are queued
-cmtmp   = $80f4                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
-cmv     = $80f5                 ; the ninth index bit -- the two columns the bucket throws away
+cmtmp   = $86                   ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $b0                   ; the ninth index bit -- the two columns the bucket throws away
 ${PLAN === 2 ? `cqN     = $80f3                 ; entries in the colour queue
 cqp     = $3e                   ; 2 bytes: colour RAM pointer, flush only
 cqLo    = $8100                 ; colour queue: address low, high, and the value to write.
@@ -11595,6 +11606,11 @@ m8l2:   tax
 ; Each chain slot also writes the mirrored row, so both halves are painted in one pass;
 ; charset B (raster-split at the horizon) makes the same char code render upside down.
 renderSym:
+        lda #$ff                ; VSPLIT: vsOn names the COLUMN whose stack is in progress, so it
+        sta vsOn                ;   is reset once a frame here rather than at every column head --
+                                ;   39 clears a frame for a stack that starts ~2 times. $ff is no
+                                ;   column, and without this a stale number from last frame could
+                                ;   match the same column this frame.
         lda baseHi
         cmp #${hx(SCR_A >> 8)}
         beq rfBufA
@@ -11634,7 +11650,7 @@ ${SEAMS && true ? '        sty rfCb3+1\n' : ''}
         ; X is the cell column and the chains index by it, so it has to survive; Y and A are
         ; free here, which is all this needs.
 rfCol:  stx colc
-        lda #$00\n        sta vsOn                ; VSPLIT: no stack in progress\n${EDGCHK ? `        ; EDGCHK: is this cell column's colH bit-identical to last frame's? That is exactly
+${EDGCHK ? `        ; EDGCHK: is this cell column's colH bit-identical to last frame's? That is exactly
         ; what an edge-band cache would have to key on, so counting it prices the idea. X must
         ; survive -- it is the cell column and the run-cache tests below index on it.
         ldy col4T,x
@@ -11773,7 +11789,7 @@ ${RAYCNT ? '        inc edgN\n' : ''}${NOEDGE ? `        lda #${hx(SOLID)}
         lda col4T,x
         tax                     ; X = 4*column -> logical column of this cell
         lda colH,x              ; cap here, not over all 160 columns: (h + K) has to fit a
-        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; signed byte, and colH is deliberately left uncapped so the
+        ${capCmp()}                ; signed byte, and colH is deliberately left uncapped so the
         bcc rfCp0               ; interpolator's merged spans stay linear
         lda #100
 rfCp0:  clc
@@ -11782,7 +11798,7 @@ rfCp0:  clc
         lda clmp16,y
         sta hh0                 ; left level, already shifted into the high nibble
         lda colH+3,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}
+        ${capCmp()}
         bcc rfCp3
         lda #100
 rfCp3:  clc
@@ -11825,7 +11841,7 @@ ${PLAN === 2 ? `        sty bidx                ; the pair's threshold is indexe
         ; The three step sites still call calcM; they clobber X and only 2.7 cells a frame
         ; reach them, so a second inlined copy there would be 40 bytes for nothing.
         lda colH+1,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; same cap as the endpoints: (h + K) must fit a signed byte
+        ${capCmp()}                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rmpM1
         lda #100
 rmpM1:  clc
@@ -11834,7 +11850,7 @@ rmpM1:  clc
         lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}
+        ${capCmp()}
         bcc rmpM2
         lda #100
 rmpM2:  clc
@@ -11888,7 +11904,7 @@ vsNo:
         adc qmColT,y
         tax
         lda colH,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; same cap as the endpoints: (h + K) must fit a signed byte
+        ${capCmp()}                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rfMc
         lda #100
 rfMc:   clc
@@ -11980,7 +11996,7 @@ ${PLAN === 2 ? `        ; ---- which half of the pair does this cell show? ----
         lda col4T,x
         tax
         lda colH+1,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}                ; same cap as the endpoints: (h + K) must fit a signed byte
+        ${capCmp()}                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rcM1
         lda #100
 rcM1:   clc
@@ -11989,7 +12005,7 @@ rcM1:   clc
         lda clamp8T,y           ; LEVEL 0..8, matching the offline thresholds -- not clampT
         sta cqtmp               ; free scratch: the colour is not chosen until below
         lda colH+2,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}
+        ${capCmp()}
         bcc rcM2
         lda #100
 rcM2:   clc
@@ -12039,8 +12055,9 @@ rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc vsChk
         jmp rfSolid
-vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ----
-        beq rfEdgeL             ; no: the ordinary selection
+vsChk:  ldx vsOn                ; ---- VSPLIT: inside THIS column's stack? ----
+        cpx colc                ;   (X, not A: A is erow and the compare below needs it)
+        bne rfEdgeL             ; no: the ordinary selection
         cmp vsRow               ; A = erow: before the far top's row, the pure split
         bcs vsEnd
         clc
@@ -12054,7 +12071,7 @@ vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ---
         lda vsCode
         sta ecode
         jmp (jv)                ; -> edA<row> -> inc erow -> jmp rfEdgeT
-vsEnd:  lda #$00                ; the far top's row and below: back to real selection
+vsEnd:  lda #$ff                ; the far top's row and below: back to real selection
         sta vsOn
         jmp rfEdgeL
 rfSolid:${SEAMS && true ? `; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
@@ -12135,7 +12152,7 @@ calcM:  ldx colc
         lda col4T,x
         tax
         lda colH+1,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}
+        ${capCmp()}
         bcc cm1
         lda #100
 cm1:    clc
@@ -12144,7 +12161,7 @@ cm1:    clc
         lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
-        cmp ${FALLTAIL ? 'hCap' : '#101'}
+        ${capCmp()}
         bcc cm2
         lda #100
 cm2:    clc
@@ -23349,7 +23366,7 @@ vsRgt:  tay                     ; right is near: A = left height = the far one
         ldy kpos
         lda vsplitR,y
         sta vsCode
-vsSet:  lda #$01
+vsSet:  lda colc                ; the stack belongs to this column (see renderSym's entry)
         sta vsOn
         rts
 seamOne:
@@ -24333,7 +24350,9 @@ ${FALLTAIL ? `
 ; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
 fallTail:
         lda #$ff                ; no height cap up here: see hCap
-        sta hCap
+${hCapPatch()}
+        sta vsOn                ; ...and no VSPLIT stack: vsOn names a column, and renderSym's
+                                ;   last one could match a tail column (A is $ff already)
         lda #15                 ; erow 13..17 + 15 -> chain entries 28..32
         sta bufOff
         ldx #39
@@ -24376,7 +24395,7 @@ ftNext: ldy ftR
         dex
         bpl ftCol
         lda #101                ; and back, before anything renders the screen again
-        sta hCap
+${hCapPatch()}
         lda #$00                ; ...and bufOff, which rfStore turns into a chain index. Left at
         sta bufOff              ;   15 it points the NEXT store at entries 28..34 -- the tail's
                                 ;   own stubs, which write into fallTailB. The background render
@@ -24384,7 +24403,7 @@ ftNext: ldy ftR
                                 ;   hypothetical.
         rts
         ; ---- the tail's data and store stubs ----
-hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
+; hCap (now the IMMEDIATE operand of every capCmp site): the height cap the cell chooser applies. 101 for the screen,
                                 ;   where K is +4 at the horizon and an uncapped h would wrap the
                                 ;   index; $ff for the tail rows, where K is -100 to -132 and the
                                 ;   cap is the whole problem -- it flattens every wall with h>100

@@ -66,27 +66,27 @@ qhi     = $16
 col     = $17
 tmp     = $1f
 baseHi  = $22
-paF     = $56a9                  ; low byte of the 16-bit player angle; pa is the high
-smCnt   = $56ac                  ; SLOWMO: frames left before the auto-mover steps again
-hazCur  = $56ad                  ; the cell whose run-table patches are currently applied
+paF     = $56b8                  ; low byte of the 16-bit player angle; pa is the high
+smCnt   = $56bb                  ; SLOWMO: frames left before the auto-mover steps again
+hazCur  = $56bc                  ; the cell whose run-table patches are currently applied
                                  ; $8060-$8073 are free: they held the sprite GRID walk and its
                                  ; debug capture, both gone with the six-sprite angel
-oqa     = $6182                  ; 9-bit angle being folded onto the quarter circle
-opaqL   = $6184                  ; the paq the cached frame trig was taken at
-opaqH   = $6185
-dtv     = $569e
-dtm     = $56a7                  ; elapsed ticks scaled for movement, and for turning
-dtt     = $56a8
-rxF     = $56aa                  ; the sub-quantum remainder of each axis' step, carried to the
-ryF     = $56ab                  ;   next frame instead of being truncated away (see moveApply)
-lastMv  = $569f
-dxs     = $56a0
-dxsH    = $56a1
-dys     = $56a2
-dysH    = $56a3
-dxSgn   = $56a4
-dySgn   = $56a5
-rowv    = $56a6                  ; keyboard row 1, held so SHIFT/E/S read it once
+oqa     = $60fb                  ; 9-bit angle being folded onto the quarter circle
+opaqL   = $60fd                  ; the paq the cached frame trig was taken at
+opaqH   = $60fe
+dtv     = $56ad
+dtm     = $56b6                  ; elapsed ticks scaled for movement, and for turning
+dtt     = $56b7
+rxF     = $56b9                  ; the sub-quantum remainder of each axis' step, carried to the
+ryF     = $56ba                  ;   next frame instead of being truncated away (see moveApply)
+lastMv  = $56ae
+dxs     = $56af
+dxsH    = $56b0
+dys     = $56b1
+dysH    = $56b2
+dxSgn   = $56b3
+dySgn   = $56b4
+rowv    = $56b5                  ; keyboard row 1, held so SHIFT/E/S read it once
 dxv     = $23
 dyv     = $24
 nxL     = $25
@@ -122,9 +122,9 @@ dpy     = $55
 ppHi    = $56
 ppLo    = $57
 tmp2    = $58
-vsOn    = $56ff                 ; VSPLIT: this column is a step column with a stack in progress
-vsRow   = $59fe                 ;   the row the FAR wall's top lands in (rbT of the far height)
-vsCode  = $59ff                 ;   the pure-split glyph for this column's kpos and side
+vsOn    = $5dff                 ; VSPLIT: this column is a step column with a stack in progress
+vsRow   = $56fe                 ;   the row the FAR wall's top lands in (rbT of the far height)
+vsCode  = $56ff                 ;   the pure-split glyph for this column's kpos and side
 kpos    = $6c                   ; step path: boundary position, and qB held across the
 qbv     = $6b                   ;   middle-column read that needs A and X
 spanL   = $60
@@ -275,18 +275,18 @@ cbA     = $5d50                 ; ... and the solid run start, or $ff for "alway
 cbB     = $5d78
 faceIdT = $5f00                 ; page-aligned: a column index must never need a 16-bit add
 cstepT  = $5da0                 ; per cell-column (40): face-boundary column, 0 = none
-bidx    = $6186                ; PLAN=2: the bucket index the code came from, and which
-thsel   = $6187                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
-paqL    = $60fd                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
-paqH    = $60fe
-rqL     = $60ff                 ; and this ray's 10-bit angle: rqL is the table index,
-rqH     = $5efe                 ; rqH (0..3) picks which quarter of the 1024-entry table.
+bidx    = $15                  ; PLAN=2: the bucket index the code came from, and which
+thsel   = $5efe                 ; threshold table to read it out of (0 = ramp, 1..3 = step k)
+paqL    = $59fd                 ; FINEANG: pa*4 as a 10-bit value, formed ONCE a frame
+paqH    = $59fe
+rqL     = $59ff                 ; and this ray's 10-bit angle: rqL is the table index,
+rqH     = $bdaa                 ; rqH (0..3) picks which quarter of the 1024-entry table.
                                 ; It was declared TWICE, at $cbf9 and here; the assembler takes
                                 ; the last, so $cbf9 was never the live one. Removed rather
                                 ; than left as a trap for the next reader.
-cqtmp   = $6188                 ; the colour this cell needs, while both its rows are queued
-cmtmp   = $60fb                 ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
-cmv     = $60fc                 ; the ninth index bit -- the two columns the bucket throws away
+cqtmp   = $5eff                 ; the colour this cell needs, while both its rows are queued
+cmtmp   = $86                   ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
+cmv     = $b0                   ; the ninth index bit -- the two columns the bucket throws away
 
 ; bfsLast and mulWY were the ONLY live equates on page $7c00 -- everything else there is the
 ; PROFMAX/SEAMPRE/SEAMCNT clusters, now gated above. The hole report reserves a whole PAGE per
@@ -421,7 +421,7 @@ ocol    = $6210
 ocl     = $6212
 ocr     = $6213
 oidx    = $6217
-onv     = $56e5
+onv     = $6182
 ohtmp   = $60c7
 carry   = $60c8                  ; 0 = empty hands, else the held entity's index + 1
 fcCell  = $60c9                  ; the cell directly in front of the player, and its parts
@@ -431,37 +431,37 @@ okNew   = $60cc                  ; SPACE, debounced to one action a press
 okOld   = $60cd
 okJoy   = $60ce                  ; how many slots this rung of the hole wants
 onvH    = $60c6                  ; the HOLE allocates downward from 8: it is flat on the floor,
-omEn    = $56e6
-omXX    = $56e7
-omYY    = $56e8
-omPri   = $56e9
-omX8    = $56ea
-omBit   = $56eb
+omEn    = $6183
+omXX    = $6184
+omYY    = $6185
+omPri   = $6186
+omX8    = $6187
+omBit   = $6188
 skJoy   = $9fc3                  ; SNDTEST: the live cutoff / pulse-width tweak keys
 skTmp   = $9fc4
 skOld   = $9fc5
 skNew   = $9fc8
 skEdge  = $9fc9
-marked  = $56e3                  ; 0, or the index+1 of the angel that stepped up beside you
-dieSt   = $56e4                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
-dieDir  = $bda0                  ; the turn the player was making, locked in
-dieOpa  = $bda1
-dieP    = $bda2                  ; which picture of this death's sequence is on screen
-dieRem  = $bda3                  ; whole angle units the sweep still owes
-dieCl   = $bda4                  ; scratch: dx+1 and dy+1 while the bearing index is built
-dieKik  = $56b6                  ; frames left in the kick's downward sweep
-dieFqL  = $56b4                  ; the rising tone's 16-bit frequency
-dieFqH  = $56b5
-dieSgn  = $56b3                  ; oaS at the last projection: which side of centre
-dieLk   = $56b2                  ; consecutive frames the angel has read as centred
-dieIdx  = $56b1                  ; the entity the death sweep is steering onto
-dieDirF = $56af                  ; fine half of the captured turn rate
-dieOpaF = $56b0
-dieCy   = $56ae                  ; ($8060-$8073 came free with the six-sprite angel)
-dieOff  = $bda6                  ; the angel's column offset from centre, from the projection
-dieT0   = $bda7                  ; frameCnt when they died: everything is measured from here
-dieTck  = $bda8                  ; the last palette tick written, so a fill happens once
-dkJoy   = $bdaa
+marked  = $56f2                  ; 0, or the index+1 of the angel that stepped up beside you
+dieSt   = $56f3                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
+dieDir  = $56f4                  ; the turn the player was making, locked in
+dieOpa  = $56f5
+dieP    = $56f6                  ; which picture of this death's sequence is on screen
+dieRem  = $56f7                  ; whole angle units the sweep still owes
+dieCl   = $56f8                  ; scratch: dx+1 and dy+1 while the bearing index is built
+dieKik  = $56c5                  ; frames left in the kick's downward sweep
+dieFqL  = $56c3                  ; the rising tone's 16-bit frequency
+dieFqH  = $56c4
+dieSgn  = $56c2                  ; oaS at the last projection: which side of centre
+dieLk   = $56c1                  ; consecutive frames the angel has read as centred
+dieIdx  = $56c0                  ; the entity the death sweep is steering onto
+dieDirF = $56be                  ; fine half of the captured turn rate
+dieOpaF = $56bf
+dieCy   = $56bd                  ; ($8060-$8073 came free with the six-sprite angel)
+dieOff  = $56fa                  ; the angel's column offset from centre, from the projection
+dieT0   = $56fb                  ; frameCnt when they died: everything is measured from here
+dieTck  = $56fc                  ; the last palette tick written, so a fill happens once
+dkJoy   = $6195
 dieLat  = $5fd7                  ; dieSt, LATCHED at raster 250. sprPal runs in the IRQ and read
                                  ;   dieSt direct, so the frame dieGo set it the shared sprite
                                  ;   inks changed WITHIN that frame -- while obC goes out through
@@ -481,9 +481,9 @@ sndMode = $9fca                  ; index into sndModeT: low / band / high / notc
 sndVol  = $9fcb
 sndFc   = $9fc6
 sndPw   = $9fc7
-sndD    = $569b                  ; nearest angel, in cells; and the scratch the search needs
-sndI    = $569c
-sndT    = $569d
+sndD    = $56aa                  ; nearest angel, in cells; and the scratch the search needs
+sndI    = $56ab
+sndT    = $56ac
 
 omMc    = $620e
 amIdx   = $5df6                  ; angel movement scratch: entity, chosen step, target cell
@@ -514,11 +514,11 @@ bfsTail = $60e2
 bfsC    = $5fce
 bfsND   = $5fcf
 bfsN    = $5fd0
-hlFill  = $6189                  ; the fill ink of the hole-like entity being projected
-hlKind  = $618a                  ; which ladder holeTail is currently patched for
-hoI     = $618b                  ; holeOne's loop: which hole-like entity
+hlFill  = $6192                  ; the fill ink of the hole-like entity being projected
+hlKind  = $6193                  ; which ladder holeTail is currently patched for
+hoI     = $6194                  ; holeOne's loop: which hole-like entity
 ooCX    = $6211                  ; orbOcc1: the cell the entity is being tested from
-ooAI    = $bda5                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
+ooAI    = $56f9                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $6216                  ; buffered $d01c. STALE: the held object was a hi-res icon once;
                                  ;   it is the full multicolor sprite now, so this is $ff always
                                  ;   and the held object shares $d025/$d026 like everything else
@@ -574,7 +574,7 @@ fallSnapD = $5700                ; the destination room, snapshotted before the 
 fallSnapS = $5a00                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
-fallSt  = $5eff                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
+fallSt  = $bea0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
                                  ; CLEARED AT ENTRY -- see fsZero. It used to be initialised by
                                  ; nothing at all, which was free only while it sat in a page that
                                  ; happened to come up zero. The relayout rehomed it ($5aff in the
@@ -588,8 +588,8 @@ fallSt  = $5eff                  ; 0 normal, 1 dropping, 2 render the new view, 
                                  ; EXACTLY the pfN bug (see pfInit), second instance. The rule it
                                  ; teaches: a variable's initialisation is not free because its page
                                  ; is zero today, and a layout tool is allowed to move it.
-fdN     = $bda9
-ohP     = $56ec                  ; hole scratch: the left half's sprite pointer, the hires-pixel
+fdN     = $bea1
+ohP     = $6189                  ; hole scratch: the left half's sprite pointer, the hires-pixel
 ohT     = $620f
 ohWc    = $5fa0                  ; how many COLUMNS one sprite of this rung covers, 12 or 24
 ohBL    = $5fa1                  ; this slice's column + 12, signed and 16-bit: it runs to
@@ -662,7 +662,7 @@ hlv     = $5fa3                  ; which hole is live, 0 or 1, and that times 32
 hlvOf   = $5fa4                  ;   per-hole line-of-sight map
 ohF     = $6214                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
 pcell   = $6215                  ; the cell the player stands in, for the hole's LOS gate
-odb     = $56ed                  ; DBGORB scratch: six bytes shown as hex on screen row 3
+odb     = $618a                  ; DBGORB scratch: six bytes shown as hex on screen row 3
 obX     = $5fa5
 obY     = $5fad
 obP     = $5fb5
@@ -670,46 +670,46 @@ obC     = $5fbd                  ; per-sprite state, flushed to the VIC in the b
 opx     = $5fd1                  ; the viewpoint orbMove last projected from
 opy     = $5fd3
 opa     = $5fd5
-ofx     = $56f5
-ofy     = $56f6
-kxc     = $56f7
-kxs     = $56f8
-kyc     = $56f9
-kys     = $56fa
-kfL     = $56fb
-kfH     = $56fc
-krL     = $56fd
-krH     = $56fe
+ofx     = $bda0
+ofy     = $bda1
+kxc     = $bda2
+kxs     = $bda3
+kyc     = $bda4
+kys     = $bda5
+kfL     = $bda6
+kfH     = $bda7
+krL     = $bda8
+krH     = $bda9
 oix     = $d0   ; GATEFAST: zero page -- the gate's inlined cone and orbProj both hit these
 oiy     = $d1
-oax     = $56cf
-oay     = $56d0
-oixS    = $56d1
-oiyS    = $56d2
-ocl2    = $566e                 ; the bounding box in COLUMNS, not cells
-ocmax   = $566f
-obCL    = $5673                 ; per sprite slot, for the second pass: cell range and
-obCR    = $567b                 ; bounding-box edge masks, so pass 2 need not reproject
-obBL    = $5683
-obBR    = $568b
-obIX    = $5693
+oax     = $56de
+oay     = $56df
+oixS    = $56e0
+oiyS    = $56e1
+ocl2    = $567d                 ; the bounding box in COLUMNS, not cells
+ocmax   = $567e
+obCL    = $5682                 ; per sprite slot, for the second pass: cell range and
+obCR    = $568a                 ; bounding-box edge masks, so pass 2 need not reproject
+obBL    = $5692
+obBR    = $569a
+obIX    = $56a2
 obV     = $9fcc                 ; size variant per slot, so orbSeam can find the sprite's
 obOcc   = $60d3                 ; per slot: bit 7 = this orb has a possible occluder here
-obL     = $56d3                 ; per slot: the orb's TIGHT column range, which the cell range
-obR     = $56db                 ;   cannot give -- a cell is 4 columns and a box starts inside one
+obL     = $56e2                 ; per slot: the orb's TIGHT column range, which the cell range
+obR     = $56ea                 ;   cannot give -- a cell is 4 columns and a box starts inside one
 osI     = $60e7                 ; occStamp: slot being stamped, and how many there are
 osN     = $60e8
 osL     = $60e9                 ; the span/box intersection being stamped
 osR     = $60ea
 osRow   = $60eb                 ; char row range
 osRowB  = $60ec
-ohFst   = $5670                 ; the stamp's two edge glyphs, chosen once per span
-ohLst   = $5671
-ohFstW  = $56ee                 ; the same two edge glyphs backed by white
-ohLstW  = $56ef
-ohFstM  = $56f0                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
-ohLstM  = $56f1                 ;   what the cell shows outside the stamp, which picks the backing
-ohMsk   = $56f2                 ; oSBack scratch: the mask under test, and the saved X
+ohFst   = $567f                 ; the stamp's two edge glyphs, chosen once per span
+ohLst   = $5680
+ohFstW  = $618b                 ; the same two edge glyphs backed by white
+ohLstW  = $618c
+ohFstM  = $618d                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
+ohLstM  = $618e                 ;   what the cell shows outside the stamp, which picks the backing
+ohMsk   = $618f                 ; oSBack scratch: the mask under test, and the saved X
 osSrc   = $a0                   ; OCCSYN: source glyph pointer (2). The destinations are patched
                                 ;   into oSPut's own stores (oSPa/oSPb), not held here.
 osCov   = $a2                   ;   the covered-column pair mask
@@ -722,16 +722,16 @@ osPY    = $a9                   ;   Y saved across the row loop
 osLast  = $cf                   ;   1 on the BOTTOM row of the stamp, 0 above it. The only row
                                 ;   where a cell can run past the wall's base, so the only row
                                 ;   synthesis is allowed to consider -- see OCCSYNTH.
-ohMsX   = $56f3
-o2r     = $56f4                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
+ohMsX   = $6190
+o2r     = $6191                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
                                 ;   Not zero page: it is touched a handful of times per orb, in
                                 ;   the projection, never in a per-column loop.
 osDC    = $60ee                 ; occStamp: the de-seam's current cell column
 oSCnt   = $60ef                 ; DBGORB: cells stamped this frame, orbs that entered the walk,
 oSOrb   = $60f0                 ;   and spans visited -- the three numbers the cost is made of
 oSSpn   = $60f1
-oSHbase = $5dff                 ; OCCFBN: baseHi as occStamp saw it, latched
-oSHist  = $59fd                 ; OCCFBN: oSPut's branch histogram, 6 bytes, FREE-RUNNING.
+oSHbase = $5fff                 ; OCCFBN: baseHi as occStamp saw it, latched
+oSHist  = $56fd                 ; OCCFBN: oSPut's branch histogram, 6 bytes, FREE-RUNNING.
                                 ;   NOT in the $8500 page: that is the orb scratch page and it is
                                 ;   densely occupied, $8580 included -- and a 6-byte array declared
                                 ;   as ONE equate is only guarded for its first byte, so the
@@ -739,7 +739,7 @@ oSHist  = $59fd                 ; OCCFBN: oSPut's branch histogram, 6 bytes, FRE
                                 ;   readout / already-stamped / pre-built split / synthesised.
                                 ;   "Which branch does the cell that goes unstamped take" is not a
                                 ;   question to answer by reading the dispatch.
-oSDbg   = $5fff                 ; OCCFBN: 4 bytes. [0] occStamp entries, [2] renderCnt bumps as
+oSDbg   = $60ff                 ; OCCFBN: 4 bytes. [0] occStamp entries, [2] renderCnt bumps as
                                 ;   the REFERENCE. PAST oSHist's eight, not on top of them: both
                                 ;   live under the same flag, so sharing $70e8 would have had
                                 ;   oSDbg+0 and oSHist+0 counting into one byte. Declared here AND
@@ -765,7 +765,7 @@ ohRun   = $60e3                 ; the run id, held across the mask-byte lookup
 ohL     = $60e4                 ; the span being tested: its left column, and the index into bndT
 ohBX    = $60e5
 ohDbg   = $60e6                 ; ORBOCCDBG: furthest stage any orb reached this frame
-ocolN   = $5672                 ; centre column went left of 0: ocol holds the magnitude
+ocolN   = $5681                 ; centre column went left of 0: ocol holds the magnitude
 ocanO   = $60db                 ; the same bit while the candidate list is being walked
 
 bndT    = $59bd                 ; columns where a face or saturation state begins ($40 max)
@@ -2112,6 +2112,11 @@ m8l2:   tax
 ; Each chain slot also writes the mirrored row, so both halves are painted in one pass;
 ; charset B (raster-split at the horizon) makes the same char code render upside down.
 renderSym:
+        lda #$ff                ; VSPLIT: vsOn names the COLUMN whose stack is in progress, so it
+        sta vsOn                ;   is reset once a frame here rather than at every column head --
+                                ;   39 clears a frame for a stack that starts ~2 times. $ff is no
+                                ;   column, and without this a stale number from last frame could
+                                ;   match the same column this frame.
         lda baseHi
         cmp #$e0
         beq rfBufA
@@ -2152,8 +2157,6 @@ rfCbS:  sta rfCw1+1
         ; X is the cell column and the chains index by it, so it has to survive; Y and A are
         ; free here, which is all this needs.
 rfCol:  stx colc
-        lda #$00
-        sta vsOn                ; VSPLIT: no stack in progress
         ; colH is ONE linear ramp across any cell with no delimiter inside it, so its extremes
         ; are its END columns and the middle two need not be looked at. 97% of cells, measured.
         ; The four-way scan below is kept for the other 3%, where two linear pieces meet and the
@@ -2248,7 +2251,7 @@ rfEdgeL:
         lda col4T,x
         tax                     ; X = 4*column -> logical column of this cell
         lda colH,x              ; cap here, not over all 160 columns: (h + K) has to fit a
-        cmp hCap                ; signed byte, and colH is deliberately left uncapped so the
+        hcp0: cmp #101                ; signed byte, and colH is deliberately left uncapped so the
         bcc rfCp0               ; interpolator's merged spans stay linear
         lda #100
 rfCp0:  clc
@@ -2257,7 +2260,7 @@ rfCp0:  clc
         lda clmp16,y
         sta hh0                 ; left level, already shifted into the high nibble
         lda colH+3,x
-        cmp hCap
+        hcp1: cmp #101
         bcc rfCp3
         lda #100
 rfCp3:  clc
@@ -2296,7 +2299,7 @@ rfCp3:  clc
         ; The three step sites still call calcM; they clobber X and only 2.7 cells a frame
         ; reach them, so a second inlined copy there would be 40 bytes for nothing.
         lda colH+1,x
-        cmp hCap                ; same cap as the endpoints: (h + K) must fit a signed byte
+        hcp2: cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rmpM1
         lda #100
 rmpM1:  clc
@@ -2305,7 +2308,7 @@ rmpM1:  clc
         lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
-        cmp hCap
+        hcp3: cmp #101
         bcc rmpM2
         lda #100
 rmpM2:  clc
@@ -2358,7 +2361,7 @@ vsNo:
         adc qmColT,y
         tax
         lda colH,x
-        cmp hCap                ; same cap as the endpoints: (h + K) must fit a signed byte
+        hcp4: cmp #101                ; same cap as the endpoints: (h + K) must fit a signed byte
         bcc rfMc
         lda #100
 rfMc:   clc
@@ -2435,8 +2438,9 @@ rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc vsChk
         jmp rfSolid
-vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ----
-        beq rfEdgeL             ; no: the ordinary selection
+vsChk:  ldx vsOn                ; ---- VSPLIT: inside THIS column's stack? ----
+        cpx colc                ;   (X, not A: A is erow and the compare below needs it)
+        bne rfEdgeL             ; no: the ordinary selection
         cmp vsRow               ; A = erow: before the far top's row, the pure split
         bcs vsEnd
         clc
@@ -2450,7 +2454,7 @@ vsChk:  ldx vsOn                ; ---- VSPLIT: inside a step column's stack? ---
         lda vsCode
         sta ecode
         jmp (jv)                ; -> edA<row> -> inc erow -> jmp rfEdgeT
-vsEnd:  lda #$00                ; the far top's row and below: back to real selection
+vsEnd:  lda #$ff                ; the far top's row and below: back to real selection
         sta vsOn
         jmp rfEdgeL
 rfSolid:; A seam column always redraws. The cache byte HAS room to carry the seam variant as well --
@@ -2510,7 +2514,7 @@ calcM:  ldx colc
         lda col4T,x
         tax
         lda colH+1,x
-        cmp hCap
+        hcp5: cmp #101
         bcc cm1
         lda #100
 cm1:    clc
@@ -2519,7 +2523,7 @@ cm1:    clc
         lda clamp8T,y           ; the LEVEL 0..8, not clampT's 0..15 clamp index
         sta cmtmp
         lda colH+2,x
-        cmp hCap
+        hcp6: cmp #101
         bcc cm2
         lda #100
 cm2:    clc
@@ -8835,7 +8839,7 @@ orbOccHiT: !byte >orbOccT+0,>orbOccT+9,>orbOccT+18,>orbOccT+27,>orbOccT+36,>orbO
         ; further; past that it wants a different home. Both ends are guarded by the
         ; assembler's own "moves backward".
 ; [origin folded into the run above by compact.mjs]
-        * = $3dff
+        * = $3de8
         ; ---- how many raster interrupts the frame just drawn took ----
         ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
         ; front of you, not an average. Six of these is about 10 fps.
@@ -9203,7 +9207,7 @@ chainEnd:
         ; Out here only because the main code block ends a few bytes short of ORB_SMALL once
         ; PROFILE adds its ticks. Reached by a patched jsr from holeTail, so nothing falls in.
 ; [origin folded into the run above by compact.mjs]
-        * = $3e82
+        * = $3e6b
 ; X = h. A = the rung, or $ff for "past the smallest".
 hlRungH:cpx #$7d               ; past here the rung is constant, and the table stops there
         bcc hlRHc
@@ -9411,7 +9415,7 @@ orbVarT: !byte 15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12
         * = $b000
 bfsD1:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps
 ; [origin folded into the run above by compact.mjs]
-        * = $3ebc
+        * = $3ea5
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
 ; BFS guarantees one exists for every reachable cell, so the only $ff cases are a map that has
@@ -9953,7 +9957,7 @@ fHiT:   !byte 24,24,24,24,24,22,20,18,16,14,12,10,9,7,6,4,2,0,0,0,0,24,24,24,24,
         * = $8ce1
 krillRt: !fill 251, 0
 ; [origin folded into the run above by compact.mjs]
-        * = $4078
+        * = $4061
 ; ---- klPark / lvlLoad: THE LEVEL COMES OFF THE DISK ----
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
 ; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
@@ -10230,7 +10234,7 @@ moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
         !byte 232,233,234,236,237,239,240,242,244,245,247,248,250,251,253,254
 
 ; [origin folded into the run above by compact.mjs]
-        * = $40e3
+        * = $40cc
 ; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
 ; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
 ; that drawFps falling through into whatever follows it still does. The only branches that
@@ -10557,7 +10561,7 @@ a2F:    sta (fdB),y
 ; routine runs ONCE, at boot, and never again -- so it was the obvious thing to move out of
 ; contested space. Same reasoning that moved dpCand out of the main block.
 ; [origin folded into the run above by compact.mjs]
-        * = $42fb
+        * = $42e4
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -10761,7 +10765,7 @@ setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster
         ; it is COLD, jsr-entered from symPut once per level entry, and it fits whole in the page
         ; bndT was holding down on its own. See bndT for the move that freed it.
 ; [origin folded into the run above by compact.mjs]
-        * = $43f9
+        * = $43e2
 ; ---- the idol subsystem lives in the front of seamEdge's page ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
 ; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
@@ -10919,7 +10923,7 @@ seamEdge:
         ; !fill MAPN tails are NOT: those collapse to three bytes on a build whose live level is
         ; the 253-cell one. Code, not data, because the blocks that were full held code.
 ; [origin folded into the run above by compact.mjs]
-        * = $44ee
+        * = $44d7
 arcCdT: !byte 2,7,8,15,17,19,20,21,25,29,40,41,42,43,44,58,61,70,81,83,90,107,116,119,132,139,140,142,147,155,161,164,193
 
 ; ---- dpDiag: is this direction a squeeze THROUGH a corner? ----
@@ -10962,7 +10966,7 @@ dpCnr:  jsr dpCand              ; Z set when that corner cell is open
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
         ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
 ; [origin folded into the run above by compact.mjs]
-        * = $453f
+        * = $4528
 ; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
 ; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
 ; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
@@ -10973,7 +10977,7 @@ pedOff: ldy idolHand
         sta idolOnPedT,y
 poNo:   rts
 ; [origin folded into the run above by compact.mjs]
-        * = $454a
+        * = $4533
 dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
         ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
         ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
@@ -11095,7 +11099,7 @@ runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,6,0,0,0,0,0,0
 ; ---- snapCp: the half-height snapshot copy, out here because both its callers' blocks are
 ; full. 64 bytes of stable slack; the origin after it puts the cursor back.
 ; [origin folded into the run above by compact.mjs]
-        * = $4591
+        * = $457a
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         tay
@@ -11157,7 +11161,7 @@ rsT:    !byte 13,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $45c7
+        * = $45b0
         ; coarse delta tables vacated. It used to sit at $609b, a hole that only LEVEL 1's map
         ; leaves -- level 2's data ran straight through it and the build died. Everything from
         ; RELOC on is engine table space at fixed origins, so it is free on EVERY map.
@@ -11204,7 +11208,7 @@ snKDn:  rts
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
 ; [origin folded into the run above by compact.mjs]
-        * = $4611
+        * = $45fa
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
 ; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
@@ -11783,17 +11787,17 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; instruction added to it (one "lda #imm" becoming "lda abs") pushed emitted data over seB and
 ; failed the build. Ending at $bdff instead leaves that growth room in front of the scratch
 ; rather than behind it, where nothing can use it.
-seB     = $56b7                 ; the row being worked on
-seHi    = $56b8                 ; its high bits, brought into line with the low ones
-seNL    = $56b9                 ; ~lo
-seLo    = $56ba
-seT     = $56bb                 ; the adjacency union
-seW     = $56bc                 ; the pairs about to be flipped
-seMsk   = $56bd                 ; $55 or $00: does this level want the outline
-seN     = $56be                 ; glyphs left
-seC00   = $56bf                 ; 8 bytes: ground/ceiling pixels, per row
-seNB    = $56c7                 ; 8 bytes: the row being built, ending exactly at $bdff
-        * = $4900
+seB     = $56c6                 ; the row being worked on
+seHi    = $56c7                 ; its high bits, brought into line with the low ones
+seNL    = $56c8                 ; ~lo
+seLo    = $56c9
+seT     = $56ca                 ; the adjacency union
+seW     = $56cb                 ; the pairs about to be flipped
+seMsk   = $56cc                 ; $55 or $00: does this level want the outline
+seN     = $56cd                 ; glyphs left
+seC00   = $56ce                 ; 8 bytes: ground/ceiling pixels, per row
+seNB    = $56d6                 ; 8 bytes: the row being built, ending exactly at $bdff
+        * = $48e9
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -13045,7 +13049,7 @@ vsRgt:  tay                     ; right is near: A = left height = the far one
         ldy kpos
         lda vsplitR,y
         sta vsCode
-vsSet:  lda #$01
+vsSet:  lda colc                ; the stack belongs to this column (see renderSym's entry)
         sta vsOn
         rts
 seamOne:
@@ -13496,7 +13500,7 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
 ; [origin folded into the run above by compact.mjs]
-        * = $537c
+        * = $5365
 ; ---- lvlStart: put the player at the LIVE level's official start ----
 ; Boot and every death go through here. dieKey restarts with "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
@@ -13548,7 +13552,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; from $ae2a". They live in the stream now, with the other displaced lookups.
 
 ; [origin folded into the run above by compact.mjs]
-        * = $539c
+        * = $5385
 ; The page the pivot's three scratch tables vacated for VIC bank 3 (see PVBASE), and the only
 ; free run left in a four-level image big enough to hold fallTail in ONE piece -- the next
 ; largest is 36 bytes.
@@ -13631,7 +13635,15 @@ aclD:   rts
 ; rsv 18 keeps rfEdgeT looping, and edT4 returns instead of chaining, which ends the column.
 fallTail:
         lda #$ff                ; no height cap up here: see hCap
-        sta hCap
+        sta hcp0+1
+        sta hcp1+1
+        sta hcp2+1
+        sta hcp3+1
+        sta hcp4+1
+        sta hcp5+1
+        sta hcp6+1
+        sta vsOn                ; ...and no VSPLIT stack: vsOn names a column, and renderSym's
+                                ;   last one could match a tail column (A is $ff already)
         lda #15                 ; erow 13..17 + 15 -> chain entries 28..32
         sta bufOff
         ldx #39
@@ -13674,7 +13686,13 @@ ftNext: ldy ftR
         dex
         bpl ftCol
         lda #101                ; and back, before anything renders the screen again
-        sta hCap
+        sta hcp0+1
+        sta hcp1+1
+        sta hcp2+1
+        sta hcp3+1
+        sta hcp4+1
+        sta hcp5+1
+        sta hcp6+1
         lda #$00                ; ...and bufOff, which rfStore turns into a chain index. Left at
         sta bufOff              ;   15 it points the NEXT store at entries 28..34 -- the tail's
                                 ;   own stubs, which write into fallTailB. The background render
@@ -13682,7 +13700,7 @@ ftNext: ldy ftR
                                 ;   hypothetical.
         rts
         ; ---- the tail's data and store stubs ----
-hCap:   !byte 101               ; the height cap the cell chooser applies. 101 for the screen,
+; hCap (now the IMMEDIATE operand of every capCmp site): the height cap the cell chooser applies. 101 for the screen,
                                 ;   where K is +4 at the horizon and an uncapped h would wrap the
                                 ;   index; $ff for the tail rows, where K is -100 to -132 and the
                                 ;   cap is the whole problem -- it flattens every wall with h>100
@@ -13855,7 +13873,7 @@ clamp8T: !byte 0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8
         ; the same address and only fitted because level 1 has no hazard cells. They live in
         ; table space now (see HAZ_BASE), which is the same address on every map.
 ; [origin folded into the run above by compact.mjs]
-        * = $5491
+        * = $54a0
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
