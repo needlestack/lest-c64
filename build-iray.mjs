@@ -146,7 +146,6 @@ const CHAMBER = LVL === 3;              // the chamber level: corners like the o
 // NO LEVEL IS A STUB ANY MORE (2026-09-28): 5, 6 and 7 all have their own design. Kept as a
 // constant rather than torn out because STUB_MAP and the empty placement branches are what a
 // FOURTH errand room would start from, and the throw below still catches a level with no branch.
-const ERRAND = false;
 const STUB_MAP = [
   "######",
   "#....#",                             // PP at (1,1)
@@ -455,7 +454,6 @@ const IDOL_XY = [...Array(IDOL_N)].map((_, i) => {
   return IDOLSEAT ? (peds[IDOLSEAT_ON(i)] ?? peds[i]) : [peds[i][0] - 1, peds[i][1]];
 });
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
-const SOCK_WALL = LEVEL_WALLS[LVL]?.sockWall ?? [];
 const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
   const k = +(process.env.WALLOFF ?? 0);
   const g = rows.map(r => r.split(''));
@@ -772,7 +770,6 @@ const cellOf = (x, y) => y * MAPW + x;
 // 16 would be wrong the moment a 23-wide level was swapped in. mulW is a table lookup (rowMulT,
 // swapped per level); the asl chain it replaces was worth ~15 cycles a call at a few calls a
 // frame, and the DDA -- the one hot stride user -- steps by a variable it already loaded.
-const POW2W = false;
 const MULW  = '        jsr mulW';
 const ADDX  = (x, c = '') => `        clc\n        adc ${x}${c}`;
 const cellX  = c => c % MAPW;
@@ -826,7 +823,6 @@ const COMPACT = process.env.COMPACT !== '0';
 // Page-aligned because mapT sits at offset 0 and is the one table that must be (alignment audit,
 // 2026-09-29: every other per-level table is small and unaligned already).
 const SLOT_AT = +(process.env.SLOT_AT ?? 0xf500);
-const SLOT_PAGES = +(process.env.SLOT_PAGES ?? 3);      // 768 bytes; level 2's blob is 705
 // WHICH level file the boot stub names. Every level in CHAIN ships as its own file at the same
 // address; this picks the one the loader asks for. It is the ONLY thing that differs between a
 // disk that starts in level 1 and one that starts in level 2 -- the name string in the boot PRG.
@@ -2735,7 +2731,6 @@ if (process.env.OCCVRTDUMP) console.error(
 // ("jsr oSWall / bcc oSCCol") and skips every ramp or step. On a wall edge that is most of them, so
 // it stamped nothing at all at the user's pose -- a stale A/B that reads as "occlusion is broken",
 // which is the silent trap this file warns about elsewhere. Removed rather than kept as a choice.
-const OCCSYN = true;
 // OCCSYNTH=1 brings back the SYNTHESIS ARM: copying a wall-edge cell's own ramp into a scratch
 // glyph with 01 -> 11. DEFAULT OFF (the user, 2026-10-01: "I'm inclined to turn it off completely
 // and revisit if we ever see anything that needs it again... the occlusion stamp only needs to
@@ -2963,7 +2958,7 @@ if (ANGCHAR) {
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + ${NSEAM} seams = ${glyphs.length} > 256`);
 // OCCSYN's scratch codes are the top OCCSYN_N: they must not be allocated to anything. Checked
 // here, where the glyph list is final, rather than trusting that KCELL was refit low enough.
-if (OCCSYN && glyphs.length > 256 - OCCSYN_N) throw new Error(
+if (glyphs.length > 256 - OCCSYN_N) throw new Error(
   `charset has ${glyphs.length} codes; OCCSYN needs the top ${OCCSYN_N} free -- refit with a smaller KCELL, or OCCSYN=0`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + ${NSEAM} seam + 7 occluder ` +
   `+ 6 white-backed = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
@@ -4676,9 +4671,7 @@ const DIE      = process.env.DIE !== '0' && process.env.SNDTEST !== '1';
 // else -- pfAcc lands at $5c00 on a CHAIN=1 build, nowhere near $bc00 -- so there is no page
 // to contend for and no reason to demand DIE=0. Enforcing it made PROFILE depend on a flag
 // that does not itself boot, which is why the profiler looked broken when it was not.
-if (false && PROFILE && DIE) throw new Error(
-  'PROFILE=1 needs DIE=0: the profiler is at $bc00 (RELOC+$3600) and the relocated dieChk/dieGo ' +
-  'group claims the same page. Add DIE=0 -- a profiled build has no use for the cut scene.');
+
 // ---- the cut scene's pictures ----
 // death-pics.json is produced by build-facetest3.mjs (ASSET=1) and carries ONE 256-glyph charset
 // plus a screen map per picture. The charset is trained over a wider set than it ships -- the top
@@ -4751,7 +4744,6 @@ if (FACE_PACK) { PICS.chars = FACE_PACK.chars;
   PICS.maps = PICS.maps.map((m, i) => i < NPIC
     ? { ...m, map: m.map.map(c => FACE_PACK.map.get(c) ?? 0) } : m); }
 const FACE_NCHR = PICS.chars.length;      // 8 bytes a glyph, so 2048 is the full 256
-const FACE_BLANK = 0;
 // ---- EVERYTHING HERE IS IN SIXTIETHS, off frameCnt ----
 // The first version counted RENDER frames. The renderer runs at ~19fps and varies, so a 40-frame
 // fade took 2.1 seconds instead of 0.27 -- the same mistake tickDelta exists to undo.
@@ -4810,8 +4802,6 @@ const dieProf = [...Array(DIE_OUT >> DIE_SHIFT).keys()].map((t, _, a) => (1 - t 
 const dieScale = (DIE_SWEEP * 256) / ((1 << DIE_SHIFT) * dieProf.reduce((x, y) => x + y, 0));
 const dieRotT = dieProf.map(v => Math.max(0, Math.min(255, Math.round(v * dieScale))));
 const DIE_SHOW = +(process.env.DIESHOW ?? 120);   // the face on screen, 0.9s
-const DIE_OFF0 = +(process.env.DIEOFF0 ?? 10);   // columns of it showing when the fade-up starts
-const DIE_OFF1 = +(process.env.DIEOFF1 ?? 48);
 // ...OR any turn of this much while still cornered. An angel on your flank can need most of a
 // revolution to come into view, and the player is turning the whole time wondering why nothing
 // is happening. 256 units to the circle, so 30 degrees is 21.
@@ -4825,11 +4815,6 @@ const darkerT = [...Array(16)].map((_, c) => {
   for (const g of [0, 11, 12, 15, 1]) if (CLUM[g] < CLUM[c] && CLUM[g] >= CLUM[best]) best = g;
   return best;
 });
-// Phase 2's palette, in 9 ticks of 6 sixtieths: up the chain to each register's own target, hold,
-// then back down. Each slot stops where it needs to, which is what makes them arrive together.
-const UPCH = [0, 11, 12, 15];
-const dieRamp = tgt => [...Array(9)].map((_, t) =>
-  t <= 3 ? UPCH[Math.min(t, tgt)] : t <= 5 ? UPCH[tgt] : UPCH[Math.max(0, tgt - (t - 5))]);
 // elapsed sixtieth -> tick. A table because 54/9 is 6 and a shift cannot divide by six: with
 // >>2 the ramp finished at el=36 and the picture went black well BEFORE the face reached centre.
 // ANGELART=full digitises the angel from angel-full.png instead of using the drawn art off
@@ -4951,12 +4936,6 @@ const PEDART = JSON.parse(readFileSync('./pedestal-art.json', 'utf8'));
 for (const k of ['top', 'side'])
   if (PEDART[k].length !== PEDART[k === 'top' ? 'topH' : 'sideH'])
     throw new Error(`pedestal-art.json: ${k} is ${PEDART[k].length} rows, not ${PEDART[k === 'top' ? 'topH' : 'sideH']}`);
-const pedLum = (band, u, v) => {            // u, v in [0,1); band 'top' or 'side'
-  const W = PEDART[band === 'top' ? 'topW' : 'sideW'], H = PEDART[band === 'top' ? 'topH' : 'sideH'];
-  const x = Math.max(0, Math.min(W - 1, Math.floor(u * W)));
-  const y = Math.max(0, Math.min(H - 1, Math.floor(v * H)));
-  return parseInt(PEDART[band][y].substr(x * 2, 2), 16);
-};
 // ---- the stone, BAKED ONCE into a fixed surface texture ----
 // WHY a texture and not a per-pixel dither. Ordered-dithering each rung as it is rasterised
 // indexes the threshold by BITMAP pixel, so when the rung changes the same point on the stone
@@ -5333,7 +5312,6 @@ if (process.env.ORBSCATTER) {
   // list that has to agree with it is the bug this file keeps re-learning.
   // Spelled out rather than left to fall through: the branch below is level 1's, and its orbs
   // stand at (6,5) and (20,5), which are outside a 6x6 map entirely.
-  else if (ERRAND) { }
   else if (LVL === 5) {                          // the O markers in L5_MAP: one in the north
     ORBS.push({ x: 9.5, y: 1.5, c: 0 });         //   gallery, one in the east hall
     ORBS.push({ x: 16.5, y: 7.5, c: 0 });
@@ -5404,7 +5382,6 @@ if (process.env.ORBSCATTER) {
       ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
       ORBS.push({ x: 6.5, y: 6.5, c: 0, tall: true });
     }
-    else if (ERRAND) { }                          // 6 and 7: no angel, same as no orb
     else if (LVL === 5) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // the A in the hall
     else if (LVL === 6) {                         // one sealed in each pocket, until a socket
       ORBS.push({ x: 3.5, y: 6.5, c: 0, tall: true });   //   is fed and the walls come out
@@ -5871,8 +5848,7 @@ const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').
 // that hides it stays: it is what the three pedestals open, and it now reveals an empty alcove.
 const HUB_HOLES = [[4, 1], [1, 4], [4, 7], [14, 4]];   // N(red), W(green), S(blue), E(black)
 const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
-             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : ERRAND ? [4, 4]
-             : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
@@ -7490,7 +7466,6 @@ const DIE_KICK_LO = +(process.env.DIEKICKLO ?? 28);     // ...and where it lands
 const DIE_KICK_FR = +(process.env.DIEKICKFR ?? 7);      // frames to fall: fast, or it is a note
 const DIE_KICK_AD = +(process.env.DIEKICKAD ?? 0x09);   // no attack, ~750ms decay
 const DIE_KICK_SR = +(process.env.DIEKICKSR ?? 0x00);
-const DIE_KICK_PW = +(process.env.DIEKICKPW ?? 0x800);
 // Indexed by Chebyshev cell distance to the nearest angel. Exponential, so the last two cells of
 // an approach are where it turns from atmosphere into a pulse.
 // VOICE 1 IS A REAL NOTE, and voice 2 rides above it purely to make the beat. 55 Hz is exactly
@@ -7555,14 +7530,6 @@ const DIE_DSTEP = Math.max(1, Math.round((DIE_DRTOP - DIE_DR0) / DIE_RISE));
 // twelfth, so peak/3. Unlike the drone proper this one is not held; it is struck and left to
 // decay, and it has fallen away by the time the picture cuts in.
 const DIE_LAND_FN = Math.max(1, Math.round(DIE_DRTOP / 3));
-// It has to be HEARD, so it holds at full level and is then released -- not struck and left to
-// decay. Decay-to-zero has an exponential curve that falls away fastest at the start, so a
-// percussive shape reads as a blip however long the decay is set. A=0 D=0 S=15 gets it to full
-// volume at once and keeps it there; the gate drops DIE_LAND_HOLD frames later and R carries it
-// out. (SID decay steps are not linear: $6 is 204ms, $c is 3s.)
-const DIE_LAND_AD = +(process.env.DIELANDAD ?? 0x00);   // instant attack, no decay
-const DIE_LAND_SR = +(process.env.DIELANDSR ?? 0xf9);   // full sustain, ~750ms release
-const DIE_LAND_HOLD = +(process.env.DIELANDHOLD ?? 45); // frames at full before the gate drops
 // ---- voice 3: a small figure over the drone ----
 // A natural-minor colour against the A drone: the fifth, the flat sixth, the flat seventh. Named
 // in semitones above A1 so it stays tied to whatever SNDNOTE the drone is on.
@@ -7731,7 +7698,6 @@ const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: t
 for (const [n, a] of [...(VSLOTS ? [] : [['FALLBUF2', FALLBUF2]]), ['FALLBUF', FALLBUF]])
   if (a & 255) throw new Error(`${n} = $${a.toString(16)} is not page-aligned, and fallSnap/bgCopy ` +
     `only ever write its high byte -- the snapshot would land on the previous page boundary`);
-const FALL_END = 200;                            // pixels of travel per phase = screen height
 // ---- how long the drop takes, and how smooth it can possibly be ----
 // FALL_PERIODS raster periods per animation frame, FALL_FRAMES frames to cover FALL_END pixels.
 // Those two are the whole tuning: duration = FRAMES * PERIODS / 60 seconds, and the LAST step --
@@ -8139,37 +8105,7 @@ const fRowT = (() => {
   }
   return out;
 })();
-// Rim thickness in BITMAP pixels. The rim is what makes one bitmap serve as both the exit
-// hole and a socket -- see the grid build below.
-const HOLE_RIM = +(process.env.HOLERIM ?? 1);
 const HOLEBASE = 0xd000;                         // UNDER THE I/O HOLE: the VIC reads it, the CPU never does.
-                                                 // The loader lands it at $d000 via a $34 two-step. (was $e800)
-                                                 //   the 48 between $c400 and the I/O hole, and
-                                                 //   $e800-$ffb9 is the bank.s other free run
-// A rung is a target apparent WIDTH; both magnification bits then follow from the SHAPE rather
-// than from a fixed schedule of regimes. Two sprites hold 24 multicolor pixels, so hmag is on
-// exactly when the ellipse is wider than that, and vmag exactly when it is taller than a
-// sprite's 21 rows. Deciding each independently is what lets the near rungs be both wide and
-// tall without a third pair of sprites.
-// TWO families, because apparent width is not monotonic in distance. Far out, the ellipse grows
-// steadily as you approach and WIDTH is the natural step. Once the near edge passes row 200 the
-// widest part of the shape is below the screen, so the VISIBLE width peaks at 59.9 columns
-// (d=0.88) and then shrinks again -- it cannot key a table, and those rungs step by h instead.
-//
-// The near family closes the near field completely; it does not need the char stamp after all.
-// Three hmag sprites is 72 columns against that 59.9 peak, so there is never a four-sprite case,
-// and the screen edge eats the shape faster than perspective grows it -- so vmag is needed only
-// down to d=0.90 and a plain sprite holds it from there. The hole leaves the screen entirely at
-// d = 0.88 - r = 0.667, where the ladder simply ends.
-// The build let 101 slots be written from $e800 and the last 8 ran off the top of memory, which
-// came out as a garbled screen with no error anywhere. Sprite data is emitted as raw files at
-// fixed addresses, so nothing else was ever going to catch it.
-const fitsBank = (name, at, slots, end) => {
-  if (at + slots * 64 > end) throw new Error(
-    `${name}: ${slots} sprite slots at $${at.toString(16)} need ` +
-    `$${(at + slots * 64).toString(16)}, past $${end.toString(16)} -- ` +
-    `${Math.ceil((at + slots * 64 - end) / 64)} slots too many`);
-};
 
 // ---- one ladder builder, so a socket is the SAME SHAPE at a different radius ----
 // A socket cannot just reindex the hole's ladder at a longer distance: for a flat disc the
@@ -8873,7 +8809,6 @@ const PEDTBL = 5 * Math.max(1, PED.L.length);
 const PEDCODE = 18;
 // seamEdge's own size, hand-counted like PEDCODE; the assembler's "moves backward" is the guard.
 const SEAMEDGE_AT = 0x7f00;     // the page bndT vacated; 249 of 256 used
-const SEAMCODE = ANYSEAM ? 249 : 1;   // still hand-counted, but now against SEAMEDGE_AT's page
 if (process.env.PEDDUMP && HAS_PED) {
   console.error(`pedestal ladder: r=${PEDR} u=${PEDH}, ${PED.L.length} rungs, ` +
     `${PED.BM.length} slots (${PED.BM.length * 64} bytes), slots ${PED.slotT[0]}..${PED.slotEnd - 1}`);
@@ -10719,9 +10654,6 @@ if (process.env.HOLEDUMP === '1') {
     `${g.vis.toFixed(1).padStart(4)}r vis at d=${g.d.toFixed(2)} h=${holeHOf(g)}` +
     `${g.mag ? " hmag" : ""}${g.vmag ? " vmag" : ""} ${g.spr}spr rows ${g.far}..${g.near.toFixed(0)}`));
 }
-// The occluder bitmaps, laid out one after another, with a pointer table so a run-id lookup
-// is (ptr),y with no multiply.
-const OCCBASE = ORB_OCC;
 const orbOccFlat = orbOcc.flat();
 // Padded to NOCC entities -- the LARGEST resident level's count, not this level's. The swap
 // exchanges the table in place, so the live copy has to be as long as the shadow's; a level with
@@ -13007,7 +12939,7 @@ ohLstW  = $8524
 ohFstM  = $8525                 ; the columns each split leaves UNCOVERED, as a cellFillT mask:
 ohLstM  = $8526                 ;   what the cell shows outside the stamp, which picks the backing
 ohMsk   = $8527                 ; oSBack scratch: the mask under test, and the saved X
-${OCCSYN ? `osSrc   = $a0                   ; OCCSYN: source glyph pointer (2). The destinations are patched
+osSrc   = $a0                   ; OCCSYN: source glyph pointer (2). The destinations are patched
                                 ;   into oSPut's own stores (oSPa/oSPb), not held here.
 osCov   = $a2                   ;   the covered-column pair mask
 osTmp   = $a3                   ;   the code being built, and a byte temp (2)
@@ -13019,7 +12951,7 @@ osPY    = $a9                   ;   Y saved across the row loop
 osLast  = $cf                   ;   1 on the BOTTOM row of the stamp, 0 above it. The only row
                                 ;   where a cell can run past the wall's base, so the only row
                                 ;   synthesis is allowed to consider -- see OCCSYNTH.
-` : ''}ohMsX   = $8528
+ohMsX   = $8528
 o2r     = $8529                 ; the ball's RIGHT extent from ocol; o2 is now the LEFT one.
                                 ;   Not zero page: it is touched a handful of times per orb, in
                                 ;   the projection, never in a per-column loop.
@@ -18006,7 +17938,7 @@ oSCR2:  sta ohRun               ; last cell
         ; With both ends interior there is still no glyph for it, and it stays the from-the-right
         ; one: over-covering takes a small bite out of the orb, while under-covering leaves orb
         ; drawn ON the wall, which is the error that reads as broken.
-${OCCSYN ? `        ; With synthesis the single-cell case is exact: the covered columns are k..m, i.e. those
+        ; With synthesis the single-cell case is exact: the covered columns are k..m, i.e. those
         ; in NEITHER mask, and the fallback glyph (used only when the scratch slots run out) is
         ; whichever edge glyph the old rule chose.
         lda ohFstM
@@ -18027,23 +17959,7 @@ oSC1r:  ldx ohFst
 oSC1g:  pla
         jsr oSPut
         jmp oSCNx
-` : `        lda osL
-        and #$03
-        bne oSC1r
-        lda ohLstM              ; k = 0: clip from the LEFT, exactly m+1 columns
-        jsr oSBack
-        lda ohLst
-        bcs oSC1s
-        lda ohLstW
-        jmp oSC1s
-oSC1r:  lda ohFstM
-        jsr oSBack              ; single-cell stamp: pick the backing, do not skip
-        lda ohFst
-        bcs oSC1s
-        lda ohFstW
-oSC1s:  sta (osPtr),y
-        jmp oSCNx
-`}
+
         ; ---- only stamp cells that actually HOLD WALL ----
         ; The stamp covers the ORB's rows, on the assumption that a wall which occludes an orb
         ; extends below its feet. Where that does not hold -- a receding wall whose base has risen
@@ -18060,47 +17976,28 @@ oSC1s:  sta (osPtr),y
         ; Skipping them leaves up to 8px of orb showing over the wall's bottom edge instead, which
         ; is the smaller error and the one that reads as a soft edge rather than a stray block.
 oSCMid: ${DBGORB ? `inc oSCnt
-        ` : ''}${OCCSYN ? `lda ohFstM              ; the columns this split leaves showing; oSPut covers the rest
+        ` : ''}lda ohFstM              ; the columns this split leaves showing; oSPut covers the rest
         ldx ohFst
         stx osGly
         ldx ohFstW
         stx osGlyW              ; the white-backed twin: oSPut picks between them
         jsr oSPut
-` : `lda ohFstM
-        jsr oSBack        ; the FIRST cell straddles the wall's edge, so it is stamped
-        lda ohFst               ;   whatever is there -- only the backing changes. A cell that is
-        bcs oSCMs               ;   not fully wall has floor or ceiling beyond the silhouette, and
-        lda ohFstW              ;   the white-backed split leaves that showing.
-oSCMs:               ; first cell: the stamp starts part way in, so clip from the right
-        sta (osPtr),y
-`}oSCCol: iny
+oSCCol: iny
         cpy ohRun
         beq oSCLst
-${OCCSYN ? `        lda #$00                ; interior: every column covered
+        lda #$00                ; interior: every column covered
         ldx #${hx(OCC_FULL)}
         stx osGly
         stx osGlyW              ; the white-backed twin: oSPut picks between them
         jsr oSPut
         jmp oSCCol
-` : `        jsr oSWall
-        bcc oSCCol              ; ditto for every interior cell
-        lda #${hx(OCC_FULL)}
-        sta (osPtr),y
-        jmp oSCCol
-`}oSCLst: ${OCCSYN ? `lda ohLstM
+oSCLst: lda ohLstM
         ldx ohLst
         stx osGly
         ldx ohLstW
         stx osGlyW              ; the white-backed twin: oSPut picks between them
         jsr oSPut
-` : `lda ohLstM
-        jsr oSBack
-        lda ohLst
-        bcs oSCLs
-        lda ohLstW
-oSCLs:               ; last cell: the stamp ends part way in, so clip from the left
-        sta (osPtr),y
-`}oSCNx:  inc ohSv
+oSCNx:  inc ohSv
         jmp oSCRow
 ; oSWall: carry set if the cell at (osPtr),y is FULLY wall -- SOLID, or a seam variant, which is
 ; SOLID with a panel line on it. Ramp and step cells are part ceiling or part floor and cannot be
@@ -19193,7 +19090,7 @@ ohAdv:  ldx ohBX
 ohHide:${process.env.ORBOCCDBG ? `
         lda #$04
         sta ohDbg` : ''}
-${`        lda ovProbe
+        lda ovProbe
         beq ohHid0
         rts                     ; probe done: the counters are the answer, and nothing has been
 ohHid0: jmp orbNo               ;   allocated, because allocation lives past opDone
@@ -19214,7 +19111,7 @@ ovW2:   sec
         clc
         adc #$01
         rts
-`}` : ''}opDone:
+` : ''}opDone:
 ${ENT1PROF ? "        jsr pfT13               ; ENT1PROF: the occluder span walk -- the suspect\n" : ''}        ; --- take a sprite slot ---
         ldx onv
         lda orbBitT,x
@@ -22362,7 +22259,7 @@ oabs:   lda #$00
         sbc oaH
         sta oaH
 oabsD:  rts
-` : ''}${`
+` : ''}
 ; ---- mulW: A = row -> A = row * MAPW ----
 ; A power-of-two width is four asl and an ora; anything else needs a real multiply, and a table
 ; of MAPH entries is both smaller and faster than shift-and-add. Y is saved because the callers
@@ -22374,7 +22271,7 @@ mulW:   sty mulWY
         ldy mulWY
         rts
 ${LD('rowMulT', LVLT('rowMulT').join(','), ': !byte ')}   ; from the MANIFEST: the live level's stride
-`}
+
 ${process.env.PAD ? `        !fill ${+process.env.PAD}, $ea   ; PAD=<n>: n inert bytes at the end of the code block, to
                                 ;   separate "this diagnostic's LOGIC broke the build" from "the
                                 ;   build does not survive its code growing by n bytes". Nothing
@@ -26350,12 +26247,12 @@ ${CVXSEAM ? '' : `; The (at most two) runs each run meets at a CONCAVE corner, 0
 ; every run-to-run boundary drawing a line, nothing reads them.
 cpLoT:  !byte ${cpLo.join(',')}
 cpHiT:  !byte ${cpHi.join(',')}`}
-kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}${OCCSYN ? `
+kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
 ; synMskT: a cellFillT column mask of the columns left SHOWING (bit 3 = column 0) -> the HIGH bit
 ; of each COVERED column's pixel pair (column c is bits 7-2c,6-2c), so that (b & $55) << 1 &
 ; synMskT[m] turns exactly the covered columns' 01 pairs into 11. The 01 -> 11 map is what makes wall pixels stamp ink and leaves 00
 ; (sky/floor) and 10 (seam) alone.
-synMskT: !byte ${[...Array(16)].map((_, m) => [0,1,2,3].reduce((b, c) => b | ((m >> (3 - c)) & 1 ? 0 : 1 << (7 - 2 * c)), 0)).join(',')}` : ''}
+synMskT: !byte ${[...Array(16)].map((_, m) => [0,1,2,3].reduce((b, c) => b | ((m >> (3 - c)) & 1 ? 0 : 1 << (7 - 2 * c)), 0)).join(',')}
 mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
 bbLT:   !byte $0f,$07,$03,$01
 bbRT:   !byte $08,$0c,$0e,$0f
@@ -27233,7 +27130,7 @@ ogSn:   sta orbSeenT,x
         rts
 ogYes:  clc
         rts
-` : ''}${OCCSYN ? `; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
+` : ''}; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
 ; A = the columns the stamp leaves SHOWING (cellFillT mask, bit 3 = column 0); osGly / osGlyW =
 ; the whole-column split glyphs to fall back on, black- and white-backed; Y = the column, (osPtr),y
 ; the cell. Preserves Y.
@@ -27368,7 +27265,7 @@ oSPst:  sta (osPtr),y
 oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
         sta (osPtr),y
         rts
-` : ''}; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
+; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
 ; mkRuns's tail. A spare id never appears in mapT's faces, so the two passes cannot give it a
 ; plane; hazSpT (per level, swapped) says which run it was split from. Until this existed the
 ; spare slots held whatever the PREVIOUS level's mkRuns had written there (2026-09-17).
