@@ -13675,7 +13675,16 @@ cdda:   lda sdxH
         ; a cell away and keeps stepping that way forever. It needs the player within 1/256
         ; of a cell boundary and a ray parallel to it, which is why it stayed hidden: a
         ; whole wall vanished and an unrelated one filled the column.
-cstepY: clc
+        ; THE CELL IS TESTED BEFORE THE ADD. sdy is the distance to the gridline being
+        ; crossed, so on a hit it already IS the hit distance -- the old order added ddy and
+        ; then subtracted it straight back at cwallY. Only the steps that do not hit pay the add.
+cstepY: txa
+        clc
+        adc stpY16
+        tax
+        lda mapT,x
+        beq cwallY                 ; mapT: walls are $00, open cells their zone mask
+        clc
         lda sdy
         adc ddy
         sta sdy
@@ -13686,13 +13695,7 @@ cstepY: clc
         lda #$ff                ; this axis is effectively never crossed again
         sta sdy
         sta sdyH
-cyNs:   txa
-        clc
-        adc stpY16
-        tax
-        lda mapT,x
-        beq cwallY                 ; mapT: walls are $00, open cells their zone mask
-        dey
+cyNs:   dey
         bne cdda
         jmp cfar
         ; Both 'bcc cstepX' above arrive with carry CLEAR -- that is what the branch tested --
@@ -13700,7 +13703,15 @@ cyNs:   txa
         ; and that pays for its own here rather than taxing every step. (The Y side keeps its
         ; clc: 'bne cstepY' is reached when sdxH > sdyH, i.e. carry SET.)
 cstepXc: clc
-cstepX: lda sdx
+cstepX:
+        ; stpX is ALWAYS +-1 and is decided once per ray, so this is inx/dex -- 2 cycles
+        ; against the 9 that txa / clc / adc stpX / tax cost. The opcode is patched at the
+        ; same place stpX is set; stpX itself stays, because marchCol reads it to pick which
+        ; face of the cell was hit.
+cxInc:  inx                     ; PATCHED to $e8 inx / $ca dex, once per ray
+        lda mapT,x              ; tested before the add, as on the Y side; inx/lda/beq leave
+        beq cwallX              ;   the carry the compare set, so the add still needs no clc
+        lda sdx
         adc ddx
         sta sdx
         lda sdxH
@@ -13710,15 +13721,7 @@ cstepX: lda sdx
         lda #$ff
         sta sdx
         sta sdxH
-        ; stpX is ALWAYS +-1 and is decided once per ray, so this is inx/dex -- 2 cycles
-        ; against the 9 that txa / clc / adc stpX / tax cost. The opcode is patched at the
-        ; same place stpX is set; stpX itself stays, because marchCol reads it to pick which
-        ; face of the cell was hit.
-cxNs:
-cxInc:  inx                     ; PATCHED to $e8 inx / $ca dex, once per ray
-        lda mapT,x
-        beq cwallX
-        dey
+cxNs:   dey
         bne cdda
 cfar:   stx cell                ; step guard expired; unreachable with a solid border
         lda #$01
@@ -13727,23 +13730,17 @@ cfar:   stx cell                ; step guard expired; unreachable with a solid b
 cwallX: stx cell                ; marchCol reads the cell back for the run-id lookup
         lda #$00
         sta side
-        sec
-        lda sdx
-        sbc ddx
+        lda sdx                 ; the hit distance: the add for this step never happened
         sta remL
         lda sdxH
-        sbc ddxH
         sta remH
         jmp cidx
 cwallY: stx cell
         lda #$01
         sta side
-        sec
-        lda sdy
-        sbc ddy
+        lda sdy                 ; the hit distance (see cstepY)
         sta remL
         lda sdyH
-        sbc ddyH
         sta remH
         ; No cos correction here: it depends only on the column, so it is baked into the
         ; per-column height tables (see hTabT). This used to be a whole sideMul per ray.
