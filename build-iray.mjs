@@ -926,6 +926,11 @@ for (let Q = 0; Q < 4; Q++) for (let y = 0; y < 256; y++) {
 }
 // What castRay actually reads: two pages, the second being what quarter 1 needs.
 const ddxLoP = ddxLoQ.slice(0, 512), ddxHiP = ddxHiQ.slice(0, 512);
+// castRay's saturation checks are skipped unless rqL == 0 (cySat): a $ffff delta -- a ray exactly
+// parallel to an axis -- must only ever sit at index 0 of a page. Proved here, not assumed.
+for (let i = 0; i < 512; i++)
+  if (ddxLoP[i] === 255 && ddxHiP[i] === 255 && (i & 255) !== 0)
+    throw new Error(`delta saturates at q=${i}, not at a page start: castRay's rqL==0 gate would miss it`);
 const NLOG = 160, FOV = 47;             // one ray per output column (160 logical cols)
 const NCELL = NLOG / 4;                 // 4x8 cells across the screen (40)
 // Span delimiters the subdivision may pin. Was NLOG/8 = 20, which the COARSE angle table never
@@ -13619,7 +13624,8 @@ cypos:  lda #$01
         lda ddyH
         sbc sdyH
         sta sdyH
-cySat:
+cySat:  lda rqL                 ; a delta saturates ONLY at rqL == 0 (asserted at build time), so
+        bne cydone              ;   every other ray skips both checks below
         ; Two things the old loop did on EVERY step that are only needed once, on the step
         ; that hits: it wrote "side" (5 cycles a step, read once after the loop), and it
         ; round-tripped the cell index through memory -- "lda cell / adc / sta cell",
