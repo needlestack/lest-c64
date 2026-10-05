@@ -25137,6 +25137,22 @@ const lintReach = src => {
 // A squatter's extent is unknown from an equate, so both consumers round its page down and treat
 // the whole page as taken. Scanned once: the ILVL fit guard and the free-space accounting below
 // disagreeing about what is in the bank is exactly how a shadow grew over doomT unnoticed.
+// ---- castRay's hit distance depends on the DDA's ORDER: test the cell, THEN add ----
+// cwallX/cwallY take the side distance AS the hit distance, which is only true because the step
+// that hits never adds its delta. Move an add above the mapT test and every wall comes back one
+// cell's delta too far, with nothing failing -- so the emitted order is checked, per axis.
+for (const [A, a] of [['X', 'x'], ['Y', 'y']]) {
+  const from = asm.search(new RegExp(`^cstep${A}:`, 'm'));
+  const add = asm.slice(from).search(new RegExp(`^\\s+adc dd${a}\\b`, 'm'));
+  const pre = from < 0 || add < 0 ? '' : asm.slice(from, from + add);
+  if (!/^\s+lda mapT,x\b[^\n]*\n\s+beq cwall/m.test(pre) || !new RegExp(`beq cwall${A}\\b`).test(pre))
+    throw new Error(`castRay: cstep${A} must test mapT and branch to cwall${A} BEFORE "adc dd${a}" ` +
+      `-- cwall${A} reads sd${a} as the hit distance, which is wrong once the step has been added`);
+  const hit = asm.slice(asm.search(new RegExp(`^cwall${A}:`, 'm')));
+  const body = hit.slice(0, hit.search(/^\s+jmp cidx\b|^cidx:/m));
+  if (new RegExp(`\\bdd${a}H?\\b`).test(body))
+    throw new Error(`castRay: cwall${A} uses dd${a} -- the hit distance is sd${a} as-is (see cstep${A})`);
+}
 const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)/gm)]
   .map(m => [m[1], parseInt(m[2], 16)])
   // ...but the SOLO slot's tables are not squatters. They are one deliberate allocation with a
