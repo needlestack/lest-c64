@@ -3884,19 +3884,6 @@ const PROFTOUR = flag('PROFTOUR');
 const PROFWIN = (process.env.PROFWIN ?? '').split(',').filter(Boolean).map(Number);
 if (PROFWIN.length && PROFWIN.length !== 2) throw new Error('PROFWIN=t0,t1');
 if (PROFWIN.length && (PROFTOUR || PROFAT)) throw new Error('PROFWIN, PROFTOUR and PROFAT are three different windows; pick one');
-// EGPROF=1 (with PROFWIN): what the horizon cull DOES inside the window -- tests, entity-end
-// lookups, culls at each end. Counts, not cycles. (Named for ENTGRID, which it was built to count.)
-const EGPROF = process.env.EGPROF === '1';
-// One EGPROF counter bump, 16-bit, only while the PROFWIN window is open. Clobbers A only.
-const egInc = (k, tag) => !EGPROF ? '' : `        lda pfArm               ; EGPROF: count only inside the window
-        beq egI${tag}
-        lda pfDone
-        bne egI${tag}
-        inc egPC+${2 * k}
-        bne egI${tag}
-        inc egPC+${2 * k + 1}
-egI${tag}:
-`;
 if (PROFTOUR && !TOURW) throw new Error('PROFTOUR=1 needs TOURW=1: the window it uses is the tour');
 if (PROFTOUR && PROFAT) throw new Error('PROFTOUR and PROFAT are two different windows; pick one');
 // PROFN=1: count how often each bucket is closed, so pfTick's own cost can be SUBTRACTED rather
@@ -6118,967 +6105,7 @@ for (const L of LVLSIZED) for (const [n, f] of Object.entries(CHAIN_GLOBAL)) L.t
 // were left out of this originally, which is the whole reason they had no occlusion test: the
 // walk in orbOne indexes orbOccLoT by oidx, and past ORBS.length there was nothing to index.
 // The test itself never cared what kind of thing it was -- it is a face-plane compare on an x,y.
-// CULLSIM=1: how many wall runs survive the two FACING tests from the spawn cell, and how many of
-// those then satisfy the user's extent rule -- "both the player's and the object's row lie inside
-// the wall's extent, therefore the sightline must cross it". Convexity: the crossing point's
-// coordinate is between the two endpoints', so if both are in the interval so is it.
-// The point of the count is that the per-run TEST is cheap (6 compares) and the LOOP is not.
-if (process.env.CULLSIM) {
-  const ext = {};                              // run id -> [lo, hi] along its perpendicular axis
-  const note = (id, v) => { if (!id) return; const e = ext[id] ??= [v, v];
-                            e[0] = Math.min(e[0], v); e[1] = Math.max(e[1], v); };
-  for (let c = 0; c < MAPN; c++) {
-    note(runW[c], cellY(c)); note(runE[c], cellY(c));     // vertical planes span y
-    note(runN[c], cellX(c)); note(runS[c], cellX(c));     // horizontal planes span x
-  }
-  {   // how much of the level is "cheap local rule" territory at all
-    const hist = [0, 0, 0, 0, 0];
-    let ruleAByOpenness = [0, 0, 0, 0, 0], pairsBy = [0, 0, 0, 0, 0];
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])];
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const x = cellX(c), y = cellY(c), gx = x + 0.5, gy = y + 0.5;
-      const o = { N: !map[cellOf(x, y - 1)], S: !map[cellOf(x, y + 1)],
-                  W: !map[cellOf(x - 1, y)], E: !map[cellOf(x + 1, y)] };
-      const n = o.N + o.S + o.W + o.E; hist[n]++;
-      for (const [ex, ey] of ents) {
-        const dx = ex - gx, dy = ey - gy; if (!dx && !dy) continue;
-        pairsBy[n]++;
-        const side = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'E' : 'W') : (dy > 0 ? 'S' : 'N');
-        if (!o[side]) ruleAByOpenness[n]++;
-      }
-    }
-    console.error('  WHERE CHEAP LOCAL RULES CAN WORK -- open sides per cell:');
-    for (let n = 1; n <= 4; n++) console.error(
-      `    ${n} open side${n > 1 ? 's' : ' '}: ${String(hist[n]).padStart(3)} cells   ` +
-      `rule A rejects ${String(ruleAByOpenness[n]).padStart(3)} of ${String(pairsBy[n]).padStart(3)} pairs ` +
-      `(${pairsBy[n] ? (100 * ruleAByOpenness[n] / pairsBy[n]).toFixed(0) : 0}%)`);
-  }
-  {   // the map itself, so the geometry can be checked by eye
-    console.error('  MAP (# wall, . open), player P at the spawn cell, entities by index:');
-    const ents = [...ORBS.map(o => [Math.floor(o.x), Math.floor(o.y)]),
-                  ...HOLELIKE.map(h => [h.x, h.y])];
-    const [spx, spy] = [ST0[0] >> 8, ST0[1] >> 8];
-    for (let y = 0; y < MAPH; y++) {
-      let row = '    ';
-      for (let x = 0; x < MAPW; x++) {
-        const ei = ents.findIndex(([ex, ey]) => ex === x && ey === y);
-        row += map[cellOf(x, y)] ? '#' : (x === spx && y === spy) ? 'P' : ei >= 0 ? String(ei) : '.';
-      }
-      console.error(row + `  y=${y}`);
-    }
-  }
-  {   // EIGHT-NEIGHBOUR SECTOR TABLE. 256 patterns x 8 sectors, decided offline by geometry:
-      // a sector is blocked iff NO ray, from any point of the entity's disc, in any direction in
-      // that sector, escapes the 3x3 without crossing a wall. Escaping proves nothing, so this is
-      // conservative. Runtime: one pattern byte, one table lookup, one bit test.
-    const SEC = +(process.env.SEC ?? 8), STEP = Math.PI * 2 / SEC;
-    const buildTable = (r) => {
-      const t = new Array(256).fill(0n);
-      for (let p = 0; p < 256; p++) {
-        // bit order: 0=N 1=NE 2=E 3=SE 4=S 5=SW 6=W 7=NW, relative to the centre cell
-        const off = [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];
-        const wall = (gx, gy) => {            // is 3x3 cell (gx,gy) in {-1,0,1} a wall in pattern p
-          if (gx === 0 && gy === 0) return false;
-          const i = off.findIndex(([ox, oy]) => ox === gx && oy === gy);
-          return (p >> i) & 1;
-        };
-        let mask = 0n;
-        for (let sec = 0; sec < SEC; sec++) {
-          let escapes = false;
-          for (let k = 0; k <= 12 && !escapes; k++) {             // directions across the sector
-            const a = (sec - 0.6) * STEP + (k / 12) * 1.2 * STEP;   // overlap the sector edges
-            for (let j = 0; j <= 8 && !escapes; j++) {            // start points across the disc
-              const sa = j * Math.PI / 4;
-              let x = 0.5 + (j < 8 ? r * Math.cos(sa) : 0), y = 0.5 + (j < 8 ? r * Math.sin(sa) : 0);
-              const dx = Math.cos(a), dy = Math.sin(a);
-              let hit = false;
-              for (let st = 1; st <= 240; st++) {                 // fine walk out of the 3x3
-                const tx = x + dx * st / 80, ty = y + dy * st / 80;
-                if (tx < -1 || tx > 2 || ty < -1 || ty > 2) break;        // escaped
-                if (wall(Math.floor(tx), Math.floor(ty))) { hit = true; break; }
-              }
-              if (!hit) escapes = true;
-            }
-          }
-          if (!escapes) mask |= 1n << BigInt(sec);
-        }
-        t[p] = mask;
-      }
-      return t;
-    };
-    const sectorOf = (dx, dy) => {           // which of 8 sectors the direction falls in
-      let a = Math.atan2(dy, dx); if (a < 0) a += Math.PI * 2;
-      return Math.round(a / STEP) % SEC;
-    };
-    const patternOf = (cx, cy) => {
-      const off = [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];
-      let p = 0; off.forEach(([ox, oy], i) => { if (map[cellOf(cx + ox, cy + oy)]) p |= 1 << i; });
-      return p;
-    };
-    const ents = [...ORBS.map(o => [o.x, o.y, ORBSCALE / (4 * F_COL)]),
-                  ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5, h.exit ? HOLER : HOLER / 2])];
-    const seen = (gx, gy, ex, ey, r) => {
-      for (const ox of [0.1,0.5,0.9]) for (const oy of [0.1,0.5,0.9]) for (const a of [0,1,2,3,4,5,6,7])
-        if (losFree(gx+ox-0.5, gy+oy-0.5, ex+r*Math.cos(a*Math.PI/4), ey+r*Math.sin(a*Math.PI/4))) return true;
-      return false;
-    };
-    const tabs = {}; for (const [, , r] of ents) tabs[r] = tabs[r] || buildTable(r);
-    const tabP = buildTable(0.5);            // player end: unknown position within its own cell
-    let pairs = 0, E = 0, Eb = 0, P = 0, Pb = 0, X = 0, Xb = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const pcx = cellX(c), pcy = cellY(c), gx = pcx + 0.5, gy = pcy + 0.5;
-      for (const [ex, ey, r] of ents) {
-        const ecx = Math.floor(ex), ecy = Math.floor(ey);
-        if (ecx === pcx && ecy === pcy) continue;
-        pairs++;
-        // the player is somewhere in their cell, so the true bearing spans a RANGE of sectors;
-        // reject only if EVERY sector in that range is blocked. Distance-dependent, like coneTolT.
-        const D = Math.hypot(gx - ex, gy - ey);
-        const half = Math.atan2(0.75, Math.max(D - 0.75, 0.3));     // half-diagonal of a cell
-        const nsec = Math.ceil(half / STEP);
-        const base = sectorOf(gx - ex, gy - ey);
-        let allBlocked = true;
-        for (let k = -nsec; k <= nsec && allBlocked; k++) {
-          const sc = ((base + k) % SEC + SEC) % SEC;
-          if (!((tabs[r][patternOf(ecx, ecy)] >> BigInt(sc)) & 1n)) allBlocked = false;
-        }
-        const e = allBlocked ? 1 : 0;
-        const baseP = sectorOf(ex - gx, ey - gy);
-        let allP = true;
-        for (let k = -nsec; k <= nsec && allP; k++) {
-          const sc = ((baseP + k) % SEC + SEC) % SEC;
-          if (!((tabP[patternOf(pcx, pcy)] >> BigInt(sc)) & 1n)) allP = false;
-        }
-        const p = allP ? 1 : 0;
-        const vis = seen(gx, gy, ex, ey, r);
-        if (e) { E++; if (vis) Eb++; }
-        if (p) { P++; if (vis) Pb++; }
-        if (e || p) { X++; if (vis) Xb++; }
-      }
-    }
-    const f = (n, b) => `${String(n).padStart(3)} (${(100*n/pairs).toFixed(1)}%)${b ? ' FALSE '+b : ''}`;
-    console.error(`  EIGHT-NEIGHBOUR SECTOR TABLE, ${SEC} sectors (${SEC/8} bytes/pattern), ${pairs} pairs:`);
-    console.error(`    entity end ${f(E,Eb)}    player end ${f(P,Pb)}    either ${f(X,Xb)}`);
-  }
-  {   // PARTIAL rule with DEPTH, both ends. A cell is unreachable if every side that could admit a
-      // sightline is a wall, or leads to a cell that is itself unreachable. "Could admit" is the
-      // radius-aware set: the dominant side alone, or both when the direction is near the diagonal.
-    const ents = [...ORBS.map(o => [o.x, o.y, ORBSCALE / (4 * F_COL)]),
-                  ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5, h.exit ? HOLER : HOLER / 2])];
-    const SLE = +(process.env.SLACKE ?? 1.0), SLP = +(process.env.SLACKP ?? 3.0);
-    const seen = (gx, gy, ex, ey, r) => {
-      for (const ox of [0.1,0.5,0.9]) for (const oy of [0.1,0.5,0.9]) for (const a of [0,1,2,3,4,5,6,7])
-        if (losFree(gx+ox-0.5, gy+oy-0.5, ex+r*Math.cos(a*Math.PI/4), ey+r*Math.sin(a*Math.PI/4))) return true;
-      return false;
-    };
-    // sides of cell (cx,cy) that could admit a sightline coming from (fx,fy); [dx,dy] steps
-    const admit = (fx, fy, cx, cy, r, slack) => {
-      const adx = Math.abs(fx - (cx + 0.5)), ady = Math.abs(fy - (cy + 0.5));
-      // INTEGER FORM, which is what the 6502 will run:
-      //   |adx-ady| <= 2r*max + slack   <=>   K*max <= 8*min + 8*slack,  K = floor(8(1-2r))
-      // K rounds DOWN so the band can only come out WIDER, i.e. more conservative.
-      const mx = Math.max(adx, ady), mn = Math.min(adx, ady);
-      const K = Math.floor(8 * (1 - 2 * r));
-      const band = process.env.INTBAND
-        ? K * mx <= 8 * mn + 8 * slack
-        : Math.abs(adx - ady) <= 2 * r * mx + slack;
-      const H = [fx > cx + 0.5 ? 1 : -1, 0], V = [0, fy > cy + 0.5 ? 1 : -1];
-      return band ? [H, V] : (adx > ady ? [H] : [V]);
-    };
-    const unreach = (fx, fy, tcx, tcy, hcx, hcy, d, r, slack) => {
-      if (tcx === hcx && tcy === hcy) return false;          // reached the other party's cell
-      const sides = admit(fx, fy, tcx, tcy, r, slack);
-      const open = sides.filter(([sx, sy]) => !map[cellOf(tcx + sx, tcy + sy)]);
-      if (!open.length) return true;                         // every admitting side is a wall
-      if (d <= 1) return false;
-      return open.every(([sx, sy]) => unreach(fx, fy, tcx + sx, tcy + sy, hcx, hcy, d - 1, r, slack));
-    };
-    const T = {}; const key = (e, d) => `${e}${d}`;
-    for (const e of ['E', 'P']) for (let d = 1; d <= 3; d++) T[key(e, d)] = { n: 0, bad: 0 };
-    for (let d = 1; d <= 3; d++) T[key('X', d)] = { n: 0, bad: 0 };
-    let pairs = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const pcx = cellX(c), pcy = cellY(c), gx = pcx + 0.5, gy = pcy + 0.5;
-      for (const [ex, ey, r] of ents) {
-        const ecx = Math.floor(ex), ecy = Math.floor(ey);
-        if (ecx === pcx && ecy === pcy) continue;
-        pairs++;
-        const vis = seen(gx, gy, ex, ey, r);
-        for (let d = 1; d <= 3; d++) {
-          const E = unreach(gx, gy, ecx, ecy, pcx, pcy, d, r, SLE);   // walk from the entity's cell
-          const P = unreach(ex, ey, pcx, pcy, ecx, ecy, d, r, SLP);   // ...and from the player's
-          if (E) { T[key('E', d)].n++; if (vis) T[key('E', d)].bad++; }
-          if (P) { T[key('P', d)].n++; if (vis) T[key('P', d)].bad++; }
-          if (E || P) { T[key('X', d)].n++; if (vis) T[key('X', d)].bad++; }
-        }
-      }
-    }
-    {   // ...and the same rule at the ACTUAL opening scene of level 2
-      const [spx, spy] = [ST0[0] >> 8, ST0[1] >> 8], sgx = spx + 0.5, sgy = spy + 0.5;
-      const nm = ['orb 0','orb 1','orb 2','angel','exit hole','socket 0','socket 1','socket 2'];
-      console.error(`  === LEVEL 2 OPENING SCENE, player cell (${spx},${spy}) ===`);
-      console.error(`    entity       2-hop entity   2-hop player   VERDICT        truth`);
-      ents.forEach(([ex, ey, r], i) => {
-        const ecx = Math.floor(ex), ecy = Math.floor(ey);
-        const E = unreach(sgx, sgy, ecx, ecy, spx, spy, 2, r, SLE);
-        const P = unreach(ex, ey, spx, spy, ecx, ecy, 2, r, SLP);
-        const vis = seen(sgx, sgy, ex, ey, r);
-        console.error(`    ${nm[i].padEnd(12)} ${(E?'REJECT':'  -   ').padEnd(14)} ${(P?'REJECT':'  -   ').padEnd(14)} ` +
-          `${(E||P ? 'CULLED' : 'projected').padEnd(14)} ${vis ? 'visible' : 'hidden'}` +
-          `${(E||P) && vis ? '   <-- FALSE' : ''}`);
-      });
-    }
-    const f = k => `${String(T[k].n).padStart(3)} (${(100*T[k].n/pairs).toFixed(1)}%)${T[k].bad ? ' FALSE '+T[k].bad : ''}`;
-    console.error(`  PARTIAL RULE WITH DEPTH, ${pairs} pairs:`);
-    console.error(`    hops      entity end        player end        either`);
-    for (let d = 1; d <= 3; d++) console.error(
-      `      ${d}      ${f(key('E',d)).padEnd(18)}${f(key('P',d)).padEnd(18)}${f(key('X',d))}`);
-  }
-  {   // THE MATRIX: entity-end vs player-end, full-square vs partial (radius-aware).
-      // full    = reject only if EVERY side facing the other party is a wall  ("no part of the
-      //           square is reachable")
-      // partial = the sightline uses ONE side unless the direction is near the diagonal, where
-      //           two can admit it; the band is the entity's own width plus the cell we have
-      //           quantised the player into
-    const ents = [...ORBS.map(o => [o.x, o.y, ORBSCALE / (4 * F_COL)]),
-                  ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5, h.exit ? HOLER : HOLER / 2])];
-    const SLE = +(process.env.SLACKE ?? 1.0), SLP = +(process.env.SLACKP ?? 3.0);
-    const seen = (gx, gy, ex, ey, r) => {
-      for (const ox of [0.1, 0.5, 0.9]) for (const oy of [0.1, 0.5, 0.9])
-        for (const a of [0,1,2,3,4,5,6,7])
-          if (losFree(gx + ox - 0.5, gy + oy - 0.5,
-                      ex + r*Math.cos(a*Math.PI/4), ey + r*Math.sin(a*Math.PI/4))) return true;
-      return false;
-    };
-    const K = ['E.full','E.part','P.full','P.part','either.full','either.part','both.part'];
-    const tally = {}; K.forEach(k => tally[k] = { n: 0, bad: 0 });
-    let pairs = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const pcx = cellX(c), pcy = cellY(c), gx = pcx + 0.5, gy = pcy + 0.5;
-      for (const [ex, ey, r] of ents) {
-        const ecx = Math.floor(ex), ecy = Math.floor(ey);
-        if (ecx === pcx && ecy === pcy) continue;
-        pairs++;
-        const adx = Math.abs(ex - gx), ady = Math.abs(ey - gy);
-        // SEPARATE bands. At the entity end the player's half-cell error subtends a small angle
-        // because the entity is D away; at the player end the exit side is decided at their own
-        // cell boundary, where that same half cell is the whole quantity.
-        const bandE = Math.abs(adx - ady) <= 2 * r * Math.max(adx, ady) + SLE;
-        const bandP = Math.abs(adx - ady) <= 2 * r * Math.max(adx, ady) + SLP;
-        const band = bandE;
-        // the two sides of a cell that face the other party
-        const eH = map[cellOf(ecx + (ex > gx ? -1 : 1), ecy)], eV = map[cellOf(ecx, ecy + (ey > gy ? -1 : 1))];
-        const pH = map[cellOf(pcx + (gx > ex ? -1 : 1), pcy)], pV = map[cellOf(pcx, pcy + (gy > ey ? -1 : 1))];
-        // full: every FACING side walled (only sides that actually face count)
-        const eFacing = [], pFacing = [];
-        if (gx < ecx) eFacing.push(map[cellOf(ecx-1, ecy)]); if (gx > ecx+1) eFacing.push(map[cellOf(ecx+1, ecy)]);
-        if (gy < ecy) eFacing.push(map[cellOf(ecx, ecy-1)]); if (gy > ecy+1) eFacing.push(map[cellOf(ecx, ecy+1)]);
-        if (ex < pcx) pFacing.push(map[cellOf(pcx-1, pcy)]); if (ex > pcx+1) pFacing.push(map[cellOf(pcx+1, pcy)]);
-        if (ey < pcy) pFacing.push(map[cellOf(pcx, pcy-1)]); if (ey > pcy+1) pFacing.push(map[cellOf(pcx, pcy+1)]);
-        const Ef = eFacing.length > 0 && eFacing.every(Boolean);
-        const Pf = pFacing.length > 0 && pFacing.every(Boolean);
-        const Ep = band ? (eH && eV) : (adx > ady ? eH : eV);
-        const Pp = bandP ? (pH && pV) : (adx > ady ? pH : pV);
-        const vis = seen(gx, gy, ex, ey, r);
-        const put = (k, v) => { if (v) { tally[k].n++; if (vis) tally[k].bad++; } };
-        put('E.full', Ef); put('E.part', Ep); put('P.full', Pf); put('P.part', Pp);
-        put('either.full', Ef || Pf); put('either.part', Ep || Pp); put('both.part', Ep && Pp);
-      }
-    }
-    const pc = k => `${String(tally[k].n).padStart(3)} (${(100*tally[k].n/pairs).toFixed(1)}%)` +
-                    `${tally[k].bad ? '  FALSE ' + tally[k].bad : ''}`;
-    console.error(`  MATRIX over ${pairs} pairs, entity-band slack ${SLE}, player-band slack ${SLP}:`);
-    console.error(`                    full square        partial (radius-aware)`);
-    console.error(`    entity end      ${pc('E.full').padEnd(19)}${pc('E.part')}`);
-    console.error(`    player end      ${pc('P.full').padEnd(19)}${pc('P.part')}`);
-    console.error(`    either end      ${pc('either.full').padEnd(19)}${pc('either.part')}`);
-  }
-  if (process.env.EGLIST) {
-    // EXACTLY what entGrid does: integer CELL deltas, the K row table, the max clamp, blkT.
-    // The point is to check the shipped arithmetic, not the float model it came from -- the
-    // 6502 has only cell indices, so its band sees up to half a cell of error the model does not.
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])];
-    // the same radii and K the emitter uses; recomputed here because ENTGRID_R/K are declared
-    // further down the file and this block runs first
-    const egR = [...ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1)),
-                 ...HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2)];
-    const egK = egR.map(r => Math.max(1, Math.min(7, Math.floor(8 * (1 - 2 * r)))));
-    const seen = (gx, gy, ex, ey, r) => {
-      for (const ox of [0.1, 0.5, 0.9]) for (const oy of [0.1, 0.5, 0.9])
-        for (const a of [0,1,2,3,4,5,6,7])
-          if (losFree(gx + ox - 0.5, gy + oy - 0.5,
-                      ex + r * Math.cos(a * Math.PI/4), ey + r * Math.sin(a * Math.PI/4))) return true;
-      return false;
-    };
-    const wall = (x, y) => (!inMap(x, y) || map[cellOf(x, y)]) ? 1 : 0;
-    // one end, the 6502's own arithmetic. base = the cell under test, sg = +1 toward the entity
-    const end = (bx, by, dx, dy, dom, sg) => {
-      const H = dx === 0 ? null : wall(bx + (dx > 0 ? sg : -sg), by);
-      const V = dy === 0 ? null : wall(bx, by + (dy > 0 ? sg : -sg));
-      if (dom < 0) {                      // near the diagonal: both sides must be walls
-        if (H === null && V === null) return false;
-        if (H !== null && !H) return false;
-        if (V === null) return true;
-        return !!V;
-      }
-      const s = dom ? H : V;
-      return s === null ? false : !!s;
-    };
-    let nE = 0, nP = 0, nB = 0, bad = 0, pairs = 0; const egP = [];
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const pcx = cellX(c), pcy = cellY(c);
-      for (let e = 0; e < ents.length; e++) {
-        const [ex, ey] = ents[e], ecx = Math.floor(ex), ecy = Math.floor(ey);
-        if (ecx === pcx && ecy === pcy) continue;
-        pairs++;
-        const dx = ecx - pcx, dy = ecy - pcy;
-        const ax = Math.abs(dx), ay = Math.abs(dy);
-        const mx = Math.max(ax, ay), mn = Math.min(ax, ay);
-        const K = egK[e];
-        const SE = +(process.env.EGSLE || 8), SP = +(process.env.EGSLP || 8);
-        const domE = (8 * mn + SE >= K * Math.min(mx, 15)) ? -1 : (ax > ay ? 1 : 0);
-        const domP = (8 * mn + SP >= K * Math.min(mx, 15)) ? -1 : (ax > ay ? 1 : 0);
-        // THE PLAYER END HAS NO BAND. The ray starts at an unknown point inside that cell, so
-        // the direction does not decide which side it leaves by -- standing a hair from the south
-        // edge, a strongly east-west ray still drops south first. Every facing side must be wall.
-        const E = end(ecx, ecy, dx, dy, domE, -1);
-        const P = end(pcx, pcy, dx, dy, process.env.EGPMODE === 'band' ? domP : -1, 1);
-        if (E) nE++; if (P) nP++; if (E || P) nB++;
-        if ((E || P) && seen(pcx + 0.5, pcy + 0.5, ex, ey, egR[e])) {
-          bad++; if (bad < 6) console.error(`      FALSE: player (${pcx},${pcy}) ent ${e}  E=${E} P=${P}`);
-        }
-        if (P && !E) egP.push(`(${pcx},${pcy}) ent ${e}`);
-        if (process.env.EGONE === `${pcx},${pcy},${e}`) {
-          const sideName = d => d < 0 ? 'BOTH' : d ? 'E/W' : 'N/S';
-          const hx = pcx + (dx > 0 ? 1 : -1), vy = pcy + (dy > 0 ? 1 : -1);
-          console.error(`  EGONE player (${pcx},${pcy}) -> ent ${e} at ${ex},${ey}  r=${egR[e]} K=${K}`);
-          console.error(`    cell delta ${dx},${dy}   max ${mx} min ${mn}   8*min+SP=${8*mn+SP} vs K*max=${K*Math.min(mx,15)} -> entity end ${sideName(domE)}, player end ${sideName(domP)}`);
-          console.error(`    player-end sides: E/W (${hx},${pcy}) wall=${wall(hx,pcy)}   N/S (${pcx},${vy}) wall=${wall(pcx,vy)}  -> P=${P}`);
-          console.error(`    entity-end sides: E/W (${ecx - (dx>0?1:-1)},${ecy}) wall=${wall(ecx-(dx>0?1:-1),ecy)}   N/S (${ecx},${ecy-(dy>0?1:-1)}) wall=${wall(ecx,ecy-(dy>0?1:-1))}  -> E=${E}`);
-          let W = 0; while (inMap(W, 0)) W++;
-          for (let yy = Math.min(pcy,ecy)-1; yy <= Math.max(pcy,ecy)+1; yy++)
-            console.error('    ' + [...Array(W)].map((_, xx) => xx===pcx&&yy===pcy ? 'P' : xx===ecx&&yy===ecy ? 'E' : (wall(xx,yy) ? '#' : '.')).join(''));
-        }
-      }
-    }
-    console.error(`  EGLIST, the 6502's own arithmetic, ${pairs} pairs:`);
-    console.error(`    entity end ${nE} (${(100*nE/pairs).toFixed(1)}%)  player end ${nP} (${(100*nP/pairs).toFixed(1)}%)` +
-                  `  either ${nB} (${(100*nB/pairs).toFixed(1)}%)   FALSE REJECTIONS ${bad}`);
-    console.error(`    player-end-only cases (${egP.length}): ${egP.slice(0, 12).join('  ')}`);
-    console.error(`    entities: ${ents.map(([x,y],i) => `${i}@${x},${y} r=${egR[i].toFixed(3)} K=${egK[i]}`).join('  ')}`);
-    if (process.env.EGALL) {
-      // EVERY open cell as a hypothetical entity, not just the ones this level happens to place.
-      // The player-end band is a gamble by construction -- the ray starts at an unknown point in
-      // the cell -- so the only question is whether the gamble ever loses, and 8 entities cannot
-      // answer it. One radius at a time, since K is what sets the band.
-      for (const r of [...new Set(egR)].sort((a,b) => a-b)) {
-        const K = Math.max(1, Math.min(7, Math.floor(8 * (1 - 2 * r))));
-        const SP = +(process.env.EGSLP || 8);
-        const SE = +(process.env.EGSLE || 8);
-        const stat = { E: {n:0, bad:0, worst:null}, B: {n:0, bad:0, worst:null}, C: {n:0, bad:0, worst:null} };
-        let np = 0;
-        for (let c = 0; c < MAPN; c++) {
-          if (map[c]) continue;
-          const pcx = cellX(c), pcy = cellY(c);
-          for (let d = 0; d < MAPN; d++) {
-            if (map[d] || d === c) continue;
-            const ecx = cellX(d), ecy = cellY(d);
-            const dx = ecx - pcx, dy = ecy - pcy;
-            const ax = Math.abs(dx), ay = Math.abs(dy);
-            const mx = Math.max(ax, ay), mn = Math.min(ax, ay);
-            np++;
-            const domP = (8 * mn + SP >= K * Math.min(mx, 15)) ? -1 : (ax > ay ? 1 : 0);
-            const domE = (8 * mn + SE >= K * Math.min(mx, 15)) ? -1 : (ax > ay ? 1 : 0);
-            const E = end(ecx, ecy, dx, dy, domE, -1);
-            const B = end(pcx, pcy, dx, dy, domP, 1), C = end(pcx, pcy, dx, dy, -1, 1);
-            if (!B && !C && !E) continue;
-            const vis = seen(pcx + 0.5, pcy + 0.5, ecx + 0.5, ecy + 0.5, r);
-            for (const [k, v] of [['E', E], ['B', B], ['C', C]]) if (v) {
-              stat[k].n++;
-              if (vis) { stat[k].bad++; if (!stat[k].worst) stat[k].worst = `(${pcx},${pcy})->(${ecx},${ecy}) d=${dx},${dy}`; }
-            }
-          }
-        }
-        console.error(`    EGALL r=${r.toFixed(3)} K=${K} over ${np} open-cell pairs:` +
-          `  E band ${stat.E.n} (${(100*stat.E.n/np).toFixed(1)}%) FALSE ${stat.E.bad}${stat.E.worst ? ' e.g. ' + stat.E.worst : ''}` +
-          `  B band ${stat.B.n} (${(100*stat.B.n/np).toFixed(1)}%) FALSE ${stat.B.bad}${stat.B.worst ? ' e.g. ' + stat.B.worst : ''}` +
-          `   C full ${stat.C.n} (${(100*stat.C.n/np).toFixed(1)}%) FALSE ${stat.C.bad}${stat.C.worst ? ' e.g. ' + stat.C.worst : ''}`);
-      }
-    }
-  }
-  if (process.env.HOPMX) {
-    // HOPMX: every grid-cull rule against the IDEAL for its hop depth, so a rule's rate means
-    // something. The ideal is computed from the sightlines themselves: sample segments from the
-    // player (anywhere in its cell, or one exact point) to the entity's disc, walk each one cell
-    // by cell, and note how many steps from each END its first wall is. A d-hop rule at the entity
-    // end can at best reject when EVERY segment meets a wall within d steps of the entity; the
-    // same from the player end. That is the most any local d-hop rule could ever get, so the gap
-    // between a rule and its ideal is what a cleverer rule could still win.
-    const W = (x, y) => (!inMap(x, y) || map[cellOf(x, y)]) ? 1 : 0;
-    const egR = [...ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1)),
-                 ...HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2)];
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])]
-                 .map(([x, y], i) => [x, y, egR[i]]);
-    const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
-    const PS = [0.01, 0.2, 0.4, 0.6, 0.8, 0.99];       // player sample points within its cell
-    // one segment: [steps from the player to its first wall, steps from the entity to ITS first
-    // wall], or null if it is clear. Same stepping as losFree.
-    const seg = (ax, ay, bx, by) => {
-      const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
-      const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
-      const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
-      let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity;
-      let tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
-      let n = 0, first = -1, last = -1;
-      while (!(cx === ex && cy === ey)) {
-        if (tX < tY) { if (tX > 1) break; cx += sX; tX += iX; } else { if (tY > 1) break; cy += sY; tY += iY; }
-        n++;
-        if (!(cx === ex && cy === ey) && map[cellOf(cx, cy)]) { if (first < 0) first = n; last = n; }
-      }
-      return first < 0 ? null : [first, n - last];
-    };
-    // over a set of player points: kP = worst (largest) first-wall distance from the player end,
-    // kE = the same from the entity end; Infinity if any segment is clear (visible).
-    const ideal = (pts, ex, ey, r) => {
-      let kP = 0, kE = 0;
-      for (const [px, py] of pts) for (const [c, s] of RIM) {
-        const k = seg(px, py, ex + r * c, ey + r * s);
-        if (!k) return [Infinity, Infinity];
-        kP = Math.max(kP, k[0]); kE = Math.max(kE, k[1]);
-      }
-      return [kP, kE];
-    };
-    // ---- the rules, as the 6502 would walk them ----
-    const facing = (tx, ty, hx, hy) => { const f = [];
-      if (hx !== tx) f.push([Math.sign(hx - tx), 0]); if (hy !== ty) f.push([0, Math.sign(hy - ty)]); return f; };
-    // m = null: every facing side (no band).  m = {fx, fy, r, sl}: the radius-aware band about
-    // the point (fx,fy) that the sightline is coming from or going to.  m.first = band only past
-    // the start cell (the hybrid).
-    const walk = (tx, ty, hx, hy, d, m, c, depth = 0) => {
-      if (tx === hx && ty === hy) return false;
-      let f = facing(tx, ty, hx, hy);
-      // m.first: no band in the START cell.  m.sl0: a different slack in the start cell, and
-      // m.sl === null past it means no band there at all.
-      const sl = depth === 0 && m && m.sl0 !== undefined ? m.sl0 : m && m.sl;
-      if (m && m.firstFn && depth === 0) f = m.firstFn(f);
-      const useBand = m && !m.firstFn && !(m.first && depth === 0) && sl !== null;
-      if (useBand && f.length === 2) {
-        c.b++;
-        const adx = Math.abs(m.fx - tx - 0.5), ady = Math.abs(m.fy - ty - 0.5);
-        if (Math.abs(adx - ady) > 2 * m.r * Math.max(adx, ady) + sl) f = [adx > ady ? f[0] : f[1]];
-      }
-      const open = [];
-      for (const [sx, sy] of f) { c.t++; if (!W(tx + sx, ty + sy)) open.push([sx, sy]); }
-      if (!open.length) return true;
-      if (d <= 1) return false;
-      for (const [sx, sy] of open) if (!walk(tx + sx, ty + sy, hx, hy, d - 1, m, c, depth + 1)) return false;
-      return true;
-    };
-    // CYCLE MODEL, from entGrid as written: ~75 setup (|dx|,|dy|, max/min, K row) per entity,
-    // ~40 to form an end's base cell, ~30 per band decision, ~25 per side tested (neighbour
-    // index + blkT). A walk past 1 hop also needs a small explicit stack: +20 per cell entered.
-    const cyc = (c, ends) => 75 + 40 * ends + 30 * c.b + 25 * c.t + 20 * (c.e || 0);
-    const HOPS = [1, 2, 3];
-    const RULES = {
-      'E band1': (p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: p.x, fy: p.y, r: e.r, sl: 1 }, c),
-      'P band3': (p, e, d, c) => walk(p.cx, p.cy, e.cx, e.cy, d, { fx: e.x, fy: e.y, r: e.r, sl: 3 }, c),
-      'P full':  (p, e, d, c) => walk(p.cx, p.cy, e.cx, e.cy, d, null, c),
-      'P hyb2':  (p, e, d, c) => walk(p.cx, p.cy, e.cx, e.cy, d, { fx: e.x, fy: e.y, r: e.r, sl: 2, first: 1 }, c),
-      // the entity end with the band ONLY in the entity's own cell, where the sightline really
-      // does end at a known point; past it the ray crosses a cell anywhere, not through its centre
-      'E b1+full': (p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: p.x, fy: p.y, r: e.r, sl0: 1, sl: null }, c),
-      'E b1+s2':   (p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: p.x, fy: p.y, r: e.r, sl0: 1, sl: 2 }, c),
-      'E b1+s3':   (p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: p.x, fy: p.y, r: e.r, sl0: 1, sl: 3 }, c),
-    };
-    const cellPts = (cx, cy) => PS.flatMap(ox => PS.map(oy => [cx + ox, cy + oy]));
-    const run = (pairs, label) => {
-      // pairs: [{cx,cy,x,y}, {cx,cy,x,y,r}]
-      const T = {}; const add = (k, v, vis, c) => { const t = T[k] ??= { n: 0, bad: 0, cy: 0 };
-        if (v) { t.n++; if (vis) t.bad++; } if (c) t.cy += c; };
-      let N = 0;
-      for (const [p, e] of pairs) {
-        N++;
-        const [kP, kE] = ideal(cellPts(p.cx, p.cy), e.x, e.y, e.r);
-        const vis = kP === Infinity;
-        add('ceiling', !vis, false);
-        for (const d of HOPS) {
-          add(`iE${d}`, kE <= d, vis); add(`iP${d}`, kP <= d, vis); add(`iX${d}`, kE <= d || kP <= d, vis);
-          const R = {};
-          for (const [nm, fn] of Object.entries(RULES)) {
-            const c = { b: 0, t: 0 }; R[nm] = fn(p, e, d, c); c.e = d > 1 ? c.t : 0; R[nm + '#'] = cyc(c, 1) - 75;
-            add(`${nm}${d}`, R[nm], vis, R[nm + '#']);
-          }
-          // the two compositions, costed in both orders (the second end only runs if the first passed)
-          for (const [nm, en, pn] of [['OLD', 'E band1', 'P band3'], ['NEW', 'E band1', 'P full'],
-                                      ['SF', 'E b1+full', 'P full'], ['S2', 'E b1+s2', 'P full'], ['S3', 'E b1+s3', 'P full']]) {
-            const rej = R[en] || R[pn];
-            const eFirst = 75 + R[en + '#'] + (R[en] ? 0 : R[pn + '#']);
-            const pFirst = 75 + R[pn + '#'] + (R[pn] ? 0 : R[en + '#']);
-            add(`${nm}${d}`, rej, vis); T[`${nm}${d}`].cyE = (T[`${nm}${d}`].cyE || 0) + eFirst;
-            T[`${nm}${d}`].cyP = (T[`${nm}${d}`].cyP || 0) + pFirst;
-          }
-        }
-      }
-      const pc = k => { const t = T[k] || { n: 0, bad: 0 };
-        return `${(100 * t.n / N).toFixed(1).padStart(5)}%${t.bad ? ` FALSE ${t.bad}` : ''}`; };
-      const cy = k => T[k] ? String(Math.round(T[k].cy / N)).padStart(4) : '   -';
-      console.error(`  HOPMX ${label}: ${N} pairs.  CEILING (hidden from every point of the player's cell) ${pc('ceiling')}`);
-      console.error(`    hop | ideal E  ideal P  ideal either | E band1     cy | P band3     cy | P full      cy | P hyb2      cy`);
-      for (const d of HOPS) console.error(`     ${d}  | ${pc(`iE${d}`)}  ${pc(`iP${d}`)}  ${pc(`iX${d}`)}       |` +
-        ` ${pc(`E band1${d}`).padEnd(11)}${cy(`E band1${d}`)} | ${pc(`P band3${d}`).padEnd(11)}${cy(`P band3${d}`)} |` +
-        ` ${pc(`P full${d}`).padEnd(11)}${cy(`P full${d}`)} | ${pc(`P hyb2${d}`).padEnd(11)}${cy(`P hyb2${d}`)}`);
-      console.error(`    hop | OLD = E band1 + P band3      | NEW = E band1 + P full       | HYB = E band1 + P hyb2`);
-      console.error(`        | rate           cy E1st cy P1st | rate           cy E1st cy P1st | rate           cy E1st cy P1st`);
-      console.error(`    hop | E b1+full   cy | E b1+s2     cy | E b1+s3     cy`);
-      for (const d of HOPS) console.error(`     ${d}  | ` + ['E b1+full', 'E b1+s2', 'E b1+s3'].map(k =>
-        `${pc(`${k}${d}`).padEnd(11)}${cy(`${k}${d}`)}`).join(' | '));
-      console.error(`    hop | SF = E b1+full + P full  | S2 = E b1+s2 + P full  | S3 = E b1+s3 + P full`);
-      for (const d of HOPS) console.error(`     ${d}  | ` + ['SF', 'S2', 'S3'].map(k =>
-        `${pc(`${k}${d}`).padEnd(15)}${String(Math.round(T[`${k}${d}`].cyE / N)).padStart(4)}    ${String(Math.round(T[`${k}${d}`].cyP / N)).padStart(4)}`).join(' | '));
-      for (const d of HOPS) console.error(`     ${d}  | ` + ['OLD', 'NEW', 'HYB'].filter(k => T[`${k}${d}`]).map(k =>
-        `${pc(`${k}${d}`).padEnd(15)}${String(Math.round(T[`${k}${d}`].cyE / N)).padStart(4)}    ${String(Math.round(T[`${k}${d}`].cyP / N)).padStart(4)}`).join(' | '));
-    };
-    // (1) the level's real entities, every open cell as the player
-    const real = [];
-    for (let c = 0; c < MAPN; c++) { if (map[c]) continue; const pcx = cellX(c), pcy = cellY(c);
-      for (const [ex, ey, r] of ents) { const ecx = Math.floor(ex), ecy = Math.floor(ey);
-        if (ecx === pcx && ecy === pcy) continue;
-        real.push([{ cx: pcx, cy: pcy, x: pcx + 0.5, y: pcy + 0.5 }, { cx: ecx, cy: ecy, x: ex, y: ey, r }]); } }
-    run(real, 'real entities');
-    // (2) soundness: every open cell as a hypothetical entity, smallest and largest radius
-    if (process.env.HOPMX === 'all') for (const r of [Math.min(...egR), Math.max(...egR)]) {
-      const all = [];
-      for (let c = 0; c < MAPN; c++) { if (map[c]) continue;
-        for (let d = 0; d < MAPN; d++) { if (map[d] || d === c) continue;
-          all.push([{ cx: cellX(c), cy: cellY(c), x: cellX(c) + 0.5, y: cellY(c) + 0.5 },
-                    { cx: cellX(d), cy: cellY(d), x: cellX(d) + 0.5, y: cellY(d) + 0.5, r }]); } }
-      run(all, `ALL open-cell pairs, r=${r.toFixed(3)}`);
-    }
-    // (3) position-aware: the player's EXACT point is known (the 6502 has px/py's fractions), so
-    // the ideal is taken from that point alone. 16 points per cell, each its own pair.
-    {
-      const T = { c: 0 }; const tal = {}; let N = 0;
-      for (let c = 0; c < MAPN; c++) { if (map[c]) continue; const pcx = cellX(c), pcy = cellY(c);
-        for (const ox of [0.125, 0.375, 0.625, 0.875]) for (const oy of [0.125, 0.375, 0.625, 0.875])
-          for (const [ex, ey, r] of ents) { if (Math.floor(ex) === pcx && Math.floor(ey) === pcy) continue;
-            N++; const [kP, kE] = ideal([[pcx + ox, pcy + oy]], ex, ey, r);
-            if (kP !== Infinity) T.c++;
-            for (const d of HOPS) { tal[`E${d}`] = (tal[`E${d}`] || 0) + (kE <= d);
-              tal[`P${d}`] = (tal[`P${d}`] || 0) + (kP <= d); tal[`X${d}`] = (tal[`X${d}`] || 0) + (kE <= d || kP <= d); } } }
-      const p = n => `${(100 * n / N).toFixed(1).padStart(5)}%`;
-      console.error(`  HOPMX position-aware IDEAL (exact player point), ${N} pairs.  CEILING ${p(T.c)}`);
-      for (const d of HOPS) console.error(`     ${d}  | ideal E ${p(tal[`E${d}`])}  ideal P ${p(tal[`P${d}`])}  ideal either ${p(tal[`X${d}`])}`);
-    }
-    // (4) SOUND, and SOUND with the player's sub-cell position folded in, judged per POINT.
-    //   PX: the player's own cell decides its exit side from the exact point. A sightline to the
-    //       entity leaves through the E/W side iff it reaches that side's x before the N/S side's
-    //       y: the crossing height at the vertical side, y = py + (xb-px)*dy/dx, falls inside the
-    //       cell. Widened by the disc's own spread there and by Q, the fixed-point error of
-    //       fractions held in 1/16ths.
-    //   EX: the entity end's band is measured from the exact point, so it no longer needs the
-    //       cell of slack that stood for "the player is somewhere in there" -- only Q's.
-    const Q = +(process.env.HOPQ ?? 1 / 16), ESL = +(process.env.HOPESL ?? 0.25);
-    const pFirst = (px, py, e) => f => {
-      if (f.length < 2) return f;
-      const dx = e.x - px, dy = e.y - py, D = Math.hypot(dx, dy);
-      const xb = dx > 0 ? Math.floor(px) + 1 : Math.floor(px), yb = dy > 0 ? Math.floor(py) + 1 : Math.floor(py);
-      const tH = (xb - px) / dx, tV = (yb - py) / dy;        // fraction of the way to the entity
-      // the disc's half-width, carried back to where the sightline crosses the cell boundary
-      const m = e.r * Math.min(tH, tV) * 1.0 + Q * 2;
-      const yAtH = py + tH * dy, xAtV = px + tV * dx;
-      const fy0 = Math.floor(py), fx0 = Math.floor(px);
-      const H = yAtH >= fy0 - m && yAtH <= fy0 + 1 + m;      // can reach the E/W side inside the cell
-      const V = xAtV >= fx0 - m && xAtV <= fx0 + 1 + m;
-      return f.filter(([sx]) => sx ? H : V);
-    };
-    const PR = {
-      'SOUND': (pt, p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: p.x, fy: p.y, r: e.r, sl0: 1, sl: null }, c) ||
-                                   walk(p.cx, p.cy, e.cx, e.cy, d, null, c),
-      '+PX':   (pt, p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: p.x, fy: p.y, r: e.r, sl0: 1, sl: null }, c) ||
-                                   walk(p.cx, p.cy, e.cx, e.cy, d, { firstFn: pFirst(pt[0], pt[1], e) }, c),
-      '+EX':   (pt, p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: pt[0], fy: pt[1], r: e.r, sl0: ESL, sl: null }, c) ||
-                                   walk(p.cx, p.cy, e.cx, e.cy, d, null, c),
-      '+both': (pt, p, e, d, c) => walk(e.cx, e.cy, p.cx, p.cy, d, { fx: pt[0], fy: pt[1], r: e.r, sl0: ESL, sl: null }, c) ||
-                                   walk(p.cx, p.cy, e.cx, e.cy, d, { firstFn: pFirst(pt[0], pt[1], e) }, c),
-    };
-    const OFF = [0.03, 0.2, 0.37, 0.5, 0.63, 0.8, 0.97];
-    const prun = (entsL, label) => {
-      const t = {}; let N = 0, hid = 0;
-      for (let c = 0; c < MAPN; c++) { if (map[c]) continue; const pcx = cellX(c), pcy = cellY(c);
-        const p = { cx: pcx, cy: pcy, x: pcx + 0.5, y: pcy + 0.5 };
-        for (const [ex, ey, r] of entsL) { const e = { cx: Math.floor(ex), cy: Math.floor(ey), x: ex, y: ey, r };
-          if (e.cx === pcx && e.cy === pcy) continue;
-          for (const ox of OFF) for (const oy of OFF) {
-            const pt = [pcx + ox, pcy + oy]; N++;
-            const vis = ideal([pt], ex, ey, r)[0] === Infinity; if (!vis) hid++;
-            for (const d of HOPS) for (const [nm, fn] of Object.entries(PR)) {
-              const k = nm + d, T = t[k] ??= { n: 0, bad: 0, cy: 0, cyV: 0, nV: 0 };
-              const cc = { b: 0, t: 0 }; const rej = fn(pt, p, e, d, cc);
-              cc.e = d > 1 ? cc.t : 0; const cyc_ = cyc(cc, 2);
-              T.cy += cyc_; if (rej) { T.n++; if (vis) T.bad++; } else { T.cyV += cyc_; T.nV++; }
-            } } } }
-      const pc = k => `${(100 * t[k].n / N).toFixed(1).padStart(5)}%${t[k].bad ? ` FALSE ${t[k].bad}` : ''}`;
-      console.error(`  HOPMX per-POINT ${label}: ${N} pairs, ceiling ${(100 * hid / N).toFixed(1)}%  (cy = walk only; +PX/+EX extra arithmetic NOT included)`);
-      console.error(`    hop | ` + Object.keys(PR).map(n => `${n.padEnd(6)} rate     cy  cyIfKept`).join(' | '));
-      for (const d of HOPS) console.error(`     ${d}  | ` + Object.keys(PR).map(n => { const k = n + d;
-        return `${pc(k).padEnd(14)} ${String(Math.round(t[k].cy / N)).padStart(4)} ${String(Math.round(t[k].cyV / Math.max(1, t[k].nV))).padStart(6)}`; }).join(' | '));
-    };
-    prun(ents, 'real entities');
-    if (process.env.HOPMX === 'all') {
-      const allE = []; for (let c = 0; c < MAPN; c++) if (!map[c]) allE.push([cellX(c) + 0.5, cellY(c) + 0.5, Math.min(...egR)], [cellX(c) + 0.5, cellY(c) + 0.5, Math.max(...egR)]);
-      // every open cell as an entity is a lot of points; thin the player points to keep it quick
-      OFF.splice(0, OFF.length, 0.03, 0.35, 0.65, 0.97);
-      prun(allE, 'ALL open cells as entities, both radii');
-    }
-  }
-  {   // RADIUS-AWARE rule: one side outside the overlap band, two inside it. Sound, and uses the
-      // cheap single-side test for ~88% of directions because the entity is small.
-    const ents = [...ORBS.map(o => [o.x, o.y, ORBSCALE / (4 * F_COL)]),
-                  ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5, h.exit ? HOLER : HOLER / 2])];
-    const seen = (gx, gy, ex, ey, r) => {
-      for (const ox of [0.1, 0.5, 0.9]) for (const oy of [0.1, 0.5, 0.9])
-        for (const a of [0,1,2,3,4,5,6,7])
-          if (losFree(gx + ox - 0.5, gy + oy - 0.5,
-                      ex + r * Math.cos(a * Math.PI/4), ey + r * Math.sin(a * Math.PI/4))) return true;
-      return false;
-    };
-    const SLACK = +(process.env.SLACK ?? 0);
-    let pairs = 0, n1 = 0, b1 = 0, nR = 0, bR = 0, bandHits = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const px = cellX(c), py = cellY(c), gx = px + 0.5, gy = py + 0.5;
-      for (const [ex, ey, r] of ents) {
-        const cx = Math.floor(ex), cy = Math.floor(ey);
-        if (cx === px && cy === py) continue;
-        pairs++;
-        const dx = Math.abs(ex - gx), dy = Math.abs(ey - gy), K = 1 + 2 * r;
-        const wH = map[cellOf(cx + (ex > gx ? -1 : 1), cy)], wV = map[cellOf(cx, cy + (ey > gy ? -1 : 1))];
-        const band = Math.abs(dx - dy) <= 2 * r * Math.max(dx, dy) + SLACK;
-        if (band) bandHits++;
-        const one = dx > dy ? wH : wV;                  // unsound single-side
-        const rad = band ? (wH && wV) : (dx > dy ? wH : wV);
-        const vis = seen(gx, gy, ex, ey, r);
-        if (one) { n1++; if (vis) b1++; }
-        if (rad) { nR++; if (vis) bR++; }
-      }
-    }
-    console.error(`  RADIUS-AWARE vs NAIVE, ${pairs} pairs:`);
-    console.error(`    naive one-side : rejects ${n1} (${(100*n1/pairs).toFixed(1)}%)  FALSE ${b1}`);
-    console.error(`    radius-aware   : rejects ${nR} (${(100*nR/pairs).toFixed(1)}%)  FALSE ${bR}`);
-    console.error(`    pairs inside the overlap band (need both sides): ${bandHits} (${(100*bandHits/pairs).toFixed(1)}%)`);
-  }
-  {   // HOW BIG IS AN ENTITY, as a fraction of the way from its cell centre to the cell edge.
-      // The cull has been treating a 1x1 cell as the thing to hide; it is not.
-    const half = 0.5;
-    const rOrb = ORBSCALE / (4 * F_COL);
-    const rows = [['orb', rOrb], ['angel', rOrb * 1.7], ['socket', HOLER / 2], ['exit hole', HOLER],
-                  ['pedestal', PEDR]];
-    console.error('  ENTITY WORLD RADIUS (cell = 1.0, centre to edge = 0.5):');
-    for (const [nm, r] of rows) console.error(
-      `    ${nm.padEnd(10)} r = ${r.toFixed(3)} cells  = ${(100 * r / half).toFixed(0)}% of the way to the edge` +
-      `   -> side wedge widens to tan = ${(1 + 2 * r).toFixed(2)} (${(Math.atan(1 + 2 * r) * 180 / Math.PI).toFixed(1)} deg vs 45)`);
-    console.error(`    => the OVERLAP BAND where two sides can both admit a sightline:`);
-    for (const [nm, r] of rows) console.error(
-      `       ${nm.padEnd(10)} |dx|/|dy| in [${(1 / (1 + 2 * r)).toFixed(2)}, ${(1 + 2 * r).toFixed(2)}]` +
-      `  = ${(2 * (Math.atan(1 + 2 * r) - Math.PI / 4) * 180 / Math.PI).toFixed(1)} deg of each 90`);
-  }
-  {   // TWO HOPS. The entity's cell is reached through its open facing sides; if every cell beyond
-      // those is itself unreachable by the same test, the entity is hidden. Still only map lookups.
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])];
-    const R = 0.2;
-    const seen = (gx, gy, ex, ey) => {
-      for (const ox of [0.1, 0.5, 0.9]) for (const oy of [0.1, 0.5, 0.9])
-        for (const a of [0, 1, 2, 3, 4, 5, 6, 7])
-          if (losFree(gx + ox - 0.5, gy + oy - 0.5,
-                      ex + R * Math.cos(a * Math.PI / 4), ey + R * Math.sin(a * Math.PI / 4))) return true;
-      return false;
-    };
-    // open sides of cell (cx,cy) that point back toward (ax,ay), as [dx,dy] steps
-    const openFacing = (ax, ay, cx, cy) => {
-      const r = [];
-      if (ax < cx     && !map[cellOf(cx - 1, cy)]) r.push([-1, 0]);
-      if (ax > cx + 1 && !map[cellOf(cx + 1, cy)]) r.push([1, 0]);
-      if (ay < cy     && !map[cellOf(cx, cy - 1)]) r.push([0, -1]);
-      if (ay > cy + 1 && !map[cellOf(cx, cy + 1)]) r.push([0, 1]);
-      return r;
-    };
-    const blocked = (ax, ay, cx, cy) => {
-      const f = [];
-      if (ax < cx)     f.push(map[cellOf(cx - 1, cy)]);
-      if (ax > cx + 1) f.push(map[cellOf(cx + 1, cy)]);
-      if (ay < cy)     f.push(map[cellOf(cx, cy - 1)]);
-      if (ay > cy + 1) f.push(map[cellOf(cx, cy + 1)]);
-      return f.length > 0 && f.every(Boolean);
-    };
-    let pairs = 0;
-    const DEPTH = [0,1,2,3,4].map(() => ({ n: 0, bad: 0 }));
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const px = cellX(c), py = cellY(c), gx = px + 0.5, gy = py + 0.5;
-      for (const [ex, ey] of ents) {
-        const cx = Math.floor(ex), cy = Math.floor(ey);
-        if (cx === px && cy === py) continue;
-        pairs++;
-        const one = blocked(gx, gy, cx, cy);
-        // depth-limited: is this cell unreachable, looking up to d hops back toward the player?
-        const unreach = (cx2, cy2, d, seenSet) => {
-          if (cx2 === px && cy2 === py) return false;
-          if (blocked(gx, gy, cx2, cy2)) return true;
-          if (d <= 1) return false;
-          const outs = openFacing(gx, gy, cx2, cy2);
-          if (!outs.length) return true;
-          return outs.every(([sx, sy]) => {
-            const k = (cy2 + sy) * 64 + cx2 + sx;
-            if (seenSet.has(k)) return true;              // already proved unreachable on this path
-            seenSet.add(k);
-            return unreach(cx2 + sx, cy2 + sy, d - 1, seenSet);
-          });
-        };
-        const vis = seen(gx, gy, ex, ey);
-        for (let d = 1; d <= 4; d++) {
-          if (unreach(cx, cy, d, new Set())) { DEPTH[d].n++; if (vis) DEPTH[d].bad++; }
-        }
-      }
-    }
-    console.error(`  HOP DEPTH, ${pairs} pairs (false rejections must be 0):`);
-    for (let d = 1; d <= 4; d++) console.error(
-      `    ${d} hop${d > 1 ? 's' : ' '} : rejects ${String(DEPTH[d].n).padStart(3)} ` +
-      `(${(100*DEPTH[d].n/pairs).toFixed(1)}%)  false ${DEPTH[d].bad}`);
-  }
-  {   // THE SQUARE IS NOT THE ENTITY. An orb is a disc of radius ~0.2 at the cell CENTRE, so a
-      // visible corner of the square does not mean a visible entity. Compare the two rules
-      // against the footprint rather than the square.
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])];
-    const R = +(process.env.ENTR ?? 0.2);
-    const seen = (gx, gy, ex, ey) => {        // any eye point in the player's cell to any of the disc
-      for (const ox of [0.1, 0.5, 0.9]) for (const oy of [0.1, 0.5, 0.9])
-        for (const a of [0, 1, 2, 3, 4, 5, 6, 7])
-          if (losFree(gx + ox - 0.5, gy + oy - 0.5,
-                      ex + R * Math.cos(a * Math.PI / 4), ey + R * Math.sin(a * Math.PI / 4))) return true;
-      return losFree(gx, gy, ex, ey);
-    };
-    let pairs = 0, c1 = 0, c1bad = 0, c2 = 0, c2bad = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const px = cellX(c), py = cellY(c), gx = px + 0.5, gy = py + 0.5;
-      for (const [ex, ey] of ents) {
-        const cx = Math.floor(ex), cy = Math.floor(ey);
-        if (cx === px && cy === py) continue;
-        pairs++;
-        const dx = ex - gx, dy = ey - gy;
-        const horiz = Math.abs(dx) > Math.abs(dy), tie = Math.abs(dx) === Math.abs(dy);
-        const wH = map[cellOf(cx + (dx > 0 ? -1 : 1), cy)], wV = map[cellOf(cx, cy + (dy > 0 ? -1 : 1))];
-        const one  = tie ? (wH && wV) : (horiz ? wH : wV);          // one-side rule
-        const all  = [...(px + 0.5 < cx ? [map[cellOf(cx - 1, cy)]] : []),
-                      ...(px + 0.5 > cx + 1 ? [map[cellOf(cx + 1, cy)]] : []),
-                      ...(py + 0.5 < cy ? [map[cellOf(cx, cy - 1)]] : []),
-                      ...(py + 0.5 > cy + 1 ? [map[cellOf(cx, cy + 1)]] : [])];
-        const sound = all.length > 0 && all.every(Boolean);
-        const vis = seen(gx, gy, ex, ey);
-        if (one)   { c1++; if (vis) c1bad++; }
-        if (sound) { c2++; if (vis) c2bad++; }
-      }
-    }
-    console.error(`  VALIDATED AGAINST THE ENTITY'S FOOTPRINT (radius ${R}), ${pairs} pairs:`);
-    console.error(`    one-side rule  : rejects ${c1} (${(100*c1/pairs).toFixed(1)}%)  false ${c1bad}`);
-    console.error(`    all-sides rule : rejects ${c2} (${(100*c2/pairs).toFixed(1)}%)  false ${c2bad}`);
-  }
-  {   // SOUND rule: reject only if EVERY side of the cell facing the other party is a wall.
-      // "Is ANY of that square visible", not "is its centre visible" -- so a corner peek cannot
-      // fool it. Validated against LOS to a grid of points across the entity's cell, from a grid
-      // across the player's, because both have extent.
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])];
-    const facing = (ax, ay, cx, cy) => {        // sides of cell (cx,cy) that a point (ax,ay) faces
-      const r = [];
-      if (ax < cx)     r.push(map[cellOf(cx - 1, cy)]);
-      if (ax > cx + 1) r.push(map[cellOf(cx + 1, cy)]);
-      if (ay < cy)     r.push(map[cellOf(cx, cy - 1)]);
-      if (ay > cy + 1) r.push(map[cellOf(cx, cy + 1)]);
-      return r;
-    };
-    const anyVisible = (gx, gy, cx, cy) => {    // any point of the player's cell to any of the target's
-      for (const ox of [0.1, 0.5, 0.9]) for (const oy of [0.1, 0.5, 0.9])
-        for (const tx of [0.15, 0.5, 0.85]) for (const ty of [0.15, 0.5, 0.85])
-          if (losFree(gx + ox - 0.5, gy + oy - 0.5, cx + tx, cy + ty)) return true;
-      return false;
-    };
-    let pairs = 0, byP = 0, byE = 0, either = 0, bad = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const px = cellX(c), py = cellY(c), gx = px + 0.5, gy = py + 0.5;
-      for (const [ex, ey] of ents) {
-        const cx = Math.floor(ex), cy = Math.floor(ey);
-        if (cx === px && cy === py) continue;
-        pairs++;
-        const fe = facing(gx, gy, cx, cy), fp = facing(cx + 0.5, cy + 0.5, px, py);
-        const e = fe.length > 0 && fe.every(Boolean), p = fp.length > 0 && fp.every(Boolean);
-        if (e) byE++; if (p) byP++;
-        if (e || p) { either++; if (anyVisible(gx, gy, cx, cy)) bad++; }
-      }
-    }
-    console.error(`  SOUND RULE ("is any of that square visible") over ${pairs} pairs:`);
-    console.error(`    entity's cell rejects : ${byE} (${(100*byE/pairs).toFixed(1)}%)`);
-    console.error(`    player's cell rejects : ${byP} (${(100*byP/pairs).toFixed(1)}%)`);
-    console.error(`    EITHER                : ${either} (${(100*either/pairs).toFixed(1)}%)`);
-    console.error(`    false rejections      : ${bad}  (must be 0)`);
-  }
-  {   // RULE A BOTH WAYS -- line of sight is bidirectional, so the ENTITY's own cell walls
-      // reject just as well, and its open sides can be precomputed because it moves rarely.
-    const ents = [...ORBS.map((o, i) => [o.x, o.y, `orb ${i}`]),
-                  ...HOLELIKE.map((h, i) => [h.x + 0.5, h.y + 0.5, h.exit ? 'exit hole' : `socket ${i-1}`])];
-    const sides = (x, y) => ({ N: !map[cellOf(x, y - 1)], S: !map[cellOf(x, y + 1)],
-                               W: !map[cellOf(x - 1, y)], E: !map[cellOf(x + 1, y)] });
-    let pairs = 0, byP = 0, byE = 0, byEither = 0, bad = 0;
-    console.error('  ENTITY-SIDE openness (precomputable, refreshed on movement):');
-    ents.forEach(([ex, ey, nm]) => {
-      const o = sides(Math.floor(ex), Math.floor(ey));
-      console.error(`    ${nm.padEnd(12)} at (${Math.floor(ex)},${Math.floor(ey)})  open ` +
-        `N=${+o.N} S=${+o.S} W=${+o.W} E=${+o.E}   (${o.N + o.S + o.W + o.E} sides)`);
-    });
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const px = cellX(c), py = cellY(c), gx = px + 0.5, gy = py + 0.5;
-      const po = sides(px, py);
-      for (const [ex, ey] of ents) {
-        const dx = ex - gx, dy = ey - gy; if (!dx && !dy) continue;
-        pairs++;
-        const eo = sides(Math.floor(ex), Math.floor(ey));
-        // A TIE is a perfect diagonal: the line goes through the CORNER, entering neither side.
-        // Rejecting on one of them is wrong -- every false rejection measured was exactly this.
-        // On a tie, demand BOTH sides be walls; then whichever way it really passes, it is blocked.
-        const tie = Math.abs(dx) === Math.abs(dy), horiz = Math.abs(dx) > Math.abs(dy);
-        const pH = dx > 0 ? 'E' : 'W', pV = dy > 0 ? 'S' : 'N';
-        const eH = dx > 0 ? 'W' : 'E', eV = dy > 0 ? 'N' : 'S';
-        const p = tie ? (!po[pH] && !po[pV]) : !po[horiz ? pH : pV];
-        const e = tie ? (!eo[eH] && !eo[eV]) : !eo[horiz ? eH : eV];
-        if (p) byP++; if (e) byE++;
-        if (p || e) { byEither++; if (losFree(gx, gy, ex, ey)) { bad++;
-          if (bad <= 6) console.error(`      FALSE: player (${px},${py}) -> entity ` +
-            `(${Math.floor(ex)},${Math.floor(ey)})  d=(${dx.toFixed(2)},${dy.toFixed(2)})` +
-            `  tie=${tie}  byPlayer=${p} byEntity=${e}`); } }
-      }
-    }
-    console.error(`  RULE A both ways over ${pairs} pairs:`);
-    console.error(`    player's cell rejects : ${byP} (${(100*byP/pairs).toFixed(1)}%)`);
-    console.error(`    entity's cell rejects : ${byE} (${(100*byE/pairs).toFixed(1)}%)`);
-    console.error(`    EITHER                : ${byEither} (${(100*byEither/pairs).toFixed(1)}%)`);
-    console.error(`    false rejections      : ${bad}  (must be 0)`);
-  }
-  // RULE A ceiling: the sightline leaves the player's cell through exactly one side. If that side
-  // is a wall, the entity is hidden -- whatever else is out there. Measured from the cell CENTRE,
-  // which is the best case; a real implementation must be conservative over the whole cell.
-  {
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])];
-    let pairs = 0, byA = 0, alsoBlocked = 0, open1 = 0, cells = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      cells++;
-      const pxc = cellX(c), pyc = cellY(c), gx = pxc + 0.5, gy = pyc + 0.5;
-      const openN = !map[cellOf(pxc, pyc - 1)], openS = !map[cellOf(pxc, pyc + 1)];
-      const openW = !map[cellOf(pxc - 1, pyc)], openE = !map[cellOf(pxc + 1, pyc)];
-      if (openN + openS + openW + openE === 1) open1++;
-      for (const [ex, ey] of ents) {
-        pairs++;
-        const dx = ex - gx, dy = ey - gy;
-        if (!dx && !dy) continue;
-        // which side does the ray leave through: whichever edge it reaches first
-        const tx = dx ? 0.5 / Math.abs(dx) : Infinity, ty = dy ? 0.5 / Math.abs(dy) : Infinity;
-        const side = tx < ty ? (dx > 0 ? 'E' : 'W') : (dy > 0 ? 'S' : 'N');
-        const sideOpen = side === 'E' ? openE : side === 'W' ? openW : side === 'N' ? openN : openS;
-        if (!sideOpen) { byA++; if (!losFree(gx, gy, ex, ey)) alsoBlocked++; }
-      }
-    }
-    console.error(`  RULE A (exit side of the player's own cell is a wall), ${cells} open cells:`);
-    console.error(`    cells with only ONE open side: ${open1} (${(100*open1/cells).toFixed(0)}%)`);
-    console.error(`    pairs rejected: ${byA} of ${pairs} (${(100*byA/pairs).toFixed(1)}%)`);
-    console.error(`    ...of which genuinely blocked: ${alsoBlocked} (${byA ? (100*alsoBlocked/byA).toFixed(0) : 0}% -- must be 100)`);
-  }
-  // How often are the player and an entity AXIS-ALIGNED with a wall between them -- the case that
-  // needs only x/y and the map, no runs and no extents. Over every open player cell.
-  {
-    const ents = [...ORBS.map(o => [o.x, o.y]), ...HOLELIKE.map(h => [h.x + 0.5, h.y + 0.5])];
-    let pairs = 0, aligned = 0, blocked = 0;
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      const pxc = cellX(c), pyc = cellY(c);
-      for (const [ex, ey] of ents) {
-        const exc = Math.floor(ex), eyc = Math.floor(ey);
-        pairs++;
-        const sameRow = pyc === eyc && pxc !== exc, sameCol = pxc === exc && pyc !== eyc;
-        if (!sameRow && !sameCol) continue;
-        aligned++;
-        let hit = false;
-        if (sameRow) { const [a, b] = pxc < exc ? [pxc, exc] : [exc, pxc];
-          for (let x = a + 1; x < b; x++) if (map[cellOf(x, pyc)]) hit = true; }
-        else         { const [a, b] = pyc < eyc ? [pyc, eyc] : [eyc, pyc];
-          for (let y = a + 1; y < b; y++) if (map[cellOf(pxc, y)]) hit = true; }
-        if (hit) blocked++;
-      }
-    }
-    console.error(`  AXIS-ALIGNED case over ${pairs} (open cell, entity) pairs:`);
-    console.error(`    share a row or column: ${aligned} (${(100*aligned/pairs).toFixed(1)}%)`);
-    console.error(`    ...and a wall between: ${blocked} (${(100*blocked/pairs).toFixed(1)}% of all pairs)`);
-  }
-  const [spx, spy] = [ST0[0] >> 8, ST0[1] >> 8];
-  const ents = [...ORBS.map((o, i) => [o.x, o.y, `orb ${i}`]),
-                ...HOLELIKE.map((h, i) => [h.x + 0.5, h.y + 0.5, h.exit ? 'exit hole' : `socket ${i - 1}`])];
-  {
-    const [ax, ay] = [ST0[0] >> 8, ST0[1] >> 8];
-    const fx = (ST0[0] & 255) / 256, fy = (ST0[1] & 255) / 256;
-    const oN = !map[cellOf(ax, ay - 1)], oS = !map[cellOf(ax, ay + 1)];
-    const oW = !map[cellOf(ax - 1, ay)], oE = !map[cellOf(ax + 1, ay)];
-    console.error(`  RULE A at the spawn cell (${ax},${ay}) frac (${fx.toFixed(2)},${fy.toFixed(2)}): ` +
-      `open N=${+oN} S=${+oS} W=${+oW} E=${+oE}`);
-    const ents = [...ORBS.map((o, i) => [o.x, o.y, `orb ${i}`]),
-                  ...HOLELIKE.map((h, i) => [h.x + 0.5, h.y + 0.5, h.exit ? 'exit hole' : `socket ${i - 1}`])];
-    ents.forEach(([ex, ey, nm]) => {
-      const px = ax + fx, py = ay + fy, dx = ex - px, dy = ey - py;
-      const tx = dx ? (dx > 0 ? 1 - fx : fx) / Math.abs(dx) : Infinity;
-      const ty = dy ? (dy > 0 ? 1 - fy : fy) / Math.abs(dy) : Infinity;
-      const side = tx < ty ? (dx > 0 ? 'E' : 'W') : (dy > 0 ? 'S' : 'N');
-      const sideOpen = side === 'E' ? oE : side === 'W' ? oW : side === 'N' ? oN : oS;
-      const cent = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'E' : 'W') : (dy > 0 ? 'S' : 'N');
-      console.error(`    ${nm.padEnd(12)} exits ${side} (from centre: ${cent})  ` +
-        `${sideOpen ? 'open  -> not culled' : 'WALL  -> CULLED'}`);
-    });
-  }
-  console.error(`  CULLSIM from spawn cell (${spx},${spy}), ${nextRun - 1} runs on this level:`);
-  console.error(`    entity        faces-away  &faces-player   &extent rule   VERDICT`);
-  ents.forEach(([ex, ey, nm]) => {
-    let away = 0, both = 0, blocked = 0, exact = 0;
-    for (let r = 1; r < nextRun; r++) {
-      const k = runPlane[r], f = runFace[r], e = ext[r]; if (!e) continue;
-      const entBeyond = f === 'W' ? ex > k : f === 'E' ? ex < k : f === 'N' ? ey > k : ey < k;
-      if (!entBeyond) continue;
-      away++;
-      const plFaces  = f === 'W' ? spx + 0.5 < k : f === 'E' ? spx + 0.5 > k
-                     : f === 'N' ? spy + 0.5 < k : spy + 0.5 > k;
-      if (!plFaces) continue;
-      both++;
-      const vert = (f === 'W' || f === 'E');
-      const pc = vert ? spy : spx, ec = vert ? Math.floor(ey) : Math.floor(ex);
-      if (pc >= e[0] && pc <= e[1] && ec >= e[0] && ec <= e[1]) blocked++;
-      // ...and the EXACT crossing, to say whether the extent rule is too strict or whether no
-      // SINGLE run blocks at all. Wall occupies [lo, hi+1] in continuous coords.
-      const pA = vert ? spx + 0.5 : spy + 0.5, pB = vert ? spy + 0.5 : spx + 0.5;
-      const eA = vert ? ex : ey,              eB = vert ? ey : ex;
-      const t = (k - pA) / (eA - pA);
-      if (t > 0 && t < 1) { const cross = pB + t * (eB - pB);
-        const M = 0.25;   // margin: the object has width, and a graze is not a block
-        if (cross > e[0] + M && cross < e[1] + 1 - M) { exact++;
-          if (process.env.CULLSIM === '2') console.error(`      ${nm}: run ${r} face ${f} plane ${k}` +
-            ` extent ${e[0]}..${e[1]}  crossing at ${cross.toFixed(2)} (t=${t.toFixed(2)})`); } }
-    }
-    console.error(`    ${nm.padEnd(12)} ${String(away).padStart(6)} ${String(both).padStart(13)} ` +
-      `${String(blocked).padStart(13)} ${String(exact).padStart(7)}   ` +
-      `${blocked ? 'CULLED' : exact ? 'exact only' : 'NO single run blocks'}`);
-  });
-}
+
 const orbOcc = [...ORBS, ...HOLELIKE.map(h => ({ x: h.x + 0.5, y: h.y + 0.5 }))].map(o => {
   const m = new Array(OCCBYTES).fill(0);
   for (let r = 1; r < nextRun; r++) {
@@ -7122,57 +6149,7 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // with the level's OFFICIAL start point, so a fall and a death now arrive at the same place --
 // which was the bug that found them ("when you die on level 4 you start at x280 y280 and appear
 // stuck"). The LAND= and LANDA= env knobs went with them; they had been read and discarded since.
-// ---- the hole gets the same line-of-sight cull, as ONE BIT per cell ----
-// An orb is only projected if it survives the per-cell candidate list and a bearing window;
-// a culled orb is ~20 cycles against ~2,400 projected, and that ratio is the entire reason 34
-// orbs are affordable. The hole was paying full price every frame -- behind you, through a
-// wall, across the map -- so it gets the same treatment.
-//
-// A bit rather than a 3-byte candidate record because the lists are already 2,283 bytes of a
-// 2,304-byte region: one more record per cell would not fit. 32 bytes buys the LOS half of the
-// cull, which is the larger half in a maze (most cells cannot see a given spot at all), and
-// orbOne's existing "behind the camera" test still catches the rest cheaply.
-// HOLECULL=0 fills the map solid, so the gate always passes: it prices the cull the same way
-// ORBGATE and ORBSTAMP price theirs. Rendering is identical either way -- only the cost moves.
-const HOLECULL = process.env.HOLECULL !== "0";
-// 32 bytes per hole-like entity. Sized by how many there ARE: it was a flat 64 -- two holes'
-// worth -- while the writes below index at L*32 for up to four. With a socket present the array
-// grew SPARSE past 64, and `join` renders a hole as an empty field, so holeSeeT emitted
-// "!byte ...,,..." -- 81 fields with 2 empty, every byte after the gap shifted, and the socket's
-// visibility bitmap silently wrong. It assembled cleanly the whole time.
-// ---- SIZED TO THIS LEVEL, not to the chain's widest (2026-09-30) ----
-// It was NHOLE * 32 -- a 32-byte visibility bitmap per hole-like entity, padded to the most
-// any resident level has. Measured over levels 1-7 the padding is 192 bytes on level 1, 128
-// on most of the others: 416 bytes across a four-level set, for rows no loop ever reaches.
-// Natural sizing only works for a table at the END of the manifest, where a varying length
-// shifts nothing after it -- see where this is pushed. Its BASE is still fixed (everything
-// before it is budget-sized), which it has to be: two instructions name it directly.
-const holeSee = new Array(Math.max(1, HOLELIKE.length) * 32).fill(0);
 const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
-if (!HOLECULL) holeSee.fill(255);
-for (let cell = 0; cell < MAPN; cell++) {
-  const x = cellX(cell), y = cellY(cell);
-  if (map[cell]) continue;
-  const cx = x + 0.5, cy = y + 0.5;
-  // Line of sight from ANYWHERE in the cell, not just its centre. The player occupies the
-  // whole cell, and standing at one edge you can see round a corner the centre cannot -- which
-  // showed up as an orb popping in and out as you walked a corridor, present in cells 9 and 11
-  // and missing in 10. Sampling a 3x3 grid makes the list a superset of what is reachable.
-  const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
-  HOLELIKE.forEach((h, L) => {                  // same 3x3 eye grid the orbs used to share
-    // Each is capped by ITS OWN ladder's reach: a socket is half the radius, so its smallest
-    // rung runs out at half the distance and listing it further would cost a projection to
-    // draw nothing.
-    // A PEDESTAL is not a socket here. It is BIGGER than the exit hole and its ladder reaches
-    // further than either, and taking the socket's half-range cut it off at 6.6 cells -- where
-    // it is still eleven columns across. (The user, 2026-09-24: "they disappear when far away
-    // but they are still large just before they disappear.") Same formula, its own radius.
-    const maxD = h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2;
-    if (Math.hypot(h.x + 0.5 - cx, h.y + 0.5 - cy) < maxD &&
-        eye.some(([ex, ey]) => losFree(ex, ey, h.x + 0.5, h.y + 0.5)))
-      holeSee[L * 32 + (cell >> 3)] |= 1 << (cell & 7);
-  });
-}
 const _pal = [...new Set(ORBBODY)].length === 1
   ? `all body colour ${ORBBODY[0]}`
   : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
@@ -8422,59 +7399,6 @@ const SOCK = makeHoleLadder(SOCKR, 4, SOCK_OWN ? 0 : HOLE.slotEnd, 32, false, 0,
            .map(t => t.split(':').map(Number)),
 } : {});
 
-// HSDUMP=1: what holeSeeT says for ONE cell -- "which hole-likes can be seen from here at all".
-// Build-time, so it answers without an emulator; the gate reads exactly this bit.
-if (process.env.HSDUMP) {
-  const [sx, sy] = [ST0[0] >> 8, ST0[1] >> 8];
-  const cell = sy * MAPW + sx, cx = sx + 0.5, cy = sy + 0.5;
-  const eye = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [cx + ox, cy + oy]));
-  // How much the 3x3 eye grid adds over a single centre sample, and how much the 1/8-cell point
-  // sampling adds over a denser walk -- the two places this test is generous, measured not asserted.
-  {
-    let cells = 0, byGrid = 0, byStep = 0, total = 0;
-    const fine = (ax, ay, bx, by) => {            // 64 samples/cell: what a near-exact walk says
-      const n = Math.ceil(Math.hypot(bx - ax, by - ay) * 64);
-      for (let i = 1; i < n; i++) { const t = i / n;
-        if (map[cellOf((ax + (bx - ax) * t) | 0, (ay + (by - ay) * t) | 0)]) return false; }
-      return true; };
-    for (let c = 0; c < MAPN; c++) {
-      if (map[c]) continue;
-      cells++;
-      const gx = cellX(c) + 0.5, gy = cellY(c) + 0.5;
-      const eyes = [-0.45, 0, 0.45].flatMap(ox => [-0.45, 0, 0.45].map(oy => [gx + ox, gy + oy]));
-      HOLELIKE.forEach(h => {
-        total++;
-        const tx = h.x + 0.5, ty = h.y + 0.5;
-        const centre = losFree(gx, gy, tx, ty);
-        const grid = eyes.some(([ex, ey]) => losFree(ex, ey, tx, ty));
-        if (grid && !centre) byGrid++;                       // the 3x3 let it through
-        if (grid && !eyes.some(([ex, ey]) => fine(ex, ey, tx, ty))) byStep++;  // sampling missed a wall
-      });
-    }
-    console.error(`  holeSeeT generosity over ${cells} open cells x ${HOLELIKE.length} entities = ${total} pairs:`);
-    console.error(`    3x3 eye grid says SEEN where the centre alone says blocked: ${byGrid} (${(100*byGrid/total).toFixed(1)}%)`);
-    console.error(`    1/8-cell sampling says SEEN where a 1/64 walk says blocked: ${byStep} (${(100*byStep/total).toFixed(1)}%)`);
-  }
-  console.error(`  cap vs LADDER REACH -- the cap is a formula, the reach is the ladder's last rung:`);
-  console.error(`    socket: cap ${(HOLE_MAX_D / 2).toFixed(2)}   ladder's smallest rung at d=` +
-    `${SOCK.L[SOCK.L.length - 1].d.toFixed(2)} (${SOCK.L[SOCK.L.length - 1].w.toFixed(1)}c)` +
-    `   ${Math.abs(HOLE_MAX_D / 2 - SOCK.L[SOCK.L.length - 1].d) < 0.01 ? 'MATCH' : '*** MISMATCH ***'}`);
-  console.error(`    exit:   cap ${HOLE_MAX_D.toFixed(2)}   ladder's smallest rung at d=` +
-    `${HOLE.L[HOLE.L.length - 1].d.toFixed(2)} (${HOLE.L[HOLE.L.length - 1].w.toFixed(1)}c)` +
-    `   ${Math.abs(HOLE_MAX_D - HOLE.L[HOLE.L.length - 1].d) < 0.01 ? 'MATCH' : '*** MISMATCH ***'}`);
-  console.error(`  holeSeeT from the spawn cell (${sx},${sy}) = cell ${cell}:`);
-  HOLELIKE.forEach((h, L) => {
-    const maxD = h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2;
-    const d = Math.hypot(h.x + 0.5 - cx, h.y + 0.5 - cy);
-    const los = eye.some(([ex, ey]) => losFree(ex, ey, h.x + 0.5, h.y + 0.5));
-    const bit = (holeSee[L * 32 + (cell >> 3)] >> (cell & 7)) & 1;
-    console.error(`    ent ${L + ORBS.length}  ${(h.exit ? 'exit hole' : h.ped ? 'pedestal' : 'socket').padEnd(9)}` +
-      ` at (${h.x},${h.y})  d=${d.toFixed(2)} (cap ${maxD.toFixed(2)}${d < maxD ? ' ok' : ' TOO FAR'})` +
-      `  line of sight ${los ? 'FREE' : 'blocked'}  ->  holeSeeT bit ${bit}`);
-  });
-}
-
-
 // ---- SOCKETS BORROW THE EXIT HOLE'S BITMAPS AND OWN NONE ----
 // A disc of HALF the radius at distance d is the same shape as a full-size one at 2d stretched
 // twice vertically -- exactly, not approximately. Rasterising row by row, the socket's half-width
@@ -9714,844 +8638,7 @@ const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
   return Math.min(127, CONE_HALF + Math.ceil(coneSlack(c) + quant) + 1);
 });
 
-// ---- HOPMC=<samples>: Monte Carlo of the grid cull, AFTER the culls that already run ----
-// Each sample is one frame: the player at a random free position (kept 0.1 off any wall side,
-// which is as close as the collision box lets them get) and a random heading; the MOVEABLE
-// entities (ORBS: orbs and angels) each at a random open cell centre; the fixed ones (HOLELIKE)
-// where the level puts them. Every entity then goes through holeSeeT (the built bitmap itself)
-// and cnTest (its own tables and arithmetic), and only what survives both reaches the grid
-// cull -- the only population whose cost and saving are real.
-// Per config: what it culls, what it falsely culls (a line of sight exists from the exact
-// point), the work it does, and net = culls * HOPSAVE - work, per frame. Diagnostic only.
-if (process.env.HOPMC) {
-  const NS = +(process.env.HOPMC || 0), SAVE = +(process.env.HOPSAVE ?? 2900);
-  let sd = +(process.env.HOPSEED ?? 1) >>> 0;
-  const rnd = () => {                                    // mulberry32
-    sd = (sd + 0x6d2b79f5) >>> 0; let t = sd;
-    t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  const W = (x, y) => (!inMap(x, y) || map[cellOf(x, y)]) ? 1 : 0;
-  let openC = []; for (let c = 0; c < MAPN; c++) if (!map[c]) openC.push(c);
-  // HOPREACH=1: only cells REACHABLE from the level's start with every wall shut -- where the
-  // player (and anything they carry, or an angel loose with them) can actually be before a wall
-  // opens. Without it the sampling credits a shut wall for rooms you cannot be in while it is shut.
-  if (process.env.HOPREACH) {
-    const st = cellOf(ST0[0] >> 8, ST0[1] >> 8), seen = new Set([st]), q = [st];
-    while (q.length) { const c = q.pop(), x = cellX(c), y = cellY(c);
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx, ny = y + dy; if (!inMap(nx, ny)) continue;
-        const n = cellOf(nx, ny); if (!map[n] && !seen.has(n)) { seen.add(n); q.push(n); } } }
-    console.error(`    HOPREACH: ${seen.size} of ${openC.length} open cells reachable from the start with the walls shut`);
-    openC = openC.filter(c => seen.has(c));
-  }
-  const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
-  const radH = HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2);
-  const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
-  // ground truth from ONE exact point: is any part of the disc in sight?
-  const visible = (px, py, ex, ey, r) => RIM.some(([c, s]) => losFree(px, py, ex + r * c, ey + r * s));
-  // ---- the culls that already run ----
-  const coneOk = (dx, dy, pa) => {                       // cnTest, verbatim in arithmetic
-    let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
-    if (c < 2) return true;
-    let a = c; while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
-    let bq = CONE_BQ[(t << 3) | b];
-    if (dx < 0) bq = (128 - bq) & 255;
-    if (dy < 0) bq = (256 - bq) & 255;
-    const tol = CONE_TOL[Math.min(c, CONE_DMAX)];
-    return ((bq - pa + tol) & 255) < 2 * tol;
-  };
-  // ---- the grid cull: SOUND, optionally with the exact point ----
-  const facing = (tx, ty, hx, hy) => { const f = [];
-    if (hx !== tx) f.push([Math.sign(hx - tx), 0]); if (hy !== ty) f.push([0, Math.sign(hy - ty)]); return f; };
-  const walk = (tx, ty, hx, hy, d, m, c, depth = 0) => {
-    if (tx === hx && ty === hy) return false;
-    if (depth) c.e++;
-    let f = facing(tx, ty, hx, hy);
-    if (depth === 0 && m && f.length === 2) {
-      if (m.first) { c.px++; f = m.first(f); }         // the player's own cell, from the exact point
-      else {                                           // the entity's own cell: the radius-aware band
-        c.b++;
-        const adx = Math.abs(m.fx - tx - 0.5), ady = Math.abs(m.fy - ty - 0.5);
-        if (Math.abs(adx - ady) > 2 * m.r * Math.max(adx, ady) + m.sl) f = [adx > ady ? f[0] : f[1]];
-      }
-    }
-    const op = [];
-    for (const [sx, sy] of f) { c.t++; if (!W(tx + sx, ty + sy)) op.push([sx, sy]); }
-    if (!op.length) return true;
-    if (d <= 1) return false;
-    for (const [sx, sy] of op) if (!walk(tx + sx, ty + sy, hx, hy, d - 1, m, c, depth + 1)) return false;
-    return true;
-  };
-  const Q = 1 / 16;                                    // fractions held in 16ths
-  // Which side of its own cell can a sightline from the exact point leave by? Measured ALONG THE
-  // DOMINANT AXIS only: where is the ray, across, when it reaches the dominant side? Measuring the
-  // crossing on the other side too is a trap -- for a shallow ray that crossing swings by whole
-  // cells for a sliver of aim, so no small margin covers it (HOPMC found it: a ray 7 degrees off
-  // the horizontal moved its south crossing from x=10.23 to 9.99 aiming 0.17 lower).
-  // The margin is the disc's angular half-width, taken as 1.1*r/max (max <= the true distance, so
-  // it can only come out wider), times the distance to that side, doubled for cos^2 of a ray at
-  // up to 45 degrees; plus the 16ths rounding. All of it is what a 6502 version can compute.
-  const pFirst = (px, py, ex, ey, r) => f => {
-    const dx = ex - px, dy = ey - py, ax = Math.abs(dx), ay = Math.abs(dy);
-    const xDom = ax >= ay;
-    const [p0, p1, d0, d1] = xDom ? [px, py, dx, dy] : [py, px, dy, dx];   // 0 = dominant axis
-    const b0 = d0 > 0 ? Math.floor(p0) + 1 : Math.floor(p0);   // the dominant side's coordinate
-    const b1 = d1 > 0 ? Math.floor(p1) + 1 : Math.floor(p1);   // ...and the other side's
-    const run = Math.abs(b0 - p0);
-    const across = p1 + run * d1 / Math.abs(d0);               // where the ray is on reaching b0
-    const mg = run * 2 * 1.1 * e_r(r, Math.max(ax, ay)) + 2 * Q;
-    // past b1 already (in the direction of travel) -> it left by the other side first
-    const beyond = d1 > 0 ? across - b1 : b1 - across;
-    const domOK = beyond <= mg, othOK = beyond >= -mg;
-    return f.filter(([sx]) => (sx !== 0) === xDom ? domOK : othOK);
-  };
-  const e_r = (r, mx) => r / Math.max(mx, 0.5);
-  // ---- EGREF: entGrid's OWN integer arithmetic, bit for bit -- what the 6502 must reproduce ----
-  // px16/py16 are the engine's 8.8 position; entities sit at cell centres (cell*256+128).
-  //   ENTITY END: its own cell's band, from the exact point:  K*max <= 8*min + 512  ->  both
-  //     sides, else the dominant one. (512 = 8 * 0.25 cell in 256ths; K = floor(8(1-2r)).)
-  //   PLAYER END: its own cell's exit side, along the dominant axis, all in 16-bit:
-  //     run7/dist7 = distances to the dominant/other side in 128ths; d0'/d1' = |deltas| shifted
-  //     right by s until d0' fits a byte;  A = run7*d1', B = dist7*d0',
-  //     Mg = (run7*R8 >> s) + 16*d0'  (R8 = ceil(2.2*r*256): the disc; 16*d0' = 2/16 cell)
-  //     dominant side admitted iff A <= B + Mg, the other iff B <= A + Mg.
-  //   Past the start cell, both ends: every facing side, 3 hops, blkT walls.
-  const egKof = r => Math.max(1, Math.min(7, Math.floor(8 * (1 - 2 * r))));
-  const egRof = r => Math.min(255, Math.ceil(2.2 * r * 256));
-  const egWalk = (tx, ty, hx, hy, d, mask, c) => {
-    if (tx === hx && ty === hy) return false;
-    c.n++;
-    const sx = Math.sign(hx - tx), sy = Math.sign(hy - ty);
-    const oH = sx !== 0 && (mask & 1) && !W(tx + sx, ty), oV = sy !== 0 && (mask & 2) && !W(tx, ty + sy);
-    if (!oH && !oV) return true;
-    if (d <= 1) return false;
-    if (oH && !egWalk(tx + sx, ty, hx, hy, d - 1, 3, c)) return false;
-    if (oV && !egWalk(tx, ty + sy, hx, hy, d - 1, 3, c)) return false;
-    return true;
-  };
-  const egRef = (px16, py16, ecx, ecy, r, c = { n: 0, px: 0 }) => {
-    const K = egKof(r), R8 = egRof(r);
-    const pcx = px16 >> 8, pcy = py16 >> 8;
-    if (pcx === ecx && pcy === ecy) return false;
-    const dX = ecx * 256 + 128 - px16, dY = ecy * 256 + 128 - py16;
-    const ax = Math.abs(dX), ay = Math.abs(dY);
-    // entity end
-    let mE = 3;
-    if (pcx !== ecx && pcy !== ecy) {
-      const mx = Math.max(ax, ay), mn = Math.min(ax, ay);
-      if (!(K * mx <= 8 * mn + 512)) mE = ax > ay ? 1 : 2;
-    }
-    if (egWalk(ecx, ecy, pcx, pcy, 3, mE, c)) return true;
-    // player end
-    let mP = 3;
-    if (pcx !== ecx && pcy !== ecy) {
-      c.px++;
-      const xDom = ax >= ay;
-      const d0 = xDom ? ax : ay, d1 = xDom ? ay : ax;
-      const f0 = (xDom ? px16 : py16) & 255, f1 = (xDom ? py16 : px16) & 255;
-      const s0 = (xDom ? dX : dY) > 0, s1 = (xDom ? dY : dX) > 0;
-      const run7 = (s0 ? 256 - f0 : f0) >> 1, dist7 = (s1 ? 256 - f1 : f1) >> 1;
-      let s = 0; while ((d0 >> s) > 255) s++;
-      const e0 = d0 >> s, e1 = d1 >> s;
-      const A = run7 * e1, B = dist7 * e0, Mg = ((run7 * R8) >> s) + 16 * e0;
-      const domOK = A <= B + Mg, othOK = B <= A + Mg;
-      mP = xDom ? (domOK ? 1 : 0) | (othOK ? 2 : 0) : (domOK ? 2 : 0) | (othOK ? 1 : 0);
-    }
-    return egWalk(pcx, pcy, ecx, ecy, 3, mP, c);
-  };
-  // CYCLE MODEL (estimated from entGrid as written, not measured): 75 setup, 40 per end run,
-  // 30 per band decision, 25 per side tested, 20 per cell entered past the first, +30 for the
-  // fractional deltas when the entity end uses the exact point, +115 per exact-point exit test.
-  const CFG = [];
-  for (const d of [1, 2, 3]) for (const sub of [0, 1]) for (const ends of ['E', 'EP']) CFG.push({ d, sub, ends });
-  const name = g => `hop${g.d} ${g.sub ? 'sub' : '   '} ${g.ends.padEnd(2)}`;
-  const S = CFG.map(() => ({ cul: 0, bad: 0, work: 0, workKept: 0, neg: 0, worst: Infinity, net: 0 }));
-  const REF = { n: 0, cul: 0, bad: 0, onlyRef: 0, onlyFloat: 0 };
-  // R0, the user's first rule: same row or same column, and a WALL CELL strictly between. Exact,
-  // not a heuristic: a segment between two points of one row's strip stays in that strip, so a
-  // wall cell across it blocks every sightline wherever in the cell the player stands.
-  // aligned = how often the rule even APPLIES; scan = cells a runtime scan would test to answer it.
-  const R0 = { n: 0, aligned: 0, cul: 0, bad: 0, scan: 0 };
-  // R1, WALL SHADOW CONES. A wall cell beside the SOURCE cell (the player's, or the entity's), on a
-  // side that faces the TARGET cell, plus the run of wall cells continuing sideways along that same
-  // row -- a to one side, b to the other. Every ray from anywhere in the source that heads past it
-  // must cross the wall row inside the run, so the target cell k rows beyond the wall is hidden iff
-  // its sideways offset from the source column is <= b*(k+1) on b's side and <= a*(k+1) on a's.
-  // (Worst ray: from the source's FAR corner.) a = b = 0 is just the column -- R0's adjacent case.
-  // The whole source cell is used even for an entity, whose disc is smaller: conservative.
-  const RUNCAP = +(process.env.R1CAP ?? 15);
-  const shadow = (sx, sy, tx, ty, st) => {
-    // dirs: [step to the wall, sideways unit]
-    for (const [ux, uy, vx, vy] of [[0, -1, 1, 0], [0, 1, 1, 0], [-1, 0, 0, 1], [1, 0, 0, 1]]) {
-      if (!W(sx + ux, sy + uy)) continue;
-      const fwd = (tx - sx) * ux + (ty - sy) * uy;      // rows from the source toward the wall
-      if (fwd < 2) continue;                             // the target must lie BEYOND the wall row
-      const k = fwd - 1, lat = (tx - sx) * vx + (ty - sy) * vy;
-      let a = 0, b = 0;
-      while (b < RUNCAP && W(sx + ux + vx * (b + 1), sy + uy + vy * (b + 1))) b++;
-      while (a < RUNCAP && W(sx + ux - vx * (a + 1), sy + uy - vy * (a + 1))) a++;
-      if (st) { st.sides++; st.ab[Math.min(3, lat >= 0 ? b : a)]++; }
-      if (lat >= 0 ? lat <= b * (k + 1) : -lat <= a * (k + 1)) return true;
-    }
-    return false;
-  };
-  const R1 = { P: 0, E: 0, X: 0, bad: 0, sides: 0, ab: [0, 0, 0, 0], r0and: 0, r1only: 0, r0only: 0 };
-  // R2, THE CORNER. If the source cell has walls on BOTH sides that face a target lying strictly
-  // diagonally from it (say north and east, target north-east), every ray from anywhere in the
-  // source leaves through one of those two sides and enters a wall -- so the whole quadrant is
-  // hidden, at any distance. Two wall tests on the deltas' signs; no arithmetic at all.
-  const corner = (sx, sy, tx, ty) => {
-    const dx = Math.sign(tx - sx), dy = Math.sign(ty - sy);
-    return dx !== 0 && dy !== 0 && !!W(sx + dx, sy) && !!W(sx, sy + dy);
-  };
-  const R2 = { P: 0, E: 0, X: 0, bad: 0, r1: 0, r12: 0, r012: 0, bad12: 0 };
-  // R2 VARIATION (R2W): the walls in a small WINDOW of the quadrant facing the other end -- radius 1
-  // (N, NE, E for a north-east target: every 2-4 wall shape, the lone diagonal included) or radius
-  // 2 (the next ring too, 8 cells, 256 patterns). Every sightline to a target in a closed quadrant
-  // stays in that quadrant's columns and rows, so the window holds every wall that could block it
-  // locally. This is the BEST CASE -- the exact hidden set per (pattern, offset), by tracing
-  // segments from the source square's points to the target square's points against window walls
-  // only -- to see what any encoding of it could win before designing one.
-  const SP = [0, 0.25, 0.5, 0.75, 1];
-  const winCache = new Map();
-  const winHidden = (pat, R, dx, dy) => {            // NE-normalised: dx, dy >= 0, outside the window
-    const key = `${R}:${pat}:${dx}:${dy}`;
-    let v = winCache.get(key); if (v !== undefined) return v;
-    const isW = (i, j) => i >= 0 && j >= 0 && Math.max(i, j) <= R && (i || j) && ((pat >> (j * (R + 1) + i)) & 1);
-    v = true;
-    outer: for (const ax of SP) for (const ay of SP) for (const bx of SP) for (const by of SP) {
-      // segment from (ax, ay) in the source square to (dx+bx, dy+by) in the target; +y is "away"
-      const x0 = ax, y0 = ay, x1 = dx + bx, y1 = dy + by;
-      let cx = 0, cy = 0;                                // every source point is in cell (0,0)
-      const ddx = x1 - x0, ddy = y1 - y0;
-      const iX = ddx ? 1 / ddx : Infinity, iY = ddy ? 1 / ddy : Infinity;
-      let tX = ddx ? (1 - x0) * iX : Infinity, tY = ddy ? (1 - y0) * iY : Infinity;
-      let blocked = false;
-      for (;;) {
-        if (tX < tY) { if (tX >= 1) break; cx++; tX += iX; } else { if (tY >= 1) break; cy++; tY += iY; }
-        if (Math.max(cx, cy) > R) break;               // left the window: nothing else counts
-        if (isW(cx, cy)) { blocked = true; break; }
-      }
-      if (!blocked) { v = false; break outer; }
-    }
-    winCache.set(key, v); return v;
-  };
-  const windowRule = (sx, sy, tx, ty, R) => {
-    const qx = Math.sign(tx - sx) || 1, qy = Math.sign(ty - sy) || 1;   // aligned: either side works
-    const dx = (tx - sx) * qx, dy = (ty - sy) * qy;
-    if (Math.max(dx, dy) <= R) return false;           // the target must lie beyond the window
-    if (Math.max(dx, dy) > +(process.env.R2WMAX ?? 99)) return false;   // R2WMAX: a lookup table only reaches so far
-    let pat = 0;
-    for (let j = 0; j <= R; j++) for (let i = 0; i <= R; i++)
-      if ((i || j) && W(sx + i * qx, sy + j * qy)) pat |= 1 << (j * (R + 1) + i);
-    if (!pat) return false;
-    return winHidden(pat, R, dx, dy);
-  };
-  const R2W = { 1: { P: 0, E: 0, X: 0, bad: 0, all: 0, allBad: 0 }, 2: { P: 0, E: 0, X: 0, bad: 0, all: 0, allBad: 0 } };
-  // The 3x3 quadrant pattern at an end (radius 2, NE-normalised; bit j*3+i for cell (i,j)), for
-  // the census of which shapes supply the radius-2 gain.
-  const pat2 = (sx, sy, tx, ty) => {
-    const qx = Math.sign(tx - sx) || 1, qy = Math.sign(ty - sy) || 1;
-    let pat = 0;
-    for (let j = 0; j <= 2; j++) for (let i = 0; i <= 2; i++)
-      if ((i || j) && W(sx + i * qx, sy + j * qy)) pat |= 1 << (j * 3 + i);
-    return pat;
-  };
-  const bit = (i, j) => 1 << (j * 3 + i);
-  // the user's two shapes. SHORT L: (2,2) (1,2) (2,1) walls, with (1,0) (0,1) (1,1) OPEN -- an L
-  // one cell out that does not reach P's own row or column. FULL L: row 2 and column 2 all walls.
-  const SHORTL = bit(2, 2) | bit(1, 2) | bit(2, 1), SHORTL_OPEN = bit(1, 0) | bit(0, 1) | bit(1, 1) | bit(0, 2) | bit(2, 0);
-  const FULLL = bit(0, 2) | bit(1, 2) | bit(2, 2) | bit(2, 1) | bit(2, 0);
-  // ---- HZN: THE VISIBILITY HORIZON TABLE ----
-  // Per open cell, per bearing sector: the farthest Chebyshev distance at which ANY cell in that
-  // sector is visible from ANYWHERE in this cell. Runtime: sector from the cone's own bearing
-  // (cnB), hidden if distance > horizon -- one lookup and one compare per end. Sector membership is
-  // computed here with the SAME bearing arithmetic as cnTest, and visibility is from-region (5x5
-  // points on each square), so the cut is exact for what the runtime can see. Walls that can OPEN
-  // (LEVEL_WALLS) are treated as open: always sound, and only loses culling while they are shut.
-  // 4-bit entries; 15 = "never hidden" (a horizon past 14 cannot be stored, so it must not cull).
-  const bearing = (dx, dy) => {
-    let b = Math.abs(dx), t = Math.abs(dy); let a = Math.max(b, t);
-    while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
-    let bq = CONE_BQ[(t << 3) | b];
-    if (dx < 0) bq = (128 - bq) & 255;
-    if (dy < 0) bq = (256 - bq) & 255;
-    return bq;
-  };
-  const HZN = process.env.HZN ? (process.env.HZNS ?? '8,16,32').split(',').map(Number) : [];
-  const hzTab = {}, HZQ = [], HOPEN = { n: 0 };
-  const HZROT = +(process.env.HZNROT ?? 0);        // sector rotation, in 256ths of a turn
-  if (HZN.length) {
-    // HZNMODE=closed: the table for the walls AS THEY ARE (openable ones shut) -- what a
-    // state-tracking table would get before any wall opens; the default treats them as open.
-    const openable = process.env.HZNMODE === 'closed' ? new Set()
-                   : new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
-    const WO = (x, y) => (!inMap(x, y) || (map[cellOf(x, y)] && !openable.has(cellOf(x, y)))) ? 1 : 0;
-    const losO = (ax, ay, bx, by) => {          // losFree against WO
-      const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
-      if (cx === ex && cy === ey) return true;
-      const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
-      const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
-      let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity, tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
-      for (;;) {
-        if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; } else { if (tY > 1) return true; cy += sY; tY += iY; }
-        if (cx === ex && cy === ey) return true;
-        if (WO(cx, cy)) return false;
-      }
-    };
-    const HP = [0.01, 0.255, 0.5, 0.745, 0.99];
-    const cvis = (sx, sy, tx, ty) => {
-      for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
-        if (losO(sx + ax, sy + ay, tx + bx, ty + by)) return true;
-      return false;
-    };
-    const open = []; for (let c = 0; c < MAPN; c++) if (!WO(cellX(c), cellY(c))) open.push(c);
-    const V = new Map();                         // unordered pair -> visible
-    const t0 = Date.now();
-    for (let i = 0; i < open.length; i++) for (let j = i + 1; j < open.length; j++) {
-      const a = open[i], b = open[j];
-      V.set(a * 256 + b, cvis(cellX(a), cellY(a), cellX(b), cellY(b)));
-    }
-    const vis2 = (a, b) => a === b || V.get(Math.min(a, b) * 256 + Math.max(a, b));
-    // HZNQ: how each horizon is stored. A list of the distances a code can MEAN (the last is
-    // "never cull"); a horizon is rounded UP to the next one, which is the safe direction.
-    const QB = { '4b': [...Array(15).keys(), 99], '3lin': [0, 1, 2, 3, 4, 5, 6, 99], '3log': [1, 2, 3, 4, 6, 8, 11, 99],
-                 '2b': [1, 2, 4, 99], '2b2': [2, 3, 5, 99], '1b': [2, 99], '1b3': [3, 99] };
-    HZQ.splice(0, HZQ.length, ...(process.env.HZNQ ?? '4b').split(','));
-    HOPEN.n = open.length;
-    for (const NSC of HZN) for (const qn of HZQ) {
-      const cb = QB[qn];
-      const T = new Uint8Array(MAPN * NSC).fill(99);
-      for (const a of open) {
-        const h = new Array(NSC).fill(0);
-        for (const b of open) { if (a === b || !vis2(a, b)) continue;
-          const dx = cellX(b) - cellX(a), dy = cellY(b) - cellY(a);
-          const k = (((bearing(dx, dy) + HZROT) & 255) * NSC) >> 8, c = Math.max(Math.abs(dx), Math.abs(dy));
-          if (c > h[k]) h[k] = c; }
-        for (let k = 0; k < NSC; k++) T[a * NSC + k] = cb.find(v => v >= h[k]);
-      }
-      hzTab[`${NSC}/${qn}`] = T;
-      // HZNKEEP=<credits.json>: keep only the K most valuable cells' entries (the rest read as
-      // "never cull" -- always safe), one variant per K in HZNKEEPN. Credits come from a SEPARATE
-      // run (HZNCREDIT), so the subset is not fitted to the sample that judges it.
-      if (process.env.HZNKEEP && NSC === 4 && qn === '2b2') {
-        const cr = JSON.parse(readFileSync(process.env.HZNKEEP, 'utf8'));
-        const order = [...cr.keys()].filter(c => cr[c] > 0).sort((a, b) => cr[b] - cr[a]);
-        for (const K of (process.env.HZNKEEPN ?? '10,20,30,45,60').split(',').map(Number)) {
-          const keep = new Set(order.slice(0, K)), M = T.slice();
-          for (let c = 0; c < MAPN; c++) if (!keep.has(c)) for (let k = 0; k < NSC; k++) M[c * NSC + k] = 99;
-          hzTab[`${NSC}/${qn}/K${K}`] = M;
-        }
-        HOPEN.useful = order.length;
-      }
-      if (process.env.HZNDUMP && NSC === 4 && qn === '2b2')
-        writeFileSync(process.env.HZNDUMP, JSON.stringify([...T]));
-    }
-    console.error(`    HZN: ${open.length} open cells, ${V.size} pairs, ${[...V.values()].filter(Boolean).length} visible, built in ${Date.now() - t0} ms; ` +
-      HZN.map(n => `${n} sectors = ${Math.ceil(MAPN * n / 2)} bytes`).join(', '));
-  }
-  const hzCull = (key, sc, b, c) => { const NSC = +key.split('/')[0]; const v = hzTab[key][sc * NSC + ((((b + HZROT) & 255) * NSC) >> 8)]; return c > v; };
-  const HZK = Object.keys(hzTab);
-  const HZCR = new Float64Array(MAPN);            // cycles each cell's entry saved (HZNCREDIT)
-  const HZ = Object.fromEntries(HZK.map(n => [n, { P: 0, E: 0, X: 0, bad: 0, saved: 0, work: 0 }]));
-  const hzTot = Object.fromEntries(HZK.map(n => [n, new Float32Array(Math.max(1, NS))]));
-  const hzF = Object.fromEntries(HZK.map(n => [n, { w: 0, cc: 0, sv: 0 }]));
-  const census = new Map();     // pattern -> culls beyond R0+R1+R2
-  if (process.env.R2SHAPES) for (const [nm, p] of [['SHORT L', SHORTL], ['FULL L', FULLL]]) {
-    console.error(`  ${nm}: hidden cells (H), up-left of PP, offsets 0..9`);
-    for (let dy = 9; dy >= 0; dy--) console.error('    ' + [...Array(10)].map((_, k) => 9 - k).map(dx =>
-      (dx === 0 && dy === 0) ? 'P' : (dx <= 2 && dy <= 2) ? (((p >> (dy * 3 + dx)) & 1) ? '#' : '.') : (winHidden(p, 2, dx, dy) ? 'H' : '.')).join(' '));
-  }
-  const RL = { shortHit: 0, shortSeen: 0, fullHit: 0, fullSeen: 0, fullAll: 0 };
-  let nNone = 0; let nEnt = 0, nHid = 0, nHole = 0, nCone = 0, nPost = 0, nCeil = 0, maxPost = 0;
-  const frame = new Float64Array(CFG.length);
-  const per = CFG.map(() => new Float32Array(NS));
-  const fcul = new Int32Array(CFG.length); const shut = new Int32Array(CFG.length);   // gate-shut frames
-  // ---- TOTAL entity-stage cost per frame, not just the grid's own ledger ----
-  // From the measured breakdown in the entity-cull notes: a VISIBLE entity is ~7,000 (projection +
-  // drawing), a hidden one in view ~2,900 (projected, then discarded by the span walk), one the
-  // projection rejects as off-screen ~560 (~314 if behind), omTrig ~800 whenever the gate is open,
-  // the cone ~125, holeSeeT ~25. Visible = a line of sight AND inside the screen's true bound.
-  const C = { hs: 25, cone: 125, trig: 800, vis: 7000, hid: 2900, off: 560, behind: 314 };
-  for (const k of Object.keys(C)) if (process.env['HOPC_' + k]) C[k] = +process.env['HOPC_' + k];
-  const totB = new Float32Array(NS), totK = CFG.map(() => new Float32Array(NS));
-  const ft = new Float64Array(CFG.length), fsv = new Int32Array(CFG.length);
-  const savedReal = new Float64Array(CFG.length);       // every frame's net, per config, for the spread
-  for (let s = 0; s < NS; s++) {
-    // the player: a free position, kept off the walls, and a heading
-    const pc = openC[(rnd() * openC.length) | 0], pcx = cellX(pc), pcy = cellY(pc);
-    const lo = (w) => w ? 0.1 : 0, hi = (w) => w ? 0.9 : 1;
-    const x0 = lo(W(pcx - 1, pcy)), x1 = hi(W(pcx + 1, pcy)), y0 = lo(W(pcx, pcy - 1)), y1 = hi(W(pcx, pcy + 1));
-    // quantised to the engine's own 8.8, so EGREF and the truth see the same point
-    const px = Math.floor((pcx + x0 + rnd() * (x1 - x0)) * 256) / 256,
-          py = Math.floor((pcy + y0 + rnd() * (y1 - y0)) * 256) / 256, pa = (rnd() * 256) | 0;
-    const ents = [
-      ...ORBS.map((o, i) => { const c = openC[(rnd() * openC.length) | 0];
-        return { x: cellX(c) + 0.5, y: cellY(c) + 0.5, r: radO[i], hole: -1 }; }),
-      ...HOLELIKE.map((h, L) => ({ x: h.x + 0.5, y: h.y + 0.5, r: radH[L], hole: L })),
-    ];
-    frame.fill(0); let post = 0; fcul.fill(0); ft.fill(0); fsv.fill(0); let fb = 0;
-    for (const n of HZK) { hzF[n].w = 0; hzF[n].cc = 0; hzF[n].sv = 0; }
-    const ca = Math.cos(pa / 256 * 2 * Math.PI), sa = Math.sin(pa / 256 * 2 * Math.PI);
-    for (const e of ents) {
-      nEnt++;
-      const ecx = Math.floor(e.x), ecy = Math.floor(e.y);
-      fb += C.hs; for (let k = 0; k < ft.length; k++) ft[k] += C.hs;
-      if (e.hole >= 0 && !((holeSee[e.hole * 32 + (pc >> 3)] >> (pc & 7)) & 1)) { nHole++; continue; }
-      fb += C.cone; for (let k = 0; k < ft.length; k++) ft[k] += C.cone;
-      if (!coneOk(ecx - pcx, ecy - pcy, pa)) { nCone++; continue; }
-      nPost++; post++;
-      const vis = visible(px, py, e.x, e.y, e.r); if (!vis) nCeil++;
-      // what this entity costs downstream if nothing culls it
-      const fx = (e.x - px) * ca + (e.y - py) * sa, rx = -(e.x - px) * sa + (e.y - py) * ca;
-      const inFov = fx > 0.05 && Math.abs(rx) <= (e.hole >= 0 ? 0.944 : 0.749) * fx;
-      const cls = !inFov ? (fx <= 0.05 ? C.behind : C.off) : vis ? C.vis : C.hid;
-      fb += cls;
-      if (HZN.length) {   // HZN: player end first (the player's cell is the same for every entity)
-        const b = bearing(ecx - pcx, ecy - pcy), c = Math.max(Math.abs(ecx - pcx), Math.abs(ecy - pcy));
-        const ec = cellOf(ecx, ecy);
-        for (const n of HZK) {
-          const p = hzCull(n, pc, b, c), q = !p && hzCull(n, ec, (b + 128) & 255, c), T = HZ[n];
-          if (n === '4/2b2') { if (p) HZCR[pc] += cls; else if (q) HZCR[ec] += cls; }
-          const w = 25 + (p ? 0 : 25);
-          T.work += w; hzF[n].w += w;
-          if (p) T.P++; if (q) T.E++;
-          if (p || q) { T.X++; if (vis) T.bad++; T.saved += cls; hzF[n].cc += cls; } else hzF[n].sv++;
-        }
-      }
-      {   // R0
-        R0.n++;
-        if (pcx === ecx || pcy === ecy) {
-          R0.aligned++;
-          const dx = Math.sign(ecx - pcx), dy = Math.sign(ecy - pcy);
-          let x = pcx + dx, y = pcy + dy, wall = false;
-          while (!(x === ecx && y === ecy)) { R0.scan++; if (W(x, y)) { wall = true; break; } x += dx; y += dy; }
-          if (wall) { R0.cul++; if (vis) R0.bad++; }
-        }
-      }
-      {   // R2 variation, best case, radius 1 and 2 -- and in union with R0+R1+R2
-        const r1 = shadow(pcx, pcy, ecx, ecy) || shadow(ecx, ecy, pcx, pcy);
-        const r2 = corner(pcx, pcy, ecx, ecy) || corner(ecx, ecy, pcx, pcy);
-        let r0 = false;
-        if (pcx === ecx || pcy === ecy) { const dx = Math.sign(ecx - pcx), dy = Math.sign(ecy - pcy);
-          let x = pcx + dx, y = pcy + dy; while (!(x === ecx && y === ecy)) { if (W(x, y)) { r0 = true; break; } x += dx; y += dy; } }
-        for (const R of [1, 2]) {
-          const p = windowRule(pcx, pcy, ecx, ecy, R), q = windowRule(ecx, ecy, pcx, pcy, R), T = R2W[R];
-          if (p) T.P++; if (q) T.E++;
-          if (p || q) { T.X++; if (vis) T.bad++; }
-          if (p || q || r0 || r1 || r2) { T.all++; if (vis) T.allBad++; }
-        }
-        {   // census + the two named shapes
-          const base = r0 || r1 || r2;
-          const pp = pat2(pcx, pcy, ecx, ecy), qp = pat2(ecx, ecy, pcx, pcy);
-          const dP = Math.max(Math.abs(ecx - pcx), Math.abs(ecy - pcy));
-          if (!base) {
-            if (windowRule(pcx, pcy, ecx, ecy, 2)) census.set(pp, (census.get(pp) || 0) + 1);
-            else if (windowRule(ecx, ecy, pcx, pcy, 2)) census.set(qp, (census.get(qp) || 0) + 1);
-          }
-          for (const pt of [pp, qp]) {
-            if ((pt & SHORTL) === SHORTL && !(pt & SHORTL_OPEN)) RL.shortSeen++;
-            if ((pt & FULLL) === FULLL) RL.fullSeen++;
-          }
-          // the FULL L as a rule: 5 walls, target 3+ cells out in that quadrant -> hidden
-          const fl = (dP >= 3) && (((pp & FULLL) === FULLL) || ((qp & FULLL) === FULLL));
-          if (fl) { RL.fullAll++; if (!base) RL.fullHit++; if (vis) RL.fullBad = (RL.fullBad || 0) + 1; }
-        }
-      }
-      {   // R2, by itself -- and unions with R1 and R0
-        const p = corner(pcx, pcy, ecx, ecy), q = corner(ecx, ecy, pcx, pcy);
-        if (p) R2.P++; if (q) R2.E++;
-        if (p || q) { R2.X++; if (vis) R2.bad++; }
-        const r1 = shadow(pcx, pcy, ecx, ecy) || shadow(ecx, ecy, pcx, pcy);
-        let r0 = false;
-        if (pcx === ecx || pcy === ecy) { const dx = Math.sign(ecx - pcx), dy = Math.sign(ecy - pcy);
-          let x = pcx + dx, y = pcy + dy; while (!(x === ecx && y === ecy)) { if (W(x, y)) { r0 = true; break; } x += dx; y += dy; } }
-        if (r1) R2.r1++;
-        if (r1 || p || q) { R2.r12++; if (vis) R2.bad12++; }
-        if (r0 || r1 || p || q) R2.r012++;
-      }
-      {   // R1, by itself -- and how it overlaps R0
-        const p = shadow(pcx, pcy, ecx, ecy, R1), q = shadow(ecx, ecy, pcx, pcy, R1);
-        if (p) R1.P++; if (q) R1.E++;
-        if (process.env.R1DIFF && p !== q && (R1.dd = (R1.dd || 0) + 1) <= 6)
-          console.error(`    R1DIFF player cell (${pcx},${pcy}) entity cell (${ecx},${ecy}): player end ${p}, entity end ${q}`);
-        if (p || q) { R1.X++; if (vis) R1.bad++; }
-        let r0 = false;
-        if (pcx === ecx || pcy === ecy) { const dx = Math.sign(ecx - pcx), dy = Math.sign(ecy - pcy);
-          let x = pcx + dx, y = pcy + dy; while (!(x === ecx && y === ecy)) { if (W(x, y)) { r0 = true; break; } x += dx; y += dy; } }
-        if (r0 && (p || q)) R1.r0and++; else if (p || q) R1.r1only++; else if (r0) R1.r0only++;
-      }
-      {   // EGREF against the float model's hop3 sub EP, entity by entity
-        const rr = egRef(Math.round(px * 256), Math.round(py * 256), ecx, ecy, e.r);
-        const kk = CFG.findIndex(g => g.d === 3 && g.sub && g.ends === 'EP');
-        const cE = { b: 0, t: 0, e: 0, px: 0 };
-        const mE = { fx: px, fy: py, r: e.r, sl: 0.25 };
-        let fm = walk(ecx, ecy, pcx, pcy, 3, mE, cE) ||
-                 walk(pcx, pcy, ecx, ecy, 3, { first: pFirst(px, py, e.x, e.y, e.r) }, { b: 0, t: 0, e: 0, px: 0 });
-        REF.n++; if (rr) { REF.cul++; if (vis) { REF.bad++;
-          if (process.env.HOPBAD && REF.bad <= 5) console.error(`    REF FALSE: player (${px},${py}) -> (${e.x},${e.y}) r=${e.r.toFixed(3)}`); } }
-        if (rr && !fm) REF.onlyRef++; if (fm && !rr) REF.onlyFloat++;
-      }
-      CFG.forEach((g, k) => {
-        const cE = { b: 0, t: 0, e: 0, px: 0 };
-        const mE = g.sub ? { fx: px, fy: py, r: e.r, sl: 0.25 } : { fx: pcx + 0.5, fy: pcy + 0.5, r: e.r, sl: 1 };
-        let rej = walk(ecx, ecy, pcx, pcy, g.d, mE, cE);
-        let work = 75 + 40 + 30 * cE.b + 25 * cE.t + 20 * cE.e + (g.sub ? 30 : 0);
-        if (!rej && g.ends === 'EP') {
-          const cP = { b: 0, t: 0, e: 0, px: 0 };
-          rej = walk(pcx, pcy, ecx, ecy, g.d, g.sub ? { first: pFirst(px, py, e.x, e.y, e.r) } : null, cP);
-          work += 40 + 25 * cP.t + 20 * cP.e + 115 * cP.px;
-        }
-        const st = S[k]; st.work += work;
-        ft[k] += work + (rej ? 0 : cls); if (!rej) fsv[k]++; else savedReal[k] += cls;
-        if (rej) { st.cul++; fcul[k]++; if (vis) { st.bad++;
-          if (process.env.HOPBAD && st.bad <= 3) console.error(`    FALSE ${name(g)}: player (${px.toFixed(3)},${py.toFixed(3)}) cell ${pcx},${pcy}` +
-            ` -> entity (${e.x},${e.y}) r=${e.r.toFixed(3)}; clear rays: ` +
-            RIM.filter(([c, s]) => losFree(px, py, e.x + e.r * c, e.y + e.r * s)).map(([c, s]) => `(${(e.x + e.r * c).toFixed(2)},${(e.y + e.r * s).toFixed(2)})`).join(' ')); }
-          frame[k] += SAVE - work; }
-        else { st.workKept += work; frame[k] -= work; }
-      });
-    }
-    maxPost = Math.max(maxPost, post);
-    if (post) CFG.forEach((g, k) => { if (fcul[k] === post) shut[k]++; });   // the grid emptied the frame
-    if (!post) nNone++;
-    totB[s] = fb + (post ? C.trig : 0);
-    // the baseline frame, minus what the culls saved, plus the lookups; and omTrig goes if nothing survives
-    for (const n of HZK) hzTot[n][s] = totB[s] - hzF[n].cc + hzF[n].w - (post && !hzF[n].sv ? C.trig : 0);
-    for (let k = 0; k < ft.length; k++) totK[k][s] = ft[k] + (fsv[k] ? C.trig : 0);
-    CFG.forEach((g, k) => { const st = S[k]; st.net += frame[k]; per[k][s] = frame[k];
-      if (frame[k] < 0) st.neg++; if (frame[k] < st.worst) st.worst = frame[k]; });
-  }
-  if (NS) {
-  const pct = (a, b) => `${(100 * a / b).toFixed(1)}%`;
-  console.error(`  HOPMC level ${LVL}: ${NS} frames, ${nEnt} entities. holeSeeT culls ${pct(nHole, nEnt)}, cnTest ${pct(nCone, nEnt)}; ` +
-    `${(nPost / NS).toFixed(2)} reach the grid per frame (max ${maxPost}), of which ${pct(nCeil, nPost)} have NO line of sight (the ceiling)`);
-  console.error(`    config          culls   false | work/ent  work if kept | saved/frame  work/frame   NET/frame | frames net<0  worst frame`);
-  CFG.forEach((g, k) => { const st = S[k];
-    console.error(`    ${name(g)}   ${pct(st.cul, nPost).padStart(6)}  ${String(st.bad).padStart(5)} |` +
-      ` ${String(Math.round(st.work / nPost)).padStart(7)}  ${String(Math.round(st.workKept / Math.max(1, nPost - st.cul))).padStart(11)} |` +
-      ` ${String(Math.round(st.cul * SAVE / NS)).padStart(10)}  ${String(Math.round(st.work / NS)).padStart(10)}  ${String(Math.round(st.net / NS)).padStart(10)} |` +
-      ` ${pct(st.neg, NS).padStart(11)}  ${String(Math.round(st.worst)).padStart(10)}`); });
-  // THE SPREAD. Net per frame = (entities culled * HOPSAVE) - (the grid's work on every entity it
-  // looked at). Positive = cycles saved that frame, negative = cycles the cull cost and got nothing
-  // back for. Sorted best to worst, then cut into thirds and percentiles.
-  const r = v => String(Math.round(v)).padStart(6);
-  {
-    const q = (a, p) => a[Math.min(NS - 1, Math.floor(p * NS))];
-    const B = Float32Array.from(totB).sort();
-    const r = v => String(Math.round(v)).padStart(7);
-    const m = a => { let t = 0; for (const v of a) t += v; return t / a.length; };
-    // the baseline's slowest 1% of frames, by index, for the PAIRED comparison
-    const idx = [...Array(NS).keys()].sort((i, j) => totB[j] - totB[i]).slice(0, Math.floor(NS / 100));
-    console.error(`    TOTAL entity-stage cycles per frame (grid in entGate, so it can shut the gate):`);
-    console.error(`    config          |    mean     p50     p90     p99   p99.9     max | vs none: mean  slowest-1%-of-none  worst frame | real saved/cull`);
-    console.error(`    no grid         | ${r(m(totB))} ${r(q(B, .5))} ${r(q(B, .9))} ${r(q(B, .99))} ${r(q(B, .999))} ${r(B[NS - 1])} |`);
-    CFG.forEach((g, k) => {
-      const A = Float32Array.from(totK[k]).sort();
-      let worst = -Infinity; for (let i = 0; i < NS; i++) worst = Math.max(worst, totK[k][i] - totB[i]);
-      const slow = idx.reduce((t, i) => t + totK[k][i] - totB[i], 0) / idx.length;
-      console.error(`    ${name(g)} | ${r(m(totK[k]))} ${r(q(A, .5))} ${r(q(A, .9))} ${r(q(A, .99))} ${r(q(A, .999))} ${r(A[NS - 1])} |` +
-        ` ${r(m(totK[k]) - m(totB))}  ${r(slow).padStart(17)}  ${r(worst).padStart(11)} | ${r(savedReal[k] / Math.max(1, S[k].cul)).padStart(14)}`);
-    });
-  }
-  console.error(`    R0 (same row/column + a wall between): applies to ${pct(R0.aligned, R0.n)} of post-cone entities, ` +
-    `culls ${pct(R0.cul, R0.n)} (FALSE ${R0.bad}); hidden ceiling ${pct(nCeil, nPost)}; ` +
-    `a scan tests ${(R0.scan / Math.max(1, R0.aligned)).toFixed(1)} cells per aligned entity; ` +
-    `per frame ${(R0.n / NS).toFixed(2)} reach it, ${(R0.cul / NS).toFixed(3)} culled`);
-  if (process.env.HZNCREDIT) writeFileSync(process.env.HZNCREDIT, JSON.stringify([...HZCR]));
-  if (HZN.length) {
-    const q = (a, p) => a[Math.min(NS - 1, Math.floor(p * NS))];
-    const mean = a => { let t = 0; for (const v of a) t += v; return t / a.length; };
-    const B = Float32Array.from(totB).sort();
-    const slowIdx = [...Array(NS).keys()].sort((i, j) => totB[j] - totB[i]).slice(0, Math.floor(NS / 100));
-    console.error(`    HZN horizon table: R0+R1+R2 ${pct(R2.r012, R0.n)} for comparison; ceiling ${pct(nCeil, nPost)}. ` +
-      `No-grid entity stage: mean ${mean(totB).toFixed(0)}, p99 ${q(B, .99).toFixed(0)} cycles/frame.`);
-    for (const n of HZK) { const T = HZ[n], A = Float32Array.from(hzTot[n]).sort();
-      const [nsc, qn] = n.split('/'), bits = { '4b': 4, '3lin': 3, '3log': 3, '2b': 2, '2b2': 2, '1b': 1, '1b3': 1 }[qn];
-      const K = n.split('/')[2] ? Math.min(+n.split('/')[2].slice(1), HOPEN.useful ?? 999) : null;
-      const sparse = K !== null ? Math.min(2 * K, 32 + K) : Math.ceil(HOPEN.n * nsc * bits / 8) + 64,
-            dense = Math.ceil(MAPN * nsc * bits / 8);
-      const slow = slowIdx.reduce((t, i) => t + hzTot[n][i] - totB[i], 0) / slowIdx.length;
-      console.error(`      ${n.padEnd(8)} sparse ${String(sparse).padStart(4)} B (dense ${String(dense).padStart(4)}): player end ${pct(T.P, R0.n)}, +entity end ${pct(T.E, R0.n)}, ` +
-        `EITHER ${pct(T.X, R0.n)} (FALSE ${T.bad}) | saved ${(mean(totB) - mean(hzTot[n])).toFixed(0)} cy/frame on average, ` +
-        `p99 ${(q(B, .99) - q(A, .99)).toFixed(0)}, slowest 1% of no-grid frames ${(-slow).toFixed(0)} | lookups ${(T.work / NS).toFixed(0)} cy/frame`); }
-  }
-  for (const R of [1, 2]) { const T = R2W[R];
-    console.error(`    R2W radius ${R} (best case): player end ${pct(T.P, R0.n)}, entity end ${pct(T.E, R0.n)}, EITHER ${pct(T.X, R0.n)} (FALSE ${T.bad})` +
-      ` | with R0+R1+R2: ${pct(T.all, R0.n)} (FALSE ${T.allBad})`); }
-  {
-    const pic = (p) => [2, 1, 0].map(j => [2, 1, 0].map(i => (i === 0 && j === 0) ? 'PP' : ((p >> (j * 3 + i)) & 1) ? '[]' : '..').join(' '));
-    const tot = [...census.values()].reduce((a, b) => a + b, 0);
-    console.error(`    RADIUS-2 CENSUS: ${tot} culls beyond R0+R1+R2 (${pct(tot, R0.n)}), from ${census.size} patterns. Top 8 (quadrant drawn up-left of PP):`);
-    const top = [...census.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
-    const rows = [0, 1, 2].map(r => top.map(([p]) => pic(p)[r]).join('    '));
-    rows.forEach(r => console.error('      ' + r));
-    console.error('      ' + top.map(([, n]) => `${pct(n, tot).padStart(6)}  `).join('      '));
-    console.error(`    SHORT L seen at an end in ${pct(RL.shortSeen, R0.n)} of entities; FULL L seen in ${pct(RL.fullSeen, R0.n)}; ` +
-      `FULL L as a rule culls ${pct(RL.fullAll, R0.n)} (FALSE ${RL.fullBad || 0}), of which beyond R0+R1+R2 ${pct(RL.fullHit, R0.n)}`);
-  }
-  console.error(`    R2 (corner): player end ${pct(R2.P, R0.n)}, entity end ${pct(R2.E, R0.n)}, EITHER ${pct(R2.X, R0.n)} (FALSE ${R2.bad})` +
-    ` | R1 ${pct(R2.r1, R0.n)}, R1+R2 ${pct(R2.r12, R0.n)} (FALSE ${R2.bad12}), R0+R1+R2 ${pct(R2.r012, R0.n)} | ceiling ${pct(nCeil, nPost)}`);
-  console.error(`    R1 raw: P ${R1.P} E ${R1.E} differ ${R1.dd || 0}`);
-  console.error(`    R1 (wall shadow cones): player end ${pct(R1.P, R0.n)}, entity end ${pct(R1.E, R0.n)}, ` +
-    `EITHER ${pct(R1.X, R0.n)} (FALSE ${R1.bad}) | vs R0: both ${pct(R1.r0and, R0.n)}, R1 only ${pct(R1.r1only, R0.n)}, ` +
-    `R0 only ${pct(R1.r0only, R0.n)} | wall sides tested ${(R1.sides / R0.n).toFixed(2)}/entity, ` +
-    `run on the entity's side 0/1/2/3+: ${R1.ab.map(v => pct(v, R1.sides)).join(' ')}`);
-  console.error(`    EGREF (the 6502's integer arithmetic): culls ${pct(REF.cul, REF.n)}, FALSE ${REF.bad}; ` +
-    `disagrees with the float hop3 sub EP on ${REF.onlyRef} (ref culls, float not) + ${REF.onlyFloat} (float culls, ref not) of ${REF.n}`);
-  console.error(`    GATE: the cone alone leaves NO entity in ${pct(nNone, NS)} of frames (omTrig skipped today). ` +
-    `Frames where the grid would ALSO empty the frame: ` + CFG.map((g, k) => `${name(g).trim()} +${pct(shut[k], NS)}`).join(', '));
-  console.error(`    SPREAD of net cycles per frame (+ saved, - lost), best -> worst:`);
-  console.error(`    config          |   best    p1   p10 |  best3rd  mid3rd  worst3rd |   p90   p99  worst |   mean | =0 frames  <0 frames`);
-  CFG.forEach((g, k) => {
-    const a = Float32Array.from(per[k]).sort().reverse();   // descending: best first
-    const at = q => a[Math.min(NS - 1, Math.floor(q * NS))];
-    const avg = (i0, i1) => { let t = 0; for (let i = i0; i < i1; i++) t += a[i]; return t / (i1 - i0); };
-    const t1 = Math.floor(NS / 3), t2 = Math.floor(2 * NS / 3);
-    let z = 0, n = 0; for (const v of a) { if (v === 0) z++; else if (v < 0) n++; }
-    console.error(`    ${name(g)} | ${r(a[0])}${r(at(0.01))}${r(at(0.10))} | ${r(avg(0, t1))}  ${r(avg(t1, t2))}  ${r(avg(t2, NS))}   |` +
-      `${r(at(0.90))}${r(at(0.99))}${r(a[NS - 1])} | ${r(S[k].net / NS)} | ${pct(z, NS).padStart(8)}  ${pct(n, NS).padStart(8)}`);
-  });
-  }
-}
 
-// ---- PATHSIM=<repeats>: the horizon cull along a PLAYTHROUGH, not at random positions ----
-// The route is what a player does: start -> nearest reachable orb -> nearest reachable socket
-// (which opens its wall), while any remain -> nearest reachable exit; shortest paths on the walls
-// AS THEY ARE at each point. The player walks it facing roughly along the path, orbs vanish when
-// picked up, everything else stays put, and the TRUTH is line of sight through the walls as they
-// are at that moment -- which is the case random sampling could not model.
-// Methods, all 4 sectors x 2 bits rotated 45 degrees:
-//   M1      every cell, openable walls treated as open (what the mapT overlay would hold)
-//   M2/r    a before list (exact, walls shut) + an after list (walls open) inside the level's page
-//           budget, r = the share of entries given to "before". Before any wall opens a cell reads
-//           its before entry, else its after entry (sound either way); after, only the after list.
-//           Cells are chosen by credits from a SEPARATE run of the route (other jitter).
-if (process.env.PATHSIM) {
-  const REP = +process.env.PATHSIM, ROT = 32;
-  const bear = (dx, dy) => {                     // cnTest's bearing (hzBearing is declared further down)
-    let b = Math.abs(dx), t = Math.abs(dy); let a = Math.max(b, t);
-    while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
-    let bq = CONE_BQ[(t << 3) | b];
-    if (dx < 0) bq = (128 - bq) & 255;
-    if (dy < 0) bq = (256 - bq) & 255;
-    return bq;
-  };
-  const C = { hs: 25, cone: 125, trig: 800, vis: 7000, hid: 2900, off: 560, behind: 314, look: 25 };
-  const groups = (LEVEL_WALLS[LVL]?.walls ?? []).map(g => g.map(([x, y]) => cellOf(x, y)));
-  const sockWall = LEVEL_WALLS[LVL]?.sockWall ?? [];
-  const openable = new Set(groups.flat());
-  const wallAt = (open, c) => c < 0 || c >= MAPN || (map[c] && !open.has(c));
-  const W2 = (open, x, y) => !inMap(x, y) || wallAt(open, cellOf(x, y));
-  const losDyn = (open, ax, ay, bx, by) => {
-    const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
-    if (cx === ex && cy === ey) return true;
-    const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
-    const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
-    let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity, tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
-    for (;;) {
-      if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; } else { if (tY > 1) return true; cy += sY; tY += iY; }
-      if (cx === ex && cy === ey) return true;
-      if (W2(open, cx, cy)) return false;
-    }
-  };
-  // ---- the two horizon tables ----
-  const HP = [0.01, 0.255, 0.5, 0.745, 0.99], THR = [2, 3, 5, 99];
-  const build = (open) => {
-    const cells = []; for (let c = 0; c < MAPN; c++) if (!wallAt(open, c)) cells.push(c);
-    const vis = (a, b) => { for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
-      if (losDyn(open, cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) return true; return false; };
-    const T = new Uint8Array(MAPN * 4).fill(99);
-    for (const a of cells) { const h = [0, 0, 0, 0];
-      for (const b of cells) { if (a === b) continue;
-        const dx = cellX(b) - cellX(a), dy = cellY(b) - cellY(a), c = Math.max(Math.abs(dx), Math.abs(dy));
-        const k = ((bear(dx, dy) + ROT) & 255) >> 6;
-        if (c > h[k] && vis(a, b)) h[k] = c; }
-      for (let k = 0; k < 4; k++) T[a * 4 + k] = THR.find(t => t >= h[k]); }
-    return T;
-  };
-  const allOpen = new Set(openable);
-  const Topen = build(allOpen), Tshut = build(new Set());
-  // ---- the route ----
-  const bfs = (open, from, to) => {
-    const prev = new Map([[from, -1]]), q = [from];
-    for (let i = 0; i < q.length; i++) { const c = q[i]; if (c === to) break;
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nx = cellX(c) + dx, ny = cellY(c) + dy;
-        if (!inMap(nx, ny)) continue; const n = cellOf(nx, ny);
-        if (!wallAt(open, n) && !prev.has(n)) { prev.set(n, c); q.push(n); } } }
-    if (!prev.has(to)) return null;
-    const p = []; for (let c = to; c !== -1; c = prev.get(c)) p.push(c); return p.reverse();
-  };
-  const orbCells = ORBS.map((o, i) => o.tall ? -1 : cellOf(Math.floor(o.x), Math.floor(o.y)));
-  const sockets = SOCKETS_AT.map(([x, y], i) => ({ c: cellOf(x, y), wall: sockWall[i] ?? 0xff }));
-  const exits = HOLES_AT.map(([x, y]) => cellOf(x, y));
-  const route = [];          // { cell, open: Set, taken: Set of orb indices }
-  let at = cellOf(ST0[0] >> 8, ST0[1] >> 8), open = new Set(), taken = new Set(), filled = new Set();
-  const walk = (to) => { const p = bfs(open, at, to); if (!p) return false;
-    for (const c of p.slice(route.length ? 1 : 0)) route.push({ cell: c, open: new Set(open), taken: new Set(taken) });
-    at = to; return true; };
-  const nearest = (list) => { let best = null, bl = 1e9;
-    for (const t of list) { const p = bfs(open, at, t.c); if (p && p.length < bl) { bl = p.length; best = t; } } return best; };
-  for (;;) {
-    const orb = nearest(orbCells.map((c, i) => ({ c, i })).filter(o => o.c >= 0 && !taken.has(o.i)));
-    const sock = nearest(sockets.map((s, i) => ({ ...s, i })).filter(s => !filled.has(s.i)));
-    if (!orb || !sock) break;
-    walk(orb.c); taken.add(orb.i);
-    const s2 = nearest(sockets.map((s, i) => ({ ...s, i })).filter(s => !filled.has(s.i)));
-    if (!s2) break;
-    walk(s2.c); filled.add(s2.i);
-    if (s2.wall !== 0xff && groups[s2.wall]) for (const c of groups[s2.wall]) open.add(c);
-  }
-  const ex = nearest(exits.map(c => ({ c })));
-  if (ex) walk(ex.c);
-  const firstOpen = route.findIndex(r => r.open.size > 0);
-  console.error(`  PATHSIM level ${LVL}: route ${route.length} cells, ${filled.size} socket(s) filled, ` +
-    `walls first open at step ${firstOpen < 0 ? 'never' : firstOpen}, ${ex ? 'reaches the exit' : 'NO EXIT REACHED'}`);
-  // ---- frames along the route ----
-  let sd = +(process.env.PATHSEED ?? 1) >>> 0;
-  const rnd = () => { sd = (sd + 0x6d2b79f5) >>> 0; let t = sd; t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-  const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
-  const radH = HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2);
-  const coneOk2 = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
-    if (c < 2) return true; let a = c; while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
-    let bq = CONE_BQ[(t << 3) | b]; if (dx < 0) bq = (128 - bq) & 255; if (dy < 0) bq = (256 - bq) & 255;
-    const tol = CONE_TOL[Math.min(c, CONE_DMAX)]; return ((bq - pa + tol) & 255) < 2 * tol; };
-  const frames = (seed, fn) => {
-    sd = seed >>> 0;
-    for (let r = 0; r < REP; r++) for (let i = 0; i + 1 < route.length; i++) {
-      const a = route[i], b = route[i + 1];
-      const hd = Math.round(Math.atan2(cellY(b.cell) - cellY(a.cell), cellX(b.cell) - cellX(a.cell)) / (2 * Math.PI) * 256);
-      for (let s = 0; s < 8; s++) {
-        const t = (s + rnd()) / 8, j = (rnd() - 0.5) * 0.5;
-        let x = cellX(a.cell) + 0.5 + (cellX(b.cell) - cellX(a.cell)) * t, y = cellY(a.cell) + 0.5 + (cellY(b.cell) - cellY(a.cell)) * t;
-        if (cellX(a.cell) === cellX(b.cell)) x += j; else y += j;
-        x = Math.floor(x * 256) / 256; y = Math.floor(y * 256) / 256;
-        const pa = (hd + Math.round((rnd() - 0.5) * 80)) & 255;
-        fn(x, y, pa, t < 0.5 ? a : b);
-      }
-    }
-  };
-  // one frame: every entity through holeSeeT and the cone, then each method's verdict and cost
-  const evalFrame = (x, y, pa, st, methods, acc) => {
-    const pcx = Math.floor(x), pcy = Math.floor(y), pc = cellOf(pcx, pcy);
-    const before = st.open.size === 0;
-    const ents = [...ORBS.map((o, i) => (o.tall || !st.taken.has(i)) ? [o.x, o.y, radO[i], -1] : null),
-                  ...HOLELIKE.map((h, L) => [h.x + 0.5, h.y + 0.5, radH[L], L])].filter(Boolean);
-    let base = 0, post = 0; const m = methods.map(() => ({ cut: 0, work: 0, sv: 0 }));
-    for (const [ex, ey, r, L] of ents) {
-      base += C.hs;
-      if (L >= 0 && !((holeSee[L * 32 + (pc >> 3)] >> (pc & 7)) & 1)) continue;
-      base += C.cone;
-      const ecx = Math.floor(ex), ecy = Math.floor(ey), dx = ecx - pcx, dy = ecy - pcy;
-      if (!coneOk2(dx, dy, pa)) continue;
-      post++;
-      const visible = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])]
-        .some(([c, s]) => losDyn(st.open, x, y, ex + r * c, ey + r * s));
-      const fx = (ex - x) * Math.cos(pa / 128 * Math.PI) + (ey - y) * Math.sin(pa / 128 * Math.PI);
-      const rx = -(ex - x) * Math.sin(pa / 128 * Math.PI) + (ey - y) * Math.cos(pa / 128 * Math.PI);
-      const inFov = fx > 0.05 && Math.abs(rx) <= (L >= 0 ? 0.944 : 0.749) * fx;
-      const cls = !inFov ? (fx <= 0.05 ? C.behind : C.off) : visible ? C.vis : C.hid;
-      base += cls;
-      const c = Math.max(Math.abs(dx), Math.abs(dy)), b = bear(dx, dy), ec = cellOf(ecx, ecy);
-      methods.forEach((M, k) => {
-        const thr = (cell, bb) => M.look(cell, ((bb + ROT) & 255) >> 6, before);
-        const p = c >= 3 && c > thr(pc, b), q = !p && c >= 3 && c > thr(ec, (b + 128) & 255);
-        m[k].work += C.look * (p ? 1 : 2);
-        if (p || q) { m[k].cut += cls; if (visible) acc.bad[k]++; if (acc.cred) acc.cred[k][p ? pc : ec][before ? 0 : 1] += cls; }
-        else m[k].sv++;
-      });
-    }
-    const tb = base + (post ? C.trig : 0);
-    acc.base.push(tb); acc.before.push(before);
-    methods.forEach((M, k) => acc.tot[k].push(tb - m[k].cut + m[k].work - (post && !m[k].sv ? C.trig : 0)));
-  };
-  const runAll = (seed, methods, cred) => {
-    const acc = { base: [], before: [], tot: methods.map(() => []), bad: methods.map(() => 0),
-                  cred: cred ? methods.map(() => [...Array(MAPN)].map(() => [0, 0])) : null };
-    frames(seed, (x, y, pa, st) => evalFrame(x, y, pa, st, methods, acc));
-    return acc;
-  };
-  // ---- methods ----
-  const fromT = T => (cell, k) => T[cell * 4 + k];
-  const M1 = { name: 'M1  all cells, walls as open', look: (cell, k) => Topen[cell * 4 + k] };
-  // scoring run: credits for the full before (Tshut) and after (Topen) tables, on its own jitter
-  const scoreM = { name: 'score', look: (cell, k, before) => before ? Math.max(Tshut[cell * 4 + k], 0) : Topen[cell * 4 + k] };
-  const sc = runAll(0xbeef, [scoreM, M1], true);
-  const credB = sc.cred[0].map(v => v[0]), credA = sc.cred[1].map(v => v[0] + v[1]);
-  const B = +(process.env.PATHBUDGET ?? 160);
-  const M2 = r => {
-    const nTot = r === 0 ? B - 32 : B - 64, nB = Math.round(r * nTot), nA = nTot - nB;
-    const rank = cr => [...cr.keys()].filter(c => cr[c] > 0).sort((a, b) => cr[b] - cr[a]);
-    const kb = new Set(rank(credB).slice(0, nB)), ka = new Set(rank(credA).slice(0, nA));
-    return { name: `M2 r=${r} (${Math.min(nB, kb.size)} before + ${Math.min(nA, ka.size)} after of ${B} B)`,
-      look: (cell, k, before) => (before && kb.has(cell)) ? Tshut[cell * 4 + k] : ka.has(cell) ? Topen[cell * 4 + k] : 99 };
-  };
-  // M3: every cell, exact while the walls are shut, then the all-open values (the patch list)
-  const M3 = { name: 'M3  all cells, exact before + all-open after', look: (cell, k, before) => before ? Tshut[cell * 4 + k] : Topen[cell * 4 + k] };
-  const methods = process.env.PATHMIX !== undefined ? [M1, M3] : [M1, M2(0), M2(0.25), M2(0.5), M2(0.75)];
-  // PATHMIX=f: replace a fraction f of the frames with RANDOM ones -- each takes the wall state of a
-  // random point on the route, puts the player anywhere reachable in that state (0.1 off the walls)
-  // with a random heading. Same total frame count, so the mixes compare like for like.
-  const MIX = +(process.env.PATHMIX ?? 0);
-  const reachCache = new Map();
-  const reachOf = st => { const key = [...st.open].sort().join(','); if (reachCache.has(key)) return reachCache.get(key);
-    const seen = new Set([st.cell]), q = [st.cell];
-    for (let i = 0; i < q.length; i++) { const c = q[i];
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nx = cellX(c) + dx, ny = cellY(c) + dy;
-        if (!inMap(nx, ny)) continue; const n = cellOf(nx, ny); if (!wallAt(st.open, n) && !seen.has(n)) { seen.add(n); q.push(n); } } }
-    const arr = [...seen]; reachCache.set(key, arr); return arr; };
-  const runMix = (seed) => {
-    const acc = { base: [], before: [], tot: methods.map(() => []), bad: methods.map(() => 0), cred: null };
-    sd = seed >>> 0;
-    frames(seed, (x, y, pa, st) => {
-      if (rnd() < MIX) {          // swap this frame for a random one
-        const st2 = route[Math.floor(rnd() * route.length)], cells = reachOf(st2), c = cells[Math.floor(rnd() * cells.length)];
-        const cx = cellX(c), cy = cellY(c);
-        const x0 = W2(st2.open, cx - 1, cy) ? 0.1 : 0, x1 = W2(st2.open, cx + 1, cy) ? 0.9 : 1;
-        const y0 = W2(st2.open, cx, cy - 1) ? 0.1 : 0, y1 = W2(st2.open, cx, cy + 1) ? 0.9 : 1;
-        const rx = Math.floor((cx + x0 + rnd() * (x1 - x0)) * 256) / 256, ry = Math.floor((cy + y0 + rnd() * (y1 - y0)) * 256) / 256;
-        evalFrame(rx, ry, Math.floor(rnd() * 256), st2, methods, acc);
-      } else evalFrame(x, y, pa, st, methods, acc);
-    });
-    return acc;
-  };
-  const res = process.env.PATHMIX !== undefined ? runMix(+(process.env.PATHSEED ?? 1)) : runAll(+(process.env.PATHSEED ?? 1), methods, false);
-  const N = res.base.length, nb = res.before.filter(Boolean).length;
-  const mean = (a, f) => { let t = 0, n = 0; a.forEach((v, i) => { if (!f || f(i)) { t += v; n++; } }); return n ? t / n : 0; };
-  const slowIdx = [...Array(N).keys()].sort((i, j) => res.base[j] - res.base[i]).slice(0, Math.max(1, Math.floor(N / 100)));
-  console.error(`    ${N} frames (${(100 * nb / N).toFixed(0)}% before any wall opens); no-cull entity stage ${mean(res.base).toFixed(0)} cy/frame`);
-  console.error(`    method                                           saved: all  before  after  | slowest 1%  FALSE`);
-  methods.forEach((M, k) => {
-    const sv = f => (mean(res.base, f) - mean(res.tot[k], f)).toFixed(0).padStart(6);
-    const slow = slowIdx.reduce((t, i) => t + res.base[i] - res.tot[k][i], 0) / slowIdx.length;
-    console.error(`    ${M.name.padEnd(48)} ${sv()} ${sv(i => res.before[i])} ${sv(i => !res.before[i])}  | ${slow.toFixed(0).padStart(9)}  ${res.bad[k]}`);
-  });
-}
-
-// ---- ENTLOS: is a WALL nearer than this entity, decided before any projection ----
-// The cone answers "is it in front of you" and nothing more. At level 2's start pose three
-// orb-likes pass it, are fully projected every frame, and are then thrown away by the span walk
-// because walls hide all three -- 4.00 wasted projections a frame, ~2,900 cycles each, none of
-// which put a pixel on screen.
-//
-// THE DEPTH BUFFER ALREADY EXISTS. colH[col] is the wall's apparent half-height for all 160
-// columns -- interpSpan fills the ~92% that are not marched, and renderSym REQUIRES every one of
-// them, because a 4x8 glyph is chosen from the heights across its four columns (rfCol). So this
-// test rides on data the renderer cannot stop producing.
-//
-// And colH is already in the same units as an entity's own projected height: colH = 2816/(j *
-// cosCorr/256) with j in 1/32 cells is 88/d, and ohgt = 22528/forward in 8.8 cells is also 88/d.
-// Same constant, no scaling to reconcile.
-//
-// HEIGHT IS NOT THE REASON TO CULL -- the views are vertical-only, so nothing is ever occluded
-// vertically and height is usable only as a proxy for 1/distance. This is a DEPTH comparison that
-// happens to be denominated in height units.
-// DEFAULT OFF. On level 2's start pose it culls everything but the angel -- 4.00 wasted
-// projections a frame down to 1.00 -- and on a SPIN it deletes visible entities: losBad 229 on
-// level 2, 22 on level 1. A cull that is right on one view and wrong when you turn is not a cull
-// yet. ENTLOS=1 to work on it.
 const ENTLOS = ENTCONE && process.env.ENTLOS === '1';
 if (ENTLOS) DIAG.push('ENTLOS=1');
 // The entity's centre column from the angle the cone already computed. Only the +-44 units the
@@ -10661,10 +8748,7 @@ const orbOccFlat = orbOcc.flat();
 // the shadow's extra masks. The pad is never read: every loop stops at the live count.
 
 const NOCC = NORB + NHOLE;                       // every entity orbOne can be asked about
-// ENTGRID (a 3-hop cell walk at both ends of the sightline, ENTGRID=1) was REMOVED 2026-10-04: correct
-// (0 false rejections in ~8M entities) but ~2,500 cycles a call, 4-5x its estimate. ENTHZN replaced
-// it. The JS reference (EGREF, in the HOPMC block) is kept as the record of the rule.
-if (process.env.ENTHZN !== '0' && process.env.ZONES === '0' && (ENTLOS || !CONEGATE)) throw new Error('ENTHZN runs in entGate (CONEGATE), and its zero page is ENTLOS scratch');
+
 // ---- the occluder masks are a RUNTIME buffer, not level data ----
 // They used to be a constant emitted at $7000 and, under SOLO, a LVL_TABLES entry as well:
 // 108 bytes shipped in every level file to an address no instruction names. orbOccAll
@@ -10806,42 +8890,12 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 //   - bfsQ / hlSeat / orbSeenT: runtime state, not data. objInit rebuilds them.
 // The order here is the order of the shadow blob, so it is also the swap order. Anything added
 // here must be swapped, or the new level renders with the old level's geometry.
-// ---- ENTHZN: THE VISIBILITY HORIZON, a per-cell table instead of a walk ----
-// For every open cell and each of 4 bearing sectors: the farthest Chebyshev distance at which ANY
-// cell in that sector can be seen from ANYWHERE in this cell. Past it, everything in the sector is
-// behind walls. At runtime that is one lookup and one compare per end, on the bearing and distance
-// cnTest has ALREADY computed -- the whole of what the old walk (ENTGRID) did, from the whole map,
-// for a few loads instead of ~2,500 cycles. Designed and measured in HOPMC (HZN): 4 sectors x 2 bits
-// saves ~1,400-2,350 cycles a frame on levels 1, 2, 5, 6, 7 with 0 false rejections in 1M frames
-// each, and the slowest frames get faster too. Levels 3 and 4 are open plans where it culls
-// almost nothing, so it is off there.
-//   Sector = cnB >> 6, the cone's own bearing, so membership is exactly what the runtime sees.
-//   Visibility is from-region: 5x5 points on each square, any segment clear means visible.
-//   Walls that can OPEN (LEVEL_WALLS) count as open: always safe, it only culls less while shut.
-//   2 bits per entry, meaning 2, 3, 5 or "never" (vhThrT): a horizon rounds UP to the next one.
-//   SPARSE: one byte per mapT-open cell, in cell order. A cell's place in that list is
-//   vhRkT[cell >> 3] (open cells before its 8-cell block) plus the open cells before it in the
-//   block, counted from mapT -- which is never written at runtime, so the ranks cannot drift. A
-//   cell mapT calls a wall (an opened wall) has no entry and culls nothing from that end.
-// DEFAULT ON (2026-10-03): verified exact against VHPOSE, 0 bad in HZCHK, and worth 0-77 raster
-// lines of entity work a frame on the levels' start views for ~200 bytes of code. ENTHZN=0 to A/B.
-// ZONES=1: per-level visibility zones in mapT (ZN_BUILD) -- they take the horizon's bits, so the two
-// are exclusive, and they replace holeSeeT too. MAPPACK: mapT holds a packed non-zero byte for an
-// open cell (either scheme), which is what every map reader's beq/bne flip depends on.
-const ZONES = process.env.ZONES !== '0';   // DEFAULT since 2026-10-04 (user: walls-open zones, keep it simple); ZONES=0 = horizon + holeSeeT
-const ENTHZN = process.env.ENTHZN !== '0' && !ZONES;
-const MAPPACK = ENTHZN || ZONES;
 // GATEFAST (default with ZONES): the gate's per-entity loop with the cone INLINED (no jsr/rts, Y and A
 // only, so the loop keeps the entity index in X instead of reloading cnI), the cell delta in zero page,
 // and the per-cell lookups (mapT mask, stamp list) redone only when the player's cell changes. Off for
 // the builds whose extra stages read cnTest's leftovers or count inside the loop. GATEFAST=0 to A/B.
-const GATEFAST = ZONES && !ENTLOS && !process.env.LOSCHK && !process.env.CULLCNT && !process.env.HZCHK &&
+const GATEFAST = !ENTLOS && !process.env.LOSCHK && !process.env.CULLCNT && true &&
                  process.env.GATEFAST !== '0';
-if (!ENTHZN) DIAG.push('ENTHZN=0');
-const ENTHZN_LVLS = (process.env.ENTHZN_LVLS ?? '1,2,5,6,7').split(',').filter(Boolean).map(Number);
-const HZCHK = process.env.HZCHK === '1';
-if (HZCHK && !ENTHZN) throw new Error('HZCHK=1 verifies ENTHZN, which is off');
-const HZ_THR = [2, 3, 5];                        // code 3 = never
 const hzBearing = (dx, dy) => {                  // cnTest's bearing, step for step
   let b = Math.abs(dx), t = Math.abs(dy); let a = Math.max(b, t);
   while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
@@ -10850,80 +8904,17 @@ const hzBearing = (dx, dy) => {                  // cnTest's bearing, step for s
   if (dy < 0) bq = (256 - bq) & 255;
   return bq;
 };
-// M3: the horizon lives IN mapT. Walls are $00; an open cell holds its packed horizon byte,
-// which is never zero, so every reader's zero test still separates wall from open (with the branch
-// sense flipped). The bytes are the EXACT table for the level with every openable wall SHUT; vhPatT
-// lists the cells whose byte differs once every openable wall is OPEN, and vhAll writes those the
-// first time a wall comes out. "All open" from then on is safe whatever order the walls go in.
-// Both tables are computed from the level's BASE geometry (openable cells forced shut, or forced
-// open) -- never from this build's own map -- so a wall-variant build produces exactly the same
-// bytes and a wall's delta still touches only the cells it removes.
-const VH_ROT = 32;                               // sectors centred on the axes: corridors run along them
-const VH_FILL = process.env.VHFILL;              // VHFILL=ff: every open cell $FF (stage 1: readers only)
-// VHMODE: 'open' (M1, the default) puts the all-walls-OPEN horizon in every open cell and needs no
-// patch list -- safe in every wall state, and it fits the bank-3 slot as it is. 'exact' (M3) puts
-// the walls-SHUT horizon there and patches to all-open when a wall comes out; it needs the patch
-// list's bytes, which the slot does not have until it moves into the arena.
-const VH_MODE = process.env.VHMODE ?? 'open';
-const HZ_BUILD = (() => {
-  const on = ENTHZN && ENTHZN_LVLS.includes(LVL);
-  const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
-  const tableFor = (openNow) => {
-    const isW = c => !!map[c] && !openable.has(c) || (openable.has(c) && !openNow);
-    const WO = (x, y) => (!inMap(x, y) || isW(cellOf(x, y))) ? 1 : 0;
-    const losO = (ax, ay, bx, by) => {
-      const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
-      if (cx === ex && cy === ey) return true;
-      const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
-      const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
-      let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity, tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
-      for (;;) {
-        if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; } else { if (tY > 1) return true; cy += sY; tY += iY; }
-        if (cx === ex && cy === ey) return true;
-        if (WO(cx, cy)) return false;
-      }
-    };
-    const HP = [0.01, 0.255, 0.5, 0.745, 0.99];
-    const cvis = (a, b) => { for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
-      if (losO(cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) return true; return false; };
-    const cells = []; for (let c = 0; c < MAPN; c++) if (!isW(c)) cells.push(c);
-    const out = new Uint8Array(MAPN);
-    for (const a of cells) {
-      const h = [0, 0, 0, 0];
-      for (const b of cells) {
-        if (a === b) continue;
-        const dx = cellX(b) - cellX(a), dy = cellY(b) - cellY(a);
-        const k = ((hzBearing(dx, dy) + VH_ROT) & 255) >> 6, c = Math.max(Math.abs(dx), Math.abs(dy));
-        if (c > h[k] && cvis(a, b)) h[k] = c;
-      }
-      // the smallest code whose distance is >= the horizon (rounding UP is the safe way); 3 = never
-      const code = hk => { const i = HZ_THR.findIndex(t => t >= hk); return i < 0 ? 3 : i; };
-      let byte = h.reduce((v, hk, k) => v | (code(hk) << (2 * k)), 0);
-      if (byte === 0) byte = 1;                  // 0 means WALL: nudge sector 0 one step further, which only culls less
-      out[a] = on && VH_FILL !== 'ff' ? byte : 0xff;
-    }
-    return out;
-  };
-  const shut = (ENTHZN && on && VH_MODE === 'exact') ? tableFor(false) : null, open = (ENTHZN && on) ? tableFor(true) : null;
-  const patch = [];
-  if (shut) for (let c = 0; c < MAPN; c++) if (!map[c] && !openable.has(c) && open[c] !== shut[c]) patch.push(c, open[c]);
-  // the byte this build's mapT holds for an open cell: an openable cell is open only in a wall
-  // variant, and then it has the all-open value; anything else has the walls-shut value
-  const enc = i => i >= MAPN || map[i] ? 0 : !on ? 0xff : (openable.has(i) || VH_MODE !== 'exact') ? open[i] : shut[i];
-  return { on, enc, patch };
-})();
-// VHPOSE=1: what the horizon SHOULD do at this build's start pose (PX/PY/PA), entity by entity in
-// entGate's order, read from the very bytes that go into mapT -- to set against HZCNT's runtime counts.
 // ---- ZONES: the per-level visibility ZONES, and each open cell's mask of the zones it can see ----
 // User's design (2026-10-04), replacing the horizon AND holeSeeT: the level is split into up to 8
 // zones, and an open cell's mapT byte is the mask of zones visible from ANYWHERE in it (its own zone
 // always, so never $00 = wall). An entity is culled when its zone's bit is clear in mapT[player
 // cell]: no recompute, ever. Built with every OPENABLE wall treated as open -- nothing to patch when
 // one opens, and base and WALLOFF variants then see identical geometry and get identical zones.
-// Zones are chosen per level by a weighted greedy merge plus single-cell local search (DYNVIS
-// measured it: 8 zones beat today on 5 of 7 levels, zero visible entities culled).
+// Zones are chosen per level by a weighted greedy merge plus single-cell local search (a
+// build-time study measured it: 8 zones beat the old horizon on 5 of 7 levels, zero visible
+// entities culled).
 const ZN_BUILD = (() => {
-  if (!ZONES) return null;
+  
   const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
   const isW = c => !!map[c] && !openable.has(c);
   const WO = (x, y) => (!inMap(x, y) || isW(cellOf(x, y))) ? 1 : 0;
@@ -11123,226 +9114,15 @@ const ZN_BUILD = (() => {
   }
   return { enc, zoneT, hmask, zones: Z.length, cells: cells.length, bad, n };
 })();
-if (ZONES) console.error(`  ZONES level ${LVL}: ${ZN_BUILD.zones} zones over ${ZN_BUILD.cells} cells; hole masks ${ZN_BUILD.hmask.map(m => '$' + m.toString(16)).join(' ')}; ` +
+console.error(`  ZONES level ${LVL}: ${ZN_BUILD.zones} zones over ${ZN_BUILD.cells} cells; hole masks ${ZN_BUILD.hmask.map(m => '$' + m.toString(16)).join(' ')}; ` +
   `self-check: ${ZN_BUILD.bad} visible of ${ZN_BUILD.n} culled samples (must be 0)`);
-// ---- DYNVIS=<frames>: what DYNAMIC visibility would buy, against the culls that ship ----
-// The question (user, 2026-10-04): instead of per-level precomputed tables (holeSeeT, the horizon),
-// one runtime bitmap -- "cells visible from anywhere in the player's REGION" -- recomputed when the
-// player leaves the region (k x k aligned cells) or a wall changes. Every entity, holes included,
-// is then one bit test. This measures the VALUE of an ideal such bitmap at k = 1, 2, 4 on random
-// frames, with the same cost model HOPMC uses; the recompute ALGORITHM is costed separately.
-if (process.env.DYNVIS) {
-  const NS = +process.env.DYNVIS || 200000;
-  let sd = +(process.env.DYNSEED ?? 7) >>> 0;
-  const rnd = () => { sd = (sd + 0x6d2b79f5) >>> 0; let t = sd;
-    t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
-  const W = (x, y) => (!inMap(x, y) || map[cellOf(x, y)]) ? 1 : 0;
-  // cell-to-cell visibility against the walls AS THEY ARE (a dynamic bitmap sees the real state)
-  const HP = [0.01, 0.255, 0.5, 0.745, 0.99];
-  const cvis = (a, b) => { for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
-    if (losFree(cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) return true; return false; };
-  const cells = []; for (let c = 0; c < MAPN; c++) if (!map[c]) cells.push(c);
-  // the player can only be where the level lets them: reachable from the start, walls as they are
-  const [sx0, sy0] = startOf(LVL); const st = cellOf(sx0 >> 8, sy0 >> 8);
-  const reach = new Set([st]); { const q = [st]; while (q.length) { const c = q.pop();
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const x = cellX(c) + dx, y = cellY(c) + dy;
-      if (!inMap(x, y)) continue; const n = cellOf(x, y); if (!map[n] && !reach.has(n)) { reach.add(n); q.push(n); } } } }
-  const pcells = [...reach];
-  const V = new Uint8Array(MAPN * MAPN);
-  const t0 = Date.now();
-  for (const a of cells) { V[a * MAPN + a] = 1;
-    for (const b of cells) if (b > a && cvis(a, b)) { V[a * MAPN + b] = 1; V[b * MAPN + a] = 1; } }
-  // region bitmaps: aligned k x k blocks, the OR of their open cells' rows
-  const KS = [1, 2, 4];
-  const RV = {};
-  for (const k of KS) { RV[k] = new Map();
-    for (const a of cells) { const id = Math.floor(cellX(a) / k) + 64 * Math.floor(cellY(a) / k);
-      let row = RV[k].get(id); if (!row) { row = new Uint8Array(MAPN); RV[k].set(id, row); }
-      for (const b of cells) if (V[a * MAPN + b]) row[b] = 1; } }
-  const regionOf = (k, c) => RV[k].get(Math.floor(cellX(c) / k) + 64 * Math.floor(cellY(c) / k));
-  // ZONE MASKS: each open cell stores "which zones can be seen from anywhere in me" -- up to 8 zones
-  // fits mapT's byte (own zone always set, so never 0 = wall). Zones here are fixed TILES of the map,
-  // nx x ny blocks, so a cell's zone is arithmetic. 16 zones (two bytes) as the reference.
-  const tiling = (nx, ny) => { const zx = x => Math.min(nx - 1, Math.floor(x * nx / MAPW)), zy = y => Math.min(ny - 1, Math.floor(y * ny / MAPH));
-    const zoneOf = c => zx(cellX(c)) + nx * zy(cellY(c)); const mask = new Uint32Array(MAPN);
-    for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zoneOf(b);
-    return { name: nx + 'x' + ny, zoneOf, mask }; };
-  const TIL8 = [[4, 2], [2, 4], [8, 1], [1, 8]].map(([a, b]) => tiling(a, b));
-  const TIL16 = [[4, 4], [8, 2], [2, 8]].map(([a, b]) => tiling(a, b));
-  // OPTIMISED ZONES: greedy agglomeration. Every open cell starts as its own zone; repeatedly merge
-  // the pair that admits the fewest NEW false passes -- player cells that see one zone but not the
-  // other then pass every cell of the other. Zones need not be contiguous: a cell's zone is a table.
-  const optZones = (K) => {
-    let Z = cells.map(c => [c]);
-    const sees = Z.map(z => cells.map(p => z.some(c => V[p * MAPN + c]) ? 1 : 0));   // [zone][player idx]
-    while (Z.length > K) {
-      let best = Infinity, bi = 0, bj = 1;
-      for (let i = 0; i < Z.length; i++) for (let j = i + 1; j < Z.length; j++) {
-        let cst = 0; const si = sees[i], sj = sees[j];
-        for (let p = 0; p < cells.length; p++) { if (si[p] && !sj[p]) cst += Z[j].length; else if (sj[p] && !si[p]) cst += Z[i].length; }
-        if (cst < best) { best = cst; bi = i; bj = j; }
-      }
-      Z[bi] = Z[bi].concat(Z[bj]); sees[bi] = sees[bi].map((v, p) => v | sees[bj][p]);
-      Z.splice(bj, 1); sees.splice(bj, 1);
-    }
-    const zid = new Int8Array(MAPN).fill(-1); Z.forEach((z, k) => z.forEach(c => { zid[c] = k; }));
-    const zoneOf = c => zid[c] < 0 ? 0 : zid[c];           // a wall cell (a disc spilling into it): any zone, it is never visible anyway
-    const mask = new Uint32Array(MAPN);
-    for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zoneOf(b);
-    return { name: 'opt' + K, zoneOf, mask };
-  };
-  // WEIGHTED + LOCAL SEARCH. The cost of a false pass (p, e) is what it costs in play: the chance
-  // the pair survives the CONE (always when adjacent; else ~2*tol/256 for its distance) times the
-  // chance an entity is THERE (each orb or angel spread over the reachable cells; a hole-like sits in
-  // its cell every frame). Players are uniform over the reachable cells. Analytic, not fitted to the
-  // sampled frames. Greedy merge on that weight, then single-cell moves until none helps.
-  const reachIdx = pcells;
-  const cellW = new Float64Array(MAPN);
-  for (const c of pcells) cellW[c] += ORBS.length / pcells.length;
-  HOLELIKE.forEach(h => { cellW[cellOf(h.x, h.y)] += 1; });
-  const coneP = (a, b) => { const c = Math.max(Math.abs(cellX(a) - cellX(b)), Math.abs(cellY(a) - cellY(b)));
-    return c < 2 ? 1 : Math.min(1, (2 * CONE_TOL[Math.min(c, CONE_DMAX)] + 1) / 256); };
-  const wt = (p, e) => cellW[e] * coneP(p, e);
-  const optZonesW = (K) => {
-    let Z = cells.map(c => [c]);
-    const P = reachIdx.length;
-    const S = Z.map(z => reachIdx.map(p => z.some(c => V[p * MAPN + c]) ? 1 : 0));
-    const Fw = Z.map(z => reachIdx.map(p => z.reduce((a, e) => a + (V[p * MAPN + e] ? 0 : wt(p, e)), 0)));
-    while (Z.length > K) {
-      let best = Infinity, bi = 0, bj = 1;
-      for (let i = 0; i < Z.length; i++) for (let j = i + 1; j < Z.length; j++) {
-        let cst = 0; const si = S[i], sj = S[j], fi = Fw[i], fj = Fw[j];
-        for (let p = 0; p < P; p++) { if (si[p] && !sj[p]) cst += fj[p]; else if (sj[p] && !si[p]) cst += fi[p]; }
-        if (cst < best) { best = cst; bi = i; bj = j; }
-      }
-      Z[bi] = Z[bi].concat(Z[bj]); S[bi] = S[bi].map((v, p) => v | S[bj][p]); Fw[bi] = Fw[bi].map((v, p) => v + Fw[bj][p]);
-      Z.splice(bj, 1); S.splice(bj, 1); Fw.splice(bj, 1);
-    }
-    // local search: zone cost = sum over players that SEE the zone of its invisible weight
-    const zcost = z => { let t = 0; for (let pi = 0; pi < P; pi++) { const p = reachIdx[pi];
-      let seen = false, f = 0; for (const e of z) { if (V[p * MAPN + e]) seen = true; else f += wt(p, e); }
-      if (seen) t += f; } return t; };
-    let zc = Z.map(zcost), moves = 0;
-    for (let pass = 0; pass < 20; pass++) {
-      let improved = false;
-      for (let a = 0; a < Z.length; a++) for (let i = 0; i < Z[a].length; i++) {
-        if (Z[a].length === 1) continue;
-        const c = Z[a][i], za = Z[a].filter(x => x !== c), ca = zcost(za);
-        let bestB = -1, bestD = -1e-9, bestCb = 0;
-        for (let b = 0; b < Z.length; b++) { if (b === a) continue;
-          const cb = zcost([...Z[b], c]), d = (ca + cb) - (zc[a] + zc[b]);
-          if (d < bestD) { bestD = d; bestB = b; bestCb = cb; } }
-        if (bestB >= 0) { Z[a] = za; zc[a] = ca; Z[bestB].push(c); zc[bestB] = bestCb; i--; moves++; improved = true; }
-      }
-      if (!improved) break;
-    }
-    const zid = new Int8Array(MAPN).fill(-1); Z.forEach((z, k) => z.forEach(c => { zid[c] = k; }));
-    const zoneOf = c => zid[c] < 0 ? 0 : zid[c];
-    const mask = new Uint32Array(MAPN);
-    for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zoneOf(b);
-    return { name: 'w' + K, zoneOf, mask, moves };
-  };
-  const tOpt = Date.now();
-  const OPT = [optZones(8), optZonesW(8), optZones(16), optZonesW(16)];
-  console.error(`    (optimised zones built in ${Date.now() - tOpt} ms; local search moves: ${OPT.filter(t => t.moves !== undefined).map(t => t.name + ' ' + t.moves).join(', ')})`);
-  const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
-  const radH = HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2);
-  const capH = HOLELIKE.map(h => h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2);
-  const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
-  const visible = (px, py, ex, ey, r) => RIM.some(([c, s]) => losFree(px, py, ex + r * c, ey + r * s));
-  const coneOk = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
-    if (c < 2) return true; let a = c; while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
-    const tol = CONE_TOL[Math.min(c, CONE_DMAX)]; return ((hzBearing(dx, dy) - pa + tol) & 255) < 2 * tol; };
-  const hzOn = HZ_BUILD.on;
-  const hzCull = (pc, ec, dx, dy) => {          // vhTest, as it ships: player end, then entity end
-    const c = Math.max(Math.abs(dx), Math.abs(dy)); if (c < 3) return false;
-    const thr = (byte, k) => [2, 3, 5, 0xff][(byte >> (2 * k)) & 3];
-    const b = hzBearing(dx, dy), kp = ((b + VH_ROT) & 255) >> 6, ke = (((b + 128) & 255) + VH_ROT & 255) >> 6;
-    return c > thr(HZ_BUILD.enc(pc), kp) || c > thr(HZ_BUILD.enc(ec), ke);
-  };
-  const C = { hs: 25, cone: 125, hz: 175, bit: 25, bitHole: 60, trig: 800, vis: 7000, hid: 2900, off: 560, behind: 314 };
-  const CF = ['A today', 'B cone', 'C cone+V1', 'D cone+V2', 'E cone+V4', 'F cone+V4+hz', 'perfect',
-              ...TIL8.map(t => 'Z8 ' + t.name), ...TIL16.map(t => 'Z16 ' + t.name), ...OPT.map(t => 'Z ' + t.name)];
-  const tot = CF.map(() => new Float64Array(NS)), surv = new Float64Array(CF.length), waste = new Float64Array(CF.length), bad = new Float64Array(CF.length);
-  for (let s = 0; s < NS; s++) {
-    const pc = pcells[(rnd() * pcells.length) | 0], pcx = cellX(pc), pcy = cellY(pc);
-    const lo = w => w ? 0.1 : 0, hi = w => w ? 0.9 : 1;
-    const x0 = lo(W(pcx - 1, pcy)), x1 = hi(W(pcx + 1, pcy)), y0 = lo(W(pcx, pcy - 1)), y1 = hi(W(pcx, pcy + 1));
-    const px = pcx + x0 + rnd() * (x1 - x0), py = pcy + y0 + rnd() * (y1 - y0), pa = (rnd() * 256) | 0;
-    const ca = Math.cos(pa / 256 * 2 * Math.PI), sa = Math.sin(pa / 256 * 2 * Math.PI);
-    const ents = [
-      ...ORBS.map((o, i) => { const c = pcells[(rnd() * pcells.length) | 0];
-        return { x: cellX(c) + 0.5, y: cellY(c) + 0.5, r: radO[i], hole: -1 }; }),
-      ...HOLELIKE.map((h, L) => ({ x: h.x + 0.5, y: h.y + 0.5, r: radH[L], hole: L })),
-    ];
-    const f = new Float64Array(CF.length); let anyOpen = new Uint8Array(CF.length);
-    for (const e of ents) {
-      const ecx = Math.floor(e.x), ecy = Math.floor(e.y), ec = cellOf(ecx, ecy), dx = ecx - pcx, dy = ecy - pcy;
-      const vis = visible(px, py, e.x, e.y, e.r);
-      const fx = (e.x - px) * ca + (e.y - py) * sa, rx = -(e.x - px) * sa + (e.y - py) * ca;
-      const inFov = fx > 0.05 && Math.abs(rx) <= (e.hole >= 0 ? 0.944 : 0.749) * fx;
-      const cls = !inFov ? (fx <= 0.05 ? C.behind : C.off) : vis ? C.vis : C.hid;
-      const capped = e.hole >= 0 && Math.hypot(e.x - (pcx + 0.5), e.y - (pcy + 0.5)) >= capH[e.hole];
-      const cone = coneOk(dx, dy, pa);
-      // the cells the disc touches: a big hole spills past its own cell
-      const dcells = []; for (let yy = Math.floor(e.y - e.r); yy <= Math.floor(e.y + e.r); yy++)
-        for (let xx = Math.floor(e.x - e.r); xx <= Math.floor(e.x + e.r); xx++) if (inMap(xx, yy)) dcells.push(cellOf(xx, yy));
-      const vk = k => { const row = regionOf(k, pc); return dcells.some(c => row[c]); };
-      const hsOk = e.hole < 0 || ((holeSee[e.hole * 32 + (pc >> 3)] >> (pc & 7)) & 1);
-      const bitC = e.hole >= 0 ? C.bitHole : C.bit;
-      // [cost of the tests, survives?] per config
-      const R = [];
-      if (e.hole >= 0) R.push(hsOk ? [C.hs + C.cone, cone] : [C.hs, false]);
-      else R.push(!cone ? [C.cone, false] : hzOn ? [C.cone + C.hz, !hzCull(pc, ec, dx, dy)] : [C.cone, true]);
-      R.push([C.cone, cone && !capped]);
-      for (const k of [1, 2, 4]) R.push(!cone ? [C.cone, false] : [C.cone + bitC, !capped && vk(k)]);
-      R.push(!cone ? [C.cone, false] : (capped || !vk(4)) ? [C.cone + bitC, false]
-             : (e.hole < 0 && hzOn) ? [C.cone + bitC + C.hz, !hzCull(pc, ec, dx, dy)] : [C.cone + bitC, true]);
-      R.push([0, inFov && vis && !capped]);
-      for (const t of [...TIL8, ...TIL16, ...OPT]) {     // zone mask: the entity's zone(s) against mapT[player cell]
-        const ok = dcells.some(c => (t.mask[pc] >> t.zoneOf(c)) & 1);
-        R.push(!cone ? [C.cone, false] : [C.cone + bitC, !capped && ok]); }
-      R.forEach(([w, ok], i) => { f[i] += w; if (ok) { f[i] += cls; surv[i]++; anyOpen[i] = 1; if (!vis) waste[i]++; }
-        else if (vis && inFov && !capped) bad[i]++; });
-    }
-    for (let i = 0; i < CF.length; i++) tot[i][s] = f[i] + (anyOpen[i] ? C.trig : 0);
-  }
-  const pct = (a, p) => { const b = Float64Array.from(a).sort(); return b[Math.min(b.length - 1, Math.floor(p * b.length))]; };
-  console.error(`  DYNVIS level ${LVL}: ${cells.length} open cells (${pcells.length} reachable), ${NS} frames, ` +
-    `pairs in ${Date.now() - t0} ms; region rows: k1 ${RV[1].size}, k2 ${RV[2].size}, k4 ${RV[4].size}; horizon ${hzOn ? 'ON' : 'off'} here`);
-  console.error(`    config          survivors/f  wasted/f   mean cy/f   p99 cy/f   wrongly culled (visible)`);
-  CF.forEach((n, i) => console.error(`    ${n.padEnd(14)} ${(surv[i] / NS).toFixed(2).padStart(9)} ${(waste[i] / NS).toFixed(2).padStart(9)} ` +
-    `${(tot[i].reduce((a, b) => a + b, 0) / NS).toFixed(0).padStart(10)} ${pct(tot[i], 0.99).toFixed(0).padStart(10)}   ${bad[i]}`));
-}
-if (ENTHZN && process.env.VHPOSE) {
-  const pcx = PX >> 8, pcy = PY >> 8, pc = cellOf(pcx, pcy);
-  const thr = (byte, k) => [2, 3, 5, 0xff][(byte >> (2 * k)) & 3];
-  const cone = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
-    if (c < 2) return true; let a = c; while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
-    const tol = CONE_TOL[Math.min(c, CONE_DMAX)]; return ((hzBearing(dx, dy) - pa + tol) & 255) < 2 * tol; };
-  const all = [...ORBS.map(o => [Math.floor(o.x), Math.floor(o.y), -1, o.tall ? 'angel' : 'orb']),
-               ...HOLELIKE.map((h, L) => [h.x, h.y, L, h.exit ? 'exit' : h.ped ? 'pedestal' : 'socket'])];
-  console.error(`  VHPOSE level ${LVL}, player $${PX.toString(16)},$${PY.toString(16)} (cell ${pcx},${pcy}) heading ${PA}:`);
-  all.forEach(([ex, ey, L, kind], i) => {
-    const hs = L < 0 || ((holeSee[L * 32 + (pc >> 3)] >> (pc & 7)) & 1);
-    const dx = ex - pcx, dy = ey - pcy, c = Math.max(Math.abs(dx), Math.abs(dy));
-    const cn = hs && cone(dx, dy, PA);
-    const k = ((hzBearing(dx, dy) + VH_ROT) & 255) >> 6;
-    const p = cn && c >= 3 && HZ_BUILD.on && c > thr(HZ_BUILD.enc(pc), k);
-    const q = cn && !p && c >= 3 && HZ_BUILD.on && c > thr(HZ_BUILD.enc(cellOf(ex, ey)), k ^ 2);
-    console.error(`    ${String(i).padStart(2)} ${kind.padEnd(8)} (${ex},${ey}) dist ${c}  ` +
-      (!hs ? 'holeSeeT rejects' : !cn ? 'cone rejects' : p ? 'HORIZON CULLS (player end)' : q ? 'HORIZON CULLS (entity end)' : 'passes'));
-  });
-}
-if (ENTHZN) console.error(`  ENTHZN level ${LVL}: ${HZ_BUILD.on ? `horizons in mapT, patch list ${HZ_BUILD.patch.length / 2} cells (${HZ_BUILD.patch.length + 1} bytes)` : 'OFF on this level (open cells $FF)'}`);
+
 const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from the manifest
 
 const pad = (a, n, fill = 0) => [...a, ...Array(Math.max(0, n - a.length)).fill(fill)];
 const LVL_TABLES = [
-  // ENTHZN encodes it the other way up: walls $00 and an open cell its (non-zero) horizon byte.
-  ['mapT', MAPPACK ? [...Array(256)].map((_, i) => ZONES ? ZN_BUILD.enc(i) : HZ_BUILD.enc(i))
-                  : pad(map, 256).map((v, i) => i < MAPN ? v : 1)],   // a full page of WALL past the map: see the emitted mapT
+  // Walls $00, an open cell its (never zero) mask of visible zones -- see ZN_BUILD.
+  ['mapT', [...Array(256)].map((_, i) => ZN_BUILD.enc(i))],   // a full page of WALL past the map: see the emitted mapT
   // blkT and the eight run tables USED to travel here -- 1,380 of the 1,789 bytes a level cost.
   // They are all derived from mapT: blkT by objInit, which already copied it at boot, and the
   // rest by mkRuns. Carrying them was more expensive than recomputing them, because the swap
@@ -11452,12 +9232,6 @@ const LVL_TABLES = [
   // stride ITS OWN build computed (4, 7, 8 against the engine's 9): masks overlapped, ran past
   // orbOccT and zeroed the parked Krill loader, so the next disk load hung (2026-10-03). The
   // re-lay that once fixed this only ran under TWOLEV, which LVLLOAD switched off.
-  // ENTHZN: the per-level switch, and the patch list -- a count, then (cell, all-open byte) pairs.
-  // Its natural length varies, but only holeSeeT may (it is last, so nothing after it moves), so it
-  // is PADDED to the longest in the chain and its base is the same in every level.
-  ...(ENTHZN ? [['vhOnT', [HZ_BUILD.on ? 1 : 0]],
-                ...(VH_MODE === 'exact' ? [['vhPatT', pad([HZ_BUILD.patch.length / 2, ...HZ_BUILD.patch],
-                               lvlMax(l => l.tables?.vhPatT?.length ?? 1, HZ_BUILD.patch.length + 1))]] : [])] : []),
 ];
 // PED_WALL is an IMMEDIATE in pedGate, so nothing at runtime can notice it drifting from the
 // table the same fact lives in. Check the MEANING: every pedestal on the pedestal level must
@@ -11650,7 +9424,7 @@ if (SOLO) LVL_TABLES.push(['lvlMeT', [LVL]]);
 // the gate looks the player's cell up once a frame and occStamp skips a hole-like whose bit is clear.
 // Exit holes are floor discs and never stamped (obOcc carries their fill colour), so only sockets and
 // pedestals are listed; orbs and angels move and keep the full path. STMP=0 turns it off.
-const STMP = process.env.STMP !== '0' && ZONES;
+const STMP = process.env.STMP !== '0' && true;
 const STMP_LIST = (() => {
   if (!STMP) return [0];
   const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
@@ -11692,8 +9466,7 @@ const STMP_LIST = (() => {
   return [cellsSorted.length, ...cellsSorted.flatMap(c => [c, out.get(c)])];
 })();
 if (STMP) console.error(`  STMP level ${LVL}: ${STMP_LIST[0]} cell(s) where a pedestal/socket can be partly hidden (${STMP_LIST.length} bytes)`);
-if (ZONES) LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT], ['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);
-else LVL_TABLES.push(['holeSeeT', holeSee]);   // ZONES: the hole-likes' zone masks replace it
+LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT], ['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);   // ZONES: the hole-likes' zone masks replace it
 if (STMP) LVL_TABLES.push(['stmpT', STMP_LIST]);       // LAST: variable length -- see LVL_VARLEN
 const SLOT_OFF = {};
 let SLOT_LEN = 0;
@@ -12268,12 +10041,7 @@ mp      = $98                   ; mul8 operands / product
 mq      = $99
 plo     = $9a
 phi     = $9b
-${ENTHZN ? `; ENTHZN scratch ($c1-$cf is ENTLOS's when that is on; the two are exclusive)
-vhD     = $c1                   ; this entity's Chebyshev distance, from cnTest
-vhPok   = $c4                   ; the player's thresholds are ready this frame
-vhS     = $c5                   ; this entity's sector
-vhPT    = $c6                   ; 4: the player cell's threshold per sector, once a frame
-` : ''}cx0     = $82                   ; collision box corners, in map cells
+cx0     = $82                   ; collision box corners, in map cells
 cx1     = $83
 cy0     = $84
 cy1     = $85
@@ -14444,11 +12212,7 @@ pwWpN:  sta pfNum,x
         bpl pwWpN
 ` : ''}        sta pwF
         sta pwF+1
-${EGPROF ? `        ldx #$07
-pwWpE:  sta egPC,x
-        dex
-        bpl pwWpE
-` : ''}        lda px
+        lda px
         sta pwX0
         lda px+1
         sta pwX0+1
@@ -16708,7 +14472,7 @@ cyNs:   txa
         adc stpY16
         tax
         lda mapT,x
-        ${MAPPACK ? 'beq' : 'bne'} cwallY                 ; ENTHZN: walls are $00, open cells their horizon byte
+        beq cwallY                 ; mapT: walls are $00, open cells their zone mask
         dey
         bne cdda
         jmp cfar
@@ -16734,7 +14498,7 @@ cstepX: lda sdx
 cxNs:
 cxInc:  inx                     ; PATCHED to $e8 inx / $ca dex, once per ray
         lda mapT,x
-        ${MAPPACK ? 'beq' : 'bne'} cwallX
+        beq cwallX
         dey
         bne cdda
 cfar:   stx cell                ; step guard expired; unreachable with a solid border
@@ -18522,8 +16286,7 @@ cnYP:   sta cnT                 ; |dy|
         cmp cnB
         bcs cnChb
         lda cnB
-cnChb:  ${ENTHZN ? `tay                     ; ENTHZN: Y = the distance on EVERY exit, adjacent included
-        ` : ''}cmp #$02                ; Chebyshev distance, and the tolerance index
+cnChb:  cmp #$02                ; Chebyshev distance, and the tolerance index
         bcc cnNear               ; ADJACENT OR UNDER US: the cell centres are up to 45 degrees from
                                 ;   the true bearing here, so there is no tolerance that both
                                 ;   rejects anything and is safe. Let it through; it is one entity
@@ -19277,13 +17040,6 @@ ${FOVCHK ? `        lda fovWld              ; FOVCHK: the pre-cull would have dr
         beq fovYok              ;   SPRITE. This must read zero, always.
         inc fovBad
 fovYok:
-` : ''}${HZCHK ? `        lda egVT,x              ; HZCHK: the cull would have dropped something that got a
-        beq egYok               ;   SPRITE -- a visible entity deleted. Must read zero.
-        inc egBadT,x
-        inc egBad
-        bne egYok
-        inc egBad+1
-egYok:
 ` : ''}${CONECHK ? `        lda cnV                 ; CONECHK: the cone would have dropped something that got a
         beq cnYok               ;   SPRITE -- a visible entity deleted. This must read zero.
         inc coneBad
@@ -19322,31 +17078,12 @@ holeOne:lda nHoleT              ; a level with no hole-likes at all: nothing to 
         beq hoRts
         lda #$00                ; the exits first, so they can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
-hoLp:${ZONES ? `   lda hoI                 ; ZONES: entGate's VERDICT for this hole-like -- its zone test AND the
+hoLp:   lda hoI                 ; ZONES: entGate's VERDICT for this hole-like -- its zone test AND the
         clc                     ;   cone, already in cnOkT. Checked here, BEFORE hlSet re-patches the
         adc nOrbT               ;   drawing routine and orbOne is called only to read the same byte
         tax                     ;   and bail: that cost ~650 cycles per culled hole-like, every frame
         lda cnOkT,x             ;   (the hub profile, 2026-10-05: 7 hole-likes walked, 4 drawn)
-        beq hoNx` : `   lda hoI                 ;   biggest thing here
-        asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
-        asl
-        asl
-        asl
-        asl
-        sta hoOf                ;   NOT a cell multiply: it stays 32 whatever MAPW is
-        lda pcell
-        and #$07
-        tay
-        lda pcell
-        lsr
-        lsr
-        lsr
-        clc
-        adc hoOf
-        tax
-        lda holeSeeT,x
-        and orbBitT,y
-        beq hoNx                ; not visible from this cell: ~25 cycles against a ~2,400 projection`}
+        beq hoNx
         ldy hoI                 ; ...and a CONSUMED socket is not in the world at all any more.
         lda hlSeat,y            ; Exit holes keep 0 here for ever, so this costs them one compare.
         bmi hoNx
@@ -20185,11 +17922,11 @@ ${GATEFAST ? `        lda #$00                ; GATEFAST: a new level (or a rest
         sta ogPcV
 ` : ''}        ldx #$00
 oiBlk:  lda mapT,x              ; walls first
-${MAPPACK ? `        cmp #$01                ; ENTHZN: mapT is $00 for a wall and a horizon byte otherwise;
+        cmp #$01                ; mapT is $00 for a wall and a zone mask otherwise;
         lda #$00                ;   blkT still wants 1 = wall, 0 = open
         rol
         eor #$01
-` : ''}        sta blkT,x
+        sta blkT,x
         inx
         bne oiBlk
 ${FALLMARK.includes(5) ? '        inc fallMk              ; FALLMARK 5: blkT rebuilt, about to place entities\n' : ''}        lda nOrbT               ; a level may have NO entities at all
@@ -22045,15 +19782,7 @@ ohDone: rts
 ; the screen and cannot overlap, and anything nearer must be in front. Lowest VIC priority is
 ; therefore always right, and it stops the hole painting over an angel standing beyond it.
 holeSlot:
-${HZCHK ? `        ldx oidx                ; HZCHK: the same check for a hole-like taking its slot here
-        lda egVT,x
-        beq egHok
-        inc egBadT,x
-        inc egBad
-        bne egHok
-        inc egBad+1
-egHok:
-` : ''}        dec onvH
+        dec onvH
         ldx onvH
         lda orbBitT,x
         sta omBit
@@ -22364,14 +20093,14 @@ hrpL:   cmp pedHT,y
         dey
 hrpHit: tya
         rts
-${ZONES ? `${LD('zoneT', ZN_BUILD.zoneT.join(','), ': !byte ')}   ; ZONES: every cell's zone, two to a byte
+${LD('zoneT', ZN_BUILD.zoneT.join(','), ': !byte ')}   ; ZONES: every cell's zone, two to a byte
 ${LD('hzMskT', pad(ZN_BUILD.hmask, NHOLE).join(','), ': !byte ')}   ; ZONES: each hole-like's zones (its disc)
 zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask${GATEFAST ? `
 ogPcV:  !byte 0                 ; GATEFAST: pcell/znP/stmpM are valid for the live level (objInit clears)
 ogTol:  !byte 0                 ; GATEFAST: the inlined cone's tolerance for this distance` : ''}${STMP ? `
 ${LD('stmpT', STMP_LIST.join(','), ': !byte ')}   ; STMP: [count, (cell, hole-like mask)...]
 stmpM:  !byte 0                 ; STMP: this frame's hole-likes that CAN be partly hidden from here` : ''}${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0\nosCntR: !byte 0,0' : ''}
-znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame` : LD('holeSeeT', holeSee.join(","), ': !byte ')}
+znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
         ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
         ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
@@ -22965,10 +20694,7 @@ snapSrcT: !byte ${SNAP_SRC.join(',')}` : ''}
 orbPtrT: !byte ${orbPtrT.join(',')}
 orbPtrU: !byte ${orbPtrU.join(',')}
 ${LD('orbTallT', LVLT('orbTallT').join(','), ': !byte ')}
-${ENTHZN ? `${LD('vhOnT', LVLT('vhOnT').join(','), ': !byte ')}   ; ENTHZN: this level's switch and its walls-open patch list
-${VH_MODE === 'exact' ? LD('vhPatT', LVLT('vhPatT').join(','), ': !byte ') : ''}
-vhThrT: !byte ${HZ_THR.join(',')},$ff   ; ENTHZN: what a 2-bit horizon code MEANS -- $ff never culls
-` : ''}
+
 ${HAS_IDOL ? `${LD('orbArtT', LVLT('orbArtT').map(hx).join(','), ': !byte ')}   ; bitmap offset per entity; 0 = the orb's art` : ''}
 orbHidT: !byte ${pad(orbHidT, NORB).join(',')}
 ${LD('orbIdolT', LVLT('orbIdolT').map(hx).join(','), ': !byte ')}   ; which idol each slot is, $ff = none
@@ -22982,12 +20708,7 @@ orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
 ohHiB:  !byte 0                 ; occStamp's binary search: the upper bound
 ${CONEGATE ? `; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
 ; orbSeenT, so the hole-likes' indices -- which share oidx -- land inside it.
-${ENTHZN && process.env.HZCNT ? `vhRejT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; HZCNT: frames each entity was culled by the horizon
-` : ''}${HZCHK ? `egVT:   !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; HZCHK: this frame's verdict per entity
-egBadT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; HZCHK: would-cull that got a sprite, per entity
-egBad:  !byte 0,0                ; HZCHK: ...in all, 16-bit. MUST be 0
-egChkN: !byte 0,0                ; HZCHK: would-cull verdicts, 16-bit
-` : ''}cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}
+cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}
 ${OCCLAZYE ? `ooFrT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; OCCLAZYE: this entity's mask is built for this frame's runs` : ''}
 ${LAZYCHK ? `lzShad: !fill ${OCCBYTES}, 0        ; LAZYCHK: the trusted mask, set aside for the compare
 lzBad:  !byte 0,0                ; LAZYCHK: bytes a trusted mask got wrong -- MUST be 0
@@ -23005,7 +20726,6 @@ pwX0:   !byte 0,0                ; PROFWIN: the player at the start and the end 
 pwY0:   !byte 0,0
 pwX1:   !byte 0,0
 pwY1:   !byte 0,0
-` : ''}${EGPROF ? `egPC:   !byte 0,0,0,0,0,0,0,0    ; EGPROF: horizon tests, entity-end lookups, player-end culls, entity-end culls (16-bit each)
 ` : ''}angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
@@ -25219,16 +22939,16 @@ mrVx:   lda #$00
         lda mrX
         tay                     ; c = y*MAPW + x, walking y means stepping MAPW
 mrVy:   lda mapT,y
-        ${MAPPACK ? 'beq' : 'bne'} mrVw
-${MAPPACK ? `        lda #$00                ; ENTHZN: an open cell is no longer 0, and the stores want 0
-` : ''}        sta mrWp                ; open cell: both runs end here
+        beq mrVw
+        lda #$00                ; mapT: an open cell is not 0 (a zone mask), and the stores want 0
+        sta mrWp                ; open cell: both runs end here
         sta mrEp
         jmp mrVn
 mrVw:   dey                     ; west face? the cell at c-1 must be open
         lda mapT,y
         iny                     ; restoring Y CLOBBERS the flags the load just set, so the
         cmp #$00                ;   compare has to be redone -- without this the branch below
-        ${MAPPACK ? 'beq' : 'bne'} mrVwn               ;   tested Y and every west run came out wrong
+        beq mrVwn               ;   tested Y and every west run came out wrong
         lda mrWp
         bne mrVws
         lda mrNext              ; a new run: plane = x, face W
@@ -25250,7 +22970,7 @@ mrVe:   iny                     ; east face? the cell at c+1 must be open
         lda mapT,y
         dey                     ; same trap as the west face above
         cmp #$00
-        ${MAPPACK ? 'beq' : 'bne'} mrVen
+        beq mrVen
         lda mrEp
         bne mrVes
         lda mrNext              ; plane = x+1, face E
@@ -25293,9 +23013,9 @@ mrHy:   lda #$00
         ldx #$00
         stx mrX
 mrHx:   lda mapT,y
-        ${MAPPACK ? 'beq' : 'bne'} mrHn
-${MAPPACK ? `        lda #$00                ; ENTHZN: as at mrVy
-` : ''}        sta mrWp
+        beq mrHn
+        lda #$00                ; as at mrVy
+        sta mrWp
         sta mrEp
         jmp mrHnx
 mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW would leave mapT
@@ -25305,7 +23025,7 @@ mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW 
         sbc lvlDimT             ; c - MAPW
         tax
         lda mapT,x
-        ${MAPPACK ? 'beq' : 'bne'} mrHnn
+        beq mrHnn
         lda mrWp
         bne mrHns
         lda mrNext              ; plane = y, face N
@@ -25331,7 +23051,7 @@ mrHs:   lda mrY                 ; south face: the last row has none, and c+MAPW 
         adc lvlDimT             ; c + MAPW
         tax
         lda mapT,x
-        ${MAPPACK ? 'beq' : 'bne'} mrHsn
+        beq mrHsn
         lda mrEp
         bne mrHss
         lda mrNext              ; plane = y+1, face S
@@ -25823,11 +23543,7 @@ wtGo:   sta wallStT,y
         lda wallDHiT,y
 ${VSLOTS ? '        clc                     ; VSLOTS: the level may live in another slot than it was built for\n        adc vsDelta\n' : ''}        sta hzRd+2
         jsr hzRunW              ; sets its own X and walks to the $ff
-${ENTHZN && VH_MODE === 'exact' ? `        lda wsDir               ; ENTHZN: a wall just came OUT -- from now on every horizon
-        beq wtNoV               ;   is the all-walls-open one (safe in any order of opening)
-        jsr vhAll
-wtNoV:
-` : ''}        jsr wtCells             ; every cell of the group: blkT from the new mapT (the delta no
+        jsr wtCells             ; every cell of the group: blkT from the new mapT (the delta no
                                 ;   longer carries blkT or the run tables, since neither travels
                                 ;   with a level), and doomT back to 0
         jsr mkRuns              ; ...and the runs renumber wholesale, so re-derive the rest
@@ -25853,11 +23569,11 @@ wtLd:   lda $ffff,y             ; operand patched: the group's $ff-ended cell li
         beq wtCDn
         tax
         lda mapT,x
-${MAPPACK ? `        cmp #$01                ; ENTHZN: translate, as oiBlk does
+        cmp #$01                ; mapT: translate, as oiBlk does
         lda #$00
         rol
         eor #$01
-` : ''}        sta blkT,x
+        sta blkT,x
         iny
         bne wtLd                ; always: a group is far shorter than a page
 wtCDn:  rts
@@ -26611,113 +24327,7 @@ ${ENTGATE ? `; ---- entGate: can ANY entity be projected this frame? Carry SET =
 ; a slot (the carried orb, a socket animation). This pays on an empty level -- the benchmark --
 ; and in any corridor with nothing in sight; a level with an orb placed always has something to
 ; project and takes the full path from the first test. Orbs have no LOS bitmap because they move.
-${ENTHZN ? `; ---- ENTHZN: is this entity past the visibility horizon of either end's cell? ----
-; The horizon is mapT itself: an open cell's byte holds 4 sectors x 2 bits, sector k in bits 2k-2k+1,
-; each code meaning "nothing in this sector is visible past distance vhThrT[code]" ($ff: no limit).
-; In: X = the entity, Y = its Chebyshev distance, cnB its bearing (both cnTest's). Out: carry SET =
-; hidden from anywhere in the player's cell -- reject. Clobbers A, X, Y.
-vhTest: cpy #$03
-        bcc vhNo                ; nearer than 3: the smallest distance a code can mean is 2
-        sty vhD
-        lda vhOnT
-        beq vhNo                ; this level does not use it (its open cells are all $ff anyway)
-${egInc(0, 'hc')}        lda vhPok               ; ---- the player's end: four thresholds, once a frame ----
-        bne vhPh
-        txa                     ; vhPlr loops on X, and X is the entity: the first entity of every
-        pha                     ;   frame came back as entity 4 and was judged by THAT one's cell
-        jsr vhPlr               ;   (caught by VHPOSE against HZCNT: entity 0 culled, predicted to pass)
-        pla
-        tax
-vhPh:   lda cnB                 ; sector = (bearing + 45 degrees) >> 6, so each sector is centred
-        clc                     ;   on an axis and a corridor's sightline stays in one of them.
-        adc #${hx(VH_ROT)}               ;   Three rotates bring bits 7-6 to 1-0; whatever the carry
-        rol                     ;   brought in lands in bit 2 and is masked off
-        rol
-        rol
-        and #$03
-        sta vhS
-        tay
-        lda vhPT,y
-        cmp vhD
-        bcc vhYesP              ; this sector's horizon is nearer than the entity
-        ldy orbYCT,x            ; ---- the entity's end: the OPPOSITE sector of its own cell ----
-        lda rowMulT,y
-        clc
-        adc orbXCT,x
-        tax
-${egInc(1, 'he')}        lda mapT,x
-        beq vhNo                ; (an entity cannot stand in a wall; if one ever does, do not cull)
-        tay                     ; Y = the byte; shift it down by 2 * (sector ^ 2)
-        lda vhS
-        eor #$02
-        tax
-        tya
-        cpx #$00
-        beq vhE1
-vhE0:   lsr
-        lsr
-        dex
-        bne vhE0
-vhE1:   and #$03
-        tay
-        lda vhThrT,y
-        cmp vhD
-        bcc vhYesE
-vhNo:   clc
-        rts
-vhYesP:
-${egInc(2, 'hp')}${process.env.HZCNT ? `        ldx cnI
-        inc vhRejT,x
-` : ''}        sec
-        rts
-vhYesE:
-${egInc(3, 'hq')}${process.env.HZCNT ? `        ldx cnI
-        inc vhRejT,x
-` : ''}        sec
-        rts
-
-; The player cell's threshold per sector into vhPT, once a frame (vhPok).
-vhPlr:  inc vhPok
-        ldy py+1
-        lda rowMulT,y
-        clc
-        adc px+1
-        tay
-        lda mapT,y
-        bne vhPg
-        lda #$ff                ; the player's cell reads as a wall (it cannot): cull nothing from here
-vhPg:   ldx #$00
-vhPl:   pha
-        and #$03
-        tay
-        lda vhThrT,y
-        sta vhPT,x
-        pla
-        lsr
-        lsr
-        inx
-        cpx #$04
-        bcc vhPl
-        rts
-
-${VH_MODE === 'exact' ? `; vhAll: the walls-open horizons, written over the walls-shut ones the level arrived with. Called
-; every time a wall comes out; writing the same values twice is harmless, so it keeps no flag.
-vhAll:  ldx vhPatT              ; the count; pairs follow
-        beq vhAd
-        ldy #$01
-vhAl:   lda vhPatT,y            ; the cell...
-        sta vhD                 ;   (vhD is free outside vhTest)
-        iny
-        lda vhPatT,y            ; ...and its all-open byte
-        iny
-        sty vhS
-        ldy vhD
-        sta mapT,y
-        ldy vhS
-        dex
-        bne vhAl
-vhAd:   rts
-` : ''}` : ''}entGate:
+entGate:
 ${CONEGATE ? '' : `        lda carry
         ora sokAn
         bne ogYes
@@ -26739,7 +24349,7 @@ ${CONEGATE ? '' : `        lda carry
         ; because orbOne reads all of them.
 ${HAS_IDOL ? `        lda #$00                ; orbProjC: no idol has been projected yet this frame
 ${[...Array(IDOL_N)].map((_, i) => `        sta pcP+${i}`).join('\n')}
-` : ''}${ZONES ? `        lda py+1                ; ZONES: the player's cell, and the zones visible from anywhere in it --
+` : ''}        lda py+1                ; ZONES: the player's cell, and the zones visible from anywhere in it --
 ${MULW}
 ${ADDX('px+1')}
 ${GATEFAST && process.env.GFCACHE !== '0' ? `        ldx ogPcV               ; GATEFAST: the same cell as when znP and stmpM were worked out? Then
@@ -26769,20 +24379,7 @@ ogStL:  lda stmpT,y
 ogStH:  lda stmpT+1,y
         sta stmpM
 ogStD:
-` : ''}${GATEFAST ? 'ogPcS:\n' : ''}` : `        lda nHoleT
-        beq ogNoH               ; no hole-likes: the LOS row below is never indexed
-        lda py+1                ; the player's cell, for the LOS test
-${MULW}
-${ADDX('px+1')}
-        sta pcell
-        and #$07
-        sta cnBit               ; which bit of a 32-byte LOS row this cell is
-        lda pcell
-        lsr
-        lsr
-        lsr
-        sta rgtL                ; ...and which byte. rgtL is orbProj's, and orbProj has not run yet
-`}ogNoH:${ENTLOS ? `
+` : ''}${GATEFAST ? 'ogPcS:\n' : ''}ogNoH:${ENTLOS ? `
         ; ---- HOW FAR THE PLAYER IS FROM THEIR OWN CELL CENTRE, once a frame ----
         ; The depth test's distance comes from the cell delta, which is the distance between cell
         ; CENTRES. The player is not at one, and the difference is the same for every entity this
@@ -26835,8 +24432,7 @@ ogAo:   lsr
         lda #$00
         sta cnAny
         sta cnI
-${ENTHZN ? `        sta vhPok               ; ENTHZN: the player's thresholds are recomputed on first use
-` : ''}${GATEFAST ? `        tax                     ; GATEFAST: X IS the entity index for the whole loop
+${GATEFAST ? `        tax                     ; GATEFAST: X IS the entity index for the whole loop
 ogEnL:  cpx nOrbT
         bcs ogEHol
 ` : `ogEnL:  lda cnI
@@ -26844,7 +24440,7 @@ ogEnL:  cpx nOrbT
         bcs ogEHol
         ldx cnI                 ; ---- an orb or an angel ----`}
         lda orbHidT,x
-${ZONES ? `        bne ogENo               ; hidden: no verdict to give
+        bne ogENo               ; hidden: no verdict to give
         ldy orbYCT,x            ; ZONES: its zone's bit against mapT[player cell] -- BEFORE the cone,
         lda rowMulT,y           ;   which costs ~125 to this test's ~40
         clc
@@ -26870,22 +24466,7 @@ ogEHol: ${GATEFAST ? `txa                     ; GATEFAST: A must BE the entity i
         lda hzMskT,x
         and znP
         beq ogENo${GATEFAST ? `
-        ldx cnI                 ; GATEFAST: back to the entity index for the cone` : ''}` : `        beq ogETst              ; in the world: ask the cone
-        bne ogENo               ; hidden: no verdict to give
-ogEHol: sec                     ; ---- a hole-like: its per-cell LOS bitmap first ----
-        sbc nOrbT               ; A = the hole index, as holeSeeT is keyed
-        asl
-        asl
-        asl
-        asl
-        asl                     ; x32 -- ceil(MAPN/8) per entity, whatever MAPW is
-        clc
-        adc rgtL
-        tax
-        ldy cnBit
-        lda holeSeeT,x
-        and orbBitT,y
-        beq ${CULLCNT ? 'ogELos' : 'ogENo'}               ; cannot be seen from this cell at all`}
+        ldx cnI                 ; GATEFAST: back to the entity index for the cone` : ''}
 ${GATEFAST ? `ogETst:                         ; GATEFAST: cnTest INLINED, Y and A only -- X keeps the entity
         sec                     ; the cell delta, exactly as orbOne computes it (zero page now)
         lda orbXCT,x
@@ -27008,26 +24589,7 @@ ${LOSCHK ? `        ldx cnI                 ; LOSCHK: the verdict is PER ENTITY.
         lda lsV                 ;   last entity entGate tested, not the one orbOne later draws --
         sta lsVT,x              ;   which is how losBad came out LARGER than losRej.
 ` : ''}        bcs ogENo
-${ENTHZN && !HZCHK && !process.env.VHNOLOOK ? `        lda cnI                 ; ENTHZN: not for a HOLE-LIKE. holeSeeT has already said it is visible
-        cmp nOrbT               ;   from somewhere in this cell, exactly and for the walls as they are,
-        bcs ogHzS               ;   and the horizon is a coarser answer to the same question: it never
-                                ;   culled one (HZCNT, levels 1, 2 and the hub, 2026-10-04). ~150-200 cy each.
-        ldx cnI                 ; ENTHZN: in the cone -- is it past this cell's horizon?
-        jsr vhTest              ;   (Y = the Chebyshev distance, left there by cnTest)
-        bcs ogENo
-ogHzS:
-` : ''}${HZCHK ? `        ldx cnI                 ; HZCHK: ask, note the verdict, do NOT act on it
-        jsr vhTest
-        lda #$00
-        rol
-        ldx cnI
-        sta egVT,x
-        beq vhCk0
-        inc egChkN
-        bne vhCk0
-        inc egChkN+1
-vhCk0:
-` : ''}        lda #$ff
+        lda #$ff
         ldx cnI
         sta cnOkT,x
         sta cnAny
