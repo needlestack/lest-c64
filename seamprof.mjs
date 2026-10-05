@@ -2,7 +2,6 @@
 // back out. Two VICE runs, ~25 seconds each.
 //
 //   node seamprof.mjs                       the benchmark route, level 1, no objects (bench.sh)
-//   node seamprof.mjs --route=seam          the older seam tour, which has spins in it
 //   node seamprof.mjs --route=walk          the game walkthrough instead (has entities in it)
 //   node seamprof.mjs --env "SEAMS=0"       any extra build vars, for A/B
 //   node seamprof.mjs --coarse              one run, top-level buckets only, no correction

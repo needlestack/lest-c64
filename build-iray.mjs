@@ -628,8 +628,8 @@ const TOUR_ROUTE = [
   ['turn', T_TURNR,  0x0159],
   ['act',  T_FALL,   400],              // walk on until the hole takes us
 ];
-// ROUTE=seam selects SEAM_ROUTE instead (see below, next to the movement tables it has to model
-// exactly). Both compile to the same (type, ticks) steps, so twStep neither knows nor cares.
+// The other ROUTEs are place lists (see compileRoute, next to the movement tables it has to
+// model exactly). All compile to the same (type, ticks) steps, so twStep neither knows nor cares.
 const ROUTE = process.env.ROUTE ?? 'walk';
 const WALK_STEPS = (() => {
   let x = 0x01f6, y = 0x0149, a = 0x3b00;    // the start pose
@@ -655,57 +655,6 @@ const WALK_STEPS = (() => {
 })();
 const RECMAX = 64;
 const TOURW = process.env.TOURW === '1';
-// BANDS=1: distance shading on the ceiling and floor, by raster line.
-// Distance to a floor pixel goes as 1/|row - horizon|, so the bands CLUSTER toward the horizon
-// and the ramp runs white (near, at the screen edges) to dark grey (far, at the horizon). The
-// horizon stop and the arc stop keep the charset values the three-stop path used, because they
-// are the same two splits -- this table just adds stops between them.
-const BANDS = process.env.BANDS === '1';
-// The ramp, as (distance from the horizon in rasters, colour). Distance to a floor pixel goes
-// as 1/|row - horizon|, so equal steps in DISTANCE are these unequal steps in rows -- which is
-// why the bands crowd toward the horizon.
-const BAND_H = 0x96, BAND_ARC = 246;
-const BAND_RAMP = [[100, 1], [50, 15], [25, 12], [12, 11]];
-// BANDDITH=n: raster lines of 1-D ordered dither at each colour boundary. A raster split is one
-// line, so alternating two greys line by line blends them FINER than an 8x8 glyph could -- and
-// it costs table entries, not code, not charset codes, and nothing in renderSym. The zone is
-// clamped to half the gap so the boundaries nearest the horizon, which are only 12 rasters
-// apart, do not dither across their whole band.
-const BAND_DITH = +(process.env.BANDDITH ?? 3);
-const bandDither = (from, to, gap) => {           // returns colours for the lines BEFORE `to`
-  const w = Math.max(0, Math.min(BAND_DITH, gap >> 1)), out = [];
-  let acc = 0;
-  for (let i = 0; i < w; i++) { acc += (i + 1) / (w + 1); if (acc >= 1) { acc -= 1; out.push(to); }
-                                else out.push(from); }
-  return out;
-};
-const BAND_STOPS = (() => {
-  const stops = [[0x00, 0x04, BAND_RAMP[0][1]]];          // top of frame: charset A, nearest ink
-  const run = (rows, from, to, gap) => {                  // dither lines, then the boundary
-    const d = bandDither(from, to, gap);
-    // TWO rasters apart, not one. This IRQ pushes three registers, dispatches and pulls -- 60+
-    // cycles against a 65-cycle line -- so one-line spacing armed a raster that had already
-    // passed, the chain did not fire again until that line came round NEXT frame, and the
-    // charset splits fell out of step: flat shading and jagged wall bottoms.
-    d.forEach((c, k) => stops.push([rows - 2 * (d.length - k), 0xff, c]));
-    stops.push([rows, 0xff, to]);
-  };
-  let prev = null;                                        // ceiling: white at the top, dark at the split
-  for (const [off, col] of BAND_RAMP) {
-    const row = BAND_H - off;
-    if (prev) run(row, prev[1], col, row - prev[0]); else stops.push([row, 0xff, col]);
-    prev = [row, col];
-  }
-  stops.push([BAND_H, 0x06, BAND_RAMP[BAND_RAMP.length - 1][1]]);   // horizon: charset B
-  for (let k = BAND_RAMP.length - 2; k >= 0; k--)          // floor: the mirror, back out to white
-    run(BAND_H + BAND_RAMP[k][0], BAND_RAMP[k + 1][1], BAND_RAMP[k][1],
-        BAND_RAMP[k][0] - BAND_RAMP[k + 1][0]);
-  stops.push([BAND_ARC, 0x04, BAND_RAMP[0][1]]);           // arc top: charset A
-  // >= 0, not > 0: the line-0 stop is the top of frame, where the charset returns to A and
-  // frameCnt ticks. Filtering it out cost both.
-  return stops.filter(b => b[0] >= 0 && b[0] < 245).sort((a, b) => a[0] - b[0]);
-})();
-const BANDS_N = BAND_STOPS.length;
 import { png } from './png.mjs';
 await import('./d64lib.js');
 const D64 = globalThis.D64;
@@ -1456,12 +1405,9 @@ const MOVE_STEP = 64, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 
-// ================= ROUTE=seam: a scripted walk with NO objects in it =================
-// The renderer benchmark the seam work needs, and the reason it is a second route rather than a
-// reuse of the walkthrough above: that one is a GAME script. It takes an orb, waits on an angel
-// and falls down a hole, so a third of its running time is standing still and the rest is priced
-// with entity work on top. Neither belongs in a measurement of the wall renderer.
-//
+// ================= AUTHORED ROUTES: place lists compiled to steps =================
+// (The first of these was ROUTE=seam, the seam work's renderer benchmark; it walked into a wall
+// once level 1 changed and was deleted 2026-10-05.)
 // Authored as PLACES rather than as inputs. Every waypoint below names where to be; the compiler
 // works out the bearing, the direction to turn and the tick counts, and -- this is the part the
 // recorded route cannot do -- it advances the pose by what the HARDWARE will actually do, not by
@@ -1482,26 +1428,6 @@ for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Mat
 //            endpoint. Accepted deliberately: no movement model on this machine can hold a
 //            curve exactly, and simultaneous walk-and-turn is the input the seams are judged
 //            under. Keep arcs short and do not put one immediately before a tight gap.
-const SEAM_ROUTE = [
-  ['spin',  360],                 // out of the start corner: one full sweep of the room from
-                                  //   a spot where two stepped walls are close and oblique
-  ['to',    4.5, 4.5],            // into the middle
-  ['spin', -360],                 // every wall of the room at close range -- the many-short-faces
-                                  //   case, which is where the corner seams live
-  ['to',    6.5, 2.5],            // the north-east step, seen along its short face
-  ['to',    6.5, 6.5],            // straight down the east side: both side walls recede
-  ['to',    2.5, 6.5],            // along the south wall
-  ['to',    2.5, 3.5],            // and up the west one -- stopping short of the north-west step,
-                                  //   which the arc below needs the room to swing through
-  ['arc',   90],                  // curve away from the wall, walking and turning at once
-  ['to',    6.5, 4.5],            // out to the doorway throat, which frames the corridor
-  ['to',   12.5, 4.5],            // down the corridor: ONE long receding face each side, which
-                                  //   is the many-seams-per-span case and the slowest view here
-  ['spin', 180],                  // turn round at the far end and look back up it
-  ['run',   7.5, 4.5],            // run back: same geometry, three times the motion per frame
-  ['arc',  -90, 1],               // a running curve into the room
-  ['to',    4.5, 4.5],
-];
 // Compile a place-list into twStep's (type, ticks). Pose is carried in the machine's own units:
 // x/y in 1/256 cells, a as the 16-bit pa:paF angle, 0 = +x and rising toward +y (moveXT is
 // cos/sin of a/256 turns, so that convention is the movement table's, not a choice made here).
@@ -1814,7 +1740,6 @@ const COVER3_ROUTE = [
 // POSEDUMP's knew five of the nine routes, so POSEDUMP=1 ROUTE=sock read poses of undefined.
 // Adding a route is now one entry.
 const ROUTES = {
-  seam:   { route: SEAM_ROUTE,   start: [0x01f6, 0x0149, 0x3b00] },
   cover:  { route: COVER_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
   cover3: { route: COVER3_ROUTE, start: [0x0280, 0x0280, 0x1000] },
   bench:  { route: BENCH_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
@@ -3132,14 +3057,6 @@ if (process.env.CELLSCAN === '1') {
 // pairs to 01, on the theory that nothing above the horizon ever needs the foreground pair.
 // That reasoning does not generalise -- a tall object rises above the horizon under
 // perspective even though the ceiling never does -- so leave A and B identical in ink.
-// FLOORDITH=1: make the EMPTY cell a 50/50 checkerboard of bit pair 00 ($d021, the ceiling and
-// floor) against pair 10 ($d023). No new charset code and no renderer change: every empty cell
-// already draws glyph 0, so redefining that glyph dithers the whole ceiling and floor at once.
-// Pair 10 is the only channel not already committed -- 01 is walls and the HUD, 11 is the
-// occluder stamps -- so the seams share the second colour. That is the price of the experiment.
-// One multicolour pixel is two screen pixels wide, so this is the FINEST dither the mode allows.
-if (process.env.FLOORDITH)
-  glyphs[0] = [...Array(8)].map((_, r) => (r & 1) ? 0x88 : 0x22);
 const fontA = new Uint8Array(256 * 8), fontB = new Uint8Array(256 * 8);
 for (let c = 0; c < 256; c++) { const g = glyphs[c] || [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 8; i++) { fontA[c * 8 + i] = g[i]; fontB[c * 8 + i] = g[7 - i]; } }
@@ -13840,43 +13757,7 @@ irq:    pha
         lda $d019
         and #$01
         beq irqd                ; not a raster IRQ
-${BANDS ? `        ; ---- BANDS=1: shade the ceiling and floor by raster line ----
-        ; Floor and ceiling shading by ROW is geometrically exact: on a flat projection plane
-        ; every pixel of a given screen row sits at one perpendicular distance. Walls are NOT --
-        ; a row holds the tops of far walls and the middles of near ones at the same time -- so
-        ; only $d021 (bit pair 00, ceiling and floor) moves. $d022 and the wall pixels are left
-        ; exactly alone, which is what makes this correct rather than approximate.
-        ; Greys have to come from $d021 and cannot come from colour RAM: in multicolour char mode
-        ; bit 3 of colour RAM only ENABLES multicolour and bits 0-2 pick the colour, so pair 11
-        ; can be one of 0-7 and every grey the machine has is 11, 12 or 15.
-        ; Stood down during a fall, where pSplit sweeps the horizon across the screen and a band
-        ; pinned to a fixed line would land on the wrong side of it.
-        lda fallSt
-        bne irqNb
-        ldx bandI
-        lda bandDT,x
-        bmi bdNoC               ; $ff: this stop does not touch the charset
-        ora d018vm
-        sta $d018
-bdNoC:  lda bandCT,x
-        jsr setGnd
-        inx
-        cpx #${hx(BANDS_N)}
-        bne bdNx
-        ldx #$00
-        inc frameCnt            ; the wrap to line 0 IS the frame boundary
-        bne bdNx
-        inc frameCnt+1
-bdNx:   stx bandI
-        lda bandLT,x
-        sta $d012
-        jmp irqd
-irqNb:                          ; a fall takes the screen: hand back to the three-stop path.
-                                ;   bandI is left where it is on purpose -- resetting it cost
-                                ;   five bytes of the scarcest space in the program, and the
-                                ;   three-stop path re-arms $d012 itself, so a stale index only
-                                ;   mis-times the first band IRQ after landing and resyncs.
-` : ''}
+
         ; ---- THREE regions, because the two things below the horizon want opposite polarities.
         ; The frozen scene below the horizon is drawn as MIRRORED glyphs and needs charset B; the
         ; arc's rim is floor-above/hole-below and needs A, which is the only polarity the ramp
@@ -21860,13 +21741,7 @@ mrB:    txa
         bcc mrB
         jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
                                 ;   ends at bfsQ with nothing to spare.
-${BANDS ? `; The raster-band table, out here because the main code stream has under 100 bytes and this
-; is indexed data with no alignment need. See the BANDS path in irq.
-bandLT: !byte ${BAND_STOPS.map(b => hx(b[0])).join(',')}
-bandCT: !byte ${BAND_STOPS.map(b => hx(b[2])).join(',')}
-bandDT: !byte ${BAND_STOPS.map(b => hx(b[1])).join(',')}
-bandI:  !byte 0
-` : ''}
+
 ${SOUND ? `
 ; ---- sfx: one-shot effects on VOICE 3 ----
 ; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
