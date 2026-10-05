@@ -1025,7 +1025,7 @@ const colGrpT = hGrpOf.map(g => g);            // this column's group IS its pag
 // 2 rows -- EXACTLY what the 16-group cosCorr quantisation already costs today, so the new scale
 // adds nothing to the worst case; mean error is 0.081 rows.
 //
-// It also makes an out-of-range j safe. m32LoT reaches j = 991 against HSPAN's 768, which used
+// It also makes an out-of-range j safe (castRay rejects remH >= 24 first). j up to 991 used
 // to read into the NEXT group's pages; every zone here lands inside the group's own page.
 const hJofY = y => y < 128 ? y
                  : y < 192 ? 128 + ((y - 128) << 1)
@@ -9304,8 +9304,6 @@ deltaH  = $52
 fpsv    = $53
 dpx     = $54                   ; fps scratch (was the pixel plotter's x/y)
 dpy     = $55
-ppHi    = $56
-ppLo    = $57
 tmp2    = $58
 vsOn    = $70e8                 ; VSPLIT: this column is a step column with a stack in progress
 vsRow   = $70e9                 ;   the row the FAR wall's top lands in (rbT of the far height)
@@ -9340,7 +9338,6 @@ bcnt    = $08
 cell0   = $13                  ; the player's own cell index, constant for the frame
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
 stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
-hp      = $80                   ; 2 bytes: pointer into this column's height table
 uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
 uwH     = $21
 sdK     = $92                   ; the seam code's offset from SEAM0, decoded once
@@ -13751,62 +13748,51 @@ cwallY: stx cell
         ; No cos correction here: it depends only on the column, so it is baked into the
         ; per-column height tables (see hTabT). This used to be a whole sideMul per ray.
 cidx:${PROFSUB ? '\n        jsr pfT11              ; ray: the DDA loop (after the label: jmp cidx skips it)' : ''}
-        lda remH
-        cmp #24
-        bcc cidxok
-        lda #$01                ; past the map diagonal -> tiny far wall
+        ; ---- distance -> height: y = hzBaseT[remH] | (remL >> s), s fixed per zone ----
+        ; j = remH*32 + (remL>>3) folds onto the group's page as hJofY's inverse describes:
+        ; one entry per j below 128, then two, eight, sixteen. Each zone is a RANGE OF remH
+        ; (0-3, 4-7, 8-15, 16-23), so the fold is a per-remH base plus remL shifted by the zone's
+        ; count (3, 4, 6, 7) -- and the shifted part never reaches the base's set bits, so ora
+        ; joins them with no carry to clear. The same y the 16-bit index and its fold produced,
+        ; without building j at all.
+        ldx remH
+        cpx #24
+        bcs hzOut
+        lda remL
+        cpx #8
+        bcs hzFar
+        cpx #4
+        bcc hz0
+        lsr                     ; remH 4-7: >>4
+hz0:    lsr                     ; remH 0-3: >>3
+        lsr
+        lsr
+        ora hzBaseT,x
+        tay
+        ; The page of this column's height table, precomputed (hPgT = >hTabT + group), patched
+        ; into the load: the zero-page pointer with its forced-zero low byte cost 9 more cycles.
+hzPg:   ldx col
+        lda hPgT,x
+        sta hzLd+2
+hzLd:   lda $ff00,y             ; PATCHED high byte; low byte 0, so abs,y never crosses a page
         sta pp
         rts
-        ; index = perpDist>>3 = remH*32 + (remL>>3)  (0..767), 1/32-cell steps
-cidxok: lda remL
-        lsr
-        lsr
-        lsr
-        sta tmp                 ; remL>>3 (0..31)
-        ldx remH                ; remH*32 was five rounds of "asl zp / rol zp" -- 50 cycles
-        clc                     ; to multiply a value the cmp above just bounded under 24.
-        lda m32LoT,x
-        adc tmp
-        sta ppLo
-        lda m32HiT,x
-        adc #$00
-        sta ppHi                ; 0..2: which 256 of the distance index j
-        ; ---- fold j onto the group's SINGLE page (see hJofY in the build) ----
-        ; Zone boundaries are the page of j and the top bit of its low byte, so this is two
-        ; branches on bytes already in hand -- no arithmetic on a 16-bit j. The near field
-        ; (j < 128, walls inside ~4 cells) is the common case and takes the short path.
-        lda ppHi
-        bne hzFar
-        lda ppLo
-        bpl hzDn                ; j 0..127: one table entry per j
-        and #$7f
-        lsr
-        ora #$80                ; j 128..255: two per entry. Bit 7 is set, so never zero
-        bne hzDn                ;   and this branch is unconditional
-hzFar:  lsr                     ; ppHi 1 -> C=1, ppHi 2 -> C=0
-        lda ppLo
-        bcc hzF2
-        lsr
-        lsr
-        lsr
-        clc
-        adc #192                ; j 256..511: eight per entry
-        bne hzDn                ; >= 192, so never zero
-hzF2:   lsr
-        lsr
-        lsr
-        lsr
-        clc
-        adc #224                ; j 512..767: sixteen per entry
-hzDn:   tay
-        ldx col
-        lda colGrpT,x           ; the group IS the page: one per group now, not three
-        clc
-        adc #>hTabT
-        sta hp+1
+hzFar:  cpx #16
+        bcs hz3
+        asl                     ; remH 8-15: >>6, as the top two bits rotated round to the bottom
+        rol
+        rol
+        and #$03
+        ora hzBaseT,x
+        tay
+        jmp hzPg
+hz3:    asl                     ; remH 16-23: >>7, the top bit alone
         lda #$00
-        sta hp
-        lda (hp),y
+        rol
+        ora hzBaseT,x
+        tay
+        jmp hzPg
+hzOut:  lda #$01                ; past the map diagonal -> tiny far wall
         sta pp
         rts
 
@@ -14044,8 +14030,7 @@ stepThrT1: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(0, i)).join(',')}
 stepThrT2: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(1, i)).join(',')}
 stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(2, i)).join(',')}
 ` : ''}
-m32LoT: !byte ${[...Array(24)].map((_, i) => (i * 32) & 255).join(',')}
-m32HiT: !byte ${[...Array(24)].map((_, i) => (i * 32) >> 8).join(',')}
+hzBaseT: !byte ${[...Array(24)].map((_, i) => i < 4 ? i * 32 : i < 8 ? 128 + (i - 4) * 16 : i < 16 ? 192 + (i - 8) * 4 : 224 + (i - 16) * 2).join(',')}
 blkLoT: !byte ${blkEnt('<')}
 blkHiT: !byte ${blkEnt('>')}
 sldLoT: !byte ${sldEnt('<')}
@@ -22144,7 +22129,8 @@ pgC:    tya
 pgNo:   rts
 ` }
         * = ${hx16(RELOC + 0x1200)}
-colGrpT: !byte ${colGrpT.join(',')}
+; acme applies > LAST, so ">hTabT+512" is the high byte of hTabT+512: page 2 of the table
+hPgT:   !byte ${colGrpT.map(g => `>hTabT+${g * 256}`).join(',')}
         * = $98a0
 ${SOUND ? `sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
 sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
@@ -25184,7 +25170,7 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 256])), ocos: 1, runPlaneT: 1, remLoT: 1 } : {}), ...(BGLOAD ? { stackLT: 256 } : {}), mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
-    rayOffT: NLOG, colGrpT: NLOG, ecMT: 256, ecM16: 256, ecM8: 256,
+    rayOffT: NLOG, hPgT: NLOG, ecMT: 256, ecM16: 256, ecM8: 256,
     // ---- THE CELL CHOOSER'S BYTE-INDEXED TABLES (2026-10-05) ----
     // Their source puts each at a `* = RELOC+$xx00` origin with a comment saying why ("a page
     // crossing here would tax the hottest lookup in the renderer") -- but compaction strips
@@ -25197,7 +25183,7 @@ const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 2
         stepT1lo: 256, stepT1hi: 256, stepT2lo: 256, stepT2hi: 256, stepT3lo: 256, stepT3hi: 256 } : {}),
     // hTabT MUST start on a page, and this list is where that is said. The height lookup builds
     // its pointer out of the HIGH BYTE ALONE and forces the low byte to zero:
-    //     lda colGrpT,x / adc #>hTabT / sta hp+1 / lda #$00 / sta hp / lda (hp),y
+    //     lda hPgT,x / sta hzLd+2 / hzLd: lda $ff00,y      (hPgT = >hTabT + group)
     // -- the group IS the page. At a non-page address it reads from the page BELOW the table.
     // It was missing here and never mattered, because the hand-placed layout happened to put it
     // at $4d00; the relayout moved it to $975e and every wall came back the height of a wall
