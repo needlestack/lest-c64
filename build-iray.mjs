@@ -4343,7 +4343,11 @@ if (SLOWMO) DIAG.push(`SLOWMO=${SLOWMO}`);
 // SPIN's own hop to the next of four preset viewpoints) was benchmark machinery that had outlived
 // the level it was authored against and was reporting confident numbers for scenes nobody chose --
 // the hop in particular teleported the player inside a wall, mid-run, on the current map.
-const AUTOMOVE = SPIN ? 'spinStep' : WALK ? 'moveFwd' : STRAFE ? 'strafeR' : null;
+// WALKB / STRAFEL (2026-10-04): the same ONE-CONTROL movers in the other direction, because on
+// some levels the start pose walks forward into a wall within a second (user: walk BACKWARDS on
+// level 6, strafe on level 7). Still one held control from the caller's pose.
+const WALKB = flag('WALKB'), STRAFEL = flag('STRAFEL');
+const AUTOMOVE = SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
 
 // ---- VIC bank 0 memory layout ----
 // The double buffer flips between two 1KB screen matrices. Both are RAM the renderer
@@ -10728,7 +10732,7 @@ const NOCC = NORB + NHOLE;                       // every entity orbOne can be a
 // ENTGRID (a 3-hop cell walk at both ends of the sightline, ENTGRID=1) was REMOVED 2026-10-04: correct
 // (0 false rejections in ~8M entities) but ~2,500 cycles a call, 4-5x its estimate. ENTHZN replaced
 // it. The JS reference (EGREF, in the HOPMC block) is kept as the record of the rule.
-if (process.env.ENTHZN !== '0' && (ENTLOS || !CONEGATE)) throw new Error('ENTHZN runs in entGate (CONEGATE), and its zero page is ENTLOS scratch');
+if (process.env.ENTHZN !== '0' && process.env.ZONES === '0' && (ENTLOS || !CONEGATE)) throw new Error('ENTHZN runs in entGate (CONEGATE), and its zero page is ENTLOS scratch');
 // ---- the occluder masks are a RUNTIME buffer, not level data ----
 // They used to be a constant emitted at $7000 and, under SOLO, a LVL_TABLES entry as well:
 // 108 bytes shipped in every level file to an address no instruction names. orbOccAll
@@ -10889,7 +10893,12 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 //   cell mapT calls a wall (an opened wall) has no entry and culls nothing from that end.
 // DEFAULT ON (2026-10-03): verified exact against VHPOSE, 0 bad in HZCHK, and worth 0-77 raster
 // lines of entity work a frame on the levels' start views for ~200 bytes of code. ENTHZN=0 to A/B.
-const ENTHZN = process.env.ENTHZN !== '0';
+// ZONES=1: per-level visibility zones in mapT (ZN_BUILD) -- they take the horizon's bits, so the two
+// are exclusive, and they replace holeSeeT too. MAPPACK: mapT holds a packed non-zero byte for an
+// open cell (either scheme), which is what every map reader's beq/bne flip depends on.
+const ZONES = process.env.ZONES !== '0';   // DEFAULT since 2026-10-04 (user: walls-open zones, keep it simple); ZONES=0 = horizon + holeSeeT
+const ENTHZN = process.env.ENTHZN !== '0' && !ZONES;
+const MAPPACK = ENTHZN || ZONES;
 if (!ENTHZN) DIAG.push('ENTHZN=0');
 const ENTHZN_LVLS = (process.env.ENTHZN_LVLS ?? '1,2,5,6,7').split(',').filter(Boolean).map(Number);
 const HZCHK = process.env.HZCHK === '1';
@@ -10967,6 +10976,407 @@ const HZ_BUILD = (() => {
 })();
 // VHPOSE=1: what the horizon SHOULD do at this build's start pose (PX/PY/PA), entity by entity in
 // entGate's order, read from the very bytes that go into mapT -- to set against HZCNT's runtime counts.
+// ---- ZONES: the per-level visibility ZONES, and each open cell's mask of the zones it can see ----
+// User's design (2026-10-04), replacing the horizon AND holeSeeT: the level is split into up to 8
+// zones, and an open cell's mapT byte is the mask of zones visible from ANYWHERE in it (its own zone
+// always, so never $00 = wall). An entity is culled when its zone's bit is clear in mapT[player
+// cell]: no recompute, ever. Built with every OPENABLE wall treated as open -- nothing to patch when
+// one opens, and base and WALLOFF variants then see identical geometry and get identical zones.
+// Zones are chosen per level by a weighted greedy merge plus single-cell local search (DYNVIS
+// measured it: 8 zones beat today on 5 of 7 levels, zero visible entities culled).
+const ZN_BUILD = (() => {
+  if (!ZONES) return null;
+  const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
+  const isW = c => !!map[c] && !openable.has(c);
+  const WO = (x, y) => (!inMap(x, y) || isW(cellOf(x, y))) ? 1 : 0;
+  const losO = (ax, ay, bx, by) => {
+    const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
+    if (cx === ex && cy === ey) return true;
+    const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
+    const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
+    let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity, tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
+    for (;;) {
+      if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; } else { if (tY > 1) return true; cy += sY; tY += iY; }
+      if (cx === ex && cy === ey) return true;
+      if (WO(cx, cy)) return false;
+    }
+  };
+  const HP = [0.01, 0.255, 0.5, 0.745, 0.99];
+  const cvis = (a, b) => { for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
+    if (losO(cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) return true; return false; };
+  const cells = []; for (let c = 0; c < MAPN; c++) if (!isW(c)) cells.push(c);
+  const V = new Uint8Array(MAPN * MAPN);
+  for (const a of cells) { V[a * MAPN + a] = 1;
+    for (const b of cells) if (b > a && cvis(a, b)) { V[a * MAPN + b] = 1; V[b * MAPN + a] = 1; } }
+  // where the player can be: reachable from the start, openable walls open (same for every variant)
+  const [sx0, sy0] = startOf(LVL); const st = cellOf(sx0 >> 8, sy0 >> 8);
+  const reach = new Set([st]); { const q = [st]; while (q.length) { const c = q.pop();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const x = cellX(c) + dx, y = cellY(c) + dy;
+      if (!inMap(x, y)) continue; const n = cellOf(x, y); if (!isW(n) && !reach.has(n)) { reach.add(n); q.push(n); } } } }
+  const pl = [...reach].sort((a, b) => a - b);
+  // the weight of a false pass (p, e): cone-survival chance x entity presence (orbs spread over the
+  // reachable cells, a hole-like in its own cell every frame) -- analytic, not fitted to any sample
+  const coneP = (a, b) => { const c = Math.max(Math.abs(cellX(a) - cellX(b)), Math.abs(cellY(a) - cellY(b)));
+    return c < 2 ? 1 : Math.min(1, (2 * CONE_TOL[Math.min(c, CONE_DMAX)] + 1) / 256); };
+  // the optimiser, on any visibility matrix VV, cell set CS and player set PL (all as arrays)
+  const optimise = (VV, CS, PL) => {
+    const cellW = new Float64Array(MAPN);
+    for (const c of PL) cellW[c % MAPN] += ORBS.length / PL.length;
+    HOLELIKE.forEach(h => { cellW[cellOf(h.x, h.y)] += 1; });
+    const wt = (p, e) => cellW[e] * coneP(p % MAPN, e);
+    const K = 8, P = PL.length;
+    let Z = CS.map(c => [c]);
+    const S = Z.map(z => PL.map(p => z.some(c => VV[p * MAPN + c]) ? 1 : 0));
+    const Fw = Z.map(z => PL.map(p => z.reduce((a, e) => a + (VV[p * MAPN + e] ? 0 : wt(p, e)), 0)));
+    while (Z.length > K) {
+      let best = Infinity, bi = 0, bj = 1;
+      for (let i = 0; i < Z.length; i++) for (let j = i + 1; j < Z.length; j++) {
+        let cst = 0; const si = S[i], sj = S[j], fi = Fw[i], fj = Fw[j];
+        for (let p = 0; p < P; p++) { if (si[p] && !sj[p]) cst += fj[p]; else if (sj[p] && !si[p]) cst += fi[p]; }
+        if (cst < best) { best = cst; bi = i; bj = j; }
+      }
+      Z[bi] = Z[bi].concat(Z[bj]); S[bi] = S[bi].map((v, p) => v | S[bj][p]); Fw[bi] = Fw[bi].map((v, p) => v + Fw[bj][p]);
+      Z.splice(bj, 1); S.splice(bj, 1); Fw.splice(bj, 1);
+    }
+    const zcost = z => { let t = 0; for (const p of PL) { let seen = false, f = 0;
+      for (const e of z) { if (VV[p * MAPN + e]) seen = true; else f += wt(p, e); } if (seen) t += f; } return t; };
+    let zc = Z.map(zcost);
+    for (let pass = 0; pass < 20; pass++) {
+      let improved = false;
+      for (let a = 0; a < Z.length; a++) for (let i = 0; i < Z[a].length; i++) {
+        if (Z[a].length === 1) continue;
+        const c = Z[a][i], za = Z[a].filter(x => x !== c), ca = zcost(za);
+        let bestB = -1, bestD = -1e-9, bestCb = 0;
+        for (let b = 0; b < Z.length; b++) { if (b === a) continue;
+          const cb = zcost([...Z[b], c]), d = (ca + cb) - (zc[a] + zc[b]);
+          if (d < bestD) { bestD = d; bestB = b; bestCb = cb; } }
+        if (bestB >= 0) { Z[a] = za; zc[a] = ca; Z[bestB].push(c); zc[bestB] = bestCb; i--; improved = true; }
+      }
+      if (!improved) break;
+    }
+    const zid = new Uint8Array(MAPN); Z.forEach((z, k) => z.forEach(c => { zid[c] = k; }));
+    return { zid, n: Z.length };
+  };
+  const zo = optimise(V, cells, pl);
+  const zid = zo.zid, Z = { length: zo.n };
+  const mask = new Uint8Array(MAPN);
+  for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zid[b];
+  // a hole-like's disc spills past its own cell: its mask is every zone its disc touches, fixed
+  const radH = HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2);
+  const hmask = HOLELIKE.map((h, L) => { let m = 0; const ex = h.x + 0.5, ey = h.y + 0.5, r = radH[L];
+    for (let y = Math.floor(ey - r); y <= Math.floor(ey + r); y++) for (let x = Math.floor(ex - r); x <= Math.floor(ex + r); x++)
+      if (inMap(x, y) && !isW(cellOf(x, y))) m |= 1 << zid[cellOf(x, y)];
+    return m || 1 << zid[cellOf(h.x, h.y)]; });
+  // zone of every cell, two to a byte (low nibble = even cell); a wall cell's nibble is never read
+  const zoneT = [...Array(128)].map((_, i) => (2 * i < MAPN ? zid[2 * i] : 0) | ((2 * i + 1 < MAPN ? zid[2 * i + 1] : 0) << 4));
+  const enc = i => i >= MAPN || map[i] ? 0 : mask[i];
+  // ZNMODEL=<frames> (diagnostic): ZONE-LEVEL PATCHING. Zones optimised for the walls SHUT, masks exact
+  // for that state; when a wall opens, every cell of zone a ORs in patch[a] = everything any cell of a
+  // newly sees. Judged with the walls shut and with them all open, against the walls-open build and
+  // against an exact bound (masks recomputed perfectly per state).
+  if (process.env.ZNMODEL) {
+    const NS = +process.env.ZNMODEL || 50000;
+    const live = cells.filter(c => !map[c]);                 // open with the walls shut
+    const Vs = new Uint8Array(MAPN * MAPN);
+    for (const a of live) { Vs[a * MAPN + a] = 1; for (const b of live) if (b > a) {
+      let v = false; outer: for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
+        if (losFree(cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) { v = true; break outer; }
+      if (v) { Vs[a * MAPN + b] = 1; Vs[b * MAPN + a] = 1; } } }
+    const reachS = new Set([st]); { const q = [st]; while (q.length) { const c = q.pop();
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const x = cellX(c) + dx, y = cellY(c) + dy;
+        if (!inMap(x, y)) continue; const n = cellOf(x, y); if (!map[n] && !reachS.has(n)) { reachS.add(n); q.push(n); } } } }
+    const plS = [...reachS].sort((a, b) => a - b);
+    // a wall cell (open only later) takes the zone of an open neighbour, so it has one when it opens
+    const fillWalls = z => { const out = z.slice(); for (const c of cells) if (map[c]) {
+      const n = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => [cellX(c) + dx, cellY(c) + dy])
+        .filter(([x, y]) => inMap(x, y) && !map[cellOf(x, y)]).map(([x, y]) => cellOf(x, y))[0];
+      out[c] = n !== undefined ? z[n] : 0; } return out; };
+    const zS = fillWalls(optimise(Vs, live, plS).zid);
+    // BLEND: one optimisation over players in BOTH states -- shut rows 0..MAPN-1, open rows MAPN..2*MAPN-1
+    const Vb = new Uint8Array(2 * MAPN * MAPN); Vb.set(Vs, 0); Vb.set(V, MAPN * MAPN);
+    const zB = optimise(Vb, cells, [...plS, ...pl.map(p => p + MAPN)]).zid;
+    const maskOf = (zz, VV, cs) => { const m = new Uint8Array(MAPN); for (const a of cs) for (const b of cs) if (VV[a * MAPN + b]) m[a] |= 1 << zz[b]; return m; };
+    const variants = [
+      { name: 'open-zones, open masks (as built)', zz: zid, shut: maskOf(zid, V, cells), open: maskOf(zid, V, cells) },
+      { name: 'open-zones, shut masks + zone patch', zz: zid },
+      { name: 'SHUT-zones, shut masks + zone patch', zz: zS },
+      { name: 'SHUT-zones, exact per state (bound)', zz: zS, exact: true },
+      { name: 'BLEND-zones, shut masks + zone patch', zz: zB },
+      { name: 'BLEND-zones, exact per state (bound)', zz: zB, exact: true },
+    ];
+    for (const v of variants) {
+      if (v.shut) continue;
+      v.shut = maskOf(v.zz, Vs, live);
+      const openExact = maskOf(v.zz, V, cells);
+      if (v.exact) { v.open = openExact; v.patchB = NaN; continue; }
+      const patch = new Uint8Array(8);
+      for (const c of live) patch[v.zz[c]] |= openExact[c] & ~v.shut[c];
+      v.open = new Uint8Array(MAPN);
+      for (const c of cells) v.open[c] = map[c] ? openExact[c] | patch[v.zz[c]] : v.shut[c] | patch[v.zz[c]];
+      v.patchB = 2 * [...patch].filter(Boolean).length + 1;   // (zone, mask) pairs + terminator, all walls at once
+    }
+    const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
+    const capH = HOLELIKE.map(h => h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2);
+    const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
+    const coneOk = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
+      if (c < 2) return true; const tol = CONE_TOL[Math.min(c, CONE_DMAX)]; return ((hzBearing(dx, dy) - pa + tol) & 255) < 2 * tol; };
+    const C = { cone: 125, z: 40, vis: 7000, hid: 2900, off: 560, behind: 314, trig: 800 };
+    let sd = 99; const rnd = () => { sd = (sd * 1103515245 + 12345) >>> 0; return sd / 4294967296; };
+    const run = (state) => {
+      const P = state === 'shut' ? plS : pl, losT = state === 'shut' ? losFree : losO;
+      const tot = variants.map(() => 0), bad = variants.map(() => 0);
+      for (let s = 0; s < NS; s++) {
+        const pc = P[(rnd() * P.length) | 0], px = cellX(pc) + 0.05 + 0.9 * rnd(), py = cellY(pc) + 0.05 + 0.9 * rnd(), pa = (rnd() * 256) | 0;
+        const ca = Math.cos(pa / 128 * Math.PI), sa = Math.sin(pa / 128 * Math.PI);
+        const ents = [...ORBS.map((o, i) => { const c = P[(rnd() * P.length) | 0]; return { c, x: cellX(c) + 0.5, y: cellY(c) + 0.5, r: radO[i], L: -1 }; }),
+                      ...HOLELIKE.map((h, L) => ({ c: cellOf(h.x, h.y), x: h.x + 0.5, y: h.y + 0.5, r: HOLER, L }))];
+        const any = variants.map(() => 0), f = variants.map(() => 0);
+        for (const e of ents) {
+          const vis = RIM.some(([c, s2]) => losT(px, py, e.x + e.r * c, e.y + e.r * s2));
+          const fx = (e.x - px) * ca + (e.y - py) * sa, rx = -(e.x - px) * sa + (e.y - py) * ca;
+          const inFov = fx > 0.05 && Math.abs(rx) <= (e.L >= 0 ? 0.944 : 0.749) * fx;
+          const cls = !inFov ? (fx <= 0.05 ? C.behind : C.off) : vis ? C.vis : C.hid;
+          const capped = e.L >= 0 && Math.hypot(e.x - pc % MAPW - 0.5, e.y - Math.floor(pc / MAPW) - 0.5) >= capH[e.L];
+          variants.forEach((v, i) => {
+            const m = state === 'shut' ? v.shut : v.open;
+            const em = e.L >= 0 ? (() => { let mm = 0; for (let yy = Math.floor(e.y - e.r); yy <= Math.floor(e.y + e.r); yy++)
+              for (let xx = Math.floor(e.x - e.r); xx <= Math.floor(e.x + e.r); xx++) if (inMap(xx, yy)) mm |= 1 << v.zz[cellOf(xx, yy)]; return mm; })()
+              : 1 << v.zz[e.c];
+            f[i] += C.z; if (!(m[pc] & em)) { if (vis && inFov && !capped) bad[i]++; return; }
+            f[i] += C.cone; if (!coneOk(cellX(e.c) - cellX(pc), cellY(e.c) - cellY(pc), pa) || capped) return;
+            f[i] += cls; any[i] = 1;
+          });
+        }
+        variants.forEach((v, i) => { tot[i] += f[i] + (any[i] ? C.trig : 0); });
+      }
+      return { tot: tot.map(t => t / NS), bad };
+    };
+    const rs = run('shut'), ro = run('open');
+    console.error(`  ZNMODEL level ${LVL}: ${NS} frames per state, ${(LEVEL_WALLS[LVL]?.walls ?? []).length} wall(s)`);
+    console.error(`    variant                                  walls shut   walls open   patch bytes   wrong culls (shut/open)`);
+    variants.forEach((v, i) => console.error(`    ${v.name.padEnd(40)} ${rs.tot[i].toFixed(0).padStart(10)} ${ro.tot[i].toFixed(0).padStart(12)} ` +
+      `${String(isNaN(v.patchB) ? '-' : v.patchB).padStart(12)}   ${rs.bad[i]}/${ro.bad[i]}`));
+  }
+  // ZNSHUT=1 (diagnostic): the same zones, masks for the walls AS THEY START -- how many cells differ
+  if (process.env.ZNSHUT) {
+    const shutMask = new Uint8Array(MAPN), live = cells.filter(c => !map[c]);
+    for (const a of live) for (const b of live) {
+      let v = a === b; if (!v) { outer: for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
+        if (losFree(cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) { v = true; break outer; } }
+      if (v) shutMask[a] |= 1 << zid[b]; }
+    const diff = live.filter(c => shutMask[c] !== mask[c]);
+    const hshut = HOLELIKE.map((h, L) => hmask[L]);
+    console.error(`  ZNSHUT level ${LVL}: ${diff.length} of ${live.length} cells' masks differ with the walls shut ` +
+      `(a patch list of ${diff.length * 4 + 1} bytes as quads)`);
+  }
+  // SELF-CHECK, every build: the 6502 tests an orb or angel by its OWN cell's zone only, while its
+  // disc (an angel's is ~1.7x an orb's) can spill into a neighbour. Sample exact player points and
+  // entity cells; count entities the test would cull whose disc is in fact visible. Must be 0.
+  let bad = 0, n = 0, sd = 12345;
+  const rnd = () => { sd = (sd * 1103515245 + 12345) >>> 0; return sd / 4294967296; };
+  const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
+  const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
+  for (let i = 0; i < 20000 && ORBS.length; i++) {
+    const p = pl[(rnd() * pl.length) | 0], e = pl[(rnd() * pl.length) | 0], r = Math.max(...radO);
+    const px = cellX(p) + 0.05 + 0.9 * rnd(), py = cellY(p) + 0.05 + 0.9 * rnd();
+    if (mask[p] & (1 << zid[e])) continue;              // the test passes it: nothing to check
+    n++;
+    if (RIM.some(([c, s]) => losFree(px, py, cellX(e) + 0.5 + r * c, cellY(e) + 0.5 + r * s))) bad++;
+  }
+  return { enc, zoneT, hmask, zones: Z.length, cells: cells.length, bad, n };
+})();
+if (ZONES) console.error(`  ZONES level ${LVL}: ${ZN_BUILD.zones} zones over ${ZN_BUILD.cells} cells; hole masks ${ZN_BUILD.hmask.map(m => '$' + m.toString(16)).join(' ')}; ` +
+  `self-check: ${ZN_BUILD.bad} visible of ${ZN_BUILD.n} culled samples (must be 0)`);
+// ---- DYNVIS=<frames>: what DYNAMIC visibility would buy, against the culls that ship ----
+// The question (user, 2026-10-04): instead of per-level precomputed tables (holeSeeT, the horizon),
+// one runtime bitmap -- "cells visible from anywhere in the player's REGION" -- recomputed when the
+// player leaves the region (k x k aligned cells) or a wall changes. Every entity, holes included,
+// is then one bit test. This measures the VALUE of an ideal such bitmap at k = 1, 2, 4 on random
+// frames, with the same cost model HOPMC uses; the recompute ALGORITHM is costed separately.
+if (process.env.DYNVIS) {
+  const NS = +process.env.DYNVIS || 200000;
+  let sd = +(process.env.DYNSEED ?? 7) >>> 0;
+  const rnd = () => { sd = (sd + 0x6d2b79f5) >>> 0; let t = sd;
+    t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const W = (x, y) => (!inMap(x, y) || map[cellOf(x, y)]) ? 1 : 0;
+  // cell-to-cell visibility against the walls AS THEY ARE (a dynamic bitmap sees the real state)
+  const HP = [0.01, 0.255, 0.5, 0.745, 0.99];
+  const cvis = (a, b) => { for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
+    if (losFree(cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) return true; return false; };
+  const cells = []; for (let c = 0; c < MAPN; c++) if (!map[c]) cells.push(c);
+  // the player can only be where the level lets them: reachable from the start, walls as they are
+  const [sx0, sy0] = startOf(LVL); const st = cellOf(sx0 >> 8, sy0 >> 8);
+  const reach = new Set([st]); { const q = [st]; while (q.length) { const c = q.pop();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const x = cellX(c) + dx, y = cellY(c) + dy;
+      if (!inMap(x, y)) continue; const n = cellOf(x, y); if (!map[n] && !reach.has(n)) { reach.add(n); q.push(n); } } } }
+  const pcells = [...reach];
+  const V = new Uint8Array(MAPN * MAPN);
+  const t0 = Date.now();
+  for (const a of cells) { V[a * MAPN + a] = 1;
+    for (const b of cells) if (b > a && cvis(a, b)) { V[a * MAPN + b] = 1; V[b * MAPN + a] = 1; } }
+  // region bitmaps: aligned k x k blocks, the OR of their open cells' rows
+  const KS = [1, 2, 4];
+  const RV = {};
+  for (const k of KS) { RV[k] = new Map();
+    for (const a of cells) { const id = Math.floor(cellX(a) / k) + 64 * Math.floor(cellY(a) / k);
+      let row = RV[k].get(id); if (!row) { row = new Uint8Array(MAPN); RV[k].set(id, row); }
+      for (const b of cells) if (V[a * MAPN + b]) row[b] = 1; } }
+  const regionOf = (k, c) => RV[k].get(Math.floor(cellX(c) / k) + 64 * Math.floor(cellY(c) / k));
+  // ZONE MASKS: each open cell stores "which zones can be seen from anywhere in me" -- up to 8 zones
+  // fits mapT's byte (own zone always set, so never 0 = wall). Zones here are fixed TILES of the map,
+  // nx x ny blocks, so a cell's zone is arithmetic. 16 zones (two bytes) as the reference.
+  const tiling = (nx, ny) => { const zx = x => Math.min(nx - 1, Math.floor(x * nx / MAPW)), zy = y => Math.min(ny - 1, Math.floor(y * ny / MAPH));
+    const zoneOf = c => zx(cellX(c)) + nx * zy(cellY(c)); const mask = new Uint32Array(MAPN);
+    for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zoneOf(b);
+    return { name: nx + 'x' + ny, zoneOf, mask }; };
+  const TIL8 = [[4, 2], [2, 4], [8, 1], [1, 8]].map(([a, b]) => tiling(a, b));
+  const TIL16 = [[4, 4], [8, 2], [2, 8]].map(([a, b]) => tiling(a, b));
+  // OPTIMISED ZONES: greedy agglomeration. Every open cell starts as its own zone; repeatedly merge
+  // the pair that admits the fewest NEW false passes -- player cells that see one zone but not the
+  // other then pass every cell of the other. Zones need not be contiguous: a cell's zone is a table.
+  const optZones = (K) => {
+    let Z = cells.map(c => [c]);
+    const sees = Z.map(z => cells.map(p => z.some(c => V[p * MAPN + c]) ? 1 : 0));   // [zone][player idx]
+    while (Z.length > K) {
+      let best = Infinity, bi = 0, bj = 1;
+      for (let i = 0; i < Z.length; i++) for (let j = i + 1; j < Z.length; j++) {
+        let cst = 0; const si = sees[i], sj = sees[j];
+        for (let p = 0; p < cells.length; p++) { if (si[p] && !sj[p]) cst += Z[j].length; else if (sj[p] && !si[p]) cst += Z[i].length; }
+        if (cst < best) { best = cst; bi = i; bj = j; }
+      }
+      Z[bi] = Z[bi].concat(Z[bj]); sees[bi] = sees[bi].map((v, p) => v | sees[bj][p]);
+      Z.splice(bj, 1); sees.splice(bj, 1);
+    }
+    const zid = new Int8Array(MAPN).fill(-1); Z.forEach((z, k) => z.forEach(c => { zid[c] = k; }));
+    const zoneOf = c => zid[c] < 0 ? 0 : zid[c];           // a wall cell (a disc spilling into it): any zone, it is never visible anyway
+    const mask = new Uint32Array(MAPN);
+    for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zoneOf(b);
+    return { name: 'opt' + K, zoneOf, mask };
+  };
+  // WEIGHTED + LOCAL SEARCH. The cost of a false pass (p, e) is what it costs in play: the chance
+  // the pair survives the CONE (always when adjacent; else ~2*tol/256 for its distance) times the
+  // chance an entity is THERE (each orb or angel spread over the reachable cells; a hole-like sits in
+  // its cell every frame). Players are uniform over the reachable cells. Analytic, not fitted to the
+  // sampled frames. Greedy merge on that weight, then single-cell moves until none helps.
+  const reachIdx = pcells;
+  const cellW = new Float64Array(MAPN);
+  for (const c of pcells) cellW[c] += ORBS.length / pcells.length;
+  HOLELIKE.forEach(h => { cellW[cellOf(h.x, h.y)] += 1; });
+  const coneP = (a, b) => { const c = Math.max(Math.abs(cellX(a) - cellX(b)), Math.abs(cellY(a) - cellY(b)));
+    return c < 2 ? 1 : Math.min(1, (2 * CONE_TOL[Math.min(c, CONE_DMAX)] + 1) / 256); };
+  const wt = (p, e) => cellW[e] * coneP(p, e);
+  const optZonesW = (K) => {
+    let Z = cells.map(c => [c]);
+    const P = reachIdx.length;
+    const S = Z.map(z => reachIdx.map(p => z.some(c => V[p * MAPN + c]) ? 1 : 0));
+    const Fw = Z.map(z => reachIdx.map(p => z.reduce((a, e) => a + (V[p * MAPN + e] ? 0 : wt(p, e)), 0)));
+    while (Z.length > K) {
+      let best = Infinity, bi = 0, bj = 1;
+      for (let i = 0; i < Z.length; i++) for (let j = i + 1; j < Z.length; j++) {
+        let cst = 0; const si = S[i], sj = S[j], fi = Fw[i], fj = Fw[j];
+        for (let p = 0; p < P; p++) { if (si[p] && !sj[p]) cst += fj[p]; else if (sj[p] && !si[p]) cst += fi[p]; }
+        if (cst < best) { best = cst; bi = i; bj = j; }
+      }
+      Z[bi] = Z[bi].concat(Z[bj]); S[bi] = S[bi].map((v, p) => v | S[bj][p]); Fw[bi] = Fw[bi].map((v, p) => v + Fw[bj][p]);
+      Z.splice(bj, 1); S.splice(bj, 1); Fw.splice(bj, 1);
+    }
+    // local search: zone cost = sum over players that SEE the zone of its invisible weight
+    const zcost = z => { let t = 0; for (let pi = 0; pi < P; pi++) { const p = reachIdx[pi];
+      let seen = false, f = 0; for (const e of z) { if (V[p * MAPN + e]) seen = true; else f += wt(p, e); }
+      if (seen) t += f; } return t; };
+    let zc = Z.map(zcost), moves = 0;
+    for (let pass = 0; pass < 20; pass++) {
+      let improved = false;
+      for (let a = 0; a < Z.length; a++) for (let i = 0; i < Z[a].length; i++) {
+        if (Z[a].length === 1) continue;
+        const c = Z[a][i], za = Z[a].filter(x => x !== c), ca = zcost(za);
+        let bestB = -1, bestD = -1e-9, bestCb = 0;
+        for (let b = 0; b < Z.length; b++) { if (b === a) continue;
+          const cb = zcost([...Z[b], c]), d = (ca + cb) - (zc[a] + zc[b]);
+          if (d < bestD) { bestD = d; bestB = b; bestCb = cb; } }
+        if (bestB >= 0) { Z[a] = za; zc[a] = ca; Z[bestB].push(c); zc[bestB] = bestCb; i--; moves++; improved = true; }
+      }
+      if (!improved) break;
+    }
+    const zid = new Int8Array(MAPN).fill(-1); Z.forEach((z, k) => z.forEach(c => { zid[c] = k; }));
+    const zoneOf = c => zid[c] < 0 ? 0 : zid[c];
+    const mask = new Uint32Array(MAPN);
+    for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zoneOf(b);
+    return { name: 'w' + K, zoneOf, mask, moves };
+  };
+  const tOpt = Date.now();
+  const OPT = [optZones(8), optZonesW(8), optZones(16), optZonesW(16)];
+  console.error(`    (optimised zones built in ${Date.now() - tOpt} ms; local search moves: ${OPT.filter(t => t.moves !== undefined).map(t => t.name + ' ' + t.moves).join(', ')})`);
+  const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
+  const radH = HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2);
+  const capH = HOLELIKE.map(h => h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2);
+  const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
+  const visible = (px, py, ex, ey, r) => RIM.some(([c, s]) => losFree(px, py, ex + r * c, ey + r * s));
+  const coneOk = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
+    if (c < 2) return true; let a = c; while (a >= 8) { b >>= 1; t >>= 1; a >>= 1; }
+    const tol = CONE_TOL[Math.min(c, CONE_DMAX)]; return ((hzBearing(dx, dy) - pa + tol) & 255) < 2 * tol; };
+  const hzOn = HZ_BUILD.on;
+  const hzCull = (pc, ec, dx, dy) => {          // vhTest, as it ships: player end, then entity end
+    const c = Math.max(Math.abs(dx), Math.abs(dy)); if (c < 3) return false;
+    const thr = (byte, k) => [2, 3, 5, 0xff][(byte >> (2 * k)) & 3];
+    const b = hzBearing(dx, dy), kp = ((b + VH_ROT) & 255) >> 6, ke = (((b + 128) & 255) + VH_ROT & 255) >> 6;
+    return c > thr(HZ_BUILD.enc(pc), kp) || c > thr(HZ_BUILD.enc(ec), ke);
+  };
+  const C = { hs: 25, cone: 125, hz: 175, bit: 25, bitHole: 60, trig: 800, vis: 7000, hid: 2900, off: 560, behind: 314 };
+  const CF = ['A today', 'B cone', 'C cone+V1', 'D cone+V2', 'E cone+V4', 'F cone+V4+hz', 'perfect',
+              ...TIL8.map(t => 'Z8 ' + t.name), ...TIL16.map(t => 'Z16 ' + t.name), ...OPT.map(t => 'Z ' + t.name)];
+  const tot = CF.map(() => new Float64Array(NS)), surv = new Float64Array(CF.length), waste = new Float64Array(CF.length), bad = new Float64Array(CF.length);
+  for (let s = 0; s < NS; s++) {
+    const pc = pcells[(rnd() * pcells.length) | 0], pcx = cellX(pc), pcy = cellY(pc);
+    const lo = w => w ? 0.1 : 0, hi = w => w ? 0.9 : 1;
+    const x0 = lo(W(pcx - 1, pcy)), x1 = hi(W(pcx + 1, pcy)), y0 = lo(W(pcx, pcy - 1)), y1 = hi(W(pcx, pcy + 1));
+    const px = pcx + x0 + rnd() * (x1 - x0), py = pcy + y0 + rnd() * (y1 - y0), pa = (rnd() * 256) | 0;
+    const ca = Math.cos(pa / 256 * 2 * Math.PI), sa = Math.sin(pa / 256 * 2 * Math.PI);
+    const ents = [
+      ...ORBS.map((o, i) => { const c = pcells[(rnd() * pcells.length) | 0];
+        return { x: cellX(c) + 0.5, y: cellY(c) + 0.5, r: radO[i], hole: -1 }; }),
+      ...HOLELIKE.map((h, L) => ({ x: h.x + 0.5, y: h.y + 0.5, r: radH[L], hole: L })),
+    ];
+    const f = new Float64Array(CF.length); let anyOpen = new Uint8Array(CF.length);
+    for (const e of ents) {
+      const ecx = Math.floor(e.x), ecy = Math.floor(e.y), ec = cellOf(ecx, ecy), dx = ecx - pcx, dy = ecy - pcy;
+      const vis = visible(px, py, e.x, e.y, e.r);
+      const fx = (e.x - px) * ca + (e.y - py) * sa, rx = -(e.x - px) * sa + (e.y - py) * ca;
+      const inFov = fx > 0.05 && Math.abs(rx) <= (e.hole >= 0 ? 0.944 : 0.749) * fx;
+      const cls = !inFov ? (fx <= 0.05 ? C.behind : C.off) : vis ? C.vis : C.hid;
+      const capped = e.hole >= 0 && Math.hypot(e.x - (pcx + 0.5), e.y - (pcy + 0.5)) >= capH[e.hole];
+      const cone = coneOk(dx, dy, pa);
+      // the cells the disc touches: a big hole spills past its own cell
+      const dcells = []; for (let yy = Math.floor(e.y - e.r); yy <= Math.floor(e.y + e.r); yy++)
+        for (let xx = Math.floor(e.x - e.r); xx <= Math.floor(e.x + e.r); xx++) if (inMap(xx, yy)) dcells.push(cellOf(xx, yy));
+      const vk = k => { const row = regionOf(k, pc); return dcells.some(c => row[c]); };
+      const hsOk = e.hole < 0 || ((holeSee[e.hole * 32 + (pc >> 3)] >> (pc & 7)) & 1);
+      const bitC = e.hole >= 0 ? C.bitHole : C.bit;
+      // [cost of the tests, survives?] per config
+      const R = [];
+      if (e.hole >= 0) R.push(hsOk ? [C.hs + C.cone, cone] : [C.hs, false]);
+      else R.push(!cone ? [C.cone, false] : hzOn ? [C.cone + C.hz, !hzCull(pc, ec, dx, dy)] : [C.cone, true]);
+      R.push([C.cone, cone && !capped]);
+      for (const k of [1, 2, 4]) R.push(!cone ? [C.cone, false] : [C.cone + bitC, !capped && vk(k)]);
+      R.push(!cone ? [C.cone, false] : (capped || !vk(4)) ? [C.cone + bitC, false]
+             : (e.hole < 0 && hzOn) ? [C.cone + bitC + C.hz, !hzCull(pc, ec, dx, dy)] : [C.cone + bitC, true]);
+      R.push([0, inFov && vis && !capped]);
+      for (const t of [...TIL8, ...TIL16, ...OPT]) {     // zone mask: the entity's zone(s) against mapT[player cell]
+        const ok = dcells.some(c => (t.mask[pc] >> t.zoneOf(c)) & 1);
+        R.push(!cone ? [C.cone, false] : [C.cone + bitC, !capped && ok]); }
+      R.forEach(([w, ok], i) => { f[i] += w; if (ok) { f[i] += cls; surv[i]++; anyOpen[i] = 1; if (!vis) waste[i]++; }
+        else if (vis && inFov && !capped) bad[i]++; });
+    }
+    for (let i = 0; i < CF.length; i++) tot[i][s] = f[i] + (anyOpen[i] ? C.trig : 0);
+  }
+  const pct = (a, p) => { const b = Float64Array.from(a).sort(); return b[Math.min(b.length - 1, Math.floor(p * b.length))]; };
+  console.error(`  DYNVIS level ${LVL}: ${cells.length} open cells (${pcells.length} reachable), ${NS} frames, ` +
+    `pairs in ${Date.now() - t0} ms; region rows: k1 ${RV[1].size}, k2 ${RV[2].size}, k4 ${RV[4].size}; horizon ${hzOn ? 'ON' : 'off'} here`);
+  console.error(`    config          survivors/f  wasted/f   mean cy/f   p99 cy/f   wrongly culled (visible)`);
+  CF.forEach((n, i) => console.error(`    ${n.padEnd(14)} ${(surv[i] / NS).toFixed(2).padStart(9)} ${(waste[i] / NS).toFixed(2).padStart(9)} ` +
+    `${(tot[i].reduce((a, b) => a + b, 0) / NS).toFixed(0).padStart(10)} ${pct(tot[i], 0.99).toFixed(0).padStart(10)}   ${bad[i]}`));
+}
 if (ENTHZN && process.env.VHPOSE) {
   const pcx = PX >> 8, pcy = PY >> 8, pc = cellOf(pcx, pcy);
   const thr = (byte, k) => [2, 3, 5, 0xff][(byte >> (2 * k)) & 3];
@@ -10993,7 +11403,7 @@ const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from t
 const pad = (a, n, fill = 0) => [...a, ...Array(Math.max(0, n - a.length)).fill(fill)];
 const LVL_TABLES = [
   // ENTHZN encodes it the other way up: walls $00 and an open cell its (non-zero) horizon byte.
-  ['mapT', ENTHZN ? [...Array(256)].map((_, i) => HZ_BUILD.enc(i))
+  ['mapT', MAPPACK ? [...Array(256)].map((_, i) => ZONES ? ZN_BUILD.enc(i) : HZ_BUILD.enc(i))
                   : pad(map, 256).map((v, i) => i < MAPN ? v : 1)],   // a full page of WALL past the map: see the emitted mapT
   // blkT and the eight run tables USED to travel here -- 1,380 of the 1,789 bytes a level cost.
   // They are all derived from mapT: blkT by objInit, which already copied it at boot, and the
@@ -11293,7 +11703,8 @@ if (SOLO) LVL_TABLES.push(['lvlMeT', [LVL]]);
 // is only safe LAST: a table whose length varies moves everything after it, and there is
 // nothing after it. Its own base stays fixed, which two `lda holeSeeT,x` sites require.
 // Anything added later goes BEFORE this line unless it is pointer-reached and variable too.
-LVL_TABLES.push(['holeSeeT', holeSee]);
+if (ZONES) LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT], ['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);
+else LVL_TABLES.push(['holeSeeT', holeSee]);   // ZONES: the hole-likes' zone masks replace it
 const SLOT_OFF = {};
 let SLOT_LEN = 0;
 for (const [n, a] of LVL_TABLES) {
@@ -16307,7 +16718,7 @@ cyNs:   txa
         adc stpY16
         tax
         lda mapT,x
-        ${ENTHZN ? 'beq' : 'bne'} cwallY                 ; ENTHZN: walls are $00, open cells their horizon byte
+        ${MAPPACK ? 'beq' : 'bne'} cwallY                 ; ENTHZN: walls are $00, open cells their horizon byte
         dey
         bne cdda
         jmp cfar
@@ -16333,7 +16744,7 @@ cstepX: lda sdx
 cxNs:
 cxInc:  inx                     ; PATCHED to $e8 inx / $ca dex, once per ray
         lda mapT,x
-        ${ENTHZN ? 'beq' : 'bne'} cwallX
+        ${MAPPACK ? 'beq' : 'bne'} cwallX
         dey
         bne cdda
 cfar:   stx cell                ; step guard expired; unreachable with a solid border
@@ -18781,7 +19192,10 @@ holeOne:lda nHoleT              ; a level with no hole-likes at all: nothing to 
         beq hoRts
         lda #$00                ; the exits first, so they can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
-hoLp:   lda hoI                 ;   biggest thing here
+hoLp:${ZONES ? `   ldx hoI                 ; ZONES: this hole-like's zones against the player's (entGate set znP)
+        lda hzMskT,x
+        and znP
+        beq hoNx` : `   lda hoI                 ;   biggest thing here
         asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
         asl
         asl
@@ -18800,7 +19214,7 @@ hoLp:   lda hoI                 ;   biggest thing here
         tax
         lda holeSeeT,x
         and orbBitT,y
-        beq hoNx                ; not visible from this cell: ~25 cycles against a ~2,400 projection
+        beq hoNx                ; not visible from this cell: ~25 cycles against a ~2,400 projection`}
         ldy hoI                 ; ...and a CONSUMED socket is not in the world at all any more.
         lda hlSeat,y            ; Exit holes keep 0 here for ever, so this costs them one compare.
         bmi hoNx
@@ -19637,7 +20051,7 @@ okDone: rts
 objInit:
         ldx #$00
 oiBlk:  lda mapT,x              ; walls first
-${ENTHZN ? `        cmp #$01                ; ENTHZN: mapT is $00 for a wall and a horizon byte otherwise;
+${MAPPACK ? `        cmp #$01                ; ENTHZN: mapT is $00 for a wall and a horizon byte otherwise;
         lda #$00                ;   blkT still wants 1 = wall, 0 = open
         rol
         eor #$01
@@ -21816,7 +22230,10 @@ hrpL:   cmp pedHT,y
         dey
 hrpHit: tya
         rts
-${LD('holeSeeT', holeSee.join(","), ': !byte ')}
+${ZONES ? `${LD('zoneT', ZN_BUILD.zoneT.join(','), ': !byte ')}   ; ZONES: every cell's zone, two to a byte
+${LD('hzMskT', pad(ZN_BUILD.hmask, NHOLE).join(','), ': !byte ')}   ; ZONES: each hole-like's zones (its disc)
+zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask
+znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame` : LD('holeSeeT', holeSee.join(","), ': !byte ')}
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
         ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
         ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
@@ -24663,8 +25080,8 @@ mrVx:   lda #$00
         lda mrX
         tay                     ; c = y*MAPW + x, walking y means stepping MAPW
 mrVy:   lda mapT,y
-        ${ENTHZN ? 'beq' : 'bne'} mrVw
-${ENTHZN ? `        lda #$00                ; ENTHZN: an open cell is no longer 0, and the stores want 0
+        ${MAPPACK ? 'beq' : 'bne'} mrVw
+${MAPPACK ? `        lda #$00                ; ENTHZN: an open cell is no longer 0, and the stores want 0
 ` : ''}        sta mrWp                ; open cell: both runs end here
         sta mrEp
         jmp mrVn
@@ -24672,7 +25089,7 @@ mrVw:   dey                     ; west face? the cell at c-1 must be open
         lda mapT,y
         iny                     ; restoring Y CLOBBERS the flags the load just set, so the
         cmp #$00                ;   compare has to be redone -- without this the branch below
-        ${ENTHZN ? 'beq' : 'bne'} mrVwn               ;   tested Y and every west run came out wrong
+        ${MAPPACK ? 'beq' : 'bne'} mrVwn               ;   tested Y and every west run came out wrong
         lda mrWp
         bne mrVws
         lda mrNext              ; a new run: plane = x, face W
@@ -24694,7 +25111,7 @@ mrVe:   iny                     ; east face? the cell at c+1 must be open
         lda mapT,y
         dey                     ; same trap as the west face above
         cmp #$00
-        ${ENTHZN ? 'beq' : 'bne'} mrVen
+        ${MAPPACK ? 'beq' : 'bne'} mrVen
         lda mrEp
         bne mrVes
         lda mrNext              ; plane = x+1, face E
@@ -24737,8 +25154,8 @@ mrHy:   lda #$00
         ldx #$00
         stx mrX
 mrHx:   lda mapT,y
-        ${ENTHZN ? 'beq' : 'bne'} mrHn
-${ENTHZN ? `        lda #$00                ; ENTHZN: as at mrVy
+        ${MAPPACK ? 'beq' : 'bne'} mrHn
+${MAPPACK ? `        lda #$00                ; ENTHZN: as at mrVy
 ` : ''}        sta mrWp
         sta mrEp
         jmp mrHnx
@@ -24749,7 +25166,7 @@ mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW 
         sbc lvlDimT             ; c - MAPW
         tax
         lda mapT,x
-        ${ENTHZN ? 'beq' : 'bne'} mrHnn
+        ${MAPPACK ? 'beq' : 'bne'} mrHnn
         lda mrWp
         bne mrHns
         lda mrNext              ; plane = y, face N
@@ -24775,7 +25192,7 @@ mrHs:   lda mrY                 ; south face: the last row has none, and c+MAPW 
         adc lvlDimT             ; c + MAPW
         tax
         lda mapT,x
-        ${ENTHZN ? 'beq' : 'bne'} mrHsn
+        ${MAPPACK ? 'beq' : 'bne'} mrHsn
         lda mrEp
         bne mrHss
         lda mrNext              ; plane = y+1, face S
@@ -25297,7 +25714,7 @@ wtLd:   lda $ffff,y             ; operand patched: the group's $ff-ended cell li
         beq wtCDn
         tax
         lda mapT,x
-${ENTHZN ? `        cmp #$01                ; ENTHZN: translate, as oiBlk does
+${MAPPACK ? `        cmp #$01                ; ENTHZN: translate, as oiBlk does
         lda #$00
         rol
         eor #$01
@@ -26181,7 +26598,14 @@ ${CONEGATE ? '' : `        lda carry
         ; of frames. One loop over the orbs and then the hole-likes, in holeOne's own order.
         ; It does NOT early-out on the first entity that passes: every verdict has to be stored,
         ; because orbOne reads all of them.
-        lda nHoleT
+${ZONES ? `        lda py+1                ; ZONES: the player's cell, and the zones visible from anywhere in it --
+${MULW}
+${ADDX('px+1')}
+        sta pcell               ;   one mapT read a frame, for every entity's test below
+        tax
+        lda mapT,x
+        sta znP
+` : `        lda nHoleT
         beq ogNoH               ; no hole-likes: the LOS row below is never indexed
         lda py+1                ; the player's cell, for the LOS test
 ${MULW}
@@ -26194,7 +26618,7 @@ ${ADDX('px+1')}
         lsr
         lsr
         sta rgtL                ; ...and which byte. rgtL is orbProj's, and orbProj has not run yet
-ogNoH:${ENTLOS ? `
+`}ogNoH:${ENTLOS ? `
         ; ---- HOW FAR THE PLAYER IS FROM THEIR OWN CELL CENTRE, once a frame ----
         ; The depth test's distance comes from the cell delta, which is the distance between cell
         ; CENTRES. The player is not at one, and the difference is the same for every entity this
@@ -26253,7 +26677,31 @@ ${ENTHZN ? `        sta vhPok               ; ENTHZN: the player's thresholds ar
         bcs ogEHol
         ldx cnI                 ; ---- an orb or an angel ----
         lda orbHidT,x
-        beq ogETst              ; in the world: ask the cone
+${ZONES ? `        bne ogENo               ; hidden: no verdict to give
+        ldy orbYCT,x            ; ZONES: its zone's bit against mapT[player cell] -- BEFORE the cone,
+        lda rowMulT,y           ;   which costs ~125 to this test's ~40
+        clc
+        adc orbXCT,x            ; its cell
+        lsr                     ; two cells to a byte; carry = the odd one, in the high nibble
+        tay
+        lda zoneT,y
+        bcc ogZe
+        lsr
+        lsr
+        lsr
+        lsr
+ogZe:   and #$07
+        tay
+        lda zBitT,y
+        and znP
+        beq ogENo               ; no part of its zone is visible from anywhere in this cell
+        bne ogETst              ; always
+ogEHol: sec                     ; ---- a hole-like: its fixed zone mask (its whole disc) ----
+        sbc nOrbT
+        tax
+        lda hzMskT,x
+        and znP
+        beq ogENo` : `        beq ogETst              ; in the world: ask the cone
         bne ogENo               ; hidden: no verdict to give
 ogEHol: sec                     ; ---- a hole-like: its per-cell LOS bitmap first ----
         sbc nOrbT               ; A = the hole index, as holeSeeT is keyed
@@ -26268,7 +26716,7 @@ ogEHol: sec                     ; ---- a hole-like: its per-cell LOS bitmap firs
         ldy cnBit
         lda holeSeeT,x
         and orbBitT,y
-        beq ${CULLCNT ? 'ogELos' : 'ogENo'}               ; cannot be seen from this cell at all
+        beq ${CULLCNT ? 'ogELos' : 'ogENo'}               ; cannot be seen from this cell at all`}
 ogETst: ldx cnI${ENTLOS ? `
         lda #$00                ; is this one TALL? hole-likes never are, and their index is past
         cpx nOrbT               ;   orbTallT, so do not read it there
