@@ -17618,7 +17618,7 @@ oSLoop:${process.env.OSCNT ? ' inc osCntV             ; OSCNT: slots occStamp vi
         cmp #$ff
         beq oSNext              ; the CARRIED orb's icon: not an entity, and it fills no state
         cmp nOrbT
-        bcc oSEnt               ; an orb, which always carries it
+        bcc ${HAS_IDOL && STMP ? 'oSIdl' : 'oSEnt'}               ; an orb, which always carries it
         lda obOcc,x             ; hole-like, so only a SOCKET does: holeSlot sets bit 7 on one,
         bpl oSNext              ;   where an exit hole's obOcc is its fill colour (0-15). The${STMP ? `
         lda obIX,x              ; STMP: can a wall partly hide THIS one from the player's cell at all?
@@ -17627,7 +17627,21 @@ oSLoop:${process.env.OSCNT ? ' inc osCntV             ; OSCNT: slots occStamp vi
         tay
         lda orbBitT,y
         and stmpM
-        beq oSNext` : ''}
+        beq oSNext` : ''}${HAS_IDOL && STMP ? `
+        jmp oSEnt
+oSIdl:  tay                     ; STMP: an IDOL up on a drum stands in the drum's footprint (PEDR is the
+        lda orbIdolT,y          ;   orb's radius by construction) and is just as static, so the drum's
+        bmi oSEnt               ;   stamp-list bit decides for it too. Any other orb keeps the full path.
+        tay
+        lda idolOnPedT,y        ; pedestal index + 1, 0 = on the floor
+        beq oSEnt
+        clc
+        adc nPedT               ; -> the drum's hole-like index + 1
+        tay
+        lda orbBitT-1,y
+        and stmpM
+        bne oSEnt
+        jmp oSNext` : ''}
                                 ;   exit hole keeps holeTail's all-or-nothing test instead --
                                 ;   it is the wall's own black and has nothing to clip.
 oSEnt:
@@ -18252,7 +18266,69 @@ ${HAS_IDOL ? `        jsr idolLat             ; THIS frame's finding, not last f
 ; THAT cell appear" without a second copy of the projection. C clear on return means nowhere
 ; on screen at all: behind the camera, close enough to be inside us, or past 255 columns off
 ; centre. oaS carries the side. Nothing here touches oidx, which is why it splits cleanly.
-orbProj:
+${HAS_IDOL ? `; ---- orbProjC: ONE projection for an idol and the drum it stands on ----
+; An idol up on a pedestal stands in the pedestal's cell, and orbProj depends on nothing but the cell
+; (its FOV bound is the same for every kind -- checked), so the two were being projected twice to
+; bit-identical answers: ~1,830 cycles each, three times a frame on the hub with every idol seated.
+; Hole-likes run before orbs (holeOne first), so the DRUM's answer -- ohgt, ocoff, oaS and the carry,
+; the only things read after orbProj -- is kept, and an idol standing on it restores it. Kept only for
+; THIS frame (entGate clears pcP); a drum culled before projecting keeps nothing, and its idol
+; projects itself.
+orbProjC:
+        ldx oidx
+        cpx nOrbT
+        bcc opcOrb
+        txa                     ; a hole-like (they run FIRST, in holeOne): if it is a pedestal,
+        sec                     ;   project it and keep the answer for the idol that may stand on it
+        sbc nOrbT
+        sec
+        sbc nPedT               ; the hole-like index where the pedestals start
+        bcc opcP                ; an exit or a socket: just project
+        cmp #${hx(IDOL_N)}
+        bcs opcP
+        pha
+        jsr orbProj
+        php
+        pla
+        tax                     ; the flags
+        pla
+        tay                     ; the pedestal index
+        txa
+        sta pcP,y               ; the flags, carry included -- never 0, so it doubles as "kept"
+        lda ohgt
+        sta pcH,y
+        lda ocoff
+        sta pcC,y
+        lda oaS
+        sta pcS,y
+        lda pcP,y
+        pha
+        plp
+        rts
+opcOrb: ldy orbIdolT,x          ; an orb: an idol up on a drum whose answer is already kept?
+        bmi opcP
+        lda idolOnPedT,y        ; pedestal index + 1, 0 = on the floor
+        beq opcP
+        tay
+        dey
+        lda pcP,y
+        beq opcP                ; the drum was not projected this frame: do it ourselves
+        lda pcH,y
+        sta ohgt
+        lda pcC,y
+        sta ocoff
+        lda pcS,y
+        sta oaS
+        lda pcP,y
+        pha
+        plp                     ; the carry the drum's projection returned
+        rts
+opcP:   jmp orbProj
+pcH:    !fill ${IDOL_N}, 0
+pcC:    !fill ${IDOL_N}, 0
+pcS:    !fill ${IDOL_N}, 0
+pcP:    !fill ${IDOL_N}, 0
+` : ''}orbProj:
         ldy #$00                ; magnitudes and signs, so the products can be unsigned
         lda oix
         bpl oipx
@@ -18754,7 +18830,7 @@ lzOk:   dey
         bne olChkD
         inc lzN+1
 olChkD: ldx oidx
-` : ''}` : ''}` : ''}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr orbProj             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+` : ''}` : ''}` : ''}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr ${HAS_IDOL ? 'orbProjC' : 'orbProj'}             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
 ${ENT1PROF ? "        php                     ; ENT1PROF: orbProj itself. php/plp because pfTick does NOT\n        jsr pfT7                ;   preserve the carry, and the carry is orbProj's return value\n        plp\n" : ''}
 ${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
         inc culPrj
@@ -26751,7 +26827,9 @@ ${CONEGATE ? '' : `        lda carry
         ; of frames. One loop over the orbs and then the hole-likes, in holeOne's own order.
         ; It does NOT early-out on the first entity that passes: every verdict has to be stored,
         ; because orbOne reads all of them.
-${ZONES ? `        lda py+1                ; ZONES: the player's cell, and the zones visible from anywhere in it --
+${HAS_IDOL ? `        lda #$00                ; orbProjC: no idol has been projected yet this frame
+${[...Array(IDOL_N)].map((_, i) => `        sta pcP+${i}`).join('\n')}
+` : ''}${ZONES ? `        lda py+1                ; ZONES: the player's cell, and the zones visible from anywhere in it --
 ${MULW}
 ${ADDX('px+1')}
         sta pcell               ;   one mapT read a frame, for every entity's test below
