@@ -8554,95 +8554,7 @@ const CONE_TOL = [...Array(CONE_DMAX + 1)].map((_, c) => {
 });
 
 
-const ENTLOS = ENTCONE && process.env.ENTLOS === '1';
-if (ENTLOS) DIAG.push('ENTLOS=1');
-// The entity's centre column from the angle the cone already computed. Only the +-44 units the
-// cone can pass are ever indexed; the rest are clamped off-screen so a stray read cannot land
-// somewhere plausible.
-const LOS_CMAX = 127;
-const tanColT = [...Array(256)].map((_, a) => {
-  const sg = a < 128 ? a : a - 256;                       // signed angle off the view axis
-  const t = Math.tan(sg / 256 * 2 * Math.PI);
-  const v = (Math.abs(sg) > 64 || !isFinite(t)) ? (sg < 0 ? -LOS_CMAX : LOS_CMAX)
-          : Math.round(F_COL * t);
-  // BIASED BY THE CENTRE COLUMN and clamped to the screen, so the runtime is one indexed load
-  // with no signed add. A signed offset plus "adc #80" needs sign extension, and getting that
-  // wrong produces a WRAPPED column -- which reads colH somewhere plausible instead of failing,
-  // the one way this test can be quietly wrong.
-  return Math.max(0, Math.min(NLOG - 1, NLOG / 2 + v));
-});
-// distQT: the EUCLIDEAN distance of the folded quadrant delta, in half-cells. Chebyshev was the
-// first cut and it is a 31% underestimate on a diagonal: level 2's orb at (6,2) is 5.74 cells away
-// and Chebyshev called it 4.29, so the threshold rejected only walls nearer than 4.0 while the
-// walls genuinely in front of it sit at 4.4. Measured off colH, not reasoned about.
-const distQT = [...Array(64)].map((_, i) => {
-  const dy = i >> 3, dx = i & 7;
-  return Math.min(255, Math.round(2 * Math.hypot(dx, dy)));
-});
-// The threshold, per HALF-CELL distance AND per cosCorr group. 2D because the group factor applies
-// to the wall and to the entity identically -- they are on the same ray -- so it only has to be
-// absorbed if the table is 1D, and absorbing it costs 40% of the discrimination (a wall at 2.63
-// cells instead of 3.94 for an entity 4.29 away). colGrpT[col] is already in the image: the
-// renderer uses it to pick the hTabT page.
-const LOS_HG = HGROUPS;
-const LOS_DMAX = 63;                     // half-cells, so 31.5 cells of reach
-const losHT = [...Array((LOS_DMAX + 1) * LOS_HG)].map((_, i) => {
-  const dh = i / LOS_HG | 0, g = i % LOS_HG;
-  if (dh < 4) return 255;                // never reject something within two cells
-  const d = dh / 2;                      // the NEAREST the entity can be: the runtime has already
-                                         //   subtracted the player's own sub-cell offset
-  // (hRep/256) SQUARED, and the second factor is not a fudge. colH is denominated in the wall's
-  // PERPENDICULAR distance; this threshold is built from the entity's EUCLIDEAN distance bound,
-  // and the entity's forward distance is D*cos(theta). So one factor converts D to forward and the
-  // other is colH's own cosCorr page. Dropping the first on the grounds that "the factor cancels"
-  // is what left 25 visible entities on level 1's spin inside the reject -- it makes the threshold
-  // up to 32% too small at the cone edge, which is the eager direction.
-  const cc = hRep[g] / 256;
-  const h = Math.round(2816 / (Math.max(1, 32 * d) * cc * cc));
-  // No +1: the runtime compares colH > threshold, which is already strict. Adding one on top was
-  // a second unit of slack and it was the whole margin on level 2's orb (6,2) -- walls reading 20
-  // against a threshold of 21 instead of 19.
-  return Math.max(1, Math.min(254, h));
-});
-// Its half-width in columns at that range, taken over BOTH ladders at the variant each would
-// actually select -- the angel is as wide as one sprite like an orb, but deriving it rather than
-// assuming keeps a future taller or wider entity honest.
-const losWT = [...Array(CONE_DMAX + 1)].map((_, c) => {
-  const d = Math.max(0.5, c - 0.707), h = Math.min(255, Math.round(88 / d));
-  // orbColLT/orbColRT -- the BALL's extent, which is also what the box test (ocl2/ocmax) uses to
-  // decide "on screen". The sprite BOX was tried here while chasing the angel's false rejections,
-  // and for an orb it is pure loss: at level 2's opening view orb (6,2) is ~2 columns wide at 5.7
-  // cells, the box made the scan 15 columns, and columns five away from it -- showing walls at 4.4
-  // to 4.9 cells, nothing to do with that orb -- vetoed the rejection. The box is only right for a
-  // TALL entity, which no longer reaches this test at all.
-  const wide = v => Math.max(orbColLT[v] ?? 12, orbColRT[v] ?? 12);
-  const w = Math.max(wide(orbVarT[h]), wide(angVarT[h]));
-  // The bearing's slack was tried here too -- tanColT is indexed by the CELL-CENTRE bearing, which
-  // coneSlack says is off by up to 41 COLUMNS at Chebyshev 2 -- and widening by it changed losBad
-  // by exactly zero (25 before, 25 after) while scanning 74% of the screen. So the column is not
-  // where the false rejections come from. Left out.
-  return Math.max(1, Math.min(24, w + 1));
-});
-if (process.env.LOSDUMP === '1') {
-  console.error('  LOSDUMP  cheb   d    h=88/d   orbVar  orbBallC   angVar  angBallC   losWT');
-  for (const c of [2,3,4,5,7,9,12,16,24]) {
-    const d = Math.max(0.5, c - 0.707), h = Math.min(255, Math.round(88 / d));
-    console.error(`          ${String(c).padStart(4)} ${d.toFixed(2).padStart(6)} ${String(h).padStart(6)}` +
-      `   ${String(orbVarT[h]).padStart(6)} ${String(Math.max(orbColLT[orbVarT[h]], orbColRT[orbVarT[h]])).padStart(9)}` +
-      `   ${String(angVarT[h]).padStart(6)} ${String(Math.max(orbColLT[angVarT[h]], orbColRT[angVarT[h]])).padStart(9)}` +
-      `   ${String(losWT[c]).padStart(5)}`);
-  }
-}
-// LOSCHK=1: verify it the way CONECHK verifies the cone. The depth test only NOTES that it would
-// have rejected; the full path still runs, and losBad counts the ones that went on to take a
-// SPRITE. That must be zero -- the failure mode is an orb winking out at a wall edge, which is
-// easy to miss by eye and hard to attribute. colH is LINEARLY INTERPOLATED between the ~13 marched
-// columns while true height goes as 1/d, so it carries a two-sided error, and the unsafe direction
-// is an over-estimate making a wall look nearer than it is. This counter is how that is answered.
-const LOSCHK = flag('LOSCHK');
-if (LOSCHK && !ENTLOS) throw new Error('LOSCHK=1 verifies ENTLOS, which is off');
-if (ENTLOS) console.error(`  entlos: threshold at 5.0 cells = ${losHT[10 * LOS_HG]}..` +
-  `${losHT[10 * LOS_HG + LOS_HG - 1]}, widths cheb 3/5/9 = ${losWT[3]}/${losWT[5]}/${losWT[9]} cols`);
+
 if (ENTCONE) console.error(`  cone: half ${CONE_HALF} (ENTFOV's atan(${ENTFOV_BOUND})); true bounds ` +
   `orb ${((NLOG / 2 + Math.max(...orbHalfCT)) / F_COL).toFixed(3)} ` +
   `hole ${((NLOG / 2 + Math.max(...holeXOffT)) / F_COL).toFixed(3)}; ` +
@@ -8803,7 +8715,7 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 // only, so the loop keeps the entity index in X instead of reloading cnI), the cell delta in zero page,
 // and the per-cell lookups (mapT mask, stamp list) redone only when the player's cell changes. Off for
 // the builds whose extra stages read cnTest's leftovers or count inside the loop. GATEFAST=0 to A/B.
-const GATEFAST = !ENTLOS && !process.env.LOSCHK && !process.env.CULLCNT && true &&
+const GATEFAST = !process.env.CULLCNT && true &&
                  process.env.GATEFAST !== '0';
 const hzBearing = (dx, dy) => {                  // cnTest's bearing, step for step
   let b = Math.abs(dx), t = Math.abs(dy); let a = Math.max(b, t);
@@ -9922,10 +9834,6 @@ mcHint  = $70f4                 ;   hints offered per frame, summed
 ` : ''}${FALLMARK ? `fallMk  = $70fc                 ; FALLMARK=${process.env.FALLMARK}: how far the fall's level change got\n` : ''}${FOVCHK ? `fovWld  = $70c8                 ; FOVCHK: the cull would have rejected this entity
 fovDis  = $70c9                 ;   ...and orbProj accepted it anyway (byte, saturating is fine)
 fovBad  = $70ca                 ;   ...and it got a sprite. MUST be zero.
-` : ''}${LOSCHK ? `losRej  = $70e4                 ; LOSCHK: entities the depth test would have rejected
-losBad  = $70e6                 ;   ...which then took a SPRITE anyway. MUST be zero.
-lsV     = $bd                   ;   the verdict, held instead of acted on ($b6 is lsHP's second
-                                ;   byte -- the zero-page overlap guard caught that one)
 ` : ''}${CONECHK ? `coneRej = $70dc                 ; CONECHK: entities the CELL BEARING would have rejected, 16-bit
 coneDis = $70de                 ;   ...of which orbProj disagreed (the box tests may still drop it)
 coneBad = $70e0                 ;   ...and which then got a SPRITE. MUST be zero.
@@ -10075,19 +9983,6 @@ ${CONECHK ? `cnV     = $ac                    ; CONECHK: the verdict, held inste
 cnEnd   = $ae                    ;   entity passed, and which bit of the LOS row the player's cell
 cnAny   = $af                    ;   is. All four die with the gate; none outlives a frame.
 cnBit   = $b0
-` : ''}${ENTLOS ? `cnA     = $b1                    ; ENTLOS: the angle off the view axis, which the cone
-lsC     = $b2                    ;   already computed; then the entity's centre column, its
-lsW     = $b3                    ;   half-width in columns at this range, the last column of the
-lsR     = $b4                    ;   scan, and the colH a wall must beat to hide it
-lsHP    = $b5                    ;   2 bytes: this entity's row of losHT
-cnSh    = $b9                    ;   the halving count, to scale distQT back up
-lsD     = $ba                    ;   the delta's euclidean distance in half-cells
-cnD2    = $bb                    ;   ...scaled, minus the player's offset, clamped: the losHT row
-lsAlw   = $bc                    ;   the player's own sub-cell offset in half-cells, once a frame
-cnTall  = $b8                    ;   whether this entity is a two-sprite one: the depth test is
-                                 ;   not applied to those -- see cnTest
-cnD     = $b7                    ;   ...and the Chebyshev distance, which cnTest otherwise keeps
-                                 ;   only in Y -- and Y goes to the angle lookup first
 ` : ''}` : ''}
 ocos    = $8500
 ocosS   = $8501
@@ -10875,18 +10770,6 @@ pfNIni: sta pfNum,x
         sta cnV
 ` : ''}${CULLCNT && ENTCONE ? `        sta culCone
         sta culCone+1
-` : ''}${CULLCNT && ENTLOS ? `        sta culLos
-        sta culLos+1
-` : ''}${LOSCHK ? `        sta losRej
-        sta losRej+1
-        sta losBad
-        sta losBad+1
-        sta lsV
-        ldx #${hx(NOCC * 2 - 1)}
-lsBz:   sta losBadT,x
-        dex
-        bpl lsBz
-        lda #$00
 ` : ''}${CULLCNT && CONEGATE ? `        ldx #${hx(NOCC * 2 - 1)}
 ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts start clean
         sta culDrwT,x
@@ -15931,12 +15814,7 @@ ${ENTCONE ? `; ---- cnTest: is the entity at (oix, oiy) in the view cone at all?
 ; orbOne both ask, and a gate whose verdict could differ from the loop's would be worse than no
 ; gate at all -- it would delete entities the loop meant to draw.
 cnTest:
-${LOSCHK ? `        lda #$00                ; LOSCHK: CLEAR AT ENTRY, not on each exit. Every exit path
-        sta lsV                 ;   that forgets leaves the PREVIOUS entity's verdict behind, and
-                                ;   there are three of them -- near-field, cone reject, depth
-                                ;   reject. Patching them one at a time produced losBad LARGER
-                                ;   than losRej twice in a row.
-` : ''}        lda oix
+        lda oix
         bpl cnXP
         eor #$ff
         clc
@@ -15957,19 +15835,19 @@ cnChb:  cmp #$02                ; Chebyshev distance, and the tolerance index
                                 ;   rejects anything and is safe. Let it through; it is one entity
                                 ;   and it is almost certainly on screen anyway.
         tay
-${ENTLOS ? '        sty cnD                 ; the depth test needs it after Y has gone to the angle\n' : ''}${ENTLOS ? '        lda #$00\n        sta cnSh\n        lda cnD                 ; the depth test needs the SHIFT COUNT to scale distQT back\n' : ''}cnHlv:  cmp #$08                ; halve both until each fits the 8x8 quadrant table. max() and
+cnHlv:  cmp #$08                ; halve both until each fits the 8x8 quadrant table. max() and
         bcc cnIx                ;   >>1 commute, so the Chebyshev value tracks the halving
         lsr cnB
         lsr cnT
         lsr
-${ENTLOS ? '        inc cnSh\n' : ''}        jmp cnHlv
+        jmp cnHlv
 cnIx:   lda cnT                 ; index = (|dy| << 3) | |dx|
         asl
         asl
         asl
         ora cnB
         tax
-${ENTLOS ? '        lda distQT,x            ; ...and the same delta\u0027s EUCLIDEAN distance, in half-cells\n        sta lsD\n' : ''}        lda coneBQT,x           ; the first-quadrant bearing...
+        lda coneBQT,x           ; the first-quadrant bearing...
         sta cnB
         lda oix                 ; ...and the quadrant, from the two signs: dx < 0 mirrors about
         bpl cnQX                ;   the y axis (128 - b), dy < 0 about the x axis (-b), and
@@ -15988,103 +15866,11 @@ cnQY:   lda coneTolT,y          ; Y still holds the UNSHIFTED distance
         lda cnB
         sec
         sbc pa                  ; how far off the heading, as a signed 8-bit difference
-${ENTLOS ? '        sta cnA                 ; kept: the depth test turns this same angle into a column\n' : ''}        clc
+        clc
         adc cnT                 ; the standard range test: (b - pa + tol) >= 2*tol is outside
         asl cnT
         cmp cnT
-        ${ENTLOS ? `bcs cnFar
-        ; ---- IS A WALL NEARER THAN THIS ENTITY CAN BE? ----
-        ; In the cone is not visible. colH[col] is the wall's apparent half-height for ALL 160
-        ; columns -- renderSym requires every one (rfCol reads four per char cell, and the run
-        ; cache compares against them to decide what to redraw, so they cannot be made lazy
-        ; either) -- and it is in the SAME units as an entity's own projected height: colH is
-        ; 2816/(j * cosCorr/256) = 88/d, ohgt is 22528/forward = 88/d. One constant, no scaling.
-        ; So a wall reading TALLER than this entity possibly can is NEARER than it possibly is.
-        ; A DEPTH test denominated in height units -- not a coverage test. The views are
-        ; vertical-only, so nothing is ever occluded vertically and height alone would never be a
-        ; reason to cull anything.
-        lda cnTall              ; ---- NOT FOR A TALL ENTITY ----
-        bne cnOk                ; LOSCHK pinned every false rejection on ONE entity: the far angel
-                                ;   at (19,5), 24 of 24 on level 1's spin. Four hypotheses tested
-                                ;   -- the cell-centre bearing's column error, the euclidean-to-
-                                ;   forward cosine, ball-extent vs sprite-box width, and a scan
-                                ;   widened to 74% of the screen -- and the count did not move by
-                                ;   one. Something about a TWO-SPRITE entity is not modelled here
-                                ;   and guessing a fifth time is not a method. Orbs and hole-likes
-                                ;   verify clean on three level-2 runs; the angel waits until it
-                                ;   is understood rather than until the counter goes quiet.
-        ldy cnA
-        lda tanColT,y           ; centre column, pre-biased by 80 and clamped: no signed add, and
-        sta lsC                 ;   so no wrapped column reading colH somewhere plausible
-        ldy cnD
-        lda losWT,y             ; the BALL's extent in columns at this range, from orbColLT/RT over
-${process.env.LOSPAD ? `        clc                     ; LOSPAD: ...plus slack for the CENTRE being wrong. lsC comes
-        adc #${(+process.env.LOSPAD).toString(16).padStart(2,'0').replace(/^/,'$')}                 ;   from a CELL-level bearing, which at short range names the
-        bcc lsWok               ;   column only roughly -- the cone carries coneTolT for exactly
-        lda #$9f                ;   this and the depth scan carries nothing, so it can sit several
-lsWok:  ` : ''}        sta lsW                 ;   columns off and sample walls either side of the gap the
-                                ;   entity actually shows through. The angel is ~70% wider than an orb, and
-                                ;   orbHalfCT would have been the sprite BOX, flat with distance
-        ; losHT is [32 distances][16 cosCorr groups]; point at this entity's row once, then each
-        ; column is compared against ITS OWN group. Taking the worst group across the whole span
-        ; was conservative by up to 36% and that was enough to save orb (6,2) on level 2's opening
-        ; view: it lands at column 117, where the edge-ward group gives 30 against the blocking
-        ; wall's colH of ~25. cnD can reach 31, so cnD*16 is 496 and the base is 16-bit.
-        lda cnD                 ; HIGH NIBBLE FIRST. Doing it the other way round put four lsr's
-        lsr                     ;   between the low-byte ADC and the high-byte one, and lsr sets
-        lsr                     ;   the carry from bit 0 -- so the carry being propagated was bit
-        lsr                     ;   3 of cnD, not the low byte's. The base landed in the wrong page
-        lsr                     ;   and orb (11,3) stopped being culled, which is how it was found.
-        sta lsHP+1
-        lda cnD2
-        asl
-        asl
-        asl
-        asl
-        clc
-        adc #<losHT
-        sta lsHP
-        lda lsHP+1
-        adc #>losHT
-        sta lsHP+1
-        sec                     ; scan the columns the ball could occupy, clipped to the screen
-        lda lsC
-        sbc lsW
-        bcs lsL0
-        lda #$00
-lsL0:   tax
-        clc
-        lda lsC
-        adc lsW
-        cmp #${hx(NLOG - 1)}
-        bcc lsR0
-        lda #${hx(NLOG - 1)}
-lsR0:   sta lsR
-lsLoop: ldy colGrpT,x           ; REJECT only if EVERY column has a wall nearer. The first that
-        lda (lsHP),y            ;   does not is a column the entity shows through.
-${process.env.LOSBIAS ? `        clc                     ; LOSBIAS: raise the threshold -- a false rejection means we
-        adc #${(+process.env.LOSBIAS).toString(16).padStart(2,'0').replace(/^/,'$')}                 ;   hid something visible, i.e. the bar a wall had to clear
-        bcc lsBok               ;   was set too low. Sweeping this says whether the row is wrong
-        lda #$ff                ;   by a constant or wrong in kind.
-lsBok:  ` : ''}        cmp colH,x              ; threshold >= colH: that wall is FURTHER, so the entity shows
-        bcs cnOk
-        inx
-        cpx lsR
-        bcc lsLoop
-        beq lsLoop
-${CULLCNT ? `        inc culLos              ; CULLCNT: hidden by a wall, before any multiply ran
-        bne lsLs1
-        inc culLos+1
-lsLs1:
-` : ''}${LOSCHK ? `        lda #$ff                ; LOSCHK: note the verdict and let it through anyway, so
-        sta lsV                 ;   orbProj and the span walk can be asked whether they agree
-        inc losRej
-        bne lsRj1
-        inc losRej+1
-lsRj1:  clc
-        rts
-cnFar:` : `        jmp cnFar               ; hidden: nothing else needs computing
-cnFar:`}` : 'bcc cnOk'}
+        bcc cnOk
 ${CULLCNT ? `        inc culCone             ; CULLCNT: rejected before any multiply ran
         bne cnCn1
         inc culCone+1
@@ -16712,19 +16498,6 @@ fovYok:
         inc coneBad+1
 cnBd1:
 cnYok:
-` : ''}${LOSCHK ? `        lda lsVT,x              ; LOSCHK: the depth test would have dropped something that got
-        beq lsYok               ;   a SPRITE. This must read zero. X is oidx, set just above.
-        inc losBad
-        bne lsBd1
-        inc losBad+1
-lsBd1:  txa                     ; ...and WHICH entity, because "25 of them" three fixes running is
-        asl                     ;   a diagnosis waiting to happen, not a tuning problem
-        tax
-        inc losBadT,x
-        bne lsBd2
-        inc losBadT+1,x
-lsBd2:  ldx oidx
-lsYok:
 ` : ''}        rts
 orbNo:  ldx oidx
         lda #$00
@@ -20353,9 +20126,7 @@ ${OCCLAZYE ? `ooFrT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; OCCLA
 ${LAZYCHK ? `lzShad: !fill ${OCCBYTES}, 0        ; LAZYCHK: the trusted mask, set aside for the compare
 lzBad:  !byte 0,0                ; LAZYCHK: bytes a trusted mask got wrong -- MUST be 0
 lzN:    !byte 0,0                ; LAZYCHK: trusted masks checked` : ''}
-${LOSCHK ? `lsVT:   !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; LOSCHK: the depth test's verdict, per entity
-losBadT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; LOSCHK: ...and which entity it wrongly rejected
-` : ''}${CULLCNT ? `culOkT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: frames each entity PASSED the gate, 16-bit, free-running
+${CULLCNT ? `culOkT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: frames each entity PASSED the gate, 16-bit, free-running
 culDrwT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: ...and frames it actually took a sprite
 culLosT: !byte ${[...Array(NOCC * 2)].map(() => 0).join(',')}   ; CULLCNT: ...and frames LINE OF SIGHT rejected it (hole-likes only)` : ''}` : ''}
 ${PROFWIN.length ? `pwOn:   !byte 0                  ; PROFWIN: anchor taken; anchor tick; ticks since; frames in window
@@ -20385,20 +20156,7 @@ coneBQT: !byte ${CONE_BQ.join(',')}
 ; plus two units); the rest is how far the cell-centre bearing can be from the true one -- the
 ; player's 0.707 of slack inside their own cell, and the rounding the >>1 folding introduces.
 ; Entry 0 and 1 are never read: the test bails out below distance 2, where no tolerance is safe.
-coneTolT: !byte ${CONE_TOL.join(',')}${ENTLOS ? `
-; ---- ENTLOS: 800 bytes of PURE GEOMETRY, engine-wide, no per-level cost ----
-; tanColT: the screen column an angle off the view axis lands on, BIASED by the centre column and
-; clamped to the screen. Only the +-44 units the cone can pass are ever indexed.
-tanColT: !byte ${tanColT.join(',')}
-; losHT: the colH a wall must EXCEED to be nearer than an entity at this Chebyshev distance can be.
-; [32 distances][${LOS_HG} cosCorr groups] -- 2D because the group factor applies to the wall and the
-; entity identically (same ray), so it only needs absorbing if the table is 1D, and absorbing it
-; costs 40% of the discrimination: a wall at 2.63 cells instead of 3.94 for an entity 4.29 away.
-losHT:  !byte ${losHT.join(',')}
-distQT: !byte ${distQT.join(',')}
-; losWT: the BALL's extent in columns at that range, over both ladders. Not orbHalfCT, which is the
-; sprite BOX -- 6 columns for every unexpanded variant, so flat with distance by construction.
-losWT:  !byte ${losWT.join(',')}` : ''}` : ''}
+coneTolT: !byte ${CONE_TOL.join(',')}` : ''}
 arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
   const d = arcSpan(arcYT[ARC_DROP_N + n], (arcET[ARC_DROP_N + n] << 24) >> 24)[1];
   const l = arcSpan(arcYT2[n], (arcET2[n] << 24) >> 24)[0];
@@ -23846,52 +23604,7 @@ ogStL:  lda stmpT,y
 ogStH:  lda stmpT+1,y
         sta stmpM
 ogStD:
-` : ''}${GATEFAST ? 'ogPcS:\n' : ''}ogNoH:${ENTLOS ? `
-        ; ---- HOW FAR THE PLAYER IS FROM THEIR OWN CELL CENTRE, once a frame ----
-        ; The depth test's distance comes from the cell delta, which is the distance between cell
-        ; CENTRES. The player is not at one, and the difference is the same for every entity this
-        ; frame, so it is computed here rather than allowed for by a worst case. The worst case is
-        ; 1.41 half-cells; at level 2's start pose the real figure is 0.79, and that one half-cell
-        ; was the whole margin on orb (6,2).
-        ; Octagonal magnitude -- max + min/2 -- which OVER-estimates by up to 12%, and over is the
-        ; safe direction here because it is subtracted from the entity's distance.
-        lda px
-        sec
-        sbc #$80                ; offset from the cell centre, 1/256 cells
-        bcs ogAx
-        eor #$ff
-        clc
-        adc #$01
-ogAx:   sta cnT
-        lda py
-        sec
-        sbc #$80
-        bcs ogAy
-        eor #$ff
-        clc
-        adc #$01
-ogAy:   cmp cnT                 ; A = max, cnT = min
-        bcs ogAm
-        ldy cnT
-        sta cnT
-        tya
-ogAm:   lsr cnT                 ; max + min/2
-        clc
-        adc cnT
-        bcc ogAn
-        lda #$ff                ; cannot happen (both are <= 128) but say so
-ogAn:   clc                     ; -> half-cells, rounded UP: (v + 127) >> 7
-        adc #$7f
-        bcc ogAo
-        lda #$ff
-ogAo:   lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        sta lsAlw` : ''}
+` : ''}${GATEFAST ? 'ogPcS:\n' : ''}ogNoH:
         clc
         lda nOrbT
         adc nHoleT
@@ -24036,13 +23749,7 @@ ogENx:  inx
         stx cnI
         cpx cnEnd
         bcc ogEnL
-` : `ogETst: ldx cnI${ENTLOS ? `
-        lda #$00                ; is this one TALL? hole-likes never are, and their index is past
-        cpx nOrbT               ;   orbTallT, so do not read it there
-        bcs ogETl
-        lda orbTallT,x
-ogETl:  sta cnTall
-        ldx cnI` : ''}                 ; the cell delta, exactly as orbOne computes it
+` : `ogETst: ldx cnI                 ; the cell delta, exactly as orbOne computes it
         sec
         lda orbXCT,x
         sbc px+1
@@ -24052,10 +23759,7 @@ ogETl:  sta cnTall
         sbc py+1
         sta oiy
         jsr cnTest
-${LOSCHK ? `        ldx cnI                 ; LOSCHK: the verdict is PER ENTITY. A single byte was the
-        lda lsV                 ;   last entity entGate tested, not the one orbOne later draws --
-        sta lsVT,x              ;   which is how losBad came out LARGER than losRej.
-` : ''}        bcs ogENo
+        bcs ogENo
         lda #$ff
         ldx cnI
         sta cnOkT,x
