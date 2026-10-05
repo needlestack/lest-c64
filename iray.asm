@@ -2243,6 +2243,7 @@ rfEdge: lda rbv
         cmp rsv
         bcs rfSolid             ; nothing between the ceiling and the solid run
         sta erow
+
 rfEdgeL:
         ldy erow
         lda kTabT,y

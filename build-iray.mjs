@@ -3293,6 +3293,64 @@ const capCmp = () => {
   return `${l}: cmp #101`;
 };
 const hCapPatch = () => HCAP_SITES.map(l => `        sta ${l}+1`).join('\n');
+// ---- EDGECHAIN=1 (PROTOTYPE): the edge cells of rows 1..12 as one routine PER ROW ----
+// Measured in VICE's per-instruction profile: about half of an edge cell's ~210 cycles depend only
+// on WHICH ROW it is -- the row offset kr, the cap and `clc / adc kr / tay` on every height
+// sample, the dispatch to that row's store, the loop between rows -- yet were redone per cell.
+// Here each row is its own code with the row baked in: a sample is `ldy colH,x / lda T+8r,y`
+// (the wide tables below absorb the offset, indexed by the RAW height, so no cap), the stores
+// are direct (`sta row,y / sta mirror,y`), and the next row falls straight through. A column
+// dispatches once, at its first edge row. Step columns (cstepT is per COLUMN), and row 0, keep
+// the generic chooser: for row 0 the cap is not a no-op (CHI = 12 > 8 at K = -92).
+// The stores name buffer A's addresses; ecPatch rewrites their high bytes for the buffer being
+// drawn, once a frame (~110 cycles), instead of a second copy of every row.
+const EDGECHAIN = process.env.EDGECHAIN === '1' && PLAN === 3;
+// ecMT[8r + h] = clampT's value for h + K(r), K(r) = 8r - 92: index 0..351 covers h 0..255, r 0..12.
+const ECW = 96 + 256;
+const ecF = v => Math.max(CLO, Math.min(CHI, v)) - CLO;
+const ecMT  = [...Array(ECW)].map((_, j) => ecF(j - 92));
+const ecM16 = ecMT.map(v => v << 4);
+const ecM8  = [...Array(ECW)].map((_, j) => Math.max(0, Math.min(8, j - 92)));
+const ecRow = r => {
+  const a = 0xe000 + 40 * r, m = 0xe000 + 40 * (24 - r);
+  return `ecR${r}:  ldy colH,x              ; row ${r}: X = 4*column for the whole chain
+        lda ecM16+${8 * r},y
+        sta hh0
+        ldy colH+3,x
+        lda ecMT+${8 * r},y
+        ora hh0
+        tay
+        lda rampThrT,y
+        beq ecH${r}
+        sta cmv
+        sty bidx
+        ldy colH+1,x
+        lda ecM8+${8 * r},y
+        sta cmtmp
+        ldy colH+2,x
+        lda ecM8+${8 * r},y
+        clc
+        adc cmtmp
+        ldy bidx
+        cmp cmv
+        bcs ecH${r}
+        lda rampTlo,y
+        bcc ecS${r}              ; always: the bcs above fell through
+ecH${r}:  lda rampThi,y
+ecS${r}:  ldy colc
+ecA${r}:  sta ${hx16(a)},y
+${r < 12 ? `ecB${r}:  sta ${hx16(m)},y\n` : ''}${r < 12 ? `        lda #${r + 1}
+        cmp rsv
+        bcc ecR${r + 1}           ; another edge row: straight into its code
+` : ''}        ldx colc                ; rfSolid indexes the seam and run caches by X = COLUMN
+        jmp rfSolid
+`;
+};
+const EC_SITES = [];
+for (let r = 1; r <= 12; r++) { EC_SITES.push([`ecA${r}`, (40 * r) >> 8]); if (r < 12) EC_SITES.push([`ecB${r}`, (40 * (24 - r)) >> 8]); }
+// the store operands' high bytes for the buffer about to be drawn: baseHi + page offset (0..3)
+const ecPatch = () => [0, 1, 2, 3].map(k => (k === 0 ? '        ldx baseHi\n' : '        inx\n') +
+  EC_SITES.filter(([, p]) => p === k).map(([l]) => `        stx ${l}+2`).join('\n')).join('\n');
 // kTab[R] = 8R-92 as a two's-complement byte: fill = h + kTab[R], clamped to 0..8.
 const kTab = [...Array(13)].map((_, R) => (8 * R - 92) & 255)
   .concat(FALLTAIL ? [...Array(FTROWS)].map((_, i) => (8 * (-1 - i) - 92) & 255) : []);
@@ -11624,7 +11682,7 @@ m8l2:   tax
 ; Each chain slot also writes the mirrored row, so both halves are painted in one pass;
 ; charset B (raster-split at the horizon) makes the same char code render upside down.
 renderSym:
-        lda #$ff                ; VSPLIT: vsOn names the COLUMN whose stack is in progress, so it
+${EDGECHAIN ? ecPatch() + '\n' : ''}        lda #$ff                ; VSPLIT: vsOn names the COLUMN whose stack is in progress, so it
         sta vsOn                ;   is reset once a frame here rather than at every column head --
                                 ;   39 clears a frame for a stack that starts ~2 times. $ff is no
                                 ;   column, and without this a stale number from last frame could
@@ -11796,6 +11854,20 @@ rfEdge: lda rbv
         cmp rsv
         bcs rfSolid             ; nothing between the ceiling and the solid run
 ${EDGCHK ? '        inc edcN                ; this column has a band\n' : ''}        sta erow
+${EDGECHAIN ? `        tay                     ; EDGECHAIN: row 0 keeps the generic chooser (see ecRow)
+        beq rfEdgeL
+        ldx colc
+        lda cstepT,x            ; a step column: the generic chooser for all its rows
+        and #$03
+        bne rfEdgeL
+        lda col4T,x
+        tax                     ; X = 4*column, which every row of the chain samples from
+        lda ecLoT-1,y
+        sta jv
+        lda ecHiT-1,y
+        sta jv+1
+        jmp (jv)
+` : ''}
 rfEdgeL:
 ${RAYCNT ? '        inc edgN\n' : ''}${NOEDGE ? `        lda #${hx(SOLID)}
         sta ecode
@@ -12069,7 +12141,13 @@ rcHave: sta cqtmp
         lda ecode
         jmp (jv)                ; -> edA<row>/edB<row> -> inc erow -> jmp rfEdgeL
         ; ---- solid run: rows rs .. 12 ----
-rfEdgeT:lda erow                ; bottom of the edge run
+${EDGECHAIN ? `        ; ---- EDGECHAIN: rows 1..12, one routine each (see ecRow) ----
+${[...Array(12)].map((_, i) => ecRow(i + 1)).join('')}ecLoT:  !byte ${[...Array(12)].map((_, i) => `<ecR${i + 1}`).join(',')}
+ecHiT:  !byte ${[...Array(12)].map((_, i) => `>ecR${i + 1}`).join(',')}
+ecMT:   !byte ${ecMT.join(',')}
+ecM16:  !byte ${ecM16.join(',')}
+ecM8:   !byte ${ecM8.join(',')}
+` : ''}rfEdgeT:lda erow                ; bottom of the edge run
         cmp rsv
         bcc vsChk
         jmp rfSolid
