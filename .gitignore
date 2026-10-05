@@ -74,3 +74,4 @@ iray.compact.asm
 tools/node_modules/
 tools/package-lock.json
 tools/.ship/
+zz-vprof.d64
