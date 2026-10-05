@@ -582,11 +582,6 @@ const SOCK_MAP = (() => {
   return punchWalls(rows.map(r => r.join('')), LEVEL_WALLS[2].walls);
 })();
 
-// NOSOCK=1 drops the socket bitmaps (the seated-orb ones went in 2026-09-26; see PICBASE).
-// They are emitted even in levels with no
-// sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
-// Hoisted here because PICBASE's fit check and the bank-3 overlap guard both consult it.
-const NOSOCK = process.env.NOSOCK === '1';
 // RECORD=1: log the player's input so a real play-through becomes a repeatable benchmark.
 // 64 runs of 4 bytes. Recording stops when it fills rather than wrapping, so a truncated tour
 // is obvious instead of silently looping.
@@ -3543,11 +3538,6 @@ const ENTPROF = flag('ENTPROF');
 if (ENTPROF && !PROFCOARSE) throw new Error('ENTPROF=1 needs PROFCOARSE=1: it reuses the bucket ' +
   'indices PROFCOARSE frees, and without it the fine ray buckets are summed into the entity ones');
 // OCCLAZY=1: rebuild the occluder masks only when they can have changed.
-// STILLSKIP=1: let orbMove take its own still-frame short-circuit. The test below it was always
-// complete -- pose, quarter-angle and entDty -- and the jmp over it was placed "until the
-// occlusion stamping lands". occStamp has landed and runs unconditionally after renderSym, which
-// is what the still path was waiting for.
-const STILLSKIP = flag('STILLSKIP');
 // ON by default since 2026-09-03, and it is the single biggest win in the frame. The masks say
 // whether an entity is beyond a wall face's PLANE -- no camera term -- so they only change when an
 // entity moves or the run tables are re-patched, and on a map that splits nothing neither happens
@@ -3886,17 +3876,10 @@ const NOMINMAX = flag('NOMINMAX');
 // RAYCNT=1 shows the number of marchCol calls this frame as two hex digits on row 3. The one
 // number that says whether a change to the SUBDIVISION did what it claimed -- fps cannot, since
 // it is raster-quantised and mixes in every other phase.
-// SPANCAP=1: refuse to merge a span wider than the smallest occluder that could hide inside it.
-// subLp's merge test compares faceIdT at the two ENDS only and never looks between them, so a
-// free-standing block with the same wall behind both ends is invisible to it and vanishes -- the
-// open half of the pivot-nearside bug. An occluder inside the span is nearer than the face at the
-// ends, so it subtends at least F_COL/d columns; colH is 88/d, making the bound 1.397*colH, which
-// spanCapT holds per colH value.
 // CULLCNT=1: how many entities orbMove projects in full and then throws away. The projection is
 // ~2,900 cycles an entity and the rejects all happen AFTER it, so this is the ceiling on what an
 // early cull could save.
 const CULLCNT = flag('CULLCNT');
-const SPANCAP = flag('SPANCAP');
 const RAYCNT = flag('RAYCNT') || flag('EDGCHK');
 // EDGCHK=1: how often a cell column's colH is UNCHANGED from last frame. That is the exact key an
 // edge-band cache would need -- the glyph is a function of colH[4x..4x+3] and the row -- so this
@@ -4840,14 +4823,13 @@ const GW = Math.max(..._gc) - GX0 + 1, GH = Math.max(..._gr) - GY0 + 1;
 // IDOLART=hand restores the old box-filter of goat-art.json.
 const IDOLART = process.env.IDOLART ?? 'goat6.png';
 const IDOLCON = +(process.env.IDOLCON ?? 1.6);
-const IDOLDITH = process.env.IDOLDITH === '1';
 function idolScale(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, standing on the floor
   if (IDOLART !== 'hand') {
     // dark: the art is lit-on-black, so the background flood fill looks for DARK from the
     // border. Without it every pixel reads as ink and the fit is a filled rectangle.
-    const px = fitArt(IDOLART, w, h, { dither: IDOLDITH, contrast: IDOLCON, dark: true }).px;
+    const px = fitArt(IDOLART, w, h, { dither: false, contrast: IDOLCON, dark: true }).px;
     for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
       out[oy + dy][ox + dx] = px[dy * w + dx];
     return out;
@@ -5036,8 +5018,7 @@ if (process.env.ORBDUMP === '1') {
 const ORBANCH = ORBEXP.map(e => e ? 42 : 21);   // row pitch: one sprite height
 // The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
 // and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
-// ORBPAL=colour brings back light blue / light red / light green bodies.
-const ORBBODY = process.env.ORBPAL === 'colour' ? [14, 10, 13] : [12, 12, 12];
+const ORBBODY = [12, 12, 12];
 const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
 const SPR_DEF = { under: ORBUNDER, hi: ORBHILITE };
 const sprOf = n => {
@@ -5845,7 +5826,7 @@ const CHAIN_GLOBAL = {
   lvlNxtT: L => {
     const n = Math.max(1, NEXIT), d = LEVEL_EXITDST[L.level];
     return [...Array(n)].map((_, i) => {
-      if ((!LVLLOAD) || process.env.NOFALL) return 0xff;
+      if (!LVLLOAD) return 0xff;
       const v = d?.[i];
       // Past this level's own exit count the entry is padding and never read; $ff anyway.
       if (i >= (L.nExit ?? 1)) return 0xff;
@@ -6179,7 +6160,7 @@ const SND_AD   = +(process.env.SNDAD   ?? 0x80); // slow attack, no decay
 const SND_SR   = +(process.env.SNDSR   ?? 0xfa); // full sustain: gated once and never released
 const SND_FN   = Math.round(SND_HZ * 16777216 / 1022727);
 // ---- the cut scene's own voice ----
-// Voice 3 is free: MELODY is parked, so nothing in the shipping build writes $d40e-$d414. The
+// Voice 3 is free: nothing in the game writes $d40e-$d414 (the parked MELODY is gone). The
 // drone on voices 1 and 2 keeps running underneath all of this, untouched.
 //   * the SPIN carries a dissonant tone a tritone above the drone, rising one octave
 //   * each picture arrives on a BOOM, two octaves below the drone
@@ -6276,26 +6257,6 @@ const DIE_DSTEP = Math.max(1, Math.round((DIE_DRTOP - DIE_DR0) / DIE_RISE));
 // twelfth, so peak/3. Unlike the drone proper this one is not held; it is struck and left to
 // decay, and it has fallen away by the time the picture cuts in.
 const DIE_LAND_FN = Math.max(1, Math.round(DIE_DRTOP / 3));
-// ---- voice 3: a small figure over the drone ----
-// A natural-minor colour against the A drone: the fifth, the flat sixth, the flat seventh. Named
-// in semitones above A1 so it stays tied to whatever SNDNOTE the drone is on.
-const MELODY   = process.env.MELODY === '1' && !SNDTEST;   // parked; MELODY=1 brings it back
-const MEL_SEQ  = (process.env.MELSEQ ?? 'A3 E4 F4 E4 A3 E4 F4 G4').trim().split(/\s+/);
-const MEL_DUR  = +(process.env.MELDUR ?? 60);    // 60ths per note: one a second, so an 8s loop
-const MEL_GATE = +(process.env.MELGATE ?? 24);   // of those, how many are gated ON
-// Attack 2 (16ms) is fast without being a click; decay 6 drops from the full-scale attack peak
-// to SUSTAIN 8 in 168ms, and 8 is the "melody volume" -- the only per-voice level the SID has.
-// Gate goes low at MEL_GATE and release 10 (750ms) fades the tail, so a note has thinned out but
-// not vanished by the time the next one fires.
-const MEL_AD   = +(process.env.MELAD ?? 0x26);
-const MEL_SR   = +(process.env.MELSR ?? 0x8a);
-const SEMI = { C: -9, D: -7, E: -5, F: -4, G: -2, A: 0, B: 2 };
-const melFn = MEL_SEQ.map(n => {
-  const m = /^([A-G])(#?)(-?\d)$/.exec(n);
-  if (!m) throw new Error(`melody note "${n}" is not like A3 or F#4`);
-  // A1 is the reference and octave numbers change at C, so A3 is 24 semitones above A1.
-  return hzToFn(noteHz(SEMI[m[1]] + (m[2] ? 1 : 0) + 12 * (+m[3] - 1)));
-});
 // orbBlankT goes NEGATIVE for a two-sprite entity -- ORBTALL is the whole entity's height while
 // ORBANCH is only the LOWER sprite's frame, so the content overflows upward into the other slot.
 // The cap is about the lower sprite's own frame, so clamp: untreated it computed to 280/274/268,
@@ -7511,7 +7472,7 @@ if (process.env.PEDDUMP && HAS_PED) {
   });
   process.exit(0);
 }
-const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(NOSOCK || SOCK_OWN ? [] : SOCK.BM), ...PED.BM];
+const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...(SOCK_OWN ? [] : SOCK.BM), ...PED.BM];
 // ---- HOW MANY SCREEN ROWS EACH SOCKET-LIKE RUNG COVERS, so occStamp can box it ----
 // The stamp needs one thing from a slot it did not project: the row extent of what is drawn
 // there. For an orb it reads that from orbBlankT/orbAnchT by variant; a socket's rung cannot go
@@ -7848,7 +7809,7 @@ if (process.env.LADDERSHEET) {
   // its heights come out in even numbers and why five of its ten rungs are the same 4px tall.
   // Sheeting the borrowed grid rather than the socket's own projection is the only way to see
   // that: the numbers in SOCK.L describe a shape that is never drawn.
-  if (!NOSOCK && SOCK.L.length) {
+  if (SOCK.L.length) {
     const sokRung = i => { const src = { grid: sockGrid(i) };
       return { xmag: SOCK.flagT[i] & 4, ymag: SOCK.flagT[i] & 8,
                parts: [...Array(SOCK.flagT[i] & 3)].map((_, k) => ({
@@ -8322,7 +8283,7 @@ if (process.env.LADDERSHEET) {
 // could not see. Bit pair 3 ($d026), as above; it overwrites art on the border rows and columns.
 boxBitmaps(HOLEBM);
 console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} socket` +
-              `${NOSOCK ? ' (DROPPED)' : ''} = ${HOLEBM.length} slots`);
+              ` = ${HOLEBM.length} slots`);
 // The three sprite blocks share VIC bank 3 and are loaded as SEPARATE FILES, so an overlap is
 // silent: the later file simply overwrites the earlier one's art and the wrong sprites appear on
 // screen with everything else -- pointers, positions, enable bits -- looking perfectly correct.
@@ -8340,7 +8301,7 @@ console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} s
                   ...(ORBHI_N ? [['renderer scratch', 0xee00, ORBHI_N * 64]] : []),
                   ['idol', IDOLBASE, IDOLBM.length * 64],
                   ['hole ladder', HOLEBASE, HOLEBM.length * 64],
-                  ...(SOCK_OWN && !NOSOCK && SOCK.BM.length
+                  ...(SOCK_OWN && true && SOCK.BM.length
                         ? [['socket ladder', SOCKBASE, SOCK.BM.length * 64]] : []),
                   ['the loader', LOADER_RUN, 0x100]];
   for (const [an, aa, al] of blocks) for (const [bn, ba, bl] of blocks)
@@ -8870,14 +8831,14 @@ const LVL_TABLES = [
   // The live counts. Shared loops read these instead of an immediate, which is the whole point:
   // a level with a socket has one more hole-like entity than a level without one, and the code
   // between them is the same code. $ff is not special here -- a level with no orbs has 0.
-  // Which LEVEL this level's hole drops into -- $ff for "nowhere", which is what a standalone
-  // or NOFALL build emits. It travels like everything else, so the level that arrives brings its
+  // Which LEVEL this level's hole drops into -- $ff for "nowhere", which is what a level dump
+  // emits. It travels like everything else, so the level that arrives brings its
   // own idea of where it leads. A level's own build cannot know the chain it will sit in, so the
   // main build overwrites this in every dump (see nextLevel below).
-  // One byte per EXIT, padded to NEXIT -- see LEVEL_EXITDST. $ff standalone (or NOFALL=1),
+  // One byte per EXIT, padded to NEXIT -- see LEVEL_EXITDST. $ff in a dump,
   // and $ff for an exit whose destination has not been built: the hole is then scenery.
   ['lvlNxtT', pad([...Array(Math.max(1, HOLES_AT.length))].map((_, i) => {
-    if ((!LVLLOAD) || process.env.NOFALL) return 0xff;
+    if (!LVLLOAD) return 0xff;
     const v = LEVEL_EXITDST[LVL]?.[i];
     if (v === undefined || v === null) return nextLevel(LVL);
       // A destination that is not resident is $ff -- but ONLY when this is a ONE-LEVEL
@@ -9772,8 +9733,7 @@ rayAcc  = $8015                 ; 2 bytes: 256 frames of rayN. The HIGH byte is 
 rayFrm  = $8017                 ; for free -- the same trick the profiler uses
 rayMean = $8018
 pvNdbg  = $8013                 ; pvN as pivPrep saw it, before pivPrep clears it
-${SPANCAP && RAYCNT ? `scapN   = $8022                 ; SPANCAP: splits the cap forced. Saturating, never reset:
-                                ;   the question is whether the hazard fires at all.` : ''}
+
 ${EDGCHK ? `ehShad  = $7100                 ; EDGCHK: last frame's colH, 4 per cell column ($7060-$7bff is free
 ehN     = $71a0                 ;   per the image-hole report). Cell columns whose colH is unchanged
 ehAcc   = $71a1                 ;   this frame; 2-byte accumulator and its latched mean, same shape
@@ -10650,9 +10610,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         sta edgAcc
         sta edgAcc+1
         sta chnAcc
-        sta chnAcc+1` : ''}${SPANCAP && RAYCNT ? `
-        lda #$00
-        sta scapN` : ''}${EDGCHK ? `
+        sta chnAcc+1` : ''}${EDGCHK ? `
         sta ehN
         sta ehGN
         sta ehAcc
@@ -10669,9 +10627,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         sta chdAcc
         sta chdAcc+1
         sta pvAcc
-        sta pvAcc+1` : ''}${STILLSKIP ? `        lda #$01                ; the pose orbMove compares against is uninitialised scratch, so
-        sta entDty              ;   force the FIRST frame to project rather than risk a match
-` : ''}${OCCCHK ? `        lda #$00                ; OCCCHK's counters are equates over uninitialised scratch, and a
+        sta pvAcc+1` : ''}${OCCCHK ? `        lda #$00                ; OCCCHK's counters are equates over uninitialised scratch, and a
         sta occArm              ;   garbage occBad is exactly the answer this must never give
         sta occChk
         sta occBad` : ''}
@@ -10856,21 +10812,7 @@ subLp0: ldx sp
         rol
         cmp tmp2
         bne subSp
-${SPANCAP ? `        ; ---- SPANCAP: is this span narrow enough that nothing can HIDE inside it? ----
-        ; The merge test above compares faceIdT at the two ends and never looks between them, so
-        ; a free-standing block with the same wall behind both ends is invisible to it. Anything
-        ; hiding in here is nearer than this face, so it subtends at least F_COL/d columns;
-        ; colH is 88/d, so the bound is 1.397*colH and spanCapT holds it per colH.
-        ; spanL's colH, not the smaller of the two ends: one load instead of four, and the two
-        ; ends of a merge candidate are the same face, so their distances are close.
-        ldx spanL
-        lda colH,x
-        tax                     ; X = this face's height -> its own minimum occluder width
-        lda spanR
-        sec
-        sbc spanL               ; A = span width in columns
-        cmp spanCapT,x
-${SPANCAP && RAYCNT ? '        bcc scOk\n        inc scapN               ; saturating: the question is whether it fires at all\n        bne subSp\n        dec scapN\n        jmp subSp\nscOk:\n' : '        bcs subSp               ; wide enough to hide a cell -> split and look between the ends\n'}` : ''}        jmp subLp               ; merged: the interpolation happens once per FACE, at subDn
+        jmp subLp               ; merged: the interpolation happens once per FACE, at subDn
         ; The face changes somewhere in this span. Once the span is a single column wide the
         ; boundary is pinned, and THIS is the only place in the frame it can be discovered --
         ; so record it straight into cstepT. The old route was to write a face id into all
@@ -14122,8 +14064,7 @@ irqArm: lda #${hx(SPLITLINE)}
         inc frameCnt
         bne irqNf
         inc frameCnt+1
-irqNf:${MELODY && SOUND ? `        jsr melTick             ; 60Hz, and the next raster compare is already armed above
-` : ''}
+irqNf:
 irqd:   lda #$ff
         sta $d019
 ${BGLOAD ? `        lda zlIn                ; BGLOAD: in the loader at the bottom of the frame? the game is
@@ -14231,9 +14172,9 @@ orbMove:
         ; spent arriving at last frame's answer. The sprite registers already hold it. All that
         ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
         ; rewrites the screen every frame and puts plain SOLID back.
-${STILLSKIP ? '' : `        jmp obMoved             ; DEADCODE-OK: the still-frame short-circuit is off until the
+        jmp obMoved             ; DEADCODE-OK: the still-frame short-circuit is off until the
                                 ; occlusion stamping lands -- see the comment above it.
-`}${DIE ? `        lda dieSt               ; the cut scene owns the sprites from the swap onward. Clearing
+${DIE ? `        lda dieSt               ; the cut scene owns the sprites from the swap onward. Clearing
         cmp #$02                ;   omEn inside the swap did not hold: the swap runs from mfIn and
         bcs omDead              ;   the REST of that same frame still calls orbMove, which put the
 ` : ''}        lda entDty              ; an entity moved even though the player did not. Without this
@@ -16321,7 +16262,7 @@ ${CEILVARY ? `        tax
         ldx hlv                 ; WHICH exit did fallChk match? Its destination is lvlNxtT's
         lda lvlNxtT,x           ;   entry for that exit -- one byte per exit since the hub got
                                 ;   four of them. $ff means nowhere --
-        cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
+        cmp #$ff                ;   an exit whose destination is not built, so the hole is scenery
         beq lvlEnd
         pha                     ; wallsBack does not preserve A, and the stack is cheaper here
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the arriving file carries its\n                                ;   own, and wallStT is engine state that must not follow us out\n' : ''}        pla
@@ -17212,55 +17153,7 @@ ooVCmpX:
 ` : ''}${OCCLAZY ? 'ooSkip:\n' : ''}        rts
 
 
-${MELODY ? `; ---- melTick: voice 3, called from the TOP-OF-FRAME IRQ ----
-; In the IRQ and not the main loop, because the main loop runs at 19fps and varies: note lengths
-; would follow the frame rate (the same mistake tickDelta exists to undo) and the shimmer would
-; be a 19Hz warble instead of a sheen. irqTop arms the next raster compare BEFORE it calls this,
-; and the next split is ~9,750 cycles away, so there is room. The IRQ has already saved A/X/Y.
-;
-; The shimmer is Hubbard's trick: flip the waveform between triangle and sawtooth every single
-; frame. Same pitch, same envelope -- the timbre alternates faster than the ear separates it and
-; the note reads as one bright, unstable tone.
-melTick:
-        lda melPh
-        eor #$ff
-        sta melPh
-        bmi melTri
-        lda #$21                ; sawtooth + gate
-        bne melW                ; always taken
-melTri: lda #$11                ; triangle + gate
-melW:   sta melWav
-        dec melCnt
-        bne melHold
-        lda #${hx(MEL_DUR)}     ; ---- next note ----
-        sta melCnt
-        ldx melIx
-        inx
-        cpx #${hx(melFn.length)}
-        bcc melIx2
-        ldx #$00
-melIx2: stx melIx
-        lda melLoT,x
-        sta $d40e
-        lda melHiT,x
-        sta $d40f
-        lda melWav
-        and #$fe                ; gate LOW for this one frame: the envelope only retriggers on
-        sta $d412               ;   the edge, and the 16ms gap is what articulates the figure
-        rts
-melHold:
-        lda melCnt
-        cmp #${hx(MEL_DUR - MEL_GATE)}
-        bcc melTail
-        lda melWav              ; head of the note: gated, attacking then settling to sustain 8
-        sta $d412
-        rts
-melTail:
-        lda melWav              ; released early, so the note has thinned out but not vanished
-        and #$fe                ;   by the time the next one fires. The shimmer keeps running
-        sta $d412               ;   through the tail
-        rts
-` : ''}
+
 ${SNDTEST ? `; ---- sndKeys: 4/5 sweep the cutoff, 6/7 step the pulse width ----
 ; Same joystick masking as palKeys: joy-1 shares $dc01 with the keyboard columns, so read the
 ; port with NO row selected first and force whatever the stick holds back high. The cutoff
@@ -20593,8 +20486,7 @@ pedVisT: !byte ${pedVisT.join(',') || '0'}
         * = ${hx16(RUNTAB)}
 runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it
-${SOUND ? `${MELODY ? `melLoT: !byte ${melFn.map(v => v & 255).join(',')}
-melHiT: !byte ${melFn.map(v => v >> 8).join(',')}` : ''}` : ''}
+${SOUND ? `` : ''}
         * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
 ; moveXT/moveYT are 512 bytes of TABLE that were sitting inside the code block -- the scarcest
 ; resource on the machine -- at $1f3e, which is not even page-aligned, so a byte-indexed read
@@ -22182,15 +22074,7 @@ ${SNDTEST ? `                                ; SNDTEST: voice 2 never gets a wav
         sta sndVol
 ` : `        sta $d40b
 `}
-${MELODY ? `        lda #${hx(MEL_AD)}      ; voice 3 plucks: no attack, short decay, no sustain
-        sta $d413
-        lda #${hx(MEL_SR)}
-        sta $d414
-        lda #$01                ; so the first melTick rolls straight over to note 0
-        sta melCnt
-        lda #${hx(melFn.length - 1)}
-        sta melIx
-` : ''}        rts
+        rts
 
 ; An effect is a ROW OF TABLES, not code. sfxTick reads length, waveform, envelope, filter
 ; routing, peak volume and a pitch table out of them and never knows which effect is playing,
@@ -24191,15 +24075,7 @@ sdPut1: lda rowLoT,y
         sta (sdPtr),y
         rts
 
-${SPANCAP ? `        ; Placed in the stream, not at a fixed origin: the free run below HAZ_BASE starts at a
-        ; different address in a chained build, and a hard address collided there.
-; SPANCAP: widest span, in columns, that a face at this colH may cover without being able to
-; hide a whole cell in front of it. F_COL/d columns per cell, colH = 88/d, so F_COL*colH/88.
-; colH 0 and 1 would give 0-1 and force a split of every single-column span, which can never
-; hide anything -- floor at 2.
-spanCapT: ${chunk(Array.from({length:256},(_,h)=>{const F=(160/2)/Math.tan(47/2/256*2*Math.PI);
-  return Math.max(2,Math.min(255,Math.round(F*h/88)));})).trim()}
-` : ''}${HAZRT ? `        ; The walker and all its data. The dispatcher stays down in the
+${HAZRT ? `        ; The walker and all its data. The dispatcher stays down in the
         ; main code stream's headroom; only this needs somewhere with room.
         ; NO FIXED ORIGIN any more (2026-09-16). It sat at HAZ_BASE = $a700 so the lists would be
         ; at the same address on every level -- but every level-specific table in here is in the
@@ -25812,13 +25688,13 @@ try {
                      data: [...HOLEBM.flat(), ...IDOLBM.flat(),
                             ...ORBBM.slice(ORBLO_N, NORBBM).flat()],
                      length: (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64 }] : []),
-    ...(SPRITES && SOCK_OWN && !NOSOCK && SOCK.BM.length
+    ...(SPRITES && SOCK_OWN && true && SOCK.BM.length
           ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: SOCK.BM.flat() }] : []),
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
     ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.slice(0, ORBLO_N).flat() }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
-    // socket ladder vacates under NOSOCK. This is DATA the VIC never reads -- it is copied to a
+    // bank 3 has free. This is DATA the VIC never reads -- it is copied to a
     // screen slot when its turn comes -- so it only has to be RAM that nothing else touches, and
     // it has to survive a warm restart, because dieKey does `jmp entry` and reloads nothing.
     ...(DIE && PICSEG.length ? [{ tag: 'P', name: 'IPIC', at: PICBASE, data: PICSEG }] : []),
@@ -25917,7 +25793,7 @@ try {
   // Krill is the 13 seconds it was waiting behind. It arrives PACKED (see make-quote.mjs) and
   // IQOT decrunches it to $f400 itself.
   const QUOTE = (() => {
-    if (!DIE || process.env.NOQUOTE) return null;             // the picture machinery owns bank 3's tail
+    if (!DIE || undefined) return null;             // the picture machinery owns bank 3's tail
     let q; try { q = JSON.parse(readFileSync('./quote-screen.json', 'utf8')); }
     catch { return null; }                                    // not generated: ship without it
     const { QUOTE_SCR, QUOTE_CHR } = quoteAddrs;
@@ -26138,7 +26014,7 @@ try {
                             // the file list because this array feeds the free-space calculator
                             // as well as the guard: left out, 768 bytes of live sprite data read
                             // as free space, and the next thing placed there would land on it.
-                            ...(SOCK_OWN && !NOSOCK && SOCK.BM.length
+                            ...(SOCK_OWN && true && SOCK.BM.length
                               ? [['SOCKBASE', SOCKBASE, SOCKBASE + SOCK.BM.length * 64]] : []),
                             ['LOADER_RUN', LOADER_RUN, 0xd000],
                             ...(PICSEG.length ? [['PICBASE', PICBASE, PICBASE + PICSEG.length]] : []),
