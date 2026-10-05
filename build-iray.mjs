@@ -17554,9 +17554,9 @@ oSCbS:  sta oSInv+1
         jmp oSCwS               ;   already poisoned -- but a stamp in the BLANK run was invisible
 oSCwB:  lda #<cwB               ;   to both, so rfCw1's compare kept matching and those rows were
 oSCwS:  sta oSInvW+1            ;   never redrawn again.
-        lda osN
+${process.env.OSPROF ? '        jsr pfT3              ; OSPROF: occStamp setup (before any slot)\n' : ''}        lda osN
         beq oSHole              ; no orb slots at all: straight to the hole-like ones
-oSLoop: ldx osI
+oSLoop:${process.env.OSCNT ? ' inc osCntV             ; OSCNT: slots occStamp visits (16-bit)\n        bne oSCv\n        inc osCntV+1\noSCv:' : ''} ldx osI
         lda obIX,x              ; a HOLE's slot: it carries no stamp state, and unlike the gate
         cmp #$fe                ;   below this test is always here, because ORBGATE is off by
         beq oSUpHf              ;   default and cannot be relied on to fence anything
@@ -17569,6 +17569,10 @@ oSLoop: ldx osI
                                 ;   exit hole keeps holeTail's all-or-nothing test instead --
                                 ;   it is the wall's own black and has nothing to clip.
 oSEnt:
+${process.env.OSCNT ? `        inc osCntE              ; OSCNT: slots taking the FULL path
+        bne oSCe
+        inc osCntE+1
+oSCe:` : ''}
 ${ORBGATE ? `        lda obOcc,x
         bpl oSNext              ; nothing reachable from this cell can occlude this orb
 ` : ''}
@@ -17640,11 +17644,42 @@ oSRok:  sta osRowB
         bcc oSRok2
 oSNone: jmp oSDone              ; nothing of this orb is on screen
 oSRok2:
-        ; walk the spans, exactly as the whole-orb test does
+        ; ---- start at the first span that can overlap this entity, not at the screen's left edge ----
+        ; Span i covers [bndT[i-1], bndT[i]-1] (span 0 from column 0, the last to 159), bndT ascending,
+        ; so the first one reaching obL is index = how many boundaries are <= obL. This was a LINEAR
+        ; walk from column 0 for every slot -- ~600 cycles a slot on the hub, which stamped nothing.
+        ; Binary search, lo = 0 .. hi = nbnd; everything from here on is the scan it always was.
         lda #$00
-        sta ohL
-        sta ohBX
-oSSpan: ${DBGORB ? `inc oSSpn
+        sta ohBX                ; lo
+        lda nbnd
+        sta ohHiB               ; hi
+oSBl:${process.env.OSCNT ? ' inc osCntB              ; OSCNT: binary-search steps\n        bne oSCb\n        inc osCntB+1\noSCb:' : ''}   lda ohBX
+        cmp ohHiB
+        bcs oSBd
+        clc
+        adc ohHiB
+        ror                     ; (lo + hi) / 2, the add's carry rotated back in
+        tax
+        lda bndT,x
+        ldy osI
+        cmp obL,y
+        beq oSBle               ; a boundary AT obL: the span it opens is the first one
+        bcs oSBgt
+oSBle:  inx
+        stx ohBX                ; lo = mid + 1
+        jmp oSBl
+oSBgt:  stx ohHiB               ; hi = mid
+        jmp oSBl
+oSBd:   ldx ohBX                ; the span's left edge: column 0, or the boundary before it
+        lda #$00
+        cpx #$00
+        beq oSBs
+        lda bndT-1,x
+oSBs:   sta ohL
+oSSpan: ${process.env.OSCNT ? `inc osCntP              ; OSCNT: spans examined
+        bne oSCp
+        inc osCntP+1
+oSCp:   ` : ''}${DBGORB ? `inc oSSpn
         ` : ''}ldx ohBX
         cpx nbnd
         bcc oSSB
@@ -17747,6 +17782,7 @@ oSNext: inc osI
 oSHole: lda osN
         cmp #$08
         beq oSDn
+${process.env.OSPROF ? '        jsr pfT7              ; OSPROF: the ORB slots (the hole slots follow, closing in pfT16)\n' : ''}
         lda onvH
         cmp #$08
         beq oSDn                ; nothing hole-like took a slot this frame
@@ -17759,7 +17795,7 @@ oSDn:   rts
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
-oSCells:${process.env.OCCFBN ? ' inc oSHist+6           ; OCCFBN: oSCells ENTRIES, free-running\n       ' : ''}${ORBNOCELL ? `rts
+oSCells:${process.env.OSCNT ? ' inc osCntS             ; OSCNT: slots it actually STAMPS\n        bne oSCs\n        inc osCntS+1\noSCs:' : ''}${process.env.OCCFBN ? ' inc oSHist+6           ; OCCFBN: oSCells ENTRIES, free-running\n       ' : ''}${ORBNOCELL ? `rts
 ` : ''}        lda osL
         and #$03
         tay
@@ -17999,7 +18035,11 @@ oSCId:  rts
 ;
 ; Only reached by orbs that were actually stamped, so an unoccluded orb pays nothing and keeps
 ; its seams -- which is the whole reason the priority bit is per orb rather than global.
-oSDeseam:
+oSDeseam:${process.env.OSCNT ? `
+        inc osCntD              ; OSCNT: deseam passes
+        bne oSCd
+        inc osCntD+1
+oSCd:` : ''}
         ldx osI
         lda obCR,x              ; the orb's full cell range; hoisted, CPY has no abs,x
         cmp #$28
@@ -19192,9 +19232,11 @@ holeOne:lda nHoleT              ; a level with no hole-likes at all: nothing to 
         beq hoRts
         lda #$00                ; the exits first, so they can never lose a slot to a
         sta hoI                 ;   socket -- the slots are allocated downward and it is the
-hoLp:${ZONES ? `   ldx hoI                 ; ZONES: this hole-like's zones against the player's (entGate set znP)
-        lda hzMskT,x
-        and znP
+hoLp:${ZONES ? `   lda hoI                 ; ZONES: entGate's VERDICT for this hole-like -- its zone test AND the
+        clc                     ;   cone, already in cnOkT. Checked here, BEFORE hlSet re-patches the
+        adc nOrbT               ;   drawing routine and orbOne is called only to read the same byte
+        tax                     ;   and bail: that cost ~650 cycles per culled hole-like, every frame
+        lda cnOkT,x             ;   (the hub profile, 2026-10-05: 7 hole-likes walked, 4 drawn)
         beq hoNx` : `   lda hoI                 ;   biggest thing here
         asl                     ; x32: this entity's LOS bitmap -- ceil(MAPN/8) per entity, and
         asl
@@ -19225,7 +19267,7 @@ hoLp:${ZONES ? `   ldx hoI                 ; ZONES: this hole-like's zones again
         adc nOrbT               ; hole-like entities follow the orbs in orbXCT/orbYCT
         sta oidx
         jsr orbOne              ; orbOne branches to holeTail on the index
-        ; ---- EVERY exit draws, not just hlv's ----
+${ENT1PROF ? "        jsr pfT13               ; ENT1PROF: a hole-like's DRAWING (holeTail) -- without this close it lands\n                                ;   in the NEXT entity's delta+cone bucket, which is how it read as 2,000 cy\n" : ''}        ; ---- EVERY exit draws, not just hlv's ----
         ; This used to jump hoI past the other exits, because a level had two holes that took
         ; turns and only one of them was real. The hub has FOUR and all four are ways out, so
         ; three of them were invisible floor. (The user, 2026-09-24: "would love the holes to be
@@ -22232,7 +22274,7 @@ hrpHit: tya
         rts
 ${ZONES ? `${LD('zoneT', ZN_BUILD.zoneT.join(','), ': !byte ')}   ; ZONES: every cell's zone, two to a byte
 ${LD('hzMskT', pad(ZN_BUILD.hmask, NHOLE).join(','), ': !byte ')}   ; ZONES: each hole-like's zones (its disc)
-zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask
+zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0' : ''}
 znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame` : LD('holeSeeT', holeSee.join(","), ': !byte ')}
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
         ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
@@ -22841,6 +22883,7 @@ ${LD('orbY0T', LVLT('orbY0T').join(','), ': !byte ')}
 ; screen", the observation test the angels freeze on. Sized like orbXCT so the HOLE's index,
 ; which shares oidx, lands somewhere harmless rather than past the end.
 orbSeenT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}
+ohHiB:  !byte 0                 ; occStamp's binary search: the upper bound
 ${CONEGATE ? `; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
 ; orbSeenT, so the hole-likes' indices -- which share oidx -- land inside it.
 ${ENTHZN && process.env.HZCNT ? `vhRejT: !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; HZCNT: frames each entity was culled by the horizon
