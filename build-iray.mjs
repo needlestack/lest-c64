@@ -98,20 +98,9 @@ const CHAIN = (process.env.CHAIN ?? '1,2,3,4').split(',').map(Number);
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
 const D64OUT = process.env.D64 ?? 'latest.d64';
 const LVL = +(process.env.LVL ?? CHAIN[0]);
-// ---- LATE: levels that are NOT resident at boot and arrive from disk while the game runs ----
-// The hub's three coloured exits name them. Until the loader that brings them in exists they are
-// exits with nowhere to go: lvlNxtT carries the level number, the runtime looks it up in lvlAtT,
-// finds it in no slot and does nothing -- which is the same "dead hole" a level out of the chain
-// has always been, and is the honest behaviour for a destination that has not arrived yet.
-// They are declared rather than inferred so the exit guard can tell "not built" from "typo".
-const LATE = (process.env.LATE ?? '').split(',').filter(v => v.trim() !== '')
-  .map(Number).filter(n => n > 0 && !CHAIN.includes(n));
-// EVERY level the image has to be able to RUN, resident or not. A level loaded from disk brings
-// its tables with it and nothing else: its code -- the seam outline, the idol, the pedestals --
-// has to be in the image already, because there is nowhere for code to arrive into. So every
-// per-feature flag keys off this list and not off CHAIN, and the cost of a late level's features
-// is paid at build time whether or not it is resident at boot.
-const ALLLVL = [...CHAIN, ...LATE];
+// EVERY level the image has to be able to RUN. (It once also held the LATE levels, which arrived
+// from disk mid-game; loading on demand made every level that, so it is the chain.)
+const ALLLVL = [...CHAIN];
 // ---- EVERY LEVEL THE SOURCE DEFINES, whatever this build happens to carry ----
 // The per-feature flags below used to key off ALLLVL -- "does any level IN THIS BUILD use the
 // idol?" -- so the engine's mechanics, and therefore its size, depended on which levels the
@@ -592,9 +581,7 @@ const SOCK_MAP = (() => {
   ].map(r => r.split(''));
   return punchWalls(rows.map(r => r.join('')), LEVEL_WALLS[2].walls);
 })();
-if (SOCKROOM && process.env.TWOLEV === '0') {   // built ALONE, for looking at things: one
-  process.env.NPIC ??= '1';                       //   picture. Defaults, each still overridable.
-}
+
 // NOSOCK=1 drops the socket bitmaps (the seated-orb ones went in 2026-09-26; see PICBASE).
 // They are emitted even in levels with no
 // sockets, and at 6 bitmaps a rung the angel's close-range tier needs every slot it can get.
@@ -789,22 +776,12 @@ const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) ma
 // Sized to the live level alone they are wrong for the other one: level 1 has 25 wall runs (4
 // mask bytes an orb) and level 2 has 11 (2), so after a swap orb 0's four-byte clear ran over
 // orb 1's two-byte mask. One orb occluded correctly and the other was visible through walls.
-// ---- SOLO=1: AN IMAGE WITH NO LEVEL IN IT ----
-// The first real step of the engine/level split. Every per-level table stops being emitted and
-// becomes an EQUATE at its offset inside a page-aligned SLOT; the bytes ship as their own disk
-// file and land there. Nothing about the engine's code changes -- all ~146 absolute references
-// still name the same labels, which now resolve into the slot.
-//
-// This is NOT what BOOTSLOT=1 did. That swapped a disk-loaded blob with a level the image still
-// carried, so two levels were resident and dropping out of one landed in the other. Here the
-// image has no level to fall back to, which is the whole point of the exercise.
-// ---- THE DEFAULT IS NOW THE SEPARATED ARCHITECTURE ----
-// The image is engine only; every per-level table is an equate into a region in bank 3 that
-// arrives as its own disk file. SOLO=0 builds the old world, where the live level is baked into
-// the image and only the shadows come off disk -- kept for A/B, not for shipping.
-// CHAIN defaults to 1,2 because four levels' blobs (4 x 893) no longer fit bank 3 alongside the
-// graphics; more than two waits on the arena, which compact.mjs has measured but not yet built.
-const SOLO = process.env.SOLO !== '0';
+// ---- AN IMAGE WITH NO LEVEL IN IT (once SOLO=1; the only architecture now) ----
+// Every per-level table is an EQUATE at its offset inside a page-aligned SLOT; the bytes ship as
+// their own disk file and land there. The engine's absolute references still name the same
+// labels, which resolve into the slot. (SOLO=0, the old world with the live level baked into the
+// image, and BOOTSLOT, which swapped a disk-loaded blob with a level the image still carried, are
+// both gone.)
 // ---- ...AND THE COMPACTED LAYOUT IS THE DEFAULT TOO ----
 // engine code up from $0801, the level arena, then the data tables down from $c000. COMPACT=0
 // builds the old scattered layout, which is the only way to A/B a suspected layout regression.
@@ -828,30 +805,19 @@ const SLOT_AT = +(process.env.SLOT_AT ?? 0xf500);
 // disk that starts in level 1 and one that starts in level 2 -- the name string in the boot PRG.
 // The game image is not rebuilt and does not change.
 const BOOTLVL = +(process.env.BOOTLVL ?? CHAIN[0]);
-if (SOLO && !CHAIN.includes(BOOTLVL)) throw new Error(
+if (!CHAIN.includes(BOOTLVL)) throw new Error(
   `BOOTLVL=${BOOTLVL} is not in CHAIN=${CHAIN.join(',')}, so no file for it is built`);
-// MULTI vs TWOLEV. These used to be one flag and they are two different facts:
-//   MULTI  -- this build KNOWS several levels. It has their tables, so every shared table is
-//             sized to the largest and the per-level palette rows get emitted. Without it the
-//             image is sized and inked for ONE level, and a different level loaded into it
-//             renders in the wrong colours with tables too small for its contents.
-//   TWOLEV -- a level sits in a SHADOW in bank 3 and lvlSwap exchanges it with the live one.
-// SOLO wants the first and not the second: every level is its own disk file, so the image must
-// be sized for all of them and privileged toward none, but there is no shadow and nothing swaps.
-const MULTI = !process.env.LVLDUMP && process.env.TWOLEV !== '0';
-// SOLO no longer turns the shadow off. The point was never to lose the other levels -- it was to
-// get the LIVE level's bytes out of the image, and the way to do that while keeping falls is to
-// make the live level slot 0 of the same region the shadows already live in. lvlSwap exchanges
-// live tables with a shadow blob and does not care where the live tables are, so it needs no
-// change at all: the equates simply name bank 3 instead of the image.
+// MULTI -- this build KNOWS several levels. It has their tables, so every shared table is sized to
+// the largest and the per-level palette rows get emitted. False only in an LVLDUMP subprocess,
+// which is the dump of ONE level and stops before it assembles anything.
+const MULTI = !process.env.LVLDUMP;
 // ---- LVLLOAD: the destination level is READ OFF THE DISK on every fall ----
-// This is what makes the level count unbounded. With it there is no shadow and nothing to swap:
-// one live slot, and the arriving level is loaded over the departing one during the drop. A level
-// is ~705 bytes, about 0.15s at Krill's ~4.9 KB/s, inside a 0.53s fall -- and the same machinery
-// LATE already uses, which is why LATE and this are mutually exclusive rather than layered.
-const LVLLOAD = SOLO && MULTI && !LATE.length && process.env.NOLOAD !== '1';
-// TWOLEV is the SHADOW: a second level parked in RAM, exchanged by lvlSwap. Loading replaces it.
-const TWOLEV = MULTI && !LVLLOAD;
+// This is what makes the level count unbounded: one live slot, and the arriving level is loaded
+// over the departing one during the drop. (It replaced TWOLEV, a second level parked in a bank-3
+// SHADOW and exchanged by lvlSwap, and LATE, levels loaded mid-game into that shadow; both are
+// gone.) The same fact as MULTI -- every assembled build loads on demand -- kept under its own
+// name because the two read differently at their sites.
+const LVLLOAD = MULTI;
 // ---- VSLOTS: more than one level RESIDENT, and the engine POINTED at whichever is live ----
 // The user's design (2026-09-29, built 2026-10-03): a level lives ONCE, wherever it was loaded.
 // Every instruction that names a per-level table is listed at build time (vsLoT/vsHiT -- the
@@ -881,9 +847,6 @@ const VS_ARENA = ['lvlSlot1', 'lvlSlot2', 'lvlSlot3'].slice(0, VS_N - 1);
 // not zeros as the image gives the arena, so entry clears it: the variables start where they
 // always did.
 const VS_MOVE = { from: 0x8000, to: 0x807a, at: 0xf42f };
-// BOOTSLOT=1: install slot 0 before the first frame, so play begins in the level that came off
-// the disk rather than the one baked into the image. Needs a slot to exist and a level in it.
-const BOOTSLOT = process.env.BOOTSLOT === '1';
 // Which levels ride along, in ascending order. That order IS the slot order.
 const OTHERS = !MULTI ? [] : CHAIN.length === 1 ? [LVL] : CHAIN.filter(n => n !== LVL);
 const LVLALL = MULTI ? (() => {
@@ -912,26 +875,10 @@ const LVLALL = MULTI ? (() => {
 // entity counts) is taken across residents AND late levels together. Size a table to the
 // residents alone and the level that arrives at the hub overruns it.
 // Not in an LVLDUMP subprocess, which is the dump of ONE level and has no chain of its own.
-const LATEALL = (TWOLEV && LATE.length) ? (() => {
-  const { SOCKETS, ...envNoSock } = process.env;
-  return LATE.map(n => {
-    const tmp = `./.lvl${n}-tables.json`;
-    // CHAIN=n, not the inherited chain: a late level is not IN the chain, so inheriting it
-    // leaves the level resident in no chain at all -- WALL_LVLS comes out empty, WALL_BASE has
-    // no entry for it, and its sockets name wall NaN. Its own chain of one is what a dump is
-    // anyway (TWOLEV is off under LVLDUMP), and the global wall ids are patched in by
-    // CHAIN_GLOBAL here, exactly as they are for a shadow's dump.
-    // LATE='' so the child cannot try to build late levels of its own.
-    execFileSync(process.execPath, [process.argv[1]],
-      { env: { ...envNoSock, CHAIN: String(n), LATE: '', LVL: String(n), LVLDUMP: tmp },
-        stdio: ['ignore', 'ignore', 'ignore'] });
-    return JSON.parse(readFileSync(tmp, 'utf8'));
-  });
-})() : null;
 // Every level whose tables this build has to accommodate, resident or arriving. The distinction
 // that matters for SIZING is not which slot a level is in -- it is whether its bytes ever land
 // in these tables at all, and a late level's do.
-const LVLSIZED = [...(LVLALL ?? []), ...(LATEALL ?? [])];
+const LVLSIZED = [...(LVLALL ?? []), ...([])];
 
 // ---- ANGEL PATHING: a breadth-first distance map, filled a few cells per frame ----
 // The greedy chase this replaces tried three steps, all straight at the player, and stopped when
@@ -1366,8 +1313,6 @@ const HAZ_TOP = 0xa900;                               // RELOC + $2300, rayOffQS
 // top of the bank. $f450 is the lowest that clears ARC_MAP ($f380 + CELLCODES, ending $f448).
 // Bank 3 is now full around the shadow -- 8 bytes below it and a handful above -- so the next
 // thing that grows here fails the build rather than corrupting a level. That is the point.
-const LVLSHADOW = +(process.env.LVLSHADOW ?? 0xf431);   // hard against ARC_MAP's end, below ARC_GLY
-const LVLSHAD_BYTES = [];
 const HAZFACE = { W: 0, E: 1, N: 2, S: 3 };
 const hazRunT = { W: runW, E: runE, N: runN, S: runS };
 const hazSpare = new Map();
@@ -1787,7 +1732,7 @@ const FALL_ROUTE = [
   ['to',  15.5, 5.5],                              // onto the hole
   ['act', T_FALL, 600],                            // and wait for the drop. Nothing after it: the
 ];                                                 //   map has changed and the wall check cannot know
-// ROUTE=sock (LVL=2 TWOLEV=0 TOURW=1): the socket mechanic, headless. Take the north alcove's
+// ROUTE=sock (CHAIN=2 TOURW=1): the socket mechanic, headless. Take the north alcove's
 // orb, carry it to the doorway, seat it, and stand looking east through the pocket at the wall
 // that should now be gone. Ends there for the same reason FALL_ROUTE ends on the hole: the map
 // has changed and the wall check below cannot know.
@@ -1812,7 +1757,7 @@ const SOCK_ROUTE = [
   ['act', T_SPACE, 2],                             // seat it: the wall at (11,14) goes
   ['act', T_WAIT, 120],
 ];
-// ROUTE=block (LVL=2 TWOLEV=0 TOURW=1, angel ON): open the corridor, then drop the second orb
+// ROUTE=block (CHAIN=2 TOURW=1, angel ON): open the corridor, then drop the second orb
 // in the vanished wall's cell -- the one-wide chokepoint -- and look away for ten seconds. The
 // angel must still be east of (8,5) afterwards.
 const BLOCK_ROUTE = [
@@ -1825,7 +1770,7 @@ const BLOCK_ROUTE = [
   ['spin', 180],                                    // look away
   ['act', T_WAIT, 600],                             // and give the angel ten seconds
 ];
-// ROUTE=sock3 (CHAIN=3 TWOLEV=0 TOURW=1 ANGEL=0): level 3's east orb into S1 -- the chamber's
+// ROUTE=sock3 (CHAIN=3 TOURW=1 ANGEL=0): level 3's east orb into S1 -- the chamber's
 // north and west walls go -- then stand in the opening looking in.
 const SOCK3_ROUTE = [
   ['to', 12.5, 2.5], ['to', 12.5, 8.5],            // along row 2 (row 1 ends in an angel), down to the orb
@@ -1839,7 +1784,7 @@ const SOCK3_ROUTE = [
   ['to', 3.5, 3.5], ['spin', 360], ['spin', -360], // then a slow look round from the open floor:
   ['act', T_WAIT, 60],                             //   with ENTLOG, every entity in view must draw
 ];
-// ROUTE=l3rep (CHAIN=3 TWOLEV=0 TOURW=1 DIE=0 ANGFREEZE=1 ANGAT=4.5,1.5;1.5,6.5;6.5,6.5): the
+// ROUTE=l3rep (CHAIN=3 TOURW=1 DIE=0 ANGFREEZE=1 ANGAT=4.5,1.5;1.5,6.5;6.5,6.5): the
 // user's readout X133 Y127 A2F00 E041 E016 E066 after seating S1 -- the angel at (1,6) is 21
 // degrees right of centre, five cells off, and did not draw.
 const L3REP_ROUTE = [
@@ -3980,10 +3925,9 @@ const FLOG_N = 704;
 // Both are PURE RAM: anything here is runtime scratch, never loaded data, because the loader
 // would have to write it and the KERNAL would be using the same bytes to do so.
 const LOWBOOT = 0x0200, LOWSAFE = 0x033c, LOWEND = 0x03fc;
-// ---- and the two tenants evicted from VIC bank 3 to make room for a fourth resident level ----
-// The shadow region runs from LVLSHADOW up to the first CPU squatter in bank 3, and these two
-// WERE that squatter, capping it at $fe00. Moving them here lifts the wall to $fff9 -- 2,304
-// bytes to 2,809 -- which is what lets four levels be resident at once.
+// ---- and the two tenants evicted from VIC bank 3 to make room for more level data there ----
+// They were the first CPU squatter in bank 3, capping the level region at $fe00; moving them
+// here lifted it to $fff9.
 // The pivot scratch takes the CASSETTE half because it is written from the very first frame.
 // fallTailB takes the boot half because it is not written until a fall, which is minutes after
 // the last KERNAL LOAD -- and even a KERNAL-fallback load during play only clobbers bytes that
@@ -4675,13 +4619,7 @@ for (const m of PICS.maps) if (m.map.length !== 1000)
 // the socket ladder's home -- the two cannot both have it.
 // A fourth resident level and a second cut-scene picture are mutually exclusive: three shadows
 // leave IPIC no room below them. The chain wins, so a four-level build defaults to one picture.
-// How many of them fit is decided by the LEVEL SHADOW, not by the chain's LENGTH. IPIC loads at
-// $f100 and a shadow starts at $f500 whenever TWOLEV, which leaves 1024 bytes against a second
-// picture's 2000 -- so two have never fitted alongside a shadow of ANY size, one level's
-// included (the fit check reads LVLSHADOW, not the level count). The old rule keyed off
-// "4 or more levels" and so demanded two pictures for every shorter chain, which is why
-// CHAIN=4 on its own has always had to be told NPIC=1 by hand. Two pictures need TWOLEV=0.
-// MULTI, not TWOLEV: the reason a chain build gets one picture is that several levels' tables
+// MULTI: the reason a chain build gets one picture is that several levels' tables
 // leave less room, and that is just as true when the levels are disk files as when one is a
 // shadow. Keyed on TWOLEV, the first SOLO chain build asked for two pictures and died in the
 // cut-scene charset fit check -- a failure with no visible connection to levels at all.
@@ -5446,7 +5384,7 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // late level too -- LATEALL builds them. It is not about which slot a level occupies at boot but
 // whether this build has its tables at all, and the wall ids are global to the whole chain a
 // level can ever join, not to the four that happen to be resident.
-const RESIDENT = new Set([LVL, ...OTHERS, ...LATE]);
+const RESIDENT = new Set([LVL, ...OTHERS]);
 const WALL_LVLS = ALLLVL.filter(n => LEVEL_WALLS[n] && RESIDENT.has(n));
 const WALLS_ALL = WALL_LVLS.flatMap(lv => LEVEL_WALLS[lv].walls.map((cells, k) => ({ lvl: lv, k, cells })));
 // ---- WALL IDS ARE LEVEL-LOCAL (2026-09-30) ----
@@ -5541,21 +5479,6 @@ const PACK_HOLES = [];
 // NOPACK=1: skip the probe and pack nothing, for comparing against an unpacked layout.
 const PACK_AT = new Map();
 const PACKED = new Map();            // item name -> the hole it went in
-// First fit, largest item first. Fragmentation, not the total, is what limits this: a 97-byte
-// item cannot use three 30-byte holes, and on the LATE build 47 bytes of hole sat unused for
-// exactly that reason. So the big items have to choose first.
-const packInto = items => {
-  PACK_AT.clear(); PACKED.clear();          // re-run once per fixpoint iteration
-  for (const h of PACK_HOLES) PACK_AT.set(h.at, []);
-  const left = new Map(PACK_HOLES.map(h => [h.at, h.len]));
-  for (const it of [...items].sort((x, y) => y.size - x.size)) {
-    const h = PACK_HOLES.find(h => left.get(h.at) >= it.size);
-    if (!h) continue;                // stays where it was; the block has to hold it
-    left.set(h.at, left.get(h.at) - it.size);
-    PACK_AT.get(h.at).push(it);
-    PACKED.set(it.name, h.at);
-  }
-};
 // Emitted at the marker: an origin, then whatever landed in that hole.
 // EVERYTHING, at the end of the source. The assembler is address-indexed now (see asm6502),
 // so an origin may go backward into unwritten space -- which means a relocated table can simply
@@ -5586,7 +5509,7 @@ const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.leng
   execFileSync(process.execPath, [process.argv[1]],
     // CHAIN=lvl for a LATE level's wall, exactly as its dump does: inheriting the chain leaves
     // the level resident in no chain and its own walls unreachable. See LATEALL.
-    { env: { ...process.env, LVL: String(w.lvl), LATE: '',
+    { env: { ...process.env, LVL: String(w.lvl),
              ...(CHAIN.includes(w.lvl) ? {} : { CHAIN: String(w.lvl) }),
              WALLOFF: String(w.k + 1), LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
   return JSON.parse(readFileSync(tmp, 'utf8'));
@@ -5606,7 +5529,6 @@ const WALLVAR = WALL_MECH ? (WALLVARS?.[0] ?? true) : null;
 // So: a CHAIN level's walls stay in the image, because that level is resident anyway. A LATE
 // level's go in bank 3 with the level tables, to be loaded when the level is. The pointer tables
 // carry the address either way, so wallTog neither knows nor cares which kind it is reading.
-const LATEWALL = WALLS_ALL.map((w, i) => i).filter(i => !CHAIN.includes(WALLS_ALL[i].lvl));
 
 // Sized to the LARGER level, both of them. A run id past a level's own count has runBitT = 0, so
 // it sets no bit and costs only the loop iteration -- the padding is inert, not merely harmless.
@@ -5780,11 +5702,6 @@ const HUB_WIRED = [5, 6, 7].every(n => ALLLVL.includes(n));
 // what the destination assertion exists to refuse.
 const BLACK_DST = ALLLVL.includes(1) ? 1 : 0xff;
 const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4] };
-// The level whose exits name a late one: arriving there is what triggers the load. Derived
-// rather than written down, so wiring a different room to the late levels moves the trigger too.
-const LATEHUB = LATE.length
-  ? +(Object.keys(LEVEL_EXITDST).find(n => (LEVEL_EXITDST[n] ?? []).some(d => LATE.includes(d))) ?? 0)
-  : 0;
 // FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
 // hlv, and hlv is reset to 0 after every drop (see fallDone), so a headless run can only ever
 // take exit 0: on the hub that is 4->5->4->5 for ever and levels 6 and 7 are never entered.
@@ -6076,7 +5993,7 @@ const CHAIN_GLOBAL = {
   lvlNxtT: L => {
     const n = Math.max(1, NEXIT), d = LEVEL_EXITDST[L.level];
     return [...Array(n)].map((_, i) => {
-      if ((!TWOLEV && !LVLLOAD) || process.env.NOFALL) return 0xff;
+      if ((!LVLLOAD) || process.env.NOFALL) return 0xff;
       const v = d?.[i];
       // Past this level's own exit count the entry is padding and never read; $ff anyway.
       if (i >= (L.nExit ?? 1)) return 0xff;
@@ -7477,13 +7394,11 @@ const PICBASE = SPRBASE + NORBBM * 64;
 // two bytes in it and nothing at all at runtime.
 const PICSEG = DIE ? PICS.maps.slice(0, NPIC).flatMap(m => m.map) : [];
 if (PICSEG.length) {
-  // Up to the level shadow -- or, with no shadow to collide with, up to doomT, the lowest CPU
-  // squatter in bank 3's tail. A standalone build was being held to the chain's budget and
-  // refusing a picture it had 1.5K of room for.
-  const room = (TWOLEV ? LVLSHADOW : 0xfb00) - PICBASE;
+  // Up to doomT, the lowest CPU squatter in bank 3's tail.
+  const room = 0xfb00 - PICBASE;
   if (PICSEG.length > room) throw new Error(
     `IPIC is ${PICSEG.length} bytes but only ${room} are free between $${PICBASE.toString(16)} ` +
-    `and the level shadow at $${LVLSHADOW.toString(16)} -- ${NPIC} pictures do not fit`);
+    `and doomT at $fb00 -- ${NPIC} pictures do not fit`);
   console.error(`  cut scene: ${NPIC} picture(s), all as IPIC` +
                 ` at $${PICBASE.toString(16)} (${PICSEG.length} of ${room} bytes)`);
 }
@@ -8843,7 +8758,7 @@ const ARC_GLY = ARC_BLK + ARC_C0 * 8;
 // ...and the map lives in bank 3 too, in block 6's free run. It is READ by the CPU, and $f000
 // is plain RAM at the engine's port value, so the only thing it costs is 201 of those bytes --
 // against 201 in the image, which has no run that size to spare. Built from a 33-byte list.
-const ARC_MAP = 0xf368;   // hard against PICBASE's end -- see LVLSHADOW, which follows it
+const ARC_MAP = 0xf368;   // hard against PICBASE's end
 // ---- ...AND THE ARRIVING ARC'S, in block 5, at the SAME code numbers ----
 // fsLand is B,A,B: region 1 is the arriving rim and region 3 is the new room's floor, both
 // charset B on the same frame and needing opposite dither states -- the rim's surround is the
@@ -8869,12 +8784,6 @@ const SPLITLINE = 150;
 // and the readout glyphs put their ink on lines 1-5 of the cell.
 const HUDROW = 1;
 const hx = n => '$' + n.toString(16).padStart(2, '0');
-// The stores that rewrite lvlAtT once the late file is in. Built here rather than inside the asm
-// template -- three levels of nested backtick were one too many, and the join leaked into the
-// output as literal text -- and here rather than with LATEHUB, because hx is not declared yet up
-// there and a const in the temporal dead zone throws in every build that has a late level.
-const LATE_AT_CODE = LATE.map((n, i) =>
-  `        lda #${hx(n)}\n        sta lvlAtT+${i}`).join('\n');
 const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 
 // ---- THE PER-LEVEL TABLES, IN ONE PLACE ----
@@ -9204,7 +9113,7 @@ const LVL_TABLES = [
   // One byte per EXIT, padded to NEXIT -- see LEVEL_EXITDST. $ff standalone (or NOFALL=1),
   // and $ff for an exit whose destination has not been built: the hole is then scenery.
   ['lvlNxtT', pad([...Array(Math.max(1, HOLES_AT.length))].map((_, i) => {
-    if ((!TWOLEV && !LVLLOAD) || process.env.NOFALL) return 0xff;
+    if ((!LVLLOAD) || process.env.NOFALL) return 0xff;
     const v = LEVEL_EXITDST[LVL]?.[i];
     if (v === undefined || v === null) return nextLevel(LVL);
       // A destination that is not resident is $ff -- but ONLY when this is a ONE-LEVEL
@@ -9252,9 +9161,9 @@ if (PED_WALL !== 0xff && HAS_IDOL && CHAIN.includes(PED_LVL)) {
 for (const L of [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...LVLSIZED]) {
   // EVERY exit, not just the first: the hub's four each name their own destination.
   for (const [i, nxt] of (L.tables.lvlNxtT ?? []).entries())
-    if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt) && !LATE.includes(nxt))
+    if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt) && true)
       throw new Error(`level ${L.level}'s exit ${i} names level ${nxt}, which is neither in the ` +
-        `chain ${CHAIN.join(',')} nor declared LATE (${LATE.join(',') || 'none'})`);
+        `chain ${CHAIN.join(',')} nor declared LATE (none)`);
   // Wall ids are LOCAL, so "belongs to another level" is no longer expressible -- the check that
   // replaces it is that the id names a wall this level actually has. A socket pointing past its
   // own wall list would index a zero pointer pair and apply a delta from address $0000.
@@ -9308,94 +9217,7 @@ const HZ_LIVE = hazTabs(HAZ_SELF);
 // The shadow build runs THIS FILE in a subprocess with LEVEL2=1. Building both maps in one
 // process would mean untangling `map` and its two dozen module-level derivations into a function;
 // a subprocess costs a second build and nothing else. Same pattern as death-pics.json.
-if (TWOLEV) {
-  // orbOccT is a per-orb mask at OCCBYTES stride, and the shadow build sized its own stride from
-  // its own run count. Re-lay it on ours BEFORE anything pads the tail, or every orb after the
-  // first reads its mask from the middle of the previous one's.
-  // ONE PASS PER SHADOW LEVEL. Both of these ran on the FIRST other level alone, which was the
-  // same thing while only one rode along. With three resident, the second shadow kept its own
-  // stride and its own orbOccLoT bases while orbOcc1's `ldx #OCCBYTES-1` and orbOccHiT (which is
-  // not swapped) used ours -- the "one orb occluded correctly and the other visible through a
-  // wall" bug, one level further along where nothing was looking for it.
-  for (const L of LVLALL) {
-    if (L.occBytes !== OCCBYTES) {
-      const src = L.tables.orbOccT, out = [];
-      // THE SHADOW'S entity count, orbs and hole-likes both -- not ours. This loop used ORBS.length,
-      // this level's orb count, which happened to equal the shadow's whole entity count for as long
-      // as the two levels had the same population. The socket room (1 orb + hole + socket) as the
-      // live level with level 1 (2 orbs + 2 angels + hole) as its shadow truncated the shadow's six
-      // masks to one and the size check downstream caught the shortfall.
-      // Math.max(1, ...) to match NORB's own floor: the emitted tables always reserve ONE orb
-      // row even for a level that has none (the hub), so a shadow with nOrbs 0 still occupies it.
-      const n = Math.max(1, L.nOrbs) + L.nHoleLike;
-      for (let i = 0; i < n; i++) {
-        const m = src.slice(i * L.occBytes, (i + 1) * L.occBytes);
-        while (m.length < OCCBYTES) m.push(0);
-        out.push(...m);
-      }
-      L.tables.orbOccT = out;
-    }
-    // Positive proof that it happened, because the failure is silent: an un-restrided table is
-    // merely SHORT, and the padding below fills it to the right LENGTH with zeros while every
-    // mask past the first sits at the wrong offset. Length is not the invariant -- stride is.
-    const want = (Math.max(1, L.nOrbs) + L.nHoleLike) * OCCBYTES;   // NORB's floor, as above
-    if (L.tables.orbOccT.length !== want) throw new Error(
-      `level ${L.level}'s orbOccT is ${L.tables.orbOccT.length} bytes after the re-lay, not ` +
-      `${Math.max(1, L.nOrbs) + L.nHoleLike} entities x ${OCCBYTES} -- every mask but the first ` +
-      `would be read ` +
-      `from the middle of the one before it`);
-    // The counts USED to have to match, because they were immediates. They are swapped bytes now.
-    for (const [n, a] of LVL_TABLES) {
-      const b = L.tables[n];
-      if (!b) throw new Error(`level ${L.level} dumped no ${n}: the manifest changed under the subprocess`);
-      if (b.length > a.length) throw new Error(
-        `level ${L.level}'s ${n} is ${b.length} bytes but level ${LVL}'s is only ${a.length}, and the ` +
-        `swap exchanges in place. Pad level ${LVL}'s copy to ${b.length} (for the run tables that ` +
-        `means raising nextRun) or the extra bytes have nowhere to go.`);
-      // Short is fine and is the normal case -- a level with fewer wall runs than the live one
-      // pads with zeros. Run ids it never uses are never read.
-      while (b.length < a.length) b.push(0);
-    }
-  }
-  console.error(`  occluder stride: live ${OCCBYTES} bytes/entity` +
-    LVLALL.map(L => `, level ${L.level} ${L.occBytes}${L.occBytes !== OCCBYTES ? ' re-laid' : ''}`).join(''));
-  const report = () => (process.env.SHADOWBREAK &&
-      LVL_TABLES.forEach(([n, a]) => console.error(`    ${n.padEnd(12)} ${String(a.length).padStart(5)}`)),
-    console.error(`${LVLALL.length + 1} levels resident: each shadow is ${LVL_TABLES.length} ` +
-    `tables, ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} bytes`));
-  // The hazard tables are built here rather than dumped, because the shadow level's list POINTERS
-  // have to be offsets into THIS build's hazLstT. Both sides are then padded to a common length
-  // so a swap is a straight exchange -- the shorter side's tail is inert (an unreferenced cell in
-  // hazCT is never matched, since hazNT stops the scan first).
-  // ONE SET PER SHADOW LEVEL. This built a single HZ_SHAD from the FIRST other level alone --
-  // and the manifest's shadow override then applied it to EVERY shadow slot. With two levels that
-  // was the same thing; in a three-level chain level 3 silently inherited level 2's lists, and
-  // level 2 splits nothing, so level 3's free-standing column was merged away and vanished while
-  // strafing. The analysis had found its 40 hazard cells all along -- they just never travelled.
-  // LVLSIZED, not LVLALL: a LATE level needs its merge-hazard lists as much as a resident one,
-  // and a level missing from this Map falls back to an empty table that pads to ZERO -- which is
-  // a list pointer of $0000. The first render after swapping into that level then jsr's through
-  // it, and the tell is a PC of $0000. This codebase has had exactly that once before, when
-  // every list pointer in the socket room's shadow came out $0000.
-  const HZ_SHAD = new Map(LVLSIZED.map(L => [L.level, hazTabs(L.haz)]));
-  for (const [k, fill] of [['ct', 0], ['lo', 0], ['hi', 0], ['lst', 0], ['rst', '$ff'], ['n', 0xff]]) {
-    // At least one byte each: a zero-length chunk would be recorded in lvlLenT as 0, which the
-    // swap loop reads as 256 -- and two levels that both split nothing would otherwise produce
-    // exactly that.
-    const m = Math.max(1, HZ_LIVE[k].length, ...[...HZ_SHAD.values()].map(h => h[k].length));
-    while (HZ_LIVE[k].length < m) HZ_LIVE[k].push(fill);
-    for (const h of HZ_SHAD.values()) while (h[k].length < m) h[k].push(fill);
-  }
-  const perLvl = k => new Map([...HZ_SHAD].map(([lv, h]) => [lv, h[k]]));
-  LVL_TABLES.push(
-    ['hazNT', HZ_LIVE.n, perLvl('n')], ['hazCT', HZ_LIVE.ct, perLvl('ct')],
-    ['hazLoT', HZ_LIVE.lo, perLvl('lo')], ['hazHiT', HZ_LIVE.hi, perLvl('hi')],
-    ['hazLstT', HZ_LIVE.lst, perLvl('lst')], ['hazRstT', HZ_LIVE.rst, perLvl('rst')]);
-  report();
-  console.error(`  merge-hazard: level ${LVL} (live) splits ${hazRec.length}` +
-    LVLALL.map(L => `, level ${L.level} (shadow) splits ${L.nHaz}`).join('') +
-    `; ${HZ_LIVE.lst.length + HZ_LIVE.rst.length} list bytes each side`);
-}
+
 
 // ---- THE SLOT LAYOUT (SOLO=1) ----
 // Computed HERE and not beside LVL_TABLES, because the hazard tables are pushed onto the manifest
@@ -9408,7 +9230,7 @@ const SLOT_SUB = { nOrbT: ['nOrbT', 'nHoleT', 'nExitT', 'nOrbM1T', 'nSockT', 'nA
 // WHICH LEVEL THIS IS travels with the level. It is one byte and it is read by the HUD, but it is
 // the level's own identity, so leaving it in the image would leave the image knowing which level
 // it was built for -- exactly the privilege SOLO exists to remove.
-if (SOLO) LVL_TABLES.push(['lvlMeT', [LVL]]);
+LVL_TABLES.push(['lvlMeT', [LVL]]);
 // ---- THE VARIABLE-LENGTH TAIL ----
 // Everything above is budget-sized, so its offset into the blob is identical for every level
 // and the engine names it with a fixed equate. holeSeeT is sized to the level instead, which
@@ -9490,16 +9312,16 @@ const slotEquates = () => LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n]))
 // slot or a definition here, and the guard after the template checks it is exactly one of them.
 const SLOT_DROPPED = new Set();
 const LD = (name, body, sep = ': !byte ') => {
-  if (SOLO && SLOT_OFF[name] !== undefined) { SLOT_DROPPED.add(name); return ''; }
+  if (SLOT_OFF[name] !== undefined) { SLOT_DROPPED.add(name); return ''; }
   return name + sep + body;
 };
-if (SOLO && (SLOT_AT & 255)) throw new Error(
+if (SLOT_AT & 255) throw new Error(
   `SOLO: SLOT_AT must be page-aligned (mapT sits at offset 0)`);
 
 // The hazard MACHINERY has to exist whenever any resident level needs it, not just when THIS
 // level does. Level 1 splits nothing, so on its own it emits none of this -- but level 2 rides
 // along in the shadow and does, and the code is shared. hazNT is what turns it off per level.
-const HAZRT = HAZ || TWOLEV || !!WALLVAR;   // ...and the wall delta is walked by hzRun too
+const HAZRT = HAZ || false || !!WALLVAR;   // ...and the wall delta is walked by hzRun too
 
 // The delta, as two lists of hzRun triples -- one to take the wall out, one to put it back.
 // hzRun already walks (addrLo, addrHi, value) until $ff, which is exactly this job at a larger
@@ -9595,117 +9417,22 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
 }) : [];   // [] not null: with the mechanic always compiled (see WALL_DELTA) a build
            //   whose levels have no removable walls has an EMPTY list, not an absent one
 
-// ---- where a LATE level's wall lists land in bank 3, laid out here so both ends agree ----
-// Straight after the level blocks, in the same region and so in the same file: the tables and
-// the walls of a level arrive together or not at all. The image's pointer tables are built from
-// these addresses, so wallTog reads a late level's list exactly as it reads a resident one.
-// Sized and guarded rather than assumed -- the region's slack is small, and the failure if it
-// ever ran past would be a wall that patches whatever came next.
-const LATEWALL_AT = {};
-let LATEWALL_END = 0;   // for the shadow guard, which knows the real ceiling
 // ---- and now decide which wall deltas go in the image's scraps ----
 // AT MODULE LEVEL, before the template is built: packAll() reads the assignment.
 // ...and NOT under SOLO: the deltas are not in the image at all there, they ride in the slot,
 // so there is nothing to place and the probe would be measuring a layout that never ships.
-if (WALL_DELTAS && !PACK_PROBE && !SOLO && process.env.NOPACK !== '1'
-    && !process.env.LVLDUMP && !process.env.WALLOFF) {
-  // ---- THE PROBE, RUN TO A FIXPOINT ----
-  // Each pass builds us again with a stated set of items left out, and reports the holes that
-  // leaves. Omitting everything (the first pass) over-reports, because the remainder pass 2
-  // cannot place goes back inline and eats the space it freed. So: assign from that map, then
-  // re-probe omitting exactly what was placed, and stop when the set stops changing. Two passes
-  // is the normal case; three is the cap, and the last assignment is the one that ships.
-  const probe = `./.packprobe-${process.pid}.json`;
-  const ITEMS = WALL_DELTAS.map((d, k) => LATEWALL.includes(k) ? null
-    : { name: `wallDT${k}`, text: [...d.quad, '$ff'].join(','),
-        size: d.quad.length * 4 + 1 }).filter(Boolean);
-  try {
-    let omit = ITEMS.map(i => i.name), settled = false;
-    for (let pass = 0; pass < 3 && !settled; pass++) {
-      execFileSync(process.execPath, [process.argv[1]],
-        { env: { ...process.env, PACKPROBE: probe, PACKOMIT: omit.join(',') },
-          stdio: ['ignore', 'ignore', 'inherit'] });
-      const { holes, eq } = JSON.parse(readFileSync(probe, 'utf8'));
-      PACK_HOLES.length = 0;
-      // A hole is free of EMITTED data; it is not necessarily free of the PROGRAM. Subtract every
-      // equate's RESERVED EXTENT -- the probe computes those with reserveOf, the build's own rule.
-      const bans = eq.slice().sort((x, y) => x[0] - y[0]);
-      for (const [lo, hi] of holes) {
-        let at = lo;
-        while (at < hi) {
-          const b = bans.find(([bl, bh]) => at >= bl && at < bh);
-          if (b) { at = b[1]; continue; }                       // inside a reservation: step past it
-          const nxt = bans.filter(([bl]) => bl > at).map(([bl]) => bl);
-          const end = Math.min(hi, nxt.length ? Math.min(...nxt) : hi);
-          if (end > at) PACK_HOLES.push({ at, len: end - at, why: `measured hole $${at.toString(16)}` });
-          at = Math.max(end, at + 1);
-        }
-      }
-      // Adjacent survivors merge, or a 200-byte run split at every page boundary would hold
-      // nothing bigger than a page fragment.
-      PACK_HOLES.sort((a, b) => a.at - b.at);
-      for (let i = PACK_HOLES.length - 1; i > 0; i--)
-        if (PACK_HOLES[i - 1].at + PACK_HOLES[i - 1].len === PACK_HOLES[i].at) {
-          PACK_HOLES[i - 1].len += PACK_HOLES[i].len; PACK_HOLES.splice(i, 1);
-        }
-      PACK_HOLES.sort((a, b) => b.len - a.len);
-      packInto(ITEMS);
-      const got = [...PACKED.keys()].sort();
-      settled = got.length === omit.length && got.every((n, x) => n === [...omit].sort()[x]);
-      omit = got;
-    }
-    // PACKMAP=<file>: the SETTLED hole map, for choosing a home for something by hand.
-    if (process.env.PACKMAP) writeFileSync(process.env.PACKMAP,
-      JSON.stringify(PACK_HOLES.map(h => [h.at, h.at + h.len])));
-    if (!settled) console.error('  packer: the probe did not settle in three passes; '
-      + 'the last assignment is used and the equate guard is the backstop');
-  } catch (e) { console.error('  packer: probe pass failed, packing nothing --', e.message.split('\n')[0]); }
-  try { unlinkSync(probe); } catch {}
-}
+
 if (WALL_DELTAS && !PACK_PROBE && PACKED.size && !process.env.LVLDUMP && !process.env.WALLOFF)
   console.error(`  packed ${PACKED.size} of ${WALL_DELTAS.length} wall deltas into the image's `
     + `scraps: ` + [...PACKED].map(([n, at]) => `${n}->$${at.toString(16)}`).join(' '));
-{
-  let at = LVLSHADOW + (LVLALL ?? []).length * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0);
-  // WALL_DELTAS is null in an LVLDUMP subprocess -- it builds no wall variants, being the dump of
-  // one level -- and LATEWALL is a list of indices into it, so this has to stand down there.
-  for (const k of (WALL_DELTAS ? LATEWALL : [])) {
-    const d = WALL_DELTAS[k];
-    // A QUAD ENTRY IS FOUR BYTES, not one: each is the string "addrLo,addrHi,open,closed", which
-    // is why lateWallBytes below splits on commas before resolving. This used to advance by
-    // quad.length + 1 and so handed every late wall after the first an address inside the one
-    // before it -- the same miscount that once put a 221-byte table in a 64-byte hole. It never
-    // showed because the LATE chain has not been buildable since the hub grew its fourth exit.
-    const dN = d.quad.length * 4 + 1;
-    LATEWALL_AT[k] = { d: at, c: at + dN };
-    at += dN + d.cells.length + 1;
-  }
-  // Against the top of the bank only: BANK3_SQUATTERS -- the CPU tables still squatting in bank
-  // 3's tail -- is not built until the disk is assembled, so the STRICT ceiling is checked there,
-  // where the level blocks are already checked against it. This catches the gross case early,
-  // with a message that names the cause.
-  if (LATEWALL.length && at > 0xfff9) throw new Error(
-    `the late levels' wall lists run to $${at.toString(16)}, past the top of bank 3. They sit ` +
-    `above the ${(LVLALL ?? []).length} level blocks; either the blocks or the lists have to ` +
-    `move, or a late level needs fewer walls.`);
-  // ONLY IF THERE ARE LATE WALLS. `at` is seeded past the shadow whether the loop ran or not, so
-  // setting this unconditionally claimed a late-wall region on every build that has none -- it
-  // just happened to be harmless while nothing else was allocated up there. The first SOLO chain
-  // build put its slot at $f500 and the overlap guard reported a 493-byte clash with a region
-  // that does not exist. LATEWALL_END means "the top of the late walls"; with no late walls there
-  // is no such thing, and 0 is what the guard below already tests for.
-  LATEWALL_END = LATEWALL.length ? at : 0;
-}
 // ---- SOLO: the live level's wall lists ride in the slot, behind the manifest blob ----
 // Same treatment a LATE level's walls already get, and for the same reason: the bytes are the
 // level's, so they travel with it and the image only names where they will land. Without this
 // the image still carries 50 bytes describing how ONE level's walls collapse -- and those bytes
 // hold mapT ADDRESSES, which is precisely the data that cannot stay behind when the level moves.
 // ---- WHERE THE LEVEL REGION SITS ----
-// SOLO: one contiguous run in bank 3 holding [live blob][shadow blobs][wall lists], all of it off
-// the disk. The live slot is page-aligned because mapT sits at its offset 0; the shadows are only
-// ever parked bytes, so they need no alignment of their own.
-// Not SOLO: the old layout, live tables in the image and shadows from LVLSHADOW.
+// One contiguous run in bank 3 holding [live blob][wall lists], all of it off the disk. The live
+// slot is page-aligned because mapT sits at its offset 0.
 // ---- WHICH TABLES ARE SIZED TO THE LEVEL rather than to the chain's widest ----
 // Only tables at the END of the manifest may be in here: a varying length moves everything
 // after it, and the engine names the rest with fixed equates. lvlBlocks must not pad these
@@ -9721,7 +9448,7 @@ const ALLBLOBS = [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...LVL
 const LVLBLOB_MAX = Math.max(...ALLBLOBS.map(blobOf));
 // LVLBLOB_MAX, not the LIVE level's blob: every level lands at SLOT_AT and the region has to
 // clear the LONGEST of them, which since holeSeeT went variable is not necessarily this one.
-const SHADOW_BASE = SOLO ? SLOT_AT + LVLBLOB_MAX : LVLSHADOW;
+const SHADOW_BASE = SLOT_AT + LVLBLOB_MAX;
 // ---- A LEVEL'S WALL LISTS SIT BEHIND ITS OWN BLOB, and only its own ----
 // Every level file used to end with EVERY wall in the chain -- seven copies of the same 547
 // bytes, because the pointer tables lived in the image and had to name one address whichever
@@ -9733,7 +9460,7 @@ const SOLO_WALL_AT = {};
 let SOLO_WALL_LEN = 0;
 // .length, not truthiness: WALL_DELTAS is [] in a build that compiles the mechanic but has no
 // deltas to lay out (a WALLOFF variant, whose own walls are already punched out of its map).
-if (SOLO && WALL_DELTAS.length) {
+if (WALL_DELTAS.length) {
   // Behind the level's OWN blob, which since holeSeeT went variable is no longer the same
   // length for every level. The pointer tables are per-level (see wallPtrs), so each level's
   // walls can start wherever its blob ends -- no padding to a common length.
@@ -9755,11 +9482,7 @@ if (SOLO && WALL_DELTAS.length) {
   }
 }
 // ---- wallPtrs: fill each level's four pointer tables with ITS OWN walls ----
-// Three ways a wall's bytes can be addressed, and the tables hold whichever applies, so wallTog
-// reads one pointer pair and never learns which kind it got:
-//   SOLO      -- behind the level's blob in the slot, a number this build computed;
-//   LATEWALL  -- parked in bank 3 with a level loaded mid-game, likewise a number;
-//   otherwise -- `wallDT${k}` in the image, an assembler expression lvlResolve looks up.
+// A wall's bytes sit behind the level's blob in the slot, at an address this build computed.
 // An id the level does not use gets 0. That is safe rather than merely unused: wallsBack only
 // applies a wall whose wallStT is set, and only a socket or pedestal naming the id can set it --
 // which the sockWallT guard above has already checked against the level's real wall count.
@@ -9772,7 +9495,7 @@ const wallPtrs = () => {
       // declares its walls, so wallGid finds one. Zero, or the fallback below names a wallDT
       // label no build emitted.
       const k = WALL_DELTAS ? wallGid(lv, j) : -1;
-      const at = k < 0 ? null : SOLO ? SOLO_WALL_AT[k] : LATEWALL.includes(k) ? LATEWALL_AT[k] : null;
+      const at = k < 0 ? null : SOLO_WALL_AT[k];
       if (k < 0) { for (const n of Object.keys(ent)) ent[n].push(0); continue; }
       ent.wallDLoT.push(at ? at.d & 255 : `<wallDT${k}`);
       ent.wallDHiT.push(at ? at.d >> 8 : `>wallDT${k}`);
@@ -9795,10 +9518,10 @@ const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBL
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
-if (SOLO) writeFileSync('./iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));
+writeFileSync('./iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));
 // Above $c000 the ceiling is the top of bank 3; inside the image it is the arena, and the relayout
 // is what decides where that is -- so a region there is checked by the overlap guards instead.
-if (SOLO && SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
+if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
   `SOLO: ${CHAIN.length} levels need $${SLOT_AT.toString(16)}-$${LVLREGION_END.toString(16)} ` +
   `(${LVLBLOB} bytes each + ${SOLO_WALL_LEN} of wall lists) and bank 3 ends at $fff9. ` +
   `Fewer resident levels, or the region moves into the image's arena.`);
@@ -9812,7 +9535,7 @@ if (VSLOTS) {
   VS_SLOTLEN = LVLREGION_END - SLOT_AT;
   for (const n of VS_ARENA) RUNTIME_BUFS[n] = VS_SLOTLEN;
 }
-if (SOLO) console.error(`level region: ${LVLBLOB_MAX} bytes of tables (live ${LVLBLOB}, saved `
+console.error(`level region: ${LVLBLOB_MAX} bytes of tables (live ${LVLBLOB}, saved `
   + `${ALLBLOBS.reduce((t, L) => t + LVLBLOB_MAX - blobOf(L), 0)} across ${ALLBLOBS.length} levels by `
   + `natural sizing) + ${SOLO_WALL_LEN} of wall ` +
   `lists = ${LVLREGION_END - SLOT_AT} per slot, ${Math.ceil((LVLREGION_END - SLOT_AT) / 256)} pages` +
@@ -9847,14 +9570,14 @@ if (process.env.LVLDUMP) {
   process.exit(0);
 }
 
-let asm = `${!SOLO ? '' : `
+let asm = `
 ; ---- SOLO=1: THE LEVEL IS NOT IN THIS IMAGE ----
 ; Every per-level table is an EQUATE into the slot at ${hx16(SLOT_AT)}, in manifest order, mapT first
 ; so it lands page-aligned at offset 0. The bytes arrive as their own disk file. Nothing below
 ; changes: every reference still names the label, which now resolves into the slot instead of
 ; into a run of !byte the image carries.
 ${slotEquates()}
-`}
+
 charset = ${hx(CHARSET)}        ; where the VIC reads them: under the I/O hole
 charsetB = ${hx(CHARSET_B)}
 px      = $02
@@ -10824,7 +10547,7 @@ ${process.env.FTFREEZE ? `        sta ftFrz               ;   the one place the 
                                 ;   froze the fall at a RANDOM frame, and two runs of the same
                                 ;   build differed by 5,400 pixels -- which looks exactly like the
                                 ;   rendering change you are trying to measure.
-` : ''}${(LATE.length || LVLLOAD) && !BGLOAD ? `        jsr klPark              ; park the LIVE loader before the renderer writes over it
+` : ''}${!BGLOAD ? `        jsr klPark              ; park the LIVE loader before the renderer writes over it
 ` : ''}${VSLOTS ? `        jsr vsBoot              ; VSLOTS: the boot level's load list (once per power-on)
 ` : ''}        ; ---- copy both charsets into the RAM under the I/O hole ----
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
@@ -10894,39 +10617,7 @@ ${ANYFLOORDK ? `        lda #$01                ; entry is the RESTART too, and 
         ; $00 is the $c000 bank we want. Same low bits as before; it is the other six that matter.
         lda #$00
         sta $dd00
-${process.env.LATENOW ? `        ; LATENOW=1: the BISECT. Call loadraw here, the instant the boot has handed over and
-        ; before the game has done anything at all. If it works here and not at the hub, what
-        ; breaks it is something the game does in between; if it fails here too, it is the
-        ; machine state entry itself sets up. The resident is still at $0400 untouched, so this
-        ; is the same call the hub makes, minus sixty seconds of play.
-${process.env.LATENOW === 'delay' ? `        ; LATENOW=delay: the same call, ~10 seconds later. If the immediate one works and this
-        ; one does not, what breaks the load is ELAPSED TIME -- the drive's own code idling out
-        ; -- and not anything the game does.
-        lda #$20
-dlyA:   ldx #$00
-dlyB:   ldy #$00
-dlyC:   dey
-        bne dlyC
-        dex
-        bne dlyB
-        sec
-        sbc #$01
-        bne dlyA
-` : ''}        lda #$00
-        sta $99
-        lda #$03
-        sta $9a
-        lda #$08
-        sta $ba
-        ldx #<nILAT
-        ldy #>nILAT
-        jsr ${hx16(KRILL_RESIDENT_AT)}
-        sta llErr
-        bcs lnBad
-        lda #$01
-        sta lateOK
-lnBad:
-` : ''}
+
         lda #$03                ; 24-ROW MODE, ALWAYS -- but DEN OFF until the first frame is
         sta pd11                ;   drawn. entry is the RESTART too, and a death picture is still
         sta $d011               ;   in both buffers while cpChr rebuilds the cell charset beneath
@@ -11044,23 +10735,7 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta cqN                 ; of 64 or more makes every push hit the full check silently,
                                 ; and the first flush walks 64 garbage pointers writing colour
                                 ; bytes wherever they happen to point.
-` : ''}${!BOOTSLOT ? '' : `        ; ---- BOOTSLOT=1: START IN THE LEVEL THAT ARRIVED FROM ITS OWN FILE ----
-        ; The proof that a level is a loadable pack rather than part of the engine. Slot 0's
-        ; blob is ILVL, which the BOOT LOADER pulls off the disk before any of this runs -- so
-        ; the engine starts, installs a level it did not ship with, and plays it. Everything
-        ; downstream is untouched: mkRuns derives the run tables from the mapT that just
-        ; arrived, objInit places the entities it names, and lvlStart reads the pose out of
-        ; lvlStartT, which now travels WITH the level rather than being indexed by its id.
-        lda #$00
-        jsr lvlSwap             ; live tables <-> slot 0
-${LVLALL.length > 1 ? `        ldx lvlMeT              ; ...and the bookkeeping follows the exchange
-        lda lvlAtT
-        sta lvlMeT
-        stx lvlAtT
-` : `        ldx lvlMeT              ; one slot: which level is in it is known at build time,
-        lda #${hx(LVLALL[0]?.level ?? 0)}                 ;   and lvlAtT is not emitted for a single slot
-        sta lvlMeT
-`}` }${FALL ? `        lda #$00                ; ---- NOT FALLING. Say so. ----
+` : ''}${FALL ? `        lda #$00                ; ---- NOT FALLING. Say so. ----
         sta fallSt              ; fsZero: the main loop's first act is "lda fallSt / beq mfIn", and
                                 ;   nothing had ever written this. See fallSt's own note: it worked
                                 ;   only while its page came up zero, and the relayout moved it.
@@ -11270,16 +10945,6 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
 
 mloop:
 ${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
-` : ''}${LATE.length ? `        jsr lateLoad            ; at the hub: pull in the levels its coloured holes lead to.
-                                ; HERE and not in the fall's drop->landing hand-over, which is
-                                ; where it was: that point is mid-animation with the raster split
-                                ; reprogrammed and the buffers part-way through a flip, and the
-                                ; same call that works at entry fails there. Top of a normal
-                                ; frame is the quietest moment the main loop has.
-                                ; NOT nested inside the PALKEYS block, which is where this and
-                                ; dieKey both were: PALKEYS=0 is a BENCHMARKING flag, and it was
-                                ; silently switching off the late load and the restart key with
-                                ; the palette cycling. A thing is gated on its own flag.
 ` : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}${SNDTEST ? '        jsr sndKeys             ; 4/5 cutoff, 6/7 pulse width\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
 pdInL:  ldx #$01
@@ -17188,7 +16853,7 @@ ${CEILVARY ? `        tax
         lda lvlPalceilT,x
         sta irqB2+1
 ` : ''}fmHole:
-` : `${TWOLEV || LVLLOAD ? `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
+` : `        ; ---- THE LEVEL CHANGES HERE, BEFORE ANYTHING READS THE DESTINATION ----
         ; Order is load-bearing twice over. lvlSwap must run before lvlStart reads the destination's
         ; start point, or the player is placed at the spot they just left (it named landXT until
         ; 2026-09-22); and objInit must run after it, because it rebuilds
@@ -17200,39 +16865,14 @@ ${CEILVARY ? `        tax
                                 ;   four of them. $ff means nowhere --
         cmp #$ff                ;   a standalone or NOFALL build, whose hole is scenery
         beq lvlEnd
-${LVLLOAD ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
+        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the arriving file carries its\n                                ;   own, and wallStT is engine state that must not follow us out\n' : ''}        pla
         jsr ${VSLOTS ? 'vsEnter' : 'lvlLoad'}             ; A = the level being entered. No slot search and no exchange:
                                 ;   there is one slot, and the arriving level is read over the
                                 ;   departing one. lvlMeT rides in the file, so identity arrives
                                 ;   with the geometry rather than being stored ahead of it.
-` : LVLALL.length > 1 ? `        pha                     ; wallsBack does not preserve A, and the stack is cheaper here
-${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        pla
-        ldx #${hx(LVLALL.length - 1)}   ; WHICH SLOT is it in now? Not a build-time constant: the
-lvFind: cmp lvlAtT,x            ;   swap is an exchange, so the level being left takes the slot
-        beq lvGot               ;   the level being entered came out of, and the layout permutes
-        dex                     ;   every fall. nextLevel only ever names a level in the chain,
-        bpl lvFind              ;   so this always finds one.
-        bmi lvlEnd              ; belt and braces: a level not in any slot is a dead hole, never
-lvGot:  ldy lvlMeT              ;   a swap against X = $ff
-${SOLO ? '' : `        sta lvlMeT              ; A is the level being entered: it is the live one now...`}
-        tya
-        sta lvlAtT,x            ;   ...and the one being left lands in the slot it came out of
-        txa` : `${SOLO ? `        ; ---- lvlMeT IS NOT WRITTEN HERE UNDER SOLO ----
-        ; It travels IN the level's blob now, so the swap below brings the arriving level's own
-        ; id in with everything else. Storing the destination first made two mechanisms fight for
-        ; one byte: the store put 2 in the LIVE copy, the swap then moved that 2 into the SHADOW,
-        ; and the departing level's blob carried the wrong id for ever after. Levels 1 and 2 then
-        ; alternated correctly in geometry while the HUD drifted one transition behind.` : `        sta lvlMeT              ; A is the level being entered. ONLY on this path: the search`}
-                                ;   below reads lvlMeT for the level being LEFT, and storing it
-                                ;   here first made that read the DESTINATION -- so the departing
-                                ;   level never went into lvlAtT, the table drifted from where the
-                                ;   slots really were, and by level 3 the search found nothing and
-                                ;   silently skipped the swap while the HUD already said "1".
-${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the exchange keeps what it takes\n' : ''}        lda #$00                ; ONE slot, so it is always slot 0 -- but say so rather than
-                                ;   leaning on wallsBack happening to leave A zero, which is what
-                                ;   made this correct by accident before lvlNxtT named a level`}
-${FALLMARK.includes(1) ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}${LVLLOAD ? '' : '        jsr lvlSwap'}
+
+${FALLMARK.includes(1) ? '        inc fallMk              ; FALLMARK 1: about to swap\n' : ''}
 ${FALLMARK.includes(2) ? '        inc fallMk              ; FALLMARK 2: swapped, about to mkRuns\n' : ''}        jsr mkRuns              ; the run tables no longer travel with the level -- they are
                                 ;   derived from the mapT the swap just brought in. Must come
                                 ;   AFTER the swap and BEFORE anything renders the new room.
@@ -17240,7 +16880,7 @@ ${FALLMARK.includes(3) ? '        inc fallMk              ; FALLMARK 3: runs mad
                                 ;   blkT need not travel either.
 
 ${FALLMARK.includes(4) ? '        inc fallMk              ; FALLMARK 4: objInit done\n' : ''}${CEILVARY ? '        jsr lvlLo               ; what you see THROUGH the hole is already the new level\n' : ''}lvlEnd:
-` : ''}        jsr lvlStart            ; go to the arriving level's OFFICIAL START now, and let the
+        jsr lvlStart            ; go to the arriving level's OFFICIAL START now, and let the
                                 ;   main loop render it next frame -- fallLand snapshots it and
                                 ;   starts the drop; the player does not move again for the rest
                                 ;   of the fall. This used to be landXT/landYT/landAT, a SECOND
@@ -20034,7 +19674,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ${SPRVARY ? ['under', 'hi'].filter(k => LEVEL_IDS.some(n => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]))
   .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
   .join('\n') : ''}
-${MULTI ? (() => {
+${(() => {
   // MULTI, not TWOLEV: under SOLO there is no shadow, but there are still several levels and
   // lvlBoot still indexes these rows by lvlMeT. Gated on TWOLEV, a SOLO build emitted no rows at
   // all and every level would have rendered in the inks of the one the image was built around.
@@ -20042,7 +19682,7 @@ ${MULTI ? (() => {
   return Object.keys(REG).filter(k => LEVEL_IDS.some(n => palOf(n)[k] !== palOf(LEVEL_IDS[0])[k]))
     .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
     .join('\n');
-})() : ''}
+})()}
 ${HAS_IDOL ? ['under', 'hi'].filter(IDOLVARY)
   .map(k => `lvlIdol${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(idolSprOf(i + 1)[k])).join(',')}`)
   .join('\n') : ''}
@@ -20932,99 +20572,23 @@ fHiT:   !byte ${P.HI.join(',')}
 `; })() : ''}
 ; ---- $6d82: lateLoad, sitting directly below the loader it calls ----
         * = $6d82
-${LATE.length ? '' : `; ---- dpCand and dpDiag live here, in the space lateLoad wants when a level is LATE ----
+; ---- dpCand and dpDiag live here, in the space lateLoad wants when a level is LATE ----
 ; The two are mutually exclusive by construction: a build with no LATE level has no lateLoad, and
 ; this is the only stretch big enough. They are here rather than in the main code block because
 ; that block is at ZERO headroom and these are COLD -- eight calls on a keypress -- so they had no
 ; business holding the tightest bytes in the program. Moving dpCand out is what paid for dpDiag.
 
 
-${!ANYFLOORDK ? '' : ``}`}${LATE.length ? `; ---- lateLoad: the hub pulls levels ${LATE.join(', ')} off the disk ----
-; Called from the fall's drop->landing hand-over, which is the one moment a load is free: the
-; screen is showing the arc, nothing is being rendered, and the destination was snapshotted
-; before the drop began. It BLOCKS, and that is deliberate -- the wait is spent inside an
-; animation that is already playing.
-; What it loads is one file at one address: ILAT is the three level blocks in slot order plus
-; level ${LATE[0]}'s wall lists above them, landing on the slots levels 1-3 occupied. They are
-; discarded wholesale, so it does not matter which slot held which -- lvlAtT is simply rewritten.
-lateLoad:
-        lda lateOK
-        bne llRts               ; once only: they stay in for the rest of the game
-        lda lvlMeT
-        cmp #${hx(LATEHUB)}
-        bne llRts               ; only at the hub
-        ; ---- the three KERNAL zero-page bytes the resident reads, and the engine owns ----
-        ; Krill's resident uses FA, DFLTN and DFLTO and nothing else of the KERNAL's; its own
-        ; workspace is $e0-$e7, which this engine does not claim. $99 and $9a ARE engine
-        ; variables, so by now they hold geometry rather than the idle 0/3 the loader expects.
-        ; Three bytes, named: a blanket $90-$a9 save was 26 bytes of buffer and a pair of loops,
-        ; and lateLoad does not have them to spare.
-        lda $99
-        sta llZP
-        lda $9a
-        sta llZP+1
-        lda #$00
-        sta $99                 ; DFLTN: input from the keyboard
-        lda #$03
-        sta $9a                 ; DFLTO: output to the screen
-        lda #$08
-        sta $ba                 ; FA: the drive to talk to
-        ; ---- the loader back where it was built to run ----
-        ; It costs the renderer's span stack, which is rebuilt from scratch every frame, and we
-        ; are inside a fall with nothing being drawn.
-        ; (Krill's own $e0-$e7 was snapshotted here and restored too -- it made no difference,
-        ;  so the workspace is not what drifts. Removed rather than left as cargo.)
-        ldx #$00
-klUn:   lda krillRt,x
-        sta ${hx16(KRILL_RESIDENT_AT)},x
-        inx
-        cpx #${hx(KRILL_RT_LEN)}
-        bne klUn
-        ; NOT under sei, and NOT at port $37. Both were tried and both make it WORSE: with
-        ; interrupts held off the loader waits for the drive for ever (PC parks inside the
-        ; resident), where with them on it gives up and returns. The drive is not answering
-        ; either way -- see lateLoad's note -- so neither is the cause, and a hang is harder to
-        ; diagnose than a clean failure.
-        ; ---- BLANK THE DISPLAY ACROSS THE TRANSFER ----
-        ; At entry this same call works, and the one thing different about entry is that DEN is
-        ; still off: no badlines, no sprite DMA, nothing stealing cycles from the serial
-        ; handshake. The fall is on screen when this runs, so it costs a blank frame or two in
-        ; the middle of an animation -- which is the cheapest thing here to spend.
-        lda $d011
-        pha
-        and #$ef                ; DEN off
-        sta $d011
-        ldx #<nILAT
-        ldy #>nILAT
-        jsr ${hx16(KRILL_RESIDENT_AT)}   ; = loadraw, at the address it was assembled for
-        tax                     ; the status, across the $d011 restore
-        pla
-        sta $d011
-        txa
-        sta llErr               ; A is Krill's status; carry set means it did not arrive
-        bcs llBack
-        lda #$01
-        sta lateOK
-${LATE_AT_CODE}
-llBack: lda llZP                ; $ba is not saved: FA is the KERNAL's, not the engine's --
-        sta $99                 ;   nothing here reads it, so it only needs SETTING above.
-        lda llZP+1
-        sta $9a
-llRts:  rts
-nILAT:  !byte ${[...(process.env.LATEFILE ?? 'ILAT')].map(c => hx(c.charCodeAt(0))).join(',')},0
-llZP:   !fill 2, 0              ; DFLTN, DFLTO
-lateOK: !byte 0                 ; 0 = not in yet, which is what the fall's hold tests
-llErr:  !byte 0                 ; the last loadraw status, for probing
-` : ''}; ---- $6e00: WHERE THE LIVE LOADER IS PARKED ----
+${!ANYFLOORDK ? '' : ``}; ---- $6e00: WHERE THE LIVE LOADER IS PARKED ----
 ; NOT a second build of Krill. That was tried and it hangs: the protocol is STATEFUL across
 ; loads, and a pristine copy has none of the state install() and the boot's own loads left in
 ; the live one -- the drive simply does not answer it, and the resident spins at $6ec7 for ever.
 ; So there is ONE resident, the boot's, built for $0400. entry copies it up here before the
 ; first frame writes stackLT over it, and lateLoad copies it back down to run it. It keeps its
 ; address and its state, and what it clobbers on the way back is per-frame scratch.
-${LATE.length || LVLLOAD ? `        * = ${hx16(KRILL_RT_AT)}
-krillRt: !fill ${KRILL_RT_LEN}, 0` : ''}
-${!(LVLLOAD || LATE.length) ? '' : `        * = $6408
+        * = ${hx16(KRILL_RT_AT)}
+krillRt: !fill ${KRILL_RT_LEN}, 0
+        * = $6408
 ; ---- klPark / lvlLoad: THE LEVEL COMES OFF THE DISK ----
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
 ; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
@@ -21045,7 +20609,7 @@ kpL:    lda ${hx16(KRILL_RESIDENT_AT)},x
         inc klParked
 kpDn:   rts
 klParked: !byte 0
-`}${!LVLLOAD ? '' : `
+
 ; lvlLoad: A = the level to bring in. Called from the fall where lvlSwap used to be. With one
 ; slot there is nothing to exchange, so the arriving level is simply read over the departing one:
 ; the room being left was snapshotted a moment earlier and is what the drop animates, and the
@@ -21467,7 +21031,7 @@ vsEHit: sty vsLive
 ${BGLOAD ? `        jmp lvlLive             ; BGLOAD: the list is fallMid's background job, not run here` : `        jsr lvlLive
         jmp vsList`}
 ;@@VSTAB@@
-` : ''}`}
+` : ''}
 
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
@@ -23494,16 +23058,7 @@ ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
-; A LATE level's two lists are NOT here (see LATEWALL): they ride in bank 3 with that level's
-; tables and the pointer tables below simply name where they will land, so nothing at runtime has
-; to know which kind of wall it is looking at.
-${PACK_PROBE ? 'packHere:\n' : ''}${WALL_DELTAS.map((d, k) => LATEWALL.includes(k) || SOLO ? ''
-  : PACK_PROBE && PACK_OMIT.has(`wallDT${k}`) ? `wallDT${k} = $ffff`   // probe: symbol only, no bytes
-  : PACKED.has(`wallDT${k}`) ? ''              // placed by packAll at the end
-  : `wallDT${k}: !byte ${d.quad.join(',')},$ff`).filter(Boolean).join('\n')}
-${WALL_DELTAS.map((d, k) => LATEWALL.includes(k) || SOLO ? '' :
-  `wallCells${k}: !byte ${d.cells.map(hx).join(',')},$ff`).filter(Boolean).join('\n')}   ; each wall's cells, $ff-ended
-; The four pointer tables that used to stand here are LVL_TABLES entries now (see wallPtrs):
+${PACK_PROBE ? 'packHere:\n' : ''}; The four pointer tables that used to stand here are LVL_TABLES entries now (see wallPtrs):
 ; sized to the chain, they were the last thing forcing a global wall id space.
 ; ONE BYTE PER LOCAL WALL ID, not per wall in the chain: 0 = the wall is there. It is engine
 ; state and does not travel -- wallsBack puts every wall back before a level leaves, so an
@@ -23832,95 +23387,7 @@ ${LD('lvlMeT', hx(LVL), ': !byte ')}                 ; the level that is live. O
                                 ;   standalone one included, where it is simply a constant. A
                                 ;   single-slot chain still CHANGES level, it just never has to
                                 ;   search for the slot.
-${TWOLEV ? `; ---- THE OTHER LEVEL, SITTING IN THE DARK ----
-; Level 2's copy of every per-level table, in manifest order, as one blob. lvlSwap EXCHANGES it
-; with the live tables, so this holds whichever level you are not standing in. It lives in table
-; space (fixed off RELOC) rather than in an image hole, because holes move when the map does --
-; which is exactly how the old $609b and $bc00 placements broke the moment a second map existed.
-; ONE BLOB PER RESIDENT LEVEL, back to back, each in manifest order and each the same length --
-; lvlSwap indexes them by slot, and the slots are the OTHERS list in ascending level order.
-; THE SHADOW IS NOT HERE ANY MORE (2026-09-16). It rides in VIC bank 3 as the disk file ILVL, at
-; LVLSHADOW = $${LVLSHADOW.toString(16)} -- plain RAM under both port modes (only $d000-$dfff is the
-; I/O hole), so lvlSwap reads and writes it exactly as it did here, with no port dance. It moved
-; because the image ran out: with the socket room (40 merge-hazard cells, 435 bytes of hazard
-; tables) as level 1's shadow and the leash per angel, the shadow is ${LVLALL.length ? LVL_TABLES.reduce((n, [, a]) => n + a.length, 0) : 0} bytes, and the
-; stream it lived in overran rayOffQS by a kilobyte. Same reasoning as IPIC: data the VIC never
-; reads, needing only RAM nothing else touches, and it survives a warm restart because dieKey's
-; \`jmp entry\` reloads nothing -- so after a fall and a RETURN the shadow holds the level you fell
-; FROM, exactly as it did in the image.
-; Where each chunk belongs when it is live, and how long it is. A length of 0 means 256 -- the
-; swap loop counts with cpy, so the wrap does the right thing without a 16-bit counter.
-${LVLALL.length > 1 ? `; WHICH LEVEL IS IN WHICH SLOT, RIGHT NOW. lvlSwap exchanges, so every fall permutes the slots
-; and no build-time slot number stays true past the first lap -- see lvlNxtT. They must NOT be in
-; LVL_TABLES: a table in the manifest is exchanged by the very swap it is describing, which would
-; undo each update as it was made.
-; Only emitted with TWO OR MORE slots. With one there is nothing to permute -- the transposition
-; is its own inverse, the wanted level is always slot 0, and the 31 bytes of search below are 31
-; the ceiling does not have.
-lvlAtT: !byte ${LVLALL.map(L => hx(L.level)).join(',')}   ; slot -> the level now in it
-` : ''}lvlBasLoT: !byte ${LVLALL.map((_, i) => hx((SHADOW_BASE + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) & 255)).join(',')}
-lvlBasHiT: !byte ${LVLALL.map((_, i) => hx((SHADOW_BASE + i * LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)) >> 8)).join(',')}
-lvlDstLoT: !byte ${LVL_TABLES.map(([n]) => `<${n}`).join(',')}
-lvlDstHiT: !byte ${LVL_TABLES.map(([n]) => `>${n}`).join(',')}
-lvlLenT: !byte ${LVL_TABLES.map(([, a]) => hx(a.length & 255)).join(',')}
 
-; ---- lvlSwap: exchange the live per-level tables with the shadow ----
-; X is the byte temp, not the loop index, because that is what makes the inner swap 27 cycles
-; instead of 35 -- a memory temp costs two extra absolute accesses per byte and there are
-; ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} of them. The table index lives in lsIdx for the same reason.
-; Total is a shade over two frames, spent on the one frame the player steps into the hole, where
-; fallStep has already taken the screen. An EXCHANGE, not a copy: the level being left survives,
-; so the fall runs in both directions and dying never has to reload anything.
-lvlSwap:                        ; A = which slot to exchange with
-        tax
-        lda lvlBasLoT,x         ; the slots are one blob each, back to back, all the same length
-        sta lsS+1
-        sta lsS2+1
-        lda lvlBasHiT,x
-        sta lsS+2
-        sta lsS2+2
-        lda #$00
-        sta lsIdx
-lsTab:  ldy lsIdx
-        lda lvlLenT,y
-        sta lsLen
-        lda lvlDstLoT,y
-        sta lsD+1
-        sta lsD2+1
-        lda lvlDstHiT,y
-        sta lsD+2
-        sta lsD2+2
-        ldy #$00
-lsByte:
-lsD:    lda $ffff,y             ; only STA has an abs,y mode -- STX and STY do not -- so both
-lsS:    ldx $ffff,y             ;   stores go through A and X is just the holding pen. Doing it
-lsS2:   sta $ffff,y             ;   the obvious way, through a memory temp, costs 6 more cycles
-        txa                     ;   a byte, which over ${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)} bytes is most of an extra frame.
-lsD2:   sta $ffff,y
-        iny
-        cpy lsLen               ; lsLen 0 means 256: y wraps to 0 and matches after a full page
-        bne lsByte
-        ; The shadow is one run of bytes, so it advances by this chunk's length -- but a length
-        ; of 0 MEANS 256, and "adc #0" advances by nothing. Six of these chunks are a full page,
-        ; so getting this wrong swapped all of them against the same shadow page and left the
-        ; live mapT holding some other table's bytes.
-        lda lsLen
-        beq lsPg                ; a whole page: the low byte is already right
-        clc
-        adc lsS+1
-        sta lsS+1
-        sta lsS2+1
-        bcc lsNC
-lsPg:   inc lsS+2
-        inc lsS2+2
-lsNC:   inc lsIdx
-        lda lsIdx
-        cmp #${hx(LVL_TABLES.length)}
-        bne lsTab
-        rts
-lsIdx:  !byte 0
-lsLen:  !byte 0
-` : ''}
 ; ---- orbColLT / orbColRT: the ball's extent each side of its centre column, per rung ----
 ; Eighty-four more bytes out of the ORB_SMALL block, for the same reason as everything below: pure
 ; functions of the ladder, not in the swap manifest. The two-level build with level 1 (44 runs,
@@ -26649,13 +26116,13 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 // would be BOTH an equate at the slot and a run of bytes in the image. The engine would read the
 // slot (correct), the image would carry a stale copy of the level (the thing SOLO exists to
 // remove), and nothing would look wrong until a level with different contents was loaded.
-if (SOLO) {
+
   const want = new Set(Object.keys(SLOT_OFF));
   const missed = [...want].filter(n => !SLOT_DROPPED.has(n));
   if (missed.length) throw new Error(
     `SOLO: these tables are in the slot but their definition is still emitted into the image: ` +
     `${missed.join(' ')} -- route each one's site through LD()`);
-}
+
 // ---- WHAT THE RELAYOUT NEEDS, PUBLISHED BEFORE ANY ASSEMBLY ----
 // These two maps are plain constants: which tables must start on a page, and how big each RAM
 // buffer is. compact.mjs needs both, and they used to be written by guards that run AFTER the
@@ -26938,13 +26405,6 @@ try {
       `that value comes from the level's own build, not this engine -- emit the table in the engine instead`);
     return (LVL_VARLEN.has(n) ? flat : pad(flat, a.length)).map(lvlResolve);
   }));
-  // ...and the late levels' wall lists, in the order LATEWALL_AT laid them out. Each is the quad
-  // delta then the cell list, both $ff-terminated, exactly as the image emits a resident one.
-  // A quad entry is FOUR bytes in one string -- address lo, address hi, the value closed, the
-  // value open -- which is why the image emits them with `.join(',')`. Split before resolving.
-  const lateWallBytes = () => (WALL_DELTAS ? LATEWALL : []).flatMap(k =>
-    [...WALL_DELTAS[k].quad.flatMap(q => q.split(',')).map(lvlResolve), 0xff,
-     ...WALL_DELTAS[k].cells, 0xff]);
   const DISK = [
     // name, load address, bytes, and whether it must land BEFORE the charset copy
     // ---- IHOL FIRST: it is the file that goes UNDER THE I/O HOLE ----
@@ -26983,54 +26443,8 @@ try {
     // 1-3 vacate: their blocks and their wall lists are exactly what this replaces, which is the
     // whole design. Built with the same resolver and the same manifest as ILVL, because the
     // layout has to be byte-for-byte the shape lvlSwap exchanges.
-    ...(LATEALL && LATEALL.length ? [{ tag: 'A', name: 'ILAT', at: LVLSHADOW, runtime: true,
-      data: lvlBlocks(LATEALL).concat(lateWallBytes()) }] : []),
-    ...(TWOLEV && !SOLO ? [{ tag: 'L', name: 'ILVL', at: LVLSHADOW, data: (() => {
-      // THE SHADOW IS RAW BYTES NOW, NOT ASSEMBLED -- so every entry the manifest expresses as an
-      // assembler expression has to be resolved here. The hazard pointer tables are '<hazLstT+N'
-      // and '>hazLstT+N', and hazRstT ends in '$ff'. Written through Buffer.from as-is, a string
-      // is NaN is 0: every list pointer in the socket room's shadow was $0000, the hazard walker
-      // jsr'd through zero page on the first render after the fall, and the machine reset into
-      // BASIC with frameCnt at 5. Standalone builds were fine (no shadow) and so was a two-level
-      // build with the fall disabled (the walker never ran), which is what pinned it here.
-      const resolve = v => {
-        if (typeof v === 'number') return v;
-        if (/^\d+$/.test(v)) return +v & 255;               // decimal text, from a split(',')
-        const m = /^([<>])?([A-Za-z_][A-Za-z0-9_]*)(?:\+(\d+))?$/.exec(v);
-        if (m) {
-          const base = r.labels[m[2]];
-          if (base === undefined) throw new Error(`ILVL: unknown label in shadow table: ${v}`);
-          const addr = base + (+(m[3] ?? 0));
-          return m[1] === '<' ? addr & 255 : m[1] === '>' ? addr >> 8 : addr & 255;
-        }
-        if (/^\$[0-9a-fA-F]+$/.test(v)) return parseInt(v.slice(1), 16) & 255;
-        throw new Error(`ILVL: cannot resolve shadow table entry ${JSON.stringify(v)}`);
-      };
-      const bytes = LVLALL.flatMap(L => LVL_TABLES.flatMap(([n, a, sh]) =>
-        pad((sh instanceof Map ? sh.get(L.level) : sh) ?? L.tables[n] ?? [], a.length).map(resolve)));
-      // $fff9 is NOT the first thing above the shadow. Bank 3 is meant to be graphics-only and
-      // is not yet: doomT, runPlaneT, runFaceT and bfsQ are CPU equates squatting in its tail,
-      // and a shadow that runs into them assembles perfectly and corrupts geometry the first time
-      // a wall collapses. Tested against $fff9 alone, CHAIN=1,2,3 built clean and silently wrote
-      // 100 bytes of level tables over doomT -- the only tell was the free-space line losing a gap.
-      // Same scan as the bank-3 accounting below; see BANK3_SQUATTERS for why it is page-rounded.
-      const wall = Math.min(0xfff9, ...BANK3_SQUATTERS.map(([, a]) => a & ~255).filter(a => a >= LVLSHADOW));
-      // The late levels' wall lists sit ABOVE the blocks in the same region (see LATEWALL_AT) and
-      // are not in `bytes`, so the ceiling has to be measured against whichever reaches higher.
-      const top = Math.max(LVLSHADOW + bytes.length, LATEWALL_END);
-      if (top > wall) throw new Error(
-        `the level shadow is ${bytes.length} bytes (${LVLALL.length} levels x ` +
-        (LATEWALL_END > LVLSHADOW + bytes.length
-          ? `, and the late walls above it reach $${LATEWALL_END.toString(16)}` : '') +
-        `${LVL_TABLES.reduce((n, [, a]) => n + a.length, 0)}) and does not fit between ` +
-        `$${LVLSHADOW.toString(16)} and $${wall.toString(16)} in bank 3` +
-        (wall < 0xfff9 ? ` -- $${wall.toString(16)} is ` +
-          `${BANK3_SQUATTERS.filter(([, a]) => (a & ~255) === wall).map(([n]) => n).join('/')}, a CPU ` +
-          `table squatting in the graphics bank` : '') +
-        `. Move LVLSHADOW down (IPIC below it has its own guard), or evict the squatter.`);
-      LVLSHAD_BYTES.push(...bytes);      // for the bank-3 accounting below
-      return bytes;
-    })() }] : []),
+    ...([]),
+    ...([]),
     // ---- ILVn: THE LEVEL ITSELF, as its own file (SOLO=1) ----
     // Not a shadow and not a spare copy: this IS the level the engine plays. The image carries
     // none of it -- every table it names is an equate into this file's landing ground -- so the
@@ -27044,7 +26458,7 @@ try {
     // lists ride in every file at the same offset, because wallDLoT lives in the image and has
     // to name one address whichever level is in the slot.
     // Without LVLLOAD this is the old shape: one file holding [live][shadows][walls].
-    ...(SOLO ? (LVLLOAD ? CHAIN : [LVL]).map(n => {
+    ...((CHAIN).map(n => {
       const L = n === LVL ? { level: LVL, tables: Object.fromEntries(LVL_TABLES) }
                           : (LVLALL ?? []).find(l => l.level === n);
       if (!L) throw new Error(`SOLO: no tables for level ${n} -- in CHAIN but never built`);
@@ -27060,12 +26474,11 @@ try {
       const walls = !WALL_DELTAS ? [] : WALLS_ALL.flatMap((w, k) => w.lvl !== n ? []
         : [...WALL_DELTAS[k].quad.flatMap(q => q.split(',')).map(lvlResolve), 0xff,
            ...WALL_DELTAS[k].cells, 0xff]);
-      const body = LVLLOAD ? lvlBlocks([L])
-                           : lvlBlocks([L, ...(LVLALL ?? [])]);
+      const body = lvlBlocks([L]);
       // Blobs no longer have to MATCH -- holeSeeT is sized to its level (see LVL_VARLEN), so a
       // file is as long as its own room needs. What still has to hold is that none overflows the
       // region the slot reserves, since they all land at the same address.
-      if (LVLLOAD && body.length > LVLBLOB_MAX) throw new Error(
+      if (body.length > LVLBLOB_MAX) throw new Error(
         `SOLO: level ${n}'s blob is ${body.length} bytes and the slot reserves ${LVLBLOB_MAX} -- ` +
         `the region is sized to the longest level, so this one was measured wrong`);
       const data = body.concat(walls);
@@ -27090,8 +26503,8 @@ try {
         }
       }
       return { tag: 'V' + n, name: 'ILV' + n, at: SLOT_AT,
-               runtime: LVLLOAD && n !== LVL, data };
-    }) : []),
+               runtime: n !== LVL, data };
+    })),
     // HOLEBMHASH=1: checksum just the EXIT hole's bitmaps, so a change to the socket
     // ladder cannot be mistaken for a change to the hole.
 
@@ -27286,7 +26699,7 @@ try {
                 // everything the engine reads about the level resolves into it. Named so the
                 // pairwise guard covers it -- picking a slot address by eye is exactly the kind
                 // of choice that put ARC_GLY on the level shadow's tail (see iray-bank3-overlap).
-                ...(SOLO ? [['LEVELS', SLOT_AT, LVLREGION_END]] : []),
+                ...([['LEVELS', SLOT_AT, LVLREGION_END]]),
                 ['VECTORS', 0xfffa, 0x10000]];
   const used = [...usedNamed.map(([, lo, hi]) => [lo, hi]),
                 // a squatter's extent is unknown, so reserve to the next page boundary
@@ -27340,15 +26753,7 @@ try {
                               ? [['SOCKBASE', SOCKBASE, SOCKBASE + SOCK.BM.length * 64]] : []),
                             ['LOADER_RUN', LOADER_RUN, 0xd000],
                             ...(PICSEG.length ? [['PICBASE', PICBASE, PICBASE + PICSEG.length]] : []),
-                            ...(LVLSHAD_BYTES.length ? [['LVLSHADOW', LVLSHADOW, LVLSHADOW + LVLSHAD_BYTES.length]] : []),
-                            // A LATE level's wall lists ride ABOVE the shadow and are NOT in
-                            // LVLSHAD_BYTES, so this guard could not see them -- and they land
-                            // on ARC_GLY, which begins one byte after the shadow ends. Neither
-                            // this nor the shadow-fit guard (which only tests against $fff9)
-                            // caught it, so the LATE build has been writing its wall deltas over
-                            // the arc's glyph dictionary.
-                            ...(LATEWALL_END > LVLSHADOW
-                              ? [['LATEWALL', Math.max(LVLSHADOW + LVLSHAD_BYTES.length, 0), LATEWALL_END]] : [])] : [];
+] : [];
   {
     // LOADER_RUN is excluded: it is not an allocation but a COVERAGE marker for "everything below
     // $d000 is the image the loader relocates into", so it overlaps the charsets and both screens

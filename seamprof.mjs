@@ -53,7 +53,7 @@ const PH = [
 const WAIT = 6;
 
 const run = coarse => {
-  const env = `ROUTE=${ROUTE} LVL=1 TWOLEV=0 DIE=0 NOORB=1 ANGEL=0 TOURW=1 ` +
+  const env = `ROUTE=${ROUTE} CHAIN=1 DIE=0 NOORB=1 ANGEL=0 TOURW=1 ` +
               `PROFILE=1 PROFTOUR=1 PROFN=1 ${coarse ? 'PROFCOARSE=1 ' : ''}${EXTRA}`;
   process.stderr.write(`  ${coarse ? 'PROFCOARSE' : 'PROFSUB   '}  ${EXTRA || '(defaults)'} ...`);
   const out = execFileSync(process.execPath, ['probe.mjs', env,

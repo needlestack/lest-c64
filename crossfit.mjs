@@ -1,6 +1,6 @@
 // crossfit.mjs -- score a charset PLAN against a SCAN it was not fitted to.
 //
-//   CELLSCAN=1 CELLRAND=2000000 LVL=1 TWOLEV=0 node build-iray.mjs   # -> cellscan.json for a level
+//   CELLSCAN=1 CELLRAND=2000000 CHAIN=1 node build-iray.mjs   # -> cellscan.json for a level
 //   node charsetgen.mjs                                              # -> charset-plan.json fitted to it
 //   node crossfit.mjs charset-plan.json cellscan.json "label"
 //

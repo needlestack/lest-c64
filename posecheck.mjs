@@ -1,6 +1,6 @@
 // posecheck.mjs -- does the route compiler's movement model match what the machine did?
 //
-//   node posecheck.mjs "ROUTE=bench LVL=1 TWOLEV=0 DIE=0 NOORB=1 ANGEL=0"
+//   node posecheck.mjs "ROUTE=bench CHAIN=1 DIE=0 NOORB=1 ANGEL=0"
 //
 // One run, and a table of model-vs-machine pose at the end of every step. A disagreement means
 // the route lands somewhere its author did not send it, and NOTHING ELSE REPORTS THAT: moveFwd

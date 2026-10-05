@@ -11860,11 +11860,6 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
-; A LATE level's two lists are NOT here (see LATEWALL): they ride in bank 3 with that level's
-; tables and the pointer tables below simply name where they will land, so nothing at runtime has
-; to know which kind of wall it is looking at.
-
-   ; each wall's cells, $ff-ended
 ; The four pointer tables that used to stand here are LVL_TABLES entries now (see wallPtrs):
 ; sized to the chain, they were the last thing forcing a global wall id space.
 ; ONE BYTE PER LOCAL WALL ID, not per wall in the chain: 0 = the wall is there. It is engine
