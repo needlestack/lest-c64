@@ -10899,6 +10899,12 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 const ZONES = process.env.ZONES !== '0';   // DEFAULT since 2026-10-04 (user: walls-open zones, keep it simple); ZONES=0 = horizon + holeSeeT
 const ENTHZN = process.env.ENTHZN !== '0' && !ZONES;
 const MAPPACK = ENTHZN || ZONES;
+// GATEFAST (default with ZONES): the gate's per-entity loop with the cone INLINED (no jsr/rts, Y and A
+// only, so the loop keeps the entity index in X instead of reloading cnI), the cell delta in zero page,
+// and the per-cell lookups (mapT mask, stamp list) redone only when the player's cell changes. Off for
+// the builds whose extra stages read cnTest's leftovers or count inside the loop. GATEFAST=0 to A/B.
+const GATEFAST = ZONES && !ENTLOS && !process.env.LOSCHK && !process.env.CULLCNT && !process.env.HZCHK &&
+                 process.env.GATEFAST !== '0';
 if (!ENTHZN) DIAG.push('ENTHZN=0');
 const ENTHZN_LVLS = (process.env.ENTHZN_LVLS ?? '1,2,5,6,7').split(',').filter(Boolean).map(Number);
 const HZCHK = process.env.HZCHK === '1';
@@ -12971,8 +12977,8 @@ kfL     = $856a
 kfH     = $856b
 krL     = $856c
 krH     = $856d
-oix     = $856e
-oiy     = $856f
+oix     = ${GATEFAST && process.env.GFZP !== '0' ? '$d0' : '$856e'}   ; GATEFAST: zero page -- the gate's inlined cone and orbProj both hit these
+oiy     = ${GATEFAST && process.env.GFZP !== '0' ? '$d1' : '$856f'}
 oax     = $8570
 oay     = $8571
 oixS    = $8572
@@ -17293,11 +17299,14 @@ ${DIE ? `omDead: rts
         lda paqH
         sta opaqH
 ${ENTGATE ? `        jsr entGate             ; ---- anything to project at all? ---- (out of line: the
-        bcc ogFull              ;   main block is full; see entGate for what it tests)
+${process.env.GATEPROF ? `        php                     ; GATEPROF: the gate alone, in bucket 10 (orbKey's ~6 lines share it)
+        jsr pfT10
+        plp
+` : ''}        bcc ogFull              ;   main block is full; see entGate for what it tests)
         rts                     ; carry set: nothing in sight, registers already cleared
 ogFull:
 ` : ''}        jsr omTrig              ; the frame's trig and the shared halves of every projection
-                                ;   -- out of line, the main block is at its ceiling; see omTrig
+${process.env.GATEPROF ? '        jsr pfT11              ; GATEPROF: omTrig alone, in bucket 11 (bfsTick shares it)\n' : ''}                                ;   -- out of line, the main block is at its ceiling; see omTrig
         lda #$00                ; the per-sprite bit registers are built up a bit at a time and
         sta omEn                ; written once, so an unused slot is simply never set
         sta omXX
@@ -18799,7 +18808,7 @@ ${OCCLAZYE ? `        ldx oidx                ; OCCLAZYE: it survived the culls 
         lda ooFrT,x             ;   worth building, if this frame's is not built yet
         bne olFresh
         jsr orbOcc1             ; clobbers A, X, Y; nothing of orbOne's lives in them here
-        ldx oidx
+${process.env.GATEPROF ? '        jsr pfT15              ; GATEPROF: the lazy mask builds, in bucket 15 (angStep+dieChk share it)\n' : ''}        ldx oidx
         lda #$01
         sta ooFrT,x
 ${LAZYCHK ? `        jmp olChkD              ; just built: nothing to check
@@ -20275,7 +20284,9 @@ okDone: rts
 ; rebuilt from mapT rather than kept as a second copy -- 256 bytes of table saved, and it can
 ; never drift out of step with the walls.
 objInit:
-        ldx #$00
+${GATEFAST ? `        lda #$00                ; GATEFAST: a new level (or a restart) -- the cached cell is meaningless
+        sta ogPcV
+` : ''}        ldx #$00
 oiBlk:  lda mapT,x              ; walls first
 ${MAPPACK ? `        cmp #$01                ; ENTHZN: mapT is $00 for a wall and a horizon byte otherwise;
         lda #$00                ;   blkT still wants 1 = wall, 0 = open
@@ -22458,7 +22469,9 @@ hrpHit: tya
         rts
 ${ZONES ? `${LD('zoneT', ZN_BUILD.zoneT.join(','), ': !byte ')}   ; ZONES: every cell's zone, two to a byte
 ${LD('hzMskT', pad(ZN_BUILD.hmask, NHOLE).join(','), ': !byte ')}   ; ZONES: each hole-like's zones (its disc)
-zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask${STMP ? `
+zBitT:  !byte 1,2,4,8,16,32,64,128   ; ZONES: zone -> its bit in a mask${GATEFAST ? `
+ogPcV:  !byte 0                 ; GATEFAST: pcell/znP/stmpM are valid for the live level (objInit clears)
+ogTol:  !byte 0                 ; GATEFAST: the inlined cone's tolerance for this distance` : ''}${STMP ? `
 ${LD('stmpT', STMP_LIST.join(','), ': !byte ')}   ; STMP: [count, (cell, hole-like mask)...]
 stmpM:  !byte 0                 ; STMP: this frame's hole-likes that CAN be partly hidden from here` : ''}${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0\nosCntR: !byte 0,0' : ''}
 znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame` : LD('holeSeeT', holeSee.join(","), ': !byte ')}
@@ -26832,7 +26845,13 @@ ${[...Array(IDOL_N)].map((_, i) => `        sta pcP+${i}`).join('\n')}
 ` : ''}${ZONES ? `        lda py+1                ; ZONES: the player's cell, and the zones visible from anywhere in it --
 ${MULW}
 ${ADDX('px+1')}
-        sta pcell               ;   one mapT read a frame, for every entity's test below
+${GATEFAST && process.env.GFCACHE !== '0' ? `        ldx ogPcV               ; GATEFAST: the same cell as when znP and stmpM were worked out? Then
+        beq ogPcN               ;   they still hold -- the cell changes about every ten frames walking,
+        cmp pcell               ;   and the stamp-list scan alone was up to ~460 cycles on the hub.
+        beq ogPcS               ;   objInit clears ogPcV on every level change and restart.
+ogPcN:  ldx #$01
+        stx ogPcV
+` : ''}        sta pcell               ;   one mapT read a frame, for every entity's test below
         tax
         lda mapT,x
         sta znP
@@ -26853,7 +26872,7 @@ ogStL:  lda stmpT,y
 ogStH:  lda stmpT+1,y
         sta stmpM
 ogStD:
-` : ''}` : `        lda nHoleT
+` : ''}${GATEFAST ? 'ogPcS:\n' : ''}` : `        lda nHoleT
         beq ogNoH               ; no hole-likes: the LOS row below is never indexed
         lda py+1                ; the player's cell, for the LOS test
 ${MULW}
@@ -26920,10 +26939,13 @@ ogAo:   lsr
         sta cnAny
         sta cnI
 ${ENTHZN ? `        sta vhPok               ; ENTHZN: the player's thresholds are recomputed on first use
-` : ''}ogEnL:  lda cnI
+` : ''}${GATEFAST ? `        tax                     ; GATEFAST: X IS the entity index for the whole loop
+ogEnL:  cpx nOrbT
+        bcs ogEHol
+` : `ogEnL:  lda cnI
         cmp nOrbT
         bcs ogEHol
-        ldx cnI                 ; ---- an orb or an angel ----
+        ldx cnI                 ; ---- an orb or an angel ----`}
         lda orbHidT,x
 ${ZONES ? `        bne ogENo               ; hidden: no verdict to give
         ldy orbYCT,x            ; ZONES: its zone's bit against mapT[player cell] -- BEFORE the cone,
@@ -26944,12 +26966,14 @@ ogZe:   and #$07
         and znP
         beq ogENo               ; no part of its zone is visible from anywhere in this cell
         bne ogETst              ; always
-ogEHol: sec                     ; ---- a hole-like: its fixed zone mask (its whole disc) ----
+ogEHol: ${GATEFAST ? `txa                     ; GATEFAST: A must BE the entity index here -- the old loop head left it
+        ` : ''}sec                     ; ---- a hole-like: its fixed zone mask (its whole disc) ----
         sbc nOrbT
         tax
         lda hzMskT,x
         and znP
-        beq ogENo` : `        beq ogETst              ; in the world: ask the cone
+        beq ogENo${GATEFAST ? `
+        ldx cnI                 ; GATEFAST: back to the entity index for the cone` : ''}` : `        beq ogETst              ; in the world: ask the cone
         bne ogENo               ; hidden: no verdict to give
 ogEHol: sec                     ; ---- a hole-like: its per-cell LOS bitmap first ----
         sbc nOrbT               ; A = the hole index, as holeSeeT is keyed
@@ -26965,7 +26989,109 @@ ogEHol: sec                     ; ---- a hole-like: its per-cell LOS bitmap firs
         lda holeSeeT,x
         and orbBitT,y
         beq ${CULLCNT ? 'ogELos' : 'ogENo'}               ; cannot be seen from this cell at all`}
-ogETst: ldx cnI${ENTLOS ? `
+${GATEFAST ? `ogETst:                         ; GATEFAST: cnTest INLINED, Y and A only -- X keeps the entity
+        sec                     ; the cell delta, exactly as orbOne computes it (zero page now)
+        lda orbXCT,x
+        sbc px+1
+        sta oix
+        bpl ogXP
+        eor #$ff
+        clc
+        adc #$01
+ogXP:   sta cnB                 ; |dx|
+        sec
+        lda orbYCT,x
+        sbc py+1
+        sta oiy
+        bpl ogYP
+        eor #$ff
+        clc
+        adc #$01
+ogYP:   sta cnT                 ; |dy|
+        cmp cnB
+        bcs ogCh
+        lda cnB
+ogCh:   cmp #$02                ; Chebyshev distance: adjacent or nearer is always in
+        bcc ogPass
+        tay
+        lda coneTolT,y          ; the tolerance for the TRUE distance, before any halving
+        sta ogTol
+        tya
+ogHv:   cmp #$08                ; halve both deltas until the larger fits the 8x8 table
+        bcc ogIx
+        lsr cnB
+        lsr cnT
+        lsr
+        bne ogHv                ; always: A was >= 8, so it is >= 4 now
+ogIx:   lda cnT
+        asl
+        asl
+        asl
+        ora cnB
+        tay
+        lda coneBQT,y           ; first-quadrant bearing
+        bit oix
+        bpl ogQX
+        eor #$ff                ; dx < 0: $80 - b
+        clc
+        adc #$81
+ogQX:   bit oiy
+        bpl ogQY
+        eor #$ff                ; dy < 0: 0 - b
+        clc
+        adc #$01
+ogQY:   sec
+        sbc pa
+        clc
+        adc ogTol
+        sta cnB                 ; (bearing - heading + tol) & 255
+        lda ogTol
+        asl                     ; 2 * tol: inside the cone iff the value is below it
+        cmp cnB
+${process.env.GATECHK ? `        ; GATECHK=1 checks the CONE only. It said 0 disagreements in ~33,700 while the zone test for
+        ; hole-likes was reading the wrong mask (A was no longer the entity index at ogEHol) -- the
+        ; pixel compare caught that. Check the whole verdict, or compare screens, not just this.
+        beq gkOut               ; GATECHK: this verdict (1 = in) against the original cnTest's --
+        bcc gkOut               ;   taken from the compare FIRST: an lda would set Z itself
+        lda #$01
+        bne gkS0
+gkOut:  lda #$00
+gkS0:   sta gkV
+        stx gkX
+        jsr cnTest              ;   same oix/oiy/pa in; carry SET = outside
+        lda #$00
+        rol
+        eor #$01                ; -> 1 = in
+        cmp gkV
+        beq gkOk
+        inc gkBad
+        bne gkOk
+        inc gkBad+1
+gkOk:   inc gkN
+        bne gkN1
+        inc gkN+1
+gkN1:   ldx gkX
+        lda gkV
+        beq ogENo
+        bne ogPass
+gkV:    !byte 0
+gkX:    !byte 0
+gkBad:  !byte 0,0
+gkN:    !byte 0,0
+` : `        beq ogENo
+        bcc ogENo
+`}ogPass: lda #$ff
+        sta cnOkT,x
+        sta cnAny
+        bne ogENx               ; always
+ogENo:  ldx cnI
+        lda #$00
+        sta cnOkT,x
+ogENx:  inx
+        stx cnI
+        cpx cnEnd
+        bcc ogEnL
+` : `ogETst: ldx cnI${ENTLOS ? `
         lda #$00                ; is this one TALL? hole-likes never are, and their index is past
         cpx nOrbT               ;   orbTallT, so do not read it there
         bcs ogETl
@@ -27031,7 +27157,7 @@ ogENx:  inc cnI
         lda cnI
         cmp cnEnd
         bcc ogEnL
-        lda cnAny
+`}        lda cnAny
         ora carry               ; ...and the two things that want a slot without being in the world
         ora sokAn
         bne ogYes
