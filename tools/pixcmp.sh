@@ -17,15 +17,19 @@ shot() {   # $1 env, $2 png
     -exitscreenshot "$2" -autostart zz-pix.d64 >/dev/null 2>&1
   pkill -f x64sc; rm -f "$CFG"
 }
+# Poses in the levels, which is what the player moves through; the HUD is off (NOHUD=1) because its
+# fps/position readout depends on timing and differs from run to run. Falls are not checked by
+# default (the user, 2026-10-05: falls are fine, moving around the levels is what matters).
 SCENES=(
-  "CHAIN=1,2,3,4,5,6,7 VSLOTS=1 FALLNOW=1 FALLEXIT=3 ANGFREEZE=1 DEADOK=1"
-  "CHAIN=1 ANGFREEZE=1 DEADOK=1"
-  "CHAIN=1 ANGFREEZE=1 DEADOK=1 PA=40"
-  "CHAIN=2 ANGFREEZE=1 DEADOK=1"
-  "CHAIN=3 ANGFREEZE=1 DEADOK=1"
-  "CHAIN=4 IDOLSEAT=1 ANGFREEZE=1 DEADOK=1"
-  "CHAIN=4 IDOLSEAT=1 ANGFREEZE=1 DEADOK=1 PA=F5 PAF=C0"
-  "CHAIN=6 ANGFREEZE=1 DEADOK=1"
+  "CHAIN=1 ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "CHAIN=1 ANGFREEZE=1 DEADOK=1 NOHUD=1 PA=40"
+  "CHAIN=2 ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "CHAIN=3 ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "CHAIN=4 IDOLSEAT=1 ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "CHAIN=4 IDOLSEAT=1 ANGFREEZE=1 DEADOK=1 NOHUD=1 PA=F5 PAF=C0"
+  "CHAIN=5 ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "CHAIN=6 ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "CHAIN=7 ANGFREEZE=1 DEADOK=1 NOHUD=1"
 )
 # PIXSCENES="env1|env2|..." replaces the list (e.g. mid-fall holds: FALLNOW=1 FALLHOLD=n).
 [[ -n "$PIXSCENES" ]] && SCENES=("${(@s:|:)PIXSCENES}")

@@ -16,6 +16,14 @@
 // can be divided down to PER RENDERED FRAME.
 // Cycle counts include IRQ time, attributed to the IRQ handler's own entry.
 //
+// FIXED-WORKLOAD MODE (use this for A/B): build with SPINF=1 BENCHF=n and pass --until benchEnd.
+// Every build then renders the same n frames, and two runs of one build agree TO THE CYCLE on every
+// render routine. A timed window does not: it covers a different stretch of the spin each run
+// (33-71 cy/frame of drift on renderSym between identical builds), and a faster build draws a
+// different set of headings. In this mode the window includes BOOT, so the loader (Krill at
+// $04xx, the KERNAL's $ffcf/$eea9, stackLT used as its buffer) and the idle wait vary with disk
+// timing -- compare render routines, not the grand total.
+//   node tools/vprof.mjs "CHAIN=1 SPINF=1 BENCHF=2000 ANGFREEZE=1 NOHUD=1" --until benchEnd
 // Hard cap: the emulator is killed after --secs + 60 s whatever happens (one-minute rule).
 import { execSync, spawn } from 'child_process';
 import { readFileSync, writeFileSync, mkdtempSync } from 'fs';
@@ -28,6 +36,10 @@ const ENV = args[0] ?? '';
 const opt = (k, d) => { const i = args.indexOf(k); return i < 0 ? d : args[i + 1]; };
 const T0 = +opt('--t0', 600), SECS = +opt('--secs', 20), TOP = +opt('--top', 25), NDIS = +opt('--disass', 8);
 const OUT = opt('--out', '');
+// --until LABEL: a FIXED-WORKLOAD run (build with SPINF=1 BENCHF=n). Profile from the first
+// moment the monitor answers until the CPU is parked at LABEL (benchEnd), so every build is
+// measured over exactly the same n rendered frames. --t0/--secs are ignored.
+const UNTIL = opt('--until', '');
 const ROOT = new URL('..', import.meta.url).pathname;
 const X64 = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
 const PORT = 6510;
@@ -96,6 +108,28 @@ const rd16 = async a => {
 (async () => {
   await sleep(1500);
   const FC = addrOf('frameCnt');
+  if (UNTIL) {
+    const at = addrOf(UNTIL);
+    await session(['prof on']);
+    let pc = -1;
+    for (let k = 0; k < 2000; k++) {
+      const [o] = await session(['r']);
+      const m = /\.;([0-9a-f]{4})/i.exec(o); pc = m ? parseInt(m[1], 16) : -1;
+      if (pc === at) break;
+      await sleep(300);
+    }
+    if (pc !== at) throw new Error(`never reached ${UNTIL}`);
+    const [flat] = await session(['prof off', `prof flat ${TOP}`]).then(o => [o[1]]);
+    const frames = await rd16(addrOf('iterLo') ?? 0x29);
+    const names = [...flat.matchAll(/^\s*[\d,]+\s+[\d.na]+%\s+([\d,]+)\s+[\d.na]+%\s+(\S+)/gm)].map(m => m[2]).filter(n => n !== 'ROOT');
+    const dis = [];
+    for (const n of names.slice(0, NDIS)) { const [o] = await session([`prof disass ${n}`]); dis.push(`==== ${n}\n${o}`); }
+    clearTimeout(killer); try { vice.kill('SIGKILL'); } catch {}
+    const text = `vprof: ${ENV}\nwindow: boot to ${UNTIL}, ${frames} rendered frames; ${ok}\n\n${flat}\n${dis.join('\n')}`;
+    if (OUT) writeFileSync(OUT, text);
+    console.log(text);
+    process.exit(0);
+  }
   // wait for the game: frameCnt past T0 (it counts 60ths from boot)
   let fc = 0;
   for (let k = 0; k < 400; k++) { fc = await rd16(FC); if (fc >= T0) break; await sleep(250); }

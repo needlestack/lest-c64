@@ -4004,7 +4004,15 @@ if (SLOWMO) DIAG.push(`SLOWMO=${SLOWMO}`);
 // some levels the start pose walks forward into a wall within a second (user: walk BACKWARDS on
 // level 6, strafe on level 7). Still one held control from the caller's pose.
 const WALKB = flag('WALKB'), STRAFEL = flag('STRAFEL');
-const AUTOMOVE = SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
+// ---- SPINF / BENCHF: a benchmark whose WORKLOAD does not depend on the build's speed ----
+// SPIN turns per 60th, so a faster build draws a different set of headings and two profiles are
+// never of the same frames. SPINF turns a fixed $0300 per RENDERED frame instead, and BENCHF=n
+// stops after exactly n rendered frames (benchEnd: jmp *). Frame k is the same view in every
+// build, so a routine's cycle count over those n frames differs ONLY because its code does.
+// tools/vprof.mjs --until benchEnd profiles from boot to there.
+const SPINF = flag('SPINF');
+const BENCHF = +(process.env.BENCHF ?? 0);
+const AUTOMOVE = SPINF ? 'spinFrm' : SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
 
 // ---- VIC bank 0 memory layout ----
 // The double buffer flips between two 1KB screen matrices. Both are RAM the renderer
@@ -11549,10 +11557,20 @@ cqF1:   dex
 cqDone: lda #$00
         sta cqN
 ` : ''}${SPRITES ? '        jsr osFlush             ; sprite registers, now the beam is out of the way\n' : ''}        inc iterLo
-        bne mloop
+${BENCHF ? `        bne bfChk
+        inc iterHi
+bfChk:  lda iterHi              ; BENCHF: exactly ${BENCHF} rendered frames, then park
+        cmp #${hx(BENCHF >> 8)}
+        bne bfGo
+        lda iterLo
+        cmp #${hx(BENCHF & 255)}
+        beq benchEnd
+bfGo:   jmp mloop
+benchEnd:jmp benchEnd            ; DEADCODE-OK: the profiler stops here
+` : `        bne mloop
         inc iterHi
         jmp mloop
-
+`}
 ; The old makeDiv drew a white seam slit by ZEROING colH at each face boundary. That is
 ; incompatible with 4-wide cells -- a zeroed column silently became a ramp endpoint, so a
 ; boundary landing on a cell edge turned the whole cell into a diagonal. It is also now
@@ -12266,6 +12284,12 @@ spTick: lda paF
         dex
         bne spTick
 spinDn: rts
+` : ''}${SPINF ? `
+spinFrm:lda pa                  ; SPINF: a fixed turn per RENDERED frame, whatever the tick count
+        clc
+        adc #$03
+        sta pa
+        rts
 ` : ''}
 ; ---- tickDelta: how much time has passed, in 60ths ----
 ; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
@@ -25030,6 +25054,17 @@ const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 2
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
     rayOffT: NLOG, colGrpT: NLOG, clampT: 256, clmp16: 256,
+    // ---- THE CELL CHOOSER'S BYTE-INDEXED TABLES (2026-10-05) ----
+    // Their source puts each at a `* = RELOC+$xx00` origin with a comment saying why ("a page
+    // crossing here would tax the hottest lookup in the renderer") -- but compaction strips
+    // origins, and alignment survives it only if it is declared HERE. These were not, and the
+    // per-instruction profile caught rampThrT crossing a page on 100% of lookups, rampThi 80%,
+    // rampTlo 72%, stepThrT1 92%. clamp8T is the same kind of table on the same path.
+    // (Not edgLoT/edgHiT: 35 bytes each, and anything listed here is placed at a PAGE START by
+    // compact.mjs -- two pages of padding to fix a crossing the current layout does not have.)
+    ...(PLAN === 3 ? { rampTlo: 256, rampThi: 256, rampThrT: 256, stepThrT1: 256, stepThrT2: 256, stepThrT3: 256,
+        stepT1lo: 256, stepT1hi: 256, stepT2lo: 256, stepT2hi: 256, stepT3lo: 256, stepT3hi: 256 } : {}),
+    clamp8T: 256,
     // hTabT MUST start on a page, and this list is where that is said. The height lookup builds
     // its pointer out of the HIGH BYTE ALONE and forces the low byte to zero:
     //     lda colGrpT,x / adc #>hTabT / sta hp+1 / lda #$00 / sta hp / lda (hp),y
