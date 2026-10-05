@@ -2582,6 +2582,9 @@ const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
 // synthesise only the edge cell that actually straddles a wall boundary rather than both edges of
 // every row -- and measure it in CYCLES (PROFILE bucket 16), because one 60/n step could be a few
 // hundred cycles over a boundary or several thousand and those argue differently.
+// TO CHECK (user, 2026-10-05): the shipping bottom-cell OCCSYNTH may already handle what
+// OCCSYNEDGE does, and what OCCSYNROW=all buys is unclear. Experiment (the poses above) before
+// deleting either -- they are kept until that is confirmed.
 const OCCSYNEDGE = process.env.OCCSYNEDGE === '1';
 if (OCCSYNEDGE) DIAGEARLY.push('OCCSYNEDGE=1');   // registered HERE, below its own declaration
 if (OCCSYN_N & 1) throw new Error('OCCSYNN must be even: half the scratch codes per buffer');
