@@ -1327,7 +1327,7 @@ for (const [cell, hs] of hazCell) for (const h of hs) {
   if (cells.length) hazRec.push({ cell, sel: HAZFACE[face], spare: hazSpare.get(h.run),
                                   orig: h.run, cells });
 }
-const HAZ = hazRec.length > 0 && process.env.NOHAZ !== '1';   // NOHAZ=1: A/B the fix
+const HAZ = hazRec.length > 0;
 // (parent, spare) id pairs for mkRuns's tail, $ff-terminated, padded to the largest resident
 // level with $ff so the terminator is where the shorter level put it. Travels in the manifest.
 const hazSpTab = (() => {
@@ -1981,7 +1981,7 @@ const QA = QLEV[LA], QM = QLEV[LM], QB = QLEV[LB];
 const SLOTN = LA * LM * LB;
 
 const C8 = x => Math.max(0, Math.min(8, x));
-// STEPA=1 -- reconstruct a step cell by FORMULA instead of by sampled median.
+// THE STEP FORMULA -- reconstruct a step cell by FORMULA instead of by sampled median.
 //
 // The three samples are qA (column 0), qM (the last column before the boundary) and qB
 // (column 3). Two of them sit on the NEAR wall, so that side gets a real ramp; the far wall has
@@ -2008,14 +2008,13 @@ const C8 = x => Math.max(0, Math.min(8, x));
 // it cannot produce at all.
 // TRIED AS THE DEFAULT 2026-08-27 and turned back off the same day: the user reported seeing a
 // degradation on screen. The 1.4% is an AVERAGE over a walkthrough and averages hide where the
-// error lands -- see the note in [[iray-charset-decisions]]. STEPA=1 to compare.
-const STEPA = process.env.STEPA === '1';
+// error lands -- see the note in [[iray-charset-decisions]]. (STEPA=1, formula everywhere, is gone.)
 // DEFAULT ON since 2026-08-27. The plan answers every slot it covers -- 546 of 729 -- and only
 // the LEFTOVERS come from the formula rather than from this room's own sampling. That removes the
 // entire map dependence of the step tables (they are byte-identical between the two levels and
 // with or without a wall) and the user could not tell it from the sampled build at four
 // viewpoints, three of them up against the column where step cells actually live.
-// Full STEPA looked worse for a reason worth remembering: it hits `continue` before ever reading
+// Full STEPA (deleted) looked worse for a reason worth remembering: it hits `continue` before ever reading
 // planCode, so it throws away the 546 GOOD answers to make the 183 leftovers go away.
 const STEPFB = process.env.STEPFB !== '0';
 // Which column the MIDDLE sample reads. It was always w[kb-1] -- "the last column before the
@@ -2035,11 +2034,6 @@ const stepAPat = (k, slot) => {
   return (kb === 1 ? [a, ...lerp(m, b, 3)]
                    : [...lerp(a, m, kb), ...Array(4 - kb).fill(b)]).map(C8);
 };
-// every shape the formula can ask for, so placeAll gives them codes
-// ...but ONLY for slots the sampler actually reaches. Generating all 756 asks for 630 distinct
-// shapes against 191 codes; the ~255 reachable slots are what the map can really produce, and
-// unreachable ones fall back to the nearest code exactly as dropped patterns always have.
-let stepAAll = [];
 const hamm = (p, t) => (p[0] !== t[0]) + (p[1] !== t[1]) + (p[2] !== t[2]) + (p[3] !== t[3]);
 // Counting differing COLUMNS, not rows of difference, is deliberate. Weighting by magnitude
 // instead (sum of |row difference|) was measured 2026-08-09 and is WORSE: corner error 0.653 ->
@@ -2060,73 +2054,6 @@ const digGlyph = [
                                                                 //   hex E for its two Es
 const NGLYPH = digGlyph.length / 5;
 
-// ================= ANGCHAR=1: the angel's SILHOUETTE drawn in CHARACTERS =================
-// An experiment, off by default and self-contained. Three things had to be true and all three
-// were measured before a line of this was written:
-//
-// 1. THE SHAPE FITS THE DICTIONARY'S IDIOM. A cell can express one contiguous ink run per
-//    column. Constraining the fitted art that way reproduces 99.6% of the silhouette's pixels
-//    at apparent 63 -- whole CELLS are a blob, but sub-cell boundaries are near-exact.
-// 2. THE INK EXISTS. Angel ink is bit pair 10, which reads $d023 -- a GLOBAL register, so it
-//    takes all sixteen colours including the three greys that colour RAM (three usable bits,
-//    eight colours) can never reach. No palette shuffle, no colour-RAM writes. The rest of the
-//    cell is pair 01, the wall ink, so the silhouette is exact against a wall and fringes black
-//    where it overhangs floor or ceiling.
-// 3. THE CODES ARE AFFORDABLE. Regenerating the plan at KCELL=176 moves charsetgen's predicted
-//    error 0.020 -> 0.022 px/frame against a shipped baseline of 445. The charset reads as
-//    256/256 full, but its MARGINAL codes are worth almost nothing.
-//
-// The cost that is not obvious: charset B is charset A with every glyph's rows REVERSED (it is
-// the below-horizon half of the same screen, not a second frame), so a cell that can appear
-// below the horizon needs the code whose A-form is the reverse of what it wants. Closing the
-// set under row-reversal is what takes 24 glyphs to 43.
-const ANGCHAR = process.env.ANGCHAR === '1';
-const ANGCHARH = +(process.env.ANGCHARH ?? 63);         // apparent height in rows
-const ANGCHARW = Math.max(1, Math.round(12 * ANGCHARH / 42));
-const ANGCCOL = Math.ceil(ANGCHARW / 4), ANGCROW = Math.ceil(ANGCHARH / 8);
-const ANGCG = [];                                       // the glyphs, 8 bytes each
-const ANGCA = [], ANGCB = [];                           // per cell: index of the A- and B-form
-if (ANGCHAR) {
-  const px = fitArt(`angel-${process.env.ANGELART || 'full'}.png`, ANGCHARW, ANGCHARH,
-                    { mirror: false, contrast: +(process.env.ANGCON ?? 1.6) }).px;
-  const key = new Map();
-  const intern = rows => { const k = rows.join(',');
-    if (!key.has(k)) { key.set(k, ANGCG.length); ANGCG.push(rows); }
-    return key.get(k); };
-  const pad = ANGCROW * 8 - ANGCHARH;                   // bottom-aligned: it stands on the floor
-  for (let cy = 0; cy < ANGCROW; cy++) for (let cx = 0; cx < ANGCCOL; cx++) {
-    const rows = [];
-    let anyInk = false;
-    for (let y = 0; y < 8; y++) {
-      let b = 0;
-      for (let i = 0; i < 4; i++) {
-        const sy = cy * 8 + y - pad, sx = cx * 4 + i;
-        const on = sy >= 0 && sy < ANGCHARH && sx < ANGCHARW && px[sy * ANGCHARW + sx];
-        if (on) anyInk = true;
-        b |= (on ? 2 : 1) << (6 - 2 * i);               // 10 = angel ink, 01 = wall ink
-      }
-      rows.push(b);
-    }
-    // A cell the figure never reaches is left alone rather than painted wall-ink, so the
-    // silhouette does not carry a rectangle of background around with it. The sentinel is 0,
-    // NOT $ff: these become codes ANGC0..255 at emission, so $ff is a real angel cell.
-    if (!anyInk) { ANGCA.push(-1); ANGCB.push(-1); continue; }
-    ANGCA.push(intern(rows));
-    ANGCB.push(intern([...rows].reverse()));            // what charset B will show below the split
-  }
-}
-
-// NOTE for whoever adds objects back (2026-08-11, at the user's request): every trace of the
-// orb/sprite pass has been removed from this file, deliberately and not because it was broken.
-// The plan is to do objects as a SECOND PASS over the finished wall image rather than weaving
-// priority into the charset, so none of what follows should be reinstated as it was. What that
-// old scheme cost is worth knowing before rebuilding it: the fg/bg split below is INVISIBLE --
-// bit pairs 01 and 11 are both black (01 through $d022, 11 through colour RAM) and only sprite
-// priority tells them apart -- and expressing it cost 43 of 256 char codes (SOLID's twin, six
-// vertical splits, four seam-bg, twelve ramp/step background twins, twenty shared-shape
-// foreground duplicates). Those 43 codes are now spent on rendering accuracy instead.
-
-// --- assign char codes: cell patterns first, then the 18 readout glyphs ---
 const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of multicolor bitmap
 // Wall pixels are bit pair 01, which reads $d022. THREE INKS, one per register:
 //   00  $d021  the ceiling and floor      01  $d022  the walls      10  $d023  the seams
@@ -2467,24 +2394,13 @@ function chooseSteps() {
   return { chosen, assign, base, after, nslots: slots.length, tot };
 }
 const STEPS = chooseSteps();
-if (STEPA) { const seen = new Map();
-  // stepStats holds the slots the sampler actually VISITED; STEPS.assign back-fills all 756
-  // with nearest-shape guesses, so using it would ask for shapes the map never produces.
-  for (let k = 0; k < 3; k++) for (const slot of stepStats[k].keys()) {
-    const p = stepAPat(k, slot); seen.set(p.join(','), p); }
-  stepAAll = [...seen.values()];
-  console.error(`  STEPA: ${stepAAll.length} distinct formula shapes over ` +
-    `${stepStats.reduce((a, m) => a + m.size, 0)} sampled slots`); }
+
 // The chosen patterns' frequencies have to reach PFREQ before pairing runs, or the pairing
 // ranks every step pattern at zero and happily pairs away the common ones.
 for (let k = 0; k < 3; k++) for (const [slot, p] of STEPS.assign[k]) {
   const m = stepStats[k].get(slot); if (!m) continue;
   const n = [...m.values()].reduce((a, b) => a + b, 0);
-  // Under STEPA the code the slot will USE is the formula's shape, not the sampled pattern, so
-  // that is what must carry the frequency. Registering p instead left every formula shape with
-  // no frequency at all, which made the drop tier treat all 227 of them as never-sampled and
-  // discard exactly the shapes the step table was about to ask for.
-  const key = (STEPA ? stepAPat(k, slot) : p).join(',');
+  const key = p.join(',');
   PFREQ.set(key, (PFREQ.get(key) || 0) + n);
 }
 for (const fr of PFRAMES) for (let i = 0; i < fr.length; i++)
@@ -2544,7 +2460,7 @@ const pairBytes = (hi, lo) => [...Array(8)].map((_, i) =>
 const CQMAX = 64;
 let planCode = null;                      // bucket key -> code, for rampT/stepT below
 let planThr = null;                       // bucket key -> the w1+w2 threshold for its pair
-if (!PLAN) placeAll([rampsAll, STEPA ? stepAAll : STEPS.chosen]);
+if (!PLAN) placeAll([rampsAll, STEPS.chosen]);
 else {
   glyphs.length = 2;                      // keep BLANK=0 and SOLID=1; drop everything interned
   for (const k of [...codeOf.keys()]) if (codeOf.get(k) >= 2) codeOf.delete(k);
@@ -2885,21 +2801,7 @@ if (process.env.CELLMARK === '1' && DIAGEARLY.push('CELLMARK')) {
     for (let i = 0; i < 6; i++) glyphs[OCCW0 + i][r] = dot(glyphs[OCCW0 + i][r], cols, 2);
   }
 }
-// The angel's silhouette glyphs go LAST, so every existing code keeps its number and a build
-// with ANGCHAR=0 is byte-identical.
-const ANGC0 = glyphs.length;
-if (ANGCHAR) {
-  if (ANGC0 + ANGCG.length > 256) throw new Error(
-    `ANGCHAR needs ${ANGCG.length} codes and only ${256 - ANGC0} are free. The cell dictionary ` +
-    `is sized by a PRECOMPUTED PLAN, so shrinking it is a separate step:\n` +
-    `    KCELL=${CELLCODES - 2 - (ANGCG.length - (256 - ANGC0))} node charsetgen.mjs\n` +
-    `  then rebuild. Measured cost of doing that: charsetgen's predicted error moves 0.020 -> ` +
-    `0.022 px/frame at KCELL=176, against a shipped baseline of 445.`);
-  for (const g of ANGCG) glyphs.push(g);
-  console.error(`  ANGCHAR: apparent ${ANGCHARH} (${ANGCHARW} logical px) -> ${ANGCCOL}x${ANGCROW} ` +
-    `cells, ${ANGCG.length} glyphs at codes ${ANGC0}-${glyphs.length - 1} ` +
-    `(${ANGCA.filter(c => c >= 0).length} of ${ANGCA.length} cells inked)`);
-}
+
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + ${NSEAM} seams = ${glyphs.length} > 256`);
 // OCCSYN's scratch codes are the top OCCSYN_N: they must not be allocated to anything. Checked
 // here, where the glyph list is final, rather than trusting that KCELL was refit low enough.
@@ -2947,14 +2849,7 @@ for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
 // k. qM is the level at the LAST column before the boundary: that third sample is what lets
 // the plateau slope down to meet the corner instead of capping it flat.
 const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
-  if (PLAN && STEPA) {
-    // Scheme A + a k-medians codebook: do NOT reserve codes for the formula's shapes. The
-    // sampler already chose the best set of shapes it could afford; the formula just indexes
-    // into it by nearest match. That is the whole point -- steps, ramps and the six hard
-    // verticals all come out of one pool, and nothing is set aside.
-    for (let slot = 0; slot < SLOTN; slot++) t[slot] = nearestCode(stepAPat(k, slot));
-    return t;
-  }
+  
   if (PLAN) {
     // Every slot, not just the sampled ones: an unsampled slot still gets reached at some
     // viewpoint, and leaving it 0 draws a BLANK hole in a wall.
@@ -2968,18 +2863,14 @@ const stepT = [0, 1, 2].map(k => { const t = new Array(SLOTN).fill(0);
     }
     return t;
   }
-  if (STEPA) {                       // every slot, by formula -- no sampling involved
-    for (let slot = 0; slot < SLOTN; slot++) {
-      const c = edgeCode(stepAPat(k, slot)); t[slot] = c; }
-    return t;
-  }
+  
   for (const [slot, p] of STEPS.assign[k]) t[slot] = edgeCode(p);
   return t; });
 // PLAN=3: the index gains a ninth bit, so every table gains a second copy -- one for each half
 // of the split. A bucket that never split has thr 0, which compares true for every m, so its LO
 // copy is unreachable and just mirrors HI rather than needing a special case.
 let rampTlo = null, rampThi = null, stepTlo = null, stepThi = null;
-let fineHit = 0, fineMiss = 0; const stepAErr = [];
+let fineHit = 0, fineMiss = 0;
 if (PLAN === 3) {
   rampThi = new Array(CN * 16).fill(0); rampTlo = new Array(CN * 16).fill(0);
   for (let a = 0; a < CN; a++) for (let b = 0; b < CN; b++) {
@@ -3005,19 +2896,6 @@ if (PLAN === 3) {
   stepThi = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
   stepTlo = [0, 1, 2].map(() => new Array(SLOTN).fill(0));
   for (let k = 0; k < 3; k++) for (let slot = 0; slot < SLOTN; slot++) {
-    if (STEPA) {
-      // Scheme A: the shape comes from the formula, so both halves of the fine index answer the
-      // same way -- the extra bit says nothing the three samples do not already carry. It is
-      // still spent usefully on RAMPS, which is where 83% of the error lives.
-      const want = stepAPat(k, slot);
-      const code = nearestCode(want);
-      stepThi[k][slot] = stepTlo[k][slot] = code;
-      // MIDPOINT PROBE: does the table actually encode what the formula asked for?
-      const got = planPats[code - 2] ?? [0,0,0,0];
-      const d = Math.abs(want[0]-got[0])+Math.abs(want[1]-got[1])+Math.abs(want[2]-got[2])+Math.abs(want[3]-got[3]);
-      stepAErr.push({ k, slot, want: want.join(','), got: got.join(','), d });
-      fineHit++; continue;
-    }
     // STEPFB=1: the plan still answers every slot it covers -- 546 of 729 -- and only the
     // LEFTOVERS come from the formula instead of from this room's sampling. That is the whole
     // map dependence (183 slots) removed without giving up a single plan answer, which is what
@@ -3028,12 +2906,6 @@ if (PLAN === 3) {
     stepThi[k][slot] = planCode.get(`s${k}.${slot}.h`) ?? fb;
     stepTlo[k][slot] = planCode.get(`s${k}.${slot}.l`) ?? stepThi[k][slot];
   }
-  if (stepAErr.length) { const ex = stepAErr.filter(e => e.d === 0).length;
-    const bad = stepAErr.filter(e => e.d > 0).sort((a, b) => b.d - a.d);
-    console.error(`  STEPA TABLE PROBE: ${ex}/${stepAErr.length} slots encode the formula EXACTLY; ` +
-      `mean L1 ${(stepAErr.reduce((a,e)=>a+e.d,0)/stepAErr.length).toFixed(3)}, worst ${bad[0]?.d ?? 0}`);
-    for (const e of bad.slice(0, 6))
-      console.error(`     k=${e.k} slot=${e.slot}  want [${e.want}]  got [${e.got}]  off ${e.d}`); }
   console.error(`  PLAN=3: ${fineHit} of ${fineHit + fineMiss} index slots come from the plan, ` +
     `${fineMiss} fall back to the nearest codeword (never reached by the walkthrough)`);
 }
@@ -3661,7 +3533,6 @@ const SEAMCNT = flag('SEAMCNT');
 // it produced -- so a jitter can be RECOMPUTED offline at full precision and compared, instead of
 // its cause being argued from estimates. Seven records, which covers a frame's boundaries here.
 const SEAMDBG = flag('SEAMDBG');
-const CELLMERGE = flag('CELLMERGE');
 const PROFMAX = flag('PROFMAX');
 // ENTPROF=1: split the entities bucket into orbOccAll / orbMove / orbKey / bfsTick / angStep.
 // Reuses the bucket indices PROFCOARSE frees, so it must be run WITH PROFCOARSE.
@@ -4148,12 +4019,10 @@ const SEAMCUTC = SEAMPIXC ? SEAMPIXC + 7 : 0;
 // solves, and having it as its own number is how the two used to drift apart.
 const SEAMFAR = +(process.env.SEAMFAR ?? SEAMCUT);
 
-// SEAMPRE=1: reject a span before deriving u when none of its char cells is still free.
-// MEASURED AND IT DOES NOT PAY -- kept only so the negative result is not re-derived. At the
-// long-hall viewpoint it NEVER fires: seamOne calls and rejections are unchanged (52877 -> 53105,
-// noise), because a span of ~5 char cells nearly always has one free. The 63% of boundaries that
-// get discarded collide INDIVIDUALLY, mostly with corner seams, so there is no whole-span answer.
-const SEAMPRE = flag('SEAMPRE');
+// (SEAMPRE, deleted: rejecting a span before deriving u when none of its char cells is still free.
+// MEASURED AND IT DID NOT PAY -- at the long-hall viewpoint it never fired, because a span of ~5
+// char cells nearly always has one free. The 63% of boundaries that get discarded collide
+// INDIVIDUALLY, mostly with corner seams, so there is no whole-span answer.)
 const SEAMS = process.env.SEAMS !== '0';
 // SEAMDRAW=0: compute every seam exactly as usual -- seamSpan, seamT, the corner marks, all of it
 // byte for byte -- but have renderSym ignore seamT and take its ordinary cached path. A
@@ -4214,20 +4083,18 @@ const SEAMPANEL = process.env.SEAMPANEL !== '0';
 //     dp 0.25 -> 2.9    dp 1 -> 5.8    dp 2 -> 8.1    dp 4 -> 11.1    dp 8 -> 14.6
 // K varies with sec^2 across the screen (138.7 at centre, 175 at the edge), so the threshold is
 // soft by about 20% either way. That is well inside how fuzzy "wide enough to read" is.
-// SEAMANY=1 restores ssAny, the "is any cell of this span still writable" early-out. Measured
+// (SEAMANY, deleted: ssAny, the "is any cell of this span still writable" early-out. Measured
 // 2026-09-03 with SEAMCNT over 13,000 spans at two viewpoints -- the long hall and the level 1
-// walking spot -- it ended a walk EXACTLY ZERO times, so it is off by default.
+// walking spot -- it ended a walk EXACTLY ZERO times.)
 // It is not that the idea was wrong; SEAMPW took its job. ssAny stopped the walk once the span had
 // no unmarked cell left, and the way a span fills up is by walking far enough down a receding face.
 // SEAMPW now stops the walk before that, at the first boundary too narrow to place. And ssAny got
 // weaker in the other direction too when the "cell and both neighbours" rule became the flat
 // four-column rule: a line can now go in a cell whose neighbours are marked, so the honest
 // predicate is looser and fires less. Two changes pushing the same way left it at zero.
-// Worth ~25 cycles and a jsr per boundary, plus 30-odd bytes against a ceiling that keeps binding.
-// Restore it if a viewpoint ever shows spans filling: the counters to watch are ssAnyX vs ssPwX.
-const SEAMANY = flag('SEAMANY');
-const SEAMPW = CELLMERGE ? 0 : +(process.env.SEAMPW ?? 4);   // idT/faceIdT hold CELL ids under
-                                        // CELLMERGE, so the run lookup would read gibberish
+// It cost ~25 cycles and a jsr per boundary. If a viewpoint ever shows spans filling, the
+// counters to watch are ssAnyX vs ssPwX.
+const SEAMPW = +(process.env.SEAMPW ?? 4);
 if (SEAMPW && SEAMPW < 3) throw new Error(`SEAMPW=${SEAMPW}: 4K/n must fit a byte, so n >= 3`);
 const PW4C = SEAMPW ? Math.round(4 * NLOG / (FOV / 256 * 2 * Math.PI) / SEAMPW) : 0;
 if (SEAMPW !== 4) DIAG.push(`SEAMPW=${SEAMPW}`);
@@ -4361,8 +4228,7 @@ const ORBFG = process.env.ORBFG;
 // ORBSTAMP=0 disables PARTIAL occlusion. On by default: the slot-count clobber that made this
 // walk a hundred garbage slots per frame is fixed -- see occStamp's entry.
 const ORBSTAMP = process.env.ORBSTAMP !== '0';
-// ORBGATE=1 restores the build-time canOcc gate on the STAMP pass. OFF by default.
-//
+// (ORBGATE, deleted: the build-time canOcc gate on the STAMP pass.)
 // canOcc comes from blockers(), which marches from 9 eye positions in the cell across +-0.25
 // cells of the orb. That answers "can this orb be occluded from this cell" well enough for the
 // WHOLE-ORB hide, but partial occlusion asks a wider question -- can any PART of it be hidden
@@ -4371,7 +4237,6 @@ const ORBSTAMP = process.env.ORBSTAMP !== '0';
 // long as you stand in that cell, and pops correct again one step later.
 //
 // Skipping the gate costs 21.59 -> 21.48 fps, which is worth not having that class of bug.
-const ORBGATE = process.env.ORBGATE === '1';
 // ORBNOCELL=1: walk and decide, but stamp nothing. Separates the SEARCH cost from the WRITING.
 const ORBNOCELL = process.env.ORBNOCELL === '1';
 // The sprite bitmaps are their own disk file, loaded straight into VIC bank 3 ($c000, 64-byte
@@ -5183,28 +5048,15 @@ const sprOf = n => {
 };
 const SPRVARY = LEVEL_IDS.some(n => ['under', 'hi'].some(k => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]));
 
-// Placement. Greedy over the open cells with a minimum spacing, which spreads them through
-// every room and corridor without clumping. 2.2 cells lands 34 orbs and keeps the worst cell's
-// candidate list to 9 -- see the visibility lists below, which are what make this affordable.
-const ORBSPACE = +(process.env.ORBSPACE ?? 2.2);
 // How far an orb can be and still make the cell's list. A full projection is ~2400 cycles
 // whether the orb ends up 48 pixels across or 4, so the tail of tiny distant dots is the
 // expensive part of being generous. 9 cells is where an orb is still a couple of pixels.
 // ---- LEVEL 1 places its objects by hand ----
 // One orb at the mouth of the corridor, one hole at the far end, and (later) one angel halfway
 // between them. The orb both blocks the way through and cages the angel, which is the whole
-// lesson of the level -- so the placement is the design, not a scatter. ORBSCATTER=1 brings back
-// the old fill-the-map-with-orbs behaviour for engine testing.
+// lesson of the level -- so the placement is the design, not a scatter.
 const ORBS = [];
-if (process.env.ORBSCATTER) {
-  for (let y = 1; y < 15; y++) for (let x = 1; x < 15; x++) {
-    if (map[cellOf(x, y)]) continue;
-    const cx = x + 0.5, cy = y + 0.5;
-    if (cx < 2 && cy < 2) continue;              // not sitting on the player's start
-    if (ORBS.some(o => Math.hypot(o.x - cx, o.y - cy) < ORBSPACE)) continue;
-    ORBS.push({ x: cx, y: cy, c: ORBS.length % ORBBODY.length });
-  }
-} else {
+
   // NOORB=1: the angel only. It shares the sprite budget and the priority ordering with every
   // orb on screen, so having one standing in front of it is the wrong thing to be looking at
   // while judging the angel's own scaling.
@@ -5322,7 +5174,7 @@ if (process.env.ORBSCATTER) {
     }
     else throw new Error(`no angel placement for level ${LVL} -- add a branch (an empty one is fine)`);
   }
-}
+
 // ANGAT=x,y: start every angel at this cell instead. An occlusion artefact depends entirely on
 // where the entity stands, and a wandering angel puts a different configuration in front of the
 // camera on every headless run -- so a reported one cannot be reproduced at all without this.
@@ -9754,7 +9606,6 @@ pfHist  = $7e33                 ;   8 bytes: how many frames spanned 0..7 raster
 mxLo    = $7e3b                 ; PROFMAX: worst whole-frame delta, in raster lines
 mxHi    = $7e3c
 mxStep  = $7e3d                 ;   ...and the tour step it happened in
-` : ''}${SEAMPRE ? `ssCE    = $7e5a                 ; SEAMPRE: the span's last char cell
 ` : ''}; bfsLast and mulWY were the ONLY live equates on page $7c00 -- everything else there is the
 ; PROFMAX/SEAMPRE/SEAMCNT clusters, now gated above. The hole report reserves a whole PAGE per
 ; squatter, so these two bytes were holding 256 out of the free map, and deleting the dead
@@ -11720,7 +11571,7 @@ dnSkip:                         ;   headless run can TAKE and then PUT DOWN. One
                                 ;   exercised the pick-up half, which is why the drop path could
                                 ;   carry a 16-wide coordinate mask for as long as it did.
 ` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        ldy wsWall              ; WALLNOW: not on a level with no such wall -- its pointer\n        lda wallDHiT,y          ;   is 0 and the toggle would apply a list read from page 0\n        beq wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        jsr pfT4              ; renderSym alone' : ''}${SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && ORBSTAMP ? '\n        jsr pfT16              ; occStamp: the partial-occlusion pass' : ''}
-${ANGCHAR ? '        jsr angChar             ; AFTER renderSym and occStamp, for the same reason they are\n                                ;   ordered that way: it overwrites cells they just drew\n' : ''}${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the raster count, the LEVEL line and the 'L' key. Outside the
+${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the raster count, the LEVEL line and the 'L' key. Outside the
                                 ;   NOHUD gate: the key is a control, not a readout.
 ${NOHUD ? '' : `        jsr drawFps
         jsr drawDbg
@@ -13182,32 +13033,7 @@ ${SEAMCNT ? `        inc ssNear\n        bne ssNearX\n        inc ssNear+1\nssNe
         ; spans stop on this test, which is exactly why u is derived here instead of in
         ; marchCol -- computing it for all 19 marched columns spent ~2850 cycles a frame
         ; to use about a third of the answer.
-${SEAMCNT ? `        inc ssCalc\n        bne ssCalcX\n        inc ssCalc+1\nssCalcX:\n` : ''}${SEAMPRE ? `        ; ---- is there ANYWHERE left to put a line in this span? ----
-        ; seamOne rejects a boundary whose char cell -- or either neighbour -- is already
-        ; marked, and it does that AFTER projecting it. Down a long hall 63% of them go that
-        ; way, mostly against corner seams subFace placed during the cast. The span's char
-        ; cells are known before any of it: spanL>>2 .. spanR>>2. If not one is still a plain
-        ; fill, every boundary would be discarded, so the whole span can go.
-        ; Tests the CELL ONLY, not its neighbours, which keeps this a strict subset of what
-        ; seamOne decides -- it can never suppress a seam that would have drawn.
-        lda spanR
-        lsr
-        lsr
-        sta ssCE
-        lda spanL
-        lsr
-        lsr
-        tax
-ssPre:  lda seamT,x
-        cmp #${hx(SOLID)}
-        beq ssPreO              ; a free cell: worth deriving u after all
-        inx
-        cpx ssCE
-        beq ssPre
-        bcc ssPre
-        jmp ssDn                ; nowhere left to put one
-ssPreO:
-` : ''}        ldx spanL               ; now it is worth deriving u
+${SEAMCNT ? `        inc ssCalc\n        bne ssCalcX\n        inc ssCalc+1\nssCalcX:\n` : ''}        ldx spanL               ; now it is worth deriving u
 ${DOUBLE === 'calcU' ? '        jsr calcU               ; DOUBLE=calcU: price it by differencing two PROFILE runs.\n        ldx spanL               ;   calcU CLOBBERS X, which is its own input -- without this\n' : ''}        jsr calcU
         lda uwL
         sta uaL
@@ -13279,17 +13105,9 @@ ssPwNX: jsr ssPw
         bne ssPwXX
         inc ssPwX+1
 ssPwXX: jmp ssDn
-ssPwCk:${SEAMANY ? ` jsr ssAny
-        bcs ssAnyOk
-        inc ssAnyX
-        bne ssAnyXX
-        inc ssAnyX+1
-ssAnyXX: jmp ssDn
-ssAnyOk:` : ''}` : `   jsr ssPw                ; no panel wide enough to place a line in: stop, because the
+ssPwCk:` : `   jsr ssPw                ; no panel wide enough to place a line in: stop, because the
         bcs ssDn                ;   face only gets narrower from here
-${SEAMANY ? `jsr ssAny               ; nothing writable left: every remaining boundary is a certain
-        bcc ssDn                ; discard, so stop rather than project them` : ''}`) : `   ${SEAMANY ? `jsr ssAny
-        bcc ssDn` : ''}`}
+`) : `   `}
 ${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n' : ''}        jsr seamOne
         dec ssN
         beq ssDn
@@ -13314,31 +13132,7 @@ ssDn:   rts
 ; weaker question than whether one can be WRITTEN: a free cell next to a corner is unusable,
 ; and down a hall most free cells are exactly that. Asking the weak question, nothing ever
 ; looked exhausted and the pre-test never fired.
-${SEAMANY ? `; Returns carry SET while a placeable cell remains.
-ssAny:  lda spanR
-        lsr
-        lsr
-        sta ssAng               ; last cell of the span (calcU's scratch, dead by now)
-        lda spanL
-        lsr
-        lsr
-        tax
-        ; An UNMARKED cell is the test now, not the three-cell one: the distance rule can place a
-        ; line in a cell whose neighbours are marked, so asking the old question here would stop
-        ; the walk while placements were still possible. This is looser, so it fires less often --
-        ; correct beats clever for an early-out.
-ssAnL:  lda seamT,x
-        cmp #${hx(SOLID)}
-        bne ssAnX
-        sec
-        rts                     ; carry SET: a line might still go here
-ssAnX:  inx
-        cpx ssAng
-        beq ssAnL
-        bcc ssAnL
-        clc                     ; the span is spoken for end to end
-        rts
-` : ''}
+
 
 ; u for one marched column (X): where along the wall the ray landed, 8.8 cells.
 ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and vice
@@ -13518,12 +13312,7 @@ ${RAYCNT ? '        inc rayN\n' : ''}        jsr castRay
         sta sideT,x             ; side kept separate (avoids id/side bit collision)
         lda cell                ; castRay already maintains the cell id
         sta idT,x               ; X is still col -- nothing since the store above touches it
-${CELLMERGE ? `        ; CELLMERGE=1: store the CELL id, not the run id, so the subdivision splits at every
-        ; cell boundary and finds seam positions by the same hinted binary search it already
-        ; uses for faces -- instead of merging them away and having seamSpan re-derive them.
-        ; A already holds the cell id here, so this also skips the run-table lookup below.
-        sta faceIdT,x
-` : `        ; --- faceIdT = connected-wall-run id: "same wall" means same contiguous run,
+        ; --- faceIdT = connected-wall-run id: "same wall" means same contiguous run,
         ;     not merely same plane -> the merge cannot span a hallway gap ---
         tay                     ; Y = cell id (index into run tables)
         lda side
@@ -13540,7 +13329,7 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
         jmp friSto
 friSo:  lda runST,y
 friSto: sta faceIdT,x
-`}           ; X still col: the run-table branch above only uses A and Y
+           ; X still col: the run-table branch above only uses A and Y
 ${SEAMS ? `        lda remL                ; park the raw hit distance; u is derived from it later, and
         sta remLoT,x            ; only for the ~35% of spans that actually cross a boundary
         lda remH
@@ -14374,62 +14163,8 @@ nmi:    pha
 
 ; ---- fps = 960 / (frames per 16 renders) ----
 
-${ANGCHAR ? `; ---- angChar: stamp the angel's silhouette into the char buffer ----
-; Runs AFTER renderSym, so it overwrites the wall image the renderer just drew, and into the
-; BACK buffer, which is what renderSym was drawing. Idempotent: re-stamped every frame, so a
-; column renderSym skipped (run cache hit) still carries last frame's stamp and agrees.
-;
-; NOT wired to the angel's projected position yet -- ANGCX/ANGCY place it. What that leaves
-; untested is the thing most likely to decide this: the figure can only sit on the 4x8 cell
-; grid, so it JUMPS 4 pixels across and 8 down as it walks, where a sprite slides one.
-;
-; No run-cache invalidation either, and that IS needed once it moves: the cells the figure
-; vacates are ones renderSym believes it already painted correctly. See the note on cwA/cbA.
-angChar:lda #$00
-        sta acRow
-        sta acIx                ; walks the cell map row-major, so no multiply per row
-acRLp:  lda acRow
-        clc
-        adc #${hx(+(process.env.ANGCY ?? 4))}
-        pha                     ; the screen row, wanted twice
-        cmp #${hx(+(process.env.ANGCSPLIT ?? 13))}
-        lda #$00                ; NOT the carry: setRow and the index arithmetic below both
-        bcc acAbv               ;   clobber it, so the split test is kept in a byte
-        lda #$01
-acAbv:  sta acB
-        pla
-        jsr setRow              ; clobbers X, so the column loop is set up after it
-        ldx #$00
-acCLp:  ldy acIx
-        lda acB
-        bne acUseB
-        lda angcAT,y
-        jmp acGot
-acUseB: lda angcBT,y
-acGot:  beq acSkip              ; 0 = a cell the figure never reaches: leave the wall alone
-        pha
-        txa
-        clc
-        adc #${hx(+(process.env.ANGCX ?? 17))}
-        tay
-        pla
-        sta (ppPtr),y
-acSkip: inc acIx
-        inx
-        cpx #${hx(ANGCCOL)}
-        bne acCLp
-        inc acRow
-        lda acRow
-        cmp #${hx(ANGCROW)}
-        bne acRLp
-        rts
-
-` : ''}; ================= data =================
-${ANGCHAR ? `; Char CODES, not indices into the glyph list -- the silhouette glyphs are appended last, so
-; the code is ANGC0 + index. 0 means "leave this cell alone".
-angcAT: !byte ${ANGCA.map(c => c < 0 ? 0 : ANGC0 + c).join(',')}
-angcBT: !byte ${ANGCB.map(c => c < 0 ? 0 : ANGC0 + c).join(',')}
-` : ''}dirXT:  !byte 1,1,0,255,255,255,0,1
+; ================= data =================
+dirXT:  !byte 1,1,0,255,255,255,0,1
 dirYT:  !byte 0,1,1,1,0,255,255,255
 rowLoT: !byte ${rowLo.join(',')}
 rowHiT: !byte ${rowHi.join(',')}
@@ -14804,10 +14539,7 @@ qtLo:   ldx oqa
 ;     in the charset. So every seam inside the orb's box becomes plain black. Its whole box, not
 ;     just the occluded part: a near wall's seam would otherwise bite an orb that a DIFFERENT
 ;     wall is occluding at the edge.
-occStamp:${process.env.OCCFBN ? ' inc oSDbg+0             ; OCCFBN: occStamp entries, free-running\n       ' : ''}${process.env.OSVIS === '1' ? `
-        lda #$00                ; OSVIS: this frame's on-screen run set is built on first need
-        sta osVOk
-` : ''}
+occStamp:${process.env.OCCFBN ? ' inc oSDbg+0             ; OCCFBN: occStamp entries, free-running\n       ' : ''}
 ${DBGORB ? `        lda #$00
         sta oSCnt
         sta oSOrb
@@ -14903,9 +14635,7 @@ ${process.env.OSCNT ? `        inc osCntE              ; OSCNT: slots taking the
         bne oSCe
         inc osCntE+1
 oSCe:` : ''}
-${ORBGATE ? `        lda obOcc,x
-        bpl oSNext              ; nothing reachable from this cell can occlude this orb
-` : ''}
+
 ${DBGORB ? `        inc oSOrb
 ` : ''}        lda obIX,x
         tay
@@ -14913,21 +14643,7 @@ ${DBGORB ? `        inc oSOrb
         sta omptr
         lda orbOccHiT,y
         sta omptr+1
-${process.env.OSVIS === '1' ? `        lda osVOk               ; OSVIS: IS ANY RUN IN ITS MASK ON SCREEN THIS FRAME? A mask bit only says
-        bne osVHave             ;   "beyond that face's PLANE" -- a hub pedestal has one for the pedestal
-        jsr osVBld              ;   wall even when that wall covers none of it. The set is the run at
-osVHave:ldy #${hx(OCCBYTES - 1)}             ;   every span's left column -- exactly what the scan below tests --
-osVT:   lda (omptr),y           ;   so a slot whose mask misses it entirely can only end in "nothing".
-        and osVis,y
-        bne osVHit
-        dey
-        bpl osVT
-${process.env.OSCNT ? `        inc osCntR              ; OSCNT: slots rejected here
-        bne oSCr
-        inc osCntR+1
-oSCr:` : ''}        jmp oSDone
-osVHit: ldx osI
-` : ''}        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
+        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
         ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
         ; Display y is raster - 50, and a char row is eight of those.
         ; ---- blank and anchor: from the variant tables for an orb, from the SLOT for a socket ----
@@ -15135,38 +14851,7 @@ ${process.env.OSPROF ? '        jsr pfT7              ; OSPROF: the ORB slots (t
         sta osN
         jmp oSLoop
 oSDn:   rts
-${process.env.OSVIS === '1' ? `
-; osVBld: the set of runs on screen this frame, one bit per run as the masks hold them -- the run at
-; each span's LEFT column, spans 0..nbnd (span i starts at bndT[i-1], span 0 at column 0).
-osVBld: inc osVOk
-        ldx #${hx(OCCBYTES - 1)}
-        lda #$00
-osVZ:   sta osVis,x
-        dex
-        bpl osVZ
-        sta osVi
-osVL:   ldx osVi
-        lda #$00
-        cpx #$00
-        beq osV0
-        lda bndT-1,x
-osV0:   tax
-        ldy faceIdT,x
-        beq osVN
-        ldx runByteT,y
-        lda osVis,x
-        ora runBitT,y
-        sta osVis,x
-osVN:   inc osVi
-        lda osVi
-        cmp nbnd
-        bcc osVL
-        beq osVL
-        rts
-osVOk:  !byte 0
-osVi:   !byte 0
-osVis:  !fill ${OCCBYTES}, 0
-` : ''}
+
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
