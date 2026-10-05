@@ -3177,6 +3177,20 @@ if (process.env.MODELJSON === '1') {
 // clear on entry to every copy: the group's "cmp spanR" falls through clear, "bcc" into the
 // write is only taken when clear, and the subtract loop exits on a failed "bcs". So no copy
 // needs its own clc, and the four share one bounds test instead of paying inx/cpx/bcs/jmp.
+// SHYCOL (default; =0 for the old path): the column store is SHY colH,x ($9c, undocumented but stable on every NMOS 6510),
+// which writes Y AND (high byte of the base + 1). With colH at $fe00 that mask is $ff, so it
+// stores Y exactly -- and A, which holds the error term, is never disturbed. That deletes the
+// "sta errv / tya / sta colH,x / lda errv" shuffle: 13 cycles a column become 5, on ~147
+// columns a frame. The two documented quirks are both harmless here: a page crossing
+// corrupts the high byte (colH is 160 bytes from $fe00, so the index never crosses), and a
+// DMA steal (badline, sprite) during the write drops the AND -- which with a $ff mask
+// changes nothing. The page is forced: no other page has H+1 = $ff, and colH reaches 254.
+const SHYCOL = process.env.SHYCOL !== '0';   // DEFAULT; SHYCOL=0 restores the shuffle
+const COLH_AT = SHYCOL ? 0xfe00 : 0x0700, COLH_N = 160;
+const ispanSto = SHYCOL ? `        !byte $9c,<colH,>colH   ; shy colH,x -- A (err) survives`
+                        : `        sta errv
+        tya
+        sta colH,x`;
 const ispanCol = (id, step, last) => `        inx
         adc dyv
         bcs ish${id}            ; err+dyv crossed 256: handled below, out of line
@@ -3186,9 +3200,8 @@ iss${id}:  sbc dxv
         ${step}
         cmp dxv
         bcs iss${id}
-isw${id}:  sta errv
-        tya
-        sta colH,x` + (last ? '' : `
+isw${id}:
+${ispanSto}` + (last || SHYCOL ? '' : `
         lda errv`);
 // The 9th bit of the error term, inline instead of a whole second interpolator.
 // err is always < dxv <= 159 at the top of a column, so errH is only ever set transiently
@@ -9423,7 +9436,7 @@ stackLT = ${hx16(SCRATCH_AT.stackLT)}
 stackRT = ${hx16(SCRATCH_AT.stackRT)}
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
 ; index never needs a 16-bit add.
-colH    = $0700
+colH    = ${hx16(COLH_AT)}${SHYCOL ? '                 ; SHYCOL: the page with H+1 = $ff (see ispanSto)' : ''}
 ; ---- the per-frame arrays: ALL of them live in the reclaimed charset source, $3000-$37ff ----
 ; Two evictions got them here, both for the same reason -- an array in the code's growth room is
 ; an array that caps the engine:
@@ -13229,17 +13242,29 @@ isErr:  lda dxv
         ;   - no sec before "sbc dxv": the "cmp dxv" that got us there already set carry.
         ; 63% of columns take zero Bresenham steps and 23% take one, so the fixed per-column
         ; cost dominates and that is what these target -- 53 cycles/column down to 38.
-        ldy hcur
+${SHYCOL ? `        ; SHYCOL: A carries err from column to column, so the group's bounds test may not
+        ; touch it. "x + 4 < spanR" becomes "x < spanR - 4" against an immediate patched once
+        ; per span; spanR < 4 patches 0, which no X is below. Falling through leaves carry
+        ; clear, as the bodies need.
+        lda spanR
+        sec
+        sbc #$04
+        bcs isLim
+        lda #$00
+isLim:  sta isA8+1
+        sta isDl8+1
+` : ''}        ldy hcur
         lda errv
         ldx syNeg
         bne isD8
         ldx spanL
-isA8:   txa                     ; --- ascending, four columns per bounds test ---
+${SHYCOL ? `isA8:   cpx #$00                ; --- ascending, four columns per bounds test ---
+        bcs isA1                ; PATCHED to spanR - 4 (isLim); A is err, untouched` : `isA8:   txa                     ; --- ascending, four columns per bounds test ---
         clc
         adc #$04
         cmp spanR
         bcs isA1                ; fewer than four left: rolled tail below
-        lda errv                ; the test above needed A; err is where the last body left it
+        lda errv                ; the test above needed A; err is where the last body left it`}
 ${ispanCol('a1', 'iny')}
 ${ispanCol('a2', 'iny')}
 ${ispanCol('a3', 'iny')}
@@ -13249,8 +13274,8 @@ ${ispanHi('a1','iny')}
 ${ispanHi('a2','iny')}
 ${ispanHi('a3','iny')}
 ${ispanHi('a4','iny')}
-isA1:   lda errv
-        inx
+isA1:${SHYCOL ? '' : `   lda errv
+       `} inx
         cpx spanR
         bcs isDn
         adc dyv                 ; carry clear: cpx fell through
@@ -13261,11 +13286,10 @@ isAsb:  sbc dxv                 ; carry set by the cmp above / by this sbc
         iny
         cmp dxv
         bcs isAsb
-isAWr:  sta errv                ; park err: A is needed for the stores
-        tya
-        sta colH,x
-        lda errv
-        jmp isA1
+isAWr:                          ; ${SHYCOL ? 'store h; A keeps err' : 'park err: A is needed for the stores'}
+${ispanSto}
+${SHYCOL ? '' : `        lda errv
+`}        jmp isA1
 isAhi: sec
         sbc dxv
         iny
@@ -13274,12 +13298,13 @@ isAhi: sec
         bcc isAWr
         bcs isAsb           ; always
 isD8:   ldx spanL               ; --- descending ---
-isDl8:  txa
+${SHYCOL ? `isDl8:  cpx #$00                ; PATCHED to spanR - 4 (isLim)
+        bcs isD1` : `isDl8:  txa
         clc
         adc #$04
         cmp spanR
         bcs isD1
-        lda errv
+        lda errv`}
 ${ispanCol('d1', 'dey')}
 ${ispanCol('d2', 'dey')}
 ${ispanCol('d3', 'dey')}
@@ -13289,8 +13314,8 @@ ${ispanHi('d1','dey')}
 ${ispanHi('d2','dey')}
 ${ispanHi('d3','dey')}
 ${ispanHi('d4','dey')}
-isD1:   lda errv
-        inx
+isD1:${SHYCOL ? '' : `   lda errv
+       `} inx
         cpx spanR
         bcs isDn
         adc dyv
@@ -13301,11 +13326,10 @@ isDsb:  sbc dxv
         dey
         cmp dxv
         bcs isDsb
-isDWr:  sta errv
-        tya
-        sta colH,x
-        lda errv
-        jmp isD1
+isDWr:
+${ispanSto}
+${SHYCOL ? '' : `        lda errv
+`}        jmp isD1
 isDhi: sec
         sbc dxv
         dey
@@ -25098,7 +25122,10 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
   // known extent, declared as the SOLO_SLOT segment, and a squatter reserves a whole PAGE -- so
   // counting all 36 of them separately made every pair inside a page "overlap" every other.
   .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB'
-                      && SLOT_OFF[n] === undefined);
+                      && SLOT_OFF[n] === undefined
+                      // SHYCOL's colH is a named allocation of known size (COLH below), not a
+                      // squatter: a squatter reserves its whole page, which would run into ARC_GLY.
+                      && n !== 'colH');
 // ---- SOLO: every table the slot holds must have LOST its definition, and vice versa ----
 // The failure this prevents is silent and nasty: a manifest table whose emission site was missed
 // would be BOTH an equate at the slot and a run of bytes in the image. The engine would read the
@@ -25697,6 +25724,8 @@ try {
                 // pairwise guard covers it -- picking a slot address by eye is exactly the kind
                 // of choice that put ARC_GLY on the level shadow's tail (see iray-bank3-overlap).
                 ...([['LEVELS', SLOT_AT, LVLREGION_END]]),
+                // SHYCOL: the column heights, on the one page SHY can store to (see ispanSto).
+                ...(SHYCOL ? [['COLH', COLH_AT, COLH_AT + COLH_N]] : []),
                 ['VECTORS', 0xfffa, 0x10000]];
   const used = [...usedNamed.map(([, lo, hi]) => [lo, hi]),
                 // a squatter's extent is unknown, so reserve to the next page boundary

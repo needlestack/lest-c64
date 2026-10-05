@@ -20,7 +20,8 @@ const HOT = opt('--hot', 30), CROSS = opt('--cross', 25);
 const frames = +(/(\d+) rendered frames/.exec(txt) ?? [0, 0])[1];
 if (!frames) throw new Error('no rendered-frame count in the report');
 
-const RMW = /^(ASL|LSR|ROL|ROR|INC|DEC)$/, STORE = /^(STA|STX|STY)$/;
+// SHY/SHX (undocumented, SHYCOL uses SHY) always take the indexed-store time, like STA abs,X.
+const RMW = /^(ASL|LSR|ROL|ROR|INC|DEC)$/, STORE = /^(STA|STX|STY|SHY|SHX)$/;
 const BR = /^(BCC|BCS|BEQ|BNE|BMI|BPL|BVC|BVS)$/;
 const IMPL = { PHA: 3, PHP: 3, PLA: 4, PLP: 4, RTS: 6, RTI: 6, BRK: 7 };
 // Base cycles, NMOS 6502, before any page-crossing penalty or taken branch.
