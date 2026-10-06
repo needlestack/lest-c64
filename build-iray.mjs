@@ -9161,7 +9161,15 @@ const STMP_LIST = (() => {
   const openable = OPENABLE;
   const walk = wallAt => (ax, ay, bx, by) =>             // losClear against a chosen wall set
     losClear(ax, ay, bx, by, (x, y) => !inMap(x, y) || wallAt(cellOf(x, y)));
-  const states = [walk(c => !!map[c]), walk(c => !!map[c] && !openable.has(c))];
+  // EVERY COMBINATION of this level's removable walls, not just "all shut" and "all open": a wall
+  // opens on its own (one socket, one group), so the level spends time with SOME open and the rest
+  // shut, and the list must hold there too. At most 3 groups, so at most 8 states. Because the list
+  // then holds in every state, wall deltas leave stmpT alone (see SKIP) -- they used to patch it
+  // index by index over the BASE length, so a variant list longer than the base would have had its
+  // count patched up and its tail never written.
+  const groupCells = WALLS.map(g => new Set(g.map(([x, y]) => cellOf(x, y))));
+  const states = [...Array(1 << groupCells.length)].map((_, m) =>
+    walk(c => !!map[c] && !groupCells.some((g, i) => (m >> i & 1) && g.has(c))));
   const PS = [0.02, 0.21, 0.4, 0.6, 0.79, 0.98];
   const out = new Map();                                  // cell -> mask
   HOLELIKE.forEach((h, L) => {
@@ -9258,7 +9266,7 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   //                delta over them is meaningless as well as wrong. (It is not enough that they
   //                are filled after this runs: the variant's values are non-zero.)
   // Derived from CHAIN_GLOBAL rather than listed, so a table added there cannot miss this.
-  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT',
+  const SKIP = new Set(['orbOccLoT', 'orbOccT', 'hazSpT', 'stmpT',   // stmpT: holds in every wall state
                         ...Object.keys(WALL_PTR), ...Object.keys(CHAIN_GLOBAL)]);
   const off = [], on = [], quad = [];
   // The baseline is the wall level's tables with the wall PRESENT -- not the live level's. Diffing
