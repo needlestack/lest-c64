@@ -10081,6 +10081,8 @@ ocr     = $8513
 oidx    = $8517
 onv     = $851a
 ohtmp   = $81f0
+mvTc    = $b3                   ; mvMine: the corner cell it is asked about
+mvTr    = $b4
 hbL     = $b1                   ; holeTail -> holeSlot: this hole-like's INK box, as screen columns (0..159),
 hbR     = $b2                   ;   so each slice's stamp can be clipped to where something is drawn
 carry   = $81f1                  ; 0 = empty hands, else the held entity's index + 1
@@ -13161,33 +13163,106 @@ mvFree: sec                     ; cx0 = (nx - r) >> 8
         lda cy1
         cmp lvlDimT+1
         bcs mvBlk
-        lda cy0                 ; all four corners must be open
+        ; All four corners must be open -- except an ENTITY's cell that your box is ALREADY on. An
+        ; entity can end up under you (die holding the idol on the level's start cell and it drops
+        ; exactly where you respawn); every move keeps a corner on it until you are fully clear, so
+        ; blocking it froze you in place. The exemption is the CURRENT BOX, not your centre cell: the
+        ; box reaches COLL_R past the centre, and a centre-only rule stuck you again on the cell edge.
+        ; Once you are fully off it, it blocks as usual. Walls never get the exemption.
+        lda cy0
 ${MULW}
         sta tmp
 ${ADDX('cx0')}
         tax
         lda blkT,x
+        beq mvOw0
+        cmp #$02                ; an ENTITY -- walls (1) always block
         bne mvBlk
+        lda cx0                ; ...and only if your box is not on that cell already
+        ldy cy0
+        jsr mvMine
+        bcs mvBlk
+mvOw0:
         lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
 ${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
+        beq mvOw1
+        cmp #$02                ; an ENTITY -- walls (1) always block
         bne mvBlk
+        lda cx1                ; ...and only if your box is not on that cell already
+        ldy cy0
+        jsr mvMine
+        bcs mvBlk
+mvOw1:
         lda cy1
 ${MULW}
         sta tmp
 ${ADDX('cx0')}
         tax
         lda blkT,x
+        beq mvOw2
+        cmp #$02                ; an ENTITY -- walls (1) always block
         bne mvBlk
+        lda cx0                ; ...and only if your box is not on that cell already
+        ldy cy1
+        jsr mvMine
+        bcs mvBlk
+mvOw2:
         lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
 ${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to spot
         tax
         lda blkT,x
+        beq mvOw3
+        cmp #$02                ; an ENTITY -- walls (1) always block
         bne mvBlk
+        lda cx1                ; ...and only if your box is not on that cell already
+        ldy cy1
+        jsr mvMine
+        bcs mvBlk
+mvOw3:
         clc                     ; all four corners open
         rts
 mvBlk:  sec
+        rts
+; mvMine: is cell (A = column, Y = row) under the player's CURRENT box? Carry CLEAR = yes.
+; Only reached when a corner hits an entity, so its cost lands on the rare blocked move, not on
+; every step. px/py are 16-bit with the cell in the high byte, as in mvFree.
+mvMine: sta mvTc
+        sty mvTr
+        sec                     ; left edge: (px - r) >> 8 must be <= the column
+        lda px
+        sbc #${COLL_R}
+        lda px+1
+        sbc #$00
+        cmp mvTc
+        beq mvM1
+        bcs mvMo
+mvM1:   clc                     ; right edge: (px + r) >> 8 must be >= the column
+        lda px
+        adc #${COLL_R}
+        lda px+1
+        adc #$00
+        cmp mvTc
+        bcc mvMo
+        sec                     ; top edge
+        lda py
+        sbc #${COLL_R}
+        lda py+1
+        sbc #$00
+        cmp mvTr
+        beq mvM2
+        bcs mvMo
+mvM2:   clc                     ; bottom edge
+        lda py
+        adc #${COLL_R}
+        lda py+1
+        adc #$00
+        cmp mvTr
+        bcc mvMo
+        clc
+        rts
+mvMo:   sec
         rts
 
 ${SEAMS ? `; ================= seamSpan: project this face's cell boundaries to columns =========
@@ -25083,6 +25158,17 @@ dieGo:  ${!HAS_IDOL ? '' : `ldy idolHand            ; ---- THE IDOL FALLS WHERE 
         sta idolXT,y            ;   the HIGH byte, which is what idolXT/idolYT hold.
         lda py+1
         sta idolYT,y
+        ; ...AND IT IS NO LONGER IN YOUR HANDS. The restart reaches idolPlace (inside objInit)
+        ; BEFORE anything re-derives idolHand from the cleared carry -- objInit clears carry,
+        ; calls idolPlace, and only then idolLk. With idolHand still naming this idol, idolPlace
+        ; took the "in your hands" arm: hid the idol and set carry back; entry then zeroed carry,
+        ; leaving an idol that was hidden AND held by nobody -- gone until you left the level and
+        ; came back (reported from play, levels 5 and 6). Dropping it HERE says what happened.
+        ; Not reordering objInit instead: a FALL carries the idol through objInit precisely by
+        ; idolHand surviving into idolPlace. carry stays set through the death scene, so the
+        ; held-icon still shows as you die; entry clears it on the restart.
+        lda #$ff
+        sta idolHand
 dgNI:   ` }${process.env.DIEDIR ? `lda #${hx(+process.env.DIEDIR & 255)}
         sta dieDir      ; DIEDIR forces the turn direction, to test both entry sides
         ` : ''}lda dieDir
