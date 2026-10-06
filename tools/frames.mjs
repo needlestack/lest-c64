@@ -39,8 +39,13 @@ if (execSync(`lsof -nP -iTCP:${PORT} -sTCP:LISTEN -t 2>/dev/null || true`).toStr
 const tmp = mkdtempSync(join(tmpdir(), 'frames-')), cfg = join(tmp, 'vice.cfg'); writeFileSync(cfg, '');
 const vice = spawn(X64, ['-ntsc', '-config', cfg, '+minimized', '-warp', '-drive8truedrive', '+virtualdev8',
   '-autostart-handle-tde', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  '-autostart', join(ROOT, 'zz-frames.d64')], { stdio: 'ignore' });
-const HARD = setTimeout(() => { try { vice.kill('SIGKILL'); } catch {} console.error('HARD CAP: killed'); process.exit(3); }, 240000);
+  '-autostart', join(ROOT, 'zz-frames.d64')], { stdio: 'ignore', detached: true });
+// bin/x64sc is a shell WRAPPER that starts the real emulator as its child, so killing the spawned
+// pid leaves the emulator running. detached: true makes the wrapper a process-group leader, and
+// killVice() signals the whole group -- this run's emulator and nothing else (never a blanket
+// pkill, which would also close a VICE the user has open).
+const killVice = () => { try { process.kill(-vice.pid, 'SIGKILL'); } catch {} };
+const HARD = setTimeout(() => { killVice(); console.error('HARD CAP: killed'); process.exit(3); }, 240000);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ONE persistent connection. Connecting stops the CPU; `x` resumes it; a checkpoint hit stops it
@@ -76,7 +81,7 @@ for (;;) {
   for (let k = 0; k < 50 && !existsSync(tmpf); k++) await sleep(20);
   frames.push(readFileSync(tmpf));
 }
-clearTimeout(HARD); try { sock.destroy(); vice.kill('SIGKILL'); } catch {}
+clearTimeout(HARD); try { sock.destroy(); } catch {} killVice();
 writeFileSync(join(OUT, 'frames.bin'), Buffer.concat(frames));
 
 // ---- A-B-A: a cell that changes and changes straight back ----

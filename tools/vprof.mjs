@@ -71,8 +71,13 @@ if (execSync(`lsof -nP -iTCP:${PORT} -sTCP:LISTEN -t 2>/dev/null || true`).toStr
 const cfg = join(tmp, 'vice.cfg'); writeFileSync(cfg, '');
 const vice = spawn(X64, ['-ntsc', '-config', cfg, '+minimized', '-warp', '-drive8truedrive', '+virtualdev8',
   '-autostart-handle-tde', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  '-moncommands', lbl, '-autostart', join(ROOT, 'zz-vprof.d64')], { stdio: 'ignore' });
-const killer = setTimeout(() => { try { vice.kill('SIGKILL'); } catch {} console.error('HARD CAP: killed'); process.exit(3); }, (SECS + 60) * 1000);
+  '-moncommands', lbl, '-autostart', join(ROOT, 'zz-vprof.d64')], { stdio: 'ignore', detached: true });
+// bin/x64sc is a shell WRAPPER that starts the real emulator as its child, so killing the spawned
+// pid leaves the emulator running. detached: true makes the wrapper a process-group leader, and
+// killVice() signals the whole group -- this run's emulator and nothing else (never a blanket
+// pkill, which would also close a VICE the user has open).
+const killVice = () => { try { process.kill(-vice.pid, 'SIGKILL'); } catch {} };
+const killer = setTimeout(() => { killVice(); console.error('HARD CAP: killed'); process.exit(3); }, (SECS + 60) * 1000);
 
 // ---- the text monitor: connect (which stops the CPU), run commands, `x` resumes ----
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -145,7 +150,7 @@ const rd16 = async a => {
     const names = [...flat.matchAll(/^\s*[\d,]+\s+[\d.na]+%\s+([\d,]+)\s+[\d.na]+%\s+(\S+)/gm)].map(m => m[2]).filter(n => n !== 'ROOT');
     const dis = [];
     for (const n of names.slice(0, NDIS)) { const [o] = await session([`prof disass ${n}`]); dis.push(`==== ${n}\n${o}`); }
-    clearTimeout(killer); try { vice.kill('SIGKILL'); } catch {}
+    clearTimeout(killer); killVice();
     const text = `vprof: ${ENV}\nwindow: boot to ${UNTIL}, ${frames} rendered frames; ${ok}\n\n${flat}\n${dis.join('\n')}`;
     if (OUT) writeFileSync(OUT, text);
     console.log(text);
@@ -169,10 +174,10 @@ const rd16 = async a => {
     const [o] = await session([`prof disass ${n}`]);
     dis.push(`==== ${n}\n${o}`);
   }
-  clearTimeout(killer); try { vice.kill('SIGKILL'); } catch {}
+  clearTimeout(killer); killVice();
   const head = `vprof: ${ENV}\nwindow: ${ticks} ticks (60ths)${frames != null ? `, ${frames} rendered frames` : ''}; ${ok}\n`;
   const text = head + '\n' + flat + '\n' + dis.join('\n');
   if (OUT) writeFileSync(OUT, text);
   console.log(text);
   process.exit(0);
-})().catch(e => { console.error(e.message); try { vice.kill('SIGKILL'); } catch {} process.exit(1); });
+})().catch(e => { console.error(e.message); killVice(); process.exit(1); });
