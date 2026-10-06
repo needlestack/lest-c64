@@ -25424,7 +25424,7 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 256])), ocos: 1, runPlaneT: 1, remLoT: 1 } : {}), ...(BGLOAD ? { stackLT: 256 } : {}), mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
-    rayOffT: NLOG, hPgT: NLOG, ecMT: 256, ecM16: 256, ecM8: 256,
+    rayOffT: 256, hPgT: 256, ecMT: 256, ecM16: 256, ecM8: 256,   // 256 = START ON A PAGE (see the guard)
     // ---- THE CELL CHOOSER'S BYTE-INDEXED TABLES (2026-10-05) ----
     // Their source puts each at a `* = RELOC+$xx00` origin with a comment saying why ("a page
     // crossing here would tax the hottest lookup in the renderer") -- but compaction strips
@@ -25941,12 +25941,15 @@ try {
   // works while the hand-placed layout exists, which is exactly what compaction replaces. This is
   // the authoritative list; the check below is what it is authoritative FOR.
   writeFileSync('./iray.aligned.json', JSON.stringify(aligned));
+  // ONE MEANING: a value above 1 is "starts on a page" -- what compact.mjs does with it. This guard
+  // used to read the value as an EXTENT ("these n bytes must not cross a page"), so rayOffT/hPgT's
+  // NLOG asked it a weaker question than the one compact answered. Same list, same reading, now.
   for (const [t, n] of Object.entries(aligned)) {
     const a = r.labels[t];
-    if (a === undefined) continue;
-    if (((a & 255) + n - 1) > 255)
-      throw new Error(`${t} at $${a.toString(16)} spans a page boundary; every indexed read ` +
-        `past $${((a | 255) + 1).toString(16)} costs an extra cycle (page-align it)`);
+    if (a === undefined || n <= 1) continue;
+    if (a & 255)
+      throw new Error(`${t} at $${a.toString(16)} must start on a page (ALIGNED_T): a byte-indexed ` +
+        `read that crosses past $${((a | 255) + 1).toString(16)} costs an extra cycle`);
   }
   // What is left in VIC BANK 3 for sprites. Sprite data is 64 bytes on a 64-byte boundary, so
   // this is the number that decides how many sprites an object pass can have. No char-ROM window
