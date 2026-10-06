@@ -7,7 +7,8 @@
 //
 // WHY NOT bench.sh / seamprof: ROUTE=bench walks into walls on the current level 1, and
 // seamprof needs a profiler that compaction was dropping. Both predate the 23x11 map and the
-// relayout. fps.sh should work again now that SPIN=1 builds, but it only spins.
+// relayout. (fps.sh, runviews.sh and motionview.sh were deleted 2026-10-06: they used the trap loader,
+// which stalls under Krill, and their own launch code; this script and `level` mode replace them.)
 //
 // HOW IT WORKS, and why each piece is there:
 //
