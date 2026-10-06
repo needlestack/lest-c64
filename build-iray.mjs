@@ -6079,7 +6079,64 @@ const orbYBaseT = ORBANCH.map(a => 150 - a);
 // blank ABOVE the ball -- up to two and a half char rows of nothing. orbSeam uses these to
 // patch only the rows an orb actually inks; using the raw sprite rectangle instead is what
 // once made seams vanish in cells with no orb near them.
-const orbBlankT = LADDER.map((r, v) => ORBANCH[v] - ORBTALL[v]);
+// ==================== EXTENTS: WHERE EACH RUNG'S INK IS, MEASURED ====================
+// Every occlusion decision and every stamp needs one fact per rung: how far its drawn pixels reach
+// left, right, up and down of the point it is anchored to. That fact used to be DERIVED five
+// different ways -- the orb's width formula (borrowed by the angel, whose figure is half as wide),
+// height formulas, a hole's sprite FRAME (mostly blank around the ellipse), inked-row counts -- and
+// each bug was one derivation reused for something it did not describe: the angel enabled and
+// stamped at twice its width, an exit drawn over a wall it was several pixels behind.
+// So now it is MEASURED, from the exact bitmap bytes the pointer tables reference, once, here.
+// Rungs are expected to change: nothing below names a rung or a size. Add, remove or redraw rungs
+// and every extent table follows; if a new rung breaks an assumption the RUNTIME makes (content
+// bottom-aligned in its frame, an ellipse drawn from the top of its frame), the guards say so in
+// words instead of the engine drawing it wrong.
+//
+// A rung is drawn from PARTS: a bitmap grid placed with its top-left at (col0, row0) relative to
+// the anchor, each grid cell covering xm logical columns and ym screen rows (magnification).
+// Columns are the 160-column grid, the anchor column is ocol; rows are counted from the top of the
+// frame that the runtime treats as the entity's own (an orb's sprite; an angel's LOWER sprite).
+// Returns the inclusive ink box { l, r, top, bot } -- l and r as distances left/right of ocol --
+// or null for a rung with no ink at all.
+const spriteGrid = bytes => [...Array(21)].map((_, y) =>
+  [...Array(12)].map((_, i) => (bytes[y * 3 + (i >> 2)] >> (6 - 2 * (i & 3))) & 3));
+const inkExtent = parts => {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const p of parts) p.grid.forEach((row, y) => row.forEach((px, i) => {
+    if (!px) return;
+    x0 = Math.min(x0, p.col0 + i * p.xm); x1 = Math.max(x1, p.col0 + (i + 1) * p.xm - 1);
+    y0 = Math.min(y0, p.row0 + y * p.ym); y1 = Math.max(y1, p.row0 + (y + 1) * p.ym - 1);
+  }));
+  return x1 < x0 ? null : { l: -x0, r: x1, top: y0, bot: y1 };
+};
+// The orb path: orbs, the angel (two stacked sprites), and the idol -- which draws its OWN art at
+// the orb's rungs through one pointer offset, so a variant's box is the UNION of what either
+// picture inks there. Equal today; if the idol's art is ever redrawn wider, the box grows with it.
+const orbPartsOf = (v, bm, col0) => {
+  const r = LADDER[v], m = r.exp ? 2 : 1;
+  const parts = [{ grid: spriteGrid(ORBBM[bm]), col0, row0: 0, xm: m, ym: m }];
+  if (ORBSRCU[v] >= 0) parts.push({ grid: spriteGrid(ORBBM[ORBSRCU[v]]), col0, row0: -21 * m, xm: m, ym: m });
+  return parts;
+};
+// col0 is where the sprite's left edge sits relative to ocol. ROWS do not depend on it, which is
+// what lets orbBlankT be measured here, before the placement half-width (orbHalfCT) exists; the
+// column box is measured again at orbBoxT with the real col0. Same function, same parts.
+const orbExtOf = (v, col0) => {
+  const r = LADDER[v], parts = orbPartsOf(v, ORBSRC[v], col0);
+  if (HAS_IDOL && v < ANG_V0 && ORBBM[IDOLBM0 + ORBSRC[v]]) parts.push(...orbPartsOf(v, IDOLBM0 + ORBSRC[v], col0).slice(0, 1));
+  const e = inkExtent(parts);
+  if (!e) throw new Error(`orb-path variant ${v} (h=${r.h}) inks nothing -- a rung must draw something`);
+  // THE STAMP ENDS AT anchor - 1 (occStamp: "the content is bottom aligned in the frame"), so the
+  // ink must reach exactly the frame's last row. A rung that floats above it would leave rows
+  // stamped under nothing; one that hangs below would be under-covered.
+  if (e.bot !== ORBANCH[v] - 1) throw new Error(`orb-path variant ${v} (h=${r.h}): ink ends on row ${e.bot}, ` +
+    `but occStamp assumes content is BOTTOM-ALIGNED and ends on row ${ORBANCH[v] - 1} of its frame`);
+  return e;
+};
+const orbRowExtT = LADDER.map((r, v) => orbExtOf(v, 0));
+// First inked row in the frame. NEGATIVE for a two-sprite entity: its content runs up into the upper
+// sprite, and the lower slot's stamp reaches over both (see occStamp's upper-half note).
+const orbBlankT = orbRowExtT.map(e => e.top);
 // How far $d001 may sink before it is pinned. Walk right up to an orb and its anchor goes past
 // the last visible raster, so the whole sprite slides off the bottom -- you could still pick up
 // something you could not see. ORB_FLOOR rows of CONTENT (not sprite frame: the content is
@@ -6266,6 +6323,8 @@ const orbHalfCT = orbHalfT.map(h => Math.ceil(h / 2));
 // column is ocol - orbHalfCT. Fold both into one table: b = ocol + orbXOffT, X = b << 1. The
 // offset is never negative (orbHalfCT is 6..12), so it is a plain ADC with no sign handling, and
 // X comes out EVEN by construction rather than by masking.
+// orbExtOf measures the ink with the sprite's left edge at ocol - orbHalfCT -- THIS placement --
+// so the occlusion box and where the pixels land cannot disagree for any variant, angel included.
 const orbXOffT = orbHalfCT.map(h => 12 - h);
 if (orbXOffT.some(v => v < 0 || v > 12))
   throw new Error('orbXOffT out of range -- a sprite is more than 12 columns off its own centre');
@@ -6285,26 +6344,43 @@ if (orbXOffT.some(v => v < 0 || v > 12))
 // EXACT, with no rounding anywhere, because sprite X is now built on the 160-column grid (see
 // orbXOffT). While X was a hires quantity that got its low bit snapped off at the end, the box
 // had to round outward to cover the half column the snap could take.
-const orbBoxT = LADDER.map((r, v) => {
-  // The ANGEL's width does not match orbW is round(12h/42), half of orbW at the same bitmap height, so its
-  // box has been computed from the orb's function all along -- at h=42 that asks for 24 columns
-  // of a 12-column sprite. Left alone deliberately: correcting it moves where the angel's
-  // occluder stamp lands, which is a rendering change and wants verification of its own.
-  const w = orbW(r.h), ox = (12 - w) >> 1, xx = r.exp ? 2 : 1;
-  const left = ox * xx, wide = w * xx;                   // logical columns, from the sprite's left
-  return { l: orbHalfCT[v] - left, r: left + wide - 1 - orbHalfCT[v] };
-});
-const orbColLT = orbBoxT.map(b => b.l);          // columns from ocol to the ball's left edge
-// The last rung is a ONE-column ball sitting entirely left of ocol, so its true right offset is
+// The ink box either side of ocol, from orbExtT -- so the angel's is its OWN figure now, not the
+// orb's ball at the same bitmap height (which asked for 24 columns of a 12-column sprite).
+const orbBoxT = LADDER.map((r, v) => orbExtOf(v, -orbHalfCT[v])).map(e => ({ l: e.l, r: e.r }));
+const orbColLT = orbBoxT.map(b => b.l);          // columns from ocol to the leftmost ink
+// The last orb rung is a ONE-column ball sitting entirely left of ocol, so its true right offset is
 // -1. The runtime adds this to ocol with a carry test for "past column 255", which a negative
 // addend would trip. Clamp it: over-covering by a column is invisible, because the stamp only
 // writes cells that are already fully wall, and the occluder is black on black there. It is
 // UNDER-covering that shows, which is the bug this whole table exists to fix.
 const orbColRT = orbBoxT.map(b => Math.max(0, b.r));
+// BOXAUDIT=1 (diagnostic): every orb-path rung's box against the INK of the bitmap(s) it actually
+// draws -- the orb's, the angel's lower+upper pair, and the idol's copy of the orb rung. A box
+// wider than its ink enables and stamps for nothing; a box NARROWER than its ink under-covers.
+if (process.env.BOXAUDIT) {
+  const inkCols = bms => { let cl = 99, cr = -1, rt = 99, rb = -1;
+    for (const [bm, y0] of bms) for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++) for (let k = 0; k < 4; k++)
+      if ((bm[y * 3 + b] >> (6 - 2 * k)) & 3) { const i = b * 4 + k; cl = Math.min(cl, i); cr = Math.max(cr, i);
+        rt = Math.min(rt, y0 + y); rb = Math.max(rb, y0 + y); }
+    return { cl, cr, rt, rb }; };
+  const rel = (v, ink) => { const xx = LADDER[v].exp ? 2 : 1;
+    return ink.cr < 0 ? '  (no ink)' : `${String(orbHalfCT[v] - ink.cl * xx).padStart(3)}/${String((ink.cr + 1) * xx - 1 - orbHalfCT[v]).padStart(3)}`; };
+  console.error('BOXAUDIT  v  kind   h exp   box L/R   ink L/R   idol ink L/R');
+  LADDER.forEach((r, v) => {
+    const isAng = v >= ANG_V0;
+    const bms = isAng ? (() => { const [lo, up] = ANGIDX.get(r.h); return [[ORBBM[lo], 21], ...(up >= 0 ? [[ORBBM[up], 0]] : [])]; })()
+                      : [[ORBBM[ORBSRC[v]], 0]];
+    const idol = !isAng && HAS_IDOL ? rel(v, inkCols([[ORBBM[IDOLBM0 + ORBSRC[v]], 0]])) : '';
+    console.error(`BOXAUDIT ${String(v).padStart(2)}  ${isAng ? 'angel' : 'orb  '} ${String(r.h).padStart(3)}  ${r.exp}   ` +
+      `${String(orbColLT[v]).padStart(3)}/${String(orbColRT[v]).padStart(3)}   ${rel(v, inkCols(bms))}   ${idol}` +
+      (() => { const k = inkCols(bms), m = r.exp ? 2 : 1;   // rows: stamp [blank, anchor-1] vs ink [top, bottom]
+        return `   rows stamp ${orbBlankT[v]}-${ORBANCH[v] - 1}  ink ${k.rt * m}-${(k.rb + 1) * m - 1}`; })());
+  });
+}
 // A negative right offset is only ever legitimate on a ONE-COLUMN rung, which sits entirely
 // left of ocol. On anything wider it means the box and the sprite have come apart.
 {
-  const bad = orbBoxT.map((b, v) => [b, v]).filter(([b, v]) => b.r < 0 && orbW(LADDER[v].h) > 1);
+  const bad = orbBoxT.map((b, v) => [b, v]).filter(([b, v]) => b.r < 0 && b.l + b.r + 1 > 1);
   if (bad.length) throw new Error(
     `${bad.length} rung(s) wider than one column have a negative right offset ` +
     `(variants ${bad.map(([, v]) => v).join(',')}) -- the ladder and orbBoxT disagree`);
@@ -7447,47 +7523,38 @@ const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...([]), ...PED.BM];
 // stamped box, and a wall that occluded the socket left a single pixel row of it showing.
 // Inked rows, not the 21-row frame: the frame is mostly blank and stamping it would black out
 // cells the socket never reaches.
-const inkedRows = grid => {
-  let n = 0;
-  for (let by = 0; by < grid.length; by++) if (grid[by].some(p => p)) n = by + 1;
-  return n;
-};
-const drawnRows = (grid, flag) => inkedRows(grid) * ((flag & 8) ? 2 : 1);   // bit 3 is vmag
 const visRows = rows => rows.map(v => Math.max(1, Math.min(255, Math.round(v))));
 // Whichever grid the socket is actually drawn from: its own when it owns a ladder, the exit
 // hole's borrowed one when SOCKOWN=0. Every consumer below goes through this.
 const sockGrid = i => SOCK.srcIdx ? HOLE.L[SOCK.srcIdx[i]].grid : SOCK.L[i].grid;
-const sockVisT = visRows(SOCK.L.map((g, i) => drawnRows(sockGrid(i), SOCK.flagT[i])));
+// A hole-like rung is ONE grid spanning all its slices, placed with its left edge at ocol - xOff;
+// flag bit 2 is hmag (two columns a cell), bit 3 vmag (two rows a cell). Its frame's top is the
+// ellipse's far edge, which is where holeTail puts o3 -- so the stamp's rows run from row 0 to the ink's last.
+const holeExt = (grid, flag, xOff, what) => {
+  const e = inkExtent([{ grid, col0: -xOff, row0: 0, xm: (flag & 4) ? 2 : 1, ym: (flag & 8) ? 2 : 1 }]);
+  if (!e) throw new Error(`${what} inks nothing -- a rung must draw something`);
+  // The stamp covers rows 0 .. bot of the frame. Art that starts lower (the tiniest exit rungs begin
+  // on row 1) just over-covers by those rows, which is harmless; it can never start ABOVE row 0.
+  return e;
+};
+const holeExtT = HOLE.L.map((g, i) => holeExt(g.grid, HOLE.flagT[i], HOLE.xOffT[i], `exit rung ${i}`));
+const sockExtT = SOCK.L.map((g, i) => holeExt(sockGrid(i), SOCK.flagT[i], SOCK.xOffT[i], `socket rung ${i}`));
+const pedExtT = PED.L.map((g, i) => holeExt(g.grid, PED.flagT[i], PED.xOffT[i], `pedestal rung ${i}`));
+const sockVisT = visRows(sockExtT.map(e => e.bot + 1));
 // ...and the EXIT hole's own. It had none, because it was the one kind occStamp skipped: a pit
 // was the wall's own black, so a sprite half behind a corner melted into it and only "wholly
 // behind" ever had to be handled. Colouring the holes ended that -- a coloured pit hanging over
 // the wall in front of it is exactly what the stamp exists to cut.
-const exitVisT = visRows(HOLE.L.map((g, i) => drawnRows(g.grid, HOLE.flagT[i])));
-const pedVisT = visRows(PED.L.map((g, i) => drawnRows(g.grid, PED.flagT[i])));
-// ---- ...and how far each rung's INKED pixels reach either side of ocol, for holeTail's probe ----
-// The probe used to box a hole-like by its sprite placement offset (xOffT), which is where the
-// sprite FRAME starts -- and a frame is mostly blank around the ellipse. So a disc several pixels
-// behind a wall still had its box reaching one column past the corner, the probe found that column
-// showing a wall the disc is in FRONT of, and the disc was drawn (the user: the north exit at X762
-// Y2D7 A8240 on the 2026-10-05 hub, "completely behind the wall by several pixels"). The box is now
-// the inked pixels: a grid cell is one logical column (multicolour), two with hmag (flag bit 2), and
-// grid column 0 sits at ocol - xOff.
-const inkBox = (grid, flag, xOff) => {
-  let cl = Infinity, cr = -1;
-  for (const row of grid) row.forEach((p, i) => { if (p) { cl = Math.min(cl, i); cr = Math.max(cr, i); } });
-  if (cr < 0) return [0, 0];
-  const m = (flag & 4) ? 2 : 1;
-  return [Math.max(0, xOff - cl * m), Math.max(0, (cr + 1) * m - 1 - xOff)];
-};
-const boxT = (Ls, gridOf, flagT, xOffT) => {
-  const b = Ls.map((g, i) => inkBox(gridOf(g, i), flagT[i], xOffT[i]));
-  b.forEach(([l, r], i) => { if (l > xOffT[i] || l + r > 3 * 24)
-    throw new Error(`hole-like box ${i}: ${l}/${r} against xOff ${xOffT[i]} -- the inked extent cannot exceed the frame`); });
-  return [b.map(x => x[0]), b.map(x => x[1])];
-};
-const [holeBoxL, holeBoxR] = boxT(HOLE.L, g => g.grid, HOLE.flagT, HOLE.xOffT);
-const [sockBoxL, sockBoxR] = boxT(SOCK.L, (g, i) => sockGrid(i), SOCK.flagT, SOCK.xOffT);
-const [pedBoxL, pedBoxR] = boxT(PED.L, g => g.grid, PED.flagT, PED.xOffT);
+const exitVisT = visRows(holeExtT.map(e => e.bot + 1));
+const pedVisT = visRows(pedExtT.map(e => e.bot + 1));
+// ---- ...and how far each rung's INK reaches either side of ocol: holeTail's probe box, and the
+// clip on each slice's stamp in holeSlot. The sprite FRAME is mostly blank around the ellipse, so
+// boxing by it (as the probe once did) enabled a disc several pixels behind a wall (the user: the
+// north exit at X762 Y2D7 A8240) and stamped cells nothing was drawn in. ----
+const boxLR = ext => [ext.map(e => Math.max(0, e.l)), ext.map(e => Math.max(0, e.r))];
+const [holeBoxL, holeBoxR] = boxLR(holeExtT);
+const [sockBoxL, sockBoxR] = boxLR(sockExtT);
+const [pedBoxL, pedBoxR] = boxLR(pedExtT);
 // SOCKSTRIP=1 writes sock-rungs.png: the rungs as they are actually DRAWN, side by side.
 // Each grid cell is 2 hires pixels because the sprite is MULTICOLOUR, doubled again by hmag
 // (flag bit 2); each row is doubled by vmag (bit 3). So the tiles here are true on-screen sizes,
@@ -9782,6 +9849,8 @@ ocr     = $8513
 oidx    = $8517
 onv     = $851a
 ohtmp   = $81f0
+hbL     = $b1                   ; holeTail -> holeSlot: this hole-like's INK box, as screen columns (0..159),
+hbR     = $b2                   ;   so each slice's stamp can be clipped to where something is drawn
 carry   = $81f1                  ; 0 = empty hands, else the held entity's index + 1
 fcCell  = $81f2                  ; the cell directly in front of the player, and its parts
 fcX     = $81f3
@@ -18390,7 +18459,7 @@ fdfDn:  rts
 hlSet:  tay
         cpy nExitT
         bcs hlSsock
-        lda hlFillT,y           ; an exit hole: black, and it is never anything else
+        lda hlFillT,y           ; an exit hole: its level's fill colour (black on most levels)
         sta hlFill
         lda #$00
         beq hlSk                ; always taken
@@ -18456,9 +18525,9 @@ hlSk:   cmp hlKind
 hlSdn:  rts
 
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
-; Two sprites side by side, the left half and the right half of one ellipse, so the pair reads
-; as a single shape up to 48 columns wide. No occlusion mask and no stamp: a hole is IN the
-; floor, so the only thing that can hide it is a wall in front, which the $d01b bit handles.
+; Up to three sprites side by side holding one ellipse. Occluded like every other entity: the probe
+; below drops it when its INK is wholly behind walls, and otherwise occStamp clips it where a wall
+; is in front (exits included -- they stopped being the wall's own black when level 4 coloured them).
 holeTail:
         ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
         ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
@@ -18519,10 +18588,14 @@ hlNoShr:
         ; This is why the probe lives HERE and not above hlRung, where it used to: the rung is
         ; only final after the shrink, and the half-width is a per-kind table. ocl2 is free until
         ; hlVst, three instructions down, which is the one window where both are true.
+        lda #$00                ; the ink box defaults to the whole screen: a centre off either edge
+        sta hbL                 ;   skips the probe below, and the slice clip then changes nothing
+        lda #${hx(NLOG - 1)}
+        sta hbR
         txa
         pha                     ; occWalk clobbers X, and the rung indexes every table below
 hlBXL:  lda holeBoxLT,x         ; PATCHED by hlSet: how far this rung's INKED pixels reach left of
-        sta ohtmp               ;   ocol -- not the sprite frame (see inkBox in the build)
+        sta ohtmp               ;   ocol -- not the sprite frame (see holeExtT in the build)
         lda ocolN
         bne hlOcSk              ; centre off the left edge; the column tests below decide
         lda ocol
@@ -18542,6 +18615,9 @@ hlBXR:  lda holeBoxRT,x         ; PATCHED by hlSet: ...and right of it. X is sti
         bcc hlPbR
         lda #${hx(NLOG - 1)}    ; ...or off the right
 hlPbR:  sta ocmax
+        sta hbR                 ; ...and the same box is what holeSlot clips each slice's stamp to
+        lda ocl2
+        sta hbL
         lda #$00
         sta ovVis
         sta ovOcc
@@ -18777,7 +18853,22 @@ hsLst:  sta obL,x
         bcc hsRst
 hsRhi:  ldy #${hx(NLOG - 1)}
 hsRst:  tya
-        sta obR,x
+        ; ---- CLIP TO THE INK: stamp only the columns where this slice can have drawn something ----
+        ; The slice is a 12- or 24-column sprite, and around a far ellipse most of it is blank. The
+        ; stamp only ever writes cells that are already wall, so stamping the blank part was never
+        ; WRONG -- it was occluder work for pixels that do not exist.
+        cmp hbR
+        bcc hsC1
+        lda hbR                 ; the slice runs past the ink's right edge
+hsC1:   sta obR,x
+        lda obL,x
+        cmp hbL
+        bcs hsC2
+        lda hbL                 ; ...or starts left of its left edge
+        sta obL,x
+hsC2:   lda obR,x
+        cmp obL,x
+        bcc hsDrop              ; no inked column in this slice at all: no stamp claim for it
         lda obL,x               ; and the two edge cells, for the partial-cell glyphs
         and #$03
         tay
