@@ -1,85 +1,102 @@
-# c64fps — pseudo-3D rendering on a stock Commodore 64
+# Lest
 
-An exploration of how far real-time 3D / pseudo-3D can be pushed on an unmodified
-C64 (MOS 6510 @ ~1 MHz, 64 KB), and — more to the point — how much performance is
-left on the table when you reach for "more hardware" instead of profiling and
-rewriting. Short version: a lot. The flagship raycaster went from a flat ~5 fps to
-**8–17 fps** with nothing but software optimization.
+A first-person game for an unmodified Commodore 64: smooth 3D at 10–20 frames per second, at
+the machine's full multicolour resolution, without the 8×8 blocks.
 
-Each `build-*.mjs` is a Node script that assembles a 6502 program (via the homegrown
-`asm6502.mjs`) and writes a `.d64` disk image (via `d64lib.js`). No toolchain needed
-beyond Node.
+> "He drove out the man, and at the east of the garden he placed cherubim and a flaming sword
+> that turned every way…"
 
-```
-cd ~/c64fps
-node build-iray.mjs        # -> iray.d64  (then copied to disks/iray-ntsc.d64)
-```
+<!-- TODO(screenshot): a still or a short GIF of level 4 -->
 
-Everything is self-contained (local `d64lib.js` + `asm6502.mjs`); nothing reaches
-outside this directory.
+## Where it started
 
-## The builds
+> Drawing 3D at full resolution on a C64 is impossible, and 8×8 blocks are ugly. What if every
+> character were a 2×4 block of pixels, with a 256-glyph charset holding every possible pattern?
+> Could that render 3D at up to 30 fps?
 
-| script | disk | what it is | fps (NTSC) |
-|---|---|---|---|
-| `build-iray.mjs` | `disks/iray-ntsc.d64` | **The main one.** Full-screen 80-column raycaster, char-mode framebuffer, 16-bit DDA. | **8–17** |
-| `build-ray.mjs` | `disks/maze-ntsc.d64` | Original 40-column char raycaster, 8-bit DDA, solid walls. | ~12 |
-| `build-bmaze.mjs` | `disks/bmaze-ntsc.d64` | Hi-res **bitmap** raycaster, double-buffered (bank flip), 80×80 window. | ~3–5 |
-| `build-pmaze.mjs` | `disks/pmaze-ntsc.d64` | **Polygon** (Wayout-style) maze: projects wall faces as filled trapezoids. | ~3 |
-| `build-cube.mjs` | `disks/cube-ntsc*.d64` | Char-framebuffer rotating cube (solid / bitmap / wireframe variants). | up to 30 |
-| `build-bitmap/solid/min.mjs` | — | Early scaffolding experiments. |
-| `poly-ref.mjs` | — | JS reference renderer used to validate the polygon math before the 6502 port. |
-| `poly-maze.html` | — | Interactive **browser** version of the polygon maze (drive it with keys). |
+That was the whole question, and the project was called *c64fps* while it was only a question.
+The answer turned out to be "nearly, and differently". The 2×4 blocks became 4×8 multicolour
+cells. Instead of holding every pattern, the charset holds the 243 shapes a wall edge actually
+makes, fitted from millions of measured views. The frame rate settled at 10–20 fps on a stock
+machine. Somewhere along the way it became a game.
 
-`disks/*-ntsc.d64` are the canonical, delivered builds; the un-suffixed `.d64`s are
-raw build outputs.
+## Playing
 
-## The iray optimization journey (the headline result)
+You need a C64, or [VICE](https://vice-emu.sourceforge.io/) (`x64sc`), and the disk image
+`lest.d64` from the releases page, or one you build yourself (below). It's built and timed for
+**NTSC** machines.
 
-`build-iray.mjs` renders the maze with one ray per column into a 256-glyph
-"framebuffer font" (each character code = a 2×4 logical-pixel pattern → 80×100 logical
-resolution in plain character mode, so the per-frame redraw is ~2 KB, not an 8 KB
-bitmap). Then, in order, each optimization measured against the last:
+| control | |
+|---|---|
+| **E / D** or joystick up / down | forward / back |
+| **S / F** | step left / right |
+| joystick (port 1) left / right | turn |
+| **left SHIFT** | run |
+| **SPACE** | pick up / put down |
+| **RETURN** | start again |
 
-1. **Baseline** per-column 16-bit raycaster — ~5 fps, flat.
-2. **Vertical symmetry** — the image mirrors about the horizon, so compute the top 13
-   cell-rows and write each cell *and* its vertical flip. → 6.
-3. **Adaptive subdivision** — march a full ray only where the visible *square face*
-   changes; interpolate the wall top across same-face runs. This is exact and
-   occlusion-safe (two rays on one unit face can't hide a nearer square between them),
-   and it keeps the per-column dividers crisp. → 5–10, view-dependent.
-4. **Fast solid/blank fill** — a cell is a constant `$FF` where both columns are wall
-   and `$00` where both are ceiling; only the one edge cell per column-pair needs real
-   computation. Fill becomes edge-proportional instead of area-proportional. → **8–17**.
+The loader talks to a real 1541. In VICE, keep **True Drive Emulation** on (the default).
 
-Net: open corridors run ~17 fps; a room full of little panels (lots of distinct
-squares to march) is the worst case at ~8. The performance curve finally matches
-intuition — "how much wall is on screen" is free; "how many distinct squares" is the
-cost.
+## Building
 
-Still on the table: sharing the per-ray setup multiplies across rays (they share the
-frame-constant player position), and leaping empty runs with per-row next-wall tables.
+Requirements: a recent [Node.js](https://nodejs.org/) (developed on 26), and [ImageMagick](https://imagemagick.org/) 7
+(`magick` on the path; the build fits sprite art from the images in `art/`). There's no other
+toolchain: the assembler (`asm6502.mjs`) and the disk-image writer (`d64lib.js`) are part of the project.
 
-## Controls (iray / mazes)
-
-- **E / D** — forward / back
-- **S / F** — strafe left / right
-- **Joystick-1 left/right** — turn
-- fps readout sits in the top-left corner.
-
-## Testing headless in VICE
-
-```
-x64sc -silent -warp -ntsc +drive8truedrive -limitcycles 70000000 \
-      -jamaction 1 -exitscreenshot out.png -autostart disks/iray-ntsc.d64
+```sh
+CHAIN=1,2,3,4,5,6,7 node build-iray.mjs     # the whole game -> latest.d64
+node build-iray.mjs                         # levels 1-4 only (the development default)
 ```
 
-- `+drive8truedrive` disables true-drive emulation → near-instant loads (kernal trap).
-- `-limitcycles N` runs exactly N cycles, then writes the screenshot and exits.
-- `-warp` runs flat-out; `-ntsc` matches the build timing.
+`CHAIN` lists the levels on the disk, in order. A full build takes under 20 seconds: each level and each
+removable wall is built as its own sub-build first, so the engine can be laid out around all of
+them. Run it from the project directory.
 
-## Files
+## How it works
 
-- `asm6502.mjs` — homegrown ACME-flavored 6502 assembler (expressions support `+`/`-` only).
-- `d64lib.js` — `.d64` disk-image writer (exposes `globalThis.D64`).
-- `disks/` — all built disk images.
+The screen is a character-mode **framebuffer**: 40×25 cells, each drawn from a charset of
+wall-edge shapes, giving 160×200 multicolour pixels. Each frame:
+
+- **Rays** are cast only where the picture can change: last frame's wall boundaries seed the
+  subdivision, so a typical view needs around 14 rays rather than 160, and the columns between
+  are interpolated.
+- **Walls** become cell codes through tables. A wall's top edge in a cell is a ramp, a step or a
+  level, and the charset was chosen by measuring which of those the engine really draws.
+- **Seams**, the lines between wall panels, are painted in a reserved colour by one divide per seam.
+- **Entities** (orbs, statues, idols, sockets, exits) are hardware sprites. Each is scaled from a
+  ladder of pre-fitted sizes and hidden behind walls by per-frame occluder masks.
+- **Memory**: the image is laid out by a build-time compactor, code from the bottom and tables from
+  the top. Levels load from disk on demand, through Krill's loader.
+
+The build also checks itself as it goes. Page alignment, memory overlaps, zero-page ownership,
+unreachable code, and the precondition of every undocumented opcode it uses are verified before a
+disk is written.
+
+Deeper notes: [`RENDERING.md`](RENDERING.md) on the renderer, [`DECISIONS.md`](DECISIONS.md) on why
+things are the way they are.
+
+## Layout
+
+| path | what |
+|---|---|
+| `build-iray.mjs` | the game: emits 6502 assembly, builds every level, writes the disk |
+| `compact.mjs` | the image layout pass (run by the build) |
+| `asm6502.mjs`, `d64lib.js` | assembler and disk writer |
+| `art/` | source art: renders, paintings and hand-drawn sprites |
+| `*.json` | fitted assets the build reads (sprites, charset plan, boot quote) |
+| `fit-*.mjs`, `make-*.mjs`, `charsetgen.mjs` | hand-run generators that produce those assets |
+| `krill/`, `krill-bg/` | Krill's loader, prebuilt |
+| `tools/` | VICE-driven profiling and test rigs (`vprof`, `frames`, `ship.sh`, …) |
+| `probe.mjs`, `fpsr.mjs`, `prof.mjs` | live-machine inspection and frame-rate benchmarks |
+
+## Credits and licence
+
+The code in this repository is released under the [MIT licence](LICENSE).
+
+<!-- TODO(licence): decide whether art/ and the level designs are covered too, or reserved -->
+
+Included third-party code keeps its own licence:
+
+- **Loader by Krill** (Gunnar Ruthenberg), BSD 3-clause. See [`krill/README-krill`](krill/README-krill).
+- **Exomizer decruncher** by Magnus Lind ([`exodecrunch.asm`](exodecrunch.asm)), under the notice
+  in that file.
