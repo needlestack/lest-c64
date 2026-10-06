@@ -3182,17 +3182,24 @@ if (process.env.MODELJSON === '1') {
 // clear on entry to every copy: the group's "cmp spanR" falls through clear, "bcc" into the
 // write is only taken when clear, and the subtract loop exits on a failed "bcs". So no copy
 // needs its own clc, and the four share one bounds test instead of paying inx/cpx/bcs/jmp.
-// SHYCOL (default; =0 for the old path): the column store is SHY colH,x ($9c, undocumented but stable on every NMOS 6510),
-// which writes Y AND (high byte of the base + 1). With colH at $fe00 that mask is $ff, so it
-// stores Y exactly -- and A, which holds the error term, is never disturbed. That deletes the
-// "sta errv / tya / sta colH,x / lda errv" shuffle: 13 cycles a column become 5, on ~147
-// columns a frame. The two documented quirks are both harmless here: a page crossing
-// corrupts the high byte (colH is 160 bytes from $fe00, so the index never crosses), and a
-// DMA steal (badline, sprite) during the write drops the AND -- which with a $ff mask
-// changes nothing. The page is forced: no other page has H+1 = $ff, and colH reaches 254.
+// ---- STY_COLH_X: "sty colH,x", an instruction the 6502 does not have ----
+// interpSpan's inner loop keeps the error term in A and the height in Y, so the natural store is
+// "sty colH,x" -- but STY has no absolute,X mode. The documented way round is a shuffle:
+//     sta errv / tya / sta colH,x / lda errv        13 cycles, every interpolated column
+// The 6510 has an UNDOCUMENTED store that does exactly what we want, SHY abs,X (opcode $9c),
+// with one catch: it stores Y AND (high byte of the address + 1). On page $fe that mask is $ff,
+// so it stores Y unchanged. Hence colH lives at $fe00, and this one store is 5 cycles.
+//   * The build CHECKS the precondition (see "SHY's precondition" near the bank-3 guard): every
+//     $9c in the image must target page $fe, with all 160 columns inside that page. Move colH and
+//     the build fails, rather than every wall height silently coming out ANDed with junk.
+//   * Its two known quirks cannot bite here: a page crossing corrupts the address (the 160 columns
+//     never cross), and a DMA steal during the write skips the AND (which is $ff anyway).
+//   * It runs on every real C64 (6510/8500) and in VICE; it would NOT on a 65816 SuperCPU, where
+//     $9c is a different instruction. SHYCOL=0 builds the documented shuffle instead.
 const SHYCOL = process.env.SHYCOL !== '0';   // DEFAULT; SHYCOL=0 restores the shuffle
 const COLH_AT = SHYCOL ? 0xfe00 : 0x0700, COLH_N = 160;
-const ispanSto = SHYCOL ? `        !byte $9c,<colH,>colH   ; shy colH,x -- A (err) survives`
+const STY_COLH_X = `        !byte $9c,<colH,>colH   ; = "sty colH,x" (SHY, undocumented -- see STY_COLH_X)`;
+const ispanSto = SHYCOL ? STY_COLH_X
                         : `        sta errv
         tya
         sta colH,x`;
@@ -13781,16 +13788,22 @@ hzLd:   lda $ff00,y             ; PATCHED high byte; low byte 0, so abs,y never 
         rts
 hzFar:  cpx #16
         bcs hz3
-        asl                     ; remH 8-15: >>6, as the top two bits rotated round to the bottom
-        rol
-        rol
-        and #$03
+        lsr                     ; remH 8-15: >>6
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
         ora hzBaseT,x
         tay
         jmp hzPg
-hz3:    asl                     ; remH 16-23: >>7, the top bit alone
-        lda #$00
-        rol
+hz3:    lsr                     ; remH 16-23: >>7
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
         ora hzBaseT,x
         tay
         jmp hzPg
@@ -25152,6 +25165,17 @@ for (const [A, a] of [['X', 'x'], ['Y', 'y']]) {
   if (new RegExp(`\\bdd${a}H?\\b`).test(body))
     throw new Error(`castRay: cwall${A} uses dd${a} -- the hit distance is sd${a} as-is (see cstep${A})`);
 }
+// ---- SHY's precondition (see STY_COLH_X) ----
+// SHY abs,X stores Y AND (high byte + 1), so it is a plain "sty abs,x" only on page $fe, and only
+// while abs+X stays on that page. Checked on the EMITTED code: every $9c, whatever it targets.
+for (const m of asm.matchAll(/!byte \$9c,<([a-zA-Z]\w*),>\1\b/g)) {
+  const eq = new RegExp(`^${m[1]}\\s*=\\s*\\$([0-9a-fA-F]+)`, 'm').exec(asm);
+  const at = eq ? parseInt(eq[1], 16) : NaN;
+  if (!(at >> 8 === 0xfe && (at + COLH_N - 1) >> 8 === 0xfe))
+    throw new Error(`SHY targets ${m[1]} at $${at.toString(16)}: it stores Y AND (page+1), so it ` +
+      `must be on page $fe with all ${COLH_N} columns inside it -- otherwise the stored heights are masked`);
+}
+if (SHYCOL && !/!byte \$9c,</.test(asm)) throw new Error('SHYCOL is on but no SHY was emitted');
 const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)/gm)]
   .map(m => [m[1], parseInt(m[2], 16)])
   // ...but the SOLO slot's tables are not squatters. They are one deliberate allocation with a
