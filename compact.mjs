@@ -494,6 +494,11 @@ console.log(`  ===> LEVEL ARENA  ${arenaLeft} bytes, of which ${usable} are page
   writeFileSync(OUT, out);
   let run;
   try { run = assemble(out); } catch (e) { console.log(`  REHOMED build failed: ${e.message.slice(0, 90)}`); run = null; }
+  // THE SYMBOLS AGAIN, NOW THAT THE BUFFERS HAVE MOVED. The write above (step 4) predates the
+  // rehoming, so every RAM equate in it was its PRE-move address -- faceIdT read as $8200 while
+  // the engine kept it at $6300 -- and any tool reading a buffer by name (vprof --dump, probes,
+  // monitor scripts) silently read junk. Code labels were right; only the buffers were stale.
+  if (run) writeFileSync('./iray.syms.json', JSON.stringify(run.labels));
   if (process.env.SHOWMOVED)
     console.log('  moved: ' + [...placedAt].map(([nm, at]) => {
       const was = (sorted.find(([q]) => q === nm) || [, 0])[1];
