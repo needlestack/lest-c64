@@ -3241,6 +3241,105 @@ if (process.env.MODELJSON === '1') {
 // clear on entry to every copy: the group's "cmp spanR" falls through clear, "bcc" into the
 // write is only taken when clear, and the subtract loop exits on a failed "bcs". So no copy
 // needs its own clc, and the four share one bounds test instead of paying inx/cpx/bcs/jmp.
+// ---- castRay's side-distance multiply, ONE source for both axes ----
+// The X and Y copies were textual twins (2,601 characters each, identical under x<->y): the ddH == 1
+// shortcut, the quarter-square high half, the low half and the deliberately skipped borrow. Generated
+// from here so a fix to one axis can never miss the other.
+const sideMulAxis = ax => { const A = ax === 'x' ? { dd: 'ddx', sd: 'sdx', l: 'cx', trig: '|cos|' }
+                                                 : { dd: 'ddy', sd: 'sdy', l: 'cy', trig: '|sin|' };
+  return `        ; ---- ${A.dd}H == 1: THE HIGH HALF IS THE FRACTION ITSELF ----
+        ; The delta is SCALE/${A.trig} with SCALE = 256, so its high byte is exactly 1 whenever
+        ; ${A.trig} > 0.5 -- and every ray has at least one such axis. fr * 1 needs no quarter-square
+        ; pair: it is fr, exactly (f(fr+1) - f(fr-1) = fr with no rounding), so the result is
+        ; byte-identical. 17 cycles against ~60; the full product pays 10 for the test.
+        ldx ${A.dd}H
+        dex
+        beq ${A.l}m1
+        lda frc                  ; --- high half: fr * mhi -> ${A.sd}H:s1 ---
+        clc
+        adc ${A.dd}H
+        tax
+        bcc ${A.l}mh0
+        lda f1LoT,x
+        tay                     ; the low byte rides in Y instead of zero page: this routine
+        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
+        sta ${A.sd}H
+        jmp ${A.l}mh1
+${A.l}mh0:   lda f0LoT,x
+        tay
+        lda f0HiT,x
+        sta ${A.sd}H
+${A.l}mh1:   lda frc
+        sec
+        sbc ${A.dd}H
+        bcs ${A.l}mh2
+        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
+        adc #$01
+${A.l}mh2:   tax
+        sec
+        tya
+        sbc f0LoT,x
+        sta ${A.sd}
+        lda ${A.sd}H
+        sbc f0HiT,x
+        sta ${A.sd}H
+        jmp ${A.l}mL
+${A.l}m1:   lda frc                  ; ${A.dd}H == 1: ${A.sd}H:${A.sd} = 0:fr (X is 0 after the dex)
+        sta ${A.sd}
+        stx ${A.sd}H
+${A.l}mL:   lda frc                  ; --- low half: only the HIGH byte survives the >>8 ---
+        clc
+        adc ${A.dd}
+        tax
+        bcc ${A.l}ml0
+        lda f1HiT,x
+        sta qhi
+        jmp ${A.l}ml1
+${A.l}ml0:   lda f0HiT,x
+        sta qhi
+${A.l}ml1:   lda frc
+        sec
+        sbc ${A.dd}
+        bcs ${A.l}ml2
+        eor #$ff
+        adc #$01
+${A.l}ml2:   tax
+        ; THE BORROW FROM THE LOW BYTES IS DELIBERATELY NOT COMPUTED. This half only ever
+        ; contributed the high byte of fr*${A.dd}L, so the two low-byte loads and the subtract
+        ; that produced their borrow existed only to be +/-1 correct in the LAST bit.
+        ; Dropping them leaves the product high by 0 or 1 -- the side distance wrong by at
+        ; most 1/256 of a cell, one-sided, and NOT accumulated: the DDA adds exact deltas
+        ; from here on. On screen: colH = 88/d so dColH ~ 88*(1/256)/d^2, and a wall top is
+        ; only VISIBLE below colH 100, i.e. d >= 0.88 cells -- so the worst visible error is
+        ; 0.45 of a logical pixel, falling off as the square of distance.
+        sec
+        lda qhi
+        sbc f0HiT,x             ; high byte of fr*${A.dd}L, straight into ${A.sd}
+        clc
+        adc ${A.sd}
+        sta ${A.sd}
+        lda ${A.sd}H
+        adc #$00
+        sta ${A.sd}H
+`; };
+// ---- joyMask: which keyboard-matrix lines the JOYSTICK is holding down ----
+// Joystick port 1 shares $dc01 with the keyboard's columns, so a key read can see a stick
+// direction as a keypress. Read the port with NO row selected first; the bits that are low then
+// are the stick's, and every key read masks them out. Was hand-copied in five key readers.
+const joyMask = dst => `        lda #$ff
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        sta ${dst}               ; 1 where a joystick line is active`;
+// ---- absA: |A| after "sec / lda a / sbc b" on two cell coordinates ----
+// The absolute value of a player-to-entity cell delta was hand-written six times in three variants
+// (bpl or bcs, with or without a clc). Coordinates are 0..MAPW-1, so "negative" and "borrowed" are
+// the same thing: carry SET means a >= b and A is already |a - b|; carry CLEAR (a borrow) leaves A
+// negative AND the carry clear, so eor #$ff / adc #$01 negates it with no clc. Label = the join point.
+const absA = lbl => `        bcs ${lbl}
+        eor #$ff
+        adc #$01
+${lbl}:`;
 // ---- emitBox: an entity's screen box, from its centre column and its ink extents ----
 // orbOne and holeTail each turned "centre column + how far the ink reaches left/right" into a
 // clipped [lo, hi] column range with their own code, and they drifted: holeTail skipped its probe
@@ -12678,11 +12777,7 @@ palKeys:
         ; without this mask, pushing the stick up cycled the ceiling AND the seam, and pushing
         ; right cycled the walls. readKeys has always done this; palKeys was written without it.
         ; Read the port with NO row selected: whatever is low then is the stick, not a key.
-        lda #$ff
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        sta pkJoy               ; 1 where a joystick line is active
+${joyMask('pkJoy')}
         lda #$7f
         sta $dc00
         lda $dc01
@@ -13697,81 +13792,7 @@ cxpos:  lda #$01
         lda px
         eor #$ff                ; +x: 1 - frac (as 255 - frac)
 cxFr:   sta frc
-        ; ---- ddxH == 1: THE HIGH HALF IS THE FRACTION ITSELF ----
-        ; The delta is SCALE/|cos| with SCALE = 256, so its high byte is exactly 1 whenever
-        ; |cos| > 0.5 -- and every ray has at least one such axis. fr * 1 needs no quarter-square
-        ; pair: it is fr, exactly (f(fr+1) - f(fr-1) = fr with no rounding), so the result is
-        ; byte-identical. 17 cycles against ~60; the full product pays 10 for the test.
-        ldx ddxH
-        dex
-        beq cxm1
-        lda frc                  ; --- high half: fr * mhi -> sdxH:s1 ---
-        clc
-        adc ddxH
-        tax
-        bcc cxmh0
-        lda f1LoT,x
-        tay                     ; the low byte rides in Y instead of zero page: this routine
-        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
-        sta sdxH
-        jmp cxmh1
-cxmh0:   lda f0LoT,x
-        tay
-        lda f0HiT,x
-        sta sdxH
-cxmh1:   lda frc
-        sec
-        sbc ddxH
-        bcs cxmh2
-        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
-        adc #$01
-cxmh2:   tax
-        sec
-        tya
-        sbc f0LoT,x
-        sta sdx
-        lda sdxH
-        sbc f0HiT,x
-        sta sdxH
-        jmp cxmL
-cxm1:   lda frc                  ; ddxH == 1: sdxH:sdx = 0:fr (X is 0 after the dex)
-        sta sdx
-        stx sdxH
-cxmL:   lda frc                  ; --- low half: only the HIGH byte survives the >>8 ---
-        clc
-        adc ddx
-        tax
-        bcc cxml0
-        lda f1HiT,x
-        sta qhi
-        jmp cxml1
-cxml0:   lda f0HiT,x
-        sta qhi
-cxml1:   lda frc
-        sec
-        sbc ddx
-        bcs cxml2
-        eor #$ff
-        adc #$01
-cxml2:   tax
-        ; THE BORROW FROM THE LOW BYTES IS DELIBERATELY NOT COMPUTED. This half only ever
-        ; contributed the high byte of fr*ddxL, so the two low-byte loads and the subtract
-        ; that produced their borrow existed only to be +/-1 correct in the LAST bit.
-        ; Dropping them leaves the product high by 0 or 1 -- the side distance wrong by at
-        ; most 1/256 of a cell, one-sided, and NOT accumulated: the DDA adds exact deltas
-        ; from here on. On screen: colH = 88/d so dColH ~ 88*(1/256)/d^2, and a wall top is
-        ; only VISIBLE below colH 100, i.e. d >= 0.88 cells -- so the worst visible error is
-        ; 0.45 of a logical pixel, falling off as the square of distance.
-        sec
-        lda qhi
-        sbc f0HiT,x             ; high byte of fr*ddxL, straight into sdx
-        clc
-        adc sdx
-        sta sdx
-        lda sdxH
-        adc #$00
-        sta sdxH
-${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
+${sideMulAxis('x')}${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
 cydo:${DOUBLE === 'sideMulRay' ? `   lda py                  ; see the X axis: only the DOUBLE build needs fr/mlo/mhi
         sta fr
         lda ddy
@@ -13797,81 +13818,7 @@ cypos:  lda #$01
         lda py
         eor #$ff                ; +y: 1 - frac (as 255 - frac)
 cyFr:   sta frc
-        ; ---- ddyH == 1: THE HIGH HALF IS THE FRACTION ITSELF ----
-        ; The delta is SCALE/|sin| with SCALE = 256, so its high byte is exactly 1 whenever
-        ; |sin| > 0.5 -- and every ray has at least one such axis. fr * 1 needs no quarter-square
-        ; pair: it is fr, exactly (f(fr+1) - f(fr-1) = fr with no rounding), so the result is
-        ; byte-identical. 17 cycles against ~60; the full product pays 10 for the test.
-        ldx ddyH
-        dex
-        beq cym1
-        lda frc                  ; --- high half: fr * mhi -> sdyH:s1 ---
-        clc
-        adc ddyH
-        tax
-        bcc cymh0
-        lda f1LoT,x
-        tay                     ; the low byte rides in Y instead of zero page: this routine
-        lda f1HiT,x             ; never used Y at all, and it is the hottest one here
-        sta sdyH
-        jmp cymh1
-cymh0:   lda f0LoT,x
-        tay
-        lda f0HiT,x
-        sta sdyH
-cymh1:   lda frc
-        sec
-        sbc ddyH
-        bcs cymh2
-        eor #$ff                ; |fr-mhi|; carry is already clear from the borrow
-        adc #$01
-cymh2:   tax
-        sec
-        tya
-        sbc f0LoT,x
-        sta sdy
-        lda sdyH
-        sbc f0HiT,x
-        sta sdyH
-        jmp cymL
-cym1:   lda frc                  ; ddyH == 1: sdyH:sdy = 0:fr (X is 0 after the dex)
-        sta sdy
-        stx sdyH
-cymL:   lda frc                  ; --- low half: only the HIGH byte survives the >>8 ---
-        clc
-        adc ddy
-        tax
-        bcc cyml0
-        lda f1HiT,x
-        sta qhi
-        jmp cyml1
-cyml0:   lda f0HiT,x
-        sta qhi
-cyml1:   lda frc
-        sec
-        sbc ddy
-        bcs cyml2
-        eor #$ff
-        adc #$01
-cyml2:   tax
-        ; THE BORROW FROM THE LOW BYTES IS DELIBERATELY NOT COMPUTED. This half only ever
-        ; contributed the high byte of fr*ddyL, so the two low-byte loads and the subtract
-        ; that produced their borrow existed only to be +/-1 correct in the LAST bit.
-        ; Dropping them leaves the product high by 0 or 1 -- the side distance wrong by at
-        ; most 1/256 of a cell, one-sided, and NOT accumulated: the DDA adds exact deltas
-        ; from here on. On screen: colH = 88/d so dColH ~ 88*(1/256)/d^2, and a wall top is
-        ; only VISIBLE below colH 100, i.e. d >= 0.88 cells -- so the worst visible error is
-        ; 0.45 of a logical pixel, falling off as the square of distance.
-        sec
-        lda qhi
-        sbc f0HiT,x             ; high byte of fr*ddyL, straight into sdy
-        clc
-        adc sdy
-        sta sdy
-        lda sdyH
-        adc #$00
-        sta sdyH
-${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
+${sideMulAxis('y')}${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
 cySat:  lda rqL                 ; a delta saturates ONLY at rqL == 0 (asserted at build time), so
         bne cydone              ;   every other ray skips both checks below
         ; Two things the old loop did on EVERY step that are only needed once, on the step
@@ -15575,10 +15522,11 @@ ohOk:   lda o1
         rts
 opjNo:  clc
         rts
-; ---- cnTest: is the entity at (oix, oiy) in the view cone at all? ----
-; Carry SET = no. Reads oix/oiy and pa; writes cnB and cnT. ONE implementation, because entGate and
-; orbOne both ask, and a gate whose verdict could differ from the loop's would be worse than no
-; gate at all -- it would delete entities the loop meant to draw.
+${process.env.GATECHK ? `; ---- cnTest: is the entity at (oix, oiy) in the view cone at all? (GATECHK's ORACLE) ----
+; Carry SET = no. Reads oix/oiy and pa; writes cnB and cnT. The shipping cone test is INLINE in entGate
+; (ogETst: X keeps the entity, no jsr) and orbOne reads entGate's verdict from cnOkT -- one verdict,
+; computed once. This routine is the original subroutine, kept only for GATECHK=1, which runs it beside
+; the inline copy and counts disagreements. Emitted only in that build: it was dead code on every disk.
 cnTest:
         lda oix
         bpl cnXP
@@ -15646,7 +15594,7 @@ cnCn1:
 cnNear:                         ; adjacent or under us: no cell-level bearing means anything
 cnOk:   clc
         rts
-orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rate is this against\n        bne oc1                ;   iterLo, which removes every question about where in the\n        inc culTot+1           ;   frame the per-frame reset lands\noc1:   ' : ''} ldx oidx
+` : ''}orbOne:${CULLCNT ? ' inc culTot             ; FREE-RUNNING, never reset: the rate is this against\n        bne oc1                ;   iterLo, which removes every question about where in the\n        inc culTot+1           ;   frame the per-frame reset lands\noc1:   ' : ''} ldx oidx
         sec                     ; Ix, Iy = orb cell - player cell, -15..15
         lda orbXCT,x
         sbc px+1
@@ -16986,11 +16934,8 @@ tkNext: ldx odD
 ; ---- orbKey: SPACE picks up and puts down, one action a press ----
 ; Row 7 bit 4. The joystick shares these lines, so read the port with no row selected first and
 ; force whatever the stick is holding back high -- otherwise FIRE reads as SPACE.
-orbKey: lda #$ff
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        sta okJoy
+orbKey:
+${joyMask('okJoy')}
         lda #$7f
         sta $dc00
         lda $dc01
@@ -17257,11 +17202,7 @@ ${SNDTEST ? `; ---- sndKeys: 4/5 sweep the cutoff, 6/7 step the pulse width ----
 ; repeats while held, because sweeping 0..255 one press at a time is not a listening test; the
 ; pulse width is edge-triggered, because it only has 16 steps.
 sndKeys:
-        lda #$ff
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        sta skJoy               ; 1 where a joystick line is active, so key reads can mask it out
+${joyMask('skJoy')}
         lda #$fd                ; '4' -- row $fd bit 3 -- cutoff DOWN, repeating while held
         sta $dc00
         lda $dc01
@@ -17423,20 +17364,14 @@ stLp:   stx sndI
         sec
         lda orbXCT,x
         sbc px+1
-        bcs stPx
-        eor #$ff                ; borrow: A is the two's complement, so negate for |dx|
-        clc
-        adc #$01
-stPx:   sta sndT
+${absA('stPx')}
+        sta sndT
         ldx sndI
         sec
         lda orbYCT,x
         sbc py+1
-        bcs stPy
-        eor #$ff
-        clc
-        adc #$01
-stPy:   cmp sndT
+${absA('stPy')}
+        cmp sndT
         bcs stMax               ; Chebyshev: whichever axis is further
         lda sndT
 stMax:  cmp sndD
@@ -19352,11 +19287,7 @@ hxLv:   lda hxLvT,x
         ; very bit 'L' sits on. Read the port with NO row selected first: whatever is low then is
         ; the stick, and it is forced back high before any key is believed. palKeys learned this
         ; by cycling the walls every time the stick went right.
-        lda #$ff
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        sta hxJoy               ; 1 where a joystick line is active
+${joyMask('hxJoy')}
         lda #$df
         sta $dc00
         lda $dc01
@@ -22277,17 +22208,13 @@ obKLiv:
 ` : ''}        lda orbXCT,x
         sec
         sbc px+1
-        bcs obKx
-        eor #$ff                ; negative: negate. The borrow left C clear, so the +1 is free
-        adc #$01
-obKx:   sta obKT
+${absA('obKx')}
+        sta obKT
         lda orbYCT,x
         sec
         sbc py+1
-        bcs obKy
-        eor #$ff
-        adc #$01
-obKy:   clc
+${absA('obKy')}
+        clc
         adc obKT                ; |dx| + |dy| in cells: at most 30, so never $ff
 obKSt:  sta obKeyT,x
         txa
@@ -23277,7 +23204,8 @@ ogEnL:  cpx nOrbT
         lda orbHidT,x
         bne ogENo               ; hidden: no verdict to give
         ldy orbYCT,x            ; ZONES: its zone's bit against mapT[player cell] -- BEFORE the cone,
-        lda rowMulT,y           ;   which costs ~125 to this test's ~40
+        lda rowMulT,y           ;   which costs ~125 to this test's ~40. (mulW inlined: no jsr/rts or
+                                ;   Y save in the gate's per-entity loop -- same rowMulT table.)
         clc
         adc orbXCT,x            ; its cell
         lsr                     ; two cells to a byte; carry = the odd one, in the high nibble
@@ -23298,31 +23226,26 @@ ogEHol: txa                     ; GATEFAST: A must BE the entity index here -- t
         sec                     ; ---- a hole-like: its fixed zone mask (its whole disc) ----
         sbc nOrbT
         tax
-        lda hlSeat,x            ; a CONSUMED socket is not in the world any more (holeOne skips it too);
-        bmi ogENo               ;   left in, it still set cnAny and kept the per-frame entity work alive
         lda hzMskT,x
         and znP
         beq ogENo
+        lda hlSeat,x            ; a CONSUMED socket is not in the world any more (holeOne skips it too);
+        bmi ogENo               ;   left in, it still set cnAny and kept the per-frame entity work alive.
+                                ;   AFTER the zone test, so only a disc that could be in view pays for it.
         ldx cnI                 ; GATEFAST: back to the entity index for the cone
 ogETst:                         ; GATEFAST: cnTest INLINED, Y and A only -- X keeps the entity
         sec                     ; the cell delta, exactly as orbOne computes it (zero page now)
         lda orbXCT,x
         sbc px+1
         sta oix
-        bpl ogXP
-        eor #$ff
-        clc
-        adc #$01
-ogXP:   sta cnB                 ; |dx|
+${absA('ogXP')}
+        sta cnB                 ; |dx|
         sec
         lda orbYCT,x
         sbc py+1
         sta oiy
-        bpl ogYP
-        eor #$ff
-        clc
-        adc #$01
-ogYP:   sta cnT                 ; |dy|
+${absA('ogYP')}
+        sta cnT                 ; |dy|
         cmp cnB
         bcs ogCh
         lda cnB
@@ -25314,11 +25237,8 @@ picOn:  ${SOUND ? 'jsr snBoom\n        ' : ''}lda #${hx(PICS.d021)}
         rts
 ` : ''}
 ${DIE ? `; ---- dieKey: RETURN restarts, from anywhere ----
-dieKey: lda #$ff
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        sta dkJoy               ; the stick shares these lines, same as palKeys and orbKey
+dieKey:
+${joyMask('dkJoy')}
         lda #$fe
         sta $dc00
         lda $dc01
