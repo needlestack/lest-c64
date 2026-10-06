@@ -44,7 +44,23 @@ const SEGMENTS = [
 
 const extra = process.argv[2] ?? '';
 const only = process.argv[3];
-const want = SEGMENTS.filter(s => !only || s.name === only);
+// ---- `level`: THE PER-LEVEL BENCHMARK (the user, 2026-10-06) ----
+// The segments above carry LEVEL 1's poses, so on any other CHAIN they stand the player at level-1
+// coordinates -- in a corner, or a wall. `node fpsr.mjs "CHAIN=n" level` instead starts from the
+// level's OWN start pose and runs the two things the user benchmarks a level with:
+//   spin -- every cast angle, no travel;
+//   walk -- about TWO SQUARES from the start: forward, except level 6 (forward falls into an exit,
+//           so it walks BACKWARDS) and level 7 (forward runs into a wall, so it STRAFES).
+// The mover runs from boot, and the window opens at T0, so two squares in total is a SHORT window
+// (68 ticks): about one second, with the coarser +-1-frame resolution that implies.
+const LVL = +((/CHAIN=(\d)/.exec(extra) ?? [0, 1])[1]);
+const TWO_SQUARES = Math.round(2 * 256 / MV_WALK) - T0;   // ticks of window that end two cells out
+const LEVEL_SEGS = [
+  { name: 'spin', env: 'SPIN=1', moves: false, prefix: '' },
+  { name: LVL === 6 ? 'walkb' : LVL === 7 ? 'strafe' : 'walk', env: LVL === 6 ? 'WALKB=1' : LVL === 7 ? 'STRAFE=1' : 'WALK=1',
+    moves: true, prefix: '', ticks: TWO_SQUARES },
+];
+const want = only === 'level' ? LEVEL_SEGS : SEGMENTS.filter(s => !only || s.name === only);
 if (!want.length) { console.error(`no such segment. known: ${SEGMENTS.map(s => s.name).join(', ')}`); process.exit(2); }
 
 const num = (out, n) => {
@@ -62,11 +78,12 @@ const num = (out, n) => {
 // works on spin.
 console.log(`segment   fps     frames  ticks   +-1 frame   travelled`);
 for (const s of want) {
-  const env = `CHAIN=1 ${s.env}${extra ? ' ' + extra : ''}`;
+  const env = `${s.prefix ?? 'CHAIN=1 '}${s.env}${extra ? ' ' + extra : ''}`;
+  const t1 = T0 + (s.ticks ?? TICKS);
   let out;
   try {
     out = execFileSync(process.execPath,
-      ['probe.mjs', env, 'iterLo:2', 'px:2', 'py:2', '--at', `${T0},${T1}`],
+      ['probe.mjs', env, 'iterLo:2', 'px:2', 'py:2', '--at', `${T0},${t1}`],
       { cwd: '/Users/jfield/c64fps', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) { console.log(`${s.name.padEnd(9)} BUILD OR RUN FAILED`); continue; }
   const it = num(out, 'iterLo'), fc = num(out, 'frameCnt');
