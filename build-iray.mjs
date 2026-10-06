@@ -9164,7 +9164,7 @@ const wallPtrs = () => {
       // variant builds none of its own) means there is nothing to point AT -- and the level still
       // declares its walls, so wallGid finds one. Zero, or the fallback below names a wallDT
       // label no build emitted.
-      const k = WALL_DELTAS ? wallGid(lv, j) : -1;
+      const k = WALL_DELTAS.length ? wallGid(lv, j) : -1;   // [] (never null, see 9087) = no deltas
       const at = k < 0 ? null : SOLO_WALL_AT[k];
       if (k < 0) { for (const n of Object.keys(ent)) ent[n].push(0); continue; }
       ent.wallDLoT.push(at ? at.d & 255 : `<wallDT${k}`);
@@ -25566,7 +25566,7 @@ try {
       // a wall already punched out, and a wall variant has no variants of its own) -- and
       // WALLS_ALL is NOT empty then, because the level still declares its walls. Iterating the
       // declarations and indexing the deltas is what made that combination throw.
-      const walls = !WALL_DELTAS ? [] : WALLS_ALL.flatMap((w, k) => w.lvl !== n ? []
+      const walls = !WALL_DELTAS.length ? [] : WALLS_ALL.flatMap((w, k) => w.lvl !== n ? []
         : [...WALL_DELTAS[k].quad.flatMap(q => q.split(',')).map(lvlResolve), 0xff,
            ...WALL_DELTAS[k].cells, 0xff]);
       const body = lvlBlocks([L]);
