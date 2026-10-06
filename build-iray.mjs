@@ -3199,6 +3199,14 @@ if (process.env.MODELJSON === '1') {
 const SHYCOL = process.env.SHYCOL !== '0';   // DEFAULT; SHYCOL=0 restores the shuffle
 const COLH_AT = SHYCOL ? 0xfe00 : 0x0700, COLH_N = 160;
 const STY_COLH_X = `        !byte $9c,<colH,>colH   ; = "sty colH,x" (SHY, undocumented -- see STY_COLH_X)`;
+// ---- X_MINUS_IMM: "X -= #imm", which the 6502 does not have either ----
+// The documented way to add to X is txa / clc / adc / tax, 9 cycles. The 6510's undocumented
+// SBX #imm (opcode $cb) computes X = (A AND X) - imm in 2, so with A = $ff it is exactly
+// "X -= imm" (flags as CMP). castRay's Y step uses it: lda #$ff / sbx = 4 cycles, with the
+// immediate patched once per ray to minus the row stride. The build CHECKS the precondition
+// ("SBX's precondition", next to SHY's): every $cb must be preceded by lda #$ff. Like SHY it
+// runs on every real C64 and in VICE, not on a 65816.
+const X_MINUS_IMM = label => `${label}: !byte $cb,$00          ; = "X -= #imm" (SBX, undocumented -- see X_MINUS_IMM); PATCHED imm`;
 const ispanSto = SHYCOL ? STY_COLH_X
                         : `        sta errv
         tya
@@ -9349,7 +9357,6 @@ bswp    = $19
 bcnt    = $08
 cell0   = $13                  ; the player's own cell index, constant for the frame
 cell    = $7e                   ; DDA cell index = mapY*16 + mapX, stepped incrementally
-stpY16  = $7f                   ; +16 / -16: one Y step in cell-index units
 uwL     = $20                   ; seam pass scratch: u low byte, then the projective solve
 uwH     = $21
 sdK     = $92                   ; the seam code's offset from SEAM0, decoded once
@@ -13613,14 +13620,14 @@ ${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
         bcc cypos
         lda #$ff
         sta stpY
-        lda lvlDimT+2           ; -MAPW: one cell row back
-        sta stpY16
+        lda lvlDimT             ; stepping -y is X += -MAPW, i.e. X -= MAPW (see cyStep)
+        sta cyStep+1
         jmp cySat               ; negative: m IS the side distance, so there is nothing to
                                 ; subtract -- but the saturation below still has to run
 cypos:  lda #$01
         sta stpY
-        lda lvlDimT             ; +MAPW: one cell row on
-        sta stpY16
+        lda lvlDimT+2           ; stepping +y is X += MAPW, i.e. X -= -MAPW (see cyStep)
+        sta cyStep+1
         sec                     ; positive: sdy = ddy - m, in place
         lda ddy
         sbc sdy
@@ -13689,10 +13696,8 @@ cdda:   lda sdxH
         ; THE CELL IS TESTED BEFORE THE ADD. sdy is the distance to the gridline being
         ; crossed, so on a hit it already IS the hit distance -- the old order added ddy and
         ; then subtracted it straight back at cwallY. Only the steps that do not hit pay the add.
-cstepY: txa
-        clc
-        adc stpY16
-        tax
+cstepY: lda #$ff                ; one row along: X -= the patched step (A = $ff, see X_MINUS_IMM)
+${X_MINUS_IMM('cyStep')}
         lda mapT,x
         beq cwallY                 ; mapT: walls are $00, open cells their zone mask
         clc
@@ -25168,6 +25173,17 @@ for (const m of asm.matchAll(/!byte \$9c,<([a-zA-Z]\w*),>\1\b/g)) {
       `must be on page $fe with all ${COLH_N} columns inside it -- otherwise the stored heights are masked`);
 }
 if (SHYCOL && !/!byte \$9c,</.test(asm)) throw new Error('SHYCOL is on but no SHY was emitted');
+// ---- SBX's precondition (see X_MINUS_IMM): X = (A AND X) - imm is "X -= imm" only with A = $ff ----
+{
+  const ls = asm.split('\n'), code = l => l.replace(/;.*/, '').replace(/^[a-zA-Z]\w*:/, '').trim();
+  ls.forEach((l, i) => {
+    if (!/^!byte \$cb\b/.test(code(l))) return;
+    let j = i - 1; while (j >= 0 && !code(ls[j])) j--;
+    if (!/^lda #\$ff$/i.test(code(ls[j] ?? '')))
+      throw new Error(`SBX at line ${i + 1} is not preceded by "lda #$ff": X = (A AND X) - imm, so ` +
+        `without A = $ff it is not "X -= imm" (found: "${code(ls[j] ?? '')}")`);
+  });
+}
 const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)/gm)]
   .map(m => [m[1], parseInt(m[2], 16)])
   // ...but the SOLO slot's tables are not squatters. They are one deliberate allocation with a
