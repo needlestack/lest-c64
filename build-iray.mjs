@@ -3752,7 +3752,10 @@ const FOVCHK = flag('FOVCHK');
 // count every byte that differs (lzBad, must be 0) against the uses checked (lzN).
 const LAZYCHK = process.env.LAZYCHK === '1';
 const OCCLAZYE = !['1', '2', '3'].includes(process.env.OCCCHK ?? '');
-// OCCCHK=1: verify the skip. Rebuilds even when it would skip, and counts bytes that differ.
+// OCCCHK=1: verify the skip on the EAGER path. NOTE: setting it turns OCCLAZYE OFF, so it does not test
+// what ships -- LAZYCHK=1 does (2026-10-06: OCCCHK reported 58 stale bytes on level 2 that the shipping
+// lazy path never trusts; LAZYCHK found zero in 4,171 trusted masks). Kept for the eager path only.
+// Rebuilds even when it would skip, and counts bytes that differ.
 // 2 and 3 exist to BISECT it: the full version starts and then runs wild, so build up in stages.
 //   2 = counters only (never skip, count clean frames)   3 = 2 + the shadow copy   1 = 3 + compare
 const OCCCHK = ['1', '2', '3'].includes(process.env.OCCCHK ?? '');
@@ -11616,7 +11619,7 @@ pvNeg:  cmp #$80
 pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; the run table is final HERE and renumbers every frame, so every\n                                ;   entity mask has to be rebuilt against it before anything reads\n                                ;   one. See orbOcc1.\n' : ''}${SPRITES ? '' + (ENTPROF ? '        jsr pfT8              ; orbOccAll: every entity mask, every frame\n' : '') + (ANYFLOORDK ? `        jsr lvlSpr              ; the level's SHARED sprite inks, beside the projection
+${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; masks against this frame\'s run table, before anything reads one --\n                                ;   rebuilt only when an entity moved or the cell changed (see orbOcc1)\n' : ''}${SPRITES ? '' + (ENTPROF ? '        jsr pfT8              ; orbOccAll: every entity mask, every frame\n' : '') + (ANYFLOORDK ? `        jsr lvlSpr              ; the level's SHARED sprite inks, beside the projection
                                 ;   that decides what osFlush will write. The two have to land on
                                 ;   the SAME frame or the cast recolours in two steps: the bodies
                                 ;   follow the projection, so the shared pair has to as well.
@@ -17038,6 +17041,13 @@ objInit:
                                 ;   defaults to sockVisT, the rest to the exit's) -- so an exit could
                                 ;   stamp with the socket's rows. $ff is no kind, so the first call
                                 ;   always patches.
+        sta occCell             ; ...and orbOccAll's "nothing changed" skip: occVer/occCell were never
+                                ;   initialised either, so on a level's first frame the skip could match
+                                ;   leftover state (both versions 0, occCell equal to the start cell) and
+                                ;   keep whatever the mask buffer held -- the previous level's masks, or
+                                ;   boot junk -- until something moved. $ff is never a cell (maps are at
+                                ;   most 253), so the first frame after any entry always rebuilds.
+                                ;   (OCCCHK=1 caught it: 58 stale bytes on level 2's first frame.)
         ldx #$00
 oiBlk:  lda mapT,x              ; walls first
         cmp #$01                ; mapT is $00 for a wall and a zone mask otherwise;
@@ -17117,14 +17127,13 @@ ${HAS_IDOL ? `        jsr idolPlace           ; ---- ...then put the IDOLS where
 ; describe the old position: hidden behind walls it is now in front of, and stamped through ones
 ; it is behind.
 ;
-; It is ALSO a function of the run table, and that is per-frame. Run ids are handed out by the
-; subdivision in the order the runs come out of it, so they renumber whenever the view changes --
-; the same id is a different wall a frame later. A mask built once at boot and refreshed only on
-; an angel's step (once every two seconds) therefore spent every frame in between naming the
-; wrong runs: an occluder that should have stamped did nothing, and one that should not have
-; stamped hid the entity. That is the "missing blue block with the statue peeking through it".
-; So orbOccAll below re-runs it for every entity every frame, from subFin where the table is
-; final and before orbMove, which is the first thing to read the mask.
+; It is ALSO a function of the run table (runPlaneT/runFaceT, built by mkRuns at level entry) and of
+; the merge-hazard splits hazSet patches in per RENDERING cell. Run ids are fixed for a level: they
+; were once handed out by the subdivision in view order and renumbered as you turned, which is why
+; masks were rebuilt every frame ("the missing blue block with the statue peeking through it"). Now
+; orbOccAll rebuilds only when an entity moved (blkVer) or the rendering cell changed (cell0), and
+; with OCCLAZYE only the masks an entity actually needs. Verified 2026-10-06 with LAZYCHK=1: 4,171
+; trusted masks over spins, walks and moving angels on levels 1-4, zero stale bytes.
 ; The mask base is self-modified rather than indirect-indexed because the loop needs Y for the
 ; run id and X for the byte within the mask.
 orbOcc1:
