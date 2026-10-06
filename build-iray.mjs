@@ -12952,7 +12952,7 @@ ssNp:   ldx #$01
         stx ssDir
         ; This USED to reject a span covering more than 16 cells, on the grounds that u must be
         ; junk -- castRay's far/guard exits leave remL/remH meaningless. It was dead in that role:
-        ; cfar says of itself "unreachable with a solid border", and the build asserts a solid
+        ; castRay's old step-guard exit was unreachable with a solid border, and the build asserts a solid
         ; border. What it actually did was silently deny seams to any wall longer than 16 cells,
         ; near part included, because it rejects before ssCutS could clip the far end.
         ; The only real requirement is that the count fit the byte the walk counts down, and that
@@ -13665,13 +13665,12 @@ cySx:   lda ddyH
         sta sdy
         sta sdyH
 cydone:${PROFSUB ? '\n        jsr pfT10              ; ray: initial side distances (AFTER the label --\n                                ; jmp/bne cydone would otherwise skip the tick)' : ''}
-        ldy lvlDimT+3           ; the step guard must span the MAP: a ray crosses at most
-                                ;   W + H cell boundaries before it leaves the grid. At a fixed 24
-                                ;   a long sightline expires early, cfar sets pp = 1, and the
-                                ;   column ends up with no wall run -- which occWalk reads as
-                                ;   "nothing here occludes", so entities BEHIND the wall draw.
+        ; NO STEP COUNT. The march ends only by hitting a wall, which it always does: the map
+        ; border is solid (asserted at build time for every level and every removable-wall
+        ; variant). If corrupt map data ever opens the border, this loops forever -- a hang that
+        ; says "fix the corruption", rather than a counter quietly drawing a stub wall over it.
         ldx cell0               ; the march starts in the player's cell (computed once a frame in
-                                ;   mloop) and lives in X; every exit (cwallX/cwallY/cfar) stores it
+                                ;   mloop) and lives in X; both exits (cwallX/cwallY) store it
                                 ;   to cell, so cell itself is never written here first
 cdda:   lda sdxH
         cmp sdyH
@@ -13703,13 +13702,11 @@ cstepY: txa
         lda sdyH
         adc ddyH
         sta sdyH
-        bcc cyNs
+        bcc cdda                ; no overflow: the next step
         lda #$ff                ; this axis is effectively never crossed again
         sta sdy
         sta sdyH
-cyNs:   dey
-        bne cdda
-        jmp cfar
+        jmp cdda
         ; Both 'bcc cstepX' above arrive with carry CLEAR -- that is what the branch tested --
         ; so the add below does not need a clc. Only the exact-tie 'beq' arrives with it set,
         ; and that pays for its own here rather than taxing every step. (The Y side keeps its
@@ -13729,16 +13726,11 @@ cxInc:  inx                     ; PATCHED to $e8 inx / $ca dex, once per ray
         lda sdxH
         adc ddxH
         sta sdxH
-        bcc cxNs
+        bcc cdda                ; no overflow: the next step
         lda #$ff
         sta sdx
         sta sdxH
-cxNs:   dey
-        bne cdda
-cfar:   stx cell                ; step guard expired; unreachable with a solid border
-        lda #$01
-        sta pp
-        rts
+        jmp cdda
 cwallX: stx cell                ; marchCol reads the cell back for the run-id lookup
         lda #$00
         sta side
