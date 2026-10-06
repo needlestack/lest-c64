@@ -85,7 +85,7 @@ for (const s of want) {
   try {
     out = execFileSync(process.execPath,
       ['probe.mjs', env, 'iterLo:2', 'px:2', 'py:2', '--at', `${T0},${t1}`],
-      { cwd: '/Users/jfield/c64fps', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      { cwd: new URL('.', import.meta.url).pathname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) { console.log(`${s.name.padEnd(9)} BUILD OR RUN FAILED`); continue; }
   const it = num(out, 'iterLo'), fc = num(out, 'frameCnt');
   if (!it || !fc) { console.log(`${s.name.padEnd(9)} could not read the counters`); continue; }

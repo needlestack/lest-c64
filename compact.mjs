@@ -14,7 +14,11 @@
 // listing, classify each as code or data, then rewrite the Nth origin directive with the Nth
 // run's new address. Labels resolve wherever they land, so nothing else in the source changes.
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
-import { assemble } from '/Users/jfield/c64fps/asm6502.mjs';
+import { assemble } from './asm6502.mjs';
+// Every path is relative to THIS file's directory, never absolute and never the cwd: a clone (or a
+// renamed checkout) must build in place, and an absolute path once made a clone's build read and
+// write the original checkout's files without a word.
+const ROOT = new URL('.', import.meta.url).pathname;
 
 // The source is the file the BUILD JUST WROTE, handed over as argv[2] -- not a fixed name.
 // Hardcoding iray.asm meant that on a DIAGNOSTIC build, which writes iray.diag.asm so it cannot
@@ -24,8 +28,8 @@ import { assemble } from '/Users/jfield/c64fps/asm6502.mjs';
 // appeared to vanish, why two ROUTE builds with and without entities measured identically (they
 // were the same stale image), and why the build prints "not for fps numbers" on a DIAG build --
 // a symptom someone recorded without finding the cause.
-const SRC = process.argv[2] || '/Users/jfield/c64fps/iray.asm';
-const OUT = '/Users/jfield/c64fps/iray.compact.asm';
+const SRC = process.argv[2] || ROOT + 'iray.asm';
+const OUT = ROOT + 'iray.compact.asm';
 const ORG = 0x0801, CEIL = 0xc000;
 
 const src = readFileSync(SRC, 'utf8');
@@ -56,7 +60,7 @@ const isCode = s => /^\s*(adc|and|asl|bcc|bcs|beq|bit|bmi|bne|bpl|brk|bvc|bvs|cl
 // and with no iray.reserve.json scratch could be placed ON the level region. build-iray.mjs writes all
 // of them immediately before running this, so a missing one is a real fault: say so and stop.
 const need = f => {
-  try { return JSON.parse(readFileSync(`/Users/jfield/c64fps/${f}`, 'utf8')); }
+  try { return JSON.parse(readFileSync(ROOT + f, 'utf8')); }
   catch (e) { console.error(`compact: cannot read ${f} (${e.message}) -- run it via build-iray.mjs, which writes it`); process.exit(1); }
 };
 const ALIGNED = need('iray.aligned.json');
@@ -319,7 +323,7 @@ console.log(`  assembled: org $${out.org.toString(16)} end $${out.end.toString(1
 // code, so build-iray's own label table is pre-compaction and wrong by thousands of bytes.
 // probe.mjs needs it to set an EXECUTION checkpoint on a routine by name, which is what lets it
 // wait for "mloop was reached" instead of sleeping eight seconds and hoping the load finished.
-writeFileSync('./iray.syms.json', JSON.stringify(out.labels));
+writeFileSync(ROOT + 'iray.syms.json', JSON.stringify(out.labels));
 
 // ---- 5. what would still have to move: RAM equates that used to live in the old holes ----
 // A buffer declared as `name = $xxxx` is not emitted, so compaction cannot see it. Any that now
@@ -503,9 +507,9 @@ console.log(`  ===> LEVEL ARENA  ${arenaLeft} bytes, of which ${usable} are page
   // rehoming, so every RAM equate in it was its PRE-move address -- faceIdT read as $8200 while
   // the engine kept it at $6300 -- and any tool reading a buffer by name (vprof --dump, probes,
   // monitor scripts) silently read junk. Code labels were right; only the buffers were stale.
-  if (run) writeFileSync('./iray.syms.json', JSON.stringify(run.labels));
+  if (run) writeFileSync(ROOT + 'iray.syms.json', JSON.stringify(run.labels));
   else {        // the pre-move symbols are WRONG for every buffer: better no file than a stale one
-    try { unlinkSync('./iray.syms.json'); } catch {}
+    try { unlinkSync(ROOT + 'iray.syms.json'); } catch {}
     console.error('compact: the rehomed source did not assemble -- iray.syms.json removed rather than left stale');
   }
   if (process.env.SHOWMOVED)

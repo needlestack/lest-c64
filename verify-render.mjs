@@ -37,7 +37,7 @@ const h=rays.map((r,c)=>Math.min(CY,Math.round(88/Math.max(r[0]*cosC[c],0.02))))
 const hraw=rays.map((r,c)=>Math.round(88/Math.max(r[0]*cosC[c],0.02)));
 const fid=rays.map(r=>r[1]);
 // screenshot: display area starts at x=32,y=23; logical col c -> x=32+2c, row r -> y=23+r
-const shot=execSync(`node /Users/jfield/c64fps/shot.mjs ${process.argv[2]} 32 23 320 200`).toString().trim().split('\n');
+const shot=execSync(`node ${new URL('shot.mjs', import.meta.url).pathname} ${process.argv[2]} 32 23 320 200`).toString().trim().split('\n');
 let diff=0, tot=0, worstCol=-1, worstD=0;
 for(let c=0;c<W;c++){
   const top=CY-h[c];

@@ -5,7 +5,7 @@
 # A cleanup that removes code no shipping build emits must leave all four IDENTICAL.
 S=$(cd "$(dirname "$0")" && pwd)/.ship
 mkdir -p "$S"
-cd /Users/jfield/c64fps
+cd "${0:A:h}/.."   # the checkout this script lives in, wherever that is
 typeset -A CFG
 # The two disks that ship. The 7-level build is retired (user, 2026-10-05: the largest set ever
 # resident is 4-7). The 4-7 RESIDENT builds (VSLOTS, with or without BGLOAD) do not fit since the

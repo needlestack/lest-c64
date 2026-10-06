@@ -115,7 +115,7 @@ for(let c=1;c<W;c++){const a=hit[c-1],b=hit[c]; if(!a||!b) continue;
 // check reported "boundaries 9  drawn 0" for all six views -- a clean bill of health for a
 // render with no seams at all. Comparing against whatever colour the wall happens to be
 // survives the next recolour of either.
-const row=execSync(`node /Users/jfield/c64fps/shot.mjs ${shotFile} 32 123 320 1 --raw`).toString().trim().split(/\s+/);
+const row=execSync(`node ${new URL('shot.mjs', import.meta.url).pathname} ${shotFile} 32 123 320 1 --raw`).toString().trim().split(/\s+/);
 const tally=new Map();
 for(let c=0;c<W;c++){const v=row[c*2];tally.set(v,(tally.get(v)||0)+1);}
 const wall=[...tally].sort((a,b)=>b[1]-a[1])[0][0];
