@@ -178,7 +178,7 @@ const LEVEL_WALLS = {
   // wallTog is single-wall state (wsWall, wsN), so three of them in one frame would leave the
   // first two with doomT set and a map that never changed. All three pedestals name wall 0;
   // the gate that holds it shut until the last one is fed is in orbMove, at omPdC.
-  4: { walls: [[[10, 3], [10, 4], [10, 5]]],
+  4: { walls: [[[9, 4]]],                           // 2026-10-05: the east corridor's mouth
        sockWall: [0, 0, 0] },
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
   5: { walls: [[[11, 2]], [[20, 9]]],                // S1 up to the exit,
@@ -405,7 +405,7 @@ const HAS_IDOL = LEVEL_IDS.some(n => LEVEL_IDOL[n]);             // the mechanic
 // from HUBROOM, because HAS_PED has to be true for the whole CHAIN -- the ladder is emitted once
 // and every resident level's pedestals draw from it, so asking only about the live level would
 // leave a shadow level's pedestals pointing at bitmaps that were never built.
-const LEVEL_PEDESTALS = { 4: '9,3;9,4;9,5' };
+const LEVEL_PEDESTALS = { 4: '8,3;8,4;8,5' };
 const HAS_PED = LEVEL_IDS.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
 const PED_LVL = +(Object.keys(LEVEL_PEDESTALS)[0] ?? 0);   // only one level has them
 // IDOLHUB=1: every idol already in the pedestal room, for testing the wall without three
@@ -481,15 +481,20 @@ const L3_MAP = [
 // and only opens when all three are filled. The barrier is deliberately awkward: column 9 is
 // pedestal/wall/pedestal/wall/pedestal, so the only way through is the two removable cells at
 // (9,3) and (9,5), and column 10 shuts those off again at rows 2, 4 and 6.
+// Revised by the user 2026-10-05 for the torture view: the east room was a stepped outline seen
+// whole from across the hall (35 rays, 10.5 DDA steps each, 8 fps at the worst pose). Now it is a
+// small plus-shaped room reached through a one-cell corridor from behind the middle pedestal, so
+// it is never seen whole from far away. The wall is the corridor's mouth. Second pass the same day:
+// the west chamber is a plain 6x5 box and the three errand exits sit in one-cell alcoves.
 const L4_MAP = [
   "################",
-  "###.X.#.###.####",
-  "##.......#...###",
-  "#........T|...##",
-  "#X.P.....T|...X#",
-  "#........T|...##",
-  "##.......#...###",
-  "###.X.#.###.####",
+  "####X###########",
+  "##......#####.##",
+  "##......T###...#",
+  "#X.P....T|...X.#",
+  "##......T###...#",
+  "##......#####.##",
+  "####X###########",
   "################",
 // T = pedestal and X = exit, markers for the reader like O/S/A/P elsewhere: the real positions
 // come from the tables. '|' is a removable wall and must be SOLID in the base map, or the wall
@@ -5554,7 +5559,7 @@ const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').
 // not exist -- and an exit costs a holeSeeT row, an lvlNxtT byte, a fill colour and an entity's
 // worth of tables whether anything is through it or not. It comes back with level 8. The wall
 // that hides it stays: it is what the three pedestals open, and it now reveals an empty alcove.
-const HUB_HOLES = [[4, 1], [1, 4], [4, 7], [14, 4]];   // N(red), W(green), S(blue), E(black)
+const HUB_HOLES = [[4, 1], [1, 4], [4, 7], [13, 4]];   // N(red), W(green), S(blue), E(black)
 const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
              : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
@@ -8691,6 +8696,13 @@ const ZN_BUILD = (() => {
     if (mask[p] & (1 << zid[e])) continue;              // the test passes it: nothing to check
     n++;
     if (RIM.some(([c, s]) => losFree(px, py, cellX(e) + 0.5 + r * c, cellY(e) + 0.5 + r * s))) bad++;
+  }
+  // ZNDUMP=1 (diagnostic): every open cell's zone, and ZNDUMP=x,y also the zones visible from that cell.
+  if (process.env.ZNDUMP) {
+    for (let y = 0; y < MAPH; y++) console.error('  ZN ' + String(y).padStart(2) + '  ' + [...Array(MAPW)].map((_, x) => {
+      const c = cellOf(x, y); return map[c] ? '[]' : ' ' + zid[c]; }).join(' '));
+    const [qx, qy] = process.env.ZNDUMP.split(',').map(Number);
+    if (!isNaN(qy)) console.error(`  ZN visible from (${qx},${qy}): mask $${mask[cellOf(qx, qy)].toString(16)}`);
   }
   return { enc, zoneT, hmask, zones: Z.length, cells: cells.length, bad, n };
 })();
