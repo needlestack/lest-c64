@@ -25959,6 +25959,11 @@ try {
   // every one of these is evicted the free figure would be a lie, and a lie in the direction that
   // gets sprite data written over the span stack.
   const squatters = BANK3_SQUATTERS;
+  // A squatter's extent: its DECLARED size when RUNTIME_BUFS has one, else to the end of its page --
+  // the same rule reserveOf uses for the free-space figure. The pairwise guard and BANK3MAP used to
+  // stop every squatter at one page, so a declared buffer longer than that was counted by the free
+  // figure but invisible to the guard past its first page.
+  const sqEnd = (n, a) => RUNTIME_BUFS[n] !== undefined ? a + RUNTIME_BUFS[n] : (a & ~255) + 256;
   // NAMED for the overlap guard below, exactly as the sprite-side segments are. The first cut of
   // that guard checked only the sprite side, which would have missed a shadow landing on a SCREEN
   // or a charset -- the two things in bank 3 whose corruption you would actually SEE.
@@ -26030,7 +26035,7 @@ try {
     // $d000 is the image the loader relocates into", so it overlaps the charsets and both screens
     // by design. Including it makes the guard cry wolf on its first run, which is how guards die.
     const all = [...usedNamed, ...sprNamed.filter(([n]) => n !== 'LOADER_RUN'),
-                 ...squatters.map(([n, a]) => [n, a, (a & ~255) + 256])];
+                 ...squatters.map(([n, a]) => [n, a, sqEnd(n, a)])];
     const hits = [];
     for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
       const lo = Math.max(all[i][1], all[j][1]), hi = Math.min(all[i][2], all[j][2]);
@@ -26254,7 +26259,7 @@ try {
   // question -- which runs are CPU-readable at port $35 (so $d000-$dfff is out) and big enough
   // to hold a level in place. That is a layout question, not a free-space one.
   if (process.env.BANK3MAP) {
-    const segs = [...usedNamed, ...sprNamed, ...squatters.map(([n, a]) => [n, a, (a & ~255) + 256])]
+    const segs = [...usedNamed, ...sprNamed, ...squatters.map(([n, a]) => [n, a, sqEnd(n, a)])]
       .sort((a, b) => a[1] - b[1] || a[2] - b[2]);
     console.log('  VIC bank 3 occupancy:');
     let at = VBANK;
@@ -26353,7 +26358,10 @@ try {
     const eq = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
       .map(m => [m[1], parseInt(m[2], 16)])
       .filter(([n, a]) => a >= 0x0200 && !(n in OK));
-    const clash = eq.filter(([, a]) => a >= r.org && a < r.end && !inHole(a, 1));
+    // Its WHOLE declared extent, not its first byte: a buffer starting in a hole and running on into
+    // emitted data passed this check while the program's writes walked over that data.
+    const clash = eq.filter(([n, a]) => { const sz = RUNTIME_BUFS[n] ?? 1;
+      return a < r.end && a + sz > r.org && !inHole(a, sz); });
     if (clash.length && process.env.HOLEDBG) console.error('HOLEDBG near clash:',
       clash.map(([n, a]) => `${n}=$${a.toString(16)}`).join(' '), '| holes:',
       holes.filter(([lo, hi]) => hi > 0xbc00 && lo < 0xbf00)
