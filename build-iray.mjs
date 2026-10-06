@@ -3833,6 +3833,7 @@ const FLOG_N = 704;
 // Both are PURE RAM: anything here is runtime scratch, never loaded data, because the loader
 // would have to write it and the KERNAL would be using the same bytes to do so.
 const LOWBOOT = 0x0200, LOWSAFE = 0x033c, LOWEND = 0x03fc;
+const LOWTOP = 0x0400;           // where low RAM stops: the default screen, which stackLT and the rest occupy
 // ---- and the two tenants evicted from VIC bank 3 to make room for more level data there ----
 // They were the first CPU squatter in bank 3, capping the level region at $fe00; moving them
 // here lifted it to $fff9.
@@ -26330,10 +26331,10 @@ try {
         // real RAM sat in NEITHER. Now that the pivot scratch and fallTailB live there, the
         // region needs the same protection as the rest. Below $0200 is the hardware stack and
         // the zero page, which have their own checker.
-        .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
+        .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= LOWBOOT)
         .map(([n, a]) => [n, a, SIZES[n] ?? 1]).sort((x, y) => x[1] - y[1]);
-      for (const [n, a, sz] of all)
-        if (a < 0x0200 || (a < 0x0400 && a + sz > LOWEND)) throw new Error(
+      for (const [n, a, sz] of all)       // (below LOWBOOT is filtered out above: zero page and stack have their own checker)
+        if (a < LOWTOP && a + sz > LOWEND) throw new Error(
           `${n}=$${a.toString(16)} (${sz}B) runs past $${(LOWEND - 1).toString(16)} into the ` +
           `default screen at $0400 (stackLT and the rest), or below $0200 into the stack.`);
       // PUBLISH the sizes. compact.mjs relocates these buffers and has no way to know how big
