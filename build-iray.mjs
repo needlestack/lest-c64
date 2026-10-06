@@ -738,6 +738,11 @@ const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) ma
 //
 // isWall(cx, cy) is the caller's wall set -- walls as they start, or openable walls taken as open.
 const WALL_SHUT = (cx, cy) => !inMap(cx, cy) || !!map[cellOf(cx, cy)];
+// This level's removable walls as a cell set -- ONE copy (it was rebuilt from LEVEL_WALLS in four
+// places) -- and the wall set with every one of them taken as OPEN, which is what the culling tables
+// assume, since a wall that may open must not hide what is behind it.
+const OPENABLE = new Set(WALLS.flat().map(([x, y]) => cellOf(x, y)));
+const WALL_OPEN = (cx, cy) => !inMap(cx, cy) || (!!map[cellOf(cx, cy)] && !OPENABLE.has(cellOf(cx, cy)));
 const losClear = (ax, ay, bx, by, isWall) => {
   const ex = Math.floor(bx), ey = Math.floor(by);
   let cx = Math.floor(ax), cy = Math.floor(ay);
@@ -903,8 +908,7 @@ const PATH_N = pathOpen.length;
 { // one connected region, or an angel can be permanently marooned -- and so can the player.
   // Judged with the removable wall OPEN: level 2 keeps its angel behind that wall on purpose,
   // and the two regions join the moment an orb is seated.
-  const mapC = map.slice();
-  for (const g of WALLS) for (const w of g) mapC[cellOf(...w)] = 0;
+  const mapC = map.map((v, c) => OPENABLE.has(c) ? 0 : v);
   const open = []; for (let c = 0; c < MAPN; c++) if (mapC[c] === 0) open.push(c);
   const seen = new Set([open[0]]), q = [open[0]];
   for (let h = 0; h < q.length; h++) {
@@ -1829,8 +1833,9 @@ if (!process.env.LVLDUMP && ROUTEDEF) {
   const R = 26;                                  // mvFree's half-box, in 1/256 cells
   // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
   // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
-  const openW = ROUTEDEF.opensWalls ? new Set(WALLS.flat().map(w => cellOf(...w))) : new Set();
-  const solid = (cx, cy) => cx < 0 || cy < 0 || cx >= MAPW || cy >= MAPH || (M[cy][cx] && !openW.has(cellOf(cx, cy)));
+  // The padded map and inMap, not the raw literal M[cy][cx]: a literal shorter than MAPW x MAPH read
+  // `undefined` there, i.e. OPEN, where every other reader sees wall.
+  const solid = ROUTEDEF.opensWalls ? WALL_OPEN : WALL_SHUT;
   const blocked = (X, Y) => {
     for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
       if (solid(bx, by)) return true;
@@ -8615,7 +8620,7 @@ const hzBearing = (dx, dy) => {                  // cnTest's bearing, step for s
 // entities culled).
 const ZN_BUILD = (() => {
   
-  const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
+  const openable = OPENABLE;
   const isW = c => !!map[c] && !openable.has(c);
   const WO = (x, y) => (!inMap(x, y) || isW(cellOf(x, y))) ? 1 : 0;
   const losO = (ax, ay, bx, by) => losClear(ax, ay, bx, by, (x, y) => WO(x, y) === 1);   // openable walls OPEN
@@ -9038,7 +9043,7 @@ LVL_TABLES.push(['lvlMeT', [LVL]]);
 // north exit at X762 Y2D7 A8240 on the 2026-10-05 hub). Orbs and angels move and keep the full path.
 const STMP_LIST = (() => {
   
-  const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
+  const openable = OPENABLE;
   const walk = wallAt => (ax, ay, bx, by) =>             // losClear against a chosen wall set
     losClear(ax, ay, bx, by, (x, y) => !inMap(x, y) || wallAt(cellOf(x, y)));
   const states = [walk(c => !!map[c]), walk(c => !!map[c] && !openable.has(c))];
