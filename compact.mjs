@@ -13,7 +13,7 @@
 // ends exactly where an origin directive moves the cursor. Reconstruct those runs from the
 // listing, classify each as code or data, then rewrite the Nth origin directive with the Nth
 // run's new address. Labels resolve wherever they land, so nothing else in the source changes.
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { assemble } from '/Users/jfield/c64fps/asm6502.mjs';
 
 // The source is the file the BUILD JUST WROTE, handed over as argv[2] -- not a fixed name.
@@ -51,11 +51,17 @@ const isCode = s => /^\s*(adc|and|asl|bcc|bcs|beq|bit|bmi|bne|bpl|brk|bvc|bvs|cl
 // only worked while the hand layout existed. iray.aligned.json is the map the build's own
 // page-boundary guard is authoritative for; a run that STARTS with one of those tables must start
 // on a page.
-let ALIGNED = {};
-try { ALIGNED = JSON.parse(readFileSync('/Users/jfield/c64fps/iray.aligned.json', 'utf8')); } catch {}
+// THE BUILD'S PUBLISHED FACTS ARE REQUIRED. These reads used to sit in silent try/catch blocks, so a
+// missing file quietly degraded the layout -- alignment guessed from addresses, no hot-loop padding,
+// and with no iray.reserve.json scratch could be placed ON the level region. build-iray.mjs writes all
+// of them immediately before running this, so a missing one is a real fault: say so and stop.
+const need = f => {
+  try { return JSON.parse(readFileSync(`/Users/jfield/c64fps/${f}`, 'utf8')); }
+  catch (e) { console.error(`compact: cannot read ${f} (${e.message}) -- run it via build-iray.mjs, which writes it`); process.exit(1); }
+};
+const ALIGNED = need('iray.aligned.json');
 // HOT LOOPS, also from the build: each must sit inside one page (see step 3's re-measure).
-let HOTLOOPS = [];
-try { HOTLOOPS = JSON.parse(readFileSync('/Users/jfield/c64fps/iray.hotloops.json', 'utf8')); } catch {}
+const HOTLOOPS = need('iray.hotloops.json');
 const labelLine = new Map();          // first source line that defines each label
 lines.forEach((l, i) => { const m = /^([a-zA-Z][a-zA-Z0-9_]*):/.exec(l); if (m && !labelLine.has(m[1])) labelLine.set(m[1], i); });
 // a run must begin where an origin is, and also at any table the build says must be page-aligned
@@ -343,8 +349,7 @@ const eqs = [...src.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*) *= *\$([0-9a-fA-F]{4})(?:
 // placed a buffer 21 bytes inside another. Read what the build published; fall back to the
 // never-indexed rule and then to adjacency for anything it does not name.
 const DECLARED = (() => {
-  try { return JSON.parse(readFileSync('/Users/jfield/c64fps/iray.bufsizes.json', 'utf8')); }
-  catch { return { fallSnapD: 520, fallSnapS: 520 }; }
+  return need('iray.bufsizes.json');   // (its old fallback hardcoded the fall snapshots' size a second time)
 })();
 const MN = /^\s*(adc|and|asl|bcc|bcs|beq|bit|bmi|bne|bpl|brk|bvc|bvs|clc|cld|cli|clv|cmp|cpx|cpy|dec|dex|dey|eor|inc|inx|iny|jmp|jsr|lda|ldx|ldy|lsr|nop|ora|pha|php|pla|plp|rol|ror|rti|rts|sbc|sec|sed|sei|sta|stx|sty|tax|tay|tsx|txa|txs|tya)\b/i;
 const use = new Map(eqs.map(([n]) => [n, { max: 0, indexed: false }]));
@@ -423,7 +428,7 @@ const bySize = (a, b) => (a[1] - a[0]) - (b[1] - b[0]) || a[0] - b[0];
 // SUBTRACT THE LEVEL REGION. The levels are not emitted -- they arrive from disk -- so the
 // assembler reports their home as a hole, and scratch would be placed straight on top of them.
 let RESERVE = null;
-try { RESERVE = JSON.parse(readFileSync('/Users/jfield/c64fps/iray.reserve.json', 'utf8')); } catch {}
+RESERVE = need('iray.reserve.json');
 const carve = ([lo, hi]) => {
   if (!RESERVE || RESERVE[1] <= lo || RESERVE[0] >= hi) return [[lo, hi]];
   return [[lo, Math.min(hi, RESERVE[0])], [Math.max(lo, RESERVE[1]), hi]].filter(([a, b]) => b > a);
@@ -499,6 +504,10 @@ console.log(`  ===> LEVEL ARENA  ${arenaLeft} bytes, of which ${usable} are page
   // the engine kept it at $6300 -- and any tool reading a buffer by name (vprof --dump, probes,
   // monitor scripts) silently read junk. Code labels were right; only the buffers were stale.
   if (run) writeFileSync('./iray.syms.json', JSON.stringify(run.labels));
+  else {        // the pre-move symbols are WRONG for every buffer: better no file than a stale one
+    try { unlinkSync('./iray.syms.json'); } catch {}
+    console.error('compact: the rehomed source did not assemble -- iray.syms.json removed rather than left stale');
+  }
   if (process.env.SHOWMOVED)
     console.log('  moved: ' + [...placedAt].map(([nm, at]) => {
       const was = (sorted.find(([q]) => q === nm) || [, 0])[1];
