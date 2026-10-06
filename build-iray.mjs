@@ -25957,11 +25957,15 @@ try {
     // claim like any other, so a collision is a build error.
     const owner = {};
     for (let a = 0xe0; a <= 0xe6; a++) owner[a] = 'the Krill loader';
+    // A zero-page variable's width: its DECLARED size in RUNTIME_BUFS when it has one (the same map
+    // every other guard reads), else 2 if the code ever says name+1, else 1. The inference alone
+    // missed any zero-page buffer longer than two bytes, and ignored the declarations entirely.
+    const zpWidth = n => Math.max(RUNTIME_BUFS[n] ?? 1, two.has(n) ? 2 : 1);
     for (const [n, a] of Object.entries(zp)) {
-      for (const b of two.has(n) ? [a, a + 1] : [a]) {
+      for (const b of [...Array(zpWidth(n))].map((_, i) => a + i)) {
         if (owner[b] && owner[b] !== n && !ZPSHARED.has(b))
           throw new Error(`zero page $${b.toString(16)} claimed by both ${owner[b]} and ${n}` +
-            (two.has(owner[b]) || two.has(n) ? ' (one of them is two bytes wide)' : ''));
+            (zpWidth(owner[b]) > 1 || zpWidth(n) > 1 ? ' (one of them is wider than a byte)' : ''));
         owner[b] = n;
       }
     }
@@ -25981,7 +25985,7 @@ try {
   // and cannot infer it -- inferring it from "this one happens to be page-aligned today" only
   // works while the hand-placed layout exists, which is exactly what compaction replaces. This is
   // the authoritative list; the check below is what it is authoritative FOR.
-  writeFileSync('./iray.aligned.json', JSON.stringify(aligned));
+  // (iray.aligned.json is written ONCE, before compaction, which is where it is consumed.)
   // ONE MEANING: a value above 1 is "starts on a page" -- what compact.mjs does with it. This guard
   // used to read the value as an EXTENT ("these n bytes must not cross a page"), so rayOffT/hPgT's
   // NLOG asked it a weaker question than the one compact answered. Same list, same reading, now.
@@ -26386,9 +26390,8 @@ try {
       // guard (it only ever under-claims) and a disastrous one for a tool that then places the
       // next buffer one byte later. Leave the unknowns out so they fall through to the relayout's
       // own rules instead of being confidently wrong.
-      writeFileSync('./iray.bufsizes.json',
-        JSON.stringify(Object.fromEntries(all.filter(([n]) => SIZES[n] !== undefined)
-                                             .map(([n, , sz]) => [n, sz]))));
+      // (iray.bufsizes.json is written ONCE, before compaction, from this same RUNTIME_BUFS map --
+      // a second write here produced the identical file after compact.mjs had already read it.)
       for (let i = 1; i < all.length; i++) {
         const [pn, pa, ps] = all[i - 1], [n, a, sz] = all[i];
         if (a < pa + ps) throw new Error(
