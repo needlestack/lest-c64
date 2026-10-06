@@ -15675,7 +15675,14 @@ ocDn:
 oxNeg:  lda orbXOffT,x          ; centre is ocol columns LEFT of column 0, so b = offset - ocol
         sec
         sbc ocol
-        bcc orbNo               ; sprite's left edge is left of X = 0, which no sprite can be
+        ; A NEGATIVE b IS FINE: SPRITE X WRAPS. This used to reject the entity here ("left of X = 0,
+        ; which no sprite can be"), so a close orb or angel vanished while part of it was still on
+        ; screen -- and the angel's move probe, which runs through here, read that as "nothing of it
+        ; shows" and let an angel you could SEE move. holeTail has always relied on the wrap: X is
+        ; 9 bits and the beam's counter rolls over, so a sprite placed at 2b mod 512 draws its
+        ; visible part at the left of the same line. An entity with NOTHING on screen is rejected by
+        ; the box test further down, before any slot takes this X; for the rest, b >= -24, so asl of
+        ; the two's-complement byte is exactly the wrapped X: bit 7 of b becomes the X8 bit.
 oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         sta o0
         lda #$00
@@ -15766,9 +15773,8 @@ orbYok: sta o3                  ;   keeps ORB_FLOOR rows above the last raster l
         jmp opBL2               ; straddles column 0 from the right: left edge is 0
 opBLn:  lda o2r                 ; centre is LEFT of 0 by ocol columns, so the box ends at
         sec                     ;   o2 - ocol. If that borrows, the whole orb is off screen.
-        sbc ocol
-        bcc opBLx
-        beq opBLx
+        sbc ocol                ; 0 is NOT off screen: the extent is inclusive, so the ink's last
+        bcc opBLx               ;   column IS column 0 (this used to drop the orb a column early)
         lda #$00                ; part of it shows: the box starts at column 0
         jmp opBL2
 opBLx:  jmp orbNo
