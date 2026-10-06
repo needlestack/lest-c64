@@ -471,10 +471,10 @@ export function gmSpr(px, W, H, { name = 'ram', c1 = 8, c2 = 11, c3 = 15, bg = 0
 // thresh/crop chosen per source: ram1 is a lit statue in a dark TEMPLE with braziers either
 // side, so it is cropped past the flames first; ram3 and ram4 are already on flat black.
 const SRC = [
-  { name: 'ram1', file: 'ram1.png', thresh: 17, crop: '880x1010+190+20' },
-  { name: 'ram5', file: 'ram5.png', thresh: 12 },   // the same composition, cut out on black
-  { name: 'ram3', file: 'ram3.png', thresh: 14 },
-  { name: 'ram4', file: 'ram4.png', thresh: 14 },
+  { name: 'ram1', file: 'art/ram1.png', thresh: 17, crop: '880x1010+190+20' },
+  { name: 'ram5', file: 'art/ram5.png', thresh: 12 },   // the same composition, cut out on black
+  { name: 'ram3', file: 'art/ram3.png', thresh: 14 },
+  { name: 'ram4', file: 'art/ref/ram4.png', thresh: 14 },
 ];
 const SIZES = [[12, 42, 'tall'], [12, 21, 'small']];
 const out = [];

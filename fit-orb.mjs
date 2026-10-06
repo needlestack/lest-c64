@@ -9,6 +9,17 @@
 //   0 transparent   1 = $d025 (grey1, 68)   2 = sprite colour (grey2, 108)   3 = $d026 (grey3, 149)
 // so this is the same three-level problem as the face charset, on a 180-pixel canvas.
 import { execFileSync } from 'child_process';
+import { existsSync } from 'fs';
+
+// SOURCE ART lives in art/. A bare file name ('goat6.png') means art/goat6.png; anything with a
+// slash is a path and is taken as given -- so IDOLART=some/other.png still points anywhere.
+// Resolved against this file, not the working directory, so a tool run from elsewhere finds it.
+const ART = new URL('./art/', import.meta.url).pathname;
+export const artPath = f => {
+  const p = f.includes('/') ? f : ART + f;
+  if (!existsSync(p)) throw new Error(`source art not found: ${p}`);
+  return p;
+};
 
 const LU = [null, 68, 108, 149];              // luminance of pixel values 1..3
 const LEVELS = [1, 2, 3];
@@ -29,6 +40,7 @@ const srcCache = new Map();
 // statues) has no bright border to start from, every pixel comes back as ink, and the fit returns
 // a filled rectangle. One comparison, flipped.
 function loadArt(file, mirror, dark) {
+  file = artPath(file);
   const key = `${file}|${mirror}|${dark ? 'd' : 'l'}`;
   if (srcCache.has(key)) return srcCache.get(key);
   const [sw, sh] = execFileSync('magick', ['identify', '-format', '%w %h', file])
@@ -165,6 +177,7 @@ if (process.argv[1]?.endsWith('fit-orb.mjs') && process.argv[2]) {
 // the editor's gridlines and any half-pixel at the edges, which is what makes this exact:
 // fitArt's box filter and dither exist for photographs and would soften a two-colour bitmap.
 export function fatBits(file, W, H) {
+  file = artPath(file);
   const [sw, sh] = execFileSync('magick', ['identify', '-format', '%w %h', file])
     .toString().split(' ').map(Number);
   const raw = execFileSync('magick', [file, '-colorspace', 'gray', '-depth', '8', 'gray:-'],

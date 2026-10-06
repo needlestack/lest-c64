@@ -184,7 +184,7 @@ function hanglPixels() {
   const tmp = mkdtempSync(join(tmpdir(), 'gek'));
   const f = join(tmp, 'hangl1.prg');
   execFileSync('/Applications/vice-arm64-gtk3-3.8/bin/c1541',
-    ['-attach', './TMP-3.d64', '-read', 'hangl1/pic', f], { stdio: 'ignore' });
+    ['-attach', './art/TMP-3.d64', '-read', 'hangl1/pic', f], { stdio: 'ignore' });
   const g = readGek(f);
   // GEK pixel values are scene-order (bg, c1, c2, c3); fit-angel's 0<->3 swap put black on the
   // per-cell pair, and every table here is in that post-swap order.

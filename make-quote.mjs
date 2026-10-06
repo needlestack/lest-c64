@@ -22,7 +22,7 @@ import { tmpdir } from 'os';
 import { inflateSync } from 'zlib';
 import { QUOTE_SCR, QUOTE_CHR, EXO_GETBYTE, EXO_CODE, EXO_TABLE } from './loader-src.mjs';
 
-const SRC = process.argv[2] ?? './quote02.png';
+const SRC = process.argv[2] ?? './art/quote02.png';
 const THR = +(process.argv[3] ?? 0.36);          // the user's pick: 'b', a touch thicker than faithful
 const INK = +(process.argv[4] ?? 12);            // grey2
 

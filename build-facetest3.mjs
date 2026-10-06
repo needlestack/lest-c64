@@ -22,7 +22,7 @@ await import('./d64lib.js');
 const D64 = globalThis.D64;
 
 const FACE = JSON.parse(readFileSync('./angel-face.json', 'utf8')).hangl1;
-const IMAGES = ['angel-1.png', 'angel-2.png', 'angel-3.png', 'angel-4.png', 'angel-5.png'];
+const IMAGES = ['art/angel-1.png', 'art/angel-2.png', 'art/angel-3.png', 'art/angel-4.png', 'art/angel-5.png'];
 const hx = n => '$' + n.toString(16);
 // Where the dictionary changes. 12 puts it just under the face on this image set; it is a build
 // knob because the right row is a property of the PICTURES, not of the hardware.

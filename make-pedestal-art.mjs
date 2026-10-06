@@ -13,7 +13,7 @@
 import { readFileSync, writeFileSync } from 'fs';
 import { inflateSync } from 'zlib';
 
-const SRC = process.argv[2] ?? './pedestal.png';
+const SRC = process.argv[2] ?? './art/pedestal.png';
 const b = readFileSync(SRC); let o = 8, w, h, ct, idat = [];
 while (o < b.length) { const len = b.readUInt32BE(o), ty = b.toString('ascii', o + 4, o + 8);
   if (ty === 'IHDR') { w = b.readUInt32BE(o + 8); h = b.readUInt32BE(o + 12); ct = b[o + 17]; }

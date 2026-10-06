@@ -16,6 +16,21 @@
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { execFileSync } from 'child_process';
+// Run this script again as a SUB-BUILD (one level's tables, one wall variant). Its chatter is
+// dropped, but if it FAILS its own error is shown: with stderr discarded, a sub-build that hit a
+// missing file surfaced only as "Command failed" from the parent -- no file, no reason.
+const subBuild = env => {
+  try { execFileSync(process.execPath, [process.argv[1]], { env, stdio: ['ignore', 'ignore', 'pipe'] }); }
+  catch (e) {
+    // The useful part is the ERROR LINES, not the tail: a failed tool call inside the sub-build
+    // ends in a stack trace and a byte dump of the tool's stderr, which buries the message.
+    const all = (e.stderr ?? '').toString().trim().split('\n');
+    const errs = all.filter(l => /error|unable|ENOENT|not found/i.test(l) && !/^\s+at /.test(l));
+    const why = (errs.length ? errs.slice(0, 4) : all.slice(-12)).join('\n  ');
+    console.error(`sub-build failed (LVL=${env.LVL}${env.WALLOFF ? ' WALLOFF=' + env.WALLOFF : ''}):\n  ${why}`);
+    process.exit(1);
+  }
+};
 import { assemble } from './asm6502.mjs';
 
 // Diagnostic flags read BEFORE flag() exists -- charset construction runs long before it. They
@@ -865,9 +880,7 @@ const LVLALL = MULTI ? (() => {
   const { SOCKETS, ...envNoSock } = process.env;
   return OTHERS.map(n => {
     const tmp = `./.lvl${n}-tables.json`;
-    execFileSync(process.execPath, [process.argv[1]],
-      { env: { ...envNoSock, LVL: String(n), LVLDUMP: tmp },
-        stdio: ['ignore', 'ignore', 'ignore'] });
+    subBuild({ ...envNoSock, LVL: String(n), LVLDUMP: tmp });
     return JSON.parse(readFileSync(tmp, 'utf8'));
   });
 })() : null;
@@ -5522,12 +5535,11 @@ const PED_WALL = (LEVEL_WALLS[PED_LVL]?.sockWall ?? []).length
 // level-local (1-based within the level's own groups) -- only the id is global.
 const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.length) ? WALLS_ALL.map((w, i) => {
   const tmp = `./.wall${i}-tables.json`;
-  execFileSync(process.execPath, [process.argv[1]],
-    // CHAIN=lvl for a LATE level's wall, exactly as its dump does: inheriting the chain leaves
-    // the level resident in no chain and its own walls unreachable. See LATEALL.
-    { env: { ...process.env, LVL: String(w.lvl),
+  // CHAIN=lvl for a LATE level's wall, exactly as its dump does: inheriting the chain leaves
+  // the level resident in no chain and its own walls unreachable. See LATEALL.
+  subBuild({ ...process.env, LVL: String(w.lvl),
              ...(CHAIN.includes(w.lvl) ? {} : { CHAIN: String(w.lvl) }),
-             WALLOFF: String(w.k + 1), LVLDUMP: tmp }, stdio: ['ignore', 'ignore', 'ignore'] });
+             WALLOFF: String(w.k + 1), LVLDUMP: tmp });
   return JSON.parse(readFileSync(tmp, 'utf8'));
 }) : null;
 // "is there a wall mechanic at all" -- an ENGINE question, so it asks LEVEL_IDS and not what
