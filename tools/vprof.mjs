@@ -44,6 +44,8 @@ const UNTIL = opt('--until', '');
 // The parked state is a fixed frame of a fixed workload, so two builds' dumps must be byte-identical
 // when their output is: one run is both the cycle profile and the bitmap check.
 const DUMP = opt('--dump', '');
+// --shot file.png (with --until): a PNG of the parked frame, for eyeballing a change that is not byte-identical.
+const SHOT = opt('--shot', '');
 const ROOT = new URL('..', import.meta.url).pathname;
 const X64 = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
 const PORT = 6510;
@@ -125,6 +127,12 @@ const rd16 = async a => {
     if (pc !== at) throw new Error(`never reached ${UNTIL}`);
     const [flat] = await session(['prof off', `prof flat ${TOP}`]).then(o => [o[1]]);
     const frames = await rd16(addrOf('iterLo') ?? 0x29);
+    if (SHOT) {
+      try { unlinkSync(SHOT); } catch {}
+      await session([`screenshot "${SHOT}" 2`]);
+      for (let k = 0; k < 20 && !existsSync(SHOT); k++) await sleep(100);
+      if (!existsSync(SHOT)) throw new Error('screenshot wrote nothing');
+    }
     if (DUMP) {
       if (!OUT) throw new Error('--dump needs --out');
       for (const r of DUMP.split(',')) {

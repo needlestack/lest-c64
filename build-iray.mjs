@@ -9262,6 +9262,7 @@ sdx     = $0a
 sdy     = $0b
 ddx     = $0c
 ddy     = $0d
+frc     = $7f                   ; castRay: this axis's fraction to its first gridline (frac or 1-frac)
 stpX    = $0e
 stpY    = $0f
 side    = $10
@@ -13431,6 +13432,32 @@ ${DOUBLE === 'sideMulRay' ? `        lda px                  ; DOUBLE=sideMulRay
         ; All six are zero page, so the copies bought nothing and cost 18 cycles an axis --
         ; 36 a ray, ~720 a frame. The names only ever existed as sideMul's argument protocol,
         ; and an inlined body has no protocol to honour.
+        ; ---- DIRECTION FIRST, so each axis is ONE multiply by the right fraction ----
+        ; Stepping -x, the side distance is to THIS cell's line: frac * ddx. Stepping +x it is to
+        ; the NEXT line: (1 - frac) * ddx. That used to be computed as ddx - frac*ddx, a 16-bit
+        ; subtract after the multiply; now the multiply is simply given 1 - frac. As a byte that
+        ; is 255 - frac (eor #$ff), one 256th short of 256 - frac, so the distance comes out
+        ; short by ddx/256 -- 1/256 of a cell crossing, the same size as the low-half rounding
+        ; below, and never the 256 -> 0 wrap that 256 - frac would hit at frac = 0.
+        ; Step signs come from the FINE angle's quarter (rqH): cos >= 0 in quarters 0 and 3,
+        ; sin >= 0 in quarters 0 and 1. (The coarse angle once disagreed at axis boundaries.)
+        lda rqH
+        beq cxpos
+        cmp #$03
+        beq cxpos
+        lda #$ff
+        sta stpX
+        lda #$ca                ; dex: the DDA's X step, patched rather than added -- see cxInc
+        sta cxInc
+        lda px                  ; -x: frac
+        jmp cxFr
+cxpos:  lda #$01
+        sta stpX
+        lda #$e8                ; inx
+        sta cxInc
+        lda px
+        eor #$ff                ; +x: 1 - frac (as 255 - frac)
+cxFr:   sta frc
         ; ---- ddxH == 1: THE HIGH HALF IS THE FRACTION ITSELF ----
         ; The delta is SCALE/|cos| with SCALE = 256, so its high byte is exactly 1 whenever
         ; |cos| > 0.5 -- and every ray has at least one such axis. fr * 1 needs no quarter-square
@@ -13439,7 +13466,7 @@ ${DOUBLE === 'sideMulRay' ? `        lda px                  ; DOUBLE=sideMulRay
         ldx ddxH
         dex
         beq cxm1
-        lda px                  ; --- high half: fr * mhi -> sdxH:s1 ---
+        lda frc                  ; --- high half: fr * mhi -> sdxH:s1 ---
         clc
         adc ddxH
         tax
@@ -13453,7 +13480,7 @@ cxmh0:   lda f0LoT,x
         tay
         lda f0HiT,x
         sta sdxH
-cxmh1:   lda px
+cxmh1:   lda frc
         sec
         sbc ddxH
         bcs cxmh2
@@ -13468,10 +13495,10 @@ cxmh2:   tax
         sbc f0HiT,x
         sta sdxH
         jmp cxmL
-cxm1:   lda px                  ; ddxH == 1: sdxH:sdx = 0:fr (X is 0 after the dex)
+cxm1:   lda frc                  ; ddxH == 1: sdxH:sdx = 0:fr (X is 0 after the dex)
         sta sdx
         stx sdxH
-cxmL:   lda px                  ; --- low half: only the HIGH byte survives the >>8 ---
+cxmL:   lda frc                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
         adc ddx
         tax
@@ -13481,7 +13508,7 @@ cxmL:   lda px                  ; --- low half: only the HIGH byte survives the 
         jmp cxml1
 cxml0:   lda f0HiT,x
         sta qhi
-cxml1:   lda px
+cxml1:   lda frc
         sec
         sbc ddx
         bcs cxml2
@@ -13506,32 +13533,6 @@ cxml2:   tax
         adc #$00
         sta sdxH
 ${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
-        ; STEP SIGNS COME FROM THE FINE ANGLE. FINEANG moved the deltas to rq but left these
-        ; on the coarse rang, and the two disagree at the axis boundaries -- the ray then steps
-        ; the wrong way while using a delta for a slightly different direction. cos >= 0 in
-        ; quarters 0 and 3, sin >= 0 in quarters 0 and 1, so rqH decides both, and posXT/posYT
-        ; (512 bytes holding two bits) are not needed at all.
-        lda rqH
-        beq cxpos
-        cmp #$03
-        beq cxpos
-        lda #$ff
-        sta stpX
-        lda #$ca                ; dex: the DDA's X step, patched rather than added -- see cxInc
-        sta cxInc
-        jmp cydo                ; negative: m IS the side distance, and the inlined
-                                ; multiply above now writes it straight into sdx
-cxpos:  lda #$01
-        sta stpX
-        lda #$e8                ; inx
-        sta cxInc
-        sec                     ; positive: sdx = ddx - m, in place
-        lda ddx
-        sbc sdx
-        sta sdx
-        lda ddxH
-        sbc sdxH
-        sta sdxH
 cydo:${DOUBLE === 'sideMulRay' ? `   lda py                  ; see the X axis: only the DOUBLE build needs fr/mlo/mhi
         sta fr
         lda ddy
@@ -13540,6 +13541,23 @@ cydo:${DOUBLE === 'sideMulRay' ? `   lda py                  ; see the X axis: o
         sta mhi
 ` : ''}
         ; --- sideMul inlined; reads py / ddyH / ddy directly, see the X axis above ---
+        ; ---- direction first, as on the X axis ----
+        lda rqH                 ; sin >= 0 in quarters 0 and 1
+        cmp #$02
+        bcc cypos
+        lda #$ff
+        sta stpY
+        lda lvlDimT             ; stepping -y is X += -MAPW, i.e. X -= MAPW (see cyStep)
+        sta cyStep+1
+        lda py                  ; -y: frac
+        jmp cyFr
+cypos:  lda #$01
+        sta stpY
+        lda lvlDimT+2           ; stepping +y is X += MAPW, i.e. X -= -MAPW (see cyStep)
+        sta cyStep+1
+        lda py
+        eor #$ff                ; +y: 1 - frac (as 255 - frac)
+cyFr:   sta frc
         ; ---- ddyH == 1: THE HIGH HALF IS THE FRACTION ITSELF ----
         ; The delta is SCALE/|sin| with SCALE = 256, so its high byte is exactly 1 whenever
         ; |sin| > 0.5 -- and every ray has at least one such axis. fr * 1 needs no quarter-square
@@ -13548,7 +13566,7 @@ cydo:${DOUBLE === 'sideMulRay' ? `   lda py                  ; see the X axis: o
         ldx ddyH
         dex
         beq cym1
-        lda py                  ; --- high half: fr * mhi -> sdyH:s1 ---
+        lda frc                  ; --- high half: fr * mhi -> sdyH:s1 ---
         clc
         adc ddyH
         tax
@@ -13562,7 +13580,7 @@ cymh0:   lda f0LoT,x
         tay
         lda f0HiT,x
         sta sdyH
-cymh1:   lda py
+cymh1:   lda frc
         sec
         sbc ddyH
         bcs cymh2
@@ -13577,10 +13595,10 @@ cymh2:   tax
         sbc f0HiT,x
         sta sdyH
         jmp cymL
-cym1:   lda py                  ; ddyH == 1: sdyH:sdy = 0:fr (X is 0 after the dex)
+cym1:   lda frc                  ; ddyH == 1: sdyH:sdy = 0:fr (X is 0 after the dex)
         sta sdy
         stx sdyH
-cymL:   lda py                  ; --- low half: only the HIGH byte survives the >>8 ---
+cymL:   lda frc                  ; --- low half: only the HIGH byte survives the >>8 ---
         clc
         adc ddy
         tax
@@ -13590,7 +13608,7 @@ cymL:   lda py                  ; --- low half: only the HIGH byte survives the 
         jmp cyml1
 cyml0:   lda f0HiT,x
         sta qhi
-cyml1:   lda py
+cyml1:   lda frc
         sec
         sbc ddy
         bcs cyml2
@@ -13615,26 +13633,6 @@ cyml2:   tax
         adc #$00
         sta sdyH
 ${DOUBLE === 'sideMulRay' ? '        jsr sideMul\n' : ''}
-        lda rqH                 ; sin >= 0 in quarters 0 and 1
-        cmp #$02
-        bcc cypos
-        lda #$ff
-        sta stpY
-        lda lvlDimT             ; stepping -y is X += -MAPW, i.e. X -= MAPW (see cyStep)
-        sta cyStep+1
-        jmp cySat               ; negative: m IS the side distance, so there is nothing to
-                                ; subtract -- but the saturation below still has to run
-cypos:  lda #$01
-        sta stpY
-        lda lvlDimT+2           ; stepping +y is X += MAPW, i.e. X -= -MAPW (see cyStep)
-        sta cyStep+1
-        sec                     ; positive: sdy = ddy - m, in place
-        lda ddy
-        sbc sdy
-        sta sdy
-        lda ddyH
-        sbc sdyH
-        sta sdyH
 cySat:  lda rqL                 ; a delta saturates ONLY at rqL == 0 (asserted at build time), so
         bne cydone              ;   every other ray skips both checks below
         ; Two things the old loop did on EVERY step that are only needed once, on the step
