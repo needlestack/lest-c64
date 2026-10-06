@@ -7464,6 +7464,30 @@ const sockVisT = visRows(SOCK.L.map((g, i) => drawnRows(sockGrid(i), SOCK.flagT[
 // the wall in front of it is exactly what the stamp exists to cut.
 const exitVisT = visRows(HOLE.L.map((g, i) => drawnRows(g.grid, HOLE.flagT[i])));
 const pedVisT = visRows(PED.L.map((g, i) => drawnRows(g.grid, PED.flagT[i])));
+// ---- ...and how far each rung's INKED pixels reach either side of ocol, for holeTail's probe ----
+// The probe used to box a hole-like by its sprite placement offset (xOffT), which is where the
+// sprite FRAME starts -- and a frame is mostly blank around the ellipse. So a disc several pixels
+// behind a wall still had its box reaching one column past the corner, the probe found that column
+// showing a wall the disc is in FRONT of, and the disc was drawn (the user: the north exit at X762
+// Y2D7 A8240 on the 2026-10-05 hub, "completely behind the wall by several pixels"). The box is now
+// the inked pixels: a grid cell is one logical column (multicolour), two with hmag (flag bit 2), and
+// grid column 0 sits at ocol - xOff.
+const inkBox = (grid, flag, xOff) => {
+  let cl = Infinity, cr = -1;
+  for (const row of grid) row.forEach((p, i) => { if (p) { cl = Math.min(cl, i); cr = Math.max(cr, i); } });
+  if (cr < 0) return [0, 0];
+  const m = (flag & 4) ? 2 : 1;
+  return [Math.max(0, xOff - cl * m), Math.max(0, (cr + 1) * m - 1 - xOff)];
+};
+const boxT = (Ls, gridOf, flagT, xOffT) => {
+  const b = Ls.map((g, i) => inkBox(gridOf(g, i), flagT[i], xOffT[i]));
+  b.forEach(([l, r], i) => { if (l > xOffT[i] || l + r > 3 * 24)
+    throw new Error(`hole-like box ${i}: ${l}/${r} against xOff ${xOffT[i]} -- the inked extent cannot exceed the frame`); });
+  return [b.map(x => x[0]), b.map(x => x[1])];
+};
+const [holeBoxL, holeBoxR] = boxT(HOLE.L, g => g.grid, HOLE.flagT, HOLE.xOffT);
+const [sockBoxL, sockBoxR] = boxT(SOCK.L, (g, i) => sockGrid(i), SOCK.flagT, SOCK.xOffT);
+const [pedBoxL, pedBoxR] = boxT(PED.L, g => g.grid, PED.flagT, PED.xOffT);
 // SOCKSTRIP=1 writes sock-rungs.png: the rungs as they are actually DRAWN, side by side.
 // Each grid cell is 2 hires pixels because the sprite is MULTICOLOUR, doubled again by hmag
 // (flag bit 2); each row is doubled by vmag (bit 3). So the tiles here are true on-screen sizes,
@@ -8927,8 +8951,11 @@ LVL_TABLES.push(['lvlMeT', [LVL]]);
 // part of a hole-like's disc while another sampled sightline to it is blocked -- with openable walls
 // shut AND open, OR'd, so it holds in either state. Stored sparse, [count, (cell, hole-like mask)...];
 // the gate looks the player's cell up once a frame and occStamp skips a hole-like whose bit is clear.
-// Exit holes are floor discs and never stamped (obOcc carries their fill colour), so only sockets and
-// pedestals are listed; orbs and angels move and keep the full path.
+// EXITS ARE LISTED TOO. This list was written when exits were never stamped -- a black pit melted
+// into the black wall -- but exitVisT made them stampable once level 4 coloured them, and holeSlot
+// gives a stampable exit no blanket priority. Leaving them off here meant a PARTLY hidden exit got
+// neither the stamp nor the priority: it drew straight over the wall in front of it (the user, the
+// north exit at X762 Y2D7 A8240 on the 2026-10-05 hub). Orbs and angels move and keep the full path.
 const STMP_LIST = (() => {
   
   const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
@@ -8948,8 +8975,7 @@ const STMP_LIST = (() => {
   const PS = [0.02, 0.21, 0.4, 0.6, 0.79, 0.98];
   const out = new Map();                                  // cell -> mask
   HOLELIKE.forEach((h, L) => {
-    if (h.exit) return;
-    const r = h.ped ? PEDR : HOLER / 2, ex = h.x + 0.5, ey = h.y + 0.5;
+    const r = h.ped ? PEDR : h.exit ? HOLER : HOLER / 2, ex = h.x + 0.5, ey = h.y + 0.5;
     const Q = [[ex, ey], ...[...Array(24)].map((_, k) => [ex + r * Math.cos(k * Math.PI / 12), ey + r * Math.sin(k * Math.PI / 12)]),
                ...[...Array(12)].map((_, k) => [ex + r / 2 * Math.cos(k * Math.PI / 6), ey + r / 2 * Math.sin(k * Math.PI / 6)])];
     for (let c = 0; c < MAPN; c++) {
@@ -8969,7 +8995,7 @@ const STMP_LIST = (() => {
   const cellsSorted = [...out.keys()].sort((a, b) => a - b);
   return [cellsSorted.length, ...cellsSorted.flatMap(c => [c, out.get(c)])];
 })();
-console.error(`  STMP level ${LVL}: ${STMP_LIST[0]} cell(s) where a pedestal/socket can be partly hidden (${STMP_LIST.length} bytes)`);
+console.error(`  STMP level ${LVL}: ${STMP_LIST[0]} cell(s) where a hole-like can be partly hidden (${STMP_LIST.length} bytes)`);
 LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT], ['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);   // ZONES: the hole-likes' zone masks replace it
 LVL_TABLES.push(['stmpT', STMP_LIST]);       // LAST: variable length -- see LVL_VARLEN
 const SLOT_OFF = {};
@@ -18396,7 +18422,7 @@ hlSk:   cmp hlKind
         tax
         lda hlVisL,x            ; where this kind's rung -> rows table lives, for occStamp's box
         sta hlVB+1              ;   -- low byte only, see hlVisL
-        ldy hlK5T,x             ; five entries a kind
+        ldy hlK5T,x             ; seven entries a kind
         lda hlSrcL,y
         sta hlRung+1
         lda hlSrcH,y
@@ -18416,11 +18442,17 @@ hlSk:   cmp hlKind
         lda hlSrcL+4,y
         sta hlXO1+1
         sta hlXO2+1
-        sta hlXO3+1
         lda hlSrcH+4,y
         sta hlXO1+2
         sta hlXO2+2
-        sta hlXO3+2
+        lda hlSrcL+5,y          ; the probe's box: the inked extent left and right of ocol
+        sta hlBXL+1
+        lda hlSrcH+5,y
+        sta hlBXL+2
+        lda hlSrcL+6,y
+        sta hlBXR+1
+        lda hlSrcH+6,y
+        sta hlBXR+2
 hlSdn:  rts
 
 ; ---- holeTail: the hole's half of orbOne, entered with ohgt and ocol already computed ----
@@ -18489,8 +18521,8 @@ hlNoShr:
         ; hlVst, three instructions down, which is the one window where both are true.
         txa
         pha                     ; occWalk clobbers X, and the rung indexes every table below
-hlXO3:  lda holeXOffT,x         ; PATCHED by hlSet alongside hlXO1/hlXO2 -- the SAME table they
-        sta ohtmp               ;   place the sprites from, so the box cannot disagree with them
+hlBXL:  lda holeBoxLT,x         ; PATCHED by hlSet: how far this rung's INKED pixels reach left of
+        sta ohtmp               ;   ocol -- not the sprite frame (see inkBox in the build)
         lda ocolN
         bne hlOcSk              ; centre off the left edge; the column tests below decide
         lda ocol
@@ -18501,9 +18533,11 @@ hlXO3:  lda holeXOffT,x         ; PATCHED by hlSet alongside hlXO1/hlXO2 -- the 
         bcs hlPbL
         lda #$00                ; the box runs off the left edge
 hlPbL:  sta ocl2
+hlBXR:  lda holeBoxRT,x         ; PATCHED by hlSet: ...and right of it. X is still the rung (pha left it)
+        sta ohtmp
         lda ocol
         clc
-        adc ohtmp               ; ocol <= ${NLOG - 1} and the half-width <= ${HL_HALFMAX}, so no carry past 255
+        adc ohtmp               ; ocol <= ${NLOG - 1} and the extent is under a frame (72), so no carry past 255
         cmp #${hx(NLOG)}
         bcc hlPbR
         lda #${hx(NLOG - 1)}    ; ...or off the right
@@ -18697,7 +18731,7 @@ ohNoPri:lda ohP
         ; socket clipped at a cell edge by the corner in front of it, instead of the whole thing
         ; blinking out the moment its CENTRE column goes behind a wall.
         lda ocl2
-        beq hsNoSt              ; 0: an exit hole, which is not stamped
+        beq hsNoSt              ; 0: do not stamp (every kind has a rows table now, exits included)
         sta obV,x               ; the rows this slice covers -- occStamp's box, straight out of
                                 ;   the slot, where an orb's comes from orbAnchT by variant
         lda #$80
@@ -18950,6 +18984,8 @@ ${SPRITES ? `; ================= orb tables =================
         ; the labels unconditionally, and an empty !byte assembles as "bad number: $".
 pedPtrT: !byte ${PED.slotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',') || '0'}
 pedXOffT: !byte ${PED.xOffT.join(',') || '0'}
+pedBoxLT: !byte ${pedBoxL.join(',') || '0'}
+pedBoxRT: !byte ${pedBoxR.join(',') || '0'}
 pedYBaseT: !byte ${PED.yBaseT.join(',') || '0'}
 pedFlagT: !byte ${PED.flagT.join(',') || '0'}
 pedHT: !byte ${PED.hT.join(',') || '0'}   ; DESCENDING, scanned by hlRungP
@@ -18993,6 +19029,8 @@ hlSeat: !fill ${NHOLE}, 0
 ; two-sprite rung needs one pointer and an increment.
 holePtrT: !byte ${holeSlotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',')}
 holeXOffT: !byte ${holeXOffT.join(',')}
+holeBoxLT: !byte ${holeBoxL.join(',')}
+holeBoxRT: !byte ${holeBoxR.join(',')}
 holeYBaseT: !byte ${holeYBaseT.join(',')}
 holeFlagT: !byte ${holeFlagT.join(',')}
         ; ---- the socket's ladder: same tables, half the radius ----
@@ -19000,6 +19038,8 @@ holeFlagT: !byte ${holeFlagT.join(',')}
         ; socket has ${SOCK.L.length}, so hlRungS scans and the page stays spent on something else.
 sockPtrT: !byte ${SOCK.slotT.map(s => (((SOCKBASE) - VBANK) >> 6) + s).join(',')}
 sockXOffT: !byte ${SOCK.xOffT.join(',')}
+sockBoxLT: !byte ${sockBoxL.join(',')}
+sockBoxRT: !byte ${sockBoxR.join(',')}
 sockYBaseT: !byte ${SOCK.yBaseT.join(',')}
 sockFlagT: !byte ${SOCK.flagT.join(',')}
 sockHT: !byte ${SOCK.hT.join(',')}   ; DESCENDING h thresholds, scanned by hlRungS
@@ -19634,16 +19674,16 @@ arcOvSpT: !byte ${[...Array(ARC_OVERLAP)].map((_, n) => {
 ; Five kinds now: exit, socket empty, socket seated, pedestal empty, pedestal seated. The two
 ; pedestal rows are IDENTICAL -- seating changes only hlFill, not the shape -- and they are both
 ; here so that "seated is the next kind up" stays one adc #1 in hlSet for every seatable thing.
-hlK5T:  !byte 0,5,10
+hlK5T:  !byte 0,7,14             ; seven entries a kind (five + the probe box's two)
         ; The sixth operand -- this kind's rung -> rows table -- is patched from hlVisL, which
         ; sits with the tables themselves; this block has four spare bytes. Low byte only: they
         ; share a page, and the build checks that they still do.
-hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT
-        !byte <hlRungS,<sockYBaseT,<sockPtrT,<sockFlagT,<sockXOffT
-        !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT
-hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT
-        !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT
-        !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT
+hlSrcL: !byte <hlRungH,<holeYBaseT,<holePtrT,<holeFlagT,<holeXOffT,<holeBoxLT,<holeBoxRT
+        !byte <hlRungS,<sockYBaseT,<sockPtrT,<sockFlagT,<sockXOffT,<sockBoxLT,<sockBoxRT
+        !byte <hlRungP,<pedYBaseT,<pedPtrT,<pedFlagT,<pedXOffT,<pedBoxLT,<pedBoxRT
+hlSrcH: !byte >hlRungH,>holeYBaseT,>holePtrT,>holeFlagT,>holeXOffT,>holeBoxLT,>holeBoxRT
+        !byte >hlRungS,>sockYBaseT,>sockPtrT,>sockFlagT,>sockXOffT,>sockBoxLT,>sockBoxRT
+        !byte >hlRungP,>pedYBaseT,>pedPtrT,>pedFlagT,>pedXOffT,>pedBoxLT,>pedBoxRT
 ${ANYFLOORDK ? `
 ; ---- fdGlyph: carry the floor's dither THROUGH the ramps and steps ----
 ; Dithering BLANK alone leaves an 8-pixel stairstep along every wall base: the cell where floor
