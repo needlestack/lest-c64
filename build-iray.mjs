@@ -5716,7 +5716,29 @@ Object.assign(RUNTIME_BUFS, {
   // The renderer's per-column scratch. These were the tool's own blind spot: 1,024 bytes counted
   // as five, which flattered a packing report by four pages. sideT/idT/colH are 160 entries on a
   // page each; the two stacks are half-pages.
-  sideT: 256, idT: 256, colH: 256, stackLT: 128, stackRT: 128,
+  sideT: 256, idT: 256, colH: COLH_N, stackLT: 128, stackRT: 128,   // colH: 160 columns, wherever it lives
+  // ---- formerly only in SIZES_T, a second size map that RUNTIME_BUFS shadowed ----
+  // SIZES_T listed these PLUS stale copies of entries above (faceIdT/remLoT 256 against NLOG,
+  // remHiT 256 against 176), and spread RUNTIME_BUFS over them -- twice -- so the copies were dead
+  // and the extras invisible to everything that reads RUNTIME_BUFS (reserveOf, the low-RAM report,
+  // PAGEFIT). One map now; the overlap guard and iray.bufsizes.json read this.
+  cqLo: 64, cqHi: 64, cqCol: 64,
+  // eight sprite slots each. Without these the checker treats them as ONE byte and happily
+  // lets a new variable land inside obX -- which is exactly what happened to the fall's
+  // arc scratch, and it took a freeze to notice.
+  obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
+  obL: 8, obR: 8, obBL: 8, obBR: 8,
+  pfNum: 34,                       // PROFN: the same seventeen phases, x 2
+  flogB: 2816,                     // FRAMELOG: $7100-$7bff, 704 x 4
+  twPose: 252,                     // TOURPOSE: 42 steps x 6
+  // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
+  // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
+  // player's projected X overwrote the death trigger's reference angle every frame and you
+  // died the instant an angel reached you, standing still. Anything referenced as name+1
+  // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
+  opx: 2, opy: 2,
+  osSrc: 2, osTmp: 2,              // OCCSYN pointer and pair
+  rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
 });
 // ---- the leash is PER ANGEL (2026-09-15) ----
 // It was one bit per cell for the whole level, so every angel shared one territory, and "the
@@ -25442,38 +25464,6 @@ const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 2
     // had the same requirement and never stated it. Both were page-aligned by luck at $5000 and
     // $5300; at any other offset every row of both snapshots lands skewed by the low byte.
     ...(VSLOTS ? {} : { fallSnapD: 256 }), fallSnapS: 256 };
-const SIZES_T = {
-    stackLT: 128, stackRT: 128, sideT: 256, idT: 256, colH: 256,
-    faceIdT: 256, remLoT: 256, remHiT: 256,
-    cwA: 40, cwB: 40, cbA: 40, cbB: 40, cstepT: 40, seamT: 40,
-    bndT: NBND, pvBnd: NBND, pvAng: NBND, pvRcp: NBND,
-    cqLo: 64, cqHi: 64, cqCol: 64,
-    // eight sprite slots each. Without these the checker treats them as ONE byte and happily
-    // lets a new variable land inside obX -- which is exactly what happened to the fall's
-    // arc scratch, and it took a freeze to notice.
-    obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
-    obL: 8, obR: 8, obBL: 8, obBR: 8,
-    pfNum: 34,                       // PROFN: the same seventeen phases, x 2
-    flogB: 2816,                     // FRAMELOG: $7100-$7bff, 704 x 4
-    twPose: 252,                     // TOURPOSE: 42 steps x 6
-    pfAcc: 51,                       // SEVENTEEN phases x 3. It said 13 while the code used 15,
-                                     //   so two phases' worth of room was undeclared and the
-                                     //   next variable placed there would have collided.
-    // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
-    // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
-    // player's projected X overwrote the death trigger's reference angle every frame and you
-    // died the instant an angel reached you, standing still. Anything referenced as name+1
-    // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
-    ...RUNTIME_BUFS,
-    // These five come from RUNTIME_BUFS now rather than being written twice: the free-space
-    // accounting and this overlap check disagreeing is exactly how a table gets reserved
-    // one way and packed the other. runPlaneT/runFaceT were 256 here and are NRUN=65 in
-    // truth, which is what let them be packed onto one page.
-    ...RUNTIME_BUFS,
-    opx: 2, opy: 2,
-    osSrc: 2, osTmp: 2,   // OCCSYN pointer and pair
-    rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
-  };
 writeFileSync('./iray.aligned.json', JSON.stringify(ALIGNED_T));
 // HOT LOOPS: a taken branch whose target is on another page costs a cycle, and a loop that
 // straddles a page boundary pays it on EVERY iteration -- castRay's DDA loop did, for 89 cy/frame,
@@ -25483,7 +25473,7 @@ writeFileSync('./iray.hotloops.json', JSON.stringify(['cdda', 'sdWl']));
 writeFileSync('./iray.bufsizes.json', JSON.stringify(Object.fromEntries(
   [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
     .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
-    .filter(([n]) => SIZES_T[n] !== undefined).map(([n]) => [n, SIZES_T[n]]))));
+    .filter(([n]) => RUNTIME_BUFS[n] !== undefined).map(([n]) => [n, RUNTIME_BUFS[n]]))));
 
 // ---- VSLOTS: label every engine site that names a per-level table ----
 // An instruction whose operand names a slot table gets a label of its own, and vsLoT/vsHiT list
@@ -26323,7 +26313,7 @@ try {
     // Sizes have to be declared because an equate carries none. Only multi-byte arrays need an
     // entry; everything else is assumed to be one byte, which is the common case and the safe
     // default (a missed entry under-reports, it never invents an overlap).
-    const SIZES = SIZES_T;
+    const SIZES = RUNTIME_BUFS;
     {
       const all = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
         // $0200, not $0400. The threshold was $0400 because everything below it was BASIC's and
