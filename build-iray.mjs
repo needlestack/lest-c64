@@ -18878,6 +18878,17 @@ hsC1:   sta obR,x
 hsC2:   lda obR,x
         cmp obL,x
         bcc hsDrop              ; no inked column in this slice at all: no stamp claim for it
+        ; ---- ...and the same range in CELLS, for oSDeseam ----
+        ; occStamp de-seams any slot whose priority bit it set, over obCL..obCR -- which only orbOne
+        ; used to write. A stamped hole-like slot (they count down from 8) therefore de-seamed
+        ; whatever cell range an ORB last left in that slot. obR >= obL here, so the cells are ordered.
+        lsr
+        lsr
+        sta obCR,x
+        lda obL,x
+        lsr
+        lsr
+        sta obCL,x
         lda obL,x               ; and the two edge cells, for the partial-cell glyphs
         and #$03
         tay
