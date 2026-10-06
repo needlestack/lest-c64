@@ -25,11 +25,10 @@
 // timing -- compare render routines, not the grand total.
 //   node tools/vprof.mjs "CHAIN=1 SPINF=1 BENCHF=2000 ANGFREEZE=1 NOHUD=1" --until benchEnd
 // Hard cap: the emulator is killed after --secs + 60 s whatever happens (one-minute rule).
-import { execSync, spawn } from 'child_process';
-import { readFileSync, writeFileSync, mkdtempSync, unlinkSync, existsSync } from 'fs';
-import net from 'net';
+import { writeFileSync, mkdtempSync, unlinkSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ROOT, buildDisk, portHeld, launch, LAUNCH_FLAGS, textMonitor, session } from './vice.mjs';
 
 const args = process.argv.slice(2);
 const ENV = args[0] ?? '';
@@ -46,138 +45,84 @@ const UNTIL = opt('--until', '');
 const DUMP = opt('--dump', '');
 // --shot file.png (with --until): a PNG of the parked frame, for eyeballing a change that is not byte-identical.
 const SHOT = opt('--shot', '');
-const ROOT = new URL('..', import.meta.url).pathname;
-const X64 = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
 const PORT = 6510;
 
 // ---- build to its own disk, so latest.d64 is never touched ----
-const env = { ...process.env, D64: 'zz-vprof.d64' };
-for (const kv of ENV.split(/\s+/).filter(Boolean)) { const [k, v] = kv.split('='); env[k] = v ?? '1'; }
-const b = execSync('node build-iray.mjs 2>&1', { cwd: ROOT, env }).toString();
+const { out: b, syms: SYMS, addrOf } = buildDisk(ENV, 'zz-vprof.d64');
 const ok = b.split('\n').find(l => l.startsWith('ok:'));
-if (!ok) { console.error(b.split('\n').slice(-15).join('\n')); process.exit(1); }
-const SYMS = JSON.parse(readFileSync(join(ROOT, 'iray.syms.json'), 'utf8'));
-const addrOf = n => { if (!(n in SYMS)) throw new Error(`no label ${n}`); return SYMS[n]; };
-// VICE label file: one `al C:addr .name` per label. Several names on one address: keep them all,
-// VICE shows the first, which is fine.
+if (!SYMS) { console.error('this build wrote no iray.syms.json'); process.exit(1); }
+// VICE label file: one `al C:addr .name` per label, so the profile names routines.
 const tmp = mkdtempSync(join(tmpdir(), 'vprof-'));
 const lbl = join(tmp, 'iray.lbl');
 writeFileSync(lbl, Object.entries(SYMS).filter(([n, a]) => typeof a === 'number' && /^[A-Za-z_]\w*$/.test(n))
   .map(([n, a]) => `al C:${a.toString(16).padStart(4, '0')} .${n}`).join('\n') + '\n');
 
-if (execSync(`lsof -nP -iTCP:${PORT} -sTCP:LISTEN -t 2>/dev/null || true`).toString().trim()) {
-  console.error(`port ${PORT} is held -- a leaked emulator? pkill -f x64sc`); process.exit(2);
-}
-const cfg = join(tmp, 'vice.cfg'); writeFileSync(cfg, '');
-const vice = spawn(X64, ['-ntsc', '-config', cfg, '+minimized', '-warp', '-drive8truedrive', '+virtualdev8',
-  '-autostart-handle-tde', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  '-moncommands', lbl, '-autostart', join(ROOT, 'zz-vprof.d64')], { stdio: 'ignore', detached: true });
-// bin/x64sc is a shell WRAPPER that starts the real emulator as its child, so killing the spawned
-// pid leaves the emulator running. detached: true makes the wrapper a process-group leader, and
-// killVice() signals the whole group -- this run's emulator and nothing else (never a blanket
-// pkill, which would also close a VICE the user has open).
-const killVice = () => { try { process.kill(-vice.pid, 'SIGKILL'); } catch {} };
-const killer = setTimeout(() => { killVice(); console.error('HARD CAP: killed'); process.exit(3); }, (SECS + 60) * 1000);
-
-// ---- the text monitor: connect (which stops the CPU), run commands, `x` resumes ----
+const held = portHeld(PORT);
+if (held) { console.error(`port ${PORT} is held by pid ${held} -- kill that process (not every x64sc)`); process.exit(2); }
+// launch() owns the emulator: its whole process group dies on exit, Ctrl-C, an error, or the cap.
+// The cap covers the whole run: --until mode waits for an event, not a wall-clock window.
+const CAP = (UNTIL ? 240 : SECS + 60) * 1000;
+launch([...LAUNCH_FLAGS, '-warp', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
+  '-moncommands', lbl, '-autostart', join(ROOT, 'zz-vprof.d64')], { hardCapMs: CAP, label: 'vprof' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function session(cmds) {
-  // VICE's text monitor sends nothing on connect. The FIRST reply is "(C:$xxxx) <output>(C:$yyyy) "
-  // -- a prompt, the output, a prompt -- and every later reply on the connection only the output
-  // and its closing prompt. Connecting stops the CPU; the final `x` resumes it.
-  const PR = /\(C:\$[0-9a-f]{4}\) /g;
-  for (let tries = 0; ; tries++) {
-    try {
-      return await new Promise((res, rej) => {
-        const s = net.connect(PORT, '127.0.0.1');
-        let buf = '', out = [], i = 0;
-        const send = () => {
-          if (i < cmds.length) { buf = ''; s.write(cmds[i++] + '\n'); }
-          else { s.write('x\n'); setTimeout(() => { s.end(); res(out); }, 50); }
-        };
-        s.on('connect', send);
-        s.on('data', d => {
-          buf += d.toString();
-          const need = i === 1 ? 2 : 1;
-          if ((buf.match(PR) || []).length >= need && /\(C:\$[0-9a-f]{4}\) $/.test(buf)) {
-            out.push(buf.replace(/^\(C:\$[0-9a-f]{4}\) /, '').replace(/\(C:\$[0-9a-f]{4}\) $/, ''));
-            send();
-          }
-        });
-        s.on('error', rej);
-        setTimeout(() => rej(new Error('monitor timeout')), 60000);
-      });
-    } catch (e) { if (tries > 60) throw e; await sleep(500); }
-  }
-}
-const rd16 = async a => {
-  const [o] = await session([`m ${a.toString(16)} ${(a + 1).toString(16)}`]);
-  const m = /:([0-9a-f]{4})\s+([0-9a-f]{2})\s+([0-9a-f]{2})/i.exec(o);
-  return m ? parseInt(m[2], 16) | (parseInt(m[3], 16) << 8) : NaN;
-};
+const strip = o => o.replace(/^\(C:\$[0-9a-f]{4}\) /, '').replace(/\(C:\$[0-9a-f]{4}\) $/, '');
+const rd16 = async (m, a) => { const [lo, hi] = await m.mem(a, 2); return lo | (hi << 8); };
+const flatNames = flat => [...flat.matchAll(/^\s*[\d,]+\s+[\d.na]+%\s+([\d,]+)\s+[\d.na]+%\s+(\S+)/gm)]
+  .map(m => m[2]).filter(n => n !== 'ROOT');
 
-(async () => {
-  await sleep(1500);
-  const FC = addrOf('frameCnt');
-  if (UNTIL) {
-    const at = addrOf(UNTIL);
-    await session(['prof on']);
-    let pc = -1;
-    for (let k = 0; k < 2000; k++) {
-      const [o] = await session(['r']);
-      const m = /\.;([0-9a-f]{4})/i.exec(o); pc = m ? parseInt(m[1], 16) : -1;
-      if (pc === at) break;
-      await sleep(300);
-    }
-    if (pc !== at) throw new Error(`never reached ${UNTIL}`);
-    const [flat] = await session(['prof off', `prof flat ${TOP}`]).then(o => [o[1]]);
-    const frames = await rd16(addrOf('iterLo') ?? 0x29);
-    if (SHOT) {
-      try { unlinkSync(SHOT); } catch {}
-      await session([`screenshot "${SHOT}" 2`]);
-      for (let k = 0; k < 20 && !existsSync(SHOT); k++) await sleep(100);
-      if (!existsSync(SHOT)) throw new Error('screenshot wrote nothing');
-    }
-    if (DUMP) {
-      if (!OUT) throw new Error('--dump needs --out');
-      for (const r of DUMP.split(',')) {
-        const [lo, hi] = r.split('-');
-        const f = `${OUT}.${lo}.bin`; try { unlinkSync(f); } catch {}
-        await session([`bsave "${f}" 0 ${lo} ${hi}`]);
-        if (!existsSync(f)) throw new Error(`bsave wrote nothing for ${r}`);
-      }
-    }
-    const names = [...flat.matchAll(/^\s*[\d,]+\s+[\d.na]+%\s+([\d,]+)\s+[\d.na]+%\s+(\S+)/gm)].map(m => m[2]).filter(n => n !== 'ROOT');
-    const dis = [];
-    for (const n of names.slice(0, NDIS)) { const [o] = await session([`prof disass ${n}`]); dis.push(`==== ${n}\n${o}`); }
-    clearTimeout(killer); killVice();
-    const text = `vprof: ${ENV}\nwindow: boot to ${UNTIL}, ${frames} rendered frames; ${ok}\n\n${flat}\n${dis.join('\n')}`;
-    if (OUT) writeFileSync(OUT, text);
-    console.log(text);
-    process.exit(0);
+await sleep(1500);
+if (UNTIL) {
+  // EVENT-DRIVEN: a checkpoint at UNTIL stops the CPU exactly there. (This used to poll the PC every
+  // 300 ms, which also let the parked loop run on into the profile.)
+  const at = addrOf(UNTIL);
+  const m = await textMonitor(PORT);
+  await m.cmd('prof on');
+  await m.cmd(`break ${at.toString(16)}`);
+  const stop = await m.cmd('x');
+  if (m.pcOf(stop) !== at) throw new Error(`stopped at $${m.pcOf(stop).toString(16)}, not ${UNTIL}`);
+  await m.cmd('prof off');
+  const flat = strip(await m.cmd(`prof flat ${TOP}`));
+  const frames = await rd16(m, addrOf('iterLo'));
+  if (SHOT) {
+    try { unlinkSync(SHOT); } catch {}
+    await m.cmd(`screenshot "${SHOT}" 2`);
+    for (let k = 0; k < 20 && !existsSync(SHOT); k++) await sleep(100);
+    if (!existsSync(SHOT)) throw new Error('screenshot wrote nothing');
   }
-  // wait for the game: frameCnt past T0 (it counts 60ths from boot)
-  let fc = 0;
-  for (let k = 0; k < 400; k++) { fc = await rd16(FC); if (fc >= T0) break; await sleep(250); }
-  if (!(fc >= T0)) throw new Error(`frameCnt never reached ${T0} (last ${fc})`);
-  const RF = SYMS.iterLo ?? 0x29;        // iterLo/iterHi: +1 per rendered frame (the main loop's inc)
-  const t0 = await rd16(FC), r0 = RF ? await rd16(RF) : 0;
-  await session(['prof on']);
-  await sleep(SECS * 1000);
-  const [flat] = await session(['prof off', `prof flat ${TOP}`]).then(o => [o[1]]);
-  const t1 = await rd16(FC), r1 = RF ? await rd16(RF) : 0;
-  const ticks = (t1 - t0) & 0xffff, frames = RF ? (r1 - r0) & 0xffff : null;
-  // per-instruction breakdowns of the heaviest self-time routines
-  const names = [...flat.matchAll(/^\s*[\d,]+\s+[\d.na]+%\s+([\d,]+)\s+[\d.na]+%\s+(\S+)/gm)].map(m => m[2]).filter(n => n !== 'ROOT');
+  if (DUMP) {
+    if (!OUT) throw new Error('--dump needs --out');
+    for (const r of DUMP.split(',')) {
+      const [lo, hi] = r.split('-');
+      const f = `${OUT}.${lo}.bin`; try { unlinkSync(f); } catch {}
+      await m.cmd(`bsave "${f}" 0 ${lo} ${hi}`);
+      if (!existsSync(f)) throw new Error(`bsave wrote nothing for ${r}`);
+    }
+  }
   const dis = [];
-  for (const n of names.slice(0, NDIS)) {
-    const [o] = await session([`prof disass ${n}`]);
-    dis.push(`==== ${n}\n${o}`);
-  }
-  clearTimeout(killer); killVice();
-  const head = `vprof: ${ENV}\nwindow: ${ticks} ticks (60ths)${frames != null ? `, ${frames} rendered frames` : ''}; ${ok}\n`;
-  const text = head + '\n' + flat + '\n' + dis.join('\n');
+  for (const n of flatNames(flat).slice(0, NDIS)) dis.push(`==== ${n}\n${strip(await m.cmd(`prof disass ${n}`))}`);
+  m.close();
+  const text = `vprof: ${ENV}\nwindow: boot to ${UNTIL}, ${frames} rendered frames; ${ok}\n\n${flat}\n${dis.join('\n')}`;
   if (OUT) writeFileSync(OUT, text);
   console.log(text);
   process.exit(0);
-})().catch(e => { console.error(e.message); killVice(); process.exit(1); });
+}
+// ---- timed window: wait for frameCnt to pass T0, profile SECS of wall clock ----
+const FC = addrOf('frameCnt'), RF = addrOf('iterLo');
+const read16 = async a => { const [o] = await session(PORT, [`m ${a.toString(16)} ${(a + 1).toString(16)}`]);
+  const q = /:([0-9a-f]{4})\s+([0-9a-f]{2})\s+([0-9a-f]{2})/i.exec(o); return q ? parseInt(q[2], 16) | (parseInt(q[3], 16) << 8) : NaN; };
+let fc = 0;
+for (let k = 0; k < 400; k++) { fc = await read16(FC); if (fc >= T0) break; await sleep(250); }
+if (!(fc >= T0)) throw new Error(`frameCnt never reached ${T0} (last ${fc})`);
+const t0 = await read16(FC), r0 = await read16(RF);
+await session(PORT, ['prof on']);
+await sleep(SECS * 1000);
+const [, flatRaw] = await session(PORT, ['prof off', `prof flat ${TOP}`]);
+const flat = strip(flatRaw);
+const t1 = await read16(FC), r1 = await read16(RF);
+const ticks = (t1 - t0) & 0xffff, frames = (r1 - r0) & 0xffff;
+const dis = [];
+for (const n of flatNames(flat).slice(0, NDIS)) { const [o] = await session(PORT, [`prof disass ${n}`]); dis.push(`==== ${n}\n${strip(o)}`); }
+const text = `vprof: ${ENV}\nwindow: ${ticks} ticks (60ths), ${frames} rendered frames; ${ok}\n\n${flat}\n${dis.join('\n')}`;
+if (OUT) writeFileSync(OUT, text);
+console.log(text);
+process.exit(0);

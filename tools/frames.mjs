@@ -13,56 +13,28 @@
 // saves the displayed buffer's 1000 visible bytes; the run ends at benchEnd (BENCHF).
 // Output: dir/frames.bin (n x 1000 bytes) and a report of A-B-A flips per frame and per cell.
 // --cmp: also report flips present in this run and not in the other (same frames, cell by cell).
-import { execSync, spawn } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync, unlinkSync } from 'fs';
-import net from 'net'; import { tmpdir } from 'os'; import { join } from 'path';
+import { tmpdir } from 'os'; import { join } from 'path';
+import { ROOT, buildDisk, portHeld, launch, LAUNCH_FLAGS, textMonitor } from './vice.mjs';
 
 const args = process.argv.slice(2), ENV = args[0] ?? '';
 const opt = (k, d) => { const i = args.indexOf(k); return i < 0 ? d : args[i + 1]; };
 const OUT = opt('--out', ''), CMP = opt('--cmp', '');
 if (!OUT) { console.error('--out dir is required'); process.exit(1); }
 mkdirSync(OUT, { recursive: true });
-const ROOT = new URL('..', import.meta.url).pathname;
-const X64 = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc', PORT = 6510;
-
-const env = { ...process.env, D64: 'zz-frames.d64' };
-for (const kv of ENV.split(/\s+/).filter(Boolean)) { const [k, v] = kv.split('='); env[k] = v ?? '1'; }
-if (!env.BENCHF) { console.error('needs a fixed workload: BENCHF=n (with SPINF=1 or WALKF=1)'); process.exit(1); }
-const b = execSync('node build-iray.mjs 2>&1', { cwd: ROOT, env }).toString();
-if (!b.split('\n').some(l => l.startsWith('ok:'))) { console.error(b.split('\n').slice(-15).join('\n')); process.exit(1); }
-const SYMS = JSON.parse(readFileSync(join(ROOT, 'iray.syms.json'), 'utf8'));
-const at = n => { if (!(n in SYMS)) throw new Error(`no label ${n}`); return SYMS[n]; };
-const MNEXT = at('mnext'), END = at('benchEnd'), BASEHI = at('baseHi');
-
-if (execSync(`lsof -nP -iTCP:${PORT} -sTCP:LISTEN -t 2>/dev/null || true`).toString().trim()) {
-  console.error(`port ${PORT} is held -- pkill -f x64sc`); process.exit(2); }
-const tmp = mkdtempSync(join(tmpdir(), 'frames-')), cfg = join(tmp, 'vice.cfg'); writeFileSync(cfg, '');
-const vice = spawn(X64, ['-ntsc', '-config', cfg, '+minimized', '-warp', '-drive8truedrive', '+virtualdev8',
-  '-autostart-handle-tde', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  '-autostart', join(ROOT, 'zz-frames.d64')], { stdio: 'ignore', detached: true });
-// bin/x64sc is a shell WRAPPER that starts the real emulator as its child, so killing the spawned
-// pid leaves the emulator running. detached: true makes the wrapper a process-group leader, and
-// killVice() signals the whole group -- this run's emulator and nothing else (never a blanket
-// pkill, which would also close a VICE the user has open).
-const killVice = () => { try { process.kill(-vice.pid, 'SIGKILL'); } catch {} };
-const HARD = setTimeout(() => { killVice(); console.error('HARD CAP: killed'); process.exit(3); }, 240000);
+const PORT = 6510;
+if (!/\bBENCHF=/.test(ENV)) { console.error('needs a fixed workload: BENCHF=n (with SPINF=1 or WALKF=1)'); process.exit(1); }
+const { addrOf } = buildDisk(ENV, 'zz-frames.d64');
+const MNEXT = addrOf('mnext'), END = addrOf('benchEnd'), BASEHI = addrOf('baseHi');
+const held = portHeld(PORT);
+if (held) { console.error(`port ${PORT} is held by pid ${held} -- kill that process (not every x64sc)`); process.exit(2); }
+// launch() owns the emulator's lifetime: its whole process group dies on exit, Ctrl-C, an error, or the cap
+launch([...LAUNCH_FLAGS, '-warp', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
+  '-autostart', join(ROOT, 'zz-frames.d64')], { hardCapMs: 240000, label: 'frames' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// ONE persistent connection. Connecting stops the CPU; `x` resumes it; a checkpoint hit stops it
-// again and VICE writes the stop message and a fresh prompt to the same socket.
+const tmp = mkdtempSync(join(tmpdir(), 'frames-'));
+const mon = await textMonitor(PORT), cmd = mon.cmd;
 const PR = /\(C:\$([0-9a-f]{4})\) $/;
-let sock, buf = '', waiter = null;
-const until = () => new Promise((res, rej) => {
-  const t = setTimeout(() => rej(new Error('monitor timeout')), 60000);
-  waiter = () => { const m = PR.exec(buf); if (m) { clearTimeout(t); const o = buf; buf = ''; waiter = null; res(o); } };
-  waiter();
-});
-const cmd = async c => { buf = ''; sock.write(c + '\n'); return until(); };
-for (let k = 0; ; k++) {
-  try { await new Promise((res, rej) => { sock = net.connect(PORT, '127.0.0.1', res); sock.on('error', rej); }); break; }
-  catch { if (k > 120) throw new Error('no monitor'); await sleep(250); }
-}
-sock.on('data', d => { buf += d.toString(); if (waiter) waiter(); });
 // (VICE's text monitor sends nothing on connect: the first prompt arrives with the first reply)
 await cmd(`break ${MNEXT.toString(16)}`);
 await cmd(`break ${END.toString(16)}`);
@@ -81,7 +53,7 @@ for (;;) {
   for (let k = 0; k < 50 && !existsSync(tmpf); k++) await sleep(20);
   frames.push(readFileSync(tmpf));
 }
-clearTimeout(HARD); try { sock.destroy(); } catch {} killVice();
+mon.close();
 writeFileSync(join(OUT, 'frames.bin'), Buffer.concat(frames));
 
 // ---- A-B-A: a cell that changes and changes straight back ----

@@ -20,6 +20,7 @@
 import { execSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import net from 'net';
+import { portHeld, launch, LAUNCH_FLAGS } from './tools/vice.mjs';
 
 const VICE = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
 const DISK = './latest.d64';
@@ -150,34 +151,23 @@ try { SYMS = JSON.parse(readFileSync('./iray.syms.json', 'utf8')); } catch { /* 
 if (!existsSync(DISK)) { console.error('no latest.d64'); process.exit(1); }
 
 // ---- run it, never touching an emulator that was already open ----
-// ---- REFUSE TO START IF THE MONITOR PORT IS TAKEN ----
-// A leaked emulator from an interrupted run keeps 6502 bound. VICE then prints
-//   vice_network_server(): bind() failed: Address already in use
-// into its own log, starts anyway WITHOUT a monitor, and this script attaches to nothing and
-// grinds for the full 90-second liveness deadline before reporting "NOT RUNNING" -- which reads
-// exactly like a jammed program and has sent more than one debugging session chasing a bug in
-// the build. The port is the whole protocol, so not having it is fatal, not a warning.
-{
-  // Wait a moment first: a probe that has just finished may still be tearing its emulator down,
-  // and the port lingers for a beat after the process is told to go. Only a port still held after
-  // that is a leak rather than a handover.
-  const portHeld = () => execSync('lsof -nP -iTCP:6502 -sTCP:LISTEN -t 2>/dev/null || true').toString().trim();
-  let held = portHeld();
-  for (let i = 0; held && i < 10; i++) { execSync('sleep 0.5'); held = portHeld(); }
-  if (held) {
-    const pids = held.split('\n').join(' ');
-    console.error(`port 6502 is already bound (pid ${pids}) -- a leaked emulator from an earlier ` +
-      `run.\nVICE would start without a monitor and this would wait 90s for a machine it can ` +
-      `never see.\nkill it first:   kill ${pids}`);
-    process.exit(2);
-  }
-}
-const before = new Set(execSync('pgrep -f x64sc || true').toString().split('\n').filter(Boolean));
+// A held monitor port makes VICE print "bind() failed: Address already in use" into its own log
+// and start anyway WITHOUT a monitor; this script then attaches to nothing and grinds out the
+// 90-second liveness deadline, which reads exactly like a jammed program. So a held port is fatal
+// (checked below, on the port this run actually uses).
 // A PRIVATE monitor port, not the default 6502. Another x64sc holding 6502 -- the user's own
 // window, or a leaked run of this script -- makes the new instance's bind() fail while the client
 // still connects happily to the OLD emulator. Every read then comes from a machine running some
 // other disk, and nothing about it looks wrong. One leaked instance cost an afternoon of that.
 const PORT = 6600 + (process.pid % 300);
+// REFUSE TO START IF THAT PORT IS TAKEN -- it used to check 6502, which is not the port it then used.
+// A held port means VICE would start without a monitor and this would wait out the liveness deadline
+// for a machine it can never see. Wait a beat first: a run that just finished may still be letting go.
+{
+  let held = portHeld(PORT);
+  for (let i = 0; held && i < 10; i++) { execSync('sleep 0.5'); held = portHeld(PORT); }
+  if (held) { console.error(`port ${PORT} is already bound (pid ${held}) -- kill that process first:  kill ${held}`); process.exit(2); }
+}
 // THE PAIR IS THE OPPOSITE OF WHAT IT WAS, AND IT HAD TO INVERT (2026-09-25). It used to be
 // -virtualdev8 +drive8truedrive: the kernal-trap fast loader ON and the cycle-exact 1541 OFF,
 // which is what made the disk load in seconds. Krill's loader ended that. It talks to a REAL
@@ -208,12 +198,14 @@ const LOG = `/tmp/probe-vice-${process.pid}.log`;
 // the address in the config wins. It also keeps every other resource this run needs off whatever
 // they last left set, which is the same trap the drive flags are in.
 const CFG = `/tmp/probe-vice-${process.pid}.vrc`;
-execSync(`${VICE} -warp -ntsc -config ${CFG} -drive8truedrive +virtualdev8 -autostart-handle-tde +minimized -jamaction 1 ` +
-  `-binarymonitor -binarymonitoraddress ip4://127.0.0.1:${PORT} ` +
-  (snapArg ? `-8 ${DISK} >${LOG} 2>&1 &` : `-autostart ${DISK} >${LOG} 2>&1 &`));
+// launch() (tools/vice.mjs) puts the emulator in its own process group and kills exactly that group
+// on stop, Ctrl-C, a crash or an uncaught error. This used to kill every x64sc that appeared during
+// the run -- a concurrent run's, or a window the user opened meanwhile -- and leaked on Ctrl-C.
+const vice = launch([...LAUNCH_FLAGS, '-warp', '-jamaction', '1',
+  '-binarymonitor', '-binarymonitoraddress', `ip4://127.0.0.1:${PORT}`,
+  ...(snapArg ? ['-8', DISK] : ['-autostart', DISK])], { config: CFG, log: LOG });
 const stop = () => {
-  for (const p of execSync('pgrep -f x64sc || true').toString().split('\n').filter(Boolean))
-    if (!before.has(p)) { try { execSync(`kill ${p}`); } catch {} }
+  vice.kill();                      // this run's process group, and nothing else
   // PUT THE SHIPPING DISK BACK. The build above runs with THIS probe's env, so latest.d64 is
   // left holding whatever diagnostic was being measured -- and latest.d64 is the one disk, the
   // thing a person loads to play. A FALLNOW build handed over this way drops the player through

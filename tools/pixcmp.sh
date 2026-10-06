@@ -9,13 +9,13 @@ cd "$(dirname "$0")/.." || exit 1
 REV=${1:-HEAD}
 T=$(mktemp -d)
 cp build-iray.mjs "$T/new.mjs"; git show "$REV:build-iray.mjs" > "$T/old.mjs"
+# The scenes swap REV's build-iray.mjs over the live one; an interrupt used to leave REV's in the tree.
+trap 'cp "$T/new.mjs" build-iray.mjs' EXIT INT TERM
 shot() {   # $1 env, $2 png
-  local CFG=$(mktemp); : > "$CFG"
   env ${=1} D64=zz-pix.d64 node build-iray.mjs >/dev/null 2>&1 || { echo "BUILD FAILED: $1"; return 1; }
-  perl -e 'alarm 55; exec @ARGV' /Applications/vice-arm64-gtk3-3.8/bin/x64sc -warp -ntsc -config "$CFG" \
-    -drive8truedrive +virtualdev8 -autostart-handle-tde +minimized -jamaction 1 -limitcycles 100000000 \
-    -exitscreenshot "$2" -autostart zz-pix.d64 >/dev/null 2>&1
-  pkill -f x64sc; rm -f "$CFG"
+  # vicerun: a private config, the standard drive flags, a hard cap, and its OWN process group killed
+  # afterwards -- this used to end with `pkill -f x64sc`, which closed any VICE the user had open.
+  node tools/vicerun.mjs 55 -warp -jamaction 1 -limitcycles 100000000 -exitscreenshot "$2" -autostart zz-pix.d64 >/dev/null 2>&1
 }
 # Poses in the levels, which is what the player moves through; the HUD is off (NOHUD=1) because its
 # fps/position readout depends on timing and differs from run to run. Falls are not checked by
