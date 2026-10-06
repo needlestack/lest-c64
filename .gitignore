@@ -70,6 +70,7 @@ CLEANUP-REVIEW.md
 iray.aligned.json
 iray.bufsizes.json
 iray.hotloops.json
+iray.syms.json
 iray.reserve.json
 iray.compact.asm
 tools/node_modules/
