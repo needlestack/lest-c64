@@ -16947,6 +16947,12 @@ okDone: rts
 objInit:
         lda #$00                ; GATEFAST: a new level (or a restart) -- the cached cell is meaningless
         sta ogPcV
+        lda #$ff                ; ...and so is hlSet's cached kind. It was never initialised: whatever
+        sta hlKind              ;   boot left at its address decided whether the FIRST hole-like got
+                                ;   patched, and the assembled operands are not all one kind's (hlVB
+                                ;   defaults to sockVisT, the rest to the exit's) -- so an exit could
+                                ;   stamp with the socket's rows. $ff is no kind, so the first call
+                                ;   always patches.
         ldx #$00
 oiBlk:  lda mapT,x              ; walls first
         cmp #$01                ; mapT is $00 for a wall and a zone mask otherwise;
