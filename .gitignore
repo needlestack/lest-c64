@@ -69,6 +69,7 @@ CLEANUP-REVIEW.md
 # stale copy of any of them would relayout the image against a build that no longer exists.
 iray.aligned.json
 iray.bufsizes.json
+iray.hotloops.json
 iray.reserve.json
 iray.compact.asm
 tools/node_modules/
