@@ -1182,6 +1182,12 @@ console.error(`connected-wall-run ids: ${nextRun - 1} (byte-sized) — merge by 
 // different ids and subLp subdivides instead of interpolating across.
 const HAZDIRS = +(process.env.HAZDIRS ?? 1024);   // angular resolution of the sweep
 const HAZSAMP = +(process.env.HAZSAMP ?? 3);      // NxN sample points per cell
+// THE PLAYER'S COLLISION HALF-BOX, in 1/256 cells: mvFree keeps the player's centre this far from any
+// wall, and dropPick clamps a dropped position to [COLL_R, 256 - COLL_R]. One constant, because it is
+// also where every build-time model of "where the player can stand" must sample up to -- it used to
+// be a 26 written seven times in the asm and once in the JS, with the models guessing 0.1-0.2 beside it.
+const COLL_R = 26;
+const STAND_LO = COLL_R / 256, STAND_HI = 1 - COLL_R / 256;   // the reachable span inside an open cell
 // A ray hits a face, and the face belongs to a run. Returns [runId, coordinate along the run]:
 // N/S runs are horizontal strips so they are indexed by x, E/W runs are vertical so by y.
 function hazCast(px, py, dx, dy) {
@@ -1234,8 +1240,11 @@ const hazCell = new Map();                        // cell index -> [{run, split}
     if (map[cellOf(cx, cy)]) continue;
     const per = new Map();                        // run -> split coordinate (widest cut wins)
     for (let i = 0; i < HAZSAMP; i++) for (let j = 0; j < HAZSAMP; j++) {
-      const px = cx + 0.2 + 0.6 * (HAZSAMP === 1 ? 0.5 : i / (HAZSAMP - 1));
-      const py = cy + 0.2 + 0.6 * (HAZSAMP === 1 ? 0.5 : j / (HAZSAMP - 1));
+      // Across the span the player can actually stand in (STAND_LO..STAND_HI, from the collision box),
+      // not 0.2-0.8: the band right against a wall is where a hazard is likeliest to show.
+      const span = STAND_HI - STAND_LO;
+      const px = cx + STAND_LO + span * (HAZSAMP === 1 ? 0.5 : i / (HAZSAMP - 1));
+      const py = cy + STAND_LO + span * (HAZSAMP === 1 ? 0.5 : j / (HAZSAMP - 1));
       for (const h of hazAt(px, py)) {
         worst = Math.max(worst, h.pieces);
         // Different sample points can want different cuts. Take the LOWEST, which is the most
@@ -1830,7 +1839,7 @@ if (!process.env.LVLDUMP && ROUTEDEF) {
   // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
   // the tick budget is spent anyway, and every later waypoint is somewhere else. That reads as
   // "the benchmark moved" rather than as an error, so the build has to catch it here.
-  const R = 26;                                  // mvFree's half-box, in 1/256 cells
+  const R = COLL_R;                              // mvFree's half-box, in 1/256 cells
   // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
   // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
   // The padded map and inMap, not the raw literal M[cy][cx]: a literal shorter than MAPW x MAPH read
@@ -2084,12 +2093,13 @@ function patternFreq() {
     const solid = (cx2, cy2) => !inMap(cx2, cy2) || map[cellOf(cx2, cy2)];
     spots.push([x + 0.5, y + 0.5]);
     const W = solid(x - 1, y), E = solid(x + 1, y), N = solid(x, y - 1), S = solid(x, y + 1);
-    if (W) spots.push([x + 0.12, y + 0.5]);
-    if (E) spots.push([x + 0.88, y + 0.5]);
-    if (N) spots.push([x + 0.5, y + 0.12]);
-    if (S) spots.push([x + 0.5, y + 0.88]);
-    if (W && N) spots.push([x + 0.12, y + 0.12]);      // inside corners: two walls at once
-    if (E && S) spots.push([x + 0.88, y + 0.88]);
+    const lo = STAND_LO, hi = STAND_HI;              // as close as the collision box lets you stand
+    if (W) spots.push([x + lo, y + 0.5]);
+    if (E) spots.push([x + hi, y + 0.5]);
+    if (N) spots.push([x + 0.5, y + lo]);
+    if (S) spots.push([x + 0.5, y + hi]);
+    if (W && N) spots.push([x + lo, y + lo]);          // inside corners: two walls at once
+    if (E && S) spots.push([x + hi, y + hi]);
   }
   // frames[] keeps each sampled frame's pattern list, not just the total, because the thing
   // that can actually break is the 80-entry colour queue overflowing in ONE frame. An average
@@ -12908,25 +12918,25 @@ mvCalcY:clc
 ; span-merge instead (see subLp).
 mvFree: sec                     ; cx0 = (nx - r) >> 8
         lda nxL
-        sbc #26
+        sbc #${COLL_R}
         lda nxH
         sbc #$00
         sta cx0
         clc                     ; cx1 = (nx + r) >> 8
         lda nxL
-        adc #26
+        adc #${COLL_R}
         lda nxH
         adc #$00
         sta cx1
         sec                     ; cy0 = (ny - r) >> 8
         lda nyL
-        sbc #26
+        sbc #${COLL_R}
         lda nyH
         sbc #$00
         sta cy0
         clc                     ; cy1 = (ny + r) >> 8
         lda nyL
-        adc #26
+        adc #${COLL_R}
         lda nyH
         adc #$00
         sta cy1
@@ -18100,20 +18110,20 @@ okPlain:inc blkVer              ; ...and setting one down closes a cell
         ; At most 26/256 of a cell, and the integer part never changes, so the cell dropPick
         ; already chose stays the right one.
         lda px
-        cmp #26
+        cmp #${COLL_R}
         bcs okpX1
-        lda #26
-okpX1:  cmp #230
+        lda #${COLL_R}
+okpX1:  cmp #${256 - COLL_R}
         bcc okpX2
-        lda #230
+        lda #${256 - COLL_R}
 okpX2:  sta px
         lda py
-        cmp #26
+        cmp #${COLL_R}
         bcs okpY1
-        lda #26
-okpY1:  cmp #230
+        lda #${COLL_R}
+okpY1:  cmp #${256 - COLL_R}
         bcc okpY2
-        lda #230
+        lda #${256 - COLL_R}
 okpY2:  sta py
         ldx odCell              ; NOT the X orbPut loaded: hlAt walks the sockets through X on
         lda #$02                ;   its way here, so on any level WITH sockets the wall went to
