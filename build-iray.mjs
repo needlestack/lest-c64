@@ -717,6 +717,64 @@ const inMap  = (x, y) => x >= 0 && y >= 0 && x < MAPW && y < MAPH;
 const mapAt = (x, y) => (M[y] && M[y][x] !== undefined) ? M[y][x] : 1;
 const map = []; for (let y = 0; y < MAPH; y++) for (let x = 0; x < MAPW; x++) map.push(mapAt(x, y));
 
+// ==================== ONE GRID WALKER FOR EVERY BUILD-TIME SIGHTLINE AND RAY ====================
+// Five copies of the same Amanatides & Woo stepper used to live in this file -- the zones' losO,
+// the global losFree, the stamp list's walk, the merge-hazard sweep's hazCast, the charset
+// sampler's refShoot -- each with its own wall set, off-map rule and corner behaviour. Two of them
+// stopped at a hardcoded 16x16 grid on the 23-wide levels; and on an EXACT corner crossing they all
+// stepped Y, which made "A sees B" and "B sees A" disagree and is the opposite of what the engine's
+// castRay does. Now there are two questions and one stepper, and the corner rule of each is a
+// decision written down here rather than an accident of `tX < tY`:
+//
+//   losClear(ax, ay, bx, by, isWall) -- can point A see point B? For the CULLING tables built from
+//     it (zones, the stamp list), which must never hide what the engine can draw, so the answer is
+//     a SUPERSET of the engine's: a sightline through an exact corner is blocked only when BOTH
+//     cells beside the corner are walls. A's own cell and B's cell never block (the player stands
+//     somewhere; a hole lies in the floor of its cell). Off the map counts as wall.
+//   castFirst(px, py, dx, dy, isWall) -- the first wall along a ray: { cx, cy, side, t }, side 0 =
+//     crossed a vertical gridline (an E/W face), t = distance to that gridline. For the MODELS of
+//     what the engine sees (hazard sweep, charset sampler), so it steps exactly as castRay does: on
+//     an exact tie it steps X (castRay's `beq cstepXc`). null if it leaves the map or runs 64 steps.
+//
+// isWall(cx, cy) is the caller's wall set -- walls as they start, or openable walls taken as open.
+const WALL_SHUT = (cx, cy) => !inMap(cx, cy) || !!map[cellOf(cx, cy)];
+const losClear = (ax, ay, bx, by, isWall) => {
+  const ex = Math.floor(bx), ey = Math.floor(by);
+  let cx = Math.floor(ax), cy = Math.floor(ay);
+  if (cx === ex && cy === ey) return true;
+  const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
+  const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
+  let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity;
+  let tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
+  for (;;) {
+    if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; }
+    else if (tY < tX) { if (tY > 1) return true; cy += sY; tY += iY; }
+    else {                                        // through an exact corner: X and Y at once
+      if (tX > 1) return true;
+      const xSide = [cx + sX, cy], ySide = [cx, cy + sY];
+      if ((xSide[0] === ex && xSide[1] === ey) || (ySide[0] === ex && ySide[1] === ey)) return true;
+      if (isWall(...xSide) && isWall(...ySide)) return false;   // a closed pinch: both sides wall
+      cx += sX; cy += sY; tX += iX; tY += iY;
+    }
+    if (cx === ex && cy === ey) return true;
+    if (isWall(cx, cy)) return false;
+  }
+};
+const castFirst = (px, py, dx, dy, isWall) => {
+  let cx = Math.floor(px), cy = Math.floor(py);
+  const sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
+  const iX = Math.abs(1 / (dx || 1e-9)), iY = Math.abs(1 / (dy || 1e-9));
+  let tX = (dx > 0 ? cx + 1 - px : px - cx) * iX, tY = (dy > 0 ? cy + 1 - py : py - cy) * iY;
+  for (let i = 0; i < 64; i++) {
+    let side, t;
+    if (tX <= tY) { t = tX; cx += sX; tX += iX; side = 0; }   // <=: castRay steps X on a tie
+    else { t = tY; cy += sY; tY += iY; side = 1; }
+    if (!inMap(cx, cy)) return null;
+    if (isWall(cx, cy)) return { cx, cy, side, t };
+  }
+  return null;
+};
+
 // ---- The OTHER resident level, fetched EARLY ----
 // Early, because two constants below have to cover BOTH levels rather than just the live one,
 // and both are baked into the code as immediates:
@@ -1123,26 +1181,12 @@ const HAZSAMP = +(process.env.HAZSAMP ?? 3);      // NxN sample points per cell
 // A ray hits a face, and the face belongs to a run. Returns [runId, coordinate along the run]:
 // N/S runs are horizontal strips so they are indexed by x, E/W runs are vertical so by y.
 function hazCast(px, py, dx, dy) {
-  let x = Math.floor(px), y = Math.floor(py);
-  const sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1;
-  const tdx = Math.abs(1 / dx), tdy = Math.abs(1 / dy);
-  let tx = (dx > 0 ? (x + 1 - px) : (px - x)) * tdx;
-  let ty = (dy > 0 ? (y + 1 - py) : (py - y)) * tdy;
-  for (let i = 0; i < 48; i++) {
-    let side;
-    if (tx < ty) { x += sx; tx += tdx; side = 0; } else { y += sy; ty += tdy; side = 1; }
-    // inMap, not a hardcoded 16x16: levels 1 and 5 are 23 wide, and "x > 15" made this sweep blind
-    // to every run east of column 15 there -- the merge hazards in that part of the map were never
-    // found. (The border is solid, so a ray cannot actually leave; this only has to be DEFINED.)
-    if (!inMap(x, y)) return null;
-    if (map[cellOf(x, y)]) {
-      const c = cellOf(x, y);
-      // side 0 means the ray crossed a vertical edge: travelling +x it lands on a WEST face.
-      if (side === 0) return [dx > 0 ? runW[c] : runE[c], y];
-      return [dy > 0 ? runN[c] : runS[c], x];
-    }
-  }
-  return null;
+  const h = castFirst(px, py, dx, dy, WALL_SHUT);
+  if (!h) return null;
+  const c = cellOf(h.cx, h.cy);
+  // side 0 means the ray crossed a vertical edge: travelling +x it lands on a WEST face.
+  if (h.side === 0) return [dx > 0 ? runW[c] : runE[c], h.cy];
+  return [dy > 0 ? runN[c] : runS[c], h.cx];
 }
 // From one point: which runs come back in more than one arc, and where the gap is.
 function hazAt(px, py) {
@@ -2011,23 +2055,15 @@ const TH = Math.tan(FOV / 2 / 256 * 2 * Math.PI), CT = (NLOG - 1) / 2;
 const refCx = c => (c - CT) / CT * TH;
 const refAng = [...Array(NLOG)].map((_, c) => Math.atan(refCx(c)));
 const refCc = [...Array(NLOG)].map((_, c) => 1 / Math.sqrt(1 + refCx(c) ** 2));
-const refShoot = (px, py, a) => { const dx = Math.cos(a), dy = Math.sin(a);
-    let mx = Math.floor(px), my = Math.floor(py);
-    const ddx = Math.abs(1 / (dx || 1e-9)), ddy = Math.abs(1 / (dy || 1e-9));
-    let sx, sy, sdx, sdy, side = 0;
-    if (dx < 0) { sx = -1; sdx = (px - mx) * ddx; } else { sx = 1; sdx = (mx + 1 - px) * ddx; }
-    if (dy < 0) { sy = -1; sdy = (py - my) * ddy; } else { sy = 1; sdy = (my + 1 - py) * ddy; }
-    for (let i = 0; i < 48; i++) { if (sdx < sdy) { sdx += ddx; mx += sx; side = 0; }
-      else { sdy += ddy; my += sy; side = 1; }
-      if (!inMap(mx, my)) return [1e9, 0];   // inMap, not 16x16: levels 1 and 5 are 23 wide (see hazCast)
-      if (map[cellOf(mx, my)]) {
-        // The run id, not just the distance: a cell whose four columns do not all share one
-        // wall face is a STEP cell, and the sampler used to be blind to those -- it emitted a
-        // ramp pattern for every cell it saw, so step patterns have never been frequency
-        // ranked at all. That is why STEPQ was a hand-picked list rather than a measured one.
-        const face = side === 0 ? (sx > 0 ? runW : runE) : (sy > 0 ? runN : runS);
-        return [side === 0 ? sdx - ddx : sdy - ddy, face[cellOf(mx, my)]]; } }
-    return [1e9, 0]; };
+const refShoot = (px, py, a) => {
+  const dx = Math.cos(a), dy = Math.sin(a), h = castFirst(px, py, dx, dy, WALL_SHUT);
+  if (!h) return [1e9, 0];
+  // The run id, not just the distance: a cell whose four columns do not all share one wall face is
+  // a STEP cell, and the sampler used to be blind to those -- it emitted a ramp pattern for every
+  // cell it saw, so step patterns had never been frequency ranked at all.
+  const face = h.side === 0 ? (dx > 0 ? runW : runE) : (dy > 0 ? runN : runS);
+  return [h.t, face[cellOf(h.cx, h.cy)]];
+};
 const refClamp = v => Math.max(CLO, Math.min(CHI, v));
 
 function patternFreq() {
@@ -5379,22 +5415,7 @@ const RUNTAB = 0x7900 - 2 * NRUN;
 // Steps cell to cell along the segment (Amanatides & Woo), visiting exactly the cells whose
 // interior it crosses. The eye's own cell and the TARGET's own cell never block -- the hole is in
 // the floor of a cell that may itself be listed as open, and the player is standing somewhere.
-const losFree = (ax, ay, bx, by) => {
-  const ex = bx | 0, ey = by | 0;
-  let cx = ax | 0, cy = ay | 0;
-  if (cx === ex && cy === ey) return true;
-  const dx = bx - ax, dy = by - ay;
-  const stepX = dx > 0 ? 1 : -1, stepY = dy > 0 ? 1 : -1;
-  const invX = dx ? 1 / Math.abs(dx) : Infinity, invY = dy ? 1 / Math.abs(dy) : Infinity;
-  let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * invX : Infinity;
-  let tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * invY : Infinity;
-  for (;;) {
-    if (tX < tY) { if (tX > 1) return true; cx += stepX; tX += invX; }
-    else         { if (tY > 1) return true; cy += stepY; tY += invY; }
-    if (cx === ex && cy === ey) return true;
-    if (map[cellOf(cx, cy)]) return false;
-  }
-};
+const losFree = (ax, ay, bx, by) => losClear(ax, ay, bx, by, WALL_SHUT);   // walls as they start
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
 const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
 const ORBSCALE = +(process.env.ORBSCALE ?? 49);   // the ball's DIAMETER in screen pixels at d=1
@@ -8597,18 +8618,7 @@ const ZN_BUILD = (() => {
   const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
   const isW = c => !!map[c] && !openable.has(c);
   const WO = (x, y) => (!inMap(x, y) || isW(cellOf(x, y))) ? 1 : 0;
-  const losO = (ax, ay, bx, by) => {
-    const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
-    if (cx === ex && cy === ey) return true;
-    const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
-    const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
-    let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity, tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
-    for (;;) {
-      if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; } else { if (tY > 1) return true; cy += sY; tY += iY; }
-      if (cx === ex && cy === ey) return true;
-      if (WO(cx, cy)) return false;
-    }
-  };
+  const losO = (ax, ay, bx, by) => losClear(ax, ay, bx, by, (x, y) => WO(x, y) === 1);   // openable walls OPEN
   const HP = [0.01, 0.255, 0.5, 0.745, 0.99];
   const cvis = (a, b) => { for (const ax of HP) for (const ay of HP) for (const bx of HP) for (const by of HP)
     if (losO(cellX(a) + ax, cellY(a) + ay, cellX(b) + bx, cellY(b) + by)) return true; return false; };
@@ -9029,18 +9039,8 @@ LVL_TABLES.push(['lvlMeT', [LVL]]);
 const STMP_LIST = (() => {
   
   const openable = new Set((LEVEL_WALLS[LVL]?.walls ?? []).flat().map(([x, y]) => cellOf(x, y)));
-  const walk = (wallAt) => (ax, ay, bx, by) => {          // losFree against a chosen wall set
-    const ex = bx | 0, ey = by | 0; let cx = ax | 0, cy = ay | 0;
-    if (cx === ex && cy === ey) return true;
-    const dx = bx - ax, dy = by - ay, sX = dx > 0 ? 1 : -1, sY = dy > 0 ? 1 : -1;
-    const iX = dx ? 1 / Math.abs(dx) : Infinity, iY = dy ? 1 / Math.abs(dy) : Infinity;
-    let tX = dx ? (dx > 0 ? cx + 1 - ax : ax - cx) * iX : Infinity, tY = dy ? (dy > 0 ? cy + 1 - ay : ay - cy) * iY : Infinity;
-    for (;;) {
-      if (tX < tY) { if (tX > 1) return true; cx += sX; tX += iX; } else { if (tY > 1) return true; cy += sY; tY += iY; }
-      if (cx === ex && cy === ey) return true;
-      if (!inMap(cx, cy) || wallAt(cellOf(cx, cy))) return false;
-    }
-  };
+  const walk = wallAt => (ax, ay, bx, by) =>             // losClear against a chosen wall set
+    losClear(ax, ay, bx, by, (x, y) => !inMap(x, y) || wallAt(cellOf(x, y)));
   const states = [walk(c => !!map[c]), walk(c => !!map[c] && !openable.has(c))];
   const PS = [0.02, 0.21, 0.4, 0.6, 0.79, 0.98];
   const out = new Map();                                  // cell -> mask
