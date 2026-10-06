@@ -5937,7 +5937,6 @@ if (SPRITES) console.error(`  occluders: ${OCCBYTES} bytes x ${ORBS.length} orbs
 // with the level's OFFICIAL start point, so a fall and a death now arrive at the same place --
 // which was the bug that found them ("when you die on level 4 you start at x280 y280 and appear
 // stuck"). The LAND= and LANDA= env knobs went with them; they had been read and discarded since.
-const HOLE_MAX_D = 2 * F_COL * HOLER / 4;        // the smallest rung's distance: past it, nothing
 const _pal = [...new Set(ORBBODY)].length === 1
   ? `all body colour ${ORBBODY[0]}`
   : ORBBODY.map((b, c) => `${ORBS.filter(o => o.c === c).length}x${b}`).join('/');
@@ -8651,6 +8650,36 @@ const hzBearing = (dx, dy) => {                  // cnTest's bearing, step for s
 // Zones are chosen per level by a weighted greedy merge plus single-cell local search (a
 // build-time study measured it: 8 zones beat the old horizon on 5 of 7 levels, zero visible
 // entities culled).
+// ==================== GATE FOOTPRINTS, FROM THE MEASURED INK ====================
+// The build-time gates -- the zone masks, the stamp list, the zone model and its self-check -- need
+// each kind's footprint on the floor as a WORLD radius. They used hand radii: HOLER, PEDR, "HOLER/2"
+// for a socket (ignoring SOCKR, which is what actually sizes the socket ladder), and the orb's radius
+// times a literal 1.7 for the angel. The runtime boxes are measured from the bitmaps now (see EXTENTS),
+// so the gates come from the same measurement: a rung drawn at distance d with its ink reaching
+// max(l, r) columns from ocol covers (max(l, r) + 1) * d / F_COL of world either side of its centre,
+// and a kind's footprint is the largest of that over every rung, at every distance it is drawn.
+// Rungs may change; this follows them.
+const inkR = (l, r, d) => (Math.max(l, r) + 1) * d / F_COL;
+const SIGHT_MAX = Math.hypot(MAPW, MAPH);                    // no sightline in the map is longer
+const H_MIN = Math.max(1, Math.floor(88 / SIGHT_MAX));      // projected height (colH = 88/d) at that range
+const orbPathR = (varT, pick) => { let R = 0;
+  for (let h = H_MIN; h < 256; h++) { const v = varT[h]; if (pick(v)) R = Math.max(R, inkR(orbBoxT[v].l, orbBoxT[v].r, 88 / h)); }
+  return R; };
+const holeKindR = (Ls, bl, br) => Math.max(0, ...Ls.map((g, i) => inkR(bl[i], br[i], g.d)));
+const GATE_R = {
+  exit: holeKindR(HOLE.L, holeBoxL, holeBoxR),
+  sock: holeKindR(SOCK.L, sockBoxL, sockBoxR),
+  ped:  HAS_PED ? holeKindR(PED.L, pedBoxL, pedBoxR) : 0,
+  orb:  orbPathR(orbVarT, v => v < ANG_V0),
+  angel: orbPathR(angVarT, v => v >= ANG_V0),
+};
+// ...and how far away each hole-like kind is still drawn at all: its farthest rung.
+const CAP_D = { exit: Math.max(...HOLE.L.map(g => g.d)), sock: Math.max(...SOCK.L.map(g => g.d)),
+                ped: HAS_PED ? Math.max(...PED.L.map(g => g.d)) : 0 };
+const gateR = h => h.exit ? GATE_R.exit : h.ped ? GATE_R.ped : GATE_R.sock;   // a HOLELIKE entry's radius
+if (process.env.GATEDBG) console.error(`GATEDBG footprints: ${Object.entries(GATE_R).map(([k, v]) => `${k} ${v.toFixed(3)}`).join('  ')}` +
+  `  caps: ${Object.entries(CAP_D).map(([k, v]) => `${k} ${v.toFixed(2)}`).join('  ')}`);
+
 const ZN_BUILD = (() => {
   
   const openable = OPENABLE;
@@ -8718,7 +8747,7 @@ const ZN_BUILD = (() => {
   const mask = new Uint8Array(MAPN);
   for (const a of cells) for (const b of cells) if (V[a * MAPN + b]) mask[a] |= 1 << zid[b];
   // a hole-like's disc spills past its own cell: its mask is every zone its disc touches, fixed
-  const radH = HOLELIKE.map(h => h.exit ? HOLER : h.ped ? PEDR : HOLER / 2);
+  const radH = HOLELIKE.map(gateR);                 // measured footprints (GATE_R), not hand radii
   const hmask = HOLELIKE.map((h, L) => { let m = 0; const ex = h.x + 0.5, ey = h.y + 0.5, r = radH[L];
     for (let y = Math.floor(ey - r); y <= Math.floor(ey + r); y++) for (let x = Math.floor(ex - r); x <= Math.floor(ex + r); x++)
       if (inMap(x, y) && !isW(cellOf(x, y))) m |= 1 << zid[cellOf(x, y)];
@@ -8771,8 +8800,8 @@ const ZN_BUILD = (() => {
       for (const c of cells) v.open[c] = map[c] ? openExact[c] | patch[v.zz[c]] : v.shut[c] | patch[v.zz[c]];
       v.patchB = 2 * [...patch].filter(Boolean).length + 1;   // (zone, mask) pairs + terminator, all walls at once
     }
-    const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
-    const capH = HOLELIKE.map(h => h.exit ? HOLE_MAX_D : h.ped ? 2 * F_COL * PEDR / PEDWMIN : HOLE_MAX_D / 2);
+    const radO = ORBS.map(o => o.tall ? GATE_R.angel : GATE_R.orb);
+    const capH = HOLELIKE.map(h => h.exit ? CAP_D.exit : h.ped ? CAP_D.ped : CAP_D.sock);
     const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
     const coneOk = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
       if (c < 2) return true; const tol = CONE_TOL[Math.min(c, CONE_DMAX)]; return ((hzBearing(dx, dy) - pa + tol) & 255) < 2 * tol; };
@@ -8785,7 +8814,7 @@ const ZN_BUILD = (() => {
         const pc = P[(rnd() * P.length) | 0], px = cellX(pc) + 0.05 + 0.9 * rnd(), py = cellY(pc) + 0.05 + 0.9 * rnd(), pa = (rnd() * 256) | 0;
         const ca = Math.cos(pa / 128 * Math.PI), sa = Math.sin(pa / 128 * Math.PI);
         const ents = [...ORBS.map((o, i) => { const c = P[(rnd() * P.length) | 0]; return { c, x: cellX(c) + 0.5, y: cellY(c) + 0.5, r: radO[i], L: -1 }; }),
-                      ...HOLELIKE.map((h, L) => ({ c: cellOf(h.x, h.y), x: h.x + 0.5, y: h.y + 0.5, r: HOLER, L }))];
+                      ...HOLELIKE.map((h, L) => ({ c: cellOf(h.x, h.y), x: h.x + 0.5, y: h.y + 0.5, r: gateR(h), L }))];
         const any = variants.map(() => 0), f = variants.map(() => 0);
         for (const e of ents) {
           const vis = RIM.some(([c, s2]) => losT(px, py, e.x + e.r * c, e.y + e.r * s2));
@@ -8830,7 +8859,7 @@ const ZN_BUILD = (() => {
   // entity cells; count entities the test would cull whose disc is in fact visible. Must be 0.
   let bad = 0, n = 0, sd = 12345;
   const rnd = () => { sd = (sd * 1103515245 + 12345) >>> 0; return sd / 4294967296; };
-  const radO = ORBS.map(o => (ORBSCALE / (4 * F_COL)) * (o.tall ? 1.7 : 1));
+  const radO = ORBS.map(o => o.tall ? GATE_R.angel : GATE_R.orb);
   const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
   for (let i = 0; i < 20000 && ORBS.length; i++) {
     const p = pl[(rnd() * pl.length) | 0], e = pl[(rnd() * pl.length) | 0], r = Math.max(...radO);
@@ -9083,7 +9112,7 @@ const STMP_LIST = (() => {
   const PS = [0.02, 0.21, 0.4, 0.6, 0.79, 0.98];
   const out = new Map();                                  // cell -> mask
   HOLELIKE.forEach((h, L) => {
-    const r = h.ped ? PEDR : h.exit ? HOLER : HOLER / 2, ex = h.x + 0.5, ey = h.y + 0.5;
+    const r = gateR(h), ex = h.x + 0.5, ey = h.y + 0.5;   // measured footprint (GATE_R)
     const Q = [[ex, ey], ...[...Array(24)].map((_, k) => [ex + r * Math.cos(k * Math.PI / 12), ey + r * Math.sin(k * Math.PI / 12)]),
                ...[...Array(12)].map((_, k) => [ex + r / 2 * Math.cos(k * Math.PI / 6), ey + r / 2 * Math.sin(k * Math.PI / 6)])];
     for (let c = 0; c < MAPN; c++) {
