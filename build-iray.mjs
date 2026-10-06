@@ -1131,7 +1131,10 @@ function hazCast(px, py, dx, dy) {
   for (let i = 0; i < 48; i++) {
     let side;
     if (tx < ty) { x += sx; tx += tdx; side = 0; } else { y += sy; ty += tdy; side = 1; }
-    if (x < 0 || y < 0 || x > 15 || y > 15) return null;
+    // inMap, not a hardcoded 16x16: levels 1 and 5 are 23 wide, and "x > 15" made this sweep blind
+    // to every run east of column 15 there -- the merge hazards in that part of the map were never
+    // found. (The border is solid, so a ray cannot actually leave; this only has to be DEFINED.)
+    if (!inMap(x, y)) return null;
     if (map[cellOf(x, y)]) {
       const c = cellOf(x, y);
       // side 0 means the ray crossed a vertical edge: travelling +x it lands on a WEST face.
@@ -2016,7 +2019,7 @@ const refShoot = (px, py, a) => { const dx = Math.cos(a), dy = Math.sin(a);
     if (dy < 0) { sy = -1; sdy = (py - my) * ddy; } else { sy = 1; sdy = (my + 1 - py) * ddy; }
     for (let i = 0; i < 48; i++) { if (sdx < sdy) { sdx += ddx; mx += sx; side = 0; }
       else { sdy += ddy; my += sy; side = 1; }
-      if (mx < 0 || my < 0 || mx > 15 || my > 15) return [1e9, 0];
+      if (!inMap(mx, my)) return [1e9, 0];   // inMap, not 16x16: levels 1 and 5 are 23 wide (see hazCast)
       if (map[cellOf(mx, my)]) {
         // The run id, not just the distance: a cell whose four columns do not all share one
         // wall face is a STEP cell, and the sampler used to be blind to those -- it emitted a
