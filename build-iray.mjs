@@ -3241,6 +3241,56 @@ if (process.env.MODELJSON === '1') {
 // clear on entry to every copy: the group's "cmp spanR" falls through clear, "bcc" into the
 // write is only taken when clear, and the subtract loop exits on a failed "bcs". So no copy
 // needs its own clc, and the four share one bounds test instead of paying inx/cpx/bcs/jmp.
+// ---- emitBox: an entity's screen box, from its centre column and its ink extents ----
+// orbOne and holeTail each turned "centre column + how far the ink reaches left/right" into a
+// clipped [lo, hi] column range with their own code, and they drifted: holeTail skipped its probe
+// whenever the centre was off either edge, so a disc just off-screen with its visible part behind a
+// wall was never culled, while orbOne handled both edges. ONE source now, emitted inline (it is the
+// hottest entity code, so no jsr) and parameterised by the operands it reads and writes:
+//   L, R     -- operands holding the ink's reach left and right of ocol (inclusive, in columns)
+//   lo, hi   -- where the clipped range goes (0 .. NLOG-1, inclusive)
+//   off      -- where to go when NO column of it is on screen
+//   afterLo / afterHi -- code run with A still holding lo / hi, so a caller can fold work in for free
+// Input is ocol (magnitude) and ocolN (set = the centre is ocol columns LEFT of column 0).
+// The cases: centre left of 0 -> lo = 0, hi = R - ocol, off if that borrows (column 0 counts: the
+// extent is inclusive). Centre at or right of 0 -> lo = ocol - L clamped at 0, off if lo >= NLOG;
+// hi = ocol + R clamped at NLOG-1.
+const emitBox = (p, L, R, lo, hi, off, { afterLo = '', afterHi = '' } = {}) => `        lda ocolN
+        bne ${p}Ln
+        lda ocol
+        sec
+        sbc ${L}
+        bcs ${p}L1
+        lda #$00                ; straddles column 0 from the right: lo is 0
+        jmp ${p}L2
+${p}Ln: lda ${R}                ; centre LEFT of 0: the box ends at R - ocol...
+        sec
+        sbc ocol
+        bcc ${p}Lx              ; ...and if that borrows, nothing of it is on screen
+        lda #$00
+        jmp ${p}L2
+${p}Lx: jmp ${off}
+${p}L1: cmp #${hx(NLOG)}        ; starts past the last column: entirely off the right (rejecting,
+        bcc ${p}L2              ;   not clamping -- a clamp turns "not on screen" into "column 159")
+        jmp ${off}
+${p}L2: sta ${lo}
+${afterLo}
+        lda ocolN
+        bne ${p}Rn
+        lda ocol
+        clc
+        adc ${R}
+        bcc ${p}R1
+        lda #${hx(NLOG - 1)}
+        jmp ${p}R1
+${p}Rn: lda ${R}                ; centre left of 0: the L test proved R >= ocol, so no borrow
+        sec
+        sbc ocol
+${p}R1: cmp #${hx(NLOG)}
+        bcc ${p}R2
+        lda #${hx(NLOG - 1)}
+${p}R2: sta ${hi}
+${afterHi}`;
 // ---- STY_COLH_X: "sty colH,x", an instruction the 6502 does not have ----
 // interpSpan's inner loop keeps the error term in A and the height in Y, so the natural store is
 // "sty colH,x" -- but STY has no absolute,X mode. The documented way round is a shuffle:
@@ -15830,55 +15880,17 @@ orbYok: sta o3                  ;   keeps ORB_FLOOR rows above the last raster l
         sta o2                  ;   (see orbColLT) and an even-wide ball never can be
         lda orbColRT,x
         sta o2r
-        lda ocolN               ; the bounding box, in logical columns
-        bne opBLn
-        lda ocol
-        sec
-        sbc o2
-        bcs opBL1
-        lda #$00
-        jmp opBL2               ; straddles column 0 from the right: left edge is 0
-opBLn:  lda o2r                 ; centre is LEFT of 0 by ocol columns, so the box ends at
-        sec                     ;   o2 - ocol. If that borrows, the whole orb is off screen.
-        sbc ocol                ; 0 is NOT off screen: the extent is inclusive, so the ink's last
-        bcc opBLx               ;   column IS column 0 (this used to drop the orb a column early)
-        lda #$00                ; part of it shows: the box starts at column 0
-        jmp opBL2
-opBLx:  jmp orbNo
-opBL1:  cmp #${hx(NLOG)}        ; A box that STARTS past the last column is an orb entirely off
-        bcc opBL2               ; the right edge. This used to clamp to 159, which turned "not on
-        jmp orbNo               ; screen" into "one column at the screen edge" -- so the orb took a
-                                ; sprite slot it could never be seen in, and occStamp then painted
-                                ; occluders into cell 39 for it. Invisible in the shipping build,
-                                ; since black on black wall looks the same, but real work for an
-                                ; orb that is not there. Clamping was added to stop the box
-                                ; running off the end of fgCell and seamT; rejecting does that
-                                ; too, and is what the geometry actually says.
-opBL2:  sta ocl2
+${emitBox('opB', 'o2', 'o2r', 'ocl2', 'ocmax', 'orbNo', {
+  afterLo: `        lsr                     ; ...and in CELLS, while A still holds it
         lsr
-        lsr
-        sta ocl
-        lda ocolN
-        bne opBRn
-        lda ocol
-        clc
-        adc o2r
-        bcc opBR1
-        lda #159
-        jmp opBR1
-opBRn:  lda o2r                 ; the centre is ocol columns LEFT of 0, so the box ends at
-        sec                     ;   o2 - ocol. The check above already proved o2 > ocol, so this
-        sbc ocol                ;   cannot borrow and the result is well under 160.
-opBR1:  cmp #160
-        bcc opBR2
-        lda #159
-opBR2:  sta ocmax
-        lsr
+        sta ocl`,
+  afterHi: `        lsr
         lsr
         cmp ocl
         bcs opBR3
         lda ocl
-opBR3:  sta ocr
+opBR3:  sta ocr`,
+})}
 ${ORBOCC ? `        ; ---- is this orb WHOLLY occluded? ----
         ; The rule is the user's: a wall facing AWAY from an orb always occludes it, and a wall
         ; facing the orb never can. Which side of each face's plane every orb lies on is a
@@ -18670,36 +18682,17 @@ hlNoShr:
         ; This is why the probe lives HERE and not above hlRung, where it used to: the rung is
         ; only final after the shrink, and the half-width is a per-kind table. ocl2 is free until
         ; hlVst, three instructions down, which is the one window where both are true.
-        lda #$00                ; the ink box defaults to the whole screen: a centre off either edge
-        sta hbL                 ;   skips the probe below, and the slice clip then changes nothing
-        lda #${hx(NLOG - 1)}
-        sta hbR
+hlBXL:  lda holeBoxLT,x         ; PATCHED by hlSet: how far this rung's INKED pixels reach left of
+        sta o2                  ;   ocol -- not the sprite frame (see holeExtT in the build)
+hlBXR:  lda holeBoxRT,x         ; PATCHED by hlSet: ...and right of it
+        sta o2r
+        ; THE SAME BOX CODE AS orbOne (emitBox). This used to skip the probe whenever the centre was
+        ; off either edge, so a disc just off-screen with its visible part behind a wall was never
+        ; culled; now an off-screen centre is boxed like any other, and nothing on screen is dropped.
+        ; The box is also what holeSlot clips each slice's stamp to (hbL/hbR).
+${emitBox('hlB', 'o2', 'o2r', 'ocl2', 'ocmax', 'orbNo', { afterLo: '        sta hbL', afterHi: '        sta hbR' })}
         txa
         pha                     ; occWalk clobbers X, and the rung indexes every table below
-hlBXL:  lda holeBoxLT,x         ; PATCHED by hlSet: how far this rung's INKED pixels reach left of
-        sta ohtmp               ;   ocol -- not the sprite frame (see holeExtT in the build)
-        lda ocolN
-        bne hlOcSk              ; centre off the left edge; the column tests below decide
-        lda ocol
-        cmp #${hx(NLOG)}
-        bcs hlOcSk              ; ...or off the right
-        sec
-        sbc ohtmp
-        bcs hlPbL
-        lda #$00                ; the box runs off the left edge
-hlPbL:  sta ocl2
-hlBXR:  lda holeBoxRT,x         ; PATCHED by hlSet: ...and right of it. X is still the rung (pha left it)
-        sta ohtmp
-        lda ocol
-        clc
-        adc ohtmp               ; ocol <= ${NLOG - 1} and the extent is under a frame (72), so no carry past 255
-        cmp #${hx(NLOG)}
-        bcc hlPbR
-        lda #${hx(NLOG - 1)}    ; ...or off the right
-hlPbR:  sta ocmax
-        sta hbR                 ; ...and the same box is what holeSlot clips each slice's stamp to
-        lda ocl2
-        sta hbL
         lda #$00
         sta ovVis
         sta ovOcc
