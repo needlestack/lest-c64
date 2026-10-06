@@ -25916,7 +25916,11 @@ try {
     const ZPSHARED = new Set();
     for (let a = 0x87; a <= 0x97; a++) ZPSHARED.add(a);
     for (let a = 0x9c; a <= 0x9f; a++) ZPSHARED.add(a);
+    // KRILL OWNS $e0-$e6, and with background loading it runs DURING gameplay -- a variable placed
+    // there is overwritten mid-frame. It was only ever text in the zero-page report; now it is a
+    // claim like any other, so a collision is a build error.
     const owner = {};
+    for (let a = 0xe0; a <= 0xe6; a++) owner[a] = 'the Krill loader';
     for (const [n, a] of Object.entries(zp)) {
       for (const b of two.has(n) ? [a, a + 1] : [a]) {
         if (owner[b] && owner[b] !== n && !ZPSHARED.has(b))
