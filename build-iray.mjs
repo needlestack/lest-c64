@@ -6214,6 +6214,8 @@ const orbYBaseT = ORBANCH.map(a => 150 - a);
 // or null for a rung with no ink at all.
 const spriteGrid = bytes => [...Array(21)].map((_, y) =>
   [...Array(12)].map((_, i) => (bytes[y * 3 + (i >> 2)] >> (6 - 2 * (i & 3))) & 3));
+// The widest a hole-like can be drawn: three sprites side by side, each 24 columns with hmag.
+const HOLE_FRAME_MAX = 3 * 24;
 const inkExtent = parts => {
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const p of parts) p.grid.forEach((row, y) => row.forEach((px, i) => {
@@ -10343,7 +10345,6 @@ ohL     = $85f1                 ; the span being tested: its left column, and th
 ohBX    = $85f2
 ohDbg   = $85f3                 ; ORBOCCDBG: furthest stage any orb reached this frame
 ocolN   = $8597                 ; centre column went left of 0: ocol holds the magnitude
-ocanO   = $85e8                 ; the same bit while the candidate list is being walked
 ` : ''}
 bndT    = $9180                 ; columns where a face or saturation state begins (${hx(NBND)} max)
                                 ; MOVED OFF $7f00 (2026-09-26). It is 64 bytes and it was
@@ -14538,8 +14539,8 @@ ${FALL ? `        jsr holeOne             ; ---- the hole FIRST, before the orbs
         ; The per-cell candidate lists carried a PRECOMPUTED bearing and occlusion answer for each
         ; (cell, orb) pair, which is exactly what a movable orb invalidates. With a handful of
         ; entities the list was never the expensive part -- projecting is -- so the loop just walks
-        ; them all and lets orbOne reject what is off screen. ocanO goes conservative: ask the
-        ; occlusion test rather than trust a build-time answer about where things used to be.
+        ; them all and lets orbOne reject what is off screen -- and always asks the occlusion test
+        ; rather than trust a build-time answer about where things used to be.
         jsr obOrder             ; NEAREST FIRST, out of line -- see obOrder for why
 obEnd:  ${DBGORB ? `lda osI
         sta odb                 ; the loop counter and its bound, against what set the bound
@@ -14685,8 +14686,9 @@ oSLoop:${process.env.OSCNT ? ' inc osCntV             ; OSCNT: slots occStamp vi
         beq oSNext              ; the CARRIED orb's icon: not an entity, and it fills no state
         cmp nOrbT
         bcc ${HAS_IDOL && true ? 'oSIdl' : 'oSEnt'}               ; an orb, which always carries it
-        lda obOcc,x             ; hole-like, so only a SOCKET does: holeSlot sets bit 7 on one,
-        bpl oSNext              ;   where an exit hole's obOcc is its fill colour (0-15). The
+        lda obOcc,x             ; hole-like: only a slot holeSlot made STAMPABLE carries it (bit 7) --
+        bpl oSNext              ;   every kind has a rows table now, exits included; otherwise obOcc
+                                ;   holds the fill colour (0-15) and the slot is not stamped.
         lda obIX,x              ; STMP: can a wall partly hide THIS one from the player's cell at all?
         sec                     ;   Almost never (the build lists the few cells where it can) -- and
         sbc nOrbT               ;   without this a hub pedestal paid ~580 cycles a frame to find out
@@ -14708,8 +14710,6 @@ oSIdl:  tay                     ; STMP: an IDOL up on a drum stands in the drum'
         and stmpM
         bne oSEnt
         jmp oSNext` : ''}
-                                ;   exit hole keeps holeTail's all-or-nothing test instead --
-                                ;   it is the wall's own black and has nothing to clip.
 oSEnt:
 
 ${process.env.OSCNT ? `        inc osCntE              ; OSCNT: slots taking the FULL path
@@ -15926,11 +15926,12 @@ ${process.env.ORBOCCDBG ? `        lda #$01
         bcc ohDa
         sta ohDbg
 ohDa:
-` : ''}occWalk:lda ocanO       ; ENTRY POINT for a probe: with ovProbe set, ohHide rts's instead of
-        bpl opDone              ;   jumping to orbNo, so a caller can ask the question and act on
-                                ;   the answer itself. build time: nothing reachable from this
-                                ;   cell can occlude it, and
-                                ; that is true of 56% of candidates -- they never enter the walk
+` : ''}occWalk:                        ; ENTRY POINT for a probe: with ovProbe set, ohHide rts's instead of
+                                ;   jumping to orbNo, so a caller can ask the question and act on
+                                ;   the answer itself. (There used to be an early exit here on a
+                                ;   build-time "nothing reachable from this cell can occlude it"
+                                ;   bit, ocanO; that bit was retired and every caller set it to
+                                ;   $80, so the exit was dead and the variable constant -- gone.)
 ${process.env.ORBOCCDBG ? `        lda #$02
         cmp ohDbg
         bcc ohDb
@@ -16096,7 +16097,7 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         sta obIX,x
         lda ovar
         sta obV,x
-        lda ocanO
+        lda #$80                ; "may have an occluder": the conservative answer, always
         sta obOcc,x
         lda ocl
         sta obCL,x
@@ -17740,8 +17741,6 @@ anSqOk:
         sta ovOcc
         lda #$01
         sta ovProbe
-        lda #$80
-        sta ocanO
         jsr orbOne
         lda #$00
         sta ovProbe
@@ -18715,8 +18714,6 @@ ${emitBox('hlB', 'o2', 'o2r', 'ocl2', 'ocmax', 'orbNo', { afterLo: '        sta 
         sta ovOcc
         lda #$01
         sta ovProbe             ; probe: the walk returns instead of drawing or rejecting
-        lda #$80
-        sta ocanO               ; conservative, exactly as obLoop and the angel probe do
         jsr occWalk
         lda #$00
         sta ovProbe
@@ -18794,8 +18791,8 @@ ohSetC: sta ohWc
         lda ocol                ; the centre sits ocol columns LEFT of column 0
         clc
 hlXO1:  adc holeXOffT,x         ; PATCHED
-        cmp #72
-        bcs orbNo               ; even the pair's right edge is off the screen
+        cmp #${hx(HOLE_FRAME_MAX)}       ; no frame is wider than HOLE_FRAME_MAX, so a left edge that far off
+        bcs orbNo               ;   puts even the pair's right edge off the screen
         sta tmp
         lda #$0c
         sec
@@ -18808,7 +18805,7 @@ hlXO2:  sbc holeXOffT,x         ; PATCHED. s = ocol - half, the pair's start col
         clc                     ; s < 0: b = s + 12, and the carry OUT of this add is a real
         adc #$0c                ;   sign flag, because it says the sum crossed back through 0
         jmp ohXS
-ohXPP:  cmp #160
+ohXPP:  cmp #${hx(NLOG)}
         bcs orbNo               ; the pair starts right of the last column
         clc
         adc #$0c                ; b = s + 12, which cannot be negative on this path -- so force
@@ -18830,8 +18827,8 @@ ohLp:   lda ohBH
         bmi ohLL                ; b < 0: off the left, or partly so
         bne ohDone              ; b >= 256: off the right, and so is everything after it
         lda ohBL
-        cmp #172
-        bcs ohDone              ; column 160 or beyond: same
+        cmp #${hx(NLOG + 12)}           ; b is the column + 12, so this is column NLOG or beyond: same
+        bcs ohDone
         jmp ohPl
 ohLL:   clc                     ; b < 0: visible only if b + cols reaches column 0, i.e. 12
         lda ohBL
@@ -18870,12 +18867,12 @@ holeSlot:
         sta omBit
         ora omEn
         sta omEn
-        ; ---- priority: blanket for an exit hole, EARNED for a socket ----
-        ; The exit hole goes behind foreground unconditionally, because the $d01b bit is the only
-        ; occlusion it has. A socket is stamped instead, and occStamp sets the bit itself on the
-        ; slots it actually stamped -- which is also what keeps its de-seam sweep honest, since
-        ; that sweep fires on exactly this bit and would otherwise strip seams around every
-        ; socket on screen whether or not a wall was ever in front of it.
+        ; ---- priority: EARNED by stamping; blanket only for a slot that will not be stamped ----
+        ; A stampable slot (ocl2 = its rows, non-zero -- every kind now, exits included since they
+        ; stopped being the wall's own black) gets the $d01b bit from occStamp, and only on slots it
+        ; actually stamped -- which also keeps the de-seam sweep honest, since that sweep fires on
+        ; exactly this bit and would otherwise strip seams around every hole-like on screen. A slot
+        ; with no rows (ocl2 = 0) would have no other occlusion, so it goes behind foreground here.
         lda ocl2
         bne ohNoPri
         lda omBit
@@ -18903,7 +18900,7 @@ ohNoPri:lda ohP
         sta obV,x               ; the rows this slice covers -- occStamp's box, straight out of
                                 ;   the slot, where an orb's comes from orbAnchT by variant
         lda #$80
-        sta obOcc,x             ; conservative, exactly as the probe above sets ocanO
+        sta obOcc,x             ; conservative: "may have an occluder", as for every orb
         ; This slice's own columns, s .. s+ohWc-1, clipped to the screen -- and each slice is
         ; judged separately, because each is its own sprite. b is s+12 and (ohBH:ohBL) carries
         ; it SIGNED: b >= 0 does not mean s >= 0, since the twelve columns of the offset can
@@ -18925,9 +18922,9 @@ ohNoPri:lda ohP
         ; The sign already lives in ohtmp and the bmi above has used it; the second test only
         ; has to fence off a slice that starts off the RIGHT edge.
         lda ocmax
-        cmp #$a0
-        bcc hsLst               ; 0-159: a real column, bit 7 and all
-        bcs hsDrop              ; >= 160: the slice starts past the right edge, nothing to stamp
+        cmp #${hx(NLOG)}
+        bcc hsLst               ; 0..NLOG-1: a real column, bit 7 and all
+        bcs hsDrop              ; >= NLOG: the slice starts past the right edge, nothing to stamp
 hsL0:   lda #$00                ; s < 0: the visible part starts at column 0
 hsLst:  sta obL,x
         lda ocmax
@@ -22313,8 +22310,6 @@ obPNx:  txa
         lda #$ff
         sta obKeyT,x            ; consumed
         stx oidx
-        lda #$80
-        sta ocanO
         jsr orbOne
         lda onv
         cmp onvH
@@ -23303,6 +23298,8 @@ ogEHol: txa                     ; GATEFAST: A must BE the entity index here -- t
         sec                     ; ---- a hole-like: its fixed zone mask (its whole disc) ----
         sbc nOrbT
         tax
+        lda hlSeat,x            ; a CONSUMED socket is not in the world any more (holeOne skips it too);
+        bmi ogENo               ;   left in, it still set cnAny and kept the per-frame entity work alive
         lda hzMskT,x
         and znP
         beq ogENo
