@@ -43,6 +43,17 @@ const keepLargest = bits => { const comp = new Int32Array(W * H).fill(-1), sizes
   const big = sizes.indexOf(Math.max(...sizes));
   for (let i = 0; i < W * H; i++) if ((lab[i] & bits) && comp[i] !== big) lab[i] &= ~bits; };
 keepLargest(3);
+// Collect the WALL STRIPS before bark connectivity removes them: pure-bark regions touching the
+// picture's border. (The right one used to vanish in keepLargest(2) and was never line-fitted, so
+// its diagonal "branch" stayed in the canopy -- the user circled both.)
+const strips = [];
+{ const seen = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) if (lab[i] === 2 && !seen[i]) { const st = [i], part = []; seen[i] = 1; let edge = false;
+    while (st.length) { const p = st.pop(); part.push(p); const x = p % W, y = (p / W) | 0;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) edge = true;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy, q = yy * W + xx;
+        if (xx >= 0 && yy >= 0 && xx < W && yy < H && lab[q] === 2 && !seen[q]) { seen[q] = 1; st.push(q); } } }
+    if (edge) { for (const q of part) lab[q] = 0; strips.push(part); } } }
 keepLargest(2);
 // ...and the left strip still reached the trunk THROUGH the canopy's overlap zone. What really
 // tells it apart: it runs off the edge of the picture, and no part of the tree's bark does. So a
@@ -53,7 +64,25 @@ keepLargest(2);
       if (x === 0 || y === 0 || x === W - 1 || y === H - 1) edge = true;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy, q = yy * W + xx;
         if (xx >= 0 && yy >= 0 && xx < W && yy < H && lab[q] === 2 && !seen[q]) { seen[q] = 1; st.push(q); } } }
-    if (edge) for (const q of part) lab[q] = 0; } }
+    if (edge) { for (const q of part) lab[q] = 0; strips.push(part); } } }
+// ...AND THE STRIP CONTINUES BEHIND THE TREE. The warm wall/ceiling edge shows through gaps in the
+// leaves as bark-coloured specks, which lined up into a brown diagonal sweep across the canopy at
+// exactly the wall's angle (the user circled it). Its colour does not separate it from real branches
+// (median L 0.43 against 0.36, overlapping), but its POSITION is known: fit a line through each
+// visible strip, extend it, and inside the canopy's overlap zone nothing along it is bark.
+for (const part of strips) {
+  if (part.length < 20) continue;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const p of part) { const x = p % W, y = (p / W) | 0; sx += x; sy += y; sxx += x * x; sxy += x * y; }
+  const k = part.length, a = (k * sxy - sx * sy) / (k * sxx - sx * sx), b = (sy - a * sx) / k;
+  const nrm = Math.hypot(a, 1), ds = part.map(p => Math.abs(a * (p % W) - ((p / W) | 0) + b) / nrm).sort((u, v) => u - v);
+  const half = ds[Math.floor(ds.length * 0.9)] + 2, left = sx / k < W / 2;
+  let n = 0;
+  for (let i = 0; i < W * H; i++) { const x = i % W, y = (i / W) | 0;
+    if (lab[i] !== 3 || (left ? x > W / 2 : x < W / 2)) continue;
+    if (Math.abs(a * x - y + b) / nrm <= half) { lab[i] = 1; n++; } }
+  console.log(`wall strip (${left ? 'left' : 'right'}): y = ${a.toFixed(2)}x + ${b.toFixed(1)}, half-width ${half.toFixed(1)}; ${n} canopy pixels no longer bark`);
+}
 // ---- THE REST OF THE SCENE (bits 4, 8, 16), measured by row band on this image: non-tree pixels
 // are bright above row ~50 (the ceiling) and below ~145 (the floor), dark between (the racks), and
 // the racks carry small saturated spots (the LEDs). Fractions of H so another size works.

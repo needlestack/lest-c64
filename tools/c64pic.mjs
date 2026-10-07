@@ -188,6 +188,8 @@ const SMOOTH = +opt('--smooth', 0.5), SMOOTHMC = +opt('--smoothmc', 0);
 // user's preferred version. 'bright': only error LEAVING the bright-leaf region is held back (left
 // the trunk's upper part flatter). --leakerr: none held back (the trunk went flat dark brown).
 const KEEPERR = has('--leakerr') ? false : opt('--keeperr', 'all');
+const SHOOTS = +opt('--shoots', 0);
+const BRANCHTEX = +opt('--branchtex', 0);
 const REG = opt('--regions', null) ? JSON.parse(readFileSync(opt('--regions'), 'utf8')) : null;
 const LEAFC = opt('--leaf', '0,5,13').split(',').map(Number), BARKC = opt('--bark', '0,9,8').split(',').map(Number);
 const NOLEAF2 = opt('--leaf2', '') === 'none';
@@ -285,6 +287,23 @@ const themed = (img, W, H) => {
     if (lab & 1) cls[0][i] = 1; else if (lab & 2) cls[1][i] = 1;
     else if (SCENE && (lab & 4)) cls[2][i] = 1; else if (SCENE && (lab & 8)) cls[3][i] = 1;
   }
+  // --shoots r: inside the canopy, brown is for SHOOTS. Overlap pixels that took the bark class form
+  // areas as well as lines -- blobs, and one wide diagonal sweep that was really the warm-lit strip
+  // where the wall meets the ceiling, seen through the leaves (it followed the wall's angle exactly).
+  // An OPENING (erode then dilate, (2r+1)^2) recovers exactly the parts at least 2r+1 wide; those
+  // become leaf, and what is thin stays brown.
+  if (SHOOTS && OVERLAP === 'hue') {
+    const ob = new Uint8Array(n); for (let i = 0; i < n; i++) ob[i] = both[i] && cls[1][i] ? 1 : 0;
+    const morph = (m, keep) => { const o = new Uint8Array(n);       // keep=1: erode (all), 0: dilate (any)
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let all = 1, any = 0;
+        for (let dy = -SHOOTS; dy <= SHOOTS; dy++) for (let dx = -SHOOTS; dx <= SHOOTS; dx++) {
+          const xx = x + dx, yy = y + dy, v = xx >= 0 && yy >= 0 && xx < W && yy < H ? m[yy * W + xx] : 0;
+          all &= v; any |= v; }
+        o[y * W + x] = keep ? all : any; }
+      return o; };
+    const wide = morph(morph(ob, 1), 0);
+    for (let i = 0; i < n; i++) if (ob[i] && wide[i]) { cls[1][i] = 0; cls[0][i] = 1; }
+  }
   const rx = Math.max(1, Math.round(FEATHER * W / 320));
   // --feather 0: HARD theme edges, no blur at all (the preferred version)
   const [wl, wb, wk, wc] = cls.map(m => FEATHER ? boxBlur(m, W, H, rx, FEATHER) : m);
@@ -307,7 +326,9 @@ const themed = (img, W, H) => {
     // palette colour (branches at C64 brown's brightness) dithers into nothing -- a solid block,
     // and in hi-res a hard-edged one. The 4x4 pattern averages out, so brightness is unchanged.
     const x = i % W, y = Math.floor(i / W), bay = (BAYER[(y & 3) * 4 + (x & 3)] + 0.5) / 16 - 0.5;
-    const mod = 1 + TEXTURE * bay * (1 - wr);
+    // --branchtex t: extra texture for BRANCH pixels inside the canopy (overlap pixels on the bark
+    // ramp) -- the user: brown branch areas came out too undithered. The trunk is left alone.
+    const mod = 1 + (TEXTURE + (both[i] && w[2] > 0.5 ? BRANCHTEX : 0)) * bay * (1 - wr);
     for (let c = 0; c < 3; c++) out[i * 3 + c] = w.reduce((a, v, k) => a + v * q[k][c], 0) * mod + wr * img[i * 3 + c];
     // A BRIGHT leaf (f > 0.5) may not use the plain leaf ramp at all: allowed by weight alone, plain
     // green stayed available wherever any of that ramp remained, and error diffusion picked it for
@@ -316,6 +337,11 @@ const themed = (img, W, H) => {
                (w[2] > 0.05 ? bitsOf(BARKC) : 0) | (w[3] > 0.05 ? bitsOf(RACKC) : 0) | (w[4] > 0.05 ? bitsOf(CEILC) : 0);
     if (ovl[i] || both[i]) allow[i] |= bitsOf(LEAFC) | bitsOf(BARKC);    // a branch line may sit in a leafy block
     if (!allow[i]) allow[i] = 0xffff & ~AVOID;
+  }
+  if (process.env.REGIONPNG) {      // debug: each pixel's dominant theme, as a picture
+    const C = [[60, 60, 60], [40, 200, 60], [170, 255, 160], [230, 120, 30], [60, 90, 220], [170, 60, 200]];
+    const rgb = new Uint8Array(n * 3); for (let i = 0; i < n; i++) C[region[i]].forEach((v, c) => { rgb[i * 3 + c] = v; });
+    writeFileSync(process.env.REGIONPNG, png(W, H, rgb));
   }
   return { img: out, allow, region };
 };
