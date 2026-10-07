@@ -25945,20 +25945,84 @@ try {
                 `${SW_COLS - col1} over Krill's next ${(tSweep - t1).toFixed(1)}s (step ${step2})` +
                 (title ? `; then the TITLE for the last ${(t1 + t2 + tLast - tSweep).toFixed(1)}s ` +
                          `(${TITLE.glyphs} glyphs, rows ${TITLE.row0}-${TITLE.row0 + TITLE.len / 40 - 1})` : ''));
+  // ---- FASTBOOT's own sweep rates: the same split, but IRAY arrives at FB_BPS, not the KERNAL's ----
+  // FB_BPS is MEASURED in VICE (true drive), not derived: see loader-src.mjs for why the fast path
+  // is handshaked and what bounds its speed.
+  const FB = !!QUOTE && process.env.FASTBOOT !== '0';
+  const FB_BPS = +(process.env.FBBPS ?? 1140);   // measured: IRAY's 3,924 B in 3.45 s (VICE, true drive)
+  // MEASURED in VICE (true drive): ~110 ms to send a block plus ~50-60 ms of DOS read-job lead
+  // means no spacing under one revolution is reliable; 19 is effectively "two sectors back", so
+  // every block lands one revolution later -- ~200 ms each, against ~330 ms at 10-17 (near misses).
+  const FB_IL = +(process.env.FBIL ?? 19);
+  const KRILL_IL = +(process.env.KRILLIL ?? 4);
+  const fb = (() => {
+    if (!FB) return null;
+    const t1f = irayBytes / FB_BPS, tSw = title ? TITLE_AT * (t1f + t2 + tLast) : t1f + t2;
+    const c1 = Math.max(1, Math.min(SW_COLS - 1, Math.round(SW_COLS * t1f / tSw)));
+    const s1 = Math.round(c1 * 256 / irayPages);
+    const s2 = Math.round((SW_COLS - c1) * 256 / (p2Pages * Math.min(1, (tSw - t1f) / t2)));
+    if (s1 > 0xffff || s2 < 1 || s2 > 0xffff) throw new Error(`fastboot sweep steps out of range: ${s1}/${s2}`);
+    console.error(`  fastboot sweep: ${c1} columns over IRAY's ${t1f.toFixed(1)}s, ${SW_COLS - c1} over Krill's`);
+    return { step1: s1, step2: s2 };
+  })();
   if (QUOTE) {
-    const built = buildQuote(assemble, QUOTE.q, 'IRAY', step1, title);
-    QUOTE.prg = built.prg; QUOTE.len = built.len;
+    const built = buildQuote(assemble, QUOTE.q, 'IRAY', step1, title, step2);
+    QUOTE.prg = built.prg; QUOTE.len = built.len; QUOTE.qshow = built.qshow;
     console.error(`  boot quote: ${QUOTE.q.glyphs} glyphs + ${QUOTE.q.screen.length} screen = ` +
       `${QUOTE.blob.length} B, exomizer ${QUOTE.q.packed.length} B -> IQOT ${built.len} B at ` +
       `$${QUOTE_RUN.toString(16)}`);
   }
-  // With no quote there is no IQOT, so the autorun stub chains straight to Krill.
-  const run = buildAutorun(assemble, QUOTE ? 'IQOT' : 'IRAY', QUOTE ? QUOTE_RUN : IRAY_ENTRY);
-  const d = D64.createEmpty('IRAY', '01');
-  d.writeFile('IRUN', Buffer.from(run), D64.FILE_TYPE_PRG);     // FIRST, so LOAD"*",8,1 finds it
-  if (QUOTE) d.writeFile('IQOT', Buffer.from(QUOTE.prg), D64.FILE_TYPE_PRG);
-  d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG);
-  for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG);
+  // With no quote there is no IQOT, so the autorun stub chains straight to Krill; with FASTBOOT it
+  // chains to IFBT, which decides between the fast road and IQOT's KERNAL one.
+  const { buildFastboot, buildDriveCode, FASTBOOT_AT, FB_NAME, FB_DRV_NAME } = await import('./loader-src.mjs');
+  const run = buildAutorun(assemble, FB ? FB_NAME : QUOTE ? 'IQOT' : 'IRAY',
+                           FB ? FASTBOOT_AT : QUOTE ? QUOTE_RUN : IRAY_ENTRY);
+  const writeDisk = (ifb, drv) => {
+    const d = D64.createEmpty('IRAY', '01');
+    d.writeFile('IRUN', Buffer.from(run), D64.FILE_TYPE_PRG);     // FIRST, so LOAD"*",8,1 finds it
+    if (FB) {
+      d.writeFile(FB_NAME, Buffer.from(ifb.prg), D64.FILE_TYPE_PRG);
+      d.writeFile(FB_DRV_NAME, Buffer.from(drv), D64.FILE_TYPE_PRG);   // raw: the DRIVE runs it, never LOADed
+    }
+    // FASTBOOT streams these two, and spends ~103 ms per block sending it; at the DOS's interleave
+    // of 10 the next block comes round after ~95 ms, is missed, and costs a whole revolution (200
+    // ms). Measured: 310 ms a block at 10. FB_IL spaces them so the next block arrives just after.
+    // And on a FRESH TRACK (2), so the spacing is exact: track 1 already holds IRUN/IFBT/IDRV, and
+    // the allocator's "next free sector after the one wanted" there made the gaps vary 10-17.
+    const il = FB ? FB_IL : undefined, it = FB ? 2 : undefined;
+    if (QUOTE) d.writeFile('IQOT', Buffer.from(QUOTE.prg), D64.FILE_TYPE_PRG, il, it);
+    d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG, il, it);
+    // EVERY KRILL-LOADED FILE at Krill's native interleave: 4 on tracks 1-17 (3 on 18+; 4 there
+    // costs little). Its drive code reads and decodes so fast it can take every 4th sector, so the
+    // DOS default of 10 left it waiting out ten revolutions per track: measured ~3.6 KB/s for the
+    // boot's 58 KB. See krill/README-krill, "native interleave".
+    for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG, KRILL_IL);
+    return d;
+  };
+  let d;
+  if (FB) {
+    // TWO PASSES: IDRV needs the sectors IQOT and IRAY start at, and IFBT needs IDRV's -- known only
+    // once the disk is written. Pass 1 uses placeholders of the same LENGTH, so pass 2 allocates
+    // identically; the assert below holds it to that.
+    const ts = (dk, n) => { const e = dk.getDirectory().find(e => e.fileName === n);
+                            return { track: e.startTrack, sector: e.startSector }; };
+    const make = (drvTs, chains) => [buildFastboot(assemble, drvTs, QUOTE.qshow, fb.step1, fb.step2),
+                                     buildDriveCode(assemble, chains)];
+    let [ifb, drv] = make({ track: 18, sector: 18 }, [{ track: 1, sector: 0 }, { track: 1, sector: 0 }]);
+    const d1 = writeDisk(ifb, drv);
+    const at = { drv: ts(d1, FB_DRV_NAME), q: ts(d1, 'IQOT'), r: ts(d1, 'IRAY') };
+    [ifb, drv] = make(at.drv, [at.q, at.r]);
+    d = writeDisk(ifb, drv);
+    for (const [k, n] of [['drv', FB_DRV_NAME], ['q', 'IQOT'], ['r', 'IRAY']]) {
+      const t = ts(d, n);
+      if (t.track !== at[k].track || t.sector !== at[k].sector) throw new Error(
+        `fastboot: ${n} moved between the two disk passes (${at[k].track}/${at[k].sector} -> ${t.track}/${t.sector})`);
+    }
+    if (process.env.FBLABELS) writeFileSync(process.env.FBLABELS, JSON.stringify({ ...ifb.labels, qshow: QUOTE.qshow,
+      ...Object.fromEntries(Object.entries(drv.labels).map(([k, v]) => ['d_' + k, v])) }));
+    console.error(`  fastboot: IFBT ${ifb.len} B; IDRV at ${at.drv.track}/${at.drv.sector} streams IQOT ` +
+                  `(${at.q.track}/${at.q.sector}) and IRAY (${at.r.track}/${at.r.sector})`);
+  } else d = writeDisk();
   writeFileSync('./' + D64OUT, Buffer.from(d.getData()));
   const kern = (run.length - 2) + (QUOTE ? QUOTE.len : 0) + ld.prg.length;
   console.log(`boot: IRUN ${run.length - 2}B` + (QUOTE ? ` + IQOT ${QUOTE.len}B` : '') +

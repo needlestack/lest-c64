@@ -122,7 +122,8 @@ export const runToExit = (args, capMs, opts = {}) => new Promise(res => {
 // and each later one "<output>(C:$yyyy) ". A connection stops the CPU; `x` resumes it, and a
 // checkpoint hit stops it again with a fresh prompt on the same socket. So: one persistent socket,
 // every command waits for the closing prompt, and the caller decides when to resume.
-const PR = /\(C:\$([0-9a-f]{4})\) $/;
+// C: is the computer; 8: (9:...) is a DRIVE's CPU after `device 8:`, whose prompt differs
+const PR = /\((?:C|\d+):\$([0-9a-f]{4})\) $/;
 export const textMonitor = async (port, { connectTries = 160, replyMs = 60000 } = {}) => {
   let sock;
   for (let k = 0; ; k++) {
@@ -141,7 +142,7 @@ export const textMonitor = async (port, { connectTries = 160, replyMs = 60000 } 
   const mem = async (a, n) => {
     const o = await cmd(`m ${a.toString(16)} ${(a + n - 1).toString(16)}`), b = [];
     for (const l of o.split('\n')) {
-      const m = /^>C:[0-9a-f]{4}\s+((?:[0-9a-f]{2}\s+){1,16})/i.exec(l);
+      const m = /^>(?:C|\d+):[0-9a-f]{4}\s+((?:[0-9a-f]{2}\s+){1,16})/i.exec(l);   // C: or a drive's 8:
       if (m) b.push(...m[1].trim().split(/\s+/).map(h => parseInt(h, 16)));
     }
     return b.slice(0, n);

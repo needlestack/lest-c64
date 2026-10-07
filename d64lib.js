@@ -382,13 +382,15 @@ class D64 {
     /**
      * Allocate a chain of sectors
      */
-    _allocateSectorChain(numSectors) {
+    _allocateSectorChain(numSectors, interleave = D64.FILE_INTERLEAVE, startTrack = 1) {
         const chain = [];
-        let currentTrack = 1;
-        let currentSector = 0;
+        let currentTrack = startTrack;
+        // A file placed on a track of its own starts AT sector 0, so its steps are exact; the
+        // default (track 1) keeps the original behaviour of starting one interleave in.
+        let currentSector = startTrack === 1 ? 0 : (D64.SECTORS_PER_TRACK[startTrack] - interleave);
 
         for (let i = 0; i < numSectors; i++) {
-            const nextSector = (currentSector + D64.FILE_INTERLEAVE) %
+            const nextSector = (currentSector + interleave) %
                                D64.SECTORS_PER_TRACK[currentTrack];
             const location = this._findFreeSector(currentTrack, nextSector);
 
@@ -511,7 +513,11 @@ class D64 {
      * @param {number} fileType - File type constant (default: PRG)
      * @returns {boolean} Success
      */
-    writeFile(fileName, fileData, fileType = D64.FILE_TYPE_PRG) {
+    // interleave: sectors skipped between a file's consecutive blocks. The default suits the DOS;
+    // a loader that spends longer per block wants more, or it misses the next one and waits a turn.
+    // startTrack: where the chain begins -- a fresh track gives exact spacing, where "the next free
+    // sector after the one wanted" on a busy track does not.
+    writeFile(fileName, fileData, fileType = D64.FILE_TYPE_PRG, interleave = D64.FILE_INTERLEAVE, startTrack = 1) {
         if (!fileName || fileName.length === 0) {
             throw new Error('Invalid filename');
         }
@@ -530,7 +536,7 @@ class D64 {
             throw new Error('Directory is full');
         }
 
-        const sectorChain = this._allocateSectorChain(numSectors);
+        const sectorChain = this._allocateSectorChain(numSectors, interleave, startTrack);
         if (!sectorChain) {
             throw new Error('Failed to allocate sectors');
         }

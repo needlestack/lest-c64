@@ -138,7 +138,11 @@ export const EXO_CODE = QUOTE_RUN + 0x14;    // the decruncher itself, after the
 // between $0400 and $0801. $0334-$03bf is free for the whole boot -- above IRUN's $02a7-$0303,
 // below the resident -- and the game's own use of low RAM starts long after the sweep is gone.
 const SW_COL = 0x0334, SW_ACC = 0x0335, SW_PG = 0x0337, SW_BASE = 0x0338,
-      SW_WANT = 0x0339, SW_STEP = 0x033a;
+      SW_WANT = 0x0339, SW_STEP = 0x033a,
+      // the KRILL phase's step, set by whichever first stage ran (IQOT's KERNAL read or IFBT's fast
+      // one): the columns left for Krill to paint depend on how far the first stage got, so it
+      // cannot be one constant in the body any more
+      SW_STEP2 = 0x033c;
 export const SWEEP_AT = 0x0340;
 const SW_IRQ = SWEEP_AT, SW_TICK = SWEEP_AT + 3,  // a jump table, so no entry's address depends
       SW_TITLE = SWEEP_AT + 6;                    //   on how long the code turns out to be
@@ -359,9 +363,9 @@ r2dbg:  jmp r2dbg
         sta ${hx4(SW_BASE)}
         lda $e1
         sta $e3                 ; nothing in flight yet
-        lda #${'$' + (step2 & 255).toString(16).padStart(2, '0')}
-        sta ${hx4(SW_STEP)}     ; Krill's pages are ${Math.round(256 / step2 * 10) / 10}x cheaper in time than the KERNAL's
-        lda #${'$' + (step2 >> 8).toString(16).padStart(2, '0')}
+        lda ${hx4(SW_STEP2)}     ; the Krill phase's step: set by the first stage that ran, which
+        sta ${hx4(SW_STEP)}     ;   knows how many columns it left to paint
+        lda ${hx4(SW_STEP2 + 1)}
         sta ${hx4(SW_STEP + 1)}
         sei
         lda #<${hx4(SW_IRQ)}
@@ -533,7 +537,7 @@ nq:     !byte ${petscii(nextName)}
 // destination from the stream's first three bytes, and a raw stream has no such header.
 // Backward is exomizer's default and the pairing exodecrunch.asm expects with DECRUNCH_FORWARDS
 // left at 0: the packed bytes are read from the END downwards, so the pointer starts one past.
-export function buildQuote(assemble, q, irayName, step1, title = null) {
+export function buildQuote(assemble, q, irayName, step1, title = null, step2 = 1) {
   const d018 = (((QUOTE_SCR - 0xc000) >> 10) << 4) | (((QUOTE_CHR - 0xc000) >> 11) << 1);
   if (q.decr.at !== EXO_CODE) throw new Error(
     `the decruncher in quote-screen.json is assembled for ${hx4(q.decr.at)} but this build puts ` +
@@ -558,7 +562,21 @@ qbSkip: dec qbLo
         rts
         * = ${hx4(EXO_CODE)}
         !byte ${q.decr.bytes.join(',')}
-qrun:   sei                     ; ${hx4(QUOTE_SCR)} is under the KERNAL ROM, so the ROM comes out -- and
+        ; ---- TWO ENTRIES. qrun is the KERNAL path (IRUN or IFBT's fallback jumps to $4000): show
+        ; the quote, then read IRAY a byte at a time. qshow only shows the quote and installs the
+        ; sweep, then RETURNS -- IFBT's fast path calls it between its two files and brings IRAY
+        ; in itself. Each path then sets the sweep's two step rates for its own speed.
+qrun:   jsr qshow
+        lda #${'$' + (step1 & 255).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP)}     ; ${step1}/256 of a column per page: ${Math.round(step1 * 100 / 256) / 100} columns each
+        lda #${'$' + (step1 >> 8).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP + 1)}
+        lda #${'$' + (step2 & 255).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP2)}     ; and the Krill phase's, which the body picks up
+        lda #${'$' + (step2 >> 8).toString(16).padStart(2, '0')}
+        sta ${hx4(SW_STEP2 + 1)}
+        jmp qkern
+qshow:  sei                     ; ${hx4(QUOTE_SCR)} is under the KERNAL ROM, so the ROM comes out -- and
         lda #$34                ;   with it the IRQ vector, hence the sei. Zero page is RAM either way.
         sta $01
         cld                     ; the decruncher's one stated precondition
@@ -611,10 +629,9 @@ swcp:   lda swDat,x             ;   them -- IMG buries this file while they are 
         sta ${hx4(SW_ACC + 1)}
         sta ${hx4(SW_PG)}
         sta ${hx4(SW_BASE)}
-        lda #${'$' + (step1 & 255).toString(16).padStart(2, '0')}
-        sta ${hx4(SW_STEP)}     ; ${step1}/256 of a column per page: ${Math.round(step1 * 100 / 256) / 100} columns each
-        lda #${'$' + (step1 >> 8).toString(16).padStart(2, '0')}
-        sta ${hx4(SW_STEP + 1)}
+        rts
+
+qkern:
 
         ; ---- Krill, read a byte at a time, so the sweep can move DURING a KERNAL load ----
         ; LOAD is one blocking call with no progress hook, and this is the longest single wait in
@@ -676,5 +693,417 @@ pkEnd:
     throw new Error('the quote byte fetcher did not assemble to the expected shape at EXO_GETBYTE');
   for (let i = 0; i < q.decr.bytes.length; i++) if (at(EXO_CODE + i) !== q.decr.bytes[i])
     throw new Error(`the decruncher is not at ${hx4(EXO_CODE)} in the assembled IQOT`);
-  return { prg: out.prg, len: out.prg.length - 2 };
+  return { prg: out.prg, len: out.prg.length - 2, qshow: out.labels.qshow };
+}
+
+
+// ================================================================================================
+// ---- FASTBOOT: the first stage at fast-loader speed ---------------------------------------------
+// ================================================================================================
+// WHY THIS EXISTS, AND WHY KRILL STAYS. Everything above loads at KERNAL speed (~290 B/s) until
+// Krill is installed -- and Krill's installer is itself 3.3 KB of that, so the boot spent ~20 s on
+// its first 5.8 KB and ~16 s on the other 58 KB. No full-featured loader fixes that by swapping in
+// (Covert Bitops' and Bitfire's installers have the same problem); what fixes it is getting the
+// DRIVE to read its own code off the disk, so almost nothing crosses the slow bus. That is the
+// idea of Michael Steil's fastboot1541 (github.com/mist64/fastboot1541, "do anything you want
+// with it"), adapted here. Krill then does the 58 KB and every in-game load, because it is FASTER
+// at bulk (its drive code decodes GCR on the fly; this one leans on the drive ROM to read each
+// sector) and it tolerates interrupts mid-transfer, which the sweep and background loading use.
+// So: fastboot gets things going faster; Krill is faster and more workable after that.
+//
+//   IRUN (KERNAL) -> IFBT (KERNAL, small) --1541?--> IDRV runs IN THE DRIVE, streams IQOT + IRAY
+//                                         \--no----> IQOT's KERNAL path, exactly the old boot
+//
+// TWO CHANGES FROM fastboot1541, both for robustness:
+//   * HANDSHAKED, NOT CYCLE-TIMED. fastboot sends a byte as four bit-pairs 8 cycles apart, timed
+//     for PAL (it fails on NTSC) with interrupts off and badlines dodged. Here the C64 CLOCKS EACH
+//     BIT by toggling CLK and the drive answers on DATA. The one timing fact left is ONE-SIDED: the
+//     C64 must sample later than the drive's worst response (FB_DRIVE_MAX). Interrupts, badlines,
+//     sprites and NTSC/PAL can only make the C64 later, so none of them can break it.
+//   * EXPLICIT SECTOR READ. fastboot executes the sector the drive happens to hold in an assumed
+//     buffer. Here U1 reads IDRV into buffer 1 ($0400) on purpose and M-E runs it.
+// A 1541 is recognised by M-R of its ROM's version string ("154" at $E5C4: 1541 and 1541-II; the
+// 1570/71 say "157" and the 1581 differs), and anything that does not answer within FB_TIMEOUT
+// falls back. SD2IEC and friends take the old path, which works everywhere.
+export const FASTBOOT_AT = 0xc200;   // clear of IQOT ($4000+), IRAY ($0801-), EXO_TABLE ($c000-$c09b),
+                                     //   KSCR ($cc00) and the quote; dead before Krill loads ICHR here
+export const FB_NAME = 'IFBT', FB_DRV_NAME = 'IDRV';
+const FB_DRV_AT = 0x0402;            // buffer 1, after the sector's two link bytes
+const FB_TIMEOUT = 120;              // jiffies (2 s) for the drive code to say it is alive
+// WORST drive response, in DRIVE cycles (1 MHz), from CLK changing to DATA holding the bit: one
+// pass of sendb's level-wait loop (bit/branch, 7) plus branch-not-taken and the store (2 + 4). The
+// output byte is prepared BEFORE the wait, so nothing else sits on that path. (The first version
+// polled for ANY change and computed the bit after seeing it: 41 cycles, and 0.8 KB/s overall.)
+// buildDriveCode() asserts the loops still have this shape; the C64 delay is derived from it.
+const FB_DRIVE_MAX = 7 + 2 + 4;
+// ...and how long after a store the drive is WAITING again (contract part 2, see buildDriveCode):
+// between the bits of a pair 12 cycles, across a pair 21 (dec/bne), across a BYTE 47 (fetch, set up).
+// The C64's gaps between toggles must exceed response + prep: 13 + 21 = 34 mid-byte, 13 + 47 = 60
+// across a byte -- each with the same 1.3x margin, in NTSC cycles (0.978 us).
+const FB_DRIVE_PREP_MID = 21, FB_DRIVE_PREP_BYTE = 47;
+// C64 sample delay after its toggle = 5*DLY + 5 cycles. NTSC is the FAST clock (0.978 us/cycle), so
+// it is the tight case; a 1.5x margin also covers the line's slower RISE when the drive releases
+// it (open collector, pull-up). DLY 3 -> 20 cycles = 19.6 us against 13. PAL only adds margin.
+const FB_DLY = +(process.env.FBDLY ?? Math.ceil((FB_DRIVE_MAX * 1.5 / 0.978 - 5) / 5));   // FBDLY: margin tests only
+
+// IDRV: 254 bytes executed at $0402 in the 1541. files = [{track, sector}...] in order.
+//
+// THE TIMING CONTRACT, both halves derived here and asserted against the assembled code:
+//   1. RESPONSE: from the C64 toggling CLK to DATA holding the bit, at most FB_DRIVE_MAX. The C64
+//      samples FB_DLY-derived cycles later.
+//   2. READINESS: the drive must already be WAITING when the next toggle arrives -- otherwise it
+//      sees the toggle late and answers late. The first version broke exactly here: it computed
+//      each bit after seeing the toggle, called a subroutine per bit and per byte, and at a byte
+//      boundary needed ~80 cycles before it was polling again, while the C64's fast path toggled
+//      again after ~45. So the C64's gap between toggles (FB_GAP) must exceed the drive's worst
+//      store-to-polling time (FB_DRIVE_PREP) plus its response.
+// What makes both small: every byte starts with CLK RELEASED (the end-of-sector ack is TWO
+// toggles, so each sector's toggle count is even and the level to wait for never needs choosing),
+// the count rides in the buffer in front of the data so one loop sends both, and the bit loop is
+// unrolled in pairs (wait-pulled, wait-released) with each bit's output prepared before its wait.
+export function buildDriveCode(assemble, files) {
+  const tab = files.flatMap(f => [f.track, f.sector]).concat([0]);
+  const half = (wait, br) => `        ldy #$02                ; a 0 pulls DATA low...
+        asl sbyte
+        bcc ${wait}
+        ldy #$00                ; ...a 1 releases it (the line reads high)
+${wait}:  bit $1800
+        ${br} ${wait}
+        sty $1800`;
+  const src = `        * = ${hx4(FB_DRV_AT)}
+        sei                     ; no DOS IRQ while we own the bus (re-enabled only to read a sector)
+        lda #$00
+        sta $1800               ; release DATA and CLK
+dw0:    lda $1800               ; the C64 releases CLK after its UNLISTEN; start from a quiet line
+        and #$04
+        bne dw0
+        sta fidx
+nfile:  ldx fidx
+        lda ftab,x              ; track of the next file's first sector; 0 = no more files
+        beq done
+        sta $06
+        lda ftab+1,x
+        sta $07
+        inx
+        inx
+        stx fidx
+nsect:  jsr rdsec               ; $06/$07 -> $0300; rdsec keeps the link's sector byte in ns
+        lda $0300
+        sta nt                  ; ...and its track byte: 0 = this is the file's last sector
+        ldy #$fe                ; a full sector carries 254 bytes...
+        tax                     ;   (Z from the track again: ldy just changed it)
+        bne cnt
+        ldy $0301               ; ...the last one, up to the index in its link
+        dey
+cnt:    sty $0301               ; the COUNT goes out first, from the buffer, like any byte
+        iny                     ; count + 1 bytes: the count itself, then the data
+        sty count
+        ldx #$01
+        jsr sendn
+        lda nt                  ; follow the chain
+        beq eof
+        sta $06
+        lda ns
+        sta $07
+        jmp nsect
+eof:    lda #$00                ; end of file: one byte, a count of 0
+        sta $0301
+        lda #$01
+        sta count
+        ldx #$01
+        jsr sendn
+        jmp nfile
+done:   lda #$00
+        sta $1800
+        cli
+        rts                     ; back to DOS: M-E called us, and Krill's install needs DOS next
+
+rdsec:  lda #$80                ; READ job for buffer 0 ($0300): DOS's job loop runs it in its IRQ
+        sta $00
+        cli
+rd1:    lda $00
+        bmi rd1
+        sei
+        cmp #$01                ; 1 = OK; anything else, read it again
+        bne rdsec
+        lda $0301
+        sta ns                  ; the link's sector byte, before the count overwrites it
+        rts
+
+        ; ---- send count bytes from $0300,X, then take the TWO-toggle ack ----
+sendn:  lda #$02
+        sta $1800               ; READY: DATA low
+sn1:    lda $0300,x
+        sta sbyte
+        lda #$04                ; for bit: CLK IN is bit 2 of $1800, set while the line is pulled
+        ldy #$04
+        sty pairs
+sn2:
+${half('sw0', 'beq')}
+${half('sw1', 'bne')}
+        dec pairs
+        bne sn2
+        inx
+        dec count
+        bne sn1
+aw0:    bit $1800               ; ack, toggle 1: the C64 has the last bit -- let go of DATA (BUSY)
+        beq aw0
+        ldy #$00
+        sty $1800
+aw1:    bit $1800               ; ack, toggle 2: back to released, so the next byte starts there
+        bne aw1
+        rts
+ftab:   !byte ${tab.join(',')}
+fidx:   !byte 0
+count:  !byte 0
+sbyte:  !byte 0
+pairs:  !byte 0
+nt:     !byte 0
+ns:     !byte 0
+`;
+  const out = assemble(src);
+  const bytes = [...out.bytes];
+  if (bytes.length > 254) throw new Error(`IDRV is ${bytes.length} bytes; one sector holds 254`);
+  // The contract's numbers come from these loops' SHAPES: each wait is "bit $1800 / branch / sty
+  // $1800". If that changes, FB_DRIVE_MAX and FB_DRIVE_PREP are stale.
+  for (const w of ['sw0', 'sw1'])
+    if (bytes[out.labels[w] - FB_DRV_AT] !== 0x2c || bytes[out.labels[w] - FB_DRV_AT + 5] !== 0x8c)
+      throw new Error(`${w} is no longer "bit $1800 / branch / sty $1800": recount the fastboot timing`);
+  const padded = bytes.concat(Array(254 - bytes.length).fill(0));
+  padded.labels = out.labels;            // for timing probes (FBLABELS)
+  return padded;
+}
+
+// IFBT: the C64 side. drv = IDRV's {track, sector}; qshow = IQOT's show-only entry; step1/step2
+// = the sweep's rates for THIS path's speed.
+export function buildFastboot(assemble, drv, qshow, step1, step2) {
+  // TWO digits always ("01"): DOS reads leading zeros fine, and a fixed width keeps IFBT's length
+  // the same in both of the build's disk passes -- the pass that learns where IDRV landed must not
+  // move it by growing a byte.
+  const dec = n => [...String(n).padStart(2, '0')].map(c => c.charCodeAt(0)).join(',');
+  const src = `        * = ${hx4(FASTBOOT_AT)}
+cptr = $fb                      ; free zero page; swPant takes it over only once the sweep runs
+ptr  = $fd                      ; the store pointer, as IQOT's KERNAL loop uses it
+rbv  = $02                      ; the byte being received
+        ; ---- 1. is it a 1541? M-R three bytes of the ROM's version string ----
+        lda #$06
+        ldx #<mrc
+        ldy #>mrc
+        jsr $ffbd               ; SETNAM: the command IS the filename of channel 15
+        lda #$0f
+        ldx $ba                 ; the device we booted from
+        ldy #$0f
+        jsr $ffba               ; SETLFS
+        jsr $ffc0               ; OPEN: sends M-R
+        bcs slowa
+        ldx #$0f
+        jsr $ffc6               ; CHKIN
+        ldy #$00
+        sty bad
+chk:    jsr $ffcf               ; CHRIN
+        cmp sig,y
+        beq chk2
+        inc bad
+chk2:   iny
+        cpy #$03
+        bne chk
+        jsr $ffcc               ; CLRCHN
+        lda bad
+        bne slow15
+        ; ---- 2. channel 2 on buffer 1 ($0400), read IDRV into it, run it ----
+        lda #$02
+        ldx #<bufn
+        ldy #>bufn
+        jsr $ffbd
+        lda #$02
+        ldx $ba
+        ldy #$02
+        jsr $ffba
+        jsr $ffc0               ; OPEN 2,dev,2,"#1"
+        bcs slow2
+        lda #<u1c
+        ldx #>u1c
+        ldy #u1e-u1c
+        jsr cmd                 ; U1:2 0 t s -- IDRV into buffer 1
+        lda #<mec
+        ldx #>mec
+        ldy #mee-mec
+        jsr cmd                 ; M-E ${hx4(FB_DRV_AT)} -- and the drive is ours
+        ; ---- 3. let go of the bus and wait for the drive to say READY (DATA low) ----
+        lda $dd00
+        and #$c7                ; ATN, CLK and DATA released; the VIC bank bits untouched
+        sta $dd00
+        lda $a2
+        clc
+        adc #${FB_TIMEOUT}
+        sta tmo
+        ; FIRST see DATA released: the end of the M-E command's own bus handshake can leave it low
+        ; for a moment, and that would read as READY before the drive code has even started.
+wh:     bit $dd00
+        bmi wa
+        lda $a2
+        cmp tmo
+        bne wh
+        jmp slow2
+wa:     bit $dd00
+        bpl alive
+        lda $a2
+        cmp tmo
+        bne wa
+        jmp slow2               ; no answer: whatever ran, take the KERNAL road
+        ; ---- 4. IQOT, show the quote, IRAY with the sweep running, then on to IRAY ----
+alive:  lda #<rtsx
+        sta tickv
+        lda #>rtsx
+        sta tickv+1
+        jsr rfile               ; IQOT (packed quote) to $4000
+        jsr ${hx4(qshow)}       ; quote up, sweep installed
+        lda #$${(step1 & 255).toString(16)}
+        sta ${hx4(SW_STEP)}
+        lda #$${(step1 >> 8).toString(16)}
+        sta ${hx4(SW_STEP + 1)}
+        lda #$${(step2 & 255).toString(16)}
+        sta ${hx4(SW_STEP2)}
+        lda #$${(step2 >> 8).toString(16)}
+        sta ${hx4(SW_STEP2 + 1)}
+        lda #<${hx4(SW_TICK)}
+        sta tickv
+        lda #>${hx4(SW_TICK)}
+        sta tickv+1
+        jsr rfile               ; IRAY, a sweep tick per page
+        lda $dd00
+        and #$c7                ; leave CLK released for the KERNAL (the toggles may end low)
+        sta $dd00
+        lda #$02
+        jsr $ffc3               ; CLOSE 2 -- the drive is back in DOS by now (IDRV returned)
+        lda #$0f
+        jsr $ffc3               ; CLOSE 15
+        jmp ${hx4(IRAY_ENTRY)}
+
+        ; ---- the KERNAL road: the boot as it was before fastboot ----
+slow2:  lda #$02
+        jsr $ffc3
+slow15: jsr $ffcc
+        lda #$0f
+        jsr $ffc3
+slowa:  lda #$04
+        ldx #<qnm
+        ldy #>qnm
+        jsr $ffbd
+        lda #$01
+        ldx $ba
+        ldy #$01
+        jsr $ffba
+        lda #$00
+        jsr $ffd5               ; LOAD IQOT
+        bcs slowx
+        jmp ${hx4(QUOTE_RUN)}
+slowx:  inc $d020
+        jmp slowx
+
+        ; ---- send a command on channel 15: A/X = string, Y = length ----
+cmd:    sta cptr
+        stx cptr+1
+        sty clen
+        ldx #$0f
+        jsr $ffc9               ; CHKOUT
+        ldy #$00
+cm1:    lda (cptr),y
+        jsr $ffd2               ; CHROUT
+        iny
+        cpy clen
+        bne cm1
+        jmp $ffcc               ; CLRCHN: UNLISTEN, and the drive runs the command
+
+        ; ---- one file: [count, bytes...] per sector until a count of 0. The first two bytes are
+        ; ---- the load address, as in any PRG.
+rfile:  lda #$02
+        sta hdr
+rs:     bit $dd00               ; READY = DATA low
+        bmi rs
+        jsr rbyte
+        sta cnt
+        beq rend
+rb:     jsr rbyte
+        ldy hdr
+        beq rst
+        cpy #$02
+        bne rh1
+        sta ptr
+        dec hdr
+        jmp rnext
+rh1:    sta ptr+1
+        dec hdr
+        jmp rnext
+rst:    ldy #$00
+        sta (ptr),y
+        inc ptr
+        bne rnext
+        inc ptr+1
+        jsr tickj               ; a page has arrived
+rnext:  dec cnt
+        bne rb
+        jsr ack
+        jmp rs
+rend:   jmp ack
+
+        ; ---- one byte: eight toggles of CLK, each answered on DATA ----
+        ; The sample comes 5*${FB_DLY}+5 = ${5 * FB_DLY + 5} cycles after the toggle, against a drive that has
+        ; answered within ${FB_DRIVE_MAX} us. Anything that delays this code only adds margin.
+rbyte:  ldy #$04                ; BYTE GAP: the drive needs ~47 cycles after its last store to be
+rb0:    dey                     ;   waiting again (it fetches the next byte), and the C64's fastest
+        bne rb0                 ;   path back here -- after the count byte -- is only ~64
+        ldx #$08
+rb1:    lda $dd00
+        eor #$10                ; toggle CLK
+        sta $dd00
+        ldy #${FB_DLY}
+rb2:    dey
+        bne rb2
+        lda $dd00               ; bit 7 = DATA = the bit
+        asl
+        rol rbv
+        nop                     ; BIT GAP: toggles must be > 34 drive cycles apart x1.3 margin;
+        nop                     ;   these two make it 46 C64 cycles
+        dex
+        bne rb1
+        lda rbv
+        rts
+
+        ; ---- the end-of-sector ack: TWO toggles, so each sector's toggle count is even and every
+        ; byte starts with CLK released -- the drive never has to choose which level to wait for.
+ack:    jsr tog
+        ldy #${2 * FB_DLY}      ; the drive answers the first (releasing DATA: BUSY) before the second
+ak1:    dey
+        bne ak1
+        jsr tog
+        ldy #${2 * FB_DLY}
+ak2:    dey
+        bne ak2
+        rts
+tog:    lda $dd00
+        eor #$10
+        sta $dd00
+        rts
+
+tickj:  jmp (tickv)
+rtsx:   rts
+
+mrc:    !byte ${'M-R'.split('').map(c => c.charCodeAt(0)).join(',')},$c4,$e5,$03
+sig:    !byte $31,$35,$34       ; "154"
+bufn:   !byte $23,$31           ; "#1"
+u1c:    !byte $55,$31,$3a,$32,$20,$30,$20,${dec(drv.track)},$20,${dec(drv.sector)}
+u1e:
+mec:    !byte $4d,$2d,$45,$${(FB_DRV_AT & 255).toString(16)},$${(FB_DRV_AT >> 8).toString(16)}
+mee:
+qnm:    !byte $49,$51,$4f,$54   ; "IQOT"
+bad:    !byte 0
+tmo:    !byte 0
+clen:   !byte 0
+hdr:    !byte 0
+cnt:    !byte 0
+tickv:  !word 0
+`;
+  const out = assemble(src);
+  return { prg: out.prg, len: out.prg.length - 2, labels: out.labels };
 }

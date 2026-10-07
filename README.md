@@ -67,6 +67,10 @@ wall-edge shapes, giving 160×200 multicolour pixels. Each frame:
   ladder of pre-fitted sizes and hidden behind walls by per-frame occluder masks.
 - **Memory**: the image is laid out by a build-time compactor, code from the bottom and tables from
   the top. Levels load from disk on demand, through Krill's loader.
+- **Boot**: a two-stage loader. A few hundred bytes at the stock drive speed get the 1541 running
+  its own small transfer routine, read straight off the disk, which brings in the quote and Krill's
+  installer quickly; Krill then loads everything else, laid out at its native interleave. Drives
+  that are not a 1541 take the stock route automatically.
 
 The build also checks itself as it goes. Page alignment, memory overlaps, zero-page ownership,
 unreachable code, and the precondition of every undocumented opcode it uses are verified before a
@@ -98,5 +102,8 @@ The code in this repository is released under the [MIT licence](LICENSE).
 Included third-party code keeps its own licence:
 
 - **Loader by Krill** (Gunnar Ruthenberg), BSD 3-clause. See [`krill/README-krill`](krill/README-krill).
+- **The fast first stage** (`IFBT`/`IDRV` in `loader-src.mjs`) adapts the idea of
+  [fastboot1541](https://github.com/mist64/fastboot1541) by Michael Steil: have the drive read its
+  own code off the disk, so almost nothing crosses the slow bus before a fast loader is running.
 - **Exomizer decruncher** by Magnus Lind ([`exodecrunch.asm`](exodecrunch.asm)), under the notice
   in that file.
