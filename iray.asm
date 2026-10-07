@@ -536,10 +536,10 @@ ooCY    = $6616                  ; buffered $d01c. STALE: the held object was a 
 ; bank 3, which is the scarce resource: it is what lets a FOURTH level be resident, and it
 ; finally makes bank 3 graphics-only, which the build has been nagging about.
 runPlaneT = $6500                ; per run id: the wall's plane coordinate and which face is
-runFaceT  = $6541                ;   visible. Derived by mkRuns at boot and after every level
+runFaceT  = $6547                ;   visible. Derived by mkRuns at boot and after every level
                                  ; PACKED IN BEHIND runPlaneT, not given a page of its own.
-                                 ;   NRUN is 65, so a page each spent 382 bytes on two
-                                 ;   tables that fit in 130 -- and $6e00-$6eff comes free
+                                 ;   NRUN is 71, so a page each spent 370 bytes on two
+                                 ;   tables that fit in 142 -- and $6e00-$6eff comes free
                                  ;   as a whole aligned page, which is where Krill's
                                  ;   runtime resident goes (251 bytes, load-raw only) so
                                  ;   that the renderer's scratch never has to leave low
@@ -548,7 +548,7 @@ runFaceT  = $6541                ;   visible. Derived by mkRuns at boot and afte
                                  ;   literal $6d41 until level 7 took NRUN from 65 to 71 and the
                                  ;   two tables overlapped by six bytes -- silent corruption if
                                  ;   the overlap guard had not been watching. The ONLY constraint
-                                 ;   is that 65 entries from $6d41 end at $6d81, inside the same
+                                 ;   is that 71 entries from $6d47 end at $6d8d, inside the same
                                  ;   page, so the indexed reads still cost what they did. That
                                  ;   holds while NRUN <= 128.
                                  ;   change; a page each because a level may have up to 255 runs
@@ -7371,7 +7371,7 @@ ooLd:   lda $ffff,x
         ora runBitT,y
 ooSt:   sta $ffff,x
 ooNx:   iny
-        cpy #$41        ; NRUN, not this level's own count: the loops are shared
+        cpy #$47        ; NRUN, not this level's own count: the loops are shared
         bcc ooLp
         rts
 
@@ -10667,12 +10667,12 @@ pedVisT: !byte 34,26,18,13,10,8,6,5,4,2
         ; "undefined symbol: runByteT" -- a table's HOME is not its OWNER. Their address is
         ; anchored to $7900 rather than to the end of faceChrT: see RUNTAB.
 ; [origin folded into the run above by compact.mjs]
-        * = $73e7
-runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8
-runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1   ; every id, as mkRuns rebuilds it
+        * = $73db
+runByteT: !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7,8,8,8,8,8,8,8
+runBitT: !byte 1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64,128,1,2,4,8,16,32,64   ; every id, as mkRuns rebuilds it
 
 ; [origin folded into the run above by compact.mjs]
-        * = $72e7
+        * = $72db
 ; moveXT/moveYT are 512 bytes of TABLE that were sitting inside the code block -- the scarcest
 ; resource on the machine -- at $1f3e, which is not even page-aligned, so a byte-indexed read
 ; crossing $2000 was paying an extra cycle. Here they are one page each: the ceiling gets 512
@@ -10689,7 +10689,7 @@ moveXT: !byte 64,64,64,64,64,64,63,63,63,62,62,62,61,61,60,60,59,59,58,57,56,56,
         !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
         !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64
 ; [origin folded into the run above by compact.mjs]
-        * = $71e7
+        * = $71db
 moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
         !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
         !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64,64,64,64,64,64,64,63,63
@@ -11893,7 +11893,7 @@ mrB:    txa
         lda mrBitT,y
         sta runBitT,x
         inx
-        cpx #$41
+        cpx #$47
         bcc mrB
         jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
                                 ;   ends at bfsQ with nothing to spare.
@@ -12190,7 +12190,7 @@ sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, 
 
 fNT:    !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $6fe7
+        * = $6fdb
 ; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
 ; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
 ; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
@@ -12221,7 +12221,7 @@ ddxLoTQ: !byte 0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,3
         !byte 5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,1,1,1,0,0
         !byte 0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
-        * = $6de7
+        * = $6ddb
 ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -12292,8 +12292,8 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; Both configurations of the room are built (the second in a subprocess, same trick the shadow
 ; level uses) and only the DIFFERENCE ships. It cannot be recomputed on the machine: the
 ; merge-hazard pass alone is 1024 directions by 3x3 samples. Run ids renumber wholesale when a
-; wall goes, so the delta is never the one map byte you would guess: these 6 come to
-; 5, 5, 5, 9, 17, 5 bytes. (It said "13 runs become 5 here" when there was one wall on one
+; wall goes, so the delta is never the one map byte you would guess: these 12 come to
+; 5, 5, 5, 9, 17, 5, 5, 5, 13, 13, 9, 5 bytes. (It said "13 runs become 5 here" when there was one wall on one
 ; level to point at, and reported wall 0's count as if it were every wall's.)
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
@@ -13998,7 +13998,7 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 
 
 ; [origin folded into the run above by compact.mjs]
-        * = $6ce7
+        * = $6cdb
 
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
 ; lo/hi pair up at 0x2900 and emit nothing here. There is no room above the tables (the
@@ -14010,11 +14010,11 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 ; spacing lives here instead of in an atan.
 qToColT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,24,25,26,27,28,29,30,31,31,32,33,34,35,36,37,37,38,39,40,41,42,42,43,44,45,46,46,47,48,49,50,50,51,52,53,54,54,55,56,57,58,58,59,60,61,61,62,63,64,64,65,66,67,67,68,69,70,70,71,72,73,73,74,75,76,77,77,78,79,80,80,81,82,82,83,84,85,86,86,87,88,89,89,90,91,92,92,93,94,95,95,96,97,98,98,99,100,101,101,102,103,104,105,105,106,107,108,109,109,110,111,112,113,113,114,115,116,117,117,118,119,120,121,122,122,123,124,125,126,127,128,128,129,130,131,132,133,134,135,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159
 ; [origin folded into the run above by compact.mjs]
-        * = $6be7
+        * = $6bdb
 
 sinST:  !byte 0,3,6,9,13,16,19,22,25,28,31,34,37,40,43,46,49,52,55,58,60,63,66,68,71,74,76,79,81,84,86,88,91,93,95,97,99,101,103,105,106,108,110,111,113,114,116,117,118,119,121,122,122,123,124,125,126,126,127,127,127,127,127,127,127,127,127,127,127,127,127,126,126,125,124,123,122,122,121,119,118,117,116,114,113,111,110,108,106,105,103,101,99,97,95,93,91,88,86,84,81,79,76,74,71,68,66,63,60,58,55,52,49,46,43,40,37,34,31,28,25,22,19,16,13,9,6,3,0,253,250,247,243,240,237,234,231,228,225,222,219,216,213,210,207,204,201,198,196,193,190,188,185,182,180,177,175,172,170,168,165,163,161,159,157,155,153,151,150,148,146,145,143,142,140,139,138,137,135,134,134,133,132,131,130,130,129,129,129,128,128,128,128,128,128,128,129,129,129,130,130,131,132,133,134,134,135,137,138,139,140,142,143,145,146,148,150,151,153,155,157,159,161,163,165,168,170,172,175,177,180,182,185,188,190,193,196,198,201,204,207,210,213,216,219,222,225,228,231,234,237,240,243,247,250,253
 ; [origin folded into the run above by compact.mjs]
-        * = $6ae7
+        * = $6adb
 
 ; 163/d as a byte, d in 1/16 cells. 163 is the constant that makes the final shift exactly
 ; 2^15. Saturates at d = 0.639 cells, where the correction is under-applied and that boundary
@@ -14616,9 +14616,9 @@ dkNo:   lda #$ff
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
 ; [origin folded into the run above by compact.mjs]
-        * = $69e7
+        * = $69db
 angMidT: !byte 3,3,2,2,1,1,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,255,255,1,1,0,0,0,255,255,1,1,1,0,0,255,255,1,1,1,0,0,255,255,2,1,1,0,0,255,255,255,1,1,0,0,255,255,255,1,1,0,0,0,255,255,1,1,0,0,0,255,255,254,254,253,253,253,252,252,251,251,251,250,250,249,249,248,248,248,247,247,246,246,246,245,245,244,244,243,243,243,242,242,241,241,240,240,240,239,239,238,238,238,237,237,236,236,235,235,235,234,234,233,233,232,232,232,231,231,230,230,230,229,229,228,228,227,227,227,226,226,225,225,225,224,224,223,223,222,222,222,221,221,220,220,219,219,219,218,218,217,217,217,216,216,215,215,214,214,214,213,213,212,212,211,211,211,210,210,209,209,209,208,208,207,207,206,206,206,205,205,204,204,204,203,203,202,202,201,201,201,200,200,199,199,198,198,198,197,197,196,196,196,195,195,194,194,193,193,193,192,192,191,191
 ; [origin folded into the run above by compact.mjs]
-        * = $68e7
+        * = $68db
 qcosT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,254,253,253,253,253,252,252,252,252,251,251,251,250,250,250,249,249,249,248,248,248,247,247,246,246,245,245,245,244,244,243,243,242,242,241,241,240,239,239,238,238,237,237,236,235,235,234,233,233,232,231,231,230,229,229,228,227,227,226,225,224,224,223,222,221,220,220,219,218,217,216,215,215,214,213,212,211,210,209,208,207,207,206,205,204,203,202,201,200,199,198,197,196,195,194,193,192,191,190,189,188,186,185,184,183,182,181,180,179,178,177,175,174,173,172,171,170,168,167,166,165,164,162,161,160,159,157,156,155,154,152,151,150,149,147,146,145,144,142,141,140,138,137,136,134,133,132,130,129,128,126,125,123,122,121,119,118,117,115,114,112,111,109,108,107,105,104,102,101,99,98,97,95,94,92,91,89,88,86,85,83,82,80,79,77,76,74,73,71,70,68,67,65,64,62,61,59,58,56,55,53,51,50,48,47,45,44,42,41,39,38,36,34,33,31,30,28,27,25,24,22,20,19,17,16,14,13,11,9,8,6,5,3,2
 

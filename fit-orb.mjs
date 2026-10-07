@@ -3,7 +3,6 @@
 // resampled from it by orbScale in build-iray.mjs, exactly as the hand-drawn art is today.
 //
 //   node fit-orb.mjs sphere-rough.png            -- preview as ASCII + the 63 bytes
-//   ORBDITHER=0 node fit-orb.mjs sphere-glossy.png
 //
 // The sprite's four pixel values are fixed by the VIC, not chosen here:
 //   0 transparent   1 = $d025 (grey1, 68)   2 = sprite colour (grey2, 108)   3 = $d026 (grey3, 149)

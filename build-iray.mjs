@@ -88,26 +88,13 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // makes that level its OWN shadow, so its hole drops into a reset copy of itself -- which is
 // how a single level is playtested. Levels do NOT share a grid: lvlDimT/rowMulT/bfsDCT travel
 // with the level and every stride site reads them, so the only rule is W x H <= 256 per level.
-// The shipping chain is 1,2,3 (2026-09-19). CHAIN=<n> alone playtests one level, making it its
-// own shadow. NOTE: the live level is CHAIN[0], and with three resident only levels 1 and 2 fit
-// under the code ceiling as the live one -- level 3 live in a three-chain is ~17 bytes over, so
-// playtest it with CHAIN=3 rather than by rotating the chain.
-// 1,4,5: level 1, then THE HUB, then the idol level its red hole leads to, then back to 1.
-// Levels 2 and 3 are out of the shipping chain for the moment and that is a SPACE limit, not a
-// design one -- measured 2026-09-25, with the hub's pedestals in:
-//     1,4,5     3 shadows x 826 = 2478   fits ($f500-$fe00 is 2304... see below)
-//     1,2,4,5   3 shadows x 837 = 2511   207 bytes over
-//     1,2,3,4,5 4 shadows x 884 = 3536   over by more than a page
-// The 207 is reachable: $fe00-$ffd8 is pvBnd/pvAng/pvRcp/fallTailB, CPU tables squatting in the
-// graphics bank, and moving them out gives the shadow region $f500-$fff9 = 2809. They need ~470
-// contiguous bytes of image to go to, which today is most of the code headroom. Five resident
-// levels needs more than that again and wants the shadow to shrink or a second ILVL region.
-// CHAIN=<n> alone still playtests one level (CHAIN=4 -> the hub by itself).
-// DEFAULT 1,2,3,4 AGAIN (2026-10-03). It was cut to 1,2 when SOLO moved the levels out of the image
-// and four blobs no longer fitted bank 3 -- but LVLLOAD then made every level its own file loaded
-// into ONE live slot, so the chain no longer has to be resident and 1-4 builds at 860 bytes a slot.
-// The two shipping disks are 1,2,3,4 (latest.d64, this default) and 4,5,6,7 (leveltest.d64).
-const CHAIN = (process.env.CHAIN ?? '1,2,3,4').split(',').map(Number);
+// CHAIN: the levels on the disk, in play order. DEFAULT 1-7 = THE GAME (2026-10-06, after the first
+// full playthrough). Every level is its own file loaded on demand into ONE live slot, so the chain
+// no longer has to be resident and its length costs only disk space. CHAIN=<n> alone playtests one
+// level (CHAIN=4 -> the hub by itself); the hub's exits lead to 5/6/7 only when all three are in the
+// chain. The other shipping disk is 4,5,6,7 (leveltest.d64). History of the residency limits that
+// used to shape this default (1,2,3 / 1,4,5 / 1,2 / 1-4): the iray-shipping-chains note and git log.
+const CHAIN = (process.env.CHAIN ?? '1,2,3,4,5,6,7').split(',').map(Number);
 // D64=<name> writes somewhere other than latest.d64. A variant build -- a level-wiring test, a
 // profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
@@ -4460,7 +4447,7 @@ const HUD_AT       = parseInt(process.env.HUDAT ?? '3f72', 16);   // see hudX: t
 // every field in them anyway -- the bearing, the window and the canOcc bit are all relative to
 // where the orb stood at BUILD time. Nothing is emitted; ORB_SMALL now starts here.
 
-// ORBART=rough|glossy samples the top-of-ladder sprite from a photoreal sphere render
+// ORBART=rough samples the top-of-ladder sprite from a photoreal sphere render (art/sphere-rough.png)
 // instead of using the drawn art. Everything below is unchanged: orbScale still resamples
 // this one 12x21 bitmap down every rung, so the whole ladder follows from whichever it is.
 // The RENDERED sphere is the default now, like the angel. Note it keeps its own contrast: the

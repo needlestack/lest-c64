@@ -44,8 +44,8 @@ Requirements: a recent [Node.js](https://nodejs.org/) (developed on 26), and [Im
 toolchain: the assembler (`asm6502.mjs`) and the disk-image writer (`d64lib.js`) are part of the project.
 
 ```sh
-CHAIN=1,2,3,4,5,6,7 node build-iray.mjs     # the whole game -> latest.d64
-node build-iray.mjs                         # levels 1-4 only (the development default)
+node build-iray.mjs                     # the whole game -> latest.d64
+CHAIN=4 node build-iray.mjs             # one level on its own, for playtesting
 ```
 
 `CHAIN` lists the levels on the disk, in order. A full build takes under 20 seconds: each level and each
