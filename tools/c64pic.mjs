@@ -178,10 +178,11 @@ const preview = (idx, W, H, pxw, file) => {
 const combos = (n, k, from) => { const out = []; const rec = (s, a) => { if (a.length === k) return out.push(a);
   for (let i = s; i < from.length; i++) rec(i + 1, [...a, from[i]]); }; rec(0, []); return out; };
 const ALL = [...Array(16).keys()];
-const SMOOTH = +opt('--smooth', 0.5), SMOOTHMC = +opt('--smoothmc', 0.5);
+const SMOOTH = +opt('--smooth', 0.5), SMOOTHMC = +opt('--smoothmc', 0);
 const REG = opt('--regions', null) ? JSON.parse(readFileSync(opt('--regions'), 'utf8')) : null;
 const LEAFC = opt('--leaf', '0,5,13').split(',').map(Number), BARKC = opt('--bark', '0,9,8').split(',').map(Number);
-const LEAF2C = opt('--leaf2', '0,13').split(',').map(Number);
+const NOLEAF2 = opt('--leaf2', '') === 'none';
+const LEAF2C = (NOLEAF2 ? '0,13' : opt('--leaf2', '0,13')).split(',').map(Number);
 const bitsOf = cols => cols.reduce((m, c) => m | (1 << c), 0);
 const colsOf = mask => ALL.filter(c => (mask >> c) & 1);
 // A THEME IS A RAMP. Themed pixels are re-targeted to their LUMINANCE placed on the theme's ramp
@@ -216,7 +217,12 @@ const boxBlur = (m, W, H, rx, ry) => {             // separable box, edge-normal
 // that brightness comes out as a black/light-green dither instead.
 const FEATHER = +opt('--feather', 4);
 const TEXTURE = +opt('--texture', 0);
-const OVERLAP = opt('--overlap', 'branch');
+// --overlap: 'hue' (default -- the version the user preferred: split at 78 degrees, then feathered
+// with the rest), 'branch' (per pixel, unblurred, bark below --barkhue), 'leaf' (all leaf).
+const OVERLAP = opt('--overlap', 'hue');
+// --scene: also theme treeseg's racks/ceiling (grey ramps) and free its lights. Opt-in: the user
+// preferred the scene in its own colours, with only brown kept out of it (--bgavoid).
+const SCENE = has('--scene');
 // --edgesoft r: within r pixels of a BLOCK edge the target fades toward a local blur that spans
 // both blocks. Each block's last pixels before the border then ask for an in-between colour, which
 // two colours can only give by dithering -- on both sides. Without it, two blocks of different
@@ -245,35 +251,44 @@ const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 // left completely free so the LEDs keep their colours.
 const RACKC = opt('--racks', '0,11,12,15').split(',').map(Number), CEILC = opt('--ceil', '11,12,15,1').split(',').map(Number);
 const BARKHUE = +opt('--barkhue', 65);
+// --bgavoid c,c: colours the BACKGROUND (everything outside the tree's themes) may not use. The
+// user, on the preferred version: walls, floor and ceiling may keep some colour, but not brown --
+// the background should avoid the tree's palette so the trunk pops. Default brown and orange.
+const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
 const themed = (img, W, H) => {
-  const allow = new Uint16Array(W * H).fill(0xffff);
+  const allow = new Uint16Array(W * H).fill(0xffff & ~AVOID);
   if (!REG) return { img, allow };
   if (REG.W !== 320 || REG.H !== 200) throw new Error(`--regions must be 320x200, not ${REG.W}x${REG.H}`);
   const n = W * H, cls = [1, 2, 4, 8].map(() => new Float32Array(n)), lum = new Float32Array(n);
   const ovl = new Int8Array(n), light = new Uint8Array(n);   // overlap: 1 leaf / 2 bark, per pixel
+  const both = new Uint8Array(n);                            // overlap in 'hue' mode: may use both palettes
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x, lab = W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
     const p = [img[i * 3], img[i * 3 + 1], img[i * 3 + 2]]; lum[i] = Y(p);
-    if (lab & 16) { light[i] = 1; continue; }
+    if (SCENE && (lab & 16)) { light[i] = 1; continue; }
     if ((lab & 3) === 3) {
       if (OVERLAP === 'leaf') { cls[0][i] = 1; continue; }
-      const [, a, b] = oklab(...p);
-      ovl[i] = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360 < BARKHUE ? 2 : 1; continue;
+      const [, a, b] = oklab(...p), h = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
+      if (OVERLAP === 'hue') { cls[h >= 78 ? 0 : 1][i] = 1; both[i] = 1; continue; }   // the version the user preferred
+      ovl[i] = h < BARKHUE ? 2 : 1; continue;
     }
-    if (lab & 1) cls[0][i] = 1; else if (lab & 2) cls[1][i] = 1; else if (lab & 4) cls[2][i] = 1; else if (lab & 8) cls[3][i] = 1;
+    if (lab & 1) cls[0][i] = 1; else if (lab & 2) cls[1][i] = 1;
+    else if (SCENE && (lab & 4)) cls[2][i] = 1; else if (SCENE && (lab & 8)) cls[3][i] = 1;
   }
   const rx = Math.max(1, Math.round(FEATHER * W / 320));
-  const [wl, wb, wk, wc] = cls.map(m => boxBlur(m, W, H, rx, FEATHER));
+  // --feather 0: HARD theme edges, no blur at all (the preferred version)
+  const [wl, wb, wk, wc] = cls.map(m => FEATHER ? boxBlur(m, W, H, rx, FEATHER) : m);
   const ls = boxBlur(lum, W, H, Math.max(1, Math.round(2 * W / 320)), 2), Yg = Y(PL[5]);
   const LR = ramp(LEAFC), L2 = ramp(LEAF2C), BR = ramp(BARKC), KR = ramp(RACKC), CR = ramp(CEILC), out = Float32Array.from(img);
   for (let i = 0; i < n; i++) {
     if (light[i]) continue;                                   // free: keeps its colour, any of 16
     let L = wl[i], B = wb[i];
     if (ovl[i]) { L = ovl[i] === 1 ? 1 : 0; B = ovl[i] === 2 ? 1 : 0; }
-    const f = Math.min(1, Math.max(0, (ls[i] - 0.6 * Yg) / (0.3 * Yg)));
+    // (--leaf2 none: no bright-leaf ramp, as in the preferred version)
+    const f = NOLEAF2 ? 0 : Math.min(1, Math.max(0, (ls[i] - 0.6 * Yg) / (0.3 * Yg)));
     const w = [L * (1 - f), L * f, B, ovl[i] ? 0 : wk[i], ovl[i] ? 0 : wc[i]];
     const tot = w.reduce((a, v) => a + v, 0);
-    if (tot > 1) for (let k = 0; k < 5; k++) w[k] /= tot;
+    if (SCENE && tot > 1) for (let k = 0; k < 5; k++) w[k] /= tot;   // (the preferred version did not normalise)
     const wr = Math.max(0, 1 - w.reduce((a, v) => a + v, 0));
     if (wr >= 1) continue;
     const q = [LR, L2, BR, KR, CR].map(rp => onRamp(rp, lum[i]));
@@ -286,10 +301,10 @@ const themed = (img, W, H) => {
     // A BRIGHT leaf (f > 0.5) may not use the plain leaf ramp at all: allowed by weight alone, plain
     // green stayed available wherever any of that ramp remained, and error diffusion picked it for
     // every target near green's brightness -- the flat band across the top came straight back.
-    allow[i] = (wr > 0.05 ? 0xffff : 0) | (w[0] > 0.05 && f <= 0.5 ? bitsOf(LEAFC) : 0) | (w[1] > 0.05 ? bitsOf(LEAF2C) : 0) |
+    allow[i] = (wr > 0.05 ? 0xffff & ~AVOID : 0) | (w[0] > 0.05 && f <= 0.5 ? bitsOf(LEAFC) : 0) | (w[1] > 0.05 ? bitsOf(LEAF2C) : 0) |
                (w[2] > 0.05 ? bitsOf(BARKC) : 0) | (w[3] > 0.05 ? bitsOf(RACKC) : 0) | (w[4] > 0.05 ? bitsOf(CEILC) : 0);
-    if (ovl[i]) allow[i] |= bitsOf(LEAFC) | bitsOf(BARKC);    // a branch line may sit in a leafy block
-    if (!allow[i]) allow[i] = 0xffff;
+    if (ovl[i] || both[i]) allow[i] |= bitsOf(LEAFC) | bitsOf(BARKC);    // a branch line may sit in a leafy block
+    if (!allow[i]) allow[i] = 0xffff & ~AVOID;
   }
   return { img: out, allow };
 };
