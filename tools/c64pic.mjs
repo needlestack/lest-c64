@@ -1,7 +1,14 @@
 // c64pic.mjs -- convert an image to a C64 bitmap, hi-res or multicolour, dithered, with each
 // block's colours chosen for that block.
 //
-//   node tools/c64pic.mjs <image> <out-prefix> [--hires] [--mc] [--bg n] [--crop]
+//   node tools/c64pic.mjs <image> <out-prefix> [--hires] [--mc] [--bg n] [--crop] [--mixpen x]
+//                         [--regions labels.json [--leaf 0,5,13] [--bark 0,9,8]]
+//
+// REGIONS (--regions): a 320x200 label map (bit 1 = leaf, bit 2 = bark; both = an overlap zone)
+// gives those pixels a THEME -- only the listed colours may appear there. A whole-picture search
+// gave the tree its true averaged colour, a flat brown; a theme says what it should READ as. Blocks
+// still choose their own colours, from what their pixels allow; pixels outside every region keep
+// all 16. Multicolour uses the map at half width (a double-wide pixel takes both halves' labels).
 //
 // Writes <out-prefix>-hires.png / -mc.png (3x previews, true C64 pixel shapes) and the C64 files
 // <out-prefix>.art (hi-res: $2000 bitmap + $3f40 screen) and <out-prefix>.kla (Koala Painter).
@@ -19,7 +26,7 @@
 // perceptual space. The first version weighted distance by luminance alone, which is nearly blind
 // to hue: the olive foliage matched brown and grey on brightness and the tree lost its green.
 import { execFileSync } from 'child_process';
-import { writeFileSync } from 'fs';
+import { writeFileSync, readFileSync } from 'fs';
 import { png } from '../png.mjs';
 
 const args = process.argv.slice(2);
@@ -53,7 +60,9 @@ const d2 = (r, g, b, p) => dk(oklab(r, g, b), PK[PL.indexOf(p)]);
 // ---- load and scale ----
 const load = (w, h) => {
   const geo = has('--crop') ? [`${w}x${h}^`, '-gravity', 'center', '-extent', `${w}x${h}`] : [`${w}x${h}!`];
-  const raw = execFileSync('magick', [SRC, '-colorspace', 'sRGB', '-filter', 'Lanczos', '-resize', ...geo, '-depth', '8', 'rgb:-'],
+  // --sharpen r: an unsharp mask AFTER downscaling, to keep the detail the averaging smooths away
+  const sh = opt('--sharpen', null) ? ['-unsharp', `0x${opt('--sharpen')}+1.0+0.02`] : [];
+  const raw = execFileSync('magick', [SRC, '-colorspace', 'sRGB', '-filter', 'Lanczos', '-resize', ...geo, ...sh, '-depth', '8', 'rgb:-'],
                           { maxBuffer: 1 << 26 });
   const img = new Float32Array(w * h * 3);
   for (let i = 0; i < w * h * 3; i++) img[i] = lin(raw[i]);
@@ -73,12 +82,14 @@ const STEPS = 16, MIX = [];
 for (let i = 0; i < 16; i++) { MIX.push([]); for (let j = 0; j < 16; j++) { const A = PL[i], B = PL[j], row = [];
   for (let k = 0; k <= STEPS; k++) { const t = k / STEPS; row.push(oklab(A[0] + t * (B[0] - A[0]), A[1] + t * (B[1] - A[1]), A[2] + t * (B[2] - A[2]))); }
   MIX[i].push({ row, pen: MIXPEN * dk(PK[i], PK[j]) }); } }
-function scoreBlock(img, W, x0, y0, bw, bh, set, pk) {
+function scoreBlock(img, W, x0, y0, bw, bh, set, pk, allow) {
   let sc = 0;
   for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
     const s = ((y0 + y) * W + x0 + x) * 3, r = img[s], g = img[s + 1], b = img[s + 2], q = pk[(y0 + y) * W + x0 + x];
+    const al = allow[(y0 + y) * W + x0 + x];
     let bd = Infinity;
     for (let i = 0; i < set.length; i++) for (let j = i; j < set.length; j++) {
+      if (!((al >> set[i]) & 1) || !((al >> set[j]) & 1)) continue;   // outside this pixel's theme
       const A = PL[set[i]], B = PL[set[j]], dx = B[0] - A[0], dy = B[1] - A[1], dz = B[2] - A[2];
       const ll = dx * dx + dy * dy + dz * dz;
       let t = ll ? ((r - A[0]) * dx + (g - A[1]) * dy + (b - A[2]) * dz) / ll : 0;
@@ -87,19 +98,23 @@ function scoreBlock(img, W, x0, y0, bw, bh, set, pk) {
       const e = dk(q, m.row[k]) + m.pen * (k / STEPS) * (1 - k / STEPS);
       if (e < bd) bd = e;
     }
-    sc += bd;
+    sc += bd === Infinity ? 4 : bd;              // the set has nothing this pixel may use
   }
   return sc;
 }
 
 // ---- choose a set per block, then one global serpentine FS within the chosen sets ----
-function convert(img, W, H, bw, bh, sets) {
-  const BX = W / bw, BY = H / bh, choice = [];
+// setsFor(mask) -> the candidate sets for a block whose pixels together allow colour bits `mask`
+function convert(img, W, H, bw, bh, setsFor, allow) {
+  const BX = W / bw, BY = H / bh, choice = [], cache = new Map();
   const pk = []; for (let i = 0; i < W * H; i++) pk.push(oklab(img[i * 3], img[i * 3 + 1], img[i * 3 + 2]));
   let total = 0;
   for (let by = 0; by < BY; by++) for (let bx = 0; bx < BX; bx++) {
+    let mask = 0;
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) mask |= allow[(by * bh + y) * W + bx * bw + x];
+    if (!cache.has(mask)) cache.set(mask, setsFor(mask));
     let best = null, bs = Infinity;
-    for (const set of sets) { const s = scoreBlock(img, W, bx * bw, by * bh, bw, bh, set, pk); if (s < bs) { bs = s; best = set; } }
+    for (const set of cache.get(mask)) { const s = scoreBlock(img, W, bx * bw, by * bh, bw, bh, set, pk, allow); if (s < bs) { bs = s; best = set; } }
     choice.push(best); total += bs;
   }
   const work = Float32Array.from(img), idx = new Uint8Array(W * H);
@@ -108,10 +123,14 @@ function convert(img, W, H, bw, bh, sets) {
     for (let i = 0; i < W; i++) {
       const x = rev ? W - 1 - i : i, t = (y * W + x) * 3, set = choice[Math.floor(y / bh) * BX + Math.floor(x / bw)];
       // clamp the carried error: an unbounded pile-up across a block that cannot express it bleeds
-      // as a streak into the next block
-      const r = Math.min(1.2, Math.max(-0.2, work[t])), g = Math.min(1.2, Math.max(-0.2, work[t + 1])), b = Math.min(1.2, Math.max(-0.2, work[t + 2]));
-      let bi = set[0], bd = Infinity; const q = oklab(r, g, b);
-      for (const k of set) { const dd = dk(q, PK[k]); if (dd < bd) { bd = dd; bi = k; } }
+      // as a streak into the next block. But NOT tightly: themed regions dither colours far apart
+      // (black and green), and a clamp at -0.2/1.2 threw away the darkness the black pixels should
+      // have absorbed -- leaves of mean RGB 108,97,56 came out 94% solid green.
+      const C0 = -0.6, C1 = 1.6;
+      const r = Math.min(C1, Math.max(C0, work[t])), g = Math.min(C1, Math.max(C0, work[t + 1])), b = Math.min(C1, Math.max(C0, work[t + 2]));
+      const al = allow[y * W + x], ok = set.filter(k => (al >> k) & 1), cand = ok.length ? ok : set;
+      let bi = cand[0], bd = Infinity; const q = oklab(r, g, b);
+      for (const k of cand) { const dd = dk(q, PK[k]); if (dd < bd) { bd = dd; bi = k; } }
       idx[y * W + x] = bi;
       const p = PL[bi], er = r - p[0], eg = g - p[1], eb = b - p[2], sx = rev ? -1 : 1;
       const push = (dx, dy, f) => { const xx = x + dx * sx, yy = y + dy; if (xx < 0 || xx >= W || yy >= H) return;
@@ -133,10 +152,70 @@ const preview = (idx, W, H, pxw, file) => {
 const combos = (n, k, from) => { const out = []; const rec = (s, a) => { if (a.length === k) return out.push(a);
   for (let i = s; i < from.length; i++) rec(i + 1, [...a, from[i]]); }; rec(0, []); return out; };
 const ALL = [...Array(16).keys()];
+const REG = opt('--regions', null) ? JSON.parse(readFileSync(opt('--regions'), 'utf8')) : null;
+const LEAFC = opt('--leaf', '0,5,13').split(',').map(Number), BARKC = opt('--bark', '0,9,8').split(',').map(Number);
+const bitsOf = cols => cols.reduce((m, c) => m | (1 << c), 0);
+const allowFor = (W, H) => {
+  const a = new Uint16Array(W * H).fill(0xffff);
+  if (!REG) return a;
+  if (REG.W !== 320 || REG.H !== 200) throw new Error(`--regions must be 320x200, not ${REG.W}x${REG.H}`);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const lab = W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
+    if (lab) a[y * W + x] = ((lab & 1) ? bitsOf(LEAFC) : 0) | ((lab & 2) ? bitsOf(BARKC) : 0);
+  }
+  return a;
+};
+const colsOf = mask => ALL.filter(c => (mask >> c) & 1);
+// A THEME IS A RAMP. Themed pixels are re-targeted to their LUMINANCE placed on the theme's ramp
+// (its colours sorted by brightness, blended in linear light between neighbours) before anything
+// else happens. Without this the dither ran away: leaves of RGB 108,97,56 carry red that neither
+// black nor green can give back, the red error piled up without limit, and that pile pushed every
+// pixel to green -- the canopy came out flat. "Black, green, light green" means the leaves'
+// BRIGHTNESS drawn in greens. Overlap pixels take the ramp their own hue is nearer (leaf above
+// ~78 degrees in Oklab, bark below: measured on this image).
+const Y = p => 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+const ramp = cols => [...cols].sort((a, b) => Y(PL[a]) - Y(PL[b])).map(c => PL[c]);
+const onRamp = (rp, y) => {
+  if (y <= Y(rp[0])) return rp[0];
+  for (let i = 0; i + 1 < rp.length; i++) { const a = Y(rp[i]), b = Y(rp[i + 1]);
+    if (y <= b) { const t = (y - a) / (b - a); return rp[i].map((v, c) => v + t * (rp[i + 1][c] - v)); } }
+  return rp[rp.length - 1];
+};
+// --stretch: each theme's own brightness range (2nd-98th percentile of its pixels) is spread over
+// its ramp's full range, in Oklab L, so a region whose leaves all sit near one ramp colour (the
+// ceiling-lit top of the canopy sat on plain green) still gets dithered texture.
+const STRETCH = has('--stretch');
+const Lof = p => oklab(...p)[0];
+const theme = (img, W, H) => {
+  if (!REG) return img;
+  const out = Float32Array.from(img), LR = ramp(LEAFC), BR = ramp(BARKC);
+  const labAt = (x, y) => W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
+  const span = {};
+  if (STRETCH) for (const [k, rp] of [[1, LR], [2, BR]]) {
+    const Ls = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (labAt(x, y) === k) { const i = (y * W + x) * 3; Ls.push(Lof([img[i], img[i + 1], img[i + 2]])); }
+    Ls.sort((a, b) => a - b);
+    span[k] = { lo: Ls[Math.floor(Ls.length * 0.02)], hi: Ls[Math.floor(Ls.length * 0.98)], rlo: Lof(rp[0]), rhi: Lof(rp[rp.length - 1]) };
+  }
+  // map a pixel's L through its theme's stretch, then back to linear luminance for the ramp
+  const yOf = (p, k) => { if (!STRETCH) return Y(p);
+    const s = span[k], L = s.rlo + Math.min(1, Math.max(0, (Lof(p) - s.lo) / (s.hi - s.lo))) * (s.rhi - s.rlo);
+    return L ** 3; };                     // Oklab L of a grey is cbrt(Y): invert it
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const lab = W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
+    if (!lab) continue;
+    const i = (y * W + x) * 3, p = [img[i], img[i + 1], img[i + 2]];
+    let k = lab === 3 ? 0 : lab;
+    if (!k) { const [, a, b] = oklab(...p); k = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360 >= 78 ? 1 : 2; }
+    const q = onRamp(k === 1 ? LR : BR, yOf(p, k)); out[i] = q[0]; out[i + 1] = q[1]; out[i + 2] = q[2];
+  }
+  return out;
+};
 
 if (DO_HI) {
-  const t0 = Date.now(), img = load(320, 200);
-  const { choice, idx } = convert(img, 320, 200, 8, 8, combos(16, 2, ALL));
+  const t0 = Date.now(), img = theme(load(320, 200), 320, 200);
+  const { choice, idx } = convert(img, 320, 200, 8, 8, m => { const c = colsOf(m);
+    return c.length >= 2 ? combos(c.length, 2, c) : [[c[0], c[0]]]; }, allowFor(320, 200));
   preview(idx, 320, 200, 1, `${OUT}-hires.png`);
   // .art (Art Studio): $2000, 8000 bytes of bitmap, then 1000 of screen (fg high nybble, bg low)
   const bm = new Uint8Array(8000), scr = new Uint8Array(1000);
@@ -148,13 +227,16 @@ if (DO_HI) {
 }
 
 if (DO_MC) {
-  const t0 = Date.now(), img = load(160, 200);
+  const t0 = Date.now(), img = theme(load(160, 200), 160, 200);
   // The background is shared by every block, so it is chosen by trying the likely ones whole.
   const tryBg = opt('--bg', null) !== null ? [+opt('--bg')] : [0, 11, 9, 6];
   let best = null;
   for (const bg of tryBg) {
-    const sets = combos(15, 3, ALL.filter(c => c !== bg)).map(s => [bg, ...s]);
-    const r = convert(img, 160, 200, 4, 8, sets);
+    const r = convert(img, 160, 200, 4, 8, m => {
+      let c = colsOf(m).filter(k => k !== bg);
+      // fewer than 3 allowed: pad with colours no pixel here may use -- the slot exists regardless
+      if (c.length < 3) c = c.concat(ALL.filter(k => k !== bg && !c.includes(k))).slice(0, 3);
+      return combos(c.length, 3, c).map(s => [bg, ...s]); }, allowFor(160, 200));
     console.log(`  multicolour, background ${bg}: score ${r.score.toFixed(3)}`);
     if (!best || r.score < best.score) best = { ...r, bg };
   }

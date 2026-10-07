@@ -1,0 +1,66 @@
+// treeseg.mjs -- leaf / bark masks for the tree image, at a given conversion resolution.
+//   node treeseg.mjs <image> <W> <H> <out.json> [overlay.png]
+// Classes come from measured Oklab stats of the source (leaves hue ~95-100, bark ~60, both
+// chroma ~0.04-0.05, mid-dark; racks near-neutral; floor/ceiling bright), smoothed so a region is
+// a coherent area rather than per-pixel noise. labels: 0 rest, 1 leaf, 2 bark, 3 both (overlap).
+import { execFileSync } from 'child_process';
+import { writeFileSync } from 'fs';
+import { png } from '../png.mjs';
+const [SRC, W, H, OUT, OV] = [process.argv[2], +process.argv[3], +process.argv[4], process.argv[5], process.argv[6]];
+const P = k => +(process.env[k] ?? { CMIN: 0.022, LMIN: 0.10, LMAX: 0.72, HSPLIT: 78, HMAX: 145, HMIN: 30, R: 3, TH: 0.35, OV: 0.18 }[k]);
+const raw = execFileSync('magick', [SRC, '-colorspace', 'sRGB', '-filter', 'Lanczos', '-resize', `${W}x${H}!`, '-depth', '8', 'rgb:-'], { maxBuffer: 1 << 26 });
+const lin = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+const ok = (r, g, b) => { [r, g, b] = [r, g, b].map(lin);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b), m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b), s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s, 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s]; };
+const leaf = new Float32Array(W * H), bark = new Float32Array(W * H);
+for (let i = 0; i < W * H; i++) {
+  const [L, a, b] = ok(raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]), C = Math.hypot(a, b), h = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
+  if (C < P('CMIN') || L < P('LMIN') || L > P('LMAX') || h < P('HMIN') || h > P('HMAX')) continue;
+  if (h >= P('HSPLIT')) leaf[i] = 1; else bark[i] = 1;
+}
+// smooth: fraction of class pixels within radius R (a box; the pixel aspect differs by mode, so R is in pixels of this grid)
+const box = (m, R) => { const o = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let s = 0, n = 0;
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) { const xx = x + dx, yy = y + dy;
+      if (xx >= 0 && yy >= 0 && xx < W && yy < H) { s += m[yy * W + xx]; n++; } }
+    o[y * W + x] = s / n; } return o; };
+const R = Math.max(1, Math.round(P('R') * W / 320)), ls = box(leaf, R), bs = box(bark, R);
+const lab = new Uint8Array(W * H);
+for (let i = 0; i < W * H; i++) {
+  const L = ls[i] > P('TH') || (ls[i] > P('OV') && bs[i] > P('OV')), B = bs[i] > P('TH') || (bs[i] > P('OV') && ls[i] > P('OV'));
+  lab[i] = (L ? 1 : 0) | (B ? 2 : 0);
+}
+// THE TREE IS ONE PIECE: keep only the largest 8-connected region of `bits`. Run twice: for the
+// whole tree (any class), then for BARK alone -- the warm-lit strips where the walls meet the
+// ceiling pass the colour test as bark and touch the canopy's leaves, but not the trunk's bark.
+const keepLargest = bits => { const comp = new Int32Array(W * H).fill(-1), sizes = [];
+  for (let i = 0; i < W * H; i++) if ((lab[i] & bits) && comp[i] < 0) { const id = sizes.length, st = [i]; comp[i] = id; let n = 0;
+    while (st.length) { const p = st.pop(); n++; const x = p % W, y = (p / W) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy, q = yy * W + xx;
+        if (xx >= 0 && yy >= 0 && xx < W && yy < H && (lab[q] & bits) && comp[q] < 0) { comp[q] = id; st.push(q); } } }
+    sizes.push(n); }
+  const big = sizes.indexOf(Math.max(...sizes));
+  for (let i = 0; i < W * H; i++) if ((lab[i] & bits) && comp[i] !== big) lab[i] &= ~bits; };
+keepLargest(3);
+keepLargest(2);
+// ...and the left strip still reached the trunk THROUGH the canopy's overlap zone. What really
+// tells it apart: it runs off the edge of the picture, and no part of the tree's bark does. So a
+// region of PURE bark that touches the border is not bark.
+{ const seen = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) if (lab[i] === 2 && !seen[i]) { const st = [i], part = []; seen[i] = 1; let edge = false;
+    while (st.length) { const p = st.pop(); part.push(p); const x = p % W, y = (p / W) | 0;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) edge = true;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy, q = yy * W + xx;
+        if (xx >= 0 && yy >= 0 && xx < W && yy < H && lab[q] === 2 && !seen[q]) { seen[q] = 1; st.push(q); } } }
+    if (edge) for (const q of part) lab[q] = 0; } }
+writeFileSync(OUT, JSON.stringify({ W, H, labels: [...lab] }));
+if (OV) {   // the source, dimmed, tinted by class: green leaf, orange bark, yellow both
+  const S = Math.round(960 / W), OW = W * S, OH = H * S * (W === 160 ? 1 : 1), rgb = new Uint8Array(OW * H * S * 3);
+  for (let y = 0; y < H * S; y++) for (let x = 0; x < OW; x++) { const i = Math.floor(y / S) * W + Math.floor(x / S), p = (y * OW + x) * 3;
+    const g = (raw[i * 3] + raw[i * 3 + 1] + raw[i * 3 + 2]) / 6, t = [[g, g, g], [40, 200, 60], [230, 120, 30], [240, 230, 40]][lab[i]];
+    const k = lab[i] ? 0.6 : 0; for (let c = 0; c < 3; c++) rgb[p + c] = Math.round(g * (1 - k) + t[c] * k); }
+  writeFileSync(OV, png(OW, H * S, rgb));
+}
+const cnt = [0, 0, 0, 0]; lab.forEach(v => cnt[v]++);
+console.log(`${W}x${H}: rest ${cnt[0]}, leaf ${cnt[1]}, bark ${cnt[2]}, both ${cnt[3]}`);
