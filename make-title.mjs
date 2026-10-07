@@ -6,7 +6,12 @@
 // each cell one of the two greys in the source art (grey 1 / grey 2, colours 11 / 12; the art's
 // dark tone #262625 is darker than any C64 grey, so it becomes grey 1).
 //
-// The look was chosen by eye (2026-10-07, preview "T2s1" plus hand edits); each step below
+// The CHARSET IS SHARED: glyphs 0..NQ-1 are the quote's (quote-screen.json, which make-quote.mjs
+// merges to a budget so these fit), and this screen's own glyphs fill the slots after them. So run
+// this AFTER make-quote.mjs: the stamps ARE the quote's glyphs, and a new quote re-stamps the title.
+//
+// The look was chosen by eye (2026-10-07, preview "T2s1" plus hand edits; re-stamped the same day
+// from quote-start.png's charset, which changed only texture cells); each step below
 // exists because a simpler one looked wrong:
 //
 //   1. COVERAGE. The 640x480 art is box-averaged to 320x200, one coverage value per tone.
@@ -27,7 +32,7 @@
 //   6. HAND EDITS, from title-preview-T2s1-edit.png: six cells erased, three recoloured.
 //
 // REPRODUCIBILITY: every random choice comes from a seeded LCG, so a run reproduces the approved
-// screen -- but step 5 shuffles with Array.sort and a random comparator, whose call order belongs
+// screen for a given quote charset -- but step 5 shuffles with Array.sort and a random comparator, whose call order belongs
 // to the JS engine. title-screen.json is therefore the source of truth; re-running this on another
 // engine may tear different corners. Check with the preview it writes before committing a rerun.
 //
@@ -38,7 +43,6 @@ import { png } from './png.mjs';
 
 const SRC = process.argv[2] ?? './art/lest.png';
 const AMP = 2.4, NOISE_SEED = 11, NOISE_SCALE = 3;    // distress reach and grain (S2)
-const FITTED = 24, TORN = 15;                          // 24 + 15 = the 39 free slots
 const TEAR_SEED = 1;
 const BLANK = [[14, 13], [15, 13], [19, 12], [19, 13], [25, 6], [26, 6]];   // erased by hand
 const DARK = [[16, 13], [16, 14], [15, 14]];           // recoloured by hand: grey 2 -> grey 1, same shape
@@ -47,6 +51,9 @@ const INK_DARK = 11, INK_LIGHT = 12;
 // ---- the quote's charset, as 64-pixel arrays ----
 const Q = JSON.parse(readFileSync('./quote-screen.json', 'utf8'));
 const NQ = Q.glyphs, G = [];
+// The budget is whatever the quote leaves (make-quote.mjs merges the quote to 220, leaving 36),
+// split between fitted and torn glyphs in the proportion the approved look used: 24 + 15 of 39.
+const FREE = 256 - NQ, TORN = Math.round(FREE * 15 / 39), FITTED = FREE - TORN;
 for (let g = 0; g < NQ; g++) {
   const b = []; for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) b.push((Q.chars[g * 8 + r] >> (7 - c)) & 1);
   G.push(b);

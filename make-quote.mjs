@@ -2,14 +2,15 @@
 //
 // The boot quote is a 320x200 HI-RES image, but it does NOT ship as a bitmap. A 1-bit image of
 // text at 8x8 granularity repeats enormously -- every blank cell is one glyph, and thresholded
-// strokes recur -- so it goes as a CHARSET plus a 40x25 screen map. Measured on quote02 at
-// threshold 0.36: 1000 cells, 217 distinct. It fits in 256 with room to spare, which makes the
-// conversion LOSSLESS: the reconstruction is pixel-identical, not an approximation.
+// strokes recur -- so it goes as a CHARSET plus a 40x25 screen map. The first quote (quote02) at
+// threshold 0.36 had 217 distinct cells and converted losslessly. quote-start.png has larger type
+// and 284, and the charset is SHARED with the title -- so it is merged to a budget (see BUDGET):
+// nearly lossless, with every changed pixel counted in the json.
 //
 //   bitmap:          8000 B + 1000 screen        = 9000 B
-//   charset + map:   217*8 = 1736 B + 1000       = 2736 B
+//   charset + map:   220*8 = 1760 B + 1000       = 2760 B
 //
-// and 2736 fits where 9000 never could -- which is the whole reason for doing it this way.
+// and 2760 fits where 9000 never could -- which is the whole reason for doing it this way.
 //
 // It is also PACKED here, with exomizer, and the packed bytes go in the json. That is deliberate:
 // the boot loads the quote at KERNAL speed (~290 B/s) before any fast loader exists, so 2760 -> 1445
@@ -22,9 +23,14 @@ import { tmpdir } from 'os';
 import { inflateSync } from 'zlib';
 import { QUOTE_SCR, QUOTE_CHR, EXO_GETBYTE, EXO_CODE, EXO_TABLE } from './loader-src.mjs';
 
-const SRC = process.argv[2] ?? './art/quote02.png';
+const SRC = process.argv[2] ?? './art/quote-start.png';
 const THR = +(process.argv[3] ?? 0.36);          // the user's pick: 'b', a touch thicker than faithful
 const INK = +(process.argv[4] ?? 12);            // grey2
+// THE CHARSET IS SHARED with the title screen (make-title.mjs), whose own glyphs go in the slots
+// after the quote's. So the quote gets a BUDGET, not 256: 220 leaves the title 36. quote-start.png
+// needs 284 distinct cells at full fidelity; merging to 220 changes 124 pixels across the screen,
+// none more than 3 in a cell. Run make-title.mjs after this -- its stamps ARE these glyphs.
+const BUDGET = +(process.env.QUOTE_GLYPHS ?? 220);
 
 // ---- PNG in (8-bit, any colour type incl. palette) ----
 const b = readFileSync(SRC); let o = 8, w, h, bd, ct, plte = null, idat = [];
@@ -69,9 +75,6 @@ for (let cy = 0; cy < CH; cy++) for (let cx = 0; cx < CW; cx++) {
   const k = g.join(',');
   if (!index.has(k)) { index.set(k, glyphs.length); glyphs.push(g); }
   screen.push(index.get(k)); }
-if (glyphs.length > 256) throw new Error(
-  `${SRC} at threshold ${THR} needs ${glyphs.length} distinct cells; a charset holds 256. ` +
-  `Raise the threshold, or cluster to 256 (k-medians, as the cell charset does) and accept the loss.`);
 
 // ---- prove it round-trips before writing anything ----
 let wrong = 0;
@@ -79,6 +82,78 @@ for (let cy = 0; cy < CH; cy++) for (let cx = 0; cx < CW; cx++) { const g = glyp
   for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++)
     if (((g[r] >> (7-c)) & 1) !== px[(cy*8+r)*W + cx*8+c]) wrong++; }
 if (wrong) throw new Error(`reconstruction differs in ${wrong} pixels -- the dedup is wrong`);
+
+// ---- MERGE to the budget: retire the glyph whose loss is least VISIBLE, until it fits ----
+// Survivors are always REAL cells of the image -- nothing is averaged into a shape the picture
+// never had -- and the blank glyph is never retired. A changed pixel is not a fixed cost: along a
+// thick stroke's edge it is invisible, but a speck appearing in empty space or a pixel lost from a
+// thin stroke reads at once. The first, plain pixel-count version put a tick between "turned" and
+// "every" and turned "man," into "man." -- so each pixel of each cell is weighted by its four
+// neighbours IN THE WHOLE PICTURE (across cell borders), and nothing with ink merges into blank:
+//   gaining ink where all four neighbours are empty (a new speck)            4
+//   losing ink that has at most one inked neighbour (comma tails, dots, joins) 4
+//   any other change                                                           1
+// plus a TOPOLOGY penalty for any swap that splits, joins or erases a stroke (see TOPO below).
+const fullGlyphs = glyphs.length;
+let merged = 0, worstCell = 0;
+if (glyphs.length > BUDGET) {
+  const bit = (g, k) => (g[k >> 3] >> (7 - (k & 7))) & 1;
+  const P = (x, y) => x < 0 || y < 0 || x >= W || y >= H ? 0 : px[y * W + x];
+  // Wt[o][k]: summed flip weight of pixel k over every cell that ORIGINALLY used glyph o
+  const Wt = glyphs.map(() => new Float64Array(64));
+  screen.forEach((o, i) => { const cx = i % CW, cy = Math.floor(i / CW);
+    for (let k = 0; k < 64; k++) { const x = cx * 8 + (k & 7), y = cy * 8 + (k >> 3);
+      const n = P(x - 1, y) + P(x + 1, y) + P(x, y - 1) + P(x, y + 1);
+      Wt[o][k] += px[y * W + x] ? (n <= 1 ? 4 : 1) : (n === 0 ? 4 : 1); } });
+  // TOPOLOGY. Pixel weights see one pixel at a time, and a stroke can be cut by a GROUP of
+  // ordinary-looking pixels: the second version detached the arm of the "r" in "sword" from its
+  // stem, four pixels each with two inked neighbours. So a swap is also judged by the cell's
+  // connected pieces of ink (8-connected), counted in a 10x10 window -- the cell plus a one-pixel
+  // ring from the real picture around it. Splitting, joining or erasing a piece costs TOPO.
+  const TOPO = 24;
+  const pieces = (cell, i) => {
+    const cx = i % CW, cy = Math.floor(i / CW), w = new Uint8Array(100), seen = new Uint8Array(100);
+    for (let y = -1; y <= 8; y++) for (let x = -1; x <= 8; x++)
+      w[(y + 1) * 10 + x + 1] = x >= 0 && x < 8 && y >= 0 && y < 8 ? bit(cell, y * 8 + x) : P(cx * 8 + x, cy * 8 + y);
+    let n = 0;
+    for (let s = 0; s < 100; s++) if (w[s] && !seen[s]) { n++; const st = [s]; seen[s] = 1;
+      while (st.length) { const p = st.pop(), px0 = p % 10, py0 = (p / 10) | 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const x = px0 + dx, y = py0 + dy, q = y * 10 + x;
+          if (x >= 0 && x < 10 && y >= 0 && y < 10 && w[q] && !seen[q]) { seen[q] = 1; st.push(q); } } } }
+    return n;
+  };
+  const uses = glyphs.map(() => []); screen.forEach((o, i) => uses[o].push(i));
+  const base = uses.map((u, o) => u.map(i => pieces(glyphs[o], i)));
+  // C[o][j], the cost of drawing original glyph o's cells with glyph j -- fixed, so computed once
+  const C = glyphs.map((go, o) => glyphs.map((gj, j) => {
+    if (o === j) return 0;
+    let c = 0; for (let k = 0; k < 64; k++) if (bit(go, k) !== bit(gj, k)) c += Wt[o][k];
+    uses[o].forEach((i, u) => { if (pieces(gj, i) !== base[o][u]) c += TOPO; });
+    return c; }));
+  const cost = (o, j) => C[o][j];
+  // members[j]: the original glyphs now drawn with survivor j; retiring j into t moves all of them
+  const alive = new Set(glyphs.keys()), members = glyphs.map((_, i) => [i]), to = glyphs.map((_, i) => i);
+  while (alive.size > BUDGET) {
+    let bi = -1, bj = -1, bc = Infinity;
+    for (const i of alive) { if (glyphs[i].every(v => !v)) continue;
+      const now = members[i].reduce((c, o) => c + cost(o, i), 0);
+      // NEVER INTO THE BLANK: a glyph holding a mark's last pixels (the tail of the comma in "man,"
+      // falls alone in the cell row below) merged into blank deletes the mark, however cheap its
+      // pixels look one at a time. That is how "man," first became "man.".
+      for (const j of alive) if (j !== i && !glyphs[j].every(v => !v)) {
+        const c = members[i].reduce((c, o) => c + cost(o, j), 0) - now; if (c < bc) { bc = c; bi = i; bj = j; } } }
+    alive.delete(bi); members[bj].push(...members[bi]);
+    for (const o of members[bi]) to[o] = bj;
+  }
+  const ham = (a, b) => { let e = 0; for (let k = 0; k < 64; k++) e += bit(a, k) !== bit(b, k); return e; };
+  const keep = [...alive].sort((a, b) => a - b), renum = new Map(keep.map((g, n) => [g, n]));
+  for (let i = 0; i < screen.length; i++) {
+    const e = ham(glyphs[screen[i]], glyphs[to[screen[i]]]); merged += e; worstCell = Math.max(worstCell, e);
+    screen[i] = renum.get(to[screen[i]]);
+  }
+  glyphs.splice(0, glyphs.length, ...keep.map(g => glyphs[g]));
+}
+if (glyphs.length > BUDGET) throw new Error(`${glyphs.length} glyphs after merging; the budget is ${BUDGET}`);
 
 // THE BLANK CELL MUST BE GLYPH 0. The screen is cleared to 0 before the map is stamped, and a
 // partly-written screen should read as empty rather than as whatever cell happened to be first.
@@ -145,10 +220,11 @@ try {
 }
 
 writeFileSync('./quote-screen.json', JSON.stringify({
-  note: 'Boot quote: a 320x200 hi-res image as a charset plus a 40x25 map. LOSSLESS -- see ' +
-        'make-quote.mjs. glyphs are 8 bytes each, MSB left; screen is 1000 bytes of glyph index; ' +
+  note: 'Boot quote: a 320x200 hi-res image as a charset plus a 40x25 map, merged to a glyph BUDGET ' +
+        'so the title screen can share the charset -- see make-quote.mjs. glyphs are 8 bytes each, MSB left; screen is 1000 bytes of glyph index; ' +
         'ink is the C64 colour for colour RAM, background is black.',
-  src: SRC, threshold: THR, ink: INK, glyphs: glyphs.length,
+  src: SRC, threshold: THR, ink: INK, glyphs: glyphs.length, budget: BUDGET,
+  fullGlyphs, mergedPixels: merged,
   // packedAt/packedLen are what build-iray.mjs checks against loader-src.mjs's QUOTE_SCR and the
   // blob it expects: the packed bytes are opaque, so a moved address must fail the BUILD rather
   // than decrunch a picture into the wrong place.
@@ -157,4 +233,4 @@ writeFileSync('./quote-screen.json', JSON.stringify({
 }, null, 1));
 console.error(`quote-screen.json: ${SRC} thr ${THR} -> ${glyphs.length} glyphs ` +
   `(${glyphs.length*8} B) + ${screen.length} B screen = ${glyphs.length*8 + screen.length} B, ` +
-  `reconstruction exact; exomizer ${blob.length} -> ${packed.length} B (${Math.round(100*packed.length/blob.length)}%), decruncher ${decr.bytes.length} B at $${decr.at.toString(16)}`);
+  `${merged ? `merged from ${fullGlyphs} (${merged} pixels changed, worst cell ${worstCell})` : 'reconstruction exact'}; exomizer ${blob.length} -> ${packed.length} B (${Math.round(100*packed.length/blob.length)}%), decruncher ${decr.bytes.length} B at $${decr.at.toString(16)}`);
