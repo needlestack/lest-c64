@@ -272,12 +272,14 @@ const RACKC = opt('--racks', '0,11,12,15').split(',').map(Number), CEILC = opt('
 const BARKHUE = +opt('--barkhue', 65);
 // --bgavoid c,c: colours the BACKGROUND (everything outside the tree's themes) may not use. The
 // user, on the preferred version: walls, floor and ceiling may keep some colour, but not brown --
-// the background should avoid the tree's palette so the trunk pops. Default brown, orange and RED:
-// the C64's red (#813338) is nearly as bright as its dark grey, so with brown banned the warm wall
-// trim landed on red -- a solid red block and red corners along the trim (the user: "not so
-// pronounced ... a few dithered dots"). Light red stays allowed, for the odd warm dot.
+// the background should avoid the tree's palette so the trunk pops. Default brown and orange.
+// --trimavoid c,c (default red): further colours banned on the wall TRIM only (treeseg's bit 32,
+// grown 2 px to take in the blocks along its edge). The C64's red (#813338) is nearly as bright as
+// dark grey, so with brown banned the warm trim landed on red: a solid red block and red corners.
+// Banning red everywhere fixed that and killed the rack LEDs the user wants to keep -- and blink.
+const TRIMAVOID = bitsOf(opt('--trimavoid', '2').split(',').filter(Boolean).map(Number));
 const BGSAT = +opt('--bgsat', 1);
-const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8,2' : '').split(',').filter(Boolean).map(Number));
+const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
 // --nobrown mask.json: hand-marked zones (320x200) where the tree is leaf and brown/orange may not
 // appear -- made from the user's manual edit, the patches they painted brown out of, grown a few
 // pixels to cover the specks at their edges. The dither stays the converter's own, so it blends.
@@ -363,6 +365,16 @@ const themed = (img, W, H) => {
     if (ovl[i] || both[i]) allow[i] |= bitsOf(LEAFC) | bitsOf(BARKC);    // a branch line may sit in a leafy block
     if (nbAt(i % W, Math.floor(i / W))) allow[i] &= ~bitsOf([8, 9]);
     if (!allow[i]) allow[i] = 0xffff & ~AVOID;
+  }
+  if (TRIMAVOID) {                  // the wall trim, grown 2 px (1 in double-wide multicolour pixels)
+    const ry = 2, rx = W === 320 ? 2 : 1;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let t = 0;
+      for (let dy = -ry; dy <= ry && !t; dy++) for (let dx = -rx; dx <= rx && !t; dx++) {
+        const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+        t = W === 320 ? REG.labels[yy * 320 + xx] & 32 : (REG.labels[yy * 320 + 2 * xx] | REG.labels[yy * 320 + 2 * xx + 1]) & 32; }
+      if (t) { allow[y * W + x] &= ~TRIMAVOID; if (!allow[y * W + x]) allow[y * W + x] = 0xffff & ~AVOID & ~TRIMAVOID; }
+    }
   }
   if (process.env.REGIONPNG) {      // debug: each pixel's dominant theme, as a picture
     const C = [[60, 60, 60], [40, 200, 60], [170, 255, 160], [230, 120, 30], [60, 90, 220], [170, 60, 200]];

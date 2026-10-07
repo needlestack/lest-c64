@@ -53,7 +53,7 @@ const strips = [];
       if (x === 0 || y === 0 || x === W - 1 || y === H - 1) edge = true;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy, q = yy * W + xx;
         if (xx >= 0 && yy >= 0 && xx < W && yy < H && lab[q] === 2 && !seen[q]) { seen[q] = 1; st.push(q); } } }
-    if (edge) { for (const q of part) lab[q] = 0; strips.push(part); } } }
+    if (edge) { for (const q of part) lab[q] = 32; strips.push(part); } } }   // 32: the wall TRIM
 keepLargest(2);
 // ...and the left strip still reached the trunk THROUGH the canopy's overlap zone. What really
 // tells it apart: it runs off the edge of the picture, and no part of the tree's bark does. So a
@@ -87,6 +87,7 @@ for (const part of strips) {
 // are bright above row ~50 (the ceiling) and below ~145 (the floor), dark between (the racks), and
 // the racks carry small saturated spots (the LEDs). Fractions of H so another size works.
 //   4 racks: grey ramp   8 ceiling: grey ramp   16 a light inside the racks: left free
+//   32 the wall TRIM (the warm strip where each wall meets the ceiling; set above)
 for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
   const i = y * W + x; if (lab[i]) continue;
   const [L, a, b] = ok(raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]), C = Math.hypot(a, b);
@@ -99,10 +100,10 @@ if (OV) {   // the source, dimmed, tinted by class: green leaf, orange bark, yel
   const S = Math.round(960 / W), OW = W * S, OH = H * S * (W === 160 ? 1 : 1), rgb = new Uint8Array(OW * H * S * 3);
   for (let y = 0; y < H * S; y++) for (let x = 0; x < OW; x++) { const i = Math.floor(y / S) * W + Math.floor(x / S), p = (y * OW + x) * 3;
     const g = (raw[i * 3] + raw[i * 3 + 1] + raw[i * 3 + 2]) / 6;
-    const t = { 0: [g, g, g], 1: [40, 200, 60], 2: [230, 120, 30], 3: [240, 230, 40], 4: [60, 90, 220], 8: [170, 60, 200], 16: [255, 0, 0] }[lab[i]];
+    const t = { 0: [g, g, g], 1: [40, 200, 60], 2: [230, 120, 30], 3: [240, 230, 40], 4: [60, 90, 220], 8: [170, 60, 200], 16: [255, 0, 0], 32: [255, 255, 255] }[lab[i]];
     const k = lab[i] ? 0.6 : 0; for (let c = 0; c < 3; c++) rgb[p + c] = Math.round(g * (1 - k) + t[c] * k); }
   writeFileSync(OV, png(OW, H * S, rgb));
 }
 const cnt = {}; lab.forEach(v => { cnt[v] = (cnt[v] ?? 0) + 1; });
-console.log(`${W}x${H}: ` + Object.entries({ 0: 'floor/rest', 1: 'leaf', 2: 'bark', 3: 'both', 4: 'racks', 8: 'ceiling', 16: 'lights' })
+console.log(`${W}x${H}: ` + Object.entries({ 0: 'floor/rest', 1: 'leaf', 2: 'bark', 3: 'both', 4: 'racks', 8: 'ceiling', 16: 'lights', 32: 'trim' })
   .map(([k, n]) => `${n} ${cnt[k] ?? 0}`).join(', '));
