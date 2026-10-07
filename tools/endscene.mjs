@@ -80,22 +80,33 @@ for (let turn = 0; chosen.length < NSTEADY + NACT && turn < 3 * cands.length; tu
   const pool = byColour[turn % 3], c = pool.find(o => !chosen.includes(o) && spaced(o));
   if (c) chosen.push(c);
 }
+// ...plus EXTRA_RIGHT on the NEAREST RIGHT RACK (the user asked for a couple more there): x >= 135 of
+// 160, a little closer together (12 screen px) since it is one rack. The first is steady, the rest
+// activity lights.
+const EXTRA_RIGHT = 3, extra = [];
+const rightBy = [7, 2, 5].map(col => shuffle(cands.filter(c => c.c === col && c.cx >= 135 && !chosen.includes(c))));
+for (let turn = 0; extra.length < EXTRA_RIGHT && turn < 3 * cands.length; turn++) {   // colours in rotation here too
+  const c = rightBy[turn % 3].find(o => !extra.includes(o) && [...chosen, ...extra].every(p => dist(p, o) >= 12));
+  if (c) extra.push(c);
+}
 // the first two steady lights each take their nearest unchosen partner (same colour if possible,
 // within ~3-12 screen px) as a SYNCED PAIR
-const used = new Set(chosen);
-const lights = chosen.map((c, i) => {
+const used = new Set([...chosen, ...extra]);
+const lights = [...chosen, ...extra].map((c, i) => {
   const dots = [c];
   if (i < 2) { const p = partnerOf(c); if (p && !used.has(p)) { dots.push(p); used.add(p); } }
   const bytes = new Map();
   for (const d of dots) for (const [x, y] of d.px) { const o = byteOf(x, y); bytes.set(o, (bytes.get(o) ?? 0) | (3 << shiftOf(x))); }
-  return { kind: i < NSTEADY ? 'steady' : 'activity', colour: DOT[c.c], pair: dots.length > 1, at: [Math.round(c.cx), Math.round(c.cy)],
+  const kind = i < NSTEADY || i === NSTEADY + NACT ? 'steady' : 'activity';   // the first extra is steady
+  return { kind, colour: DOT[c.c], pair: dots.length > 1, at: [Math.round(c.cx), Math.round(c.cy)],
            bytes: [...bytes].map(([o, mask]) => ({ addr: 0x2000 + o, on: bm[o], off: bm[o] & ~mask & 255 })) };
 });
 // STEADY periods (frames on, frames off): each light its own, about 0.5-2 s, some lopsided; and a
 // starting point anywhere in its cycle
-const PERIODS = shuffle([[30, 30], [45, 45], [60, 60], [40, 80], [90, 30], [25, 50], [75, 75], [55, 35]]);
+const PERIODS = shuffle([[30, 30], [45, 45], [60, 60], [40, 80], [90, 30], [25, 50], [75, 75], [55, 35], [35, 65]]);
+let nSteady = 0;   // each steady light its OWN period: indexing by light number reused one (two at 90/30)
 lights.forEach((l, i) => {
-  if (l.kind === 'steady') { [l.onT, l.offT] = PERIODS[i % PERIODS.length]; l.phase = 1 + Math.floor(rnd() * l.onT); }
+  if (l.kind === 'steady') { [l.onT, l.offT] = PERIODS[nSteady++ % PERIODS.length]; l.phase = 1 + Math.floor(rnd() * l.onT); }
   else { l.onT = 0; l.offT = 0; l.pause = 10 + Math.floor(rnd() * 30); l.phase = 1 + Math.floor(rnd() * 60); }
 });
 const flat = lights.flatMap(l => l.bytes);
