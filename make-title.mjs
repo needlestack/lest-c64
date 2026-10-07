@@ -51,9 +51,11 @@ const INK_DARK = 11, INK_LIGHT = 12;
 // ---- the quote's charset, as 64-pixel arrays ----
 const Q = JSON.parse(readFileSync('./quote-screen.json', 'utf8'));
 const NQ = Q.glyphs, G = [];
-// The budget is whatever the quote leaves (make-quote.mjs merges the quote to 220, leaving 36),
-// split between fitted and torn glyphs in the proportion the approved look used: 24 + 15 of 39.
-const FREE = 256 - NQ, TORN = Math.round(FREE * 15 / 39), FITTED = FREE - TORN;
+// THE APPROVED BUDGET is 24 fitted + 15 torn = 39. More slots would not improve the title, they
+// would CHANGE it -- more fitted glyphs means a cleaner fit, and the chosen look is the rough one.
+// So it takes 39 when the quote leaves that many (quote-start.png: 179 glyphs, 77 free), and only
+// when the quote is bigger does it shrink, keeping the same proportion.
+const FREE = Math.min(39, 256 - NQ), TORN = Math.round(FREE * 15 / 39), FITTED = FREE - TORN;
 for (let g = 0; g < NQ; g++) {
   const b = []; for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) b.push((Q.chars[g * 8 + r] >> (7 - c)) & 1);
   G.push(b);

@@ -2,15 +2,15 @@
 //
 // The boot quote is a 320x200 HI-RES image, but it does NOT ship as a bitmap. A 1-bit image of
 // text at 8x8 granularity repeats enormously -- every blank cell is one glyph, and thresholded
-// strokes recur -- so it goes as a CHARSET plus a 40x25 screen map. The first quote (quote02) at
-// threshold 0.36 had 217 distinct cells and converted losslessly. quote-start.png has larger type
-// and 284, and the charset is SHARED with the title -- so it is merged to a budget (see BUDGET):
-// nearly lossless, with every changed pixel counted in the json.
+// strokes recur -- so it goes as a CHARSET plus a 40x25 screen map. quote-start.png at threshold
+// 0.36 has 179 distinct cells, which fits the budget with room to spare, so the conversion is
+// LOSSLESS. The charset is SHARED with the title, so a quote that needs more is merged to a budget
+// (see BUDGET), with every changed pixel counted in the json.
 //
 //   bitmap:          8000 B + 1000 screen        = 9000 B
-//   charset + map:   220*8 = 1760 B + 1000       = 2760 B
+//   charset + map:   179*8 = 1432 B + 1000       = 2432 B
 //
-// and 2760 fits where 9000 never could -- which is the whole reason for doing it this way.
+// and 2432 fits where 9000 never could -- which is the whole reason for doing it this way.
 //
 // It is also PACKED here, with exomizer, and the packed bytes go in the json. That is deliberate:
 // the boot loads the quote at KERNAL speed (~290 B/s) before any fast loader exists, so 2760 -> 1445
@@ -27,9 +27,10 @@ const SRC = process.argv[2] ?? './art/quote-start.png';
 const THR = +(process.argv[3] ?? 0.36);          // the user's pick: 'b', a touch thicker than faithful
 const INK = +(process.argv[4] ?? 12);            // grey2
 // THE CHARSET IS SHARED with the title screen (make-title.mjs), whose own glyphs go in the slots
-// after the quote's. So the quote gets a BUDGET, not 256: 220 leaves the title 36. quote-start.png
-// needs 284 distinct cells at full fidelity; merging to 220 changes 124 pixels across the screen,
-// none more than 3 in a cell. Run make-title.mjs after this -- its stamps ARE these glyphs.
+// after the quote's. So the quote gets a BUDGET, not 256: 220 leaves the title 36. The shipping
+// quote-start.png needs only 179 and converts LOSSLESSLY; the merge below exists for a quote that
+// does not fit (a larger-type version needed 284, and merged to 220 with 153 edge pixels changed).
+// Run make-title.mjs after this -- its stamps ARE these glyphs.
 const BUDGET = +(process.env.QUOTE_GLYPHS ?? 220);
 
 // ---- PNG in (8-bit, any colour type incl. palette) ----
