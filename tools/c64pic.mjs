@@ -112,7 +112,11 @@ function scoreBlock(img, W, x0, y0, bw, bh, set, pk, allow) {
 // In MULTICOLOUR the cost is the fraction of a block's own three colours its neighbour lacks (the
 // shared background never counts) -- the lesson of a 4-colour-total conversion that looked better in
 // places than per-block freedom: where every block uses the same colours there are no seams.
-function convert(img, W, H, bw, bh, setsFor, allow, smooth = 0, mc = false) {
+// KEEPERR (default on with --regions; --leakerr turns it off): dither error stays inside the region
+// it came from. Error is a debt in ONE theme's terms; carried into another ramp it is meaningless,
+// and the bright-leaf dither (black <-> light green, large swings) poured its leftovers down into
+// the trunk and flattened it to dark brown -- the trunk only looked right without that ramp.
+function convert(img, W, H, bw, bh, setsFor, allow, smooth = 0, mc = false, region = null) {
   const BX = W / bw, BY = H / bh, choice = [], cache = new Map(), cands = [];
   const pk = []; for (let i = 0; i < W * H; i++) pk.push(oklab(img[i * 3], img[i * 3 + 1], img[i * 3 + 2]));
   let total = 0;
@@ -160,6 +164,7 @@ function convert(img, W, H, bw, bh, setsFor, allow, smooth = 0, mc = false) {
       idx[y * W + x] = bi;
       const p = PL[bi], er = r - p[0], eg = g - p[1], eb = b - p[2], sx = rev ? -1 : 1;
       const push = (dx, dy, f) => { const xx = x + dx * sx, yy = y + dy; if (xx < 0 || xx >= W || yy >= H) return;
+        if (region && region[yy * W + xx] !== region[y * W + x] && (KEEPERR === 'all' || region[y * W + x] === 2)) return;
         const u = (yy * W + xx) * 3; work[u] += er * f; work[u + 1] += eg * f; work[u + 2] += eb * f; };
       push(1, 0, 7 / 16); push(-1, 1, 3 / 16); push(0, 1, 5 / 16); push(1, 1, 1 / 16);
     }
@@ -179,6 +184,10 @@ const combos = (n, k, from) => { const out = []; const rec = (s, a) => { if (a.l
   for (let i = s; i < from.length; i++) rec(i + 1, [...a, from[i]]); }; rec(0, []); return out; };
 const ALL = [...Array(16).keys()];
 const SMOOTH = +opt('--smooth', 0.5), SMOOTHMC = +opt('--smoothmc', 0);
+// 'all' (default): no error crosses a region border -- on the tree, the trunk closest to the
+// user's preferred version. 'bright': only error LEAVING the bright-leaf region is held back (left
+// the trunk's upper part flatter). --leakerr: none held back (the trunk went flat dark brown).
+const KEEPERR = has('--leakerr') ? false : opt('--keeperr', 'all');
 const REG = opt('--regions', null) ? JSON.parse(readFileSync(opt('--regions'), 'utf8')) : null;
 const LEAFC = opt('--leaf', '0,5,13').split(',').map(Number), BARKC = opt('--bark', '0,9,8').split(',').map(Number);
 const NOLEAF2 = opt('--leaf2', '') === 'none';
@@ -257,9 +266,10 @@ const BARKHUE = +opt('--barkhue', 65);
 const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
 const themed = (img, W, H) => {
   const allow = new Uint16Array(W * H).fill(0xffff & ~AVOID);
-  if (!REG) return { img, allow };
+  if (!REG) return { img, allow, region: new Uint8Array(W * H) };
   if (REG.W !== 320 || REG.H !== 200) throw new Error(`--regions must be 320x200, not ${REG.W}x${REG.H}`);
   const n = W * H, cls = [1, 2, 4, 8].map(() => new Float32Array(n)), lum = new Float32Array(n);
+  const region = new Uint8Array(n);          // the pixel's DOMINANT theme, 0 = background (see KEEPERR)
   const ovl = new Int8Array(n), light = new Uint8Array(n);   // overlap: 1 leaf / 2 bark, per pixel
   const both = new Uint8Array(n);                            // overlap in 'hue' mode: may use both palettes
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -292,6 +302,7 @@ const themed = (img, W, H) => {
     const wr = Math.max(0, 1 - w.reduce((a, v) => a + v, 0));
     if (wr >= 1) continue;
     const q = [LR, L2, BR, KR, CR].map(rp => onRamp(rp, lum[i]));
+    { let k = -1, best = wr; w.forEach((v, j) => { if (v > best) { best = v; k = j; } }); region[i] = k + 1; }
     // --texture t: the themed part's brightness x (1 + t x (Bayer - 1/2)). A target sitting ON a
     // palette colour (branches at C64 brown's brightness) dithers into nothing -- a solid block,
     // and in hi-res a hard-edged one. The 4x4 pattern averages out, so brightness is unchanged.
@@ -306,7 +317,7 @@ const themed = (img, W, H) => {
     if (ovl[i] || both[i]) allow[i] |= bitsOf(LEAFC) | bitsOf(BARKC);    // a branch line may sit in a leafy block
     if (!allow[i]) allow[i] = 0xffff & ~AVOID;
   }
-  return { img: out, allow };
+  return { img: out, allow, region };
 };
 
 if (DO_HI) {
@@ -318,7 +329,7 @@ if (DO_HI) {
   const { choice, idx } = convert(img, 320, 200, 8, 8, m => { const c = colsOf(m);
     let pairs = c.length >= 2 ? combos(c.length, 2, c) : [[c[0], c[0]]];
     if (HB && m !== 0xffff && c.includes(0)) pairs = pairs.filter(p => p.includes(0));
-    return pairs; }, th.allow, SMOOTH);
+    return pairs; }, th.allow, SMOOTH, false, KEEPERR ? th.region : null);
   preview(idx, 320, 200, 1, `${OUT}-hires.png`);
   // .art (Art Studio): $2000, 8000 bytes of bitmap, then 1000 of screen (fg high nybble, bg low)
   const bm = new Uint8Array(8000), scr = new Uint8Array(1000);
@@ -339,7 +350,7 @@ if (DO_MC) {
       let c = colsOf(m).filter(k => k !== bg);
       // fewer than 3 allowed: pad with colours no pixel here may use -- the slot exists regardless
       if (c.length < 3) c = c.concat(ALL.filter(k => k !== bg && !c.includes(k))).slice(0, 3);
-      return combos(c.length, 3, c).map(s => [bg, ...s]); }, th.allow, SMOOTHMC, true);
+      return combos(c.length, 3, c).map(s => [bg, ...s]); }, th.allow, SMOOTHMC, true, KEEPERR ? th.region : null);
     console.log(`  multicolour, background ${bg}: score ${r.score.toFixed(3)}`);
     if (!best || r.score < best.score) best = { ...r, bg };
   }
