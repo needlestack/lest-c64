@@ -105,17 +105,39 @@ function scoreBlock(img, W, x0, y0, bw, bh, set, pk, allow) {
 
 // ---- choose a set per block, then one global serpentine FS within the chosen sets ----
 // setsFor(mask) -> the candidate sets for a block whose pixels together allow colour bits `mask`
-function convert(img, W, H, bw, bh, setsFor, allow) {
-  const BX = W / bw, BY = H / bh, choice = [], cache = new Map();
+// smooth > 0: NEIGHBOUR-AWARE CHOICE (hi-res). Each block first takes its own best set; then a few
+// rounds re-pick every block counting a cost for each neighbour it shares NO colour with (1) or
+// only one with while differing (0.3), scaled by `smooth` x the mean block score. Two blocks with
+// disjoint pairs can only meet in a hard line; sharing a colour lets the border dither through it.
+function convert(img, W, H, bw, bh, setsFor, allow, smooth = 0) {
+  const BX = W / bw, BY = H / bh, choice = [], cache = new Map(), cands = [];
   const pk = []; for (let i = 0; i < W * H; i++) pk.push(oklab(img[i * 3], img[i * 3 + 1], img[i * 3 + 2]));
   let total = 0;
   for (let by = 0; by < BY; by++) for (let bx = 0; bx < BX; bx++) {
     let mask = 0;
     for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) mask |= allow[(by * bh + y) * W + bx * bw + x];
     if (!cache.has(mask)) cache.set(mask, setsFor(mask));
-    let best = null, bs = Infinity;
-    for (const set of cache.get(mask)) { const s = scoreBlock(img, W, bx * bw, by * bh, bw, bh, set, pk, allow); if (s < bs) { bs = s; best = set; } }
-    choice.push(best); total += bs;
+    const list = cache.get(mask).map(set => ({ set, sc: scoreBlock(img, W, bx * bw, by * bh, bw, bh, set, pk, allow) }));
+    let best = list[0];
+    for (const c of list) if (c.sc < best.sc) best = c;
+    cands.push(list); choice.push(best.set); total += best.sc;
+  }
+  if (smooth > 0) {
+    const lam = smooth * total / choice.length;
+    const clash = (a, b) => { const sh = a.filter(c => b.includes(c)).length;
+      return sh === 0 ? 1 : (sh < a.length && sh < b.length) ? 0.3 : 0; };
+    for (let round = 0; round < 4; round++) {
+      let changed = 0;
+      for (let b = 0; b < choice.length; b++) {
+        const bx = b % BX, by = Math.floor(b / BX), nb = [];
+        if (bx > 0) nb.push(b - 1); if (bx < BX - 1) nb.push(b + 1); if (by > 0) nb.push(b - BX); if (by < BY - 1) nb.push(b + BX);
+        let best = null, bc = Infinity;
+        for (const c of cands[b]) { const cost = c.sc + lam * nb.reduce((n, o) => n + clash(c.set, choice[o]), 0);
+          if (cost < bc) { bc = cost; best = c.set; } }
+        if (best !== choice[b]) { choice[b] = best; changed++; }
+      }
+      if (!changed) break;
+    }
   }
   const work = Float32Array.from(img), idx = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) {
@@ -152,27 +174,17 @@ const preview = (idx, W, H, pxw, file) => {
 const combos = (n, k, from) => { const out = []; const rec = (s, a) => { if (a.length === k) return out.push(a);
   for (let i = s; i < from.length; i++) rec(i + 1, [...a, from[i]]); }; rec(0, []); return out; };
 const ALL = [...Array(16).keys()];
+const SMOOTH = +opt('--smooth', 0.5);
 const REG = opt('--regions', null) ? JSON.parse(readFileSync(opt('--regions'), 'utf8')) : null;
 const LEAFC = opt('--leaf', '0,5,13').split(',').map(Number), BARKC = opt('--bark', '0,9,8').split(',').map(Number);
+const LEAF2C = opt('--leaf2', '0,13').split(',').map(Number);
 const bitsOf = cols => cols.reduce((m, c) => m | (1 << c), 0);
-const allowFor = (W, H) => {
-  const a = new Uint16Array(W * H).fill(0xffff);
-  if (!REG) return a;
-  if (REG.W !== 320 || REG.H !== 200) throw new Error(`--regions must be 320x200, not ${REG.W}x${REG.H}`);
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const lab = W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
-    if (lab) a[y * W + x] = ((lab & 1) ? bitsOf(LEAFC) : 0) | ((lab & 2) ? bitsOf(BARKC) : 0);
-  }
-  return a;
-};
 const colsOf = mask => ALL.filter(c => (mask >> c) & 1);
 // A THEME IS A RAMP. Themed pixels are re-targeted to their LUMINANCE placed on the theme's ramp
-// (its colours sorted by brightness, blended in linear light between neighbours) before anything
-// else happens. Without this the dither ran away: leaves of RGB 108,97,56 carry red that neither
-// black nor green can give back, the red error piled up without limit, and that pile pushed every
-// pixel to green -- the canopy came out flat. "Black, green, light green" means the leaves'
-// BRIGHTNESS drawn in greens. Overlap pixels take the ramp their own hue is nearer (leaf above
-// ~78 degrees in Oklab, bark below: measured on this image).
+// (its colours sorted by brightness, blended in linear light between neighbours). Without this the
+// dither ran away: leaves of RGB 108,97,56 carry red that neither black nor green can give back, the
+// red error piled up without limit, and that pile pushed every pixel to green -- the canopy came
+// out flat. "Black, green, light green" means the leaves' BRIGHTNESS drawn in greens.
 const Y = p => 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
 const ramp = cols => [...cols].sort((a, b) => Y(PL[a]) - Y(PL[b])).map(c => PL[c]);
 const onRamp = (rp, y) => {
@@ -181,41 +193,93 @@ const onRamp = (rp, y) => {
     if (y <= b) { const t = (y - a) / (b - a); return rp[i].map((v, c) => v + t * (rp[i + 1][c] - v)); } }
   return rp[rp.length - 1];
 };
-// --stretch: each theme's own brightness range (2nd-98th percentile of its pixels) is spread over
-// its ramp's full range, in Oklab L, so a region whose leaves all sit near one ramp colour (the
-// ceiling-lit top of the canopy sat on plain green) still gets dithered texture.
-const STRETCH = has('--stretch');
-const Lof = p => oklab(...p)[0];
-const theme = (img, W, H) => {
-  if (!REG) return img;
-  const out = Float32Array.from(img), LR = ramp(LEAFC), BR = ramp(BARKC);
-  const labAt = (x, y) => W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
-  const span = {};
-  if (STRETCH) for (const [k, rp] of [[1, LR], [2, BR]]) {
-    const Ls = [];
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (labAt(x, y) === k) { const i = (y * W + x) * 3; Ls.push(Lof([img[i], img[i + 1], img[i + 2]])); }
-    Ls.sort((a, b) => a - b);
-    span[k] = { lo: Ls[Math.floor(Ls.length * 0.02)], hi: Ls[Math.floor(Ls.length * 0.98)], rlo: Lof(rp[0]), rhi: Lof(rp[rp.length - 1]) };
-  }
-  // map a pixel's L through its theme's stretch, then back to linear luminance for the ramp
-  const yOf = (p, k) => { if (!STRETCH) return Y(p);
-    const s = span[k], L = s.rlo + Math.min(1, Math.max(0, (Lof(p) - s.lo) / (s.hi - s.lo))) * (s.rhi - s.rlo);
-    return L ** 3; };                     // Oklab L of a grey is cbrt(Y): invert it
+const boxBlur = (m, W, H, rx, ry) => {             // separable box, edge-normalised
+  const t = new Float32Array(W * H), o = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let s = 0, n = 0;
+    for (let d = -rx; d <= rx; d++) { const xx = x + d; if (xx >= 0 && xx < W) { s += m[y * W + xx]; n++; } } t[y * W + x] = s / n; }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let s = 0, n = 0;
+    for (let d = -ry; d <= ry; d++) { const yy = y + d; if (yy >= 0 && yy < H) { s += t[yy * W + x]; n++; } } o[y * W + x] = s / n; }
+  return o;
+};
+// THEMES ARE FEATHERED. A pixel is not "leaf" or "bark" or "background" but a mix, by WEIGHTS: the
+// labels blurred over --feather pixels (default 4, in 320-wide units). Its target blends each
+// theme's ramp colour with the original by those weights, and every palette with real weight is
+// allowed there. The first version switched hard at the region edges, so neighbouring blocks shared
+// almost no colours and every border became a straight line -- a staircase on the 8x8 grid.
+// BRIGHT LEAVES (--leaf2, black/light green): leaves about as bright as C64 green rendered as SOLID
+// green -- the ceiling-lit top and right of the canopy, a large flat area. Leaves get leaf2's ramp
+// in proportion to their local brightness (ramping in from 60% to 90% of green's luminance), so
+// that brightness comes out as a black/light-green dither instead.
+const FEATHER = +opt('--feather', 4);
+const TEXTURE = +opt('--texture', 0);
+const OVERLAP = opt('--overlap', 'hue');
+// --edgesoft r: within r pixels of a BLOCK edge the target fades toward a local blur that spans
+// both blocks. Each block's last pixels before the border then ask for an in-between colour, which
+// two colours can only give by dithering -- on both sides. Without it, two blocks of different
+// colour sets met as flat fills in a straight line (the user: "any time a block is going to get
+// cut to another color at the edge, there should be dithering on both blocks").
+const EDGESOFT = +opt('--edgesoft', 0);
+const edgeSoft = (img, W, H, bw, bh, r) => {
+  if (!r) return img;
+  const out = Float32Array.from(img), ch = [0, 1, 2].map(c => { const m = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) m[i] = img[i * 3 + c]; return boxBlur(m, W, H, r, r); });
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const lab = W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
-    if (!lab) continue;
-    const i = (y * W + x) * 3, p = [img[i], img[i + 1], img[i + 2]];
-    let k = lab === 3 ? 0 : lab;
-    if (!k) { const [, a, b] = oklab(...p); k = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360 >= 78 ? 1 : 2; }
-    const q = onRamp(k === 1 ? LR : BR, yOf(p, k)); out[i] = q[0]; out[i + 1] = q[1]; out[i + 2] = q[2];
+    const d = Math.min(x % bw, bw - 1 - (x % bw), y % bh, bh - 1 - (y % bh)), w = Math.max(0, 1 - d / r);
+    if (!w) continue;
+    const i = y * W + x; for (let c = 0; c < 3; c++) out[i * 3 + c] = img[i * 3 + c] * (1 - w) + ch[c][i] * w;
   }
   return out;
 };
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const themed = (img, W, H) => {
+  const allow = new Uint16Array(W * H).fill(0xffff);
+  if (!REG) return { img, allow };
+  if (REG.W !== 320 || REG.H !== 200) throw new Error(`--regions must be 320x200, not ${REG.W}x${REG.H}`);
+  const leaf = new Float32Array(W * H), bark = new Float32Array(W * H), lum = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, lab = W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
+    const p = [img[i * 3], img[i * 3 + 1], img[i * 3 + 2]]; lum[i] = Y(p);
+    let k = lab;
+    // overlap: by own hue -- or, --overlap leaf, simply leaf: in HI-RES a 2-colour block cannot draw
+    // the leaf-and-twig mixture of the branches inside the canopy, and those blocks went flat brown
+    if (k === 3) { const [, a, b] = oklab(...p);
+      k = OVERLAP === 'leaf' ? 1 : (Math.atan2(b, a) * 180 / Math.PI + 360) % 360 >= 78 ? 1 : 2; }
+    if (k === 1) leaf[i] = 1; else if (k === 2) bark[i] = 1;
+  }
+  const rx = Math.max(1, Math.round(FEATHER * W / 320)), wl = boxBlur(leaf, W, H, rx, FEATHER), wb = boxBlur(bark, W, H, rx, FEATHER);
+  const ls = boxBlur(lum, W, H, Math.max(1, Math.round(2 * W / 320)), 2), Yg = Y(PL[5]);
+  const LR = ramp(LEAFC), L2 = ramp(LEAF2C), BR = ramp(BARKC), out = Float32Array.from(img);
+  for (let i = 0; i < W * H; i++) {
+    const f = Math.min(1, Math.max(0, (ls[i] - 0.6 * Yg) / (0.3 * Yg))), w1 = wl[i] * (1 - f), w2 = wl[i] * f, w3 = wb[i];
+    const wr = Math.max(0, 1 - w1 - w2 - w3);
+    if (wr >= 1) continue;
+    const q1 = onRamp(LR, lum[i]), q2 = onRamp(L2, lum[i]), q3 = onRamp(BR, lum[i]);
+    // --texture t: the themed part's brightness x (1 + t x (Bayer - 1/2)). A target sitting ON a
+    // palette colour (branches at C64 brown's brightness) dithers into nothing -- a solid block,
+    // and in hi-res a hard-edged one. The 4x4 pattern averages out, so brightness is unchanged.
+    const x = i % W, y = Math.floor(i / W), bay = (BAYER[(y & 3) * 4 + (x & 3)] + 0.5) / 16 - 0.5;
+    const mod = 1 + TEXTURE * bay * (1 - wr);
+    for (let c = 0; c < 3; c++) out[i * 3 + c] = (w1 * q1[c] + w2 * q2[c] + w3 * q3[c]) * mod + wr * img[i * 3 + c];
+    // A BRIGHT leaf (f > 0.5) may not use the plain leaf ramp at all: allowed by weight alone, plain
+    // green stayed available wherever any of that ramp remained, and error diffusion picked it for
+    // every target near green's brightness -- the flat band across the top came straight back.
+    allow[i] = (wr > 0.05 ? 0xffff : 0) | (w1 > 0.05 && f <= 0.5 ? bitsOf(LEAFC) : 0) |
+               (w2 > 0.05 ? bitsOf(LEAF2C) : 0) | (w3 > 0.05 ? bitsOf(BARKC) : 0);
+    if (!allow[i]) allow[i] = 0xffff;
+  }
+  return { img: out, allow };
+};
 
 if (DO_HI) {
-  const t0 = Date.now(), img = theme(load(320, 200), 320, 200);
+  const t0 = Date.now(), th = themed(load(320, 200), 320, 200), img = edgeSoft(th.img, 320, 200, 8, 8, EDGESOFT);
+  // --hiresblack: inside a THEMED block (one that does not allow all 16), every pair includes black.
+  // Neighbouring tree blocks then always share a colour, so a border can dither through it; with free
+  // pairs, a branch block of brown+green met a leaf block of black+green as two flat fills in a line.
+  const HB = has('--hiresblack');
   const { choice, idx } = convert(img, 320, 200, 8, 8, m => { const c = colsOf(m);
-    return c.length >= 2 ? combos(c.length, 2, c) : [[c[0], c[0]]]; }, allowFor(320, 200));
+    let pairs = c.length >= 2 ? combos(c.length, 2, c) : [[c[0], c[0]]];
+    if (HB && m !== 0xffff && c.includes(0)) pairs = pairs.filter(p => p.includes(0));
+    return pairs; }, th.allow, SMOOTH);
   preview(idx, 320, 200, 1, `${OUT}-hires.png`);
   // .art (Art Studio): $2000, 8000 bytes of bitmap, then 1000 of screen (fg high nybble, bg low)
   const bm = new Uint8Array(8000), scr = new Uint8Array(1000);
@@ -227,7 +291,7 @@ if (DO_HI) {
 }
 
 if (DO_MC) {
-  const t0 = Date.now(), img = theme(load(160, 200), 160, 200);
+  const t0 = Date.now(), th = themed(load(160, 200), 160, 200), img = edgeSoft(th.img, 160, 200, 4, 8, Math.max(1, Math.round(EDGESOFT / 2)) * (EDGESOFT ? 1 : 0));
   // The background is shared by every block, so it is chosen by trying the likely ones whole.
   const tryBg = opt('--bg', null) !== null ? [+opt('--bg')] : [0, 11, 9, 6];
   let best = null;
@@ -236,7 +300,7 @@ if (DO_MC) {
       let c = colsOf(m).filter(k => k !== bg);
       // fewer than 3 allowed: pad with colours no pixel here may use -- the slot exists regardless
       if (c.length < 3) c = c.concat(ALL.filter(k => k !== bg && !c.includes(k))).slice(0, 3);
-      return combos(c.length, 3, c).map(s => [bg, ...s]); }, allowFor(160, 200));
+      return combos(c.length, 3, c).map(s => [bg, ...s]); }, th.allow, 0);
     console.log(`  multicolour, background ${bg}: score ${r.score.toFixed(3)}`);
     if (!best || r.score < best.score) best = { ...r, bg };
   }
