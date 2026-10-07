@@ -266,7 +266,12 @@ const BARKHUE = +opt('--barkhue', 65);
 // user, on the preferred version: walls, floor and ceiling may keep some colour, but not brown --
 // the background should avoid the tree's palette so the trunk pops. Default brown and orange.
 const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
+// --nobrown mask.json: hand-marked zones (320x200) where the tree is leaf and brown/orange may not
+// appear -- made from the user's manual edit, the patches they painted brown out of, grown a few
+// pixels to cover the specks at their edges. The dither stays the converter's own, so it blends.
+const NOBROWN = opt('--nobrown', null) ? JSON.parse(readFileSync(opt('--nobrown'), 'utf8')).mask : null;
 const themed = (img, W, H) => {
+  const nbAt = (x, y) => NOBROWN ? (W === 320 ? NOBROWN[y * 320 + x] : NOBROWN[y * 320 + 2 * x] | NOBROWN[y * 320 + 2 * x + 1]) : 0;
   const allow = new Uint16Array(W * H).fill(0xffff & ~AVOID);
   if (!REG) return { img, allow, region: new Uint8Array(W * H) };
   if (REG.W !== 320 || REG.H !== 200) throw new Error(`--regions must be 320x200, not ${REG.W}x${REG.H}`);
@@ -278,6 +283,7 @@ const themed = (img, W, H) => {
     const i = y * W + x, lab = W === 320 ? REG.labels[y * 320 + x] : REG.labels[y * 320 + 2 * x] | REG.labels[y * 320 + 2 * x + 1];
     const p = [img[i * 3], img[i * 3 + 1], img[i * 3 + 2]]; lum[i] = Y(p);
     if (SCENE && (lab & 16)) { light[i] = 1; continue; }
+    if (nbAt(x, y)) { cls[0][i] = 1; continue; }              // a no-brown zone: leaf, whatever else
     if ((lab & 3) === 3) {
       if (OVERLAP === 'leaf') { cls[0][i] = 1; continue; }
       const [, a, b] = oklab(...p), h = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
@@ -336,6 +342,7 @@ const themed = (img, W, H) => {
     allow[i] = (wr > 0.05 ? 0xffff & ~AVOID : 0) | (w[0] > 0.05 && f <= 0.5 ? bitsOf(LEAFC) : 0) | (w[1] > 0.05 ? bitsOf(LEAF2C) : 0) |
                (w[2] > 0.05 ? bitsOf(BARKC) : 0) | (w[3] > 0.05 ? bitsOf(RACKC) : 0) | (w[4] > 0.05 ? bitsOf(CEILC) : 0);
     if (ovl[i] || both[i]) allow[i] |= bitsOf(LEAFC) | bitsOf(BARKC);    // a branch line may sit in a leafy block
+    if (nbAt(i % W, Math.floor(i / W))) allow[i] &= ~bitsOf([8, 9]);
     if (!allow[i]) allow[i] = 0xffff & ~AVOID;
   }
   if (process.env.REGIONPNG) {      // debug: each pixel's dominant theme, as a picture
