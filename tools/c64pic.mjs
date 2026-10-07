@@ -54,6 +54,14 @@ const oklab = (r, g, b) => {
           0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
 };
 const PK = PL.map(p => oklab(...p));
+// Oklab -> LINEAR rgb (the inverse of oklab above), for adjusting a colour's chroma in place
+const unoklab = (L, a, b) => {
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3, m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3,
+        s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+  return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+          -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+          -0.0041960863 * l - 0.7034186147 * m + 1.7076956010 * s];
+};
 const dk = (a, b) => { const x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2]; return x * x + y * y + z * z; };
 const d2 = (r, g, b, p) => dk(oklab(r, g, b), PK[PL.indexOf(p)]);
 
@@ -264,8 +272,12 @@ const RACKC = opt('--racks', '0,11,12,15').split(',').map(Number), CEILC = opt('
 const BARKHUE = +opt('--barkhue', 65);
 // --bgavoid c,c: colours the BACKGROUND (everything outside the tree's themes) may not use. The
 // user, on the preferred version: walls, floor and ceiling may keep some colour, but not brown --
-// the background should avoid the tree's palette so the trunk pops. Default brown and orange.
-const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
+// the background should avoid the tree's palette so the trunk pops. Default brown, orange and RED:
+// the C64's red (#813338) is nearly as bright as its dark grey, so with brown banned the warm wall
+// trim landed on red -- a solid red block and red corners along the trim (the user: "not so
+// pronounced ... a few dithered dots"). Light red stays allowed, for the odd warm dot.
+const BGSAT = +opt('--bgsat', 1);
+const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8,2' : '').split(',').filter(Boolean).map(Number));
 // --nobrown mask.json: hand-marked zones (320x200) where the tree is leaf and brown/orange may not
 // appear -- made from the user's manual edit, the patches they painted brown out of, grown a few
 // pixels to cover the specks at their edges. The dither stays the converter's own, so it blends.
@@ -325,7 +337,14 @@ const themed = (img, W, H) => {
     const tot = w.reduce((a, v) => a + v, 0);
     if (SCENE && tot > 1) for (let k = 0; k < 5; k++) w[k] /= tot;   // (the preferred version did not normalise)
     const wr = Math.max(0, 1 - w.reduce((a, v) => a + v, 0));
-    if (wr >= 1) continue;
+    // --bgsat s: the BACKGROUND's colour pulled toward grey (chroma x s, lightness and hue kept). With
+    // brown and orange banned there, the warm wall trim's nearest colour was red, and it filled whole
+    // blocks; at reduced chroma it lands on grey, with red only as an occasional dithered dot.
+    if (BGSAT !== 1 && wr > 0) {
+      const [L, a, b] = oklab(img[i * 3], img[i * 3 + 1], img[i * 3 + 2]), q = unoklab(L, a * BGSAT, b * BGSAT);
+      for (let c = 0; c < 3; c++) img[i * 3 + c] = img[i * 3 + c] * (1 - wr) + Math.max(0, q[c]) * wr;
+    }
+    if (wr >= 1) { for (let c = 0; c < 3; c++) out[i * 3 + c] = img[i * 3 + c]; continue; }
     const q = [LR, L2, BR, KR, CR].map(rp => onRamp(rp, lum[i]));
     { let k = -1, best = wr; w.forEach((v, j) => { if (v > best) { best = v; k = j; } }); region[i] = k + 1; }
     // --texture t: the themed part's brightness x (1 + t x (Bayer - 1/2)). A target sitting ON a
