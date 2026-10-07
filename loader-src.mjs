@@ -140,11 +140,23 @@ export const EXO_CODE = QUOTE_RUN + 0x14;    // the decruncher itself, after the
 const SW_COL = 0x0334, SW_ACC = 0x0335, SW_PG = 0x0337, SW_BASE = 0x0338,
       SW_WANT = 0x0339, SW_STEP = 0x033a;
 export const SWEEP_AT = 0x0340;
-const SW_IRQ = SWEEP_AT, SW_TICK = SWEEP_AT + 3;  // a two-entry jump table, so neither address
-                                                  // depends on how long the code turns out to be
-const sweepSource = () => `        * = ${hx4(SWEEP_AT)}
+const SW_IRQ = SWEEP_AT, SW_TICK = SWEEP_AT + 3,  // a jump table, so no entry's address depends
+      SW_TITLE = SWEEP_AT + 6;                    //   on how long the code turns out to be
+
+// ---- THE TITLE (LEST): the last ~20% of the load -----------------------------------------------
+// The sweep runs its 40 columns over the first TITLE_AT of the time the quote is up; the tick that
+// turns the last column switches the display to the title. ITTL brings it in one Krill load early
+// in the boot: its own glyphs (stamped from the quote's charset by make-title.mjs, but only the 63
+// it uses), the colours of its inked rows, and its screen -- all inside $e000-$e7e7, the game's
+// screen-buffer area, which no boot file loads into and the game overwrites on its first frame.
+// That is also why the title stays up through the LAST loads: they land on the quote ($ef80-$fc80),
+// not here, so the blank they used to need is gone and the title holds until level 1 appears.
+export const TITLE_CHR = 0xe000, TITLE_COL = 0xe200, TITLE_SCR = 0xe400;
+export const TITLE_AT = 0.8;
+const sweepSource = (title) => `        * = ${hx4(SWEEP_AT)}
         jmp swIrq
         jmp swTick
+        jmp swTitle
 
 swIrq:  lda $e3                 ; pages of the file in flight = end page - load page. Krill's
         sec                     ;   loads are blocking, so nothing in the mainline can watch
@@ -201,10 +213,44 @@ spn1:   lda #$0f
         inc $fc
 spn2:   dex
         bne spn1
-spn9:   rts
-`;
+${title ? `        lda ${hx4(SW_COL)}      ; was that the LAST column? Then the quote has had its time
+        cmp #$28
+        beq swTitle
+` : ''}spn9:   rts
+${title ? `        ; ---- swTitle: show LEST. Called from the IRQ when the sweep ends, and again by the boot
+        ; body before the last loads in case the estimate ran slow (they land on the quote). Doing it
+        ; twice is harmless: it only ever writes the same values. Display FIRST, colours second, so
+        ; the frame caught between shows the title in the sweep's grey rather than the quote in
+        ; the title's greys.
+swTitle:
+        lda #$${((((TITLE_SCR - 0xc000) >> 10) << 4) | (((TITLE_CHR - 0xc000) >> 11) << 1)).toString(16)}
+        sta $d018               ; screen ${hx4(TITLE_SCR)}, charset ${hx4(TITLE_CHR)}, still bank 3
+        ; THE COLOURS ARE UNDER THE KERNAL ROM. The VIC reads ${hx4(TITLE_COL)} as RAM, but the CPU reads
+        ; ROM there while $01 is $37 -- the first version copied ROM bytes into colour RAM and drew
+        ; LEST in confetti. $35 maps the ROM out and keeps I/O (colour RAM) in. sei for the window:
+        ; the IRQ vector at $fffe is RAM then, and the body calls this with interrupts ON.
+        php
+        sei
+        lda $01
+        pha
+        lda #$35
+        sta $01
+        ldx #$00
+${[...Array(Math.ceil(title.len / 256))].map((_, p) => {
+  const n = Math.min(256, title.len - p * 256), dst = 0xd800 + 40 * title.row0 + p * 256;
+  return `stc${p}:   lda ${hx4(TITLE_COL + p * 256)},x  ; the inked rows' greys into colour RAM
+        sta ${hx4(dst)},x
+        inx
+${n === 256 ? `        bne stc${p}` : `        cpx #$${n.toString(16).padStart(2, '0')}
+        bne stc${p}
+        ldx #$00`}
+`; }).join('')}        pla
+        sta $01
+        plp
+        rts
+` : ''}`;
 
-function bodySource(files, entry, pages, first, step2) {
+function bodySource(files, entry, pages, first, step2, title) {
   let step = 0;
   const load = f => `
         lda #${'$' + (++step).toString(16).padStart(2, '0')}
@@ -357,9 +403,11 @@ hcpok:  lda #$37
         sta $01
         cli
 ${files.filter(f => !f.first && !f.last && !f.runtime).map(load).join('\n')}
-        lda #$0b                ; screen OFF: the last two files land on the quote, and black is
+${title ? `        jsr ${hx4(SW_TITLE)}     ; the last files land on the QUOTE: be sure it is not on screen
+                                ;   (the sweep normally switched already; this covers a slow run)
+` : `        lda #$0b                ; screen OFF: the last two files land on the quote, and black is
         sta $d011               ;   a better last frame than the picture coming apart
-${files.filter(f => f.last && !f.runtime).map(load).join('\n')}
+`}${files.filter(f => f.last && !f.runtime).map(load).join('\n')}
         sei                     ; $0314 must not point into a boot body IMG has already buried,
         lda #$31                ;   not even for the one frame before the game sets its own
         sta $0314
@@ -382,7 +430,7 @@ ${names}
 
 // Returns the PRG bytes for the stub: BASIC header, a copy loop that lifts Krill's resident and
 // the body into place below $0801, the two as data, and Krill's install routine at KRILL_INSTALL.
-export function buildLoader(assemble, files, entry, step2) {
+export function buildLoader(assemble, files, entry, step2, title = null) {
   const first = files.find(f => f.first);
   const holePages = Math.ceil((first.length ?? 2048) / 256);
   if (holePages > 16) throw new Error(`the file under the I/O hole is ${first.length} bytes; the hole is 4K`);
@@ -391,7 +439,7 @@ export function buildLoader(assemble, files, entry, step2) {
     `${first.name} is ${first.length} bytes staged at ${hx4(KSTAGE)} and reaches ` +
     `${hx4(KSTAGE + holePages * 256 - 1)}, past $c000 into the charset and the KERNAL's scratch ` +
     `screen at ${hx4(KSCR)}. Lower KSTAGE -- everything below it is still empty at this point.`);
-  const body = assemble(bodySource(files, entry, holePages, first, step2));
+  const body = assemble(bodySource(files, entry, holePages, first, step2, title));
   if (LOADER_RUN + body.bytes.length > 0x0800) throw new Error(
     `the boot body is ${body.bytes.length} bytes and runs past $0800 from ${hx4(LOADER_RUN)}, ` +
     `into the image it is about to load. Krill's resident takes $0400-$0612 below it.`);
@@ -485,7 +533,7 @@ nq:     !byte ${petscii(nextName)}
 // destination from the stream's first three bytes, and a raw stream has no such header.
 // Backward is exomizer's default and the pairing exodecrunch.asm expects with DECRUNCH_FORWARDS
 // left at 0: the packed bytes are read from the END downwards, so the pointer starts one past.
-export function buildQuote(assemble, q, irayName, step1) {
+export function buildQuote(assemble, q, irayName, step1, title = null) {
   const d018 = (((QUOTE_SCR - 0xc000) >> 10) << 4) | (((QUOTE_CHR - 0xc000) >> 11) << 1);
   if (q.decr.at !== EXO_CODE) throw new Error(
     `the decruncher in quote-screen.json is assembled for ${hx4(q.decr.at)} but this build puts ` +
@@ -494,7 +542,7 @@ export function buildQuote(assemble, q, irayName, step1) {
   // baked in when acme assembled it. Its last instruction's OPERAND is the read pointer, so the
   // two bytes that qrun writes are inside the code, at a fixed offset. Both are checked below.
   const qbLo = EXO_GETBYTE + 12;
-  const sweep = [...assemble(sweepSource()).bytes];
+  const sweep = [...assemble(sweepSource(title)).bytes];
   if (SWEEP_AT + sweep.length > 0x0400) throw new Error(
     `the sweep block is ${sweep.length} bytes at ${hx4(SWEEP_AT)} and runs into $0400, where ` +
     `Krill's resident goes`);

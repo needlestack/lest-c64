@@ -25716,6 +25716,37 @@ try {
       `that value comes from the level's own build, not this engine -- emit the table in the engine instead`);
     return (LVL_VARLEN.has(n) ? flat : pad(flat, a.length)).map(lvlResolve);
   }));
+  // ---- ITTL: the title screen (LEST), shown for the last ~20% of the load ----
+  // make-title.mjs stamps it from the boot quote's charset; on the disk it carries only the glyphs
+  // it uses, renumbered with the blank as 0, so it needs no charset of its own beyond 64 glyphs and
+  // the rows it does not ink are simply zeros. One file, laid out exactly as the VIC and swTitle
+  // read it (see loader-src.mjs): glyphs at TITLE_CHR, inked rows' colours at TITLE_COL, screen at
+  // TITLE_SCR. Absent either json, there is no title and the boot is what it was.
+  const { TITLE_CHR, TITLE_COL, TITLE_SCR } = await import('./loader-src.mjs');
+  const TITLE = (() => {
+    if (!DIE) return null;                                    // as the quote: needs bank 3's tail
+    let q, t;
+    try { q = JSON.parse(readFileSync('./quote-screen.json', 'utf8')); t = JSON.parse(readFileSync('./title-screen.json', 'utf8')); }
+    catch { return null; }
+    if (t.quoteGlyphs !== q.glyphs) throw new Error(
+      `title-screen.json was stamped from a ${t.quoteGlyphs}-glyph quote charset; the quote now has ` +
+      `${q.glyphs}. Re-run make-title.mjs after make-quote.mjs.`);
+    const CS = [...q.chars, ...t.extra], key = new Map([['0,0,0,0,0,0,0,0', 0]]), chars = [[0, 0, 0, 0, 0, 0, 0, 0]];
+    const screen = t.screen.map(g => { const b = CS.slice(g * 8, g * 8 + 8), k = b.join(',');
+      if (!key.has(k)) { key.set(k, chars.length); chars.push(b); } return key.get(k); });
+    if (chars.length * 8 > TITLE_COL - TITLE_CHR) throw new Error(
+      `the title uses ${chars.length} glyphs; ${(TITLE_COL - TITLE_CHR) / 8} fit below its colours`);
+    const inked = [...Array(25).keys()].filter(r => screen.slice(r * 40, r * 40 + 40).some(Boolean));
+    const row0 = inked[0], len = 40 * (inked[inked.length - 1] - row0 + 1);
+    if (len > TITLE_SCR - TITLE_COL) throw new Error(`the title's inked rows need ${len} colour bytes`);
+    const data = Array(TITLE_SCR + 1000 - TITLE_CHR).fill(0);
+    chars.flat().forEach((v, i) => { data[i] = v; });
+    t.colour.slice(row0 * 40, row0 * 40 + len).forEach((v, i) => { data[TITLE_COL - TITLE_CHR + i] = v; });
+    screen.forEach((v, i) => { data[TITLE_SCR - TITLE_CHR + i] = v; });
+    if (SPRITES && TITLE_CHR + data.length > SPRBASE) throw new Error(
+      `the title block ends at $${(TITLE_CHR + data.length).toString(16)}, past ISPR's $${SPRBASE.toString(16)}, which it rides in front of`);
+    return { data, row0, len, glyphs: chars.length };
+  })();
   const DISK = [
     // name, load address, bytes, and whether it must land BEFORE the charset copy
     // ---- IHOL FIRST: it is the file that goes UNDER THE I/O HOLE ----
@@ -25737,7 +25768,13 @@ try {
     ...(SPRITES && true && true && SOCK.BM.length
           ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: SOCK.BM.flat() }] : []),
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
-    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: SPRBASE, data: ORBBM.slice(0, ORBLO_N).flat() }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
+    // THE TITLE RIDES AT THE FRONT OF ISPR: its block ends at $e7e7 and the orb sprites start at
+    // $e800, so the two are one load. A file of its own cost ~25 bytes of boot body (a load call
+    // and a name), and the body has none to spare: IRAY overran Krill's installer, which sits at a
+    // fixed $09c0 baked into its prebuilt binary.
+    ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: TITLE ? TITLE_CHR : SPRBASE,
+                     data: [...(TITLE ? [...TITLE.data, ...Array(SPRBASE - TITLE_CHR - TITLE.data.length).fill(0)] : []),
+                            ...ORBBM.slice(0, ORBLO_N).flat()] }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
     // bank 3 has free. This is DATA the VIC never reads -- it is copied to a
@@ -25886,18 +25923,30 @@ try {
   const p2 = ldFiles.filter(f => !f.last && !f.runtime);   // a runtime file is not in the boot
   const p2Bytes = p2.reduce((n, f) => n + f.length, 0);
   const p2Pages = p2.reduce((n, f) => n + Math.floor(f.length / 256), 0);
-  let ld = buildLoader(assemble, ldFiles, r.labels.entry, 1);
+  const title = TITLE && QUOTE ? { row0: TITLE.row0, len: TITLE.len } : null;
+  let ld = buildLoader(assemble, ldFiles, r.labels.entry, 1, title);
   const irayBytes = ld.prg.length - 2, irayPages = Math.floor(irayBytes / 256);
   const t1 = irayBytes / KERNAL_BPS, t2 = p2Bytes / KRILL_BPS;
-  const col1 = Math.max(1, Math.min(SW_COLS - 1, Math.round(SW_COLS * t1 / (t1 + t2))));
-  const step1 = Math.round(col1 * 256 / irayPages), step2 = Math.round((SW_COLS - col1) * 256 / p2Pages);
-  if (step1 > 0xffff || step2 < 1) throw new Error(`sweep steps out of range: ${step1}/${step2}`);
-  ld = buildLoader(assemble, ldFiles, r.labels.entry, step2);
+  // WITH A TITLE the sweep ends at TITLE_AT of the time the quote is up (the last loads included),
+  // and its last column switches to the title -- the sweep IS the quote's clock. Without one it
+  // spans the whole load, as before. The phase-2 page count is scaled to the Krill time that falls
+  // inside the sweep, so the steps stay per-phase rates.
+  const tLast = ldFiles.filter(f => f.last && !f.runtime).reduce((n, f) => n + f.length, 0) / KRILL_BPS;
+  const { TITLE_AT } = await import('./loader-src.mjs');
+  const tSweep = title ? TITLE_AT * (t1 + t2 + tLast) : t1 + t2;
+  if (title && tSweep <= t1) throw new Error(`the title would show before Krill is even loaded (${tSweep.toFixed(1)}s <= ${t1.toFixed(1)}s)`);
+  const col1 = Math.max(1, Math.min(SW_COLS - 1, Math.round(SW_COLS * t1 / tSweep)));
+  const p2Sweep = p2Pages * Math.min(1, (tSweep - t1) / t2);
+  const step1 = Math.round(col1 * 256 / irayPages), step2 = Math.round((SW_COLS - col1) * 256 / p2Sweep);
+  if (step1 > 0xffff || step2 < 1 || step2 > 0xffff) throw new Error(`sweep steps out of range: ${step1}/${step2}`);
+  ld = buildLoader(assemble, ldFiles, r.labels.entry, step2, title);
   if (ld.prg.length - 2 !== irayBytes) throw new Error('IRAY changed length between sweep passes');
   console.error(`  sweep: ${col1} columns over IRAY's ${t1.toFixed(1)}s (step ${step1}), ` +
-                `${SW_COLS - col1} over Krill's ${t2.toFixed(1)}s (step ${step2})`);
+                `${SW_COLS - col1} over Krill's next ${(tSweep - t1).toFixed(1)}s (step ${step2})` +
+                (title ? `; then the TITLE for the last ${(t1 + t2 + tLast - tSweep).toFixed(1)}s ` +
+                         `(${TITLE.glyphs} glyphs, rows ${TITLE.row0}-${TITLE.row0 + TITLE.len / 40 - 1})` : ''));
   if (QUOTE) {
-    const built = buildQuote(assemble, QUOTE.q, 'IRAY', step1);
+    const built = buildQuote(assemble, QUOTE.q, 'IRAY', step1, title);
     QUOTE.prg = built.prg; QUOTE.len = built.len;
     console.error(`  boot quote: ${QUOTE.q.glyphs} glyphs + ${QUOTE.q.screen.length} screen = ` +
       `${QUOTE.blob.length} B, exomizer ${QUOTE.q.packed.length} B -> IQOT ${built.len} B at ` +
