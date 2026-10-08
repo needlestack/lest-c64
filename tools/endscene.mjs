@@ -28,6 +28,9 @@ const D64 = globalThis.D64;
 const argv = process.argv.slice(2), LEAVES = !argv.includes('--noleaves');
 const [KLA = 'tree.kla', REGF = 'tree-regions.json', NBF = 'tree-nobrown.json'] = argv.filter(a => !a.startsWith('--'));
 const NSITES = 1024, NSLOT = 24;
+const WINDMAX = +((argv.find(a => a.startsWith('--wind=')) ?? '--wind=2').split('=')[1]);   // turns per frame, at most
+const EVERY = +((argv.find(a => a.startsWith('--every=')) ?? '--every=2').split('=')[1]);   // ...on every n-th frame (a power of 2)
+if (EVERY & (EVERY - 1)) throw new Error('--every must be a power of 2');
 const k = readFileSync(KLA);
 if (k.length !== 10003 || (k[0] | k[1] << 8) !== 0x6000) throw new Error(`${KLA} is not a Koala file`);
 const bm = k.subarray(2, 8002), scr = k.subarray(8002, 9002), col = k.subarray(9002, 10002), bg = k[10002];
@@ -113,35 +116,32 @@ const NL = lights.length;
 console.log(`lights: ${NL} -- ` + lights.map(l => `${l.colour} ${l.kind}${l.pair ? ' PAIR' : ''}` +
   (l.kind === 'steady' ? ` ${l.onT}/${l.offT}` : '') + ` @${l.at}`).join('; '));
 
-// ---- LEAVES: small squares of leaf pixels that TURN 90 degrees for a moment, then turn back ----
-// The user, on the first version (a 4-pixel strip slid sideways and back): too regular -- a shape
-// moving as a shape. Leaves turn in 3D, so their shape changes. So an event takes a 2x2 square
-// (4 pixels) or a 3x3 one (its outer 8 turn round the fixed centre), rotates it 90 degrees one way
-// or the other, and puts it back 2-5 frames later: a flick, then stillness. Each square lies inside
-// ONE character cell (2x2: pixels 0-2 of a byte, rows 0-6; 3x3: pixels 0-1, rows 0-5), so the pixels
-// keep their codes and therefore their colours -- only their places change. Every pixel must be a
-// leaf (canopy region or a no-brown zone, black/green/light green), and the turn must change
-// something. NSITES are sampled across the whole canopy; each event picks one at random.
+// ---- LEAVES: small squares of leaf pixels that TURN 90 degrees -- and STAY turned ----
+// History, both from the user: (1) a 4-pixel strip slid sideways and back read as a shape moving
+// as a shape -- leaves turn in 3D, so their shape changes; (2) turning a square and turning it BACK
+// after a few frames still looked wrong: "maybe it shouldn't be change and back, but change and
+// stay". So each event now rotates a 2x2 square, or a 3x3 square's outer ring of 8 round its fixed
+// centre, 90 degrees one way or the other -- and leaves it. Because a turn is applied to whatever the
+// square holds NOW (another turn may have moved things since), the player rotates at run time: a
+// site is a RING of pixel positions (4 or 8, in clockwise order) and a turn moves every pixel 1 or
+// L-1 places (2x2) / 2 or 6 places (3x3) round it.
+// WHY THIS CANNOT WEAR THE PICTURE OUT: every square lies inside ONE character cell and is made only
+// of leaf pixels (canopy region or a no-brown zone, black/green/light green), so a pixel can only
+// ever trade places with another leaf pixel of the same cell. Each cell keeps exactly the pixels it
+// started with -- its colours and brightness are fixed forever; only their arrangement drifts.
 const LEAF = new Set([0, 5, 13]), sites = [];
 const leafPx = (x, y) => { const l = labAt(x, y); return ((l & 1) && l !== 2 || nbAt(x, y)) && LEAF.has(colourAt(x, y)); };
+const RING = { 2: [[0, 0], [0, 1], [1, 1], [1, 0]], 3: [[0, 0], [0, 1], [0, 2], [1, 2], [2, 2], [2, 1], [2, 0], [1, 0]] };
 if (LEAVES) {
   const cand = [];
   for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) for (const n of [2, 3])
     for (let r0 = 0; r0 <= 8 - n; r0++) for (let x0 = 0; x0 <= 4 - n; x0++) {
-      const X = cx * 4 + x0, Y = cy * 8 + r0, P = [];
-      let ok = true;
-      for (let r = 0; r < n && ok; r++) { P.push([]); for (let c = 0; c < n; c++) {
-        if (!leafPx(X + c, Y + r)) { ok = false; break; } P[r].push(codeAt(X + c, Y + r)); } }
-      if (!ok) continue;
-      const cw = rng => rng() < 0.5;
-      const dir = cw(rnd);
-      const Q = P.map((row, r) => row.map((_, c) => dir ? P[n - 1 - c][r] : P[c][n - 1 - r]));
-      if (Q.every((row, r) => row.every((v, c) => v === P[r][c]))) continue;   // the turn changes nothing
-      const rows = [], turned = [];
-      for (let r = 0; r < n; r++) { const o = byteOf(X, Y + r); let v = bm[o];
-        for (let c = 0; c < n; c++) { const sh = shiftOf(X + c); v = (v & ~(3 << sh)) | (Q[r][c] << sh); }
-        rows.push(bm[o]); turned.push(v & 255); }
-      cand.push({ addr: 0x2000 + byteOf(X, Y), n, orig: rows, turned });
+      const X = cx * 4 + x0, Y = cy * 8 + r0;
+      let ok = true; const codes = new Set();
+      for (let r = 0; r < n && ok; r++) for (let c = 0; c < n; c++) {
+        if (!leafPx(X + c, Y + r)) { ok = false; break; } codes.add(codeAt(X + c, Y + r)); }
+      if (!ok || codes.size < 2) continue;                       // nothing to turn
+      cand.push({ addr: 0x2000 + byteOf(X, Y), n, ring: RING[n].map(([r, c]) => r * 4 + x0 + c) });   // row*4 + pixel
     }
   shuffle(cand);
   for (const c of cand) { if (sites.length >= NSITES) break; sites.push(c); }
@@ -149,11 +149,11 @@ if (LEAVES) {
   while (sites.length < NSITES) sites.push(sites[sites.length % (sites.length || 1)]);   // fill the table (power of 2)
   console.log(`leaves: ${cand.length} possible turning squares, ${NSITES} sampled`);
 }
-// the site tables: one 1K page-aligned table per FIELD, indexed by a 10-bit site number
-const FIELDS = ['alo', 'ahi', 'n', 'o0', 'o1', 'o2', 't0', 't1', 't2'];
-const fieldOf = (f, st) => f === 'alo' ? st.addr & 255 : f === 'ahi' ? st.addr >> 8 : f === 'n' ? st.n
-  : f[0] === 'o' ? (st.orig[+f[1]] ?? 0) : (st.turned[+f[1]] ?? 0);
-const SITEBASE = 0x5000;
+// tables: alo/ahi/len, one page-aligned 1K table each, indexed by a 10-bit site number; and the
+// rings, 8 bytes per site (row*4 + pixel), at RINGBASE + site*8
+const FIELDS = ['alo', 'ahi', 'len'];
+const fieldOf = (f, st) => f === 'alo' ? st.addr & 255 : f === 'ahi' ? st.addr >> 8 : st.ring.length;
+const SITEBASE = 0x5000, RINGBASE = 0x6000;
 
 const B = a => a.map(v => '$' + (v & 255).toString(16).padStart(2, '0')).join(',');
 const rows = (a, n = 32) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(`        !byte ${B(a.slice(i, i + n))}`); return o.join('\n'); };
@@ -168,26 +168,10 @@ const fld = f => `        lda idxlo
         sta ptr+1
         ldy #$00
         lda (ptr),y`;
-// write the site's rows from fields pre+0..2 to (tgt),0..n-1
-const putRows = pre => `${fld(pre + '0')}
-        ldy #$00
-        sta (tgt),y
-${fld(pre + '1')}
-        ldy #$01
-        sta (tgt),y
-${fld('n')}
-        cmp #$03
-        bne pr9${pre}
-${fld(pre + '2')}
-        ldy #$02
-        sta (tgt),y
-pr9${pre}:`;
-const tgtOfSite = `${fld('alo')}
-        sta tgt
-${fld('ahi')}
-        sta tgt+1`;
 const leafCode = `
-        ; ---- the WIND: a random step every ~half second, kept within 0..3 ----
+        ; ---- the WIND: a random step every ~half second, kept within 0..WINDMAX ----
+        ; (turns STAY now, so the same rate changes far more than flicks did: at 0..3 a second of
+        ; it moved ~1,300 pixels, a boil rather than a flutter)
         dec windt
         bne nowind
         lda #$1e
@@ -198,7 +182,7 @@ const leafCode = `
         cmp #$01
         bne nowind
         lda wind
-        cmp #$03
+        cmp #${WINDMAX}
         beq nowind
         inc wind
         jmp nowind
@@ -206,73 +190,134 @@ wdn:    lda wind
         beq nowind
         dec wind
 nowind:
-        ; ---- age the turns; turn a square back when its moment is over ----
-        ldx #${NSLOT - 1}
-age:    lda stimer,x
-        beq age2
-        dec stimer,x
-        bne age2
-        lda sidxlo,x
-        sta idxlo
-        lda sidxhi,x
-        sta idxhi
-        stx cnt
-${tgtOfSite}
-${putRows('o')}
-        ldx cnt
-age2:   dex
-        bpl age
-        ; ---- start up to WIND new turns ----
+        ; ---- up to WIND turns, on every EVERY-th frame only, each at a random site ----
+        inc fcount
+        lda fcount
+        and #${EVERY - 1}
+        bne sdone
         lda wind
         sta cnt2
 spawn:  lda cnt2
         beq sdone
         dec cnt2
-        ldx #${NSLOT - 1}   ; a free slot
-fs:     lda stimer,x
-        beq got
-        dex
-        bpl fs
-        jmp sdone
-got:    jsr rnd             ; a random site: 10 bits
+        jsr rnd             ; a random site: 10 bits
         sta idxlo
         lda seedhi
         and #$03
         sta idxhi
-        stx cnt
-${tgtOfSite}
-        ldx cnt
-        lda tgt             ; its CELL (8 bytes): busy if any live turn is in the same cell
-        and #$f8
-        sta tcell
-        ldy #${NSLOT - 1}
-bz:     lda stimer,y
-        beq bz2
-        lda scell,y
-        cmp tcell
-        bne bz2
-        lda scellh,y
-        cmp tgt+1
-        beq spawn
-bz2:    dey
-        bpl bz
-        lda idxlo
-        sta sidxlo,x
-        lda idxhi
-        sta sidxhi,x
-        lda tcell
-        sta scell,x
-        lda tgt+1
-        sta scellh,x
-        jsr rnd             ; its moment: 2..5 frames
-        and #$03
-        clc
-        adc #$02
-        sta stimer,x
-${putRows('t')}
-        ldx cnt
+        jsr turn
         jmp spawn
 sdone:`;
+// turn the site in idxlo/idxhi: read its ring's pixels, write them back moved round the ring
+const turnCode = `
+turn:
+${fld('alo')}
+        sta tgt
+${fld('ahi')}
+        sta tgt+1
+${fld('len')}
+        sta tlen
+        lda idxlo           ; rptr = RINGBASE + site*8
+        asl
+        asl
+        asl
+        sta rptr
+        lda idxlo
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        sta tmp
+        lda idxhi
+        asl
+        asl
+        asl
+        ora tmp
+        clc
+        adc #>${'$' + RINGBASE.toString(16)}
+        sta rptr+1
+        ldx #$00            ; READ: tbuf[i] = the pixel at ring position i
+trd:    txa
+        tay
+        lda (rptr),y
+        sta trp
+        lsr
+        lsr
+        tay                 ; its row
+        lda (tgt),y
+        sta tv
+        lda trp
+        and #$03
+        tay                 ; its pixel: shift right 2*(3-pixel)
+        lda tv
+tsh:    cpy #$03
+        beq tshd
+        lsr
+        lsr
+        iny
+        jmp tsh
+tshd:   and #$03
+        sta tbuf,x
+        inx
+        cpx tlen
+        bne trd
+        jsr rnd             ; how far round: 1 or 3 places in a ring of 4, 2 or 6 in a ring of 8
+        and #$01
+        tay
+        lda tlen
+        cmp #$08
+        beq t8
+        lda m4,y
+        jmp tm0
+t8:     lda m8,y
+tm0:    sta tm
+        ldx #$00            ; WRITE: position j gets tbuf[(j + m) mod len]
+twr:    txa
+        clc
+        adc tm
+        cmp tlen
+        bcc twr1
+        sec
+        sbc tlen
+twr1:   tay
+        lda tbuf,y
+        sta tv
+        txa
+        tay
+        lda (rptr),y
+        sta trp
+        and #$03
+        tay                 ; shift left 2*(3-pixel)
+        lda tv
+tsl:    cpy #$03
+        beq tsld
+        asl
+        asl
+        iny
+        jmp tsl
+tsld:   sta tv
+        lda trp
+        and #$03
+        tay
+        lda clrm,y
+        sta tm2
+        lda trp
+        lsr
+        lsr
+        tay
+        lda (tgt),y
+        and tm2
+        ora tv
+        sta (tgt),y
+        inx
+        cpx tlen
+        bne twr
+        rts
+m4:     !byte 1,3
+m8:     !byte 2,6
+clrm:   !byte $3f,$cf,$f3,$fc
+tbuf:   !fill 8,0`;
 
 const src = `
         * = $0801
@@ -288,6 +333,14 @@ cnt2    = $f5
 idxlo   = $f4
 idxhi   = $f3
 tcell   = $f2
+tlen    = $10
+trp     = $11
+tv      = $12
+tm      = $13
+tm2     = $14
+tmp     = $15
+rptr    = $16               ; and $17
+fcount  = $18
         * = $0810
         sei
         lda #$00
@@ -402,6 +455,7 @@ lset:   sta ltimer,x
 lt9:    dex
         bpl lt
         jmp frame
+${LEAVES ? turnCode : ''}
 
         ; 16-bit Galois LFSR (taps $b400); returns the low byte in A
 rnd:    lsr seedhi
@@ -452,7 +506,8 @@ scrdat:
 ${rows([...scr, ...Array(24).fill(0)])}
 coldat:
 ${rows([...col, ...Array(24).fill(0)])}
-${LEAVES ? FIELDS.map((f, k) => `        * = $${(SITEBASE + k * 0x400).toString(16)}\nsite_${f}:\n${rows(sites.map(st => fieldOf(f, st)))}`).join('\n') : ''}
+${LEAVES ? FIELDS.map((f, k) => `        * = $${(SITEBASE + k * 0x400).toString(16)}\nsite_${f}:\n${rows(sites.map(st => fieldOf(f, st)))}`).join('\n') +
+  `\n        * = $${RINGBASE.toString(16)}\nrings:\n${rows(sites.flatMap(st => [...st.ring, ...Array(8 - st.ring.length).fill(0)]))}` : ''}
 `;
 const out = assemble(src);
 const L = out.labels;
