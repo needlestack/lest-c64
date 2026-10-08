@@ -13,15 +13,17 @@
 // Cost: 2,048 more bytes, ONCE, shared by every picture. Against la-test7's 7,048 that is 9,096
 // for five pictures.
 //
-//   node build-facetest3.mjs        -> la-test8.d64
-//   SPLITROW=12 node build-facetest3.mjs
+//   node tools/build-facetest3.mjs        -> la-test8.d64
+//   SPLITROW=12 node tools/build-facetest3.mjs
 import { writeFileSync, readFileSync } from 'fs';
-import { assemble } from './asm6502.mjs';
-import { toPixels, dither, tilesOf, cluster, fitTo, LU, GREYS, BLACK } from './fit-face.mjs';
-await import('./d64lib.js');
+import { assemble } from '../src/asm6502.mjs';
+import { toPixels, dither, tilesOf, cluster, fitTo, LU, GREYS, BLACK } from '../src/fit-face.mjs';
+await import('../src/d64lib.js');
+import { ROOT } from '../src/paths.mjs';
+process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 const D64 = globalThis.D64;
 
-const FACE = JSON.parse(readFileSync('./angel-face.json', 'utf8')).hangl1;
+const FACE = JSON.parse(readFileSync('./data/angel-face.json', 'utf8')).hangl1;
 const IMAGES = ['art/angel-1.png', 'art/angel-2.png', 'art/angel-3.png', 'art/angel-4.png', 'art/angel-5.png'];
 const hx = n => '$' + n.toString(16);
 // Where the dictionary changes. 12 puts it just under the face on this image set; it is a build
@@ -333,7 +335,7 @@ if (process.env.ASSET === '1') {
   if (asset.chars.length !== 2048) throw new Error(`charset is ${asset.chars.length} bytes, not 2048`);
   for (const m of asset.maps) if (m.map.length !== 1000)
     throw new Error(`${m.name} map is ${m.map.length} cells, not 1000`);
-  writeFileSync('./death-pics.json', JSON.stringify(asset));
+  writeFileSync('./data/death-pics.json', JSON.stringify(asset));
   console.error(`  death-pics.json: charset 2048 + ${asset.maps.length} x 1000` +
                 ` = ${2048 + asset.maps.length * 1000} bytes, RMS ${asset.rms.join('/')}`);
 }

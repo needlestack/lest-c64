@@ -16,6 +16,8 @@
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
 import { execFileSync } from 'child_process';
+import { ROOT } from './paths.mjs';
+process.chdir(ROOT);   // every path below is repo-relative (see paths.mjs)
 // Run this script again as a SUB-BUILD (one level's tables, one wall variant). Its chatter is
 // dropped, but if it FAILS its own error is shown: with stderr discarded, a sub-build that hit a
 // missing file surfaced only as "Command failed" from the parent -- no file, no reason.
@@ -831,7 +833,7 @@ const LVLALL = MULTI ? (() => {
   // list is a different set), so the main build patches lvlNxtT into every dump below.
   const { SOCKETS, ...envNoSock } = process.env;
   return OTHERS.map(n => {
-    const tmp = `./.lvl${n}-tables.json`;
+    const tmp = `./build/.lvl${n}-tables.json`;
     subBuild({ ...envNoSock, LVL: String(n), LVLDUMP: tmp });
     return JSON.parse(readFileSync(tmp, 'utf8'));
   });
@@ -2366,16 +2368,16 @@ if (VSTEPS.length !== 6)
 // PLAN=3 by default -- the finer ramp index plus the k-medians charset. It needs
 // charset-plan.json, which charsetgen writes and which is NOT tracked (it is derived), so fall
 // back rather than fail if someone builds from a clean checkout:
-//   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs
+//   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node src/build-iray.mjs && node src/charsetgen.mjs
 const PLAN = (() => {
   const want = +(process.env.PLAN ?? 3);
   if (!want) return 0;
-  if (existsSync('./charset-plan.json')) return want;
+  if (existsSync('./data/charset-plan.json')) return want;
   console.error('  no charset-plan.json -- building WITHOUT the k-medians charset (PLAN=0).');
-  console.error('  regenerate: CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs');
+  console.error('  regenerate: CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node src/build-iray.mjs && node src/charsetgen.mjs');
   return 0;
 })();
-const planData = PLAN ? JSON.parse(readFileSync('./charset-plan.json', 'utf8')) : null;
+const planData = PLAN ? JSON.parse(readFileSync('./data/charset-plan.json', 'utf8')) : null;
 if (PLAN === 2 && !planData.paired) throw new Error('charset-plan.json has no paired plan: rerun with PAIRED=1');
 if (PLAN === 3 && !planData.fine) throw new Error('charset-plan.json has no fine plan: rerun charsetgen');
 // Bottom-anchored fills, so row i (0 = top) is lit when i >= 8 - level. Both halves of a pair
@@ -3058,7 +3060,7 @@ if (process.env.CELLSCAN === '1') {
     console.error(`    [${m.key}] ${String(m.n).padStart(8)}   ${String(m.cols).padStart(8)}  ` +
       `${m.d.toFixed(2)}  ${m.kb ? `step k=${m.kb}` : 'ramp'}` +
       `${m.partial ? ' (part-exact)' : ''}${sampled.has(m.key) ? '' : '   NEVER SAMPLED'}`);
-  writeFileSync('./cellscan.json', JSON.stringify({
+  writeFileSync('./build/cellscan.json', JSON.stringify({
     step: STEP, angleStride: ASTEP, positions: NRAND || spots.length, cells, mixed,
     randomSamples: NRAND || 0, frames: NRAND || (spots.length * Math.ceil(256 / ASTEP)),
     distinct: seen.size, exact, curve,
@@ -4510,7 +4512,7 @@ if (process.env.ORBSHEET === '1') {
     }
   }
   const nm = `orb-${ORBART || 'hand'}.png`;
-  writeFileSync(`./${nm}`, png(SW_, SH_, rgb));
+  writeFileSync(`./build/${nm}`, png(SW_, SH_, rgb));
   console.error(`${nm}: ${ORBBM.length} bitmaps, heights ${ORBBMH.join(',')}`);
 }
 const ORBSRC = LADDER.map(r => ORBBMH.indexOf(r.h));
@@ -4537,7 +4539,7 @@ const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent hei
 // Step of 3 source rows a rung: 7% a step, comparable to the orb ladder, and 13 distinct heights
 // instead of 32. Heights above 21 need two bitmaps, at or below 21 only one -- so a distant angel
 // costs a single sprite, which is where the slot budget goes.
-const ANGART = JSON.parse(readFileSync('./angel-art.json', 'utf8'));
+const ANGART = JSON.parse(readFileSync('./data/angel-art.json', 'utf8'));
 // ---- THE DEATH CUT SCENE: the Haserot Angel, fitted to 256 glyphs ----
 // angel-face.json is produced by fit-angel.mjs from a GEK scene on TMP-3.d64. A GEK image is
 // 160x200 multicolor stored as 4x8 tiles of 8 bytes, which IS a C64 char glyph, so the fitter's
@@ -4568,7 +4570,7 @@ const DIE      = process.env.DIE !== '0' && process.env.SNDTEST !== '1';
 // faces, not the flowing robes, and a codebook trained where it matters renders the rest for free.
 // See [[iray-charset-flip-pictures]]: this is a STILL sequence, not the cycling one; one map per
 // picture, no charset flip, and the full 256 codes.
-const PICS = JSON.parse(readFileSync('./death-pics.json', 'utf8'));
+const PICS = JSON.parse(readFileSync('./data/death-pics.json', 'utf8'));
 if (PICS.chars.length !== 2048) throw new Error(`death-pics.json charset is ${PICS.chars.length}B, not 2048`);
 if (!PICS.maps.length) throw new Error('death-pics.json carries no pictures');
 for (const m of PICS.maps) if (m.map.length !== 1000)
@@ -4815,7 +4817,7 @@ for (const r of ANGLAD) {
 // rung (its top ellipse opens and closes with distance, and the photo is one fixed camera), so
 // what the photo contributes is MATERIAL. Sampling by surface coordinate rather than by
 // bounding box is what keeps the stone sitting still on the drum as you walk around it.
-const PEDART = JSON.parse(readFileSync('./pedestal-art.json', 'utf8'));
+const PEDART = JSON.parse(readFileSync('./data/pedestal-art.json', 'utf8'));
 for (const k of ['top', 'side'])
   if (PEDART[k].length !== PEDART[k === 'top' ? 'topH' : 'sideH'])
     throw new Error(`pedestal-art.json: ${k} is ${PEDART[k].length} rows, not ${PEDART[k === 'top' ? 'topH' : 'sideH']}`);
@@ -4911,7 +4913,7 @@ const pedTex = (u0, u1, v0, v1) => {
   // flattened every dithered transition into a clean edge, which is the opposite of the point.
   return at(Math.floor((v0 + v1) / 2 * TEXH), Math.floor((u0 + u1) / 2 * TEXW));
 };
-const GOAT = JSON.parse(readFileSync('./goat-art.json', 'utf8')).rows
+const GOAT = JSON.parse(readFileSync('./data/goat-art.json', 'utf8')).rows
   .map(r => [...r].map(Number));
 const _gc = [...Array(12).keys()].filter(x => GOAT.some(r => r[x]));
 const _gr = [...Array(21).keys()].filter(y => GOAT[y].some(v => v));
@@ -5444,7 +5446,7 @@ const PED_WALL = (LEVEL_WALLS[PED_LVL]?.sockWall ?? []).length
 // taken out, and each yields its own delta. WALLVARS[i] goes with WALLS_ALL[i]. WALLOFF stays
 // level-local (1-based within the level's own groups) -- only the id is global.
 const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.length) ? WALLS_ALL.map((w, i) => {
-  const tmp = `./.wall${i}-tables.json`;
+  const tmp = `./build/.wall${i}-tables.json`;
   // CHAIN=lvl for a LATE level's wall, exactly as its dump does: inheriting the chain leaves
   // the level resident in no chain and its own walls unreachable. See LATEALL.
   subBuild({ ...process.env, LVL: String(w.lvl),
@@ -5629,7 +5631,7 @@ const HUB_WIRED = [5, 6, 7].every(n => ALLLVL.includes(n));
 // exist and the build loads levels from disk; NOENDING=1 puts the black hole back to level 1.
 // ENDTEST=1 sends level 1's exit there instead, so FALLNOW can reach the ending in seconds.
 const ENDING = LVLLOAD && true && !process.env.NOENDING
-  && existsSync('./quote-end.json') && existsSync('./end-scene.json');
+  && existsSync('./data/quote-end.json') && existsSync('./data/end-scene.json');
 const BLACK_DST = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
 const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4],
                         ...(ENDING && process.env.ENDTEST ? { 1: [END_DST] } : {}) };
@@ -7730,7 +7732,7 @@ if (process.env.SOCKSTRIP && !process.env.LVLDUMP) {   // the subprocess would r
     }));
     x0 += t.w + GAP;
   }
-  writeFileSync('./sock-rungs.png', png(W, H, rgb));
+  writeFileSync('./build/sock-rungs.png', png(W, H, rgb));
   console.error(`  sock-rungs.png: ${W}x${H}, tiles (hires px) ${tiles.map(t => t.w + 'x' + t.h).join(' ')}`);
   // PER-STEP SHRINKAGE, which is what a "pop" actually is: the eye reads the RATIO between one
   // rung and the next, not the absolute sizes. An even ladder has even percentages. The socket's
@@ -8044,7 +8046,7 @@ if (process.env.LADDERSHEET) {
             putF(px + c, py + b,
               vv === 3 ? [255, 255, 255] : vv === 2 ? [186, 186, 196] : [118, 118, 128]);
         }
-        writeFileSync(`gif-idol-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
+        writeFileSync(`build/gif-idol-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
       });
       console.error(`  gif-idol-NN.png: ${reach.length} frames`);
     }
@@ -8211,7 +8213,7 @@ if (process.env.LADDERSHEET) {
             putF(px + c, py + b,
               v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
         }
-        writeFileSync(`gif-${nm}-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
+        writeFileSync(`build/gif-${nm}-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
       });
       console.error(`  gif-${nm}-NN.png: ${all.length} frames, ${FW}x${FH}`);
       return;
@@ -8264,7 +8266,7 @@ if (process.env.LADDERSHEET) {
             putF(px + c, py + b,
               v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
         }
-        writeFileSync(`gif-orb-ship-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
+        writeFileSync(`build/gif-orb-ship-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
       });
       console.error(`  gif-orb-ship-NN.png: ${all.length} frames (the shipping ladder)`);
     }
@@ -9280,7 +9282,7 @@ const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBL
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
-writeFileSync('./iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));
+writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));
 // Above $c000 the ceiling is the top of bank 3; inside the image it is the arena, and the relayout
 // is what decides where that is -- so a region there is checked by the overlap guards instead.
 if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
@@ -24859,18 +24861,18 @@ const ALIGNED_T = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     // had the same requirement and never stated it. Both were page-aligned by luck at $5000 and
     // $5300; at any other offset every row of both snapshots lands skewed by the low byte.
     ...({ fallSnapD: 256 }), fallSnapS: 256 };
-writeFileSync('./iray.aligned.json', JSON.stringify(ALIGNED_T));
+writeFileSync('./build/iray.aligned.json', JSON.stringify(ALIGNED_T));
 // HOT LOOPS: a taken branch whose target is on another page costs a cycle, and a loop that
 // straddles a page boundary pays it on EVERY iteration -- castRay's DDA loop did, for 89 cy/frame,
 // because an unrelated edit moved code by a few bytes. Name a loop by its top label; compact.mjs
 // finds its extent (to the last branch or jmp back to it) and pads its run until it fits a page.
-writeFileSync('./iray.hotloops.json', JSON.stringify(['cdda', 'sdWl']));
-writeFileSync('./iray.bufsizes.json', JSON.stringify(Object.fromEntries(
+writeFileSync('./build/iray.hotloops.json', JSON.stringify(['cdda', 'sdWl']));
+writeFileSync('./build/iray.bufsizes.json', JSON.stringify(Object.fromEntries(
   [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
     .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
     .filter(([n]) => RUNTIME_BUFS[n] !== undefined).map(([n]) => [n, RUNTIME_BUFS[n]]))));
 
-const asmPath = DIAG.length ? './iray.diag.asm' : './iray.asm';
+const asmPath = DIAG.length ? './build/iray.diag.asm' : './build/iray.asm';
 writeFileSync(asmPath, asm);
 // ---- COMPACT: relayout into code / arena / tables before assembling ----
 // compact.mjs reads the file we just wrote, moves every emitted run into one of the two sections,
@@ -24881,8 +24883,8 @@ writeFileSync(asmPath, asm);
   // The inner build is GONE: both maps it existed to produce are published above, before any
   // assembly. It assembled the hand layout, which is what compaction replaces -- and what fails
   // first when the engine grows.
-  execFileSync(process.execPath, ['./compact.mjs', asmPath], { stdio: ['ignore', 'inherit', 'inherit'] });
-  asm = readFileSync('./iray.compact.asm', 'utf8');
+  execFileSync(process.execPath, ['./src/compact.mjs', asmPath], { stdio: ['ignore', 'inherit', 'inherit'] });
+  asm = readFileSync('./build/iray.compact.asm', 'utf8');
   writeFileSync(asmPath, asm);          // so everything downstream reads the layout that ships
 
 lintReach(asm);            // AFTER the write: a failure should leave the file to look at
@@ -24990,7 +24992,7 @@ try {
     }
   }
   // The charset ships as a raw binary for the loader to place, not as part of the image.
-  writeFileSync('./iray.prg', Buffer.from(r.prg));
+  writeFileSync('./build/iray.prg', Buffer.from(r.prg));
 
   // ---- THE DISK: a loader plus four raw files, each landing where it belongs ----
   // This replaces the compressed self-extracting PRG. That scheme decoded IN PLACE, so every
@@ -25050,7 +25052,7 @@ try {
   const TITLE = (() => {
     if (!DIE) return null;                                    // as the quote: needs bank 3's tail
     let q, t;
-    try { q = JSON.parse(readFileSync('./quote-screen.json', 'utf8')); t = JSON.parse(readFileSync('./title-screen.json', 'utf8')); }
+    try { q = JSON.parse(readFileSync('./data/quote-screen.json', 'utf8')); t = JSON.parse(readFileSync('./data/title-screen.json', 'utf8')); }
     catch { return null; }
     if (t.quoteGlyphs !== q.glyphs) throw new Error(
       `title-screen.json was stamped from a ${t.quoteGlyphs}-glyph quote charset; the quote now has ` +
@@ -25193,7 +25195,7 @@ try {
   // IQOT decrunches it to $f400 itself.
   const QUOTE = (() => {
     if (!DIE || undefined) return null;             // the picture machinery owns bank 3's tail
-    let q; try { q = JSON.parse(readFileSync('./quote-screen.json', 'utf8')); }
+    let q; try { q = JSON.parse(readFileSync('./data/quote-screen.json', 'utf8')); }
     catch { return null; }                                    // not generated: ship without it
     const { QUOTE_SCR, QUOTE_CHR } = quoteAddrs;
     if (q.chars.length > 0x10000 - QUOTE_CHR) throw new Error('the quote charset runs off the top of memory');
@@ -25227,8 +25229,8 @@ try {
   }
   // ---- THE ENDING: IEND and ITRE, loaded by the game itself when the last hole is fallen through ----
   const END = ENDING ? buildEnding({
-    scene: JSON.parse(readFileSync('./end-scene.json', 'utf8')),
-    quote: JSON.parse(readFileSync('./quote-end.json', 'utf8')),
+    scene: JSON.parse(readFileSync('./data/end-scene.json', 'utf8')),
+    quote: JSON.parse(readFileSync('./data/quote-end.json', 'utf8')),
     files: DISK.map(f => ({ tag: f.tag, name: f.name, at: f.at, length: f.length ?? f.data.length,
                             first: f.first, runtime: f.runtime })),
     entry: r.labels.entry, krill: KRILL_RESIDENT_AT, autoF: +(process.env.ENDAUTO ?? 0) }) : null;

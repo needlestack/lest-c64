@@ -5,7 +5,7 @@
 // a coherent area rather than per-pixel noise. labels: 0 rest, 1 leaf, 2 bark, 3 both (overlap).
 import { execFileSync } from 'child_process';
 import { writeFileSync } from 'fs';
-import { png } from '../png.mjs';
+import { png } from '../src/png.mjs';
 const [SRC, W, H, OUT, OV] = [process.argv[2], +process.argv[3], +process.argv[4], process.argv[5], process.argv[6]];
 const P = k => +(process.env[k] ?? { CMIN: 0.022, LMIN: 0.10, LMAX: 0.72, HSPLIT: 78, HMAX: 145, HMIN: 30, R: 3, TH: 0.35, OV: 0.18 }[k]);
 const raw = execFileSync('magick', [SRC, '-colorspace', 'sRGB', '-filter', 'Lanczos', '-resize', `${W}x${H}!`, '-depth', '8', 'rgb:-'], { maxBuffer: 1 << 26 });

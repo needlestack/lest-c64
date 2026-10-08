@@ -1,6 +1,6 @@
 // Choose a charset by frequency-weighted k-medians, from the bucket histograms CELLSCAN dumps.
 //
-//   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs
+//   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node src/build-iray.mjs && node src/charsetgen.mjs
 //
 // WHY NOT THE GREEDY MERGE of the earlier mergecells.mjs (since removed). That folds a rare shape into whichever L1==1
 // NEIGHBOUR is more common, so when five shapes collapse into one they all land on the most
@@ -20,8 +20,10 @@
 // entry and per step slot, so shapes that share a bucket are forced to share an answer whatever
 // we do; clustering shapes independently would optimise something the engine cannot express.
 import { readFileSync, writeFileSync } from 'fs';
+import { ROOT } from './paths.mjs';
+process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 
-const scan = JSON.parse(readFileSync('./cellscan.json', 'utf8'));
+const scan = JSON.parse(readFileSync('./build/cellscan.json', 'utf8'));
 // KCELL is what is left for cell patterns after BLANK, SOLID, the 18 readout glyphs and the 4
 // seam codes: 256 - 2 - 18 - 4 = 232. BLANK and SOLID are not in the codebook -- they answer the
 // all-white and all-black cells, which are not "mixed" and never reach a bucket.
@@ -404,5 +406,5 @@ const out = {
   costPx: finalPlan.cost, costCols: finalPlan.cols, acc: acc(finalPlan.cost, finalPlan.cols),
   paired,
 };
-writeFileSync('./charset-plan.json', JSON.stringify(out));
+writeFileSync('./data/charset-plan.json', JSON.stringify(out));
 console.log(`  wrote charset-plan.json`);

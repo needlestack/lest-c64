@@ -2,7 +2,7 @@
 //
 // THE END QUOTE uses the same conversion with its own charset and no packing (the fast loader
 // brings it in at the end, so the KERNAL-speed reason for packing does not apply):
-//   QUOTE_OUT=quote-end.json QUOTE_PACK=0 QUOTE_GLYPHS=256 node make-quote.mjs art/quote-end.png
+//   QUOTE_OUT=data/quote-end.json QUOTE_PACK=0 QUOTE_GLYPHS=256 node src/make-quote.mjs art/quote-end.png
 //
 // The boot quote is a 320x200 HI-RES image, but it does NOT ship as a bitmap. A 1-bit image of
 // text at 8x8 granularity repeats enormously -- every blank cell is one glyph, and thresholded
@@ -26,6 +26,8 @@ import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { inflateSync } from 'zlib';
 import { QUOTE_SCR, QUOTE_CHR, EXO_GETBYTE, EXO_CODE, EXO_TABLE } from './loader-src.mjs';
+import { ROOT } from './paths.mjs';
+process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 
 const SRC = process.argv[2] ?? './art/quote-start.png';
 const THR = +(process.argv[3] ?? 0.36);          // the user's pick: 'b', a touch thicker than faithful
@@ -36,7 +38,7 @@ const INK = +(process.argv[4] ?? 12);            // grey2
 // does not fit (a larger-type version needed 284, and merged to 220 with 153 edge pixels changed).
 // Run make-title.mjs after this -- its stamps ARE these glyphs.
 const BUDGET = +(process.env.QUOTE_GLYPHS ?? 220);
-const OUT = process.env.QUOTE_OUT ?? './quote-screen.json', PACK = process.env.QUOTE_PACK !== '0';
+const OUT = process.env.QUOTE_OUT ?? './data/quote-screen.json', PACK = process.env.QUOTE_PACK !== '0';
 
 // ---- PNG in (8-bit, any colour type incl. palette) ----
 const b = readFileSync(SRC); let o = 8, w, h, bd, ct, plte = null, idat = [];
@@ -210,7 +212,7 @@ if (PACK) try {
   const hx = n => '$' + n.toString(16);
   writeFileSync(`${tmp}/w.asm`, `exod_get_crunched_byte = ${hx(EXO_GETBYTE)}\n` +
     `exod_decrunch_table = ${hx(EXO_TABLE)}\n        * = ${hx(EXO_CODE)}\n` +
-    `        !source "${process.cwd()}/exodecrunch.asm"\n`);
+    `        !source "${process.cwd()}/src/exodecrunch.asm"\n`);
   execFileSync('acme', ['-f', 'plain', '-o', `${tmp}/exo.bin`,
                         '--symbollist', `${tmp}/exo.sym`, `${tmp}/w.asm`]);
   const sym = readFileSync(`${tmp}/exo.sym`, 'utf8');

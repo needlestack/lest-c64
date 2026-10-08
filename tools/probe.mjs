@@ -21,7 +21,7 @@ import { execSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import net from 'net';
 import { portHeld, launch, LAUNCH_FLAGS } from './vice.mjs';
-// It builds and reads the build's files (lest-c64.d64, iray.syms.json, build-iray.mjs) by name, so it
+// It builds and reads the build's files (lest-c64.d64, build/iray.syms.json, src/build-iray.mjs) by name, so it
 // runs from the project root wherever it is started from. It takes no file paths of its own.
 process.chdir(new URL('..', import.meta.url).pathname);
 
@@ -121,14 +121,14 @@ for (const kv of envStr.split(/\s+/).filter(Boolean)) {
 // between two reads the machine is still in the loader (or jammed) and every other byte is image
 // data, not runtime state. Reading a not-yet-running program is what produced a whole afternoon of
 // plausible nonsense, so it is checked before anything is interpreted -- never assumed from a wait.
-// Captured before anything is added to `env`: the environment a plain `node build-iray.mjs`
+// Captured before anything is added to `env`: the environment a plain `node src/build-iray.mjs`
 // would see, which is what `stop` rebuilds the shipping disk with.
 const SHIPENV = { ...process.env };
 const LIVE = 'frameCnt';
 env.LABELS = [...names.filter(n => !n.startsWith('@')), LIVE].join(',');   // the hook prints every label whose name contains one
 let out = '';
 try {
-  out = execSync(`node build-iray.mjs`, { env, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+  out = execSync(`node src/build-iray.mjs`, { env, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
 } catch (e) { out = (e.stdout || '') + (e.stderr || ''); }
 const build = out + '';
 if (!/^ok:/m.test(build)) {
@@ -150,7 +150,7 @@ for (const n of [...names, LIVE]) {
 // Every label's FINAL address, written by compact.mjs after the assembly that ships. Used to set
 // an execution checkpoint by name; absent (an older build) it simply falls back to the old wait.
 let SYMS = {};
-try { SYMS = JSON.parse(readFileSync('./iray.syms.json', 'utf8')); } catch { /* optional */ }
+try { SYMS = JSON.parse(readFileSync('./build/iray.syms.json', 'utf8')); } catch { /* optional */ }
 if (!existsSync(DISK)) { console.error('no lest-c64.d64'); process.exit(1); }
 
 // ---- run it, never touching an emulator that was already open ----
@@ -216,7 +216,7 @@ const stop = () => {
   // the wrong one. Three times before this was added. NOPROBEREBUILD=1 skips it for a run where
   // the diagnostic disk is the point.
   if (!process.env.NOPROBEREBUILD)
-    try { execSync('node build-iray.mjs', { env: SHIPENV, stdio: 'ignore' }); } catch {}
+    try { execSync('node src/build-iray.mjs', { env: SHIPENV, stdio: 'ignore' }); } catch {}
 };
 // Anything that goes wrong below is nearly always explained by a line VICE printed at startup
 // (a failed bind, a missing image), so show them rather than leaving a bare protocol error.

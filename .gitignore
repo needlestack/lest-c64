@@ -1,50 +1,37 @@
 # THE RULE: a file the build READS is an asset and is committed; anything a tool WRITES is
-# output and is not. The directory does not make that obvious on its own, so it is stated here.
+# output and is not. The directories say which is which:
 #
+#   src/            the build and its generators -- committed
+#   data/           FITTED assets the build reads (angel-art, goat-art, quote-screen, ...) -- committed
 #   art/            source art (renders, paintings, hand-drawn sprites) -- committed
-#   *.json (root)   FITTED assets the build reads (angel-art, goat-art, quote-screen, ...) -- committed
-#   iray.asm        generated, but committed ON PURPOSE: diffing it between commits shows what a JS
-#                   change did to the machine code and the memory map. Both early layout bugs were
-#                   invisible in the JS diff, so that churn earns its keep.
+#   build/          everything a build or tool writes -- ignored, except build/iray.asm: generated,
+#                   but committed ON PURPOSE: diffing it between commits shows what a JS change did
+#                   to the machine code and the memory map. Both early layout bugs were invisible in
+#                   the JS diff, so that churn earns its keep.
+#
+# build/ holds: iray.prg, diagnostic builds' iray.diag.asm (so a throwaway PX/PY/PA start never
+# lands in the tracked iray.asm), compact.mjs's inputs and outputs (iray.aligned/bufsizes/hotloops/
+# reserve/syms.json, iray.compact.asm -- a stale copy would relayout the image against a build that
+# no longer exists), the sub-builds' .lvl*/.wall*-tables.json, diagnostic dumps (cellscan.json),
+# previews and frames, and c64pic's tree.kla for the end scene (see tools/endscene.mjs).
+/build/*
+!/build/iray.asm
 
-# ---- build output: `node build-iray.mjs` regenerates all of it ----
+# ---- disks: `node src/build-iray.mjs` writes lest-c64.d64; test builds write zz-*.d64 ----
 *.d64
 !art/*.d64
 # ...except THE game, committed so a visitor can play it without building
-!lest-c64.d64
-iray.prg
-iray-c.prg
-iray-charset.bin
-# diagnostic builds (PX/PY/PA/SPIN/NORAY/...) emit here, so a throwaway start position never
-# lands in the tracked iray.asm
-iray.diag.asm
-# compact.mjs's inputs and outputs. A stale copy of any of them would relayout the image against
-# a build that no longer exists.
-iray.aligned.json
-iray.bufsizes.json
-iray.hotloops.json
-iray.reserve.json
-iray.syms.json
-iray.compact.asm
-# one per resident level / removable wall, written by the build's own sub-builds
-.lvl*-tables.json
-.wall*-tables.json
-# diagnostic dumps
-cellscan.json
-orbdiag.json
-face-extra.json
-# charset-plan.json is TRACKED. It looks derived and it is not: it is the k-medians fit over a
+!/lest-c64.d64
+
+# data/charset-plan.json is TRACKED. It looks derived and it is not: it is the k-medians fit over a
 # 2M-position scan of a shape-rich maze, canonical input to every build, and no level's map is an
 # input to it. Untracked, a clean clone would refit the charset against whatever map was built.
 # Regenerate deliberately with:
-#   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs
+#   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node src/build-iray.mjs && node src/charsetgen.mjs
 
-# ---- pictures at the top level are tool output: previews, ladders, screenshots, frames ----
-# (art lives in art/; fit-angel's previews regenerate with `node fit-angel.mjs art/TMP-3.d64 hangl1`)
+# ---- pictures at the top level are tool output (tools that predate build/) ----
 /*.png
 /*.gif
-# c64pic's picture for the end scene (see tools/endscene.mjs for the recipe)
-/tree.kla
 
 # ---- reference material that is not ours to publish (photographs of real objects) ----
 art/ref/

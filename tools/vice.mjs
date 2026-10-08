@@ -41,7 +41,7 @@ export const buildDisk = (envStr, d64) => {
   const env = parseEnv(envStr, { ...process.env, D64: d64 });
   const t0 = Date.now() - 1000;          // allow for filesystem timestamp granularity
   let out = '';
-  try { out = execSync('node build-iray.mjs 2>&1', { cwd: ROOT, env }).toString(); }
+  try { out = execSync('node src/build-iray.mjs 2>&1', { cwd: ROOT, env }).toString(); }
   catch (e) { out = (e.stdout ?? '').toString() + (e.stderr ?? '').toString(); }
   if (!out.split('\n').some(l => l.startsWith('ok:'))) {
     console.error('BUILD FAILED:\n  ' + out.trim().split('\n').slice(-6).join('\n  '));
@@ -49,7 +49,7 @@ export const buildDisk = (envStr, d64) => {
   }
   // FRESH SYMBOLS ONLY. compact.mjs rewrites iray.syms.json on every build (and deletes it when it
   // cannot produce correct addresses), so a file older than this build is from some other build.
-  const symPath = join(ROOT, 'iray.syms.json');
+  const symPath = join(ROOT, 'build/iray.syms.json');
   let syms = null;
   try { if (statSync(symPath).mtimeMs >= t0) syms = JSON.parse(readFileSync(symPath, 'utf8')); } catch {}
   const addrOf = n => {

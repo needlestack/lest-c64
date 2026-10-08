@@ -23,5 +23,5 @@ SOFTWARE.
 Third-party components in this repository keep their own licences:
   krill/              Loader by Krill, BSD 3-clause (see krill/README-krill)
   exodecrunch.asm     Exomizer decruncher by Magnus Lind (notice in the file)
-  loader-src.mjs's fast first stage adapts fastboot1541 by Michael Steil
+  src/loader-src.mjs's fast first stage adapts fastboot1541 by Michael Steil
                       (github.com/mist64/fastboot1541: "do anything you want with it")

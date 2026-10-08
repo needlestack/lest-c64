@@ -2,7 +2,7 @@
 // plus transparent. That single sprite is the top of the orb ladder -- every smaller rung is
 // resampled from it by orbScale in build-iray.mjs, exactly as the hand-drawn art is today.
 //
-//   node fit-orb.mjs sphere-rough.png            -- preview as ASCII + the 63 bytes
+//   node src/fit-orb.mjs sphere-rough.png            -- preview as ASCII + the 63 bytes
 //
 // The sprite's four pixel values are fixed by the VIC, not chosen here:
 //   0 transparent   1 = $d025 (grey1, 68)   2 = sprite colour (grey2, 108)   3 = $d026 (grey3, 149)
@@ -13,7 +13,7 @@ import { existsSync } from 'fs';
 // SOURCE ART lives in art/. A bare file name ('goat6.png') means art/goat6.png; anything with a
 // slash is a path and is taken as given -- so IDOLART=some/other.png still points anywhere.
 // Resolved against this file, not the working directory, so a tool run from elsewhere finds it.
-const ART = new URL('./art/', import.meta.url).pathname;
+const ART = new URL('../art/', import.meta.url).pathname;
 export const artPath = f => {
   const p = f.includes('/') ? f : ART + f;
   if (!existsSync(p)) throw new Error(`source art not found: ${p}`);

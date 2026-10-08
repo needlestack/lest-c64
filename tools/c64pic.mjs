@@ -27,7 +27,7 @@
 // to hue: the olive foliage matched brown and grey on brightness and the tree lost its green.
 import { execFileSync } from 'child_process';
 import { writeFileSync, readFileSync } from 'fs';
-import { png } from '../png.mjs';
+import { png } from '../src/png.mjs';
 
 const args = process.argv.slice(2);
 const SRC = args[0], OUT = args[1];

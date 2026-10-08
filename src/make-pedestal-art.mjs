@@ -12,6 +12,8 @@
 // walk around it.
 import { readFileSync, writeFileSync } from 'fs';
 import { inflateSync } from 'zlib';
+import { ROOT } from './paths.mjs';
+process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 
 const SRC = process.argv[2] ?? './art/pedestal.png';
 const b = readFileSync(SRC); let o = 8, w, h, ct, idat = [];
@@ -82,7 +84,7 @@ const out = {
   top: band(Y0, RIM, 64, 12),
   side: band(RIM, Y1 + 1, 64, 24),
 };
-writeFileSync('./pedestal-art.json', JSON.stringify(out, null, 1));
+writeFileSync('./data/pedestal-art.json', JSON.stringify(out, null, 1));
 const stat = rs => { const v = rs.join('').match(/../g).map(x => parseInt(x, 16)).sort((a, b) => a - b);
   return `min ${v[0]} median ${v[v.length >> 1]} max ${v[v.length - 1]}`; };
 console.error(`pedestal-art.json: box ${WD}x${HT} (aspect ${(WD / HT).toFixed(2)}), rim at ${out.rimFrac} of the height`);

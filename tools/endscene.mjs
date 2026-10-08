@@ -1,13 +1,13 @@
 // endscene.mjs -- the winning scene's DATA: the tree picture, which rack LEDs blink and how, and
-// which squares of leaves may turn. Writes end-scene.json, run by hand like make-quote.mjs; the
-// main build (build-iray.mjs, via ending-src.mjs) assembles the player around it as ITRE.
+// which squares of leaves may turn. Writes data/end-scene.json, run by hand like make-quote.mjs; the
+// main build (src/build-iray.mjs, via src/ending-src.mjs) assembles the player around it as ITRE.
 //
-//   node tools/endscene.mjs [tree.kla] [art/tree/regions.json] [art/tree/nobrown.json] [--noleaves]
+//   node tools/endscene.mjs [build/tree.kla] [art/tree/regions.json] [art/tree/nobrown.json] [--noleaves]
 //
-// THE WHOLE RECIPE, from what is committed in art/tree/ (it reproduces end-scene.json byte for byte):
-//   node tools/c64pic.mjs art/tree/source.png tree --mc --bg 0 --regions art/tree/regions.json \
+// THE WHOLE RECIPE, from what is committed in art/tree/ (it reproduces data/end-scene.json byte for byte):
+//   node tools/c64pic.mjs art/tree/source.png build/tree --mc --bg 0 --regions art/tree/regions.json \
 //        --sharpen 0.8 --feather 0 --branchtex 1.2 --nobrown art/tree/nobrown.json --darkmap art/tree/darkmap.json
-//   node tools/endscene.mjs                      # tree.kla -> end-scene.json; then rebuild the game
+//   node tools/endscene.mjs                      # build/tree.kla -> data/end-scene.json; then rebuild the game
 // The three masks are committed rather than re-derived, because they came from the user's hand edits
 // of EARLIER renders (edit-nobrown.png, edit-dark.png, also kept): regions.json is tools/treeseg.mjs
 // on source.png; nobrown.json is tools/editzones.mjs and darkmap.json tools/editdark.mjs, each
@@ -31,9 +31,11 @@
 // ADDRESSES ARE BITMAP OFFSETS (0..7999), not addresses: where the bitmap lives is the player's
 // business, and it keeps the picture twice (see ending-src.mjs).
 import { readFileSync, writeFileSync } from 'fs';
+import { ROOT } from '../src/paths.mjs';
+process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 
 const argv = process.argv.slice(2), LEAVES = !argv.includes('--noleaves');
-const [KLA = 'tree.kla', REGF = 'art/tree/regions.json', NBF = 'art/tree/nobrown.json'] = argv.filter(a => !a.startsWith('--'));
+const [KLA = 'build/tree.kla', REGF = 'art/tree/regions.json', NBF = 'art/tree/nobrown.json'] = argv.filter(a => !a.startsWith('--'));
 const NSITES = 1024;
 const k = readFileSync(KLA);
 if (k.length !== 10003 || (k[0] | k[1] << 8) !== 0x6000) throw new Error(`${KLA} is not a Koala file`);
@@ -153,7 +155,7 @@ if (LEAVES) {
   while (sites.length < NSITES) sites.push(sites[sites.length % (sites.length || 1)]);   // fill the table (power of 2)
   console.log(`leaves: ${cand.length} possible turning squares, ${NSITES} sampled`);
 }
-writeFileSync('end-scene.json', JSON.stringify({
+writeFileSync('data/end-scene.json', JSON.stringify({
   note: 'The end scene: tree.kla plus its live parts -- see tools/endscene.mjs. bm/scr/col are the Koala ' +
         'bitmap, screen and colour RAM; light byte offsets (o) and leaf site offsets are into the bitmap.',
   bg, bm: [...bm], scr: [...scr], col: [...col],

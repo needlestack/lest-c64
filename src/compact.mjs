@@ -18,7 +18,7 @@ import { assemble } from './asm6502.mjs';
 // Every path is relative to THIS file's directory, never absolute and never the cwd: a clone (or a
 // renamed checkout) must build in place, and an absolute path once made a clone's build read and
 // write the original checkout's files without a word.
-const ROOT = new URL('.', import.meta.url).pathname;
+const ROOT = new URL('../build/', import.meta.url).pathname;   // compaction's inputs and outputs
 
 // The source is the file the BUILD JUST WROTE, handed over as argv[2] -- not a fixed name.
 // Hardcoding iray.asm meant that on a DIAGNOSTIC build, which writes iray.diag.asm so it cannot

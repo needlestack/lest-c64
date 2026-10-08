@@ -8,10 +8,10 @@
 // still assembles, still runs, and quietly uses garbage. So the interesting column here is
 // "read, never written".
 //
-//   node tools/deadvars.mjs [iray.asm]
+//   node tools/deadvars.mjs [build/iray.asm]
 import { readFileSync } from 'fs';
 
-const src = readFileSync(process.argv[2] ?? 'iray.asm', 'utf8').split('\n');
+const src = readFileSync(process.argv[2] ?? 'build/iray.asm', 'utf8').split('\n');
 
 // Equates only -- these are the RAM variables. Labels are code addresses and not of interest.
 const vars = new Map();                          // name -> {addr, reads:[], writes:[]}
@@ -82,7 +82,7 @@ const show = (title, list, note) => {
       `reads ${v.reads.length ? 'line ' + v.reads.join(',') : 'none'}` +
       `  writes ${v.writes.length ? 'line ' + v.writes.join(',') : 'none'}`);
 };
-console.log(`${vars.size} RAM variables in ${process.argv[2] ?? 'iray.asm'}`);
+console.log(`${vars.size} RAM variables in ${process.argv[2] ?? 'build/iray.asm'}`);
 // ---- two more facts about this codebase, in the same spirit as the notes above ----
 // cpChr copies the charsets from where the LOADER put them to where the VIC reads them, and both
 // ends of that copy look like bugs from here:

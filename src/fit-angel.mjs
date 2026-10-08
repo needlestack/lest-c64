@@ -2,13 +2,15 @@
 // down to a 256-glyph charset plus 1000 screen codes, and write angel-face.json.
 //
 // Run by hand, not by the build: k-means over 1000 tiles takes seconds and the answer never
-// changes. Usage:  node fit-angel.mjs TMP-3.d64 hangl1 hangl2
+// changes. Usage:  node src/fit-angel.mjs art/TMP-3.d64 hangl1 hangl2
 import { execFileSync } from 'child_process';
 import { writeFileSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { readGek } from './gek.mjs';
 import { png } from './png.mjs';
+import { ROOT } from './paths.mjs';
+process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 
 const RGB = { 0:[0,0,0], 11:[68,68,68], 12:[108,108,108], 15:[149,149,149], 1:[255,255,255] };
 const lum = c => (RGB[c][0]*0.299 + RGB[c][1]*0.587 + RGB[c][2]*0.114) / 255;
@@ -126,7 +128,7 @@ for (const nm of names) {
         rgb[o] = col[0]; rgb[o+1] = col[1]; rgb[o+2] = col[2]; }
     }
   }
-  writeFileSync(`${nm}-fit.png`, png(W, H, rgb));
+  writeFileSync(`build/${nm}-fit.png`, png(W, H, rgb));
 }
-writeFileSync('angel-face.json', JSON.stringify(out));
+writeFileSync('data/angel-face.json', JSON.stringify(out));
 console.error(`wrote angel-face.json (${names.join(', ')}) and the -fit.png previews`);

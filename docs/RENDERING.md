@@ -96,7 +96,7 @@ built on that reading; it fired on zero cells from the middle of the room, and a
 would have been WRONG, stamping the top cell's glyph (with two rows of sky) down the whole stack.
 A screen dump taken from a build that still contained it was then misread as the shipping
 renderer's output. **Dump `colH` and the screen bytes at the pose in question, from a clean
-build, before theorising** -- both are one probe.mjs call (`@e000:1000`).
+build, before theorising** -- both are one tools/probe.mjs call (`@e000:1000`).
 
 ## The frame, by share (benchmark route, level 1, no objects, 2026-09-15)
 
@@ -109,4 +109,4 @@ build, before theorising** -- both are one probe.mjs call (`@e000:1000`).
     pivOne                      3.4%
     input + clears + HUD        5.1%
 
-`./bench.sh` reproduces this. See `seamprof.mjs` for how pfTick's own cost is subtracted.
+`./bench.sh` reproduces this. See `tools/seamprof.mjs` for how pfTick's own cost is subtracted.

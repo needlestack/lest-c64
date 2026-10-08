@@ -4,9 +4,9 @@
 // asks a different question: given those glyphs, what is the best 1000-cell arrangement for
 // some other picture? Nearest glyph per 4x8 tile, measured in luminance, and nothing else.
 //
-//   node fit-face.mjs "angel 3.png" a3 [more.png tag ...]
+//   node src/fit-face.mjs "angel 3.png" a3 [more.png tag ...]
 //
-// Writes face-extra.json (tag -> screen map) and one <tag>-fit.png to eyeball.
+// Writes build/face-extra.json (tag -> screen map) and one build/<tag>-fit.png to eyeball.
 import { execFileSync } from 'child_process';
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
@@ -15,7 +15,7 @@ import { readGek } from './gek.mjs';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { png } from './png.mjs';
 
-const FACE = JSON.parse(readFileSync('./angel-face.json', 'utf8')).hangl1;
+const FACE = JSON.parse(readFileSync(new URL('../data/angel-face.json', import.meta.url), 'utf8')).hangl1;
 // bit pair -> the register it reads, after fit-angel's 0<->3 swap
 //   00 $d021   01 $d022   10 $d023   11 colour RAM
 const RGB = { 0: [0,0,0], 11: [68,68,68], 12: [108,108,108], 15: [149,149,149], 1: [255,255,255] };
@@ -358,8 +358,8 @@ function previewWith(screen, chars, file) {
   writeFileSync(file, png(W, H, rgb));
 }
 
-const out = existsSync('./face-extra.json')
-  ? JSON.parse(readFileSync('./face-extra.json', 'utf8')) : {};
+const out = existsSync(new URL('../build/face-extra.json', import.meta.url))
+  ? JSON.parse(readFileSync(new URL('../build/face-extra.json', import.meta.url), 'utf8')) : {};
 const args = process.argv.slice(2);
 const pixU = {}, pixD = {}, tgts = {};
 for (let i = 0; i < args.length; i += 2) {
@@ -371,7 +371,7 @@ for (let i = 0; i < args.length; i += 2) {
   // version 1 is unchanged: the UNDITHERED picture against the shipped charset
   const { screen, rms } = fit(px);
   out[tag] = { screen, rmsOwn: rms };
-  preview(screen, `${tag}-fit.png`);
+  preview(screen, new URL(`../build/${tag}-fit.png`, import.meta.url).pathname);
   previewWith(fitTo(pixD[tag], GL).screen, FACE.chars, `${tag}-dither-old.png`);
   console.error(`${tag}: ${file} -> ${mcw}x200 in a 160-wide frame, RMS ${rms.toFixed(4)}` +
                 `, ${new Set(screen).size}/256 glyphs used`);
@@ -513,5 +513,5 @@ for (const t of TAGS) {
 // Guarded: build-facetest3.mjs imports this module for its fitting pipeline, and an import
 // must not rewrite the asset every other build reads.
 if (process.argv[1] && process.argv[1].endsWith('fit-face.mjs'))
-  writeFileSync('./face-extra.json', JSON.stringify(out));
+  writeFileSync(new URL('../build/face-extra.json', import.meta.url), JSON.stringify(out));
 console.error(`\nface-extra.json: ${Object.keys(out).join(', ')}`);

@@ -51,12 +51,12 @@ default).
 Requirements: a recent [Node.js](https://nodejs.org/) (developed on 26), and
 [ImageMagick](https://imagemagick.org/) 7 (`magick` on the path; the build fits
 sprite art from the images in `art/`). There's no other toolchain: the
-assembler (`asm6502.mjs`) and the disk-image writer (`d64lib.js`) are part of
-the project.
+assembler (`src/asm6502.mjs`) and the disk-image writer (`src/d64lib.js`) are
+part of the project.
 
 ```sh
-node build-iray.mjs                     # the whole game -> lest-c64.d64
-CHAIN=4 node build-iray.mjs             # one level on its own, for playtesting
+node src/build-iray.mjs                 # the whole game -> lest-c64.d64
+CHAIN=4 node src/build-iray.mjs         # one level on its own, for playtesting
 ```
 
 `CHAIN` lists the levels on the disk, in order. A full build takes under 20
@@ -93,25 +93,27 @@ The build also checks itself as it goes. Page alignment, memory overlaps,
 zero-page ownership, unreachable code, and the precondition of every
 undocumented opcode it uses are verified before a disk is written.
 
-Deeper notes: [`RENDERING.md`](RENDERING.md) on the renderer. Every entity's
+Deeper notes: [`docs/RENDERING.md`](docs/RENDERING.md) on the renderer. Every entity's
 size ladder, drawn rung by rung at the C64's pixel aspect, is in
 [`docs/ladders/`](docs/ladders/) (regenerate with `LADDERSHEET=1 node
-build-iray.mjs`).
+src/build-iray.mjs`).
 
 ## Layout
 
 | path | what |
 |---|---|
-| `build-iray.mjs` | the game: emits 6502 assembly, builds every level, writes the disk |
-| `compact.mjs` | the image layout pass (run by the build) |
-| `loader-src.mjs` | the boot: autorun, fast first stage, quote, Krill's installer |
-| `ending-src.mjs` | the ending: end quote, the tree dissolving in, and the reload |
-| `asm6502.mjs`, `d64lib.js` | assembler and disk writer |
+| `lest-c64.d64` | the game, ready to play |
+| `src/build-iray.mjs` | the game: emits 6502 assembly, builds every level, writes the disk |
+| `src/compact.mjs` | the image layout pass (run by the build) |
+| `src/loader-src.mjs` | the boot: autorun, fast first stage, quote, Krill's installer |
+| `src/ending-src.mjs` | the ending: end quote, the tree dissolving in, and the reload |
+| `src/asm6502.mjs`, `src/d64lib.js` | assembler and disk writer |
+| `src/fit-*.mjs`, `src/make-*.mjs`, `src/charsetgen.mjs`, `tools/endscene.mjs` | hand-run generators that produce the assets in `data/` |
+| `data/` | fitted assets the build reads (sprites, charset plan, quotes, end scene) |
+| `build/` | build output; only `build/iray.asm` is committed, so a diff shows what a change did to the machine code |
 | `art/` | source art: renders, paintings and hand-drawn sprites; `art/tree/` is the end scene's |
-| `*.json` | fitted assets the build reads (sprites, charset plan, boot quote) |
-| `fit-*.mjs`, `make-*.mjs`, `charsetgen.mjs`, `tools/endscene.mjs` | hand-run generators that produce those assets |
 | `krill/` | Krill's loader, prebuilt |
-| `docs/ladders/` | every entity's ladder of sprite sizes, as pictures |
+| `docs/` | `RENDERING.md`, and `ladders/`: every entity's ladder of sprite sizes, as pictures |
 | `tools/` | live-machine inspection (`probe`), frame-rate and cycle benchmarks (`fpsr`, `prof`, `vprof`), test rigs (`ship.sh`, `frames`) |
 
 ## Credits and licence
@@ -123,5 +125,5 @@ picture and the level designs -- by Jonathan Field, written with Claude
 Included third-party code keeps its own licence:
 
 - **Loader by Krill** (Gunnar Ruthenberg), BSD 3-clause. See [`krill/README-krill`](krill/README-krill).
-- **The fast first stage** (`IFBT`/`IDRV` in `loader-src.mjs`) adapts the idea of [fastboot1541](https://github.com/mist64/fastboot1541) by Michael Steil: have the drive read its own code off the disk, so almost nothing crosses the slow bus before a fast loader is running.
+- **The fast first stage** (`IFBT`/`IDRV` in `src/loader-src.mjs`) adapts the idea of [fastboot1541](https://github.com/mist64/fastboot1541) by Michael Steil: have the drive read its own code off the disk, so almost nothing crosses the slow bus before a fast loader is running.
 - **Exomizer decruncher** by Magnus Lind ([`exodecrunch.asm`](exodecrunch.asm)), under the notice in that file.

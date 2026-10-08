@@ -1,6 +1,6 @@
 // fold.mjs -- retire build flags from build-iray.mjs by constant-folding them away.
 //
-//   node tools/fold.mjs build-iray.mjs --env A,B,C [--force X=false,LATE=[]]
+//   node tools/fold.mjs src/build-iray.mjs --env A,B,C [--force X=false,LATE=[]]
 //        [--after 'MARKER' --afterforce Y=true] [--dead] [--checkeach] [--dry]
 //
 //   --env       env flags to treat as UNSET (process.env.A / flag('A')). An on-by-default switch

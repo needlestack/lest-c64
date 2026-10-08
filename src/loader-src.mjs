@@ -31,7 +31,7 @@ import { readFileSync } from 'fs';
 export const LOADER_RUN = 0x0630;   // clear of Krill's resident, which END_ADDRESS_API made
                                     // 556 bytes: $0400-$062b. buildLoader asserts it.
 const KDIR = 'krill';
-const krillPrg = n => [...readFileSync(`./${KDIR}/${n}`)];
+const krillPrg = n => [...readFileSync(new URL(`../${KDIR}/${n}`, import.meta.url))];
 const krillAt = p => p[0] | (p[1] << 8);
 const KRILL_RES_PRG = krillPrg('loader-c64.prg'), KRILL_INST_PRG = krillPrg('install-c64.prg');
 const KRILL_RES = KRILL_RES_PRG.slice(2), KRILL_INST = KRILL_INST_PRG.slice(2);

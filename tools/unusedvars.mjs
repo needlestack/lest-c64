@@ -3,8 +3,8 @@
 // code, any comment-free expression) -- the safe direction: only names with a single mention, the
 // definition itself, are reported. Prints "line name kind".
 import { readFileSync } from 'fs';
-const src = readFileSync(new URL('../build-iray.mjs', import.meta.url), 'utf8');
-const other = readFileSync(new URL('../compact.mjs', import.meta.url), 'utf8');
+const src = readFileSync(new URL('../src/build-iray.mjs', import.meta.url), 'utf8');
+const other = readFileSync(new URL('../src/compact.mjs', import.meta.url), 'utf8');
 const lines = src.split('\n');
 // strip ;-comments and //-comments so a mention in prose does not count as a use
 const code = s => s.replace(/;.*$/gm, '').replace(/\/\/.*$/gm, '');

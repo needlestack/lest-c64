@@ -1,7 +1,7 @@
 #!/bin/sh
 # Rebuild Krill's loader from ../../tmp/krill/loader against krill/loaderconfig.inc.
 #
-# INSTALL/RESIDENT are NOT Krill's defaults and must not drift from loader-src.mjs:
+# INSTALL/RESIDENT are NOT Krill's defaults and must not drift from src/loader-src.mjs:
 #   RESIDENT=0400 -- the screen, moved to $f400 by the boot body before install runs
 #   INSTALL =09c0 -- just above the boot stub. Krill's default $1000 leaves 654 bytes of
 #                    $1000 leaves 654 bytes of PADDING inside the boot PRG, and the boot PRG

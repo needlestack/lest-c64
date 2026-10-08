@@ -356,7 +356,7 @@ export function assemble(source, opts = {}) {
   return { prg, bytes, org, end: org + bytes.length, labels: symbols, listing, holes };
 }
 
-// Small CLI: node asm6502.mjs in.asm out.prg
+// Small CLI: node src/asm6502.mjs in.asm out.prg
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { readFileSync, writeFileSync } = await import('fs');
   const [, , inFile, outFile] = process.argv;
