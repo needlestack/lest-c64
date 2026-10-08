@@ -818,35 +818,6 @@ const MULTI = !process.env.LVLDUMP;
 // gone.) The same fact as MULTI -- every assembled build loads on demand -- kept under its own
 // name because the two read differently at their sites.
 const LVLLOAD = MULTI;
-// ---- VSLOTS: more than one level RESIDENT, and the engine POINTED at whichever is live ----
-// The user's design (2026-09-29, built 2026-10-03): a level lives ONCE, wherever it was loaded.
-// Every instruction that names a per-level table is listed at build time (vsLoT/vsHiT -- the
-// operand's HIGH byte; slots are page-aligned so the low byte never changes), and lvlLive rewrites
-// them all when the live level changes: ~200 sites, a few thousand cycles, inside a fall. The only
-// addresses a level holds INTO ITSELF are its wall pointers and wall-delta quads, read solely by
-// the wall code, which adds vsDelta (live page - the page the level was built for) where it reads
-// them -- so level files need no relocation list at all.
-// Milestone 1: two slots. Slot 0 is the bank-3 slot at SLOT_AT, which is also where the disk
-// loader puts a file; slot 1 is a page-aligned RAM buffer in the arena. Boot keeps the boot level
-// and the next one resident, and a fall into a resident level is a repoint, not a load.
-const VSLOTS = LVLLOAD && process.env.VSLOTS === '1';
-// A FIXED engine constant, not derived from any chain: 3.5 pages. Every level file must fit (the
-// build checks); the largest today is 868 bytes (level 4 with the chain-4-7 padding).
-let VS_SLOTLEN = 896;    // PROVISIONAL: set to the real level region once it is known (see LVLREGION_END)
-// BGLOAD=1 (prototype, 2026-10-04): load levels in the FRAME SLACK while playing. Krill's resident
-// stays at $0400 for good (the span stacks move out), a second execution context runs its blocking
-// load call, the raster-wait loop hands it the time the game would have spun away, and the IRQ at
-// line ~246 hands control back for the flip. With loads that cheap, two slots are enough: the live
-// level, and slot 0 as the landing zone for the next one.
-const BGLOAD = VSLOTS && process.env.BGLOAD === '1';
-const VS_N = +(process.env.VS_N ?? (BGLOAD ? 2 : 4));   // slot 0 (bank 3) + the arena slots
-const VS_ARENA = ['lvlSlot1', 'lvlSlot2', 'lvlSlot3'].slice(0, VS_N - 1);
-// VSLOTS needs ~217 more arena bytes than chain 1-4 leaves. The scratch cluster $8000-$807a (123
-// bytes: the pivot state, the movement step, the death scene's sound, ...) moves WHOLE -- same
-// layout, shifted -- into bank 3's free run at $f42f-$f4ff. It is RAM the boot quote unpacks over,
-// not zeros as the image gives the arena, so entry clears it: the variables start where they
-// always did.
-const VS_MOVE = { from: 0x8000, to: 0x807a, at: 0xf42f };
 // Which levels ride along, in ascending order. That order IS the slot order.
 const OTHERS = !MULTI ? [] : CHAIN.length === 1 ? [LVL] : CHAIN.filter(n => n !== LVL);
 const LVLALL = MULTI ? (() => {
@@ -876,7 +847,7 @@ const LVLALL = MULTI ? (() => {
 // Every level whose tables this build has to accommodate, resident or arriving. The distinction
 // that matters for SIZING is not which slot a level is in -- it is whether its bytes ever land
 // in these tables at all, and a late level's do.
-const LVLSIZED = [...(LVLALL ?? []), ...([])];
+const LVLSIZED = [...(LVLALL ?? [])];
 
 // ---- ANGEL PATHING: a breadth-first distance map, filled a few cells per frame ----
 // The greedy chase this replaces tried three steps, all straight at the player, and stopped when
@@ -3978,8 +3949,7 @@ const PROF_BUFS = {
 };
 const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8, oSDbg: 4 } : {};
 const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
-                       pvBnd: NBND, pvAng: NBND, pvRcp: NBND,
-                       ...(VSLOTS ? Object.fromEntries(VS_ARENA.map(n => [n, VS_SLOTLEN])) : {}) };
+                       pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
 // Only when the profiler is built: on an ordinary build these names do not exist and a size
 // declared for them would reserve space for nothing.
 if (PROFILE) Object.assign(RUNTIME_BUFS, PROF_BUFS);
@@ -5092,10 +5062,7 @@ if (ORBHI_N !== 0 && ORBHI_N !== 12) throw new Error(
 // including stackRT's half-page offset -- so nothing about the addressing changes with them.
 const SCRATCH_AT = ORBHI_N
   ? { sideT: 0xee00, idT: 0xef00, stackLT: 0xf000, stackRT: 0xf080 }
-  : { sideT: 0x0500, idT: 0x0600, ...(BGLOAD
-      // BGLOAD: $0400 is Krill's for good, so the span stacks become ordinary scratch the relayout
-      // places (stackLT declared page-aligned; stackRT is its +$80 neighbour and moves with it)
-      ? { stackLT: 0x7800, stackRT: 0x7880 } : { stackLT: 0x0400, stackRT: 0x0480 }) };
+  : { sideT: 0x0500, idT: 0x0600, ...({ stackLT: 0x0400, stackRT: 0x0480 }) };
 const ORBLO_N = NORBBM - ORBHI_N;               // what is left at SPRBASE
 // ORBHI -- where the tail actually lands -- is down beside IDOLBASE, which it follows and which
 // is not known until the hole ladder has been built. So is orbPtrT, which needs it.
@@ -5661,7 +5628,7 @@ const HUB_WIRED = [5, 6, 7].every(n => ALLLVL.includes(n));
 // the machine to the ending (IEND, then ITRE; see ending-src.mjs). Built whenever its two data files
 // exist and the build loads levels from disk; NOENDING=1 puts the black hole back to level 1.
 // ENDTEST=1 sends level 1's exit there instead, so FALLNOW can reach the ending in seconds.
-const ENDING = LVLLOAD && !VSLOTS && !process.env.NOENDING
+const ENDING = LVLLOAD && true && !process.env.NOENDING
   && existsSync('./quote-end.json') && existsSync('./end-scene.json');
 const BLACK_DST = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
 const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4],
@@ -5954,27 +5921,7 @@ const NSOCK = Math.max(1, lvlMax(l => l.nHoleLike - l.nExit, HOLELIKE.length - H
 // the LIVE level's start only -- a dump inherits that env and would apply it to itself.
 const startBytes = n => { const [x, y, a, af] = startOf(n);
   return [x & 255, x >> 8, y & 255, y >> 8, a, af]; };
-// ---- THE LOAD LIST: the levels a level wants RESIDENT while it is live (VSLOTS) ----
-// Read when the level becomes live; anything not on it (and not the level itself) may be evicted
-// to make room -- but only ever to make room for a LOAD, so a list naming what is already resident
-// changes nothing. EMPTY means "change nothing", which is what every level but these two wants:
-// level 1 brings in the first four, the hub swaps 1-3 out for its three errands. Filtered to what
-// is on THIS disk, so chain 1-4 builds a hub that wants nothing -- and that filter is chain-global,
-// which is why it is computed here and not in each level's own dump.
-const LEVEL_WANT = { 1: [2, 3, 4], 4: [5, 6, 7] };
-const VS_LW = 3;                                  // list bytes per level, $ff-padded
-// BGLOAD: one level ahead -- the destination of exit 0, prefetched in the slack. (The hub's other
-// exits still load in the midpoint black; a level with several exits wants more slots or a guess.)
-const wantOf = n => {
-  const w = (BGLOAD ? [LEVEL_EXITDST[n]?.[0] ?? nextLevel(n)].filter(m => m !== n && m !== 0xff)
-                    : (LEVEL_WANT[n] ?? [])).filter(m => ALLLVL.includes(m));
-  if (w.includes(n)) throw new Error(`level ${n}'s load list names itself`);
-  // The live level plus its list must fit the slots, or the victim search finds nothing to evict.
-  if (w.length > VS_N - 1) throw new Error(`level ${n} wants ${w.length} levels resident; ${VS_N} slots hold it and ${VS_N - 1} more`);
-  return [...w, ...Array(VS_LW - w.length).fill(0xff)];
-};
 const CHAIN_GLOBAL = {
-  lvlWantT: L => wantOf(L.level),
   lvlStartT: L => startBytes(L.level),
   lvlNxtT: L => {
     const n = Math.max(1, NEXIT), d = LEVEL_EXITDST[L.level];
@@ -6621,7 +6568,7 @@ const FROWT   = 0x6600;                          // 30 x 32: the camera-height r
                                                  //   RELOC, which is full to the image end, and
                                                  //   not inline: 960 bytes pushed the data
                                                  //   segment through ORB_SMALL at $3300.
-const FALLBUF2 = VSLOTS ? 0xfc80 : 0x4900;   // VSLOTS: bank 3's free run, so the arena holds the level slots                         // the DESTINATION room, rendered at the start of
+const FALLBUF2 = 0x4900;                           // the DESTINATION room, rendered at the start of
                                                  //   the fall instead of the middle. A full render
                                                  //   is 3-4 raster periods; in the middle it stalled
                                                  //   the animation for ~0.4s between the two arcs.
@@ -6632,7 +6579,7 @@ const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: t
 // store 0 into the low one (`lda #>fallSnapS / sta fdD+1 / lda #$00 / sta fdD`), so a buffer at
 // a non-page address would be written 256-aligned anyway -- over whatever is below it. The code
 // says so in one place now, by symbol; this is what keeps the constants honest.
-for (const [n, a] of [...(VSLOTS ? [] : [['FALLBUF2', FALLBUF2]]), ['FALLBUF', FALLBUF]])
+for (const [n, a] of [...([['FALLBUF2', FALLBUF2]]), ['FALLBUF', FALLBUF]])
   if (a & 255) throw new Error(`${n} = $${a.toString(16)} is not page-aligned, and fallSnap/bgCopy ` +
     `only ever write its high byte -- the snapshot would land on the previous page boundary`);
 // ---- how long the drop takes, and how smooth it can possibly be ----
@@ -7680,7 +7627,7 @@ if (process.env.PEDDUMP && HAS_PED) {
   });
   process.exit(0);
 }
-const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...([]), ...PED.BM];
+const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...PED.BM];
 // ---- HOW MANY SCREEN ROWS EACH SOCKET-LIKE RUNG COVERS, so occStamp can box it ----
 // The stamp needs one thing from a slot it did not project: the row extent of what is drawn
 // there. For an orb it reads that from orbBlankT/orbAnchT by variant; a socket's rung cannot go
@@ -8969,7 +8916,6 @@ const LVL_TABLES = [
              ORBS.length + HOLELIKE.length,
              HOLES_AT.length + SOCKETS_AT.length]],
   ['lvlStartT', startBytes(LVL)],   // px lo/hi, py lo/hi, pa, paF -- see startBytes
-  ...(VSLOTS ? [['lvlWantT', wantOf(LVL)]] : []),   // the load list; see LEVEL_WANT
   // orbOccLoT is NOT here any more. It says where the ENGINE keeps entity i's mask (orbOccT +
   // i*OCCBYTES) -- engine layout, not level data. Shipped per level, each level file carried the
   // stride ITS OWN build computed (4, 7, 8 against the engine's 9): masks overlapped, ran past
@@ -9345,12 +9291,7 @@ if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
 // fixed 896 ($f500-$f880); level 4 is 848, so each arena slot carried 48 bytes nothing could use --
 // and since slots are page-aligned, that is what decided whether a 160-byte buffer fitted beside
 // them. Nothing reads RUNTIME_BUFS' slot sizes before this point (reserveOf runs at the end).
-if (VSLOTS) {
-  if (LVLREGION_END - SLOT_AT > 896) throw new Error(
-    `VSLOTS: a level region is ${LVLREGION_END - SLOT_AT} bytes and slot 0 holds 896 ($f500-$f880)`);
-  VS_SLOTLEN = LVLREGION_END - SLOT_AT;
-  for (const n of VS_ARENA) RUNTIME_BUFS[n] = VS_SLOTLEN;
-}
+
 console.error(`level region: ${LVLBLOB_MAX} bytes of tables (live ${LVLBLOB}, saved `
   + `${ALLBLOBS.reduce((t, L) => t + LVLBLOB_MAX - blobOf(L), 0)} across ${ALLBLOBS.length} levels by `
   + `natural sizing) + ${SOLO_WALL_LEN} of wall ` +
@@ -9402,7 +9343,7 @@ pa      = $06
 ; $07 is free: it was rang, the coarse byte ray angle, dead since castRay's step
 ; signs moved to the fine angle.
 snSrc   = $6d                    ; the snapshot copy's source screen page...
-${VSLOTS ? 'snDstL  = $6f                    ; VSLOTS: ...and its LOW byte -- fallSnapD is no longer page-aligned\n' : ''}snDst   = $6e                    ;   ...and its destination page. Zero page: two bytes shorter
+snDst   = $6e                    ;   ...and its destination page. Zero page: two bytes shorter
                                  ;   per access, which is what keeps bgCopy inside its block.
 sdx     = $0a
 sdy     = $0b
@@ -10056,10 +9997,7 @@ ${FALLTAIL ? `fallTailB = ${hx16(LOWBOOT)}               ; FALLTAIL: the source 
                                  ;   (The old note, still true of where it came from: CPU-
                                  ;   addressable because the port is $35 all through play --
                                  ;   to hold the real NMI/RESET/IRQ vectors.
-` : ''}${VSLOTS ? `lvlSlot1 = $7c00                 ; VSLOTS: level slots 1-3, page-aligned -- the relayout rehomes them
-${VS_N > 2 ? `lvlSlot2 = $7800                 ;   into the arena with their declared size and alignment
-lvlSlot3 = $7400
-` : ''}` : ''}fallSnapD = ${hx16(FALLBUF2)}                ; the destination room, snapshotted before the drop begins
+` : ''}fallSnapD = ${hx16(FALLBUF2)}                ; the destination room, snapshotted before the drop begins
 fallSnapS = ${hx16(FALLBUF)}                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
@@ -10277,11 +10215,6 @@ skF:    sta $0100,x
         inx
         cpx #$c0
         bne skF
-` : ''}${VSLOTS ? `        ldx #${hx(VS_MOVE.to - VS_MOVE.from)}               ; VSLOTS: the moved scratch starts at 0, as it did in the image
-        lda #$00
-vsZ:    sta ${hx16(VS_MOVE.at)},x
-        dex
-        bpl vsZ
 ` : ''}        lda #$35                ; processor-port mode 5: RAM at $a000-$bfff, I/O at $d000-$dfff,
         sta $01                 ; RAM at $e000-$ffff. BASIC and KERNAL both out, I/O still there.
                                 ;
@@ -10315,9 +10248,8 @@ ${process.env.FTFREEZE ? `        sta ftFrz               ;   the one place the 
                                 ;   froze the fall at a RANDOM frame, and two runs of the same
                                 ;   build differed by 5,400 pixels -- which looks exactly like the
                                 ;   rendering change you are trying to measure.
-` : ''}${!BGLOAD ? `        jsr klPark              ; park the LIVE loader before the renderer writes over it
-` : ''}${VSLOTS ? `        jsr vsBoot              ; VSLOTS: the boot level's load list (once per power-on)
-` : ''}        ; ---- copy both charsets into the RAM under the I/O hole ----
+` : ''}        jsr klPark              ; park the LIVE loader before the renderer writes over it
+        ; ---- copy both charsets into the RAM under the I/O hole ----
         ; This CANNOT be done by the loader: LOAD runs with I/O mapped, so it would write VIC and
         ; CIA registers rather than memory (the build refuses an image past $c000 for the same
         ; reason). Charset A is therefore not loaded at all in the usual sense: the self-extracting
@@ -11690,34 +11622,7 @@ fwait:  lda frameCnt
         cmp #${FALL_PERIODS}
         bcc fwait
 mvs:
-${BGLOAD && !process.env.BGNOYIELD ? `        lda zlOn                ; BGLOAD: a job waiting, and this is an ordinary frame with real
-        beq mvsW                ;   slack before the flip? Hand it to the loader; the IRQ near line
-        lda fallSt              ;   246 hands it back. Not between 230 and 250: too short to be
-        bne mvsW                ;   worth a switch, and the IRQ's window starts at 240. AFTER the
-${process.env.BGHOLD ? `        lda frameCnt+1          ; BGHOLD=n (debug): no yielding before tick n, so a whole job lands
-        bne bgHk                ;   inside a measured window instead of in the boot's first frames
-        lda frameCnt
-        cmp #${+process.env.BGHOLD}
-        bcc mvsW
-bgHk:
-` : ''}
-        lda $d012               ;   label: every path into the wait jumps to mvs.
-        cmp #230
-        bcc mvsY
-        cmp #251
-        bcc mvsW
-mvsY:   lda zlFr            ; first slice of this job? note the tick (zlY0), for zlYT below
-        ora zlFr+1
-        bne mvsY1
-        lda frameCnt
-        sta zlY0
-        lda frameCnt+1
-        sta zlY0+1
-mvsY1:  inc zlFr                ; game frames rendered while a job was live -- with zlYT, the
-        bne mvsY2               ;   frame rate DURING loading, to set against the same view without
-        inc zlFr+1
-mvsY2:  jsr zlGo
-` : ''}mvsW:   lda $d012
+mvsW:   lda $d012
         cmp #250
         bne mvsW
         lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
@@ -14035,26 +13940,7 @@ irqArm: lda #${hx(SPLITLINE)}
 irqNf:
 irqd:   lda #$ff
         sta $d019
-${BGLOAD ? `        lda zlIn                ; BGLOAD: in the loader at the bottom of the frame? the game is
-        beq irqR                ;   waiting to flip at 250, so hand it back. This IRQ's own A X Y
-        lda zlSync              ;   are on the LOADER's stack -- that IS the loader's saved frame.
-        bne irqR
-        lda frameCnt            ; a new video frame since the slice began? then the band was never
-        cmp zlYF                ;   reached -- the IRQ lines are whatever the game last PUBLISHED, and
-        bne irqBk               ;   just after a landing none of them fall in it. Hand back NOW (the
-        lda $d012               ;   top-of-frame IRQ exists in every mode); the game waits out to 250.
-        cmp #240
-        bcc irqR
-        cmp #251
-        bcs irqR
-irqBk:
-        lda #$00
-        sta zlIn
-        tsx
-        stx zlLSP
-        ldx zlGSP
-        txs
-irqR:` : ''}        pla
+        pla
         tay
         pla
         tax
@@ -16180,7 +16066,7 @@ ${CEILVARY ? `        tax
         beq lvlEnd
         pha                     ; wallsBack does not preserve A, and the stack is cheaper here
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place: the arriving file carries its\n                                ;   own, and wallStT is engine state that must not follow us out\n' : ''}        pla
-        jsr ${VSLOTS ? 'vsEnter' : 'lvlLoad'}             ; A = the level being entered. No slot search and no exchange:
+        jsr lvlLoad             ; A = the level being entered. No slot search and no exchange:
                                 ;   there is one slot, and the arriving level is read over the
                                 ;   departing one. lvlMeT rides in the file, so identity arrives
                                 ;   with the geometry rather than being stored ahead of it.
@@ -16244,8 +16130,8 @@ fcNo:   rts
 ${FALLMID ? `
 ; ---- fallMid: EVERY piece of level work, in one black moment between the two arcs ----
 ; Called at the handover, when the top arc has left the screen and the bottom one has not appeared:
-; the display is pure hole, so blanking it is invisible. Then the level change (and with VSLOTS the
-; arriving level's whole load list), and the destination rendered in FULL -- bgStep driven to
+; the display is pure hole, so blanking it is invisible. Then the level change, and the
+; destination rendered in FULL -- bgStep driven to
 ; completion rather than a slice a frame. DEN stays off until the landing's first flip publishes
 ; pd11. fmTk = the ticks it all took, so the pause can be measured rather than guessed.
 fallMid:lda $d011
@@ -16253,17 +16139,14 @@ fallMid:lda $d011
         sta $d011
         lda frameCnt
         sta fmT0
-${BGLOAD ? `        jsr zlRun               ; BGLOAD: whatever the slack did not finish, finish now -- the
-                                ;   directory must be settled before vsEnter reads it
-` : ''}        ldx hlv                 ; the exit taken -- still the departing level's numbering here
+        ldx hlv                 ; the exit taken -- still the departing level's numbering here
         lda lvlNxtT,x
         cmp #$ff
         beq fmSame
         pha                     ; wallsBack does not preserve A
 ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place, exactly as at the hole before\n' : ''}        pla
-        jsr ${VSLOTS ? 'vsEnter' : 'lvlLoad'}             ; the arriving level (and its load list); lvlLoad keeps DEN off
-${BGLOAD ? `        jsr zlPrep              ; BGLOAD: live out of slot 0 if the next job will land there
-` : ''}        jsr mkRuns
+        jsr lvlLoad             ; the arriving level (and its load list); lvlLoad keeps DEN off
+        jsr mkRuns
         jsr objInit
 fmSame: jsr lvlStart            ; the arriving level's start: what the render below looks from
         lda #$00
@@ -16276,8 +16159,7 @@ fmBg:   jsr bgStep              ; the whole destination room, into fallBuf2
         lda bgPh
         cmp #$03
         bne fmBg
-${BGLOAD ? `        jsr zlStart             ; BGLOAD: and the arriving level's list, in the slack from here on
-` : ''}        lda frameCnt
+        lda frameCnt
         sec
         sbc fmT0
         sta fmTk
@@ -19554,9 +19436,7 @@ bgCopy: lda baseHi
         sta snSrc
         lda #>fallSnapD
         sta snDst
-${VSLOTS ? `        lda #<fallSnapD
-        sta snDstL
-` : ''}
+
         jmp snapCp              ; ...the shared walk, parked in a free run of its own
 
         * = $6100
@@ -19879,23 +19759,12 @@ klParked: !byte 0
 ; destination render starts a slice per frame once this returns. It BLOCKS, deliberately -- ~705
 ; bytes is about 0.15s, spent inside an animation that is already playing.
 lvlLoad:
-${VSLOTS ? `        inc vsLoads             ; VSLOTS: disk loads since boot, so a resident fall can be SEEN not to load
-` : ''}${ENDING ? `        cmp #${hx(END_DST)}                ; THE END is not a level: endGo loads the ending instead
+${ENDING ? `        cmp #${hx(END_DST)}                ; THE END is not a level: endGo loads the ending instead
         beq endGo
 ` : ''}        ora #$30                ; the file is ILV<n>: the level number IS its last character,
         sta nILV+3              ;   so choosing a level is one byte of self-modification
 llName:
-${BGLOAD ? `        ; BGLOAD: the resident lives at $0400 for good, so nothing is copied down; and this may
-        ; run in the LOADER context, between game frames, so it touches neither $d011 (the game
-        ; owns the display -- the midpoint blanks it itself) nor $99/$9a/$ba: the resident never
-        ; reads them (its code was scanned), and the engine uses $99/$9a as mq/plo. (The comment
-        ; below about "the three KERNAL bytes the resident reads" predates that scan.)
-        ldx #<nILV
-        ldy #>nILV
-        jsr ${hx16(KRILL_RESIDENT_AT)}   ; = loadraw
-        sta llErr
-        rts
-` : ''}${BGLOAD ? '' : `        lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
+        lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
         sta llZP
         lda $9a
         sta llZP+1
@@ -19928,7 +19797,7 @@ ${process.env.LLDEN ? '' : `        and #$ef
         lda llZP+1
         sta $9a
         rts
-`}nILV:   !byte ${[...'ILV1'].map(c => hx(c.charCodeAt(0))).join(',')},0
+nILV:   !byte ${[...'ILV1'].map(c => hx(c.charCodeAt(0))).join(',')},0
 llZP:   !fill 2, 0              ; DFLTN, DFLTO
 llErr:  !byte 0
 ${ENDING ? `
@@ -19948,373 +19817,7 @@ egFail: lda #$02                ; RED border, display on: the ending did not loa
         sta $d011
 egF:    jmp egF
 ` : ''}
-${VSLOTS ? `
-; ---- VSLOTS: which level is in which slot, and pointing the engine at the live one ----
-; Slot 0 is the bank-3 slot the disk loader fills; slot 1 is a page-aligned buffer in the arena.
-vsLvT:  !byte ${Array(VS_N).fill('$ff').join(',')}   ; the level each slot holds ($ff = empty)
-vsPgT:  !byte ${hx(SLOT_AT >> 8)},${VS_ARENA.map(n => '>' + n).join(',')}   ; ...and the page it starts on
-vsLive: !byte 0                 ; the slot the live level is in
-vsBooted:!byte 0                ; set once: entry is also the death RESTART, which must not re-run vsBoot
-vsX:    !byte 0                 ; vsList's place in the load list
-vsVY:   !byte 0                 ; vsVic/vsOut: the slot being considered
-vsCur:  !byte ${hx(SLOT_AT >> 8)}               ; the page every engine site names right now
-vsDelta:!byte 0                 ; vsCur - the page a level file is built for (the wall code adds it)
-vsAdd:  !byte 0
-vsLoads:!byte 0                 ; disk loads since boot (lvlLoad bumps it)
 
-; lvlLive: A = the page the live level starts on. Adds the difference to the HIGH byte of every
-; engine site that names a per-level table (vsLoT/vsHiT, generated by the build). One byte a site:
-; slots are page-aligned, so the low bytes are the same in every slot.
-lvlLive:pha
-        sec
-        sbc vsCur
-        sta vsAdd
-        beq vsLDn
-        ldx #@@VSN@@            ; the last site's index (the build fills it in after labelling)
-vsLLp:  lda vsLoT,x
-        sta vsLA+1
-        sta vsLB+1
-        lda vsHiT,x
-        sta vsLA+2
-        sta vsLB+2
-vsLA:   lda $ffff
-        clc
-        adc vsAdd
-vsLB:   sta $ffff
-        dex
-        cpx #$ff
-        bne vsLLp
-vsLDn:  pla
-        sta vsCur
-        sec
-        sbc #${hx(SLOT_AT >> 8)}
-        sta vsDelta
-        rts
-
-; vsCopy: A = a slot's page. Copies slot 0 into it: ${VS_SLOTLEN >> 8} whole pages, then the tail. Never a
-; whole extra page -- the slots are packed and the next buffer starts right after this one.
-vsCopy: sta vsCD+2
-        lda #${hx(SLOT_AT >> 8)}
-        sta vsCS+2
-        ldx #${hx(VS_SLOTLEN >> 8)}
-        ldy #$00
-vsCS:   lda $ff00,y
-vsCD:   sta $ff00,y
-        iny
-        bne vsCS
-        inc vsCS+2
-        inc vsCD+2
-        dex
-        bne vsCS
-${VS_SLOTLEN & 255 ? `        lda vsCS+2
-        sta vsTS+2
-        lda vsCD+2
-        sta vsTD+2
-vsTS:   lda $ff00,y
-vsTD:   sta $ff00,y
-        iny
-        cpy #${hx(VS_SLOTLEN & 255)}
-        bne vsTS
-` : `                                ; (no tail: the slot is whole pages -- a tail loop here would copy a 256th)
-`}        rts
-
-; vsRes: A = a level. Carry SET if some slot holds it (Y = that slot). A is kept.
-vsRes:  ldy #${hx(VS_N - 1)}
-vsRL:   cmp vsLvT,y
-        beq vsRY
-        dey
-        bpl vsRL
-        clc
-        rts
-vsRY:   sec
-        rts
-
-; ---- THE LOAD LIST, carried out ----
-; Slot 0 is where the loader lands EVERY file, and with all four slots in use one level always lives
-; there. So before anything is loaded, slot 0's occupant is copied out if it is still WANTED -- the
-; live level, or one on the live level's list -- over a slot whose level is not. Entering the hub
-; from level 3 (slots 4,1,2,3): 4 moves over 1, then 5 lands and moves over 2, 6 over 3, and 7
-; stays where it landed. Eviction only ever happens to make room for a load.
-
-; vsWant: A = a level. Carry SET if the live level needs it kept: it IS the live level, or it is on
-; the live level's list. An empty slot ($ff) is never wanted. Keeps A; clobbers Y.
-vsWant: cmp #$ff
-        beq vsWNo
-        ldy vsLive
-        cmp vsLvT,y
-        beq vsWYes
-        ldy #${hx(VS_LW - 1)}
-vsWL:   cmp lvlWantT,y          ; read through the live slot, like every per-level table
-        beq vsWYes
-        dey
-        bpl vsWL
-vsWNo:  clc
-        rts
-vsWYes: sec
-        rts
-
-; vsVic: Y = a slot in 1-3 that may be overwritten -- an EMPTY one first, else one whose level is
-; not wanted. One always exists: the wanted set is at most ${VS_N} levels (the build checks the list
-; length), slot 0 holds one of them and the level about to load is another, not yet resident.
-vsVic:  ldy #$01
-vsVE:   lda vsLvT,y
-        cmp #$ff
-        beq vsVGot
-        iny
-        cpy #${hx(VS_N)}
-        bne vsVE
-        ldy #$01
-vsVU:   sty vsVY
-        lda vsLvT,y
-        jsr vsWant
-        ldy vsVY
-        bcc vsVGot
-        iny
-        cpy #${hx(VS_N)}
-        bne vsVU
-        !byte $02               ; JAM: no slot to give up. Impossible by the build's list guard -- and
-                                ;   loud (VICE reports the JAM) rather than a level silently lost
-vsVGot: rts
-
-; vsOut: copy slot 0's level out to vsVic's slot, and follow it with the engine if it is the live one.
-vsOut:  jsr vsVic
-        sty vsVY
-        lda vsPgT,y
-        jsr vsCopy              ; slot 0 -> that page
-        ldy vsVY
-        lda vsLvT
-        sta vsLvT,y
-        lda #$ff
-        sta vsLvT               ; slot 0 is free for the load now
-        lda vsLive
-        bne vsODn               ; the live level was elsewhere: no engine site moves
-        sty vsLive
-        lda vsPgT,y
-        jmp lvlLive
-vsODn:  rts
-
-; vsGet: A = a level the live one wants. Already resident: nothing. Otherwise off the disk into slot 0,
-; after moving slot 0's occupant out if it is wanted.
-vsGet:  jsr vsRes
-        bcs vsGDn
-        pha
-        lda vsLvT
-        jsr vsWant
-        bcc vsGLd               ; nothing in slot 0 worth keeping: the load simply replaces it
-        jsr vsOut
-vsGLd:  pla
-        pha
-        jsr lvlLoad
-        pla
-        sta vsLvT
-vsGDn:  rts
-
-; vsList: make every level on the live level's list resident. $ff ends it; an empty list is a no-op.
-vsList: ldx #$00
-vsLsL:  stx vsX
-        lda lvlWantT,x
-        cmp #$ff
-        beq vsLsD
-        jsr vsGet
-        ldx vsX
-        inx
-        cpx #${hx(VS_LW)}
-        bne vsLsL
-vsLsD:  rts
-
-; vsBoot: the boot loader put the boot level in slot 0 and every engine site already names it. Once
-; per power-on: a death restart re-enters entry with the slots exactly as play left them.
-vsBoot: lda vsBooted
-        bne vsBDn
-        inc vsBooted
-        lda lvlMeT
-        sta vsLvT
-        lda #$00
-        sta vsLive
-${BGLOAD ? `        jsr zlPrep              ; BGLOAD: live out of slot 0 if anything must land there...
-${process.env.BGSYNCTEST ? `        jsr zlStart             ; BGSYNCTEST: the same job, run to COMPLETION at once -- the loader
-        jmp zlRun               ;   context without a single suspension, to separate the two causes` : `        jmp zlStart             ;   ...and the list loads in the slack from the first frame on`}` : `        jmp vsList`}
-vsBDn:  rts
-${BGLOAD ? `
-; ---- BGLOAD: loading in the FRAME SLACK ----
-; Two execution contexts share the stack page: the game below $0200 from $01ff down (it never
-; goes deeper than 64 bytes -- measured with STKFILL), the loader from $017f down. A context is
-; saved as an IRQ frame, PCH PCL P A X Y, exactly the layout irq: pushes and irqd pops, so the
-; IRQ can switch contexts on its way out and either kind of switch resumes through zlPop.
-zlOn:   !byte 0                 ; a background job exists (the loader context is resumable)
-zlIn:   !byte 0                 ; the CPU is in the loader context right now
-zlSync: !byte 0                 ; run the loader to completion: the IRQ must not hand back
-zlGSP:  !byte 0                 ; the game's saved stack pointer
-zlLSP:  !byte 0                 ; the loader's
-zlTk:   !byte 0,0               ; ticks the current job has been running, wall clock (frameCnt)
-zlT0:   !byte 0,0
-zlLog:  !fill 8, 0              ; the last jobs' durations in ticks (low bytes), for probing
-zlLogF: !fill 8, 0              ; ...and how many slices each took
-zlY0:   !byte 0,0               ; tick of the job's first slice
-zlYF:   !byte 0                 ; frameCnt when the current slice began
-zlYT:   !byte 0,0               ; ticks from first slice to done: the job's real length in play
-zlFr:   !byte 0,0               ; game frames that yielded to it in that time
-zlLN:   !byte 0
-
-; zlNeed: carry SET if the live level's list names a level that is not resident.
-zlNeed: ldx #$00
-zlNL:   lda lvlWantT,x
-        cmp #$ff
-        beq zlNNo
-        stx vsX
-        jsr vsRes
-        ldx vsX
-        bcc zlNYes
-        inx
-        cpx #${hx(VS_LW)}
-        bne zlNL
-zlNNo:  clc
-        rts
-zlNYes: sec
-        rts
-
-; zlPrep: if a background load will be needed and the live level sits in slot 0 -- the loader's
-; landing zone -- move it out now, while the caller can afford a repoint (boot, or the midpoint's
-; black). The background job then never touches the live level or the engine's pointers.
-zlPrep: jsr zlNeed
-        bcc zlPDn
-        lda vsLive
-        bne zlPDn
-        jsr vsOut               ; copies it over vsVic's slot and repoints the engine there
-zlPDn:  rts
-
-; zlStart: a fresh loader context whose first resume enters zlBody. Only if there is work.
-zlStart:jsr zlNeed
-        bcc zlSDn
-        lda #>zlBody
-        sta $017f
-        lda #<zlBody
-        sta $017e
-${process.env.BGSYNCTEST ? `        php                     ; BGSYNCTEST: the starter's P -- I SET at boot, where the raster IRQ
-        pla                     ;   is not installed yet
-` : `        lda #$20                ; P: I CLEAR, always. The job is STARTED at boot (I set) but only ever
-                                ;   RESUMED from the raster wait, where the IRQ is live -- and the IRQ
-                                ;   is what hands the CPU back. Inheriting the boot's I flag made the
-                                ;   whole load one slice with the game frozen (zlFr was 1).
-`}        sta $017d
-        lda #$00
-        sta $017c
-        sta $017b
-        sta $017a
-        lda #$79
-        sta zlLSP
-        lda #$00                ; a new job: its own slice count (and so its own first-slice tick)
-        sta zlFr
-        sta zlFr+1
-        lda frameCnt
-        sta zlT0
-        lda frameCnt+1
-        sta zlT0+1
-        lda #$01
-        sta zlOn
-zlSDn:  rts
-
-; zlBody: the loader context's whole program. vsList is the same code the synchronous path ran;
-; zlPrep guaranteed slot 0 is not the live level, so it only ever loads and copies.
-zlBody: jsr vsList
-        lda frameCnt
-        sec
-        sbc zlY0
-        sta zlYT
-        lda frameCnt+1
-        sbc zlY0+1
-        sta zlYT+1
-        lda frameCnt            ; how long the job took on the wall clock
-        sec
-        sbc zlT0
-        sta zlTk
-        lda frameCnt+1
-        sbc zlT0+1
-        sta zlTk+1
-        ldx zlLN
-        lda zlYT                ; per job: its length in play (first slice to done) and its slices
-        sta zlLog,x
-        lda zlFr
-        sta zlLogF,x
-        inx
-        txa
-        and #$07
-        sta zlLN
-        sei
-        lda #$00
-        sta zlOn                ; done: this context is never resumed again
-        sta zlIn
-        ldx zlGSP
-        txs
-        jmp zlPop
-
-; zlGo: game -> loader. Called by jsr; returns when the game is resumed (by the IRQ at the end of
-; the slack, or by zlBody finishing). Builds the game's IRQ frame out of the jsr's return address.
-zlGo:   php
-        sei
-        pha
-        txa
-        pha
-        tya
-        pha
-        tsx
-        inc $0105,x             ; rti returns to the address itself, jsr pushed it minus one
-        bne zlG1
-        inc $0106,x
-zlG1:   stx zlGSP
-        lda frameCnt            ; the video frame this slice began in: if the IRQ finds a NEWER one,
-        sta zlYF                ;   the band below was missed and the game gets the CPU back at once
-        ldx zlLSP
-        txs
-        lda #$01
-        sta zlIn
-zlPop:  pla
-        tay
-        pla
-        tax
-        pla
-        rti
-
-; zlRun: run the job to COMPLETION, now (the midpoint's black, where nothing is waiting).
-zlRun:  lda zlOn
-        beq zlRDn
-        lda #$01
-        sta zlSync
-        jsr zlGo
-        lda #$00
-        sta zlSync
-zlRDn:  rts
-` : ''}
-
-; vsEnter: A = the level being entered, from the fall. Resident: repoint at it. Not: it lands in slot 0
-; -- whose occupant is kept only if there is an EMPTY slot for it, since the arriving level's list is
-; not known until it is in. Then the arriving level's own list.
-vsEnter:jsr vsRes
-        bcs vsEHit
-        pha
-        lda vsLvT
-        cmp #$ff
-        beq vsELd
-        ldy #${hx(VS_N - 1)}
-vsEE:   lda vsLvT,y
-        cmp #$ff
-        beq vsEOut
-        dey
-        bne vsEE
-        beq vsELd               ; always: no empty slot, slot 0's level is given up
-vsEOut: jsr vsOut               ; vsVic finds that same empty slot first
-vsELd:  pla
-        pha
-        jsr lvlLoad
-        pla
-        sta vsLvT
-        ldy #$00
-vsEHit: sty vsLive
-        lda vsPgT,y
-${BGLOAD ? `        jmp lvlLive             ; BGLOAD: the list is fallMid's background job, not run here` : `        jsr lvlLive
-        jmp vsList`}
-;@@VSTAB@@
-` : ''}
 
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
@@ -21652,14 +21155,10 @@ bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         adc snSrc               ; screens are page-aligned, so no low-byte carry
         sta fdS+1
         lda mul40LoT,x          ; destination: slot x, packed from the base
-${VSLOTS ? `        clc                     ; VSLOTS: the base's low byte too, carrying into the high
-        adc snDstL
         sta fdD
         lda mul40HiT,x
-        adc snDst` : `        sta fdD
-        lda mul40HiT,x
         clc
-        adc snDst`}
+        adc snDst
         sta fdD+1
         ldy rsLo
 bgcB:   lda (fdS),y
@@ -22076,9 +21575,7 @@ fallSnap:
         sta snSrc               ; the screen page to grab
         lda #>fallSnapS
         sta snDst
-${VSLOTS ? `        lda #<fallSnapS
-        sta snDstL
-` : ''}
+
         lda #$00                ; all 40 columns. rsLo/rsHi are the background render's slice
         sta rsLo                ;   window and are rewritten every frame that renders, and the
         lda #39                 ;   first slice comes after this, so borrowing them is free.
@@ -22347,7 +21844,7 @@ wtGo:   sta wallStT,y
         lda wallDLoT,y
         sta hzRd+1
         lda wallDHiT,y
-${VSLOTS ? '        clc                     ; VSLOTS: the level may live in another slot than it was built for\n        adc vsDelta\n' : ''}        sta hzRd+2
+        sta hzRd+2
         jsr hzRunW              ; sets its own X and walks to the $ff
         jsr wtCells             ; every cell of the group: blkT from the new mapT (the delta no
                                 ;   longer carries blkT or the run tables, since neither travels
@@ -22368,7 +21865,7 @@ wtCells:ldy wsWall
         lda wallCLoT,y
         sta wtLd+1
         lda wallCHiT,y
-${VSLOTS ? '        clc                     ; VSLOTS: the level may live in another slot than it was built for\n        adc vsDelta\n' : ''}        sta wtLd+2
+        sta wtLd+2
         ldy #$00
 wtLd:   lda $ffff,y             ; operand patched: the group's $ff-ended cell list
         cmp #$ff
@@ -22395,7 +21892,7 @@ wtDoom: ldy wsWall
         sta wdF+1
         sta wdLd+1
         lda wallCHiT,y
-${VSLOTS ? '        clc                     ; VSLOTS: the level may live in another slot than it was built for\n        adc vsDelta\n' : ''}        sta wdF+2
+        sta wdF+2
         sta wdLd+2
         ldy #$00
 wdF:    lda $ffff,y             ; operand patched: the first cell -- a group always has one
@@ -22428,7 +21925,7 @@ hzWL:   jsr hzGet
         beq hzWRt
         sta hzW+1
         jsr hzGet
-${VSLOTS ? '        clc                     ; VSLOTS: the level may live in another slot than it was built for\n        adc vsDelta\n' : ''}        sta hzW+2
+        sta hzW+2
         jsr hzGet
         sta hzWv                ; the value that takes the wall out...
         jsr hzGet               ; ...and the one that puts it back, now in A
@@ -24431,7 +23928,7 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 ; The live level's own start pose. A LVL_TABLES entry, so lvlSwap exchanges it with the shadow's
 ; like any other per-level table -- which is the whole point: no level id, no PAL_N.
 ${LD('lvlStartT', startBytes(LVL).map(hx).join(','), ': !byte ')}
-${VSLOTS ? LD('lvlWantT', wantOf(LVL).map(hx).join(','), ': !byte ') : ''}
+
 ${process.env.FTCAP ? `; ---- ftCap: the real bytes of one drop frame ----
 ; DROPHOLD cannot answer this: the drop's fill is incremental, so parking a frame drives it into
 ; a state the moving fall never reaches -- a held frame reads as garbage in the PLAIN build too.
@@ -25287,8 +24784,7 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 // its address): it is ~100 one-byte variables, nothing indexes it by a whole byte, and the page
 // rounding is exactly what four slots could not afford. runPlaneT/runFaceT likewise: indexed by run id
 // (< NRUN), never by a whole byte, so a page boundary is at most a cycle, never a wrong read.
-// remLoT too: by logical column (< NLOG), exactly as remHiT already is, unaligned. VSLOTS-only so the default layout stays put.
-const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 256])), ocos: 1, runPlaneT: 1, remLoT: 1 } : {}), ...(BGLOAD ? { stackLT: 256 } : {}), mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
+const ALIGNED_T = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
     rayOffT: 256, hPgT: 256, ecMT: 256, ecM16: 256, ecM8: 256,   // 256 = START ON A PAGE (see the guard)
@@ -25330,7 +24826,7 @@ const ALIGNED_T = { ...(VSLOTS ? { ...Object.fromEntries(VS_ARENA.map(n => [n, 2
     // it says of the SOURCE ("screens are page-aligned, so no low-byte carry"). The destination
     // had the same requirement and never stated it. Both were page-aligned by luck at $5000 and
     // $5300; at any other offset every row of both snapshots lands skewed by the low byte.
-    ...(VSLOTS ? {} : { fallSnapD: 256 }), fallSnapS: 256 };
+    ...({ fallSnapD: 256 }), fallSnapS: 256 };
 writeFileSync('./iray.aligned.json', JSON.stringify(ALIGNED_T));
 // HOT LOOPS: a taken branch whose target is on another page costs a cycle, and a loop that
 // straddles a page boundary pays it on EVERY iteration -- castRay's DDA loop did, for 89 cy/frame,
@@ -25342,35 +24838,6 @@ writeFileSync('./iray.bufsizes.json', JSON.stringify(Object.fromEntries(
     .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
     .filter(([n]) => RUNTIME_BUFS[n] !== undefined).map(([n]) => [n, RUNTIME_BUFS[n]]))));
 
-// ---- VSLOTS: label every engine site that names a per-level table ----
-// An instruction whose operand names a slot table gets a label of its own, and vsLoT/vsHiT list
-// the address of its operand's HIGH byte (+2 for absolute, +1 for an immediate #>). Labels, not
-// addresses, so the relayout can move the code and the assembler still resolves them. A #< operand
-// is left alone: slots are page-aligned, so the low byte is the same in every slot. Comparing a
-// SLOTDUMP pair (two builds a page apart) checks that this list is exactly the bytes a page move changes.
-if (VSLOTS) {
-  asm = asm.replace(/^([a-zA-Z][a-zA-Z0-9_]*)(\s*=\s*)\$([0-9a-fA-F]{4})\b/gm, (m, n, eq, h) => {
-    const a = parseInt(h, 16);
-    return a >= VS_MOVE.from && a <= VS_MOVE.to ? `${n}${eq}$${(a - VS_MOVE.from + VS_MOVE.at).toString(16)}` : m;
-  });
-  const names = new Set(Object.keys(SLOT_OFF));
-  const MNE = /^(\s*(?:[A-Za-z_][A-Za-z0-9_]*:\s*)?)(lda|ldx|ldy|sta|stx|sty|adc|sbc|cmp|cpx|cpy|and|ora|eor|bit|inc|dec|asl|lsr|rol|ror|jmp|jsr)\s+([^;]+?)\s*(;.*)?$/i;
-  const sites = [];
-  asm = asm.split('\n').map(line => {
-    const m = MNE.exec(line); if (!m) return line;
-    const op = m[3];
-    if (![...op.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].some(x => names.has(x[0]))) return line;
-    let off;
-    if (op.startsWith('#')) { if (!op.startsWith('#>')) return line; off = 1; } else off = 2;
-    const lab = `vs${sites.length}`;
-    sites.push(`${lab}+${off}`);
-    return `${lab}:\n${line}`;
-  }).join('\n');
-  if (sites.length > 256) throw new Error(`VSLOTS: ${sites.length} sites; lvlLive indexes them with one byte`);
-  asm = asm.replace('@@VSN@@', hx(sites.length - 1)).replace(';@@VSTAB@@',
-    `vsLoT:  !byte ${sites.map(x => '<' + x).join(',')}\nvsHiT:  !byte ${sites.map(x => '>' + x).join(',')}`);
-  console.error(`  VSLOTS: ${sites.length} engine sites name a per-level table; lvlLive patches their high bytes`);
-}
 const asmPath = DIAG.length ? './iray.diag.asm' : './iray.asm';
 writeFileSync(asmPath, asm);
 // ---- COMPACT: relayout into code / arena / tables before assembling ----
@@ -25610,15 +25077,7 @@ try {
     // Built HERE, at the end, and not where the manifest is first assembled: the hazard tables are
     // pushed onto LVL_TABLES after that point, and a shadow built early was 435 bytes short of
     // them -- lvlSwap would have exchanged the hazard lists with whatever followed the file.
-    // ---- ILAT: the LATE levels, as one file at the same address the shadows live at ----
-    // Three blocks in slot order plus level 5's wall lists above them -- everything that has to
-    // travel, in one contiguous run, so the hub's load is ONE seek. It lands on the slots levels
-    // 1-3 vacate: their blocks and their wall lists are exactly what this replaces, which is the
-    // whole design. Built with the same resolver and the same manifest as ILVL, because the
-    // layout has to be byte-for-byte the shape lvlSwap exchanges.
-    ...([]),
-    ...([]),
-    // ---- ILVn: THE LEVEL ITSELF, as its own file (SOLO=1) ----
+    // ---- ILVn: THE LEVEL ITSELF, as its own file ----
     // Not a shadow and not a spare copy: this IS the level the engine plays. The image carries
     // none of it -- every table it names is an equate into this file's landing ground -- so the
     // engine cannot run until this has loaded, which is exactly the property the split is for.

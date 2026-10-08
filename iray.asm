@@ -6632,8 +6632,8 @@ fcNo:   rts
 
 ; ---- fallMid: EVERY piece of level work, in one black moment between the two arcs ----
 ; Called at the handover, when the top arc has left the screen and the bottom one has not appeared:
-; the display is pure hole, so blanking it is invisible. Then the level change (and with VSLOTS the
-; arriving level's whole load list), and the destination rendered in FULL -- bgStep driven to
+; the display is pure hole, so blanking it is invisible. Then the level change, and the
+; destination rendered in FULL -- bgStep driven to
 ; completion rather than a slice a frame. DEN stays off until the landing's first flip publishes
 ; pd11. fmTk = the ticks it all took, so the pause can be measured rather than guessed.
 fallMid:lda $d011

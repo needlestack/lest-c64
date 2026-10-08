@@ -10,8 +10,6 @@ typeset -A CFG
 # latest: THE GAME, the default build -- all seven levels, loaded on demand; iray.asm records it.
 # dev: levels 1-4 (the default until 2026-10-06, and what most benchmark baselines were taken on).
 # leveltest: levels 4-7.
-# The 4-7 RESIDENT builds (VSLOTS, with or without BGLOAD) do not fit since the edge chain became
-# the default -- parked by the user; add them back here once they assemble.
 CFG=(latest "" dev "CHAIN=1,2,3,4" leveltest "CHAIN=4,5,6,7")
 for k in latest dev leveltest; do
   out=$(env ${=CFG[$k]} D64=zz-$k.d64 node build-iray.mjs 2>&1 | grep -E "^ok:|ASM ERROR|Error" | head -2)
