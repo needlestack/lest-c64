@@ -12,7 +12,7 @@ at full resolution.
 
 > Can an unmodified C64 run a first-person-shooter style game full screen at a
 > good frame rate? Bitmap mode won't work. What if we used character mode, with
-> every possible combination of 4x2 chunky pixels represnted? Could that render
+> every possible combination of 4x2 chunky pixels represented? Could that render
 > 3D at 30 fps?
 
 That was the whole question, and the project was called *c64fps* while it was
@@ -37,9 +37,14 @@ Directions get you Forward/Backward and Turn Left/Right.
 
 Button Picks up / Puts down objects.
 
-You can also ESDF to to forward/backward and strafe left/right.
+You can also use ESDF to go forward/backward and strafe left/right.
 
 You can also hold shift to run.
+
+After you're caught, press RETURN to start again.
+
+The loader talks to a real 1541. In VICE, keep **True Drive Emulation** on (the
+default).
 
 ## Building
 
