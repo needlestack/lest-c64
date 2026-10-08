@@ -39,6 +39,7 @@ import { assemble } from './asm6502.mjs';
 const DIAGEARLY = [];
 import { fitOrb, fitArt, fatBits } from './fit-orb.mjs';
 import { LOADER_RUN, KSTAGE, KRILL_RT_LEN, KRILL_RT_AT, KRILL_RESIDENT_AT } from './loader-src.mjs';
+import { END_DST, IEND_NAME, IEND_RUN, buildEnding } from './ending-src.mjs';
 
 const DIETEST = process.env.DIETEST === '1';
 if (DIETEST) {                       // defaults only: each is still overridable on its own
@@ -5700,8 +5701,16 @@ const HUB_WIRED = [5, 6, 7].every(n => ALLLVL.includes(n));
 // makes the hub's load list matter both ways (level 1's list then evicts 5-7 again). Only when
 // level 1 is on the disk: chain 4-7 has no level 1, and an exit to a level that is not there is
 // what the destination assertion exists to refuse.
-const BLACK_DST = ALLLVL.includes(1) ? 1 : 0xff;
-const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4] };
+// THE END (2026-10-08, the user: "after you drop through the last hole -- for now, dropping into the
+// black hole on the hub"): the black hole now leads to END_DST, which is not a level -- lvlLoad hands
+// the machine to the ending (IEND, then ITRE; see ending-src.mjs). Built whenever its two data files
+// exist and the build loads levels from disk; NOENDING=1 puts the black hole back to level 1.
+// ENDTEST=1 sends level 1's exit there instead, so FALLNOW can reach the ending in seconds.
+const ENDING = LVLLOAD && !VSLOTS && !process.env.NOENDING
+  && existsSync('./quote-end.json') && existsSync('./end-scene.json');
+const BLACK_DST = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
+const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4],
+                        ...(ENDING && process.env.ENDTEST ? { 1: [END_DST] } : {}) };
 // FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
 // hlv, and hlv is reset to 0 after every drop (see fallDone), so a headless run can only ever
 // take exit 0: on the hub that is 4->5->4->5 for ever and levels 6 and 7 are never entered.
@@ -6020,6 +6029,7 @@ const CHAIN_GLOBAL = {
       // Past this level's own exit count the entry is padding and never read; $ff anyway.
       if (i >= (L.nExit ?? 1)) return 0xff;
       if (v === undefined || v === null) return nextLevel(L.level);
+      if (v === END_DST) return v;  // the end of the game, not a level
       // A destination that is not resident is $ff -- but ONLY when this is a ONE-LEVEL
       // playtest build (CHAIN=4 on its own). In a real chain a name that is not in it is a
       // typo, and the assertion below is what catches it; silently turning that into scenery
@@ -9123,6 +9133,7 @@ const LVL_TABLES = [
     if (!LVLLOAD) return 0xff;
     const v = LEVEL_EXITDST[LVL]?.[i];
     if (v === undefined || v === null) return nextLevel(LVL);
+    if (v === END_DST) return v;    // the end of the game, not a level: never resident, never $ff
       // A destination that is not resident is $ff -- but ONLY when this is a ONE-LEVEL
       // playtest build (CHAIN=4 on its own). In a real chain a name that is not in it is a
       // typo, and the assertion below is what catches it; silently turning that into scenery
@@ -9168,7 +9179,7 @@ if (PED_WALL !== 0xff && HAS_IDOL && CHAIN.includes(PED_LVL)) {
 for (const L of [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...LVLSIZED]) {
   // EVERY exit, not just the first: the hub's four each name their own destination.
   for (const [i, nxt] of (L.tables.lvlNxtT ?? []).entries())
-    if (nxt !== undefined && nxt !== 0xff && !CHAIN.includes(nxt) && true)
+    if (nxt !== undefined && nxt !== 0xff && !(ENDING && nxt === END_DST) && !CHAIN.includes(nxt))
       throw new Error(`level ${L.level}'s exit ${i} names level ${nxt}, which is neither in the ` +
         `chain ${CHAIN.join(',')} nor declared LATE (none)`);
   // Wall ids are LOCAL, so "belongs to another level" is no longer expressible -- the check that
@@ -16353,8 +16364,9 @@ fdZLp:  sta omEn,x
 fdSpr:
 ${FALLMID ? `        ldx hlv                 ; FALLMID: the destination's NUMBER is all the hole needs. The level
         lda lvlNxtT,x           ;   change, the loads and the render all wait for fallMid; the colour
-        cmp #$ff                ;   seen THROUGH the hole is an engine palette entry, so it can be
-        beq fmHole              ;   the arriving level's already, as it always was
+        cmp #$fe                ;   seen THROUGH the hole is an engine palette entry, so it can be
+        bcs fmHole              ;   the arriving level's already, as it always was. $fe is THE END
+                                ;   and $ff no exit: neither is a level, so neither has a palette
 ${CEILVARY ? `        tax
         dex
         lda lvlPalceilT,x
@@ -20074,8 +20086,11 @@ klParked: !byte 0
 ; bytes is about 0.15s, spent inside an animation that is already playing.
 lvlLoad:
 ${VSLOTS ? `        inc vsLoads             ; VSLOTS: disk loads since boot, so a resident fall can be SEEN not to load
+` : ''}${ENDING ? `        cmp #${hx(END_DST)}                ; THE END is not a level: endGo loads the ending instead
+        beq endGo
 ` : ''}        ora #$30                ; the file is ILV<n>: the level number IS its last character,
         sta nILV+3              ;   so choosing a level is one byte of self-modification
+llName:
 ${BGLOAD ? `        ; BGLOAD: the resident lives at $0400 for good, so nothing is copied down; and this may
         ; run in the LOADER context, between game frames, so it touches neither $d011 (the game
         ; owns the display -- the midpoint blanks it itself) nor $99/$9a/$ba: the resident never
@@ -20122,6 +20137,23 @@ ${process.env.LLDEN ? '' : `        and #$ef
 `}nILV:   !byte ${[...'ILV1'].map(c => hx(c.charCodeAt(0))).join(',')},0
 llZP:   !fill 2, 0              ; DFLTN, DFLTO
 llErr:  !byte 0
+${ENDING ? `
+; ---- endGo: THE END. The player fell through the last hole; the game stops here for good ----
+; Called in the drop's black middle, display off. The ending is loaded exactly as a level is -- the
+; same live resident, the same name buffer renamed ${IEND_NAME} -- and jumped into; it takes the machine
+; (interrupts, sprites, sound) and never comes back. Its own REBOOT reloads the game for the next go.
+endGo:  sei
+${[...IEND_NAME.slice(1)].map((c, i) => `        lda #${hx(c.charCodeAt(0))}                ; '${c}'
+        sta nILV+${i + 1}`).join('\n')}
+        jsr llName
+        bcs egFail
+        jmp ${hx16(IEND_RUN)}             ; IEND's qStart
+egFail: lda #$02                ; RED border, display on: the ending did not load
+        sta $d020
+        lda #$1b
+        sta $d011
+egF:    jmp egF
+` : ''}
 ${VSLOTS ? `
 ; ---- VSLOTS: which level is in which slot, and pointing the engine at the live one ----
 ; Slot 0 is the bank-3 slot the disk loader fills; slot 1 is a page-aligned buffer in the arena.
@@ -25911,6 +25943,22 @@ try {
   }
   const ldFiles = DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
                                   runtime: f.runtime, length: f.length ?? f.data.length }));
+  // ---- THE ENDING: IEND and ITRE, loaded by the game itself when the last hole is fallen through ----
+  const END = ENDING ? buildEnding({
+    scene: JSON.parse(readFileSync('./end-scene.json', 'utf8')),
+    quote: JSON.parse(readFileSync('./quote-end.json', 'utf8')),
+    files: DISK.map(f => ({ tag: f.tag, name: f.name, at: f.at, length: f.length ?? f.data.length,
+                            first: f.first, runtime: f.runtime })),
+    entry: r.labels.entry, krill: KRILL_RESIDENT_AT, autoF: +(process.env.ENDAUTO ?? 0) }) : null;
+  if (END) {
+    // IEND lands while the game is still running endGo, which called lvlLoad to load it: neither may
+    // be under it. (Krill's resident is checked by ending-src.mjs: nothing there goes below $0800.)
+    for (const l of ['endGo', 'lvlLoad', 'llName', 'nILV'])
+      if (r.labels[l] >= END.iend.at && r.labels[l] < END.iend.end) throw new Error(
+        `IEND (${hx16(END.iend.at)}-${hx16(END.iend.end)}) would land on the game's ${l} at ${hx16(r.labels[l])} while it loads`);
+    console.error(`  ending: IEND ${END.iend.prg.length - 2} B at ${hx16(END.iend.at)}, ITRE ${END.itre.prg.length - 2} B at ` +
+      `${hx16(END.itre.at)} (code to ${hx16(END.itre.codeEnd)}), dissolve ${END.steps} pixels a frame`);
+  }
   // How many 256-byte pages arrive WHILE THE QUOTE IS UP -- the denominator of the sweep. IRAY
   // itself counts (IQOT reads it a byte at a time and ticks per page); IPIC and ILVL do not,
   // because they land after the screen is blanked. Two passes because IRAY's own length is part
@@ -25997,6 +26045,7 @@ try {
     // DOS default of 10 left it waiting out ten revolutions per track: measured ~3.6 KB/s for the
     // boot's 58 KB. See krill/README-krill, "native interleave".
     for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG, KRILL_IL);
+    if (END) for (const e of [END.iend, END.itre]) d.writeFile(e.name, Buffer.from(e.prg), D64.FILE_TYPE_PRG, KRILL_IL);
     return d;
   };
   let d;

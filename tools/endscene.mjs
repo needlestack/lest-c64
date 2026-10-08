@@ -1,9 +1,10 @@
-// endscene.mjs -- the winning scene: the tree picture with the rack LEDs alive. Builds endscene.d64.
+// endscene.mjs -- the winning scene's DATA: the tree picture, which rack LEDs blink and how, and
+// which squares of leaves may turn. Writes end-scene.json, run by hand like make-quote.mjs; the
+// main build (build-iray.mjs, via ending-src.mjs) assembles the player around it as ITRE.
 //
 //   node tools/endscene.mjs [tree.kla] [tree-regions.json] [tree-nobrown.json] [--noleaves]
 //
-// A multicolour bitmap (the Koala file, shown as converted) plus a small player that runs once per
-// frame (60 Hz NTSC, synced to the raster), with interrupts off.
+// The player (ending-src.mjs) runs once per frame, synced to the raster, with interrupts off.
 //
 // LIGHTS. About a dozen small red, yellow and green dots in the racks (1-3 pixels, at least ~10 apart
 // so each reads as its own light) -- chosen with a seeded shuffle, so a rebuild picks the same ones --
@@ -17,19 +18,14 @@
 //
 // LEAVES TURN (--noleaves to stop them): small squares of leaf pixels, 2x2 or 3x3, rotate 90 degrees
 // and STAY, only inside a GUST that drifts across the canopy, with calm between gusts. See LEAVES and
-// the gust notes. --every=n: at most one turn every n frames inside a gust (default 2).
-// Memory: $0801 BASIC stub, $0810 code, $0c00 light tables, $2000 bitmap, $3f40 screen and $4328
-// colour RAM data (copied to $0400/$d800 at start), $5000 leaf-site fields (five 1K tables), $6800 rings.
+// the gust notes in ending-src.mjs.
+// ADDRESSES ARE BITMAP OFFSETS (0..7999), not addresses: where the bitmap lives is the player's
+// business, and it keeps the picture twice (see ending-src.mjs).
 import { readFileSync, writeFileSync } from 'fs';
-import { assemble } from '../asm6502.mjs';
-await import('../d64lib.js');
-const D64 = globalThis.D64;
 
 const argv = process.argv.slice(2), LEAVES = !argv.includes('--noleaves');
 const [KLA = 'tree.kla', REGF = 'tree-regions.json', NBF = 'tree-nobrown.json'] = argv.filter(a => !a.startsWith('--'));
-const NSITES = 1024, NSLOT = 24;
-const EVERY = +((argv.find(a => a.startsWith('--every=')) ?? '--every=2').split('=')[1]);   // ...on every n-th frame (a power of 2)
-if (EVERY & (EVERY - 1)) throw new Error('--every must be a power of 2');
+const NSITES = 1024;
 const k = readFileSync(KLA);
 if (k.length !== 10003 || (k[0] | k[1] << 8) !== 0x6000) throw new Error(`${KLA} is not a Koala file`);
 const bm = k.subarray(2, 8002), scr = k.subarray(8002, 9002), col = k.subarray(9002, 10002), bg = k[10002];
@@ -99,7 +95,7 @@ const lights = [...chosen, ...extra].map((c, i) => {
   for (const d of dots) for (const [x, y] of d.px) { const o = byteOf(x, y); bytes.set(o, (bytes.get(o) ?? 0) | (3 << shiftOf(x))); }
   const kind = i < NSTEADY || i === NSTEADY + NACT ? 'steady' : 'activity';   // the first extra is steady
   return { kind, colour: DOT[c.c], pair: dots.length > 1, at: [Math.round(c.cx), Math.round(c.cy)],
-           bytes: [...bytes].map(([o, mask]) => ({ addr: 0x2000 + o, on: bm[o], off: bm[o] & ~mask & 255 })) };
+           bytes: [...bytes].map(([o, mask]) => ({ o, on: bm[o], off: bm[o] & ~mask & 255 })) };
 });
 // STEADY periods (frames on, frames off): each light its own, about 0.5-2 s, some lopsided; and a
 // starting point anywhere in its cycle
@@ -140,7 +136,7 @@ if (LEAVES) {
       for (let r = 0; r < n && ok; r++) for (let c = 0; c < n; c++) {
         if (!leafPx(X + c, Y + r)) { ok = false; break; } codes.add(codeAt(X + c, Y + r)); }
       if (!ok || codes.size < 2) continue;                       // nothing to turn
-      cand.push({ addr: 0x2000 + byteOf(X, Y), n, cx, cy, ring: RING[n].map(([r, c]) => r * 4 + x0 + c) });   // row*4 + pixel
+      cand.push({ o: byteOf(X, Y), n, cx, cy, ring: RING[n].map(([r, c]) => r * 4 + x0 + c) });   // row*4 + pixel
     }
   shuffle(cand);
   for (const c of cand) { if (sites.length >= NSITES) break; sites.push(c); }
@@ -148,451 +144,12 @@ if (LEAVES) {
   while (sites.length < NSITES) sites.push(sites[sites.length % (sites.length || 1)]);   // fill the table (power of 2)
   console.log(`leaves: ${cand.length} possible turning squares, ${NSITES} sampled`);
 }
-// tables: alo/ahi/len, one page-aligned 1K table each, indexed by a 10-bit site number; and the
-// rings, 8 bytes per site (row*4 + pixel), at RINGBASE + site*8
-// sx/sy: the site's character cell (column + 16, so a gust can start off-screen without going
-// negative; row), for the gust test
-const FIELDS = ['alo', 'ahi', 'len', 'sx', 'sy'];
-const fieldOf = (f, st) => f === 'alo' ? st.addr & 255 : f === 'ahi' ? st.addr >> 8 : f === 'len' ? st.ring.length
-  : f === 'sx' ? st.cx + 16 : st.cy;
-const SITEBASE = 0x5000, RINGBASE = 0x6800;
-
-const B = a => a.map(v => '$' + (v & 255).toString(16).padStart(2, '0')).join(',');
-const rows = (a, n = 32) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(`        !byte ${B(a.slice(i, i + n))}`); return o.join('\n'); };
-let first = 0; const lfirst = lights.map(l => { const f = first; first += l.bytes.length; return f; });
-
-// load field f of the current site (idxlo/idxhi) into A; clobbers Y and ptr
-const fld = f => `        lda idxlo
-        sta ptr
-        lda idxhi
-        clc
-        adc #>${'$' + (SITEBASE + FIELDS.indexOf(f) * 0x400).toString(16)}
-        sta ptr+1
-        ldy #$00
-        lda (ptr),y`;
-// THE WIND IS A GUST THAT TRAVELS. The user: too much movement (half as much, at half the pace),
-// and "I like your wind spatial idea". A gust is a window GUSTW x GUSTH cells that drifts across the
-// canopy from one side to the other (random side, height and speed: 3-7 s to cross); leaves turn
-// only inside it, at most one turn every EVERY-th frame, so neighbouring leaves stir together and
-// then settle. Between gusts, 2-4 s of CALM with only the odd lone turn anywhere (one in 32 frames).
-// A turn picks a random site and keeps it only if it lies inside the gust -- up to 6 tries a frame.
-const GUSTW = 4, GUSTH = 3;      // half-width (cells) and half-height (rows) of the gust window
-const leafCode = `
-        inc fcount
-        lda gact
-        bne gmove
-        lda fcount          ; ---- CALM: the odd lone turn, anywhere ----
-        and #$1f
-        bne gc1
-        jsr pick
-        jsr turn
-gc1:    dec gcalm
-        beq gnew
-        jmp sdone
-gnew:   jsr rnd             ; ---- a new GUST: which way, how high, how fast ----
-        and #$01
-        sta gdir
-        jsr rnd
-        and #$0b
-        clc
-        adc #$02            ; rows 2..13: the canopy
-        sta gy
-        jsr rnd
-        and #$1f
-        clc
-        adc #$18            ; $18..$37/256 of a cell a frame: 3-7 s across
-        sta gspd
-        lda gdir
-        beq gnl
-        lda #$0a            ; rightward: start off the left edge (column -6, stored +16)
-        jmp gns
-gnl:    lda #$3e            ; leftward: off the right edge (column 46)
-gns:    sta gxhi
-        lda #$00
-        sta gxlo
-        lda #$01
-        sta gact
-        jmp sdone
-gmove:  lda gdir            ; ---- the gust drifts ----
-        beq gml
-        lda gxlo
-        clc
-        adc gspd
-        sta gxlo
-        bcc gm2
-        inc gxhi
-        jmp gm2
-gml:    lda gxlo
-        sec
-        sbc gspd
-        sta gxlo
-        bcs gm2
-        dec gxhi
-gm2:    lda gxhi
-        cmp #$0a
-        bcc gend
-        cmp #$3f
-        bcs gend
-        lda fcount
-        and #${EVERY - 1}
-        bne sdone
-        lda #$06            ; up to 6 tries for a site inside the gust
-        sta cnt2
-gtry:   jsr pick
-${fld('sx')}
-        sec
-        sbc gxhi
-        bpl gax
-        eor #$ff
-        clc
-        adc #$01
-gax:    cmp #${GUSTW + 1}
-        bcs gno
-${fld('sy')}
-        sec
-        sbc gy
-        bpl gay
-        eor #$ff
-        clc
-        adc #$01
-gay:    cmp #${GUSTH + 1}
-        bcs gno
-        jsr turn
-        jmp sdone
-gno:    dec cnt2
-        bne gtry
-        jmp sdone
-gend:   lda #$00            ; the gust has gone: CALM for 2-4 s
-        sta gact
-        jsr rnd
-        lsr
-        clc
-        adc #$78
-        sta gcalm
-sdone:`;
-// a random site (10 bits) into idxlo/idxhi
-const pickCode = `
-pick:   jsr rnd
-        sta idxlo
-        lda seedhi
-        and #$03
-        sta idxhi
-        rts`;
-// turn the site in idxlo/idxhi: read its ring's pixels, write them back moved round the ring
-const turnCode = `
-turn:
-${process.env.TURNCOUNT ? '        inc $20\n        bne tcnt\n        inc $21\ntcnt:' : ''}
-${fld('alo')}
-        sta tgt
-${fld('ahi')}
-        sta tgt+1
-${fld('len')}
-        sta tlen
-        lda idxlo           ; rptr = RINGBASE + site*8
-        asl
-        asl
-        asl
-        sta rptr
-        lda idxlo
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        sta tmp
-        lda idxhi
-        asl
-        asl
-        asl
-        ora tmp
-        clc
-        adc #>${'$' + RINGBASE.toString(16)}
-        sta rptr+1
-        ldx #$00            ; READ: tbuf[i] = the pixel at ring position i
-trd:    txa
-        tay
-        lda (rptr),y
-        sta trp
-        lsr
-        lsr
-        tay                 ; its row
-        lda (tgt),y
-        sta tv
-        lda trp
-        and #$03
-        tay                 ; its pixel: shift right 2*(3-pixel)
-        lda tv
-tsh:    cpy #$03
-        beq tshd
-        lsr
-        lsr
-        iny
-        jmp tsh
-tshd:   and #$03
-        sta tbuf,x
-        inx
-        cpx tlen
-        bne trd
-        jsr rnd             ; how far round: 1 or 3 places in a ring of 4, 2 or 6 in a ring of 8
-        and #$01
-        tay
-        lda tlen
-        cmp #$08
-        beq t8
-        lda m4,y
-        jmp tm0
-t8:     lda m8,y
-tm0:    sta tm
-        ldx #$00            ; WRITE: position j gets tbuf[(j + m) mod len]
-twr:    txa
-        clc
-        adc tm
-        cmp tlen
-        bcc twr1
-        sec
-        sbc tlen
-twr1:   tay
-        lda tbuf,y
-        sta tv
-        txa
-        tay
-        lda (rptr),y
-        sta trp
-        and #$03
-        tay                 ; shift left 2*(3-pixel)
-        lda tv
-tsl:    cpy #$03
-        beq tsld
-        asl
-        asl
-        iny
-        jmp tsl
-tsld:   sta tv
-        lda trp
-        and #$03
-        tay
-        lda clrm,y
-        sta tm2
-        lda trp
-        lsr
-        lsr
-        tay
-        lda (tgt),y
-        and tm2
-        ora tv
-        sta (tgt),y
-        inx
-        cpx tlen
-        bne twr
-        rts
-m4:     !byte 1,3
-m8:     !byte 2,6
-clrm:   !byte $3f,$cf,$f3,$fc
-tbuf:   !fill 8,0`;
-
-const src = `
-        * = $0801
-        !byte $0b,$08,$0a,$00,$9e,$32,$30,$36,$34,$00,$00,$00    ; 10 SYS2064
-seedlo  = $fb
-seedhi  = $fc
-ptr     = $fd               ; and $fe
-tgt     = $f9               ; and $fa
-windt   = $f7
-cnt     = $f6
-cnt2    = $f5
-idxlo   = $f4
-idxhi   = $f3
-tcell   = $f2
-tlen    = $10
-trp     = $11
-tv      = $12
-tm      = $13
-tm2     = $14
-tmp     = $15
-rptr    = $16               ; and $17
-fcount  = $18
-gact    = $19
-gdir    = $1a
-gy      = $1b
-gspd    = $1c
-gxlo    = $1d
-gxhi    = $1e
-gcalm   = $1f
-        * = $0810
-        sei
-        lda #$00
-        sta $d020
-        lda #${bg}
-        sta $d021
-        ldx #$00            ; screen and colour data into place: 4 pages each (the last runs over
-cp:     lda scrdat,x        ;   the 1000 bytes by 24 -- harmless, the data is padded)
-        sta $0400,x
-        lda scrdat+$100,x
-        sta $0500,x
-        lda scrdat+$200,x
-        sta $0600,x
-        lda scrdat+$300,x
-        sta $0700,x
-        lda coldat,x
-        sta $d800,x
-        lda coldat+$100,x
-        sta $d900,x
-        lda coldat+$200,x
-        sta $da00,x
-        lda coldat+$300,x
-        sta $db00,x
-        inx
-        bne cp
-        lda #$3b            ; bitmap mode, screen on
-        sta $d011
-        lda #$18            ; multicolour
-        sta $d016
-        lda #$18            ; screen $0400, bitmap $2000 (VIC bank 0)
-        sta $d018
-        lda $dc04           ; seed the LFSR from a running CIA timer: every run differs
-        ora #$01
-        sta seedlo
-        lda $dc05
-        sta seedhi
-        lda #$00            ; no gust yet: the first comes after a second of calm
-        sta gact
-        lda #$3c
-        sta gcalm
-        ldx #${NL - 1}      ; every light starts ON (as in the picture), each at its own point
-li:     lda #$01            ;   in its cycle
-        sta lstate,x
-        lda lphase,x
-        sta ltimer,x
-        dex
-        bpl li
-
-frame:  lda $d011           ; once per frame: wait for line 250 (the bottom border)
-        bmi frame
-fw:     lda $d012
-        cmp #$fa
-        bne fw
-${LEAVES ? leafCode : ''}
-        ; ---- lights: when a light's time is up it toggles, then picks its next wait ----
-        ldx #${NL - 1}
-lt:     dec ltimer,x
-        bne lt9
-        lda lstate,x
-        eor #$01
-        sta lstate,x
-        stx cnt
-        lda lfirst,x        ; write this light's bytes, on or off
-        tay
-        lda lcount,x
-        sta ptr
-lw:     lda baddrlo,y
-        sta tgt
-        lda baddrhi,y
-        sta tgt+1
-        lda lstate,x
-        beq loff
-        lda bon,y
-        jmp lput
-loff:   lda boff,y
-lput:   sty ptr+1
-        ldy #$00
-        sta (tgt),y
-        ldy ptr+1
-        iny
-        dec ptr
-        bne lw
-        ldx cnt
-        lda lmode,x
-        bne act
-        lda lstate,x        ; STEADY: its own fixed on-time and off-time
-        beq stoff
-        lda lonT,x
-        jmp lset
-stoff:  lda loffT,x
-        jmp lset
-act:    lda lstate,x        ; ACTIVITY: on 1-4 frames...
-        beq actoff
-        jsr rnd
-        and #$03
-        clc
-        adc #$01
-        jmp lset
-actoff: jsr rnd             ; ...off 2-17, but sometimes a pause between bursts
-        cmp lpause,x
-        bcs actsh
-        jsr rnd
-        and #$7f
-        clc
-        adc #$1e
-        jmp lset
-actsh:  jsr rnd
-        and #$0f
-        clc
-        adc #$02
-lset:   sta ltimer,x
-lt9:    dex
-        bpl lt
-        jmp frame
-${LEAVES ? turnCode + pickCode : ''}
-
-        ; 16-bit Galois LFSR (taps $b400); returns the low byte in A
-rnd:    lsr seedhi
-        ror seedlo
-        bcc rnd1
-        lda seedhi
-        eor #$b4
-        sta seedhi
-rnd1:   lda seedlo
-        rts
-
-stimer: !fill ${NSLOT},0
-sidxlo: !fill ${NSLOT},0
-sidxhi: !fill ${NSLOT},0
-scell:  !fill ${NSLOT},0
-scellh: !fill ${NSLOT},0
-ltimer: !fill ${NL},0
-lstate: !fill ${NL},0
-
-        * = $0c00
-lfirst:
-${rows(lfirst)}
-lcount:
-${rows(lights.map(l => l.bytes.length))}
-lmode:
-${rows(lights.map(l => l.kind === 'steady' ? 0 : 1))}
-lonT:
-${rows(lights.map(l => l.onT))}
-loffT:
-${rows(lights.map(l => l.offT))}
-lpause:
-${rows(lights.map(l => l.pause ?? 0))}
-lphase:
-${rows(lights.map(l => l.phase))}
-baddrlo:
-${rows(flat.map(b => b.addr & 255))}
-baddrhi:
-${rows(flat.map(b => b.addr >> 8))}
-bon:
-${rows(flat.map(b => b.on))}
-boff:
-${rows(flat.map(b => b.off))}
-
-
-        * = $2000
-${rows([...bm])}
-scrdat:
-${rows([...scr, ...Array(24).fill(0)])}
-coldat:
-${rows([...col, ...Array(24).fill(0)])}
-${LEAVES ? FIELDS.map((f, k) => `        * = $${(SITEBASE + k * 0x400).toString(16)}\nsite_${f}:\n${rows(sites.map(st => fieldOf(f, st)))}`).join('\n') +
-  `\n        * = $${RINGBASE.toString(16)}\nrings:\n${rows(sites.flatMap(st => [...st.ring, ...Array(8 - st.ring.length).fill(0)]))}` : ''}
-`;
-const out = assemble(src);
-const L = out.labels;
-if (process.env.ENDLABELS) writeFileSync(process.env.ENDLABELS, JSON.stringify({ ...L, lightBytes: flat.map(b => b.addr) }));
-if (L.stimer + 5 * NSLOT + 2 * NL > 0x0c00) throw new Error('the player ran into its light tables at $0c00');
-if (LEAVES && L.coldat + 1024 > SITEBASE) throw new Error('the colour data runs into the leaf tables');
-if (L.scrdat !== 0x3f40) throw new Error('bitmap is not 8000 bytes');
-const d = D64.createEmpty('THE TREE', '01');
-d.writeFile('END', Buffer.from(out.prg), D64.FILE_TYPE_PRG);
-writeFileSync('endscene.d64', Buffer.from(d.getData()));
-console.log(`endscene.d64: END ${out.prg.length - 2} bytes, $0801-$${(0x0801 + out.prg.length - 3).toString(16)}${LEAVES ? ' (with turning leaves)' : ''}`);
+writeFileSync('end-scene.json', JSON.stringify({
+  note: 'The end scene: tree.kla plus its live parts -- see tools/endscene.mjs. bm/scr/col are the Koala ' +
+        'bitmap, screen and colour RAM; light byte offsets (o) and leaf site offsets are into the bitmap.',
+  bg, bm: [...bm], scr: [...scr], col: [...col],
+  lights: lights.map(l => ({ kind: l.kind, colour: l.colour, pair: l.pair, at: l.at, onT: l.onT, offT: l.offT,
+    pause: l.pause ?? 0, phase: l.phase, bytes: l.bytes })),
+  sites: sites.map(st => ({ o: st.o, cx: st.cx, cy: st.cy, ring: st.ring })),
+}));
+console.log(`end-scene.json: ${lights.length} lights (${flat.length} bytes), ${sites.length} leaf sites`);

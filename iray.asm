@@ -6596,8 +6596,9 @@ fdZLp:  sta omEn,x
 fdSpr:
         ldx hlv                 ; FALLMID: the destination's NUMBER is all the hole needs. The level
         lda lvlNxtT,x           ;   change, the loads and the render all wait for fallMid; the colour
-        cmp #$ff                ;   seen THROUGH the hole is an engine palette entry, so it can be
-        beq fmHole              ;   the arriving level's already, as it always was
+        cmp #$fe                ;   seen THROUGH the hole is an engine palette entry, so it can be
+        bcs fmHole              ;   the arriving level's already, as it always was. $fe is THE END
+                                ;   and $ff no exit: neither is a level, so neither has a palette
         tax
         dex
         lda lvlPalceilT,x
@@ -10456,6 +10457,7 @@ klParked: !byte 0
 lvlLoad:
         ora #$30                ; the file is ILV<n>: the level number IS its last character,
         sta nILV+3              ;   so choosing a level is one byte of self-modification
+llName:
         lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
         sta llZP
         lda $9a
@@ -10492,6 +10494,7 @@ klUn:   lda krillRt,x
 nILV:   !byte $49,$4c,$56,$31,0
 llZP:   !fill 2, 0              ; DFLTN, DFLTO
 llErr:  !byte 0
+
 
 
 ; [origin folded into the run above by compact.mjs]

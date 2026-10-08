@@ -1,5 +1,9 @@
 // make-quote.mjs -- quote0N.png -> quote-screen.json, run by hand like make-pedestal-art.mjs.
 //
+// THE END QUOTE uses the same conversion with its own charset and no packing (the fast loader
+// brings it in at the end, so the KERNAL-speed reason for packing does not apply):
+//   QUOTE_OUT=quote-end.json QUOTE_PACK=0 QUOTE_GLYPHS=256 node make-quote.mjs art/quote-end.png
+//
 // The boot quote is a 320x200 HI-RES image, but it does NOT ship as a bitmap. A 1-bit image of
 // text at 8x8 granularity repeats enormously -- every blank cell is one glyph, and thresholded
 // strokes recur -- so it goes as a CHARSET plus a 40x25 screen map. quote-start.png at threshold
@@ -32,6 +36,7 @@ const INK = +(process.argv[4] ?? 12);            // grey2
 // does not fit (a larger-type version needed 284, and merged to 220 with 153 edge pixels changed).
 // Run make-title.mjs after this -- its stamps ARE these glyphs.
 const BUDGET = +(process.env.QUOTE_GLYPHS ?? 220);
+const OUT = process.env.QUOTE_OUT ?? './quote-screen.json', PACK = process.env.QUOTE_PACK !== '0';
 
 // ---- PNG in (8-bit, any colour type incl. palette) ----
 const b = readFileSync(SRC); let o = 8, w, h, bd, ct, plte = null, idat = [];
@@ -168,8 +173,8 @@ if (blank > 0) { const t = glyphs[0]; glyphs[0] = glyphs[blank]; glyphs[blank] =
 const blob = [...screen, ...Array(QUOTE_CHR - QUOTE_SCR - screen.length).fill(0), ...glyphs.flat()];
 const exo = process.env.EXOMIZER ?? 'exomizer';
 const tmp = mkdtempSync(`${tmpdir()}/quote-`);
-let packed, decr;
-try {
+let packed = [], decr = null;
+if (PACK) try {
   writeFileSync(`${tmp}/blob.bin`, Buffer.from(blob));
   // `mem`, NOT `raw`. This is the mode exodecrs/acme/exodecrunch.asm is written for -- it embeds
   // the destination in the stream, which is what the decruncher's init_zp reads in its first
@@ -220,7 +225,7 @@ try {
   throw e;
 }
 
-writeFileSync('./quote-screen.json', JSON.stringify({
+writeFileSync(OUT, JSON.stringify({
   note: 'Boot quote: a 320x200 hi-res image as a charset plus a 40x25 map, merged to a glyph BUDGET ' +
         'so the title screen can share the charset -- see make-quote.mjs. glyphs are 8 bytes each, MSB left; screen is 1000 bytes of glyph index; ' +
         'ink is the C64 colour for colour RAM, background is black.',
@@ -229,9 +234,9 @@ writeFileSync('./quote-screen.json', JSON.stringify({
   // packedAt/packedLen are what build-iray.mjs checks against loader-src.mjs's QUOTE_SCR and the
   // blob it expects: the packed bytes are opaque, so a moved address must fail the BUILD rather
   // than decrunch a picture into the wrong place.
-  packedAt: QUOTE_SCR, packedLen: blob.length, packed, decr,
+  ...(PACK ? { packedAt: QUOTE_SCR, packedLen: blob.length, packed, decr } : {}),
   chars: glyphs.flat(), screen,
 }, null, 1));
-console.error(`quote-screen.json: ${SRC} thr ${THR} -> ${glyphs.length} glyphs ` +
+console.error(`${OUT}: ${SRC} thr ${THR} -> ${glyphs.length} glyphs ` +
   `(${glyphs.length*8} B) + ${screen.length} B screen = ${glyphs.length*8 + screen.length} B, ` +
-  `${merged ? `merged from ${fullGlyphs} (${merged} pixels changed, worst cell ${worstCell})` : 'reconstruction exact'}; exomizer ${blob.length} -> ${packed.length} B (${Math.round(100*packed.length/blob.length)}%), decruncher ${decr.bytes.length} B at $${decr.at.toString(16)}`);
+  `${merged ? `merged from ${fullGlyphs} (${merged} pixels changed, worst cell ${worstCell})` : 'reconstruction exact'}; ${PACK ? `exomizer ${blob.length} -> ${packed.length} B (${Math.round(100*packed.length/blob.length)}%), decruncher ${decr.bytes.length} B at $${decr.at.toString(16)}` : 'not packed'}`);
