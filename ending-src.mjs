@@ -3,7 +3,7 @@
 // Two files, because the quote has to be up in about a second and the tree is 25K:
 //
 //   IEND  $c000-$cfff  the end quote (charset + map, from quote-end.json) and the code that shows it,
-//                      loads ITRE behind it, holds it for reading, fades it out -- and, at the very
+//                      loads ITRE behind it, holds it for reading, cuts to black -- and, at the very
 //                      end, REBOOT: reloads the game's files and starts it again at level 1.
 //   ITRE  $0800-$6bff  the tree (from end-scene.json, see tools/endscene.mjs) and its player: the
 //                      picture DISSOLVES in, lights blinking and leaves turning all the while, then
@@ -59,11 +59,11 @@ const petscii = s => [...s].map(c => hx(c.charCodeAt(0))).join(',') + ',0';
 
 // opts: scene (end-scene.json), quote (quote-end.json), files (the boot's file list: tag, name, at,
 // length, first, runtime), entry (the game's entry address), krill (loadraw's address),
-// holdS / fadeF / dissolveS (timings; see below)
+// holdS / dissolveS (timings; see below)
 // autoF (TEST ONLY, ENDAUTO=n in build-iray.mjs): press RETURN by itself n frames after the dissolve
 // ends, so a headless run can reach REBOOT -- with interrupts off the keyboard matrix is read
 // directly, and VICE's monitor can only feed the KERNAL's buffer, which nothing here reads.
-export function buildEnding({ scene, quote, files, entry, krill, holdS = 6, fadeF = 20, dissolveS = 8, autoF = 0 }) {
+export function buildEnding({ scene, quote, files, entry, krill, holdS = 6, dissolveS = 8, autoF = 0 }) {
   if (autoF > 255) throw new Error('autoF counts frames in one byte');
   // ======================================================================================== IEND
   if (quote.glyphs > 256 || quote.chars.length > 0x800) throw new Error(`the end quote has ${quote.glyphs} glyphs; its charset slot holds 256`);
@@ -113,17 +113,12 @@ qStart: sei
         jsr ${hx(krill, 4)}       ; Krill's loadraw: the file's own header says where it goes
         bcs qFail
         ; READING TIME. The load is blocking, so it cannot be counted in frames; the quote is held
-        ; HOLD seconds more after it, then fades grey2 -> dark grey -> black.
+        ; HOLD seconds more after it, then CUT to black and straight into the dissolve. (It faded
+        ; grey2 -> dark grey -> black at first; two steps did not read as a fade, per the user.)
 ${[...Array(Math.ceil(holdS * 60 / 240))].map(() => `        lda #240
         jsr qWait`).join('\n')}
-        lda #$0b
-        jsr qInk
-        lda #${fadeF}
-        jsr qWait
-        lda #$00
-        jsr qInk
-        lda #${fadeF}
-        jsr qWait
+        lda #$0b            ; display off: black, and ITRE turns it back on already in bitmap mode
+        sta $d011
         jmp ${hx(T_RUN, 4)}       ; ITRE
 
 ; A frames, each ended at raster line 250 -- by waiting for the line and then for it to pass, so a
@@ -249,7 +244,7 @@ krel    = $2c               ; RETURN has been seen UP since the scene began
 kauto   = $2d               ; ENDAUTO's countdown
 
         * = ${hx(T_RUN, 4)}
-; ---- IEND jumps here with the quote faded to black ----
+; ---- IEND jumps here with the display already off ----
 tStart: sei
         lda #$0b            ; display off while the screen changes mode under it
         sta $d011
