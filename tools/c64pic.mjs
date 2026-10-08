@@ -303,6 +303,12 @@ const themed = (img, W, H) => {
     const p = [img[i * 3], img[i * 3 + 1], img[i * 3 + 2]]; lum[i] = Y(p);
     if (SCENE && (lab & 16)) { light[i] = 1; continue; }
     if (nbAt(x, y)) { cls[0][i] = 1; continue; }              // a no-brown zone: leaf, whatever else
+    // ...and an OVERLAP pixel (may take either palette) within 2 px of one: the zone's edge had left
+    // a 1-pixel brown line down the side of a painted-out branch (see REMNANTS below)
+    if ((lab & 3) === 3 && NOBROWN) { let nb = 0;
+      for (let dy = -2; dy <= 2 && !nb; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy;
+        if (xx >= 0 && yy >= 0 && xx < W && yy < H && nbAt(xx, yy)) { nb = 1; break; } }
+      if (nb) { cls[0][i] = 1; continue; } }
     if ((lab & 3) === 3) {
       if (OVERLAP === 'leaf') { cls[0][i] = 1; continue; }
       const [, a, b] = oklab(...p), h = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
@@ -311,6 +317,27 @@ const themed = (img, W, H) => {
     }
     if (lab & 1) cls[0][i] = 1; else if (lab & 2) cls[1][i] = 1;
     else if (SCENE && (lab & 4)) cls[2][i] = 1; else if (SCENE && (lab & 8)) cls[3][i] = 1;
+  }
+  // REMNANTS of painted-out branches: a no-brown zone is the user's painting grown a little, but where
+  // a branch ran along its edge the outermost pixel column survived as a 1-pixel brown LINE (the user:
+  // "a brown branch thing on the left that reads as a line of pixels"). Any bark-class piece of the
+  // canopy (above the base) that TOUCHES a zone and is small is the rest of what was painted out: leaf.
+  if (NOBROWN) {
+    const isB = i => cls[1][i] || ovl[i] === 2 || (both[i] && cls[1][i]);
+    const seen = new Uint8Array(n), top = Math.round(0.72 * H), MAXR = Math.round(40 * W / 160);
+    let gone = 0;
+    for (let s0 = 0; s0 < top * W; s0++) {
+      if (seen[s0] || !isB(s0)) continue;
+      const comp = [s0]; seen[s0] = 1; let touch = false;
+      for (let k = 0; k < comp.length; k++) { const i = comp[k], x = i % W, y = (i - x) / W;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+          const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= W || yy >= top) continue;
+          const j = yy * W + xx; if (nbAt(xx, yy)) touch = true;
+          if (!seen[j] && isB(j)) { seen[j] = 1; comp.push(j); } } }
+      if (!touch || comp.length > MAXR) continue;
+      for (const i of comp) { cls[1][i] = 0; cls[0][i] = 1; ovl[i] = ovl[i] ? 1 : 0; gone++; }
+    }
+    if (process.env.DMDBG) console.error(`remnants: ${gone} bark pixels next to no-brown zones made leaf`);
   }
   // --shoots r: inside the canopy, brown is for SHOOTS. Overlap pixels that took the bark class form
   // areas as well as lines -- blobs, and one wide diagonal sweep that was really the warm-lit strip

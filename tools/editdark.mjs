@@ -60,6 +60,43 @@ for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
   target.push(rgbE[0][i] < 0 ? null : [0, 1, 2].map(c => Math.round(rgbE[c][i] * 10000) / 10000));
   idx.push(y >= Math.round(FROM * H) ? idxOf(best.B, best.w, x * 6 + 3 + best.off, y * 3 + 1) : -1);
 }
+// THE FRONT EDGE, cleaned: the user wants the mound's front to end in a clean horizontal cut, white
+// and grey floor straight under it -- their drawing still has orange/brown/green spilling a row or two
+// below the black bottom line. Per column, the line is the lowest black pixel with a black horizontal
+// neighbour (rows from FRONTMIN down: the front, not the rising tails), smoothed by a median over 25
+// columns so it does not step; the line pixel is black and everything under it takes the floor colour
+// found further down the same column.
+const TREECOL = new Set([0, 5, 8, 9, 13]), FRONTMIN = 168, at = (x, y) => idx[y * W + x];
+let cleaned = 0;
+const raw = new Int16Array(W).fill(-1), lineAt = new Int16Array(W).fill(-1);
+for (let x = 1; x < W - 1; x++) for (let y = H - 1; y >= FRONTMIN; y--)
+  if (at(x, y) === 0 && (at(x - 1, y) === 0 || at(x + 1, y) === 0)) { raw[x] = y; break; }
+for (let x = 0; x < W; x++) {
+  const near = []; for (let d = -12; d <= 12; d++) if (raw[x + d] >= 0) near.push(raw[x + d]);
+  if (raw[x] < 0 || near.length < 8) continue;
+  near.sort((a, b) => a - b); const line = near[near.length >> 1]; lineAt[x] = line;
+  if (at(x, line) !== 0) { idx[line * W + x] = 0; cleaned++; }
+  let y = line + 1, fl = -1;
+  for (let yy = line + 1; yy < H; yy++) if (!TREECOL.has(at(x, yy))) { fl = at(x, yy); y = yy; break; }
+  if (fl < 0) continue;
+  for (let yy = line + 1; yy < y; yy++) { idx[yy * W + x] = fl; cleaned++; }
+}
+// A cell on the line holds floor colours below it AND earth colours above; more than the 3 a
+// multicolour cell can show besides the black background, and the converter dropped a FLOOR colour
+// (stray orange left on the floor). So drop an EARTH colour instead: the rarest tree colour above the
+// line goes black -- the darkness the user drew there anyway.
+let dropped = 0;
+for (let cy = 0; cy < H; cy += 8) for (let cx = 0; cx < W; cx += 4) {
+  let hasLine = false; for (let x = cx; x < cx + 4; x++) if (lineAt[x] >= cy && lineAt[x] < cy + 8) hasLine = true;
+  if (!hasLine) continue;
+  for (;;) { const cnt = new Map();
+    for (let y = cy; y < cy + 8; y++) for (let x = cx; x < cx + 4; x++) { const k = at(x, y); if (k > 0) cnt.set(k, (cnt.get(k) ?? 0) + 1); }
+    if (cnt.size <= 3) break;
+    const cands = [...cnt].filter(([k]) => TREECOL.has(k)).sort((a, b) => a[1] - b[1]);
+    if (!cands.length) break;
+    for (let y = cy; y < cy + 8; y++) for (let x = cx; x < cx + 4; x++) if (at(x, y) === cands[0][0]) { idx[y * W + x] = 0; dropped++; } }
+}
+console.log(`front edge: ${cleaned} pixels cleaned below the mound's bottom line, ${dropped} earth pixels blackened to fit the cells`);
 writeFileSync(OUT, JSON.stringify({ W: 320, H: 200, note: `darkening from ${E} vs ${R} (${best.mode}, offset ${best.off}), rows from ${FROM}`,
   map: [...map].map(v => Math.round(v * 1000) / 1000), targetW: W, target, idx }));
 console.log(`${n} multicolour pixels darkened, mean factor ${(sum / Math.max(1, n)).toFixed(2)} -> ${OUT}`);
