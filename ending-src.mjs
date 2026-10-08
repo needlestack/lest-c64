@@ -204,7 +204,9 @@ ${reload.map(f => `n${f.tag}:   !byte ${petscii(f.name)}`).join('\n')}
   // machine takes a fifth longer). Each step is ~90 cycles, so 68 a frame is ~6,000 of ~16,000.
   const STEPS = Math.ceil(32767 / (dissolveS * 60));
   if (STEPS > 120) throw new Error(`${STEPS} dissolve steps a frame will not fit in one; make dissolveS longer`);
-  const EVERY = 2;   // at most one leaf turn every EVERY-th frame inside a gust (a power of 2)
+  // TURNS PER FRAME inside a gust, in 256ths: 171 is 2 every 3 frames. It was one every 2nd frame
+  // (128) until the user asked for "a bit more wind in the leaves -- not a lot, just a little more".
+  const GRATE = 171;
   const GUSTW = 4, GUSTH = 3;   // half-width (cells) and half-height (rows) of the gust window
 
   const tsrc = `
@@ -242,6 +244,7 @@ plo     = $2a
 phi     = $2b
 krel    = $2c               ; RETURN has been seen UP since the scene began
 kauto   = $2d               ; ENDAUTO's countdown
+gacc    = $2e               ; the gust's turn rate, accumulated
 
         * = ${hx(T_RUN, 4)}
         jmp tStart          ; IEND, when the quote has had its time
@@ -333,7 +336,7 @@ fw:     lda $d012
         cmp #$fa
         beq fw
         jsr dslv
-${leafCode(fld, EVERY, GUSTW, GUSTH)}
+${leafCode(fld, GRATE, GUSTW, GUSTH)}
         ; ---- lights: when a light's time is up it toggles, then picks its next wait ----
         ldx #${NL - 1}
 lt:     dec ltimer,x
@@ -580,15 +583,16 @@ ${rows(scene.scr)}
 // THE WIND IS A GUST THAT TRAVELS (the user: "too much movement -- half as much at half the speed",
 // and "I like your wind spatial idea"). A gust is a window GUSTW x GUSTH cells that drifts across the
 // canopy from one side to the other (random side, height and speed: 3-7 s to cross); leaves turn
-// only inside it, at most one turn every EVERY-th frame, so neighbouring leaves stir together and
-// then settle. Between gusts, 2-4 s of CALM with only the odd lone turn anywhere (one in 32 frames).
+// only inside it, at most GRATE/256 turns a frame, so neighbouring leaves stir together and then
+// settle. Between gusts, 1.5-2.5 s of CALM with only the odd lone turn anywhere (one in 16 frames).
+// (Calm was 2-4 s and lone turns one in 32 until the user's "a little more wind".)
 // A turn picks a random site and keeps it only if it lies inside the gust -- up to 6 tries a frame.
-const leafCode = (fld, EVERY, GUSTW, GUSTH) => `
+const leafCode = (fld, GRATE, GUSTW, GUSTH) => `
         inc fcount
         lda gact
         bne gmove
         lda fcount          ; ---- CALM: the odd lone turn, anywhere ----
-        and #$1f
+        and #$0f
         bne gc1
         jsr pick
         jsr turn
@@ -639,9 +643,11 @@ gm2:    lda gxhi
         bcc gend
         cmp #$3f
         bcs gend
-        lda fcount
-        and #${EVERY - 1}
-        bne sdone
+        lda gacc            ; GRATE/256 of a turn a frame: a turn whenever the fraction carries
+        clc
+        adc #${GRATE}
+        sta gacc
+        bcc sdone
         lda #$06            ; up to 6 tries for a site inside the gust
         sta cnt2
 gtry:   jsr pick
@@ -668,12 +674,13 @@ gay:    cmp #${GUSTH + 1}
 gno:    dec cnt2
         bne gtry
         jmp sdone
-gend:   lda #$00            ; the gust has gone: CALM for 2-4 s
+gend:   lda #$00            ; the gust has gone: CALM for 1.5-2.5 s (90-153 frames)
         sta gact
         jsr rnd
         lsr
+        lsr
         clc
-        adc #$78
+        adc #$5a
         sta gcalm
 sdone:`;
 
