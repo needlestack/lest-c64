@@ -25941,8 +25941,6 @@ try {
     const lo = f.at, hi = f.at + (f.length ?? f.data.length);
     if (f.name === 'IPIC' || QSEG.some(([a, b]) => hi > a && lo < b)) f.last = true;
   }
-  const ldFiles = DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
-                                  runtime: f.runtime, length: f.length ?? f.data.length }));
   // ---- THE ENDING: IEND and ITRE, loaded by the game itself when the last hole is fallen through ----
   const END = ENDING ? buildEnding({
     scene: JSON.parse(readFileSync('./end-scene.json', 'utf8')),
@@ -25959,6 +25957,15 @@ try {
     console.error(`  ending: IEND ${END.iend.prg.length - 2} B at ${hx16(END.iend.at)}, ITRE ${END.itre.prg.length - 2} B at ` +
       `${hx16(END.itre.at)} (code to ${hx16(END.itre.codeEnd)}), dissolve ${END.steps} pixels a frame`);
   }
+  // ENDBOOT=1 (a TEST disk): the boot loads only IHOL and the end quote, and jumps into the ending
+  // instead of the game -- the quote, the tree and the dissolve without a playthrough. RETURN then
+  // reloads the game through REBOOT exactly as in play, from a machine where it was never loaded.
+  // IHOL still loads: REBOOT relies on it already being in the RAM under the I/O hole.
+  const ENDBOOT = !!(END && process.env.ENDBOOT);
+  const ldFiles = [...DISK.map(f => ({ tag: f.tag, name: f.name, first: f.first, last: f.last,
+                                       runtime: f.runtime || (ENDBOOT && !f.first), length: f.length ?? f.data.length })),
+                   ...(ENDBOOT ? [{ tag: 'E', name: END.iend.name, last: true, length: END.iend.prg.length - 2 }] : [])];
+  const bootEntry = ENDBOOT ? END.iend.run : r.labels.entry;
   // How many 256-byte pages arrive WHILE THE QUOTE IS UP -- the denominator of the sweep. IRAY
   // itself counts (IQOT reads it a byte at a time and ticks per page); IPIC and ILVL do not,
   // because they land after the screen is blanked. Two passes because IRAY's own length is part
@@ -25971,8 +25978,9 @@ try {
   const p2 = ldFiles.filter(f => !f.last && !f.runtime);   // a runtime file is not in the boot
   const p2Bytes = p2.reduce((n, f) => n + f.length, 0);
   const p2Pages = p2.reduce((n, f) => n + Math.floor(f.length / 256), 0);
-  const title = TITLE && QUOTE ? { row0: TITLE.row0, len: TITLE.len } : null;
-  let ld = buildLoader(assemble, ldFiles, r.labels.entry, 1, title);
+  // (ENDBOOT has no title: with nothing but the quote to load, the sweep is over before Krill is up)
+  const title = TITLE && QUOTE && !ENDBOOT ? { row0: TITLE.row0, len: TITLE.len } : null;
+  let ld = buildLoader(assemble, ldFiles, bootEntry, 1, title);
   const irayBytes = ld.prg.length - 2, irayPages = Math.floor(irayBytes / 256);
   const t1 = irayBytes / KERNAL_BPS, t2 = p2Bytes / KRILL_BPS;
   // WITH A TITLE the sweep ends at TITLE_AT of the time the quote is up (the last loads included),
@@ -25987,7 +25995,7 @@ try {
   const p2Sweep = p2Pages * Math.min(1, (tSweep - t1) / t2);
   const step1 = Math.round(col1 * 256 / irayPages), step2 = Math.round((SW_COLS - col1) * 256 / p2Sweep);
   if (step1 > 0xffff || step2 < 1 || step2 > 0xffff) throw new Error(`sweep steps out of range: ${step1}/${step2}`);
-  ld = buildLoader(assemble, ldFiles, r.labels.entry, step2, title);
+  ld = buildLoader(assemble, ldFiles, bootEntry, step2, title);
   if (ld.prg.length - 2 !== irayBytes) throw new Error('IRAY changed length between sweep passes');
   console.error(`  sweep: ${col1} columns over IRAY's ${t1.toFixed(1)}s (step ${step1}), ` +
                 `${SW_COLS - col1} over Krill's next ${(tSweep - t1).toFixed(1)}s (step ${step2})` +

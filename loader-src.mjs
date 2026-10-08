@@ -160,7 +160,8 @@ export const TITLE_AT = 0.8;
 const sweepSource = (title) => `        * = ${hx4(SWEEP_AT)}
         jmp swIrq
         jmp swTick
-        jmp swTitle
+${title ? `        jmp swTitle` : `        rts                     ; no title: SW_TITLE does nothing (the table keeps its shape)
+        !byte 0,0`}
 
 swIrq:  lda $e3                 ; pages of the file in flight = end page - load page. Krill's
         sec                     ;   loads are blocking, so nothing in the mainline can watch

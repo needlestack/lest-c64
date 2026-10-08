@@ -80,6 +80,8 @@ ${rows(quote.screen)}
 qt      = $f2               ; frames left to wait
 ; ---- the game has just jumped here, from lvlLoad, mid-fall, with the display blanked ----
 qStart: sei
+        lda #$35            ; KERNAL and BASIC out, I/O in: what the game runs in -- and what an
+        sta $01             ;   ENDBOOT test disk, arriving straight from the boot, does not
         lda #$00
         sta $d015           ; the game's sprites
         sta $d01a           ; ...and its raster interrupt: this owns the machine now
