@@ -16,10 +16,10 @@
 // "Off" is pixel code 00, the black background every block has.
 //
 // LEAVES TURN (--noleaves to stop them): small squares of leaf pixels, 2x2 or 3x3, rotate 90 degrees
-// for 2-5 frames and turn back -- a flick, then stillness -- at random sites across the canopy, as
-// many per frame as a WIND that takes a random step every half second. See the LEAVES section.
+// and STAY, only inside a GUST that drifts across the canopy, with calm between gusts. See LEAVES and
+// the gust notes. --every=n: at most one turn every n frames inside a gust (default 2).
 // Memory: $0801 BASIC stub, $0810 code, $0c00 light tables, $2000 bitmap, $3f40 screen and $4328
-// colour RAM data (copied to $0400/$d800 at start), $5000 leaf-site tables (nine 1K fields).
+// colour RAM data (copied to $0400/$d800 at start), $5000 leaf-site fields (five 1K tables), $6800 rings.
 import { readFileSync, writeFileSync } from 'fs';
 import { assemble } from '../asm6502.mjs';
 await import('../d64lib.js');
@@ -28,7 +28,6 @@ const D64 = globalThis.D64;
 const argv = process.argv.slice(2), LEAVES = !argv.includes('--noleaves');
 const [KLA = 'tree.kla', REGF = 'tree-regions.json', NBF = 'tree-nobrown.json'] = argv.filter(a => !a.startsWith('--'));
 const NSITES = 1024, NSLOT = 24;
-const WINDMAX = +((argv.find(a => a.startsWith('--wind=')) ?? '--wind=2').split('=')[1]);   // turns per frame, at most
 const EVERY = +((argv.find(a => a.startsWith('--every=')) ?? '--every=2').split('=')[1]);   // ...on every n-th frame (a power of 2)
 if (EVERY & (EVERY - 1)) throw new Error('--every must be a power of 2');
 const k = readFileSync(KLA);
@@ -141,7 +140,7 @@ if (LEAVES) {
       for (let r = 0; r < n && ok; r++) for (let c = 0; c < n; c++) {
         if (!leafPx(X + c, Y + r)) { ok = false; break; } codes.add(codeAt(X + c, Y + r)); }
       if (!ok || codes.size < 2) continue;                       // nothing to turn
-      cand.push({ addr: 0x2000 + byteOf(X, Y), n, ring: RING[n].map(([r, c]) => r * 4 + x0 + c) });   // row*4 + pixel
+      cand.push({ addr: 0x2000 + byteOf(X, Y), n, cx, cy, ring: RING[n].map(([r, c]) => r * 4 + x0 + c) });   // row*4 + pixel
     }
   shuffle(cand);
   for (const c of cand) { if (sites.length >= NSITES) break; sites.push(c); }
@@ -151,9 +150,12 @@ if (LEAVES) {
 }
 // tables: alo/ahi/len, one page-aligned 1K table each, indexed by a 10-bit site number; and the
 // rings, 8 bytes per site (row*4 + pixel), at RINGBASE + site*8
-const FIELDS = ['alo', 'ahi', 'len'];
-const fieldOf = (f, st) => f === 'alo' ? st.addr & 255 : f === 'ahi' ? st.addr >> 8 : st.ring.length;
-const SITEBASE = 0x5000, RINGBASE = 0x6000;
+// sx/sy: the site's character cell (column + 16, so a gust can start off-screen without going
+// negative; row), for the gust test
+const FIELDS = ['alo', 'ahi', 'len', 'sx', 'sy'];
+const fieldOf = (f, st) => f === 'alo' ? st.addr & 255 : f === 'ahi' ? st.addr >> 8 : f === 'len' ? st.ring.length
+  : f === 'sx' ? st.cx + 16 : st.cy;
+const SITEBASE = 0x5000, RINGBASE = 0x6800;
 
 const B = a => a.map(v => '$' + (v & 255).toString(16).padStart(2, '0')).join(',');
 const rows = (a, n = 32) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(`        !byte ${B(a.slice(i, i + n))}`); return o.join('\n'); };
@@ -168,49 +170,118 @@ const fld = f => `        lda idxlo
         sta ptr+1
         ldy #$00
         lda (ptr),y`;
+// THE WIND IS A GUST THAT TRAVELS. The user: too much movement (half as much, at half the pace),
+// and "I like your wind spatial idea". A gust is a window GUSTW x GUSTH cells that drifts across the
+// canopy from one side to the other (random side, height and speed: 3-7 s to cross); leaves turn
+// only inside it, at most one turn every EVERY-th frame, so neighbouring leaves stir together and
+// then settle. Between gusts, 2-4 s of CALM with only the odd lone turn anywhere (one in 32 frames).
+// A turn picks a random site and keeps it only if it lies inside the gust -- up to 6 tries a frame.
+const GUSTW = 4, GUSTH = 3;      // half-width (cells) and half-height (rows) of the gust window
 const leafCode = `
-        ; ---- the WIND: a random step every ~half second, kept within 0..WINDMAX ----
-        ; (turns STAY now, so the same rate changes far more than flicks did: at 0..3 a second of
-        ; it moved ~1,300 pixels, a boil rather than a flutter)
-        dec windt
-        bne nowind
-        lda #$1e
-        sta windt
-        jsr rnd
-        and #$03
-        beq wdn             ; 1 in 4 down, 1 in 4 up, else hold
-        cmp #$01
-        bne nowind
-        lda wind
-        cmp #${WINDMAX}
-        beq nowind
-        inc wind
-        jmp nowind
-wdn:    lda wind
-        beq nowind
-        dec wind
-nowind:
-        ; ---- up to WIND turns, on every EVERY-th frame only, each at a random site ----
         inc fcount
+        lda gact
+        bne gmove
+        lda fcount          ; ---- CALM: the odd lone turn, anywhere ----
+        and #$1f
+        bne gc1
+        jsr pick
+        jsr turn
+gc1:    dec gcalm
+        beq gnew
+        jmp sdone
+gnew:   jsr rnd             ; ---- a new GUST: which way, how high, how fast ----
+        and #$01
+        sta gdir
+        jsr rnd
+        and #$0b
+        clc
+        adc #$02            ; rows 2..13: the canopy
+        sta gy
+        jsr rnd
+        and #$1f
+        clc
+        adc #$18            ; $18..$37/256 of a cell a frame: 3-7 s across
+        sta gspd
+        lda gdir
+        beq gnl
+        lda #$0a            ; rightward: start off the left edge (column -6, stored +16)
+        jmp gns
+gnl:    lda #$3e            ; leftward: off the right edge (column 46)
+gns:    sta gxhi
+        lda #$00
+        sta gxlo
+        lda #$01
+        sta gact
+        jmp sdone
+gmove:  lda gdir            ; ---- the gust drifts ----
+        beq gml
+        lda gxlo
+        clc
+        adc gspd
+        sta gxlo
+        bcc gm2
+        inc gxhi
+        jmp gm2
+gml:    lda gxlo
+        sec
+        sbc gspd
+        sta gxlo
+        bcs gm2
+        dec gxhi
+gm2:    lda gxhi
+        cmp #$0a
+        bcc gend
+        cmp #$3f
+        bcs gend
         lda fcount
         and #${EVERY - 1}
         bne sdone
-        lda wind
+        lda #$06            ; up to 6 tries for a site inside the gust
         sta cnt2
-spawn:  lda cnt2
-        beq sdone
-        dec cnt2
-        jsr rnd             ; a random site: 10 bits
+gtry:   jsr pick
+${fld('sx')}
+        sec
+        sbc gxhi
+        bpl gax
+        eor #$ff
+        clc
+        adc #$01
+gax:    cmp #${GUSTW + 1}
+        bcs gno
+${fld('sy')}
+        sec
+        sbc gy
+        bpl gay
+        eor #$ff
+        clc
+        adc #$01
+gay:    cmp #${GUSTH + 1}
+        bcs gno
+        jsr turn
+        jmp sdone
+gno:    dec cnt2
+        bne gtry
+        jmp sdone
+gend:   lda #$00            ; the gust has gone: CALM for 2-4 s
+        sta gact
+        jsr rnd
+        lsr
+        clc
+        adc #$78
+        sta gcalm
+sdone:`;
+// a random site (10 bits) into idxlo/idxhi
+const pickCode = `
+pick:   jsr rnd
         sta idxlo
         lda seedhi
         and #$03
         sta idxhi
-        jsr turn
-        jmp spawn
-sdone:`;
+        rts`;
 // turn the site in idxlo/idxhi: read its ring's pixels, write them back moved round the ring
 const turnCode = `
 turn:
+${process.env.TURNCOUNT ? '        inc $20\n        bne tcnt\n        inc $21\ntcnt:' : ''}
 ${fld('alo')}
         sta tgt
 ${fld('ahi')}
@@ -326,7 +397,6 @@ seedlo  = $fb
 seedhi  = $fc
 ptr     = $fd               ; and $fe
 tgt     = $f9               ; and $fa
-wind    = $f8
 windt   = $f7
 cnt     = $f6
 cnt2    = $f5
@@ -341,6 +411,13 @@ tm2     = $14
 tmp     = $15
 rptr    = $16               ; and $17
 fcount  = $18
+gact    = $19
+gdir    = $1a
+gy      = $1b
+gspd    = $1c
+gxlo    = $1d
+gxhi    = $1e
+gcalm   = $1f
         * = $0810
         sei
         lda #$00
@@ -377,10 +454,10 @@ cp:     lda scrdat,x        ;   the 1000 bytes by 24 -- harmless, the data is pa
         sta seedlo
         lda $dc05
         sta seedhi
-        lda #$01
-        sta wind
-        lda #$1e
-        sta windt
+        lda #$00            ; no gust yet: the first comes after a second of calm
+        sta gact
+        lda #$3c
+        sta gcalm
         ldx #${NL - 1}      ; every light starts ON (as in the picture), each at its own point
 li:     lda #$01            ;   in its cycle
         sta lstate,x
@@ -455,7 +532,7 @@ lset:   sta ltimer,x
 lt9:    dex
         bpl lt
         jmp frame
-${LEAVES ? turnCode : ''}
+${LEAVES ? turnCode + pickCode : ''}
 
         ; 16-bit Galois LFSR (taps $b400); returns the low byte in A
 rnd:    lsr seedhi
@@ -511,6 +588,7 @@ ${LEAVES ? FIELDS.map((f, k) => `        * = $${(SITEBASE + k * 0x400).toString(
 `;
 const out = assemble(src);
 const L = out.labels;
+if (process.env.ENDLABELS) writeFileSync(process.env.ENDLABELS, JSON.stringify({ ...L, lightBytes: flat.map(b => b.addr) }));
 if (L.stimer + 5 * NSLOT + 2 * NL > 0x0c00) throw new Error('the player ran into its light tables at $0c00');
 if (LEAVES && L.coldat + 1024 > SITEBASE) throw new Error('the colour data runs into the leaf tables');
 if (L.scrdat !== 0x3f40) throw new Error('bitmap is not 8000 bytes');

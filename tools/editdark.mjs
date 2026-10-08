@@ -51,14 +51,15 @@ for (let y = Math.round(FROM * H); y < H; y++) for (let x = 0; x < W; x++) { con
 const rgbE = [0, 1, 2].map(c => { const m = new Float32Array(W * H);
   for (let i = 0; i < W * H; i++) { const cy = Math.floor(i / W), cx = i % W, b = idxOf(best.B, best.w, cx * 6 + 3 + best.off, cy * 3 + 1);
     m[i] = b < 0 ? -1 : lin(PAL[b][c]); } return m; });
-const target = [];
+const target = [], idx = [];   // idx: the edit's palette index per multicolour pixel (-1 outside)
 for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-  if (y < Math.round(FROM * H)) { target.push(null); continue; }
+  if (y < Math.round(FROM * H)) { target.push(null); idx.push(-1); continue; }   // (idx too: skipping it shifted every later row)
   // EXACT pixel colour, not smoothed: a 3x3 blend in linear light let the brighter brown outweigh
   // black, smearing the thin root lines over the black earth -- the target came out brown.
   const i = y * W + x;
   target.push(rgbE[0][i] < 0 ? null : [0, 1, 2].map(c => Math.round(rgbE[c][i] * 10000) / 10000));
+  idx.push(y >= Math.round(FROM * H) ? idxOf(best.B, best.w, x * 6 + 3 + best.off, y * 3 + 1) : -1);
 }
 writeFileSync(OUT, JSON.stringify({ W: 320, H: 200, note: `darkening from ${E} vs ${R} (${best.mode}, offset ${best.off}), rows from ${FROM}`,
-  map: [...map].map(v => Math.round(v * 1000) / 1000), targetW: W, target }));
+  map: [...map].map(v => Math.round(v * 1000) / 1000), targetW: W, target, idx }));
 console.log(`${n} multicolour pixels darkened, mean factor ${(sum / Math.max(1, n)).toFixed(2)} -> ${OUT}`);

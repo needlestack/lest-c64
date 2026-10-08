@@ -282,7 +282,7 @@ const BGSAT = +opt('--bgsat', 1);
 const BASEDARK = +opt('--basedark', 0);
 const DM = opt('--darkmap', null) ? JSON.parse(readFileSync(opt('--darkmap'), 'utf8')) : null;
 const DARKMAP = DM ? DM.map : null, DARKTGT = DM ? DM.target : null, DARKTW = DM ? DM.targetW : 0;
-const EDITMODE = opt('--editmode', 'target');
+const EDITMODE = opt('--editmode', 'exact');
 let dmN, dmY;
 const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
 // --nobrown mask.json: hand-marked zones (320x200) where the tree is leaf and brown/orange may not
@@ -398,9 +398,30 @@ const themed = (img, W, H) => {
   // --darkmap file: brightness factors measured from a HAND EDIT (tools/editdark.mjs) -- the user
   // darkened the earth round the roots far more than --basedark did. Applied to BARK-themed pixels
   // only, so the green at the base is never darkened; the converter re-dithers the result.
-  // With EDITMODE 'target' (default) the edit's own smoothed colours REPLACE the target there; 'ratio'
-  // only scales brightness (too gentle: it blurred the thin root lines into the black).
-  if (DARKMAP) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  // EDITMODE 'exact' (default): inside the mound's box (the tree's base pixels, grown 4 px -- which
+  // takes in the floor right round it, where the user cleaned brown spill into greys and white), each
+  // pixel's target is the edit's colour AND that is the only colour it may use. As a mere target
+  // ('target') the block chooser still traded a few points of black away (44% drawn, 38% out) and the
+  // user said it "did not really take the darkness as I drew it". 'ratio' only scales brightness.
+  if (DARKMAP && EDITMODE === 'exact' && DM.idx) {
+    let x0 = W, x1 = -1, y0 = H, y1 = -1, exactN = 0;
+    // the box: tree-themed pixels AND wherever the drawing has tree colours (brown, orange, greens) --
+    // the mound's tails are not labelled tree, and a box from the labels alone missed them
+    const treeCol = new Set([8, 9, 5, 13]);
+    for (let y = Math.round(0.72 * H); y < H; y++) for (let x = 0; x < W; x++) {
+      const k = DM.idx[y * DARKTW + (W === 320 ? x >> 1 : x)];
+      if ((region[y * W + x] >= 1 && region[y * W + x] <= 3) || treeCol.has(k)) {
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); } }
+    const gx = Math.round(4 * W / 320), sx = W === 320 ? 1 : 0;
+    for (let y = Math.max(0, y0 - 4); y <= Math.min(H - 1, y1 + 4); y++) for (let x = Math.max(0, x0 - gx); x <= Math.min(W - 1, x1 + gx); x++) {
+      const i = y * W + x, k = DM.idx[y * DARKTW + (x >> sx)];
+      if (k === undefined || k < 0) continue;
+      for (let c = 0; c < 3; c++) out[i * 3 + c] = PL[k][c];
+      allow[i] = 1 << k; region[i] = 9;                      // its own region: no error crosses in or out
+      exactN++;
+    }
+    if (process.env.DMDBG) console.error(`exact: box x ${x0}-${x1} y ${y0}-${y1} (W ${W}), ${exactN} pixels pinned to the drawing`);
+  } else if (DARKMAP) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x; if (region[i] !== 3) continue;
     const tx = W === 320 ? x >> 1 : x, t = DARKTGT && DARKTGT[y * DARKTW + tx];
     if (EDITMODE === 'target' && t) { for (let c = 0; c < 3; c++) out[i * 3 + c] = t[c];
