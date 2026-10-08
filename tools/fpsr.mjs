@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // fps over a fixed SEGMENT: one pose, one control held down, one number.
 //
-//   node fpsr.mjs                      every segment, as the game ships
-//   node fpsr.mjs "ANGEL=0"            the same segments with a build flag
-//   node fpsr.mjs "" walk              one segment by name
+//   node tools/fpsr.mjs                      every segment, as the game ships
+//   node tools/fpsr.mjs "ANGEL=0"            the same segments with a build flag
+//   node tools/fpsr.mjs "" walk              one segment by name
 //
 // WHY NOT bench.sh / seamprof: ROUTE=bench walks into walls on the current level 1, and
 // seamprof needs a profiler that compaction was dropping. Both predate the 23x11 map and the
@@ -47,7 +47,7 @@ const extra = process.argv[2] ?? '';
 const only = process.argv[3];
 // ---- `level`: THE PER-LEVEL BENCHMARK (the user, 2026-10-06) ----
 // The segments above carry LEVEL 1's poses, so on any other CHAIN they stand the player at level-1
-// coordinates -- in a corner, or a wall. `node fpsr.mjs "CHAIN=n" level` instead starts from the
+// coordinates -- in a corner, or a wall. `node tools/fpsr.mjs "CHAIN=n" level` instead starts from the
 // level's OWN start pose and runs the two things the user benchmarks a level with:
 //   spin -- every cast angle, no travel;
 //   walk -- about TWO SQUARES from the start: forward, except level 6 (forward falls into an exit,

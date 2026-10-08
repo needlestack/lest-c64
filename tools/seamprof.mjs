@@ -1,10 +1,10 @@
 // seamprof.mjs -- where the frame goes over a whole scripted walk, with pfTick's own cost taken
 // back out. Two VICE runs, ~25 seconds each.
 //
-//   node seamprof.mjs                       the benchmark route, level 1, no objects (bench.sh)
-//   node seamprof.mjs --route=walk          the game walkthrough instead (has entities in it)
-//   node seamprof.mjs --env "SEAMS=0"       any extra build vars, for A/B
-//   node seamprof.mjs --coarse              one run, top-level buckets only, no correction
+//   node tools/seamprof.mjs                       the benchmark route, level 1, no objects (bench.sh)
+//   node tools/seamprof.mjs --route=walk          the game walkthrough instead (has entities in it)
+//   node tools/seamprof.mjs --env "SEAMS=0"       any extra build vars, for A/B
+//   node tools/seamprof.mjs --coarse              one run, top-level buckets only, no correction
 //
 // WHY A TOUR AND NOT A VIEWPOINT. fps here swings 8 to 30 with position and heading, so a number
 // from one spot says almost nothing about the build. The tour is driven in 60Hz TICKS and so takes
@@ -55,7 +55,7 @@ const run = coarse => {
   const env = `ROUTE=${ROUTE} CHAIN=1 DIE=0 NOORB=1 ANGEL=0 TOURW=1 ` +
               `PROFILE=1 PROFTOUR=1 PROFN=1 ${coarse ? 'PROFCOARSE=1 ' : ''}${EXTRA}`;
   process.stderr.write(`  ${coarse ? 'PROFCOARSE' : 'PROFSUB   '}  ${EXTRA || '(defaults)'} ...`);
-  const out = execFileSync(process.execPath, ['probe.mjs', env,
+  const out = execFileSync(process.execPath, [new URL('probe.mjs', import.meta.url).pathname, env,
     'pfAcc:51', 'pfNum:34', 'twFrm:2', 'twTck:2', 'twN', 'pfDone',
     '--until', 'pfDone>=1', '--wait', '20000'], { encoding: 'utf8' });
   const field = n => {

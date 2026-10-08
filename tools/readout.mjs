@@ -2,7 +2,7 @@
 // Decode the drawDbg X/Y/A readout (and the fps digits) straight off a VICE screenshot.
 // Needed because SPIN measurement means differencing the angle byte between two runs, and
 // eyeballing 3x5 glyphs out of a multicolor ASCII dump is slow and error-prone.
-//   node readout.mjs shot.png        -> X=... Y=... A=... FPS=...
+//   node tools/readout.mjs shot.png        -> X=... Y=... A=... FPS=...
 import { readFileSync } from 'fs'; import { inflateSync } from 'zlib';
 
 const f = process.argv[2];

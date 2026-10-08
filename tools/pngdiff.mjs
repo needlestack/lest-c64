@@ -1,9 +1,9 @@
 // pngdiff.mjs -- compare two VICE screenshots pixel for pixel, no dependencies.
 //
-//   node pngdiff.mjs a.png b.png            differing pixel count and bounding box
-//   node pngdiff.mjs a.png b.png --dump     ...and the differing region as text (each char a pixel:
+//   node tools/pngdiff.mjs a.png b.png            differing pixel count and bounding box
+//   node tools/pngdiff.mjs a.png b.png --dump     ...and the differing region as text (each char a pixel:
 //                                            '.' same, 'a'/'b' where only one is dark, '#' both dark, differ)
-//   node pngdiff.mjs a.png --crop x,y,w,h   print one region of ONE image as text ('#' dark, '.' light)
+//   node tools/pngdiff.mjs a.png --crop x,y,w,h   print one region of ONE image as text ('#' dark, '.' light)
 //
 // A PNG read of "looks the same" is worth nothing for a pixel-exact claim; this is the check. VICE
 // writes 8-bit RGB(A) non-interlaced PNGs, which is all this decodes.

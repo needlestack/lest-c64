@@ -1,7 +1,7 @@
 // probe.mjs -- read named variables out of a RUNNING build, self-verifying.
 //
-//   node probe.mjs "TOURW=1 LVL=1 DIE=0" twN twFrm:4 occChk occBad
-//   node probe.mjs "TOURW=1 LVL=1" twN --expect "twN<=17" --wait 22000
+//   node tools/probe.mjs "TOURW=1 LVL=1 DIE=0" twN twFrm:4 occChk occBad
+//   node tools/probe.mjs "TOURW=1 LVL=1" twN --expect "twN<=17" --wait 22000
 //
 // Every wrong number this tool exists to prevent had the same shape: an address or a field
 // offset that was right for a DIFFERENT build or a different layout. Stale labels twice, a
@@ -20,12 +20,15 @@
 import { execSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import net from 'net';
-import { portHeld, launch, LAUNCH_FLAGS } from './tools/vice.mjs';
+import { portHeld, launch, LAUNCH_FLAGS } from './vice.mjs';
+// It builds and reads the build's files (lest-c64.d64, iray.syms.json, build-iray.mjs) by name, so it
+// runs from the project root wherever it is started from. It takes no file paths of its own.
+process.chdir(new URL('..', import.meta.url).pathname);
 
 const VICE = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
 const DISK = './lest-c64.d64';
 const args = process.argv.slice(2);
-if (!args.length) { console.error('usage: node probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
+if (!args.length) { console.error('usage: node tools/probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
 
 const envStr = args.shift();
 // How long to sit still before dialling the monitor. It exists because POLLING THROUGH THE LOAD

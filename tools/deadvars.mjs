@@ -8,7 +8,7 @@
 // still assembles, still runs, and quietly uses garbage. So the interesting column here is
 // "read, never written".
 //
-//   node deadvars.mjs [iray.asm]
+//   node tools/deadvars.mjs [iray.asm]
 import { readFileSync } from 'fs';
 
 const src = readFileSync(process.argv[2] ?? 'iray.asm', 'utf8').split('\n');

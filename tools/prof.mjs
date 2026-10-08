@@ -2,10 +2,10 @@
 // Where a frame's time goes, per segment. Reads the on-chip profiler's accumulators instead of
 // its screen output -- which prints hex over the game's own charset and reads as colour noise.
 //
-//   node prof.mjs                    every segment, coarse phases
-//   node prof.mjs "ANGEL=0"          with a build flag
-//   node prof.mjs "" walk            one segment
-//   node prof.mjs "" walk ent        ENTPROF: split the entity bucket five ways
+//   node tools/prof.mjs                    every segment, coarse phases
+//   node tools/prof.mjs "ANGEL=0"          with a build flag
+//   node tools/prof.mjs "" walk            one segment
+//   node tools/prof.mjs "" walk ent        ENTPROF: split the entity bucket five ways
 //
 // The profiler brackets each phase of the main loop with a raster timestamp and sums the deltas
 // over 256 frames, then halts. pfDone says it finished; pfAcc is 17 phases x 3 bytes, little

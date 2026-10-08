@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Read a VICE -exitscreenshot PNG and print a region as ASCII, or report stats.
 // Node's zlib is enough; no image library needed.  usage:
-//   node shot.mjs file.png            -> size + a downscaled overview
-//   node shot.mjs file.png x y w h    -> that region, 1 char per pixel
+//   node tools/shot.mjs file.png            -> size + a downscaled overview
+//   node tools/shot.mjs file.png x y w h    -> that region, 1 char per pixel
 import { readFileSync } from 'fs'; import { inflateSync } from 'zlib';
 const f = process.argv[2];
 const buf = readFileSync(f);

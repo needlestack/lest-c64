@@ -1,7 +1,7 @@
 // flog.mjs -- read a FRAMELOG dump (probe.mjs output) and rank where the frames were expensive.
 //
-//   node probe.mjs "ROUTE=cover ... FRAMELOG=1" flogB:2816 flogN:2 twFrm:2 --until "pfDone>=1" > cover.txt
-//   node flog.mjs cover.txt [--map]
+//   node tools/probe.mjs "ROUTE=cover ... FRAMELOG=1" flogB:2816 flogN:2 twFrm:2 --until "pfDone>=1" > cover.txt
+//   node tools/flog.mjs cover.txt [--map]
 //
 // Each record is (cell, heading, work in raster lines) for one rendered frame, taken IN MOTION on
 // a route that covers the level. The ranking is by cell and by (cell, heading-octant) because

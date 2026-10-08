@@ -94,8 +94,7 @@ rung by rung at the C64's pixel aspect, is in [`docs/ladders/`](docs/ladders/)
 | `fit-*.mjs`, `make-*.mjs`, `charsetgen.mjs`, `tools/endscene.mjs` | hand-run generators that produce those assets |
 | `krill/` | Krill's loader, prebuilt |
 | `docs/ladders/` | every entity's ladder of sprite sizes, as pictures |
-| `tools/` | VICE-driven profiling and test rigs (`vprof`, `frames`, `ship.sh`, …) |
-| `probe.mjs`, `fpsr.mjs`, `prof.mjs` | live-machine inspection and frame-rate benchmarks |
+| `tools/` | live-machine inspection (`probe`), frame-rate and cycle benchmarks (`fpsr`, `prof`, `vprof`), test rigs (`ship.sh`, `frames`) |
 
 ## Credits and licence
 
