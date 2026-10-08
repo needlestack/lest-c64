@@ -280,6 +280,10 @@ const BARKHUE = +opt('--barkhue', 65);
 const TRIMAVOID = bitsOf(opt('--trimavoid', '2').split(',').filter(Boolean).map(Number));
 const BGSAT = +opt('--bgsat', 1);
 const BASEDARK = +opt('--basedark', 0);
+const DM = opt('--darkmap', null) ? JSON.parse(readFileSync(opt('--darkmap'), 'utf8')) : null;
+const DARKMAP = DM ? DM.map : null, DARKTGT = DM ? DM.target : null, DARKTW = DM ? DM.targetW : 0;
+const EDITMODE = opt('--editmode', 'target');
+let dmN, dmY;
 const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
 // --nobrown mask.json: hand-marked zones (320x200) where the tree is leaf and brown/orange may not
 // appear -- made from the user's manual edit, the patches they painted brown out of, grown a few
@@ -391,6 +395,21 @@ const themed = (img, W, H) => {
       for (let c = 0; c < 3; c++) out[i * 3 + c] *= 1 - f;
     }
   }
+  // --darkmap file: brightness factors measured from a HAND EDIT (tools/editdark.mjs) -- the user
+  // darkened the earth round the roots far more than --basedark did. Applied to BARK-themed pixels
+  // only, so the green at the base is never darkened; the converter re-dithers the result.
+  // With EDITMODE 'target' (default) the edit's own smoothed colours REPLACE the target there; 'ratio'
+  // only scales brightness (too gentle: it blurred the thin root lines into the black).
+  if (DARKMAP) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x; if (region[i] !== 3) continue;
+    const tx = W === 320 ? x >> 1 : x, t = DARKTGT && DARKTGT[y * DARKTW + tx];
+    if (EDITMODE === 'target' && t) { for (let c = 0; c < 3; c++) out[i * 3 + c] = t[c];
+      if (process.env.DMDBG) { dmN = (dmN ?? 0) + 1; dmY = (dmY ?? 0) + Y(t); } continue; }
+    const f = W === 320 ? DARKMAP[y * 320 + x] : (DARKMAP[y * 320 + 2 * x] + DARKMAP[y * 320 + 2 * x + 1]) / 2;
+    if (f < 1) for (let c = 0; c < 3; c++) out[i * 3 + c] *= f;
+  }
+  if (process.env.DMDBG) { let rb = 0, base = 0; for (let y = Math.round(0.72 * H); y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (region[i]) base++; if (region[i] === 3) rb++; }
+    console.error(`darkmap: ${dmN ?? 0} targets applied, mean Y ${((dmY ?? 0) / (dmN || 1)).toFixed(3)}; base rows: ${base} themed, ${rb} bark`); }
   if (TRIMAVOID) {                  // the wall trim, grown 2 px (1 in double-wide multicolour pixels)
     const ry = 2, rx = W === 320 ? 2 : 1;
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
