@@ -95,9 +95,9 @@ things are the way they are.
 
 ## Credits and licence
 
-The code in this repository is released under the [MIT licence](LICENSE).
+Everything in this repository -- the code, the art in `art/`, the end-scene picture and the level
+designs -- is released under the [MIT licence](LICENSE).
 
-<!-- TODO(licence): decide whether art/ and the level designs are covered too, or reserved -->
 
 Included third-party code keeps its own licence:
 
