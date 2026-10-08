@@ -1,6 +1,6 @@
 // endscene.mjs -- the winning scene: the tree picture with the rack LEDs alive. Builds endscene.d64.
 //
-//   node tools/endscene.mjs [tree.kla] [tree-regions.json] [tree-nobrown.json] [--flutter]
+//   node tools/endscene.mjs [tree.kla] [tree-regions.json] [tree-nobrown.json] [--noleaves]
 //
 // A multicolour bitmap (the Koala file, shown as converted) plus a small player that runs once per
 // frame (60 Hz NTSC, synced to the raster), with interrupts off.
@@ -15,21 +15,19 @@
 //     second to two and a half seconds, the gaps between bursts of activity.
 // "Off" is pixel code 00, the black background every block has.
 //
-// --flutter adds the leaf flutter (off by default; the user: "without any leaf movement for now"):
-// a byte wholly of canopy leaf pixels (black/green/light green) has its 4 pixels rotated one place
-// left or right and is restored 4-11 frames later; how many start per frame is a WIND taking a
-// random step every half second. The leaf pattern moves, the colours never change, nothing drifts.
-//
-// Memory: $0801 BASIC stub, $0810 code, $0c00 light tables, $1000 flutter sites (2048, lo/hi split),
-// $2000 bitmap, $3f40 screen and $4328 colour RAM data (copied to $0400/$d800 at start).
+// LEAVES TURN (--noleaves to stop them): small squares of leaf pixels, 2x2 or 3x3, rotate 90 degrees
+// for 2-5 frames and turn back -- a flick, then stillness -- at random sites across the canopy, as
+// many per frame as a WIND that takes a random step every half second. See the LEAVES section.
+// Memory: $0801 BASIC stub, $0810 code, $0c00 light tables, $2000 bitmap, $3f40 screen and $4328
+// colour RAM data (copied to $0400/$d800 at start), $5000 leaf-site tables (nine 1K fields).
 import { readFileSync, writeFileSync } from 'fs';
 import { assemble } from '../asm6502.mjs';
 await import('../d64lib.js');
 const D64 = globalThis.D64;
 
-const argv = process.argv.slice(2), FLUTTER = argv.includes('--flutter');
+const argv = process.argv.slice(2), LEAVES = !argv.includes('--noleaves');
 const [KLA = 'tree.kla', REGF = 'tree-regions.json', NBF = 'tree-nobrown.json'] = argv.filter(a => !a.startsWith('--'));
-const NSITES = 2048, NSLOT = 24;
+const NSITES = 1024, NSLOT = 24;
 const k = readFileSync(KLA);
 if (k.length !== 10003 || (k[0] | k[1] << 8) !== 0x6000) throw new Error(`${KLA} is not a Koala file`);
 const bm = k.subarray(2, 8002), scr = k.subarray(8002, 9002), col = k.subarray(9002, 10002), bg = k[10002];
@@ -115,27 +113,80 @@ const NL = lights.length;
 console.log(`lights: ${NL} -- ` + lights.map(l => `${l.colour} ${l.kind}${l.pair ? ' PAIR' : ''}` +
   (l.kind === 'steady' ? ` ${l.onT}/${l.offT}` : '') + ` @${l.at}`).join('; '));
 
-// ---- FLUTTER sites (only with --flutter): bytes wholly of leaf pixels in leaf colours ----
+// ---- LEAVES: small squares of leaf pixels that TURN 90 degrees for a moment, then turn back ----
+// The user, on the first version (a 4-pixel strip slid sideways and back): too regular -- a shape
+// moving as a shape. Leaves turn in 3D, so their shape changes. So an event takes a 2x2 square
+// (4 pixels) or a 3x3 one (its outer 8 turn round the fixed centre), rotates it 90 degrees one way
+// or the other, and puts it back 2-5 frames later: a flick, then stillness. Each square lies inside
+// ONE character cell (2x2: pixels 0-2 of a byte, rows 0-6; 3x3: pixels 0-1, rows 0-5), so the pixels
+// keep their codes and therefore their colours -- only their places change. Every pixel must be a
+// leaf (canopy region or a no-brown zone, black/green/light green), and the turn must change
+// something. NSITES are sampled across the whole canopy; each event picks one at random.
 const LEAF = new Set([0, 5, 13]), sites = [];
-if (FLUTTER) {
-  for (let y = 0; y < H; y++) for (let bx = 0; bx < 40; bx++) {
-    let ok = true; const codes = new Set();
-    for (let p = 0; p < 4; p++) { const x = bx * 4 + p, l = labAt(x, y);
-      if (!(((l & 1) && l !== 2) || nbAt(x, y)) || !LEAF.has(colourAt(x, y))) { ok = false; break; }
-      codes.add(codeAt(x, y)); }
-    if (ok && codes.size > 1) sites.push(byteOf(bx * 4, y));
-  }
-  if (sites.length < 64) throw new Error(`only ${sites.length} flutter sites -- are the regions for this picture?`);
-  shuffle(sites);
-  console.log(`flutter: ${sites.length} leaf sites`);
+const leafPx = (x, y) => { const l = labAt(x, y); return ((l & 1) && l !== 2 || nbAt(x, y)) && LEAF.has(colourAt(x, y)); };
+if (LEAVES) {
+  const cand = [];
+  for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) for (const n of [2, 3])
+    for (let r0 = 0; r0 <= 8 - n; r0++) for (let x0 = 0; x0 <= 4 - n; x0++) {
+      const X = cx * 4 + x0, Y = cy * 8 + r0, P = [];
+      let ok = true;
+      for (let r = 0; r < n && ok; r++) { P.push([]); for (let c = 0; c < n; c++) {
+        if (!leafPx(X + c, Y + r)) { ok = false; break; } P[r].push(codeAt(X + c, Y + r)); } }
+      if (!ok) continue;
+      const cw = rng => rng() < 0.5;
+      const dir = cw(rnd);
+      const Q = P.map((row, r) => row.map((_, c) => dir ? P[n - 1 - c][r] : P[c][n - 1 - r]));
+      if (Q.every((row, r) => row.every((v, c) => v === P[r][c]))) continue;   // the turn changes nothing
+      const rows = [], turned = [];
+      for (let r = 0; r < n; r++) { const o = byteOf(X, Y + r); let v = bm[o];
+        for (let c = 0; c < n; c++) { const sh = shiftOf(X + c); v = (v & ~(3 << sh)) | (Q[r][c] << sh); }
+        rows.push(bm[o]); turned.push(v & 255); }
+      cand.push({ addr: 0x2000 + byteOf(X, Y), n, orig: rows, turned });
+    }
+  shuffle(cand);
+  for (const c of cand) { if (sites.length >= NSITES) break; sites.push(c); }
+  if (sites.length < 64) throw new Error(`only ${sites.length} leaf sites -- are the regions for this picture?`);
+  while (sites.length < NSITES) sites.push(sites[sites.length % (sites.length || 1)]);   // fill the table (power of 2)
+  console.log(`leaves: ${cand.length} possible turning squares, ${NSITES} sampled`);
 }
-const table = FLUTTER ? Array.from({ length: NSITES }, (_, i) => 0x2000 + sites[i % sites.length]) : [];
+// the site tables: one 1K page-aligned table per FIELD, indexed by a 10-bit site number
+const FIELDS = ['alo', 'ahi', 'n', 'o0', 'o1', 'o2', 't0', 't1', 't2'];
+const fieldOf = (f, st) => f === 'alo' ? st.addr & 255 : f === 'ahi' ? st.addr >> 8 : f === 'n' ? st.n
+  : f[0] === 'o' ? (st.orig[+f[1]] ?? 0) : (st.turned[+f[1]] ?? 0);
+const SITEBASE = 0x5000;
 
 const B = a => a.map(v => '$' + (v & 255).toString(16).padStart(2, '0')).join(',');
 const rows = (a, n = 32) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(`        !byte ${B(a.slice(i, i + n))}`); return o.join('\n'); };
 let first = 0; const lfirst = lights.map(l => { const f = first; first += l.bytes.length; return f; });
 
-const flutterCode = `
+// load field f of the current site (idxlo/idxhi) into A; clobbers Y and ptr
+const fld = f => `        lda idxlo
+        sta ptr
+        lda idxhi
+        clc
+        adc #>${'$' + (SITEBASE + FIELDS.indexOf(f) * 0x400).toString(16)}
+        sta ptr+1
+        ldy #$00
+        lda (ptr),y`;
+// write the site's rows from fields pre+0..2 to (tgt),0..n-1
+const putRows = pre => `${fld(pre + '0')}
+        ldy #$00
+        sta (tgt),y
+${fld(pre + '1')}
+        ldy #$01
+        sta (tgt),y
+${fld('n')}
+        cmp #$03
+        bne pr9${pre}
+${fld(pre + '2')}
+        ldy #$02
+        sta (tgt),y
+pr9${pre}:`;
+const tgtOfSite = `${fld('alo')}
+        sta tgt
+${fld('ahi')}
+        sta tgt+1`;
+const leafCode = `
         ; ---- the WIND: a random step every ~half second, kept within 0..3 ----
         dec windt
         bne nowind
@@ -155,90 +206,71 @@ wdn:    lda wind
         beq nowind
         dec wind
 nowind:
-        ; ---- age the flutters; put a byte back when its time is up ----
+        ; ---- age the turns; turn a square back when its moment is over ----
         ldx #${NSLOT - 1}
 age:    lda stimer,x
         beq age2
         dec stimer,x
         bne age2
-        lda slo,x
-        sta tgt
-        lda shi,x
-        sta tgt+1
-        ldy #$00
-        lda sorig,x
-        sta (tgt),y
+        lda sidxlo,x
+        sta idxlo
+        lda sidxhi,x
+        sta idxhi
+        stx cnt
+${tgtOfSite}
+${putRows('o')}
+        ldx cnt
 age2:   dex
         bpl age
-        ; ---- start up to WIND new flutters ----
+        ; ---- start up to WIND new turns ----
         lda wind
-        sta cnt
-spawn:  lda cnt
+        sta cnt2
+spawn:  lda cnt2
         beq sdone
-        dec cnt
+        dec cnt2
         ldx #${NSLOT - 1}   ; a free slot
 fs:     lda stimer,x
         beq got
         dex
         bpl fs
         jmp sdone
-got:    jsr rnd             ; a random site: 11 bits index the lo/hi tables
-        sta ptr
+got:    jsr rnd             ; a random site: 10 bits
+        sta idxlo
         lda seedhi
-        and #$07
-        clc
-        adc #>sitelo
-        sta ptr+1
-        ldy #$00
-        lda (ptr),y
-        sta tgt
-        lda ptr+1
-        clc
-        adc #$08            ; sitehi is sitelo + $800
-        sta ptr+1
-        lda (ptr),y
-        sta tgt+1
-        ldy #${NSLOT - 1}   ; already fluttering? then skip it this time (its saved byte is the
-bz:     lda stimer,y        ;   real one; a second save would capture the rotated byte)
+        and #$03
+        sta idxhi
+        stx cnt
+${tgtOfSite}
+        ldx cnt
+        lda tgt             ; its CELL (8 bytes): busy if any live turn is in the same cell
+        and #$f8
+        sta tcell
+        ldy #${NSLOT - 1}
+bz:     lda stimer,y
         beq bz2
-        lda slo,y
-        cmp tgt
+        lda scell,y
+        cmp tcell
         bne bz2
-        lda shi,y
+        lda scellh,y
         cmp tgt+1
         beq spawn
 bz2:    dey
         bpl bz
-        lda tgt
-        sta slo,x
+        lda idxlo
+        sta sidxlo,x
+        lda idxhi
+        sta sidxhi,x
+        lda tcell
+        sta scell,x
         lda tgt+1
-        sta shi,x
-        ldy #$00
-        lda (tgt),y
-        sta sorig,x
-        pha
-        jsr rnd             ; lifetime 4..11 frames
-        and #$07
+        sta scellh,x
+        jsr rnd             ; its moment: 2..5 frames
+        and #$03
         clc
-        adc #$04
+        adc #$02
         sta stimer,x
-        lda seedhi          ; ...and a direction
-        lsr
-        pla
-        bcs rr
-        asl                 ; rotate the 4 pixels LEFT one place (2 bits, circular)
-        adc #$00
-        asl
-        adc #$00
-        jmp wr
-rr:     lsr                 ; ...or RIGHT one place
-        bcc rr1
-        ora #$80
-rr1:    lsr
-        bcc wr
-        ora #$80
-wr:     ldy #$00
-        sta (tgt),y
+${putRows('t')}
+        ldx cnt
         jmp spawn
 sdone:`;
 
@@ -252,6 +284,10 @@ tgt     = $f9               ; and $fa
 wind    = $f8
 windt   = $f7
 cnt     = $f6
+cnt2    = $f5
+idxlo   = $f4
+idxhi   = $f3
+tcell   = $f2
         * = $0810
         sei
         lda #$00
@@ -305,7 +341,7 @@ frame:  lda $d011           ; once per frame: wait for line 250 (the bottom bord
 fw:     lda $d012
         cmp #$fa
         bne fw
-${FLUTTER ? flutterCode : ''}
+${LEAVES ? leafCode : ''}
         ; ---- lights: when a light's time is up it toggles, then picks its next wait ----
         ldx #${NL - 1}
 lt:     dec ltimer,x
@@ -378,9 +414,10 @@ rnd1:   lda seedlo
         rts
 
 stimer: !fill ${NSLOT},0
-slo:    !fill ${NSLOT},0
-shi:    !fill ${NSLOT},0
-sorig:  !fill ${NSLOT},0
+sidxlo: !fill ${NSLOT},0
+sidxhi: !fill ${NSLOT},0
+scell:  !fill ${NSLOT},0
+scellh: !fill ${NSLOT},0
 ltimer: !fill ${NL},0
 lstate: !fill ${NL},0
 
@@ -407,12 +444,7 @@ bon:
 ${rows(flat.map(b => b.on))}
 boff:
 ${rows(flat.map(b => b.off))}
-${FLUTTER ? `
-        * = $1000
-sitelo:
-${rows(table.map(a => a & 255))}
-sitehi:
-${rows(table.map(a => a >> 8))}` : 'sitelo = $1000'}
+
 
         * = $2000
 ${rows([...bm])}
@@ -420,13 +452,14 @@ scrdat:
 ${rows([...scr, ...Array(24).fill(0)])}
 coldat:
 ${rows([...col, ...Array(24).fill(0)])}
+${LEAVES ? FIELDS.map((f, k) => `        * = $${(SITEBASE + k * 0x400).toString(16)}\nsite_${f}:\n${rows(sites.map(st => fieldOf(f, st)))}`).join('\n') : ''}
 `;
 const out = assemble(src);
 const L = out.labels;
-if (L.stimer + 4 * NSLOT + 2 * NL > 0x0c00) throw new Error('the player ran into its light tables at $0c00');
-if (FLUTTER && L.sitehi !== 0x1800) throw new Error(`sitehi at $${L.sitehi.toString(16)}, the code assumes sitelo + $800`);
+if (L.stimer + 5 * NSLOT + 2 * NL > 0x0c00) throw new Error('the player ran into its light tables at $0c00');
+if (LEAVES && L.coldat + 1024 > SITEBASE) throw new Error('the colour data runs into the leaf tables');
 if (L.scrdat !== 0x3f40) throw new Error('bitmap is not 8000 bytes');
 const d = D64.createEmpty('THE TREE', '01');
 d.writeFile('END', Buffer.from(out.prg), D64.FILE_TYPE_PRG);
 writeFileSync('endscene.d64', Buffer.from(d.getData()));
-console.log(`endscene.d64: END ${out.prg.length - 2} bytes, $0801-$${(0x0801 + out.prg.length - 3).toString(16)}${FLUTTER ? ' (with leaf flutter)' : ''}`);
+console.log(`endscene.d64: END ${out.prg.length - 2} bytes, $0801-$${(0x0801 + out.prg.length - 3).toString(16)}${LEAVES ? ' (with turning leaves)' : ''}`);
