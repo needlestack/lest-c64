@@ -11485,11 +11485,10 @@ dnSkip:                         ;   headless run can TAKE and then PUT DOWN. One
                                 ;   exercised the pick-up half, which is why the drop path could
                                 ;   carry a 16-wide coordinate mask for as long as it did.
 ` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        ldy wsWall              ; WALLNOW: not on a level with no such wall -- its pointer\n        lda wallDHiT,y          ;   is 0 and the toggle would apply a list read from page 0\n        beq wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        jsr pfT4              ; renderSym alone' : ''}${SPRITES && ORBOCC && true ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && true ? '\n        jsr pfT16              ; occStamp: the partial-occlusion pass' : ''}
-${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the raster count, the LEVEL line and the 'L' key. Outside the
-                                ;   NOHUD gate: the key is a control, not a readout.
-${NOHUD ? '' : `        jsr drawFps
-        jsr drawDbg
-${SNDTEST ? '        jsr drawSnd\n' : ''}`}
+${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the 'H' and 'L' keys, and -- while the HUD is on -- every readout:
+                                ;   raster count, LEVEL line, fps, X/Y/angle. Outside the NOHUD
+                                ;   gate: the keys are controls, not readouts.
+${NOHUD || !SNDTEST ? '' : '        jsr drawSnd\n'}
 ${PROFILE && !PROFILE1 ? '        jsr pfT5              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
         bne pfRdy
 ${PROFWIN.length ? `        lda pwOn                ; PROFWIN: the anchor is the FIRST main-loop frame's tick
@@ -16693,9 +16692,11 @@ tkNext: ldx odD
         bcc tkLp
         rts
 
-; ---- orbKey: SPACE picks up and puts down, one action a press ----
-; Row 7 bit 4. The joystick shares these lines, so read the port with no row selected first and
-; force whatever the stick is holding back high -- otherwise FIRE reads as SPACE.
+; ---- orbKey: SPACE -- or joystick 1's FIRE -- picks up and puts down, one action a press ----
+; Row 7 bit 4. The joystick shares these lines, so the port is read with no row selected first and
+; whatever the stick holds is forced back high for the key read -- otherwise any stick direction
+; on that row would read as a key. FIRE is then taken from that stick read on purpose: it is the
+; same bit 4, and the user wants the game playable with the joystick alone.
 orbKey:
 ${joyMask('okJoy')}
         lda #$7f
@@ -16703,6 +16704,7 @@ ${joyMask('okJoy')}
         lda $dc01
         ora okJoy
         eor #$ff
+        ora okJoy               ; ...and the stick's own bit 4: FIRE
         and #$10
         sta okNew
         lda #$ff
@@ -18992,7 +18994,7 @@ ${LD('orbYCT', LVLT('orbYCT').join(','), ': !byte ')}      ;   disagree with wha
 ${LD('orbColT2', LVLT('orbColT2').join(','), ': !byte ')}   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 
-        ; ---- hudX: the per-frame raster count, the LEVEL line, and the 'L' key ----
+        ; ---- hudX: the 'H' key, the HUD (raster count, LEVEL line, fps, X/Y/angle), the 'L' key ----
         ; Out here in the slack above ORB_SMALL because the main block has about fifteen bytes
         ; and this is a hundred and thirty. jsr-entered from mloop; nothing falls into it.
         ; The address is a knob because the block BELOW it grows with NOCC -- five resident
@@ -19010,7 +19012,32 @@ ${NOHUD ? '' : `        ; ---- how many raster interrupts the frame just drawn t
         ; BOOT frame, whose delta is the whole disk load, and after a cut scene. Those frames read
         ; ${hx(DT_MAX)} instead of the truth, and they are the frames whose duration means nothing anyway.
 `}hudX:
-${NOHUD ? '' : `        lda #${hx(HUDROW + 1)}
+${NOHUD ? '' : `        ; ---- 'H': the HUD on and off (it starts OFF; HUDON=1 builds it starting on) ----
+        ; The user: "'H' toggles the hud. And the game starts without the HUD." Column 3, row
+        ; bit 5 -- no joystick line is bit 5, so unlike 'L' below this needs no masking.
+        lda #$f7
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        and #$20
+        tax
+        beq hhDn                ; not pressed
+        cpx hhOld
+        beq hhDn                ; still down from last frame: one toggle a press
+        lda hudOn
+        eor #$01
+        sta hudOn
+        bne hhDn                ; just turned ON: this frame draws it
+        jsr fallInv             ; just turned OFF: renderSym skips columns it thinks are unchanged,
+                                ;   and the readouts were drawn over its cells -- so both buffers
+                                ;   are forgotten and repainted whole, wiping the digits
+hhDn:   stx hhOld
+        lda #$ff
+        sta $dc00
+        lda hudOn
+        bne hhOn
+        jmp hxKey               ; off: no readouts at all
+hhOn:   lda #${hx(HUDROW + 1)}
         jsr setRow
         ldy #$00
         lda dtv
@@ -19039,6 +19066,9 @@ hxLv:   lda hxLvT,x
         iny
         lda lvlMeT
         jsr ddPut
+        jsr drawFps
+        jsr drawDbg
+hxKey:
 `}        ; ---- 'L': go to the next level ----
         ; Row $df bit 2, which nothing else in the build reads.
         ; It does NOT call the level change: it stands the player on the live exit cell and lets
@@ -19076,6 +19106,8 @@ hxDn:   stx hxOld
         rts
 hxOld:  !byte 0                 ; 'L' last frame, for the edge test
 hxJoy:  !byte 0
+${NOHUD ? '' : `hhOld:  !byte 0                 ; 'H' last frame, for the edge test
+hudOn:  !byte ${process.env.HUDON === '1' ? 1 : 0}                 ; the HUD: off until 'H' (HUDON=1 starts it on)`}
 ${NOHUD ? '' : `hxLvT:  !byte 18,14,19,14,18   ; L E V E L as glyph indices -- 14 is the hex digit E`}
 ` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
 absCosT: ${chunk(absCos).trim()}

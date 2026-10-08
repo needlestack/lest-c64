@@ -32,8 +32,9 @@ You need a C64, or [VICE](https://vice-emu.sourceforge.io/) (`x64sc`), and the d
 | **S / F** | step left / right |
 | joystick (port 1) left / right | turn |
 | **left SHIFT** | run |
-| **SPACE** | pick up / put down |
+| **SPACE** or joystick fire | pick up / put down |
 | **RETURN** | start again |
+| **H** | show / hide the HUD (frame rate, position, level) |
 
 The loader talks to a real 1541. In VICE, keep **True Drive Emulation** on (the default).
 
