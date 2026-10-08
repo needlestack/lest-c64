@@ -47,7 +47,7 @@ const DUMP = opt('--dump', '');
 const SHOT = opt('--shot', '');
 const PORT = 6510;
 
-// ---- build to its own disk, so latest.d64 is never touched ----
+// ---- build to its own disk, so lest-c64.d64 is never touched ----
 const { out: b, syms: SYMS, addrOf } = buildDisk(ENV, 'zz-vprof.d64');
 const ok = b.split('\n').find(l => l.startsWith('ok:'));
 if (!SYMS) { console.error('this build wrote no iray.syms.json'); process.exit(1); }

@@ -29,7 +29,7 @@
 //      inside a letter), a 2-pixel nick where it meets the other grey, one tear per meeting
 //      point (four tears at one point made a black diamond), and convex corners only (tearing
 //      where stacked blocks continue one straight edge notched it every 8 px, like beads).
-//   6. HAND EDITS, from title-preview-T2s1-edit.png: six cells erased, three recoloured.
+//   6. HAND EDITS, from a hand-edited preview (title-preview-T2s1-edit.png, not kept): six cells erased, three recoloured.
 //
 // REPRODUCIBILITY: every random choice comes from a seeded LCG, so a run reproduces the approved
 // screen for a given quote charset -- but step 5 shuffles with Array.sort and a random comparator, whose call order belongs

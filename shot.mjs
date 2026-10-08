@@ -37,7 +37,7 @@ const lum = (x, y) => {
 };
 // RRGGBB per pixel, space separated. The '#'/'.' modes threshold luminance at 128, which is
 // blind to anything dark-on-dark: the dark-grey panel seams (lum 98) on the black wall read
-// as plain wall, so verify-seams.mjs silently reported "drawn 0" for every view once the
+// as plain wall, so the seam checker silently reported "drawn 0" for every view once the
 // seams were recoloured. A caller that compares colours instead of brightness survives the
 // next recolour too.
 const col = (x, y) => {

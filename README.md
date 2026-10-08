@@ -23,7 +23,7 @@ machine. Somewhere along the way it became a game.
 ## Playing
 
 You need a C64, or [VICE](https://vice-emu.sourceforge.io/) (`x64sc`), and the disk image
-`lest.d64` from the releases page, or one you build yourself (below). It's built and timed for
+[`lest-c64.d64`](lest-c64.d64) in this repository, or one you build yourself (below). It's built and timed for
 **NTSC** machines.
 
 | control | |
@@ -44,7 +44,7 @@ Requirements: a recent [Node.js](https://nodejs.org/) (developed on 26), and [Im
 toolchain: the assembler (`asm6502.mjs`) and the disk-image writer (`d64lib.js`) are part of the project.
 
 ```sh
-node build-iray.mjs                     # the whole game -> latest.d64
+node build-iray.mjs                     # the whole game -> lest-c64.d64
 CHAIN=4 node build-iray.mjs             # one level on its own, for playtesting
 ```
 
@@ -76,8 +76,9 @@ The build also checks itself as it goes. Page alignment, memory overlaps, zero-p
 unreachable code, and the precondition of every undocumented opcode it uses are verified before a
 disk is written.
 
-Deeper notes: [`RENDERING.md`](RENDERING.md) on the renderer, [`DECISIONS.md`](DECISIONS.md) on why
-things are the way they are.
+Deeper notes: [`RENDERING.md`](RENDERING.md) on the renderer. Every entity's size ladder, drawn
+rung by rung at the C64's pixel aspect, is in [`docs/ladders/`](docs/ladders/)
+(regenerate with `LADDERSHEET=1 node build-iray.mjs`).
 
 ## Layout
 
@@ -85,11 +86,14 @@ things are the way they are.
 |---|---|
 | `build-iray.mjs` | the game: emits 6502 assembly, builds every level, writes the disk |
 | `compact.mjs` | the image layout pass (run by the build) |
+| `loader-src.mjs` | the boot: autorun, fast first stage, quote, Krill's installer |
+| `ending-src.mjs` | the ending: end quote, the tree dissolving in, and the reload |
 | `asm6502.mjs`, `d64lib.js` | assembler and disk writer |
-| `art/` | source art: renders, paintings and hand-drawn sprites |
+| `art/` | source art: renders, paintings and hand-drawn sprites; `art/tree/` is the end scene's |
 | `*.json` | fitted assets the build reads (sprites, charset plan, boot quote) |
-| `fit-*.mjs`, `make-*.mjs`, `charsetgen.mjs` | hand-run generators that produce those assets |
-| `krill/`, `krill-bg/` | Krill's loader, prebuilt |
+| `fit-*.mjs`, `make-*.mjs`, `charsetgen.mjs`, `tools/endscene.mjs` | hand-run generators that produce those assets |
+| `krill/` | Krill's loader, prebuilt |
+| `docs/ladders/` | every entity's ladder of sprite sizes, as pictures |
 | `tools/` | VICE-driven profiling and test rigs (`vprof`, `frames`, `ship.sh`, …) |
 | `probe.mjs`, `fpsr.mjs`, `prof.mjs` | live-machine inspection and frame-rate benchmarks |
 
@@ -97,7 +101,6 @@ things are the way they are.
 
 Everything in this repository -- the code, the art in `art/`, the end-scene picture and the level
 designs -- is released under the [MIT licence](LICENSE).
-
 
 Included third-party code keeps its own licence:
 

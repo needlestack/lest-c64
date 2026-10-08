@@ -1,4 +1,4 @@
-// make-quote.mjs -- quote0N.png -> quote-screen.json, run by hand like make-pedestal-art.mjs.
+// make-quote.mjs -- art/quote-start.png -> quote-screen.json, run by hand like make-pedestal-art.mjs.
 //
 // THE END QUOTE uses the same conversion with its own charset and no packing (the fast loader
 // brings it in at the end, so the KERNAL-speed reason for packing does not apply):

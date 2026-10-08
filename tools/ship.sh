@@ -22,5 +22,5 @@ for k in latest dev leveltest; do
     if cmp -s $S/sh-$k.d64 $S/base-$k.d64; then echo "$k IDENTICAL"; else echo "$k DIFFERS  asm diff lines: $(diff $S/base-$k.asm $S/sh-$k.asm | grep -c '^[<>]')"; fi
   fi
 done
-# leave the tree as a plain build leaves it: iray.asm (tracked) and latest.d64 are the game's
+# leave the tree as a plain build leaves it: iray.asm (tracked) and lest-c64.d64 are the game's
 node build-iray.mjs >/dev/null 2>&1

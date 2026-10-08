@@ -2,7 +2,7 @@
 //
 //   CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node build-iray.mjs && node charsetgen.mjs
 //
-// WHY NOT THE GREEDY MERGE IN mergecells.mjs. That folds a rare shape into whichever L1==1
+// WHY NOT THE GREEDY MERGE of the earlier mergecells.mjs (since removed). That folds a rare shape into whichever L1==1
 // NEIGHBOUR is more common, so when five shapes collapse into one they all land on the most
 // popular member rather than on the shape closest to all five -- and because it is greedy and
 // pairwise, the answer depends on which fold happened first. Both are real biases and both

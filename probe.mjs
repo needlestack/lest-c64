@@ -9,7 +9,7 @@
 // wrong denominator. Each printed a plausible value and none of them announced itself.
 //
 // So the rules here are structural, not advisory:
-//   * ONE build. The same invocation that writes latest.d64 emits the labels, so an address
+//   * ONE build. The same invocation that writes lest-c64.d64 emits the labels, so an address
 //     can never come from a build the disk is not.
 //   * A missing label is fatal. It used to yield an empty string, `$NaN`, and three reads of
 //     the same nonsense.
@@ -23,7 +23,7 @@ import net from 'net';
 import { portHeld, launch, LAUNCH_FLAGS } from './tools/vice.mjs';
 
 const VICE = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
-const DISK = './latest.d64';
+const DISK = './lest-c64.d64';
 const args = process.argv.slice(2);
 if (!args.length) { console.error('usage: node probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
 
@@ -68,7 +68,7 @@ const trapArg = args.find(a => a === '--trap') ? args[args.indexOf('--trap') + 1
 // a step before the bug. Loaded with the binary monitor's UNDUMP. VICE is launched WITHOUT
 // -autostart then (the disk attached only): autostart types RUN when it sees READY, and those
 // keystrokes would land in the game. The build this probe makes must be the one the snapshot was
-// taken on, or every label is wrong -- the plain env builds latest.d64, which is what the user plays.
+// taken on, or every label is wrong -- the plain env builds lest-c64.d64, which is what the user plays.
 const require_path = p => p.startsWith('/') ? p : process.cwd() + '/' + p;
 const snapArg = args.find(a => a === '--snapshot') ? args[args.indexOf('--snapshot') + 1] : '';
 const watchAllArg = args.find(a => a === '--watchall') ? args[args.indexOf('--watchall') + 1] : '';
@@ -148,7 +148,7 @@ for (const n of [...names, LIVE]) {
 // an execution checkpoint by name; absent (an older build) it simply falls back to the old wait.
 let SYMS = {};
 try { SYMS = JSON.parse(readFileSync('./iray.syms.json', 'utf8')); } catch { /* optional */ }
-if (!existsSync(DISK)) { console.error('no latest.d64'); process.exit(1); }
+if (!existsSync(DISK)) { console.error('no lest-c64.d64'); process.exit(1); }
 
 // ---- run it, never touching an emulator that was already open ----
 // A held monitor port makes VICE print "bind() failed: Address already in use" into its own log
@@ -206,8 +206,8 @@ const vice = launch([...LAUNCH_FLAGS, '-warp', '-jamaction', '1',
   ...(snapArg ? ['-8', DISK] : ['-autostart', DISK])], { config: CFG, log: LOG });
 const stop = () => {
   vice.kill();                      // this run's process group, and nothing else
-  // PUT THE SHIPPING DISK BACK. The build above runs with THIS probe's env, so latest.d64 is
-  // left holding whatever diagnostic was being measured -- and latest.d64 is the one disk, the
+  // PUT THE SHIPPING DISK BACK. The build above runs with THIS probe's env, so lest-c64.d64 is
+  // left holding whatever diagnostic was being measured -- and lest-c64.d64 is the one disk, the
   // thing a person loads to play. A FALLNOW build handed over this way drops the player through
   // the floor every 256 frames, which reads as the game being broken rather than the disk being
   // the wrong one. Three times before this was added. NOPROBEREBUILD=1 skips it for a run where

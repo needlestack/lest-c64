@@ -1,5 +1,5 @@
 
-; ---- SOLO=1: THE LEVEL IS NOT IN THIS IMAGE ----
+; ---- THE LEVEL IS NOT IN THIS IMAGE ----
 ; Every per-level table is an EQUATE into the slot at $f500, in manifest order, mapT first
 ; so it lands page-aligned at offset 0. The bytes arrive as their own disk file. Nothing below
 ; changes: every reference still names the label, which now resolves into the slot instead of
@@ -1316,13 +1316,8 @@ subFace:lda spanR
         ; all -- it is simply the column we just found. Do it before the k=0 bail below:
         ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
         ;
-        ; CVXSEAM=1 IS THE DEFAULT, so EVERY run end gets its mark, concave or convex -- not the
-        ; whole vertical run, just the column where black meets black. The block below is the
-        ; CVXSEAM=0 path and the rest of this note describes IT, not what ships:
-        ;   a CONCAVE corner is an inside corner where two perpendicular faces meet, both walls
-        ;   at the same depth, so the line is the only thing dividing them. A CONVEX corner --
-        ;   the end of a receding wall -- is already drawn by the silhouette stepping 20+ rows,
-        ;   and the argument was that a grey line adds nothing to a boundary that emphatic.
+        ; EVERY run end gets its mark, concave or convex -- not the whole vertical run, just the
+        ; column where black meets black.
 subCv:  
         jsr subCvM              ; choose the column, settle any collision, place the mark
 subCn:
@@ -1613,7 +1608,7 @@ subBDn: rts
 ; It cannot lose a boundary: extra cut points only ever SPLIT a span, and every sub-span still
 ; gets the same face-id test in subLp -- so this finds a superset of what bisection finds. That
 ; is why the bracket can be one column wide with no safety margin: a wrong prediction costs
-; probes, never pixels. Modelled in analyze-pivot.mjs at 22.6 -> 15.0 marches/frame.
+; probes, never pixels. Modelled offline at 22.6 -> 15.0 marches/frame.
 ;
 ; With pvN = 0 -- first frame, or PIVOT off -- it degenerates to exactly the old seeding.
 pivPrep:
@@ -11734,7 +11729,6 @@ snKDn:  rts
 ; 3/4/8/9, and its 40 merge-hazard lists -- which name the BUILD's ids -- spliced the column onto
 ; whichever wall held the old number: "the central column stretches as if attached to another
 ; wall off screen" (the user). Level 1 was untouched because mkRuns only runs after a fall.
-; MKRUNS=1 boots through this routine on top of the build's tables so the two can be compared.
 mkRuns: ldx #$00
         txa
 mrZ:    sta runWT,x             ; 0 = "no run here"

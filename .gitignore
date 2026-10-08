@@ -10,6 +10,8 @@
 # ---- build output: `node build-iray.mjs` regenerates all of it ----
 *.d64
 !art/*.d64
+# ...except THE game, committed so a visitor can play it without building
+!lest-c64.d64
 iray.prg
 iray-c.prg
 iray-charset.bin
@@ -29,8 +31,8 @@ iray.compact.asm
 .wall*-tables.json
 # diagnostic dumps
 cellscan.json
-model.json
 orbdiag.json
+face-extra.json
 # charset-plan.json is TRACKED. It looks derived and it is not: it is the k-medians fit over a
 # 2M-position scan of a shape-rich maze, canonical input to every build, and no level's map is an
 # input to it. Untracked, a clean clone would refit the charset against whatever map was built.
@@ -41,6 +43,8 @@ orbdiag.json
 # (art lives in art/; fit-angel's previews regenerate with `node fit-angel.mjs art/TMP-3.d64 hangl1`)
 /*.png
 /*.gif
+# c64pic's picture for the end scene (see tools/endscene.mjs for the recipe)
+/tree.kla
 
 # ---- reference material that is not ours to publish (photographs of real objects) ----
 art/ref/
@@ -56,6 +60,3 @@ tools/.ship/
 CLEANUP-REVIEW.md
 loader-v194.zip
 krill/loader-rt-c64.prg
-/tree-regions.json
-/tree-nobrown.json
-/tree-darkmap.json

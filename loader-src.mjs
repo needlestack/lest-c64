@@ -32,11 +32,13 @@ export const LOADER_RUN = 0x0630;   // clear of Krill's resident, which END_ADDR
                                     // 556 bytes: $0400-$062b. buildLoader asserts it.
 // BGLOAD=1 loads levels in the frame SLACK, which starves the loader for whole game frames -- and
 // the 1541's watchdog resets the drive after 65,536 cycles (~4 video frames) of silence mid-transfer.
-// krill-bg/ is the same Krill v194 built with DISABLE_WATCHDOG = 1 in loader/include/loader.inc (the
-// only change: a rebuild of the untouched source reproduces krill/ byte for byte). Its README says
-// exactly this for a loader "starved for multiple video frames"; the cost is that a crash or reset
-// MID-LOAD leaves the drive needing a power-cycle.
-const KDIR = process.env.BGLOAD === '1' ? 'krill-bg' : 'krill';
+// BGLOAD=1 (loading levels in the frame slack, a parked prototype) needs Krill v194 rebuilt with
+// DISABLE_WATCHDOG = 1 in loader/include/loader.inc -- the loader is "starved for multiple video
+// frames" there, and the watchdog would reset the drive. That build was krill-bg/; it is not in this
+// repository any more (it is in the project's history), so BGLOAD stops here rather than load the
+// wrong loader.
+if (process.env.BGLOAD === '1') throw new Error('BGLOAD=1 needs the no-watchdog Krill build (krill-bg/), which is no longer included');
+const KDIR = 'krill';
 const krillPrg = n => [...readFileSync(`./${KDIR}/${n}`)];
 const krillAt = p => p[0] | (p[1] << 8);
 const KRILL_RES_PRG = krillPrg('loader-c64.prg'), KRILL_INST_PRG = krillPrg('install-c64.prg');

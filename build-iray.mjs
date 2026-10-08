@@ -1,5 +1,5 @@
 // build-iray.mjs — char-framebuffer raycaster for a stock C64. Emits iray.asm, assembles
-// it, and writes latest.d64. The engine, top to bottom:
+// it, and writes lest-c64.d64. The engine, top to bottom:
 //
 //   castRay     8-bit integer DDA, one ray per connected-wall-run boundary rather than
 //               per column -- adaptive subdivision, so ~25 rays cover 160 columns.
@@ -14,7 +14,7 @@
 // 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
 // code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
-import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
 import { execFileSync } from 'child_process';
 // Run this script again as a SUB-BUILD (one level's tables, one wall variant). Its chatter is
 // dropped, but if it FAILS its own error is shown: with stderr discarded, a sub-build that hit a
@@ -49,17 +49,10 @@ if (DIETEST) {                       // defaults only: each is still overridable
   process.env.ANGAT ??= '3.5,4.5';   // ...one cell west
   process.env.ANGFREEZE ??= '1';
 }
-// TESTLVL=1: a bare room for LOOKING at things -- not a level. 8x8, one column, one orb, one
-// socket, the exit hole in a corner, no angel. It sets everything else it needs, because the
-// combination is not obvious and getting any of it wrong fails in a different file:
-//   - sockets and the SECOND cut-scene picture both want PICBASE, so a socket build ships one
-//     picture (see the PICSEG check);
-//   - a socket is a hole-like entity, so the entity count stops matching level 1 and the two
-//     levels can no longer share one binary.
 // ---- WHICH LEVEL IS THIS BUILD? ----
-// LVL=1|2|3, and the three are a LOOP: 1's hole drops into 2, 2's into 3, and 3's brings you
-// back to a RESET level 1 (objInit on arrival restores every entity). All three resident by
-// default (TWOLEV), each of the others built as a shadow in its own subprocess.
+// LVL=n is the level this build (or sub-build) is about. The game is the CHAIN of levels, each
+// built in its own subprocess and loaded off the disk when it is fallen into; the hub's black hole
+// leads to the ending (END_DST).
 //
 // LEVEL 1 is the user's layout of 2026-09-15: the old level 1's room, 6 x 9 with its alcoves
 // and notch, joined by a 7-cell corridor to the ring rotated 90 degrees clockwise. 23 x 11 =
@@ -96,10 +89,10 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // chain. The other shipping disk is 4,5,6,7 (leveltest.d64). History of the residency limits that
 // used to shape this default (1,2,3 / 1,4,5 / 1,2 / 1-4): the iray-shipping-chains note and git log.
 const CHAIN = (process.env.CHAIN ?? '1,2,3,4,5,6,7').split(',').map(Number);
-// D64=<name> writes somewhere other than latest.d64. A variant build -- a level-wiring test, a
+// D64=<name> writes somewhere other than lest-c64.d64. A variant build -- a level-wiring test, a
 // profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
-const D64OUT = process.env.D64 ?? 'latest.d64';
+const D64OUT = process.env.D64 ?? 'lest-c64.d64';
 const LVL = +(process.env.LVL ?? CHAIN[0]);
 // EVERY level the image has to be able to RUN. (It once also held the LATE levels, which arrived
 // from disk mid-game; loading on demand made every level that, so it is the chain.)
@@ -1023,13 +1016,13 @@ for (let c = 0; c < NLOG; c++) {
 // The subdivision bisects, so it spends ~7.3 marches locating each boundary from scratch every
 // frame -- and boundaries barely move between frames. Predict each one forward and start the
 // search from a ONE-COLUMN bracket around the prediction instead of from the whole screen.
-// Modelled in analyze-pivot.mjs at 22.6 -> 15.0 marches a frame (-33%), 0 boundaries lost.
+// Modelled offline (a JS replay of the subdivision) at 22.6 -> 15.0 marches a frame (-33%), 0 boundaries lost.
 //
 // It cannot lose a boundary, structurally: the extra cut points only ever SPLIT a span, and
 // every sub-span still gets the same face-id test, so this finds a superset of what bisection
 // finds. A bad prediction costs probes, never pixels -- which is what makes w=0 safe.
 //
-// prediction (all fixed point, see analyze-pivot.mjs where the scales were verified):
+// prediction (all fixed point; the scales were verified in that offline replay):
 //   q' = rayOffQS[c] - dqa + ((dxv*sin(a) - dyv*cos(a)) * rcp + 2^14 >> 15)
 //        \___ where it was ___/  \_ rotation _/  \______ translation, first order ______/
 // then qToColT turns q' back into a column. The 2^14 is a ROUND: a bare >>15 truncates toward
@@ -1037,10 +1030,9 @@ for (let c = 0; c < NLOG; c++) {
 // Requires FINEANG (for rayOffQS) and PLAN=3 (for the three table pages it frees; see the
 // emission site). Both are the defaults, so this is on unless something else is being tested.
 const PIVOT = +(process.env.PLAN ?? 3) === 3 && true;
-// PIVTRANS=0 zeroes the translation delta, leaving the rotation-only prediction. Not a tuning
-// knob -- it is the A/B that says whether the translation term earns the two multiplies, and
-// the only way to tell a WORKING translation term from a broken one, since a broken one cannot
-// corrupt the image (extra cuts only split spans) and shows up purely as lost rays.
+// The translation term was justified by an A/B against the rotation-only prediction (PIVTRANS=0,
+// since removed) -- the only way to tell a WORKING translation term from a broken one, since a
+// broken one cannot corrupt the image (extra cuts only split spans) and shows up purely as lost rays.
 // signed sin * 128, by BYTE angle. absSinT/absCosT hold the magnitudes but put the sign in a
 // separate table, which is a second lookup and a branch on a path that multiplies twice per
 // boundary per frame. Only SIN is stored: cos(a) = sin(a + 64) at 256 units to the turn, and
@@ -1808,7 +1800,7 @@ const COVER3_ROUTE = [
 // "is this validated" list, the "does it open walls" list, the start-pose ternary and the .end
 // lookup -- with the START POSE STATED TWICE, once to compileRoute and again to the validator.
 // Two sources for one fact is how they drift, and a sixth list had already fallen behind:
-// POSEDUMP's knew five of the nine routes, so POSEDUMP=1 ROUTE=sock read poses of undefined.
+// a pose dump's knew five of the nine routes, and read poses of undefined for the rest.
 // Adding a route is now one entry.
 const ROUTES = {
   cover:  { route: COVER_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
@@ -1881,14 +1873,6 @@ if (!process.env.LVLDUMP && ROUTEDEF) {
 if (process.env.TOURDUMP)
   console.error('  tour: ' + TOUR_STEPS.map(t => `${t[0]}:${t[1]}`).join(' ') +
                 `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
-// POSEDUMP=1: the compiler's pose at the end of each step, one line a step, for posecheck.mjs.
-if (process.env.POSEDUMP && ROUTE !== 'walk') {
-  const c = ROUTEDEF.compiled;    // every route, not the five this list used to know
-  for (let i = 0; i < TOUR_STEPS.length; i++) {
-    const [x, y, a] = c.poses[i + 1] ?? c.end;    // poses[i] is the pose at the START of step i
-    console.log(`  pose ${i} ${TOUR_STEPS[i][0]} ${TOUR_STEPS[i][1]} ${x} ${y} ${a}`);
-  }
-}
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
 for (let i = 0; i < 256; i++) { const v = Math.floor(i * i / 4); f0Lo.push(v & 255); f0Hi.push((v >> 8) & 255); }
 for (let i = 256; i < 512; i++) { const v = Math.floor(i * i / 4); f1Lo.push(v & 255); f1Hi.push((v >> 8) & 255); }
@@ -1901,7 +1885,7 @@ for (let i = 256; i < 512; i++) { const v = Math.floor(i * i / 4); f1Lo.push(v &
 // A cell is described by [f0..f3] = wall pixels counted UP FROM THE CELL BOTTOM in each
 // of the 4 columns. Only 253 of the 2^32 possible cells are ever needed, because under
 // rectilinear projection the wall top is a straight line across a face -- see
-// analyze-4x8*.mjs / analyze-final.mjs for the derivation and the measured error.
+// the derivation and the measured error were offline analyses, kept in the project's history.
 //
 // Index: (wL, wR, bulge). wL/wR are the clamped end columns; bulge distinguishes the
 // three interior shapes the endpoints alone cannot separate (a step cannot be told from
@@ -1943,7 +1927,7 @@ const QLEV = {
 // The middle sample only has to say roughly WHERE the step falls; the edges set the heights the
 // eye aligns against, so trading middle resolution for exact edges is the right direction. It is
 // specifically BOTH edges together that pays: 9x3x8 and 8x3x9 both fall back to ~0.384.
-// (9x9x9 reaches 0.154 but needs 729 states = 3 pages -- see DECISIONS.md.)
+// (9x9x9 reaches 0.154 but needs 729 states = 3 pages -- see the SLOTPAGES note below.)
 const [LA, LM, LB] = (process.env.QLEVELS ?? '9,3,9').split(',').map(Number);
 // The one-byte slot is not a law, it is a budget. Past 256 states the slot becomes 9 or 10 bits
 // and the step tables gain pages, dispatched on the high byte -- the same trick the quarter-angle
@@ -1953,8 +1937,8 @@ const SLOTPAGES = Math.ceil(LA * LM * LB / 256);
 if (SLOTPAGES > 1) throw new Error(
   `step index ${LA}*${LM}*${LB} = ${LA*LM*LB} needs ${SLOTPAGES} pages. The JS side is ready ` +
   `(qmLoT/qaLoT/qaHiT below) but the 6502 side is NOT: rfStep still folds qA*8+qM into one byte ` +
-  `via qmT, and stepT1/2/3 are emitted one page each. Both must change together -- see the ` +
-  `unfinished work note in DECISIONS.md.`);
+  `via qmT, and stepT1/2/3 are emitted one page each. Both must change together: the slot becomes ` +
+  `two bytes (or the high byte picks the page), and every stepT read dispatches on it.`);
 if (LA > 9 || LM > 9 || LB > 9) throw new Error('quantisation levels max out at 9 (exact 0..8)');
 const QA = QLEV[LA], QM = QLEV[LM], QB = QLEV[LB];
 
@@ -2524,7 +2508,7 @@ for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 1)));
 // under it -- the cell would flip to next frame's outline a refresh early. So buffer A's stamps
 // use codes SYN0..SYN0+N/2-1 and buffer B's the rest; a frame needing more than its half falls
 // back to the old whole-column stamp for the rest. The user's own idea, costed in August,
-// buildable now that the charsets are plain RAM (2026-09-16). OCCSYN=0 to A/B.
+// buildable now that the charsets are plain RAM (2026-09-16).
 // ---- WHICH CELLS A PRE-BUILT SPLIT CAN ALREADY EXPRESS ----
 // The seven occluders above are `new Array(8).fill(occRow(...))` -- every row identical, because
 // a column split is a VERTICAL boundary. So a cell glyph whose eight rows are all equal has a
@@ -2662,7 +2646,7 @@ const OCC_FULL = OCC0 + 3;                        // all four columns foreground
 // foreground priority is moot here because the fall clears every sprite on the frame it starts
 // (they belong to the level being left). So a plain black char cost no new code at all.
 // The synthesis scratch codes are the LAST OCCSYN_N of the charset. They must be free: the plan
-// was refit at KCELL=201 to free six (3.416 -> 3.438 wrong px/frame on the 2M scan, crossfit).
+// was refit at KCELL=201 to free six (3.416 -> 3.438 wrong px/frame on the 2M scan, scored against a scan it was not fitted to).
 const SYN0 = 256 - OCCSYN_N;
 // ---- and what happens when those run out, which on the hub is FIFTEEN CELLS A FRAME ----
 // Measured at the user's viewpoint (level 4, PX=06b5 PY=037d PA=eb PAF=80): oSFbN = 15. Three
@@ -2781,7 +2765,7 @@ if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell pa
 // OCCSYN's scratch codes are the top OCCSYN_N: they must not be allocated to anything. Checked
 // here, where the glyph list is final, rather than trusting that KCELL was refit low enough.
 if (glyphs.length > 256 - OCCSYN_N) throw new Error(
-  `charset has ${glyphs.length} codes; OCCSYN needs the top ${OCCSYN_N} free -- refit with a smaller KCELL, or OCCSYN=0`);
+  `charset has ${glyphs.length} codes; OCCSYN needs the top ${OCCSYN_N} free -- refit with a smaller KCELL`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + ${NSEAM} seam + 7 occluder ` +
   `+ 6 white-backed = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
@@ -3201,34 +3185,6 @@ const qIdxAT = [...Array(CN)].map((_, v) => qIdxA(v + CLO));
 const qIdxMT = [...Array(CN)].map((_, v) => qIdxM(v + CLO));
 const qIdxBT = [...Array(CN)].map((_, v) => qIdxB(v + CLO));
 
-// MODELJSON=1 dumps everything a standalone copy of the model needs -- the map, the run ids the
-// face test reads, the clamp, the two code tables and the pattern behind every code. Written so
-// the model can be run somewhere without Node (see iray-model.html): the alternative is a
-// hand-copied second implementation, which is exactly what refShoot was hoisted to avoid.
-if (process.env.MODELJSON === '1') {
-  // Under PLAN the codebook is the plan's, not codeOf -- codeOf keeps only BLANK and SOLID once
-  // placeAll is skipped, so building the glyph table from it yields 2 patterns and a blank page.
-  const patOfCode3 = (() => { const m = new Map();
-    for (const [k, c] of codeOf) if (!m.has(c)) m.set(c, k.split(',').map(Number));
-    planPats.forEach((p, i) => m.set(2 + i, p));
-    return m; })();
-  writeFileSync('./model.json', JSON.stringify({
-    NLOG, FOV, NCELL, CLO, CHI, CN, LA, LM, LB,
-    map: [...map], runW: [...runW], runE: [...runE], runN: [...runN], runS: [...runS],
-    rampT, stepT, qIdxAT, qIdxMT, qIdxBT,
-    // PLAN=3's actual tables, so the browser page models the SHIPPED renderer rather than a
-    // single-index approximation of it. Without these the page silently shows a different engine.
-    plan: PLAN,
-    rampTlo, rampThi, stepTlo, stepThi,
-    rampThr: PLAN === 3 ? [...Array(256)].map((_, i) => rampThrN(i)) : null,
-    stepThr: PLAN === 3 ? [0, 1, 2].map(k => [...Array(SLOTN)].map((_, i) => stepThrN(k, i))) : null,
-    codePat: [...Array(256)].map((_, c) => patOfCode3.get(c) ?? null),
-    cellCodes: CELLCODES, seam0: SEAM0, blank: BLANK, solid: SOLID,
-  }));
-  console.error(`MODELJSON: wrote model.json (${CELLCODES} cell codes)`);
-}
-
-
 // ---- unrolled fill chains ----
 // A straight line of store instructions, one slot per cell row, each with its screen
 // address baked into the instruction. Jumping INTO the middle of that line writes exactly
@@ -3491,7 +3447,7 @@ if (PLAN === 3) {
   //       NOT the converse: if a future charset plan ever emitted a real threshold of 0 for a
   //       slot whose halves differ, every cell landing there would render the hi half forever.
   //       Nothing else in the pipeline would notice -- it is a wrong CODE, not a wrong shape,
-  //       so verify-render would report a handful of stray pixels with no hint of the cause.
+  //       so a screenshot check would report a handful of stray pixels with no hint of the cause.
   const c8 = [...Array(392)].map((_, j) => Math.max(0, Math.min(8, j - 132))).findIndex(v => v < 0 || v > 8);
   if (c8 >= 0) throw new Error(
     `ecM8[${c8}] is outside 0..8, so m could go negative and renderSym's ` +
@@ -4399,7 +4355,7 @@ const ORBFG = process.env.ORBFG;
 // canOcc comes from blockers(), which marches from 9 eye positions in the cell across +-0.25
 // cells of the orb. That answers "can this orb be occluded from this cell" well enough for the
 // WHOLE-ORB hide, but partial occlusion asks a wider question -- can any PART of it be hidden
-// from anywhere in the cell -- and ORBGATECHK=1 measures the gate answering "no" wrongly for
+// from anywhere in the cell -- and a measurement (ORBGATECHK, since removed) found it answering "no" wrongly for
 // 4 of 426 gated candidates (0.9%). Each of those is an orb that visibly overlaps a wall for as
 // long as you stand in that cell, and pops correct again one step later.
 //
@@ -4605,7 +4561,7 @@ const ORBEXP = LADDER.map(r => r.exp);
 const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent width, screen px
 const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent height, screen px
 // ---- TALL ENTITIES: the angel, two sprites stacked ----
-// Art comes off TMP-2.d64 (GKGM, two frames) via angel-art.json. 12x42 multicolor, body and
+// Art came off TMP-2.d64 (GKGM, two frames; the disk is not kept) via angel-art.json. 12x42 multicolor, body and
 // underside inks only. Same resampler as the orb -- majority of 4x4 samples, transparency
 // competing on equal terms -- just over a 42-row box, so the output is TWO sprite bitmaps.
 // Step of 3 source rows a rung: 7% a step, comparable to the orb ladder, and 13 distinct heights
@@ -4995,8 +4951,8 @@ const GW = Math.max(..._gc) - GX0 + 1, GH = Math.max(..._gr) - GY0 + 1;
 // It used to box-filter GOAT, the hand-tuned 21x12 in goat-art.json -- a resample of something
 // already crushed to sprite resolution and four colours. That is why its small rungs collapsed
 // into a cross and a dash while the orb's stayed round: the orb re-resolves from 1254x1254 at
-// every rung and keeps its grain, the idol was averaging an average. ORBRUNG=0 shows the orb
-// done the old way and it has the same blotchy failure.
+// every rung and keeps its grain, the idol was averaging an average. The orb done the old way (a
+// switch, ORBRUNG=0, since removed) had the same blotchy failure.
 // goat6.png is the render with the silhouette painted back over it by hand -- bold strokes for
 // the horns and ring, stippling across the face -- because a plain render cannot survive twelve
 // columns: at h=12 one sprite pixel covers 143x96 source pixels, so any mark thinner than that
@@ -5493,7 +5449,6 @@ const PACK_PROBE = process.env.PACKPROBE ?? '';
 const PACK_OMIT = new Set((process.env.PACKOMIT ?? '').split(',').filter(Boolean));
 const PACK_HOLES = [];
 
-// NOPACK=1: skip the probe and pack nothing, for comparing against an unpacked layout.
 const PACK_AT = new Map();
 const PACKED = new Map();            // item name -> the hole it went in
 // Emitted at the marker: an origin, then whatever landed in that hole.
@@ -6179,7 +6134,7 @@ if (process.env.ANGDUMP === '1') {
       `  exp ${ORBEXP[v]}  ptr ${ORBSRC[v]}`);
   }
 }
-// ---- ANGMID=1: centre the angel on its ideal height instead of standing it on the floor ----
+// ---- THE ANGEL IS CENTRED on its ideal height instead of standing on the floor (once ANGMID=1) ----
 // The rung is a quantised height, and foot-anchoring puts ALL of that error at the TOP: between
 // jumps the figure slides down with the ground line, then the top leaps by the whole step. Split
 // the error and it grows both ways, so the top moves half as far. ovar is itself a function of
@@ -7953,6 +7908,7 @@ if (ORBHI + ORBHI_N * 64 > 0xe000) throw new Error(
 // at the C64's NTSC pixel aspect -- a multicolor pixel is TWO hires pixels wide and a hires pixel
 // is 0.75 as wide as it is tall, so a multicolor pixel is 1.5 : 1. Square pixels made every
 // sprite look half as tall as it really is. A thin box marks each hardware sprite.
+// LADDERSHEET=1 writes them to docs/ladders/<entity>.png (LADDERSHEET=<dir> anywhere else).
 if (process.env.LADDERSHEET) {
   const PAR = +(process.env.PAR ?? 0.75);        // NTSC. PAL is nearer 0.936
   const SC = 4;                                  // output rows per source row
@@ -8017,8 +7973,11 @@ if (process.env.LADDERSHEET) {
         for (let y = 0; y < bh; y++) { put(bx, by + y, [70, 60, 0]); put(bx + bw - 1, by + y, [70, 60, 0]); }
       }
     });
-    writeFileSync(`ladder-${name}.png`, png(W, H, rgb));
-    console.error(`  ladder-${name}.png: ${rungs.length} rungs, ${W}x${H}`);
+    // docs/ladders/ is where the sheets are kept (committed), so regenerating them is one flag
+    const dir = process.env.LADDERSHEET === '1' ? 'docs/ladders' : process.env.LADDERSHEET;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(`${dir}/${name}.png`, png(W, H, rgb));
+    console.error(`  ${dir}/${name}.png: ${rungs.length} rungs, ${W}x${H}`);
   };
   // the hole: `grid` is the whole assembled rung, `spr` hardware sprites of 12 across it
   const holeRung = i => { const r = HOLE.L[i]; return {
@@ -8117,149 +8076,6 @@ if (process.env.LADDERSHEET) {
     mapLine('idol', idolG, i => `bm${ORBSRC[i]}`);
     // IDOLDBG: the sheet's columns, numbered as drawn, with what each one IS and the distance
     // band it covers -- so a rung can be named by its position in the PNG.
-    // ---- IDOLFIT: the idol fitted from goat.png at every rung, the way the orb is ----
-    // The shipping idol is box-filtered down from goat-art.json, a 21x12 grid -- a resample of
-    // something already crushed to sprite resolution and four colours. The orb is fitted from
-    // sphere-rough.png (1254x1254) at each rung instead, which is what keeps its grain constant
-    // all the way down; ORBRUNG=0 shows what the orb looks like done the idol's way, and it is
-    // the same blotchy collapse. goat.png is 718x846 and the build has never touched it.
-    // Strips only -- nothing here changes what is built.
-    if (process.env.IDOLFIT) {
-      for (const mode of (process.env.IDOLFIT === '1'
-            ? 'd1c1.0,d1c1.6,d0c1.0,d0c1.6' : process.env.IDOLFIT).split(',')) {
-        const m = /^d([01])c([\d.]+)$/.exec(mode.trim());
-        if (!m) throw new Error(`IDOLFIT: "${mode}" is not d<0|1>c<contrast>`);
-        const dith = m[1] === '1', con = +m[2];
-        const grid = h => {
-          const w = orbW(h), out = [...Array(21)].map(() => new Array(12).fill(0));
-          const px = fitArt(process.env.IDOLART ?? 'ram5.png', w, h,
-                            { dither: dith, contrast: con, dark: true }).px;
-          const ox = (12 - w) >> 1, oy = 21 - h;
-          for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
-            out[oy + dy][ox + dx] = px[dy * w + dx];
-          return out;
-        };
-        const rung = (h, e) => { const g = grid(h);
-          return { xmag: e, ymag: e,
-                   parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; };
-        const magH = ORB_H.filter(h => 2 * h > SH);
-        const all = [...magH.map(h => rung(h, 1)), ...ORB_H.map(h => rung(h, 0))];
-        sheet(`idol-fit-${mode}`, all);
-        // one frame per rung, same framing as the orb's: fixed canvas, bottom-anchored,
-        // centred on the sprite centre, no hardware box.
-        if (process.env.IDOLFRAMES) {
-          const FW = 12 * 2 * CW + 12, FH = 21 * 2 * CH + 12;
-          all.forEach((r, i) => {
-            const rgbF = new Uint8Array(FW * FH * 3);
-            for (let q = 0; q < FW * FH; q++) { rgbF[q*3]=22; rgbF[q*3+1]=22; rgbF[q*3+2]=22; }
-            const putF = (x, y, c) => { if (x<0||y<0||x>=FW||y>=FH) return;
-              const o=(y*FW+x)*3; rgbF[o]=c[0]; rgbF[o+1]=c[1]; rgbF[o+2]=c[2]; };
-            const xm = r.xmag ? 2 : 1, ym = r.ymag ? 2 : 1, pt = r.parts[0];
-            const x0 = ((FW - pt.w*xm*CW) >> 1), y0 = FH - 6 - pt.h*ym*CH;
-            for (let y = 0; y < pt.h*ym; y++) for (let x = 0; x < pt.w*xm; x++) {
-              const v = pt.at((x/xm)|0, (y/ym)|0);
-              if (!v) continue;
-              const px2 = x0 + x*CW, py2 = y0 + y*CH;
-              for (let b2 = 0; b2 < CH; b2++) for (let c2 = 0; c2 < CW; c2++)
-                putF(px2+c2, py2+b2,
-                  v===3?[255,255,255]:v===2?[186,186,196]:[118,118,128]);
-            }
-            writeFileSync(`gif-idolfit-${String(i).padStart(2,'0')}.png`, png(FW, FH, rgbF));
-          });
-          console.error(`  gif-idolfit-NN.png: ${all.length} frames (${mode})`);
-        }
-      }
-    }
-    // ---- IDOLBLEND=<w>: EVERY rung is a per-pixel blend of the two sources ----
-    // Not a crossover -- switching sources at one rung makes the silhouette change shape as you
-    // walk toward it, because the two do not agree about the animal. Blending every rung keeps
-    // one shape throughout and lets each source contribute what it is good at: the hand-tuned
-    // master supplies solid strokes, the fitted art supplies the eyes and the ring.
-    // w = 0 is all hand-tuned, 1 is all fitted.
-    // PRESENCE is decided before LEVEL. A pixel inked in only one source is not "half ink" --
-    // averaging 0 with 3 would put dark-grey fringe everywhere the two silhouettes disagree, so
-    // the weight decides whether that pixel exists at all, and only then do the levels mix.
-    if (process.env.IDOLBLEND) {
-      for (const ws of process.env.IDOLBLEND.split(',')) {
-        const w0 = +ws;
-        const gridOf = h => {
-          const w = orbW(h), hand = idolScale(idolW(h), h);
-          const out = [...Array(21)].map(() => new Array(12).fill(0));
-          const px = fitArt(process.env.IDOLART ?? 'goat5.png', w, h,
-                            { dither: false, contrast: +(process.env.IDOLMIXC ?? 1.6), dark: true }).px;
-          const ox = (12 - w) >> 1, oy = 21 - h;
-          for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
-            const f = px[dy * w + dx], g = hand[oy + dy][ox + dx];
-            let v;
-            if (f && g) v = Math.round(w0 * f + (1 - w0) * g);      // both: mix the levels
-            else if (f) v = (w0 >= 0.5) ? f : 0;                    // only the fit has it
-            else if (g) v = (w0 < 0.5) ? g : 0;                     // only the hand has it
-            else v = 0;
-            out[oy + dy][ox + dx] = Math.max(0, Math.min(3, v));
-          }
-          return out;
-        };
-        const rung = (h, e) => { const g = gridOf(h);
-          return { xmag: e, ymag: e,
-                   parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; };
-        const magH = ORB_H.filter(h => 2 * h > SH);
-        const tag = `idol-blend${String(w0).replace('.', '')}`;
-        const all = [...magH.map(h => rung(h, 1)), ...ORB_H.map(h => rung(h, 0))];
-        sheet(tag, all);
-        // ...and one frame per rung on a fixed canvas, for the animation. Same rules as the
-        // orb's: bottom-anchored, centred on the sprite centre, no hardware box.
-        const FW = 12 * 2 * CW + 12, FH = 21 * 2 * CH + 12;
-        all.forEach((r, i) => {
-          const rgbF = new Uint8Array(FW * FH * 3);
-          for (let q = 0; q < FW * FH; q++) { rgbF[q*3] = 22; rgbF[q*3+1] = 22; rgbF[q*3+2] = 22; }
-          const putF = (x, y, c) => { if (x < 0 || y < 0 || x >= FW || y >= FH) return;
-            const o = (y * FW + x) * 3; rgbF[o] = c[0]; rgbF[o+1] = c[1]; rgbF[o+2] = c[2]; };
-          const xm = r.xmag ? 2 : 1, ym = r.ymag ? 2 : 1, pt = r.parts[0];
-          const x0 = ((FW - pt.w * xm * CW) >> 1), y0 = FH - 6 - pt.h * ym * CH;
-          for (let y = 0; y < pt.h * ym; y++) for (let x = 0; x < pt.w * xm; x++) {
-            const v = pt.at((x / xm) | 0, (y / ym) | 0);
-            if (!v) continue;
-            const px2 = x0 + x * CW, py2 = y0 + y * CH;
-            for (let b2 = 0; b2 < CH; b2++) for (let c2 = 0; c2 < CW; c2++)
-              putF(px2 + c2, py2 + b2,
-                v === 3 ? [255, 255, 255] : v === 2 ? [186, 186, 196] : [118, 118, 128]);
-          }
-          writeFileSync(`gif-${tag}-${String(i).padStart(2, '0')}.png`, png(FW, FH, rgbF));
-        });
-        console.error(`  gif-${tag}-NN.png: ${all.length} frames`);
-      }
-    }
-    // ---- IDOLMIX=<h>: hi-res art above this bitmap height, the hand-tuned 12x21 below ----
-    // The two sources fail in opposite directions. Fitted hi-res art carries the eyes, the ring
-    // and the modelling at the large rungs and averages to mush at the small ones, because a
-    // horned head inside a ring cannot be said in seven columns. The hand-tuned 12x21 is already
-    // a bold simplification, so box-filtering it KEEPS strokes solid all the way down -- and it
-    // has nothing extra to give at the top, where its own resolution runs out.
-    // So: take each where it wins. The seam is the thing to watch, since the two do not agree
-    // about what the face looks like and the crossover rung can pop.
-    if (process.env.IDOLMIX) {
-      const cut = +process.env.IDOLMIX;
-      const con = +(process.env.IDOLMIXC ?? 1.6);
-      const gridOf = h => {
-        const w = orbW(h);
-        if (h < cut) return idolScale(idolW(h), h);        // the hand-tuned master, filtered
-        const out = [...Array(21)].map(() => new Array(12).fill(0));
-        const px = fitArt(process.env.IDOLART ?? 'goat4.png', w, h,
-                          { dither: false, contrast: con, dark: true }).px;
-        const ox = (12 - w) >> 1, oy = 21 - h;
-        for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
-          out[oy + dy][ox + dx] = px[dy * w + dx];
-        return out;
-      };
-      const rung = (h, e) => { const g = gridOf(h);
-        return { xmag: e, ymag: e,
-                 parts: [{ w: 12, h: 21, ox: 0, oy: 0, at: (x, y) => g[y][x] }] }; };
-      const magH = ORB_H.filter(h => 2 * h > SH);
-      sheet(`idol-mix${cut}`, [...magH.map(h => rung(h, 1)), ...ORB_H.map(h => rung(h, 0))]);
-      console.error(`    idol mix at h<${cut}: hand-tuned for ` +
-        ORB_H.filter(h => h < cut).join(',') + '; fitted for ' +
-        ORB_H.filter(h => h >= cut).join(','));
-    }
     // ---- the idol as frames, on the same fixed canvas as the orb's ----
     // It rides the orb's rungs, so this is the same sixteen sizes with a different picture --
     // which is the point: played side by side, the two ladders should step together.
@@ -9220,24 +9036,7 @@ const hazTabs = h => {
 const HAZ_SELF = HAZ ? { cells: hazRec.map(r => r.cell), pick: hazPick, lists: hazLists, rst: hazRst } : null;
 const HZ_LIVE = hazTabs(HAZ_SELF);
 
-// ---- TWO LEVELS RESIDENT: level 2's tables ride along as a SHADOW, and the fall SWAPS them ----
-// Swap rather than copy, and the reason is memory: a copy needs somewhere to keep the level you
-// are leaving, so it costs two spare sets; an exchange costs one and never destroys anything, so
-// both levels stay live and the fall works in either direction. Room for it came from folding the
-// quarter-angle delta tables from 4KB to 1KB -- see the ddx/ddy identities.
-//
-// Why not repoint the reads at a second set of tables instead of moving bytes? 81 instruction
-// sites index these tables, several as `orbXCT+N,x`. Patching 81 operands at every transition is
-// both bigger and easier to get quietly wrong than swapping one shadow's worth of bytes once --
-// the figure the build prints as "each shadow is N tables, M bytes", not a number written here
-// that stopped being true the day blkT and the run tables left the manifest.
-//
-// The shadow build runs THIS FILE in a subprocess with LEVEL2=1. Building both maps in one
-// process would mean untangling `map` and its two dozen module-level derivations into a function;
-// a subprocess costs a second build and nothing else. Same pattern as death-pics.json.
-
-
-// ---- THE SLOT LAYOUT (SOLO=1) ----
+// ---- THE SLOT LAYOUT (the separated architecture: the image holds no level) ----
 // Computed HERE and not beside LVL_TABLES, because the hazard tables are pushed onto the manifest
 // above and a layout built earlier would be six tables short -- the same trap that made an early
 // ILVL shadow 435 bytes small. Manifest order IS slot order, so mapT (first) lands at offset 0.
@@ -9588,7 +9387,7 @@ if (process.env.LVLDUMP) {
 }
 
 let asm = `
-; ---- SOLO=1: THE LEVEL IS NOT IN THIS IMAGE ----
+; ---- THE LEVEL IS NOT IN THIS IMAGE ----
 ; Every per-level table is an EQUATE into the slot at ${hx16(SLOT_AT)}, in manifest order, mapT first
 ; so it lands page-aligned at offset 0. The bytes arrive as their own disk file. Nothing below
 ; changes: every reference still names the label, which now resolves into the slot instead of
@@ -9999,7 +9798,7 @@ pvMode  = $802a                 ; 0 = predict in full, 1 = turned in place (the 
                                 ; only in the diagnostic builds, i.e. silently.
 ` : ''}${RAYCNT ? `; RAYCNT diagnostics. Declared OUTSIDE the PIVOT block: a RAYCNT build with PIVOT=0 is the
 ; baseline half of the comparison, and gating these on PIVOT made that build fail to assemble --
-; which left latest.d64 holding the PREVIOUS disk and reported the default viewpoint as if it
+; which left lest-c64.d64 holding the PREVIOUS disk and reported the default viewpoint as if it
 ; were the one asked for. Silent, and exactly the trap the RELOC comment warns about.
 rayN    = $8014                 ; marchCol calls this frame
 edgN    = $801a                 ; edge cells drawn this frame -- the part of renderSym the run
@@ -11101,13 +10900,8 @@ bcSkip:
         ; all -- it is simply the column we just found. Do it before the k=0 bail below:
         ; the seam CAN sit at pixel 0 of a cell, cstepT cannot.
         ;
-        ; CVXSEAM=1 IS THE DEFAULT, so EVERY run end gets its mark, concave or convex -- not the
-        ; whole vertical run, just the column where black meets black. The block below is the
-        ; CVXSEAM=0 path and the rest of this note describes IT, not what ships:
-        ;   a CONCAVE corner is an inside corner where two perpendicular faces meet, both walls
-        ;   at the same depth, so the line is the only thing dividing them. A CONVEX corner --
-        ;   the end of a receding wall -- is already drawn by the silhouette stepping 20+ rows,
-        ;   and the argument was that a grey line adds nothing to a boundary that emphatic.
+        ; EVERY run end gets its mark, concave or convex -- not the whole vertical run, just the
+        ; column where black meets black.
 subCv:  ${process.env.NOCSEAM === '1' ? 'jmp subCn   ; NOCSEAM=1: corner seams off, to tell the two writers apart' : ''}
         jsr subCvM              ; choose the column, settle any collision, place the mark
 subCn:` : ''}
@@ -11402,7 +11196,7 @@ ${PIVOT ? `
 ; It cannot lose a boundary: extra cut points only ever SPLIT a span, and every sub-span still
 ; gets the same face-id test in subLp -- so this finds a superset of what bisection finds. That
 ; is why the bracket can be one column wide with no safety margin: a wrong prediction costs
-; probes, never pixels. Modelled in analyze-pivot.mjs at 22.6 -> 15.0 marches/frame.
+; probes, never pixels. Modelled offline at 22.6 -> 15.0 marches/frame.
 ;
 ; With pvN = 0 -- first frame, or PIVOT off -- it degenerates to exactly the old seeding.
 pivPrep:
@@ -21966,7 +21760,6 @@ snKDn:  rts
 ; 3/4/8/9, and its 40 merge-hazard lists -- which name the BUILD's ids -- spliced the column onto
 ; whichever wall held the old number: "the central column stretches as if attached to another
 ; wall off screen" (the user). Level 1 was untouched because mkRuns only runs after a fall.
-; MKRUNS=1 boots through this routine on top of the build's tables so the two can be compared.
 mkRuns: ldx #$00
         txa
 mrZ:    sta runWT,x             ; 0 = "no run here"
@@ -25553,8 +25346,8 @@ writeFileSync('./iray.bufsizes.json', JSON.stringify(Object.fromEntries(
 // An instruction whose operand names a slot table gets a label of its own, and vsLoT/vsHiT list
 // the address of its operand's HIGH byte (+2 for absolute, +1 for an immediate #>). Labels, not
 // addresses, so the relayout can move the code and the assembler still resolves them. A #< operand
-// is left alone: slots are page-aligned, so the low byte is the same in every slot. SLOTCHK=<dump>
-// (with a SLOTDUMP pair) is the guard that this list is exactly the bytes a page move changes.
+// is left alone: slots are page-aligned, so the low byte is the same in every slot. Comparing a
+// SLOTDUMP pair (two builds a page apart) checks that this list is exactly the bytes a page move changes.
 if (VSLOTS) {
   asm = asm.replace(/^([a-zA-Z][a-zA-Z0-9_]*)(\s*=\s*)\$([0-9a-fA-F]{4})\b/gm, (m, n, eq, h) => {
     const a = parseInt(h, 16);
