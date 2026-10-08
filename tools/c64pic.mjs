@@ -279,6 +279,7 @@ const BARKHUE = +opt('--barkhue', 65);
 // Banning red everywhere fixed that and killed the rack LEDs the user wants to keep -- and blink.
 const TRIMAVOID = bitsOf(opt('--trimavoid', '2').split(',').filter(Boolean).map(Number));
 const BGSAT = +opt('--bgsat', 1);
+const BASEDARK = +opt('--basedark', 0);
 const AVOID = bitsOf(opt('--bgavoid', REG ? '9,8' : '').split(',').filter(Boolean).map(Number));
 // --nobrown mask.json: hand-marked zones (320x200) where the tree is leaf and brown/orange may not
 // appear -- made from the user's manual edit, the patches they painted brown out of, grown a few
@@ -365,6 +366,30 @@ const themed = (img, W, H) => {
     if (ovl[i] || both[i]) allow[i] |= bitsOf(LEAFC) | bitsOf(BARKC);    // a branch line may sit in a leafy block
     if (nbAt(i % W, Math.floor(i / W))) allow[i] &= ~bitsOf([8, 9]);
     if (!allow[i]) allow[i] = 0xffff & ~AVOID;
+  }
+  // --basedark s: DARK EARTH between the roots. The base of the tree read as all tree; the user wants
+  // the raised roots, with darker earth between them, darker the further from a root. Bark-themed
+  // pixels below row BASE_Y (fading in over 8 rows) are split into ROOTS -- brighter than their
+  // neighbourhood, where the light catches them -- and EARTH; earth is darkened by s x (distance to
+  // the nearest root / BASE_D), capped at s. Leaf pixels (the green down there) are never touched.
+  if (BASEDARK > 0) {
+    const sx = W / 320, BASE_Y = Math.round(0.74 * H), BASE_D = 3;
+    const nb2 = boxBlur(lum, W, H, Math.max(1, Math.round(2 * sx)), 2);
+    const INF = 1e9, d = new Float32Array(n).fill(INF), inBase = new Uint8Array(n);
+    for (let y = BASE_Y - 8; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; if (region[i] !== 3) continue;
+      inBase[i] = 1; if (lum[i] > nb2[i] * 1.05) d[i] = 0;          // a root: lit above its surroundings
+    }
+    const step = (i, j, c) => { if (d[j] + c < d[i]) d[i] = d[j] + c; };   // chamfer distance, in 320-wide px
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (!inBase[i]) continue;
+      if (x > 0) step(i, i - 1, 1 / sx); if (y > 0) step(i, i - W, 1); }
+    for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) { const i = y * W + x; if (!inBase[i]) continue;
+      if (x < W - 1) step(i, i + 1, 1 / sx); if (y < H - 1) step(i, i + W, 1); }
+    for (let i = 0; i < n; i++) { if (!inBase[i] || d[i] === 0) continue;
+      const y = Math.floor(i / W), fade = Math.min(1, Math.max(0, (y - (BASE_Y - 8)) / 8));
+      const f = Math.min(1, (d[i] === INF ? BASE_D : d[i]) / BASE_D) * BASEDARK * fade;
+      for (let c = 0; c < 3; c++) out[i * 3 + c] *= 1 - f;
+    }
   }
   if (TRIMAVOID) {                  // the wall trim, grown 2 px (1 in double-wide multicolour pixels)
     const ry = 2, rx = W === 320 ? 2 : 1;
