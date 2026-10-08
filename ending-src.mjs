@@ -112,14 +112,14 @@ qStart: sei
         ldy #>nTre
         jsr ${hx(krill, 4)}       ; Krill's loadraw: the file's own header says where it goes
         bcs qFail
+        jsr ${hx(T_RUN + 3, 4)}       ; ITRE's tPrep: its setup, done now behind the quote
         ; READING TIME. The load is blocking, so it cannot be counted in frames; the quote is held
-        ; HOLD seconds more after it, then CUT to black and straight into the dissolve. (It faded
-        ; grey2 -> dark grey -> black at first; two steps did not read as a fade, per the user.)
+        ; HOLD seconds more after it, then CUT straight to the dissolve: the first frame after the
+        ; quote is the tree's black bitmap. (It faded grey2 -> dark grey -> black at first; two steps
+        ; did not read as a fade, per the user.)
 ${[...Array(Math.ceil(holdS * 60 / 240))].map(() => `        lda #240
         jsr qWait`).join('\n')}
-        lda #$0b            ; display off: black, and ITRE turns it back on already in bitmap mode
-        sta $d011
-        jmp ${hx(T_RUN, 4)}       ; ITRE
+        jmp ${hx(T_RUN, 4)}       ; ITRE's tStart
 
 ; A frames, each ended at raster line 250 -- by waiting for the line and then for it to pass, so a
 ; caller with nothing to do between two calls cannot see the same line twice
@@ -244,47 +244,31 @@ krel    = $2c               ; RETURN has been seen UP since the scene began
 kauto   = $2d               ; ENDAUTO's countdown
 
         * = ${hx(T_RUN, 4)}
-; ---- IEND jumps here with the display already off ----
-tStart: sei
-        lda #$0b            ; display off while the screen changes mode under it
-        sta $d011
-        lda #>${hx(MASK, 4)}       ; nothing dissolved yet...
+        jmp tStart          ; IEND, when the quote has had its time
+        jmp tPrep           ; IEND, as soon as this file is in
+
+; ---- tPrep: everything that can be made ready while the quote is still up ----
+; About 0.2 s of work (16K zeroed, a screen copied). Done in the reading hold, the cut from the quote
+; to the dissolve is instant; done at the cut it was a fifth of a second of black. Nothing here may
+; touch what the VIC is showing -- the quote, in bank 3 -- and that includes COLOUR RAM, which the
+; quote's text is inked from: that waits for tStart.
+tPrep:  lda #>${hx(MASK, 4)}       ; nothing dissolved yet...
         ldy #$20
         jsr fill0
         lda #>${hx(DSP, 4)}        ; ...so nothing shown
         ldy #$20
         jsr fill0
-        ldx #$00            ; screen and colour data into place: 4 pages each (the last runs over the
-cp:     lda ${hx(SRC_SCR, 4)},x     ;   1000 bytes by 24 -- harmless: past the end of the data is padding,
-        sta ${hx(DSP_SCR, 4)},x     ;   and past the end of the screen are sprite pointers nothing uses)
+        ldx #$00            ; the screen data into place: 4 pages (the last runs over the 1000 bytes by
+cp:     lda ${hx(SRC_SCR, 4)},x     ;   24 -- harmless: past the end of the data is padding, and past the
+        sta ${hx(DSP_SCR, 4)},x     ;   end of the screen are sprite pointers nothing uses)
         lda ${hx(SRC_SCR + 0x100, 4)},x
         sta ${hx(DSP_SCR + 0x100, 4)},x
         lda ${hx(SRC_SCR + 0x200, 4)},x
         sta ${hx(DSP_SCR + 0x200, 4)},x
         lda ${hx(SRC_SCR + 0x300, 4)},x
         sta ${hx(DSP_SCR + 0x300, 4)},x
-        lda ${hx(SRC_COL, 4)},x
-        sta $d800,x
-        lda ${hx(SRC_COL + 0x100, 4)},x
-        sta $d900,x
-        lda ${hx(SRC_COL + 0x200, 4)},x
-        sta $da00,x
-        lda ${hx(SRC_COL + 0x300, 4)},x
-        sta $db00,x
         inx
         bne cp
-        lda #$00
-        sta $d020
-        lda #${bg}
-        sta $d021
-        lda #$01            ; VIC bank 2 ($8000-$bfff), written whole (see IEND)
-        sta $dd00
-        lda #${hx(((DSP_SCR - 0x8000) >> 10) << 4 | ((DSP - 0x8000) >> 13) << 3)}
-        sta $d018           ; screen ${hx(DSP_SCR, 4)}, bitmap ${hx(DSP, 4)}
-        lda #$18
-        sta $d016           ; multicolour
-        lda #$3b
-        sta $d011           ; bitmap mode, display on: all black, every byte of DSP still zero
         lda $dc04           ; seed the LFSR from a running CIA timer: every run differs
         ora #$01
         sta seedlo
@@ -309,6 +293,38 @@ li:     lda #$01            ;   in its cycle
         sta ltimer,x
         dex
         bpl li
+        rts
+
+; ---- tStart: THE CUT. In the bottom border, so no frame shows half of each ----
+; The bitmap goes up first, every byte of it still zero, so the screen is black whatever colour RAM
+; holds -- and only then is colour RAM given the tree's colours (~10,000 cycles), unseen. The first
+; dissolved pixels come on the next frame.
+tStart: lda $d012
+        cmp #$fa
+        bne tStart
+        lda #$00
+        sta $d020
+        lda #${bg}
+        sta $d021
+        lda #$01            ; VIC bank 2 ($8000-$bfff), written whole (see IEND)
+        sta $dd00
+        lda #${hx(((DSP_SCR - 0x8000) >> 10) << 4 | ((DSP - 0x8000) >> 13) << 3)}
+        sta $d018           ; screen ${hx(DSP_SCR, 4)}, bitmap ${hx(DSP, 4)}
+        lda #$18
+        sta $d016           ; multicolour
+        lda #$3b
+        sta $d011           ; bitmap mode: all black
+        ldx #$00
+tc:     lda ${hx(SRC_COL, 4)},x
+        sta $d800,x
+        lda ${hx(SRC_COL + 0x100, 4)},x
+        sta $d900,x
+        lda ${hx(SRC_COL + 0x200, 4)},x
+        sta $da00,x
+        lda ${hx(SRC_COL + 0x300, 4)},x
+        sta $db00,x
+        inx
+        bne tc
 
 frame:  lda $d012           ; once per frame: raster line 250, the bottom border -- the line, and
         cmp #$fa            ;   then the line PASSING, so a short frame cannot run twice on it
@@ -556,7 +572,7 @@ ${rows(scene.scr)}
   if (ta.org < 0x0800) throw new Error(`ITRE starts at ${hx(ta.org, 4)}, on Krill's resident`);
   return {
     iend: { name: IEND_NAME, prg: qa.prg, at: qa.org, end: qa.end, run: QL.qStart, reboot: QL.reboot },
-    itre: { name: ITRE_NAME, prg: ta.prg, at: ta.org, end: ta.end, run: TL.tStart, codeEnd: TL.tCodeEnd },
+    itre: { name: ITRE_NAME, prg: ta.prg, at: ta.org, end: ta.end, run: TL.tStart, codeEnd: TL.tCodeEnd, labels: TL },
     steps: STEPS,
   };
 }
