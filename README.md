@@ -35,7 +35,7 @@ yourself (below). It's built and timed for **NTSC** machines.
 
 Directions get you Forward/Backward and Turn Left/Right.
 
-Button Picks up / Puts down objects.
+Button or Spacebar Picks up / Puts down objects.
 
 You can also use ESDF to go forward/backward and strafe left/right.
 
