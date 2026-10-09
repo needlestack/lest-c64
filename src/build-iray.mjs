@@ -4050,7 +4050,7 @@ const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent hei
 // costs a single sprite, which is where the slot budget goes.
 const ANGART = JSON.parse(readFileSync('./data/angel-art.json', 'utf8'));
 // ---- THE DEATH CUT SCENE: the Haserot Angel, fitted to 256 glyphs ----
-// angel-face.json is produced by fit-angel.mjs from a GEK scene on TMP-3.d64. A GEK image is
+// angel-face.json is produced by fit-angel.mjs from a GEK scene, art/gek/hangl1.gek. A GEK image is
 // 160x200 multicolor stored as 4x8 tiles of 8 bytes, which IS a C64 char glyph, so the fitter's
 // output drops straight into a charset. 256 glyphs reproduce the face at RMS 0.082 -- close
 // enough that no raster split and no backup of charset A is needed.

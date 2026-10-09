@@ -8,9 +8,6 @@
 //
 // Writes build/face-extra.json (tag -> screen map) and one build/<tag>-fit.png to eyeball.
 import { execFileSync } from 'child_process';
-import { mkdtempSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
 import { readGek } from './gek.mjs';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { png } from './png.mjs';
@@ -181,11 +178,7 @@ function hanglPixels() {
     }
     return px;
   }
-  const tmp = mkdtempSync(join(tmpdir(), 'gek'));
-  const f = join(tmp, 'hangl1.prg');
-  execFileSync('/Applications/vice-arm64-gtk3-3.8/bin/c1541',
-    ['-attach', './art/TMP-3.d64', '-read', 'hangl1/pic', f], { stdio: 'ignore' });
-  const g = readGek(f);
+  const g = readGek(new URL('../art/gek/hangl1.gek', import.meta.url).pathname);
   // GEK pixel values are scene-order (bg, c1, c2, c3); fit-angel's 0<->3 swap put black on the
   // per-cell pair, and every table here is in that post-swap order.
   const sw = v => v === 0 ? 3 : v === 3 ? 0 : v;

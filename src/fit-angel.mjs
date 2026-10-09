@@ -2,11 +2,8 @@
 // down to a 256-glyph charset plus 1000 screen codes, and write angel-face.json.
 //
 // Run by hand, not by the build: k-means over 1000 tiles takes seconds and the answer never
-// changes. Usage:  node src/fit-angel.mjs art/TMP-3.d64 hangl1 hangl2
-import { execFileSync } from 'child_process';
-import { writeFileSync, mkdtempSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+// changes. Usage:  node src/fit-angel.mjs hangl1   (reads art/gek/hangl1.gek; see tools/gek2png.mjs)
+import { writeFileSync } from 'fs';
 import { readGek } from './gek.mjs';
 import { png } from './png.mjs';
 import { ROOT } from './paths.mjs';
@@ -67,14 +64,10 @@ function cluster(tiles, LU, K, iters = 60) {
   return { cents, assign };
 }
 
-const [d64, ...names] = process.argv.slice(2);
-const tmp = mkdtempSync(join(tmpdir(), 'gek'));
+const names = process.argv.slice(2);
 const out = {};
 for (const nm of names) {
-  const f = join(tmp, nm + '.prg');
-  execFileSync('/Applications/vice-arm64-gtk3-3.8/bin/c1541',
-    ['-attach', d64, '-read', `${nm}/pic`, f], { stdio: 'ignore' });
-  const g = readGek(f);
+  const g = readGek(`art/gek/${nm}.gek`);
   const COL = [g.bg, g.c1, g.c2, g.c3], LU = COL.map(lum);
   const tiles = tilesOf(g.img);
   const K = +(process.env.FACEK ?? 256);
