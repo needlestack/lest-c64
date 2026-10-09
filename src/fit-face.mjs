@@ -178,7 +178,7 @@ function hanglPixels() {
     }
     return px;
   }
-  const g = readGek(new URL('../art/gek/hangl1.gek', import.meta.url).pathname);
+  const g = readGek(new URL('../art/gamemaker/hangl1.gek', import.meta.url).pathname);
   // GEK pixel values are scene-order (bg, c1, c2, c3); fit-angel's 0<->3 swap put black on the
   // per-cell pair, and every table here is in that post-swap order.
   const sw = v => v === 0 ? 3 : v === 3 ? 0 : v;

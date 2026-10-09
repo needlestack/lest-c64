@@ -2,7 +2,7 @@
 // down to a 256-glyph charset plus 1000 screen codes, and write angel-face.json.
 //
 // Run by hand, not by the build: k-means over 1000 tiles takes seconds and the answer never
-// changes. Usage:  node src/fit-angel.mjs hangl1   (reads art/gek/hangl1.gek; see tools/gek2png.mjs)
+// changes. Usage:  node src/fit-angel.mjs hangl1   (reads art/gamemaker/hangl1.gek; see tools/gm2png.mjs)
 import { writeFileSync } from 'fs';
 import { readGek } from './gek.mjs';
 import { png } from './png.mjs';
@@ -67,7 +67,7 @@ function cluster(tiles, LU, K, iters = 60) {
 const names = process.argv.slice(2);
 const out = {};
 for (const nm of names) {
-  const g = readGek(`art/gek/${nm}.gek`);
+  const g = readGek(`art/gamemaker/${nm}.gek`);
   const COL = [g.bg, g.c1, g.c2, g.c3], LU = COL.map(lum);
   const tiles = tilesOf(g.img);
   const K = +(process.env.FACEK ?? 256);
