@@ -109,4 +109,4 @@ build, before theorising** -- both are one tools/probe.mjs call (`@e000:1000`).
     pivOne                      3.4%
     input + clears + HUD        5.1%
 
-`./bench.sh` reproduces this. See `tools/seamprof.mjs` for how pfTick's own cost is subtracted.
+Measured with the since-retired `bench.sh` walkthrough; `node tools/fpsr.mjs "" suite` is the current per-level benchmark.

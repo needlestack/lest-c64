@@ -23,7 +23,7 @@ const ROOT = new URL('../build/', import.meta.url).pathname;   // compaction's i
 // The source is the file the BUILD JUST WROTE, handed over as argv[2] -- not a fixed name.
 // Hardcoding iray.asm meant that on a DIAGNOSTIC build, which writes iray.diag.asm so it cannot
 // clobber the tracked reference copy, compaction read the PREVIOUS non-diagnostic build's
-// assembly and the disk was built from that. Every DIAG flag -- PROFILE, ROUTE, PX/PY/PA --
+// assembly and the disk was built from that. Every DIAG flag -- PROFILE, PX/PY/PA --
 // therefore shipped a program that was not the one it had just generated. It is why the profiler
 // appeared to vanish, why two ROUTE builds with and without entities measured identically (they
 // were the same stale image), and why the build prints "not for fps numbers" on a DIAG build --
@@ -442,7 +442,17 @@ let inPad = 0, placed = 0;
 for (const b of bufs) {
   const fits = ([lo, hi]) => (b.align ? ((lo + 255) & ~255) : lo) + b.size <= hi;
   const h = holes.find(fits);
-  if (!h) continue;
+  if (!h) {
+    // NOT SILENT ANY MORE. A buffer with no hole stays at its hand-layout address, which is now
+    // inside the image -- the build's equate guard then refuses the disk, but names only the
+    // victims ("pvN=$8000 ... sit inside the emitted image"), not the cause. Twice (2026-10-08) the
+    // cause was a scalar run INFERRED page-aligned from its address, stranded when the arena lost
+    // a page; ALIGNED_T name: 1 is the fix when the run does not really need one.
+    console.error(`  compact: no hole for ${b.n} (${b.size} B${b.align ? ', page-aligned' : ''}` +
+      `${b.align && ALIGNED[b.n] === undefined ? ' -- INFERRED from its address; if nothing needs ' +
+        'the page, declare ALIGNED_T ' + b.n + ': 1' : ''}); left at $${b.a.toString(16)}`);
+    continue;
+  }
   if (h[1] <= codeEnd || h[0] >= dataStart) inPad += b.size;
   b.at = b.align ? (h[0] + 255) & ~255 : h[0];   // REMEMBER where it went: this is what runs
   // A page-aligned buffer skips forward to the boundary. Those skipped bytes used to be simply

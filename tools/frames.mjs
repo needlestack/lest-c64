@@ -24,13 +24,13 @@ if (!OUT) { console.error('--out dir is required'); process.exit(1); }
 mkdirSync(OUT, { recursive: true });
 const PORT = 6510;
 if (!/\bBENCHF=/.test(ENV)) { console.error('needs a fixed workload: BENCHF=n (with SPINF=1 or WALKF=1)'); process.exit(1); }
-const { addrOf } = buildDisk(ENV, 'zz-frames.d64');
+const { addrOf } = buildDisk(ENV, 'build/zz-frames.d64');
 const MNEXT = addrOf('mnext'), END = addrOf('benchEnd'), BASEHI = addrOf('baseHi');
 const held = portHeld(PORT);
 if (held) { console.error(`port ${PORT} is held by pid ${held} -- kill that process (not every x64sc)`); process.exit(2); }
 // launch() owns the emulator's lifetime: its whole process group dies on exit, Ctrl-C, an error, or the cap
 launch([...LAUNCH_FLAGS, '-warp', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  '-autostart', join(ROOT, 'zz-frames.d64')], { hardCapMs: 240000, label: 'frames' });
+  '-autostart', join(ROOT, 'build/zz-frames.d64')], { hardCapMs: 240000, label: 'frames' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const tmp = mkdtempSync(join(tmpdir(), 'frames-'));
 const mon = await textMonitor(PORT), cmd = mon.cmd;

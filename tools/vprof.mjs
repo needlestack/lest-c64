@@ -48,7 +48,7 @@ const SHOT = opt('--shot', '');
 const PORT = 6510;
 
 // ---- build to its own disk, so lest-c64.d64 is never touched ----
-const { out: b, syms: SYMS, addrOf } = buildDisk(ENV, 'zz-vprof.d64');
+const { out: b, syms: SYMS, addrOf } = buildDisk(ENV, 'build/zz-vprof.d64');
 const ok = b.split('\n').find(l => l.startsWith('ok:'));
 if (!SYMS) { console.error('this build wrote no iray.syms.json'); process.exit(1); }
 // VICE label file: one `al C:addr .name` per label, so the profile names routines.
@@ -63,7 +63,7 @@ if (held) { console.error(`port ${PORT} is held by pid ${held} -- kill that proc
 // The cap covers the whole run: --until mode waits for an event, not a wall-clock window.
 const CAP = (UNTIL ? 240 : SECS + 60) * 1000;
 launch([...LAUNCH_FLAGS, '-warp', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  '-moncommands', lbl, '-autostart', join(ROOT, 'zz-vprof.d64')], { hardCapMs: CAP, label: 'vprof' });
+  '-moncommands', lbl, '-autostart', join(ROOT, 'build/zz-vprof.d64')], { hardCapMs: CAP, label: 'vprof' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const strip = o => o.replace(/^\(C:\$[0-9a-f]{4}\) /, '').replace(/\(C:\$[0-9a-f]{4}\) $/, '');
 const rd16 = async (m, a) => { const [lo, hi] = await m.mem(a, 2); return lo | (hi << 8); };

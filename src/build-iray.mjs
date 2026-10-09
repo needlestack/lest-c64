@@ -585,79 +585,6 @@ const SOCK_MAP = (() => {
   return punchWalls(rows.map(r => r.join('')), LEVEL_WALLS[2].walls);
 })();
 
-// RECORD=1: log the player's input so a real play-through becomes a repeatable benchmark.
-// 64 runs of 4 bytes. Recording stops when it fills rather than wrapping, so a truncated tour
-// is obvious instead of silently looping.
-const RECORD = process.env.RECORD === '1';
-// TOURW=1: the user's recorded route as a WAYPOINT script -- walk/run/turn until the pose
-// arrives, rather than for a fixed number of frames. Self-correcting, so a build of any speed
-// walks to the same places; a per-step tick timeout means a step that cannot arrive (a wall, a
-// target slightly off the facing axis) gives up instead of wedging the benchmark.
-// The route as WAYPOINTS, turned into hold-durations at build time. Durations, not runtime
-// position tests: a duration cannot wedge, and a tick is real time -- movement is tick-driven --
-// so the same script walks to the same places on a build of any frame rate, which is the whole
-// point of a benchmark.
-// Rates are the ones readKeys documents: running is 12 units of 1/256 cell and 6 quarter-units
-// of angle per tick, and is 3x movement / 2x turning over walking.
-const MV_WALK = 4, MV_RUN = 12;          // units of 1/256 cell per tick
-const TN_WALK = 192, TN_RUN = 384;       // 16-bit angle units per tick (a quarter unit is 64)
-// 10-13 hold forward AND a turn at the same time, which no recorded step ever did: joyv carries
-// both bits, and readKeys already runs moveFwd and the turn loop independently off it. They exist
-// because walking and turning SEPARATELY leaves the renderer's commonest real input untested --
-// the temporal pivot's translation term and its rotation term are exercised one at a time and
-// never together, and a seam's stability under motion is precisely a question about both at once.
-const T_WALK = 0, T_BACK = 1, T_RUN = 2, T_TURNL = 3, T_TURNR = 4,
-      T_FTURNL = 5, T_FTURNR = 6, T_SPACE = 7, T_WAIT = 8, T_FALL = 9,
-      T_ARCL = 10, T_ARCR = 11, T_RARCL = 12, T_RARCR = 13;
-const TOUR_ROUTE = [
-  ['move', T_WALK,   0x0287, 0x0483],   // out of the corner, across the room. Pushed 0.4 cells
-                                        //   further along the same heading: the left turn was
-                                        //   coming too early and the walk missed the hallway.
-  ['turn', T_TURNL,  0x02c0],
-  ['move', T_WALK,   0x07dd, 0x0465],   // down the corridor to the orb
-  ['act',  T_SPACE,  2],                // take it
-  ['move', T_BACK,   0x02a1, 0x0426],   // back off, still facing the orb's cell
-  ['turn', T_TURNR,  0x4280],           // look away: the angel is free to move
-  ['act',  T_WAIT,   900, 0x44],        // until the angel reaches (4,4); the ticks are a ceiling
-  ['turn', T_TURNL,  0x169d],           // look at it: it stops. 5 deg past a1a1d -- that was
-                                        //   not quite far enough to catch the angel's eye.
-  ['move', T_RUN,    0x04c7, 0x05c3],
-  ['turn', T_FTURNL, 0xeed9],           // likewise 5 deg past af259
-  ['move', T_RUN,    0x07f1, 0x04ba],
-  ['turn', T_FTURNR, 0x0159],
-  ['move', T_RUN,    0x0c4d, 0x04ad],   // out along the corridor
-  ['turn', T_FTURNL, 0x7f99],           // face back down it: the angel stops again
-  ['act',  T_SPACE,  2],                // drop the orb
-  ['turn', T_TURNR,  0x0159],
-  ['act',  T_FALL,   400],              // walk on until the hole takes us
-];
-// The other ROUTEs are place lists (see compileRoute, next to the movement tables it has to
-// model exactly). All compile to the same (type, ticks) steps, so twStep neither knows nor cares.
-const ROUTE = process.env.ROUTE ?? 'walk';
-const WALK_STEPS = (() => {
-  let x = 0x01f6, y = 0x0149, a = 0x3b00;    // the start pose
-  const out = [];
-  for (const r of TOUR_ROUTE) {
-    if (r[0] === 'move') {
-      const d = Math.hypot(r[2] - x, r[3] - y);
-      out.push([r[1], Math.max(1, Math.round(d / (r[1] === T_RUN ? MV_RUN : MV_WALK)))]);
-      x = r[2]; y = r[3];
-    } else if (r[0] === 'turn') {
-      // The DIRECTION the route names, not the shortest way round -- going the wrong way is
-      // still a legal turn, it just takes the complement, and the two disagree on most of this
-      // route. readKeys is unambiguous: joystick left is `sbc #$c0` per tick (the angle
-      // DECREASES) and right is `adc #$c0` (it increases).
-      const left = (r[1] === T_TURNL || r[1] === T_FTURNL);
-      const d = left ? ((a - r[2]) & 0xffff) : ((r[2] - a) & 0xffff);
-      const rate = (r[1] === T_FTURNL || r[1] === T_FTURNR) ? TN_RUN : TN_WALK;
-      out.push([r[1], Math.max(1, Math.round(d / rate))]);
-      a = r[2];
-    } else out.push([r[1], r[2], r[3] ?? 0]);
-  }
-  return out;
-})();
-const RECMAX = 64;
-const TOURW = process.env.TOURW === '1';
 import { png } from './png.mjs';
 await import('./d64lib.js');
 const D64 = globalThis.D64;
@@ -1441,411 +1368,6 @@ const MOVE_STEP = 64, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
 
-// ================= AUTHORED ROUTES: place lists compiled to steps =================
-// (The first of these was ROUTE=seam, the seam work's renderer benchmark; it walked into a wall
-// once level 1 changed and was deleted 2026-10-05.)
-// Authored as PLACES rather than as inputs. Every waypoint below names where to be; the compiler
-// works out the bearing, the direction to turn and the tick counts, and -- this is the part the
-// recorded route cannot do -- it advances the pose by what the HARDWARE will actually do, not by
-// the waypoint it was given. The recorded route sets `x = r[2]` after a move, so its nominal pose
-// and its real one drift apart and every later waypoint inherits the error; here a move ends
-// wherever `floor(ticks * moveX[pa] / 16)` puts it, which is exactly where the machine ends up.
-//
-// Three primitives, and each one is exact for a different reason:
-//   to/run   a straight walk. moveApply CARRIES the shift remainder (see the long comment there),
-//            so the total displacement is floor of the exact sum however the frames fall -- the
-//            same on a 12 fps build and a 30 fps one.
-//   spin     a turn on the spot. readKeys turns once per TICK in a `dex/bne` loop, so the
-//            heading after N ticks is exact and frame-rate independent too.
-//   arc      forward and turn held together. This one is NOT exact across frame rates: moveFwd
-//            reads `pa` before the frame's turn loop runs, so the path is a polygon whose
-//            vertices are frame boundaries. The error is half a frame's turn applied over the
-//            arc -- 1.6 degrees between a 12 fps build and a 30 fps one, about 0.06 cells of
-//            endpoint. Accepted deliberately: no movement model on this machine can hold a
-//            curve exactly, and simultaneous walk-and-turn is the input the seams are judged
-//            under. Keep arcs short and do not put one immediately before a tight gap.
-// Compile a place-list into twStep's (type, ticks). Pose is carried in the machine's own units:
-// x/y in 1/256 cells, a as the 16-bit pa:paF angle, 0 = +x and rising toward +y (moveXT is
-// cos/sin of a/256 turns, so that convention is the movement table's, not a choice made here).
-const compileRoute = (ops, start) => {
-  let [x, y, a] = start, out = [], poses = [];
-  // the model's pose after each emitted step, so TOURPOSE can check it against the machine
-  const emit = (t, ticks) => { while (poses.length < out.length) poses.push([x, y, a]); out.push([t, Math.max(1, Math.round(ticks))]); };
-  // A turn of `d` 16-bit units in `dir` (+1 = right = pa rising). Returns the ticks spent, and
-  // leaves `a` where the hardware will leave it -- ticks*rate, NOT the bearing that was asked
-  // for, because the tick count is a whole number and the two differ by up to half a tick.
-  const turn = (d, dir, run) => {
-    const rate = run ? TN_RUN : TN_WALK, n = Math.max(1, Math.round(d / rate));
-    emit(dir > 0 ? (run ? T_FTURNR : T_TURNR) : (run ? T_FTURNL : T_TURNL), n);
-    a = (a + dir * n * rate) & 0xffff;
-    return n;
-  };
-  // Face a point by the SHORT way round. The recorded route names its direction because it is
-  // reproducing what a hand on a joystick did; a route authored as places has no such history.
-  const faceTo = (tx, ty, run) => {
-    const want = Math.round(Math.atan2(ty - y, tx - x) / (2 * Math.PI) * 65536) & 0xffff;
-    const right = (want - a) & 0xffff;
-    if (right === 0) return;
-    if (right <= 32768) turn(right, +1, run); else turn(65536 - right, -1, run);
-  };
-  // A straight walk of `n` ticks, stepped as the hardware steps it. The floor is the whole point:
-  // moveApply accumulates dxv per tick into a 16-bit sum and shifts once, keeping the remainder,
-  // so this is floor(n * moveX / 16) exactly and not n * (moveX / 16) rounded.
-  const walk = (n, run) => {
-    const sx = moveX[a >> 8] > 127 ? moveX[a >> 8] - 256 : moveX[a >> 8];
-    const sy = moveY[a >> 8] > 127 ? moveY[a >> 8] - 256 : moveY[a >> 8];
-    const t = n * (run ? 3 : 1);   // readKeys feeds moveApply dtm = 3 * dtv while SHIFT is held
-    x += Math.floor(t * sx / (1 << MOVE_SHIFT));
-    y += Math.floor(t * sy / (1 << MOVE_SHIFT));
-  };
-  for (const op of ops) {
-    if (op[0] === 'to' || op[0] === 'run') {
-      const run = op[0] === 'run', tx = Math.round(op[1] * 256), ty = Math.round(op[2] * 256);
-      faceTo(tx, ty, run);
-      const n = Math.max(1, Math.round(Math.hypot(tx - x, ty - y) / (run ? MV_RUN : MV_WALK)));
-      emit(run ? T_RUN : T_WALK, n);
-      walk(n, run);
-    } else if (op[0] === 'spin') {
-      const deg = op[1], run = !!op[2];
-      turn(Math.abs(deg) / 360 * 65536, Math.sign(deg), run);
-    } else if (op[0] === 'arc') {
-      // Sized by the TURN, because that is the half a viewer notices: `deg` of heading change,
-      // and the distance is whatever the walk covers in the same time. Walking, 90 degrees is
-      // 1.33 cells (radius 0.85); running, 2.0 cells (radius 1.27).
-      const deg = op[1], run = !!op[2], dir = Math.sign(deg);
-      const rate = run ? TN_RUN : TN_WALK;
-      const n = Math.max(1, Math.round(Math.abs(deg) / 360 * 65536 / rate));
-      emit(dir > 0 ? (run ? T_RARCR : T_ARCR) : (run ? T_RARCL : T_ARCL), n);
-      // Integrate per tick. The machine integrates per FRAME, which is the approximation the
-      // block comment above prices; per tick is the limit of that as the frame rate rises and is
-      // the only frame-rate-free answer available, so it is the one the later waypoints use.
-      const mv = run ? MV_RUN : MV_WALK;
-      for (let i = 0; i < n; i++) {
-        const b = a >> 8;
-        x += (moveX[b] > 127 ? moveX[b] - 256 : moveX[b]) * mv / MOVE_STEP;
-        y += (moveY[b] > 127 ? moveY[b] - 256 : moveY[b]) * mv / MOVE_STEP;
-        a = (a + dir * rate) & 0xffff;
-      }
-      x = Math.round(x); y = Math.round(y);
-    } else if (op[0] === 'act') {
-      out.push([op[1], op[2], op[3] ?? 0]);       // SPACE / WAIT / FALL: type, ticks (or ceiling), operand
-    } else throw new Error(`ROUTE=${ROUTE}: unknown op ${op[0]}`);
-  }
-  while (poses.length < out.length) poses.push([x, y, a]);
-  return { steps: out, end: [x, y, a], poses };   // poses[i] = the model's pose when step i ENDS
-};
-// ROUTE=cover: the SAMPLING route -- not a benchmark, the thing the benchmark was chosen from.
-// Snakes every open cell of level 1 with the player walking and running, so FRAMELOG sees each
-// cell approached from the headings the geometry allows, in motion. It never stops: what a cell
-// costs standing still is not a question anyone is asking.
-// Ends short of the corridor's far end -- (13.5, 4.5) -- because the exit hole is at (14, 4).
-const COVER_ROUTE = [
-  //    x: 0123456789ABCDEF
-  // y=1    #..###..#          row 1 is two alcoves; row 2 spans x1-7; rows 3 and 5 span x2-6;
-  // y=2    #.......#          row 4 is x2-14 including the corridor; row 6 is x1-7; row 7 is
-  // y=3    ##.....#           two alcoves again. The player starts in the (1,1) alcove.
-  // y=4    ##.............#
-  // y=5    ##.....#
-  // y=6    #.......#
-  // y=7    #..###..#
-  ['to',  2.5, 1.5], ['to',  2.5, 2.5], ['to',  7.5, 2.5],      // out of the alcove, row 2 east
-  ['to',  7.5, 1.5], ['to',  6.5, 1.5], ['to',  6.5, 2.5],      // the north-east alcove
-  ['to',  1.5, 2.5], ['to',  2.5, 2.5], ['to',  2.5, 3.5],      // row 2 west; NOT diagonally
-  ['to',  6.5, 3.5],                                            //   into (2,3): the (1,3) corner
-                                                                //   is inside the collision box
-                                                                //   on a 45-degree cut. Row 3 east.
-  ['to',  6.5, 4.5], ['run', 2.5, 4.5], ['to',  2.5, 5.5],      // row 4 west, running
-  ['to',  6.5, 5.5], ['to',  6.5, 6.5], ['to',  7.5, 6.5],      // row 5 east, down, then row 6
-  ['to',  1.5, 6.5],                                            //   west
-  ['to',  1.5, 7.5], ['to',  2.5, 7.5], ['to',  2.5, 6.5],      // the south-west alcove
-  ['to',  6.5, 6.5], ['to',  6.5, 7.5], ['to',  7.5, 7.5],      // the south-east alcove
-  ['to',  6.5, 6.5], ['to',  6.5, 4.5], ['to',  7.5, 4.5],      // back up the east side to the
-  ['run', 13.5, 4.5],                                           //   throat -- (7,5) is wall -- and
-                                                                //   run the corridor
-  ['to',  8.5, 4.5], ['run', 6.5, 4.5],                         // walk back to the mouth, run
-  ['run', 4.5, 2.5],                                            //   in through the throat first --
-                                                                //   straight from the mouth to
-                                                                //   (4.5,2.5) clips the (7,3) corner ['run', 2.5, 4.5], ['run', 4.5, 6.5],      // diagonals across the room
-  ['run', 5.5, 4.5], ['run', 4.5, 2.5], ['run', 2.5, 2.5],      //   a 45-degree run toward x=6.5
-                                                                //   grazes the (7,3)/(7,5) corners:
-                                                                //   the collision box is 0.1 cells
-                                                                //   and a cut past a corner puts
-                                                                //   it inside. 5.5 clears both.
-];
-// ================= ROUTE=bench: THE benchmark =================
-// One route, walked and run like a player would, and chosen by measurement (ROUTE=cover +
-// FRAMELOG=1, read with flog.mjs, then two drafts of this route logged the same way, 2026-09-15).
-//
-// What the three logs said, in order, because each corrected the last:
-//   1. By CELL, the worst places are the alcoves, the west notches and the throat. A route through
-//      them on long straight legs ran at 19.5 fps -- faster than the seam tour's 15.9. Long legs
-//      are cheap: the corridor holds the single worst frame on the map (3,147 lines) and is still
-//      one of the cheaper places to WALK, ~1,000 a frame, because its two faces barely change.
-//   2. By LEG, the expensive ones were the short hops in and out of the alcoves. A route that
-//      worked every alcove ran at 17.8 -- and its own log showed the alcoves were the CHEAPEST
-//      third of it (774 lines a frame) and the open room the dearest (1,013).
-//   3. So the coverage legs were expensive for which way they FACED, not where they were: out of
-//      an alcove you face the whole room, seven stepped walls of short oblique faces; into one you
-//      face two walls a cell away and nothing else. The cost on this level is the open room with
-//      all of it in view, which is also what a player looks at most.
-// Hence this: the room crossed on long diagonals FACING ITS FAR WALLS, with the turn a player
-// makes at each end to look where they are going next, the corridor once each way for the worst
-// frame, and no time spent looking into corners. No spins, no oscillation, no waits, no hole --
-// but turns are not artificial, a player turns at every corner, and the two "look round" turns
-// are the two places a player genuinely would.
-// Straight walks and spot turns are frame-rate exact (see compileRoute), so any build walks the
-// same line. Under 90 seconds, so a FRAMELOG at FLOGDIV=4 does not wrap.
-// ================= ROUTE=b1: the benchmark for the CURRENT level 1 =================
-// BENCH_ROUTE below was authored for the old 16-wide level 1 -- its own sketch is a map with
-// alcoves that no longer exists -- and has walked into walls since the 23x11 room-corridor-ring
-// landed on 2026-09-16. This is the replacement, and the map it is drawn on:
-//        0123456789012345678901 2
-//    y=1 #..##..######.........#
-//    y=2 #......######.#######.#
-//    y=3 ##....#######.#.....#.#
-//    y=4 ##....#######.#.##..#.#
-//    y=5 ##............#.##....#     <- the corridor, x2..x13
-//    y=6 ##....#######.#.##..#.#
-//    y=7 ##....#######.#.....#.#
-//    y=8 #......######.#######.#
-//    y=9 #..##..######.........#
-// Three kinds of motion, because the engine's cost is not the same for any two of them: long
-// WALKS across open space facing a far wall (the dear case -- the whole room in view), RUNS
-// along the corridor and the ring's straights (cheap per frame, but twice the ground), and two
-// SPINS standing still in open room, which is the only way the full 256-angle cast gets
-// exercised. No leg faces a near wall head-on and no leg ends against one: walking into a
-// surface a cell away is the cheapest frame on the map and measuring it flatters any build.
-const BENCH1_ROUTE = [
-  // FOUR SPOTS, and at each the same three things: walk a few cells, run a few, half turn.
-  // Every leg runs along a LONG SIGHTLINE, because this map has only three of them -- north/south
-  // in the west room, the corridor, and the ring's straights -- and the engine's cost is what is
-  // in view, not where you stand. The west room is six cells wide, so any east/west leg is a flat
-  // wall five cells off: the cheapest frame on the map, and measuring it flatters everything.
-  // Nothing starts or ends facing a near wall; the half turns happen where there is depth behind
-  // you as well as ahead.
-  // --- 1: the west room, walked up its long axis with the whole room in view
-  ['to',  2.5, 1.5], ['run', 2.5, 6.5], ['spin', 180],
-  // --- 2: the corridor, entered from the room end -- eleven cells of depth ahead
-  ['to',  3.5, 5.5], ['to',  9.5, 5.5], ['run', 13.5, 5.5], ['spin', 180],
-  // --- 3: the ring's top straight
-  ['to', 13.5, 1.5], ['to', 18.5, 1.5], ['run', 20.5, 1.5], ['spin', 180],
-  // --- 4: down the ring's right column, then its bottom straight
-  ['to', 21.5, 1.5], ['to', 21.5, 9.5], ['to', 17.5, 9.5], ['run', 14.5, 9.5], ['spin', 180],
-];
-const BENCH_ROUTE = [
-  //    x: 0123456789ABCDEF
-  // y=1    #..###..#
-  // y=2    #.......#
-  // y=3    ##.....#
-  // y=4    ##.............#
-  // y=5    ##.....#
-  // y=6    #.......#
-  // y=7    #..###..#
-  ['to',  2.5, 2.5],              // out of the alcove, facing the room
-  ['to',  6.5, 6.5],              // the long diagonal, the south-east walls ahead the whole way
-  ['to',  6.5, 2.5],              // up the east side, the north step and alcove coming at you
-  ['to',  2.5, 6.5],              // the other diagonal, the south-west walls ahead
-  ['to',  2.5, 4.5],              // up into the west notch, facing along it
-  ['to',  6.5, 4.5],              // across the middle of the room to the throat, the corridor
-  ['to',  7.5, 4.5],              //   opening ahead -- the worst frame on the map, walked into
-  ['to',  12.5, 4.5],             // the corridor, walked
-  ['run', 7.5, 4.5],              // and run back, the room opening up in the throat
-  ['run', 4.5, 2.5],              // run out into the room, facing its north-west
-  ['to',  4.5, 6.5],              // walk down the middle, the south step ahead
-  ['to',  1.5, 6.5],              // to the south-west corner, facing the west wall's steps
-  ['to',  2.5, 6.5],              // a step back out -- (1,5) is wall, so the diagonal must start
-  ['to',  6.5, 2.5],              //   from x=2.5. The long diagonal back, the alcove ahead
-  ['run', 2.5, 2.5],              // run the top of the room, facing west
-  ['run', 6.5, 4.5],              // run for the throat
-  ['run', 13.5, 4.5],             // run the corridor out
-  ['to',  7.5, 4.5],              // walk it back
-  ['to',  2.5, 2.5],              // across the room, home
-  ['to',  1.5, 1.5],
-];
-// ROUTE=fall: the shortest honest path from level 1's start to its hole, with the two orbs left
-// where they are -- the door orb is IN the way, so this goes round the ring's north arc, into the
-// chamber by... it cannot: the chamber's only door is plugged. So it takes the door orb (SPACE)
-// and walks in. A test of the level LOOP, not of play: fall into the socket room, then the
-// verification reads mapT and the pose to see which level is live.
-const FALL_ROUTE = [
-  ['to',  2.5, 5.5], ['run', 13.5, 5.5],          // across the room, run the corridor
-  ['run', 13.5, 1.5], ['run', 21.5, 1.5],         // the north arc
-  ['run', 21.5, 5.5],                              // down to the door
-  ['act', T_SPACE, 2],                             // take the door orb
-  ['to',  19.5, 5.5], ['to', 18.5, 5.5],           // into the chamber (the angel is at 19,5 --
-  ['to',  18.5, 3.5], ['to', 15.5, 3.5],           //   walking through its cell is harmless)
-  ['to',  15.5, 5.5],                              // onto the hole
-  ['act', T_FALL, 600],                            // and wait for the drop. Nothing after it: the
-];                                                 //   map has changed and the wall check cannot know
-// ROUTE=sock (CHAIN=2 TOURW=1): the socket mechanic, headless. Take the north alcove's
-// orb, carry it to the doorway, seat it, and stand looking east through the pocket at the wall
-// that should now be gone. Ends there for the same reason FALL_ROUTE ends on the hole: the map
-// has changed and the wall check below cannot know.
-// Then (ANGEL=0 for this, the route walks the angel's cell) through the corridor for the spine's
-// orb, down through (9,10) and round to the third socket at (12,14) from its east side. Ends
-// facing west at it with wall 2 (11,14) gone: wallStT reads 1,0,1.
-const SOCK_ROUTE = [
-  ['to',  5.5, 2.5],                               // up to the orb at (6,2), facing it
-  ['act', T_SPACE, 2],                             // take it
-  ['to',  5.5, 5.5],                               // down to the doorway, facing south
-  ['spin', -90],                                   // ...east, at the socket
-  ['act', T_SPACE, 2],                             // seat it: the wall at (8,5) goes
-  ['act', T_WAIT, 60],                             // the collapse
-  ['run', 7.5, 5.5], ['run', 13.5, 5.5],           // through the pocket and the corridor
-  ['run', 13.5, 1.5], ['run', 11.5, 1.5],          // round to the spine's orb
-  ['to',  11.5, 2.5],                              // facing south at (11,3)
-  ['act', T_SPACE, 2],                             // take it
-  ['to',  11.5, 1.5], ['run', 13.5, 1.5], ['run', 13.5, 9.5], ['run', 11.5, 9.5],
-  ['run', 11.5, 7.5], ['run', 9.5, 7.5], ['run', 9.5, 11.5], ['run', 14.5, 11.5],
-  ['run', 14.5, 13.5], ['to', 13.5, 13.5], ['to', 13.5, 14.5],   // beside the socket
-  ['spin', 90],                                    // facing west at (12,14)
-  ['act', T_SPACE, 2],                             // seat it: the wall at (11,14) goes
-  ['act', T_WAIT, 120],
-];
-// ROUTE=block (CHAIN=2 TOURW=1, angel ON): open the corridor, then drop the second orb
-// in the vanished wall's cell -- the one-wide chokepoint -- and look away for ten seconds. The
-// angel must still be east of (8,5) afterwards.
-const BLOCK_ROUTE = [
-  ['to',  5.5, 2.5], ['act', T_SPACE, 2],           // orb A
-  ['to',  5.5, 5.5], ['spin', -90], ['act', T_SPACE, 2],   // seat it: (8,5) goes
-  ['act', T_WAIT, 60],
-  ['to',  5.5, 8.5], ['spin', -90], ['act', T_SPACE, 2],   // orb B, from the south alcove
-  ['to',  5.5, 5.5], ['to', 7.5, 5.5],              // into the pocket, facing east at (8,5)
-  ['act', T_SPACE, 2],                              // put it down in the corridor mouth
-  ['spin', 180],                                    // look away
-  ['act', T_WAIT, 600],                             // and give the angel ten seconds
-];
-// ROUTE=sock3 (CHAIN=3 TOURW=1 ANGEL=0): level 3's east orb into S1 -- the chamber's
-// north and west walls go -- then stand in the opening looking in.
-const SOCK3_ROUTE = [
-  ['to', 12.5, 2.5], ['to', 12.5, 8.5],            // along row 2 (row 1 ends in an angel), down to the orb
-  ['act', T_SPACE, 2],
-  ['to', 12.5, 3.5], ['to', 4.5, 3.5], ['to', 4.5, 5.5],   // back up, west, down beside the socket
-  ['spin', -90],                                   // facing east at (5,5)
-  ['act', T_SPACE, 2],
-  ['act', T_WAIT, 60],                             // the corner goes
-  ['to', 5.5, 5.5], ['spin', 45],                  // onto the spent socket, facing the caged angel
-  ['act', T_WAIT, 120],                            //   diagonally adjacent (DIE=0 ANGFREEZE=1 to look)
-  ['to', 3.5, 3.5], ['spin', 360], ['spin', -360], // then a slow look round from the open floor:
-  ['act', T_WAIT, 60],                             //   with ENTLOG, every entity in view must draw
-];
-// ROUTE=l3rep (CHAIN=3 TOURW=1 DIE=0 ANGFREEZE=1 ANGAT=4.5,1.5;1.5,6.5;6.5,6.5): the
-// user's readout X133 Y127 A2F00 E041 E016 E066 after seating S1 -- the angel at (1,6) is 21
-// degrees right of centre, five cells off, and did not draw.
-const L3REP_ROUTE = [
-  ['to', 12.5, 2.5], ['to', 12.5, 8.5], ['act', T_SPACE, 2],
-  ['to', 12.5, 3.5], ['to', 4.5, 3.5], ['to', 4.5, 5.5], ['spin', -90], ['act', T_SPACE, 2],
-  ['act', T_WAIT, 60],
-  ['to', 1.2, 1.15], ['spin', -149],                // facing ~$2f
-  ['act', T_WAIT, 60],
-];
-// ROUTE=cover3: the same idea for LVL=3 -- every open cell of the room, the corridor, and the
-// ring's outer loop and chamber, walking and running, never stopping. The chamber is entered by
-// its east door at (20,5); the two-wide column at x16-17 splits it, so both halves are walked.
-const COVER3_ROUTE = [
-  //    x: 0        1         2
-  //       0123456789012345678901 2
-  // y=1    #..##..######.........#
-  // y=2    #......######.#######.#
-  // y=3    ##....#######.#.....#.#
-  // y=4    ##....#######.#.##..#.#
-  // y=5    ##............#.##....#
-  // y=6    ##....#######.#.##..#.#
-  // y=7    ##....#######.#.....#.#
-  // y=8    #......######.#######.#
-  // y=9    #..##..######.........#
-  ['to',  1.5, 1.5], ['to',  2.5, 1.5], ['to',  2.5, 2.5], ['to',  6.5, 2.5],   // NW alcove, row 2 east
-  ['to',  6.5, 1.5], ['to',  5.5, 1.5], ['to',  5.5, 2.5],                      // NE alcove
-  ['to',  2.5, 2.5], ['to',  2.5, 8.5], ['to',  1.5, 8.5], ['to',  1.5, 9.5],   // down the west notch, SW alcove
-  ['to',  2.5, 9.5], ['to',  2.5, 8.5], ['to',  5.5, 8.5], ['to',  5.5, 9.5],   // row 8 east, SE alcove
-  ['to',  6.5, 9.5], ['to',  6.5, 8.5], ['to',  5.5, 8.5], ['to',  5.5, 3.5],   // up the east side
-  ['to',  3.5, 3.5], ['to',  3.5, 7.5], ['to',  4.5, 7.5], ['to',  4.5, 3.5],   // the middle, both ways
-  ['to',  4.5, 5.5], ['run', 13.5, 5.5],                                        // out the corridor, running
-  ['to',  13.5, 1.5], ['to',  21.5, 1.5], ['to',  21.5, 9.5], ['to',  13.5, 9.5],// the outer loop, clockwise
-  ['to',  13.5, 5.5], ['run', 13.5, 1.5], ['run', 21.5, 1.5], ['run', 21.5, 5.5],// ...and part of it running
-  ['to',  19.5, 5.5], ['to',  18.5, 5.5], ['to',  18.5, 3.5], ['to',  15.5, 3.5],// into the chamber, north half
-  ['to',  15.5, 7.5], ['to',  18.5, 7.5], ['to',  18.5, 5.5], ['to',  21.5, 5.5],// south half, out the door
-  ['run', 21.5, 9.5], ['run', 13.5, 9.5], ['run', 13.5, 5.5], ['run', 6.5, 5.5],  // run home
-  ['to',  2.5, 5.5],
-];
-// ---- ROUTES: one entry per scripted tour, and ONE statement of each fact ----
-// A route used to be spread across five lists that all had to agree -- the steps ternary, the
-// "is this validated" list, the "does it open walls" list, the start-pose ternary and the .end
-// lookup -- with the START POSE STATED TWICE, once to compileRoute and again to the validator.
-// Two sources for one fact is how they drift, and a sixth list had already fallen behind:
-// a pose dump's knew five of the nine routes, and read poses of undefined for the rest.
-// Adding a route is now one entry.
-const ROUTES = {
-  cover:  { route: COVER_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
-  cover3: { route: COVER3_ROUTE, start: [0x0280, 0x0280, 0x1000] },
-  bench:  { route: BENCH_ROUTE,  start: [0x01f6, 0x0149, 0x3b00] },
-  b1:     { route: BENCH1_ROUTE, start: [0x0280, 0x0880, 0xc000] },   // cell (2,8), facing NORTH up the room
-  fall:   { route: FALL_ROUTE,   start: [0x0280, 0x0280, 0x19c0] },
-  // opensWalls: the route walks through walls its own sockets have taken out, so the validator
-  // has to judge it with them OPEN. One that arrives at a wall still standing simply stalls there.
-  sock:   { route: SOCK_ROUTE,   start: [0x0280, 0x0280, 0x1a00], opensWalls: true },
-  block:  { route: BLOCK_ROUTE,  start: [0x0280, 0x0280, 0x1a00], opensWalls: true },
-  sock3:  { route: SOCK3_ROUTE,  start: [0x0180, 0x0180, 0x2000], opensWalls: true },
-  l3rep:  { route: L3REP_ROUTE,  start: [0x0180, 0x0180, 0x2000], opensWalls: true },
-};
-for (const r of Object.values(ROUTES)) r.compiled = compileRoute(r.route, r.start);
-// Not in a dump: a LVLDUMP subprocess inherits ROUTE, has no use for it (the validator below
-// skips entirely), and would throw first -- turning a good message into the parent's opaque
-// "Command failed", which is the whole reason subprocess stdio being ignored is a trap.
-if (!process.env.LVLDUMP && ROUTE !== 'walk' && !ROUTES[ROUTE]) throw new Error(
-  `ROUTE=${ROUTE} is not a route. Known: walk, ${Object.keys(ROUTES).join(', ')}. ` +
-  `An unknown one used to fall back silently to the free walk, which looks like the route ran.`);
-const ROUTEDEF = ROUTES[ROUTE];                 // undefined for ROUTE=walk, the unscripted default
-const TOUR_STEPS = ROUTEDEF ? ROUTEDEF.compiled.steps : WALK_STEPS;
-// Not in an LVLDUMP subprocess: that is the OTHER level being built as a shadow, and a route
-// authored for the live level walks straight through its walls.
-if (!process.env.LVLDUMP && ROUTEDEF) {
-  DIAGEARLY.push(`ROUTE=${ROUTE}`);
-  // Walk the whole route a tick at a time and run mvFree's OWN box test at every position. A
-  // scripted route that clips a wall does not fail loudly -- moveFwd simply refuses the step,
-  // the tick budget is spent anyway, and every later waypoint is somewhere else. That reads as
-  // "the benchmark moved" rather than as an error, so the build has to catch it here.
-  const R = COLL_R;                              // mvFree's half-box, in 1/256 cells
-  // ROUTE=sock walks through walls its sockets have opened, so it is checked with them open --
-  // a route that arrives at a wall still standing simply stalls there, which the read-back shows.
-  // The padded map and inMap, not the raw literal M[cy][cx]: a literal shorter than MAPW x MAPH read
-  // `undefined` there, i.e. OPEN, where every other reader sees wall.
-  const solid = ROUTEDEF.opensWalls ? WALL_OPEN : WALL_SHUT;
-  const blocked = (X, Y) => {
-    for (const bx of [(X - R) >> 8, (X + R) >> 8]) for (const by of [(Y - R) >> 8, (Y + R) >> 8])
-      if (solid(bx, by)) return true;
-    return false;
-  };
-  let [x, y, a] = [...ROUTEDEF.start], bad = [];
-  for (const [i, [t, n]] of TOUR_STEPS.entries()) {
-    const run = t === T_RUN || t === T_FTURNL || t === T_FTURNR || t === T_RARCL || t === T_RARCR;
-    const mv = (t === T_WALK) ? MV_WALK : (t === T_RUN) ? MV_RUN
-             : (t === T_ARCL || t === T_ARCR) ? MV_WALK
-             : (t === T_RARCL || t === T_RARCR) ? MV_RUN : 0;
-    const tn = (t === T_TURNL || t === T_ARCL) ? -TN_WALK : (t === T_TURNR || t === T_ARCR) ? TN_WALK
-             : (t === T_FTURNL || t === T_RARCL) ? -TN_RUN : (t === T_FTURNR || t === T_RARCR) ? TN_RUN : 0;
-    for (let k = 0; k < n; k++) {
-      const b = a >> 8;
-      x += (moveX[b] > 127 ? moveX[b] - 256 : moveX[b]) * mv / MOVE_STEP;
-      y += (moveY[b] > 127 ? moveY[b] - 256 : moveY[b]) * mv / MOVE_STEP;
-      a = (a + tn) & 0xffff;
-      if (blocked(Math.round(x), Math.round(y)))
-        bad.push(`step ${i} (type ${t}) tick ${k}: (${(x / 256).toFixed(2)}, ${(y / 256).toFixed(2)})`);
-    }
-  }
-  if (bad.length) throw new Error(
-    `ROUTE=${ROUTE} walks into a wall at ${bad.length} of ${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ` +
-    `ticks -- moveFwd would refuse those steps and the rest of the route would land somewhere ` +
-    `else. First: ${bad[0]}${bad.length > 1 ? `; last: ${bad[bad.length - 1]}` : ''}`);
-  const [ex, ey, ea] = ROUTEDEF.compiled.end;
-  console.error(`  ROUTE=${ROUTE}: ${TOUR_STEPS.length} steps, ` +
-    `${TOUR_STEPS.reduce((s, t) => s + t[1], 0)} ticks = ` +
-    `${(TOUR_STEPS.reduce((s, t) => s + t[1], 0) / 60).toFixed(1)}s, clear of every wall; ` +
-    `ends at (${(ex / 256).toFixed(2)}, ${(ey / 256).toFixed(2)}) facing $${(ea >> 8).toString(16)}`);
-}
-if (process.env.TOURDUMP)
-  console.error('  tour: ' + TOUR_STEPS.map(t => `${t[0]}:${t[1]}`).join(' ') +
-                `  = ${TOUR_STEPS.reduce((n, t) => n + t[1], 0)} ticks`);
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
 for (let i = 0; i < 256; i++) { const v = Math.floor(i * i / 4); f0Lo.push(v & 255); f0Hi.push((v >> 8) & 255); }
 for (let i = 256; i < 512; i++) { const v = Math.floor(i * i / 4); f1Lo.push(v & 255); f1Hi.push((v >> 8) & 255); }
@@ -3792,21 +3314,10 @@ if (OCCCHK) DIAG.push('OCCCHK');
 const OCC_CPY = OCCCHK && process.env.OCCCHK !== '2';
 const OCC_CMP = OCCCHK && process.env.OCCCHK === '1';
 // PROFAT=<tick>: hold the profiler off until frameCnt reaches this, then wipe and count 256 frames
-// from there. Without it the window is always the first 256 frames after boot, which under TOURW is
-// the opening walk and nothing else -- every earlier profile of "the tour" was really that.
+// from there. Without it the window is always the first 256 frames after boot, which under the old
+// scripted tours was the opening walk and nothing else.
 const PROFAT = +(process.env.PROFAT ?? 0);
 if (PROFAT) DIAG.push('PROFAT');
-// PROFTOUR=1 (with TOURW=1): make the window the WHOLE TOUR instead of 256 frames. 256 frames is
-// about a quarter of a route, so a profile of "the tour" was always a profile of one quarter of
-// it, and PROFAT only moves which quarter -- three runs and an argument about how to add them up.
-// The whole tour is the better window for a reason beyond coverage: the script is driven in 60Hz
-// TICKS, so a route takes the same REAL TIME on a build of any speed. The accumulated lines in a
-// phase are therefore that phase's share of a fixed wall-clock second, directly comparable
-// between builds, and no per-frame denominator has to be agreed on first. twFrm alongside them
-// says how many frames that time bought, which is the fps.
-// Accumulators are 24-bit and a phase can at most take the whole tour: 3,606 ticks x 262 lines =
-// 945k, comfortably inside 16.7M. It is pfN, one byte, that could not have counted the frames.
-const PROFTOUR = flag('PROFTOUR');
 // PROFWIN=t0,t1 (with PROFILE=1): a window the MACHINE times, so every build measures the same
 // stretch of the same journey no matter when the host reads it. Ticks are counted from an anchor
 // taken on the FIRST frame of the main loop -- not from power-on, which would put the disk load
@@ -3818,9 +3329,9 @@ const PROFTOUR = flag('PROFTOUR');
 // so warp, polling and connect delays cannot change a single number.
 const PROFWIN = (process.env.PROFWIN ?? '').split(',').filter(Boolean).map(Number);
 if (PROFWIN.length && PROFWIN.length !== 2) throw new Error('PROFWIN=t0,t1');
-if (PROFWIN.length && (PROFTOUR || PROFAT)) throw new Error('PROFWIN, PROFTOUR and PROFAT are three different windows; pick one');
-if (PROFTOUR && !TOURW) throw new Error('PROFTOUR=1 needs TOURW=1: the window it uses is the tour');
-if (PROFTOUR && PROFAT) throw new Error('PROFTOUR and PROFAT are two different windows; pick one');
+if (PROFWIN.length && PROFAT) throw new Error('PROFWIN and PROFAT are two different windows; pick one');
+
+
 // PROFN=1: count how often each bucket is closed, so pfTick's own cost can be SUBTRACTED rather
 // than estimated. See the counter in pfTick for why that is not optional at PROFSUB.
 const PROFN = flag('PROFN');
@@ -3858,26 +3369,8 @@ const NOHUD = flag('NOHUD');
 // answer one question: does the cost of the phases AFTER input depend on WHEN they start?
 const PADIN = +(process.env.PADIN ?? 0);
 if (PADIN) DIAG.push(`PADIN=${PADIN}`);
-// FRAMELOG=1 (with TOURW=1 PROFILE=1): one 4-byte record per rendered frame -- cell, heading,
-// and the raster lines of WORK the frame took (flip to the tick that closes the wait, so the
-// wait itself is excluded). Filled while the tour runs, read out by probe.mjs afterwards.
-// This is the sampler the torture route was chosen from: which cells and headings are expensive
-// WHILE MOVING THROUGH THEM. A hop-and-hold scan would have measured settled poses, and a settled
-// frame is the one case the pivot and the run cache flatter -- the benchmark does not care what
-// standing still costs, and neither should the search for its waypoints.
-// 2,816 bytes at $7100 = 704 records. The coverage route is 109s, ~1,600 frames at 15 fps, so
-// the log takes every FOURTH frame (FLOGDIV=4; 1 logs all, and it must be a power of two).
-// Thinning the sample does not move the per-(cell, heading) means it is read for -- each pose
-// still gets several frames -- and it beats wrapping, which silently keeps only the tail of the
-// route. The reader checks flogN against the buffer and refuses a wrapped log.
-const FRAMELOG = flag('FRAMELOG');
-const TOURPOSE = flag('TOURPOSE');   // with TOURW: record the pose at the end of each step
-if (TOURPOSE && TOUR_STEPS.length > 42) throw new Error('TOURPOSE: 42 steps x 6 bytes is the 256 bytes at twPose');
-const FLOGDIV = +(process.env.FLOGDIV ?? 4);
-if (FLOGDIV & (FLOGDIV - 1)) throw new Error(`FLOGDIV=${FLOGDIV}: must be a power of two (it is an AND mask)`);
-if (FRAMELOG && !(TOURW && PROFILE)) throw new Error('FRAMELOG=1 needs TOURW=1 and PROFILE=1 (it reads the profiler timestamps)');
-if (FRAMELOG && process.env.EDGCHK === '1') throw new Error('FRAMELOG and EDGCHK both use $7100');
-const FLOG_N = 704;
+
+
 
 // Where the CPU-only tables start, and so the ceiling on how much code there may be. A build
 // that adds code ahead of this has run into it twice, and the failure is SILENT: the assembler
@@ -4243,6 +3736,22 @@ const SPINF = flag('SPINF');
 // the player at the same frame in every build, so even a bump is still a fair A/B.
 const WALKF = flag('WALKF');
 const BENCHF = +(process.env.BENCHF ?? 0);
+// MOVEAT=n MOVEFOR=m: the auto-mover holds still until tick n, moves for m ticks, then holds
+// still again -- and the BUILD times that window itself. The fps rig's per-level walk is TWO
+// SQUARES, which at the run speed is 43 ticks: shorter than the 60 ticks of boot to skip, so a
+// mover started at boot is done before the window opens, and probe's --at reads land ~12 ticks
+// late, a quarter of the window. So the window is the walk, and maS holds frameCnt, the iteration
+// count and px/py at its first frame (maS+0..7) and at its last (maS+8..15). maGo goes 0 -> 1 -> 2,
+// and `--until "maGo>=2"` reads them whenever it likes. Ticks are frameCnt's low byte, so n < 256.
+// MOVELEGS=n (the user, 2026-10-09): a SHUTTLE. No start pose can run far before it meets a wall --
+// level 1 clears 3 diagonal squares, about 1.4 s -- so the window runs MOVEFOR ticks out, the same
+// back with the opposite control, and again, n legs in all. maS+16..19 holds px/py at the end of the
+// first leg (the far point, so the rig can check the run out did not stop short of it), and with an
+// even n the run ends where it began, so ending somewhere else means a leg bumped.
+const MOVEAT = +(process.env.MOVEAT ?? 0), MOVEFOR = +(process.env.MOVEFOR ?? 0), MOVELEGS = +(process.env.MOVELEGS ?? 1);
+if (MOVELEGS < 1 || MOVELEGS > 255) throw new Error(`MOVELEGS=${MOVELEGS}: 1..255`);
+if (MOVEAT < 0 || MOVEAT > 255 || MOVEFOR < 0 || MOVEFOR > 255 || !MOVEAT !== !MOVEFOR)
+  throw new Error(`MOVEAT=${MOVEAT} MOVEFOR=${MOVEFOR}: both or neither, each 1..255 (frameCnt's low byte)`);
 const AUTOMOVE = SPINF ? 'spinFrm' : WALKF ? 'walkFrm' : SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
 
 // ---- VIC bank 0 memory layout ----
@@ -5814,8 +5323,6 @@ Object.assign(RUNTIME_BUFS, {
   obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
   obL: 8, obR: 8, obBL: 8, obBR: 8,
   pfNum: 34,                       // PROFN: the same seventeen phases, x 2
-  flogB: 2816,                     // FRAMELOG: $7100-$7bff, 704 x 4
-  twPose: 252,                     // TOURPOSE: 42 steps x 6
   // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
   // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
   // player's projected X overwrote the death trigger's reference angle every frame and you
@@ -6298,6 +5805,15 @@ const ANG_PERIOD_FAR = +(process.env.ANGPERF ?? 120);
 // against columns hidden gives a real fraction -- and ">= half obscured" is then one compare,
 // with no division anywhere. ANGOBSC shifts the visible count left: 0 = half, 1 = two thirds.
 const ANG_OBSC = +(process.env.ANGOBSC ?? 0);
+// ANGSLIDE=n: with the IDOL in hand an angel moves in plain sight, so a step that would teleport it
+// a whole cell is drawn as a LUNGE instead. It leaves n 60ths before the step is due and lands
+// exactly when it would have teleported, so the pace is unchanged. The slide is in the WORLD -- the
+// angel gets a fraction of a cell, projected every frame like everything else -- so it stays right
+// while you walk or turn, and its rung follows its apparent size on the way. 0 = the instant step.
+// Only the idol makes a step visible, so without one in the engine there is nothing to draw.
+const ANGSLIDE = HAS_IDOL ? +(process.env.ANGSLIDE ?? 24) : 0;
+if (ANGSLIDE && (ANGSLIDE < 2 || Math.max(ANG_PERIOD, ANG_PERIOD_FAR) + ANGSLIDE > 256 || ANGSLIDE >= Math.min(ANG_PERIOD, ANG_PERIOD_FAR)))
+  throw new Error(`ANGSLIDE=${ANGSLIDE} must be 2.. and shorter than a step period (${ANG_PERIOD}/${ANG_PERIOD_FAR}), and period + slide must fit a byte`);
 // ---- SOUND: two detuned low-pass pulses, and the detune IS the proximity readout ----
 // Two voices a hair apart beat at exactly their difference in Hz, so one number controls the
 // whole effect: a slow flange far off, a throb closer, a heartbeat when it is on top of you.
@@ -9503,9 +9019,8 @@ ssDir   = $915c                 ; which way the boundary walk steps: 0 = up, 1 =
 ; steady, and the four-column rule keeps a panel far enough from one that it could never match.
 ; No seam identity is needed or wanted here -- run ids renumber every frame -- so the match is
 ; pure proximity, which is exactly what the band means.
-; At fixed addresses in this gap rather than in the free-run stream: that stream runs up to
-; HAZ_BASE and TOURW's waypoint script sits in its tail, so 26 bytes there is 26 the tour cannot
-; have. The gap below holeSeeT at $9180 was doing nothing.
+; At fixed addresses in this gap rather than in the free-run stream, which runs up to HAZ_BASE.
+; The gap below holeSeeT at $9180 was doing nothing.
 sHyP    = $915d                 ; 12 columns
 sHyC    = $9169                 ; 12 columns
 sHyPN   = $9175
@@ -9653,15 +9168,8 @@ sdColN  = $70ba                  ; SEAMCNT: COLUMNS that took the seam draw path
                                 ;   (a seam) from the one renderSym is billed in (a column).
 ` : ''}${SEAMCNT ? `ssDraw  = $7e58                 ;   ...and a boundary really is crossed` : ''}
 ${PROFN ? `pfNum   = $70c4                 ; PROFN: 17 phases x 2 bytes, times each bucket was closed.
-                                ;   In the SEAMCNT/FRAMELOG scratch run at $70b0; $7100 up is the
+                                ;   In the SEAMCNT scratch run at $70b0; $7100 up is the
                                 ;   frame log's.
-` : ''}${FRAMELOG ? `flogB   = $7100                 ; FRAMELOG: ${FLOG_N} x (cellLo, pa, workLo, workHi)
-flogN   = $70bc                 ;   write cursor (16-bit, byte offset)
-flogW   = $70be                 ;   scratch for the work computation
-flgTF   = $70c0                 ;   the opening tick of the frame being rendered: frameCnt,
-flgTL   = $70c1                 ;   raster line low, raster line high bit
-flgTH   = $70c2
-` : ''}${TOURPOSE ? `twPose  = $a600                 ; TOURPOSE: 42 x (pxL pxH pyL pyH paF pa), in the $a486-$a8ff hole
 ` : ''}${CULLCNT ? `ogSkip  = $70cc                 ; CULLCNT: frames entGate closed, 16-bit free-running\n` : ''}${BNDCNT ? `bcN     = $70ec                 ; BNDCNT: boundaries pinned, 16-bit, stopped at pfDone
 bcSame  = $70ee                 ;   ...of which shared corners (same height both sides)
 ` : ''}${MARCHCNT ? `mcPiv   = $70f0                 ; MARCHCNT: marches at pivot hint brackets
@@ -10587,12 +10095,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         sta bcN+1
         sta bcSame
         sta bcSame+1
-` : ''}${FRAMELOG ? `        sta flogN               ; FRAMELOG: the cursor starts at record 0 (A is still 0)
-        sta flogN+1
-        sta flgTF
-        sta flgTL
-        sta flgTH
-` : ''}${PROFAT || PROFTOUR ? '        sta pfArm               ; PROFAT/PROFTOUR: not armed yet (A is still 0)\\n' : ''}` : ''}${RAYCNT ? `        lda #$00                ; rayFrm/rayAcc were never initialised -- uninitialised scratch, so
+` : ''}${PROFAT ? '        sta pfArm               ; PROFAT: not armed yet (A is still 0)\\n' : ''}` : ''}${RAYCNT ? `        lda #$00                ; rayFrm/rayAcc were never initialised -- uninitialised scratch, so
         sta rayFrm              ;   the first 256-frame latch fired after (256 - garbage) frames
         sta rayAcc              ;   and the "mean" divided by the wrong count
         sta rayAcc+1
@@ -10641,7 +10144,7 @@ mfAlive:
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
 ${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}${process.env.CEILLOG ? '        jsr ceilLog\n' : ''}        jmp fwait
-mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
+mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
         and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two), so a headless run falls again and again. It sets only
         bne fnSkip              ;   the player's CELL and lets fallChk find it the normal way, so
@@ -11573,25 +11076,7 @@ pfArmN: sta pfNum,x
         bpl pfArmN
 ` : ''}        inc pfArm
         bne pfNd                ; always: this frame is half-accumulated, so start with the next
-pfGo:   ` : '')}${PROFWIN.length ? '' : (PROFTOUR ? `        lda pfArm               ; PROFTOUR=1: the window is the WHOLE TOUR. Arm on the frame
-        bne pfTGo               ;   twStep anchors its clock -- that is the first frame after the
-        lda twGo                ;   load, and it is the only signal here that the load is over;
-        beq pfNd                ;   frameCnt has been running throughout it.
-        ldx #$32
-        lda #$00
-pfTArm: sta pfAcc,x
-        dex
-        bpl pfTArm
-${PROFN ? `        ldx #$21
-pfTArN: sta pfNum,x
-        dex
-        bpl pfTArN
-` : ''}        inc pfArm
-        bne pfNd                ; always: this frame is half-accumulated, so start with the next
-pfTGo:  lda twN                 ; ...and latch when the script runs out of steps. No frame count
-        cmp #${hx(TOUR_STEPS.length)}                ;   is involved, so the window is a fixed number of TICKS
-        bcc pfNd                ;   and every build profiles exactly the same journey.
-` : `${PROFAT ? '' : '        '}inc pfN
+pfGo:   ` : '')}${PROFWIN.length ? '' : (`${PROFAT ? '' : '        '}inc pfN
         bne pfNd
 `)}        inc pfDone              ; latch: freezes pfTick, starts drawing the table
 pfRdy:  jsr pfShow              ; every frame from now on -- the two screen buffers alternate,
@@ -12267,12 +11752,7 @@ ${PARTIAL ? `        bcs rfNext              ; rs GREW: the solid run starts lat
                                 ; and the edge loop (rb..rs-1) has just redrawn every one of
                                 ; them. Rows rs..12 are a suffix of what the buffer holds.
 ` : ''}        jmp rfSlDr
-${SEAMS && true ? `rfSlSm:${SEAMCNT ? `${PROFTOUR ? ` lda pfDone              ; STOP COUNTING WHEN THE PROFILER DOES. Free-running was wrong by 6x:
-        bne rfSlSn              ;   the tour ends, twFrm stops, and the program goes on rendering
-                                ;   idle frames for as long as it takes the host to poll -- which
-                                ;   at warp is thousands. A counter and its denominator have to
-                                ;   close on the same frame.
-       ` : ''} inc sdColN
+${SEAMS && true ? `rfSlSm:${SEAMCNT ? ` inc sdColN
         bne rfSlSc
         inc sdColN+1
 rfSlSc:${EDGCHK ? ' lda #$0d\n        sta chOld\n       ' : ''}` : `${EDGCHK ? ' lda #$0d\n        sta chOld               ; a seam column genuinely redraws in full: no waste to report\n       ' : ''}`} lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
@@ -12281,7 +11761,7 @@ rfCb3:  sta cbA,x               ; and the column redraws. It must be STORED WITH
                                 ; and the column is skipped even though its seam may have MOVED.
                                 ; Collapsing this into the common path cost 914 -> 7117 wrong
                                 ; pixels across the six views.
-${SEAMCNT && PROFTOUR ? 'rfSlSn:\n' : ''}        jmp seamDrw             ; seam columns draw their run out at SEAM_BLK, which is the whole
+        jmp seamDrw             ; seam columns draw their run out at SEAM_BLK, which is the whole
                                 ; cost here: the block below ORB_SMALL has no room for the rest
 ` : ''}rfSlDr:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         cmp #13
@@ -12426,11 +11906,11 @@ ${SPIN ? `
 ; A benchmark move is one pose and one control held down. The pose is the caller's
 ; (PX/PY/PA/PAF); this only turns.
 spinStep:
-        ldx dtv
+        ldx dtt                 ; dtt, not dtv: the player's turn is 2x per tick (see tickDelta)
         beq spinDn
 spTick: lda paF
         clc
-        adc #$c0                ; 192 = TN_WALK, the rate readKeys turns at
+        adc #$c0                ; 192 a dtt tick, the rate readKeys turns at
         sta paF
         lda pa
         adc #$00
@@ -12455,7 +11935,76 @@ walkFrm:lda #$03                ; WALKF: a fixed step per RENDERED frame (see WA
 ; frameCnt is bumped by the top-of-frame raster IRQ, so it counts 60ths of a second no matter
 ; how long the render took. Called from the main loop rather than from readKeys, so the WALK
 ; and STRAFE diagnostic builds move at the same speed a player does.
-tickDelta:
+${MOVEAT ? `; ---- maStep: MOVEAT/MOVEFOR's self-timed window (see MOVEAT) ----
+; The ticks are lastMv, the tick THIS FRAME'S MOVE runs up to, not frameCnt, which has moved on
+; by the time we get here: then the window's ticks and the ground covered are the same span. The
+; first frame only snaps, so every move inside the window covers ticks inside it, and the last
+; frame snaps AFTER its move. One frame of skew is a quarter cell at 12 fps, which read as a bump.
+maStep: lda maGo
+        bne maRun
+        lda lastMv
+        cmp #${hx(MOVEAT)}
+        bcc maDn                ; 0: not yet
+        inc maGo
+        ldy #$00
+        jmp maSnap              ; the window's first frame: snap, no move
+maRun:  cmp #$02
+        bcs maDn                ; 2: the window is over, stand still
+        lda maLeg
+        lsr
+        bcs maBk                ; odd legs come back with the opposite control
+        jsr ${AUTOMOVE}
+        jmp maChk
+maBk:   jsr ${{ moveFwd: 'moveBack', moveBack: 'moveFwd', strafeR: 'strafeL', strafeL: 'strafeR' }[AUTOMOVE] ?? AUTOMOVE}
+maChk:  lda lastMv
+        sec
+        sbc maLT
+        cmp #${hx(MOVEFOR)}
+        bcc maDn
+        lda maLT                ; the next leg is timed from where this one SHOULD have ended, so
+        clc                     ;   a frame's overshoot is paid back on the next leg instead of
+        adc #${hx(MOVEFOR)}     ;   drifting the shuttle one way
+        sta maLT
+        inc maLeg
+        lda maLeg
+        cmp #$01
+        bne maL2
+        lda px                  ; the far point of the first leg
+        sta maS+16
+        lda px+1
+        sta maS+17
+        lda py
+        sta maS+18
+        lda py+1
+        sta maS+19
+maL2:   lda maLeg
+        cmp #${hx(MOVELEGS)}
+        bcc maDn
+        inc maGo
+        ldy #$08                ; ...and its last, after its move
+maSnap: lda lastMv              ; 8-bit, so the rig takes this difference mod 256
+        sta maLT
+        sta maS,y
+        lda #$00
+        sta maS+1,y
+        lda iterLo
+        sta maS+2,y
+        lda iterHi
+        sta maS+3,y
+        lda px
+        sta maS+4,y
+        lda px+1
+        sta maS+5,y
+        lda py
+        sta maS+6,y
+        lda py+1
+        sta maS+7,y
+maDn:   rts
+maGo:   !byte 0
+maLeg:  !byte 0
+maLT:   !byte 0                 ; the tick the current leg started on
+maS:    !fill 20, 0
+` : ''}tickDelta:
         lda frameCnt
         sec
         sbc lastMv
@@ -12470,9 +12019,29 @@ tdCl:   lda dtv
         bcc tdDn
         lda #${DT_MAX}          ; a hitch must not step far enough to tunnel a wall
         sta dtv
-tdDn:   lda dtv                 ; unshifted, both run at plain elapsed time
-        sta dtm
-        sta dtt
+tdDn:   ; ---- THE PLAYER ALWAYS RUNS (2026-10-09) ----
+        ; 3 cells/s and 127 deg/s. There used to be a walk at 0.94 and 63 with SHIFT to run, but
+        ; the walk was barely twice an angel's 0.5 cells/s and nothing in the game rewarded it, so
+        ; the run is now simply the speed. Done HERE, not in readKeys, so the benchmark movers
+        ; (WALK, STRAFE, SPIN...) move at the speed a player does -- the reason tickDelta lives
+        ; in the main loop at all. Movement and turning get their own multipliers so running
+        ; does not spin the world faster than it moves through it; scaling elapsed TIME rather
+        ; than the step keeps both frame-rate independent. Clamped again: 3x a clamped dtv can
+        ; pass DT_MAX, and DT_MAX is the anti-tunnelling cap on the STEP, not on the ticks.
+        lda dtv
+        asl
+        clc
+        adc dtv                 ; 3x movement: 12 units of 1/256 cell a tick
+        cmp #${DT_MAX}
+        bcc tdM
+        lda #${DT_MAX}
+tdM:    sta dtm
+        lda dtv
+        asl                     ; 2x turning: 384 units of the 16-bit angle a tick
+        cmp #${DT_MAX}
+        bcc tdT
+        lda #${DT_MAX}
+tdT:    sta dtt
         rts
 
 ${PALKEYS ? `; ---- palKeys: 1 / 2 / 3 cycle the ceiling, wall and seam inks ----
@@ -12541,43 +12110,18 @@ pkDn:   rts
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
         ; keyboard scan (joystick-1 shares $dc01 with the keyboard matrix rows).
-${TOURW ? '        jsr twStep              ; TOURW=1: the script supplies what the hardware would\n' : ''}        lda #$ff
+        lda #$ff
         sta $dc00
-        ${TOURW ? 'lda twJoy' : 'lda $dc01'}
+        lda $dc01
         sta joyv
         eor #$ff
         sta joyEor
         lda #$fd
         sta $dc00
-        ${TOURW ? 'lda twRow' : 'lda $dc01'}
+        lda $dc01
         ora joyEor
-        sta rowv                ; SHIFT, E and S all live in this row -- read it once
-${RECORD && SPRITES ? '        jsr recTick             ; RECORD=1: log this frame\'s input\n' : ''}
-        and #$80
-        bne rkNoSh
-        ; LEFT SHIFT: run. 3 cells/s and 127 deg/s, against 0.94 and 63 walking -- movement and
-        ; turning get their own multipliers so running does not spin the world faster than it
-        ; moves through it. Scaling elapsed TIME rather than the step keeps both frame-rate
-        ; independent for free.
-        ; The extra x4 that b3e72b0 put in front of these is gone with the quarter-speed walk
-        ; it was compensating for: 3x/2x of a plain dtv gives running exactly the rates it has
-        ; had throughout, 12 units of 1/256 cell and 6 quarter-units of angle per tick.
-        lda dtv
-        asl
-        clc
-        adc dtv                 ; 3x movement
-        bcs rkShMc
-        cmp #${DT_MAX}
-        bcc rkShM
-rkShMc: lda #${DT_MAX}
-rkShM:  sta dtm
-        lda dtv
-        asl                     ; 2x turning
-        cmp #${DT_MAX}
-        bcc rkShT
-        lda #${DT_MAX}
-rkShT:  sta dtt
-rkNoSh: lda rowv
+        sta rowv                ; E and S live in this row -- read it once
+        lda rowv
         and #$40
         beq rkFwd               ; E held
         lda joyv
@@ -15421,7 +14965,7 @@ lzOk:   dey
         bne olChkD
         inc lzN+1
 olChkD: ldx oidx
-` : ''}` : ''}`}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr ${HAS_IDOL ? 'orbProjC' : 'orbProj'}             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+` : ''}` : ''}`}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr ${ANGSLIDE ? 'orbProjS' : HAS_IDOL ? 'orbProjC' : 'orbProj'}             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
 ${ENT1PROF ? "        php                     ; ENT1PROF: orbProj itself. php/plp because pfTick does NOT\n        jsr pfT7                ;   preserve the carry, and the carry is orbProj's return value\n        plp\n" : ''}
 ${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
         inc culPrj
@@ -16788,7 +16332,7 @@ oiEnt:  lda orbX0T,x            ; then each entity, back at its build-time cell
         sta orbHidT,x           ;   holding an entity, and resetting that put it back in the
         bne oiNext              ;   world -- both carried AND blocking its old cell
         sta angAccT,x
-        sta orbSeenT,x
+${ANGSLIDE ? '        sta angSlDT,x           ; and no lunge in progress: a restart lands nothing\n' : ''}        sta orbSeenT,x
         lda orbY0T,x
 ${MULW}
 ${ADDX('orbX0T,x')}
@@ -17185,11 +16729,21 @@ ${process.env.ANGFREEZE === '1' ? `        rts                     ; DEADCODE-OK
                                 ;   cell. Occlusion artefacts depend on WHERE the entity is, and an
                                 ;   angel that wanders makes a headless capture show a different
                                 ;   configuration every run -- unreproducible by construction.
+` : ''}${DIE ? `        lda dieSt               ; ---- THE SCENE HAS STARTED: nothing moves in it ----
+        bne asOut               ; The main loop swaps input for dieFade but still runs this. A
+                                ;   watched angel's clock never stopped while you held the idol,
+                                ;   so ~1.6 s after it caught you it set off again -- mid-scene,
+                                ;   sliding away from the face it is meant to be.
 ` : ''}        ldx #$00
 asLp:   stx amIdx
         lda orbTallT,x
         beq asNext              ; not an angel
-
+${DIE ? `        txa                     ; ...and the one that has MARKED you holds where it caught you,
+        clc                     ;   through the half second before the scene too. Stepping away
+        adc #$01                ;   would lift its own mark (dieChk lets you go past a cell).
+        cmp marked              ;   marked is the entity + 1, 0 for nobody
+        beq asNext
+` : ''}
         lda orbHidT,x
         bne asNext              ; not in the world
         lda orbSeenT,x
@@ -17215,32 +16769,45 @@ asPer:  sty asPCur
         clc
         adc dtv
         cmp asPCur              ; both periods are per LEVEL, swapped with the rest of the manifest
-        bcc asKeep
+        bcc ${ANGSLIDE ? 'asSlid' : 'asKeep'}
         sbc asPCur              ; ---- CARRY the remainder, do not zero it ----
         pha                     ; Carry is set from the cmp, so this is A - period. Zeroing made
-        jsr angOne              ; the effective period "period + whatever this frame overshot by",
-        pla                     ; and that overshoot is one frame of ticks -- so the angel walked
+${ANGSLIDE ? `        ldx amIdx
+        lda angSlDT,x           ; mid-lunge: it LANDS now, on the tick it would have teleported
+        beq asStep
+        jsr slLand
+        jmp asLand
+asStep:
+` : ''}        jsr angOne              ; the effective period "period + whatever this frame overshot by",
+${ANGSLIDE ? 'asLand: ' : ''}        pla                     ; and that overshoot is one frame of ticks -- so the angel walked
                                 ; SLOWER on a slower build, and faster down an empty corridor than
                                 ; in a dense view. Carrying it makes the average period exact at
                                 ; any frame rate, which is what the accumulator was for.
-                                ; It also un-breaks the scripted walkthrough: TOURW's "wait until
-                                ; the angel reaches (4,4)" is a CONDITION, so a drifting angel
-                                ; clock landed that step on a different tick every time the frame
-                                ; rate moved, and every step after it walked a different line.
                                 ; (X is the entity; angOne preserves nothing, hence the pha/pla.)
-asKeep: ldx amIdx
+${ANGSLIDE ? `        jmp asKeep
+asSlid: ldx amIdx               ; not due yet -- but the last ANGSLIDE 60ths before it are the lunge
+        sta angAccT,x
+        jsr slTick
+        jmp asNext
+` : ''}asKeep: ldx amIdx
         sta angAccT,x
 asNext: ldx amIdx
         inx
         cpx nOrbT
         bcc asLp
-        rts
+asOut:  rts
 
 ; ---- angOne: one grid step toward the player ----
 ; Greedy, not a path. A distance field would have to be rebuilt every time the player moves or an
 ; orb lands, and slow-and-inexorable is both cheaper and the better feeling. Diagonal first, then
 ; each axis alone, so a blocked diagonal still makes progress along a wall.
-angOne: stx amIdx
+angOne: jsr angPick             ; where to, and may it go there?
+        bcs anGo
+        rts
+; ---- angPick: the step for angel X, decided but NOT taken. C set (amTX/amTY/amX/amY/amCell
+; filled) if there is a legal one. Split from the taking so a lunge can choose its cell when it
+; SETS OUT and commit it when it lands. ----
+angPick:stx amIdx
         lda #$00
         sta amDX
         sta amDY
@@ -17264,7 +16831,7 @@ anSetY: sta amDY
         ; against an obstacle that is rare, transient and two seconds from being irrelevant.
 anNoY:  jsr anPath
         cmp #$ff
-        beq anDone              ; no descending neighbour: it is walled in, so it WAITS
+        beq apNo                ; no descending neighbour: it is walled in, so it WAITS
         tax
         lda pathDXT,x
         sta amTX
@@ -17279,7 +16846,9 @@ anNoY:  jsr anPath
         ; Now the fill itself routes round orbs, so a refused step means genuinely boxed in, and
         ; the right answer to that is to stand still.
         jsr anTry
-        bcc anDone
+        rts                     ; C is anTry's verdict
+apNo:   clc                     ; (the cmp above left C set)
+        rts
 anGo:   inc blkVer              ; the obstacle map changed: the fill has to be redone
         ldx amIdx
         lda orbYCT,x            ; the cell it is leaving opens
@@ -17341,6 +16910,9 @@ ${DIE ? `        sec                     ; did that land it beside the player? t
         bne anNoMk
 anReach:
         ldx amIdx
+        stx dieIdx              ; from the mark on, the projection stashes THIS angel's side of the
+        lda #$ff                ;   screen in dieOff/dieSgn -- which it only does while the angel
+        sta dieOff              ;   is drawn, so $ff still standing at dieGo means it never was
         lda orbSeenT,x          ; were you LOOKING at it when it reached you?
         beq anHide              ; no: it hides and waits for the turn, as it always has
         lda #${hx(DIE_MARKDLY)}              ; yes: it stays on screen, and the scene starts after this
@@ -17474,6 +17046,221 @@ anYes:  sec
         rts
 anNo:   clc
         rts
+${ANGSLIDE ? `; ---- THE LUNGE (ANGSLIDE): a seen step drawn as a slide, not a teleport ----
+; An angel lunging owns BOTH cells -- the one it left and the one it is going to are 2 in blkT for
+; the whole slide -- so nothing can walk into either and the landing is always legal. Halfway, its
+; orbXCT/orbYCT switch to the new cell: culling, zones and the occluder mask then answer for the
+; cell it is NEARER, and its projection offset (slOn) runs -0.5..0 from there instead of 0..+0.5.
+angSlDT: !byte ${pad([], NORB).join(',')}   ; 0 = not lunging, else 1..4 = +x,-x,+y,-y; bit 7 once switched
+angSlFT: !byte ${pad([], NORB).join(',')}   ; how far, in 256ths of the cell
+slFT:   !byte ${[...Array(ANGSLIDE)].map((_, i) => hx(Math.round((i + 1) * 256 / (ANGSLIDE + 1)))).join(',')}   ; 60ths into the lunge -> 256ths of the way
+slDXT:  !byte 0,1,$ff,0,0
+slDYT:  !byte 0,0,0,1,$ff
+slNgT:  !byte 0,0,1,0,1         ; west and north run the offset backwards
+slO:    !byte 0
+slF:    !byte 0                 ; this projection's own forward and right terms, kept to take back
+slFH:   !byte 0
+slR:    !byte 0
+slRH:   !byte 0
+
+; ---- slTick: angel X's step is not due yet; A = its banked 60ths ----
+; Inside the last ANGSLIDE 60ths, and only while the IDOL is in hand -- the one time a step can be
+; SEEN -- the step is chosen now and drawn as a slide that lands when it falls due. A lunge already
+; under way carries on whatever is in your hands: drop the idol with it in view and angStep stops
+; reaching it, which freezes it mid-air -- the freeze doing its job.
+slTick: lda angSlDT,x
+        bne stMove
+        lda idolHd
+        beq stOut               ; empty hands: the step stays an unseen teleport, as it always was
+        lda angAccT,x
+        clc
+        adc #${hx(ANGSLIDE)}         ; fits: the build asserts period + slide <= 256
+        cmp asPCur
+        bcc stOut               ; not yet
+        jsr angPick             ; clobbers X
+        bcc stOut               ; nowhere to go: try next frame; when it falls due it steps as usual
+        ldx amIdx
+        ldy amCell
+        lda #$02
+        sta blkT,y              ; the landing cell is taken from now on
+        inc blkVer              ; ...which the path fill has to know
+        lda #$01                ; the direction, 1..4
+        ldy amTX
+        beq stY
+        bpl stSet
+        lda #$02
+        bne stSet               ; always
+stY:    lda #$03
+        ldy amTY
+        bpl stSet
+        lda #$04
+stSet:  sta angSlDT,x
+stMove: lda angAccT,x           ; 60ths into the lunge = banked - (period - slide), clamped to the table
+        clc                     ;   (a period that grew mid-lunge reads negative: hold at the start)
+        adc #${hx(ANGSLIDE)}
+        sec
+        sbc asPCur
+        bcs stIx
+        lda #$00
+stIx:   cmp #${hx(ANGSLIDE)}
+        bcc stIx2
+        lda #${hx(ANGSLIDE - 1)}
+stIx2:  tay
+        lda slFT,y
+        sta angSlFT,x
+        bpl stDty               ; first half: still counted in the cell it is leaving
+        lda angSlDT,x
+        bmi stDty               ; switched already
+        ora #$80
+        sta angSlDT,x
+        jsr slFwd               ; now it is NEARER the new cell
+        jsr orbOcc1             ; ...and its occluder mask must say so (clobbers X)
+stDty:  lda #$01
+        sta entDty
+stOut:  rts
+
+; slFwd / slBack: move angel X's cell one step along its lunge, or back
+slFwd:  lda angSlDT,x
+        and #$7f
+        tay
+        clc
+        lda orbXCT,x
+        adc slDXT,y
+        sta orbXCT,x
+        clc
+        lda orbYCT,x
+        adc slDYT,y
+        sta orbYCT,x
+        rts
+slBack: lda angSlDT,x
+        and #$7f
+        tay
+        sec
+        lda orbXCT,x
+        sbc slDXT,y
+        sta orbXCT,x
+        sec
+        lda orbYCT,x
+        sbc slDYT,y
+        sta orbYCT,x
+        rts
+
+; ---- slLand: the step falls due mid-lunge. Land it through anGo, the instant step's own tail ----
+; anGo moves an angel from orbXCT/orbYCT to amX/amY: it frees the cell left, takes the new one,
+; marks the player if that is beside them, and rebuilds the occluder mask. So put the cell back
+; where the lunge set out from, name the landing cell, and let it do exactly what it always did.
+slLand: lda angSlDT,x
+        bmi slL2
+        jsr slFwd               ; a lunge that never reached halfway (one long frame): finish it
+slL2:   lda orbXCT,x
+        sta amX
+        lda orbYCT,x
+        sta amY
+${MULW}
+${ADDX('amX')}
+        sta amCell
+        ldx amIdx
+        jsr slBack
+        lda #$00
+        sta angSlDT,x
+        sta angSlFT,x
+        jmp anGo
+
+; ---- orbProjS: the projection, with a lunging angel's own fraction of a cell added ----
+; The shared terms kf/kr carry the PLAYER's fraction (see omTrig). A lunging angel adds its own:
+; two of the same small products omTrig makes, for this one projection only, then taken back.
+; Nothing else in orbProj changes, and an entity that is not lunging pays a load and a branch.
+orbProjS:
+        ldx oidx
+        cpx nOrbT
+        bcs opsP                ; a hole-like: never lunges
+        lda angSlDT,x
+        bne opsS
+opsP:   jmp ${HAS_IDOL ? 'orbProjC' : 'orbProj'}
+opsS:   jsr slOn
+        jsr ${HAS_IDOL ? 'orbProjC' : 'orbProj'}
+        php                     ; the carry is orbProj's answer
+        jsr slOff
+        plp
+        rts
+; slOn: the offset o from orbXCT/orbYCT is angSlFT as a SIGNED byte -- +f before the halfway
+; switch, f-256 (from the new cell) after it -- turned round for a lunge west or north. Along x
+; it adds o*cos to forward and takes o*sin from right; along y, o*sin and o*cos, the same shape
+; as omTrig's kf = kxc + kys and kr = kyc - kxs.
+slOn:   lda angSlDT,x
+        and #$7f
+        tay
+        lda angSlFT,x
+        cmp #$80
+        bne snS
+        lda #$81                ; -128 is outside oFrac's range; 1/256 of a cell does not show
+snS:    ldx slNgT,y
+        beq snP
+        eor #$ff
+        clc
+        adc #$01
+snP:    sta slO
+        cpy #$03
+        bcs snY
+        ldx ocos                ; along x
+        ldy ocosS
+        jsr oFrac
+        sta slF
+        lda slO
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        eor #$ff
+        clc
+        adc #$01
+        sta slR
+        jmp snAdd
+snY:    ldx osin                ; along y
+        ldy osinS
+        jsr oFrac
+        sta slF
+        lda slO
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        sta slR
+snAdd:  lda slF                 ; kSgn reads the N flag, so the load goes right before it
+        jsr kSgn
+        sta slFH
+        clc
+        lda kfL
+        adc slF
+        sta kfL
+        lda kfH
+        adc slFH
+        sta kfH
+        lda slR
+        jsr kSgn
+        sta slRH
+        clc
+        lda krL
+        adc slR
+        sta krL
+        lda krH
+        adc slRH
+        sta krH
+        rts
+slOff:  sec
+        lda kfL
+        sbc slF
+        sta kfL
+        lda kfH
+        sbc slFH
+        sta kfH
+        sec
+        lda krL
+        sbc slR
+        sta krL
+        lda krH
+        sbc slRH
+        sta krH
+        rts
+` : ''}
 
 ${DIE ? `${DIE && SOUND ? `; ---- snTone / snRise: the DRONE climbs ----
 ; Not a note over the top: the drone itself is wound up, voices 1 and 2 together, keeping their
@@ -19557,6 +19344,7 @@ pwY0:   !byte 0,0
 pwX1:   !byte 0,0
 pwY1:   !byte 0,0
 ` : ''}angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
+
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
@@ -22441,7 +22229,7 @@ ssCtN:  lda #${hx(NLOG - 1)}    ; nothing on screen is past this
 ${SEAMPW ? `; ---- ssPwS: dp for this face, and the largest s*s that still leaves a placeable panel ----
 ; Out here in the free run rather than inline in seamSpan, which lives in the MAIN block below
 ; ORB_SMALL: that block was down to 41 bytes and this is 60 of them, while the stream has room to
-; spare in every build that is not TOURW. A jsr per walking span, about 65 cycles a frame.
+; spare. A jsr per walking span, about 65 cycles a frame.
         ; dp is the perpendicular distance from the player to the wall PLANE, and runPlaneT holds
         ; that plane per run -- a run lies in one plane by construction. sideT picks the axis the
         ; same way calcU does, so the two cannot disagree about which coordinate u is.
@@ -23583,356 +23371,7 @@ agPt:   lda #$00                ; fdA -> charset A's glyph for rim code X. X sur
 
 
 
-`}${TOURW ? `        ; ---- TOURW: the waypoint tour, in the tail of the hazard block ----
-        ; FLOWS on from the hazard tables rather than re-originning at $a700. It used to say
-        ; "* = $a700", reasoning that the page is free while every resident map splits nothing --
-        ; and the DATA is, but the hazard block also emits hzRun and its table stubs there, 39
-        ; bytes of them, whenever HAZRT is on. So the tour asked for an address the block it is
-        ; meant to sit BEHIND had already taken, and every TWOLEV build of the walkthrough died
-        ; with "* = $a700 moves backward from $a727". Exactly those 39 bytes, and it had nothing
-        ; to do with how big the tour or the seam code had grown.
-        ; With HAZRT off there is no block to follow and this just continues the stream, which is
-        ; where it wanted to be anyway -- and is the rule the rest of this file already follows.
-        ; Feeds readKeys the two bytes it would have read from the hardware, so every bit of
-        ; movement, run and turn logic runs exactly as it does for a player. Parallel arrays
-        ; indexed by STEP so no multiply is needed; the input masks are indexed by TYPE.
-twStep: ldy twN                 ; ---- one step, one hold, one duration in 60Hz ticks ----
-        cpy #${hx(TOUR_STEPS.length)}
-        bcs twNeu
-        ; ---- "wait UNTIL the angel reaches a cell" is a CONDITION, not a duration ----
-        ; Turned into a flat wait it was ten seconds of standing still, facing away, while the
-        ; angel closes a cell every two -- so it always arrived before the script looked back at
-        ; it, and the death scene froze the tour. The tick count is a ceiling now, not the rule.
-        lda twTypT,y
-        cmp #${hx(T_WAIT)}
-        bne twTime
-        ldx #$00
-twWaL:  lda orbTallT,x
-        bne twWaF
-        inx
-        cpx nOrbT
-        bcc twWaL
-        bcs twTime              ; no angel on this level: fall back to the ceiling
-twWaF:  lda orbYCT,x
-${MULW}
-${ADDX('orbXCT,x')}
-        cmp twOpT,y
-        beq twExp               ; arrived: this step is done NOW
-twTime:
-        ; ---- how much REAL TIME has passed, not how many frames ----
-        ; readKeys runs once a RENDER FRAME but the durations are in 60Hz ticks, and movement is
-        ; tick-driven. Counting frames held every step ~4x too long at 15fps and buried the walks
-        ; in walls. frameCnt is the raster IRQ, so its delta is the honest elapsed time -- and it
-        ; keeps the script frame-rate independent, which is the point of the benchmark.
-        lda twAdv               ; the previous call expired a step: advance to the next NOW,
-        beq twNoAdv             ;   before this frame's ticks are charged to anything
-        lda #$00
-        sta twAdv
-        inc twAdv2              ; tell twStepOn to come back and charge this frame
-        jmp twStepOn
-twNoAdv:
-        ; ---- ONE CLOCK: the step is charged exactly what the movement will use ----
-        ; This used to keep its own elapsed-tick count off frameCnt (twLast), and the movement
-        ; code keeps another (tickDelta's dtv, off lastMv). Both read frameCnt, but at different
-        ; instants -- tickDelta runs before readKeys, this runs inside it -- so an IRQ landing
-        ; between the two reads made this clock see one tick MORE than the movement used. The
-        ; step then expired a frame early and its last tick of movement never happened. Measured
-        ; with TOURPOSE: every turn came up 2 ticks short (384 angle units), walks likewise, and
-        ; it COMPOUNDS -- forty steps in, the heading was 4,800 units off and the run legs were
-        ; landing in walls. dtv is capped at DT_MAX, and so must this be, for the same reason: a
-        ; hitch that moved the player DT_MAX ticks' worth must charge the step DT_MAX ticks.
-        lda dtv
-        sta twEl
-        lda twGo                ; the FIRST call only arms: PROFTOUR starts on twGo, and the
-        bne twEl1               ;   opening frame's dtv is the whole disk load capped at DT_MAX --
-        inc twGo                ;   32 ticks of movement no step asked for. Hands off this frame,
-        jmp twNeu               ;   so the route starts from the start pose and not 32 ticks on.
-twEl1:
-        lda twTk+1
-        bne twSub               ; more than a page of ticks left: cannot expire this frame
-        lda twTk
-        cmp twEl
-        bcc twExp
-        beq twExp
-twSub:  lda twTk
-        sec
-        sbc twEl
-        sta twTk
-        bcs twCnt
-        dec twTk+1
-        jmp twCnt
-twExp:  ; ---- the step ends THIS frame: move only the ticks it had LEFT ----
-        ; A step expires when its remaining ticks fall below the elapsed ticks of this render,
-        ; but the movement for the frame was still the FULL elapsed -- so every step overran by
-        ; up to one render frame, about 4 ticks at 15fps, a sixteenth of a cell. Small, except
-        ; that it lands differently depending on where frame boundaries fall against the step
-        ; durations, which moves with the frame rate AND with how long the disk took to load.
-        ; That is why the same build walked the route correctly once and a hair long the next
-        ; time, and why nudging a waypoint could not fix it: the error was not in the waypoint.
-        ; Clamping here makes a step's total movement exactly duration * rate -- the earlier
-        ; frames consume twEl each, this one consumes what is left -- so the route is the same
-        ; on any build at any frame rate, which is the whole point of a scripted walkthrough.
-        ; Floored at 1 because moveApply's loop is a do-while: dtm = 0 would run it 256 times
-        ; and tunnel the player through a wall.
-        ; TOURW-only code, so the player's own movement is untouched.
-        lda twTk
-        bne twExC
-        lda #$01
-twExC:  cmp dtv
-        bcs twExZ               ; the step had more time left than this frame used: nothing to do
-        sta dtv                 ; dtm and dtt are recomputed from dtv on the RUN path, and left
-        sta dtm                 ;   alone on the walk path, so all three want clamping
-        sta dtt
-twExZ:  lda #$00
-        sta twTk
-        sta twTk+1
-        ; ---- and HOLD THIS STEP'S INPUT for the clamped frame; advance next call ----
-        ; This used to fall straight into twStepOn, which loaded the NEXT step and set the
-        ; joystick for it -- so the clamped ticks, step N's last, were executed as step N+1's
-        ; input. Every turn lost its final partial frame to the walk that followed, and how much
-        ; depended on where the frame boundary fell: measured with TOURPOSE, one to five ticks a
-        ; step, not the same twice, compounding to 4,800 angle units by step forty and the run legs
-        ; landing in walls. Now the expiring frame moves step N's remaining ticks as step N, the
-        ; rest of that frame is stillness, and the next call advances. A step's movement is
-        ; exactly ticks x rate, and the route is the same on any build at any frame rate --
-        ; which was the claim all along, and is now true.
-        lda #$01
-        sta twAdv
-        jmp twRun
-        ; The "does this step still have time on it?" test that used to stand here went dead the
-        ; moment the jmp above was added, and sat unreachable after it until the reachability
-        ; guard found it (2026-09-20). twAdv answers the same question now, one call later.
-twStepOn:
-${TOURPOSE ? `        ; TOURPOSE=1: the pose at the END of every step -- px, py, pa:paF, 6 bytes a step at
-        ; twPose -- so the route compiler's model can be checked against what the machine did.
-        ; This is how the run-leg drift was found: the model and the hardware agreed on every
-        ; walk and disagreed on the long diagonal runs, which nothing else could have shown.
-        lda twN
-        asl
-        adc twN                 ; x3
-        asl                     ; x6
-        tay
-        lda px
-        sta twPose,y
-        lda px+1
-        sta twPose+1,y
-        lda py
-        sta twPose+2,y
-        lda py+1
-        sta twPose+3,y
-        lda paF
-        sta twPose+4,y
-        lda pa
-        sta twPose+5,y
-` : ''}        inc twN                 ; ...it does not: move on and load the next duration
-        ldy twN
-        cpy #${hx(TOUR_STEPS.length)}
-        bcs twNeu
-        lda twTOLoT,y
-        sta twTk
-        lda twTOHiT,y
-        sta twTk+1
-        lda twTypT,y
-        cmp #${hx(T_SPACE)}
-        bne twChg
-        jsr orbUse              ; SPACE is read by orbKey's own scan, so act directly, once,
-                                ;   at the moment its step begins
-twChg:  lda twAdv2              ; reached from the advance at the top of a call: this frame's
-        beq twCnt               ;   ticks belong to the NEW step, so go and charge them
-        lda #$00
-        sta twAdv2
-        jmp twTime
-        ; ---- the measurement: frames and ticks, EXCLUDING the angel wait ----
-        ; Standing still is where the temporal pivot and the dirty-cell cache pay off most, so
-        ; those frames are unusually cheap and would flatter the average. Counting here rather
-        ; than sampling at a fixed cycle count also makes the result immune to boot-timing phase,
-        ; which is what made the earlier fixed-cycle comparisons look non-deterministic.
-twCnt:  ldy twN
-        lda twTypT,y
-        cmp #${hx(T_WAIT)}
-        beq twRun
-${FRAMELOG ? `        ; ---- FRAMELOG: the frame just rendered, and what it cost ----
-        ; ORDER OF EVENTS, which the first cut got wrong: ... work ... wait -> flip (fT0 = frameCnt,
-        ; at raster 250) -> mloop -> pfTick (pfPrvF/L/H) -> here. So pfPrvF - fT0 is the gap from the
-        ; flip to the tick right after it: a constant few dozen lines, which is what it read.
-        ; The frame's work runs from the tick at the top of ITS iteration to ITS flip. That tick is
-        ; the one saved LAST time through here (flgTF/L/H), and the flip is fT0 at raster 250:
-        ;     work = (fT0 - flgTF) * 263 + 250 - (flgTL + flgTH * 256)
-        ; The first frame has no saved tick and logs garbage once; the reader drops record 0.
-${FLOGDIV > 1 ? `        lda twFrm               ; every FLOGDIV-th frame only -- but the tick is saved EVERY
-        and #${hx(FLOGDIV - 1)}    ;   frame, or the interval measured would be two frames' worth
-        bne flgSv
-` : ''}        lda fT0
-        sec
-        sbc flgTF
-        tax                     ; X = whole raster frames from that tick to the flip
-        lda #250
-        sec
-        sbc flgTL
-        sta flogW
-        lda #$00
-        sbc flgTH
-        sta flogW+1
-flgFr:  cpx #$00
-        beq flgSt
-        lda flogW
-        clc
-        adc #<263
-        sta flogW
-        lda flogW+1
-        adc #>263
-        sta flogW+1
-        dex
-        jmp flgFr
-flgSt:  lda flogN+1             ; wrap at ${FLOG_N} records: keep the LAST ${FLOG_N}
-        cmp #${hx((FLOG_N * 4) >> 8)}
-        bcc flgOk
-        lda #$00
-        sta flogN
-        sta flogN+1
-flgOk:  lda flogN               ; jv is renderSym's chain vector and is dead here -- twStep runs
-        sta jv                  ;   from readKeys at the top of the frame, before any drawing
-        lda flogN+1
-        clc
-        adc #>flogB
-        sta jv+1
-        ldy #$00
-        lda py+1
-${MULW}
-${ADDX('px+1')}
-        sta (jv),y              ; 0: cell
-        iny
-        lda pa
-        sta (jv),y              ; 1: heading
-        iny
-${process.env.ENTLOG ? `        ldx #$00                ; ENTLOG=k: bytes 2-3 are the entity-seen bits and entity
-        lda #$00                ;   k's cell instead of the work -- for "it was in view and
-elgLp:  lsr orbSeenT,x          ;   did not draw" reports (2026-09-18). Bit x = entity x got
-        ror                     ;   a sprite slot this frame (orbSeenT is 0/1).
-        inx
-        cpx #$08
-        bne elgLp
-        sta (jv),y
-        iny
-        ldx #${hx(+process.env.ENTLOG)}
-        lda orbYCT,x
-${MULW}
-${ADDX('orbXCT,x')}
-        sta (jv),y
-` : `        lda flogW
-        sta (jv),y              ; 2-3: work, raster lines
-        iny
-        lda flogW+1
-        sta (jv),y
-`}        lda flogN
-        clc
-        adc #$04
-        sta flogN
-        bcc flgSv
-        inc flogN+1
-flgSv:  lda pfPrvF              ; this iteration's opening tick: the START of the frame about to
-        sta flgTF               ;   be rendered, for next time through
-        lda pfPrvL
-        sta flgTL
-        lda pfPrvH
-        sta flgTH
-` : ''}        inc twFrm               ; one render frame of real work
-        bne twF1
-        inc twFrm+1
-twF1:   lda twTck               ; ...and the ticks it covered
-        clc
-        adc twEl
-        sta twTck
-        bcc twRun
-        inc twTck+1
-twRun:  ldy twN
-        lda twTypT,y
-        tax
-        lda twJoyT,x            ; the input this step holds down
-        sta twJoy
-        lda twRowT,x
-        sta twRow
-        rts
-twNeu:  lda #$ff                ; the tour is over: hands off the controls
-        sta twJoy
-        sta twRow
-        rts
-twJoy:  !byte $ff
-twRow:  !byte $ff
-twN:    !byte 0
-twTk:   !byte ${hx(TOUR_STEPS[0][1] & 255)}
-        !byte ${hx(TOUR_STEPS[0][1] >> 8)}
-twGo:   !byte 0
-twAdv:  !byte 0                 ; the last call expired a step; advance before charging
-twAdv2: !byte 0                 ; ...and having advanced, charge this frame to the new step
-twFrm:  !byte 0,0               ; frames rendered outside the wait
-twTck:  !byte 0,0               ; 60Hz ticks those frames covered
-twEl:   !byte 0
-twTypT: !byte ${TOUR_STEPS.map(t => hx(t[0])).join(',')}
-twOpT:  !byte ${TOUR_STEPS.map(t => hx(t[2] ?? 0)).join(',')}   ; the wait's target cell
-twTOLoT:!byte ${TOUR_STEPS.map(t => hx(t[1] & 255)).join(',')}
-twTOHiT:!byte ${TOUR_STEPS.map(t => hx(t[1] >> 8)).join(',')}
-        ; Active LOW, as the hardware is: joyv bit 0 = forward, 1 = back, 2 = turn left,
-        ; 3 = turn right, and twRow bit 7 clear is SHIFT, i.e. run. The arc types are just two
-        ; bits held at once -- readKeys tests forward and the turn independently, so nothing in
-        ; it had to change to walk and turn in the same frame.
-        ;        walk back  run  turnL turnR fturnL fturnR space angel fall  arcL arcR rarcL rarcR
-twJoyT: !byte $fe, $fd, $fe, $fb, $f7, $fb, $f7, $ff, $ff, $fe, $fa, $f6, $fa, $f6
-twRowT: !byte $ff, $ff, $7f, $ff, $ff, $7f, $7f, $ff, $ff, $ff, $ff, $ff, $7f, $7f
-` : ''}${RECORD && SPRITES ? `        ; ---- RECORD's log, in the tail of the hazard block ----
-        ; Flows on from the hazard tables, for the reason spelled out at TOURW above: hzRun and
-        ; its stubs already hold $a700 whenever HAZRT is on, so re-originning there moves backward.
-recTick:                        ; ---- the input log, run-length encoded in 60Hz TICKS ----
-        ; Ticks, not render frames. Movement is tick-driven, so a run held for N FRAMES covers
-        ; less ground on a faster build -- and comparing builds of different speed is the entire
-        ; point. frameCnt is the raster IRQ at 60Hz, so a run measured against it replays to the
-        ; same place whatever the frame rate.
-        ; orbKey runs earlier in the frame than readKeys, so okNew is already this frame's SPACE.
-        lda joyv
-        cmp recL0
-        bne recNew
-        lda rowv
-        cmp recL1
-        bne recNew
-        lda okNew
-        cmp recL2
-        beq recDn
-recNew: jsr recPut              ; close the run that just ended, then start the new one
-        lda joyv
-        sta recL0
-        lda rowv
-        sta recL1
-        lda okNew
-        sta recL2
-        lda frameCnt
-        sta recT0
-recDn:  rts
-
-recPut: lda recN
-        cmp #${hx(RECMAX)}
-        bcs rpDn                ; full: stop, do not wrap -- a truncated tour must be obvious
-        asl                     ; four bytes an entry, so the index stays inside a byte
-        asl
-        tax
-        lda recL0
-        sta recBuf,x
-        lda recL1
-        sta recBuf+1,x
-        lda recL2
-        sta recBuf+2,x
-        sec
-        lda frameCnt            ; how long the run lasted, in 60Hz ticks
-        sbc recT0
-        sta recBuf+3,x
-        inc recN
-rpDn:   rts
-recL0:  !byte $ff               ; $ff so the very first sample always counts as a change
-recL1:  !byte $ff
-recL2:  !byte $ff
-recT0:  !byte 0
-recN:   !byte 0                 ; runs logged so far -- read this first when dumping
-recBuf: !fill ${RECMAX * 4}, 0
-` : ''}        * = ${hx16(RELOC + 0x2300)}
+`}        * = ${hx16(RELOC + 0x2300)}
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
 ; table landed on $c000 -- which is stackLT, the subdivision's own stack. It rendered fine until
@@ -24217,12 +23656,7 @@ ${PROFILE ? `        * = ${hx16(RELOC + (PLAN === 3 ? 0x3600 : 0x2900))}  ; the 
                             ; and the build dies with an overlap error.
 ` : ''}${PROFILE ? `; ---- pfShow: 7 phases as 4 hex digits each, one per row from row 4 ----
 ; Accumulated over exactly 256 frames, so bytes 1 and 2 of each 24-bit total ARE the mean
-; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.${PROFTOUR ? `
-; NOT UNDER PROFTOUR: the window is the tour, not 256 frames, so what these digits show is the
-; 24-bit TOTAL divided by 256 and is a mean of nothing. The screen is not the readout in that
-; mode -- seamprof.mjs reads pfAcc and twFrm out of RAM and divides by the frames actually
-; rendered. The digits are left drawing because they still say at a glance that the run
-; finished, and their RATIO between two builds is meaningful even when their scale is not.` : ''}
+; raster lines per frame. One line is 65 cycles. Read it back with readout.mjs PROF=1.
 pfShow: lda #$00
         sta pfRow
         ; TWO COLUMNS of five. Ten rows starting at 4 would reach rows 12-13, which are BELOW
@@ -24364,9 +23798,7 @@ pmYes:  lda pfDLo
         sta mxLo
         lda pfDHi
         sta mxHi
-${TOURW ? `        lda twN
-        sta mxStep
-` : ''}pmNo:   lda pfFD                ; ...and the DISTRIBUTION: a floor that is a rare spike is a
+pmNo:   lda pfFD                ; ...and the DISTRIBUTION: a floor that is a rare spike is a
         cmp #$08                ;   different problem from one that is the shape of the whole run
         bcc pmH1
         lda #$07
@@ -24541,6 +23973,8 @@ dgD:    ; ---- which way round, and unhide it ----
                                 ;   below takes it down from here, so the white lasts exactly the
                                 ;   frame the angel reaches you, and the sprites lose the idol's
                                 ;   fire on the same frame (sprPal stands down once dieSt is set).
+        lda dieOff              ; was it ON SCREEN after it marked you? (see anReach) -- keep the
+        sta dgWas               ;   answer before the reset below throws it away
         lda #$ff                ; unsigned "never projected", far outside the lock window
         sta dieOff
         lda #${hx(DIE_CAP)}
@@ -24576,6 +24010,25 @@ ${SOUND ? '        jsr snTone              ; the dissonance starts with the grab
         sec
         sbc pa                  ; shortest way round: the sign of the difference is the way to go
         sta dieCl
+        ; ---- CAUGHT WHILE YOU WERE WATCHING IT: steer by the SCREEN, at hand speed ----
+        ; The bearing above is to the angel's cell CENTRE from yours. That is the right estimate
+        ; for the unseen death, where the angel is off screen and your turn is what brings it in.
+        ; Watched -- the idol case, where it walks up in plain view -- it is already near the
+        ; middle, and your offset inside your own cell can flip that bearing's sign: the sweep
+        ; then turns AWAY and runs out its cap with the angel gone. The projection already knows
+        ; which side it is on, so use that. And not at your own rate: a fast turn crosses the
+        ; two-frame lock window in one frame and never locks. Zero here takes the hand-speed
+        ; default below.
+        lda dgWas
+        cmp #$ff
+        beq dgBear              ; never drawn since the mark: the bearing is all there is
+        lda dieSgn              ; $00 right of centre, $ff left
+        ora #$01                ; -> +1 (turn up: sweeps it left onto the middle) or -1
+        sta dieCl
+        lda #$00
+        sta dieDir
+        sta dieDirF
+dgBear:
         ; dieDir is the HIGH BYTE OF A RATE now, not a direction flag. Storing +-1 into it left
         ; pa:paF advancing by $01xx or $FFxx a frame -- and $FFxx is minus a quarter of a unit, so
         ; the turn crawled backwards and never arrived. Keep the captured rate; only its SIGN is
@@ -24623,6 +24076,7 @@ dgAD:   lda #${hx(ORBBODY[0])}  ; the orb, by contrast, fades out with everythin
         lda #$ff
         sta dieTck              ; no tick written yet
         rts
+dgWas:  !byte $ff                ; dieOff as dieGo found it: $ff = the angel was not drawn since the mark
 dcClr:  ldx amIdx               ; out of reach again: the sentence lifts and it comes back
         lda #$00
         sta orbHidT,x
@@ -24860,7 +24314,15 @@ const ALIGNED_T = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     // it says of the SOURCE ("screens are page-aligned, so no low-byte carry"). The destination
     // had the same requirement and never stated it. Both were page-aligned by luck at $5000 and
     // $5300; at any other offset every row of both snapshots lands skewed by the low byte.
-    ...({ fallSnapD: 256 }), fallSnapS: 256 };
+    ...({ fallSnapD: 256 }), fallSnapS: 256,
+    // ---- AND ONE THAT ONLY LOOKS ALIGNED: 1 = "starts on a page by accident" ----
+    // pvN heads a run of 19 scalars hand-placed at $8000 (pvN, opaL/H, opxL/H, ...). Nothing indexes
+    // them, but compact.mjs infers page alignment from a page-start address, so it wanted a WHOLE
+    // free page for 19 bytes -- and when the angel lunge's code cost the arena that page, it found
+    // none and left the run where it was, under the image. Saying so frees it to go anywhere.
+    // ocos is the same case, and the note above this table has always said it was declared --
+    // the entry itself had gone, and it only mattered once the arena was a page shorter.
+    pvN: 1, ocos: 1 };
 writeFileSync('./build/iray.aligned.json', JSON.stringify(ALIGNED_T));
 // HOT LOOPS: a taken branch whose target is on another page costs a cycle, and a loop that
 // straddles a page boundary pays it on EVERY iteration -- castRay's DDA loop did, for 89 cy/frame,

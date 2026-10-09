@@ -12,9 +12,9 @@ typeset -A CFG
 # leveltest: levels 4-7.
 CFG=(latest "" dev "CHAIN=1,2,3,4" leveltest "CHAIN=4,5,6,7")
 for k in latest dev leveltest; do
-  out=$(env ${=CFG[$k]} D64=zz-$k.d64 node src/build-iray.mjs 2>&1 | grep -E "^ok:|ASM ERROR|Error" | head -2)
+  out=$(env ${=CFG[$k]} D64=build/zz-$k.d64 node src/build-iray.mjs 2>&1 | grep -E "^ok:|ASM ERROR|Error" | head -2)
   [[ "$out" == ok:* ]] || { echo "$k: BUILD FAILED: $out"; continue; }
-  mv zz-$k.d64 $S/sh-$k.d64; cp build/iray.asm $S/sh-$k.asm
+  mv build/zz-$k.d64 $S/sh-$k.d64; cp build/iray.asm $S/sh-$k.asm
   if [[ "$1" == save ]]; then cp $S/sh-$k.d64 $S/base-$k.d64; cp build/iray.asm $S/base-$k.asm; echo "$k $(md5 -q $S/sh-$k.d64) saved"
   else
     if cmp -s $S/sh-$k.d64 $S/base-$k.d64; then echo "$k IDENTICAL"; else echo "$k DIFFERS  asm diff lines: $(diff $S/base-$k.asm $S/sh-$k.asm | grep -c '^[<>]')"; fi

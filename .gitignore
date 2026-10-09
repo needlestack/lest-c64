@@ -17,7 +17,7 @@
 /build/*
 !/build/iray.asm
 
-# ---- disks: `node src/build-iray.mjs` writes lest-c64.d64; test builds write zz-*.d64 ----
+# ---- disks: `node src/build-iray.mjs` writes lest-c64.d64; test and tool builds write build/*.d64 ----
 *.d64
 !art/*.d64
 # ...except THE game, committed so a visitor can play it without building
