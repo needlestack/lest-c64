@@ -39,7 +39,7 @@ Button Picks up / Puts down objects.
 
 You can also use ESDF to go forward/backward and strafe left/right.
 
-You can also hold shift to run.
+**You can also hold shift to run.**
 
 After you're caught, press RETURN to start again.
 
