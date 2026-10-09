@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'fs';
 // GEK scene: 2-byte load addr + "GEK" + RLE flag, then 8000 bytes of 160x200 multicolor stored
 // as 4x8 TILES of 8 bytes -- which is already exactly a C64 char glyph -- then a 10-byte footer
 // carrying the three global colours, the background, and a 6-char name. GMC64's scene format: the
-// reference reader is ../GMC64/code/js/gmScene.js (sprites, art/gamemaker/*.spr: gmSprite.js).
+// reference reader is ../GMC64/code/js/gmScene.js; both GameMaker formats: docs/GAMEMAKER-FORMATS.md.
 export function readGek(path) {
   let d = new Uint8Array(readFileSync(path));
   const HDR = 6, IMG = 8000, FOOT = 10;

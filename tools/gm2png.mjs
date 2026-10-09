@@ -5,7 +5,8 @@
 //
 // The files came off art/TMP-3.d64 (deleted 2026-10-09; these were everything on it). The .gek and
 // .spr files are the SOURCE -- fit-angel.mjs and fit-face.mjs read hangl1.gek directly -- and the
-// PNGs are only views of them. Both formats are GMC64's: the authoritative readers are
+// PNGs are only views of them. THE FORMATS ARE WRITTEN UP IN docs/GAMEMAKER-FORMATS.md. Both are
+// GMC64's (Garry Kitchen's GameMaker): the authoritative readers are
 // ../GMC64/code/js/gmScene.js and gmSprite.js, and this follows them (src/gek.mjs is the scene one).
 // Multicolour pixels are two hires pixels wide, so everything is drawn on a 320-wide grid.
 //
