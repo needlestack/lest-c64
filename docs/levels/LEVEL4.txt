@@ -1,0 +1,23 @@
+LEVEL 4
+
+                                   1  1  1  1  1  1
+     0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5
+ 0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
+ 1  [] [] [] [] X5 [] [] [] [] [] [] [] [] [] [] []
+ 2  [] [] .. .. .. .. .. .. [] [] [] [] [] .. [] []
+ 3  [] [] .. .. .. .. .. .. /1 [] [] [] .. .. .. []
+ 4  [] X7 .. P> .. .. .. .. /1 |1 .. .. .. X! .. []
+ 5  [] [] .. .. .. .. .. .. /1 [] [] [] .. .. .. []
+ 6  [] [] .. .. .. .. .. .. [] [] [] [] [] .. [] []
+ 7  [] [] [] [] X6 [] [] [] [] [] [] [] [] [] [] []
+ 8  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
+
+size     16 x 9 = 144 cells
+start    (3.50, 4.50) facing 0 deg (0 east, 90 south)  [PX=0380 PY=0480 PA=00 PAF=00]
+inks     ground 11 grey 1, walls 0 black, seams 14 light blue
+walls    marked (a dot in every solid wall cell)
+exit     X5 at (4,1): level 5, hole 2 red
+exit     X7 at (1,4): level 7, hole 5 green
+exit     X6 at (4,7): level 6, hole 6 blue
+exit     X! at (13,4): THE END (the ending sequence), hole 0 black
+group 1  (9,4) -- opened by /1 (8,3), /1 (8,4), /1 (8,5) (all of them)

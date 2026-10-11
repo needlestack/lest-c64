@@ -1,0 +1,72 @@
+LEVEL SHEETS: THE KEY
+
+Every level is a grid of cells, two characters per cell, one space between cells.
+The FIRST character says what the cell is. The SECOND is its one parameter: a group,
+an angel, a level or a facing. If the thing has no parameter, the first character
+is repeated. Each cell holds exactly one glyph. A floor cell holds at most one thing.
+
+The sheets in this folder are written by `node tools/levelsheet.mjs` from the build's
+own level data, so they always match the game. Don't edit them by hand; change the level
+in src/build-iray.mjs and re-run the tool.
+
+
+TERRAIN
+
+  []   solid wall
+  ..   open floor
+  |n   removable wall in group n (1-9). It is solid until group n opens.
+  |+   removable wall in MORE THAN ONE group: whichever opens first takes it out.
+       The sheet lists its groups under the map.
+
+
+ON THE FLOOR (each stands on an open cell)
+
+  P>   player start, facing east     P<   facing west
+  Pv   facing south                  P^   facing north
+       This is the nearest of the four. The exact pose is under the map.
+  An   angel number n (1-9, in the order the build places them)
+  Ln   leash cell for angel n: angel n may never enter it
+  OO   orb
+  II   idol, the errand rooms' prize, carried back to the hub's pedestals
+  Sn   socket: seating an orb here opens wall group n
+  /n   pedestal: seating an idol here helps open group n. A group held by
+       pedestals opens only when ALL of them are fed; sockets have no such gate.
+  Xn   exit hole, dropping you into level n
+  X>   exit hole to the next level in the chain
+  X!   exit hole to THE END, the ending sequence
+
+
+GRID
+
+  Columns are numbered across the top, with the tens digit on its own line above the
+  units digit. Rows are numbered down the left. x runs east and y runs south, so the
+  cell (x, y) is column x, row y. Positions in the notes are (x, y). Entities stand at
+  the CENTRE of a cell: an orb at (6,5) is at 6.5, 5.5.
+
+  The map is at most 256 cells (W x H <= 256, and in practice <= 253). The outer
+  ring is solid wall.
+
+
+UNDER THE MAP
+
+  size     W x H and the cell count
+  start    exact position and heading (0 = east, 90 = south), plus the PX/PY/PA/PAF
+           values to start a build there
+  inks     the three colours a room is made of: ground (ceiling and floor, $d021),
+           walls ($d022), seams ($d023). C64 colour number, then name.
+  flicker  the failing-light inks, shown for single frames (only on levels that have it)
+  floor    dithered: the floor half is darkened with a black checker
+  walls    marked: a dot in every solid wall cell
+  exit     each exit: where it leads, and the colour of the hole
+  group n  the cells of wall group n, and which sockets or pedestals open it
+  |+       which groups a shared wall cell belongs to
+  leash    which cells each leashed angel may not enter
+  idol     present on the levels that hold one
+
+
+C64 COLOURS
+
+   0 black    4 purple   8 orange      12 grey 2
+   1 white    5 green    9 brown       13 light green
+   2 red      6 blue    10 light red   14 light blue
+   3 cyan     7 yellow  11 grey 1      15 grey 3
