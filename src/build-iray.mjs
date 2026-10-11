@@ -4109,16 +4109,26 @@ const ORBSAMP = 4;                              // NxN point samples per destina
 // ORBSHD01 applies to EVERY RUNG as fitted, not to ORBSRC12: with ORBART (the default) each rung is
 // fitted straight from the source PNG and never reads ORBSRC12, so recolouring that alone changed
 // nothing on screen (found 2026-10-11 -- the level-8 shadow disk was byte-identical without it).
-// A rung whose ball and shadow have merged (no empty row between them) is left alone.
-const orbShadow01 = g => {
-  if (!ORBSHD01) return g;
+// WHICH ROWS ARE SHADOW is decided in the SOURCE, not in the rung: at small sizes, and at the last
+// magnified one, the ball and its shadow touch with no empty row between them, so a rung cannot
+// say where one ends (the user saw the old shadow on exactly those). In the full-size art the
+// shadow starts below an empty gap row; a rung row is shadow when its centre maps back to that gap
+// or below. The fit stands every rung on the floor and scales the 21-row box to h rows, so rung
+// row dy (0 = its top) samples source row (dy + 0.5) * 21 / h.
+const ORB_GAP = (() => {
+  const raw = [...Array(21)].map((_, y) => [0, 1, 2].some(b => ORB4RAW[y * 3 + b]));
   let y = 20;
-  while (y >= 0 && g[y].some(v => v)) y--;            // up through the shadow to the gap row
-  if (y < 1 || y === 20 || !g[y - 1].some(v => v)) return g;
-  for (let k = y + 1; k < 21; k++) g[k] = g[k].map(v => v && 1);
+  while (y >= 0 && raw[y]) y--;                       // up through the shadow to the gap row
+  if (y < 1 || y === 20 || !raw[y - 1]) throw new Error('ORBSHD01: no gap row between the ball and its shadow in the orb art');
+  return y;
+})();
+const orbShadow01 = (g, h) => {
+  if (!ORBSHD01) return g;
+  for (let dy = 0; dy < h; dy++)
+    if ((dy + 0.5) * 21 / h >= ORB_GAP) { const y = 21 - h + dy; g[y] = g[y].map(v => v && 1); }
   return g;
 };
-function orbScale(w, h) { return orbShadow01(orbScale0(w, h)); }
+function orbScale(w, h) { return orbShadow01(orbScale0(w, h), h); }
 function orbScale0(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, and standing on the floor
