@@ -3604,7 +3604,7 @@ const PROF_BUFS = {
   pfRow: 1, pfArm: 1, pfDone: 1, pfWant: 1,
 };
 const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8, oSDbg: 4 } : {};
-const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallSnapS: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
+const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
 // Only when the profiler is built: on an ordinary build these names do not exist and a size
 // declared for them would reserve space for nothing.
@@ -6319,13 +6319,12 @@ const FALLBUF2 = 0x4900;                           // the DESTINATION room, rend
                                                  //   the animation for ~0.4s between the two arcs.
                                                  //   At frame zero the screen has not moved yet, so
                                                  //   the same stall is invisible.
-const FALLBUF = 0x6200;                          // 1K in the run hTabT freed: the frozen frame
-// BOTH MUST BE PAGE-ALIGNED. fallSnap and bgCopy set only the HIGH byte of their pointer and
-// store 0 into the low one (`lda #>fallSnapS / sta fdD+1 / lda #$00 / sta fdD`), so a buffer at
-// a non-page address would be written 256-aligned anyway -- over whatever is below it. The code
-// says so in one place now, by symbol; this is what keeps the constants honest.
-for (const [n, a] of [...([['FALLBUF2', FALLBUF2]]), ['FALLBUF', FALLBUF]])
-  if (a & 255) throw new Error(`${n} = $${a.toString(16)} is not page-aligned, and fallSnap/bgCopy ` +
+// (FALLBUF, the snapshot of the room being left, is gone: the drop reads the screen. 2026-10-11)
+// MUST BE PAGE-ALIGNED. bgCopy sets only the HIGH byte of its pointer and stores 0 into the low
+// one, so a buffer at a non-page address would be written 256-aligned anyway -- over whatever is
+// below it. The code says so in one place now, by symbol; this is what keeps the constant honest.
+for (const [n, a] of [['FALLBUF2', FALLBUF2]])
+  if (a & 255) throw new Error(`${n} = $${a.toString(16)} is not page-aligned, and bgCopy ` +
     `only ever write its high byte -- the snapshot would land on the previous page boundary`);
 // ---- how long the drop takes, and how smooth it can possibly be ----
 // FALL_PERIODS raster periods per animation frame, FALL_FRAMES frames to cover FALL_END pixels.
@@ -6733,6 +6732,29 @@ const fRowT = (() => {
   }
   return out;
 })();
+// ---- DROPREAD: the drop reads its source rows OFF THE SCREEN (fwSlo), so prove they are there ----
+// Drop frame n shows source row R + K_n at row R, for rows 0..nsrc_n-1; the frame before it is the
+// one on display while n is drawn, and the frozen room (K = 0, all 25 rows) before frame 0. A frame
+// can be SKIPPED (the fall runs on the raster clock), so any earlier frame can be the displayed one.
+// Every source row this frame asks for that is on the screen at all (s <= 24; 25+ is fallTailB) must
+// sit inside the displayed frame's content, or the drop would copy the arc or the hole fill.
+{
+  const drop = [{ K: 0, nsrc: 25 }];               // the frozen room
+  for (let n = 0; n < ARC_N; n++) {
+    const blk = fRowT.slice(n * 32, n * 32 + 32), rows = blk.slice(0, 25);
+    const R0 = rows.findIndex(v => v !== 255);
+    const cur = { K: R0 < 0 ? 0 : rows[R0] - R0, nsrc: blk[25] };
+    for (const d of drop) rows.forEach((s, R) => {
+      if (s === 255 || s > 24) return;
+      const r = s - d.K;
+      if (r < 0 || r >= d.nsrc) throw new Error(`DROPREAD: drop frame ${n} row ${R} wants source row ${s}, ` +
+        `which a displayed frame at offset ${d.K} holds at row ${r}, outside its content 0..${d.nsrc - 1} -- ` +
+        `the drop can no longer slide the room off the screen and needs its snapshot back`);
+    });
+    drop.push(cur);
+  }
+}
+
 const HOLEBASE = 0xd000;                         // UNDER THE I/O HOLE: the VIC reads it, the CPU never does.
 
 // ---- one ladder builder, so a socket is the SAME SHAPE at a different radius ----
@@ -9722,7 +9744,6 @@ ${FALLTAIL ? `fallTailB = ${hx16(LOWBOOT)}               ; FALLTAIL: the source 
                                  ;   addressable because the port is $35 all through play --
                                  ;   to hold the real NMI/RESET/IRQ vectors.
 ` : ''}fallSnapD = ${hx16(FALLBUF2)}                ; the destination room, snapshotted before the drop begins
-fallSnapS = ${hx16(FALLBUF)}                ; the room being left
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
 fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
@@ -15813,13 +15834,9 @@ ${FALLMID ? '' : `        sta bgPh                ; and start rendering the dest
                                 ; the next place the cache is cleared. Bug 1 in [[iray-fall]],
                                 ; for the third time: anything that writes the screen behind
                                 ; renderSym has to invalidate before renderSym runs again.
-        lda baseHi              ; freeze what is on screen NOW -- baseHi is the buffer being
-        cmp #${hx(SCR_A >> 8)}  ;   drawn into, so the displayed one is the other
-        bne fcGB
-        lda #${hx(SCR_B >> 8)}
-        bne fcGrab              ; always taken: a page number, never zero
-fcGB:   lda #${hx(SCR_A >> 8)}
-fcGrab: jsr fallSnap
+        lda #$00                ; NO SNAPSHOT of the room being left: the drop slides it straight
+        sta fwKd                ;   off the screen (see fwSlo). The frame on display now IS the
+                                ;   frozen room, every source row at its own row: offset 0.
 ${FALLTAIL ? '        jsr fallTail            ; ...and the five rows below the screen it cannot see\n' : ''}
 fcNo:   rts
 ${FALLMID ? `
@@ -16262,12 +16279,16 @@ fwSrcA:${FALLTAIL ? ` cpx #25
         adc #>fallTailB
         sta fdS+1
         jmp fwSrcD
-fwSlo:` : ''} lda mulSnapLoT,x
+fwSlo:` : ''} txa                     ; ---- THE DROP READS THE SCREEN, NOT A SNAPSHOT (2026-10-11) ----
+        sec                     ; The frame on display is the previous drop frame (the fall flips
+        sbc fwKd                ;   every frame), which holds source row s at row s - fwKd. Its
+        tax                     ;   content runs 0..nsrc-1, and the build proves every row this
+        lda mul40LoT,x          ;   frame asks for is inside that (see DROPREAD). Saves the 520-byte
+        sta fdS                 ;   fallSnapS and the copy into it. The bottom half needs no mirror:
+        lda baseHi              ;   renderSym already drew it as the top half's codes through the
+        eor #${hx((SCR_A ^ SCR_B) >> 8)}               ;   flipped charset. The displayed buffer is the other one.
         clc
-        adc #<fallSnapS
-        sta fdS
-        lda mulSnapHiT,x
-        adc #>fallSnapS
+        adc mul40HiT,x
         sta fdS+1
 fwSrcD:
         ldx fwRow
@@ -16293,7 +16314,11 @@ fwB:    lda (fdS),y
         bpl fwB
 fwSkip: inc fwRow
         jmp fwLp
-fwDn:   rts
+fwDn:   lda arcInv
+        bne fwDnL
+        lda fwK                 ; the drop: this frame goes on display next, at this offset
+        sta fwKd
+fwDnL:  rts
 
 ; ---- faceCell: the cell directly in front, to the nearest of eight ----
 ; pa is a full byte of turn, so +16 then >>5 rounds to the nearest octant instead of truncating
@@ -19546,6 +19571,7 @@ fwGst:  sta fwBlk,y
         bpl fwGl
         rts
 fwK:    !byte 0
+fwKd:   !byte 0                 ; the offset the displayed drop frame was drawn at
 fwLo:   !byte 0
 fwHi:   !byte 0
 fKT:    !byte ${P.K.join(',')}
@@ -21648,22 +21674,7 @@ sfxK:   !byte 0                 ; which effect is loaded
 ${FALL ? `; Out of the main block (11 bytes over once level 1's two angel readouts met the per-level
 ; stride reads, 2026-09-18) into the tail of the bfsQ page. jsr-only; "* = $9500 moves
 ; backward" guards it.
-` + `; fallSnap: A = page of a screen buffer -> copy its TOP HALF into fallSnapS.
-; 13 rows, not four pages: the frame is its own vertical mirror about row 12 (see mulSnapLoT), so
-; rows 13-24 are read back through the mirror and never stored. The sprite pointers past the
-; matrix are no longer swept up either -- fallDraw only ever writes 40-byte rows, so the copy it
-; used to make of them was never read.
-fallSnap:
-        sta snSrc               ; the screen page to grab
-        lda #>fallSnapS
-        sta snDst
-
-        lda #$00                ; all 40 columns. rsLo/rsHi are the background render's slice
-        sta rsLo                ;   window and are rewritten every frame that renders, and the
-        lda #39                 ;   first slice comes after this, so borrowing them is free.
-        sta rsHi
-        jmp snapCp              ; ...the shared walk, over in bgCopy's block
-` : ''}
+` + `` : ''}
 ; ---- obOrder: project every entity, nearest first, until the sprite slots run out ----
 ; The walk used to go in entity order, and the slots ran out on whoever came last: level 3's
 ; third angel (entity 4, two sprites) simply did not draw whenever the two orbs, the hole and
@@ -24811,7 +24822,7 @@ const ALIGNED_T = {
     // it says of the SOURCE ("screens are page-aligned, so no low-byte carry"). The destination
     // had the same requirement and never stated it. Both were page-aligned by luck at $5000 and
     // $5300; at any other offset every row of both snapshots lands skewed by the low byte.
-    ...({ fallSnapD: 256 }), fallSnapS: 256,
+    ...({ fallSnapD: 256 }),
     // ---- AND ONE THAT ONLY LOOKS ALIGNED: 1 = "starts on a page by accident" ----
     // pvN heads a run of 19 scalars hand-placed at $8000 (pvN, opaL/H, opxL/H, ...). Nothing indexes
     // them, but compact.mjs infers page alignment from a page-start address, so it wanted a WHOLE
