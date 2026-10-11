@@ -30,9 +30,21 @@ and 7):
   and repeat for about 5 s. Level 6 runs backwards, because its forward run falls into an exit.
 
 The build times the window itself (`MOVEAT`/`MOVEFOR`/`MOVELEGS`), so boot is excluded and a run
-repeats exactly. It exits 1 on a level that fails to build or boot, or a walk that BUMPS (a leg
-stops short of its clear distance, or the shuttle does not end where it began). That makes it the
-functionality check too: run it after every engine change. It takes 14 emulator runs, a few minutes.
+repeats exactly. It exits 1 on a level that fails to build or boot, or a walk that BUMPS. That makes
+it the functionality check too: run it after every engine change. It takes 14 emulator runs, a few
+minutes.
+
+**No bumps, asserted directly (2026-10-11).** The build counts every blocked move inside the window,
+and the `blocked` column must read 0. Any count is BUMPED, even a glancing slide that loses no
+distance. The two older signs stay as cross-checks: the first leg stopping short, and the shuttle
+not ending where it should, within two frames of running. The counter's first run found two grazes
+the end-point check had passed for days: level 7's run slid along the south wall (14 blocked), and
+level 2's last frame touched (2 blocked). Both poses were fixed (see `CLEAR` and `POSE` in fpsr.mjs).
+
+**Level 5 runs inset legs.** Its start has a quarter cell behind it, and a tick-timed leg can
+overshoot by a frame, about 0.23 cells at 11 fps. So every leg after the first runs 21 ticks (one
+cell) short: 3.75 out, then 2.77 back and forth, ending a cell out from the start (`INSET`, and
+`MOVEINSET` in the build).
 
 Reading it:
 
@@ -41,16 +53,10 @@ Reading it:
 - Compare against the previous suite run on the commit you started from, not against memory. The
   last recorded results are at the end of this file. Update them when a change moves them on
   purpose.
-- **Known weakness, ACCEPTED (2026-10-11):** a shuttle's legs end on a tick count, and the build
-  reverses on the first rendered frame past it. At ~11 fps one frame is ~0.23 cells of running.
-  Level 5's start is 1.5 cells from the wall BEHIND it, which leaves 0.25 cells once the
-  collision radius is taken off, so a build that merely renders on different frames can overshoot
-  a backward leg into that wall. Since the space audit, level 5's walk reads `4 legs of 3.98/3.75
-  cells, ends 0.47 from the start *** BUMPED ***`, deterministically. The movement and collision
-  code did not change. The user accepted it as is: the walk still measures open floor, not half a
-  run spent against a blank wall. So a BUMPED on level 5 alone, with those numbers, is this and not
-  a failure. A BUMPED anywhere else, or different numbers on level 5, still is one. Watch it with
-  `DISK=build/x.d64 node tools/fpsr.mjs "CHAIN=5" level walk`.
+- To watch a walk at real speed: `DISK=build/x.d64 node tools/fpsr.mjs "CHAIN=n" level walk`.
+- **OPEN: an occasional `BUILD OR RUN FAILED`.** Twice in three suites (2026-10-11) one walk failed
+  and passed when rerun alone, on a different level each time. The rig now prints probe's reason
+  after the message. The next time it happens, read that before rerunning.
 
 ## 2. Draws the same: `regress.sh`
 
@@ -124,19 +130,19 @@ compare anything.
 
 ## Last recorded `fpsr.mjs "" suite`
 
-2026-10-10, the default build after the space audit (zero-page promotion, shared tables, dev keys
-removed). The `was` column is `8a9f6dc`, before the audit.
+2026-10-11, after the bump counter and the pose fixes. The `was` column is the 2026-10-10 record
+(the space audit).
 
-| level | spin fps | was | walk fps | was |
-|---|---:|---:|---:|---:|
-| 1 | 21.60 | 21.60 | 15.26 | 14.47 |
-| 2 | 31.10 | 30.90 | 12.95 | 12.49 |
-| 3 | 27.51 | 26.91 | 15.97 | 15.90 |
-| 4 | 17.60 | 17.40 | 15.96 | 15.59 |
-| 5 | 27.80 | 27.40 | 11.25 * | 11.03 |
-| 6 | 23.80 | 24.20 | 14.95 | 14.67 |
-| 7 | 29.40 | 29.00 | 14.64 | 14.23 |
+| level | spin fps | was | walk fps | was | walk |
+|---|---:|---:|---:|---:|---|
+| 1 | 21.40 | 21.60 | 15.26 | 15.26 | 4 legs, 0 blocked |
+| 2 | 31.10 | 31.10 | 12.73 | 12.95 | 2 legs, 0 blocked (clear 7 -> 6.75) |
+| 3 | 27.51 | 27.51 | 15.97 | 15.97 | 2 legs, 0 blocked |
+| 4 | 17.60 | 17.60 | 15.96 | 15.96 | 2 legs, 0 blocked |
+| 5 | 27.80 | 27.80 | 11.16 | 11.25 | 4 legs inset, 0 blocked |
+| 6 | 23.80 | 23.80 | 14.91 | 14.95 | 4 legs backwards, 0 blocked |
+| 7 | 30.40 | 29.40 | 14.79 | 14.64 | 2 legs, 0 blocked (pose moved to the row's middle) |
 
-\* flagged BUMPED: the accepted level-5 weakness above. Level 6's spin is 0.4 fps lower, which is
-2 frames (121 -> 119), one past the 1-frame resolution. The likeliest cause is the shared
-quarter-turn tables adding a page-crossing cycle to some seam reads. It is not being chased.
+The walks on levels 2, 5 and 7 changed course, so their `was` is not a like-for-like comparison.
+Level 1's spin moved by one frame (107 vs 108), inside the resolution. Level 7's spin moved because
+its pose moved. Level 6's spin, 0.4 fps (2 frames) under its pre-audit 24.20, is not being chased.

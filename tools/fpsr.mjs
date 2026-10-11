@@ -30,9 +30,10 @@
 //   24.16 and 25.00 on level 3). Runs repeat exactly; spins to within a frame.
 //
 //   A BUMP CHECK. The moment the player bumps a wall they stop, the render cache takes over and the
-//   frames go cheap -- a flattering number for the wrong reason. A bump shows twice: the first leg
-//   stops short of where it should reach, and since only the outward legs are shortened, the
-//   shuttle no longer ends where it began.
+//   frames go cheap -- a flattering number for the wrong reason. The build COUNTS every blocked
+//   move inside the window (maS+20), and any count at all is a bump. Two indirect signs are kept
+//   as cross-checks: the first leg stopping short of where it should reach, and the shuttle not
+//   ending where it should.
 //
 // WHAT THE NUMBER CANNOT TELL YOU: fps is an integer frame count over ~5 s, so its resolution is
 // ONE FRAME, printed as the +-1 frame column (~1-2%). A change smaller than that is inside it; for
@@ -68,24 +69,34 @@ if (only !== 'level') { console.error('usage: fpsr.mjs "FLAGS" suite | fpsr.mjs 
 const LVL = +((/CHAIN=(\d)/.exec(extra) ?? [0, 1])[1]);
 // HOW FAR EACH POSE CAN RUN before it meets a wall (the user, paced out in play, 2026-10-09).
 // Diagonal runs are counted in diagonal squares, sqrt(2) cells each.
-const CLEAR = { 1: 3 * Math.SQRT2, 2: 7, 3: 4 * Math.SQRT2, 4: 5, 5: 4, 6: 4, 7: 7 };
+// Level 2 was 7, and the blocked-move count showed its last frame touching the wall (2026-10-11).
+const CLEAR = { 1: 3 * Math.SQRT2, 2: 6.75, 3: 4 * Math.SQRT2, 4: 5, 5: 4, 6: 4, 7: 7 };
 // A quarter cell short of the wall: the player's collision radius stops it before the cell edge.
 // LEG=n overrides it, which with LEGS=1 is how a new pose's clear run is measured (a long leg, then
 // read how far it got).
 const RUN_TICKS = +(process.env.LEG ?? Math.round(((CLEAR[LVL] ?? 2) - 0.25) * 256 / MV_RUN));
 // An even number of legs filling about TICKS, so the sample is ~5 s however short the clear run is.
-const LEGS = +(process.env.LEGS ?? Math.max(2, 2 * Math.round(TICKS / (2 * RUN_TICKS))));
+// INSET (the user, 2026-10-11): ticks every leg after the first runs SHORT, so the return legs turn
+// back before the start instead of on it. A leg reverses on the first rendered frame past its tick
+// count, so it can overshoot by a frame, ~0.23 cells at 11 fps. Level 5's start has a quarter cell
+// behind it and bumped on exactly that; 21 ticks is one cell, so it runs 4 out, 3 back, 3 out...
+const INSET = +(process.env.INSET ?? ({ 5: 21 }[LVL] ?? 0));
+const LEGS = +(process.env.LEGS ?? Math.max(2, 2 * Math.round((1 + (TICKS - RUN_TICKS) / (RUN_TICKS - INSET)) / 2)));
 // Poses of the rig's own, where the level's start is a poor benchmark (the user's, from play):
 //   2 -- the level's start clears only ~2.3 cells; this one measured clear for 8.76.
 //   7 -- the level's start strafes along a wall right in the view's face, an easy render. From
 //        here a strafe bumps within 0.6 cells either way, but forward (west) clears ~8.4.
-const POSE = { 2: 'PX=01ad PY=09e5 PA=e0 PAF=80', 7: 'PX=0b93 PY=0ab3 PA=7e PAF=c0' };
+//        PY was 0ab3 (10.70): heading 0x7e runs 0.05 cells south per cell, so from 0.2 cells off
+//        the south wall the run slid along it from ~4 cells on -- 14 blocked moves, invisible to
+//        the end-point check. 0a80 is the middle of the row (2026-10-11).
+const POSE = { 2: 'PX=01ad PY=09e5 PA=e0 PAF=80', 7: 'PX=0b93 PY=0a80 PA=7e PAF=c0' };
 const pose = POSE[LVL] ? POSE[LVL] + ' ' : '';
 const SEGS = [
   // A leg is a byte of ticks, so the spin's 300 are two legs; spinStep has no reverse, so both turn
   // the same way. It stands where the run starts.
   { name: 'spin', env: 'SPIN=1', moves: false, ticks: TICKS / 2, legs: 2 },
-  { name: LVL === 6 ? 'walkb' : 'walk', env: LVL === 6 ? 'WALKB=1' : 'WALK=1', moves: true, ticks: RUN_TICKS, legs: LEGS },
+  { name: LVL === 6 ? 'walkb' : 'walk', env: `${LVL === 6 ? 'WALKB=1' : 'WALK=1'}${INSET ? ` MOVEINSET=${INSET}` : ''}`,
+    moves: true, ticks: RUN_TICKS, legs: LEGS, inset: INSET },
 ];
 const pick = process.argv[4];
 const want = SEGS.filter(s => !pick || (pick === 'walk' ? s.moves : s.name === pick));
@@ -106,24 +117,36 @@ for (const s of want) {
   }
   let out;
   try {
-    out = execFileSync(process.execPath, ['probe.mjs', env, 'maS:20', 'maGo', '--until', 'maGo>=2'],
+    out = execFileSync(process.execPath, ['probe.mjs', env, 'maS:21', 'maGo', '--until', 'maGo>=2'],
       { cwd: new URL('.', import.meta.url).pathname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) { console.log(`${s.name.padEnd(9)} BUILD OR RUN FAILED`); continue; }
+  } catch (e) {
+    // Say WHY: probe prints the cause (a jam, a held port, a deadline) on stderr.
+    const why = String(e.stderr ?? '').trim().split('\n').slice(-3).join(' | ');
+    console.log(`${s.name.padEnd(9)} BUILD OR RUN FAILED${why ? ': ' + why : ''}`); continue;
+  }
   // The build's own record of the window: frameCnt, iterations, px, py (16-bit each) at its first
   // frame, then at its last, then px/py at the far end of the first leg.
-  const b = (/^maS\s+\$\w+\s+((?:\d+ ){19}\d+)/m.exec(out)?.[1] ?? '').split(' ').map(Number);
-  if (b.length !== 20) { console.log(`${s.name.padEnd(9)} could not read maS`); continue; }
+  const b = (/^maS\s+\$\w+\s+((?:\d+ ){20}\d+)/m.exec(out)?.[1] ?? '').split(' ').map(Number);
+  if (b.length !== 21) { console.log(`${s.name.padEnd(9)} could not read maS`); continue; }
   const v = i => b[i] + 256 * b[i + 1];
   // The ticks are lastMv, one byte, and the window is longer than 256 ticks; but the build ends it
-  // on the first frame at or past its last leg, so the total is legs * leg plus less than one frame.
-  const ticks = s.legs * s.ticks + ((b[8] - b[0] - s.legs * s.ticks) & 0xff);
+  // on the first frame at or past its last leg, so the total is the legs plus less than one frame.
+  const planned = s.legs * s.ticks - (s.legs - 1) * (s.inset ?? 0);
+  const ticks = planned + ((b[8] - b[0] - planned) & 0xff);
   const frames = v(10) - v(2), fps = frames / (ticks / 60);
   let travel = '';
   if (s.moves) {
     const out1 = Math.hypot(v(16) - v(4), v(18) - v(6)) / 256, want1 = s.ticks * MV_RUN / 256;
     const home = Math.hypot(v(12) - v(4), v(14) - v(6)) / 256;
-    travel = `${s.legs} legs of ${out1.toFixed(2)}/${want1.toFixed(2)} cells, ends ${home.toFixed(2)} from the start` +
-      (out1 < 0.95 * want1 || (s.legs % 2 === 0 && home > 0.35) ? '  *** BUMPED ***' : '');
+    // An even shuttle ends where it began, or INSET ticks of running out from it.
+    const wantHome = s.legs % 2 === 0 ? s.inset * MV_RUN / 256 : null;
+    const bumps = b[20];
+    // Each reversal lands on a rendered frame, so either end of the shuttle can be off by one frame's
+    // running: allow two frames before calling the end point wrong.
+    const slack = 2 * MV_RUN * ticks / (v(10) - v(2)) / 256;
+    travel = `${s.legs} legs of ${out1.toFixed(2)}/${want1.toFixed(2)} cells${s.inset ? ` (then ${s.inset} ticks short)` : ''}, ` +
+      `ends ${home.toFixed(2)} from the start${wantHome ? ` (wants ${wantHome.toFixed(2)})` : ''}, ${bumps} blocked` +
+      (bumps || out1 < 0.95 * want1 || (wantHome !== null && Math.abs(home - wantHome) > slack) ? '  *** BUMPED ***' : '');
   }
   console.log(`${s.name.padEnd(9)} ${fps.toFixed(2).padStart(6)}  ${String(frames).padStart(6)}  ` +
               `${String(ticks).padStart(5)}   ${(100 / frames).toFixed(1).padStart(5)}%     ${travel}`);

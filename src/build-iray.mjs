@@ -3907,7 +3907,16 @@ const BENCHF = +(process.env.BENCHF ?? 0);
 // back with the opposite control, and again, n legs in all. maS+16..19 holds px/py at the end of the
 // first leg (the far point, so the rig can check the run out did not stop short of it), and with an
 // even n the run ends where it began, so ending somewhere else means a leg bumped.
+// MOVEINSET=m (the user, 2026-10-11): every leg after the first runs m ticks SHORT, so the shuttle
+// turns back m ticks before the start instead of on it. A tick-timed leg reverses on the first
+// rendered frame past its count, so it can overshoot by a frame -- ~0.23 cells at 11 fps -- and
+// level 5's start has only a quarter cell behind it. With an inset the return legs never reach
+// the start, and an even n ends m ticks of running out from it.
+// maS+20 counts BLOCKED moves inside the window: the bump check reads it directly, rather than
+// inferring a bump from where the shuttle ended.
 const MOVEAT = +(process.env.MOVEAT ?? 0), MOVEFOR = +(process.env.MOVEFOR ?? 0), MOVELEGS = +(process.env.MOVELEGS ?? 1);
+const MOVEINSET = +(process.env.MOVEINSET ?? 0);
+if (MOVEINSET < 0 || MOVEINSET >= MOVEFOR && MOVEINSET) throw new Error(`MOVEINSET=${MOVEINSET}: 0..MOVEFOR-1`);
 if (MOVELEGS < 1 || MOVELEGS > 255) throw new Error(`MOVELEGS=${MOVELEGS}: 1..255`);
 if (MOVEAT < 0 || MOVEAT > 255 || MOVEFOR < 0 || MOVEFOR > 255 || !MOVEAT !== !MOVEFOR)
   throw new Error(`MOVEAT=${MOVEAT} MOVEFOR=${MOVEFOR}: both or neither, each 1..255 (frameCnt's low byte)`);
@@ -12185,16 +12194,18 @@ maBk:   jsr ${{ moveFwd: 'moveBack', moveBack: 'moveFwd', strafeR: 'strafeL', st
 maChk:  lda lastMv
         sec
         sbc maLT
-        cmp #${hx(MOVEFOR)}
+        cmp maLen
         bcc maDn
         lda maLT                ; the next leg is timed from where this one SHOULD have ended, so
         clc                     ;   a frame's overshoot is paid back on the next leg instead of
-        adc #${hx(MOVEFOR)}     ;   drifting the shuttle one way
+        adc maLen               ;   drifting the shuttle one way
         sta maLT
         inc maLeg
         lda maLeg
         cmp #$01
         bne maL2
+        lda #${hx(MOVEFOR - MOVEINSET)}
+        sta maLen               ; every leg after the first is MOVEINSET short (see MOVEINSET)
         lda px                  ; the far point of the first leg
         sta maS+16
         lda px+1
@@ -12229,7 +12240,8 @@ maDn:   rts
 maGo:   !byte 0
 maLeg:  !byte 0
 maLT:   !byte 0                 ; the tick the current leg started on
-maS:    !fill 20, 0
+maLen:  !byte ${hx(MOVEFOR)}            ; this leg's length in ticks
+maS:    !fill 21, 0             ; +20: blocked moves inside the window
 ` : ''}tickDelta:
         lda frameCnt
         sec
@@ -12457,7 +12469,8 @@ maSh:   lda dxsH
         jsr mvCalcY
         jsr mvFree
         bcc mvGo                ; whole step is clear -- the common case, one test
-        ; Blocked. Rather than stop dead, retry one axis at a time and take the first that
+${MOVEAT ? `        inc maS+20              ; the fps rig's bump count (see MOVEINSET)
+` : ''}        ; Blocked. Rather than stop dead, retry one axis at a time and take the first that
         ; fits. The component running INTO the wall is the one that fails, so what survives
         ; is the component ALONG it, at full speed: a glancing hit becomes a slide, and a
         ; corner you cut too close is rounded instead of sticking to you.
