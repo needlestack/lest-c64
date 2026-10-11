@@ -10,7 +10,8 @@
 //   tables   -- the DATA TABLES section, from the top down (plus the few variables that live
 //               in its holes)
 //   scratch  -- the RAM buffers compact.mjs packs into the ARENA between the two
-// Each label's size is the gap to the next label, so the columns add up to the whole image.
+// Each label's size is the gap to the next label, bounded by the build's raw gaps and the buffer's
+// declared size; whatever no label covers is charged to FREE. The columns add up to the whole image.
 //
 // HOW A BYTE FINDS ITS FEATURE. Code is charged by its label's name first, then by the section
 // banner (`; ---- name: ... ----`) it sits under in build/iray.asm; tables and scratch by name
@@ -30,7 +31,7 @@ process.chdir(ROOT);
 
 const flags = process.argv[2] ?? '';
 const verbose = process.argv.includes('-v');
-const env = { ...process.env, D64: 'build/_space.d64' };   // never the official disk
+const env = { ...process.env, D64: 'build/_space.d64', RAWHOLES: '1' };   // never the official disk
 for (const kv of flags.split(/\s+/).filter(Boolean)) env[kv.slice(0, kv.indexOf('='))] = kv.slice(kv.indexOf('=') + 1);
 const run = spawnSync(process.execPath, ['src/build-iray.mjs'], { env, encoding: 'utf8', maxBuffer: 1 << 26 });
 try { unlinkSync('build/_space.d64'); } catch {}
@@ -45,6 +46,20 @@ const range = name => {
 const CODE = range('ENGINE CODE'), ARENA = range('ARENA'), TABLES = range('DATA TABLES');
 
 const syms = JSON.parse(readFileSync('build/iray.syms.json', 'utf8'));
+// FREE SPACE IS NOT A FEATURE. A label's size used to be the gap to the next label, so every free
+// run was charged to whatever sat just below it: the arena's 2.5K went to remLoT, a 160-byte buffer,
+// and the renderer read 2.5K heavier than it is. Two facts bound a label now:
+//   - the build's raw gaps (RAWHOLES=1: address ranges where nothing is EMITTED). Emitted data stops
+//     where one starts.
+//   - each RAM buffer's declared size (iray.bufsizes.json, the sizes compact.mjs packs by). A buffer
+//     in a gap takes that many bytes. An undeclared one still takes the gap to the next label, as
+//     compact.mjs sizes it.
+// Whatever no label covers is charged to FREE.
+const rawGaps = [...report.matchAll(/^\s+\$([0-9a-f]+)-\$([0-9a-f]+)\s+\d+\s*$/gm)]
+  .map(m => [parseInt(m[1], 16), parseInt(m[2], 16) + 1]);
+if (!rawGaps.length) throw new Error('space.mjs: no raw gaps in the build report (RAWHOLES=1)');
+let declared = {};
+try { declared = JSON.parse(readFileSync('build/iray.bufsizes.json', 'utf8')); } catch {}
 const owner = {};                                   // label -> the banner it was written under
 let banner = '';
 for (const l of readFileSync('build/iray.asm', 'utf8').split('\n')) {
@@ -58,7 +73,6 @@ const R = 'renderer: cast, subdivide, draw';
 // [feature, label prefixes, banner prefixes]. First label match wins, then first banner match.
 const CODE_RULES = [
   ['HUD + fps readout', /^(hud|hh|hx|drawDbg|ddAng|ddPut|symT|symOT|drawFps|setRow|lvlSymT|computeFps|cf)/, /^readout/],
-  ['palette keys 1/2/3', /^(palKeys|pk\d|pkDn|palCol|pcCei|pcFlr|pcQ|pcW|pcDn|colT|colF)/, /^palCol/],
   ['movement + input', /^(readKeys|rk|move|strafe|mv[A-Z]|ma[A-Z]|tickDelta|td[A-Z])/, /tickDelta|ESDF/],
   ['angel lunge (slide)', /^(sl[A-Z]|st(Ix|Move|Y|Dty)|angSl|slFT|sn(Add|P|Y|S)$|slOff|slOn|orbProjS|opsS|slL)/, /LUNGE|slTick|slLand|orbProjS/],
   ['angel AI + BFS pathing', /^(ang|an[A-Z]|as[A-Z]|aa|al[A-Z]|bfs|apLd|anP|pathD)/, /^(angStep|angOne|angPick|anAdj|anTry|angDst|bfs)/],
@@ -70,7 +84,7 @@ const CODE_RULES = [
   ['orb carry (pick up / put down)', /^(takePick|tk|dropPick|dp(Lp|Next|Cand|Diag|Cnr|Dok)|orbKey|ok[A-Z]|orbPut|orbUse|hlAt|od[A-Z]|faceCell|fc[A-Z])/, /^(takePick|dropPick|orbKey|hlAt|dpDiag|faceCell)/],
   ['level fall + load (the drop)', /^(fall|fd|fs|fst|fg|fw|fm|ft|arc|ab|ap|ag|a2|bg|snap|kl|lvlLoad|llN|llZ|kp|nILV)/, /^(the drop|fallMid|fdWarp|fwait|arc|bgStep|fallTail|fdG|fdS|fdB|fsOv|klPark|snapCp|fwGen|THE FALL)/],
   ['THE END', /^(endGo|eg)/, /^endGo/],
-  ['level setup (entering a level)', /^(lvl|objInit|oi[A-Z]|mkRuns|mr|hazSpFix|hsf|floorDk|fdM|setGnd|lvlChr|symPut|spLp|seamEdge|mulW)/, /^(WHAT ENTERING|objInit|mkRuns|lvlStart|lvlChr|floorDk|setGnd|hazSpFix|the per-level|seamEdge|mulW|THIS LEVEL)/],
+  ['level setup (entering a level)', /^(colT$|colF$|lvl|objInit|oi[A-Z]|mkRuns|mr|hazSpFix|hsf|floorDk|fdM|setGnd|lvlChr|symPut|spLp|seamEdge|mulW)/, /^(WHAT ENTERING|objInit|mkRuns|lvlStart|lvlChr|floorDk|setGnd|hazSpFix|the per-level|seamEdge|mulW|THIS LEVEL)/],
   ['seams', /^(ss|seam|sd[A-Z]|calcU|cu[A-Z]|spw)/, /^(seamSpan|the solid-run draw for a SEAM|where does this wall stop|ssPw|SEAMHYST)/],
   ['entities: projection, sprites, occlusion', /^(orb|o[a-zA-Z]|ob|om|oS|os|og|ent|hl|ho|hole|hs|hr|occ|cn|ocs|oss|ivLp|ivR|ivDn|onLp|onDn|spr|sp[A-Z]|irqSp|saOff|cone)/, /^(orbs:|orbMove|osFlush|occStamp|the UPPER|orbOne|orbProj|holeTail|hlSet|entGate|omTrig|oSPut|orbOcc|obOrder|kMskT|occRT|orbColLT|sprPal|sprSpl|ENTCONE|orb tables|hole ladder)/],
   ['boot, main loop, IRQ', /^(entry|cpChr|mloop|mf|mvs|irq|nmi|ccf|rfCz)/, /^(raster IRQ|nmi)/],
@@ -88,7 +102,7 @@ const DATA_RULES = [
   ['entities: projection, sprites, occlusion', /^(cellFillT|occVrtT)$/],
   [R, /^(hTab|hPg|ddx|ramp|step|ecM|rbT|rsT|qm|qIdx|rayOff|rcpD|sinS|qToCol|runByte|runBit|run[WENS]T|ed[AB]|bk[AB]|sl[AB]|occVrt|cellFill|haz|recip|rem|faceId|runPlane|runFace|bndT|cw[AB]|cb[AB]|cstep|pv|o2r)/],
   ['entities: projection, sprites, occlusion', /^(orb|hole|sock|ped|angVarT|angMid|cone|hl|hrp|obOcc|oo|cnOk|ogP|ogT|ohHi|otmp|onv|oht|oqa|stmp|zBit|exitVis|hlK5|ob|o[a-z]|oS)/],
-  ['palette keys 1/2/3', /^(pk|col[WBS])/],
+  ['level setup (entering a level)', /^col[WBS]$/],          // the level's three inks
   ['movement + input', /^(move|dtv|lastMv|dx|dy|rowv|dtm|dtt|paF|rxF|ryF|sk)/],
 ];
 const featOfCode = k => {
@@ -99,21 +113,38 @@ const featOfCode = k => {
 const featOfData = k => (DATA_RULES.find(([, r]) => r.test(k)) ?? [null])[0] ?? featOfCode(k);
 
 const sum = {};
+const FREE = 'FREE: nothing lives here';
+// The build's "end=" is one past the image's last byte; from there to $c000 holds nothing.
+const imgEnd = parseInt((/^ok:.* end=\$([0-9a-f]+)/m.exec(report) ?? [0, 'c000'])[1], 16);
+const add = (feat, kind, k, sz) => {
+  if (!sz) return;
+  const s = sum[feat] ??= { code: 0, tables: 0, scratch: 0, items: [] };
+  s[kind] += sz; s.items.push([k, sz]);
+};
 const charge = ([lo, hi], kind, feat) => {
   const e = Object.entries(syms).filter(([, v]) => v >= lo && v < hi).sort((a, b) => a[1] - b[1]);
+  const gapAt = a => rawGaps.find(([g0, g1]) => a >= g0 && a < g1);
+  let covered = lo;                                  // everything below this is charged
   e.forEach(([k, v], i) => {
-    const sz = (i + 1 < e.length ? e[i + 1][1] : hi) - v;
-    if (!sz) return;
-    const s = sum[feat(k)] ??= { code: 0, tables: 0, scratch: 0, items: [] };
-    s[kind] += sz; s.items.push([k, sz]);
+    const next = i + 1 < e.length ? e[i + 1][1] : hi;
+    let end = Math.min(next, Math.max(imgEnd, v + 1));
+    const g = gapAt(v);
+    if (g) { end = Math.min(end, g[1]); if (declared[k]) end = Math.min(end, v + declared[k]); }
+    else { const ng = rawGaps.find(([g0]) => g0 > v && g0 < end); if (ng) end = ng[0]; }
+    // Bytes ahead of the first label in the code are the BASIC SYS line that starts the program.
+    if (v > covered) add(i === 0 && kind === 'code' ? 'boot, main loop, IRQ' : FREE, kind, `$${covered.toString(16)}`, v - covered);
+    add(feat(k), kind, k, Math.max(0, end - Math.max(v, covered)));
+    covered = Math.max(covered, end);
   });
+  if (hi > covered) add(covered >= imgEnd || gapAt(covered) ? FREE : feat(e.at(-1)?.[0] ?? ''), kind, `$${covered.toString(16)}`, Math.min(hi, imgEnd) - covered);
+  if (hi > imgEnd && imgEnd >= covered) add(FREE, kind, `$${imgEnd.toString(16)}`, hi - imgEnd);
 };
 charge(CODE, 'code', featOfCode);
 charge(ARENA, 'scratch', featOfData);
 charge(TABLES, 'tables', featOfData);
 
 const all = s => s.code + s.tables + s.scratch;
-const rows = Object.entries(sum).sort((a, b) => all(b[1]) - all(a[1]));
+const rows = Object.entries(sum).sort((a, b) => (a[0] === FREE) - (b[0] === FREE) || all(b[1]) - all(a[1]));
 const pad = (v, n = 7) => String(v).padStart(n);
 console.log(`${flags ? `flags: ${flags}\n` : ''}   code  tables scratch   total  feature`);
 const tot = { code: 0, tables: 0, scratch: 0 };

@@ -71,32 +71,32 @@ The goal was room for features, without changing the game. The image went from *
 
 | feature | code | tables | scratch | **total** |
 |---|---:|---:|---:|---:|
-| renderer: cast, subdivide, draw | 5,113 | 14,038 | 854 | **20,005** |
+| renderer: cast, subdivide, draw | 5,113 | 13,921 | 907 | **19,941** |
 | entities: projection, sprites, occlusion | 5,115 | 2,366 | 88 | **7,569** |
 | level fall + load (the drop) | 2,200 | 1,002 | 1,042 | **4,244** |
 | death scene | 994 | 1,837 | 6 | **2,837** |
 | angel AI + BFS pathing | 998 | 801 | 257 | **2,056** |
 | seams | 1,285 | 675 | 40 | **2,000** |
 | movement + input | 759 | 328 | 0 | **1,087** |
-| level setup (entering a level) | 823 | 0 | 0 | **823** |
+| level setup (entering a level) | 825 | 0 | 3 | **828** |
 | sound | 388 | 290 | 56 | **734** |
-| boot, main loop, IRQ | 652 | 0 | 0 | **652** |
+| boot, main loop, IRQ | 664 | 0 | 0 | **664** |
 | angel lunge (slide) | 448 | 156 | 0 | **604** |
 | orb carry (pick up / put down) | 595 | 3 | 0 | **598** |
 | HUD + fps readout | 560 | 0 | 0 | **560** |
 | wall collapse (sockets) | 485 | 0 | 0 | **485** |
 | idol + pedestals | 228 | 2 | 0 | **230** |
 | THE END | 37 | 0 | 0 | **37** |
-| free arena (charged to the renderer by the tool) | | | 2,565 | **2,565** |
-| **total** | **20,682** | **21,498** | **4,911** | **47,091** |
-
-The total is 12 bytes short of 47,103: the image's last bytes below `$c000`, which hold no label.
-(`space.mjs` still finds 5 bytes it files under "palette keys"; they are prefix collisions in its
-rules, not the removed keys.)
+| FREE: nothing lives here | 0 | 117 | 2,512 | **2,629** |
+| **total** | **20,694** | **21,498** | **4,911** | **47,103** |
 
 **How bytes are charged:**
 
-- A label's size is the gap to the next label.
+- A label's size is the gap to the next label, but emitted data stops where the build's raw gaps
+  begin (`RAWHOLES=1`), and a RAM buffer takes its declared size (`iray.bufsizes.json`). Bytes no
+  label covers are FREE, and the FREE row matches the build's own "image holes" total. Until
+  2026-10-11 the tool charged free space to the label below it: the arena's 2.4K went to
+  `remLoT`, a 160-byte buffer, as renderer scratch.
 - Code is charged by the label's name prefix, then by the section banner it sits under in
   `build/iray.asm`.
 - Tables and scratch are charged by name alone, because `compact.mjs` moves them away from where
