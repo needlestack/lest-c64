@@ -4106,7 +4106,20 @@ const SW = SX1 - SX0 + 1, SH = SY1 - SY0 + 1;
 // half-covered edge pixel fills rather than erodes and a highlight survives against body colour
 // at small sizes -- the case that made nearest-neighbour unusable below about 6px across.
 const ORBSAMP = 4;                              // NxN point samples per destination pixel
-function orbScale(w, h) {
+// ORBSHD01 applies to EVERY RUNG as fitted, not to ORBSRC12: with ORBART (the default) each rung is
+// fitted straight from the source PNG and never reads ORBSRC12, so recolouring that alone changed
+// nothing on screen (found 2026-10-11 -- the level-8 shadow disk was byte-identical without it).
+// A rung whose ball and shadow have merged (no empty row between them) is left alone.
+const orbShadow01 = g => {
+  if (!ORBSHD01) return g;
+  let y = 20;
+  while (y >= 0 && g[y].some(v => v)) y--;            // up through the shadow to the gap row
+  if (y < 1 || y === 20 || !g[y - 1].some(v => v)) return g;
+  for (let k = y + 1; k < 21; k++) g[k] = g[k].map(v => v && 1);
+  return g;
+};
+function orbScale(w, h) { return orbShadow01(orbScale0(w, h)); }
+function orbScale0(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, and standing on the floor
   if (ORBART) {
@@ -4179,7 +4192,9 @@ const ORBBM = ORBBMH.map(h => {
 let NORBBM = ORBBM.length;
 // The widest rung must come back byte-identical to the art it was scaled from. If a change to
 // the resampler breaks that, every other rung is suspect too.
-if (ORBBM[0].slice(0, 63).join() !== ORB4RAW.slice(0, 63).join())
+// Against ORBSRC12 packed rather than ORB4RAW, so ORBSHD01's recolour (which both carry) is in it.
+const ORB4WANT = ORBSRC12.flatMap(r => [0, 1, 2].map(b => [0, 1, 2, 3].reduce((v, k) => v | (r[b * 4 + k] << (6 - 2 * k)), 0)));
+if (ORBBM[0].slice(0, 63).join() !== ORB4WANT.join())
   throw new Error('orbScale does not reproduce ORB4 at full size -- the resampler changed');
 // ORBSHEET=1: every distinct bitmap in the ladder, on black and on white, at 8x4 zoom (a
 // multicolor pixel is 2 hires wide, so 8x4 keeps its real proportions). The point is to see how
