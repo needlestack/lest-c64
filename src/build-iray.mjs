@@ -20909,7 +20909,7 @@ ${HAS_IDOL ? `; ---- the idol subsystem lives in the front of seamEdge's page --
 ; level 5 became a stub). The two cannot both live here: turn the outline back on anywhere and
 ; seamEdge's 249 bytes leave no room, and the "* = $8000" guard below says so at build time
 ; rather than letting them overlap. Whoever turns it on has to rehome one of them.
-${ANYFLOORDK ? `
+` : ''}${ANYFLOORDK ? `
 ; ---- floorDk: the ground's dither, per level, into charset B's BLANK ----
 ; lvlFloorT holds $ff for a level that wants it and $00 for one that does not, so the same eight
 ; stores serve both: ANDing the pattern with the flag writes the checker or writes zeros. A
@@ -20928,7 +20928,7 @@ fdM:    and #$00                ; operand patched above: $ff keeps the dither, $
         jmp fdGlyph             ; ...then the ramps and steps, then the wall/ceiling outline
 fdPatT: !byte ${FLOORDK_PAT.map(hx).join(',')}
 lvlFloorT: !byte ${[...Array(PAL_N)].map((_, i) => hx(LEVEL_FLOORDK[i + 1] ? 0xff : 0)).join(',')}
-` : ''}
+` : ''}${HAS_IDOL ? `
 ; ---- idolLk: what is in your hands, as both a flag and an identity ----
 ; idolHd is "is it the idol" and drives the gaze and covering rules. idolHand is WHICH idol,
 ; and unlike carry it survives a fall -- carry indexes the live level's entity table and
