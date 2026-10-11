@@ -112,9 +112,19 @@ const ALLLVL = [...CHAIN];
 // nowhere for code to arrive into. So every feature flag now asks "does any level THE GAME HAS
 // use it", which is constant, and the engine is byte-identical whatever CHAIN says.
 // Bounded by how many mechanics exist, not by how many levels do.
-const LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7];
-if (!LEVEL_IDS.includes(LVL)) throw new Error(
-  `LVL=${LVL}: the game has levels ${LEVEL_IDS[0]} to ${LEVEL_IDS[LEVEL_IDS.length - 1]}`);
+//
+// WORK IN PROGRESS levels are defined here but NOT in the game until WIP=1. Because a mechanic is
+// compiled in when any level uses it, a half-built level would otherwise ship its mechanics (level
+// 8's flicker: ~400 bytes of IRQ code and tables) in every build of the real game. WIP=1 adds them
+// to LEVEL_IDS, so the engine changes; naming one in CHAIN or LVL without it is an error, not a
+// quietly different engine.
+const SHIP_LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7];
+const WIP_LEVEL_IDS = [8];                       // 8: the flicker / lighting test (2026-10-09)
+const WIP = process.env.WIP === '1';
+const LEVEL_IDS = WIP ? [...SHIP_LEVEL_IDS, ...WIP_LEVEL_IDS] : SHIP_LEVEL_IDS;
+for (const n of [...CHAIN, LVL]) if (!LEVEL_IDS.includes(n)) throw new Error(WIP_LEVEL_IDS.includes(n)
+  ? `level ${n} is work in progress: build it with WIP=1`
+  : `level ${n}: the game has levels ${LEVEL_IDS[0]} to ${LEVEL_IDS[LEVEL_IDS.length - 1]}`);
 const SOCKROOM = LVL === 2;
 // LEVEL 5 IS BACK (2026-09-28). It was retired to a 6x6 stub on 2026-09-27 while the carry
 // mechanic was built; its map and wall groups were kept here unreferenced so that bringing it
@@ -197,7 +207,7 @@ const LEVEL_WALLS = {
 // Any level's map by number, for the few places that need a level OTHER than the live one --
 // a wall's cell ids are in its own level's width, which need not be the live one's.
 const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : n === 4 ? L4_MAP
-                 : n === 5 ? L5_MAP : n === 6 ? L6_MAP : n === 7 ? L7_MAP : L1_MAP;
+                 : n === 5 ? L5_MAP : n === 6 ? L6_MAP : n === 7 ? L7_MAP : n === 8 ? L8_MAP : L1_MAP;
 // Which levels carry an IDOL, and where. Declared up here with the other level facts because
 // the sprite ladder is built long before ORBS exists, and a ladder nothing uses is 1K of bank 3
 // -- which bank 3 does not have. Levels 1-3 are unaffected by the idol existing at all.
@@ -251,7 +261,49 @@ const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env
                     // that had green->6: the destinations were fixed and these were not, so the
                     // blue hole dropped you into a green room.
                     6: { ceil: +(process.env.CEIL6 ?? 0x06), seam: +(process.env.SEAM6 ?? 0x0e) },
-                    7: { ceil: +(process.env.CEIL7 ?? 0x05), seam: +(process.env.SEAM7 ?? 0x0d) } };
+                    7: { ceil: +(process.env.CEIL7 ?? 0x05), seam: +(process.env.SEAM7 ?? 0x0d) },
+                    // 8 is DARK: ground and walls black, seams grey 1. LEVEL_FLICKER lights it.
+                    8: { ceil: 0x00, wall: 0x00, seam: 0x0b } };
+// ---- LEVEL_FLICKER: a failing fluorescent tube (the user's lighting test, 2026-10-09) ----
+// A level listed here is lit, for single 60Hz frames at random, in these inks: ground (ceiling
+// AND floor), walls and seams. Between flashes it shows its LEVEL_PAL inks. The flashes come in
+// BURSTS -- a stutter of a few frames, some lit and some not -- with a quiet gap between, which
+// is what a bad tube does; see flkTick. Done in the top-of-frame IRQ, so a flash is exactly one
+// video frame whatever the render rate: hooked to the renderer it would last a whole rendered
+// frame, ~4 of them at 15 fps, and read as a blink rather than a flicker.
+// The occluder cells -- the wall drawn in pair 11 so a sprite can pass behind an edge -- take pair
+// 11's ink from colour RAM, which in multicolour holds only 0..7. So the LIT WALL must be 0..7 for
+// them to flash with it (FLKINK below). Black lit walls also match, and were tried and rejected.
+// FLKTONE picks a whole tone for level 8: the dark seam, then the lit ground / wall / seam. Blue
+// is the default, being the one whose lit wall (6) colour RAM can show -- see FLKINK. Grey and amber
+// looked as good (the user, 2026-10-09) but light the walls 11 and 9, so they build only with
+// FLKANYWALL=1. FLKGND/FLKWALL/FLKSEAM still override one lit ink of whichever tone, and
+// FLKDSEAM the dark seam: FLKDSEAM=11 FLKSEAM=11 is a grey seam that never changes.
+const FLK_TONES = { grey:  { dark: 0x0b, gnd: 0x0c, wall: 0x0b, seam: 0x0f },   // grey 1 / 2 / 3
+                    amber: { dark: 0x09, gnd: 0x08, wall: 0x09, seam: 0x07 },   // brown / orange / yellow
+                    blue:  { dark: 0x06, gnd: 0x0e, wall: 0x06, seam: 0x01 },   // blue / light blue / white
+                    green: { dark: 0x05, gnd: 0x0d, wall: 0x05, seam: 0x01 },   // green / light green / white
+                    red:   { dark: 0x02, gnd: 0x0a, wall: 0x02, seam: 0x01 },   // red / light red / white
+                    ember: { dark: 0x02, gnd: 0x08, wall: 0x02, seam: 0x01 } }; // red / orange / white
+const FLK_TONE = FLK_TONES[process.env.FLKTONE ?? 'blue'];
+if (!FLK_TONE) throw new Error(`FLKTONE=${process.env.FLKTONE}: known tones are ${Object.keys(FLK_TONES).join(', ')}`);
+LEVEL_PAL[8].seam = +(process.env.FLKDSEAM ?? FLK_TONE.dark);
+const LEVEL_FLICKER = { 8: { gnd: +(process.env.FLKGND ?? FLK_TONE.gnd), wall: +(process.env.FLKWALL ?? FLK_TONE.wall),
+                             seam: +(process.env.FLKSEAM ?? FLK_TONE.seam) } };
+const HAS_FLICKER = LEVEL_IDS.some(n => LEVEL_FLICKER[n]);
+// FLKINK: on a lit frame the cover cells under each covered sprite get the lit wall ink in colour
+// RAM, so they flash with the wall and the occlusion stays exact; see fkInk. That needs the lit
+// wall to be 0..7, so a flickering level's lit wall MUST be (the user, 2026-10-09, after hiding
+// the covered sprite was tried instead: hiding it still leaves the cover cells black, and swapping
+// their glyphs for plain wall inside one 1/60 s flash is not worth it). FLKANYWALL=1 builds a wall
+// above 7 anyway, cover cells black on the flash, for looking at a tone.
+for (const n of LEVEL_IDS) if (LEVEL_FLICKER[n] && LEVEL_FLICKER[n].wall > 7 && process.env.FLKANYWALL !== '1')
+  throw new Error(`LEVEL_FLICKER[${n}].wall = ${LEVEL_FLICKER[n].wall}: a lit wall must be colour 0..7, the ` +
+    `only inks colour RAM can give the cover cells (FLKANYWALL=1 to build it anyway, patches black)`);
+const FLKINK = LEVEL_IDS.some(n => LEVEL_FLICKER[n] && LEVEL_FLICKER[n].wall <= 7 && LEVEL_FLICKER[n].wall !== 0);
+// FLKLIT=1: hold every flickering level in its LIT inks, to look at what a one-frame flash shows.
+if (process.env.FLKLIT === '1') for (const n of Object.keys(LEVEL_FLICKER))
+  LEVEL_PAL[n] = { ceil: LEVEL_FLICKER[n].gnd, wall: LEVEL_FLICKER[n].wall, seam: LEVEL_FLICKER[n].seam };
 // PALTEST=<level>:<ceil colour> overrides one level's ground, for trying a colour or for making
 // a raster split visible by giving it something loud enough to read off a screenshot.
 if (process.env.PALTEST) { const [lv, c] = process.env.PALTEST.split(':').map(Number);
@@ -326,6 +378,21 @@ const ANYSEAM = LEVEL_IDS.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDG
 const LEVEL_SPR = { 4: { under: 0x00, hi: 0x0c } };   // 5's black underside went with its black
                                             //   room; the hub's highlight is grey2, not grey3
 const SPR_ENV = { under: 'SPRU', hi: 'SPRH' };
+// ---- FLKSPR: the sprites flicker with the light too (level 8, every sprite) ----
+// In the dark the cast wears a DARK set of inks, and only a lit frame shows its normal ones.
+// The dark shared inks are simply this level's own (LEVEL_SPR), so lvlLook, lvlSpr and sprPal
+// need to know nothing; flkTick swaps in the normal pair for a lit frame and back. Bodies are per
+// sprite, so they go through FLKSPR_MAP whenever flkDk is set (osFlush, and flkTick's own
+// rewrite of all eight at each change).
+//   FLKSPR=1  one step darker: black / grey1 / grey2, lit grey1 / grey2 / grey3
+//   FLKSPR=2  black / black / grey1 -- the body goes to black whatever its colour
+const FLKSPR = +(process.env.FLKSPR ?? 0);
+if (FLKSPR && ![1, 2].includes(FLKSPR)) throw new Error(`FLKSPR=${FLKSPR}: 1 (one step darker) or 2 (black / black / grey1)`);
+const FLKSPR_MAP = FLKSPR === 2 ? Array(16).fill(0)
+  //  0  1   2   3  4   5  6  7  8  9 10  11  12 13 14  15  -- each colour one step down its own ramp
+  : [0, 15, 9, 14, 6, 11, 0, 8, 9, 0, 2, 0, 11, 5, 6, 12];
+const ORBSHD01 = (process.env.ORBSHD01 ?? (FLKSPR === 2 ? '1' : '0')) === '1';   // see ORBSRC12
+if (FLKSPR) LEVEL_SPR[8] = FLKSPR === 2 ? { under: 0x00, hi: 0x0b } : { under: 0x00, hi: 0x0c };
 // ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
 // The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
 // that rises with the room. The renderer only ever computes 13 cell rows and MIRRORS them, so
@@ -563,6 +630,30 @@ const L7_MAP = [
   "#S|....P....|..#",
   "################",
 ].map(r => r.replace(/\|/g, '#').replace(/[XAOPSI]/g, '.'));
+// ---- LEVEL 8, the FLICKER test (2026-10-09): a random 15x15 maze in the dark ----
+// The user's lighting test drive. Everything is black but the seams (grey 1), and a failing
+// fluorescent tube lights the room for single 60Hz frames now and then (LEVEL_FLICKER). The map
+// is a seeded depth-first maze (python random.seed(8) over the odd cells, 3 extra walls knocked out
+// for loops) -- nothing about it is designed. Kept plain on purpose: every free-standing wall stub
+// is more wall RUNS, and NRUN sizes engine tables for the whole build. A first draft with a room
+// and twelve loops had 93 runs to level 7's 71 and pushed an engine buffer out of the image.
+const L8_MAP = [
+  "###############",
+  "#...#...#.....#",
+  "###.#.#.#.###.#",
+  "#...#.#...#...#",
+  "#.#####.###.#.#",
+  "#...........#.#",
+  "#.###########.#",
+  "#.....#.....#.#",
+  "#.#.###.#.###.#",
+  "#.#...#.#.....#",
+  "#.###.#.#######",
+  "#...#...#.....#",
+  "#.#.#########.#",
+  "#.............#",
+  "###############",
+];
 const SOCK_MAP = (() => {
   const rows = [
     "################",
@@ -1899,7 +1990,8 @@ const PLAN = (() => {
   console.error('  regenerate: CELLSCAN=1 CELLSTEP=0.2 CELLANG=1 node src/build-iray.mjs && node src/charsetgen.mjs');
   return 0;
 })();
-const planData = PLAN ? JSON.parse(readFileSync('./data/charset-plan.json', 'utf8')) : null;
+// CHARPLAN=path: a different plan, e.g. the 181-code one RIVETS=1 needs room for its 16 glyphs.
+const planData = PLAN ? JSON.parse(readFileSync(process.env.CHARPLAN ?? './data/charset-plan.json', 'utf8')) : null;
 if (PLAN === 2 && !planData.paired) throw new Error('charset-plan.json has no paired plan: rerun with PAIRED=1');
 if (PLAN === 3 && !planData.fine) throw new Error('charset-plan.json has no fine plan: rerun charsetgen');
 // Bottom-anchored fills, so row i (0 = top) is lit when i >= 8 - level. Both halves of a pair
@@ -1969,6 +2061,39 @@ for (let v = 1; v <= 3; v++)
   for (let k = 0; k < 4; k++)
     glyphs.push([...Array(8)].map((_, r) => r < 2 * v ? seamRow([]) : seamRow([k])));
 const NSEAM = 4 + 12;
+// ---- RIVETS=1: a dot at each PANEL CENTRE instead of a line at each panel boundary ----
+// Corner lines stay -- a wall is one flat colour, so without them two faces meeting would vanish
+// into each other -- but the decorative line between panels becomes a pair of rivets, a quarter
+// of the wall's height in from its top and bottom. A rivet is ONE cell: a solid wall cell with a
+// pair-10 dot one pixel wide and two rows tall, at column k (0..3) and height v (rows 2v, 2v+1),
+// so it lands to 2 px vertically, the step seam tops already move in. The lower rivet is free:
+// fontB mirrors the rows, so the same code written to the mirror row puts it at 3-v.
+// Indexed RIV0 + 4v + k, directly after the seams so RIV0 - SEAM0 = 16 is a multiple of 4 and
+// "code - SEAM0, low two bits" is the column for a seam AND a rivet (ssDl relies on it).
+// RIV0 + k doubles as the MARKER seamOne leaves in seamT: it is never drawn as such, seamDrw
+// sees it and draws the rivet at whatever height the wall has.
+const RIVETS = process.env.RIVETS === '1' && process.env.SEAMS !== '0';
+const RIV0 = glyphs.length;
+// RIVBIG=1: the rivet is 2 pixels wide and 3 rows tall, so it can cross a cell edge either way.
+// 25 glyphs, RIV0 + 5h + cv. cv is the COLUMN shape: 0..2 = pixels {cv, cv+1}, 3 = pixel 3 alone
+// (a rivet starting at column 3, whose other half is the next cell's cv 4), 4 = pixel 0 alone.
+// h is the ROW shape: 0..3 = rows 2h..2h+2 clipped to the cell (h 3 is rows 6-7), 4 = row 0 alone,
+// the third row of an h 3 rivet spilled into the cell below.
+const RIVBIG = RIVETS && process.env.RIVBIG === '1';
+// RIVSEAM=1: panel LINES and rivets both -- every step of the seam walk places the boundary line
+// and then the panel centre's rivet, so each costs the pass its own projection.
+const RIVSEAM = RIVETS && process.env.RIVSEAM === '1';
+const RIVCOLS = [[0, 1], [1, 2], [2, 3], [3], [0]];
+if (RIVBIG) for (let h = 0; h < 5; h++)
+  for (let cv = 0; cv < 5; cv++)
+    glyphs.push([...Array(8)].map((_, r) => (h < 4 ? r >= 2 * h && r <= 2 * h + 2 : r === 0) ? seamRow(RIVCOLS[cv]) : seamRow([])));
+else if (RIVETS) for (let v = 0; v < 4; v++)
+  for (let k = 0; k < 4; k++)
+    glyphs.push([...Array(8)].map((_, r) => (r >> 1) === v ? seamRow([k]) : seamRow([])));
+// RIVMIN: no rivet on a wall shorter than this many pixels from horizon to top at the rivet's
+// column. A fixed-size dot does not shrink with distance, so on a far wall it reads as a blot.
+const RIVMIN = +(process.env.RIVMIN ?? (RIVBIG ? 24 : 0));
+if (RIVETS && (RIV0 - SEAM0) % 4) throw new Error('RIVETS: RIV0 - SEAM0 must be a multiple of 4');
 
 // ---- the sprite occluders: seven cells of black that CLIP ----
 // Bit pair 11, where every wall pixel is 01. In multicolor char mode 00 and 01 count as
@@ -3095,6 +3220,7 @@ const LEVEL_START = {
   5: [0x0180, 0x0880, 0x00, 0x00],   // (1.5, 8.5), the west end of the hall, facing east
   6: [0x0180, 0x0780, 0xc0, 0x00],   // (1.5, 7.5) facing NORTH, straight at the exit one cell away
   7: [0x0780, 0x0a80, 0xc0, 0x00],   // (7.5, 10.5) facing NORTH, the idol two cells ahead
+  8: [0x0180, 0x0180, 0x00, 0x00],   // (1.5, 1.5), the maze's corner, facing east
 };
 const ST0 = LEVEL_START[LVL] ?? LEVEL_START[1];
 const startOf = n => n === LVL ? [PX, PY, PA, PAF] : (LEVEL_START[n] ?? LEVEL_START[1]);
@@ -3899,6 +4025,17 @@ const ORBSRC12 = (() => {
   for (let y = 0; y < 21; y++) { const r = [];
     for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++) r.push((d[y * 3 + b] >> (6 - 2 * i)) & 3);
     g.push(r); }
+  // ORBSHD01: the ground shadow (every row below the empty gap under the ball) is redrawn in pair
+  // 01, the shared underside ink. FLKSPR=2's dark set makes that black, and a lit frame grey 1 --
+  // what the user asked for on level 8 (2026-10-10). In its own inks it is a grey 3/grey 2 mix,
+  // which in the dark set read as a grey-1 band with black in it. The ladder is ONE bitmap for every
+  // level, so this recolours every level's orb shadow: it is on only with FLKSPR=2, a level-8 test.
+  if (ORBSHD01) {
+    let y = 20;
+    while (y >= 0 && g[y].some(v => v)) y--;          // up through the shadow to the gap row
+    if (y < 1 || !g[y - 1].some(v => v)) throw new Error('ORBSHD01: no gap row between the ball and its shadow');
+    for (let k = y + 1; k < 21; k++) g[k] = g[k].map(v => v && 1);
+  }
   return g;
 })();
 // Scale about the DRAWN content, not the 12x21 frame it happens to sit in.
@@ -4700,6 +4837,8 @@ const ORBS = [];
     ORBS.push({ x: 2.5, y: 5.5, c: 0 });         //   east behind |1
     ORBS.push({ x: 10.5, y: 8.5, c: 0 });
   }
+  else if (LVL === 8)                            // the flicker test: one orb two cells ahead of
+    ORBS.push({ x: 3.5, y: 1.5, c: 0 });         //   the start, to judge the dark sprite inks by
   else if (LVL === 1) {                          // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
@@ -4767,6 +4906,7 @@ const ORBS = [];
       ORBS.push({ x: 3.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 9.5, y: 8.5, c: 0, tall: true });
     }
+    else if (LVL === 8) ORBS.push({ x: 7.5, y: 7.5, c: 0, tall: true });   // the middle of the room
     else if (LVL === 1) {                         // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
@@ -5194,7 +5334,7 @@ const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').
 // that hides it stays: it is what the three pedestals open, and it now reveals an empty alcove.
 const HUB_HOLES = [[4, 1], [1, 4], [4, 7], [13, 4]];   // N(red), W(green), S(blue), E(black)
 const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
-             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : LVL === 8 ? [13, 13] : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
@@ -5347,6 +5487,76 @@ Object.assign(RUNTIME_BUFS, {
 const LEASH_GROUPS = (process.env.ANGEL === '0' ? '' : process.env.LEASH ?? (LVL === 1 ? '|21,2;21,8' : ''))
   .split('|').map(g => g.split(';').filter(Boolean).map(q => q.split(',').map(Number)));
 const LEASH_AT = LEASH_GROUPS.flat();     // every leash cell, for the checks that only care WHERE
+// ---- LEVELSHEET=1: print the live level in the LEVEL SHEET glyph language and stop ----
+// docs/levels/KEY.txt is the language; tools/levelsheet.mjs runs this for every level. Drawn from
+// the SAME data the build uses -- map, wall groups, sockets, pedestals, exits and where they go,
+// entities, leashes, start, inks -- so a sheet cannot drift from the game the way hand-kept ones
+// did. Two characters a cell: the first says WHAT, the second is its one parameter (or repeats).
+if (process.env.LEVELSHEET === '1') {
+  const rows = MAP_OF(LVL), W = rows[0].length, H = rows.length;
+  const g = rows.map(r => [...r].map(c => c === '#' ? '[]' : '..'));
+  const clash = [];
+  const put = (x, y, gl, what) => {
+    x = Math.floor(x); y = Math.floor(y);
+    if (g[y][x] !== '..') clash.push(`(${x},${y}) ${what} on ${g[y][x]}`);
+    g[y][x] = gl;
+  };
+  // removable walls: |n for group n, |+ for a cell in more than one group
+  const wallGroups = {};
+  (LEVEL_WALLS[LVL]?.walls ?? []).forEach((grp, k) => grp.forEach(([x, y]) =>
+    (wallGroups[`${x},${y}`] ??= []).push(k + 1)));
+  for (const [xy, ks] of Object.entries(wallGroups)) {
+    const [x, y] = xy.split(',').map(Number);
+    g[y][x] = ks.length > 1 ? '|+' : `|${ks[0]}`;
+  }
+  const sw = LEVEL_WALLS[LVL]?.sockWall ?? [];
+  SOCKETS_AT.forEach(([x, y], i) => put(x, y, `S${(sw[i] ?? -1) + 1 || '?'}`, 'socket'));
+  PEDESTALS_AT.forEach(([x, y], i) => put(x, y, `/${(sw[SOCKETS_AT.length + i] ?? -1) + 1 || '?'}`, 'pedestal'));
+  const dst = v => v === undefined || v === null ? '>' : v === END_DST ? '!' : String(v);
+  HOLES_AT.forEach(([x, y], i) => put(x, y, `X${dst(LEVEL_EXITDST[LVL]?.[i])}`, 'exit'));
+  let an = 0;
+  for (const o of ORBS) {
+    if (o.hidden) continue;                     // the hub's idol slots: they stand on the pedestals
+    put(o.x, o.y, o.tall ? `A${++an}` : o.idol ? 'II' : 'OO', o.tall ? 'angel' : o.idol ? 'idol' : 'orb');
+  }
+  LEASH_GROUPS.forEach((grp, k) => grp.forEach(([x, y]) => put(x, y, `L${k + 1}`, 'leash')));
+  const [sx, sy, sa, saf] = startOf(LVL);
+  const ang = (sa * 256 + saf) / 65536 * 360;   // 0 = east (+x), rising toward +y = south
+  put(sx / 256, sy / 256, 'P' + '>v<^'[Math.round(ang / 90) % 4], 'player');
+  if (clash.length) throw new Error(`LEVELSHEET level ${LVL}: two things in one cell: ${clash.join('; ')}`);
+
+  const C64N = ['black','white','red','cyan','purple','green','blue','yellow','orange','brown',
+                'light red','grey 1','grey 2','light green','light blue','grey 3'];
+  const ink = c => `${c} ${C64N[c]}`;
+  const pal = palOf(LVL), out = [];
+  const pad = (s, n) => String(s).padStart(n);
+  out.push(`LEVEL ${LVL}`, '');
+  out.push('    ' + [...Array(W)].map((_, x) => x >= 10 ? pad(Math.floor(x / 10), 2) : '  ').join(' '));
+  out.push('    ' + [...Array(W)].map((_, x) => pad(x % 10, 2)).join(' '));
+  g.forEach((r, y) => out.push(`${pad(y, 2)}  ${r.join(' ')}`));
+  out.push('', `size     ${W} x ${H} = ${W * H} cells`);
+  out.push(`start    (${(sx / 256).toFixed(2)}, ${(sy / 256).toFixed(2)}) facing ${ang.toFixed(0)} deg (0 east, 90 south)  [PX=${sx.toString(16).padStart(4, '0')} PY=${sy.toString(16).padStart(4, '0')} PA=${sa.toString(16).padStart(2, '0')} PAF=${saf.toString(16).padStart(2, '0')}]`);
+  out.push(`inks     ground ${ink(pal.ceil)}, walls ${ink(pal.wall)}, seams ${ink(pal.seam)}`);
+  if (LEVEL_FLICKER[LVL]) { const f = LEVEL_FLICKER[LVL];
+    out.push(`flicker  lit for single frames: ground ${ink(f.gnd)}, walls ${ink(f.wall)}, seams ${ink(f.seam)}`); }
+  if (LEVEL_FLOORDK[LVL]) out.push('floor    dithered (the floor half darkened by a black checker)');
+  if (LEVEL_SYM[LVL]) out.push('walls    marked (a dot in every solid wall cell)');
+  HOLES_AT.forEach(([x, y], i) => {
+    const d = dst(LEVEL_EXITDST[LVL]?.[i]);
+    out.push(`exit     X${d} at (${x},${y}): ${d === '>' ? `the next level in the chain (level ${nextLevel(LVL)} in the full game)` : d === '!' ? 'THE END (the ending sequence)' : `level ${d}`}, hole ${ink(EXIT_COLS[i] ?? 0)}`);
+  });
+  (LEVEL_WALLS[LVL]?.walls ?? []).forEach((grp, k) => {
+    const by = [...SOCKETS_AT.map((c, i) => [`S${k + 1}`, c, i]), ...PEDESTALS_AT.map((c, i) => [`/${k + 1}`, c, SOCKETS_AT.length + i])]
+      .filter(([, , i]) => sw[i] === k).map(([gl, [x, y]]) => `${gl} (${x},${y})`);
+    out.push(`group ${k + 1}  ${grp.map(([x, y]) => `(${x},${y})`).join(' ')} -- opened by ${by.join(', ') || 'nothing'}${by.length > 1 && by[0][0] === '/' ? ' (all of them)' : by.length > 1 ? ' (any of them)' : ''}`);
+  });
+  for (const [xy, ks] of Object.entries(wallGroups)) if (ks.length > 1)
+    out.push(`|+       (${xy}) is in groups ${ks.join(' and ')}: whichever opens first takes it out`);
+  LEASH_GROUPS.forEach((grp, k) => { if (grp.length) out.push(`leash    A${k + 1} may not enter ${grp.map(([x, y]) => `(${x},${y})`).join(' ')}`); });
+  if (LEVEL_IDOL[LVL]) out.push(`idol     carried to the hub's pedestals`);
+  console.log(out.join('\n'));
+  process.exit(0);
+}
 // One bit per cell. The RUNTIME bakes a x32 stride (five asl) for the LOS bitmaps, so a map
 // past 256 cells needs that changed too -- assert rather than let it go quietly wrong.
 const CELLBYTES = Math.ceil(MAPN / 8);
@@ -5805,12 +6015,13 @@ const ANG_PERIOD_FAR = +(process.env.ANGPERF ?? 120);
 // against columns hidden gives a real fraction -- and ">= half obscured" is then one compare,
 // with no division anywhere. ANGOBSC shifts the visible count left: 0 = half, 1 = two thirds.
 const ANG_OBSC = +(process.env.ANGOBSC ?? 0);
-// ANGSLIDE=n: with the IDOL in hand an angel moves in plain sight, so a step that would teleport it
-// a whole cell is drawn as a LUNGE instead. It leaves n 60ths before the step is due and lands
-// exactly when it would have teleported, so the pace is unchanged. The slide is in the WORLD -- the
-// angel gets a fraction of a cell, projected every frame like everything else -- so it stays right
-// while you walk or turn, and its rung follows its apparent size on the way. 0 = the instant step.
-// Only the idol makes a step visible, so without one in the engine there is nothing to draw.
+// ANGSLIDE=n: an angel's step is a SLIDE, never a teleport. It leaves n 60ths before the step is
+// due and lands exactly when it would have teleported, so the pace is unchanged. The slide is in
+// the WORLD -- the angel gets a fraction of a cell, projected every frame like everything else --
+// so it stays right while you walk or turn, and its rung follows its apparent size on the way.
+// With the idol in hand it is the LUNGE you watch; without, an unseen step that strays into view
+// freezes mid-slide (see slTick). 0 = the instant step. Gated on HAS_IDOL only because the lunge
+// was built with it; the unseen slide has no need of an idol.
 const ANGSLIDE = HAS_IDOL ? +(process.env.ANGSLIDE ?? 24) : 0;
 if (ANGSLIDE && (ANGSLIDE < 2 || Math.max(ANG_PERIOD, ANG_PERIOD_FAR) + ANGSLIDE > 256 || ANGSLIDE >= Math.min(ANG_PERIOD, ANG_PERIOD_FAR)))
   throw new Error(`ANGSLIDE=${ANGSLIDE} must be 2.. and shorter than a step period (${ANG_PERIOD}/${ANG_PERIOD_FAR}), and period + slide must fit a byte`);
@@ -9408,15 +9619,15 @@ sndI    = $85c1
 sndT    = $85c2
 
 omMc    = $850e
-amIdx   = $84f6                  ; angel movement scratch: entity, chosen step, target cell
-amDX    = $84f7
-amDY    = $84f8
-amTX    = $84f9
-amTY    = $84fa
-amCell  = $84fb
-amX     = $84fc
-amY     = $84fd
-entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gate must not skip
+amIdx   = $c0                    ; angel movement scratch: entity, chosen step, target cell.
+amDX    = $c1                    ;   ZERO PAGE for SIZE, like fkV: ~40 operands one byte shorter is
+amDY    = $c2                    ;   what paid for the adjacent-mark rule (anAdj) in a full image.
+amTX    = $c3                    ;   Only live inside angStep/slTick/dieChk, never across a level
+amTY    = $c4                    ;   load (Krill is $e0-$e6; the KERNAL's LOAD use of $90-$fa is
+amCell  = $c5                    ;   boot-time only)
+amX     = $c6
+amY     = $c7
+${RIVETS ? 'ssSg    = $c8                    ; seamOne (RIVETS): how many span ends lie below the centre\n' : ''}${RIVSEAM ? 'rvMode  = $cc                    ; seamOne (RIVSEAM): 0 = a boundary line, 1 = a centre rivet\n' : ''}${RIVBIG ? 'rvH     = $c9                    ; rvDrw (RIVBIG): row shape, 5 x it, column shape\nrvB     = $ca\nrvCv    = $cb\n' : ''}entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gate must not skip
 dbgOnce = $84f5                  ; DROPNOW only
 ${process.env.FALLNOW ? `fnCnt   = ${hx16(FNDBG)}                  ; FALLNOW: how many forced falls have been triggered
 fnLog   = ${hx16(FNDBG + 1)}                  ;   ...and the level each one left, in order (16 of them).
@@ -12538,12 +12749,14 @@ ${SEAMCNT ? `        inc ssEnt\n        bne ssEntX\n        inc ssEnt+1\nssEntX:
         ; A run is a contiguous line of cells along ONE plane, so its cells can only differ in the
         ; coordinate that runs along the face -- comparing raw cell ids IS the boundary test, with
         ; no masking and no knowledge of which way the wall faces.
-        ldx spanL
+${RIVETS && process.env.RIVONE !== '0' ? `                                ; RIVETS: no identical-cell reject -- a face inside one cell
+                                ;   has no boundary, but it does have that cell's CENTRE
+` : `        ldx spanL
         lda idT,x
         ldx spanR
         cmp idT,x
         beq ssDn                ; identical cell -> no boundary between the ends
-        lda spanR
+`}        lda spanR
         sec
         sbc spanL
         cmp #${hx(SEAMWIDE)}
@@ -12589,10 +12802,10 @@ ${DOUBLE === 'calcU' ? '        jsr calcU\n        ldx spanR               ;   t
         sta ubH
         ; Walk the integer coordinates between the two ends. Direction first: the face can
         ; run either way across the screen.
-        lda uaH
+${RIVETS && process.env.RIVONE !== '0' ? '' : `        lda uaH
         cmp ubH
         beq ssDn                ; same cell, no boundary crossed -- the common case
-${SEAMCNT ? `        inc ssDraw\n        bne ssDrawX\n        inc ssDraw+1\nssDrawX:\n` : ''}        ; ---- walk the NEAR end of the face FIRST ----
+`}${SEAMCNT ? `        inc ssDraw\n        bne ssDrawX\n        inc ssDraw+1\nssDrawX:\n` : ''}        ; ---- walk the NEAR end of the face FIRST ----
         ; The old walk always started at spanL, which is the left of the SCREEN and has nothing to
         ; do with which end is near. It matters because ssAny stops the walk once the span has no
         ; writable cell left: whatever is reached first is what survives. A near line is wider,
@@ -12631,6 +12844,8 @@ ssNp:   ldx #$01
         ; experiments.
 ssCnt:  ${SEAMMAXN ? `cmp #${hx(SEAMMAXN + 1)}
         bcs ssDn
+        ` : ''}${RIVETS ? `clc                     ; RIVETS: n boundaries lie between the end cells, but n+1
+        adc #$01                ;   CENTRES do (seamOne drops the end ones the face stops short of)
         ` : ''}sta ssN
 ${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}${SEAMPW ? '        jsr ssPwS               ; dp, and the widest s that still leaves a placeable panel\n' : ''}
 
@@ -12650,7 +12865,12 @@ ssPwXX: jmp ssDn
 ssPwCk:` : `   jsr ssPw                ; no panel wide enough to place a line in: stop, because the
         bcs ssDn                ;   face only gets narrower from here
 `) : `   `}
-${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n' : ''}        jsr seamOne
+${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:\n' : ''}${RIVSEAM ? `        lda #$00                ; RIVSEAM: the boundary first -- it is structure, the rivet is
+        sta rvMode              ;   decoration, and whichever lands first keeps its cell
+        jsr seamOne
+        lda #$01
+        sta rvMode
+` : ''}        jsr seamOne
         dec ssN
         beq ssDn
         lda ssDir               ; step k toward the far end, in the order chosen at setup
@@ -13483,7 +13703,7 @@ irqArm: lda #${hx(SPLITLINE)}
         bne irqNf
         inc frameCnt+1
 irqNf:
-irqd:   lda #$ff
+${HAS_FLICKER ? '        jsr flkTick             ; LEVEL_FLICKER: after irqB0, so a flash overrides its ground\n' : ''}irqd:   lda #$ff
         sta $d019
         pla
         tay
@@ -14477,7 +14697,12 @@ osLp:   dex                     ;   allocate DOWNWARD from 7, so a loop bounded 
         sta ${hx16(SCR_A + 0x3f8)},x             ; the pointer lives in the SCREEN, so both buffers need it
         sta ${hx16(SCR_B + 0x3f8)},x
         lda obC,x
-        sta $d027,x
+${FLKSPR ? `        ldy flkDk               ; FLKSPR: in the dark the body wears the darker colour
+        beq osC
+        tay
+        lda flkMapT,y
+osC:
+` : ''}        sta $d027,x
         cpx #$00
         bne osLp
 ${HAS_IDOL ? `        jsr idolLat             ; THIS frame's finding, not last frame's. Latched at the start
@@ -16748,11 +16973,19 @@ ${DIE ? `        txa                     ; ...and the one that has MARKED you ho
         bne asNext              ; not in the world
         lda orbSeenT,x
         beq asFree              ; unobserved: it moves, as it always has
-${HAS_IDOL ? `        lda idolHd              ; seen -- but holding the IDOL a gaze no longer holds them,
-        beq asNext              ;   and they come for you in plain sight
+${ANGSLIDE ? `        lda angSlDT,x           ; seen MID-SLIDE: it finishes the step (the user, 2026-10-09).
+        bne asFree              ;   Freezing it between two cells read as a cheat in reverse; it
+                                ;   lands, and the gaze holds it from the next step on
+` : ''}${HAS_IDOL ? `        lda idolHd              ; seen -- but holding the IDOL a gaze no longer holds them,
+        beq ${DIE ? 'asSeen' : 'asNext'}              ;   and they come for you in plain sight
         bne asFree              ; always
-` : ''}        bne asNext              ; one visible pixel freezes it, and its clock with it
-asFree:
+` : ''}${DIE ? `asSeen: jsr anAdj               ; one visible pixel freezes it -- and BESIDE you, its clock is
+        bcc asNext              ;   ZEROED rather than held, so turning away gives you exactly
+        lda #$00                ;   one step period (2 s) before it marks you (angOne), however
+        sta angAccT,x           ;   much it had banked before you looked
+        beq asNext              ; always
+` : `        bne asNext              ; one visible pixel freezes it, and its clock with it
+`}asFree:
         ; ---- how long until this angel's next step? It depends how far away it is. ----
         ; Y holds the answer rather than A because the accumulator has to be loaded after this and
         ; there is no cmp with a Y-indexed operand -- hence the one-byte parking spot.
@@ -16801,7 +17034,11 @@ asOut:  rts
 ; Greedy, not a path. A distance field would have to be rebuilt every time the player moves or an
 ; orb lands, and slow-and-inexorable is both cheaper and the better feeling. Diagonal first, then
 ; each axis alone, so a blocked diagonal still makes progress along a wall.
-angOne: jsr angPick             ; where to, and may it go there?
+angOne: ${DIE ? `jsr anAdj               ; ALREADY beside you when its step falls due, unseen: it does
+        bcs anReach             ;   not need to move to mark you (the user, 2026-10-09). Before,
+                                ;   only a step that LANDED beside you marked, so turning your
+                                ;   back on an angel you had walked up to was safe forever.
+        ` : ''}jsr angPick             ; where to, and may it go there?
         bcs anGo
         rts
 ; ---- angPick: the step for angel X, decided but NOT taken. C set (amTX/amTY/amX/amY/amCell
@@ -16866,49 +17103,16 @@ ${ADDX('orbXCT,x')}
         sta blkT,y
         lda #$01
         sta entDty
-${DIE ? `        sec                     ; did that land it beside the player? then they are MARKED.
-        lda orbXCT,x            ;   Triggered by the ANGEL moving, never by adjacency itself --
-        sbc px+1                ;   which is exactly why walking into one yourself is harmless.
-        clc                     ;   and needs no "who moved last" bookkeeping at all.
-        adc #$01
-        sta anKx                ; 1 = same column; 0 or 2 = one cell to a side
-        cmp #$03
-        bcs anNoMk
-        sec
-        lda orbYCT,x
-        sbc py+1
-        clc
-        adc #$01
-        sta anKy
-        cmp #$03
-        bcs anNoMk
+${DIE ? `        jsr anAdj               ; did that land it beside the player? then they are MARKED.
+        bcc anNoMk              ;   A step is one trigger; the other is an angel ALREADY beside
+                                ;   you whose step falls due unseen (angOne) -- see asSeen.
+anReach:
         ; ---- ON THE DIAGONAL, BOTH corner cells have to be clear ----
         ; "if it's at an angle but there's nothing at all between you, death. But if you're
         ; around a corner, it has to clear the corner." Orthogonally adjacent there is nothing
         ; between you by definition, so this only runs for the corner case. blkT is non-zero for
         ; a wall AND for an entity, so an orb parked in the gap blocks the reach too, which is
         ; the same answer for the same reason.
-        lda anKx
-        cmp #$01
-        beq anReach             ; same column: orthogonal, nothing to clear
-        lda anKy
-        cmp #$01
-        beq anReach             ; same row
-        lda py+1                ; corner one: the angel's column, your row
-        jsr mulW                ; mulW leaves X alone -- anGo relies on that too
-        clc
-        adc orbXCT,x
-        tay
-        lda blkT,y
-        bne anNoMk
-        lda orbYCT,x            ; corner two: your column, the angel's row
-        jsr mulW
-        clc
-        adc px+1
-        tay
-        lda blkT,y
-        bne anNoMk
-anReach:
         ldx amIdx
         stx dieIdx              ; from the mark on, the projection stashes THIS angel's side of the
         lda #$ff                ;   screen in dieOff/dieSgn -- which it only does while the angel
@@ -16935,7 +17139,54 @@ dckLp:  sta obC,x
 anNoMk: ldx amIdx
 ` : ''}        jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
 anDone: rts
-
+${DIE ? `; ---- anAdj: can angel X reach the player from where it stands? C set if so. X kept, Y lost ----
+anAdj:  sec
+        lda orbXCT,x
+        sbc px+1
+        clc
+        adc #$01
+        sta anKx                ; 1 = same column; 0 or 2 = one cell to a side
+        cmp #$03
+        bcs aaNo
+        sec
+        lda orbYCT,x
+        sbc py+1
+        clc
+        adc #$01
+        sta anKy
+        cmp #$03
+        bcs aaNo
+        ; ---- ON THE DIAGONAL, BOTH corner cells have to be clear ----
+        ; "if it's at an angle but there's nothing at all between you, death. But if you're
+        ; around a corner, it has to clear the corner." Orthogonally adjacent there is nothing
+        ; between you by definition, so this only runs for the corner case. blkT is non-zero for
+        ; a wall AND for an entity, so an orb parked in the gap blocks the reach too, which is
+        ; the same answer for the same reason.
+        lda anKx
+        cmp #$01
+        beq aaYes               ; same column: orthogonal, nothing to clear
+        lda anKy
+        cmp #$01
+        beq aaYes               ; same row
+        lda py+1                ; corner one: the angel's column, your row
+        jsr mulW                ; mulW leaves X alone -- anGo relies on that too
+        clc
+        adc orbXCT,x
+        tay
+        lda blkT,y
+        bne aaNo
+        lda orbYCT,x            ; corner two: your column, the angel's row
+        jsr mulW
+        clc
+        adc px+1
+        tay
+        lda blkT,y
+        bne aaNo
+aaYes:  sec
+        rts
+aaNo:   clc
+        rts
+` : ''}
 ; ---- anTry: is the step in amTX/amTY legal? C set and amCell/amX/amY filled if so ----
 ; Steps are ORTHOGONAL ONLY now, so exactly one of amTX/amTY is zero and the old diagonal
 ; squeeze test -- both brushed cells must be open -- has no case left to guard. It is gone with
@@ -17046,7 +17297,7 @@ anYes:  sec
         rts
 anNo:   clc
         rts
-${ANGSLIDE ? `; ---- THE LUNGE (ANGSLIDE): a seen step drawn as a slide, not a teleport ----
+${ANGSLIDE ? `; ---- THE LUNGE (ANGSLIDE): every step drawn as a slide, not a teleport (see slTick) ----
 ; An angel lunging owns BOTH cells -- the one it left and the one it is going to are 2 in blkT for
 ; the whole slide -- so nothing can walk into either and the landing is always legal. Halfway, its
 ; orbXCT/orbYCT switch to the new cell: culling, zones and the occluder mask then answer for the
@@ -17064,14 +17315,16 @@ slR:    !byte 0
 slRH:   !byte 0
 
 ; ---- slTick: angel X's step is not due yet; A = its banked 60ths ----
-; Inside the last ANGSLIDE 60ths, and only while the IDOL is in hand -- the one time a step can be
-; SEEN -- the step is chosen now and drawn as a slide that lands when it falls due. A lunge already
-; under way carries on whatever is in your hands: drop the idol with it in view and angStep stops
-; reaching it, which freezes it mid-air -- the freeze doing its job.
+; Inside the last ANGSLIDE 60ths the step is chosen now and drawn as a slide that lands when it
+; falls due. EVERY step, not only with the idol in hand (2026-10-09). An unseen step used to be a
+; teleport, and the visibility test only asks about the two CELLS: an angel could leave a cell you
+; could not see and land in another, passing through the sliver of floor you WERE looking at --
+; which read as a cheat. Sliding, its sprite crosses that sliver and orbSeenT catches it -- but a
+; slide once begun always COMPLETES (angStep keeps the clock of an angel with angSlDT set running,
+; the user's rule of 2026-10-09). It lands in the new cell, and only then does the gaze hold it.
+; With the idol in hand a seen angel's clock keeps running, so the same slide is the lunge.
 slTick: lda angSlDT,x
         bne stMove
-        lda idolHd
-        beq stOut               ; empty hands: the step stays an unseen teleport, as it always was
         lda angAccT,x
         clc
         adc #${hx(ANGSLIDE)}         ; fits: the build asserts period + slide <= 256
@@ -20439,7 +20692,12 @@ ${CEILVARY ? `lvlLo:  ldx lvlMeT
         lda lvlPalceilT,x
         sta irqB2+1
         rts
-` : ''}lvlLook:${(() => {
+` : ''}lvlLook:${HAS_FLICKER ? `
+        ldx lvlMeT              ; LEVEL_FLICKER: is this level's light failing? (flkTick)
+        lda lvlFlkT-1,x
+        sta flkOn
+${FLKSPR ? '        sta flkDk               ; FLKSPR: a flickering level starts dark\n' : ''}${FLKINK ? `        jsr fkEmpty             ; no inked rectangle yet (its zero page is whatever a load left)
+` : ''}` : ''}${(() => {
   // EVERY ink is set here, whether it varies across the chain or not. It used to emit only the
   // ones that vary, on the grounds that the rest were "already correct from boot" -- true when
   // the boot set them itself, and false the moment lvlBoot started calling this instead. On a
@@ -20510,7 +20768,9 @@ ${SPRVARY && !ANYFLOORDK ? (() => {
 ; there should be one. Called from fstEnd instead, which is the frame the renderer takes the
 ; screen back and draws the level's own sprites, so the cast and its palette appear together.
 ; The idol keeps the DEPARTING level's inks for the whole fall, which is what it is wearing.
-lvlSpr:${(() => {
+lvlSpr:${FLKSPR ? `  lda flkLit              ; FLKSPR: a lit frame is wearing the cast's NORMAL inks; this
+        bne lvSpX               ;   runs every rendered frame and would put the dark ones back
+       ` : ''}${(() => {
   const sprV = k => LEVEL_IDS.some(n => sprOf(n)[k] !== sprOf(LEVEL_IDS[0])[k]);
   const IDOLK = HAS_IDOL ? ['under', 'hi'] : [];
   const anyT = ['under', 'hi'].some(sprV) || IDOLK.some(k => IDOLVARY(k));
@@ -20524,7 +20784,7 @@ lvlSpr:${(() => {
     out += (IDOLVARY(k) ? `        lda lvlIdol${k}T,x\n` : `        lda #${hx(idolSprOf(ALLLVL[0])[k])}\n`)
          + `        sta idol${{ under: 'U', hi: 'H' }[k]}\n`;
   return out;
-})()}        rts
+})()}${FLKSPR ? 'lvSpX:' : ''}  rts
 
 ; ---- lvlChr: the arriving level's CHARSET, which must NOT happen at the handover ----
 ; The inks above are per-region and can change the moment the phase does -- there are two $d021s
@@ -20564,7 +20824,285 @@ setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster
 ${CEILVARY ? `        sta colW                ;   halves change at the same top of frame instead of a frame
 ` : ''}        sta colF                ;   apart -- and there is no mid-frame $d021 store to paint a
         rts                     ;   partial band down the middle of the one it lands in.
-        ; ---- seamEdge has a PAGE of its own now (2026-09-26), and is not in the block below ----
+${HAS_FLICKER ? (() => { const F = LEVEL_FLICKER[LEVEL_IDS.find(n => LEVEL_FLICKER[n])];
+  if (LEVEL_IDS.some(n => LEVEL_FLICKER[n] && JSON.stringify(LEVEL_FLICKER[n]) !== JSON.stringify(F)))
+    throw new Error('LEVEL_FLICKER: flkTick takes its lit inks as immediates; give it a table before two levels differ');
+  return `
+; ---- flkTick: a failing fluorescent tube, from the top-of-frame IRQ (see LEVEL_FLICKER) ----
+; Every 60Hz frame while flkOn. Quiet for a random GAP of ticks, then a BURST of a few ticks in
+; which each tick is lit or not at random -- the stutter of a tube trying to strike -- then another
+; gap. A lit tick overrides all three inks for this frame only; the next dark tick puts them back.
+; $d021 is irqB0's at the top and irqB1's from the horizon down, so a flash sets this frame's $d021
+; AND irqB1's operand; going dark, irqB0 has already restored the top and irqB1 gets colF back.
+; (mnext also republishes irqB1 from colF, but only on a rendered frame, which is not every tick.)
+; Hands off during the death scene and the fall, which own the inks then: whatever this left on
+; screen is what they start from, and lvlLook resets everything on the next arrival.
+; The random source is John Metcalf's 16-bit xorshift (7,9,8; period 65535), returning the high
+; byte -- not an 8-bit LFSR, whose consecutive outputs are mostly each other shifted right, so a
+; low (lit) draw would tend to be followed by lower ones. Nothing else reads it, so its sequence
+; can never couple to gameplay. MEASURED with FLKCNT=1 (a lit-frame counter, flkCnt): 22 lit
+; frames in 1,200 ticks (~66 a minute) with the old 32..255-tick gaps, 35 (~105 a minute) with
+; the 48..175 ones below -- each over only ~8 bursts, so +-30% of noise rides on either figure.
+; (Not with --watchall: its hit totals run on past --until, and it reported hundreds.)
+flkTick:lda flkOn
+        beq fkOut
+${DIE ? `        lda dieSt               ; the death and the fall own the inks: go DARK and stay out, so a
+        bne ${FLKSPR ? 'fkStop' : 'fkDark'}              ;   flash caught by one is put back once, not left behind -- with
+` : ''}${FALL ? `        lda fallSt              ;   FLKINK, a cover-cell rectangle left inked in colour RAM
+        bne ${FLKSPR ? 'fkStop' : 'fkDark'}
+` : ''}        lda flkBur
+        bne fkIn
+        dec flkGap              ; ---- quiet: wait out the gap ----
+        bne fkDark
+        jsr flkRnd              ; ---- strike: a burst of 2..17 ticks ----
+        and #$0f
+        clc
+        adc #$02
+        sta flkBur
+fkIn:   dec flkBur
+        bne fkB
+        jsr flkRnd              ; ---- burst over: quiet for 48..175 ticks, 0.8 to 2.9 s ----
+        and #$7f                ;   (was 32..255 by "ora #$20": the user found the long gaps
+        clc                     ;   went on a bit too long in the dark, 2026-10-09. This trims
+        adc #$30                ;   the tail and the mean, ~2.4 s -> ~1.9 s, and keeps the short end)
+        sta flkGap
+        bne fkDark              ; always (A >= $30)
+fkB:    jsr flkRnd
+        cmp #$60                ; lit on about 3 ticks in 8 of a burst
+        bcs fkDark
+        lda #${hx(F.gnd)}               ; ---- LIT, for this frame ----
+        sta $d021
+        sta irqB1+1
+        lda #${hx(F.wall)}
+        sta $d022
+        lda #${hx(F.seam)}
+        sta $d023
+        lda #$01
+        sta flkLit
+${FLKSPR ? `        lda #${hx(SPR_DEF.under)}               ; the cast's NORMAL inks, for this frame
+        sta sprU
+        sta $d025
+        lda #${hx(SPR_DEF.hi)}
+        sta sprH
+        sta $d026
+        lda #$00
+        sta flkDk
+        jsr fkBody
+` : ''}${FLKINK ? `        jsr fkInk               ; the cover cells under every covered sprite take the lit wall ink
+` : ''}${process.env.FLKCNT ? `        inc flkCnt              ; FLKCNT: lit frames, for measuring the rate
+        bne fkCn
+        inc flkCnt+1
+fkCn:
+` : ''}        rts
+${FLKSPR && (DIE || FALL) ? `fkStop: lda #$00                ; FLKSPR: the scenes paint the bodies themselves -- leave them
+        sta flkDk               ;   unmapped from here on (lvlLook resets it on the next arrival)
+        beq fkDk2               ; always
+` : ''}${FLKSPR ? `fkDark: lda #$01
+        sta flkDk               ; dark: bodies through FLKSPR_MAP
+fkDk2:  ` : 'fkDark: '}lda flkLit
+        beq fkOut               ; already dark: nothing to put back
+        lda #$00
+        sta flkLit
+        lda colB
+        sta $d022
+        lda colS
+        sta $d023
+        lda colF
+        sta irqB1+1
+${FLKSPR ? `        lda #${hx(sprOf(LEVEL_IDS.find(n => LEVEL_FLICKER[n])).under)}               ; and the cast back to the level's own (dark) inks
+        sta sprU
+        sta $d025
+        lda #${hx(sprOf(LEVEL_IDS.find(n => LEVEL_FLICKER[n])).hi)}
+        sta sprH
+        sta $d026
+        jsr fkBody
+` : ''}${FLKINK ? `        jsr fkUnink             ; the cover cells back to black, the colour RAM everywhere else
+` : ''}fkOut:  rts
+${FLKSPR ? `; fkBody: all eight bodies to $d027+n now, mapped while flkDk (osFlush does the same each
+; rendered frame, but that is up to four raster frames away and a flash lasts one)
+fkBody: ldx #$07
+fkBL:   lda obC,x
+        ldy flkDk
+        beq fkBS
+        tay
+        lda flkMapT,y
+fkBS:   sta $d027,x
+        dex
+        bpl fkBL
+        rts
+flkMapT:!byte ${FLKSPR_MAP.map(hx).join(',')}
+flkDk:  !byte 0                 ; 1 = the bodies wear FLKSPR_MAP (dark), 0 = their own colours
+` : ''}flkRnd: lda flkSd+1             ; x ^= x << 7
+        lsr
+        lda flkSd
+        ror
+        eor flkSd+1
+        sta flkSd+1
+        ror                     ; x ^= x >> 9
+        eor flkSd
+        sta flkSd
+        eor flkSd+1             ; x ^= x << 8
+        sta flkSd+1
+        rts
+${FLKINK ? `
+; ---- fkInk: give the cover cells the lit wall's ink, for one lit frame (see FLKINK) ----
+; A wall covers a sprite by drawing its cells over the sprite in bit pair 11 -- foreground, so it
+; clips a sprite with its $d01b bit set -- whose ink is colour RAM, $08 (black) everywhere. Lit,
+; the wall goes to F.wall and the cover cells must follow. Which cells are cover cells is the
+; renderer's business and changes every rendered frame, so this does not ask: it inks one cell
+; RECTANGLE around every sprite whose $d01b bit is set. Over-inking is harmless, because the only
+; pair-11 pixels in the view ARE cover cells (the cell glyphs never use pair 11) and every one of
+; them lies under some covered sprite.
+; The sprites come from the VIC registers, i.e. what is ON SCREEN, not from the renderer's arrays,
+; which already describe the frame being drawn. ONE rectangle, the union of them all, and it only
+; GROWS through a burst (a burst can light several frames running and the sprite can move between
+; them); the dark tick blacks out the whole of it and empties it. One rectangle rather than one per
+; sprite because the image has no room for the bookkeeping, and level 8 has one angel anyway.
+; Cost: ~12 cycles a cell, ~600 for an expanded angel -- from the IRQ at raster 0, long before the
+; stamps, which sit around the horizon, are drawn.
+fkInk:  jsr fkRects
+${process.env.FLKCNT ? `        ldx #$03                ; FLKCNT: the last lit frame's rectangle, C0 C1 R0 R1, for a probe
+fkDbL:  lda fkC0,x
+        sta flkDbg,x
+        dex
+        bpl fkDbL
+` : ''}        lda #${hx(0x08 | (F.wall & 7))}
+        ; fall through: ink it
+
+; fkFill: A -> colour RAM over rows fkR0..fkR1, columns fkC0..fkC1 (nothing while it is empty)
+fkFill: sta fkV
+        lda fkC1
+        cmp fkC0
+        bcc fkFd                ; C1 < C0: empty
+        ldx fkR0
+fkFR:   lda rowLoT,x            ; R * 40...
+        sta fkSt+1
+        lda rowHiT,x
+        clc
+        adc #$d8                ; ...into colour RAM
+        sta fkSt+2
+        ldy fkC0
+        lda fkV
+fkSt:   sta $d800,y             ; operand patched per row
+        iny
+        cpy fkC1
+        bcc fkSt
+        beq fkSt
+        txa
+        inx
+        cmp fkR1
+        bcc fkFR
+fkFd:   rts
+
+; fkUnink: the rectangle back to black, and empty it ($ff/0 so the first min/max takes anything)
+fkUnink:lda #$08
+        jsr fkFill
+fkEmpty:lda #$ff
+        sta fkC0
+        sta fkR0
+        lda #$00
+        sta fkC1
+        sta fkR1
+        rts
+
+; fkRects: grow the rectangle over every sprite that is enabled AND behind the foreground. Register
+; x covers hires columns x-24.. and y raster lines y.., the text area starting at 24 and line 50.
+; 24 px from any start reach at most 4 cells, so a sprite runs from its first cell 3 on, 6 if
+; expanded (always both ways together: orbExpT sets omXX and omYY from one byte). Off the left or
+; top it starts at 0; off the right or bottom it is clamped, or skipped if it starts past.
+fkRects:lda $d015
+        and $d01b
+        sta fkBits
+        lda $d010
+        sta fkX8
+        lda $d01d
+        sta fkXX
+        ldx #$00                ; 2 * sprite, its register pair
+fkRL:   lsr fkX8                ; this sprite's x bit 8...
+        lda #$00
+        rol
+        sta fkHi
+        lsr fkXX                ; ...its size...
+        lda #$03
+        bcc fkW
+        lda #$06
+fkW:    sta fkWd
+        lsr fkBits              ; ...and whether it is covered at all
+        bcc fkRNx
+        lda $d001,x             ; ---- rows ----
+        sec
+        sbc #50
+        bcs fkRp
+        lda #$00
+fkRp:   lsr
+        lsr
+        lsr
+        cmp #25
+        bcs fkRNx               ; starts below the text area
+        cmp fkR0
+        bcs fkR0k
+        sta fkR0
+fkR0k:  adc fkWd                ; C clear: cmp #25 above, or the store's branch
+        cmp #25
+        bcc fkR1c
+        lda #24
+fkR1c:  cmp fkR1
+        bcc fkCx
+        sta fkR1
+fkCx:   lda $d000,x             ; ---- columns ----
+        sec
+        sbc #24
+        sta fkLo
+        lda fkHi
+        sbc #$00
+        bcs fkCp
+        lda #$00                ; starts off the left edge
+        beq fkCs                ; always
+fkCp:   lsr                     ; bit 8 of x - 24 into C...
+        lda fkLo
+        ror                     ; ...and (x - 24) >> 3
+        lsr
+        lsr
+fkCs:   cmp #40
+        bcs fkRNx               ; starts off the right edge
+        cmp fkC0
+        bcs fkC0k
+        sta fkC0
+fkC0k:  clc
+        adc fkWd
+        cmp #40
+        bcc fkC1c
+        lda #39
+fkC1c:  cmp fkC1
+        bcc fkRNx
+        sta fkC1
+fkRNx:  inx
+        inx
+        cpx #16
+        bcc fkRL
+        rts
+; Its variables are ZERO PAGE, $b5-$bf: not for speed but for size, ~40 bytes of operands, which is
+; what let this fit an image with no headroom left. Unclaimed by the game; the KERNAL uses that
+; range during a LOAD, but those are boot-time, before any level can flash -- and lvlLook empties
+; the rectangle on arrival, so nothing a load left there is ever read as one.
+fkV     = $b5                   ; the ink being filled
+fkBits  = $b6                   ; covered sprites still to look at, and alongside them...
+fkX8    = $b7                   ;   ...their x bit 8s...
+fkXX    = $b8                   ;   ...and expands
+fkLo    = $b9                   ; this sprite's x - 24
+fkHi    = $ba
+fkWd    = $bb                   ; ...and its extent past its first cell, 3 or 6
+fkC0    = $bc                   ; THE RECTANGLE: columns...
+fkC1    = $bd
+fkR0    = $be                   ; ...and rows. Empty while C1 < C0.
+fkR1    = $bf
+` : ''}${process.env.FLKCNT ? 'flkCnt: !byte 0,0\n' + (FLKINK ? 'flkDbg: !byte 0,0,0,0\n' : '') : ''}flkOn:  !byte 0                 ; lvlLook: this level's lvlFlkT entry
+flkLit: !byte 0                 ; the inks on screen are the LIT ones
+flkBur: !byte 0                 ; ticks left in this burst, 0 = in a gap
+flkGap: !byte $40               ; ticks left in this gap
+flkSd:  !byte $5a,$c3           ; the xorshift state; never 0, which is its one fixed point
+lvlFlkT:!byte ${LEVEL_IDS.map(n => LEVEL_FLICKER[n] ? 1 : 0).join(',')}   ; per level id - 1
+`; })() : ''}        ; ---- seamEdge has a PAGE of its own now (2026-09-26), and is not in the block below ----
         ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
         ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
         ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
@@ -22015,7 +22553,13 @@ seamDrw:${RAYCNT ? ' inc chnN\n       ' : ''} lda rsv
         sta sdRow
         cmp #13
         bcs sdNext              ; the run starts below the horizon: nothing to draw
-        ; ---- two different questions, two different numbers ----
+${RIVETS ? `        ldx colc
+        lda seamT,x
+        cmp #${hx(RIV0)}
+        bcc sdLine
+        jmp rvDrw               ; a rivet marker, not a line
+sdLine:
+` : ''}        ; ---- two different questions, two different numbers ----
         ; WHERE THE LINE STARTS wants a conservative floor: it may not begin above the cell's
         ; solid run, or it paints ramp rows. A minimum over a window CENTRED on the seam is
         ; always <= the cell's own minimum, so it is safe, and it slides a column at a time
@@ -22131,7 +22675,202 @@ ${SEAMHALF ? `        ; gap = 8*start + h - 100, the black space between the wal
         lda seamT,x
         jmp (jv)                ; -> ascending chain -> jmp rfNext
 sdNext: jmp rfNext
-
+${RIVETS ? `; ---- rvDrw: this column's solid run, with a rivet in it (A = RIV0 + k) ----
+; The rivet sits at y = 100 - h/2, a quarter of the wall's height below its top (the top is
+; 100 - h, the horizon 100), measured at the rivet's own pixel column so it moves as smoothly as
+; the wall there. Rows above it in the run are SOLID one at a time, the rivet's row gets its code,
+; and the solid chain finishes the rest -- the same three steps seamDrw takes for a line. Every
+; write is mirrored, so the lower rivet comes with the upper.
+${RIVBIG ? `rvDrw:  sec
+        sbc #${hx(RIV0)}
+        sta sdK                 ; k, the sub-column
+        txa
+        asl
+        asl
+        clc
+        adc sdK
+        tay
+        lda colH,y
+${RIVMIN ? `        cmp #${hx(RIVMIN)}
+        bcc rvSol               ; too far: a dot this size would not read as a rivet
+` : ''}        lsr
+        sta sdH
+        lda #100
+        sec
+        sbc sdH                 ; y, the rivet's top pixel
+        sta sdH
+        lsr
+        lsr
+        lsr
+        cmp sdRow
+        bcc rvSol               ; above the solid run (in a ramp cell): no rivet
+        cmp #13
+        bcs rvSol
+        sta sdSRow
+        lda sdH
+        and #$06
+        lsr
+        sta rvH                 ; h, the row shape 0..3
+        asl
+        asl
+        adc rvH                 ; 5h (C is clear: h <= 3)
+        sta rvB
+        ldy sdK
+        lda rvCvT,y             ; the column shape: k, except that k 3 is a half
+        sta rvCv
+        lda #${hx(SOLID)}
+        sta sdCode
+rvFl:   lda sdRow
+        cmp sdSRow
+        bcs rvR
+        jsr sdPut
+        inc sdRow
+        jmp rvFl
+rvR:    lda rvB
+        clc
+        adc rvCv
+        adc #${hx(RIV0)}
+        sta sdCode
+        jsr sdPut
+        inc sdRow
+        lda rvH
+        cmp #$03
+        bne rvNb                ; rows 6-7 hold only two of its three rows...
+        lda sdRow
+        cmp #13
+        bcs rvNb
+        lda rvCv                ; ...so the third goes in row 0 of the cell below: h 4
+        clc
+        adc #${hx(RIV0 + 20)}
+        sta sdCode
+        jsr sdPut
+        inc sdRow
+        ; ---- a rivet starting at column 3 has its right half in the NEXT cell ----
+        ; Columns are drawn right to left, so that cell is already final for this frame. Its
+        ; half goes in only where it is plain wall -- next to a corner line or an edge the rivet
+        ; is simply clipped -- and the column is told to redraw next time this buffer comes
+        ; round, or the half would outlive the rivet.
+rvNb:   lda sdK
+        cmp #$03
+        bne rvSol
+        lda colc
+        cmp #${hx(NCELL - 1)}
+        bcs rvSol
+        inc colc
+        lda sdRow
+        pha
+        lda sdSRow
+        sta sdRow
+        lda rvB
+        jsr rvHalf              ; the rivet's own row
+        lda rvH
+        cmp #$03
+        bne rvNbD
+        inc sdRow               ; and the spilled third row
+        lda #20
+        jsr rvHalf
+rvNbD:  lda rfCb3+1             ; this buffer's run cache (renderSym patches the operand)
+        sta sdPtr
+        lda rfCb3+2
+        sta sdPtr+1
+        ldy colc
+        lda #$ff                ; a value rs cannot take: the column redraws next time
+        sta (sdPtr),y
+        pla
+        sta sdRow
+        dec colc
+rvSol:  lda sdRow
+        cmp #13
+        bcs rvOut
+        clc
+        adc bufOff
+        tay
+        lda sldLoT,y
+        sta jv
+        lda sldHiT,y
+        sta jv+1
+        ldx colc
+        lda #${hx(SOLID)}
+        jmp (jv)                ; -> ascending chain -> jmp rfNext
+rvOut:  jmp rfNext
+; rvHalf: the left-column half (cv 4) of row shape A/5 into row sdRow of column colc, if that cell
+; is plain wall. Row sdRow < 13 always: the caller only spills where the column has rows left.
+rvHalf: clc
+        adc #${hx(RIV0 + 4)}
+        sta sdCode
+        ldy sdRow
+        cpy #13
+        bcs rvHx
+        lda rowLoT,y
+        sta sdPtr
+        lda rowHiT,y
+        clc
+        adc baseHi
+        sta sdPtr+1
+        ldy colc
+        lda (sdPtr),y
+        cmp #${hx(SOLID)}
+        bne rvHx
+        jmp sdPut
+rvHx:   rts
+rvCvT:  !byte 0,1,2,3
+` : `rvDrw:  sec
+        sbc #${hx(RIV0)}
+        sta sdK                 ; k, the sub-column
+        txa
+        asl
+        asl
+        clc
+        adc sdK
+        tay
+        lda colH,y
+        lsr
+        sta sdH
+        lda #100
+        sec
+        sbc sdH                 ; y, the rivet's top pixel
+        sta sdH
+        lsr
+        lsr
+        lsr
+        cmp sdRow
+        bcc rvSol               ; above the solid run (in a ramp cell): no rivet
+        cmp #13
+        bcs rvSol
+        sta sdSRow
+        lda sdH
+        and #$06                ; 2v
+        asl                     ; 4v
+        clc
+        adc sdK
+        adc #${hx(RIV0)}
+        pha
+        lda #${hx(SOLID)}
+        sta sdCode
+rvFl:   lda sdRow
+        cmp sdSRow
+        bcs rvR
+        jsr sdPut
+        inc sdRow
+        jmp rvFl
+rvR:    pla
+        sta sdCode
+        jsr sdPut
+        inc sdRow
+rvSol:  lda sdRow
+        cmp #13
+        bcs sdNext
+        clc
+        adc bufOff
+        tay
+        lda sldLoT,y
+        sta jv
+        lda sldHiT,y
+        sta jv+1
+        ldx colc
+        lda #${hx(SOLID)}
+        jmp (jv)                ; -> ascending chain -> jmp rfNext
+`}` : ''}
 ; sdCode into row sdRow of the live buffer at this column, AND into the row it mirrors to below
 ; the horizon -- the same pairing the solid chain does in one store, so callers never have to
 ; think about the second write. The buffer base is page-aligned, so rowLoT/rowHiT (which hold
@@ -22902,11 +23641,38 @@ vsSet:  lda colc                ; the stack belongs to this column (see renderSy
         sta vsOn
         rts
 seamOne:
-        lda #$00                ; k as 8.8
+${RIVSEAM ? `        lda #$00
+        sta ssSg
+        lda rvMode
+        bne soCtr
+        sta skL                 ; RIVSEAM, a boundary: k as 8.8, as without rivets
+        lda ssK
+        sta skH
+        jmp soGo
+soCtr:  lda #$80                ; ...or the centre beside it (see below)
+        sta skL
+        lda ssK
+        ldx ssDir
+        bne soKd
+        sec
+        sbc #$01
+soKd:   sta skH
+soGo:
+` : RIVETS ? `        lda #$80                ; RIVETS: the CENTRE beside boundary ssK -- ssK + 0.5 walking
+        sta skL                 ;   down, ssK - 0.5 walking up, so both walks visit the centres
+        lda ssK                 ;   from the near end's cell to the far end's
+        ldx ssDir
+        bne soKd
+        sec
+        sbc #$01
+soKd:   sta skH
+        lda #$00
+        sta ssSg                ; how many of the two ends lie BELOW k (see ssbQ)
+` : `        lda #$00                ; k as 8.8
         sta skL
         lda ssK
         sta skH
-        sec                     ; a = |u_L - k|
+`}        sec                     ; a = |u_L - k|
         lda uaL
         sbc skL
         sta saL
@@ -22914,7 +23680,7 @@ seamOne:
         sbc skH
         sta saH
         bcs ssaP
-        sec                     ; negate
+${RIVETS ? '        inc ssSg\n' : ''}        sec                     ; negate
         lda #$00
         sbc saL
         sta saL
@@ -22928,15 +23694,18 @@ ssaP:   sec                     ; b = |u_R - k|
         lda ubH
         sbc skH
         sta sbH
-        bcs ssbP
-        sec
+        bcs ${RIVETS ? 'ssbQ' : 'ssbP'}
+${RIVETS ? '        inc ssSg\n' : ''}        sec
         lda #$00
         sbc sbL
         sta sbL
         lda #$00
         sbc sbH
         sta sbH
-        ; Squeeze a and b down to 8 bits together, so their ratio survives. The larger keeps
+${RIVETS ? `ssbQ:   lda ssSg                ; a boundary is always between the ends; a centre need not be --
+        cmp #$01                ;   the end cells' centres can lie past the face -- and the
+        bne ssOne               ;   |a|,|b| formula would put it INSIDE the span regardless
+` : ''}        ; Squeeze a and b down to 8 bits together, so their ratio survives. The larger keeps
         ; its top bit; the smaller may collapse to 0, which is the right limit anyway -- a
         ; seam sitting on an endpoint belongs at that endpoint.
 ssbP:   lda saH
@@ -23103,7 +23872,7 @@ ssDl:   ldy ssScan
         beq ssDk                ; nothing claimed here
         sec
         sbc #${hx(SEAM0)}
-        sta ssTmp
+${RIVETS ? '        and #$03                ; a rivet marker is RIV0+k, and RIV0-SEAM0 is a multiple of 4\n' : ''}        sta ssTmp
         tya
         asl
         asl
@@ -23127,8 +23896,12 @@ ssDk:   inc ssScan
         lda ssCol
         and #$03
         clc
-        adc #${hx(SEAM0)}
-        sta seamT,x
+        adc #${hx(RIVETS && !RIVSEAM ? RIV0 : SEAM0)}${RIVETS ? '   ; the rivet MARKER: seamDrw picks its height' : ''}
+${RIVSEAM ? `        ldy rvMode              ; RIVSEAM: a centre marks a rivet, a boundary a line
+        beq soMk
+        adc #${hx(RIV0 - SEAM0)}
+soMk:
+` : ''}        sta seamT,x
         ldx sHyN                ; only lines that SURVIVED every test become band centres:
         cpx #${HYSN}            ;   a rejected one is not on screen to be held still
         bcs ssOne
@@ -24272,7 +25045,12 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 // its address): it is ~100 one-byte variables, nothing indexes it by a whole byte, and the page
 // rounding is exactly what four slots could not afford. runPlaneT/runFaceT likewise: indexed by run id
 // (< NRUN), never by a whole byte, so a page boundary is at most a cycle, never a wrong read.
-const ALIGNED_T = { mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
+const ALIGNED_T = {
+    // runPlaneT + runFaceT, packed nose to tail: neither may CROSS a page (see the NRUN guard), but
+    // nothing needs them to start on one, and inferring that from $6d00 stranded them when the
+    // arena ran short (2026-10-09). compact.mjs keeps runFaceT with it as one cluster.
+    runPlaneT: { within: 2 * NRUN },
+    mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
     rayOffT: 256, hPgT: 256, ecMT: 256, ecM16: 256, ecM8: 256,   // 256 = START ON A PAGE (see the guard)
@@ -24914,6 +25692,11 @@ try {
   // NLOG asked it a weaker question than the one compact answered. Same list, same reading, now.
   for (const [t, n] of Object.entries(aligned)) {
     const a = r.labels[t];
+    if (a !== undefined && n?.within) {           // { within: n }: may start anywhere, may not cross
+      if ((a & 255) + n.within > 256) throw new Error(`${t} at $${a.toString(16)}: its ${n.within} bytes ` +
+        `cross a page (ALIGNED_T within) -- every abs,X read past $${((a | 255) + 1).toString(16)} costs a cycle`);
+      continue;
+    }
     if (a === undefined || n <= 1) continue;
     if (a & 255)
       throw new Error(`${t} at $${a.toString(16)} must start on a page (ALIGNED_T): a byte-indexed ` +

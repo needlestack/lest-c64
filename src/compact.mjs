@@ -411,8 +411,13 @@ for (const b of sized) {
   // ...and a declaration can also say NO: alignment 1 means "this only starts on a page by
   // accident". The $8500 run of ~100 scalars (ocos, osin, ovar...) was inferred aligned purely for
   // its address, and a page-rounded 100-byte run is what kept four level slots from fitting.
-  const mustAlign = ALIGNED[b.n] !== undefined ? ALIGNED[b.n] > 1 : (b.a & 255) === 0;
-  bufs.push({ n: b.n, a: b.a, size: b.size, align: mustAlign, members: [b] });
+  // ...and a third answer, { within: n }: "these n bytes must not CROSS a page", which is what an
+  // abs,X table actually needs, and which can sit anywhere in a page it fits in. runPlaneT +
+  // runFaceT (2026-10-09): page-aligned by inference, the pair stranded for want of a whole free
+  // page when the arena's leftovers were 151 bytes of edges.
+  const within = ALIGNED[b.n]?.within;
+  const mustAlign = within ? false : ALIGNED[b.n] !== undefined ? ALIGNED[b.n] > 1 : (b.a & 255) === 0;
+  bufs.push({ n: b.n, a: b.a, size: b.size, align: mustAlign, within, members: [b] });
 }
 bufs.sort((x, y) => y.size - x.size);                       // largest first: first-fit wants it
 const bufB = bufs.reduce((t, b) => t + b.size, 0);
@@ -440,7 +445,9 @@ const carve = ([lo, hi]) => {
 const holes = out.holes.flatMap(([lo, hi]) => carve([lo, hi])).sort(bySize);
 let inPad = 0, placed = 0;
 for (const b of bufs) {
-  const fits = ([lo, hi]) => (b.align ? ((lo + 255) & ~255) : lo) + b.size <= hi;
+  // where it would start in a hole: on the next page if aligned, or if it would cross one
+  const startIn = lo => b.align || (b.within && (lo & 255) + b.within > 256) ? (lo + 255) & ~255 : lo;
+  const fits = ([lo, hi]) => startIn(lo) + b.size <= hi;
   const h = holes.find(fits);
   if (!h) {
     // NOT SILENT ANY MORE. A buffer with no hole stays at its hand-layout address, which is now
@@ -454,7 +461,7 @@ for (const b of bufs) {
     continue;
   }
   if (h[1] <= codeEnd || h[0] >= dataStart) inPad += b.size;
-  b.at = b.align ? (h[0] + 255) & ~255 : h[0];   // REMEMBER where it went: this is what runs
+  b.at = startIn(h[0]);                          // REMEMBER where it went: this is what runs
   // A page-aligned buffer skips forward to the boundary. Those skipped bytes used to be simply
   // LOST -- 1,349 of them, more than a third of the level arena, thrown away to round up nine
   // buffers. They are perfectly good RAM and most of what is left to place is one or two bytes
