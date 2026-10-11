@@ -396,7 +396,9 @@ sock.on('connect', async () => {
       }
     }
     if (watchAll) {
-      await cpSet(watchAll[0], watchAll[1], 2); cpHit = false; await resume();
+      // WATCHREAD=1: a LOAD checkpoint instead -- who READS this range, which is the question when a
+      // value's starting contents matter and nothing seems to read it by name.
+      await cpSet(watchAll[0], watchAll[1], process.env.WATCHREAD === '1' ? 1 : 2); cpHit = false; await resume();
       const regsGet = () => new Promise(res => {
         const id = rid++, h = Buffer.alloc(11); h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(1, 2); h.writeUInt32LE(id, 6); h[10] = 0x31;
         pend.set(id, (err, body) => { const r = {}; for (let i = 2; i + 3 < body.length; i += body[i] + 1) r[body[i + 1]] = body.readUInt16LE(i + 2); res(r); });

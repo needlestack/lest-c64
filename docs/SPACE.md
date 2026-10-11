@@ -1,56 +1,98 @@
 # Where the image's bytes go
 
 What each feature of LEST costs in the C64 image. Measured 2026-10-10 on the default build
-(chain 1–7, level 8 excluded: it is work in progress and builds only with `WIP=1`). Rerun with:
+(chain 1–7; level 8 is work in progress and builds only with `WIP=1`), after the space audit
+below. Rerun with:
 
 ```
 node tools/space.mjs          # the table below
 node tools/space.mjs "" -v    # plus each feature's largest items
 ```
 
-## The image is nearly full
+## The image
 
 The image runs from `$0801` to `$bfff`: **47,103 bytes**. It holds three kinds of bytes, and
 `space.mjs` charges all three to a feature:
 
 | | bytes | what |
 |---|---:|---|
-| code | 21,760 | the engine, from `$0801` up |
-| tables | 22,309 | precomputed data, from `$bfff` down, plus a few variables in its holes |
-| scratch | 2,604 | RAM buffers, packed into the arena between code and tables |
-| **free** | **~550** | 431 B in 11 fragments (one of 315 B at the top of the arena, the rest 6- and 13-byte page tails) and 117 B of alignment padding |
+| code | 20,682 | the engine, from `$0801` up |
+| tables | 21,498 | precomputed data, from `$bfff` down, plus a few variables in its holes |
+| scratch | 2,346 | RAM buffers, packed into the arena between code and tables (another 184 sit in alignment padding) |
+| **free** | **~2,700** | **2,565 B of level arena in one run (9 whole pages)**, plus 127 B of alignment padding |
 
-Leaving level 8's flicker out of the shipping engine is what opened the 315-byte hole. `space.mjs`
-sizes a label by the gap to the next one, so it charges that hole to the scratch buffer below it:
-its scratch column reads 3,022, of which 418 B is the free space.
+All 88 free bytes of zero page are now in use: `compact.mjs` promotes the most-referenced
+variables into them (see the audit).
 
-The 46 B of zero page at `$d2`–`$ff` are also unclaimed. See *Smaller wins* below.
+## The space audit, 2026-10-10
+
+The goal was room for features, without changing the game. The image went from **~240 B free to
+~2,700**. Every step was checked with `tools/regress.sh` (draws the same as the pre-audit commit
+`8a9f6dc`) and `node tools/fpsr.mjs "" suite` (every level plays; fps per level in
+`docs/TESTING.md`).
+
+| change | freed | how |
+|---|---:|---|
+| zero-page promotion | ~775 code + ~85 scratch | `compact.mjs` step 0: the most-referenced RAM variables go to the 88 free zero-page bytes, each saving a byte per instruction that names it (and a cycle). One clear loop at power-on zeroes zero page, as the image's scratch used to load as zeros |
+| level 8 out of the shipping engine | ~420 | `WIP_LEVEL_IDS`, built only with `WIP=1` |
+| three quarter-turn table pairs | 576 | `moveYT/moveXT`, `absSinT/absCosT`, `posYT/posXT`: cos is sin 64 entries on, so each pair is 320 bytes (`sharedPair`, asserted per entry) |
+| `rbT` inside `rsT` | ~240 | `rbT[c] = rsT[c+7]`, so the pair is 263 bytes (`sharedPair`) |
+| tables already inside other tables | ~105 | `rowLo/HiT` in `mul40Lo/HiT`, `sndV1H/sndV2H` in `recipHiT`, `qIdxAT/qIdxBT` in `ecM8` (`embedIn`, aliases checked at build time) |
+| palette keys (1/2/3, Q/W) and `SNDTEST` | ~250 | development tools, removed |
+| equates nothing names | 38 | `compact.mjs` gives them no RAM |
+| dead code | ~70 | `oSWall`, `lvlLo` (FALLMID never calls it), `amDX/amDY`, `hlvOf`, four tail calls |
+
+**Bugs found on the way:**
+
+- **The render-cache clear (`rfCz`) ran X to 255 over a 160-byte cache.** It stamped `$ff` on the
+  next 96 bytes at every boot and every death restart: `cstepT`, `seamT`, and whatever
+  compaction put after them. It's now bounded. The colour-RAM fill after it had silently relied
+  on X coming out of that loop as 0, which turned up as garbled walls; it now sets X itself.
+- **The zero-page pass first broke the fall.** One masked loop over `omEn,x` clears five
+  consecutive bytes, and four of them are named nowhere but there. Now any buffer in the
+  unbroken run after an indexed buffer with no declared size stays put. The level-1 walk alone
+  could not see this, which is why `regress.sh` has a falls workload.
+- **`FALLNOW` forced its first fall on frame 0**, before anything was rendered. It now starts on
+  frame n-1 (a test-flag change only).
+
+**What was looked at and left:**
+
+- **The edge-chain clamp tables (`ecMT`/`ecM16`/`ecM8`, 1,224 B).** They begin with ~146 zeros,
+  which could overlap another table's zero tail for ~150 B. That moves them off their pages in the
+  hottest code, so it needs a vprof A/B first.
+- **The large renderer tables** (`hTabT`, the ramp/step pages). Every fold costs cycles in the
+  renderer.
+- **Boot-only overlays.** `entry` also runs on every death restart, so almost nothing runs only
+  once.
+- **The angel leash as a per-level overlay.** It is ~23 bytes of engine code, and its data already
+  rides in the level file.
 
 ## Cost by feature
 
 | feature | code | tables | scratch | **total** |
 |---|---:|---:|---:|---:|
-| renderer: cast, subdivide, draw | 5,254 | 14,430 | 989 | **20,673** |
-| entities: projection, sprites, occlusion | 5,441 | 2,338 | 149 | **7,928** |
-| level fall + load (the drop) | 2,292 | 1,064 | 1,068 | **4,424** |
-| death scene | 1,061 | 1,842 | 11 | **2,914** |
-| seams | 1,319 | 1,024 | 101 | **2,444** |
-| angel AI + BFS pathing | 1,060 | 797 | 263 | **2,120** |
-| movement + input | 795 | 526 | 5 | **1,326** |
-| level setup (entering a level) | 839 | 0 | 0 | **839** |
-| boot, main loop, IRQ | 684 | 0 | 0 | **684** |
-| orb carry (pick up / put down) | 640 | 0 | 3 | **643** |
-| angel lunge (slide) | 472 | 156 | 0 | **628** |
-| HUD + fps readout | 565 | 0 | 0 | **565** |
-| sound | 395 | 131 | 7 | **533** |
-| wall collapse (sockets) | 488 | 0 | 0 | **488** |
-| idol + pedestals | 230 | 1 | 1 | **232** |
-| palette keys 1/2/3 | 188 | 0 | 7 | **195** |
+| renderer: cast, subdivide, draw | 5,113 | 14,038 | 854 | **20,005** |
+| entities: projection, sprites, occlusion | 5,115 | 2,366 | 88 | **7,569** |
+| level fall + load (the drop) | 2,200 | 1,002 | 1,042 | **4,244** |
+| death scene | 994 | 1,837 | 6 | **2,837** |
+| angel AI + BFS pathing | 998 | 801 | 257 | **2,056** |
+| seams | 1,285 | 675 | 40 | **2,000** |
+| movement + input | 759 | 328 | 0 | **1,087** |
+| level setup (entering a level) | 823 | 0 | 0 | **823** |
+| sound | 388 | 290 | 56 | **734** |
+| boot, main loop, IRQ | 652 | 0 | 0 | **652** |
+| angel lunge (slide) | 448 | 156 | 0 | **604** |
+| orb carry (pick up / put down) | 595 | 3 | 0 | **598** |
+| HUD + fps readout | 560 | 0 | 0 | **560** |
+| wall collapse (sockets) | 485 | 0 | 0 | **485** |
+| idol + pedestals | 228 | 2 | 0 | **230** |
 | THE END | 37 | 0 | 0 | **37** |
-| free (charged to scratch by the tool) | | | 418 | **418** |
-| **total** | **21,760** | **22,309** | **3,022** | **47,091** |
+| free arena (charged to the renderer by the tool) | | | 2,565 | **2,565** |
+| **total** | **20,682** | **21,498** | **4,911** | **47,091** |
 
 The total is 12 bytes short of 47,103: the image's last bytes below `$c000`, which hold no label.
+(`space.mjs` still finds 5 bytes it files under "palette keys"; they are prefix collisions in its
+rules, not the removed keys.)
 
 **How bytes are charged:**
 
@@ -68,6 +110,8 @@ of the game entirely (`WIP_LEVEL_IDS`, built only with `WIP=1`): level 8's flick
 put about 400 bytes into the shipping image.
 
 ### The renderer, 20.7K
+
+*(Measured before the audit at `38fa972`. The table names still hold. The sizes of `rbT`/`rsT` and the move/seam pairs are now shared, as above.)*
 
 Tables are most of it:
 
@@ -122,6 +166,8 @@ Tables, 2.3K:
 
 ## What an off-switch actually frees
 
+*(Measured before the audit at `38fa972`. `PALKEYS` and `SNDTEST` no longer exist.)*
+
 Measured by building with the switch and comparing against the default build. These differ from
 the table above for two reasons. An off-switch can leave its feature's tables behind. And some
 code is shared, so it can't be removed with the feature.
@@ -164,6 +210,8 @@ Bank 3 is where a level-8-only orb with a different shadow would go: a second or
 about 30 slots, and only 19 are free.
 
 ## Where a pass could find room
+
+*(Written before the audit. Done since: the zero-page pass, the duplicate tables, the palette keys. Still open: the HUD readout, the death picture charset, per-level overlays, the clamp-table overlap.)*
 
 Ranked by size. Each one's cost in cycles or features has to be weighed against the room it
 frees.

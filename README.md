@@ -111,7 +111,7 @@ src/build-iray.mjs`).
 | `build/` | build output; only `build/iray.asm` is committed, so a diff shows what a change did to the machine code |
 | `art/` | source art: renders, paintings and hand-drawn sprites; `art/tree/` is the end scene's; `art/gamemaker/` holds the original GameMaker scenes and sprites |
 | `krill/` | Krill's loader, prebuilt |
-| `docs/` | `RENDERING.md`; `levels/`, every level as a sheet (key in `levels/KEY.txt`, regenerate with `node tools/levelsheet.mjs`); `GAMEMAKER-FORMATS.md`, the GameMaker scene and sprite file formats; and `ladders/`: every entity's ladder of sprite sizes, as pictures |
+| `docs/` | `TESTING.md`, THE tests: what to run for which question and how to read it; `SPACE.md`, where the image's bytes go; `RENDERING.md`; `levels/`, every level as a sheet (key in `levels/KEY.txt`, regenerate with `node tools/levelsheet.mjs`); `GAMEMAKER-FORMATS.md`, the GameMaker scene and sprite file formats; and `ladders/`: every entity's ladder of sprite sizes, as pictures |
 | `tools/` | live-machine inspection (`probe`), frame-rate and cycle benchmarks (`fpsr`, `prof`, `vprof`), test rigs (`ship.sh`, `frames`) |
 
 ## Credits and licence
