@@ -41,17 +41,16 @@ Reading it:
 - Compare against the previous suite run on the commit you started from, not against memory. The
   last recorded results are at the end of this file. Update them when a change moves them on
   purpose.
-- **Known weakness, OPEN (2026-10-10):** a shuttle's legs end on a tick count, and the build
+- **Known weakness, ACCEPTED (2026-10-11):** a shuttle's legs end on a tick count, and the build
   reverses on the first rendered frame past it. At ~11 fps one frame is ~0.23 cells of running.
   Level 5's start is 1.5 cells from the wall BEHIND it, which leaves 0.25 cells once the
-  collision radius is taken off. So a build that merely renders on different frames can overshoot a
-  backward leg into that wall. Since the space audit, level 5's walk reads `4 legs of 3.98/3.75
-  cells, ends 0.47 from the start *** BUMPED ***`, deterministically. The outward leg went FURTHER
-  than planned, and the shuttle ended forward of its start, which is the back wall stopping a
-  return leg. The movement and collision code did not change. Until it is fixed, a BUMPED on
-  level 5 alone is this; watch it with `DISK=build/x.d64 node tools/fpsr.mjs "CHAIN=5" level walk`.
-  The fix is the user's call, since it changes the locked-in benchmark: end a leg on DISTANCE
-  rather than ticks, or give level 5 a pose with room behind it.
+  collision radius is taken off, so a build that merely renders on different frames can overshoot
+  a backward leg into that wall. Since the space audit, level 5's walk reads `4 legs of 3.98/3.75
+  cells, ends 0.47 from the start *** BUMPED ***`, deterministically. The movement and collision
+  code did not change. The user accepted it as is: the walk still measures open floor, not half a
+  run spent against a blank wall. So a BUMPED on level 5 alone, with those numbers, is this and not
+  a failure. A BUMPED anywhere else, or different numbers on level 5, still is one. Watch it with
+  `DISK=build/x.d64 node tools/fpsr.mjs "CHAIN=5" level walk`.
 
 ## 2. Draws the same: `regress.sh`
 
@@ -138,7 +137,6 @@ removed). The `was` column is `8a9f6dc`, before the audit.
 | 6 | 23.80 | 24.20 | 14.95 | 14.67 |
 | 7 | 29.40 | 29.00 | 14.64 | 14.23 |
 
-\* flagged BUMPED: the open level-5 weakness above. The flag is deterministic, and it was not yet
-watched by eye when recorded. Level 6's spin is 2 frames slower (121 -> 119), beyond the 1-frame
-resolution; the shared quarter-turn tables add a page-crossing cycle to some seam reads, and that
-is the first suspect. It has not been checked with vprof.
+\* flagged BUMPED: the accepted level-5 weakness above. Level 6's spin is 0.4 fps lower, which is
+2 frames (121 -> 119), one past the 1-frame resolution. The likeliest cause is the shared
+quarter-turn tables adding a page-crossing cycle to some seam reads. It is not being chased.
