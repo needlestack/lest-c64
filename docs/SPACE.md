@@ -82,6 +82,57 @@ workload, fps suite clean.
 
 Not done: loading the death charset from disk at death (~1.8K), which adds a pause at the cut.
 
+## Parked plan: per-level code (designed 2026-10-11, deferred)
+
+Pull this out the next time a special feature doesn't fit. A feature only one level uses (level
+8's flicker, level 4's wall symbol) is compiled into the engine for every level today. The plan
+moves such code into a file that loads with its level.
+
+**The economics, which decide when it's worth it:**
+
+    saving = (sum of every level's special code) - (the largest one) - (hooks, ~65 B)
+
+Level code needs a block to load into, and that block is sized to the largest level's code.
+With today's candidates (level 8 ~670 B including the shadow switch, level 4 ~60 B) the saving
+is about zero. It pays once a SECOND level brings a sizeable feature: special code then stops
+stacking, and each further special level costs only what it exceeds the largest by.
+
+**Design:**
+
+- **Where it loads.** Not the bank-3 level slot at `$f500` (~768 B, mostly full of level data).
+  A block reserved in the image, emitted by the build, sized to the largest level's code.
+- **The file.** `ILX<n>`, loaded by `lvlLoad` straight after `ILV<n>`, through the same name
+  buffer with `V` patched to `X`. An engine table, one byte per level id, says whether a level
+  has one. The boot level's code is patched straight into the image bytes after linking, so
+  boot needs no extra load. A death restart keeps it resident.
+- **Its interface.** Three `jmp`s at the block's start:
+  - enter: called from where `symPut` runs today, on every arrival including death restarts.
+    It must be safe to run twice.
+  - leave: called in `lvlLoad` before anything loads. It must undo whatever enter changed
+    (charset glyphs, sprite bitmaps, inks).
+  - tick: called once per frame from the top-of-frame raster IRQ.
+  A level with no code gets three `rts` stubs. Before any load, the engine calls leave and then
+  stubs the vectors, tick FIRST, so the IRQ can never run half-loaded code.
+- **Linking.** Level code is assembled in a second pass AFTER compaction, against the engine's
+  final addresses (`r.labels`). That is what makes it safe for it to name engine symbols. The
+  rule "level files may not name engine symbols" exists because the level DUMP computes
+  addresses before layout, and a post-layout link does not. Size the reserved block with every
+  engine symbol taken as absolute (a real link can only shrink it). A variable only level code
+  uses gets dropped by compaction's unnamed-equate pass, so the link must fail loudly on that.
+- **Zero cost when unused.** With no level carrying code, none of it is emitted.
+
+**What moves, when it's built:**
+
+- Level 8: `flkTick`, `fkInk` & co., the flickering-sprite code, and the orb-shadow switch. The
+  switch is an XOR patch of the 42 bytes ORBSHD01 changes in the orb bitmaps, applied on enter
+  and again on leave; XOR undoes itself. Writes under the I/O hole need the `$01` port switch.
+- Level 4: `symPut`/`symT`/`symOT`/`lvlSymT` (~94 B). Enter writes the marked glyphs, leave
+  writes the plain ones back.
+- Engine hooks that stay: a 16-byte sprite-ink map in `osFlush` (identity unless a level remaps
+  it, for flickering sprites), and `lvlSpr`'s lit-frame skip.
+- Floor dither (616 B, levels 5-7) does NOT move cleanly: it's woven into the drop's rim and
+  charset rebuild. Left alone by the user's call.
+
 ## Cost by feature
 
 | feature | code | tables | scratch | **total** |
