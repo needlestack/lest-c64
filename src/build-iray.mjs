@@ -1458,6 +1458,41 @@ console.error(`  corner partners (line kept): ` +
 const MOVE_STEP = 64, MOVE_SHIFT = 4;
 const moveX = [], moveY = [];
 for (let a = 0; a < 256; a++) { moveX.push(Math.round(Math.cos(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); moveY.push(Math.round(Math.sin(a / 256 * 2 * Math.PI) * MOVE_STEP) & 255); }
+// ---- TWO TABLES THAT SHARE BYTES: emit A's first k entries, then all of B ----
+// When A[k + i] === B[i] for every i that A's 256 reads can reach, A's reads past entry k-1 run
+// straight on into B and the pair costs 256 + k bytes instead of 512. Asserted entry by entry: a
+// pair that only NEARLY overlaps must stay two tables. B lands k bytes after A, so if A starts on
+// a page B does not, and a byte-indexed read of B crosses a page for its top k entries (a cycle).
+const sharedPair = (aName, a, bName, b, k) => {
+  for (let i = 0; i < 256 - k; i++) if (a[i + k] !== b[i])
+    throw new Error(`sharedPair: ${aName}[${i + k}] = ${a[i + k]} but ${bName}[${i}] = ${b[i]} -- the tables do not overlap at ${k}`);
+  return `${aName}: ${chunk(a.slice(0, k)).trim()}\n${bName}: ${chunk(b).trim()}   ; ${aName} runs on into this: see sharedPair`;
+};
+// ---- A SMALL TABLE THAT ALREADY EXISTS INSIDE A BIGGER ONE: name it there, emit nothing ----
+// Hosts are [name, entries, emitted-in-this-build], tried in order; the first that holds the whole
+// table as a run of consecutive bytes gets the label as an alias (`name = host+k`). Both must be
+// READ-ONLY tables: an alias into RAM state would be overwritten under it. If no host holds it --
+// a tuning moved a value -- the table is simply emitted, so the match never has to be maintained.
+// The alias lines go at the END of the source (EMBEDDED): the assembler evaluates an equate where
+// it stands, so `name = host+k` must come after the host's label. Uses before it size as absolute,
+// which these tables (all far above zero page) are anyway.
+const EMBEDDED = [];
+const embedIn = (name, arr, hosts) => {
+  for (const [h, ha, on] of hosts) {
+    if (!on) continue;
+    for (let k = 0; k + arr.length <= ha.length; k++)
+      if (arr.every((v, i) => ha[k + i] === v)) {
+        EMBEDDED.push(`${name} = ${h}+${k}               ; ${arr.length} bytes, already there: see embedIn`);
+        return `; ${name}: ${arr.length} bytes found inside ${h}, so not emitted (see embedIn)`;
+      }
+  }
+  return `${name}: !byte ${arr.join(',')}`;
+};
+// ---- A QUARTER-TURN PAIR IN 320 BYTES, NOT 512 ----
+// cos is sin a quarter turn (64 units) along, so a sin-like table and its cos-like partner are the
+// same bytes at two offsets (sharedPair, k = 64). Used for moveYT/moveXT, absSinT/absCosT and
+// posYT/posXT.
+const quarterPair = (sinName, sin, cosName, cos) => sharedPair(sinName, sin, cosName, cos, 64);
 
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
 for (let i = 0; i < 256; i++) { const v = Math.floor(i * i / 4); f0Lo.push(v & 255); f0Hi.push((v >> 8) & 255); }
@@ -3634,8 +3669,6 @@ const RAYCNT = flag('RAYCNT') || flag('EDGCHK');
 // measures the ceiling on what such a cache could skip, before building one. It compares against
 // ONE frame back, not the two the double buffer would really impose, so it is an UPPER bound.
 const EDGCHK = flag('EDGCHK');
-// PALKEYS=0 drops the 1/2/3 palette cycling (~30 cycles a frame) for clean benchmarking.
-const PALKEYS = process.env.PALKEYS !== '0';
 const SEAMCOL = +(process.env.SEAMCOL ?? 11);   // $d023: 11 = dark grey (grey 1), 1 = white
 // white ground, black walls, SEAMCOL seams -- what every level had before LEVEL_PAL existed.
 const PAL_DEF = { ceil: 0x01, wall: 0x00, seam: SEAMCOL };
@@ -3993,7 +4026,6 @@ const ORB_OCC      = 0x7000;    // occluder masks, OCCBYTES x norbs. Out of the 
                                 //   bytes past it. Addressed through the orbOccLo/Hi pointer
                                 //   pair, so it has no alignment or locality requirement, and
                                 //   moving it hands the code the 320 bytes up to holeSeeT.
-// SNDTEST adds ~300 bytes of live tweak keys, which is more than the slack below this
 // ORBSMALL=<hex> moves this block later, handing the difference to CODE. The block has tail slack
 // below $4000, and a diagnostic build (OCCCHK and friends) needs a few dozen bytes the shipping
 // build does not have -- see [[iray-code-ceiling]]. Nothing here is alignment-sensitive; the
@@ -4193,7 +4225,7 @@ const ANGART = JSON.parse(readFileSync('./data/angel-art.json', 'utf8'));
 // enough that no raster split and no backup of charset A is needed.
 // The death cut scene, on by default. The face ships INSIDE the image at $7100 -- there is no
 // packer and no staging any more, so nothing about it is size-constrained. See fit-angel.mjs.
-const DIE      = process.env.DIE !== '0' && process.env.SNDTEST !== '1';
+const DIE      = process.env.DIE !== '0';
 // PROFILE and the cut scene both want $bc00 and there is no longer room for both, so say which
 // two things collided instead of letting the assembler report "* = $bc00 moves backward from
 // $bd0a" -- which names neither of them and reads like a corrupt build.
@@ -4338,7 +4370,7 @@ const DIE_SHOW = +(process.env.DIESHOW ?? 120);   // the face on screen, 0.9s
 // is happening. 256 units to the circle, so 30 degrees is 21.
 const DIE_TURN = +(process.env.DIETURN ?? 21);   // and where it has got to when the screen is black
 // One step darker, for any colour. The fade-out reads the LIVE registers and walks them down
-// this, so it does not care what palKeys left the palette on.
+// this, so it does not care which inks the level set.
 const CLUM = { 0:0, 6:.15, 9:.2, 11:.31, 2:.35, 4:.4, 8:.42, 12:.5, 14:.55, 5:.55, 10:.6, 3:.65,
                15:.69, 7:.75, 13:.8, 1:1 };
 const darkerT = [...Array(16)].map((_, c) => {
@@ -6031,11 +6063,6 @@ if (ANGSLIDE && (ANGSLIDE < 2 || Math.max(ANG_PERIOD, ANG_PERIOD_FAR) + ANGSLIDE
 // NTSC: Fn = f * 16777216 / 1022727, i.e. 16.405 units per Hz, so the detune in units / 16.4 IS
 // the beat rate in Hz. Everything here is env-tunable because it can only really be judged by ear.
 const SOUND    = process.env.SOUND !== '0';
-// SNDTEST=1: ONE voice, no detune, no melody, and the distance tracking switched off, so the
-// drone holds still while 4/5 sweep the filter cutoff and 6/7 step the pulse width. Both values
-// are shown top-right under the X/Y/A readout. This exists because cutoff and pulse width are
-// the SID's only per-voice level controls and they can only be judged by ear.
-const SNDTEST  = process.env.SNDTEST === '1';
 const SND_HZ   = +(process.env.SNDHZ   ?? 55);   // the drone's pitch
 const SND_NEAR = +(process.env.SNDNEAR ?? 36);   // detune when an angel is in the next cell: 2.2 Hz
 const SND_FALL = +(process.env.SNDFALL ?? 3);    // cells per e-fold of the falloff
@@ -9454,8 +9481,8 @@ pvI2    = $8011                 ; the hint index, saved across mul8 (which needs
 pvYs    = $8012                 ; the bearing, saved across the first multiply
 pvMode  = $802a                 ; 0 = predict in full, 1 = turned in place (the translation
                                 ;   term is identically zero), 2 = nothing moved at all.
-                                ; NOT beside pvYs: $cb13-$cb29 are claimed by the RAYCNT
-                                ; and PALKEYS blocks below, which are separate build
+                                ; NOT beside pvYs: $cb13-$cb29 were claimed by the RAYCNT
+                                ; and (since removed) palette-key blocks below, separate build
                                 ; flags -- a PIVOT variable landing in that range collides
                                 ; only in the diagnostic builds, i.e. silently.
 ` : ''}${RAYCNT ? `; RAYCNT diagnostics. Declared OUTSIDE the PIVOT block: a RAYCNT build with PIVOT=0 is the
@@ -9495,17 +9522,10 @@ chdMean = $71b4
 pvAcc   = $71b5                 ; EDGCHK: pvNdbg summed over the profiler's window. Rays per
 pvMean  = $71b7                 ;   BOUNDARY is what says whether the subdivision is near its
                                 ;   floor -- a boundary cannot be found without casting at it.` : ''}
-` : ''}colW    = $8023                 ; the three ink colours, one register each. NOT inside the PALKEYS
-colB    = $8024                 ;   block: init loads $d021/$d022/$d023 from these in EVERY build,
-colS    = $8025                 ;   so PALKEYS=0 failed to assemble on an undefined colW. It is the
-                                ;   key CYCLING that is optional, not the colours -- and a config
-                                ;   that does not assemble is the silent trap this file warns about
-                                ;   elsewhere: VICE boots the PREVIOUS disk and the numbers look real.
-${PALKEYS ? `pkNew   = $8026                 ; palette keys this frame, last frame, and the fresh presses
-pkOld   = $8027
-pkEdge  = $8028
-pkJoy   = $8029                 ; joystick-1 lines, masked out of the palette-key reads
-` : ''}${SPRITES ? `; ---- orb scratch ----
+` : ''}colW    = $8023                 ; the three ink colours, one register each: init loads
+colB    = $8024                 ;   $d021/$d022/$d023 from these. (The 1/2/3 and Q/W keys that
+colS    = $8025                 ;   cycled them were a development tool, removed 2026-10-10.)
+${SPRITES ? `; ---- orb scratch ----
 ; The absolute half was at $cbxx, which the bank-3 move turned into graphics-only space. It is
 ; now the LAST FREE PAGE of the array hole ($8500-$85ef) -- one page, every relative offset
 ; preserved. The zero-page half is seamSpan's scratch, dead by the time orbMove runs. NOTE
@@ -9570,11 +9590,6 @@ omYY    = $851d
 omPri   = $851e
 omX8    = $851f
 omBit   = $8520
-skJoy   = $85c7                  ; SNDTEST: the live cutoff / pulse-width tweak keys
-skTmp   = $85c8
-skOld   = $85c9
-skNew   = $85cc
-skEdge  = $85cd
 marked  = $8584                  ; 0, or the index+1 of the angel that stepped up beside you
 dieSt   = $8585                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
 dieDir  = $8587                  ; the turn the player was making, locked in
@@ -9610,21 +9625,17 @@ ovSpR   = $8554                  ; the span's right edge, kept for the overlap w
 ovTmp   = $8555
 ovSvS   = $8556                  ; orbSeenT saved across a probe -- orbNo writes it
 markPa  = $8553                  ; heading when the angel cornered you: the turn trigger's origin
-sndMode = $85ce                  ; index into sndModeT: low / band / high / notch
-sndVol  = $85cf
-sndFc   = $85ca
-sndPw   = $85cb
 sndD    = $85c0                  ; nearest angel, in cells; and the scratch the search needs
 sndI    = $85c1
 sndT    = $85c2
 
 omMc    = $850e
 amIdx   = $c0                    ; angel movement scratch: entity, chosen step, target cell.
-amDX    = $c1                    ;   ZERO PAGE for SIZE, like fkV: ~40 operands one byte shorter is
-amDY    = $c2                    ;   what paid for the adjacent-mark rule (anAdj) in a full image.
-amTX    = $c3                    ;   Only live inside angStep/slTick/dieChk, never across a level
-amTY    = $c4                    ;   load (Krill is $e0-$e6; the KERNAL's LOAD use of $90-$fa is
-amCell  = $c5                    ;   boot-time only)
+amTX    = $c3                    ;   ZERO PAGE for SIZE, like fkV: ~40 operands one byte shorter is
+amTY    = $c4                    ;   what paid for the adjacent-mark rule (anAdj) in a full image.
+amCell  = $c5                    ;   Only live inside angStep/slTick/dieChk, never across a level
+                                 ;   load (Krill is $e0-$e6; the KERNAL's LOAD use of $90-$fa is
+                                 ;   boot-time only). $c1/$c2 were amDX/amDY, now gone.
 amX     = $c6
 amY     = $c7
 ${RIVETS ? 'ssSg    = $c8                    ; seamOne (RIVETS): how many span ends lie below the centre\n' : ''}${RIVSEAM ? 'rvMode  = $cc                    ; seamOne (RIVSEAM): 0 = a boundary line, 1 = a centre rivet\n' : ''}${RIVBIG ? 'rvH     = $c9                    ; rvDrw (RIVBIG): row shape, 5 x it, column shape\nrvB     = $ca\nrvCv    = $cb\n' : ''}entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gate must not skip
@@ -9806,8 +9817,8 @@ pCh2    = $81e3                  ;   then A for the rim. The LANDING wants B,A,B
                                  ;   Same lesson as omEn: when the value is double buffered, the
                                  ;   register is the wrong lever. See [[iray-fall]].
 fT0     = $81cf                  ; frameCnt at the last flip: the fall's constant-rate reference
-hlv     = $852e                  ; which hole is live, 0 or 1, and that times 32 for the
-hlvOf   = $852f                  ;   per-hole line-of-sight map
+hlv     = $852e                  ; which hole is live (hlvOf, its x32 line-of-sight offset, had no
+                                 ;   reader left and was deleted 2026-10-10)
 ohF     = $8514                  ; the rung's flag byte: bit 0 hmag, bit 1 two sprites, bit 2 vmag
 pcell   = $8515                  ; the cell the player stands in, for the hole's LOS gate
 odb     = $8522                  ; DBGORB scratch: six bytes shown as hex on screen row 3
@@ -10078,7 +10089,6 @@ ${ANYFLOORDK ? `        lda #$01                ; entry is the RESTART too, and 
 ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change per frame in orbMove.
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
-        sta hlvOf
         sta $d015               ; nothing visible until orbMove has decided what is
         lda pa
         eor #$80
@@ -10101,8 +10111,6 @@ ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change
                                 ; would otherwise take a bite out of an orb standing in front of
                                 ; one. Occlusion returns as stamped foreground-black chars plus a
                                 ; per-orb priority bit, and that is when this changes.
-` : ''}${PALKEYS ? `        lda #$00
-        sta pkOld               ; no keys held on the first frame, so nothing reads as a fresh press
 ` : ''}        lda #$00
         sta $d020
         lda #$ff
@@ -10117,8 +10125,12 @@ ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change
         ;     screen showing through.
         ;   cbA/cbB start at $ff -- the solid test skips when rs has GROWN, and $ff exceeds any
         ;     rs, so the first frame always draws.
-        ; The four tables are contiguous at $c500/$c528/$c550/$c578, so one walk covers them:
-        ; offsets 0-79 are the ceiling pair, 80-159 the solid pair.
+        ; The four tables are contiguous (cwA, cwB, cbA, cbB, 40 bytes each), so one walk covers
+        ; them: offsets 0-79 are the ceiling pair, 80-159 the solid pair. EXACTLY 160: the walk
+        ; used to run on to X = 255, which was harmless while the four had a page to themselves
+        ; and, once compaction packed other buffers behind them, stamped $ff over the next 96
+        ; bytes at every boot and every death restart (pvMode and the sprite buffers among them,
+        ; 2026-10-10).
         ldx #$00
         lda #$00
 rfCz0:  sta cwA,x
@@ -10128,7 +10140,10 @@ rfCz0:  sta cwA,x
         lda #$ff
 rfCz:   sta cwA,x
         inx
-        bne rfCz
+        cpx #160
+        bcc rfCz
+        ldx #$00                ; ccf below walks colour RAM from X = 0. It used to inherit that from
+                                ;   this loop running X round to 0; bounded at 160, it no longer does.
         lda #${hx(0x08 | (ORBFG ? (+ORBFG & 7) : 0))}                ; bit3 = per-cell multicolor enable, low three bits = the
                                 ; bit-pair-11 colour. Written once at startup and never
                                 ; touched again: the pattern pairing that used to rewrite it
@@ -10337,8 +10352,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         cli
 
 mloop:
-${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${PALKEYS ? `        jsr palKeys             ; 1/2/3 walk the three inks round the palette
-` : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}${SNDTEST ? '        jsr sndKeys             ; 4/5 cutoff, 6/7 pulse width\n' : ''}        jsr tickDelta
+${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
 pdInL:  ldx #$01
 pdInM:  dex
@@ -10357,8 +10371,10 @@ mfAlive:
 ${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}${process.env.CEILLOG ? '        jsr ceilLog\n' : ''}        jmp fwait
 mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
-        and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two), so a headless run falls again and again. It sets only
-        bne fnSkip              ;   the player's CELL and lets fallChk find it the normal way, so
+        and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two) -- on frame n-1, 2n-1, ..., NOT frame 0, where nothing
+        cmp #${hx((+process.env.FALLNOW - 1) & 255)}                ;   is rendered yet and the drop would snapshot boot's leftovers
+        bne fnSkip              ;   (2026-10-10). A headless run falls again and again. It sets only
+                                ;   the player's CELL and lets fallChk find it the normal way, so
         lda fallSt              ;   the whole path -- fallStep, wallsBack, the slot lookup, lvlSwap,
         bne fnSkip              ;   mkRuns, objInit -- runs exactly as it does in play. Not while a
         ldx fnCnt               ;   fall is already running, or it would retrigger mid-animation.
@@ -10797,8 +10813,7 @@ ${PROFSUB ? '        jsr pfT7              ; the delimiter bubble sort\n' : ''}s
         bcc subEmt
 subOne: lda #${NLOG - 1}
         sta spanR
-        jsr subFlush
-        rts                     ; was "jmp subFin": rayAll returns to its caller now
+        jmp subFlush            ; a tail call: rayAll returns to its caller through subFlush's rts
 
 subFlush:                       ; interpolate + seam one maximal face
         lda spanR
@@ -11204,7 +11219,7 @@ dnSkip:                         ;   headless run can TAKE and then PUT DOWN. One
 ${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the 'H' and 'L' keys, and -- while the HUD is on -- every readout:
                                 ;   raster count, LEVEL line, fps, X/Y/angle. Outside the NOHUD
                                 ;   gate: the keys are controls, not readouts.
-${NOHUD || !SNDTEST ? '' : '        jsr drawSnd\n'}
+
 ${PROFILE && !PROFILE1 ? '        jsr pfT5              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
         bne pfRdy
 ${PROFWIN.length ? `        lda pwOn                ; PROFWIN: the anchor is the FIRST main-loop frame's tick
@@ -12255,69 +12270,7 @@ tdM:    sta dtm
 tdT:    sta dtt
         rts
 
-${PALKEYS ? `; ---- palKeys: 1 / 2 / 3 cycle the ceiling, wall and seam inks ----
-
-; Purely for looking at. In mloop rather than readKeys so it works in the auto-mover builds
-; too, which never call readKeys. ~30 cycles a frame; PALKEYS=0 removes it for benchmarking.
-;
-; Matrix rows: '1' and '2' are both row $7f (bits 0 and 3), '3' is row $fd bit 0. The three are
-; folded into one byte as bit0='1', bit2='3', bit3='2' so a single edge test covers them --
-; without the edge test a held key would sprint through all sixteen colours in a quarter second.
-palKeys:
-        ; JOYSTICK 1 SHARES $dc01 WITH THE KEYBOARD COLUMNS, so a row read sees both. Joy-1 up
-        ; pulls bit 0 and right pulls bit 3 -- the very bits '1'/'3' and '2' live on -- so
-        ; without this mask, pushing the stick up cycled the ceiling AND the seam, and pushing
-        ; right cycled the walls. readKeys has always done this; palKeys was written without it.
-        ; Read the port with NO row selected: whatever is low then is the stick, not a key.
-${joyMask('pkJoy')}
-        lda #$7f
-        sta $dc00
-        lda $dc01
-        ora pkJoy               ; force the stick's bits high = "not pressed" in this active-low
-        eor #$ff                ; read, THEN invert so 1 means pressed
-        and #$49                ; row 7: bit0 '1', bit3 '2', bit6 'Q'
-        sta pkNew
-        lda #$fd
-        sta $dc00
-        lda $dc01
-        ora pkJoy
-        eor #$ff
-        and #$03                ; row 1: bit0 '3', bit1 'W'
-        asl                     ;   -> bits 4 and 5, which nothing else in pkEdge uses
-        asl
-        asl
-        asl
-        ora pkNew
-        sta pkNew
-        eor pkOld               ; changed since last frame ...
-        and pkNew               ; ... and pressed now: a fresh press
-        sta pkEdge
-        lda pkNew
-        sta pkOld
-        lda #$ff
-        sta $dc00               ; leave the port neutral for the joystick read in readKeys
-        jsr palCol              ; '1' both grounds, 'Q' the floor, 'W' the ceiling.
-                                ;   Out of the main block: three keys' worth of advance does not
-                                ;   fit in what is left of it, and this frees what the one key
-                                ;   used to cost.
-pk2:    lda pkEdge
-        and #$08
-        beq pk3
-        inc colB
-        lda colB
-        and #$0f
-        sta colB
-        sta $d022
-pk3:    lda pkEdge
-        and #$10                ; '3' sits at bit 4 now
-        beq pkDn
-        inc colS
-        lda colS
-        and #$0f
-        sta colS
-        sta $d023
-pkDn:   rts
-` : ''}readKeys:
+readKeys:
         ; read pure joystick-1 first ($dc00=$ff, so no keyboard column pulls $dc01);
         ; joyEor has 1s where a joystick line is active, so we can mask it out of the
         ; keyboard scan (joystick-1 shares $dc01 with the keyboard matrix rows).
@@ -13726,8 +13679,8 @@ nmi:    pha
 ; ================= data =================
 dirXT:  !byte 1,1,0,255,255,255,0,1
 dirYT:  !byte 0,1,1,1,0,255,255,255
-rowLoT: !byte ${rowLo.join(',')}
-rowHiT: !byte ${rowHi.join(',')}
+${embedIn('rowLoT', rowLo, [['mul40LoT', mul40.map(v => v & 255), FALL]])}
+${embedIn('rowHiT', rowHi, [['mul40HiT', mul40.map(v => v >> 8), FALL]])}
 kTabT:  !byte ${kTab.join(',')}
 vsplitL: !byte 0,${VSPLIT_L.join(',')}   ; VSPLIT: solid LEFT of boundary column 1,2,3: #... ##.. ###.
 vsplitR: !byte 0,${VSPLIT_R.join(',')}   ;   solid RIGHT: .### ..## ...#
@@ -14554,21 +14507,8 @@ oSCLst: lda ohLstM
         jsr oSPut
 oSCNx:  inc ohSv
         jmp oSCRow
-; oSWall: carry set if the cell at (osPtr),y is FULLY wall -- SOLID, or a seam variant, which is
-; SOLID with a panel line on it. Ramp and step cells are part ceiling or part floor and cannot be
-; stamped, because the occluder splits are horizontal only.
-oSWall: lda (osPtr),y
-        cmp #${hx(SOLID)}
-        beq oSWyes
-        cmp #${hx(SEAM0)}
-        bcc oSWno
-        cmp #${hx(SEAM0 + NSEAM)}
-        bcs oSWno
-oSWyes: sec
-        rts
-oSWno:  clc
-        rts
-
+; (oSWall -- "is the cell at (osPtr),y FULLY wall" -- lived here; oSBack replaced every call to it,
+; and it was deleted on 2026-10-10 as dead code.)
 ; oSBack: choose an EDGE cell's backing. A = the cellFillT mask naming the columns the split does
 ; NOT cover. Carry set -> the black-backed glyph, because those columns hold wall; clear -> white.
 ;
@@ -15781,13 +15721,6 @@ fcNx:   inx
         bcc fcLp
         bcs fcNo                ; always taken: none of them is under us
 fcHit:  sty hlv                 ; the one we are dropping through
-        tya
-        asl                     ; x32, the LOS stride -- see hlvOf
-        asl
-        asl
-        asl
-        asl
-        sta hlvOf
         ; ---- sprites away: they belong to the level being left ----
         ; The BUFFER, not $d015 -- osFlush runs after the buffer flip, which is past where the
         ; fall path rejoins the loop, so it would put the register straight back and leave an
@@ -15862,12 +15795,6 @@ ${FALLMARK.includes(4) ? '        inc fallMk              ; FALLMARK 4: objInit 
         ; record of which one the last drop used, and the level being arrived at has not used one.
         lda #$00
         sta hlv
-        asl                     ; x32, the same LOS stride -- not a cell multiply
-        asl
-        asl
-        asl
-        asl
-        sta hlvOf
 `}        ldx #$ff                ; the drop starts on THIS frame -- mfIn falls into fallStep and
         stx fFrm                ;   draws frame 0, so stepping in and falling are the same frame
         ldx #25
@@ -15921,7 +15848,6 @@ ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place
 fmSame: jsr lvlStart            ; the arriving level's start: what the render below looks from
         lda #$00
         sta hlv
-        sta hlvOf
         lda #$01
         sta bgPh
         jsr fallInv
@@ -16593,7 +16519,7 @@ hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
 ${HAS_IDOL ? `        jsr idolPlace           ; ---- ...then put the IDOLS where they actually are ----
                                 ; objInit has just restored every entity from the build data,
                                 ; which says each idol is at home. Three of them may not be.
-        jsr idolLk              ; ---- carry was just cleared, so RE-DERIVE what depends on it ----
+        jmp idolLk              ; ---- carry was just cleared, so RE-DERIVE what depends on it ----
                                 ; idolHd is a pure function of carry (see idolLk) and is the one
                                 ; piece of entity state that was not being re-derived here. Boot
                                 ; called idolLk for itself and the FALL did not, so the two
@@ -16606,9 +16532,10 @@ ${HAS_IDOL ? `        jsr idolPlace           ; ---- ...then put the IDOLS where
                                 ; so the angels stopped freezing when looked at.
                                 ; Here rather than at the fall's call site: objInit is what owns
                                 ; carry, so objInit is what owes the invariant. Every caller gets
-                                ; it, including the next one nobody has written yet.
-` : ''}        rts
-
+                                ; it, including the next one nobody has written yet. (A tail
+                                ; call: idolLk's rts returns from here.)
+` : `        rts
+`}
 ; ---- orbOcc1: rebuild entity X's occluder mask from the cell it stands in NOW ----
 ; orbOccT answers "is this entity beyond that wall run's plane" -- the facing rule, and the only
 ; thing about occlusion that is precomputed. Every bit of it is a function of where the entity
@@ -16731,159 +16658,7 @@ ooVCmpX:
 
 
 
-${SNDTEST ? `; ---- sndKeys: 4/5 sweep the cutoff, 6/7 step the pulse width ----
-; Same joystick masking as palKeys: joy-1 shares $dc01 with the keyboard columns, so read the
-; port with NO row selected first and force whatever the stick holds back high. The cutoff
-; repeats while held, because sweeping 0..255 one press at a time is not a listening test; the
-; pulse width is edge-triggered, because it only has 16 steps.
-sndKeys:
-${joyMask('skJoy')}
-        lda #$fd                ; '4' -- row $fd bit 3 -- cutoff DOWN, repeating while held
-        sta $dc00
-        lda $dc01
-        ora skJoy
-        and #$08
-        bne skN4
-        lda sndFc
-        cmp #$02
-        bcc skN4
-        sec
-        sbc #$02
-        sta sndFc
-skN4:   lda #$fb                ; '5' bit 0 = cutoff UP, '6' bit 3 = pulse width DOWN
-        sta $dc00
-        lda $dc01
-        ora skJoy
-        sta skTmp
-        and #$01
-        bne skN5
-        lda sndFc
-        cmp #$fe
-        bcs skN5
-        clc
-        adc #$02
-        sta sndFc
-skN5:   lda #$00                ; the rest are edge-triggered, packed into one byte
-        sta skNew
-        lda skTmp
-        and #$08
-        bne sk6n
-        lda #$01
-        sta skNew
-sk6n:   lda #$f7                ; '7' bit 0 = pulse width UP, '8' bit 3 = filter MODE
-        sta $dc00
-        lda $dc01
-        ora skJoy
-        sta skTmp
-        and #$01
-        bne sk7n
-        lda skNew
-        ora #$02
-        sta skNew
-sk7n:   lda skTmp
-        and #$08
-        bne sk8n
-        lda skNew
-        ora #$04
-        sta skNew
-sk8n:   lda #$ef                ; '9' bit 0 = volume DOWN, '0' bit 3 = volume UP
-        sta $dc00
-        lda $dc01
-        ora skJoy
-        sta skTmp
-        and #$01
-        bne sk9n
-        lda skNew
-        ora #$08
-        sta skNew
-sk9n:   lda skTmp
-        and #$08
-        bne sk0n
-        lda skNew
-        ora #$10
-        sta skNew
-sk0n:   lda #$ff
-        sta $dc00               ; leave the port neutral for readKeys
-        lda skNew
-        eor skOld
-        and skNew               ; changed AND down now = a fresh press
-        sta skEdge
-        lda skNew
-        sta skOld
-        lda skEdge
-        and #$01
-        beq skE7
-        lda sndPw
-        beq skE7
-        dec sndPw
-skE7:   lda skEdge
-        and #$02
-        beq skE8
-        lda sndPw
-        cmp #$0f
-        bcs skE8
-        inc sndPw
-skE8:   lda skEdge
-        and #$04
-        beq skE9
-        ldx sndMode
-        inx
-        cpx #$04
-        bcc skE8s
-        ldx #$00
-skE8s:  stx sndMode
-skE9:   lda skEdge
-        and #$08
-        beq skE0
-        lda sndVol
-        beq skE0
-        dec sndVol
-skE0:   lda skEdge
-        and #$10
-        beq skPut
-        lda sndVol
-        cmp #$0f
-        bcs skPut
-        inc sndVol
-skPut:  lda sndFc
-        sta $d416
-        lda sndPw
-        sta $d403
-        ldx sndMode
-        lda sndModeT,x
-        ora sndVol
-        sta $d418
-        rts
-; ONE cutoff serves all three modes and their outputs are SUMMED, so low+high is a NOTCH, not a
-; narrow band -- combining them cannot attenuate. High-pass alone is the one that can: sweep its
-; cutoff up past 55Hz and the fundamental goes first, then the harmonics.
-sndModeT: !byte $10,$20,$40,$50 ; low-pass, band-pass, high-pass, low+high = notch
-
-; ---- drawSnd: the two numbers, under the X/Y/A block ----
-drawSnd:
-        lda #$04
-        jsr setRow
-        ldy #34                 ; six glyphs now, so it has to start further left
-        lda #$0f                ; 'F'
-        jsr ddPut
-        lda sndFc
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr ddPut
-        lda sndFc
-        and #$0f
-        jsr ddPut
-        lda sndPw
-        jsr ddPut
-        lda sndMode
-        jsr ddPut
-        lda sndVol
-        jsr ddPut
-        rts
-
-` : ''}${SOUND ? `; ---- sndTick: the detune tracks the nearest angel ----
+${SOUND ? `; ---- sndTick: the detune tracks the nearest angel ----
 ; Chebyshev distance, because the angel moves on a king's graph -- diagonal and orthogonal steps
 ; are both one move, so that is what "one cell away" has to mean here too. It runs whether or not
 ; you are looking, which is the point: the sound is the channel that works when sight does not.
@@ -16932,13 +16707,13 @@ stOk2:  tax                     ; everything comes straight off tables -- the cl
         sta $d407
         lda sndV2H,x
         sta $d408
-${SNDTEST ? '' : `        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonance and pulse width are set once in
+        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonance and pulse width are set once in
         ora #$10                ;   sndInit and left there -- with three things moving at once you
         sta sndLvl              ;   cannot tell which one you are hearing. Low-pass, as it began.
                                 ; NOT written to $d418 here: sfxTick runs next and is the single
                                 ;   writer, so the drone and an effect cannot fight over the
                                 ;   master and step it against each other.
-`}        rts
+        rts
 
 ` : ''}; ---- angStep: give every unobserved angel its share of the clock, and move the ones that are due
 ; The accumulator advances ONLY while the angel is unobserved, so looking at one stops its clock
@@ -17045,28 +16820,13 @@ angOne: ${DIE ? `jsr anAdj               ; ALREADY beside you when its step fall
 ; filled) if there is a legal one. Split from the taking so a lunge can choose its cell when it
 ; SETS OUT and commit it when it lands. ----
 angPick:stx amIdx
-        lda #$00
-        sta amDX
-        sta amDY
-        lda px+1                ; dx = sign(player cell - angel cell), per axis
-        cmp orbXCT,x
-        beq anNoX
-        lda #$01
-        bcs anSetX
-        lda #$ff
-anSetX: sta amDX
-anNoX:  lda py+1
-        cmp orbYCT,x
-        beq anNoY
-        lda #$01
-        bcs anSetY
-        lda #$ff
-anSetY: sta amDY
+        ; (The sign of player - angel per axis, amDX/amDY, was worked out here for the greedy
+        ;   fallback; nothing has read it since the fill replaced greedy. Deleted 2026-10-10.)
         ; ---- the precomputed shortest step, then the greedy list as a fallback ----
         ; pathT is exact for the WALLS, which never move. It cannot know about a dropped orb, so
         ; when anTry refuses the step the old greedy pair still gets its turn -- one wasted tick
         ; against an obstacle that is rare, transient and two seconds from being irrelevant.
-anNoY:  jsr anPath
+        jsr anPath
         cmp #$ff
         beq apNo                ; no descending neighbour: it is walled in, so it WAITS
         tax
@@ -17082,8 +16842,7 @@ anNoY:  jsr anPath
         ; greedy points AT the player, through the wall, not round to the far door.
         ; Now the fill itself routes round orbs, so a refused step means genuinely boxed in, and
         ; the right answer to that is to stand still.
-        jsr anTry
-        rts                     ; C is anTry's verdict
+        jmp anTry               ; a tail call: C is anTry's verdict
 apNo:   clc                     ; (the cmp above left C set)
         rts
 anGo:   inc blkVer              ; the obstacle map changed: the fill has to be redone
@@ -19119,8 +18878,8 @@ hxKey:
         ; from the one play uses. Same trick FALLNOW uses to test the chain headlessly.
         ; JOYSTICK 1 SHARES $dc01 WITH THE KEYBOARD COLUMNS, and joy-1 LEFT pulls bit 2 -- the
         ; very bit 'L' sits on. Read the port with NO row selected first: whatever is low then is
-        ; the stick, and it is forced back high before any key is believed. palKeys learned this
-        ; by cycling the walls every time the stick went right.
+        ; the stick, and it is forced back high before any key is believed. The palette keys (since
+        ; removed) learned this by cycling the walls every time the stick went right.
 ${joyMask('hxJoy')}
         lda #$df
         sta $dc00
@@ -19152,8 +18911,7 @@ ${NOHUD ? '' : `hhOld:  !byte 0                 ; 'H' last frame, for the edge t
 hudOn:  !byte ${process.env.HUDON === '1' ? 1 : 0}                 ; the HUD: off until 'H' (HUDON=1 starts it on)`}
 ${NOHUD ? '' : `hxLvT:  !byte 18,14,19,14,18   ; L E V E L as glyph indices -- 14 is the hex digit E`}
 ` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
-absCosT: ${chunk(absCos).trim()}
-absSinT: ${chunk(absSin).trim()}
+${quarterPair('absSinT', absSin, 'absCosT', absCos)}
 recipLoT: ${chunk(recipLo).trim()}
 recipHiT: ${chunk(recipHi).trim()}
 ; the unsigned clamp tables (see ECOFF): here among the data, NOT beside the code that reads
@@ -19161,9 +18919,9 @@ recipHiT: ${chunk(recipHi).trim()}
 ecMT:   !byte ${ecMT.join(',')}
 ecM16:  !byte ${ecM16.join(',')}
 ecM8:   !byte ${ecM8.join(',')}
-qIdxAT: !byte ${qIdxAT.join(',')}
+${embedIn('qIdxAT', qIdxAT, [['ecM8', ecM8, true]])}
 qIdxMT: !byte ${qIdxMT.join(',')}
-qIdxBT: !byte ${qIdxBT.join(',')}
+${embedIn('qIdxBT', qIdxBT, [['qIdxAT', qIdxAT, true], ['ecM8', ecM8, true]])}
 qmT:    !byte ${qmT.join(',')}
 ${PLAN === 3 ? '' : `rampT:  ${chunk(rampT).trim()}`}
 ${chainSrc('bkA', SCR_A, ROWSD, 'rfEdge')}
@@ -19818,6 +19576,10 @@ krillRt: !fill ${KRILL_RT_LEN}, 0
 ; reason dieN is: an emitted 0 is the only initialisation a restart never repeats.
 klPark: lda klParked
         bne kpDn
+; compact.mjs puts the code that zeroes its promoted zero-page buffers at the marker. They used to
+; be scratch INSIDE the image, which loads as zeros, and some code reads one before writing it.
+; Once per power-on, like the park: a restart never re-zeroed them before either.
+; @ZPCLEAR
         ldx #$00
 kpL:    lda ${hx16(KRILL_RESIDENT_AT)},x
         sta krillRt,x
@@ -19902,9 +19664,9 @@ ${SOUND ? `; The two voices, fully precomputed per cell distance: centre climb a
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
 sndV1L: !byte ${sndV1.map(v => v & 255).join(',')}
-sndV1H: !byte ${sndV1.map(v => v >> 8).join(',')}
+${embedIn('sndV1H', sndV1.map(v => v >> 8), [['recipHiT', recipHi, true]])}
 sndV2L: !byte ${sndV2.map(v => v & 255).join(',')}
-sndV2H: !byte ${sndV2.map(v => v >> 8).join(',')}
+${embedIn('sndV2H', sndV2.map(v => v >> 8), [['sndV1H', sndV1.map(v => v >> 8), true], ['recipHiT', recipHi, true]])}
 sndVolT: !byte ${sndVolT.join(',')}` : ''}
 ${DIE ? `; Where each picture's map lives. The first is inside the image next to the charset; the rest
 ; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
@@ -20013,13 +19775,9 @@ runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
 runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it
 ${SOUND ? `` : ''}
         * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
-; moveXT/moveYT are 512 bytes of TABLE that were sitting inside the code block -- the scarcest
-; resource on the machine -- at $1f3e, which is not even page-aligned, so a byte-indexed read
-; crossing $2000 was paying an extra cycle. Here they are one page each: the ceiling gets 512
-; bytes back AND the movement code gets marginally faster.
-moveXT: ${chunk(moveX).trim()}
-        * = $7a00
-moveYT: ${chunk(moveY).trim()}
+; moveXT/moveYT were 512 bytes of TABLE sitting inside the code block -- the scarcest resource
+; on the machine. Now 320 bytes out of it: the pair shares a page and a quarter (quarterPair).
+${quarterPair('moveYT', moveY, 'moveXT', moveX)}
 
         * = $7b00               ; ---- and the whole readout ----
 ; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
@@ -20604,38 +20362,6 @@ saOff:  lda #$ff                ; never matches, and irqAr2 keeps the arc split
         sta irqSpC+1
         rts
 ` : ''}
-; ---- palCol: the ground inks, by key ----
-; '1' advances CEILING and FLOOR together, keeping any difference between them; 'Q' advances the
-; floor alone and 'W' the ceiling alone. They are separable because the raster split gave the two
-; their own registers: irqB0 is everything above the horizon, irqB1 everything below it. Pressing
-; '1' used to move only the ceiling once irqB1 existed, which is the bug that found this feature.
-; No $d021 store: the IRQ writes both regions from these two operands every frame anyway.
-palCol: lda pkEdge
-        and #$01
-        beq pcQ
-        jsr pcCei
-        jsr pcFlr
-pcQ:    lda pkEdge
-        and #$40                ; 'Q'
-        beq pcW
-        jsr pcFlr
-pcW:    lda pkEdge
-        and #$20                ; 'W'
-        beq pcDn
-        jsr pcCei
-pcDn:   rts
-pcCei:  inc colW
-        lda colW
-        and #$0f
-        sta colW
-        sta colT                ; through the shadow, like everything else that paints the ground
-        rts
-pcFlr:  inc colF
-        lda colF
-        and #$0f
-        sta colF
-        sta irqB1+1
-        rts
 colT:   !byte ${hx(palOf(LVL).ceil)}             ; the TOP region's pending ink. irqB0 is read at the top of
                                 ;   the frame and irqB1 at pSplit, so a store that reaches one of
                                 ;   them immediately can NEVER reach the other on the same frame:
@@ -20687,7 +20413,7 @@ lvlHi:  lda colW
 ; already swapped underneath but the drop is still showing the room being left above the rim.
 ; Two $d021s for the two levels on screen at once -- the overlap frames used to have to pick one,
 ; which made whichever lost look as though IT had changed colour.
-${CEILVARY ? `lvlLo:  ldx lvlMeT
+${CEILVARY && !FALLMID ? `lvlLo:  ldx lvlMeT              ; (only the non-FALLMID drop calls this; FALLMID sets irqB2 itself)
         dex
         lda lvlPalceilT,x
         sta irqB2+1
@@ -21538,9 +21264,9 @@ runST: !byte ${[...runS, ...Array(256 - MAPN).fill(0)].join(',')}
         * = ${hx16(RELOC + 0x800)}
 ${LD('mapT', chunk(LVLT('mapT'), 16).trim(), ':   ')}   ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
         * = ${hx16(RELOC + 0x900)}
-rbT:    ${chunk(rbT).trim()}
-        * = ${hx16(RELOC + 0xa00)}
-rsT:    ${chunk(rsT).trim()}
+; rsT and rbT are one formula 7 apart (rbT[c] = rsT[c + 7]; both 0 past the wall's reach), so they
+; share bytes. rsT keeps the page; rbT, 7 in, crosses it only for a column 249+ pixels tall.
+${sharedPair('rsT', rsT, 'rbT', rbT, 7)}
 ${DIE && SOUND ? `        * = ${hx16(RELOC + 0xb00)}     ; a jsr target, in the page FINEANG's
         ; coarse delta tables vacated. It used to sit at $609b, a hole that only LEVEL 1's map
         ; leaves -- level 2's data ran straight through it and the build died. Everything from
@@ -21858,18 +21584,8 @@ sniLp:  sta $d400,x
         sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
         lda #$41                ; pulse + gate
         sta $d404
-${SNDTEST ? `                                ; SNDTEST: voice 2 never gets a waveform, so the drone is
-                                ;   one bare pulse and the detune is out of the picture
-        lda #${hx(SND_FC)}
-        sta sndFc
-        lda #${hx(SND_PW >> 8)}
-        sta sndPw
-        lda #$00
-        sta sndMode             ; low-pass, matching the shipping build
-        lda #$0f
-        sta sndVol
-` : `        sta $d40b
-`}
+        sta $d40b
+
         rts
 
 ; An effect is a ROW OF TABLES, not code. sfxTick reads length, waveform, envelope, filter
@@ -21999,9 +21715,7 @@ obPNx:  txa
         bcc obPick              ; slots left: the next nearest
 obODn:  rts
         * = ${hx16(RELOC + 0xf00)}
-posXT:  ${chunk(posX).trim()}
-        * = ${hx16(RELOC + 0x1000)}
-posYT:  ${chunk(posY).trim()}
+${quarterPair('posYT', posY, 'posXT', posX)}
         * = ${hx16(RELOC + 0x1100)}
 rayOffT: !byte ${rayOff.join(',')}
         ; ---- the seated orb's per-variant tables ----
@@ -22441,8 +22155,7 @@ wsTick: dec wsN
         bne wsMore
 wsDone: lda #$00                ; the wsAny path skips the dec, so stop the clock by hand or the
         sta wsN                 ;   idle guard lets the whole collapse run again next frame
-        jsr wtOff               ; the collapse has finished: NOW the map really changes
-        rts
+        jmp wtOff               ; the collapse has finished: NOW the map really changes (tail call)
 wsMore: lda #$01
         sta entDty              ; keep the frame alive while it falls...
         jmp fallInv             ; ...and repaint in full, since colH is moving under the cache
@@ -25051,8 +24764,8 @@ const ALIGNED_T = {
     // arena ran short (2026-10-09). compact.mjs keeps runFaceT with it as one cluster.
     runPlaneT: { within: 2 * NRUN },
     mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
-    runWT: 256, runET: 256, runNT: 256, runST: 256, rbT: 256, rsT: 256,
-    ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posXT: 256, posYT: 256,
+    runWT: 256, runET: 256, runNT: 256, runST: 256, rsT: 256,   // rbT is 7 into rsT: sharedPair
+    ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posYT: 256,   // posXT is 64 into posYT: quarterPair
     rayOffT: 256, hPgT: 256, ecMT: 256, ecM16: 256, ecM8: 256,   // 256 = START ON A PAGE (see the guard)
     // ---- THE CELL CHOOSER'S BYTE-INDEXED TABLES (2026-10-05) ----
     // Their source puts each at a `* = RELOC+$xx00` origin with a comment saying why ("a page
@@ -25113,6 +24826,7 @@ writeFileSync('./build/iray.bufsizes.json', JSON.stringify(Object.fromEntries(
     .filter(([n]) => RUNTIME_BUFS[n] !== undefined).map(([n]) => [n, RUNTIME_BUFS[n]]))));
 
 const asmPath = DIAG.length ? './build/iray.diag.asm' : './build/iray.asm';
+if (EMBEDDED.length) asm += `\n; ---- tables that live inside other tables (embedIn) ----\n${EMBEDDED.join('\n')}\n`;
 writeFileSync(asmPath, asm);
 // ---- COMPACT: relayout into code / arena / tables before assembling ----
 // compact.mjs reads the file we just wrote, moves every emitted run into one of the two sections,

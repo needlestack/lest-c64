@@ -32,7 +32,167 @@ const SRC = process.argv[2] || ROOT + 'iray.asm';
 const OUT = ROOT + 'iray.compact.asm';
 const ORG = 0x0801, CEIL = 0xc000;
 
-const src = readFileSync(SRC, 'utf8');
+// ---- 0. ZERO PAGE: promote the most-referenced RAM buffers, BEFORE anything is measured ----
+// Every free zero-page byte is worth bytes of CODE: an instruction that names a zero-page operand
+// is one byte shorter than the absolute form (and a cycle faster). For SPACE, then, the measure is
+// how many instructions name a buffer, per byte of zero page it needs -- a reference count, not a
+// profile. (The profiler already put the HOT variables here; this fills what it left.)
+// It runs first because it changes the size of the code: every later step measures the program
+// with these buffers already in zero page.
+// What counts as a saving: an instruction AFTER the equate's definition (the assembler sizes a
+// forward reference as absolute), in a mode that HAS a zero-page form -- plain, or ,x for all but
+// ldx/stx/cpx/cpy/bit, or ,y for ldx/stx only. `lda buf,y` still works from zero page (absolute,y
+// with a zero high byte) but saves nothing.
+// What is never moved:
+//   - a buffer whose address is taken with < or > -- code that builds a pointer, or assumes two
+//     buffers share a page, should not have its page changed under it;
+//   - a buffer named by an instruction that is itself PATCHED (`label+1` / `label+2` written
+//     elsewhere): a zero-page operand is one byte, so `label+2` would become the next opcode;
+//   - a buffer that must be page-aligned or must not cross a page (iray.aligned.json);
+//   - anything not exactly sized: an INDEXED buffer the build does not declare a size for, since
+//     a zero-page ,x read WRAPS within page zero where the absolute one ran on.
+// Free zero page: every byte no zero-page equate or literal operand claims, minus Krill's
+// resident range (it runs during play, loading levels in the background). An indexed zero-page
+// equate is taken to own every byte up to the next one, since its length is not declared.
+// The KERNAL's own zero-page use ($90-$fa) is BOOT-TIME only: it is banked out before the game
+// runs, and nothing calls it after. ZPALLOC=0 turns this pass off.
+const zpAlloc = text => {
+  if (process.env.ZPALLOC === '0') return text;
+  const L = text.split('\n');
+  const readJ = f => JSON.parse(readFileSync(ROOT + f, 'utf8'));
+  const DECL = readJ('iray.bufsizes.json'), ALN = readJ('iray.aligned.json');
+  const krill = readFileSync(new URL('../krill/loadersymbols-c64.inc', import.meta.url), 'utf8');
+  const kz = k => parseInt(new RegExp(`^${k}\\s*=\\s*\\$([0-9a-fA-F]+)`, 'm').exec(krill)[1], 16);
+  const MNEM = /^\s*(?:[A-Za-z_]\w*:)?\s*(adc|and|asl|bit|cmp|cpx|cpy|dec|eor|inc|lda|ldx|ldy|lsr|ora|rol|ror|sbc|sta|stx|sty|jmp|jsr)\s+(.*)$/i;
+  const code = L.map(l => l.split(';')[0]);
+  // equates: RAM buffers (4 hex digits, inside the image's range) and existing zero page
+  const ram = new Map(), zpEq = new Map();
+  code.forEach((l, i) => {
+    const m = /^([A-Za-z_]\w*)\s*=\s*\$([0-9a-fA-F]+)\s*$/.exec(l.trim());
+    if (!m) return;
+    const v = parseInt(m[2], 16);
+    if (m[2].length === 4 && v >= ORG && v < CEIL && !ram.has(m[1])) ram.set(m[1], { a: v, def: i });
+    else if (v < 0x100 && !zpEq.has(m[1])) zpEq.set(m[1], v);
+  });
+  // ---- who names what, and how ----
+  const st = new Map([...ram.keys()].map(n => [n, { save: 0, max: 0, idx: false, bad: false }]));
+  const zpUse = new Set();                         // zero-page bytes claimed beyond the equates themselves
+  const zpIdx = new Set();                         // zero-page equates used indexed
+  const patched = new Set();
+  for (const l of code) for (const m of l.matchAll(/\b([A-Za-z_]\w*)\s*\+\s*([12])\b/g)) patched.add(m[1]);
+  code.forEach((l, i) => {
+    for (const m of l.matchAll(/[<>]\s*\(?\s*([A-Za-z_]\w*)/g)) if (st.has(m[1])) st.get(m[1]).bad = true;
+    const ins = MNEM.exec(l);
+    if (!ins) return;
+    const op = ins[1].toLowerCase(), opd = ins[2].trim();
+    const lab = /^\s*([A-Za-z_]\w*):/.exec(l)?.[1];
+    if (opd.startsWith('#')) return;
+    const ind = /^\(\s*([^),]+?)\s*\)?\s*(,\s*[xy])?\s*\)?\s*(,\s*[yY])?$/.exec(opd);
+    if (opd.startsWith('(')) {                     // (zp),y / (zp,x): the pointer's two bytes
+      const e = ind?.[1] ?? '';
+      const lit = /^\$([0-9a-fA-F]{1,2})$/.exec(e);
+      const v = lit ? parseInt(lit[1], 16) : zpEq.get(e);
+      if (v !== undefined && op !== 'jmp') { zpUse.add(v); zpUse.add(v + 1); }
+      return;
+    }
+    const m = /^([A-Za-z_]\w*|\$[0-9a-fA-F]+)\s*(?:([+-])\s*(\$?[0-9a-fA-F]+))?\s*(?:,\s*([xyXY]))?$/.exec(opd);
+    if (!m) return;
+    const off = m[3] ? (m[2] === '-' ? -1 : 1) * parseInt(m[3].replace('$', ''), m[3][0] === '$' ? 16 : 10) : 0;
+    const ix = m[4]?.toLowerCase();
+    if (m[1][0] === '$') {                         // a literal zero-page operand claims its byte
+      const v = parseInt(m[1].slice(1), 16);
+      if (m[1].length <= 3 && v + off < 0x100) zpUse.add(v + off);
+      return;
+    }
+    if (zpEq.has(m[1])) { zpUse.add(zpEq.get(m[1]) + off); if (ix) zpIdx.add(m[1]); return; }
+    const s = st.get(m[1]);
+    if (!s) return;
+    if (op === 'jmp' || op === 'jsr' || (lab && patched.has(lab))) { s.bad = true; return; }
+    s.max = Math.max(s.max, off);
+    if (ix) s.idx = true;
+    const shrinks = !ix ? !['jmp', 'jsr'].includes(op)
+      : ix === 'x' ? !['ldx', 'stx', 'cpx', 'cpy', 'bit'].includes(op)
+      : ['ldx', 'stx'].includes(op);
+    if (shrinks && i > ram.get(m[1]).def) s.save++;
+  });
+  // ---- free zero page ----
+  const used = new Set([0, 1, ...zpEq.values(), ...zpUse]);
+  for (let a = kz('loader_zp_first'); a <= kz('loader_zp_last'); a++) used.add(a);
+  const zpSorted = [...new Set(zpEq.values())].sort((a, b) => a - b);
+  for (const n of zpIdx) {                         // an indexed zero-page buffer: up to the next equate
+    const a = zpEq.get(n), next = zpSorted.find(v => v > a) ?? 0x100;
+    for (let k = a; k < next; k++) used.add(k);
+  }
+  const free = [];
+  for (let a = 2; a < 0x100; a++) if (!used.has(a)) free.push(a);
+  // ---- candidates, one buffer each ----
+  // Step 5 moves runs of ADJACENT buffers together, because it cannot tell which adjacency the code
+  // relies on. Here it can: a buffer that is never indexed is touched only at its own +0..+max
+  // offsets, so nothing reaches it through a neighbour and it moves alone. An indexed buffer must
+  // have a DECLARED size (iray.bufsizes.json) to move at all. And EVERY buffer in the unbroken run
+  // that follows an undeclared indexed one stays put: its reach is exactly what nobody declared.
+  // omEn is the case: one masked loop over omEn,x clears omEn/omXX/omYY/omPri/omX8 at a fall, so
+  // those four "scalars" are really omEn's tail -- promoting them broke the loop (2026-10-10).
+  const sorted = [...ram].sort((x, y) => x[1].a - y[1].a);
+  const sizeOf = n => DECL[n] ?? (st.get(n).idx ? null : st.get(n).max + 1);
+  const cand = [];
+  let tail = false;                                // inside an undeclared indexed buffer's run
+  sorted.forEach(([n, { a }], k) => {
+    const size = sizeOf(n), prev = sorted[k - 1];
+    const prevEnd = prev ? prev[1].a + (sizeOf(prev[0]) ?? 0) : -1;
+    if (size === null) { tail = true; return; }
+    if (tail && !(prev && sizeOf(prev[0]) === null) && a !== prevEnd) tail = false;
+    if (tail || st.get(n).bad || ALN[n] !== undefined) return;
+    cand.push({ m: [{ n, size }], a, size, save: st.get(n).save });
+  });
+  if (process.env.ZPWHY) for (const n of process.env.ZPWHY.split(','))
+    console.log(`  zpwhy ${n}: ${JSON.stringify(st.get(n))} size ${st.get(n) && sizeOf(n)} candidate ${cand.some(c => c.m[0].n === n)}`);
+  cand.splice(0, cand.length, ...cand.filter(c => c.save > c.size && c.size <= 16)
+    .sort((x, y) => y.save / y.size - x.save / x.size || y.save - x.save));
+  // ---- place: best ratio first, each into the smallest free run it fits ----
+  const freeSet = new Set(free), placed = [];
+  const runOf = (a, n) => { for (let k = 0; k < n; k++) if (!freeSet.has(a + k)) return false; return true; };
+  for (const c of cand) {
+    const at = free.filter(a => freeSet.has(a) && runOf(a, c.size))
+      .sort((x, y) => { const len = a => { let k = 0; while (freeSet.has(a + k)) k++; return k; }; return len(x) - len(y) || x - y; })[0];
+    if (at === undefined) continue;
+    for (let k = 0; k < c.size; k++) freeSet.delete(at + k);
+    placed.push({ ...c, at });
+  }
+  const rename = new Map();
+  for (const c of placed) { let o = c.at; for (const x of c.m) { rename.set(x.n, o); o += x.size; } }
+  // ---- zero them at power-on, as the image used to ----
+  // Emitted at the build's @ZPCLEAR marker. Not a store per promoted byte -- they are scattered
+  // over ~25 runs and that came to ~140 bytes -- but one loop over ALL of zero page from $02 up,
+  // skipping only Krill's live range ($00/$01 are the CPU port). The bytes it clears beyond the
+  // promoted ones are the build's own zero-page variables, which nothing has written yet at
+  // power-on either: zero is as good a starting value as whatever the boot chain left there,
+  // and it is the same one every time.
+  const k0 = kz('loader_zp_first'), k1 = kz('loader_zp_last');
+  const clr = !rename.size ? [] : [
+    '        lda #$00                ; ZPCLEAR: zero page from $02, all but the loader\'s',
+    '        ldx #$02',
+    `zpcLp:  cpx #$${k0.toString(16)}`,
+    '        bcc zpcSt',
+    `        cpx #$${(k1 + 1).toString(16)}`,
+    '        bcc zpcNx               ; Krill\'s range: its resident is live during play',
+    'zpcSt:  sta $00,x',
+    'zpcNx:  inx',
+    '        bne zpcLp'];
+  const mk = L.findIndex(l => l.startsWith('; @ZPCLEAR'));
+  if (mk < 0 && rename.size) throw new Error('compact: buffers promoted to zero page but no ; @ZPCLEAR marker to zero them at');
+  if (mk >= 0) L.splice(mk, 1, L[mk], ...clr);
+  const out = L.map(l => {
+    const m = /^([A-Za-z_]\w*)(\s*=\s*)\$[0-9a-fA-F]{4}\b/.exec(l);
+    return m && rename.has(m[1]) ? l.replace(/\$[0-9a-fA-F]{4}/, '$' + rename.get(m[1]).toString(16).padStart(2, '0')) : l;
+  });
+  const saved = placed.reduce((t, c) => t + c.save, 0), spent = placed.reduce((t, c) => t + c.size, 0);
+  console.log(`  ZERO PAGE     ${placed.length} buffers (${spent} B of ${free.length} free) promoted: ~${saved} B of code saved` +
+              `, ${freeSet.size} B left`);
+  if (process.env.ZPSHOW) console.log('  ' + placed.map(c => `${c.m.map(x => x.n).join('+')}=$${c.at.toString(16)}(${c.save})`).join(' '));
+  return out.join('\n');
+};
+const src = zpAlloc(readFileSync(SRC, 'utf8'));
 const lines = src.split('\n');
 
 // ---- MEASURE IN A LAYOUT THAT CANNOT FAIL ----
@@ -392,9 +552,21 @@ const sized = sorted.map(([n, a], i) => ({ n, a, size: sizeOf(n, a, i) }));
 // exceed 1+max(+k) protects it from being UNDER-SIZED -- it says nothing about its NEIGHBOURS
 // staying put. So: any buffer that begins exactly where the previous one ended joins its cluster,
 // and clusters are what get placed.
+// ---- AN EQUATE NOTHING NAMES GETS NO SPACE ----
+// A debug flag's scratch, or a variable whose last reader was deleted, is still an equate, and
+// was still given a byte (or a cluster's worth) of the arena. If no line but its own definition
+// names it, nothing can touch it -- EXCEPT through an indexed neighbour, so a nameless buffer in
+// the unbroken run after an indexed one keeps its place (the omEn rule; see zpAlloc). The rest
+// lose their definition line in the compacted source.
+const nameCount = new Map();
+for (const raw of src.split('\n')) for (const m of raw.split(';')[0].matchAll(/\b[a-zA-Z][a-zA-Z0-9_]*\b/g))
+  nameCount.set(m[0], (nameCount.get(m[0]) ?? 0) + 1);
+const unnamed = [];
 const bufs = [];
 for (const b of sized) {
   const last = bufs[bufs.length - 1];
+  const inIndexedRun = last && b.a === last.a + last.size && last.members.some(m => use.get(m.n).indexed && !DECLARED[m.n]);
+  if ((nameCount.get(b.n) ?? 0) <= 1 && !inIndexedRun && ALIGNED[b.n] === undefined) { unnamed.push(b); continue; }
   // A buffer that DECLARES alignment cannot be a cluster member: a cluster is placed as one run
   // and aligned at its start, so a declared buffer sitting 520 bytes in lands wherever it lands.
   // fallSnapD and fallSnapS are adjacent and both declared -- merged, the second was never on a
@@ -508,9 +680,12 @@ console.log(`  ===> LEVEL ARENA  ${arenaLeft} bytes, of which ${usable} are page
 // image" guard checks. So each one's `name = $xxxx` is rewritten to the address it was assigned.
 {
   const placedAt = (process.env.IDENTITY && !process.env.REHOME) ? new Map()   // identity: leave them
-    : new Map(bufs.filter(b => b.at !== undefined)
-    .flatMap(b => b.members).map(m => [m.n, m.at]));
+    : new Map([...bufs.filter(b => b.at !== undefined)
+    .flatMap(b => b.members).map(m => [m.n, m.at])]);
+  if (unnamed.length) console.log(`  UNNAMED       ${unnamed.length} equates nothing names, given no space: ${unnamed.map(b => b.n).join(' ')}`);
   let out = lines2.join('\n'), n = 0;
+  for (const { n: nm } of unnamed)             // nothing names them, so the definition can simply go
+    out = out.replace(new RegExp(`^${nm} *= *\\$[0-9a-fA-F]{4}`, 'm'), `; ${nm}: named by nothing in this build, so given no RAM (compact.mjs)`);
   for (const [name, at] of placedAt) {
     const re = new RegExp(`^(${name} *= *)\\$[0-9a-fA-F]{4}`, 'm');
     if (!re.test(out)) continue;
