@@ -4277,44 +4277,24 @@ const FACEART = { colram: PICS.colram & 7 };
 // rest is 2,048 bytes of image holding cells nothing draws -- and the image is the scarce
 // resource (a four-level chain overran the $9d00 block by 113 bytes).
 //
-// The catch is the picture CYCLING: a glyph's twin is `code EOR $0f`, so a glyph is only
-// droppable if its twin is too. The used set is closed under that first, which took 196 to 214.
-//
-// EOR $0f only ever touches the low nibble, so it never leaves a glyph's aligned block of 16 --
-// which means whole blocks can be moved and pairs repacked WITHIN a block, both preserving the
-// twin relation exactly. A block holds 8 pairs; 107 pairs need 14 blocks, so two blocks fall out
-// = 256 bytes = one whole page off the charset AND one page off dsLp, which is generated from
-// FACE_NCHR and shortens by itself.
-// Blocks are emitted in PAIRS so the charset stays a whole number of 256-byte pages.
+// The pictures are STILLS (the user, 2026-08-22: no cycling), so a glyph is needed only if a shipped
+// picture draws it. It used to be packed in EOR $0f pairs, for a cycling that flipped each cell to
+// its twin; nothing emits that flip any more, and the pairing cost 18 glyphs (144 bytes) plus the
+// rounding to whole pages (2026-10-11). So: exactly the glyphs drawn, renumbered in their old
+// order, and dsLp copies the last partial page with a short tail loop.
 const FACE_PACK = (() => {
-  if (!DIE || false) return null;
-  const used = new Set(PICS.maps.slice(0, NPIC).flatMap(m => m.map));
-  for (const c of [...used]) used.add(c ^ 0x0f);              // a glyph is only droppable with its twin
-  // Pair up: each pair is {lo, lo^15} within one block, and exactly one of the two has lo < 8.
-  const pairs = [...used].filter(c => (c & 0x0f) < 8).map(c => [c, c ^ 0x0f]);
-  for (const [a, b] of pairs) if (!used.has(a) || !used.has(b))
-    throw new Error(`cut-scene charset: glyph pair ${a}/${b} is not closed under EOR $0f`);
-  const blocks = Math.max(2, Math.ceil(Math.ceil(pairs.length / 8) / 2) * 2);   // even, for whole pages
-  if (blocks >= 16) return null;                              // nothing to gain
-  const map = new Map();                                      // old code -> new code
-  pairs.forEach(([a, b], i) => { const nb = (i / 8) | 0, np = i % 8;
-    map.set(a, nb * 16 + np); map.set(b, nb * 16 + (15 - np)); });
-  for (const [a, b] of pairs) if ((map.get(a) ^ 0x0f) !== map.get(b))
-    throw new Error(`cut-scene charset repack broke the EOR $0f twin of glyph ${a}`);
-  const chars = [];
-  for (let n = 0; n < blocks * 16; n++) {
-    const old = [...map.entries()].find(([, v]) => v === n)?.[0];
-    for (let r = 0; r < 8; r++) chars.push(old === undefined ? 0 : PICS.chars[old * 8 + r]);
-  }
-  const drawn = new Set(PICS.maps.slice(0, NPIC).flatMap(m => m.map)).size;
-  console.error(`  cut-scene charset: ${drawn} glyphs drawn + ${used.size - drawn} EOR $0f twins ` +
-    `= ${used.size} -> ${blocks} blocks, ${chars.length} B instead of ${PICS.chars.length} ` +
-    `(saves ${PICS.chars.length - chars.length})`);
+  if (!DIE) return null;
+  const used = [...new Set(PICS.maps.slice(0, NPIC).flatMap(m => m.map))].sort((a, b) => a - b);
+  if (used.length >= 256) return null;                        // nothing to gain
+  const map = new Map(used.map((c, n) => [c, n]));            // old code -> new code
+  const chars = used.flatMap(c => PICS.chars.slice(c * 8, c * 8 + 8));
+  console.error(`  cut-scene charset: ${used.length} glyphs drawn -> ${chars.length} B instead of ` +
+    `${PICS.chars.length} (saves ${PICS.chars.length - chars.length})`);
   return { chars, map };
 })();
 if (FACE_PACK) { PICS.chars = FACE_PACK.chars;
   PICS.maps = PICS.maps.map((m, i) => i < NPIC
-    ? { ...m, map: m.map.map(c => FACE_PACK.map.get(c) ?? 0) } : m); }
+    ? { ...m, map: m.map.map(c => FACE_PACK.map.get(c)) } : m); }
 const FACE_NCHR = PICS.chars.length;      // 8 bytes a glyph, so 2048 is the full 256
 // ---- EVERYTHING HERE IS IN SIXTIETHS, off frameCnt ----
 // The first version counted RENDER frames. The renderer runs at ~19fps and varies, so a 40-frame
@@ -6547,6 +6527,9 @@ const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 0 : 2));
 // Effective only where the level LOADS (LVLLOAD): the per-level dump subprocesses inherit the env
 // but build no fall worth the name, and have no lvlLoad for fallMid to call.
 const FALLMID = LVLLOAD;   // all level work in the drop's black middle (2026-10-04, user: "let's keep it")
+// FMLOG=1: time the black middle -- fmTk is the ticks the last one took, fmLog the last 16 -- to read
+// with probe.mjs. Instrumentation, so off in the game (2026-10-11: 50 bytes nobody reads in play).
+const FMLOG = flag('FMLOG');
 const ARC_OVERLAP = +(process.env.ARC_OVERLAP ?? (FALLMID ? 0 : 4));
 // Which drop frame asks for the destination render. NOT frame 0: a render is ~4 raster periods
 // and at frame 0 nothing has moved yet, so it reads as hitting something rather than falling.
@@ -10418,14 +10401,14 @@ fnSkip:
         jsr fallStep            ; the destination render is a background job now -- no state
         jmp mvs                 ;   between walking and falling
 mfRnd:${FALLTAIL && process.env.FTDBG ? '  jsr fallTail          ; FTDBG: build the tail every frame, readable at any pose\n      ' : ''}  lda #$00
-        sta bgOn                ; the player's own frame is never capped, and draws every column
-        sta rsLo
+${FALLMID ? '' : `        sta bgOn                ; the player's own frame is never capped, and draws every column
+`}        sta rsLo
         lda #39
         sta rsHi
         jsr rayAll              ; the cast is a SUBROUTINE now, so the fall can run it too --
         jmp subFin              ;   in slices, into a buffer, while the animation keeps moving
-rayCont:jmp subLp               ; resume a capped cast: everything it needs is still in RAM
-rayAll:
+${FALLMID ? '' : `rayCont:jmp subLp               ; resume a capped cast: everything it needs is still in RAM
+`}rayAll:
 ` : ''}
 ${PROFILE && !PROFILE1 ? '        jsr pfT0              ; input\n' : ''}
 ${NORAY ? '        jmp subDn' : ''}
@@ -10499,14 +10482,17 @@ ${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol store
         sta stackRT             ; push (0,159)
         lda #$01
         sta sp
-`}subLp:  lda bgOn                ; ---- the cast is INTERRUPTIBLE ----
+`}subLp:${FALLMID ? `   ; FALLMID renders the destination WHOLE in the drop's black middle, so the cast is
+                                ;   never interrupted and the per-pop budget check below is gone
+                                ;   (2026-10-11) -- one compare a pop off every frame.
+` : `  lda bgOn                ; ---- the cast is INTERRUPTIBLE ----
         beq subLp0              ;   Normal rendering pays one compare per pop for this. The
         dec bgN                 ;   background render for the fall gets a per-frame iteration
         bne subLp0              ;   budget instead, and when it runs out it simply RETURNS: sp
         lda #$ff                ;   and the two stack arrays are plain RAM, so next frame picks
         sta bgMore              ;   up exactly where it stopped. No recursion to unwind -- the
         rts                     ;   subdivision was an explicit stack all along.
-subLp0: ldx sp
+`}subLp0: ldx sp
         beq subDn
         dex
         stx sp
@@ -15817,10 +15803,9 @@ ${!ANYFLOORDK ? '' : `        jsr arcBld              ; the departing arc's dict
                                 ;   level being LEFT -- lvlLook does not run until the handover
 `}        lda #$01
         sta fallSt
-${FALLMID ? `        lda #$00                ; FALLMID: no background render -- fallMid renders the room whole
-` : ''}        sta bgPh                ; and start rendering the destination room IN THE BACKGROUND,
+${FALLMID ? '' : `        sta bgPh                ; and start rendering the destination room IN THE BACKGROUND,
                                 ;   a slice per frame in the slack the fall leaves
-        jsr fallInv             ; THE RENDER COMING IN A FEW FRAMES DRAWS INTO A BUFFER A PREVIOUS
+`}        jsr fallInv             ; THE RENDER COMING IN A FEW FRAMES DRAWS INTO A BUFFER A PREVIOUS
                                 ; FALL SCRIBBLED. Without this renderSym skips every column whose
                                 ; cached runs still look unchanged and leaves the LAST fall's
                                 ; destination sitting there -- the second drop showed the first
@@ -15841,15 +15826,16 @@ ${FALLMID ? `
 ; ---- fallMid: EVERY piece of level work, in one black moment between the two arcs ----
 ; Called at the handover, when the top arc has left the screen and the bottom one has not appeared:
 ; the display is pure hole, so blanking it is invisible. Then the level change, and the
-; destination rendered in FULL -- bgStep driven to
-; completion rather than a slice a frame. DEN stays off until the landing's first flip publishes
-; pd11. fmTk = the ticks it all took, so the pause can be measured rather than guessed.
+; destination rendered in FULL: one cast, one renderSym over all 40 columns, one copy. (It was
+; bgStep driven to completion, the machinery for rendering in slices across the fall's frames,
+; which FALLMID no longer does.) DEN stays off until the landing's first flip publishes
+; pd11. With FMLOG=1, fmTk = the ticks it all took, so the pause can be measured rather than guessed.
 fallMid:lda $d011
         and #$ef
         sta $d011
-        lda frameCnt
+${FMLOG ? `        lda frameCnt
         sta fmT0
-        ldx hlv                 ; the exit taken -- still the departing level's numbering here
+` : ''}        ldx hlv                 ; the exit taken -- still the departing level's numbering here
         lda lvlNxtT,x
         cmp #$ff
         beq fmSame
@@ -15861,14 +15847,16 @@ ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place
 fmSame: jsr lvlStart            ; the arriving level's start: what the render below looks from
         lda #$00
         sta hlv
-        lda #$01
-        sta bgPh
         jsr fallInv
-fmBg:   jsr bgStep              ; the whole destination room, into fallBuf2
-        lda bgPh
-        cmp #$03
-        bne fmBg
-        lda frameCnt
+        jsr rayAll              ; the whole destination cast in one go -- nothing caps it here
+        jsr fallInv             ; renderSym must not trust a cache the fall has been scribbling
+        lda #$00
+        sta rsLo
+        lda #39
+        sta rsHi
+        jsr renderSym           ; every column into the back buffer...
+        jsr bgCopy              ; ...and out to fallSnapD, ready for the landing
+${FMLOG ? `        lda frameCnt
         sec
         sbc fmT0
         sta fmTk
@@ -15878,12 +15866,12 @@ fmBg:   jsr bgStep              ; the whole destination room, into fallBuf2
         txa
         and #$0f
         sta fmN
-        rts
-fmT0:   !byte 0
+` : ''}        rts
+${FMLOG ? `fmT0:   !byte 0
 fmTk:   !byte 0                 ; ticks the last midpoint took (60 a second)
 fmN:    !byte 0
 fmLog:  !fill 16, 0             ; the last 16 midpoints, oldest first until it wraps
-` : ''}
+` : ''}` : ''}
 
 ; fallStep: advance the physics and draw one frame. Called instead of the whole renderer.
 fallStep:
@@ -15978,7 +15966,7 @@ ${!ANYFLOORDK ? '        sta pCh0\n' : `        lda #${hx(ARC_CB5)}     ;   scan
         sta arcInv              ;   holds, so park the split ABOVE the display instead and let
                                 ;   charset B supply the other polarity. Every column flips on
                                 ;   the same frame, so one raster line does the whole job.
-        cpx #${ARC_OVERLAP}     ; still inside the overlap window? then the screen is the two
+${ARC_OVERLAP ? `        cpx #${ARC_OVERLAP}     ; still inside the overlap window? then the screen is the two
         bcs fsL2                ;   RIMS and nothing else: A for the departing one at the top,
         lda #${hx(ANYFLOORDK ? ARC_CB : CB_A)}        ;   B for the arriving one below it. The new room is held off
         sta pCh0                ;   screen this early, so two regions is all it takes. The
@@ -15999,7 +15987,7 @@ ${!ANYFLOORDK ? `        lda #246
         sta pSplit2
 ` : `        jsr fsOv                ; region 3 begins where the room does
 `}        jmp fsL3
-fsL2:${!ANYFLOORDK || FALLMID ? '' : `   cpx #${hx(ARC_OVERLAP)}             ; the FIRST frame past the window, and only that one: the
+` : ``}fsL2:${!ANYFLOORDK || FALLMID ? '' : `   cpx #${hx(ARC_OVERLAP)}             ; the FIRST frame past the window, and only that one: the
         bne fsL2a               ;   departing room has gone, so the charset can change now
         jsr lvlChr
 fsL2a:`}${CEILVARY ? `   jsr lvlHi               ; past the overlap window: the DEPARTING rim has left the
@@ -16071,10 +16059,10 @@ fivS:   sta cwA,x               ; offsets 80-159: the solid pair
 ; hole; the arc itself -- crown, depth, profile -- is identical, so the world closing over you and
 ; the room opening under you are the same sixteen frames run twice.
 fallDraw:
-        jsr bgStep              ; a slice of the destination render first -- it draws into the
+${FALLMID ? '' : `        jsr bgStep              ; a slice of the destination render first -- it draws into the
                                 ;   back buffer and copies itself out, and the fall frame below
                                 ;   then paints over the whole thing
-        lda fFrm                ; which arc frame to draw. The overlap re-points this at a DROP
+`}        lda fFrm                ; which arc frame to draw. The overlap re-points this at a DROP
         sta arcIx               ;   frame further on, so it has to be reset every frame -- losing
                                 ;   this line left arcPrep reading whatever the tail draw set
                                 ;   last, and the arc appeared late and in the wrong place.
@@ -16180,7 +16168,7 @@ fdPhW:  sta phA                 ; remember where it is now, for this buffer
         pla
         jsr fdFill
 fdTail:
-        ; ---- the DEPARTING arc, drawn over the top of an arriving one ----
+${ARC_OVERLAP ? `        ; ---- the DEPARTING arc, drawn over the top of an arriving one ----
         ; Only for the first ARC_OVERLAP frames of the landing, and only ever above it: the two
         ; rims never share a row (see arcOvSpT). Its polarity is the drop's -- floor above, hole
         ; below -- so charset A, which is why pCh0 goes back to A through the window. No second
@@ -16217,7 +16205,7 @@ fdTail:
         jsr arcBand
         lda #$ff
         sta arcInv              ; put it back: the landing owns the rest of the phase
-fdTDn:  rts
+` : ``}fdTDn:  rts
 
 ; ---- fdWarp: the drop's copy, one source row per DESTINATION row ----
 ; This is the camera height. Instead of translating the frozen frame by a fixed offset, every
@@ -17472,12 +17460,17 @@ dfEnd:
         ldx #$00                ; charset B is plain RAM now: no port dance, no sei. (It was five
                                 ;   pages under the I/O hole, ~12,800 cycles with interrupts off.)
                                 ; unrolled per page and GENERATED from the glyph count -- this
-dsLp:${[...Array(Math.ceil(FACE_NCHR / 256))].map((_, pg) => `
+dsLp:${[...Array(FACE_NCHR >> 8)].map((_, pg) => `
         lda faceChrT+${hx16(pg * 256)},x
         sta ${hx16(CHARSET_B + pg * 256)},x`).join('')}
         inx
         bne dsLp
-        ldx #$00                ; colour RAM is the OTHER memory at $d800 and needs I/O back in.
+${FACE_NCHR & 255 ? `        ldx #${hx(FACE_NCHR & 255)}             ; ...and the last, partial page, top down
+dsTl:   lda faceChrT+${hx16((FACE_NCHR & ~255) - 1)},x
+        sta ${hx16(CHARSET_B + (FACE_NCHR & ~255) - 1)},x
+        dex
+        bne dsTl
+` : ''}        ldx #$00                ; colour RAM is the OTHER memory at $d800 and needs I/O back in.
 dsCol:  lda #${hx(8 | FACEART.colram)}  ; bit 3 keeps the cell multicolor; the face wants black here
         sta $d800,x
         sta $d900,x
@@ -17784,7 +17777,7 @@ ${HAS_IDOL ? `        txa                     ; ...and gives them back when you 
         jmp orbOcc1             ; X is still the entity index. Its build-time occluder mask is
                                 ;   about the cell it came from and is now wrong.
 
-; ---- bgStep: one slice of the destination render, once per fall frame ----
+${FALLMID ? '' : `; ---- bgStep: one slice of the destination render, once per fall frame ----
 bgStep: lda bgPh
         beq bgDn
         cmp #$03
@@ -17837,7 +17830,7 @@ bgFin:  lda #$03
 bgDn:   rts
 
 
-; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
+`}; ---- arcPrep: two bytes of animation, and where the arc bottoms out ----
 ; The profile is monotonic from centre to edge, so the boundary's lowest point on screen is always
 ; either the centre (inverted) or an edge (arch) -- no scan is needed to find arcHi.
 arcPrep:ldx arcIx
@@ -19711,7 +19704,7 @@ faceChrT: ${chunk(PICS.chars, 32).trim()}` : ''}${!ANYFLOORDK ? '' : `
 ; 96 bytes over. Each runs a handful of times per FALL, so none had any claim on contested
 ; space; this is the run the packed cut-scene charset leaves ahead of the ladder tables, which
 ; FALLNOW's scratch already uses the same way. VISTAB's guard says if it stops fitting.
-; ---- fsOv: where region 3 begins during the overlap window ----
+${ARC_OVERLAP ? `; ---- fsOv: where region 3 begins during the overlap window ----
 ; It used to be parked at 246 -- the bottom -- because the window was "the two rims and nothing
 ; else". The new room reaches the foot of the screen before the window ends, though, and it needs
 ; its own charset rather than the arriving rim's block. So the split follows its leading edge.
@@ -19723,7 +19716,7 @@ fsOv:   lda arcSp2T,x           ; region 3 begins at the ARRIVING arc's BOTTOM -
                                 ;   below it, and its cells then landed in charset A -- where
                                 ;   200-232 are the readout glyphs. A row of HUD characters.
 
-; ---- fdBlw: what fills the rows BELOW the arc, which is not one answer ----
+` : ``}; ---- fdBlw: what fills the rows BELOW the arc, which is not one answer ----
 ; On a DROP it is the hole, and region 3 down there reads the arc's own block, so it is the
 ; block's code. On a LANDING it is the gap between the arc and the room, and every region below
 ; the arc's bottom is a CHARSET -- so it has to be the charset's ground, BLANK. The arc block's

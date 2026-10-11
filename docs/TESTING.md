@@ -130,19 +130,19 @@ compare anything.
 
 ## Last recorded `fpsr.mjs "" suite`
 
-2026-10-11, after the bump counter and the pose fixes. The `was` column is the 2026-10-10 record
-(the space audit).
+2026-10-11, after the drop/death space cuts (the destination rendered whole, so the cast lost its
+per-pop budget check). The `was` column is the run before, the same day, after the bump counter
+and pose fixes. Every walk: 0 blocked.
 
-| level | spin fps | was | walk fps | was | walk |
-|---|---:|---:|---:|---:|---|
-| 1 | 21.40 | 21.60 | 15.26 | 15.26 | 4 legs, 0 blocked |
-| 2 | 31.10 | 31.10 | 12.73 | 12.95 | 2 legs, 0 blocked (clear 7 -> 6.75) |
-| 3 | 27.51 | 27.51 | 15.97 | 15.97 | 2 legs, 0 blocked |
-| 4 | 17.60 | 17.60 | 15.96 | 15.96 | 2 legs, 0 blocked |
-| 5 | 27.80 | 27.80 | 11.16 | 11.25 | 4 legs inset, 0 blocked |
-| 6 | 23.80 | 23.80 | 14.91 | 14.95 | 4 legs backwards, 0 blocked |
-| 7 | 30.40 | 29.40 | 14.79 | 14.64 | 2 legs, 0 blocked (pose moved to the row's middle) |
+| level | spin fps | was | walk fps | was |
+|---|---:|---:|---:|---:|
+| 1 | 21.60 | 21.40 | 15.26 | 15.26 |
+| 2 | 31.30 | 31.10 | 12.73 | 12.73 |
+| 3 | 27.51 | 27.51 | 16.10 | 15.97 |
+| 4 | 17.60 | 17.60 | 16.04 | 15.96 |
+| 5 | 28.00 | 27.80 | 11.26 | 11.16 |
+| 6 | 23.92 | 23.80 | 14.95 | 14.91 |
+| 7 | 30.40 | 30.40 | 14.79 | 14.79 |
 
-The walks on levels 2, 5 and 7 changed course, so their `was` is not a like-for-like comparison.
-Level 1's spin moved by one frame (107 vs 108), inside the resolution. Level 7's spin moved because
-its pose moved. Level 6's spin, 0.4 fps (2 frames) under its pre-audit 24.20, is not being chased.
+Every change is within one frame. The walks on levels 2, 5 and 7 changed course on 2026-10-11 (the
+bump counter's fixes), so compare them only with runs from then on.

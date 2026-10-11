@@ -67,6 +67,24 @@ The goal was room for features, without changing the game. The image went from *
 - **The angel leash as a per-level overlay.** It is ~23 bytes of engine code, and its data already
   rides in the level file.
 
+## Round 2: the drop and the death scene, same look (2026-10-11)
+
+Free: 2,629 -> 3,071 bytes; the arena now holds 10 whole pages. `regress.sh` IDENTICAL on every
+workload, fps suite clean.
+
+| change | freed |
+|---|---:|
+| Overlap-window code, dead since FALLMID set `ARC_OVERLAP` to 0, gated on it | ~145 |
+| Fall timing log (`fmTk`/`fmLog`) behind `FMLOG=1` | ~90 |
+| Death charset: exactly the 196 glyphs drawn (was EOR $0f pairs for a cycling that no longer exists) | 224 |
+| The destination rendered whole in the black middle (`bgStep` slicing and the cast's per-pop budget check deleted) | ~83 |
+
+Not done, and why. Sliding the departing room from the screen instead of `fallSnapS` (520 B)
+works row-wise: proved that every drop frame's rows are still on the previous frame. But the
+snapshot keeps 13 rows and mirrors them, and the real screen's bottom half has occluder stamps
+(and the HUD), so it would change the look slightly. Loading the death charset from disk at death
+(~1.8K) adds a pause at the cut.
+
 ## Cost by feature
 
 | feature | code | tables | scratch | **total** |
