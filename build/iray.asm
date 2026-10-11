@@ -13251,7 +13251,7 @@ oSPedg: cmp #$01
         ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
         ; whole scratch budget and leaving its lower cells unstamped.
         tax
-        lda osLast              ; bottom of this column only -- see OCCSYNROW
+        lda osLast              ; bottom of this column only -- OCCSYNROW=all drops this gate (see OCCSYNTH)
         beq oSPnos
         lda occVrtT,x
         beq oSPsyn

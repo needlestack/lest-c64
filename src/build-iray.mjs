@@ -2203,8 +2203,17 @@ if (process.env.OCCVRTDUMP) console.error(
 // ("jsr oSWall / bcc oSCCol") and skips every ramp or step. On a wall edge that is most of them, so
 // it stamped nothing at all at the user's pose -- a stale A/B that reads as "occlusion is broken",
 // which is the silent trap this file warns about elsewhere. Removed rather than kept as a choice.
-// OCCSYNTH=1 brings back the SYNTHESIS ARM: copying a wall-edge cell's own ramp into a scratch
-// glyph with 01 -> 11. DEFAULT OFF (the user, 2026-10-01: "I'm inclined to turn it off completely
+// ---- WHAT SHIPS (checked against the code 2026-10-11) ----
+//   OCCSYNTH   ON.  Synthesis for the BOTTOM cell of each stamp column only, and only where the
+//              wall ends inside that cell (osLast + occVrtT). This is the wall-base overhang fix.
+//   OCCSYNEDGE OFF, for fps. Also synthesises partly covered cells on EVERY row of a stamp -- a
+//              wall meeting a farther wall behind an entity (the black nub). Works; rare to see;
+//              cost a whole raster frame on the pose measured (19 -> 15 fps). See below.
+//   OCCSYNROW=all  OFF. Drops the osLast gate (every row of a column is considered); measured not
+//              to fix the nub and to perturb a good view by 4 px.
+// History of OCCSYNTH, oldest first:
+// OCCSYNTH=1 brought back the SYNTHESIS ARM: copying a wall-edge cell's own ramp into a scratch
+// glyph with 01 -> 11. It was briefly DEFAULT OFF (the user, 2026-10-01: "I'm inclined to turn it off completely
 // and revisit if we ever see anything that needs it again... the occlusion stamp only needs to
 // worry about the closer wall line"). With it off, a cell a pre-built split cannot express takes
 // the split anyway, which is what OCCFB=block already does when the scratch budget runs out.
@@ -6300,7 +6309,8 @@ const orbBitT = [...Array(8)].map((_, i) => 1 << i);
 // single raster period, so the fall runs at 60fps against the 15 the rendered world manages --
 // deliberately the smoothest thing on screen.
 //
-// It runs at a LOCKED 30fps, not 60. The widest frame copies a whole screen, which only just
+// (Now a locked 20fps -- FALL_PERIODS = 3, below; this paragraph is the 30fps history.)
+// It ran at a LOCKED 30fps, not 60. The widest frame copies a whole screen, which only just
 // fits a single raster period -- so some frames spilled into a second one and the rate flipped
 // between 60 and 30, and a rate that varies is precisely what stutters. Half the rate is twice
 // the headroom and never a missed period. It is still twice the rendered world's frame rate.
@@ -6350,7 +6360,7 @@ const FALL_PERIODS = +(process.env.FALL_PERIODS ?? 3);   // was 2 = 30fps, measu
 // and N = 20, ARC_SLOW must be 2. Dropping N to 16 keeps v at 16.0 -- the climb to flat, the part
 // that was right, is unchanged to within 1% -- and the exit is shorter because the crown is now
 // moving faster through it.
-const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 16);   // 16 * 2 / 60 = 0.53s
+const FALL_FRAMES  = +(process.env.FALL_FRAMES ?? 16);   // 16 * FALL_PERIODS(3) / 60 = 0.8s
 const mul40 = [...Array(FALLTAIL ? 31 : 26)].map((_, i) => i * 40);
 // ---- the half-height snapshot's two tables ----
 // SNAP_MUL[x] = the byte offset of screen row x INSIDE the snapshot. Rows fold about 12, so x and
@@ -23105,7 +23115,7 @@ ${OCCSYNTH ? `${OCCSYNEDGE ? `        lda osCov               ; OCCSYNEDGE: a PA
         bne oSPsyn              ;   and that is a guess -- wrong wherever the uncovered part holds
                                 ;   a distant wall's end plus floor. Synthesis has no backing: it
                                 ;   keeps the cell's own pixels outside osCov untouched.
-` : ''}${process.env.OCCSYNROW === 'all' ? '' : `        lda osLast              ; bottom of this column only -- see OCCSYNROW
+` : ''}${process.env.OCCSYNROW === 'all' ? '' : `        lda osLast              ; bottom of this column only -- OCCSYNROW=all drops this gate (see OCCSYNTH)
         beq oSPnos
 `}        lda occVrtT,x
         beq oSPsyn
