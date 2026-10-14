@@ -51,7 +51,11 @@ const scan = JSON.parse(readFileSync('./build/cellscan.json', 'utf8'));
 // charset-plan.json is derived and untracked, so THIS DEFAULT IS THE RESERVATION: regenerating
 // at 207 builds a plan the eight scratch codes have no room in, and the build's charset guard
 // fires rather than anything silently overlapping.
-const KCELL = +(process.env.KCELL ?? 197);
+// 189, not 197: eight EDGE splits that keep a corner line under an occluder stamp (SEDGE in the
+// build, 2026-10-13) -- the line used to vanish wherever an entity passed behind a wall's edge.
+// The SHIPPED plan was not refit for them: tools/dropcodes.mjs took eight codes out of it (a fresh scan
+// does not reproduce the shipped one). 189 here keeps a regenerated plan inside the same room.
+const KCELL = +(process.env.KCELL ?? 189);
 const FRAMES = scan.positions * Math.ceil(256 / scan.angleStride);
 const parse = k => k.split(',').map(Number);
 const L1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);

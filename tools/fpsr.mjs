@@ -50,7 +50,7 @@ const only = process.argv[3];
 if (only === 'suite') {
   let bad = 0;
   console.log(`level  segment   fps     frames  ticks   +-1 frame   travelled`);
-  for (let n = 1; n <= 7; n++) {
+  for (let n = 1; n <= 8; n++) {
     let o;
     try {
       o = execFileSync(process.execPath, [new URL(import.meta.url).pathname, `CHAIN=${n}${extra ? ' ' + extra : ''}`, 'level'],
@@ -70,7 +70,8 @@ const LVL = +((/CHAIN=(\d)/.exec(extra) ?? [0, 1])[1]);
 // HOW FAR EACH POSE CAN RUN before it meets a wall (the user, paced out in play, 2026-10-09).
 // Diagonal runs are counted in diagonal squares, sqrt(2) cells each.
 // Level 2 was 7, and the blocked-move count showed its last frame touching the wall (2026-10-11).
-const CLEAR = { 1: 3 * Math.SQRT2, 2: 6.75, 3: 4 * Math.SQRT2, 4: 5, 5: 4, 6: 4, 7: 7 };
+// Level 8: east down the middle hall from (1.5,5.5) to the pillar at (7,5) -- 5.5 cells (measured, not paced).
+const CLEAR = { 1: 3 * Math.SQRT2, 2: 6.75, 3: 4 * Math.SQRT2, 4: 5, 5: 4, 6: 4, 7: 7, 8: 5.25 };
 // A quarter cell short of the wall: the player's collision radius stops it before the cell edge.
 // LEG=n overrides it, which with LEGS=1 is how a new pose's clear run is measured (a long leg, then
 // read how far it got).

@@ -99,8 +99,8 @@ stacking, and each further special level costs only what it exceeds the largest 
 
 **Design:**
 
-- **Where it loads.** Not the bank-3 level slot at `$f500` (~768 B, mostly full of level data).
-  A block reserved in the image, emitted by the build, sized to the largest level's code.
+- **Where it loads.** Not the level slot (now `$6900` in CPU RAM, ~768 B, mostly full of level
+  data). A block reserved in the image, emitted by the build, sized to the largest level's code.
 - **The file.** `ILX<n>`, loaded by `lvlLoad` straight after `ILV<n>`, through the same name
   buffer with `V` patched to `X`. An engine table, one byte per level id, says whether a level
   has one. The boot level's code is patched straight into the image bytes after linking, so
@@ -132,6 +132,45 @@ stacking, and each further special level costs only what it exceeds the largest 
   it, for flickering sprites), and `lvlSpr`'s lit-frame skip.
 - Floor dither (616 B, levels 5-7) does NOT move cleanly: it's woven into the drop's rim and
   charset rebuild. Left alone by the user's call.
+- **Level 9's sentry: the first consumer, and the one that will force this.** Its code is about
+  1.2K (`svStep`, `svTouch`, `svTick`, `svChg`, `svDie`, `svKey`, `svReset`, `svQuad`, `svReg`)
+  and only levels with sentries need it. It's already self-contained, and the engine reaches it
+  through a handful of hooks: `svStep` in the main loop, `svTick` in the IRQ, `svReset` in
+  `objInit`, `svReg`/`orbRt` in the sprite writer. With the sentry (~1.2K) and level 8 (~670 B)
+  both moved, the saving is about 670 B less the hooks. Build it when level 9's gameplay runs out
+  of room. A WIP=1 engine had about 320 B free on 2026-10-14 (122 B in the fps rig's level-2
+  build), so that point is close.
+
+## Level-loaded art: the first instance (2026-10-14)
+
+Level 9's sentry needed 48 sprite slots that bank 3 didn't have. Rather than drop the idol and the
+pedestal from the game, they now swap with the sentry's art per level. This is the pattern any
+level-loaded asset will follow, so here it is written down.
+
+- **A fixed landing area.** `OVLBASE` = `$f780`, 26 slots up to `COLH` at `$fe00`. It has to be
+  RAM the CPU can reach: Krill can't write under the I/O hole, so anything swapped at runtime
+  lives above it. What never swaps can live under the hole: the sentry's frames 0-1 sit at
+  `SVBASE`, behind the exit ladder at the end of `IHOL`, where the pedestal and the idol were.
+- **Sets that can occupy it.** `ART_SETS` in the build: `IAR0` = the pedestal then the idol
+  (1.3K); `IAR1` = the sentry's frames 2-3 plus its data tables (`SVTBL`: `svVarT` and five
+  small ones, 126 B), 1.6K. Data rides with art when only that level reads it.
+- **Which set a level needs.** `lvlArtT`, one byte in the level file: `'0'`, `'1'`, or 0 for a
+  level that uses neither and keeps whatever is there.
+- **What's loaded now.** `artCur`, emitted as data, so a death restart (`jmp entry`, which loads
+  nothing) keeps it, exactly like `dieN`.
+- **When it loads.** At the end of `lvlLoad`, in the fall's blanked middle: if `lvlArtT` names a
+  set other than `artCur`, the name buffer is renamed `IAR<c>` and loaded, then renamed back to
+  `ILV`. About 0.3 s for 1.6K. The boot loads the set its own level wants; the other waits on
+  the disk.
+- **Guards.** The bank-3 overlap guard counts the landing area at the size of the LARGEST set. A
+  level can't need two sets (a sentry level with an idol is a build error). Code that reads a
+  set's data checks first that its level has the feature (`svTick` tests `svNT`), because on
+  other levels those addresses hold the other set.
+
+Checked: falling 9 -> 7 reloads `IAR0`, and level 7 is pixel-identical to booting it.
+
+Level-loaded CODE is the same shape plus one hard part, linking code to run at the landing
+address. That's the parked plan above.
 
 ## Cost by feature
 

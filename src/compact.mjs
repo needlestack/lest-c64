@@ -489,8 +489,11 @@ writeFileSync(ROOT + 'iray.syms.json', JSON.stringify(out.labels));
 // A buffer declared as `name = $xxxx` is not emitted, so compaction cannot see it. Any that now
 // fall inside the code or table sections have to be rehomed -- into the arena, or above the
 // tables. Reported, because they are the difference between "it assembles" and "it could run".
+// NOT the level slot's equates: since the slot moved into CPU RAM (2026-10-13) its tables are equates
+// in the image range too, but they are where the level FILES land -- a fixed address, not scratch.
+const SLOTR = need('iray.reserve.json');
 const eqs = [...src.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*) *= *\$([0-9a-fA-F]{4})(?:\s*;.*)?$/gm)]
-  .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= ORG && a < CEIL);
+  .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= ORG && a < CEIL && !(a >= SLOTR[0] && a < SLOTR[1]));
 
 // ---- HOW BIG IS EACH SCRATCH BUFFER, REALLY ----
 // An equate declares no length, so build-iray.mjs reserves its whole PAGE -- safe, and here it
@@ -610,6 +613,14 @@ const bySize = (a, b) => (a[1] - a[0]) - (b[1] - b[0]) || a[0] - b[0];
 // assembler reports their home as a hole, and scratch would be placed straight on top of them.
 let RESERVE = null;
 RESERVE = need('iray.reserve.json');
+// ...and the region must lie wholly in the ARENA once the level slot is in CPU RAM (2026-10-13). Only
+// scratch is carved around it; code grows up and tables grow down regardless, and a run laid over
+// the slot would be overwritten by every level load -- silent, and only after the first fall.
+if (RESERVE[0] < CEIL && RESERVE[1] > ORG && (RESERVE[0] < codeEnd || RESERVE[1] > dataStart)) {
+  console.error(`compact: the level slot $${RESERVE[0].toString(16)}-$${(RESERVE[1] - 1).toString(16)} is not inside ` +
+    `the arena $${codeEnd.toString(16)}-$${(dataStart - 1).toString(16)} -- move SLOT_AT`);
+  process.exit(1);
+}
 const carve = ([lo, hi]) => {
   if (!RESERVE || RESERVE[1] <= lo || RESERVE[0] >= hi) return [[lo, hi]];
   return [[lo, Math.min(hi, RESERVE[0])], [Math.max(lo, RESERVE[1]), hi]].filter(([a, b]) => b > a);

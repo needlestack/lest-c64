@@ -40,6 +40,7 @@ import { assemble } from './asm6502.mjs';
 // the tracked iray.asm alone.
 const DIAGEARLY = [];
 import { fitOrb, fitArt, fatBits } from './fit-orb.mjs';
+import { silverW, silverAt, silverLeast, setSilverLuma } from './fit-silver.mjs';
 import { LOADER_RUN, KSTAGE, KRILL_RT_LEN, KRILL_RT_AT, KRILL_RESIDENT_AT } from './loader-src.mjs';
 import { END_DST, IEND_NAME, IEND_RUN, buildEnding } from './ending-src.mjs';
 
@@ -54,7 +55,7 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // ---- WHICH LEVEL IS THIS BUILD? ----
 // LVL=n is the level this build (or sub-build) is about. The game is the CHAIN of levels, each
 // built in its own subprocess and loaded off the disk when it is fallen into; the hub's black hole
-// leads to the ending (END_DST).
+// leads to level 8, and level 8's exit to the ending (END_DST).
 //
 // LEVEL 1 is the user's layout of 2026-09-15: the old level 1's room, 6 x 9 with its alcoves
 // and notch, joined by a 7-cell corridor to the ring rotated 90 degrees clockwise. 23 x 11 =
@@ -90,7 +91,13 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // level (CHAIN=4 -> the hub by itself); the hub's exits lead to 5/6/7 only when all three are in the
 // chain. The other shipping disk is 4,5,6,7 (leveltest.d64). History of the residency limits that
 // used to shape this default (1,2,3 / 1,4,5 / 1,2 / 1-4): the iray-shipping-chains note and git log.
-const CHAIN = (process.env.CHAIN ?? '1,2,3,4,5,6,7').split(',').map(Number);
+// LAB=1: level 9 on its own disk -- WIP=1 with CHAIN=9. It WAS an engine for the WIP levels alone
+// (2026-10-13), dropping the idol, the pedestals and the flicker to make bank-3 room for the
+// sentry's art; since 2026-10-14 the sentry is an ordinary entity in the full engine (the user: "use
+// all the same machinery (code,ladders,graphics) as the other levels"), so a lab is just the game's
+// engine booting level 9.
+const LAB = process.env.LAB === '1';
+const CHAIN = (process.env.CHAIN ?? (LAB ? '9' : '1,2,3,4,5,6,7,8')).split(',').map(Number);
 // D64=<name> writes somewhere other than lest-c64.d64. A variant build -- a level-wiring test, a
 // profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
@@ -118,9 +125,12 @@ const ALLLVL = [...CHAIN];
 // 8's flicker: ~400 bytes of IRQ code and tables) in every build of the real game. WIP=1 adds them
 // to LEVEL_IDS, so the engine changes; naming one in CHAIN or LVL without it is an error, not a
 // quietly different engine.
-const SHIP_LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7];
-const WIP_LEVEL_IDS = [8];                       // 8: the flicker / lighting test (2026-10-09)
-const WIP = process.env.WIP === '1';
+// 8 SHIPS (2026-10-13, the user: "let's keep this as level 8 ... where you drop after completing the
+// errands and dropping through the black exit on level 4"). It was the flicker / lighting test from
+// 2026-10-09. The WIP list stays, empty, for the next level that is not ready.
+const SHIP_LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
+const WIP_LEVEL_IDS = [9];                       // 9: the sentries (2026-10-13); LAB=1 builds it alone
+const WIP = process.env.WIP === '1' || LAB;
 const LEVEL_IDS = WIP ? [...SHIP_LEVEL_IDS, ...WIP_LEVEL_IDS] : SHIP_LEVEL_IDS;
 for (const n of [...CHAIN, LVL]) if (!LEVEL_IDS.includes(n)) throw new Error(WIP_LEVEL_IDS.includes(n)
   ? `level ${n} is work in progress: build it with WIP=1`
@@ -164,6 +174,102 @@ const L1_MAP = [
   "#..##..######.........#",
   "#######################",
 ];
+// (Level 9 is parsed up here, ahead of LEVEL_WALLS, which takes its door from the sheet.)
+// ---- LEVEL 9 (WIP; LAB=1 builds it alone): SENTRIES -- the user's map, in the user's own notation ----
+// The silver orbs no longer chase -- "you run away and don't look at them (wasting their cool large
+// & animated effect)" -- they PATROL: each runs its own closed path at a fixed rate, a timing
+// challenge. The sheet is the source: ~n is sentry n's path, ~# a cell two paths share, and ~<
+// ~> ~^ ~v a sentry's start cell and first heading. A path is traced from its start: at each cell
+// the sentry goes on to a neighbour on its own path (its number, ~#, or its own start), preferring
+// straight on, never back, until it is home. "Not a complete level, just a test."
+// v3 (the user, 2026-10-13): EIGHT sentries, four round each pillar, both loops clockwise -- so the
+// two lanes that touch (rows 4 and 5) run in opposite directions. The user wrote the paths ~~;
+// they are numbered here because the loops touch and a bare ~~ would fork at (2,4)/(2,5).
+// v4 (the user, 2026-10-14): the PUZZLE on the normal machinery -- OO at (6,8) is an ordinary orb,
+// S1 at (6,1) an ordinary socket, and |1 at (7,1) the door it opens (LEVEL_WALLS[9], from this
+// sheet). Pick the orb up at the bottom of loop 2, carry it round to the top of loop 1, and the way
+// east opens. Right of the door is placeholder; (12,6) is OPENED here as it was in v3, or (12,7)-(12,8)
+// is a pocket nothing can reach and the angel-path connectivity check refuses the map.
+const L9_SHEET = `
+ 0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
+ 1  [] [] >1 ~1 ~1 v1 S1 |1 .. .. .. .. .. .. .. .. .. []
+ 2  [] [] ~1 [] [] ~1 [] [] [] .. [] [] .. [] [] .. .. []
+ 3  [] .. ~1 [] [] ~1 [] .. .. .. [] [] .. [] [] .. .. []
+ 4  [] PP ^1 ~1 ~1 <1 [] [] [] .. [] [] .. [] [] .. .. []
+ 5  [] PP ~2 >2 ~2 ~2 [] [] [] .. .. .. .. [] [] .. XX []
+ 6  [] .. ~2 [] [] v2 [] .. .. .. [] .. .. [] .. .. [] []
+ 7  [] [] ^2 [] [] ~2 [] [] [] .. [] [] .. [] [] .. .. []
+ 8  [] [] ~2 ~2 <2 ~2 OO [] .. .. [] [] .. [] [] .. .. []
+ 9  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []`;
+// v2 of the notation (the user, 2026-10-13, four sentries, two per loop): a start is its HEADING and
+// its path -- v1 ^1 <2 -- or ># on a cell two paths share. (The first sheet's ~v, heading only, still
+// reads: its number is the first numbered cell ahead.) A path cell is ~n, ~# or any start on it.
+const L9 = (() => {
+  const g = L9_SHEET.trim().split('\n').map(l => l.trim().split(/\s+/).slice(1));
+  const tok = (x, y) => g[y]?.[x] ?? '[]';
+  const D = { '>': [1, 0], '<': [-1, 0], 'v': [0, 1], '^': [0, -1] };
+  // which path a token puts its cell on: '1'..'9', '#' (shared), or null; and a start's heading
+  const pathOf = t => t[0] === '~' && /[\d#]/.test(t[1]) ? t[1] : D[t[0]] && /[\d#]/.test(t[1]) ? t[1] : t[0] === '~' && D[t[1]] ? '?' : null;
+  const headOf = t => D[t[0]] && /[\d#]/.test(t[1]) ? D[t[0]] : t[0] === '~' && D[t[1]] ? D[t[1]] : null;
+  // |n is a DOOR, a wall until socket Sn is fed: a wall in the map, and LEVEL_WALLS[9] names it
+  const rows = g.map(r => r.map(t => t === '[]' || t[0] === '|' ? '#' : '.').join(''));
+  let player = null, exit = null;
+  const starts = [], socks = [], doors = {}, orbs = [];
+  g.forEach((r, y) => r.forEach((t, x) => {
+    if (t === 'PP') player = [x, y];
+    if (t === 'XX') exit = [x, y];
+    if (t === 'OO') orbs.push([x, y]);
+    if (/^S\d$/.test(t)) socks.push({ x, y, n: +t[1] });
+    if (/^\|\d$/.test(t)) (doors[t[1]] ??= []).push([x, y]);
+    if (headOf(t)) starts.push({ x, y, d: headOf(t), p: pathOf(t) });
+  }));
+  // trace one path from a start: on to a neighbour on path id (its number, #, or a '?' start),
+  // straight on preferred, never back; null if it forks or dead-ends
+  const trace = (st, id) => {
+    const own = (x, y) => { const p = pathOf(tok(x, y)); return p === id || p === '#' || p === '?'; };
+    const dirs = [];
+    let cx = st.x, cy = st.y, d = st.d;
+    for (let k = 0; k <= 256; k++) {
+      dirs.push(d); cx += d[0]; cy += d[1];
+      if (cx === st.x && cy === st.y) return dirs;
+      const opts = [d, [d[1], -d[0]], [-d[1], d[0]]].filter(([dx, dy]) => own(cx + dx, cy + dy));
+      if (!opts.length || (opts.length > 1 && opts[0] !== d)) return null;
+      d = opts[0];
+    }
+    return null;
+  };
+  const ids = [...new Set(g.flat().map(pathOf).filter(p => p && /\d/.test(p)))].sort();
+  const count = {};
+  const sentries = [];
+  // numbered starts first, so a # start can go to the path with fewer sentries
+  for (const st of [...starts.filter(s => /\d/.test(s.p)), ...starts.filter(s => !/\d/.test(s.p))]) {
+    let id = st.p, dirs = null;
+    if (id === '?') {             // v1 notation: the first numbered cell straight ahead
+      let x = st.x, y = st.y;
+      for (let k = 0; k < 64 && id === '?'; k++) { x += st.d[0]; y += st.d[1]; const p = pathOf(tok(x, y));
+        if (p && /\d/.test(p)) id = p; else if (p !== '#') break; }
+    }
+    if (id === '#') {             // a shared cell: whichever path runs through it this way, fewest sentries first
+      const fits = ids.filter(i => trace(st, i)).sort((a, b) => (count[a] ?? 0) - (count[b] ?? 0));
+      if (!fits.length) throw new Error(`L9_SHEET: the sentry starting at (${st.x},${st.y}) fits no path`);
+      id = fits[0];
+      console.error(`  L9_SHEET: the # start at (${st.x},${st.y}) could be path ${fits.join(' or ')}; it goes to ${id}, which had fewer sentries (write ${Object.keys(D).find(k => D[k] === st.d)}${id} to say so)`);
+    }
+    if (!/\d/.test(id)) throw new Error(`L9_SHEET: the sentry starting at (${st.x},${st.y}) heads off its path`);
+    dirs = trace(st, id);
+    if (!dirs) throw new Error(`L9_SHEET: sentry ${id}'s path from (${st.x},${st.y}) forks or dead-ends`);
+    count[id] = (count[id] ?? 0) + 1;
+    sentries.push({ id, x: st.x, y: st.y, dirs });
+  }
+  // door n is wall group n-1, and socket Sn opens it: the numbers must run 1..k with a socket each
+  const walls = Object.keys(doors).sort().map((n, k) => {
+    if (+n !== k + 1) throw new Error(`L9_SHEET: the doors are numbered ${Object.keys(doors).sort()}, not 1..${Object.keys(doors).length}`);
+    return doors[n];
+  });
+  for (const sk of socks) if (!doors[sk.n]) throw new Error(`L9_SHEET: S${sk.n} at (${sk.x},${sk.y}) has no door |${sk.n} to open`);
+  return { rows, player, exit, sentries, socks, orbs, walls, sockWall: socks.map(sk => sk.n - 1) };
+})();
+const L9_MAP = L9.rows;
 // LEVEL 2, the user's layout of 2026-09-18, fleshed out the same day: 16 x 16 = 256 cells.
 //   PP (2,2) in a 5x9 room with an orb alcove at (6,2) and (6,8); the socket at (6,5) IS the
 //   doorway into a 2x3 pocket whose far wall (8,5) goes when it is fed, freeing the angel (13,5)
@@ -200,6 +306,9 @@ const LEVEL_WALLS = {
   7: { walls: [[[2, 10], [12, 10]],                  // S1: east to the second orb, and col 1's foot
               [[13, 5]]],                            // S2: the only way up to the exit
        sockWall: [0, 1] },
+  8: { walls: [[[15, 5]]],                           // S1 (14,5): the door to the exit
+       sockWall: [0] },
+  9: { walls: L9.walls, sockWall: L9.sockWall },     // from the sheet: |1 (7,1), opened by S1 (6,1)
   3: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
               [[11, 10], [12, 10], [10, 11], [10, 12]]],        // S2 (7,7): the exit's corner
        sockWall: [0, 1] },
@@ -207,7 +316,7 @@ const LEVEL_WALLS = {
 // Any level's map by number, for the few places that need a level OTHER than the live one --
 // a wall's cell ids are in its own level's width, which need not be the live one's.
 const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : n === 4 ? L4_MAP
-                 : n === 5 ? L5_MAP : n === 6 ? L6_MAP : n === 7 ? L7_MAP : n === 8 ? L8_MAP : L1_MAP;
+                 : n === 5 ? L5_MAP : n === 6 ? L6_MAP : n === 7 ? L7_MAP : n === 8 ? L8_MAP : n === 9 ? L9_MAP : L1_MAP;
 // Which levels carry an IDOL, and where. Declared up here with the other level facts because
 // the sprite ladder is built long before ORBS exists, and a ladder nothing uses is 1K of bank 3
 // -- which bank 3 does not have. Levels 1-3 are unaffected by the idol existing at all.
@@ -264,6 +373,8 @@ const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env
                     7: { ceil: +(process.env.CEIL7 ?? 0x05), seam: +(process.env.SEAM7 ?? 0x0d) },
                     // 8 is DARK: ground and walls black, seams grey 1. LEVEL_FLICKER lights it.
                     8: { ceil: 0x00, wall: 0x00, seam: 0x0b } };
+                    // 9 (the silver orb lab) is level 1's white and black on purpose: the user
+                    // rendered the ball's reflections for that scheme.
 // ---- LEVEL_FLICKER: a failing fluorescent tube (the user's lighting test, 2026-10-09) ----
 // A level listed here is lit, for single 60Hz frames at random, in these inks: ground (ceiling
 // AND floor), walls and seams. Between flashes it shows its LEVEL_PAL inks. The flashes come in
@@ -288,6 +399,14 @@ const FLK_TONES = { grey:  { dark: 0x0b, gnd: 0x0c, wall: 0x0b, seam: 0x0f },   
 const FLK_TONE = FLK_TONES[process.env.FLKTONE ?? 'blue'];
 if (!FLK_TONE) throw new Error(`FLKTONE=${process.env.FLKTONE}: known tones are ${Object.keys(FLK_TONES).join(', ')}`);
 LEVEL_PAL[8].seam = +(process.env.FLKDSEAM ?? FLK_TONE.dark);
+// FLK_GAP: THE lever for how often the tube flickers -- the quiet between bursts is min..min+span-1
+// ticks (60Hz), uniform. Bursts (2..17 ticks, ~3 in 8 lit) are unchanged by it, so the flash rate
+// scales with 1 / the mean gap. History: 32..255 (mean 2.4 s); 48..175 (1.9 s, the user found the
+// long gaps went on too long in the dark, 2026-10-09); 24..151 (1.5 s, "reveal the maze a bit more
+// often", 2026-10-13) -- about 25% more bursts, keeping the spread. FLKGAP=min,span overrides.
+const FLK_GAP = (([min, span]) => ({ min, span }))((process.env.FLKGAP ?? '24,128').split(',').map(Number));
+if (!(FLK_GAP.min >= 1 && [2, 4, 8, 16, 32, 64, 128].includes(FLK_GAP.span) && FLK_GAP.min + FLK_GAP.span <= 256))
+  throw new Error(`FLKGAP=${FLK_GAP.min},${FLK_GAP.span}: min >= 1, span a power of two <= 128 (it is an AND mask), min+span <= 256`);
 const LEVEL_FLICKER = { 8: { gnd: +(process.env.FLKGND ?? FLK_TONE.gnd), wall: +(process.env.FLKWALL ?? FLK_TONE.wall),
                              seam: +(process.env.FLKSEAM ?? FLK_TONE.seam) } };
 const HAS_FLICKER = LEVEL_IDS.some(n => LEVEL_FLICKER[n]);
@@ -375,7 +494,11 @@ const ANYSEAM = LEVEL_IDS.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDG
 // SPRU<n>/SPRH<n> override any level's, not just 4 and 5 -- the env hooks were written inline
 // here one level at a time, so a level with no literal in this table had no way to be tried
 // without an edit. Applied in sprOf, below, next to the idol scheme's identical hooks.
-const LEVEL_SPR = { 4: { under: 0x00, hi: 0x0c } };   // 5's black underside went with its black
+const LEVEL_SPR = { 4: { under: 0x00, hi: 0x0c },
+                    // 9, the sentries: $d025/$d026 are the silver ball's (SILVINKS -- the orb's own
+                    // defaults, grey1/grey3, unless overridden). Read lazily: SILV_INKS is declared
+                    // with the ball's art.
+                    get 9() { return { under: SILV_INKS[0], hi: SILV_INKS[2] }; } };   // 5's black underside went with its black
                                             //   room; the hub's highlight is grey2, not grey3
 const SPR_ENV = { under: 'SPRU', hi: 'SPRH' };
 // ---- FLKSPR: the sprites flicker with the light too (level 8, every sprite) ----
@@ -386,12 +509,21 @@ const SPR_ENV = { under: 'SPRU', hi: 'SPRH' };
 // rewrite of all eight at each change).
 //   FLKSPR=1  one step darker: black / grey1 / grey2, lit grey1 / grey2 / grey3
 //   FLKSPR=2  black / black / grey1 -- the body goes to black whatever its colour
-const FLKSPR = +(process.env.FLKSPR ?? 0);
+// DEFAULT 2 whenever the game has a flickering level -- the look the user settled on for level 8;
+// it was a flag every level-8 build had to remember to pass while 8 was work in progress.
+const FLKSPR = +(process.env.FLKSPR ?? (LEVEL_IDS.some(n => LEVEL_FLICKER[n]) ? 2 : 0));
 if (FLKSPR && ![1, 2].includes(FLKSPR)) throw new Error(`FLKSPR=${FLKSPR}: 1 (one step darker) or 2 (black / black / grey1)`);
 const FLKSPR_MAP = FLKSPR === 2 ? Array(16).fill(0)
   //  0  1   2   3  4   5  6  7  8  9 10  11  12 13 14  15  -- each colour one step down its own ramp
   : [0, 15, 9, 14, 6, 11, 0, 8, 9, 0, 2, 0, 11, 5, 6, 12];
-const ORBSHD01 = (process.env.ORBSHD01 ?? (FLKSPR === 2 ? '1' : '0')) === '1';   // see ORBSRC12
+// ---- ORBSHD01: which levels draw the orb's ground shadow in pair 01 (see orbShadow01) ----
+// PER LEVEL now, not per build. The ladder ships in its normal inks, and arriving at a level that
+// wants the dark shadow XORs it in (shdSet, from lvlLook); arriving anywhere else XORs it back out.
+// On with FLKSPR=2 for the flickering levels -- the look the user settled on for level 8
+// (level8-shadow-fixed.d64, 2026-10-11). ORBSHD01=0 turns it off.
+const LEVEL_SHD01 = Object.fromEntries(Object.keys(LEVEL_FLICKER).map(n =>
+  [n, FLKSPR === 2 && (process.env.ORBSHD01 ?? '1') === '1']));
+const HAS_SHD01 = LEVEL_IDS.some(n => LEVEL_SHD01[n]);
 if (FLKSPR) LEVEL_SPR[8] = FLKSPR === 2 ? { under: 0x00, hi: 0x0b } : { under: 0x00, hi: 0x0c };
 // ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
 // The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
@@ -472,6 +604,18 @@ const HAS_IDOL = LEVEL_IDS.some(n => LEVEL_IDOL[n]);             // the mechanic
 // leave a shadow level's pedestals pointing at bitmaps that were never built.
 const LEVEL_PEDESTALS = { 4: '8,3;8,4;8,5' };
 const HAS_PED = LEVEL_IDS.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
+// ---- THE SENTRY, the silver orb (level 9, 2026-10-13): the user's new entity ----
+// A silver ball that HOVERS at eye level, PATROLS its own closed path at a fixed rate, and now and
+// then crackles with lightning -- one of three lightning frames held 1-6 rendered frames, then back
+// to the plain ball, like level 8's tube. Touching one charges you; enough charge is a shock death.
+// Built on what is there: its rungs are a third range of the shared variant list, after the angel's
+// (SV_V0), so every table indexed by ovar extends for free; frames 1-3 are parallel ladders reached
+// by a pointer DELTA exactly as the idol's art is; its glide is the angel's slide. It first REPLACED
+// the orb ladder's art and so built only in a lab (2026-10-13); since 2026-10-14 it is an ordinary
+// entity beside the orb and the angel (the user: "use all the same machinery (code,ladders,graphics)
+// as the other levels"), entities 0..svN-1 of the levels that have them.
+const LEVEL_SILVER = { 9: true };
+const HAS_SILVER = LEVEL_IDS.some(n => LEVEL_SILVER[n]);
 const PED_LVL = +(Object.keys(LEVEL_PEDESTALS)[0] ?? 0);   // only one level has them
 // IDOLHUB=1: every idol already in the pedestal room, for testing the wall without three
 // errands first. Shorthand for IDOLLOC=<that level> repeated, because that is the only thing
@@ -630,30 +774,35 @@ const L7_MAP = [
   "#S|....P....|..#",
   "################",
 ].map(r => r.replace(/\|/g, '#').replace(/[XAOPSI]/g, '.'));
-// ---- LEVEL 8, the FLICKER test (2026-10-09): a random 15x15 maze in the dark ----
-// The user's lighting test drive. Everything is black but the seams (grey 1), and a failing
-// fluorescent tube lights the room for single 60Hz frames now and then (LEVEL_FLICKER). The map
-// is a seeded depth-first maze (python random.seed(8) over the odd cells, 3 extra walls knocked out
-// for loops) -- nothing about it is designed. Kept plain on purpose: every free-standing wall stub
-// is more wall RUNS, and NRUN sizes engine tables for the whole build. A first draft with a room
-// and twelve loops had 93 runs to level 7's 71 and pushed an engine buffer out of the image.
+// ---- LEVEL 8, the user's maze (16x11 2026-10-12, 18x11 v4 2026-10-13): lit by a failing tube ----
+// Everything is black but the seams, and a failing fluorescent tube lights the room for single
+// 60Hz frames now and then (LEVEL_FLICKER). Two avenues (cols 1 and 13; 1 and 14-16 in v4) joined by three halls (rows
+// 1, 5, 9), with col 7 crossing them; the blocks between are hollowed into open bays off the outer
+// halls, so you can keep an angel in sight round more of the corners (the first draft's solid
+// pillars made it "one hard level" -- the user, 2026-10-12). v3, the user's pocketed tweak
+// (2026-10-13): the bays no longer reach the middle hall, so each is a dead-end pocket, and the
+// halls meet only round the pillar at (7,5); v2's extra crossings at cols 4 and 10 made loops.
+// v4, the user's (2026-10-13): 18x11. The crossing moves to col 8, round the (7,5) pillar, with
+// the ONE orb at (8,5) in it; the angels move to col 13, and the exit hides behind a socket at the
+// end of the middle hall: S1 (14,5) opens |1 (15,5), and the exit is X (16,5). The east avenue is
+// three wide so the door and exit sit inside the border (castRay needs it solid). A fed socket
+// leaves the world, so (14,5) is floor again and the way in is (14,4)/(14,6) -> (14,5) -> (15,5).
+// X exit, P player, A angel, O orb, S socket, | the socket's door: markers for the reader only.
+// NRUN sizes engine tables for the whole build, and every free-standing pillar is more wall RUNS:
+// a 2026-10-09 draft with a room and twelve loops pushed an engine buffer out of the image.
 const L8_MAP = [
-  "###############",
-  "#...#...#.....#",
-  "###.#.#.#.###.#",
-  "#...#.#...#...#",
-  "#.#####.###.#.#",
-  "#...........#.#",
-  "#.###########.#",
-  "#.....#.....#.#",
-  "#.#.###.#.###.#",
-  "#.#...#.#.....#",
-  "#.###.#.#######",
-  "#...#...#.....#",
-  "#.#.#########.#",
-  "#.............#",
-  "###############",
-];
+  "##################",
+  "#............A...#",
+  "#.#...##.#...#...#",
+  "#.######.#####...#",
+  "#.####....####.###",
+  "#P.....#O....AS|X#",
+  "#.####....####.###",
+  "#.######.#####...#",
+  "#.#...##.#...#...#",
+  "#............A...#",
+  "##################",
+].map(r => r.replace(/\|/g, '#').replace(/[XAOPS]/g, '.'));
 const SOCK_MAP = (() => {
   const rows = [
     "################",
@@ -819,7 +968,12 @@ const castFirst = (px, py, dx, dy, isWall) => {
 // glyphs are ever written into it, a level's tables have no business inside a charset.
 // Page-aligned because mapT sits at offset 0 and is the one table that must be (alignment audit,
 // 2026-09-29: every other per-level table is small and unaligned already).
-const SLOT_AT = +(process.env.SLOT_AT ?? 0xf500);
+// 2026-10-13: MOVED OUT OF BANK 3, into the image's arena (CPU RAM). The level is only ever read by the
+// CPU, and its 3 pages at $f500 split the sprite space the sentry's frames need. compact.mjs keeps
+// scratch off it (iray.reserve.json) and refuses a layout whose code or tables reach it; IMG carries
+// the starting level there (see DISK). $6900: the arena's free run is $638e-$6cf1, and this leaves
+// room both ways -- code grows up into it from below, tables down from above.
+const SLOT_AT = +(process.env.SLOT_AT ?? 0x6900);
 // WHICH level file the boot stub names. Every level in CHAIN ships as its own file at the same
 // address; this picks the one the loader asks for. It is the ONLY thing that differs between a
 // disk that starts in level 1 and one that starts in level 2 -- the name string in the boot PRG.
@@ -2376,6 +2530,32 @@ const OCCW0 = glyphs.length;
 for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, false, 0)));
 for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 0)));
 
+// ---- and the EDGE splits that keep a corner line (the user, 2026-10-13) ----
+// A corner line sits on the NEARER wall's own last column (subCvM), so where an entity passes
+// behind that wall's silhouette the stamp's covered columns end exactly on the line -- and the
+// black-backed split oSPsol wrote painted the line out with the rest. "The edge piece having the
+// correct seam": the covered columns 11, the line kept at 10 (foreground, so it clips the sprite
+// just as the 11 would), and the uncovered rest 01, which is what a seam cell holds there anyway.
+// Eight: covered from the LEFT with the line at column 0..2, from the RIGHT with it at 1..3, and
+// the two where the edge falls on the cell's own boundary -- a FULLY covered cell with the line at
+// column 3 (wall on the left) or 0 (on the right). Fully covered, the side no longer matters, so
+// those two are keyed on the line alone; a line at 1 or 2 under full cover is a panel seam deeper
+// in the wall, not an edge, and is not built (the user, 2026-10-13: edge only for now). Bought by
+// taking eight codes out of the shipped plan (tools/dropcodes.mjs). Rows identical: their own
+// vertical mirror.
+// SEDGE=0: keep the glyphs (the charset is canonical) but stamp seam cells the old way. A
+// candidate to turn off per level for a frame or two if a level never shows the case (the user,
+// 2026-10-13: "something we may turn off or on for certain levels"); on everywhere for now.
+const SEDGE_ON = process.env.SEDGE !== '0';
+const SEDGE0 = glyphs.length;
+const SEDGE = [];                        // [{k, show}] -- the seam column and the cellFillT mask
+const edgeRow = (k, fromRight) => [0, 1, 2, 3].reduce((b, i) =>
+  b | ((i === k ? 2 : (fromRight ? i > k : i < k) ? 3 : 1) << (6 - 2 * i)), 0);
+for (let k = 0; k <= 2; k++) { SEDGE.push({ k, show: 0x0f >> (k + 1) }); glyphs.push(new Array(8).fill(edgeRow(k, false))); }
+for (let k = 1; k <= 3; k++) { SEDGE.push({ k, show: (0xf0 >> k) & 0x0f }); glyphs.push(new Array(8).fill(edgeRow(k, true))); }
+const SEDGEF = [];                       // fully covered, line at column k -> code (k = 0, 3)
+for (const k of [0, 3]) { SEDGEF[k] = glyphs.length; glyphs.push(new Array(8).fill(edgeRow(k, k === 0))); }
+
 // CELLMARK=1: put a small grey triangle in the middle of SOLID and of all seven occluders --
 // columns 1 and 2, rows 2 to 5, at bit pair 10 ($d023, grey). Purely a debugging aid: it makes
 // the CHAR GRID visible, so a stamp that is one column out can be read off the screen directly
@@ -2387,7 +2567,12 @@ for (let n = 1; n <= 3; n++) glyphs.push(new Array(8).fill(occRow(n, true, 0)));
 // Registered as a diagnostic by hand -- flag() is defined further down, and this block runs
 // during charset construction. A CELLMARK build rewrites the CHARSET, about as diagnostic as a
 // build gets, and reading it raw meant every marker build left the tracked iray.asm dirty.
-if (process.env.CELLMARK === '1' && DIAGEARLY.push('CELLMARK')) {
+// CELLMARK=occ: the dot on the OCCLUDERS only, in pair 01 -- the wall's own ink, black on a white
+// level -- so with ORBFG=6 every pre-built stamp is a blue cell with a black centre, the walls are
+// left unmarked, and a blue cell WITHOUT a dot is a synthesised one (the user, 2026-10-13, chasing
+// seams that vanish under stamps). 01 is a background pair, so the sprite shows through the dot.
+const CELLMARK_OCC = process.env.CELLMARK === 'occ' && DIAGEARLY.push('CELLMARK=occ');
+if ((process.env.CELLMARK === '1' || CELLMARK_OCC) && (CELLMARK_OCC || DIAGEARLY.push('CELLMARK'))) {
   // SOLID gets a GREY dot (pair 10) and every occluder a WHITE one (pair 00), so wall and stamp
   // are told apart at a glance. Always the same two columns and rows whatever the split, so the
   // dot marks the CELL's centre and the char grid can be counted directly.
@@ -2414,14 +2599,15 @@ if (process.env.CELLMARK === '1' && DIAGEARLY.push('CELLMARK')) {
     (b, i) => (b & ~(3 << (6 - 2 * i))) | (pair << (6 - 2 * i)), row);
   for (const r of [2, 3, 4, 5]) {
     const cols = TRI[r];
-    glyphs[SOLID][r] = dot(glyphs[SOLID][r], cols, 2);
+    const pr = CELLMARK_OCC ? 1 : 2;
+    if (!CELLMARK_OCC) glyphs[SOLID][r] = dot(glyphs[SOLID][r], cols, 2);
     // GREY (pair 10) on the occluders too, not white. The dot used to be white so wall and stamp
     // could be told apart by dot colour -- but ORBFG already tells them apart far better, by
     // tinting the whole stamped cell, and a white marker is useless when the bug you are chasing
     // IS white leaking into an occlusion. Grey everywhere marks the char grid; colour carries
     // the meaning; and any white on screen is now unambiguously the bug.
-    for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], cols, 2);
-    for (let i = 0; i < 6; i++) glyphs[OCCW0 + i][r] = dot(glyphs[OCCW0 + i][r], cols, 2);
+    for (let i = 0; i < 7; i++) glyphs[OCC0 + i][r] = dot(glyphs[OCC0 + i][r], cols, pr);
+    for (let i = 0; i < 6; i++) glyphs[OCCW0 + i][r] = dot(glyphs[OCCW0 + i][r], cols, pr);
   }
 }
 
@@ -2431,7 +2617,7 @@ if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell pa
 if (glyphs.length > 256 - OCCSYN_N) throw new Error(
   `charset has ${glyphs.length} codes; OCCSYN needs the top ${OCCSYN_N} free -- refit with a smaller KCELL`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + ${NSEAM} seam + 7 occluder ` +
-  `+ 6 white-backed = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
+  `+ 6 white-backed + 8 seam-edge = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
@@ -3264,7 +3450,8 @@ const LEVEL_START = {
   5: [0x0180, 0x0880, 0x00, 0x00],   // (1.5, 8.5), the west end of the hall, facing east
   6: [0x0180, 0x0780, 0xc0, 0x00],   // (1.5, 7.5) facing NORTH, straight at the exit one cell away
   7: [0x0780, 0x0a80, 0xc0, 0x00],   // (7.5, 10.5) facing NORTH, the idol two cells ahead
-  8: [0x0180, 0x0180, 0x00, 0x00],   // (1.5, 1.5), the maze's corner, facing east
+  8: [0x0180, 0x0580, 0x00, 0x00],   // (1.5, 5.5), the west avenue, facing east down the middle hall
+  9: [0x0180, 0x0500, 0x00, 0x00],   // the sentry test's two PPs, (1,4) and (1,5): ON the line between them, (1.5, 5.0), facing east
 };
 const ST0 = LEVEL_START[LVL] ?? LEVEL_START[1];
 const startOf = n => n === LVL ? [PX, PY, PA, PAF] : (LEVEL_START[n] ?? LEVEL_START[1]);
@@ -4069,23 +4256,105 @@ const HUD_AT       = parseInt(process.env.HUDAT ?? '3f72', 16);   // see hudX: t
 // light/dark split. ORBART= (empty) brings the hand-drawn orb back.
 const ORBART = process.env.ORBART ?? 'rough';
 const ORB4HAND = [0, 170, 0, 10, 170, 160, 43, 234, 168, 47, 170, 168, 174, 170, 169, 170, 170, 169, 170, 170, 169, 170, 170, 165, 170, 170, 165, 170, 170, 165, 170, 170, 149, 42, 170, 148, 42, 170, 84, 10, 149, 80, 0, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 255, 255, 255, 3, 255, 192];
+// silvGrid: silver frame f at rung height h, centred in a 12x21 sprite and standing on its bottom
+// row -- the BOX does (lightning reaches below the ball), so the plain ball floats a few rows up.
+const silvGrid = (f, h) => {
+  const w = silverW(h), px = silverAt(f, w, h, SILV_INK), out = [...Array(21)].map(() => new Array(12).fill(0));
+  const ox = (12 - w) >> 1, oy = 21 - h;
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) out[oy + dy][ox + dx] = px[dy * w + dx];
+  return out;
+};
+const gridBytes = g => { const b = [];
+  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++) b.push([0, 1, 2, 3].reduce((v, i) => v | (g[y][k * 4 + i] << (6 - 2 * i)), 0));
+  return b; };
+// The ink the lightning is drawn in: whichever of the three the plain ball uses least, over the
+// ten rungs (the user, 2026-10-13). It turns light blue while a lightning frame is up.
+// ---- THE SILVER ORB'S LADDER: ten rungs, the four nearest drawn 2x2, NOTHING magnified ----
+// The user, 2026-10-13: "see how the floating orb will look without magnification" -- 88 bitmaps,
+// 22 a frame. Heights step ~1.2-1.3 like the orb's; the four over 21 rows are 24..42 rows tall and
+// 13..23 sprite pixels wide, so each takes all four quadrants of a 24x42 canvas. 24 is the
+// smallest height whose ball is wider than one sprite -- 23 would fit one column and cost only two.
+// With the bolts' sideways reach trimmed (SILVTRIMX in fit-silver.mjs) a 42-row box is exactly 24
+// pixels wide, so height is the limit again: the four 2x2 rungs are 26..42, and a single sprite
+// holds up to 21 rows (12 wide). (Untrimmed, 42 was clamped to 24 where it wanted 28 -- the
+// "horizontally squished" largest size -- and the 2x2 rungs had to stop at 35.)
+// ...and the four 2x2 heights again MAGNIFIED (both expand bits), apparent 52..84 rows: the ball
+// can come closer and larger with no new bitmaps (the user, 2026-10-13).
+// SVQUAD=0: NO 2x2 -- "capping out at one magnified sprite" (the user, 2026-10-13, to compare):
+// one-sprite rungs 21..4 and the top three of them magnified (apparent 42, 34, 26), six bitmaps a
+// frame. Like the angel's, the four-sprite version may not survive level design.
+// 'wide': the in-between (the user, 2026-10-13: "less blocky ... no in-between?"): the near rungs
+// are TWO sprites side by side with only the HEIGHT doubled -- apparent 42/34/26 like SVQUAD=0's
+// magnified singles, but full horizontal detail and near-square pixels. 2 sprites, not 4.
+// DEFAULT 'wide' (the user, 2026-10-13: "notably better than the double magged single sprite, and
+// it still allows ... up to four floating orbs in view"). SVQUAD=1 builds the 2x2, SVQUAD=0 the
+// magnified single.
+const SVMODE = process.env.SVQUAD === '0' ? 'single' : process.env.SVQUAD === '1' ? 'quad' : 'wide';
+const SVQUAD = SVMODE === 'quad';
+const SILV_H = SVQUAD ? [42, 36, 31, 26, 21, 17, 13, 10, 7, 4] : [21, 17, 13, 10, 7, 4];
+const SILV_MAG = SVQUAD ? [42, 36, 31, 26] : SVMODE === 'single' ? [21, 17, 13] : [];
+const SILV_WIDE = SVMODE === 'wide' ? [21, 17, 13] : [];   // rows, each shown twice: apparent 42/34/26
+// ---- the silver orb's three inks: $d025, the body colour, $d026, darkest first ----
+// grey1/grey2/grey3, which read best (the user, 2026-10-13) -- a smoky mirror, darker than what it
+// reflects. Tried and dropped: black/grey2/white (on level 1's white ground and ceiling the white
+// vanished, and a near ball read as a grey and black fragment) and black/grey2/grey3 (the black
+// band merged into the wall band behind it). SILVINKS=d025,body,d026 in hex, darkest first.
+const SILV_INKS = (process.env.SILVINKS ?? '0b,0c,0f').split(',').map(v => parseInt(v, 16));
+// The dither aims at each ink's luma, on fit-orb's scale (grey1/2/3 = 68/108/149). The VIC has
+// these luma steps: black; blue = brown (the darkest colours); red = grey1; purple = orange;
+// grey2 = light blue; green = light red; grey3 = cyan; yellow = light green; white.
+const C64_LUMA = { 0x00: 0, 0x06: 40, 0x09: 40, 0x02: 68, 0x0b: 68, 0x04: 88, 0x08: 88, 0x0c: 108,
+                   0x0e: 108, 0x05: 128, 0x0a: 128, 0x0f: 149, 0x03: 149, 0x07: 200, 0x0d: 200, 0x01: 255 };
+if (HAS_SILVER) {
+  if (SILV_INKS.length !== 3 || SILV_INKS.some(c => C64_LUMA[c] === undefined)) throw new Error(`SILVINKS=${process.env.SILVINKS}: three C64 colours in hex, darkest first`);
+  setSilverLuma(SILV_INKS.map(c => C64_LUMA[c]));
+}
+const SILV_LEAST = HAS_SILVER ? silverLeast(SILV_H) : null;
+const SILV_INK = SILV_LEAST?.ink ?? 0;
+// The lightning's colour is written once for every sentry sprite on screen, which takes a SHARED
+// register: $d025 (ink 1) or $d026 (ink 3). Ink 2 is $d027+n, one per sprite, and svTick no longer
+// writes per sprite since the orb and the sentry share a frame (it was the lab's svInk).
+if (HAS_SILVER && SILV_INK === 2) throw new Error('the silver ball uses its body colour least: the lightning would need a per-sprite colour write (SILVINKS)');
+// The bolts' colour on a spark frame: light blue, or SILVBOLT=<hex> (cyan 03 with a blue sphere).
+const SILV_BLUE = parseInt(process.env.SILVBOLT ?? '0e', 16);
+// One cell per SVSLIDE 60ths. The player runs 12/256 a tick, so 43 is 50% of their speed -- the
+// user, 2026-10-13, "at least for testing ... I can't get a good look at it in the distance". It
+// was 27 (79%, for the first ask of "something like 80%").
+const SVSLIDE = +(process.env.SVSLIDE ?? 43);
+const SVNEAR = +(process.env.SVNEAR ?? 1);              // (the chaser's stopping distance; unused by sentries)
+// The HIT: touching a sentry is an octagon of "radius" SVHITR cells between its true position and
+// yours. 0.45: a sentry rides the middle of a one-cell lane, and you can stand COLL_R (0.10) from
+// its wall -- 0.40 off its line -- so anything under 0.40 let it slide past you against the wall
+// (the user, 2026-10-13: "I shouldn't be able to stand against a wall where the orb is riding").
+// Under 0.60 the next lane over (no nearer than 0.60) stays safe. It is bigger than the ball you see
+// (half width ~0.16, which cannot grow: the ladder tops out ~2.2 cells away): the orb owns its lane.
+// 0.24 (ball + an angel-wide player) was the first try, and too small.
+const SVHITR = +(process.env.SVHITR ?? 0.45);
+const SVHIT_R = Math.round(SVHITR * 256), SVHIT_D = Math.round(SVHITR * 256 * Math.SQRT2);
+if (HAS_SILVER && (SVHIT_R < 1 || SVHIT_D > 255)) throw new Error(`SVHITR=${SVHITR}: 0 < R and R * 1.41 under a cell (<= 0.70)`);
+// 60Hz ticks: the quiet between bursts (min, span -- level 8's FLK_GAP), and a burst's shortest
+// length (it runs min..min+15).
+const [SVGAP_MIN, SVGAP_SPAN] = (process.env.SVGAP ?? '24,128').split(',').map(Number);
+const SVBUR_MIN = +(process.env.SVBUR ?? 4);
+// ---- THE KILL: a CHARGE, not a touch (the user, 2026-10-13: "charge threshold") ----
+// Touching a sentry charges you by the 60Hz ticks it lasts; out of reach it drains at half that
+// rate; SVKILL ticks of charge and you are dead. A shock rather than a tag: a graze through the
+// hit octagon's edge survives, walking into one or riding with it does not. Crossing the whole
+// 0.9-cell zone at running speed is ~19 ticks, so 10 means "never cross straight through one".
+// The border flash is already the touching signal, so it is the meter. SVSHOCK = the shocked
+// screen's length in 60Hz frames, then black until RETURN.
+const SVKILL = +(process.env.SVKILL ?? 10);
+const SVSHOCK = +(process.env.SVSHOCK ?? 40);
+if (HAS_SILVER && (SVKILL < 1 || SVKILL > 250 || SVSHOCK < 1 || SVSHOCK > 255)) throw new Error(`SVKILL=${SVKILL} (1..250) / SVSHOCK=${SVSHOCK} (1..255)`);
+if (HAS_SILVER && (SVSLIDE < 2 || SVSLIDE > 120 || ![2, 4, 8, 16, 32, 64, 128].includes(SVGAP_SPAN) || SVGAP_MIN < 1 || SVGAP_MIN + SVGAP_SPAN > 256))
+  throw new Error(`SVSLIDE=${SVSLIDE} (2..120) / SVGAP=${SVGAP_MIN},${SVGAP_SPAN} (min >= 1, span a power of two)`);
+if (HAS_SILVER) console.error(`  silver orb: ball inks 1/2/3 used ${SILV_LEAST.counts.join('/')} -> lightning in ink ${SILV_INK} (${['', '$d025', 'the body colour', '$d026'][SILV_INK]}), colour $${SILV_BLUE.toString(16)} while it sparks`);
 const ORB4RAW = ORBART ? fitOrb(`sphere-${ORBART}.png`).bytes.slice(0, 63) : ORB4HAND;
 const ORBSRC12 = (() => {
   const d = ORB4RAW, g = [];
   for (let y = 0; y < 21; y++) { const r = [];
     for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++) r.push((d[y * 3 + b] >> (6 - 2 * i)) & 3);
     g.push(r); }
-  // ORBSHD01: the ground shadow (every row below the empty gap under the ball) is redrawn in pair
-  // 01, the shared underside ink. FLKSPR=2's dark set makes that black, and a lit frame grey 1 --
-  // what the user asked for on level 8 (2026-10-10). In its own inks it is a grey 3/grey 2 mix,
-  // which in the dark set read as a grey-1 band with black in it. The ladder is ONE bitmap for every
-  // level, so this recolours every level's orb shadow: it is on only with FLKSPR=2, a level-8 test.
-  if (ORBSHD01) {
-    let y = 20;
-    while (y >= 0 && g[y].some(v => v)) y--;          // up through the shadow to the gap row
-    if (y < 1 || !g[y - 1].some(v => v)) throw new Error('ORBSHD01: no gap row between the ball and its shadow');
-    for (let k = y + 1; k < 21; k++) g[k] = g[k].map(v => v && 1);
-  }
   return g;
 })();
 // Scale about the DRAWN content, not the 12x21 frame it happens to sit in.
@@ -4106,7 +4375,11 @@ const SW = SX1 - SX0 + 1, SH = SY1 - SY0 + 1;
 // half-covered edge pixel fills rather than erodes and a highlight survives against body colour
 // at small sizes -- the case that made nearest-neighbour unusable below about 6px across.
 const ORBSAMP = 4;                              // NxN point samples per destination pixel
-// ORBSHD01 applies to EVERY RUNG as fitted, not to ORBSRC12: with ORBART (the default) each rung is
+// ORBSHD01: the ground shadow (every row below the empty gap under the ball) redrawn in pair 01,
+// the shared underside ink. FLKSPR=2's dark set makes that black, and a lit frame grey 1 -- what
+// the user asked for on level 8 (2026-10-10). In its own inks it is a grey 3/grey 2 mix, which in
+// the dark set read as a grey-1 band with black in it.
+// It applies to EVERY RUNG as fitted, not to ORBSRC12: with ORBART (the default) each rung is
 // fitted straight from the source PNG and never reads ORBSRC12, so recolouring that alone changed
 // nothing on screen (found 2026-10-11 -- the level-8 shadow disk was byte-identical without it).
 // WHICH ROWS ARE SHADOW is decided in the SOURCE, not in the rung: at small sizes, and at the last
@@ -4123,12 +4396,11 @@ const ORB_GAP = (() => {
   return y;
 })();
 const orbShadow01 = (g, h) => {
-  if (!ORBSHD01) return g;
   for (let dy = 0; dy < h; dy++)
     if ((dy + 0.5) * 21 / h >= ORB_GAP) { const y = 21 - h + dy; g[y] = g[y].map(v => v && 1); }
   return g;
 };
-function orbScale(w, h) { return orbShadow01(orbScale0(w, h), h); }
+function orbScale(w, h, shd = false) { return shd ? orbShadow01(orbScale0(w, h), h) : orbScale0(w, h); }
 function orbScale0(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, and standing on the floor
@@ -4191,18 +4463,62 @@ const LADDER = [];
 // covers the size and the rung would be a duplicate. That boundary is h > SH/2.
 for (const h of ORB_H) if (2 * h > SH) LADDER.push({ h, exp: 1 });
 for (const h of ORB_H) LADDER.push({ h, exp: 0 });
+// The SENTRY's ladder (SILV_H, declared by its fitter's ink count above): its own rungs, appended to
+// the shared variant list after the angel's (SV_V0). w is the ball's width in sprite pixels.
+const SVLAD = [];
+if (HAS_SILVER) {
+  for (const h of SILV_MAG) SVLAD.push({ h, exp: 1, w: silverW(h) });
+  for (const h of SILV_WIDE) SVLAD.push({ h, exp: 0, ey: 1, wide: true, w: silverW(2 * h) });   // width of a ball 2h rows tall
+  for (const h of SILV_H) SVLAD.push({ h, exp: 0, w: silverW(h) });
+}
 const ORBBMH = [...new Set(LADDER.map(r => r.h))].sort((a, b) => b - a);   // distinct bitmaps
-const ORBBM = ORBBMH.map(h => {
-  const g = orbScale(orbW(h), h), bytes = [];
+const orbBytes = (h, shd) => {
+  const g = orbScale(orbW(h), h, shd), bytes = [];
   for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
     bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
   bytes.push(0);
   return bytes;
-});
+};
+const ORBBM = ORBBMH.map(h => orbBytes(h, false));
+// The sentry ladder's bitmaps, rung by rung: one sprite for a short rung, four for a 2x2 one
+// (lower-left, upper-left, lower-right, upper-right -- the angel's lower/upper pair, twice). The
+// four FRAMES are laid out identically, so frame f is always frame 0's pointer plus one constant.
+// Frames 0 and 1 ship under the I/O hole behind the exit ladder (SVBASE, in IHOL); frames 2 and 3 at
+// OVLBASE, loaded over the pedestal and the idol when level 9 arrives (lvlArtT).
+const silvRung = (f, h) => {
+  const w = silverW(h), px = silverAt(f, w, h, SILV_INK);
+  if (h <= 21) return [gridBytes(silvGrid(f, h))];
+  if (w <= 12) throw new Error(`silver rung h=${h} is ${w} wide: one column, so two bitmaps, not four`);
+  const can = [...Array(42)].map(() => new Array(24).fill(0)), ox = (24 - w) >> 1, oy = 42 - h;
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) can[oy + dy][ox + dx] = px[dy * w + dx];
+  const q = (r0, c0) => gridBytes([...Array(21)].map((_, y) => can[r0 + y].slice(c0, c0 + 12)));
+  return [q(21, 0), q(0, 0), q(21, 12), q(0, 12)];       // LL, UL, LR, UR
+};
+// A two-wide rung (SVQUAD=v): w columns by h rows, each row shown twice -- so the ball's width is
+// that of one 2h rows tall -- centred across a 24x21 canvas, split into left and right sprites.
+const silvWide = (f, h) => {
+  const w = silverW(2 * h), px = silverAt(f, w, h, SILV_INK);
+  if (w <= 12) throw new Error(`silver wide rung h=${h} is ${w} wide: one sprite would do`);
+  const can = [...Array(21)].map(() => new Array(24).fill(0)), ox = (24 - w) >> 1, oy = 21 - h;
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) can[oy + dy][ox + dx] = px[dy * w + dx];
+  return [gridBytes(can.map(r => r.slice(0, 12))), gridBytes(can.map(r => r.slice(12, 24)))];
+};
+const silvFrame = f => [...SILV_WIDE.flatMap(h => silvWide(f, h)), ...SILV_H.flatMap(h => silvRung(f, h))].map(b => [...b, 0]);
+let SILV_PER = 0;
+if (HAS_SILVER) {
+  const at = new Map(), atW = new Map();         // height -> its first bitmap, in silvFrame's order
+  for (const h of SILV_WIDE) { atW.set(h, SILV_PER); SILV_PER += 2; }
+  for (const h of SILV_H) { at.set(h, SILV_PER); SILV_PER += silvRung(0, h).length; }
+  for (const r of SVLAD) {                       // a magnified rung shares its height's bitmaps
+    if (r.wide) { r.lo = atW.get(r.h); r.rt = r.lo + 1; continue; }
+    const i = at.get(r.h);
+    r.lo = i;
+    if (r.h > 21) { r.up = i + 1; r.rt = i + 2; r.rtu = i + 3; }
+  }
+}
 let NORBBM = ORBBM.length;
 // The widest rung must come back byte-identical to the art it was scaled from. If a change to
 // the resampler breaks that, every other rung is suspect too.
-// Against ORBSRC12 packed rather than ORB4RAW, so ORBSHD01's recolour (which both carry) is in it.
 const ORB4WANT = ORBSRC12.flatMap(r => [0, 1, 2].map(b => [0, 1, 2, 3].reduce((v, k) => v | (r[b * 4 + k] << (6 - 2 * k)), 0)));
 if (ORBBM[0].slice(0, 63).join() !== ORB4WANT.join())
   throw new Error('orbScale does not reproduce ORB4 at full size -- the resampler changed');
@@ -4251,8 +4567,12 @@ if (process.env.ORBDBG) {
     `(${LADDER.length - ORBBMH.length} are a bitmap reused at another magnification)`);
 }
 const ORBEXP = LADDER.map(r => r.exp);
-const ORBWIDE = LADDER.map(r => orbW(r.h) * (r.exp ? 4 : 2));    // apparent width, screen px
-const ORBTALL = LADDER.map(r => r.h * (r.exp ? 2 : 1));          // apparent height, screen px
+// The WIDTH and HEIGHT doublings apart. Equal to ORBEXP for everything but the silver orb's
+// two-wide rungs (SVQUAD=v, r.ey), which double only the height: two sprites side by side, so the
+// ball keeps its horizontal detail at the size a magnified single sprite would be.
+const ORBEX = LADDER.map(r => r.exp ? 1 : 0), ORBEY = LADDER.map(r => r.exp || r.ey ? 1 : 0);
+const ORBWIDE = LADDER.map((r, v) => (r.w ?? orbW(r.h)) * (ORBEX[v] ? 4 : 2));   // apparent width, screen px
+const ORBTALL = LADDER.map((r, v) => r.h * (ORBEY[v] ? 2 : 1));                  // apparent height, screen px
 // ---- TALL ENTITIES: the angel, two sprites stacked ----
 // Art came off TMP-2.d64 (GKGM, two frames; the disk is not kept) via angel-art.json. 12x42 multicolor, body and
 // underside inks only. Same resampler as the orb -- majority of 4x4 samples, transparency
@@ -4497,7 +4817,7 @@ const ANG_V0 = LADDER.length;                    // the angel's rungs follow the
 for (const r of ANGLAD) {
   const [lo, up] = ANGIDX.get(r.h);
   LADDER.push({ h: r.h, exp: r.exp, up });
-  ORBSRC.push(lo); ORBEXP.push(r.exp);
+  ORBSRC.push(lo); ORBEXP.push(r.exp); ORBEX.push(r.exp ? 1 : 0); ORBEY.push(r.exp ? 1 : 0);
   ORBWIDE.push(angW(r.h) * (r.exp ? 4 : 2));
   ORBTALL.push(r.h * (r.exp ? 2 : 1));
 }
@@ -4735,8 +5055,29 @@ if (HAS_IDOL) {
 // the hole page by page, so the idol simply follows the exit ladder in that same file and lands
 // at HOLEBASE + the exit ladder's length.
 const IDOLBM = HAS_IDOL ? ORBBM.slice(IDOLBM0) : [];
+// ---- THE SENTRY'S RUNGS: the third range of the shared variant list, after the angel's ----
+// Every table indexed by ovar extends for free, as it did for the angel. Frame 0's bitmaps join
+// ORBBM here -- after the idol's slice, so nothing that ships at SPRBASE or rides with the idol moves
+// -- because every extent, box and lift is measured off ORBBM[ORBSRC[v]]. They SHIP from SVBM (all
+// four frames, see SVBASE), not from ORBBM: orbPtrT names them there.
+const SV_V0 = LADDER.length;
+const SVBM0 = ORBBM.length;
+if (HAS_SILVER) {
+  ORBBM.push(...silvFrame(0));
+  const ab = i => i === undefined ? undefined : SVBM0 + i;
+  for (const r of SVLAD) {
+    LADDER.push({ ...r, lo: ab(r.lo), up: ab(r.up), rt: ab(r.rt), rtu: ab(r.rtu) });
+    ORBSRC.push(SVBM0 + r.lo); ORBEXP.push(r.exp); ORBEX.push(r.exp ? 1 : 0); ORBEY.push(r.exp || r.ey ? 1 : 0);
+    ORBWIDE.push(r.w * (r.exp ? 4 : 2));
+    ORBTALL.push(r.h * (r.exp || r.ey ? 2 : 1));
+  }
+}
+const isSv = v => v >= SV_V0;                    // a sentry's rung (none in a build without them)
+const isAngV = v => v >= ANG_V0 && v < SV_V0;    // an angel's
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
+// ...and the silver orb's RIGHT column: lower-right and upper-right, -1 for a one-column rung
+const ORBSRCR = LADDER.map(r => r.rt ?? -1), ORBSRCRU = LADDER.map(r => r.rtu ?? -1);
 NORBBM = IDOLBM0;               // what still ships AT SPRBASE; the idol is counted separately
 // ---- THE TAIL OF THE ORB LADDER MOVES UNDER THE I/O HOLE, to buy back low RAM ----
 // Krill's resident has to live at $0400-$062c (it refuses to assemble above $d000), and that is
@@ -4776,6 +5117,7 @@ const ORBLO_N = NORBBM - ORBHI_N;               // what is left at SPRBASE
 // one bitmap per orb bitmap, from index 0 up, so what it can reach is exactly the first
 // IDOLBM.length of them. The split takes bitmaps off the END, so the two only collide when the
 // idol's run is longer than what is left behind.
+// (The silver orb's road carries whole frames, reached by their own deltas, not one per orb bitmap.)
 if (IDOLBM.length > ORBLO_N) throw new Error(
   `the idol has ${IDOLBM.length} bitmaps and only ${ORBLO_N} orb bitmaps are left at SPRBASE, so ` +
   `orbArtT's pointer DELTA would span two bases. Move fewer (ORBHI_N=${ORBHI_N}), or give the ` +
@@ -4801,6 +5143,19 @@ const boxBitmaps = bms => {
       b[y * 3 + (x >> 2)] |= 3 << (6 - 2 * (x & 3));   // set both bits: pixel value 3
 };
 boxBitmaps(ORBBM);
+// ---- SHD01_DIFF: what shdSet XORs into the orb ladder to give it the pair-01 shadow ----
+// Every byte of the orb's own bitmaps (not the idol's, which shares ORBBM from IDOLBM0 on) that
+// the dark shadow changes, as [bitmap, offset, mask]. XOR undoes itself, so the one list both
+// applies the shadow and takes it off again. Boxed like the real ladder, so SPRBOX=1 still lines up.
+const SHD01_DIFF = (() => {
+  if (!HAS_SHD01) return [];
+  const shd = ORBBMH.map(h => orbBytes(h, true));
+  boxBitmaps(shd);
+  const d = [];
+  shd.forEach((bm, b) => bm.forEach((v, i) => { if (v !== ORBBM[b][i]) d.push([b, i, v ^ ORBBM[b][i]]); }));
+  if (!d.length) throw new Error('ORBSHD01: the dark shadow changes no byte of the orb ladder');
+  return d;
+})();
 // Every bitmap must be EXACTLY 64 bytes: they upload as one flat block and are addressed by
 // sprite pointer, so a single short entry shifts every bitmap after it and the pointers walk
 // into whatever follows -- which reads on screen as the wrong art entirely.
@@ -4825,7 +5180,7 @@ if (process.env.ORBDUMP === '1') {
 // The content is bottom-aligned in every bitmap, so the ground shadow always ends on the
 // sprite's last row and the anchor is simply the sprite's height. No per-variant table of
 // hand-measured shadow positions any more.
-const ORBANCH = ORBEXP.map(e => e ? 42 : 21);   // row pitch: one sprite height
+const ORBANCH = ORBEY.map(e => e ? 42 : 21);    // row pitch: one sprite height
 // The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
 // and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
 const ORBBODY = [12, 12, 12];
@@ -4892,8 +5247,11 @@ const ORBS = [];
     ORBS.push({ x: 2.5, y: 5.5, c: 0 });         //   east behind |1
     ORBS.push({ x: 10.5, y: 8.5, c: 0 });
   }
-  else if (LVL === 8)                            // the flicker test: one orb two cells ahead of
-    ORBS.push({ x: 3.5, y: 1.5, c: 0 });         //   the start, to judge the dark sprite inks by
+  else if (LVL === 8) ORBS.push({ x: 8.5, y: 5.5, c: 0 });   // v4: one orb, in the col-8 crossing
+  else if (LVL === 9) {                          // the sentries, at their starts -- FIRST, see SVN --
+    for (const sn of L9.sentries) ORBS.push({ x: sn.x + 0.5, y: sn.y + 0.5, c: 0, silver: true });
+    for (const [x, y] of L9.orbs) ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });   // ...then the sheet's OO
+  }
   else if (LVL === 1) {                          // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
     ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
@@ -4961,7 +5319,12 @@ const ORBS = [];
       ORBS.push({ x: 3.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 9.5, y: 8.5, c: 0, tall: true });
     }
-    else if (LVL === 8) ORBS.push({ x: 7.5, y: 7.5, c: 0, tall: true });   // the middle of the room
+    else if (LVL === 8) {                         // AA in col 13, one in each hall
+      ORBS.push({ x: 13.5, y: 1.5, c: 0, tall: true });
+      ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });
+      ORBS.push({ x: 13.5, y: 9.5, c: 0, tall: true });
+    }
+    else if (LVL === 9) { }                       // the sentries' level: no angels
     else if (LVL === 1) {                         // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
@@ -5153,9 +5516,12 @@ const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.leng
   const tmp = `./build/.wall${i}-tables.json`;
   // CHAIN=lvl for a LATE level's wall, exactly as its dump does: inheriting the chain leaves
   // the level resident in no chain and its own walls unreachable. See LATEALL.
+  // LEVELSHEET cleared: a sheet build prints and stops BEFORE the dump, so an inherited flag left
+  // no file -- and the sheets of levels 2-7 only ever worked by reading a stale one left by an
+  // earlier full build (found 2026-10-13, when level 8's first wall had none to read).
   subBuild({ ...process.env, LVL: String(w.lvl),
              ...(CHAIN.includes(w.lvl) ? {} : { CHAIN: String(w.lvl) }),
-             WALLOFF: String(w.k + 1), LVLDUMP: tmp });
+             WALLOFF: String(w.k + 1), LVLDUMP: tmp, LEVELSHEET: '' });
   return JSON.parse(readFileSync(tmp, 'utf8'));
 }) : null;
 // "is there a wall mechanic at all" -- an ENGINE question, so it asks LEVEL_IDS and not what
@@ -5214,7 +5580,20 @@ const RUNTAB = 0x7900 - 2 * NRUN;
 const losFree = (ax, ay, bx, by) => losClear(ax, ay, bx, by, WALL_SHUT);   // walls as they start
 const F_COL = (NLOG / 2) / Math.tan(FOV / 2 / 256 * 2 * Math.PI);   // columns per unit of x/d
 const HOLER = +(process.env.HOLER ?? 0.88 / (2 * F_COL / 48 - 1));
+// The silver orb's sprite box holds its lightning too, so the ball is only ~60% of it: scaled up
+// by 1.25 to put the ball near the plain orb's size at the same distance. SVSCALE overrides.
+// The silver orb reaches the ladder's LARGEST rung about one cell out (SVCAP, default 1.1). It
+// was silverW(42) * 4 = 96, meant as "full size at one cell", but that is the rung's width in
+// SCREEN pixels where orbVarT counts LOGICAL columns (two each): the ball stopped growing 2.2 cells
+// out and slid the rest of the way in at one size -- "it stops growing and slides earlier than I
+// think necessary" (the user, 2026-10-13). The cap distance scales with ORBSCALE (the 42-row rung
+// takes over at a fixed want), so SVCAP sets it directly: 2 * SVCAP / 1.1 per silverW(42), the
+// largest rung from 1.1 cells in at SVCAP 1.1. Smaller at every distance, which the user accepted.
+// The SAME scale with SVQUAD=0, so the one-sprite ladder matches the 2x2 one size for size.
+const SVCAP = +(process.env.SVCAP ?? 1.1);
 const ORBSCALE = +(process.env.ORBSCALE ?? 49);   // the ball's DIAMETER in screen pixels at d=1
+// The sentry's own, which svVarT is built from (it was ORBSCALE itself while the ball replaced the orb).
+const SVSCALE = +(process.env.SVSCALE ?? Math.round(silverW(42) * 2 * SVCAP / 1.1));
 // ---- the pedestal's world size, up here because the LOS cull needs its reach ----
 // DERIVED, not chosen. The user's brief: "they should look the same size as the idols which
 // will eventually be placed on them", and the idol rides the orb's ladder, so the drum is
@@ -5336,8 +5715,13 @@ const HUB_WIRED = [5, 6, 7].every(n => ALLLVL.includes(n));
 // ENDTEST=1 sends level 1's exit there instead, so FALLNOW can reach the ending in seconds.
 const ENDING = LVLLOAD && true && !process.env.NOENDING
   && existsSync('./data/quote-end.json') && existsSync('./data/end-scene.json');
-const BLACK_DST = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
+// LEVEL 8 (2026-10-13): the black hole now drops into level 8, and the ENDING moves one step on, to
+// level 8's own exit. A chain without 8 (CHAIN=4,5,6,7, a playtest) keeps the old wiring: black to
+// the ending, or to level 1 under NOENDING.
+const AFTER_8 = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
+const BLACK_DST = ALLLVL.includes(8) ? 8 : AFTER_8;
 const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4],
+                        8: [AFTER_8],
                         ...(ENDING && process.env.ENDTEST ? { 1: [END_DST] } : {}) };
 // FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
 // hlv, and hlv is reset to 0 after every drop (see fallDone), so a headless run can only ever
@@ -5389,7 +5773,7 @@ const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').
 // that hides it stays: it is what the three pedestals open, and it now reveals an empty alcove.
 const HUB_HOLES = [[4, 1], [1, 4], [4, 7], [13, 4]];   // N(red), W(green), S(blue), E(black)
 const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
-             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : LVL === 8 ? [13, 13] : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : LVL === 8 ? [16, 5] : LVL === 9 ? L9.exit : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
@@ -5415,7 +5799,8 @@ const HOLES_AT = process.env.NOHOLE === '1' ? []
 // level keeps its own.
 const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '5,5;7,7'
                     : LVL === 5 ? '11,3;19,9' : LVL === 6 ? '3,8;5,8'
-                    : LVL === 7 ? '1,10;11,5' : '')).split(';')
+                    : LVL === 7 ? '1,10;11,5' : LVL === 8 ? '14,5'
+                    : LVL === 9 ? L9.socks.map(sk => `${sk.x},${sk.y}`).join(';') : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
@@ -5490,6 +5875,7 @@ Object.assign(RUNTIME_BUFS, {
   // 176-byte one is. Slack of 15 over the highest index anything can form.
   remHiT: 176,
   krillRt: 251,         // Krill's RUNTIME resident -- see krillRt
+  arcMap: CELLCODES,    // the fall's cell code -> arc code map, built at runtime by arcBld
   // The seam-stability and seam-edge scratch, declared so their two pages stop being written off
   // whole. Between them they are 63 bytes; they were holding down 512.
   ssCut: 1, ssCutD: 1, ssHL: 1, ssHR: 1, ssPU: 1, ssPUL: 1, ssKLo: 1, ssKHi: 1,
@@ -5794,6 +6180,7 @@ const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
 // An orb takes its colour from its own index. No fallback: an idol with no identity colour is
 // a level-data mistake, and a silent default is how the two sources drifted in the first place.
 const orbCol = ORBS.map(o => {
+  if (o.silver) return SILV_INKS[1];
   if (!o.idol) return ORBBODY[o.c];
   if (o.body === undefined) throw new Error(`idol at (${o.x},${o.y}) has no body colour`);
   return o.body;
@@ -5829,7 +6216,7 @@ const ANGH = +(process.env.ANGH ?? 0.42);
 const angVarT = [...Array(256)].map((_, h) => {
   const want = 2 * h * ANGH;
   let b = ANG_V0;
-  for (let v = ANG_V0 + 1; v < ORBTALL.length; v++)
+  for (let v = ANG_V0 + 1; v < SV_V0; v++)        // not into the sentry's rungs, which follow
     if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
   return b;
 });
@@ -5844,7 +6231,7 @@ if (process.env.ANGDUMP === '1') {
         [0,1,2,3].map(i => CH[(b[y*3+k] >> (6-2*i)) & 3])).join(''));
   }
   console.error('  angel variants: var tall wide base exp');
-  for (let v = ANG_V0; v < ORBTALL.length; v++)
+  for (let v = ANG_V0; v < SV_V0; v++)
     console.error(`    var ${v} (0x${v.toString(16)})  tall ${String(ORBTALL[v]).padStart(3)}` +
       `  wide ${String(ORBWIDE[v]).padStart(3)}  base ${ORBSRC[v]}  exp ${ORBEXP[v]}`);
   console.error('  ohgt -> angel rung (want = 2*h*ANGH):');
@@ -5865,6 +6252,26 @@ const angMidT = [...Array(256)].map((_, h) => {
   const off = Math.round((ORBTALL[angVarT[h]] - 2 * h * ANGH) / 2);
   return Math.max(-128, Math.min(127, off)) & 255;      // two's complement in a byte
 });
+// ---- svLiftT: how far the silver orb hovers, per ohgt>>1 ----
+// Its centre is at the HORIZON (the user, 2026-10-13: "move the ball up to horizon height"; it was
+// at the angel's upper sprite, 3/4 of 2*ANGH*h, which reads low because an angel's head is below
+// the horizon). The horizon is h rows above the floor line at every distance, so SVH is a
+// fraction of h: 1 = eye level.
+// The rung's own art puts the ball some rows above the floor already (its box is bottom-aligned
+// with the lightning, not the ball), so the lift is the difference, measured off the rung's
+// frame-0 bitmap at the size orbVarT will actually pick for that h.
+const SVH = +(process.env.SVH ?? 1);
+// One entry per ohgt, not per ohgt>>1: halved, every odd h used the lift of h-1 and the ball
+// bobbed a row up and down as h ticked by while you walked -- part of the jitter (2026-10-13).
+const SVLIFT_N = 256;
+let svLiftT = [];
+const svLiftOf = (h, vt) => {
+  // the ball's rows over every part (a 2x2 rung's upper sprites sit at negative rows), against
+  // the lower sprite's bottom row, which is the floor anchor
+  const v = vt[h], e = inkExtent(orbPartsOf(v, ORBSRC[v], 0)), mag = ORBEY[v] ? 2 : 1;
+  const centre = 21 * mag - (e.top + e.bot + 1) / 2;                     // rows above the floor
+  return Math.max(0, Math.min(255, Math.round(SVH * h - centre)));
+};
 const orbVarT = [...Array(256)].map((_, h) => {
   const want = (ORBSCALE * h / 88) * ORBTALL[0] / ORBWIDE[0];
   // STOP AT ANG_V0. The angel's rungs live in this same list, and searching past the boundary
@@ -5875,6 +6282,15 @@ const orbVarT = [...Array(256)].map((_, h) => {
                                         // earlier (expanded) entry: twice the horizontal detail
   return b;
 });
+// ...and the sentry's, from its own scale: the same rule over its own rungs (SV_V0 on). 0s without
+// sentries, and never emitted then.
+const svVarT = [...Array(256)].map((_, h) => {
+  if (!HAS_SILVER) return 0;
+  const want = (SVSCALE * h / 88) * ORBTALL[SV_V0] / ORBWIDE[SV_V0];
+  let b = SV_V0; for (let v = SV_V0 + 1; v < LADDER.length; v++)
+    if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
+  return b;
+});
 { // which rungs can actually be reached, and at what distance each one takes over?
   const band = [];
   for (let v = 0; v < ORBWIDE.length; v++) {
@@ -5882,7 +6298,7 @@ const orbVarT = [...Array(256)].map((_, h) => {
     // Each rung is reached through its OWN distance map -- orbVarT for the round entities,
     // angVarT for the tall ones. Testing every rung against orbVarT reported the entire angel
     // ladder as dead, which it is not: it is simply never what a round thing asks for.
-    const vt = v >= ANG_V0 ? angVarT : orbVarT;
+    const vt = isSv(v) ? svVarT : v >= ANG_V0 ? angVarT : orbVarT;
     const hs = [...Array(lim).keys()].filter(h => vt[h] === v);
     band.push(hs.length ? `${ORBTALL[v]}h@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
       `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBTALL[v]}h/${ORBWIDE[v]}w UNREACHABLE`);
@@ -5896,6 +6312,8 @@ const orbVarT = [...Array(256)].map((_, h) => {
 // orbPtrT is built further down, with ORBHI: the ladder is split across two bases now and the
 // second one is not known until the hole ladder's length is.
 const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
+const orbPtrR = ORBSRCR.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);    // 0 = one column
+const orbPtrRU = ORBSRCRU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);
 const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
 // Which BITMAP an entity draws with, as an offset added to the orb's pointer at the rung it is
 // already using. 0 is the orb's own art. Not folded into orbTallT: that one means "is an angel"
@@ -5951,8 +6369,9 @@ if (CARRY0 && CARRY0 <= orbHidT.length) orbHidT[CARRY0 - 1] = 1;
 // tests one table and costs nothing extra, and picking an orb up is a single store into it.
 // 2 rather than 1 marks "entity, not wall", which the angel will want when it starts moving.
 const blkT = map.slice();
-ORBS.forEach((o, i) => { if (!orbHidT[i]) blkT[cellOf(Math.floor(o.x), Math.floor(o.y))] = 2; });
-const orbExpT = ORBEXP.map(e => e);
+ORBS.forEach((o, i) => { if (!orbHidT[i] && !o.silver) blkT[cellOf(Math.floor(o.x), Math.floor(o.y))] = 2; });   // sentries: a HIT, not a wall
+// In a silver build, bit 0 = double the width and bit 1 = the height; elsewhere the one flag.
+const orbExpT = HAS_SILVER ? LADDER.map((r, v) => ORBEX[v] | (ORBEY[v] << 1)) : ORBEXP.map(e => e);
 // Distance from the sprite's LEFT EDGE to the anchor the projection aims at. orbScale centres
 // the content in the 12-column sprite, so this is ~half the sprite whatever the ball's size;
 // using ballWidth/2 drew small orbs up to 10px right of where they belong AND shifted them on
@@ -5966,6 +6385,7 @@ const orbExpT = ORBEXP.map(e => e);
 // again is a SECOND, independently-derived idea of where the ball is -- so the bounding box
 // below is computed FROM this value rather than alongside it.
 const orbHalfT = ORBSRC.map((b, v) => {
+  if (isSv(v)) return (ORBSRCR[v] >= 0 ? 24 : 12) * (ORBEX[v] ? 2 : 1);   // centred on its 1- or 2-sprite frame
   const w = b + 1, ox = (12 - w) >> 1;
   return (2 * ox + w) * (ORBEXP[v] ? 2 : 1);
 });
@@ -6013,9 +6433,12 @@ const inkExtent = parts => {
 // the orb's rungs through one pointer offset, so a variant's box is the UNION of what either
 // picture inks there. Equal today; if the idol's art is ever redrawn wider, the box grows with it.
 const orbPartsOf = (v, bm, col0) => {
-  const r = LADDER[v], m = r.exp ? 2 : 1;
-  const parts = [{ grid: spriteGrid(ORBBM[bm]), col0, row0: 0, xm: m, ym: m }];
-  if (ORBSRCU[v] >= 0) parts.push({ grid: spriteGrid(ORBBM[ORBSRCU[v]]), col0, row0: -21 * m, xm: m, ym: m });
+  const xm = ORBEX[v] ? 2 : 1, ym = ORBEY[v] ? 2 : 1;
+  const parts = [{ grid: spriteGrid(ORBBM[bm]), col0, row0: 0, xm, ym }];
+  if (ORBSRCU[v] >= 0) parts.push({ grid: spriteGrid(ORBBM[ORBSRCU[v]]), col0, row0: -21 * ym, xm, ym });
+  // the silver orb's right column, one sprite (12 columns) over
+  if (ORBSRCR[v] >= 0) parts.push({ grid: spriteGrid(ORBBM[ORBSRCR[v]]), col0: col0 + 12 * xm, row0: 0, xm, ym });
+  if (ORBSRCRU[v] >= 0) parts.push({ grid: spriteGrid(ORBBM[ORBSRCRU[v]]), col0: col0 + 12 * xm, row0: -21 * ym, xm, ym });
   return parts;
 };
 // col0 is where the sprite's left edge sits relative to ocol. ROWS do not depend on it, which is
@@ -6029,7 +6452,10 @@ const orbExtOf = (v, col0) => {
   // THE STAMP ENDS AT anchor - 1 (occStamp: "the content is bottom aligned in the frame"), so the
   // ink must reach exactly the frame's last row. A rung that floats above it would leave rows
   // stamped under nothing; one that hangs below would be under-covered.
-  if (e.bot !== ORBANCH[v] - 1) throw new Error(`orb-path variant ${v} (h=${r.h}): ink ends on row ${e.bot}, ` +
+  // The silver orb is exempt: its box is bottom-aligned (the lightning reaches the last row) but
+  // the plain ball is not, and frame 0 is what gets measured. Rows stamped below it are cells the
+  // lightning may cross; a stamp over nothing draws wall over nothing, which is invisible.
+  if (!isSv(v) && e.bot !== ORBANCH[v] - 1) throw new Error(`orb-path variant ${v} (h=${r.h}): ink ends on row ${e.bot}, ` +
     `but occStamp assumes content is BOTTOM-ALIGNED and ends on row ${ORBANCH[v] - 1} of its frame`);
   return e;
 };
@@ -6077,7 +6503,14 @@ const ANG_OBSC = +(process.env.ANGOBSC ?? 0);
 // With the idol in hand it is the LUNGE you watch; without, an unseen step that strays into view
 // freezes mid-slide (see slTick). 0 = the instant step. Gated on HAS_IDOL only because the lunge
 // was built with it; the unseen slide has no need of an idol.
-const ANGSLIDE = HAS_IDOL ? +(process.env.ANGSLIDE ?? 24) : 0;
+// HAS_SILVER as well: the silver orb's continuous glide IS this slide (svStep), drawn by orbProjS.
+// FINECOL: an entity's screen column from h WITH its fraction, not the whole rows of ohgt. Integer h
+// sawtoothed a distant sidelong mover (2026-10-13). The SENTRIES' only by default (they glide; the
+// rest step or stand): it costs two mul8s per projection, and every other entity is kept looking
+// exactly as it did until it is measured there. FINECOL=1 gives it to every entity, FINECOL=0 to none.
+const FINECOL = process.env.FINECOL ? process.env.FINECOL === '1' : HAS_SILVER;
+const FINECOL_ALL = process.env.FINECOL === '1';
+const ANGSLIDE = HAS_IDOL || HAS_SILVER ? +(process.env.ANGSLIDE ?? 24) : 0;
 if (ANGSLIDE && (ANGSLIDE < 2 || Math.max(ANG_PERIOD, ANG_PERIOD_FAR) + ANGSLIDE > 256 || ANGSLIDE >= Math.min(ANG_PERIOD, ANG_PERIOD_FAR)))
   throw new Error(`ANGSLIDE=${ANGSLIDE} must be 2.. and shorter than a step period (${ANG_PERIOD}/${ANG_PERIOD_FAR}), and period + slide must fit a byte`);
 // ---- SOUND: two detuned low-pass pulses, and the detune IS the proximity readout ----
@@ -6214,24 +6647,37 @@ const ANGCLIP = +(process.env.ANGCLIP ?? 4);
 // and pinned 26 rows lower on every magnified rung. That is exactly where it shows, because the
 // magnified rungs are the close ones, where the ladder has stopped growing and translation down
 // the screen is all that is left.
-const orbYCapT = orbBlankT.map((b, v) => v >= ANG_V0
+const orbYCapT = orbBlankT.map((b, v) => isAngV(v)
   ? Math.max(0, Math.min(255, 250 + ANGCLIP - ORBANCH[v]))
   : Math.max(0, 250 - ORB_FLOOR - Math.max(0, b)));
 if (orbYCapT.some(v => v < 0 || v > 255)) throw new Error('orbYCapT does not fit a byte');
-const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEXP[v] ? 2 : 1));
+const orbHgtT = ORBSRC.map((b, v) => 21 * (ORBEY[v] ? 2 : 1));
 // Half the sprite, in LOGICAL COLUMNS. Everything in this engine lives on the 160x200 grid, and
 // a multicolor sprite pixel is two hires pixels, so a sprite has no odd X worth taking: the old
 // code built a 16-bit hires X and then snapped its low bit off again (`and #$fe`). Rounding UP
 // here is exactly what that snap did -- effective halfWidth h + (h & 1) -- so no orb moves.
 const orbHalfCT = orbHalfT.map(h => Math.ceil(h / 2));
+// ---- SILVER: centre each rung's BALL, not its frame ----
+// The art is centred in its 12- or 24-pixel frame by whole pixels, so the ball sat -0.5, -1.0 or
+// -1.5 columns off ocol depending on the rung, and every rung change nudged it sideways a column
+// (SVDUMP shows it). Shift each rung's placement so its ball centre lands within half a column of
+// the same spot. orbXOffT and the occlusion box (orbBoxT) both derive from orbHalfCT, so they move
+// together and cannot disagree.
+LADDER.forEach((r, v) => { if (!isSv(v)) return;   // the sentry's rungs only: the orb's stay where they always were
+  const e = inkExtent(orbPartsOf(v, ORBSRC[v], -orbHalfCT[v]));
+  orbHalfCT[v] -= Math.round(-0.5 - (e.r - e.l) / 2);
+});
 // X = 24 + 2*col, and 24 hires px is 12 columns, so X = 2 * (col + 12) and the sprite's left
 // column is ocol - orbHalfCT. Fold both into one table: b = ocol + orbXOffT, X = b << 1. The
 // offset is never negative (orbHalfCT is 6..12), so it is a plain ADC with no sign handling, and
 // X comes out EVEN by construction rather than by masking.
 // orbExtOf measures the ink with the sprite's left edge at ocol - orbHalfCT -- THIS placement --
 // so the occlusion box and where the pixels land cannot disagree for any variant, angel included.
+// NEGATIVE for the silver orb's magnified 2x2 rungs: their frame is 48 columns, so the left edge is
+// 24 left of ocol and the offset is -12 -- stored as a two's-complement byte, and orbOne's X add
+// branches on its sign (see oxDn).
 const orbXOffT = orbHalfCT.map(h => 12 - h);
-if (orbXOffT.some(v => v < 0 || v > 12))
+if (orbXOffT.some(v => v < (HAS_SILVER ? -12 : 0) || v > 12))
   throw new Error('orbXOffT out of range -- a sprite is more than 12 columns off its own centre');
 
 // The bounding box, as the ball's TRUE extent in logical columns each side of ocol. Asymmetric,
@@ -6253,6 +6699,31 @@ if (orbXOffT.some(v => v < 0 || v > 12))
 // orb's ball at the same bitmap height (which asked for 24 columns of a 12-column sprite).
 const orbBoxT = LADDER.map((r, v) => orbExtOf(v, -orbHalfCT[v])).map(e => ({ l: e.l, r: e.r }));
 const orbColLT = orbBoxT.map(b => b.l);          // columns from ocol to the leftmost ink
+if (HAS_SILVER) svLiftT = [...Array(SVLIFT_N)].map((_, h) => svLiftOf(h, svVarT));
+// ...which ships as ONE BYTE PER RUNG, not 256 (2026-10-14, to fit the full engine): with SVH = 1 the
+// lift is h minus the rung's ball centre, rounded the way svLiftOf rounds it -- round(h - c) is
+// h - K for whole h, K = -floor(0.5 - c) -- and floored at 0, which the runtime does with one bcs.
+// Checked against the table it replaces at every h.
+if (HAS_SILVER && SVH !== 1) throw new Error(`SVH=${SVH}: the hover is h - the ball's centre, which is eye level (1); svLiftT is no longer a table`);
+const svCtrT = LADDER.map((r, v) => {
+  if (!isSv(v)) return 0;
+  const e = inkExtent(orbPartsOf(v, ORBSRC[v], 0)), mag = ORBEY[v] ? 2 : 1;
+  return -Math.floor(0.5 - (21 * mag - (e.top + e.bot + 1) / 2));
+});
+if (HAS_SILVER) for (let h = 0; h < 256; h++)
+  if (Math.max(0, h - svCtrT[svVarT[h]]) !== svLiftT[h]) throw new Error(`svCtrT: at h=${h} the lift is ${Math.max(0, h - svCtrT[svVarT[h]])}, svLiftOf says ${svLiftT[h]}`);
+// SVDUMP=1: per silver rung -- apparent height, the h band orbVarT gives it, and the BALL's centre
+// against ocol (columns) and against the horizon (rows) at the middle of that band. Steady centres
+// are what keep a rung change from reading as a jump.
+if (HAS_SILVER && process.env.SVDUMP) LADDER.forEach((r, v) => { if (!isSv(v)) return;
+  const hs = [...Array(256).keys()].filter(h => svVarT[h] === v);
+  if (!hs.length) return console.error(`  silver rung ${v}: ${ORBTALL[v]} apparent, UNREACHED`);
+  const h = hs[hs.length >> 1], e = inkExtent(orbPartsOf(v, ORBSRC[v], -orbHalfCT[v])), m = ORBEY[v] ? 2 : 1;
+  const yTop = 150 - ORBANCH[v] + h - svLiftT[h];                       // $d001 of the lower sprite
+  const cy = yTop + (e.top + e.bot + 1) / 2 - 150;                      // ball centre vs the horizon
+  console.error(`  silver rung ${String(v).padStart(2)}: ${String(ORBTALL[v]).padStart(2)} apparent${ORBEX[v] ? ' (x2)' : m > 1 ? ' (vx2)' : '      '}  h ${hs[0]}-${hs[hs.length - 1]}` +
+    `  ball centre ${((e.r - e.l) / 2).toFixed(1)} cols, ${cy.toFixed(1)} rows from the horizon`);
+});
 // The last orb rung is a ONE-column ball sitting entirely left of ocol, so its true right offset is
 // -1. The runtime adds this to ocol with a carry test for "past column 255", which a negative
 // addend would trip. Clamp it: over-covering by a column is invisible, because the stamp only
@@ -6272,7 +6743,7 @@ if (process.env.BOXAUDIT) {
     return ink.cr < 0 ? '  (no ink)' : `${String(orbHalfCT[v] - ink.cl * xx).padStart(3)}/${String((ink.cr + 1) * xx - 1 - orbHalfCT[v]).padStart(3)}`; };
   console.error('BOXAUDIT  v  kind   h exp   box L/R   ink L/R   idol ink L/R');
   LADDER.forEach((r, v) => {
-    const isAng = v >= ANG_V0;
+    const isAng = isAngV(v);
     const bms = isAng ? (() => { const [lo, up] = ANGIDX.get(r.h); return [[ORBBM[lo], 21], ...(up >= 0 ? [[ORBBM[up], 0]] : [])]; })()
                       : [[ORBBM[ORBSRC[v]], 0]];
     const idol = !isAng && HAS_IDOL ? rel(v, inkCols([[ORBBM[IDOLBM0 + ORBSRC[v]], 0]])) : '';
@@ -7092,7 +7563,10 @@ const SOCK_SPR = (process.env.SOCKSPR ?? '').split(',').map(Number);
 // by 264 bytes -- and eight rungs cannot cost less than nine slots (rung 0 needs two sprites even
 // magnified), so NO dedicated ladder fits in that gap. Sprite data only has to be 64-byte aligned
 // RAM inside the VIC bank, so it ships as its own file instead, like ISPR and IPIC already do.
-const SOCKBASE = +(process.env.SOCKBASE ?? 0xf880);
+// $f380, not $f880 (2026-10-13): the arc map and the level slot left bank 3, and the socket was all
+// that split the space they freed into 20 + 6 slots. At the FRONT of that run the rest is one piece:
+// $f780-$fdff, 26 slots, two of the sentry's 12-sprite frames. Same bytes, new address.
+const SOCKBASE = +(process.env.SOCKBASE ?? 0xf380);
 const SOCK = makeHoleLadder(SOCKR, 4, 0, 32, false, 0, {
   widths: SOCK_W, crisp: true, spr: SOCK_SPR, cover: true,
   // "<rung>:<lit row>:<pixels each side>", EMPTY by default. One rung was hand-trimmed while the
@@ -7103,6 +7577,9 @@ const SOCK = makeHoleLadder(SOCKR, 4, 0, 32, false, 0, {
   touch: (process.env.SOCKTOUCH ?? '').split(',').filter(Boolean)
            .map(t => t.split(':').map(Number)),
 });
+// What actually SHIPS at SOCKBASE (ISOK). (In the silver lab of 2026-10-13 it was the sentry's frame
+// 3; the sentry's frames live at SVBASE and OVLBASE now, and the socket has its slots back.)
+const SOCKSHIP = SOCK.BM;
 
 // ---- SOCKETS BORROW THE EXIT HOLE'S BITMAPS AND OWN NONE ----
 // A disc of HALF the radius at distance d is the same shape as a full-size one at 2d stretched
@@ -7433,6 +7910,19 @@ if (process.env.PEDDUMP && HAS_PED) {
   process.exit(0);
 }
 const HOLE_LADDER = HOLE.L, HOLEBM = [...HOLE.BM, ...PED.BM];
+// ---- OVLBASE: THE LEVEL ART RUN, where the pedestal and the idol ship ----
+// They sat in the HOLEBASE stack under the I/O hole, straight behind the exit ladder. They moved here
+// (2026-10-14) so the sentry's art can take their place under the hole -- and because this run is
+// plain RAM the CPU can reach, a level that needs neither can have something else LOADED over them
+// on arrival (see lvlArtT) and they come back the same way. Krill cannot write under the I/O hole,
+// so whatever is swapped per level has to live on this side of it. Same bytes, same order
+// (pedestal then idol); only the pointers that name them changed.
+const OVLBASE = +(process.env.OVLBASE ?? 0xf780);
+// The pedestal's rungs still number their slots in the shared hole block (makePedLadder counts on
+// from HOLE.slotEnd); pedPtrT rebases them onto OVLBASE, which is only right if they run contiguously
+// from there and the exit ladder fills exactly the slots before them.
+if (PED.slotT.some((s, i) => s < HOLE.slotEnd || s >= HOLE.slotEnd + PED.BM.length) || HOLE.BM.length !== HOLE.slotEnd)
+  throw new Error(`the pedestal's slots ${PED.slotT} are not a contiguous run from the exit ladder's end (${HOLE.slotEnd}) -- pedPtrT cannot rebase them onto OVLBASE`);
 // ---- HOW MANY SCREEN ROWS EACH SOCKET-LIKE RUNG COVERS, so occStamp can box it ----
 // The stamp needs one thing from a slot it did not project: the row extent of what is drawn
 // there. For an orb it reads that from orbBlankT/orbAnchT by variant; a socket's rung cannot go
@@ -7635,21 +8125,67 @@ if (DIE && !process.env.LVLDUMP && 0x7100 + PICS.chars.length > VISTAB)
     `$${(0x7100 + PICS.chars.length).toString(16)} and overruns sockVisT at $${VISTAB.toString(16)} ` +
     `(NRUN=${NRUN}, ${VISN}B of rung heights). Pack the pictures harder, or move the tables.`);
 // ---- and now the exit ladder's length is known, so the idol's base is too ----
-const IDOLBASE = HOLEBASE + HOLEBM.length * 64;   // straight behind it, under the hole
+// Behind the pedestal at OVLBASE (IAR0).
+const IDOLBASE = OVLBASE + PED.BM.length * 64;
 const IDOL_PTR = ((IDOLBASE - SPRBASE) >> 6) & 255;
 if (HAS_IDOL && IDOL_PTR === 0) throw new Error(
   `the idol's pointer offset came out 0, and 0 is the value that MEANS "not the idol" in ` +
   `orbArtT -- IDOLBASE ${hx16(IDOLBASE)} landed exactly on SPRBASE, so the two collide`);
 const orbArtT = ORBS.map(o => o.idol ? IDOL_PTR : 0);   // a pointer DELTA now, not a bitmap index
+// ---- SVBASE: the sentry's frames 0 and 1, under the I/O hole behind the exit ladder ----
+// The end of IHOL, where the pedestal and the idol rode until they moved to OVLBASE: frames 2 and 3
+// can only live on the CPU's side of the hole, because they are what a level LOADS (lvlArtT) and
+// Krill cannot write under it. A sentry's frame f is its frame-0 pointer + SILV_PD[f].
+const SVBASE = HOLEBASE + (HOLE.BM.length + ORBHI_N) * 64;
+const SVBM = HAS_SILVER ? [...silvFrame(0), ...silvFrame(1)] : [];          // ships in IHOL
+const SVART = HAS_SILVER ? [...silvFrame(2), ...silvFrame(3)] : [];         // ships as IAR1, at OVLBASE
+const SILV_PD = [0, SILV_PER, ((OVLBASE - SVBASE) >> 6) & 255, ((OVLBASE + SILV_PER * 64 - SVBASE) >> 6) & 255];
+if (HAS_SILVER && SVBASE + SVBM.length * 64 > 0xe000) throw new Error(`the sentry's frames 0-1 run to ${hx16(SVBASE + SVBM.length * 64)}, past the I/O hole`);
+if (HAS_SILVER && OVLBASE + SVART.length * 64 > 0xfe00) throw new Error(`the sentry's frames 2-3 run past $fe00 (COLH) from OVLBASE`);
+// The sentries are entities 0..SVN-1 of their level, in the sheet's order, and their paths one flat
+// table of direction codes (1..4 = +x -x +y -y, slTick's encoding). PER LEVEL: svNT, svBegT, svEndT
+// and svPathT ride in the level file; the engine keeps only the state, SV_MAX of each.
+const SV_MAX = 8;
+const SENTRIES = LVL === 9 ? L9.sentries : [];
+const SVN = ORBS.filter(o => o.silver).length;
+if (SVN > SV_MAX) throw new Error(`level ${LVL} has ${SVN} sentries; the engine keeps state for ${SV_MAX}`);
+if (ORBS.some((o, i) => !!o.silver !== i < SVN)) throw new Error(`level ${LVL}: the sentries must be its FIRST entities -- every per-sentry test is "index < svN"`);
+if (SVN && !HAS_SILVER) throw new Error(`level ${LVL} has sentries but no level in LEVEL_SILVER says so`);
+const SV_DCODE = d => d[0] === 1 ? 1 : d[0] === -1 ? 2 : d[1] === 1 ? 3 : 4;
+const SV_PATH = SENTRIES.flatMap(sn => sn.dirs.map(SV_DCODE));
+const SV_BEG = SENTRIES.map((_, i) => SENTRIES.slice(0, i).reduce((n, sn) => n + sn.dirs.length, 0));
+const SV_END = SV_BEG.map((b, i) => b + SENTRIES[i].dirs.length);
+if (SV_PATH.length > 255) throw new Error(`the sentries' paths are ${SV_PATH.length} steps; svPosT is a byte`);
+// ---- THE LEVEL ART SETS: what can occupy OVLBASE, and which one each level needs ----
+// Set 0 is the pedestal and the idol, set 1 the sentry's frames 2 and 3. A level that uses neither
+// says so (-1) and keeps whatever is there, so walking 1 -> 2 -> 3 loads nothing extra. The idol is
+// LUGGAGE as well -- carried from its errand level back to the hub -- so every level that can hold
+// one wants set 0: its own (LEVEL_IDOL) and the hub that receives them (LEVEL_PEDESTALS).
+const ART_SETS = [[...PED.BM, ...IDOLBM], SVART];
+const ART_OF = n => LEVEL_SILVER[n] ? 1 : LEVEL_IDOL[n] || LEVEL_PEDESTALS[n] ? 0 : -1;
+const ART_LEN = Math.max(...ART_SETS.map(a => a.length));
+if (HAS_SILVER && ART_SETS[0].length && ALLLVL.some(n => LEVEL_SILVER[n] && (LEVEL_IDOL[n] || LEVEL_PEDESTALS[n])))
+  throw new Error('a level with sentries cannot also have an idol or a pedestal: their art shares OVLBASE');
+// ART_OF(BOOTLVL) of -1 boots set 0 (the disk loads it); artCur says which is in place from then on.
+const ART_BOOT = Math.max(0, ART_OF(BOOTLVL));
+if (SVN) console.error(`  sentries: ${SENTRIES.map(sn => `${sn.id} from (${sn.x},${sn.y}), a ${sn.dirs.length}-cell loop`).join('; ')}`);
 // ---- and here, at last, is where the orb ladder's tail lands (see ORBHI_N) ----
 // Straight after the idol, which is straight after the exit ladder -- so this is simply "the end
 // of the IHOL file", and appending to that file is all the placement there is.
-const ORBHI = IDOLBASE + IDOLBM.length * 64;
+// (The idol has moved to OVLBASE, so the tail now follows the exit ladder directly -- it is still
+// what rides on the end of IHOL, with the sentry's frames 0-1 behind it.)
+const ORBHI = HOLEBASE + HOLE.BM.length * 64;
 // Split across two bases: the low run is still at SPRBASE, the tail is under the I/O hole. A
 // sprite pointer is only "which 64-byte slot of the bank", so either base costs the same byte.
-const orbPtrT = ORBSRC.map(b => b < ORBLO_N
+// (The sentry's rungs point at SVBASE, where their frame 0 really ships -- ORBBM holds a copy only to
+// be measured.)
+const svPtr = b => ((SVBASE - VBANK) >> 6) + (b - SVBM0);
+const orbPtrT = ORBSRC.map((b, v) => isSv(v) ? svPtr(b) : b < ORBLO_N
   ? ((SPRBASE - VBANK) >> 6) + b
   : ((ORBHI - VBANK) >> 6) + (b - ORBLO_N));
+ORBSRCU.forEach((b, v) => { if (isSv(v) && b >= 0) orbPtrU[v] = svPtr(b); });
+ORBSRCR.forEach((b, v) => { if (isSv(v) && b >= 0) orbPtrR[v] = svPtr(b); });
+ORBSRCRU.forEach((b, v) => { if (isSv(v) && b >= 0) orbPtrRU[v] = svPtr(b); });
 if (ORBHI + ORBHI_N * 64 > 0xe000) throw new Error(
   `the orb ladder's tail runs to $${(ORBHI + ORBHI_N * 64).toString(16)}, past the end of the ` +
   `I/O hole -- the whole point of moving it is that the CPU never needs to see it`);
@@ -8136,9 +8672,10 @@ console.error(`  hole bitmaps: ${HOLE.BM.length} exit-hole + ${SOCK.BM.length} s
                   ['orb ladder tail', ORBHI, ORBHI_N * 64],
                   ...(ORBHI_N ? [['renderer scratch', 0xee00, ORBHI_N * 64]] : []),
                   ['idol', IDOLBASE, IDOLBM.length * 64],
-                  ['hole ladder', HOLEBASE, HOLEBM.length * 64],
-                  ...(SOCK.BM.length
-                        ? [['socket ladder', SOCKBASE, SOCK.BM.length * 64]] : []),
+                  ['pedestal', OVLBASE, PED.BM.length * 64],
+                  ['hole ladder', HOLEBASE, HOLE.BM.length * 64],
+                  ...(SOCKSHIP.length
+                        ? [['socket ladder', SOCKBASE, SOCKSHIP.length * 64]] : []),
                   ['the loader', LOADER_RUN, 0x100]];
   for (const [an, aa, al] of blocks) for (const [bn, ba, bl] of blocks)
     if (an < bn && aa < ba + bl && ba < aa + al)
@@ -8164,8 +8701,24 @@ const holeSlotT = HOLE.slotT, holeHT = HOLE.hT, holeVarT = HOLE.varT;
 const tailFrom = t => { let k = t.length - 1; while (k > 0 && t[k - 1] === t[t.length - 1]) k--; return k; };
 // NOVARCUT=1 keeps the full 256-entry tables (clamp at 255, a no-op) -- the A/B that showed the cut
 // pixel-identical on four poses.
-const VAR_CLAMP = process.env.NOVARCUT ? 255 : Math.max(tailFrom(orbVarT), tailFrom(angVarT));
+const VAR_CLAMP = process.env.NOVARCUT ? 255 : Math.max(tailFrom(orbVarT), tailFrom(angVarT), HAS_SILVER ? tailFrom(svVarT) : 0);
 const HVAR_CLAMP = process.env.NOVARCUT ? 255 : tailFrom(holeVarT);
+// ---- SVTBL: the sentry's DATA rides in IAR1, behind its frames 2-3 at OVLBASE ----
+// Read only on a level with sentries -- which is exactly when IAR1 is loaded -- so it costs the image
+// nothing (2026-10-14: the full engine had no room for it). svTick tests svNT before reading any of
+// it, and the projection reads svVarT only for an entity below svN.
+const SVTBL = HAS_SILVER ? {
+  svVarT: svVarT.slice(0, VAR_CLAMP + 1),                    // the sentry's distance -> rung, from SVSCALE
+  svShT: [0x00, 0x06, 0x0e, 0x03, 0x01, 0x01, 0x0e, 0x00],   // shock inks: black, blue, light blue, cyan, white
+  svDurT: [1, 2, 3, 4, 5, 6, 2, 4],                          // a spark's length in 60Hz ticks, from three random bits
+  svPDT: SILV_PD,                                            // frame -> pointer delta (0 = frame 0 itself)
+  svInkT: [SILV_INKS[SILV_INK - 1], SILV_BLUE, SILV_BLUE, SILV_BLUE],   // frame -> the lightning ink's colour
+  svBdT: [0x06, 0x0e, 0x03, 0x01],                           // the touch flash: blue, light blue, cyan, white
+} : {};
+const SVTBL_AT = OVLBASE + SVART.length * 64;
+const SVTBL_OFF = {}, SVTBL_BYTES = [];
+for (const [n, a] of Object.entries(SVTBL)) { SVTBL_OFF[n] = SVTBL_BYTES.length; SVTBL_BYTES.push(...a); }
+if (HAS_SILVER && SVTBL_AT + SVTBL_BYTES.length > 0xfe00) throw new Error(`SVTBL runs to ${hx16(SVTBL_AT + SVTBL_BYTES.length)}, past $fe00 (COLH)`);
 const holeXOffT = HOLE.xOffT, holeYBaseT = HOLE.yBaseT, holeFlagT = HOLE.flagT;
 // The widest half-width ANY hole-like kind can have, over every rung. The occlusion probe below
 // uses it to widen its box, so the box always CONTAINS the entity whatever rung it lands on --
@@ -8316,15 +8869,15 @@ const ARC_C0 = VOIDCH - ARC_RIM_CODES.length - 2;    // ARC_FILL then lands on V
 const ARC_VOID = ARC_C0 + ARC_RIM_CODES.length;      // the hole: all pair 11 -> colour RAM -> black
 const ARC_FILL = ARC_VOID + 1;                       // the flat ground either side of the curve
 const ARC_GLY = ARC_BLK + ARC_C0 * 8;
-// ...and the map lives in bank 3 too, in block 6's free run. It is READ by the CPU, and $f000
-// is plain RAM at the engine's port value, so the only thing it costs is 201 of those bytes --
-// against 201 in the image, which has no run that size to spare. Built from a 33-byte list.
-const ARC_MAP = 0xf368;   // hard against PICBASE's end
+// ...and the map is a RAM buffer, arcMap, placed by compaction like every other scratch table.
+// It is only ever READ by the CPU, so it has no business in bank 3: it sat at $f368, hard against
+// PICBASE's end, in sprite space -- moved out 2026-10-13 so the free sprite slots there join up
+// (the sentry's frames need runs of 12). Built at runtime from a 33-byte list; see arcBld.
 // ---- ...AND THE ARRIVING ARC'S, in block 5, at the SAME code numbers ----
 // fsLand is B,A,B: region 1 is the arriving rim and region 3 is the new room's floor, both
 // charset B on the same frame and needing opposite dither states -- the rim's surround is the
 // CEILING you came through, which is never dithered, while the floor is. So it needs a set too.
-// Same codes as the departing one, in a different block, so ARC_MAP serves both.
+// Same codes as the departing one, in a different block, so arcMap serves both.
 // Its glyphs never change: they are charset B's own, clean, which is what cpChr has just built
 // when this runs. So it is stamped ONCE at boot, not per fall -- which is what makes the port
 // dance affordable: $d000-$dfff is I/O to the CPU at the engine's $35, and only $34 shows the RAM
@@ -8333,7 +8886,7 @@ const ARC_BLK5 = 0xd800, ARC_CB5 = cb(ARC_BLK5);
 const ARC_GLY5 = ARC_BLK5 + ARC_C0 * 8;
 const ARC_GLY_N = (ARC_FILL + 1 - ARC_C0) * 8;
 if (ARC_FILL > 255) throw new Error(`arc set overruns code 255: ${ARC_RIM_CODES.length} rim codes`);
-// The map itself is built at runtime, into ARC_MAP -- see arcBld. Cell code -> its code in the
+// The map itself is built at runtime, into arcMap -- see arcBld. Cell code -> its code in the
 // arc block: SOLID is a cell the rim has already passed, so it becomes the hole; BLANK and
 // anything the walk never saw become the FILL, so a gap in ARC_RIM_CODES draws flat ground
 // rather than sprite data.
@@ -8396,13 +8949,20 @@ const H_MIN = Math.max(1, Math.floor(88 / SIGHT_MAX));      // projected height 
 const orbPathR = (varT, pick) => { let R = 0;
   for (let h = H_MIN; h < 256; h++) { const v = varT[h]; if (pick(v)) R = Math.max(R, inkR(orbBoxT[v].l, orbBoxT[v].r, 88 / h)); }
   return R; };
+// HITDUMP=1: how WIDE each round thing really is, in cells, from its measured ink at one and two
+// cells away (a world width is columns * d / F_COL). For sizing hit boxes against what you see.
+if (process.env.HITDUMP) for (const [nm, vt, pick] of [['orb', orbVarT, v => v < ANG_V0], ['angel', angVarT, isAngV], ['sentry', svVarT, isSv]])
+  for (const h of [88, 44]) { const v = vt[h]; if (!pick(v)) continue;
+    const b = orbBoxT[v], w = (b.l + b.r + 1) * (88 / h) / F_COL;
+    console.error(`  HITDUMP ${nm.padEnd(10)} at ${(88 / h).toFixed(0)} cell: ink ${b.l + b.r + 1} columns = ${w.toFixed(3)} cells wide (half ${(w / 2).toFixed(3)})`); }
 const holeKindR = (Ls, bl, br) => Math.max(0, ...Ls.map((g, i) => inkR(bl[i], br[i], g.d)));
 const GATE_R = {
   exit: holeKindR(HOLE.L, holeBoxL, holeBoxR),
   sock: holeKindR(SOCK.L, sockBoxL, sockBoxR),
   ped:  HAS_PED ? holeKindR(PED.L, pedBoxL, pedBoxR) : 0,
   orb:  orbPathR(orbVarT, v => v < ANG_V0),
-  angel: orbPathR(angVarT, v => v >= ANG_V0),
+  angel: orbPathR(angVarT, isAngV),
+  sv:   HAS_SILVER ? orbPathR(svVarT, isSv) : 0,
 };
 // ...and how far away each hole-like kind is still drawn at all: its farthest rung.
 const CAP_D = { exit: Math.max(...HOLE.L.map(g => g.d)), sock: Math.max(...SOCK.L.map(g => g.d)),
@@ -8531,7 +9091,7 @@ const ZN_BUILD = (() => {
       for (const c of cells) v.open[c] = map[c] ? openExact[c] | patch[v.zz[c]] : v.shut[c] | patch[v.zz[c]];
       v.patchB = 2 * [...patch].filter(Boolean).length + 1;   // (zone, mask) pairs + terminator, all walls at once
     }
-    const radO = ORBS.map(o => o.tall ? GATE_R.angel : GATE_R.orb);
+    const radO = ORBS.map(o => o.tall ? GATE_R.angel : o.silver ? GATE_R.sv : GATE_R.orb);
     const capH = HOLELIKE.map(h => h.exit ? CAP_D.exit : h.ped ? CAP_D.ped : CAP_D.sock);
     const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
     const coneOk = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
@@ -8590,7 +9150,7 @@ const ZN_BUILD = (() => {
   // entity cells; count entities the test would cull whose disc is in fact visible. Must be 0.
   let bad = 0, n = 0, sd = 12345;
   const rnd = () => { sd = (sd * 1103515245 + 12345) >>> 0; return sd / 4294967296; };
-  const radO = ORBS.map(o => o.tall ? GATE_R.angel : GATE_R.orb);
+  const radO = ORBS.map(o => o.tall ? GATE_R.angel : o.silver ? GATE_R.sv : GATE_R.orb);
   const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
   for (let i = 0; i < 20000 && ORBS.length; i++) {
     const p = pl[(rnd() * pl.length) | 0], e = pl[(rnd() * pl.length) | 0], r = Math.max(...radO);
@@ -8721,6 +9281,13 @@ const LVL_TABLES = [
              ORBS.length + HOLELIKE.length,
              HOLES_AT.length + SOCKETS_AT.length]],
   ['lvlStartT', startBytes(LVL)],   // px lo/hi, py lo/hi, pa, paF -- see startBytes
+  // ---- THE SENTRIES, in a build that has them: the count, each one's span of svPathT, the paths ----
+  // svPathT is padded to the longest any level carries, like every fixed-length table.
+  ...(HAS_SILVER ? [['svNT', [SVN]], ['svBegT', pad(SV_BEG, SV_MAX)], ['svEndT', pad(SV_END, SV_MAX)],
+                    ['svPathT', pad(SV_PATH, Math.max(1, lvlMax(l => l.tables?.svPathT?.length ?? 0, SV_PATH.length)))],
+                    // which LEVEL ART set it needs at OVLBASE, as the file name's last character
+                    // ('0' or '1', IAR0/IAR1), 0 for either -- see ART_SETS and lvlArt
+                    ['lvlArtT', [ART_OF(LVL) < 0 ? 0 : 0x30 + ART_OF(LVL)]]] : []),
   // orbOccLoT is NOT here any more. It says where the ENGINE keeps entity i's mask (orbOccT +
   // i*OCCBYTES) -- engine layout, not level data. Shipped per level, each level file carried the
   // stride ITS OWN build computed (4, 7, 8 against the engine's 9): masks overlapped, ran past
@@ -9763,6 +10330,7 @@ runFaceT  = ${hx16(0x6d00 + NRUN)}                ;   visible. Derived by mkRuns
 obKT    = $5b                   ; obOrder: the smallest key so far, its entity, and the keys
 obKI    = $5c  
 obKeyT  = $a8b3                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
+arcMap  = $6e00                  ; the fall's arc map (CELLCODES bytes, built by arcBld): placed by compaction
 bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
                                  ;   3's 196 open cells outgrew its old spot (2026-09-18) and no
@@ -10400,7 +10968,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         cli
 
 mloop:
-${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}        jsr tickDelta
+${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : HAS_SILVER ? '        jsr svKey               ; RETURN restarts, at any time (a DIE=0 build has no dieKey)\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
 pdInL:  ldx #$01
 pdInM:  dex
@@ -11255,7 +11823,7 @@ ${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + s
                                 ;   reaches it -- and this must not run during one, or the idol in
                                 ;   your hands changes colour mid-descent. This half of the loop
                                 ;   is the half a fall skips, which is exactly the property wanted.
-` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
+` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + (HAS_SILVER ? '        jsr svStep              ; SILVER: glide after the player, and spark now and then\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
         bne dnSkip
         lda iterLo
         cmp #${hx(+process.env.DROPNOW & 255)}
@@ -13711,7 +14279,7 @@ irqArm: lda #${hx(SPLITLINE)}
         bne irqNf
         inc frameCnt+1
 irqNf:
-${HAS_FLICKER ? '        jsr flkTick             ; LEVEL_FLICKER: after irqB0, so a flash overrides its ground\n' : ''}irqd:   lda #$ff
+${HAS_FLICKER ? '        jsr flkTick             ; LEVEL_FLICKER: after irqB0, so a flash overrides its ground\n' : ''}${HAS_SILVER ? '        jsr svTick              ; SILVER: the sparks, one 60Hz frame at a time\n' : ''}irqd:   lda #$ff
         sta $d019
         pla
         tay
@@ -13828,7 +14396,9 @@ ${DIE ? `        lda dieSt               ; the cut scene owns the sprites from t
                                 ; and orbPaint runs unconditionally, so the walls come out
                                 ; painted the same way without reprojecting anything.
 ${DIE ? `omDead: rts
-` : ''}obMoved:lda #$00
+` : ''}obMoved:${HAS_SILVER ? `lda #$00                ; SILVER: no slots until this pass draws the orb again
+        sta svCnt
+        ` : ''}lda #$00
         sta entDty
         lda px
         sta opx
@@ -14706,6 +15276,26 @@ ${HAS_IDOL ? `        jsr idolLat             ; THIS frame's finding, not last f
                                 ;   entity is already placed, but idolOn still said "not in view"
                                 ;   -- so the palette fell back to the level's greys for 50ms
                                 ;   between the button and the idol appearing.
+` : ''}${HAS_SILVER ? `        ; ---- SILVER: what is on screen NOW is what svTick may repoint ----
+        ; svTick used to read the list the projection was still building, so for the rest of a
+        ; rendered frame it put the NEXT rung's bitmaps into slots still showing the old rung's X,
+        ; Y and expand bits -- a quadrant of the wrong size, or in the wrong place, for a few 60ths:
+        ; the "strange glitchy size jumps" (the user, 2026-10-13). Copied here, as the registers are
+        ; written; the count goes to 0 first so an IRQ mid-copy sees an empty list, not a torn one.
+        lda #$00
+        sta svLCnt
+        ldy svCnt
+        beq osSv0
+osSvL:  dey
+        lda svSlT,y
+        sta svLSlT,y
+        lda svBsT,y
+        sta svLBsT,y
+        tya
+        bne osSvL
+osSv0:  lda svCnt
+        sta svLCnt
+        jsr svWr                ; and the frame that is up NOW, not the one the projection saw
 ` : ''}osBits: lda omEn
         sta $d015
         lda omMc
@@ -14995,7 +15585,10 @@ ivDn:   lda #$0b                ; h = 22528/forward = iv * 11/512, the same 88/d
         sta o2
         lsr o2
         ror o1
-        lda o2
+${FINECOL ? `        lda o0                  ; FINECOL: keep the fraction the shift drops (the carry is
+        ror                     ;   o1's old bit 0), so the column below is not quantised to
+        sta ocF                 ;   whole rows of h
+` : ''}        lda o2
         beq ohOk
         lda #$ff
         sta o1
@@ -15028,7 +15621,35 @@ ohOk:   lda o1
         lda phi
         adc #$00
         bne opjNo               ; |right|*h past 65535 is far outside the FOV
-        lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
+${FINECOL ? `${FINECOL_ALL ? '' : `        lda oidx                ; FINECOL: the SENTRIES only, entities 0..svN-1 (holes are all
+        cmp svNT                ;   past nOrbT, so past them too)
+        bcs ocfDn
+`}        lda ocF                 ; ---- FINECOL: + |right| * frac(h) / 256 ----
+        beq ocfDn               ; Without it the column moves only when h ticks over a whole row,
+        sta mq                  ;   and at a distance h is ~10: the column held still (or drifted
+        lda oaL                 ;   with |right| alone) and then jumped ~10% when h stepped, so an
+        jsr mul8                ;   orb gliding in at an angle sawtoothed sideways, "right a few
+        lda phi                 ;   pixels, then a left jump" (the user, 2026-10-13). Two more
+        sta o2                  ;   mul8s per projection.
+        lda oaH
+        jsr mul8
+        clc
+        lda o2
+        adc plo
+        sta o2
+        lda phi
+        adc #$00
+        sta ogL
+        clc
+        lda o0
+        adc o2
+        sta o0
+        lda o1
+        adc ogL
+        sta o1
+        bcs opjNo
+ocfDn:
+` : ''}        lda #179                ; /183.2, as *179 >> 15. The product is 24 bits and a 15-bit
         sta mq                  ; shift of it is just (b2 << 1) | (b1 >> 7) -- no shift loop.
         lda o0
         jsr mul8
@@ -15052,7 +15673,7 @@ ohOk:   lda o1
         rts
 opjNo:  clc
         rts
-${process.env.GATECHK ? `; ---- cnTest: is the entity at (oix, oiy) in the view cone at all? (GATECHK's ORACLE) ----
+${FINECOL ? 'ocF:    !byte 0                 ; FINECOL: h\'s fraction, orbProj -> its own column\n' : ''}${process.env.GATECHK ? `; ---- cnTest: is the entity at (oix, oiy) in the view cone at all? (GATECHK's ORACLE) ----
 ; Carry SET = no. Reads oix/oiy and pa; writes cnB and cnT. The shipping cone test is INLINE in entGate
 ; (ogETst: X keeps the entity, no jsr) and orbOne reads entGate's verdict from cnOkT -- one verdict,
 ; computed once. This routine is the original subroutine, kept only for GATECHK=1, which runs it beside
@@ -15213,12 +15834,16 @@ odSk:
         ldx #${hx(VAR_CLAMP)}
 omVarC:
         ldy oidx                ; TALL entities have their own rungs, appended to the same
-        lda orbTallT,y          ;   variant list so every table indexed by ovar still works
+${HAS_SILVER ? `        cpy svNT                ;   variant list so every table indexed by ovar still works --
+        bcc omVarV              ;   and so do the SENTRIES, entities 0..svN-1, after the angel's
+` : ''}        lda orbTallT,y
         beq omVarO
 
         lda angVarT,x
         bne omVarS              ; always taken: the angel's rungs never start at 0
-omVarO: lda orbVarT,x
+${HAS_SILVER ? `omVarV: lda svVarT,x
+        bne omVarS              ; always taken: nor do the sentry's
+` : ''}omVarO: lda orbVarT,x
 omVarS: sta ovar
         lda oaS                 ; --- centre column ---
         bmi ocN
@@ -15276,7 +15901,9 @@ ocDn:
         lda ocol                ; centre on screen: b = ocol + (12 - halfCols)
         clc
         adc orbXOffT,x
-        bcc oxDn
+${HAS_SILVER ? `        ldy orbXOffT,x          ; SILVER: a NEGATIVE offset (a magnified 2x2 rung) borrows
+        bmi oxDn                ;   rather than carries; b >= -12, and asl wraps it (see oxNeg)
+` : ''}        bcc oxDn
         jmp orbNo               ; b past 255: far off the right, and b<<1 would wrap
 oxNeg:  lda orbXOffT,x          ; centre is ocol columns LEFT of column 0, so b = offset - ocol
         sec
@@ -15301,10 +15928,41 @@ oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         ; anchor into the constant keeps the sum in range all the way down to 0.62 cells,
         ; which is past the point where the whole sprite is below the last visible line.
         ldx ovar
-        lda orbYBaseT,x
+${HAS_SILVER ? `        cpx #${hx(SV_V0)}               ; a SENTRY's rung? It hovers (below); nothing else does
+        bcs oSvY
+` : ''}        lda orbYBaseT,x
         clc
         adc ohgt
-        bcs orbYCp              ; the sum passed 255, so it is far below the screen
+${HAS_SILVER ? `        jmp oSvYD
+oSvY:   lda orbYBaseT,x
+        clc
+        adc ohgt
+        sta svY                 ; ---- SENTRY: lifted to the horizon (svCtrT) ----
+        lda #$00                ;   The floor-anchored Y in 16 bits first, because close up it
+        adc #$00                ;   passes 255 BEFORE the lift brings it back on screen -- the
+        sta svYH                ;   pinning test below would otherwise sink the ball to the floor
+        lda ohgt                ;   the moment you walked under it.
+        sec                     ; the lift: h - the rung's ball centre (its centre to the horizon,
+        sbc svCtrT,x            ;   h rows above the floor), never below 0 -- X is ovar
+        bcs svLfP
+        lda #$00
+svLfP:  sta svDLo               ; (svTouch's scratch: svStep runs after the projection)
+        lda svY
+        sec
+        sbc svDLo
+        sta svY
+        lda svYH
+        sbc #$00
+        bmi svTop               ; lifted past the top of the frame: park it above the screen
+        bne orbYCp              ; still past 255: below the screen, pinned like anything else
+        lda svY
+        clc                     ; so the bcs below falls through
+        bcc svYDn               ; always
+svTop:  lda #$00
+        clc
+svYDn:
+oSvYD:
+` : ''}        bcs orbYCp              ; the sum passed 255, so it is far below the screen
         pha                     ; ---- centre a TALL entity on its ideal height ----
         ldy oidx                ;   the offset is half the rung's quantisation error, signed,
         lda orbTallT,y          ;   precomputed per ohgt -- see angMidT in the build. X holds
@@ -15531,7 +16189,11 @@ ${ENT1PROF ? "        jsr pfT13               ; ENT1PROF: the occluder span walk
         sta omEn
         ldy ovar
         lda orbPtrT,y
-        ldy oidx                ; the ENTITY, not the variant
+${HAS_SILVER ? `        cpy #${hx(SV_V0)}               ; Y = ovar: a SENTRY's sprite? svReg notes it for the 60Hz
+        bcc oSvR1               ;   svTick and hands back the frame that is up right now
+        jsr svReg
+oSvR1:
+` : ''}        ldy oidx                ; the ENTITY, not the variant
 ${HAS_IDOL ? `        clc                     ; 0 for an orb; the idol's bitmap base for the idol. The two
         adc orbArtT,y           ;   ladders are geometrically identical, so the idol borrows the
                                 ;   orb's rung wholesale and swaps only the picture.
@@ -15545,13 +16207,25 @@ obNotI:
         ldy ovar
         lda orbExpT,y
         beq oNoX
+${HAS_SILVER ? `        lsr                     ; SILVER: bit 0 doubles the WIDTH, bit 1 the HEIGHT -- apart, for
+        bcc oNoXy              ;   the two-wide rungs that double only the height (SVQUAD=v)
+        lda omBit               ; (X is the SLOT here -- the flags are re-read, not parked in it)
+        ora omXX
+        sta omXX
+        lda orbExpT,y
+        lsr
+oNoXy: lsr
+        bcc oNoX
         lda omBit
+        ora omYY
+        sta omYY
+` : `        lda omBit
         ora omXX
         sta omXX
         lda omBit
         ora omYY
         sta omYY
-oNoX:   lda o0                  ; already on the multicolor grid -- X is 2*b, so always even.
+`}oNoX:   lda o0                  ; already on the multicolor grid -- X is 2*b, so always even.
                                 ; It has to be: a multicolor CHAR pixel is two hires pixels
                                 ; aligned to the character, a multicolor SPRITE pixel is two
                                 ; aligned to the sprite's own X, and at an odd X the two grids
@@ -15602,18 +16276,22 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         ; rows, or 42 once vmag has doubled it, which is exactly what orbAnchT already holds.
         ldy ovar
         lda orbPtrU,y
-        beq orbYes              ; one-sprite entity: nothing more to do
+        beq ${HAS_SILVER ? 'orbRt' : 'orbYes'}              ; one-sprite entity: nothing more to do
         sta otmp
         ldx onv
         cpx onvH
-        bcs orbYes              ; no slot left: show the lower half rather than nothing
+        bcs ${HAS_SILVER ? 'orbRt' : 'orbYes'}              ; no slot left: show the lower half rather than nothing
         sec
         lda o3
         sbc orbAnchT,y
-        bcc orbYes              ; upper half is off the top of the screen
+        bcc ${HAS_SILVER ? 'orbRt' : 'orbYes'}              ; upper half is off the top of the screen
         sta obY,x
         lda otmp
-        sta obP,x
+${HAS_SILVER ? `        cpy #${hx(SV_V0)}               ; (Y = ovar still) the sentry's upper half, likewise
+        bcc oSvR2
+        jsr svReg
+oSvR2:
+` : ''}        sta obP,x
         lda orbBitT,x
         sta omBit
         ora omEn
@@ -15624,13 +16302,25 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         ldy ovar
         lda orbExpT,y
         beq oNoX2
+${HAS_SILVER ? `        lsr                     ; SILVER: bit 0 doubles the WIDTH, bit 1 the HEIGHT -- apart, for
+        bcc oNoX2y              ;   the two-wide rungs that double only the height (SVQUAD=v)
+        lda omBit               ; (X is the SLOT here -- the flags are re-read, not parked in it)
+        ora omXX
+        sta omXX
+        lda orbExpT,y
+        lsr
+oNoX2y: lsr
+        bcc oNoX2
         lda omBit
+        ora omYY
+        sta omYY
+` : `        lda omBit
         ora omXX
         sta omXX
         lda omBit
         ora omYY
         sta omYY
-oNoX2:  lda o0
+`}oNoX2:  lda o0
         sta obX,x
         lda o1
         beq oNoM2
@@ -15673,7 +16363,52 @@ oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EX
         lda obBR,y
         sta obBR,x
         inc onv
-orbYes: ${CULLCNT && true ? `ldx oidx
+${HAS_SILVER ? `orbRt:  ; ---- SILVER: a 2x2 rung's RIGHT column, one sprite (24 hires pixels) over ----
+        ; Built like the upper half: same colour and priority, the lower slot's record, $fe so it
+        ; does not stamp -- the lower slot's box already spans both columns (orbPartsOf).
+        ldy ovar
+        cpy #${hx(SV_V0)}               ; only a SENTRY's rung can have one: the tables start at SV_V0
+        bcc orbYes
+        lda orbPtrR,y
+        beq orbYes              ; a one-column rung
+        sta otmp
+        lda orbExpT,y           ; one sprite over: 24 hires pixels, 48 when its WIDTH is doubled
+        and #$01
+        beq orbR1
+        lda #48
+        bne orbR2               ; always
+orbR1:  lda #24
+orbR2:  clc
+        adc o0
+        sta svRX
+        lda o1
+        adc #$00
+        and #$01                ; X is 9 bits and WRAPS: a left column parked off the left edge
+        sta svRX8               ;   at 2b mod 512 ($1F6) plus 24 is 14, not 270 -- the carry on
+                                ;   top of an X8 of 1 made 2, which read as "X8 set" and threw
+                                ;   the right column to the far right (the user, 2026-10-13)
+        ldx onv
+        cpx onvH
+        bcs orbYes              ; no slot left: the left column alone
+        lda o3
+        sta obY,x
+        lda otmp
+        jsr svQuad
+        ldy ovar
+        lda orbPtrRU,y
+        beq orbYes
+        sta otmp
+        ldx onv
+        cpx onvH
+        bcs orbYes
+        sec
+        lda o3
+        sbc orbAnchT,y
+        bcc orbYes              ; off the top of the screen
+        sta obY,x
+        lda otmp
+        jsr svQuad
+` : ''}orbYes: ${CULLCNT && true ? `ldx oidx
         txa                     ; CULLCNT: frames this entity really took a SPRITE. Against
         asl                     ;   culOkT (frames it passed the gate) this is the whole measure of
         tax                     ;   wasted projection: passed-but-never-drawn is an entity the cone
@@ -16412,7 +17147,9 @@ takePick:
         sta odCell              ; holds an ENTITY index here, not a cell
         ldx #$00
 tkLp:   stx odD
-        lda orbTallT,x
+${HAS_SILVER ? `        cpx svNT                ; nor is a sentry (entities 0..svN-1)
+        bcc tkNext
+` : ''}        lda orbTallT,x
         bne tkNext              ; an angel is not luggage
         lda orbHidT,x
         bne tkNext
@@ -16549,8 +17286,11 @@ ${ANGSLIDE ? '        sta angSlDT,x           ; and no lunge in progress: a rest
 ${MULW}
 ${ADDX('orbX0T,x')}
         tay
-        lda #$02
+${HAS_SILVER ? `        cpx svNT                ; a SENTRY is not in blkT: touching one is a HIT, not a wall,
+        bcc oiNext              ;   and it glides through cells (svStep)
+` : ''}        lda #$02
         sta blkT,y              ; 2 = entity, not wall -- angStep and mvFree both rely on it
+
 oiNext: txa
         pha                     ; orbOcc1 CLOBBERS X. Without this the dex/bpl below ran on
         jsr orbOcc1             ;   garbage and the loop scribbled 2s across blkT at random
@@ -16577,7 +17317,12 @@ hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         bpl hlSCl
         lda #$ff                ; a cell the player can never be in, so the first frame always
         sta bfsDone             ;   starts a fill
-${HAS_IDOL ? `        jsr idolPlace           ; ---- ...then put the IDOLS where they actually are ----
+${HAS_SILVER ? `        jsr svReset             ; the sentries' PLACE ON THEIR PATHS, and the charge: the loop above put
+                                ;   them back on their start cells, and a sentry whose path index
+                                ;   still says mid-loop walks through walls from there. Here, not at
+                                ;   entry, because the FALL arrives through objInit too (the user hit
+                                ;   it: drop through the lab's exit, and every sentry went wrong).
+` : ''}${HAS_IDOL ? `        jsr idolPlace           ; ---- ...then put the IDOLS where they actually are ----
                                 ; objInit has just restored every entity from the build data,
                                 ; which says each idol is at home. Three of them may not be.
         jmp idolLk              ; ---- carry was just cleared, so RE-DERIVE what depends on it ----
@@ -16927,12 +17672,13 @@ ${DIE ? `        jsr anAdj               ; did that land it beside the player? t
         bcc anNoMk              ;   A step is one trigger; the other is an angel ALREADY beside
                                 ;   you whose step falls due unseen (angOne) -- see asSeen.
 anReach:
-        ; ---- ON THE DIAGONAL, BOTH corner cells have to be clear ----
-        ; "if it's at an angle but there's nothing at all between you, death. But if you're
-        ; around a corner, it has to clear the corner." Orthogonally adjacent there is nothing
-        ; between you by definition, so this only runs for the corner case. blkT is non-zero for
-        ; a wall AND for an entity, so an orb parked in the gap blocks the reach too, which is
-        ; the same answer for the same reason.
+        ; ---- ONE MARK AT A TIME: a second angel beside you does not take it over ----
+        ; dcClr unhides only the angel in marked, so overwriting marked left the first one hidden
+        ; for good -- invisible, still holding its cell in blkT, until a restart. Found by the
+        ; overhead simulator on level 8 (2026-10-12), where the user had once seen an angel go
+        ; missing. The newcomer just stands beside you; its own step re-checks every period.
+        lda marked
+        bne anNoMk              ; (anNoMk refreshes its occluder mask, harmless if it never moved)
         ldx amIdx
         stx dieIdx              ; from the mark on, the projection stashes THIS angel's side of the
         lda #$ff                ;   screen in dieOff/dieSgn -- which it only does while the angel
@@ -17335,7 +18081,539 @@ slOff:  sec
         rts
 ` : ''}
 
-${DIE ? `${DIE && SOUND ? `; ---- snTone / snRise: the DRONE climbs ----
+${HAS_SILVER ? (() => {
+  const calm = SILV_INKS[SILV_INK - 1];          // the lightning ink's own colour between sparks
+  return `
+; ---- svReg: sprite slot X is showing a sentry, A = its plain-ball pointer. Note both for the 60Hz
+; svTick, and return A = the pointer of the frame that is up right now. Clobbers Y. ----
+svReg:  pha
+        txa
+        ldy svCnt
+        sta svSlT,y
+        pla
+        sta svBsT,y
+        inc svCnt
+        clc
+        adc svPD
+        rts
+; ---- svQuad: one right-column sprite of the silver orb. A = its plain pointer, X = the slot,
+; obY,x already set. The rest copies the lower slot (onvL), as the upper half's code does. ----
+svQuad:
+        jsr svReg               ; only a sentry's rung has a right column, so always one of its
+        sta obP,x
+        lda orbBitT,x
+        sta omBit
+        ora omEn
+        sta omEn
+        ldy oidx
+        lda orbColT2,y
+        sta obC,x
+        lda svRX
+        sta obX,x
+        lda svRX8
+        beq sqNoM
+        lda omBit
+        ora omX8
+        sta omX8
+sqNoM:  ldy ovar
+        lda orbExpT,y
+        beq sqNoX
+${HAS_SILVER ? `        lsr                     ; SILVER: bit 0 doubles the WIDTH, bit 1 the HEIGHT -- apart, for
+        bcc sqNoXy              ;   the two-wide rungs that double only the height (SVQUAD=v)
+        lda omBit               ; (X is the SLOT here -- the flags are re-read, not parked in it)
+        ora omXX
+        sta omXX
+        lda orbExpT,y
+        lsr
+sqNoXy: lsr
+        bcc sqNoX
+        lda omBit
+        ora omYY
+        sta omYY
+` : `        lda omBit               ; a magnified rung: both expand bits, like the left column
+        ora omXX
+        sta omXX
+        lda omBit
+        ora omYY
+        sta omYY
+`}sqNoX:  ldy onvL
+        lda #$fe                ; inherit the priority bit, stamp nothing (see the upper half)
+        sta obIX,x
+        lda obV,y
+        sta obV,x
+        lda obOcc,y
+        sta obOcc,x
+        lda obCL,y
+        sta obCL,x
+        lda obCR,y
+        sta obCR,x
+        lda obL,y
+        sta obL,x
+        lda obR,y
+        sta obR,x
+        lda obBL,y
+        sta obBL,x
+        lda obBR,y
+        sta obBR,x
+        inc onv
+        rts
+
+; ---- svStep: the SENTRIES (entities 0..svN-1), once per rendered frame ----
+; Each runs its own closed path (svPathT, traced from the sheet) at one cell per ${SVSLIDE} 60ths
+; (${Math.round(256 / SVSLIDE / 12 * 100)}% of the player's 12/256 a tick), whether you look or not, and NOTHING stops it: the
+; glide is the angel's slide -- angSlDT/angSlFT, the halfway cell switch, drawn by orbProjS -- with
+; the period equal to its length. They are not in blkT: they neither block you nor wait for you,
+; because touching one is a HIT, tested against the ball's true position (svTouch), and shown as a
+; border flash for now -- the stand-in for the kill, to judge how close should count.
+svStep: lda #$00
+        sta svHit
+        ldx svNT                ; this level's sentries, entities 0..svN-1
+        bne svGo
+        rts                     ; none: nothing glides, nothing charges
+svGo:   dex
+svSLp:  stx amIdx
+        lda orbHidT,x
+        bne svSNx
+        lda angSlDT,x
+        bne svMove
+        ldy svPosT,x            ; ---- standing: set off on the next leg of its path ----
+        lda svPathT,y           ; 1..4 = +x -x +y -y (slTick's direction code)
+        sta angSlDT,x
+        lda svCarT,x            ; the 60ths the last cell overran by, so the glide does not hitch
+        sta svTT,x
+        lda #$00
+        sta svCarT,x
+        beq svAdv               ; always
+svMove: lda svTT,x
+        clc
+        adc dtv
+        sta svTT,x
+svAdv:  lda svTT,x
+        cmp #${hx(SVSLIDE)}
+        bcs svLand
+        tay
+        lda svFT,y
+        sta angSlFT,x
+        bpl svDty               ; first half: still counted in the cell it is leaving
+        lda angSlDT,x
+        bmi svDty               ; switched already
+        ora #$80
+        sta angSlDT,x
+        jsr slFwd               ; now it is NEARER the new cell
+        jsr orbOcc1             ; ...and its occluder mask must say so (clobbers X)
+svDty:  lda #$01
+        sta entDty
+svSNx:  ldx amIdx
+        jsr svTouch
+        ldx amIdx
+        dex
+        bpl svSLp
+        jmp svChg               ; every sentry tested: charge, or drain
+svLand: sbc #${hx(SVSLIDE)}            ; carry set by the cmp: what this frame overran by
+        cmp #${hx(SVSLIDE)}
+        bcc svL1
+        lda #${hx(SVSLIDE - 1)}            ; a very long frame: no more than the next cell's worth
+svL1:   sta svCarT,x
+        lda angSlDT,x
+        bmi svL2
+        jsr slFwd               ; a slide that never reached halfway (one long frame): finish it
+        ldx amIdx
+svL2:   lda #$00
+        sta angSlDT,x
+        sta angSlFT,x
+        ldy svPosT,x            ; on along the path, round to its start at the end
+        iny
+        tya
+        cmp svEndT,x
+        bcc svP1
+        lda svBegT,x
+svP1:   sta svPosT,x
+        lda #$01
+        sta entDty
+        jsr orbOcc1             ; the mask now describes the cell it landed in (clobbers X)
+        jmp svSNx
+
+; ---- svTouch: is sentry X touching the player? Sets svHit if so. ----
+; Where the ball REALLY is: its cell's centre plus its glide -- angSlFT as a signed byte along the
+; glide (+f from the old cell before halfway, f-256 from the new one after), turned round for west
+; and north, exactly as slOn draws it. Against px/py, in 256ths of a cell. The test is an OCTAGON
+; (the user, 2026-10-13): |dx| < R and |dy| < R, which is a box, and |dx| + |dy| < 1.41 R, which
+; cuts its corners -- within a few percent of a circle, without a square table. R = ${SVHITR} cells
+; (SVHITR): the ball's half width plus an angel-wide player.
+svTouch:lda #$80
+        sta svFX
+        sta svFY                ; low bytes: the centre of its cell
+        lda orbXCT,x
+        sta svFXH
+        lda orbYCT,x
+        sta svFYH
+        lda angSlDT,x
+        and #$7f
+        beq stcD                ; not gliding: the cell centre is where it is
+        tay
+        lda angSlFT,x
+        cmp #$80
+        bne stcS
+        lda #$81                ; -128 has no negation; 1/256 of a cell does not matter
+stcS:   ldx slNgT,y             ; west and north run backwards
+        beq stcP
+        eor #$ff
+        clc
+        adc #$01
+stcP:   ldx #$00                ; X: 0 = along x, 2 = along y (svFX/svFXH, svFY/svFYH are pairs)
+        cpy #$03
+        bcc stcAx
+        ldx #$02
+stcAx:  cmp #$80                ; sign-extend the offset into the high byte
+        bcc stcAp
+        dec svFXH,x
+stcAp:  clc
+        adc svFX,x
+        sta svFX,x
+        bcc stcD
+        inc svFXH,x
+stcD:   sec                     ; ---- |dx| ----
+        lda svFX
+        sbc px
+        sta svDLo
+        lda svFXH
+        sbc px+1
+        jsr svAbs
+        bcs stcFar
+        sta svDX
+        sec                     ; ---- |dy| ----
+        lda svFY
+        sbc py
+        sta svDLo
+        lda svFYH
+        sbc py+1
+        jsr svAbs
+        bcs stcFar
+        clc                     ; ---- and the corners: |dx| + |dy| ----
+        adc svDX
+        bcs stcFar
+        cmp #${hx(SVHIT_D)}
+        bcs stcFar
+        lda #$01
+        sta svHit
+stcFar: rts
+; svAbs: a signed 16-bit difference, A = high byte and svDLo the low -> A = |d|, C clear when
+; |d| < R, C set when it is R or more (or a cell or more away). Y lost.
+svAbs:  tay                     ; the high byte
+        beq saPos
+        iny
+        bne saFar               ; not -1: a cell or more away
+        lda svDLo
+        beq saFar               ; exactly -256
+        eor #$ff
+        clc
+        adc #$01
+        bne saCmp               ; always (non-zero)
+saPos:  lda svDLo
+saCmp:  cmp #${hx(SVHIT_R)}
+        rts                     ; C set: R or more
+saFar:  sec
+        rts
+
+; ---- svTick: the sparks, from the top-of-frame IRQ, every 60Hz frame ----
+; One video frame at a time, like level 8's tube -- per RENDERED frame (the first version) each
+; spark lasted 50-80ms at least and read as temporally chunky (the user, 2026-10-13). Shaped like
+; the tube too: quiet for a random GAP, then a BURST in which the ball shows a random lightning
+; frame for 1-6 ticks, then the plain ball for 1-4, and again, until the burst runs out.
+; The pointers go straight into both screens' pointer bytes for the slots the orb took this pass
+; (svSlT, svCnt of them: one, or four for a 2x2 rung), and the lightning ink into $d025 -- at the top of the frame, so a
+; frame never shows half of one spark. osFlush writes the same pair, so the two can only agree.
+svTick: lda svNT                ; a level with no sentries: nothing sparks -- and the tables this
+        beq tkOut               ;   reads ride with the sentry's art (SVTBL), absent on such a level
+        lda svHit               ; ---- TOUCHING a sentry: the border flashes (the kill, for now) ----
+        beq tkBd0               ; random among blue, light blue, cyan, white, a new one each 60th
+        jsr svRnd
+        and #$03
+        tay
+        lda svBdT,y
+        sta $d020
+        lda #$01
+        sta svBdOn
+        bne tkAn                ; always
+tkBd0:  lda svBdOn
+        beq tkAn
+        lda #$00                ; just let go: back to the black border, once
+        sta svBdOn
+        sta $d020
+tkAn:   lda svB
+        bne tkBur
+        dec svN                 ; ---- quiet: wait out the gap ----
+        bne tkWr
+        jsr svRnd               ; ---- strike: a burst of ${SVBUR_MIN}..${SVBUR_MIN + 15} ticks ----
+        and #$0f
+        clc
+        adc #${hx(SVBUR_MIN)}
+        sta svB
+        lda #$01
+        sta svN                 ; ...whose first hold is picked right now
+tkBur:  dec svB
+        beq tkEnd
+        dec svN
+        bne tkWr
+        lda svF
+        bne tkPl
+tkSpk:  jsr svRnd               ; ---- a lightning frame, 1..3, held 1..6 ticks ----
+        and #$03
+        beq tkSpk
+        sta svF
+        jsr svRnd
+        and #$07
+        tay
+        lda svDurT,y
+        sta svN
+        bne tkSet               ; always
+tkPl:   lda #$00                ; ---- the plain ball between sparks, 1..4 ticks ----
+        sta svF
+        jsr svRnd
+        and #$03
+        clc
+        adc #$01
+        sta svN
+        bne tkSet               ; always
+tkEnd:  lda #$00                ; ---- the burst is over: plain, for a gap ----
+        sta svF
+        jsr svRnd
+        and #${hx(SVGAP_SPAN - 1)}
+        clc
+        adc #${hx(SVGAP_MIN)}
+        sta svN
+tkSet:  ldy svF
+        lda svPDT,y
+        sta svPD
+        lda svInkT,y
+        sta svInk
+tkWr:
+svWr:   ldy svLCnt              ; every sprite the orb has ON SCREEN: up to four
+        beq tkOut               ; not on screen
+tkWL:   dey
+        ldx svLSlT,y
+        lda svLBsT,y
+        clc
+        adc svPD
+        sta ${hx16(SCR_A + 0x3f8)},x
+        sta ${hx16(SCR_B + 0x3f8)},x
+        tya
+        bne tkWL
+        lda svInk
+        sta ${SILV_INK === 1 ? '$d025' : SILV_INK === 3 ? '$d026' : '$d027,x'}
+tkOut:  rts
+; John Metcalf's 16-bit xorshift (7,9,8), as flkRnd -- its own seed, so it couples to nothing
+svRnd:  lda svSd+1
+        lsr
+        lda svSd
+        ror
+        eor svSd+1
+        sta svSd+1
+        ror
+        eor svSd
+        sta svSd
+        eor svSd+1
+        sta svSd+1
+        rts
+; ---- svChg: the charge (see SVKILL). dtv = the 60Hz ticks this frame took ----
+svChg:  lda svHit
+        beq zvDrnSc
+        lda svQ                 ; touching: charge by the frame's ticks
+        clc
+        adc dtv
+        bcs svDie
+        cmp #${hx(SVKILL)}
+        bcs svDie
+        sta svQ
+        rts
+zvDrnSc:  lda svQ                 ; out of reach: drain at half the rate, rounding up so a 60Hz
+        beq zvOutSc               ;   frame still drains
+        lda dtv
+        clc
+        adc #$01
+        lsr
+        sta svDLo               ; (svTouch's scratch: free between frames)
+        lda svQ
+        sec
+        sbc svDLo
+        bcs zvStSc
+        lda #$00
+zvStSc:   sta svQ
+zvOutSc:  rts
+
+; ---- svDie: SHOCKED. A burst of flashing colour and random wall-edge glyphs, then black ----
+; Never returns: RETURN (svKey) restarts through entry, as every death does. The main loop is
+; gone from here on, so nothing republishes the IRQ's ground operands -- this writes them
+; itself, and keeps the level's own to put back before the restart (the restart's lvlLook
+; restores $d022/$d023 but not irqB1, which only a CEILVARY chain ever rewrites).
+svDie:  lda irqB0+1
+        sta svSv
+        lda irqB1+1
+        sta svSv+1
+${CEILVARY ? `        lda irqB2+1
+        sta svSv+2
+` : ''}        lda #$00
+        sta svHit               ; svTick: hands off the border, it is ours now
+        sta svBdOn
+        sta $d015               ; no sprites
+        lda #${hx(SVSHOCK)}
+        sta svQ                 ; frames of shock left
+zvFrSd:   lda frameCnt            ; ---- once per 60Hz frame ----
+zvWSd:    cmp frameCnt
+        beq zvWSd
+        jsr svRnd               ; a random ink for each of ground, walls, seams and border
+        and #$07
+        tax
+        lda svShT,x
+        jsr svGnd
+        jsr svRnd
+        and #$07
+        tax
+        lda svShT,x
+        sta $d022
+        jsr svRnd
+        and #$07
+        tax
+        lda svShT,x
+        sta $d023
+        jsr svRnd
+        and #$07
+        tax
+        lda svShT,x
+        sta $d020
+        lda #$60                ; ...and 96 cells of random wall-edge glyph, both screens
+        sta svDY
+zvCSd:    jsr svRnd
+        and #$03
+        tay                     ; the page
+        jsr svRnd
+        tax                     ; the byte in it
+        cpy #$03
+        bne zvC1Sd
+        cpx #$e8                ; past the 1000th cell: not on screen
+        bcs zvC2Sd
+zvC1Sd:   tya
+        clc
+        adc #${hx(SCR_A >> 8)}
+        sta zvASd+2
+        adc #$04                ; SCR_B is SCR_A + $400 (C clear: no carry out of a page number)
+        sta zvBSd+2
+        jsr svRnd
+        and #$7f
+        clc
+        adc #$02                ; codes 2..129: ramps and steps, never BLANK or SOLID
+zvASd:    sta $ff00,x
+zvBSd:    sta $ff00,x
+zvC2Sd:   dec svDY
+        bne zvCSd
+        dec svQ
+        bne zvFrSd
+        lda #$00                ; ---- then BLACK: every ink, and both screens BLANK ----
+        jsr svGnd
+        sta $d022
+        sta $d023
+        sta $d020
+        tax
+zvBkSd:   sta ${hx16(SCR_A)},x
+        sta ${hx16(SCR_A + 0x100)},x
+        sta ${hx16(SCR_A + 0x200)},x
+        sta ${hx16(SCR_A + 0x2e8)},x
+        sta ${hx16(SCR_B)},x
+        sta ${hx16(SCR_B + 0x100)},x
+        sta ${hx16(SCR_B + 0x200)},x
+        sta ${hx16(SCR_B + 0x2e8)},x
+        inx
+        bne zvBkSd
+zvKSd:    jsr svKey               ; ---- black until RETURN ----
+        jmp zvKSd
+; svKey: RETURN (or fire, as dieKey reads it) -> the level's ground operands back, then the restart
+svKey:
+${joyMask('dkJoy')}
+        lda #$fe
+        sta $dc00
+        lda $dc01
+        ora dkJoy
+        and #$02                ; RETURN
+        bne zvNoSk
+        lda svSv
+        sta irqB0+1
+        lda svSv+1
+        sta irqB1+1
+${CEILVARY ? `        lda svSv+2
+        sta irqB2+1
+` : ''}        ldx #$ff
+        txs
+        jmp entry
+zvNoSk:   lda #$ff
+        sta $dc00
+        rts
+; svGnd: A -> the ground, top to bottom, THIS frame (the IRQ's operands; setGnd's shadows wait
+; for a rendered frame that will not come). A preserved.
+svGnd:  sta irqB0+1
+        sta irqB1+1
+${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
+; ---- svReset: entry's half -- every sentry back to the start of its path, uncharged ----
+; objInit puts each back in its start CELL; its place along the path, its glide and the charge are
+; ours. Without this a restart left svPosT mid-path while the cell went home, and it walked off
+; through the walls.
+svReset:ldx svNT
+        beq zvNoSr              ; a level without sentries: only the charge to clear
+        dex
+zvLpSr:   lda svBegT,x
+        sta svPosT,x
+        lda #$00
+        sta svTT,x
+        sta svCarT,x
+        sta angSlDT,x
+        sta angSlFT,x
+        dex
+        bpl zvLpSr
+zvNoSr:   lda #$00
+        sta svQ
+        sta svHit
+        sta svBdOn
+        sta $d020
+        rts
+svQ:    !byte 0                 ; the charge in 60Hz ticks; in svDie, the shock frames left
+svSv:   !byte 0,0,0             ; the IRQ's ground operands as the death found them
+svFT:   !byte ${[...Array(SVSLIDE)].map((_, i) => hx(Math.round((i + 1) * 256 / (SVSLIDE + 1)))).join(',')}   ; 60ths into the glide -> 256ths of the cell
+; svShT svDurT svPDT svInkT svBdT svVarT: equates into IAR1 -- see SVTBL
+${Object.entries(SVTBL_OFF).map(([n, o]) => `${n} = ${hx16(SVTBL_AT + o)}`).join('\n')}
+svTT:   !fill ${SV_MAX}, 0             ; per sentry: 60ths into the current cell
+svCarT: !fill ${SV_MAX}, 0             ; ...the 60ths carried from the last one
+svPosT: !fill ${SV_MAX}, 0             ; ...where it is in svPathT (svReset sets it from svBegT)
+${LD('svNT', LVLT('svNT').join(','), ':   !byte ')}   ; this level's sentry count: entities 0..svN-1
+${LD('svBegT', LVLT('svBegT').join(','), ': !byte ')}   ; per sentry: where its path starts in svPathT
+${LD('svEndT', LVLT('svEndT').join(','), ': !byte ')}   ; ...and ends
+${LD('svPathT', LVLT('svPathT').join(','), ':!byte ')}   ; every sentry's path, as direction codes
+${LD('lvlArtT', LVLT('lvlArtT').join(','), ': !byte ')}   ; the level art set this level wants (see lvlArt)
+svDCT:  !byte 0,1,$ff,${hx(MAPW)},${hx(256 - MAPW)}   ; direction code -> cell step
+svHit:  !byte 0                 ; 1 = the player is touching a sentry this frame (svTouch)
+svBdOn: !byte 0                 ; 1 = the border is flashing
+svFX:   !byte 0                 ; a sentry's true position, 8.8: x low, x high, y low, y high --
+svFXH:  !byte 0                 ;   in THIS order, svTouch indexes the pair it moves by 0 or 2
+svFY:   !byte 0
+svFYH:  !byte 0
+svDX:   !byte 0
+svDY:   !byte 0
+svDLo:  !byte 0
+svF:    !byte 0                 ; the frame on show, 0..3
+svN:    !byte ${hx(SVGAP_MIN)}               ; ticks until it changes
+svB:    !byte 0                 ; ticks left in this burst, 0 = in a gap
+svCnt:  !byte 0                 ; sprites the sentries took in the projection pass under way
+svSlT:  !byte 0,0,0,0,0,0,0,0   ; ...their slots (eight: every sentry shares the list)
+svBsT:  !byte 0,0,0,0,0,0,0,0   ; ...and their plain-ball pointers
+svLCnt: !byte 0                 ; the same, as of the last osFlush: what is ON SCREEN, and the
+svLSlT: !byte 0,0,0,0,0,0,0,0   ;   only list svTick may touch -- see osFlush
+svLBsT: !byte 0,0,0,0,0,0,0,0
+svRX:   !byte 0                 ; the right column's X, 9 bits
+svRX8:  !byte 0
+svPD:   !byte 0
+svInk:  !byte ${hx(calm)}
+svY:    !byte 0
+svYH:   !byte 0
+svSd:   !byte $3c,$a5           ; the xorshift state; never 0
+`; })() : ''}${DIE ? `${DIE && SOUND ? `; ---- snTone / snRise: the DRONE climbs ----
 ; Not a note over the top: the drone itself is wound up, voices 1 and 2 together, keeping their
 ; absolute detune so the beating between them stays where it was while the pitch rises.
 snTone: lda #<${hx16(DIE_DR0)}
@@ -18026,7 +19304,7 @@ abLp:   jsr arcPx
         ; (BLANK is fdCol on the drop and arcBlw on the landing), and one it has passed is hole.
 ${!ANYFLOORDK ? '' : `        lda rampThi,x           ; BOTH phases draw their rim from an arc block now, and the two
         tax                     ;   sets share code numbers, so one map serves them: the block
-        lda ${hx16(ARC_MAP)},x  ;   differs, not the code. The degenerate ends translate with the
+        lda arcMap,x  ;   differs, not the code. The degenerate ends translate with the
         bne abSet               ;   33 real ones -- a cell the rim missed is ground, one it has
 ` }        lda rampThi,x           ;   passed is the hole. (always taken: ARC_C0 is not zero)
         cmp #${hx(SOLID)}                ;   (see rampThi's build). A cell the rim misses is floor in
@@ -18739,7 +20017,7 @@ ${SPRITES ? `; ================= orb tables =================
         ; there is no right half to increment onto.
         ; A build with NO pedestals anywhere still emits these as one zero byte: hlSrcL names
         ; the labels unconditionally, and an empty !byte assembles as "bad number: $".
-pedPtrT: !byte ${PED.slotT.map(s => ((HOLEBASE - VBANK) >> 6) + s).join(',') || '0'}
+pedPtrT: !byte ${PED.slotT.map(s => ((OVLBASE - VBANK) >> 6) + s - HOLE.slotEnd).join(',') || '0'}
 pedXOffT: !byte ${PED.xOffT.join(',') || '0'}
 pedBoxLT: !byte ${pedBoxL.join(',') || '0'}
 pedBoxRT: !byte ${pedBoxR.join(',') || '0'}
@@ -19388,7 +20666,17 @@ snapSrcT: !byte ${SNAP_SRC.join(',')}` : ''}
 ; the per-VARIANT tables live out here: the angel's rungs doubled their length and pushed the
 ; image segment through holeSeeT at $3240
 orbPtrT: !byte ${orbPtrT.join(',')}
-orbPtrU: !byte ${orbPtrU.join(',')}
+orbPtrU: !byte ${orbPtrU.join(',')}${HAS_SILVER ? `
+; The sentry's RIGHT column: its lower sprite, 0 = one column, and its upper one. The sentry's rungs
+; only (orbRt tests ovar >= SV_V0 first), so each label sits SV_V0 before its first byte.
+; (The equates FOLLOW the tables: the assembler resolves an equate when it reads it.)
+svPtrRT: !byte ${orbPtrR.slice(SV_V0).join(',')}
+svPtrRUT:!byte ${orbPtrRU.slice(SV_V0).join(',')}
+orbPtrR = svPtrRT - ${hx(SV_V0)}
+orbPtrRU = svPtrRUT - ${hx(SV_V0)}
+; ...and each rung's ball centre, in rows above its floor anchor: the hover is h minus this (oSvY)
+svCtrBT: !byte ${svCtrT.slice(SV_V0).join(',')}
+svCtrT = svCtrBT - ${hx(SV_V0)}` : ''}
 ${LD('orbTallT', LVLT('orbTallT').join(','), ': !byte ')}
 
 ${HAS_IDOL ? `${LD('orbArtT', LVLT('orbArtT').map(hx).join(','), ': !byte ')}   ; bitmap offset per entity; 0 = the orb's art` : ''}
@@ -19423,14 +20711,15 @@ pwY1:   !byte 0,0
 ` : ''}angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
 
 orbExpT: !byte ${orbExpT.join(',')}
-orbXOffT: !byte ${orbXOffT.join(',')}
+orbXOffT: !byte ${orbXOffT.map(v => v & 255).join(',')}
 orbYBaseT: !byte ${orbYBaseT.join(',')}
 orbYCapT: !byte ${orbYCapT.join(',')}
 orbBlankT: !byte ${orbBlankT.join(',')}
 orbAnchT: !byte ${ORBANCH.join(',')}
 
 ; REMOVED 2026-09-26, nothing in the image named it: orbHgtT: sprite height per variant, 21 or 42. Nothing read it; it is one shift from ORBEXP.
-angVarT: !byte ${angVarT.slice(0, VAR_CLAMP + 1).join(',')}
+angVarT: !byte ${angVarT.slice(0, VAR_CLAMP + 1).join(',')}${HAS_SILVER ? `
+` : ''}
 ; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
 ; 64 + ${CONE_DMAX + 1} bytes of PURE GEOMETRY. atan2 of a cell delta is the same on every level, so unlike
 ; holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
@@ -19667,7 +20956,31 @@ ${ENDING ? `        cmp #${hx(END_DST)}                ; THE END is not a level:
         beq endGo
 ` : ''}        ora #$30                ; the file is ILV<n>: the level number IS its last character,
         sta nILV+3              ;   so choosing a level is one byte of self-modification
-llName:
+${HAS_SILVER ? `        jsr llName
+; ---- lvlArt: and the LEVEL ART at OVLBASE, if the arriving level wants the other set ----
+; The pedestal and the idol (IAR0) or the sentry's frames 2-3 (IAR1) -- see ART_SETS. Loaded with
+; the level, by the same resident under the same blanked display, by renaming the one name buffer
+; as endGo does. lvlArtT is 0 for a level that uses neither, which keeps whatever is in place.
+        lda lvlArtT
+        beq laDn
+        cmp artCur
+        beq laDn
+        sta artCur
+        sta nILV+3
+        lda #$41                ; 'A'
+        sta nILV+1
+        lda #$52                ; 'R'
+        sta nILV+2
+        jsr llName
+        lda #$4c                ; 'L' -- and back to ILV for the next level
+        sta nILV+1
+        lda #$56                ; 'V'
+        sta nILV+2
+laDn:   rts
+; artCur is DATA, not an equate, for the reason dieN is: an emitted value is the only initialisation
+; a death restart (jmp entry, which loads nothing) never repeats -- and the art does stay loaded.
+artCur: !byte ${hx(0x30 + ART_BOOT)}
+` : ''}llName:
         lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
         sta llZP
         lda $9a
@@ -20377,14 +21690,14 @@ a2F:    sta (fdB),y
         lda #$35
         sta $01
         plp
-        ; ---- ARC_MAP's entry 0, which arcBld's fill deliberately cannot reach ----
+        ; ---- arcMap's entry 0, which arcBld's fill deliberately cannot reach ----
         ; That fill counts DOWN and ends on bne, so it writes ${CELLCODES - 1}..1 and never 0.
         ; It cannot use bpl instead -- bpl tests the SIGN bit and the table is ${CELLCODES} long, which
         ; is what the bug was. Index 0 is BLANK, a cell the rim MISSED, and a miss is ground in
         ; both polarities -- a CONSTANT. So it is written once, here, rather than costing three
         ; bytes a fall in a block that is already one over; see the note on that fill.
         lda #${hx(ARC_FILL)}
-        sta ${hx16(ARC_MAP)}
+        sta arcMap
         rts
 
 ; ...it is HERE, and not beside arcBld and the rest of the arc code, because that block sits
@@ -20485,7 +21798,8 @@ ${CEILVARY && !FALLMID ? `lvlLo:  ldx lvlMeT              ; (only the non-FALLMI
         lda lvlPalceilT,x
         sta irqB2+1
         rts
-` : ''}lvlLook:${HAS_FLICKER ? `
+` : ''}lvlLook:${HAS_SHD01 ? `
+        jsr shdSet              ; ORBSHD01: this level's orb shadow, in or out` : ''}${HAS_FLICKER ? `
         ldx lvlMeT              ; LEVEL_FLICKER: is this level's light failing? (flkTick)
         lda lvlFlkT-1,x
         sta flkOn
@@ -20635,7 +21949,7 @@ ${HAS_FLICKER ? (() => { const F = LEVEL_FLICKER[LEVEL_IDS.find(n => LEVEL_FLICK
 ; low (lit) draw would tend to be followed by lower ones. Nothing else reads it, so its sequence
 ; can never couple to gameplay. MEASURED with FLKCNT=1 (a lit-frame counter, flkCnt): 22 lit
 ; frames in 1,200 ticks (~66 a minute) with the old 32..255-tick gaps, 35 (~105 a minute) with
-; the 48..175 ones below -- each over only ~8 bursts, so +-30% of noise rides on either figure.
+; 48..175 -- each over only ~8 bursts, so +-30% of noise rides on either figure.
 ; (Not with --watchall: its hit totals run on past --until, and it reported hundreds.)
 flkTick:lda flkOn
         beq fkOut
@@ -20654,12 +21968,12 @@ ${DIE ? `        lda dieSt               ; the death and the fall own the inks: 
         sta flkBur
 fkIn:   dec flkBur
         bne fkB
-        jsr flkRnd              ; ---- burst over: quiet for 48..175 ticks, 0.8 to 2.9 s ----
-        and #$7f                ;   (was 32..255 by "ora #$20": the user found the long gaps
-        clc                     ;   went on a bit too long in the dark, 2026-10-09. This trims
-        adc #$30                ;   the tail and the mean, ~2.4 s -> ~1.9 s, and keeps the short end)
+        jsr flkRnd              ; ---- burst over: quiet for FLK_GAP ticks (see its comment) ----
+        and #${hx(FLK_GAP.span - 1)}
+        clc
+        adc #${hx(FLK_GAP.min)}
         sta flkGap
-        bne fkDark              ; always (A >= $30)
+        bne fkDark              ; always (FLK_GAP.min >= 1, asserted at FLK_GAP)
 fkB:    jsr flkRnd
         cmp #$60                ; lit on about 3 ticks in 8 of a burst
         bcs fkDark
@@ -20894,7 +22208,54 @@ flkLit: !byte 0                 ; the inks on screen are the LIT ones
 flkBur: !byte 0                 ; ticks left in this burst, 0 = in a gap
 flkGap: !byte $40               ; ticks left in this gap
 flkSd:  !byte $5a,$c3           ; the xorshift state; never 0, which is its one fixed point
-lvlFlkT:!byte ${LEVEL_IDS.map(n => LEVEL_FLICKER[n] ? 1 : 0).join(',')}   ; per level id - 1
+lvlFlkT:!byte ${[...Array(PAL_N)].map((_, i) => LEVEL_FLICKER[i + 1] ? 1 : 0).join(',')}   ; per level id - 1
+`; })() : ''}${HAS_SHD01 ? (() => {
+  // Each entry's ADDRESS, sorted, so the index can say which page it is on: the list runs up
+  // through consecutive pages, and the entries from SHD_T[k] on are k+1 pages past the first.
+  const at = SHD01_DIFF.map(([b, i, m]) => [b < ORBLO_N ? SPRBASE + b * 64 + i : ORBHI + (b - ORBLO_N) * 64 + i, m])
+    .sort((a, b) => a[0] - b[0]);
+  if (at.some(([a]) => a >= 0xd000 && a < 0xe000)) throw new Error(
+    `ORBSHD01: an orb bitmap the shadow changes is under the I/O hole (ORBHI_N=${ORBHI_N}); shdSet ` +
+    `would need the $01 port switch with interrupts off to write it`);
+  if (at.length > 128) throw new Error(`ORBSHD01: ${at.length} bytes to patch, and shdSet's index counts down with bpl`);
+  const P0 = at[0][0] >> 8, SHD_T = [];
+  at.forEach(([a], k) => { const pg = (a >> 8) - P0;
+    if (pg > SHD_T.length + 1) throw new Error(`ORBSHD01: the patched bytes skip page $${hx(P0 + SHD_T.length + 1)}`);
+    if (pg > SHD_T.length) SHD_T.push(k); });
+  return `; ---- shdSet: put the orb ladder's ground shadow in this level's inks (ORBSHD01) ----
+; A flickering level draws the orb's ground shadow in pair 01, the shared underside ink, so it is
+; black in the dark and grey 1 on a flash. Every other level keeps the shadow it was drawn with.
+; The ladder is ONE set of bitmaps, so the difference is a patch of ${at.length} bytes, XORed in on
+; arrival and XORed back out on the next arrival anywhere else: shdOn is which of the two the ladder
+; holds NOW, and nothing runs when the arriving level agrees with it. That covers every case with
+; no hook on the way out -- a death restart finds them agreeing, and leaving goes through the
+; next level's lvlLook. Nothing reloads the ladder (ISPR lands once at boot), so shdOn cannot go
+; stale. ${at.length} bytes to patch on ${SHD_T.length + 1} pages: zero page has no pointer free, so the page goes
+; into the operands of shdR/shdW, worked out from the index -- the entries are sorted by address,
+; so each cpx sets carry from the first entry on the next page, and the adc #0 adds it (it can
+; never carry out of a page number, so carry is clear again for the next cpx).
+shdSet: ldx lvlMeT
+        lda lvlShdT-1,x
+        cmp shdOn
+        beq shdX                ; the ladder already holds this level's shadow
+        sta shdOn
+        ldx #${at.length - 1}
+shdL:   lda #${hx(P0)}
+${SHD_T.map(k => `        cpx #${k}                 ; C = this entry is on a later page
+        adc #$00
+`).join('')}        sta shdR+2
+        sta shdW+2
+        ldy shdLoT,x
+shdR:   lda $ff00,y             ; (page patched above)
+        eor shdMkT,x
+shdW:   sta $ff00,y
+        dex
+        bpl shdL
+shdX:   rts
+shdOn:  !byte 0                 ; 1 = the ladder holds the pair-01 shadow. It ships without.
+lvlShdT:!byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SHD01[i + 1] ? 1 : 0).join(',')}   ; per level id - 1
+shdLoT: !byte ${at.map(([a]) => hx(a & 255)).join(',')}
+shdMkT: !byte ${at.map(([, m]) => hx(m)).join(',')}
 `; })() : ''}        ; ---- seamEdge has a PAGE of its own now (2026-09-26), and is not in the block below ----
         ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
         ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
@@ -23230,10 +24591,29 @@ oSPst:  sta (osPtr),y
                                 ; allocator in occStamp ~19 cycles for a facility nothing
                                 ; could call. A flag that is off should emit nothing.
 `}oSPdn:  rts
-oSPsol: lda osGly               ; fully wall: black-backed split, no question to ask
+${SEDGE_ON ? `oSPsol: cmp #${hx(SEAM0)}         ; a SEAM cell whose stamp ends on the line: the edge split that
+        bcc oSPso2              ;   keeps it (SEDGE). SOLID comes here too, and goes straight on.
+        sbc #${hx(SEAM0)}         ; C set by the cmp
+        and #$03                ; the line's column -- the sub-cell starts too ((v-1)*4 + k + 4):
+        ldx ohMsk               ;   the line then starts at the top of this one cell, not 2-6 px
+        bne oSPsep              ;   down, which is the look before those existed
+        tax                     ; FULLY covered: keyed on the line alone (column 0 or 3)
+        lda seFT,x
+        beq oSPso2
         sta (osPtr),y
         rts
-; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
+oSPsep: cmp seKT,x              ; partly covered: the edge split whose line is this one
+        bne oSPso2
+        lda seGT,x
+        sta (osPtr),y
+        rts
+` : 'oSPsol:\n'}oSPso2: lda osGly               ; fully wall: black-backed split, no question to ask
+        sta (osPtr),y
+        rts
+${SEDGE_ON ? `seKT:   !byte ${[...Array(16)].map((_, m) => { const e = SEDGE.find(e => e.show === m); return e ? e.k : '$ff'; }).join(',')}   ; cellFillT mask -> the seam column its edge split keeps, $ff none
+seGT:   !byte ${[...Array(16)].map((_, m) => { const e = SEDGE.findIndex(e => e.show === m); return e < 0 ? 0 : SEDGE0 + e; }).join(',')}   ; ...and that split's code
+seFT:   !byte ${[0, 1, 2, 3].map(k => SEDGEF[k] ?? 0).join(',')}   ; fully covered, line at k -> its split, 0 none
+` : ''}; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
 ; mkRuns's tail. A spare id never appears in mapT's faces, so the two passes cannot give it a
 ; plane; hazSpT (per level, swapped) says which run it was split from. Until this existed the
 ; spare slots held whatever the PREVIOUS level's mkRuns had written there (2026-09-17).
@@ -23817,7 +25197,7 @@ ${!ANYFLOORDK ? '' : `
 ; that is the polarity the dictionary holds.
 arcBld: lda #${hx(ARC_FILL)}     ; ---- the map first: every code is ground unless said otherwise
         ldx #${hx(CELLCODES - 1)}   ;   (a code the walk never saw then draws flat, not sprite data)
-agM:    sta ${hx16(ARC_MAP)},x  ; counting DOWN: dex already sets the flag, where counting up
+agM:    sta arcMap,x  ; counting DOWN: dex already sets the flag, where counting up
         dex                     ;   needs a cpx. Two bytes, and the block was one over.
         ; BNE, NOT BPL. bpl tests the SIGN bit, so a countdown from ${CELLCODES - 1} ($${hx(CELLCODES - 1)}) exits on
         ; the FIRST dex -- $${hx(CELLCODES - 2)} is still negative -- and the loop filled exactly ONE entry.
@@ -23831,14 +25211,14 @@ agM:    sta ${hx16(ARC_MAP)},x  ; counting DOWN: dex already sets the flag, wher
                                 ;   arcBl2 writes it once at boot -- see there. Doing it here cost
                                 ;   three bytes a fall in a block that had none.
         lda #${hx(ARC_VOID)}    ; ...except SOLID, which is a cell the rim has already passed
-        sta ${hx16(ARC_MAP + SOLID)}
+        sta arcMap+${SOLID}
         ldx #$00
 agR:    lda arcCdT,x
         tay
         txa
         clc
         adc #${hx(ARC_C0)}
-        sta ${hx16(ARC_MAP)},y
+        sta arcMap,y
         inx
         cpx #${hx(ARC_RIM_CODES.length)}
         bne agR
@@ -24783,8 +26163,9 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
   // ...but the SOLO slot's tables are not squatters. They are one deliberate allocation with a
   // known extent, declared as the SOLO_SLOT segment, and a squatter reserves a whole PAGE -- so
   // counting all 36 of them separately made every pair inside a page "overlap" every other.
+  // ...nor the sentry's tables (SVTBL): they ride in IAR1, inside the OVLBASE segment.
   .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB'
-                      && SLOT_OFF[n] === undefined
+                      && SLOT_OFF[n] === undefined && SVTBL_OFF[n] === undefined
                       // SHYCOL's colH is a named allocation of known size (COLH below), not a
                       // squatter: a squatter reserves its whole page, which would run into ARC_GLY.
                       && n !== 'colH');
@@ -24813,8 +26194,16 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 const ALIGNED_T = {
     // runPlaneT + runFaceT, packed nose to tail: neither may CROSS a page (see the NRUN guard), but
     // nothing needs them to start on one, and inferring that from $6d00 stranded them when the
-    // arena ran short (2026-10-09). compact.mjs keeps runFaceT with it as one cluster.
-    runPlaneT: { within: 2 * NRUN },
+    // arena ran short (2026-10-09).
+    // (2026-10-14: declared apart, NRUN each. They are separate labels to every reader -- nothing
+    // indexes runFaceT off runPlaneT -- and two 65-byte runs fit the arena's edges where one 130-byte
+    // run did not, once the sentry's code took the slack. A declared buffer is never clustered.)
+    runPlaneT: { within: NRUN }, runFaceT: { within: NRUN },
+    // faceIdT and remLoT: per logical column (NLOG), abs,X -- they must not CROSS a page (a cycle on
+    // the hottest reads), but nothing builds a pointer from their high byte, so they need not START
+    // on one. Inferred page-aligned from their hand addresses, they were stranded when the sentry's
+    // code took the arena (2026-10-14).
+    faceIdT: { within: NLOG }, remLoT: { within: NLOG },
     mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rsT: 256,   // rbT is 7 into rsT: sharedPair
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posYT: 256,   // posXT is 64 into posYT: quarterPair
@@ -25093,12 +26482,20 @@ try {
     // ...and the tail of the ORB ladder rides along on the end of it, because that file is the
     // one that lands under the hole. See ORBHI_N: the bytes it frees at SPRBASE are what the
     // renderer's scratch moves into, so that Krill's resident can have $0400 back.
+    // (The pedestal and the idol left it for OVLBASE, 2026-10-14 -- IAR0 below.)
+    // ...and then the sentry's frames 0 and 1 (SVBASE), in a build with sentries.
     ...(SPRITES ? [{ tag: 'H', name: 'IHOL', first: true, at: KSTAGE,
-                     data: [...HOLEBM.flat(), ...IDOLBM.flat(),
-                            ...ORBBM.slice(ORBLO_N, NORBBM).flat()],
-                     length: (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64 }] : []),
-    ...(SPRITES && true && true && SOCK.BM.length
-          ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: SOCK.BM.flat() }] : []),
+                     data: [...HOLE.BM.flat(), ...ORBBM.slice(ORBLO_N, NORBBM).flat(), ...SVBM.flat()],
+                     length: (HOLE.BM.length + ORBHI_N + SVBM.length) * 64 }] : []),
+    // ---- the LEVEL ART at OVLBASE: IAR0 = the pedestal then the idol, IAR1 = the sentry's frames 2-3 ----
+    // One of them is in place at a time; lvlArt loads the other over it when a level needs it (see
+    // lvlArtT). The boot loads the one its own level wants; the other waits on the disk.
+    ...(SPRITES ? ART_SETS.map((data, k) => data.length
+          ? { tag: 'A' + k, name: 'IAR' + k, at: OVLBASE, data: [...data.flat(), ...(k === 1 ? SVTBL_BYTES : [])],
+              runtime: k !== ART_BOOT } : null)
+          .filter(Boolean) : []),
+    ...(SPRITES && true && true && SOCKSHIP.length
+          ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: SOCKSHIP.flat() }] : []),
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
     // THE TITLE RIDES AT THE FRONT OF ISPR: its block ends at $e7e7 and the orb sprites start at
     // $e800, so the two are one load. A file of its own cost ~25 bytes of boot body (a load call
@@ -25182,6 +26579,22 @@ try {
 
     { tag: 'M', name: 'IMG', at: r.org, data: [...r.bytes] },
   ];
+  // ---- THE STARTING LEVEL RIDES IN IMG when the slot is in CPU RAM ----
+  // The slot moved out of bank 3 into the image's free arena (2026-10-13: bank 3 is for what the VIC
+  // reads, and the sentry's frames needed the room). IMG spans the arena and loads LAST, so a
+  // separately loaded ILVn would be overwritten by IMG's zero fill there. So IMG carries the starting
+  // level's bytes at the slot address instead, and its ILVn file stays on the disk for the levels
+  // that drop back into it, like every other level's.
+  if (SLOT_AT >= r.org && SLOT_AT < r.org + r.bytes.length) {
+    const img = DISK.find(f => f.name === 'IMG'), boot = DISK.find(f => f.name === 'ILV' + BOOTLVL);
+    if (SLOT_AT + boot.data.length > r.org + r.bytes.length) throw new Error(`ILV${BOOTLVL} runs past the end of IMG`);
+    for (let i = 0; i < boot.data.length; i++) {
+      if (img.data[SLOT_AT - r.org + i]) throw new Error(`the level slot at ${hx16(SLOT_AT)} is not empty in IMG ` +
+        `(byte ${hx16(SLOT_AT + i)} is emitted) -- compaction laid something over it`);
+      img.data[SLOT_AT - r.org + i] = boot.data[i];
+    }
+    boot.runtime = true;
+  }
   // SLOTDUMP=<file>: every file this disk carries, as bytes, plus the slot address -- built twice
   // with SLOT_AT a page apart, the bytes that differ by exactly a page are the references to level
   // data: in IMG, the engine sites the live slot's address has to be patched into; in an ILV file,
@@ -25200,7 +26613,10 @@ try {
   // Krill is the 13 seconds it was waiting behind. It arrives PACKED (see make-quote.mjs) and
   // IQOT decrunches it to $f400 itself.
   const QUOTE = (() => {
-    if (!DIE || undefined) return null;             // the picture machinery owns bank 3's tail
+    // NOT gated on DIE any more (2026-10-13). It returned null without the cut scene ("the picture
+    // machinery owns bank 3's tail"), which sent a DIE=0 build down the quote-less boot -- a path
+    // nothing ships and nothing tests, and it no longer boots (rainbow snow). Files that land on
+    // the quote already load LAST, worked out from their addresses below, so nothing needs it gone.
     let q; try { q = JSON.parse(readFileSync('./data/quote-screen.json', 'utf8')); }
     catch { return null; }                                    // not generated: ship without it
     const { QUOTE_SCR, QUOTE_CHR } = quoteAddrs;
@@ -25493,7 +26909,7 @@ try {
                 // everything the engine reads about the level resolves into it. Named so the
                 // pairwise guard covers it -- picking a slot address by eye is exactly the kind
                 // of choice that put ARC_GLY on the level shadow's tail (see iray-bank3-overlap).
-                ...([['LEVELS', SLOT_AT, LVLREGION_END]]),
+                ...(SLOT_AT >= 0xc000 ? [['LEVELS', SLOT_AT, LVLREGION_END]] : []),
                 // SHYCOL: the column heights, on the one page SHY can store to (see ispanSto).
                 ...(SHYCOL ? [['COLH', COLH_AT, COLH_AT + COLH_N]] : []),
                 ['VECTORS', 0xfffa, 0x10000]];
@@ -25537,16 +26953,18 @@ try {
                               // there. Eight bytes, and they are as occupied as the other 280.
                               ['ARC_VOIDCH', ARC_BLK + VOIDCH * 8, ARC_BLK + VOIDCH * 8 + 8],
                               ['ARC_VOIDCH5', ARC_BLK5 + VOIDCH * 8, ARC_BLK5 + VOIDCH * 8 + 8],
-                              ['ARC_MAP', ARC_MAP, ARC_MAP + CELLCODES]] : [];
+                              ] : [];
   const sprNamed = SPRITES ? [...arcSeg, ['SPRBASE', SPRBASE, SPRBASE + NORBBM * 64],
-                            ['HOLEBASE', HOLEBASE, HOLEBASE + (HOLEBM.length + IDOLBM.length + ORBHI_N) * 64],
+                            ['HOLEBASE', HOLEBASE, HOLEBASE + (HOLE.BM.length + ORBHI_N + SVBM.length) * 64],
+                            // the LONGEST of the art sets: whichever is loaded, this is what it covers
+                            ...(ART_LEN ? [['OVLBASE', OVLBASE, Math.max(OVLBASE + ART_LEN * 64, SVTBL_AT + SVTBL_BYTES.length)]] : []),
                             // The socket's own ladder, which is NOT in the HOLEBASE stack -- it
                             // ships as ISOK at its own address. Registered here and not just in
                             // the file list because this array feeds the free-space calculator
                             // as well as the guard: left out, 768 bytes of live sprite data read
                             // as free space, and the next thing placed there would land on it.
-                            ...(SOCK.BM.length
-                              ? [['SOCKBASE', SOCKBASE, SOCKBASE + SOCK.BM.length * 64]] : []),
+                            ...(SOCKSHIP.length
+                              ? [['SOCKBASE', SOCKBASE, SOCKBASE + SOCKSHIP.length * 64]] : []),
                             ['LOADER_RUN', LOADER_RUN, 0xd000],
                             ...(PICSEG.length ? [['PICBASE', PICBASE, PICBASE + PICSEG.length]] : []),
 ] : [];

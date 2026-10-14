@@ -6,7 +6,7 @@ LEVEL 4
  1  [] [] [] [] X5 [] [] [] [] [] [] [] [] [] [] []
  2  [] [] .. .. .. .. .. .. [] [] [] [] [] .. [] []
  3  [] [] .. .. .. .. .. .. /1 [] [] [] .. .. .. []
- 4  [] X7 .. P> .. .. .. .. /1 |1 .. .. .. X! .. []
+ 4  [] X7 .. P> .. .. .. .. /1 |1 .. .. .. X8 .. []
  5  [] [] .. .. .. .. .. .. /1 [] [] [] .. .. .. []
  6  [] [] .. .. .. .. .. .. [] [] [] [] [] .. [] []
  7  [] [] [] [] X6 [] [] [] [] [] [] [] [] [] [] []
@@ -19,5 +19,5 @@ walls    marked (a dot in every solid wall cell)
 exit     X5 at (4,1): level 5, hole 2 red
 exit     X7 at (1,4): level 7, hole 5 green
 exit     X6 at (4,7): level 6, hole 6 blue
-exit     X! at (13,4): THE END (the ending sequence), hole 0 black
+exit     X8 at (13,4): level 8, hole 0 black
 group 1  (9,4) -- opened by /1 (8,3), /1 (8,4), /1 (8,5) (all of them)

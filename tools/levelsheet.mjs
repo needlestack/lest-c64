@@ -15,7 +15,7 @@ import { ROOT } from '../src/paths.mjs';
 process.chdir(ROOT);
 
 const src = readFileSync('src/build-iray.mjs', 'utf8');
-const list = name => JSON.parse(new RegExp(`const ${name} = (\\[[\\d, ]+\\]);`).exec(src)[1]);
+const list = name => JSON.parse(new RegExp(`const ${name} = (\\[[\\d, ]*\\]);`).exec(src)[1]);
 const ship = list('SHIP_LEVEL_IDS'), wip = list('WIP_LEVEL_IDS');
 mkdirSync('docs/levels', { recursive: true });
 for (const n of [...ship, ...wip]) {
