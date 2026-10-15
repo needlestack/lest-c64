@@ -50,7 +50,7 @@ const only = process.argv[3];
 if (only === 'suite') {
   let bad = 0;
   console.log(`level  segment   fps     frames  ticks   +-1 frame   travelled`);
-  for (let n = 1; n <= 8; n++) {
+  for (let n = 1; n <= 9; n++) {
     let o;
     try {
       o = execFileSync(process.execPath, [new URL(import.meta.url).pathname, `CHAIN=${n}${extra ? ' ' + extra : ''}`, 'level'],
@@ -71,7 +71,9 @@ const LVL = +((/CHAIN=(\d)/.exec(extra) ?? [0, 1])[1]);
 // Diagonal runs are counted in diagonal squares, sqrt(2) cells each.
 // Level 2 was 7, and the blocked-move count showed its last frame touching the wall (2026-10-11).
 // Level 8: east down the middle hall from (1.5,5.5) to the pillar at (7,5) -- 5.5 cells (measured, not paced).
-const CLEAR = { 1: 3 * Math.SQRT2, 2: 6.75, 3: 4 * Math.SQRT2, 4: 5, 5: 4, 6: 4, 7: 7, 8: 5.25 };
+// Level 9: east from (1.5,5.0) on the row 4/5 line toward the wall at x = 6 (2026-10-15); 4.5 to the
+// face graze-bumped (a leg overshoots by a frame), so a quarter cell less.
+const CLEAR = { 1: 3 * Math.SQRT2, 2: 6.75, 3: 4 * Math.SQRT2, 4: 5, 5: 4, 6: 4, 7: 7, 8: 5.25, 9: 4.25 };
 // A quarter cell short of the wall: the player's collision radius stops it before the cell edge.
 // LEG=n overrides it, which with LEGS=1 is how a new pose's clear run is measured (a long leg, then
 // read how far it got).
@@ -81,7 +83,9 @@ const RUN_TICKS = +(process.env.LEG ?? Math.round(((CLEAR[LVL] ?? 2) - 0.25) * 2
 // back before the start instead of on it. A leg reverses on the first rendered frame past its tick
 // count, so it can overshoot by a frame, ~0.23 cells at 11 fps. Level 5's start has a quarter cell
 // behind it and bumped on exactly that; 21 ticks is one cell, so it runs 4 out, 3 back, 3 out...
-const INSET = +(process.env.INSET ?? ({ 5: 21 }[LVL] ?? 0));
+// Level 9 likewise (2026-10-15): its start is 0.4 cells off the west wall, and a return leg that
+// overshot by a 6-tick frame clipped it at x = 1.36 -- caught by a store watch on maS+20.
+const INSET = +(process.env.INSET ?? ({ 5: 21, 9: 21 }[LVL] ?? 0));
 const LEGS = +(process.env.LEGS ?? Math.max(2, 2 * Math.round((1 + (TICKS - RUN_TICKS) / (RUN_TICKS - INSET)) / 2)));
 // Poses of the rig's own, where the level's start is a poor benchmark (the user's, from play):
 //   2 -- the level's start clears only ~2.3 cells; this one measured clear for 8.76.
@@ -91,7 +95,10 @@ const LEGS = +(process.env.LEGS ?? Math.max(2, 2 * Math.round((1 + (TICKS - RUN_
 //        the south wall the run slid along it from ~4 cells on -- 14 blocked moves, invisible to
 //        the end-point check. 0a80 is the middle of the row (2026-10-11).
 const POSE = { 2: 'PX=01ad PY=09e5 PA=e0 PAF=80', 7: 'PX=0b93 PY=0a80 PA=7e PAF=c0' };
-const pose = POSE[LVL] ? POSE[LVL] + ' ' : '';
+// Per-level build flags of the rig's own. Level 9: the walk crosses section 1's sentry loops, and a
+// touch would kill the run part-way -- NOSHOCK keeps the touch (it still flashes) and drops the death.
+const LVLENV = { 9: 'NOSHOCK=1' };
+const pose = (POSE[LVL] ? POSE[LVL] + ' ' : '') + (LVLENV[LVL] ? LVLENV[LVL] + ' ' : '');
 const SEGS = [
   // A leg is a byte of ticks, so the spin's 300 are two legs; spinStep has no reverse, so both turn
   // the same way. It stands where the run starts.

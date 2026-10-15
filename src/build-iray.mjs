@@ -133,7 +133,7 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // all the same machinery (code,ladders,graphics) as the other levels"), so a lab is just the game's
 // engine booting level 9.
 const LAB = process.env.LAB === '1';
-const CHAIN = (process.env.CHAIN ?? (LAB ? '9' : '1,2,3,4,5,6,7,8')).split(',').map(Number);
+const CHAIN = (process.env.CHAIN ?? (LAB ? '9' : '1,2,3,4,5,6,7,8,9')).split(',').map(Number);
 // D64=<name> writes somewhere other than lest-c64.d64. A variant build -- a level-wiring test, a
 // profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
@@ -164,8 +164,9 @@ const ALLLVL = [...CHAIN];
 // 8 SHIPS (2026-10-13, the user: "let's keep this as level 8 ... where you drop after completing the
 // errands and dropping through the black exit on level 4"). It was the flicker / lighting test from
 // 2026-10-09. The WIP list stays, empty, for the next level that is not ready.
-const SHIP_LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
-const WIP_LEVEL_IDS = [9];                       // 9: the sentries (2026-10-13); LAB=1 builds it alone
+// 9 SHIPS (2026-10-15, the user: "level 9 is great. let's add it"), after 8: the sentries' level.
+const SHIP_LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const WIP_LEVEL_IDS = [];                        // LAB=1 still builds level 9 alone
 const WIP = process.env.WIP === '1' || LAB;
 const LEVEL_IDS = WIP ? [...SHIP_LEVEL_IDS, ...WIP_LEVEL_IDS] : SHIP_LEVEL_IDS;
 for (const n of [...CHAIN, LVL]) if (!LEVEL_IDS.includes(n)) throw new Error(WIP_LEVEL_IDS.includes(n)
@@ -244,17 +245,20 @@ const L1_MAP = [
 // v7 (the user, 2026-10-14): NO ANGEL. Its pocket is wall, (9,1) is floor beside S1, |1 is (8,2)
 // alone; W2 drops to (8,9), sealing column 8 just above the corridor, which now starts at (6,10)
 // with the second orb at its west end.
+// v8 (the user, 2026-10-15): NO THIRD SOCKET. S3, |3 and room 3's orb are gone; the exit moves to (11,1),
+// reached from room 3 up (15,2) and west along row 1. Section 2's lanes renumbered 3/4/5 (the user's
+// bare ~~ numbered with their lane's sentry), room 3's loops 8/9/6/7.
 const L9_SHEET = `
  0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
- 1  [] [] >1 ~1 ~1 v1 W1 .. S1 .. [] [] OO .. S3 |3 XX []
- 2  [] [] ~1 [] [] ~1 [] [] |1 [] [] [] [] .. [] [] [] []
- 3  [] .. ~1 [] [] ~1 [] >4 ~4 ~4 [] ~9 ~9 <9 ~0 ~0 v0 []
- 4  [] PP ^1 ~1 ~1 <1 [] [] .. [] [] ~9 .. ~9 ~0 .. ~0 []
- 5  [] PP ~2 >2 ~2 ~2 [] ~5 >5 ~5 [] >9 ~9 ~9 ^0 ~0 ~0 []
- 6  [] .. ~2 [] [] v2 [] [] .. [] [] >7 ~7 ~7 v8 ~8 ~8 []
- 7  [] [] ^2 [] [] ~2 [] ~6 ~6 <6 [] ~7 .. ~7 ~8 .. ~8 []
- 8  [] [] ~2 ~2 <2 ~2 OO [] .. [] [] ~7 .. ~7 ~8 .. ~8 []
- 9  [] [] [] [] [] [] [] [] W2 [] [] ~7 ~7 <7 ~8 ~8 ^8 []
+ 1  [] [] >1 ~1 ~1 v1 W1 .. S1 .. [] XX .. .. .. .. .. []
+ 2  [] [] ~1 [] [] ~1 [] [] |1 [] [] [] [] [] [] .. [] []
+ 3  [] .. ~1 [] [] ~1 [] >3 ~3 ~3 [] ~8 ~8 <8 ~9 ~9 v9 []
+ 4  [] PP ^1 ~1 ~1 <1 [] [] .. [] [] ~8 .. ~8 ~9 .. ~9 []
+ 5  [] PP ~2 >2 ~2 ~2 [] ~4 >4 ~4 [] >8 ~8 ~8 ^9 ~9 ~9 []
+ 6  [] .. ~2 [] [] v2 [] [] .. [] [] >6 ~6 ~6 v7 ~7 ~7 []
+ 7  [] [] ^2 [] [] ~2 [] ~5 ~5 <5 [] ~6 .. ~6 ~7 .. ~7 []
+ 8  [] [] ~2 ~2 <2 ~2 OO [] .. [] [] ~6 .. ~6 ~7 .. ~7 []
+ 9  [] [] [] [] [] [] [] [] W2 [] [] ~6 ~6 <6 ~7 ~7 ^7 []
 10  [] [] [] [] [] [] OO .. .. .. S2 |2 .. .. .. .. .. []
 11  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []`;
 // v2 of the notation (the user, 2026-10-13, four sentries, two per loop): a start is its HEADING and
@@ -5926,10 +5930,13 @@ const ENDING = LVLLOAD && true && !process.env.NOENDING
 // LEVEL 8 (2026-10-13): the black hole now drops into level 8, and the ENDING moves one step on, to
 // level 8's own exit. A chain without 8 (CHAIN=4,5,6,7, a playtest) keeps the old wiring: black to
 // the ending, or to level 1 under NOENDING.
+// LEVEL 9 (2026-10-15) goes between them: 8's exit drops into 9, and the ending moves on to 9's exit.
+// AFTER_8 is still "the end of the route", whichever level's exit that now is.
 const AFTER_8 = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
 const BLACK_DST = ALLLVL.includes(8) ? 8 : AFTER_8;
+const AFTER_9 = AFTER_8;
 const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4],
-                        8: [AFTER_8],
+                        8: [ALLLVL.includes(9) ? 9 : AFTER_8], 9: [AFTER_9],
                         ...(ENDING && process.env.ENDTEST ? { 1: [END_DST] } : {}) };
 // FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
 // hlv, and hlv is reset to 0 after every drop (see fallDone), so a headless run can only ever

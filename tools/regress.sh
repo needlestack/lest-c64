@@ -11,13 +11,14 @@
 #           (WALKF: forward a fixed step per rendered frame), compared by framecmp.mjs. Three
 #           workloads: a level-1 walk; levels 1->2 with two forced falls (FALLNOW), which is the
 #           drop, the level load and level 2; and the hub, level 4.
-#   STILLS  a screenshot at a fixed cycle count, compared pixel for pixel: levels 5, 6, 7 and 8 at
+#   STILLS  a screenshot at a fixed cycle count, compared pixel for pixel: levels 5, 6, 7, 8 and 9 at
 #           their starts, a fall held mid-drop (FALLHOLD), and the death scene's picture (DIETEST:
 #           already cornered, then spin to face the angel). Level 8 since 2026-10-14, when its
 #           flicker became LEVEL CODE (loaded with the level, reached through lxTick): the tube's
 #           random sequence advances once per raster-locked tick, so the inks at a cycle count are
 #           the same in any build that boots in the same time.
-# 18 emulator runs, each capped. Exit 1 if anything differs.
+# 20 emulator runs, each capped. Level 9 (2026-10-15) with SVFREEZE=1: its sentries glide and spark
+# on the 60Hz clock, so its still is only comparable with them held. Exit 1 if anything differs.
 cd "${0:A:h}/.."
 REV=${1:-HEAD}
 SHA=$(git rev-parse --short "$REV") || exit 2
@@ -55,6 +56,7 @@ STILLS=(
   "CHAIN=6 ANGFREEZE=1 DEADOK=1 NOHUD=1@100000000"
   "CHAIN=7 ANGFREEZE=1 DEADOK=1 NOHUD=1@100000000"
   "CHAIN=8 ANGFREEZE=1 DEADOK=1 NOHUD=1@100000000"
+  "CHAIN=9 SVFREEZE=1 DEADOK=1 NOHUD=1@100000000"
   "CHAIN=1,2 FALLNOW=2 FALLHOLD=12 ANGFREEZE=1 NOHUD=1@100000000"
   "DIETEST=1 SPINF=1 NOHUD=1@36000000"
 )

@@ -23,7 +23,7 @@ node tools/fpsr.mjs "" suite          # the game as shipped
 node tools/fpsr.mjs "FLAG=x" suite    # the same with a build flag on every level
 ```
 
-For each of levels 1-7, from one fixed pose (the level's start, or the rig's own pose for levels 2
+For each of levels 1-9, from one fixed pose (the level's start, or the rig's own pose for levels 2
 and 7):
 
 - **spin**: turn through every cast angle, standing still.
@@ -32,7 +32,7 @@ and 7):
 
 The build times the window itself (`MOVEAT`/`MOVEFOR`/`MOVELEGS`), so boot is excluded and a run
 repeats exactly. It exits 1 on a level that fails to build or boot, or a walk that BUMPS. That makes
-it the functionality check too: run it after every engine change. It takes 14 emulator runs, a few
+it the functionality check too: run it after every engine change. It takes 18 emulator runs, a few
 minutes.
 
 **No bumps, asserted directly (2026-10-11).** The build counts every blocked move inside the window,
@@ -42,7 +42,9 @@ not ending where it should, within two frames of running. The counter's first ru
 the end-point check had passed for days: level 7's run slid along the south wall (14 blocked), and
 level 2's last frame touched (2 blocked). Both poses were fixed (see `CLEAR` and `POSE` in fpsr.mjs).
 
-**Level 5 runs inset legs.** Its start has a quarter cell behind it, and a tick-timed leg can
+**Levels 5 and 9 run inset legs.** Level 9's start is 0.4 cells off the west wall, and a return leg
+that overshot by a 6-tick frame clipped it (found 2026-10-15 with a store watch on `maS+20`).
+**Level 5:** Its start has a quarter cell behind it, and a tick-timed leg can
 overshoot by a frame, about 0.23 cells at 11 fps. So every leg after the first runs 21 ticks (one
 cell) short: 3.75 out, then 2.77 back and forth, ending a cell out from the start (`INSET`, and
 `MOVEINSET` in the build).
@@ -76,7 +78,8 @@ fixed workloads on both builds:
   - levels 1→2 with two forced falls (`FALLNOW=128`): the drop, the level load, and level 2
   - the hub, level 4
 - **Stills**: a screenshot at a fixed cycle count, compared pixel for pixel:
-  - levels 5, 6 and 7 at their starts
+  - levels 5, 6, 7, 8 and 9 at their starts (level 9 with `SVFREEZE=1`: its sentries glide and
+    spark on the 60Hz clock, so a still is only comparable with them held)
   - a fall parked mid-drop (`FALLHOLD=12`)
   - the death picture (`DIETEST=1`: already cornered, then spin to face the angel)
 
@@ -84,7 +87,7 @@ fixed workloads on both builds:
 in the same order, in the new run. That is the pass for a build that got faster: the movers repeat
 exactly per rendered frame, but a fall and the death scene run on the raster clock, so a faster
 build can show them in a different number of frames. Anything wrong on screen is a frame the
-reference never drew, and fails. It takes 16 emulator runs.
+reference never drew, and fails. It takes 20 emulator runs.
 
 Why each workload is there:
 
