@@ -3591,6 +3591,16 @@ const NOSHOCK = process.env.NOSHOCK === '1';
 // NOSV=1 (testing, the user 2026-10-14: "disable entities (sentries)" to look at fps without them):
 // every sentry slot starts and stays hidden -- no glide, no gate, no drawing.
 const NOSV = process.env.NOSV === '1';
+// SVFREEZE=1 (testing, 2026-10-15): the sentries stand where they start and never spark. Both run on
+// the 60Hz clock, so without this a level-9 screen at frame n depends on how fast the build is, and two
+// builds' screens can't be compared byte for byte.
+const SVFREEZE = process.env.SVFREEZE === '1';
+// OPENALL=1 (testing, the user 2026-10-15: "all walls open so I can walk through other sections"):
+// level 9 starts with every door |n open as well as every closing wall Wn (stInit's job), and no
+// socket fed, so nothing closes behind you. Walking into a door opened this way is just floor; |3
+// still leads to the exit.
+const OPENALL = process.env.OPENALL === '1';
+if (OPENALL && STAGE) throw new Error('OPENALL=1 with STAGE: feeding a socket shuts its Wn again -- use one or the other');
 if (STAGE) {
   if (!(STAGE > 0 && STAGE < L9.stN)) throw new Error(`STAGE=${STAGE}: level 9 has stages 1..${L9.stN - 1}`);
   const sk = L9.socks.find(k => k.n === STAGE), door = L9.walls[STAGE - 1];
@@ -3905,6 +3915,10 @@ const NOHUD = flag('NOHUD');
 // answer one question: does the cost of the phases AFTER input depend on WHEN they start?
 const PADIN = +(process.env.PADIN ?? 0);
 if (PADIN) DIAG.push(`PADIN=${PADIN}`);
+// PADX=n (diagnostic, 2026-10-15): PADIN's INNER count, so the padding can reach a whole frame's worth
+// (PADIN=255 PADX=40 is ~52k cycles) -- the same view at a much lower frame rate, nothing else changed.
+const PADX = +(process.env.PADX ?? 1);
+if (PADX !== 1) DIAG.push(`PADX=${PADX}`);
 
 
 
@@ -4126,6 +4140,20 @@ const SEAMMAXN = +(process.env.SEAMMAXN ?? 0);
 // SEAMWIDE: narrowest face, in columns, that can still hold a panel line. Derived from the
 // four-column spacing rule, not chosen -- see the note at the test.
 const SEAMWIDE = +(process.env.SEAMWIDE ?? 7);
+// SEAMEVERY=n (the user, 2026-10-15: "cut panel seams to half as often"): a panel line only on the
+// cell boundaries whose coordinate along the face is a multiple of n, so panels are n cells wide.
+// Anchored to the MAP coordinate, not to the run's ends, so a line stays put on the wall as you
+// move. A wall whose ends fall between multiples gets a narrower panel there. Power of two (a mask).
+const SEAMEVERY = +(process.env.SEAMEVERY ?? 1);
+if (![1, 2, 4, 8].includes(SEAMEVERY)) throw new Error(`SEAMEVERY=${SEAMEVERY}: must be 1, 2, 4 or 8`);
+// SEAMGAP=1 (the user, 2026-10-15: "never have a seam next to another seam (corner or otherwise), so a
+// minimum of 2 squares between any seams"): with SEAMEVERY spacing the panel lines, also drop a line
+// that would sit ONE cell from the face's corner. The corner is a MAP fact, not where the run leaves
+// the screen: boundary k keeps its line only if cells k-2 and k+1 are still on the face -- a wall cell
+// (mapT 0) with an open cell in front. That is the run's own definition, read from mapT so a door
+// opened at runtime counts and a merge-hazard split (an artificial run end) does not.
+const SEAMGAP = process.env.SEAMGAP === '1';
+if (SEAMGAP && SEAMEVERY < 2) throw new Error('SEAMGAP=1 needs SEAMEVERY=2 or more: with a line on every boundary, every line is one cell from the next');
 const SEAMPIX = +(process.env.SEAMPIX ?? 4);
 const SEAMCUT = SEAMPIX ? SEAMPIX + 7 : 0;
 // SEAMPIXC: the same cutoff for CORNER seams, separately, and OFF by default. A corner marks real
@@ -6055,6 +6083,7 @@ Object.assign(RUNTIME_BUFS, {
   vsOn: 1, vsRow: 1, vsCode: 1,
   bfsLast: 1, mulWY: 1, obKT: 1, obKI: 1,
   obKeyT: NORB,         // at most 8: the sprite budget bounds the cast
+  obLT: NORB, obLN: 1,  // obOrder's sorted list of the entities that survive culling, and its length
   // 176, not 256. It is indexed by screen COLUMN -- `remHiT,x` and `remHiT+1,y` with x,y in
   // 0..159 -- so 161 bytes are reachable and the rest was "named whole rather than guessed at".
   // That mattered once it had to move: no 256-byte run is free in all three chain shapes, and a
@@ -10161,7 +10190,10 @@ sHyP    = $915d                 ; 12 columns
 sHyC    = $9169                 ; 12 columns
 sHyPN   = $9175
 sHyN    = $9176
-ssAng   = $9d
+${SEAMGAP ? `sgW     = $9177                 ; SEAMGAP, per span: the wall cells' coordinate ACROSS the face
+sgF     = $9178                 ;   and the open cells' in front (both as rowMulT bases on an N/S face)
+sgO     = $9179                 ;   and the face: bit 0 set = an N/S face, cells run along x
+` : ''}ssAng   = $9d
 mp      = $98                   ; mul8 operands / product
 mq      = $99
 plo     = $9a
@@ -10611,6 +10643,8 @@ runFaceT  = ${hx16(0x6d00 + NRUN)}                ;   visible. Derived by mkRuns
 obKT    = $5b                   ; obOrder: the smallest key so far, its entity, and the keys
 obKI    = $5c  
 obKeyT  = $a8b3                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
+obLT    = ${hx16(0xa8b3 + NORB)}                 ; obOrder: the survivors, nearest first (NORB bytes), placed by compaction
+obLN    = ${hx16(0xa8b3 + 2 * NORB)}                 ;   ...and how many
 arcMap  = $6e00                  ; the fall's arc map (CELLCODES bytes, built by arcBld): placed by compaction
 bfsQ    = $6f00                  ; the angel fill's queue: one byte per open cell, so up to 254.
                                  ;   Pure scratch, nothing swaps it. Exiled to bank 3 when level
@@ -11240,7 +11274,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
 mloop:
 ${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
-pdInL:  ldx #$01
+pdInL:  ldx #${hx(PADX)}
 pdInM:  dex
         bne pdInM
         dey
@@ -13571,12 +13605,17 @@ maLT:   !byte 0                 ; the tick the current leg started on
 maLen:  !byte ${hx(MOVEFOR)}            ; this leg's length in ticks
 maS:    !fill 21, 0             ; +20: blocked moves inside the window
 ` : ''}tickDelta:
-        lda frameCnt
+        ; frameCnt is READ ONCE. It used to be read twice -- once for the difference, once to store
+        ; as lastMv -- and when the top-of-frame IRQ landed between the reads, that tick went into
+        ; lastMv but never into dtv: lost. About one frame in eight (2026-10-15, level 9's spin),
+        ; so a faster frame rate lost MORE time per second: turning measured 4.7% slow at 21 fps
+        ; and 1.7% slow at 9 fps -- "rotation is slower when the frame rate is higher" (the user).
+        ldx frameCnt
+        txa
         sec
         sbc lastMv
         sta dtv
-        lda frameCnt
-        sta lastMv
+        stx lastMv
         lda dtv
         bne tdCl
         inc dtv                 ; two renders inside one tick: still move a little
@@ -14143,7 +14182,28 @@ ssCnt:  ${SEAMMAXN ? `cmp #${hx(SEAMMAXN + 1)}
         ` : ''}sta ssN
 ${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets too short for a line\n' : ''}${SEAMPW ? '        jsr ssPwS               ; dp, and the widest s that still leaves a placeable panel\n' : ''}
 
-        ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
+${SEAMGAP ? `        ; ---- SEAMGAP: where this face's wall and its open front lie, for sgFace ----
+        ldx spanL
+        ldy faceIdT,x           ; the run: its plane and its face
+        lda runPlaneT,y
+        sta sgW
+        sta sgF
+        lda runFaceT,y
+        sta sgO
+        bmi sgES
+        dec sgF                 ; W/N: the wall is the plane, open cells at plane-1
+        jmp sgAx
+sgES:   dec sgW                 ; E/S: open cells are the plane, the wall at plane-1
+sgAx:   lsr                     ; bit 0: an N/S face runs along x, so the across coordinate is a
+        bcc sgVt                ;   ROW -- make both rowMulT bases once, here
+        ldx sgW
+        lda rowMulT,x
+        sta sgW
+        ldx sgF
+        lda rowMulT,x
+        sta sgF
+sgVt:
+` : ''}        ; Every boundary this walk emits is INTERIOR to the run: uaH/ubH are the cells the two
         ; end rays land in, so the outer edges of the wall are never crossed between them. The
         ; corner at the end of a receding wall is marked by subFace instead, which is where it
         ; gets suppressed.
@@ -14164,8 +14224,21 @@ ${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:
         jsr seamOne
         lda #$01
         sta rvMode
+` : ''}${SEAMEVERY > 1 ? `        lda ssK                 ; SEAMEVERY=${SEAMEVERY}: only boundaries at a multiple of ${SEAMEVERY} along the face
+        and #${hx(SEAMEVERY - 1)}
+        bne ssSkp
+` : ''}${SEAMGAP ? `        lda ssK                 ; SEAMGAP: two face cells on the low side of k...
+        sec
+        sbc #$02
+        jsr sgFace
+        bcc ssSkp
+        lda ssK                 ; ...and two on the high side (k and k+1)
+        clc
+        adc #$01
+        jsr sgFace
+        bcc ssSkp
 ` : ''}        jsr seamOne
-        dec ssN
+${SEAMEVERY > 1 ? 'ssSkp:\n' : ''}        dec ssN
         beq ssDn
         lda ssDir               ; step k toward the far end, in the order chosen at setup
         bne ssKdn
@@ -14174,7 +14247,46 @@ ${SEAMCNT ? '        inc ssNCnt\n        bne ssNCX\n        inc ssNCnt+1\nssNCX:
 ssKdn:  dec ssK
         jmp ssLp
 ssDn:   rts
-
+${SEAMGAP ? `
+; ---- sgFace: is the cell at coordinate A along this span's face still ON the face? ----
+; Carry set = yes: a wall cell (mapT 0) whose front cell is open. Clobbers X and Y. ssLp's k is
+; interior to the run, so k-2 >= 0 and k+1 is inside the map (its border is solid, never a face).
+sgFace: tax
+        lda sgO
+        lsr
+        bcs sgHz
+        lda rowMulT,x           ; a W/E face runs along y: cell = rowMulT[j] + x
+        tax
+        clc
+        adc sgW
+        tay
+        lda mapT,y
+        bne sgNo                ; open: the face has ended (a gap, or past an outside corner)
+        txa
+        clc
+        adc sgF
+        tay
+        lda mapT,y
+        beq sgNo                ; walled in front: an inside corner
+        sec
+        rts
+sgHz:   txa                     ; an N/S face runs along x: cell = rowMulT[y] + j, bases in sgW/sgF
+        clc
+        adc sgW
+        tay
+        lda mapT,y
+        bne sgNo
+        txa
+        clc
+        adc sgF
+        tay
+        lda mapT,y
+        beq sgNo
+        sec
+        rts
+sgNo:   clc
+        rts
+` : ''}
 
 ; Can ANY cell of this span still take a seam? A cell qualifies only if it AND both its
 ; neighbours are unmarked -- the same three-cell rule seamOne applies below -- so a span can
@@ -15299,8 +15411,11 @@ omWTog: sec
         sta wsWall
 ${HAS_SILVER ? `        lda sockStgT,y          ; STAGES: does this socket begin one? (0 = no)
         pha
+` : ''}${OPENALL ? `        ldx wsWall              ; OPENALL: the door may be open already, and wallTog FLIPS it --
+        lda wallStT,x           ;   feeding S1 shut |1 behind the player (2026-10-15). Play never
+        bne omOpen              ;   feeds a socket whose door is open, so only the test build guards
 ` : ''}        jsr wallTog
-${HAS_SILVER ? `        pla
+${OPENALL ? 'omOpen:\n' : ''}${HAS_SILVER ? `        pla
         beq omNoIco
         jsr lxSock              ; the door is falling: close the wall behind, and change the cast (stGo)
 ` : ''}` : ''}omNoIco:
@@ -18752,7 +18867,10 @@ ${[...Array(STAGE)].map((_, k) => { const n = k + 1, sk = L9.socks.find(q => q.n
         jsr wtOff               ; |${n} open, no collapse
         lda #${n}
         jsr stGo                ; W${n} shut, stage ${n}'s cast`; }).join('\n')}
-        rts` : `        jmp svReset`}
+        rts` : OPENALL && LVL === 9 ? `${L9.walls.map((_, k) => `        lda #${k}
+        sta wsWall
+        jsr wtOff               ; OPENALL: |${k + 1} open, no collapse`).join('\n')}
+        jmp svReset` : `        jmp svReset`}
 ; ---- svStep: the SENTRIES (entities 0..svN-1), once per rendered frame ----
 ; Each runs its own closed path (svPathT, traced from the sheet) at one cell per ${SVSLIDE} 60ths
 ; (${Math.round(256 / SVSLIDE / 12 * 100)}% of the player's 12/256 a tick), whether you look or not, and NOTHING stops it: the
@@ -18760,7 +18878,7 @@ ${[...Array(STAGE)].map((_, k) => { const n = k + 1, sk = L9.socks.find(q => q.n
 ; the period equal to its length. They are not in blkT: they neither block you nor wait for you,
 ; because touching one is a HIT, tested against the ball's true position (svTouch), and shown as a
 ; border flash for now -- the stand-in for the kill, to judge how close should count.
-svStep: lda #$00
+svStep:${SVFREEZE ? '  rts                     ; DEADCODE-OK: SVFREEZE=1 (testing) -- nobody moves\n       ' : ''} lda #$00
         sta svHit
         ldx svNT                ; this level's sentries, entities 0..svN-1
         bne svGo
@@ -18933,7 +19051,7 @@ saFar:  sec
 ; The pointers go straight into both screens' pointer bytes for the slots the orb took this pass
 ; (svSlT, svCnt of them: one, or four for a 2x2 rung), and the lightning ink into $d025 -- at the top of the frame, so a
 ; frame never shows half of one spark. osFlush writes the same pair, so the two can only agree.
-svTick: lda svNT                ; a level with no sentries: nothing sparks -- and the tables this
+svTick:${SVFREEZE ? '  rts                     ; DEADCODE-OK: SVFREEZE=1 (testing) -- no sparks\n       ' : ''} lda svNT                ; a level with no sentries: nothing sparks -- and the tables this
         beq tkOut               ;   reads ride with the sentry's art (SVTBL), absent on such a level
         lda svHit               ; ---- TOUCHING a sentry: the border flashes (the kill, for now) ----
         beq tkBd0               ; random among blue, light blue, cyan, white, a new one each 60th
@@ -18953,7 +19071,7 @@ tkBd0:  lda svBdOn
 tkAn:   lda svB
         bne tkBur
         dec svN                 ; ---- quiet: wait out the gap ----
-        bne tkWr
+        bne tkOut               ; nothing changed: the pointers on screen are already right
         jsr svRnd               ; ---- strike: a burst of ${SVBUR_MIN}..${SVBUR_MIN + 15} ticks ----
         and #$0f
         clc
@@ -18964,7 +19082,7 @@ tkAn:   lda svB
 tkBur:  dec svB
         beq tkEnd
         dec svN
-        bne tkWr
+        bne tkOut               ; still holding this frame: nothing to write (see tkSet)
         lda svF
         bne tkPl
 tkSpk:  jsr svRnd               ; ---- a lightning frame, 1..3, held 1..6 ticks ----
@@ -18992,6 +19110,10 @@ tkEnd:  lda #$00                ; ---- the burst is over: plain, for a gap ----
         clc
         adc #${hx(SVGAP_MIN)}
         sta svN
+; The pointers are written only when the frame or ink CHANGES (2026-10-15: rewriting every on-screen
+; sentry's pointer pair on every 60th cost ~1k a frame with 8 in view). The rest of the time the
+; screen is already right, because the other writer, osFlush -> lxWr -> svWr, rewrites the pair
+; for the list it has just put on screen, with the frame that is up now, on every rendered frame.
 tkSet:  ldy svF
         lda svPDT,y
         sta svPD
@@ -23928,10 +24050,16 @@ ${FALL ? `; Out of the main block (11 bytes over once level 1's two angel readou
 ; a socket had taken theirs -- "still blocks me, still kills me, but doesn't render" (the user,
 ; 2026-09-18). Now each entity gets a key of |dx|+|dy| cells from the player and the nearest is
 ; projected first, so what drops when eight is not enough is the smallest thing on screen.
-; Up to eight entities, so the selection is a plain repeated minimum: ~600 cycles a frame.
+; It WAS a repeated minimum over every entity: each pick scanned all nOrbT, culled or not, so level
+; 9's room with 8 sentries in view (14 entities, ~9 picks) spent ~2,000 cycles a frame choosing
+; (2026-10-15). Now the key pass INSERTS each survivor into obLT as it goes -- a stable insertion
+; after every equal key, and the pass runs from the highest index down, so equal keys still come
+; out highest index first, exactly the order the repeated minimum gave -- and the walk just reads it.
 ; Out here because the main block has no room; jsr-only.
 obOrder:ldx nOrbT
         beq obODn
+        lda #$00
+        sta obLN
 obKLp:  dex
         lda #$ff                ; $ff = never: hidden, or not an angel while dying
         ldy orbHidT,x
@@ -23957,26 +24085,35 @@ ${absA('obKy')}
         clc
         adc obKT                ; |dx| + |dy| in cells: at most 30, so never $ff
 obKSt:  sta obKeyT,x
-        txa
-        bne obKLp
-obPick: lda #$ff
-        sta obKT                ; the smallest key so far
-        ldx nOrbT
-obPLp:  dex
+        cmp #$ff
+        beq obKNx               ; never: not in the list
+        sta obKT                ; ---- insert entity X, key A, after every key <= it ----
+        stx obKI
+        ldy obLN
+obIns:  beq obIPut              ; reached the front
+        ldx obLT-1,y
         lda obKeyT,x
         cmp obKT
-        bcs obPNx
-        sta obKT
-        stx obKI
-obPNx:  txa
-        bne obPLp
-        lda obKT
-        cmp #$ff
-        beq obODn               ; every entity done (or never)
-        ldx obKI
-        lda #$ff
-        sta obKeyT,x            ; consumed
-        stx oidx
+        bcc obIPut              ; smaller...
+        beq obIPut              ;   ...or EQUAL stays ahead: stable, highest index first
+        txa                     ; larger: it moves up one
+        sta obLT,y
+        dey
+        jmp obIns
+obIPut: lda obKI
+        sta obLT,y
+        inc obLN
+        tax
+obKNx:  txa
+        bne obKLp
+        lda #$00                ; ---- the walk: nearest first, until the slots run out ----
+        sta obKI                ; obKI is the list position now (orbOne clobbers X and Y)
+obPick: ldy obKI
+        cpy obLN
+        beq obODn               ; every survivor done
+        lda obLT,y
+        inc obKI
+        sta oidx
         jsr orbOne
         lda onv
         cmp onvH
