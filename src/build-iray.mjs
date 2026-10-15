@@ -3595,12 +3595,6 @@ const NOSV = process.env.NOSV === '1';
 // the 60Hz clock, so without this a level-9 screen at frame n depends on how fast the build is, and two
 // builds' screens can't be compared byte for byte.
 const SVFREEZE = process.env.SVFREEZE === '1';
-// OPENALL=1 (testing, the user 2026-10-15: "all walls open so I can walk through other sections"):
-// level 9 starts with every door |n open as well as every closing wall Wn (stInit's job), and no
-// socket fed, so nothing closes behind you. Walking into a door opened this way is just floor; |3
-// still leads to the exit.
-const OPENALL = process.env.OPENALL === '1';
-if (OPENALL && STAGE) throw new Error('OPENALL=1 with STAGE: feeding a socket shuts its Wn again -- use one or the other');
 if (STAGE) {
   if (!(STAGE > 0 && STAGE < L9.stN)) throw new Error(`STAGE=${STAGE}: level 9 has stages 1..${L9.stN - 1}`);
   const sk = L9.socks.find(k => k.n === STAGE), door = L9.walls[STAGE - 1];
@@ -15411,11 +15405,8 @@ omWTog: sec
         sta wsWall
 ${HAS_SILVER ? `        lda sockStgT,y          ; STAGES: does this socket begin one? (0 = no)
         pha
-` : ''}${OPENALL ? `        ldx wsWall              ; OPENALL: the door may be open already, and wallTog FLIPS it --
-        lda wallStT,x           ;   feeding S1 shut |1 behind the player (2026-10-15). Play never
-        bne omOpen              ;   feeds a socket whose door is open, so only the test build guards
 ` : ''}        jsr wallTog
-${OPENALL ? 'omOpen:\n' : ''}${HAS_SILVER ? `        pla
+${HAS_SILVER ? `        pla
         beq omNoIco
         jsr lxSock              ; the door is falling: close the wall behind, and change the cast (stGo)
 ` : ''}` : ''}omNoIco:
@@ -18867,10 +18858,7 @@ ${[...Array(STAGE)].map((_, k) => { const n = k + 1, sk = L9.socks.find(q => q.n
         jsr wtOff               ; |${n} open, no collapse
         lda #${n}
         jsr stGo                ; W${n} shut, stage ${n}'s cast`; }).join('\n')}
-        rts` : OPENALL && LVL === 9 ? `${L9.walls.map((_, k) => `        lda #${k}
-        sta wsWall
-        jsr wtOff               ; OPENALL: |${k + 1} open, no collapse`).join('\n')}
-        jmp svReset` : `        jmp svReset`}
+        rts` : `        jmp svReset`}
 ; ---- svStep: the SENTRIES (entities 0..svN-1), once per rendered frame ----
 ; Each runs its own closed path (svPathT, traced from the sheet) at one cell per ${SVSLIDE} 60ths
 ; (${Math.round(256 / SVSLIDE / 12 * 100)}% of the player's 12/256 a tick), whether you look or not, and NOTHING stops it: the
