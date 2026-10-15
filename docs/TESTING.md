@@ -42,8 +42,10 @@ not ending where it should, within two frames of running. The counter's first ru
 the end-point check had passed for days: level 7's run slid along the south wall (14 blocked), and
 level 2's last frame touched (2 blocked). Both poses were fixed (see `CLEAR` and `POSE` in fpsr.mjs).
 
-**Levels 5 and 9 run inset legs.** Level 9's start is 0.4 cells off the west wall, and a return leg
-that overshot by a 6-tick frame clipped it (found 2026-10-15 with a store watch on `maS+20`).
+**Levels 2, 5 and 9 run inset legs.** Level 9's start is 0.4 cells off the west wall and level 2's
+rig pose 0.11 off the south wall, so a return leg that overshot the start clipped them (found
+2026-10-15 with a store watch on `maS+20`, the bump counter: `probe.mjs ... --until "maGo>=1" --watch
+<maS+20>,<maS+20>` stops on the blocked move and reads the pose).
 **Level 5:** Its start has a quarter cell behind it, and a tick-timed leg can
 overshoot by a frame, about 0.23 cells at 11 fps. So every leg after the first runs 21 ticks (one
 cell) short: 3.75 out, then 2.77 back and forth, ending a cell out from the start (`INSET`, and
@@ -57,9 +59,10 @@ Reading it:
   last recorded results are at the end of this file. Update them when a change moves them on
   purpose.
 - To watch a walk at real speed: `DISK=build/x.d64 node tools/fpsr.mjs "CHAIN=n" level walk`.
-- **OPEN: an occasional `BUILD OR RUN FAILED`.** Twice in three suites (2026-10-11) one walk failed
-  and passed when rerun alone, on a different level each time. The rig now prints probe's reason
-  after the message. The next time it happens, read that before rerunning.
+- **An occasional `BUILD OR RUN FAILED`.** Twice in three suites (2026-10-11) one walk failed and
+  passed when rerun alone; the rig now prints probe's reason after the message. On 2026-10-15 EVERY
+  level failed this way: VICE had been upgraded and `tools/vice.mjs`/`tools/probe.mjs` named the old
+  install's path. So: if every level fails, check the VICE path first; if one does, read the reason.
 
 ## 2. Draws the same: `regress.sh`
 
@@ -159,19 +162,18 @@ on CIA2's timers.
 
 ## Last recorded `fpsr.mjs "" suite`
 
-2026-10-11, after the drop/death space cuts (the destination rendered whole, so the cast lost its
-per-pop budget check). The `was` column is the run before, the same day, after the bump counter
-and pose fixes. Every walk: 0 blocked.
+2026-10-15, level 9 shipped (`ae6fec7` + the inset walks), on VICE 3.9. `all levels ran clean`: every
+walk 0 blocked, exit 0. The `was` column is 2026-10-11's. Walks on levels 2 and 9 run inset return
+legs since this run, so compare them only with runs from now on.
 
 | level | spin fps | was | walk fps | was |
 |---|---:|---:|---:|---:|
-| 1 | 21.60 | 21.40 | 15.26 | 15.26 |
-| 2 | 31.30 | 31.10 | 12.73 | 12.73 |
-| 3 | 27.51 | 27.51 | 16.10 | 15.97 |
-| 4 | 17.60 | 17.60 | 16.04 | 15.96 |
-| 5 | 28.00 | 27.80 | 11.26 | 11.16 |
-| 6 | 23.92 | 23.80 | 14.95 | 14.91 |
-| 7 | 30.40 | 30.40 | 14.79 | 14.79 |
-
-Every change is within one frame. The walks on levels 2, 5 and 7 changed course on 2026-10-11 (the
-bump counter's fixes), so compare them only with runs from then on.
+| 1 | 22.72 | 21.60 | 16.05 | 15.26 |
+| 2 | 31.10 | 31.30 | 14.02 | 12.73 |
+| 3 | 27.71 | 27.51 | 17.00 | 16.10 |
+| 4 | 18.40 | 17.60 | 16.76 | 16.04 |
+| 5 | 28.40 | 28.00 | 12.05 | 11.26 |
+| 6 | 25.12 | 23.92 | 15.05 | 14.95 |
+| 7 | 30.60 | 30.40 | 15.83 | 14.79 |
+| 8 | 23.92 | - | 15.21 | - |
+| 9 | 20.20 | - | 18.78 | - |

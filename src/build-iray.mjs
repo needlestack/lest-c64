@@ -38,7 +38,7 @@ if (process.env.SLOT_AT === undefined) {
     const sa = queue.shift(); if (tried.includes(sa)) continue; tried.push(sa);
     try { unlinkSync('./build/iray.arena.json'); } catch {}
     const res = spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit',
-      env: { ...process.env, SLOT_AT: '0x' + sa.toString(16) } });
+      env: { ...process.env, SLOT_AT: '0x' + sa.toString(16), SLOT_PICK: '1' } });   // SLOT_PICK: a trial, so a miss is quiet
     if (res.status === 0) {
       if (cache[key] !== sa) { cache[key] = sa; writeFileSync(cacheF, JSON.stringify(cache, null, 1)); }
       if (tried.length > 1) console.error(`  slot: placed at $${sa.toString(16)} (tried ${tried.map(t => '$' + t.toString(16)).join(', ')})`);
@@ -127,7 +127,9 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // level (CHAIN=4 -> the hub by itself); the hub's exits lead to 5/6/7 only when all three are in the
 // chain. The other shipping disk is 4,5,6,7 (leveltest.d64). History of the residency limits that
 // used to shape this default (1,2,3 / 1,4,5 / 1,2 / 1-4): the iray-shipping-chains note and git log.
-// LAB=1: level 9 on its own disk -- WIP=1 with CHAIN=9. It WAS an engine for the WIP levels alone
+// LAB=1: level 9 on its own disk (CHAIN=9). Level 9 ships since 2026-10-15, so this is now just the
+// quick way to boot it; the flag also sets WIP, which adds nothing while the WIP list is empty.
+// History: it WAS an engine for the WIP levels alone
 // (2026-10-13), dropping the idol, the pedestals and the flicker to make bank-3 room for the
 // sentry's art; since 2026-10-14 the sentry is an ordinary entity in the full engine (the user: "use
 // all the same machinery (code,ladders,graphics) as the other levels"), so a lab is just the game's
@@ -5931,12 +5933,11 @@ const ENDING = LVLLOAD && true && !process.env.NOENDING
 // level 8's own exit. A chain without 8 (CHAIN=4,5,6,7, a playtest) keeps the old wiring: black to
 // the ending, or to level 1 under NOENDING.
 // LEVEL 9 (2026-10-15) goes between them: 8's exit drops into 9, and the ending moves on to 9's exit.
-// AFTER_8 is still "the end of the route", whichever level's exit that now is.
-const AFTER_8 = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
-const BLACK_DST = ALLLVL.includes(8) ? 8 : AFTER_8;
-const AFTER_9 = AFTER_8;
+// ROUTE_END: where the LAST level's exit leads -- the ending, or level 1 under NOENDING.
+const ROUTE_END = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
+const BLACK_DST = ALLLVL.includes(8) ? 8 : ROUTE_END;
 const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4],
-                        8: [ALLLVL.includes(9) ? 9 : AFTER_8], 9: [AFTER_9],
+                        8: [ALLLVL.includes(9) ? 9 : ROUTE_END], 9: [ROUTE_END],
                         ...(ENDING && process.env.ENDTEST ? { 1: [END_DST] } : {}) };
 // FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
 // hlv, and hlv is reset to 0 after every drop (see fallDone), so a headless run can only ever
@@ -27319,7 +27320,11 @@ writeFileSync(asmPath, asm);
   // The inner build is GONE: both maps it existed to produce are published above, before any
   // assembly. It assembled the hand layout, which is what compaction replaces -- and what fails
   // first when the engine grows.
-  execFileSync(process.execPath, ['./src/compact.mjs', asmPath], { stdio: ['ignore', 'inherit', 'inherit'] });
+  // compact prints its own reason (or, for the slot picker's trial, nothing -- the picker reports the
+  // miss in one line), so a failure here exits without Node's stack trace on top: that trace made
+  // every routine slot miss look like a crash, and buried real errors in the same output.
+  try { execFileSync(process.execPath, ['./src/compact.mjs', asmPath], { stdio: ['ignore', 'inherit', 'inherit'] }); }
+  catch { process.exit(1); }
   asm = readFileSync('./build/iray.compact.asm', 'utf8');
   writeFileSync(asmPath, asm);          // so everything downstream reads the layout that ships
 

@@ -632,6 +632,7 @@ RESERVE = need('iray.reserve.json');
 // misses still tells the picker where it would fit.
 writeFileSync('./build/iray.arena.json', JSON.stringify({ codeEnd, dataStart, regionLen: RESERVE[1] - RESERVE[0] }));
 if (RESERVE[0] < CEIL && RESERVE[1] > ORG && (RESERVE[0] < codeEnd || RESERVE[1] > dataStart)) {
+  if (process.env.SLOT_PICK) process.exit(1);   // the slot picker's trial: it reports the miss itself
   console.error(`compact: the level slot $${RESERVE[0].toString(16)}-$${(RESERVE[1] - 1).toString(16)} is not inside ` +
     `the arena $${codeEnd.toString(16)}-$${(dataStart - 1).toString(16)} -- move SLOT_AT`);
   process.exit(1);

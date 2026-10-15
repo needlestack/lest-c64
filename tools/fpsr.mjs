@@ -85,7 +85,9 @@ const RUN_TICKS = +(process.env.LEG ?? Math.round(((CLEAR[LVL] ?? 2) - 0.25) * 2
 // behind it and bumped on exactly that; 21 ticks is one cell, so it runs 4 out, 3 back, 3 out...
 // Level 9 likewise (2026-10-15): its start is 0.4 cells off the west wall, and a return leg that
 // overshot by a 6-tick frame clipped it at x = 1.36 -- caught by a store watch on maS+20.
-const INSET = +(process.env.INSET ?? ({ 5: 21, 9: 21 }[LVL] ?? 0));
+// And level 2 (2026-10-15): the rig's pose is 0.11 cells off the south wall, so ANY return overshoot
+// touched it -- the one blocked move that had failed every suite since level 8 shipped.
+const INSET = +(process.env.INSET ?? ({ 2: 21, 5: 21, 9: 21 }[LVL] ?? 0));
 const LEGS = +(process.env.LEGS ?? Math.max(2, 2 * Math.round((1 + (TICKS - RUN_TICKS) / (RUN_TICKS - INSET)) / 2)));
 // Poses of the rig's own, where the level's start is a poor benchmark (the user's, from play):
 //   2 -- the level's start clears only ~2.3 cells; this one measured clear for 8.76.
