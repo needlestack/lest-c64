@@ -6,7 +6,7 @@ not a workload made up for the occasion, not fps timed from the host, not a sing
 "it looked fine". Each of those has produced a wrong answer at least once. The tools exist because
 the obvious way to check something was misleading.
 
-Four questions, four tools:
+Five questions, five tools:
 
 | question | tool | when |
 |---|---|---|
@@ -14,6 +14,7 @@ Four questions, four tools:
 | Does it still DRAW the same as before? | `tools/regress.sh [REV]` | changes that move bytes but must not change the game: layout, space savings, rewrites |
 | Are the shipped bytes unchanged? | `tools/ship.sh save`, then `tools/ship.sh` | cleanups that must emit the identical program |
 | Did this routine get faster or slower, by how many cycles? | `tools/vprof.mjs` with `SPINF=1 BENCHF=n --until benchEnd NOHUD=1` | optimisation A/B, below fpsr's 1-frame resolution |
+| Does the ray search (subdivision, pivot prediction) cast fewer rays, per kind of motion? | `node tools/pivlab.mjs "" "FLAG=x"` | any change to where rays are cast |
 
 ## 1. Functionality and fps: `fpsr.mjs suite`
 
@@ -115,6 +116,31 @@ IDENTICAL, and when they do, that is the whole proof. No emulator run is needed.
 Only with `SPINF=1 BENCHF=n --until benchEnd` and `NOHUD=1`. That run is cycle-exact and
 deterministic. A timed spin drifts 33-71 cycles a frame between identical builds, so it can't
 compare anything.
+
+## 5. The ray search: `pivlab.mjs`
+
+```
+node tools/pivlab.mjs "" "PIVCOLD=1"                     # current vs no prediction, level 9's open room
+PLBASE="LAB=1 NOSV=1 SEAMS=0 STAGE=1 NOSHOCK=1 SOUND=0 PX=0x880 PY=0x180 PA=0x40" \
+  node tools/pivlab.mjs ""                                 # the same in room 2's corridor
+```
+
+Each argument is a build variant. Every variant runs the same script of motions (still, turn, walk,
+back, strafe, and combinations: `PLS`) at a fixed step per RENDERED frame (`PLDT`), so frame k is
+the same view in every build. One emulator run per variant. Per segment it prints rays, the floor
+(2 per boundary, what perfect prediction would cast), how many hints landed and how far the misses
+were, and the cycles in the whole cast and in the prediction arithmetic, timed by the build itself
+on CIA2's timers.
+
+- **Judge on rays and cast cycles, not fps.** A hint can only change where rays are cast, never a
+  pixel, so a broken prediction shows up only as extra rays.
+- **Read the `ends at` column.** Shuttles must end where they began; a different end means a move
+  bumped a wall and the segments are no longer the same frames.
+- **Two views, because they disagree.** The open room has ~5 boundaries; the corridor has 14, where
+  plain bisection is already cheap and prediction barely pays on strafes. A change that helps one
+  can hurt the other.
+- `PIVLAB` keeps its records in the death picture's RAM, so it needs `NOSHOCK=1` (the default base
+  has it).
 
 ## Rules
 

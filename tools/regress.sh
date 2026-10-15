@@ -11,15 +11,21 @@
 #           (WALKF: forward a fixed step per rendered frame), compared by framecmp.mjs. Three
 #           workloads: a level-1 walk; levels 1->2 with two forced falls (FALLNOW), which is the
 #           drop, the level load and level 2; and the hub, level 4.
-#   STILLS  a screenshot at a fixed cycle count, compared pixel for pixel: levels 5, 6 and 7 at
+#   STILLS  a screenshot at a fixed cycle count, compared pixel for pixel: levels 5, 6, 7 and 8 at
 #           their starts, a fall held mid-drop (FALLHOLD), and the death scene's picture (DIETEST:
-#           already cornered, then spin to face the angel).
-# 16 emulator runs, each capped. Exit 1 if anything differs.
+#           already cornered, then spin to face the angel). Level 8 since 2026-10-14, when its
+#           flicker became LEVEL CODE (loaded with the level, reached through lxTick): the tube's
+#           random sequence advances once per raster-locked tick, so the inks at a cycle count are
+#           the same in any build that boots in the same time.
+# 18 emulator runs, each capped. Exit 1 if anything differs.
 cd "${0:A:h}/.."
 REV=${1:-HEAD}
 SHA=$(git rev-parse --short "$REV") || exit 2
 WT=${TMPDIR:-/tmp}/lest-regress-$SHA
 OUT=$WT-out
+TOOLS=$PWD/tools   # every emulator run uses this tree's tools, on either side
+# prune first: a worktree whose temp dir was cleaned is still registered, and `add` refuses it
+git worktree prune
 [[ -d $WT ]] || git worktree add -q --detach "$WT" "$SHA" || exit 2
 [[ -e $WT/tools/node_modules ]] || ln -s "$PWD/tools/node_modules" "$WT/tools/node_modules"
 mkdir -p $OUT
@@ -31,7 +37,8 @@ FRAMES=(
 )
 for w in $FRAMES; do
   t=${w//[^A-Za-z0-9]/_}
-  (cd $WT && perl -e 'alarm 100; exec @ARGV' node tools/frames.mjs "$w" --out $OUT/base-$t >/dev/null 2>&1)
+  # the base side runs THIS tree's tools on REV's tree (LEST_ROOT): one tool set measures both
+  LEST_ROOT=$WT/ perl -e 'alarm 100; exec @ARGV' node tools/frames.mjs "$w" --out $OUT/base-$t >/dev/null 2>&1
   perl -e 'alarm 100; exec @ARGV' node tools/frames.mjs "$w" --out $OUT/new-$t >/dev/null 2>&1
   if [[ ! -s $OUT/base-$t/frames.bin || ! -s $OUT/new-$t/frames.bin ]]; then echo "FAILED   frames: $w (no frames recorded)"; bad=1; continue; fi
   r=$(node tools/framecmp.mjs $OUT/base-$t/frames.bin $OUT/new-$t/frames.bin) || bad=1
@@ -47,12 +54,13 @@ STILLS=(
   "CHAIN=5 ANGFREEZE=1 DEADOK=1 NOHUD=1@100000000"
   "CHAIN=6 ANGFREEZE=1 DEADOK=1 NOHUD=1@100000000"
   "CHAIN=7 ANGFREEZE=1 DEADOK=1 NOHUD=1@100000000"
+  "CHAIN=8 ANGFREEZE=1 DEADOK=1 NOHUD=1@100000000"
   "CHAIN=1,2 FALLNOW=2 FALLHOLD=12 ANGFREEZE=1 NOHUD=1@100000000"
   "DIETEST=1 SPINF=1 NOHUD=1@36000000"
 )
 shot() {   # dir env cycles png
   (cd $1 && env ${=2} D64=build/zz-regress.d64 node src/build-iray.mjs >/dev/null 2>&1 || { echo "BUILD FAILED in $1: $2"; return 1 }
-   node tools/vicerun.mjs 55 -warp -jamaction 1 -limitcycles $3 -exitscreenshot "$4" -autostart build/zz-regress.d64 >/dev/null 2>&1
+   node $TOOLS/vicerun.mjs 55 -warp -jamaction 1 -limitcycles $3 -exitscreenshot "$4" -autostart build/zz-regress.d64 >/dev/null 2>&1
    rm -f build/zz-regress.d64)
 }
 for s in $STILLS; do

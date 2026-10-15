@@ -82,64 +82,71 @@ workload, fps suite clean.
 
 Not done: loading the death charset from disk at death (~1.8K), which adds a pause at the cut.
 
-## Parked plan: per-level code (designed 2026-10-11, deferred)
+## Level code: BUILT (2026-10-14)
 
-Pull this out the next time a special feature doesn't fit. A feature only one level uses (level
-8's flicker, level 4's wall symbol) is compiled into the engine for every level today. The plan
-moves such code into a file that loads with its level.
+Designed on 2026-10-11 and parked until level 9 v6 (19 sentries in three sealed rooms) left the
+`WIP=1` engine 320 B short. A feature only some levels use now loads with those levels.
 
-**The economics, which decide when it's worth it:**
+**The economics, measured:**
 
-    saving = (sum of every level's special code) - (the largest one) - (hooks, ~65 B)
+    saving = (sum of every feature's code) - (the largest module) - (hooks)
 
-Level code needs a block to load into, and that block is sized to the largest level's code.
-With today's candidates (level 8 ~670 B including the shadow switch, level 4 ~60 B) the saving
-is about zero. It pays once a SECOND level brings a sizeable feature: special code then stops
-stacking, and each further special level costs only what it exceeds the largest by.
+The block a module loads into is sized to the largest one, so one feature alone saves nothing: the
+shipped game (flicker only) lost 67 B to the vectors. With two (flicker 477 B, sentries + stages
+1,328 B) the `WIP=1` engine went from 320 B short to 344 B spendable. Each further special level
+costs only what its module exceeds the largest by, and every level whose module is smaller has the
+difference free for more level code.
 
-**Design:**
+**What was built (where it differs from the plan, the plan was wrong):**
 
-- **Where it loads.** Not the level slot (now `$6900` in CPU RAM, ~768 B, mostly full of level
-  data). A block reserved in the image, emitted by the build, sized to the largest level's code.
-- **The file.** `ILX<n>`, loaded by `lvlLoad` straight after `ILV<n>`, through the same name
-  buffer with `V` patched to `X`. An engine table, one byte per level id, says whether a level
-  has one. The boot level's code is patched straight into the image bytes after linking, so
-  boot needs no extra load. A death restart keeps it resident.
-- **Its interface.** Three `jmp`s at the block's start:
-  - enter: called from where `symPut` runs today, on every arrival including death restarts.
-    It must be safe to run twice.
-  - leave: called in `lvlLoad` before anything loads. It must undo whatever enter changed
-    (charset glyphs, sprite bitmaps, inks).
-  - tick: called once per frame from the top-of-frame raster IRQ.
-  A level with no code gets three `rts` stubs. Before any load, the engine calls leave and then
-  stubs the vectors, tick FIRST, so the IRQ can never run half-loaded code.
-- **Linking.** Level code is assembled in a second pass AFTER compaction, against the engine's
-  final addresses (`r.labels`). That is what makes it safe for it to name engine symbols. The
-  rule "level files may not name engine symbols" exists because the level DUMP computes
-  addresses before layout, and a post-layout link does not. Size the reserved block with every
-  engine symbol taken as absolute (a real link can only shrink it). A variable only level code
-  uses gets dropped by compaction's unnamed-equate pass, so the link must fail loudly on that.
-- **Zero cost when unused.** With no level carrying code, none of it is emitted.
+- **Where it loads: in the level file, after the level's data.** Not a separate `ILX` file and not a
+  separate block: `LXAT` is the end of the largest level's data plus wall lists, and a level that
+  brings code is its tables, its wall lists, zeros up to `LXAT`, then the module. One file, one load,
+  and the boot level's module rides in `IMG` with its tables, as the tables already did. The region
+  compaction reserves runs to `LXAT + LX_SIZE`.
+- **Which code.** The source marks it: `;@@LX-BEGIN <feature>` ... `;@@LX-END`. `LX_FEATURES` in the
+  build says which levels use each feature and which vectors it answers. Today: `silver` (`svStep`,
+  `svTick`, `svWr`, `stGo`, `stInit`/`svReset`) and `flicker` (`flkTick`, `fkEmpty`).
+- **The vectors.** `lxTick`, `lxStep`, `lxInit`, `lxSock`, `lxWr`, `lxLook`, only those some feature
+  answers. Each is a `jmp` the engine calls; a level's module begins with a jump table in the same
+  order, and a vector none of its features answers goes to an `rts` in the module. `lvlLoad` stubs
+  them all to `lxNone` before a load (the IRQ's first) and points them at the module after it if
+  `lvlLxT` says the level brought one (the IRQ's last), each with interrupts masked. A death restart
+  keeps them, as it keeps the module.
+- **Linking.** The marked text is cut out of the engine's source before compaction, sized once with
+  placeholder addresses (absolute, unless the source gives the name a zero-page address), and linked
+  after the final assembly against the engine's real labels. A name compaction dropped fails the link.
+- **State.** What the engine's own code reads stays resident, after `@@LX-END` (`svCnt`, the slot
+  lists, `svY`, `flkDk`, `flkLit` ...). What only the module reads lives in the module: it is
+  re-initialised by every load, which is the level starting over anyway.
+- **The slot address is picked, not set.** The region's size depends on the build, so no one address
+  serves the game, `WIP=1`, the lab and the rigs' chains. Without `SLOT_AT` the build runs itself as
+  a child: the last address that worked for these settings (`build/slot-cache.json`), and if it does
+  not fit, the highest page compaction says does (`build/iray.arena.json`), then a page or two lower.
 
-**What moves, when it's built:**
+**Four traps it hit, now guarded:**
 
-- Level 8: `flkTick`, `fkInk` & co., the flickering-sprite code, and the orb-shadow switch. The
-  switch is an XOR patch of the 42 bytes ORBSHD01 changes in the orb bitmaps, applied on enter
-  and again on leave; XOR undoes itself. Writes under the I/O hole need the `$01` port switch.
-- Level 4: `symPut`/`symT`/`symOT`/`lvlSymT` (~94 B). Enter writes the marked glyphs, leave
-  writes the plain ones back.
-- Engine hooks that stay: a 16-byte sprite-ink map in `osFlush` (identity unless a level remaps
-  it, for flickering sprites), and `lvlSpr`'s lit-frame skip.
-- Floor dither (616 B, levels 5-7) does NOT move cleanly: it's woven into the drop's rim and
-  charset rebuild. Left alone by the user's call.
-- **Level 9's sentry: the first consumer, and the one that will force this.** Its code is about
-  1.2K (`svStep`, `svTouch`, `svTick`, `svChg`, `svDie`, `svKey`, `svReset`, `svQuad`, `svReg`)
-  and only levels with sentries need it. It's already self-contained, and the engine reaches it
-  through a handful of hooks: `svStep` in the main loop, `svTick` in the IRQ, `svReset` in
-  `objInit`, `svReg`/`orbRt` in the sprite writer. With the sentry (~1.2K) and level 8 (~670 B)
-  both moved, the saving is about 670 B less the hooks. Build it when level 9's gameplay runs out
-  of room. A WIP=1 engine had about 320 B free on 2026-10-14 (122 B in the fps rig's level-2
-  build), so that point is close.
+- **Zero page the module owns.** Its equates leave the engine's source with it, so compaction saw
+  `$b5-$bf` as free and promoted engine buffers onto the flicker's rectangle. The build publishes the
+  module's zero page (`build/iray.zpres.json`) and compaction keeps off it.
+- **Slot tables were told from scratch by ADDRESS.** Compaction left alone any RAM equate inside the
+  reserve, on the theory that only the slot's tables were there. The longer region swallowed
+  `runPlaneT`'s hand address, it stayed put, and `mkRuns` wrote over level 8's flicker code: a hang
+  after two frames. Slot tables are now named (`build/iray.slotnames.json`), and a build guard fails
+  any other RAM buffer that overlaps the region.
+- **Slot tables promoted to zero page.** Compaction's zero-page pass never excluded the slot's tables;
+  it was safe only while zero page was full. Moving module variables out freed some, `lvlMeT` went to
+  `$66` where no level file writes it, and every `WIP=1` level drew a black sky and garbage walls. The
+  pass now skips slot names, and the build fails if any slot table is not in the slot.
+- **A guard that only sees nonzero bytes.** The boot-level patch refuses to overwrite emitted data,
+  but tests for nonzero bytes, so a zero-padded table under the region would pass. The region guard
+  above is the real check.
+
+**What could move next:** each level's module has `LX_SIZE` minus its own size free, so features of
+smaller levels are free to move: level 4's wall symbol (`symPut`, ~94 B); the idol and pedestal code,
+duplicated into each of levels 4-7's modules if it can be cut cleanly; the sentry's resident hooks
+(`orbRt`, `svReg`, `svQuad`, the variant branch), which need a call-site redesign. Floor dither (616 B,
+levels 5-7) still doesn't move cleanly: it's woven into the drop's rim and charset rebuild.
 
 ## Level-loaded art: the first instance (2026-10-14)
 
@@ -170,7 +177,7 @@ level-loaded asset will follow, so here it is written down.
 Checked: falling 9 -> 7 reloads `IAR0`, and level 7 is pixel-identical to booting it.
 
 Level-loaded CODE is the same shape plus one hard part, linking code to run at the landing
-address. That's the parked plan above.
+address. That's "Level code: BUILT" above.
 
 ## Cost by feature
 

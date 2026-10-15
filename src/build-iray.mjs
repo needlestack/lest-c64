@@ -18,6 +18,42 @@ import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from '
 import { execFileSync } from 'child_process';
 import { ROOT } from './paths.mjs';
 process.chdir(ROOT);   // every path below is repo-relative (see paths.mjs)
+// ---- WHERE THE LEVEL SLOT GOES: picked, not hand-set (2026-10-14) ----
+// The slot -- the level's tables, then its level CODE at LXAT -- must be page-aligned and lie in the
+// arena compaction leaves between code and tables. Its size depends on the build (which levels, which
+// features ride as level code), and the arena on everything else, so no one address serves the game,
+// WIP=1, LAB=1 and the test rigs' chains. SLOT_AT pins it; otherwise this runs the build as a child
+// with a guess (the last one that worked for these settings, from build/slot-cache.json), and if that
+// does not fit, again at the highest page compaction says does -- then a page or two lower, should the
+// page-constrained scratch fail to pack around it. A failure BEFORE compaction is not a layout
+// problem, and is not retried. Sub-builds inherit SLOT_AT from the child's environment.
+if (process.env.SLOT_AT === undefined) {
+  const { spawnSync } = await import('child_process');
+  const SYS = /^(PATH|HOME|USER|SHELL|PWD|OLDPWD|TERM.*|LANG|LC_.*|TMPDIR|LOGNAME|SHLVL|COLORTERM|_|SSH_.*|DISPLAY|EDITOR|PAGER|MANPATH|XPC_.*|__CF.*|COMMAND_MODE|SECURITYSESSIONID|HOMEBREW_.*|INFOPATH|CLAUDE.*|NODE_.*|GIT_.*|OTEL_.*|CI|NO_COLOR|FORCE_COLOR)$/;
+  const key = JSON.stringify(Object.entries(process.env).filter(([k]) => /^[A-Z0-9_]+$/.test(k) && !SYS.test(k)).sort());
+  const cacheF = './build/slot-cache.json';
+  let cache = {}; try { cache = JSON.parse(readFileSync(cacheF, 'utf8')); } catch {}
+  const tried = [], queue = [cache[key] ?? 0x6900];
+  while (queue.length && tried.length < 9) {
+    const sa = queue.shift(); if (tried.includes(sa)) continue; tried.push(sa);
+    try { unlinkSync('./build/iray.arena.json'); } catch {}
+    const res = spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit',
+      env: { ...process.env, SLOT_AT: '0x' + sa.toString(16) } });
+    if (res.status === 0) {
+      if (cache[key] !== sa) { cache[key] = sa; writeFileSync(cacheF, JSON.stringify(cache, null, 1)); }
+      if (tried.length > 1) console.error(`  slot: placed at $${sa.toString(16)} (tried ${tried.map(t => '$' + t.toString(16)).join(', ')})`);
+      process.exit(0);
+    }
+    let ar = null; try { ar = JSON.parse(readFileSync('./build/iray.arena.json', 'utf8')); } catch {}
+    if (!ar) process.exit(res.status ?? 1);            // failed before compaction: not a layout problem
+    const top = (ar.dataStart - ar.regionLen) & ~255;
+    console.error(`  slot: $${sa.toString(16)} does not fit (arena $${ar.codeEnd.toString(16)}-$${(ar.dataStart - 1).toString(16)}, region ${ar.regionLen} B); trying lower`);
+    // every page from the highest that fits down: where the page-constrained scratch packs is not
+    // predictable, and a lower slot can leave a whole page free above it where a higher one did not
+    for (let k = 0; k < 7; k++) { const a = top - 256 * k; if (a >= ar.codeEnd && !tried.includes(a) && !queue.includes(a)) queue.push(a); }
+  }
+  process.exit(1);
+}
 // Run this script again as a SUB-BUILD (one level's tables, one wall variant). Its chatter is
 // dropped, but if it FAILS its own error is shown: with stderr discarded, a sub-build that hit a
 // missing file surfaced only as "Command failed" from the parent -- no file, no reason.
@@ -190,17 +226,37 @@ const L1_MAP = [
 // sheet). Pick the orb up at the bottom of loop 2, carry it round to the top of loop 1, and the way
 // east opens. Right of the door is placeholder; (12,6) is OPENED here as it was in v3, or (12,7)-(12,8)
 // is a pocket nothing can reach and the angel-path connectivity check refuses the map.
+// v5 (the user, 2026-10-14): Loops 1 and 2 as before; past the door, column 8 runs
+// south through three back-and-forth lanes (4, 5, 6: three cells each, so a dead end turns a
+// sentry round) to the long corridor on row 10, with the second orb at its west end; the final
+// room is four loops (9, 0, 7, 8), two sentries each, guarding the way up to S2 and the exit.
+// AA is the angel, and |1 is also its LEASH (it may never come west through the open door).
+// Transcribed with the user's bare ~~ numbered (loops 1 and 2 touch, so a bare ~~ would fork),
+// the row labels renumbered 0-11 (the sheet skipped 9 and 11), and loop 8's top-left start v8 (the
+// user's first draft had <8, heading off the loop into loop 7).
+// v6 (the user, 2026-10-14): THE ROOMS ARE SEALED. Wn is a wall that CLOSES when socket Sn is fed
+// (|n opens at the same moment), and the room behind it is gone for good: its entities are dropped
+// and the next room's take their slots -- the STAGES (see L9_STAGES). S1 can only be fed from (7,1),
+// with W1 right behind it; S2 only from (9,10), with W2 two cells up column 8 -- so the angel, let
+// out of its pocket at (10,1) when S1 opens |1, usually follows you past W2 into room 3. If W2
+// closes on it, it is pushed FORWARD (the user). Loops 9 and 0 now run the other way. Room 3's orb,
+// for S3, at (12,1) in the alcove beside it.
+// v7 (the user, 2026-10-14): NO ANGEL. Its pocket is wall, (9,1) is floor beside S1, |1 is (8,2)
+// alone; W2 drops to (8,9), sealing column 8 just above the corridor, which now starts at (6,10)
+// with the second orb at its west end.
 const L9_SHEET = `
  0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
- 1  [] [] >1 ~1 ~1 v1 S1 |1 .. .. .. .. .. .. .. .. .. []
- 2  [] [] ~1 [] [] ~1 [] [] [] .. [] [] .. [] [] .. .. []
- 3  [] .. ~1 [] [] ~1 [] .. .. .. [] [] .. [] [] .. .. []
- 4  [] PP ^1 ~1 ~1 <1 [] [] [] .. [] [] .. [] [] .. .. []
- 5  [] PP ~2 >2 ~2 ~2 [] [] [] .. .. .. .. [] [] .. XX []
- 6  [] .. ~2 [] [] v2 [] .. .. .. [] .. .. [] .. .. [] []
- 7  [] [] ^2 [] [] ~2 [] [] [] .. [] [] .. [] [] .. .. []
- 8  [] [] ~2 ~2 <2 ~2 OO [] .. .. [] [] .. [] [] .. .. []
- 9  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []`;
+ 1  [] [] >1 ~1 ~1 v1 W1 .. S1 .. [] [] OO .. S3 |3 XX []
+ 2  [] [] ~1 [] [] ~1 [] [] |1 [] [] [] [] .. [] [] [] []
+ 3  [] .. ~1 [] [] ~1 [] >4 ~4 ~4 [] ~9 ~9 <9 ~0 ~0 v0 []
+ 4  [] PP ^1 ~1 ~1 <1 [] [] .. [] [] ~9 .. ~9 ~0 .. ~0 []
+ 5  [] PP ~2 >2 ~2 ~2 [] ~5 >5 ~5 [] >9 ~9 ~9 ^0 ~0 ~0 []
+ 6  [] .. ~2 [] [] v2 [] [] .. [] [] >7 ~7 ~7 v8 ~8 ~8 []
+ 7  [] [] ^2 [] [] ~2 [] ~6 ~6 <6 [] ~7 .. ~7 ~8 .. ~8 []
+ 8  [] [] ~2 ~2 <2 ~2 OO [] .. [] [] ~7 .. ~7 ~8 .. ~8 []
+ 9  [] [] [] [] [] [] [] [] W2 [] [] ~7 ~7 <7 ~8 ~8 ^8 []
+10  [] [] [] [] [] [] OO .. .. .. S2 |2 .. .. .. .. .. []
+11  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []`;
 // v2 of the notation (the user, 2026-10-13, four sentries, two per loop): a start is its HEADING and
 // its path -- v1 ^1 <2 -- or ># on a cell two paths share. (The first sheet's ~v, heading only, still
 // reads: its number is the first numbered cell ahead.) A path cell is ~n, ~# or any start on it.
@@ -212,29 +268,38 @@ const L9 = (() => {
   const pathOf = t => t[0] === '~' && /[\d#]/.test(t[1]) ? t[1] : D[t[0]] && /[\d#]/.test(t[1]) ? t[1] : t[0] === '~' && D[t[1]] ? '?' : null;
   const headOf = t => D[t[0]] && /[\d#]/.test(t[1]) ? D[t[0]] : t[0] === '~' && D[t[1]] ? D[t[1]] : null;
   // |n is a DOOR, a wall until socket Sn is fed: a wall in the map, and LEVEL_WALLS[9] names it
-  const rows = g.map(r => r.map(t => t === '[]' || t[0] === '|' ? '#' : '.').join(''));
+  // Wn is a wall too: the map is drawn with every removable cell SOLID, and Wn is opened at the
+  // start of the level (stInit) so that it can be put back later -- the same machinery the other way
+  const rows = g.map(r => r.map(t => t === '[]' || t[0] === '|' || /^W\d$/.test(t) ? '#' : '.').join(''));
   let player = null, exit = null;
-  const starts = [], socks = [], doors = {}, orbs = [];
+  const starts = [], socks = [], doors = {}, orbs = [], angels = [], closers = {};
   g.forEach((r, y) => r.forEach((t, x) => {
     if (t === 'PP') player = [x, y];
+    if (t === 'AA') angels.push([x, y]);
     if (t === 'XX') exit = [x, y];
     if (t === 'OO') orbs.push([x, y]);
     if (/^S\d$/.test(t)) socks.push({ x, y, n: +t[1] });
     if (/^\|\d$/.test(t)) (doors[t[1]] ??= []).push([x, y]);
+    if (/^W\d$/.test(t)) (closers[t[1]] ??= []).push([x, y]);
     if (headOf(t)) starts.push({ x, y, d: headOf(t), p: pathOf(t) });
   }));
   // trace one path from a start: on to a neighbour on path id (its number, #, or a '?' start),
-  // straight on preferred, never back; null if it forks or dead-ends
+  // straight on preferred, never back -- except at a DEAD END, where it turns round (v5's lanes:
+  // a sentry runs back and forth). Done when it is home AND about to set off the way it started,
+  // so a lane sentry starting mid-lane does the far half too; null if it forks, or is a dead end
+  // both ways (an isolated cell)
   const trace = (st, id) => {
     const own = (x, y) => { const p = pathOf(tok(x, y)); return p === id || p === '#' || p === '?'; };
+    if (!own(st.x + st.d[0], st.y + st.d[1])) return null;
     const dirs = [];
     let cx = st.x, cy = st.y, d = st.d;
     for (let k = 0; k <= 256; k++) {
       dirs.push(d); cx += d[0]; cy += d[1];
-      if (cx === st.x && cy === st.y) return dirs;
-      const opts = [d, [d[1], -d[0]], [-d[1], d[0]]].filter(([dx, dy]) => own(cx + dx, cy + dy));
+      let opts = [d, [d[1], -d[0]], [-d[1], d[0]]].filter(([dx, dy]) => own(cx + dx, cy + dy));
+      if (!opts.length) opts = [[-d[0], -d[1]]].filter(([dx, dy]) => own(cx + dx, cy + dy));
       if (!opts.length || (opts.length > 1 && opts[0] !== d)) return null;
       d = opts[0];
+      if (cx === st.x && cy === st.y && d[0] === st.d[0] && d[1] === st.d[1]) return dirs;
     }
     return null;
   };
@@ -267,9 +332,62 @@ const L9 = (() => {
     return doors[n];
   });
   for (const sk of socks) if (!doors[sk.n]) throw new Error(`L9_SHEET: S${sk.n} at (${sk.x},${sk.y}) has no door |${sk.n} to open`);
-  return { rows, player, exit, sentries, socks, orbs, walls, sockWall: socks.map(sk => sk.n - 1) };
+    // ---- THE STAGES: stage n begins when Sn is fed, if there is a Wn to close behind it ----
+  // Rooms by flood fill, each in its own stage's walls: room 0 from PP with every Wn open and every
+  // stage door shut; room n from Sn's cell with doors 1..n open and W1..Wn shut. Doors that start no
+  // stage (|3, the exit's) count as open: what they lead to is part of the room they open from.
+  const stN = 1 + Object.keys(closers).length;
+  for (let n = 1; n < stN; n++) {
+    if (!closers[n]) throw new Error(`L9_SHEET: the closing walls are ${Object.keys(closers)}, not W1..W${stN - 1}`);
+    if (!socks.some(sk => sk.n === n)) throw new Error(`L9_SHEET: W${n} has no S${n} to close it`);
+    if (closers[n].length !== 1) throw new Error(`L9_SHEET: W${n} is ${closers[n].length} cells; the push-forward handles one`);
+  }
+  const shut = (x, y, st) => { const t = tok(x, y);
+    if (t === '[]') return true;
+    if (t[0] === '|') return +t[1] < stN && +t[1] > st;      // a stage's door: shut until its stage
+    if (t[0] === 'W') return +t[1] <= st;                     // a closer: shut from its stage on
+    return false; };
+  const flood = (sx, sy, st) => { const seen = new Set([`${sx},${sy}`]), q = [[sx, sy]];
+    while (q.length) { const [x, y] = q.pop();
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nx = x + dx, ny = y + dy, k = `${nx},${ny}`;
+        if (!seen.has(k) && !shut(nx, ny, st)) { seen.add(k); q.push([nx, ny]); } } }
+    return seen; };
+  const rooms = [...Array(stN)].map((_, n) => n === 0 ? flood(...player, 0)
+    : (sk => flood(sk.x, sk.y, n))(socks.find(sk => sk.n === n)));
+  const roomOf = (x, y) => rooms.findIndex(R => R.has(`${x},${y}`));
+  // a sentry lives in ONE room, for that room's stage; its whole path must be in it and no other
+  for (const sn of sentries) {
+    const cells = [[sn.x, sn.y]]; let x = sn.x, y = sn.y;
+    for (const [dx, dy] of sn.dirs) { x += dx; y += dy; cells.push([x, y]); }
+    const inR = rooms.map(R => cells.some(([cx, cy]) => R.has(`${cx},${cy}`)));
+    sn.stage = inR.indexOf(true);
+    if (sn.stage < 0 || inR.filter(Boolean).length > 1 || !cells.every(([cx, cy]) => rooms[sn.stage].has(`${cx},${cy}`)))
+      throw new Error(`L9_SHEET: sentry ${sn.id} from (${sn.x},${sn.y}) runs through more than one room (${inR.map((v, i) => v ? i : '').join('')})`);
+    sn.cells = cells;
+  }
+  // each closer: its cell, and the cell AHEAD of it -- its neighbour in the room it seals you into
+  const close = [...Array(stN - 1)].map((_, k) => { const [wx, wy] = closers[k + 1][0];
+    const ahead = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => [wx + dx, wy + dy]).filter(([ax, ay]) => rooms[k + 1].has(`${ax},${ay}`));
+    if (ahead.length !== 1) throw new Error(`L9_SHEET: W${k + 1} at (${wx},${wy}) has ${ahead.length} neighbours in room ${k + 1}; it needs exactly one to push into`);
+    return { x: wx, y: wy, ax: ahead[0][0], ay: ahead[0][1] }; });
+  return { rows, player, exit, sentries, socks, orbs, angels, walls: [...walls, ...Object.keys(closers).sort().map(n => closers[n])],
+           nDoor: walls.length, sockWall: socks.map(sk => sk.n - 1), stN, rooms, roomOf, close, shut };
 })();
 const L9_MAP = L9.rows;
+// THE CAST, BY STAGE. Sentry slots 0..SV_MAX-1 are shared: in each stage they hold that room's
+// sentries, in sheet order, and the rest are hidden. ROLES are every sentry, stage 0's first and
+// padded to SV_MAX (so stage 0's role k is slot k, which is how objInit already places them), then
+// each later stage's in turn. Orbs and angels keep a slot each for the whole level: they appear when
+// the room they start in comes into play, and leave only by being left behind (see stGo).
+const L9_STAGES = (() => {
+  const byS = [...Array(L9.stN)].map((_, n) => L9.sentries.filter(sn => sn.stage === n));
+  const svMax = Math.max(1, ...byS.map(a => a.length));
+  const roles = [...byS[0], ...Array(svMax - byS[0].length).fill(null), ...byS.slice(1).flat()];
+  let r = svMax;
+  const slotRole = byS.slice(1).map(a => [...Array(svMax)].map((_, k) => k < a.length ? r++ : 0xff));
+  const firstOf = (x, y) => L9.rooms.findIndex(R => R.has(`${x},${y}`));
+  return { svMax, roles, slotRole, firstOf, byS };
+})();
 // LEVEL 2, the user's layout of 2026-09-18, fleshed out the same day: 16 x 16 = 256 cells.
 //   PP (2,2) in a 5x9 room with an orb alcove at (6,2) and (6,8); the socket at (6,5) IS the
 //   doorway into a 2x3 pocket whose far wall (8,5) goes when it is fed, freeing the angel (13,5)
@@ -655,7 +773,9 @@ const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
   const k = +(process.env.WALLOFF ?? 0);
   const g = rows.map(r => r.split(''));
-  if (k) for (const [x, y] of groups[k - 1]) g[y][x] = '.';
+  // groups[k-1] can be missing: every level's map is built in every sub-build (level 2's below), and
+  // WALLOFF names a group of the level BEING built -- level 9 v6 has five, level 2 three
+  if (k && groups[k - 1]) for (const [x, y] of groups[k - 1]) g[y][x] = '.';
   return g.map(r => r.join(''));
 };
 // LEVEL 5, the user's 14x14 (2026-09-18): "interesting rooms are about 1/4-1/3 the size of the
@@ -872,6 +992,10 @@ const cellOf = (x, y) => y * MAPW + x;
 // swapped per level); the asl chain it replaces was worth ~15 cycles a call at a few calls a
 // frame, and the DDA -- the one hot stride user -- steps by a variable it already loaded.
 const MULW  = '        jsr mulW';
+// orbProj's per-frame table of |cos| and |sin| multiples (oTmC) is indexed by a cell difference's
+// magnitude, so it needs one entry per cell of the widest or tallest map any level has.
+const MULN = 32;
+if (MAPW > MULN || MAPH > MULN) throw new Error(`level ${LVL} is ${MAPW}x${MAPH}; oTmC's table covers cell differences up to ${MULN - 1}`);
 const ADDX  = (x, c = '') => `        clc\n        adc ${x}${c}`;
 const cellX  = c => c % MAPW;
 const cellY  = c => (c / MAPW) | 0;
@@ -1175,6 +1299,9 @@ for (let c = 0; c < NLOG; c++) {
 // Requires FINEANG (for rayOffQS) and PLAN=3 (for the three table pages it frees; see the
 // emission site). Both are the defaults, so this is on unless something else is being tested.
 const PIVOT = +(process.env.PLAN ?? 3) === 3 && true;
+// PIVNEAR (default on; PIVNEAR=0 off): a bracket that misses tries its two neighbours before the
+// search falls back to bisection -- see pivLp.
+const PIVNEAR = process.env.PIVNEAR !== '0';
 // The translation term was justified by an A/B against the rotation-only prediction (PIVTRANS=0,
 // since removed) -- the only way to tell a WORKING translation term from a broken one, since a
 // broken one cannot corrupt the image (extra cuts only split spans) and shows up purely as lost rays.
@@ -3453,6 +3580,25 @@ const LEVEL_START = {
   8: [0x0180, 0x0580, 0x00, 0x00],   // (1.5, 5.5), the west avenue, facing east down the middle hall
   9: [0x0180, 0x0500, 0x00, 0x00],   // the sentry test's two PPs, (1,4) and (1,5): ON the line between them, (1.5, 5.0), facing east
 };
+// ---- STAGE=n (level 9, for testing): start as though sockets 1..n had just been fed ----
+// The user, 2026-10-14: "drop me at the beginning of the second section". The player stands in stage
+// n's doorway -- of its door's cells, the one farthest from any angel -- facing away from the socket.
+// objInit's level code (lxIn) then feeds the sockets itself, so a death restart lands here again.
+const STAGE = +(process.env.STAGE ?? 0);
+// NOSHOCK=1 (testing, the user 2026-10-14: "turn off all shock death so I can go check out fps"):
+// a sentry's touch charges as usual but never kills -- see svChg.
+const NOSHOCK = process.env.NOSHOCK === '1';
+// NOSV=1 (testing, the user 2026-10-14: "disable entities (sentries)" to look at fps without them):
+// every sentry slot starts and stays hidden -- no glide, no gate, no drawing.
+const NOSV = process.env.NOSV === '1';
+if (STAGE) {
+  if (!(STAGE > 0 && STAGE < L9.stN)) throw new Error(`STAGE=${STAGE}: level 9 has stages 1..${L9.stN - 1}`);
+  const sk = L9.socks.find(k => k.n === STAGE), door = L9.walls[STAGE - 1];
+  const far = ([x, y]) => Math.min(...L9.angels.map(([ax, ay]) => Math.abs(ax - x) + Math.abs(ay - y)), 99);
+  const [dx, dy] = [...door].sort((a, b) => far(b) - far(a))[0];
+  const ang = dx > sk.x ? 0x00 : dx < sk.x ? 0x80 : dy > sk.y ? 0x40 : 0xc0;
+  LEVEL_START[9] = [dx * 256 + 0x80, dy * 256 + 0x80, ang, 0x00];
+}
 const ST0 = LEVEL_START[LVL] ?? LEVEL_START[1];
 const startOf = n => n === LVL ? [PX, PY, PA, PAF] : (LEVEL_START[n] ?? LEVEL_START[1]);
 // ---- every declared cell must be an OPEN cell of its OWN level's map ----
@@ -3468,7 +3614,9 @@ for (const n of ALLLVL) {
                             ['idol', LEVEL_IDOL[n]]]) {
     if (!xy) continue;
     const cx = Math.floor(xy[0]), cy = Math.floor(xy[1]);
-    const ok = cy >= 0 && cy < m.length && cx >= 0 && cx < m[cy].length && m[cy][cx] !== '#';
+    const ok = cy >= 0 && cy < m.length && cx >= 0 && cx < m[cy].length && (m[cy][cx] !== '#'
+      // STAGE=n starts in a doorway, which is a wall in the map until lxIn opens it
+      || (STAGE && what === 'start' && (LEVEL_WALLS[n]?.walls ?? []).flat().some(([x, y]) => x === cx && y === cy)));
     if (!ok) throw new Error(`level ${n}'s ${what} is at cell (${cx},${cy}), which is ` +
       (cy >= m.length || cx >= (m[0]?.length ?? 0) ? `outside its ${m[0]?.length}x${m.length} map`
                                                    : 'a solid wall'));
@@ -3644,6 +3792,35 @@ const BNDCNT = flag('BNDCNT');
 // MARCHCNT=1: marches by SITE -- pivot hint brackets (pivCut) vs bisection midpoints (subMid) --
 // plus hints per frame, so the pivot's residue (what bisection still has to find) is measured.
 const MARCHCNT = flag('MARCHCNT');
+// PIVLAB=1 (2026-10-15): the temporal pivot's own bench, read by tools/pivlab.mjs. The pivot had
+// only ever been judged by fps and a ray count at a few poses; this measures what it is FOR, per
+// kind of motion. A script of segments (PLS="n:keys,...", keys F B L R = walk/back/strafe, < > =
+// turn, . = still) runs one step per RENDERED frame with fixed ticks (PLDT="dtm,dtt"), so every
+// build sees the same frames. Per segment it records: marches, hints bracketed, boundaries found,
+// how far each bracket was from the nearest boundary actually found (0 = a hit), the cycles in the
+// whole cast and in pivPrep alone (CIA2's two timers chained into a free-running clock -- nothing
+// else in the engine uses them), ticks, and where the segment ended (so a shuttle that bumped
+// shows). plDone goes to 1 when the script is over.
+const PIVLAB = flag('PIVLAB');
+if (PIVLAB && process.env.NOSHOCK !== '1') throw new Error('PIVLAB keeps its records in the death picture: it needs NOSHOCK=1');
+const PLSEGS = PIVLAB ? (process.env.PLS ?? '4:.,12:.,16:<,16:>,10:F,10:B,8:L,16:R,8:L,16:F<,16:B>,16:L>,16:R<')
+  .split(',').map(s => { const [n, k] = s.split(':'); return { n: +n, k }; }) : [];
+const PLKEY = { F: 1, B: 2, L: 4, R: 8, '<': 16, '>': 32, '.': 0 };
+for (const s of PLSEGS) if (!(s.n >= 1 && s.n <= 255) || [...s.k].some(c => !(c in PLKEY)))
+  throw new Error(`PLS segment ${s.n}:${s.k}: n 1..255, keys from F B L R < > .`);
+if (PLSEGS.length > 15) throw new Error('PLS: at most 15 segments (16 records, the last is the spare)');
+const [PLDTM, PLDTT] = (process.env.PLDT ?? '4,8').split(',').map(Number);
+// the record: one 16-byte table per field, indexed by segment. h0..h3 = bracket-to-nearest-
+// boundary distance 0 / 1 / 2-4 / 5+ (or nothing found), and h4 = how many of the 1s were to
+// the bracket's RIGHT (the boundary one column further right than predicted); c = cast cycles,
+// v = pivOne's cycles.
+const PLF = ['mL', 'mH', 'pL', 'pH', 'bL', 'bH', 'h0L', 'h0H', 'h1L', 'h1H', 'h2L', 'h2H', 'h3L', 'h3H',
+  'cL', 'cM', 'cH', 'vL', 'vM', 'vH', 'tL', 'tH', 'fr', 'xL', 'xH', 'yL', 'yH', 'h4L', 'h4H',
+  'k1L', 'k1H', 'k2L', 'k2H', 'k3L', 'k3H'];
+// k2 = spans the search had to SPLIT because their two end faces differ; k1 = of those, the ones
+// whose two end rays hit the same wall LINE (a straight wall broken by an opening between them:
+// the case a seam-style projected split would serve); k3 = translation terms that rounded to 0
+const plo = f => PLF.indexOf(f) * 16;
 // FOVCHK=1: verify ENTFOV. The pre-cull only NOTES that it would have rejected, the full path
 // runs, and two counters say what happened: fovDis = orbProj accepted what the cull would have
 // dropped (the box tests may still throw it out), fovBad = it got a SPRITE. fovBad must be 0.
@@ -3659,7 +3836,9 @@ const FOVCHK = flag('FOVCHK');
 // LAZYCHK=1 (with OCCLAZYE): whenever orbOne is about to TRUST a mask as fresh, rebuild it anyway and
 // count every byte that differs (lzBad, must be 0) against the uses checked (lzN).
 const LAZYCHK = process.env.LAZYCHK === '1';
-const OCCLAZYE = !['1', '2', '3'].includes(process.env.OCCCHK ?? '');
+for (const f of ['OCCCHK', 'LAZYCHK', 'OCCSELF']) if (process.env[f])
+  throw new Error(`${f}: retired with the occluder masks (OCCFACE, 2026-10-14) -- occBy answers the facing rule when asked, so there is no cached mask to check`);
+const OCCLAZYE = false;
 // OCCCHK=1: verify the skip on the EAGER path. NOTE: setting it turns OCCLAZYE OFF, so it does not test
 // what ships -- LAZYCHK=1 does (2026-10-06: OCCCHK reported 58 stale bytes on level 2 that the shipping
 // lazy path never trusts; LAZYCHK found zero in 4,171 trusted masks). Kept for the eager path only.
@@ -4116,7 +4295,7 @@ if (MOVEINSET < 0 || MOVEINSET >= MOVEFOR && MOVEINSET) throw new Error(`MOVEINS
 if (MOVELEGS < 1 || MOVELEGS > 255) throw new Error(`MOVELEGS=${MOVELEGS}: 1..255`);
 if (MOVEAT < 0 || MOVEAT > 255 || MOVEFOR < 0 || MOVEFOR > 255 || !MOVEAT !== !MOVEFOR)
   throw new Error(`MOVEAT=${MOVEAT} MOVEFOR=${MOVEFOR}: both or neither, each 1..255 (frameCnt's low byte)`);
-const AUTOMOVE = SPINF ? 'spinFrm' : WALKF ? 'walkFrm' : SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
+const AUTOMOVE = PIVLAB ? 'plStep' : SPINF ? 'spinFrm' : WALKF ? 'walkFrm' : SPIN ? 'spinStep' : WALK ? 'moveFwd' : WALKB ? 'moveBack' : STRAFE ? 'strafeR' : STRAFEL ? 'strafeL' : null;
 
 // ---- VIC bank 0 memory layout ----
 // The double buffer flips between two 1KB screen matrices. Both are RAM the renderer
@@ -4330,6 +4509,9 @@ const SVNEAR = +(process.env.SVNEAR ?? 1);              // (the chaser's stoppin
 // (half width ~0.16, which cannot grow: the ladder tops out ~2.2 cells away): the orb owns its lane.
 // 0.24 (ball + an angel-wide player) was the first try, and too small.
 const SVHITR = +(process.env.SVHITR ?? 0.45);
+// svTouch skips the exact test unless the player's cell is within one of the sentry's, which is only
+// sound while a touch cannot reach further than that: the ball is inside its cell, so R must be <= 1.
+if (SVHITR > 1) throw new Error(`SVHITR=${SVHITR}: svTouch's near-cell early-out assumes a hit radius of at most one cell`);
 const SVHIT_R = Math.round(SVHITR * 256), SVHIT_D = Math.round(SVHITR * 256 * Math.SQRT2);
 if (HAS_SILVER && (SVHIT_R < 1 || SVHIT_D > 255)) throw new Error(`SVHITR=${SVHITR}: 0 < R and R * 1.41 under a cell (<= 0.70)`);
 // 60Hz ticks: the quiet between bursts (min, span -- level 8's FLK_GAP), and a burst's shortest
@@ -5249,8 +5431,11 @@ const ORBS = [];
   }
   else if (LVL === 8) ORBS.push({ x: 8.5, y: 5.5, c: 0 });   // v4: one orb, in the col-8 crossing
   else if (LVL === 9) {                          // the sentries, at their starts -- FIRST, see SVN --
-    for (const sn of L9.sentries) ORBS.push({ x: sn.x + 0.5, y: sn.y + 0.5, c: 0, silver: true });
-    for (const [x, y] of L9.orbs) ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });   // ...then the sheet's OO
+    // stage 0's sentries in the shared slots (a slot it does not fill starts hidden, on the first one's cell)
+    L9_STAGES.roles.slice(0, L9_STAGES.svMax).forEach(sn => { const at = sn ?? L9_STAGES.roles.find(Boolean);
+      ORBS.push({ x: at.x + 0.5, y: at.y + 0.5, c: 0, silver: true, hidden: !sn || NOSV }); });
+    // ...then the sheet's OO, each hidden until the stage of the room it lies in
+    for (const [x, y] of L9.orbs) ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, stage: L9_STAGES.firstOf(x, y), hidden: L9_STAGES.firstOf(x, y) > 0 });
   }
   else if (LVL === 1) {                          // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
@@ -5324,7 +5509,8 @@ const ORBS = [];
       ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 13.5, y: 9.5, c: 0, tall: true });
     }
-    else if (LVL === 9) { }                       // the sentries' level: no angels
+    else if (LVL === 9) for (const [x, y] of L9.angels)            // the sheet's AA, hidden until its room's stage
+      ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, tall: true, stage: L9_STAGES.firstOf(x, y), hidden: L9_STAGES.firstOf(x, y) > 0 });
     else if (LVL === 1) {                         // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
@@ -5411,7 +5597,7 @@ const WALLS_ALL = WALL_LVLS.flatMap(lv => LEVEL_WALLS[lv].walls.map((cells, k) =
 // NWALL is a DECLARED BUDGET, not a measurement over the known levels. That is the whole point:
 // the engine's wall tables must not change size when a level is added, so this is a promise the
 // engine makes and levels are checked against, rather than a number derived from them.
-const NWALL = +(process.env.NWALL ?? 4);
+const NWALL = +(process.env.NWALL ?? Math.max(4, ...LEVEL_IDS.map(n => LEVEL_WALLS[n]?.walls.length ?? 0)));   // at least 4; level 9 v6 has 5 (3 doors, 2 closers)
 // ---- NDOOM: how many cells one wall GROUP may hold ----
 // wallSink used to answer "is the cell this column struck one of the doomed group?" with
 // doomT -- a 256-byte page marking at most four cells. It is now an unrolled compare against
@@ -5426,7 +5612,7 @@ for (const lv of Object.keys(LEVEL_WALLS))
       `level ${lv}'s wall ${k} has ${g.length} cells and the engine's budget is NDOOM=${NDOOM}. ` +
       `Raise NDOOM -- it costs 5 cycles per screen column per frame of a collapse, so about ` +
       `800 cycles a frame for each extra cell -- or split the group into two walls.`);
-for (const lv of Object.keys(LEVEL_WALLS))
+for (const lv of Object.keys(LEVEL_WALLS).filter(n => LEVEL_IDS.includes(+n)))   // the levels this engine is built for
   if (LEVEL_WALLS[lv].walls.length > NWALL) throw new Error(
     `level ${lv} has ${LEVEL_WALLS[lv].walls.length} removable walls and the engine's budget is ` +
     `NWALL=${NWALL}. Raise NWALL (costs ${4} bytes per level in the blob per wall, and ` +
@@ -5887,6 +6073,7 @@ Object.assign(RUNTIME_BUFS, {
   // assumes -- bndT by span index (< NBND), faceIdT/remLoT by logical column, the six caches by
   // the 40 character columns of the screen.
   bndT: NBND, faceIdT: NLOG, remLoT: NLOG,
+  svSlT: 8, svLSlT: 8, ...(HAS_SILVER ? { angSlFT: NORB } : {}),   // the sentries' per-slot state: SV_MAX each
   cwA: 40, cwB: 40, cbA: 40, cbB: 40, cstepT: 40, seamT: 40,
   // The renderer's per-column scratch. These were the tool's own blind spot: 1,024 bytes counted
   // as five, which flattered a packing report by four pages. sideT/idT/colH are 160 entries on a
@@ -6003,8 +6190,11 @@ if (process.env.LEVELSHEET === '1') {
 const CELLBYTES = Math.ceil(MAPN / 8);
 if (CELLBYTES > 32) throw new Error(
   `${MAPN} cells needs ${CELLBYTES} bytes of bitmap, but holeOne and the fall bake x32`);
+// A DOOR may be leashed (level 9's |1): it is a wall until its socket is fed, and the leash is what
+// keeps the angel out once it is not. anTry reads the list whatever the map says.
 for (const [lx, ly] of LEASH_AT)
-  if (map[cellOf(lx, ly)] !== 0) throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
+  if (map[cellOf(lx, ly)] !== 0 && !WALLS.flat().some(([wx, wy]) => wx === lx && wy === ly))
+    throw new Error(`leash cell (${lx},${ly}) is inside a wall`);
 // ---- the leash is a SPARSE LIST, not a bitmap (2026-09-30) ----
 // It was one bit per cell per entity slot -- NORB x 32 bytes -- which is up to 160 bytes to say
 // that two cells are off limits to one angel on one level. Measured across levels 1-7: an
@@ -8143,19 +8333,56 @@ const SILV_PD = [0, SILV_PER, ((OVLBASE - SVBASE) >> 6) & 255, ((OVLBASE + SILV_
 if (HAS_SILVER && SVBASE + SVBM.length * 64 > 0xe000) throw new Error(`the sentry's frames 0-1 run to ${hx16(SVBASE + SVBM.length * 64)}, past the I/O hole`);
 if (HAS_SILVER && OVLBASE + SVART.length * 64 > 0xfe00) throw new Error(`the sentry's frames 2-3 run past $fe00 (COLH) from OVLBASE`);
 // The sentries are entities 0..SVN-1 of their level, in the sheet's order, and their paths one flat
-// table of direction codes (1..4 = +x -x +y -y, slTick's encoding). PER LEVEL: svNT, svBegT, svEndT
+// table of direction codes (1..4 = +x -x +y -y, slTick's encoding). PER LEVEL: svNT, svP0T, svRXT/svRYT and the stage tables
 // and svPathT ride in the level file; the engine keeps only the state, SV_MAX of each.
-const SV_MAX = 8;
-const SENTRIES = LVL === 9 ? L9.sentries : [];
+const SV_MAX = Math.max(8, HAS_SILVER ? L9_STAGES.svMax : 0);   // SLOTS: v6 has 19 sentries in 8
+// ROLES: every sentry the level has -- stage 0's in the slots, then each later stage's (L9_STAGES).
+// A null role is a slot stage 0 leaves empty.
+const SENTRIES = LVL === 9 ? L9_STAGES.roles : [];
+const STN = LVL === 9 ? L9.stN : 1;          // stages: 1 = the level is one room
+const STN_MAX = HAS_SILVER ? L9.stN : 1;
+// ---- LEVEL CODE (the per-level code plan, docs/SPACE.md; built 2026-10-14) ----
+// FEATURES whose code loads with the levels that use them, and the vectors each one answers. A
+// level's module is the features it uses, behind a jump table in LX_VECS order; a vector none of
+// them answers goes to an rts in the module. Two features answering one vector is not supported yet.
+const LX_FEATURES = {
+  silver:  { on: n => !!LEVEL_SILVER[n],  vecs: { lxTick: 'svTick', lxStep: 'svStep', lxInit: 'lxIn', lxSock: 'stGo', lxWr: 'svWr' } },
+  flicker: { on: n => !!LEVEL_FLICKER[n], vecs: { lxTick: 'flkTick', ...(FLKINK ? { lxLook: 'fkEmpty' } : {}) } },
+};
+const LX_FEAT_OF = n => Object.keys(LX_FEATURES).filter(f => LX_FEATURES[f].on(n));
+const LX_OF = n => LX_FEAT_OF(n).length > 0;
+const HAS_LX = LEVEL_IDS.some(LX_OF);
+// the vectors this build needs, the IRQ's first (lxOff stubs in this order, lxOn points in reverse)
+const LX_VECS = ['lxTick', 'lxStep', 'lxInit', 'lxSock', 'lxWr', 'lxLook']
+  .filter(v => LEVEL_IDS.some(n => LX_FEAT_OF(n).some(f => LX_FEATURES[f].vecs[v])));
+for (const n of LEVEL_IDS) for (const v of LX_VECS)
+  if (LX_FEAT_OF(n).filter(f => LX_FEATURES[f].vecs[v]).length > 1) throw new Error(`level ${n}: two level-code features answer ${v}`);
+if (STN_MAX > 1 && SV_MAX !== 8) throw new Error(`stGo indexes stSvT by stage x 8 (three asl); SV_MAX is ${SV_MAX}`);
 const SVN = ORBS.filter(o => o.silver).length;
 if (SVN > SV_MAX) throw new Error(`level ${LVL} has ${SVN} sentries; the engine keeps state for ${SV_MAX}`);
 if (ORBS.some((o, i) => !!o.silver !== i < SVN)) throw new Error(`level ${LVL}: the sentries must be its FIRST entities -- every per-sentry test is "index < svN"`);
 if (SVN && !HAS_SILVER) throw new Error(`level ${LVL} has sentries but no level in LEVEL_SILVER says so`);
 const SV_DCODE = d => d[0] === 1 ? 1 : d[0] === -1 ? 2 : d[1] === 1 ? 3 : 4;
-const SV_PATH = SENTRIES.flatMap(sn => sn.dirs.map(SV_DCODE));
-const SV_BEG = SENTRIES.map((_, i) => SENTRIES.slice(0, i).reduce((n, sn) => n + sn.dirs.length, 0));
-const SV_END = SV_BEG.map((b, i) => b + SENTRIES[i].dirs.length);
+// ONE COPY OF EACH PATH. A path is only directions, so every sentry whose steps are a rotation of
+// one already stored shares it, starting part-way round (svP0T): the four on loop 1 and the four
+// on loop 2 (both clockwise 4x4) are all one 12-step path, and the three lanes one 4-step path.
+// Each path ENDS IN A MARKER, minus its length (256 - n): reaching it, a sentry adds it to its
+// position and is back at the first step -- so a role needs only where it starts, not a span.
+const SV_PATH = [], SV_BEG = [], SV_END = [], SV_P0 = [];
+for (const sn of SENTRIES) {
+  if (!sn) { SV_BEG.push(0); SV_END.push(0); SV_P0.push(0); continue; }   // an empty stage-0 slot
+  const codes = sn.dirs.map(SV_DCODE), n = codes.length;
+  let hit = null;
+  for (let i = 0; i < SV_BEG.length && !hit; i++) {
+    if (SV_END[i] - SV_BEG[i] !== n) continue;
+    const st = SV_PATH.slice(SV_BEG[i], SV_END[i]);
+    for (let k = 0; k < n && !hit; k++) if (codes.every((c, j) => st[(k + j) % n] === c)) hit = [SV_BEG[i], k];
+  }
+  if (!hit) { hit = [SV_PATH.length, 0]; SV_PATH.push(...codes, 256 - n); }
+  SV_BEG.push(hit[0]); SV_END.push(hit[0] + n); SV_P0.push(hit[0] + hit[1]);
+}
 if (SV_PATH.length > 255) throw new Error(`the sentries' paths are ${SV_PATH.length} steps; svPosT is a byte`);
+if (SENTRIES.some(sn => sn && sn.dirs.length > 127)) throw new Error('a sentry path over 127 steps: its end marker would read as a step');
 // ---- THE LEVEL ART SETS: what can occupy OVLBASE, and which one each level needs ----
 // Set 0 is the pedestal and the idol, set 1 the sentry's frames 2 and 3. A level that uses neither
 // says so (-1) and keeps whatever is there, so walking 1 -> 2 -> 3 loads nothing extra. The idol is
@@ -8168,7 +8395,8 @@ if (HAS_SILVER && ART_SETS[0].length && ALLLVL.some(n => LEVEL_SILVER[n] && (LEV
   throw new Error('a level with sentries cannot also have an idol or a pedestal: their art shares OVLBASE');
 // ART_OF(BOOTLVL) of -1 boots set 0 (the disk loads it); artCur says which is in place from then on.
 const ART_BOOT = Math.max(0, ART_OF(BOOTLVL));
-if (SVN) console.error(`  sentries: ${SENTRIES.map(sn => `${sn.id} from (${sn.x},${sn.y}), a ${sn.dirs.length}-cell loop`).join('; ')}`);
+if (SVN) console.error(`  sentries: ${SENTRIES.filter(Boolean).length} in ${SVN} slots over ${STN} stage(s) (${L9_STAGES.byS.map(a => a.length).join('/')}), ` +
+  `${SV_PATH.length} path steps: ${SENTRIES.filter(Boolean).map(sn => `${sn.id}@(${sn.x},${sn.y})s${sn.stage}`).join(' ')}`);
 // ---- and here, at last, is where the orb ladder's tail lands (see ORBHI_N) ----
 // Straight after the idol, which is straight after the exit ladder -- so this is simply "the end
 // of the IHOL file", and appending to that file is all the placement there is.
@@ -9166,6 +9394,23 @@ const ZN_BUILD = (() => {
     const [qx, qy] = process.env.ZNDUMP.split(',').map(Number);
     if (!isNaN(qy)) console.error(`  ZN visible from (${qx},${qy}): mask $${mask[cellOf(qx, qy)].toString(16)}`);
   }
+  // ---- THE STAGES MUST BE UNSEEABLE FROM EACH OTHER ----
+  // A stage's sentries appear the moment its socket is fed and the last stage's vanish, so from any
+  // cell of a room, in THAT stage's walls, no other stage's sentry path may be in view -- else one
+  // would be seen to pop. Rooms are sealed by walls, so this is a check, not a design tool: it only
+  // fails on a sightline through a gap the flood fill cannot see (a corner, say).
+  if (STN > 1) {
+    const S3 = [0.02, 0.5, 0.98];
+    for (let st = 0; st < STN; st++) {
+      const wallAt = (x, y) => !inMap(x, y) || L9.shut(x, y, st);
+      const others = SENTRIES.filter(sn => sn && sn.stage !== st).flatMap(sn => sn.cells);
+      for (const key of L9.rooms[st]) { const [px_, py_] = key.split(',').map(Number);
+        for (const [ex, ey] of others) for (const ax of S3) for (const ay of S3) for (const bx of S3) for (const by of S3)
+          if (losClear(px_ + ax, py_ + ay, ex + bx, ey + by, wallAt))
+            throw new Error(`level ${LVL}: from (${px_},${py_}) in stage ${st}, another stage's sentry path at (${ex},${ey}) is in view`); }
+    }
+    console.error(`  stages: ${STN} rooms of ${L9.rooms.map(R => R.size).join('/')} cells, sealed from each other's sentries`);
+  }
   return { enc, zoneT, hmask, zones: Z.length, cells: cells.length, bad, n };
 })();
 console.error(`  ZONES level ${LVL}: ${ZN_BUILD.zones} zones over ${ZN_BUILD.cells} cells; hole masks ${ZN_BUILD.hmask.map(m => '$' + m.toString(16)).join(' ')}; ` +
@@ -9283,7 +9528,30 @@ const LVL_TABLES = [
   ['lvlStartT', startBytes(LVL)],   // px lo/hi, py lo/hi, pa, paF -- see startBytes
   // ---- THE SENTRIES, in a build that has them: the count, each one's span of svPathT, the paths ----
   // svPathT is padded to the longest any level carries, like every fixed-length table.
-  ...(HAS_SILVER ? [['svNT', [SVN]], ['svBegT', pad(SV_BEG, SV_MAX)], ['svEndT', pad(SV_END, SV_MAX)],
+  // Per ROLE: its starting point in svPathT, and (past stage 0's, which objInit places from orbX0T)
+  // its start cell. THE STAGES: per socket, the stage it begins (0 = none); per stage past the first,
+  // the wall it closes, that wall's cell and the cell ahead (stGo pushes into it), the role each
+  // sentry slot takes ($ff = hidden), and a bit per cell of its ROOM -- an orb or an angel outside it
+  // when the stage begins is left behind. Per other slot: the stage it appears in.
+  ...(HAS_LX ? [['lvlLxT', [LX_OF(LVL) ? 1 : 0]]] : []),   // 1 = this level brings code (LX_FEATURES)
+  ...(HAS_SILVER ? [['svNT', [SVN]],
+                    ['svP0T', pad(SV_P0, Math.max(1, lvlMax(l => l.tables?.svP0T?.length ?? 0, SV_P0.length)))],
+                    ['svRXT', (a => pad(a, Math.max(1, lvlMax(l => l.tables?.svRXT?.length ?? 0, a.length))))(SENTRIES.slice(SV_MAX).map(sn => sn.x))],
+                    ['svRYT', (a => pad(a, Math.max(1, lvlMax(l => l.tables?.svRYT?.length ?? 0, a.length))))(SENTRIES.slice(SV_MAX).map(sn => sn.y))],
+                    ['stNT', [STN]],
+
+                    ['sockStgT', pad(LVL === 9 ? L9.socks.map(sk => sk.n < STN ? sk.n : 0) : [], Math.max(1, NSOCK))],
+                    ...(STN_MAX > 1 ? [
+                    ['stWT', pad(LVL === 9 ? L9.close.map((_, k) => L9.nDoor + k) : [], STN_MAX - 1)],
+                    ['stWXT', pad(LVL === 9 ? L9.close.map(c => c.x) : [], STN_MAX - 1)],
+                    ['stWYT', pad(LVL === 9 ? L9.close.map(c => c.y) : [], STN_MAX - 1)],
+                    ['stWAXT', pad(LVL === 9 ? L9.close.map(c => c.ax) : [], STN_MAX - 1)],
+                    ['stWAYT', pad(LVL === 9 ? L9.close.map(c => c.ay) : [], STN_MAX - 1)],
+                    ['stSvT', pad(LVL === 9 ? L9_STAGES.slotRole.flat() : [], (STN_MAX - 1) * SV_MAX, 0xff)],
+                    ['stRmT', pad(LVL === 9 ? L9.rooms.slice(1).flatMap(R => [...Array(Math.ceil(MAPN / 8))].map((_, b) =>
+                      [...Array(8)].reduce((m, _, k) => { const c = b * 8 + k; return m | (c < MAPN && R.has(`${cellX(c)},${cellY(c)}`) ? 1 << k : 0); }, 0))) : [],
+                      (STN_MAX - 1) * 32)],
+                    ['stFstT', pad(ORBS.slice(SV_MAX).map(o => o.stage ?? 0), Math.max(1, NORB - SV_MAX))]] : []),
                     ['svPathT', pad(SV_PATH, Math.max(1, lvlMax(l => l.tables?.svPathT?.length ?? 0, SV_PATH.length)))],
                     // which LEVEL ART set it needs at OVLBASE, as the file name's last character
                     // ('0' or '1', IAR0/IAR1), 0 for either -- see ART_SETS and lvlArt
@@ -9434,6 +9702,12 @@ for (const [n, a] of LVL_TABLES) {
 // image simply has a hole where the level used to be -- and every reference still resolves.
 const slotEquates = () => LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n]))
   .map(n => `${n} = ${hx16(SLOT_AT + SLOT_OFF[n])}`).join('\n');
+// ...and their NAMES, for compaction: it must leave exactly these where the level files land, and
+// rehome every other RAM equate. It used to tell them apart by ADDRESS (inside the reserve or not),
+// which held only while no hand-placed buffer happened to sit there -- the level-code block grew the
+// reserve over runPlaneT's $6d00, compaction left it in place, and mkRuns wrote over level 8's
+// flicker code (2026-10-14).
+writeFileSync('./build/iray.slotnames.json', JSON.stringify(LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n]))));
 // Every per-level DEFINITION in the source goes through this, so SOLO can delete it in one place.
 // The label survives as an equate; only the bytes go. Written as (name, body, sep) rather than
 // wrapping each site in a nested template literal, because a backtick inside this file's one big
@@ -9649,6 +9923,12 @@ wallPtrs();
 // HERE because the wall lists are only sized now, and against the TOP OF THE BANK rather than a
 // slot size -- there is no fixed slot count any more, the region is as long as the chain is.
 const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBLOB_MAX) + SOLO_WALL_LEN;
+// LEVEL CODE lands straight after the region the level DATA can use, at a fixed address every module
+// is linked for: a level file that brings code is its tables, its wall lists, zeros up to LXAT, then
+// the code. The vectors, in this order, are what the engine calls; a module's jump table matches it.
+const LXAT = LVLREGION_END;
+const LX_BOOT = LX_OF(BOOTLVL);
+if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: svKey went with the level code, and RETURN is dieKey');
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
@@ -9664,6 +9944,8 @@ if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
 // and since slots are page-aligned, that is what decided whether a 160-byte buffer fitted beside
 // them. Nothing reads RUNTIME_BUFS' slot sizes before this point (reserveOf runs at the end).
 
+// LVLSIZES=1 (diagnostic): the live level's tables, largest first -- where a level file's bytes go
+if (process.env.LVLSIZES) console.error('  LVLSIZES ' + LVL_TABLES.map(([n, a]) => [n, a.length]).sort((a, b) => b[1] - a[1]).map(([n, l]) => `${n} ${l}`).join(', '));
 console.error(`level region: ${LVLBLOB_MAX} bytes of tables (live ${LVLBLOB}, saved `
   + `${ALLBLOBS.reduce((t, L) => t + LVLBLOB_MAX - blobOf(L), 0)} across ${ALLBLOBS.length} levels by `
   + `natural sizing) + ${SOLO_WALL_LEN} of wall ` +
@@ -10094,7 +10376,6 @@ pvPH    = $800e
 pvPB    = $800f
 pvSgn   = $8010                 ; sign of the term, carried around the unsigned multiply
 pvI2    = $8011                 ; the hint index, saved across mul8 (which needs X)
-pvYs    = $8012                 ; the bearing, saved across the first multiply
 pvMode  = $802a                 ; 0 = predict in full, 1 = turned in place (the translation
                                 ;   term is identically zero), 2 = nothing moved at all.
                                 ; NOT beside pvYs: $cb13-$cb29 were claimed by the RAYCNT
@@ -10292,7 +10573,7 @@ bfsN    = $855b
 hlFill  = $85dc                  ; the fill ink of the hole-like entity being projected
 hlKind  = $85dd                  ; which ladder holeTail is currently patched for
 hoI     = $85de                  ; holeOne's loop: which hole-like entity
-ooCX    = $8511                  ; orbOcc1: the cell the entity is being tested from
+ooCX    = $8511                  ; occBy: the cell the entity is being tested from
 ooAI    = $858c                  ; orbOccAll's loop counter -- orbOcc1 clobbers X
 ooCY    = $8516                  ; buffered $d01c. STALE: the held object was a hi-res icon once;
                                  ;   it is the full multicolor sprite now, so this is $ff always
@@ -10842,18 +11123,7 @@ ${DIETEST && DIE ? `        lda #${hx(ORBS.findIndex(o => o.tall) + 1)}
         lda #${hx(PA)}          ;   the angel instead of dying to it.
         sta markPa              ; the 30-degree trigger measures from the heading you start on
 ` : ''}
-${process.env.OCCSELF ? `
-        lda nOrbT
-        beq ooSlfD
-        ldx nOrbM1T             ; OCCSELF=1: rebuild every mask at boot from orbOcc1 and
-ooSlf:  txa                     ;   leave the result. Nothing has moved yet, so the table it
-        pha                     ;   produces must equal the one the build emitted -- which is
-        jsr orbOcc1             ;   the whole test
-        pla
-        tax
-        dex
-        bpl ooSlf
-ooSlfD:` : ''}
+
         lda #${hx(SCR_A >> 8)}
         sta baseHi
         lda #$00
@@ -10968,7 +11238,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         cli
 
 mloop:
-${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : HAS_SILVER ? '        jsr svKey               ; RETURN restarts, at any time (a DIE=0 build has no dieKey)\n' : ''}        jsr tickDelta
+${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
 pdInL:  ldx #$01
 pdInM:  dex
@@ -11029,8 +11299,8 @@ ${FALLMID ? '' : `        sta bgOn                ; the player's own frame is ne
 `}        sta rsLo
         lda #39
         sta rsHi
-        jsr rayAll              ; the cast is a SUBROUTINE now, so the fall can run it too --
-        jmp subFin              ;   in slices, into a buffer, while the animation keeps moving
+${PIVLAB ? '        jsr plCs0\n' : ''}        jsr rayAll              ; the cast is a SUBROUTINE now, so the fall can run it too --
+${PIVLAB ? '        jsr plCs1\n' : ''}        jmp subFin              ;   in slices, into a buffer, while the animation keeps moving
 ${FALLMID ? '' : `rayCont:jmp subLp               ; resume a capped cast: everything it needs is still in RAM
 `}rayAll:
 ` : ''}
@@ -11161,8 +11431,12 @@ subFace:lda spanR
         sec
         sbc spanL
         cmp #$02
-        bcs subMid              ; still wide -> split further
-${BNDCNT ? `${PROFILE ? '        lda pfDone              ; BNDCNT: stop with the profiler, so the two share a window\n        bne bcSkip\n' : ''}        inc bcN                 ; a boundary was pinned between spanL and spanR
+${PIVLAB ? `        bcc sfNar
+        jsr plCop               ; PIVLAB: is this a same-wall-line split?
+        jmp subMid
+sfNar:
+` : `        bcs subMid              ; still wide -> split further
+`}${BNDCNT ? `${PROFILE ? '        lda pfDone              ; BNDCNT: stop with the profiler, so the two share a window\n        bne bcSkip\n' : ''}        inc bcN                 ; a boundary was pinned between spanL and spanR
         bne bcN1
         inc bcN+1
 bcN1:   ldx spanL               ; ...and do the two faces meet at the same height there?
@@ -11482,7 +11756,9 @@ ${PIVOT ? `
 ;
 ; With pvN = 0 -- first frame, or PIVOT off -- it degenerates to exactly the old seeding.
 pivPrep:
-        ; ---- rotation, quarter-units: (pa:paF - opa) >> 6 ----
+${PIVLAB ? '        lda #$00\n        sta plPN                ; PIVLAB: this frame\'s brackets, listed as they are cut\n' : ''}${process.env.PIVCOLD ? `        lda #$00                ; PIVCOLD=1 (diagnostic): no hints, ever -- every frame is a cold
+        sta pvN                 ;   subdivision, to measure what the temporal pivot buys (or costs)
+` : ''}        ; ---- rotation, quarter-units: (pa:paF - opa) >> 6 ----
         lda paF
         sec
         sbc opaL
@@ -11505,6 +11781,7 @@ pivPrep:
         sbc opxH
         sta pvTH
         jsr pvClmp
+        jsr pvC63
         sta pvDX
         lda py
         sec
@@ -11514,9 +11791,13 @@ pivPrep:
         sbc opyH
         sta pvTH
         jsr pvClmp
+        jsr pvC63
         sta pvDY
-        ; ---- how much of the prediction does this frame actually need? ----
-        ; pivOne is 890 cycles a hint -- measured, 11% of the worst frame at nine hints -- and
+${process.env.PIVNOTR ? `        lda #$00                ; PIVNOTR=1 (diagnostic): predict rotation only, even when the
+        sta pvDX                ;   camera moved -- the A/B that tells a working translation term
+        sta pvDY                ;   from a broken one (it can only ever cost rays, never pixels)
+` : ''}        ; ---- how much of the prediction does this frame actually need? ----
+        ; pivOne was 890 cycles a hint (now ~700, see pv1All) -- 11% of the worst frame at nine hints -- and
         ; almost all of it is the translation term: two signed multiplies for the displacement
         ; and a third for the reciprocal. When the camera has not translated that term is
         ; identically zero, so the whole chain computes a very expensive nothing. Turning on
@@ -11527,6 +11808,7 @@ pivPrep:
         lda pvDX
         ora pvDY
         bne pvMDn               ; the camera moved: the full prediction earns its cycles
+
         inc pvMode
         lda dqa
         bne pvMDn
@@ -11573,14 +11855,81 @@ mcH1:
         beq pivEnd
         dex
         stx pvI
-${PROFSUB ? '        jsr pfT14\n        ldx pvI\n' : ''}        jsr pivOne              ; A = where hint X is predicted to be now
-${PROFSUB ? '        pha                     ; pfTick clobbers A, and A is the predicted column\n        jsr pfT13              ; pivOne: the per-hint prediction arithmetic\n        pla\n' : ''}        cmp pvLast
+${PROFSUB ? '        jsr pfT14\n        ldx pvI\n' : ''}${PIVLAB ? '        jsr plPv0               ; PIVLAB: time the arithmetic alone (X survives)\n' : ''}        jsr pivOne              ; A = where hint X is predicted to be now
+${PIVLAB ? '        jsr plPv1\n' : ''}${PROFSUB ? '        pha                     ; pfTick clobbers A, and A is the predicted column\n        jsr pfT13              ; pivOne: the per-hint prediction arithmetic\n        pla\n' : ''}        cmp pvLast
         beq pivNx               ; predictions must come out strictly increasing, or the spans
         bcc pivNx               ; would overlap and the stack would describe nonsense. Rotation
         cmp #${hx(NLOG - 1)}    ; is monotonic but the per-boundary translation term is not, so
         bcs pivNx               ; anything out of order is simply dropped -- it costs one
         pha                     ; unpredicted boundary, not a wrong image.
-        jsr pivCut
+${PIVLAB ? '        ldx plPN                ; PIVLAB: remember the bracket\n        sta plPrd,x\n        inc plPN\n' : ''}${PIVNEAR ? `        pla
+        ; ---- PIVNEAR: march the bracket, and if it missed, its two neighbours ----
+        ; A boundary is only known to lie BETWEEN two marched columns, so where it lands after
+        ; any motion that is not a whole number of columns is ambiguous by one column either way
+        ; -- tools/pivlab.mjs measured the misses as almost all exactly 1 off, evenly split
+        ; left and right. Left to the search, a miss costs the bisection of the neighbouring
+        ; span from its MIDDLE, ~4 extra rays to find a boundary sitting right next to the
+        ; bracket. Looking next door first costs 1 or 2. So march first and push afterwards,
+        ; in ascending order, every column marched (a marched column is a free cut).
+        sta pvP
+        lda #$00
+        sta pvNb                ; bit 0: p-1 was marched, bit 1: p+2 was
+        lda pvP
+        jsr pivMrc
+        lda pvP
+        clc
+        adc #$01
+        cmp #${hx(NLOG - 1)}
+        bcs pnCmp               ; p+1 is the right edge, marched already
+        jsr pivMrc
+pnCmp:  ldx pvP
+        lda faceIdT,x
+        cmp faceIdT+1,x
+        bne pnPush              ; caught
+        dex                     ; missed: p-1, if it is right of the last cut
+        cpx pvLast
+        beq pnR
+        bcc pnR
+        txa
+        jsr pivMrc
+        inc pvNb
+        ldx pvP
+        lda faceIdT-1,x
+        cmp faceIdT,x
+        bne pnPush              ; it was one column left
+pnR:    lda pvP                 ; ...then p+2, if it is short of the right edge
+        clc
+        adc #$02
+        cmp #${hx(NLOG - 1)}
+        bcs pnPush
+        jsr pivMrc
+        lda pvNb
+        ora #$02
+        sta pvNb
+pnPush: lsr pvNb
+        bcc pnP1
+        ldx pvP
+        dex
+        txa
+        jsr pivPush
+pnP1:   lda pvP
+        jsr pivPush
+        lda pvP
+        clc
+        adc #$01
+        cmp #${hx(NLOG - 1)}
+        bcs pivNx
+        jsr pivPush
+        lsr pvNb
+        bcc pivNx
+        lda pvP
+        clc
+        adc #$02
+        jsr pivPush
+pivNx:  jmp pivLp               ; pvI was decremented at the top; 0 ends the walk
+pvP:    !byte 0                 ; PIVNEAR: this hint's predicted column
+pvNb:   !byte 0                 ;   ...and which neighbours were marched
+` : `        jsr pivCut
         pla
         clc
         adc #$01
@@ -11588,7 +11937,7 @@ ${PROFSUB ? '        pha                     ; pfTick clobbers A, and A is the p
         bcs pivNx
         jsr pivCut
 pivNx:  jmp pivLp               ; pvI was decremented at the top; 0 ends the walk
-pivEnd: lda #${hx(NLOG - 1)}    ; the last span always runs to the right edge
+`}pivEnd: lda #${hx(NLOG - 1)}    ; the last span always runs to the right edge
         jsr pivPush
         lda #$00
         sta pvN                 ; this frame records its own boundaries from scratch
@@ -11596,13 +11945,18 @@ pivEnd: lda #${hx(NLOG - 1)}    ; the last span always runs to the right edge
 
 ; march column A, then push the span (pvLast, A) and make A the new pvLast
 pivCut: pha
-        sta col
+        jsr pivMrc
+        pla
+        jmp pivPush
+; march column A
+pivMrc: sta col
 ${MARCHCNT ? `${PROFILE ? '        lda pfDone\n        bne mcP1\n' : ''}        inc mcPiv
         bne mcP1
         inc mcPiv+1
 mcP1:
 ` : ''}${PROFSUB ? '        jsr pfT14\n' : ''}        jsr marchCol
-${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}        pla
+${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}        rts
+; push the span (pvLast, A) and make A the new pvLast
 pivPush:ldx sp
         pha
         lda pvLast
@@ -11613,6 +11967,18 @@ pivPush:ldx sp
         inx
         stx sp
         rts
+
+; pvC63: signed A -> clamped to +-63, so the term's quarter-square sums fit a signed byte (pv1All)
+pvC63:  cmp #$80
+        bcs pc63n
+        cmp #$40
+        bcc pc63d
+        lda #$3f
+        rts
+pc63n:  cmp #$c1
+        bcs pc63d
+        lda #$c1
+pc63d:  rts
 
 ; pvClmp: signed 16-bit pvTL/pvTH -> A, saturating to -128..127 rather than wrapping. A wrap
 ; here would turn a large forward step into a large BACKWARD prediction, which is worse than
@@ -11652,8 +12018,80 @@ pivOne: stx pvI2
 pv1Sti: lda pvBnd,x             ; nothing moved: the boundary is still exactly where it was
         rts                     ; pinned, which is a better answer than the rounding the
                                 ; qToColT round trip would give it
+; ---- the translation term, signed quarter squares (2026-10-15) ----
+; t = dX*sin(a) - dY*cos(a), with sin/cos at x64 and dX/dY clamped to +-63 (a quarter cell a
+; frame), so every a+b and a-b fits a SIGNED byte and ab = f0[|a+b|] - f0[|a-b|] comes out
+; signed with no sign bookkeeping at all. The old route took magnitudes, carried the sign in
+; pvSgn through two unsigned mul8s and a pvNeg per operand: ~960 cycles a hint, ~5k a moving
+; frame (tools/pivlab.mjs). Then u = |t| * rcp >> 14 as before (x64 not x128, so 14 not 15).
+pvS     = pvPH                  ; sin and cos live in the product bytes until the product
+pvC     = pvPB                  ;   needs them -- both are spent by then
 pv1All: ldy pvAng,x
-        jsr pivTerm             ; pvTL/pvTH = the signed 16-bit term
+        lda sinST,y
+        cmp #$80
+        ror                     ; sin x64, sign kept
+        sta pvS
+        tya
+        clc
+        adc #$40                ; cos(a) = sin(a + a quarter turn)
+        tay
+        lda sinST,y
+        cmp #$80
+        ror
+        sta pvC
+        lda pvDX
+        clc
+        adc pvS
+        bpl pvq1a
+        eor #$ff
+        clc
+        adc #$01
+pvq1a:   tax
+        lda pvDX
+        sec
+        sbc pvS
+        bpl pvq1b
+        eor #$ff
+        clc
+        adc #$01
+pvq1b:   tay
+        lda f0LoT,x             ; t = f0[|a+b|] - f0[|a-b|]
+        sec
+        sbc f0LoT,y
+        sta pvTL
+        lda f0HiT,x
+        sbc f0HiT,y
+        sta pvTH
+        lda pvDY
+        clc
+        adc pvC
+        bpl pvq2a
+        eor #$ff
+        clc
+        adc #$01
+pvq2a:   tax
+        lda pvDY
+        sec
+        sbc pvC
+        bpl pvq2b
+        eor #$ff
+        clc
+        adc #$01
+pvq2b:   tay
+        lda pvTL                ; t -= f0[|a+b|] - f0[|a-b|]
+        sec
+        sbc f0LoT,x
+        sta pvTL
+        lda pvTH
+        sbc f0HiT,x
+        sta pvTH
+        lda pvTL
+        clc
+        adc f0LoT,y
+        sta pvTL
+        lda pvTH
+        adc f0HiT,y
+        sta pvTH
         lda #$00
         sta pvSgn
         lda pvTH
@@ -11671,9 +12109,9 @@ pv1p:   ldx pvI2                ; |term| * rcp, 16x8 -> 24 bits
         lda pvRcp,x
         sta mq
         lda pvTL
-        jsr mul8                ; the product's LOW byte is never read: the >>15 below takes
-        lda phi                 ; only bits 15..22, so byte 0 cannot reach the result
-        sta pvPH
+        jsr mul8                ; the product's LOW byte is never read: the >>14 below takes
+        lda phi                 ; only bits 14..21, and +2^13 cannot carry out of byte 0's
+        sta pvPH                ; contribution by more than the rounding it is for
         lda #$00
         sta pvPB
         lda pvTH
@@ -11686,23 +12124,31 @@ pv1p:   ldx pvI2                ; |term| * rcp, 16x8 -> 24 bits
         lda phi
         adc #$00
         sta pvPB
-pv1n:   lda pvPH                ; + 2^14: a bare >>15 truncates toward -inf, and -0.4 of a
+pv1n:   lda pvPH                ; + 2^13: a bare >>14 truncates toward -inf, and -0.4 of a
         clc                     ; column every frame is enough to miss at a one-column bracket
-        adc #$40
+        adc #$20
         sta pvPH
         lda pvPB
         adc #$00
         sta pvPB
-        lda pvPH                ; >>15 = (pvPB<<1) | bit 7 of pvPH
-        asl
+        asl pvPH                ; >>14 = (pvPB<<2) | the top two bits of pvPH
+        rol pvPB
+        asl pvPH
+        rol pvPB
         lda pvPB
-        rol
         ldy pvSgn
         bpl pv1s
         eor #$ff                ; put the sign back
         clc
         adc #$01
-pv1s:   sta pvTL                ; daq, signed byte -> sign-extend for the 16-bit sum
+pv1s:${PIVLAB ? `   cmp #$00                ; PIVLAB: a translation term that rounded to nothing
+        bne plZt
+        ldx plCur
+        inc plR+${plo('k3L')},x
+        bne plZt0
+        inc plR+${plo('k3H')},x
+plZt0:  lda #$00
+plZt:` : ''}   sta pvTL                ; daq, signed byte -> sign-extend for the 16-bit sum
         ldy #$00
         bit pvTL
         bpl pv1e
@@ -11739,83 +12185,9 @@ pv1g:   sta tmp
         lda qToColT,y
         rts
 
-; pivTerm: Y = the boundary's world bearing -> pvTL/pvTH = pvDX*sin(a) - pvDY*cos(a), signed.
-; Two unsigned multiplies with the signs carried in pvSgn, because mul8 is a quarter-square
-; table and only takes magnitudes.
-pivTerm:lda #$00
-        sta pvTL
-        sta pvTH
-        sta pvSgn
-        sty pvYs
-        lda sinST,y
-        jsr pvNeg
-        sta mq
-        lda pvDX
-        jsr pvNeg
-        jsr mul8
-        lda pvSgn
-        bmi pvT1s
-        clc                     ; term += |dx*sin|
-        lda pvTL
-        adc plo
-        sta pvTL
-        lda pvTH
-        adc phi
-        sta pvTH
-        jmp pvT2
-pvT1s:  sec                     ; term -= |dx*sin|
-        lda pvTL
-        sbc plo
-        sta pvTL
-        lda pvTH
-        sbc phi
-        sta pvTH
-pvT2:   lda #$00
-        sta pvSgn
-        lda pvYs                ; cos(a) = sin(a + a quarter turn); no second table
-        clc
-        adc #$40
-        tay
-        lda sinST,y
-        jsr pvNeg
-        sta mq
-        lda pvDY
-        jsr pvNeg
-        jsr mul8
-        lda pvSgn               ; this product is SUBTRACTED, so the senses invert
-        bmi pvT2a
-        sec
-        lda pvTL
-        sbc plo
-        sta pvTL
-        lda pvTH
-        sbc phi
-        sta pvTH
-        rts
-pvT2a:  clc
-        lda pvTL
-        adc plo
-        sta pvTL
-        lda pvTH
-        adc phi
-        sta pvTH
-        rts
-
-; pvNeg: A signed -> A = |A|, flipping pvSgn's bit 7 when it was negative
-pvNeg:  cmp #$80
-        bcc pvNgD
-        eor #$ff
-        clc
-        adc #$01
-        pha
-        lda pvSgn
-        eor #$80
-        sta pvSgn
-        pla
-pvNgD:  rts
 ` : ''}
 subFin:
-${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES && ORBOCC ? '        jsr orbOccAll           ; masks against this frame\'s run table, before anything reads one --\n                                ;   rebuilt only when an entity moved or the cell changed (see orbOcc1)\n' : ''}${SPRITES ? '' + (ENTPROF ? '        jsr pfT8              ; orbOccAll: every entity mask, every frame\n' : '') + (ANYFLOORDK ? `        jsr lvlSpr              ; the level's SHARED sprite inks, beside the projection
+${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + seams (prepCells is folded in here)\n' : ''}${SPRITES ? '' + (ENTPROF ? '        jsr pfT8              ; orbOccAll: every entity mask, every frame\n' : '') + (ANYFLOORDK ? `        jsr lvlSpr              ; the level's SHARED sprite inks, beside the projection
                                 ;   that decides what osFlush will write. The two have to land on
                                 ;   the SAME frame or the cast recolours in two steps: the bodies
                                 ;   follow the projection, so the shared pair has to as well.
@@ -11823,7 +12195,7 @@ ${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + s
                                 ;   reaches it -- and this must not run during one, or the idol in
                                 ;   your hands changes colour mid-descent. This half of the loop
                                 ;   is the half a fall skips, which is exactly the property wanted.
-` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + (HAS_SILVER ? '        jsr svStep              ; SILVER: glide after the player, and spark now and then\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
+` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + (HAS_SILVER ? '        jsr lxStep              ; SILVER (level code): glide after the player, and spark now and then\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
         bne dnSkip
         lda iterLo
         cmp #${hx(+process.env.DROPNOW & 255)}
@@ -12773,7 +13145,353 @@ spinFrm:lda pa                  ; SPINF: a fixed turn per RENDERED frame, whatev
 walkFrm:lda #$03                ; WALKF: a fixed step per RENDERED frame (see WALKF)
         sta dtm
         jmp moveFwd
-` : ''}
+` : ''}${PIVLAB ? (() => {
+  const tr = TURN_RATE * PLDTT;         // one frame's turn, in the 16-bit angle
+  const key = (bit, lbl, body) => `        lda plKeys
+        and #${hx(bit)}
+        beq ${lbl}
+${body}${lbl}:
+`;
+  // the elapsed CIA2 clock since plS<n>, added into the 24-bit per-segment field f
+  const tEnd = (lbl, sv, f) => `${lbl}:pha
+        txa
+        pha
+        tya
+        pha
+        jsr plClk
+        ldx plCur
+        lda plK
+        sec
+        sbc ${sv}
+        sta plD
+        lda plK+1
+        sbc ${sv}+1
+        sta plD+1
+        lda plK+2
+        sbc ${sv}+2
+        sta plD+2
+        clc
+        lda plR+${plo(f + 'L')},x
+        adc plD
+        sta plR+${plo(f + 'L')},x
+        lda plR+${plo(f + 'M')},x
+        adc plD+1
+        sta plR+${plo(f + 'M')},x
+        lda plR+${plo(f + 'H')},x
+        adc plD+2
+        sta plR+${plo(f + 'H')},x
+        pla
+        tay
+        pla
+        tax
+        pla
+        rts
+`;
+  const tBeg = (lbl, sv) => `${lbl}:jsr plClk
+        lda plK
+        sta ${sv}
+        lda plK+1
+        sta ${sv}+1
+        lda plK+2
+        sta ${sv}+2
+        rts
+`;
+  const add16 = (f, src, hiSrc) => `        clc
+        lda plR+${plo(f + 'L')},x
+        adc ${src}
+        sta plR+${plo(f + 'L')},x
+        lda plR+${plo(f + 'H')},x
+        adc ${hiSrc}
+        sta plR+${plo(f + 'H')},x
+`;
+  return `
+; ===== PIVLAB: the pivot's bench (see PIVLAB) -- one script step per rendered frame =====
+; Runs where readKeys would, so it first books the frame just DRAWN to the segment that drew
+; it, then picks this frame's move. The first call books nothing and starts the clock.
+plStep: lda plArm
+        bne plA1
+        inc plArm
+        lda #$7f                ; CIA2 raises no interrupts: its timers are the bench's clock
+        sta $dd0d
+        lda #$ff
+        sta $dd04
+        sta $dd05
+        sta $dd06
+        sta $dd07
+        lda #$51                ; timer B counts timer A's underflows; force-load; start
+        sta $dd0f
+        lda #$11                ; timer A counts cycles, continuous; force-load; start
+        sta $dd0e
+        ldx #$00                ; the records sit in RAM the boot loaded a picture into
+        txa
+plZ:    sta plR,x
+        sta plR+256,x
+        sta plR+512,x
+        inx
+        bne plZ
+        lda #$00
+        sta plRay
+        sta plRay+1
+        lda frameCnt
+        sta plTk
+        jmp plNext
+plA1:   jsr plAcc
+plNext: lda plLeft
+        bne plRun
+        ldx plSeg
+        lda plLenT,x
+        bne plNew
+        lda #$01                ; the script is over: stand still, book into the spare record
+        sta plDone
+        lda #${hx(PLSEGS.length)}
+        sta plCur
+        rts
+plNew:  sta plLeft
+        lda plKeyT,x
+        sta plKeys
+        stx plCur
+        inc plSeg
+plRun:  dec plLeft
+        lda #${PLDTM}
+        sta dtm
+${key(1, 'plK0', '        jsr moveFwd\n')}${key(2, 'plK1', '        jsr moveBack\n')}${key(4, 'plK2', '        jsr strafeL\n')}${key(8, 'plK3', '        jsr strafeR\n')}${key(16, 'plK4', `        lda paF
+        sec
+        sbc #${hx(tr & 255)}
+        sta paF
+        lda pa
+        sbc #${hx(tr >> 8)}
+        sta pa
+`)}${key(32, 'plK5', `        lda paF
+        clc
+        adc #${hx(tr & 255)}
+        sta paF
+        lda pa
+        adc #${hx(tr >> 8)}
+        sta pa
+`)}        rts
+
+; book the frame just drawn into record plCur
+plAcc:${process.env.PLSNAP ? `  lda plGF                ; PLSNAP=k: the hints going INTO frame k+1, then what it predicted and found
+        cmp #${hx(+process.env.PLSNAP)}
+        bne plSn1
+        ldx #23
+plSnA:  lda pvBnd,x
+        sta plSA,x
+        lda pvAng,x
+        sta plSA+24,x
+        lda pvRcp,x
+        sta plSA+48,x
+        dex
+        bpl plSnA
+        lda pvN
+        sta plSA+72
+        lda opaL                ; the reference pose those hints were taken at
+        sta plSA+73
+        lda opaH
+        sta plSA+74
+        jmp plSnD
+plSn1:  cmp #${hx(+process.env.PLSNAP + 1)}
+        bne plSnD
+        ldx #23
+plSnB:  lda plPrd,x
+        sta plSB,x
+        lda pvBnd,x
+        sta plSB+24,x
+        dex
+        bpl plSnB
+        lda plPN
+        sta plSB+48
+        lda pvN
+        sta plSB+49
+        lda pvDX
+        sta plSB+50
+        lda pvDY
+        sta plSB+51
+        lda dqa
+        sta plSB+52
+        lda opaL
+        sta plSB+53
+        lda opaH
+        sta plSB+54
+plSnD:  inc plGF
+` : ''}  ldx plCur
+        inc plR+${plo('fr')},x
+        lda frameCnt
+        sec
+        sbc plTk
+        sta plD
+        lda frameCnt
+        sta plTk
+${add16('t', 'plD', '#$00')}${add16('m', 'plRay', 'plRay+1')}        lda #$00
+        sta plRay
+        sta plRay+1
+${add16('p', 'plPN', '#$00')}${add16('b', 'pvN', '#$00')}        lda px
+        sta plR+${plo('xL')},x
+        lda px+1
+        sta plR+${plo('xH')},x
+        lda py
+        sta plR+${plo('yL')},x
+        lda py+1
+        sta plR+${plo('yH')},x
+        ; each bracket: the distance to the nearest boundary this frame actually found
+        ldy plPN
+plHL:   dey
+        bmi plHD
+        lda plPrd,y
+        sta plP
+        lda #$ff
+        sta plMin
+        ldx pvN
+plHJ:   dex
+        bmi plHB
+        lda pvBnd,x
+        sec
+        sbc plP                 ; C = 1: the boundary is at or right of the bracket
+        bcs plHA
+        eor #$ff                ; negative: C is clear (the borrow), so this is the negation
+        adc #$01
+        clc
+plHA:   ror plTs                ; bit 7 = that side
+        cmp plMin
+        bcs plHJ
+        sta plMin
+        lda plTs
+        sta plMs                ; bit 7 set = right
+        jmp plHJ
+plHB:   ldx #$00                ; bucket: 0 | 1 | 2-4 | 5+ (or no boundary at all)
+        lda plMin
+        beq plHC
+        inx
+        cmp #$01
+        bne plHN1
+        lda plMs                ; a 1 to the right is ALSO booked in h4
+        bpl plHC
+        txa
+        pha
+        ldx plCur
+        inc plR+${plo('h4L')},x
+        bne plHR1
+        inc plR+${plo('h4H')},x
+plHR1:  pla
+        tax
+        jmp plHC
+plHN1:
+        inx
+        cmp #$05
+        bcc plHC
+        inx
+plHC:   txa
+        asl                     ; x32: a bucket is a lo table and a hi table of 16
+        asl
+        asl
+        asl
+        asl
+        clc
+        adc plCur
+        tax
+        inc plR+${plo('h0L')},x
+        bne plHL
+        inc plR+${plo('h0H')},x
+        jmp plHL
+plHD:   rts
+
+; plCop: the span (spanL, spanR) is about to be split -- count it, and whether both end rays hit
+; the same wall line: same side, and the same cell column (x-faces) or row (y-faces). From one
+; camera only one face of a line can be seen, so same side + same column/row IS the same plane.
+plCop:  ldx plCur
+        inc plR+${plo('k2L')},x
+        bne plCp1
+        inc plR+${plo('k2H')},x
+plCp1:  ldx spanL
+        ldy spanR
+        lda sideT,x
+        cmp sideT,y
+        bne plCpD
+        lda idT,y
+        jsr plRow
+        sta plCc
+        stx plCr
+        ldx spanL
+        lda idT,x
+        jsr plRow               ; A = col, X = row of the left end
+        ldy spanL
+        pha
+        lda sideT,y
+        bne plCpY
+        pla
+        cmp plCc                ; x-face: same column
+        bne plCpD
+        beq plCpY1
+plCpY:  pla
+        cpx plCr                ; y-face: same row
+        bne plCpD
+plCpY1: ldx plCur
+        inc plR+${plo('k1L')},x
+        bne plCpD
+        inc plR+${plo('k1H')},x
+plCpD:  rts
+; plRow: A = cell -> X = row, A = column (rowMulT is zero-padded past the last row)
+plRow:  sta plCl
+        ldx #$00
+plRw:   lda rowMulT+1,x
+        beq plRwD
+        cmp plCl
+        beq plRw1
+        bcs plRwD
+plRw1:  inx
+        jmp plRw
+plRwD:  lda plCl
+        sec
+        sbc rowMulT,x
+        rts
+plCc:   !byte 0
+plCr:   !byte 0
+plCl:   !byte 0
+
+; CIA2 timer B:A, frozen for the read so the bytes agree, complemented so it counts UP
+plClk:  lda #$00
+        sta $dd0e
+        lda $dd04
+        eor #$ff
+        sta plK
+        lda $dd05
+        eor #$ff
+        sta plK+1
+        lda $dd06
+        eor #$ff
+        sta plK+2
+        lda #$01                ; run again, continuous, no reload
+        sta $dd0e
+        rts
+${tBeg('plCs0', 'plS0')}${tEnd('plCs1', 'plS0', 'c')}${tBeg('plPv0', 'plS1')}${tEnd('plPv1', 'plS1', 'v')}
+plLenT: !byte ${PLSEGS.map(s => s.n).join(',')},0
+plKeyT: !byte ${PLSEGS.map(s => [...s.k].reduce((a, c) => a | PLKEY[c], 0)).join(',')}
+plArm:  !byte 0
+plLeft: !byte 0
+plSeg:  !byte 0
+plCur:  !byte 0
+plKeys: !byte 0
+plDone: !byte 0
+plTk:   !byte 0
+plPN:   !byte 0
+plP:    !byte 0
+plMin:  !byte 0
+plMs:   !byte 0
+plTs:   !byte 0
+plRay:  !byte 0,0
+plK:    !byte 0,0,0
+plD:    !byte 0,0,0
+plS0:   !byte 0,0,0
+plS1:   !byte 0,0,0
+; The records live in the death picture's RAM (IPIC, ${'$'}{PICBASE.toString(16)}): NOSHOCK=1 means it is
+; never shown, and the image is too full for a bench that is not part of the game.
+plR     = ${hx16(PICBASE)}      ; DEADCODE-OK: tools/pivlab.mjs reads it
+plPrd   = ${hx16(PICBASE + PLF.length * 16)}
+${process.env.PLSNAP ? `plGF:   !byte 0
+plSA:   !fill 75, 0             ; DEADCODE-OK: read by hand
+plSB:   !fill 55, 0             ; DEADCODE-OK: read by hand
+` : ''}`;
+})() : ''}
 ; ---- tickDelta: how much time has passed, in 60ths ----
 ; The step used to be per FRAME, so walking speed rose and fell with the frame rate -- fastest
 ; down an empty corridor, slowest where the geometry is dense, which is exactly backwards.
@@ -13638,7 +14356,7 @@ hzG:    lda hazLoT,x            ; X must survive to here: hzRun clobbers it, and
 
 ` : ''}; ================= march one column: cast + store colH/idT =================
 marchCol:
-${RAYCNT ? '        inc rayN\n' : ''}        jsr castRay
+${RAYCNT ? '        inc rayN\n' : ''}${PIVLAB ? '        inc plRay\n        bne plMc1\n        inc plRay+1\nplMc1:\n' : ''}        jsr castRay
         ldx col
         lda pp
         sta colH,x
@@ -13664,10 +14382,13 @@ friS1:  lda stpY                ; side1: +y ray hits NORTH face, -y hits SOUTH f
 friSo:  lda runST,y
 friSto: sta faceIdT,x
            ; X still col: the run-table branch above only uses A and Y
-${SEAMS ? `        lda remL                ; park the raw hit distance; u is derived from it later, and
+${SEAMS || PIVOT ? `        lda remL                ; park the raw hit distance; u is derived from it later, and
         sta remLoT,x            ; only for the ~35% of spans that actually cross a boundary
-        lda remH
-        sta remHiT,x` : ''}
+        lda remH                ; -- and the PIVOT reads it too: a hint's reciprocal is taken from
+        sta remHiT,x            ; it. This was SEAMS-only, so a SEAMS=0 build read stale distances
+                                ; and every translation prediction was garbage: walking, 11% of
+                                ; brackets landed against 66% with no translation term at all
+                                ; (tools/pivlab.mjs, 2026-10-15). Shipping builds have seams.` : ''}
         rts
 
 ; ===== interpolate colH linearly across a same-face span [spanL,spanR] (Bresenham) =====
@@ -14279,7 +15000,7 @@ irqArm: lda #${hx(SPLITLINE)}
         bne irqNf
         inc frameCnt+1
 irqNf:
-${HAS_FLICKER ? '        jsr flkTick             ; LEVEL_FLICKER: after irqB0, so a flash overrides its ground\n' : ''}${HAS_SILVER ? '        jsr svTick              ; SILVER: the sparks, one 60Hz frame at a time\n' : ''}irqd:   lda #$ff
+${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}irqd:   lda #$ff
         sta $d019
         pla
         tay
@@ -14576,8 +15297,13 @@ omWTog: sec
         lda sockWallT,y         ; ...names its wall, or $ff for a seat that opens nothing
         bmi omNoIco
         sta wsWall
-        jsr wallTog
-` : ''}omNoIco:
+${HAS_SILVER ? `        lda sockStgT,y          ; STAGES: does this socket begin one? (0 = no)
+        pha
+` : ''}        jsr wallTog
+${HAS_SILVER ? `        pla
+        beq omNoIco
+        jsr lxSock              ; the door is falling: close the wall behind, and change the cast (stGo)
+` : ''}` : ''}omNoIco:
 ${process.env.ORBOCCDBG ? `        sta ohDbg
 ` : ''}        lda py+1                ; which cell is the player standing in?
 ${MULW}
@@ -14773,12 +15499,12 @@ ${process.env.OSCNT ? `        inc osCntE              ; OSCNT: slots taking the
 oSCe:` : ''}
 
 ${DBGORB ? `        inc oSOrb
-` : ''}        lda obIX,x
+` : ''}        lda obIX,x              ; OCCFACE: the cell occBy tests the runs' faces against
         tay
-        lda orbOccLoT,y
-        sta omptr
-        lda orbOccHiT,y
-        sta omptr+1
+        lda orbXCT,y
+        sta ooCX
+        lda orbYCT,y
+        sta ooCY
         ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
         ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
         ; Display y is raster - 50, and a char row is eight of those.
@@ -14896,12 +15622,8 @@ oSChk:  ldx ohL
         ldy faceIdT,x
         beq oSAdv               ; no run in this span, so it cannot occlude
         sty ohSv
-        lda runByteT,y
-        tay
-        lda (omptr),y
-        ldy ohSv
-        and runBitT,y
-        beq oSAdv               ; this run does not occlude this orb
+        jsr occBy
+        bcc oSAdv               ; this run's face is not in front of this orb
         ; it does: stamp [max(spanL, obL) .. min(spanR, obR)] -- but the two ends are NOT alike.
         ;
         ; One end comes from the WALL's edge and the other from the ORB's box. Only the wall edge
@@ -15295,7 +16017,7 @@ osSvL:  dey
         bne osSvL
 osSv0:  lda svCnt
         sta svLCnt
-        jsr svWr                ; and the frame that is up NOW, not the one the projection saw
+        jsr lxWr                ; and the frame that is up NOW, not the one the projection saw (svWr)
 ` : ''}osBits: lda omEn
         sta $d015
         lda omMc
@@ -15399,21 +16121,18 @@ oipx:   sta oax
 oipy:   sta oay
         sty oiyS
         ; forward = Ix*cos + Iy*sin + kf
-        lda oax
-        ldx ocos
         lda oixS
         eor ocosS
         ldy oax
-        jsr oTerm
+        jsr oTmC
         lda orL
         sta fwdL
         lda orH
         sta fwdH
         lda oiyS
         eor osinS
-        ldx osin
         ldy oay
-        jsr oTerm
+        jsr oTmS
         clc
         lda fwdL
         adc orL
@@ -15437,18 +16156,16 @@ oipy:   sta oay
 ofwOk:  ; right = Iy*cos - Ix*sin + kr
         lda oiyS
         eor ocosS
-        ldx ocos
         ldy oay
-        jsr oTerm
+        jsr oTmC
         lda orL
         sta rgtL
         lda orH
         sta rgtH
         lda oixS
         eor osinS
-        ldx osin
         ldy oax
-        jsr oTerm
+        jsr oTmS
         sec
         lda rgtL
         sbc orL
@@ -15562,27 +16279,33 @@ ivRl:   lsr ivH
         ror ivL
         inx
         bne ivRl
-ivDn:   lda #$0b                ; h = 22528/forward = iv * 11/512, the same 88/d the walls use
-        sta mq
-        lda ivL
-        jsr mul8
-        lda plo
+ivDn:   ; h = 22528/forward = iv * 11/512, the same 88/d the walls use. iv * 11 = iv + 2iv + 8iv,
+        ; by shifts and adds -- a constant multiplier needs no mul8, and this was two of them an
+        ; entity (2026-10-14). The 24-bit result o2:o1:o0 is the same exact product they gave.
+        ; ogL/ogH/o3 are free here: the FOV bound above is done with ogL/ogH, and o3 is not
+        ; written until orbYok, after the projection.
+        lda ivL                 ; o = iv
         sta o0
-        lda phi
+        lda ivH
         sta o1
         lda #$00
         sta o2
-        lda #$0b
-        sta mq
+        sta o3
+        lda ivL                 ; s = 2iv
+        asl
+        sta ogL
         lda ivH
-        jsr mul8
-        clc
-        lda o1
-        adc plo
-        sta o1
-        lda o2
-        adc phi
-        sta o2
+        rol
+        sta ogH
+        rol o3
+        jsr oAddS               ; o = 3iv
+        asl ogL                 ; s = 8iv
+        rol ogH
+        rol o3
+        asl ogL
+        rol ogH
+        rol o3
+        jsr oAddS               ; o = 11iv
         lsr o2
         ror o1
 ${FINECOL ? `        lda o0                  ; FINECOL: keep the fraction the shift drops (the carry is
@@ -15771,42 +16494,7 @@ ${(`        ; ---- the cone's verdict, decided ONCE, in entGate ----
         bne cnYes
         jmp orbNo
 `) + `cnYes:
-${OCCLAZYE ? `        ldx oidx                ; OCCLAZYE: it survived the culls -- now its occluder mask is
-        lda ooFrT,x             ;   worth building, if this frame's is not built yet
-        bne olFresh
-        jsr orbOcc1             ; clobbers A, X, Y; nothing of orbOne's lives in them here
-${process.env.GATEPROF ? '        jsr pfT15              ; GATEPROF: the lazy mask builds, in bucket 15 (angStep+dieChk share it)\n' : ''}        ldx oidx
-        lda #$01
-        sta ooFrT,x
-${LAZYCHK ? `        jmp olChkD              ; just built: nothing to check
-` : ''}olFresh:
-${LAZYCHK ? `        ldx oidx                ; LAZYCHK: the mask is about to be trusted -- is it what a rebuild gives?
-        lda orbOccLoT,x
-        sta lzA+1
-        sta lzB+1
-        lda orbOccHiT,x
-        sta lzA+2
-        sta lzB+2
-        ldy #${hx(OCCBYTES - 1)}
-lzA:    lda $ffff,y
-        sta lzShad,y
-        dey
-        bpl lzA
-        jsr orbOcc1
-        ldy #${hx(OCCBYTES - 1)}
-lzB:    lda $ffff,y
-        cmp lzShad,y
-        beq lzOk
-        inc lzBad
-        bne lzOk
-        inc lzBad+1
-lzOk:   dey
-        bpl lzB
-        inc lzN
-        bne olChkD
-        inc lzN+1
-olChkD: ldx oidx
-` : ''}` : ''}`}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr ${ANGSLIDE ? 'orbProjS' : HAS_IDOL ? 'orbProjC' : 'orbProj'}             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
+`}${ENT1PROF ? "        jsr pfT3                ; ENT1PROF: the cell delta and the cone test, per entity\n" : ''}        jsr ${ANGSLIDE ? 'orbProjS' : HAS_IDOL ? 'orbProjC' : 'orbProj'}             ; -> ohgt, ocoff, oaS. Everything below needs the entity,
 ${ENT1PROF ? "        php                     ; ENT1PROF: orbProj itself. php/plp because pfTick does NOT\n        jsr pfT7                ;   preserve the carry, and the carry is orbProj's return value\n        plp\n" : ''}
 ${CULLCNT ? `        bcs culOk               ;   everything above needs only the cell it stands in
         inc culPrj
@@ -16074,11 +16762,11 @@ ${process.env.ORBOCCDBG ? `        lda #$02
         sta ohDbg
 ohDb:
 ` : ''}
-        ldy oidx
-        lda orbOccLoT,y
-        sta omptr
-        lda orbOccHiT,y
-        sta omptr+1
+        ldy oidx                ; OCCFACE: the cell occBy tests the runs' faces against -- for the
+        lda orbXCT,y            ;   angel's probe, the cell it is THINKING of, which anTry has just
+        sta ooCX                ;   written here
+        lda orbYCT,y
+        sta ooCY
         ; Walk the SPANS the subdivision left behind, not the columns. bndT holds the columns
         ; where a new face begins, sorted, so the spans are [0,bndT[0]-1], [bndT[0],bndT[1]-1],
         ; ... [bndT[n-1],159] -- about fourteen of them. Each span is a contiguous piece of ONE
@@ -16123,11 +16811,9 @@ ${CULLCNT ? `        bne ohC1
         jmp opVis
 ohC1:` : '        beq opVis               ; no run here at all, so the orb shows through'}
         sty ohRun
-        lda runByteT,y
-        tay
-        lda (omptr),y           ; the mask byte holding this run's bit
-        ldy ohRun
-        and runBitT,y
+        jsr occBy               ; C = this run's face is in front of the entity
+        lda #$00
+        rol                     ; ...as A, for the flags the code below was written against
 ${CULLCNT ? `        bne ohOcc
         ldx oidx                ; CULLCNT: which run let this entity through, and at which column
         lda ohRun
@@ -17254,13 +17940,6 @@ objInit:
                                 ;   defaults to sockVisT, the rest to the exit's) -- so an exit could
                                 ;   stamp with the socket's rows. $ff is no kind, so the first call
                                 ;   always patches.
-        sta occCell             ; ...and orbOccAll's "nothing changed" skip: occVer/occCell were never
-                                ;   initialised either, so on a level's first frame the skip could match
-                                ;   leftover state (both versions 0, occCell equal to the start cell) and
-                                ;   keep whatever the mask buffer held -- the previous level's masks, or
-                                ;   boot junk -- until something moved. $ff is never a cell (maps are at
-                                ;   most 253), so the first frame after any entry always rebuilds.
-                                ;   (OCCCHK=1 caught it: 58 stale bytes on level 2's first frame.)
         ldx #$00
 oiBlk:  lda mapT,x              ; walls first
         cmp #$01                ; mapT is $00 for a wall and a zone mask otherwise;
@@ -17291,20 +17970,10 @@ ${HAS_SILVER ? `        cpx svNT                ; a SENTRY is not in blkT: touch
 ` : ''}        lda #$02
         sta blkT,y              ; 2 = entity, not wall -- angStep and mvFree both rely on it
 
-oiNext: txa
-        pha                     ; orbOcc1 CLOBBERS X. Without this the dex/bpl below ran on
-        jsr orbOcc1             ;   garbage and the loop scribbled 2s across blkT at random
-        pla                     ;   cells -- which opened the doorway the caging orb was
-        tax                     ;   supposed to block, and the angel walked straight out.
-        dex
+oiNext: dex
         bpl oiEnt
 oiEntD:
-${OCCLAZYE ? `        lda #$00                ; OCCLAZYE: a new level -- no mask is fresh, whatever the dirty
-        ldx #${hx(NOCC - 1)}               ;   test's saved blkVer/cell happen to read
-oiFrC:  sta ooFrT,x
-        dex
-        bpl oiFrC
-` : ''}${FALLMARK.includes(6) ? '        inc fallMk              ; FALLMARK 6: every entity placed\n' : ''}        lda #$00
+${FALLMARK.includes(6) ? '        inc fallMk              ; FALLMARK 6: every entity placed\n' : ''}        lda #$00
         sta carry
         sta marked
         sta entDty
@@ -17317,7 +17986,8 @@ hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         bpl hlSCl
         lda #$ff                ; a cell the player can never be in, so the first frame always
         sta bfsDone             ;   starts a fill
-${HAS_SILVER ? `        jsr svReset             ; the sentries' PLACE ON THEIR PATHS, and the charge: the loop above put
+${HAS_SILVER ? `        jsr lxInit              ; LEVEL CODE: stInit (every closing wall out) then svReset -- the
+                                ;   sentries' PLACE ON THEIR PATHS, and the charge: the loop above put
                                 ;   them back on their start cells, and a sentry whose path index
                                 ;   still says mid-loop walks through walls from there. Here, not at
                                 ;   entry, because the FALL arrives through objInit too (the user hit
@@ -17342,125 +18012,30 @@ ${HAS_SILVER ? `        jsr svReset             ; the sentries' PLACE ON THEIR P
                                 ; call: idolLk's rts returns from here.)
 ` : `        rts
 `}
-; ---- orbOcc1: rebuild entity X's occluder mask from the cell it stands in NOW ----
-; orbOccT answers "is this entity beyond that wall run's plane" -- the facing rule, and the only
-; thing about occlusion that is precomputed. Every bit of it is a function of where the entity
-; WAS at build time, so setting an orb down somewhere else, or an angel taking a step, makes it
-; describe the old position: hidden behind walls it is now in front of, and stamped through ones
-; it is behind.
-;
-; It is ALSO a function of the run table (runPlaneT/runFaceT, built by mkRuns at level entry) and of
-; the merge-hazard splits hazSet patches in per RENDERING cell. Run ids are fixed for a level: they
-; were once handed out by the subdivision in view order and renumbered as you turned, which is why
-; masks were rebuilt every frame ("the missing blue block with the statue peeking through it"). Now
-; orbOccAll rebuilds only when an entity moved (blkVer) or the rendering cell changed (cell0), and
-; with OCCLAZYE only the masks an entity actually needs. Verified 2026-10-06 with LAZYCHK=1: 4,171
-; trusted masks over spins, walks and moving angels on levels 1-4, zero stale bytes.
-; The mask base is self-modified rather than indirect-indexed because the loop needs Y for the
-; run id and X for the byte within the mask.
-orbOcc1:
-        lda orbOccLoT,x
-        sta ooCl+1
-        sta ooLd+1
-        sta ooSt+1
-        lda orbOccHiT,x
-        sta ooCl+2
-        sta ooLd+2
-        sta ooSt+2
-        lda orbXCT,x
-        sta ooCX
-        lda orbYCT,x
-        sta ooCY
-        lda #$00
-        ldx #${hx(OCCBYTES - 1)}
-ooCl:   sta $ffff,x
-        dex
-        bpl ooCl
-        ldy #$01                ; run 0 is the "no run" sentinel and owns no bit
-ooLp:   lda runFaceT,y
-        pha                     ; PLA sets N from bit 7 and leaves C alone, so the sense survives
-        and #$01                ;   the axis pick and the compare below
-        beq ooAxX
+; ---- occBy: does wall run Y's face stand IN FRONT of the entity at (ooCX, ooCY)? C set = it does ----
+; THE FACING RULE, asked when it is needed (OCCFACE, 2026-10-14). A face can hide an entity only if
+; the entity is beyond the face's plane; occStamp and occWalk ask it for exactly the runs drawn in
+; the columns a sprite covers, a handful a frame. It used to be answered ahead of time, for EVERY
+; run in the level, as a per-entity bit mask (orbOccT) rebuilt whenever the entity changed cell:
+; ~3,000 cycles a rebuild, a moving sentry or angel paying it twice a cell, plus a dirty test every
+; frame -- to save the ~20 cycles a test costs here. The user, on level 9's final room: "None of
+; these sentries can be occluded by any of the walls in this room because they're all on the facing
+; side of the wall." The answer is the same bit, from the same cell, so the pictures are the same.
+; runFaceT bit 0 says which axis the plane is across; bit 7 the sense: 1 = the entity must be
+; strictly nearer than the plane, 0 = at or past it. Keeps X and Y.
+occBy:  lda runFaceT,y
+        lsr                     ; C = the axis: 1 = y
+        lda ooCX
+        bcc obyA
         lda ooCY
-        jmp ooCmp
-ooAxX:  lda ooCX
-ooCmp:  cmp runPlaneT,y         ; C set = cell >= plane
-        pla
-        bpl ooGE
-        bcc ooSet               ; sense 1: the entity must be strictly nearer than the plane
-        bcs ooNx                ; always taken
-ooGE:   bcc ooNx
-ooSet:  ldx runByteT,y
-ooLd:   lda $ffff,x
-        ora runBitT,y
-ooSt:   sta $ffff,x
-ooNx:   iny
-        cpy #${hx(NRUN)}        ; NRUN, not this level's own count: the loops are shared
-        bcc ooLp
-        rts
-
-; ---- orbOccAll: every entity's mask, rebuilt against THIS frame's run numbering ----
-; Called from subFin, where the subdivision is done and the run table will not change again this
-; frame. orbOcc1 clobbers X, so the loop counter lives in a byte rather than the register.
-orbOccAll:
-        ; The masks say whether an entity is beyond a wall face's PLANE -- no camera term at
-        ; all -- so they only go stale when an entity moves or the run tables are re-patched.
-        ; blkVer catches the first (angOne, okTake, okPlain all bump it); the viewing cell
-        ; catches the second, since hazSet patches per RENDERING cell. On a map that splits
-        ; nothing -- which is every map here -- neither changes most frames, and this was
-        ; rebuilding byte-identical masks every single one.
-${OCCCHK ? `        lda #$00                ; clear the armed flag FIRST, so both dirty exits below leave it
-        sta occArm              ;   clear without a branch of their own
-` : ''}        lda blkVer
-        cmp occVer
-        bne ooDirty
-        lda cell0
-        cmp occCell
-${OCCCHK ? `        bne ooDirty             ; OCCCHK: do not skip -- copy the masks aside, rebuild them
-${OCC_CPY ? `        ldx #${hx(NOCC * OCCBYTES - 1)}      ;   anyway, and count any byte that differs. A mismatch
-ooCpy:  lda orbOccT,x           ;   means the skip would have shipped a stale mask, which is the
-        sta occShad,x           ;   exact bug orbOccAll was made per-frame to avoid.
-        dex
-        bpl ooCpy
-` : ''}        inc occChk              ; frames checked -- SATURATING, both counters. A wrapping byte can
-        bne ooCpyD              ;   turn "255 frames checked" into 0 and "256 stale masks" into a
-        dec occChk              ;   clean bill of health, which is the one answer this must not be
-ooCpyD: inc occArm              ;   able to give. The flag says a shadow exists for THIS frame;
-                                ;   without it the compare below also ran on dirty frames, against
-                                ;   whatever occShad held from some earlier one, counting
-` : '        beq ooSkip\n'}ooDirty:lda blkVer  ;   differences that mean nothing
-        sta occVer
-        lda cell0
-        sta occCell
-${OCCLAZYE ? `        lda #$00                ; OCCLAZYE: dirty -- every mask is stale; orbOne rebuilds the
-        ldx #${hx(NOCC - 1)}               ;   ones that survive the culls, when it gets to them
-ooFrC:  sta ooFrT,x
-        dex
-        bpl ooFrC
-` : `        lda nAllT               ; orbs AND hole-like entities -- the COUNT, so that none is
-        beq ooAlD               ;   sayable; the index below cannot say it
-        lda nAllM1T
-ooAlp:  sta ooAI
-        tax
-        jsr orbOcc1
-        lda ooAI
+obyA:   cmp runPlaneT,y         ; C = cell >= plane
+        lda runFaceT,y          ; N = the sense (lda leaves C alone)
+        bpl obyR                ; sense 0: in front when cell >= plane, which C already says
+        bcs obyNo               ; sense 1: in front when cell < plane
         sec
-        sbc #$01
-        bcs ooAlp               ; ...down to 0, then the borrow out of 0 ends it
-`}ooAlD:
-${OCC_CMP ? `        lda occArm              ; NOTE the ooV prefix: ooCmp is ALREADY a label inside orbOcc1,
-        beq ooVCmpX             ;   two screens up, and the assembler took the duplicate without a
-        ldx #${hx(NOCC * OCCBYTES - 1)}            ;   word -- so orbOcc1's own \`jmp ooCmp\` landed here instead and
-ooVCmp: lda orbOccT,x           ;   the program ran wild. See the duplicate-label guard.
-        cmp occShad,x
-        beq ooVCmpN
-        inc occBad              ; a mask the lazy path would have got wrong
-        bne ooVCmpN
-        dec occBad
-ooVCmpN:dex
-        bpl ooVCmp
-ooVCmpX:
-` : ''}ooSkip:\n        rts
+        rts
+obyNo:  clc
+obyR:   rts
 
 
 
@@ -17703,7 +18278,7 @@ dckLp:  sta obC,x
         rts
 
 anNoMk: ldx amIdx
-` : ''}        jmp orbOcc1             ; X is the entity index, and its mask describes the OLD cell
+` : ''}        rts                     ; (an occluder mask for the new cell was rebuilt here: gone -- see occBy)
 anDone: rts
 ${DIE ? `; ---- anAdj: can angel X reach the player from where it stands? C set if so. X kept, Y lost ----
 anAdj:  sec
@@ -17823,7 +18398,6 @@ anSqOk:
         sta orbXCT,x
         lda amY
         sta orbYCT,x
-        jsr orbOcc1
         ldx amIdx
         stx oidx
         lda #$00
@@ -17841,7 +18415,6 @@ anSqOk:
         sta orbYCT,x
         pla
         sta orbXCT,x
-        jsr orbOcc1
         lda ovVis
         beq anYes               ; nothing of it shows there at all
 ${HAS_IDOL ? `        lda idolHd              ; ---- and the IDOL suspends the covering rule too ----
@@ -17869,7 +18442,10 @@ ${ANGSLIDE ? `; ---- THE LUNGE (ANGSLIDE): every step drawn as a slide, not a te
 ; orbXCT/orbYCT switch to the new cell: culling, zones and the occluder mask then answer for the
 ; cell it is NEARER, and its projection offset (slOn) runs -0.5..0 from there instead of 0..+0.5.
 angSlDT: !byte ${pad([], NORB).join(',')}   ; 0 = not lunging, else 1..4 = +x,-x,+y,-y; bit 7 once switched
-angSlFT: !byte ${pad([], NORB).join(',')}   ; how far, in 256ths of the cell
+${HAS_SILVER ? `angSlFT = $b110             ; how far, in 256ths of the cell. RAM in a build with sentries
+                                ;   (2026-10-14, the arena one byte short): read only while angSlDT is
+                                ;   set, and every write of angSlDT (stSet, svStep, svRole) writes it too` :
+`angSlFT: !byte ${pad([], NORB).join(',')}   ; how far, in 256ths of the cell`}
 slFT:   !byte ${[...Array(ANGSLIDE)].map((_, i) => hx(Math.round((i + 1) * 256 / (ANGSLIDE + 1)))).join(',')}   ; 60ths into the lunge -> 256ths of the way
 slDXT:  !byte 0,1,$ff,0,0
 slDYT:  !byte 0,0,0,1,$ff
@@ -17933,7 +18509,6 @@ stIx2:  tay
         ora #$80
         sta angSlDT,x
         jsr slFwd               ; now it is NEARER the new cell
-        jsr orbOcc1             ; ...and its occluder mask must say so (clobbers X)
 stDty:  lda #$01
         sta entDty
 stOut:  rts
@@ -18158,6 +18733,26 @@ sqNoXy: lsr
         inc onv
         rts
 
+;@@LX-BEGIN silver
+; ==== LEVEL CODE: everything from here to @@LX-END loads WITH ITS LEVEL (see LX_MODULES) ====
+; It is cut out of the engine's source before assembly and linked after compaction, at LXAT, against
+; the engine's final addresses -- so it may name any engine symbol. The engine reaches it only
+; through the lx vectors (its jump table is generated: LX_FEATURES); the shared state it reads is
+; declared resident, after @@LX-END.
+lxIn:${process.env.STOFF ? '  ; STOFF=1 (diagnostic): the closing walls stay shut\n       ' : ''}   ${process.env.STOFF ? 'nop' : 'jsr stInit'}              ; objInit's half: the walls, then the cast
+${STAGE && LVL === 9 ? `        jsr svReset
+        ; ---- STAGE=${STAGE} (testing): feed sockets 1..${STAGE} as play would, without the swallow ----
+${[...Array(STAGE)].map((_, k) => { const n = k + 1, sk = L9.socks.find(q => q.n === n);
+  const hi = HOLELIKE.findIndex(h => !h.exit && h.x === sk.x && h.y === sk.y);
+  if (hi < 0) throw new Error(`STAGE: S${n} at (${sk.x},${sk.y}) is not a hole-like`);
+  return `        lda #$ff
+        sta hlSeat+${hi}           ; S${n}: fed, out of the world
+        lda #${n - 1}
+        sta wsWall
+        jsr wtOff               ; |${n} open, no collapse
+        lda #${n}
+        jsr stGo                ; W${n} shut, stage ${n}'s cast`; }).join('\n')}
+        rts` : `        jmp svReset`}
 ; ---- svStep: the SENTRIES (entities 0..svN-1), once per rendered frame ----
 ; Each runs its own closed path (svPathT, traced from the sheet) at one cell per ${SVSLIDE} 60ths
 ; (${Math.round(256 / SVSLIDE / 12 * 100)}% of the player's 12/256 a tick), whether you look or not, and NOTHING stops it: the
@@ -18173,7 +18768,7 @@ svStep: lda #$00
 svGo:   dex
 svSLp:  stx amIdx
         lda orbHidT,x
-        bne svSNx
+        bne svSHd               ; a slot this stage leaves empty: no glide, and no hit
         lda angSlDT,x
         bne svMove
         ldy svPosT,x            ; ---- standing: set off on the next leg of its path ----
@@ -18199,13 +18794,12 @@ svAdv:  lda svTT,x
         bmi svDty               ; switched already
         ora #$80
         sta angSlDT,x
-        jsr slFwd               ; now it is NEARER the new cell
-        jsr orbOcc1             ; ...and its occluder mask must say so (clobbers X)
+        jsr slFwd               ; now it is NEARER the new cell (keeps X)
 svDty:  lda #$01
         sta entDty
 svSNx:  ldx amIdx
         jsr svTouch
-        ldx amIdx
+svSHd:  ldx amIdx
         dex
         bpl svSLp
         jmp svChg               ; every sentry tested: charge, or drain
@@ -18221,16 +18815,18 @@ svL1:   sta svCarT,x
 svL2:   lda #$00
         sta angSlDT,x
         sta angSlFT,x
-        ldy svPosT,x            ; on along the path, round to its start at the end
+        ldy svPosT,x            ; on along the path...
         iny
-        tya
-        cmp svEndT,x
-        bcc svP1
-        lda svBegT,x
-svP1:   sta svPosT,x
+        lda svPathT,y
+        bpl svP1                ; a step (1..4)
+        tya                     ; ...or the END MARKER, minus the path's length: back to its first step
+        clc
+        adc svPathT,y
+        tay
+svP1:   tya
+        sta svPosT,x
         lda #$01
         sta entDty
-        jsr orbOcc1             ; the mask now describes the cell it landed in (clobbers X)
         jmp svSNx
 
 ; ---- svTouch: is sentry X touching the player? Sets svHit if so. ----
@@ -18240,7 +18836,21 @@ svP1:   sta svPosT,x
 ; (the user, 2026-10-13): |dx| < R and |dy| < R, which is a box, and |dx| + |dy| < 1.41 R, which
 ; cuts its corners -- within a few percent of a circle, without a square table. R = ${SVHITR} cells
 ; (SVHITR): the ball's half width plus an angel-wide player.
-svTouch:lda #$80
+svTouch:lda orbXCT,x            ; ---- NOT NEAR, NO MATH (the user, 2026-10-14) ----
+        sec                     ; The ball is always inside the cell it is counted in (the halfway
+        sbc px+1                ;   switch sees to that) and a touch needs the player within SVHITR
+        clc                     ;   (< 1 cell) of it on each axis -- so a player whose cell is more
+        adc #$01                ;   than one away on either axis cannot be touching it. dx+1 in 0..2
+        cmp #$03                ;   is near; anything else, including a wrapped negative, is not.
+        bcs stcFar
+        lda orbYCT,x
+        sec
+        sbc py+1
+        clc
+        adc #$01
+        cmp #$03
+        bcs stcFar
+        lda #$80
         sta svFX
         sta svFY                ; low bytes: the centre of its cell
         lda orbXCT,x
@@ -18421,11 +19031,15 @@ svChg:  lda svHit
         lda svQ                 ; touching: charge by the frame's ticks
         clc
         adc dtv
-        bcs svDie
+        bcs ${NOSHOCK ? 'svFull' : 'svDie'}
         cmp #${hx(SVKILL)}
-        bcs svDie
+        bcs ${NOSHOCK ? 'svFull' : 'svDie'}
         sta svQ
         rts
+${NOSHOCK ? `svFull: lda #${hx(SVKILL - 1)}               ; NOSHOCK=1 (testing): the charge tops out and nothing dies --
+        sta svQ                 ;   the border still flashes, so a touch still shows
+        rts
+` : ''}
 zvDrnSc:  lda svQ                 ; out of reach: drain at half the rate, rounding up so a 60Hz
         beq zvOutSc               ;   frame still drains
         lda dtv
@@ -18559,34 +19173,184 @@ ${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
 svReset:ldx svNT
         beq zvNoSr              ; a level without sentries: only the charge to clear
         dex
-zvLpSr:   lda svBegT,x
+zvLpSr: txa                     ; group 0 is on stage at the start: slot n plays role n
+        tay
+        jsr svRole
+        dex
+        bpl zvLpSr
+zvNoSr: lda #$00
+        sta svQ
+        sta svHit
+        sta svBdOn
+        sta $d020
+        rts
+; ---- svRole: slot X takes role Y's path, at its start, standing. Keeps X. ----
+svRole: lda svP0T,y
         sta svPosT,x
         lda #$00
         sta svTT,x
         sta svCarT,x
         sta angSlDT,x
         sta angSlFT,x
-        dex
-        bpl zvLpSr
-zvNoSr:   lda #$00
-        sta svQ
-        sta svHit
-        sta svBdOn
-        sta $d020
         rts
+
+; ---- stInit: objInit's half of the STAGES -- every closing wall opened, instantly ----
+; The map is drawn with each Wn SOLID (it is a removable wall like any door), so the level starts by
+; taking them out without the collapse; stGo puts each back when its socket is fed. A restart's
+; wallsBack has just put them all back, so this runs on every entry and every restart alike.
+stInit: ldx stNT
+        dex
+        beq siDn                ; one stage: nothing closes
+siLp:   stx stS
+        lda stWT-1,x            ; stage x's wall
+        sta wsWall
+        jsr wtOff               ; out, now, no animation
+        ldx stS
+        dex
+        bne siLp
+siDn:   rts
+
+; ---- stGo: stage A begins (its socket was just fed, its door has started to fall) ----
+; 1. Anything standing in its closing wall's cell is pushed FORWARD, into the cell ahead (the user:
+;    an angel caught there joins you rather than being left behind); then the wall goes back, at once.
+; 2. The sentry slots take this stage's roles, each at its start, standing; the rest hide.
+; 3. Every other slot: one whose room this is APPEARS (at its build-time cell); one still in the world
+;    but outside this room is LEFT BEHIND -- hidden, and out of blkT. Carried and eaten ones are hidden
+;    already, so neither test touches them.
+stGo:   sta stS
+        tay
+        dey
+        sty stS1                ; the per-stage tables start at stage 1
+        ldx svNT                ; ---- 1. the push, then the wall ----
+stPLp:  cpx nOrbT
+        bcs stPDn
+        lda orbHidT,x
+        bne stPNx
+        lda orbXCT,x
+        cmp stWXT,y
+        bne stPNx
+        lda orbYCT,x
+        cmp stWYT,y
+        bne stPNx
+        lda stWAXT,y
+        sta orbXCT,x
+        lda stWAYT,y
+        sta orbYCT,x
+        jsr stOn                ; standing, stale mask, in blkT at the new cell
+        ldy stS1
+stPNx:  inx
+        bne stPLp               ; always: nOrbT is far below 256
+stPDn:  lda wsWall              ; the door's collapse is running on wsWall: lend it out and back
+        pha
+        lda stWT,y
+        sta wsWall
+        jsr wtBack              ; the wall back, now: blkT from the new mapT, runs rebuilt
+        pla
+        sta wsWall
+        lda stS1                ; ---- 2. the sentry slots ----
+        asl
+        asl
+        asl                     ; x SV_MAX (8, asserted at build time)
+        sta stB
+        ldx svNT
+        dex
+stSLp:  stx amIdx
+        txa
+        clc
+        adc stB
+        tay
+        lda stSvT,y
+        cmp #$ff
+        bne stSOn
+        sta orbHidT,x           ; $ff: this stage leaves the slot empty
+        bcs stSNx               ; always: the cmp #$ff that matched set C (Z is set too -- sta leaves
+                                ;   flags alone -- which is why this was once a bne that fell through)
+stSOn:  tay                     ; the role, always past stage 0's
+        lda #${NOSV ? '$01               ; NOSV=1 (testing): every sentry stays hidden' : '$00'}
+        sta orbHidT,x
+        lda svRXT-${SV_MAX},y
+        sta orbXCT,x
+        lda svRYT-${SV_MAX},y
+        sta orbYCT,x
+        jsr svRole              ; on its path at its start, standing, stale mask
+stSNx:  ldx amIdx
+        dex
+        bpl stSLp
+        ldx svNT                ; ---- 3. everything else ----
+stOLp:  cpx nOrbT
+        bcs stODn
+        lda orbHidT,x
+        beq stOVis
+        lda stFstT-${SV_MAX},x
+        cmp stS
+        bne stONx
+        lda #$00                ; its room's stage: it appears where the build put it
+        sta orbHidT,x
+        sta angAccT,x           ; objInit skipped it while it was hidden: nothing banked,
+        sta orbSeenT,x          ;   and not seen
+        jsr stOn
+        jmp stONx
+stOVis: jsr stCell              ; in the world: is it in this stage's room?
+        pha
+        and #$07
+        tay
+        lda zBitT,y
+        sta stB
+        lda stS1
+        asl
+        asl
+        asl
+        asl
+        asl                     ; x 32: one bitmap a stage
+        sta stM
+        pla
+        lsr
+        lsr
+        lsr
+        clc
+        adc stM
+        tay
+        lda stRmT,y
+        and stB
+        bne stONx               ; it is: it stays
+        lda #$01                ; LEFT BEHIND: out of the world, and out of blkT
+        sta orbHidT,x
+        jsr stCell
+        tay
+        lda #$00
+        sta blkT,y
+stONx:  inx
+        bne stOLp               ; always
+stODn:  inc blkVer              ; the angel's fill must be redone
+        lda #$01
+        sta entDty
+        rts
+; stOn: entity X is standing at orbXCT/orbYCT: no glide, and 2 in blkT there. Keeps X.
+stOn:   lda #$00
+        sta angSlDT,x
+        sta angSlFT,x
+        jsr stCell
+        tay
+        lda #$02
+        sta blkT,y
+        rts
+; stCell: A = entity X's cell. Keeps X and Y.
+stCell: lda orbYCT,x
+${MULW}
+${ADDX('orbXCT,x')}
+        rts
+stS:    !byte 0                 ; the stage stGo is starting
+stS1:   !byte 0                 ; ...less one: the per-stage tables' index
+stB:    !byte 0
+stM:    !byte 0
 svQ:    !byte 0                 ; the charge in 60Hz ticks; in svDie, the shock frames left
 svSv:   !byte 0,0,0             ; the IRQ's ground operands as the death found them
 svFT:   !byte ${[...Array(SVSLIDE)].map((_, i) => hx(Math.round((i + 1) * 256 / (SVSLIDE + 1)))).join(',')}   ; 60ths into the glide -> 256ths of the cell
-; svShT svDurT svPDT svInkT svBdT svVarT: equates into IAR1 -- see SVTBL
-${Object.entries(SVTBL_OFF).map(([n, o]) => `${n} = ${hx16(SVTBL_AT + o)}`).join('\n')}
-svTT:   !fill ${SV_MAX}, 0             ; per sentry: 60ths into the current cell
+; Per-slot state. In the module, so it costs the engine nothing; objInit's svReset writes every slot
+; before the first svStep reads one.
+svTT:   !fill ${SV_MAX}, 0             ; per sentry slot: 60ths into the current cell
 svCarT: !fill ${SV_MAX}, 0             ; ...the 60ths carried from the last one
-svPosT: !fill ${SV_MAX}, 0             ; ...where it is in svPathT (svReset sets it from svBegT)
-${LD('svNT', LVLT('svNT').join(','), ':   !byte ')}   ; this level's sentry count: entities 0..svN-1
-${LD('svBegT', LVLT('svBegT').join(','), ': !byte ')}   ; per sentry: where its path starts in svPathT
-${LD('svEndT', LVLT('svEndT').join(','), ': !byte ')}   ; ...and ends
-${LD('svPathT', LVLT('svPathT').join(','), ':!byte ')}   ; every sentry's path, as direction codes
-${LD('lvlArtT', LVLT('lvlArtT').join(','), ': !byte ')}   ; the level art set this level wants (see lvlArt)
+svPosT: !fill ${SV_MAX}, 0             ; ...where it is in svPathT (svRole sets it from svP0T)
 svDCT:  !byte 0,1,$ff,${hx(MAPW)},${hx(256 - MAPW)}   ; direction code -> cell step
 svHit:  !byte 0                 ; 1 = the player is touching a sentry this frame (svTouch)
 svBdOn: !byte 0                 ; 1 = the border is flashing
@@ -18596,23 +19360,36 @@ svFY:   !byte 0
 svFYH:  !byte 0
 svDX:   !byte 0
 svDY:   !byte 0
-svDLo:  !byte 0
 svF:    !byte 0                 ; the frame on show, 0..3
 svN:    !byte ${hx(SVGAP_MIN)}               ; ticks until it changes
 svB:    !byte 0                 ; ticks left in this burst, 0 = in a gap
+svInk:  !byte ${hx(calm)}
+svSd:   !byte $3c,$a5           ; the xorshift state; never 0
+;@@LX-END
+; ---- THE SENTRIES' RESIDENT STATE: what the engine's own code reads (the projection, osFlush) ----
+; svShT svDurT svPDT svInkT svBdT svVarT: equates into IAR1 -- see SVTBL
+${Object.entries(SVTBL_OFF).map(([n, o]) => `${n} = ${hx16(SVTBL_AT + o)}`).join('\n')}
+${LD('svNT', LVLT('svNT').join(','), ':   !byte ')}   ; this level's sentry count: entities 0..svN-1
+${LD('svPathT', LVLT('svPathT').join(','), ':!byte ')}   ; every PATH, once, as direction codes, each ended by -length
+${LD('svP0T', LVLT('svP0T').join(','), ':  !byte ')}   ; per role: where in its path it starts
+${LD('svRXT', LVLT('svRXT').join(','), ':  !byte ')}   ; start cells of the roles past stage 0's
+${LD('svRYT', LVLT('svRYT').join(','), ':  !byte ')}
+${LD('stNT', LVLT('stNT').join(','), ':   !byte ')}   ; the STAGES: how many (1 = the level is one room)
+${LD('sockStgT', LVLT('sockStgT').join(','), ': !byte ')}   ; per socket: the stage it begins, 0 = none
+${STN_MAX > 1 ? ['stWT', 'stWXT', 'stWYT', 'stWAXT', 'stWAYT', 'stSvT', 'stRmT', 'stFstT'].map(n => LD(n, LVLT(n).join(','), ': !byte ')).join('\n') : ''}
+${LD('lvlArtT', LVLT('lvlArtT').join(','), ': !byte ')}   ; the level art set this level wants (see lvlArt)
+svDLo:  !byte 0                 ; svTouch's scratch, and the projection's (svStep runs after it)
 svCnt:  !byte 0                 ; sprites the sentries took in the projection pass under way
-svSlT:  !byte 0,0,0,0,0,0,0,0   ; ...their slots (eight: every sentry shares the list)
+svSlT   = $b100                 ; ...their slots (eight: every sentry shares the list). RAM: read only below svCnt
 svBsT:  !byte 0,0,0,0,0,0,0,0   ; ...and their plain-ball pointers
 svLCnt: !byte 0                 ; the same, as of the last osFlush: what is ON SCREEN, and the
-svLSlT: !byte 0,0,0,0,0,0,0,0   ;   only list svTick may touch -- see osFlush
+svLSlT  = $b108                 ;   only list svTick may touch -- see osFlush. RAM: read only below svLCnt
 svLBsT: !byte 0,0,0,0,0,0,0,0
 svRX:   !byte 0                 ; the right column's X, 9 bits
 svRX8:  !byte 0
 svPD:   !byte 0
-svInk:  !byte ${hx(calm)}
 svY:    !byte 0
 svYH:   !byte 0
-svSd:   !byte $3c,$a5           ; the xorshift state; never 0
 `; })() : ''}${DIE ? `${DIE && SOUND ? `; ---- snTone / snRise: the DRONE climbs ----
 ; Not a note over the top: the drone itself is wound up, voices 1 and 2 together, keeping their
 ; absolute detune so the beating between them stays where it was while the pitch rises.
@@ -19111,9 +19888,8 @@ ${HAS_IDOL ? `        txa                     ; ...and gives them back when you 
         pla
         tax
 ` : ''}        lda #$01
-        sta entDty              ; leaves X alone, and X is still the entity index orbOcc1 wants
-        jmp orbOcc1             ; X is still the entity index. Its build-time occluder mask is
-                                ;   about the cell it came from and is now wrong.
+        sta entDty
+        rts                     ; (its occluder mask was rebuilt here for the new cell: gone -- see occBy)
 
 ${FALLMID ? '' : `; ---- bgStep: one slice of the destination render, once per fall frame ----
 bgStep: lda bgPh
@@ -19863,35 +20639,87 @@ ohNoY:  lda o0
         ora omX8
         sta omX8
 ohNo8:  rts
+; oAddS: o2:o1:o0 += o3:ogH:ogL (orbProj's height, above)
+oAddS:  clc
+        lda o0
+        adc ogL
+        sta o0
+        lda o1
+        adc ogH
+        sta o1
+        lda o2
+        adc o3
+        sta o2
+        rts
 kSgn:   bmi kSgN
         lda #$00
         rts
 kSgN:   lda #$ff
         rts
 
-; oTerm: (Y * X) as a 16-bit product in orL/orH, negated if A is negative. Y is a cell
-; difference magnitude (0..15) and X a trig magnitude, so this is a plain 8x8 -- the 16x8 the
-; old orot did was only ever needed because the orb offset carried a fraction, and that
-; fraction is now a per-frame constant instead.
-oTerm:  stx mq
-        sta tmp2
-        tya
-        jsr mul8
-        lda tmp2
-        bpl otD
+; oTmC / oTmS: Y * |cos| (or |sin|) as a 16-bit product in orL/orH, negated if A is negative.
+; Y is a cell difference's magnitude and |cos|/|sin| are this FRAME's, so the products are a short
+; table of multiples, not a multiply each (2026-10-14: four mul8s an entity, ~95 cycles each with the
+; sign handling; level 9's final room projects eight). The table grows only as far as an entity
+; asks -- omTrig resets it when the angle changes, so a spin past one orb builds a few entries, not
+; MULN. Exact: the same integer products the mul8s gave.
+oTmC:   cpy mcN
+        bcc oTmC1
+        jsr mcGrow
+oTmC1:  pha
+        lda mcLoT,y
+        sta orL
+        lda mcHiT,y
+        jmp oTmN
+oTmS:   cpy mcN
+        bcc oTmS1
+        jsr mcGrow
+oTmS1:  pha
+        lda msLoT,y
+        sta orL
+        lda msHiT,y
+oTmN:   sta orH
+        pla
+        bpl oTmD
         sec
         lda #$00
-        sbc plo
+        sbc orL
         sta orL
         lda #$00
-        sbc phi
+        sbc orH
         sta orH
+oTmD:   rts
+; mcGrow: extend both tables through entry Y, each from the last by one addition. Keeps A and Y.
+mcGrow: pha
+        sty mcY
+        ldx mcN
+mcGL:   clc
+        lda mcLoT-1,x
+        adc ocos
+        sta mcLoT,x
+        lda mcHiT-1,x
+        adc #$00
+        sta mcHiT,x
+        clc
+        lda msLoT-1,x
+        adc osin
+        sta msLoT,x
+        lda msHiT-1,x
+        adc #$00
+        sta msHiT,x
+        cpx mcY                 ; C set once the entry just built is Y's...
+        inx                     ;   (inx leaves C alone)
+        bcc mcGL
+        stx mcN                 ; ...and now Y+1 entries are valid
+        pla
         rts
-otD:    lda plo
-        sta orL
-        lda phi
-        sta orH
-        rts
+mcY:    !byte 0
+mcN:    !byte 1                 ; entries valid in the tables below; entry 0 is 0, always
+mcLoT:  !fill ${MULN}, 0             ; i * |cos|, this frame
+mcHiT:  !fill ${MULN}, 0
+msLoT:  !fill ${MULN}, 0             ; i * |sin|
+msHiT:  !fill ${MULN}, 0
+omCs:   !byte $ff,$ff           ; the |cos|,|sin| the tables were built for
 
 ; oFrac: (signed A * unsigned X) >> 8, negated if Y is $ff. A is 0.5 minus the player's
 ; fractional position, so the result is the shared fractional term of one product -- and it
@@ -20130,8 +20958,6 @@ cellFillT: !byte ${[...Array(256)].map((_, c) => {
 ; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
 ; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
 ; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
-orbOccLoT: !byte ${orbOccLo.join(',')}   ; ENGINE layout, beside its high bytes -- see LVL_TABLES
-orbOccHiT: !byte ${orbOccHi.join(',')}
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 ${LD('orbXCT', LVLT('orbXCT').join(','), ': !byte ')}      ; from the MANIFEST, so its length cannot
@@ -20693,7 +21519,7 @@ ohHiB:  !byte 0                 ; occStamp's binary search: the upper bound
 ; CONEGATE: the cone's verdict per entity, rebuilt by entGate every frame it runs. Sized like
 ; orbSeenT, so the hole-likes' indices -- which share oidx -- land inside it.
 cnOkT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}
-${OCCLAZYE ? `ooFrT:  !byte ${[...Array(NOCC)].map(() => 0).join(',')}   ; OCCLAZYE: this entity's mask is built for this frame's runs` : ''}
+
 ${LAZYCHK ? `lzShad: !fill ${OCCBYTES}, 0        ; LAZYCHK: the trusted mask, set aside for the compare
 lzBad:  !byte 0,0                ; LAZYCHK: bytes a trusted mask got wrong -- MUST be 0
 lzN:    !byte 0,0                ; LAZYCHK: trusted masks checked` : ''}
@@ -20952,12 +21778,16 @@ klParked: !byte 0
 ; destination render starts a slice per frame once this returns. It BLOCKS, deliberately -- ~705
 ; bytes is about 0.15s, spent inside an animation that is already playing.
 lvlLoad:
-${ENDING ? `        cmp #${hx(END_DST)}                ; THE END is not a level: endGo loads the ending instead
+${HAS_LX ? `        pha
+        jsr lxOff               ; LEVEL CODE: the departing level's is about to be read over
+        pla
+` : ''}${ENDING ? `        cmp #${hx(END_DST)}                ; THE END is not a level: endGo loads the ending instead
         beq endGo
 ` : ''}        ora #$30                ; the file is ILV<n>: the level number IS its last character,
         sta nILV+3              ;   so choosing a level is one byte of self-modification
-${HAS_SILVER ? `        jsr llName
-; ---- lvlArt: and the LEVEL ART at OVLBASE, if the arriving level wants the other set ----
+${HAS_LX ? `        jsr llName
+        jsr lxOn                ; LEVEL CODE: the arriving level's, if it brought any
+` : ''}${HAS_SILVER ? `; ---- lvlArt: and the LEVEL ART at OVLBASE, if the arriving level wants the other set ----
 ; The pedestal and the idol (IAR0) or the sentry's frames 2-3 (IAR1) -- see ART_SETS. Loaded with
 ; the level, by the same resident under the same blanked display, by renaming the one name buffer
 ; as endGo does. lvlArtT is 0 for a level that uses neither, which keeps whatever is in place.
@@ -20980,6 +21810,49 @@ laDn:   rts
 ; artCur is DATA, not an equate, for the reason dieN is: an emitted value is the only initialisation
 ; a death restart (jmp entry, which loads nothing) never repeats -- and the art does stay loaded.
 artCur: !byte ${hx(0x30 + ART_BOOT)}
+` : HAS_LX ? `        rts
+` : ''}${HAS_LX ? `; ---- THE LEVEL-CODE VECTORS (see LX_FEATURES) ----
+; The engine calls level code only through these. Each is a jmp: into the module's jump table at
+; LXAT while a level that brought code is live, at lxNone otherwise. lxOff stubs them before a load
+; reads over the module, the IRQ's FIRST; lxOn points them back, the IRQ's LAST -- each with
+; interrupts masked, because a jmp whose two address bytes disagree for one instruction is a crash.
+; They start out pointing wherever the boot level needs: its module rides in IMG with its tables.
+lxVec:
+${LX_VECS.map((v, k) => `${(v + ':').padEnd(8)}jmp ${LX_BOOT ? hx16(LXAT + 3 * k) : 'lxNone'}`).join('\n')}
+lxNone: rts
+lxOff:  php
+        sei
+        ldy #$00
+lxOfL:  lda #<lxNone
+        sta lxVec+1,y
+        lda #>lxNone
+        sta lxVec+2,y
+        iny
+        iny
+        iny
+        cpy #${3 * LX_VECS.length}
+        bne lxOfL
+        plp
+        rts
+lxOn:   lda lvlLxT
+        beq lxOnD               ; no level code: the stubs stay
+        php
+        sei
+        ldy #${3 * (LX_VECS.length - 1)}
+lxOnL:  tya
+        clc
+        adc #<${hx16(LXAT)}
+        sta lxVec+1,y
+        lda #>${hx16(LXAT)}
+        adc #$00
+        sta lxVec+2,y
+        dey
+        dey
+        dey
+        bpl lxOnL
+        plp
+lxOnD:  rts
+${LD('lvlLxT', LVLT('lvlLxT').join(','), ': !byte ')}   ; 1 = this level brings code (at LXAT)
 ` : ''}llName:
         lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
         sta llZP
@@ -21039,7 +21912,7 @@ egF:    jmp egF
         * = ${hx16(ORB_OCC)}
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
-${LD('orbOccT', (process.env.OCCSELF ? orbOccFlat.map(() => 255) : orbOccFlat).join(','), ': !byte ')}
+; (orbOccT, the per-entity occluder masks, lived here. Gone: occBy answers the facing rule when asked.)
 ${SOUND ? `; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
 ; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
 ; the rest of the per-orb tables live in runs right up against FROWT+0x500.
@@ -21140,19 +22013,7 @@ exitVisT: !byte ${exitVisT.join(',')}
 sockVisT: !byte ${sockVisT.join(',')}
 pedVisT: !byte ${pedVisT.join(',') || '0'}
 
-        ; ---- runByteT / runBitT: a run id as a byte index and a bit mask ----
-        ; Here, in the page the cut-scene charset vacated when it was repacked to the glyphs its
-        ; picture actually reaches (see FACE_PACK). They were in the $9d00 block, which a
-        ; four-level chain overran by 113 bytes -- the wall deltas grew when NHOLE went to seven
-        ; for the hub's pedestals, because opening a wall changes the LOS bitmap and the delta
-        ; carries every byte of it that moved.
-        ; NOT gated on DIE, though they LIVE in the death scene's page: orbOcc reads them every
-        ; frame of every build. They were inside the DIE block, so DIE=0 stopped assembling with
-        ; "undefined symbol: runByteT" -- a table's HOME is not its OWNER. Their address is
-        ; anchored to $7900 rather than to the end of faceChrT: see RUNTAB.
-        * = ${hx16(RUNTAB)}
-runByteT: !byte ${[...Array(NRUN)].map((_, r) => r >> 3).join(',')}
-runBitT: !byte ${[...Array(NRUN)].map((_, r) => 1 << (r & 7)).join(',')}   ; every id, as mkRuns rebuilds it
+        ; (runByteT / runBitT lived here: a run id as a mask byte and bit. Gone with the masks -- see occBy.)
 ${SOUND ? `` : ''}
         * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
 ; moveXT/moveYT were 512 bytes of TABLE sitting inside the code block -- the scarcest resource
@@ -21803,7 +22664,7 @@ ${CEILVARY && !FALLMID ? `lvlLo:  ldx lvlMeT              ; (only the non-FALLMI
         ldx lvlMeT              ; LEVEL_FLICKER: is this level's light failing? (flkTick)
         lda lvlFlkT-1,x
         sta flkOn
-${FLKSPR ? '        sta flkDk               ; FLKSPR: a flickering level starts dark\n' : ''}${FLKINK ? `        jsr fkEmpty             ; no inked rectangle yet (its zero page is whatever a load left)
+${FLKSPR ? '        sta flkDk               ; FLKSPR: a flickering level starts dark\n' : ''}${FLKINK ? `        jsr lxLook              ; fkEmpty: no inked rectangle yet (its zero page is whatever a load left)
 ` : ''}` : ''}${(() => {
   // EVERY ink is set here, whether it varies across the chain or not. It used to emit only the
   // ones that vary, on the grounds that the rest were "already correct from boot" -- true when
@@ -21935,7 +22796,9 @@ ${HAS_FLICKER ? (() => { const F = LEVEL_FLICKER[LEVEL_IDS.find(n => LEVEL_FLICK
   if (LEVEL_IDS.some(n => LEVEL_FLICKER[n] && JSON.stringify(LEVEL_FLICKER[n]) !== JSON.stringify(F)))
     throw new Error('LEVEL_FLICKER: flkTick takes its lit inks as immediates; give it a table before two levels differ');
   return `
+;@@LX-BEGIN flicker
 ; ---- flkTick: a failing fluorescent tube, from the top-of-frame IRQ (see LEVEL_FLICKER) ----
+; LEVEL CODE (see LX_FEATURES): loaded with the flickering level, reached through lxTick.
 ; Every 60Hz frame while flkOn. Quiet for a random GAP of ticks, then a BURST of a few ticks in
 ; which each tick is lit or not at random -- the stutter of a tube trying to strike -- then another
 ; gap. A lit tick overrides all three inks for this frame only; the next dark tick puts them back.
@@ -22037,8 +22900,6 @@ fkBS:   sta $d027,x
         dex
         bpl fkBL
         rts
-flkMapT:!byte ${FLKSPR_MAP.map(hx).join(',')}
-flkDk:  !byte 0                 ; 1 = the bodies wear FLKSPR_MAP (dark), 0 = their own colours
 ` : ''}flkRnd: lda flkSd+1             ; x ^= x << 7
         lsr
         lda flkSd
@@ -22203,11 +23064,15 @@ fkC0    = $bc                   ; THE RECTANGLE: columns...
 fkC1    = $bd
 fkR0    = $be                   ; ...and rows. Empty while C1 < C0.
 fkR1    = $bf
-` : ''}${process.env.FLKCNT ? 'flkCnt: !byte 0,0\n' + (FLKINK ? 'flkDbg: !byte 0,0,0,0\n' : '') : ''}flkOn:  !byte 0                 ; lvlLook: this level's lvlFlkT entry
-flkLit: !byte 0                 ; the inks on screen are the LIT ones
-flkBur: !byte 0                 ; ticks left in this burst, 0 = in a gap
+` : ''}${process.env.FLKCNT ? 'flkCnt: !byte 0,0\n' + (FLKINK ? 'flkDbg: !byte 0,0,0,0\n' : '') : ''}flkBur: !byte 0                 ; ticks left in this burst, 0 = in a gap
 flkGap: !byte $40               ; ticks left in this gap
 flkSd:  !byte $5a,$c3           ; the xorshift state; never 0, which is its one fixed point
+;@@LX-END
+; ---- the flicker's RESIDENT state: lvlLook, osFlush and lvlSpr read it ----
+${FLKSPR ? `flkMapT:!byte ${FLKSPR_MAP.map(hx).join(',')}
+flkDk:  !byte 0                 ; 1 = the bodies wear FLKSPR_MAP (dark), 0 = their own colours
+` : ''}flkOn:  !byte 0                 ; lvlLook: this level's lvlFlkT entry
+flkLit: !byte 0                 ; the inks on screen are the LIT ones
 lvlFlkT:!byte ${[...Array(PAL_N)].map((_, i) => LEVEL_FLICKER[i + 1] ? 1 : 0).join(',')}   ; per level id - 1
 `; })() : ''}${HAS_SHD01 ? (() => {
   // Each entry's ADDRESS, sorted, so the index can say which page it is on: the list runs up
@@ -22944,20 +23809,6 @@ mrHnx:  iny
         ; run had an empty occluder bit: it popped in and out with the player's cell (2026-09-17).
         ; No id in the live tables can be stale: the swap is followed by this rebuild, and the
         ; masks are remade from the live tables every frame.
-        ldx #$00
-mrB:    txa
-        lsr
-        lsr
-        lsr
-        sta runByteT,x
-        txa
-        and #$07
-        tay
-        lda mrBitT,y
-        sta runBitT,x
-        inx
-        cpx #${hx(NRUN)}
-        bcc mrB
         jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
                                 ;   ends at bfsQ with nothing to spare.
 
@@ -23085,6 +23936,10 @@ obKLp:  dex
         lda #$ff                ; $ff = never: hidden, or not an angel while dying
         ldy orbHidT,x
         bne obKSt
+        ldy cnOkT,x             ; CULLED by entGate (zone or cone): orbOne would only reject it, so it
+        beq obKSt               ;   never enters the sort (A is still $ff) -- a pick scans every entity,
+                                ;   and level 9's room 1 has 14, most out of sight (2026-10-14). orbNo's
+                                ;   one job, NOT SEEN, entGate now does as it culls -- see ogENo.
 ${DIE ? `        ldy dieSt               ; dying: the ANGEL keeps its sprite and nothing else does.
         beq obKLiv              ;   Done here rather than by clearing omEn, because orbMove
         ldy orbTallT,x          ;   refills omEn later in the same frame -- which is exactly how
@@ -23240,8 +24095,6 @@ seNB    = $bdf8                 ; 8 bytes: the row being built, ending exactly a
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
-occVer: !byte $ff               ; blkVer and the cell orbOccAll last rebuilt for; $ff forces
-occCell:!byte $ff               ;   a rebuild on the first frame
 ${OCCCHK ? `; EQUATES, not emitted bytes: declaring these as !byte pushed everything after this point along by
 ; 19 bytes and the build stopped running, assembling clean the whole way.
 ;
@@ -24417,6 +25270,8 @@ ogEC1:  ldx cnI                 ;   cnI is always X's twin in this loop -- and t
 ogENo:  ldx cnI
         lda #$00
         sta cnOkT,x
+        sta orbSeenT,x          ; ...and NOT SEEN: obOrder leaves a culled entity out of the sort, so
+                                ;   orbNo never runs for it -- and a stale 1 freezes an angel for ever
 ogENx:  inx
         stx cnI
         cpx cnEnd
@@ -24636,7 +25491,6 @@ hsfLp:  lda hazSpT,x            ; parent id, or $ff at the end
 hsfDn:  rts
 ; mkRuns's bit table and scratch. Out of the $9200 block, which the row-counted vertical pass
 ; (2026-09-17) filled to the byte -- bfsQ sits at its end and the page boundary is hard.
-mrBitT: !byte 1,2,4,8,16,32,64,128
 mrNext: !byte 0
 mrWid:  !byte 0
 mrEid:  !byte 0
@@ -24667,7 +25521,18 @@ omTrig:
         sta oqa+1
         jsr qTrig
         sta osin
-        lda #$00                ; sin(a) < 0 exactly when bit 7 of a is set, and cos(a) < 0
+        cmp omCs+1              ; a new |cos| or |sin|: orbProj's table of multiples starts over
+        bne omMcR               ;   (oTmC grows it as entities ask)
+        lda ocos
+        cmp omCs
+        beq omMcD
+omMcR:  lda ocos
+        sta omCs
+        lda osin
+        sta omCs+1
+        lda #$01
+        sta mcN
+omMcD:  lda #$00                ; sin(a) < 0 exactly when bit 7 of a is set, and cos(a) < 0
         sta osinS               ; when bit 7 of a+64 is -- no sign tables needed
         lda pa
         bpl oss
@@ -26204,6 +27069,9 @@ const ALIGNED_T = {
     // on one. Inferred page-aligned from their hand addresses, they were stranded when the sentry's
     // code took the arena (2026-10-14).
     faceIdT: { within: NLOG }, remLoT: { within: NLOG },
+    // the sentries' slot list: it sits at $b100 only because that page was free, and an address on
+    // a boundary reads as "page-aligned" -- which stranded it (2026-10-14)
+    svSlT: 1,
     mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rsT: 256,   // rbT is 7 into rsT: sharedPair
     ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posYT: 256,   // posXT is 64 into posYT: quarterPair
@@ -26266,6 +27134,47 @@ writeFileSync('./build/iray.bufsizes.json', JSON.stringify(Object.fromEntries(
     .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
     .filter(([n]) => RUNTIME_BUFS[n] !== undefined).map(([n]) => [n, RUNTIME_BUFS[n]]))));
 
+// ---- LEVEL CODE: cut each module out of the engine's source, size it, reserve its block ----
+// The text between ;@@LX-BEGIN and ;@@LX-END is not engine code: it is assembled on its own at LXAT,
+// and linked AFTER compaction against the engine's final addresses (lxLink) -- which is what lets it
+// name engine symbols, where a level's TABLES may not (they are laid out before the engine is).
+// Sized now with every engine symbol a placeholder: absolute unless the source already gives it a
+// zero-page address. The real link can only shrink it (compaction promotes more to zero page).
+const LX_SRC = {};          // feature -> its marked text
+asm = asm.replace(/^;@@LX-BEGIN (\w+)\n([\s\S]*?)^;@@LX-END\n/gm, (_, nm, body) => {
+  LX_SRC[nm] = (LX_SRC[nm] ?? '') + body; return `; (level code '${nm}' cut here: see LX_SRC)\n`; });
+// the zero page level code OWNS (its own equates): compaction must not promote engine buffers onto it
+writeFileSync('./build/iray.zpres.json', JSON.stringify([...new Set(Object.values(LX_SRC).flatMap(t =>
+  [...t.matchAll(/^[a-zA-Z][a-zA-Z0-9_]*\s*=\s*\$([0-9a-fA-F]{1,2})\b/gm)].map(m => parseInt(m[1], 16))))].sort((a, b) => a - b)));
+// a level's module: the jump table in LX_VECS order, then each of its features' text
+const lxSrcFor = feats => {
+  for (const f of feats) if (!LX_SRC[f]) throw new Error(`level code: feature '${f}' has no marked text in this build`);
+  return LX_VECS.map(v => { const f = feats.find(f => LX_FEATURES[f].vecs[v]);
+      return `        jmp ${f ? LX_FEATURES[f].vecs[v] : 'lxRtsM'}               ; ${v}`; }).join('\n') +
+    `\nlxRtsM: rts                     ; a vector none of this level's features answers\n${feats.map(f => LX_SRC[f]).join('\n')}`;
+};
+const lxAssemble = (feats, resolve) => {
+  const src = lxSrcFor(feats), eq = new Map();
+  for (let tries = 0; tries < 500; tries++) {
+    try { return assemble(`${[...eq].map(([n, v]) => `${n} = ${hx16(v)}`).join('\n')}\n        * = ${hx16(LXAT)}\n${src}`); }
+    catch (e) { const m = /undefined symbol: (\w+)/.exec(e.message); if (!m || eq.has(m[1])) throw new Error(`level code (${feats}): ${e.message}`);
+      eq.set(m[1], resolve(m[1])); }
+  }
+  throw new Error('level code: too many engine symbols');
+};
+// one module per distinct feature set among the levels this ENGINE supports -- not just the ones on
+// this disk: the block is the engine's, and a disk that leaves level 9 off must not report the room
+// level 9's code needs as free
+const LX_SETS = [...new Set(LEVEL_IDS.filter(LX_OF).map(n => LX_FEAT_OF(n).join('+')))];
+const LX_SIZE = (() => {
+  if (!LX_SETS.length) return 0;
+  const zp = new Map([...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{1,2})\b/gm)].map(m => [m[1], parseInt(m[2], 16)]));
+  return Math.max(...LX_SETS.map(k => lxAssemble(k.split('+'), n => zp.has(n) ? zp.get(n) : 0x1234).bytes.length));
+})();
+if (LX_SIZE) {
+  writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, LXAT + LX_SIZE]));
+  console.error(`  level code: ${LX_SIZE} bytes reserved at ${hx16(LXAT)} (after the level data); modules ${LX_SETS.map(k => `${k} (level ${LEVEL_IDS.filter(n => LX_FEAT_OF(n).join('+') === k).join(',')})`).join(', ')}`);
+}
 const asmPath = DIAG.length ? './build/iray.diag.asm' : './build/iray.asm';
 if (EMBEDDED.length) asm += `\n; ---- tables that live inside other tables (embedIn) ----\n${EMBEDDED.join('\n')}\n`;
 writeFileSync(asmPath, asm);
@@ -26282,9 +27191,48 @@ writeFileSync(asmPath, asm);
   asm = readFileSync('./build/iray.compact.asm', 'utf8');
   writeFileSync(asmPath, asm);          // so everything downstream reads the layout that ships
 
+let LX_BYTES = null;       // the linked level code, per feature set (see LX_SRC), once the engine is final
 lintReach(asm);            // AFTER the write: a failure should leave the file to look at
 try {
   const r = assemble(asm);
+  // ---- NOTHING BUT THE LEVEL'S OWN TABLES MAY LIVE IN THE LEVEL REGION ----
+  // Every level load rewrites [SLOT_AT, end): data, wall lists, level code. A RAM buffer in there is
+  // clobbered by each load and clobbers the level code in between -- silently: the image has a hole
+  // there, so the "no equate inside emitted data" guard cannot see it. runPlaneT did exactly that.
+  {
+    const end = LX_SIZE ? LXAT + LX_SIZE : LVLREGION_END, slotN = new Set(LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n])));
+    const inReg = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{4})\s*(?:;.*)?$/gm)]
+      .map(m => [m[1], parseInt(m[2], 16)]).filter(([nm]) => !slotN.has(nm))
+      // EXACT extents -- the start, plus the declared size where there is one -- not reserveOf's
+      // page-rounding, which flagged buffers merely sharing a page with the region's end (fpsr's
+      // level-3 and level-7 builds, 2026-10-14). Compaction carves the reserve with exact sizes too.
+      .filter(([nm, a]) => a < end && a + (RUNTIME_BUFS[nm] ?? 1) > SLOT_AT);
+    // ...and the reverse: every slot table must BE in the slot. Compaction once promoted lvlMeT to zero
+    // page, where no level file ever writes it (2026-10-14).
+    const zpSlot = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
+      .filter(m => slotN.has(m[1]) && (parseInt(m[2], 16) < SLOT_AT || parseInt(m[2], 16) >= end)).map(m => `${m[1]}=$${m[2]}`);
+    if (zpSlot.length) throw new Error(`level-slot table(s) moved OUT of the slot, where level files never write them: ${zpSlot.join(' ')}`);
+    if (inReg.length) throw new Error(`RAM buffer(s) inside the level region ${hx16(SLOT_AT)}-${hx16(end - 1)}, which every level load ` +
+      `overwrites: ${inReg.map(([nm, a]) => `${nm}=${hx16(a)}`).join(' ')}`);
+  }
+  // ---- LEVEL CODE: link each module against the engine's FINAL addresses ----
+  if (LX_SETS.length) {
+    LX_BYTES = {};
+    for (const k of LX_SETS) {
+      const L = lxAssemble(k.split('+'), n => {
+        if (!(n in r.labels)) throw new Error(`level code names ${n}, which the engine does not define after compaction ` +
+          `(a buffer only level code names is dropped as unnamed -- give it a home in the module, or name it in the engine)`);
+        return r.labels[n]; });
+      if (L.bytes.length > LX_SIZE) throw new Error(`level code ${k} linked to ${L.bytes.length} bytes, past the ${LX_SIZE} reserved`);
+      // LXDUMP=1 (diagnostic): every engine symbol the module was linked against, and its address
+      if (process.env.LXDUMP) console.error(`  LXDUMP ${k} at ${hx16(LXAT)}: ` + Object.entries(L.labels)
+        .filter(([n]) => !lxSrcFor(k.split('+')).match(new RegExp(`^${n}(:|\\s+=)`, 'm'))).map(([n, v]) => `${n}=${hx16(v)}`).join(' '));
+      LX_BYTES[k] = [...L.bytes];
+      // LXLIST=<file> (diagnostic): the linked module's listing, address and bytes per source line
+      if (process.env.LXLIST) writeFileSync(process.env.LXLIST + '.' + k + '.txt', L.listing.map(e =>
+        `${hx16(e.at ?? 0)} ${[...(e.bytes ?? [])].slice(0, e.len).map(b => b.toString(16).padStart(2, "0")).join(" ").padEnd(9)} ${e.src ?? e.text ?? ''}`).join('\n'));
+    }
+  }
   if (PACK_PROBE) {
     // The map pass-2 packs into. Equate addresses go with it: a hole with a RAM equate in it is
     // NOT free -- the program writes there at runtime and would overwrite whatever we placed.
@@ -26570,6 +27518,13 @@ try {
             `carries ($${(SLOT_AT + body.length).toString(16)}-$${(SLOT_AT + data.length - 1).toString(16)}). ` +
             `A level may only point at its own wall data -- see wallPtrs.`);
         }
+      }
+      // LEVEL CODE: zeros up to LXAT, then the module, linked against this very engine (LX_BYTES)
+      if (LX_OF(n) && LX_BYTES) {
+        const mod = LX_BYTES[LX_FEAT_OF(n).join('+')];
+        if (SLOT_AT + data.length > LXAT) throw new Error(`level ${n}'s data runs past LXAT ${hx16(LXAT)}`);
+        while (SLOT_AT + data.length < LXAT) data.push(0);
+        data.push(...mod);
       }
       return { tag: 'V' + n, name: 'ILV' + n, at: SLOT_AT,
                runtime: n !== LVL, data };
@@ -26977,6 +27932,10 @@ try {
     const hits = [];
     for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
       const lo = Math.max(all[i][1], all[j][1]), hi = Math.min(all[i][2], all[j][2]);
+      // PIVLAB's records sit on the death picture ON PURPOSE: it requires NOSHOCK=1 (checked where
+      // PIVLAB is read), so the picture is never shown -- the one overlap that is a decision
+      const pair = [all[i][0], all[j][0]];
+      if (PIVLAB && pair.includes('PICBASE') && pair.some(n => n === 'plR' || n === 'plPrd')) continue;
       if (hi > lo) hits.push(`${all[i][0]} x ${all[j][0]}: $${lo.toString(16)}-` +
         `$${(hi - 1).toString(16)} (${hi - lo} bytes)`);
     }
@@ -27052,6 +28011,13 @@ try {
       if (at < hi) out.push([at, hi, []]);
       return out.sort((a, b) => a[0] - b[0]);
     });
+    // ...and the LEVEL CODE block: no equate points into it, so without this it read as free -- and
+    // the report claimed the 1.3K a module needs as spendable (2026-10-14)
+    if (LX_SIZE) for (let i = holes.length - 1; i >= 0; i--) {
+      const [lo, hi, nm] = holes[i], a = Math.max(lo, LXAT), b = Math.min(hi, LXAT + LX_SIZE);
+      if (nm.length || a >= b) continue;
+      holes.splice(i, 1, ...[[lo, a, []], [a, b, ['(level code)']], [b, hi, []]].filter(([x, y]) => y > x));
+    }
     const spendable = holes.filter(h => !h[2].length).reduce((a, [lo, hi]) => a + (hi - lo), 0);
     console.log(`image holes: ${holes.length}, ${spendable} bytes with nothing living in them` +
                 ` (+ ${VBANK - r.end} bytes above the image, below $c000)`);

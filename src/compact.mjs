@@ -67,10 +67,16 @@ const zpAlloc = text => {
   const code = L.map(l => l.split(';')[0]);
   // equates: RAM buffers (4 hex digits, inside the image's range) and existing zero page
   const ram = new Map(), zpEq = new Map();
+  const SLOTN0 = new Set(readJ('iray.slotnames.json'));
   code.forEach((l, i) => {
     const m = /^([A-Za-z_]\w*)\s*=\s*\$([0-9a-fA-F]+)\s*$/.exec(l.trim());
     if (!m) return;
     const v = parseInt(m[2], 16);
+    // NOT the level slot's tables (iray.slotnames.json): they are where the level FILES land, and a
+    // promoted one never receives its level's value. Safe only by luck while zero page was full;
+    // the level-code move freed some, and lvlMeT went to $66 -- every per-level ink read index -1,
+    // a black sky and garbage walls on every WIP=1 level (2026-10-14).
+    if (SLOTN0.has(m[1])) return;
     if (m[2].length === 4 && v >= ORG && v < CEIL && !ram.has(m[1])) ram.set(m[1], { a: v, def: i });
     else if (v < 0x100 && !zpEq.has(m[1])) zpEq.set(m[1], v);
   });
@@ -117,6 +123,10 @@ const zpAlloc = text => {
   });
   // ---- free zero page ----
   const used = new Set([0, 1, ...zpEq.values(), ...zpUse]);
+  // ...and what LEVEL CODE owns: its equates were cut out of this source with it (build-iray's
+  // LX_SRC), so nothing here names them -- and promoting an engine buffer onto them hung level 8's
+  // boot, the flicker writing its rectangle over engine state (2026-10-14).
+  try { for (const a of JSON.parse(readFileSync('./build/iray.zpres.json', 'utf8'))) used.add(a); } catch {}
   for (let a = kz('loader_zp_first'); a <= kz('loader_zp_last'); a++) used.add(a);
   const zpSorted = [...new Set(zpEq.values())].sort((a, b) => a - b);
   for (const n of zpIdx) {                         // an indexed zero-page buffer: up to the next equate
@@ -491,9 +501,11 @@ writeFileSync(ROOT + 'iray.syms.json', JSON.stringify(out.labels));
 // tables. Reported, because they are the difference between "it assembles" and "it could run".
 // NOT the level slot's equates: since the slot moved into CPU RAM (2026-10-13) its tables are equates
 // in the image range too, but they are where the level FILES land -- a fixed address, not scratch.
-const SLOTR = need('iray.reserve.json');
+// BY NAME (iray.slotnames.json), not by address: a hand-placed buffer whose address happens to fall
+// inside the reserve is scratch like any other, and must move out of it.
+const SLOTN = new Set(need('iray.slotnames.json'));
 const eqs = [...src.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*) *= *\$([0-9a-fA-F]{4})(?:\s*;.*)?$/gm)]
-  .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= ORG && a < CEIL && !(a >= SLOTR[0] && a < SLOTR[1]));
+  .map(m => [m[1], parseInt(m[2], 16)]).filter(([n, a]) => a >= ORG && a < CEIL && !SLOTN.has(n));
 
 // ---- HOW BIG IS EACH SCRATCH BUFFER, REALLY ----
 // An equate declares no length, so build-iray.mjs reserves its whole PAGE -- safe, and here it
@@ -616,6 +628,9 @@ RESERVE = need('iray.reserve.json');
 // ...and the region must lie wholly in the ARENA once the level slot is in CPU RAM (2026-10-13). Only
 // scratch is carved around it; code grows up and tables grow down regardless, and a run laid over
 // the slot would be overwritten by every level load -- silent, and only after the first fall.
+// The arena and the region, for build-iray's slot picker: written BEFORE the check, so a slot that
+// misses still tells the picker where it would fit.
+writeFileSync('./build/iray.arena.json', JSON.stringify({ codeEnd, dataStart, regionLen: RESERVE[1] - RESERVE[0] }));
 if (RESERVE[0] < CEIL && RESERVE[1] > ORG && (RESERVE[0] < codeEnd || RESERVE[1] > dataStart)) {
   console.error(`compact: the level slot $${RESERVE[0].toString(16)}-$${(RESERVE[1] - 1).toString(16)} is not inside ` +
     `the arena $${codeEnd.toString(16)}-$${(dataStart - 1).toString(16)} -- move SLOT_AT`);
@@ -625,34 +640,47 @@ const carve = ([lo, hi]) => {
   if (!RESERVE || RESERVE[1] <= lo || RESERVE[0] >= hi) return [[lo, hi]];
   return [[lo, Math.min(hi, RESERVE[0])], [Math.max(lo, RESERVE[1]), hi]].filter(([a, b]) => b > a);
 };
-const holes = out.holes.flatMap(([lo, hi]) => carve([lo, hi])).sort(bySize);
-let inPad = 0, placed = 0;
-for (const b of bufs) {
-  // where it would start in a hole: on the next page if aligned, or if it would cross one
-  const startIn = lo => b.align || (b.within && (lo & 255) + b.within > 256) ? (lo + 255) & ~255 : lo;
-  const fits = ([lo, hi]) => startIn(lo) + b.size <= hi;
-  const h = holes.find(fits);
-  if (!h) {
-    // NOT SILENT ANY MORE. A buffer with no hole stays at its hand-layout address, which is now
-    // inside the image -- the build's equate guard then refuses the disk, but names only the
-    // victims ("pvN=$8000 ... sit inside the emitted image"), not the cause. Twice (2026-10-08) the
-    // cause was a scalar run INFERRED page-aligned from its address, stranded when the arena lost
-    // a page; ALIGNED_T name: 1 is the fix when the run does not really need one.
-    console.error(`  compact: no hole for ${b.n} (${b.size} B${b.align ? ', page-aligned' : ''}` +
-      `${b.align && ALIGNED[b.n] === undefined ? ' -- INFERRED from its address; if nothing needs ' +
-        'the page, declare ALIGNED_T ' + b.n + ': 1' : ''}); left at $${b.a.toString(16)}`);
-    continue;
+// PLACE, and if anything is left with no hole, place AGAIN with the page-constrained buffers first
+// (2026-10-14, the full WIP engine with level 9's sentries: 274 bytes free, but remLoT -- 160 that may
+// not cross a page -- came last among the big ones and found every page already cut up). Only as a
+// retry, so a build that fits keeps exactly the layout it had.
+const place = order => {
+  const holes = out.holes.flatMap(([lo, hi]) => carve([lo, hi])).sort(bySize);
+  let inPad = 0, placed = 0, failed = [];
+  for (const b of bufs) delete b.at;
+  for (const b of order) {
+    const startIn = lo => b.align || (b.within && (lo & 255) + b.within > 256) ? (lo + 255) & ~255 : lo;
+    const fits = ([lo, hi]) => startIn(lo) + b.size <= hi;
+    const h = holes.find(fits);
+    if (!h) { failed.push(b); continue; }
+    if (h[1] <= codeEnd || h[0] >= dataStart) inPad += b.size;
+    b.at = startIn(h[0]);
+    if (b.at > h[0]) holes.push([h[0], b.at]);
+    { let o = b.at; for (const m of b.members) { m.at = o; o += m.size; } }
+    h[0] = b.at + b.size; placed++;
+    holes.sort(bySize);
   }
-  if (h[1] <= codeEnd || h[0] >= dataStart) inPad += b.size;
-  b.at = startIn(h[0]);                          // REMEMBER where it went: this is what runs
-  // A page-aligned buffer skips forward to the boundary. Those skipped bytes used to be simply
-  // LOST -- 1,349 of them, more than a third of the level arena, thrown away to round up nine
-  // buffers. They are perfectly good RAM and most of what is left to place is one or two bytes
-  // wide, so hand the gap back as a hole instead of dropping it on the floor.
-  if (b.at > h[0]) holes.push([h[0], b.at]);
-  { let o = b.at; for (const m of b.members) { m.at = o; o += m.size; } }
-  h[0] = b.at + b.size; placed++;
-  holes.sort(bySize);
+  return { holes, inPad, placed, failed };
+};
+let P = place(bufs);
+if (P.failed.length) {
+  const P2 = place([...bufs.filter(b => b.align || b.within), ...bufs.filter(b => !b.align && !b.within)]);
+  if (process.env.PLACEDBG) console.error('  PLACEDBG first: ' + P.failed.map(b => b.n + ' ' + b.size).join(', ') + ' / retry: ' + P2.failed.map(b => b.n + ' ' + b.size).join(', '));
+  if (P2.failed.length < P.failed.length) { P = P2; console.error('  compact: placed again, page-constrained buffers first'); }
+  else P = place(bufs);
+}
+const { holes, inPad, placed } = P;
+if (process.env.PLACEDBG) console.error(`  PLACEDBG reserve $${RESERVE[0].toString(16)}-$${RESERVE[1].toString(16)}; ` +
+  bufs.filter(b => b.at !== undefined && b.at < RESERVE[1] && b.at + b.size > RESERVE[0]).map(b => `${b.n}@$${b.at.toString(16)}+${b.size}`).join(' ') + ' in the reserve (must be none)');
+for (const b of P.failed) {
+  // NOT SILENT ANY MORE. A buffer with no hole stays at its hand-layout address, which is now
+  // inside the image -- the build's equate guard then refuses the disk, but names only the
+  // victims ("pvN=$8000 ... sit inside the emitted image"), not the cause. Twice (2026-10-08) the
+  // cause was a scalar run INFERRED page-aligned from its address, stranded when the arena lost
+  // a page; ALIGNED_T name: 1 is the fix when the run does not really need one.
+  console.error(`  compact: no hole for ${b.n} (${b.size} B${b.align ? ', page-aligned' : ''}` +
+    `${b.align && ALIGNED[b.n] === undefined ? ' -- INFERRED from its address; if nothing needs ' +
+      'the page, declare ALIGNED_T ' + b.n + ': 1' : ''}); left at $${b.a.toString(16)}`);
 }
 const arenaLeft = holes.filter(([lo, hi]) => lo >= codeEnd && hi <= dataStart)
                        .reduce((t, [lo, hi]) => t + (hi - lo), 0);

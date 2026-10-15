@@ -28,8 +28,11 @@ import net from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-export const ROOT = new URL('..', import.meta.url).pathname;
-export const X64 = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
+// LEST_ROOT: the tree to build and run, when it isn't this one. regress.sh points THIS tree's tools
+// at the base revision's worktree, so both sides are measured by one tool set and a tool change in
+// the working tree (a new VICE path, 2026-10-15) can't make the base side fail.
+export const ROOT = process.env.LEST_ROOT || new URL('..', import.meta.url).pathname;
+export const X64 = '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';
 
 export const parseEnv = (str, base = process.env) => {
   const env = { ...base };

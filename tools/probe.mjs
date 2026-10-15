@@ -25,7 +25,7 @@ import { portHeld, launch, LAUNCH_FLAGS } from './vice.mjs';
 // runs from the project root wherever it is started from. It takes no file paths of its own.
 process.chdir(new URL('..', import.meta.url).pathname);
 
-const VICE = '/Applications/vice-arm64-gtk3-3.8/bin/x64sc';
+const VICE = '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';
 const DISK = './lest-c64.d64';
 const args = process.argv.slice(2);
 if (!args.length) { console.error('usage: node tools/probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
