@@ -13,7 +13,11 @@ const OUT = process.argv[2] ?? 'music/lest-starter.sng';
 
 // ---- the four tables: [left, right] rows, 1-based pointers handed out as rows are added ----
 const T = { wave: [], pulse: [], filt: [], speed: [] };
-const add = (t, rows) => { const at = T[t].length + 1; T[t].push(...rows); return at; };
+// an FF jump is written relative to its own table's first row and made absolute here: GoatTracker's
+// jumps are positions in the SHARED table (this was missed at first -- Minor arp and Bouncy bass looped
+// into other instruments' rows)
+const add = (t, rows) => { const at = T[t].length + 1;
+  T[t].push(...rows.map(([l, r]) => l === 0xff && r ? [l, r + at - 1] : [l, r])); return at; };
 
 // ---- instruments (AD, SR, tables, vibrato) ----
 // Each wavetable row is [waveform or delay/command, note]: right side 00-5F relative, 80 keep,
