@@ -1,0 +1,43 @@
+LEVEL 9
+
+                                   1  1  1  1  1  1  1  1
+     0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7
+ 0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
+ 1  [] [] OO .. .. OO |3 .. S1 .. [] X! .. .. .. .. .. []
+ 2  [] [] .. [] [] .. [] [] |1 [] [] [] [] [] [] .. [] []
+ 3  [] .. .. [] [] .. [] .. .. .. [] .. .. .. .. .. .. []
+ 4  [] .. OO .. .. OO [] [] .. [] [] .. .. .. .. .. .. []
+ 5  [] P> .. OO .. .. [] .. .. .. [] .. .. .. .. .. .. []
+ 6  [] .. .. [] [] OO [] [] .. [] [] .. .. .. .. .. .. []
+ 7  [] [] OO [] [] .. [] .. .. .. [] .. .. .. .. .. .. []
+ 8  [] [] .. .. OO .. OO [] .. [] [] .. .. .. .. .. .. []
+ 9  [] [] [] [] [] [] [] [] |4 [] [] .. .. .. .. .. .. []
+10  [] [] [] [] [] [] .. .. .. .. S2 |2 .. .. .. .. .. []
+11  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
+
+size     18 x 12 = 216 cells
+start    (1.50, 5.00) facing 0 deg (0 east, 90 south)  [PX=0180 PY=0500 PA=00 PAF=00]
+inks     ground 1 white, walls 0 black, seams 11 grey 1
+exit     X! at (11,1): THE END (the ending sequence), hole 0 black
+group 1  (8,2) -- opened by S1 (8,1)
+group 2  (11,10) -- opened by S2 (10,10)
+group 3  (6,1) -- opened by nothing
+group 4  (8,9) -- opened by nothing
+
+The sheet above cannot show sentries or stages: its OO in the loops are the first stage's
+sentries, later stages are missing, and the groups "opened by nothing" are W1/W2, the walls that
+CLOSE behind you when S1/S2 are fed. The level is built from this authoring sheet (see L9_SHEET
+in src/build-iray.mjs for its notation: >n/<n/vn/^n a sentry heading off on path n, ~n path n,
+Wn closes when Sn is fed, |n opens):
+ 0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
+ 1  [] [] >1 ~1 ~1 v1 W1 .. S1 .. [] XX .. .. .. .. .. []
+ 2  [] [] ~1 [] [] ~1 [] [] |1 [] [] [] [] [] [] .. [] []
+ 3  [] .. ~1 [] [] ~1 [] >3 ~3 ~3 [] ~8 ~8 <8 ~9 ~9 v9 []
+ 4  [] PP ^1 ~1 ~1 <1 [] [] .. [] [] ~8 .. ~8 ~9 .. ~9 []
+ 5  [] PP ~2 >2 ~2 ~2 [] ~4 >4 ~4 [] >8 ~8 ~8 ^9 ~9 ~9 []
+ 6  [] .. ~2 [] [] v2 [] [] .. [] [] >6 ~6 ~6 v7 ~7 ~7 []
+ 7  [] [] ^2 [] [] ~2 [] ~5 ~5 <5 [] ~6 .. ~6 ~7 .. ~7 []
+ 8  [] [] ~2 ~2 <2 ~2 OO [] .. [] [] ~6 .. ~6 ~7 .. ~7 []
+ 9  [] [] [] [] [] [] [] [] W2 [] [] ~6 ~6 <6 ~7 ~7 ^7 []
+10  [] [] [] [] [] [] OO .. .. .. S2 |2 .. .. .. .. .. []
+11  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []

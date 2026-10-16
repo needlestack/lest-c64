@@ -6213,6 +6213,14 @@ if (process.env.LEVELSHEET === '1') {
     out.push(`|+       (${xy}) is in groups ${ks.join(' and ')}: whichever opens first takes it out`);
   LEASH_GROUPS.forEach((grp, k) => { if (grp.length) out.push(`leash    A${k + 1} may not enter ${grp.map(([x, y]) => `(${x},${y})`).join(' ')}`); });
   if (LEVEL_IDOL[LVL]) out.push(`idol     carried to the hub's pedestals`);
+  // Level 9's SENTRIES and STAGES have no glyphs in KEY.txt: drawn as above, its stage-0 sentries
+  // read as orbs (OO), later stages' cast is missing, and the closing walls W1/W2 look like doors
+  // opened by nothing. So its sheet also carries the authoring sheet the level is built from.
+  if (LVL === 9) out.push('', 'The sheet above cannot show sentries or stages: its OO in the loops are the first stage\'s',
+    'sentries, later stages are missing, and the groups "opened by nothing" are W1/W2, the walls that',
+    'CLOSE behind you when S1/S2 are fed. The level is built from this authoring sheet (see L9_SHEET',
+    'in src/build-iray.mjs for its notation: >n/<n/vn/^n a sentry heading off on path n, ~n path n,',
+    'Wn closes when Sn is fed, |n opens):', L9_SHEET.replace(/^\n/, ''));
   console.log(out.join('\n'));
   process.exit(0);
 }

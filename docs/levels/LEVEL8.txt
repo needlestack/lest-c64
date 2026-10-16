@@ -7,7 +7,7 @@ LEVEL 8
  2  [] .. [] .. .. .. [] [] .. [] .. .. .. [] .. .. .. []
  3  [] .. [] [] [] [] [] [] .. [] [] [] [] [] .. .. .. []
  4  [] .. [] [] [] [] .. .. .. .. [] [] [] [] .. [] [] []
- 5  [] P> .. .. .. .. .. [] OO .. .. .. .. A2 S1 |1 X! []
+ 5  [] P> .. .. .. .. .. [] OO .. .. .. .. A2 S1 |1 X9 []
  6  [] .. [] [] [] [] .. .. .. .. [] [] [] [] .. [] [] []
  7  [] .. [] [] [] [] [] [] .. [] [] [] [] [] .. .. .. []
  8  [] .. [] .. .. .. [] [] .. [] .. .. .. [] .. .. .. []
@@ -18,5 +18,5 @@ size     18 x 11 = 198 cells
 start    (1.50, 5.50) facing 0 deg (0 east, 90 south)  [PX=0180 PY=0580 PA=00 PAF=00]
 inks     ground 0 black, walls 0 black, seams 6 blue
 flicker  lit for single frames: ground 14 light blue, walls 6 blue, seams 1 white
-exit     X! at (16,5): THE END (the ending sequence), hole 0 black
+exit     X9 at (16,5): level 9, hole 0 black
 group 1  (15,5) -- opened by S1 (14,5)
