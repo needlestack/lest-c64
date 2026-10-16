@@ -17323,8 +17323,11 @@ fcHit:  sty hlv                 ; the one we are dropping through
         ; The BUFFER, not $d015 -- osFlush runs after the buffer flip, which is past where the
         ; fall path rejoins the loop, so it would put the register straight back and leave an
         ; orb hanging in space while the world scrolled away behind it.
-        ; ...EXCEPT what is in your hands, which is coming with you. The carried icon is slot 0
-        ; and nothing else is, so ONE BIT of each buffer keeps it and drops the rest.
+        ; ...EXCEPT what is in your hands, IF it is coming with you. The carried icon is slot 0
+        ; and nothing else is, so ONE BIT of each buffer keeps it and drops the rest. Only the IDOL
+        ; travels (idolHand survives the fall); a carried ORB belongs to the level being left, and
+        ; objInit drops it on landing -- so it goes now, with the rest, not after the landing (the
+        ; user, 2026-10-15). orbArtT tells them apart: 0 for an orb, an art set for the idol.
         ; omEn/omXX/omYY/omPri/omX8 are five CONSECUTIVE bytes, which is what lets one masked
         ; loop do all five. Enable alone was not enough: omXX and omYY are $d01d and $d017, the
         ; two expands, and zeroing them left the held idol un-magnified for the whole drop and
@@ -17332,6 +17335,8 @@ fcHit:  sty hlv                 ; the one we are dropping through
         ldx #$04
 ${HAS_IDOL ? `        ldy carry
         beq fdZap
+        lda orbArtT-1,y         ; carry is the entity index PLUS ONE
+        beq fdZap               ; an orb in hand: it stays behind, so it goes now
 fdKeep: lda omEn,x              ; something in hand: keep its slot-0 bit in all five
         and #$01
         sta omEn,x
