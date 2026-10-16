@@ -117,8 +117,10 @@ qStart: sei
         ; HOLD seconds more after it, then CUT straight to the dissolve: the first frame after the
         ; quote is the tree's black bitmap. (It faded grey2 -> dark grey -> black at first; two steps
         ; did not read as a fade, per the user.)
-${[...Array(Math.ceil(holdS * 60 / 240))].map(() => `        lda #240
-        jsr qWait`).join('\n')}
+        ; holdS * 60 frames EXACTLY, in qWait calls of at most 240 (a byte). It used to round UP to
+        ; whole 240-frame calls, so holdS = 6 held 8 s (2026-10-15).
+${(() => { const out = []; for (let left = Math.round(holdS * 60); left > 0; left -= 240)
+  out.push(`        lda #${Math.min(240, left)}\n        jsr qWait`); return out.join('\n'); })()}
         jmp ${hx(T_RUN, 4)}       ; ITRE's tStart
 
 ; A frames, each ended at raster line 250 -- by waiting for the line and then for it to pass, so a
