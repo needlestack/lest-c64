@@ -1374,6 +1374,16 @@ const hJofY = y => y < 128 ? y
                  : y < 192 ? 128 + ((y - 128) << 1)
                  : y < 224 ? 256 + ((y - 192) << 3)
                  :           512 + ((y - 224) << 4);
+// HROWS: only y 0..239 can be read. castRay rejects remH >= 24 before the lookup, and the folded
+// index is hzBaseT[remH] | (remL >> s) -- at most 224 + 14 + (255 >> 7) = 239. So each group's page
+// holds 240 entries, and its last 16 bytes are free for the compactor to put something else in
+// (2026-10-16: they were filled with heights for 24-32 cells that nothing could ask for -- 256 B).
+const HROWS = 240;
+const HZBASE = [...Array(24)].map((_, i) => i < 4 ? i * 32 : i < 8 ? 128 + (i - 4) * 16 : i < 16 ? 192 + (i - 8) * 4 : 224 + (i - 16) * 2);
+const HZSHIFT = i => i < 4 ? 3 : i < 8 ? 4 : i < 16 ? 6 : 7;          // castRay's remL shift per zone
+// the guard: every index the lookup can form is inside the 240 kept rows
+if (Math.max(...HZBASE.map((b, i) => b | (255 >> HZSHIFT(i)))) >= HROWS)
+  throw new Error(`hTabT: castRay can index past the ${HROWS} kept rows of a group`);
 const hTab = [];
 for (let g = 0; g < HGROUPS; g++) for (let y = 0; y < 256; y++)
   hTab.push(Math.max(0, Math.min(254, Math.round(2816 / (Math.max(1, hJofY(y)) * hRep[g] / 256)))));
@@ -3993,7 +4003,26 @@ const PROF_BUFS = {
   pfRow: 1, pfArm: 1, pfDone: 1, pfWant: 1,
 };
 const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8, oSDbg: 4 } : {};
-const RUNTIME_BUFS = { fallSnapD: SNAP_ROWS * 40, fallTailB: FTROWS * 40 || 1,
+// ---- WHERE THE ARRIVING ROOM'S SNAPSHOT LIVES: in two buffers that are DEAD while it is (2026-10-16) ----
+// The 13 rows are written once (bgCopy, in fallMid's black middle) and read until fstEnd, the last
+// landing frame. They used to have 520 bytes of their own, idle the rest of the game. Now each row
+// sits in a buffer nothing reads or writes between those two moments, and that is rebuilt before
+// it is next read:
+//   fallTailB  the DEPARTING room's rows below the screen. Written as the drop starts (ftCap), read
+//              only by drop frames (fwSrcA, arcInv = 0) -- and by fallMid the screen is pure hole,
+//              the departing room long gone. The next fall writes it from scratch.  7 rows.
+//   bfsQ       the angel fill's queue. objInit (also in fallMid, BEFORE bgCopy) sets bfsPhase = 0,
+//              and a fill writes bfsQ[0] and resets head/tail before reading anything; bfsTick does
+//              not run during the fall (the main loop takes fallStep instead). 254 bytes: 6 rows.
+// ONLY with FALLMID: without it the destination is rendered in SLICES during the drop, while the
+// tail is still being read. Whatever rows the hosts cannot take stay in fallSnapD.
+const SNAP_HOSTS = LVLLOAD ? [['fallTailB', FTROWS * 40], ['bfsQ', 254]] : [];
+const SNAP_AT = [];                          // slot -> its address, as an assembler expression
+for (const [h, cap] of SNAP_HOSTS)
+  for (let o = 0; o + 40 <= cap && SNAP_AT.length < SNAP_ROWS; o += 40) SNAP_AT.push(`${h}+${o}`);
+const SNAP_OWN = SNAP_ROWS - SNAP_AT.length; // rows with no host: fallSnapD's own
+for (let k = 0; k < SNAP_OWN; k++) SNAP_AT.push(`fallSnapD+${k * 40}`);
+const RUNTIME_BUFS = { ...(SNAP_OWN ? { fallSnapD: SNAP_OWN * 40 } : {}), fallTailB: FTROWS * 40 || 1,
                        pvBnd: NBND, pvAng: NBND, pvRcp: NBND };
 // Only when the profiler is built: on an ordinary build these names do not exist and a size
 // declared for them would reserve space for nothing.
@@ -6742,120 +6771,8 @@ const FINECOL_ALL = process.env.FINECOL === '1';
 const ANGSLIDE = HAS_IDOL || HAS_SILVER ? +(process.env.ANGSLIDE ?? 24) : 0;
 if (ANGSLIDE && (ANGSLIDE < 2 || Math.max(ANG_PERIOD, ANG_PERIOD_FAR) + ANGSLIDE > 256 || ANGSLIDE >= Math.min(ANG_PERIOD, ANG_PERIOD_FAR)))
   throw new Error(`ANGSLIDE=${ANGSLIDE} must be 2.. and shorter than a step period (${ANG_PERIOD}/${ANG_PERIOD_FAR}), and period + slide must fit a byte`);
-// ---- SOUND: two detuned low-pass pulses, and the detune IS the proximity readout ----
-// Two voices a hair apart beat at exactly their difference in Hz, so one number controls the
-// whole effect: a slow flange far off, a throb closer, a heartbeat when it is on top of you.
-// NTSC: Fn = f * 16777216 / 1022727, i.e. 16.405 units per Hz, so the detune in units / 16.4 IS
-// the beat rate in Hz. Everything here is env-tunable because it can only really be judged by ear.
-const SOUND    = process.env.SOUND !== '0';
-const SND_HZ   = +(process.env.SNDHZ   ?? 55);   // the drone's pitch
-const SND_NEAR = +(process.env.SNDNEAR ?? 36);   // detune when an angel is in the next cell: 2.2 Hz
-const SND_FALL = +(process.env.SNDFALL ?? 3);    // cells per e-fold of the falloff
-const SND_FAR  = +(process.env.SNDFAR  ?? 2);    // floor: 0.12 Hz, a drift you feel more than hear
-const SND_PW   = +(process.env.SNDPW   ?? 0x800);
-const SND_FC   = +(process.env.SNDFC   ?? 30);   // low-pass cutoff, top 8 bits of 11
-const SND_RES  = +(process.env.SNDRES  ?? 8);
-const SND_AD   = +(process.env.SNDAD   ?? 0x80); // slow attack, no decay
-const SND_SR   = +(process.env.SNDSR   ?? 0xfa); // full sustain: gated once and never released
-const SND_FN   = Math.round(SND_HZ * 16777216 / 1022727);
-// ---- the cut scene's own voice ----
-// Voice 3 is free: nothing in the game writes $d40e-$d414 (the parked MELODY is gone). The
-// drone on voices 1 and 2 keeps running underneath all of this, untouched.
-//   * the SPIN carries a dissonant tone a tritone above the drone, rising one octave
-//   * each picture arrives on a BOOM, two octaves below the drone
-//   * each blackout is a CRASH -- noise, long decay, the cell door
-// THE DRONE ITSELF climbs, rather than a separate voice singing over it -- the world being wound
-// up rather than a siren laid on top. It ends an octave and a minor third above where it started
-// (x2.378), which lands somewhere unresolved rather than back on its own note.
-// sndTick is skipped for the whole scene (the main loop branches away on dieSt), so nothing
-// fights these writes; and voices 1 and 2 keep their absolute detune, so the beating stays put
-// as the pitch rises.
-const DIE_RISE  = +(process.env.DIERISE ?? 70);   // frames the climb is spread over
-const DIE_CLIMB = +(process.env.DIECLIMB ?? 2.378);   // octave + minor third
-// A boom needs a fundamental you can actually hear -- an early version sat at 13.75Hz, two
-// octaves under the drone, and was silent. Both hits are NOISE: the SID's noise generator is
-// clocked by the frequency registers, so it has a pitch, and dropping it turns a hiss into a
-// rumble. The picture lands on the higher one, the dark closes on the lower.
-const hzFn = hz => Math.round(hz * 16777216 / 1022727);
-const DIE_PIC_HZ  = +(process.env.DIEPICHZ ?? 140);     // the picture arrives
-const DIE_PIC_FN  = hzFn(DIE_PIC_HZ);
-const DIE_BLK_HZ  = +(process.env.DIEBLKHZ ?? 60);      // ...and the dark closes, lower
-const DIE_BLK_FN  = hzFn(DIE_BLK_HZ);
-const DIE_HIT_AD  = +(process.env.DIEHITAD ?? 0x0a);    // no attack, ~500ms decay
-const DIE_HIT_SR  = +(process.env.DIEHITSR ?? 0x00);    // no sustain: it falls away by itself
-// ---- and a kick under each hit ----
-// Noise alone is a splash. A bass drum is a PITCH DROP: a tonal voice falling fast enough that
-// the ear reads the movement as impact rather than as a note. Voices 1 and 2 are free by then --
-// the drone is cut on the same frame the picture lands -- so voice 1 carries it.
-const DIE_KICK_HI = +(process.env.DIEKICKHI ?? 90);     // Hz at the strike
-const DIE_KICK_LO = +(process.env.DIEKICKLO ?? 28);     // ...and where it lands
-const DIE_KICK_FR = +(process.env.DIEKICKFR ?? 7);      // frames to fall: fast, or it is a note
-const DIE_KICK_AD = +(process.env.DIEKICKAD ?? 0x09);   // no attack, ~750ms decay
-const DIE_KICK_SR = +(process.env.DIEKICKSR ?? 0x00);
-// Indexed by Chebyshev cell distance to the nearest angel. Exponential, so the last two cells of
-// an approach are where it turns from atmosphere into a pulse.
-// VOICE 1 IS A REAL NOTE, and voice 2 rides above it purely to make the beat. 55 Hz is exactly
-// A1 in A440, which is where the drone already sat, so the approach is a clean A1 -> A#1: one
-// half step, landing on a note rather than on an arbitrary number of cents. Keeping voice 1 as
-// the named pitch is what makes it possible to write music against this later.
-const SND_NOTE = +(process.env.SNDNOTE ?? 0);    // semitones above A1 at the FAR end
-const SND_STEP = +(process.env.SNDSTEP ?? 1);    // half steps of climb at closest approach
-const SND_DMAX = +(process.env.SNDDMAX ?? 8);    // cells the climb is spread over
-const hzToFn = hz => Math.round(hz * 16777216 / 1022727);
-const noteHz = semis => 55 * Math.pow(2, semis / 12);
-// Same exponential shape as the detune, but NORMALISED so it is exactly 1 at d=0 and exactly 0
-// at d=SND_DMAX. Unnormalised it left 0.3 cents on the table at the far end, so the drone never
-// quite sat on the note it is supposed to name.
-const sndShape = d => {
-  if (d >= SND_DMAX) return 0;
-  const k = Math.exp(-SND_DMAX / SND_FALL);
-  return (Math.exp(-d / SND_FALL) - k) / (1 - k);
-};
-const sndDet = d => Math.max(SND_FAR, SND_NEAR * Math.exp(-d / SND_FALL));
-// ---- how LOUD the drone is, which on a SID is not a volume at all ----
-// $d418 is master and would take the melody with it, and the per-voice sustain cannot be raised
-// mid-note (the 6581 envelope only counts down toward it, so a raise sends it to zero; re-gating
-// to force a rise spikes to full scale first and clicks). What IS per-voice and click-free:
-// FILTER CUTOFF and PULSE WIDTH. Voices 1-2 are the only ones routed through the filter, so both
-// land on the drone alone. Far off it is a narrow, almost closed-off rumble; close up a fat 50%
-// pulse with the filter open. Which is also what distance actually does to a sound.
-const SND_VFALL = +(process.env.SNDVFALL ?? 4);  // cells per e-fold of the loudness falloff
-// HIGH-PASS, not low. The fundamental is 55Hz, so sweeping an HP cutoff UP past it strips the
-// body and leaves the harmonics -- thin and quiet, which is what distance sounds like. Low-pass
-// only ever made it darker. The user's "fluorescent light buzz" (cutoff 150, PW 15, high-pass)
-// IS the far end of this, and near is the same voice with the filter opened back down.
-// With the melody parked, MASTER VOLUME is effectively the drone's own volume, so it can carry
-// the loudness half of the job that the SID gives no per-voice control for.
-const SND_VOLN  = +(process.env.SNDVOLN ?? 15);
-// 2, not 4: at the START the angel is 9 cells away and the old curve still gave volume 5 of 15,
-// which is present enough to be company. The drone should be nearly nothing until something is
-// actually coming for you.
-const SND_VOLF  = +(process.env.SNDVOLF ?? 2);
-const sndLoud = d => { const k = Math.exp(-15 / SND_VFALL);
-  return (Math.exp(-Math.min(d, 15) / SND_VFALL) - k) / (1 - k); };
-const lerpT = (near, far) => [...Array(16)].map((_, d) => Math.round(far + (near - far) * sndLoud(d)));
-// Only the volume tracks distance now. SND_FCN/FCF and SND_PWN/PWF are kept because the
-// high-pass sweep is worth coming back to, but nothing reads them.
-const sndVolT = lerpT(SND_VOLN, SND_VOLF);
-// ---- the border pulses in time with the beat ----
-// The beat rate IS the detune in Hz, so the phase increment is just the detune scaled: adding
-// detune<<6 to a 16-bit accumulator every sixtieth gives one cycle per 1024/detune sixtieths,
-// within 4% of the 984/detune the beat actually runs at. Top three bits of the high byte pick
-// the colour, so the wrap is free.
-// PULSE WIDTH IS A DEAD END AS A LEVEL CONTROL -- user tested the live sweep 2026-08-17 and none
-// of it reads as loudness, only as tone. It stays fixed at SND_PW; the live key survives because
-// it is a useful timbre control.
-const sndBase = d => hzToFn(noteHz(SND_NOTE + SND_STEP * sndShape(d)));
-const sndV1 = [...Array(16)].map((_, d) => sndBase(d));
-const sndV2 = [...Array(16)].map((_, d) => sndBase(d) + Math.round(sndDet(d)));
-const DIE_DR0   = sndV1[0];                       // cornered: the pitch the drone is already on
-const DIE_DET   = sndV2[0] - sndV1[0];            // ...and the gap voice 2 keeps above it
-const DIE_DRTOP = Math.min(0xffff, Math.round(DIE_DR0 * DIE_CLIMB));
-const DIE_DSTEP = Math.max(1, Math.round((DIE_DRTOP - DIE_DR0) / DIE_RISE));
-// The angel arrives and the drone DROPS: an octave and a fifth under the top of the climb -- a
-// twelfth, so peak/3. Unlike the drone proper this one is not held; it is struck and left to
-// decay, and it has fallen away by the time the picture cuts in.
-const DIE_LAND_FN = Math.max(1, Math.round(DIE_DRTOP / 3));
+// (The SOUND -- the angel-proximity drone on voices 1-2 and the effects -- was removed 2026-10-16
+// for GoatTracker music; it lives in the history, lest-c64-history, before that date.)
 // orbBlankT goes NEGATIVE for a two-sprite entity -- ORBTALL is the whole entity's height while
 // ORBANCH is only the LOWER sprite's frame, so the content overflows upward into the other slot.
 // The cap is about the lower sprite's own frame, so clamp: untreated it computed to 280/274/268,
@@ -7097,6 +7014,9 @@ const mul40 = [...Array(FALLTAIL ? 31 : 26)].map((_, i) => i * 40);
 // garbage source: fallSnapD came back all zeros and the first drop frame was a blank screen.
 // Rows past 24 fold to 0 rather than to a negative offset; the tail has its own buffer anyway.
 const SNAP_MUL = [...Array(mul40.length)].map((_, x) => 40 * (x <= 24 ? Math.min(x, 24 - x) : 0));
+// ...and since 2026-10-16 the slots are not contiguous (SNAP_AT), so the tables hold each row's
+// ADDRESS, not its offset: the reader and the writer both drop an add.
+const SNAP_ROWAT = SNAP_MUL.map(v => SNAP_AT[v / 40]);
 // SNAP_SRC[slot] = the screen row that slot is COPIED FROM. Identity, except slots 1-5, which take
 // rows 23-19 -- their own mirrors. The HUD is drawn over rows 1-5 AFTER renderSym, so those are the
 // only rows on screen that are not symmetric, and their mirrors hold exactly the render the HUD is
@@ -7261,6 +7181,7 @@ const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 0 : 2));
 // Effective only where the level LOADS (LVLLOAD): the per-level dump subprocesses inherit the env
 // but build no fall worth the name, and have no lvlLoad for fallMid to call.
 const FALLMID = LVLLOAD;   // all level work in the drop's black middle (2026-10-04, user: "let's keep it")
+if (SNAP_HOSTS.length && !FALLMID) throw new Error('SNAP_HOSTS: the snapshot\'s hosts are dead only if the destination renders in the black middle (FALLMID)');
 // FMLOG=1: time the black middle -- fmTk is the ticks the last one took, fmLog the last 16 -- to read
 // with probe.mjs. Instrumentation, so off in the game (2026-10-11: 50 bytes nobody reads in play).
 const FMLOG = flag('FMLOG');
@@ -10035,9 +9956,8 @@ py      = $04
 pa      = $06
 ; $07 is free: it was rang, the coarse byte ray angle, dead since castRay's step
 ; signs moved to the fine angle.
-snSrc   = $6d                    ; the snapshot copy's source screen page...
-snDst   = $6e                    ;   ...and its destination page. Zero page: two bytes shorter
-                                 ;   per access, which is what keeps bgCopy inside its block.
+snSrc   = $6d                    ; the snapshot copy's source screen page. Zero page: two bytes
+                                 ;   shorter per access. (Its destination is per row now: snapLoT/HiT.)
 sdx     = $0a
 sdy     = $0b
 ddx     = $0c
@@ -10564,9 +10484,6 @@ ovSpR   = $8554                  ; the span's right edge, kept for the overlap w
 ovTmp   = $8555
 ovSvS   = $8556                  ; orbSeenT saved across a probe -- orbNo writes it
 markPa  = $8553                  ; heading when the angel cornered you: the turn trigger's origin
-sndD    = $85c0                  ; nearest angel, in cells; and the scratch the search needs
-sndI    = $85c1
-sndT    = $85c2
 
 omMc    = $850e
 amIdx   = $c0                    ; angel movement scratch: entity, chosen step, target cell.
@@ -10671,7 +10588,7 @@ ${FALLTAIL ? `fallTailB = ${hx16(LOWBOOT)}               ; FALLTAIL: the source 
                                  ;   (The old note, still true of where it came from: CPU-
                                  ;   addressable because the port is $35 all through play --
                                  ;   to hold the real NMI/RESET/IRQ vectors.
-` : ''}fallSnapD = ${hx16(FALLBUF2)}                ; the destination room, snapshotted before the drop begins
+` : ''}${SNAP_OWN ? `fallSnapD = ${hx16(FALLBUF2)}                ; the destination room's rows no host could take (SNAP_AT)` : ''}
 fdS     = $2b                    ; fallDraw's source and destination row pointers. Zero page
 fdD     = $2d                    ;   because the copy is (zp),y -- the DATA can live anywhere
 fallSt  = $81c0                  ; 0 normal, 1 dropping, 2 render the new view, 3 landing.
@@ -11122,7 +11039,6 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
 ${SLOWMO ? `        lda #$01
         sta smCnt               ; 1, not SLOWMO: step on the FIRST frame, so the traverse starts
                                 ; from the requested position rather than SLOWMO frames into it
-` : ''}${SOUND ? `        jsr sndInit             ; the drone starts before the first frame and never stops
 ` : ''}${process.env.DROPNOW ? `        lda #$01
         sta dbgOnce` : ''}
 ${DIE ? `        lda #$ff                ; hazCur is READ to decide whether the run-table patches are stale
@@ -11137,8 +11053,6 @@ ${DIE ? `        lda #$ff                ; hazCur is READ to decide whether the 
         lda #$00
         sta dieSt               ; power-on garbage here sent the loop straight into the cut scene with
         sta marked              ;   no state set up, and the program fell out to BASIC
-        lda #$0f
-        sta sndD
 ` : ''}${SPRITES ? `        lda #$00
         sta sokAn               ; RETURN restarts by JUMPING to entry, not by reloading, so
 ${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is still live RAM and has to be
@@ -11299,7 +11213,7 @@ mfAlive:
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
 ${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}${process.env.CEILLOG ? '        jsr ceilLog\n' : ''}        jmp fwait
-mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${SOUND ? 'jsr sndTick\n        jsr sfxTick\n        ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
+mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
         and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two) -- on frame n-1, 2n-1, ..., NOT frame 0, where nothing
         cmp #${hx((+process.env.FALLNOW - 1) & 255)}                ;   is rendered yet and the drop would snapshot boot's leftovers
@@ -15175,7 +15089,7 @@ stepThrT1: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(0, i)).join(',')}
 stepThrT2: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(1, i)).join(',')}
 stepThrT3: !byte ${[...Array(SLOTN)].map((_, i) => stepThrN(2, i)).join(',')}
 ` : ''}
-hzBaseT: !byte ${[...Array(24)].map((_, i) => i < 4 ? i * 32 : i < 8 ? 128 + (i - 4) * 16 : i < 16 ? 192 + (i - 8) * 4 : 224 + (i - 16) * 2).join(',')}
+hzBaseT: !byte ${HZBASE.join(',')}
 blkLoT: !byte ${blkEnt('<')}
 blkHiT: !byte ${blkEnt('>')}
 sldLoT: !byte ${sldEnt('<')}
@@ -17840,12 +17754,9 @@ fwLp:   lda fwRow
         tax
         lda arcInv              ; the landing slides the DESTINATION room, snapshotted before
         beq fwSrcA              ;   the drop began; the drop slides the one being left
-        lda mulSnapLoT,x
-        clc
-        adc #<fallSnapD
+        lda mulSnapLoT,x        ; the row's ADDRESS (SNAP_AT: its slot lives in a host buffer)
         sta fdS
         lda mulSnapHiT,x
-        adc #>fallSnapD
         sta fdS+1
         jmp fwSrcD
 fwSrcA:${FALLTAIL ? ` cpx #25
@@ -18166,64 +18077,7 @@ obyR:   rts
 
 
 
-${SOUND ? `; ---- sndTick: the detune tracks the nearest angel ----
-; Chebyshev distance, because the angel moves on a king's graph -- diagonal and orthogonal steps
-; are both one move, so that is what "one cell away" has to mean here too. It runs whether or not
-; you are looking, which is the point: the sound is the channel that works when sight does not.
-sndTick:
-        lda #$0f
-        sta sndD
-        ldx #$00
-stLp:   stx sndI
-        lda orbTallT,x
-        beq stNext              ; not an angel
-        lda orbHidT,x
-        bne stNext
-        sec
-        lda orbXCT,x
-        sbc px+1
-${absA('stPx')}
-        sta sndT
-        ldx sndI
-        sec
-        lda orbYCT,x
-        sbc py+1
-${absA('stPy')}
-        cmp sndT
-        bcs stMax               ; Chebyshev: whichever axis is further
-        lda sndT
-stMax:  cmp sndD
-        bcs stNext
-        sta sndD                ; a new nearest
-stNext: ldx sndI
-        inx
-        cpx nOrbT
-        bcc stLp
-        lda sndD
-        cmp #$10
-        bcc stOk
-        lda #$0f                ; the table only runs to 15 cells; the map is 16 wide
-stOk:   ldy marked              ; cornered: the angel is HIDDEN so the search above skipped it,
-        beq stOk2               ;   but it is standing on top of you and the drone should say so
-        lda #$00
-stOk2:  tax                     ; everything comes straight off tables -- the climb, the detune
-        lda sndV1L,x            ;   and the loudness pair are all folded in at build time, so
-        sta $d400               ;   there is no arithmetic here at all
-        lda sndV1H,x
-        sta $d401
-        lda sndV2L,x
-        sta $d407
-        lda sndV2H,x
-        sta $d408
-        lda sndVolT,x           ; VOLUME ONLY. Cutoff, resonance and pulse width are set once in
-        ora #$10                ;   sndInit and left there -- with three things moving at once you
-        sta sndLvl              ;   cannot tell which one you are hearing. Low-pass, as it began.
-                                ; NOT written to $d418 here: sfxTick runs next and is the single
-                                ;   writer, so the drone and an effect cannot fight over the
-                                ;   master and step it against each other.
-        rts
-
-` : ''}; ---- angStep: give every unobserved angel its share of the clock, and move the ones that are due
+; ---- angStep: give every unobserved angel its share of the clock, and move the ones that are due
 ; The accumulator advances ONLY while the angel is unobserved, so looking at one stops its clock
 ; rather than just its feet -- look away and it takes a normal-length pause, not an instant step.
 ; Per angel, not global: two angels in different directions have to keep separate time, which is
@@ -19521,62 +19375,7 @@ svRX8:  !byte 0
 svPD:   !byte 0
 svY:    !byte 0
 svYH:   !byte 0
-`; })() : ''}${DIE ? `${DIE && SOUND ? `; ---- snTone / snRise: the DRONE climbs ----
-; Not a note over the top: the drone itself is wound up, voices 1 and 2 together, keeping their
-; absolute detune so the beating between them stays where it was while the pitch rises.
-snTone: lda #<${hx16(DIE_DR0)}
-        sta dieFqL
-        lda #>${hx16(DIE_DR0)}
-        sta dieFqH
-        rts
-snRise: lda dieFqH              ; at the top already? then hold there
-        cmp #>${hx16(DIE_DRTOP)}
-        bcs snRDn
-        clc
-        lda dieFqL
-        adc #<${hx16(DIE_DSTEP)}
-        sta dieFqL
-        lda dieFqH
-        adc #>${hx16(DIE_DSTEP)}
-        sta dieFqH
-snRDn:  lda dieFqL              ; voice 1
-        sta $d400
-        lda dieFqH
-        sta $d401
-        clc                     ; voice 2 rides DIE_DET above it, the same gap throughout
-        lda dieFqL
-        adc #<${hx16(DIE_DET)}
-        sta $d407
-        lda dieFqH
-        adc #>${hx16(DIE_DET)}
-        sta $d408
-        rts
-snOff:  lda #$00                ; the angel is centred and everything stops. A low note under
-        sta $d404               ;   the noise hit could not be heard anyway, and silence at the
-        sta $d40b               ;   moment it faces you is stronger than another sound.
-        rts
-
-; ---- snBoom / snCrash: the picture arrives, and the dark closes ----
-; Same voice, one after the other and never overlapping, so they can simply overwrite each other.
-snBoom: lda #$00                ; the drone stops dead as the picture lands -- the hit should
-        sta $d404               ;   arrive into silence, not on top of a chord. Clearing the
-        sta $d40b               ;   waveform cuts it at once; releasing would take ~750ms.
-        lda #<${hx16(DIE_PIC_FN)}
-        sta $d40e
-        lda #>${hx16(DIE_PIC_FN)}
-        sta $d40f
-        jmp snHit
-snHit:  jsr snKick              ; the tonal half of the drum, under the noise
-        lda #${hx(DIE_HIT_AD)}
-        sta $d413
-        lda #${hx(DIE_HIT_SR)}
-        sta $d414
-        lda #$80                ; gate LOW first: the envelope will not retrigger otherwise
-        sta $d412
-        lda #$81                ; noise + gate -- pitched, because the noise generator is clocked
-        sta $d412               ;   by the frequency registers
-        rts
-` : ''}
+`; })() : ''}${DIE ? `
 ; ---- dieFade: the room goes out, and nothing else happens ----
 ; No charset corruption any more: the swap is one frame, done once the screen is already black,
 ; so it is invisible. Reads the LIVE colour registers and walks each one step darker per tick,
@@ -19611,11 +19410,7 @@ dfOP:   cmp #${hx(DIE_CTR)}
         ; tolerance, so it stopped short or sailed past depending on which frame it landed on.
         lda #$00
         sta dieRem
-${SOUND ? `        jsr snOff               ; the drone CUTS here, before the correction branches --
-                                ;   sitting it just above dfLD meant the positive side's
-                                ;   "jmp dfLD" jumped clean over it, so only one turn direction
-                                ;   ever silenced the drone.
-` : ''}        lda dieOff              ; already a magnitude, so there is no sign to strip
+        lda dieOff              ; already a magnitude, so there is no sign to strip
 dfLP:   ldx #${hx(COL_FINE)}
         stx mq
         jsr mul8                ; phi:plo = |off| * COL_FINE
@@ -19646,7 +19441,7 @@ dfLD:   lda #$00                ; the room has already gone; $d023 is untouched,
         rts
 dfMiss: lda #$00                ; outside the window: the run of good frames restarts
         sta dieLk
-${SOUND ? '        jsr snRise              ; a step up the octave for every frame of turn\n' : ''}dfSpin: clc                     ; their OWN rate, continued: one signed 16-bit add a frame, no
+dfSpin: clc                     ; their OWN rate, continued: one signed 16-bit add a frame, no
         lda paF                 ;   ramp and no easing -- it turns exactly as they were turning
         adc dieDirF
         sta paF
@@ -19761,7 +19556,7 @@ dsMir:
 ; "jmp entry", which reloads nothing and clears only what entry explicitly clears -- so dieN is
 ; EMITTED data, 0 off the disk, and counts up from there. dieP is which one is on screen.
 dieShow:
-${SOUND ? '        jsr snKTick             ; the kick keeps falling while the picture holds\n' : ''}        lda #$00                ; no sprites from here on. Clearing this at the SWAP did not hold:
+        lda #$00                ; no sprites from here on. Clearing this at the SWAP did not hold:
         sta omEn                ;   the swap runs early in the frame and orbMove refills omEn
         sta $d015               ;   later in the same one, so the carried-orb slot came back.
         lda dieSt
@@ -19861,9 +19656,7 @@ ${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : `        jsr pedOff              ;
 ` }        pla
         tax
 ` : ''}
-${SOUND ? `        lda #$03
-        jsr sfxGo               ; the clink of it coming off the floor
-` : ''}
+
         lda #$01
         sta entDty
         rts
@@ -19890,9 +19683,7 @@ ${HAS_IDOL ? `        ldx carry               ; ...unless what you are holding i
         sty sokWho              ; index+1; the consume happens when the animation lands
         lda #${hx(SOK_ANIM)}
         sta sokAn               ; orb phase while sokAn >= SOK_SHR, socket closing at or below it
-${SOUND ? `        lda #$01
-        jsr sfxGo               ; ...and it is heard going in
-` : ''}
+
         lda #$00
         sta sokVar
         ; sokCX is the orb's CENTRE, not its left edge. A sprite shrinks about its left edge, so
@@ -21299,9 +21090,9 @@ bfsSdN: inx
         rts
 
 
-        * = ${hx16(HTABLE)}
-hTabT:  ${chunk(hTab, 32).trim()}
-        * = ${hx16(ORB_VART)}
+${[...Array(HGROUPS)].map((_, g) => `        * = ${hx16(HTABLE + g * 256)}
+hTabG${g}: ${chunk(hTab.slice(g * 256, g * 256 + HROWS), 32).trim()}
+`).join('')}        * = ${hx16(ORB_VART)}
 orbVarT: !byte ${orbVarT.slice(0, VAR_CLAMP + 1).join(',')}
         ; ---- the angel's distance maps, its pathing code, and its queue ----
         ; NOT at $4900 or $6200: those are the fall's screen snapshots, which are runtime-only
@@ -21567,8 +21358,6 @@ ${LD('hlFillT', LVLT('hlFillT').join(','), ': !byte ')}
 ; were the same loop written twice, and the second copy is what pushed its block past $9500.
 bgCopy: lda baseHi
         sta snSrc
-        lda #>fallSnapD
-        sta snDst
 
         jmp snapCp              ; ...the shared walk, parked in a free run of its own
 
@@ -21612,8 +21401,11 @@ mul40HiT: !byte ${mul40.map(v => v >> 8).join(',')}
 ; mulSnapT is 40*min(x, 24-x): the row offset INTO the snapshot for screen row x. It replaces
 ; mul40 at the two snapshot reads, so the mirror costs no cycles at all -- same instruction, a
 ; different table.
-mulSnapLoT: !byte ${SNAP_MUL.map(v => v & 255).join(',')}
-mulSnapHiT: !byte ${SNAP_MUL.map(v => v >> 8).join(',')}
+mulSnapLoT: !byte ${SNAP_ROWAT.map(e => `<${e}`).join(',')}
+mulSnapHiT: !byte ${SNAP_ROWAT.map(e => `>${e}`).join(',')}
+; (acme applies < and > LAST, so <fallTailB+40 is the low byte of fallTailB+40)
+snapLoT: !byte ${SNAP_AT.map(e => `<${e}`).join(',')}   ; slot -> address, for the writer
+snapHiT: !byte ${SNAP_AT.map(e => `>${e}`).join(',')}
 ; Which SCREEN row each slot copies from. Slots 1-5 take rows 23-19 -- their own mirrors -- because
 ; the HUD is drawn over rows 1-5 AFTER renderSym, so those rows are the only asymmetric ones on
 ; screen. Their mirrors hold exactly the render the HUD is covering, so this both loses the HUD
@@ -22044,14 +21836,7 @@ egF:    jmp egF
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
 ; (orbOccT, the per-entity occluder masks, lived here. Gone: occBy answers the facing rule when asked.)
-${SOUND ? `; The two voices, fully precomputed per cell distance: centre climb and symmetric detune are
-; both folded in, so sndTick does no arithmetic. Parked with the occluder masks because the block
-; the rest of the per-orb tables live in runs right up against FROWT+0x500.
-sndV1L: !byte ${sndV1.map(v => v & 255).join(',')}
-${embedIn('sndV1H', sndV1.map(v => v >> 8), [['recipHiT', recipHi, true]])}
-sndV2L: !byte ${sndV2.map(v => v & 255).join(',')}
-${embedIn('sndV2H', sndV2.map(v => v >> 8), [['sndV1H', sndV1.map(v => v >> 8), true], ['recipHiT', recipHi, true]])}
-sndVolT: !byte ${sndVolT.join(',')}` : ''}
+
 ${DIE ? `; Where each picture's map lives. The first is inside the image next to the charset; the rest
 ; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
 picLoT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((PICBASE + k * 1000) & 255)).join(',')}
@@ -22145,7 +21930,7 @@ sockVisT: !byte ${sockVisT.join(',')}
 pedVisT: !byte ${pedVisT.join(',') || '0'}
 
         ; (runByteT / runBitT lived here: a run id as a mask byte and bit. Gone with the masks -- see occBy.)
-${SOUND ? `` : ''}
+
         * = $7900               ; ---- out of the main code block, into the page faceScrT vacated ----
 ; moveXT/moveYT were 512 bytes of TABLE sitting inside the code block -- the scarcest resource
 ; on the machine. Now 320 bytes out of it: the pair shares a page and a quarter (quarterPair).
@@ -23664,11 +23449,9 @@ bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         clc
         adc snSrc               ; screens are page-aligned, so no low-byte carry
         sta fdS+1
-        lda mul40LoT,x          ; destination: slot x, packed from the base
+        lda snapLoT,x           ; destination: slot x, wherever SNAP_AT put it
         sta fdD
-        lda mul40HiT,x
-        clc
-        adc snDst
+        lda snapHiT,x
         sta fdD+1
         ldy rsLo
 bgcB:   lda (fdS),y
@@ -23691,48 +23474,7 @@ ${LD('mapT', chunk(LVLT('mapT'), 16).trim(), ':   ')}   ; padded to the page wit
 ; rsT and rbT are one formula 7 apart (rbT[c] = rsT[c + 7]; both 0 past the wall's reach), so they
 ; share bytes. rsT keeps the page; rbT, 7 in, crosses it only for a column 249+ pixels tall.
 ${sharedPair('rsT', rsT, 'rbT', rbT, 7)}
-${DIE && SOUND ? `        * = ${hx16(RELOC + 0xb00)}     ; a jsr target, in the page FINEANG's
-        ; coarse delta tables vacated. It used to sit at $609b, a hole that only LEVEL 1's map
-        ; leaves -- level 2's data ran straight through it and the build died. Everything from
-        ; RELOC on is engine table space at fixed origins, so it is free on EVERY map.
-; ---- snKick: voice 1 falls fast, so the ear hears an impact and not a note ----
-; Voice 1 is free at this point: the drone is cut on the same frame the picture arrives. The
-; fall is what makes it percussive -- held still it would just be a low tone under the noise.
-snKick: lda #<${hx16(hzFn(DIE_KICK_HI))}
-        sta dieFqL
-        sta $d400
-        lda #>${hx16(hzFn(DIE_KICK_HI))}
-        sta dieFqH
-        sta $d401
-                                ; pulse width is already SND_PW from sndInit; no need to set it
-        lda #${hx(DIE_KICK_AD)}
-        sta $d405
-        lda #${hx(DIE_KICK_SR)}
-        sta $d406
-        lda #$40                ; gate low first, or the envelope will not retrigger
-        sta $d404
-        lda #$41                ; pulse + gate
-        sta $d404
-        lda #${hx(DIE_KICK_FR)}
-        sta dieKik
-        rts
 
-; called once a frame while a picture is up: steps the fall, then stops touching the voice
-snKTick: lda dieKik
-        beq snKDn
-        dec dieKik
-        sec
-        lda dieFqL
-        sbc #<${hx16(Math.round((hzFn(DIE_KICK_HI) - hzFn(DIE_KICK_LO)) / DIE_KICK_FR))}
-        sta dieFqL
-        sta $d400
-        lda dieFqH
-        sbc #>${hx16(Math.round((hzFn(DIE_KICK_HI) - hzFn(DIE_KICK_LO)) / DIE_KICK_FR))}
-        sta dieFqH
-        sta $d401
-snKDn:  rts
-
-` : ''}
         ; The sound effects, out here because the $9d00 block that holds the level shadow
         ; ran out of room the moment a level was allowed to declare its own sockets: the
         ; shadow carries the other level's tables and those grew with it. This hole is
@@ -23943,112 +23685,7 @@ mrHnx:  iny
         jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
                                 ;   ends at bfsQ with nothing to spare.
 
-${SOUND ? `
-; ---- sfx: one-shot effects on VOICE 3 ----
-; Voices 1 and 2 are the angel drone and are rewritten every frame by sndTick, so an effect
-; that borrowed one would fight it. Voice 3 is untouched by the drone and free.
-; Everything is table-driven for the same reason the drone is: with pitch, waveform and volume
-; all moving you cannot tell which one you are hearing.
-; RELOCATED out of the main code stream, which was down to 1 byte. sndInit runs ONCE at
-; boot and is entered by jsr only, so it has no business occupying the scarcest space in
-; the program. Relocating code into a hole is established practice here -- the rule is
-; enter by jsr/jmp only, nothing may fall in, and the block must appear in ADDRESS ORDER.
-; ---- sndInit: one sustained chord of two, and then only the detune ever changes ----
-; The SID has no reset line, so every register is cleared first -- whatever BASIC or the loader
-; left in there is otherwise still playing. Gated once and never released: this is a drone, so
-; the envelope only ever runs its attack.
-sndInit:
-        ldx #$18
-        lda #$00
-sniLp:  sta $d400,x
-        dex
-        bpl sniLp
-        lda #<${hx16(SND_FN)}
-        sta $d400
-        sta $d407
-        lda #>${hx16(SND_FN)}
-        sta $d401
-        sta $d408
-        lda #${hx(SND_PW & 0xff)}
-        sta $d402
-        sta $d409
-        lda #${hx(SND_PW >> 8)}
-        sta $d403
-        sta $d40a
-        lda #${hx(SND_AD)}
-        sta $d405
-        sta $d40c
-        lda #${hx(SND_SR)}
-        sta $d406
-        sta $d40d
-        lda #$00                ; cutoff is 11 bits: three low, then eight. Only the top matters
-        sta $d415
-        lda #${hx(SND_FC)}
-        sta $d416
-        lda #${hx((SND_RES << 4) | 7)}
-        sta $d417               ; resonance, and ALL THREE voices routed through the filter.
-                                ;   Voice 3 was unfiltered and read bright and thin next to the
-                                ;   drone; the cutoff is already low, so routing alone darkens the
-                                ;   effects a long way. The drone's own path is unchanged.
-        lda #${hx(0x10 | SND_VOLN)}
-        sta $d418               ; LOW-pass; sndTick varies only the volume nibble from here
-        lda #$41                ; pulse + gate
-        sta $d404
-        sta $d40b
 
-        rts
-
-; An effect is a ROW OF TABLES, not code. sfxTick reads length, waveform, envelope, filter
-; routing, peak volume and a pitch table out of them and never knows which effect is playing,
-; so a new sound is a row plus a pitch table -- no new code, and nothing added to the main
-; code stream, which has 23 bytes left.
-sfxGo:  sta sfxK                ; A = effect id, 1..N
-        tax
-        lda sfxLenT-1,x
-        sta sfxN
-        lda sfxAdT-1,x          ; per-effect envelope. A clink and a rumble want different ones,
-        sta $d413               ;   and ATTACK 0 rises instantly, which IS a click -- one shared
-        lda sfxSrT-1,x          ;   envelope for every sound was half of "clippy".
-        sta $d414
-        lda sfxPLoT-1,x         ; aim the per-frame read at this effect's pitch table
-        sta sfxRd+1
-        lda sfxPHiT-1,x
-        sta sfxRd+2
-        lda #${hx((SND_RES << 4) | 3)}
-        ora sfxFltT-1,x         ; voice 3 through the filter or not, per effect -- a rumble wants
-        sta $d417               ;   it, a clink wants the sparkle. The drone's own two routing
-        rts                     ;   bits are constant either way.
-
-sfxTick:ldx sfxK
-        beq sfxQ                ; nothing has ever played
-        lda sfxN
-        bne sfxOn
-        lda sfxCtlT-1,x         ; idle: drop the GATE bit only and leave the waveform, so the
-        and #$fe                ;   release phase rings out. Clearing the whole control register
-        sta $d412               ;   yanked the oscillator mid-note -- the other half of the click.
-sfxQ:   lda sndLvl              ; and the drone has the master back
-        sta $d418
-        rts
-sfxOn:  dec sfxN
-        ldy sfxN                ; counts DOWN, so a pitch table's LAST entry is its first frame
-        lda #$00
-        sta $d40e
-sfxRd:  lda $ffff,y             ; SELF-MODIFIED by sfxGo: this effect's pitch table
-        sta $d40f
-        lda sfxCtlT-1,x
-        sta $d412
-        lda sfxVolT-1,x         ; the LOUDER of effect and drone, so the master never steps down
-        cmp sndLvl              ;   when a sound starts next to a close angel
-        bcs sfxV
-        lda sndLvl
-sfxV:   sta $d418
-        rts
-
-sndLvl: !byte $12               ; what the DRONE wants the master to be. sfxTick reconciles it
-                                ;   with any effect and writes $d418 once.
-sfxN:   !byte 0                 ; frames left in the effect; 0 = idle
-sfxK:   !byte 0                 ; which effect is loaded
-` : ''}
 ${FALL ? `; Out of the main block (11 bytes over once level 1's two angel readouts met the per-level
 ; stride reads, 2026-09-18) into the tail of the bfsQ page. jsr-only; "* = $9500 moves
 ; backward" guards it.
@@ -24137,18 +23774,7 @@ rayOffT: !byte ${rayOff.join(',')}
         ; Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
         * = $97a0
-${SOUND ? `; The sound effects' parameter tables, in the tail of this page and the next: the $9200 block
-; they lived in overran $9500 by eight bytes when level 2's 117 open cells grew bfsQ (2026-09-18).
-` + `;         swallow  collapse  clink
-sfxLenT:!byte   8,      14,     5      ; frames
-sfxCtlT:!byte $11,     $81,   $11      ; triangle, noise, triangle. Bit 0 is the gate.
-sfxAdT: !byte $18,     $18,   $14      ; attack/decay
-sfxSrT: !byte $f8,     $f8,   $04      ; sustain/release -- the clink has none, so it plinks
-sfxVolT:!byte $19,     $19,   $17      ; peak master, low-pass bit included
-sfxFltT:!byte $04,     $04,   $00      ; voice-3 filter routing bit
-sfxPLoT:!byte <sfxSwT, <sfxWlT, <sfxCkT
-sfxPHiT:!byte >sfxSwT, >sfxWlT, >sfxCkT
-` : ''}
+
 ; ---- fwBlk and fNT live up here, away from the fall's other tables ----
 ; They were at the foot of the $6c00 block with fKT/fLoT/fHiT, and level 7's tables push that run
 ; down until it overlaps runFaceT -- 65 bytes of it. These two are 72, and the sfx pages leave
@@ -24191,18 +23817,10 @@ pgC:    tya
 pgNo:   rts
 ` }
         * = ${hx16(RELOC + 0x1200)}
-; acme applies > LAST, so ">hTabT+512" is the high byte of hTabT+512: page 2 of the table
-hPgT:   !byte ${colGrpT.map(g => `>hTabT+${g * 256}`).join(',')}
+; each group is its own page-aligned table (hTabG0..15), so the high byte alone names it
+hPgT:   !byte ${colGrpT.map(g => `>hTabG${g}`).join(',')}
         * = $98a0
-${SOUND ? `sfxSwT: !byte 6,7,9,11,13,15,17,19                      ; ~300Hz down to ~95Hz
-sfxWlT: !byte 12,13,14,16,18,20,22,24,26,28,31,34,38,42 ; NOT lower: noise clocked this slowly
-                                                        ;   crackles rather than rumbles, which
-                                                        ;   is what the old floor of 3 was doing
-sfxCkT: !byte 96,85,74,62,51    ; RISING, ~800Hz up to ~1500Hz. It fell before, an octave lower,
-                                ;   and a short fall low in the register is the shape every
-                                ;   refusal sound has -- it read as the orb being rejected rather
-                                ;   than taken. Up and bright is what acknowledgement sounds like.
-` : ''}
+
 ${(() => { const P = fRowPack(); return `fNT:    !byte ${P.N.join(',')}
 `; })()}        * = ${hx16(RELOC + 0x1300)}
 ; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
@@ -24310,9 +23928,7 @@ wallTog:ldy wsWall
                                 ;   them directly now that doomT is gone
         lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
-${SOUND ? `        lda #$02
-        jsr sfxGo               ; only on the way OUT: wtBack is how a restart puts the wall back
-` : ''}
+
         ldx #$9f                ; and wipe idT, because only the ~14-26 CAST columns are written
         lda #$ff                ;   each frame and the rest still hold the cell some earlier pose
 wtClr:  sta idT,x               ;   struck there. Scanning those stale entries stretched the span
@@ -26914,7 +26530,7 @@ dgD:    ; ---- which way round, and unhide it ----
         stx dieIdx              ; the one entity dieOff is allowed to come from
         lda #$00
         sta dieLk
-${SOUND ? '        jsr snTone              ; the dissonance starts with the grab\n' : ''}
+
         lda #$00
         sta orbHidT,x
         sec
@@ -27052,7 +26668,7 @@ ppWB:   sta $ffff,y
 ; ---- picOn: the cut itself ----
 ; One write per palette register, on a frame that is already black. No ramp and no slide: between
 ; one frame and the next the picture is simply there.
-picOn:  ${SOUND ? 'jsr snBoom\n        ' : ''}lda #${hx(PICS.d021)}
+picOn:  lda #${hx(PICS.d021)}
         jsr setGnd
         lda #${hx(PICS.d022)}
         sta $d022
@@ -27240,7 +26856,9 @@ const ALIGNED_T = {
     // at $4d00; the relayout moved it to $975e and every wall came back the height of a wall
     // $5e bytes further down the table ("everything looked stretched vertically" -- the user).
     // 256, not 4096: the requirement is where it STARTS, and the guard tests (a & 255) + n > 256.
-    hTabT: 256,
+    // Since 2026-10-16 each GROUP is its own table (hTabG0..15, HROWS bytes each) and each must
+    // start on a page; they no longer need to be contiguous, since hPgT names each one.
+    ...Object.fromEntries([...Array(HGROUPS)].map((_, g) => [`hTabG${g}`, 256])),
     // ---- THE ANGEL'S TWO DISTANCE MAPS MUST SHARE A LOW BYTE ----
     // bfsFin promotes the finished fill by swapping the patched HIGH BYTES of the operands and
     // nothing else ("live <-> work, by swapping the patched high bytes"). That is only an address
@@ -27253,14 +26871,15 @@ const ALIGNED_T = {
     // one step and froze. Same shape as hTabT above -- an alignment the hand-placed layout
     // happened to satisfy, so nothing had ever had to state it.
     bfsD0: 256, bfsD1: 256,
-    // ---- THE FALL SNAPSHOTS ARE ADDRESSED BY PAGE ----
-    // fallSnap hands snapCp a PAGE, not an address (`lda #>fallSnapS / sta snDst`), and snapCp
+    // ---- THE FALL SNAPSHOTS WERE ADDRESSED BY PAGE ----
+    // fallSnap handed snapCp a PAGE, not an address (`lda #>fallSnapS / sta snDst`), and snapCp
     // builds each row as `mul40LoT,x` for the low byte and `mul40HiT,x + snDst` for the high --
     // so the destination's low byte is assumed to be zero, exactly as the comment one line above
     // it says of the SOURCE ("screens are page-aligned, so no low-byte carry"). The destination
     // had the same requirement and never stated it. Both were page-aligned by luck at $5000 and
     // $5300; at any other offset every row of both snapshots lands skewed by the low byte.
-    ...({ fallSnapD: 256 }),
+    // (2026-10-16: no longer -- the rows are addressed whole, by snapLoT/snapHiT and mulSnapLoT/HiT,
+    // so a slot can start anywhere; most live in other buffers now, see SNAP_HOSTS.)
     // ---- AND ONE THAT ONLY LOOKS ALIGNED: 1 = "starts on a page by accident" ----
     // pvN heads a run of 19 scalars hand-placed at $8000 (pvN, opaL/H, opxL/H, ...). Nothing indexes
     // them, but compact.mjs infers page alignment from a page-start address, so it wanted a WHOLE

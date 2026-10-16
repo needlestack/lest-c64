@@ -151,6 +151,6 @@ const tot = { code: 0, tables: 0, scratch: 0 };
 for (const [f, s] of rows) {
   for (const k in tot) tot[k] += s[k];
   console.log(`${pad(s.code)} ${pad(s.tables)} ${pad(s.scratch)} ${pad(all(s))}  ${f}`);
-  if (verbose) console.log('          ' + s.items.sort((a, b) => b[1] - a[1]).slice(0, 14).map(([k, z]) => `${k} ${z}`).join(', '));
+  if (verbose) console.log('          ' + s.items.sort((a, b) => b[1] - a[1]).slice(0, +(process.env.SPACETOP ?? 14)).map(([k, z]) => `${k} ${z}`).join(', '));
 }
 console.log(`${pad(tot.code)} ${pad(tot.tables)} ${pad(tot.scratch)} ${pad(all(tot))}  TOTAL ($${CODE[0].toString(16)}-$${(TABLES[1] - 1).toString(16)})`);
