@@ -13,6 +13,8 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { png } from './png.mjs';
 
 const FACE = JSON.parse(readFileSync(new URL('../data/angel-face.json', import.meta.url), 'utf8')).hangl1;
+// FACED023=n (2026-10-15): another colour for the global third ink -- 1 makes the highlights WHITE
+if (process.env.FACED023) FACE.d023 = +process.env.FACED023;
 // bit pair -> the register it reads, after fit-angel's 0<->3 swap
 //   00 $d021   01 $d022   10 $d023   11 colour RAM
 const RGB = { 0: [0,0,0], 11: [68,68,68], 12: [108,108,108], 15: [149,149,149], 1: [255,255,255] };
@@ -31,6 +33,15 @@ const HI   = +(process.env.FACEHI ?? 222);
 const GAM  = +(process.env.FACEGAMMA ?? 1);
 // how hard to perturb the quantiser, in luminance units. 0 = pure Floyd-Steinberg.
 const GRIT = +(process.env.FACEGRIT ?? 40);
+// FACEGRITTOP=g, FACEGRITROW=y (2026-10-15): a different grit ABOVE pixel row y (the face), easing to
+// FACEGRIT over the next 16 rows so the two textures do not meet at a visible line
+const GRITTOP = process.env.FACEGRITTOP === undefined ? GRIT : +process.env.FACEGRITTOP;
+const GRITROW = +(process.env.FACEGRITROW ?? 72);
+const gritRow = y => y < GRITROW ? GRITTOP : y >= GRITROW + 16 ? GRIT : GRITTOP + (GRIT - GRITTOP) * (y - GRITROW) / 16;
+// FACEGRITBOX="x0,y0,x1,y1,g,tmin" (2026-10-15): grit g for the BRIGHT pixels (tone >= tmin) inside a
+// box, in 160x200 pixel coordinates -- the sword, which reads better smoother than the robe around it
+const GB = process.env.FACEGRITBOX ? process.env.FACEGRITBOX.split(',').map(Number) : null;
+const gritAt = (x, y, t) => GB && x >= GB[0] && y >= GB[1] && x <= GB[2] && y <= GB[3] && t >= GB[5] ? GB[4] : gritRow(y);
 // the three non-black inks, darkest first, as pixel values
 export const GREYS = [0,1,2,3].filter(v => INK[v] !== 0).sort((a, b) => LU[a] - LU[b]);
 export const BLACK = [0,1,2,3].find(v => INK[v] === 0);
@@ -58,7 +69,8 @@ export function dither(tone, inks) {
       // flat patches with visible 8x8 seams. Perturb the DECISION with a deterministic
       // per-pixel offset so those regions break into stipple -- and measure the error against
       // the TRUE value, so diffusion still corrects the average and the tone does not shift.
-      const n = GRIT ? (((((x * 73856093) ^ (y * 19349663)) >>> 8) & 255) / 255 - 0.5) * GRIT : 0;
+      const gr = gritAt(x, y, tone[i]);
+      const n = gr ? (((((x * 73856093) ^ (y * 19349663)) >>> 8) & 255) / 255 - 0.5) * gr : 0;
       const want = buf[i] + n;
       let best = inks[0], bd = Infinity;
       for (const v of inks) { const d = Math.abs(LU[v] - want); if (d < bd) { bd = d; best = v; } }
@@ -91,7 +103,11 @@ export function toPixels(file) {
   const PAR = +(process.env.FACEPAR ?? (2 / 1.2));   // display width of one mc pixel, in rows
   const mcw = Math.max(1, Math.min(160, Math.round(200 * (w / h) / PAR)));
   const raw = execFileSync('magick',
-    [file, '-colorspace', 'gray', '-resize', `${mcw}x200!`, '-depth', '8', 'gray:-'],
+    // FACEMAGICK="..." (2026-10-15): extra ImageMagick steps on the greyscale BEFORE the resize --
+    // e.g. "-clahe 25x25%+128+3" for local contrast, which a softly lit statue needs: its folds are
+    // gradients a few levels deep that four inks and a dither flatten to nothing.
+    [file, '-colorspace', 'gray', ...(process.env.FACEMAGICK ?? '').split(/\s+/).filter(Boolean),
+     '-resize', `${mcw}x200!`, '-depth', '8', 'gray:-'],
     { maxBuffer: 1 << 26 });
   const x0 = (160 - mcw) >> 1;
   const px = new Uint8Array(160 * 200).fill(BLACK);
@@ -100,11 +116,46 @@ export function toPixels(file) {
   // grey-only range in here is what made adding black to the palette do nothing at all -- no
   // target pixel ever landed near it.
   const tgt = new Float64Array(160 * 200).fill(-1);
+  // FACEBGFILL=1 (2026-10-15, the sword angel): background is a bright pixel CONNECTED to the top,
+  // left or right edge, not every bright pixel. A white sword held by the statue is brighter than
+  // the off-white backdrop, so the plain threshold keyed it out with the background. The bottom edge
+  // seeds nothing, because the blade runs off it.
+  // The background is judged on the image BEFORE any FACEMAGICK step: local contrast (CLAHE) stretches
+  // a flat backdrop's faint paper texture into specks below BG, which then drew as stray dots (2026-10-15).
+  const plain = process.env.FACEMAGICK ? execFileSync('magick',
+    [file, '-colorspace', 'gray', '-resize', `${mcw}x200!`, '-depth', '8', 'gray:-'], { maxBuffer: 1 << 26 }) : raw;
+  let isBg = i => plain[i] >= BG;
+  if (process.env.FACEBGFILL === '1') {
+    const bg = new Uint8Array(mcw * 200), st = [];
+    const seed = (x, y) => { const i = y * mcw + x; if (!bg[i] && plain[i] >= BG) { bg[i] = 1; st.push(i); } };
+    for (let x = 0; x < mcw; x++) seed(x, 0);
+    for (let y = 0; y < 200; y++) { seed(0, y); seed(mcw - 1, y); }
+    while (st.length) { const i = st.pop(), x = i % mcw, y = (i / mcw) | 0;
+      if (x > 0) seed(x - 1, y); if (x < mcw - 1) seed(x + 1, y); if (y > 0) seed(x, y - 1); if (y < 199) seed(x, y + 1); }
+    isBg = i => bg[i] === 1;
+  }
+  // FACEEDGE=n[,k] (2026-10-15): darken the figure's tone in a band n output pixels inside its
+  // silhouette -- by k at the very edge (default 0.4), easing to none at n -- so a statue's lit rim
+  // stops dithering into a light-grey halo against the black. 0 or unset: off.
+  const [EN, EK] = (process.env.FACEEDGE ?? '0').split(',').map(Number);
+  const edgeD = new Uint8Array(mcw * 200).fill(255);
+  if (EN > 0) {
+    let fr = [];
+    for (let i = 0; i < mcw * 200; i++) if (isBg(i)) { edgeD[i] = 0; fr.push(i); }
+    for (let d = 1; d <= EN && fr.length; d++) {
+      const nx = [];
+      for (const i of fr) { const x = i % mcw, y = (i / mcw) | 0;
+        for (const j of [x > 0 ? i - 1 : -1, x < mcw - 1 ? i + 1 : -1, y > 0 ? i - mcw : -1, y < 199 ? i + mcw : -1])
+          if (j >= 0 && edgeD[j] === 255) { edgeD[j] = d; nx.push(j); } }
+      fr = nx;
+    }
+  }
+  const edgeF = i => EN > 0 && edgeD[i] <= EN ? (EK ?? 0.4) + (1 - (EK ?? 0.4)) * (edgeD[i] - 1) / EN : 1;
   for (let y = 0; y < 200; y++) for (let x = 0; x < mcw; x++) {
     const v = raw[y * mcw + x];
-    if (v >= BG) continue;                                    // background: leave it black
+    if (isBg(y * mcw + x)) continue;                          // background: leave it black
     let t = (Math.min(HI, Math.max(LO, v)) - LO) / (HI - LO); // 0 = darkest statue tone
-    t = Math.pow(t, GAM);
+    t = Math.pow(t, GAM) * edgeF(y * mcw + x);
     px[y * 160 + x0 + x] = GREYS[Math.min(GREYS.length - 1, Math.floor(t * GREYS.length))];
     tgt[y * 160 + x0 + x] = t;
   }

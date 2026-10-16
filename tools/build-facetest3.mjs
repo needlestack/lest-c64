@@ -24,7 +24,10 @@ process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 const D64 = globalThis.D64;
 
 const FACE = JSON.parse(readFileSync('./data/angel-face.json', 'utf8')).hangl1;
-const IMAGES = ['art/angel-1.png', 'art/angel-2.png', 'art/angel-3.png', 'art/angel-4.png', 'art/angel-5.png'];
+if (process.env.FACED023) FACE.d023 = +process.env.FACED023;   // as fit-face.mjs
+// IMAGES=a.png,b.png (2026-10-15): fit other pictures than the five angels -- a candidate for the scene.
+const IMAGES = process.env.IMAGES ? process.env.IMAGES.split(',').map(s => s.trim()).filter(Boolean)
+  : ['art/angel-1.png', 'art/angel-2.png', 'art/angel-3.png', 'art/angel-4.png', 'art/angel-5.png'];
 const hx = n => '$' + n.toString(16);
 // Where the dictionary changes. 12 puts it just under the face on this image set; it is a build
 // knob because the right row is a property of the PICTURES, not of the hardware.
@@ -35,12 +38,25 @@ const KTOP = +(process.env.KTOP ?? 256), KBOT = +(process.env.KBOT ?? 256);
 // Same pipeline as fit-face.mjs, imported rather than reimplemented: greyscale and letterbox,
 // Floyd-Steinberg with grit over the 4-ink palette, then k-medoids over the resulting tiles.
 const INKS = [...GREYS, BLACK];
-const pix = {}, tiles = {};
+const pix = {}, tiles = {}, edge = {}, tone = {};
 for (const f of IMAGES) {
   const { tgt } = toPixels(f);
+  // the SMOOTH target, in luminance (background black), for FACESEAM: the dither's own pixel noise
+  // would make every cell boundary look like a jump
+  { const lo = Math.min(...INKS.map(v => LU[v])), hi = Math.max(...INKS.map(v => LU[v]));
+    tone[f] = Float64Array.from(tgt, t => t < 0 ? LU[BLACK] : lo + t * (hi - lo)); }
   pix[f] = dither(tgt, INKS);
   tiles[f] = tilesOf(pix[f]);
+  // a cell the silhouette crosses: some pixels figure (tgt >= 0), some background (tgt < 0)
+  edge[f] = [...Array(1000)].map((_, c) => { let fg = 0, bg = 0;
+    for (let r = 0; r < 8; r++) for (let i = 0; i < 4; i++)
+      (tgt[(((c / 40) | 0) * 8 + r) * 160 + (c % 40) * 4 + i] < 0 ? bg++ : fg++);
+    return fg > 0 && bg > 0; });
 }
+// EDGETRAIN=0 (2026-10-15): leave the cells the silhouette crosses OUT of the training pool. Each is a
+// near-unique slice of outline and wins a glyph the interior then lacks; they are still drawn, fitted
+// to the nearest glyph the interior produced. Default 1: trained like any other cell.
+const EDGETRAIN = process.env.EDGETRAIN !== '0';
 // ---- TRAIN / SHOW: the codebook's training set need not be the set it renders ----
 // A codebook is a budget, and pooling every tile of every picture spends it evenly on content
 // that does not matter evenly. TRAIN names what the clusterer sees, per picture and per band;
@@ -60,6 +76,7 @@ for (const f of SHOW) if (!IMAGES.includes(f)) throw new Error(`SHOW names ${f},
 const pool = [[], []];
 for (const [f, b] of TRAIN)
   tiles[f].forEach((t, i) => {
+    if (!EDGETRAIN && edge[f][i]) return;
     const bd = band(Math.floor(i / 40));
     if (b === 'all' || (b === 'top') === (bd === 0)) pool[bd].push(t);
   });
@@ -73,7 +90,9 @@ if (process.env.TRAIN || process.env.SHOW)
 const ONEBOOK = process.env.ONEBOOK === '1';
 const books = [], K = [KTOP, KBOT];
 if (ONEBOOK) {
-  const { cents } = cluster([...pool[0], ...pool[1]], 256);
+  // KONE=n (2026-10-15): fewer than 256 codewords, so the shipped charset is smaller (the game packs
+  // it to the glyphs drawn). The asset is still padded to 256 glyphs, which the build expects.
+  const { cents } = cluster([...pool[0], ...pool[1]], +(process.env.KONE ?? 256));
   books.push(cents, cents);
   console.error(`  ONEBOOK control: ${pool[0].length + pool[1].length} tiles -> one 256-codeword book`);
 } else for (let b = 0; b < 2; b++) {
@@ -96,6 +115,66 @@ for (const f of SHOW) {
   for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) {
     const i = cy * 40 + cx;
     m[i] = (cy < SPLITROW ? top : bot).screen[i];
+  }
+  // ---- FACESEAM=w (2026-10-15): a seam-aware refit against blockiness ----
+  // Each cell above chose its glyph alone. Blockiness is a step in tone AT a cell boundary that the
+  // picture does not have, so refit cell by cell (3 passes, each seeing its neighbours' current
+  // glyphs): own squared error, plus w times, per side, (the glyphs' mean-edge step - the source's
+  // mean-edge step)^2 -- edge means of the SMOOTH tone, 4 pixels on a horizontal side, 8 on a vertical.
+  const SEAMW = +(process.env.FACESEAM ?? 0);
+  if (SEAMW > 0) {
+    const T = tone[f], P = pix[f];
+    // a cell's four edge means -- top, bottom, left, right -- from 32 luminances
+    const edges = L => { let t = 0, b = 0, l = 0, r = 0;
+      for (let i = 0; i < 4; i++) { t += L[i]; b += L[28 + i]; }
+      for (let k = 0; k < 8; k++) { l += L[k * 4]; r += L[k * 4 + 3]; }
+      return [t / 4, b / 4, l / 8, r / 8]; };
+    const cellL = (src, c) => { const o = new Float64Array(32), cx = c % 40, cy = (c / 40) | 0;
+      for (let r = 0; r < 8; r++) for (let i = 0; i < 4; i++) o[r * 4 + i] = src(((cy * 8 + r) * 160 + cx * 4 + i)); return o; };
+    const gE = bookLum.map(bk => bk.map(edges));                                 // per band, per glyph
+    const tE = [...Array(1000)].map((_, c) => edges(cellL(i => T[i], c)));
+    const pL = [...Array(1000)].map((_, c) => cellL(i => LU[P[i]], c));
+    // side k of a cell meets side opp[k] of the neighbour at offset nb[k]
+    const nb = [-40, 40, -1, 1], opp = [1, 0, 3, 2];
+    // FACERUN=n (2026-10-15): a horizontal run of n or more LIGHTEST-grey pixels -- inside the glyph or
+    // across its joins with the cells left and right -- reads as a glitch (a 5-pixel bar across the
+    // nose, from two cells that each looked fine). A glyph that would make one costs as much as a
+    // whole badly fitted cell.
+    const RUN = +(process.env.FACERUN ?? 0), LT = GREYS[GREYS.length - 1];
+    const runCost = (c, cx, gv) => {
+      if (!RUN || band((c / 40) | 0) !== 0) return 0;   // the FACE band only: below it, the sword's guard
+                                                          //   and lit shoulders ARE horizontal light bars
+      const L = cx > 0 ? books[band(((c - 1) / 40) | 0)][m[c - 1]] : null;
+      const R = cx < 39 ? books[band(((c + 1) / 40) | 0)][m[c + 1]] : null;
+      let bad = 0;
+      for (let r = 0; r < 8; r++) {
+        const row = [...(L ? L.slice(r * 4, r * 4 + 4) : [-1, -1, -1, -1]), ...gv.slice(r * 4, r * 4 + 4),
+                     ...(R ? R.slice(r * 4, r * 4 + 4) : [-1, -1, -1, -1])];
+        let run = 0;
+        for (let k = 0; k < 12; k++) { run = row[k] === LT ? run + 1 : 0;
+          if (run >= RUN && k >= 4 && k - run + 1 < 8) { bad++; break; } }   // the run touches THIS glyph
+      }
+      return bad * 32 * 255 * 255;
+    };
+    for (let pass = 0; pass < 3; pass++) for (let c = 0; c < 1000; c++) {
+      const cx = c % 40, cy = (c / 40) | 0, bk = bookLum[band(cy)], ge = gE[band(cy)];
+      let best = m[c], bd = Infinity;
+      for (let g = 0; g < bk.length; g++) {
+        let d = 0;
+        for (let p = 0; p < 32; p++) { const e = pL[c][p] - bk[g][p]; d += e * e; }
+        if (d >= bd) continue;
+        for (let k = 0; k < 4; k++) {
+          const n = c + nb[k];
+          if ((k === 2 && cx === 0) || (k === 3 && cx === 39) || n < 0 || n >= 1000) continue;
+          const nE = gE[band((n / 40) | 0)][m[n]][opp[k]];
+          const e = (ge[g][k] - nE) - (tE[c][k] - tE[n][opp[k]]);
+          d += SEAMW * e * e * (k < 2 ? 4 : 8);
+        }
+        d += runCost(c, cx, books[band(cy)][g]);
+        if (d < bd) { bd = d; best = g; }
+      }
+      m[c] = best;
+    }
   }
   MAPS.push(m);
   // Report the error over the cells each band actually owns, not the whole-frame RMS, which
@@ -332,10 +411,13 @@ if (process.env.ASSET === '1') {
     colram: 0x08 | (FACE.colram & 7),
     rms: rms.map(v => +v.toFixed(4)),
   };
+  while (asset.chars.length < 2048) asset.chars.push(0);     // KONE < 256: pad to the full charset
   if (asset.chars.length !== 2048) throw new Error(`charset is ${asset.chars.length} bytes, not 2048`);
   for (const m of asset.maps) if (m.map.length !== 1000)
     throw new Error(`${m.name} map is ${m.map.length} cells, not 1000`);
-  writeFileSync('./data/death-pics.json', JSON.stringify(asset));
+  // ASSETOUT=path: write the asset elsewhere, to LOOK at a candidate without replacing the game's
+  // (tools/renderpic.mjs draws one as a PNG)
+  writeFileSync(process.env.ASSETOUT ?? './data/death-pics.json', JSON.stringify(asset));
   console.error(`  death-pics.json: charset 2048 + ${asset.maps.length} x 1000` +
                 ` = ${2048 + asset.maps.length * 1000} bytes, RMS ${asset.rms.join('/')}`);
 }
