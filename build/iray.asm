@@ -2015,7 +2015,7 @@ subFin:
                                 ;   later than the press is invisible; projecting from last
                                 ;   frame pose would not be.
         jsr bfsTick             ; a few cells of the angel distance map; see anPath
-        jsr lxStep              ; SILVER (level code): glide after the player, and spark now and then
+        jsr lxStep              ; LEVEL CODE: the sentries glide and spark (svStep), or the drone follows the angels (drStep)
         jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run
                                 ;   before it, the angel decided on last frame visibility and so
                                 ;   took one free step on the very frame you turned to face it --
@@ -7352,7 +7352,7 @@ hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         bpl hlSCl
         lda #$ff                ; a cell the player can never be in, so the first frame always
         sta bfsDone             ;   starts a fill
-        jsr lxInit              ; LEVEL CODE: stInit (every closing wall out) then svReset -- the
+        jsr lxInit              ; LEVEL CODE: drIn (the drone's SID set-up) or stInit (every closing wall out) then svReset -- the
                                 ;   sentries' PLACE ON THEIR PATHS, and the charge: the loop above put
                                 ;   them back on their start cells, and a sentry whose path index
                                 ;   still says mid-loop walks through walls from there. Here, not at

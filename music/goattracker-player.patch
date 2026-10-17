@@ -1,0 +1,31 @@
+--- player.s.orig	2026-10-16 15:24:29
++++ player.s	2026-10-16 15:46:45
+@@ -1358,6 +1358,8 @@
+ mt_loadregswaveonly:
+                 lda mt_chnwave,x
+                 and mt_chngate,x
++                and #$ff                        ;LEST patch: the RELEASE mask -- the game patches this
++                                                ;to $fe to let every voice go (a click-free fade)
+                 sta SIDBASE+$04,x
+               .ELSE
+               .IF (SOUNDSUPPORT != 0)
+@@ -1386,6 +1388,8 @@
+ mt_loadregswaveonly:
+                 lda mt_chnwave,x
+                 and mt_chngate,x
++                and #$ff                        ;LEST patch: the RELEASE mask -- the game patches this
++                                                ;to $fe to let every voice go (a click-free fade)
+                 sta SIDBASE+$04,x
+               .ELSE
+ mt_loadregswaveonly:
+@@ -1436,7 +1440,9 @@
+                 lda (mt_temp1),y           ;Load pulse
+                 sta SIDBASE+$02,x
+                 sta SIDBASE+$03,x
+-                lda #$09                   ;Testbit
++                lda #$08                   ;Testbit, gate OFF (LEST patch 2026-10-16: with the gate on
++                                           ;and no waveform the 6581 outputs DC times the envelope -- a thump
++                                           ;before every effect; the effect's own first waveform gates it)
+ mt_sfxexec_wavechg:
+                 sta mt_chnwave,x
+                 sta SIDBASE+$04,x

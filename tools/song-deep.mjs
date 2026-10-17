@@ -92,9 +92,12 @@ const FMASK = 0xa1 | (DATA ? 2 : 0) | (STEAMON ? 4 : 0);
 const FILT_THROB = t => [[0x90, FMASK], [0x00, 0x08],
   ...[...Array(10)].flatMap(() => beatF(6, t)), ...[...Array(8)].flatMap(() => beatF(-7, t)), ...beatF(-4, t),
   [0xff, 0x03]];
+// STAIRS=8: the same ~10 s breath (608 ticks) and range in 8 steps of 8 instead of 16 of 4 -- half
+// the table (64 bytes), coarser steps; for a build short of room (2026-10-16 sound test)
+const STAIRS = +(process.env.STAIRS ?? 16), SPT = 608 / 2 / STAIRS;      // ticks per stair
 const FILT_SWEEP = [[0x90, FMASK], [0x00, 0x08],
-  ...[...Array(16)].flatMap(() => [[0x04, 0x01], [0x0f, 0x00]]),
-  ...[...Array(16)].flatMap(() => [[0x04, 0xff], [0x0f, 0x00]]),
+  ...[...Array(STAIRS)].flatMap(() => [[0x04, 64 / STAIRS / 4], [SPT - 4, 0x00]]),
+  ...[...Array(STAIRS)].flatMap(() => [[0x04, -(64 / STAIRS / 4) & 0xff], [SPT - 4, 0x00]]),
   [0xff, 0x03]];
 const DRONE_FILT = THROB ? FILT_THROB(THROB) : FILT_SWEEP;
 // ---- the data voice: instant attack, short release; the hard restart (gate timer 2) cuts each note
@@ -164,7 +167,8 @@ for (const i of INSTR) {
 }
 const I = Object.fromEntries(INSTR.map((x, n) => [x.name, n + 1]));
 // the mix's second filter table, started from a pattern (the drone's own is the sweep)
-const FTHROB_AT = DATAMIX ? add('filt', FILT_THROB(THROB_MIX)) : 0;
+// (THROB=0: no second table -- the pulse half keeps the sweep, and its first row carries no AXY)
+const FTHROB_AT = DATAMIX && THROB_MIX ? add('filt', FILT_THROB(THROB_MIX)) : 0;
 
 const NOTE = { 'C': 0, 'C#': 1, 'D': 2, 'D#': 3, 'E': 4, 'F': 5, 'F#': 6, 'G': 7, 'G#': 8, 'A': 9, 'A#': 10, 'B': 11 };
 const n = s => { const m = /^([A-G]#?)(\d)$/.exec(s); return 0x60 + 12 * +m[2] + NOTE[m[1]]; };
@@ -226,7 +230,16 @@ const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (se
 const pick = a => a[Math.floor(rnd() * a.length)];
 const LO = n('G3'), HI = n('F5');
 // a packet over one bass note: 8 beats of 4 sixteenths
-const packet = (bass, { tag, dstep: DSTEP }, fcmd) => {
+// REUSE=1 (SONG's default): one packet per (bass note, set, filter command) -- the bass line plays A
+// and F twice, so those sections replay their first packet instead of storing a second (2026-10-16:
+// the song has to fit the level region).
+const PKCACHE = new Map(), REUSE = (process.env.REUSE ?? (SONG ? '1' : '0')) === '1';
+const packet = (bass, set, fcmd) => {
+  const key = `${bass}|${set.tag}|${fcmd ?? ''}`;
+  if (REUSE && PKCACHE.has(key)) return PKCACHE.get(key);
+  const p = packetNew(bass, set, fcmd); PKCACHE.set(key, p); return p;
+};
+const packetNew = (bass, { tag, dstep: DSTEP }, fcmd) => {
   const [pcs, out] = CHORD[bass];
   const lad = []; for (let v = LO; v <= HI; v++) if (pcs.includes((v - 0x60) % 12)) lad.push(v);
   const root = lad.findIndex(v => v >= n('A3') && (v - 0x60) % 12 === pcs[0]);
@@ -336,12 +349,18 @@ const STEAM1 = FLUTTER ? null : steamPat(0);                            // witho
 const STEAMS = BASS.map((_, sec) => FLUTTER ? steamPat(sec) : STEAM1);
 const SIL = def([]), SIL_IN = def([], 8);
 const BLOOP = [B_A, B_F, B_BB, B_E, B_A, B_F, B_D, B_E];
-const ORDER = SONG ? [
+// PASSES=3 (SONG): the first three passes only -- no pulse 16ths -- for a test that needs it smaller
+const PASSES = +(process.env.PASSES ?? 4);
+const ORDER = SONG && PASSES === 3 ? [
+  [B_IN, ...BLOOP, ...BLOOP, ...BLOOP],
+  [SIL_IN, SIL, ...Array(7).fill(SIL), ...Array(8).fill(SIL), ...BASS.map(bs => packet(bs, DSET_TRI))],
+  [SIL_IN, def([[0, 'off']]), ...Array(7).fill(SIL), steamPat(0, true), ...Array(7 + 8).fill(STEAM1)],
+] : SONG ? [
   [B_IN, ...BLOOP, ...BLOOP, ...BLOOP, ...BLOOP],
   // pass 1's first row hands the filter back the slow sweep (pass 4 had the throb)
-  [SIL_IN, def([[0, null, 0, 0xa, INSTR[0].fp]]), ...Array(7).fill(SIL), ...Array(8).fill(SIL),
+  [SIL_IN, FTHROB_AT ? def([[0, null, 0, 0xa, INSTR[0].fp]]) : SIL, ...Array(7).fill(SIL), ...Array(8).fill(SIL),
    ...BASS.map(bs => packet(bs, DSET_TRI)),
-   ...BASS.map((bs, k) => packet(bs, DSET_PUL, k ? null : [0xa, FTHROB_AT]))],
+   ...BASS.map((bs, k) => packet(bs, DSET_PUL, k || !FTHROB_AT ? null : [0xa, FTHROB_AT]))],
   // pass 1 keys the steam off (it fades on its release), pass 2 strikes it
   [SIL_IN, def([[0, 'off']]), ...Array(7).fill(SIL), steamPat(0, true), ...Array(7 + 16).fill(STEAM1)],
 ] : [
@@ -362,7 +381,11 @@ str('GTS5', 4); str('Deep', 32); str('', 32); str('', 32);
 b.push(1);
 for (const o of ORDER) b.push(o.length + 1, ...o, 0xff, RESTART);
 b.push(INSTR.length);
-for (const i of INSTR) { b.push(i.ad, i.sr, i.wp, i.pp, i.fp, i.vib ?? 0, i.vibDelay ?? 0, i.gt ?? 0x02, 0x09); str(i.name, 16); }
+// 1st-frame wave $08 (test bit, gate OFF), not GoatTracker's usual $09 (test + gate): with the gate on and
+// no waveform, a 6581 outputs DC times the envelope -- a click as each voice's first note starts, which
+// is what the song's restart on a landing sounded like (2026-10-16). The wavetable's first row gates it.
+const FIRSTWAVE = parseInt(process.env.FIRSTWAVE ?? '08', 16);
+for (const i of INSTR) { b.push(i.ad, i.sr, i.wp, i.pp, i.fp, i.vib ?? 0, i.vibDelay ?? 0, i.gt ?? 0x02, FIRSTWAVE); str(i.name, 16); }
 for (const t of ['wave', 'pulse', 'filt', 'speed']) b.push(T[t].length, ...T[t].map(r => r[0]), ...T[t].map(r => r[1]));
 b.push(P.length);
 for (const p of P) { b.push(p.length); for (const row of p) b.push(...row); }

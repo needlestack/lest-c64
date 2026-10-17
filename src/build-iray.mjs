@@ -14,7 +14,9 @@
 // 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
 // code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, mkdtempSync, copyFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir, homedir } from 'os';
 import { execFileSync } from 'child_process';
 import { ROOT } from './paths.mjs';
 process.chdir(ROOT);   // every path below is repo-relative (see paths.mjs)
@@ -8305,15 +8307,19 @@ const STN_MAX = HAS_SILVER ? L9.stN : 1;
 // FEATURES whose code loads with the levels that use them, and the vectors each one answers. A
 // level's module is the features it uses, behind a jump table in LX_VECS order; a vector none of
 // them answers goes to an rts in the module. Two features answering one vector is not supported yet.
+// DRONELV: the levels whose sound is our own drone + effect player (level code), not a GoatTracker block
+const DRONE_LV = process.env.MUSIC === '1' ? (process.env.DRONELV ?? '1').split(',').map(Number) : [];
 const LX_FEATURES = {
   silver:  { on: n => !!LEVEL_SILVER[n],  vecs: { lxTick: 'svTick', lxStep: 'svStep', lxInit: 'lxIn', lxSock: 'stGo', lxWr: 'svWr' } },
   flicker: { on: n => !!LEVEL_FLICKER[n], vecs: { lxTick: 'flkTick', ...(FLKINK ? { lxLook: 'fkEmpty' } : {}) } },
+  // the PROXIMITY DRONE (2026-10-16, MUSIC builds): level 1's own sound, no GoatTracker there -- see drIn
+  drone:   { on: n => DRONE_LV.includes(n), vecs: { lxInit: 'drIn', lxStep: 'drStep', lxTick: 'drTick', lxSfx: 'drSfx' } },
 };
 const LX_FEAT_OF = n => Object.keys(LX_FEATURES).filter(f => LX_FEATURES[f].on(n));
 const LX_OF = n => LX_FEAT_OF(n).length > 0;
 const HAS_LX = LEVEL_IDS.some(LX_OF);
 // the vectors this build needs, the IRQ's first (lxOff stubs in this order, lxOn points in reverse)
-const LX_VECS = ['lxTick', 'lxStep', 'lxInit', 'lxSock', 'lxWr', 'lxLook']
+const LX_VECS = ['lxTick', 'lxStep', 'lxInit', 'lxSock', 'lxWr', 'lxLook', 'lxSfx']
   .filter(v => LEVEL_IDS.some(n => LX_FEAT_OF(n).some(f => LX_FEATURES[f].vecs[v])));
 for (const n of LEVEL_IDS) for (const v of LX_VECS)
   if (LX_FEAT_OF(n).filter(f => LX_FEATURES[f].vecs[v]).length > 1) throw new Error(`level ${n}: two level-code features answer ${v}`);
@@ -9888,11 +9894,141 @@ const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBL
 // the code. The vectors, in this order, are what the engine calls; a module's jump table matches it.
 const LXAT = LVLREGION_END;
 const LX_BOOT = LX_OF(BOOTLVL);
+// ---- MUSIC=1: a GoatTracker song, player and data as ONE block, in the files of the levels that play it ----
+// (2026-10-16, a TEST build: "music at all times", to feel the cost in play.) GoatTracker's packer
+// writes a player TAILORED to its song -- effects it never uses left out, the song's tables at
+// absolute addresses inside the player's instructions -- so the two travel together. The block sits
+// at SONGAT, the first page of the level-code area, so a level that brings level code cannot also
+// bring the song (guarded); MUSICLV names the levels that do (level 9 is silent: artistic reasons).
+// The region grows to hold it, which is image space. A level without it stops the music
+// (musGo finds no song); a fall stops it before the load (musOff) and starts the new level's.
+// The player runs in the top-of-frame IRQ, 60 times a second, whatever the frame rate.
+// Its two zero-page temps are MUS_ZP and MUS_ZP+1, published to compaction as owned.
+const MUSIC = process.env.MUSIC === '1';
+// SOUND, per level (2026-10-16, the user's plan): every level that makes any sound carries a block,
+// built WITH GoatTracker's sound-effect engine (-D1: entries init +0, play +3, effect +6, volume +9).
+// MUSICLV play the song (MUSICSNG); the other SFXLV levels carry an EMPTY song, so their player is
+// there for the effects alone -- level 1, the hard room: footsteps and the clinks, no music.
+const MUSIC_LV = MUSIC ? (process.env.MUSICLV ?? '2,3,4,5,6,7').split(',').map(Number) : [];
+const SFX_LV = MUSIC ? [...new Set([...(process.env.SFXLV ?? '2,3,4,5,6,7').split(',').map(Number), ...MUSIC_LV])] : [];
+// footsteps: on no level for now (the user, 2026-10-16: "they take away from the mood ... maybe in
+// another level"); STEPLV=n,... puts them back
+const STEP_LV = MUSIC ? (process.env.STEPLV ?? '').split(',').filter(Boolean).map(Number) : [];
+const MUS_ZP = 0xbe;
+const SONGAT = (LXAT + 255) & ~255;
+const MUS_SNG = n => MUSIC_LV.includes(n) ? (process.env.MUSICSNG ?? 'music/deep-song.sng') : 'music/empty.sng';
+const MUS_BLOBS = (() => {
+  const out = new Map(), bySng = new Map();
+  for (const n of SFX_LV) {
+    if (LX_OF(n)) throw new Error(`SFXLV: level ${n} brings level code, which owns the area the sound block would use`);
+    const sng = MUS_SNG(n);
+    if (!bySng.has(sng)) {
+      // gt2reloc crashes (exit 133, no message) on a long input path: a short temp dir, files by name
+      const d = mkdtempSync(join(tmpdir(), 'mus-'));
+      copyFileSync(sng, join(d, 's.sng'));
+      execFileSync(join(homedir(), 'goattracker2/linux/gt2reloc'),
+        ['s.sng', 's.prg', '-N', '-D1', `-W${(SONGAT >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
+      const prg = readFileSync(join(d, 's.prg'));
+      if ((prg[0] | (prg[1] << 8)) !== SONGAT) throw new Error(`MUSIC: gt2reloc put the player at ${hx16(prg[0] | (prg[1] << 8))}, not ${hx16(SONGAT)}`);
+      // the RELEASE MASK our patch to player.s adds (music/goattracker-player.patch): the immediate of
+      // "and #$ff" between the gate and the waveform store. Found by its bytes, and exactly once.
+      const blob = [...prg.slice(2)], pat = [0x29, 0xff, 0x9d, 0x04, 0xd4];
+      const hits = blob.flatMap((_, i) => pat.every((v, k) => blob[i + k] === v) ? [i] : []);
+      if (hits.length !== 1) throw new Error(`MUSIC: ${sng}'s player has ${hits.length} release masks, not 1 -- is ~/goattracker2 patched? (music/goattracker-player.patch)`);
+      blob.rel = SONGAT + hits[0] + 1;
+      bySng.set(sng, blob);
+      console.error(`  sound: ${sng}, ${prg.length - 2} bytes (player + song) at ${hx16(SONGAT)}`);
+    }
+    out.set(n, bySng.get(sng));
+  }
+  return out;
+})();
+const MUS_END = MUSIC ? SONGAT + Math.max(...MUS_BLOBS.values().map(b => b.length)) : 0;
+// THE FADE (the user, 2026-10-16: "fade the music out during the fall so it's zero when the loader
+// kicks in") is the voices' own RELEASE, not the master volume. A 15-step volume fade was 15 bumps:
+// on a 6581 every $d418 write steps the DC level -- the very thing that plays samples -- so it can
+// never be silent. Instead the fall's first frame closes our patched release mask (and #$ff -> #$fe):
+// every voice is gated off, each envelope fades its own way, and no new note can re-gate. A level's
+// block arrives with the mask open ($ff, from the file); musGo reopens it for a block that stayed.
+const MUS_RELT = [...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => MUS_BLOBS.get(i)?.rel ?? SONGAT);
+// ---- THE EFFECTS (GoatTracker's sound-effect format, readme 6.3) ----
+// AD, SR, a pulse width (one byte, written to both $d402 and $d403, so $08 is ~$808), then one entry
+// per frame: an absolute note ($82-$df = D-0..B-7) and, after it, optionally a waveform ($01-$81); $00
+// ends it. (The readme's "note/waveform pairs, different order than in instrument wavetable".) The
+// effect owns its voice only for as long as it has entries. Built from the format, NOT heard: tune
+// by ear. In priority order, least first (see sfxData).
+const SFX_NOTE = nm => { const m = /^([A-G]#?)(\d)$/.exec(nm);
+  return 0x80 + 12 * +m[2] + ({ C: 0, 'C#': 1, D: 2, 'D#': 3, E: 4, F: 5, 'F#': 6, G: 7, 'G#': 8, A: 9, 'A#': 10, B: 11 })[m[1]]; };
+// Each frame is the NOTE, then (optionally) the waveform -- the engine reads a note and only then looks
+// whether the next byte is a waveform (< $82). Written waveform-first (the first version), every effect
+// came out as the engine's own test-bit frame plus whatever gate-off byte followed: a thump and a hiss.
+const fx = (ad, sr, pw, frames) => [ad, sr, pw, ...frames.flatMap(([w, nm]) => w === null ? [SFX_NOTE(nm)] : [SFX_NOTE(nm), w]), 0];
+const hold = (nm, k) => [...Array(k)].map(() => [null, nm]);
+// k frames sliding from one note to another in semitone steps: [[waveform, note value], [null, ...], ...]
+const glideFx = (w, from, to, k) => { const a = SFX_NOTE(from), z = SFX_NOTE(to);
+  return [...Array(k)].map((_, i) => [i ? null : w, Math.round(a + (z - a) * i / (k - 1))]); };
+const fxRaw = (ad, sr, pw, frames) => [ad, sr, pw, ...frames.flatMap(([w, v]) => w === null ? [v] : [v, w]), 0];
+const SFX_BYTES = {
+  // a footstep in a hard room, the way IMPOSSIBLE MISSION does it (Games Explained's disassembly,
+  // footstep_sound $8E79): NOISE clocked very high (its $861E/$C8F3 are about C7 and G7), AD $05 /
+  // SR $39 -- an instant attack, a ~170 ms decay down to a LOW sustain, and a ~750 ms RELEASE --
+  // gated for a few frames and let go. The "reverb" is that envelope: each step's quiet tail is still
+  // dying when the next one lands. (Release 8, ~300 ms, here -- the user: "shorten the release a bit".)
+  // The effect runs on through the release (gate-off frames), because
+  // when it ends the voice goes back to the song, which would cut the tail. Two feet, a semitone apart.
+  // ...and then MUFFLED (the user, 2026-10-16: the bright tap "takes away from the mood ... unless we
+  // can make it much more muffled"): the same envelope, the noise clocked five octaves down.
+  stepL:  fx(0x05, 0x38, 0x08, [[0x81, 'C2'], ...hold('C2', 2), [0x80, 'C2'], ...hold('C2', 16)]),
+  stepR:  fx(0x05, 0x38, 0x08, [[0x81, 'B1'], ...hold('B1', 2), [0x80, 'B1'], ...hold('B1', 16)]),
+  // the orb coming off the floor: a bright triangle ping that rings a moment
+  clink:  fx(0x08, 0x00, 0x08, [[0x11, 'E6'], [null, 'B6'], [null, 'E7'], ...hold('B6', 3), ...hold('E6', 14), [0x10, 'E6']]),
+  // an orb going into its socket: a triangle falling an octave and a half
+  socket: fxRaw(0x0a, 0x00, 0x08, glideFx(0x11, 'C5', 'F3', 18)),
+  // a wall going down: low noise falling for most of a second
+  wall:   fxRaw(0x0c, 0x00, 0x08, glideFx(0x81, 'G4', 'C2', 32)),
+  // the death picture's cut: a hard noise hit dropping away
+  death:  fxRaw(0x0b, 0x00, 0x08, glideFx(0x81, 'D5', 'C2', 30)),
+};
+const SFX_ORDER = ['stepL', 'stepR', 'clink', 'socket', 'wall', 'death'];
+const SFX_ID = Object.fromEntries(SFX_ORDER.map((k, i) => [k, i + 1]));
+const SFX_OFF = {};
+{ let o = 0; for (const k of SFX_ORDER) { if (SFX_BYTES[k].length > 128) throw new Error(`sfx ${k}: ${SFX_BYTES[k].length} bytes, past the engine's 128`);
+    SFX_OFF[k] = o; o += SFX_BYTES[k].length; } }
+const STEP_LEN = +(process.env.STEPLEN ?? 140);   // 1/256 cells walked per footstep: about half a cell
+// ---- THE PROXIMITY DRONE (level code 'drone'): the old engine drone, revived 2026-10-16 ----
+// Two pulse voices a hair apart beat at exactly their difference in Hz, so ONE number is the whole
+// effect: a slow flange far off, a throb closer, a heartbeat on top of you -- Chebyshev cells to the
+// nearest angel, 0..15. Voice 1 is a real note (A1, climbing a half step at the closest) and voice 2
+// rides above it to make the beat. The old drone's LOUDNESS was the master volume, and every $d418
+// write is a bump on a 6581 -- so here the nearness is the FILTER: every voice (the effects on voice 3
+// too -- the user: "the proximity drone will also filter the footsteps") goes through a low-pass that
+// opens as the angel closes. The volume is written once, at drIn.
+const DR = { near: 36, fall: 3, far: 2, step: 1, dmax: 8, vfall: 4, fcNear: +(process.env.DRFCNEAR ?? 0x10), fcFar: +(process.env.DRFCFAR ?? 0x00) };
+// (2026-10-16, the user: "more aggressively lowpass so the initial hum is more subdued", then "even
+// further", then the trial they kept: "I think I like fully filtered" -- $00 from 6 cells, $10 at 0)
+const drFn = hz => Math.round(hz * 16777216 / 1022727);           // NTSC
+const drShape = d => d >= DR.dmax ? 0 : (Math.exp(-d / DR.fall) - Math.exp(-DR.dmax / DR.fall)) / (1 - Math.exp(-DR.dmax / DR.fall));
+// DRZERO: the distance (cells) at which the cutoff reaches fcFar, the same exponential shape squeezed
+// into 0..DRZERO (the falloff scales with it). 15 = the whole table; 6 for a trial (the user,
+// 2026-10-16: "I can't get more than about six squares away from an angel").
+const DR_ZERO = +(process.env.DRZERO ?? 6), DR_VF = DR.vfall * DR_ZERO / 15;
+const drLoud = d => (Math.exp(-Math.min(d, DR_ZERO) / DR_VF) - Math.exp(-DR_ZERO / DR_VF)) / (1 - Math.exp(-DR_ZERO / DR_VF));
+const DR_V1 = [...Array(16)].map((_, d) => drFn(55 * Math.pow(2, DR.step * drShape(d) / 12)));
+const DR_V2 = DR_V1.map((v, d) => v + Math.round(Math.max(DR.far, DR.near * Math.exp(-d / DR.fall))));
+const DR_FC = [...Array(16)].map((_, d) => Math.round(DR.fcFar + (DR.fcNear - DR.fcFar) * drLoud(d)));
+// octave 7's twelve notes; the effect player shifts these down (GoatTracker's note numbering, C-0 = 0)
+// DRMODE=lp|bp|hp: the filter's mode, $d418's top bits (low-pass, band-pass, high-pass); written once at
+// drIn with the volume. DRFX3=1 routes voice 3 -- the effects, the footsteps -- through it as well: a
+// high noise tap through a closed low-pass is inaudible (the user, 2026-10-16: "not hearing footsteps").
+const DR_MODE = ({ lp: 0x10, bp: 0x20, hp: 0x40 })[process.env.DRMODE ?? 'lp'];   // the user tried bp: "keep low pass"
+if (DRONE_LV.length && !DR_MODE) throw new Error(`DRMODE=${process.env.DRMODE}: lp, bp or hp`);
+const DR_ROUTE = process.env.DRFX3 === '1' ? 7 : 3;
+const DR_BASE = [...Array(12)].map((_, k) => drFn(440 * Math.pow(2, (7 * 12 + k - 57) / 12)));
 if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: svKey went with the level code, and RETURN is dieKey');
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
-writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));
+writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, Math.max(LVLREGION_END, MUS_END)]));
 // Above $c000 the ceiling is the top of bank 3; inside the image it is the arena, and the relayout
 // is what decides where that is -- so a region there is checked by the overlap guards instead.
 if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
@@ -9905,6 +10041,8 @@ if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
 // them. Nothing reads RUNTIME_BUFS' slot sizes before this point (reserveOf runs at the end).
 
 // LVLSIZES=1 (diagnostic): the live level's tables, largest first -- where a level file's bytes go
+// ...and every level's own data length, against the slot's (LVLBLOB_MAX + the wall lists)
+if (process.env.LVLSIZES) console.error('  LVLSIZES per level: ' + ALLBLOBS.map(L => `${L.level}:${blobOf(L)}`).join(' ') + ` (slot ${LVLBLOB_MAX})`);
 if (process.env.LVLSIZES) console.error('  LVLSIZES ' + LVL_TABLES.map(([n, a]) => [n, a.length]).sort((a, b) => b[1] - a[1]).map(([n, l]) => `${n} ${l}`).join(', '));
 console.error(`level region: ${LVLBLOB_MAX} bytes of tables (live ${LVLBLOB}, saved `
   + `${ALLBLOBS.reduce((t, L) => t + LVLBLOB_MAX - blobOf(L), 0)} across ${ALLBLOBS.length} levels by `
@@ -11194,7 +11332,7 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         sta occChk
         sta occBad` : ''}
         cli
-
+${MUSIC ? '        jsr musGo               ; MUSIC: this level\'s song, unless one is already playing (a death restart)\n' : ''}
 mloop:
 ${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
@@ -11213,7 +11351,7 @@ mfAlive:
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
 ${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}${process.env.CEILLOG ? '        jsr ceilLog\n' : ''}        jmp fwait
-mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
+mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${MUSIC ? '\n        jsr stepOdo             ; footsteps: this frame\'s walking, once' : ''}${DIE ? '\nmfSkip:' : ''}
 ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
         and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two) -- on frame n-1, 2n-1, ..., NOT frame 0, where nothing
         cmp #${hx((+process.env.FALLNOW - 1) & 255)}                ;   is rendered yet and the drop would snapshot boot's leftovers
@@ -12153,7 +12291,7 @@ ${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + s
                                 ;   reaches it -- and this must not run during one, or the idol in
                                 ;   your hands changes colour mid-descent. This half of the loop
                                 ;   is the half a fall skips, which is exactly the property wanted.
-` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + (HAS_SILVER ? '        jsr lxStep              ; SILVER (level code): glide after the player, and spark now and then\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
+` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + (LX_VECS.includes('lxStep') ? '        jsr lxStep              ; LEVEL CODE: the sentries glide and spark (svStep), or the drone follows the angels (drStep)\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
         bne dnSkip
         lda iterLo
         cmp #${hx(+process.env.DROPNOW & 255)}
@@ -15036,7 +15174,11 @@ irqArm: lda #${hx(SPLITLINE)}
         bne irqNf
         inc frameCnt+1
 irqNf:
-${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}irqd:   lda #$ff
+${MUSIC ? `        lda musOn               ; MUSIC: the player, 60 times a second, while a level's song is live
+        beq irqNm
+        jsr ${hx16(SONGAT + 3)}
+irqNm:
+` : ''}${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}irqd:   lda #$ff
         sta $d019
         pla
         tay
@@ -15045,7 +15187,335 @@ ${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: fl
         pla
         rti
 
-; ---- nmi: swallow RESTORE ----
+${MUSIC ? `; ---- musGo / musOff: the level's song (see MUSIC) ----
+; musGo starts it only if NONE is playing, so a death restart (jmp entry) leaves the music running;
+; musOff is the only way it stops, and it runs before every level load (the song lives in the slot).
+; musOn gates the IRQ's call, so the player is never entered while init is rewriting its state.
+musGo:  lda musOn
+        bne mgD
+        ldx lvlMeT
+        lda musLvT,x
+        beq mgD                 ; a silent level
+        lda #$ff                ; the release mask OPEN (a fall closed it; fmSame keeps the block)
+        jsr musRel
+        lda #$00                ; subtune 0
+        jsr ${hx16(SONGAT)}     ; the player's init
+        lda #$01
+        sta musOn
+mgD:    rts
+musOff: lda #$00
+        sta musOn
+        sta $d404               ; every voice gated off, so nothing hangs on while the slot is
+        sta $d40b               ;   reloaded under the player. NOT $d418: a volume write is a bump.
+        sta $d412               ;   (The release has faded them by now -- see MUS_RELT.)
+        rts
+; musRel: A = the release mask ($fe = let every voice go, $ff = play) into this level's player
+musRel: ldx lvlMeT
+        ldy musRLT,x
+        sty mrSt+1
+        ldy musRHT,x
+        sty mrSt+2
+mrSt:   sta $ffff               ; SELF-MODIFIED: the level's release-mask operand
+        rts
+musRLT: !byte ${MUS_RELT.map(a => a & 255).join(',')}
+musRHT: !byte ${MUS_RELT.map(a => a >> 8).join(',')}
+musOn:  !byte 0                 ; DATA, not an equate: it must start at 0, and a restart keeps it
+musLvT: !byte ${[...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => SFX_LV.includes(i) ? 1 : 0).join(',')}   ; by level id: 1 = it carries a sound block
+stepLvT:!byte ${[...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => STEP_LV.includes(i) ? 1 : 0).join(',')}   ; by level id: 1 = footsteps
+; ---- sfxPlay: A = an effect id (SFX_ID), played on voice 3 by the live block's effect engine ----
+; Silent where no block is live. Interrupts off around the call: the effect engine's start writes the
+; channel's effect pointer, which the IRQ's play would otherwise read half written.
+sfxPlay:ldx musOn
+        beq spLx                ; no GoatTracker block: the level's own sound, if it has any
+        tax
+        lda sfxLoT-1,x
+        ldy sfxHiT-1,x
+        ldx #14                 ; voice 3: on a music level, the voice the song can best spare
+        php
+        sei
+        jsr ${hx16(SONGAT + 6)}
+        plp
+        rts
+spLx:   ${LX_VECS.includes('lxSfx') ? 'jmp lxSfx               ; drSfx, or lxNone (rts)' : 'rts'}
+; ---- stepOdo: the footstep odometer, ONCE A FRAME from the main loop ----
+; Every STEP_LEN of distance walked plays a step, the two feet in turn. The distance is the FRAME's
+; displacement, max(|dx|,|dy|) + min/2 (a diagonal within ~10%). It used to run per move from mvGo,
+; and walking while strafing is two moves a frame: two odometers' worth of steps, interfering (the
+; user, 2026-10-16). A frame's step is far under half a cell; anything over 127 is a teleport (a
+; fall, a restart) and is not walked.
+stepOdo:ldx lvlMeT
+        lda stepLvT,x
+        beq soSave
+        lda px
+        sec
+        sbc soPX
+        bpl so1
+        eor #$ff
+        clc
+        adc #$01
+so1:    sta soT                 ; |dx|
+        lda py
+        sec
+        sbc soPY
+        bpl so2
+        eor #$ff
+        clc
+        adc #$01
+so2:    cmp soT                 ; A = |dy|: make A the larger, soT the smaller
+        bcs so3
+        ldx soT
+        sta soT
+        txa
+so3:    lsr soT
+        clc
+        adc soT                 ; max + min/2
+        bmi soSave              ; a teleport, not a step
+        clc
+        adc stepAcc
+        bcs soStep              ; past 255 is past any STEP_LEN
+        cmp #${STEP_LEN}
+        bcc soKeep
+soStep: sec
+        sbc #${STEP_LEN}
+        sta stepAcc
+        lda stepLR              ; the other foot
+        eor #$01
+        sta stepLR
+        clc
+        adc #${SFX_ID.stepL}
+        jsr sfxPlay
+        jmp soSave
+soKeep: sta stepAcc
+soSave: lda px                  ; where this frame left you, for the next one's displacement
+        sta soPX
+        lda py
+        sta soPY
+        rts
+soPX:   !byte 0
+soPY:   !byte 0
+soT:    !byte 0
+stepAcc:!byte 0
+stepLR: !byte 0
+sfxLoT: !byte ${SFX_ORDER.map(k => `<sfxData+${SFX_OFF[k]}`).join(',')}
+sfxHiT: !byte ${SFX_ORDER.map(k => `>sfxData+${SFX_OFF[k]}`).join(',')}
+; ONE run, so the order holds: the effect engine's priority IS the address -- an effect higher in
+; memory is never cut off by one lower down. Least important first.
+sfxData:!byte ${SFX_ORDER.flatMap(k => SFX_BYTES[k]).join(',')}
+
+` : ''}${DRONE_LV.length ? `;@@LX-BEGIN drone
+; ---- THE DRONE LEVEL'S SOUND (level code): the proximity drone and a GoatTracker-format effect player ----
+; No GoatTracker block on this level, so this owns the whole SID. See DR_V1 for the drone.
+drP     = $${MUS_ZP.toString(16)}                      ; the effect's data pointer: the player's temps, free here
+; drIn (lxInit, from objInit -- boot, a death restart, and every landing): every register from cold,
+; the two drone voices gated on for good, all three voices through the low-pass, volume once.
+drIn:   ldx #$18
+        lda #$00
+diClr:  sta $d400,x
+        dex
+        bpl diClr
+        sta drFxA               ; no effect playing
+        sta drFall
+        lda #<${hx16(DR_V1[15])}
+        sta $d400
+        lda #>${hx16(DR_V1[15])}
+        sta $d401
+        lda #<${hx16(DR_V2[15])}
+        sta $d407
+        lda #>${hx16(DR_V2[15])}
+        sta $d408
+        lda #$00                ; pulse width $800: round and hollow
+        sta $d402
+        sta $d409
+        lda #$08
+        sta $d403
+        sta $d40a
+        lda #$80                ; a slow attack, no decay
+        sta $d405
+        sta $d40c
+        lda #$fa                ; full sustain: gated once, never released (until a fall)
+        sta $d406
+        sta $d40d
+        lda #${hx(DR_FC[15])}
+        sta $d416
+        lda #${hx(0x80 | DR_ROUTE)}                ; resonance 8; the drone's voices (and voice 3 with DRFX3) filtered
+        sta $d417
+        lda #${hx(DR_MODE | 0x0f)}                ; the filter's mode (DRMODE), volume 15 -- the one $d418 write
+        sta $d418
+        lda #$41                ; pulse + gate
+        sta $d404
+        sta $d40b
+        rts
+; drStep (lxStep, once a frame): the nearest angel, Chebyshev, and the voices and cutoff for it.
+; It runs whether or not you are looking -- the sound is the channel that works when sight does not.
+drStep: lda drFall
+        bne dsD
+        lda #$0f
+        sta drD
+        ldx #$00
+dsLp:   stx drI
+        lda orbTallT,x
+        beq dsN                 ; not an angel
+        lda orbHidT,x
+        bne dsN
+        lda orbXCT,x
+        sec
+        sbc px+1
+        bcs dsX
+        eor #$ff
+        adc #$01
+dsX:    sta drT
+        lda orbYCT,x
+        sec
+        sbc py+1
+        bcs dsY
+        eor #$ff
+        adc #$01
+dsY:    cmp drT
+        bcs dsM                 ; whichever axis is further
+        lda drT
+dsM:    cmp drD
+        bcs dsN
+        sta drD
+dsN:    ldx drI
+        inx
+        cpx nOrbT
+        bcc dsLp
+        ldx drD
+        lda marked              ; cornered: the angel is hidden, but it is on top of you
+        beq dsW
+        ldx #$00
+dsW:    lda drV1L,x
+        sta $d400
+        lda drV1H,x
+        sta $d401
+        lda drV2L,x
+        sta $d407
+        lda drV2H,x
+        sta $d408
+        lda drFcT,x
+        sta $d416
+dsD:    rts
+; drTick (lxTick, 60 Hz from the IRQ): the fall's fade, then a frame of the effect, if one is playing
+drTick: lda drFall
+        bne dtFx
+        lda fallSt
+        beq dtFx
+        lda #$01                ; a fall has begun: the drone RELEASES (a click-free fade; no $d418)
+        sta drFall
+        lda #$f8                ; release 8, ~300 ms, so it is gone before the load
+        sta $d406
+        sta $d40d
+        lda #$40
+        sta $d404
+        sta $d40b
+dtFx:   lda drFxA
+        beq dtD
+        lda drFxL
+        sta drP
+        lda drFxH
+        sta drP+1
+        ldy drFxI
+        bne dtFn
+        lda (drP),y             ; frame 0: AD, SR, the pulse width; the voice under the test bit
+        sta $d413
+        iny
+        lda (drP),y
+        sta $d414
+        iny
+        lda (drP),y
+        sta $d410
+        sta $d411
+        iny
+        sty drFxI
+        lda #$08                ; test bit, gate OFF: no DC thump (the GoatTracker patch's lesson)
+        sta $d412
+dtD:    rts
+dtFn:   lda (drP),y             ; a frame: the note...
+        beq dtEnd
+        jsr drNote
+        iny
+        lda (drP),y             ; ...and a waveform after it, if the next byte is one
+        beq dtK
+        cmp #$82
+        bcs dtK
+        sta $d412
+        iny
+dtK:    sty drFxI
+        rts
+dtEnd:  sta drFxA               ; A = 0: done; whatever release it set runs on
+        rts
+; drNote: A = a GoatTracker note ($80 + semitones from C-0) -> voice 3's frequency, from octave 7's
+; twelve shifted down. Keeps Y.
+drNote: sty drYs
+        sec
+        sbc #$80
+        ldx #$00
+dnL:    cmp #12
+        bcc dnS
+        sbc #12
+        inx
+        bne dnL
+dnS:    tay
+        lda drBL,y
+        sta drFL
+        lda drBH,y
+        sta drFH
+        txa
+        eor #$07                ; 7 - octave shifts
+        tax
+        beq dnW
+dnSh:   lsr drFH
+        ror drFL
+        dex
+        bne dnSh
+dnW:    lda drFL
+        sta $d40e
+        lda drFH
+        sta $d40f
+        ldy drYs
+        rts
+; drSfx (lxSfx, from sfxPlay): A = an effect id. GoatTracker's priority rule: an effect lower in
+; memory never cuts off one higher up.
+drSfx:  tax
+        lda sfxLoT-1,x
+        ldy sfxHiT-1,x
+        php
+        sei
+        ldx drFxA
+        beq dfGo
+        cpy drFxH
+        bcc dfNo
+        bne dfGo
+        cmp drFxL
+        bcc dfNo
+dfGo:   sta drFxL
+        sty drFxH
+        lda #$00
+        sta drFxI
+        lda #$01
+        sta drFxA
+dfNo:   plp
+        rts
+drV1L:  !byte ${DR_V1.map(v => v & 255).join(',')}
+drV1H:  !byte ${DR_V1.map(v => v >> 8).join(',')}
+drV2L:  !byte ${DR_V2.map(v => v & 255).join(',')}
+drV2H:  !byte ${DR_V2.map(v => v >> 8).join(',')}
+drFcT:  !byte ${DR_FC.join(',')}
+drBL:   !byte ${DR_BASE.map(v => v & 255).join(',')}
+drBH:   !byte ${DR_BASE.map(v => v >> 8).join(',')}
+drFxA:  !byte 0
+drFxL:  !byte 0
+drFxH:  !byte 0
+drFxI:  !byte 0
+drFall: !byte 0
+drD:    !byte 0
+drI:    !byte 0
+drT:    !byte 0
+drYs:   !byte 0
+drFL:   !byte 0
+drFH:   !byte 0
+;@@LX-END
+` : ''}; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
 ; behind it, so this exists purely to make that keypress harmless. $dd0d is read to clear the
 ; CIA2 latch in case an NMI ever arrives from there instead.
@@ -17233,7 +17703,12 @@ fcNx:   inx
         bcc fcLp
         bcs fcNo                ; always taken: none of them is under us
 fcHit:  sty hlv                 ; the one we are dropping through
-        ; ---- sprites away: they belong to the level being left ----
+${MUSIC ? `        lda musOn               ; MUSIC: the fade -- every voice into its release
+        beq fcNoM
+        lda #$fe
+        jsr musRel
+fcNoM:
+` : ''}        ; ---- sprites away: they belong to the level being left ----
         ; The BUFFER, not $d015 -- osFlush runs after the buffer flip, which is past where the
         ; fall path rejoins the loop, so it would put the register straight back and leave an
         ; orb hanging in space while the world scrolled away behind it.
@@ -17349,7 +17824,7 @@ fallMid:lda $d011
         sta $d011
 ${FMLOG ? `        lda frameCnt
         sta fmT0
-` : ''}        ldx hlv                 ; the exit taken -- still the departing level's numbering here
+` : ''}${MUSIC ? '        jsr musOff              ; MUSIC: before the load writes over the song\n' : ''}        ldx hlv                 ; the exit taken -- still the departing level's numbering here
         lda lvlNxtT,x
         cmp #$ff
         beq fmSame
@@ -17359,7 +17834,7 @@ ${WALL_DELTA ? '        jsr wallsBack           ; leave with every wall in place
         jsr mkRuns
         jsr objInit
 fmSame: jsr lvlStart            ; the arriving level's start: what the render below looks from
-        lda #$00
+${MUSIC ? '        jsr musGo               ; MUSIC: the arriving level\'s song, through the landing\n' : ''}        lda #$00
         sta hlv
         jsr fallInv
         jsr rayAll              ; the whole destination cast in one go -- nothing caps it here
@@ -18024,7 +18499,7 @@ hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         bpl hlSCl
         lda #$ff                ; a cell the player can never be in, so the first frame always
         sta bfsDone             ;   starts a fill
-${HAS_SILVER ? `        jsr lxInit              ; LEVEL CODE: stInit (every closing wall out) then svReset -- the
+${LX_VECS.includes('lxInit') ? `        jsr lxInit              ; LEVEL CODE: drIn (the drone's SID set-up) or stInit (every closing wall out) then svReset -- the
                                 ;   sentries' PLACE ON THEIR PATHS, and the charge: the loop above put
                                 ;   them back on their start cells, and a sentry whose path index
                                 ;   still says mid-loop walks through walls from there. Here, not at
@@ -19657,7 +20132,9 @@ ${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : `        jsr pedOff              ;
         tax
 ` : ''}
 
-        lda #$01
+${MUSIC ? `        lda #${SFX_ID.clink}
+        jsr sfxPlay             ; the clink of it coming off the floor
+` : ''}        lda #$01
         sta entDty
         rts
 orbPut: jsr dropPick            ; ---- put down ----
@@ -19683,7 +20160,9 @@ ${HAS_IDOL ? `        ldx carry               ; ...unless what you are holding i
         sty sokWho              ; index+1; the consume happens when the animation lands
         lda #${hx(SOK_ANIM)}
         sta sokAn               ; orb phase while sokAn >= SOK_SHR, socket closing at or below it
-
+${MUSIC ? `        lda #${SFX_ID.socket}
+        jsr sfxPlay             ; ...and it is heard going in
+` : ''}
         lda #$00
         sta sokVar
         ; sokCX is the orb's CENTRE, not its left edge. A sprite shrinks about its left edge, so
@@ -23928,7 +24407,9 @@ wallTog:ldy wsWall
                                 ;   them directly now that doomT is gone
         lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
-
+${MUSIC ? `        lda #${SFX_ID.wall}
+        jsr sfxPlay             ; only on the way OUT: wtBack is how a restart puts the wall back
+` : ''}
         ldx #$9f                ; and wipe idT, because only the ~14-26 CAST columns are written
         lda #$ff                ;   each frame and the rest still hold the cell some earlier pose
 wtClr:  sta idT,x               ;   struck there. Scanning those stale entries stretched the span
@@ -26668,7 +27149,9 @@ ppWB:   sta $ffff,y
 ; ---- picOn: the cut itself ----
 ; One write per palette register, on a frame that is already black. No ramp and no slide: between
 ; one frame and the next the picture is simply there.
-picOn:  lda #${hx(PICS.d021)}
+picOn:  ${MUSIC ? `lda #${SFX_ID.death}
+        jsr sfxPlay             ; the cut lands on a crash
+        ` : ''}lda #${hx(PICS.d021)}
         jsr setGnd
         lda #${hx(PICS.d022)}
         sta $d022
@@ -26830,7 +27313,11 @@ const ALIGNED_T = {
     // the hottest reads), but nothing builds a pointer from their high byte, so they need not START
     // on one. Inferred page-aligned from their hand addresses, they were stranded when the sentry's
     // code took the arena (2026-10-14).
-    faceIdT: { within: NLOG }, remLoT: { within: NLOG },
+    faceIdT: { within: NLOG },
+    // ...EXCEPT in a MUSIC build (2026-10-16): its sound block leaves the arena in scraps, no page has
+    // 160 bytes, and a crossing costs one cycle on a read made a few dozen times a frame -- under 50
+    // cycles against the player's thousands. 1 = "no alignment needed".
+    remLoT: MUSIC ? 1 : { within: NLOG },
     // the sentries' slot list: it sits at $b100 only because that page was free, and an address on
     // a boundary reads as "page-aligned" -- which stranded it (2026-10-14)
     svSlT: 1,
@@ -26909,8 +27396,9 @@ const LX_SRC = {};          // feature -> its marked text
 asm = asm.replace(/^;@@LX-BEGIN (\w+)\n([\s\S]*?)^;@@LX-END\n/gm, (_, nm, body) => {
   LX_SRC[nm] = (LX_SRC[nm] ?? '') + body; return `; (level code '${nm}' cut here: see LX_SRC)\n`; });
 // the zero page level code OWNS (its own equates): compaction must not promote engine buffers onto it
-writeFileSync('./build/iray.zpres.json', JSON.stringify([...new Set(Object.values(LX_SRC).flatMap(t =>
-  [...t.matchAll(/^[a-zA-Z][a-zA-Z0-9_]*\s*=\s*\$([0-9a-fA-F]{1,2})\b/gm)].map(m => parseInt(m[1], 16))))].sort((a, b) => a - b)));
+writeFileSync('./build/iray.zpres.json', JSON.stringify([...new Set([...Object.values(LX_SRC).flatMap(t =>
+  [...t.matchAll(/^[a-zA-Z][a-zA-Z0-9_]*\s*=\s*\$([0-9a-fA-F]{1,2})\b/gm)].map(m => parseInt(m[1], 16))),
+  ...(MUSIC ? [MUS_ZP, MUS_ZP + 1] : [])])].sort((a, b) => a - b)));   // + the music player's temps
 // a level's module: the jump table in LX_VECS order, then each of its features' text
 const lxSrcFor = feats => {
   for (const f of feats) if (!LX_SRC[f]) throw new Error(`level code: feature '${f}' has no marked text in this build`);
@@ -26937,7 +27425,7 @@ const LX_SIZE = (() => {
   return Math.max(...LX_SETS.map(k => lxAssemble(k.split('+'), n => zp.has(n) ? zp.get(n) : 0x1234).bytes.length));
 })();
 if (LX_SIZE) {
-  writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, LXAT + LX_SIZE]));
+  writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, Math.max(LXAT + LX_SIZE, MUS_END)]));
   console.error(`  level code: ${LX_SIZE} bytes reserved at ${hx16(LXAT)} (after the level data); modules ${LX_SETS.map(k => `${k} (level ${LEVEL_IDS.filter(n => LX_FEAT_OF(n).join('+') === k).join(',')})`).join(', ')}`);
 }
 const asmPath = DIAG.length ? './build/iray.diag.asm' : './build/iray.asm';
@@ -26969,7 +27457,7 @@ try {
   // clobbered by each load and clobbers the level code in between -- silently: the image has a hole
   // there, so the "no equate inside emitted data" guard cannot see it. runPlaneT did exactly that.
   {
-    const end = LX_SIZE ? LXAT + LX_SIZE : LVLREGION_END, slotN = new Set(LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n])));
+    const end = Math.max(LX_SIZE ? LXAT + LX_SIZE : LVLREGION_END, MUS_END), slotN = new Set(LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n])));
     const inReg = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{4})\s*(?:;.*)?$/gm)]
       .map(m => [m[1], parseInt(m[2], 16)]).filter(([nm]) => !slotN.has(nm))
       // EXACT extents -- the start, plus the declared size where there is one -- not reserveOf's
@@ -26997,6 +27485,7 @@ try {
       if (process.env.LXDUMP) console.error(`  LXDUMP ${k} at ${hx16(LXAT)}: ` + Object.entries(L.labels)
         .filter(([n]) => !lxSrcFor(k.split('+')).match(new RegExp(`^${n}(:|\\s+=)`, 'm'))).map(([n, v]) => `${n}=${hx16(v)}`).join(' '));
       LX_BYTES[k] = [...L.bytes];
+      if (process.env.LVLSIZES) console.error(`  LVLSIZES level code ${k}: ${L.bytes.length} of ${LX_SIZE} reserved`);
       // LXLIST=<file> (diagnostic): the linked module's listing, address and bytes per source line
       if (process.env.LXLIST) writeFileSync(process.env.LXLIST + '.' + k + '.txt', L.listing.map(e =>
         `${hx16(e.at ?? 0)} ${[...(e.bytes ?? [])].slice(0, e.len).map(b => b.toString(16).padStart(2, "0")).join(" ").padEnd(9)} ${e.src ?? e.text ?? ''}`).join('\n'));
@@ -27294,6 +27783,12 @@ try {
         if (SLOT_AT + data.length > LXAT) throw new Error(`level ${n}'s data runs past LXAT ${hx16(LXAT)}`);
         while (SLOT_AT + data.length < LXAT) data.push(0);
         data.push(...mod);
+      }
+      // SOUND: zeros up to SONGAT, then this level's player and its song (MUS_BLOBS)
+      if (MUS_BLOBS.has(n)) {
+        while (SLOT_AT + data.length < SONGAT) data.push(0);
+        if (SLOT_AT + data.length > SONGAT) throw new Error(`level ${n}'s bytes run past SONGAT ${hx16(SONGAT)}`);
+        data.push(...MUS_BLOBS.get(n));
       }
       return { tag: 'V' + n, name: 'ILV' + n, at: SLOT_AT,
                runtime: n !== LVL, data };
