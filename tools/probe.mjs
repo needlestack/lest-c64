@@ -143,7 +143,11 @@ const addr = {};
 // table's interior, the I/O area's underlying RAM. Nothing to resolve, so nothing can be stale.
 for (const n of [...names, LIVE]) {
   if (n.startsWith('@')) { addr[n] = parseInt(n.slice(1), 16); continue; }
-  const m = build.match(new RegExp(`^\\s*label ${n} = \\$([0-9a-f]+)\\s*$`, 'm'));
+  // The LAST print, not the first: with the level-slot picker the build runs a trial per slot
+  // address and every trial prints its labels, so the first match can be a placement the picker
+  // then rejected -- lvlMeT read 169 off a slot that was never used (2026-10-17). The final build
+  // prints last.
+  const ms = [...build.matchAll(new RegExp(`^\\s*label ${n} = \\$([0-9a-f]+)\\s*$`, 'gm'))], m = ms[ms.length - 1];
   if (!m) { console.error(`LABEL NOT FOUND: ${n} -- it does not exist in this configuration.`); process.exit(1); }
   addr[n] = parseInt(m[1], 16);
 }

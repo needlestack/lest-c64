@@ -9897,10 +9897,10 @@ const LX_BOOT = LX_OF(BOOTLVL);
 // ---- MUSIC=1: a GoatTracker song, player and data as ONE block, in the files of the levels that play it ----
 // (2026-10-16, a TEST build: "music at all times", to feel the cost in play.) GoatTracker's packer
 // writes a player TAILORED to its song -- effects it never uses left out, the song's tables at
-// absolute addresses inside the player's instructions -- so the two travel together. The block sits
-// at SONGAT, the first page of the level-code area, so a level that brings level code cannot also
-// bring the song (guarded); MUSICLV names the levels that do (level 9 is silent: artistic reasons).
-// The region grows to hold it, which is image space. A level without it stops the music
+// absolute addresses inside the player's instructions -- so the two travel together. PER LEVEL
+// (2026-10-17) the block sits at the first page after that level's OWN level code (MUS_AT), so a
+// level can bring both; the engine patches the player's entry points from musAtT when the level
+// starts (musGo). The region grows to the largest code + block of any level, which is image space. A level without it stops the music
 // (musGo finds no song); a fall stops it before the load (musOff) and starts the new level's.
 // The player runs in the top-of-frame IRQ, 60 times a second, whatever the frame rate.
 // Its two zero-page temps are MUS_ZP and MUS_ZP+1, published to compaction as owned.
@@ -9915,42 +9915,43 @@ const SFX_LV = MUSIC ? [...new Set([...(process.env.SFXLV ?? '2,3,4,5,6,7').spli
 // another level"); STEPLV=n,... puts them back
 const STEP_LV = MUSIC ? (process.env.STEPLV ?? '').split(',').filter(Boolean).map(Number) : [];
 const MUS_ZP = 0xbe;
-const SONGAT = (LXAT + 255) & ~255;
 const MUS_SNG = n => MUSIC_LV.includes(n) ? (process.env.MUSICSNG ?? 'music/deep-song.sng') : 'music/empty.sng';
-const MUS_BLOBS = (() => {
-  const out = new Map(), bySng = new Map();
+// Filled by musBuild once every level's module size is known (the level code is cut from the
+// engine's source late in the build): level -> its block (player + song), its address, the release
+// mask's address in it; and the end of the largest, for the region.
+const MUS_BLOBS = new Map(), MUS_AT = {}, MUS_REL = {};
+let MUS_END = 0;
+const musBuild = modLen => {
+  const cache = new Map();
   for (const n of SFX_LV) {
-    if (LX_OF(n)) throw new Error(`SFXLV: level ${n} brings level code, which owns the area the sound block would use`);
-    const sng = MUS_SNG(n);
-    if (!bySng.has(sng)) {
+    const at = (LXAT + (modLen(n) ?? 0) + 255) & ~255, sng = MUS_SNG(n), key = `${sng}@${at}`;
+    if (!cache.has(key)) {
       // gt2reloc crashes (exit 133, no message) on a long input path: a short temp dir, files by name
       const d = mkdtempSync(join(tmpdir(), 'mus-'));
       copyFileSync(sng, join(d, 's.sng'));
       execFileSync(join(homedir(), 'goattracker2/linux/gt2reloc'),
-        ['s.sng', 's.prg', '-N', '-D1', `-W${(SONGAT >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
+        ['s.sng', 's.prg', '-N', '-D1', `-W${(at >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
       const prg = readFileSync(join(d, 's.prg'));
-      if ((prg[0] | (prg[1] << 8)) !== SONGAT) throw new Error(`MUSIC: gt2reloc put the player at ${hx16(prg[0] | (prg[1] << 8))}, not ${hx16(SONGAT)}`);
+      if ((prg[0] | (prg[1] << 8)) !== at) throw new Error(`MUSIC: gt2reloc put the player at ${hx16(prg[0] | (prg[1] << 8))}, not ${hx16(at)}`);
       // the RELEASE MASK our patch to player.s adds (music/goattracker-player.patch): the immediate of
       // "and #$ff" between the gate and the waveform store. Found by its bytes, and exactly once.
       const blob = [...prg.slice(2)], pat = [0x29, 0xff, 0x9d, 0x04, 0xd4];
       const hits = blob.flatMap((_, i) => pat.every((v, k) => blob[i + k] === v) ? [i] : []);
       if (hits.length !== 1) throw new Error(`MUSIC: ${sng}'s player has ${hits.length} release masks, not 1 -- is ~/goattracker2 patched? (music/goattracker-player.patch)`);
-      blob.rel = SONGAT + hits[0] + 1;
-      bySng.set(sng, blob);
-      console.error(`  sound: ${sng}, ${prg.length - 2} bytes (player + song) at ${hx16(SONGAT)}`);
+      cache.set(key, { blob, rel: at + hits[0] + 1 });
     }
-    out.set(n, bySng.get(sng));
+    const { blob, rel } = cache.get(key);
+    MUS_BLOBS.set(n, blob); MUS_AT[n] = at; MUS_REL[n] = rel;
+    MUS_END = Math.max(MUS_END, at + blob.length);
+    console.error(`  sound: level ${n}, ${sng}, ${blob.length} bytes (player + song) at ${hx16(at)}`);
   }
-  return out;
-})();
-const MUS_END = MUSIC ? SONGAT + Math.max(...MUS_BLOBS.values().map(b => b.length)) : 0;
+};
 // THE FADE (the user, 2026-10-16: "fade the music out during the fall so it's zero when the loader
 // kicks in") is the voices' own RELEASE, not the master volume. A 15-step volume fade was 15 bumps:
 // on a 6581 every $d418 write steps the DC level -- the very thing that plays samples -- so it can
 // never be silent. Instead the fall's first frame closes our patched release mask (and #$ff -> #$fe):
 // every voice is gated off, each envelope fades its own way, and no new note can re-gate. A level's
 // block arrives with the mask open ($ff, from the file); musGo reopens it for a block that stayed.
-const MUS_RELT = [...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => MUS_BLOBS.get(i)?.rel ?? SONGAT);
 // ---- THE EFFECTS (GoatTracker's sound-effect format, readme 6.3) ----
 // AD, SR, a pulse width (one byte, written to both $d402 and $d403, so $08 is ~$808), then one entry
 // per frame: an absolute note ($82-$df = D-0..B-7) and, after it, optionally a waveform ($01-$81); $00
@@ -10028,7 +10029,7 @@ if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: svKey 
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
-writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, Math.max(LVLREGION_END, MUS_END)]));
+writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));   // (+ code and sound: see musBuild)
 // Above $c000 the ceiling is the top of bank 3; inside the image it is the arena, and the relayout
 // is what decides where that is -- so a region there is checked by the overlap guards instead.
 if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
@@ -15176,7 +15177,7 @@ irqArm: lda #${hx(SPLITLINE)}
 irqNf:
 ${MUSIC ? `        lda musOn               ; MUSIC: the player, 60 times a second, while a level's song is live
         beq irqNm
-        jsr ${hx16(SONGAT + 3)}
+irqPl:  jsr $ff03                ; the player's play: high byte PATCHED by musGo (musAtT)
 irqNm:
 ` : ''}${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}irqd:   lda #$ff
         sta $d019
@@ -15194,12 +15195,15 @@ ${MUSIC ? `; ---- musGo / musOff: the level's song (see MUSIC) ----
 musGo:  lda musOn
         bne mgD
         ldx lvlMeT
-        lda musLvT,x
-        beq mgD                 ; a silent level
+        lda musAtT,x            ; this level's block, by page: 0 = a silent level
+        beq mgD
+        sta mgJ+2               ; ...and the player's three entry points patched to it
+        sta irqPl+2
+        sta spJ+2
         lda #$ff                ; the release mask OPEN (a fall closed it; fmSame keeps the block)
         jsr musRel
         lda #$00                ; subtune 0
-        jsr ${hx16(SONGAT)}     ; the player's init
+mgJ:    jsr $ff00                ; the player's init (patched above)
         lda #$01
         sta musOn
 mgD:    rts
@@ -15207,7 +15211,7 @@ musOff: lda #$00
         sta musOn
         sta $d404               ; every voice gated off, so nothing hangs on while the slot is
         sta $d40b               ;   reloaded under the player. NOT $d418: a volume write is a bump.
-        sta $d412               ;   (The release has faded them by now -- see MUS_RELT.)
+        sta $d412               ;   (The release has faded them by now -- see THE FADE.)
         rts
 ; musRel: A = the release mask ($fe = let every voice go, $ff = play) into this level's player
 musRel: ldx lvlMeT
@@ -15217,10 +15221,10 @@ musRel: ldx lvlMeT
         sty mrSt+2
 mrSt:   sta $ffff               ; SELF-MODIFIED: the level's release-mask operand
         rts
-musRLT: !byte ${MUS_RELT.map(a => a & 255).join(',')}
-musRHT: !byte ${MUS_RELT.map(a => a >> 8).join(',')}
+musRLT: !byte @@MUSRL@@    ; by level id: the release mask's address in its block (musBuild fills these)
+musRHT: !byte @@MUSRH@@
+musAtT: !byte @@MUSAT@@    ; by level id: its block's page, 0 = no block
 musOn:  !byte 0                 ; DATA, not an equate: it must start at 0, and a restart keeps it
-musLvT: !byte ${[...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => SFX_LV.includes(i) ? 1 : 0).join(',')}   ; by level id: 1 = it carries a sound block
 stepLvT:!byte ${[...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => STEP_LV.includes(i) ? 1 : 0).join(',')}   ; by level id: 1 = footsteps
 ; ---- sfxPlay: A = an effect id (SFX_ID), played on voice 3 by the live block's effect engine ----
 ; Silent where no block is live. Interrupts off around the call: the effect engine's start writes the
@@ -15233,7 +15237,7 @@ sfxPlay:ldx musOn
         ldx #14                 ; voice 3: on a music level, the voice the song can best spare
         php
         sei
-        jsr ${hx16(SONGAT + 6)}
+spJ:    jsr $ff06                ; the player's effect entry (patched by musGo)
         plp
         rts
 spLx:   ${LX_VECS.includes('lxSfx') ? 'jmp lxSfx               ; drSfx, or lxNone (rts)' : 'rts'}
@@ -27419,11 +27423,22 @@ const lxAssemble = (feats, resolve) => {
 // this disk: the block is the engine's, and a disk that leaves level 9 off must not report the room
 // level 9's code needs as free
 const LX_SETS = [...new Set(LEVEL_IDS.filter(LX_OF).map(n => LX_FEAT_OF(n).join('+')))];
-const LX_SIZE = (() => {
-  if (!LX_SETS.length) return 0;
+// each module's size, linked with every engine symbol a placeholder; the real link can only shrink it
+const LX_SZ = (() => {
+  if (!LX_SETS.length) return {};
   const zp = new Map([...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{1,2})\b/gm)].map(m => [m[1], parseInt(m[2], 16)]));
-  return Math.max(...LX_SETS.map(k => lxAssemble(k.split('+'), n => zp.has(n) ? zp.get(n) : 0x1234).bytes.length));
+  return Object.fromEntries(LX_SETS.map(k => [k, lxAssemble(k.split('+'), n => zp.has(n) ? zp.get(n) : 0x1234).bytes.length]));
 })();
+const LX_SIZE = LX_SETS.length ? Math.max(...Object.values(LX_SZ)) : 0;
+// ---- the SOUND blocks, now that each level's code size is known: after its code, on a page ----
+if (MUSIC) {
+  musBuild(n => LX_OF(n) ? LX_SZ[LX_FEAT_OF(n).join('+')] : 0);
+  const ids = [...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => i);
+  asm = asm.replace('@@MUSRL@@', ids.map(i => (MUS_REL[i] ?? 0) & 255).join(','))
+           .replace('@@MUSRH@@', ids.map(i => (MUS_REL[i] ?? 0) >> 8).join(','))
+           .replace('@@MUSAT@@', ids.map(i => (MUS_AT[i] ?? 0) >> 8).join(','));
+  writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, Math.max(LX_SIZE ? LXAT + LX_SIZE : LVLREGION_END, MUS_END)]));
+}
 if (LX_SIZE) {
   writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, Math.max(LXAT + LX_SIZE, MUS_END)]));
   console.error(`  level code: ${LX_SIZE} bytes reserved at ${hx16(LXAT)} (after the level data); modules ${LX_SETS.map(k => `${k} (level ${LEVEL_IDS.filter(n => LX_FEAT_OF(n).join('+') === k).join(',')})`).join(', ')}`);
@@ -27784,10 +27799,10 @@ try {
         while (SLOT_AT + data.length < LXAT) data.push(0);
         data.push(...mod);
       }
-      // SOUND: zeros up to SONGAT, then this level's player and its song (MUS_BLOBS)
+      // SOUND: zeros up to its block's page (after its code), then its player and song (MUS_BLOBS)
       if (MUS_BLOBS.has(n)) {
-        while (SLOT_AT + data.length < SONGAT) data.push(0);
-        if (SLOT_AT + data.length > SONGAT) throw new Error(`level ${n}'s bytes run past SONGAT ${hx16(SONGAT)}`);
+        if (SLOT_AT + data.length > MUS_AT[n]) throw new Error(`level ${n}'s bytes run past its sound block at ${hx16(MUS_AT[n])}`);
+        while (SLOT_AT + data.length < MUS_AT[n]) data.push(0);
         data.push(...MUS_BLOBS.get(n));
       }
       return { tag: 'V' + n, name: 'ILV' + n, at: SLOT_AT,
