@@ -26,7 +26,9 @@ import { portHeld, launch, LAUNCH_FLAGS } from './vice.mjs';
 process.chdir(new URL('..', import.meta.url).pathname);
 
 const VICE = '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';
-const DISK = './lest-c64.d64';
+// PAL=1 builds write lest-c64-pal.d64 (build-iray.mjs's D64OUT): boot THAT, or a PAL probe runs the
+// NTSC disk with the PAL build's labels and reads garbage -- every level identical (2026-10-23)
+const DISK = process.env.PAL === '1' ? './lest-c64-pal.d64' : './lest-c64.d64';
 const args = process.argv.slice(2);
 if (!args.length) { console.error('usage: node tools/probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
 
@@ -155,7 +157,7 @@ for (const n of [...names, LIVE]) {
 // an execution checkpoint by name; absent (an older build) it simply falls back to the old wait.
 let SYMS = {};
 try { SYMS = JSON.parse(readFileSync('./build/iray.syms.json', 'utf8')); } catch { /* optional */ }
-if (!existsSync(DISK)) { console.error('no lest-c64.d64'); process.exit(1); }
+if (!existsSync(DISK)) { console.error(`no ${DISK}`); process.exit(1); }
 
 // ---- run it, never touching an emulator that was already open ----
 // A held monitor port makes VICE print "bind() failed: Address already in use" into its own log

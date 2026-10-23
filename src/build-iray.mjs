@@ -141,7 +141,14 @@ const CHAIN = (process.env.CHAIN ?? (LAB ? '9' : '1,2,3,4,5,6,7,8,9')).split(','
 // D64=<name> writes somewhere other than lest-c64.d64. A variant build -- a level-wiring test, a
 // profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
-const D64OUT = process.env.D64 ?? 'lest-c64.d64';
+// PAL=1: a build for a PAL C64 (2026-10-23, the user: "most of the hobbyists are in PAL"; VICE
+// starts as one, and a .d64 cannot say which machine it wants). The game's clock stays 60 ticks a
+// second: the raster IRQ comes 50 times a second there, so every fifth one runs the tick twice (see
+// irqTk). The SID clock (CLOCK) is PAL's, so the music needs no retune. NOT yet done for PAL: the
+// art's pixel aspect (PAR) and a look at the inks. PAL=0 (NTSC, the default) emits the same bytes.
+const PAL = process.env.PAL === '1';
+const CLOCK = PAL ? 985248 : 1022727;            // the SID's clock, Hz
+const D64OUT = process.env.D64 ?? (PAL ? 'lest-c64-pal.d64' : 'lest-c64.d64');
 const LVL = +(process.env.LVL ?? CHAIN[0]);
 // EVERY level the image has to be able to RUN. (It once also held the LATE levels, which arrived
 // from disk mid-game; loading on demand made every level that, so it is the chain.)
@@ -1349,7 +1356,15 @@ const rcpD = [...Array(256)].map((_, i) =>
 // page offset -- no multiply, no shifts. 768 entries spans 24 cells, more than the 22.6
 // cell diagonal of a 16x16 map, so nothing in range is ever clamped away (the old code
 // clamped past 16 cells and drew those walls at height 1).
-const HGROUPS = 16, HSPAN = 768;
+//
+// 10 groups since 2026-10-22 (was 16), for the music region: 1,536 B of image at ZERO cycles,
+// since hPgT already names each column's page -- the group count is data, not code. Measured
+// over every column x kept row (capped at 100 as drawn): worst error 1 at 16, 12 and 10 groups
+// (mean 0.069 / 0.094 / 0.107); 8 groups is the first to reach 2. The user saw no difference at 12.
+// Not 12: its layout put level 9's walk (frames on the 20 fps edge) 5 frames slower in the fps
+// suite, though a fixed-frame vprof walk showed the render code within ~30 cy/frame -- a
+// quantisation edge, not a cost. 10 runs the suite frame-for-frame with 16.
+const HGROUPS = +(process.env.HGROUPS ?? 10), HSPAN = 768;
 const ccLo = Math.min(...cosCorr), ccHi = Math.max(...cosCorr);
 const hGrpOf = cosCorr.map(v => Math.min(HGROUPS - 1, Math.floor((v - ccLo) / (ccHi - ccLo + 1e-9) * HGROUPS)));
 const hRep = [...Array(HGROUPS)].map((_, g) => { const m = cosCorr.filter((_, i) => hGrpOf[i] === g);
@@ -9915,7 +9930,12 @@ const SFX_LV = MUSIC ? [...new Set([...(process.env.SFXLV ?? '2,3,4,5,6,7').spli
 // another level"); STEPLV=n,... puts them back
 const STEP_LV = MUSIC ? (process.env.STEPLV ?? '').split(',').filter(Boolean).map(Number) : [];
 const MUS_ZP = 0xbe;
-const MUS_SNG = n => MUSIC_LV.includes(n) ? (process.env.MUSICSNG ?? 'music/deep-song.sng') : 'music/empty.sng';
+const MUS_PITCH = 440 * 985248 / CLOCK;     // 423.87 on NTSC, 440 on PAL: see the gt2reloc call
+// a level's own song (2026-10-22, the user: the struck-bass keys piece "into level... 3"): MUSICSNG<n>
+// names level n's, MUS_LVSNG holds the defaults; every other music level plays MUSICSNG
+const MUS_LVSNG = { 3: 'music/keys-build3.sng' };
+const MUS_SNG = n => !MUSIC_LV.includes(n) ? 'music/empty.sng'
+  : process.env[`MUSICSNG${n}`] ?? MUS_LVSNG[n] ?? process.env.MUSICSNG ?? 'music/deep-song.sng';
 // Filled by musBuild once every level's module size is known (the level code is cut from the
 // engine's source late in the build): level -> its block (player + song), its address, the release
 // mask's address in it; and the end of the largest, for the region.
@@ -9929,8 +9949,12 @@ const musBuild = modLen => {
       // gt2reloc crashes (exit 133, no message) on a long input path: a short temp dir, files by name
       const d = mkdtempSync(join(tmpdir(), 'mus-'));
       copyFileSync(sng, join(d, 's.sng'));
+      // -G: GoatTracker's note table is tuned for PAL (A=440 at 985,248 Hz), so on our NTSC machine
+      // every song played ~0.65 semitone sharp (the user, against a keyboard: "almost a semitone
+      // higher"). -G recalculates the table from the PAL clock, so A=440 on NTSC asks for
+      // 440 * 985248 / 1022727 Hz.
       execFileSync(join(homedir(), 'goattracker2/linux/gt2reloc'),
-        ['s.sng', 's.prg', '-N', '-D1', `-W${(at >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
+        ['s.sng', 's.prg', '-N', '-D1', ...PAL ? [] : [`-G${MUS_PITCH.toFixed(2)}`], `-W${(at >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
       const prg = readFileSync(join(d, 's.prg'));
       if ((prg[0] | (prg[1] << 8)) !== at) throw new Error(`MUSIC: gt2reloc put the player at ${hx16(prg[0] | (prg[1] << 8))}, not ${hx16(at)}`);
       // the RELEASE MASK our patch to player.s adds (music/goattracker-player.patch): the immediate of
@@ -9987,10 +10011,51 @@ const SFX_BYTES = {
   socket: fxRaw(0x0a, 0x00, 0x08, glideFx(0x11, 'C5', 'F3', 18)),
   // a wall going down: low noise falling for most of a second
   wall:   fxRaw(0x0c, 0x00, 0x08, glideFx(0x81, 'G4', 'C2', 32)),
-  // the death picture's cut: a hard noise hit dropping away
-  death:  fxRaw(0x0b, 0x00, 0x08, glideFx(0x81, 'D5', 'C2', 30)),
 };
-const SFX_ORDER = ['stepL', 'stepR', 'clink', 'socket', 'wall', 'death'];
+const SFX_ORDER = ['stepL', 'stepR', 'clink', 'socket', 'wall'];
+// ---- THE DEATH'S OWN SOUND (dsGo / dsBoom / dsTick), 2026-10-22, the user: "when the death scene
+// starts music should drop out and be replaced with a glide down note ... and a deep boom when the
+// angel face image pops up" ----
+// Our own SID writes, not a GoatTracker effect: an effect needs the player running, and the player
+// IS the music that has to stop. The IRQ runs dsTick at 60 Hz while either part is live, so the
+// glide's speed does not depend on the frame rate. Shapes after the old engine's (efc060c^): the
+// boom is NOISE (pitched: the noise generator is clocked by the frequency registers, so dropping it
+// turns a hiss into a rumble) with a KICK under it -- a tone falling too fast to read as a note.
+// Built from the numbers, NOT heard: tune by ear (DSG*, DSB*, DSK*).
+// Then (the user, 2026-10-22): "starts a bit too high. Or alternately, two dissonant notes that
+// converge to a diad? A bit like the THX sound? Then Boom (maybe a filtered noise sound on more than
+// one channel to cause some distortion)". So:
+//   * TWO sawtooth voices start a semitone apart (beating) and each closes a fixed fraction of the
+//     gap to its own target every 60th -- exponential, so they ARRIVE rather than stop -- crossing on
+//     the way and settling on a low fifth, held until the picture. 24-bit (a fraction byte), or the
+//     last steps round to nothing short of the note.
+//   * the boom: NOISE on two voices a little apart and the kick on the third, ALL through the low-pass
+//     at full resonance -- three voices into the 6581's filter overdrive it -- its cutoff closing.
+const sidFn = hz => Math.round(hz * 16777216 / CLOCK);
+// ...and then (the user, 2026-10-22: "the sweeping tone is still too weak ... needs to be deeper, use
+// multiple filtered tones to also get some distortion"): THREE saws, a cluster a semitone apart round
+// G2, converging on a deep open chord D1 A1 D2, all three through the resonant low-pass -- three voices
+// into the 6581's filter overdrive it -- its cutoff opening as they arrive.
+const DSG_W  = +(process.env.DSGW ?? 0x20);                 // sawtooth, all three
+const dsHz = (k, d) => (process.env[k] ?? d).split(',').map(Number);
+const DSG_FROM = dsHz('DSGFROM', '103.83,92.5,98.0');      // voices 1-3: G#2, F#2, G2 ...
+const DSG_TO   = dsHz('DSGTO', '36.71,55.0,73.42');        // ... -> D1, A1, D2 (they cross on the way)
+const DSG_SH = +(process.env.DSGSH ?? 5);                   // 1/32 of the gap a 60th: ~95% there in 1.6 s
+const DSG_RES = +(process.env.DSGRES ?? 0xc);               // the filter's resonance under the cluster
+const DSG_C0 = +(process.env.DSGC0 ?? 0x18), DSG_C1 = +(process.env.DSGC1 ?? 0x40);   // cutoff opens, 1 every 4 60ths
+// T (MUSIC builds; the user: "add a button so I can trigger it to test it over and over"): the death's
+// sound without the death -- the converging cluster, then the boom DST_N 60ths later (the DIETEST turn)
+const DST_N = +(process.env.DSTN ?? 205);
+if (DSG_FROM.length !== 3 || DSG_TO.length !== 3) throw new Error('DSGFROM/DSGTO: three voices each');
+if (DSG_C1 <= DSG_C0) throw new Error('DSGC1: the cutoff opens, so it ends above where it starts');
+const DSG_AD = +(process.env.DSGAD ?? 0x08), DSG_SR = +(process.env.DSGSR ?? 0xa9);
+const DSB_HZ = +(process.env.DSBHZ ?? 70), DSB_HZ2 = +(process.env.DSBHZ2 ?? 47);   // the two noises
+const DSB_AD = +(process.env.DSBAD ?? 0x0b);                // no attack, ~1.5 s decay, no sustain
+const DSB_C0 = +(process.env.DSBC0 ?? 0x40), DSB_C1 = +(process.env.DSBC1 ?? 0x08);   // the cutoff closes, 1 a 60th
+const DSK_HI = +(process.env.DSKHI ?? 80), DSK_LO = +(process.env.DSKLO ?? 24), DSK_N = +(process.env.DSKN ?? 8);
+const DSK_AD = +(process.env.DSKAD ?? 0x0a);
+const DSK_STEP = Math.round((sidFn(DSK_HI) - sidFn(DSK_LO)) / DSK_N);
+if (DSB_C1 >= DSB_C0) throw new Error('DSBC1: the cutoff closes, so it ends below where it starts');
 const SFX_ID = Object.fromEntries(SFX_ORDER.map((k, i) => [k, i + 1]));
 const SFX_OFF = {};
 { let o = 0; for (const k of SFX_ORDER) { if (SFX_BYTES[k].length > 128) throw new Error(`sfx ${k}: ${SFX_BYTES[k].length} bytes, past the engine's 128`);
@@ -10007,7 +10072,7 @@ const STEP_LEN = +(process.env.STEPLEN ?? 140);   // 1/256 cells walked per foot
 const DR = { near: 36, fall: 3, far: 2, step: 1, dmax: 8, vfall: 4, fcNear: +(process.env.DRFCNEAR ?? 0x10), fcFar: +(process.env.DRFCFAR ?? 0x00) };
 // (2026-10-16, the user: "more aggressively lowpass so the initial hum is more subdued", then "even
 // further", then the trial they kept: "I think I like fully filtered" -- $00 from 6 cells, $10 at 0)
-const drFn = hz => Math.round(hz * 16777216 / 1022727);           // NTSC
+const drFn = hz => Math.round(hz * 16777216 / CLOCK);
 const drShape = d => d >= DR.dmax ? 0 : (Math.exp(-d / DR.fall) - Math.exp(-DR.dmax / DR.fall)) / (1 - Math.exp(-DR.dmax / DR.fall));
 // DRZERO: the distance (cells) at which the cutoff reaches fcFar, the same exponential shape squeezed
 // into 0..DRZERO (the falloff scales with it). 15 = the whole table; 6 for a trial (the user,
@@ -12416,8 +12481,8 @@ noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falli
 ; VARIES reads as stutter far more than a low rate does. frameCnt is incremented by the top-of-frame
 ; IRQ, so it keeps counting THROUGH the block copy: the deadline is absolute, not measured from
 ; whenever the work happened to finish.
-fwait:  lda frameCnt
-        sec
+fwait:  lda ${PAL ? 'palRas' : 'frameCnt'}            ; PAL: the raster's own count -- the doubled tick would
+        sec                     ;   cut every fifth period short, the varying rate this exists to stop
         sbc fT0
         cmp #${FALL_PERIODS}
         bcc fwait
@@ -12425,7 +12490,7 @@ mvs:
 mvsW:   lda $d012
         cmp #250
         bne mvsW
-        lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
+        lda ${PAL ? 'palRas  ' : 'frameCnt'}            ; the flip IS the fall's clock reference: raster 250 of a known
         sta fT0                 ;   frame, so the next deadline is exactly fT0 + ${FALL_PERIODS}
         lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
         sta $d011               ;   flip below, so the fine scroll and the content it shifts reach
@@ -15171,15 +15236,29 @@ irqB0:  lda #${hx(palOf(LVL).ceil)}      ; the ground colour ABOVE the rim: duri
         sta $d021               ;   still the level being LEFT. The middle region inherits it.
 irqArm: lda #${hx(SPLITLINE)}
         sta $d012
-        inc frameCnt
+${PAL ? `        inc palRas              ; PAL: the RASTER's count, for the one clock that is the screen's (fwait)
+` : ''}irqTk:  inc frameCnt              ; ---- THE TICK: everything from here to irqd is TIME, 60 a second ----
         bne irqNf
         inc frameCnt+1
 irqNf:
 ${MUSIC ? `        lda musOn               ; MUSIC: the player, 60 times a second, while a level's song is live
         beq irqNm
 irqPl:  jsr $ff03                ; the player's play: high byte PATCHED by musGo (musAtT)
-irqNm:
-` : ''}${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}irqd:   lda #$ff
+irqNm:  lda dsGl                ; the death's glide, kick or closing filter, 60 times a second (dsTick)
+        ora dsKk
+        ora dsCf
+        ora dsAu
+        beq irqNd
+        jsr dsTick
+irqNd:
+` : ''}${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}${PAL ? `        dec palQ                ; PAL: 50 raster frames a second, 60 ticks -- so every fifth frame
+        bne irqd                ;   ticks TWICE. Back to back, so ticks land 20,20,20,20,20,0 ms apart
+        lda #5                  ;   rather than evenly; nothing here is tighter than a tick, and the
+        sta palQ                ;   player and dsTick only ever count them.
+        jmp irqTk
+palQ:   !byte 5
+palRas: !byte 0
+` : ''}irqd:   lda #$ff
         sta $d019
         pla
         tay
@@ -15192,7 +15271,12 @@ ${MUSIC ? `; ---- musGo / musOff: the level's song (see MUSIC) ----
 ; musGo starts it only if NONE is playing, so a death restart (jmp entry) leaves the music running;
 ; musOff is the only way it stops, and it runs before every level load (the song lives in the slot).
 ; musOn gates the IRQ's call, so the player is never entered while init is rewriting its state.
-musGo:  lda musOn
+musGo:  lda #$00                ; a death restart: the death's sound stops before the song starts over
+        sta dsGl
+        sta dsKk
+        sta dsCf
+        sta dsAu
+        lda musOn
         bne mgD
         ldx lvlMeT
         lda musAtT,x            ; this level's block, by page: 0 = a silent level
@@ -15225,6 +15309,197 @@ musRLT: !byte @@MUSRL@@    ; by level id: the release mask's address in its bloc
 musRHT: !byte @@MUSRH@@
 musAtT: !byte @@MUSAT@@    ; by level id: its block's page, 0 = no block
 musOn:  !byte 0                 ; DATA, not an equate: it must start at 0, and a restart keeps it
+; ---- dsGo: the death begins (dieGo) -- the song drops out; two voices a semitone apart converge ----
+dsGo:   lda #$00
+        sta musOn               ; FIRST: the IRQ stops playing the song before its voices are cut
+        sta dsKk
+        sta dsCf
+        sta $d404               ; every voice cut dead: a drop-out, not a fade
+        sta $d40b
+        sta $d412
+        lda #${hx(DSG_RES << 4 | 7)}            ; all three voices into the low-pass, resonance ${DSG_RES}
+        sta $d417
+        lda #$1f                ; low-pass, volume 15 (a silent level may never have set it;
+        sta $d418               ;   the cut itself masks the bump this write makes)
+        lda #${hx(DSG_C0)}
+        sta dsC
+        sta $d416
+        lda #$00
+        sta dsQ
+        ldx #8
+dgF:    lda dsF0,x              ; the three voices' starts (24-bit: fraction, low, high)
+        sta dsF,x
+        dex
+        bpl dgF
+        ldx #0                  ; X: dsF, Y: the voice's SID registers
+        ldy #0
+dgV:    lda dsF+1,x
+        sta $d400,y
+        lda dsF+2,x
+        sta $d401,y
+        lda #${hx(DSG_AD)}
+        sta $d405,y
+        lda #${hx(DSG_SR)}
+        sta $d406,y
+        lda #${hx(DSG_W | 1)}
+        sta $d404,y             ; gated
+        inx
+        inx
+        inx
+        tya
+        clc
+        adc #7
+        tay
+        cpy #21
+        bcc dgV
+        lda #$01
+        sta dsGl
+        rts
+; ---- dsBoom: a picture lands (picOn) -- two noises and a kick, overdriving a closing resonant low-pass ----
+dsBoom: lda #$00
+        sta dsGl
+        lda #$f7                ; resonance F, all three voices into the filter
+        sta $d417
+        lda #$1f                ; low-pass, volume 15 (the boom masks this write's bump)
+        sta $d418
+        lda #${hx(DSB_C0)}
+        sta dsC
+        sta $d416
+        lda #$01
+        sta dsCf
+        lda #$00
+        sta $d40d               ; no sustain on the noises or the kick
+        sta $d414
+        sta $d406
+        lda #${hx(DSB_AD)}
+        sta $d40c
+        sta $d413
+        lda #<${hx16(sidFn(DSB_HZ))}
+        sta $d40e
+        lda #>${hx16(sidFn(DSB_HZ))}
+        sta $d40f
+        lda #<${hx16(sidFn(DSB_HZ2))}
+        sta $d407
+        lda #>${hx16(sidFn(DSB_HZ2))}
+        sta $d408
+        lda #$80                ; gate LOW first: the envelope will not retrigger otherwise
+        sta $d40b
+        sta $d412
+        lda #$81                ; noise + gate
+        sta $d40b
+        sta $d412
+        lda #<${hx16(sidFn(DSK_HI))}
+        sta dsKF
+        sta $d400
+        lda #>${hx16(sidFn(DSK_HI))}
+        sta dsKF+1
+        sta $d401
+        lda #${hx(DSK_AD)}
+        sta $d405
+        lda #$10                ; the kick: triangle, gate low then high
+        sta $d404
+        lda #$11
+        sta $d404
+        lda #${DSK_N}
+        sta dsKk
+        rts
+; ---- dsTick (IRQ) ----
+; The glide: each voice f += (target - f) >> ${DSG_SH}, in 24 bits. The shift is ARITHMETIC (the sign
+; copied in), since a voice falls: the gap is negative. The kick falls linearly; the cutoff closes by 1.
+dsTick: lda dsGl
+        beq dtKk
+        ldx #0                  ; X: the voice's 3 bytes in dsF/dsTg
+        ldy #0                  ; Y: its SID registers
+dtV:    sec
+        lda dsTg,x
+        sbc dsF,x
+        sta dsT
+        lda dsTg+1,x
+        sbc dsF+1,x
+        sta dsT+1
+        lda dsTg+2,x
+        sbc dsF+2,x
+        sta dsT+2
+        lda #${DSG_SH}
+        sta dsN
+dtSh:   lda dsT+2
+        cmp #$80                ; C = the sign, shifted back in
+        ror dsT+2
+        ror dsT+1
+        ror dsT
+        dec dsN
+        bne dtSh
+        clc
+        lda dsF,x
+        adc dsT
+        sta dsF,x
+        lda dsF+1,x
+        adc dsT+1
+        sta dsF+1,x
+        sta $d400,y
+        lda dsF+2,x
+        adc dsT+2
+        sta dsF+2,x
+        sta $d401,y
+        inx
+        inx
+        inx
+        tya
+        clc
+        adc #7
+        tay
+        cpy #21
+        bcs dtOp
+        jmp dtV
+dtOp:   inc dsQ                 ; the cutoff opens a step every 4 60ths, to DSGC1
+        lda dsQ
+        and #$03
+        bne dtKk
+        lda dsC
+        cmp #${hx(DSG_C1)}
+        bcs dtKk
+        inc dsC
+        lda dsC
+        sta $d416
+dtKk:   lda dsKk
+        beq dtCf
+        dec dsKk
+        sec
+        lda dsKF
+        sbc #<${hx16(DSK_STEP)}
+        sta dsKF
+        sta $d400
+        lda dsKF+1
+        sbc #>${hx16(DSK_STEP)}
+        sta dsKF+1
+        sta $d401
+dtCf:   lda dsCf
+        beq dtDn
+        dec dsC
+        lda dsC
+        sta $d416
+        cmp #${hx(DSB_C1)}
+        bne dtDn
+        lda #$00                ; closed: the noises decay on under it
+        sta dsCf
+dtDn:   lda dsAu                ; T's countdown to the boom
+        beq dtDx
+        dec dsAu
+        bne dtDx
+        jmp dsBoom
+dtDx:   rts
+dsF0:   !byte ${DSG_FROM.map(h => `0,<${hx16(sidFn(h))},>${hx16(sidFn(h))}`).join(',')}   ; the cluster
+dsTg:   !byte ${DSG_TO.map(h => `0,<${hx16(sidFn(h))},>${hx16(sidFn(h))}`).join(',')}   ; the chord
+dsF:    !byte 0,0,0,0,0,0,0,0,0 ; voices 1-3 now
+dsQ:    !byte 0                 ; 60ths of glide, for the cutoff's pace
+dsAu:   !byte 0                 ; T: 60ths left to the boom
+dsGl:   !byte 0                 ; 1 = the voices are converging
+dsKk:   !byte 0                 ; 60ths of kick left
+dsCf:   !byte 0                 ; 1 = the boom's cutoff is closing
+dsC:    !byte 0
+dsKF:   !byte 0,0               ; the kick's frequency
+dsT:    !byte 0,0,0
+dsN:    !byte 0
 stepLvT:!byte ${[...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => STEP_LV.includes(i) ? 1 : 0).join(',')}   ; by level id: 1 = footsteps
 ; ---- sfxPlay: A = an effect id (SFX_ID), played on voice 3 by the live block's effect engine ----
 ; Silent where no block is live. Interrupts off around the call: the effect engine's start writes the
@@ -15352,7 +15627,8 @@ diClr:  sta $d400,x
 ; drStep (lxStep, once a frame): the nearest angel, Chebyshev, and the voices and cutoff for it.
 ; It runs whether or not you are looking -- the sound is the channel that works when sight does not.
 drStep: lda drFall
-        bne dsD
+        ora dieSt               ; and not while you die: dsGo owns voices 1 and 2 from then (the
+        bne dsD                 ;   glide, the kick); drIn takes them back on the restart
         lda #$0f
         sta drD
         ldx #$00
@@ -21445,7 +21721,23 @@ hxLv:   lda hxLvT,x
         jsr drawFps
         jsr drawDbg
 hxKey:
-`}        ; ---- 'L': go to the next level ----
+`}${MUSIC ? `        ; ---- 'T' (MUSIC): the death's sound, on demand -- row $fb bit 6, no joystick line ----
+        lda #$fb
+        sta $dc00
+        lda $dc01
+        eor #$ff
+        and #$40
+        tax
+        beq htDn
+        cpx htOld
+        beq htDn                ; one press, one run
+        jsr dsGo
+        lda #${DST_N}
+        sta dsAu
+htDn:   stx htOld
+        lda #$ff
+        sta $dc00
+` : ''}        ; ---- 'L': go to the next level ----
         ; Row $df bit 2, which nothing else in the build reads.
         ; It does NOT call the level change: it stands the player on the live exit cell and lets
         ; fallChk find them there, so the skip runs the REAL transition -- fallStep, wallsBack,
@@ -21481,7 +21773,7 @@ hxDn:   stx hxOld
         sta $dc00               ; leave the port neutral for the joystick read in readKeys
         rts
 hxOld:  !byte 0                 ; 'L' last frame, for the edge test
-hxJoy:  !byte 0
+${MUSIC ? "htOld:  !byte 0                 ; 'T' last frame\n" : ''}hxJoy:  !byte 0
 ${NOHUD ? '' : `hhOld:  !byte 0                 ; 'H' last frame, for the edge test
 hudOn:  !byte ${process.env.HUDON === '1' ? 1 : 0}                 ; the HUD: off until 'H' (HUDON=1 starts it on)`}
 ${NOHUD ? '' : `hxLvT:  !byte 18,14,19,14,18   ; L E V E L as glyph indices -- 14 is the hex digit E`}
@@ -26958,7 +27250,8 @@ dcTurn:
 dcPos:  cmp #${hx(DIE_TURN)}
         bcc dcNo
 dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
-dieGo:  ${!HAS_IDOL ? '' : `ldy idolHand            ; ---- THE IDOL FALLS WHERE YOU DO ----
+dieGo:  ${MUSIC ? `jsr dsGo                ; MUSIC: the song drops out, the glide begins
+        ` : ''}${!HAS_IDOL ? '' : `ldy idolHand            ; ---- THE IDOL FALLS WHERE YOU DO ----
         bmi dgNI                ; $ff = empty hands, and 0..2 never set bit 7
         ; IT HAS TO BE RECORDED HERE, because the restart cannot work it out. dieKey does
         ; jmp entry, and entry stores 0 into carry and calls idolLk -- which derives idolHand
@@ -27153,8 +27446,7 @@ ppWB:   sta $ffff,y
 ; ---- picOn: the cut itself ----
 ; One write per palette register, on a frame that is already black. No ramp and no slide: between
 ; one frame and the next the picture is simply there.
-picOn:  ${MUSIC ? `lda #${SFX_ID.death}
-        jsr sfxPlay             ; the cut lands on a crash
+picOn:  ${MUSIC ? `jsr dsBoom              ; the cut lands on a boom
         ` : ''}lda #${hx(PICS.d021)}
         jsr setGnd
         lda #${hx(PICS.d022)}
@@ -28291,11 +28583,14 @@ try {
       return out.sort((a, b) => a[0] - b[0]);
     });
     // ...and the LEVEL CODE block: no equate points into it, so without this it read as free -- and
-    // the report claimed the 1.3K a module needs as spendable (2026-10-14)
+    // the report claimed the 1.3K a module needs as spendable (2026-10-14). It ends where the RESERVE
+    // ends: a level's sound block can run past the code's reservation (MUS_END), and the report
+    // called that tail free -- 677 B of Deep's block in a MUSIC=1 build (2026-10-22)
+    const LXEND = Math.max(LXAT + LX_SIZE, MUS_END);
     if (LX_SIZE) for (let i = holes.length - 1; i >= 0; i--) {
-      const [lo, hi, nm] = holes[i], a = Math.max(lo, LXAT), b = Math.min(hi, LXAT + LX_SIZE);
+      const [lo, hi, nm] = holes[i], a = Math.max(lo, LXAT), b = Math.min(hi, LXEND);
       if (nm.length || a >= b) continue;
-      holes.splice(i, 1, ...[[lo, a, []], [a, b, ['(level code)']], [b, hi, []]].filter(([x, y]) => y > x));
+      holes.splice(i, 1, ...[[lo, a, []], [a, b, [MUS_END > LXAT + LX_SIZE ? '(level code + sound)' : '(level code)']], [b, hi, []]].filter(([x, y]) => y > x));
     }
     const spendable = holes.filter(h => !h[2].length).reduce((a, [lo, hi]) => a + (hi - lo), 0);
     console.log(`image holes: ${holes.length}, ${spendable} bytes with nothing living in them` +

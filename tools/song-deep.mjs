@@ -34,7 +34,8 @@ const T = { wave: [], pulse: [], filt: [], speed: [] };
 // a table's FF jump is written relative to its own first row (FF 02 = its row 2) and made absolute
 // here -- GoatTracker's jumps are absolute positions in the shared table, so a relative jump in any
 // table but the first lands in another instrument's rows. ($00 = stop stays $00.)
-const add = (t, rows) => { const at = T[t].length + 1;
+const RANGES = [];                                   // every add(): the pruner keeps the referenced ones
+const add = (t, rows) => { const at = T[t].length + 1; RANGES.push({ t, at, len: rows.length });
   T[t].push(...rows.map(([l, r]) => l === 0xff && r ? [l, r + at - 1] : [l, r])); return at; };
 
 // ---- speedtable entries first: commands name them by index ----
@@ -53,6 +54,7 @@ const LGLIDE_DIV = 2, LBEND_DIV = 5;
 const S_LGLIDE = add('speed', [[0x80, LGLIDE_DIV]]);
 const S_LBEND  = add('speed', [[0x80, LBEND_DIV]]);
 const S_LVIB   = add('speed', [[0x85, 0x06]]);
+const S_KVIB   = add('speed', [[0x86, 0x05]]);   // KEYS: 6 ticks a way, 1/32 semitone a tick
 
 // DATAWAVE=tri: the data voice plays a TRIANGLE ($11) instead of the pulse ($41) -- its pulse sweep
 // then does nothing. DATAHALF=1: the data voice moves in 8ths, half the speed (2026-10-16 variations).
@@ -72,7 +74,53 @@ const DSTEP = process.env.DATAHALF === '1' ? 2 : 1;
 // steam; + the triangle 8ths; the triangle swapped for the pulse 16ths -- then back to the start.
 const SONG = process.env.SONG === '1';
 const DATAMIX = process.env.DATAMIX === '1' || SONG;
-const DATA = process.env.DRONEONLY !== '1' && process.env.MELODY !== '1' && process.env.DATA !== '0';
+// KEYS=tri|pulse|filt (2026-10-22, the user's sketch): the bass line A F Bb E | D C Bb E under a DYAD
+// struck on count 2 of each bass note and left to ring "like piano notes" -- no arpeggio. Ch2 takes the
+// lower note, ch3 the upper. tri: a triangle with a sawtooth strike (2 ticks) and a delayed vibrato;
+// pulse: a slow pulse-width sweep, outside the filter; filt: the same pulse INSIDE the bass's filter.
+const KEYS = process.env.KEYS ?? '';
+// KFILT=1: the dyad voices (ch2, ch3) go through the bass's filter as well (2026-10-22, the user: "the
+// triangle is not going through the filter, right? can i hear what happens if we do that?")
+const KFILT = KEYS && process.env.KFILT === '1';
+const KSTAG = +(process.env.KSTAG ?? 2);
+// KBUILD=1 (with KBRHY=k16; 2026-10-22, the user: "a buildup: so we start with the 'both' version
+// (thud+hat), maybe transition to this, then bring in the arpeggiated sweeps"): three passes of the
+// bass line -- both + plain dyads; k16 + plain dyads; k16 + the roll -- then round again
+const KBUILD = KEYS === 'tri' && process.env.KBUILD === '1';
+const KRGT = parseInt(process.env.KRGT ?? '02', 16);   // the roll voices' gate timer (see 'Roll')
+// KECHO (2026-10-22, the user: "let me hear those variations"): oct, the echo an octave UP, still a row
+// behind; tick, the echo on the SAME row, KECHOT (3) ticks late -- a thickening, not a trail
+const KECHO = process.env.KECHO ?? '', KECHOT = +(process.env.KECHOT ?? 3);
+              // KEYS=tri: ticks the upper note is late (1-15)
+// KSAW=n: ticks of sawtooth strike before the triangle (default 0: none -- 2 was the first; the user, 2026-10-22: "it reads
+// like a glitch" -- then, of none / 6 / 12: "saw 0, definitely")
+const KSAWROWS = [...Array(+(process.env.KSAW ?? 0))].map(() => [0x21, 0x00]);
+// KBRHY=k32 (2026-10-22, the user's 32nd-note bar, "x X c and C should be noticeably different noise
+// pitches, and at a longer duration ... more pronounced"):
+//   1 2 3 4 5 6 7 8 1 2 3 4 5 6 7 8 1 2 3 4 5 6 7 8 1 2 3 4 5 6 7 8
+//   x x x x     X X X X     c c c c     X X X X     c c C C c c C
+// KBRHY=k16 (the user: "we're not aligned ... I should have said 16th notes ... the bass hits on 1 and
+// the diad hits on the next 1"): the SAME string a step a ROW -- the 32 steps are one bass note, step
+// 9 is the dyad's row 8 -- each hit KN16 ticks of noise in its 10-tick row. (k32, below, was the first
+// reading: a step a 32nd, the bar twice a bass note.)
+// A 32nd is HALF a row (5 ticks) and a command can only start on a row, so each row points the bass
+// at a program for ITS two 32nds: per hit KN32 ticks of noise, then the pulse for the rest of the 5 --
+// the gap keeps back-to-back hits apart. The pitches are ABSOLUTE, a kit that doesn't follow the bass:
+// x C7, X E6, c A4, C C4. Two bars to a bass note, so the bar plays twice; row 0's pair rides in the
+// struck instrument itself ('Bass k32'), since the first row's command column carries the tempo.
+const K32 = process.env.K32 ?? 'xxxx--XXXX--cccc--XXXX--ccCCccC-';
+const K16 = process.env.KBRHY === 'k16';
+// k16's kit spread ~2 octaves apart (the user: "make the differences between the notes more dramatic.
+// shorten the duration back to like 3 frames"): x B7, X C6, c C4, C C2; then "back to a little
+// tighter -- something like C3, C4, C5, C6": an octave apart, x C6, X C5, c C4, C C3
+const K32N = K16 ? { x: 0xc8, X: 0xbc, c: 0xb0, C: 0xa4 } : { x: 0xd4, X: 0xcc, c: 0xb9, C: 0xb0 };
+const KN32 = +(process.env.KN32 ?? 4), KN16 = +(process.env.KN16 ?? 3);
+// a program for one row: two 32nd hits (k32), or one 16th (k16: the "pair" is one step)
+const k32rows = pair => { const r = [];
+  for (const h of pair) for (let t = 0; t < (K16 ? 10 : 5); t++) r.push(h !== '-' && t < (K16 ? KN16 : KN32) ? [0x81, K32N[h]] : [0x41, 0x00]);
+  while (r.length > 1 && r.at(-1)[0] === 0x41 && r.at(-2)[0] === 0x41) r.pop();   // trailing pulse: once is enough
+  return [...r, [0xff, 0x00]]; };
+const DATA = !KEYS && process.env.DRONEONLY !== '1' && process.env.MELODY !== '1' && process.env.DATA !== '0';
 // The SID has ONE filter, and an instrument with a filtertable takes it over -- so the drone's table
 // is the only one, and it carries both motions. Per 32-tick beat: the THROB (cutoff up 6*s over 2
 // ticks, back down s a tick over 12), then the slow DRIFT (one tick), then a 17-tick hold. The drift
@@ -88,17 +136,25 @@ const THROB = +(process.env.THROB ?? (DATA && DSTEP === 1 && !DATAMIX ? 2 : 0));
 const THROB_MIX = +(process.env.THROB ?? 2);                     // the throb the mix's pulse half uses
 const beatF = (d, t) => [[0x02, (6 * t) & 0xff], [0x0c, -t & 0xff], [0x01, d & 0xff], [4 * TEMPO_T - 15, 0x00]];
 const STEAMON = process.env.STEAM === '1' || SONG;
-const FMASK = 0xa1 | (DATA ? 2 : 0) | (STEAMON ? 4 : 0);
+const FMASK = 0xa1 | (DATA ? 2 : 0) | (STEAMON ? 4 : 0) | (KEYS === 'filt' || KFILT ? 6 : 0);
 const FILT_THROB = t => [[0x90, FMASK], [0x00, 0x08],
   ...[...Array(10)].flatMap(() => beatF(6, t)), ...[...Array(8)].flatMap(() => beatF(-7, t)), ...beatF(-4, t),
   [0xff, 0x03]];
 // STAIRS=8: the same ~10 s breath (608 ticks) and range in 8 steps of 8 instead of 16 of 4 -- half
 // the table (64 bytes), coarser steps; for a build short of room (2026-10-16 sound test)
 const STAIRS = +(process.env.STAIRS ?? 16), SPT = 608 / 2 / STAIRS;      // ticks per stair
-const FILT_SWEEP = [[0x90, FMASK], [0x00, 0x08],
-  ...[...Array(STAIRS)].flatMap(() => [[0x04, 64 / STAIRS / 4], [SPT - 4, 0x00]]),
-  ...[...Array(STAIRS)].flatMap(() => [[0x04, -(64 / STAIRS / 4) & 0xff], [SPT - 4, 0x00]]),
+// FCUT=hex: the sweep's floor (it climbs +$40 from there and back). $08 is the drone's dark breath;
+// higher opens the filter (2026-10-22, the user, with the dyads in the filter: "open the filter up a bit")
+const FCUT = parseInt(process.env.FCUT ?? '08', 16);
+// FRANGE=hex: how far it climbs (default $40). The user, 2026-10-22: "something like $90 to $B0" --
+// FCUT=90 FRANGE=20 (STAIRS=8, so a stair stays a whole +1 a tick)
+const FRANGE = parseInt(process.env.FRANGE ?? '40', 16), FSTEP = FRANGE / STAIRS / 4;
+if (FSTEP !== Math.floor(FSTEP)) throw new Error(`FRANGE $${FRANGE.toString(16)} over ${STAIRS} stairs is not a whole step a tick`);
+const sweepT = (mask, cut) => [[0x90, mask], [0x00, cut],
+  ...[...Array(STAIRS)].flatMap(() => [[0x04, FSTEP], [SPT - 4, 0x00]]),
+  ...[...Array(STAIRS)].flatMap(() => [[0x04, -FSTEP & 0xff], [SPT - 4, 0x00]]),
   [0xff, 0x03]];
+const FILT_SWEEP = sweepT(FMASK, FCUT);
 const DRONE_FILT = THROB ? FILT_THROB(THROB) : FILT_SWEEP;
 // ---- the data voice: instant attack, short release; the hard restart (gate timer 2) cuts each note
 // 2 ticks early, so every note is a separate blip. One SET of four instruments per (wave, speed):
@@ -121,13 +177,15 @@ const dataSet = ({ tag, dw, dstep }) => {
 const DSET_ENV = { tag: 'Data', dw: DW, dstep: DSTEP };
 const DSET_TRI = { tag: 'Tri', dw: 0x11, dstep: 2 }, DSET_PUL = { tag: 'Data', dw: 0x41, dstep: 1 };
 const DATASETS = DATAMIX ? [DSET_TRI, DSET_PUL] : [DSET_ENV];
+const KEYBASS = KEYS && process.env.KEYBASS === 'piano', KBSWEEP = KEYBASS && process.env.KBSWEEP === '1';
+const INSTR_DRONE_PULSE = [[0x84, 0x00], [0x7f, 0x03], [0x7f, 0x03], [0x56, 0x03],
+                          [0x7f, 0xfd], [0x7f, 0xfd], [0x56, 0xfd], [0xff, 0x02]];
 const INSTR = [
   { name: 'Drone', ad: 0x8f, sr: 0xf8,
     wave:  [[0x41, 0x00], [0xff, 0x00]],
     // pulse width $400 <-> $800, round and hollow, never the thin buzzy end. A 680-tick cycle (340 up,
     // 340 down at 3/tick): NOT a multiple of the 256-tick section, so it drifts across the note changes
-    pulse: [[0x84, 0x00], [0x7f, 0x03], [0x7f, 0x03], [0x56, 0x03],
-                          [0x7f, 0xfd], [0x7f, 0xfd], [0x56, 0xfd], [0xff, 0x02]],
+    pulse: INSTR_DRONE_PULSE,
     // lowpass, resonance A, cutoff kept LOW ($08-$44) so the drone stays dark; it breathes in steps
     // over ~10 s (608 ticks). (It was 128 ticks: in lockstep with the bass; then 19-tick stairs, until
     // the data voice's beat needed the same table -- DRONE_FILT, above.)
@@ -159,6 +217,47 @@ const INSTR = [
   { name: 'Steam', ad: 0x00, sr: 0xc8,                           // (release 8: SONG keys it off)
     wave:  [[0x81, 0x00], [0xff, 0x00]] },                     // the wavetable stops, so 3XY owns the pitch
   ...DATASETS.flatMap(d => dataSet(d)),
+  // ---- KEYS: struck and left to ring. Attack 0, decay C (~3 s) towards sustain 2, release D (~9 s):
+  // keyed off ~1 s after the strike (2026-10-22, the user: "get to release quicker and use a longer
+  // release" -- it was release 9, keyed off a second before the next strike; then "release over even a
+  // longer time": C (~3 s) -> D, so it is still sounding when the next strike cuts it, ~4.3 s on)
+  ...!KEYS ? [] : KEYS === 'tri' ? [
+    // a plain triangle (KSAW=n puts n ticks of sawtooth in front: a bright hammer, which at 2 ticks
+    // read as a glitch); then a slow vibrato from ~0.8 s in
+      { name: 'Keys', ad: 0x0c, sr: 0x2d, vib: S_KVIB, vibDelay: 0x30,
+        wave: [...KSAWROWS, [0x11, 0x00], [0xff, 0x00]] }, { name: 'Keys hi', ad: 0x0c, sr: 0x2d, vib: S_KVIB, vibDelay: 0x30,
+        // the upper note of the dyad, a hair LATE (2026-10-22, the user: "the low note a hair before the
+        // high note"): a row is 10 ticks, far too coarse, so the stagger is a wavetable DELAY row -- the
+        // gate stays off (frame 0's $08) for KSTAG ticks before the strike
+        wave: [[KSTAG, 0x00], ...KSAWROWS, [0x11, 0x00], [0xff, 0x00]] },
+    // KBUILD's third pass: the ROLL (2026-10-22, the user: "16th notes, rolling up and down chords,
+    // starting right on the 1 beat with bass note ... a close three note chord ... moving the chord
+    // upward a few times, then back down"): a struck triangle a row, its sustain high so every 16th is
+    // as loud as the last (the hard restart, 2 ticks a note, does the articulation); and its ECHO a row
+    // behind on ch3, the same at sustain 5 -- the C64's oldest trick for a voice that sounds like two
+    // KRGT (2026-10-22): the roll voices' gate timer. 2 = GoatTracker's hard restart (gate off 2 ticks
+    // early with ADSR $0f00: release 0, silent in ~6 ms). In VICE that cut each 16th dead -- "choppy
+    // repeated notes" against the editor's "nintendo-ringing echo" (the SID writes are identical; the
+    // editor renders that release slower). $82: gate off 2 ticks early but on the note's OWN release,
+    // so its tail runs into the next; $40: no early gate-off at all, each note re-attacks from the last
+    ...KBUILD ? [{ name: 'Roll', ad: 0x00, sr: 0xa6, gt: KRGT, wave: [[0x11, 0x00], [0xff, 0x00]] },
+                 // KECHO=tick: the echo KECHOT ticks behind instead of a row (a wavetable delay, gate off)
+                 { name: 'Roll echo', ad: 0x00, sr: 0x56, gt: KRGT, wave: [...KECHO === 'tick' ? [[KECHOT, 0x00]] : [], [0x11, 0x00], [0xff, 0x00]] }] : []] : [
+    // the width swept $300 -> $5fa -> $300 over ~4 s (254 ticks a way): hollow, slowly turning
+      { name: 'Keys', ad: 0x0c, sr: 0x2d, vib: S_KVIB, vibDelay: 0x30,
+        wave: [[0x41, 0x00], [0xff, 0x00]],
+        pulse: [[0x83, 0x00], [0x7f, 0x03], [0x7f, 0x03], [0x7f, 0xfd], [0x7f, 0xfd], [0xff, 0x02]] }],
+  // KEYBASS=piano (2026-10-22, the user: "more piano-like behavior too: no glides, just a very long
+  // release"): the drone's own sound (its pulse sweep and the filter's breath) struck on each bass note.
+  // Then "ring longer, still being fairly loud when the next note comes (like a real piano bass note)":
+  // the gate stays on, attack 0, decay D (~9 s) towards sustain 5 -- still well up when the next strike
+  // (5.3 s on) cuts it; release C only for the end. KBSWEEP=1: no filtertable of its own, so a strike
+  // never restarts the filter -- the intro hands the drone's breath to the filter once (AXY) and it runs
+  // on across the strikes, as under the gliding drone
+  ...KEYBASS ? [{ name: 'Bass key', ad: 0x0d, sr: 0x5c, wave: [[0x41, 0x00], [0xff, 0x00]],
+                  pulse: INSTR_DRONE_PULSE, ...KBSWEEP ? {} : { filt: DRONE_FILT } }] : [],
+  ...KEYBASS && /^k(32|16)$/.test(process.env.KBRHY) ? [{ name: 'Bass k32', ad: 0x0d, sr: 0x5c, wave: k32rows(K32.slice(0, K16 ? 1 : 2)),
+                  pulse: INSTR_DRONE_PULSE, ...KBSWEEP ? {} : { filt: DRONE_FILT } }] : [],
 ];
 for (const i of INSTR) {
   i.wp = add('wave', i.wave);
@@ -200,6 +299,9 @@ const B_F   = def([glide(0, 'F1', S_BASSGLIDE)]);
 const B_BB  = def([glide(0, 'A#1', S_BASSGLIDE)]);
 const B_E   = def([glide(0, 'E1', S_BASSGLIDE)]);
 const B_D   = def([glide(0, 'D1', S_BASSGLIDE)]);
+// KEYS's C: C2, a 7th up from D1 -- too far for GLIDE_ROWS at $0C (~40 ticks), so it holds the glide 7
+// rows. (C1 would be a step down, but at 33 Hz it is gone on a laptop.)
+const B_C   = def([[0, 'C2', 0, PORTA, S_BASSGLIDE], ...[...Array(6)].map((_, k) => [1 + k, null, 0, PORTA, S_BASSGLIDE])]);
 // (B_E2, E then a rise to G# halfway, was dropped 2026-10-15: the user -- "lose the G# and just hold the E")
 // ---- ch2: the melody ----
 const bl = (row, note) => [row, note, I['Bloom']];
@@ -351,7 +453,189 @@ const SIL = def([]), SIL_IN = def([], 8);
 const BLOOP = [B_A, B_F, B_BB, B_E, B_A, B_F, B_D, B_E];
 // PASSES=3 (SONG): the first three passes only -- no pulse 16ths -- for a test that needs it smaller
 const PASSES = +(process.env.PASSES ?? 4);
-const ORDER = SONG && PASSES === 3 ? [
+// TRIONLY=1 (SONG; 2026-10-17, the user: "the bass and triangle only -- just play both starting from
+// the beginning"): one pass, the drone and the triangle 8ths together from the first bar; the same
+// packets as the song's triangle pass (REUSE, and they are the first draws on the seed)
+// KEYS: count 2 is row 8 (a count is 8 rows: four counts to a bass note); keyed off at row 14, ~1 s on
+const KBASS = [B_A, B_F, B_BB, B_E, B_D, B_C, B_BB, B_E];
+const KDYAD = [['C4', 'E4'], ['C4', 'E4'], ['D4', 'E4'], ['D4', 'E4'], ['D4', 'E4'], ['C4', 'E4'], ['D4', 'F4'], ['D4', 'E4']];
+const KPATS = [];                                         // one set a voice, built on first use
+const kpat = v => KPATS[v] ??= (() => { const m = new Map(); return KDYAD.map(d => { const k = d[v];
+  if (!m.has(k)) m.set(k, def([[8, k, I[v && I['Keys hi'] ? 'Keys hi' : 'Keys']], [14, 'off']])); return m.get(k); }); })();
+// KEYBASS: each bass note struck on count 1 and held to the next. NO intro (2026-10-22, the user: "every
+// goatracker song you do seems to start with one bar of silence" -- the drone's 8-row lead-in, which
+// the struck bass left empty): the first bass row sets the tempo, and with KBSWEEP the first dyad
+// row hands the filter its table (one command a row; the filter is global, so either voice can).
+// KSPLIT=1 (KBSWEEP; the user: "the first four unfiltered and the second four filtered"): section 5
+// hands the filter a second sweep with the dyads routed in and the floor at KSPLITCUT ($30, the
+// "kind of odd sounding but I like it" one); section 1 hands the first back on every loop.
+const KSPLIT = KBSWEEP && process.env.KSPLIT === '1';
+const KSPLIT_AT = KSPLIT ? add('filt', sweepT(FMASK | 6, parseInt(process.env.KSPLITCUT ?? '30', 16))) : 0;
+// KBRHY=hat|chug|thud (2026-10-22, the user: "work some little noise moments into the bass to give it
+// rhythm"): Hubbard's trick inside a held note -- 8XY points the bass voice's wavetable at a blip: noise
+// for a frame or few, then straight back to the pulse at the note (the wavetable stops there). The gate
+// never drops, so the envelope isn't restarted: each blip borrows the bass's current level and fades
+// with it. Noise pitch is relative to the note: +48 a hiss, +24 a dull knock.
+//   hat:  a 1-frame hiss on every off-beat 8th (rows 2, 6, ... 30)
+//   chug: a 2-frame hiss in pairs of 16ths ahead of each beat (rows 2-3 ... 30-31): a shuffle
+//   thud: a 3-frame knock, syncopated: rows 6, 12, 20, 22, 28
+//   both: thud + hat (the user: "thud was my favorite, though hat works too. I almost want both
+//         together ... can be a bit bigger as these were very subtle"); where they meet, the knock.
+//         Wider: KHATF (3) frames of hiss, KTHUDF (6) of knock -- the others keep 1 and 3
+const KHATF = +(process.env.KHATF ?? 3), KTHUDF = +(process.env.KTHUDF ?? 6);
+const KBRHY = KEYBASS ? process.env.KBRHY ?? '' : '';
+const blip = (fr, rel) => add('wave', [...[...Array(fr)].map(() => [0x81, rel]), [0x41, 0x00], [0xff, 0x00]]);
+const KB_HIT = { hat: () => [blip(1, 0x30), [2, 6, 10, 14, 18, 22, 26, 30]],
+                 chug: () => [blip(2, 0x30), [2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31]],
+                 thud: () => [blip(3, 0x18), [6, 12, 20, 22, 28]] }[KBRHY]?.();
+const KB_BOTH = (KBRHY === 'both' || KBUILD) && (() => { const h = blip(KHATF, 0x30), t = blip(KTHUDF, 0x18), T = [6, 12, 20, 22, 28];
+  return [...[...Array(8)].map((_, k) => 2 + 4 * k).filter(r => !T.includes(r)).map(r => [r, h]), ...T.map(r => [r, t])]; })();
+const K32P = new Map(), k32prog = pair => K32P.get(pair) ?? (K32P.set(pair, add('wave', k32rows(pair))), K32P.get(pair));
+const KB_K32 = /^k(32|16)$/.test(KBRHY) && [...Array(32)].flatMap((_, r) => { const pair = K16 ? K32[r] : K32.slice((r % 16) * 2, (r % 16) * 2 + 2);
+  return r && !/^-+$/.test(pair) ? [[r, k32prog(pair)]] : []; });
+const KBI = KB_K32 ? 'Bass k32' : 'Bass key';
+const kbHits = () => KB_K32 ? KB_K32.map(([r, w]) => [r, null, 0, 0x8, w]) : KB_BOTH ? KB_BOTH.map(([r, w]) => [r, null, 0, 0x8, w])
+  : KB_HIT ? KB_HIT[1].map(r => [r, null, 0, 0x8, KB_HIT[0]]) : [];
+const kb = new Map(), kbass = note => kb.get(note) ?? (kb.set(note, def([[0, note, I[KBI]], ...kbHits()])), kb.get(note));
+const KBNOTES = ['A1', 'F1', 'A#1', 'E1', 'D1', 'C2', 'A#1', 'E1'];
+// a dyad voice's section k, with a filter hand-off on row 0 when the section starts a sweep
+// off=1: the row-0 hand-off also keys the voice OFF -- for a pass that follows the roll, whose last
+// 16th is never released and otherwise rings on until count 2's strike (the user, 2026-10-22: "an
+// overlapping note that carries from the last of section 3 through to section 1")
+const kdy = (v, k, fp, off) => fp ? def([[0, off ? 'off' : null, 0, 0xa, fp], [8, KDYAD[k][v], I[v && I['Keys hi'] ? 'Keys hi' : 'Keys']], [14, 'off']]) : kpat(v)[k];
+const ksec = k => KBSWEEP && k === 0 ? INSTR[0].fp : KSPLIT && k === 4 ? KSPLIT_AT : 0;
+// KBUILD's filter (the user: "sweep up and down rather than opening up slowly ... $06 to $0A, then
+// when we get to section 2 opening that up to $09 to $0B"): the breath (8 stairs, ~10 s) over $60-$A0
+// for pass 1, then over $90-$B0 -- each pass's first dyad row hands the filter its table
+// A stair is `range / 8` of cutoff, climbed in k ticks of a whole step each: k = 4 where it divides (every
+// range up to 2026-10-22), else 3, 6, 2, 8 or 1 -- the user's $40-$70 is $30, 6 a stair: 3 ticks of +2
+const ksw = (cut, range) => { const a = range / 8, sp = 608 / 2 / 8;
+  const k = [4, 3, 6, 2, 8, 1].find(d => a % d === 0);
+  if (!Number.isInteger(a) || !k) throw new Error(`ksw: range $${range.toString(16)} is not a whole step a stair`);
+  const st = a / k;
+  return add('filt', [[0x90, FMASK], [0x00, cut], ...[...Array(8)].flatMap(() => [[k, st], [sp - k, 0x00]]),
+    ...[...Array(8)].flatMap(() => [[k, -st & 0xff], [sp - k, 0x00]]), [0xff, 0x03]]); };
+// KF1=1 (2026-10-22, the user, trimming for level 3: "try the first one for the whole song"): pass 1's
+// breath runs on through all three passes -- no second table, no hand-off at pass 2
+const KF1 = process.env.KF1 === '1';
+// KF1C / KF2C = "cut,range" (2026-10-22): the two passes' breaths. $60/$90 were tuned by ear in
+// GoatTracker's reSID-fp model; VICE's 6581 barely moves up there (its brightness change is mostly
+// below ~$60), so in the game the sweep vanished. The old keys-rhy-both's $08-$48 is what VICE hears.
+const kfc = (k, d) => (process.env[k] ?? d).split(',').map(Number);
+const KB_F1 = KBUILD && ksw(...kfc('KF1C', '0x60,0x40')), KB_F2 = KBUILD && !KF1 && ksw(...kfc('KF2C', '0x90,0x20'));
+// the roll's chords: the bass note's pitch plus the dyad, close, from about middle C; where that is
+// only two pitch classes (E/D, D/E, C/E) a fifth makes the third note
+const KROLL = [['A3', 'C4', 'E4'], ['C4', 'E4', 'F4'], ['A#3', 'D4', 'E4'], ['B3', 'D4', 'E4'],
+               ['A3', 'D4', 'E4'], ['C4', 'E4', 'G4'], ['A#3', 'D4', 'F4'], ['B3', 'D4', 'E4']].map(c => c.map(n));
+// a beat (4 rows) a position: 1 2 3 2 of the chord, inversions 0 1 2 3 4 3 2 1 -- up an inversion a
+// beat, then back down, so the next bass note finds it at the bottom again
+const inv = (c, k) => { let v = [...c]; for (let i = 0; i < k; i++) v = [...v.slice(1), v[0] + 12]; return v; };
+const rollNotes = c => [0, 1, 2, 3, 4, 3, 2, 1].flatMap(k => { const v = inv(c, k); return [v[0], v[1], v[2], v[1]]; });
+// KRTR=1 (the user: "reusing some arpeggio patterns transposed if it works"): chords of the same SHAPE
+// share a pattern, the order list transposing it ({t} before it) -- C E G and Bb D F are both 0 4 7.
+// Each roll is [pattern, echo, transpose]; without KRTR the transpose is always 0 and the key the chord.
+const KRTR = process.env.KRTR === '1';
+// KB2=1 (2026-10-22, the user's rework of level 3's song): passes 1 and 2 are four bass notes each,
+// A F Bb E; pass 3 runs all eight, A F Bb E D C Bb E. Its first four roll as before; "when the bass
+// gets to the D: F E D A and stays with those notes, with arpeggiated variation as the bass goes
+// through D, C, Bb, and then resolves to E F# B D E". The F E D A cell is the chord A D E F; each
+// beat plays one inversion of it, so the four notes stay and only their order and octave move:
+//   D:  falling cells (F E D A first, exactly as asked), the chord climbing an inversion a beat and back
+//   C:  rising cells (A D E F) over the same climb -- the mirror
+//   Bb: falling and rising cells in turn, the climb again
+//   E:  E F# B D E up and back down, four times (the user's notes: F#, not G#, so E with a 9th, no 3rd)
+const KB2 = KBUILD && process.env.KB2 === '1';
+if (KB2 && KRTR) throw new Error('KB2: its cells are not chord shapes, so KRTR has nothing to share');
+if (KB2 && process.env.KBTR === '0') throw new Error('KB2: needs the transposed bass (KBTR)');
+const KB2_FEDA = ['A3', 'D4', 'E4', 'F4'].map(n), KB2_CLIMB = [0, 1, 2, 3, 3, 2, 1, 0];
+const kb2Cell = (k, up) => { let v = [...KB2_FEDA]; for (let i = 0; i < k; i++) v = [...v.slice(1), v[0] + 12]; return up ? v : [...v].reverse(); };
+// KB2E: the last bar's eight-step cell, played four times (2026-10-22, the user: "try E Ab A B C D":
+// six notes up and back down without repeating the ends is E G# A B C D C B -- eight, so a bar holds four)
+const KB2_E = (process.env.KB2E ?? 'E4,F#4,B4,D5,E5,D5,B4,F#4').split(',').map(n);
+// ...or 32, the whole bar (the user: "shuffle the note order up a bit after the first run, it shouldn't
+// repeat the exact same thing")
+if (KB2 && KB2_E.length !== 8 && KB2_E.length !== 32) throw new Error('KB2E: eight notes (a cell, four times) or 32 (the bar)');
+// KFROM3=1 (a TEST: "can you make the song start from 3"): pass 3 alone, looping -- its first bass row
+// sets the tempo, and the echo channel's empty row 0 hands the filter pass 2's breath
+const KFROM3 = KB2 && process.env.KFROM3 === '1';
+const ROLLSEQ = KBUILD && (KB2 ? [...KROLL.slice(0, 4).map(rollNotes),
+  KB2_CLIMB.flatMap(k => kb2Cell(k, false)),                       // D
+  KB2_CLIMB.flatMap(k => kb2Cell(k, true)),                        // C
+  KB2_CLIMB.flatMap((k, b) => kb2Cell(k, b % 2 === 1)),            // Bb
+  KB2_E.length === 32 ? KB2_E : [0, 1, 2, 3].flatMap(() => KB2_E)]  // E
+  : KROLL.map(rollNotes));
+// KTAILR (KB2; 2026-10-22, the user on the last roll note into pass 1: "I almost think I like the last
+// note lingering ... with a quicker release than before ... it sustained too long and sounded like a
+// stuck note"): the bar's last row sets that note's release (6XY, the sustain kept), so the downbeat's
+// key-off lets it die over about a count instead of cutting it (release 6) or holding it to count 2
+const KTAILR = +(process.env.KTAILR ?? 11);   // B, ~2.4 s: still dying when count 2's dyad cuts it (the user: "ok if it runs all the way to the diad ... as long as it is in release phase")
+const ktail = (ci, r, sus) => KB2 && ci === ROLLSEQ.length - 1 && r === 31 ? [0x6, sus << 4 | KTAILR] : [];   // sus: the instrument's own
+const rollPats = KBUILD && (() => { const m = new Map(); return ROLLSEQ.map((ns, ci) => { const c = KB2 ? ns : KROLL[ci];
+  const key = KRTR ? c.map(v => v - c[0]).join() : c.join();
+  if (m.has(key)) return [...m.get(key).slice(0, 2), c[0] - m.get(key)[2]];
+  {
+    m.set(key, [def(ns.map((v, r) => [r, v, I['Roll'], ...ktail(ci, r, 0xa)])), def(KECHO === 'tick' ? ns.map((v, r) => [r, v, I['Roll echo']])
+                      : ns.slice(0, 31).map((v, r) => [r + 1, v + (KECHO === 'oct' ? 12 : 0), I['Roll echo'], ...ktail(ci, r + 1, 0x5)])), c[0]]); }
+  return [...m.get(key).slice(0, 2), 0]; }); })();
+// a dyad channel's order list: transposes only where the roll needs one, and one back to 0 at the top
+// (a transpose holds across the loop: GoatTracker resets it only when the song starts)
+const kchan = (pats, roll) => !KRTR ? [...pats, ...roll.map(p => p[0])]
+  : [{ t: 0 }, ...pats, ...(() => { let cur = 0; return roll.flatMap(([p, , t]) => { const e = t === cur ? [p] : [{ t }, p]; cur = t; return e; }); })()];
+const kbB = new Map(), kbK = new Map();
+const kbassB = (note, first) => first ? def([[0, note, I['Bass key'], TEMPO, TEMPO_T], ...KB_BOTH.map(([r, w]) => [r, null, 0, 0x8, w])])
+  : kbB.get(note) ?? (kbB.set(note, def([[0, note, I['Bass key']], ...KB_BOTH.map(([r, w]) => [r, null, 0, 0x8, w])])), kbB.get(note));
+// pass 2 BLENDS (2026-10-22, the user: "blending the rhythm from section 1 and 2 so that when section 2
+// kicks in it isn't so completely different. Section 1 should stay how it is, then section 2 adds more
+// noise notes"): pass 1's knock and hiss where they fall, the k16 kit filling the rows they leave
+// empty (row 0's x rides in the 'Bass k32' strike); pass 3 is the k16 pattern alone
+const KB_BLEND = KBUILD && [...KB_BOTH, ...KB_K32.filter(([r]) => !KB_BOTH.some(([b]) => b === r))].sort((a, b) => a[0] - b[0]);
+const kbL = new Map(), kbassL = note => kbL.get(note) ?? (kbL.set(note, def([[0, note, I['Bass k32']], ...KB_BLEND.map(([r, w]) => [r, null, 0, 0x8, w])])), kbL.get(note));
+const kbassK = note => kbK.get(note) ?? (kbK.set(note, def([[0, note, I['Bass k32']], ...KB_K32.map(([r, w]) => [r, null, 0, 0x8, w])])), kbK.get(note));
+// The bass line by TRANSPOSE (2026-10-22, level 3's song was 1.2K over the region): every bass pattern
+// of a pass is the same rhythm, so each pass keeps ONE, on A1, and the order list transposes it to the
+// note -- a transpose entry ({t}) holds until the next, so one goes before each pattern that changes
+// it. The kit's pitches are absolute in the wavetable, so only the bass note moves. KBTR=0: the old
+// one-pattern-a-note lists.
+const KBTR = process.env.KBTR !== '0';
+const KBOFS = KBNOTES.map(nt => n(nt) - n('A1'));
+// KB2: passes of 4, 4 and 8 bass notes, so the offsets are listed, not taken k % 8
+// KSTART3=1 (a TEST, the user: "starts at 3 and wraps to 1"): pass 3 as an intro, then the whole
+// song, the loop going back to pass 1 -- a per-channel restart (KRESTART), since each channel's list
+// has its own transpose entries
+const KSTART3 = KB2 && process.env.KSTART3 === '1';
+const KBPASS = KFROM3 ? [0, 0, 8] : KB2 ? [4, 4, 8] : [8, 8, 8];
+const KBOFSL = KBPASS.flatMap(len => KBOFS.slice(0, len));
+const trList = (pats, ofs = KBOFSL) => { let cur = null; return pats.flatMap((p, k) => { const t = ofs[k];
+  const e = t === cur ? [p] : [{ t }, p]; cur = t; return e; }); };
+// pass 3 on its own, able to START a song: its first bass row sets the tempo, and the echo channel's
+// empty row 0 hands the filter pass 2's breath
+const kPass3 = () => [
+  trList([def([[0, 'A1', I['Bass k32'], TEMPO, TEMPO_T], ...KB_K32.map(([r, w]) => [r, null, 0, 0x8, w])]),
+          ...[...Array(7)].map(() => kbassK('A1'))], KBOFS),
+  kchan([], rollPats),
+  kchan([], [[def([[0, null, 0, 0xa, KB_F2], ...ROLLSEQ[0].slice(0, 31).map((v, r) => [r + 1, v, I['Roll echo']])]), , 0],
+             ...rollPats.slice(1).map(([, e, t]) => [e, , t])]),
+];
+const KRESTART = [];
+function kSong() { return [
+  KBTR ? trList([kbassB('A1', true), ...[...Array(KBPASS[0] - 1)].map(() => kbassB('A1')),
+                 ...[...Array(KBPASS[1])].map(() => kbassL('A1')), ...[...Array(KBPASS[2])].map(() => kbassK('A1'))])
+  : [...KBNOTES.map((nt, k) => kbassB(nt, !k)), ...KBNOTES.map(process.env.KBLEND === '0' ? kbassK : kbassL), ...KBNOTES.map(kbassK)],
+  kchan([...KDYAD.slice(0, KBPASS[0]).map((_, k) => kdy(0, k, k ? 0 : KB_F1, KB2)), ...KDYAD.slice(0, KBPASS[1]).map((_, k) => kdy(0, k, k ? 0 : KB_F2))], rollPats),
+  kchan([...(KB2 ? [def([[0, 'off'], [8, KDYAD[0][1], I[I['Keys hi'] ? 'Keys hi' : 'Keys']], [14, 'off']])] : kpat(1).slice(0, 1)),
+         ...kpat(1).slice(1, KBPASS[0]), ...kpat(1).slice(0, KBPASS[1])], rollPats.map(([, e, t]) => [e, , t])),
+]; }
+// a function, so a KBUILD song never evaluates it: its def()s and add()s would create patterns and
+// table rows, which moves every number after them
+const ORDER_KEYS = () => (KEYS ? [
+  KEYBASS ? [def([[0, 'A1', I[KBI], TEMPO, TEMPO_T], ...kbHits()]), ...KBNOTES.slice(1).map(kbass)] : [B_IN, ...KBASS],
+  KEYBASS ? KDYAD.map((_, k) => kdy(0, k, ksec(k))) : [SIL_IN, ...kpat(0)],
+  KEYBASS ? KDYAD.map((_, k) => kdy(1, k, 0)) : [SIL_IN, ...kpat(1)],
+] : SONG && process.env.TRIONLY === '1' ? [
+  [B_IN, ...BLOOP],
+  [SIL_IN, ...BASS.map(bs => packet(bs, DSET_TRI))],
+  [SIL_IN, ...BASS.map(() => SIL)],
+] : SONG && PASSES === 3 ? [
   [B_IN, ...BLOOP, ...BLOOP, ...BLOOP],
   [SIL_IN, SIL, ...Array(7).fill(SIL), ...Array(8).fill(SIL), ...BASS.map(bs => packet(bs, DSET_TRI))],
   [SIL_IN, def([[0, 'off']]), ...Array(7).fill(SIL), steamPat(0, true), ...Array(7 + 8).fill(STEAM1)],
@@ -372,14 +656,50 @@ const ORDER = SONG && PASSES === 3 ? [
     STEAMON ? [STEAM_IN, ...STEAMS] :
     process.env.HEART === '1' ? [D_IN, D1, D2, D1, D2, D1, D2, D1, D2] :
     process.env.LEAD === '0' ? [SIL_IN, ...BASS.map(() => SIL)] : [SIL_IN, ...leadPats],
-];
-const RESTART = 1;                                                // loop past the intro
+]);
+const ORDER = KFROM3 ? kPass3() : KSTART3 ? (() => { const a = kPass3(), b = kSong(); a.forEach(o => KRESTART.push(o.length));
+  return a.map((o, c) => [...o, ...b[c]]); })() : KBUILD ? kSong() : ORDER_KEYS();
+const RESTART = KEYBASS ? 0 : 1;                                  // loop past the intro (KEYBASS has none)
 
+// PRUNE (KEYS songs; 2026-10-22, level 3's song came out 1.2K over the region): the generator defines
+// every voice's patterns and instruments whichever the song plays, and GoatTracker's packer keeps them
+// all. Write only the patterns the order lists name and the instruments those patterns strike,
+// renumbered. (Tables stay whole: their jumps are absolute.)
+const PRUNE = KEYS && process.env.PRUNE !== '0';
+if (PRUNE) {
+  const used = [...new Set(ORDER.flat().filter(x => typeof x === 'number'))].sort((a, b) => a - b), pmap = new Map(used.map((p, k) => [p, k]));
+  const keep = used.map(k => P[k]);
+  const iu = [...new Set(keep.flatMap(p => p.map(r => r[1]).filter(Boolean)))].sort((a, b) => a - b);
+  const imap = new Map(iu.map((i, k) => [i, k + 1]));
+  for (const p of keep) for (const r of p) if (r[1]) r[1] = imap.get(r[1]);
+  P.splice(0, P.length, ...keep);
+  for (const o of ORDER) o.splice(0, o.length, ...o.map(x => typeof x === 'number' ? pmap.get(x) : x));
+  INSTR.splice(0, INSTR.length, ...iu.map(i => INSTR[i - 1]));
+  // ...and the TABLES: only the programs a kept instrument or a pattern command points at. Each add()
+  // was one program; kept ones move up together, their own jumps (absolute) moved with them.
+  const ref = { wave: new Set(), pulse: new Set(), filt: new Set(), speed: new Set() };
+  for (const i of INSTR) { ref.wave.add(i.wp); i.pp && ref.pulse.add(i.pp); i.fp && ref.filt.add(i.fp); i.vib && ref.speed.add(i.vib); }
+  const CMDT = { 1: 'speed', 2: 'speed', 3: 'speed', 4: 'speed', 8: 'wave', 9: 'pulse', 0xa: 'filt' };
+  for (const p of P) for (const r of p) if (CMDT[r[2]] && r[3]) ref[CMDT[r[2]]].add(r[3]);
+  const move = {};
+  for (const t of Object.keys(T)) {
+    const keepR = RANGES.filter(g => g.t === t && ref[t].has(g.at)), rows = [], m = new Map();
+    for (const g of keepR) { const nat = rows.length + 1; m.set(g.at, nat);
+      for (const [l, r] of T[t].slice(g.at - 1, g.at - 1 + g.len))
+        rows.push(t !== 'speed' && l === 0xff && r ? [l, r - g.at + nat] : [l, r]); }
+    for (const a of ref[t]) if (!m.has(a)) throw new Error(`PRUNE: ${t} $${a.toString(16)} is not the start of a program`);
+    T[t] = rows; move[t] = m;
+  }
+  for (const i of INSTR) { i.wp = move.wave.get(i.wp); i.pp = i.pp && move.pulse.get(i.pp);
+    i.fp = i.fp && move.filt.get(i.fp); i.vib = i.vib && move.speed.get(i.vib); }
+  for (const p of P) for (const r of p) if (CMDT[r[2]] && r[3]) r[3] = move[CMDT[r[2]]].get(r[3]);
+}
 const b = [];
 const str = (s, len) => { for (let k = 0; k < len; k++) b.push(k < s.length ? s.charCodeAt(k) : 0); };
 str('GTS5', 4); str('Deep', 32); str('', 32); str('', 32);
 b.push(1);
-for (const o of ORDER) b.push(o.length + 1, ...o, 0xff, RESTART);
+// a transpose entry {t}: TRANSUP $F0+t (0..14), TRANSDOWN $F0-|t| (-1..-15), GoatTracker's gcommon.h
+ORDER.forEach((o, c) => b.push(o.length + 1, ...o.map(x => typeof x === 'number' ? x : 0xf0 + x.t), 0xff, KRESTART[c] ?? RESTART));
 b.push(INSTR.length);
 // 1st-frame wave $08 (test bit, gate OFF), not GoatTracker's usual $09 (test + gate): with the gate on and
 // no waveform, a 6581 outputs DC times the envelope -- a click as each voice's first note starts, which

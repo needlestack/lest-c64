@@ -70,7 +70,8 @@ export const portHeld = port =>
 // drive is ON and the kernal-trap loader OFF -- with the trap loader the boot stalls after the quote
 // screen. -autostart-handle-tde makes autostart use that drive. Passed explicitly every time because
 // VICE drops at-default resources from vicerc. +minimized: the user can still see the window.
-export const LAUNCH_FLAGS = ['-ntsc', '+minimized', '-drive8truedrive', '+virtualdev8', '-autostart-handle-tde'];
+// PAL=1 (the same switch the build reads, so `PAL=1 node tools/fpsr.mjs "" suite` builds AND runs PAL)
+export const LAUNCH_FLAGS = [process.env.PAL === '1' ? '-pal' : '-ntsc', '+minimized', '-drive8truedrive', '+virtualdev8', '-autostart-handle-tde'];
 
 // ---- process-group lifetime: one registry, cleaned on every way out ----
 const live = new Set();
