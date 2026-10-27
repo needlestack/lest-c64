@@ -9933,7 +9933,9 @@ const MUS_ZP = 0xbe;
 const MUS_PITCH = 440 * 985248 / CLOCK;     // 423.87 on NTSC, 440 on PAL: see the gt2reloc call
 // a level's own song (2026-10-22, the user: the struck-bass keys piece "into level... 3"): MUSICSNG<n>
 // names level n's, MUS_LVSNG holds the defaults; every other music level plays MUSICSNG
-const MUS_LVSNG = { 3: 'music/keys-build3.sng' };
+// level 4 (2026-10-27): the hub's wind and hum (tools/song-hub.mjs), "silent save a very soft background
+// atmosphere"
+const MUS_LVSNG = { 3: 'music/keys-build3.sng', 4: 'music/hub.sng' };
 const MUS_SNG = n => !MUSIC_LV.includes(n) ? 'music/empty.sng'
   : process.env[`MUSICSNG${n}`] ?? MUS_LVSNG[n] ?? process.env.MUSICSNG ?? 'music/deep-song.sng';
 // Filled by musBuild once every level's module size is known (the level code is cut from the
@@ -18588,17 +18590,17 @@ dropPick:
         sta odCell              ; nothing placeable in reach
         ldx #$07
 dpLp:   stx odD
-        jsr dpDiag              ; ...and not THROUGH a corner, which is a cell away that the
-        bcs dpNext              ;   route to cannot pass. See dpDiag.
+        lda dirXT,x
+        sta oix
+        lda dirYT,x
+        sta oiy
+        jsr seeDiag             ; ...and only where you can SEE the cell's centre: see seeDiag
+        bcs dpNext
         jsr dpCand
         ldx fcCell
         lda blkT,x
         bne dpNext              ; a wall, or something already standing there
         ldx odD
-        lda dirXT,x
-        sta oix
-        lda dirYT,x
-        sta oiy
         jsr orbProj
         bcc dpNext              ; would not be on screen at all
         lda ocoff
@@ -18652,6 +18654,8 @@ ${HAS_SILVER ? `        cpx svNT                ; nor is a sentry (entities 0..s
         lda oix
         ora oiy
         beq tkNext              ; our own cell: nothing to project
+        jsr seeDiag             ; the same sight rule as putting down (seeDiag keeps X)
+        bcs tkNext
         jsr orbProj
         bcc tkNext
         lda ocoff
@@ -18664,6 +18668,72 @@ tkNext: ldx odD
         inx
         cpx nOrbT
         bcc tkLp
+        rts
+
+; ---- seeDiag: can you see the centre of the neighbouring cell oix/oiy? C set to REJECT ----
+; Taking and putting down both ask this (the user, 2026-10-27: "require that you can see the center
+; of the square you're putting down/picking up from ... pick up/put down should use the same
+; checks"). Before, taking had no corner rule at all -- an orb a diagonal away came up through two
+; solid corner cells -- and putting down (the old dpDiag) needed only ONE of the two open, so you
+; could still set an orb round a corner you could not see past.
+; An orthogonal neighbour shares an edge with your cell: always seen. For a diagonal one the sight
+; line from your position to its centre passes through exactly one of the two corner cells, and
+; which one is cheap to know EXACTLY. Put the corner the three cells share at the origin, ux and uy
+; your distances from it along each axis, the target centre at (+1/2, +1/2): the line crosses the
+; x boundary at y = (ux - uy) / (2ux + 1), below the corner exactly when ux < uy. So the nearer
+; boundary is the one you see through: ux < uy -> the x-neighbour, uy < ux -> the y-neighbour, and
+; on the tie the line grazes the corner and either open side will do. ux is px's fraction (toward
+; -x) or its complement (toward +x, off by 1/256 -- the same on both axes, so it cancels). blkT, so
+; anything standing in the corner cell blocks the view too, as it blocked the old squeeze test.
+; Keeps X (takePick holds the entity index across it); mulW keeps Y.
+seeDiag:
+        lda oix
+        beq sdOk                ; orthogonal: nothing between you
+        lda oiy
+        beq sdOk
+        lda px                  ; ux
+        bit oix
+        bmi sdUx                ; toward -x: the corner is at your cell's west edge
+        eor #$ff
+sdUx:   sta tmp
+        lda py                  ; uy
+        bit oiy
+        bmi sdUy
+        eor #$ff
+sdUy:   cmp tmp
+        beq sdTie
+        bcc sdY                 ; uy < ux: through the y-neighbour
+        jsr sdXc                ; ux < uy: through the x-neighbour
+        bne sdNo
+sdOk:   clc
+        rts
+sdY:    jsr sdYc
+        bne sdNo
+        clc
+        rts
+sdTie:  jsr sdXc
+        beq sdOk
+        jsr sdYc
+        beq sdOk
+sdNo:   sec
+        rts
+sdXc:   lda py+1                ; (x + dx, y): Z set when open
+        jsr mulW
+        clc
+        adc px+1
+        clc
+        adc oix
+        tay
+        lda blkT,y
+        rts
+sdYc:   lda py+1                ; (x, y + dy)
+        clc
+        adc oiy
+        jsr mulW
+        clc
+        adc px+1
+        tay
+        lda blkT,y
         rts
 
 ; ---- orbKey: SPACE -- or joystick 1's FIRE -- picks up and puts down, one action a press ----
@@ -22428,7 +22498,8 @@ fHiT:   !byte ${P.HI.join(',')}
 `; })()}
 ; ---- $6d82: lateLoad, sitting directly below the loader it calls ----
         * = $6d82
-; ---- dpCand and dpDiag live here, in the space lateLoad wants when a level is LATE ----
+; ---- dpCand and dpDiag lived here, in the space lateLoad wanted when a level was LATE (history: LATE is
+; gone, and dpDiag became seeDiag, in the main block beside takePick, 2026-10-27) ----
 ; The two are mutually exclusive by construction: a build with no LATE level has no lateLoad, and
 ; this is the only stretch big enough. They are here rather than in the main code block because
 ; that block is at ZERO headroom and these are COLD -- eight calls on a keypress -- so they had no
@@ -24090,41 +24161,6 @@ seNC:   dec seN
         * = $82a0
 arcCdT: !byte ${ARC_RIM_CODES.join(',')}
 
-; ---- dpDiag: is this direction a squeeze THROUGH a corner? ----
-; dropPick walks all eight neighbours and used to reject a candidate only if the destination cell
-; itself was blocked -- nothing looked at the two cells you would pass BETWEEN. So a diagonal could
-; land an idol on an open cell whose two orthogonal neighbours were both solid: behind a pedestal
-; in a corner, those two are the pedestal (an entity in blkT) and the wall. The idol went through
-; the corner, vanished behind the geometry, and was still an 8-neighbour so it could be picked up
-; again. Same rule the angel's pathing needed, for the same reason -- see anPath's orthogonal steps.
-; ONE open side is enough: going ROUND a corner is legal, going through it is not.
-; dirXT/dirYT make the test cheap -- the odd indices are the diagonals, and a diagonal's two
-; orthogonal neighbours are simply d-1 and d+1, mod 8.
-; Returns C set to REJECT, and leaves X = odD for the caller either way.
-dpDiag: lda odD
-        lsr
-        bcc dpDok               ; an orthogonal step: nothing to squeeze past
-        ldx odD
-        dex
-        jsr dpCnr
-        beq dpDok               ; one side open: this goes round the corner, not through it
-        ldx odD
-        inx
-        txa
-        and #$07
-        tax
-        jsr dpCnr
-        beq dpDok
-        ldx odD                 ; both sides solid: there is no way to put it there
-        sec
-        rts
-dpDok:  ldx odD
-        clc
-        rts
-dpCnr:  jsr dpCand              ; Z set when that corner cell is open
-        ldx fcCell
-        lda blkT,x
-        rts
 
         ; ...and $83a0 is the same again in the next page. NOT $6d82, which is where these were:
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
@@ -27676,7 +27712,13 @@ writeFileSync('./build/iray.aligned.json', JSON.stringify(ALIGNED_T));
 // straddles a page boundary pays it on EVERY iteration -- castRay's DDA loop did, for 89 cy/frame,
 // because an unrelated edit moved code by a few bytes. Name a loop by its top label; compact.mjs
 // finds its extent (to the last branch or jmp back to it) and pads its run until it fits a page.
-writeFileSync('./build/iray.hotloops.json', JSON.stringify(['cdda', 'sdWl']));
+// 2026-10-27: the pickup sight test (seeDiag) grew the code ~95 bytes and level 9's walk dropped a
+// frame a second, 19.71 -> 18.78 -- none of it the new code (it runs on a keypress): angStep's entity
+// loop (10 cy/frame) and obOrder's (9) had come to straddle pages. The user: "we shouldn't force any
+// page crossings unless necessary". So every per-frame loop the vprof diff showed crossing is held
+// in a page: the entity step (asLp), the draw-order sort (obKLp), the entity gate (ogEnL) and
+// mkRuns' two face scans (mrHx, mrVx).
+writeFileSync('./build/iray.hotloops.json', JSON.stringify(['cdda', 'sdWl', 'asLp', 'obKLp', 'ogEnL']));
 writeFileSync('./build/iray.bufsizes.json', JSON.stringify(Object.fromEntries(
   [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
     .map(m => [m[1], parseInt(m[2], 16)]).filter(([, a]) => a >= 0x0200)
