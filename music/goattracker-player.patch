@@ -1,6 +1,45 @@
 --- player.s.orig	2026-10-16 15:24:29
-+++ player.s	2026-10-16 15:46:45
-@@ -1358,6 +1358,8 @@
++++ player.s	2026-10-28 23:26:02
+@@ -594,6 +594,7 @@
+                 sta mt_filtctrl+1             ;Switch filter off & reset
+               .IF (NOFILTER == 0)
+                 sta mt_filtstep+1             ;step-programming
++                sta mt_filtheld+1             ;LEST patch: the filter HELD again (see mt_filtheld)
+               .ENDIF
+                 stx mt_initsongnum+1          ;Reset initflag
+                 tax
+@@ -627,6 +628,8 @@
+               .IF (NOFILTER == 0)
+                 ldy #$00                        ;See if filter stopped
+                 beq mt_filtdone
++                sty mt_filtheld+1               ;LEST patch: a filter program has run -- the song owns
++                                                ;the filter registers from here (Y is nonzero)
+               .IF (NOFILTERMOD == 0)
+ mt_filttime:
+                 lda #$00                        ;See if time left for mod.
+@@ -673,6 +676,13 @@
+ mt_nofiltjump:
+                 sta mt_filtstep+1
+ mt_filtdone:
++mt_filtheld:    lda #$00                        ;LEST patch 2026-10-28: 0 from init until the song's
++                beq mt_filtskip                 ;filter program first runs, and until then NO $d416-$d418
++                                                ;write: the last song's filter state stays. A new song
++                                                ;reset to "filter off" first, and on a 6581 a routing or
++                                                ;mode change steps the DC level -- a click in the silence
++                                                ;after a fade. The song's own setup a frame later lands
++                                                ;with its first notes, which mask it.
+ mt_filtcutoff:
+                 lda #$00
+ mt_storecutoff:
+@@ -698,6 +708,7 @@
+               .ELSE
+                 sta <ghostfilttype
+               .ENDIF
++mt_filtskip:
+ 
+               .IF (NUMCHANNELS == 3)
+                 jsr mt_execchn
+@@ -1358,6 +1369,8 @@
  mt_loadregswaveonly:
                  lda mt_chnwave,x
                  and mt_chngate,x
@@ -9,7 +48,7 @@
                  sta SIDBASE+$04,x
                .ELSE
                .IF (SOUNDSUPPORT != 0)
-@@ -1386,6 +1388,8 @@
+@@ -1386,6 +1399,8 @@
  mt_loadregswaveonly:
                  lda mt_chnwave,x
                  and mt_chngate,x
@@ -18,7 +57,7 @@
                  sta SIDBASE+$04,x
                .ELSE
  mt_loadregswaveonly:
-@@ -1436,7 +1440,9 @@
+@@ -1436,7 +1451,9 @@
                  lda (mt_temp1),y           ;Load pulse
                  sta SIDBASE+$02,x
                  sta SIDBASE+$03,x

@@ -50,7 +50,9 @@ const TEMPO_T = +env('TEMPOT', 6), ROW_S = TEMPO_T / 60;
 // $50..$c0 (the first take: music/hub-v1.sng)
 const WTYPE = { lp: 0x90, bp: 0xa0, hp: 0xc0 }[env('WTYPE', 'bp')], WRES = hexv('WRES', '8');
 // the wind's envelope: the silent attack (above), then sustain WSUS, release WREL when the level ends
-const WAD = hexv('WAD', '00'), WSR = hexv('WSUS', '1') << 4 | hexv('WREL', 'a');
+// (2026-10-27, after level 3's atmosphere: wind 1 -> 2, hum 2 -> 4, "bump up to 2 and 4"; the take
+// before is music/hub-v10.sng)
+const WAD = hexv('WAD', '00'), WSR = hexv('WSUS', '2') << 4 | hexv('WREL', 'a');
 const QUIET = +env('QUIET', 0.1);                        // seconds of silent attack before any sound
 // WIND: the cutoff's moves, in seconds and hex cutoff units. `secs>cut` sweeps to cut over secs; `secs=`
 // holds; `g:amp:up:down[:res]` is a gust: amp units up in up seconds and back down in down seconds, the
@@ -108,7 +110,12 @@ const WINTRO = env('WINTRO', '');
 // swell climbs $30 -> $5d, falls to $3b (a quarter of the climb left), recovers to $46 (half), then out.
 // Take 9's WIND (music/hub-v9.sng):
 // '8= 10>4e@4:f:1:2.5 10>30@2:f:1.2:3 8= 14>5d@3:f:1:2.5@9:f:1.5:3 4=@.3:f:1:2.5 14>30@4:f:1.2:3@10:f:1:2 8= 7>44@3:f:1:2.5 8>30@2:f:1:3'
-const WIND = env('WIND', '4= 10>4e@4:f:1:2.5 10>30@2:f:1.2:3 4= 14>5d@3:f:1:2.5@9:f:1.5:3 4=@.3:f:1:2.5 10>3b@3:f:1.2:3 6>46@2:f:1:2.5 7>30@2:f:1:3 8= 7>44@3:f:1:2.5 8>30@2:f:1:3');
+// Take 11 (2026-10-27), wind sustain 2 / hum 4: at sustain 2 the $30 floor let the noise through in VICE.
+// A third of every cutoff ($10..$1f, WDEPTH=0.33333 WMID=2b) silenced it but flattened the swells away
+// (all inside the 6581's flat bottom) -- the user: "have the floor $10, but make the low swell $30, the soft
+// swell $40, and the big swell $50>$30>$40". Take 10's WIND (music/hub-v10.sng, sustain 1 / hum 2):
+// '4= 10>4e@4:f:1:2.5 10>30@2:f:1.2:3 4= 14>5d@3:f:1:2.5@9:f:1.5:3 4=@.3:f:1:2.5 10>3b@3:f:1.2:3 6>46@2:f:1:2.5 7>30@2:f:1:3 8= 7>44@3:f:1:2.5 8>30@2:f:1:3'
+const WIND = env('WIND', '4= 10>30@4:f:1:2.5 10>10@2:f:1.2:3 4= 14>50@3:f:1:2.5@9:f:1.5:3 4=@.3:f:1:2.5 10>30@3:f:1.2:3 6>40@2:f:1:2.5 7>10@2:f:1:3 8= 7>40@3:f:1:2.5 8>10@2:f:1:3');
 const lastTarget = parseInt([...WIND.matchAll(/>([0-9a-f]+)/gi)].at(-1)?.[1] ?? '70', 16);
 const WSTART = process.env.WSTART ? hexv('WSTART') : Math.round(WMID + (lastTarget - 0x80) * WDEPTH);
 // NOISE: the noise's pitch, `start  t:note/secs ...` -- at t seconds into the WIND loop, glide to note
@@ -127,7 +134,7 @@ const NOISE = env('NOISE', 'B4');
 // (ROOM=0 for now: "lose the triangle buzz ... we'll add it back after we get the air sounds worked out")
 // (back for take 7, with the wind at sustain 2: "bring back the 60-cycle hum (it doesn't have to be exactly
 // 60 btw, closest note is fine)" -- HUMEXACT=1 adds the nudge to 60.0)
-const ROOM = env('ROOM', '1') === '1', ROOMSUS = hexv('ROOMSUS', '2');
+const ROOM = env('ROOM', '1') === '1', ROOMSUS = hexv('ROOMSUS', '4');
 const HUMHZ = +env('HUMHZ', 60), HUMWAVE = env('HUMWAVE', 'tri'), HUMPW = hexv('HUMPW', '028');
 
 // ---- GoatTracker's encodings (as song-fc.mjs) ----
@@ -247,7 +254,8 @@ const windEvents = (moves, cut, trace) => {
 const scaleMoves = moves => moves.split(' ').filter(Boolean).map(m => {
   let r;
   const hx = v => Math.max(0, Math.min(0xff, Math.round(v))).toString(16);
-  if ((r = /^([\d.]+)>([0-9a-f]+)$/i.exec(m))) return `${r[1]}>${hx(WMID + (parseInt(r[2], 16) - 0x80) * WDEPTH)}`;
+  // (a move with gusts too: `10>4e@...` -- the gusts move the resonance, not the cutoff, so they stay)
+  if ((r = /^([\d.]+)>([0-9a-f]+)((?:@[\d.:a-f]+)*)$/i.exec(m))) return `${r[1]}>${hx(WMID + (parseInt(r[2], 16) - 0x80) * WDEPTH)}${r[3]}`;
   if ((r = /^g:([0-9a-f]+):([\d.]+):([\d.]+)(?::([0-9a-f]))?$/i.exec(m)))
     return `g:${hx(parseInt(r[1], 16) * WDEPTH)}:${r[2]}:${r[3]}` + (r[4] ? `:${Math.round(WRES + (parseInt(r[4], 16) - WRES) * RDEPTH).toString(16)}` : '');
   return m; }).join(' ');

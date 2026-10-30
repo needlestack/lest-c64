@@ -425,7 +425,7 @@ const LEVEL_WALLS = {
   // wallTog is single-wall state (wsWall, wsN), so three of them in one frame would leave the
   // first two with doomT set and a map that never changed. All three pedestals name wall 0;
   // the gate that holds it shut until the last one is fed is in orbMove, at omPdC.
-  4: { walls: [[[9, 4]]],                           // 2026-10-05: the east corridor's mouth
+  4: { walls: [[[10, 6]]],                          // the east ring's mouth (v3, 2026-10-27)
        sockWall: [0, 0, 0] },
   2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
   5: { walls: [[[11, 2]], [[20, 9]]],                // S1 up to the exit,
@@ -735,7 +735,7 @@ const HAS_IDOL = LEVEL_IDS.some(n => LEVEL_IDOL[n]);             // the mechanic
 // from HUBROOM, because HAS_PED has to be true for the whole CHAIN -- the ladder is emitted once
 // and every resident level's pedestals draw from it, so asking only about the live level would
 // leave a shadow level's pedestals pointing at bitmaps that were never built.
-const LEVEL_PEDESTALS = { 4: '8,3;8,4;8,5' };
+const LEVEL_PEDESTALS = { 4: '9,5;9,6;9,7' };
 const HAS_PED = LEVEL_IDS.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTALS;
 // ---- THE SENTRY, the silver orb (level 9, 2026-10-13): the user's new entity ----
 // A silver ball that HOVERS at eye level, PATROLS its own closed path at a fixed rate, and now and
@@ -820,9 +820,9 @@ const L3_MAP = [
 // S2 (19,9) opens (20,9) into the dead-end column that holds the idol. Two orbs, one angel, and
 // one orb short of opening both -- which is the level.
 // ---- LEVEL 4: THE HUB ----
-// Four ways down and three pedestals. The three exits in the left chamber are the levels you go
-// and fetch an idol from; the fourth, behind the pedestal wall on the right, is the way onward
-// and only opens when all three are filled. The barrier is deliberately awkward: column 9 is
+// Five ways down (four before v3) and three pedestals. The three exits in the west are the levels you
+// go and fetch an idol from; the ones behind the pedestal wall are the way onward, and only open
+// when all three are filled. History of the earlier layouts: The barrier is deliberately awkward: column 9 is
 // pedestal/wall/pedestal/wall/pedestal, so the only way through is the two removable cells at
 // (9,3) and (9,5), and column 10 shuts those off again at rows 2, 4 and 6.
 // Revised by the user 2026-10-05 for the torture view: the east room was a stepped outline seen
@@ -830,15 +830,24 @@ const L3_MAP = [
 // small plus-shaped room reached through a one-cell corridor from behind the middle pedestal, so
 // it is never seen whole from far away. The wall is the corridor's mouth. Second pass the same day:
 // the west chamber is a plain 6x5 box and the three errand exits sit in one-cell alcoves.
+// v3 (the user's sketch, 2026-10-27: "love the new hub -- so let's make it official"): 16x13, FIVE
+// exits. The west hall holds 5, 6 and 7 in alcoves at its corners and its middle; behind the pedestal
+// wall the east side is a ring with TWO ways on, 8 (north) and 9 (south), "so the player can choose to go
+// to either 8 or 9" -- the routing past them is for now (8 -> 9 -> the ending, so taking 9 first skips 8).
+// Pedestals (9,5..7), the wall (10,6), the start (3,6). The 16x9 map before it is in git (c2b6aff).
 const L4_MAP = [
   "################",
-  "####X###########",
-  "##......#####.##",
-  "##......T###...#",
-  "#X.P....T|...X.#",
-  "##......T###...#",
-  "##......#####.##",
-  "####X###########",
+  "#X...####X.....#",
+  "####.#########.#",
+  "###...#.###.##.#",
+  "#........##..#.#",
+  "#.#......T#....#",
+  "#X#P.....T|....#",
+  "#.#......T#....#",
+  "#........##..#.#",
+  "###...#.###.##.#",
+  "####.#########.#",
+  "#X...####X.....#",
   "################",
 // T = pedestal and X = exit, markers for the reader like O/S/A/P elsewhere: the real positions
 // come from the tables. '|' is a removable wall and must be SOLID in the base map, or the wall
@@ -1182,6 +1191,23 @@ const LVLSIZED = [...(LVLALL ?? [])];
 // cell. Movable obstacles are what the greedy pair still handles, as a fallback.
 const pathOpen = [];
 for (let c = 0; c < MAPN; c++) if (map[c] === 0) pathOpen.push(c);
+// BFSFAST=1: the fill's neighbour test reorders -- "labeled yet?" first, and blkT read only for a
+// cell that has just been labeled (57% of neighbours already have one). Not a sign-bit test for
+// "labeled": level 3 has 133 open cells, so a distance can't be PROVEN to stay under 128.
+// BFSUNROLL=1: the four neighbours written out, each offset folded into the instruction's address
+// (bfsD1+1,x / -1,x / +W,x / -W,x), so no offset table, no add and no loop counter; W is patched in
+// per level by bfsPatch.
+const BFS_FAST = process.env.BFSFAST === '1', BFS_UNROLL = process.env.BFSUNROLL === '1';
+// BFSJIT=1: STEP-TIMED fills. The map is refreshed only when an angel is about to choose a step, started
+// just early enough to reach it: lead = the cells the last fill expanded before labelling that angel,
+// at BFSTICK cells a tick, plus the clear. A near angel's fill starts late and lands fast, so it reads
+// where you are almost NOW; a far one's starts earlier. An angel reads the fill IN FLIGHT once its own
+// cell is labeled (BFS order: everything nearer already is). The simulator (2026-10-29): as hard as
+// refreshing every cell crossing at 10 cells a frame, for about half the work -- close to the old rate.
+// ANGDIAG=1: angels may step DIAGONALLY when the cell two closer is free and both corner cells are
+// clear (blkT: walls, orbs, angels). Corners are blockers only -- the visibility rule judges the
+// destination, as for any step, and the lunge draws the move so it is never a teleport.
+const BFS_JIT = process.env.BFSJIT === '1', ANG_DIAG = process.env.ANGDIAG === '1';
 const PATH_N = pathOpen.length;
 { // one connected region, or an angel can be permanently marooned -- and so can the player.
   // Judged with the removable wall OPEN: level 2 keeps its angel behind that wall on purpose,
@@ -1214,6 +1240,14 @@ const BFS_Q = Math.max(PATH_N, ...(LVLALL ?? []).map(l => l.pathN)) + 1;
 // Cells expanded per frame. A fill is PATH_N expansions plus the array clear, so this sets how
 // many frames it takes; anything well under ANG_PERIOD is free.
 const BFS_RATE = +(process.env.BFSRATE ?? 2);
+// BFSTICK=n: expand n cells per 60Hz tick instead of half a cell. The angel's map is only as fresh
+// as the fill is fast, and the simulator says freshness is the biggest lever on how well angels
+// hunt; 3 a tick is ~10 cells a frame at 20fps, ~2,400 cy/frame while a fill runs. 0 = the old rate.
+const BFS_TICK = +(process.env.BFSTICK ?? (BFS_JIT ? 2 : 0));
+if (BFS_JIT && BFS_TICK < 1) throw new Error('BFSJIT needs BFSTICK >= 1: the lead is computed at whole cells a tick');
+const BFS_LEADSH = BFS_JIT ? Math.floor(Math.log2(BFS_TICK)) : 0;   // lead = cells >> this: rounds the rate DOWN, so the lead errs long
+if (BFS_TICK < 0 || BFS_TICK > 31 || BFS_TICK !== Math.floor(BFS_TICK))
+  throw new Error(`BFSTICK=${process.env.BFSTICK}: whole cells a tick, 0..31 (8 ticks * n must fit a byte)`);
 console.error(`  angel path: ${PATH_N} open cells, BFS queue ${BFS_Q}, ${BFS_RATE} cells/frame ` +
   `-> ~${Math.ceil(PATH_N / BFS_RATE) + 4} frames a fill`);
 
@@ -3606,7 +3640,7 @@ const LEVEL_START = {
   1: [0x0280, 0x0280, 0x19, 0xc0],
   2: [0x046e, 0x07dc, 0xdb, 0x00],   // the user's spot, 2026-09-22
   3: [0x0180, 0x0180, 0x20, 0x00],
-  4: [0x0380, 0x0480, 0x00, 0x00],   // the hub: the player's cell (3,4), facing the three holes
+  4: [0x0380, 0x0680, 0x00, 0x00],   // the hub: the player's cell (3,6), facing the pedestals
   5: [0x0180, 0x0880, 0x00, 0x00],   // (1.5, 8.5), the west end of the hall, facing east
   6: [0x0180, 0x0780, 0xc0, 0x00],   // (1.5, 7.5) facing NORTH, straight at the exit one cell away
   7: [0x0780, 0x0a80, 0xc0, 0x00],   // (7.5, 10.5) facing NORTH, the idol two cells ahead
@@ -4872,15 +4906,12 @@ if (PICS.chars.length !== 2048) throw new Error(`death-pics.json charset is ${PI
 if (!PICS.maps.length) throw new Error('death-pics.json carries no pictures');
 for (const m of PICS.maps) if (m.map.length !== 1000)
   throw new Error(`death-pics.json ${m.name} is ${m.map.length} cells, not 1000`);
-// NPIC caps how many of death-pics.json's pictures ship. Capping to 1 frees PICBASE, which is
-// the socket ladder's home -- the two cannot both have it.
-// A fourth resident level and a second cut-scene picture are mutually exclusive: three shadows
-// leave IPIC no room below them. The chain wins, so a four-level build defaults to one picture.
-// MULTI: the reason a chain build gets one picture is that several levels' tables
-// leave less room, and that is just as true when the levels are disk files as when one is a
-// shadow. Keyed on TWOLEV, the first SOLO chain build asked for two pictures and died in the
-// cut-scene charset fit check -- a failure with no visible connection to levels at all.
-const NPIC = Math.min(PICS.maps.length, +(process.env.NPIC ?? (MULTI ? 1 : 99)));
+// ONE picture, always (2026-10-30). The scene once ESCALATED -- death n showed n pictures, counted
+// by dieN -- but only one picture ships, and the counter reset only when a scene played to its end.
+// RETURN restarts from anywhere, so skipping a scene left dieN at 1; the next death then showed the
+// picture, a second boom, and "picture 2" read past a one-entry address table: a screen of garbage
+// (the user, level 7). The sequence is gone rather than patched: one death, one picture.
+const NPIC = 1;
 const FACEART = { colram: PICS.colram & 7 };
 // ---- REPACK THE CUT-SCENE CHARSET TO THE GLYPHS THE SHIPPED PICTURES ACTUALLY REACH ----
 // death-pics.json carries a full 256-glyph charset, but one picture only uses 196 of them. The
@@ -5929,7 +5960,7 @@ if (HAS_PED) for (let i = 0; i < IDOL_N; i++) {
 // The fourth is the one behind the pedestal wall, which nothing opens until all three are
 // seated, so it is NOT an errand and is deliberately not one of the three -- it stays black,
 // the way every other exit in the game reads.
-const LEVEL_EXITCOL = { 4: [2, 5, 6, 0] };   // red, green, blue -- the black one went with its hole
+const LEVEL_EXITCOL = { 4: [2, 5, 6, 0, 0] };   // v3: a second black one, to 9   // red, green, blue -- the black one went with its hole
 // ---- and where each exit GOES ----
 // lvlNxtT was one byte a level, so a level's exits all led to the same place -- fine while
 // every level had exactly one. The hub has four, and the whole point of the room is that they
@@ -5982,7 +6013,7 @@ const ENDING = LVLLOAD && true && !process.env.NOENDING
 // ROUTE_END: where the LAST level's exit leads -- the ending, or level 1 under NOENDING.
 const ROUTE_END = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
 const BLACK_DST = ALLLVL.includes(8) ? 8 : ROUTE_END;
-const LEVEL_EXITDST = { 4: HUB_WIRED ? [5, 7, 6, BLACK_DST] : [1, 1, 1, BLACK_DST], 5: [4], 6: [4], 7: [4],
+const LEVEL_EXITDST = { 4: [...(HUB_WIRED ? [5, 7, 6] : [1, 1, 1]), BLACK_DST, ALLLVL.includes(9) ? 9 : ROUTE_END], 5: [4], 6: [4], 7: [4],
                         8: [ALLLVL.includes(9) ? 9 : ROUTE_END], 9: [ROUTE_END],
                         ...(ENDING && process.env.ENDTEST ? { 1: [END_DST] } : {}) };
 // FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
@@ -6033,7 +6064,7 @@ const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').
 // not exist -- and an exit costs a holeSeeT row, an lvlNxtT byte, a fill colour and an entity's
 // worth of tables whether anything is through it or not. It comes back with level 8. The wall
 // that hides it stays: it is what the three pedestals open, and it now reveals an empty alcove.
-const HUB_HOLES = [[4, 1], [1, 4], [4, 7], [13, 4]];   // N(red), W(green), S(blue), E(black)
+const HUB_HOLES = [[1, 1], [1, 11], [1, 6], [9, 1], [9, 11]];   // red 5, green 7, blue 6, black 8, black 9
 const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
              : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : LVL === 8 ? [16, 5] : LVL === 9 ? L9.exit : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
@@ -6181,7 +6212,10 @@ Object.assign(RUNTIME_BUFS, {
 // It was one bit per cell for the whole level, so every angel shared one territory, and "the
 // first angel roams free, the second stays by its door" -- which is what LVL=3 wants -- could not
 // be said at all. LEASH now takes one group per angel, in angel order (the order of the `tall`
-// entries in ORBS), separated by '|': LEASH="|21,2;21,8" leashes the second angel only. A group
+// entries in ORBS), separated by '|': LEASH="|21,1;21,9" leashes the second angel only.
+// Level 1's moved out from (21,2)/(21,8) to the corners on 2026-10-30: with diagonal steps and fresher
+// maps (BFSJIT/ANGDIAG) angel 2 got round the ring to the door too fast -- the user needed room to
+// draw it further up or down the east column before slipping past to the hole. A group
 // is cells the angel may NOT enter, as before; an empty group is an unleashed angel.
 // The table is NORB x 32 bytes, indexed by entity slot -- so an orb's slots are wasted (all
 // zero) and the angels' rows land where amIdx x 32 says. 32 bytes an entity is the price of
@@ -6189,7 +6223,7 @@ Object.assign(RUNTIME_BUFS, {
 // ANGEL=0 takes the angels out, so it takes the leashes with them -- otherwise the consistency
 // check below fires on a level whose default leash names angels the flag has just removed, and
 // "ANGEL=0" stops being a thing you can simply say about any level.
-const LEASH_GROUPS = (process.env.ANGEL === '0' ? '' : process.env.LEASH ?? (LVL === 1 ? '|21,2;21,8' : ''))
+const LEASH_GROUPS = (process.env.ANGEL === '0' ? '' : process.env.LEASH ?? (LVL === 1 ? '|21,1;21,9' : ''))
   .split('|').map(g => g.split(';').filter(Boolean).map(q => q.split(',').map(Number)));
 const LEASH_AT = LEASH_GROUPS.flat();     // every leash cell, for the checks that only care WHERE
 // ---- LEVELSHEET=1: print the live level in the LEVEL SHEET glyph language and stop ----
@@ -7807,8 +7841,6 @@ const PICBASE = SPRBASE + NORBBM * 64;
 // What it buys is not bank-3 space, which is a wash: it is 1,000 PAGE-ALIGNED bytes of image at
 // $7900, the only run left big enough to take moveXT/moveYT and the HUD out of the main block.
 //
-// picLoT/picHiT already indirect through a table, so picture 0 joining the others is a change of
-// two bytes in it and nothing at all at runtime.
 const PICSEG = DIE ? PICS.maps.slice(0, NPIC).flatMap(m => m.map) : [];
 if (PICSEG.length) {
   // Up to doomT, the lowest CPU squatter in bank 3's tail.
@@ -9935,12 +9967,65 @@ const MUS_PITCH = 440 * 985248 / CLOCK;     // 423.87 on NTSC, 440 on PAL: see t
 // names level n's, MUS_LVSNG holds the defaults; every other music level plays MUSICSNG
 // level 4 (2026-10-27): the hub's wind and hum (tools/song-hub.mjs), "silent save a very soft background
 // atmosphere"
-const MUS_LVSNG = { 3: 'music/keys-build3.sng', 4: 'music/hub.sng' };
+// level 2 (2026-10-27): Deep without the steam engine, the data part a repeat earlier, its last note
+// held into the loop, voice 3 left free for the effects (tools/sng-deep-nonoise.cjs)
+// level 3 (2026-10-27): the organ ATMOSPHERE (tools/song-organ-atmos.mjs): the siciliano's harmony as
+// held suspensions with fragments of its cells on voice 3, softened by the attack trick (a slow attack
+// keyed off before its peak). The siciliano itself is music/organ.sng, the keys build-up before it
+// music/keys-build3.sng
+const MUS_LVSNG = { 2: 'music/deep-song-nonoise.sng', 3: 'music/organ-atmos.sng', 4: 'music/hub.sng' };
 const MUS_SNG = n => !MUSIC_LV.includes(n) ? 'music/empty.sng'
   : process.env[`MUSICSNG${n}`] ?? MUS_LVSNG[n] ?? process.env.MUSICSNG ?? 'music/deep-song.sng';
 // Filled by musBuild once every level's module size is known (the level code is cut from the
 // engine's source late in the build): level -> its block (player + song), its address, the release
 // mask's address in it; and the end of the largest, for the region.
+// EVERY SONG SETS ITS FILTER WITH ITS FIRST NOTE (2026-10-28, the user: "we should assert somehow that
+// each song must set its filter at startup"). The player holds the filter registers from init until the
+// song's own filter program first runs (music/goattracker-player.patch, mt_filtheld): whatever the last
+// song or the drone left stays, because a reset to "filter off" was a click in the silence after the
+// fall's fade (on a 6581 a routing or mode change steps the DC level). The song's own change is masked
+// only if it comes WITH sound, so: the first filter program -- an Axx command, or a note whose
+// instrument has a filter pointer -- must start on the row of the song's first note. Earlier is a
+// change in silence (the click again); later, the first notes play inside the last song's filter. Its
+// first step must set the mode and routing ($80-$fe), not just a cutoff. (A song with no filter at all
+// fails too: its player is assembled without the filter code, so it would never write $d418.) Rows are
+// counted from the start along each voice's order list, so the voices must share a tempo until then: a
+// global tempo is fine, a CHANNEL tempo ($83+) before the first note is refused rather than modelled.
+const musFilterCheck = sng => {
+  const b = readFileSync(sng);
+  if (b.toString('latin1', 0, 4) !== 'GTS5') throw new Error(`MUSIC: ${sng} is not a GoatTracker 2 song (GTS5)`);
+  let o = 4 + 96;
+  const nsub = b[o++], ords = [];
+  for (let k = 0; k < 3 * nsub; k++) { const len = b[o]; ords.push([...b.subarray(o + 1, o + 1 + len)]); o += len + 2; }
+  const nIns = b[o++], insAt = o, insFilt = k => b[insAt + 25 * (k - 1) + 4];   // byte 4: the filter pointer
+  o += 25 * nIns;
+  const tabs = [];
+  for (let t = 0; t < 4; t++) { const n = b[o]; tabs.push({ L: [...b.subarray(o + 1, o + 1 + n)] }); o += 1 + 2 * n; }
+  const nPat = b[o++], pats = [];
+  for (let k = 0; k < nPat; k++) { const len = b[o]; pats.push(b.subarray(o + 1, o + 1 + 4 * len)); o += 1 + 4 * len; }
+  // per voice, along its order list (repeat $d0-$df and transpose $e0-$fe entries skipped): the row of
+  // its first note and of its first filter start, and the program that starts
+  const firstNote = [], firstFilt = [];
+  for (const ol of ords.slice(0, 3)) {
+    let row = 0, note = Infinity, filt = null;
+    for (const p of ol.filter(x => x < 0xd0)) {
+      const P = pats[p];
+      for (let r = 0; r < P.length / 4 - 1 && (note === Infinity || !filt); r++, row++) {
+        const [nt, ins, cmd, dat] = P.subarray(4 * r, 4 * r + 4), isNote = nt >= 0x60 && nt <= 0xbc;
+        // (a global tempo, $03-$7f, moves every voice alike, so rows still line up; a channel's own does not)
+        if (cmd === 0xf && dat >= 0x80 && note === Infinity) throw new Error(`MUSIC: ${sng} sets a channel tempo before its first note: musFilterCheck counts rows, not ticks`);
+        if (isNote && note === Infinity) note = row;
+        if (!filt && cmd === 0xa && dat) filt = { row, at: dat };
+        else if (!filt && isNote && ins && insFilt(ins)) filt = { row, at: insFilt(ins) }; }
+      if (note < Infinity && filt) break; }
+    firstNote.push(note); if (filt) firstFilt.push(filt); }
+  const t = Math.min(...firstNote);
+  if (t === Infinity) return;                                      // no notes: nothing to mask, nothing to hold for
+  const f = firstFilt.sort((a, c) => a.row - c.row)[0];
+  if (!f || f.row !== t) throw new Error(`MUSIC: ${sng}'s first note is on row ${t} but its first filter program starts ${f ? `on row ${f.row}` : 'never'}: it must start WITH the first note (an Axx, or the note's instrument's filter pointer) -- see musFilterCheck`);
+  if (tabs[2].L[f.at - 1] < 0x80 || tabs[2].L[f.at - 1] === 0xff)
+    throw new Error(`MUSIC: ${sng}'s first filter program (filter table row $${f.at.toString(16)}) does not begin by setting the mode and routing ($80-$fe), so the last song's would stay`);
+};
 const MUS_BLOBS = new Map(), MUS_AT = {}, MUS_REL = {};
 let MUS_END = 0;
 const musBuild = modLen => {
@@ -9964,6 +10049,13 @@ const musBuild = modLen => {
       const blob = [...prg.slice(2)], pat = [0x29, 0xff, 0x9d, 0x04, 0xd4];
       const hits = blob.flatMap((_, i) => pat.every((v, k) => blob[i + k] === v) ? [i] : []);
       if (hits.length !== 1) throw new Error(`MUSIC: ${sng}'s player has ${hits.length} release masks, not 1 -- is ~/goattracker2 patched? (music/goattracker-player.patch)`);
+      // the FILTER HOLD (mt_filtheld, the same patch): "sty abs" into the immediate of an "lda #$00 /
+      // beq" -- once in a player with a filter; a song with none has no filter code (and must be silent)
+      const held = blob.flatMap((x, i) => x === 0x8c ? [(blob[i + 1] | blob[i + 2] << 8) - at - 1] : [])
+        .filter(j => j >= 0 && blob[j] === 0xa9 && blob[j + 1] === 0x00 && blob[j + 2] === 0xf0);
+      if (MUSIC_LV.includes(n)) {
+        musFilterCheck(sng);
+        if (held.length !== 1) throw new Error(`MUSIC: ${sng}'s player has ${held.length} filter holds, not 1 -- is ~/goattracker2 patched and gt2reloc rebuilt? (music/goattracker-player.patch)`); }
       cache.set(key, { blob, rel: at + hits[0] + 1 });
     }
     const { blob, rel } = cache.get(key);
@@ -10659,7 +10751,6 @@ marked  = $8584                  ; 0, or the index+1 of the angel that stepped u
 dieSt   = $8585                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
 dieDir  = $8587                  ; the turn the player was making, locked in
 dieOpa  = $8588
-dieP    = $8589                  ; which picture of this death's sequence is on screen
 dieRem  = $858a                  ; whole angle units the sweep still owes
 dieCl   = $858b                  ; scratch: dx+1 and dy+1 while the bearing index is built
 dieKik  = $8068                  ; frames left in the kick's downward sweep
@@ -18794,8 +18885,34 @@ okDone: rts
 ; A restart is a jmp to entry, and entity state lives in tables the game edits IN PLACE. blkT is
 ; rebuilt from mapT rather than kept as a second copy -- 256 bytes of table saved, and it can
 ; never drift out of step with the walls.
-objInit:
-        lda #$00                ; GATEFAST: a new level (or a restart) -- the cached cell is meaningless
+${BFS_UNROLL ? `; ---- bfsPatch (BFSUNROLL): the live level's width into the fill's south/north operands ----
+; Levels differ in width and the engine is shared, so +W/-W cannot be assembled in. Run from objInit,
+; which every level arrival and restart passes through before the first fill.
+bfsPatch:
+        lda bfsDCT+2            ; W
+        sta bfsU2L+1            ; bfsD1/bfsD0 are page-aligned (the build's ALIGN list), so the low byte IS W
+        sta bfsU2S+1
+        sta bfsU2A+1
+        clc
+        adc #<blkT
+        sta bfsU2B+1
+        lda #>blkT
+        adc #$00
+        sta bfsU2B+2
+        lda bfsDCT+3            ; 256 - W
+        sta bfsU3L+1
+        sta bfsU3S+1
+        sta bfsU3A+1
+        clc
+        adc #<blkT
+        sta bfsU3B+1
+        lda #>blkT
+        adc #$ff                ; blkT - W: the high byte drops one unless the low byte carried
+        sta bfsU3B+2
+        rts
+
+` : ''}objInit:
+${BFS_UNROLL ? '        jsr bfsPatch\n' : ''}        lda #$00                ; GATEFAST: a new level (or a restart) -- the cached cell is meaningless
         sta ogPcV
         lda #$ff                ; ...and so is hlSet's cached kind. It was never initialised: whatever
         sta hlKind              ;   boot left at its address decided whether the FIRST hole-like got
@@ -19017,7 +19134,7 @@ angPick:stx amIdx
         cmp #$ff
         beq apNo                ; no descending neighbour: it is walled in, so it WAITS
         tax
-        lda pathDXT,x
+${ANG_DIAG ? '        stx amDir               ; the direction index, kept for the lunge: index + 1 IS its code\n' : ''}        lda pathDXT,x
         sta amTX
         lda pathDYT,x
         sta amTY
@@ -19253,9 +19370,12 @@ ${HAS_SILVER ? `angSlFT = $b110             ; how far, in 256ths of the cell. RA
                                 ;   set, and every write of angSlDT (stSet, svStep, svRole) writes it too` :
 `angSlFT: !byte ${pad([], NORB).join(',')}   ; how far, in 256ths of the cell`}
 slFT:   !byte ${[...Array(ANGSLIDE)].map((_, i) => hx(Math.round((i + 1) * 256 / (ANGSLIDE + 1)))).join(',')}   ; 60ths into the lunge -> 256ths of the way
-slDXT:  !byte 0,1,$ff,0,0
-slDYT:  !byte 0,0,0,1,$ff
-slNgT:  !byte 0,0,1,0,1         ; west and north run the offset backwards
+slDXT:  !byte 0,1,$ff,0,0${ANG_DIAG ? ',1,$ff,1,$ff' : ''}
+slDYT:  !byte 0,0,0,1,$ff${ANG_DIAG ? ',1,1,$ff,$ff' : ''}${ANG_DIAG ? `
+amDir:  !byte 0                 ; angPick: anPath's direction index
+slOA:   !byte 0                 ; slOn: the signed offset along the axis being added
+slDir:  !byte 0` : ''}
+slNgT:  !byte 0,0,1,0,1         ; west and north run the offset backwards (the sentries' stcS reads it too)
 slO:    !byte 0
 slF:    !byte 0                 ; this projection's own forward and right terms, kept to take back
 slFH:   !byte 0
@@ -19285,7 +19405,9 @@ slTick: lda angSlDT,x
         lda #$02
         sta blkT,y              ; the landing cell is taken from now on
         inc blkVer              ; ...which the path fill has to know
-        lda #$01                ; the direction, 1..4
+${ANG_DIAG ? `        ldy amDir               ; anPath's index 0..7 (E W S N, SE SW NE NW) + 1 = the lunge code:
+        iny                     ;   1..4 as before, 5..8 the diagonals -- slDXT/slDYT are in that order
+        tya` : `        lda #$01                ; the direction, 1..4
         ldy amTX
         beq stY
         bpl stSet
@@ -19294,7 +19416,7 @@ slTick: lda angSlDT,x
 stY:    lda #$03
         ldy amTY
         bpl stSet
-        lda #$04
+        lda #$04`}
 stSet:  sta angSlDT,x
 stMove: lda angAccT,x           ; 60ths into the lunge = banked - (period - slide), clamped to the table
         clc                     ;   (a period that grew mid-lunge reads negative: hold at the start)
@@ -19387,7 +19509,84 @@ opsS:   jsr slOn
 ; switch, f-256 (from the new cell) after it -- turned round for a lunge west or north. Along x
 ; it adds o*cos to forward and takes o*sin from right; along y, o*sin and o*cos, the same shape
 ; as omTrig's kf = kxc + kys and kr = kyc - kxs.
-slOn:   lda angSlDT,x
+${ANG_DIAG ? `slOn:   lda kfL                 ; ---- ANGDIAG: keep the player's terms, add x and y parts in place ----
+        sta slF                 ; slOff puts these back exactly: nothing between the two writes kf/kr
+        lda kfH                 ;   (omTrig sets them once a frame; orbProj only reads them), and a
+        sta slFH                ;   diagonal's two parts together can pass the 8 bits a total would get
+        lda krL
+        sta slR
+        lda krH
+        sta slRH
+        lda angSlDT,x
+        and #$7f
+        sta slDir
+        lda angSlFT,x
+        cmp #$80
+        bne snS
+        lda #$81                ; -128 is outside oFrac's range; 1/256 of a cell does not show
+snS:    sta slO
+        ldy slDir
+        lda slDXT,y
+        beq snNoX
+        jsr snNeg               ; along x: forward += o*cos, right -= o*sin
+        sta slOA
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        jsr kfAdd
+        lda slOA
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        eor #$ff
+        clc
+        adc #$01
+        jsr krAdd
+snNoX:  ldy slDir
+        lda slDYT,y
+        beq snDone
+        jsr snNeg               ; along y: forward += o*sin, right += o*cos
+        sta slOA
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        jsr kfAdd
+        lda slOA
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        jmp krAdd
+; snNeg: A = the axis step (1 or $ff) -> A = the offset, negated for a step backwards
+snNeg:  cmp #$80
+        lda slO
+        bcc snDone
+        eor #$ff
+        adc #$00                ; C set from the cmp: + 1
+snDone: rts
+; kfAdd / krAdd: add A, a signed byte, into kf / kr
+kfAdd:  ldx #$00
+        cmp #$80
+        bcc kfA1
+        dex
+kfA1:   clc
+        adc kfL
+        sta kfL
+        txa
+        adc kfH
+        sta kfH
+        rts
+krAdd:  ldx #$00
+        cmp #$80
+        bcc krA1
+        dex
+krA1:   clc
+        adc krL
+        sta krL
+        txa
+        adc krH
+        sta krH
+        rts
+` : `slOn:   lda angSlDT,x
         and #$7f
         tay
         lda angSlFT,x
@@ -19445,7 +19644,16 @@ snAdd:  lda slF                 ; kSgn reads the N flag, so the load goes right 
         adc slRH
         sta krH
         rts
-slOff:  sec
+`}${ANG_DIAG ? `slOff:  lda slF                 ; the saved terms back
+        sta kfL
+        lda slFH
+        sta kfH
+        lda slR
+        sta krL
+        lda slRH
+        sta krH
+        rts
+` : `slOff:  sec
         lda kfL
         sbc slF
         sta kfL
@@ -19460,7 +19668,7 @@ slOff:  sec
         sbc slRH
         sta krH
         rts
-` : ''}
+`}` : ''}
 
 ${HAS_SILVER ? (() => {
   const calm = SILV_INKS[SILV_INK - 1];          // the lightning ink's own colour between sparks
@@ -20363,8 +20571,6 @@ dsMir:
         ; ---- and straight into the first picture ----
         ; The screen is black here (the fade just finished and the swap set every palette register
         ; to 0), so the copy is invisible and the cut is picOn's three stores on the next frame.
-        lda #$00
-        sta dieP
         lda #$02
         sta dieSt
         lda #$ff                ; "not placed yet" -- see dieShow. dfEnd runs INSIDE the fade
@@ -20377,9 +20583,7 @@ dsMir:
 ; and the picture is simply THERE. Stark reads as more unsettling than motion -- the user's call
 ; after seeing both, and the reason the charset-cycling experiment was dropped entirely.
 ;
-; dieN is how many pictures THIS death shows. It survives the restart because dieKey does
-; "jmp entry", which reloads nothing and clears only what entry explicitly clears -- so dieN is
-; EMITTED data, 0 off the disk, and counts up from there. dieP is which one is on screen.
+; One picture: shown for DIE_SHOW sixtieths, then black and held until RETURN.
 dieShow:
         lda #$00                ; no sprites from here on. Clearing this at the SWAP did not hold:
         sta omEn                ;   the swap runs early in the frame and orbMove refills omEn
@@ -20414,22 +20618,8 @@ ${DIE_SHOW >= 256 ? `        jmp dshHld              ; DIESHOW>=256: hold the pi
         sta $d022
         sta $d023
 
-        inc dieP
-        lda dieP
-        cmp dieN
-        bcs dshEnd              ; shown them all
-        jsr picPut              ; the next one into both buffers, still black
-        jsr picOn               ; ...and cut to it
-        lda frameCnt
-        sta dieT0
-        rts
-dshEnd: lda #$03                ; nothing sounds here: the dark is silent
+        lda #$03                ; nothing sounds here: the dark is silent
         sta dieSt
-        lda dieN                ; the sequence ran its full length: start the next death over
-        cmp #${hx(NPIC)}
-        bcc dshHld
-        lda #$00
-        sta dieN
 dshHld: rts
 
 
@@ -21975,14 +22165,67 @@ ${MULW}
 ${ADDX('orbXCT,x')}
         sta apC
         tax
-apLdA:  lda bfsD0,x             ; operand PATCHED to the live map
+${BFS_JIT ? `        ; ---- BFSJIT: read the fill IN FLIGHT if it has reached this angel ----
+        ; BFS labels in order of distance, so once this cell has one, every cell nearer the player
+        ; has one too -- which is all this walk reads. The fresher map wins; otherwise the live one.
+        lda bfsLiveP
+        ldy bfsPhase
+        cpy #$02
+        bcc apPg                ; no fill expanding (idle, or still clearing)
+apLdW:  ldy bfsD1,x             ; operand PATCHED to the work map
+        iny
+        beq apPg                ; $ff: not reached yet
+        lda bfsClS+2            ; the work page
+apPg:   sta apLdA+2
+        sta apLdB+2
+${ANG_DIAG ? '        sta apLdD+2\n' : ''}` : ''}apLdA:  lda bfsD0,x             ; operand PATCHED to the live map
         cmp #$ff
         beq anPNo               ; no fill has completed yet
         sec
         sbc #$01
         bcc anPNo               ; distance 0: standing on the player
         sta apD
-        ldy #$00
+${ANG_DIAG ? `        ; ---- ANGDIAG: a diagonal step two closer, both corner cells clear ----
+        ; Tried FIRST: where it exists it is the shorter walk. Only from d >= 3, so the cell it lands
+        ; in is never the player's (d = 2 diagonally is already beside you, and anAdj marks).
+        cmp #$02
+        bcc apDgN
+        ldy #$03                ; directions 4..7 (SE SW NE NW), from pathDXT/pathDYT
+apDgL:  sty apDi
+        ldx apDxI,y
+        lda apC
+        clc
+        adc bfsDCT,x
+        tax
+        lda blkT,x              ; the corner along x: a BLOCKER only, no visibility test (the user,
+        bne apDgX               ;   2026-10-29) -- walls, orbs and angels all count
+        txa
+        ldx apDyI,y
+        clc
+        adc bfsDCT,x            ; corner x + the y step: the diagonal cell itself
+        tay
+        lda apC
+        clc
+        adc bfsDCT,x
+        tax
+        lda blkT,x              ; the corner along y
+        bne apDgX
+        lda blkT,y
+        bne apDgX               ; the diagonal cell is taken
+apLdD:  lda bfsD0,y             ; operand PATCHED with apLdA
+        clc
+        adc #$01                ; ($ff + 1 = 0 never matches: apD >= 2 here)
+        cmp apD
+        bne apDgX               ; not two closer
+        lda apDi
+        clc
+        adc #$04
+        rts
+apDgX:  ldy apDi
+        dey
+        bpl apDgL
+apDgN:
+` : ''}        ldy #$00
 anPLp:  lda apC
         clc
         adc bfsDCT,y            ; no bounds check: the border is solid, so a step off the open
@@ -21999,7 +22242,46 @@ anPNo:  lda #$ff
         rts
 anPHit: tya
         rts
+${ANG_DIAG ? `apDxI:  !byte 0,1,0,1             ; diagonal y -> its x step, as a bfsDCT index (E W E W)
+apDyI:  !byte 2,2,3,3             ;   ...and its y step (S S N N): directions 4..7 = SE SW NE NW
+apDi:   !byte 0                   ; the diagonal being tried
+` : ''}${BFS_JIT ? `bfsLiveP: !byte >bfsD0            ; which page anPath's LIVE reads use (apLdA's assembled base)
+bfsMiss: !byte 0
+bdT:    !byte 0
 
+; ---- bfsDue (BFSJIT): C set if some angel will choose a step within its lead ----
+; Ticks until it sets out = period - slide - banked; lead = cells the last fill took to reach it,
+; at BFSTICK a tick, plus the clear. Angels held by your gaze are skipped: their clocks are stopped
+; (unless you carry the idol), and one that turns free reads whatever map exists, a moment stale.
+bfsDue: ldx nOrbM1T              ; every entity: an orb or a hole never banks time (angAccT stays 0),
+bdLp:                           ;   so it is never within its lead -- no need to ask what it is
+${ANGSLIDE ? `        lda angSlDT,x
+        bne bdNx                ; lunging: its step is already chosen
+` : ''}        lda orbSeenT,x
+        beq bdFree
+${HAS_IDOL ? `        lda idolHd
+        beq bdNx                ; seen and frozen
+` : `        bne bdNx                ; seen and frozen
+`}bdFree: lda angPerT
+        sec
+        sbc #${hx(ANGSLIDE || 0)}
+        sec
+        sbc angAccT,x
+        bcc bdYes               ; already past its set-out point: due now
+        sta bdT
+        lda angLabT,x
+${'        lsr\n'.repeat(BFS_LEADSH)}        clc
+        adc #20                 ; the clear (4 frames) and a frame of slack, in 60ths at 15 fps
+        bcs bdYes
+        cmp bdT
+        bcs bdYes               ; its lead covers the time left: start now
+bdNx:   dex
+        bpl bdLp
+        clc
+        rts
+bdYes:  sec
+        rts
+` : ''}
 ; ---- bfsTick: a few cells of the distance map, once a frame ----
 ; The angel reads the map once per ANG_PERIOD -- ~120 frames -- so there is no reason to pay for
 ; a whole fill in one of them. Phase 1 clears the work map 64 bytes a frame, phase 2 expands
@@ -22021,11 +22303,16 @@ ${ADDX('px+1')}
         ; setting one down changes the answer just as much as walking does.
         lda bfsWant
         cmp bfsDone
-        bne bfsGo
+        bne ${BFS_JIT ? 'bfsJit' : 'bfsGo'}
         lda blkVer
         cmp bfsBVD
         beq bfsRts
-bfsGo:  lda bfsWant
+${BFS_JIT ? `bfsJit: lda bfsDone                ; ---- BFSJIT: the map is stale, but is anyone about to read it? ----
+        cmp #$ff
+        beq bfsGo               ; no map at all yet this level (objInit): fill now
+        jsr bfsDue
+        bcc bfsRts              ; nobody steps within its lead: leave it stale, it costs nothing
+` : ''}bfsGo:  lda bfsWant
         sta bfsFor
         lda blkVer
         sta bfsBVF              ; remember what this fill is for, not what is current when it ends
@@ -22033,7 +22320,12 @@ bfsGo:  lda bfsWant
         sta bfsCl
         lda #$01
         sta bfsPhase
-bfsWork:
+${BFS_JIT ? `        ldx #${hx(NORB - 1)}
+        lda #$00
+bfsLSc: sta angLabT,x           ; reached on the first frame keeps 0: the lead is then the clear alone
+        dex
+        bpl bfsLSc
+` : ''}bfsWork:
         lda bfsPhase
         cmp #$02
         bcs bfsExp              ; 2 = the main wave, 3 = the deferred entity wave (see bfsSeed)
@@ -22075,14 +22367,21 @@ bfsExp: lda frameCnt
         sec
         sbc bfsLast
         stx bfsLast
-        lsr
+${BFS_TICK ? `        bne bfsE1
+        lda #$01                ; never zero: a fast frame must still make progress
+bfsE1:  cmp #$09
+        bcc bfsE2
+        lda #$08                ; never a burst: a long stall counts as 8 ticks at most
+bfsE2:  sta bfsN                ; ticks, 1..8 -- times BFSTICK cells a tick (8 * BFSTICK fits a byte)
+${'        clc\n        adc bfsN\n'.repeat(BFS_TICK - 1)}        sta bfsN
+` : `        lsr
         bne bfsE1
         lda #$01                ; never zero: a fast frame must still make progress
 bfsE1:  cmp #$09
         bcc bfsE2
         lda #$08                ; and never a burst -- a long stall must not dump the whole queue
 bfsE2:  sta bfsN
-bfsExL: lda bfsHead
+`}bfsExL: lda bfsHead
         cmp bfsTail
         beq bfsQE               ; queue empty -> the main wave is done; is there a second?
         tax
@@ -22090,7 +22389,106 @@ bfsExL: lda bfsHead
         sta bfsC
         inc bfsHead
         tax
-bfsLdC: lda bfsD1,x             ; operand PATCHED to the work map
+${BFS_UNROLL ? `bfsLdC: lda bfsD1,x             ; operand PATCHED to the work map
+        clc
+        adc #$01
+        sta bfsND
+        ; ---- BFSUNROLL: X holds the cell throughout; each neighbour's offset is in the address ----
+        ; No bounds check: only open cells are expanded and the border is solid, so cell +-1 and
+        ; +-W stay inside the map -- and inside the page, since W x H <= 256.
+        ; east
+bfsU0L: lda bfsD1+1,x        ; PATCHED: work map page
+        cmp #$ff
+        bne bfsU0N               ; already has a distance
+        lda bfsND
+bfsU0S: sta bfsD1+1,x        ; PATCHED with bfsU0L
+bfsU0B: lda blkT+1,x         ; blocked: labeled, never expanded
+        bne bfsU0N
+        txa
+        clc
+bfsU0A: adc #1             ; the neighbour's cell number, to queue
+        ldy bfsTail
+        sta bfsQ,y
+        inc bfsTail
+bfsU0N:
+        ; west
+bfsU1L: lda bfsD1-1,x        ; PATCHED: work map page - 1
+        cmp #$ff
+        bne bfsU1N               ; already has a distance
+        lda bfsND
+bfsU1S: sta bfsD1-1,x        ; PATCHED with bfsU1L
+bfsU1B: lda blkT-1,x         ; blocked: labeled, never expanded
+        bne bfsU1N
+        txa
+        clc
+bfsU1A: adc #$ff             ; the neighbour's cell number, to queue
+        ldy bfsTail
+        sta bfsQ,y
+        inc bfsTail
+bfsU1N:
+        ; south
+bfsU2L: lda bfsD1+${MAPW},x        ; PATCHED: work map page (low byte = W, per level)
+        cmp #$ff
+        bne bfsU2N               ; already has a distance
+        lda bfsND
+bfsU2S: sta bfsD1+${MAPW},x        ; PATCHED with bfsU2L
+bfsU2B: lda blkT+${MAPW},x         ; blocked: labeled, never expanded -- PATCHED per level
+        bne bfsU2N
+        txa
+        clc
+bfsU2A: adc #${hx(MAPW)}             ; the neighbour's cell number, to queue -- PATCHED per level
+        ldy bfsTail
+        sta bfsQ,y
+        inc bfsTail
+bfsU2N:
+        ; north
+bfsU3L: lda bfsD1-${MAPW},x        ; PATCHED: work map page - 1 (low byte = W, per level)
+        cmp #$ff
+        bne bfsU3N               ; already has a distance
+        lda bfsND
+bfsU3S: sta bfsD1-${MAPW},x        ; PATCHED with bfsU3L
+bfsU3B: lda blkT-${MAPW},x         ; blocked: labeled, never expanded -- PATCHED per level
+        bne bfsU3N
+        txa
+        clc
+bfsU3A: adc #${hx((256 - MAPW) & 255)}             ; the neighbour's cell number, to queue -- PATCHED per level
+        ldy bfsTail
+        sta bfsQ,y
+        inc bfsTail
+bfsU3N:
+        dec bfsN
+        beq bfsUX
+        jmp bfsExL              ; out of branch range: the four neighbours are ~120 bytes
+bfsUX:
+` : BFS_FAST ? `bfsLdC: lda bfsD1,x             ; operand PATCHED to the work map
+        clc
+        adc #$01
+        sta bfsND
+        ldy #$00
+bfsNbL: lda bfsC
+        clc
+        adc bfsDCT,y
+        tax
+bfsLdN: lda bfsD1,x             ; operand PATCHED to the work map
+        cmp #$ff
+        bne bfsNbN              ; already has a distance
+        lda bfsND
+bfsStN: sta bfsD1,x             ; operand PATCHED to the work map
+        ; ---- blkT, NOT mapT: an orb is a real obstacle and the path has to go round it ----
+        ; A blocked cell still RECEIVES a distance, but is never EXPANDED from. Read only now,
+        ; for a cell just labeled, not for every neighbour.
+        lda blkT,x
+        bne bfsNbN              ; blocked: distance recorded, but nothing expands from here
+        txa
+        ldx bfsTail
+        sta bfsQ,x
+        inc bfsTail
+bfsNbN: iny
+        cpy #$04
+        bcc bfsNbL
+        dec bfsN
+        bne bfsExL
+` : `bfsLdC: lda bfsD1,x             ; operand PATCHED to the work map
         clc
         adc #$01
         sta bfsND
@@ -22121,7 +22519,7 @@ bfsNbN: iny
         bcc bfsNbL
         dec bfsN
         bne bfsExL
-        ; ---- EARLY OUT: stop as soon as every angel can see its way to the player ----
+`}        ; ---- EARLY OUT: stop as soon as every angel can see its way to the player ----
         ; BFS assigns in strictly increasing distance, so the instant an angel's own cell has a
         ; value, every cell nearer than it already has one -- and that is exactly the set anPath
         ; reads. Filling the far side of the map it is never going to walk buys nothing. The
@@ -22131,7 +22529,9 @@ bfsNbN: iny
         ; runs to its natural end -- which is correct, and is also when it matters least.
         lda nOrbT               ; no entities: nothing to path toward
         beq bfsFin
-        ldx nOrbM1T
+${BFS_JIT ? `        lda #$00
+        sta bfsMiss
+` : ''}        ldx nOrbM1T
 bfsEnL: lda orbTallT,x
         beq bfsEnN
         lda orbHidT,x
@@ -22142,12 +22542,22 @@ ${MULW}
 ${ADDX('orbXCT,x')}
         tax
 bfsLdE: lda bfsD1,x             ; operand PATCHED to the work map
+${BFS_JIT ? `        ldx bfsEnI
         cmp #$ff
+        bne bfsEnN              ; reached: angLabT keeps the count from the last frame it was not
+        inc bfsMiss             ; not reached yet -- go on, the others' counts still get written
+        lda bfsHead             ; ---- BFSJIT: cells expanded so far without reaching this angel ----
+        sta angLabT,x           ;   the next fill's lead for it, at BFSTICK cells a tick
+bfsEnN: dex
+        bpl bfsEnL
+        lda bfsMiss
+        bne bfsRts              ; someone has no distance yet: keep filling
+        jmp bfsFin              ; every angel has its answer` : `        cmp #$ff
         beq bfsRts              ; no distance yet: keep filling
         ldx bfsEnI
 bfsEnN: dex
         bpl bfsEnL
-        jmp bfsFin              ; every angel has its answer
+        jmp bfsFin              ; every angel has its answer`}
 bfsRts: rts
         ; ---- the fill is done: swap the maps over ----
         ; ---- the queue has run dry ----
@@ -22166,19 +22576,37 @@ bfsFin: lda bfsFor
         sta bfsBVD
         lda #$00
         sta bfsPhase
-        lda apLdA+2             ; live <-> work, by swapping the patched high bytes
+${BFS_JIT ? `        lda bfsLiveP            ; live <-> work. anPath patches its own reads per call (it may
+        pha                     ;   read the fill in flight), so the live page is kept as a byte
+        lda bfsClS+2
+        sta bfsLiveP
+        sta apLdC+2             ; angDst reads the live map
+        pla
+        sta apLdW+2             ; anPath's "reached yet?" probe reads the WORK map` : `        lda apLdA+2             ; live <-> work, by swapping the patched high bytes
         pha
         lda bfsClS+2
         sta apLdA+2
         sta apLdB+2
-        sta apLdC+2             ; angDst reads the same map as anPath, so it swaps with it
-        pla
+${ANG_DIAG ? '        sta apLdD+2\n' : ''}        sta apLdC+2             ; angDst reads the same map as anPath, so it swaps with it
+        pla`}
         sta bfsClS+2
         sta bfsSd+2
         sta bfsLdC+2
-        sta bfsLdN+2
+${BFS_UNROLL ? `        sta bfsU0L+2            ; east and south: the work page itself
+        sta bfsU0S+2
+        sta bfsU2L+2
+        sta bfsU2S+2
+        sec
+        sbc #$01                ; west and north address below the cell: base on the page before
+        sta bfsU1L+2
+        sta bfsU1S+2
+        sta bfsU3L+2
+        sta bfsU3S+2
+        clc
+        adc #$01
+` : `        sta bfsLdN+2
         sta bfsStN+2
-        sta bfsSdQ+2            ; bfsSeed reads the WORK map too, so it swaps with the rest
+`}        sta bfsSdQ+2            ; bfsSeed reads the WORK map too, so it swaps with the rest
         sta bfsLdE+2            ; the early-out reads the WORK map, so it swaps with the rest
         rts
 
@@ -22186,8 +22614,8 @@ bfsFin: lda bfsFor
 ${LD('bfsDCT', LVLT('bfsDCT').join(','), ': !byte ')}      ; ...as a CELL delta (manifest: the live level's width)
 ${LD('lvlDimT', LVLT('lvlDimT').join(','), ': !byte ')}   ; W, H, -W, W+H, H-1: the live level's shape, for every
                                 ;   stride the code used to carry as an immediate
-pathDXT: !byte 1,255,0,0        ; ...and as the amTX/amTY pair anTry wants
-pathDYT: !byte 0,0,1,255
+pathDXT: !byte 1,255,0,0${ANG_DIAG ? ',1,255,1,255' : ''}        ; ...and as the amTX/amTY pair anTry wants
+pathDYT: !byte 0,0,1,255${ANG_DIAG ? ',1,1,255,255' : ''}         ;   (ANGDIAG: 4..7 = SE SW NE NW)
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
 ${LD('hlFillT', LVLT('hlFillT').join(','), ': !byte ')}
@@ -22303,6 +22731,7 @@ pwY0:   !byte 0,0
 pwX1:   !byte 0,0
 pwY1:   !byte 0,0
 ` : ''}angAccT: !byte ${pad([], NORB).join(',')}   ; 60ths banked toward this angel's next step
+${BFS_JIT ? `angLabT: !byte ${pad([], NORB).join(',')}   ; BFSJIT: cells the last fill expanded before reaching this angel` : ''}
 
 orbExpT: !byte ${orbExpT.join(',')}
 orbXOffT: !byte ${orbXOffT.map(v => v & 255).join(',')}
@@ -22523,8 +22952,8 @@ krillRt: !fill ${KRILL_RT_LEN}, 0
 ; ONCE PER POWER-ON, NEVER AGAIN. Entry runs on every death restart too (dieKey is "jmp entry"),
 ; and by then $0400 is the renderer's span stack: re-parking copied stackLT/stackRT over the live
 ; loader's code, and the NEXT disk load ran the stack as code and hung on a black screen
-; (2026-10-04: die once on level 3, then drop to 4). klParked is DATA, not an equate, for the
-; reason dieN is: an emitted 0 is the only initialisation a restart never repeats.
+; (2026-10-04: die once on level 3, then drop to 4). klParked is DATA, not an equate: dieKey's
+; "jmp entry" reloads nothing, so an emitted 0 is the only initialisation a restart never repeats.
 klPark: lda klParked
         bne kpDn
 ; compact.mjs puts the code that zeroes its promoted zero-page buffers at the marker. They used to
@@ -22576,7 +23005,7 @@ ${HAS_LX ? `        jsr llName
         lda #$56                ; 'V'
         sta nILV+2
 laDn:   rts
-; artCur is DATA, not an equate, for the reason dieN is: an emitted value is the only initialisation
+; artCur is DATA, not an equate: an emitted value is the only initialisation
 ; a death restart (jmp entry, which loads nothing) never repeats -- and the art does stay loaded.
 artCur: !byte ${hx(0x30 + ART_BOOT)}
 ` : HAS_LX ? `        rts
@@ -22683,15 +23112,7 @@ egF:    jmp egF
 ; because the test does not involve the camera at all -- see the data layer above.
 ; (orbOccT, the per-entity occluder masks, lived here. Gone: occBy answers the facing rule when asked.)
 
-${DIE ? `; Where each picture's map lives. The first is inside the image next to the charset; the rest
-; ride in bank 3 as IPIC, because a 1,000-byte map has no contiguous home in the image.
-picLoT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((PICBASE + k * 1000) & 255)).join(',')}
-picHiT: !byte ${PICS.maps.slice(0, NPIC).map((_, k) => hx((PICBASE + k * 1000) >> 8)).join(',')}
-; dieN is the death counter and it is DATA, not an equate, on purpose: dieKey restarts with
-; "jmp entry", which reloads nothing, so an emitted 0 is the only initialisation it ever gets --
-; and that is exactly what makes it survive the restart and count deaths rather than resetting.
-dieN:   !byte 0
-angBearT: !byte ${angBearT.join(',')}
+${DIE ? `angBearT: !byte ${angBearT.join(',')}
 dieFadeT: !byte ${dieFadeT.join(',')}
 darkerT: !byte ${darkerT.join(',')}
 ; ---- the death cut scene's charset and its 40x25 of codes ----
@@ -23379,7 +23800,7 @@ colF:   !byte ${hx(palOf(LVL).ceil)}             ; the FLOOR's ink. colW is the 
 sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
 sprH:   !byte ${hx(sprOf(LVL).hi)}             ;   because the idol swap borrows the registers
 ${HAS_IDOL ? `; ---- WHERE EACH IDOL IS: the one piece of state a death does not undo ----
-; DATA, not an equate, for exactly the reason dieN is: dieKey restarts with "jmp entry", which
+; DATA, not an equate: dieKey restarts with "jmp entry", which
 ; reloads nothing, so the emitted bytes are the only initialisation these ever get -- and that
 ; is what makes them survive a restart while everything else goes back to its build state.
 ; "Everything resets except the idols." One byte each: the level the idol is currently in, or
@@ -27427,8 +27848,7 @@ dgAD:   lda #${hx(ORBBODY[0])}  ; the orb, by contrast, fades out with everythin
                                 ;   loop runs dieFade and never dieChk, so nothing repainted obC
                                 ;   at all: it kept whatever the last live frame left, which with
                                 ;   the idol in hand is orange. It held that for the whole fade.
-        inc dieN                ; how many pictures this death earns; dshEnd resets it after the
-        lda #$01                ;   last one, so the sequence starts over rather than running out
+        lda #$01
         sta dieSt
         lda frameCnt
         sta dieT0
@@ -27453,10 +27873,9 @@ ${DIE ? `; ---- picPut: the current picture into BOTH screen buffers ----
 ; drawn is exactly the "slides over and stutters back and forth" the old version was reported as.
 ; Four whole pages rather than 1,000 bytes: the 24-byte overrun lands in the unused tail of the
 ; screen and the source overruns into free space, so the loop costs nothing to keep simple.
-picPut: ldx dieP
-        lda picLoT,x
+picPut: lda #${hx(PICBASE & 255)}     ; the picture's map, in bank 3 as IPIC
         sta ppRd+1
-        lda picHiT,x
+        lda #${hx(PICBASE >> 8)}
         sta ppRd+2
         lda #$00
         sta ppWA+1
