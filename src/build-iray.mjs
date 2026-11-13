@@ -24383,10 +24383,12 @@ dshHld: rts
 ; dropped it with the HUD. RESETNOW=n is the headless test's restart.)
 ; (A blind playtester sat at this black with only the joystick: "Fire did nothing ... A real
 ; player might sit at a black screen wondering if it crashed.")
-dshFir: lda #$ff
-        sta $dc00
-        lda $dc01
-        and #$10                ; joystick-1 fire: 0 = pressed
+dshFir: lda #$7f                ; SPACE's column: bit 4 is SPACE there, and joystick-1 FIRE pulls the same
+        sta $dc00               ;   line whatever the column -- so either restarts, as either acts in play.
+        lda $dc01               ;   (It was $ff, fire alone: a keyboard player -- EmulatorJS, 2026-11-13 --
+        ldx #$ff                ;   sat at the black pressing SPACE, which looked exactly like a freeze.)
+        stx $dc00               ; the port neutral again: the joystick reads elsewhere expect it
+        and #$10
         bne dsfUp
         lda dkArm
         beq dshHld              ; still the press from before the black
