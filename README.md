@@ -33,13 +33,15 @@ yourself (below). It's built and timed for **NTSC** machines.
 * On a stock C64 just use Joystick 1.
 * On VICE set the cursor keys to Joystick 1.
 
-Directions get you Forward/Backward and Turn Left/Right.
+Directions get you Forward/Backward and Turn Left/Right. Hold the button and
+Left/Right strafe instead.
 
-Button or Spacebar Picks up / Puts down objects.
+Tap the button (or Spacebar) to pick up / put down objects. It acts when you let
+go, unless you strafed while holding it.
 
-You can also use ESDF to go forward/backward and strafe left/right.
+On the keyboard: ESDF go forward/backward and strafe left/right, and < > turn.
 
-After you're caught, press RETURN to start again.
+After you're caught, press the button to start again.
 
 The loader talks to a real 1541. In VICE, keep **True Drive Emulation** on (the
 default).

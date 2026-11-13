@@ -105,7 +105,7 @@ const VIC_READS = new Set(['charset', 'charsetB']);
 // foreground-black chars rather than the charset-twin scheme that used to read these. Kept
 // declared rather than deleted so the next step has its inputs, and listed here rather than
 // left as noise, because a dirty deadvars baseline hides the next real bug.
-const OCCLUSION_PENDING = new Set(['obCL', 'obCR', 'obBL', 'obBR', 'obIX', 'obV', 'obOcc']);     // the VIC is the reader, not the CPU
+const OCCLUSION_PENDING = new Set(['obCL', 'obCR', 'obIX', 'obV', 'obOcc']);     // the VIC is the reader, not the CPU
 for (const n of OCCLUSION_PENDING) { const i = writtenNeverRead.findIndex(e => e[0] === n);
   if (i >= 0) writtenNeverRead.splice(i, 1); }
 for (const n of LOADER_WRITES) { const i = readNeverWritten.findIndex(e => e[0] === n);

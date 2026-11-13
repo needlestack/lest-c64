@@ -39,8 +39,13 @@ if (process.env.SLOT_AT === undefined) {
   while (queue.length && tried.length < 9) {
     const sa = queue.shift(); if (tried.includes(sa)) continue; tried.push(sa);
     try { unlinkSync('./build/iray.arena.json'); } catch {}
+    // DUMPKEEP from the second trial on: the level-table sub-builds (dumpOf) are most of a trial's
+    // time, and their dumps do not depend on SLOT_AT -- the dump is taken before the slot address
+    // reaches anything in it, and a dump build lays out no wall lists. So a retry reuses the ones
+    // the FIRST trial of this same build just wrote, instead of making all ten again.
     const res = spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit',
-      env: { ...process.env, SLOT_AT: '0x' + sa.toString(16), SLOT_PICK: '1' } });   // SLOT_PICK: a trial, so a miss is quiet
+      env: { ...process.env, SLOT_AT: '0x' + sa.toString(16), SLOT_PICK: '1',   // SLOT_PICK: a trial, so a miss is quiet
+             ...(tried.length > 1 ? { DUMPKEEP: '1' } : {}) } });
     if (res.status === 0) {
       if (cache[key] !== sa) { cache[key] = sa; writeFileSync(cacheF, JSON.stringify(cache, null, 1)); }
       if (tried.length > 1) console.error(`  slot: placed at $${sa.toString(16)} (tried ${tried.map(t => '$' + t.toString(16)).join(', ')})`);
@@ -71,16 +76,24 @@ const subBuild = env => {
     process.exit(1);
   }
 };
+// dumpOf: one level's tables (an LVLDUMP sub-build) -> its dump. Made fresh unless DUMPKEEP: a later
+// slot trial of the same build, whose first trial has just written this very file (see the picker).
+const dumpOf = (tmp, env) => {
+  if (!(process.env.DUMPKEEP && existsSync(tmp))) subBuild({ ...env, LVLDUMP: tmp });
+  return JSON.parse(readFileSync(tmp, 'utf8'));
+};
 import { assemble } from './asm6502.mjs';
 
 // Diagnostic flags read BEFORE flag() exists -- charset construction runs long before it. They
 // land in DIAG all the same, so a build that rewrites the charset writes iray.diag.asm and leaves
 // the tracked iray.asm alone.
 const DIAGEARLY = [];
-import { fitOrb, fitArt, fatBits } from './fit-orb.mjs';
+import { fitOrb, fitArt, fatBits, artPath } from './fit-orb.mjs';
+import { fitBolt, ROTSTEP as BOLT_ROT, BOLT_H, HIRES as BOLT_HIRES } from './fit-bolt.mjs';
 import { silverW, silverAt, silverLeast, setSilverLuma } from './fit-silver.mjs';
 import { LOADER_RUN, KSTAGE, KRILL_RT_LEN, KRILL_RT_AT, KRILL_RESIDENT_AT } from './loader-src.mjs';
 import { END_DST, IEND_NAME, IEND_RUN, buildEnding } from './ending-src.mjs';
+import { parseTune } from './end-tunes.mjs';
 
 const DIETEST = process.env.DIETEST === '1';
 if (DIETEST) {                       // defaults only: each is still overridable on its own
@@ -123,8 +136,8 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // makes that level its OWN shadow, so its hole drops into a reset copy of itself -- which is
 // how a single level is playtested. Levels do NOT share a grid: lvlDimT/rowMulT/bfsDCT travel
 // with the level and every stride site reads them, so the only rule is W x H <= 256 per level.
-// CHAIN: the levels on the disk, in play order. DEFAULT 1-7 = THE GAME (2026-10-06, after the first
-// full playthrough). Every level is its own file loaded on demand into ONE live slot, so the chain
+// CHAIN: the levels on the disk, in play order. DEFAULT 1-10 = THE GAME (1-7 on 2026-10-06, after the
+// first full playthrough; 8 and 9 in October, 10 on 2026-11-13). Every level is its own file loaded on demand into ONE live slot, so the chain
 // no longer has to be resident and its length costs only disk space. CHAIN=<n> alone playtests one
 // level (CHAIN=4 -> the hub by itself); the hub's exits lead to 5/6/7 only when all three are in the
 // chain. The other shipping disk is 4,5,6,7 (leveltest.d64). History of the residency limits that
@@ -137,7 +150,7 @@ if (DIETEST) {                       // defaults only: each is still overridable
 // all the same machinery (code,ladders,graphics) as the other levels"), so a lab is just the game's
 // engine booting level 9.
 const LAB = process.env.LAB === '1';
-const CHAIN = (process.env.CHAIN ?? (LAB ? '9' : '1,2,3,4,5,6,7,8,9')).split(',').map(Number);
+const CHAIN = (process.env.CHAIN ?? (LAB ? '9' : '1,2,3,4,5,6,7,8,9,10')).split(',').map(Number);
 // D64=<name> writes somewhere other than lest-c64.d64. A variant build -- a level-wiring test, a
 // profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
@@ -150,6 +163,14 @@ const PAL = process.env.PAL === '1';
 const CLOCK = PAL ? 985248 : 1022727;            // the SID's clock, Hz
 const D64OUT = process.env.D64 ?? (PAL ? 'lest-c64-pal.d64' : 'lest-c64.d64');
 const LVL = +(process.env.LVL ?? CHAIN[0]);
+// MAPSET=v1|v2 (2026-11-04, the user: "set aside the whole map set we've had ... as a V1 map set. I'm
+// going to go through and make adjustments to each map for a V2 set"). v1 is the game as it stood
+// at 53ccde5 plus the default level 2 (the one-angel socket room, not the L2VAR trials); v2, the
+// default, is where the user's revised maps land. A level v2 has not revised yet IS its v1 level.
+// Revised in v2 so far: 1.
+const MAPSET = process.env.MAPSET ?? 'v2';
+if (!['v1', 'v2'].includes(MAPSET)) throw new Error(`MAPSET wants v1 or v2, got "${MAPSET}"`);
+const V2 = MAPSET === 'v2';
 // EVERY level the image has to be able to RUN. (It once also held the LATE levels, which arrived
 // from disk mid-game; loading on demand made every level that, so it is the chain.)
 const ALLLVL = [...CHAIN];
@@ -176,7 +197,9 @@ const ALLLVL = [...CHAIN];
 // errands and dropping through the black exit on level 4"). It was the flicker / lighting test from
 // 2026-10-09. The WIP list stays, empty, for the next level that is not ready.
 // 9 SHIPS (2026-10-15, the user: "level 9 is great. let's add it"), after 8: the sentries' level.
-const SHIP_LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+// 10 SHIPS (2026-11-13, the user: "level 10 should be shipping now. it's good. everything is good"):
+// the BIG ANGEL's level, after 9 -- see L10. It brings the flute with it (LEVEL_FLUTE borrows its ball).
+const SHIP_LEVEL_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const WIP_LEVEL_IDS = [];                        // LAB=1 still builds level 9 alone
 const WIP = process.env.WIP === '1' || LAB;
 const LEVEL_IDS = WIP ? [...SHIP_LEVEL_IDS, ...WIP_LEVEL_IDS] : SHIP_LEVEL_IDS;
@@ -184,6 +207,235 @@ for (const n of [...CHAIN, LVL]) if (!LEVEL_IDS.includes(n)) throw new Error(WIP
   ? `level ${n} is work in progress: build it with WIP=1`
   : `level ${n}: the game has levels ${LEVEL_IDS[0]} to ${LEVEL_IDS[LEVEL_IDS.length - 1]}`);
 const SOCKROOM = LVL === 2;
+// L2VAR=b|c: TRIAL level 2s (the user's sheets of 2026-11-03). Both move the exit into a pen of its
+// own guarded by a second angel at (3,14): S3 (5,14) opens (4,14) into the angel's room, and the
+// exit (2,11) is reached only from there. b: S2 (11,14) opens (10,14) into a 4x2 middle room
+// (the oracle: 58.6 s, "perhaps too easy"). c: the middle room is one corridor, S2 (10,14) opens
+// (9,14), and the east side is a 2-wide column down to it. Rows 11-14 of SOCK_MAP, the walls and
+// the sockets differ; nothing else. d (second sheet, 2026-11-03): c's south half; north, the third
+// orb moves to (9,1) (its alcove opens east along row 3) and A1 two cells nearer the door, (11,5),
+// so that NOT caging A1 behind an orb lets it reach the east path first. It carries its whole
+// map, orbs and A1. Off by default; build with D64= so the master disk is kept.
+const L2VARS = {
+  b: { rows: ["##.######......#", "#...##########.#", "#...##....##...#", "#...#.....#....#"],
+       walls: [[[8, 5]], [[10, 14]], [[4, 14]]], socks: '6,5;11,14;5,14' },
+  c: { rows: ["##.######......#", "#...#########..#", "#...#########..#", "#...#....#.....#"],
+       walls: [[[8, 5]], [[9, 14]], [[4, 14]]], socks: '6,5;10,14;5,14' },
+  d: { map: ["################",
+             "#......##.#....#",
+             "#......##.#.#.##",
+             "#.....###...#.##",
+             "#.....#..####.##",
+             "#.......#.....##",
+             "#.....#..####.##",
+             "#.....###...#.##",
+             "#......##.#.#.##",
+             "#......##.#....#",
+             "#########.######",
+             "##.######......#",
+             "#...#########..#",
+             "#...#########..#",
+             "#...#....#.....#",
+             "################"],
+       walls: [[[8, 5]], [[9, 14]], [[4, 14]]], socks: '6,5;10,14;5,14',
+       orbs: [[6, 2], [6, 8], [9, 1]], a1: [11, 5] },
+};
+// v2 level 2 (the user's sheet, 2026-11-04): 15x16. The start room (x1-5, y1-9) holds two orbs at
+// its east edge; S1 (6,5) sits in its east door and opens |1 (8,5), the wall between the little
+// (7-8,4-6) pocket and A1 (10,5) in the corridor east of it. A third orb at (8,1) is up the north
+// corridor, which runs east and down col 12 past the corridor to row 9, then south through (8,10)
+// to the lower half: S2 (11,14) opens |2 (10,14), and S3 (6,14) opens |3 (5,14), behind which A2
+// (4,14) guards the exit's room (x1-3, y11-14), exit (2,11). Start (4,7) facing north.
+L2VARS.v2 = { map: ["###############",
+                    "#......#......#",
+                    "#......#####.##",
+                    "#.....######.##",
+                    "#.....#..###.##",
+                    "#.......#....##",
+                    "#.....#..###.##",
+                    "#.....######.##",
+                    "#......#####.##",
+                    "#......#......#",
+                    "########.######",
+                    "#...####......#",
+                    "#...########..#",
+                    "#...########..#",
+                    "#....#....#...#",
+                    "###############"],
+              walls: [[[8, 5]], [[10, 14]], [[5, 14]]], socks: '6,5;11,14;6,14',
+              orbs: [[8, 1], [6, 2], [6, 8]], a1: [10, 5], a2: [4, 14], start: [0x0480, 0x0780, 0xc0, 0x00] };
+// v2 level 3 (the user's sheets, 2026-11-04). Both keep the v1 chamber, angels, start, S1/S2 and
+// walls in the north, and put the exit at (10,10), walled in on all four sides, with S2 (7,7)
+// opening (11,10), (10,11) and (11,11) round it.
+//  a: the first sheet. Col 12 is a one-wide corridor from row 5 down to row 12, closed off from the
+//     east room by col 11 (rows 6-9); the two orbs lie in its foot, (12,11) and (11,12). Oracle 26.1 s.
+//  b (the default): the second sheet, the same day. The east room becomes col 9, one wide, from row 4
+//     down to the orb at (9,9), between walls at cols 10-11; col 12 still runs down to the other orb
+//     in the corner, (12,12). New walls north of the chamber at (5,3)-(6,3) and (6,4)-(7,4), and west
+//     of it at (3,5)-(3,6) and (4,6)-(4,7), leaving S1 reached from (4,5). Rows 10-11 walled from col 5.
+// L3VAR=a|b picks one; L3_MAP and the level-3 branches below take it under V2.
+const L3VARS = {
+  a: { map: ["##############",
+             "#............#",
+             "#............#",
+             "#............#",
+             "#.....#......#",
+             "#.....###....#",
+             "#...##..#..#.#",
+             "#....#..#..#.#",
+             "#....####..#.#",
+             "#.........##.#",
+             "#........#.#.#",
+             "#.....######.#",
+             "#............#",
+             "##############"],
+       wall2: [[11, 10], [10, 11], [11, 11]], orbs: [[12, 11], [11, 12]], exit: [10, 10] },
+  b: { map: ["##############",
+             "#............#",
+             "#............#",
+             "#....##......#",
+             "#.....##.....#",
+             "#..#..###.##.#",
+             "#..###..#.##.#",
+             "#...##..#.##.#",
+             "#....####.##.#",
+             "#.........##.#",
+             "#....#####.#.#",
+             "#....#######.#",
+             "#............#",
+             "##############"],
+       wall2: [[11, 10], [10, 11], [11, 11]], orbs: [[9, 9], [12, 12]], exit: [10, 10] },
+};
+if (process.env.L3VAR && !L3VARS[process.env.L3VAR]) throw new Error(`L3VAR wants one of ${Object.keys(L3VARS).join('/')}, got "${process.env.L3VAR}"`);
+const L3V2 = V2 ? L3VARS[process.env.L3VAR ?? 'b'] : null;
+// v2 level 5 (the user's sheets, 2026-11-04; their row labels skip 5, so each grid is the 10 rows drawn).
+// Every one has TWO angels where v1 had one, the start (1,7) facing east with A1 (5,7) at the start
+// room's one-wide neck, and the idol at the top of an east column that a socket opens.
+//  a: 19x10. North, the room at rows 3-4 runs up col 1 to the row-1 gallery, where an orb (6,1) and A2
+//     (7,1) wait at its far end. S1 (9,3) opens |1 (9,2) to the exit (9,1), back to the hub. The second
+//     orb is in the comb at (13,4); S2 (15,8) opens |2 (16,8) into col 17, the idol at (17,1). Oracle 30.6 s.
+//  d (the default): 17x10, ONE socket. The exit is open from the start, at the west end of row 4 (1,4),
+//     with A2 (2,4) standing in front of it and an orb (3,4) beside A2; the other orb waits up the comb
+//     at (12,2). S1 (14,8) opens |1 (15,8) into col 15, the idol at (15,2) (it was (15,1) until the
+//     user shortened the column, 2026-11-04). The oracle (beam 300) did NOT solve the (15,1) version: it takes A2's orb, and coming back with the idol both angels cork the row-8 hall.
+// (b and c, between them, were oracle-only sheets.) L5VAR=a|d picks one under V2.
+const L5VARS = {
+  a: { map: ["###################",
+             "#.......#.#.#...#.#",
+             "#.#########.#.#.#.#",
+             "#.......#.#.#.#.#.#",
+             "#...........#.#.#.#",
+             "###########.#.#.#.#",
+             "#.....##......#.#.#",
+             "#........######.#.#",
+             "#.....##........#.#",
+             "###################"],
+       walls: [[[9, 2]], [[16, 8]]], sockWall: [0, 1], socks: '9,3;15,8', orbs: [[6, 1], [13, 4]],
+       angels: [[5, 7], [7, 1]], idol: [17.5, 1.5], exit: [9, 1], start: [0x0180, 0x0780, 0x00, 0x00] },
+  d: { map: ["#################",
+             "#################",
+             "###########...#.#",
+             "###########.#.#.#",
+             "#...........#.#.#",
+             "###########.#.#.#",
+             "#.....##....#.#.#",
+             "#........####.#.#",
+             "#.....##.......##",
+             "#################"],
+       walls: [[[15, 8]]], sockWall: [0], socks: '14,8', orbs: [[12, 2], [3, 4]],
+       angels: [[5, 7], [2, 4]], idol: [15.5, 2.5], exit: [1, 4], start: [0x0180, 0x0780, 0x00, 0x00] },
+};
+if (process.env.L5VAR && !L5VARS[process.env.L5VAR]) throw new Error(`L5VAR wants one of ${Object.keys(L5VARS).join('/')}, got "${process.env.L5VAR}"`);
+const L5V2 = V2 ? L5VARS[process.env.L5VAR ?? 'd'] : null;
+// v2 level 6 (the user's sheet, 2026-11-04; their row labels skip 3 and 9, so the grid is the 11 rows
+// drawn). Both angels are caged in col 7, A1 (7,4) above A2 (7,6), with |2 (7,5) between them.
+// The two S1s, (8,1) and (8,9), open the SAME group, |1: (9,1) and (9,9) into the east room, and the
+// cage's top (7,3) and bottom (7,7). Whichever is fed first opens it; the other then opens nothing
+// (orbMove skips a wall that is already out). The orb (1,4) is the far side of the exit from the
+// start. The second orb (9,5) is in the east room, for S2 (12,5), which opens |2: the idol's door
+// (13,5), the wall between the angels, and (4,5), which joins cols 3 and 5. S2 also CLOSES W2,
+// (4,1) and (4,9), cutting rows 1 and 9 in two (see LEVEL_CLOSE). The idol is at (14,5) and the
+// exit at (1,5). The user wants the angels to trap the player in the east room.
+// Markers for the reader: | a door and W a closer (both SOLID in the map, see stInit), the rest floor.
+const L6V2 = V2 ? {
+  map: ["################",
+        "#...W...S|.....#",
+        "#.#.#.#.###....#",
+        "#.#.#.#|#...####",
+        "#O#.#.#A##..#..#",
+        "#X#.|.#|#O..S|I#",
+        "#P#.#.#A##..#..#",
+        "#.#.#.#|#...####",
+        "#.#.#.#.###....#",
+        "#...W...S|.....#",
+        "################"].map(r => r.replace(/[|W]/g, '#').replace(/[XAOPSI]/g, '.')),
+  walls: [[[9, 1], [7, 3], [7, 7], [9, 9]],          // |1: either S1
+          [[13, 5], [7, 5], [4, 5]],                 // |2: S2
+          [[4, 1], [4, 9]]],                         // W2: S2 puts these back (a closer, LEVEL_CLOSE)
+  sockWall: [0, 0, 1], socks: '8,1;8,9;12,5',
+  close: [{ wall: 2, socks: [2] }],                  // wall 2 is a closer, shut by socket 2 (S2)
+  orbs: [[1, 4], [9, 5]], angels: [[7, 4], [7, 6]], idol: [14.5, 5.5], exit: [1, 5],
+  start: [0x0180, 0x0680, 0xc0, 0x00],               // (1.5, 6.5) facing north, at the exit
+} : null;
+// v2 level 7 (the user's sheet, 2026-11-08): three angels. A1 (3,4) is plugged in its pocket by the
+// orb (2,4); A2 (3,6) waits behind |1 (3,7); A3 (12,5) stands beside the second orb (11,5). S1 (1,1)
+// opens |1: A2's door, (2,10) at the foot of col 1 and (12,10) to the east side. S2 (10,1) opens
+// |2 (9,1), the exit room's only way in -- (5,2) and (6,3) wall it off from the west. Idol (7,8).
+const L7V2 = V2 ? {
+  map: ["################",
+        "#S..#X...|S.#..#",
+        "#.#..#...#..#..#",
+        "#.##..#..#.....#",
+        "#.OA#..#######.#",
+        "#.###..#...OA..#",
+        "#.#A#..#...#####",
+        "#.#|..###......#",
+        "#.#..##I##.....#",
+        "#.#.##...####..#",
+        "#.|....P....|..#",
+        "################"].map(r => r.replace(/\|/g, '#').replace(/[XAOPSI]/g, '.')),
+  walls: [[[3, 7], [2, 10], [12, 10]],              // |1: S1
+          [[9, 1]]],                                 // |2: S2, into the exit room
+  sockWall: [0, 1], socks: '1,1;10,1',
+  orbs: [[2, 4], [11, 5]], angels: [[3, 4], [3, 6], [12, 5]],
+} : null;
+// LEVEL 10 (the user's sheet, 2026-11-10, WIP): THE BIG ANGEL. 17x15 = 255 cells (rows 6-8 run two
+// cells further east than the rest; the gaps are solid). Two nested rings round a centre cell: the
+// big angel BA (7,7) is caged there by its three walls and the orb OO (7,6) in its one doorway. The
+// player P^ (13,7) starts facing north, beside the door |1 (14,7) to the exit XX (15,7); S1 (1,7),
+// the socket that opens it, is on the far side of both rings. The angel and the orb are GOLD.
+const L10 = {
+  // THE PILLAR HALLS (the user, 2026-11-11, for the follow/fire/back-off AI): a 10x12 floor of halls
+  // between 2x2 pillars -- one-wide halls north-south, single rows at the ends and double rows between --
+  // in a two-thick wall: the outer ring stands, the inner one breaks ("the outer ring of the outer wall
+  // I gave would be the indestructable edge and the inner ring of the exterior wall would be
+  // destructable"). 14x16, as drawn. Before it: the quarry, the grid and the sheet, all set aside.
+  map: ["##############",
+        "##############",
+        "##..........##",
+        "##.##.##.##.##",
+        "##.##.##.##.##",
+        "##..........##",
+        "##..........##",
+        "##.##.##.##.##",
+        "##.##.##.##.##",
+        "##..........##",
+        "##..........##",
+        "##.##.##.##.##",
+        "##.##.##.##.##",
+        "##..........##",
+        "##############",
+        "##############"],
+  socks: '',
+  // No exit, no orbs. Opposite corners: the angel north-east, the player south-west facing north.
+  // The exit at the central pillar's centre: cell (7, 8), drawn at its north-west corner (7.0, 8.0) --
+  // where the pillar's four cells (6-7, 7-8) meet. See LEVEL_CORNER.
+  orbs: [], angels: [[11, 2]], exit: [7, 8],
+  start: [0x0280, 0x0d80, 0xc0, 0x00],               // (2.5, 13.5) facing north
+};
+// L2VAR names a trial explicitly; otherwise MAPSET=v2 takes the user's v2 sheet, and v1 the original.
+const L2V = process.env.L2VAR ? L2VARS[process.env.L2VAR] : V2 ? L2VARS.v2 : null;
+if (process.env.L2VAR && !L2V) throw new Error(`L2VAR wants one of ${Object.keys(L2VARS).join('/')}, got "${process.env.L2VAR}"`);
 // LEVEL 5 IS BACK (2026-09-28). It was retired to a 6x6 stub on 2026-09-27 while the carry
 // mechanic was built; its map and wall groups were kept here unreferenced so that bringing it
 // back would be deleting a comment rather than reading git, and that is exactly what it was.
@@ -209,7 +461,7 @@ const STUB_MAP = [
   "#...X#",                             // XX at (4,4)
   "######",
 ].map(r => r.replace(/[IX]/g, '.'));    // markers stand on open floor, like every other map
-const L1_MAP = [
+const L1_MAP_V1 = [
   "#######################",
   "#..##..######.........#",
   "#......######.#######.#",
@@ -222,6 +474,25 @@ const L1_MAP = [
   "#..##..######.........#",
   "#######################",
 ];
+// v2 level 1 (the user's sheet, 2026-11-04): 22 wide, the east chamber one column narrower. Its
+// inner ring is now closed on the east (col 19 is solid but for row 5's orb), so the chamber's
+// angel A2 stands at (18,5) inside it with the orb (19,5) behind it in the door to the outer
+// column, and A2's leash moves in to (20,2)/(20,8). The west room, A1, the exit (15,5) and the
+// start are v1's.
+const L1_MAP_V2 = [
+  "######################",
+  "#..##..######........#",
+  "#......######.######.#",
+  "##....#######.#....#.#",
+  "##....#######.#.##.#.#",
+  "##............#.##...#",
+  "##....#######.#.##.#.#",
+  "##....#######.#....#.#",
+  "#......######.######.#",
+  "#..##..######........#",
+  "######################",
+];
+const L1_MAP = V2 ? L1_MAP_V2 : L1_MAP_V1;
 // (Level 9 is parsed up here, ahead of LEVEL_WALLS, which takes its door from the sheet.)
 // ---- LEVEL 9 (WIP; LAB=1 builds it alone): SENTRIES -- the user's map, in the user's own notation ----
 // The silver orbs no longer chase -- "you run away and don't look at them (wasting their cool large
@@ -427,35 +698,35 @@ const LEVEL_WALLS = {
   // the gate that holds it shut until the last one is fed is in orbMove, at omPdC.
   4: { walls: [[[10, 6]]],                          // the east ring's mouth (v3, 2026-10-27)
        sockWall: [0, 0, 0] },
-  2: { walls: [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
-  5: { walls: [[[11, 2]], [[20, 9]]],                // S1 up to the exit,
-       sockWall: [0, 1] },                           //   S2 into the idol's column
+  2: { walls: L2V ? L2V.walls : [[[8, 5]], [[8, 13]], [[11, 14]]], sockWall: [0, 1, 2] },
+  5: { walls: L5V2?.walls ?? [[[11, 2]], [[20, 9]]],   // S1 up to the exit,
+       sockWall: L5V2?.sockWall ?? [0, 1] },         //   S2 into the idol's column (v2 d: one socket)
   // (7,6) IS IN BOTH GROUPS on purpose: it opens on either socket. Each group is punched on its
   // own to make its delta, so either one opens it, and within a level walls only ever open --
   // wallsBack closes them all before a swap, so the two can never disagree about it.
-  6: { walls: [[[5, 5], [3, 7], [7, 6]],             // S1 frees the angel in col 3, and the orbs
-              [[3, 5], [5, 7], [7, 6]]],             // S2 frees the one in col 5, and the orbs
-       sockWall: [0, 1] },
-  7: { walls: [[[2, 10], [12, 10]],                  // S1: east to the second orb, and col 1's foot
-              [[13, 5]]],                            // S2: the only way up to the exit
-       sockWall: [0, 1] },
+  6: { walls: L6V2?.walls ?? [[[5, 5], [3, 7], [7, 6]],   // S1 frees the angel in col 3, and the orbs
+                             [[3, 5], [5, 7], [7, 6]]],  // S2 frees the one in col 5, and the orbs
+       sockWall: L6V2?.sockWall ?? [0, 1] },         // (v2: both S1s name |1, and W2 is group 3)
+  7: { walls: L7V2?.walls ?? [[[2, 10], [12, 10]],   // S1: east to the second orb, and col 1's foot
+                             [[13, 5]]],             // S2: the only way up to the exit
+       sockWall: L7V2?.sockWall ?? [0, 1] },
   8: { walls: [[[15, 5]]],                           // S1 (14,5): the door to the exit
        sockWall: [0] },
   9: { walls: L9.walls, sockWall: L9.sockWall },     // from the sheet: |1 (7,1), opened by S1 (6,1)
   3: { walls: [[[6, 5], [5, 6]],                                // S1 (5,5): the chamber's NW corner
-              [[11, 10], [12, 10], [10, 11], [10, 12]]],        // S2 (7,7): the exit's corner
+              L3V2?.wall2 ?? [[11, 10], [12, 10], [10, 11], [10, 12]]],   // S2 (7,7): the exit's corner
        sockWall: [0, 1] },
 };
 // Any level's map by number, for the few places that need a level OTHER than the live one --
 // a wall's cell ids are in its own level's width, which need not be the live one's.
 const MAP_OF = n => n === 2 ? SOCK_MAP : n === 3 ? L3_MAP : n === 4 ? L4_MAP
-                 : n === 5 ? L5_MAP : n === 6 ? L6_MAP : n === 7 ? L7_MAP : n === 8 ? L8_MAP : n === 9 ? L9_MAP : L1_MAP;
+                 : n === 5 ? L5_MAP : n === 6 ? L6_MAP : n === 7 ? L7_MAP : n === 8 ? L8_MAP : n === 9 ? L9_MAP : n === 10 ? L10.map : L1_MAP;
 // Which levels carry an IDOL, and where. Declared up here with the other level facts because
 // the sprite ladder is built long before ORBS exists, and a ladder nothing uses is 1K of bank 3
 // -- which bank 3 does not have. Levels 1-3 are unaffected by the idol existing at all.
 // One per errand room. 6 and 7 are stubs and hold theirs at (3,3) -- see STUB_MAP. Level 5's
 // stands at the top of the column its SECOND socket opens, so reaching it is the room.
-const LEVEL_IDOL = { 5: [21.5, 1.5], 6: [12.5, 6.5], 7: [7.5, 8.5] };
+const LEVEL_IDOL = { 5: L5V2?.idol ?? [21.5, 1.5], 6: L6V2?.idol ?? [12.5, 6.5], 7: [7.5, 8.5] };
 // ---- ...and an idol is a GAME object, not a level object ----
 // Which is the whole difference between it and an orb. An orb belongs to the room it is in and
 // objInit puts it back on every arrival; an idol has a PLACE in the game that outlives the room
@@ -470,7 +741,9 @@ const LEVEL_IDOL = { 5: [21.5, 1.5], 6: [12.5, 6.5], 7: [7.5, 8.5] };
 // PEDESTAL index, because pedGate's rule is "idol n belongs on drum n" and the player reads the
 // rule off the COLOURS. Pedestals are red/green/blue (PED_COLS) and level 7 is the green room,
 // so 7's idol must be idol 1. Left in level order, the blue idol belonged on the green drum.
-const IDOL_HOME = { 5: 0, 7: 1, 6: 2 };           // level -> the idol that lives there
+// V2 (the user, 2026-11-08): level 6 is the GREEN room and 7 the BLUE one, so the idols, the
+// LEVEL_PAL inks and the hub's green/blue destinations all swap together; v1 keeps 6 blue.
+const IDOL_HOME = V2 ? { 5: 0, 6: 1, 7: 2 } : { 5: 0, 7: 1, 6: 2 };   // level -> the idol that lives there
 // Its IDENTITY colour -- the light version of its home room, carried wherever it goes, which is
 // what says which pedestal it belongs on once it is out of that room. Distinct from idolCar,
 // the tint the room you are standing in puts on whatever is in your hands.
@@ -502,10 +775,14 @@ const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env
                     // green one to 7. They were the other way round, left over from the wiring
                     // that had green->6: the destinations were fixed and these were not, so the
                     // blue hole dropped you into a green room.
-                    6: { ceil: +(process.env.CEIL6 ?? 0x06), seam: +(process.env.SEAM6 ?? 0x0e) },
-                    7: { ceil: +(process.env.CEIL7 ?? 0x05), seam: +(process.env.SEAM7 ?? 0x0d) },
+                    // V2 swaps them (see IDOL_HOME): 6 green, 7 blue.
+                    6: { ceil: +(process.env.CEIL6 ?? (V2 ? 0x05 : 0x06)), seam: +(process.env.SEAM6 ?? (V2 ? 0x0d : 0x0e)) },
+                    7: { ceil: +(process.env.CEIL7 ?? (V2 ? 0x06 : 0x05)), seam: +(process.env.SEAM7 ?? (V2 ? 0x0e : 0x0d)) },
                     // 8 is DARK: ground and walls black, seams grey 1. LEVEL_FLICKER lights it.
-                    8: { ceil: 0x00, wall: 0x00, seam: 0x0b } };
+                    8: { ceil: 0x00, wall: 0x00, seam: 0x0b },
+                    // 10, the big angel's: a dark grey ground, so its gold reads (yellow on
+                    // level 1's white would vanish, as the silver orb's white did)
+                    10: { ceil: +(process.env.CEIL10 ?? 0x0b), seam: +(process.env.SEAM10 ?? 0x0c) } };
                     // 9 (the silver orb lab) is level 1's white and black on purpose: the user
                     // rendered the ball's reflections for that scheme.
 // ---- LEVEL_FLICKER: a failing fluorescent tube (the user's lighting test, 2026-10-09) ----
@@ -533,11 +810,75 @@ const FLK_TONE = FLK_TONES[process.env.FLKTONE ?? 'blue'];
 if (!FLK_TONE) throw new Error(`FLKTONE=${process.env.FLKTONE}: known tones are ${Object.keys(FLK_TONES).join(', ')}`);
 LEVEL_PAL[8].seam = +(process.env.FLKDSEAM ?? FLK_TONE.dark);
 // FLK_GAP: THE lever for how often the tube flickers -- the quiet between bursts is min..min+span-1
-// ticks (60Hz), uniform. Bursts (2..17 ticks, ~3 in 8 lit) are unchanged by it, so the flash rate
+// ticks (60Hz), uniform. Bursts (2..17 ticks, FLK_LITP of them lit) are unchanged by it, so the flash rate
 // scales with 1 / the mean gap. History: 32..255 (mean 2.4 s); 48..175 (1.9 s, the user found the
 // long gaps went on too long in the dark, 2026-10-09); 24..151 (1.5 s, "reveal the maze a bit more
-// often", 2026-10-13) -- about 25% more bursts, keeping the spread. FLKGAP=min,span overrides.
-const FLK_GAP = (([min, span]) => ({ min, span }))((process.env.FLKGAP ?? '24,128').split(',').map(Number));
+// often", 2026-10-13) -- about 25% more bursts, keeping the spread; 16..79 (0.8 s, "beyond scary
+// and drifting into frustrating", 2026-11-08) -- ~1.7x the bursts, with FLK_LITP below raising the
+// lit share of each. FLKGAP=min,span overrides.
+const FLK_GAP = (([min, span]) => ({ min, span }))((process.env.FLKGAP ?? '16,64').split(',').map(Number));
+// FLK_LITP: a burst tick is lit when the random byte is below this -- $60 (3 in 8) until 2026-11-08,
+// now $80 (1 in 2), so a burst shows ~1.3x the flashes. FLKLITP=n overrides (1..255).
+const FLK_LITP = +(process.env.FLKLITP ?? 0x80);
+if (!(FLK_LITP >= 1 && FLK_LITP <= 255)) throw new Error(`FLKLITP=${FLK_LITP}: 1..255`);
+// FLKSND: the failing tube's SOUND (the user, 2026-11-09: "a 60 cycle hum and little electrical snaps
+// with each visual flicker ... the crackles should be different frequencies and filter settings. The
+// hum should be triangle like on level 4, but the crackles could be noise or possibly thin pulse
+// waves or a mix"). A level with no song owns the SID, so: the hum on voice 1, held; a snap on every
+// lit tick, on voice 2 (noise) or 3 (a thin pulse) at random, each with its own pitch, decay and
+// filter. On by default only where a fall gates the voices off (musOff is MUSIC code) -- without
+// that the hum would follow the player into the next level. FLKHUM = Hz (60), FLKHUMS = sustain (4,
+// the hub hum's level).
+const FLKSND = process.env.FLKSND ? process.env.FLKSND === '1' : process.env.MUSIC !== '0';
+const FLK_HUM = +(process.env.FLKHUM ?? 60), FLK_HUMS = +(process.env.FLKHUMS ?? 4);
+// SVSND: level 9 gets the same sound (tubeSnd), the snap fired by each sentry spark instead of the
+// tube's flash -- "hum and zaps timed with the orbs" (the user, 2026-11-10). Same knobs as level 8's
+// (FLKHUM, FS*) for now. On by default where FLKSND is, for the same reason (musOff on the fall).
+const SVSND = process.env.SVSND ? process.env.SVSND === '1' : FLKSND;
+if (!(FLK_HUMS >= 1 && FLK_HUMS <= 15)) throw new Error(`FLKHUMS=${FLK_HUMS}: 1..15`);
+// The snaps, after the first listen (the user, 2026-11-10: "a bit too varied? Also a bit too
+// trimmed? maybe move the decay up a tiny bit to simulate this is happening in a space"). The first
+// take drew pitch over the whole register, cutoff and resonance over theirs, four filter modes, and
+// cut each snap off 6 ms after its one tick of gate. Now:
+// Heard as four disks (mix / noise / pulse / fixed 960 Hz); the user chose the fixed pitch, "the
+// release a bit longer and to about 2/3 noise and 1/3 pulse" -- the defaults below.
+//   FSWAVE = mix (noise or pulse, at random) | noise | pulse
+//   FSNOISE = in mix, the noise share out of 256 ($aa: 2 in 3)
+//   FSHZ   = 0: pitch drawn from a band per wave; n: every snap at n Hz (960, the default, is 8 x
+//            the 120 Hz a tube on 60 Hz mains buzzes at)
+//   FSREL  = the release after the tick of gate: the room's tail (5 = 168 ms; the four disks had
+//            4 = 114 ms, the first take 0)
+//   FSDEC  = the decay during it (1 = 24 ms)
+const FS_WAVE = process.env.FSWAVE ?? 'mix';
+if (!['mix', 'noise', 'pulse'].includes(FS_WAVE)) throw new Error(`FSWAVE=${FS_WAVE}: mix, noise or pulse`);
+const FS_HZ = +(process.env.FSHZ ?? 960), FS_REL = +(process.env.FSREL ?? 5), FS_DEC = +(process.env.FSDEC ?? 1);
+const FS_NOISE = +(process.env.FSNOISE ?? 0xaa);
+if (!(FS_REL >= 0 && FS_REL <= 15 && FS_DEC >= 0 && FS_DEC <= 15)) throw new Error('FSREL, FSDEC: 0..15');
+if (!(FS_NOISE >= 1 && FS_NOISE <= 255)) throw new Error(`FSNOISE=${FS_NOISE}: 1..255`);
+// Each tubeSnd copy takes its own snap: wave, hz (0 = drawn from nband, [base, mask] of the noise
+// pitch's high byte), dec, rel, noise. Level 8's is the FS* above.
+const FS_L8 = { wave: FS_WAVE, hz: FS_HZ, dec: FS_DEC, rel: FS_REL, noise: FS_NOISE, nband: [0x40, 0x3f] };
+// Level 9's ZAP (the user, 2026-11-10: "this should be a different sound than what's on level 8.
+// let's keep it all noise"): noise only, drawn from a band an octave up and wider ($80-$ff, a bright
+// spit rather than level 8's mid hiss), with a short tail -- release 3 (72 ms) against level 8's
+// 168 ms room, so it reads as a discharge, not a tube. Z9HZ / Z9DEC / Z9REL / Z9BAND=base,mask.
+// ...and then (the user, 2026-11-10: "the sound needs to be a bit zappier. right now it sounds more
+// like a click"): one tick of gate at decay 0 IS a click. o.zap holds the gate for hold[0] +
+// (rnd & hold[1]) ticks at sustain sus, and slides the noise's pitch down by slide each of them -- an
+// arc that spits and falls. Z9SUS / Z9HOLD=min,mask / Z9SLIDE.
+const FS_L9 = { wave: 'noise', hz: +(process.env.Z9HZ ?? 0), dec: +(process.env.Z9DEC ?? 4), rel: +(process.env.Z9REL ?? 5),
+                noise: 255, nband: (process.env.Z9BAND ?? '128,127').split(',').map(Number),
+                zap: { sus: +(process.env.Z9SUS ?? 10), hold: (process.env.Z9HOLD ?? '3,3').split(',').map(Number),
+                       slide: +(process.env.Z9SLIDE ?? 0x14) } };
+if (!(FS_L9.zap.sus >= 0 && FS_L9.zap.sus <= 15 && FS_L9.zap.hold[0] >= 1 && FS_L9.zap.hold[0] + FS_L9.zap.hold[1] <= 255))
+  throw new Error('Z9SUS 0..15, Z9HOLD=min>=1,mask');
+// FSFXC: while a sound effect plays, voice 3 goes through the filter at THIS low-pass cutoff (0 =
+// unfiltered) and the snaps leave the filter alone -- the SID has one filter, and a snap retuning it
+// every lit tick put clicks and a changing tone over the wall going down (the user, 2026-11-10: "the
+// wall fall sounds different here?"). $50 is a guess, not a match: level 1 never filters its effects
+// and levels 2-7 do whatever their songs do. FSFXR = its resonance (0-15).
+const FS_FXC = +(process.env.FSFXC ?? 0x50), FS_FXR = +(process.env.FSFXR ?? 4);
+if (!(FS_FXC >= 0 && FS_FXC <= 255 && FS_FXR >= 0 && FS_FXR <= 15)) throw new Error('FSFXC 0..255, FSFXR 0..15');
 if (!(FLK_GAP.min >= 1 && [2, 4, 8, 16, 32, 64, 128].includes(FLK_GAP.span) && FLK_GAP.min + FLK_GAP.span <= 256))
   throw new Error(`FLKGAP=${FLK_GAP.min},${FLK_GAP.span}: min >= 1, span a power of two <= 128 (it is an AND mask), min+span <= 256`);
 const LEVEL_FLICKER = { 8: { gnd: +(process.env.FLKGND ?? FLK_TONE.gnd), wall: +(process.env.FLKWALL ?? FLK_TONE.wall),
@@ -631,7 +972,9 @@ const LEVEL_SPR = { 4: { under: 0x00, hi: 0x0c },
                     // 9, the sentries: $d025/$d026 are the silver ball's (SILVINKS -- the orb's own
                     // defaults, grey1/grey3, unless overridden). Read lazily: SILV_INKS is declared
                     // with the ball's art.
-                    get 9() { return { under: SILV_INKS[0], hi: SILV_INKS[2] }; } };   // 5's black underside went with its black
+                    get 9() { return { under: SILV_INKS[0], hi: SILV_INKS[2] }; },
+                    10: { under: 0x09, hi: 0x07 } };   // 10: GOLD, brown underside, yellow highlight (body: GOLD_BODY)
+                                            // 5's black underside went with its black
                                             //   room; the hub's highlight is grey2, not grey3
 const SPR_ENV = { under: 'SPRU', hi: 'SPRH' };
 // ---- FLKSPR: the sprites flicker with the light too (level 8, every sprite) ----
@@ -749,6 +1092,63 @@ const HAS_PED = LEVEL_IDS.some(n => LEVEL_PEDESTALS[n]) || !!process.env.PEDESTA
 // as the other levels"), entities 0..svN-1 of the levels that have them.
 const LEVEL_SILVER = { 9: true };
 const HAS_SILVER = LEVEL_IDS.some(n => LEVEL_SILVER[n]);
+// ---- LEVEL_BIG: levels whose angels are the BIG angel (2 columns x 3 rows of sprites) ----
+// The user, 2026-11-10: "let's try a six sprite angel and see how big it feels -- it's only worth doing
+// if it's noticeably bigger". Its close rungs are six magnified sprites; its art rides in IAR2 at
+// OVLBASE, loaded with the level (lvlArt), so it costs bank 3 nothing anywhere else. See BIG_V0.
+const LEVEL_BIG = process.env.BIG === '0' ? {} : { 10: true };   // BIG=0: level 10's angel at the ordinary size, to compare
+const HAS_BIG = LEVEL_IDS.some(n => LEVEL_BIG[n]);
+// ---- BREAKABLE WALLS (the user, 2026-11-11: "every non-edge wall" breakable, "filled with the dotted
+// look from level 4") ----
+// The big angel's ball lightning breaks the wall cell it flies into. Which cells: every wall but the
+// map's OUTER RING (the user: "the rest is destroyable walls except the outer ring"). (It was every wall
+// not joined through walls to the edge, for the pillar grid; in a quarry that is none of them.) One cell a hit, through the doors' own collapse (wallTog: the sink, the
+// sound, the runs, the angel's map); see brHit. BREAK=0 builds level 10 with none.
+const LEVEL_BREAK = process.env.BREAK === '0' ? {} : { 10: true };
+const HAS_BRK = LEVEL_IDS.some(n => LEVEL_BREAK[n] && LEVEL_BIG[n]);   // the ball is what breaks them
+const BRK_CELLS = n => {                         // -> the breakable cells of level n, as y*W + x
+  const rows = MAP_OF(n), H = rows.length, W = rows[0].length, out = [];
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) if (rows[y][x] !== '.') out.push(y * W + x);
+  return out;
+};
+// NEW FACES (the user, 2026-11-11): "when wall sections are destroyed it would be nice if the second
+// row of walls was distinguished somehow", then "even the sides of the undestroyed boxes should get
+// the dots, only the front face should be plain". So EVERY face the level did not start with -- any
+// wall face whose neighbour was a wall at the start -- is drawn with a mark, BRK_MK; the faces you
+// could see at the start stay plain. One charset code and two of OCCSYN's scratch codes.
+// BRKMARK: 'dot' (level 4's: one pixel of ground, column 1 row 3 -- "dots work better than stripes"),
+// 'quad' (a four-pixel dot in the middle, columns 1-2 rows 3-4), 'stripe' (rows 1 and 5: it showed the
+// top edge chars missing it, 8x8 at a time), '0' off.
+// THE CORNER EXIT (the user, 2026-11-11: "put an exit right in the middle of the central column, so that
+// all four walls there need to be destroyed before you can fall through" -- "true center"). A level's
+// exit 0 can sit at its cell's NORTH-WEST CORNER, where four cells meet: drawn there (a frozen slide,
+// CORNER_SLD), hidden until one of the four cells round it is open, and fallen through within BRKFALLR of
+// that point once all four are (bhStep). lvlCorT (per level) names the hole's entity, $ff elsewhere.
+const LEVEL_CORNER = { 10: true };
+const HAS_CORNER = LEVEL_IDS.some(n => LEVEL_CORNER[n] && LEVEL_BREAK[n] && LEVEL_BIG[n]);
+// It is drawn as a north-west slide (code 8, slDXT/slDYT -1,-1) frozen at 127/256: the slide tables are
+// NORB long, so its entity index must fall inside them (checked where the level's entities are known).
+const CORNER_SLD = 8;
+// CORNSCALE: the corner exit drawn this many times its true size (1, 1.25, 1.5 or 2 -- shifts and an
+// add). It must stay black (see LEVEL_EXITCOL), and black alone read as a rendering glitch or not at
+// all (the user, 2026-11-13: "use another trick to make it more visible ... appear larger using the
+// same sprites"). The fall area is its own (BRKFALLR), not the drawing's.
+const CORN_SCALE = +(process.env.CORNSCALE ?? 1.5);
+if (![1, 1.25, 1.5, 2].includes(CORN_SCALE)) throw new Error(`CORNSCALE=${CORN_SCALE}: 1, 1.25, 1.5 or 2`);
+
+const BRK_MARK = HAS_BRK && process.env.BRKMARK !== '0' ? (process.env.BRKMARK ?? 'dot') : null;
+if (BRK_MARK && !['dot', 'quad', 'stripe'].includes(BRK_MARK)) throw new Error(`BRKMARK=${BRK_MARK}: dot, quad, stripe or 0`);
+// level n's OPEN cells at the start, as y*W + x: a face is one of the level's own iff its neighbour is here
+const OPEN_CELLS = n => {
+  const rows = MAP_OF(n), W = rows[0].length, out = [];
+  rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') out.push(y * W + x); }));
+  return out;
+};
+const HAS_QUAD = HAS_SILVER || HAS_BIG;          // a rung may have a RIGHT column (svQuad)
+// The big angel borrows the sentry's right-column machinery (svQuad, svRX, the right-column tables),
+// which is built with the sentries -- and level 9 ships, so every build has them.
+if (HAS_BIG && !HAS_SILVER) throw new Error('the big angel (LEVEL_BIG) needs the sentries\' svQuad: a build with level 9');
+const HAS_ART = HAS_SILVER || HAS_BIG;           // a level may want other art at OVLBASE (lvlArt)
 const PED_LVL = +(Object.keys(LEVEL_PEDESTALS)[0] ?? 0);   // only one level has them
 // IDOLHUB=1: every idol already in the pedestal room, for testing the wall without three
 // errands first. Shorthand for IDOLLOC=<that level> repeated, because that is the only thing
@@ -761,10 +1161,12 @@ if (process.env.IDOLHUB === '1') process.env.IDOLLOC ??= Array(IDOL_N).fill(PED_
 // IDOLSEAT=1 seats every idol on ITS OWN drum. IDOLSEAT=2,1,3 (1-based pedestal numbers) seats
 // them swapped, which is the only way to test that a wrong arrangement does NOT open the wall --
 // the whole point of the rule, and not otherwise reachable without playing it by hand.
+// A 0 leaves that idol on the FLOOR beside its drum: IDOLSEAT=1,0,3 is the puzzle one put-down
+// from solved (the user's PEDSINK test room, 2026-11-08).
 const IDOLSEAT = (process.env.IDOLSEAT ?? '') !== '';
 const IDOLSEAT_ON = i => {
   const v = (process.env.IDOLSEAT ?? '').split(',');
-  return v.length > 1 ? +v[i] - 1 : i;          // which pedestal idol i starts on, 0-based
+  return v.length > 1 ? +v[i] - 1 : i;          // which pedestal idol i starts on, 0-based; -1 = the floor
 };
 if (IDOLSEAT) process.env.IDOLLOC ??= Array(IDOL_N).fill(PED_LVL).join(',');
 // Where each idol STARTS -- its home room's cell, unless IDOLLOC has put it somewhere else,
@@ -782,7 +1184,7 @@ const IDOL_XY = [...Array(IDOL_N)].map((_, i) => {
   if (at === home) return (LEVEL_IDOL[home] ?? [3.5, 3.5]).map(Math.floor);
   const peds = (LEVEL_PEDESTALS[at] ?? '').split(';').filter(Boolean).map(p => p.split(',').map(Number));
   if (!peds[i]) return (LEVEL_IDOL[home] ?? [3.5, 3.5]).map(Math.floor);
-  return IDOLSEAT ? (peds[IDOLSEAT_ON(i)] ?? peds[i]) : [peds[i][0] - 1, peds[i][1]];
+  return IDOLSEAT && IDOLSEAT_ON(i) >= 0 ? (peds[IDOLSEAT_ON(i)] ?? peds[i]) : [peds[i][0] - 1, peds[i][1]];
 });
 const WALLS = LEVEL_WALLS[LVL]?.walls ?? [];
 const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): group k-1 taken out
@@ -798,7 +1200,7 @@ const punchWalls = (rows, groups) => {              // WALLOFF=k (1-based): grou
 // middle with an angel INSIDE it, whose north-west corner (two cells) goes when S1 (5,5) is
 // fed; a second socket S2 (7,7) inside it opens the exit's corner at the south-east; angels in
 // two corners as well, orbs at (12,9) and (9,12). (Revised the same day from a 4x4 chamber.)
-const L3_MAP = [
+const L3_MAP_V1 = [
   "##############",
   "#............#",
   "#............#",
@@ -814,6 +1216,7 @@ const L3_MAP = [
   "#.........#..#",
   "##############",
 ];
+const L3_MAP = L3V2?.map ?? L3_MAP_V1;
 // LEVEL 4, the user's layout of 2026-09-21: 23 x 11 = 253, the first level with an IDOL in it.
 // A long west hall, a comb of north-south slots down the east side, and two socket/wall pairs
 // that gate the only two things worth reaching: S1 (11,3) opens (11,2) to the exit above it, and
@@ -847,13 +1250,31 @@ const L4_MAP = [
   "#........##..#.#",
   "###...#.###.##.#",
   "####.#########.#",
-  "#X...####X.....#",
+  "#X...#F.#C.....#",
   "################",
 // T = pedestal and X = exit, markers for the reader like O/S/A/P elsewhere: the real positions
 // come from the tables. '|' is a removable wall and must be SOLID in the base map, or the wall
 // delta diffs two identical maps and removes nothing -- which is exactly what it did first try.
-].map(r => r.replace(/\|/g, '#').replace(/[TXP]/g, '.'));
-const L5_MAP = [
+// 2026-11-12 (the user): the bottom-right exit is gone. Its tunnel runs on three cells west into a
+// hidden hall, F the FLUTE at its end, behind the CURTAIN (LEVEL_CURTAIN): a plane on the west edge of
+// C. The '#' between F and C is the curtain's west cell, a wall in the base map (you start east of it).
+].map(r => r.replace(/\|/g, '#').replace(/[TXPFC]/g, '.'));
+// ---- THE CURTAIN (the user, 2026-11-12: "a vertical plane that is visible from either side if you're
+// looking at it and occludes what is behind it. but when you step through it's like it wasn't there
+// physically"; "draw it like any other wall, just without the dots") ----
+// The plane is the boundary between two cells, w (west) and e (east). The renderer knows only whole-cell
+// walls, so the cell on the FAR side of the plane is drawn as the wall: w while you are east of it, e once
+// you are west -- its face sits exactly on the boundary either way, and you are never inside it. Neither
+// blocks movement. ctDot (level code) swaps them as you cross and draws the face with CURT_MK.
+const LEVEL_CURTAIN = V2 ? { 4: { x: 9, y: 11 } } : {};   // the plane on the WEST edge of (x, y)
+const HAS_CURTAIN = LEVEL_IDS.some(n => LEVEL_CURTAIN[n]);
+// ---- THE FLUTE (the user, 2026-11-12): behind the curtain, at the end of its hall. Picked up like an orb,
+// it vanishes for good (fluteGot, never reset), and the ending plays its tune only if you have it. It
+// borrows the BALL LIGHTNING's machinery -- its entity index (bltIxT), its own rungs, a hi-res slot and
+// the two hooks for its height and its other sprites -- which level 10 alone uses; see FLUTE for the art.
+const LEVEL_FLUTE = V2 && LEVEL_CURTAIN[4] && HAS_BIG ? { 4: [6, 11] } : {};   // (the ball's machinery is HAS_BIG's)
+const HAS_FLUTE = LEVEL_IDS.some(n => LEVEL_FLUTE[n]);
+const L5_MAP_V1 = [
   "#######################",
   "#........O#X#...#...#I#",
   "#.#########|#.#.#.#.#.#",
@@ -869,6 +1290,7 @@ const L5_MAP = [
 // with it left as floor the wall delta diffed two identical maps and removed nothing. Every
 // other marker (orb, idol, exit, socket, player, angel) stands on open floor.
 ].map(r => r.replace(/\|/g, '#').replace(/[OXISPA]/g, '.'));
+const L5_MAP = L5V2?.map ?? L5_MAP_V1;
 // ---- LEVEL 6, the user's 16x14 (2026-09-28): four corridors and a room ----
 // Cols 1, 3, 5 and 7 are parallel north-south corridors. Row 1 runs the full width and is the
 // ONLY way between them and the east room; row 11 joins the corridors to each other but stops at
@@ -879,7 +1301,7 @@ const L5_MAP = [
 // |1 is (5,5) and (3,7); |2 is (3,5) and (5,7); |# is (7,6) and is in BOTH groups -- the first
 // wall in this game to be, which is how "opens on EITHER socket" is expressed. One variant per
 // GROUP, each a rebuild with that group alone punched, so either delta opens the shared cell.
-const L6_MAP = [
+const L6_MAP_V1 = [
   "################",
   "#..............#",
   "#.#.#.#.#......#",
@@ -896,6 +1318,31 @@ const L6_MAP = [
 // '|' is a removable wall and must be SOLID in the base map -- see L5_MAP for what happens when
 // it is not. X exit, P player, A angel, O orb, S socket, I idol: markers for the reader only.
 ].map(r => r.replace(/\|/g, '#').replace(/[XAOPSI]/g, '.'));
+const L6_MAP = L6V2?.map ?? L6_MAP_V1;
+// ---- CLOSERS: walls that come BACK when a socket is fed (2026-11-04, level 6 v2's W2) ----
+// Level 9 has its own (stGo, part of its stages); this is the plain kind any level may use: a wall
+// group that starts OUT and returns, instantly, when one of its sockets is fed. Per level, a list of
+// { wall: local group id, socks: socket indices (SOCKETS_AT order) that shut it, cells }. Each cell
+// carries the floor cell anything standing in it is PUSHED to -- the open neighbour nearest the
+// socket, so an angel caught there comes towards you (level 9's rule) -- and nothing can stand in
+// the cell once the wall is there.
+const LEVEL_CLOSE = Object.fromEntries([[6, L6V2?.close]].filter(([, c]) => c).map(([n, list]) => {
+  const rows = MAP_OF(n), socks = (n === 6 ? L6V2.socks : '').split(';').map(q => q.split(',').map(Number));
+  return [n, list.map(({ wall, socks: si }) => {
+    if (si.length !== 1) throw new Error(`level ${n}: closer ${wall} is shut by ${si.length} sockets; the push picks its side from ONE`);
+    const [sx, sy] = socks[si[0]];
+    const cells = LEVEL_WALLS[n].walls[wall].map(([x, y]) => {
+      // the player feeds from a cell beside the socket, so a closer that near could shut on them
+      if (Math.max(Math.abs(x - sx), Math.abs(y - sy)) < 3) throw new Error(`level ${n}: closer cell (${x},${y}) is within 2 cells of its socket (${sx},${sy}); the player could be standing in it`);
+      const nb = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => [x + dx, y + dy]).filter(([ax, ay]) => rows[ay]?.[ax] === '.')
+        .sort((a, b) => (Math.abs(a[0] - sx) + Math.abs(a[1] - sy)) - (Math.abs(b[0] - sx) + Math.abs(b[1] - sy)));
+      if (!nb.length) throw new Error(`level ${n}: closer cell (${x},${y}) has no floor beside it to push into`);
+      return { x, y, ax: nb[0][0], ay: nb[0][1] };
+    });
+    return { wall, sock: si[0], cells };
+  })];
+}));
+const HAS_CLOSE = LEVEL_IDS.some(n => LEVEL_CLOSE[n]);
 // ---- LEVEL 7, the user's 16x12 (2026-09-28): the EXIT is what is locked ----
 // The idol at (7,8) sits two cells north of the start, in a pocket open only to the south, and is
 // free for the taking. The way OUT is the puzzle. From the start you can reach the idol, and --
@@ -904,7 +1351,7 @@ const L6_MAP = [
 // col 1's foot behind you. Feeding S2 opens |2 at (13,5), which is the only route up the east
 // side to the exit at (5,1). So: idol free, exit earned, and an angel let out at each step.
 // Note (5,1) is an EXIT, which is a one-way trap -- it is what keeps row 1's two halves apart.
-const L7_MAP = [
+const L7_MAP_V1 = [
   "################",
   "#...#X......#..#",
   "#.#..#...#..#..#",
@@ -918,6 +1365,7 @@ const L7_MAP = [
   "#S|....P....|..#",
   "################",
 ].map(r => r.replace(/\|/g, '#').replace(/[XAOPSI]/g, '.'));
+const L7_MAP = L7V2?.map ?? L7_MAP_V1;
 // ---- LEVEL 8, the user's maze (16x11 2026-10-12, 18x11 v4 2026-10-13): lit by a failing tube ----
 // Everything is black but the seams, and a failing fluorescent tube lights the room for single
 // 60Hz frames now and then (LEVEL_FLICKER). Two avenues (cols 1 and 13; 1 and 14-16 in v4) joined by three halls (rows
@@ -965,7 +1413,10 @@ const SOCK_MAP = (() => {
     "#...##..#..#...#",
     "#......##..#...#",
     "################",
-  ].map(r => r.split(''));
+  ];
+  if (L2V?.map) rows.splice(0, 16, ...L2V.map);
+  else if (L2V) rows.splice(11, 4, ...L2V.rows);
+  rows.forEach((r, y) => { rows[y] = r.split(''); });
   return punchWalls(rows.map(r => r.join('')), LEVEL_WALLS[2].walls);
 })();
 
@@ -1054,7 +1505,8 @@ const WALL_SHUT = (cx, cy) => !inMap(cx, cy) || !!map[cellOf(cx, cy)];
 // This level's removable walls as a cell set -- ONE copy (it was rebuilt from LEVEL_WALLS in four
 // places) -- and the wall set with every one of them taken as OPEN, which is what the culling tables
 // assume, since a wall that may open must not hide what is behind it.
-const OPENABLE = new Set(WALLS.flat().map(([x, y]) => cellOf(x, y)));
+const OPENABLE = new Set([...WALLS.flat().map(([x, y]) => cellOf(x, y)),
+                          ...(LEVEL_BREAK[LVL] && LEVEL_BIG[LVL] ? BRK_CELLS(LVL) : [])]);   // breakable walls too
 const WALL_OPEN = (cx, cy) => !inMap(cx, cy) || (!!map[cellOf(cx, cy)] && !OPENABLE.has(cellOf(cx, cy)));
 const losClear = (ax, ay, bx, by, isWall) => {
   const ex = Math.floor(bx), ey = Math.floor(by);
@@ -1153,9 +1605,7 @@ const LVLALL = MULTI ? (() => {
   // list is a different set), so the main build patches lvlNxtT into every dump below.
   const { SOCKETS, ...envNoSock } = process.env;
   return OTHERS.map(n => {
-    const tmp = `./build/.lvl${n}-tables.json`;
-    subBuild({ ...envNoSock, LVL: String(n), LVLDUMP: tmp });
-    return JSON.parse(readFileSync(tmp, 'utf8'));
+    return dumpOf(`./build/.lvl${n}-tables.json`, { ...envNoSock, LVL: String(n) });
   });
 })() : null;
 // ---- ...and the LATE levels, built the same way but not resident ----
@@ -1207,12 +1657,16 @@ const BFS_FAST = process.env.BFSFAST === '1', BFS_UNROLL = process.env.BFSUNROLL
 // ANGDIAG=1: angels may step DIAGONALLY when the cell two closer is free and both corner cells are
 // clear (blkT: walls, orbs, angels). Corners are blockers only -- the visibility rule judges the
 // destination, as for any step, and the lunge draws the move so it is never a teleport.
-const BFS_JIT = process.env.BFSJIT === '1', ANG_DIAG = process.env.ANGDIAG === '1';
+// Both DEFAULT since 2026-11-01 (the user played them: "feel a bit more alive"); =0 gives the old angels.
+const BFS_JIT = process.env.BFSJIT !== '0', ANG_DIAG = process.env.ANGDIAG !== '0';
+if (HAS_CORNER && !ANG_DIAG) throw new Error('the corner exit draws through slOn\'s ANGDIAG form: ANGDIAG=0 cannot build it');
 const PATH_N = pathOpen.length;
 { // one connected region, or an angel can be permanently marooned -- and so can the player.
   // Judged with the removable wall OPEN: level 2 keeps its angel behind that wall on purpose,
   // and the two regions join the moment an orb is seated.
-  const mapC = map.map((v, c) => OPENABLE.has(c) ? 0 : v);
+  // ...and the CURTAIN's base-map wall too: you walk straight through it (LEVEL_CURTAIN)
+  const curtW = LEVEL_CURTAIN[LVL] ? LEVEL_CURTAIN[LVL].y * MAPW + LEVEL_CURTAIN[LVL].x - 1 : -1;
+  const mapC = map.map((v, c) => OPENABLE.has(c) || c === curtW ? 0 : v);
   const open = []; for (let c = 0; c < MAPN; c++) if (mapC[c] === 0) open.push(c);
   const seen = new Set([open[0]]), q = [open[0]];
   for (let h = 0; h < q.length; h++) {
@@ -1253,28 +1707,13 @@ console.error(`  angel path: ${PATH_N} open cells, BFS queue ${BFS_Q}, ${BFS_RAT
 
 // 16-bit fixed point: 256 units = 1 cell (8.8). deltaDist = 256/|dir|, clamp 65535.
 const SCALE = 256;
-const ddxLo = [], ddxHi = [], ddyLo = [], ddyHi = [], posX = [], posY = [];
-for (let a = 0; a < 256; a++) {
-  const cx = Math.cos(a / 256 * 2 * Math.PI), sy = Math.sin(a / 256 * 2 * Math.PI);
-  const dx = Math.min(65535, Math.round(SCALE / Math.max(1e-3, Math.abs(cx))));
-  const dy = Math.min(65535, Math.round(SCALE / Math.max(1e-3, Math.abs(sy))));
-  ddxLo.push(dx & 255); ddxHi.push(dx >> 8); ddyLo.push(dy & 255); ddyHi.push(dy >> 8);
-  posX.push(cx >= 0 ? 1 : 0); posY.push(sy >= 0 ? 1 : 0);
-}
 // FINEANG: the DDA deltas at QUARTER-angle resolution, 1024 entries instead of 256.
 // The angle byte gives only 48 distinct ray directions across 160 columns, so 3-5 adjacent
 // columns march the identical ray and a wall's far end can only sit on a run edge -- it jumps a
 // whole character instead of scrolling. Two fractional bits make every column distinct.
 //
-// ONLY these four tables grow -- and that used to be the whole story, with the note here saying
-// absSinT/absCosT could stay on the integer angle because "u for seams is already +-1-2 columns".
-// That reasoning was circular: u was +-1-2 columns BECAUSE calcU added the 8-bit rayOffT while the
-// rays were cast fine, describing a direction the ray never took. calcU builds the fine angle now
-// and interpolates these two tables with the spare two bits, so they need not grow either.
-// posXT/posYT genuinely can stay coarse, and not by luck: they hold the SIGN of cos/sin, which
-// flips only at coarse 0 and 128 -- fine 0 and 512, both multiples of four. ssAng is fine>>2, so a
-// coarse bucket can never straddle a sign change.
-// castRay itself no longer forms a coarse angle at all -- its step signs come from rqH.
+// (The byte-angle originals, and calcU's byte-angle |sin|/|cos| and sign tables, are gone: calcU
+// reads qcosT at the fine angle, and castRay's step signs come from rqH.)
 // ON by default: the byte angle gave only 48 distinct ray directions across 160 columns, which
 // made every wall's far end jump a whole character instead of scrolling.
 
@@ -1354,7 +1793,7 @@ const PIVNEAR = process.env.PIVNEAR !== '0';
 // The translation term was justified by an A/B against the rotation-only prediction (PIVTRANS=0,
 // since removed) -- the only way to tell a WORKING translation term from a broken one, since a
 // broken one cannot corrupt the image (extra cuts only split spans) and shows up purely as lost rays.
-// signed sin * 128, by BYTE angle. absSinT/absCosT hold the magnitudes but put the sign in a
+// signed sin * 128, by BYTE angle. absSinT/absCosT (gone since) held the magnitudes with the sign in a
 // separate table, which is a second lookup and a branch on a path that multiplies twice per
 // boundary per frame. Only SIN is stored: cos(a) = sin(a + 64) at 256 units to the turn, and
 // the quarter-turn add is four cycles against a whole page of table -- which matters, because
@@ -1664,47 +2103,16 @@ for (const [cell, hs] of hazCell) for (const h of hs) {
                                   orig: h.run, cells });
 }
 const HAZ = hazRec.length > 0;
-// (parent, spare) id pairs for mkRuns's tail, $ff-terminated, padded to the largest resident
-// level with $ff so the terminator is where the shorter level put it. Travels in the manifest.
-const hazSpTab = (() => {
-  const own = [...hazSpare].flatMap(([run, spare]) => [run, spare]).concat([0xff]);
-  const n = Math.max(own.length, ...(LVLALL ?? []).map(l => l.tables.hazSpT?.length ?? 0));
-  while (own.length < n) own.push(0xff);
-  return own;
-})();
-// cell, table selector, spare id, original id, count, then that many wall-cell indices; $ff ends.
-// hazSet advances by count+5 in one 8-bit add, so a record may not be longer than that allows.
-const HAZTBL = { 0: 'runWT', 1: 'runET', 2: 'runNT', 3: 'runST' };
-// Everything is (addrLo, addrHi, value) triples ending in $ff, so ONE walker serves both jobs.
-const hazTrip = (sel, cell, val) =>
-  `<${HAZTBL[sel]}+${cell},>${HAZTBL[sel]}+${cell},${val}`;
-// The restore list puts every splittable run back to its merged id. Resetting all of them
-// unconditionally is what removes the need to remember which cell was patched last -- there is
-// no revert step, no hazCur, and no way for a stale patch to survive a cell change.
-const hazRst = [];
-for (const [run, ] of hazSpare) {
-  const face = runFace[run], tbl = hazRunT[face], sel = HAZFACE[face];
-  for (let c = 0; c < MAPN; c++) if (tbl[c] === run) hazRst.push(hazTrip(sel, c, run));
-}
-const hazKey = r => `${r.orig}@${r.cells[0]}`;
-const hazUniq = [...new Set(hazRec.map(hazKey))];
-const hazLists = hazUniq.map(k => {
-  const r = hazRec.find(x => hazKey(x) === k);
-  return r.cells.map(c => hazTrip(r.sel, c, r.spare)).join(',') + ',$ff';
-});
-// hazCT is parallel to the cell list; each entry points at one of the SHARED lists above.
-const hazPick = hazRec.map(r => hazUniq.indexOf(hazKey(r)));
+// THIS level's hazards RAW, for the main build to merge across the level's wall states and lay
+// out (see HAZ_PLAN): cells and run ids only -- no addresses, and no spare ids, which the main
+// build numbers above every state's run count. The run tables ride along so it can check that a
+// split run is the SAME run (same id, same cells) in every state before restoring it by id.
+const HAZ_RAW = { nReal: nextRun - hazSpare.size,
+  recs: hazRec.map(({ cell, sel, orig, cells }) => ({ cell, sel, orig, cells })),
+  runs: [runW, runE, runN, runS].map(t => [...t].slice(0, MAPN)) };
 if (HAZ) {
-  const bytes = hazRst.length * 3 + 1 + hazLists.reduce((n, l) => n + l.split(',').length, 0)
-              + hazRec.length * 3;
-  console.error(`  ${hazUniq.length} distinct (run,split) lists shared by ${hazRec.length} cells`);
-  const fits = (n, cap, what) => { if (n > cap)
-    throw new Error(`hazard ${what} is ${n} bytes, fragment holds ${cap}`); return n; };
-  // Bounded by the next table above it, NOT by $c000: the block no longer sits at the top of
-  // the image, so overrunning it would land on rayOffQS rather than on empty space.
-  fits(bytes + 28, HAZ_TOP - HAZ_BASE, 'block');   // +28 for hzRun itself
-  console.error(`  ${hazRec.length} patch records, ${hazSpare.size} spare run ids ` +
-                `(${[...hazSpare].map(([r, s]) => `${r}->${s}`).join(' ')}), ${bytes} bytes`);
+  console.error(`  ${hazRec.length} patch records, ${hazSpare.size} run(s) split ` +
+                `(${[...hazSpare.keys()].join(' ')})`);
   // Every hazardous cell must come out with a patch, or the split silently does not happen and
   // the wall goes back to vanishing. Checked rather than argued -- the whole point of computing
   // this at build time is that the guarantee is verifiable.
@@ -1838,8 +2246,7 @@ const embedIn = (name, arr, hosts) => {
 };
 // ---- A QUARTER-TURN PAIR IN 320 BYTES, NOT 512 ----
 // cos is sin a quarter turn (64 units) along, so a sin-like table and its cos-like partner are the
-// same bytes at two offsets (sharedPair, k = 64). Used for moveYT/moveXT, absSinT/absCosT and
-// posYT/posXT.
+// same bytes at two offsets (sharedPair, k = 64). Used for moveYT/moveXT.
 const quarterPair = (sinName, sin, cosName, cos) => sharedPair(sinName, sin, cosName, cos, 64);
 
 const f0Lo = [], f0Hi = [], f1Lo = [], f1Hi = [];
@@ -2598,7 +3005,7 @@ if (!OCCSYNTH) DIAGEARLY.push('OCCSYNTH=0');
 // covers one wide entity or two small ones. Paid for by refitting the cell codebook at KCELL=197:
 // 201 cell codes -> 199, predicted error 6,932,472 -> 6,963,243 px over 512M frames, which is
 // 0.014 px/frame either way. The charset's tail is nearly free -- see the char-headroom note.
-const OCCSYN_N = +(process.env.OCCSYNN ?? 8);
+const OCCSYN_N = +(process.env.OCCSYNN ?? (BRK_MARK || HAS_CURTAIN ? 6 : 8));   // 6 with new faces marked, or a curtain: BRK_MK / CURT_MK take codes, and they go in pairs (one a buffer)
 // OCCSYNEDGE: also synthesise a PARTIALLY COVERED cell, whatever its glyph says.
 //
 // occVrtT answers "can a column split draw this cell's shape", and that is not the only way a
@@ -2805,13 +3212,25 @@ if ((process.env.CELLMARK === '1' || CELLMARK_OCC) && (CELLMARK_OCC || DIAGEARLY
   }
 }
 
+// BRK_MK: a new face's fill -- SOLID with GROUND (pair 00) cut into it, BRKMARK's shape; a code of its
+// own, so the level's own faces keep plain SOLID; brStr picks it per column. Charset B is A flipped,
+// so the lower half's mark sits mirrored (row 3 -> 4) -- level 4's dot does the same.
+const BRK_MK = BRK_MARK ? glyphs.length : -1;
+if (BRK_MARK) glyphs.push(glyphs[SOLID].map((b, r) =>
+  BRK_MARK === 'dot' ? (r === 3 ? b & ~(3 << 4) : b)                       // column 1 (bits 5-4), row 3
+  : BRK_MARK === 'quad' ? (r === 3 || r === 4 ? b & ~(15 << 2) : b)        // columns 1-2, rows 3-4
+  : (r === 1 || r === 5 ? 0 : b)));                                        // rows 1 and 5
+// CURT_MK: the CURTAIN's fill (HAS_CURTAIN) -- plain SOLID, every column pair 01, without the level's
+// dot (symPut puts that into SOLID itself). Drawn, cached and occluded exactly as BRK_MK is.
+const CURT_MK = HAS_CURTAIN ? glyphs.length : -1;
+if (HAS_CURTAIN) glyphs.push(Array(8).fill(0x55));
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + ${NSEAM} seams = ${glyphs.length} > 256`);
 // OCCSYN's scratch codes are the top OCCSYN_N: they must not be allocated to anything. Checked
 // here, where the glyph list is final, rather than trusting that KCELL was refit low enough.
 if (glyphs.length > 256 - OCCSYN_N) throw new Error(
   `charset has ${glyphs.length} codes; OCCSYN needs the top ${OCCSYN_N} free -- refit with a smaller KCELL`);
 console.error(`charset: ${CELLCODES} cell codes + ${NGLYPH} readout + ${NSEAM} seam + 7 occluder ` +
-  `+ 6 white-backed + 8 seam-edge = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
+  `+ 6 white-backed + 8 seam-edge${BRK_MARK ? ' + 1 new-face mark' : ''} = ${glyphs.length}/256  -- ${256 - glyphs.length} free`);
 // Ramps and steps share one placement pass (so pairing can mate a ramp with a step), which
 // means there is no contiguous "steps" range to report -- they interleave by frequency.
 console.error(`  codes: 0 BLANK, 1 SOLID, 2-${CELLCODES-1} ramps+steps interleaved, ` +
@@ -3632,19 +4051,20 @@ const DUMPH = flag('DUMPH');
 // is comparable across builds without breakpointing the frame counter.
 // Level 2 starts you on the SOUTH arc facing west along it -- see PX/PY below for why there.
 // ---- where each level STARTS ----
-// Per level, not per build: dieKey restarts with "jmp entry", and lvlMeT is RAM, so after dying
+// Per level, not per build: the death restart is "jmp entry", and lvlMeT is RAM, so after dying
 // on level 4 the boot used to place you at the BUILD's start -- level 1's (2.5, 2.5) -- on level
 // 4's map, which is inside a wall. lvlStart reads the live level instead, so a death always
 // returns you to the official start point of the level you died on.
 const LEVEL_START = {
   1: [0x0280, 0x0280, 0x19, 0xc0],
-  2: [0x046e, 0x07dc, 0xdb, 0x00],   // the user's spot, 2026-09-22
+  2: L2V?.start ?? [0x046e, 0x07dc, 0xdb, 0x00],   // the user's spot, 2026-09-22
   3: [0x0180, 0x0180, 0x20, 0x00],
   4: [0x0380, 0x0680, 0x00, 0x00],   // the hub: the player's cell (3,6), facing the pedestals
-  5: [0x0180, 0x0880, 0x00, 0x00],   // (1.5, 8.5), the west end of the hall, facing east
-  6: [0x0180, 0x0780, 0xc0, 0x00],   // (1.5, 7.5) facing NORTH, straight at the exit one cell away
+  5: L5V2?.start ?? [0x0180, 0x0880, 0x00, 0x00],   // (1.5, 8.5), the west end of the hall, facing east (v2: (1.5, 7.5))
+  6: L6V2?.start ?? [0x0180, 0x0780, 0xc0, 0x00],   // (1.5, 7.5) facing NORTH, straight at the exit one cell away
   7: [0x0780, 0x0a80, 0xc0, 0x00],   // (7.5, 10.5) facing NORTH, the idol two cells ahead
   8: [0x0180, 0x0580, 0x00, 0x00],   // (1.5, 5.5), the west avenue, facing east down the middle hall
+  10: L10.start,
   9: [0x0180, 0x0500, 0x00, 0x00],   // the sentry test's two PPs, (1,4) and (1,5): ON the line between them, (1.5, 5.0), facing east
 };
 // ---- STAGE=n (level 9, for testing): start as though sockets 1..n had just been fed ----
@@ -3969,9 +4389,26 @@ const PROFSUB = PROFILE0 && !PROFILE1 && !PROFCOARSE;
 // raster wait absorbing the extra work.
 const DOUBLE = process.env.DOUBLE || '';
 if (DOUBLE) DIAG.push(`DOUBLE=${DOUBLE}`);
-// NOHUD=1 drops the fps counter and the X/Y readout, keeping only the two hex digits of
-// the angle so SPIN can still be measured. That is what the shipping build would look like.
-const NOHUD = flag('NOHUD');
+// HUD=1 (diagnostic): the readout -- raster count, LEVEL line, fps, X/Y/angle, each angel's cell --
+// drawn every frame from the start. The game has none since 2026-11-12 (the user: "I suppose it's
+// time to let the HUD go"), and with it went the 'H' toggle and the 'L' level skip. NOHUD=1 is
+// still accepted, and is now what every build is: the test tools pass it so that they can build
+// a base commit from before this, which had the HUD on 'H'.
+const HUD = flag('HUD');
+const NOHUD = !HUD;
+// LVSKIP: the secret level select -- hold 'L' and press a digit, and you drop to that level (0 is
+// level 10; your own level's digit restarts it). The user, 2026-11-13: getting to level 8 takes ~15
+// minutes of play, and the 'L' skip went with the HUD. See lvKey for how it stays safe. ON by
+// default since the same day's audit made room (level 4's wall mark and level 8's orb shadow went
+// to level code); LVSKIP=0 leaves it out.
+const LVSKIP = process.env.LVSKIP !== '0';
+// FIRESTRAFE (DEFAULT; =0 for the old controls): a joystick game needs strafing, and the stick has
+// one button. So while FIRE is held, LEFT and RIGHT strafe instead of turning -- and since a held
+// button is now a modifier, picking up and putting down happen when it is LET GO, and only if it
+// did not strafe while held (the user, 2026-11-12: "it doesn't drop the ball. ball only drops if
+// you're stationary or you press the button for some tiny amount of time"). A tap still picks up
+// while walking: only a strafe spends the press.
+const FIRE_STRAFE = process.env.FIRESTRAFE !== '0';
 // PADIN=n: burn n x ~13 cycles in the input phase doing nothing, pose untouched. A DIAGNOSTIC to
 // answer one question: does the cost of the phases AFTER input depend on WHEN they start?
 const PADIN = +(process.env.PADIN ?? 0);
@@ -4157,10 +4594,8 @@ const PAL_N = Math.max(...LEVEL_IDS);             // indexed by level id - 1, so
 // wall-base overhang's stamp and it is solid wall as far as the eye is concerned, so on a marked
 // level it has to carry the mark too -- otherwise the stamped cells read as blank black holes in
 // an otherwise dotted wall, which is exactly what the user saw. The dot is pair 00 either way
-// (the ground's colour showing through), so this is symRows with $ff for the field.
-const symRowsOcc = art => symRowsInk(art, 0xff, 0);
-const symRows = art => symRowsInk(art, 0x55, 0);
-// ...and the same mark in any ink. The dot has always been pair 00 -- the GROUND showing through
+// (the ground's colour showing through), so it is the same rows with $ff for the field.
+// The mark in any ink: The dot has always been pair 00 -- the GROUND showing through
 // the wall -- which is invisible the moment a level paints its ground the same colour as its
 // walls. Level 5 does exactly that (black on black, so the outline is the only ink in the room),
 // and there the dot wants the SEAM ink instead: pair 10, the one colour that level has.
@@ -4304,7 +4739,7 @@ const SEAMS = process.env.SEAMS !== '0';
 // the wall-aligned coordinates of it. So "wide enough" rearranges to
 //     s*s <= dp * (K/n - dp)
 // with no division and no trigonometry, and both inputs are subtracts on bytes already in hand:
-// runPlaneT holds the wall's plane, px/py the player, and ssK the boundary. Held in QUARTER cells
+// runPFT holds the wall's plane, px/py the player, and ssK the boundary. Held in QUARTER cells
 // so the player's fractional position survives a byte: s_q*s_q <= dp_q * (4K/n - dp_q).
 // Quarter and not half, and ROUNDED not truncated, because the limit goes as sqrt(dp) and half
 // cells are far too coarse near the player. Walking dp from 1.027 to 0.973 truncated it from 1.0
@@ -4624,7 +5059,9 @@ const SVHIT_R = Math.round(SVHITR * 256), SVHIT_D = Math.round(SVHITR * 256 * Ma
 if (HAS_SILVER && (SVHIT_R < 1 || SVHIT_D > 255)) throw new Error(`SVHITR=${SVHITR}: 0 < R and R * 1.41 under a cell (<= 0.70)`);
 // 60Hz ticks: the quiet between bursts (min, span -- level 8's FLK_GAP), and a burst's shortest
 // length (it runs min..min+15).
-const [SVGAP_MIN, SVGAP_SPAN] = (process.env.SVGAP ?? '24,128').split(',').map(Number);
+// 12,64 since 2026-11-10 (the user: "maybe they (including graphics) need to be a bit more common"):
+// half the old 24,128, so about twice the bursts.
+const [SVGAP_MIN, SVGAP_SPAN] = (process.env.SVGAP ?? '12,64').split(',').map(Number);
 const SVBUR_MIN = +(process.env.SVBUR ?? 4);
 // ---- THE KILL: a CHARGE, not a touch (the user, 2026-10-13: "charge threshold") ----
 // Touching a sentry charges you by the 60Hz ticks it lasts; out of reach it drains at half that
@@ -4632,9 +5069,13 @@ const SVBUR_MIN = +(process.env.SVBUR ?? 4);
 // hit octagon's edge survives, walking into one or riding with it does not. Crossing the whole
 // 0.9-cell zone at running speed is ~19 ticks, so 10 means "never cross straight through one".
 // The border flash is already the touching signal, so it is the meter. SVSHOCK = the shocked
-// screen's length in 60Hz frames, then black until RETURN.
+// screen's length in 60Hz frames, then black until fire.
 const SVKILL = +(process.env.SVKILL ?? 10);
 const SVSHOCK = +(process.env.SVSHOCK ?? 40);
+// BDKEEP: shock frames the ANGEL stays in view on level 10's angel death (bdDie), frozen where the whip
+// turn left it (the user, 2026-11-12: half the shock, then "cut it shorter -- maybe 1/2 ... maybe 1/4")
+const BD_KEEP = +(process.env.BDKEEP ?? 5);    // 5 (the user, 2026-11-12: "I like keep 5 best. It's subtle but works")
+if (!(BD_KEEP >= 1 && BD_KEEP < SVSHOCK)) throw new Error(`BDKEEP=${BD_KEEP}: 1..${SVSHOCK - 1} shock frames`);
 if (HAS_SILVER && (SVKILL < 1 || SVKILL > 250 || SVSHOCK < 1 || SVSHOCK > 255)) throw new Error(`SVKILL=${SVKILL} (1..250) / SVSHOCK=${SVSHOCK} (1..255)`);
 if (HAS_SILVER && (SVSLIDE < 2 || SVSLIDE > 120 || ![2, 4, 8, 16, 32, 64, 128].includes(SVGAP_SPAN) || SVGAP_MIN < 1 || SVGAP_MIN + SVGAP_SPAN > 256))
   throw new Error(`SVSLIDE=${SVSLIDE} (2..120) / SVGAP=${SVGAP_MIN},${SVGAP_SPAN} (min >= 1, span a power of two)`);
@@ -4908,7 +5349,7 @@ for (const m of PICS.maps) if (m.map.length !== 1000)
   throw new Error(`death-pics.json ${m.name} is ${m.map.length} cells, not 1000`);
 // ONE picture, always (2026-10-30). The scene once ESCALATED -- death n showed n pictures, counted
 // by dieN -- but only one picture ships, and the counter reset only when a scene played to its end.
-// RETURN restarts from anywhere, so skipping a scene left dieN at 1; the next death then showed the
+// RETURN then restarted from anywhere, so skipping a scene left dieN at 1; the next death then showed the
 // picture, a second boom, and "picture 2" read past a one-entry address table: a screen of garbage
 // (the user, level 7). The sequence is gone rather than patched: one death, one picture.
 const NPIC = 1;
@@ -4961,23 +5402,38 @@ const DIE_SHIFT = Math.max(1, Math.round(Math.log2(DIE_OUT / 5)));
 // So it stays exactly where it touched you -- behind you, one cell away -- and the scene wrenches
 // the player round to face it.
 //
-// DIRECTION comes from the cell delta, which is one of the eight neighbours because that is what
-// being marked means (dieChk's own reach test is |dx|<=1 and |dy|<=1). Nine entries, indexed
-// (dy+1)*3 + (dx+1).
-const angBearT = [];
-for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
-  angBearT.push(dx === 0 && dy === 0 ? 0 : Math.round(Math.atan2(dy, dx) / (2 * Math.PI) * 256) & 255);
-// The STOP is the projection, not this table: a cell-centre bearing ignores where in its own cell
-// the player is standing, which at one cell away is worth up to 32 units -- the angel would arrive
-// off to one side. ocoff is the real column offset and it is exact.
-// Close enough to lock on. A single frame of turn can cover more than this, so it is a WINDOW,
-// not a tolerance: once inside it the residual is corrected exactly and the turn stops dead. That
-// is what stops the angel sometimes halting short and sometimes sailing past.
+// DIRECTION: dieAim's exact bearing from where the player stands to the angel's cell centre (the
+// angel is one of the eight neighbours, which is what being marked means). It replaced a nine-entry
+// cell-to-cell table, angBearT, which ignored where in its own cell the player stood.
+// The projection REFINES it: ocoff is the sprite's real column offset, so once the angel has read
+// inside +-DIE_CTR columns on two frames running, the target becomes pa +- ocoff * COL_FINE.
 const DIE_CTR  = +(process.env.DIECTR ?? 24);     // columns
+// ---- DIE_ARR: the turn and the falling note ARRIVE TOGETHER (the user, 2026-11-04) ----
+// "a quick calculation of how far the player has to turn to coincide with the sound: let's say it's
+// always 3 seconds for the sound to reach its destination pitch, calculate how far the player needs
+// to turn each frame to arrive on centered angel as the destination pitch is reached. then we hold".
+// So both are planned over DIE_ARR 60ths from dieGo. The glide (dsTick) eases onto its chord in
+// exactly the same ticks; the turn aims at the angel's exact bearing (dieAim) and each frame covers
+// the remaining angle times (ticks this frame / ticks left), so it lands on the same tick whatever
+// the frame rate. History: it continued the player's own rate (a crawl if they were barely turning,
+// "the spin is very slow and doesn't reach the angel"), then a fixed rate for one build.
+// ...and BY QUADRANT, the same day (the user: "3 seconds might be right for a full turn but will be
+// way too slow if the angel is onscreen ... If the angel is within the forward 90 degrees, 1 second
+// sound/turn to center. If it's in the left or right 90 degrees, 2 second ... back 90 degrees 3
+// second"). DIEARRS = the three, in 60ths: front (within 45 degrees, 32 units), side, back (past
+// 135, 96 units). Then DIE_PAUSE on the arrived note before the picture.
+const DIE_ARRS = (process.env.DIEARRS ?? '60,120,180').split(',').map(Number);
+if (DIE_ARRS.length !== 3) throw new Error('DIEARRS: three durations, front,side,back');
+const DIE_ARR = Math.max(...DIE_ARRS);
 // 160 columns span the 47-unit FOV, so one column is 256/(160/47) = 75 fine units of angle.
 const COL_FINE = Math.round(256 / (NLOG / FOV));
-const DIE_CAP  = +(process.env.DIECAP ?? 255);    // frames before giving up: a backstop only
-const DIE_PAUSE = +(process.env.DIEPAUSE ?? 120); // two seconds held on the angel before the cut
+const DIE_PAUSE = +(process.env.DIEPAUSE ?? 60);  // a second on the arrived note before the cut (was 2 s)
+// The elapsed clock is a byte. Turning, it runs to DIE_ARR; landing re-dates it to DIE_OUT -
+// DIE_PAUSE, which must be past the 16 ticks the fade table covers or the room would fade again.
+if (Math.min(...DIE_ARRS) < 16 || DIE_ARR >= DIE_OUT || DIE_OUT - DIE_PAUSE < 16 || DIE_OUT > 255)
+  throw new Error(`DIEARRS=${DIE_ARRS}, DIEOUT=${DIE_OUT}, DIEPAUSE=${DIE_PAUSE}: need 16 <= each of DIEARRS < DIEOUT <= 255 and DIEOUT - DIEPAUSE >= 16`);
+// atan(r/64) for r = 0..64, in QUARTER angle units (0..128 = 0..45 degrees): dieAim's octant table.
+const atanQT = [...Array(65)].map((_, r) => Math.round(Math.atan(r / 64) / (2 * Math.PI) * 1024));
 // Caught in plain sight, the scene does NOT start on the touching frame: it has you, and then
 // half a second passes with nothing changing at all before the room begins to go. Counted in
 // 60ths and drained by dtv, so it is half a second at any frame rate.
@@ -4997,8 +5453,9 @@ const dieRotT = dieProf.map(v => Math.max(0, Math.min(255, Math.round(v * dieSca
 const DIE_SHOW = +(process.env.DIESHOW ?? 120);   // the face on screen, 0.9s
 // ...OR any turn of this much while still cornered. An angel on your flank can need most of a
 // revolution to come into view, and the player is turning the whole time wondering why nothing
-// is happening. 256 units to the circle, so 30 degrees is 21.
-const DIE_TURN = +(process.env.DIETURN ?? 21);   // and where it has got to when the screen is black
+// is happening. 256 units to the circle, so 20 degrees is 14 (30, 21, until 2026-11-02: with the
+// angel drawn, a turn is only for one still off screen, and the user asked for it narrower).
+const DIE_TURN = +(process.env.DIETURN ?? 14);   // and where it has got to when the screen is black
 // One step darker, for any colour. The fade-out reads the LIVE registers and walks them down
 // this, so it does not care which inks the level set.
 const CLUM = { 0:0, 6:.15, 9:.2, 11:.31, 2:.35, 4:.4, 8:.42, 12:.5, 14:.55, 5:.55, 10:.6, 3:.65,
@@ -5091,6 +5548,7 @@ for (let h = 42; h >= 24; h -= 3) ANGLAD.push({ h, exp: 1 });      // apparent 8
 for (let h = 42; h >= 6;  h -= 3) ANGLAD.push({ h, exp: 0 });      // apparent 42..6, plain
 const ANGBMH = [...new Set(ANGLAD.map(r => r.h))].sort((a, b) => b - a);
 const ANGIDX = new Map();                        // height -> [lower slot, upper slot or -1]
+const ANGBM0 = ORBBM.length;                     // the angel's bitmaps, contiguous: IAN0 (see IAN)
 for (const h of ANGBMH) {
   const g = angScale(angW(h), h);
   const lo = ORBBM.length; ORBBM.push(angBytes(g, 21));         // rows 21..41: the lower sprite
@@ -5098,6 +5556,7 @@ for (const h of ANGBMH) {
   if (h > 21) { up = ORBBM.length; ORBBM.push(angBytes(g, 0)); }// rows 0..20: only if it reaches
   ANGIDX.set(h, [lo, up]);
 }
+const ANGBM1 = ORBBM.length;
 const ANG_V0 = LADDER.length;                    // the angel's rungs follow the orb's in the
                                                  // SHARED variant tables, so every table indexed
                                                  // by ovar extends for free
@@ -5359,12 +5818,321 @@ if (HAS_SILVER) {
     ORBTALL.push(r.h * (r.exp || r.ey ? 2 : 1));
   }
 }
-const isSv = v => v >= SV_V0;                    // a sentry's rung (none in a build without them)
-const isAngV = v => v >= ANG_V0 && v < SV_V0;    // an angel's
+// ---- THE BIG ANGEL'S RUNGS (LEVEL_BIG): the fourth range, after the sentry's ----
+// THE FLYING ANGEL (the user, 2026-11-10: art/angel-fly.png -- wings spread, no legs, a trailing robe;
+// "see if you can make something from that with six sprites"). Spread wings are wider than they are
+// tall, so a grid of 2 x 3 wastes half of itself; instead each SPRITE ROW gets only the sprites its ink
+// needs, centred on that ink -- the closest is 3 + 2 + 1, an inverted pyramid like the figure. At most
+// BIG_MAXSPR a rung: past that the row that loses fewest pixels drops a sprite.
+// Each SET of bitmaps (BIG_SETS, rows of art) is drawn plain at its height, and -- only where that is
+// taller than any plain set (BIG_SETS[0]) -- magnified at twice it as well. IAR2 holds what fits from
+// OVLBASE to $fe00, bitmaps and BIGTBL together.
+// Its bitmaps join ORBBM here only to be MEASURED (extents, boxes); they ship as IAR2 (BIGART) and
+// orbPtrT and the part tables (bigPP/bigPX/bigPY) name them at OVLBASE.
+// Scale: BIGS times the ordinary angel's height at the same distance. 2.2 holds the full 110 rows
+// from about 1.5 cells in (the user: "f150 is about right").
+const BIGS = +(process.env.BIGS ?? 2.2);   // standing art: 1.5 "went from 4' to 5'" (the user), 2.5 wall-high
+// BIGFLOAT=1: it floats, centred BIGC rows above the horizon whatever the distance (the user: "make it
+// floating above the ground"), instead of standing on the floor line. See bigYT.
+const BIGFLOAT = (process.env.BIGFLOAT ?? '1') === '1', BIGC = +(process.env.BIGC ?? 0);
+const BIG_ART = process.env.BIGART ?? 'angel-fly.png';
+// HOW IT MOVES (the user, 2026-11-10: "follow at 2/3 player speed smoothly ... It should stop when it
+// reaches maximum size"; "the sentry code is the only thing that moves smoothly now -- maybe that's a
+// better model"). It is: a sentry glides because its step IS its slide, and so is this one's -- the
+// level's step period is BIG_PER, one cell in 96 ticks against the player's 64 (2/3 speed), and the
+// lunge spans all of it (slTick indexes the slide through bigSlT). It chases by the angels' own fill, in
+// plain sight (no gaze, no covering rule), and HOLDS -- mid-glide if need be -- whenever it is drawn at
+// its top rung (bgTop): cells are too coarse to stop at the right distance in a corridor (they stand
+// at 1, 2, 3 cells; full size starts at ~1.4). BIGSTOP is only the floor under that: no step into a
+// cell nearer than that many cells. It marks nobody, for now: the user wants to eyeball it.
+// BIGPER: its ticks a cell. The player ALWAYS RUNS: 12/256 of a cell a tick, 3 cells/s, ~21 ticks a
+// cell (the old walk was 64). 96 was the first ask, 2/3 of that walk; 21 = the player's own pace (the
+// user, 2026-11-10: "the same as the player -- I want to see if the mapping lag provides enough gap";
+// "remember that i run all the time now"); 27 = 4/5 of that ("let's slow it down just a bit ... 4/5?");
+// 32 = 2/3 of the RUN -- "2/3 speed was actually right ... it's just that we were doing 2/3 of half before";
+// 43 = 1/2 of the run (2026-11-11, the quarry: "drop the angel's movement speed to 1/2 (down from 2/3)").
+// BIGSTOP 0.5 with the follow/fire AI (BIG_AI2): it strikes by DISTANCE now (BIG_HITD), so it must be
+// free to step into any cell beside yours -- at 1.0 it could stand two cells off, short of its top rung,
+// and never reach you.
+const BIG_PER = +(process.env.BIGPER ?? 43), BIGSTOP = +(process.env.BIGSTOP ?? (process.env.BIGAIOLD === '1' ? 1.0 : 0.5));
+// OCCLUSION (the user, 2026-11-10: "sometimes it gets stamped when it shouldn't, sometimes it doesn't
+// get stamped where it should"): the face rule tests ONE cell against each face's plane, which is right
+// for an orb and wrong for a figure a corridor wide -- its wings reach past walls its centre is clear
+// of. So the big angel is hidden by DEPTH, per column: a wall hides it where colH (88/d) is greater
+// than its own h (occWalk's owBL for "wholly hidden?", bgOcc for the stamp). BIGDEPTH=0 puts the face
+// rule back, to compare.
+// BOBBING (the user: "I like the bobbing idea"): its float height swings on a 32-step sine, 4 ticks a
+// step (2.1 s round), BIGBOB rows each way at the top rung, halved per halving of the rung's height.
+const BIGBOB = +(process.env.BIGBOB ?? 6);
+// (38 and 24 went, 2026-11-10, for the ball lightning's room: of all the sets they covered least ground)
+// the BALL LIGHTNING: thrown every BOLTGAP 60ths, flying BOLTSPD 256ths of a cell a tick -- 26 is
+// 6 cells/s, twice the player's run (the user: "It should move about 2x my run speed, I think")
+const BOLT_GAP = +(process.env.BOLTGAP ?? 120), BOLT_SPD = +(process.env.BOLTSPD ?? 26);
+// THE HIT (the user, 2026-11-10: it "can miss the player completely if the player is on the edge of
+// the hall. not sure the tolerance we want"): when the ball's centre passes the player's position along
+// its line, it HITS if the player is within BOLTHIT cells of that line sideways -- it vanishes there
+// (nothing more yet) -- and otherwise flies on past to the wall. 0.3: hugging a wall (0.4 off a
+// one-wide hall's centre line) dodges it.
+const BOLT_HIT = Math.round(256 * +(process.env.BOLTHIT ?? 0.3));
+if (BOLT_HIT < 1 || BOLT_HIT > 127) throw new Error('BOLTHIT: 0..0.5 cells (the hit compares |d| with it in a byte, as a signed-safe immediate)');
+const BOLT_DIR = 0x40;
+// THE BALL'S SOUND (the user, 2026-11-11: "we need a sound for the angel firing the ball, and ideally, a
+// doppler-type sound as it passes by"; "when a wall is destroyed there should be a low boom"). Level 10
+// has no song -- a GoatTracker block is 1.7-2.6K the level region does not have -- so these are its own
+// SID writes: voice 1 the boom, voice 2 the throw's crack, voice 3 the ball's hum through the low-pass.
+// BALLSND=0: silent.
+// THE BALL'S OWN SOUND (the user, 2026-11-11): "a noise wave, starting at pitch C1, that ramps up to +9
+// and back down ... through a low+band filter, that coincides with the pitch ramp up/down from about
+// 25% cutoff to 100% and back down. Resonance full ... rise in pitch/filter cutoff as it approaches,
+// and back down as it passes". Both follow how near it is, the larger axis in 8ths of a cell: BS_RANGE
+// (8) cells or farther is C1 and a quarter open, on you is +9 and wide open, in 64 steps. Then (11-12):
+// "start at C2 and have the pitch sweep go +20, and the filter go from 0-100 instead of 25 to 100. Also,
+// low pass, not band pass."
+const BALL_SND = process.env.BALLSND !== '0';
+// BDBORDER=1: the shock deaths (level 9's svDie, level 10's bdDie) flash the border too. Off: it stays
+// black (the user, 2026-11-11: "turn the border flickering off for death?"; 11-12: "i like the death
+// better with the border staying black. implement that on level 9 as well")
+const BD_BORDER = process.env.BDBORDER === '1';
+const BS_C2 = Math.round(65.4064 * 16777216 / (PAL ? 985248 : 1022727));   // C2, voice 3's frequency
+// THE BOSS TRACK (BOSSMUS=0: none; the user, 2026-11-12): "a jaws-like background track ... F1 Pulse
+// wave. Pulse width cycles from 50% to 5% and back to 50% over 800ms. In sync, the lowpass filter goes
+// from 30% to 0%. resonance maximum." It climbs F harmonic minor ("the F minor scale that uses E as
+// the 7th") a step at each event, F2 when the central pillar is gone. It takes the ONE filter: the
+// ball's sound keeps its pitch and loudness but no longer sweeps the cutoff ("let's try the first
+// option and see how it sounds").
+// ON since level 10 shipped (2026-11-13: the game the user played and approved had it); BOSSMUS=0
+// leaves it out. 254 bytes of level code, in level 10's file.
+const BOSS_MUS = BALL_SND && process.env.BOSSMUS !== '0';
+const BM_F = m => 440 * 2 ** ((m - 69) / 12) * 16777216 / (PAL ? 985248 : 1022727);
+const BM_NT = [29, 31, 32, 34, 36, 37, 40, 41].map(m => Math.round(BM_F(m) / 8));   // F1 G1 Ab1 Bb1 C2 Db2 E2 F2, in 8ths of the register
+if (Math.max(...BM_NT) > 255) throw new Error('BOSS_MUS: F2 / 8 must fit a byte');
+const BM_F1 = BM_NT[0] * 8;
+// THE AIR (BOSSMUS; L10AIR=0 off; the user, 2026-11-12: "add level-4 style background noise to level 10
+// before we go to the boss track"). Level 4's song itself is a 1,731-byte GoatTracker block; this is its
+// sound in a few dozen bytes of level code: voice 1 the WIND, noise at B4 through the band-pass at
+// resonance 8, sustain 2, its cutoff wandering to a random target in AIRLO..AIRLO+63 at one unit every
+// AIRRATE ticks (~10 s a sweep); voice 2 the HUM, a triangle at A#1 (~58 Hz), sustain 4 -- both the
+// hub's settings (song-hub). From the level's start until you first see the angel, when the SID goes
+// over to the effects and the track (bsSidT) under the first Dun.
+const L10AIR = BOSS_MUS && process.env.L10AIR !== '0';
+const AIR_LO = parseInt(process.env.AIRLO ?? '20', 16), AIR_RATE = +(process.env.AIRRATE ?? 12);
+const AIR_W = Math.round(BM_F(71)), AIR_H = Math.round(BM_F(34));   // B4, A#1
+// THE DUN (the user, 2026-11-12): "we lose the note slide for the drone and instead when it switches
+// there's a three note chord -- the drone continues but the other two voices do a brief 'Dun!' in a
+// new chord that implies the new notes the bass moves to". Over each bass note of F harmonic minor,
+// the two notes above it (MIDI), climbing as the bass does: Fm, G dim, Ab augmented (the harmonic
+// minor's own chord: its E), Bb m, C7 (E and Bb: the tritone that wants F), Db maj7, E dim7, and Fm
+// an octave up.
+// DUNSHIFT (semitones, default -12): the user, 2026-11-12, on hearing them at Ab3/C4 over F1: "I think
+// the chords are too high? I was thinking they'd be in the same register as the bass drone" -- two
+// octaves down was "too low", so one: Ab2/C3 over F1, up to Ab3/C4 over F2.
+const BM_CH = [[56, 60], [58, 61], [60, 64], [61, 65], [64, 70], [65, 72], [67, 73], [68, 72]];
+const DUN_SHIFT = +(process.env.DUNSHIFT ?? -24);   // -24 again (the user, 2026-11-12: with the drone at 25%, "it might work now"); was -12 after "too low"
+const BM_CHF = BM_CH.map(c => c.map(m => Math.round(BM_F(m + DUN_SHIFT))));
+// The envelope (the user, 2026-11-12: "make them last a little longer ... attack 2ms decay 761ms"): attack
+// 2 ms, decay 750 ms (rate 9) to sustain 0, so the decay IS the note -- the gate is held through it
+// (DUNHOLD, 45 ticks) and only then let go, and the voices go back to the effects 7 ticks later.
+const DUN_LEN = +(process.env.DUNLEN ?? 108), DUN_HOLD = +(process.env.DUNHOLD ?? 88);   // ticks: all of it, and the gate -- 88, the whole of decay 10's 1.47 s, then 20 to release (2026-11-12; 52/45 under decay 9)
+const DUN_AD = parseInt(process.env.DUNAD ?? '0a', 16), DUN_SR = parseInt(process.env.DUNSR ?? '08', 16);
+// THE BALL'S CURVE (the user, 2026-11-12): "strongly biased toward being near the player. So maybe 20%
+// of the climb until it is two cells away, then it rises the other 80% as it reaches the closest point,
+// then falls off as rapidly after passing. I want a real 'whoosh'". k (pitch, loudness, and the cutoff
+// without the track) by distance in 8ths of a cell: 0 -> 20% from 8 cells in to 2, then 20% -> 100%
+// from 2 cells in to half a cell (the top is anywhere in your square, as before). 252, not 255: the
+// envelope is never struck at $ff (sid-envelope-freeze).
+const BS_KNEE = +(process.env.BSKNEE ?? 0.2);
+// ---- THE ZAP (BS_ZAP; the user, 2026-11-12), replacing that whoosh: a sound at the THROW, and no more.
+// "Attack 2ms Decay 1.47s S0R0. Pulse wave starts at 5% and ramps to 50% over 500ms. Pitch drops 24
+// steps over 200ms. For now Eb1 is the destination note". Voice 3, unfiltered (the filter is the
+// track's). bzTick, from the IRQ (bmFT): ZAP_PT ticks of pitch, a semitone table (zapL/zapH), and
+// ZAP_PWT of width, ZAP_PWS a tick. It is never let go -- R0 would cut it -- so it rings its decay out.
+// BMMUTE=1 (testing, the user 2026-11-12: "remove the boss track (drone and chords) ... focus on the
+// fireball"): the drone is never gated and bmUp never steps, so no Dun -- the effects and the zap alone.
+const BM_MUTE = process.env.BMMUTE === '1';
+const BS_ZAP = BOSS_MUS && process.env.BSZAP !== '0';
+const ZAP_TO = +(process.env.ZAPTO ?? 27), ZAP_UP = +(process.env.ZAPUP ?? 24);   // Eb1, from Eb3
+const ZAP_PT = +(process.env.ZAPPT ?? 12), ZAP_PWT = +(process.env.ZAPPWT ?? 30); // ticks: 200 ms, 500 ms
+const ZAP_PW0 = Math.round(4096 * 0.05), ZAP_PWS = Math.round((2048 - ZAP_PW0) / ZAP_PWT);
+if ((ZAP_PW0 - ZAP_PWS) >> 8) throw new Error('ZAP: the throw stores 0 as the width\'s start high byte (bsGo)');
+const ZAP_AD = parseInt(process.env.ZAPAD ?? '0a', 16), ZAP_SR = parseInt(process.env.ZAPSR ?? '00', 16);
+// THE PASS-BY (BS_PASS; the user, 2026-11-12): "noise wave, A/D 244ms/733ms S/R 0/0, pitch F1, rises +8
+// by 200ms, falls to -6 by 300 ms, falls to -10 by 500ms -- this sound triggers as the ball is passing by"
+// -- once a throw, when the ball's cell is one of the 8 round yours. Voice 3, as the zap (the ball reaches
+// you no sooner than ~15 ticks from a throw 4+ cells off, past the zap's 12 of pitch; its width writes
+// do nothing to noise). pbTick: three straight lines in frequency, PB_T ticks each, between the notes.
+const BS_PASS = BS_ZAP && process.env.BSPASS !== '0';
+const PB_M = (process.env.PBNOTES ?? '29,37,23,19').split(',').map(Number);   // F1, +8, -6, -10
+const PB_T = (process.env.PBTICKS ?? '12,6,12').split(',').map(Number);       // 200, 300, 500 ms
+const PB_AD = parseInt(process.env.PBAD ?? '99', 16);
+const PB_D = PB_T.map((t, i) => Math.round((BM_F(PB_M[i + 1]) - BM_F(PB_M[i])) / t) & 0xffff);
+const PB_S = (Math.round(BM_F(PB_M[0])) - (PB_D[0] << 16 >> 16)) & 0xffff;    // a step short: tick 0 sounds F1
+if (PB_M.length !== 4 || PB_T.length !== 3) throw new Error('PBNOTES: four notes, PBTICKS: three spans');
+const zapF = [...Array(ZAP_PT + 1)].map((_, t) => Math.round(BM_F(ZAP_TO + ZAP_UP * (1 - t / ZAP_PT))));
+const bsKT = [...Array(32)].map((_, d) => {     // quarter cells: 32 bytes, not 64, for the full game's room
+  const c = d / 4;
+  const f = c >= 2 ? BS_KNEE * Math.max(0, 8 - c) / 6 : c <= 0.5 ? 1 : BS_KNEE + (1 - BS_KNEE) * (2 - c) / 1.5;
+  return Math.round(252 * f);
+});
+// ---- THE BIG ANGEL'S MOVES (the user, 2026-11-11: "Straight follow is boring ... it needs to strafe a
+// bit sometimes. Sometimes pull back?") ----
+// bgAim picks a MODE for the next few steps -- CHASE (the fill's step, as every angel), STRAFE (one cell
+// across the line to the player, a side picked per spell) or PULL BACK (one cell away along it) -- by
+// BIGAI's weights out of 8: chase,strafe,back. Farther than BIGAI_FAR cells (either axis) it only chases.
+// A spell lasts 2-3 steps chasing, 1-3 strafing, 1-2 pulling back. A blocked strafe tries the other
+// side, then chases; a blocked pull-back strafes.
+// THE STRIKE: a chase step BIGSTOP would refuse -- it is on you -- is a hit instead: the screen flashes
+// yellow then orange (the ball's is white then light blue), and it pulls back BIGAI_BACKOFF steps. At
+// most one a BIGAI_CD ticks; between, it stands.
+const BIGAI = (process.env.BIGAI ?? '4,3,1').split(',').map(Number);
+// THE FOLLOW / FIRE / BACK OFF AI (the user, 2026-11-11; the spells above are kept, BIGAIOLD=1): it
+// FOLLOWS the fill at its glide. Farther than BIGFIRE cells (either axis) it throws, still coming --
+// each ball the moment the last one's results are dealt with (its wall gone, its flash over), no
+// BOLT_GAP -- and after 1-3 balls it BACKS OFF 1-3 cells: up the map (to a neighbour one FARTHER from
+// the player), taking a turn where it can rather than going straight, then follows again (sooner at
+// a dead end). Reaching the player strikes as before, and backs it off too. It STANDS until you first
+// see it, then approaches; its first ball waits until it has come within BIGFIRE and you pull away.
+// BIGFIRE 3 (the user, 2026-11-12). Closing in PAUSES a run: every ball asks how far you are. Letting a
+// begun run fire on at any range was tried the same day and dropped: "it also made the angel so much
+// more aggressive it is hard to survive and thus less fun".
+const BIG_AI2 = process.env.BIGAIOLD !== '1';
+// THE WHIP (the user, 2026-11-12: "a whip turn to center the angel when it touches you ... just a few
+// frames to look wherever it is and then the zap immediately upon centering"). Caught, you stand where
+// you are and turn 1/2^WHIPSH of the remaining way onto it each tick (dieAim's bearing, the death
+// scene's own) -- an ease-out, 180 degrees in ~36 ticks at 3 -- and within a unit of it, bdDie.
+// WHIP=0: the zap on the touch, as before.
+const WHIP = BIG_AI2 && DIE && !NOSHOCK && process.env.WHIP !== '0';
+const WHIP_SH = +(process.env.WHIPSH ?? 3);   // 3, was 2 (the user, 2026-11-12: "make it take twice as long")
+const BIGFIRE = +(process.env.BIGFIRE ?? 3);
+// THE STRIKE'S REACH (the user, 2026-11-11: "it should keep moving towards you until it gets to its largest
+// rung and then it's a hit" -- it was striking a cell or more out, two rungs down): the distance at which
+// it is drawn at its top rung, d = 88/h for the smallest h bigVarT gives BIG_V0. BIGHITD overrides.
+if (BIGAI.length !== 3 || BIGAI.reduce((a, b) => a + b) !== 8) throw new Error('BIGAI: three weights (chase,strafe,back) adding to 8');
+const BIGAI_FAR = +(process.env.BIGAIFAR ?? 5), BIGAI_BACKOFF = +(process.env.BIGAIBACK ?? 2), BIGAI_CD = +(process.env.BIGAICD ?? 120);
+// BIGHOLD=1: the old rule -- at full size where you can see it, it holds (for eyeballing its size).
+const BIGHOLD = process.env.BIGHOLD === '1';   // angSlDT's code for the ball in flight: slOn takes its offsets from bsXF/bsYF
+// THE HIT FLASH (the user, 2026-11-11: "some kind of screen flash for getting hit", to play at dodging
+// before a hit does anything): the ground, both wall inks and the border go WHITE, then LIGHT BLUE for
+// the second half, BOLTFLASH ticks in all (60ths), then back to the level's own.
+const BOLT_FLASH = +(process.env.BOLTFLASH ?? 20);
+if (BOLT_FLASH < 2 || BOLT_FLASH > 255) throw new Error('BOLTFLASH: 2..255 ticks');
+const BIG_GND = palOf(LEVEL_IDS.find(n => LEVEL_BIG[n]) ?? 10).ceil;   // the big angel's level's ground, to put back
+if (BOLT_SPD < 1 || BOLT_SPD > 127) throw new Error('BOLTSPD: 1..127 (a tick may cross the halfway point once)');
+// (47 went too, 2026-11-10 -- 6 slots for ~0.3 cell of approach -- for the ball's second frames)
+const BIG_SETS = (process.env.BIGSETS ?? '63,52,42,34,30,27,21,18,15').split(',').map(Number);
+const BIG_MAXSPR = 6, BIG_MAXPARTS = BIG_MAXSPR - 1;
+const BIG_AX = 1.667;                    // an mc pixel's displayed width : height (see the ANG6 ladder)
+const BIG_V0 = LADDER.length;
+const BIGBM0 = ORBBM.length;
+if (HAS_BIG) {
+  if (BIG_SETS.some(h => h < 4 || h > 63)) throw new Error('BIGSETS: sets of 4..63 rows of art');
+  // THE TAIL IS STRETCHED to fill the frame (the user: "move the angel up in the frame ... extend the
+  // length of the ghostly tail to go to the bottom of the bottom sprite. maximize size"). The widest
+  // set is width-bound (36 columns hold the wingspan at 55 rows), so the figure keeps its proportions
+  // down to BIGSPLIT of its height -- head, wings, hands, the sword's guard -- and only the robe and
+  // tail below are lengthened, until the whole is exactly as tall as BIG_SETS[0] at 36 wide: top at
+  // the frame's first row, tail on its last. build/<art>-tall.png, made here with magick.
+  const BIGSPLIT = +(process.env.BIGSPLIT ?? 0.62);
+  const tall = './build/' + BIG_ART.replace(/\.png$/, '-tall.png');
+  {
+    const src = artPath(BIG_ART);
+    const [tw, th] = execFileSync('magick', [src, '-fuzz', '4%', '-trim', '+repage', '-format', '%w %h', 'info:']).toString().split(' ').map(Number);
+    const want = Math.round(BIG_SETS[0] * tw / 36 / BIG_AX), split = Math.round(th * BIGSPLIT);
+    if (want <= th) throw new Error(`BIGSETS[0]=${BIG_SETS[0]}: the art already fills that height at 36 wide -- nothing to stretch`);
+    execFileSync('magick', [src, '-fuzz', '4%', '-trim', '+repage',
+      '(', '-clone', '0', '-crop', `${tw}x${split}+0+0`, '+repage', ')',
+      '(', '-clone', '0', '-crop', `${tw}x${th - split}+0+${split}`, '+repage', '-resize', `${tw}x${want - split}!`, ')',
+      '-delete', '0', '-append', '-bordercolor', 'white', '-border', '4', tall]);
+  }
+  const [bw, bh] = fitArt(tall, 8, 8, { mirror: false }).box, ratio = (bw / bh) / BIG_AX;
+  const spr = (g, r0, c0) => { const b = [];
+    for (let y = r0; y < r0 + 21; y++) for (let k = 0; k < 3; k++)
+      b.push([0, 1, 2, 3].reduce((v, i) => v | ((g[y]?.[c0 + k * 4 + i] ?? 0) << (6 - 2 * i)), 0));
+    b.push(0); return b; };
+  const sets = BIG_SETS.map(h => {
+    const w = Math.min(36, Math.round(h * ratio)), R = Math.ceil(h / 21);
+    // The INK must span exactly h rows, bottom row inked (occStamp's bottom alignment): the tail's
+    // faint wisps fall under fitArt's coverage threshold, so fit taller until the inked rows are h,
+    // and keep just those.
+    let fh = h, px, t, b;
+    for (let k = 0; k < 4; k++) {
+      px = fitArt(tall, w, fh, { mirror: false, contrast: ANGCON }).px;
+      const ink = y => px.slice(y * w, y * w + w).some(v => v);
+      t = 0; while (!ink(t)) t++;
+      b = fh - 1; while (!ink(b)) b--;
+      if (b - t + 1 >= h) break;
+      fh += h - (b - t + 1);
+    }
+    const g = [...Array(R * 21)].map(() => new Array(w).fill(0));      // bottom-aligned, w wide
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) g[R * 21 - h + y][x] = px[(b - h + 1 + y) * w + x];
+    // per sprite row: the ink's column span and how many sprites cover it
+    const rowsI = [...Array(R)].map((_, r) => {
+      let a = w, b = -1;
+      for (let y = r * 21; y < r * 21 + 21; y++) for (let x = 0; x < w; x++) if (g[y][x]) { a = Math.min(a, x); b = Math.max(b, x); }
+      return b < 0 ? null : { r, a, b, n: Math.ceil((b - a + 1) / 12) };
+    }).filter(Boolean);
+    const start = q => Math.round((q.a + q.b + 1) / 2 - q.n * 6);       // n sprites centred on the ink
+    const lost = q => { let c = 0, s0 = start(q);
+      for (let y = q.r * 21; y < q.r * 21 + 21; y++) for (let x = 0; x < w; x++) if (g[y][x] && (x < s0 || x >= s0 + q.n * 12)) c++;
+      return c; };
+    let cut = 0;
+    while (rowsI.reduce((t, q) => t + q.n, 0) > BIG_MAXSPR) {
+      let best = null, bl = Infinity;
+      for (const q of rowsI) if (q.n > 1) { q.n--; const l = lost(q); q.n++; if (l < bl) { bl = l; best = q; } }
+      best.n--;
+    }
+    cut = rowsI.reduce((t, q) => t + lost(q), 0);
+    // the parts, bottom row first: the PRIMARY is the bottom row's leftmost sprite
+    const parts = [];
+    for (const q of [...rowsI].reverse()) for (let k = 0; k < q.n; k++) parts.push({ c0: start(q) + 12 * k, up: R - 1 - q.r, bm: spr(g, q.r * 21, start(q) + 12 * k) });
+    return { h, w, R, parts, cut, centre: w / 2 };
+  });
+  for (const st of sets) {
+    const at = ORBBM.length;
+    st.parts.forEach(pt => ORBBM.push(pt.bm));
+    const pr = st.parts[0];
+    // Magnified only where no plain set reaches: twice its height past the tallest set (the user:
+    // "once we're below needing magnification, none of the smaller angels should use it")
+    for (const exp of 2 * st.h > BIG_SETS[0] ? [1, 0] : [0]) {
+      LADDER.push({ h: st.h, exp, lo: at, big: { set: sets.indexOf(st), parts: st.parts.slice(1).map((pt, k) =>
+        ({ b: at + 1 + k, dx: (pt.c0 - pr.c0) * 2 * (exp ? 2 : 1), dx1: (pt.c0 - pr.c0) * 2, up: pt.up })), half: (st.centre - pr.c0) * 2 * (exp ? 2 : 1) } });
+      ORBSRC.push(at); ORBEXP.push(exp); ORBEX.push(exp); ORBEY.push(exp);
+      ORBWIDE.push(st.w * (exp ? 4 : 2)); ORBTALL.push(st.h * (exp ? 2 : 1));
+    }
+  }
+  console.error(`  big angel: ${BIG_ART} ${bw}x${bh}, sets ${sets.map(st => `${st.h}r ${st.w}w ${st.parts.length}spr${st.cut ? ` (-${st.cut}px)` : ''}`).join(', ')}; ` +
+    `${ORBBM.length - BIGBM0} bitmaps, ${LADDER.length - BIG_V0} rungs`);
+}
+const BIGART = HAS_BIG ? ORBBM.slice(BIGBM0) : [];   // (taken before the bolt's bitmaps follow)
+// ---- THE BALL LIGHTNING (LEVEL_BIG): the big angel's projectile, the fifth range ----
+// The user, 2026-11-10: "have the angel hurl these at us ... throw one every 2 seconds or so". One
+// sprite a rung (src/fit-bolt.mjs: yellow = $d026, cyan = its own colour, black clear, a little turned
+// each rung), floating at the horizon like the angel. Plain sets BOLTSETS; magnified only past the
+// tallest plain one, as the angel's. Shipped in IAN1 behind the angel's overflow (BOLTBM).
+const BOLT_V0 = LADDER.length;
+const BOLTBM0 = ORBBM.length;
+const BOLT_SETS = BOLT_H;                        // fit-bolt.mjs's list (BOLTH): one source for the preview and the game
+const BOLT_K = +(process.env.BOLTK ?? 0.42);     // its apparent rows per h: ~37 rows a cell away
+if (HAS_BIG) {
+  const sets = BOLT_SETS.map((h, k) => ({ h, ...fitBolt(h, BOLT_ROT * k), b2: fitBolt(h, BOLT_ROT * k + 90).bytes }));
+  for (const st of sets) {
+    const at = ORBBM.length; ORBBM.push(st.bytes, st.b2);   // frame 0, then frame 1 (turned 90): pointer + iterLo&1
+    for (const exp of 2 * st.h > BOLT_SETS[0] ? [1, 0] : [0]) {
+      LADDER.push({ h: st.h, exp, lo: at, bolt: true });
+      ORBSRC.push(at); ORBEXP.push(exp); ORBEX.push(exp); ORBEY.push(exp);
+      ORBWIDE.push(st.w * (exp ? 4 : 2)); ORBTALL.push(st.h * (exp ? 2 : 1));
+    }
+  }
+}
+const BOLTBM = HAS_BIG ? ORBBM.slice(BOLTBM0) : [];
+const isBolt = v => v >= BOLT_V0;
+const isBig = v => v >= BIG_V0 && v < BOLT_V0;   // the big angel's (none in a build without it)
+const isSv = v => v >= SV_V0 && v < BIG_V0;      // a sentry's rung (none in a build without them)
+const isAngV = v => (v >= ANG_V0 && v < SV_V0) || isBig(v);   // an angel's, big or not
 // upper-sprite bitmap per variant; 0 means "this entity is one sprite"
 const ORBSRCU = LADDER.map(r => (r.up === undefined || r.up < 0) ? -1 : r.up);
 // ...and the silver orb's RIGHT column: lower-right and upper-right, -1 for a one-column rung
 const ORBSRCR = LADDER.map(r => r.rt ?? -1), ORBSRCRU = LADDER.map(r => r.rtu ?? -1);
+
 NORBBM = IDOLBM0;               // what still ships AT SPRBASE; the idol is counted separately
 // ---- THE TAIL OF THE ORB LADDER MOVES UNDER THE I/O HOLE, to buy back low RAM ----
 // Krill's resident has to live at $0400-$062c (it refuses to assemble above $d000), and that is
@@ -5471,6 +6239,7 @@ const ORBANCH = ORBEY.map(e => e ? 42 : 21);    // row pitch: one sprite height
 // The whole scene is white ceiling, black wall, grey-1 seams -- so the orbs go monochrome too
 // and the palette closes: grey 1 underside, grey 2 body, grey 3 highlight and ground shadow.
 const ORBBODY = [12, 12, 12];
+const GOLD_BODY = 0x08;                          // level 10's orb and angel: orange, between brown and yellow
 const ORBUNDER = 11, ORBHILITE = 15;             // shared: $d025 underside, $d026 highlight
 const SPR_DEF = { under: ORBUNDER, hi: ORBHILITE };
 const sprOf = n => {
@@ -5499,13 +6268,10 @@ const ORBS = [];
   // that holds the exit. It reads exactly like level 1's caging orb, which is the point: the
   // player already knows to pick it up. What is new is that they have to put it back.
   else if (SOCKROOM) {                         // level 2: OO in each alcove and one on the spine
-    ORBS.push({ x: 6.5, y: 2.5, c: 0 });
-    ORBS.push({ x: 6.5, y: 8.5, c: 0 });
-    ORBS.push({ x: 11.5, y: 3.5, c: 0 });
+    for (const [x, y] of L2V?.orbs ?? [[6, 2], [6, 8], [11, 3]]) ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });
   }
-  else if (CHAMBER) {                          // level 3: one east, one south
-    ORBS.push({ x: 12.5, y: 9.5, c: 0 });
-    ORBS.push({ x: 9.5, y: 12.5, c: 0 });
+  else if (CHAMBER) {                          // level 3: one east, one south (v2: both in col 12's foot)
+    for (const [x, y] of L3V2?.orbs ?? [[12, 9], [9, 12]]) ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });
   }
   else if (HUBROOM) {
     // HUBTEST=1 drops three orbs beside the pedestals so the all-three gate can be exercised
@@ -5523,18 +6289,24 @@ const ORBS = [];
   // Spelled out rather than left to fall through: the branch below is level 1's, and its orbs
   // stand at (6,5) and (20,5), which are outside a 6x6 map entirely.
   else if (LVL === 5) {                          // the O markers in L5_MAP: one in the north
-    ORBS.push({ x: 9.5, y: 1.5, c: 0 });         //   gallery, one in the east hall
-    ORBS.push({ x: 16.5, y: 7.5, c: 0 });
+    for (const [x, y] of L5V2?.orbs ?? [[9, 1], [16, 7]])   //   gallery, one in the east hall
+      ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });
   }
   else if (LVL === 6) {                          // col 7, one either side of the wall that
-    ORBS.push({ x: 7.5, y: 5.5, c: 0 });         //   splits it
-    ORBS.push({ x: 7.5, y: 7.5, c: 0 });
+    for (const [x, y] of L6V2?.orbs ?? [[7, 5], [7, 7]])   //   splits it (v2: (1,4) and (9,5))
+      ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });
   }
   else if (LVL === 7) {                          // one beside each angel: west behind col 1,
-    ORBS.push({ x: 2.5, y: 5.5, c: 0 });         //   east behind |1
-    ORBS.push({ x: 10.5, y: 8.5, c: 0 });
+    for (const [x, y] of L7V2?.orbs ?? [[2, 5], [10, 8]])   //   east behind |1 (v2: (2,4) and (11,5))
+      ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });
   }
   else if (LVL === 8) ORBS.push({ x: 8.5, y: 5.5, c: 0 });   // v4: one orb, in the col-8 crossing
+  else if (LVL === 10) {
+    for (const [x, y] of L10.orbs) ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, body: GOLD_BODY });
+    // the BALL LIGHTNING: one, hidden until the big angel throws it (bgStep); cyan its own ink
+    // BOLTCOL: its own ink, cyan (3) by default -- brighter than light blue (14, 0e), which matches grey2
+    if (LEVEL_BIG[10]) ORBS.push({ x: L10.angels[0][0] + 0.5, y: L10.angels[0][1] + 0.5, c: 0, bolt: true, hidden: true, body: parseInt(process.env.BOLTCOL ?? '03', 16) });
+  }
   else if (LVL === 9) {                          // the sentries, at their starts -- FIRST, see SVN --
     // stage 0's sentries in the shared slots (a slot it does not fill starts hidden, on the first one's cell)
     L9_STAGES.roles.slice(0, L9_STAGES.svMax).forEach(sn => { const at = sn ?? L9_STAGES.roles.find(Boolean);
@@ -5544,7 +6316,7 @@ const ORBS = [];
   }
   else if (LVL === 1) {                          // the user's markers: OO at (6,5), 00 at (20,5)
     ORBS.push({ x: 6.5, y: 5.5, c: 0 });         // in the corridor mouth, at the room's edge
-    ORBS.push({ x: 20.5, y: 5.5, c: 0 });        // in the chamber's east door
+    ORBS.push({ x: V2 ? 19.5 : 20.5, y: 5.5, c: 0 });   // in the chamber's east door (v2: one in, the map is narrower)
   }
   // Loudly, not by inheriting level 1. A new level that nobody remembered to give a branch to
   // used to be built with level 1's entities standing at level 1's coordinates -- which is how
@@ -5576,6 +6348,7 @@ const ORBS = [];
     if (i < IDOL_N) ORBS.push({ x: px_ + 0.5, y: py_ + 0.5, c: 0, idol: true,
                                 idolId: i, body: IDOL_BODY_OF[i], hidden: true });
   });
+  if (LEVEL_FLUTE[LVL]) ORBS.push({ x: LEVEL_FLUTE[LVL][0] + 0.5, y: LEVEL_FLUTE[LVL][1] + 0.5, c: 0, flute: true, body: 2 });
   // The angel starts IMMEDIATELY BEHIND the orb. Walking up to the orb -- the one thing a new
   // player is drawn to -- then puts them at nearly the closest range, so they get the heartbeat
   // end of the detune straight away instead of the far-off flange. It also stops the encounter
@@ -5592,7 +6365,18 @@ const ORBS = [];
   // The socket room has no angel: it is a puzzle, not a chase, and an entity count that differs
   // from the other levels' is exactly what nOrbT was made swappable for.
   if (process.env.ANGEL !== '0') {
-    if (SOCKROOM) ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });   // level 2: AA behind the wall
+    if (SOCKROOM) {                               // level 2: AA behind the wall
+      const [a1x, a1y] = L2V?.a1 ?? [13, 5];
+      ORBS.push({ x: a1x + 0.5, y: a1y + 0.5, c: 0, tall: true });
+      // L2ANG2=x,y: a TRIAL second angel (2026-11-03, the user's "an angel at 9,14", the oracle
+      // says winnable at ~194 s against 66 s without). Off by default; build with D64= so the
+      // master disk is not replaced by the trial.
+      if (process.env.L2ANG2 || L2V) {
+        const [x, y] = (process.env.L2ANG2 ?? (L2V?.a2 ?? [3, 14]).join(',')).split(',').map(Number);
+        if (!isFinite(x) || !isFinite(y)) throw new Error(`L2ANG2 wants "x,y", got "${process.env.L2ANG2}"`);
+        ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, tall: true });
+      }
+    }
     else if (HUBROOM) { }                      // no angel in the hub either
     // (retired with level 5's design: an angel at 6.5,8.5 in the hall)
     else if (CHAMBER) {                           // level 3: one in each far corner, and one
@@ -5600,25 +6384,26 @@ const ORBS = [];
       ORBS.push({ x: 1.5, y: 12.5, c: 0, tall: true });
       ORBS.push({ x: 6.5, y: 6.5, c: 0, tall: true });
     }
-    else if (LVL === 5) ORBS.push({ x: 6.5, y: 8.5, c: 0, tall: true });   // the A in the hall
-    else if (LVL === 6) {                         // one sealed in each pocket, until a socket
-      ORBS.push({ x: 3.5, y: 6.5, c: 0, tall: true });   //   is fed and the walls come out
-      ORBS.push({ x: 5.5, y: 6.5, c: 0, tall: true });
-    }
-    else if (LVL === 7) {                         // each standing next to an orb
-      ORBS.push({ x: 3.5, y: 5.5, c: 0, tall: true });
-      ORBS.push({ x: 9.5, y: 8.5, c: 0, tall: true });
-    }
+    else if (LVL === 5) for (const [x, y] of L5V2?.angels ?? [[6, 8]])   // the A in the hall (v2: A1, A2)
+      ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, tall: true });
+    else if (LVL === 6)                           // one sealed in each pocket, until a socket
+      for (const [x, y] of L6V2?.angels ?? [[3, 6], [5, 6]])   //   is fed and the walls come out
+        ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, tall: true });
+    else if (LVL === 7)                           // each standing next to an orb (v2: three)
+      for (const [x, y] of L7V2?.angels ?? [[3, 5], [9, 8]])
+        ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, tall: true });
     else if (LVL === 8) {                         // AA in col 13, one in each hall
       ORBS.push({ x: 13.5, y: 1.5, c: 0, tall: true });
       ORBS.push({ x: 13.5, y: 5.5, c: 0, tall: true });
       ORBS.push({ x: 13.5, y: 9.5, c: 0, tall: true });
     }
+    else if (LVL === 10) for (const [x, y] of L10.angels)        // the BIG angel, gold
+      ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, tall: true, big: true, body: GOLD_BODY });
     else if (LVL === 9) for (const [x, y] of L9.angels)            // the sheet's AA, hidden until its room's stage
       ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0, tall: true, stage: L9_STAGES.firstOf(x, y), hidden: L9_STAGES.firstOf(x, y) > 0 });
     else if (LVL === 1) {                         // AA at (7,5) and (19,5): one behind each orb
       ORBS.push({ x: 7.5, y: 5.5, c: 0, tall: true });
-      ORBS.push({ x: 19.5, y: 5.5, c: 0, tall: true });
+      ORBS.push({ x: V2 ? 18.5 : 19.5, y: 5.5, c: 0, tall: true });
     }
     else throw new Error(`no angel placement for level ${LVL} -- add a branch (an empty one is fine)`);
   }
@@ -5810,10 +6595,9 @@ const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.leng
   // LEVELSHEET cleared: a sheet build prints and stops BEFORE the dump, so an inherited flag left
   // no file -- and the sheets of levels 2-7 only ever worked by reading a stale one left by an
   // earlier full build (found 2026-10-13, when level 8's first wall had none to read).
-  subBuild({ ...process.env, LVL: String(w.lvl),
-             ...(CHAIN.includes(w.lvl) ? {} : { CHAIN: String(w.lvl) }),
-             WALLOFF: String(w.k + 1), LVLDUMP: tmp, LEVELSHEET: '' });
-  return JSON.parse(readFileSync(tmp, 'utf8'));
+  return dumpOf(tmp, { ...process.env, LVL: String(w.lvl),
+                      ...(CHAIN.includes(w.lvl) ? {} : { CHAIN: String(w.lvl) }),
+                      WALLOFF: String(w.k + 1), LEVELSHEET: '' });
 }) : null;
 // "is there a wall mechanic at all" -- an ENGINE question, so it asks LEVEL_IDS and not what
 // this build's levels happen to need. See WALL_DELTA: the flag and the per-level delta data
@@ -5838,17 +6622,92 @@ const WALLVAR = WALL_MECH ? (WALLVARS?.[0] ?? true) : null;
 // walk never masked ids 27-30, so after the corner opened an angel behind one of the new runs
 // read a garbage occluder bit and vanished while it still blocked and killed (2026-09-19, the
 // user, three readouts in).
-const NRUN = Math.max(nextRun, ...LVLSIZED.map(l => l.nextRun), ...(WALLVARS ?? []).map(v => v.nextRun));
+// ---- THE MERGE HAZARDS, PER LEVEL, VALID IN EVERY WALL STATE (2026-11-02) ----
+// Each level's own build finds its hazards (HAZ_RAW) on its own map; this merges them with the
+// same level's wall-out variants (WALLVARS) and numbers them, so one set of lists is right
+// whichever walls are standing. Two bugs this replaced, both on level 4, the only level with any:
+//   - the lists never reached the machine. They travelled through the swap manifest until
+//     shadow-and-swap was deleted (2026-10-05) and nothing took that job over, so hazSet only ever
+//     had the image's OWN level's lists -- level 1's, which are empty. The pillar in front of
+//     the hub's west wall could merge away from the ten cells in the middle.
+//   - the spare id was the level's own next free id, 61. With the pedestal wall down mkRuns
+//     numbers four more runs, so 61 is a REAL run there, and hazSpFix gave it run 2's plane and face.
+// So the spare ids start above the largest run count of any state, and every split run must
+// cover the same cells under the same id in every state (checked), because the restore list puts
+// it back by id. Player cells and patches are the UNION over states: a hazard in any state is
+// split, and an earlier split than one state needs costs a probe, never a pixel. (The variants
+// are one wall out at a time, as the wall deltas are; a level with hazards and two walls would
+// want its combinations checked too.)
+const HAZ_PLAN = new Map();
+if (MULTI) for (const [lv, raw] of [[LVL, HAZ_RAW], ...LVLSIZED.map(L => [L.level, L.haz])]) {
+  const states = [raw, ...(WALLVARS ?? []).filter(v => v.level === lv).map(v => v.haz)];
+  const origs = [...new Set(states.flatMap(st => st.recs.map(r => r.orig)))].sort((a, b) => a - b);
+  if (!origs.length) continue;
+  const S = Math.max(...states.map(st => st.nReal));
+  const spare = new Map(origs.map((r, i) => [r, S + i]));
+  const cellsOf = (st, r) => st.runs.flatMap((t, sel) => t.flatMap((id, c) => id === r ? [[sel, c]] : []));
+  for (const r of origs) for (const st of states)
+    if (JSON.stringify(cellsOf(st, r)) !== JSON.stringify(cellsOf(raw, r))) throw new Error(
+      `level ${lv}: merge-hazard run ${r} is not the same run in every wall state, so restoring it ` +
+      `by id would write it over another run's cells`);
+  // (table, cell, run id) triples, $ff-terminated: the restore list first, then the shared lists
+  const lst = [...origs.flatMap(r => cellsOf(raw, r).flatMap(([sel, c]) => [sel, c, r])), 0xff];
+  const per = new Map();                                   // player cell -> its patches
+  for (const st of states) for (const rec of st.recs) {
+    if (!per.has(rec.cell)) per.set(rec.cell, new Set());
+    for (const c of rec.cells) per.get(rec.cell).add(`${rec.sel},${c},${rec.orig}`);
+  }
+  const at = new Map(), ct = [], of = [];
+  for (const [cell, set] of [...per].sort((a, b) => a[0] - b[0])) {
+    const key = [...set].sort().join(' ');
+    if (!at.has(key)) {
+      at.set(key, lst.length);
+      for (const t of [...set].sort()) { const [sel, c, r] = t.split(',').map(Number); lst.push(sel, c, spare.get(r)); }
+      lst.push(0xff);
+    }
+    ct.push(cell); of.push(at.get(key));
+  }
+  if (lst.length > 256) throw new Error(`level ${lv}: ${lst.length} bytes of hazard lists; hzRun indexes them with X`);
+  HAZ_PLAN.set(lv, { n: [ct.length - 1], ct, of, lst, sp: [...origs.flatMap(r => [r, spare.get(r)]), 0xff],
+                     top: S + origs.length });
+  console.error(`  merge hazard, level ${lv}: ${ct.length} cell(s) over ${states.length} wall state(s), ` +
+    `run(s) ${origs.map(r => `${r}->${spare.get(r)}`).join(' ')}, ${lst.length} list bytes`);
+}
+const HZ_ANY = HAZ_PLAN.size > 0;
+// ONE level's lists, as the haz module's own data (it is assembled once): a second level with hazards
+// wants them back in the level file, or one module per level
+if (HAZ_PLAN.size > 1) throw new Error(`merge hazards on levels ${[...HAZ_PLAN.keys()]}: the haz level code carries one level's lists`);
+const HZ_LV = HZ_ANY ? [...HAZ_PLAN.values()][0] : null;
+// DOOM RUNS (2026-11-08): spare run ids above every level's own, for a wall in mid-collapse.
+// wtRun gives each exposed face of the doomed cells one of these, so the ray search splits at the
+// door's edges and casts rays ON it. Without that, a door flush in a straight wall is the middle
+// of one run: the search casts only the run's two ends, no ray ever strikes the door, and the
+// sink finds nothing for its whole clock and then pops (the user saw exactly that on the hub's
+// pedestal wall). A cell rarely shows more than two faces at once; past the reserve a face just
+// keeps its old id (wrOne), so the cost of too few is a door that pops, never a wrong read.
+// BREAKABLE WALLS dig new faces, so a level that has them grows runs as it is played: the first build
+// sized the ids from every level's STARTING map, and digging in the quarry ran mkRuns past them --
+// into the doom ids, then off the end of runPlaneT/runFaceT (the user, 2026-11-11: "glitchy characters
+// sticking up above the wall height ... usually on seams, and only for a frame"). BRKRUNS reserves ids
+// for it; brHit refuses a break once mrNext is within BRK_GROW of them -- opening one cell can split
+// at most the four runs its faces lay in and expose four new faces, so at most 8 new runs.
+// 120 (NRUN 128 with the doors' 8): the user's pillar halls START at 40 runs, and digging them out
+// peaks at ~98 typically, 120 at worst (a simulation of random digs, 2026-11-11). It was 52 -- all the
+// arena held while plane and face were two tables -- and the halls refused every break after the first
+// couple ("they don't seem to destroy the wall behind me"). runPFT is one byte an id.
+const BRK_RUNS = HAS_BRK ? +(process.env.BRKRUNS ?? 120) : 0, BRK_GROW = 8;
+const DOOM_RUN0 = Math.max(nextRun, ...LVLSIZED.map(l => l.nextRun), ...(WALLVARS ?? []).map(v => v.nextRun),
+                      ...[...HAZ_PLAN.values()].map(p => p.top), BRK_RUNS);
+const DOOM_RUNS = WALL_MECH ? +(process.env.DOOMRUNS ?? 2 * NDOOM) : 0;
+const NRUN = DOOM_RUN0 + DOOM_RUNS;
+if (HAS_BRK) console.error(`  runs: ids up to ${DOOM_RUN0 - 1} for breakable walls (BRKRUNS), ${DOOM_RUNS} doom, NRUN ${NRUN}`);
 const OCCBYTES = (NRUN + 7) >> 3;
-// runPlaneT and runFaceT are packed nose to tail from $6d00 and both are read with an absolute,X
-// in the hot loops, so what must hold is that NEITHER ONE CROSSES THE PAGE -- not that either
-// happens to fit somewhere. 2*NRUN <= 256 says exactly that. (The overlap guard would catch the
-// two tables colliding; nothing but this catches the second one merely spilling past $6dff, which
-// costs a cycle on every read that lands beyond it and corrupts whatever is at $6e00 -- Krill's
-// runtime resident, which would not show up as a rendering bug at all.)
-if (2 * NRUN > 256)
-  throw new Error(`NRUN=${NRUN}: runPlaneT+runFaceT need ${2 * NRUN} bytes and page $6d00 holds 256. `
-    + `They cannot both stay in one page -- give runFaceT a page of its own and pay the origin.`);
+// runPFT (one byte per run id, read absolute,X/Y) must not CROSS a page: compaction places it
+// `within` NRUN. It was two tables, runPlaneT and runFaceT, packed nose to tail in one page.
+if (NRUN > 256) throw new Error(`NRUN=${NRUN}: a run id is a byte`);
+// runPFT packs the plane into 5 bits: no map may be wider or taller than 31
+if (Math.max(...LEVEL_IDS.flatMap(n => [MAP_OF(n)[0].length, MAP_OF(n).length])) > 31)
+  throw new Error('runPFT holds a plane in 5 bits: every map must be 31 cells or fewer on each side');
 // Where those two tables live: flush against the END of the cut-scene charset's region, the same
 // address in every build. They used to start immediately after faceChrT, which made the address
 // depend on how tightly FACE_PACK happened to pack the pictures -- and in a DIE=0 build, with no
@@ -5960,7 +6819,16 @@ if (HAS_PED) for (let i = 0; i < IDOL_N; i++) {
 // The fourth is the one behind the pedestal wall, which nothing opens until all three are
 // seated, so it is NOT an errand and is deliberately not one of the three -- it stays black,
 // the way every other exit in the game reads.
-const LEVEL_EXITCOL = { 4: [2, 5, 6, 0, 0] };   // v3: a second black one, to 9   // red, green, blue -- the black one went with its hole
+// V2 (the user, 2026-11-08): seen from the start, facing the pedestals, the holes behind read
+// red / green / blue left to right like the drums -- (1,1), then (1,6) right behind you, then
+// (1,11) -- and lead to 5 / 6 / 7. So under V2 (1,11) is BLUE and (1,6) GREEN, and the destinations
+// are the old [5, 7, 6] again: the colours moved round to the levels, not the other way.
+// 10's corner exit MUST stay black (the user, 2026-11-13, after trying yellow): it is never stamped.
+// While some of its four blocks stand it lies ACROSS their faces' planes, and occBy, asked from the
+// quadrant cell bhStep gives it, says no face is in front; stamping it properly would mean
+// synthesising the ramp cells along each face's base, every frame, on the slowest level. Black on
+// black walls hides the error. It is drawn LARGER instead, to be seen (CORNSCALE).
+const LEVEL_EXITCOL = { 4: V2 ? [2, 6, 5, 0] : [2, 5, 6, 0] };   // (v3's second black one, to 9, went with its hole)   // red, green, blue -- the black one went with its hole
 // ---- and where each exit GOES ----
 // lvlNxtT was one byte a level, so a level's exits all led to the same place -- fine while
 // every level had exactly one. The hub has four, and the whole point of the room is that they
@@ -6013,8 +6881,8 @@ const ENDING = LVLLOAD && true && !process.env.NOENDING
 // ROUTE_END: where the LAST level's exit leads -- the ending, or level 1 under NOENDING.
 const ROUTE_END = ENDING ? END_DST : ALLLVL.includes(1) ? 1 : 0xff;
 const BLACK_DST = ALLLVL.includes(8) ? 8 : ROUTE_END;
-const LEVEL_EXITDST = { 4: [...(HUB_WIRED ? [5, 7, 6] : [1, 1, 1]), BLACK_DST, ALLLVL.includes(9) ? 9 : ROUTE_END], 5: [4], 6: [4], 7: [4],
-                        8: [ALLLVL.includes(9) ? 9 : ROUTE_END], 9: [ROUTE_END],
+const LEVEL_EXITDST = { 4: [...(HUB_WIRED ? [5, 7, 6] : [1, 1, 1]), BLACK_DST], 5: [4], 6: [4], 7: [4],
+                        8: [ALLLVL.includes(9) ? 9 : ROUTE_END], 9: [ALLLVL.includes(10) ? 10 : ROUTE_END], 10: [ROUTE_END],
                         ...(ENDING && process.env.ENDTEST ? { 1: [END_DST] } : {}) };
 // FALLEXIT=n -- which of the hub's exits a FALLNOW fall takes. Without it the forced fall reads
 // hlv, and hlv is reset to 0 after every drop (see fallDone), so a headless run can only ever
@@ -6064,9 +6932,9 @@ const EXIT_COLS = (process.env.EXITCOLS ?? LEVEL_EXITCOL[LVL]?.join(',') ?? '').
 // not exist -- and an exit costs a holeSeeT row, an lvlNxtT byte, a fill colour and an entity's
 // worth of tables whether anything is through it or not. It comes back with level 8. The wall
 // that hides it stays: it is what the three pedestals open, and it now reveals an empty alcove.
-const HUB_HOLES = [[1, 1], [1, 11], [1, 6], [9, 1], [9, 11]];   // red 5, green 7, blue 6, black 8, black 9
-const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
-             : LVL === 5 ? [11, 1] : LVL === 6 ? [1, 6] : LVL === 7 ? [5, 1] : LVL === 8 ? [16, 5] : LVL === 9 ? L9.exit : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
+const HUB_HOLES = [[1, 1], [1, 11], [1, 6], [9, 1]];   // red 5, green 7, blue 6, black 8 (v2: red 5, blue 7, green 6). (9,11), black to 9, went 2026-11-12: the curtain
+const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? (L3V2?.exit ?? [12, 12])
+             : LVL === 5 ? (L5V2?.exit ?? [11, 1]) : LVL === 6 ? (L6V2?.exit ?? [1, 6]) : LVL === 7 ? [5, 1] : LVL === 8 ? [16, 5] : LVL === 9 ? L9.exit : LVL === 10 ? L10.exit : HUBROOM ? HUB_HOLES : [15, 5];   // level 2: XX behind the last socket; 3: none yet
 // ONE exit per level (2026-09-18). There were two, alternating, from the days of one maze
 // with two holes; every level since has had both at the same cell, and the second slot cost a
 // holeSeeT row (32 bytes, four rows in all) that level 2's third socket needed. hlv is 0 now.
@@ -6080,6 +6948,8 @@ const HOLE_D = SOCKROOM ? [2, 11] : CHAMBER ? [12, 12]
 const HOLES_AT = process.env.NOHOLE === '1' ? []
                : Array.isArray(HOLE_D?.[0]) ? HOLE_D
                : HOLE_D || process.env.HOLEX ? [[+(process.env.HOLEX ?? HOLE_D[0]), +(process.env.HOLEY ?? HOLE_D[1])]] : [];
+if (LVSKIP && process.env.FALL !== '0' && !HOLES_AT.length && process.env.NOHOLE !== '1') throw new Error(`level ${LVL} has no exit, and ` +
+  `LVSKIP's lvKey stands the player on exit 0 without checking: give it one, or build with LVSKIP=0`);
 // SOCKETS=x,y;x,y -- puzzle sockets. Same projection, same code and (nearly) the same art as
 // the exit hole: a socket is a hole at half the radius with a different fill ink. They live in
 // orbXCT/orbYCT past the exit holes, so orbOne's "index above the orbs is hole-like" dispatch
@@ -6090,11 +6960,12 @@ const HOLES_AT = process.env.NOHOLE === '1' ? []
 // the placeholder in would have quietly put two sockets into the ring level. A level declares
 // sockets when its design calls for them; SOCKETS=x,y overrides for the live level, and the other
 // level keeps its own.
-const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? '6,5;9,13;12,14' : CHAMBER ? '5,5;7,7'
-                    : LVL === 5 ? '11,3;19,9' : LVL === 6 ? '3,8;5,8'
-                    : LVL === 7 ? '1,10;11,5' : LVL === 8 ? '14,5'
-                    : LVL === 9 ? L9.socks.map(sk => `${sk.x},${sk.y}`).join(';') : '')).split(';')
+const SOCKETS_AT = (process.env.SOCKETS ?? (SOCKROOM ? (L2V ? L2V.socks : '6,5;9,13;12,14') : CHAMBER ? '5,5;7,7'
+                    : LVL === 5 ? (L5V2?.socks ?? '11,3;19,9') : LVL === 6 ? (L6V2?.socks ?? '3,8;5,8')
+                    : LVL === 7 ? (L7V2?.socks ?? '1,10;11,5') : LVL === 8 ? '14,5'
+                    : LVL === 9 ? L9.socks.map(sk => `${sk.x},${sk.y}`).join(';') : LVL === 10 ? L10.socks : '')).split(';')
   .filter(Boolean).map(p => p.split(',').map(Number));
+if (LEVEL_FLUTE[LVL] && SOCKETS_AT.length) throw new Error(`level ${LVL} has sockets, but the flute's ISK2 loads over their ladder`);
 // Every hole-like entity in one list, exits first. The index into THIS is what indexes the LOS
 // bitmaps, the fill colours and the ladder choice.
 // ---- PEDESTALS: a socket you can SEE across a room ----
@@ -6147,7 +7018,9 @@ const lvlMax = (f, own) => Math.max(own, ...LVLSIZED.map(f));   // late levels c
 // seams from first principles). Six tables are emitted at this length, and a zero-length !byte
 // assembles to "bad number: $", which names neither the table nor the flags that emptied it.
 // Nothing indexes them when the count is really zero, so the spare byte is inert.
-const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
+// +1 on a CORNER-exit level: its exit (entity nOrbs) is drawn through the slide tables, which are NORB long
+const NORB  = Math.max(1, lvlMax(l => l.nOrbs + (HAS_CORNER && LEVEL_CORNER[l.level] ? 1 : 0),
+                                 ORBS.length + (HAS_CORNER && LEVEL_CORNER[LVL] ? 1 : 0)));
 // ---- and now the sizes of the RAM buffers that needed NRUN/NORB to state ----
 // See RUNTIME_BUFS. Declaring a length is what lets the accounting stop reserving a whole PAGE
 // around an equate: a page all of whose equates are declared is reserved exactly, and the rest of
@@ -6156,18 +7029,18 @@ const NORB  = Math.max(1, lvlMax(l => l.nOrbs,     ORBS.length));
 // Over-declaring is safe and under-declaring is not -- a table reserved short is how a level
 // shadow once grew over doomT -- so where the true extent is not obvious the whole page is named.
 Object.assign(RUNTIME_BUFS, {
-  runPlaneT: NRUN,      // per run id, and NRUN is 65 -- these two are the worst ratio in the
-  runFaceT: NRUN,       //   build, 65 bytes each on a page of their own
+  runPFT: NRUN,         // per run id: plane, axis and sense in one byte
   bfsQ: 254,            // one byte per open cell
   vsOn: 1, vsRow: 1, vsCode: 1,
   bfsLast: 1, mulWY: 1, obKT: 1, obKI: 1,
   obKeyT: NORB,         // at most 8: the sprite budget bounds the cast
   obLT: NORB, obLN: 1,  // obOrder's sorted list of the entities that survive culling, and its length
-  // 176, not 256. It is indexed by screen COLUMN -- `remHiT,x` and `remHiT+1,y` with x,y in
+  // 161, not 256. It is indexed by screen COLUMN -- `remHiT,x` and `remHiT+1,y` with x,y in
   // 0..159 -- so 161 bytes are reachable and the rest was "named whole rather than guessed at".
-  // That mattered once it had to move: no 256-byte run is free in all three chain shapes, and a
-  // 176-byte one is. Slack of 15 over the highest index anything can form.
-  remHiT: 176,
+  // That mattered once it had to move: no 256-byte run is free in all three chain shapes. It was
+  // 176, 15 of slack over the highest index anything can form, until those 15 were the difference
+  // between level 10's corner exit fitting the arena and not (2026-11-11).
+  remHiT: 161,
   krillRt: 251,         // Krill's RUNTIME resident -- see krillRt
   arcMap: CELLCODES,    // the fall's cell code -> arc code map, built at runtime by arcBld
   // The seam-stability and seam-edge scratch, declared so their two pages stop being written off
@@ -6197,14 +7070,13 @@ Object.assign(RUNTIME_BUFS, {
   // lets a new variable land inside obX -- which is exactly what happened to the fall's
   // arc scratch, and it took a freeze to notice.
   obX: 8, obY: 8, obP: 8, obC: 8, obIX: 8, obV: 8, obOcc: 8, obCL: 8, obCR: 8,
-  obL: 8, obR: 8, obBL: 8, obBR: 8,
+  obL: 8, obR: 8,
   pfNum: 34,                       // PROFN: the same seventeen phases, x 2
   // 16-BIT, and the checker assumes ONE byte unless told. This has now bitten twice in one
   // sitting: pulsePh's high byte landed on markPa, and then markPa landed on opx+1 -- so the
   // player's projected X overwrote the death trigger's reference angle every frame and you
   // died the instant an angel reached you, standing still. Anything referenced as name+1
   // belongs here; `grep -o '[a-z]*+1'` over the asm finds them.
-  opx: 2, opy: 2,
   osSrc: 2, osTmp: 2,              // OCCSYN pointer and pair
   rayAcc: 2, edgAcc: 2, chnAcc: 2, bcN: 2, bcSame: 2, mcPiv: 2, mcMid: 2, mcHint: 2, // RAYCNT: 256 frames summed, so the HIGH byte is the mean
 });
@@ -6215,7 +7087,9 @@ Object.assign(RUNTIME_BUFS, {
 // entries in ORBS), separated by '|': LEASH="|21,1;21,9" leashes the second angel only.
 // Level 1's moved out from (21,2)/(21,8) to the corners on 2026-10-30: with diagonal steps and fresher
 // maps (BFSJIT/ANGDIAG) angel 2 got round the ring to the door too fast -- the user needed room to
-// draw it further up or down the east column before slipping past to the hole. A group
+// draw it further up or down the east column before slipping past to the hole. Moved back on
+// 2026-11-01 for a playtest, then OUT to the corners again the same day once the fixed reaction
+// (ANGREACT) made the race consistent: "now we have to move the leash out to the corners". A group
 // is cells the angel may NOT enter, as before; an empty group is an unleashed angel.
 // The table is NORB x 32 bytes, indexed by entity slot -- so an orb's slots are wasted (all
 // zero) and the angels' rows land where amIdx x 32 says. 32 bytes an entity is the price of
@@ -6223,7 +7097,7 @@ Object.assign(RUNTIME_BUFS, {
 // ANGEL=0 takes the angels out, so it takes the leashes with them -- otherwise the consistency
 // check below fires on a level whose default leash names angels the flag has just removed, and
 // "ANGEL=0" stops being a thing you can simply say about any level.
-const LEASH_GROUPS = (process.env.ANGEL === '0' ? '' : process.env.LEASH ?? (LVL === 1 ? '|21,1;21,9' : ''))
+const LEASH_GROUPS = (process.env.ANGEL === '0' ? '' : process.env.LEASH ?? (LVL === 1 ? (V2 ? '|20,2;20,8' : '|21,1;21,9') : ''))
   .split('|').map(g => g.split(';').filter(Boolean).map(q => q.split(',').map(Number)));
 const LEASH_AT = LEASH_GROUPS.flat();     // every leash cell, for the checks that only care WHERE
 // ---- LEVELSHEET=1: print the live level in the LEVEL SHEET glyph language and stop ----
@@ -6244,11 +7118,13 @@ if (process.env.LEVELSHEET === '1') {
   const wallGroups = {};
   (LEVEL_WALLS[LVL]?.walls ?? []).forEach((grp, k) => grp.forEach(([x, y]) =>
     (wallGroups[`${x},${y}`] ??= []).push(k + 1)));
+  const sw = LEVEL_WALLS[LVL]?.sockWall ?? [];
+  // a CLOSER is Wn, n the group its socket opens (W2 shuts when S2 is fed) -- see LEVEL_CLOSE
+  const closeOf = Object.fromEntries((LEVEL_CLOSE[LVL] ?? []).map(c => [c.wall + 1, sw[c.sock] + 1]));
   for (const [xy, ks] of Object.entries(wallGroups)) {
     const [x, y] = xy.split(',').map(Number);
-    g[y][x] = ks.length > 1 ? '|+' : `|${ks[0]}`;
+    g[y][x] = ks.length > 1 ? '|+' : closeOf[ks[0]] ? `W${closeOf[ks[0]]}` : `|${ks[0]}`;
   }
-  const sw = LEVEL_WALLS[LVL]?.sockWall ?? [];
   SOCKETS_AT.forEach(([x, y], i) => put(x, y, `S${(sw[i] ?? -1) + 1 || '?'}`, 'socket'));
   PEDESTALS_AT.forEach(([x, y], i) => put(x, y, `/${(sw[SOCKETS_AT.length + i] ?? -1) + 1 || '?'}`, 'pedestal'));
   const dst = v => v === undefined || v === null ? '>' : v === END_DST ? '!' : String(v);
@@ -6285,6 +7161,7 @@ if (process.env.LEVELSHEET === '1') {
     out.push(`exit     X${d} at (${x},${y}): ${d === '>' ? `the next level in the chain (level ${nextLevel(LVL)} in the full game)` : d === '!' ? 'THE END (the ending sequence)' : `level ${d}`}, hole ${ink(EXIT_COLS[i] ?? 0)}`);
   });
   (LEVEL_WALLS[LVL]?.walls ?? []).forEach((grp, k) => {
+    if (closeOf[k + 1]) return out.push(`closer   W${closeOf[k + 1]} ${grp.map(([x, y]) => `(${x},${y})`).join(' ')} -- open at the start; back the moment S${closeOf[k + 1]} is fed (whatever stands in it is pushed ${(LEVEL_CLOSE[LVL].find(c => c.wall === k).cells.map(c => `to (${c.ax},${c.ay})`)).join(', ')})`);
     const by = [...SOCKETS_AT.map((c, i) => [`S${k + 1}`, c, i]), ...PEDESTALS_AT.map((c, i) => [`/${k + 1}`, c, SOCKETS_AT.length + i])]
       .filter(([, , i]) => sw[i] === k).map(([gl, [x, y]]) => `${gl} (${x},${y})`);
     out.push(`group ${k + 1}  ${grp.map(([x, y]) => `(${x},${y})`).join(' ')} -- opened by ${by.join(', ') || 'nothing'}${by.length > 1 && by[0][0] === '/' ? ' (all of them)' : by.length > 1 ? ' (any of them)' : ''}`);
@@ -6490,7 +7367,7 @@ const orbXC = ORBS.map(o => o.x | 0), orbYC = ORBS.map(o => o.y | 0);
 // a level-data mistake, and a silent default is how the two sources drifted in the first place.
 const orbCol = ORBS.map(o => {
   if (o.silver) return SILV_INKS[1];
-  if (!o.idol) return ORBBODY[o.c];
+  if (!o.idol) return o.body ?? ORBBODY[o.c];
   if (o.body === undefined) throw new Error(`idol at (${o.x},${o.y}) has no body colour`);
   return o.body;
 });
@@ -6529,6 +7406,73 @@ const angVarT = [...Array(256)].map((_, h) => {
     if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
   return b;
 });
+// ...and the BIG angel's: BIGS times the angel's height, from its own rungs
+const bigVarT = [...Array(256)].map((_, h) => {
+  if (!HAS_BIG) return 0;
+  const want = 2 * h * ANGH * BIGS;
+  let b = BIG_V0;
+  for (let v = BIG_V0 + 1; v < BOLT_V0; v++)
+    if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
+  return b;
+});
+const BIG_HITD = !HAS_BIG ? 0 : +(process.env.BIGHITD ?? 88 / [...Array(256).keys()].find(h => h > 0 && bigVarT[h] === BIG_V0));
+if (HAS_BIG && BIG_AI2) {
+  if (!(BIG_HITD > BIGSTOP && BIG_HITD < 2)) throw new Error(`BIG_HITD ${BIG_HITD}: must be past BIGSTOP (${BIGSTOP}) and under 2 cells (bgDst's range)`);
+  console.error(`  big angel: strikes within ${BIG_HITD.toFixed(2)} cells (its top rung), steps no nearer than ${BIGSTOP}`);
+}
+// ...and the bolt's: BOLT_K rows per h
+const bltVarT = [...Array(256)].map((_, h) => {
+  if (!HAS_BIG) return 0;
+  const want = BOLT_K * h;
+  let b = BOLT_V0;
+  for (let v = BOLT_V0 + 1; v < LADDER.length; v++)
+    if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
+  return b;
+});
+// BIGSHEET=file.png: the big angel's whole ladder on one sheet, each rung at its on-screen size (a
+// hires pixel 2x2, an mc pixel 2 hires wide, magnified rungs doubled both ways), every sprite boxed
+// (the primary red, the rest cyan), with its rows, sprites, magnification and the distances it covers.
+if (HAS_BIG && process.env.BIGSHEET) {
+  const PAL = [null, [0x43, 0x39, 0x00], [0x6f, 0x4f, 0x25], [0xbf, 0xce, 0x72]];
+  const Z = 2, PADX = 16, TOP = 16, LAB = 52;
+  const rungs = LADDER.map((r, v) => v).filter(isBig).sort((a, b) => ORBTALL[b] - ORBTALL[a]);
+  const geo = rungs.map(v => {
+    const m = ORBEX[v] ? 2 : 1, r = LADDER[v];
+    const spr = [{ b: r.lo, x: 0, y: 0, pri: 1 }, ...r.big.parts.map(pt => ({ b: pt.b, x: pt.dx1 * m, y: -pt.up * 21 * m }))];
+    const x0 = Math.min(...spr.map(q => q.x)), x1 = Math.max(...spr.map(q => q.x + 24 * m));
+    const y0 = Math.min(...spr.map(q => q.y)), y1 = 21 * m;
+    const hs = [...Array(256).keys()].filter(h => h > 0 && bigVarT[h] === v);
+    const band = hs.length ? `${(88 / hs[hs.length - 1]).toFixed(1)}-${hs[0] <= 8 ? 'far' : (88 / hs[0]).toFixed(1)}` : 'unused';
+    return { v, m, spr, x0, w: x1 - x0, y0, h: y1 - y0, band };
+  });
+  const H = Math.max(...geo.map(g => g.h)) * Z + TOP + LAB, W = geo.reduce((t, g) => t + g.w * Z + PADX, PADX);
+  const buf = Buffer.alloc(W * H * 3, 0x44);
+  const put = (x, y, c) => { if (x >= 0 && x < W && y >= 0 && y < H) buf.set(c, (y * W + x) * 3); };
+  let gx = PADX; const labels = [];
+  for (const g of geo) {
+    const base = TOP + Math.max(...geo.map(q => q.h)) * Z;          // every rung's bottom on one line
+    const ox = gx - g.x0 * Z, oy = base - g.h * Z - g.y0 * Z;
+    for (const q of g.spr) {
+      const bm = ORBBM[q.b];
+      for (let y = 0; y < 21; y++) for (let i = 0; i < 12; i++) {
+        const c = (bm[y * 3 + (i >> 2)] >> (6 - 2 * (i & 3))) & 3;
+        if (!c) continue;
+        for (let yy = 0; yy < g.m * Z; yy++) for (let xx = 0; xx < 2 * g.m * Z; xx++)
+          put(ox + (q.x + i * 2 * g.m) * Z + xx, oy + (q.y + y * g.m) * Z + yy, PAL[c]);
+      }
+      const bx = ox + q.x * Z, by = oy + q.y * Z, bw = 24 * g.m * Z, bh = 21 * g.m * Z, bc = q.pri ? [0xff, 0x40, 0x40] : [0x40, 0xe0, 0xff];
+      for (let k = 0; k < bw; k++) { put(bx + k, by, bc); put(bx + k, by + bh - 1, bc); }
+      for (let k = 0; k < bh; k++) { put(bx, by + k, bc); put(bx + bw - 1, by + k, bc); }
+    }
+    labels.push([gx, base + 6, `${ORBTALL[g.v]} rows\n${g.spr.length} spr ${g.m === 2 ? 'x2' : 'x1'}\n${g.band} cells`]);
+    gx += g.w * Z + PADX;
+  }
+  const ppm = './build/bigsheet.ppm';
+  writeFileSync(ppm, Buffer.concat([Buffer.from(`P6 ${W} ${H} 255\n`), buf]));
+  execFileSync('magick', [ppm, '-font', process.env.BIGSHEETFONT ?? '/System/Library/Fonts/Supplemental/Arial.ttf', '-fill', 'white', '-pointsize', '11',
+    ...labels.flatMap(([x, y, t]) => ['-annotate', `+${x}+${y + 10}`, t]), process.env.BIGSHEET]);
+  console.error(`  big angel sheet: ${process.env.BIGSHEET} (${geo.length} rungs)`);
+}
 if (process.env.ANGDUMP === '1') {
   // Derive the indices rather than naming them: they were hardcoded to 42/43, which stopped
   // existing when the six-sprite ladder went and the bitmap count dropped to 37.
@@ -6596,7 +7540,7 @@ const orbVarT = [...Array(256)].map((_, h) => {
 const svVarT = [...Array(256)].map((_, h) => {
   if (!HAS_SILVER) return 0;
   const want = (SVSCALE * h / 88) * ORBTALL[SV_V0] / ORBWIDE[SV_V0];
-  let b = SV_V0; for (let v = SV_V0 + 1; v < LADDER.length; v++)
+  let b = SV_V0; for (let v = SV_V0 + 1; v < BIG_V0; v++)
     if (Math.abs(ORBTALL[v] - want) < Math.abs(ORBTALL[b] - want)) b = v;
   return b;
 });
@@ -6607,7 +7551,7 @@ const svVarT = [...Array(256)].map((_, h) => {
     // Each rung is reached through its OWN distance map -- orbVarT for the round entities,
     // angVarT for the tall ones. Testing every rung against orbVarT reported the entire angel
     // ladder as dead, which it is not: it is simply never what a round thing asks for.
-    const vt = isSv(v) ? svVarT : v >= ANG_V0 ? angVarT : orbVarT;
+    const vt = isSv(v) ? svVarT : isBolt(v) ? bltVarT : isBig(v) ? bigVarT : v >= ANG_V0 ? angVarT : orbVarT;
     const hs = [...Array(lim).keys()].filter(h => vt[h] === v);
     band.push(hs.length ? `${ORBTALL[v]}h@${(22528 / hs[hs.length - 1] / 256).toFixed(2)}-` +
       `${(22528 / Math.max(hs[0], 1) / 256).toFixed(2)}` : `${ORBTALL[v]}h/${ORBWIDE[v]}w UNREACHABLE`);
@@ -6623,7 +7567,7 @@ const svVarT = [...Array(256)].map((_, h) => {
 const orbPtrU = ORBSRCU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);   // 0 = one sprite
 const orbPtrR = ORBSRCR.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);    // 0 = one column
 const orbPtrRU = ORBSRCRU.map(b => b < 0 ? 0 : ((SPRBASE - VBANK) >> 6) + b);
-const orbTallT = ORBS.map(o => o.tall ? 1 : 0);
+const orbTallT = ORBS.map(o => o.tall ? (o.big && LEVEL_BIG[LVL] ? 2 : 1) : 0);   // 2 = the BIG angel (bigVarT)
 // Which BITMAP an entity draws with, as an offset added to the orb's pointer at the rung it is
 // already using. 0 is the orb's own art. Not folded into orbTallT: that one means "is an angel"
 // and is read as a boolean in five other places (luggage, pathing, the BFS early-out), where a
@@ -6638,7 +7582,6 @@ const ORB_HOLD_Y = +(process.env.ORBHOLDY ?? 210);
 // 0 at ORB_HOLD_Y, Y-expanded to 42 rows, so it owns everything from there down; one split just
 // above it gives it its own $d025/$d026. Anything in the world whose sprite reaches below this
 // line takes the held object's inks instead -- which is the artefact to watch for.
-const SPRSPL = ORB_HOLD_Y - 1;
 // ---- the swallow: the orb shrinking into a socket ----
 // Frames, not sixtieths, and deliberately: this is four DRAWN steps, so it has to advance once
 // per rendered frame or a step is skipped and the flourish stutters. Durations that matter get
@@ -6695,6 +7638,8 @@ const orbExpT = HAS_SILVER ? LADDER.map((r, v) => ORBEX[v] | (ORBEY[v] << 1)) : 
 // below is computed FROM this value rather than alongside it.
 const orbHalfT = ORBSRC.map((b, v) => {
   if (isSv(v)) return (ORBSRCR[v] >= 0 ? 24 : 12) * (ORBEX[v] ? 2 : 1);   // centred on its 1- or 2-sprite frame
+  if (isBig(v)) return Math.round(LADDER[v].big.half);                     // the figure's centre, from the primary's left edge
+  if (isBolt(v)) return 12 * (ORBEX[v] ? 2 : 1);                           // the bolt: centred in its sprite
   const w = b + 1, ox = (12 - w) >> 1;
   return (2 * ox + w) * (ORBEXP[v] ? 2 : 1);
 });
@@ -6748,6 +7693,8 @@ const orbPartsOf = (v, bm, col0) => {
   // the silver orb's right column, one sprite (12 columns) over
   if (ORBSRCR[v] >= 0) parts.push({ grid: spriteGrid(ORBBM[ORBSRCR[v]]), col0: col0 + 12 * xm, row0: 0, xm, ym });
   if (ORBSRCRU[v] >= 0) parts.push({ grid: spriteGrid(ORBBM[ORBSRCRU[v]]), col0: col0 + 12 * xm, row0: -21 * ym, xm, ym });
+  // the big angel's other sprites, each at its own offset (bigPX/bigPY)
+  for (const pt of LADDER[v].big?.parts ?? []) parts.push({ grid: spriteGrid(ORBBM[pt.b]), col0: col0 + pt.dx / 2, row0: -21 * ym * pt.up, xm, ym });
   return parts;
 };
 // col0 is where the sprite's left edge sits relative to ocol. ROWS do not depend on it, which is
@@ -6764,7 +7711,7 @@ const orbExtOf = (v, col0) => {
   // The silver orb is exempt: its box is bottom-aligned (the lightning reaches the last row) but
   // the plain ball is not, and frame 0 is what gets measured. Rows stamped below it are cells the
   // lightning may cross; a stamp over nothing draws wall over nothing, which is invisible.
-  if (!isSv(v) && e.bot !== ORBANCH[v] - 1) throw new Error(`orb-path variant ${v} (h=${r.h}): ink ends on row ${e.bot}, ` +
+  if (!isSv(v) && !isBolt(v) && e.bot !== ORBANCH[v] - 1) throw new Error(`orb-path variant ${v} (h=${r.h}): ink ends on row ${e.bot}, ` +
     `but occStamp assumes content is BOTTOM-ALIGNED and ends on row ${ORBANCH[v] - 1} of its frame`);
   return e;
 };
@@ -6783,17 +7730,10 @@ const ORB_FLOOR = +(process.env.ORB_FLOOR ?? 12);
 // rebuild. Both levels are 120 (one cell per two seconds) for now; the design note is that the
 // NUMBER of angels matters far more than the speed, because you can only watch one way.
 const ANG_PERIOD = +(process.env.ANGPER ?? 120);
-// ...and a SECOND, shorter period for when it is far off. One cell per two seconds is right when
-// the thing is breathing down your neck and much too slow when it is half a map away: on level 2's
-// 30-cell ring it starts 15 cells out either way round, which is thirty seconds of strolling. So
-// past ANG_FAR cells it closes at ANG_PERIOD_FAR instead. Distance is the angel's own cell in the
-// BFS field that already exists for pathing -- no new state, no second measure of "near".
-// ANG_FAR is the first FAST distance, so 6 means "more than five cells away".
-const ANG_FAR = +(process.env.ANGFAR ?? 6);
-// BACK TO 120, i.e. off: user-tested 2026-08-25 and it changed nothing about how the level plays.
-// It arrives sooner and you turn round and run, which was always the answer. The machinery stays
-// because it is per-level and free -- a later map may want it -- but the default is "no change".
-const ANG_PERIOD_FAR = +(process.env.ANGPERF ?? 120);
+// (A second, shorter period past ANGFAR cells, ANGPERF, was deleted 2026-11-02: user-tested at
+// 2026-08-25 it changed nothing about how a level plays, and it sat at 120 = off ever since. The
+// user: "good level design should make it irrelevant". One period per level, angPerT, remains as
+// the knob for overall angel speed.)
 // Columns from screen centre inside which a destination counts as "you would see me there".
 // 80 is the screen edge; the margin covers the sprite's own width, since a cell whose CENTRE is
 // just off screen can still show half an angel.
@@ -6820,8 +7760,26 @@ const ANG_OBSC = +(process.env.ANGOBSC ?? 0);
 const FINECOL = process.env.FINECOL ? process.env.FINECOL === '1' : HAS_SILVER;
 const FINECOL_ALL = process.env.FINECOL === '1';
 const ANGSLIDE = HAS_IDOL || HAS_SILVER ? +(process.env.ANGSLIDE ?? 24) : 0;
-if (ANGSLIDE && (ANGSLIDE < 2 || Math.max(ANG_PERIOD, ANG_PERIOD_FAR) + ANGSLIDE > 256 || ANGSLIDE >= Math.min(ANG_PERIOD, ANG_PERIOD_FAR)))
-  throw new Error(`ANGSLIDE=${ANGSLIDE} must be 2.. and shorter than a step period (${ANG_PERIOD}/${ANG_PERIOD_FAR}), and period + slide must fit a byte`);
+// ANGREACT=R (2026-11-01, opt-in): a FIXED reaction time. An angel steps on its own 2-second clock and
+// can only change its mind on a step, so when the player crossed the point where its best way round
+// flips, it answered anywhere from 0.3 to 1.75 s later depending only on where in its cycle the
+// crossing fell -- level 1's loop race was a coin toss (the user: "essentially random ... not ideal").
+// With R set, the first time a fill reaches an angel and its way round has REVERSED (or it was standing
+// and now has somewhere to go), its clock is re-set so that step LANDS R ticks after the player entered
+// the cell the fill is for -- not after its clock, nor after the map, both of which wander. Once per
+// step, so dithering across the midpoint cannot pin it. A fill that came too late to make R lands it
+// one lunge from now. R is at most a period (the build checks).
+// DEFAULT R = 96 since 2026-11-02 (the master disk); ANGREACT=0 off. Since 2026-11-03 the default
+// SCALES with the step: 0.8 of ANGPER (96 of 120, 72 of 90), because the old fixed 96 switched itself
+// off for any period under 96 and so quietly brought the random reaction back with faster angels
+// (the user: "keep reaction on always -- just scale it as needed"). Only where it can work: a build
+// without the lunge (no idol or sentries in the chain) or without BFSJIT gets 0 unless it asks.
+const ANG_REACT = +(process.env.ANGREACT ?? (BFS_JIT && ANGSLIDE ? Math.max(ANGSLIDE, Math.round(ANG_PERIOD * 0.8)) : 0));
+if (ANG_REACT && (!BFS_JIT || !ANGSLIDE)) throw new Error('ANGREACT needs BFSJIT (it hooks the fill reaching an angel) and the lunge');
+if (ANG_REACT && (ANG_REACT < ANGSLIDE || ANG_REACT > ANG_PERIOD))
+  throw new Error(`ANGREACT=${ANG_REACT}: must be from the lunge (${ANGSLIDE}) to the step period (${ANG_PERIOD}) ticks`);
+if (ANGSLIDE && (ANGSLIDE < 2 || ANG_PERIOD + ANGSLIDE > 256 || ANGSLIDE >= ANG_PERIOD))
+  throw new Error(`ANGSLIDE=${ANGSLIDE} must be 2.. and shorter than the step period (${ANG_PERIOD}), and period + slide must fit a byte`);
 // (The SOUND -- the angel-proximity drone on voices 1-2 and the effects -- was removed 2026-10-16
 // for GoatTracker music; it lives in the history, lest-c64-history, before that date.)
 // orbBlankT goes NEGATIVE for a two-sprite entity -- ORBTALL is the whole entity's height while
@@ -6860,7 +7818,9 @@ const orbHalfCT = orbHalfT.map(h => Math.ceil(h / 2));
 // (SVDUMP shows it). Shift each rung's placement so its ball centre lands within half a column of
 // the same spot. orbXOffT and the occlusion box (orbBoxT) both derive from orbHalfCT, so they move
 // together and cannot disagree.
-LADDER.forEach((r, v) => { if (!isSv(v)) return;   // the sentry's rungs only: the orb's stay where they always were
+// The BIG angel's too (2026-11-10): its figure is fitted fresh at every size and centred by whole pixels,
+// so without this each rung change nudged it sideways a column or two.
+LADDER.forEach((r, v) => { if (!isSv(v) && !isBig(v) && !isBolt(v)) return;   // the sentry's and the big angel's rungs only: the orb's stay where they always were
   const e = inkExtent(orbPartsOf(v, ORBSRC[v], -orbHalfCT[v]));
   orbHalfCT[v] -= Math.round(-0.5 - (e.r - e.l) / 2);
 });
@@ -6874,7 +7834,7 @@ LADDER.forEach((r, v) => { if (!isSv(v)) return;   // the sentry's rungs only: t
 // 24 left of ocol and the offset is -12 -- stored as a two's-complement byte, and orbOne's X add
 // branches on its sign (see oxDn).
 const orbXOffT = orbHalfCT.map(h => 12 - h);
-if (orbXOffT.some(v => v < (HAS_SILVER ? -12 : 0) || v > 12))
+if (orbXOffT.some(v => v < (HAS_QUAD ? -12 : 0) || v > 12))
   throw new Error('orbXOffT out of range -- a sprite is more than 12 columns off its own centre');
 
 // The bounding box, as the ball's TRUE extent in logical columns each side of ocol. Asymmetric,
@@ -7854,8 +8814,11 @@ if (PICSEG.length) {
 // The hole moved from a scan to a 256-byte h -> rung table when it reached 35 rungs (~600
 // cycles a frame). A socket ladder is a third of that, so the scan is ~100 cycles and a page
 // is worth more than the cycles here.
+// ...except a CORNER exit (LEVEL_CORNER), whose cell is one of the breakable four round its point: it
+// is shut until they are dug out, which is the whole idea
 for (const h of HOLELIKE)
-  if (map[cellOf(h.x, h.y)] !== 0) throw new Error(
+  if (map[cellOf(h.x, h.y)] !== 0
+      && !(h.exit && HAS_CORNER && LEVEL_CORNER[LVL] && LEVEL_BREAK[LVL] && BRK_CELLS(LVL).includes(cellOf(h.x, h.y)))) throw new Error(
     `${h.exit ? 'exit hole' : 'socket'} at (${h.x},${h.y}) is inside a wall`);
 // 8, not 4. The old cap was not a design limit at all -- it was the SIZE OF THE GAP holeSeeT
 // happened to be parked in ($9180, 128 bytes below the $9200 sound block). It is placed against
@@ -8355,21 +9318,52 @@ const STN_MAX = HAS_SILVER ? L9.stN : 1;
 // level's module is the features it uses, behind a jump table in LX_VECS order; a vector none of
 // them answers goes to an rts in the module. Two features answering one vector is not supported yet.
 // DRONELV: the levels whose sound is our own drone + effect player (level code), not a GoatTracker block
-const DRONE_LV = process.env.MUSIC === '1' ? (process.env.DRONELV ?? '1').split(',').map(Number) : [];
+const DRONE_LV = process.env.MUSIC !== '0' ? (process.env.DRONELV ?? '1').split(',').map(Number) : [];
 const LX_FEATURES = {
-  silver:  { on: n => !!LEVEL_SILVER[n],  vecs: { lxTick: 'svTick', lxStep: 'svStep', lxInit: 'lxIn', lxSock: 'stGo', lxWr: 'svWr' } },
-  flicker: { on: n => !!LEVEL_FLICKER[n], vecs: { lxTick: 'flkTick', ...(FLKINK ? { lxLook: 'fkEmpty' } : {}) } },
+  silver:  { on: n => !!LEVEL_SILVER[n],  vecs: { lxTick: SVSND ? 'zsTick' : 'svTick', lxStep: 'svStep', lxInit: SVSND ? 'zsIn' : 'lxIn', lxSock: 'stGo', lxWr: 'svWr', ...(SVSND ? { lxSfx: 'zsSfx' } : {}) } },
+  // (its ORBSHD01 shadow went in with it, 2026-11-13: shdSet and its patch list were resident everywhere)
+  flicker: { on: n => !!LEVEL_FLICKER[n], vecs: { lxTick: FLKSND ? 'fsTick' : 'flkTick', ...(FLKSND ? { lxInit: 'fsIn', lxSfx: 'fsSfx' } : {}),
+                                                  ...(HAS_SHD01 ? { lxLook: 'shdIn', lxBye: 'shdOut' } : FLKINK ? { lxLook: 'fkEmpty' } : {}) } },
+  // THE WALL MARK (LEVEL_SYM, 2026-11-13): SOLID's glyph marked on arrival, plain again on the way out
+  sym:     { on: n => !!LEVEL_SYM[n],       vecs: { lxLook: 'symPut', lxBye: 'symOff' } },
   // the PROXIMITY DRONE (2026-10-16, MUSIC builds): level 1's own sound, no GoatTracker there -- see drIn
   drone:   { on: n => DRONE_LV.includes(n), vecs: { lxInit: 'drIn', lxStep: 'drStep', lxTick: 'drTick', lxSfx: 'drSfx' } },
+  // CLOSERS (LEVEL_CLOSE, 2026-11-04): walls that come back when a socket is fed -- level 6 v2's W2
+  close:   { on: n => !!LEVEL_CLOSE[n],     vecs: { lxInit: 'clIn', lxSock: 'clGo' } },
+  curtain: { on: n => !!LEVEL_CURTAIN[n],   vecs: { lxDot: 'ctDot', ...(HAS_FLUTE ? { lxBgY: 'ftY', lxBgPt: 'ftPart', lxHaz: 'ftStop' } : {}) },
+             wraps: ['lxHaz'] },   // ftStop goes on to the level's hazSet itself, when it has one
+  // PEDSINK (2026-11-08): the pedestals swallow their idols and sink into the floor once the wall opens
+  sink:    { on: n => PEDSINK && !!LEVEL_PEDESTALS[n], vecs: { lxStep: 'pdStep', lxInit: 'pdIn' } },
+  // the MERGE-HAZARD splits (2026-11-12 memory audit): hazSet and its four tables, only on a level that
+  // has any (level 4) -- they were in every level's slot
+  haz:     { on: n => HAZ_PLAN.has(n), vecs: { lxHaz: 'hazSet', lxBur: 'hazSpFix' } },
+  // THE BIG ANGEL (LEVEL_BIG, 2026-11-10): its float, its other sprites, its step test and its stamp
+  big:     { on: n => !!LEVEL_BIG[n], vecs: { lxStep: 'bgStep', lxBgY: 'bgFlt', lxBgPt: 'bgPart', lxBgFar: 'bgFar', lxBgOcc: 'bgOcc', lxBgAim: 'bgAim',
+                                              ...(HAS_BRK ? { lxInit: 'brIn', lxDot: 'brStr' } : {}), ...(BRK_MARK ? { lxBur: 'brSplit' } : {}),
+                                              ...(BOSS_MUS ? { lxTick: 'bmFT' } : {}) } },
 };
+// ---- PEDSINK: the solved pedestals go down into the floor (the user, 2026-11-08) ----
+// ON by default since 2026-11-10 (the user, after judging it: "put everything we have now on the
+// shipping disk"); PEDSINK=0 turns it off. When the pedestal wall opens, the idols sink into their drums
+// (PEDSINK_T rendered frames), then the drums sink into the floor (PEDSINK_T more). DESTRUCTIVE:
+// it shifts the art at OVLBASE down in place, because nothing needs those pictures again until a
+// level LOADS them -- and it marks the art set stale at the end so the next level wanting it does.
+// Lazy: only the rungs the eight sprite slots point at this frame are brought down to the
+// current depth (pdDnT says how far each already is), so a rung first seen late catches up in
+// one pass instead of every rung being rewritten every frame.
+const PEDSINK = process.env.PEDSINK !== '0';
+const PEDSINK_T = +(process.env.PEDSINK_T ?? 8);   // 8 since the user's "too slow ... double the speed" (was 16)
+if (PEDSINK && ![4, 8, 16, 32].includes(PEDSINK_T)) throw new Error(`PEDSINK_T=${PEDSINK_T}: 4, 8, 16 or 32 (the depth is rows * clock >> log2 T, and rows * T must fit 16 bits)`);
 const LX_FEAT_OF = n => Object.keys(LX_FEATURES).filter(f => LX_FEATURES[f].on(n));
 const LX_OF = n => LX_FEAT_OF(n).length > 0;
 const HAS_LX = LEVEL_IDS.some(LX_OF);
 // the vectors this build needs, the IRQ's first (lxOff stubs in this order, lxOn points in reverse)
-const LX_VECS = ['lxTick', 'lxStep', 'lxInit', 'lxSock', 'lxWr', 'lxLook', 'lxSfx']
+const LX_VECS = ['lxTick', 'lxStep', 'lxInit', 'lxSock', 'lxWr', 'lxLook', 'lxSfx', 'lxBgY', 'lxBgPt', 'lxBgFar', 'lxBgOcc', 'lxDot', 'lxBgAim', 'lxBur', 'lxHaz', 'lxBye']
   .filter(v => LEVEL_IDS.some(n => LX_FEAT_OF(n).some(f => LX_FEATURES[f].vecs[v])));
 for (const n of LEVEL_IDS) for (const v of LX_VECS)
-  if (LX_FEAT_OF(n).filter(f => LX_FEATURES[f].vecs[v]).length > 1) throw new Error(`level ${n}: two level-code features answer ${v}`);
+  { const fs = LX_FEAT_OF(n).filter(f => LX_FEATURES[f].vecs[v]);   // two may, if one WRAPS the other (calls on to it)
+    if (fs.length > 2 || fs.length === 2 && fs.filter(f => LX_FEATURES[f].wraps?.includes(v)).length !== 1)
+      throw new Error(`level ${n}: two level-code features answer ${v}`); }
 if (STN_MAX > 1 && SV_MAX !== 8) throw new Error(`stGo indexes stSvT by stage x 8 (three asl); SV_MAX is ${SV_MAX}`);
 const SVN = ORBS.filter(o => o.silver).length;
 if (SVN > SV_MAX) throw new Error(`level ${LVL} has ${SVN} sentries; the engine keeps state for ${SV_MAX}`);
@@ -8381,33 +9375,178 @@ const SV_DCODE = d => d[0] === 1 ? 1 : d[0] === -1 ? 2 : d[1] === 1 ? 3 : 4;
 // on loop 2 (both clockwise 4x4) are all one 12-step path, and the three lanes one 4-step path.
 // Each path ENDS IN A MARKER, minus its length (256 - n): reaching it, a sentry adds it to its
 // position and is back at the first step -- so a role needs only where it starts, not a span.
-const SV_PATH = [], SV_BEG = [], SV_END = [], SV_P0 = [];
-for (const sn of SENTRIES) {
-  if (!sn) { SV_BEG.push(0); SV_END.push(0); SV_P0.push(0); continue; }   // an empty stage-0 slot
-  const codes = sn.dirs.map(SV_DCODE), n = codes.length;
-  let hit = null;
-  for (let i = 0; i < SV_BEG.length && !hit; i++) {
-    if (SV_END[i] - SV_BEG[i] !== n) continue;
-    const st = SV_PATH.slice(SV_BEG[i], SV_END[i]);
-    for (let k = 0; k < n && !hit; k++) if (codes.every((c, j) => st[(k + j) % n] === c)) hit = [SV_BEG[i], k];
+const svPaths = roles => {
+  const PATH = [], BEG = [], END = [], P0 = [];
+  for (const sn of roles) {
+    if (!sn) { BEG.push(0); END.push(0); P0.push(0); continue; }   // an empty stage-0 slot
+    const codes = sn.dirs.map(SV_DCODE), n = codes.length;
+    let hit = null;
+    for (let i = 0; i < BEG.length && !hit; i++) {
+      if (END[i] - BEG[i] !== n) continue;
+      const st = PATH.slice(BEG[i], END[i]);
+      for (let k = 0; k < n && !hit; k++) if (codes.every((c, j) => st[(k + j) % n] === c)) hit = [BEG[i], k];
+    }
+    if (!hit) { hit = [PATH.length, 0]; PATH.push(...codes, 256 - n); }
+    BEG.push(hit[0]); END.push(hit[0] + n); P0.push(hit[0] + hit[1]);
   }
-  if (!hit) { hit = [SV_PATH.length, 0]; SV_PATH.push(...codes, 256 - n); }
-  SV_BEG.push(hit[0]); SV_END.push(hit[0] + n); SV_P0.push(hit[0] + hit[1]);
-}
-if (SV_PATH.length > 255) throw new Error(`the sentries' paths are ${SV_PATH.length} steps; svPosT is a byte`);
-if (SENTRIES.some(sn => sn && sn.dirs.length > 127)) throw new Error('a sentry path over 127 steps: its end marker would read as a step');
+  if (PATH.length > 255) throw new Error(`the sentries' paths are ${PATH.length} steps; svPosT is a byte`);
+  if (roles.some(sn => sn && sn.dirs.length > 127)) throw new Error('a sentry path over 127 steps: its end marker would read as a step');
+  return { PATH, P0 };
+};
+const { PATH: SV_PATH } = svPaths(SENTRIES);
+// ---- LEVEL 9'S OWN TABLES RIDE IN ITS LEVEL CODE (the silver module), not the shared slot ----
+// (2026-11-12 memory audit.) The slot is as long as the longest level's tables and every level loads
+// into it, so 179 bytes only level 9 reads -- its sentries' paths, their later-stage starts, the
+// stages' slot roles and rooms -- were reserved on all ten. The SONGS sit at the first page after the
+// slot plus a level's code: taking the slot under 768 moves every song a page down. Built from L9
+// itself, not the level this build happens to start on: the module is assembled once, here.
+const L9T = HAS_SILVER ? (() => {
+  const R = L9_STAGES.roles, { PATH, P0 } = svPaths(R);
+  const W9 = MAP_OF(9)[0].length, N9 = W9 * MAP_OF(9).length;
+  const padT = (a, n, f = 0) => [...a, ...Array(Math.max(0, n - a.length)).fill(f)];
+  return {
+    svP0T: padT(P0, 1), svPathT: padT(PATH, 1),
+    svRXT: padT(R.slice(SV_MAX).map(sn => sn.x), 1), svRYT: padT(R.slice(SV_MAX).map(sn => sn.y), 1),
+    ...(STN_MAX > 1 ? {
+      stSvT: padT(L9_STAGES.slotRole.flat(), (STN_MAX - 1) * SV_MAX, 0xff),
+      stRmT: padT(L9.rooms.slice(1).flatMap(Rm => [...Array(Math.ceil(N9 / 8))].map((_, b) =>
+        [...Array(8)].reduce((m, _, k) => { const c = b * 8 + k; return m | (c < N9 && Rm.has(`${c % W9},${Math.floor(c / W9)}`) ? 1 << k : 0); }, 0))),
+        (STN_MAX - 1) * 32) } : {}),
+  };
+})() : null;
 // ---- THE LEVEL ART SETS: what can occupy OVLBASE, and which one each level needs ----
 // Set 0 is the pedestal and the idol, set 1 the sentry's frames 2 and 3. A level that uses neither
 // says so (-1) and keeps whatever is there, so walking 1 -> 2 -> 3 loads nothing extra. The idol is
 // LUGGAGE as well -- carried from its errand level back to the hub -- so every level that can hold
 // one wants set 0: its own (LEVEL_IDOL) and the hub that receives them (LEVEL_PEDESTALS).
-const ART_SETS = [[...PED.BM, ...IDOLBM], SVART];
-const ART_OF = n => LEVEL_SILVER[n] ? 1 : LEVEL_IDOL[n] || LEVEL_PEDESTALS[n] ? 0 : -1;
+// A level's file is ILV + ONE character, '0' + n: lvlLoad forms it with ora #$30, so level 10 is 'ILV:'
+const ILV_NAME = n => 'ILV' + String.fromCharCode(0x30 + n);
+// ---- WHERE THE BIG ANGEL'S BITMAPS GO: IAR2 at OVLBASE, and the rest over the ANGEL's ladder ----
+// IAR2 holds what fits below $fe00 after BIGTBL (the user, 2026-11-10, wanting in-between sizes: "as it
+// approaches from afar there is no indication it is moving towards you"). The rest load as IAN1 over the
+// ordinary angel's own bitmaps at SPRBASE (ANGBASE): a level of LEVEL_BIG has no ordinary angel, and
+// lvlArt puts them back (IAN0) on arrival at a level that does. RAM under the KERNAL, so Krill can.
+const BIG_NRUNG = BOLT_V0 - BIG_V0, BIG_NSET = HAS_BIG ? BIG_SETS.length : 0;
+const BIGTBL_LEN = HAS_BIG ? BIG_NSET * BIG_MAXPARTS * 3 + BIG_NRUNG * 3 + 32 + BIG_PER : 0;
+const BIG_NOVL = Math.min(BIGART.length, Math.floor((0xfe00 - OVLBASE - BIGTBL_LEN) / 64));
+const BIGAN = BIGART.slice(BIG_NOVL);
+const ANGBASE = SPRBASE + ANGBM0 * 64;
+// ---- THE FLUTE'S ART (LEVEL_FLUTE; the user, 2026-11-12) ----
+// art/flute.png, a pan flute lying on the floor, as LAYERED HI-RES sprites: one sprite a colour (black,
+// red, light red -- FLUTECOL), each 24 pixels at full resolution, stacked at one place, so the pipes read
+// where a 12-pixel multicolor sprite smears them into a wedge. SIX drawn sizes (FLUTESZ: 24..60 wide, the
+// wider ones two or three sprites across; a layer's column with no ink in it is not a sprite at all, which
+// is what lets the widest fit the eight), stepped by distance so it grows as the orbs do (ftSz; FLUTEK:
+// screen pixels wide per unit of h, the floor's depth below the horizon, 88/distance). Never DOUBLED by the
+// expand bits (the user, 2026-11-12: "looks great until it gets to the magnified version"): the player is
+// stopped instead (ftStop) where the widest is the right size. A black DROP SHADOW under its lower edge (the user: "It
+// also needs a shadow to place it on the floor"), and it stands on a row INSIDE its body (FLUTEANC of its
+// height), not on its nearest pipe tips -- it lies on the floor, it does not stand on its front edge.
+// The bitmaps go in IAN2 over the hub's ORB and ANGEL ladders, neither of which the hub draws (IAN0, which
+// puts them back, now carries both). The fit is the user-approved preview's: crop to the warm pixels,
+// squash the height (by distance, as a socket flattens: FLUTEASP), contrast and a sharpen so the gaps
+// between pipes survive, each inked pixel to the nearest of three inks. FLUTEPATCH: "y,x,K|r|L" hand edits
+// to the SMALLEST (y counts from the picture's top, before the shadow).
+const FLUTE = (() => {
+  if (!HAS_FLUTE) return null;
+  const SRC = artPath(process.env.FLUTEART ?? 'flute.png');
+  const CON = process.env.FLUTECON ?? '6,45%', SHARP = process.env.FLUTESHARP ?? '0x1';
+  const SZ = (process.env.FLUTESZ ?? '24,30,36,42,48,60').split(',').map(Number).sort((a, b) => a - b);
+  const COL = (process.env.FLUTECOL ?? '0,2,10').split(',').map(Number);      // the layers' inks; layer 0 is the shadow's too
+  const SHD = +(process.env.FLUTESHD ?? 2), ANC = +(process.env.FLUTEANC ?? 0.5);
+  // IT LIES FLAT, like a socket (the user: "the view of this is very similar to a socket -- it lays on the
+  // ground"): a flat thing's height on screen over its width is eye height over distance, so each size is
+  // squashed for the distance it is drawn at (h = W / FLUTEK), FLUTEASP its height/width seen from one cell
+  // (h 88), and it is centred on the floor line as a socket is (FLUTEANC 0.5)
+  const ASP = +(process.env.FLUTEASP ?? 0.43), K = +(process.env.FLUTEK ?? 0.7);
+  const PEP = { 0: [0, 0, 0], 2: [104, 55, 43], 10: [154, 103, 89] };          // Pepto, for the fit
+  if (COL.some(c => !PEP[c])) throw new Error('FLUTECOL: the fit knows black (0), red (2) and light red (10)');
+  const [sw, sh] = execFileSync('magick', ['identify', '-format', '%w %h', SRC]).toString().split(' ').map(Number);
+  const raw = execFileSync('magick', [SRC, '-depth', '8', 'rgb:-'], { maxBuffer: 1 << 28 });
+  const ink = i => { const r = raw[i * 3], g = raw[i * 3 + 1], b = raw[i * 3 + 2]; return r - (g + b) / 2 > 28 && r > 70; };
+  let x0 = sw, x1 = 0, y0 = sh, y1 = 0;
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) if (ink(y * sw + x)) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  const CW = x1 - x0 + 1, CH = y1 - y0 + 1, crop = `${CW}x${CH}+${x0}+${y0}`;
+  const mask = Buffer.alloc(sw * sh); for (let i = 0; i < sw * sh; i++) mask[i] = ink(i) ? 255 : 0;
+  const d2 = (a, b) => (a[0] - b[0]) ** 2 * 0.3 + (a[1] - b[1]) ** 2 * 0.59 + (a[2] - b[2]) ** 2 * 0.11;
+  const shd = W => W >= 36 ? SHD : Math.min(SHD, 1);        // rows of shadow: one on the small ones
+  const sizes = SZ.map((W, si) => {
+    if (W > 72) throw new Error(`FLUTESZ: ${W} is wider than three sprites`);
+    const H = Math.min(21 - shd(W), Math.max(2, Math.round(W * ASP * (W / K) / 88)));
+    const col = execFileSync('magick', [SRC, '-crop', crop, '+repage', '-sigmoidal-contrast', CON, '-filter', 'Lanczos',
+      '-resize', `${W}x${H}!`, '-unsharp', SHARP, '-depth', '8', 'rgb:-'], { maxBuffer: 1 << 26 });
+    const msk = execFileSync('magick', ['-size', `${sw}x${sh}`, '-depth', '8', 'gray:-', '-crop', crop, '+repage',
+      '-filter', 'Box', '-resize', `${W}x${H}!`, '-depth', '8', 'gray:-'], { input: mask, maxBuffer: 1 << 26 });
+    const g = [...Array(H)].map((_, y) => [...Array(W)].map((_, x) => { const i = y * W + x;
+      if (msk[i] < 110) return -1;
+      const c = [col[i * 3], col[i * 3 + 1], col[i * 3 + 2]];
+      return COL.reduce((a, k, j) => d2(c, PEP[k]) < d2(c, PEP[COL[a]]) ? j : a, 0); }));
+    if (si === 0) for (const t of (process.env.FLUTEPATCH ?? '').split(';').filter(Boolean)) {   // (the user's 2026-11-12 edits were for the old 24x10)
+      const [y, x, c] = t.split(','); const v = { K: 0, r: 1, L: 2 }[c];
+      if (g[+y]?.[+x] === undefined || v === undefined) throw new Error(`FLUTEPATCH: "${t}" is off the ${W}x${H} picture or not K/r/L`);
+      g[+y][+x] = v; }
+    // the shadow: under each column's lowest inked pixel, shd(W) rows of black, a pixel to the right
+    // (the light is above and a little to the left), where nothing is drawn
+    const R = H + shd(W), f = [...g.map(r => [...r]), ...Array(shd(W)).fill(0).map(() => new Array(W).fill(-1))];
+    for (let x = 0; x < W; x++) { let yb = -1; for (let y = 0; y < H; y++) if (g[y][x] >= 0) yb = y;
+      if (yb < 0) continue;
+      for (let k = 1; k <= shd(W); k++) { const xx = Math.min(W - 1, x + 1); if (f[yb + k][xx] < 0) f[yb + k][xx] = 0; } }
+    return { W, H: R, g: f, anc: (21 - R) + Math.round(H * ANC) };
+  });
+  const bm = [];
+  for (const z of sizes) {
+    // { bm, L, dx, xe }: each layer's columns start at ITS leftmost ink, not the picture's, so a layer
+    // narrower than the whole (the highlights) can take a sprite fewer. Past two sprites wide, three
+    // layers of three columns is NINE sprites, one more than there are: there the RED layer -- the
+    // wood, which carries no detail (the user, 2026-11-12) -- is drawn DOUBLE-WIDE (the X expand bit),
+    // two sprites covering 96 pixels, a pixel pair red if either pixel is. It goes on the screen UNDER
+    // the other two (parts in black, light red, red order: a later slot is a lower priority sprite), so
+    // the pixel it spreads into, where it meets them, is theirs.
+    z.parts = [];
+    for (const L of [0, 2, 1]) {
+      const xe = L === 1 && z.W > 48 ? 1 : 0, sw = 24 << xe;
+      const xs = [...Array(z.W).keys()].filter(x => z.g.some(r => r[x] === L));
+      if (!xs.length) continue;
+      const lx = xs[0];
+      for (let c = 0; c * sw + lx <= xs[xs.length - 1]; c++) {
+      const b = new Array(64).fill(0);
+      for (let y = 0; y < z.H; y++) for (let x = 0; x < 24; x++) {
+        const sx = lx + c * sw + (x << xe);
+        if ([0, xe].some(k => sx + k < z.W && z.g[y][sx + k] === L))
+          b[(21 - z.H + y) * 3 + (x >> 3)] |= 0x80 >> (x & 7);   // standing on the frame's last row
+      }
+      if (b.some(v => v)) { z.parts.push({ bm: bm.length, L, dx: lx + c * sw, xe }); bm.push(b); }
+    } }
+    if (z.parts.length > 8) throw new Error(`the flute at ${z.W} wide needs ${z.parts.length} sprites; there are eight`);
+  }
+  // the h at which each size takes over from the one before: where the wanted width (K*h) is midway
+  const bnd = sizes.slice(1).map((z, i) => Math.min(255, Math.round((sizes[i].W + z.W) / 2 / K)));
+  // ...and where the player stops: the widest exactly right, FLUTE.stop cells from the flute's centre
+  const stop = 88 / (sizes[sizes.length - 1].W / K);
+  console.error(`  flute: ${sizes.map(z => `${z.W}x${z.H}/${z.parts.length}spr`).join(' ')} hi-res, 3 layers (${COL.join(',')}), ` +
+    `shadow ${SHD}; ${bm.length} bitmaps; stepping at h ${bnd.join(' ')} ` +
+    `(${bnd.map(h => (88 / h).toFixed(2)).join(' ')} cells), the player stopped at ${stop.toFixed(2)}`);
+  return { sizes, bm, bnd, stop, inks: COL };
+})();
+if (HAS_BIG && ORBHI_N) throw new Error('the big angel loads over the angel ladder at SPRBASE: ORBHI_N must be 0');
+if (BIGAN.length + BOLTBM.length + 2 > ANGBM1 - ANGBM0) throw new Error(`IAN1: the big angel's overflow (${BIGAN.length}) + the bolt (${BOLTBM.length}) + bltVarT (2) is more than the angel's ${ANGBM1 - ANGBM0} slots`);
+if (BIGAN.length > ANGBM1 - ANGBM0) throw new Error(`the big angel has ${BIGART.length} bitmaps: ${BIG_NOVL} fit in IAR2 and ` +
+  `${ANGBM1 - ANGBM0} over the angel's ladder, ${BIGAN.length - (ANGBM1 - ANGBM0)} too many -- fewer or smaller BIGSETS`);
+const ART_SETS = [[...PED.BM, ...IDOLBM], SVART, BIGART.slice(0, BIG_NOVL)];
+const ART_OF = n => LEVEL_BIG[n] ? 2 : LEVEL_SILVER[n] ? 1 : LEVEL_IDOL[n] || LEVEL_PEDESTALS[n] ? 0 : -1;
 const ART_LEN = Math.max(...ART_SETS.map(a => a.length));
+// ---- PEDTBL: the pedestal's lift table rides in IAR0, behind the pedestal and idol bitmaps ----
+// (2026-11-12 memory audit.) Only the hub has pedestals, and IAR0 is in place on every level with an
+// idol or a pedestal -- so, like SVTBL in IAR1 and BIGTBL in IAR2, it costs the image nothing.
+const PEDTBL_BYTES = HAS_PED ? pedLiftT : [];
+const PEDTBL_AT = OVLBASE + ART_SETS[0].length * 64;
+if (PEDTBL_AT + PEDTBL_BYTES.length > 0xfe00) throw new Error(`PEDTBL runs to $${(PEDTBL_AT + PEDTBL_BYTES.length).toString(16)}, past $fe00 (COLH)`);
+if (HAS_PED && ART_SETS[0].length === 0) throw new Error('PEDTBL rides in IAR0, and this build has no IAR0');
 if (HAS_SILVER && ART_SETS[0].length && ALLLVL.some(n => LEVEL_SILVER[n] && (LEVEL_IDOL[n] || LEVEL_PEDESTALS[n])))
   throw new Error('a level with sentries cannot also have an idol or a pedestal: their art shares OVLBASE');
 // ART_OF(BOOTLVL) of -1 boots set 0 (the disk loads it); artCur says which is in place from then on.
-const ART_BOOT = Math.max(0, ART_OF(BOOTLVL));
+let ART_BOOT = Math.max(0, ART_OF(BOOTLVL));   // (3 when booting onto the flute's level: see ISK2_DATA)
 if (SVN) console.error(`  sentries: ${SENTRIES.filter(Boolean).length} in ${SVN} slots over ${STN} stage(s) (${L9_STAGES.byS.map(a => a.length).join('/')}), ` +
   `${SV_PATH.length} path steps: ${SENTRIES.filter(Boolean).map(sn => `${sn.id}@(${sn.x},${sn.y})s${sn.stage}`).join(' ')}`);
 // ---- and here, at last, is where the orb ladder's tail lands (see ORBHI_N) ----
@@ -8427,6 +9566,37 @@ const orbPtrT = ORBSRC.map((b, v) => isSv(v) ? svPtr(b) : b < ORBLO_N
 ORBSRCU.forEach((b, v) => { if (isSv(v) && b >= 0) orbPtrU[v] = svPtr(b); });
 ORBSRCR.forEach((b, v) => { if (isSv(v) && b >= 0) orbPtrR[v] = svPtr(b); });
 ORBSRCRU.forEach((b, v) => { if (isSv(v) && b >= 0) orbPtrRU[v] = svPtr(b); });
+// The big angel's six: IAR2, at OVLBASE (BIGART)
+const bigPtr = b => b - BIGBM0 < BIG_NOVL ? ((OVLBASE - VBANK) >> 6) + (b - BIGBM0) : ((ANGBASE - VBANK) >> 6) + (b - BIGBM0 - BIG_NOVL);
+LADDER.forEach((r, v) => { if (isBig(v)) orbPtrT[v] = bigPtr(r.lo); });
+// the bolt's: in IAN1, straight after the angel's overflow
+LADDER.forEach((r, v) => { if (isBolt(v)) orbPtrT[v] = ((ANGBASE - VBANK) >> 6) + BIGAN.length + (r.lo - BOLTBM0); });
+// ---- BIGTBL: the big angel's DATA rides in IAR2, behind its bitmaps at OVLBASE ----
+// Read only on a level with the big angel, which is exactly when IAR2 is loaded -- so, like the
+// sentry's SVTBL in IAR1, it costs the image nothing. Per SET (a set's plain and magnified rungs
+// share them), BIG_MAXPARTS each: the other sprites' pointers (0 ends the list), their X from the
+// primary in plain hires pixels (signed; the runtime doubles it for a magnified rung) and how many
+// sprite heights they stand above it. Per RUNG: its set's first index, and where it floats (bigYT).
+const BIGR = LADDER.slice(BIG_V0, BOLT_V0);
+const BIGSETR = BIGR.filter((r, i, a) => a.findIndex(q => q.big.set === r.big.set) === i);   // one rung of each set, in set order
+const BIGTBL = HAS_BIG ? {
+  bigPP: BIGSETR.flatMap(r => [...Array(BIG_MAXPARTS)].map((_, k) => r.big.parts[k] ? bigPtr(r.big.parts[k].b) : 0)),
+  bigPX: BIGSETR.flatMap(r => [...Array(BIG_MAXPARTS)].map((_, k) => (r.big.parts[k]?.dx1 ?? 0) & 255)),
+  bigPU: BIGSETR.flatMap(r => [...Array(BIG_MAXPARTS)].map((_, k) => r.big.parts[k]?.up ?? 0)),
+  bgPIT: BIGR.map(r => r.big.set * BIG_MAXPARTS),
+  bgYT: BIGR.map((r, i) => Math.max(0, Math.min(255, 150 - BIGC + Math.round(ORBTALL[BIG_V0 + i] / 2) - ORBANCH[BIG_V0 + i]))),
+  bgBST: BIGR.map((r, i) => { const t = ORBTALL[BIG_V0 + i]; return t >= 100 ? 0 : t >= 50 ? 1 : t >= 25 ? 2 : 3; }),   // bob: shifts
+  bobT: [...Array(32)].map((_, i) => Math.round(BIGBOB * Math.sin(2 * Math.PI * i / 32)) & 255),
+  bigSlT: [...Array(BIG_PER)].map((_, t) => Math.min(ANGSLIDE - 1, Math.floor(t * ANGSLIDE / BIG_PER))),   // ticks into its glide -> slide step
+} : {};
+if (HAS_BIG && (BIG_PER < 8 || BIG_PER > 255 - ANGSLIDE)) throw new Error(`BIGPER ${BIG_PER}: 8..${255 - ANGSLIDE} ticks a cell`);
+if (BIGR.some(r => r.big.parts.some(pt => pt.dx1 < -64 || pt.dx1 > 63))) throw new Error('a big-angel part is too far from the primary to double in a signed byte');
+const BIGTBL_AT = OVLBASE + BIG_NOVL * 64;
+const BIGTBL_OFF = {}, BIGTBL_BYTES = [];
+for (const [n, a] of Object.entries(BIGTBL)) { BIGTBL_OFF[n] = BIGTBL_BYTES.length; BIGTBL_BYTES.push(...a); }
+if (BIGTBL_BYTES.length !== BIGTBL_LEN) throw new Error(`BIGTBL is ${BIGTBL_BYTES.length} bytes, BIGTBL_LEN says ${BIGTBL_LEN}`);
+if (HAS_BIG && BIGTBL_AT + BIGTBL_BYTES.length > 0xfe00) throw new Error(`BIGTBL runs to ${hx16(BIGTBL_AT + BIGTBL_BYTES.length)}, past $fe00 (COLH)`);
+
 if (ORBHI + ORBHI_N * 64 > 0xe000) throw new Error(
   `the orb ladder's tail runs to $${(ORBHI + ORBHI_N * 64).toString(16)}, past the end of the ` +
   `I/O hole -- the whole point of moving it is that the CPU never needs to see it`);
@@ -8942,7 +10112,38 @@ const holeSlotT = HOLE.slotT, holeHT = HOLE.hT, holeVarT = HOLE.varT;
 const tailFrom = t => { let k = t.length - 1; while (k > 0 && t[k - 1] === t[t.length - 1]) k--; return k; };
 // NOVARCUT=1 keeps the full 256-entry tables (clamp at 255, a no-op) -- the A/B that showed the cut
 // pixel-identical on four poses.
-const VAR_CLAMP = process.env.NOVARCUT ? 255 : Math.max(tailFrom(orbVarT), tailFrom(angVarT), HAS_SILVER ? tailFrom(svVarT) : 0);
+const VAR_CLAMP = process.env.NOVARCUT ? 255 : Math.max(tailFrom(orbVarT), tailFrom(angVarT), HAS_SILVER ? tailFrom(svVarT) : 0, HAS_BIG ? tailFrom(bigVarT) : 0, HAS_BIG ? tailFrom(bltVarT) : 0);
+// IAN1: the big angel's overflow, the bolt's bitmaps, then the bolt's h -> rung table (bltVarT)
+const BLTVAR_AT = ANGBASE + (BIGAN.length + BOLTBM.length) * 64;
+// bigVarT is cut where its tail starts (its top rung from there on), and omVarG clamps h to it
+const BIGVAR_N = HAS_BIG ? Math.min(VAR_CLAMP, tailFrom(bigVarT)) + 1 : 1;
+// IAN2, the hub's: from SPRBASE over the orb AND angel ladders (the hub draws neither; IAN0 puts both
+// back), the flute's bitmaps in every slot but the two that hold -- at bltVarT's own address, which is
+// IAN1's -- a rung table sending every distance to BOLT_V0: orbOne reads it for the level's "ball", which
+// the flute is, and ftSz picks the flute's real size from h itself.
+// ISK2_DATA: what does not fit there goes over the SOCKET ladder at SOCKBASE (ISOK), which the hub does
+// not draw either (its pedestals have their own) -- carried by IAR3, the hub's art, and the sockets put
+// back by whichever art the next level loads (see the IAR files). FLUTE_PTR: bitmap -> its sprite pointer.
+const FLUTE_PTR = [];
+let ISK2_DATA = [];
+const IAN2_DATA = FLUTE ? (() => {
+  const tab0 = BLTVAR_AT - SPRBASE, tab1 = tab0 + VAR_CLAMP + 1, slots = ANGBM1;
+  const free = [...Array(slots).keys()].filter(k => k * 64 + 64 <= tab0 || k * 64 >= tab1);
+  const nk = Math.max(0, FLUTE.bm.length - free.length);
+  if (nk > SOCKSHIP.length) throw new Error(`the flute's ${FLUTE.bm.length} bitmaps want more than the ${free.length} free slots over the orb and angel ladders and the ${SOCKSHIP.length} of the socket ladder`);
+  const d = new Array(slots * 64).fill(0);
+  FLUTE.bm.forEach((b, i) => {
+    if (i < free.length) { FLUTE_PTR.push(((SPRBASE - VBANK) >> 6) + free[i]); b.forEach((v, j) => { d[free[i] * 64 + j] = v; }); }
+    else { FLUTE_PTR.push(((SOCKBASE - VBANK) >> 6) + i - free.length); ISK2_DATA.push(...b); } });
+  for (let h = 0; h <= VAR_CLAMP; h++) d[tab0 + h] = BOLT_V0;
+  return d; })() : [];
+if (ISK2_DATA.length && SOCKBASE + SOCKSHIP.length * 64 !== OVLBASE) throw new Error('the art files carry the socket ladder in front: it must end where OVLBASE starts');
+if (ISK2_DATA.length && !HAS_ART) throw new Error('the flute\'s overflow rides in the level art files (lvlArt), and this build has none');
+if (LEVEL_FLUTE[BOOTLVL] && ISK2_DATA.length) ART_BOOT = 3;
+// (each level's own build checks it has no sockets: see SOCKETS_AT)
+const IAN1_DATA = HAS_BIG ? [...BIGAN.flat(), ...BOLTBM.flat(), ...bltVarT.slice(0, VAR_CLAMP + 1), ...bigVarT.slice(0, BIGVAR_N)] : [];
+if (HAS_BIG && process.env.IANDUMP) console.error(`  IAN1: ${BIGAN.length} angel + ${BOLTBM.length} bolt bitmaps + ${2 * (VAR_CLAMP + 1)} B tables = ${IAN1_DATA.length} of ${(ANGBM1 - ANGBM0) * 64} B; IAR2 ${BIG_NOVL} angel bitmaps + BIGTBL ${BIGTBL_LEN} B`);
+if (HAS_BIG && IAN1_DATA.length > (ANGBM1 - ANGBM0) * 64) throw new Error(`IAN1 is ${IAN1_DATA.length} bytes, the angel's ladder ${(ANGBM1 - ANGBM0) * 64}`);
 const HVAR_CLAMP = process.env.NOVARCUT ? 255 : tailFrom(holeVarT);
 // ---- SVTBL: the sentry's DATA rides in IAR1, behind its frames 2-3 at OVLBASE ----
 // Read only on a level with sentries -- which is exactly when IAR1 is loaded -- so it costs the image
@@ -9047,14 +10248,9 @@ if (orbOccFlat.length < NOCC * OCCBYTES) throw new Error(
   `${NOCC * OCCBYTES}: the last masks would be built over whatever follows the table`);
 if (((NRUN - 1) >> 3) >= OCCBYTES) throw new Error(
   `NRUN=${NRUN} run ids need ${((NRUN - 1) >> 3) + 1} mask bytes but OCCBYTES is ${OCCBYTES}`);
-// Seam projection tables. |cos| / |sin| as 0..255 turn a hit distance into the hit's
-// coordinate ALONG the wall with one sideMul; recip turns the single divide the projective
-// solve needs into another one. 1024 bytes, all above VIC bank 0.
-const absCos = [], absSin = [];
-for (let a = 0; a < 256; a++) {
-  absCos.push(Math.min(255, Math.round(Math.abs(Math.cos(a / 256 * 2 * Math.PI)) * 256)));
-  absSin.push(Math.min(255, Math.round(Math.abs(Math.sin(a / 256 * 2 * Math.PI)) * 256)));
-}
+// Seam projection tables: recip turns the single divide the projective solve needs into a
+// multiply. (|cos| / |sin|, which turn a hit distance into the hit's coordinate along the wall,
+// are qcosT below, at the fine angle.)
 // ---- |cos| at QUARTER-unit resolution, one QUARTER CIRCLE ----
 // orbProj read absCosT[pa] -- the WHOLE-unit angle -- while the rays turn on paq, which is
 // (pa:paF)>>6. A whole unit is 3 screen columns at centre and 4.3 at the edge, so while turning
@@ -9284,9 +10480,17 @@ const ZN_BUILD = (() => {
     for (let y = Math.floor(ey - r); y <= Math.floor(ey + r); y++) for (let x = Math.floor(ex - r); x <= Math.floor(ex + r); x++)
       if (inMap(x, y) && !isW(cellOf(x, y))) m |= 1 << zid[cellOf(x, y)];
     return m || 1 << zid[cellOf(h.x, h.y)]; });
+  // ---- ZONELESS: a level whose zones never cull anything (2026-11-12, level 10) ----
+  // If every open cell's mask already holds every zone, the test (zone bit AND mapT[player cell]) can
+  // never fail: the 128-byte zone table buys nothing. Such a level's open cells get mask $ff -- what a
+  // broken wall is given anyway -- so the test passes WHATEVER the table's bytes hold, and the table
+  // is dropped from its file (zoneT is the slot's last, variable-length table): the level's code may
+  // use those bytes (see LX_LOW). ZONELESS=0: every level keeps its table.
+  const allZ = cells.reduce((m, c) => m | 1 << zid[c], 0);
+  const zoneless = process.env.ZONELESS !== '0' && cells.every(c => (mask[c] & allZ) === allZ);
   // zone of every cell, two to a byte (low nibble = even cell); a wall cell's nibble is never read
-  const zoneT = [...Array(128)].map((_, i) => (2 * i < MAPN ? zid[2 * i] : 0) | ((2 * i + 1 < MAPN ? zid[2 * i + 1] : 0) << 4));
-  const enc = i => i >= MAPN || map[i] ? 0 : mask[i];
+  const zoneT = zoneless ? [] : [...Array(128)].map((_, i) => (2 * i < MAPN ? zid[2 * i] : 0) | ((2 * i + 1 < MAPN ? zid[2 * i + 1] : 0) << 4));
+  const enc = i => i >= MAPN || map[i] ? 0 : zoneless ? 0xff : mask[i];
   // ZNMODEL=<frames> (diagnostic): ZONE-LEVEL PATCHING. Zones optimised for the walls SHUT, masks exact
   // for that state; when a wall opens, every cell of zone a ORs in patch[a] = everything any cell of a
   // newly sees. Judged with the walls shut and with them all open, against the walls-open build and
@@ -9424,14 +10628,23 @@ const ZN_BUILD = (() => {
     }
     console.error(`  stages: ${STN} rooms of ${L9.rooms.map(R => R.size).join('/')} cells, sealed from each other's sentries`);
   }
-  return { enc, zoneT, hmask, zones: Z.length, cells: cells.length, bad, n };
+  return { enc, zoneT, hmask, zones: Z.length, cells: cells.length, bad, n, zoneless };
 })();
+if (ZN_BUILD.zoneless) console.error(`  ZONELESS level ${LVL}: every open cell sees every zone -- masks $ff, no zone table in its file`);
 console.error(`  ZONES level ${LVL}: ${ZN_BUILD.zones} zones over ${ZN_BUILD.cells} cells; hole masks ${ZN_BUILD.hmask.map(m => '$' + m.toString(16)).join(' ')}; ` +
   `self-check: ${ZN_BUILD.bad} visible of ${ZN_BUILD.n} culled samples (must be 0)`);
 
 const LVLT = n => LVL_TABLES.find(([k]) => k === n)[1];   // emit a table from the manifest
 
 const pad = (a, n, fill = 0) => [...a, ...Array(Math.max(0, n - a.length)).fill(fill)];
+// One hazard table for every level in the chain, padded to the longest (at least a byte): the live
+// level's array, and the Map the level files are cut from (see HAZ_PLAN).
+const HZ_EMPTY = { n: [0xff], ct: [], of: [], lst: [0xff], sp: [0xff] };
+const HZ_TAB = (k, fill) => {
+  const of = lv => (HAZ_PLAN.get(lv) ?? HZ_EMPTY)[k];
+  const n = Math.max(1, ...ALLLVL.map(lv => of(lv).length));
+  return [pad(of(LVL), n, fill), new Map(ALLLVL.map(lv => [lv, pad(of(lv), n, fill)]))];
+};
 const LVL_TABLES = [
   // Walls $00, an open cell its (never zero) mask of visible zones -- see ZN_BUILD.
   ['mapT', [...Array(256)].map((_, i) => ZN_BUILD.enc(i))],   // a full page of WALL past the map: see the emitted mapT
@@ -9454,7 +10667,6 @@ const LVL_TABLES = [
   // only in the hazard lists, so its plane and face -- the parent's -- are copied from this after
   // every rebuild. Without it the socket room's column, split by its 40 hazard cells, occluded
   // and seamed against whatever level 1 had left in those slots (2026-09-17).
-  ['hazSpT', hazSpTab],
   // PADDED to the largest resident level. The swap exchanges in place, so a chunk that is
   // shorter here than in the other level would run off the end of this one. The padding sits
   // AFTER the real entries, so the packed orbs-then-holes layout is untouched and nothing
@@ -9463,7 +10675,10 @@ const LVL_TABLES = [
   ['orbYCT', pad([...orbYC, ...HOLELIKE.map(h => h.y)], NOCC)],
   ['orbX0T', pad(orbXC, NORB)], ['orbY0T', pad(orbYC, NORB)],
   ['angLeashT', angLeash],
-  ['angPerT', [ANG_PERIOD]], ['angPerFT', [ANG_PERIOD_FAR]], ['angFarT', [ANG_FAR]],
+  ['angPerT', [LEVEL_BIG[LVL] ? BIG_PER : ANG_PERIOD]],   // the big angel's level: its glide (BIG_PER)
+  ...(HAS_CORNER ? [['lvlCorT', [LEVEL_CORNER[LVL] && HOLES_AT.length ? (() => {
+    if (ORBS.length >= NORB) throw new Error(`level ${LVL}: the corner exit is entity ${ORBS.length}, past the slide tables (NORB ${NORB})`);
+    return ORBS.length; })() : 0xff]]] : []),   // the corner exit's entity
   // An exit hole is black unless its level names a colour (LEVEL_EXITCOL); 15 is an empty
   // socket's grey3 inside its grey1 rim.
   // A PEDESTAL takes one of PED_COLS. This is the ONLY ink on the drum that can differ from
@@ -9533,6 +10748,7 @@ const LVL_TABLES = [
   // than a kind per entity, exactly as nExitT already separates exits from sockets -- one byte
   // a level instead of NHOLE of them, and it costs nothing when a level has no pedestals
   // (nPedT == nHoleT, so the test is never true).
+  // (LVSKIP stands the player on exit 0 with no runtime check: a level without one is refused below.)
   ['nOrbT', [ORBS.length, HOLELIKE.length, HOLES_AT.length,
              Math.max(0, ORBS.length - 1), ORBS.length + HOLES_AT.length,
              Math.max(0, ORBS.length + HOLELIKE.length - 1),
@@ -9547,28 +10763,29 @@ const LVL_TABLES = [
   // sentry slot takes ($ff = hidden), and a bit per cell of its ROOM -- an orb or an angel outside it
   // when the stage begins is left behind. Per other slot: the stage it appears in.
   ...(HAS_LX ? [['lvlLxT', [LX_OF(LVL) ? 1 : 0]]] : []),   // 1 = this level brings code (LX_FEATURES)
+  // per socket, the LEVEL-CODE EVENT feeding it starts, 0 = none: on level 9 the stage it begins
+  // (stGo), on a closer level the closer it shuts, 1-based (clGo) -- either way, A for lxSock
+  ...(HAS_SILVER || HAS_CLOSE ? [['sockStgT', pad(LVL === 9 ? L9.socks.map(sk => sk.n < STN ? sk.n : 0)
+      : LEVEL_CLOSE[LVL] ? SOCKETS_AT.map((_, i) => LEVEL_CLOSE[LVL].findIndex(c => c.sock === i) + 1) : [], Math.max(1, NSOCK))]] : []),
   ...(HAS_SILVER ? [['svNT', [SVN]],
-                    ['svP0T', pad(SV_P0, Math.max(1, lvlMax(l => l.tables?.svP0T?.length ?? 0, SV_P0.length)))],
-                    ['svRXT', (a => pad(a, Math.max(1, lvlMax(l => l.tables?.svRXT?.length ?? 0, a.length))))(SENTRIES.slice(SV_MAX).map(sn => sn.x))],
-                    ['svRYT', (a => pad(a, Math.max(1, lvlMax(l => l.tables?.svRYT?.length ?? 0, a.length))))(SENTRIES.slice(SV_MAX).map(sn => sn.y))],
                     ['stNT', [STN]],
 
-                    ['sockStgT', pad(LVL === 9 ? L9.socks.map(sk => sk.n < STN ? sk.n : 0) : [], Math.max(1, NSOCK))],
                     ...(STN_MAX > 1 ? [
                     ['stWT', pad(LVL === 9 ? L9.close.map((_, k) => L9.nDoor + k) : [], STN_MAX - 1)],
                     ['stWXT', pad(LVL === 9 ? L9.close.map(c => c.x) : [], STN_MAX - 1)],
                     ['stWYT', pad(LVL === 9 ? L9.close.map(c => c.y) : [], STN_MAX - 1)],
                     ['stWAXT', pad(LVL === 9 ? L9.close.map(c => c.ax) : [], STN_MAX - 1)],
                     ['stWAYT', pad(LVL === 9 ? L9.close.map(c => c.ay) : [], STN_MAX - 1)],
-                    ['stSvT', pad(LVL === 9 ? L9_STAGES.slotRole.flat() : [], (STN_MAX - 1) * SV_MAX, 0xff)],
-                    ['stRmT', pad(LVL === 9 ? L9.rooms.slice(1).flatMap(R => [...Array(Math.ceil(MAPN / 8))].map((_, b) =>
-                      [...Array(8)].reduce((m, _, k) => { const c = b * 8 + k; return m | (c < MAPN && R.has(`${cellX(c)},${cellY(c)}`) ? 1 << k : 0); }, 0))) : [],
-                      (STN_MAX - 1) * 32)],
-                    ['stFstT', pad(ORBS.slice(SV_MAX).map(o => o.stage ?? 0), Math.max(1, NORB - SV_MAX))]] : []),
-                    ['svPathT', pad(SV_PATH, Math.max(1, lvlMax(l => l.tables?.svPathT?.length ?? 0, SV_PATH.length)))],
-                    // which LEVEL ART set it needs at OVLBASE, as the file name's last character
-                    // ('0' or '1', IAR0/IAR1), 0 for either -- see ART_SETS and lvlArt
-                    ['lvlArtT', [ART_OF(LVL) < 0 ? 0 : 0x30 + ART_OF(LVL)]]] : []),
+                    ['stFstT', pad(ORBS.slice(SV_MAX).map(o => o.stage ?? 0), Math.max(1, NORB - SV_MAX))]] : [])] : []),
+  // (svP0T svRXT svRYT stSvT stRmT svPathT: level 9's alone -- they ride in its code, see L9T)
+  // which LEVEL ART set it needs at OVLBASE, as the file name's last character
+  // ('0', '1' or '2': IAR0/IAR1/IAR2), 0 for any -- see ART_SETS and lvlArt
+  ...(HAS_ART ? [['lvlArtT', [LEVEL_FLUTE[LVL] && ISK2_DATA.length ? 0x33                  // IAR3: IAR0 + the flute's overflow
+                              : ART_OF(LVL) < 0 ? (ISK2_DATA.length && SOCKETS_AT.length ? 0x30 : 0)   // sockets: be sure they are in
+                              : 0x30 + ART_OF(LVL)]]] : []),
+  ...(HAS_BIG ? [['lvlAnT', [0x30 + (LEVEL_BIG[LVL] ? 1 : LEVEL_FLUTE[LVL] ? 2 : 0)]],   // IAN2: the flute's art   // IAN0 or IAN1 over the angel's ladder
+                 ['bltIxT', [ORBS.findIndex(o => o.bolt || o.flute) & 255]],   // the ball lightning's entity (or the FLUTE, which borrows its machinery), $ff = none
+                 ['bgAIxT', [ORBS.findIndex(o => o.big) & 255]]] : []),   // ...and the angel that throws it
   // orbOccLoT is NOT here any more. It says where the ENGINE keeps entity i's mask (orbOccT +
   // i*OCCBYTES) -- engine layout, not level data. Shipped per level, each level file carried the
   // stride ITS OWN build computed (4, 7, 8 against the engine's 9): masks overlapped, ran past
@@ -9606,34 +10823,12 @@ for (const L of [{ level: LVL, tables: Object.fromEntries(LVL_TABLES) }, ...LVLS
       `level ${L.level}'s socket ${i} names wall ${w}, but the level declares ${nw} wall group(s) ` +
       `(ids 0..${nw - 1}). Wall ids are local to a level -- see NWALL.`);
 }
-// ---- The merge-hazard data, FLATTENED so it can travel between levels ----
-// It used to be emitted as a label per shared list (hazL0..hazL7) with hazLoT/hazHiT holding
-// `<hazL3` style references, and a COUNT baked into hazSet as an immediate. None of that can be
-// swapped: a second level's lists would land at different addresses and its count is in the code.
-// So the lists become one flat run, `hazLstT`, and the pointers become offsets INTO it -- which
-// resolve identically whichever level's bytes are currently in the region -- and the count
-// becomes `hazNT`, one more byte to swap. $ff there means "this level splits nothing".
-//
-// The triples themselves are symbolic (`<runWT+cell,>runWT+cell,val`) and name the LIVE run
-// tables, which sit at fixed addresses, so the other level's triples are correct the moment its
-// run data is swapped in.
-const hazTabs = h => {
-  if (!h || !h.cells.length) return { n: [0xff], ct: [], lo: [], hi: [], lst: [], rst: ['$ff'] };
-  const off = []; let o = 0;
-  for (const l of h.lists) { off.push(o); o += l.split(',').length; }
-  return {
-    n: [h.cells.length - 1],
-    ct: h.cells,
-    // No parentheses: evalExpr strips a leading </> and applies it to the whole sum, which is
-    // what is wanted here and is just as well, since it does not parse brackets at all.
-    lo: h.pick.map(i => `<hazLstT+${off[i]}`),
-    hi: h.pick.map(i => `>hazLstT+${off[i]}`),
-    lst: h.lists.flatMap(l => l.split(',')),
-    rst: [...h.rst.flatMap(t => t.split(',')), '$ff'],
-  };
-};
-const HAZ_SELF = HAZ ? { cells: hazRec.map(r => r.cell), pick: hazPick, lists: hazLists, rst: hazRst } : null;
-const HZ_LIVE = hazTabs(HAZ_SELF);
+// ---- The merge-hazard data travels in the level file: four tables, numbers only ----
+// hazNT (cells split, less one; $ff = none), hazCT (those cells), hazOfT (each one's list, as an
+// offset into hazLstT) and hazLstT itself: (table 0-3 = W E N S, cell, run id) triples, each list
+// $ff-terminated, the restore list at offset 0. No addresses, so nothing in a level file has to
+// know where the engine put the run tables -- hzRun looks the table up from the selector.
+// (2026-11-12: they ride in the haz level code now, with hazSet -- only level 4 has any)
 
 // ---- THE SLOT LAYOUT (the separated architecture: the image holds no level) ----
 // Computed HERE and not beside LVL_TABLES, because the hazard tables are pushed onto the manifest
@@ -9703,8 +10898,13 @@ const STMP_LIST = (() => {
   return [cellsSorted.length, ...cellsSorted.flatMap(c => [c, out.get(c)])];
 })();
 console.error(`  STMP level ${LVL}: ${STMP_LIST[0]} cell(s) where a hole-like can be partly hidden (${STMP_LIST.length} bytes)`);
-LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT], ['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);   // ZONES: the hole-likes' zone masks replace it
-LVL_TABLES.push(['stmpT', STMP_LIST]);       // LAST: variable length -- see LVL_VARLEN
+// stmpT, the zone masks and LAST zoneT, variable length (see LVL_VARLEN): it was stmpT that varied, but
+// zoneT is the one a level can do without (ZONELESS), and only the last table can be missing without
+// moving the rest. stmpT is padded to the chain's longest instead -- a few bytes, against 128.
+const STMP_MAX = Math.max(STMP_LIST.length, ...LVLSIZED.map(L => L.tables?.stmpT?.length ?? 0));
+LVL_TABLES.push(['hzMskT', pad(ZN_BUILD.hmask, NHOLE)]);   // ZONES: the hole-likes' zone masks replace it
+LVL_TABLES.push(['stmpT', pad(STMP_LIST, STMP_MAX)]);
+LVL_TABLES.push(['zoneT', ZN_BUILD.zoneT]);  // LAST: variable length -- see LVL_VARLEN
 const SLOT_OFF = {};
 let SLOT_LEN = 0;
 for (const [n, a] of LVL_TABLES) {
@@ -9739,10 +10939,10 @@ const LD = (name, body, sep = ': !byte ') => {
 if (SLOT_AT & 255) throw new Error(
   `SOLO: SLOT_AT must be page-aligned (mapT sits at offset 0)`);
 
-// The hazard MACHINERY has to exist whenever any resident level needs it, not just when THIS
-// level does. Level 1 splits nothing, so on its own it emits none of this -- but level 2 rides
-// along in the shadow and does, and the code is shared. hazNT is what turns it off per level.
-const HAZRT = HAZ || false || !!WALLVAR;   // ...and the wall delta is walked by hzRun too
+// The hazard MACHINERY exists whenever any level in the chain needs it (HZ_ANY), not just when
+// THIS level does; hazNT is what turns it off per level. HAZRT is the byte reader hzGet/hzRd,
+// which hzRunW shares for the wall deltas.
+const HAZRT = HZ_ANY || !!WALLVAR;
 
 // The delta, as two lists of hzRun triples -- one to take the wall out, one to put it back.
 // hzRun already walks (addrLo, addrHi, value) until $ff, which is exactly this job at a larger
@@ -9858,7 +11058,7 @@ if (WALL_DELTAS && !PACK_PROBE && PACKED.size && !process.env.LVLDUMP && !proces
 // Only tables at the END of the manifest may be in here: a varying length moves everything
 // after it, and the engine names the rest with fixed equates. lvlBlocks must not pad these
 // (that is what would hand the saving straight back), so it reads this set too.
-const LVL_VARLEN = new Set(['holeSeeT', 'stmpT']);
+const LVL_VARLEN = new Set(['holeSeeT', 'zoneT']);
 // This level's blob, and any other level's. The fixed part is identical for all of them by
 // construction; only the tail differs, so a level's length is the live one's with its own tail
 // swapped in. The MAX is what the slot region has to be big enough for.
@@ -9879,6 +11079,9 @@ const SHADOW_BASE = SLOT_AT + LVLBLOB_MAX;
 // by; the runtime never sees it -- wallPtrs() below turns it into the local id's slot entry.
 const SOLO_WALL_AT = {};
 let SOLO_WALL_LEN = 0;
+// each level's OWN last byte in the slot (its blob, then its walls): what is left up to LXAT is free for
+// its code to start in (LX_LOW). One slot only (LVLLOAD); resident levels share no such tail.
+const LVL_END = Object.fromEntries(ALLBLOBS.map(L => [L.level, SLOT_AT + blobOf(L)]));
 // .length, not truthiness: WALL_DELTAS is [] in a build that compiles the mechanic but has no
 // deltas to lay out (a WALLOFF variant, whose own walls are already punched out of its map).
 if (WALL_DELTAS.length) {
@@ -9899,6 +11102,7 @@ if (WALL_DELTAS.length) {
       SOLO_WALL_AT[k] = { d: at, c: at + dN };
       at += dN + d.cells.length + 1;
     }
+    if (LVLLOAD) LVL_END[lv] = at;
     SOLO_WALL_LEN = Math.max(SOLO_WALL_LEN, at - baseOf(lv));
   }
 }
@@ -9941,7 +11145,7 @@ const LVLREGION_END = SHADOW_BASE + (LVLLOAD ? 0 : (LVLALL ?? []).length * LVLBL
 // the code. The vectors, in this order, are what the engine calls; a module's jump table matches it.
 const LXAT = LVLREGION_END;
 const LX_BOOT = LX_OF(BOOTLVL);
-// ---- MUSIC=1: a GoatTracker song, player and data as ONE block, in the files of the levels that play it ----
+// ---- MUSIC (DEFAULT since 2026-11-02; MUSIC=0 off): a GoatTracker song, player and data as ONE block, in the files of the levels that play it ----
 // (2026-10-16, a TEST build: "music at all times", to feel the cost in play.) GoatTracker's packer
 // writes a player TAILORED to its song -- effects it never uses left out, the song's tables at
 // absolute addresses inside the player's instructions -- so the two travel together. PER LEVEL
@@ -9950,17 +11154,17 @@ const LX_BOOT = LX_OF(BOOTLVL);
 // starts (musGo). The region grows to the largest code + block of any level, which is image space. A level without it stops the music
 // (musGo finds no song); a fall stops it before the load (musOff) and starts the new level's.
 // The player runs in the top-of-frame IRQ, 60 times a second, whatever the frame rate.
-// Its two zero-page temps are MUS_ZP and MUS_ZP+1, published to compaction as owned.
-const MUSIC = process.env.MUSIC === '1';
+// Its two zero-page temps are MUS_ZP and MUS_ZP+1, published to compaction as owned. TEMPS: anything
+// else in the IRQ may use them too, but nothing may keep state there (see the flicker's fkR0).
+// DEFAULT since 2026-11-02 (the user: "make everything there default ... That's our master"); it was
+// the opt-in lest-music.d64 build.
+const MUSIC = process.env.MUSIC !== '0';
 // SOUND, per level (2026-10-16, the user's plan): every level that makes any sound carries a block,
 // built WITH GoatTracker's sound-effect engine (-D1: entries init +0, play +3, effect +6, volume +9).
 // MUSICLV play the song (MUSICSNG); the other SFXLV levels carry an EMPTY song, so their player is
-// there for the effects alone -- level 1, the hard room: footsteps and the clinks, no music.
+// there for the effects alone -- the clinks and the wall, no music.
 const MUSIC_LV = MUSIC ? (process.env.MUSICLV ?? '2,3,4,5,6,7').split(',').map(Number) : [];
 const SFX_LV = MUSIC ? [...new Set([...(process.env.SFXLV ?? '2,3,4,5,6,7').split(',').map(Number), ...MUSIC_LV])] : [];
-// footsteps: on no level for now (the user, 2026-10-16: "they take away from the mood ... maybe in
-// another level"); STEPLV=n,... puts them back
-const STEP_LV = MUSIC ? (process.env.STEPLV ?? '').split(',').filter(Boolean).map(Number) : [];
 const MUS_ZP = 0xbe;
 const MUS_PITCH = 440 * 985248 / CLOCK;     // 423.87 on NTSC, 440 on PAL: see the gt2reloc call
 // a level's own song (2026-10-22, the user: the struck-bass keys piece "into level... 3"): MUSICSNG<n>
@@ -9968,12 +11172,17 @@ const MUS_PITCH = 440 * 985248 / CLOCK;     // 423.87 on NTSC, 440 on PAL: see t
 // level 4 (2026-10-27): the hub's wind and hum (tools/song-hub.mjs), "silent save a very soft background
 // atmosphere"
 // level 2 (2026-10-27): Deep without the steam engine, the data part a repeat earlier, its last note
-// held into the loop, voice 3 left free for the effects (tools/sng-deep-nonoise.cjs)
+// held into the loop, voice 3 left free for the effects (tools/sng-deep-nonoise.cjs). Since 2026-11-03 the
+// DUCK mix (music/deep-song-duck.sng): the original's levels, the data part all triangle, and the drone
+// dropping from sustain F to A over ~1.6 s as the data comes in (the user: "perfect. make this the level2
+// song"); the 11-01 gentle mix is MIX=gentle -> music/deep-song-nonoise.sng
 // level 3 (2026-10-27): the organ ATMOSPHERE (tools/song-organ-atmos.mjs): the siciliano's harmony as
 // held suspensions with fragments of its cells on voice 3, softened by the attack trick (a slow attack
 // keyed off before its peak). The siciliano itself is music/organ.sng, the keys build-up before it
 // music/keys-build3.sng
-const MUS_LVSNG = { 2: 'music/deep-song-nonoise.sng', 3: 'music/organ-atmos.sng', 4: 'music/hub.sng' };
+// levels 5-7 (2026-10-31): Spell as theme and variations, two rounds each (tools/spell-levels.sh)
+const MUS_LVSNG = { 2: 'music/deep-song-duck.sng', 3: 'music/organ-atmos.sng', 4: 'music/hub.sng',
+  5: 'music/spell-level-5.sng', 6: 'music/spell-level-6.sng', 7: 'music/spell-level-7.sng' };
 const MUS_SNG = n => !MUSIC_LV.includes(n) ? 'music/empty.sng'
   : process.env[`MUSICSNG${n}`] ?? MUS_LVSNG[n] ?? process.env.MUSICSNG ?? 'music/deep-song.sng';
 // Filled by musBuild once every level's module size is known (the level code is cut from the
@@ -10012,9 +11221,11 @@ const musFilterCheck = sng => {
       const P = pats[p];
       for (let r = 0; r < P.length / 4 - 1 && (note === Infinity || !filt); r++, row++) {
         const [nt, ins, cmd, dat] = P.subarray(4 * r, 4 * r + 4), isNote = nt >= 0x60 && nt <= 0xbc;
-        // (a global tempo, $03-$7f, moves every voice alike, so rows still line up; a channel's own does not)
-        if (cmd === 0xf && dat >= 0x80 && note === Infinity) throw new Error(`MUSIC: ${sng} sets a channel tempo before its first note: musFilterCheck counts rows, not ticks`);
         if (isNote && note === Infinity) note = row;
+        // (a global tempo, $03-$7f, moves every voice alike, so rows still line up; a channel's own does not --
+        // but one ON the first note's row is fine: the rows before it, all that is counted, ran at the global
+        // tempo. spell-level-7's lead sets its own 5-tick rows with its first note)
+        if (cmd === 0xf && dat >= 0x80 && note === Infinity) throw new Error(`MUSIC: ${sng} sets a channel tempo before its first note: musFilterCheck counts rows, not ticks`);
         if (!filt && cmd === 0xa && dat) filt = { row, at: dat };
         else if (!filt && isNote && ins && insFilt(ins)) filt = { row, at: insFilt(ins) }; }
       if (note < Infinity && filt) break; }
@@ -10088,17 +11299,6 @@ const glideFx = (w, from, to, k) => { const a = SFX_NOTE(from), z = SFX_NOTE(to)
   return [...Array(k)].map((_, i) => [i ? null : w, Math.round(a + (z - a) * i / (k - 1))]); };
 const fxRaw = (ad, sr, pw, frames) => [ad, sr, pw, ...frames.flatMap(([w, v]) => w === null ? [v] : [v, w]), 0];
 const SFX_BYTES = {
-  // a footstep in a hard room, the way IMPOSSIBLE MISSION does it (Games Explained's disassembly,
-  // footstep_sound $8E79): NOISE clocked very high (its $861E/$C8F3 are about C7 and G7), AD $05 /
-  // SR $39 -- an instant attack, a ~170 ms decay down to a LOW sustain, and a ~750 ms RELEASE --
-  // gated for a few frames and let go. The "reverb" is that envelope: each step's quiet tail is still
-  // dying when the next one lands. (Release 8, ~300 ms, here -- the user: "shorten the release a bit".)
-  // The effect runs on through the release (gate-off frames), because
-  // when it ends the voice goes back to the song, which would cut the tail. Two feet, a semitone apart.
-  // ...and then MUFFLED (the user, 2026-10-16: the bright tap "takes away from the mood ... unless we
-  // can make it much more muffled"): the same envelope, the noise clocked five octaves down.
-  stepL:  fx(0x05, 0x38, 0x08, [[0x81, 'C2'], ...hold('C2', 2), [0x80, 'C2'], ...hold('C2', 16)]),
-  stepR:  fx(0x05, 0x38, 0x08, [[0x81, 'B1'], ...hold('B1', 2), [0x80, 'B1'], ...hold('B1', 16)]),
   // the orb coming off the floor: a bright triangle ping that rings a moment
   clink:  fx(0x08, 0x00, 0x08, [[0x11, 'E6'], [null, 'B6'], [null, 'E7'], ...hold('B6', 3), ...hold('E6', 14), [0x10, 'E6']]),
   // an orb going into its socket: a triangle falling an octave and a half
@@ -10106,7 +11306,7 @@ const SFX_BYTES = {
   // a wall going down: low noise falling for most of a second
   wall:   fxRaw(0x0c, 0x00, 0x08, glideFx(0x81, 'G4', 'C2', 32)),
 };
-const SFX_ORDER = ['stepL', 'stepR', 'clink', 'socket', 'wall'];
+const SFX_ORDER = ['clink', 'socket', 'wall'];
 // ---- THE DEATH'S OWN SOUND (dsGo / dsBoom / dsTick), 2026-10-22, the user: "when the death scene
 // starts music should drop out and be replaced with a glide down note ... and a deep boom when the
 // angel face image pops up" ----
@@ -10134,12 +11334,22 @@ const DSG_W  = +(process.env.DSGW ?? 0x20);                 // sawtooth, all thr
 const dsHz = (k, d) => (process.env[k] ?? d).split(',').map(Number);
 const DSG_FROM = dsHz('DSGFROM', '103.83,92.5,98.0');      // voices 1-3: G#2, F#2, G2 ...
 const DSG_TO   = dsHz('DSGTO', '36.71,55.0,73.42');        // ... -> D1, A1, D2 (they cross on the way)
-const DSG_SH = +(process.env.DSGSH ?? 5);                   // 1/32 of the gap a 60th: ~95% there in 1.6 s
+// The glide ARRIVES at DIE_ARR (the turn lands on the same tick -- see DIE_ARR): an ease-out, the
+// speed falling linearly to nothing, so each voice is a velocity and a constant pull on it. In
+// 32 bits (16 of fraction), planned here and checked to land within one frequency unit.
+// (It was an exponential, 1/32 of the gap a 60th, which never quite arrives: ~95% at 1.6 s.)
+// One plan per DIE_ARRS duration (dsPlan picks the row the turn's quadrant chose).
+const dsPlans = DIE_ARRS.map(T => DSG_FROM.map((h, i) => {
+  const f0 = sidFn(h) * 65536, gap = (sidFn(DSG_TO[i]) - sidFn(h)) * 65536;
+  const a = Math.round(-2 * gap / (T * (T + 1))), v0 = -T * a;
+  let f = f0, v = v0;
+  for (let k = 0; k < T; k++) { f += v; v += a; }
+  if (Math.abs(f - sidFn(DSG_TO[i]) * 65536) >= 65536) throw new Error(`glide voice ${i + 1} (${T}) lands ${(f / 65536 - sidFn(DSG_TO[i])).toFixed(2)} off`);
+  return { f0, v0, a };
+}));
+const le32 = v => [0, 8, 16, 24].map(b => `$${((v < 0 ? v + 2 ** 32 : v) / 2 ** b & 255).toString(16).padStart(2, '0')}`).join(',');
 const DSG_RES = +(process.env.DSGRES ?? 0xc);               // the filter's resonance under the cluster
 const DSG_C0 = +(process.env.DSGC0 ?? 0x18), DSG_C1 = +(process.env.DSGC1 ?? 0x40);   // cutoff opens, 1 every 4 60ths
-// T (MUSIC builds; the user: "add a button so I can trigger it to test it over and over"): the death's
-// sound without the death -- the converging cluster, then the boom DST_N 60ths later (the DIETEST turn)
-const DST_N = +(process.env.DSTN ?? 205);
 if (DSG_FROM.length !== 3 || DSG_TO.length !== 3) throw new Error('DSGFROM/DSGTO: three voices each');
 if (DSG_C1 <= DSG_C0) throw new Error('DSGC1: the cutoff opens, so it ends above where it starts');
 const DSG_AD = +(process.env.DSGAD ?? 0x08), DSG_SR = +(process.env.DSGSR ?? 0xa9);
@@ -10154,15 +11364,13 @@ const SFX_ID = Object.fromEntries(SFX_ORDER.map((k, i) => [k, i + 1]));
 const SFX_OFF = {};
 { let o = 0; for (const k of SFX_ORDER) { if (SFX_BYTES[k].length > 128) throw new Error(`sfx ${k}: ${SFX_BYTES[k].length} bytes, past the engine's 128`);
     SFX_OFF[k] = o; o += SFX_BYTES[k].length; } }
-const STEP_LEN = +(process.env.STEPLEN ?? 140);   // 1/256 cells walked per footstep: about half a cell
 // ---- THE PROXIMITY DRONE (level code 'drone'): the old engine drone, revived 2026-10-16 ----
 // Two pulse voices a hair apart beat at exactly their difference in Hz, so ONE number is the whole
 // effect: a slow flange far off, a throb closer, a heartbeat on top of you -- Chebyshev cells to the
 // nearest angel, 0..15. Voice 1 is a real note (A1, climbing a half step at the closest) and voice 2
 // rides above it to make the beat. The old drone's LOUDNESS was the master volume, and every $d418
-// write is a bump on a 6581 -- so here the nearness is the FILTER: every voice (the effects on voice 3
-// too -- the user: "the proximity drone will also filter the footsteps") goes through a low-pass that
-// opens as the angel closes. The volume is written once, at drIn.
+// write is a bump on a 6581 -- so here the nearness is the FILTER: the drone's voices (and, with DRFX3,
+// the effects on voice 3) go through a low-pass that opens as the angel closes. The volume is written once, at drIn.
 const DR = { near: 36, fall: 3, far: 2, step: 1, dmax: 8, vfall: 4, fcNear: +(process.env.DRFCNEAR ?? 0x10), fcFar: +(process.env.DRFCFAR ?? 0x00) };
 // (2026-10-16, the user: "more aggressively lowpass so the initial hum is more subdued", then "even
 // further", then the trial they kept: "I think I like fully filtered" -- $00 from 6 cells, $10 at 0)
@@ -10178,13 +11386,302 @@ const DR_V2 = DR_V1.map((v, d) => v + Math.round(Math.max(DR.far, DR.near * Math
 const DR_FC = [...Array(16)].map((_, d) => Math.round(DR.fcFar + (DR.fcNear - DR.fcFar) * drLoud(d)));
 // octave 7's twelve notes; the effect player shifts these down (GoatTracker's note numbering, C-0 = 0)
 // DRMODE=lp|bp|hp: the filter's mode, $d418's top bits (low-pass, band-pass, high-pass); written once at
-// drIn with the volume. DRFX3=1 routes voice 3 -- the effects, the footsteps -- through it as well: a
-// high noise tap through a closed low-pass is inaudible (the user, 2026-10-16: "not hearing footsteps").
+// drIn with the volume. DRFX3=1 routes voice 3 -- the effects -- through it as well; off by default,
+// because an effect through a closed low-pass is close to inaudible.
 const DR_MODE = ({ lp: 0x10, bp: 0x20, hp: 0x40 })[process.env.DRMODE ?? 'lp'];   // the user tried bp: "keep low pass"
 if (DRONE_LV.length && !DR_MODE) throw new Error(`DRMODE=${process.env.DRMODE}: lp, bp or hp`);
 const DR_ROUTE = process.env.DRFX3 === '1' ? 7 : 3;
+// ---- THE EFFECT PLAYER for a level with no GoatTracker block (level code) ----
+// GoatTracker-format effects on voice 3, ticked at 60 Hz: the drone's (level 1) since it was built,
+// and level 8's since 2026-11-10 (the user: "we kept sound effects (ball pickup, wall drop) on voice
+// 3" -- levels 8 and 9 had played none at all, sfxPlay's lxSfx being lxNone there). ONE source, and
+// each level's copy renamed by R, because level modules are cut out and linked apart: two copies
+// under one set of labels would be a duplicate-label error in the image that holds both.
+// The pointer (dr)P is MUS_ZP -- the GoatTracker player's temps, free on any level without one.
+const FX_LABELS = ["dtFx","dtFl","dtD","dtFn","dtK","dtEnd","drNote","dnL","dnS","dnSh","dnW","drSfx","dfGo","dfNo","drBL","drBH","drFxA","drFxL","drFxH","drFxI","drYs","drFL","drFH","drP"];
+const fxRe = new RegExp('\\b(' + FX_LABELS.join('|') + ')\\b', 'g');
+const fxPlayer = R => (`dtFx:   lda dieSt               ; dying: the death owns voice 3 too (dsGo) -- an effect still
+        beq dtFl                ;   playing (the clink of the orb you were caught picking up) went
+        lda #$00                ;   on writing it, over the glide. Killed, not paused, so the
+        sta drFxA               ;   restart does not resume it.
+        rts
+dtFl:   lda drFxA
+        beq dtD
+        lda drFxL
+        sta drP
+        lda drFxH
+        sta drP+1
+        ldy drFxI
+        bne dtFn
+        lda (drP),y             ; frame 0: AD, SR, the pulse width; the voice under the test bit
+        sta $d413
+        iny
+        lda (drP),y
+        sta $d414
+        iny
+        lda (drP),y
+        sta $d410
+        sta $d411
+        iny
+        sty drFxI
+        lda #$08                ; test bit, gate OFF: no DC thump (the GoatTracker patch's lesson)
+        sta $d412
+dtD:    rts
+dtFn:   lda (drP),y             ; a frame: the note...
+        beq dtEnd
+        jsr drNote
+        iny
+        lda (drP),y             ; ...and a waveform after it, if the next byte is one
+        beq dtK
+        cmp #$82
+        bcs dtK
+        sta $d412
+        iny
+dtK:    sty drFxI
+        rts
+dtEnd:  sta drFxA               ; A = 0: done; whatever release it set runs on
+        rts
+; drNote: A = a GoatTracker note ($80 + semitones from C-0) -> voice 3's frequency, from octave 7's
+; twelve shifted down. Keeps Y.
+drNote: sty drYs
+        sec
+        sbc #$80
+        ldx #$00
+dnL:    cmp #12
+        bcc dnS
+        sbc #12
+        inx
+        bne dnL
+dnS:    tay
+        lda drBL,y
+        sta drFL
+        lda drBH,y
+        sta drFH
+        txa
+        eor #$07                ; 7 - octave shifts
+        tax
+        beq dnW
+dnSh:   lsr drFH
+        ror drFL
+        dex
+        bne dnSh
+dnW:    lda drFL
+        sta $d40e
+        lda drFH
+        sta $d40f
+        ldy drYs
+        rts
+; drSfx (lxSfx, from sfxPlay): A = an effect id. GoatTracker's priority rule: an effect lower in
+; memory never cuts off one higher up.
+drSfx:  tax
+        lda sfxLoT-1,x
+        ldy sfxHiT-1,x
+        php
+        sei
+        ldx drFxA
+        beq dfGo
+        cpy drFxH
+        bcc dfNo
+        bne dfGo
+        cmp drFxL
+        bcc dfNo
+dfGo:   sta drFxL
+        sty drFxH
+        lda #$00
+        sta drFxI
+        lda #$01
+        sta drFxA
+dfNo:   plp
+        rts
+`).replace(fxRe, R);
+const fxPlayerData = R => (`drBL:   !byte ${DR_BASE.map(v => v & 255).join(',')}
+drBH:   !byte ${DR_BASE.map(v => v >> 8).join(',')}
+drFxA:  !byte 0
+drFxL:  !byte 0
+drFxH:  !byte 0
+drFxI:  !byte 0
+drYs:   !byte 0
+drFL:   !byte 0
+drFH:   !byte 0
+`).replace(fxRe, R);
+// ---- THE TUBE'S SOUND, for a level with no GoatTracker block (level code) ----
+// The hum on voice 1, a snap on voice 2 when the level calls P+'Snap', and the effects on voice 3
+// (fxPlayer). Level 8's since 2026-11-09 (the failing tube's flashes); level 9's since 2026-11-10
+// (the user: "level 9. hum and zaps timed with the orbs?" -- a zap on each sentry spark). One source,
+// each copy renamed: P the routines' prefix, X the effect player's, rnd the level's random source.
+// tick = the level's own lxTick, run inside this one; init = its own lxInit, chained after (or none).
+const tubeSnd = ({ P, X, rnd, tick, init, o }) => (`; ---- fsIn (lxInit: boot, a death restart, every landing): the SID from cold ----
+; Everything to 0 -- every gate off, every envelope at attack/decay/release 0 -- and the hum gated
+; on 4 ticks later (fsHr). The 4 ticks are the hard restart: arriving from the death sound, a voice
+; can sit at envelope $ff, and gating it there wraps the attack to 0 and freezes it silent; release
+; 0 brings it down in ~7 ms (see the death glide's dsHr).
+fsIn:   ldx #$18
+        lda #$00
+fsClr:  sta $d400,x
+        dex
+        bpl fsClr
+        lda #<${hx16(sidFn(FLK_HUM))}
+        sta $d400
+        lda #>${hx16(sidFn(FLK_HUM))}
+        sta $d401
+        lda #${hx(FLK_HUMS << 4)}               ; sustain FLK_HUMS, attack/decay/release 0
+        sta $d406
+        lda #${hx(o.dec)}                ; the snap voice: attack 0, decay o.dec, sustain 0, release
+        sta $d40c               ;   o.rel -- the tail after the gate is the room
+        lda #${hx(((o.zap ? o.zap.sus : 0) << 4) | o.rel)}${o.zap ? '               ; ...and a zap holds at sustain o.zap.sus' : ''}
+        sta $d40d
+${o.hz ? `        lda #<${hx16(sidFn(o.hz))}               ; FSHZ: one pitch for every snap, set once
+        sta $d407
+        lda #>${hx16(sidFn(o.hz))}
+        sta $d408
+` : ''}        lda #$40                ; its pulse: $040 of $fff, about 1.5% -- thin, a buzz not a tone
+        sta $d409
+        lda #$80
+        sta fsW                 ; nothing played yet: let go as noise
+        lda #$1f                ; volume full, low-pass (each snap picks its own mode)
+        sta $d418
+${FS_FXC ? `        lda #$04                ; voice 3 in the filter from the start, and for good (see fsSnap)
+        sta $d417
+` : ''}        lda #$00
+        sta x8drFxA             ; no effect playing: a restart does not resume one
+        lda #$04
+        sta fsHr
+        lda #$00
+        sta fsOff               ; the level's own sound is over (a restart after the shock)
+${o.zap ? '        sta fsSw                ; ...and no zap is holding\n' : ''}${init ? `        jmp ${init}               ; ...and the level's own start-up
+` : '        rts\n'}; ---- fsSnap: one electrical snap (level 8: a lit tick of the tube; level 9: a sentry's spark) ----
+fsSnX: rts
+fsSnap: lda fsOff
+        bne fsSnX
+${DIE ? `        lda dieSt               ; not over the death: it owns the SID (level 9's sparks run on)
+        bne fsSnX
+` : ''}${FALL ? `        lda fallSt              ; ...nor over a fall, which has gated everything off
+        bne fsSnX
+` : ''}        jsr flkRnd
+        sta fsR
+${FS_FXC ? `        lda x8drFxA             ; an effect is playing: the filter is set for it (fsSfx)
+        bne fsWv
+` : ''}        lda fsR
+        and #$7f                ; the cutoff: the middle of its range, $50-$cf
+        clc
+        adc #$50
+        sta $d416
+        jsr flkRnd
+        and #$70                ; resonance 8-15 (the hub found low resonance reads as static),
+        ora #${hx(FS_FXC ? 0x86 : 0x82)}                ;   the snap voice through it, never the hum -- and voice 3 ALWAYS
+                                ;   with FSFXC: switching a voice in or out of the 6581's filter
+                                ;   steps its DC level, and an effect was clicking on and off
+                                ;   with it (the user, 2026-11-10: "pops on and off")
+        sta $d417
+        lda fsR
+        and #$01
+        tax
+        lda fsModT,x            ; band or high pass. A volume write is a bump -- here, one more click
+        sta $d418
+fsWv:
+${o.wave === 'pulse' ? '' : `${o.wave === 'mix' ? `        lda fsR
+        cmp #${hx(256 - o.noise)}               ; noise on o.noise/256 of the snaps
+        bcc fsP
+` : ''}${o.hz ? '' : `        jsr flkRnd              ; the pitch, within the band of its wave
+        and #${hx(o.nband[1])}                ; noise: within the copy's band (level 8: $40-$7f, a mid hiss)
+        ora #${hx(o.nband[0])}
+        sta $d408
+${o.zap ? `        sta fsPi                ; where the zap's fall starts
+        jsr flkRnd
+        and #${hx(o.zap.hold[1])}
+        clc
+        adc #${hx(o.zap.hold[0])}
+        sta fsSw                ; ...and how many ticks it holds
+` : ''}`}        lda #$81                ; noise
+        sta $d40b
+        lda #$80
+        sta fsW
+        rts
+`}${o.wave === 'noise' ? '' : `fsP:    ${o.hz ? '' : `jsr flkRnd
+        and #$1f                ; pulse: $20-$3f, about 500-1000 Hz
+        ora #$20
+        sta $d408
+        `}lda #$41                ; a thin pulse, on the same voice
+        sta $d40b
+        lda #$40
+        sta fsW
+        rts
+`}fsModT: !byte $2f,$4f
+fsHr:   !byte 0                 ; ticks left before the hum gates on
+fsOff:  !byte 0                 ; non-zero: hands off the SID, the level is using it
+fsW:    !byte 0                 ; voice 2's wave without its gate: what letting go writes
+fsFx:   !byte 0                 ; fsTick: an effect was playing at the start of this tick
+${o.zap ? `fsSw:   !byte 0                 ; ticks the zap holds yet, 0 = none
+fsPi:   !byte 0                 ; its pitch (high byte), falling
+` : ''}; ---- fsTick (lxTick): the hum and the snap voice, the level's own tick, then a frame of the effect ----
+x8drP   = $${MUS_ZP.toString(16)}                      ; the effect's data pointer, as the drone's: the player's temps, free here
+fsTick: lda fsOff             ; the level has taken the SID for itself (level 9's shock): only its tick
+        beq fsTk
+        jmp ${tick}
+fsTk:
+${DIE ? `        lda dieSt               ; the death and the fall own the SID: hands off
+        bne fsGt
+` : ''}${FALL ? `        lda fallSt
+        bne fsGt
+` : ''}        lda fsHr                ; the hum waits out its hard restart (see fsIn)
+        beq fsGo
+        dec fsHr
+        bne fsGo
+        lda #$11                ; triangle, gated: and it holds from here
+        sta $d404
+${o.zap ? `fsGo:   lda fsSw                ; a ZAP still holding: keep the gate and slide its pitch down
+        beq fsLet
+        dec fsSw
+        beq fsLet               ; ...held out: let go, below
+        lda fsPi
+        sec
+        sbc #${hx(o.zap.slide)}
+        bcs fsPs
+        lda #$00                ; (the floor: a zap never wraps back up to a squeal)
+fsPs:   sta fsPi
+        sta $d408
+        jmp fsGt
+fsLet:  ` : 'fsGo:   '}lda fsW                 ; a snap lasts ONE tick of gate: voice 2 lets go every tick, and a
+        sta $d40b               ;   snap below (from the level's tick) gates it back on. Its envelope
+                                ;   is long past its peak by then, so this is never the retrigger-at-
+                                ;   $ff freeze (see fsIn). fsW keeps the WAVE, so a pulse snap's
+                                ;   tail is not turned into noise by letting go of it
+fsGt:   jsr ${tick}
+        lda x8drFxA
+        sta fsFx                ; was an effect playing before this frame of it?
+        jsr x8dtFx
+        lda fsFx
+        beq fsTD
+        lda x8drFxA
+        bne fsTD
+${DIE ? `        ldx dieSt               ; ...unless it ended because we died: the death owns voice 3 now
+        bne fsTD
+` : ''}        sta $d413               ; it has just ENDED: silence voice 3. On a music level the song takes
+                                ;   the voice back here and the effect stops; with nothing to take
+                                ;   it, the wall's noise (decay 12, no gate-off frame) rang on for
+                                ;   1.5 s instead of half of one (the user: "it sounds like it goes on
+                                ;   longer"). A = 0 into AD: decay 0, so the envelope falls to the
+                                ;   effects' sustain 0 in ~6 ms WITH its waveform still running. It
+                                ;   wrote 0 to the control register until 2026-11-10, which took the
+                                ;   waveform away too -- a DC step, the pop at the end of the orb's
+                                ;   ping. The next effect's first frame sets AD again.
+fsTD:   rts
+${FS_FXC ? `; fsSfx (lxSfx, from sfxPlay): start the effect, and give the filter to it -- voice 3 and the
+; snap voice low-passed together, so the snaps during it sit under it rather than across it
+fsSfx:  jsr x8drSfx
+        lda #${hx(FS_FXC)}
+        sta $d416
+        lda #${hx((FS_FXR << 4) | 6)}
+        sta $d417
+        lda #$1f
+        sta $d418
+        rts
+` : `fsSfx:  jmp x8drSfx
+`}${fxPlayer(n => 'x8' + n)}${fxPlayerData(n => 'x8' + n)}fsR:    !byte 0                 ; this snap's first random byte: cutoff, filter mode, which voice
+`)
+  .replace(/\bfs([A-Z]\w*)\b/g, P + '$1').replace(/\bx8(\w+)\b/g, X + '$1').replace(/\bflkRnd\b/g, rnd);
 const DR_BASE = [...Array(12)].map((_, k) => drFn(440 * Math.pow(2, (7 * 12 + k - 57) / 12)));
-if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: svKey went with the level code, and RETURN is dieKey');
+if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: svKey went with the level code, and its restart is dshFir\'s');
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
@@ -10229,9 +11726,8 @@ if (process.env.LVLDUMP) {
     level: LVL,
     nOrbs: ORBS.length, nHoleLike: HOLELIKE.length, nExit: HOLES_AT.length, nextRun,
     nHaz: HAZ ? hazRec.length : 0, occBytes: OCCBYTES, pathN: PATH_N,
-    // Raw, not laid out: the receiving build turns the lists into offsets into its OWN hazLstT.
-    // The triples are assembler expressions naming the live run tables, so they re-emit verbatim.
-    haz: HAZ_SELF,
+    // Raw, not laid out: the main build merges it with the wall states and numbers it (HAZ_PLAN).
+    haz: HAZ_RAW,
     tables: Object.fromEntries(LVL_TABLES.map(([n, a]) => [n, [...a]])),
   }));
   console.error(`LVLDUMP: ${LVL_TABLES.length} tables, ` +
@@ -10239,6 +11735,11 @@ if (process.env.LVLDUMP) {
   process.exit(0);
 }
 
+// LVSKIP's keys: the digit of each level ON THIS DISK (a missing ILV file would hang the load), as
+// [keyboard column, row bit]. Shared by lvKey and its tables, which live in the data section.
+const LVSKIP_LV = [...Array(10).keys()].map(k => k + 1).filter(n => ALLLVL.includes(n));
+const LVSKIP_KEY = [[0x7f, 0x01], [0x7f, 0x08], [0xfd, 0x01], [0xfd, 0x08], [0xfb, 0x01],   // 1 2 3 4 5
+                    [0xfb, 0x08], [0xf7, 0x01], [0xf7, 0x08], [0xef, 0x01], [0xef, 0x08]];  // 6 7 8 9 0
 let asm = `
 ; ---- THE LEVEL IS NOT IN THIS IMAGE ----
 ; Every per-level table is an EQUATE into the slot at ${hx16(SLOT_AT)}, in manifest order, mapT first
@@ -10272,12 +11773,9 @@ tmp     = $1f
 baseHi  = $22
 paF     = $805b                  ; low byte of the 16-bit player angle; pa is the high
 smCnt   = $805e                  ; SLOWMO: frames left before the auto-mover steps again
-hazCur  = $805f                  ; the cell whose run-table patches are currently applied
                                  ; $8060-$8073 are free: they held the sprite GRID walk and its
                                  ; debug capture, both gone with the six-sprite angel
 oqa     = $8074                  ; 9-bit angle being folded onto the quarter circle
-opaqL   = $8076                  ; the paq the cached frame trig was taken at
-opaqH   = $8077
 dtv     = $8050
 dtm     = $8059                  ; elapsed ticks scaled for movement, and for turning
 dtt     = $805a
@@ -10363,9 +11861,9 @@ sdH     = $91                   ; the wall's height AT the seam's own column
 sdCol   = $8f                   ; seamDrw: the seam's own pixel column, the window minimum
 sdMin   = $9e                   ;   around it, and the row the SEAM (not the wall) starts on
 sdSRow  = $9f
-cuQL    = $8d                   ; calcU's fine angle: its low byte, which quarter it lands in,
-cuQF    = $8e                   ;   and a scratch for the three-quarter case. Shares the seam
-cuQT    = $8f                   ;   scratch below -- calcU runs at span setup, before the walk.
+cuQL    = $8d                   ; calcU's fine angle: its low byte, its quadrant, and which of
+cuQH    = $8e                   ;   px/py it reads. Shares the seam scratch below -- calcU runs at
+cuP     = $8f                   ;   span setup, before the walk.
 ssCol   = $8d                   ; seamOne's distance test: the seam's column and cell, the cell
 ssCell  = $8e                   ;   being scanned, how many are left, and a scratch. All of it is
 ssScan  = $8f                   ;   seam-pass zp the projective solve has finished with by here.
@@ -10420,9 +11918,8 @@ sHyPN   = $9175
 sHyN    = $9176
 ${SEAMGAP ? `sgW     = $9177                 ; SEAMGAP, per span: the wall cells' coordinate ACROSS the face
 sgF     = $9178                 ;   and the open cells' in front (both as rowMulT bases on an N/S face)
-sgO     = $9179                 ;   and the face: bit 0 set = an N/S face, cells run along x
-` : ''}ssAng   = $9d
-mp      = $98                   ; mul8 operands / product
+sgO     = $9179                 ;   and the face (runPFT's): bit 6 set = an N/S face, cells run along x
+` : ''}mp      = $98                   ; mul8 operands / product
 mq      = $99
 plo     = $9a
 phi     = $9b
@@ -10737,8 +12234,8 @@ carry   = $81f1                  ; 0 = empty hands, else the held entity's index
 fcCell  = $81f2                  ; the cell directly in front of the player, and its parts
 fcX     = $81f3
 fcY     = $81f4
-okNew   = $81f5                  ; SPACE, debounced to one action a press
-okOld   = $81f6
+okStr   = $81f5                  ; FIRESTRAFE: this press has strafed, so letting it go does nothing
+okOld   = $81f6                  ; SPACE or FIRE was down last frame
 okJoy   = $81f7                  ; how many slots this rung of the hole wants
 onvH    = $81ef                  ; the HOLE allocates downward from 8: it is flat on the floor,
 omEn    = $851b
@@ -10749,23 +12246,31 @@ omX8    = $851f
 omBit   = $8520
 marked  = $8584                  ; 0, or the index+1 of the angel that stepped up beside you
 dieSt   = $8585                  ; 0 alive, 1 the room going out, 2 a picture up, 3 held on black
-dieDir  = $8587                  ; the turn the player was making, locked in
-dieOpa  = $8588
-dieRem  = $858a                  ; whole angle units the sweep still owes
+dieRem  = $858a                  ; 1 while the turn is still under way, 0 once it has landed
 dieCl   = $858b                  ; scratch: dx+1 and dy+1 while the bearing index is built
-dieKik  = $8068                  ; frames left in the kick's downward sweep
-dieFqL  = $8066                  ; the rising tone's 16-bit frequency
-dieFqH  = $8067
 dieSgn  = $8065                  ; oaS at the last projection: which side of centre
 dieLk   = $8064                  ; consecutive frames the angel has read as centred
 dieIdx  = $8063                  ; the entity the death sweep is steering onto
-dieDirF = $8061                  ; fine half of the captured turn rate
-dieOpaF = $8062
-dieCy   = $8060                  ; ($8060-$8073 came free with the six-sprite angel)
+dieTgF  = $8061                  ; the turn's target heading, 16-bit like pa:paF (dieAim, refined
+dieTg   = $8062                  ;   by the projection once the angel is near the middle)
+dvQ0    = $8069                  ; udiv: 24-bit dividend in, quotient out
+dvQ1    = $806a
+dvQ2    = $806b
+dvD     = $806c                  ; udiv: the divisor
+dmS     = $806d                  ; dieAim/dieFade: signs and the octant swap
+dmT     = $806e                  ; scratch
+dmU     = $806f
+plLX    = $8072                  ; the last cell you stood on that was not a hole (fallChk; idolStay)
+plLY    = $8073
+lkArm   = $8066                  ; lvKey: nonzero once 'L' has been seen UP -- one drop per press (LVSKIP)
+dieArr  = $8070                  ; this death's turn and glide, in 60ths: one of DIE_ARRS
+dieQ    = $8071                  ; ...and which (0 front, 1 side, 2 back), times 24: dsPlan's row
+dieCy   = $8060                  ; ($8060-$8073 came free with the six-sprite angel; $8066-$8068 went to
+                                 ;   lkArm, markC and mvBmp, 2026-11-13, which had been sitting on oqa/dvQ0/dvQ1)
 dieOff  = $858d                  ; the angel's column offset from centre, from the projection
 dieT0   = $858e                  ; frameCnt when they died: everything is measured from here
 dieTck  = $858f                  ; the last palette tick written, so a fill happens once
-dkJoy   = $8591
+dkArm   = $8590                  ; the held black: 0 until fire has been seen UP, then fire restarts
 dieLat  = $8562                  ; dieSt, LATCHED at raster 250. sprPal runs in the IRQ and read
                                  ;   dieSt direct, so the frame dieGo set it the shared sprite
                                  ;   inks changed WITHIN that frame -- while obC goes out through
@@ -10791,8 +12296,7 @@ amCell  = $c5                    ;   Only live inside angStep/slTick/dieChk, nev
                                  ;   boot-time only). $c1/$c2 were amDX/amDY, now gone.
 amX     = $c6
 amY     = $c7
-${RIVETS ? 'ssSg    = $c8                    ; seamOne (RIVETS): how many span ends lie below the centre\n' : ''}${RIVSEAM ? 'rvMode  = $cc                    ; seamOne (RIVSEAM): 0 = a boundary line, 1 = a centre rivet\n' : ''}${RIVBIG ? 'rvH     = $c9                    ; rvDrw (RIVBIG): row shape, 5 x it, column shape\nrvB     = $ca\nrvCv    = $cb\n' : ''}entDty  = $84fe                  ; an ENTITY moved, so orbMove's still-frame gate must not skip
-dbgOnce = $84f5                  ; DROPNOW only
+${RIVETS ? 'ssSg    = $c8                    ; seamOne (RIVETS): how many span ends lie below the centre\n' : ''}${RIVSEAM ? 'rvMode  = $cc                    ; seamOne (RIVSEAM): 0 = a boundary line, 1 = a centre rivet\n' : ''}${RIVBIG ? 'rvH     = $c9                    ; rvDrw (RIVBIG): row shape, 5 x it, column shape\nrvB     = $ca\nrvCv    = $cb\n' : ''}dbgOnce = $84f5                  ; DROPNOW only
 ${process.env.FALLNOW ? `fnCnt   = ${hx16(FNDBG)}                  ; FALLNOW: how many forced falls have been triggered
 fnLog   = ${hx16(FNDBG + 1)}                  ;   ...and the level each one left, in order (16 of them).
 ${process.env.CEILLOG ? `clP     = ${hx16(FNDBG + 0x1e)}                  ; CEILLOG: write cursor into clBuf
@@ -10846,24 +12350,12 @@ ooCY    = $8516                  ; buffered $d01c. STALE: the held object was a 
 ; costs nothing in file bytes (the assembler pads holes either way) and buys 1,024 bytes of
 ; bank 3, which is the scarce resource: it is what lets a FOURTH level be resident, and it
 ; finally makes bank 3 graphics-only, which the build has been nagging about.
-runPlaneT = $6d00                ; per run id: the wall's plane coordinate and which face is
-runFaceT  = ${hx16(0x6d00 + NRUN)}                ;   visible. Derived by mkRuns at boot and after every level
-                                 ; PACKED IN BEHIND runPlaneT, not given a page of its own.
-                                 ;   NRUN is ${NRUN}, so a page each spent ${512 - 2 * NRUN} bytes on two
-                                 ;   tables that fit in ${2 * NRUN} -- and $6e00-$6eff comes free
-                                 ;   as a whole aligned page, which is where Krill's
-                                 ;   runtime resident goes (251 bytes, load-raw only) so
-                                 ;   that the renderer's scratch never has to leave low
-                                 ;   RAM and the orb ladder keeps all its sprite slots.
-                                 ; runFaceT's ADDRESS IS DERIVED, not written down. It was the
-                                 ;   literal $6d41 until level 7 took NRUN from 65 to 71 and the
-                                 ;   two tables overlapped by six bytes -- silent corruption if
-                                 ;   the overlap guard had not been watching. The ONLY constraint
-                                 ;   is that ${NRUN} entries from ${hx16(0x6d00 + NRUN)} end at ${hx16(0x6cff + 2 * NRUN)}, inside the same
-                                 ;   page, so the indexed reads still cost what they did. That
-                                 ;   holds while NRUN <= 128.
-                                 ;   change; a page each because a level may have up to 255 runs
-                                 ;   (level 4 has 100, which is what outgrew its old home).
+runPFT  = $6d00                 ; per run id, ONE byte: the wall's plane (bits 0-4), the axis it is
+                                 ;   across (bit 6, 1 = y: an N/S face) and which side is visible
+                                 ;   (bit 7: 1 = E/S). Derived by mkRuns at boot and after every
+                                 ;   level change. It was TWO tables, runPlaneT and runFaceT, a byte
+                                 ;   each per id; packed (2026-11-11) so the breakable walls of the
+                                 ;   user's pillar halls could have ${NRUN} ids. Compaction places it.
 obKT    = $5b                   ; obOrder: the smallest key so far, its entity, and the keys
 obKI    = $5c  
 obKeyT  = $a8b3                 ;   (NORB bytes, at most 8: the sprite budget bounds the cast)
@@ -10938,6 +12430,8 @@ ${DIE ? `anKx    = $81db                  ; the reach test's dx+1 and dy+1, kept
 anKy    = $81dc                  ;   can be told from the orthogonal one
 markSaw = $81dd                  ; was the angel being WATCHED when it reached you? Then there is
                                  ;   no "look away and back" left to wait for -- see dieChk.
+markC   = $8067                  ; the marking angel's cell (y*MAPW+x), for mvFree to recognise
+mvBmp   = $8068                  ; non-zero once a move was refused by THAT cell -- see dcTurn
 ` : ''}${HAS_IDOL ? `idolHd  = $81da                  ; 1 while the IDOL is the thing in your hands. The angel
                                  ;   step reads it: carrying it, being looked at no longer stops
                                  ;   them. That is the whole cost of the thing.
@@ -10949,7 +12443,6 @@ arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, s
 rsHi    = $81eb                  ; renderSym's column range, 39..0 for an ordinary frame
 rsLo    = $81ec
 otmp    = $81ed
-onvL    = $81ee                  ;   lower half took, so its clip record can be inherited
 bgOn    = $81e6                  ; background render in progress: cap the subdivision loop
 bgN     = $81e7                  ; iterations left this frame
 bgMore  = $81e8                  ; $ff = the stack still has work on it
@@ -10981,9 +12474,6 @@ obX     = $8530
 obY     = $8538
 obP     = $8540
 obC     = $8548                  ; per-sprite state, flushed to the VIC in the border
-opx     = $855c                  ; the viewpoint orbMove last projected from
-opy     = $855e
-opa     = $8560
 ofx     = $8564
 ofy     = $8565
 kxc     = $8566
@@ -11002,13 +12492,11 @@ oixS    = $8572
 oiyS    = $8573
 ocl2    = $8593                 ; the bounding box in COLUMNS, not cells
 ocmax   = $8594
-obCL    = $8598                 ; per sprite slot, for the second pass: cell range and
-obCR    = $85a0                 ; bounding-box edge masks, so pass 2 need not reproject
-obBL    = $85a8
-obBR    = $85b0
+obCL    = $8598                 ; per sprite slot: the orb's cell range, for oSDeseam
+obCR    = $85a0
 obIX    = $85b8
 obV     = $85d0                 ; size variant per slot, so orbSeam can find the sprite's
-obOcc   = $85e0                 ; per slot: bit 7 = this orb has a possible occluder here
+obOcc   = $85e0                 ; per HOLE-LIKE slot: bit 7 = stamp it, else the fill colour
 obL     = $8574                 ; per slot: the orb's TIGHT column range, which the cell range
 obR     = $857c                 ;   cannot give -- a cell is 4 columns and a box starts inside one
 osI     = $85f4                 ; occStamp: slot being stamped, and how many there are
@@ -11093,7 +12581,8 @@ remLoT  = $8300                 ; per marched column: castRay's raw hit distance
 remHiT  = $a803                 ;   Parked so u can be derived later, only where it is needed.
 
         * = $0801
-        !byte $0c,$08, $0a,$00, $9e, $32,$30,$36,$31, $00, $00,$00
+                                ; (no BASIC header: the boot loader jumps to entry, and compaction
+                                ;   moved this origin off $0801 long ago, so SYS 2061 was wrong anyway)
 entry:
         sei
 ${process.env.STKFILL ? `        ldx #$00                ; STKFILL (debug): mark $0100-$01bf, to see how deep the stack goes
@@ -11229,9 +12718,6 @@ ${ANYFLOORDK ? `        lda #$01                ; entry is the RESTART too, and 
         lda #$00                ;   before they are first read.
         sta arcSkip
         sta arcIx
-        lda #$00
-        sta arcSkip
-        lda #$00
         sta fT0
         lda #${hx(vm(SCR_A))}
         sta d018vm              ; display buffer A; IRQ ORs the charset bits per half-screen
@@ -11245,9 +12731,6 @@ ${SPRITES ? `        ; ---- orbs: static sprite setup. Position and shape change
         lda #$00
         sta hlv                 ; hole 0 is the live one until the first drop swaps them
         sta $d015               ; nothing visible until orbMove has decided what is
-        lda pa
-        eor #$80
-        sta opa                 ; cannot match pa, so the first frame never takes the still path
         lda #$ff
         sta $d01c               ; ALL eight in multicolor: orbMove hands out slots as it finds
                                 ; visible orbs, so any of them can be in use
@@ -11330,7 +12813,7 @@ ${PLAN === 2 ? `        lda #$00                ; the colour queue must start EM
         sta fallSt              ; fsZero: the main loop's first act is "lda fallSt / beq mfIn", and
                                 ;   nothing had ever written this. See fallSt's own note: it worked
                                 ;   only while its page came up zero, and the relayout moved it.
-                                ;   entry is also the RETURN restart, so a restart mid-drop needs
+                                ;   entry is also the death restart, so a restart mid-drop needs
                                 ;   this too -- that path could not have worked either.
 ` : ''}        jsr lvlStart            ; the LIVE level's start -- boot and every death come here
 ${SLOWMO ? `        lda #$01
@@ -11338,20 +12821,11 @@ ${SLOWMO ? `        lda #$01
                                 ; from the requested position rather than SLOWMO frames into it
 ` : ''}${process.env.DROPNOW ? `        lda #$01
         sta dbgOnce` : ''}
-${DIE ? `        lda #$ff                ; hazCur is READ to decide whether the run-table patches are stale
-        sta hazCur              ;   and never written anywhere, so it held power-on garbage. When
-                                ;   that garbage happened to equal the current cell, hazSet was
-                                ;   SKIPPED -- and run ids feed the occlusion masks, which decide
-                                ;   whether the angel counts as seen, which decides whether it
-                                ;   moves. VICE randomises RAM per run, so the same disk took a
-                                ;   different path every time. $ff is not a legal cell here (ids
-                                ;   are y*16+x and no map is 16 rows deep), so hazSet always runs,
-                                ;   which is the behaviour the garbage gave us MOST of the time.
-        lda #$00
+${DIE ? `        lda #$00
         sta dieSt               ; power-on garbage here sent the loop straight into the cut scene with
         sta marked              ;   no state set up, and the program fell out to BASIC
 ` : ''}${SPRITES ? `        lda #$00
-        sta sokAn               ; RETURN restarts by JUMPING to entry, not by reloading, so
+        sta sokAn               ; a death restarts by JUMPING to entry, not by reloading, so
 ${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is still live RAM and has to be
                                 ;   cleared by hand. A wall the sockets took out must come back
                                 ;   too, or a restart hands you a level already solved.
@@ -11360,7 +12834,7 @@ ${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is st
                                 ;   swapped-in one does. The four per-cell run tables are still
                                 ;   carried, and this rewrites them byte for byte (MKRUNS=1 was
                                 ;   the proof of that, and is now simply the default).
-        jsr objInit             ; entities back to their starting cells -- RETURN restarts by
+        jsr objInit             ; entities back to their starting cells -- a death restarts by
                                 ;   jumping here, and their state is all live RAM
 ` : ''}        lda #${hx(+(process.env.CARRY ?? 0))}
         sta carry               ; CARRY=n starts the run holding entity n-1, for headless testing
@@ -11373,10 +12847,10 @@ ${HAS_IDOL ? `        jsr idolLk              ; AFTER carry is set, not with lvl
 ` : ''}
 ${DIETEST && DIE ? `        lda #${hx(ORBS.findIndex(o => o.tall) + 1)}
         sta marked              ; DIETEST: already cornered. This has to come after objInit, which
-        lda #${hx(ORBS.findIndex(o => o.tall))}   ;   ends by clearing carry, marked and entDty --
+        lda #${hx(ORBS.findIndex(o => o.tall))}   ;   ends by clearing carry and marked --       
         sta amIdx               ;   set before it, the mark was wiped and turning merely revealed
         lda #${hx(PA)}          ;   the angel instead of dying to it.
-        sta markPa              ; the 30-degree trigger measures from the heading you start on
+        sta markPa              ; the turn trigger measures from the heading you start on
 ` : ''}
 
         lda #${hx(SCR_A >> 8)}
@@ -11417,12 +12891,12 @@ ${DIETEST && DIE ? `        lda #${hx(ORBS.findIndex(o => o.tall) + 1)}
         lda #$00
         sta frameCnt
         sta frameCnt+1
-        sta lastFrame
+${HUD ? `        sta lastFrame
         sta lastFrame+1
         sta renderCnt
         sta fpsTens
         sta fpsOnes
-${PROFILE ? `        ldx #$32                ; the profile accumulators live in uninitialised scratch. $32, not
+` : ''}${PROFILE ? `        ldx #$32                ; the profile accumulators live in uninitialised scratch. $32, not
         lda #$00                ;   $2f: 17 phases x 3 bytes is 51, so the last index is 50 -- the
 pfInit: sta pfAcc,x             ;   old count left the top THREE bytes (bucket 16, occStamp) holding
         dex                     ;   whatever was there. It only ever read as a wild outlier.
@@ -11490,10 +12964,12 @@ ogCk0:  sta culOkT,x            ; CULLCNT: per-entity pass, draw and LOS counts 
         sta occArm              ;   garbage occBad is exactly the answer this must never give
         sta occChk
         sta occBad` : ''}
-        cli
+${FIRE_STRAFE ? `        lda #$01                ; FIRESTRAFE: a press already down (fire restarts after a death,
+        sta okStr               ;   and is still held) is not a tap, so letting it go does nothing
+` : ''}        cli
 ${MUSIC ? '        jsr musGo               ; MUSIC: this level\'s song, unless one is already playing (a death restart)\n' : ''}
 mloop:
-${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}${DIE ? '        jsr dieKey              ; RETURN restarts, at any time\n' : ''}        jsr tickDelta
+${PROFILE ? '        jsr pfT6              ; closes the raster wait\n' : ''}        jsr tickDelta
 ${PADIN ? `        ldy #${hx(PADIN)}       ; PADIN: ${PADIN} x 13 cycles of nothing
 pdInL:  ldx #${hx(PADX)}
 pdInM:  dex
@@ -11510,7 +12986,7 @@ mfAlive:
         beq mfIn                ;   copy and out, which is what lets it run at 60fps
         jsr fallStep
 ${process.env.FTCAP ? '        jsr ftCap               ; FTCAP: trap the first non-blank top-right cell\n' : ''}${process.env.CEILLOG ? '        jsr ceilLog\n' : ''}        jmp fwait
-mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${MUSIC ? '\n        jsr stepOdo             ; footsteps: this frame\'s walking, once' : ''}${DIE ? '\nmfSkip:' : ''}
+mfIn:   ` : '        '}${DIE ? 'lda dieSt\n        beq mfLive\n        jsr dieFade\n        jmp mfSkip\nmfLive: ' : ''}${!AUTOMOVE ? 'jsr readKeys' : MOVEAT && !SLOWMO ? `jsr maStep`  : !SLOWMO ? `jsr ${AUTOMOVE}` : `dec smCnt\n        bne smSkip\n        lda #${SLOWMO}\n        sta smCnt\n        jsr ${AUTOMOVE}\nsmSkip:`}${DIE ? '\nmfSkip:' : ''}
 ${FALL && process.env.FALLNOW ? `        lda iterLo              ; FALLNOW=n: teleport onto the live exit every n frames (n a power
         and #${hx((+process.env.FALLNOW - 1) & 255)}                ;   of two) -- on frame n-1, 2n-1, ..., NOT frame 0, where nothing
         cmp #${hx((+process.env.FALLNOW - 1) & 255)}                ;   is rendered yet and the drop would snapshot boot's leftovers
@@ -11585,10 +13061,9 @@ ${MULW}
         clc
         adc px+1
         sta cell0
-${HAZRT ? `        cmp hazCur              ; the run tables are patched for the cell being RENDERED
-        beq hzOk                ;   from, so this stays consistent even when the fall renders a
-        jsr hazSet              ;   different cell than the player stands in
-hzOk:` : ''}
+${HZ_ANY ? `        jsr lxHaz               ; the run tables are patched for the cell being RENDERED from, so
+                                ;   this stays right even when the fall renders a different cell
+                                ;   than the player stands in` : ''}
         ; ---- the view angle at QUARTER-unit resolution: paq = (pa:paF) >> 6 ----
         ; Once a frame, not once a ray: it is constant across the whole frame and the rays only
         ; add their own offset.
@@ -11968,7 +13443,7 @@ subFlush:                       ; interpolate + seam one maximal face
         cmp spanL
         bcc subFDn              ; empty
 ${PROFILE && !PROFILE1 ? '        jsr pfT2\n' : ''}        jsr interpSpan
-${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        jsr pfT8              ; interpSpan\n' : ''}${SEAMS && true ? '        jsr seamSpan\n' : ''}${PROFSUB && SEAMS ? '        jsr pfT9              ; seamSpan\n' : ''}subFDn: rts
+${DOUBLE === 'interpSpan' ? '        jsr interpSpan\n' : ''}${PROFSUB ? '        jsr pfT8              ; interpSpan\n' : ''}${SEAMS && !PROFSUB ? '        jmp seamSpan            ; a tail call\n' : SEAMS ? '        jsr seamSpan\n        jsr pfT9              ; seamSpan\n' : ''}subFDn: rts
 
 subBnd: ldx nbnd                ; remember a column where a new face/saturation state begins
         cpx #${hx(NBND)}
@@ -12209,9 +13684,7 @@ ${MARCHCNT ? `${PROFILE ? '        lda pfDone\n        bne mcP1\n' : ''}        
         bne mcP1
         inc mcPiv+1
 mcP1:
-` : ''}${PROFSUB ? '        jsr pfT14\n' : ''}        jsr marchCol
-${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol stores\n' : ''}        rts
-; push the span (pvLast, A) and make A the new pvLast
+` : ''}${PROFSUB ? '        jsr pfT14\n        jsr marchCol\n        jsr pfT12              ; ray: hit + height + marchCol stores\n        rts\n' : '        jmp marchCol            ; a tail call\n'}; push the span (pvLast, A) and make A the new pvLast
 pivPush:ldx sp
         pha
         lda pvLast
@@ -12450,7 +13923,7 @@ ${PROFILE && !PROFILE1 ? '        jsr pfT2              ; cast + interpolate + s
                                 ;   reaches it -- and this must not run during one, or the idol in
                                 ;   your hands changes colour mid-descent. This half of the loop
                                 ;   is the half a fall skips, which is exactly the property wanted.
-` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + (LX_VECS.includes('lxStep') ? '        jsr lxStep              ; LEVEL CODE: the sentries glide and spark (svStep), or the drone follows the angels (drStep)\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame via entDty, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the RETURN restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
+` : '') + '        jsr orbMove             ; once a frame: project every candidate the cell lists\n' + (ENTPROF ? '        jsr pfT9              ; orbMove: the projection\n' : '') + '        jsr orbKey              ; SPACE: take the orb you are looking at, or put the carried one\n                                ;   down. AFTER orbMove, because that is what sets up the frame\n                                ;   trig and fractional-offset terms orbProj reads. Acting a frame\n                                ;   later than the press is invisible; projecting from last\n                                ;   frame pose would not be.\n' + (ENTPROF ? '        jsr pfT10              ; orbKey\n' : '') + '        jsr bfsTick             ; a few cells of the angel distance map; see anPath\n' + (ENTPROF ? '        jsr pfT11              ; bfsTick: the distance fill\n' : '') + (LX_VECS.includes('lxStep') ? '        jsr lxStep              ; LEVEL CODE: the sentries glide and spark (svStep), or the drone follows the angels (drStep)\n' : '') + '        jsr angStep             ; AFTER the projection, so orbSeenT describes THIS frame. Run\n                                ;   before it, the angel decided on last frame visibility and so\n                                ;   took one free step on the very frame you turned to face it --\n                                ;   it moved AS you looked, which reads as a pop. Its own step is\n                                ;   rendered next frame, which nobody can see.\n' : ''}${DIE ? '        jsr dieChk              ; the mark, and the moment they turn far enough to see it\n' : ''}${PROFILE && !PROFILE1 ? '        jsr pfT15              ; entities: orbMove, orbKey, angStep, dieChk\n' : ''}${DIE && process.env.DIENOW ? '        lda iterLo\n        cmp #' + hx(+process.env.DIENOW) + '\n        bne dnDie\n        lda iterHi\n        bne dnDie\n        jsr dieGo               ; DIENOW=n: die on frame n\ndnDie:\n' : ''}${process.env.RESETNOW ? '        lda iterLo\n        cmp #' + hx(+process.env.RESETNOW & 255) + '\n        bne rnSkip\n        lda iterHi\n        cmp #' + hx(+process.env.RESETNOW >> 8) + '\n        bne rnSkip\n        ldx #$ff                ; RESETNOW=n: the death restart, on frame n. Headless runs cannot\n        txs                     ;   press a key, and this is the only way to test that a restart\n        jmp entry               ;   really undoes what a run did to live RAM.\nrnSkip:\n' : ''}${process.env.DROPNOW ? `        lda iterHi
         bne dnSkip
         lda iterLo
         cmp #${hx(+process.env.DROPNOW & 255)}
@@ -12461,11 +13934,9 @@ dnGo:   jsr orbUse              ; DROPNOW=n: a synthetic SPACE on frame n and ag
 dnSkip:                         ;   headless run can TAKE and then PUT DOWN. One press only ever
                                 ;   exercised the pick-up half, which is why the drop path could
                                 ;   carry a 16-wide coordinate mask for as long as it did.
-` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        ldy wsWall              ; WALLNOW: not on a level with no such wall -- its pointer\n        lda wallDHiT,y          ;   is 0 and the toggle would apply a list read from page 0\n        beq wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        jsr pfT4              ; renderSym alone' : ''}${SPRITES && ORBOCC && true ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && true ? '\n        jsr pfT16              ; occStamp: the partial-occlusion pass' : ''}
-${PROFILE && !PROFILE1 ? '' : ''}        jsr hudX                ; the 'H' and 'L' keys, and -- while the HUD is on -- every readout:
-                                ;   raster count, LEVEL line, fps, X/Y/angle. Outside the NOHUD
-                                ;   gate: the keys are controls, not readouts.
-
+` : ''}${WALL_DELTA && process.env.WALLNOW ? '        lda iterLo\n        and #' + hx((+process.env.WALLNOW - 1) & 255) + '\n        bne wnSkip\n        ldy wsWall              ; WALLNOW: not on a level with no such wall -- its pointer\n        lda wallDHiT,y          ;   is 0 and the toggle would apply a list read from page 0\n        beq wnSkip\n        jsr wallTog             ; WALLNOW=n: toggle the wall every n frames, so the collapse\nwnSkip:                         ;   plays over and over -- wallTog takes it away with the sink and\n                                ;   puts it straight back, which is what makes it watchable. Not\n                                ;   frame one: the opening frames render progressively and idT has\n                                ;   no hit cells yet, so the sink would find nothing and burn its\n                                ;   whole clock before the room was ever on screen.\n' : ''}${process.env.NOCACHE === '1' ? '        jsr fallInv             ; NOCACHE=1: poison both run caches every frame, so renderSym\n                                ;   redraws all 40 columns in full. Slow, but it settles "is this\n                                ;   glyph stale?" in one run -- if an artefact survives this, the\n                                ;   caches are innocent and the renderer really did choose it.\n' : ''}${LX_VECS.includes('lxDot') ? '        jsr lxDot               ; LEVEL CODE: brStr, new faces marked and a broken wall taken out (before the sink takes idT)\n' : ''}${WALL_DELTA ? '        jsr wallSink            ; a vanishing wall, mid-collapse\n' : ''}${NOFILL ? '' : '        jsr renderSym\n        lda #$13                ; DEN on: there is a rendered frame to show now\n        sta pd11'}${PROFILE && !PROFILE1 ? '\n        jsr pfT4              ; renderSym alone' : ''}${SPRITES && ORBOCC && true ? '\n        jsr occStamp            ; AFTER renderSym: it overwrites cells renderSym just drew' : ''}${PROFILE && !PROFILE1 && SPRITES && ORBOCC && true ? '\n        jsr pfT16              ; occStamp: the partial-occlusion pass' : ''}
+${HUD ? `        jsr hudX                ; HUD=1: every readout -- raster count, LEVEL line, fps, X/Y/angle
+` : ''}
 ${PROFILE && !PROFILE1 ? '        jsr pfT5              ; fps counter + readout\n' : ''}${PROFILE ? `        lda pfDone              ; 256 frames, so the average is just the top two bytes
         bne pfRdy
 ${PROFWIN.length ? `        lda pwOn                ; PROFWIN: the anchor is the FIRST main-loop frame's tick
@@ -12554,14 +14025,14 @@ pfGo:   ` : '')}${PROFWIN.length ? '' : (`${PROFAT ? '' : '        '}inc pfN
 pfRdy:  jsr pfShow              ; every frame from now on -- the two screen buffers alternate,
 pfNd:                           ; so a one-shot draw is only in one of them
 ` : ''}${DUMPH ? '        jsr dumpH      ; AFTER the readout: drawDbg writes rows 0-2 at cols 36-39' : ''}
-${process.env.OCCFBN ? '        inc oSDbg+2             ; OCCFBN: the REFERENCE. renderCnt is bumped once per\n                                ;   render pass by code that predates me -- if my counter does\n                                ;   not track it, my counter is wrong, not the engine.\n' : ''}        inc renderCnt
+${process.env.OCCFBN ? '        inc oSDbg+2             ; OCCFBN: the REFERENCE. renderCnt is bumped once per\n                                ;   render pass by code that predates me -- if my counter does\n                                ;   not track it, my counter is wrong, not the engine.\n' : ''}${HUD ? `        inc renderCnt
         lda renderCnt
         cmp #16
         bcc noFps
         jsr computeFps
         lda #$00
         sta renderCnt
-noFps:  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falling through to the
+noFps:` : '      '}  jmp mvs                 ; the ordinary path takes the SINGLE wait. Falling through to the
                                 ; fall's wait gave every rendered frame an extra raster period --
                                 ; 17,045 cycles on a frame that already costs three or four of
                                 ; them, ~a fifth of the frame rate, on the one path that was
@@ -12593,7 +14064,7 @@ mvsW:   lda $d012
         lda pSplit2
         sta irqCm2+1
         sta irqAr2+1
-${HAS_IDOL ? '        jsr sprArm              ; ...and whether the held object gets its own inks\n' : ''}        lda colT                ; BOTH HALVES OF THE GROUND, PUBLISHED TOGETHER -- see colT
+        lda colT                ; BOTH HALVES OF THE GROUND, PUBLISHED TOGETHER -- see colT
         sta irqB0+1
 ${DIE ? `        lda dieSt               ; ...and the death's sprite palette with them, so the flash,
         sta dieLat              ;   the shared inks and the per-sprite inks are ONE frame
@@ -13224,7 +14695,16 @@ ${PARTIAL ? `        bcs rfNext              ; rs GREW: the solid run starts lat
                                 ; and the edge loop (rb..rs-1) has just redrawn every one of
                                 ; them. Rows rs..12 are a suffix of what the buffer holds.
 ` : ''}        jmp rfSlDr
-${SEAMS && true ? `rfSlSm:${SEAMCNT ? ` inc sdColN
+${SEAMS && true ? `rfSlSm:${BRK_MARK || HAS_CURTAIN ? `${BRK_MARK && HAS_CURTAIN ? ` cmp #${hx(BRK_MK)}
+        beq rfSlMk
+       ` : ''} cmp #${hx(BRK_MARK ? (HAS_CURTAIN ? CURT_MK : BRK_MK) : CURT_MK)}               ; a NEW FACE's marked fill (or the CURTAIN's): drawn by the plain chain and
+        bne rfSlS2              ;   CACHED like it, keyed rs + $40 (rs is 0..13) so the key says
+rfSlMk:
+        lda rsv                 ;   which fill too. Unlike a seam's, this key is coarse -- a face's
+        ora #$40                ;   fill changes only where a face boundary moves -- so it hits.
+        bne rfCb1               ;   (always: A >= $40.) PARTIAL's "rs grew" holds mark to mark; plain to mark it
+                                ;   would not, so brStr turns a plain entry under a mark to $ff
+rfSlS2:` : ''}${SEAMCNT ? ` inc sdColN
         bne rfSlSc
         inc sdColN+1
 rfSlSc:${EDGCHK ? ' lda #$0d\n        sta chOld\n       ' : ''}` : `${EDGCHK ? ' lda #$0d\n        sta chOld               ; a seam column genuinely redraws in full: no waste to report\n       ' : ''}`} lda #$ff              ; $ff is a value rs cannot take, so next frame's compare fails
@@ -13911,10 +15391,27 @@ rkNotD: lda $dc01
         and #$20
         bne rkNotF
         jsr strafeR
-rkNotF: lda joyv
+rkNotF: lda #$df                ; ---- ',' and '.': the '<' and '>' keys turn, for a keyboard alone ----
+        sta $dc00               ; (the user, 2026-11-12). Column 5: ',' is bit 7, '.' bit 4 -- bit 4
+        lda $dc01               ;   is also the stick's FIRE, and joyEor forces whatever the stick
+        ora joyEor              ;   holds back high, so '>' cannot be read while fire is down.
+        sta rowv                ;   E and S are done with rowv by now
+${LVSKIP && FALL ? `        jsr lvKey               ; LVSKIP: 'L' is bit 2 of this column, the stick already masked
+` : ''}        lda joyv
         and #$04
-        bne rkJR                ; joystick-1 left = turn left
-        ldx dtt
+        beq rkSL                ; joystick-1 left
+        lda rowv
+        bmi rkJR                ; nor ','
+        bpl rkTL                ; always: ',' turns left
+rkSL:
+${FIRE_STRAFE ? `        lda joyv
+        and #$10
+        bne rkTL                ; FIRE up: the stick turns
+        lda #$01                ; FIRE down: it strafes, and this press no longer picks up or
+        sta okStr               ;   puts down when it is let go (see orbKey)
+        jsr strafeL
+        jmp rkJR
+` : ''}rkTL:   ldx dtt
         ldy pa
         lda paF
 rkTlL:  sec
@@ -13927,8 +15424,19 @@ rkTlL2: dex
         sty pa
 rkJR:   lda joyv
         and #$08
-        bne rkJD                ; joystick-1 right = turn right
-        ldx dtt
+        beq rkSR                ; joystick-1 right
+        lda rowv
+        and #$10
+        bne rkJD                ; nor '.'
+        beq rkTR                ; always: '.' turns right
+rkSR:
+${FIRE_STRAFE ? `        lda joyv
+        and #$10
+        bne rkTR                ; FIRE up: the stick turns
+        lda #$01
+        sta okStr
+        jmp strafeR             ; FIRE down: it strafes
+` : ''}rkTR:   ldx dtt
         ldy pa
         lda paF
 rkTlR:  clc
@@ -14200,7 +15708,7 @@ ${ADDX('cx0')}
         lda cx0                ; ...and only if your box is not on that cell already
         ldy cy0
         jsr mvMine
-        bcs mvBlk
+        bcs ${DIE ? "mvEnt" : "mvBlk"}
 mvOw0:
         lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
 ${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to spot
@@ -14212,7 +15720,7 @@ ${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to
         lda cx1                ; ...and only if your box is not on that cell already
         ldy cy0
         jsr mvMine
-        bcs mvBlk
+        bcs ${DIE ? "mvEnt" : "mvBlk"}
 mvOw1:
         lda cy1
 ${MULW}
@@ -14226,7 +15734,7 @@ ${ADDX('cx0')}
         lda cx0                ; ...and only if your box is not on that cell already
         ldy cy1
         jsr mvMine
-        bcs mvBlk
+        bcs ${DIE ? "mvEnt" : "mvBlk"}
 mvOw2:
         lda tmp                 ; the row offset again -- ADDX, not ora: this reuses a stored
 ${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to spot
@@ -14238,11 +15746,16 @@ ${ADDX('cx1')}                  ;   y*MAPW so there is no MULW in front of it to
         lda cx1                ; ...and only if your box is not on that cell already
         ldy cy1
         jsr mvMine
-        bcs mvBlk
+        bcs ${DIE ? "mvEnt" : "mvBlk"}
 mvOw3:
         clc                     ; all four corners open
         rts
-mvBlk:  sec
+${DIE ? `mvEnt:  lda marked              ; refused by an ENTITY (X = its cell): is it the angel that has
+        beq mvBlk               ;   you? Then you walked into it -- backing, strafing, it does not
+        cpx markC               ;   matter which, or whether you could see it: it has you, and
+        bne mvBlk               ;   dcTurn starts the scene. A = marked, never 0 here.
+        sta mvBmp
+` : ''}mvBlk:  sec
         rts
 ; mvMine: is cell (A = column, Y = row) under the player's CURRENT box? Carry CLEAR = yes.
 ; Only reached when a corner hits an entity, so its cost lands on the rare blocked move, not on
@@ -14406,17 +15919,18 @@ ${SEAMCUT ? '        jsr ssCutS              ; the column where this wall gets t
 ${SEAMGAP ? `        ; ---- SEAMGAP: where this face's wall and its open front lie, for sgFace ----
         ldx spanL
         ldy faceIdT,x           ; the run: its plane and its face
-        lda runPlaneT,y
+        lda runPFT,y
+        and #$1f
         sta sgW
         sta sgF
-        lda runFaceT,y
+        lda runPFT,y
         sta sgO
         bmi sgES
         dec sgF                 ; W/N: the wall is the plane, open cells at plane-1
         jmp sgAx
 sgES:   dec sgW                 ; E/S: open cells are the plane, the wall at plane-1
-sgAx:   lsr                     ; bit 0: an N/S face runs along x, so the across coordinate is a
-        bcc sgVt                ;   ROW -- make both rowMulT bases once, here
+sgAx:   and #$40                ; bit 6: an N/S face runs along x, so the across coordinate is a
+        beq sgVt                ;   ROW -- make both rowMulT bases once, here
         ldx sgW
         lda rowMulT,x
         sta sgW
@@ -14473,9 +15987,8 @@ ${SEAMGAP ? `
 ; Carry set = yes: a wall cell (mapT 0) whose front cell is open. Clobbers X and Y. ssLp's k is
 ; interior to the run, so k-2 >= 0 and k+1 is inside the map (its border is solid, never a face).
 sgFace: tax
-        lda sgO
-        lsr
-        bcs sgHz
+        bit sgO                 ; V = bit 6: an N/S face
+        bvs sgHz
         lda rowMulT,x           ; a W/E face runs along y: cell = rowMulT[j] + x
         tax
         clc
@@ -14526,45 +16039,18 @@ sgNo:   clc
 ; u for one marched column (X): where along the wall the ray landed, 8.8 cells.
 ; A y-face is a wall of constant y, so the coordinate that varies along it is x, and vice
 ; versa. u = p + d*dir, one sideMul: sideMul(fr, m) returns fr/256 * m, so feeding it |cos|
-; (or |sin|) as 0..255 against the parked hit distance gives exactly d*|dir|. The sign comes
-; from the same posXT/posYT the DDA used to choose its step. sideMul eats X, hence ssAng.
-; fr += (A - fr) * cuQF / 4, A being the next table entry. |sin| and |cos| move by at most ~6
-; between adjacent 8-bit entries, so two bits of interpolation brings the error under 2 -- which
-; is what the fine angle is worth. The slope is SIGNED, hence cmp #$80 / ror for the shifts.
-cuLerp: sec
-        sbc fr
-        cpy #$02
-        beq cuL2
-        bcs cuL3
-        cmp #$80                ; a quarter of the way: slope/4
-        ror
-        cmp #$80
-        ror
-        jmp cuLA
-cuL2:   cmp #$80                ; halfway: slope/2
-        ror
-        jmp cuLA
-cuL3:   cmp #$80                ; three quarters: slope/2 + slope/4
-        ror
-        sta cuQT
-        cmp #$80
-        ror
-        clc
-        adc cuQT
-cuLA:   clc
-        adc fr
-        sta fr
-        rts
-
+; (or |sin|) as 0..255 against the parked hit distance gives exactly d*|dir|.
+; Both come from qcosT, |cos| over one quarter circle at the ray's own fine angle, and so does
+; the sign: no table at all. (Until 2026-11-02 it was |sin|/|cos| on the BYTE angle, lerped with
+; the fine angle's two spare bits, and two sign tables -- 640 bytes, the slower way round to a less
+; exact answer, and the sign was wrong in the first quarter-unit past each axis.)
 calcU:  lda remLoT,x
         sta mlo
         lda remHiT,x
         sta mhi
         ; ---- the angle the ray was actually CAST at, to quarter resolution ----
-        ; The DDA has used the fine angle since FINEANG; this was still adding the 8-bit rayOffT,
-        ; so u described a direction the ray never took -- up to half a coarse unit, about 1.5
-        ; columns, and THREE columns share one coarse entry. Same inputs as the caster: paq is
-        ; formed once a frame, rayOffQS holds the per-column quarter offsets.
+        ; Same inputs as the caster: paq is formed once a frame, rayOffQS holds the per-column
+        ; quarter offsets. The quadrant is the high byte's bits 0-1, the angle within it the low byte.
         lda rayOffQS,x
         bmi cuAN
         clc
@@ -14578,115 +16064,110 @@ cuAN:   clc
         sta cuQL
         lda paqH
         adc #$ff                ; sign-extended: -1 in the high byte
-cuAH:   and #$03
-        asl
-        asl
-        asl
-        asl
-        asl
-        asl                     ; the quarter's two bits become the angle's top two
-        sta ssAng
-        lda cuQL
-        and #$03
-        sta cuQF                ; which quarter WITHIN the coarse entry, 0..3
-        lda cuQL
-        lsr
-        lsr
-        ora ssAng
-        sta ssAng
-
+cuAH:   sta cuQH                ; only bits 0-1 are read from here on
+        ldy #py-px              ; side 0, a face across x: u runs along y -- |sin|, from py
         lda sideT,x
-        bne cuX
-        ldx ssAng
-        lda absSinT,x
-        sta fr
-        ldy cuQF
-        beq cuS0
-        inx                     ; the next entry: X wraps at 255 and the table is periodic
-        lda absSinT,x
-        jsr cuLerp
-cuS0:
+        beq cuSin
+        ldy #$00                ; side 1: along x -- |cos|, from px, and
+        inc cuQH                ;   |cos q| = |sin(q + a quarter turn)|, sign and all
+cuSin:  sty cuP
+        lda cuQH
+        lsr                     ; C = an odd quadrant: |sin| climbs the quarter circle there,
+        lda cuQL                ;   qcosT[r], and comes down it in an even one, qcosT[256 - r]
+        bcs cuUp
+        eor #$ff
+        adc #$01                ; (C clear) 256 - r ...
+        beq cuZ                 ; ...but r = 0 is a whole quadrant, where the sine is exactly 0
+cuUp:   tax
+        lda qcosT,x
+cuZ:    sta fr
         jsr sideMul
-        ldx ssAng
-        lda posYT,x
-        bne cuYp
-        sec
-        lda py
-        sbc s1
-        sta uwL
-        lda py+1
-        sbc s2
-        sta uwH
-        rts
-cuYp:   clc
-        lda py
+        ldx cuP
+        lda cuQH
+        and #$02                ; quadrants 0 and 1: the sine is positive
+        bne cuNeg
+        clc
+        lda px,x
         adc s1
         sta uwL
-        lda py+1
+        lda px+1,x
         adc s2
         sta uwH
         rts
-cuX:    ldx ssAng
-        lda absCosT,x
-        sta fr
-        ldy cuQF
-        beq cuC0
-        inx
-        lda absCosT,x
-        jsr cuLerp
-cuC0:
-        jsr sideMul
-        ldx ssAng
-        lda posXT,x
-        bne cuXp
-        sec
-        lda px
+cuNeg:  sec
+        lda px,x
         sbc s1
         sta uwL
-        lda px+1
+        lda px+1,x
         sbc s2
-        sta uwH
-        rts
-cuXp:   clc
-        lda px
-        adc s1
-        sta uwL
-        lda px+1
-        adc s2
         sta uwH
         rts
 
 
-` : ''}${HAZRT ? `; ============ per-cell run splits: make subLp's merge test correct, by cell ============
+` : ''}${HZ_ANY ? `
+;@@LX-BEGIN haz
+; ============ per-cell run splits: make subLp's merge test correct, by cell (LEVEL CODE: haz) ============
 ; subLp merges a span on faceIdT alone and never looks between the ends, so a wall hidden inside
 ; one is not drawn at all. From most cells every run is visible in ONE piece and that merge is
 ; exact; from a few, an occluder breaks a run in two and it is wrong. Those cells -- and only
 ; those -- get the far run's second half renamed to a spare id, so the EXISTING test splits the
 ; span. No width cap, no forced probes, no per-ray cost: cells that can merge safely still do.
 ;
-; Restore-everything-then-apply, rather than reverting the last cell's patches. It costs a few
-; more stores on a cell change and removes the entire class of bug where a stale patch outlives
-; the cell that set it -- there is no "currently applied" state to get wrong.
-hazSet: lda #<hazRstT    ; hzRd is self-modified rather than indirect: (zp),y needs a ZERO
-        sta hzRd+1      ;   PAGE pointer, and there is none spare -- pointing it at $805f
-        lda #>hazRstT   ;   assembled as ($5f),y and scattered writes across memory.
+; Restore-everything-then-apply, rather than reverting the last cell's patches: a few more
+; stores, and no record of WHICH patches are in to get wrong. Only when the cell changes (~450
+; cycles on level 4 otherwise, every frame): hazCur is the cell they were applied for, and mkRuns,
+; the only other writer of the run tables, resets it. (Until 2026-11-02 hazCur was read and never
+; written, and the boot set it to $ff, so this ran every frame by accident.) A level that splits
+; nothing leaves on the first branch.
+hazSet: ldx hazNT               ; how many cells THIS level splits, less one; $ff = none
+        bmi hzNo
+        lda cell0
+        cmp hazCur
+        beq hzNo                ; applied for this cell already, and the tables not rebuilt since
+        sta hazCur
+        lda #<hazLstT           ; hzRd is self-modified rather than indirect: (zp),y needs a ZERO
+        sta hzRd+1              ;   PAGE pointer, and there is none spare. hzRunW repoints it at
+        lda #>hazLstT           ;   a wall's delta, so it is set here every time.
         sta hzRd+2
-        jsr hzRun               ; every splittable run back to its merged id
-        ldx hazNT               ; how many cells THIS level splits, less one. $ff = none, and it
-        bmi hzNo                ;   must branch out: x=$ff would read 255 bytes past hazCT.
-                                ;   (hzRt is in the HAZ_BASE block, far out of branch range.)
+        ldx #$00                ; the restore list, at the start of hazLstT: every split run
+        jsr hzRun               ;   back to its merged id
+        ldx hazNT
 hzF:    lda hazCT,x             ; does THIS cell split anything?
         cmp cell0
         beq hzG
         dex
         bpl hzF
 hzNo:   rts
-hzG:    lda hazLoT,x            ; X must survive to here: hzRun clobbers it, and has not run yet
-        sta hzRd+1
-        lda hazHiT,x
-        sta hzRd+2
+hzG:    lda hazOfT,x            ; where its list starts
+        tax
         jmp hzRun
+hazNT:  !byte ${hx(HZ_LV.n[0])}
+hazCT:  !byte ${HZ_LV.ct.join(',')}
+hazOfT: !byte ${HZ_LV.of.join(',')}
+hazLstT: !byte ${HZ_LV.lst.join(',')}
+; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
+; mkRuns's tail (lxBur, LEVEL CODE: haz). A spare id never appears in mapT's faces, so the two passes
+; cannot give it a plane; hazSpT says which run it was split from. Until this existed the
+; spare slots held whatever the PREVIOUS level's mkRuns had written there (2026-09-17).
+hazSpFix:
+        lda #$ff                ; the run tables are rebuilt: no cell's patches are in them
+        sta hazCur
+        ldx #$00
+hsfLp:  lda hazSpT,x            ; parent id, or $ff at the end
+        cmp #$ff
+        beq hsfDn
+        tay
+        lda runPFT,y
+        inx
+        ldy hazSpT,x            ; the spare id
+        sta runPFT,y
+        inx
+        bne hsfLp               ; always: the table is far shorter than a page
+hsfDn:  rts
+hazSpT: !byte ${HZ_LV.sp.join(',')}   ; (parent, spare) pairs; $ff ends
+hazCur: !byte $ff               ; the cell the run-table patches were applied for; $ff = none (mkRuns)
 
+;@@LX-END
 ` : ''}; ================= march one column: cast + store colH/idT =================
 marchCol:
 ${RAYCNT ? '        inc rayN\n' : ''}${PIVLAB ? '        inc plRay\n        bne plMc1\n        inc plRay+1\nplMc1:\n' : ''}        jsr castRay
@@ -14880,8 +16361,7 @@ isDn:   rts
 ; ================= cast one ray (16-bit DDA) =================
 castRay:
         ldx col
-        ; The coarse angle is gone: the step signs now come from the fine angle's quarter, and
-        ; posXT/posYT/absSinT/absCosT are only read by calcU, which builds its own ssAng.
+        ; The coarse angle is gone: the step signs now come from the fine angle's quarter.
         ; ---- 10-bit ray angle for the DDA deltas ----
         ; Dispatch on the quarter rather than patching four operands: rqH is 0..3, so four load
         ; blocks with the page folded into the absolute address cost ~8 cycles, against ~40 to
@@ -15275,9 +16755,12 @@ irqCmp: cmp #${hx(SPLITLINE)}   ; operands PATCHED, not variable reads: "cmp abs
         bcc irqTop              ;   more than "cmp #" and that was once enough to push the
 irqCm2: cmp #246                ;   sta $d018 past the VIC's fetch point for the line.
         bcs irqA2
-${HAS_IDOL ? `irqSpC: cmp #$ff                ; the HELD object's split, $ff while it is switched off
-        bcs irqSp` : ''}
-        lda d018vm              ; --- horizon..arc: the mirrored half ---
+${HAS_IDOL ? `        nop                     ; 4 CYCLES OF TIMING, not code: the held object's split compare
+        nop                     ;   ("cmp #$ff / bcs", never taken) sat here until 2026-11-12, and
+                                ;   the horizon's store is timed with it. Without them the switch
+                                ;   lands 32 px further left and the right end of the horizon row
+                                ;   flickers with the other charset and ground (the user, level 10)
+` : ''}        lda d018vm              ; --- horizon..arc: the mirrored half ---
 irqC1:  ora #${hx(CB_B)}
         sta $d018
 irqB1:  lda #${hx(palOf(LVL).ceil)}      ; on an OVERLAP frame this line sits between the two
@@ -15289,9 +16772,8 @@ irqB1:  lda #${hx(palOf(LVL).ceil)}      ; on an OVERLAP frame this line sits be
 irqAr2: lda #246                ; next stop: the top of the arc
         sta $d012
         jmp irqd
-${HAS_IDOL ? `irqSp:  jmp sprSpl              ; out of the main block; rejoins at irqd
-` : ''}${HAS_IDOL ? `        ; region 3 -- below the split, before the next frame's sprites -- is where the
-        ; WORLD's inks come back. It used to be done from osFlush, which runs once per RENDERED
+${HAS_IDOL ? `        ; region 3 -- before the next frame's sprites -- is where the shared sprite inks are
+        ; set (sprPal: the level's, or the idol's tint). It used to be done from osFlush, which runs once per RENDERED
         ; frame: at 20fps that is one restore every three raster frames, so for two frames in
         ; three the whole screen kept the HELD palette. That was the 60Hz flicker.
 ` : ''}irqA2:${CEILVARY ? `
@@ -15338,9 +16820,9 @@ ${MUSIC ? `        lda musOn               ; MUSIC: the player, 60 times a secon
         beq irqNm
 irqPl:  jsr $ff03                ; the player's play: high byte PATCHED by musGo (musAtT)
 irqNm:  lda dsGl                ; the death's glide, kick or closing filter, 60 times a second (dsTick)
+        ora dsHr
         ora dsKk
         ora dsCf
-        ora dsAu
         beq irqNd
         jsr dsTick
 irqNd:
@@ -15366,9 +16848,9 @@ ${MUSIC ? `; ---- musGo / musOff: the level's song (see MUSIC) ----
 ; musOn gates the IRQ's call, so the player is never entered while init is rewriting its state.
 musGo:  lda #$00                ; a death restart: the death's sound stops before the song starts over
         sta dsGl
+        sta dsHr
         sta dsKk
         sta dsCf
-        sta dsAu
         lda musOn
         bne mgD
         ldx lvlMeT
@@ -15407,9 +16889,36 @@ dsGo:   lda #$00
         sta musOn               ; FIRST: the IRQ stops playing the song before its voices are cut
         sta dsKk
         sta dsCf
-        sta $d404               ; every voice cut dead: a drop-out, not a fade
-        sta $d40b
-        sta $d412
+        sta dsGl
+        sta $d415               ; the cutoff's low bits: nothing else of the level's filter is left
+        ; ---- HARD RESTART (2026-11-04, the user: "consider leftover filter settings, pulse width
+        ; settings ... and envelope settings") ----
+        ; Only one of the three voices was sounding, sporadically. The drone holds voices 1 and 2
+        ; gated at full sustain, and gating them off and on again a few dozen cycles later, with the
+        ; envelope's rate counter wherever it happened to be, is the SID's ADSR bug -- the reason
+        ; every tracker hard-restarts. So: gate off with the TEST bit (it also zeroes the three
+        ; oscillators, so they start in step), AD/SR $0000, and the gate goes on FOUR ticks later in
+        ; dsTick (dsHr), once the envelopes have settled at zero.
+        ; Why four (measured 2026-11-04 from snapshots of the user's own deaths): at two, voices 1 and
+        ; 2 were still at the drone's $ff when the gate went on in four deaths out of five -- the
+        ; new release rate waits on the rate counter's wrap, up to 32768 cycles (32 ms), and two
+        ; ticks is 33. Gated at $ff, the attack's first step wraps the counter to 0 and the envelope
+        ; FREEZES there (resid's hold_zero; the real chip does the same): silent for the whole glide,
+        ; leaving voice 3 alone, G2 -> D2. Four ticks (67 ms) covers the 32 ms wait plus the ~6 ms a
+        ; rate-0 release takes from $ff.
+        ldy #14
+dgH:    lda #$08                ; test bit, gate off
+        sta $d404,y
+        lda #$00
+        sta $d405,y
+        sta $d406,y
+        tya
+        sec
+        sbc #7
+        tay
+        bcs dgH
+        lda #$04
+        sta dsHr
         lda #${hx(DSG_RES << 4 | 7)}            ; all three voices into the low-pass, resonance ${DSG_RES}
         sta $d417
         lda #$1f                ; low-pass, volume 15 (a silent level may never have set it;
@@ -15419,23 +16928,18 @@ dsGo:   lda #$00
         sta $d416
         lda #$00
         sta dsQ
-        ldx #8
-dgF:    lda dsF0,x              ; the three voices' starts (24-bit: fraction, low, high)
-        sta dsF,x
+        ldx #11
+dgF:    lda dsF0,x              ; the three voices' starts (32-bit, 16 of fraction); they hold
+        sta dsF,x               ;   here until dsPlan sets them moving
         dex
         bpl dgF
         ldx #0                  ; X: dsF, Y: the voice's SID registers
         ldy #0
-dgV:    lda dsF+1,x
+dgV:    lda dsF+2,x
         sta $d400,y
-        lda dsF+2,x
+        lda dsF+3,x
         sta $d401,y
-        lda #${hx(DSG_AD)}
-        sta $d405,y
-        lda #${hx(DSG_SR)}
-        sta $d406,y
-        lda #${hx(DSG_W | 1)}
-        sta $d404,y             ; gated
+        inx
         inx
         inx
         inx
@@ -15445,8 +16949,20 @@ dgV:    lda dsF+1,x
         tay
         cpy #21
         bcc dgV
+        rts
+; ---- dsPlan: dieGo, once it knows the turn's duration -- the glide over the same dieArr 60ths ----
+dsPlan: ldy dieQ                ; 0/24/48: the row of dsPlT
+        ldx #0
+dpL:    lda dsPlT,y             ; the speeds, then the pulls, into dsV/dsA (adjacent)
+        sta dsV,x
+        iny
+        inx
+        cpx #24
+        bcc dpL
+        lda dieArr
+        sta dsK
         lda #$01
-        sta dsGl
+        sta dsGl                ; and the IRQ starts it
         rts
 ; ---- dsBoom: a picture lands (picOn) -- two noises and a kick, overdriving a closing resonant low-pass ----
 dsBoom: lda #$00
@@ -15497,43 +17013,58 @@ dsBoom: lda #$00
         sta dsKk
         rts
 ; ---- dsTick (IRQ) ----
-; The glide: each voice f += (target - f) >> ${DSG_SH}, in 24 bits. The shift is ARITHMETIC (the sign
-; copied in), since a voice falls: the gap is negative. The kick falls linearly; the cutoff closes by 1.
-dsTick: lda dsGl
+; The glide: each voice f += v, v += a (dsPlan), for DIE_ARR 60ths, then it holds on the chord. The
+; kick falls linearly; the cutoff closes by 1.
+dsTick: lda dsHr                ; ---- the hard restart: two ticks at zero, then the gate ----
+        beq dtGo
+        dec dsHr
+        bne dtHw
+        ldy #14
+dtHg:   lda #${hx(DSG_AD)}
+        sta $d405,y
+        lda #${hx(DSG_SR)}
+        sta $d406,y
+        lda #${hx(DSG_W | 1)}
+        sta $d404,y             ; gated, and the test bit off: the oscillators run from zero together
+        tya
+        sec
+        sbc #7
+        tay
+        bcs dtHg
+dtHw:   rts                     ; the glide moves from the next tick (dsK counts only moving ticks)
+dtGo:   lda dsGl
         beq dtKk
-        ldx #0                  ; X: the voice's 3 bytes in dsF/dsTg
+        ldx #0                  ; X: the voice's 4 bytes in dsF/dsV/dsA
         ldy #0                  ; Y: its SID registers
-dtV:    sec
-        lda dsTg,x
-        sbc dsF,x
-        sta dsT
-        lda dsTg+1,x
-        sbc dsF+1,x
-        sta dsT+1
-        lda dsTg+2,x
-        sbc dsF+2,x
-        sta dsT+2
-        lda #${DSG_SH}
-        sta dsN
-dtSh:   lda dsT+2
-        cmp #$80                ; C = the sign, shifted back in
-        ror dsT+2
-        ror dsT+1
-        ror dsT
-        dec dsN
-        bne dtSh
-        clc
+dtV:    clc
         lda dsF,x
-        adc dsT
+        adc dsV,x
         sta dsF,x
         lda dsF+1,x
-        adc dsT+1
+        adc dsV+1,x
         sta dsF+1,x
-        sta $d400,y
         lda dsF+2,x
-        adc dsT+2
+        adc dsV+2,x
         sta dsF+2,x
+        sta $d400,y
+        lda dsF+3,x
+        adc dsV+3,x
+        sta dsF+3,x
         sta $d401,y
+        clc
+        lda dsV,x
+        adc dsA,x
+        sta dsV,x
+        lda dsV+1,x
+        adc dsA+1,x
+        sta dsV+1,x
+        lda dsV+2,x
+        adc dsA+2,x
+        sta dsV+2,x
+        lda dsV+3,x
+        adc dsA+3,x
+        sta dsV+3,x
+        inx
         inx
         inx
         inx
@@ -15542,8 +17073,12 @@ dtSh:   lda dsT+2
         adc #7
         tay
         cpy #21
-        bcs dtOp
-        jmp dtV
+        bcc dtV
+        dec dsK
+        bne dtOp
+        lda #$00                ; arrived: the chord holds where it is, the cutoff stops with it
+        sta dsGl
+        beq dtKk
 dtOp:   inc dsQ                 ; the cutoff opens a step every 4 60ths, to DSGC1
         lda dsQ
         and #$03
@@ -15575,25 +17110,20 @@ dtCf:   lda dsCf
         bne dtDn
         lda #$00                ; closed: the noises decay on under it
         sta dsCf
-dtDn:   lda dsAu                ; T's countdown to the boom
-        beq dtDx
-        dec dsAu
-        bne dtDx
-        jmp dsBoom
-dtDx:   rts
-dsF0:   !byte ${DSG_FROM.map(h => `0,<${hx16(sidFn(h))},>${hx16(sidFn(h))}`).join(',')}   ; the cluster
-dsTg:   !byte ${DSG_TO.map(h => `0,<${hx16(sidFn(h))},>${hx16(sidFn(h))}`).join(',')}   ; the chord
-dsF:    !byte 0,0,0,0,0,0,0,0,0 ; voices 1-3 now
+dtDn:   rts
+dsF0:   !byte ${dsPlans[0].map(v => le32(v.f0)).join(',')}   ; the cluster
+dsPlT:  !byte ${dsPlans.map(pl => [...pl.map(v => le32(v.v0)), ...pl.map(v => le32(v.a))].join(',')).join(',')}   ; per duration: speeds, then pulls
+dsF:    !byte 0,0,0,0,0,0,0,0,0,0,0,0 ; voices 1-3 now
+dsV:    !byte 0,0,0,0,0,0,0,0,0,0,0,0 ; ...their speeds
+dsA:    !byte 0,0,0,0,0,0,0,0,0,0,0,0 ; ...and the pull on them: speed reaches 0 at the chord (after dsV: dsPlan fills both)
+dsK:    !byte 0                 ; 60ths of glide left
 dsQ:    !byte 0                 ; 60ths of glide, for the cutoff's pace
-dsAu:   !byte 0                 ; T: 60ths left to the boom
 dsGl:   !byte 0                 ; 1 = the voices are converging
+dsHr:   !byte 0                 ; ticks of hard restart left before the gate (dsGo)
 dsKk:   !byte 0                 ; 60ths of kick left
 dsCf:   !byte 0                 ; 1 = the boom's cutoff is closing
 dsC:    !byte 0
 dsKF:   !byte 0,0               ; the kick's frequency
-dsT:    !byte 0,0,0
-dsN:    !byte 0
-stepLvT:!byte ${[...Array(Math.max(...LEVEL_IDS) + 1)].map((_, i) => STEP_LV.includes(i) ? 1 : 0).join(',')}   ; by level id: 1 = footsteps
 ; ---- sfxPlay: A = an effect id (SFX_ID), played on voice 3 by the live block's effect engine ----
 ; Silent where no block is live. Interrupts off around the call: the effect engine's start writes the
 ; channel's effect pointer, which the IRQ's play would otherwise read half written.
@@ -15609,65 +17139,6 @@ spJ:    jsr $ff06                ; the player's effect entry (patched by musGo)
         plp
         rts
 spLx:   ${LX_VECS.includes('lxSfx') ? 'jmp lxSfx               ; drSfx, or lxNone (rts)' : 'rts'}
-; ---- stepOdo: the footstep odometer, ONCE A FRAME from the main loop ----
-; Every STEP_LEN of distance walked plays a step, the two feet in turn. The distance is the FRAME's
-; displacement, max(|dx|,|dy|) + min/2 (a diagonal within ~10%). It used to run per move from mvGo,
-; and walking while strafing is two moves a frame: two odometers' worth of steps, interfering (the
-; user, 2026-10-16). A frame's step is far under half a cell; anything over 127 is a teleport (a
-; fall, a restart) and is not walked.
-stepOdo:ldx lvlMeT
-        lda stepLvT,x
-        beq soSave
-        lda px
-        sec
-        sbc soPX
-        bpl so1
-        eor #$ff
-        clc
-        adc #$01
-so1:    sta soT                 ; |dx|
-        lda py
-        sec
-        sbc soPY
-        bpl so2
-        eor #$ff
-        clc
-        adc #$01
-so2:    cmp soT                 ; A = |dy|: make A the larger, soT the smaller
-        bcs so3
-        ldx soT
-        sta soT
-        txa
-so3:    lsr soT
-        clc
-        adc soT                 ; max + min/2
-        bmi soSave              ; a teleport, not a step
-        clc
-        adc stepAcc
-        bcs soStep              ; past 255 is past any STEP_LEN
-        cmp #${STEP_LEN}
-        bcc soKeep
-soStep: sec
-        sbc #${STEP_LEN}
-        sta stepAcc
-        lda stepLR              ; the other foot
-        eor #$01
-        sta stepLR
-        clc
-        adc #${SFX_ID.stepL}
-        jsr sfxPlay
-        jmp soSave
-soKeep: sta stepAcc
-soSave: lda px                  ; where this frame left you, for the next one's displacement
-        sta soPX
-        lda py
-        sta soPY
-        rts
-soPX:   !byte 0
-soPY:   !byte 0
-soT:    !byte 0
-stepAcc:!byte 0
-stepLR: !byte 0
 sfxLoT: !byte ${SFX_ORDER.map(k => `<sfxData+${SFX_OFF[k]}`).join(',')}
 sfxHiT: !byte ${SFX_ORDER.map(k => `>sfxData+${SFX_OFF[k]}`).join(',')}
 ; ONE run, so the order holds: the effect engine's priority IS the address -- an effect higher in
@@ -15680,13 +17151,16 @@ sfxData:!byte ${SFX_ORDER.flatMap(k => SFX_BYTES[k]).join(',')}
 drP     = $${MUS_ZP.toString(16)}                      ; the effect's data pointer: the player's temps, free here
 ; drIn (lxInit, from objInit -- boot, a death restart, and every landing): every register from cold,
 ; the two drone voices gated on for good, all three voices through the low-pass, volume once.
-drIn:   ldx #$18
-        lda #$00
+drIn:   ldx #$17                ; $d400-$d417: NOT $d418, whose one write is below (a 0 there was a
+        lda #$00                ;   volume bump on every arrival and restart -- 2026-11-13 audit)
 diClr:  sta $d400,x
         dex
         bpl diClr
         sta drFxA               ; no effect playing
-        sta drFall
+        lda fallSt              ; LANDING here (a fall's objInit, mid-fall): drFall 2, so drTick does
+        beq diNF                ;   not take the fall we are arriving by for a new one and release
+        lda #$02                ;   the drone it just started -- it waits for fallSt 0 instead.
+diNF:   sta drFall              ;   (Only the level select drops INTO level 1: 2026-11-13, silent.)
         lda #<${hx16(DR_V1[15])}
         sta $d400
         lda #>${hx16(DR_V1[15])}
@@ -15719,13 +17193,13 @@ diClr:  sta $d400,x
         rts
 ; drStep (lxStep, once a frame): the nearest angel, Chebyshev, and the voices and cutoff for it.
 ; It runs whether or not you are looking -- the sound is the channel that works when sight does not.
-drStep: lda drFall
+drStep: lda drFall              ; (released, or still landing)
         ora dieSt               ; and not while you die: dsGo owns voices 1 and 2 from then (the
         bne dsD                 ;   glide, the kick); drIn takes them back on the restart
         lda #$0f
         sta drD
         ldx #$00
-dsLp:   stx drI
+drLp:   stx drI
         lda orbTallT,x
         beq dsN                 ; not an angel
         lda orbHidT,x
@@ -15752,9 +17226,9 @@ dsM:    cmp drD
 dsN:    ldx drI
         inx
         cpx nOrbT
-        bcc dsLp
+        bcc drLp
         ldx drD
-        lda marked              ; cornered: the angel is hidden, but it is on top of you
+        lda marked              ; cornered: the angel is on top of you, wherever it shows
         beq dsW
         ldx #$00
 dsW:    lda drV1L,x
@@ -15770,8 +17244,14 @@ dsW:    lda drV1L,x
 dsD:    rts
 ; drTick (lxTick, 60 Hz from the IRQ): the fall's fade, then a frame of the effect, if one is playing
 drTick: lda drFall
-        bne dtFx
+        beq dtArm
+        cmp #$02
+        bne dtFx                ; 1: released, until the next drIn
         lda fallSt
+        bne dtFx                ; 2: still landing
+        sta drFall              ; landed (A = 0): drStep tracks the angels again
+        beq dtFx                ; always
+dtArm:  lda fallSt
         beq dtFx
         lda #$01                ; a fall has begun: the drone RELEASES (a click-free fade; no $d418)
         sta drFall
@@ -15781,112 +17261,15 @@ drTick: lda drFall
         lda #$40
         sta $d404
         sta $d40b
-dtFx:   lda drFxA
-        beq dtD
-        lda drFxL
-        sta drP
-        lda drFxH
-        sta drP+1
-        ldy drFxI
-        bne dtFn
-        lda (drP),y             ; frame 0: AD, SR, the pulse width; the voice under the test bit
-        sta $d413
-        iny
-        lda (drP),y
-        sta $d414
-        iny
-        lda (drP),y
-        sta $d410
-        sta $d411
-        iny
-        sty drFxI
-        lda #$08                ; test bit, gate OFF: no DC thump (the GoatTracker patch's lesson)
-        sta $d412
-dtD:    rts
-dtFn:   lda (drP),y             ; a frame: the note...
-        beq dtEnd
-        jsr drNote
-        iny
-        lda (drP),y             ; ...and a waveform after it, if the next byte is one
-        beq dtK
-        cmp #$82
-        bcs dtK
-        sta $d412
-        iny
-dtK:    sty drFxI
-        rts
-dtEnd:  sta drFxA               ; A = 0: done; whatever release it set runs on
-        rts
-; drNote: A = a GoatTracker note ($80 + semitones from C-0) -> voice 3's frequency, from octave 7's
-; twelve shifted down. Keeps Y.
-drNote: sty drYs
-        sec
-        sbc #$80
-        ldx #$00
-dnL:    cmp #12
-        bcc dnS
-        sbc #12
-        inx
-        bne dnL
-dnS:    tay
-        lda drBL,y
-        sta drFL
-        lda drBH,y
-        sta drFH
-        txa
-        eor #$07                ; 7 - octave shifts
-        tax
-        beq dnW
-dnSh:   lsr drFH
-        ror drFL
-        dex
-        bne dnSh
-dnW:    lda drFL
-        sta $d40e
-        lda drFH
-        sta $d40f
-        ldy drYs
-        rts
-; drSfx (lxSfx, from sfxPlay): A = an effect id. GoatTracker's priority rule: an effect lower in
-; memory never cuts off one higher up.
-drSfx:  tax
-        lda sfxLoT-1,x
-        ldy sfxHiT-1,x
-        php
-        sei
-        ldx drFxA
-        beq dfGo
-        cpy drFxH
-        bcc dfNo
-        bne dfGo
-        cmp drFxL
-        bcc dfNo
-dfGo:   sta drFxL
-        sty drFxH
-        lda #$00
-        sta drFxI
-        lda #$01
-        sta drFxA
-dfNo:   plp
-        rts
-drV1L:  !byte ${DR_V1.map(v => v & 255).join(',')}
+${fxPlayer(n => n)}drV1L:  !byte ${DR_V1.map(v => v & 255).join(',')}
 drV1H:  !byte ${DR_V1.map(v => v >> 8).join(',')}
 drV2L:  !byte ${DR_V2.map(v => v & 255).join(',')}
 drV2H:  !byte ${DR_V2.map(v => v >> 8).join(',')}
 drFcT:  !byte ${DR_FC.join(',')}
-drBL:   !byte ${DR_BASE.map(v => v & 255).join(',')}
-drBH:   !byte ${DR_BASE.map(v => v >> 8).join(',')}
-drFxA:  !byte 0
-drFxL:  !byte 0
-drFxH:  !byte 0
-drFxI:  !byte 0
-drFall: !byte 0
+${fxPlayerData(n => n)}drFall: !byte 0
 drD:    !byte 0
 drI:    !byte 0
 drT:    !byte 0
-drYs:   !byte 0
-drFL:   !byte 0
-drFH:   !byte 0
 ;@@LX-END
 ` : ''}; ---- nmi: swallow RESTORE ----
 ; The only NMI source here is the RESTORE key. With the KERNAL banked out there is no handler
@@ -15961,60 +17344,9 @@ ${SPRITES ? `
 ; that project are the NEAREST eight and assigning them to sprites in order also gets the
 ; overlap priority right -- sprite 0 draws over sprite 1.
 orbMove:
-        ; ---- nothing moved? then nothing projects differently ----
-        ; Six orbs on screen is about 18,700 cycles, and standing still it is 18,700 cycles
-        ; spent arriving at last frame's answer. The sprite registers already hold it. All that
-        ; has to be repeated is the repointing of far cells to SOLID's twin, because renderSym
-        ; rewrites the screen every frame and puts plain SOLID back.
-        jmp obMoved             ; DEADCODE-OK: the still-frame short-circuit is off until the
-                                ; occlusion stamping lands -- see the comment above it.
-${DIE ? `        lda dieSt               ; the cut scene owns the sprites from the swap onward. Clearing
-        cmp #$02                ;   omEn inside the swap did not hold: the swap runs from mfIn and
-        bcs omDead              ;   the REST of that same frame still calls orbMove, which put the
-` : ''}        lda entDty              ; an entity moved even though the player did not. Without this
-        bne obMoved             ;   a dropped orb stayed unrendered, and an angel that stepped
-                                ;   while you stood still never appeared where it went
-        lda px
-        cmp opx
-        bne obMoved
-        lda px+1
-        cmp opx+1
-        bne obMoved
-        lda py
-        cmp opy
-        bne obMoved
-        lda py+1
-        cmp opy+1
-        bne obMoved
-        lda paqL                ; the QUARTER-unit angle: comparing pa alone made a sub-unit turn
-        cmp opaqL               ;   look like a still frame, so sprites were not reprojected at
-        bne obMoved             ;   all until pa ticked over -- three columns at a time
-        lda paqH
-        cmp opaqH
-        bne obMoved
-        rts                     ; a still frame. The slot data from the last one still stands
-                                ; and orbPaint runs unconditionally, so the walls come out
-                                ; painted the same way without reprojecting anything.
-${DIE ? `omDead: rts
-` : ''}obMoved:${HAS_SILVER ? `lda #$00                ; SILVER: no slots until this pass draws the orb again
+${HAS_SILVER ? `        lda #$00                ; SILVER: no slots until this pass draws the orb again
         sta svCnt
-        ` : ''}lda #$00
-        sta entDty
-        lda px
-        sta opx
-        lda px+1
-        sta opx+1
-        lda py
-        sta opy
-        lda py+1
-        sta opy+1
-        lda pa
-        sta opa
-        lda paqL
-        sta opaqL
-        lda paqH
-        sta opaqH
-        jsr entGate             ; ---- anything to project at all? ---- (out of line: the
+` : ''}        jsr entGate             ; ---- anything to project at all? ---- (out of line: the
 ${process.env.GATEPROF ? `        php                     ; GATEPROF: the gate alone, in bucket 10 (orbKey's ~6 lines share it)
         jsr pfT10
         plp
@@ -16149,8 +17481,6 @@ omSwTk: dec sokAn
         sta hlSeat,y
         iny
         sty sockHit
-        lda #$01
-        sta entDty
 ${WALL_DELTA ? `        ; ---- seating opens a wall... unless it is a PEDESTAL ----
         ; A socket opens its own wall the instant it is fed. A pedestal opens NOTHING until
         ; every pedestal on the level is seated: the hub is one puzzle about collecting three
@@ -16176,12 +17506,16 @@ omWTog: sec
         lda sockWallT,y         ; ...names its wall, or $ff for a seat that opens nothing
         bmi omNoIco
         sta wsWall
-${HAS_SILVER ? `        lda sockStgT,y          ; STAGES: does this socket begin one? (0 = no)
+        tax                     ; a wall already OUT opens nothing more: two sockets may name one
+        lda wallStT,x           ;   group (level 6 v2's two S1s), and wallTog would put it BACK
+        bne omNoIco
+${HAS_SILVER || HAS_CLOSE ? `        lda sockStgT,y          ; LEVEL CODE: does this socket start anything? (0 = no)
         pha
 ` : ''}        jsr wallTog
-${HAS_SILVER ? `        pla
+${HAS_SILVER || HAS_CLOSE ? `        pla
         beq omNoIco
-        jsr lxSock              ; the door is falling: close the wall behind, and change the cast (stGo)
+        jsr lxSock              ; the door is falling: level 9 closes the wall behind and changes
+                                ;   the cast (stGo); a closer level shuts its closer (clGo)
 ` : ''}` : ''}omNoIco:
 ${process.env.ORBOCCDBG ? `        sta ohDbg
 ` : ''}        lda py+1                ; which cell is the player standing in?
@@ -16378,6 +17712,10 @@ ${process.env.OSCNT ? `        inc osCntE              ; OSCNT: slots taking the
 oSCe:` : ''}
 
 ${DBGORB ? `        inc oSOrb
+` : ''}${HAS_BIG && process.env.BIGDEPTH !== '0' ? `        ldy obIX,x              ; the big angel's slot is stamped by DEPTH (bgOcc)
+        lda orbTallT,y
+        and #$02
+        sta osBig
 ` : ''}        lda obIX,x              ; OCCFACE: the cell occBy tests the runs' faces against
         tay
         lda orbXCT,y
@@ -16500,7 +17838,11 @@ oSSR:   sta ohRun               ; borrow: this span's right edge
 oSChk:  ldx ohL
         ldy faceIdT,x
         beq oSAdv               ; no run in this span, so it cannot occlude
-        sty ohSv
+${HAS_BIG ? `        lda osBig
+        beq oSChkN
+        jmp lxBgOcc             ; (level code: bgOcc)
+oSChkN:
+` : ''}        sty ohSv
         jsr occBy
         bcc oSAdv               ; this run's face is not in front of this orb
         ; it does: stamp [max(spanL, obL) .. min(spanR, obR)] -- but the two ends are NOT alike.
@@ -16555,7 +17897,7 @@ oSDsk:  inc osI
 ; Its rows are already covered -- orbBlankT is negative for a two-sprite variant so the LOWER
 ; slot's span reaches over both -- but $d01b is per SPRITE, and without its bit set this half
 ; draws in front of the very occluders the lower half just laid down.
-; The lower half is always the slot BEFORE it: orbOne does stx onvL / inc onv / ldx onv, and
+; The lower half is always the slot BEFORE it: orbOne does inc onv / ldx onv, and
 ; entity slots run upward from 0 while holes come downward from 8, so the pair is contiguous.
 ; occStamp walks slots in ascending order, so the lower half's bit is already in omPri here.
 oSUpHf: dex
@@ -16588,7 +17930,1886 @@ ${process.env.OSPROF ? '        jsr pfT7              ; OSPROF: the ORB slots (t
         sta osN
         jmp oSLoop
 oSDn:   rts
+${HAS_BIG ? `
+;@@LX-BEGIN big
+; ==== LEVEL CODE: the BIG angel's (LEVEL_BIG) -- loads with its level, see LX_FEATURES ====
+; bgStep (lxStep, once a frame): the BALL LIGHTNING. Every BOLT_GAP 60ths, if it is not already in the
+; air, the angel throws it: from the angel's cell, AIMED -- at any angle, straight at where the player
+; is (the user, 2026-11-11: "it's far too easy to stay at the side of the hall"; angled shots "would
+; open up real opportunity for guiding the angel to shoot walls in strange positions"). It flies
+; BOLT_SPD 256ths of a cell a tick: bsVX/bsVY, into its own offsets bsXF/bsYF from its cell's centre,
+; which orbProjS draws through slOn (angSlDT = BOLT_DIR says whose they are). An offset that overflows
+; (signed) has crossed a cell edge: the cell moves on, and a WALL there (blkT 1) ends it. Within
+; BOLT_HIT of the player on both axes it HITS: it vanishes, and the screen flashes.
+bgStep:${HAS_CORNER ? ` jsr bhStep              ; the corner exit: in reach?
+       ` : ''}${BOSS_MUS ? ` jsr bmTick              ; the boss track
+       ` : ''}${WHIP ? ` lda bgWh
+        beq bgNWh
+        jsr bgWhip              ; caught: the turn onto it, and at the end of it the zap
+bgNWh: ` : ''}${NOSHOCK ? ` lda bsFl                ; ---- NOSHOCK: the HIT FLASH, counted down in ticks (BOLT_FLASH) ----
+        beq bfOff
+        sec
+        sbc dtv
+        bcc bfEnd
+        beq bfEnd
+        sta bsFl
+        cmp #${hx(BOLT_FLASH >> 1)}         ; the first half in bfC1, the second in bfC2
+        lda bfC1
+        bcs bfSet
+        lda bfC2
+bfSet:  jsr bfInk
+        jmp bfOff
+bfEnd:  lda #$00                ; over: the level's own inks back
+        sta bsFl
+        lda #${hx(BIG_GND)}
+        jsr bfInk
+        lda colB
+        sta $d022
+        lda colS
+        sta $d023
+        lda #$00
+        sta $d020
+bfOff:` : ''}${NOSHOCK || !BIG_AI2 ? `  lda bgCd                ; the strike's cooldown, in ticks (only a NOSHOCK strike, or
+        sec                     ;   the old AI's, ever sets it: a strike that kills needs none)
+        sbc dtv
+        bcs bfCd
+        lda #$00
+bfCd:   sta bgCd
+       ` : ''} ldx bltIxT
+        bmi bsOut               ; ($ff: no bolt on this level)
+        lda orbHidT,x
+        beq bsAir
+        jmp bsIdle
+bsAir:  lda dtv                 ; ---- in the air: one tick at a time, so no crossing is missed ----
+        sta bsN
+        beq bsOut
+bsTk1:  jsr bsMv                ; a tick on: into a wall, it ends there${HAS_BRK ? ' -- and breaks it, if it may' : ''}
+        bcc bsWl
+        jsr bsBD                ; ---- the player: within BOLT_HIT on BOTH axes is a hit ----
+        lda bsHX
+        ora bsHY
+        bne bsNx2
+        lda bsDX
+        cmp #${hx(BOLT_HIT)}
+        bcs bsNx2
+        lda bsDY
+        cmp #${hx(BOLT_HIT)}
+        bcs bsNx2
+        jsr bsEnd               ; HIT: it vanishes on the player, and ${NOSHOCK ? `the screen flashes` : `you DIE, shocked
+        lda #$00                ;   as by a sentry (bdDie; the user, 2026-11-11). NOSHOCK=1: the flash`}
+${NOSHOCK ? `        lda #$0e                ;   white, then light blue
+        ldy #$01
+; bfGo: flash Y then A (bfC1, bfC2) from this frame, BOLT_FLASH ticks
+bfGo:   sta bfC2
+        sty bfC1
+        lda #${hx(BOLT_FLASH)}
+        sta bsFl
+        tya
+; bfInk: A -> the ground (both halves, as svGnd), the two wall inks and the border, now
+bfInk:  sta $d020
+        sta $d022
+        sta $d023
+        sta irqB0+1             ; the IRQ's operands, THIS frame -- and setGnd's shadows, which
+        sta irqB1+1             ;   republish irqB0 at raster 250, so they agree
+${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
+` : `        jmp bdDie
+`}bsNx2:${BS_PASS ? `  lda pbT                 ; ---- the PASS-BY: armed, and the ball's cell one of the 8 round yours ----
+        cmp #$fe
+        bne bsNx3
+        txa                     ; (X, the ball, is what bsCb measures from your cell)
+        tay
+        jsr bsCb
+        cmp #$02
+        bcs bsNx3
+        lda #${hx(PB_S & 255)}               ; F1, a step short
+        sta pbL
+        lda #${hx(PB_S >> 8)}
+        sta pbH
+        lda #$00                ; ...last, so the IRQ never sees half of it
+        sta pbT
+bsNx3: ` : ''}  dec bsN
+        bne bsTk1
+${BALL_SND && !BS_ZAP ? `        ; ---- the BALL'S SOUND, once a frame in the air (and once at the throw, from bsGo) ----
+bsSnd:${BOSS_MUS ? `  lda bmDn                ; a Dun has voice 3: the ball is silent until it ends
+        bne bsOut
+       ` : ''}  jsr bsBD                ; |ball - you| on each axis
+        ldy #$00
+        jsr bsE8
+        sta bsC
+        ldy #$02
+        jsr bsE8
+        cmp bsC
+        bcs bsQ1
+        lda bsC                 ; the larger, in 8ths of a cell: 0..63
+bsQ1:   lsr                     ; in quarters
+        tay
+        lda bsKT,y              ; k, the CURVE: a fifth of the way up by 2 cells, all of it on you
+        sta bsL
+${BOSS_MUS ? '' : `        sta $d416
+`}        cmp $d41c               ; ...and the LOUDNESS chases it (the user, 2026-11-11: "the envelope
+        lda #$80                ;   should roughly follow the filters"): voice 3's envelope, read back.
+        bcc bsEv                ;   Above the cutoff: let go, and it falls at the release rate. Below:
+        sta $d412               ;   gated afresh, and the attack (250 ms, all of it) climbs on from where
+        lda #$81                ;   it is. Never struck AT $ff (the cutoff tops out at $fc), where a
+bsEv:   sta $d412               ;   retrigger can freeze it silent (sid-envelope-freeze)
+        ldy #$00                ; the pitch: C2 + 9k, so 20 semitones up on you (linear in
+        sty bsH                 ;   frequency: half way there is already +13)
+        lda bsL
+        asl
+        rol bsH
+        asl
+        rol bsH
+        asl
+        rol bsH                 ; 8k (no carry out: 8 * 252 < $800)
+        adc bsL
+        tay
+        lda bsH
+        adc #$00
+        sta bsH                 ; 9k
+        tya
+        clc
+        adc #${hx(BS_C2 & 255)}
+        sta $d40e
+        lda bsH
+        adc #${hx(BS_C2 >> 8)}
+        sta $d40f
+` : ''}bsOut:  rts
+${BALL_SND ? `${BS_ZAP ? '' : `bsKT:   !byte ${bsKT.join(',')}   ; k by distance in quarters of a cell (see BS_KNEE)
+; bsE8: Y = 0 (x) or 2 (y), after bsBD -> A = that axis's |ball - you| in 8ths of a cell, at most 63
+bsE8:   lda bsHX,y
+        cmp #$08
+        bcs bsE8F               ; 8 cells or more
+        sta bsH
+        lda bsDX,y
+        asl
+        rol bsH
+        asl
+        rol bsH
+        asl
+        rol bsH
+        lda bsH
+        rts
+bsE8F:  lda #$3f
+        rts
+`}; bsSidT (brIn, every arrival and restart): the SID from cold -- a death leaves the scream's voices,
+; routing and mode. Voice 2 the BOOM, low noise falling away over 750 ms; voice 3 the BALL, noise
+; through the low-pass at full resonance, cutoff, pitch and loudness steered by bsSnd. All
+; three of its rates are index 9: one rate period, so switching attack <-> release never trips the
+; ADSR delay bug (a counter past a shorter period runs the long way round, ~33 ms of nothing).
+bsSidT:${BOSS_MUS ? ` !byte ${hx(BM_F1 & 255)},${hx(BM_F1 >> 8)},$00,$08,$40,$00,$40   ; voice 1, the TRACK: F1, a square, silent; attack and decay
+                                ;   instant, sustain 4 (~25%: the user, 2026-11-12, "quieter" twice). Release
+                                ;   0 HERE: bmCold writes this over the air's wind, ungated, and a long
+                                ;   release rang its tail on as an F1 square ("turns to a note for a
+                                ;   short moment"). The fall's ~1 s release is bmFT's to set
+       ` : ''} !byte $00,$03,$00,$00,$80,$0a,$00   ; voice 2
+        !byte ${BS_ZAP ? `$00,$00,$00,$00,$40,${hx(ZAP_AD)},${hx(ZAP_SR)}   ; voice 3: the ZAP's pulse, ungated (attack 2 ms, decay 1.5 s, S0 R0)` : `${hx(BS_C2 & 255)},${hx(BS_C2 >> 8)},$00,$00,$80,$88,$08   ; voice 3: attack 100 ms, decay and release 300 ms, sustain 0`}
+                                ;   (was 250/750: the whoosh is over in half a second, and the loudness
+                                ;   has to keep up with it, up AND down)
+        !byte $00,$00,${BOSS_MUS ? '$f1' : '$f4'},$1f                    ; cutoff, resonance 15 on voice ${BOSS_MUS ? '1 (the track)' : '3'}, low-pass, volume 15
+${BOSS_MUS ? `; ---- THE BOSS TRACK (BOSS_MUS; the user, 2026-11-12: "a jaws-like background track") ----
+; Voice 1, a pulse: from the moment you first see the angel, its width swings 50% -> 5% -> 50% every
+; 800 ms (48 ticks), and the low-pass (resonance full, voice 1 alone in it) closes 30% -> 0 and opens
+; again in step. Its note climbs F harmonic minor -- F1 G1 Ab1 Bb1 C2 Db2 E2 F2 -- a step at each
+; event (bmEv), until the central pillar's blocks take over (bmUp). Each step is a JUMP, struck with
+; a DUN: voices 2 and 3, a sawtooth pair, the chord over the new bass note (BM_CH) -- the boom's
+; voice and the ball's, borrowed for DUN_LEN ticks and handed back (bmGive).
+; bmTick (bgStep, every frame): dtv ticks of it, then the registers.
+bmTick: lda bmOn
+        beq ${L10AIR ? 'amTick' : 'bmX'}
+        ldy dtv
+        beq bmX
+bmTk:   lda bmDn                ; ---- a Dun sounding: its clock ----
+        beq bmG
+        dec bmDn
+        beq bmGive0             ; over: the voices back to the effects
+        lda bmDn
+        cmp #${hx(DUN_LEN - DUN_HOLD)}
+        bne bmG
+        lda #$20                ; held long enough: the gates let go, and it rings out -- each
+        ldx bmS2                ;   voice only if it is still the Dun's
+        bne bmR3
+        sta $d40b
+bmR3:   ldx bmS3
+        bne bmG
+        sta $d412
+        bne bmG                 ; always
+bmGive0:jsr bmGive
+bmG:    ldx #$00
+        lda bmPh                ; (counts DOWN, 47 to 0: the wrap is a dec and a bpl)
+        cmp #24
+        bcs bmD                 ; the first half: narrowing and closing
+        inx                     ; the second: widening and opening
+bmD:    lda bmPW
+        clc
+        adc bmDPT,x
+        sta bmPW
+        lda bmCf
+        clc
+        adc bmDCT,x
+        sta bmCf
+        dec bmPh
+        bpl bmPx
+        lda #47
+        sta bmPh
+bmPx:   dey
+        bne bmTk
+        lda bmPW                ; the width, in 16ths of the register's 12 bits
+        asl
+        asl
+        asl
+        asl
+        sta $d402
+        lda bmPW
+        lsr
+        lsr
+        lsr
+        lsr
+        sta $d403
+        lda bmCf
+        sta $d416
+bmFq:   lda bmF8                ; the pitch, in 8ths of the register
+        asl
+        asl
+        asl
+        sta $d400
+        lda bmF8
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        sta $d401
+bmX:    rts
+${L10AIR ? `; amTick (bmTick, until the angel is seen): the wind's cutoff, a unit every AIR_RATE ticks toward its
+; target, and a new random target on arriving
+amTick: ldy dtv
+        beq amOut
+amL:    dec amH
+        bne amN
+        lda #${AIR_RATE}
+        sta amH
+        lda amC
+        cmp amT
+        beq amNew
+        bcc amUp
+        dec amC                 ; above it: down
+        bcs amN                 ; always (C from the cmp)
+amUp:   inc amC
+        bne amN                 ; always
+amNew:  jsr bdRnd               ; (keeps Y)
+        and #$3f
+        adc #${hx(AIR_LO - 1)}  ; C is set (equal): AIR_LO..AIR_LO+63
+        sta amT
+amN:    dey
+        bne amL
+        lda amC
+        sta $d416
+amOut:  rts                     ; (NOT "amX": that is the engine's zero-page amX, and a level label
+                                ;   shadows it -- every "sta amX" in the angel's code then wrote its
+                                ;   column over this rts, and a column-2 angel froze the restart)
+; bmCold: the whole SID from bsSidT -- the effects' voices 2 and 3, the track's voice 1 and its filter
+bmCold: ldx #$18
+bmCL:   lda bsSidT,x
+        sta $d400,x
+        dex
+        bpl bmCL
+        rts
+amSid:  !byte ${hx(AIR_W & 255)},${hx(AIR_W >> 8)},$00,$00,$81,$00,$2a   ; voice 1, the WIND: B4 noise, sustain 2, release 1.5 s
+        !byte ${hx(AIR_H & 255)},${hx(AIR_H >> 8)},$00,$00,$11,$00,$4a   ; voice 2, the HUM: A#1 triangle, sustain 4
+        !byte $00,$00,$00,$00,$80,$88,$08                                ; voice 3 silent (noise, ungated)
+        !byte $00,${hx(AIR_LO + 16)},$81,$2f                             ; cutoff, resonance 8 on voice 1, BAND-pass, volume 15
+` : ''}; bmGive: voices 2 and 3 as the effects want them (bsSidT), ungated. Keeps Y. A ball still in the air
+; is gated again by its own envelope follower, next frame.
+bmGive: ldx #$0d
+bmGv:   lda bmS2                ; 0-6: voice 2's registers...
+        cpx #$07
+        bcc bmGw
+        lda bmS3                ; ...7-13: voice 3's
+bmGw:   bne bmGn                ; an effect took it: leave that voice alone
+        lda bsSidT+7,x
+        sta $d407,x
+bmGn:   dex
+        bpl bmGv
+        rts
+; bmFT (lxTick, 60 Hz from the IRQ): THE FALL (the user, 2026-11-12: "release when you get to the
+; exit, adding a 1 second pitch sweep down an octave as you fall"). The main loop is in fallStep, so
+; bmTick is not running: the drone's gate goes off (its release, ~1 s from sustain 8) and bmF8:bmFr
+; loses 3/256 of itself a tick -- (253/256)^60 = 0.49, an octave over the drop's 60 ticks, which
+; is all there is: the ending takes the machine at the drop's black middle (endGo).
+bmFT:${BS_ZAP ? `   jsr bzTick              ; the zap, if one is sounding -- a Dun or not: effects win
+${BS_PASS ? `        jsr pbTick              ; ...and the pass-by
+` : ''}       ` : ''} lda fallSt
+        beq bfX
+        lda bmOn
+        beq bfX                 ; the air, if the angel was never seen: the ending cuts it
+        lda #$4a                ; release 1.5 s -- from sustain 4, well under a second (bsSidT keeps 0)
+        sta $d406
+        lda #$40                ; gate off -- every tick, which does nothing once it is
+        sta $d404
+        ldx #$03                ; bmF8:bmFr -= bmF8, three times: the 3/256
+bfL:    lda bmFr
+        sec
+        sbc bmF8
+        sta bmFr
+        bcs bfN
+        dec bmF8
+bfN:    dex
+        bne bfL
+        jmp bmFq                ; ...and out to the register, as bmTick does
+bfX:    rts
+${BS_ZAP ? `; bzTick (bmFT, 60 Hz): a tick of the ZAP (see BS_ZAP). bzT = ticks since the throw; at ZAP_PWT it is done.
+bzTick: ldx bzT
+        cpx #${ZAP_PWT}
+        bcs bzX
+        inc bzT
+        lda bzPL                ; the width, ZAP_PWS a tick from 5% to 50%
+        clc
+        adc #${hx(ZAP_PWS)}
+        sta bzPL
+        sta $d410
+        lda bzPH
+        adc #$00
+        sta bzPH
+        sta $d411
+        cpx #${ZAP_PT + 1}
+        bcs bzX
+        lda zapL,x              ; the pitch, two octaves down a semitone table
+        sta $d40e
+        lda zapH,x
+        sta $d40f
+        txa
+        bne bzX
+        lda #${hx(ZAP_AD)}               ; the first tick: struck, now its pitch and width are in
+        ldx #$40
+        jmp v3Hit
+bzX:    rts
+${BS_PASS ? `; pbTick (bmFT, 60 Hz): a tick of the PASS-BY (see BS_PASS). pbT = ticks since it began (${PB_T.reduce((a, b) => a + b)}: done,
+; $fe armed by a throw, $ff neither)
+pbTick: ldx pbT
+        cpx #${PB_T.reduce((a, b) => a + b)}
+        bcs bzX
+        inc pbT
+        cpx #${PB_T[0] + PB_T[1]}         ; which of the three lines: 0, 1 or 2 -- the two "past
+        lda #$00                ;   its end?" carries, added up
+        rol
+        cpx #${PB_T[0]}
+        adc #$00
+        tay
+        lda pbL
+        clc
+        adc pbDL,y
+        sta pbL
+        sta $d40e
+        lda pbH
+        adc pbDH,y
+        sta pbH
+        sta $d40f
+        txa
+        bne bzX
+        lda #${hx(PB_AD)}               ; the first tick: struck, noise -- on into v3Hit
+        ldx #$80
+` : ''}; v3Hit: A = attack/decay, X = the waveform, gate off -> voice 3 struck afresh (gate low, then high:
+; a gate already high starts no new attack). The zap's and the pass-by's: they set their own envelope.
+v3Hit:  sta $d413
+${BOSS_MUS ? `        sta bmS3                ; (A, the attack/decay, is never 0): a Dun's voice 3 is the effect's now
+` : ''}        stx $d412
+        inx
+        stx $d412
+        rts
+${BS_PASS ? `pbDL:   !byte ${PB_D.map(v => hx(v & 255)).join(',')}   ; a tick's change in frequency, per line
+pbDH:   !byte ${PB_D.map(v => hx(v >> 8)).join(',')}
+pbT:    !byte $ff
+pbL:    !byte 0
+pbH:    !byte 0
+` : ''}zapL:   !byte ${zapF.map(v => hx(v & 255)).join(',')}
+zapH:   !byte ${zapF.map(v => hx(v >> 8)).join(',')}
+bzT:    !byte ${ZAP_PWT}                ; ticks since the throw (${ZAP_PWT}: none sounding)
+bzPL:   !byte 0
+bzPH:   !byte 0
+` : ''}; bmEv: A = an event's bit (1 its first throw at you, 2 the third wall down, 4 the first time its
+; cell is two from yours or nearer) -> once each, a step up the scale
+bmEv:   tay
+        and bmFl
+        bne bmUx
+        tya
+        ora bmFl
+        sta bmFl
+        inc bmE
+; bmUp: the target note. Once a central block is down, the pillar decides: C2 Db2 E2 F2, the last
+; four, F2 with all four gone -- whatever the steps before it reached.
+bmUp:   ${BM_MUTE ? `rts                     ; BMMUTE: no steps and no Duns
+        ` : ''}lda bmE${BM_MUTE ? '                 ; DEADCODE-OK: BMMUTE' : ''}
+        ldx bmP
+        beq bmU1
+        txa
+        clc
+        adc #$03
+bmU1:   cmp bmT8                ; the step sounding already? (bhChk asks after every wall down)
+        beq bmUx
+        sta bmT8
+        tax
+        lda bmNT,x
+        sta bmF8                ; the bass moves...
+        lda #$00                ; ...and the DUN: the chord over it on voices 2 and 3. EFFECTS WIN a
+        sta bmS2                ;   clash (the user, 2026-11-12: "let the effect steal the chord
+        sta bmS3                ;   note"): bmS2/bmS3 non-zero = that voice is an effect's, and the
+${BS_ZAP ? `        lda bzT                 ;   Dun neither strikes nor releases nor gives it back. A zap or
+        cmp #${ZAP_PWT}                ;   pass-by sounding, or a zap due on the next tick (the first
+        bcc bmZ3                ;   throw's), keeps voice 3; one struck later takes it (v3Hit), as
+${BS_PASS ? `        lda pbT                 ;   a boom takes voice 2 (brGo). A boom still RINGING here is cut:
+        cmp #${PB_T.reduce((a, b) => a + b)}                ;   voice 2's envelope cannot be read back
+` : ''}        bcs bmN3
+bmZ3:   inc bmS3
+` : ''}bmN3:   lda bmC1L,x
+        sta $d407
+        lda bmC1H,x
+        sta $d408
+        lda bmS3
+        bne bmF3
+        lda bmC2L,x
+        sta $d40e
+        lda bmC2H,x
+        sta $d40f
+bmF3:
+        ldy #$07                ; voice 3, then voice 2 (7 registers apart):
+bmDL:   tya
+        beq bmDo                ; voice 2: the Dun's...
+        lda bmS3                ; ...voice 3 only if no zap or pass-by has it (bmS3, above)
+        bne bmDs
+bmDo:   lda #${hx(DUN_AD)}
+        sta $d40c,y
+        lda #${hx(DUN_SR)}
+        sta $d40d,y
+        lda #$20                ; gate low first: a gate already high (the ball's) would start
+        sta $d40b,y             ;   no new attack
+        lda #$21                ; a sawtooth, struck
+        sta $d40b,y
+bmDs:   tya
+        sec
+        sbc #$07
+        tay
+        bcs bmDL                ; 7 -> 0 -> done
+        lda #${hx(DUN_LEN)}
+        sta bmDn
+bmUx:   rts
+bmNT:   !byte ${BM_NT.join(',')}   ; F harmonic minor, F1 to F2, in 8ths of the register
+bmC1L:  !byte ${BM_CHF.map(c => hx(c[0] & 255)).join(',')}   ; the Dun's lower note (BM_CH)
+bmC1H:  !byte ${BM_CHF.map(c => hx(c[0] >> 8)).join(',')}
+bmC2L:  !byte ${BM_CHF.map(c => hx(c[1] & 255)).join(',')}   ; ...and its upper
+bmC2H:  !byte ${BM_CHF.map(c => hx(c[1] >> 8)).join(',')}
+bmDPT:  !byte $fb,$05           ; a tick's change in the width (16ths of the register: $80 is 50%)...
+bmDCT:  !byte $fd,$03           ;   ...and in the cutoff: 24 ticks each way
+bmIT:   !byte 0,47,$80,$48,${BM_NT[0]},0,0,0,0,0,0${L10AIR ? `,${hx(AIR_LO + 16)},${hx(AIR_LO + 16)},1` : ''}   ; bmOn..bmDn${L10AIR ? ' (..amH)' : ''} from cold
+bmOn:   !byte 0                 ; 1 once you have seen the angel
+bmPh:   !byte 0                 ; ticks LEFT of the 800 ms swing (47 down to 0)
+bmPW:   !byte $80               ; the width, 16ths
+bmCf:   !byte $48               ; the cutoff
+bmF8:   !byte 0                 ; the bass's pitch (8ths)
+bmT8:   !byte 0                 ; the step it is on, 0-7 (bmIT starts it ON step 0: the first sight is
+                                ;   the drone alone, F1, no Dun -- the user, 2026-11-12)
+bmE:    !byte 0                 ; steps taken by the events (bmEv), 0-3
+bmP:    !byte 0                 ; central pillar blocks down, 0-4
+bmFl:   !byte 0                 ; the events already counted
+bmWC:   !byte 0                 ; walls down
+bmDn:   !byte 0                 ; ticks left of the Dun sounding (0: voices 2 and 3 are the effects')
+${L10AIR ? `amC:    !byte 0                 ; the AIR: the wind's cutoff now, its target, and ticks to its next unit
+amT:    !byte 0
+amH:    !byte 0
+` : ''}bmS2:   !byte 0                 ; non-zero: an effect has voice 2 from the Dun sounding (boom)
+bmS3:   !byte 0                 ;   ...voice 3 (zap, pass-by). Set by bmUp for each Dun, outside bmIT
+bmFr:   !byte 0                 ; the fall's slide's fraction below bmF8 (bmFT). NOT in bmIT's block:
+                                ;   a fraction needs no start, and one byte slipped in there moved every
+                                ;   later variable's start value one along (no first Dun, bmDn 48)
+` : ''}` : ''}; bsMv: X = the ball -> one tick along its line; a SIGNED overflow of an offset is a cell edge crossed
+; (+120 + 20 = -116: the next cell, 0.45 short of its centre). C clear (Y = the cell) on a wall.
+bsMv:   lda bsXF
+        clc
+        adc bsVX
+        sta bsXF
+        bvc bsMY
+        lda bsVX
+        bmi bsXW
+        inc orbXCT,x
+        bpl bsXC                ; always: a cell number is never past 127
+bsXW:   dec orbXCT,x
+bsXC:   jsr bsOpen
+        bcc bsMvR
+bsMY:   lda bsYF                ; y, the same
+        clc
+        adc bsVY
+        sta bsYF
+        bvc bsMvK
+        lda bsVY
+        bmi bsYN
+        inc orbYCT,x
+        bpl bsOpen              ; always, as above
+bsYN:   dec orbYCT,x
+        jmp bsOpen
+bsMvK:  sec
+bsMvR:  rts
+bsWl:${HAS_BRK ? '   jsr brHit               ; (Y = the wall cell; keeps X)\n       ' : ''} jmp bsEnd
+bsEnd:${BALL_SND && !BS_ZAP ? `${BOSS_MUS ? ` lda bmDn                ; (not while a Dun has the voice)
+        bne bsE0
+       ` : ''} lda #$80                ; the ball's sound lets go (noise, ungated: never a 0 control, which pops)
+        sta $d412
+bsE0:  ` : ''}  lda #$01                ; gone: hidden, and no offsets for orbProjS to draw
+        sta orbHidT,x
+        lda #$00
+        sta angSlDT,x
+        sta angSlFT,x
+        rts
+${NOSHOCK ? '' : `; ---- bdDie: KILLED (the user, 2026-11-11: "getting hit with the lightning ball can be similar to the
+; sentinal. getting hit by the angel can be the same but with yellows and oranges") ----
+; Level 9's svDie, in level 10's code: SVSHOCK frames of flashing inks and random wall-edge glyphs with a
+; scream, then black until fire. A = which half of bdInkT: 0 the ball's (the sentry's own
+; blues), 8 the angel's. Never returns -- the restart is entry, as every death's is. The main loop is
+; gone, so it writes the IRQ's ground operands itself; the restart's lvlBoot puts the level's back.
+bdDie:  sta bdBase
+        cmp #$08
+        beq bdKp                ; the ANGEL's: it stays in view, frozen where the whip left it, for
+        lda #$00                ;   the shock's first BD_KEEP frames (the user, 2026-11-12) -- bdFr
+        sta $d015               ; the ball's: no sprites
+bdKp:
+        lda #${hx(SVSHOCK)}
+        sta bdQ                 ; frames of shock left
+        lda #$40                ; ---- the scream (svDie's zkGo): voices 2 and 3, held at full ----
+        sta $d404               ; every voice lets go first (voice 1 the track, still a pulse)
+        asl                     ; $80: the boom leaves voice 2's gate ON, and a
+        sta $d40b               ;   gate already on is no edge -- no attack, so the scream's noise
+        sta $d412               ;   stayed at the boom's 0 (the user: "the death sound ... became not noise")
+        ldx #$0c                ; then bdScT into $d40b-$d417, top down: each voice's envelope before
+bdSc:   lda bdScT,x             ;   its gate
+        sta $d40b,x
+        dex
+        bpl bdSc
+bdFr:   lda bdQ                 ; ---- once per 60Hz frame ----
+        cmp #${hx(SVSHOCK - BD_KEEP)}
+        bne bdF1
+        lda #$00                ; BD_KEEP frames in: the sprites go (the angel's death kept them)
+        sta $d015
+bdF1:   lda frameCnt
+bdW:    cmp frameCnt
+        beq bdW
+        jsr bdRnd               ; a new scream for this frame
+        sta $d408
+        jsr bdRnd
+        and #$3f
+        ora #$10
+        sta $d40f
+        jsr bdRnd
+        sta $d416               ; ($d417, resonance full on voices 2 and 3: once, from bdScT)
+        jsr bdRnd
+        and #$03
+        tax
+        lda bdModT,x
+        sta $d418
+        jsr bdInk               ; a random ink for each of ground, walls and seams${BD_BORDER ? ', and border' : ''}
+        jsr bdGnd
+        jsr bdInk
+        sta $d022
+        jsr bdInk
+        sta $d023
+${BD_BORDER ? `        jsr bdInk
+        sta $d020
+` : ''}        lda #$60                ; ...and 96 cells of random wall-edge glyph, both screens
+        sta bdY
+bdC:    jsr bdRnd
+        and #$03
+        tay                     ; the page
+        jsr bdRnd
+        tax                     ; the byte in it
+        cpy #$03
+        bne bdC1
+        cpx #$e8                ; past the 1000th cell: not on screen
+        bcs bdC2
+bdC1:   tya
+        clc
+        adc #${hx(SCR_A >> 8)}
+        sta bdA+2
+        adc #$04                ; SCR_B is SCR_A + $400
+        sta bdB+2
+        jsr bdRnd
+        and #$7f
+        clc
+        adc #$02                ; codes 2..129: ramps and steps, never BLANK or SOLID
+bdA:    sta $ff00,x
+bdB:    sta $ff00,x
+bdC2:   dec bdY
+        bne bdC
+        dec bdQ
+        bne bdFr
+        lda #$80                ; ---- the sound lets go with the picture ----
+        sta $d40b
+        lsr                     ; $40
+        sta $d412
+        lda #$03                ; ---- then BLACK: the display OFF, so the whole screen is the border
+        sta $d011               ;   (black). Was every ink black and both screens blanked, 30 bytes
+                                ;   more for the same picture; the restart (entry) holds the display
+                                ;   off itself until its first frame is drawn, and nothing but the
+                                ;   main loop, gone now, writes $d011
+        lda #$00
+        sta $d020
+        sta dkArm               ; A is 0: fire is not armed until it has been seen released
+bdK:    jsr dshFir              ; ---- black until a fresh fire press: the engine's own death's
+        jmp bdK                 ;   wait, resident. It restarts through entry, whose lvlBoot puts
+                                ;   back every ground ink this one blacked (irqB0-2 included)
+; bdInk: a random ink from this death's half of bdInkT
+bdInk:  jsr bdRnd
+        and #$07
+        ora bdBase
+        tax
+        lda bdInkT,x
+        rts
+; bdGnd: A -> the ground, top to bottom, THIS frame. A preserved.
+bdGnd:  sta irqB0+1
+        sta irqB1+1
+${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
+; bdRnd: John Metcalf's 16-bit xorshift (7,9,8), as svRnd -- its own seed
+baRnd:                          ; (the AI's random numbers are the death's: one generator)
+bdRnd:  lda bdSd+1
+        lsr
+        lda bdSd
+        ror
+        eor bdSd+1
+        sta bdSd+1
+        ror
+        eor bdSd
+        sta bdSd
+        eor bdSd+1
+        sta bdSd+1
+        rts
+bdInkT: !byte $00,$06,$0e,$03,$01,$01,$0e,$00   ; the ball's: black, blue, light blue, cyan, white (svShT)
+        !byte $00,$02,$08,$07,$01,$07,$08,$09   ; the angel's: black, red, orange, yellow, white, brown
+bdModT: !byte $1f,$2f,$4f,$6f   ; the filter: low / band / high / band+high
+bdScT:  !byte $81,$00,$f8       ; voice 2: noise, gated; attack 0, decay 0; sustain 15, release 8
+        !byte $00,$00,$40,$00   ; voice 3: (pitch: per frame) and a thin pulse...
+        !byte $41,$00,$f8       ;   ...gated, held as voice 2
+        !byte $00,$00,$f6       ; the filter: cutoff (per frame), and resonance full on voices 2 and 3
+bdBase: !byte 0
+bdQ:    !byte 0
+bdY:    !byte 0
+bdSd:   !byte $a7,$5c
+`}
+${HAS_BRK ? (() => { const BL = LEVEL_IDS.find(n => LEVEL_BREAK[n] && LEVEL_BIG[n]), BC = BRK_CELLS(BL);
+  const bits = [...Array(32)].map((_, i) => [...Array(8)].reduce((b, _, k) => b | (BC.includes(i * 8 + k) ? 1 << k : 0), 0));
+  const BW = MAP_OF(BL)[0].length, BH = MAP_OF(BL).length;
+  // the corner exit's own cell: only level 10 has one (LEVEL_CORNER)
+  const CXY = !HAS_CORNER ? [0, 0] : BL === 10 && LEVEL_CORNER[10] ? L10.exit : (() => { throw new Error(`corner exit: level ${BL}'s exit cell is not known here`); })();
+  // BRKFALLR: how near the corner exit's point (cells, on each axis) the player must be to fall. HALF A
+  // CELL: a square a cell across, as big as any other exit's target (fallChk takes its whole cell). It
+  // was the hole's DRAWN radius, 0.21 -- under a fifth of that -- and bhStep arms the fall a frame
+  // before fallChk takes it, so at level 10's frame rate you could run across it and never fall (the
+  // user, 2026-11-13: "i thought i walked on it and i didn't fall"). 0.5 is 128, the most bhAx's
+  // compares can express: the corner's own cell (offset < Q) or the one before it (offset >= 256-Q).
+  const BRK_FALLQ = Math.round(+(process.env.BRKFALLR ?? 0.5) * 256);
+  if (!(BRK_FALLQ >= 1 && BRK_FALLQ <= 128)) throw new Error(`BRKFALLR: 0 < r <= 0.5 cells`);
+  const OC = OPEN_CELLS(BL), opnBits = [...Array(32)].map((_, i) => [...Array(8)].reduce((b, _, k) => b | (OC.includes(i * 8 + k) ? 1 << k : 0), 0));
+  return `
+; ==== BREAKABLE WALLS (LEVEL_BREAK): the ball breaks the wall cell it flies into ====
+; It just DISAPPEARS (the user, 2026-11-11: "they can just disappear ... I've never seen one drop"):
+; no sink, so none of the door code -- mapT, blkT, the runs and the angel's map, then the sound.
+; brHit only NOTES the cell (brPnd); brStr takes it out once it has marked THIS frame's faces. The
+; cast that found those faces numbered them with the old runs, and the mark is looked up by run id:
+; rebuilding the runs between the two read every face against the wrong table for a frame ("all
+; boxes get the stripes for a frame or two").
+brHit:  sty brC
+        jsr brkQ
+        beq brHo                ; the outer shell: it just ends there
+        lda mrNext              ; the run ids are nearly spent: this one stands. ALL of them, to
+        cmp #${hx(NRUN - BRK_GROW + 1)}               ;   NRUN: the doors' DOOM ids are only for the sink, which a broken
+        bcs brHo                ;   wall no longer uses (the user's pillar halls start at 40 of them)
+        lda brC
+        sta brPnd               ; (cell 0 is the shell, so 0 can mean none)
+brHo:   ldx bltIxT
+        rts
+; brGo (the end of brStr): the noted wall out. brLst remembers it, for brIn to put back.
+brGo:   ldy brPnd
+        beq brGx
+        lda #$00
+        sta brPnd
+        sta blkT,y              ; open
+        lda #$ff                ; open in every zone: the zones already treat it as open (OPENABLE)
+        sta mapT,y
+        jsr brMk                ; the runs again (-> brSplit through lxBur, with BRK_MARK), the
+                                ;   angel's fill redone, and renderSym's run cache dropped
+${HAS_CORNER ? `        jsr bhChk               ; the corner exit: all four cells gone now?
+` : ''}${BOSS_MUS ? `        inc bmWC                ; the third wall down: a step up the track
+        lda bmWC
+        cmp #$03
+        bne brG3
+        lda #$02
+        jsr bmEv
+brG3:
+` : ''}${BALL_SND ? `${BOSS_MUS ? `        ldx #$06                ; EFFECTS WIN (see bmUp): voice 2 as the boom wants it, whatever a
+brGv:   lda bsSidT+7,x          ;   Dun left there (its pitch, envelope and sawtooth), ungated...
+        sta $d407,x
+        dex
+        bpl brGv
+        stx bmS2                ;   ...and a Dun sounding no longer has it ($ff)
+` : ''}        lda #$80                ; the BOOM (the user, 2026-11-11: "a low boom"): voice 2's noise
+        sta $d40b               ;   struck again from where it is
+        lda #$81
+        sta $d40b
+        rts
+` : `        lda #3
+        jmp sfxPlay             ; the door's sound
+`}brGx:   rts
+${BRK_MARK ? `; opnQ: Y = a cell -> A non-zero (Z clear) if it was OPEN at the start: opnBT, which sits right
+; after brkBT, so it is brkQ 32 bytes on. Takes X and Y.
+opnQ:   tya
+        lsr
+        lsr
+        lsr
+        ora #$20                ; the byte, in opnBT
+        bne bkQx                ; always
+` : ''}; brkQ: Y = a cell -> A non-zero (Z clear) if it is a breakable wall. Takes X and Y.
+brkQ:   tya
+        lsr
+        lsr
+        lsr
+bkQx:   tax
+        tya
+        and #$07
+        tay
+        lda brkBT,x
+        and orbBitT,y
+        rts
+${BRK_MARK ? `; brSplit (lxBur, at the tail of mkRuns): break every run where a NEW face meets one of the level's
+; own, so a run is all one or the other: brStr asks the same question of a face's first cell. A face is new when the
+; cell beyond it was a wall at the start (opnBT): a dug side, a dug back wall, the shell. A pass over
+; the four per-cell run tables in mkRuns's own order -- W/E walk each column down, N/S each row across
+; (level ${BL}'s ${BW}x${BH}, from the build) -- giving the
+; rest of a run a fresh id (mrNext, plane and face copied) at each change. A level without it takes
+; lxNone's rts, and its runs stay the build's -- which matters, because the merge-hazard lists name
+; those ids. Nor does it change this level's starting runs: at the start every face is its own.
+; Out of ids (DOOM_RUN0), it leaves the rest of the run whole: one fill for the face, nothing worse.
+brSplit:ldx #$03
+bpT:    stx bpI
+        lda bpLo,x
+        sta bpR+1
+        sta bpW+1
+        lda bpHi,x
+        sta bpR+2
+        sta bpW+2
+        lda #$00
+        sta bpS                 ; the first line starts at cell 0
+        sta bpO
+bpOL:   lda bpS                 ; ---- a line: a column (W/E) or a row (N/S) ----
+        sta bpCl
+        lda bpIN,x
+        sta bpJ
+        lda #$00
+        sta bpPv                ; no run in progress
+bpL:    ldy bpCl
+bpR:    lda runWT,y
+        beq bpZ                 ; no face here: the run in progress ends
+        cmp bpPv
+        beq bpS1                ; the same run as the cell before
+        sta bpPv                ; a run starts: its own id, and this face's kind
+        sta bpId
+        jsr bpNew
+        sta bpB
+        jmp bpM
+bpS1:   jsr bpNew
+        cmp bpB
+        beq bpWr
+        sta bpB                 ; new meets old, mid-run: a NEW id from here on
+        ldx mrNext
+        cpx #${hx(NRUN)}
+        bcs bpWr                ; out of ids
+        ldy bpPv
+        lda runPFT,y
+        sta runPFT,x
+        stx bpId
+        inc mrNext
+bpWr:   lda bpId
+        ldy bpCl
+bpW:    sta runWT,y
+bpM:    jmp bpN
+bpZ:    sta bpPv
+bpN:    ldx bpI                 ; on along the line
+        lda bpCl
+        clc
+        adc bpIS,x
+        sta bpCl
+        dec bpJ
+        bne bpL
+        lda bpS                 ; the next line
+        clc
+        adc bpOS,x
+        sta bpS
+        inc bpO
+        lda bpO
+        cmp bpON,x
+        bcc bpOL
+        dex
+        bpl bpT
+        rts
+; bpNew: the face of cell bpCl in table bpI -> A = 0 new (the cell beyond was a wall at the start),
+; 1 the level's own; Y = bpCl. Beyond the shell the index wraps onto more shell: a wall, never asked.
+bpNew:  ldx bpI
+        lda bpCl
+        clc
+        adc bpDT,x
+        tay
+        jsr opnQ
+        beq bpN0                ; 0: new...
+        lda #$01                ; ...1: the level's own (only ever compared for equality)
+bpN0:   ldy bpCl
+        rts
+bpLo:   !byte <runWT,<runET,<runNT,<runST
+bpHi:   !byte >runWT,>runET,>runNT,>runST
+bpDT:   !byte $ff,$01,${hx(256 - BW)},${hx(BW)}   ; the cell beyond each: west, east, north, south
+bpDT2:  !byte $ff,${hx(256 - BW)},$01,${hx(BW)}   ; ...in runPFT's order for brStr: W, N, E, S
+; per table, W E N S: a line's length and step (W/E walk a column down, N/S a row across), and the
+; number of lines and the step between their first cells
+bpIN:   !byte ${BH},${BH},${BW},${BW}
+bpIS:   !byte ${BW},${BW},1,1
+bpON:   !byte ${BW},${BW},${BH},${BH}
+bpOS:   !byte 1,1,${BW},${BW}
+bpI:    !byte 0                 ; the table, 0-3
+bpO:    !byte 0                 ; the line
+bpS:    !byte 0                 ; ...its first cell
+bpJ:    !byte 0                 ; cells left in it
+bpCl:   !byte 0                 ; the cell
+bpPv:   !byte 0                 ; the run in progress: its id as mkRuns gave it,
+bpId:   !byte 0                 ;   the id it is written as from here,
+bpB:    !byte 0                 ;   and whether it is new
+` : ''}; brIn (lxInit: every arrival and restart, after objInit has built blkT): every broken wall back.
+; A restart reloads nothing, so they are still open in mapT. A fresh load starts brN at 0 with the
+; file. A wall noted but not yet out is forgotten.
+brIn:${BALL_SND ? `   ldx #${BOSS_MUS ? '$18' : '$11'}                ; the SID from cold (bsSidT${L10AIR ? ': the AIR\'s, amSid, until the angel is seen' : ''}):
+                                ;   all 25 registers with the track, else voice 2 on -- $d407-$d418, 18
+                                ;   bytes (it was $10 into $d408: every byte one register late, the
+                                ;   controls 0, the volume 4 -- found by the 2026-11-13 audit)
+bsSI:   lda ${L10AIR ? 'amSid' : 'bsSidT'},x
+        sta ${BOSS_MUS ? '$d400' : '$d407'},x
+        dex
+        bpl bsSI
+${BOSS_MUS ? `        ldx #${L10AIR ? '$0d' : '$0a'}                ; ...and the track's state (bmIT)
+bmIL:   lda bmIT,x
+        sta bmOn,x
+        dex
+        bpl bmIL
+` : ''}       ` : ''}${HAS_CORNER ? `   jsr bhIn                ; the corner exit shut
+       ` : ''}${BIG_AI2 ? `   jsr bgBall              ; BIG_AI2: a fresh run of balls...
+       ` : ''}${BRK_MARK ? `   ldx #$07                ; the mark the same way up below the horizon: cpChr made charset B
+brMkB:  lda ${hx16(CHARSET + BRK_MK * 8)},x         ;   A flipped (y EOR 7), which put the dot a row lower there --
+        sta ${hx16(CHARSET_B + BRK_MK * 8)},x         ;   two dots one above the other where the halves meet at the
+        dex                     ;   horizon. symPut writes level 4's into both for the same reason.
+        bpl brMkB
+       ` : ''} lda #$00
+        sta brPnd
+${BIG_AI2 ? `        sta bgMd                ; ...following...
+        sta bgWk                ; ...asleep...
+        sta bgArm               ; ...and its first ball waits for you to retreat
+${WHIP ? `        sta bgWh                ; ...and you are not caught
+` : ''}` : ''}        tay                     ; every breakable cell a wall again (brkBT): all 256, as it is cheaper
+brIL:   sty brC                 ;   than a list of the ones that went
+        jsr brkQ
+        beq brIo
+        ldy brC
+        lda #$00
+        sta mapT,y
+        lda #$01
+        sta blkT,y
+brIo:   ldy brC
+        iny
+        bne brIL
+brMk:   jsr mkRuns              ; (brGo's too: the walls moved)
+        inc blkVer
+        jmp fallInv
+; brStr (lxDot, once a rendered frame, after the cast and its seams, before the sink and renderSym)
+${BRK_MARK ? `; first marks every NEW face with BRK_MK. The faces are the cast's own: bndT's delimiters, column 0 to
+; the first, each to the next, the last to ${NLOG - 1}; at a face's first column idT is its cell and faceIdT its
+; run, whose runPFT says which side faces you -- new when the cell on that side was a wall at the start
+; (opnQ). brSplit made each run all new or all old, so its first cell answers for all of it. Only a plain SOLID column changes -- a seam keeps
+; its line. A char shared by two faces is marked if either is. renderSym keys a marked column's cache
+; rs + $40, and a PLAIN entry left under it could pass for a mark that only grew (PARTIAL), so such
+; an entry, in either buffer's cache, becomes $ff: drawn in full once, then cached as marked.
+` : ''}; Then the wall the ball broke this frame goes (brGo), for the next frame's cast.
+brStr:
+${BRK_MARK ? `        lda #$00
+        sta bkS
+        sta bkI
+brDF:   ldx bkI                 ; the next face's first column, or the screen's end
+        lda #${hx(NLOG)}
+        cpx nbnd
+        bcs brDE
+        lda bndT,x
+brDE:   sta bkN
+        cmp bkS
+        beq brDS                ; empty (a delimiter twice)
+        ldx bkS
+        ldy faceIdT,x
+        cpy #${hx(NRUN)}
+        bcs brDS                ; no run (nothing struck)
+        lda runPFT,y            ; the face's kind, from its sense (bit 7) and axis (bit 6):
+        and #$c0                ;   0 W, 1 N, 2 E, 3 S
+        asl                     ; (bits 7-6 round to 1-0 through the carry: three shifts, not six)
+        rol
+        rol
+        tay
+        lda idT,x               ; its cell...
+        clc
+        adc bpDT2,y             ; ...and the one in front of it
+        tay
+        jsr opnQ
+        bne brDS                ; open at the start: one of the level's own faces, plain
+        lda bkN                 ; cells bkS/4 .. (bkN-1)/4
+        sec
+        sbc #$01
+        lsr
+        lsr
+        sta bkE
+        lda bkS
+        lsr
+        lsr
+        tax
+brDL:   lda seamT,x
+        cmp #${hx(SOLID)}
+        bne brDK
+        lda #${hx(BRK_MK)}
+        sta seamT,x
+        lda cbA,x
+        cmp #$40
+        bcs brDB
+        lda #$ff
+        sta cbA,x
+brDB:   lda cbB,x
+        cmp #$40
+        bcs brDK
+        lda #$ff
+        sta cbB,x
+brDK:   cpx bkE
+        inx
+        bcc brDL
+brDS:   lda bkN
+        sta bkS
+        inc bkI
+        cmp #${hx(NLOG)}
+        bcc brDF
+` : ''}        jmp brGo
+${HAS_CORNER ? `; ---- THE CORNER EXIT (LEVEL_CORNER): shut until the four cells round its corner are open ----
+; bhIn (from brIn, every arrival and restart): shut. Hidden -- holeOne skips a hole-like whose hlSeat
+; has bit 7, a consumed socket's mark, which an exit never otherwise gets -- and scenery to fallChk's
+; cell test: its lvlNxtT is $ff, the real destination kept in bhDst for bhStep.
+bhIn:   ldx lvlCorT             ; drawn at the CORNER: orbProjS lets this one hole-like through to slOn,
+        lda #$7f                ;   as a lunge 127/256 of the way toward it from one of its four cells.
+        sta angSlFT,x           ;   Which cell, and so which way, bhStep sets every frame
+        lda #$00
+        sta bhOpen
+        lda #$80
+        sta hlSeat              ; (exit 0)
+        lda lvlNxtT
+        cmp #$ff
+        beq bhI1                ; a restart: already shut, bhDst kept
+        sta bhDst
+        lda #$ff
+        sta lvlNxtT
+bhI1:   rts
+; bhChk (from brGo, after a wall goes): its cell and the three west and north of it. ONE open and it
+; is drawn -- the cells still standing hide what they cover (the user, 2026-11-11: "I do want the
+; partial hole to be visible when one or more blocks is destroyed"); ALL FOUR and it can be fallen through.
+bhChk:  lda bhCY                ; the corner's own cell (its SE), not the entity's: bhStep moves that
+${MULW}
+${ADDX('bhCX')}
+        tay
+        ldx #$00                ; the blocks GONE (mapT not 0: open)
+        lda mapT,y
+        beq bhC1
+        inx
+bhC1:   lda mapT-1,y
+        beq bhC2
+        inx
+bhC2:   lda mapT-${BW},y
+        beq bhC3
+        inx
+bhC3:   lda mapT-${BW + 1},y
+        beq bhC4
+        inx
+bhC4:${BOSS_MUS ? `   stx bmP                 ; the TRACK: the blocks down
+       ` : ''} txa
+        beq bhR                 ; none gone: still shut
+        lda #$00
+        sta hlSeat              ; one gone: drawn
+        cpx #$04
+        bne bhR
+        lda #$01                ; none: open
+        sta bhOpen
+bhR:    ${BOSS_MUS ? 'jmp bmUp                ; ...and its note' : 'rts'}
+; bhStep (bgStep, every frame): the hole BELONGS to the one of its four cells on your side of the corner
+; -- the quadrant you are in -- turned so it is still drawn at the corner (a slide toward it from that
+; cell, worked out in bhStep). occBy judges every wall face against the entity's CELL, and the hole straddles four:
+; held in the far one, the faces of the blocks still standing between were all "in front" of it, and
+; seen from that side it was never drawn at all (the user, 2026-11-12: "the exit hole doesn't always
+; render"); the view cone, which also reads the cell, lost it at the screen's edge the same way.
+; Once it is OPEN the engine's own cell test does the falling: within BRKFALLR of the corner on both
+; axes -- in that same cell -- its destination is put back; anywhere else it is scenery. fallChk, next
+; frame, finds them in the same cell unless that frame's step crosses a cell line -- and then the
+; frame after does.
+bhStep: ldx lvlCorT
+        ldy #$08                ; the slide: 8 from the corner's SE cell, one less west of it, two less
+        lda px+1                ;   north (SE SW NE NW are 8 7 6 5)...
+        cmp bhCX                ; C clear: you are west of the corner
+        lda bhCX
+        bcs bhQ1
+        dey
+bhQ1:   sbc #$00                ; ...and the cell itself: the corner's, or (carry clear) the one west
+        sta orbXCT,x
+        lda py+1
+        cmp bhCY                ; C clear: north
+        lda bhCY
+        bcs bhQ2
+        dey
+        dey
+bhQ2:   sbc #$00                ;   ...or north (the compares' carries do what bhQXT/bhQYT/bhDirT did)
+        sta orbYCT,x
+        tya
+        sta angSlDT,x
+        lda bhOpen
+        beq bhSx
+        ldy #$02                ; ---- open: within BRKFALLR of the corner on both axes? y, then x:
+bhAx:   lda px+1,y              ;   py is px+2, and bhCY is bhCX+2 (bhOpen between them) ----
+        sec
+        sbc bhCX,y
+        beq bhA0
+        cmp #$ff
+        bne bhOut
+        lda px,y
+        cmp #${hx(256 - BRK_FALLQ)}
+        bcc bhOut
+        bcs bhAn                ; always
+bhA0:   lda px,y
+        cmp #${hx(BRK_FALLQ)}
+        bcs bhOut
+bhAn:   dey
+        dey
+        bpl bhAx
+bhIn1:  lda bhDst               ; within: a way out
+        sta lvlNxtT
+bhSx:   rts
+bhOut:  lda #$ff                ; outside: scenery
+        sta lvlNxtT
+        rts
+; (slides by quadrant -- SE SW NE NW are 8 7 6 5 -- are worked out in bhStep: from the corner's SE cell
+                                ;   north-west, SW cell north-east, NE cell south-west, NW cell south-east
+bhCX:   !byte ${CXY[0]}                 ; its own cell, whose north-west corner it is drawn at (the level's
+bhOpen: !byte 0                 ;   exit; orbX0T covers only the orbs). bhOpen: 1 once all four cells are
+bhCY:   !byte ${CXY[1]}                 ;   open -- BETWEEN them, so bhCY is bhCX+2 as py is px+2 (bhStep)
+bhDst:  !byte $ff               ; exit 0's destination, while lvlNxtT says scenery
+` : ''}brkBT:  !byte ${bits.join(',')}   ; level ${BL}'s ${BC.length} breakable cells, a bit each
+${BRK_MARK ? `opnBT:  !byte ${opnBits.join(',')}   ; ...and its ${OC.length} OPEN ones at the start (OPEN_CELLS): RIGHT AFTER brkBT (opnQ)
+` : ''}brC:    !byte 0
+brPnd:  !byte 0                 ; the cell the ball broke this frame, for brGo; 0 = none
+bkS:    !byte 0                 ; brStr: this face's first column, the next's, the index into bndT,
+bkN:    !byte 0                 ;   the face's last cell
+bkI:    !byte 0
+bkE:    !byte 0
+`; })() : ''}; ==== bgAim (lxBgAim, from angPick): the big angel's next step. A = the fill's (anPath's index:
+; E W S N, then the diagonals). Answers as anTry does -- C set and the step in amTX/amTY/amX/amY/
+; amCell/amDir -- by ending in it. See BIGAI. ====
+${BIG_AI2 ? `bgAim:  sta bgBf
+        lda bgWk                ; ---- ASLEEP until you first see it (the user, 2026-11-11: "have the
+        cmp #$02                ;   angel not move until you first see it. then it starts with an
+        beq baAwk               ;   approach") -- on screen: it took a sprite slot (orbSeenT)
+        lsr
+        bcs baWt
+        ldx amIdx
+        lda orbSeenT,x
+        beq baStd               ; not yet: it stands
+${BOSS_MUS ? `        lda #$01                ; SEEN: the track starts
+        sta bmOn
+${L10AIR ? `        jsr bmCold              ; the air gives way: the SID as the effects and the track want it
+` : ''}${BM_MUTE ? '' : `        lda #$41                ; the drone, alone: F1 (bmF8 from bmIT). No Dun on first sight (the user,
+        sta $d404               ;   2026-11-12: "let the drone start by itself") -- bmIT has it on step 0
+`}` : ''}        inc bgWk                ; SEEN: 1, it waits for a map of where you are NOW. The one it has can be
+        lda #$00                ;   two fills (~3 s) old, and it walked off to where you had been ("it
+        sta bfsPhase            ;   triggers it to move left for several squares"). The fill in flight is
+        inc blkVer              ;   dropped and one starts from your cell (blkVer: the map is stale even
+        lda bfsLiveP            ;   if you have not moved), and it moves once that lands (bfsLiveP flips)
+        sta bgWP
+baStd:  clc
+        rts
+baWt:   lda bfsLiveP
+        cmp bgWP
+        bne baUp
+        ldx amIdx               ; ---- meanwhile, STRAIGHT AT YOU (the user, 2026-11-11). It has just
+        lda px+1                ;   seen you, so the line between you is open: a step along the axis you
+        sec                     ;   are farther away on stays near that line, so it is open too, unless
+        sbc orbXCT,x            ;   a corner clips it -- then the other axis. anTry has the last word.
+        ldy #$00                ; east...
+        bcs bw1
+        eor #$ff                ; |dx|, a cell short west: only the compare reads it
+        iny                     ; ...or west
+bw1:    sty baI
+        sta baDN
+        lda py+1
+        sec
+        sbc orbYCT,x
+        ldy #$02                ; south...
+        bcs bw2
+        eor #$ff
+        iny                     ; ...or north
+bw2:    cmp baDN
+        bcs bw3                 ; farther along y: y first, x second (baI)
+        ldx baI                 ; farther along x: x first...
+        sty baI                 ;   ...y second
+        bpl bw4                 ; always: baI is 0-3
+bw3:    tya
+        tax
+bw4:    jsr baTgt               ; X = the direction -> Y = its cell
+        lda blkT,y
+        beq bwGo
+        ldx baI
+        jsr baTgt
+bwGo:   jmp anTry
+baUp:   inc bgWk                ; 2: awake, on the fresh map
+baAwk:  ldx amIdx                ; ---- the STRIKE: from where it stands, is it at its top rung? ----
+        lda orbXCT,x            ;   (BIG_HITD: the distance it is drawn full size from)
+        sta amX
+        lda orbYCT,x
+        sta amY
+${BOSS_MUS ? `        ldy amIdx               ; ---- the TRACK: its cell two from yours or nearer, a step up ----
+        jsr bsCb                ;   (the user, 2026-11-12: "change that to 2 cells away" -- within one
+        cmp #$03                ;   cell it only ever came as it struck). bsCb: the larger axis
+        bcs baM1
+        lda #$04
+        jsr bmEv
+baM1:
+` : ''}        jsr bgDst
+        bcs baMd                ; 2 cells or more
+        cmp #${hx(Math.round(BIG_HITD * 128))}
+        bcs baMd                ; not yet: it keeps coming
+${NOSHOCK ? `        lda bgCd
+        bne baMd                ; the last strike was too recent: on with what it was doing
+` : ''}baHit:  ${NOSHOCK ? `lda #${hx(BIGAI_CD)}       ; NOSHOCK: a flash, yellow then orange, and it backs off
+        sta bgCd
+        lda #$08
+        ldy #$07
+        jsr bfGo
+        jsr bgRet` : WHIP ? `ldx amIdx               ; CAUGHT: the whip first (bgWhip), then the shock
+        jsr dieAim              ; dieTg:dieTgF = its exact bearing
+        ldx #$03
+baFz:   lda px,x                ; ...and where you stand, which the whip holds you to
+        sta bwP,x
+        dex
+        bpl baFz
+        inc bgWh
+        clc                     ; no step. Held where it caught you, you stay in reach, so every
+        rts                     ;   aim until the zap comes back here: it stands, re-aimed` : `lda #$08                ; you DIE: the shock, in yellows and oranges (bdDie)
+        jmp bdDie`}
+baMd:   lda bgMd
+        beq baFol
+        ; ---- BACKING OFF: bgRN cells (1-3), or to a dead end ----
+        lda bgRS
+        cmp bgRN
+        bcs baEnd
+        lda bfsLiveP
+        sta baRd+2
+        sta baRe+2
+        ldx apC                 ; its own cell (anPath's)
+baRd:   lda bfsD0,x             ; operand PATCHED to the live map
+        clc
+        adc #$01
+        beq baEnd               ; $ff (+1 = 0): no distance to climb
+        sta baDN                ; the distance one farther from the player
+        jsr baRnd
+        and #$01
+        sta bgSd                ; which way to turn first
+        lda bgLD
+        cmp #$04
+        bcs baAny               ; it last stepped diagonally: no straight line to avoid
+        and #$02                ; a TURN first: across its last step, either side...
+        eor #$02
+        ora bgSd
+        sta baI                 ;   (kept: the other side is the same eor 1)
+        jsr baFar
+        bcs baGoR
+        lda baI
+        eor #$01
+        jsr baFar
+        bcs baGoR
+        lda bgLD                ; ...then straight on
+        jsr baFar
+        bcs baGoR
+        bcc baEnd               ; always: nowhere farther, so follow again
+baAny:  lda #$03
+        sta baI
+baAL:   lda baI
+        jsr baFar
+        bcs baGoR
+        dec baI
+        bpl baAL
+baEnd:  lda #$00                ; ---- FOLLOWING again ----
+        sta bgMd
+baFol:  ldx bgBf                ; the fill's step
+        stx bgLD
+        jsr baTgt
+        jmp anTry
+baGoR:  lda amDir
+        sta bgLD
+        inc bgRS
+        jmp anTry               ; (anTry re-derives the cell and has the last word)
+; baFar: A = an orthogonal direction -> C set if its cell is open floor ONE FARTHER (baDN) on the live
+; map; the am* step set either way
+baFar:  tax
+        jsr baTgt
+        lda blkT,y
+        bne baFn
+baRe:   lda bfsD0,y             ; operand PATCHED with baRd
+        cmp baDN
+        bne baFn
+        sec
+        rts
+baFn:   clc
+        rts
+; bgRet: BACK OFF 1-3 cells from the next step on, and a new run of balls for when it follows again
+bgRet:  lda #$01
+        sta bgMd
+        lda #$00
+        sta bgRS
+        jsr bg13
+        sta bgRN
+; bgBall: a new run of 1-3 balls
+bgBall: lda #$00
+        sta bgBN
+        jsr bg13
+        sta bgBT
+        rts
+bg13:   jsr baRnd               ; A = 1..3, evenly
+        and #$03
+        beq bg13
+        rts
+${WHIP ? `; bgWhip (bgStep, once you are caught): see WHIP. Undoes this frame's walking (readKeys ran first),
+; then pa:paF closes 1/${1 << WHIP_SH} of the gap a tick, the short way round. The arithmetic shifts
+; keep the sign, so it eases in from either side; within a unit (hi byte -1, 0) it is ON it: zap.
+bgWhip: ldx #$03
+bwFz:   lda bwP,x
+        sta px,x
+        dex
+        bpl bwFz
+        ldy dtv                 ; (0 would run 256 ticks of it: it just lands)
+bwL:    sec
+        lda dieTgF
+        sbc paF
+        sta bwR
+        lda dieTg
+        sbc pa
+        sta bwH                 ; (the gap's whole units, for bwOn)
+${`        cmp #$80                ; signed >> 1
+        ror
+        ror bwR
+`.repeat(WHIP_SH)}        tax
+        lda bwR
+        clc
+        adc paF
+        sta paF
+        txa
+        adc pa
+        sta pa
+        dey
+        bne bwL
+bwOn:   lda bwH                 ; the gap's whole units, before this frame's last step: 0 or -1 is ON it
+        beq bwZp
+        cmp #$ff
+        bne bwX
+bwZp:
+        lda #$08                ; ON IT: the shock, in yellows and oranges (bdDie)
+        jmp bdDie
+bwX:    rts
+bgWh:   !byte 0                 ; 1 once caught (brIn clears it)
+bwR:    !byte 0
+bwH:    !byte 0
+bwP:    !fill 4, 0              ; px, py where it caught you
+` : ''}bgWk:   !byte 0                 ; 0 asleep, 1 seen and waiting for a fresh map, 2 awake: until 1 it throws nothing
+bgWP:   !byte 0                 ; the live map's page when it was seen
+bgRdy:  !byte 0                 ; 1: bsIdle found it clear last frame too (the stamps' frame of lag)
+bgSt:   !byte 0                 ; non-zero: bgOcc stamped a wall over it since bsIdle last looked
+bgArm:  !byte 0                 ; 1 once it has come within BIGFIRE: until then it does not throw
+bgRS:   !byte 0                 ; steps backed off so far
+bgRN:   !byte 0                 ; ...and how many it will
+bgBN:   !byte 0                 ; balls thrown in this run...
+bgBT:   !byte 2                 ;   ...and how many it will throw
+bgLD:   !byte 0                 ; its last step's direction (E W S N, 4+ diagonal)
+baDN:   !byte 0
+baI:    !byte 0
+` : `bgAim:  sta bgBf
+        ldx amIdx
+        sec                     ; toward the player along the axis it is farther along: bgTw
+        lda px+1                ;   (0 E, 1 W, 2 S, 3 N), and how far on either axis, for BIGAI_FAR
+        sbc orbXCT,x
+        sta baDX
+        bpl ba1
+        eor #$ff
+        clc
+        adc #$01
+ba1:    sta baAX                ; |dx|
+        sec
+        lda py+1
+        sbc orbYCT,x
+        sta baDY
+        bpl ba2
+        eor #$ff
+        clc
+        adc #$01
+ba2:    sta baAY                ; |dy|
+        cmp baAX
+        bcs baV
+        lda baDX                ; |dx| > |dy|: along x
+        asl                     ; sign into C: 0 E, 1 W
+        lda #$00
+        rol
+        jmp baT
+baV:    lda baDY                ; along y: 2 S, 3 N
+        asl
+        lda #$01
+        rol
+baT:    sta bgTw
+        ldx bgBf                ; ---- the STRIKE: is its chase step one BIGSTOP refuses? ----
+        jsr baTgt
+        jsr bgFar
+        bcs baMd
+        lda bgCd
+        beq baHit
+        clc                     ; on you, but the last strike was too recent: it stands
+        rts
+baHit:  lda #${hx(BIGAI_CD)}
+        sta bgCd
+        lda #$08                ; yellow, then orange
+        ldy #$07
+        jsr bfGo
+        lda #$02
+        sta bgMd
+        lda #${hx(BIGAI_BACKOFF)}
+        sta bgMN
+baMd:   lda bgMN                ; ---- a spell still running, or a new one ----
+        bne baGo
+        jsr baRnd
+        sta bgR
+        and #$01
+        sta bgSd                ; the strafe's side, for the whole spell
+        lda baAX
+        cmp #${hx(BIGAI_FAR)}
+        bcs baCh
+        lda baAY
+        cmp #${hx(BIGAI_FAR)}
+        bcs baCh
+        lda bgR
+        lsr
+        and #$07                ; 0..7 against the weights
+        cmp #${hx(BIGAI[0])}
+        bcc baCh
+        cmp #${hx(BIGAI[0] + BIGAI[1])}
+        bcc baSt
+        lda #$02                ; pull back: 1-2 steps
+        sta bgMd
+        lda bgR
+        rol
+        rol
+        and #$01
+        clc
+        adc #$01
+        sta bgMN
+        bne baGo
+baSt:   lda #$01                ; strafe: 1-3 steps
+        sta bgMd
+        lda bgR
+        rol
+        rol
+        rol
+        and #$01
+        sta bgMN
+        lda bgR
+        and #$10
+        beq baSt2
+        inc bgMN
+baSt2:  inc bgMN
+        bne baGo
+baCh:   lda #$00                ; chase: 2-3 steps
+        sta bgMd
+        lda bgR
+        rol
+        rol
+        and #$01
+        clc
+        adc #$02
+        sta bgMN
+baGo:   dec bgMN                ; ---- this step, by mode ----
+        lda bgMd
+        beq baChs
+        cmp #$01
+        beq baStr
+        lda bgTw                ; PULL BACK: straight away (E<->W, S<->N)
+        eor #$01
+        tax
+        jsr baTry
+        bcs baOut
+baStr:  lda bgTw                ; STRAFE: across the line, on this spell's side...
+        and #$02
+        eor #$02
+        ora bgSd
+        tax
+        jsr baTry
+        bcs baOut
+        lda bgSd                ; ...or the other
+        eor #$01
+        sta bgSd
+        lda bgTw
+        and #$02
+        eor #$02
+        ora bgSd
+        tax
+        jsr baTry
+        bcs baOut
+baChs:  ldx bgBf                ; CHASE: the fill's step
+        jsr baTgt
+        jmp anTry
+baOut:  jmp anTry               ; (a free cell: anTry re-derives it and has the last word)
+; baTry: X = a direction -> C set if its cell is open floor (blkT 0); the am* step set either way
+baTry:  jsr baTgt
+        lda blkT,y
+        beq btOk
+        clc
+        rts
+btOk:   sec
+        rts
+`}; baTgt: X = a direction -> amDir/amTX/amTY/amX/amY, and Y = the cell
+baTgt:  stx amDir
+        ldy amIdx
+        lda pathDXT,x
+        sta amTX
+        clc
+        adc orbXCT,y
+        sta amX
+        lda pathDYT,x
+        sta amTY
+        clc
+        adc orbYCT,y
+        sta amY
+${MULW}
+${ADDX('amX')}
+        tay
+        rts
+${NOSHOCK ? `; baRnd: an 8-bit Galois LFSR (taps $1d), stirred with the clock so restarts differ
+baRnd:  lda bgRs
+        asl
+        bcc baR1
+        eor #$1d
+baR1:   eor frameCnt
+        bne baR2
+        lda #$a5                ; never 0: an LFSR stuck at 0 stays there
+baR2:   sta bgRs
+        rts
+` : ''}bgBf:   !byte 0                 ; the fill's step this time
+${BIG_AI2 ? '' : `baDX:   !byte 0                 ; player - angel, in cells, and its size on each axis (bgFar has its own)
+baDY:   !byte 0
+baAX:   !byte 0
+baAY:   !byte 0
+bgTw:   !byte 0                 ; toward the player: 0 E, 1 W, 2 S, 3 N
+bgMN:   !byte 0                 ; ...steps left in it
+bgR:    !byte 0
+`}bgMd:   !byte 0                 ; the spell: 0 chase, 1 strafe, 2 pull back...
+bgSd:   !byte 0                 ; ...and a strafe's side
+${NOSHOCK ? `bgRs:   !byte $5a
+` : ''}bgCd:   !byte 0                 ; ticks until it may strike again
+${NOSHOCK ? `bfC1:   !byte 1                 ; NOSHOCK's flash under way: its first half, its second
+bfC2:   !byte $0e` : ''}
+; bsCb: Y = an entity -> A = how far you are from its cell, in cells: the larger axis. Takes bsC.
+bsCb:   lda px+1
+        sec
+        sbc orbXCT,y
+        bcs bsCb1
+        eor #$ff
+        adc #$01
+bsCb1:  sta bsC
+        lda py+1
+        sec
+        sbc orbYCT,y
+        bcs bsCb2
+        eor #$ff
+        adc #$01
+bsCb2:  cmp bsC
+        bcs bsCb3
+        lda bsC
+bsCb3:  rts
+; bsAt: X = the ball, Y = the angel -> the ball at the angel's cell, offsets 0. A = 0.
+bsAt:   lda orbXCT,y
+        sta orbXCT,x
+        lda orbYCT,y
+        sta orbYCT,x
+        lda #$00
+        sta bsXF
+        sta bsYF
+        rts
+; bsBD: X = the ball -> bsHX:bsDX, bsHY:bsDY = |ball - you| on each axis (8.8, a 256th short when the
+; ball is west / north), and bsS shifted left twice, taking 1 if you are west, then 1 if north, of it
+bsBD:   lda bsYF
+        eor #$80                ; its 8.8 is cell:(128 + offset): the offset with bit 7 flipped
+        sta bsDY
+        lda orbYCT,x
+        ldy #$02
+        jsr bsAb
+        rol bsS
+        lda bsXF
+        eor #$80
+        sta bsDX
+        lda orbXCT,x
+        ldy #$00
+        jsr bsAb
+        rol bsS
+        rts
+; bsAb: Y = 0 (x) or 2 (y); A:bsDX,y = the ball's 8.8 on that axis -> bsHX,y:bsDX,y = |ball - you|
+; (ones' complement when negative), C set if the ball is at or past you that way (east / south)
+bsAb:   sta bsHX,y
+        lda bsDX,y
+        sec
+        sbc px,y
+        sta bsDX,y
+        lda bsHX,y
+        sbc px+1,y
+        bcs bsAbR
+        eor #$ff                ; behind: both bytes complemented (a cell short, as before)
+        sta bsHX,y
+        lda bsDX,y
+        eor #$ff
+        sta bsDX,y
+        rts
+bsAbR:  sta bsHX,y
+        rts
+; bsOpen: is entity X's cell open? C set if so; C clear on a wall. Keeps X.
+bsOpen: lda orbYCT,x
+${MULW}
+        sta bsC
+        lda orbXCT,x
+        clc
+        adc bsC
+        tay
+        ldx bltIxT
+        lda blkT,y
+        cmp #$01                ; 1 = a wall (an angel's 2 it flies through)
+        beq bsWall
+        sec
+        rts
+bsWall: clc
+        rts
+; bsIdle: on the ground -- wait out the gap, then THROW: at the player, from the angel's cell
+bsIdle:${BIG_AI2 ? `${NOSHOCK ? ` lda bsFl                ; BIG_AI2: NO GAP -- the next ball the moment the last one's
+        bne bsOut               ;   results are dealt with: its wall went in brGo the frame it struck,
+                                ;   and a NOSHOCK hit waits out its flash (the user, 2026-11-11: "fire
+                                ;   right after the previous ball hits something ... in relatively
+                                ;   rapid succession"). A hit that kills leaves no flash to wait for
+       ` : ''} lda bgWk                ; not before it has been seen...
+        beq bsHold
+        lda bgSt                ; ...nor with ANY wall in front of any of it this frame (the user,
+        ldy #$00                ;   2026-11-11: "don't fire if there's any occlusion stamps?" -- round a
+        sty bgSt                ;   corner it shot the corner block). bgOcc notes each stamp; a flag
+        bne bsHold              ;   left from frames the ball was flying costs one frame's wait
+        lda bgMd                ; only while following...` : ` lda bsTk
+        clc
+        adc dtv
+        sta bsTk
+        cmp #${hx(BOLT_GAP)}
+        bcc bsOut
+`}${BIG_AI2 ? `
+        bne bsHold
+        ldy bgAIxT              ;   ...and farther than BIGFIRE on either axis
+        jsr bsCb
+        cmp #${hx(BIGFIRE + 1)}
+        bcs bsFr
+        lda #$01                ; within BIGFIRE: from now on, pulling away draws fire -- its FIRST
+        sta bgArm               ;   ball waits for you to retreat (the user, 2026-11-11)
+bsHold: lda #$00                ; not clear THIS frame: the two-frame count (bgRdy) starts again
+        sta bgRdy
+        rts
+bsFr:   lda bgArm
+        beq bsHold              ; it has not come close yet: it only approaches
+` : `        lda #$00
+        sta bsTk
+`}        ldy bgAIxT              ; from the angel's cell
+${BIG_AI2 ? `        lda orbSeenT,y          ; ...and only if some of it is on screen this frame (the user, 2026-11-11:
+        beq bsHold              ;   "when it is fully occluded it should not fire" -- behind the central
+                                ;   pillar it shot the pillar down at no risk to you). Partly hidden still
+                                ;   fires. Off screen counts as hidden too: orbSeenT is "took a sprite
+                                ;   slot", which a hidden (orbHidT) angel never does either
+        lsr bgRdy               ; ...and all of the above TWO frames running (the user, 2026-11-12: "the
+        bcs bsRd2               ;   angel is firing while partly occluded by walls"). The stamps, and so
+        inc bgRdy               ;   bgSt, are a frame BEHIND orbSeenT: occStamp runs after renderSym, on
+        rts                     ;   the pose orbMove found LAST frame. On the frame it first comes into
+bsRd2:                          ;   view -- round a corner, partly behind it -- nothing has stamped it yet.
+                                ;   (lsr: 1 -> 0 with the carry set is "clear last frame too", and resets)` : `        lda orbHidT,y
+        bne bsOut`}
+        jsr bsAt                ; at its centre
+        sta bsS
+        jsr bsBD                ; ---- the AIM: |d| on each axis, and which way (bsS bits 0 west, 1 north) ----
+bsT2:   lda bsHX                ; halve both until both fit a byte: only their RATIO matters
+        ora bsHY
+        beq bsT3
+        lsr bsHX
+        ror bsDX
+        lsr bsHY
+        ror bsDY
+        jmp bsT2
+bsT3:   lda bsDX                ; the larger is the MAJOR axis (bsDX), the other the minor (bsDY)
+        cmp bsDY
+        bcs bsT4
+        ldy bsDY
+        sta bsDY
+        sty bsDX
+        lda bsS                 ; bit 2: y is the major axis
+        ora #$04
+        sta bsS
+bsT4:   lda bsDX
+        bne bsT5
+        rts                     ; on the player's own spot: nothing to throw at
+bsT5:   sta dvD                 ; minor * 16 / major: 0..16, one of 17 slopes, ~3 degrees apart at worst
+        lda bsDY                ;   (it was minor * 64 / major, then /4: the same floor, one step)
+        lsr
+        lsr
+        lsr
+        lsr
+        sta dvQ1
+        lda bsDY
+        asl
+        asl
+        asl
+        asl
+        sta dvQ0
+        lda #$00
+        sta dvQ2
+        jsr udiv
+        ldy dvQ0
+        ldx bltIxT              ; (udiv took X)
+        lda bsVMjT,y            ; the speed, split along the two axes
+        sta bsVX
+        lda bsVMnT,y
+        sta bsVY
+        lda bsS
+        and #$04
+        beq bsT6
+        ldy bsVX                ; y major: swap
+        lda bsVY
+        sta bsVX
+        sty bsVY
+bsT6:   lsr bsS                 ; bit 0 out: west (bsS is spent here)
+        bcc bsT7
+        lda #$00                ; west
+        sec
+        sbc bsVX
+        sta bsVX
+bsT7:   lsr bsS                 ; ...and bit 1, now bit 0: north
+        bcc bsGo
+        lda #$00                ; north
+        sec
+        sbc bsVY
+        sta bsVY
+bsGo:   lda #${hx(BOLT_DIR)}               ; orbProjS: draw it at bsXF/bsYF
+        sta angSlDT,x
+        lda #$00
+        sta angSlFT,x
+        sta orbHidT,x
+${BS_ZAP ? `        lda #${hx((ZAP_PW0 - ZAP_PWS) & 255)}               ; the THROW: the ZAP (bzTick strikes it on its next tick)
+        sta bzPL
+        lda #$00                ; (the width's high byte: the build checks it is 0)
+        sta bzPH
+        sta bzT                 ; ...last, so the IRQ never sees half of it
+${BS_PASS ? `        lda #$fe                ; and the PASS-BY armed: it sounds when this ball comes by
+        sta pbT
+` : ''}` : BALL_SND ? `        jsr bsSnd               ; the THROW: the ball's sound starts, from where it is
+` : ''}${BALL_SND && BOSS_MUS ? `        lda #$01                ; the first at you: a step up the track
+        jsr bmEv
+` : ''}${BIG_AI2 ? `        inc bgBN                ; BIG_AI2: the last of this run's balls? then back off
+        lda bgBN
+        cmp bgBT
+        bcc bsGx
+        jmp bgRet
+bsGx:
+` : ''}        rts
+; the speed BOLT_SPD split along the major and minor axes, for slopes minor/major = 0, 1/16 .. 16/16
+bsVMjT: !byte ${[...Array(17)].map((_, k) => Math.round(BOLT_SPD * Math.cos(Math.atan(k / 16)))).join(',')}
+bsVMnT: !byte ${[...Array(17)].map((_, k) => Math.round(BOLT_SPD * Math.sin(Math.atan(k / 16)))).join(',')}
 
+; bgFlt: its floating Y (X = ovar), into the Y path at oSVYD
+bgFlt:  cpy bltIxT              ; (Y = oidx) the BALL LIGHTNING: its centre on the horizon, no bob
+        bne bgFltA
+        lda orbAnchT,x          ;   Y = 150 - half the sprite's height (it is centred in its frame)
+        lsr
+        eor #$ff
+        sec
+        adc #150
+        clc
+        jmp oSvYD
+bgFltA: lda ohgt                ; (its distance, for the stamp's depth test: bgOcc)
+        sta bgHgt
+        lda bigYT,x
+        sta bgPD
+        lda frameCnt            ; ...bobbing: a sine of the 60Hz clock, shifted down for a smaller rung
+        lsr
+        lsr
+        and #$1f
+        tay
+        lda bobT,y
+        ldy bigBST,x
+obB:    dey
+        bmi obB2
+        cmp #$80                ; (signed: the sign comes back in)
+        ror
+        jmp obB
+obB2:   clc
+        adc bgPD
+        clc
+        jmp oSvYD
+; bgPart: its other sprites (Y = ovar), then orbYes
+bgPart: cpy #${hx(BOLT_V0)}               ; (Y = ovar) the ball lightning is one sprite
+        bcc bgPa
+        jmp orbYes
+bgPa:
+        ; ---- the BIG angel: up to BIG_MAXPARTS more sprites, each at its own offset ----
+        ; X from the primary's (bigPX, signed hires, 9-bit wrap), Y rows above it (bigPY); placed
+        ; as the sentry's right column is (svQuad: $fe, no stamp -- the primary's box spans them all).
+        lda bigPI,y
+        sta bgPK
+        lda orbExpT,y           ; a magnified rung doubles every offset
+        sta bgPM
+        lda #${BIG_MAXPARTS}
+        sta bgPN
+obgL:   ldy bgPK
+        lda bigPP,y
+        beq orbYes              ; the set's sprites are packed first: a 0 ends them
+        lda bigPX,y             ; X: the primary's + the offset (signed, 9-bit wrap)
+        ldx bgPM
+        beq obg0
+        asl
+obg0:   sta bgPD
+        clc
+        adc o0
+        sta svRX
+        lda bgPD
+        and #$80                ; the offset's sign, as its high byte (the carry untouched)
+        beq obg1
+        lda #$ff
+obg1:   adc o1
+        and #$01
+        sta svRX8
+        ldx onv
+        cpx onvH
+        bcs orbYes              ; no slot left
+        lda bigPU,y             ; Y: that many sprite heights above the primary
+        sta bgPD
+        lda o3
+        ldy ovar
+obgU:   dec bgPD
+        bmi obgY
+        sec
+        sbc orbAnchT,y
+        bcs obgU
+        bcc obgNx               ; above the top of the screen: not this one
+obgY:   sta obY,x
+        ldy bgPK
+        lda bigPP,y
+        ldy ovar
+        jsr svQuad
+obgNx:  inc bgPK
+        dec bgPN
+        bne obgL
+        jmp orbYes
+; ---- bgFar: may the big angel stand at (amX, amY)? C set if that cell's centre is at least
+; BIGSTOP cells from the player. |dx| and |dy| in 128ths of a cell (2 cells or more on either axis is
+; simply far), distance ~ max + min/4 + min/8 (within ~7% of the true one). ----
+bgFar:  jsr bgDst
+        bcs bfR                 ; 2 cells or more
+        cmp #${hx(Math.round(BIGSTOP * 128))}
+bfR:    rts                     ; C set: far enough
+; bgDst: (amX, amY)'s centre to the player -> A = the distance in 128ths of a cell, C clear; or C set
+; if it is 2 cells or more. |dx| and |dy| through bsAb, the ball's own (a cell's centre is 8.8 cell:$80)
+bgDst:  lda #$80
+        sta bsDX
+        sta bsDY
+        lda amX
+        ldy #$00
+        jsr bsAb
+        lda amY
+        ldy #$02
+        jsr bsAb
+        lda bsHX
+        ora bsHY
+        cmp #$02
+        bcs bfYes               ; 2 cells or more on an axis
+        lsr bsHX                ; 128ths: both fit a byte now
+        ror bsDX
+        lsr bsHY
+        ror bsDY
+        lda bsDY
+        cmp bsDX                ; A = |dy|: max in bsDX, min in A
+        bcc bf1
+        ldy bsDX
+        sta bsDX
+        tya
+bf1:    lsr                     ; min/4 + min/8
+        lsr
+        sta bsDY
+        lsr
+        clc
+        adc bsDY
+        adc bsDX
+        bcs bfYes               ; past 2 cells
+        rts                     ; (carry clear: the bcs just said so)
+bfYes:  sec
+        rts
+; ---- bgOcc: the BIG angel's stamp for this span, by depth ----
+; Over [max(span, box) .. min(span, box)], every run of columns where the wall is NEARER than the
+; angel (colH > bgHgt) is stamped; the rest shows. A box edge rounds out to its cell, as the face
+; path's does; an edge inside the box is the wall's (or where its depth crosses the angel's): exact.
+bgOcc:  ldx osI
+        lda ohL
+        cmp obL,x
+        bcs bo1
+        lda obL,x
+bo1:    sta bgC
+        lda ohRun
+        cmp obR,x
+        bcc bo2
+        lda obR,x
+bo2:    sta bgE
+        cmp bgC
+        bcc boOut               ; inverted: nothing of the box in this span
+        ldx bgC
+boScan: lda colH,x
+        cmp bgHgt
+        beq boNo
+        bcc boNo
+        stx osL                 ; a nearer run starts here...
+        sta bgSt                ;   (and it is not wholly in view: colH > bgHgt, never 0)
+boIn:   cpx bgE
+        beq boEnd
+        inx
+        lda colH,x
+        cmp bgHgt
+        beq boBrk
+        bcs boIn
+boBrk:  dex
+boEnd:  stx osR                 ; ...and ends here
+        stx bgC
+        ldx osI
+        lda osL
+        cmp obL,x
+        bne bo3
+        and #$fc                ; the box's own edge: round out
+        sta osL
+bo3:    lda osR
+        cmp obR,x
+        bne bo4
+        ora #$03
+        sta osR
+bo4:    jsr oSCells
+        ldx bgC
+boNo:   cpx bgE
+        bcs boOut
+        inx
+        jmp boScan
+boOut:  jmp oSAdv
+;@@LX-END
+` : ''}
 ; oSCells: fill cells [osL>>2 .. osR>>2] x rows [osRow .. osRowB] with the whole-cell occluder,
 ; and set this orb's priority bit. Whole cells only for now: the edge splits are the next step,
 ; so occlusion currently quantises to a 4-column cell (8 screen pixels).
@@ -17225,8 +20446,16 @@ ohOk:   lda o1
         bne opjNo               ; |right|*h past 65535 is far outside the FOV
 ${FINECOL ? `${FINECOL_ALL ? '' : `        lda oidx                ; FINECOL: the SENTRIES only, entities 0..svN-1 (holes are all
         cmp svNT                ;   past nOrbT, so past them too)
-        bcs ocfDn
-`}        lda ocF                 ; ---- FINECOL: + |right| * frac(h) / 256 ----
+${HAS_BIG ? `        bcc ocfGo
+        cmp nOrbT               ; ...and the BIG angel, which glides in at an angle in plain sight: the
+        bcs ocfDn               ;   user saw it "go right, then snap back over and over as it approaches"
+        tay                     ;   from the side of the hall (a hole-like is past the entity tables)
+        lda orbTallT,y
+        cmp #$02
+        bne ocfDn
+ocfGo:
+` : `        bcs ocfDn
+`}`}        lda ocF                 ; ---- FINECOL: + |right| * frac(h) / 256 ----
         beq ocfDn               ; Without it the column moves only when h ticks over a whole row,
         sta mq                  ;   and at a distance h is ~10: the column held still (or drifted
         lda oaL                 ;   with |right| alone) and then jumped ~10% when h stepped, so an
@@ -17401,14 +20630,32 @@ odSk:
         ldx #${hx(VAR_CLAMP)}
 omVarC:
         ldy oidx                ; TALL entities have their own rungs, appended to the same
+${HAS_BIG ? `        cpy bltIxT              ; the BALL LIGHTNING: its own rungs (bltVarT)
+        bne omVarN
+        lda bltVarT,x
+        jmp omVarS
+omVarN:
+` : ''}
 ${HAS_SILVER ? `        cpy svNT                ;   variant list so every table indexed by ovar still works --
         bcc omVarV              ;   and so do the SENTRIES, entities 0..svN-1, after the angel's
 ` : ''}        lda orbTallT,y
         beq omVarO
-
+${HAS_BIG ? `        lsr                     ; 2 = the BIG angel (LEVEL_BIG): its own distance map
+        bne omVarG
+` : ''}
         lda angVarT,x
         bne omVarS              ; always taken: the angel's rungs never start at 0
-${HAS_SILVER ? `omVarV: lda svVarT,x
+${HAS_BIG ? `omVarG: cpx #${hx(BIGVAR_N)}               ; (its table stops where its top rung begins)
+        bcc omVgC
+        ldx #${hx(BIGVAR_N - 1)}
+omVgC:  lda bigVarT,x
+        cmp #${hx(BIG_V0)}               ; its TOP rung: drawn at full size, so it stops (angStep)
+        bne omVarS
+        lda #$01
+        sta bgTop
+        lda #${hx(BIG_V0)}
+        jmp omVarS              ; (a bne here was never taken: Z is the cmp's, equal)
+` : ''}${HAS_SILVER ? `omVarV: lda svVarT,x
         bne omVarS              ; always taken: nor do the sentry's
 ` : ''}omVarO: lda orbVarT,x
 omVarS: sta ovar
@@ -17495,9 +20742,21 @@ oxDn:   asl                     ; X = b * 2, low byte and the X8 bit
         ; anchor into the constant keeps the sum in range all the way down to 0.62 cells,
         ; which is past the point where the whole sprite is below the last visible line.
         ldx ovar
-${HAS_SILVER ? `        cpx #${hx(SV_V0)}               ; a SENTRY's rung? It hovers (below); nothing else does
-        bcs oSvY
-` : ''}        lda orbYBaseT,x
+${HAS_BIG && BIGFLOAT ? `        ldy oidx                ; the BIG angel FLOATS: its centre held BIGC rows above the horizon
+        lda orbTallT,y          ;   at every distance, so close up it looms rather than sinking
+        cmp #$02                ;   with the floor line -- one Y per rung, bigYT (level code: bgFlt)
+        beq oBgY
+        cpy bltIxT              ; ...and its BALL LIGHTNING floats too
+        bne oBgN
+oBgY:   jmp lxBgY
+oBgN:
+` : ''}${HAS_SILVER ? `        cpx #${hx(SV_V0)}               ; a SENTRY's rung? It hovers (below); nothing else does
+${HAS_BIG ? `        bcc oSvYn
+        cpx #${hx(BIG_V0)}               ; (the big angel's rungs follow the sentry's)
+        bcc oSvY
+oSvYn:
+` : `        bcs oSvY
+`}` : ''}        lda orbYBaseT,x
         clc
         adc ohgt
 ${HAS_SILVER ? `        jmp oSvYD
@@ -17533,7 +20792,10 @@ oSvYD:
         pha                     ; ---- centre a TALL entity on its ideal height ----
         ldy oidx                ;   the offset is half the rung's quantisation error, signed,
         lda orbTallT,y          ;   precomputed per ohgt -- see angMidT in the build. X holds
-        beq oMidSk              ;   ovar for the cap below, so only A and Y are touched here.
+${HAS_BIG ? `        cmp #$01                ;   (the BIG angel stands on the floor: angMidT is the angel's)
+        bne oMidSk
+` : `        beq oMidSk              ;   ovar for the cap below, so only A and Y are touched here.
+`}
         ldy ohgt
         pla
         clc
@@ -17641,7 +20903,23 @@ ${process.env.ORBOCCDBG ? `        lda #$02
         sta ohDbg
 ohDb:
 ` : ''}
-        ldy oidx                ; OCCFACE: the cell occBy tests the runs' faces against -- for the
+${HAS_BIG && process.env.BIGDEPTH !== '0' ? `        ldy oidx                ; the BIG angel is as wide as a corridor, so one cell against each face's
+        lda orbTallT,y          ;   plane cannot say what hides it (its wings reach past the walls its
+        cmp #$02                ;   centre is clear of). DEPTH instead, per column: a wall hides it
+        bne owNB                ;   where it is nearer (colH = 88/d against its own h). It shows if any
+        ldx ocl2                ;   column of its box has a wall no nearer than itself.
+owBL:   lda colH,x
+        cmp ohgt
+        beq owBV
+        bcc owBV
+        cpx ocmax
+        bcs owBH
+        inx
+        bne owBL                ; always
+owBV:   jmp opDone
+owBH:   jmp ohHide
+owNB:
+` : ''}        ldy oidx                ; OCCFACE: the cell occBy tests the runs' faces against -- for the
         lda orbXCT,y            ;   angel's probe, the cell it is THINKING of, which anTry has just
         sta ooCX                ;   written here
         lda orbYCT,y
@@ -17752,18 +21030,37 @@ ${ENT1PROF ? "        jsr pfT13               ; ENT1PROF: the occluder span walk
         sta omBit
         ora omEn
         sta omEn
-        ldy ovar
+${HAS_BIG && BOLT_HIRES ? `        lda oidx                ; BOLTHIRES: the ball lightning is a HI-RES sprite -- its slot's
+        cmp bltIxT              ;   multicolour bit comes out of omMc ($ff again every frame)
+        bne obMcN
+        lda omBit
+        eor #$ff
+        and omMc
+        sta omMc
+obMcN:
+` : ''}        ldy ovar
         lda orbPtrT,y
 ${HAS_SILVER ? `        cpy #${hx(SV_V0)}               ; Y = ovar: a SENTRY's sprite? svReg notes it for the 60Hz
         bcc oSvR1               ;   svTick and hands back the frame that is up right now
-        jsr svReg
+${HAS_BIG ? `        cpy #${hx(BIG_V0)}
+        bcs oSvR1
+` : ''}        jsr svReg
 oSvR1:
 ` : ''}        ldy oidx                ; the ENTITY, not the variant
 ${HAS_IDOL ? `        clc                     ; 0 for an orb; the idol's bitmap base for the idol. The two
         adc orbArtT,y           ;   ladders are geometrically identical, so the idol borrows the
                                 ;   orb's rung wholesale and swaps only the picture.
 ` : ''}        sta obP,x               ; buffered, not written: see osFlush
-${HAS_IDOL ? `        lda orbArtT,y           ; non-zero only for the idol, and we reach here only when
+${HAS_BIG ? `        lda oidx                ; the BALL LIGHTNING has TWO frames a rung (the second turned 90
+        cmp bltIxT              ;   degrees), swapped every rendered frame (the user, 2026-11-10: "just
+        bne obFrN               ;   two per rung, swapped every frame ... to make it look more lively")
+        lda iterLo
+        and #$01
+        clc
+        adc obP,x
+        sta obP,x
+obFrN:
+` : ''}${HAS_IDOL ? `        lda orbArtT,y           ; non-zero only for the idol, and we reach here only when
         beq obNotI              ;   this entity actually TOOK a slot -- so this means "the idol
         sta idolWk              ;   is on screen", not "the level has one"
 obNotI:
@@ -17807,15 +21104,12 @@ oNoXy: lsr
         lda omBit
         ora omX8
         sta omX8
-oNoM:   ; remember what this orb asked for; the second pass compares it against what the
-        ; scene actually ended up painting, which is the only place a conflict can show up
+oNoM:   ; the slot's record, for occStamp: which entity, its variant, its cells and columns
         ldx onv
         lda oidx
         sta obIX,x
         lda ovar
         sta obV,x
-        lda #$80                ; "may have an occluder": the conservative answer, always
-        sta obOcc,x
         lda ocl
         sta obCL,x
         lda ocr
@@ -17824,37 +21118,28 @@ oNoM:   ; remember what this orb asked for; the second pass compares it against 
         sta obL,x               ; the tight column range, for the stamp pass
         lda ocmax
         sta obR,x
-        lda ocl2
-        and #$03
-        tay
-        lda bbLT,y              ; the columns of the leftmost cell inside the box
-        sta obBL,x
-        lda ocmax
-        and #$03
-        tay
-        lda bbRT,y              ; ... and of the rightmost
-        sta obBR,x
-        stx onvL                ; X is still the lower slot: the upper half copies its record
         inc onv
         ; ---- a TALL entity takes a second slot for its upper half ----
         ; Same X, same colour, same expand; the other bitmap; and one sprite height above -- 21
         ; rows, or 42 once vmag has doubled it, which is exactly what orbAnchT already holds.
         ldy ovar
         lda orbPtrU,y
-        beq ${HAS_SILVER ? 'orbRt' : 'orbYes'}              ; one-sprite entity: nothing more to do
+        beq ${HAS_QUAD ? 'orbRt' : 'orbYes'}              ; one-sprite entity: nothing more to do
         sta otmp
         ldx onv
         cpx onvH
-        bcs ${HAS_SILVER ? 'orbRt' : 'orbYes'}              ; no slot left: show the lower half rather than nothing
+        bcs ${HAS_QUAD ? 'orbRt' : 'orbYes'}              ; no slot left: show the lower half rather than nothing
         sec
         lda o3
         sbc orbAnchT,y
-        bcc ${HAS_SILVER ? 'orbRt' : 'orbYes'}              ; upper half is off the top of the screen
+        bcc ${HAS_QUAD ? 'orbRt' : 'orbYes'}              ; upper half is off the top of the screen
         sta obY,x
         lda otmp
 ${HAS_SILVER ? `        cpy #${hx(SV_V0)}               ; (Y = ovar still) the sentry's upper half, likewise
         bcc oSvR2
-        jsr svReg
+${HAS_BIG ? `        cpy #${hx(BIG_V0)}
+        bcs oSvR2
+` : ''}        jsr svReg
 oSvR2:
 ` : ''}        sta obP,x
         lda orbBitT,x
@@ -17892,8 +21177,7 @@ oNoX2y: lsr
         lda omBit
         ora omX8
         sta omX8
-oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EXCEPT its identity
-        lda #$fe                ; ---- and it must NOT stamp ----
+oNoM2:  lda #$fe                ; ---- the upper half must NOT stamp ----
         sta obIX,x              ; The old note here said the two halves span the same columns, so
                                 ; the upper slot could just copy the lower's record and let the
                                 ; stamp pass clip by column. But the stamp clips by ROW too, from
@@ -17911,30 +21195,18 @@ oNoM2:  ldy onvL                ; the upper half inherits the lower's record, EX
                                 ; occluders it was supposed to be behind. occStamp gives $fe its
                                 ; own arm -- inherit the bit, stamp nothing. Both values are
                                 ; >= ORBS.length, so the ordinary reject still catches them.
-        lda obV,y
-        sta obV,x
-        lda obOcc,y
-        sta obOcc,x
-        lda obCL,y
-        sta obCL,x
-        lda obCR,y
-        sta obCR,x
-        lda obL,y
-        sta obL,x
-        lda obR,y
-        sta obR,x
-        lda obBL,y
-        sta obBL,x
-        lda obBR,y
-        sta obBR,x
         inc onv
-${HAS_SILVER ? `orbRt:  ; ---- SILVER: a 2x2 rung's RIGHT column, one sprite (24 hires pixels) over ----
+${HAS_QUAD ? `orbRt:  ; ---- SILVER, BIG ANGEL: a 2-wide rung's RIGHT column, one sprite (24 hires pixels) over ----
         ; Built like the upper half: same colour and priority, the lower slot's record, $fe so it
         ; does not stamp -- the lower slot's box already spans both columns (orbPartsOf).
         ldy ovar
         cpy #${hx(SV_V0)}               ; only a SENTRY's rung can have one: the tables start at SV_V0
         bcc orbYes
-        lda orbPtrR,y
+${HAS_BIG ? `        cpy #${hx(BIG_V0)}
+        bcc orbSvR
+        jmp lxBgPt              ; the BIG angel's other sprites (level code: bgPart)
+orbSvR:
+` : ''}        lda orbPtrR,y
         beq orbYes              ; a one-column rung
         sta otmp
         lda orbExpT,y           ; one sprite over: 24 hires pixels, 48 when its WIDTH is doubled
@@ -18051,6 +21323,7 @@ ${FALL ? `
 ; fallChk: standing in the hole's cell? Then go.
 fallChk:lda nExitT              ; no exit on this level: nothing to fall through
         beq fcNo
+
         ; ---- ANY exit, not just hlv's ----
         ; The entity index of exit n is nOrbT + n -- the SWAPPED count, not this build's
         ; ORBS.length. Level 1 has four orbs and angels before its hole; the socket room has one.
@@ -18076,7 +21349,8 @@ fcNx:   inx
         bcc fcLp
         bcs fcNo                ; always taken: none of them is under us
 fcHit:  sty hlv                 ; the one we are dropping through
-${MUSIC ? `        lda musOn               ; MUSIC: the fade -- every voice into its release
+${HAS_IDOL ? `        jsr idolStay            ; an idol only ever leaves its OWN room (see idolStay)
+` : ''}${MUSIC ? `        lda musOn               ; MUSIC: the fade -- every voice into its release
         beq fcNoM
         lda #$fe
         jsr musRel
@@ -18183,7 +21457,11 @@ ${FALLMID ? '' : `        sta bgPh                ; and start rendering the dest
         sta fwKd                ;   off the screen (see fwSlo). The frame on display now IS the
                                 ;   frozen room, every source row at its own row: offset 0.
 ${FALLTAIL ? '        jsr fallTail            ; ...and the five rows below the screen it cannot see\n' : ''}
-fcNo:   rts
+fcNo:${HAS_IDOL ? `   lda px+1                ; not in a hole: this is the last floor cell, if the next one is
+        sta plLX                ;   (idolStay leaves an idol here rather than take it out of the hub)
+        lda py+1
+        sta plLY
+        ` : '   '}rts
 ${FALLMID ? `
 ; ---- fallMid: EVERY piece of level work, in one black moment between the two arcs ----
 ; Called at the handover, when the top arc has left the screen and the bottom one has not appeared:
@@ -18379,17 +21657,14 @@ fstEnd: ${!ANYFLOORDK ? '' : `jsr fdGlFl              ; whatever is left of the 
                                 ;   identity, so this is a straight copy -- filling white here
                                 ;   instead was a one-frame flash between the arc finishing and
                                 ;   the renderer taking over.
-        lda pa                  ; force orbMove to reproject: it early-outs on a still frame,
-        eor #$80                ;   and the player has not moved since the landing began, so
-        sta opa                 ;   the sprites we just cleared would never come back
         lda #$00                ; landing over: hand the screen back to the renderer
         sta fallSt
-        sta renderCnt           ; and start the fps window fresh. It counts ticks per 16 RENDERED
-        lda frameCnt            ;   frames, and the fall advances the clock without rendering any
-        sta lastFrame           ;   -- so every drop poisoned the next reading. That is what the
-        lda frameCnt+1          ;   apparent frame-rate hit was: the counter, not the renderer.
+${HUD ? `        sta renderCnt           ; HUD=1: and start the fps window fresh. It counts ticks per 16
+        lda frameCnt            ;   RENDERED frames, and the fall advances the clock without
+        sta lastFrame           ;   rendering any -- so every drop poisoned the next reading.
+        lda frameCnt+1
         sta lastFrame+1
-        lda #$13                ; back to the resting mode, which is also 24 rows
+` : ''}        lda #$13                ; back to the resting mode, which is also 24 rows
         sta pd11
         ; fall through into fallInv
 
@@ -18828,6 +22103,9 @@ sdYc:   lda py+1                ; (x, y + dy)
         rts
 
 ; ---- orbKey: SPACE -- or joystick 1's FIRE -- picks up and puts down, one action a press ----
+; FIRESTRAFE: on the RELEASE, and only if the press did not strafe (okStr, set in readKeys). The
+; action comes a tap's length later than it used to, which is the price of the button doubling as
+; the strafe modifier.
 ; Row 7 bit 4. The joystick shares these lines, so the port is read with no row selected first and
 ; whatever the stick holds is forced back high for the key read -- otherwise any stick direction
 ; on that row would read as a key. FIRE is then taken from that stick read on purpose: it is the
@@ -18841,12 +22119,25 @@ ${joyMask('okJoy')}
         eor #$ff
         ora okJoy               ; ...and the stick's own bit 4: FIRE
         and #$10
-        sta okNew
+        tax                     ; X = $10 while SPACE or FIRE is down
         lda #$ff
         sta $dc00               ; leave the port neutral for the joystick read in readKeys
-        lda okNew
+        txa
         beq okUp
-        lda okOld
+${FIRE_STRAFE ? `        sta okOld               ; held: nothing happens until it is let go
+        rts
+okUp:   lda okOld               ; held last frame?
+        ldy #$00
+        sty okOld
+        ldx okStr               ; ...and strafed while held?
+        sty okStr               ; cleared on EVERY release: readKeys and this read the button
+        tay                     ;   at different moments, so a press can be seen by one alone
+        beq okDone
+        txa
+        bne okDone
+        jmp orbUse
+okDone: rts
+` : `        lda okOld
         bne okDone              ; held, not a fresh press
         lda #$01
         sta okOld
@@ -18854,9 +22145,9 @@ ${joyMask('okJoy')}
 okUp:   lda #$00
         sta okOld
 okDone: rts
-
+`}
 ; ================= WHAT ENTERING A LEVEL ESTABLISHES =================
-; There are THREE ways into a level -- boot, a fall, and RETURN after a death -- and each one
+; There are THREE ways into a level -- boot, a fall, and fire after a death -- and each one
 ; used to write its own sequence. They drifted, and the way you find out is a bug report about
 ; colour. So: every piece of per-level state has exactly ONE owner below, and a new one goes to
 ; whichever owner already holds the thing it depends on. Nothing is set at a call site.
@@ -18867,7 +22158,7 @@ okDone: rts
 ;   mkRuns     everything derived from the map: the run tables. After the swap, before anything
 ;              renders.
 ;   objInit    all ENTITY and player state: entity cells, blkT, carry (and therefore idolHd --
-;              see the note at its tail), marked, entDty, bfsPhase, hlSeat, bfsDone.
+;              see the note at its tail), marked, bfsPhase, hlSeat, bfsDone.
 ;   lvlStart   the PLAYER's pose. One place a level begins, however you got there.
 ;   lvlLook    every INK: the three screen registers (ceiling, wall, seam) and the two shared
 ;              sprite registers, plus the idol's own pair -- then falls through to symPut and
@@ -18956,11 +22247,17 @@ oiEntD:
 ${FALLMARK.includes(6) ? '        inc fallMk              ; FALLMARK 6: every entity placed\n' : ''}        lda #$00
         sta carry
         sta marked
-        sta entDty
         sta bfsPhase            ; NO FILL IN FLIGHT. Uninitialised this could read as phase 2,
                                 ;   which drops bfsTick straight into the expand loop with a
                                 ;   garbage bfsTail and scribbles past bfsQ.
-        ldx #${hx(NHOLE - 1)}   ; the MAX: clearing a seat this level does not have is free
+${ANG_REACT ? `        ldx #${hx(NORB - 1)}       ; ANGREACT: every angel arrives STANDING, nothing re-phased --
+oiRx:   sta angRxT,x            ;   the last level's directions mean nothing here (A is 0)
+        lda #$ff
+        sta angLDT,x
+        lda #$00
+        dex
+        bpl oiRx
+` : ''}        ldx #${hx(NHOLE - 1)}   ; the MAX: clearing a seat this level does not have is free
 hlSCl:  sta hlSeat,x            ; nothing seated: a restart empties every socket
         dex
         bpl hlSCl
@@ -19001,21 +22298,26 @@ ${LX_VECS.includes('lxInit') ? `        jsr lxInit              ; LEVEL CODE: dr
 ; frame -- to save the ~20 cycles a test costs here. The user, on level 9's final room: "None of
 ; these sentries can be occluded by any of the walls in this room because they're all on the facing
 ; side of the wall." The answer is the same bit, from the same cell, so the pictures are the same.
-; runFaceT bit 0 says which axis the plane is across; bit 7 the sense: 1 = the entity must be
-; strictly nearer than the plane, 0 = at or past it. Keeps X and Y.
-occBy:  lda runFaceT,y
-        lsr                     ; C = the axis: 1 = y
-        lda ooCX
-        bcc obyA
+; runPFT: bits 0-4 the plane, bit 6 the axis it is across (1 = y), bit 7 the sense: 1 = the entity
+; must be strictly nearer than the plane, 0 = at or past it. Keeps X and Y.
+occBy:  lda runPFT,y
+        and #$1f
+        sta obyP                ; the plane
+        lda runPFT,y
+        and #$40                ; the axis
+        beq obyX
         lda ooCY
-obyA:   cmp runPlaneT,y         ; C = cell >= plane
-        lda runFaceT,y          ; N = the sense (lda leaves C alone)
+        jmp obyA
+obyX:   lda ooCX
+obyA:   cmp obyP                ; C = cell >= plane
+        lda runPFT,y            ; N = the sense (lda leaves C alone)
         bpl obyR                ; sense 0: in front when cell >= plane, which C already says
         bcs obyNo               ; sense 1: in front when cell < plane
         sec
         rts
 obyNo:  clc
 obyR:   rts
+obyP:   !byte 0
 
 
 
@@ -19050,7 +22352,24 @@ ${DIE ? `        txa                     ; ...and the one that has MARKED you ho
 ` : ''}
         lda orbHidT,x
         bne asNext              ; not in the world
-        lda orbSeenT,x
+${HAS_BIG ? `        lda orbTallT,x          ; the BIG angel: seen or not, it glides (BIG_PER)
+        cmp #$02
+        bne asNB
+${BIGHOLD ? `        lda bgTop               ; BIGHOLD: ...until it is drawn at FULL SIZE where you can SEE it: then it holds,
+        and orbSeenT,x          ;   mid-glide or not (the projection sets bgTop each frame it picks the
+        pha                     ;   top rung; read once and cleared, so it moves the frame it is not).
+        lda #$00                ;   SEEN too: full size round a corner, behind a wall, it held for good
+        sta bgTop               ;   and stopped following (the user, 2026-11-10)
+        pla
+        bne asNext
+` : ''}        lda angSlDT,x
+        bne asFree              ; mid-glide: its clock runs and it lands when due
+        lda #$00                ; standing: nothing banked -- slTick sets it off the moment it may,
+        sta angAccT,x           ;   so a refused step never comes due as a teleport (angOne)
+        jsr slTick
+        jmp asNext
+asNB:
+` : ''}        lda orbSeenT,x
         beq asFree              ; unobserved: it moves, as it always has
 ${ANGSLIDE ? `        lda angSlDT,x           ; seen MID-SLIDE: it finishes the step (the user, 2026-10-09).
         bne asFree              ;   Freezing it between two cells read as a cheat in reverse; it
@@ -19065,24 +22384,12 @@ ${ANGSLIDE ? `        lda angSlDT,x           ; seen MID-SLIDE: it finishes the 
         beq asNext              ; always
 ` : `        bne asNext              ; one visible pixel freezes it, and its clock with it
 `}asFree:
-        ; ---- how long until this angel's next step? It depends how far away it is. ----
-        ; Y holds the answer rather than A because the accumulator has to be loaded after this and
-        ; there is no cmp with a Y-indexed operand -- hence the one-byte parking spot.
-        jsr angDst              ; A = BFS cells from the player; $ff if no fill has landed yet
-        ldy angPerT             ; the near period, and the safe default
-        cmp #$ff
-        beq asPer               ;   no map yet -- do NOT let an unreachable angel run at the fast
-        cmp angFarT             ;   rate just because $ff compares high
-        bcc asPer
-        ldy angPerFT            ; far off: close the gap at the shorter period
-asPer:  sty asPCur
-        ldx amIdx               ; angDst clobbered X
         lda angAccT,x
         clc
         adc dtv
-        cmp asPCur              ; both periods are per LEVEL, swapped with the rest of the manifest
+        cmp angPerT             ; the period is per LEVEL, swapped with the rest of the manifest
         bcc ${ANGSLIDE ? 'asSlid' : 'asKeep'}
-        sbc asPCur              ; ---- CARRY the remainder, do not zero it ----
+        sbc angPerT             ; ---- CARRY the remainder, do not zero it ----
         pha                     ; Carry is set from the cmp, so this is A - period. Zeroing made
 ${ANGSLIDE ? `        ldx amIdx
         lda angSlDT,x           ; mid-lunge: it LANDS now, on the tick it would have teleported
@@ -19119,8 +22426,130 @@ angOne: ${DIE ? `jsr anAdj               ; ALREADY beside you when its step fall
                                 ;   back on an angel you had walked up to was safe forever.
         ` : ''}jsr angPick             ; where to, and may it go there?
         bcs anGo
+${ANG_REACT ? `        ldx amIdx               ; ANGREACT: due, and refused -- it is STANDING. angPick left the way
+        lda angLDT,x            ;   it was refused in (a leash, an orb, a cage); bit 7 says so, and
+        ora #$80                ;   only a DIFFERENT way is news to angRx. This step's re-phase,
+        sta angLDT,x            ;   if any, is spent.
+        lda #$00
+        sta angRxT,x
+` : ''}        rts
+${ANG_REACT ? `; ---- ANGREACT: the fixed reaction (see ANG_REACT in the build) ----
+; frameCnt is read with interrupts off: the IRQ increments it, and a carry between the two reads
+; would put the stamp 256 ticks out.
+; (rxStamp: after entGate -- see there)
+; rxGo (bfsGo): the moment this fill answers for. A fill for a NEW player cell answers for the tick
+; they entered it; one for the same cell (an orb or an angel moved) answers for now. And nobody has
+; been reached yet.
+rxGo:   lda bfsWant
+        cmp bfsDone
+        beq rgNow
+        lda rxWT
+        ldy rxWT+1
+        jmp rgSet
+rgNow:  sei
+        lda frameCnt
+        ldy frameCnt+1
+        cli
+rgSet:  sta rxFT
+        sty rxFT+1
+        ldx #${hx(NORB - 1)}
+        lda #$00
+rgCl:   sta angNwT,x
+        dex
+        bpl rgCl
         rts
-; ---- angPick: the step for angel X, decided but NOT taken. C set (amTX/amTY/amX/amY/amCell
+; angRx (the fill's early-out loop, X = an angel its cell is labeled for): the first time this fill
+; reaches it, has its way round REVERSED (or was it standing and now has a way)? Then re-set its
+; clock so the step lands ANGREACT ticks after the moment the fill answers for. Leaves X = bfsEnI.
+angRx:  lda angNwT,x
+        bne arxNo               ; already looked at, this fill
+        inc angNwT,x
+        lda orbSeenT,x
+        bne arxNo               ; held by your gaze: its clock is stopped anyway
+        lda angSlDT,x
+        bne arxNo               ; mid-lunge: this step is already chosen
+        lda angRxT,x
+        bne arxNo               ; re-phased once this step already
+        stx amIdx
+        jsr anPath              ; A = its way now, off the fill in flight (its cell is labeled)
+        cmp #$ff
+        beq arxNo
+        sta arN
+        ldx amIdx
+        lda angLDT,x
+        bpl arxMv
+        and #$7f                ; STANDING (refused that way, or never set off: $7f)
+        cmp arN
+        beq arxNo               ;   the same way it was refused in: no news
+        bne arxGo               ;   any other way is
+arxMv:
+        ; ---- reversed? per axis, both moving: the same way counts +1, opposite -1 ----
+        ; Negative = it would turn back the way it came. A corner (one axis kept, the other new) is
+        ; not a reversal -- an angel rounding a bend keeps its own pace.
+        tax
+        ldy arN
+        lda #$00
+        sta arS
+        lda pathDXT,x
+        beq arxY
+        lda pathDXT,y
+        beq arxY
+        cmp pathDXT,x
+        beq arxX1
+        dec arS
+        dec arS
+arxX1:  inc arS
+arxY:   lda pathDYT,x
+        beq arxT
+        lda pathDYT,y
+        beq arxT
+        cmp pathDYT,x
+        beq arxY1
+        dec arS
+        dec arS
+arxY1:  inc arS
+arxT:   lda arS
+        bpl arxNo               ; not back the way it came
+arxGo:  sei
+        lda frameCnt
+        ldy frameCnt+1
+        cli
+        sec
+        sbc rxFT
+        sta arA                 ; how long ago the moment it answers for was
+        tya
+        sbc rxFT+1
+        bne arxLt               ; 256 ticks or more: late
+        lda arA
+        cmp #${hx(ANG_REACT - ANGSLIDE + 1)}
+        bcs arxLt               ; too late to land at R: one lunge from now
+        lda #${hx(ANG_REACT)}
+        sec
+        sbc arA                 ; ticks left until it should land (at least the lunge)
+        bne arxSt               ; always
+arxLt:  lda #${hx(ANGSLIDE)}
+arxSt:  sta arA
+        lda angPerT
+        sec
+        sbc arA                 ; banked = period - left: the lunge sets out when left = the lunge
+        bcs arxA
+        lda #$00
+arxA:   ldx amIdx
+        sta angAccT,x
+        lda #$01
+        sta angRxT,x
+arxNo:  ldx bfsEnI
+        rts
+rxPrv:  !byte $ff
+rxWT:   !byte 0,0
+rxFT:   !byte 0,0
+arN:    !byte 0
+arS:    !byte 0
+arA:    !byte 0
+angLDT: !byte ${pad([], NORB).map(() => '$ff').join(',')}   ; the way each angel last set off (anPath index); bit 7 = refused it, standing
+angRxT: !byte ${pad([], NORB).join(',')}   ; 1 = re-phased this step
+angNwT: !byte ${pad([], NORB).join(',')}   ; 1 = this fill has reached it already
+` : ''}; ---- angPick: the step for angel X, decided but NOT taken. C set (amTX/amTY/amX/amY/amCell
 ; filled) if there is a legal one. Split from the taking so a lunge can choose its cell when it
 ; SETS OUT and commit it when it lands. ----
 angPick:stx amIdx
@@ -19133,8 +22562,18 @@ angPick:stx amIdx
         jsr anPath
         cmp #$ff
         beq apNo                ; no descending neighbour: it is walled in, so it WAITS
-        tax
-${ANG_DIAG ? '        stx amDir               ; the direction index, kept for the lunge: index + 1 IS its code\n' : ''}        lda pathDXT,x
+${HAS_BIG ? `        ldy amIdx
+        pha
+        lda orbTallT,y
+        cmp #$02
+        bne apStd
+        pla
+        jmp lxBgAim             ; the BIG angel picks its own way (level code: bgAim) -- A = the fill's
+apStd:  pla                     ;   step; it answers as anTry does, C set with the step in am*
+` : ''}${ANG_REACT ? `        ldy amIdx               ; ANGREACT: the way it is going, for angRx's "has it reversed?"
+        sta angLDT,y
+` : ''}        tax
+${ANG_DIAG ? '        stx amDir              ; the direction index, kept for the lunge: index + 1 IS its code\n' : ''}        lda pathDXT,x
         sta amTX
         lda pathDYT,x
         sta amTY
@@ -19151,6 +22590,9 @@ apNo:   clc                     ; (the cmp above left C set)
         rts
 anGo:   inc blkVer              ; the obstacle map changed: the fill has to be redone
         ldx amIdx
+${ANG_REACT ? `        lda #$00                ; ANGREACT: a step taken -- the next one may be re-phased again
+        sta angRxT,x
+` : ''}
         lda orbYCT,x            ; the cell it is leaving opens
 ${MULW}
 ${ADDX('orbXCT,x')}
@@ -19164,36 +22606,55 @@ ${ADDX('orbXCT,x')}
         ldy amCell
         lda #$02
         sta blkT,y
-        lda #$01
-        sta entDty
 ${DIE ? `        jsr anAdj               ; did that land it beside the player? then they are MARKED.
         bcc anNoMk              ;   A step is one trigger; the other is an angel ALREADY beside
                                 ;   you whose step falls due unseen (angOne) -- see asSeen.
-anReach:
+        ; ---- A LUNGE YOU WATCH LAND DOES NOT MARK YOU (the user, 2026-11-08) ----
+        ; Seen mid-slide an angel still finishes its step (asFree), so turning onto one already
+        ; under way put it beside you WHILE you watched -- caught in plain sight, dead half a
+        ; second later, standing still and looking right at it. It takes the cell; the mark waits.
+        ; Beside you and watched, asSeen zeroes its clock, so looking away gives one step period
+        ; before angOne marks you, which jumps to anReach past this. Holding the idol a gaze holds
+        ; nothing, so then it marks you as before.
+        lda orbSeenT,x
+        beq anReach             ; unseen: the step marks you, as it always has
+${HAS_IDOL ? `        lda idolHd
+        beq anNoMk              ; watched, no idol: it lands beside you and waits
+` : `        bne anNoMk              ; watched: it lands beside you and waits
+`}anReach:
         ; ---- ONE MARK AT A TIME: a second angel beside you does not take it over ----
-        ; dcClr unhides only the angel in marked, so overwriting marked left the first one hidden
-        ; for good -- invisible, still holding its cell in blkT, until a restart. Found by the
-        ; overhead simulator on level 8 (2026-10-12), where the user had once seen an angel go
-        ; missing. The newcomer just stands beside you; its own step re-checks every period.
+        ; dcClr unhid only the angel in marked (a caught angel was hidden until 2026-11-02), so
+        ; overwriting marked left the first one hidden for good -- invisible, still holding its cell
+        ; in blkT, until a restart. Found by the overhead simulator on level 8 (2026-10-12), where
+        ; the user had once seen an angel go missing. Still one: markC and markPa are the
+        ; first one's. The newcomer just stands beside you; its own step re-checks every period.
         lda marked
         bne anNoMk              ; (anNoMk refreshes its occluder mask, harmless if it never moved)
         ldx amIdx
         stx dieIdx              ; from the mark on, the projection stashes THIS angel's side of the
         lda #$ff                ;   screen in dieOff/dieSgn -- which it only does while the angel
         sta dieOff              ;   is drawn, so $ff still standing at dieGo means it never was
-        lda orbSeenT,x          ; were you LOOKING at it when it reached you?
-        beq anHide              ; no: it hides and waits for the turn, as it always has
-        lda #${hx(DIE_MARKDLY)}              ; yes: it stays on screen, and the scene starts after this
-        sta markSaw             ;   many 60ths -- half a second of "it has you" in which nothing
-        lda #$00                ;   changes at all. markSaw is the countdown AND the flag.
-        beq anMark              ; always
-anHide: sta markSaw             ; A is 0 here, which is the "wait for the turn" case
-        lda #$01                ; it stops rendering ENTIRELY from here. Nothing after this has
-anMark: sta orbHidT,x           ;   to reason about where the sprite is or whether it shows.
+        ; ---- IT STAYS IN THE WORLD, DRAWN (2026-11-02) ----
+        ; Unseen, it used to stop rendering entirely and wait for a 30-degree turn -- "the whole
+        ; trigger is one angle comparison". But a turn is not a look: the user, pinned, backed and
+        ; strafed with it beside them and pushed against where it stood, seeing nothing -- a short
+        ; turn put it on screen still hidden, then the scene pulled it "out of thin air". Now it is
+        ; drawn like any angel, so whatever brings it into view (a turn, a step, a strafe) shows it,
+        ; and dieChk starts the scene the moment it does.
+        lda #$00
+        sta markSaw             ; 0, "not seen yet": dieChk, later this same frame, sees whether
+                                ;   you were LOOKING at it (dcTurn) and starts the half second
+        sta mvBmp               ; no bump into it yet (mvFree, the move test)
+        lda orbYCT,x            ; its cell, for mvFree to recognise
+${MULW}
+${ADDX('orbXCT,x')}
+        sta markC
         inx
         stx marked
         lda pa                  ; the heading it caught you at, for the turn trigger
         sta markPa
+        rts                     ; (this fell through into dckPnt until 2026-11-02, painting every
+                                ;   sprite in the colour numbered by your heading for one frame)
 dckPnt: ldx #$07               ; A -> every sprite's own colour
 dckLp:  sta obC,x
         dex
@@ -19202,9 +22663,15 @@ dckLp:  sta obC,x
 
 anNoMk: ldx amIdx
 ` : ''}        rts                     ; (an occluder mask for the new cell was rebuilt here: gone -- see occBy)
-anDone: rts
 ${DIE ? `; ---- anAdj: can angel X reach the player from where it stands? C set if so. X kept, Y lost ----
-anAdj:  sec
+anAdj:
+${HAS_BIG ? `        lda orbTallT,x          ; the big angel marks nobody (for now: the user is eyeballing it)
+        cmp #$02
+        bne anAdjG
+        clc
+        rts
+anAdjG:
+` : ''}        sec
         lda orbXCT,x
         sbc px+1
         clc
@@ -19252,24 +22719,17 @@ aaNo:   clc
         rts
 ` : ''}
 ; ---- anTry: is the step in amTX/amTY legal? C set and amCell/amX/amY filled if so ----
-; Steps are ORTHOGONAL ONLY now, so exactly one of amTX/amTY is zero and the old diagonal
-; squeeze test -- both brushed cells must be open -- has no case left to guard. It is gone with
-; the diagonals; if they ever come back, it has to come back with them.
-anTry:  lda amTX
-        ora amTY
-        beq anNo                ; standing in the player's cell already
-        ldx amIdx
+; Only ever after anPath (angPick), which has already refused a zero step, a taken cell (blkT) and
+; a diagonal that would cut a corner. A range check is not needed either: the border is solid, so
+; a step from an open cell never leaves the map. What is left is what anPath cannot know.
+anTry:  ldx amIdx
         clc
         lda orbXCT,x
         adc amTX
-        cmp lvlDimT             ; RANGE CHECK, not a mask, against the live level's width. "and
-        bcs anNo                ;   #$0f" wrapped x=16 round to 0 -- the border wall -- so an angel
-        sta amX                 ;   walking east stopped dead at the end of the corridor. A mask
-        clc                     ;   cannot work at a width that is not a power of two, and a step
-        lda orbYCT,x            ;   off the map is refused by the solid border; this catches the wrap.
+        sta amX
+        clc
+        lda orbYCT,x
         adc amTY
-        cmp lvlDimT+1
-        bcs anNo
         sta amY
         lda amX                 ; never step ONTO the player: touching is harmless by design,
         cmp px+1                ;   but blkT under their feet would make mvFree refuse every
@@ -19281,9 +22741,6 @@ anT1:   lda amY
 ${MULW}
 ${ADDX('amX')}
         sta amCell
-        tay
-        lda blkT,y
-        bne anNo                ; wall, orb or another angel
         ; ---- the leash: a SPARSE (entity slot, cell) list, $ff-terminated ----
         ; See LEASH_AT for why the fill ignores it, and angLeash for why this is a list and not
         ; the one-bit-per-cell bitmap it used to be. Scanned once per attempted step -- once
@@ -19304,7 +22761,13 @@ alNx:   iny
         bne alLp                ; always taken -- NLEASH is far below the 128 pairs that would
                                 ;   wrap Y, and the $ff above is what actually ends the walk
 anSqOk:
-        ; ---- how much of it would the player SEE standing there? ----
+${HAS_BIG ? `        ldx amIdx               ; the BIG angel steps in plain sight -- but never nearer than BIGSTOP
+        lda orbTallT,x
+        cmp #$02
+        bne anSqN
+        jmp lxBgFar             ; (level code: bgFar)
+anSqN:
+` : ''}        ; ---- how much of it would the player SEE standing there? ----
         ; It MAY step into view -- an angel easing round a corner and freezing mid-peek is the
         ; best thing it does -- but only into a cell something covers. Walking out into an open
         ; room breaks the one rule it has. The span walk counts columns shown against columns
@@ -19359,7 +22822,7 @@ anYes:  sec
         rts
 anNo:   clc
         rts
-${ANGSLIDE ? `; ---- THE LUNGE (ANGSLIDE): every step drawn as a slide, not a teleport (see slTick) ----
+${HAS_BIG ? `` : ''}${ANGSLIDE ? `; ---- THE LUNGE (ANGSLIDE): every step drawn as a slide, not a teleport (see slTick) ----
 ; An angel lunging owns BOTH cells -- the one it left and the one it is going to are 2 in blkT for
 ; the whole slide -- so nothing can walk into either and the landing is always legal. Halfway, its
 ; orbXCT/orbYCT switch to the new cell: culling, zones and the occluder mask then answer for the
@@ -19393,12 +22856,15 @@ slRH:   !byte 0
 ; With the idol in hand a seen angel's clock keeps running, so the same slide is the lunge.
 slTick: lda angSlDT,x
         bne stMove
-        lda angAccT,x
+${HAS_BIG ? `        lda orbTallT,x          ; the big angel sets off at once: its whole period is the glide
+        cmp #$02
+        beq slGo
+` : ''}        lda angAccT,x
         clc
         adc #${hx(ANGSLIDE)}         ; fits: the build asserts period + slide <= 256
-        cmp asPCur
+        cmp angPerT
         bcc stOut               ; not yet
-        jsr angPick             ; clobbers X
+slGo:   jsr angPick             ; clobbers X
         bcc stOut               ; nowhere to go: try next frame; when it falls due it steps as usual
         ldx amIdx
         ldy amCell
@@ -19418,11 +22884,19 @@ stY:    lda #$03
         bpl stSet
         lda #$04`}
 stSet:  sta angSlDT,x
-stMove: lda angAccT,x           ; 60ths into the lunge = banked - (period - slide), clamped to the table
-        clc                     ;   (a period that grew mid-lunge reads negative: hold at the start)
+stMove:
+${HAS_BIG ? `        lda orbTallT,x
+        cmp #$02
+        bne stMvN
+        ldy angAccT,x           ; the big angel: 60ths into its glide -> the slide's step (bigSlT: its
+        lda bigSlT,y            ;   glide is the whole period, BIG_PER, whatever that is)
+        jmp stIx
+stMvN:
+` : ''}        lda angAccT,x           ; 60ths into the lunge = banked - (period - slide), clamped to the table
+        clc                     ;   (should it read negative, hold at the start)
         adc #${hx(ANGSLIDE)}
         sec
-        sbc asPCur
+        sbc angPerT
         bcs stIx
         lda #$00
 stIx:   cmp #${hx(ANGSLIDE)}
@@ -19437,8 +22911,7 @@ stIx2:  tay
         ora #$80
         sta angSlDT,x
         jsr slFwd               ; now it is NEARER the new cell
-stDty:  lda #$01
-        sta entDty
+stDty:
 stOut:  rts
 
 ; slFwd / slBack: move angel X's cell one step along its lunge, or back
@@ -19495,11 +22968,13 @@ ${ADDX('amX')}
 orbProjS:
         ldx oidx
         cpx nOrbT
-        bcs opsP                ; a hole-like: never lunges
+        bcs ${HAS_CORNER ? 'opsH' : 'opsP'}                ; a hole-like: never lunges
         lda angSlDT,x
         bne opsS
 opsP:   jmp ${HAS_IDOL ? 'orbProjC' : 'orbProj'}
-opsS:   jsr slOn
+${HAS_CORNER ? `opsH:   cpx lvlCorT             ; ...except the CORNER exit: a north-west "lunge" held at 127/256
+        bne opsP                ;   of a cell, which brIn sets in its angSlDT/angSlFT -- its cell's corner
+` : ''}opsS:   jsr slOn
         jsr ${HAS_IDOL ? 'orbProjC' : 'orbProj'}
         php                     ; the carry is orbProj's answer
         jsr slOff
@@ -19519,17 +22994,32 @@ ${ANG_DIAG ? `slOn:   lda kfL                 ; ---- ANGDIAG: keep the player's 
         sta slRH
         lda angSlDT,x
         and #$7f
-        sta slDir
+${HAS_BIG ? `        cmp #${hx(BOLT_DIR)}               ; the BALL LIGHTNING: any angle, its own x and y offsets
+        beq snBolt
+` : ''}        sta slDir
         lda angSlFT,x
-        cmp #$80
-        bne snS
-        lda #$81                ; -128 is outside oFrac's range; 1/256 of a cell does not show
-snS:    sta slO
+        jsr snC
+        sta slO
         ldy slDir
         lda slDXT,y
         beq snNoX
-        jsr snNeg               ; along x: forward += o*cos, right -= o*sin
-        sta slOA
+        jsr snNeg
+        jsr snX
+snNoX:  ldy slDir
+        lda slDYT,y
+        beq snDone
+        jsr snNeg
+snY:    sta slOA                ; along y: forward += o*sin, right += o*cos
+        ldx osin
+        ldy osinS
+        jsr oFrac
+        jsr kfAdd
+        lda slOA
+        ldx ocos
+        ldy ocosS
+        jsr oFrac
+        jmp krAdd
+snX:    sta slOA                ; along x: forward += o*cos, right -= o*sin
         ldx ocos
         ldy ocosS
         jsr oFrac
@@ -19541,21 +23031,18 @@ snS:    sta slO
         eor #$ff
         clc
         adc #$01
-        jsr krAdd
-snNoX:  ldy slDir
-        lda slDYT,y
-        beq snDone
-        jsr snNeg               ; along y: forward += o*sin, right += o*cos
-        sta slOA
-        ldx osin
-        ldy osinS
-        jsr oFrac
-        jsr kfAdd
-        lda slOA
-        ldx ocos
-        ldy ocosS
-        jsr oFrac
         jmp krAdd
+${HAS_BIG ? `snBolt: lda bsXF                ; (bgStep keeps them: signed 256ths of a cell from its cell's centre)
+        jsr snC
+        jsr snX
+        lda bsYF
+        jsr snC
+        jmp snY
+` : ''}; snC: -128 is outside oFrac's range, so it becomes -127 (1/256 of a cell does not show)
+snC:    cmp #$80
+        bne snCo
+        lda #$81
+snCo:   rts
 ; snNeg: A = the axis step (1 or $ff) -> A = the offset, negated for a step backwards
 snNeg:  cmp #$80
         lda slO
@@ -19686,9 +23173,13 @@ svReg:  pha
         adc svPD
         rts
 ; ---- svQuad: one right-column sprite of the silver orb. A = its plain pointer, X = the slot,
-; obY,x already set. The rest copies the lower slot (onvL), as the upper half's code does. ----
+; obY,x already set. Marked $fe, as the upper half is: it takes the priority bit and stamps nothing. ----
 svQuad:
-        jsr svReg               ; only a sentry's rung has a right column, so always one of its
+${HAS_SILVER ? `${HAS_BIG ? `        cpy #${hx(BIG_V0)}               ; (Y = ovar) the big angel's: no sentry to note
+        bcs sqNoR
+` : ''}        jsr svReg               ; a sentry's rung: svReg notes it for svTick
+sqNoR:
+` : ''}
         sta obP,x
         lda orbBitT,x
         sta omBit
@@ -19725,25 +23216,8 @@ sqNoXy: lsr
         lda omBit
         ora omYY
         sta omYY
-`}sqNoX:  ldy onvL
-        lda #$fe                ; inherit the priority bit, stamp nothing (see the upper half)
+`}sqNoX:  lda #$fe                ; inherit the priority bit, stamp nothing (see the upper half)
         sta obIX,x
-        lda obV,y
-        sta obV,x
-        lda obOcc,y
-        sta obOcc,x
-        lda obCL,y
-        sta obCL,x
-        lda obCR,y
-        sta obCR,x
-        lda obL,y
-        sta obL,x
-        lda obR,y
-        sta obR,x
-        lda obBL,y
-        sta obBL,x
-        lda obBR,y
-        sta obBR,x
         inc onv
         rts
 
@@ -19809,8 +23283,7 @@ svAdv:  lda svTT,x
         ora #$80
         sta angSlDT,x
         jsr slFwd               ; now it is NEARER the new cell (keeps X)
-svDty:  lda #$01
-        sta entDty
+svDty:
 svSNx:  ldx amIdx
         jsr svTouch
 svSHd:  ldx amIdx
@@ -19839,8 +23312,6 @@ svL2:   lda #$00
         tay
 svP1:   tya
         sta svPosT,x
-        lda #$01
-        sta entDty
         jmp svSNx
 
 ; ---- svTouch: is sentry X touching the player? Sets svHit if so. ----
@@ -19985,7 +23456,7 @@ tkSpk:  jsr svRnd               ; ---- a lightning frame, 1..3, held 1..6 ticks 
         and #$03
         beq tkSpk
         sta svF
-        jsr svRnd
+${SVSND ? '        jsr zsSnap              ; ...and it zaps (SVSND)\n' : ''}        jsr svRnd
         and #$07
         tay
         lda svDurT,y
@@ -20074,7 +23545,7 @@ zvStSc:   sta svQ
 zvOutSc:  rts
 
 ; ---- svDie: SHOCKED. A burst of flashing colour and random wall-edge glyphs, then black ----
-; Never returns: RETURN (svKey) restarts through entry, as every death does. The main loop is
+; Never returns: fire (svKey) restarts through entry, as every death does. The main loop is
 ; gone from here on, so nothing republishes the IRQ's ground operands -- this writes them
 ; itself, and keeps the level's own to put back before the restart (the restart's lvlLook
 ; restores $d022/$d023 but not irqB1, which only a CEILVARY chain ever rewrites).
@@ -20090,10 +23561,12 @@ ${CEILVARY ? `        lda irqB2+1
         sta $d015               ; no sprites
         lda #${hx(SVSHOCK)}
         sta svQ                 ; frames of shock left
-zvFrSd:   lda frameCnt            ; ---- once per 60Hz frame ----
+${SVSND ? `        jsr zkGo                ; ...and it SOUNDS like one
+` : ''}zvFrSd:   lda frameCnt            ; ---- once per 60Hz frame ----
 zvWSd:    cmp frameCnt
         beq zvWSd
-        jsr svRnd               ; a random ink for each of ground, walls, seams and border
+${SVSND ? `        jsr zkFr                ; a new scream for this frame
+` : ''}        jsr svRnd               ; a random ink for each of ground, walls, seams and border
         and #$07
         tax
         lda svShT,x
@@ -20108,12 +23581,12 @@ zvWSd:    cmp frameCnt
         tax
         lda svShT,x
         sta $d023
-        jsr svRnd
+${BD_BORDER ? `        jsr svRnd
         and #$07
         tax
         lda svShT,x
         sta $d020
-        lda #$60                ; ...and 96 cells of random wall-edge glyph, both screens
+` : ''}        lda #$60                ; ...and 96 cells of random wall-edge glyph, both screens
         sta svDY
 zvCSd:    jsr svRnd
         and #$03
@@ -20140,7 +23613,11 @@ zvC2Sd:   dec svDY
         bne zvCSd
         dec svQ
         bne zvFrSd
-        lda #$00                ; ---- then BLACK: every ink, and both screens BLANK ----
+${SVSND ? `        lda #$80                ; ---- the sound lets go with the picture: a 300 ms fade ----
+        sta $d40b
+        lda #$40
+        sta $d412
+` : ''}        lda #$00                ; ---- then BLACK: every ink, and both screens BLANK ----
         jsr svGnd
         sta $d022
         sta $d023
@@ -20156,17 +23633,20 @@ zvBkSd:   sta ${hx16(SCR_A)},x
         sta ${hx16(SCR_B + 0x2e8)},x
         inx
         bne zvBkSd
-zvKSd:    jsr svKey               ; ---- black until RETURN ----
+        sta dkArm               ; A is 0: fire is not armed until it has been seen released
+zvKSd:    jsr svKey               ; ---- black until fire ----
         jmp zvKSd
-; svKey: RETURN (or fire, as dieKey reads it) -> the level's ground operands back, then the restart
+; svKey: a FRESH fire press (dshFir's rule: the angel's death and this one restart alike)
+; -> the level's ground operands back, then the restart
 svKey:
-${joyMask('dkJoy')}
-        lda #$fe
+        lda #$ff
         sta $dc00
         lda $dc01
-        ora dkJoy
-        and #$02                ; RETURN
-        bne zvNoSk
+        and #$10                ; joystick-1 fire: 0 = pressed
+        bne zvFUp
+        lda dkArm
+        beq zvNoSk              ; still the press from before the black
+zvGo:
         lda svSv
         sta irqB0+1
         lda svSv+1
@@ -20176,6 +23656,8 @@ ${CEILVARY ? `        lda svSv+2
 ` : ''}        ldx #$ff
         txs
         jmp entry
+zvFUp:  lda #$01
+        sta dkArm
 zvNoSk:   lda #$ff
         sta $dc00
         rts
@@ -20340,8 +23822,6 @@ stOVis: jsr stCell              ; in the world: is it in this stage's room?
 stONx:  inx
         bne stOLp               ; always
 stODn:  inc blkVer              ; the angel's fill must be redone
-        lda #$01
-        sta entDty
         rts
 ; stOn: entity X is standing at orbXCT/orbYCT: no glide, and 2 in blkT there. Keeps X.
 stOn:   lda #$00
@@ -20383,19 +23863,62 @@ svN:    !byte ${hx(SVGAP_MIN)}               ; ticks until it changes
 svB:    !byte 0                 ; ticks left in this burst, 0 = in a gap
 svInk:  !byte ${hx(calm)}
 svSd:   !byte $3c,$a5           ; the xorshift state; never 0
-;@@LX-END
+${SVSND ? `; ---- THE SHOCK'S SOUND (SVSND): "a more dramatic zap noise as part of the death scene, maybe
+; including the pulse sounds then to make it sound more painful" (the user, 2026-11-10) ----
+; zkGo, as the shock starts: the level's sound stands aside (zsOff), the hum stops, any effect is
+; dropped, and voices 2 and 3 open together at FULL sustain -- noise and a thin pulse, held, not
+; struck, so there is no retrigger to freeze (see fsIn). zkFr, every frame of the flashing: both
+; pitches, the filter and its mode drawn again, so the scream lurches with the picture. At black the
+; two let go over release 8 (svDie).
+zkGo:   lda #$01
+        sta zsOff
+        lda #$00
+        sta x9drFxA             ; no effect: voice 3 is the scream's now
+        lda #$10
+        sta $d404               ; the hum lets go (its release is 0: gone in ~6 ms)
+        lda #$00
+        sta $d40c               ; attack and decay 0...
+        sta $d413
+        lda #$f8                ; ...sustain 15, release 8: full, and a 300 ms fade at the end
+        sta $d40d
+        sta $d414
+        lda #$40                ; voice 3: the thin pulse (1.5%)
+        sta $d410
+        lda #$00
+        sta $d411
+        lda #$81                ; noise
+        sta $d40b
+        lda #$41                ; and pulse, both gated on, and held
+        sta $d412
+zkFr:   jsr svRnd
+        sta $d408               ; the noise's pitch: anywhere
+        jsr svRnd
+        and #$3f
+        ora #$10                ; the pulse's: a buzz from ~250 Hz to ~1.2 kHz, never a bass note
+        sta $d40f
+        jsr svRnd
+        sta $d416               ; the filter's cutoff: anywhere
+        lda #$f6                ; resonance FULL, voices 2 and 3 through it
+        sta $d417
+        jsr svRnd
+        and #$03
+        tax
+        lda zkModT,x            ; low / band / high / band+high: a volume write is a bump, one more crack
+        sta $d418
+        rts
+zkModT: !byte $1f,$2f,$4f,$6f
+` : ''}; ---- level 9's own tables, here rather than in the shared level slot (L9T) ----
+${Object.entries(L9T ?? {}).map(([k, a]) => `${k}: !byte ${a.join(',')}`).join('\n')}
+${SVSND ? tubeSnd({ P: 'zs', X: 'x9', rnd: 'svRnd', tick: 'svTick', init: 'lxIn', o: FS_L9 }) : ''};@@LX-END
 ; ---- THE SENTRIES' RESIDENT STATE: what the engine's own code reads (the projection, osFlush) ----
 ; svShT svDurT svPDT svInkT svBdT svVarT: equates into IAR1 -- see SVTBL
 ${Object.entries(SVTBL_OFF).map(([n, o]) => `${n} = ${hx16(SVTBL_AT + o)}`).join('\n')}
 ${LD('svNT', LVLT('svNT').join(','), ':   !byte ')}   ; this level's sentry count: entities 0..svN-1
-${LD('svPathT', LVLT('svPathT').join(','), ':!byte ')}   ; every PATH, once, as direction codes, each ended by -length
-${LD('svP0T', LVLT('svP0T').join(','), ':  !byte ')}   ; per role: where in its path it starts
-${LD('svRXT', LVLT('svRXT').join(','), ':  !byte ')}   ; start cells of the roles past stage 0's
-${LD('svRYT', LVLT('svRYT').join(','), ':  !byte ')}
+; svPathT (every PATH, once, as direction codes, each ended by -length), svP0T (per role: where in
+; its path it starts), svRXT/svRYT (start cells of the roles past stage 0's), stSvT and stRmT: in the
+; silver module now (L9T)
 ${LD('stNT', LVLT('stNT').join(','), ':   !byte ')}   ; the STAGES: how many (1 = the level is one room)
-${LD('sockStgT', LVLT('sockStgT').join(','), ': !byte ')}   ; per socket: the stage it begins, 0 = none
-${STN_MAX > 1 ? ['stWT', 'stWXT', 'stWYT', 'stWAXT', 'stWAYT', 'stSvT', 'stRmT', 'stFstT'].map(n => LD(n, LVLT(n).join(','), ': !byte ')).join('\n') : ''}
-${LD('lvlArtT', LVLT('lvlArtT').join(','), ': !byte ')}   ; the level art set this level wants (see lvlArt)
+${STN_MAX > 1 ? ['stWT', 'stWXT', 'stWYT', 'stWAXT', 'stWAYT', 'stFstT'].map(n => LD(n, LVLT(n).join(','), ': !byte ')).join('\n') : ''}
 svDLo:  !byte 0                 ; svTouch's scratch, and the projection's (svStep runs after it)
 svCnt:  !byte 0                 ; sprites the sentries took in the projection pass under way
 svSlT   = $b100                 ; ...their slots (eight: every sentry shares the list). RAM: read only below svCnt
@@ -20403,7 +23926,30 @@ svBsT:  !byte 0,0,0,0,0,0,0,0   ; ...and their plain-ball pointers
 svLCnt: !byte 0                 ; the same, as of the last osFlush: what is ON SCREEN, and the
 svLSlT  = $b108                 ;   only list svTick may touch -- see osFlush. RAM: read only below svLCnt
 svLBsT: !byte 0,0,0,0,0,0,0,0
-svRX:   !byte 0                 ; the right column's X, 9 bits
+${HAS_BIG ? `bgPK:   !byte 0                 ; the big angel's next part, and parts left to try
+bgPN:   !byte 0
+bgPM:   !byte 0                 ; ...its rung magnified, and scratch
+bgPD:   !byte 0
+bgTop:  !byte 0                 ; the big angel was drawn at its top rung (the projection; angStep reads it)
+bsN:    !byte 0                 ; bgStep: ticks left this frame
+bsXF:   !byte 0                 ; the ball's offsets from its cell's centre, signed 256ths (slOn reads them)
+bsYF:   !byte 0
+bsVX:   !byte 0                 ; ...and its velocity, signed 256ths a tick
+bsVY:   !byte 0
+bsDX:   !byte 0                 ; |ball - you| (bsBD), 8.8 -- the aim halves them to fit -- and which
+bsHX:   !byte 0                 ;   way (bsS). In THIS order: bsAb reaches y's two at ,y = 2
+bsDY:   !byte 0
+bsHY:   !byte 0
+bsS:    !byte 0
+bsC:    !byte 0                 ; bsOpen's row offset
+bsFl:   !byte 0                 ; bgStep: ticks of the hit flash left (0 = none)
+bsL:    !byte 0
+bsH:    !byte 0
+bgHgt:  !byte 0                 ; ...its h (88/d) this frame, for the stamp's depth test
+osBig:  !byte 0                 ; occStamp: this slot is the big angel's (stamp by depth)
+bgC:    !byte 0                 ; bgOcc's scan column and the overlap's end
+bgE:    !byte 0
+` : ''}svRX:   !byte 0                 ; the right column's X, 9 bits
 svRX8:  !byte 0
 svPD:   !byte 0
 svY:    !byte 0
@@ -20414,35 +23960,24 @@ svYH:   !byte 0
 ; so it is invisible. Reads the LIVE colour registers and walks each one step darker per tick,
 ; so slots that start dark reach black early and the whole palette converges.
 dieFade:
-${DIEDBG ? '        jsr dieDbg\n' : ''}        ; Their own turn, continued for them and eased out. dieDir only supplies the DIRECTION
-        ; now: the rate comes from dieRotT so the sweep decelerates into stillness instead of
-        ; stopping dead when the fade happens to end.
-        ; TURN_RATE a tick, dtt ticks a frame: the identical loop readKeys runs, so the sweep is
-        ; the same speed as turning by hand. dieRem is the whole units still owed, counted down on
-        ; each carry out of the fraction, and the sweep simply stops when it reaches zero.
-        lda dieRem              ; frames of turn left: a backstop, not the stopping rule
+${DIEDBG ? '        jsr dieDbg\n' : ''}        ; ---- THE TURN: onto the angel, arriving at dieArr (see DIE_ARR) ----
+        lda dieRem              ; 0 = landed (or nothing to face)
         beq dfTDn
-        dec dieRem
         lda dieOff              ; columns off centre, UNSIGNED -- see the stash in orbOne
 dfOP:   cmp #${hx(DIE_CTR)}
         bcs dfMiss
         ; ---- TWO consecutive frames, not one ----
         ; The angel is a cell away, so on the frame it crosses into the frustum its forward
         ; distance is near zero and the projection is numerically unstable -- it can alias to a
-        ; small offset. Measured: the lock fired on a reading of about 4 columns, applied a
-        ; 315-fine correction, and the very next projection put the angel at -76. A single frame
-        ; of a very close object entering view is not evidence; a value that survives two frames is.
+        ; small offset. A value that survives two frames is evidence; one frame is not.
         inc dieLk
         lda dieLk
         cmp #$02
-        bcc dfSpin
-        ; ---- inside the window: land it exactly ----
-        ; One column is COL_FINE units of angle, so the residual converts straight into a
-        ; correction and the angel locks dead centre in a single step. Turning until |off| is
-        ; merely "small enough" cannot do that -- one frame of turn covers more than any sane
-        ; tolerance, so it stopped short or sailed past depending on which frame it landed on.
-        lda #$00
-        sta dieRem
+        bcc dfStp
+        ; ---- near the middle: the SCREEN refines the target ----
+        ; dieAim aims at the angel's cell centre; where the sprite actually lands can differ by a
+        ; column or two (the projection's own rounding). One column is COL_FINE units of angle, and
+        ; this frame's offset was measured at this pa, so pa +- off * COL_FINE is where it is.
         lda dieOff              ; already a magnitude, so there is no sign to strip
 dfLP:   ldx #${hx(COL_FINE)}
         stx mq
@@ -20452,35 +23987,255 @@ dfLP:   ldx #${hx(COL_FINE)}
         clc                     ; right of centre: turning up sweeps it left, onto the middle
         lda paF
         adc plo
-        sta paF
+        sta dieTgF
         lda pa
         adc phi
-        sta pa
-        jmp dfLD
+        sta dieTg
+        jmp dfStp
 dfLN:   sec
         lda paF
         sbc plo
-        sta paF
+        sta dieTgF
         lda pa
         sbc phi
+        sta dieTg
+        jmp dfStp
+dfMiss: lda #$00                ; outside the window: the run of good frames restarts
+        sta dieLk
+dfStp:  lda frameCnt            ; ---- how much of the remaining turn is THIS frame's ----
+        sec
+        sbc dieT0
+        cmp dieArr
+        bcs dfLand              ; time: land exactly, on the tick the note arrives
+        sta dmT                 ; elapsed
+        lda dieArr
+        sec
+        sbc dmT                 ; ticks left after this frame...
+        clc
+        adc dtv                 ; ...plus this frame's own: what was left when it began
+        sta dvD                 ;   (<= dieArr + DT_MAX, a byte)
+        sec                     ; the angle still to go, signed 16-bit: the short way round
+        lda dieTgF
+        sbc paF
+        sta dvQ0
+        lda dieTg
+        sbc pa
+        sta dvQ1
+        sta dmS                 ; bit 7: which way
+        bpl dfAb
+        sec
+        lda #$00
+        sbc dvQ0
+        sta dvQ0
+        lda #$00
+        sbc dvQ1
+        sta dvQ1
+dfAb:   lda dtv                 ; |rest| * dtv, 24-bit: (hi * dtv) << 8 + lo * dtv
+        sta mq
+        lda dvQ1
+        jsr mul8
+        lda plo
+        sta dmT
+        lda phi
+        sta dmU
+        lda dvQ0
+        jsr mul8                ; (mq survives: mul8 only reads it)
+        lda plo
+        sta dvQ0
+        clc
+        lda phi
+        adc dmT
+        sta dvQ1
+        lda dmU
+        adc #$00
+        sta dvQ2
+        jsr udiv                ; / ticks left: this frame's share, never more than the rest
+        bit dmS
+        bmi dfSn
+        clc
+        lda paF
+        adc dvQ0
+        sta paF
+        lda pa
+        adc dvQ1
         sta pa
-dfLD:   lda #$00                ; the room has already gone; $d023 is untouched, so the seams
-        jsr setGnd               ;   stay and the angel is not left alone in the black
-        sta $d022
-        lda frameCnt            ; re-date, so "elapsed >= DIE_OUT" fires DIE_PAUSE frames from now
+        jmp dfTDn
+dfSn:   sec
+        lda paF
+        sbc dvQ0
+        sta paF
+        lda pa
+        sbc dvQ1
+        sta pa
+        jmp dfTDn
+dfLand: lda dieTgF              ; ---- arrived: exactly on it, with the note ----
+        sta paF
+        lda dieTg
+        sta pa
+        lda #$00
+        sta dieRem
+        jsr setGnd              ; the room has already gone; $d023 is untouched, so the seams
+        sta $d022               ;   stay and the angel is not left alone in the black
+        lda frameCnt            ; re-date, so "elapsed >= DIE_OUT" fires DIE_PAUSE ticks from now
         sec
         sbc #${hx(DIE_OUT - DIE_PAUSE)}
         sta dieT0
         rts
-dfMiss: lda #$00                ; outside the window: the run of good frames restarts
-        sta dieLk
-dfSpin: clc                     ; their OWN rate, continued: one signed 16-bit add a frame, no
-        lda paF                 ;   ramp and no easing -- it turns exactly as they were turning
-        adc dieDirF
-        sta paF
-        lda pa
-        adc dieDir
-        sta pa
+; ---- dieAim: X = the angel. dieTg:dieTgF = the exact heading from (px,py) to its cell centre ----
+; No atan at run time anywhere else, so one here: fold the delta onto the first octant, look the
+; ratio up in atanQT, unfold. The delta is under 1.5 cells either way (the angel is a neighbour),
+; so one halving puts both magnitudes in a byte and the ratio in 0..64 costs one udiv.
+dieAim: sec                     ; dx = cell centre - px, 16-bit (cells in the high byte)
+        lda #$80
+        sbc px
+        sta dvQ0
+        lda orbXCT,x
+        sbc px+1
+        sta dvQ1
+        sec                     ; dy, likewise
+        lda #$80
+        sbc py
+        sta dvQ2
+        lda orbYCT,x
+        sbc py+1
+        sta dvD
+        lda dvQ1
+        and #$80
+        sta dmS                 ; bit 7: west
+        bpl daX
+        sec
+        lda #$00
+        sbc dvQ0
+        sta dvQ0
+        lda #$00
+        sbc dvQ1
+        sta dvQ1
+daX:    lda dvD
+        bpl daY
+        lda dmS
+        ora #$40                ; bit 6: north
+        sta dmS
+        sec
+        lda #$00
+        sbc dvQ2
+        sta dvQ2
+        lda #$00
+        sbc dvD
+        sta dvD
+daY:    lda dvQ1                ; both under 384: if either needs 9 bits, halve both
+        ora dvD
+        beq da8
+        lsr dvQ1
+        ror dvQ0
+        lsr dvD
+        ror dvQ2
+da8:    lda dvQ0                ; |dx|
+        cmp dvQ2                ; |dy|
+        bcs daXb
+        sta dmT                 ; steeper than 45 degrees: the ratio |dx|/|dy|, from south
+        lda dvQ2
+        sta dvD
+        lda dmS
+        ora #$20                ; bit 5: the octant is swapped
+        sta dmS
+        jmp daDv
+daXb:   sta dvD                 ; the ratio |dy|/|dx|, from east
+        lda dvQ2
+        sta dmT
+daDv:   lda #$00
+        ldx dvD
+        beq daT                 ; 0/0 cannot happen (a neighbour), but never divide by it
+        sta dvQ2
+        lda dmT                 ; num << 6: high byte num >> 2, its two low bits atop the low byte
+        lsr
+        ror dvQ2
+        lsr
+        ror dvQ2
+        sta dvQ1
+        lda dvQ2
+        sta dvQ0
+        lda #$00
+        sta dvQ2
+        jsr udiv                ; 0..64
+        ldx dvQ0
+        lda atanQT,x            ; quarter units
+daT:    sta dmT
+        lsr
+        lsr
+        sta dieTg
+        lda dmT
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        sta dieTgF
+        lda dmS
+        and #$20
+        beq daS1
+        sec                     ; swapped: 64 units - it
+        lda #$00
+        sbc dieTgF
+        sta dieTgF
+        lda #$40
+        sbc dieTg
+        sta dieTg
+daS1:   bit dmS
+        bpl daS2
+        sec                     ; west: 128 units - it
+        lda #$00
+        sbc dieTgF
+        sta dieTgF
+        lda #$80
+        sbc dieTg
+        sta dieTg
+daS2:   bit dmS
+        bvc daS3
+        sec                     ; north: minus it (y runs south)
+        lda #$00
+        sbc dieTgF
+        sta dieTgF
+        lda #$00
+        sbc dieTg
+        sta dieTg
+daS3:   sec                     ; ---- which quadrant: how far round from where they face ----
+        lda dieTg
+        sbc pa
+        bpl daQp
+        eor #$ff                ; |difference| (128 stays 128: unsigned below)
+        clc
+        adc #$01
+daQp:   ldx #${hx(DIE_ARRS[0])}
+        ldy #0
+        cmp #$20                ; within 45 degrees: in front
+        bcc daQ
+        ldx #${hx(DIE_ARRS[1])}
+        ldy #24
+        cmp #$60                ; within 135: to one side
+        bcc daQ
+        ldx #${hx(DIE_ARRS[2])}
+        ldy #48                 ; behind
+daQ:    stx dieArr
+        sty dieQ
+        lda #$01
+        sta dieRem
+        rts
+; ---- udiv: dvQ0..2 (24-bit) / dvD -> quotient in dvQ0..2. dvD must not be 0 ----
+udiv:   lda #$00                ; the remainder, its ninth bit in carry
+        ldx #24
+udL:    asl dvQ0
+        rol dvQ1
+        rol dvQ2
+        rol
+        bcs udS                 ; past 255: certainly >= the divisor
+        cmp dvD
+        bcc udN
+udS:    sbc dvD                 ; carry is set on both ways in
+        inc dvQ0
+udN:    dex
+        bne udL
+        rts
 dfTDn:
         lda frameCnt
         sec
@@ -20563,11 +24318,6 @@ dsCol:  lda #${hx(8 | FACEART.colram)}  ; bit 3 keeps the cell multicolor; the f
         jsr setGnd
         sta $d022
         sta $d023
-        lda #$00                ; which edge the face arrives at. Increasing pa sweeps world
-        ldx dieDir              ;   points LEFT, so a right turn brings new scenery in from the
-        bpl dsMir               ;   RIGHT -- and the face has to match, or it slides in from the
-        lda #$ff                ;   side you are turning AWAY from
-dsMir:
         ; ---- and straight into the first picture ----
         ; The screen is black here (the fade just finished and the swap set every palette register
         ; to 0), so the copy is invisible and the cut is picOn's three stores on the next frame.
@@ -20583,14 +24333,14 @@ dsMir:
 ; and the picture is simply THERE. Stark reads as more unsettling than motion -- the user's call
 ; after seeing both, and the reason the charset-cycling experiment was dropped entirely.
 ;
-; One picture: shown for DIE_SHOW sixtieths, then black and held until RETURN.
+; One picture: shown for DIE_SHOW sixtieths, then black and held until fire.
 dieShow:
         lda #$00                ; no sprites from here on. Clearing this at the SWAP did not hold:
         sta omEn                ;   the swap runs early in the frame and orbMove refills omEn
         sta $d015               ;   later in the same one, so the carried-orb slot came back.
         lda dieSt
         cmp #$03
-        beq dshHld              ; HELD: black, waiting on RETURN, nothing left to time
+        beq dshFir              ; HELD: black, waiting on fire, nothing left to time
         lda dieTck              ; $ff = the picture is not on screen yet. It CANNOT be placed in
         cmp #$ff                ;   dfEnd: that runs inside the FADE frame, which returns into the
         bne dshRun              ;   render path and repaints the room over it. By here the main
@@ -20620,7 +24370,30 @@ ${DIE_SHOW >= 256 ? `        jmp dshHld              ; DIESHOW>=256: hold the pi
 
         lda #$03                ; nothing sounds here: the dark is silent
         sta dieSt
+        lda #$00                ; fire is not armed until it has been seen released
+        sta dkArm
 dshHld: rts
+; ---- the held black: FIRE restarts the level ----
+; Only once the close-up has gone (the user, 2026-11-03: "make fire restart the level, but only
+; after the death-angel close-up disappears"), and only on a fresh press: a player who died with
+; the button down -- carrying, reaching for an orb -- must not skip the black they are still
+; holding it through. (RETURN restarted from anywhere until 2026-11-12, for testing; the user
+; dropped it with the HUD. RESETNOW=n is the headless test's restart.)
+; (A blind playtester sat at this black with only the joystick: "Fire did nothing ... A real
+; player might sit at a black screen wondering if it crashed.")
+dshFir: lda #$ff
+        sta $dc00
+        lda $dc01
+        and #$10                ; joystick-1 fire: 0 = pressed
+        bne dsfUp
+        lda dkArm
+        beq dshHld              ; still the press from before the black
+        ldx #$ff                ; out of a jsr chain, so drop the stack first
+        txs
+        jmp entry
+dsfUp:  lda #$01
+        sta dkArm
+        rts
 
 
 ` : ''}; ---- orbUse: take the orb in front, or set the carried one down there ----
@@ -20674,9 +24447,7 @@ ${!(HAS_IDOL && HAS_PED && WALL_DELTA) ? '' : `        jsr pedOff              ;
 
 ${MUSIC ? `        lda #${SFX_ID.clink}
         jsr sfxPlay             ; the clink of it coming off the floor
-` : ''}        lda #$01
-        sta entDty
-        rts
+` : ''}        rts
 orbPut: jsr dropPick            ; ---- put down ----
         ldx odCell
         cpx #$ff
@@ -20737,8 +24508,6 @@ ${MUSIC ? `        lda #${SFX_ID.socket}
         sta sokDY
         lda #$00
         sta carry               ; out of your hands from this instant; the animation owns it now
-        lda #$01
-        sta entDty
         rts
 okPlain:inc blkVer              ; ...and setting one down closes a cell
         ; ---- pull the player off the cell boundary FIRST ----
@@ -20828,9 +24597,7 @@ ${HAS_IDOL ? `        txa                     ; ...and gives them back when you 
         jsr idolLk
         pla
         tax
-` : ''}        lda #$01
-        sta entDty
-        rts                     ; (its occluder mask was rebuilt here for the new cell: gone -- see occBy)
+` : ''}        rts                     ; (its occluder mask was rebuilt here for the new cell: gone -- see occBy)
 
 ${FALLMID ? '' : `; ---- bgStep: one slice of the destination render, once per fall frame ----
 bgStep: lda bgPh
@@ -21207,7 +24974,23 @@ holeTail:
         ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
         ; The real test is the span walk in orbOne, and it works for any entity with an occluder
         ; mask; holes had none, which is the only reason they were excluded. They have one now.
-        ldx ohgt                ; the rung, straight out of a page-aligned table. This was a
+${HAS_CORNER && CORN_SCALE !== 1 ? `        lda oidx                ; ---- the CORNER exit: a BIGGER rung (CORNSCALE), so it is seen ----
+        cmp lvlCorT             ; It must stay black (see LEVEL_EXITCOL), so size is what makes it
+        bne hlNoBig             ;   read as a hole. Asking the h -> rung table for a larger h picks
+        lda ohgt                ;   the rung of a nearer hole, and everything below -- the slices,
+                                ;   the box, the top row (holeYBaseT is the rung's OWN offset from
+                                ;   its h) -- follows the rung, so it stays centred on the corner.
+${CORN_SCALE === 2 ? `        asl
+` : `        lsr
+${CORN_SCALE === 1.25 ? `        lsr
+` : ''}        clc
+        adc ohgt
+`}        bcc hlBigX
+        lda #$ff                ; past the table: the nearest rung there is
+hlBigX: tax
+        bne hlRung              ; (0 only if h is: the ldx below gives the same)
+hlNoBig:
+` : ''}        ldx ohgt                ; h; the rung comes straight out of a page-aligned table. This was a
 hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -> rung table,
                                 ;   hlRungS scans the socket's ${SOCK.L.length} rungs
         cmp #$ff                ;   ~600 cycles a frame, which is a sixth of what the whole
@@ -21530,16 +25313,6 @@ hsC2:   lda obR,x
         lsr
         lsr
         sta obCL,x
-        lda obL,x               ; and the two edge cells, for the partial-cell glyphs
-        and #$03
-        tay
-        lda bbLT,y
-        sta obBL,x
-        lda obR,x
-        and #$03
-        tay
-        lda bbRT,y
-        sta obBR,x
         jmp hsNoSt              ; OVER the retract below. This is the SUCCESS path and it used to
                                 ;   fall straight into hsNoSt; dropping hsDrop in front of that
                                 ;   label put the retract in its way, so every correctly placed
@@ -21906,16 +25679,13 @@ ${LD('orbYCT', LVLT('orbYCT').join(','), ': !byte ')}      ;   disagree with wha
 ${LD('orbColT2', LVLT('orbColT2').join(','), ': !byte ')}   ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 
-        ; ---- hudX: the 'H' key, the HUD (raster count, LEVEL line, fps, X/Y/angle), the 'L' key ----
-        ; Out here in the slack above ORB_SMALL because the main block has about fifteen bytes
-        ; and this is a hundred and thirty. jsr-entered from mloop; nothing falls into it.
-        ; The address is a knob because the block BELOW it grows with NOCC -- five resident
-        ; levels with pedestals put twelve more bytes of per-entity table under it. hudX is 130
-        ; bytes and $4000 is absCosT, so there is room to slide it to about $3f80 and no
-        ; further; past that it wants a different home. Both ends are guarded by the
-        ; assembler's own "moves backward".
+${HUD ? `        ; ---- hudX (HUD=1): the readout -- raster count, LEVEL line, fps, X/Y/angle ----
+        ; Out here in the slack above ORB_SMALL because the main block has no room for it.
+        ; jsr-entered from mloop; nothing falls into it. The address is a knob because the block
+        ; BELOW it grows with NOCC. Both ends are guarded by the assembler's own "moves backward".
         * = ${hx16(HUD_AT)}
-${NOHUD ? '' : `        ; ---- how many raster interrupts the frame just drawn took ----
+hudX:
+        ; ---- how many raster interrupts the frame just drawn took ----
         ; dtv straight out of tickDelta: frameCnt - lastMv, so it is the duration of the frame in
         ; front of you, not an average. Six of these is about 10 fps.
         ; It is the CLAMPED value, deliberately: tickDelta floors it at 1 and caps it at ${DT_MAX}, and
@@ -21923,33 +25693,7 @@ ${NOHUD ? '' : `        ; ---- how many raster interrupts the frame just drawn t
         ; raster tick, and this engine does 8-22 fps against a 50Hz IRQ; the cap bites only on the
         ; BOOT frame, whose delta is the whole disk load, and after a cut scene. Those frames read
         ; ${hx(DT_MAX)} instead of the truth, and they are the frames whose duration means nothing anyway.
-`}hudX:
-${NOHUD ? '' : `        ; ---- 'H': the HUD on and off (it starts OFF; HUDON=1 builds it starting on) ----
-        ; The user: "'H' toggles the hud. And the game starts without the HUD." Column 3, row
-        ; bit 5 -- no joystick line is bit 5, so unlike 'L' below this needs no masking.
-        lda #$f7
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        and #$20
-        tax
-        beq hhDn                ; not pressed
-        cpx hhOld
-        beq hhDn                ; still down from last frame: one toggle a press
-        lda hudOn
-        eor #$01
-        sta hudOn
-        bne hhDn                ; just turned ON: this frame draws it
-        jsr fallInv             ; just turned OFF: renderSym skips columns it thinks are unchanged,
-                                ;   and the readouts were drawn over its cells -- so both buffers
-                                ;   are forgotten and repainted whole, wiping the digits
-hhDn:   stx hhOld
-        lda #$ff
-        sta $dc00
-        lda hudOn
-        bne hhOn
-        jmp hxKey               ; off: no readouts at all
-hhOn:   lda #${hx(HUDROW + 1)}
+        lda #${hx(HUDROW + 1)}
         jsr setRow
         ldy #$00
         lda dtv
@@ -21962,8 +25706,8 @@ hhOn:   lda #${hx(HUDROW + 1)}
         and #$0f
         jsr ddPut
         ; ---- LEVEL n ----
-        ; RAYCNT=1 draws two hex digits on this row too and will sit on the "LE". It is opt-in
-        ; and this is not, so the diagnostic wins on the build that asks for it.
+        ; RAYCNT=1 draws two hex digits on this row too and will sit on the "LE". Both are
+        ; diagnostics; the one asked for last wins.
         lda #${hx(HUDROW + 2)}
         jsr setRow
         ldy #$00
@@ -21979,66 +25723,9 @@ hxLv:   lda hxLvT,x
         lda lvlMeT
         jsr ddPut
         jsr drawFps
-        jsr drawDbg
-hxKey:
-`}${MUSIC ? `        ; ---- 'T' (MUSIC): the death's sound, on demand -- row $fb bit 6, no joystick line ----
-        lda #$fb
-        sta $dc00
-        lda $dc01
-        eor #$ff
-        and #$40
-        tax
-        beq htDn
-        cpx htOld
-        beq htDn                ; one press, one run
-        jsr dsGo
-        lda #${DST_N}
-        sta dsAu
-htDn:   stx htOld
-        lda #$ff
-        sta $dc00
-` : ''}        ; ---- 'L': go to the next level ----
-        ; Row $df bit 2, which nothing else in the build reads.
-        ; It does NOT call the level change: it stands the player on the live exit cell and lets
-        ; fallChk find them there, so the skip runs the REAL transition -- fallStep, wallsBack,
-        ; the slot lookup, lvlSwap, mkRuns, objInit -- rather than a second copy that could drift
-        ; from the one play uses. Same trick FALLNOW uses to test the chain headlessly.
-        ; JOYSTICK 1 SHARES $dc01 WITH THE KEYBOARD COLUMNS, and joy-1 LEFT pulls bit 2 -- the
-        ; very bit 'L' sits on. Read the port with NO row selected first: whatever is low then is
-        ; the stick, and it is forced back high before any key is believed. The palette keys (since
-        ; removed) learned this by cycling the walls every time the stick went right.
-${joyMask('hxJoy')}
-        lda #$df
-        sta $dc00
-        lda $dc01
-        ora hxJoy
-        eor #$ff
-        and #$04                ; bit 2 = 'L'
-        tax
-        beq hxDn                ; not pressed
-        cpx hxOld
-        beq hxDn                ; still down from last frame: one level a press, not one a frame
-        lda nExitT              ; a level with no exit has nowhere to skip to
-        beq hxDn
-        lda hlv                 ; the live exit's entity index, the arithmetic fallChk uses
-        clc
-        adc nOrbT
-        tay
-        lda orbXCT,y
-        sta px+1
-        lda orbYCT,y
-        sta py+1
-hxDn:   stx hxOld
-        lda #$ff
-        sta $dc00               ; leave the port neutral for the joystick read in readKeys
-        rts
-hxOld:  !byte 0                 ; 'L' last frame, for the edge test
-${MUSIC ? "htOld:  !byte 0                 ; 'T' last frame\n" : ''}hxJoy:  !byte 0
-${NOHUD ? '' : `hhOld:  !byte 0                 ; 'H' last frame, for the edge test
-hudOn:  !byte ${process.env.HUDON === '1' ? 1 : 0}                 ; the HUD: off until 'H' (HUDON=1 starts it on)`}
-${NOHUD ? '' : `hxLvT:  !byte 18,14,19,14,18   ; L E V E L as glyph indices -- 14 is the hex digit E`}
-` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
-${quarterPair('absSinT', absSin, 'absCosT', absCos)}
+        jmp drawDbg
+hxLvT:  !byte 18,14,19,14,18   ; L E V E L as glyph indices -- 14 is the hex digit E
+` : ''}` : ''}        * = ${hx16(NEWTABLES)}  ; VIC bank 0 is full -- these live above it
 recipLoT: ${chunk(recipLo).trim()}
 recipHiT: ${chunk(recipHi).trim()}
 ; the unsigned clamp tables (see ECOFF): here among the data, NOT beside the code that reads
@@ -22145,19 +25832,6 @@ bfsD1:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wra
 ; not been filled yet and the angel standing on the player, which anTry already prevents.
 ; The two LIVE reads are self-modified rather than indirect -- the map base is one of two pages
 ; and only changes when a fill completes, so paying for it per read would be silly.
-; ---- angDst: how many steps the player is from entity X, off the live BFS map ----
-; The same field anPath walks, read one cell deep. $ff means the fill has not reached this cell --
-; either no fill has completed yet, or the angel is walled off -- and callers must treat that as
-; "unknown", not as "very far", or a marooned angel would run at the fast rate forever.
-angDst: lda orbYCT,x
-${MULW}
-${ADDX('orbXCT,x')}
-        tax
-apLdC:  lda bfsD0,x             ; operand PATCHED to the live map, alongside apLdA/apLdB
-        rts
-asPCur: !byte 0                 ; the period angStep settled on for the angel it is looking at
-${LD('angPerFT', hx(ANG_PERIOD_FAR), ': !byte ')}  ; 60ths between steps when the player is far off...
-${LD('angFarT', hx(ANG_FAR), ': !byte ')}      ; ...where "far" starts. Per level, both swapped with angPerT.
 
 anPath: ldx amIdx
         lda orbYCT,x
@@ -22255,7 +25929,11 @@ bdT:    !byte 0
 ; (unless you carry the idol), and one that turns free reads whatever map exists, a moment stale.
 bfsDue: ldx nOrbM1T              ; every entity: an orb or a hole never banks time (angAccT stays 0),
 bdLp:                           ;   so it is never within its lead -- no need to ask what it is
-${ANGSLIDE ? `        lda angSlDT,x
+${HAS_BIG ? `        lda orbTallT,x          ; the BIG angel steps every period, seen or not, and stands with its
+        cmp #$02                ;   clock at 0 -- so by the rules below it was never due: a stale map
+        beq bdYes               ;   stopped it for good, anywhere (the user, 2026-11-10: "it still gets
+                                ;   stuck at the corner ... even if I'm not near it or not looking")
+` : ''}${ANGSLIDE ? `        lda angSlDT,x
         bne bdNx                ; lunging: its step is already chosen
 ` : ''}        lda orbSeenT,x
         beq bdFree
@@ -22296,7 +25974,7 @@ bfsTick:
 ${MULW}
 ${ADDX('px+1')}
         sta bfsWant
-        lda bfsPhase
+${ANG_REACT ? '        jsr rxStamp             ; ANGREACT: the tick the player ENTERED this cell\n' : ''}        lda bfsPhase
         bne bfsWork
         ; Idle: is the live map still good? It has to be for the right PLAYER CELL and for the
         ; current arrangement of obstacles -- now that orbs block a path, picking one up or
@@ -22325,7 +26003,7 @@ ${BFS_JIT ? `        ldx #${hx(NORB - 1)}
 bfsLSc: sta angLabT,x           ; reached on the first frame keeps 0: the lead is then the clear alone
         dex
         bpl bfsLSc
-` : ''}bfsWork:
+${ANG_REACT ? '        jsr rxGo                ; ANGREACT: the moment this fill answers for, and nobody reached yet\n' : ''}` : ''}bfsWork:
         lda bfsPhase
         cmp #$02
         bcs bfsExp              ; 2 = the main wave, 3 = the deferred entity wave (see bfsSeed)
@@ -22501,7 +26179,12 @@ bfsNbL: lda bfsC
         ; A blocked cell still RECEIVES a distance -- otherwise an entity could never read its
         ; own cell, which is the reason this fill used to ignore entities entirely -- but it is
         ; never EXPANDED from, so no route is ever plotted through one.
+        ; A WALL gets nothing (2026-11-01, the user: skip it "just on principle"): only an entity
+        ; ever reads its own cell, and anPath refuses any neighbour with blkT set before it reads
+        ; the map -- so a wall's distance was written and never read. It keeps the clear's $ff.
         lda blkT,x
+        cmp #$01
+        beq bfsNbN              ; a wall: not labeled, not queued
         sta bfsBlk
 bfsLdN: lda bfsD1,x             ; operand PATCHED to the work map
         cmp #$ff
@@ -22544,8 +26227,11 @@ ${ADDX('orbXCT,x')}
 bfsLdE: lda bfsD1,x             ; operand PATCHED to the work map
 ${BFS_JIT ? `        ldx bfsEnI
         cmp #$ff
-        bne bfsEnN              ; reached: angLabT keeps the count from the last frame it was not
-        inc bfsMiss             ; not reached yet -- go on, the others' counts still get written
+${ANG_REACT ? `        beq bfsEnM
+        jsr angRx               ; ANGREACT: reached -- the first time this fill, has its way round turned?
+        jmp bfsEnN              ;   (angRx leaves X = bfsEnI)
+bfsEnM:` : `        bne bfsEnN              ; reached: angLabT keeps the count from the last frame it was not
+`}        inc bfsMiss             ; not reached yet -- go on, the others' counts still get written
         lda bfsHead             ; ---- BFSJIT: cells expanded so far without reaching this angel ----
         sta angLabT,x           ;   the next fill's lead for it, at BFSTICK cells a tick
 bfsEnN: dex
@@ -22580,15 +26266,13 @@ ${BFS_JIT ? `        lda bfsLiveP            ; live <-> work. anPath patches its
         pha                     ;   read the fill in flight), so the live page is kept as a byte
         lda bfsClS+2
         sta bfsLiveP
-        sta apLdC+2             ; angDst reads the live map
         pla
         sta apLdW+2             ; anPath's "reached yet?" probe reads the WORK map` : `        lda apLdA+2             ; live <-> work, by swapping the patched high bytes
         pha
         lda bfsClS+2
         sta apLdA+2
         sta apLdB+2
-${ANG_DIAG ? '        sta apLdD+2\n' : ''}        sta apLdC+2             ; angDst reads the same map as anPath, so it swaps with it
-        pla`}
+${ANG_DIAG ? '        sta apLdD+2\n' : ''}        pla`}
         sta bfsClS+2
         sta bfsSd+2
         sta bfsLdC+2
@@ -22692,12 +26376,17 @@ orbPtrU: !byte ${orbPtrU.join(',')}${HAS_SILVER ? `
 ; The sentry's RIGHT column: its lower sprite, 0 = one column, and its upper one. The sentry's rungs
 ; only (orbRt tests ovar >= SV_V0 first), so each label sits SV_V0 before its first byte.
 ; (The equates FOLLOW the tables: the assembler resolves an equate when it reads it.)
-svPtrRT: !byte ${orbPtrR.slice(SV_V0).join(',')}
-svPtrRUT:!byte ${orbPtrRU.slice(SV_V0).join(',')}
+svPtrRT: !byte ${orbPtrR.slice(SV_V0, BIG_V0).join(',')}
+svPtrRUT:!byte ${orbPtrRU.slice(SV_V0, BIG_V0).join(',')}
 orbPtrR = svPtrRT - ${hx(SV_V0)}
-orbPtrRU = svPtrRUT - ${hx(SV_V0)}
+orbPtrRU = svPtrRUT - ${hx(SV_V0)}${HAS_BIG ? `
+; ...and the big angel's other sprites and float heights: equates into IAR2 (see BIGTBL)
+${Object.entries(BIGTBL_OFF).map(([n, o]) => `${n} = ${hx16(BIGTBL_AT + o)}`).join('\n')}
+bigPI = bgPIT - ${hx(BIG_V0)}
+bigYT = bgYT - ${hx(BIG_V0)}
+bigBST = bgBST - ${hx(BIG_V0)}` : ''}
 ; ...and each rung's ball centre, in rows above its floor anchor: the hover is h minus this (oSvY)
-svCtrBT: !byte ${svCtrT.slice(SV_V0).join(',')}
+svCtrBT: !byte ${svCtrT.slice(SV_V0, BIG_V0).join(',')}
 svCtrT = svCtrBT - ${hx(SV_V0)}` : ''}
 ${LD('orbTallT', LVLT('orbTallT').join(','), ': !byte ')}
 
@@ -22741,7 +26430,9 @@ orbBlankT: !byte ${orbBlankT.join(',')}
 orbAnchT: !byte ${ORBANCH.join(',')}
 
 ; REMOVED 2026-09-26, nothing in the image named it: orbHgtT: sprite height per variant, 21 or 42. Nothing read it; it is one shift from ORBEXP.
-angVarT: !byte ${angVarT.slice(0, VAR_CLAMP + 1).join(',')}${HAS_SILVER ? `
+angVarT: !byte ${angVarT.slice(0, VAR_CLAMP + 1).join(',')}${HAS_BIG ? `
+bltVarT = ${hx16(BLTVAR_AT)}             ; the ball lightning's h -> rung: in IAN1, behind its bitmaps
+bigVarT = ${hx16(BLTVAR_AT + VAR_CLAMP + 1)}             ; ...and the BIG angel's, behind that, cut at BIGVAR_N (omVarG clamps)` : ''}${HAS_SILVER ? `
 ` : ''}
 ; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
 ; 64 + ${CONE_DMAX + 1} bytes of PURE GEOMETRY. atan2 of a cell delta is the same on every level, so unlike
@@ -22949,10 +26640,10 @@ krillRt: !fill ${KRILL_RT_LEN}, 0
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
 ; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
 ; one; a second pristine build at another address hangs waiting for a reply that never comes.
-; ONCE PER POWER-ON, NEVER AGAIN. Entry runs on every death restart too (dieKey is "jmp entry"),
+; ONCE PER POWER-ON, NEVER AGAIN. Entry runs on every death restart too (dshFir is "jmp entry"),
 ; and by then $0400 is the renderer's span stack: re-parking copied stackLT/stackRT over the live
 ; loader's code, and the NEXT disk load ran the stack as code and hung on a black screen
-; (2026-10-04: die once on level 3, then drop to 4). klParked is DATA, not an equate: dieKey's
+; (2026-10-04: die once on level 3, then drop to 4). klParked is DATA, not an equate: the death restart's
 ; "jmp entry" reloads nothing, so an emitted 0 is the only initialisation a restart never repeats.
 klPark: lda klParked
         bne kpDn
@@ -22985,7 +26676,7 @@ ${HAS_LX ? `        pha
         sta nILV+3              ;   so choosing a level is one byte of self-modification
 ${HAS_LX ? `        jsr llName
         jsr lxOn                ; LEVEL CODE: the arriving level's, if it brought any
-` : ''}${HAS_SILVER ? `; ---- lvlArt: and the LEVEL ART at OVLBASE, if the arriving level wants the other set ----
+` : ''}${HAS_ART ? `; ---- lvlArt: and the LEVEL ART at OVLBASE, if the arriving level wants the other set ----
 ; The pedestal and the idol (IAR0) or the sentry's frames 2-3 (IAR1) -- see ART_SETS. Loaded with
 ; the level, by the same resident under the same blanked display, by renaming the one name buffer
 ; as endGo does. lvlArtT is 0 for a level that uses neither, which keeps whatever is in place.
@@ -23004,10 +26695,34 @@ ${HAS_LX ? `        jsr llName
         sta nILV+1
         lda #$56                ; 'V'
         sta nILV+2
-laDn:   rts
+laDn:
+${HAS_BIG ? `        lda lvlAnT              ; ---- ...and over the ANGEL's ladder: IAN0 (the angel's) or IAN1 ----
+        cmp anCur               ;   (the big angel's overflow, see BIGAN), the same way
+        beq lnDn
+        sta anCur
+        sta nILV+3
+        lda #$41                ; 'A'
+        sta nILV+1
+        lda #$4e                ; 'N'
+        sta nILV+2
+        jsr llName
+        lda #$4c                ; 'L'
+        sta nILV+1
+        lda #$56                ; 'V'
+        sta nILV+2
+lnDn:
+` : ''}        rts
 ; artCur is DATA, not an equate: an emitted value is the only initialisation
 ; a death restart (jmp entry, which loads nothing) never repeats -- and the art does stay loaded.
 artCur: !byte ${hx(0x30 + ART_BOOT)}
+${HAS_FLUTE ? `fluteGot: !byte 0               ; 1 once the flute is taken (LEVEL_FLUTE). DATA for the same reason: a death
+                                ;   restart reloads nothing, so it is never reset -- and the ending reads it` : ''}
+${LD('lvlArtT', LVLT('lvlArtT').join(','), ': !byte ')}   ; the level art set this level wants (see lvlArt)
+${HAS_BIG ? `${LD('lvlAnT', LVLT('lvlAnT').join(','), ': !byte ')}   ; ...and over the angel's ladder: IAN0, or IAN1 the big angel's overflow
+anCur:  !byte ${hx(0x30 + (LEVEL_BIG[BOOTLVL] ? 1 : LEVEL_FLUTE[BOOTLVL] ? 2 : 0))}
+${LD('bltIxT', LVLT('bltIxT').join(','), ': !byte ')}   ; the ball lightning's entity ($ff none)
+${LD('bgAIxT', LVLT('bgAIxT').join(','), ': !byte ')}   ; ...and its thrower
+bsTk:   !byte 0                 ; bgStep: 60ths since the last throw` : ''}
 ` : HAS_LX ? `        rts
 ` : ''}${HAS_LX ? `; ---- THE LEVEL-CODE VECTORS (see LX_FEATURES) ----
 ; The engine calls level code only through these. Each is a jmp: into the module's jump table at
@@ -23018,7 +26733,9 @@ artCur: !byte ${hx(0x30 + ART_BOOT)}
 lxVec:
 ${LX_VECS.map((v, k) => `${(v + ':').padEnd(8)}jmp ${LX_BOOT ? hx16(LXAT + 3 * k) : 'lxNone'}`).join('\n')}
 lxNone: rts
-lxOff:  php
+lxOff:${LX_VECS.includes('lxBye') ? `  jsr lxBye               ; the departing level undoes what it did to the SHARED art (the
+                                ;   charset, the orb ladder) while its code is still here to do it
+      ` : ''}  php
         sei
         ldy #$00
 lxOfL:  lda #<lxNone
@@ -23051,7 +26768,8 @@ lxOnL:  tya
         plp
 lxOnD:  rts
 ${LD('lvlLxT', LVLT('lvlLxT').join(','), ': !byte ')}   ; 1 = this level brings code (at LXAT)
-` : ''}llName:
+${HAS_SILVER || HAS_CLOSE ? `${LD('sockStgT', LVLT('sockStgT').join(','), ': !byte ')}   ; per socket: the lxSock event it starts (a stage, a closer), 0 = none
+` : ''}` : ''}llName:
         lda $99                 ; the three KERNAL bytes the resident reads and the engine owns
         sta llZP
         lda $9a
@@ -23112,7 +26830,7 @@ egF:    jmp egF
 ; because the test does not involve the camera at all -- see the data layer above.
 ; (orbOccT, the per-entity occluder masks, lived here. Gone: occBy answers the facing rule when asked.)
 
-${DIE ? `angBearT: !byte ${angBearT.join(',')}
+${DIE ? `atanQT: !byte ${atanQT.join(',')}
 dieFadeT: !byte ${dieFadeT.join(',')}
 darkerT: !byte ${darkerT.join(',')}
 ; ---- the death cut scene's charset and its 40x25 of codes ----
@@ -23208,7 +26926,8 @@ ${quarterPair('moveYT', moveY, 'moveXT', moveX)}
 ; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
 ; that drawFps falling through into whatever follows it still does. The only branches that
 ; reach these labels are computeFps's own (cf1/cfdd/cfo), so nothing outside needs a longer arm.
-computeFps:
+; All of it is HUD=1 now, but for setRow and ddPut, which the profiler and DIEDBG also draw with.
+${HUD ? `computeFps:
         sec
         lda frameCnt
         sbc lastFrame
@@ -23252,13 +26971,13 @@ cft:    cmp #10
 cfo:    sta fpsOnes
         stx fpsTens
         rts
-
+` : ''}
 ; ---- readout: fps top-left, X/Y/A top-right ----
 ; The overlay no longer plots pixels. In the 4x8 scheme a char code is an INDEX into the
 ; cell-pattern set, not a bitmap, so there is nothing to OR bits into -- instead the last
 ; 18 codes are literal digit glyphs and the readout just pokes them into screen RAM. That
 ; also removes the whole class of bug where the overlay reached into renderer tables.
-setRow:                         ; A = char row -> ppPtr
+${HUD || PROFILE || DIEDBG ? `setRow:                         ; A = char row -> ppPtr
         tax
         lda rowLoT,x
         sta ppPtr
@@ -23267,8 +26986,8 @@ setRow:                         ; A = char row -> ppPtr
         adc baseHi
         sta ppPtr+1
         rts
-
-drawFps:
+` : ''}
+${HUD ? `drawFps:
         lda #${hx(HUDROW)}      ; not row 0: 24-row mode crops the top four pixels, and the
         jsr setRow              ;   glyph ink starts on the second line of the cell
         ldy #$00
@@ -23282,7 +27001,7 @@ drawFps:
         adc #${hx(GLYPH0)}
         sta (ppPtr),y
         rts
-
+` : ''}
 ; X/Y as cell.frac hex (1 nibble cell + 2 nibbles fraction of the 8.8 fixed point),
 ; A = the raw angle byte. Screenshot it to get an exactly reproducible viewpoint.
 ${DIEDBG ? `dbHex:  pha                     ; A as two hex digits at Y, Y advanced
@@ -23303,17 +27022,16 @@ dieDbg: lda #$01                ; the readout is drawn in $d022, which the fade 
         jsr dbHex
         lda dieRem
         jsr dbHex
-        lda dieDir
+        lda dieTg               ; the target heading the turn is landing on
         jsr dbHex
-        lda dieDirF
+        lda dieTgF
         jsr dbHex
         lda pa                  ; and the angle itself: the rate bytes say -3.75 units a frame,
         jsr dbHex               ;   but the observed sweep is nearer -0.35, so watch what pa
         lda paF                 ;   ACTUALLY does per frame rather than what the rate claims
         jmp dbHex
 ` : ''}
-drawDbg:
-${NOHUD ? "        jmp ddAng               ; DEADCODE-OK: angle only, so the X/Y block below is\n                                ;   jumped over rather than compiled out -- SPIN measurement\n                                ;   still needs ddAng, and the rest is cheaper left in place." : ''}
+${HUD ? `drawDbg:
         lda #${hx(HUDROW)}      ; see drawFps: the top character row is half under the border
         jsr setRow
         ldy #36
@@ -23573,12 +27291,12 @@ ${PIVOT ? `        lda #$04                ; row 4: how many hints pivPrep had t
         lda paF                 ; looked like it simply did not reproduce. Read all four digits
         and #$0f                ; off and feed them straight back in as PA=c0 PAF=40.
         jmp ddPut
-ddPut:  clc
+` : ''}${HUD || PROFILE || DIEDBG ? `ddPut:  clc
         adc #${hx(GLYPH0)}
         sta (ppPtr),y
         iny
         rts
-
+` : ''}
 ${process.env.CEILLOG ? `        * = $7c80               ; in the slack the HUD's move left behind
 ; ---- CEILLOG: the ground operands, and whether anything is THERE to show them ----
 ; The flash is "the whole upper screen takes the next level's colour for one frame". irqB0 paints
@@ -23605,14 +27323,7 @@ ceilLog:lda clP
         sta clP
 clDn:   rts
 ` : ''}
-${ANYSYM ? `symT:   !byte $55,$55,$55,$55,$55,$55,$55,$55   ; plain SOLID: every column pair 01
-        !byte ${symRows(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}   ; +8: dot in the GROUND
-        !byte ${symRowsInk(Object.values(LEVEL_SYM)[0], 0x55, 2).map(hx).join(',')}   ; +16: in the SEAM
-symOT:  !byte $ff,$ff,$ff,$ff,$ff,$ff,$ff,$ff   ; plain OCC_FULL: every column pair 11
-        !byte ${symRowsOcc(Object.values(LEVEL_SYM)[0]).map(hx).join(',')}
-        !byte ${symRowsInk(Object.values(LEVEL_SYM)[0], 0xff, 2).map(hx).join(',')}
-lvlSymT: !byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SYM[i + 1] ? (LEVEL_SYMSEAM[i + 1] ? 16 : 8) : 0).join(',')}   ; 0 plain, 8 ground-ink dot, 16 seam-ink
-` : ''}${ANYSEAM ? `; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather
+${ANYSEAM ? `; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather
 ; than a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no
 ; branch.
 ; GATED ON ANYSEAM, NOT ANYSYM. It was inside the symbol block, so the two could disagree: the
@@ -23637,40 +27348,21 @@ ${HAS_IDOL ? `
 ; While the idol holds a slot they go brown/yellow, which re-tones every sprite in view and not
 ; just the idol -- the whole cast catches the light off it. The idol's own body is orange, which
 ; IS per sprite ($d027+n, from orbColT2), so it stays orange whatever else is on screen.
-sprPal: lda dieLat              ; ---- the death scene wants the inks to SIT STILL ----
-        bne spLvl               ; no idol tint and no held split: this is what $d025/$d026 held
-        lda idolOn              ;   before any of this existed, and the scene's fade was written
-        bne spTint              ;   against it. "The world no longer goes black correctly."
-        lda idolHd              ; ...or the idol is in your HANDS, which is the tell that the
-        beq spLvl               ;   angels have stopped caring whether you are looking
-spTint:
-        lda idolU               ; ---- above the split: the world's ----
-        ldy idolH
-        jmp spWSt               ; jmp, NOT "bne ... always". The branch only ever worked because
-                                ;   the ldy above it happened to load a non-zero highlight and
-                                ;   set the flags last -- the lda loads the UNDERSIDE, which is
-                                ;   black ($00) on every level that has an idol. A per-level
-                                ;   highlight is free to be black too, and then the branch falls
-                                ;   through into spLvl and the tint silently never happens.
-spLvl:  lda sprU                ; whatever lvlLook left for this level
+sprPal: lda sprU                ; whatever lvlLook left for this level...
         ldy sprH
+        ldx dieLat              ; ---- the death scene wants the inks to SIT STILL ----
+        bne spWSt               ; no idol tint: this is what $d025/$d026 held before any of this
+        ldx idolOn              ;   existed, and the scene's fade was written against it. "The
+        bne spTint              ;   world no longer goes black correctly."
+        ldx idolHd              ; ...or the idol is in your HANDS, which is the tell that the
+        beq spWSt               ;   angels have stopped caring whether you are looking
+spTint: lda idolU               ; ...or the idol's. The tests are on X, so a black ink (a flag the
+        ldy idolH               ;   old "bne ... always" once wrongly trusted) decides nothing.
 spWSt:  sta $d025
         sty $d026
-        sta irqSpU+1            ; the held half MATCHES the world by default, so the split shows
-        sty irqSpH+1            ;   nothing at all -- including when a WORLD idol is what is
-                                ;   tinting things and walks down into the last few rows.
-        lda dieLat
-        bne spDn
-        ldx carry               ; ---- below the split: only if something special is in hand ----
-        beq spDn
-        dex                     ;   carry is the entity index PLUS ONE
-        lda orbArtT,x
-        beq spDn                ; an orb holds no special inks
-        lda idolU
-        ldy idolH
-        sta irqSpU+1
-        sty irqSpH+1
-spDn:   rts
+        rts
+; (The HELD object had a raster split of its own here -- sprSpl, its inks from SPRSPL down -- removed
+; 2026-11-12: since the idol tints every sprite while it is held, both halves were always the same.)
 ` : ''}
 idolWk: !byte $00               ;   times a second, and the projection clears-then-sets, so
                                 ;   reading the working flag direct would show 0 for any raster
@@ -23759,33 +27451,7 @@ a2F:    sta (fdB),y
 ; ...and the level's three inks with it, out of the main block too: they are a table and three
 ; instructions per ink that some level overrides, and the main block is the tightest resource in
 ; the project. One jsr at each of the two sites instead.
-${HAS_IDOL ? `; ---- sprSpl: the HELD object's inks, from its own raster line down ----
-; Bit pairs 01 and 11 are one register each for all eight sprites, so the only way to give the
-; thing in your hand its own tones is to change them partway down the screen. It is slot 0 at
-; ORB_HOLD_Y, Y-expanded to 42 rows, so it owns everything below SPRSPL and one split does it.
-; Anything in the WORLD whose sprite reaches below that line takes these inks too -- there is no
-; per-sprite escape from a shared register, only a per-SCANLINE one.
-sprSpl:
-irqSpU: lda #${hx(SPR_DEF.under)}
-        sta $d025
-irqSpH: lda #${hx(SPR_DEF.hi)}
-        sta $d026
-        lda irqCm2+1            ; on to whatever the arc split wants next
-        sta $d012
-        jmp irqd
 
-; sprArm: the split is off during a FALL -- every sprite is cleared on the frame one starts, and
-; the arc's own split can sit ABOVE this line, which would strand region 3 behind it.
-sprArm: lda fallSt
-        bne saOff
-        lda #${hx(SPRSPL)}
-        sta irqSpC+1
-        sta irqAr2+1            ; region 1 now ends here rather than at the arc split
-        rts
-saOff:  lda #$ff                ; never matches, and irqAr2 keeps the arc split
-        sta irqSpC+1
-        rts
-` : ''}
 colT:   !byte ${hx(palOf(LVL).ceil)}             ; the TOP region's pending ink. irqB0 is read at the top of
                                 ;   the frame and irqB1 at pSplit, so a store that reaches one of
                                 ;   them immediately can NEVER reach the other on the same frame:
@@ -23800,7 +27466,7 @@ colF:   !byte ${hx(palOf(LVL).ceil)}             ; the FLOOR's ink. colW is the 
 sprU:   !byte ${hx(sprOf(LVL).under)}             ; this level's shared sprite inks, shadowed
 sprH:   !byte ${hx(sprOf(LVL).hi)}             ;   because the idol swap borrows the registers
 ${HAS_IDOL ? `; ---- WHERE EACH IDOL IS: the one piece of state a death does not undo ----
-; DATA, not an equate: dieKey restarts with "jmp entry", which
+; DATA, not an equate: the death restart is "jmp entry", which
 ; reloads nothing, so the emitted bytes are the only initialisation these ever get -- and that
 ; is what makes them survive a restart while everything else goes back to its build state.
 ; "Everything resets except the idols." One byte each: the level the idol is currently in, or
@@ -23842,13 +27508,14 @@ ${CEILVARY && !FALLMID ? `lvlLo:  ldx lvlMeT              ; (only the non-FALLMI
         lda lvlPalceilT,x
         sta irqB2+1
         rts
-` : ''}lvlLook:${HAS_SHD01 ? `
-        jsr shdSet              ; ORBSHD01: this level's orb shadow, in or out` : ''}${HAS_FLICKER ? `
+` : ''}lvlLook:${HAS_FLICKER ? `
         ldx lvlMeT              ; LEVEL_FLICKER: is this level's light failing? (flkTick)
         lda lvlFlkT-1,x
         sta flkOn
-${FLKSPR ? '        sta flkDk               ; FLKSPR: a flickering level starts dark\n' : ''}${FLKINK ? `        jsr lxLook              ; fkEmpty: no inked rectangle yet (its zero page is whatever a load left)
-` : ''}` : ''}${(() => {
+${FLKSPR ? '        sta flkDk               ; FLKSPR: a flickering level starts dark\n' : ''}` : ''}${LX_VECS.includes('lxLook') ? `        jsr lxLook              ; LEVEL CODE: the level's own look -- the flicker's empty rectangle
+                                ;   (its zero page is whatever a load left) and dark orb shadow
+                                ;   (shdIn), level 4's wall mark (symPut). Undone by lxBye.
+` : ''}${(() => {
   // EVERY ink is set here, whether it varies across the chain or not. It used to emit only the
   // ones that vary, on the grounds that the rest were "already correct from boot" -- true when
   // the boot set them itself, and false the moment lvlBoot started calling this instead. On a
@@ -23948,25 +27615,47 @@ lvlSpr:${FLKSPR ? `  lda flkLit              ; FLKSPR: a lit frame is wearing th
 lvlChr:
 
 
-` }${ANYSYM ? `symPut: ldx lvlMeT
-        dex
-        lda lvlSymT,x           ; 0 = plain, 8 = this level is marked
-        clc
-        adc #7                  ; walk both halves of symT backwards, row 7 down to 0
-        tax
-        ldy #7
+` }        jmp ${ANYFLOORDK ? 'floorDk' : 'seamEdge'}   ; (level 4's wall mark is its own code now: symPut)
+${ANYSYM ? (() => {
+  // ONE marked level: the module's text is shared by every level that has the feature, so a second
+  // would need its pattern picked by lvlMeT again -- the table this move did away with.
+  const SYM = LEVEL_IDS.filter(n => LEVEL_SYM[n]);
+  if (SYM.length > 1) throw new Error(`LEVEL_SYM: levels ${SYM} are marked; symPut (level code) knows one pattern`);
+  const art = LEVEL_SYM[SYM[0]], seam = LEVEL_SYMSEAM[SYM[0]] ? 2 : 0;
+  return `;@@LX-BEGIN sym
+; ---- symPut / symOff: SOLID's glyph marked for THIS level, into BOTH charsets, and plain again ----
+; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
+; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
+; mirror, so a baked-in A would render it upside down below the horizon. Writing both charsets
+; explicitly is what gives an above-horizon and a below-horizon glyph. LEVEL CODE since 2026-11-13
+; (it was resident and ran on every arrival to put back plain or marked by a per-level table):
+; symPut on arrival (lxLook, from lvlLook -- the charset lands in the fall's black middle, as
+; lvlChr's does), symOff on the way out (lxBye). Plain is what ICHR ships: SOLID all pair 01,
+; OCC_FULL all pair 11.
+symPut: ldx #$07
 spLp:   lda symT,x
-        sta ${hx16(CHARSET + 8)},y      ; SOLID is code 1, so its glyph is base + 8
-        sta ${hx16(CHARSET_B + 8)},y
+        sta ${hx16(CHARSET + 8)},x      ; SOLID is code 1, so its glyph is base + 8
+        sta ${hx16(CHARSET_B + 8)},x
         lda symOT,x             ; ...and the FULL OCCLUDER, which is solid wall to the eye and
-        sta ${hx16(CHARSET + OCC_FULL * 8)},y   ;   was the one cell on a marked level with no
-        sta ${hx16(CHARSET_B + OCC_FULL * 8)},y ;   mark on it -- a blank black block in a dotted
-        dex                     ;   wall. Same X, so it follows SOLID's plain/marked choice.
-        dey
+        sta ${hx16(CHARSET + OCC_FULL * 8)},x   ;   was the one cell on a marked level with no
+        sta ${hx16(CHARSET_B + OCC_FULL * 8)},x ;   mark on it -- a blank black block in a dotted wall
+        dex
         bpl spLp
-        jmp ${ANYFLOORDK ? 'floorDk' : 'seamEdge'}
-` : `        jmp ${ANYFLOORDK ? 'floorDk' : 'seamEdge'}`}
-; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
+        rts
+symOff: ldx #$07
+soLp:   lda #$55
+        sta ${hx16(CHARSET + 8)},x
+        sta ${hx16(CHARSET_B + 8)},x
+        lda #$ff
+        sta ${hx16(CHARSET + OCC_FULL * 8)},x
+        sta ${hx16(CHARSET_B + OCC_FULL * 8)},x
+        dex
+        bpl soLp
+        rts
+symT:   !byte ${symRowsInk(art, 0x55, seam).map(hx).join(',')}   ; the dot in the ${seam ? 'SEAM ink' : 'GROUND'}
+symOT:  !byte ${symRowsInk(art, 0xff, seam).map(hx).join(',')}
+;@@LX-END
+`; })() : ''}; ---- setGnd: A -> the ground colour, and the two operands the IRQ paints it from ----
 ; $d021 is written by the IRQ every RASTER frame now, so a plain "sta $d021" anywhere else
 ; survives at most 16ms. Everything else that sets the ground -- the death fade, the cut-scene
 ; pictures -- goes through here, which costs each site nothing: jsr is the same three bytes the
@@ -23975,7 +27664,548 @@ setGnd: sta colT                ; THE SHADOWS ONLY. Both are published at raster
 ${CEILVARY ? `        sta colW                ;   halves change at the same top of frame instead of a frame
 ` : ''}        sta colF                ;   apart -- and there is no mid-frame $d021 store to paint a
         rts                     ;   partial band down the middle of the one it lands in.
-${HAS_FLICKER ? (() => { const F = LEVEL_FLICKER[LEVEL_IDS.find(n => LEVEL_FLICKER[n])];
+${HAS_CLOSE ? (() => { const CN = LEVEL_IDS.filter(n => LEVEL_CLOSE[n]);
+  if (CN.length > 1) throw new Error(`LEVEL_CLOSE: levels ${CN} both have closers; clGo's lists are the module's own -- move them into the level tables first`);
+  const C = LEVEL_CLOSE[CN[0]], cells = C.flatMap(c => c.cells), c0 = [0];
+  for (const c of C) c0.push(c0[c0.length - 1] + c.cells.length);
+  return `
+;@@LX-BEGIN close
+; ---- CLOSERS: walls that come BACK when a socket is fed (LEVEL_CLOSE; level ${CN[0]}) ----
+; LEVEL CODE (see LX_FEATURES). The map draws each closer SOLID, a removable wall like any door, so
+; clIn takes them out without the collapse, on every entry and every restart (wallsBack has just put
+; everything back). clGo, from lxSock with A = the closer (1-based, sockStgT), puts one back at once.
+clIn:   ldy #${hx(C.length - 1)}
+clILp:  sty clK
+        lda clWT,y              ; closer y's wall
+        sta wsWall
+        jsr wtOff               ; out, now, no animation
+        ldy clK
+        dey
+        bpl clILp
+        rts
+; clGo: 1. anything standing in one of its cells is PUSHED to that cell's floor neighbour nearer
+; the socket (clAXT/clAYT, chosen at build time), standing, no glide; 2. the wall goes back, at once.
+; The player cannot be in one: LEVEL_CLOSE keeps every closer cell 3+ cells from its socket.
+clGo:   tay
+        dey                     ; -> the closer's index
+        lda clWT,y
+        sta clW
+        lda clC0T+1,y           ; its cells are clC0T[k] .. clC0T[k+1]-1
+        sta clE
+        lda clC0T,y
+        sta clI
+clCLp:  ldx #$00                ; ---- 1. every entity in this cell ----
+clPLp:  cpx nOrbT
+        bcs clPDn
+        lda orbHidT,x           ; carried, eaten or elsewhere: not in the world
+        bne clPNx
+        ldy clI
+        lda orbXCT,x
+        cmp clXT,y
+        bne clPNx
+        lda orbYCT,x
+        cmp clYT,y
+        bne clPNx
+        lda clAXT,y
+        sta orbXCT,x
+        lda clAYT,y
+        sta orbYCT,x
+        lda #$00                ; standing where it lands: a glide under way would carry on from
+        sta angSlDT,x           ;   the old cell
+        sta angSlFT,x
+        lda orbYCT,x            ; and in blkT at the new cell (the old one becomes wall below)
+${MULW}
+${ADDX('orbXCT,x')}
+        tay
+        lda #$02
+        sta blkT,y
+clPNx:  inx
+        bne clPLp               ; always: nOrbT is far below 256
+clPDn:  inc clI
+        lda clI
+        cmp clE
+        bcc clCLp
+        lda wsWall              ; ---- 2. the wall. The socket's own door is collapsing on wsWall:
+        pha                     ;   lend it out and back, as stGo does
+        lda clW
+        sta wsWall
+        jsr wtBack              ; back, now: blkT from the new mapT, runs rebuilt, the angels' fill redone
+        pla
+        sta wsWall
+        rts
+clWT:   !byte ${C.map(c => hx(c.wall)).join(',')}   ; per closer: its wall (local id)
+clC0T:  !byte ${c0.map(hx).join(',')}   ; ...where its cells start in the lists below (and end)
+clXT:   !byte ${cells.map(c => hx(c.x)).join(',')}   ; per closer cell: the cell
+clYT:   !byte ${cells.map(c => hx(c.y)).join(',')}
+clAXT:  !byte ${cells.map(c => hx(c.ax)).join(',')}   ; ...and where whatever stands in it goes
+clAYT:  !byte ${cells.map(c => hx(c.ay)).join(',')}
+clK:    !byte 0
+clW:    !byte 0
+clI:    !byte 0
+clE:    !byte 0
+;@@LX-END
+`; })() : ''}${HAS_CURTAIN ? (() => { const CN = LEVEL_IDS.filter(n => LEVEL_CURTAIN[n]);
+  if (CN.length > 1) throw new Error(`LEVEL_CURTAIN: levels ${CN} both have one; ctDot's cells are the module's own`);
+  const n = CN[0], { x, y } = LEVEL_CURTAIN[n], W = MAP_OF(n)[0].length, cw = y * W + x - 1, ce = y * W + x;
+  // the zone masks the two cells take when OPEN: e's own from the level's map (it is open there), w the
+  // hall's next door -- with e a wall, w sees exactly what its west neighbour does
+  const mt = n === LVL ? LVL_TABLES.find(([k]) => k === 'mapT')?.[1] : LVLSIZED.find(L => L.level === n)?.tables?.mapT;
+  const mE = mt?.[ce] || 0xff, mW = mt?.[cw - 1] || 0xff;
+  // THE FLUTE (LEVEL_FLUTE), on the same level: its entity index is the level's bltIxT
+  // A disk WITHOUT level n (a test chain: CHAIN=9) still assembles its module, only to size the slot
+  // for every shipping level, and never loads it: any index the same width will do there.
+  const FL = !LEVEL_FLUTE[n] ? undefined : n === LVL ? ORBS.findIndex(o => o.flute)
+    : ALLLVL.includes(n) ? LVLSIZED.find(L => L.level === n)?.tables?.bltIxT?.[0] : 0;
+  if (LEVEL_FLUTE[n] && !(FL >= 0 && FL < 0xff)) throw new Error(`LEVEL_FLUTE ${n}: the flute's entity index is not known here`);
+  const [FR1, FR2] = (process.env.FLUTER ?? '3,6').split(',').map(Number);   // orb rungs where the flute steps down a size
+  if (MAP_OF(n)[y][x - 1] !== '#' || MAP_OF(n)[y][x] === '#' || MAP_OF(n)[y][x - 2] === '#')
+    throw new Error(`LEVEL_CURTAIN ${n}: (${x - 1},${y}) must be a wall in the map, with open cells either side of it`);
+  return `
+;@@LX-BEGIN curtain
+; ---- THE CURTAIN (LEVEL_CURTAIN, level ${n}): a plane on the west edge of (${x},${y}) ----
+; LEVEL CODE (see LX_FEATURES). ctDot (lxDot, once a rendered frame, after the cast): FIRST its face, drawn
+; with CURT_MK -- plain wall, no dot -- off THIS frame's cast; THEN which side of the plane you are on.
+; The wall is the cell on the far side: (${x - 1},${y}) while you are east, (${x},${y}) once you are west.
+; A crossing swaps them: map (open = its zone mask, wall = 0), runs rebuilt, the angels' map and the run
+; cache told -- as a broken wall does on level 10. blkT is 0 for both, always: you walk straight through.
+ctDot:${FL !== undefined ? `  lda carry               ; ---- THE FLUTE: picked up like an orb, it is never held -- taken ----
+        cmp #${hx(FL + 1)}
+        bne ctF1
+        lda #$00
+        sta carry
+        lda #$01
+        sta fluteGot            ; for good: nothing resets it (and the ending reads it)
+ctF1:   lda fluteGot
+        beq ctF2
+        lda #$01                ; ...and gone: hidden on every visit after
+        sta orbHidT+${FL}
+ctF2:
+       ` : ''}${LEVEL_PEDESTALS[n] && WALL_DELTA ? ` lda wallStT+${PED_WALL}         ; ---- the pedestal wall OPEN: the three errand exits are scenery now ----
+        beq ctF3                ;   (the user, 2026-11-12: "that one activity changes everything")
+        lda #$ff
+        sta lvlNxtT
+        sta lvlNxtT+1
+        sta lvlNxtT+2
+ctF3:
+       ` : ''} lda #$00
+        sta ctS
+        sta ctI
+ctF:    ldx ctI                 ; the next face's first column, or the screen's end
+        lda #${hx(NLOG)}
+        cpx nbnd
+        bcs ctFE
+        lda bndT,x
+ctFE:   sta ctN
+        cmp ctS
+        beq ctFS                ; empty
+        ldx ctS
+        ldy faceIdT,x
+        cpy #${hx(NRUN)}
+        bcs ctFS                ; nothing struck
+        lda idT,x
+        cmp ctWall
+        bne ctFS                ; not the curtain
+        lda ctN                 ; cells ctS/4 .. (ctN-1)/4
+        sec
+        sbc #$01
+        lsr
+        lsr
+        sta ctE
+        lda ctS
+        lsr
+        lsr
+        tax
+ctFL:   lda seamT,x             ; a plain SOLID column takes the curtain's fill (a seam keeps its line)
+        cmp #${hx(SOLID)}
+        bne ctFK
+        lda #${hx(CURT_MK)}
+        sta seamT,x
+        lda cbA,x               ; a plain cache entry under it would pass for this fill: drawn once in full
+        cmp #$40
+        bcs ctFB
+        lda #$ff
+        sta cbA,x
+ctFB:   lda cbB,x
+        cmp #$40
+        bcs ctFK
+        lda #$ff
+        sta cbB,x
+ctFK:   cpx ctE
+        inx
+        bcc ctFL
+ctFS:   lda ctN
+        sta ctS
+        inc ctI
+        cmp #${hx(NLOG)}
+        bcc ctF
+        ldy #${hx(cw)}               ; ---- which side: the wall is west of the plane while you are east...
+        lda py+1
+        cmp #${hx(y)}
+        bne ctSd
+        lda px+1
+        cmp #${hx(x)}
+        bcs ctSd
+        ldy #${hx(ce)}               ; ...and east of it once you are west
+ctSd:   cpy ctWall
+        beq ctX                 ; no crossing
+        sty ctWall
+        lda #${hx(mW)}
+        sta mapT+${cw}
+        lda #${hx(mE)}
+        sta mapT+${ce}
+        lda #$00
+        sta mapT,y              ; the far side's cell: a wall
+        sta blkT+${cw}               ; neither blocks you (objInit made the base map's wall a block)
+        sta blkT+${ce}
+        sta ogPcV               ; and the entity gate's cached cell is stale: its mask may just have changed
+        jsr mkRuns
+        inc blkVer
+        jmp fallInv
+ctX:    rts
+${FL !== undefined ? (() => {
+  // THE SIZES, nearest last. Per size: its parts (a layer an ink, a sprite a column), the X correction from
+  // where the engine put a ball's sprite (orbXOffT[BOLT_V0]: the flute is the level's ball) to the flute's
+  // own left edge, and its Y base -- 150 less the row it lies on.
+  const P0 = (SPRBASE - VBANK) >> 6, sh = FLUTE.sizes, parts = [], pi = [], pn = [];
+  for (const z of sh) { pi.push(parts.length); pn.push(z.parts.length);
+    for (const q of z.parts) parts.push({ ptr: FLUTE_PTR[q.bm], dx: q.dx, ink: FLUTE.inks[q.L], xe: q.xe }); }
+  const adj = sh.map(z => 24 - 2 * orbXOffT[BOLT_V0] - (z.W >> 1));
+  const yb = sh.map(z => 150 - z.anc);
+  // THE STOP: the hall runs EAST from the flute, so the player, in the cell east of it, comes no nearer
+  // than FLUTE.stop cells -- px's fraction at least ftLim (and fluteGot clear: once it is gone, walk on)
+  const [fx, fy] = LEVEL_FLUTE[n], lim = Math.round((fx + 0.5 + FLUTE.stop - (fx + 1)) * 256);
+  if (lim < 26 || lim > 255) throw new Error(`the flute's stop, ${FLUTE.stop.toFixed(2)} cells, is not inside the cell east of it`);
+  if (adj.some(a => a < -128 || a > 127) || yb.some(y => y < 0 || y > 255)) throw new Error('the flute: a show is too far off its entity');
+  return `; ---- THE FLUTE'S PICTURE (FLUTE): it is the level's "ball" (bltIxT), so orbOne hands it here twice ----
+; ftY (lxBgY): which show (ftSz: by h, the floor's depth below the horizon at its distance -- FLUTEK pixels
+; wide a unit of it), and its screen Y: the row it lies on, at the floor line. ftPart (lxBgPt): its sprites.
+; The engine has given it ONE slot (hi-res: BOLTHIRES), part 0; the rest follow, each a layer (one ink) or
+; a further column of a wide size, hi-res and never doubled -- but for the widest size's red (see FLUTE).
+; ftStop (lxHaz: after the move, before the cast): the player stops short of it, where the widest size is
+; the right size (the user: "have the player stopped before it goes off the bottom of the screen"). Still
+; in the cell next to it, so it can be taken from there.
+ftStop: lda fluteGot
+        bne ftSx
+        lda py+1
+        cmp #${fy}
+        bne ftSx
+        lda px+1
+        cmp #${fx + 1}
+        bne ftSx
+        lda px
+        cmp #${lim}
+        bcs ftSx
+        lda #${lim}
+        sta px
+ftSx:   ${HAZ_PLAN.has(n) ? 'jmp hazSet              ; (lxHaz is the hazards\' too: ftStop wraps it)' : 'rts'}
+ftY:    jsr ftSz
+        ldx ovar                ; (oSvYD carries on with X = the rung)
+        lda ftYB,y
+        clc
+        adc ohgt
+        jmp oSvYD
+ftSz:   ldy #$00
+        lda ohgt
+ftS1:   cmp ftBnd,y
+        bcc ftS2
+        iny
+        cpy #${sh.length - 1}
+        bne ftS1
+ftS2:   sty ftZ
+        rts
+ftPart: ldy ftZ
+        lda o0                  ; the left edge: the engine's ball X, corrected (signed)
+        clc
+        adc ftAdj,y
+        sta ftBX
+        lda o1
+        adc ftAdjH,y
+        and #$01
+        sta ftBX8
+        lda ftPI,y
+        sta ftK
+        lda ftPN,y
+        sta ftN
+        ldx onv                 ; part 0 is the slot the engine took
+        dex
+        stx ftM
+        jsr ftPos
+        lda svRX
+        sta obX,x
+        lda orbBitT,x           ; its X8 bit, for the moved X
+        eor #$ff
+        and omX8
+        ldy svRX8
+        beq ftM8
+        ora orbBitT,x
+ftM8:   sta omX8
+        jsr ftLook
+ftL:    inc ftK
+        dec ftN
+        beq ftX
+        ldx onv
+        cpx onvH
+        bcs ftX                 ; out of slots
+        ldy ftM
+        lda obY,y
+        sta obY,x
+        jsr ftPos
+        ldy ftK
+        lda ftPT,y
+        ldy ovar                ; (svQuad: Y = the rung)
+        jsr svQuad
+        ldx onv
+        dex
+        jsr ftLook
+        jmp ftL
+ftX:    jmp orbYes
+ftPos:  ldy ftK                 ; part ftK's X: the left edge, plus a column's width for a right-hand one
+        lda ftBX
+        clc
+        adc ftDX,y
+        sta svRX
+        lda ftBX8
+        adc #$00
+        and #$01
+        sta svRX8
+        rts
+ftLook: ldy ftK                 ; X = its slot: its bitmap, its ink, hi-res; double-WIDE only if ftXE says
+        lda ftPT,y
+        sta obP,x
+        lda ftCL,y
+        sta obC,x
+        lda orbBitT,x
+        eor #$ff
+        sta ftNB
+        and omMc
+        sta omMc
+        lda ftNB
+        and omXX
+        sta omXX
+        lda ftNB
+        and omYY
+        sta omYY
+        lda ftXE,y
+        beq ftLx
+        lda orbBitT,x
+        ora omXX
+        sta omXX
+ftLx:   rts
+ftBnd:  !byte ${FLUTE.bnd.join(',')}   ; h at which each size takes over from the one before
+ftYB:   !byte ${yb.join(',')}   ; by size: 150 less the row it lies on
+ftAdj:  !byte ${adj.map(a => a & 255).join(',')}   ;   X correction, low...
+ftAdjH: !byte ${adj.map(a => a < 0 ? 255 : 0).join(',')}   ;   ...and its sign
+ftPI:   !byte ${pi.join(',')}   ;   its first part
+ftPN:   !byte ${pn.join(',')}   ;   and how many
+ftPT:   !byte ${parts.map(q => q.ptr).join(',')}   ; by part: its bitmap...
+ftDX:   !byte ${parts.map(q => q.dx).join(',')}   ;   its column's offset...
+ftCL:   !byte ${parts.map(q => q.ink).join(',')}   ;   its ink...
+ftXE:   !byte ${parts.map(q => q.xe).join(',')}   ;   ...and whether it is double-wide (the widest size's red)
+ftZ:    !byte 0
+ftBX:   !byte 0
+ftBX8:  !byte 0
+ftK:    !byte 0
+ftN:    !byte 0
+ftM:    !byte 0
+ftNB:   !byte 0
+`; })() : ''}ctWall: !byte $ff               ; the cell drawn as the wall ($ff: not yet set, so the first frame sets it)
+ctS:    !byte 0
+ctN:    !byte 0
+ctI:    !byte 0
+ctE:    !byte 0
+;@@LX-END
+`; })() : ''}${PEDSINK && HAS_PED && HAS_IDOL && LEVEL_IDS.some(n => LEVEL_PEDESTALS[n]) ? (() => {
+  // ART_SETS[0] is exactly what sits at OVLBASE: the pedestal's rungs, then the idol's.
+  const NP = PED.BM.length, ART = [...PED.BM, ...IDOLBM], NB = ART.length;
+  const P0 = (OVLBASE - VBANK) >> 6;
+  if (P0 + NB > 255) throw new Error('PEDSINK: the art set pointers run past 255');
+  // Rows each picture has to travel to be gone. A DRUM is drawn from the top of its frame, so it
+  // is its inked height; it sinks against its own base (the mask below keeps that curve). An
+  // IDOL stands on its frame's bottom row, so it is the rows from its top to the bottom, and
+  // plain shifting discards what passes the bottom -- the drum's top, where it stands.
+  const inked = b => [...Array(21)].map((_, y) => b[y * 3] | b[y * 3 + 1] | b[y * 3 + 2]);
+  const rowsT = ART.map((b, i) => { const r = inked(b), f = r.findIndex(v => v);
+    if (f < 0) return 0;
+    return i < NP ? r.length - [...r].reverse().findIndex(v => v) - f : 21 - f; });
+  const SH = Math.log2(PEDSINK_T), BYTES = NB * 64, FULL = BYTES >> 8, REM = BYTES & 255;
+  return `
+;@@LX-BEGIN sink
+; ---- pdStep: the solved pedestals swallow their idols, then go down into the floor (PEDSINK) ----
+; LEVEL CODE (see LX_FEATURES), every main-loop frame on the pedestal level, from lxStep -- after
+; the projection, so obP is this frame's. pdClk runs 0..2T once the wall is open: the idols sink
+; while it is under T, the drums after. Each picture is brought to rows * phase / T (pdDep), from
+; however far it already is (pdDnT), so moving during the sink cannot leave a stale rung behind.
+pdStep: lda pdClk
+        cmp #${hx(2 * PEDSINK_T)}
+        bcs pdHide              ; done: keep the idols out of the world (see pdHide)
+        lda wallStT+${hx(PED_WALL)}
+        beq pdOut               ; the wall is still shut: nothing has been solved
+        inc pdClk
+        lda pdClk
+        cmp #${hx(2 * PEDSINK_T)}
+        bcs pdEnd
+        ldx #$07
+pdSlot: lda obP,x               ; ---- every slot pointing into the art set ----
+        sec
+        sbc #${hx(P0)}
+        cmp #${hx(NB)}
+        bcs pdNx
+        stx pdX
+        jsr pdCatch
+        ldx pdX
+pdNx:   dex
+        bpl pdSlot
+pdOut:  rts
+; ---- pdIn: a RESTART (after a death) once the sink has begun -- from lxInit, in objInit ----
+; A restart loads nothing, so the art stays as the sink left it, and wallsBack has just shut the
+; wall. SOLVED STAYS SOLVED (the user hit it, 2026-11-08: after a restart everything was there and
+; invisible): finish the sink at once, and take the wall back out with no collapse, as clIn does.
+; The idols are hidden on the first pdStep -- idolPlace runs after this and would show them again.
+pdIn:   lda pdClk
+        beq pdOut               ; never started: the room is the puzzle again
+        lda #${hx(2 * PEDSINK_T)}
+        sta pdClk
+        jsr pdBlank
+        lda #${hx(PED_WALL)}
+        sta wsWall
+        jmp wtOff
+; ---- pdEnd: the last frame -- every picture blank, and the idols gone from the world ----
+pdEnd:  jsr pdBlank
+; pdHide: every idol slot out of the world (orbHidT, as idolPlace does for one held or elsewhere),
+; so a drum's invisible idol cannot be picked up. Every frame once done, because a restart's
+; idolPlace shows them again; seated idols never blocked, so blkT needs nothing.
+pdHide: ldx nOrbM1T
+pdHL:   lda orbIdolT,x
+        cmp #$ff
+        beq pdHN                ; not an idol slot
+        lda #$01
+        sta orbHidT,x
+pdHN:   dex
+        bpl pdHL
+        rts
+; ---- pdBlank: every picture of the set blank, whether or not it was ever looked at ----
+pdBlank:lda #$00
+        tax
+pdE1:
+${[...Array(FULL)].map((_, k) => `        sta ${hx16(OVLBASE + k * 256)},x`).join('\n')}
+        inx
+        bne pdE1
+${REM ? `        ldx #${hx(REM)}
+pdE2:   sta ${hx16(OVLBASE + FULL * 256 - 1)},x
+        dex
+        bne pdE2
+` : ''}${HAS_SILVER ? `        lda #$ff                ; the art in place is no set at all now: the next level that
+        sta artCur              ;   wants the pedestals and idols (5-7, or the hub again) reloads them
+` : ''}        rts
+; ---- pdCatch: picture A (0-based in the art set) down to this frame's depth ----
+pdCatch:tay
+        lda pdClk               ; the phase: idols over 0..T, drums over T..2T
+        cpy #${hx(NP)}
+        bcc pdPDr
+        cmp #${hx(PEDSINK_T)}           ; an idol: min(clk, T)
+        bcc pdPh
+        lda #${hx(PEDSINK_T)}
+        bne pdPh                ; always
+pdPDr:  sec                     ; a drum: max(0, clk - T)
+        sbc #${hx(PEDSINK_T)}
+        bcs pdPh
+        rts                     ; the drums have not started
+pdPh:   tax                     ; depth = rows * phase >> SH, by adding (phase <= 2T, rows <= 21)
+        lda #$00
+        sta pdM
+        sta pdM+1
+        cpx #$00
+        beq pdDv
+pdMu:   lda pdM
+        clc
+        adc pdRowT,y
+        sta pdM
+        bcc pdMc
+        inc pdM+1
+pdMc:   dex
+        bne pdMu
+pdDv:   ldx #${hx(SH)}
+pdDvL:  lsr pdM+1
+        ror pdM
+        dex
+        bne pdDvL
+        lda pdM                 ; the rows this picture should have sunk by now
+        sec
+        sbc pdDnT,y
+        beq pdOut               ; already there
+        bcc pdOut               ; (cannot go back up)
+        sta pdN
+        lda pdM
+        sta pdDnT,y
+        lda pdN                 ; ---- shift it down pdN rows: 3 bytes a row ----
+        asl
+        adc pdN
+        sta pdD
+        lda #$00                ; drums keep their curved base (mask); idols drop off the bottom
+        cpy #${hx(NP)}
+        bcs pdK
+        lda #$80
+pdK:    sta pdMk
+        tya                     ; the picture's address, OVLBASE + 64 * A, into the three operands
+        lsr
+        lsr
+        sta pdAH
+        tya
+        and #$03
+        lsr
+        ror
+        ror
+        clc
+        adc #<${hx16(OVLBASE)}
+        sta pdR1+1
+        sta pdR2+1
+        sta pdW+1
+        lda pdAH
+        adc #>${hx16(OVLBASE)}
+        sta pdR1+2
+        sta pdR2+2
+        sta pdW+2
+        ; Bottom row first, so every source byte (pdD above) is read before it is overwritten.
+        ldy #62
+pdShL:  tya
+        sec
+        sbc pdD
+        bcc pdZ                 ; above the top: blank shifts in
+        tax
+pdR1:   lda $ffff,x             ; the byte pdN rows above
+        bcs pdHv                ; always (lda keeps the carry the sbc set)
+pdZ:    lda #$00
+pdHv:   bit pdMk
+        bpl pdW
+        ; DRUM: keep only the pixels inside its CURRENT outline. Each column's outline ends at the
+        ; drum's base, which never moves, so the base keeps its curve while the top comes down.
+        sta pdV
+pdR2:   lda $ffff,y
+        sta pdT
+        lsr                     ; any bit of a pixel pair set -> both bits set
+        ora pdT
+        and #$55
+        sta pdT
+        asl
+        ora pdT
+        and pdV
+pdW:    sta $ffff,y
+        dey
+        bpl pdShL
+        rts
+pdRowT: !byte ${rowsT.join(',')}   ; rows each picture travels to be gone
+pdDnT:  !fill ${NB}, 0             ; rows each one has sunk so far
+pdClk:  !byte 0
+pdX:    !byte 0
+pdM:    !byte 0, 0
+pdN:    !byte 0
+pdD:    !byte 0
+pdMk:   !byte 0
+pdAH:   !byte 0
+pdV:    !byte 0
+pdT:    !byte 0
+;@@LX-END
+`; })() : ''}${HAS_FLICKER ? (() => { const F = LEVEL_FLICKER[LEVEL_IDS.find(n => LEVEL_FLICKER[n])];
   if (LEVEL_IDS.some(n => LEVEL_FLICKER[n] && JSON.stringify(LEVEL_FLICKER[n]) !== JSON.stringify(F)))
     throw new Error('LEVEL_FLICKER: flkTick takes its lit inks as immediates; give it a table before two levels differ');
   return `
@@ -23993,7 +28223,7 @@ ${HAS_FLICKER ? (() => { const F = LEVEL_FLICKER[LEVEL_IDS.find(n => LEVEL_FLICK
 ; The random source is John Metcalf's 16-bit xorshift (7,9,8; period 65535), returning the high
 ; byte -- not an 8-bit LFSR, whose consecutive outputs are mostly each other shifted right, so a
 ; low (lit) draw would tend to be followed by lower ones. Nothing else reads it, so its sequence
-; can never couple to gameplay. MEASURED with FLKCNT=1 (a lit-frame counter, flkCnt): 22 lit
+; can never couple to gameplay. MEASURED (before the 2026-11-08 FLK_GAP/FLK_LITP) with FLKCNT=1 (a lit-frame counter, flkCnt): 22 lit
 ; frames in 1,200 ticks (~66 a minute) with the old 32..255-tick gaps, 35 (~105 a minute) with
 ; 48..175 -- each over only ~8 bursts, so +-30% of noise rides on either figure.
 ; (Not with --watchall: its hit totals run on past --until, and it reported hundreds.)
@@ -24021,7 +28251,7 @@ fkIn:   dec flkBur
         sta flkGap
         bne fkDark              ; always (FLK_GAP.min >= 1, asserted at FLK_GAP)
 fkB:    jsr flkRnd
-        cmp #$60                ; lit on about 3 ticks in 8 of a burst
+        cmp #${hx(FLK_LITP)}               ; lit on FLK_LITP/256 of a burst's ticks
         bcs fkDark
         lda #${hx(F.gnd)}               ; ---- LIT, for this frame ----
         sta $d021
@@ -24032,7 +28262,7 @@ fkB:    jsr flkRnd
         sta $d023
         lda #$01
         sta flkLit
-${FLKSPR ? `        lda #${hx(SPR_DEF.under)}               ; the cast's NORMAL inks, for this frame
+${FLKSND ? '        jsr fsSnap              ; ...and the tube snaps\n' : ''}${FLKSPR ? `        lda #${hx(SPR_DEF.under)}               ; the cast's NORMAL inks, for this frame
         sta sprU
         sta $d025
         lda #${hx(SPR_DEF.hi)}
@@ -24193,7 +28423,8 @@ fkRp:   lsr
         cmp fkR0
         bcs fkR0k
         sta fkR0
-fkR0k:  adc fkWd                ; C clear: cmp #25 above, or the store's branch
+fkR0k:  clc                     ; NOT clear on the bcs path (top >= fkR0): it added a row (2026-11-13 audit)
+        adc fkWd
         cmp #25
         bcc fkR1c
         lda #24
@@ -24236,21 +28467,28 @@ fkRNx:  inx
 ; what let this fit an image with no headroom left. Unclaimed by the game; the KERNAL uses that
 ; range during a LOAD, but those are boot-time, before any level can flash -- and lvlLook empties
 ; the rectangle on arrival, so nothing a load left there is ever read as one.
-fkV     = $b5                   ; the ink being filled
-fkBits  = $b6                   ; covered sprites still to look at, and alongside them...
-fkX8    = $b7                   ;   ...their x bit 8s...
-fkXX    = $b8                   ;   ...and expands
-fkLo    = $b9                   ; this sprite's x - 24
-fkHi    = $ba
-fkWd    = $bb                   ; ...and its extent past its first cell, 3 or 6
-fkC0    = $bc                   ; THE RECTANGLE: columns...
-fkC1    = $bd
-fkR0    = $be                   ; ...and rows. Empty while C1 < C0.
-fkR1    = $bf
+; THE RECTANGLE IS THE ONLY STATE: it lives from tick to tick, so it sits clear of MUS_ZP ($be/$bf),
+; which the tube sound's effect player (x8drP) and any GoatTracker player take as their own temps
+; in this same IRQ. With the rectangle's rows THERE (until 2026-11-13), an effect playing while the
+; tube flashed left its data pointer's high byte in fkR1 -- row 37 or 72 -- and fkFill walked
+; rowLoT/rowHiT off their end, storing $08 over zero page, CIA 1 and the code ($0000, $2800,
+; $3900 ...): the user's random freeze on level 8. The scratch below is rebuilt every tick before it
+; is read, so sharing $be/$bf with another tick's temps costs nothing.
+fkC0    = $b5                   ; THE RECTANGLE: columns...
+fkC1    = $b6
+fkR0    = $b7                   ; ...and rows. Empty while C1 < C0.
+fkR1    = $b8
+fkV     = $b9                   ; the ink being filled
+fkBits  = $ba                   ; covered sprites still to look at, and alongside them...
+fkX8    = $bb                   ;   ...their x bit 8s...
+fkXX    = $bc                   ;   ...and expands
+fkLo    = $bd                   ; this sprite's x - 24
+fkHi    = $be
+fkWd    = $bf                   ; ...and its extent past its first cell, 3 or 6
 ` : ''}${process.env.FLKCNT ? 'flkCnt: !byte 0,0\n' + (FLKINK ? 'flkDbg: !byte 0,0,0,0\n' : '') : ''}flkBur: !byte 0                 ; ticks left in this burst, 0 = in a gap
 flkGap: !byte $40               ; ticks left in this gap
 flkSd:  !byte $5a,$c3           ; the xorshift state; never 0, which is its one fixed point
-;@@LX-END
+${FLKSND ? tubeSnd({ P: 'fs', X: 'x8', rnd: 'flkRnd', tick: 'flkTick', o: FS_L8 }) : ''};@@LX-END
 ; ---- the flicker's RESIDENT state: lvlLook, osFlush and lvlSpr read it ----
 ${FLKSPR ? `flkMapT:!byte ${FLKSPR_MAP.map(hx).join(',')}
 flkDk:  !byte 0                 ; 1 = the bodies wear FLKSPR_MAP (dark), 0 = their own colours
@@ -24270,24 +28508,29 @@ lvlFlkT:!byte ${[...Array(PAL_N)].map((_, i) => LEVEL_FLICKER[i + 1] ? 1 : 0).jo
   at.forEach(([a], k) => { const pg = (a >> 8) - P0;
     if (pg > SHD_T.length + 1) throw new Error(`ORBSHD01: the patched bytes skip page $${hx(P0 + SHD_T.length + 1)}`);
     if (pg > SHD_T.length) SHD_T.push(k); });
-  return `; ---- shdSet: put the orb ladder's ground shadow in this level's inks (ORBSHD01) ----
+  return `;@@LX-BEGIN flicker
+; ---- shdIn / shdOut: the orb ladder's ground shadow in this level's inks (ORBSHD01) ----
 ; A flickering level draws the orb's ground shadow in pair 01, the shared underside ink, so it is
 ; black in the dark and grey 1 on a flash. Every other level keeps the shadow it was drawn with.
 ; The ladder is ONE set of bitmaps, so the difference is a patch of ${at.length} bytes, XORed in on
-; arrival and XORed back out on the next arrival anywhere else: shdOn is which of the two the ladder
-; holds NOW, and nothing runs when the arriving level agrees with it. That covers every case with
-; no hook on the way out -- a death restart finds them agreeing, and leaving goes through the
-; next level's lvlLook. Nothing reloads the ladder (ISPR lands once at boot), so shdOn cannot go
-; stale. ${at.length} bytes to patch on ${SHD_T.length + 1} pages: zero page has no pointer free, so the page goes
+; arrival (lxLook) and back out on the way out (lxBye, before the next level reads over this code).
+; LEVEL CODE since 2026-11-13: it was resident, with a per-level flag, so that the NEXT arrival
+; anywhere could XOR it out -- ~140 bytes every level paid for one. shdOn is which of the two the
+; ladder holds NOW; it arrives 0 with the module, so a death restart (lvlLook again, no load) finds
+; it 1 and does nothing. Nothing reloads the ladder (ISPR lands once at boot).
+; ${at.length} bytes to patch on ${SHD_T.length + 1} pages: zero page has no pointer free, so the page goes
 ; into the operands of shdR/shdW, worked out from the index -- the entries are sorted by address,
 ; so each cpx sets carry from the first entry on the next page, and the adc #0 adds it (it can
 ; never carry out of a page number, so carry is clear again for the next cpx).
-shdSet: ldx lvlMeT
-        lda lvlShdT-1,x
-        cmp shdOn
-        beq shdX                ; the ladder already holds this level's shadow
-        sta shdOn
-        ldx #${at.length - 1}
+shdIn:  lda shdOn
+        bne shdLk               ; in already: a death restart
+        inc shdOn
+        jsr shdXor
+shdLk:  ${FLKINK ? 'jmp fkEmpty             ; ...and the rest of the flicker\'s look' : 'rts'}
+shdOut: lda shdOn
+        beq shdX                ; (never: lxLook runs on every arrival)
+        dec shdOn
+shdXor: ldx #${at.length - 1}
 shdL:   lda #${hx(P0)}
 ${SHD_T.map(k => `        cpx #${k}                 ; C = this entry is on a later page
         adc #$00
@@ -24301,9 +28544,9 @@ shdW:   sta $ff00,y
         bpl shdL
 shdX:   rts
 shdOn:  !byte 0                 ; 1 = the ladder holds the pair-01 shadow. It ships without.
-lvlShdT:!byte ${[...Array(PAL_N)].map((_, i) => LEVEL_SHD01[i + 1] ? 1 : 0).join(',')}   ; per level id - 1
 shdLoT: !byte ${at.map(([a]) => hx(a & 255)).join(',')}
 shdMkT: !byte ${at.map(([, m]) => hx(m)).join(',')}
+;@@LX-END
 `; })() : ''}        ; ---- seamEdge has a PAGE of its own now (2026-09-26), and is not in the block below ----
         ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
         ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
@@ -24378,7 +28621,7 @@ idolOnPedT: !byte ${IDOL_XY.map((_, i) => {
 ; Rows to raise a seated sprite, indexed by ohgt>>1. See PEDLIFT: the pedestal's top plane is
 ; 2*PEDH*h above the floor at every distance, and h IS the apparent height the projection
 ; already holds -- so the lift is a fraction of it, not a distance calculation.
-pedLiftT: !byte ${pedLiftT.join(',')}
+pedLiftT = ${hx16(PEDTBL_AT)}       ; ...in IAR0, behind the pedestal and idol bitmaps (PEDTBL)
 idolXT: !byte ${IDOL_XY.map(([x]) => hx(x)).join(',')}
 idolYT: !byte ${IDOL_XY.map(([, y]) => hx(y)).join(',')}
 ; ---- idolPlace: every idol slot in THIS level, shown or hidden by where the idol is ----
@@ -24444,6 +28687,63 @@ ${!HAS_PED ? '' : `        pla                     ;   ...here
 ipNext: dex
         bpl ipLp
         rts
+; ---- THE IDOL'S TWO RULES (the user, 2026-11-04) ----
+; "idol resets like everything else makes the most sense from a puzzle game. but if you take it out
+; of the level it stays wherever it ends up in level 4 ... you *can't* take an idol out of level 4."
+; So in its OWN room an idol is part of the puzzle and a death puts it back on its spawn cell, held
+; or set down; once carried out to the hub it belongs there for good, and a hole out of the hub
+; does not take it -- it is left on the last floor cell you stood on before the hole.
+; (The idol used to drop where you died, wherever that was: a 2026-09-28 fix for an idol lost when
+; the restart filed it under the wrong room. Its record is now always written whole, here.)
+; idolDie (dieGo): carry is still set and idolHand still valid -- the restart clears both later.
+idolDie:ldy idolHand
+        bmi idlNH               ; $ff = empty hands
+        lda lvlMeT              ; in hand: it is in THIS level, where you fell...
+        sta idolLoc,y
+        lda px+1                ;   ...at your cell (px/py hold the cell in the high byte). Only
+        sta idolXT,y            ;   kept away from its own room -- the loop below sends it home
+        lda py+1
+        sta idolYT,y
+${HAS_PED ? `        lda #$00                ; on the floor, not up on a drum
+        sta idolOnPedT,y
+` : ''}        lda #$ff                ; and no longer in your hands: idolPlace runs inside objInit,
+        sta idolHand            ;   before anything re-derives idolHand from the cleared carry
+idlNH:  ldy #${hx(IDOL_N - 1)}
+idlLp:  lda idolLoc,y           ; ---- every idol standing in its OWN room goes back to its spawn ----
+        cmp lvlMeT
+        bne idlNx
+        cmp idHomeT,y
+        bne idlNx
+        lda idSpXT,y
+        sta idolXT,y
+        lda idSpYT,y
+        sta idolYT,y
+idlNx:  dey
+        bpl idlLp
+        rts
+; idolStay (fallChk, a hole just taken): an idol in hand goes through ONLY out of its own room. Out
+; of anywhere else -- the hub -- it stays on the last floor cell you stood on (plLX/plLY), and your
+; hands come away empty, so the fall leaves its sprite behind like an orb's.
+idolStay:ldy idolHand
+        bmi isNo
+        lda idHomeT,y
+        cmp lvlMeT
+        beq isNo                ; its own room: it travels with you, to the hub
+        lda lvlMeT
+        sta idolLoc,y
+        lda plLX
+        sta idolXT,y
+        lda plLY
+        sta idolYT,y
+${HAS_PED ? `        lda #$00
+        sta idolOnPedT,y
+` : ''}        lda #$00
+        sta carry
+        jsr idolLk              ; idolHand and idolHd follow carry
+isNo:   rts
+idHomeT: !byte ${[...Array(IDOL_N)].map((_, i) => hx(+(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0))).join(',')}   ; each idol's own room
+idSpXT: !byte ${[...Array(IDOL_N)].map((_, i) => { const h = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0); return hx(Math.floor((LEVEL_IDOL[h] ?? [3.5, 3.5])[0])); }).join(',')}   ; ...and its spawn cell there
+idSpYT: !byte ${[...Array(IDOL_N)].map((_, i) => { const h = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0); return hx(Math.floor((LEVEL_IDOL[h] ?? [3.5, 3.5])[1])); }).join(',')}
 ; ---- and seamEdge itself starts wherever the idol code ended ----
 ` : ''}; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
 ; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
@@ -24780,10 +29080,8 @@ mrVw:   dey                     ; west face? the cell at c-1 must be open
         sta mrWid
         inc mrNext
         tax
-        lda mrX
-        sta runPlaneT,x
-        lda #$00
-        sta runFaceT,x
+        lda mrX                 ; runPFT: the plane, and W's flags are 0
+        sta runPFT,x
 mrVws:  lda mrWid
         sta runWT,y
         lda #$01
@@ -24804,10 +29102,8 @@ mrVe:   iny                     ; east face? the cell at c+1 must be open
         tax
         lda mrX
         clc
-        adc #$01
-        sta runPlaneT,x
-        lda #$80
-        sta runFaceT,x
+        adc #$81                ; the plane x+1, and bit 7: E's sense
+        sta runPFT,x
 mrVes:  lda mrEid
         sta runET,y
         lda #$01
@@ -24858,9 +29154,8 @@ mrHn:   lda mrY                 ; north face: row 0 has none to see, and c-MAPW 
         inc mrNext
         tax
         lda mrY
-        sta runPlaneT,x
-        lda #$01
-        sta runFaceT,x
+        ora #$40                ; the plane y, and bit 6: across y
+        sta runPFT,x
 mrHns:  lda mrWid
         sta runNT,y
         lda #$01
@@ -24885,10 +29180,8 @@ mrHs:   lda mrY                 ; south face: the last row has none, and c+MAPW 
         tax
         lda mrY
         clc
-        adc #$01
-        sta runPlaneT,x
-        lda #$81
-        sta runFaceT,x
+        adc #$c1                ; the plane y+1, across y, S's sense
+        sta runPFT,x
 mrHss:  lda mrEid
         sta runST,y
         lda #$01
@@ -24914,9 +29207,11 @@ mrHnx:  iny
         ; run had an empty occluder bit: it popped in and out with the player's cell (2026-09-17).
         ; No id in the live tables can be stale: the swap is followed by this rebuild, and the
         ; masks are remade from the live tables every frame.
-        jmp hazSpFix            ; ...and the split ids' plane and face. Out of line: this block
-                                ;   ends at bfsQ with nothing to spare.
-
+${LX_VECS.includes('lxBur') ? `        jmp lxBur               ; LEVEL CODE, the runs just rebuilt: level 4's hazard split ids take
+                                ;   their parent's plane and face (hazSpFix), level 10's brSplit breaks
+                                ;   a run where a new face meets one of the level's own; lxNone elsewhere
+` : `        rts
+`}
 
 ${FALL ? `; Out of the main block (11 bytes over once level 1's two angel readouts met the per-level
 ; stride reads, 2026-09-18) into the tail of the bfsQ page. jsr-only; "* = $9500 moves
@@ -24998,7 +29293,6 @@ obPick: ldy obKI
         bcc obPick              ; slots left: the next nearest
 obODn:  rts
         * = ${hx16(RELOC + 0xf00)}
-${quarterPair('posYT', posY, 'posXT', posX)}
         * = ${hx16(RELOC + 0x1100)}
 rayOffT: !byte ${rayOff.join(',')}
         ; ---- the seated orb's per-variant tables ----
@@ -25059,9 +29353,6 @@ ${(() => { const P = fRowPack(); return `fNT:    !byte ${P.N.join(',')}
 ; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
 ; so castRay picks between these two pages on bit 0 of the quarter and reads ddy out of the one
 ; ddx is not using. Both identities are asserted over every entry at build time.
-; The 256-entry integer-angle originals are emitted only for FINEANG=0 -- posXT/posYT/absSinT/
-; absCosT still index by the integer angle, and their page-alignment check would have to be
-; reworked for no gain.
 ddxLoTQ: ${chunk(ddxLoP).trim()}
         * = ${hx16(RELOC + 0x1500)}
 ddxHiTQ: ${chunk(ddxHiP).trim()}
@@ -25158,6 +29449,7 @@ wallTog:ldy wsWall
         bne wtBack
         jsr wtDoom              ; load the group's cells into dcT: the sink's column scan tests
                                 ;   them directly now that doomT is gone
+        jsr wtRun               ; ...and give their faces runs of their own, so rays land ON them
         lda #${hx(WS_N)}        ; going: START THE COLLAPSE. The map itself does not change until
         sta wsN                 ;   the last frame of it -- see wallSink.
 ${MUSIC ? `        lda #${SFX_ID.wall}
@@ -25187,8 +29479,6 @@ wtGo:   sta wallStT,y
                                 ;   with a level), and doomT back to 0
         jsr mkRuns              ; ...and the runs renumber wholesale, so re-derive the rest
         inc blkVer              ; the obstacle map moved: the angel's fill must be redone
-        lda #$01
-        sta entDty              ; ...and the frame redrawn even if nothing else moved
         jmp fallInv             ; renderSym's run cache still believes the old geometry -- a
                                 ;   column it thinks is unchanged is a column it will not repaint
 
@@ -25247,6 +29537,95 @@ wdLd:   lda $ffff,y             ; operand patched: ...then the slots the group a
         bcc wdLd                ;   only stop early -- but it must not walk off the end of dcT
 wdDn:   rts
 dcT:    !fill ${NDOOM}, 0       ; the doomed cells, one slot each; see wallSink
+
+; ---- wtRun: every exposed face of the doomed cells gets a run id of its own (see DOOM_RUNS) ----
+; The ray search splits a span wherever the two ends' run ids differ, and finds the boundary to the
+; column, so a door with its own ids gets rays cast at both its edges -- which is what wallSink's
+; scan needs to find it. Each new id copies its old one's plane and face, so every other reader
+; (seams, occlusion) sees the same wall. Nothing has to put them back: the collapse ends in wtOff,
+; and a restart or a level change in entry, and both run mkRuns, which renumbers from the map.
+; The FAR SIDE first. A door flush in a straight wall splits its run into old | door | old, and a
+; span whose two ends both land on "old" still merges without looking inside -- so the door is
+; never struck. Renaming every cell of the run past the door (by cell index: a run lies along one
+; line, so "after" is one side) makes it old | door | new, and both of the door's edges split.
+wtRun:  lda #${hx(DOOM_RUN0)}
+        sta wrId
+        ldx #${hx(NDOOM - 1)}
+wfC:    stx wrK
+        ldy #$03                ; the four face tables
+wfT:    sty wfTi
+        lda runTLo,y
+        sta wfR+1
+        sta wfS+1
+        sta wfW+1
+        sta wfV+1
+        lda runTHi,y
+        sta wfR+2
+        sta wfS+2
+        sta wfW+2
+        sta wfV+2
+        ldy dcT,x
+wfR:    lda $ffff,y             ; operand patched: the run of this face at the door
+        beq wfNx
+        cmp #${hx(DOOM_RUN0)}
+        bcs wfNx                ; already one of ours: dcT pads with a duplicate of its first cell
+        sta wfRv
+        sty wfDc
+        lda #$00
+        sta wfM                 ; no new id taken yet: one is only spent if the run goes on
+wfJ:    iny                     ; every cell after the door. The run tables are a full page, so
+        beq wfDr                ;   walking to 255 reads only zeros past the map
+wfS:    lda $ffff,y
+        cmp wfRv
+        bne wfJ
+        tya
+        ldx #${hx(NDOOM - 1)}
+wfD:    cmp dcT,x               ; another door cell keeps its id for its own turn
+        beq wfJ
+        dex
+        bpl wfD
+        lda wfM
+        bne wfW
+        lda wfRv
+        jsr wrOne               ; Y kept
+        sta wfM
+wfW:    sta $ffff,y
+        jmp wfJ
+wfDr:   ldy wfDc                ; ...and then the face of the door itself. After its far side is
+        lda wfRv                ;   safe for a multi-cell door: a door cell further along the run
+        jsr wrOne               ;   was skipped above, still holds the old id, and gets its turn
+wfV:    sta $ffff,y
+wfNx:   ldx wrK
+        ldy wfTi
+        dey
+        bpl wfT
+        dex
+        bpl wfC
+        rts
+; wrOne: A = one face's run id (0 = no face there) -> the id it has now. Y is kept.
+wrOne:  beq wrRt                ; no face this side
+        cmp #${hx(DOOM_RUN0)}
+        bcs wrRt                ; already one of ours: dcT pads with a duplicate of its first cell
+        tax
+        lda wrId
+        cmp #${hx(NRUN)}
+        bcs wrFull              ; the reserve is spent: this face keeps its old id
+        lda runPFT,x
+        ldx wrId
+        sta runPFT,x
+        inc wrId
+wrFull: txa
+wrRt:   rts
+wrId:   !byte 0
+wrK:    !byte 0
+wfTi:   !byte 0
+wfRv:   !byte 0
+wfM:    !byte 0
+wfDc:   !byte 0
+; the four face tables, by number -- also hzRun's (one copy: the hazard block emits it only when
+; there is no wall block to own it)
+runTLo: !byte <runWT,<runET,<runNT,<runST
+runTHi: !byte >runWT,>runET,>runNT,>runST
 
 ; ---- hzRunW: walk one wall's (addrLo, addrHi, outValue, backValue) quads ----
 ; Both directions in ONE list. They used to be two hzRun triple lists over the SAME addresses,
@@ -25347,47 +29726,82 @@ wsFN:   lda #$ff                ; consume it: an entry this frame's cast did not
         cmp #$ff
         beq wsTick              ; not on screen this frame: nothing to shrink, but the clock
                                 ;   still has to run or the collapse would stall out of view
-        ; How low may a column go? To the wall BESIDE it, and no lower. The room behind the
-        ; doomed wall was never cast -- the ray stopped here -- so sinking past its
-        ; surroundings paints flat ceiling and floor colour, which reads as a hole in the
-        ; world. The columns just outside the span are the live answer to "what is the wall
-        ; around this", and being live they survive the player moving mid-collapse, which a
-        ; height captured once at arm time would not.
-        ldx wsHi
-        cpx #$9f
-        beq wfNoR               ; span runs to the right edge: no neighbour that side
-        inx
-        lda colH,x
-        bne wfGotR              ; treat 0 as no neighbour too
-wfNoR:  lda #$00
-wfGotR: sta wsFlr
-        ldx wsLo
-        beq wfDone              ; span runs to the left edge
-        dex
-        lda colH,x
-        cmp wsFlr
-        bcc wfDone              ; keep the TALLER side, so neither edge opens a gap
-        sta wsFlr
-
-        ; Applied PER COLUMN, so the wall does not go all at once: each column clamps as it
-        ; reaches the surrounding height, and the ones with least to fall clamp first. The
-        ; silhouette eats itself away instead of sinking as a block.
-wfDone: lda #$00
+        ; How low may a column go? To the wall it is REVEALING, and no lower (the user,
+        ; 2026-11-08: "stop when it gets to the height of the walls it is revealing -- angles of
+        ; nearby walls, or flat walls in the distance"). This frame's cast stopped at the door, so
+        ; wsBeh casts again through it: the door cells open for a few rays across the span, and
+        ; the loop below reads that height back at any column. It used to stop at the wall BESIDE the
+        ; span instead, a stand-in that for a door flush in a straight wall is the door's own
+        ; height -- so every column had "arrived" on the first frame.
+        jsr wsBeh
+        lda #$00
         sta wsAny               ; ...and whether ANY column is still falling
         ldx wsHi
 wsLp:   lda colH,x
         jsr wsScl
-        cmp wsFlr
-        bcc wsClamp
-        beq wsClamp
-        inc wsAny               ; still standing proud of the wall beside it
-        jmp wsPut
-wsClamp:lda wsFlr               ; level with its surroundings: this column has become the room
+        sta wsT3                ; the door, this frame
+        txa                     ; what is behind it, at this column: the NEAREST sample. It
+        sec                     ;   interpolated between the two around it until 2026-11-08 (a
+        sbc wsLo                ;   lerp and an 8-step multiply, ~70 bytes); over a 4-frame sink
+        clc                     ;   the step left at a corner -- at most 4 columns of the wrong
+        adc #$04                ;   behind height, for a frame or two -- does not show, and the
+        lsr                     ;   bytes were the game. +4 rounds to the nearest 8 (the span is
+        lsr                     ;   under 160, so no carry), and the last sample is at or past
+        lsr                     ;   wsHi, so this never reads beyond it
+        tay
+        lda wsBT,y
+        cmp wsT3
+        bcs wsPut               ; the door is down to it: this column has become the room
+        inc wsAny               ; still standing proud of what it hides
+        lda wsT3
 wsPut:  sta colH,x
         cpx wsLo
         beq wsScan
         dex
         jmp wsLp
+; ---- wsBeh: what stands behind the door, every 8 columns across wsLo..wsHi ----
+; Sample k is at column wsLo + 8k, the last one at or past wsHi (clamped to the screen). With the
+; door's cells opened in mapT -- any non-zero byte is floor to castRay -- each ray runs on to the
+; wall behind; they go back to wall at the end. Between samples wsLp takes the nearest, which is exact
+; along a flat wall and a few columns out at a corner -- and only until the last frame, when the
+; map really opens and the cast takes over with the same answer.
+wsBeh:  lda col
+        pha
+        ldx #${hx(NDOOM - 1)}
+wbO:    ldy dcT,x               ; (a duplicate slot just opens the same cell twice)
+        lda #$ff
+        sta mapT,y
+        dex
+        bpl wbO
+        lda wsLo
+        sta wsC
+        ldx #$00
+wbL:    stx wsK
+        lda wsC
+        cmp #$a0
+        bcc wbIn
+        lda #$9f                ; past the right edge: the edge column
+wbIn:   sta col
+        jsr castRay             ; pp = the height of whatever it reached
+        ldx wsK
+        lda pp
+        sta wsBT,x
+        lda wsC
+        cmp wsHi
+        bcs wbDn                ; this sample is at or past the span's end
+        adc #$08                ; (carry clear: the bcs above was not taken)
+        sta wsC
+        inx
+        bne wbL                 ; always
+wbDn:   ldx #${hx(NDOOM - 1)}
+wbC:    ldy dcT,x
+        lda #$00                ; wall again
+        sta mapT,y
+        dex
+        bpl wbC
+        pla
+        sta col
+        rts
 wsScl:  sta wsT                 ; A = h -> A = h * wsN / WS_N, X untouched. The accumulator
         lda #$00                ;   STARTS at h and adds h another wsN times, so wsN = WS_N-1
         sta wsT2                ;   returns exactly h -- which is the first frame that scales
@@ -25418,14 +29832,15 @@ wsTick: dec wsN
 wsDone: lda #$00                ; the wsAny path skips the dec, so stop the clock by hand or the
         sta wsN                 ;   idle guard lets the whole collapse run again next frame
         jmp wtOff               ; the collapse has finished: NOW the map really changes (tail call)
-wsMore: lda #$01
-        sta entDty              ; keep the frame alive while it falls...
-        jmp fallInv             ; ...and repaint in full, since colH is moving under the cache
+wsMore: jmp fallInv             ; repaint in full while it falls, since colH is moving under the cache
 wsN:    !byte 0                 ; frames of collapse left
 wsT:    !byte 0
 wsT2:   !byte 0
 wsAny:  !byte 0                 ; any column still above the wall beside it this frame?
-wsFlr:  !byte 0                 ; that surrounding height, recomputed live every frame
+wsT3:   !byte 0                 ; the door column's height this frame
+wsC:    !byte 0                 ; wsBeh's sample column
+wsK:    !byte 0                 ; ...and its index
+wsBT:   !fill 21, 0             ; the behind heights, one per 8 columns of the span: (159+7)/8 + 1
 wsLo:   !byte 0
 wsHi:   !byte 0
 ` : ''}
@@ -25465,6 +29880,7 @@ ${LD('nPedT', hx(HOLES_AT.length + SOCKETS_AT.length), ':  !byte ')}            
                                 ;   start -- hlSet's only way to tell a pedestal from a socket.
                                 ;   Equal to nHoleT on a level with none, so the test never fires.
 ${LD('angPerT', hx(ANG_PERIOD), ': !byte ')}   ; 60ths between angel steps on THIS level, when it is close
+${HAS_CORNER ? `${LD('lvlCorT', '$ff', ': !byte ')}   ; the CORNER exit's entity on this level, $ff for none (LEVEL_CORNER)` : ''}
 ${LD('lvlMeT', hx(LVL), ': !byte ')}                 ; the level that is live. OUTSIDE the TWOLEV block below,
                                 ;   because the HUD's LEVEL line reads it in every build -- a
                                 ;   standalone one included, where it is simply a constant. A
@@ -25496,7 +29912,7 @@ occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
 occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).join(',')}
 occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 
-; ---- kMskT / mMskT / bbLT / bbRT / orbBitT ----
+; ---- kMskT / mMskT / orbBitT ----
 ; Twenty-four more bytes evicted from the ORB_SMALL block, same reason as the four above:
 ; that block is the only slack the CODE has, so the way to give the code room is to need
 ; less of the block. All five are small fixed lookups, identical on every level and in no
@@ -25514,8 +29930,6 @@ kMskT: !byte ${[0,1,2,3].map(k => (((1 << k) - 1) << (4 - k)) & 15).join(',')}
 ; (sky/floor) and 10 (seam) alone.
 synMskT: !byte ${[...Array(16)].map((_, m) => [0,1,2,3].reduce((b, c) => b | ((m >> (3 - c)) & 1 ? 0 : 1 << (7 - 2 * c)), 0)).join(',')}
 mMskT: !byte ${[0,1,2,3].map(m => (1 << (3 - m)) - 1).join(',')}
-bbLT:   !byte $0f,$07,$03,$01
-bbRT:   !byte $08,$0c,$0e,$0f
 
 
 
@@ -25944,14 +30358,14 @@ ${SEAMPW ? `; ---- ssPwS: dp for this face, and the largest s*s that still leave
 ; Out here in the free run rather than inline in seamSpan, which lives in the MAIN block below
 ; ORB_SMALL: that block was down to 41 bytes and this is 60 of them, while the stream has room to
 ; spare. A jsr per walking span, about 65 cycles a frame.
-        ; dp is the perpendicular distance from the player to the wall PLANE, and runPlaneT holds
+        ; dp is the perpendicular distance from the player to the wall PLANE, and runPFT holds
         ; that plane per run -- a run lies in one plane by construction. sideT picks the axis the
         ; same way calcU does, so the two cannot disagree about which coordinate u is.
         ; Once per span, and only here: 65% of spans die on the uaH/ubH test above without ever
         ; reaching the walk, and paying a multiply for those would cost more than this saves.
 ssPwS:  ldx spanL
         ldy faceIdT,x           ; the RUN id. idT holds the CELL id -- that is what seamSpan's
-        lda sideT,x             ;   first test compares -- and runPlaneT is indexed by run.
+        lda sideT,x             ;   first test compares -- and runPFT is indexed by run.
         bne spwX
         lda py                  ; side 0: u runs along Y, so the plane is an X
         sta ssPUL
@@ -25961,7 +30375,8 @@ ssPwS:  ldx spanL
         sec
         sbc px
         sta shD
-        lda runPlaneT,y
+        lda runPFT,y
+        and #$1f                ; the plane (AND leaves the borrow alone)
         sbc px+1
         jmp spwA
 spwX:   lda px                  ; otherwise u runs along X and the plane is a Y
@@ -25972,7 +30387,8 @@ spwX:   lda px                  ; otherwise u runs along X and the plane is a Y
         sec
         sbc py
         sta shD
-        lda runPlaneT,y
+        lda runPFT,y
+        and #$1f
         sbc py+1
 spwA:   sta shD+1
         bpl spwP
@@ -26310,7 +30726,25 @@ ogSn:   sta orbSeenT,x
         rts
 ogYes:  clc
         rts
-; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
+${ANG_REACT ? `; ---- ANGREACT's rxStamp, HERE and not beside rxGo (2026-11-12) ----
+; Placed AFTER entGate on purpose: ogEnL is a pinned hot loop, and the padding compaction puts in
+; front of it is the one hole faceIdT (160 bytes, inside one page) fits. That padding is 159 + the
+; bytes moved across, and it exists only while the loop would otherwise straddle a page, so moving
+; this 23-byte routine across leaves room both ways: about 20 bytes of engine growth before ogEnL,
+; and about 25 of shrinkage, before faceIdT has no home ("no hole for faceIdT"). Move cold code
+; across (either way) to re-centre it if that error comes back.
+; rxStamp (bfsTick, every frame): the tick the player entered the cell they are in now.
+rxStamp:cmp rxPrv
+        beq rxsD
+        sta rxPrv
+        sei
+        lda frameCnt
+        ldy frameCnt+1
+        cli
+        sta rxWT
+        sty rxWT+1
+rxsD:   rts
+` : ''}; ---- oSPut: stamp ONE cell of a stamp row, synthesising the glyph where the cell is a wall edge ----
 ; A = the columns the stamp leaves SHOWING (cellFillT mask, bit 3 = column 0); osGly / osGlyW =
 ; the whole-column split glyphs to fall back on, black- and white-backed; Y = the column, (osPtr),y
 ; the cell. Preserves Y.
@@ -26334,13 +30768,18 @@ ${process.env.OCCFBN ? '        inc oSHist+0            ; OCCFBN: cells oSPut wa
         bcc ${process.env.OCCFBN ? 'oSHro' : 'oSPdn'}               ; a readout: leave it
         cmp #${hx(SEAM0 + NSEAM)}
         bcc oSPsol              ; a seam is a whole wall
-${process.env.OCCFBN ? '        inc oSHist+3            ; OCCFBN: ALREADY an occluder or scratch code -- left alone\n' : ''}        rts                     ; an occluder or scratch code already
+${BRK_MARK ? `        cmp #${hx(BRK_MK)}               ; a NEW FACE's marked fill is whole wall too. HERE, before the rts:
+        beq oSPsol              ;   its code is past the seams, among the occluders' and scratch codes
+` : ''}${HAS_CURTAIN ? `        cmp #${hx(CURT_MK)}               ; ...and so is the CURTAIN's
+        beq oSPsol
+` : ''}${process.env.OCCFBN ? '        inc oSHist+3            ; OCCFBN: ALREADY an occluder or scratch code -- left alone\n' : ''}        rts                     ; an occluder or scratch code already
 ${process.env.OCCFBN ? `oSHbl:  inc oSHist+1            ; OCCFBN: BLANK
         jmp oSPdn
 oSHro:  inc oSHist+2            ; OCCFBN: a readout
         jmp oSPdn
 ` : ''}oSPedg: cmp #${hx(SOLID)}
         beq oSPsol
+
         ; ---- can a PRE-BUILT split say this cell? ----
         ; A vertical boundary can be said by one of the seven occluders (or their white-backed
         ; twins) and costs no scratch code. Only a cell split across ROWS -- the wall's base --
@@ -26464,28 +30903,7 @@ oSPsep: cmp seKT,x              ; partly covered: the edge split whose line is t
 ${SEDGE_ON ? `seKT:   !byte ${[...Array(16)].map((_, m) => { const e = SEDGE.find(e => e.show === m); return e ? e.k : '$ff'; }).join(',')}   ; cellFillT mask -> the seam column its edge split keeps, $ff none
 seGT:   !byte ${[...Array(16)].map((_, m) => { const e = SEDGE.findIndex(e => e.show === m); return e < 0 ? 0 : SEDGE0 + e; }).join(',')}   ; ...and that split's code
 seFT:   !byte ${[0, 1, 2, 3].map(k => SEDGEF[k] ?? 0).join(',')}   ; fully covered, line at k -> its split, 0 none
-` : ''}; ---- hazSpFix: the merge-hazard SPLIT ids take their parent run's plane and face ----
-; mkRuns's tail. A spare id never appears in mapT's faces, so the two passes cannot give it a
-; plane; hazSpT (per level, swapped) says which run it was split from. Until this existed the
-; spare slots held whatever the PREVIOUS level's mkRuns had written there (2026-09-17).
-hazSpFix:
-        ldx #$00
-hsfLp:  lda hazSpT,x            ; parent id, or $ff at the end
-        cmp #$ff
-        beq hsfDn
-        tay
-        lda runPlaneT,y
-        pha
-        lda runFaceT,y
-        inx
-        ldy hazSpT,x            ; the spare id
-        sta runFaceT,y
-        pla
-        sta runPlaneT,y
-        inx
-        bne hsfLp               ; always: the table is far shorter than a page
-hsfDn:  rts
-; mkRuns's bit table and scratch. Out of the $9200 block, which the row-counted vertical pass
+` : ''}; mkRuns's bit table and scratch. Out of the $9200 block, which the row-counted vertical pass
 ; (2026-09-17) filled to the byte -- bfsQ sits at its end and the page boundary is hard.
 mrNext: !byte 0
 mrWid:  !byte 0
@@ -27020,34 +31438,26 @@ ${HAZRT ? `        ; The walker and all its data. The dispatcher stays down in t
         ; between the stream and rayOffQS had hit its ceiling for the second time (the first is
         ; recorded at HAZ_BASE's declaration). The stream simply continues, and the assembler's
         ; forward-only origin at rayOffQS ($a900) is the guard: overflow fails the build there.
-hzRun:  ldx #$00                ; walk (addrLo, addrHi, value) triples until $ff
-hzL:    jsr hzGet
+${HZ_ANY ? `hzRun:                          ; X = a list's offset in hazLstT: (table, cell, id) until $ff
+hzL:    jsr hzGet               ; the table: 0-3 = runWT runET runNT runST
         cmp #$ff
         beq hzRt
+        tay
+        lda runTLo,y
         sta hzS+1
-        jsr hzGet
+        lda runTHi,y
         sta hzS+2
-        jsr hzGet
-hzS:    sta $ffff               ; self-modified: the run-table byte this triple names
+        jsr hzGet               ; the cell
+        tay
+        jsr hzGet               ; the run id it takes
+hzS:    sta $ffff,y             ; self-modified: the run table this triple names
         jmp hzL
 hzRt:   rts
-hzGet:                          ; next byte of the list; every list is well under 256 bytes
+${WALL_DELTA ? '' : 'runTLo: !byte <runWT,<runET,<runNT,<runST\nrunTHi: !byte >runWT,>runET,>runNT,>runST\n'}` : ''}hzGet:                          ; next byte of the list; every list is well under 256 bytes
 hzRd:   lda $ffff,x
         inx
         rts
-        ; ---- THE LIVE LEVEL'S SPLIT DATA. Every byte of it is swappable. ----
-        ; hazNT is the whole on/off switch: $ff means this level splits nothing, and hazSet then
-        ; touches only hazRstT (whose first byte is the $ff terminator), so a level with no
-        ; hazards costs one branch. The shared lists are ONE flat run with the pointers held as
-        ; offsets into it, rather than a label each, because a label resolves to an address and
-        ; the other level's copy has to mean the same thing after it is swapped in.
-${LD('hazNT', hx(HZ_LIVE.n[0]), ': !byte ')}
-${LD('hazLoT', HZ_LIVE.lo.join(',') || 0, ': !byte ')}
-${LD('hazHiT', HZ_LIVE.hi.join(',') || 0, ': !byte ')}
-${LD('hazCT', HZ_LIVE.ct.join(',') || 0, ': !byte ')}
-${LD('hazRstT', HZ_LIVE.rst.join(','), ': !byte ')}
-${LD('hazLstT', HZ_LIVE.lst.join(',') || 0, ': !byte ')}` : ''}
-${LD('hazSpT', LVLT('hazSpT').join(','), ': !byte ')}   ; (parent, spare) pairs for hazSpFix; $ff ends
+` : ''}
 ${!ANYFLOORDK ? '' : `
 ; ---- arcBld: stamp the departing arc's dictionary into its own block, once per fall ----
 ; Called as the fall STARTS, which is the one moment charset B still holds the level being LEFT
@@ -27161,7 +31571,7 @@ rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
         ; rather than packed in below the height tables where they used to live.
         * = $a9a0
 ; ---- lvlStart: put the player at the LIVE level's official start ----
-; Boot and every death go through here. dieKey restarts with "jmp entry", but lvlMeT is RAM and
+; Boot and every death go through here. the death restart is "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
 ; makes a death return you to THAT level's spot rather than the build's.
 lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no table length
@@ -27637,8 +32047,9 @@ ${DIE ? `        ; ---- dieChk and dieGo, relocated ----
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
-; The trigger is ONE angle comparison. Contact hides the angel outright, so there is no sprite to
-; see and nothing to project -- turn DIE_TURN either way and the cut scene fires.
+; Caught in sight, the scene follows half a second on (markSaw). Caught UNSEEN it waits, drawn like
+; any angel, for one of three things (dcTurn): it comes into view, you walk into it, or you turn
+; DIE_TURN either way. Get more than a cell away first and the mark lifts -- an escape.
 dieChk: lda dieSt               ; once it has started, the only thing left to do here is repaint
         beq dckIdl              ;   the sprites. obC is rewritten by orbMove every frame and
         lda dieInk              ;   flushed to $d027+n after us, so this is the last word on it.
@@ -27653,18 +32064,8 @@ dckIdl:                         ; ---- holding the idol no longer repaints the w
                                 ; The two SHARED inks still swap while you hold it (sprPal), and
                                 ; the idol's own body is per sprite and set where it is drawn.
                                 ; dckPnt survives for the death scene, which does want all eight.
-dckLive:
-        sec                     ; the turn they are ACTUALLY making, as a signed 16-bit rate over
-        lda paF                 ;   pa:paF. The whole-byte version dropped the fraction, and the
-        sbc dieOpaF             ;   fraction is most of it -- a hand turn is 3/4 of a unit a tick.
-        sta dieDirF             ;   The scene then continues at exactly the speed they had.
-        lda pa
-        sbc dieOpa
-        sta dieDir
-        lda paF
-        sta dieOpaF
-        lda pa
-        sta dieOpa
+dckLive:                        ; (the player's own turn rate was captured here for the sweep to
+                                ;   continue -- see DIE_ARR for why it no longer is)
         lda marked
         beq dcNo
         tax
@@ -27697,9 +32098,17 @@ dcHold: sta markSaw
         bne dcNo                ; still owed: nothing happens yet
         beq dcGo                ; just hit zero: go
 dcTurn:
-` : ''}        sec                     ; THE WHOLE TRIGGER: did they turn far enough since it cornered
-        lda pa                  ;   them? The angel is hidden, so there is no sprite to see and
-        sbc markPa              ;   nothing to project. Turn 30 degrees either way and you die.
+` : ''}        ; ---- caught unseen: THREE triggers (2026-11-02) ----
+        lda orbSeenT,x          ; 1. it has come into VIEW -- any of it, by a turn, a step or a
+        beq dcBmp               ;   strafe: from here it is the watched case, the half second
+        lda #${hx(DIE_MARKDLY)}              ;   with it standing there, then the scene
+        sta markSaw
+        bne dcNo                ; always
+dcBmp:  lda mvBmp               ; 2. you walked into it (mvEnt): the scene turns you to face it
+        bne dcGo
+        sec                     ; 3. THE TURN: did they turn far enough since it cornered them?
+        lda pa                  ;   For an angel still off screen -- on your flank it can need
+        sbc markPa              ;   most of a revolution to come into view. 20 degrees either way.
         bpl dcPos
         eor #$ff
         clc
@@ -27708,130 +32117,33 @@ dcPos:  cmp #${hx(DIE_TURN)}
         bcc dcNo
 dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
 dieGo:  ${MUSIC ? `jsr dsGo                ; MUSIC: the song drops out, the glide begins
-        ` : ''}${!HAS_IDOL ? '' : `ldy idolHand            ; ---- THE IDOL FALLS WHERE YOU DO ----
-        bmi dgNI                ; $ff = empty hands, and 0..2 never set bit 7
-        ; IT HAS TO BE RECORDED HERE, because the restart cannot work it out. dieKey does
-        ; jmp entry, and entry stores 0 into carry and calls idolLk -- which derives idolHand
-        ; FROM carry, so the hand is already empty by the time objInit runs. idolPlace then
-        ; skips its "this idol is in the level we are in" store and takes the floor arm, which
-        ; puts the idol at idolXT/idolYT. Those have exactly ONE writer, orbUse's put-down, so
-        ; they still name the cell you last DELIBERATELY set it down in -- in whichever room
-        ; that was. Read on a different room's map that is an arbitrary cell, usually inside a
-        ; wall: the idol is not destroyed, it is filed under an address from the wrong room,
-        ; and it cannot be found or reached. Reported from play, 2026-09-28.
-        lda lvlMeT              ; on THIS level's floor from now on...
-        sta idolLoc,y
-        lda px+1                ; ...at the cell you died in. px/py are 16-bit with the cell in
-        sta idolXT,y            ;   the HIGH byte, which is what idolXT/idolYT hold.
-        lda py+1
-        sta idolYT,y
-        ; ...AND IT IS NO LONGER IN YOUR HANDS. The restart reaches idolPlace (inside objInit)
-        ; BEFORE anything re-derives idolHand from the cleared carry -- objInit clears carry,
-        ; calls idolPlace, and only then idolLk. With idolHand still naming this idol, idolPlace
-        ; took the "in your hands" arm: hid the idol and set carry back; entry then zeroed carry,
-        ; leaving an idol that was hidden AND held by nobody -- gone until you left the level and
-        ; came back (reported from play, levels 5 and 6). Dropping it HERE says what happened.
-        ; Not reordering objInit instead: a FALL carries the idol through objInit precisely by
-        ; idolHand surviving into idolPlace. carry stays set through the death scene, so the
-        ; held-icon still shows as you die; entry clears it on the restart.
-        lda #$ff
-        sta idolHand
-dgNI:   ` }${process.env.DIEDIR ? `lda #${hx(+process.env.DIEDIR & 255)}
-        sta dieDir      ; DIEDIR forces the turn direction, to test both entry sides
-        ` : ''}lda dieDir
-        bne dgD
-        lda #$01                ; not turning: give the face a side to come from anyway
-        sta dieDir
-dgD:    ; ---- which way round, and unhide it ----
+        ` : ''}${!HAS_IDOL ? '' : `jsr idolDie             ; ---- THE IDOL ON A DEATH: see idolDie ----
+        ` }; ---- aim, and unhide it ----
         ; A marked angel is HIDDEN -- that is how contact works -- so the scene is where it comes
-        ; back. The cell delta is one of eight neighbours; angBearT turns that into a bearing, and
-        ; the signed difference from the current heading gives both the direction to turn and a
-        ; first estimate of how far. dieOff starts far from centre so the stop cannot fire early.
+        ; back. dieAim works out its exact bearing; dieFade turns onto it over dieArr ticks.
         lda #$01                ; ---- ONE FRAME OF WHITE, ceiling and floor together ----
         jsr setGnd              ; setGnd writes colW AND colF, so both halves flash on the SAME
                                 ;   frame -- they used to change on different ones. The ramp
                                 ;   below takes it down from here, so the white lasts exactly the
                                 ;   frame the angel reaches you, and the sprites lose the idol's
                                 ;   fire on the same frame (sprPal stands down once dieSt is set).
-        lda dieOff              ; was it ON SCREEN after it marked you? (see anReach) -- keep the
-        sta dgWas               ;   answer before the reset below throws it away
         lda #$ff                ; unsigned "never projected", far outside the lock window
         sta dieOff
-        lda #${hx(DIE_CAP)}
-        sta dieRem
+        lda #$00
+        sta dieRem              ; no turn unless an angel marked us (DIENOW may fire without one)
+        sta dieLk
+        lda #${hx(DIE_ARR)}     ; ...and the glide then takes the longest
+        sta dieArr
+        lda #48
+        sta dieQ
         lda marked
         beq dpDn
         ldx amIdx
         stx dieIdx              ; the one entity dieOff is allowed to come from
-        lda #$00
-        sta dieLk
-
-        lda #$00
-        sta orbHidT,x
-        sec
-        lda orbXCT,x            ; dx+1, in 0..2
-        sbc px+1
-        clc
-        adc #$01
-        sta dieCl
-        sec
-        lda orbYCT,x            ; (dy+1)*3
-        sbc py+1
-        clc
-        adc #$01
-        sta dieCy               ; dy+1, kept: *3 needs it twice
-        asl                     ; 2(dy+1)
-        clc
-        adc dieCy               ; 3(dy+1)
-        clc
-        adc dieCl               ; + (dx+1)
-        tax
-        lda angBearT,x
-        sec
-        sbc pa                  ; shortest way round: the sign of the difference is the way to go
-        sta dieCl
-        ; ---- CAUGHT WHILE YOU WERE WATCHING IT: steer by the SCREEN, at hand speed ----
-        ; The bearing above is to the angel's cell CENTRE from yours. That is the right estimate
-        ; for the unseen death, where the angel is off screen and your turn is what brings it in.
-        ; Watched -- the idol case, where it walks up in plain view -- it is already near the
-        ; middle, and your offset inside your own cell can flip that bearing's sign: the sweep
-        ; then turns AWAY and runs out its cap with the angel gone. The projection already knows
-        ; which side it is on, so use that. And not at your own rate: a fast turn crosses the
-        ; two-frame lock window in one frame and never locks. Zero here takes the hand-speed
-        ; default below.
-        lda dgWas
-        cmp #$ff
-        beq dgBear              ; never drawn since the mark: the bearing is all there is
-        lda dieSgn              ; $00 right of centre, $ff left
-        ora #$01                ; -> +1 (turn up: sweeps it left onto the middle) or -1
-        sta dieCl
-        lda #$00
-        sta dieDir
-        sta dieDirF
-dgBear:
-        ; dieDir is the HIGH BYTE OF A RATE now, not a direction flag. Storing +-1 into it left
-        ; pa:paF advancing by $01xx or $FFxx a frame -- and $FFxx is minus a quarter of a unit, so
-        ; the turn crawled backwards and never arrived. Keep the captured rate; only its SIGN is
-        ; ours to choose.
-        lda dieDir
-        ora dieDirF
-        bne dpHav               ; they were mid-turn, so there is a real rate to continue
-        lda #${hx(TURN_RATE)}   ; ...and if they were not, a hand-speed default
-        sta dieDirF
-        lda #$02
-        sta dieDir
-dpHav:  lda dieCl
-        eor dieDir
-        bpl dpDn                ; already heading the short way round
-        sec                     ; otherwise negate the whole 16-bit rate, magnitude intact
-        lda #$00
-        sbc dieDirF
-        sta dieDirF
-        lda #$00
-        sbc dieDir
-        sta dieDir
-dpDn:   lda #$00                ; AFTER the branch above, not inside it: skipping it left the
-        sta marked              ;   player marked through the whole cut scene when they WERE turning
+        jsr dieAim              ; the exact bearing, and the turn begins
+dpDn:   ${MUSIC ? `jsr dsPlan              ; the glide, over the turn's own time
+        ` : ''}lda #$00
+        sta marked
         lda nOrbT               ; the angel simply is not there any more -- hiding it is one
         beq dgAD                ;   store, and orbMove then never gives it a slot.
         ldx nOrbM1T
@@ -27855,11 +32167,8 @@ dgAD:   lda #${hx(ORBBODY[0])}  ; the orb, by contrast, fades out with everythin
         lda #$ff
         sta dieTck              ; no tick written yet
         rts
-dgWas:  !byte $ff                ; dieOff as dieGo found it: $ff = the angel was not drawn since the mark
-dcClr:  ldx amIdx               ; out of reach again: the sentence lifts and it comes back
-        lda #$00
-        sta orbHidT,x
-        sta marked
+dcClr:  lda #$00                ; out of reach again: the sentence lifts.
+        sta marked              ;   (It was never hidden, so nothing has to come back.)
 dcNo:   rts
 
 ` : ''}
@@ -27910,22 +32219,66 @@ picOn:  ${MUSIC ? `jsr dsBoom              ; the cut lands on a boom
         sta $d023
         rts
 ` : ''}
-${DIE ? `; ---- dieKey: RETURN restarts, from anywhere ----
-dieKey:
-${joyMask('dkJoy')}
-        lda #$fe
+${LVSKIP && FALL ? (() => {
+  const LV = LVSKIP_LV;
+  const RUN = LV.every((n, k) => n === k + 1);   // levels 1..n: the level IS the digit's index + 1
+  return `        * = $be00               ; @FLOAT (see compact.mjs): placed in the code stream, beside readKeys,
+                                ;   this routine moved four pinned hot loops across page lines and
+                                ;   cost 402 bytes of padding; as a self-contained run it drops into
+                                ;   a pre-alignment gap instead. (The address is a placeholder.)
+; ---- lvKey: the secret level select (LVSKIP) -- hold 'L', press a digit, drop to that level ----
+; Like the old 'L' skip it does NOT change level itself: it points exit 0 at the chosen level and
+; stands the player on that exit, so fallChk runs the REAL transition (the drop, wallsBack, the
+; loads, objInit) and not a second copy that could drift from it. lvlNxtT arrives with every level
+; file, so the next load (which this fall is) puts the real wiring back. Every level has an exit
+; to stand on: asserted beside nExitT. Only the levels on this disk have a key, since a missing ILV
+; file would hang the load.
+; 'L' and every digit sit on joystick-1 lines (bits 0, 2, 3), so the combo counts only with the
+; stick idle both BEFORE the keys (joyEor, readKeys' sample this frame) and AFTER them (see
+; joystick-key-race: one sample let a LEFT landing between the reads fire the old 'L').
+; The level you are ON is allowed -- the full drop and reload restarts it (the user, 2026-11-13) --
+; so one drop per press needs a latch: lkArm is set while 'L' is up and spent by a drop, or a combo
+; still held after landing would drop again and again. (Uninitialised is fine: garbage arms it, 0
+; just waits for the first frame without 'L'.)
+; From readKeys, A = the column-5 read with the stick masked. Keeps rowv; leaves $dc00 neutral.
+lvKey:  and #$04                ; 'L'
+        beq lkDown
+        sta lkArm               ; up: armed (A = 4)
+        bne lkOut               ; always
+lkDown: lda lkArm
+        beq lkOut               ; still the press that dropped us: wait for 'L' to come up
+        ldx #${LV.length - 1}
+lkDg:   lda lkColT,x
         sta $dc00
         lda $dc01
-        ora dkJoy
-        and #$02                ; RETURN
-        bne dkNo
-        ldx #$ff                ; jumping out of a jsr chain, so drop the stack first
-        txs
-        jmp entry
-dkNo:   lda #$ff
-        sta $dc00
+        and lkBitT,x
+        beq lkSeen
+        dex
+        bpl lkDg
+lkOut:  lda #$ff
+        sta $dc00               ; leave the port neutral for the next joystick read
         rts
-` : ''}
+lkSeen: jsr lkOut               ; the port neutral...
+        lda $dc01               ; ...and the stick again, after the keys
+        eor #$ff
+        ora joyEor
+        and #$1f
+        bne lkOut               ; a stick line was down at either sample: no key is believed
+        sta lkArm               ; A = 0: this press is spent
+${RUN ? `        inx                     ; the level: its digit's index + 1 (this disk has 1..${LV.length})` : `        lda lkLvT,x
+        tax`}
+        stx lvlNxtT             ; exit 0 now leads there...
+        ldy nOrbT               ; ...and we stand on it (exit 0's entity index, as fallChk counts)
+        lda orbXCT,y
+        sta px+1
+        lda orbYCT,y
+        sta py+1
+        rts
+`; })() : ''}${LVSKIP && FALL ? `        * = $be00               ; lvKey's tables: a data run of their own, for the same gap-filling
+lkColT: !byte ${LVSKIP_LV.map(n => hx(LVSKIP_KEY[n - 1][0])).join(',')}   ; lvKey: each level's digit, its keyboard column...
+lkBitT: !byte ${LVSKIP_LV.map(n => hx(LVSKIP_KEY[n - 1][1])).join(',')}   ; ...and its row bit
+${LVSKIP_LV.every((n, k) => n === k + 1) ? '' : `lkLvT:  !byte ${LVSKIP_LV.join(',')}   ; ...and the level
+`}` : ''}
         ; 256 bytes, so it goes above the image with the rest rather than into the per-variant
         ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
@@ -27954,7 +32307,7 @@ ${packAll()}`;
 // Comments and blank lines do NOT break the chain (they change nothing about reachability); data
 // directives and a new origin DO, since neither is a fall-through from the instruction above.
 // DEADCODE-OK on the exit line waives it. That convention already existed before this check did
-// -- orbMove's still-frame short-circuit is jmp'd over while the occlusion stamping is unfinished
+// -- orbMove's still-frame short-circuit sat jmp'd over for months, until it was deleted 2026-11-02
 // -- which is the argument for the check rather than against it: the situation is real enough to
 // have been annotated by hand, and everything NOT annotated is then a mistake.
 // One waived site across the whole emitted file when this was written, so it throws rather than
@@ -28024,9 +32377,9 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
   // ...but the SOLO slot's tables are not squatters. They are one deliberate allocation with a
   // known extent, declared as the SOLO_SLOT segment, and a squatter reserves a whole PAGE -- so
   // counting all 36 of them separately made every pair inside a page "overlap" every other.
-  // ...nor the sentry's tables (SVTBL): they ride in IAR1, inside the OVLBASE segment.
+  // ...nor the sentry's tables (SVTBL): they ride in IAR1, inside the OVLBASE segment. Nor PEDTBL's (IAR0).
   .filter(([n, a]) => a >= VBANK && a < 0xfffa && n !== 'charset' && n !== 'charsetB'
-                      && SLOT_OFF[n] === undefined && SVTBL_OFF[n] === undefined
+                      && SLOT_OFF[n] === undefined && SVTBL_OFF[n] === undefined && BIGTBL_OFF[n] === undefined && n !== 'pedLiftT' && n !== 'bigPI' && n !== 'bigYT' && n !== 'bigBST' && n !== 'bltVarT' && n !== 'bigVarT'
                       // SHYCOL's colH is a named allocation of known size (COLH below), not a
                       // squatter: a squatter reserves its whole page, which would run into ARC_GLY.
                       && n !== 'colH');
@@ -28059,7 +32412,11 @@ const ALIGNED_T = {
     // (2026-10-14: declared apart, NRUN each. They are separate labels to every reader -- nothing
     // indexes runFaceT off runPlaneT -- and two 65-byte runs fit the arena's edges where one 130-byte
     // run did not, once the sentry's code took the slack. A declared buffer is never clustered.)
-    runPlaneT: { within: NRUN }, runFaceT: { within: NRUN },
+    runPFT: { within: NRUN },
+    // the fall's arc map: read arcMap,x only, nothing builds a pointer from it, so it need not START
+    // on a page -- only not cross one. Inferred page-aligned from its old $6e00, it wasted the rest of
+    // its page, which was the 16 bytes NRUN 128 lacked (2026-11-11).
+    arcMap: { within: CELLCODES },
     // faceIdT and remLoT: per logical column (NLOG), abs,X -- they must not CROSS a page (a cycle on
     // the hottest reads), but nothing builds a pointer from their high byte, so they need not START
     // on one. Inferred page-aligned from their hand addresses, they were stranded when the sentry's
@@ -28074,7 +32431,9 @@ const ALIGNED_T = {
     svSlT: 1,
     mapT: 256, f0LoT: 256, f0HiT: 256, f1LoT: 256, f1HiT: 256,
     runWT: 256, runET: 256, runNT: 256, runST: 256, rsT: 256,   // rbT is 7 into rsT: sharedPair
-    ddxLoT: 256, ddxHiT: 256, ddyLoT: 256, ddyHiT: 256, posYT: 256,   // posXT is 64 into posYT: quarterPair
+    // the DDA's two pages: read once or twice a STEP. Listed under their old names (ddxLoT...) until
+    // 2026-11-02, which no build emits, so 42% of rays paid a crossing here.
+    ddxLoTQ: 256, ddxHiTQ: 256, qcosT: 256,
     rayOffT: 256, hPgT: 256, ecMT: 256, ecM16: 256, ecM8: 256,   // 256 = START ON A PAGE (see the guard)
     // ---- THE CELL CHOOSER'S BYTE-INDEXED TABLES (2026-10-05) ----
     // Their source puts each at a `* = RELOC+$xx00` origin with a comment saying why ("a page
@@ -28159,30 +32518,104 @@ writeFileSync('./build/iray.zpres.json', JSON.stringify([...new Set([...Object.v
 // a level's module: the jump table in LX_VECS order, then each of its features' text
 const lxSrcFor = feats => {
   for (const f of feats) if (!LX_SRC[f]) throw new Error(`level code: feature '${f}' has no marked text in this build`);
-  return LX_VECS.map(v => { const f = feats.find(f => LX_FEATURES[f].vecs[v]);
-      return `        jmp ${f ? LX_FEATURES[f].vecs[v] : 'lxRtsM'}               ; ${v}`; }).join('\n') +
-    `\nlxRtsM: rts                     ; a vector none of this level's features answers\n${feats.map(f => LX_SRC[f]).join('\n')}`;
+  // A vector none of this level's features answers is its OWN rts (padded to the 3 bytes of a jmp, so
+  // the next lands at LXAT + 3n where lxOn points) -- and the LAST is just the rts, so the module's
+  // code starts 2 bytes sooner (2026-11-12: level 10 needed exactly the 3 this and the old shared
+  // "lxRtsM: rts" are worth).
+  return LX_VECS.map((v, i) => { const f = feats.find(f => LX_FEATURES[f].vecs[v] && LX_FEATURES[f].wraps?.includes(v)) ?? feats.find(f => LX_FEATURES[f].vecs[v]);
+      return f ? `        jmp ${LX_FEATURES[f].vecs[v]}               ; ${v}`
+        : `        rts                     ; ${v}: none of this level's features answers it${i < LX_VECS.length - 1 ? '\n        !byte 0,0' : ''}`; }).join('\n') +
+    `\n${feats.map(f => LX_SRC[f]).join('\n')}`;
 };
-const lxAssemble = (feats, resolve) => {
-  const src = lxSrcFor(feats), eq = new Map();
-  for (let tries = 0; tries < 500; tries++) {
-    try { return assemble(`${[...eq].map(([n, v]) => `${n} = ${hx16(v)}`).join('\n')}\n        * = ${hx16(LXAT)}\n${src}`); }
-    catch (e) { const m = /undefined symbol: (\w+)/.exec(e.message); if (!m || eq.has(m[1])) throw new Error(`level code (${feats}): ${e.message}`);
-      eq.set(m[1], resolve(m[1])); }
+// ---- LX_LOW: the biggest module may START below LXAT (2026-11-12) ----
+// The jump table has to sit at LXAT (lxOn points the engine's vectors there), but the bytes between a
+// level's own end (LVL_END: its blob, its walls) and LXAT are its to use -- a ZONELESS level has no zone
+// table, so level 10 has ~180. A STRETCH of the module moves there: lines [a, b), both ends at a cut
+// after an rts, jmp or data line, so nothing falls into or out of it -- the biggest stretch that fits,
+// sized off one listing and then assembled at low.at to prove it (the assembler checks every byte, so
+// one that would run into the jump table fails). low.seg, once chosen, is kept for the link.
+const lxCuts = lines => {
+  const out = [];
+  let last = null;                                  // the last line that EMITS, before line i
+  lines.forEach((l, i) => {
+    if (i && last && /^(rts|rti|jmp|!byte|!byt|!word|!fill|!text)\b/i.test(last)) out.push(i);
+    const t = l.replace(/;.*$/, '').trim();
+    if (!t || /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(t)) return;   // blank, comment, equate: neither
+    const body = t.replace(/^[A-Za-z_][A-Za-z0-9_]*:\s*/, '');
+    last = body || null;                            // a label alone: no cut straight after it
+  });
+  return out;
+};
+const lxAssemble = (feats, resolve, low = null) => {
+  const lines = lxSrcFor(feats).split('\n'), eq = new Map();
+  const asm1 = seg => {
+    const src = seg === null ? lines.join('\n')
+      : `${[...lines.slice(0, seg[0]), ...lines.slice(seg[1])].join('\n')}\n        * = ${hx16(low.at)}\n${lines.slice(seg[0], seg[1]).join('\n')}`;
+    for (let tries = 0; tries < 500; tries++) {
+      try { const pre = `${[...eq].map(([n, v]) => `${n} = ${hx16(v)}`).join('\n')}\n        * = ${hx16(LXAT)}\n`;
+            const r = assemble(pre + src, seg === null ? {} : { origin: low.at }); r.pre = pre.split('\n').length - 1; return r; }
+      catch (e) { const m = /undefined symbol: (\w+)/.exec(e.message); if (!m || eq.has(m[1])) throw new Error(`level code (${feats}): ${e.message}`);
+        eq.set(m[1], resolve(m[1])); }
+    }
+    throw new Error('level code: too many engine symbols');
+  };
+  if (!low) return asm1(null);
+  if (low.seg !== undefined) return asm1(low.seg);
+  // bytes per source line, off the plain assembly's listing (ln is 1-based in the text it was given)
+  const r0 = asm1(null), len = new Array(lines.length + 1).fill(0);
+  for (const e of r0.listing) { const i = e.ln - 1 - r0.pre; if (i >= 0 && i < lines.length) len[i] += e.len ?? 0; }
+  const sum = [0]; for (let i = 0; i < lines.length; i++) sum.push(sum[i] + len[i]);
+  const cuts = [...lxCuts(lines).filter(i => i >= 2 * LX_VECS.length), lines.length];   // never inside the jump table
+  const room = LXAT - low.at, segs = [];
+  for (let x = 0; x < cuts.length; x++) for (let y = x + 1; y < cuts.length; y++) {
+    const n = sum[cuts[y]] - sum[cuts[x]]; if (n > room) break; segs.push([n, cuts[x], cuts[y]]); }
+  segs.sort((p, q) => q[0] - p[0]);                 // biggest first; a far branch can grow one, so prove it
+  for (const [, a, b] of segs.slice(0, 40)) {
+    try { const r = asm1([a, b]); low.seg = [a, b]; return r; }
+    catch (e) { if (!/OVERLAPPING OUTPUT/.test(e.message)) throw e; }
   }
-  throw new Error('level code: too many engine symbols');
+  low.seg = null;
+  return asm1(null);
 };
 // one module per distinct feature set among the levels this ENGINE supports -- not just the ones on
 // this disk: the block is the engine's, and a disk that leaves level 9 off must not report the room
 // level 9's code needs as free
 const LX_SETS = [...new Set(LEVEL_IDS.filter(LX_OF).map(n => LX_FEAT_OF(n).join('+')))];
 // each module's size, linked with every engine symbol a placeholder; the real link can only shrink it
+// LX_LOWS[k]: the low part of module k, if it has one -- { at, cut } (LX_LOW). Only the BIGGEST module
+// gets one: it is what sizes the reserve, and every other module stays exactly where it was.
+const LX_LOWS = {};
 const LX_SZ = (() => {
   if (!LX_SETS.length) return {};
   const zp = new Map([...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]{1,2})\b/gm)].map(m => [m[1], parseInt(m[2], 16)]));
-  return Object.fromEntries(LX_SETS.map(k => [k, lxAssemble(k.split('+'), n => zp.has(n) ? zp.get(n) : 0x1234).bytes.length]));
+  const ph = n => zp.has(n) ? zp.get(n) : 0x1234;
+  const sz = Object.fromEntries(LX_SETS.map(k => [k, lxAssemble(k.split('+'), ph).bytes.length]));
+  const big = LX_SETS.reduce((a, b) => sz[b] > sz[a] ? b : a);
+  const lvls = LEVEL_IDS.filter(n => LX_OF(n) && LX_FEAT_OF(n).join('+') === big && LVL_END[n] !== undefined);
+  const room = LVLLOAD && process.env.LXLOW !== '0' && lvls.length ? Math.min(...lvls.map(n => LXAT - LVL_END[n])) : 0;
+  if (room > 0) {
+    const low = { at: LXAT - room }, r = lxAssemble(big.split('+'), ph, low);
+    if (low.seg !== null) { LX_LOWS[big] = low; sz[big] = r.end - LXAT;
+      const gap = r.holes.find(([, b]) => b === LXAT), tail = (gap ? gap[0] : LXAT) - low.at;
+      console.error(`  LX_LOW: module ${big}'s last ${tail} B below LXAT, in the ${room} free bytes of level(s) ` +
+        `${lvls.join(',')}: ${sz[big]} B left above it`); }
+  }
+  return sz;
 })();
 const LX_SIZE = LX_SETS.length ? Math.max(...Object.values(LX_SZ)) : 0;
+// ---- NO LEVEL LABEL MAY SHARE AN ENGINE NAME ----
+// A module is assembled on its own, so a label it defines silently WINS over the engine symbol of the
+// same name inside it -- no error, just every reference in the module going to the wrong place. It
+// happened (2026-11-12): the air's exit was "amX: rts", and the angel's "sta amX" (the engine's
+// zero-page target cell) wrote its column over that rts; a column-2 angel ($02, a CPU jam) froze the
+// next restart dead. Labels and equates, every module against the engine.
+{
+  const defs = t => new Set([...t.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)(?::|\s*=)/gm)].map(m => m[1]));
+  const eng = defs(asm);
+  const bad = Object.entries(LX_SRC).map(([f, t]) => [f, [...defs(t)].filter(n => eng.has(n))]).filter(([, c]) => c.length);
+  if (bad.length) throw new Error(`level code defines names the engine also defines (${bad.map(([f, c]) => `'${f}': ${c.join(', ')}`).join('; ')}): inside a module its own wins and every reference there goes astray -- rename them`);
+}
+if (process.env.LXSZ) console.error('  LXSZ', JSON.stringify(LX_SZ), 'LXAT', hx16(LXAT));
 // ---- the SOUND blocks, now that each level's code size is known: after its code, on a page ----
 if (MUSIC) {
   musBuild(n => LX_OF(n) ? LX_SZ[LX_FEAT_OF(n).join('+')] : 0);
@@ -28217,6 +32650,7 @@ writeFileSync(asmPath, asm);
   writeFileSync(asmPath, asm);          // so everything downstream reads the layout that ships
 
 let LX_BYTES = null;       // the linked level code, per feature set (see LX_SRC), once the engine is final
+const LX_ORG = {};         // ...and where each one's bytes start: LXAT, or lower with a low part (LX_LOW)
 lintReach(asm);            // AFTER the write: a failure should leave the file to look at
 try {
   const r = assemble(asm);
@@ -28247,14 +32681,16 @@ try {
       const L = lxAssemble(k.split('+'), n => {
         if (!(n in r.labels)) throw new Error(`level code names ${n}, which the engine does not define after compaction ` +
           `(a buffer only level code names is dropped as unnamed -- give it a home in the module, or name it in the engine)`);
-        return r.labels[n]; });
-      if (L.bytes.length > LX_SIZE) throw new Error(`level code ${k} linked to ${L.bytes.length} bytes, past the ${LX_SIZE} reserved`);
+        return r.labels[n]; }, LX_LOWS[k] ?? null);
+      if (L.end - LXAT > LX_SIZE) throw new Error(`level code ${k} linked to ${L.end - LXAT} bytes above LXAT, past the ${LX_SIZE} reserved`);
+      LX_ORG[k] = L.org;
       // LXDUMP=1 (diagnostic): every engine symbol the module was linked against, and its address
       if (process.env.LXDUMP) console.error(`  LXDUMP ${k} at ${hx16(LXAT)}: ` + Object.entries(L.labels)
         .filter(([n]) => !lxSrcFor(k.split('+')).match(new RegExp(`^${n}(:|\\s+=)`, 'm'))).map(([n, v]) => `${n}=${hx16(v)}`).join(' '));
-      LX_BYTES[k] = [...L.bytes];
+      LX_BYTES[k] = [...L.bytes];             // from LX_ORG[k]: LXAT, or below it with a low part
       if (process.env.LVLSIZES) console.error(`  LVLSIZES level code ${k}: ${L.bytes.length} of ${LX_SIZE} reserved`);
       // LXLIST=<file> (diagnostic): the linked module's listing, address and bytes per source line
+      if (process.env.LXLIST) writeFileSync(process.env.LXLIST + '.' + k + '.labels.json', JSON.stringify(L.labels));
       if (process.env.LXLIST) writeFileSync(process.env.LXLIST + '.' + k + '.txt', L.listing.map(e =>
         `${hx16(e.at ?? 0)} ${[...(e.bytes ?? [])].slice(0, e.len).map(b => b.toString(16).padStart(2, "0")).join(" ").padEnd(9)} ${e.src ?? e.text ?? ''}`).join('\n'));
     }
@@ -28464,12 +32900,20 @@ try {
     // ---- the LEVEL ART at OVLBASE: IAR0 = the pedestal then the idol, IAR1 = the sentry's frames 2-3 ----
     // One of them is in place at a time; lvlArt loads the other over it when a level needs it (see
     // lvlArtT). The boot loads the one its own level wants; the other waits on the disk.
-    ...(SPRITES ? ART_SETS.map((data, k) => data.length
-          ? { tag: 'A' + k, name: 'IAR' + k, at: OVLBASE, data: [...data.flat(), ...(k === 1 ? SVTBL_BYTES : [])],
+    // With the flute's overflow (ISK2_DATA) every set starts 1K lower, at SOCKBASE, carrying the socket
+    // ladder in front -- and IAR3, the flute level's, carries the overflow there instead, then IAR0's own.
+    // So the sockets go when the hub's art comes in and are back with whatever art comes in next (a level
+    // with sockets and no art asks for IAR0 then: see lvlArtT). No loader code: lvlArt already does it.
+    ...(SPRITES ? [...ART_SETS, ...(ISK2_DATA.length ? [ART_SETS[0]] : [])].map((data, k) => data.length
+          ? { tag: 'A' + k, name: 'IAR' + k, at: ISK2_DATA.length ? SOCKBASE : OVLBASE,
+              data: [...(!ISK2_DATA.length ? [] : k === 3 ? [...ISK2_DATA, ...Array(OVLBASE - SOCKBASE - ISK2_DATA.length).fill(0)] : SOCKSHIP.flat()),
+                     ...data.flat(), ...(k === 0 || k === 3 ? PEDTBL_BYTES : k === 1 ? SVTBL_BYTES : k === 2 ? BIGTBL_BYTES : [])],
               runtime: k !== ART_BOOT } : null)
           .filter(Boolean) : []),
     ...(SPRITES && true && true && SOCKSHIP.length
-          ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: SOCKSHIP.flat() }] : []),
+          ? [{ tag: 'K', name: 'ISOK', at: SOCKBASE, data: LEVEL_FLUTE[BOOTLVL] && ISK2_DATA.length   // booting onto the flute's level: ISK2 is in
+                                                          ? [...ISK2_DATA, ...SOCKSHIP.slice(ISK2_DATA.length / 64).flat()] : SOCKSHIP.flat() }] : []),
+
     { tag: 'C', name: 'ICHR', at: CHARSET, data: [...fontA] },
     // THE TITLE RIDES AT THE FRONT OF ISPR: its block ends at $e7e7 and the orb sprites start at
     // $e800, so the two are one load. A file of its own cost ~25 bytes of boot body (a load call
@@ -28477,12 +32921,25 @@ try {
     // fixed $09c0 baked into its prebuilt binary.
     ...(SPRITES ? [{ tag: 'S', name: 'ISPR', at: TITLE ? TITLE_CHR : SPRBASE,
                      data: [...(TITLE ? [...TITLE.data, ...Array(SPRBASE - TITLE_CHR - TITLE.data.length).fill(0)] : []),
-                            ...ORBBM.slice(0, ORBLO_N).flat()] }] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
+                            ...(HAS_BIG && (LEVEL_BIG[BOOTLVL] || LEVEL_FLUTE[BOOTLVL])   // booting onto the big angel (IAN1) or the flute (IAN2): in the angel's place
+                                  ? (LEVEL_BIG[BOOTLVL] ? [...ORBBM.slice(0, ANGBM0).flat(), ...IAN1_DATA, ...Array((ANGBM1 - ANGBM0) * 64 - IAN1_DATA.length).fill(0), ...ORBBM.slice(ANGBM1, ORBLO_N).flat()]
+                                                        : [...IAN2_DATA, ...ORBBM.slice(ANGBM1, ORBLO_N).flat()])   // IAN2 spans the orbs and the angel
+                                  : ORBBM.slice(0, ORBLO_N).flat())] }] : []),
+    // ---- IAN0/IAN1: the ordinary angel's ladder, or the big angel's overflow over it (see BIGAN) ----
+    // Both RUNTIME: the boot has no room for another load (it runs into Krill's installer at $09c0),
+    // so a boot onto a big-angel level brings the overflow inside ISPR instead (above).
+    ...(SPRITES && HAS_BIG ? [{ tag: 'N0', name: 'IAN0', ...(FLUTE ? { at: SPRBASE, data: ORBBM.slice(0, ANGBM1).flat() }   // + the ORBS: the hub's IAN2 is over them too
+                                                                : { at: ANGBASE, data: ORBBM.slice(ANGBM0, ANGBM1).flat() }), runtime: true },
+                              { tag: 'N1', name: 'IAN1', at: ANGBASE, data: IAN1_DATA, runtime: true },
+                              // IAN2, the hub's: the flute's bitmaps, then -- at bltVarT's own address, which is
+                              // IAN1's -- a rung table sending every distance to BOLT_V0: orbOne reads it for the
+                              // level's "ball" entity, and ftSz picks the flute's real size from h itself
+                              ...(FLUTE ? [{ tag: 'N2', name: 'IAN2', at: SPRBASE, runtime: true, data: IAN2_DATA }] : [])] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
     // bank 3 has free. This is DATA the VIC never reads -- it is copied to a
     // screen slot when its turn comes -- so it only has to be RAM that nothing else touches, and
-    // it has to survive a warm restart, because dieKey does `jmp entry` and reloads nothing.
+    // it has to survive a warm restart, because the death restart does `jmp entry` and reloads nothing.
     ...(DIE && PICSEG.length ? [{ tag: 'P', name: 'IPIC', at: PICBASE, data: PICSEG }] : []),
     // ---- ILVL: the other level's tables, exchanged into place by lvlSwap at each fall ----
     // Built HERE, at the end, and not where the manifest is first assembled: the hazard tables are
@@ -28547,9 +33004,10 @@ try {
       }
       // LEVEL CODE: zeros up to LXAT, then the module, linked against this very engine (LX_BYTES)
       if (LX_OF(n) && LX_BYTES) {
-        const mod = LX_BYTES[LX_FEAT_OF(n).join('+')];
-        if (SLOT_AT + data.length > LXAT) throw new Error(`level ${n}'s data runs past LXAT ${hx16(LXAT)}`);
-        while (SLOT_AT + data.length < LXAT) data.push(0);
+        const fk = LX_FEAT_OF(n).join('+'), mod = LX_BYTES[fk], at = LX_ORG[fk] ?? LXAT;
+        if (SLOT_AT + data.length > at) throw new Error(`level ${n}'s data runs past its code at ${hx16(at)}` +
+          (at < LXAT ? ' (the module\'s low part, LX_LOW)' : ''));
+        while (SLOT_AT + data.length < at) data.push(0);
         data.push(...mod);
       }
       // SOUND: zeros up to its block's page (after its code), then its player and song (MUS_BLOBS)
@@ -28558,7 +33016,7 @@ try {
         while (SLOT_AT + data.length < MUS_AT[n]) data.push(0);
         data.push(...MUS_BLOBS.get(n));
       }
-      return { tag: 'V' + n, name: 'ILV' + n, at: SLOT_AT,
+      return { tag: 'V' + n, name: ILV_NAME(n), at: SLOT_AT,
                runtime: n !== LVL, data };
     })),
     // HOLEBMHASH=1: checksum just the EXIT hole's bitmaps, so a change to the socket
@@ -28573,7 +33031,7 @@ try {
   // level's bytes at the slot address instead, and its ILVn file stays on the disk for the levels
   // that drop back into it, like every other level's.
   if (SLOT_AT >= r.org && SLOT_AT < r.org + r.bytes.length) {
-    const img = DISK.find(f => f.name === 'IMG'), boot = DISK.find(f => f.name === 'ILV' + BOOTLVL);
+    const img = DISK.find(f => f.name === 'IMG'), boot = DISK.find(f => f.name === ILV_NAME(BOOTLVL));
     if (SLOT_AT + boot.data.length > r.org + r.bytes.length) throw new Error(`ILV${BOOTLVL} runs past the end of IMG`);
     for (let i = 0; i < boot.data.length; i++) {
       if (img.data[SLOT_AT - r.org + i]) throw new Error(`the level slot at ${hx16(SLOT_AT)} is not empty in IMG ` +
@@ -28642,18 +33100,32 @@ try {
     quote: JSON.parse(readFileSync('./data/quote-end.json', 'utf8')),
     files: DISK.map(f => ({ tag: f.tag, name: f.name, at: f.at, length: f.length ?? f.data.length,
                             first: f.first, runtime: f.runtime })),
-    entry: r.labels.entry, krill: KRILL_RESIDENT_AT, autoF: +(process.env.ENDAUTO ?? 0) }) : null;
+    entry: r.labels.entry, krill: KRILL_RESIDENT_AT, autoF: +(process.env.ENDAUTO ?? 0),
+    flute: HAS_FLUTE ? r.labels.fluteGot : null,   // the ending plays its tune only if the flute was taken
+    // the ending's sound and wind (2026-11-10): ENDTUNE = gen (the generative flute, default) or a fixed tune's name in src/end-tunes.mjs, ENDTUNE_S =
+    // seconds after the cut before it plays, ENDBREATH = the breath's noise pitch (hex high byte, 0 =
+    // none) and ENDBRSUS its sustain; ENDGRATE = leaf turns a frame in a gust (256ths), ENDGUST = the
+    // gust window's half-width,half-height (cells), ENDCALM = the shortest calm (frames); ENDRAMP =
+    // frames at the base pace,pixels a frame at the end
+    tune: (t => t === 'gen' ? t : parseTune(t))(process.env.ENDTUNE ?? 'gen'), tuneS: +(process.env.ENDTUNE_S ?? 20),
+    breath: parseInt(process.env.ENDBREATH ?? '38', 16), brSus: +(process.env.ENDBRSUS ?? 1),
+    grate: +(process.env.ENDGRATE ?? 384), gust: (process.env.ENDGUST ?? '5,4').split(',').map(Number),
+    calm: +(process.env.ENDCALM ?? 60),
+    // ENDGENNOW=1 (a TEST): the generative flute skips the user's two opening phrases; ENDGAP=base,mult:
+    // its long silences are base + mult * 0..255 frames (default 300,4: 5-22 s)
+    genOpts: { now: !!process.env.ENDGENNOW, gap: (process.env.ENDGAP ?? '300,4').split(',').map(Number) },
+    ramp: (([at, cap]) => ({ at, cap }))((process.env.ENDRAMP ?? '240,120').split(',').map(Number)) }) : null;
   if (END) {
     // IEND lands while the game is still running endGo, which called lvlLoad to load it: neither may
     // be under it. (Krill's resident is checked by ending-src.mjs: nothing there goes below $0800.)
-    for (const l of ['endGo', 'lvlLoad', 'llName', 'nILV'])
+    for (const l of ['endGo', 'lvlLoad', 'llName', 'nILV', ...(HAS_FLUTE ? ['fluteGot'] : [])])
       if (r.labels[l] >= END.iend.at && r.labels[l] < END.iend.end) throw new Error(
         `IEND (${hx16(END.iend.at)}-${hx16(END.iend.end)}) would land on the game's ${l} at ${hx16(r.labels[l])} while it loads`);
     console.error(`  ending: IEND ${END.iend.prg.length - 2} B at ${hx16(END.iend.at)}, ITRE ${END.itre.prg.length - 2} B at ` +
-      `${hx16(END.itre.at)} (code to ${hx16(END.itre.codeEnd)}), dissolve ${END.steps} pixels a frame`);
+      `${hx16(END.itre.at)} (code to ${hx16(END.itre.codeEnd)}), dissolve ${END.steps} pixels a frame, ${END.dsFrames} frames in all`);
   }
   // ENDBOOT=1 (a TEST disk): the boot loads only IHOL and the end quote, and jumps into the ending
-  // instead of the game -- the quote, the tree and the dissolve without a playthrough. RETURN then
+  // instead of the game -- the quote, the tree and the dissolve without a playthrough. Fire then
   // reloads the game through REBOOT exactly as in play, from a machine where it was never loaded.
   // IHOL still loads: REBOOT relies on it already being in the RAM under the I/O hole.
   const ENDBOOT = !!(END && process.env.ENDBOOT);
@@ -28944,7 +33416,7 @@ try {
   const sprNamed = SPRITES ? [...arcSeg, ['SPRBASE', SPRBASE, SPRBASE + NORBBM * 64],
                             ['HOLEBASE', HOLEBASE, HOLEBASE + (HOLE.BM.length + ORBHI_N + SVBM.length) * 64],
                             // the LONGEST of the art sets: whichever is loaded, this is what it covers
-                            ...(ART_LEN ? [['OVLBASE', OVLBASE, Math.max(OVLBASE + ART_LEN * 64, SVTBL_AT + SVTBL_BYTES.length)]] : []),
+                            ...(ART_LEN ? [['OVLBASE', OVLBASE, Math.max(OVLBASE + ART_LEN * 64, SVTBL_AT + SVTBL_BYTES.length, BIGTBL_AT + BIGTBL_BYTES.length, PEDTBL_AT + PEDTBL_BYTES.length)]] : []),
                             // The socket's own ladder, which is NOT in the HOLEBASE stack -- it
                             // ships as ISOK at its own address. Registered here and not just in
                             // the file list because this array feeds the free-space calculator

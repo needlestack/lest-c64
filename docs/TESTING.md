@@ -80,6 +80,9 @@ fixed workloads on both builds:
   - a level-1 walk
   - levels 1→2 with two forced falls (`FALLNOW=128`): the drop, the level load, and level 2
   - the hub, level 4
+  - falls out of level 4 (4→5→4) and out of level 8 (8→9): their wall mark and orb shadow are
+    level code that restores the shared charset and orb ladder on the way out (`lxBye`), and no
+    other workload leaves either level
 - **Stills**: a screenshot at a fixed cycle count, compared pixel for pixel:
   - levels 5, 6, 7, 8 and 9 at their starts (level 9 with `SVFREEZE=1`: its sentries glide and
     spark on the 60Hz clock, so a still is only comparable with them held)
@@ -90,7 +93,7 @@ fixed workloads on both builds:
 in the same order, in the new run. That is the pass for a build that got faster: the movers repeat
 exactly per rendered frame, but a fall and the death scene run on the raster clock, so a faster
 build can show them in a different number of frames. Anything wrong on screen is a frame the
-reference never drew, and fails. It takes 20 emulator runs.
+reference never drew, and fails. It takes 24 emulator runs.
 
 Why each workload is there:
 
@@ -167,18 +170,19 @@ on CIA2's timers.
 
 ## Last recorded `fpsr.mjs "" suite`
 
-2026-10-15, level 9 shipped (`ae6fec7` + the inset walks), on VICE 3.9. `all levels ran clean`: every
-walk 0 blocked, exit 0. The `was` column is 2026-10-11's. Walks on levels 2 and 9 run inset return
-legs since this run, so compare them only with runs from now on.
+2026-11-12, after the full-game memory work (uncommitted): level 9's sentry tables and level 4's
+merge-hazard code and lists moved into their levels' code, pedLiftT into IAR0, rxStamp past entGate.
+Run against a reference suite of the tree just before (the `was` column): every figure the same or
+better. Levels 5 and 6 walks report BUMPED in BOTH runs -- the walk routes predate the v2 map edits.
 
 | level | spin fps | was | walk fps | was |
 |---|---:|---:|---:|---:|
-| 1 | 22.72 | 21.60 | 16.05 | 15.26 |
-| 2 | 31.10 | 31.30 | 14.02 | 12.73 |
-| 3 | 27.71 | 27.51 | 17.00 | 16.10 |
-| 4 | 18.40 | 17.60 | 16.76 | 16.04 |
-| 5 | 28.40 | 28.00 | 12.05 | 11.26 |
-| 6 | 25.12 | 23.92 | 15.05 | 14.95 |
-| 7 | 30.60 | 30.40 | 15.83 | 14.79 |
-| 8 | 23.92 | - | 15.21 | - |
-| 9 | 20.20 | - | 18.78 | - |
+| 1 | 22.92 | 22.92 | 16.22 | 16.22 |
+| 2 | 31.30 | 31.30 | 13.72 | 13.72 |
+| 3 | 23.05 | 23.05 | 15.78 | 15.78 |
+| 4 | 21.60 | 21.60 | 15.67 | 15.67 |
+| 5 | 27.40 | 27.40 | 11.86 | 11.86 |
+| 6 | 24.40 | 24.40 | 14.53 | 14.49 |
+| 7 | 32.09 | 32.09 | 15.99 | 15.99 |
+| 8 | 22.45 | 22.45 | 15.28 | 15.21 |
+| 9 | 20.20 | 20.20 | 19.57 | 19.57 |

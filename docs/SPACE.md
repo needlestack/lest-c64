@@ -293,7 +293,7 @@ code is shared, so it can't be removed with the feature.
 | `ANGSLIDE=0` | 516 | 0 | 0 | **516** | |
 | `FALLTAIL=0` | 262 | 20 | 0 | **282** | |
 | `ANGEL=0` | 84 | 32 | 2 | **118** | the angel code stays: it is engine |
-| `NOHUD=1` | 115 | 0 | 0 | **115** | removes the level HUD only; the fps/position readout (~450) stays |
+| `HUD=1` | | | | | since 2026-11-12 the game has no HUD and no 'H'/'L'/RETURN keys (shipping spare 574 -> 1,347 B); `HUD=1` builds the readout back in, always on, as a diagnostic |
 | `OCCSYNTH=0` | 113 | 0 | 0 | **113** | |
 | `PARTIAL=0` | 4 | 0 | 0 | **4** | |
 | `CELLANG=0`, `FASTBOOT=0`, `IDOLCON=0`, `SNDSTEP=0` | 0 | 0 | 0 | **0** | no effect on the image |
@@ -323,7 +323,7 @@ about 30 slots, and only 19 are free.
 
 ## Where a pass could find room
 
-*(Written before the audit. Done since: the zero-page pass, the duplicate tables, the palette keys. Still open: the HUD readout, the death picture charset, per-level overlays, the clamp-table overlap.)*
+*(Written before the audit. Done since: the zero-page pass, the duplicate tables, the palette keys. Done 2026-11-12: the HUD readout and its keys. Still open: the death picture charset, per-level overlays, the clamp-table overlap.)*
 
 Ranked by size. Each one's cost in cycles or features has to be weighed against the room it
 frees.
@@ -331,7 +331,7 @@ frees.
 **Policy calls (no engineering):**
 
 - **Debug readout and palette keys: ~760 B.**
-  - The fps/position readout and HUD: 566 B, of which `NOHUD=1` frees only 115.
+  - The fps/position readout and HUD: 566 B. GONE 2026-11-12 (`HUD=1` brings it back for debugging).
   - The 1/2/3 ink keys: 195 B.
   - Both are development tools. If the shipping game doesn't need them, both go, but they need
     working off-switches first: `PALKEYS=0` is broken, and the readout has no switch.

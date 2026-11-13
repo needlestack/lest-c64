@@ -8,16 +8,20 @@
 # REV is built in its own git worktree -- never `git stash`, which breaks this tree -- and every
 # check runs the same workload on both builds:
 #   FRAMES  frames.mjs records the displayed screen after every rendered frame of a fixed mover
-#           (WALKF: forward a fixed step per rendered frame), compared by framecmp.mjs. Three
+#           (WALKF: forward a fixed step per rendered frame), compared by framecmp.mjs. Five
 #           workloads: a level-1 walk; levels 1->2 with two forced falls (FALLNOW), which is the
-#           drop, the level load and level 2; and the hub, level 4.
+#           drop, the level load and level 2; the hub, level 4; and falls OUT of level 4 (4->5->4,
+#           in a 4-7 chain: the hub refuses a disk without its exits)
+#           and level 8 (8->9). Those two since 2026-11-13, when level 4's wall mark and level 8's
+#           orb shadow became level code that puts the shared art back on the way out (lxBye):
+#           nothing else leaves either level.
 #   STILLS  a screenshot at a fixed cycle count, compared pixel for pixel: levels 5, 6, 7, 8 and 9 at
 #           their starts, a fall held mid-drop (FALLHOLD), and the death scene's picture (DIETEST:
 #           already cornered, then spin to face the angel). Level 8 since 2026-10-14, when its
 #           flicker became LEVEL CODE (loaded with the level, reached through lxTick): the tube's
 #           random sequence advances once per raster-locked tick, so the inks at a cycle count are
 #           the same in any build that boots in the same time.
-# 20 emulator runs, each capped. Level 9 (2026-10-15) with SVFREEZE=1: its sentries glide and spark
+# 24 emulator runs, each capped. Level 9 (2026-10-15) with SVFREEZE=1: its sentries glide and spark
 # on the 60Hz clock, so its still is only comparable with them held. Exit 1 if anything differs.
 cd "${0:A:h}/.."
 REV=${1:-HEAD}
@@ -35,6 +39,8 @@ FRAMES=(
   "CHAIN=1 WALKF=1 BENCHF=300 NOHUD=1"
   "CHAIN=1,2 WALKF=1 BENCHF=400 NOHUD=1 FALLNOW=128"
   "CHAIN=4 WALKF=1 BENCHF=300 NOHUD=1"
+  "CHAIN=4,5,6,7 WALKF=1 BENCHF=400 NOHUD=1 FALLNOW=128"
+  "CHAIN=8,9 WALKF=1 BENCHF=200 NOHUD=1 FALLNOW=128"
 )
 for w in $FRAMES; do
   t=${w//[^A-Za-z0-9]/_}

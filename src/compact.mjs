@@ -289,7 +289,25 @@ const EXIT = /^\s*(rts|rti|jmp|brk)\b/i;
 // gets the table onto a page, but the run then runs on into whatever follows -- and if that is
 // code, majority-vote sent the whole thing to the code section and the table lost its alignment.
 // `clmp16` landed at $3b52, unaligned, and the build's own page-boundary guard caught it.
-for (const b of runs) b.isCode = b.aligned ? false : (b.code >= b.data);
+// ---- @FLOAT: a self-contained routine placed like DATA ----
+// An origin line marked `@FLOAT` heads a run that is code but has no fall-through in or out: it is
+// jsr-entered and ends in an exit. Code runs keep source order (above), so a new routine there
+// shifts every hot loop after it and repays in page padding (lvKey's 91 bytes cost 402 more); as
+// data, the run drops into a pre-alignment gap instead. Refused unless it really is self-contained.
+{
+  const floatAt = new Set(orgLines.filter(o => /@FLOAT/.test(lines[o.i])).map(o => o.i));
+  let prev = null;
+  for (const b of runs) {
+    for (const i of floatAt) if (i <= b.fromLn && (!prev || i > prev.lastLn)) {
+      if (!EXIT.test(b.lastSrc ?? '')) throw new Error(`@FLOAT run at line ${i + 1} does not end in rts/jmp/rti: it would fall into whatever lands next to it`);
+      b.float = true; floatAt.delete(i);
+    }
+    prev = b;
+  }
+  // a marker left over heads no run of its own: the run before it fell through, and the merge took it
+  if (floatAt.size) throw new Error(`@FLOAT at line(s) ${[...floatAt].map(i => i + 1).join(', ')} heads no run: the code before it falls through into it`);
+}
+for (const b of runs) b.isCode = b.aligned ? false : b.float ? false : (b.code >= b.data);
 
 // ---- PHASE-LOCK THE CYCLE-EXACT CODE ----
 // The raster handler dispatches on $d012 and must land its `sta $d018` before the VIC's fetch
@@ -467,7 +485,11 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
     const k = runs.findIndex((b, j) => b.isCode && b.to <= s && s < b.to + got[j]);
     if (k < 0) { console.error(`compact: hot loop ${name} is in no code run`); process.exit(1); }
     const need = ((e - 1) & ~255) - s;
-    runs[k].hotPad = (runs[k].hotPad ?? 0) + need;
+    // MODULO A PAGE: the padding only has to put the loop at the right OFFSET in a page, and a
+    // run that has already been padded once can need more on a later pass when the layout above
+    // it moves. Summed outright that stacked past 256 -- ogEnL carried 290 bytes, a whole page
+    // of nothing in front of it (found 2026-11-02). 256 less is the same offset.
+    runs[k].hotPad = ((runs[k].hotPad ?? 0) + need) & 255;
     console.log(`  hot loop ${name} ($${s.toString(16)}-$${(e - 1).toString(16)}) straddled a page: +${need} bytes before its run`);
     settled = false;
   }
@@ -664,6 +686,9 @@ const place = order => {
   return { holes, inPad, placed, failed };
 };
 let P = place(bufs);
+if (process.env.PLACEDBG) console.error('  PLACEDBG holes >= 64: ' + out.holes.flatMap(([lo, hi]) => carve([lo, hi]))
+  .filter(([lo, hi]) => hi - lo >= 64).map(([lo, hi]) => `$${lo.toString(16)}+${hi - lo}`).join(' ') +
+  ' / buffers >= 64: ' + bufs.filter(b => b.size >= 64).map(b => `${b.n} ${b.size}${b.align ? 'A' : b.within ? 'W' : ''}@${b.at?.toString(16)}`).join(' '));
 if (P.failed.length) {
   const P2 = place([...bufs.filter(b => b.align || b.within), ...bufs.filter(b => !b.align && !b.within)]);
   if (process.env.PLACEDBG) console.error('  PLACEDBG first: ' + P.failed.map(b => b.n + ' ' + b.size).join(', ') + ' / retry: ' + P2.failed.map(b => b.n + ' ' + b.size).join(', '));

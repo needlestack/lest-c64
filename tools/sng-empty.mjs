@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // sng-empty.mjs -- a GoatTracker 2 song with no notes: the player it packs to is there only for
-// SOUND EFFECTS, on a level that has effects (footsteps, the orb's clink) and no music.
+// SOUND EFFECTS, on a level that has effects (the orb's clink, the socket, the wall) and no music.
 //
 //   node tools/sng-empty.mjs [music/empty.sng]
 //

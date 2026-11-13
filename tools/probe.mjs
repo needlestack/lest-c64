@@ -347,6 +347,18 @@ const pcGet = () => new Promise((res, rej) => {
   sock.write(Buffer.concat([h, b]));
 });
 
+// memSet: write bytes (the binary monitor's MEMORY SET, $02). Only for POKE below -- a probe READS;
+// the one exception is putting the machine into a state no input can, at a known tick.
+const memSet = (start, bytes) => new Promise((res, rej) => {
+  const id = rid++, b = Buffer.alloc(8 + bytes.length);
+  b[0] = 0; b.writeUInt16LE(start, 1); b.writeUInt16LE(start + bytes.length - 1, 3); b[5] = 0; b.writeUInt16LE(0, 6);
+  Buffer.from(bytes).copy(b, 8);
+  const h = Buffer.alloc(11);
+  h[0] = 0x02; h[1] = 0x02; h.writeUInt32LE(b.length, 2); h.writeUInt32LE(id, 6); h[10] = 0x02;
+  pend.set(id, err => err ? rej(new Error(`monitor error ${err} writing $${start.toString(16)}`)) : res());
+  sock.write(Buffer.concat([h, b]));
+});
+
 const cpSet = (lo, hi, op = 4) => new Promise((res, rej) => {   // op: 1 load, 2 store, 4 exec
   const id = rid++, b = Buffer.alloc(8);
   b.writeUInt16LE(lo, 0); b.writeUInt16LE(hi, 2); b[4] = 1; b[5] = 1; b[6] = op; b[7] = 0;
@@ -413,16 +425,38 @@ sock.on('connect', async () => {
       // Hits are SUMMARISED by writer: the first time each PC stores here it is printed in full,
       // after that only counted. A boot that parks a 251-byte block would otherwise use the whole
       // budget on the one store everybody already knows about.
+      // POKE="tick:name=b,b,...[;tick:name=b,b,...]": write those bytes to a NAMED address the first
+      // time frameCnt is seen at or past each tick, and log the tick it really landed on. What it is
+      // for: the player has to MOVE for an angel's map to go stale, and a probe cannot press the
+      // joystick -- so a move is a teleport (POKE="700:py=128,1"), and the --watchall timeline after
+      // it is how long the map and the angel took to answer. Warp goes OFF: at warp one 20 ms poll
+      // is dozens of ticks, so a list of moves a cell every 20 ticks landed late and bunched (a
+      // scripted run then ran at the wrong speed). Even so, measure from the LOGGED tick, never the
+      // asked one. WATCHSECS=n lengthens the run past its 45 s for a long list -- it is real time.
+      const pokes = (process.env.POKE ?? '').split(';').filter(Boolean).map(p => {
+        const m = /^(\d+):(\w+)=([\d,]+)$/.exec(p), at = m && (addr[m[2]] ?? SYMS[m[2]]);
+        if (!m || at === undefined) { console.error(`bad POKE: ${p} (want "tick:name=b,b", name a label)`); process.exit(2); }
+        return { tick: +m[1], at, bytes: m[3].split(',').map(Number) };
+      }).sort((a, b) => a.tick - b.tick);
+      if (pokes.length) await resSet('WarpMode', 0);
       let n = 0; const seen = new Map();
-      for (const t0 = Date.now(); Date.now() - t0 < 45000 && n < 3000; ) {
+      for (const t0 = Date.now(); Date.now() - t0 < 1000 * +(process.env.WATCHSECS ?? 45) && n < 3000; ) {
         await new Promise(r => setTimeout(r, 20));
+        if (pokes.length && !cpHit) {
+          const t = await memGet(addr[LIVE], 2), tk = t[0] | t[1] << 8;
+          while (pokes.length && tk >= pokes[0].tick) { const p = pokes.shift(); await memSet(p.at, p.bytes); console.log(`T ${tk}  POKE $${p.at.toString(16)} = ${p.bytes.join(',')}`); }
+          if (!cpHit) await resume();
+        }
         if (!cpHit) continue;
         cpHit = false; n++;
         const r = await regsGet(), sp = r[4] & 255;
         const st = sp >= 0xff ? [] : await memGet(0x100 + sp + 1, Math.min(8, 255 - sp));
         const lab = (() => { let b = null; for (const [k, v] of Object.entries(SYMS)) if (v <= r[3] && (!b || v > b[1])) b = [k, v]; return b ? `${b[0]}+${r[3] - b[1]}` : '?'; })();
         const line = `PC $${r[3].toString(16)} (${lab})  A $${(r[0] & 255).toString(16)} X $${(r[1] & 255).toString(16)} Y $${(r[2] & 255).toString(16)} SP $${sp.toString(16)}  stack ${st.join(' ')}`;
-        if (!seen.has(r[3])) { seen.set(r[3], 0); console.log(`HIT ${n} (first from this PC): ${line}`); }
+        // WATCHLOG=1: print EVERY hit with the tick it landed on -- a timeline (when did each step
+        // happen), which the per-writer summary throws away. Read while the machine is stopped.
+        if (process.env.WATCHLOG === '1') { const t = await memGet(addr[LIVE], 2); console.log(`T ${t[0] | t[1] << 8}  ${line}`); }
+        else if (!seen.has(r[3])) { seen.set(r[3], 0); console.log(`HIT ${n} (first from this PC): ${line}`); }
         seen.set(r[3], seen.get(r[3]) + 1);
         await resume();
       }
