@@ -245,8 +245,9 @@ const L2VARS = {
 // (7-8,4-6) pocket and A1 (10,5) in the corridor east of it. A third orb at (8,1) is up the north
 // corridor, which runs east and down col 12 past the corridor to row 9, then south through (8,10)
 // to the lower half: S2 (11,14) opens |2 (10,14), and S3 (6,14) opens |3 (5,14), behind which A2
-// (4,14) guards the exit's room (x1-3, y11-14), exit (2,11). Start (4,9), ~20 degrees east of north (the
-// user, 2026-11-13: "about 2 cells south and turning clockwise about 20 degrees"; it was (4,7) due north).
+// (4,14) guards the exit's room (x1-3, y11-14), exit (2,11). Start (4,9), ~30 degrees east of north (the
+// user, 2026-11-13: "about 2 cells south and turning clockwise about 20 degrees", then 10 more, with
+// the first orb about one orb-width in from the right edge; it was (4,7) due north).
 L2VARS.v2 = { map: ["###############",
                     "#......#......#",
                     "#......#####.##",
@@ -264,7 +265,7 @@ L2VARS.v2 = { map: ["###############",
                     "#....#....#...#",
                     "###############"],
               walls: [[[8, 5]], [[10, 14]], [[5, 14]]], socks: '6,5;11,14;6,14',
-              orbs: [[8, 1], [6, 2], [6, 8]], a1: [10, 5], a2: [4, 14], start: [0x0480, 0x0980, 0xce, 0x00] };
+              orbs: [[8, 1], [6, 2], [6, 8]], a1: [10, 5], a2: [4, 14], start: [0x0480, 0x0980, 0xd9, 0x00] };
 // v2 level 3 (the user's sheets, 2026-11-04). Both keep the v1 chamber, angels, start, S1/S2 and
 // walls in the north, and put the exit at (10,10), walled in on all four sides, with S2 (7,7)
 // opening (11,10), (10,11) and (11,11) round it.
