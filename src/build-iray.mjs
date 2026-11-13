@@ -23641,10 +23641,12 @@ zvKSd:    jsr svKey               ; ---- black until fire ----
 ; svKey: a FRESH fire press (dshFir's rule: the angel's death and this one restart alike)
 ; -> the level's ground operands back, then the restart
 svKey:
-        lda #$ff
+        lda #$7f                ; SPACE's column: SPACE or joystick-1 FIRE (dshFir's read, 2026-11-13)
         sta $dc00
         lda $dc01
-        and #$10                ; joystick-1 fire: 0 = pressed
+        ldx #$ff
+        stx $dc00               ; the port neutral again
+        and #$10                ; 0 = pressed
         bne zvFUp
         lda dkArm
         beq zvNoSk              ; still the press from before the black
