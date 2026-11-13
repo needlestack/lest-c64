@@ -580,11 +580,11 @@ ${autoF ? `        lda ddone           ; ENDAUTO (a test): fire presses itself
         dec kauto
         beq kgo
 kau9:
-` : ''}        lda #$ff            ; no keyboard column selected, so only the stick pulls $dc01
-        sta $dc00
-        lda $dc01
-        and #$10            ; joystick-1 FIRE, low when down (RETURN until 2026-11-12: the game's
-        bne kup             ;   keys went with the HUD, and fire is what restarts after a death)
+` : ''}        lda #$7f            ; SPACE's column: bit 4 is SPACE there, and the stick's FIRE pulls the
+        sta $dc00           ;   same line whatever the column -- so either one (SPACE as well since
+        lda $dc01           ;   2026-11-13, as at a death's black; the only read here, so no restore)
+        and #$10            ; low when down (RETURN until 2026-11-12: the game's keys went with
+        bne kup             ;   the HUD)
         lda krel
         beq kdn             ; down, but never seen up: still held from before
 kgo:    lda #$0b            ; BLACK: display off, border black
