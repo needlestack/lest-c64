@@ -435,6 +435,12 @@ const L10 = {
   orbs: [], angels: [[11, 2]], exit: [7, 8],
   start: [0x0280, 0x0d80, 0xc0, 0x00],               // (2.5, 13.5) facing north
 };
+// L10OPEN="x,y;x,y" (a TEST): those cells open in the map from the start, and the corner exit counts
+// them at once (bhIn) -- so a still can show it half-revealed without a ball having to break anything.
+if (process.env.L10OPEN) for (const c of process.env.L10OPEN.split(';')) {
+  const [x, y] = c.split(',').map(Number);
+  L10.map[y] = L10.map[y].slice(0, x) + '.' + L10.map[y].slice(x + 1);
+}
 // L2VAR names a trial explicitly; otherwise MAPSET=v2 takes the user's v2 sheet, and v1 the original.
 const L2V = process.env.L2VAR ? L2VARS[process.env.L2VAR] : V2 ? L2VARS.v2 : null;
 if (process.env.L2VAR && !L2V) throw new Error(`L2VAR wants one of ${Object.keys(L2VARS).join('/')}, got "${process.env.L2VAR}"`);
@@ -1135,7 +1141,7 @@ const CORNER_SLD = 8;
 // add). It must stay black (see LEVEL_EXITCOL), and black alone read as a rendering glitch or not at
 // all (the user, 2026-11-13: "use another trick to make it more visible ... appear larger using the
 // same sprites"). The fall area is its own (BRKFALLR), not the drawing's.
-const CORN_SCALE = +(process.env.CORNSCALE ?? 1.5);
+const CORN_SCALE = +(process.env.CORNSCALE ?? (process.env.RAGGED !== '0' ? 1 : 1.5));   // RAGGED (default): yellow and stamped, so its own size (the user)
 if (![1, 1.25, 1.5, 2].includes(CORN_SCALE)) throw new Error(`CORNSCALE=${CORN_SCALE}: 1, 1.25, 1.5 or 2`);
 
 const BRK_MARK = HAS_BRK && process.env.BRKMARK !== '0' ? (process.env.BRKMARK ?? 'dot') : null;
@@ -1143,7 +1149,10 @@ if (BRK_MARK && !['dot', 'quad', 'stripe'].includes(BRK_MARK)) throw new Error(`
 // level n's OPEN cells at the start, as y*W + x: a face is one of the level's own iff its neighbour is here
 const OPEN_CELLS = n => {
   const rows = MAP_OF(n), W = rows[0].length, out = [];
-  rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.') out.push(y * W + x); }));
+  // L10OPEN's cells count as BROKEN, not as the level's own: the faces they bare are marked, as the
+  // ball's would be -- the case the user saw (2026-11-13)
+  const brk = n === 10 && process.env.L10OPEN ? process.env.L10OPEN.split(';').map(c => { const [x, y] = c.split(',').map(Number); return y * W + x; }) : [];
+  rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.' && !brk.includes(y * W + x)) out.push(y * W + x); }));
   return out;
 };
 const HAS_QUAD = HAS_SILVER || HAS_BIG;          // a rung may have a RIGHT column (svQuad)
@@ -2393,7 +2402,15 @@ const digGlyph = [
  5,5,2,5,5, 5,5,2,2,2,                                          // X (16), Y (17) labels
  4,4,4,4,7, 5,5,5,5,2];                                         // L (18), V (19): "LEVEL" reuses
                                                                 //   hex E for its two Es
-const NGLYPH = digGlyph.length / 5;
+// ONLY when something draws them: the HUD and the debug readouts (2026-11-13). The shipping game has
+// none, and the 20 codes were the charset's slack -- RAGGED's rubble took 8 of them. Read from the
+// environment, not the flags: those are declared ~2,000 lines below, and the charset is built here.
+// READOUTGLYPHS=1 (a TEST): keep them anyway, so every code above them numbers as it did before
+// 2026-11-13 -- frames.mjs records CODES, and regress.sh against an older revision otherwise reports
+// every seam and occluder as different. The glyphs that took their room (BRK_OCC, the rubble) go.
+const READOUT_KEEP = process.env.READOUTGLYPHS === '1';
+const READOUT = READOUT_KEEP || ['HUD', 'DUMPH', 'PROFILE', 'PROFILE1', 'DIEDBG', 'DBGORB'].some(n => process.env[n] === '1');
+const NGLYPH = READOUT ? digGlyph.length / 5 : 0;
 
 const codeOf = new Map(), glyphs = [];          // glyphs[code] = 8 bytes of multicolor bitmap
 // Wall pixels are bit pair 01, which reads $d022. THREE INKS, one per register:
@@ -3158,6 +3175,10 @@ for (let k = 0; k <= 2; k++) { SEDGE.push({ k, show: 0x0f >> (k + 1) }); glyphs.
 for (let k = 1; k <= 3; k++) { SEDGE.push({ k, show: (0xf0 >> k) & 0x0f }); glyphs.push(new Array(8).fill(edgeRow(k, true))); }
 const SEDGEF = [];                       // fully covered, line at column k -> code (k = 0, 3)
 for (const k of [0, 3]) { SEDGEF[k] = glyphs.length; glyphs.push(new Array(8).fill(edgeRow(k, k === 0))); }
+// RAG_MG (RAGGED): occluder, white-backed occluder and seam-edge split codes, which must run on from
+// OCC0 unbroken, -> the code for the same cell covered WHOLE (see ragMgT in oSPut)
+if (OCCW0 !== OCC0 + 7 || SEDGE0 !== OCCW0 + 6) throw new Error('RAG_MG: the occluder, white-backed and seam-edge codes are not one run from OCC0');
+const RAG_MG = [...Array(13).fill(OCC_FULL), ...SEDGE.map(e => SEDGEF[e.k] ?? OCC_FULL)];
 
 // CELLMARK=1: put a small grey triangle in the middle of SOLID and of all seven occluders --
 // columns 1 and 2, rows 2 to 5, at bit pair 10 ($d023, grey). Purely a debugging aid: it makes
@@ -3222,10 +3243,58 @@ if (BRK_MARK) glyphs.push(glyphs[SOLID].map((b, r) =>
   BRK_MARK === 'dot' ? (r === 3 ? b & ~(3 << 4) : b)                       // column 1 (bits 5-4), row 3
   : BRK_MARK === 'quad' ? (r === 3 || r === 4 ? b & ~(15 << 2) : b)        // columns 1-2, rows 3-4
   : (r === 1 || r === 5 ? 0 : b)));                                        // rows 1 and 5
+// BRK_OCC: BRK_MK as an OCCLUDER -- its wall pairs 01 -> 11 (colour RAM black, foreground), its mark
+// still the ground (00). A stamp that covers a marked cell whole used to put plain OCC_FULL there, and
+// every stamped cell of a dotted face lost its dots (the user, 2026-11-13). The dots are BACKGROUND, so
+// a sprite behind peeks through them -- tried in the seam ink instead, which hides it, and the user
+// preferred this ("I prefer that to the dots being different all the time").
+const BRK_OCC = BRK_MARK && !READOUT_KEEP ? glyphs.length : -1;
+if (BRK_OCC >= 0) glyphs.push(glyphs[BRK_MK].map(b => b | ((b & 0x55) << 1)));
 // CURT_MK: the CURTAIN's fill (HAS_CURTAIN) -- plain SOLID, every column pair 01, without the level's
 // dot (symPut puts that into SOLID itself). Drawn, cached and occluded exactly as BRK_MK is.
 const CURT_MK = HAS_CURTAIN ? glyphs.length : -1;
 if (HAS_CURTAIN) glyphs.push(Array(8).fill(0x55));
+// ---- RAGGED: the corner exit's RUBBLE (the user, 2026-11-13) ----
+// The corner exit lies across the faces of the blocks still standing round it, so where a block's base
+// crosses the hole a stamp has to stop mid-cell. A pre-built split cannot (it hangs a 4x8 black block
+// over the hole) and synthesising the cell every frame is too slow on this level. The user's answer:
+// "this is something that just got blown up ... It doesn't need to be the correct pieces" -- a few
+// RAGGED cells, black (pair 11) above a jagged edge, the floor (00) below it, where the hole shows.
+// FOUR depths -- where the wall really ends in the cell: 1-2 rows, 3-4, 5-6, 7 -- so the jag stays within
+// a pixel or two of it (two depths swallowed the thin sliver a diagonal view leaves) x four profiles,
+// each pixel up to two rows either side, picked by a scrambled screen column so the jags do not repeat
+// as a pattern (the first try's +-1 teeth, one profile per column in turn, read as a comb). 16 codes.
+// Rows as they appear BELOW the horizon (charset B); charset A gets them upside down, since cpChr builds
+// B from A flipped.
+const RAGGED = HAS_CORNER && process.env.RAGGED !== '0' && !READOUT_KEEP;   // ON since 2026-11-13 (the user: "I played and it always looked fine. Love it."); RAGGED=0 = the old black, unstamped, 1.5x hole
+// The jags hang only DOWNWARD from the deepest row the wall can reach in that class (2, 4, 6, 7): rubble
+// spilling onto the floor, never a notch up into the wall. Jags either side of the class's middle let
+// the hole show THROUGH solid wall, a few pixels at a time -- yellow inside the block's foot (the user's
+// screen01, 2026-11-13; the screen dump showed every cell where it was meant to be).
+// RAGJAG=1: the jagged profiles. Default FLAT for now (the user, 2026-11-13: "make them flat heights
+// across: so 4 heights"), one glyph a height, so the choice can be seen for what it is.
+const RAG_JAGS = process.env.RAGJAG === '1';
+// FLAT (the default): SEVEN glyphs, black for 1..7 rows -- the wall's own height in the cell, exactly (the
+// user: "make all 7 levels (8 is a full block) -- then just use the glyph that matches the wall height").
+const RAG_JAG = RAG_JAGS ? [[0, 2, 1, 1], [1, 0, 2, 0], [2, 1, 0, 1], [0, 1, 1, 2]] : [[0, 0, 0, 0]];
+const RAG_BASES = RAG_JAGS ? [2, 4, 6, 7] : [1, 2, 3, 4, 5, 6, 7];
+const RAG_N = RAG_BASES.length * RAG_JAG.length;
+const RAG0 = RAGGED ? glyphs.length : -1;
+if (RAGGED) for (const base of RAG_BASES) for (const jag of RAG_JAG) {
+  const d = jag.map(j => Math.max(0, Math.min(8, base + j)));
+  glyphs.push([...Array(8)].map((_, r) => d.reduce((b, n, p) => b | (7 - r < n ? 3 << (6 - 2 * p) : 0), 0)));
+}
+// OCCGRID=1 (a diagnostic, the user 2026-11-13: "do the occluder blocks with a top and left seam line on
+// each char so I can make them out clearly"): every OCCLUDER glyph -- the splits, OCC_FULL, the white-backed
+// and seam-edge ones, BRK_OCC, the rubble -- gets bit pair 10 along its top row and down its left column.
+// TOP as the eye sees it below the horizon, where charset B is A flipped: so A's LAST row. (Synthesised
+// cells are copies of the wall's own glyph, built at run time, and carry no grid.)
+if (process.env.OCCGRID === '1' && DIAGEARLY.push('OCCGRID')) {
+  const occ = [...Array(SEDGEF[3] - OCC0 + 1)].map((_, i) => OCC0 + i);
+  if (BRK_OCC >= 0) occ.push(BRK_OCC);
+  if (RAG0 >= 0) for (let i = 0; i < RAG_N; i++) occ.push(RAG0 + i);
+  for (const c of occ) glyphs[c] = glyphs[c].map((b, r) => r === 7 ? 0xaa : (b & 0x3f) | 0x80);
+}
 if (glyphs.length > 256) throw new Error(`charset overflow: ${CELLCODES} cell patterns + ${NGLYPH} glyphs + ${NSEAM} seams = ${glyphs.length} > 256`);
 // OCCSYN's scratch codes are the top OCCSYN_N: they must not be allocated to anything. Checked
 // here, where the glyph list is final, rather than trusting that KCELL was refit low enough.
@@ -4076,7 +4145,11 @@ const LEVEL_START = {
 const STAGE = +(process.env.STAGE ?? 0);
 // NOSHOCK=1 (testing, the user 2026-10-14: "turn off all shock death so I can go check out fps"):
 // a sentry's touch charges as usual but never kills -- see svChg.
-const NOSHOCK = process.env.NOSHOCK === '1';
+// NODIE=1 (testing, the user 2026-11-13: "make the angel non-fatal for now. all behavior the same, just no
+// death when touched or hit with a ball"): NOSHOCK's flash for the ball, a flash for the big angel's catch
+// (bwZp), and no ordinary angel death (dieGo returns).
+const NODIE = process.env.NODIE === '1';
+const NOSHOCK = process.env.NOSHOCK === '1' || NODIE;
 // NOSV=1 (testing, the user 2026-10-14: "disable entities (sentries)" to look at fps without them):
 // every sentry slot starts and stays hidden -- no glide, no gate, no drawing.
 const NOSV = process.env.NOSV === '1';
@@ -6645,6 +6718,7 @@ if (MULTI) for (const [lv, raw] of [[LVL, HAZ_RAW], ...LVLSIZED.map(L => [L.leve
   const states = [raw, ...(WALLVARS ?? []).filter(v => v.level === lv).map(v => v.haz)];
   const origs = [...new Set(states.flatMap(st => st.recs.map(r => r.orig)))].sort((a, b) => a - b);
   if (!origs.length) continue;
+  if (lv === 10 && process.env.L10OPEN) continue;   // L10OPEN (a still): its opened pillar is not a real wall state
   const S = Math.max(...states.map(st => st.nReal));
   const spare = new Map(origs.map((r, i) => [r, S + i]));
   const cellsOf = (st, r) => st.runs.flatMap((t, sel) => t.flatMap((id, c) => id === r ? [[sel, c]] : []));
@@ -6825,12 +6899,11 @@ if (HAS_PED) for (let i = 0; i < IDOL_N; i++) {
 // red / green / blue left to right like the drums -- (1,1), then (1,6) right behind you, then
 // (1,11) -- and lead to 5 / 6 / 7. So under V2 (1,11) is BLUE and (1,6) GREEN, and the destinations
 // are the old [5, 7, 6] again: the colours moved round to the levels, not the other way.
-// 10's corner exit MUST stay black (the user, 2026-11-13, after trying yellow): it is never stamped.
-// While some of its four blocks stand it lies ACROSS their faces' planes, and occBy, asked from the
-// quadrant cell bhStep gives it, says no face is in front; stamping it properly would mean
-// synthesising the ramp cells along each face's base, every frame, on the slowest level. Black on
-// black walls hides the error. It is drawn LARGER instead, to be seen (CORNSCALE).
-const LEVEL_EXITCOL = { 4: V2 ? [2, 6, 5, 0] : [2, 5, 6, 0] };   // (v3's second black one, to 9, went with its hole)   // red, green, blue -- the black one went with its hole
+// 10's corner exit is YELLOW (RAGGED, 2026-11-13). It lies ACROSS the faces of the blocks still standing
+// round it, which no other entity does, so it is stamped its own way -- every face in its box, and the
+// cells a block's base crosses filled to the wall's own height (RAGGED, at the rubble glyphs). Without
+// that it went unstamped, and had to be black on black walls to hide it (RAGGED=0, drawn 1.5x to be seen).
+const LEVEL_EXITCOL = { 4: V2 ? [2, 6, 5, 0] : [2, 5, 6, 0], ...(process.env.RAGGED !== '0' ? { 10: [7] } : {}) };   // red, green, blue, black; 10's yellow
 // ---- and where each exit GOES ----
 // lvlNxtT was one byte a level, so a level's exits all led to the same place -- fine while
 // every level had exactly one. The hub has four, and the whole point of the room is that they
@@ -17688,7 +17761,10 @@ oSLoop:${process.env.OSCNT ? ' inc osCntV             ; OSCNT: slots occStamp vi
         lda obOcc,x             ; hole-like: only a slot holeSlot made STAMPABLE carries it (bit 7) --
         bpl oSNext              ;   every kind has a rows table now, exits included; otherwise obOcc
                                 ;   holds the fill colour (0-15) and the slot is not stamped.
-        lda obIX,x              ; STMP: can a wall partly hide THIS one from the player's cell at all?
+${RAGGED ? `        lda obIX,x              ; RAGGED: the CORNER exit always goes on. STMP is worked out from the map
+        cmp lvlCorT             ;   as built, where its cell is wall: it cannot know which blocks round
+        beq oSEnt               ;   it the ball has taken, so it would never let it be stamped
+` : ''}        lda obIX,x              ; STMP: can a wall partly hide THIS one from the player's cell at all?
         sec                     ;   Almost never (the build lists the few cells where it can) -- and
         sbc nOrbT               ;   without this a hub pedestal paid ~580 cycles a frame to find out
         tay
@@ -17727,7 +17803,12 @@ ${DBGORB ? `        inc oSOrb
         sta ooCX
         lda orbYCT,y
         sta ooCY
-        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
+${RAGGED ? `        lda #$00                ; RAGGED: is this slot the CORNER exit? (osRag)
+        cpy lvlCorT
+        bne oSRg0
+        lda #$01
+oSRg0:  sta osRag
+` : ''}        ; char rows the orb's CONTENT covers. obY is the sprite's $d001; the content is bottom
         ; aligned in the frame, so it ends at obY + anchor - 1 and starts orbBlankT rows in.
         ; Display y is raster - 50, and a char row is eight of those.
         ; ---- blank and anchor: from the variant tables for an orb, from the SLOT for a socket ----
@@ -17848,8 +17929,13 @@ ${HAS_BIG ? `        lda osBig
         jmp lxBgOcc             ; (level code: bgOcc)
 oSChkN:
 ` : ''}        sty ohSv
-        jsr occBy
+${RAGGED ? `        lda osRag               ; RAGGED: the corner exit takes EVERY face in its box. It is flat on the
+        bne oSAll               ;   floor, so any wall pixel drawn over it is nearer than it -- and the
+                                ;   facing test, asked from the quadrant cell bhStep gives it, says no
+                                ;   face at all is in front, since it straddles their planes
+` : ''}        jsr occBy
         bcc oSAdv               ; this run's face is not in front of this orb
+${RAGGED ? 'oSAll:\n' : ''}
         ; it does: stamp [max(spanL, obL) .. min(spanR, obR)] -- but the two ends are NOT alike.
         ;
         ; One end comes from the WALL's edge and the other from the ORB's box. Only the wall edge
@@ -18012,9 +18098,11 @@ bfGo:   sta bfC2
         tya
 ; bfInk: A -> the ground (both halves, as svGnd), the two wall inks and the border, now
 bfInk:  sta $d020
-        sta $d022
+${NODIE ? `                                ; NODIE: NOT the walls -- a stamped cell is pair 11, colour RAM's black,
+                                ;   and every one showed as a black block in a flashing wall
+` : `        sta $d022
         sta $d023
-        sta irqB0+1             ; the IRQ's operands, THIS frame -- and setGnd's shadows, which
+`}        sta irqB0+1             ; the IRQ's operands, THIS frame -- and setGnd's shadows, which
         sta irqB1+1             ;   republish irqB0 at raster 250, so they agree
 ${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
 ` : `        jmp bdDie
@@ -18201,7 +18289,7 @@ amL:    dec amH
         bcs amN                 ; always (C from the cmp)
 amUp:   inc amC
         bne amN                 ; always
-amNew:  jsr bdRnd               ; (keeps Y)
+amNew:  jsr baRnd               ; (keeps Y) baRnd, not bdRnd: NOSHOCK has no shock death, and no bdRnd
         and #$3f
         adc #${hx(AIR_LO - 1)}  ; C is set (equal): AIR_LO..AIR_LO+63
         sta amT
@@ -18569,6 +18657,13 @@ bdInk:  jsr bdRnd
 bdGnd:  sta irqB0+1
         sta irqB1+1
 ${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
+bdInkT: !byte $00,$06,$0e,$03,$01,$01,$0e,$00   ; the ball's: black, blue, light blue, cyan, white (svShT)
+        !byte $00,$02,$08,$07,$01,$07,$08,$09   ; the angel's: black, red, orange, yellow, white, brown
+bdModT: !byte $1f,$2f,$4f,$6f   ; the filter: low / band / high / band+high
+bdScT:  !byte $81,$00,$f8       ; voice 2: noise, gated; attack 0, decay 0; sustain 15, release 8
+        !byte $00,$00,$40,$00   ; voice 3: (pitch: per frame) and a thin pulse...
+        !byte $41,$00,$f8       ;   ...gated, held as voice 2
+        !byte $00,$00,$f6       ; the filter: cutoff (per frame), and resonance full on voices 2 and 3
 ; bdRnd: John Metcalf's 16-bit xorshift (7,9,8), as svRnd -- its own seed
 baRnd:                          ; (the AI's random numbers are the death's: one generator)
 bdRnd:  lda bdSd+1
@@ -18583,13 +18678,6 @@ bdRnd:  lda bdSd+1
         eor bdSd+1
         sta bdSd+1
         rts
-bdInkT: !byte $00,$06,$0e,$03,$01,$01,$0e,$00   ; the ball's: black, blue, light blue, cyan, white (svShT)
-        !byte $00,$02,$08,$07,$01,$07,$08,$09   ; the angel's: black, red, orange, yellow, white, brown
-bdModT: !byte $1f,$2f,$4f,$6f   ; the filter: low / band / high / band+high
-bdScT:  !byte $81,$00,$f8       ; voice 2: noise, gated; attack 0, decay 0; sustain 15, release 8
-        !byte $00,$00,$40,$00   ; voice 3: (pitch: per frame) and a thin pulse...
-        !byte $41,$00,$f8       ;   ...gated, held as voice 2
-        !byte $00,$00,$f6       ; the filter: cutoff (per frame), and resonance full on voices 2 and 3
 bdBase: !byte 0
 bdQ:    !byte 0
 bdY:    !byte 0
@@ -18912,7 +19000,7 @@ bhIn:   ldx lvlCorT             ; drawn at the CORNER: orbProjS lets this one ho
         sta bhDst
         lda #$ff
         sta lvlNxtT
-bhI1:   rts
+bhI1:   ${process.env.L10OPEN ? 'jmp bhChk               ; L10OPEN (a test): its blocks are open from the start' : 'rts'}
 ; bhChk (from brGo, after a wall goes): its cell and the three west and north of it. ONE open and it
 ; is drawn -- the cells still standing hide what they cover (the user, 2026-11-11: "I do want the
 ; partial hole to be visible when one or more blocks is destroyed"); ALL FOUR and it can be fallen through.
@@ -19220,8 +19308,12 @@ bwOn:   lda bwH                 ; the gap's whole units, before this frame's las
         cmp #$ff
         bne bwX
 bwZp:
-        lda #$08                ; ON IT: the shock, in yellows and oranges (bdDie)
-        jmp bdDie
+${NODIE ? `        lda #$00                ; NODIE (a test): ON IT -- but a yellow flash, and it lets you go
+        sta bgWh
+        lda #$08
+        ldy #$07
+        jmp bfGo` : `        lda #$08                ; ON IT: the shock, in yellows and oranges (bdDie)
+        jmp bdDie`}
 bwX:    rts
 bgWh:   !byte 0                 ; 1 once caught (brIn clears it)
 bwR:    !byte 0
@@ -30779,11 +30871,29 @@ ${process.env.OCCFBN ? '        inc oSHist+0            ; OCCFBN: cells oSPut wa
         bcc ${process.env.OCCFBN ? 'oSHro' : 'oSPdn'}               ; a readout: leave it
         cmp #${hx(SEAM0 + NSEAM)}
         bcc oSPsol              ; a seam is a whole wall
-${BRK_MARK ? `        cmp #${hx(BRK_MK)}               ; a NEW FACE's marked fill is whole wall too. HERE, before the rts:
-        beq oSPsol              ;   its code is past the seams, among the occluders' and scratch codes
+${BRK_MARK && BRK_OCC < 0 ? `        cmp #${hx(BRK_MK)}               ; (READOUTGLYPHS: no BRK_OCC -- the marked fill as a plain whole wall)
+        beq oSPsol
+` : ''}${BRK_OCC >= 0 ? `        cmp #${hx(BRK_MK)}               ; a NEW FACE's marked fill is whole wall too. HERE, before the rts:
+        bne oSPnbk              ;   its code is past the seams, among the occluders' and scratch codes
+        lda ohMsk               ; ...and covered WHOLE (no column left showing): the DOTTED occluder,
+        bne oSPso2              ;   so the stamped cells keep the face's dots. Part-covered: the plain
+        lda #${hx(BRK_OCC)}               ;   split. (It went to oSPsol, whose SEDGE test then read the
+        sta (osPtr),y           ;   mark's code as a seam's.)
+        rts
+oSPnbk:
 ` : ''}${HAS_CURTAIN ? `        cmp #${hx(CURT_MK)}               ; ...and so is the CURTAIN's
         beq oSPsol
-` : ''}${process.env.OCCFBN ? '        inc oSHist+3            ; OCCFBN: ALREADY an occluder or scratch code -- left alone\n' : ''}        rts                     ; an occluder or scratch code already
+` : ''}${process.env.OCCFBN ? '        inc oSHist+3            ; OCCFBN: ALREADY an occluder or scratch code -- left alone\n' : ''}${RAGGED ? `        ldx osRag               ; RAGGED, the corner exit: a SPLIT here is the other face's stamp. The
+        beq oSPq                ;   two faces meet at the corner line, right over the hole, in one cell:
+        sec                     ;   the first span's stamp covered its side of it and the second found an
+        sbc #${hx(OCC0)}            ;   occluder and left it, so the hole showed through the line's foot (the
+        bcc oSPq                ;   user, 2026-11-13). Both sides stamped is the whole cell: ragMgT says
+        cmp #${hx(RAG_MG.length)}            ;   which code that is -- the full-cover line keeper if the split kept
+        bcs oSPq                ;   a corner line at column 0 or 3, else OCC_FULL.
+        tax
+        lda ragMgT,x
+        sta (osPtr),y
+oSPq:` : ''}        rts                     ; an occluder or scratch code already
 ${process.env.OCCFBN ? `oSHbl:  inc oSHist+1            ; OCCFBN: BLANK
         jmp oSPdn
 oSHro:  inc oSHist+2            ; OCCFBN: a readout
@@ -30797,7 +30907,61 @@ oSHro:  inc oSHist+2            ; OCCFBN: a readout
         ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
         ; whole scratch budget and leaving its lower cells unstamped.
         tax
-${OCCSYNTH ? `${OCCSYNEDGE ? `        lda osCov               ; OCCSYNEDGE: a PARTIALLY covered cell. A pre-built split paints
+${RAGGED ? `        lda osRag               ; ---- RAGGED: the corner exit's stamp over a wall's BASE -> rubble ----
+        beq oSPnr
+        lda occVrtT,x           ; 0: some row of this cell has no wall -- the base crosses it
+        bne oSPnr
+                                ; PART-covered too: where two faces meet, each stamp covers half of
+                                ;   the cell. It took a split, the other face's stamp found it and
+                                ;   ragMgT filled it WHOLE -- a full black cell hanging at an inside
+                                ;   corner, the shallowest point of the base (the user's screen02,
+                                ;   2026-11-13). Rubble across the cell is right there: both halves
+                                ;   are wall, and the second stamp leaves rubble alone. At a block's
+                                ;   OUTER edge it overhangs the floor beside it by its own height.
+        sty osPY
+        txa                     ; the cell's glyph in charset B, as the eye sees it below the horizon
+        asl                     ;   (osSrc: the synthesis pointer, free here)
+        sta osSrc
+        lda #${hx(CHARSET_B >> 11)}
+        rol
+        asl osSrc
+        rol
+        asl osSrc
+        rol
+        sta osSrc+1
+        ldy #$00                ; how far down the cell the wall reaches: its rows with any wall in them
+oSRgL:  lda (osSrc),y
+        beq oSRgD
+        iny
+        cpy #$08
+        bne oSRgL
+oSRgD:${RAG_JAGS ? `  tya                     ; rows of wall, 0-7 -> depth class 0-3: (d-1)/2, 0 for 0
+        beq oSRg1
+        sec
+        sbc #$01
+oSRg1:  lsr
+        asl
+        asl
+        sta osTmp               ; class x 4
+        lda osPY                ; the profile: (column + column/4) & 3, a scramble, so the jags do
+        lsr                     ;   not cycle every four cells
+        lsr
+        clc
+        adc osPY
+        and #$03
+        ora osTmp
+        clc
+        adc #${hx(RAG0)}` : `  tya                     ; FLAT: the rows of wall, 1-7, ARE the glyph: RAG0 + rows - 1
+        bne oSRgH
+        ldy osPY                ; (0: no wall in the top row -- nothing to stand on: the split, as before)
+        jmp oSPnr
+oSRgH:  clc
+        adc #${hx(RAG0 - 1)}`}
+        ldy osPY
+        sta (osPtr),y
+        rts
+oSPnr:
+` : ''}${OCCSYNTH ? `${OCCSYNEDGE ? `        lda osCov               ; OCCSYNEDGE: a PARTIALLY covered cell. A pre-built split paints
         cmp #$aa                ;   the columns it does NOT cover with its backing, black or white,
         bne oSPsyn              ;   and that is a guess -- wrong wherever the uncovered part holds
                                 ;   a distant wall's end plus floor. Synthesis has no backing: it
@@ -30911,7 +31075,9 @@ oSPsep: cmp seKT,x              ; partly covered: the edge split whose line is t
 ` : 'oSPsol:\n'}oSPso2: lda osGly               ; fully wall: black-backed split, no question to ask
         sta (osPtr),y
         rts
-${SEDGE_ON ? `seKT:   !byte ${[...Array(16)].map((_, m) => { const e = SEDGE.find(e => e.show === m); return e ? e.k : '$ff'; }).join(',')}   ; cellFillT mask -> the seam column its edge split keeps, $ff none
+${RAGGED ? `osRag:  !byte 0                 ; RAGGED: 1 while occStamp is on the corner exit's slot
+ragMgT: !byte ${RAG_MG.map(hx).join(',')}   ; an occluder/split code - OCC0 -> the same cell covered whole
+` : ''}${SEDGE_ON ? `seKT:   !byte ${[...Array(16)].map((_, m) => { const e = SEDGE.find(e => e.show === m); return e ? e.k : '$ff'; }).join(',')}   ; cellFillT mask -> the seam column its edge split keeps, $ff none
 seGT:   !byte ${[...Array(16)].map((_, m) => { const e = SEDGE.findIndex(e => e.show === m); return e < 0 ? 0 : SEDGE0 + e; }).join(',')}   ; ...and that split's code
 seFT:   !byte ${[0, 1, 2, 3].map(k => SEDGEF[k] ?? 0).join(',')}   ; fully covered, line at k -> its split, 0 none
 ` : ''}; mkRuns's bit table and scratch. Out of the $9200 block, which the row-counted vertical pass
@@ -32127,7 +32293,8 @@ dcBmp:  lda mvBmp               ; 2. you walked into it (mvEnt): the scene turns
 dcPos:  cmp #${hx(DIE_TURN)}
         bcc dcNo
 dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
-dieGo:  ${MUSIC ? `jsr dsGo                ; MUSIC: the song drops out, the glide begins
+dieGo:  ${NODIE ? `rts                     ; DEADCODE-OK: NODIE=1 (a test) -- no angel death; the rest is never reached
+        ` : ''}${MUSIC ? `jsr dsGo                ; MUSIC: the song drops out, the glide begins
         ` : ''}${!HAS_IDOL ? '' : `jsr idolDie             ; ---- THE IDOL ON A DEATH: see idolDie ----
         ` }; ---- aim, and unhide it ----
         ; A marked angel is HIDDEN -- that is how contact works -- so the scene is where it comes

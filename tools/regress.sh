@@ -42,11 +42,13 @@ FRAMES=(
   "CHAIN=4,5,6,7 WALKF=1 BENCHF=400 NOHUD=1 FALLNOW=128"
   "CHAIN=8,9 WALKF=1 BENCHF=200 NOHUD=1 FALLNOW=128"
 )
+# The cap covers frames.mjs's own BUILD as well as the run: 100 s was enough until the ten-level
+# engine's builds grew to several minutes, and then the bigger workloads recorded nothing (2026-11-14).
 for w in $FRAMES; do
   t=${w//[^A-Za-z0-9]/_}
   # the base side runs THIS tree's tools on REV's tree (LEST_ROOT): one tool set measures both
-  LEST_ROOT=$WT/ perl -e 'alarm 100; exec @ARGV' node tools/frames.mjs "$w" --out $OUT/base-$t >/dev/null 2>&1
-  perl -e 'alarm 100; exec @ARGV' node tools/frames.mjs "$w" --out $OUT/new-$t >/dev/null 2>&1
+  LEST_ROOT=$WT/ perl -e 'alarm 600; exec @ARGV' node tools/frames.mjs "$w" --out $OUT/base-$t >/dev/null 2>&1
+  perl -e 'alarm 600; exec @ARGV' node tools/frames.mjs "$w" --out $OUT/new-$t >/dev/null 2>&1
   if [[ ! -s $OUT/base-$t/frames.bin || ! -s $OUT/new-$t/frames.bin ]]; then echo "FAILED   frames: $w (no frames recorded)"; bad=1; continue; fi
   r=$(node tools/framecmp.mjs $OUT/base-$t/frames.bin $OUT/new-$t/frames.bin) || bad=1
   echo "${r%%$'\n'*}  -- frames: $w"

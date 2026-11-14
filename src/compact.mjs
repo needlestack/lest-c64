@@ -452,6 +452,13 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
     if (o) out4[ln] = out4[ln].replace(/\* *= *\$[0-9a-fA-F]+/, hex);
     else out4.splice(ln, 0, `        ${hex}`);  // a run that starts at an aligned table
   }
+  // ANCHOR THE IMAGE AT $0801. When the first code run is padded (a hot loop in it), nothing was
+  // emitted below it: the program started late, that RAM was not part of it -- so it held whatever
+  // the boot left -- and the assembler reports holes only from its first byte, so scratch could not
+  // use it either (192 bytes lost, 2026-11-13, and the level slot no longer fitted). One byte at
+  // ORG makes the pad an interior hole: loaded as zeros, and offered to the scratch placer.
+  const first = Math.min(...runs.filter(b => b.isCode).map(b => b.to));
+  if (first > ORG) out4.unshift(`        * = $${ORG.toString(16).padStart(4, '0')}`, `        !byte 0                 ; compact.mjs: anchors the image at ORG (the hot-loop pad above it is a hole)`);
   lines2 = out4;
   writeFileSync(OUT, lines2.join('\n'));
   try { out = assemble(lines2.join('\n')); }
@@ -469,29 +476,40 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
   settled = runs.every((b, k) => b.len === got[k]);
   // ---- HOT LOOPS: no page boundary inside one ----
   // A loop runs from its label to the end of the last branch or jmp that targets it. If that span
-  // straddles a page, pad before the loop's run by exactly enough to start the loop on the next
-  // page: at most the loop's own length, and the padding is scratch space like any other PAD.
-  // Sticky (it accumulates), so a later pass cannot undo it; it is re-checked every pass, since
-  // earlier runs changing size can move the loop again.
+  // would straddle a page, the run it is in gets padding in front of it: scratch space like any
+  // other PAD.
+  // THE PAD IS WORKED OUT FRESH EACH PASS, as the SMALLEST that keeps every hot loop in the run
+  // inside a page, from where the loops would sit with no pad at all. It used to accumulate: a loop
+  // that straddled was pushed to the NEXT page and its pad never shrank, so code growing in front of
+  // ogEnL by 60 bytes added ~200 of padding where taking 60 away would have done -- 420 bytes across
+  // three loops, enough to push the level slot off the arena (RAGGED, 2026-11-13). From the fourth
+  // pass a pad may only grow, so a layout that would otherwise see-saw still settles.
+  const loops = new Map();                          // run -> [{ name, base, len }]
   for (const name of HOTLOOPS) {
     const s = out.labels[name];
     if (s === undefined) { console.error(`compact: hot loop ${name} is not a label`); process.exit(1); }
     const back = new RegExp(`^\\s*(b(cc|cs|eq|ne|mi|pl|vc|vs)|jmp)\\s+${name}\\b`, 'i');
-    let e = -1;
-    for (const x of out.listing) if (x.len && x.at > s && back.test(lines2[x.ln - 1] ?? '')) e = Math.max(e, x.at + x.len);
-    if (e < 0) { console.error(`compact: hot loop ${name} has no branch back to it`); process.exit(1); }
-    if (e - s > 256) { console.error(`compact: hot loop ${name} is ${e - s} bytes -- cannot fit a page`); process.exit(1); }
-    if ((s >> 8) === ((e - 1) >> 8)) continue;
     const k = runs.findIndex((b, j) => b.isCode && b.to <= s && s < b.to + got[j]);
     if (k < 0) { console.error(`compact: hot loop ${name} is in no code run`); process.exit(1); }
-    const need = ((e - 1) & ~255) - s;
-    // MODULO A PAGE: the padding only has to put the loop at the right OFFSET in a page, and a
-    // run that has already been padded once can need more on a later pass when the layout above
-    // it moves. Summed outright that stacked past 256 -- ogEnL carried 290 bytes, a whole page
-    // of nothing in front of it (found 2026-11-02). 256 less is the same offset.
-    runs[k].hotPad = ((runs[k].hotPad ?? 0) + need) & 255;
-    console.log(`  hot loop ${name} ($${s.toString(16)}-$${(e - 1).toString(16)}) straddled a page: +${need} bytes before its run`);
-    settled = false;
+    let e = -1;                                     // the loop's own run only: a jmp from far away is not its loop
+    for (const x of out.listing) if (x.len && x.at > s && x.at < runs[k].to + got[k] && back.test(lines2[x.ln - 1] ?? '')) e = Math.max(e, x.at + x.len);
+    if (e < 0) { console.error(`compact: hot loop ${name} has no branch back to it`); process.exit(1); }
+    if (e - s > 256) { console.error(`compact: hot loop ${name} is ${e - s} bytes -- cannot fit a page`); process.exit(1); }
+    if (!loops.has(k)) loops.set(k, []);
+    loops.get(k).push({ name, base: s - (runs[k].hotPad ?? 0), len: e - s });
+  }
+  for (const [k, ls] of loops) {
+    const fits = p => ls.every(l => ((l.base + p) & 255) + l.len <= 256);
+    const old = runs[k].hotPad ?? 0;
+    let p = -1;
+    for (let q = pass >= 3 ? old : 0; q < 256; q++) if (fits(q)) { p = q; break; }
+    if (p < 0) for (let q = 0; q < 256; q++) if (fits(q)) { p = q; break; }
+    if (p < 0) { console.error(`compact: hot loops ${ls.map(l => l.name)} share a run and no one pad fits them all`); process.exit(1); }
+    if (p !== old) {
+      console.log(`  hot loop${ls.length > 1 ? 's' : ''} ${ls.map(l => l.name).join(', ')}: pad ${old} -> ${p} bytes before the run`);
+      runs[k].hotPad = p;
+      settled = false;
+    }
   }
   const moved = runs.filter((b, k) => b.len !== got[k]).length;
   console.log(`  pass ${pass + 1}: ${settled ? 'sizes settled' : moved ? `${moved} run(s) changed size, going again` : 'hot-loop padding added, going again'}`);
