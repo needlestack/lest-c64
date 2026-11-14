@@ -229,7 +229,19 @@
   const card = document.getElementById('paused');
   EJS_onGameStart = () => {
     const e = emu(), toggle = e.togglePlaying;
-    e.togglePlaying = (...a) => { toggle(...a); card.classList.toggle('on', e.paused); };
+    e.togglePlaying = (...a) => {
+      toggle(...a);
+      card.classList.toggle('on', e.paused);
+      if (!e.paused) e.menu?.open();        // resumed: the toolbar's usual 3-second hide takes over
+    };
+    // ---- the toolbar STAYS while paused: its play button is the way back ----
+    // Its own timer already will not hide it when paused, but a click in the picture can (4.2.3 closes
+    // it on any mousedown when the screen is under 576 px wide, with no pause test), and then nothing
+    // shows it again until the pointer leaves and comes back. Whatever hides it, it comes straight back.
+    const bar = e.elements?.menu;
+    if (bar) new MutationObserver(() => {
+      if (e.paused && bar.classList.contains('ejs_menu_bar_hidden')) bar.classList.remove('ejs_menu_bar_hidden');
+    }).observe(bar, { attributes: true, attributeFilter: ['class'] });
     // ---- the screen takes the picture's own shape ----
     // The core settles its geometry a moment after it starts (the model option applies, the borders
     // are measured), so ask a few times rather than once.

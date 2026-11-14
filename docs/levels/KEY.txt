@@ -31,7 +31,7 @@ ON THE FLOOR (each stands on an open cell)
   Sn   socket: seating an orb here opens wall group n
   /n   pedestal: seating an idol here helps open group n. A group held by
        pedestals opens only when ALL of them are fed; sockets have no such gate.
-  Xn   exit hole, dropping you into level n
+  Xn   exit hole, dropping you into level n (X0 is level 10)
   X>   exit hole to the next level in the chain
   X!   exit hole to THE END, the ending sequence
 

@@ -1,7 +1,6 @@
 # Lest
 
-A first-person game for the Commodore 64: smooth 3D at 10–20 frames per second,
-at full resolution.
+A new 3D game for the Commodore 64 
 
 > "He drove out the man, and at the east of the garden he placed cherubim and a
 > flaming sword that turned every way…"
@@ -10,41 +9,63 @@ at full resolution.
 
 ## Where it started
 
-> Can an unmodified C64 run a first-person-shooter style game full screen at a
-> good frame rate? Bitmap mode won't work. What if we used character mode, with
-> every possible combination of 4x2 chunky pixels represented? Could that render
-> 3D at 30 fps?
+> Can an unmodified C64 run a first-person 3D game at full resolution
+> with a decent frame rate?
 
-That was the whole question, and the project was called *c64fps* while it was
-only a question. The answer turned out to be "nearly, differently, and better".
-The charset of 4×2 chunky pixels became native multicolour cells. Instead of
-holding every pattern, the charset holds the 243 shapes a wall edge actually
-makes, fitted from millions of sampled views. The frame rate settled at 10–20
-fps on a stock machine. Somewhere along the way it became a game.
+That was the question. And the answer turned out to be: better than I expected.
+
+There have been many 3D games for the C64, even up to including a port of DOOM.
+However they all tend to have poor frame rate (under 10 fps) and often very
+blocky graphics. My goal was to see if the C64 could produce something smoother
+and clearer. And it turned out, it can.
+
+Lots and lots of tricks were used to make it possible:
+
+* screen drawn in character mode instead of bitmap mode
+* character map built from sampling millions of rendered frames
+* vertically mirrored scene so we only have to calculate the top
+* ray cast hinted from previous frame does binary search for corners only
+* interpolation of wall edges between corners
+* wall seams projected instead of cast
+* caching so unchanged areas aren't touched even when moving
+* all entities are hardware sprites
+* sprites are culled with precalculated zones
+* sprites are occluded with per-frame occlusion stamps
+
+And oh so much more. Aggressive profiling and optimizing, pass after pass,
+taking advantage of every simplifying rule of our game format, using every
+6502 programming trick, precalculating as much math as possible, aligning
+tables in memory... you name it, it's in there.
 
 ## Playing
 
-You need a C64, or [VICE](https://vice-emu.sourceforge.io/) (`x64sc`), and the
-disk image [`lest-c64.d64`](lest-c64.d64) in this repository, or one you build
-yourself (below). It's built and timed for **NTSC** machines.
+You can play it online right now at:
 
-**Basic Controls**
+  https://needlestack.github.io/lest-c64/
 
-* On a stock C64 just use Joystick 1.
-* On VICE set the cursor keys to Joystick 1.
+Or if you prefer, you can use [VICE](https://vice-emu.sourceforge.io/) with
+the disk image [`lest-c64.d64`](lest-c64.d64) in this repository.
 
-Directions get you Forward/Backward and Turn Left/Right. Hold the button and
-Left/Right strafe instead.
+Be sure to use **x64sc**, and set the machine to **NTSC** and enable **true
+drive emulation** under peripherals. The fast loader runs its own code inside
+the 1541, so it needs a real (or truly emulated) drive. On a PAL machine the
+disk runs wrong and its loads can stall.
 
-Tap the button (or Spacebar) to pick up / put down objects. It acts when you let
-go, unless you strafed while holding it.
+**Controls**
 
-On the keyboard: ESDF go forward/backward and strafe left/right, and < > turn.
+| | keyboard | joystick (port 1) |
+|---|---|---|
+| forward, back | E, D | up, down |
+| turn left, right | `,` `.` (the `<` `>` keys) | left, right |
+| strafe left, right | S, F | hold the button + left, right |
+| pick up, put down | SPACE | button |
+| start again (after you're caught, or at the end) | SPACE | button |
 
-After you're caught, press the button to start again.
+Picking up and putting down happen when you let go of SPACE or the button,
+unless you strafed while holding it.
 
-The loader talks to a real 1541. In VICE, keep **True Drive Emulation** on (the
-default).
+On a real C64 plug the joystick into port 1. In VICE, map the cursor keys or a
+gamepad to joystick port 1. The online version is already set up that way.
 
 ## Building
 
@@ -55,34 +76,36 @@ assembler (`src/asm6502.mjs`) and the disk-image writer (`src/d64lib.js`) are
 part of the project.
 
 ```sh
-node src/build-iray.mjs                 # the whole game -> lest-c64.d64
-CHAIN=4 node src/build-iray.mjs         # one level on its own, for playtesting
+node src/build-iray.mjs                               # the whole game, levels 1-10 -> lest-c64.d64
+CHAIN=4 D64=build/hub.d64 node src/build-iray.mjs     # one level on its own, for playtesting
+PAL=1 node src/build-iray.mjs                         # a PAL disk -> lest-c64-pal.d64 (experimental)
 ```
 
-`CHAIN` lists the levels on the disk, in order. A full build takes under 20
-seconds: each level and each removable wall is built as its own sub-build
-first, so the engine can be laid out around all of them. Run it from the
-project directory.
+`CHAIN` lists the levels on the disk, in order. `D64` names the disk to write;
+without it, any build replaces `lest-c64.d64`. A full build takes a few minutes:
+each level and each removable wall is built as its own sub-build first, so the
+engine can be laid out around all of them. Run it from the project directory.
+
+[`docs/TESTING.md`](docs/TESTING.md) says which test answers which question
+(does it still play, does it still draw the same, did a routine get faster) and
+how to run it.
+
+The online version is [`index.html`](index.html), served from this repository
+by GitHub Pages. It runs [EmulatorJS](https://emulatorjs.org/) (pinned, from
+its CDN) set up for NTSC, true drive emulation, joystick port 1 and the whole
+keyboard to the C64, and plays `lest-c64.d64` straight from the repository, so
+pushing a new disk updates the site.
 
 ## How it works
 
 The screen is a character-mode **framebuffer**: 40×25 cells, each drawn from a
-charset of wall-edge shapes, giving 160×200 multicolour pixels. Each frame:
+charset of wall-edge shapes, giving 160×200 multicolour pixels. Around it:
 
-- **Rays** are cast only where the picture can change: last frame's wall
-  boundaries seed the subdivision, so a typical view needs around 14 rays
-  rather than 160, and the columns between are interpolated.
-- **Walls** become cell codes through tables. A wall's top edge in a cell is a
-  ramp, a step or a level, and the charset was chosen by measuring which of
-  those the engine really draws.
-- **Seams**, the lines between wall panels, are painted in a reserved colour by
-  one divide per seam.
-- **Entities** (orbs, statues, idols, sockets, exits) are hardware sprites.
-  Each is scaled from a ladder of pre-fitted sizes and hidden behind walls by
-  per-frame occluder masks.
 - **Memory**: the image is laid out by a build-time compactor, code from the
   bottom and tables from the top. Levels load from disk on demand, through
-  Krill's loader.
+  Krill's loader, into one slot. A level brings its own code with it, so a
+  feature only one level uses (level 8's failing light, level 10's ball
+  lightning) costs the others nothing.
 - **Boot**: a two-stage loader. A few hundred bytes at the stock drive speed
   get the 1541 running its own small transfer routine, read straight off the
   disk, which brings in the loading screen and Krill's installer quickly; Krill
@@ -103,6 +126,7 @@ src/build-iray.mjs`).
 | path | what |
 |---|---|
 | `lest-c64.d64` | the game, ready to play |
+| `index.html` | the game in a browser (EmulatorJS), served by GitHub Pages |
 | `src/build-iray.mjs` | the game: emits 6502 assembly, builds every level, writes the disk |
 | `src/compact.mjs` | the image layout pass (run by the build) |
 | `src/loader-src.mjs` | the boot: autorun, fast first stage, quote, Krill's installer |
@@ -114,7 +138,7 @@ src/build-iray.mjs`).
 | `art/` | source art: renders, paintings and hand-drawn sprites; `art/tree/` is the end scene's; `art/gamemaker/` holds the original GameMaker scenes and sprites |
 | `krill/` | Krill's loader, prebuilt |
 | `docs/` | `TESTING.md`, THE tests: what to run for which question and how to read it; `SPACE.md`, where the image's bytes go; `RENDERING.md`; `levels/`, every level as a sheet (key in `levels/KEY.txt`, regenerate with `node tools/levelsheet.mjs`); `GAMEMAKER-FORMATS.md`, the GameMaker scene and sprite file formats; and `ladders/`: every entity's ladder of sprite sizes, as pictures |
-| `tools/` | live-machine inspection (`probe`), frame-rate and cycle benchmarks (`fpsr`, `prof`, `vprof`), test rigs (`ship.sh`, `frames`) |
+| `tools/` | live-machine inspection (`probe`), frame-rate and cycle benchmarks (`fpsr`, `prof`, `vprof`), test rigs (`regress.sh`, `ship.sh`, `frames`), the level sheets (`levelsheet`), and the music tools (`song-*`, `sidtrace`) |
 
 ## Credits and licence
 
@@ -126,4 +150,4 @@ Included third-party code keeps its own licence:
 
 - **Loader by Krill** (Gunnar Ruthenberg), BSD 3-clause. See [`krill/README-krill`](krill/README-krill).
 - **The fast first stage** (`IFBT`/`IDRV` in `src/loader-src.mjs`) adapts the idea of [fastboot1541](https://github.com/mist64/fastboot1541) by Michael Steil: have the drive read its own code off the disk, so almost nothing crosses the slow bus before a fast loader is running.
-- **Exomizer decruncher** by Magnus Lind ([`exodecrunch.asm`](exodecrunch.asm)), under the notice in that file.
+- **Exomizer decruncher** by Magnus Lind ([`src/exodecrunch.asm`](src/exodecrunch.asm)), under the notice in that file.

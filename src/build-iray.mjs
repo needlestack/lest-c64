@@ -7129,8 +7129,11 @@ if (process.env.LEVELSHEET === '1') {
   }
   SOCKETS_AT.forEach(([x, y], i) => put(x, y, `S${(sw[i] ?? -1) + 1 || '?'}`, 'socket'));
   PEDESTALS_AT.forEach(([x, y], i) => put(x, y, `/${(sw[SOCKETS_AT.length + i] ?? -1) + 1 || '?'}`, 'pedestal'));
-  const dst = v => v === undefined || v === null ? '>' : v === END_DST ? '!' : String(v);
-  HOLES_AT.forEach(([x, y], i) => put(x, y, `X${dst(LEVEL_EXITDST[LVL]?.[i])}`, 'exit'));
+  const dst = v => v === undefined || v === null ? '>' : v === END_DST ? '!' : String(v % 10);   // 10 is X0: a cell is two characters
+  // The CORNER exit (LEVEL_CORNER) is in no cell: it is the north-west corner of a WALL cell, where four
+  // breakable cells meet. It has no glyph; the line under the map says where it is.
+  const isCorner = i => i === 0 && HAS_CORNER && !!LEVEL_CORNER[LVL];
+  HOLES_AT.forEach(([x, y], i) => { if (!isCorner(i)) put(x, y, `X${dst(LEVEL_EXITDST[LVL]?.[i])}`, 'exit'); });
   let an = 0;
   for (const o of ORBS) {
     if (o.hidden) continue;                     // the hub's idol slots: they stand on the pedestals
@@ -7160,7 +7163,7 @@ if (process.env.LEVELSHEET === '1') {
   if (LEVEL_SYM[LVL]) out.push('walls    marked (a dot in every solid wall cell)');
   HOLES_AT.forEach(([x, y], i) => {
     const d = dst(LEVEL_EXITDST[LVL]?.[i]);
-    out.push(`exit     X${d} at (${x},${y}): ${d === '>' ? `the next level in the chain (level ${nextLevel(LVL)} in the full game)` : d === '!' ? 'THE END (the ending sequence)' : `level ${d}`}, hole ${ink(EXIT_COLS[i] ?? 0)}`);
+    out.push(`exit     ${isCorner(i) ? `(no glyph) at the north-west corner of (${x},${y}), where (${x - 1},${y - 1})-(${x},${y}) meet: it opens once all four are broken` : `X${d} at (${x},${y})`}: ${d === '>' ? `the next level in the chain (level ${nextLevel(LVL)} in the full game)` : d === '!' ? 'THE END (the ending sequence)' : `level ${d === '0' ? 10 : d}`}, hole ${ink(EXIT_COLS[i] ?? 0)}`);
   });
   (LEVEL_WALLS[LVL]?.walls ?? []).forEach((grp, k) => {
     if (closeOf[k + 1]) return out.push(`closer   W${closeOf[k + 1]} ${grp.map(([x, y]) => `(${x},${y})`).join(' ')} -- open at the start; back the moment S${closeOf[k + 1]} is fed (whatever stands in it is pushed ${(LEVEL_CLOSE[LVL].find(c => c.wall === k).cells.map(c => `to (${c.ax},${c.ay})`)).join(', ')})`);

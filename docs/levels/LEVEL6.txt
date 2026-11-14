@@ -3,25 +3,23 @@ LEVEL 6
                                    1  1  1  1  1  1
      0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5
  0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
- 1  [] .. .. .. .. .. .. .. .. .. .. .. .. .. .. []
- 2  [] .. [] .. [] .. [] .. [] .. .. .. .. .. .. []
- 3  [] .. [] .. [] .. [] .. [] .. .. .. .. .. .. []
- 4  [] .. [] .. [] .. [] .. [] .. .. [] [] .. .. []
- 5  [] .. [] |2 [] |1 [] OO [] .. .. [] .. .. .. []
- 6  [] X4 [] A1 [] A2 [] |+ [] [] [] [] II .. .. []
- 7  [] P^ [] |1 [] |2 [] OO [] .. .. [] .. .. .. []
- 8  [] .. [] S1 [] S2 [] .. [] .. .. [] [] .. .. []
- 9  [] .. [] .. [] .. [] .. [] .. .. .. .. .. .. []
-10  [] .. [] .. [] .. [] .. [] .. .. .. .. .. .. []
-11  [] .. .. .. .. .. .. .. [] .. .. .. .. .. .. []
-12  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
+ 1  [] .. .. .. W2 .. .. .. S1 |1 .. .. .. .. .. []
+ 2  [] .. [] .. [] .. [] .. [] [] [] .. .. .. .. []
+ 3  [] .. [] .. [] .. [] |1 [] .. .. .. [] [] [] []
+ 4  [] OO [] .. [] .. [] A1 [] [] .. .. [] .. .. []
+ 5  [] X4 [] .. |2 .. [] |2 [] OO .. .. S2 |2 II []
+ 6  [] P^ [] .. [] .. [] A2 [] [] .. .. [] .. .. []
+ 7  [] .. [] .. [] .. [] |1 [] .. .. .. [] [] [] []
+ 8  [] .. [] .. [] .. [] .. [] [] [] .. .. .. .. []
+ 9  [] .. .. .. W2 .. .. .. S1 |1 .. .. .. .. .. []
+10  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
 
-size     16 x 13 = 208 cells
-start    (1.50, 7.50) facing 270 deg (0 east, 90 south)  [PX=0180 PY=0780 PA=c0 PAF=00]
-inks     ground 6 blue, walls 0 black, seams 14 light blue
+size     16 x 11 = 176 cells
+start    (1.50, 6.50) facing 270 deg (0 east, 90 south)  [PX=0180 PY=0680 PA=c0 PAF=00]
+inks     ground 5 green, walls 0 black, seams 13 light green
 floor    dithered (the floor half darkened by a black checker)
-exit     X4 at (1,6): level 4, hole 0 black
-group 1  (5,5) (3,7) (7,6) -- opened by S1 (3,8)
-group 2  (3,5) (5,7) (7,6) -- opened by S2 (5,8)
-|+       (7,6) is in groups 1 and 2: whichever opens first takes it out
+exit     X4 at (1,5): level 4, hole 0 black
+group 1  (9,1) (7,3) (7,7) (9,9) -- opened by S1 (8,1), S1 (8,9) (any of them)
+group 2  (13,5) (7,5) (4,5) -- opened by S2 (12,5)
+closer   W2 (4,1) (4,9) -- open at the start; back the moment S2 is fed (whatever stands in it is pushed to (5,1), to (5,9))
 idol     carried to the hub's pedestals
