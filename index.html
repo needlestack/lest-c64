@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LEST</title>
+<meta name="description" content="LEST, a new Commodore 64 game by Jonathan Field, playing in your browser.">
+<style>
+  /* The page around the game: a dark room, a monitor in it, the controls under it. */
+  :root {
+    --room: #121212;
+    --bezel: #2a2826;
+    --bezel-edge: #3a3734;
+    --ink: #d9d4cc;
+    --dim: #8a857d;
+    --key-bg: #2e2c29;
+    --key-edge: #4b4742;
+    --led: #6fe36f;
+    /* The screen's shape: the emulator's OWN, once it is running (see EJS_onGameStart). This is its
+       NTSC frame to start with -- 384 x 247 at VICE's NTSC pixel aspect of 0.75 -- so the Play screen
+       is already close. It is not 4:3: that left a black bar either side of the picture. */
+    --ar: 1.166;
+    /* The monitor is as wide as the window allows, but never so wide that the SCREEN runs off the
+       bottom: its height is the window less the title and the frame, and its width follows. */
+    --page: min(100%, 860px, calc((100svh - 128px) * var(--ar) + 24px));
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--room); color: var(--ink); }
+  body {
+    font: 15px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 18px 16px 40px;
+  }
+  .page { width: var(--page); min-width: min(100%, 320px); }
+  h1 { margin: 0 0 14px; font-size: 17px; font-weight: 600; }
+  h1 .sub { color: var(--dim); font-weight: 400; font-size: 12px; margin-left: 6px; }
+
+  /* ---- the monitor ---- */
+  .monitor {
+    background: linear-gradient(180deg, var(--bezel-edge), var(--bezel) 10%, var(--bezel) 90%, #201f1d);
+    border-radius: 14px;
+    padding: 12px 12px 8px;
+    box-shadow: 0 24px 50px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  .glass {
+    position: relative;
+    aspect-ratio: var(--ar);        /* the C64's picture, borders included */
+    background: #000;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: inset 0 0 0 2px #000;
+  }
+  #game { position: absolute; inset: 0; }
+  #paused {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: none; pointer-events: none; z-index: 10;
+    padding: 9px 26px; border-radius: 30px;
+    background: #6f6a62; color: #fff;
+    font: 600 15px/1.4 system-ui, sans-serif; letter-spacing: 0.06em;
+    box-shadow: 0 6px 20px rgba(0,0,0,.5);
+  }
+  #paused.on { display: block; }
+  .strip {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 8px; color: var(--dim); font-size: 11px; letter-spacing: 0.22em;
+  }
+  .strip .name { margin-right: auto; }
+  .led {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--led);
+    box-shadow: 0 0 7px var(--led); display: inline-block;
+  }
+
+  /* ---- the controls ---- */
+  h2 { text-align: center; margin: 26px 0 12px; font-size: 12px; font-weight: 600; letter-spacing: 0.22em; color: var(--dim); }
+  .keys { display: flex; gap: 56px; flex-wrap: wrap; align-items: flex-start; justify-content: center; }
+  .cluster { display: grid; grid-template-columns: repeat(3, 52px); gap: 6px; }
+  .label { font-size: 12px; color: var(--dim); letter-spacing: 0.15em; margin-bottom: 8px; }
+  .key {
+    position: relative; height: 48px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--key-bg); border: 1px solid var(--key-edge); border-bottom-width: 4px;
+    border-radius: 7px; font-size: 17px;
+  }
+  .key .arrow { position: absolute; top: 2px; right: 6px; font-size: 12px; color: var(--dim); }
+  .key .alt { position: absolute; bottom: 2px; left: 7px; font-size: 11px; color: var(--dim); }
+  .e { grid-column: 2; grid-row: 1; }
+  .row2 { grid-row: 2; }   /* S D F on their own line under E (auto-placement put S beside E) */
+  .space-row { margin-top: 10px; display: flex; flex-direction: column; align-items: center; }
+  .space { width: 210px; height: 44px; font-size: 13px; letter-spacing: 0.25em; }
+  .space-note { margin-top: 6px; color: var(--dim); font-size: 13px; text-align: center; }
+  .turn { display: grid; grid-template-columns: repeat(2, 52px); gap: 6px; margin-top: 54px; }
+
+  table { border-collapse: collapse; margin: 0 auto; }
+  td { padding: 3px 0; vertical-align: top; }
+  td:first-child { padding-right: 28px; white-space: nowrap; }
+  .note { margin-top: 28px; color: var(--dim); font-size: 13px; text-align: center; }
+  .note a { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>LEST <span class="sub">a new C64 game by Jonathan Field</span></h1>
+
+  <div class="monitor">
+    <div class="glass"><div id="game"></div><div id="paused">Paused</div></div>
+    <div class="strip">
+      <span class="name">COMMODORE 64</span>
+      <span class="led" title="power"></span>
+    </div>
+  </div>
+
+  <h2>KEYBOARD</h2>
+  <div class="keys">
+    <div>
+      <div class="label">MOVE</div>
+      <div class="cluster">
+        <div class="key e">E<span class="arrow">&uarr;</span></div>
+        <div class="key row2">S<span class="arrow">&larr;</span></div>
+        <div class="key row2">D<span class="arrow">&darr;</span></div>
+        <div class="key row2">F<span class="arrow">&rarr;</span></div>
+      </div>
+    </div>
+    <div>
+      <div class="label">TURN</div>
+      <div class="turn">
+        <div class="key">&lt;<span class="alt">,</span></div>
+        <div class="key">&gt;<span class="alt">.</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="space-row">
+    <div class="key space">SPACE</div>
+    <div class="space-note">pick up, put down, restart</div>
+  </div>
+
+  <h2>JOYSTICK</h2>
+  <table class="joy">
+    <tr><td>button</td><td>pick up, put down, restart</td></tr>
+    <tr><td>button + left, right</td><td>strafe</td></tr>
+  </table>
+
+  <p class="note"><a href="https://github.com/needlestack/lest-c64">github.com/needlestack/lest-c64</a></p>
+</div>
+
+<script>
+  // EmulatorJS, pinned: a newer release could change a setting's name or default under us.
+  // Its loader reads these EJS_ globals.
+  EJS_player = '#game';
+  EJS_core = 'vice_x64sc';                 // the cycle-exact core: the game's raster timing and its
+                                           //   fast loader both need it
+  EJS_pathtodata = 'https://cdn.emulatorjs.org/4.2.3/data/';
+  EJS_gameUrl = 'lest-c64.d64';            // the committed master disk, beside this page
+  EJS_gameName = 'LEST';
+  EJS_startOnLoaded = false;               // ONE click, on Play: it is the interaction the browser wants
+  EJS_startButtonName = 'Play';            //   before it allows sound, so the game is heard from its
+  EJS_alignStartButton = 'center';         //   first second, and it gives the game the keyboard
+  EJS_disableDatabases = true;             // never a cached copy of an older disk
+  EJS_disableLocalStorage = true;          // and never a visitor's old settings over these
+  EJS_color = '#6f6a62';
+  EJS_backgroundColor = '#000';
+  EJS_volume = 0.6;
+  EJS_defaultOptions = {
+    'vice_c64_model': 'C64 NTSC',          // the disk is NTSC; on a PAL machine it runs wrong and
+                                           //   its loader can stall (the user's first try, 2026-11-13)
+    'vice_drive_true_emulation': 'enabled',// the fast loader runs its own code in the 1541
+    'vice_joyport': '1',                   // LEST reads joystick port 1; the core defaults to 2
+    'vice_statusbar_startup': 'disabled',  // (no drive light: EmulatorJS passes the page no LED signal
+                                           //   and no memory to read; VICE's own bar was tried and dropped)
+    'keyboardInput': 'enabled',            // every key to the C64: by default EmulatorJS takes S, E,
+                                           //   F and others for its gamepad and the game never sees them
+    'lockMouse': 'disabled',               // no pointer grab on a click: the C64 core says it has a
+                                           //   mouse, so EmulatorJS would lock it, and LEST uses none
+  };
+  EJS_Buttons = {                          // its own toolbar: play/pause, mute, volume and fullscreen
+    playPause: true, restart: false,
+    mute: true, settings: false, fullscreen: true,
+    saveState: false, loadState: false, screenRecord: false, gamepad: false, cheat: false,
+    volume: true, saveSavFiles: false, loadSavFiles: false, quickSave: false, quickLoad: false,
+    screenshot: false, cacheManager: false, exitEmulation: false,
+  };
+
+  // ---- THE KEYBOARD STAYS WITH THE GAME ----
+  // Keys reach the C64 only while the emulator's element has the focus, and a click anywhere else on
+  // the page took it away: the window still looked selected while every key went nowhere. So a press
+  // outside the game does not take the focus (links still work: their click is not cancelled), and
+  // coming back to this window hands it straight to the game. Another WINDOW is left alone: the game
+  // keeps running there, as anything does when you switch away.
+  const emu = () => window.EJS_emulator;
+  const game = () => (emu()?.started && emu().elements?.parent) || null;
+  document.addEventListener('mousedown', (ev) => {
+    const g = game();
+    if (g && !g.contains(ev.target)) ev.preventDefault();
+  }, true);
+  document.addEventListener('focusout', (ev) => {
+    const g = game();
+    if (g && ev.target === g && !(ev.relatedTarget && g.contains(ev.relatedTarget)))
+      setTimeout(() => { if (document.hasFocus()) g.focus(); }, 0);
+  });
+  window.addEventListener('focus', () => game()?.focus());
+
+  // ---- LEAVING: let go of the heavy parts now ----
+  // Safari kept each reload's emulator alive beside the new one: ~3 GB on a fresh load (its memory
+  // graph counts reserved address space), 10, 14, 16 after reloads (the user, 2026-11-13). The page
+  // cannot force a collection, but it can give back what holds the old one: the GPU context (which
+  // Safari is known to keep), the audio context and the main loop. Each step on its own, best effort.
+  window.addEventListener('pagehide', () => {
+    const e = emu();
+    if (!e) return;
+    try { e.gameManager?.toggleMainLoop(0); } catch {}
+    try {
+      const c = e.canvas, gl = c && (c.getContext('webgl2') || c.getContext('webgl'));
+      gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    } catch {}
+    try { e.Module?.AL?.currentCtx?.audioCtx?.close(); } catch {}
+    try { e.Module?.SDL2?.audioContext?.close(); } catch {}
+  });
+
+  // ---- no right-click menu ----
+  // 4.2.3 has the switch for it (buttonOpts.rightClick) but rejects that key as "not a valid button"
+  // before storing it, so the menu always opens. Caught on the way DOWN to its element instead.
+  document.getElementById('game').addEventListener('contextmenu', (ev) => {
+    ev.preventDefault(); ev.stopPropagation();
+  }, true);
+
+  // ---- PAUSED, over the screen ----
+  // The toolbar's pause is the only way to pause, and its icon is small and hides with the toolbar;
+  // this says so in the middle of the picture. EmulatorJS raises no event for it, so its toggle is
+  // wrapped once the game has started.
+  const card = document.getElementById('paused');
+  EJS_onGameStart = () => {
+    const e = emu(), toggle = e.togglePlaying;
+    e.togglePlaying = (...a) => { toggle(...a); card.classList.toggle('on', e.paused); };
+    // ---- the screen takes the picture's own shape ----
+    // The core settles its geometry a moment after it starts (the model option applies, the borders
+    // are measured), so ask a few times rather than once.
+    let n = 0;
+    const fit = setInterval(() => {
+      const ar = e.gameManager?.getVideoDimensions('aspect');
+      if (ar > 0.5 && ar < 3) document.documentElement.style.setProperty('--ar', ar.toFixed(4));
+      if (++n >= 20) clearInterval(fit);
+    }, 500);
+  };
+</script>
+<script src="https://cdn.emulatorjs.org/4.2.3/data/loader.js"></script>
+</body>
+</html>

@@ -24466,7 +24466,9 @@ ${HAS_IDOL ? `        ldx carry               ; ...unless what you are holding i
         lda orbArtT,x           ;   and stands there, both sprites drawn, the idol simply raised
         bne okPlain             ;   onto the drum's top plane. Nothing is consumed and no art
 ` : ''}        lda hlSeat,y
-        bmi okDone              ; already used: bit 7 now means CONSUMED, and it is one-way
+        bmi okPlain             ; already used (bit 7, CONSUMED, one-way): it is FLOOR now, so the orb
+                                ;   is set down on it. It was okDone -- you kept hold of it, on a
+                                ;   square that looked like any other (the user, level 2, 2026-11-13)
         ; ---- ONE WAY. The orb and the socket both leave the world. ----
         ; They used to seat: the orb stayed orbHidT and drew as a half-ball sitting in the dish,
         ; and you could take it back out. Neither survives the design -- an orb spent on a socket
