@@ -4094,9 +4094,26 @@ const silvGrid = (f, h) => {
   for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) out[oy + dy][ox + dx] = px[dy * w + dx];
   return out;
 };
-const gridBytes = g => { const b = [];
-  for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++) b.push([0, 1, 2, 3].reduce((v, i) => v | (g[y][k * 4 + i] << (6 - 2 * i)), 0));
-  return b; };
+// ---- sprBytes: THE sprite packer. One hardware sprite's 63 bytes from a grid of multicolor pixel
+// values (0-3, one per sprite pixel), rows [r0, r0+21) and columns [c0, c0+12), four pixels a byte,
+// leftmost in the top bits. A row or column past the grid's edge packs as 0 (level 10's big angel cuts its
+// sprites from a canvas wider than its art). Every ladder goes through it: it was eight copies of the
+// one reduce until 2026-11-15. The 64th byte, where a slot has one, is the caller's.
+// (A function declaration, so it is hoisted: the hole and pedestal ladders are built in functions.)
+function sprBytes(g, r0 = 0, c0 = 0) {
+  const b = [];
+  for (let y = r0; y < r0 + 21; y++) for (let k = 0; k < 3; k++)
+    b.push([0, 1, 2, 3].reduce((v, i) => v | ((g[y]?.[c0 + k * 4 + i] ?? 0) << (6 - 2 * i)), 0));
+  return b;
+}
+const gridBytes = g => sprBytes(g);
+// lcgRand: the build's self-checks' sampler (zone culling's, ZNSHUT's), a seeded closure -> [0, 1).
+// The product overflows 2^53 and loses low bits -- kept bit for bit, since each check's samples are
+// these numbers (CELLRAND's mulberry32 is the exact one).
+function lcgRand(seed) {
+  let sd = seed;
+  return () => { sd = (sd * 1103515245 + 12345) >>> 0; return sd / 4294967296; };
+}
 // The ink the lightning is drawn in: whichever of the three the plain ball uses least, over the
 // ten rungs (the user, 2026-10-13). It turns light blue while a lightning frame is up.
 // ---- THE SILVER ORB'S LADDER: ten rungs, the four nearest drawn 2x2, NOTHING magnified ----
@@ -4310,13 +4327,7 @@ if (HAS_SILVER) {
   for (const h of SILV_H) SVLAD.push({ h, exp: 0, w: silverW(h) });
 }
 const ORBBMH = [...new Set(LADDER.map(r => r.h))].sort((a, b) => b - a);   // distinct bitmaps
-const orbBytes = (h, shd) => {
-  const g = orbScale(orbW(h), h, shd), bytes = [];
-  for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
-    bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
-  bytes.push(0);
-  return bytes;
-};
+const orbBytes = (h, shd) => [...sprBytes(orbScale(orbW(h), h, shd)), 0];
 const ORBBM = ORBBMH.map(h => orbBytes(h, false));
 // The sentry ladder's bitmaps, rung by rung: one sprite for a short rung, four for a 2x2 one
 // (lower-left, upper-left, lower-right, upper-right -- the angel's lower/upper pair, twice). The
@@ -4357,7 +4368,7 @@ if (HAS_SILVER) {
 let NORBBM = ORBBM.length;
 // The widest rung must come back byte-identical to the art it was scaled from. If a change to
 // the resampler breaks that, every other rung is suspect too.
-const ORB4WANT = ORBSRC12.flatMap(r => [0, 1, 2].map(b => [0, 1, 2, 3].reduce((v, k) => v | (r[b * 4 + k] << (6 - 2 * k)), 0)));
+const ORB4WANT = sprBytes(ORBSRC12);
 if (ORBBM[0].slice(0, 63).join() !== ORB4WANT.join())
   throw new Error('orbScale does not reproduce ORB4 at full size -- the resampler changed');
 // ORBSHEET=1: every distinct bitmap in the ladder, on black and on white, at 8x4 zoom (a
@@ -4625,10 +4636,7 @@ function angScale(w, h) {
     out[oy + dy][ox + dx] = px[dy * w + dx];
   return out;
 }
-const angBytes = (g, row0) => { const b = [];
-  for (let y = row0; y < row0 + 21; y++) for (let k = 0; k < 3; k++)
-    b.push([0, 1, 2, 3].reduce((v, i) => v | (g[y][k * 4 + i] << (6 - 2 * i)), 0));
-  b.push(0); return b; };
+const angBytes = (g, row0) => [...sprBytes(g, row0), 0];
 // ---- the angel's ladder: ONE COLUMN of at most TWO sprites, at every distance ----
 // The upper half of the ladder magnifies a smaller bitmap 2x2 rather than drawing a bigger one,
 // because a bigger one costs sprites: three sprite rows would be six, and six hardware sprites
@@ -4834,13 +4842,7 @@ if (HAS_IDOL) {
   if (ORBBMH.some(h => idolW(h) !== orbW(h))) throw new Error(
     `the idol's widths differ from the orb's, so they are no longer the same ladder and the ` +
     `single-constant pointer offset is wrong -- give the idol its own rungs, or its own art box`);
-  for (const h of ORBBMH) {
-    const g = idolScale(idolW(h), h), bytes = [];
-    for (let y = 0; y < 21; y++) for (let b = 0; b < 3; b++)
-      bytes.push([0, 1, 2, 3].reduce((v, k) => v | (g[y][b * 4 + k] << (6 - 2 * k)), 0));
-    bytes.push(0);
-    ORBBM.push(bytes);
-  }
+  for (const h of ORBBMH) ORBBM.push([...sprBytes(idolScale(idolW(h), h)), 0]);
   // ---- IDOLDROP: rungs whose picture is a NEIGHBOUR's, or nothing at all ----
   // The idol has no ladder of its own -- its bitmap is orbPtrT[variant] plus one constant, so
   // picture k is bolted to orb rung k and the bands are the ORB's. A picture therefore cannot
@@ -4986,7 +4988,7 @@ const BOLT_DIR = 0x40;
 // "start at C2 and have the pitch sweep go +20, and the filter go from 0-100 instead of 25 to 100. Also,
 // low pass, not band pass."
 const BALL_SND = process.env.BALLSND !== '0';
-// BDBORDER=1: the shock deaths (level 9's svDie, level 10's bdDie) flash the border too. Off: it stays
+// BDBORDER=1: the shock deaths (shockDie: level 9's zkDie, level 10's bdDie) flash the border too. Off: it stays
 // black (the user, 2026-11-11: "turn the border flickering off for death?"; 11-12: "i like the death
 // better with the border staying black. implement that on level 9 as well")
 const BD_BORDER = process.env.BDBORDER === '1';
@@ -5130,10 +5132,7 @@ if (HAS_BIG) {
       '-delete', '0', '-append', '-bordercolor', 'white', '-border', '4', tall]);
   }
   const [bw, bh] = fitArt(tall, 8, 8, { mirror: false }).box, ratio = (bw / bh) / BIG_AX;
-  const spr = (g, r0, c0) => { const b = [];
-    for (let y = r0; y < r0 + 21; y++) for (let k = 0; k < 3; k++)
-      b.push([0, 1, 2, 3].reduce((v, i) => v | ((g[y]?.[c0 + k * 4 + i] ?? 0) << (6 - 2 * i)), 0));
-    b.push(0); return b; };
+  const spr = (g, r0, c0) => [...sprBytes(g, r0, c0), 0];
   const sets = BIG_SETS.map(h => {
     const w = Math.min(36, Math.round(h * ratio)), R = Math.ceil(h / 21);
     // The INK must span exactly h rows, bottom row inked (occStamp's bottom alignment): the tail's
@@ -7229,14 +7228,8 @@ function makeHoleLadder(r, wStep, slot0, wMax = 48, nearFam = true, rim = 0, opt
   // true height is NEGATIVE still has real width, which is the dimension that matters out there.
   if (minRows > 0) L.splice(0, L.length, ...L.filter(g => g.vis >= minRows));
 
-  // One sprite's 63 bytes, taking multicolor pixels [x0, x0+12) of a rung's logical bitmap.
-  const sprite = (g, x0) => {
-    const b = [];
-    for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
-      b.push([0, 1, 2, 3].reduce((v, i) => v | (g.grid[y][x0 + k * 4 + i] << (6 - 2 * i)), 0));
-    b.push(0);
-    return b;
-  };
+  // One sprite's 64 bytes, taking multicolor pixels [x0, x0+12) of a rung's logical bitmap.
+  const sprite = (g, x0) => [...sprBytes(g.grid, 0, x0), 0];
   const BM = L.flatMap(g =>
     [...Array(g.spr)].map((_, i) => sprite(g, i * 12)));
   // Left half's slot; the right half is always the next one, so the runtime needs one pointer.
@@ -7645,13 +7638,7 @@ function makePedLadder(r, uh, slot0) {   // (the old wStep/wMax/wMin went 2026-1
     g.grid = [...Array(21)].map((_, y) => y < rows ? row(y) : new Array(g.px).fill(0));
   });
 
-  const sprite = g => {
-    const b = [];
-    for (let y = 0; y < 21; y++) for (let k = 0; k < 3; k++)
-      b.push([0, 1, 2, 3].reduce((v, i) => v | (g.grid[y][k * 4 + i] << (6 - 2 * i)), 0));
-    b.push(0);
-    return b;
-  };
+  const sprite = g => [...sprBytes(g.grid), 0];
   const BM = L.map(sprite);
   let _pslot = slot0;
   const slotT = L.map(() => _pslot++);
@@ -9130,7 +9117,7 @@ const ZN_BUILD = (() => {
     const coneOk = (dx, dy, pa) => { let b = Math.abs(dx), t = Math.abs(dy); const c = Math.max(b, t);
       if (c < 2) return true; const tol = CONE_TOL[Math.min(c, CONE_DMAX)]; return ((hzBearing(dx, dy) - pa + tol) & 255) < 2 * tol; };
     const C = { cone: 125, z: 40, vis: 7000, hid: 2900, off: 560, behind: 314, trig: 800 };
-    let sd = 99; const rnd = () => { sd = (sd * 1103515245 + 12345) >>> 0; return sd / 4294967296; };
+    const rnd = lcgRand(99);
     const run = (state) => {
       const P = state === 'shut' ? plS : pl, losT = state === 'shut' ? losFree : losO;
       const tot = variants.map(() => 0), bad = variants.map(() => 0);
@@ -9181,8 +9168,7 @@ const ZN_BUILD = (() => {
   // SELF-CHECK, every build: the 6502 tests an orb or angel by its OWN cell's zone only, while its
   // disc (an angel's is ~1.7x an orb's) can spill into a neighbour. Sample exact player points and
   // entity cells; count entities the test would cull whose disc is in fact visible. Must be 0.
-  let bad = 0, n = 0, sd = 12345;
-  const rnd = () => { sd = (sd * 1103515245 + 12345) >>> 0; return sd / 4294967296; };
+  let bad = 0, n = 0; const rnd = lcgRand(12345);
   const radO = ORBS.map(o => o.tall ? GATE_R.angel : o.silver ? GATE_R.sv : GATE_R.orb);
   const RIM = [[0, 0], ...[...Array(16)].map((_, k) => [Math.cos(k * Math.PI / 8), Math.sin(k * Math.PI / 8)])];
   for (let i = 0; i < 20000 && ORBS.length; i++) {
@@ -9281,10 +9267,7 @@ const LVL_TABLES = [
   // level: a chain whose live level had no sockets emitted an empty `!byte` and failed to
   // assemble as "bad number: $", and a chain with two wall levels would have had level 2's
   // sockets toggling level 3's walls. Padded to the chain's widest socket count.
-  ['sockWallT', [...Array(NSOCK)].map((_, i) => {
-    const sw = LEVEL_WALLS[LVL]?.sockWall ?? [];
-    return i < sw.length ? sw[i] : 0xff;
-  })],
+  ['sockWallT', CHAIN_GLOBAL.sockWallT({ level: LVL })],   // the same function every other level's goes through
   // ---- WHERE THIS LEVEL'S WALL DELTAS LIE, one entry per local wall id ----
   // The four pointer tables used to be image data sized to every wall in the chain, which is
   // what forced global ids and what put all seven levels' deltas in all seven level files.
@@ -9318,12 +9301,10 @@ const LVL_TABLES = [
   // main build overwrites this in every dump (see nextLevel below).
   // One byte per EXIT, padded to NEXIT -- see LEVEL_EXITDST. $ff in a dump,
   // and $ff for an exit whose destination has not been built: the hole is then scenery.
-  ['lvlNxtT', pad([...Array(Math.max(1, HOLES_AT.length))].map((_, i) => {
-    if (!LVLLOAD) return 0xff;
-    const v = LEVEL_EXITDST[LVL]?.[i];
-    if (v === undefined || v === null) return nextLevel(LVL);
-    return v;    // a level, or END_DST (the end of the game, not a level)
-  }), Math.max(1, NEXIT), 0xff)],
+  // The live level's goes through CHAIN_GLOBAL like every dump's (it was a second copy of the same rule
+  // until 2026-11-15). Not in a dump (!LVLLOAD), which has no fall order: $ff, overwritten by the main build.
+  ['lvlNxtT', LVLLOAD ? CHAIN_GLOBAL.lvlNxtT({ level: LVL, nExit: HOLES_AT.length })
+                      : Array(Math.max(1, NEXIT)).fill(0xff)],
   // Six contiguous bytes, one entry: nOrbT nHoleT nExitT nOrbM1T nSockT nAllM1T.
   // SEVEN contiguous bytes now: nAllT joins them because the down-counting loops need a COUNT
   // to test against, and an INDEX cannot express "none" -- see the guards on each loop.
@@ -10247,8 +10228,160 @@ fsSfx:  jsr x8drSfx
 `}${fxPlayer(n => 'x8' + n)}${fxPlayerData(n => 'x8' + n)}fsR:    !byte 0                 ; this snap's first random byte: cutoff, filter mode, which voice
 `)
   .replace(/\bfs([A-Z]\w*)\b/g, P + '$1').replace(/\bx8(\w+)\b/g, X + '$1').replace(/\bflkRnd\b/g, rnd);
+// ---- THE SHOCK DEATH: one source, emitted into level 9's module (sentries) and level 10's (ball, angel) ----
+// SVSHOCK frames of a scream, flashing inks and random wall-edge glyphs, then black until a fresh fire
+// press, which restarts through entry as every death does. Level code cannot call level code, so it is
+// one TEXT, written into each module with its labels renamed (P + the name after SK_), as fxPlayer is.
+// It was two near-copies until 2026-11-15, and these are the ways they differed, each settled here:
+//   * the ground's IRQ operands. svDie saved irqB0-2 as it struck and wrote them back before `jmp
+//     entry`, on the grounds that the restart put back $d022/$d023 but not irqB1; bdDie wrote nothing
+//     back. NEITHER WAS WRONG ON SCREEN: the restart's lvlBoot writes colW/colF/colS, $d022, $d023 and
+//     irqB2, lvlHi sets colT, and the first rendered frame's mnext publishes colT -> irqB0 and colF ->
+//     irqB1 at raster 250 -- in the frame pd11 turns the display back on (entry holds it off until
+//     then). The one place irqB1 is NOT republished is a build without CEILVARY, and no game can be
+//     one: level 8's ceiling is a fixed black and level 1's the default white (guarded below). So the
+//     save and the write-back were dead weight; the restart is the engine's own dshFir now.
+//   * the black. svDie blacked every ink and blanked both screens; bdDie turns the display off, which
+//     shows the same black (the border's, $d020 = 0) for 30 bytes less. Entry's restart holds the
+//     display off until its first frame is drawn either way.
+//   * the scream's start. bdDie lets voices 2 and 3 go before gating them, because a gate already on
+//     is no edge and the noise stayed at whatever envelope the last sound left (the user, 2026-11-12:
+//     "the death sound ... became not noise"); level 9's zkGo gated them straight on, so a death on a
+//     zap's held gate could scream at the zap's level. Both start the bdDie way now.
+// What truly differs is a parameter:
+//   o.rnd      the module's own xorshift          o.q, o.n  its frame and cell counters (bytes)
+//   o.enter    the level's own first moves: level 9 hands the border and the charge back; level 10
+//              keeps its angel in view and picks the ink half
+//   o.keep     level 10's angel: sprites off only BD_KEEP frames in (the ball's, and level 9's, go
+//              at once, in o.enter)
+//   o.snd      the scream (level 9's is SVSND's); o.sndPre the level's own sound standing aside;
+//              o.v1  voice 1's control as it lets go (level 9's hum $10, level 10's track $40)
+//   o.inkT, o.base  the ink table and the ORed half (level 10's two deaths); o.data its rows
+// ---- xorshift16: John Metcalf's 16-bit xorshift (7,9,8), A = the new low byte ----
+// One routine, three generators, each with its own state so nothing couples: level 8's flicker
+// (flkRnd/flkSd), level 9's sentries (svRnd/svSd) and level 10's ball and angel (bdRnd/bdSd, which
+// baRnd names too). Level code cannot share code, so each module gets this text with its own names
+// (one source since 2026-11-15; the state bytes and seeds stay with their levels).
+const xorshift16 = (name, sd) => `${(name + ':').padEnd(8)}lda ${sd}+1${' '.repeat(Math.max(1, 13 - sd.length))}; x ^= x << 7
+        lsr
+        lda ${sd}
+        ror
+        eor ${sd}+1
+        sta ${sd}+1
+        ror                     ; x ^= x >> 9
+        eor ${sd}
+        sta ${sd}
+        eor ${sd}+1             ; x ^= x << 8
+        sta ${sd}+1
+        rts
+`;
+const shockDie = (P, o) => {
+  // The restart leaves irqB1 to mnext, which republishes it only under CEILVARY (see above).
+  if (!CEILVARY) throw new Error('shockDie: every level shares one ceiling, so mnext no longer republishes irqB1 ' +
+    'and the restart would keep the shock\'s last ink there -- put the write-back of irqB1 back first');
+  return (`SK_Die:${o.enter}
+        lda #${hx(SVSHOCK)}
+        sta ${o.q}                 ; frames of shock left
+${o.snd ? `${o.sndPre}        lda #${hx(o.v1)}                ; ---- the scream: voices 2 and 3, held at full ----
+        sta $d404               ; every voice lets go first (voice 1 ${o.v1 === 0x40 ? 'the track, still a pulse' : 'the hum'})
+        ${(o.v1 === 0x40 ? 'asl' : 'lda #$80').padEnd(24)}; $80: a gate already on is no edge -- no attack, so the
+        sta $d40b               ;   scream's noise stayed at the last sound's envelope (the user: "the
+        sta $d412               ;   death sound ... became not noise")
+        ldx #$0c                ; then SK_ScT into $d40b-$d417, top down: each voice's envelope before
+SK_Sc:  lda SK_ScT,x            ;   its gate
+        sta $d40b,x
+        dex
+        bpl SK_Sc
+` : ''}SK_Fr:${o.keep ? `  lda ${o.q}                 ; ---- once per 60Hz frame ----
+        cmp #${hx(SVSHOCK - BD_KEEP)}
+        bne SK_F1
+        lda #$00                ; BD_KEEP frames in: the sprites go (the angel's death kept them)
+        sta $d015
+SK_F1:` : '                         ; ---- once per 60Hz frame ----\n      '}  lda frameCnt
+SK_W:   cmp frameCnt
+        beq SK_W
+${o.snd ? `        jsr ${o.rnd}               ; a new scream for this frame: the noise's pitch, anywhere...
+        sta $d408
+        jsr ${o.rnd}
+        and #$3f
+        ora #$10                ; ...the pulse's, a buzz from ~250 Hz to ~1.2 kHz...
+        sta $d40f
+        jsr ${o.rnd}
+        sta $d416               ; ...the cutoff ($d417, resonance full on voices 2 and 3: once, from SK_ScT)
+        jsr ${o.rnd}
+        and #$03
+        tax
+        lda SK_ModT,x           ; ...and the mode: a volume write is a bump, one more crack
+        sta $d418
+` : ''}        jsr SK_Ink              ; a random ink for each of ground, walls and seams${BD_BORDER ? ', and border' : ''}
+        jsr SK_Gnd
+        jsr SK_Ink
+        sta $d022
+        jsr SK_Ink
+        sta $d023
+${BD_BORDER ? `        jsr SK_Ink
+        sta $d020
+` : ''}        lda #$60                ; ...and 96 cells of random wall-edge glyph, both screens
+        sta ${o.n}
+SK_C:   jsr ${o.rnd}
+        and #$03
+        tay                     ; the page
+        jsr ${o.rnd}
+        tax                     ; the byte in it
+        cpy #$03
+        bne SK_C1
+        cpx #$e8                ; past the 1000th cell: not on screen
+        bcs SK_C2
+SK_C1:  tya
+        clc
+        adc #${hx(SCR_A >> 8)}
+        sta SK_A+2
+        adc #$04                ; SCR_B is SCR_A + $400 (C clear: no carry out of a page number)
+        sta SK_B+2
+        jsr ${o.rnd}
+        and #$7f
+        clc
+        adc #$02                ; codes 2..129: ramps and steps, never BLANK or SOLID
+SK_A:   sta $ff00,x
+SK_B:   sta $ff00,x
+SK_C2:  dec ${o.n}
+        bne SK_C
+        dec ${o.q}
+        bne SK_Fr
+${o.snd ? `        lda #$80                ; ---- the sound lets go with the picture: a 300 ms fade ----
+        sta $d40b
+        lsr                     ; $40
+        sta $d412
+` : ''}        lda #$03                ; ---- then BLACK: the display OFF, so the whole screen is the border
+        sta $d011               ;   (black). The restart (entry) holds the display off itself until its
+                                ;   first frame is drawn, and nothing but the main loop, gone now,
+                                ;   writes $d011
+        lda #$00
+        sta $d020
+        sta dkArm               ; A is 0: fire is not armed until it has been seen released
+SK_K:   jsr dshFir              ; ---- black until a fresh fire press: the engine's own death's
+        jmp SK_K                ;   wait. It restarts through entry, whose lvlBoot and first frame
+                                ;   put back every ground ink this one flashed (see above)
+; SK_Ink: a random ink from ${o.base ? "this death's half of " : ''}${o.inkT}
+SK_Ink: jsr ${o.rnd}
+        and #$07
+${o.base ? `        ora ${o.base}
+` : ''}        tax
+        lda ${o.inkT},x
+        rts
+; SK_Gnd: A -> the ground, top to bottom, THIS frame (the IRQ's operands; setGnd's shadows wait for
+; a rendered frame that will not come). A preserved.
+SK_Gnd: sta irqB0+1
+        sta irqB1+1
+${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
+${o.data ?? ''}${o.snd ? `SK_ModT:!byte $1f,$2f,$4f,$6f   ; the filter: low / band / high / band+high
+SK_ScT: !byte $81,$00,$f8       ; voice 2: noise, gated; attack 0, decay 0; sustain 15, release 8
+        !byte $00,$00,$40,$00   ; voice 3: (pitch: per frame) and a thin pulse...
+        !byte $41,$00,$f8       ;   ...gated, held as voice 2
+        !byte $00,$00,$f6       ; the filter: cutoff (per frame), and resonance full on voices 2 and 3
+` : ''}`).replace(/\bSK_(\w+)/g, P + '$1'); };
 const DR_BASE = [...Array(12)].map((_, k) => drFn(440 * Math.pow(2, (7 * 12 + k - 57) / 12)));
-if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: svKey went with the level code, and its restart is dshFir\'s');
+if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: its shock death (shockDie) restarts through dshFir');
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
@@ -16803,7 +16936,7 @@ bfGo:   sta bfC2
         lda #${hx(BOLT_FLASH)}
         sta bsFl
         tya
-; bfInk: A -> the ground (both halves, as svGnd), the two wall inks and the border, now
+; bfInk: A -> the ground (both halves, as shockDie's Gnd), the two wall inks and the border, now
 bfInk:  sta $d020
 ${NODIE ? `                                ; NODIE: NOT the walls -- a stamped cell is pair 11, colour RAM's black,
                                 ;   and every one showed as a black block in a flashing wall
@@ -17260,132 +17393,20 @@ bsE0:  ` : ''}  lda #$01                ; gone: hidden, and no offsets for orbPr
         rts
 ${NOSHOCK ? '' : `; ---- bdDie: KILLED (the user, 2026-11-11: "getting hit with the lightning ball can be similar to the
 ; sentinal. getting hit by the angel can be the same but with yellows and oranges") ----
-; Level 9's svDie, in level 10's code: SVSHOCK frames of flashing inks and random wall-edge glyphs with a
-; scream, then black until fire. A = which half of bdInkT: 0 the ball's (the sentry's own
-; blues), 8 the angel's. Never returns -- the restart is entry, as every death's is. The main loop is
-; gone, so it writes the IRQ's ground operands itself; the restart's lvlBoot puts the level's back.
-bdDie:  sta bdBase
+; Level 9's death (shockDie, one source for both). A = which half of bdInkT: 0 the ball's (the
+; sentry's own blues), 8 the angel's. Never returns.
+${shockDie('bd', { rnd: 'bdRnd', q: 'bdQ', n: 'bdY', snd: true, sndPre: '', v1: 0x40, keep: true,
+  inkT: 'bdInkT', base: 'bdBase', enter: `  sta bdBase
         cmp #$08
         beq bdKp                ; the ANGEL's: it stays in view, frozen where the whip left it, for
         lda #$00                ;   the shock's first BD_KEEP frames (the user, 2026-11-12) -- bdFr
         sta $d015               ; the ball's: no sprites
-bdKp:
-        lda #${hx(SVSHOCK)}
-        sta bdQ                 ; frames of shock left
-        lda #$40                ; ---- the scream (svDie's zkGo): voices 2 and 3, held at full ----
-        sta $d404               ; every voice lets go first (voice 1 the track, still a pulse)
-        asl                     ; $80: the boom leaves voice 2's gate ON, and a
-        sta $d40b               ;   gate already on is no edge -- no attack, so the scream's noise
-        sta $d412               ;   stayed at the boom's 0 (the user: "the death sound ... became not noise")
-        ldx #$0c                ; then bdScT into $d40b-$d417, top down: each voice's envelope before
-bdSc:   lda bdScT,x             ;   its gate
-        sta $d40b,x
-        dex
-        bpl bdSc
-bdFr:   lda bdQ                 ; ---- once per 60Hz frame ----
-        cmp #${hx(SVSHOCK - BD_KEEP)}
-        bne bdF1
-        lda #$00                ; BD_KEEP frames in: the sprites go (the angel's death kept them)
-        sta $d015
-bdF1:   lda frameCnt
-bdW:    cmp frameCnt
-        beq bdW
-        jsr bdRnd               ; a new scream for this frame
-        sta $d408
-        jsr bdRnd
-        and #$3f
-        ora #$10
-        sta $d40f
-        jsr bdRnd
-        sta $d416               ; ($d417, resonance full on voices 2 and 3: once, from bdScT)
-        jsr bdRnd
-        and #$03
-        tax
-        lda bdModT,x
-        sta $d418
-        jsr bdInk               ; a random ink for each of ground, walls and seams${BD_BORDER ? ', and border' : ''}
-        jsr bdGnd
-        jsr bdInk
-        sta $d022
-        jsr bdInk
-        sta $d023
-${BD_BORDER ? `        jsr bdInk
-        sta $d020
-` : ''}        lda #$60                ; ...and 96 cells of random wall-edge glyph, both screens
-        sta bdY
-bdC:    jsr bdRnd
-        and #$03
-        tay                     ; the page
-        jsr bdRnd
-        tax                     ; the byte in it
-        cpy #$03
-        bne bdC1
-        cpx #$e8                ; past the 1000th cell: not on screen
-        bcs bdC2
-bdC1:   tya
-        clc
-        adc #${hx(SCR_A >> 8)}
-        sta bdA+2
-        adc #$04                ; SCR_B is SCR_A + $400
-        sta bdB+2
-        jsr bdRnd
-        and #$7f
-        clc
-        adc #$02                ; codes 2..129: ramps and steps, never BLANK or SOLID
-bdA:    sta $ff00,x
-bdB:    sta $ff00,x
-bdC2:   dec bdY
-        bne bdC
-        dec bdQ
-        bne bdFr
-        lda #$80                ; ---- the sound lets go with the picture ----
-        sta $d40b
-        lsr                     ; $40
-        sta $d412
-        lda #$03                ; ---- then BLACK: the display OFF, so the whole screen is the border
-        sta $d011               ;   (black). Was every ink black and both screens blanked, 30 bytes
-                                ;   more for the same picture; the restart (entry) holds the display
-                                ;   off itself until its first frame is drawn, and nothing but the
-                                ;   main loop, gone now, writes $d011
-        lda #$00
-        sta $d020
-        sta dkArm               ; A is 0: fire is not armed until it has been seen released
-bdK:    jsr dshFir              ; ---- black until a fresh fire press: the engine's own death's
-        jmp bdK                 ;   wait, resident. It restarts through entry, whose lvlBoot puts
-                                ;   back every ground ink this one blacked (irqB0-2 included)
-; bdInk: a random ink from this death's half of bdInkT
-bdInk:  jsr bdRnd
-        and #$07
-        ora bdBase
-        tax
-        lda bdInkT,x
-        rts
-; bdGnd: A -> the ground, top to bottom, THIS frame. A preserved.
-bdGnd:  sta irqB0+1
-        sta irqB1+1
-${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
-bdInkT: !byte $00,$06,$0e,$03,$01,$01,$0e,$00   ; the ball's: black, blue, light blue, cyan, white (svShT)
+bdKp:`, data: `bdInkT: !byte $00,$06,$0e,$03,$01,$01,$0e,$00   ; the ball's: black, blue, light blue, cyan, white (svShT)
         !byte $00,$02,$08,$07,$01,$07,$08,$09   ; the angel's: black, red, orange, yellow, white, brown
-bdModT: !byte $1f,$2f,$4f,$6f   ; the filter: low / band / high / band+high
-bdScT:  !byte $81,$00,$f8       ; voice 2: noise, gated; attack 0, decay 0; sustain 15, release 8
-        !byte $00,$00,$40,$00   ; voice 3: (pitch: per frame) and a thin pulse...
-        !byte $41,$00,$f8       ;   ...gated, held as voice 2
-        !byte $00,$00,$f6       ; the filter: cutoff (per frame), and resonance full on voices 2 and 3
-; bdRnd: John Metcalf's 16-bit xorshift (7,9,8), as svRnd -- its own seed
+` })}
+; bdRnd: xorshift16, its own seed
 baRnd:                          ; (the AI's random numbers are the death's: one generator)
-bdRnd:  lda bdSd+1
-        lsr
-        lda bdSd
-        ror
-        eor bdSd+1
-        sta bdSd+1
-        ror
-        eor bdSd
-        sta bdSd
-        eor bdSd+1
-        sta bdSd+1
-        rts
-bdBase: !byte 0
+${xorshift16('bdRnd', 'bdSd')}bdBase: !byte 0
 bdQ:    !byte 0
 bdY:    !byte 0
 bdSd:   !byte $a7,$5c
@@ -22078,35 +22099,23 @@ tkWL:   dey
         lda svInk
         sta ${SILV_INK === 1 ? '$d025' : SILV_INK === 3 ? '$d026' : '$d027,x'}
 tkOut:  rts
-; John Metcalf's 16-bit xorshift (7,9,8), as flkRnd -- its own seed, so it couples to nothing
-svRnd:  lda svSd+1
-        lsr
-        lda svSd
-        ror
-        eor svSd+1
-        sta svSd+1
-        ror
-        eor svSd
-        sta svSd
-        eor svSd+1
-        sta svSd+1
-        rts
-; ---- svChg: the charge (see SVKILL). dtv = the 60Hz ticks this frame took ----
+; svRnd: xorshift16, its own seed, so it couples to nothing
+${xorshift16('svRnd', 'svSd')}; ---- svChg: the charge (see SVKILL). dtv = the 60Hz ticks this frame took ----
 svChg:  lda svHit
         beq zvDrnSc
         lda svQ                 ; touching: charge by the frame's ticks
         clc
         adc dtv
-        bcs ${NOSHOCK || TESTRIG ? 'svFull' : 'svDie'}
+        bcs ${NOSHOCK || TESTRIG ? 'svFull' : 'zkDie'}
         cmp #${hx(SVKILL)}
-        bcs ${NOSHOCK || TESTRIG ? 'svFull' : 'svDie'}
+        bcs ${NOSHOCK || TESTRIG ? 'svFull' : 'zkDie'}
         sta svQ
         rts
 ${NOSHOCK ? `svFull: lda #${hx(SVKILL - 1)}               ; NOSHOCK=1 (testing): the charge tops out and nothing dies --
         sta svQ                 ;   the border still flashes, so a touch still shows
         rts
 ` : TESTRIG ? `svFull: lda rgNoSh               ; TESTRIG: NOSHOCK is the rig block's (the engine's rgNoSh), read
-        beq svDie               ;   only on the tick a touch would kill
+        beq zkDie               ;   only on the tick a touch would kill
         lda #${hx(SVKILL - 1)}               ; the charge tops out and nothing dies -- the border still
         sta svQ                 ;   flashes, so a touch still shows
         rts
@@ -22126,130 +22135,21 @@ zvDrnSc:  lda svQ                 ; out of reach: drain at half the rate, roundi
 zvStSc:   sta svQ
 zvOutSc:  rts
 
-; ---- svDie: SHOCKED. A burst of flashing colour and random wall-edge glyphs, then black ----
-; Never returns: fire (svKey) restarts through entry, as every death does. The main loop is
-; gone from here on, so nothing republishes the IRQ's ground operands -- this writes them
-; itself, and keeps the level's own to put back before the restart (the restart's lvlLook
-; restores $d022/$d023 but not irqB1, which only a CEILVARY chain ever rewrites).
-svDie:  lda irqB0+1
-        sta svSv
-        lda irqB1+1
-        sta svSv+1
-${CEILVARY ? `        lda irqB2+1
-        sta svSv+2
-` : ''}        lda #$00
+; ---- zkDie (svDie until 2026-11-15): SHOCKED -- shockDie, the source level 10's deaths share ----
+; The scream is SVSND's (the user, 2026-11-10: "a more dramatic zap noise as part of the death scene,
+; maybe including the pulse sounds then to make it sound more painful"). Never returns: fire restarts through entry (dshFir), as every death does. Level 9's own part is
+; the first two stores: svTick keeps its hands off the border, which is the death's now, and the
+; sprites go at once. The sentries' blues are svShT, the resident shock inks.
+${shockDie('zk', { rnd: 'svRnd', q: 'svQ', n: 'svDY', snd: SVSND, v1: 0x10, keep: false, inkT: 'svShT',
+  base: null, enter: `  lda #$00
         sta svHit               ; svTick: hands off the border, it is ours now
         sta svBdOn
-        sta $d015               ; no sprites
-        lda #${hx(SVSHOCK)}
-        sta svQ                 ; frames of shock left
-${SVSND ? `        jsr zkGo                ; ...and it SOUNDS like one
-` : ''}zvFrSd:   lda frameCnt            ; ---- once per 60Hz frame ----
-zvWSd:    cmp frameCnt
-        beq zvWSd
-${SVSND ? `        jsr zkFr                ; a new scream for this frame
-` : ''}        jsr svRnd               ; a random ink for each of ground, walls, seams and border
-        and #$07
-        tax
-        lda svShT,x
-        jsr svGnd
-        jsr svRnd
-        and #$07
-        tax
-        lda svShT,x
-        sta $d022
-        jsr svRnd
-        and #$07
-        tax
-        lda svShT,x
-        sta $d023
-${BD_BORDER ? `        jsr svRnd
-        and #$07
-        tax
-        lda svShT,x
-        sta $d020
-` : ''}        lda #$60                ; ...and 96 cells of random wall-edge glyph, both screens
-        sta svDY
-zvCSd:    jsr svRnd
-        and #$03
-        tay                     ; the page
-        jsr svRnd
-        tax                     ; the byte in it
-        cpy #$03
-        bne zvC1Sd
-        cpx #$e8                ; past the 1000th cell: not on screen
-        bcs zvC2Sd
-zvC1Sd:   tya
-        clc
-        adc #${hx(SCR_A >> 8)}
-        sta zvASd+2
-        adc #$04                ; SCR_B is SCR_A + $400 (C clear: no carry out of a page number)
-        sta zvBSd+2
-        jsr svRnd
-        and #$7f
-        clc
-        adc #$02                ; codes 2..129: ramps and steps, never BLANK or SOLID
-zvASd:    sta $ff00,x
-zvBSd:    sta $ff00,x
-zvC2Sd:   dec svDY
-        bne zvCSd
-        dec svQ
-        bne zvFrSd
-${SVSND ? `        lda #$80                ; ---- the sound lets go with the picture: a 300 ms fade ----
-        sta $d40b
-        lda #$40
-        sta $d412
-` : ''}        lda #$00                ; ---- then BLACK: every ink, and both screens BLANK ----
-        jsr svGnd
-        sta $d022
-        sta $d023
-        sta $d020
-        tax
-zvBkSd:   sta ${hx16(SCR_A)},x
-        sta ${hx16(SCR_A + 0x100)},x
-        sta ${hx16(SCR_A + 0x200)},x
-        sta ${hx16(SCR_A + 0x2e8)},x
-        sta ${hx16(SCR_B)},x
-        sta ${hx16(SCR_B + 0x100)},x
-        sta ${hx16(SCR_B + 0x200)},x
-        sta ${hx16(SCR_B + 0x2e8)},x
-        inx
-        bne zvBkSd
-        sta dkArm               ; A is 0: fire is not armed until it has been seen released
-zvKSd:    jsr svKey               ; ---- black until fire ----
-        jmp zvKSd
-; svKey: a FRESH fire press (dshFir's rule: the angel's death and this one restart alike)
-; -> the level's ground operands back, then the restart
-svKey:
-        lda #$7f                ; SPACE's column: SPACE or joystick-1 FIRE (dshFir's read, 2026-11-13)
-        sta $dc00
-        lda $dc01
-        ldx #$ff
-        stx $dc00               ; the port neutral again
-        and #$10                ; 0 = pressed
-        bne zvFUp
-        lda dkArm
-        beq zvNoSk              ; still the press from before the black
-zvGo:
-        lda svSv
-        sta irqB0+1
-        lda svSv+1
-        sta irqB1+1
-${CEILVARY ? `        lda svSv+2
-        sta irqB2+1
-` : ''}        ldx #$ff
-        txs
-        jmp entry
-zvFUp:  lda #$01
-        sta dkArm
-zvNoSk:   lda #$ff
-        sta $dc00
-        rts
-; svGnd: A -> the ground, top to bottom, THIS frame (the IRQ's operands; setGnd's shadows wait
-; for a rendered frame that will not come). A preserved.
-svGnd:  sta irqB0+1
-        sta irqB1+1
-${CEILVARY ? '        sta irqB2+1\n' : ''}        jmp setGnd
+        sta $d015               ; no sprites`,
+  sndPre: `        lda #$01                ; the level's sound stands aside (zsOff)...
+        sta zsOff
+        lda #$00
+        sta x9drFxA             ; ...and drops any effect: voice 3 is the scream's now
+` })}
 ; ---- svReset: entry's half -- every sentry back to the start of its path, uncharged ----
 ; objInit puts each back in its start CELL; its place along the path, its glide and the charge are
 ; ours. Without this a restart left svPosT mid-path while the cell went home, and it walked off
@@ -22425,8 +22325,7 @@ stS:    !byte 0                 ; the stage stGo is starting
 stS1:   !byte 0                 ; ...less one: the per-stage tables' index
 stB:    !byte 0
 stM:    !byte 0
-svQ:    !byte 0                 ; the charge in 60Hz ticks; in svDie, the shock frames left
-svSv:   !byte 0,0,0             ; the IRQ's ground operands as the death found them
+svQ:    !byte 0                 ; the charge in 60Hz ticks; in zkDie, the shock frames left
 svFT:   !byte ${[...Array(SVSLIDE)].map((_, i) => hx(Math.round((i + 1) * 256 / (SVSLIDE + 1)))).join(',')}   ; 60ths into the glide -> 256ths of the cell
 ; Per-slot state. In the module, so it costs the engine nothing; objInit's svReset writes every slot
 ; before the first svStep reads one.
@@ -22446,51 +22345,7 @@ svN:    !byte ${hx(SVGAP_MIN)}               ; ticks until it changes
 svB:    !byte 0                 ; ticks left in this burst, 0 = in a gap
 svInk:  !byte ${hx(calm)}
 svSd:   !byte $3c,$a5           ; the xorshift state; never 0
-${SVSND ? `; ---- THE SHOCK'S SOUND (SVSND): "a more dramatic zap noise as part of the death scene, maybe
-; including the pulse sounds then to make it sound more painful" (the user, 2026-11-10) ----
-; zkGo, as the shock starts: the level's sound stands aside (zsOff), the hum stops, any effect is
-; dropped, and voices 2 and 3 open together at FULL sustain -- noise and a thin pulse, held, not
-; struck, so there is no retrigger to freeze (see fsIn). zkFr, every frame of the flashing: both
-; pitches, the filter and its mode drawn again, so the scream lurches with the picture. At black the
-; two let go over release 8 (svDie).
-zkGo:   lda #$01
-        sta zsOff
-        lda #$00
-        sta x9drFxA             ; no effect: voice 3 is the scream's now
-        lda #$10
-        sta $d404               ; the hum lets go (its release is 0: gone in ~6 ms)
-        lda #$00
-        sta $d40c               ; attack and decay 0...
-        sta $d413
-        lda #$f8                ; ...sustain 15, release 8: full, and a 300 ms fade at the end
-        sta $d40d
-        sta $d414
-        lda #$40                ; voice 3: the thin pulse (1.5%)
-        sta $d410
-        lda #$00
-        sta $d411
-        lda #$81                ; noise
-        sta $d40b
-        lda #$41                ; and pulse, both gated on, and held
-        sta $d412
-zkFr:   jsr svRnd
-        sta $d408               ; the noise's pitch: anywhere
-        jsr svRnd
-        and #$3f
-        ora #$10                ; the pulse's: a buzz from ~250 Hz to ~1.2 kHz, never a bass note
-        sta $d40f
-        jsr svRnd
-        sta $d416               ; the filter's cutoff: anywhere
-        lda #$f6                ; resonance FULL, voices 2 and 3 through it
-        sta $d417
-        jsr svRnd
-        and #$03
-        tax
-        lda zkModT,x            ; low / band / high / band+high: a volume write is a bump, one more crack
-        sta $d418
-        rts
-zkModT: !byte $1f,$2f,$4f,$6f
-` : ''}; ---- level 9's own tables, here rather than in the shared level slot (L9T) ----
+; ---- level 9's own tables, here rather than in the shared level slot (L9T) ----
 ${Object.entries(L9T ?? {}).map(([k, a]) => `${k}: !byte ${a.join(',')}`).join('\n')}
 ${SVSND ? tubeSnd({ P: 'zs', X: 'x9', rnd: 'svRnd', tick: 'svTick', init: 'lxIn', o: FS_L9 }) : ''};@@LX-END
 ; ---- THE SENTRIES' RESIDENT STATE: what the engine's own code reads (the projection, osFlush) ----
@@ -26825,19 +26680,7 @@ fkBS:   sta $d027,x
         dex
         bpl fkBL
         rts
-` : ''}flkRnd: lda flkSd+1             ; x ^= x << 7
-        lsr
-        lda flkSd
-        ror
-        eor flkSd+1
-        sta flkSd+1
-        ror                     ; x ^= x >> 9
-        eor flkSd
-        sta flkSd
-        eor flkSd+1             ; x ^= x << 8
-        sta flkSd+1
-        rts
-${FLKINK ? `
+` : ''}${xorshift16('flkRnd', 'flkSd')}${FLKINK ? `
 ; ---- fkInk: give the cover cells the lit wall's ink, for one lit frame (see FLKINK) ----
 ; A wall covers a sprite by drawing its cells over the sprite in bit pair 11 -- foreground, so it
 ; clips a sprite with its $d01b bit set -- whose ink is colour RAM, $08 (black) everywhere. Lit,
