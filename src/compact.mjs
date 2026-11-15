@@ -309,31 +309,10 @@ const EXIT = /^\s*(rts|rti|jmp|brk)\b/i;
 }
 for (const b of runs) b.isCode = b.aligned ? false : b.float ? false : (b.code >= b.data);
 
-// ---- PHASE-LOCK THE CYCLE-EXACT CODE ----
-// The raster handler dispatches on $d012 and must land its `sta $d018` before the VIC's fetch
-// point for the line -- its own comment records two extra cycles once being enough to break it.
-// A taken branch that crosses a page costs one cycle, and which branches cross depends entirely on
-// where the code sits. Relocating it freely is what left the chain dead after eight frames: not a
-// crash, just a handler that stopped hitting its line.
-// So the run holding it keeps its PAGE PHASE -- the same `at & 255` it had -- which makes every
-// page boundary inside it fall exactly where it did, and the cycle counts identical rather than
-// merely close. Costs up to 255 bytes of padding, which the scratch placement then fills.
-const PHASELOCK = ['irq'];
-{
-  let orig = null;
-  try { orig = assemble(src); } catch { /* the hand layout may not assemble; then we cannot lock */ }
-  if (orig) {
-    const atOfLine = new Map();
-    for (const e of orig.listing) if (e.len && !atOfLine.has(e.ln - 1)) atOfLine.set(e.ln - 1, e.at);
-    for (const name of PHASELOCK) {
-      const ln = labelLine.get(name);
-      if (ln === undefined) continue;
-      const b = runs.find(x => x.fromLn <= ln && ln <= x.lastLn);
-      const a0 = atOfLine.get(b?.fromLn);
-      if (b && a0 !== undefined) { b.phase = a0 & 255; console.log(`  phase-locked ${name}'s run to $..${b.phase.toString(16).padStart(2, '0')}`); }
-    }
-  } else console.error('  phase-lock SKIPPED: the source as written does not assemble');
-}
+// (PHASE-LOCK, which kept the raster IRQ's run at the page phase the HAND-WRITTEN layout gave it,
+// went 2026-11-15: that layout stopped assembling long ago and the lock had been printing "SKIPPED"
+// every build since. The real requirement -- no page boundary inside the handler's timed code --
+// is now a HOT span, 'irq..irqTk', in build-iray.mjs's hot-loop list.)
 
 // ---- 3-4. ASSIGN, EMIT, AND RE-MEASURE UNTIL THE SIZES STOP MOVING ----
 // A run's SIZE depends on where it is put. The assembler promotes an out-of-range branch to
@@ -385,15 +364,15 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
   // Data has no fall-through, so the gap filling below applies to data runs only.
   let up = ORG;
     for (const b of code) {
-    if (b.phase !== undefined) { const a = up + ((b.phase - up) & 255); if (a > up) PAD.push([up, a]); up = a; }
     if (b.hotPad) { PAD.push([up, up + b.hotPad]); up += b.hotPad; }   // see HOT LOOPS below
     b.to = up; up += b.len;
   }
   // BISECT: data runs in SOURCE ORDER, no gap-filling. Reordering is safe in principle -- data has
-  // no fall-through -- but only if nothing depends on one table following another. NOFILL=1 keeps
-  // the order to find out.
+  // no fall-through -- but only if nothing depends on one table following another. DATAORDER=1 keeps
+  // the order to find out. (It was NOFILL until 2026-11-15, which is ALSO the build's skip-renderSym
+  // diagnostic: compaction inherits the build's environment, so asking for one silently did both.)
   let down = CEIL;
-  if (process.env.NOFILL) {
+  if (process.env.DATAORDER) {
     for (const b of [...data].reverse()) {
       let start = down - b.len;
       if (b.aligned) start &= ~255;
@@ -486,6 +465,18 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
   // pass a pad may only grow, so a layout that would otherwise see-saw still settles.
   const loops = new Map();                          // run -> [{ name, base, len }]
   for (const name of HOTLOOPS) {
+    // 'a..b' is a SPAN: the bytes from label a up to label b (exclusive) in one page -- for straight-
+    // line code whose cycle count matters (the raster IRQ's dispatch), where there is no loop to find.
+    if (name.includes('..')) {
+      const [a, b] = name.split('..'), s = out.labels[a], e = out.labels[b];
+      if (s === undefined || e === undefined) { console.error(`compact: hot span ${name}: no label ${s === undefined ? a : b}`); process.exit(1); }
+      const k = runs.findIndex((r, j) => r.isCode && r.to <= s && e <= r.to + got[j]);
+      if (k < 0) { console.error(`compact: hot span ${name} is not inside one code run`); process.exit(1); }
+      if (e - s > 256) { console.error(`compact: hot span ${name} is ${e - s} bytes -- cannot fit a page`); process.exit(1); }
+      if (!loops.has(k)) loops.set(k, []);
+      loops.get(k).push({ name, base: s - (runs[k].hotPad ?? 0), len: e - s });
+      continue;
+    }
     const s = out.labels[name];
     if (s === undefined) { console.error(`compact: hot loop ${name} is not a label`); process.exit(1); }
     const back = new RegExp(`^\\s*(b(cc|cs|eq|ne|mi|pl|vc|vs)|jmp)\\s+${name}\\b`, 'i');

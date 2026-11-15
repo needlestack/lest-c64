@@ -128,6 +128,7 @@ src/build-iray.mjs`).
 | `lest-c64.d64` | the game, ready to play |
 | `index.html` | the game in a browser (EmulatorJS), served by GitHub Pages |
 | `src/build-iray.mjs` | the game: emits 6502 assembly, builds every level, writes the disk |
+| `src/levels.mjs` | the ten levels as data: maps, walls, sockets, exits, entities, starts, inks (read by the build and by `tools/levelsheet.mjs`) |
 | `src/compact.mjs` | the image layout pass (run by the build) |
 | `src/loader-src.mjs` | the boot: autorun, fast first stage, quote, Krill's installer |
 | `src/ending-src.mjs` | the ending: end quote, the tree dissolving in, and the reload |

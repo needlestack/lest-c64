@@ -5,9 +5,10 @@ The FIRST character says what the cell is. The SECOND is its one parameter: a gr
 an angel, a level or a facing. If the thing has no parameter, the first character
 is repeated. Each cell holds exactly one glyph. A floor cell holds at most one thing.
 
-The sheets in this folder are written by `node tools/levelsheet.mjs` from the build's
-own level data, so they always match the game. Don't edit them by hand; change the level
-in src/build-iray.mjs and re-run the tool.
+The sheets in this folder are written by `node tools/levelsheet.mjs` from the game's own
+level data (src/levels.mjs, which the build imports), so they always match the game. Don't
+edit them by hand; change the level in src/levels.mjs and re-run the tool (it takes well
+under a second).
 
 
 TERRAIN

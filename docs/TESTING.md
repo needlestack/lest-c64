@@ -118,6 +118,14 @@ So REV must be a revision with the rig: an older one cannot build `TESTRIG=1`, a
 with `REV ... CANNOT BUILD THE TEST RIG` (exit 2) rather than comparing something else. For a
 baseline from before the rig, use regress.sh's own previous version (git history).
 
+**Frames compare CHARACTER CODES, not pixels.** A change to the charset itself -- a regenerated
+codebook, glyphs added, removed or renumbered -- shows as DIFFERS on nearly every frame even when the
+game draws correctly. Regress is the wrong tool for those: judge them with the before/after cell
+pictures (`tools/cellviews.mjs`) and the stills. (Against revisions from before 3801b77 the readout
+glyphs shifted every code by 20; every revision with the rig is after that, so it no longer
+arises.) Each workload's output folders are cleared before it runs, so a
+missing result cannot hide behind an old one.
+
 Each workload is a rig parameter set (see `tools/rig.mjs` for every key). A level other than 1 is
 entered by a real fall from level 1, and **frame 0 is the first frame of play on it** (`rgGo`):
 `bench` and `fallnow` count from there, so frame k means what it meant in a `BOOTLVL` build.

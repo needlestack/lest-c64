@@ -27,7 +27,7 @@ group 4  (8,9) -- opened by nothing
 The sheet above cannot show sentries or stages: its OO in the loops are the first stage's
 sentries, later stages are missing, and the groups "opened by nothing" are W1/W2, the walls that
 CLOSE behind you when S1/S2 are fed. The level is built from this authoring sheet (see L9_SHEET
-in src/build-iray.mjs for its notation: >n/<n/vn/^n a sentry heading off on path n, ~n path n,
+in src/levels.mjs for its notation: >n/<n/vn/^n a sentry heading off on path n, ~n path n,
 Wn closes when Sn is fed, |n opens):
  0  [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] [] []
  1  [] [] >1 ~1 ~1 v1 W1 .. S1 .. [] XX .. .. .. .. .. []
