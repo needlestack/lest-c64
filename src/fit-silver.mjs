@@ -1,4 +1,4 @@
-// ---- THE SILVER ORB (level 9, LAB=1): four animation frames fitted to the orb's ten rungs ----
+// ---- THE SILVER ORB (level 9): four animation frames fitted to the orb's ten rungs ----
 // art/silver-orb-animation-v3.png is four quadrants: the plain ball, then three with lightning.
 // Every frame is cut to ONE box -- the union of all four -- so the ball sits at the same place and
 // the same size in each, and only the lightning comes and goes. The ball itself is fitted ONCE,

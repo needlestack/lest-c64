@@ -5108,7 +5108,7 @@ omWTog: sec
         bmi omNoIco
         sta wsWall
         tax                     ; a wall already OUT opens nothing more: two sockets may name one
-        lda wallStT,x           ;   group (level 6 v2's two S1s), and wallTog would put it BACK
+        lda wallStT,x           ;   group (level 6's two S1s), and wallTog would put it BACK
         bne omNoIco
         lda sockStgT,y          ; LEVEL CODE: does this socket start anything? (0 = no)
         pha
@@ -10084,10 +10084,8 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; These are the movable three (the other six are read by lvlStart's straight-line code and want
 ; to stay next to it), so they are the ones that come down here and get priced as code headroom.
 ;
-; ALLLVL, not CHAIN, in the "do the levels actually differ?" filter as well as in PAL_N. A row
-; is emitted only when some level disagrees with the first -- and asking only the CHAIN levels
-; meant a property that is constant across 1-4 but different on 5, 6 or 7 emitted NO row at all,
-; so the late level silently inherited the hardcoded default instead of its own value.
+; Every level in the "do the levels actually differ?" filter (LEVEL_IDS) as well as in PAL_N: a row
+; is emitted only when some level disagrees with the first.
 lvlSprunderT: !byte $0b,$0b,$0b,$00,$0b,$0b,$0b,$00,$0b,$09
 lvlSprhiT: !byte $0f,$0f,$0f,$0c,$0f,$0f,$0f,$0b,$0f,$07
 lvlPalceilT: !byte $01,$01,$01,$0b,$02,$05,$06,$00,$01,$0b
@@ -11432,7 +11430,7 @@ fluteGot: !byte 0               ; 1 once the flute is taken (LEVEL_FLUTE). DATA 
                                 ;   restart reloads nothing, so it is never reset -- and the ending reads it
    ; the level art set this level wants (see lvlArt)
    ; ...and over the angel's ladder: IAN0, or IAN1 the big angel's overflow
-anCur:  !byte $30
+anCur:  !byte $30                ; IAN0: level 1, the boot level, has the ordinary angel
    ; the ball lightning's entity ($ff none)
    ; ...and its thrower
 bsTk:   !byte 0                 ; bgStep: 60ths since the last throw
@@ -11441,7 +11439,7 @@ bsTk:   !byte 0                 ; bgStep: 60ths since the last throw
 ; LXAT while a level that brought code is live, at lxNone otherwise. lxOff stubs them before a load
 ; reads over the module, the IRQ's FIRST; lxOn points them back, the IRQ's LAST -- each with
 ; interrupts masked, because a jmp whose two address bytes disagree for one instruction is a crash.
-; They start out pointing wherever the boot level needs: its module rides in IMG with its tables.
+; They start out pointing wherever level 1, the boot level, needs: its module rides in IMG with its tables.
 lxVec:
 lxTick: jmp $67f4
 lxStep: jmp $67f7
@@ -15272,8 +15270,8 @@ picOn:  jsr dsBoom              ; the cut lands on a boom
 ; stands the player on that exit, so fallChk runs the REAL transition (the drop, wallsBack, the
 ; loads, objInit) and not a second copy that could drift from it. lvlNxtT arrives with every level
 ; file, so the next load (which this fall is) puts the real wiring back. Every level has an exit
-; to stand on: asserted beside nExitT. Only the levels on this disk have a key, since a missing ILV
-; file would hang the load.
+; to stand on: asserted beside nExitT. Every digit's level has a file: checked after the disk is
+; built ("EVERY SHIPPING LEVEL IS ON THE DISK"), since a missing ILV file would hang the load.
 ; 'L' and every digit sit on joystick-1 lines (bits 0, 2, 3), so the combo counts only with the
 ; stick idle both BEFORE the keys (joyEor, readKeys' sample this frame) and AFTER them (see
 ; joystick-key-race: one sample let a LEFT landing between the reads fire the old 'L').
@@ -15306,7 +15304,7 @@ lkSeen: jsr lkOut               ; the port neutral...
         and #$1f
         bne lkOut               ; a stick line was down at either sample: no key is believed
         sta lkArm               ; A = 0: this press is spent
-        inx                     ; the level: its digit's index + 1 (this disk has 1..10)
+        inx                     ; the level: its digit's index + 1 (1..10)
 lkGo:   stx lvlNxtT             ; exit 0 now leads there... (lkGo: TESTRIG's maStep enters here too)
         ldy nOrbT               ; ...and we stand on it (exit 0's entity index, as fallChk counts)
         lda orbXCT,y

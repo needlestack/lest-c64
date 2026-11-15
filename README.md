@@ -77,11 +77,11 @@ part of the project.
 
 ```sh
 node src/build-iray.mjs                               # the whole game, levels 1-10 -> lest-c64.d64
-CHAIN=4 D64=build/hub.d64 node src/build-iray.mjs     # one level on its own, for playtesting
+D64=build/test.d64 node src/build-iray.mjs            # the same, to another disk
 PAL=1 node src/build-iray.mjs                         # a PAL disk -> lest-c64-pal.d64 (experimental)
 ```
 
-`CHAIN` lists the levels on the disk, in order. `D64` names the disk to write;
+Every disk is the whole game, starting at level 1. `D64` names the disk to write;
 without it, any build replaces `lest-c64.d64`. A full build takes a few minutes:
 each level and each removable wall is built as its own sub-build first, so the
 engine can be laid out around all of them. Run it from the project directory.

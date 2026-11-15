@@ -11,7 +11,7 @@
 //
 // Exports:
 //   ROOT, X64                      paths
-//   parseEnv(str, base)            "CHAIN=4 IDOLSEAT=1 FOO" -> an env object (bare FOO means FOO=1)
+//   parseEnv(str, base)            "IDOLSEAT=1 FOO" -> an env object (bare FOO means FOO=1)
 //   buildDisk(envStr, d64)         run build-iray.mjs to d64; returns { out, syms, addrOf } or exits.
 //                                  syms comes from iray.syms.json only if it was written BY THIS build.
 //   portHeld(port)                 pids listening on a TCP port ('' if none)

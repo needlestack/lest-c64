@@ -53,7 +53,7 @@ for (const [seg, pose] of Object.entries(SEGMENTS)) {
   // split, never an alternative to it. Passed alone, the fine ray buckets are still live inside
   // castRay and land on top of the entity ones -- which is how a keypress test came out at 108
   // raster lines a frame and the cast at 85, and why this file's first entity numbers were junk.
-  const env = `CHAIN=1 PROFILE=1 PROFCOARSE=1 ${entMode ? 'ENTPROF=1 ' : ''}${pose}${extra ? ' ' + extra : ''}`;
+  const env = `PROFILE=1 PROFCOARSE=1 ${entMode ? 'ENTPROF=1 ' : ''}${pose}${extra ? ' ' + extra : ''}`;
   let out;
   try {
     // --until, NOT a long --wait. The window is 256 FRAMES and the emulator runs at warp, so it

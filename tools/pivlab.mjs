@@ -6,6 +6,9 @@
 // script of motions (PIVLAB in build-iray.mjs: PLS, PLDT) in level 9's final room with no
 // sentries and no seams, one step per rendered frame, so frame k is the same view in every
 // build. One emulator run per variant, capped by probe's own deadline.
+// The build is the whole game: it boots level 1 and drops to LVL by a real fall before the script
+// starts (LAB=1, level 9 alone on a disk, went 2026-11-15). The disk is build/pivlab.d64 (D64=
+// overrides), never lest-c64.d64.
 //
 // Per segment it prints, per frame:
 //   rays   marchCol calls -- the cast's unit of work, ~800 cycles each
@@ -18,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 process.chdir(new URL('..', import.meta.url).pathname);
 
-const BASE = process.env.PLBASE ?? 'LAB=1 NOSV=1 SEAMS=0 STAGE=2 NOSHOCK=1 SOUND=0 PX=0xe00 PY=0xa80 PA=0xc5';
+const BASE = process.env.PLBASE ?? 'LVL=9 NOSV=1 SEAMS=0 STAGE=2 NOSHOCK=1 MUSIC=0 PX=0xe00 PY=0xa80 PA=0xc5';
 const variants = process.argv.slice(2);
 if (!variants.length) variants.push('');
 const PLS = (process.env.PLS ?? '4:.,12:.,16:<,16:>,10:F,10:B,8:L,16:R,8:L,16:F<,16:B>,16:L>,16:R<')
@@ -35,7 +38,8 @@ for (const v of variants) {
   let out;
   try {
     out = execFileSync(process.execPath, ['tools/probe.mjs', env, `plR:${NF * 16}`, 'plDone', '--until', 'plDone>=1'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PROBE_DEADLINE: '60000' } });
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, D64: process.env.D64 ?? 'build/pivlab.d64', PROBE_DEADLINE: '60000' } });
   } catch (e) {
     console.log(`[${v || 'default'}] RUN FAILED: ${String(e.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`);
     process.exit(1);

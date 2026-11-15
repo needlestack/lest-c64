@@ -22,4 +22,4 @@ LEVEL 10
 size     14 x 16 = 224 cells
 start    (2.50, 13.50) facing 270 deg (0 east, 90 south)  [PX=0280 PY=0d80 PA=c0 PAF=00]
 inks     ground 11 grey 1, walls 0 black, seams 12 grey 2
-exit     (no glyph) at the north-west corner of (7,8), where (6,7)-(7,8) meet: it opens once all four are broken: THE END (the ending sequence), hole 0 black
+exit     (no glyph) at the north-west corner of (7,8), where (6,7)-(7,8) meet: it opens once all four are broken: THE END (the ending sequence), hole 7 yellow

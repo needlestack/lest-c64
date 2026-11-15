@@ -1,6 +1,6 @@
 // vprof.mjs -- an EXACT cycle profile of a build, from VICE's own monitor profiler.
 //
-//   node tools/vprof.mjs "BOOTLVL=4 IDOLSEAT=1 ANGFREEZE=1 SPIN=1" [--t0 600] [--secs 20] [--top 25]
+//   node tools/vprof.mjs "ANGFREEZE=1 SPIN=1" [--t0 600] [--secs 20] [--top 25]   (build flags: level 1)
 //                        [--disass 8] [--out prof.txt]
 //
 // VICE 3.8's monitor has `prof`: it counts every cycle the CPU spends, attributed by JSR/RTS to
@@ -23,7 +23,9 @@
 // different set of headings. In this mode the window includes BOOT, so the loader (Krill at
 // $04xx, the KERNAL's $ffcf/$eea9, stackLT used as its buffer) and the idle wait vary with disk
 // timing -- compare render routines, not the grand total.
-//   node tools/vprof.mjs "BOOTLVL=1 SPINF=1 BENCHF=2000 ANGFREEZE=1 NOHUD=1" --until benchEnd
+//   node tools/vprof.mjs "SPINF=1 BENCHF=2000 ANGFREEZE=1 NOHUD=1" --until benchEnd
+// (Build-flag mode is level 1 only: every disk boots level 1 since 2026-11-15. Another level is the
+// rig's, below.)
 // Hard cap: the emulator is killed after --secs + 60 s whatever happens (one-minute rule).
 //
 // ON THE TEST RIG (2026-11-14) -- THE A/B MODE NOW. The first argument may be a rig PARAMETER SET

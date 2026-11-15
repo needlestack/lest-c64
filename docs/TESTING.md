@@ -56,7 +56,7 @@ which builds nothing. The rig never touches `lest-c64.d64`.
   `angat`, `die` and `dietest` (the keys are listed at the head of rig.mjs).
 - `RIG=build/rig.json node tools/fpsr.mjs "" suite` reuses a rig already built: 18 runs, about 4 s each.
 - Flags in the first argument go into the rig build, so `fpsr.mjs "ANGEL=0" suite` still works. The
-  compile-time movers and test switches (`SPIN`, `WALK`, `MOVEAT`, `BOOTLVL`, `PX`, `BENCHF`,
+  compile-time movers and test switches (`SPIN`, `WALK`, `MOVEAT`, `PX`, `BENCHF`,
   `FALLNOW`, `ANGFREEZE`, `DIETEST`...) are refused with `TESTRIG`: they are the block's.
 - **Where the rig's code lives** is a measured answer: readKeys goes (the rig plays no keys) and
   maStep and spinStep take its place in the code stream; rgPre, rgLand and the data are `@FLOAT`
@@ -179,10 +179,10 @@ Why each workload is there:
 
 ```
 tools/ship.sh save     # before the change
-tools/ship.sh          # after: IDENTICAL or DIFFERS per shipping disk
+tools/ship.sh          # after: IDENTICAL or DIFFERS (the one shipping disk; never writes lest-c64.d64)
 ```
 
-For deletions of code no shipping build emits, and flag folds. They must leave every disk
+For deletions of code no shipping build emits, and flag folds. They must leave the disk
 IDENTICAL, and when they do, that is the whole proof. No emulator run is needed.
 
 ## 4. Cycles: `vprof.mjs`
@@ -203,14 +203,15 @@ and the fall that reaches the level left out. Two runs of one rig agree to the c
 routine; the frame loop's own line (its raster wait) moves by a few thousand cycles in 2000 frames
 with disk timing, so compare routines, not the grand total. For an A/B, build each side's rig (the
 REV worktree's `build/regress-rig.json` from a regress run is one) and pass it as `RIG=`.
-Build-flag mode is still there for flags the rig does not carry: `node tools/vprof.mjs "BOOTLVL=1
-SPINF=1 BENCHF=n ANGFREEZE=1 NOHUD=1" --until benchEnd` (window from boot).
+Build-flag mode is still there for flags the rig does not carry, on level 1 only (every disk boots
+level 1): `node tools/vprof.mjs "SPINF=1 BENCHF=n ANGFREEZE=1 NOHUD=1" --until benchEnd` (window
+from boot).
 
 ## 5. The ray search: `pivlab.mjs`
 
 ```
 node tools/pivlab.mjs "" "PIVCOLD=1"                     # current vs no prediction, level 9's open room
-PLBASE="LAB=1 NOSV=1 SEAMS=0 STAGE=1 NOSHOCK=1 SOUND=0 PX=0x880 PY=0x180 PA=0x40" \
+PLBASE="LVL=9 NOSV=1 SEAMS=0 STAGE=1 NOSHOCK=1 MUSIC=0 PX=0x880 PY=0x180 PA=0x40" \
   node tools/pivlab.mjs ""                                 # the same in room 2's corridor
 ```
 
@@ -230,6 +231,15 @@ on CIA2's timers.
   can hurt the other.
 - `PIVLAB` keeps its records in the death picture's RAM, so it needs `NOSHOCK=1` (the default base
   has it).
+- **The level is reached by a fall (2026-11-15).** The build is the whole game, booting level 1;
+  `LVL=9` makes the bench drop to level 9 through the level select's tail (`lkGo`, as the rig does)
+  before its script starts, with `PX`/`PY`/`PA` and `STAGE` applying to level 9. It used to be `LAB=1`
+  (level 9 alone on a disk). The full game with the bench's code came out ~290 B short of a level
+  slot, so the base has `MUSIC=0`, which removes levels 2-7's songs (level 9 has none) and the
+  player, where it had `SOUND=0`, a flag that no longer existed; an auto-mover build also drops
+  lvKey's dead keys half now, as the rig does. Rays, hints, misses and end points came out identical to the `LAB=1` run in
+  every segment; cast cycles moved by up to 0.3k and one segment's fps by 0.5 (layout, and no
+  music IRQ). It writes `build/pivlab.d64`, never `lest-c64.d64`.
 
 ## Rules
 
@@ -238,8 +248,8 @@ on CIA2's timers.
 - **Build the reference, don't remember it.** A baseline is a run of the same tool on the
   reference revision, made now: a worktree for regress.sh, a save for ship.sh, a suite run for
   fpsr.
-- **A single-level chain is a weaker test, not a faster one.** The engine is the same whatever
-  the chain is, but level loading, falls and exits only happen in a chain.
+- **There is one kind of disk: the whole game (2026-11-15).** `CHAIN`, `BOOTLVL` and `LAB` are gone
+  (the build refuses them); a level other than 1 is reached by a real fall, on the rig.
 - **New mechanics get a workload here.** If a change adds something none of the workloads above
   reaches, add one to regress.sh and say why it is there.
 
@@ -256,15 +266,19 @@ column range constant, HUD-only zero page freed). Levels 5 and 6 re-paced for th
 and 3.15, a quarter cell short of the wall a long leg met); their walk figures are a new route, not
 comparable with `was`. Levels 2 and 7 run their rig poses again (a BOOTLVL bug that day had
 ignored them). `was` = 2026-11-12, one build per segment.
+Updated 2026-11-15 to the rig as it stands (stage 2 and phase 3 give identical figures): level 3 spin
+125 -> 122 frames, level 6 spin 125 -> 124, level 7 walk 79 -> 78 frames, from the rig's own layout
+changing between stage 1 and stage 2, with the engine unchanged. Compare fps only between rigs of
+the same rig code.
 
 | level | spin fps | was | walk fps | was |
 |---|---:|---:|---:|---:|
 | 1 | 23.12 | 22.92 | 16.22 | 16.22 |
 | 2 | 31.89 | 31.30 | 13.72 | 13.72 |
-| 3 | 24.92 | 23.05 | 15.78 | 15.78 |
+| 3 | 24.32 | 23.05 | 15.78 | 15.78 |
 | 4 | 21.80 | 21.60 | 15.80 | 15.67 |
 | 5 | 27.91 | 27.40 | 11.89 (new route) | 11.86 BUMPED |
-| 6 | 25.00 | 24.40 | 14.76 (new route) | 14.53 BUMPED |
-| 7 | 33.00 | 32.09 | 16.34 | 15.99 |
+| 6 | 24.80 | 24.40 | 14.76 (new route) | 14.53 BUMPED |
+| 7 | 33.00 | 32.09 | 16.25 | 15.99 |
 | 8 | 22.85 | 22.45 | 15.56 | 15.28 |
 | 9 | 20.66 | 20.20 | 19.93 | 19.57 |

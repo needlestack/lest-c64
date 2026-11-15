@@ -2,7 +2,7 @@
 // space.mjs -- what each FEATURE of the game costs in the image, byte by byte.
 //
 //   node tools/space.mjs                 build the default game and charge every image byte
-//   node tools/space.mjs "CHAIN=4"       the same for any build flags (WIP=1 for an unshipped level)
+//   node tools/space.mjs "MUSIC=0"      the same for any build flags
 //   node tools/space.mjs "" -v           also list each feature's largest items
 //
 // The image ($0801-$bfff) is three kinds of bytes, and this charges all three:

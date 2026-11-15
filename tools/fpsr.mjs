@@ -8,7 +8,6 @@
 //   DISK=build/x.d64 node tools/fpsr.mjs "" level n walk
 //                                              write that segment's disk instead, to WATCH it
 //   RIG=build/rig.json node tools/fpsr.mjs "" suite      reuse a rig already built (no build at all)
-// ("BOOTLVL=n" in the flags is still read as the level, for the old command lines.)
 //
 // ONE BUILD (2026-11-14). Every segment used to be a build of its own -- the level, the pose, the
 // mover and its window were all build flags -- so the suite was 18 builds of the ten-level game,
@@ -61,10 +60,9 @@ const MV_RUN = 12, TICKS = 300, T0 = 60;   // the player always runs: 12 units o
 
 const argFlags = process.argv[2] ?? '';
 const only = process.argv[3];
-// The level: `level n`, or (the old command lines) BOOTLVL=n among the flags. Either way it is the
-// rig's parameter, never a build flag, so it comes out of the flags the rig is built with.
-const bootLvl = /(?:^|\s)BOOTLVL=(\d+)/.exec(argFlags);
-const extra = argFlags.replace(/(?:^|\s)BOOTLVL=\d+/, '').trim();
+// The level is `level n`: the rig's parameter, never a build flag. (BOOTLVL=n among the flags, which
+// old command lines used, went with BOOTLVL itself, 2026-11-15: the build refuses it.)
+const extra = argFlags.trim();
 const lvArg = only === 'level' && /^\d+$/.test(process.argv[4] ?? '') ? +process.argv[4] : null;
 const pick = lvArg !== null ? process.argv[5] : process.argv[4];
 if (only !== 'suite' && only !== 'level') {
@@ -214,7 +212,7 @@ if (only === 'suite') {
 }
 
 // ---- `level n [spin|walk]` ----
-const LVL = lvArg ?? (bootLvl ? +bootLvl[1] : 1);
+const LVL = lvArg ?? 1;
 const want = segsOf(LVL).filter(s => !pick || (pick === 'walk' ? s.moves : s.name === pick));
 if (!want.length) { console.error(`no such segment: ${pick}. known: spin, walk`); process.exit(2); }
 const rig = buildRig();

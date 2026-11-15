@@ -1,7 +1,7 @@
 // probe.mjs -- read named variables out of a RUNNING build, self-verifying.
 //
-//   node tools/probe.mjs "CHAIN=5 CARRY=3" orbXCT:4 orbYCT:4 --until "dieSt>=3"
-//   node tools/probe.mjs "CHAIN=1 WALK=1 MOVEAT=60 MOVEFOR=85 MOVELEGS=4" maS:20 --until "maGo>=2"
+//   node tools/probe.mjs "CARRY=3" orbXCT:4 orbYCT:4 --until "dieSt>=3"
+//   node tools/probe.mjs "WALK=1 MOVEAT=60 MOVEFOR=85 MOVELEGS=4" maS:20 --until "maGo>=2"
 //
 // Every wrong number this tool exists to prevent had the same shape: an address or a field
 // offset that was right for a DIFFERENT build or a different layout. Stale labels twice, a

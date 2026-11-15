@@ -20,16 +20,11 @@ shot() {   # $1 env, $2 png
 # Poses in the levels, which is what the player moves through; the HUD is off (NOHUD=1) because its
 # fps/position readout depends on timing and differs from run to run. Falls are not checked by
 # default (the user, 2026-10-05: falls are fine, moving around the levels is what matters).
+# Level 1 only since 2026-11-15: the other levels were CHAIN=n builds, and every disk now boots level 1.
+# regress.sh's stills (on the test rig, levels entered by a real fall) are where the rest are compared.
 SCENES=(
-  "CHAIN=1 ANGFREEZE=1 DEADOK=1 NOHUD=1"
-  "CHAIN=1 ANGFREEZE=1 DEADOK=1 NOHUD=1 PA=40"
-  "CHAIN=2 ANGFREEZE=1 DEADOK=1 NOHUD=1"
-  "CHAIN=3 ANGFREEZE=1 DEADOK=1 NOHUD=1"
-  "CHAIN=4 IDOLSEAT=1 ANGFREEZE=1 DEADOK=1 NOHUD=1"
-  "CHAIN=4 IDOLSEAT=1 ANGFREEZE=1 DEADOK=1 NOHUD=1 PA=F5 PAF=C0"
-  "CHAIN=5 ANGFREEZE=1 DEADOK=1 NOHUD=1"
-  "CHAIN=6 ANGFREEZE=1 DEADOK=1 NOHUD=1"
-  "CHAIN=7 ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "ANGFREEZE=1 DEADOK=1 NOHUD=1"
+  "ANGFREEZE=1 DEADOK=1 NOHUD=1 PA=40"
 )
 # PIXSCENES="env1|env2|..." replaces the list (e.g. mid-fall holds: FALLNOW=1 FALLHOLD=n).
 [[ -n "$PIXSCENES" ]] && SCENES=("${(@s:|:)PIXSCENES}")
@@ -39,6 +34,5 @@ for sc in $SCENES; do
   cp "$T/new.mjs" src/build-iray.mjs; shot "$sc" "$T/n.png"
   if cmp -s "$T/o.png" "$T/n.png"; then echo "SAME     $sc"; else echo "DIFFERS  $sc  ($T/o.png vs $T/n.png)"; bad=1; fi
 done
-cp "$T/new.mjs" src/build-iray.mjs; rm -f build/zz-pix.d64
-node src/build-iray.mjs >/dev/null 2>&1
+cp "$T/new.mjs" src/build-iray.mjs; rm -f build/zz-pix.d64   # (no plain build after: it wrote lest-c64.d64)
 exit $bad
