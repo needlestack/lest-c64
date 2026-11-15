@@ -2,7 +2,7 @@
 # output and is not. The directories say which is which:
 #
 #   src/            the build and its generators -- committed
-#   data/           FITTED assets the build reads (angel-art, goat-art, quote-screen, ...) -- committed
+#   data/           FITTED assets the build reads (death-pics, quote-screen, ...) -- committed
 #   art/            source art (renders, paintings, hand-drawn sprites) -- committed
 #   build/          everything a build or tool writes -- ignored, except build/iray.asm: generated,
 #                   but committed ON PURPOSE: diffing it between commits shows what a JS change did
@@ -47,3 +47,6 @@ CLEANUP-REVIEW.md
 loader-v194.zip
 krill/loader-rt-c64.prg
 *.swp
+
+# exomizer, fetched and built by tools/get-exomizer.sh (zlib licence; ~740 KB of source we do not carry)
+tools/exomizer-3.1/

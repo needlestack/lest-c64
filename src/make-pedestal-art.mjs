@@ -1,8 +1,7 @@
 // make-pedestal-art.mjs -- pedestal.png -> pedestal-art.json, run once by hand.
 //
-// The build does NOT read the photo. It reads two small luminance bands lifted off it, for the
-// same reason goat-art.json exists: the art is then tracked, diffable and editable, and the
-// build stays dependency-free and fast.
+// The build does NOT read the photo. It reads two small luminance bands lifted off it, so the
+// art is tracked, diffable and editable, and the build stays dependency-free and fast.
 //
 // TWO bands, not one silhouette, because the pedestal's silhouette is NOT the photo's. A drum
 // is drawn procedurally in makePedLadder (the exit hole's disc extruded), and the shape of its
@@ -12,6 +11,7 @@
 // walk around it.
 import { readFileSync, writeFileSync } from 'fs';
 import { inflateSync } from 'zlib';
+import { relative } from 'path';
 import { ROOT } from './paths.mjs';
 process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 
@@ -79,7 +79,10 @@ const out = {
         'sample, 0 = black. NOT a silhouette: makePedLadder draws the drum procedurally and ' +
         'samples these for its MATERIAL, top band by top-face surface coordinate and side band ' +
         'by angle-and-height. Re-run the script to change the stone.',
-  src: SRC, box: [X0, Y0, WD, HT], rimFrac: +((RIM - Y0) / HT).toFixed(4),
+  // The source as the art folder names it (./pedestal.png for art/pedestal.png), not as the path it
+  // was read from: the file was written before art/ existed, and recording it this way keeps a rerun
+  // byte-identical to the committed asset.
+  src: './' + relative('art', SRC), box: [X0, Y0, WD, HT], rimFrac: +((RIM - Y0) / HT).toFixed(4),
   topW: 64, topH: 12, sideW: 64, sideH: 24,
   top: band(Y0, RIM, 64, 12),
   side: band(RIM, Y1 + 1, 64, 24),

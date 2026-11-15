@@ -59,7 +59,10 @@ const ORG = 0x0801, CEIL = 0xc000;
 const zpAlloc = text => {
   if (process.env.ZPALLOC === '0') return text;
   const L = text.split('\n');
-  const readJ = f => JSON.parse(readFileSync(ROOT + f, 'utf8'));
+  const readJ = f => {          // the build's published facts: missing is an error, never "none"
+    try { return JSON.parse(readFileSync(ROOT + f, 'utf8')); }
+    catch (e) { console.error(`compact: cannot read ${f} (${e.message}) -- run it via build-iray.mjs, which writes it`); process.exit(1); }
+  };
   const DECL = readJ('iray.bufsizes.json'), ALN = readJ('iray.aligned.json');
   const krill = readFileSync(new URL('../krill/loadersymbols-c64.inc', import.meta.url), 'utf8');
   const kz = k => parseInt(new RegExp(`^${k}\\s*=\\s*\\$([0-9a-fA-F]+)`, 'm').exec(krill)[1], 16);
@@ -126,7 +129,11 @@ const zpAlloc = text => {
   // ...and what LEVEL CODE owns: its equates were cut out of this source with it (build-iray's
   // LX_SRC), so nothing here names them -- and promoting an engine buffer onto them hung level 8's
   // boot, the flicker writing its rectangle over engine state (2026-10-14).
-  try { for (const a of JSON.parse(readFileSync('./build/iray.zpres.json', 'utf8'))) used.add(a); } catch {}
+  // From ROOT (this file's own build/), and REQUIRED: it was './build/iray.zpres.json' inside a silent
+  // try/catch, so compact.mjs run from any other directory reserved nothing and promoted engine
+  // buffers straight onto level code's zero page -- the level-8 hang above, with no word said
+  // (2026-11-13 audit, fixed 2026-11-15). build-iray.mjs writes it on every build, even when empty.
+  for (const a of readJ('iray.zpres.json')) used.add(a);
   for (let a = kz('loader_zp_first'); a <= kz('loader_zp_last'); a++) used.add(a);
   const zpSorted = [...new Set(zpEq.values())].sort((a, b) => a - b);
   for (const n of zpIdx) {                         // an indexed zero-page buffer: up to the next equate
@@ -194,7 +201,7 @@ const zpAlloc = text => {
   if (mk >= 0) L.splice(mk, 1, L[mk], ...clr);
   const out = L.map(l => {
     const m = /^([A-Za-z_]\w*)(\s*=\s*)\$[0-9a-fA-F]{4}\b/.exec(l);
-    return m && rename.has(m[1]) ? l.replace(/\$[0-9a-fA-F]{4}/, '$' + rename.get(m[1]).toString(16).padStart(2, '0')) : l;
+    return m && rename.has(m[1]) ? l.replace(/\$[0-9a-fA-F]{4}/, () => '$' + rename.get(m[1]).toString(16).padStart(2, '0')) : l;   // a function: see step 6
   });
   const saved = placed.reduce((t, c) => t + c.save, 0), spent = placed.reduce((t, c) => t + c.size, 0);
   console.log(`  ZERO PAGE     ${placed.length} buffers (${spent} B of ${free.length} free) promoted: ~${saved} B of code saved` +
@@ -419,8 +426,16 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
     while (i > 0 && /^\s*$|^\s*;|^[a-zA-Z][a-zA-Z0-9_]*:\s*(;.*)?$/.test(lines[i - 1])) i--;
     return i;
   };
+  // ...and when what bareHead stopped at IS the run's own origin line, rewrite THAT line rather than
+  // folding it and inserting a bare copy below it. bareHead never returns an origin (it emits nothing
+  // and is not a comment, so the walk stops just under it), so until 2026-11-15 every one of the ~78
+  // origins was folded and re-inserted, and its comment went with it: the shipped asm showed no
+  // `@FLOAT` and no reason for any origin. Only comments and bare labels lie between the two lines,
+  // so the address is the same either way and so are the bytes.
+  const orgAt = new Set(orgLines.map(o => o.i));
+  const head = ln => { const h = bareHead(ln); return orgAt.has(h - 1) ? h - 1 : h; };
   const org4 = new Map();                       // source line -> address to emit there
-  for (const b of runs) org4.set(bareHead(b.fromLn), b.to);
+  for (const b of runs) org4.set(head(b.fromLn), b.to);
   const out4 = [...lines];
   for (const o of orgLines) if (!org4.has(o.i))  // an origin that no longer heads a run
     out4[o.i] = `; [origin folded into the run above by compact.mjs]`;
@@ -428,7 +443,7 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
   for (const [ln, at] of ins4) {
     const hex = `* = $${at.toString(16).padStart(4, '0')}`;
     const o = orgLines.find(x => x.i === ln);
-    if (o) out4[ln] = out4[ln].replace(/\* *= *\$[0-9a-fA-F]+/, hex);
+    if (o) out4[ln] = out4[ln].replace(/\* *= *\$[0-9a-fA-F]+/, () => hex);   // a function: see step 6
     else out4.splice(ln, 0, `        ${hex}`);  // a run that starts at an aligned table
   }
   // ANCHOR THE IMAGE AT $0801. When the first code run is padded (a hot loop in it), nothing was
@@ -661,9 +676,11 @@ RESERVE = need('iray.reserve.json');
 // the slot would be overwritten by every level load -- silent, and only after the first fall.
 // The arena and the region, for build-iray's slot picker: written BEFORE the check, so a slot that
 // misses still tells the picker where it would fit.
-writeFileSync('./build/iray.arena.json', JSON.stringify({ codeEnd, dataStart, regionLen: RESERVE[1] - RESERVE[0] }));
+// (ROOT, not the cwd: see iray.zpres.json in zpAlloc, 2026-11-15)
+writeFileSync(ROOT + 'iray.arena.json', JSON.stringify({ codeEnd, dataStart, regionLen: RESERVE[1] - RESERVE[0] }));
 if (RESERVE[0] < CEIL && RESERVE[1] > ORG && (RESERVE[0] < codeEnd || RESERVE[1] > dataStart)) {
-  if (process.env.SLOT_PICK) process.exit(1);   // the slot picker's trial: it reports the miss itself
+  // the slot picker's trial: mark it a SLOT miss (build-iray retries lower only on this mark) and stay quiet
+  if (process.env.SLOT_PICK) { writeFileSync(new URL('../build/iray.slotmiss', import.meta.url), 'region not in arena'); process.exit(1); }
   console.error(`compact: the level slot $${RESERVE[0].toString(16)}-$${(RESERVE[1] - 1).toString(16)} is not inside ` +
     `the arena $${codeEnd.toString(16)}-$${(dataStart - 1).toString(16)} -- move SLOT_AT`);
   process.exit(1);
@@ -763,7 +780,15 @@ console.log(`  ===> LEVEL ARENA  ${arenaLeft} bytes, of which ${usable} are page
   for (const [name, at] of placedAt) {
     const re = new RegExp(`^(${name} *= *)\\$[0-9a-fA-F]{4}`, 'm');
     if (!re.test(out)) continue;
-    out = out.replace(re, `$1$${at.toString(16).padStart(4, '0')}`);
+    // A FUNCTION REPLACER, never a replacement STRING. The string was `$1$` + `${hex}`: `$1` the
+    // captured `name = `, then `$` and the hex -- and when the hex starts with 1, `$1x` reads as a
+    // group reference too (`$12` falls back to `$1` + '2' with no group 12), so `name = $1234`
+    // became `name = name = 234`. Only the digit 1 names a group that exists, so ONLY a buffer
+    // rehomed into $1000-$1fff broke, and the rehomed source then failed to assemble. Latent: no
+    // build has put a buffer there yet, but the code section's hot-loop pads are exactly there and
+    // scratch fills pads first. (2026-11-13 audit, fixed 2026-11-15; the other replaces in this file
+    // take functions now for the same reason.)
+    out = out.replace(re, (_, lhs) => `${lhs}$${at.toString(16).padStart(4, '0')}`);
     n++;
   }
   writeFileSync(OUT, out);

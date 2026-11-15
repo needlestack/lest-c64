@@ -262,10 +262,14 @@ export function assemble(source, opts = {}) {
   const listing = [];
   const holes = [];         // [lo, hi) ranges the image pads rather than fills -- see the org case
   let cur = org, hiWater = org;
-  const out = {             // enough of the old array's surface for the listing slices below
-    get length() { return hiWater - org; },
-    slice(from) { return [...mem.subarray(org + from, hiWater)]; },
-  };
+  // A listing entry's `bytes` are ITS OWN bytes, mem[at, at+len). They were `out.slice(from)`, a copy
+  // from the statement to the HIGH-WATER mark: once the compacted image's tables (emitted near $c000)
+  // had raised it, every data statement copied tens of K, so the listing was O(statements x image)
+  // and ~2/3 of each assembly (2026-11-15: 79 -> ~25 ms for the shipped source; a build assembles
+  // dozens of times). It was also wrong for an instruction emitted BELOW the high-water mark (a
+  // backward origin: LX_LOW's stretch), whose `bytes` began at the old high-water mark instead of
+  // at the instruction. The one reader (LXLIST) takes `bytes.slice(0, len)`, which is unchanged.
+  const own = (at) => Array.from(mem.subarray(at, cur));
   const put = (addr, v) => {
     if (addr < org || addr >= SPAN) throw new Error(`emit at $${addr.toString(16)} is outside the image`);
     if (wrote[addr]) throw new Error(`OVERLAPPING OUTPUT at $${addr.toString(16)}: two things claim ` +
@@ -303,14 +307,12 @@ export function assemble(source, opts = {}) {
         const val = args.length > 1 ? evalExpr(args[1], symbols, cur) : 0;
         for (let i = 0; i < count; i++) emit(val);
       }
-      // `len` is THIS statement's own byte count. `bytes` cannot give it: out.slice(from) runs to
-      // the high-water mark, so every entry's `bytes` is "everything from here on" -- fine for the
-      // debug dump it was written for, silently wrong for anyone measuring a statement.
-      listing.push({ at: start, ln: s.ln, len: cur - start, bytes: out.slice(start - org), src: s.text });
+      // `len` is THIS statement's own byte count (bytes.length too, since 2026-11-15; before, `bytes`
+      // ran on to the high-water mark -- see own() above).
+      listing.push({ at: start, ln: s.ln, len: cur - start, bytes: own(start), src: s.text });
       continue;
     }
     // insn
-    const startIdx = out.length;
     if (s.mode === 'rel' && s.promoted) {
       // out-of-range branch -> inverse-branch over an absolute JMP
       const target = evalExpr(s.expr, symbols, s.at + 2);
@@ -318,7 +320,7 @@ export function assemble(source, opts = {}) {
       emit(0x03);
       emit(0x4C);                          // JMP abs
       emit(target & 0xFF); emit((target >> 8) & 0xFF);
-      listing.push({ at: s.at, ln: s.ln, len: cur - s.at, bytes: out.slice(startIdx), src: `${s.mnem} ${s.operand} ;far` });
+      listing.push({ at: s.at, ln: s.ln, len: cur - s.at, bytes: own(s.at), src: `${s.mnem} ${s.operand} ;far` });
       continue;
     }
     const op = OPCODES[s.mnem][s.mode];
@@ -337,7 +339,7 @@ export function assemble(source, opts = {}) {
       const v = evalExpr(s.expr, symbols, cur);
       emit(v & 0xFF); emit((v >> 8) & 0xFF);
     }
-    listing.push({ at: s.at, ln: s.ln, len: cur - s.at, bytes: out.slice(startIdx), src: `${s.mnem} ${s.operand}`.trim() });
+    listing.push({ at: s.at, ln: s.ln, len: cur - s.at, bytes: own(s.at), src: `${s.mnem} ${s.operand}`.trim() });
   }
 
   // Unwritten bytes below the high-water mark are the image's holes and load as zeros, exactly

@@ -21,7 +21,7 @@
 // bytes is ~4.5 seconds off the black screen. Packing HERE and not in build-iray.mjs keeps the main
 // build free of a C toolchain -- this generator is run by hand, like make-pedestal-art.mjs, and the
 // result is committed.
-import { readFileSync, writeFileSync, mkdtempSync } from 'fs';
+import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { inflateSync } from 'zlib';
@@ -173,7 +173,10 @@ if (blank > 0) { const t = glyphs[0]; glyphs[0] = glyphs[blank]; glyphs[blank] =
 // The screen map is 1000 bytes but the charset starts on the next 1K boundary, so the gap is
 // part of the blob. It costs nothing -- a run of zeros is what a packer is best at.
 const blob = [...screen, ...Array(QUOTE_CHR - QUOTE_SCR - screen.length).fill(0), ...glyphs.flat()];
-const exo = process.env.EXOMIZER ?? 'exomizer';
+// tools/get-exomizer.sh builds the pinned release (3.1.2, which reproduces the committed quote) there;
+// EXOMIZER=<path> overrides, and a plain `exomizer` on PATH is the last resort.
+const EXO_LOCAL = new URL('../tools/exomizer-3.1/src/exomizer', import.meta.url).pathname;
+const exo = process.env.EXOMIZER ?? (existsSync(EXO_LOCAL) ? EXO_LOCAL : 'exomizer');
 const tmp = mkdtempSync(`${tmpdir()}/quote-`);
 let packed = [], decr = null;
 if (PACK) try {
@@ -221,8 +224,8 @@ if (PACK) try {
   decr = { at: EXO_CODE, entry: parseInt(m[1], 16), bytes: [...readFileSync(`${tmp}/exo.bin`)] };
 } catch (e) {
   if (e.code === 'ENOENT') throw new Error(
-    `exomizer or acme not found (exomizer tried as "${exo}"). Build exomizer from Krill's ` +
-    `tools -- make -C tools/exomizer-3.1/src exomizer -- and set EXOMIZER=<path>. acme must be ` +
+    `exomizer or acme not found (exomizer tried as "${exo}"). Run tools/get-exomizer.sh: it fetches ` +
+    `and builds the pinned release into tools/exomizer-3.1 (or set EXOMIZER=<path>). acme must be ` +
     `on PATH; it assembles the decruncher, which asm6502.mjs cannot.`);
   throw e;
 }

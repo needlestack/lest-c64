@@ -17,8 +17,6 @@ const PAL = ['000000', 'ffffff', '813338', '75cec8', '8e3c97', '56ac4d', '2e2c9b
   .map(h => [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)));
 const inks = [a.d021, a.d022, a.d023, a.colram & 7];
 const map = a.maps[+idx].map;
-// colmap (tools/percell-white.mjs): a per-cell colour RAM value, so bit pair 11 differs by cell
-const colmap = a.maps[+idx].colmap;
 const W = 320, H = 200, rgb = new Uint8Array(W * H * 3);
 for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) {
   const code = map[cy * 40 + cx];
@@ -26,7 +24,7 @@ for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) {
     const byte = a.chars[code * 8 + r];
     for (let p = 0; p < 4; p++) {
       const pr = (byte >> (6 - 2 * p)) & 3;
-      const c = PAL[pr === 3 && colmap ? colmap[cy * 40 + cx] & 7 : inks[pr]];
+      const c = PAL[inks[pr]];
       for (let dx = 0; dx < 2; dx++) {
         const o = ((cy * 8 + r) * W + cx * 8 + p * 2 + dx) * 3;
         rgb[o] = c[0]; rgb[o + 1] = c[1]; rgb[o + 2] = c[2];

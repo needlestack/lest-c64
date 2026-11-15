@@ -133,12 +133,12 @@ src/build-iray.mjs`).
 | `src/loader-src.mjs` | the boot: autorun, fast first stage, quote, Krill's installer |
 | `src/ending-src.mjs` | the ending: end quote, the tree dissolving in, and the reload |
 | `src/asm6502.mjs`, `src/d64lib.js` | assembler and disk writer |
-| `src/fit-*.mjs`, `src/make-*.mjs`, `src/charsetgen.mjs`, `tools/endscene.mjs` | hand-run generators that produce the assets in `data/` |
-| `data/` | fitted assets the build reads (sprites, charset plan, quotes, end scene) |
+| `src/fit-*.mjs`, `src/make-*.mjs`, `src/charsetgen.mjs`, `tools/endscene.mjs`, `tools/build-facetest3.mjs` | the art converters: the `fit-*` ones run inside every build, the rest by hand to make the assets in `data/` (see `docs/ASSETS.md`) |
+| `data/` | assets made by hand from `art/` that the build reads (death picture, quotes, title, pedestal, end scene, charset plan) |
 | `build/` | build output; only `build/iray.asm` is committed, so a diff shows what a change did to the machine code |
-| `art/` | source art: renders, paintings and hand-drawn sprites; `art/tree/` is the end scene's; `art/gamemaker/` holds the original GameMaker scenes and sprites |
+| `art/` | source art: every picture in the game starts here (`docs/ASSETS.md` says how); `art/tree/` is the end scene's |
 | `krill/` | Krill's loader, prebuilt |
-| `docs/` | `TESTING.md`, THE tests: what to run for which question and how to read it; `SPACE.md`, where the image's bytes go; `RENDERING.md`; `levels/`, every level as a sheet (key in `levels/KEY.txt`, regenerate with `node tools/levelsheet.mjs`); `GAMEMAKER-FORMATS.md`, the GameMaker scene and sprite file formats; and `ladders/`: every entity's ladder of sprite sizes, as pictures |
+| `docs/` | `TESTING.md`, THE tests: what to run for which question and how to read it; `SPACE.md`, where the image's bytes go; `RENDERING.md`; `levels/`, every level as a sheet (key in `levels/KEY.txt`, regenerate with `node tools/levelsheet.mjs`); and `ladders/`: every entity's ladder of sprite sizes, as pictures |
 | `tools/` | live-machine inspection (`probe`), frame-rate and cycle benchmarks (`fpsr`, `prof`, `vprof`), test rigs (`regress.sh`, `ship.sh`, `frames`), the level sheets (`levelsheet`), and the music tools (`song-*`, `sidtrace`) |
 
 ## Credits and licence

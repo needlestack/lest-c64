@@ -86,6 +86,23 @@ for (const [name, prg, want] of [['install-c64.prg', KRILL_INST_PRG, KRILL_INSTA
 
 const hx4 = n => '$' + n.toString(16).padStart(4, '0');
 const petscii = s => [...s].map(c => c.charCodeAt(0)).join(',');
+// A KERNAL SETNAM length, FROM THE NAME. Every boot-time SETNAM said `lda #$04` beside a name that
+// happened to be four letters (IQOT, IRAY, IFBT), and IFBT's fallback spelled IQOT out in hex as
+// well: rename one file and the stub asks the drive for three letters of it, or five, and the boot
+// stops with nothing on screen but a flashing border (2026-11-13 audit, derived 2026-11-15).
+// 16 is the directory entry's limit (and Krill's FILENAME_MAXLENGTH); upper case and digits only,
+// because these bytes go to the drive unconverted and the directory holds PETSCII upper case. A
+// ':' is fine for KRILL, which compares directory bytes (level 10 is ILV:), but DOS reads it as
+// the drive-number separator, so a name the KERNAL opens may not have one.
+export const fileName = (s, kernal = false) => {
+  if (!(kernal ? /^[A-Z0-9]{1,16}$/ : /^[A-Z0-9:]{1,16}$/).test(s)) throw new Error(`file name "${s}": ` +
+    `1-16 upper-case letters or digits${kernal ? ' (no \':\': the KERNAL opens it, and DOS reads \':\' as a separator)' : ' or \':\''}`);
+  return s;
+};
+const nameLen = s => '$' + fileName(s, true).length.toString(16).padStart(2, '0');
+// IQOT is named in two places on the boot path (the autorun's target, and IFBT's KERNAL fallback)
+// and in the build that writes it: one constant for all three.
+export const QUOTE_NAME = 'IQOT';
 
 // The quote screen: a charset and a 40x25 map in VIC bank 3, shown for the whole load. It is the
 // only place either can live -- IMG owns $0801-$bfff and there is nothing below it -- so it sits
@@ -98,13 +115,16 @@ export const QUOTE_SCR = 0xf400, QUOTE_CHR = 0xf800;
 //
 //   IRUN  93 B @ $02a7   0.3 s   autoruns, blanks the screen, loads IQOT
 //   IQOT  ~1.9 K @ $4000  6.5 s   decrunches the quote to $f400 and PUTS IT UP, loads IRAY
-//   IRAY  ~3.8 K @ $0801  13 s    Krill's installer and resident, behind the quote
+//   IRAY  ~4.2 K @ $0801  14 s    Krill's installer and resident, behind the quote (+ the drive guard)
+//   (KERNAL-road figures, as the build prints them on its "boot:" line -- 2026-11-15: 21.3 s in all,
+//   the quote up after ~6.9 s. The FAST boot -- IFBT/IDRV, the default -- streams IQOT and IRAY with
+//   the drive's own code: IRAY in ~3.7 s. The build prints both; trust those over this table.)
 //
 // It was one 4,263-byte file and the quote appeared at ~19 s. The same bytes in this order put
 // a black screen up at ~2 s and the quote at ~8.5 s, because the only thing in front of the
 // quote is now the 93-byte stub and the quote's own packed data.
 export const AUTORUN_AT = 0x02a7;   // free RAM below the vectors; the file runs THROUGH $0302
-export const QUOTE_RUN = 0x4000;    // clear of IRAY ($0801-$18a5) and dead by the time IMG lands
+export const QUOTE_RUN = 0x4000;    // clear of IRAY ($0801-~$1860, 2026-11-15) and dead by the time IMG lands
 export const IRAY_ENTRY = 0x0801;   // no BASIC line: nothing types RUN any more
 // 156 bytes of decruncher scratch, live only while the quote is decrunching. $c000 is free until
 // the body loads IHOL there, which is after install, which is long after this.
@@ -249,14 +269,138 @@ ${n === 256 ? `        bne stc${p}` : `        cpx #$${n.toString(16).padStart(2
         rts
 ` : ''}`;
 
-function bodySource(files, entry, pages, first, step2, title) {
+// ---- THE DRIVE GUARD: no 1541-compatible drive, say so instead of hanging (2026-11-15) ----
+// Krill is built ONLY_1541_AND_COMPATIBLE with no KERNAL fallback (krill/loaderconfig.inc): it "treats
+// any drive as 1541, using an incompatible drive will cause undefined behaviour". An SD2IEC -- what
+// many real-hardware players have -- cannot run drive code at all. IFBT's own drive code already
+// times out to the KERNAL road (FB_TIMEOUT), so such a drive gets the quote up and IRAY in, and then
+// install() and the first loadraw talk to a drive that never answers. In VICE with true drive
+// emulation off (the nearest we can test) install returns and the first load comes back $fe; on a
+// real SD2IEC either may simply wait forever. Both looked like a quote screen that never finishes.
+// So: install() and the FIRST load run under a watchdog, and anything short of success ends on a
+// one-line message on a plain text screen, for good.
+//   - A CIA2 timer-B NMI, not an IRQ: an NMI arrives whatever the I flag says, and nobody knows
+//     whether a hung install() sits under sei. Timer A counts 65,536 cycles; timer B counts DRV_WAIT
+//     of those, ~8 s -- far more than install plus the first load take on a 1541 (the normal boot
+//     runs armed through both and reaches level 1). Tested 2026-11-15 with BOOTDBG=wdhang: a first
+//     load that hangs under sei ends on the message.
+//   - install's carry, and a first load that fails with anything but FILE NOT FOUND ($ff: a broken
+//     disk, which the body's colour diagnosis says better), end there at once.
+//   - Disarmed after that first load, and $0318 put back to the KERNAL's own: RESTORE during the
+//     rest of the boot must not jump into this code once IMG has loaded over it.
+// IT LIVES IN IRAY, after Krill's resident data, and runs IN PLACE: the boot body's gap below $09c0
+// has 9 bytes to spare, and this is 221 -- the body only trades its two jsr targets for these.
+// IRAY is intact until IMG lands, long after the first load. Its screen is $0c00 in bank 0 (the
+// body is at $0630-$07ff, inside the default screen), over Krill's installer, dead by then, with
+// the character ROM the VIC sees at $1000 in that bank. Cost: IRAY 3,924 -> 4,145 B, which the
+// build's own estimate puts at +0.2 s on the fast boot (IDRV streams it: 3.4 -> 3.6 s) and +0.7 s
+// on the KERNAL road (20.4 -> 21.1 s). Nothing else in the boot changes.
+// Two lines, centred, a blank row between (the user, 2026-11-15: the second points at the cartridge
+// release, which needs no drive at all -- planned with the public release, see docs).
+const DRV_MSG = ['LEST NEEDS A 1541-COMPATIBLE DRIVE', 'OR USE THE CARTRIDGE VERSION'];
+const DRV_WAIT = 125;                    // timer B counts of 65,536 cycles: ~8 s NTSC, ~8.3 s PAL
+const guardSource = at => {
+  for (const l of DRV_MSG) if (l.length > 40 || !/^[A-Z0-9 -]+$/.test(l)) throw new Error(`DRV_MSG: lines of upper case, digits, spaces and '-', 40 at most`);
+  const row0 = 12 - (DRV_MSG.length - 1);                      // centred: two lines with a blank row between
+  const lines = DRV_MSG.map((l, k) => ({ l, k, scr: 0x0c00 + (row0 + 2 * k) * 40 + ((40 - l.length) >> 1),
+    code: [...l].map(c => c >= 'A' && c <= 'Z' ? c.charCodeAt(0) - 64 : c.charCodeAt(0)) }));   // screen codes
+  return `        * = ${hx4(at)}
+ndInst: lda #<ndNmi             ; ---- the body's install(): armed, then Krill's own ----
+        sta $0318
+        lda #>ndNmi
+        sta $0319
+        lda #$7f
+        sta $dd0d               ; no CIA2 interrupt but ours...
+        lda $dd0d               ; ...and none pending
+        lda #$ff
+        sta $dd04
+        sta $dd05               ; timer A: 65,536 cycles
+        lda #${DRV_WAIT}
+        sta $dd06
+        lda #$00
+        sta $dd07               ; timer B: DRV_WAIT of them
+        lda #$82
+        sta $dd0d               ; timer B underflow -> NMI
+        lda #$51
+        sta $dd0f               ; B: count A's underflows, load, start
+        lda #$11
+        sta $dd0e               ; A: continuous, load, start
+        jsr ${hx4(KRILL_INSTALL)}
+        bcs ndStop              ; install said no
+        rts
+ndLd1:${process.env.BOOTDBG === 'wdhang' ? `  sei                     ; BOOTDBG=wdhang: a drive that never answers, under sei -- the
+ndHang: jmp ndHang              ;   watchdog's NMI must still end it on the message
+      ` : ''}  jsr ${hx4(KRILL_RESIDENT)}      ; ---- the body's FIRST loadraw, then disarm ----
+        php
+        pha
+        lda #$7f
+        sta $dd0d
+        lda #$00
+        sta $dd0e
+        sta $dd0f
+        lda $dd0d
+        lda #$47                ; $0318 back to the KERNAL's NMI handler, $fe47
+        sta $0318
+        lda #$fe
+        sta $0319
+        pla
+        plp
+        bcc ndOk
+        cmp #$ff                ; FILE NOT FOUND: the disk, not the drive -- the body's fail path
+        bne ndStop
+        sec
+ndOk:   rts
+ndNmi:  pha                     ; ---- NMI: the watchdog, or RESTORE (ignored) ----
+        lda $dd0d
+        and #$02
+        bne ndStop
+        pla
+        rti
+ndStop: sei                     ; ---- the end: a text screen, one line, and stop ----
+        lda #$7f
+        sta $dd0d
+        lda #$37
+        sta $01
+        lda #$00
+        sta $d015
+        sta $d020
+        sta $d021
+        lda #$03
+        sta $dd00               ; VIC bank 0; ATN, CLK and DATA released
+        lda #$34
+        sta $d018               ; screen $0c00, the ROM's upper-case set at $1000
+        lda #$08
+        sta $d016
+        lda #$20
+        ldx #$00
+ndClr:  sta $0c00,x
+        sta $0d00,x
+        sta $0e00,x
+        sta $0f00,x
+        inx
+        bne ndClr
+${lines.map(({ l, k, scr }) => `        ldx #${l.length - 1}
+ndMsg${k}: lda ndTxt${k},x
+        sta ${hx4(scr)},x
+        lda #$01
+        sta ${hx4(0xd800 + scr - 0x0c00)},x
+        dex
+        bpl ndMsg${k}
+`).join('')}        lda #$1b
+        sta $d011
+ndHalt: jmp ndHalt
+${lines.map(({ l, k, code }) => `ndTxt${k}: !byte ${code.join(',')}   ; "${l}"
+`).join('')}`;
+};
+
+function bodySource(files, entry, pages, first, step2, title, guard) {
   let step = 0;
   const load = f => `
         lda #${'$' + (++step).toString(16).padStart(2, '0')}
         sta $02                 ; BOOTSTEP: which load is in flight, for probe.mjs on a failure
         ldx #<n${f.tag}
         ldy #>n${f.tag}
-        jsr ${hx4(KRILL_RESIDENT)}      ; loadraw: the file's own header says where it goes
+        jsr ${hx4(step === 1 ? guard.ndLd1 : KRILL_RESIDENT)}      ; loadraw${step === 1 ? ', under the drive guard' : ''}: the file's own header says where it goes
 ${process.env.BOOTDBG === 'load' + step ? `        sta $d020               ; BOOTDBG: border = A, blanked so nothing else shows
         lda #$0b
         sta $d011
@@ -285,7 +429,7 @@ cdbg:   jmp cdbg
   // A runtime file's NAME belongs to whoever loads it, and that is the game, not this stub. The
   // boot PRG comes down at KERNAL speed, so every byte in it is time on a black screen.
   const names = files.filter(f => !f.runtime)
-    .map(f => `n${f.tag}: !byte ${petscii(f.name)},0`).join('\n');
+    .map(f => `n${f.tag}: !byte ${petscii(fileName(f.name))},0`).join('\n');
   return `        * = ${hx4(LOADER_RUN)}
         lda #$00                ; no KERNAL messages: "SEARCHING FOR" would scroll the screen,
         sta $9d                 ;   and the screen is about to be somewhere much more useful
@@ -334,7 +478,8 @@ icdbg:  jmp icdbg
         lda #$0b
         sta $d011
 rdbg:   jmp rdbg
-` : ''}        jsr ${hx4(KRILL_INSTALL)}       ; upload the drive code. Carry set = no native drive; with
+` : ''}        jsr ${hx4(process.env.BOOTDBG === 'install' ? KRILL_INSTALL : guard.ndInst)}       ; upload the drive code, under the drive guard (guardSource):
+                                ;   no 1541-compatible drive ends the boot on a message there
 ${process.env.BOOTDBG === 'install' ? `        pha
         lda #$00
         rol
@@ -345,10 +490,8 @@ ${process.env.BOOTDBG === 'install' ? `        pha
         sta $d011               ; BLANK: the whole display then shows the BORDER and nothing else
 idbg:   jmp idbg
 ` : ''}
-        ;bcs fail               ;   LOAD_VIA_KERNAL_FALLBACK the resident falls back to $ffd5 by
-                                ;   itself, so a failure here is NOT fatal and must not be treated
-                                ;   as one -- that is the whole point of the fallback, and it is
-                                ;   what a stock VICE with true drive emulation off will take.
+        ; (This was a commented-out "bcs fail": with LOAD_VIA_KERNAL_FALLBACK a failed install was not
+        ; fatal. The fallback is OFF -- loaderconfig.inc -- so it is, and ndInst says so. 2026-11-15)
 ${process.env.BOOTDBG === 'res2' ? `        lda ${hx4(KRILL_RESIDENT + 4)}       ; BOOTDBG: same byte AFTER install, expect $07
         sta $d020
         lda #$0b
@@ -438,7 +581,9 @@ export function buildLoader(assemble, files, entry, step2, title = null) {
     `${first.name} is ${first.length} bytes staged at ${hx4(KSTAGE)} and reaches ` +
     `${hx4(KSTAGE + holePages * 256 - 1)}, past $c000 into the charset and the KERNAL's scratch ` +
     `screen at ${hx4(KSCR)}. Lower KSTAGE -- everything below it is still empty at this point.`);
-  const body = assemble(bodySource(files, entry, holePages, first, step2, title));
+  const GUARD_AT = KRILL_RESDATA + KRILL_RES.length;     // IRAY's tail, after the resident's bytes
+  const guard = assemble(guardSource(GUARD_AT));
+  const body = assemble(bodySource(files, entry, holePages, first, step2, title, guard.labels));
   if (LOADER_RUN + body.bytes.length > 0x0800) throw new Error(
     `the boot body is ${body.bytes.length} bytes and runs past $0800 from ${hx4(LOADER_RUN)}, ` +
     `into the image it is about to load. Krill's resident takes $0400-$0612 below it.`);
@@ -474,7 +619,12 @@ ${cpBody}
         !byte ${inst.join(',')}
         * = ${hx4(KRILL_RESDATA)}
         !byte ${res.join(',')}
+        * = ${hx4(GUARD_AT)}
+        !byte ${[...guard.bytes].join(',')}
 `;
+  // IRAY must be whole until the guard is disarmed: the first load (the hole ladder, at KSTAGE) is
+  // the only thing that runs before it, and the guard must sit below anything loaded before IMG.
+  if (guard.end > KSTAGE) throw new Error(`the drive guard runs to ${hx4(guard.end)}, past KSTAGE`);
   // (the loop alone, bdat given a stand-in address: it is absolute either way, so the size is the same)
   const gapEnd = IRAY_ENTRY + assemble(`bdat = $1000\n` + front).bytes.length + bl;
   if (gapEnd > KRILL_INSTALL) throw new Error(`the boot stub's copy loop and its ${bl}-byte body reach ` +
@@ -509,7 +659,7 @@ boot:   ldx #$ff                ; BASIC's main loop called us; take the stack ba
         lda #$01
         sta $cc                 ; cursor blink off -- its IRQ writes through $d1/$d2, which still
                                 ;   point into $0400, where Krill's resident is going to live
-        lda #$04
+        lda #${nameLen(nextName)}
         ldx #<nq
         ldy #>nq
         jsr $ffbd               ; SETNAM
@@ -643,7 +793,7 @@ qkern:
         ; loop in our hands, for a little KERNAL dispatch per byte -- nothing beside 3.4 ms of
         ; bus time. Secondary address 2 means the file arrives raw, so its own two-byte load
         ; address comes down the wire first; check it rather than skip it.
-        lda #$04
+        lda #${nameLen(irayName)}
         ldx #<nr
         ldy #>nr
         jsr $ffbd               ; SETNAM
@@ -890,7 +1040,7 @@ cptr = $fb                      ; free zero page; swPant takes it over only once
 ptr  = $fd                      ; the store pointer, as IQOT's KERNAL loop uses it
 rbv  = $02                      ; the byte being received
         ; ---- 1. is it a 1541? M-R three bytes of the ROM's version string ----
-        lda #$06
+        lda #mre-mrc
         ldx #<mrc
         ldy #>mrc
         jsr $ffbd               ; SETNAM: the command IS the filename of channel 15
@@ -915,7 +1065,7 @@ chk2:   iny
         lda bad
         bne slow15
         ; ---- 2. channel 2 on buffer 1 ($0400), read IDRV into it, run it ----
-        lda #$02
+        lda #bufe-bufn
         ldx #<bufn
         ldy #>bufn
         jsr $ffbd
@@ -990,7 +1140,7 @@ slow2:  lda #$02
 slow15: jsr $ffcc
         lda #$0f
         jsr $ffc3
-slowa:  lda #$04
+slowa:  lda #${nameLen(QUOTE_NAME)}
         ldx #<qnm
         ldy #>qnm
         jsr $ffbd
@@ -1094,13 +1244,15 @@ tickj:  jmp (tickv)
 rtsx:   rts
 
 mrc:    !byte ${'M-R'.split('').map(c => c.charCodeAt(0)).join(',')},$c4,$e5,$03
+mre:
 sig:    !byte $31,$35,$34       ; "154"
 bufn:   !byte $23,$31           ; "#1"
+bufe:
 u1c:    !byte $55,$31,$3a,$32,$20,$30,$20,${dec(drv.track)},$20,${dec(drv.sector)}
 u1e:
 mec:    !byte $4d,$2d,$45,$${(FB_DRV_AT & 255).toString(16)},$${(FB_DRV_AT >> 8).toString(16)}
 mee:
-qnm:    !byte $49,$51,$4f,$54   ; "IQOT"
+qnm:    !byte ${petscii(QUOTE_NAME)}   ; "${QUOTE_NAME}" (was spelled out in hex beside a hard-coded length)
 bad:    !byte 0
 tmo:    !byte 0
 clen:   !byte 0

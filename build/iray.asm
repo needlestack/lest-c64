@@ -730,7 +730,6 @@ bndT    = $64c0                 ; columns where a face or saturation state begin
 remLoT  = $63a0                 ; per marched column: castRay's raw hit distance, 8.8 cells.
 remHiT  = $74d9                 ;   Parked so u can be derived later, only where it is needed.
 
-; [origin folded into the run above by compact.mjs]
         * = $0801
                                 ; (no BASIC header: the boot loader jumps to entry, and compaction
                                 ;   moved this origin off $0801 long ago, so SYS 2061 was wrong anyway)
@@ -10119,7 +10118,6 @@ lvlIdolhiT: !byte $0c,$0c,$0c,$0c,$07,$07,$07,$0c,$0c,$0c
         ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
         ; chain that needs more rows takes them out of the code headroom below and the headroom
         ; report says so, instead of the build dying on an origin that moves backward.
-; [origin folded into the run above by compact.mjs]
         * = $8d97
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
         ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
@@ -10171,7 +10169,6 @@ znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible 
         ; over; one run of NHOLE-sized things in one place is what makes that cost legible.
 hlSeat: !fill 7, 0
 
-; [origin folded into the run above by compact.mjs]
         * = $8afb
 ; ---- hole ladder: a disc on the floor, not a sphere (see HOLE_LADDER in the build) ----
 ; holePtrT is the LEFT half's sprite pointer; the right half is always the next slot, so a
@@ -10245,8 +10242,7 @@ cellFillT: !byte 0,15,15,0,0,15,15,14,3,8,15,15,8,7,7,15,0,14,15,0,0,15,3,15,12,
    ; from the MANIFEST and SWAPPED: a level with
                                 ;   more entities than this one indexes past this one's count
 
-; [origin folded into the run above by compact.mjs]
-        * = $88fb
+        * = $88fb  ; VIC bank 0 is full -- these live above it
 recipLoT: !byte 255,255,0,85,0,51,171,146,0,114,154,70,85,177,73,17,0,15,57,121,205,49,163,33
         !byte 171,61,217,123,37,212,137,66,0,194,136,80,28,235,189,144,102,62,24,244,209,176,145,114
         !byte 85,57,31,5,236,213,190,168,146,126,106,87,68,50,33,16,0,240,225,210,196,182,168,155
@@ -10492,7 +10488,6 @@ chainEnd:
         ; ---- the two rung finders, in the sliver before fallSnapD at $4900 ----
         ; Out here only because the main code block ends a few bytes short of ORB_SMALL once
         ; PROFILE adds its ticks. Reached by a patched jsr from holeTail, so nothing falls in.
-; [origin folded into the run above by compact.mjs]
         * = $47ae
 ; X = h. A = the rung, or $ff for "past the smallest".
 hlRungH:cpx #$7d               ; past here the rung is constant, and the table stops there
@@ -10557,7 +10552,6 @@ bfsSdN: inx
         rts
 
 
-; [origin folded into the run above by compact.mjs]
         * = $9700
 hTabG0: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,237,221,208,195,185,175,166,158,151,144,138,133,128,123,119,115,111,107
         !byte 104,101,98,95,92,90,87,85,83,81,79,77,76,74,72,71,69,68,66,65,64,63,62,60,59,58,57,56,55,54,54,53
@@ -10567,7 +10561,6 @@ hTabG0: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,254,237,221,20
         !byte 17,17,17,17,17,16,16,16,16,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,14,13,13,13,13
         !byte 13,13,12,12,12,11,11,11,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7
         !byte 6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,4
-; [origin folded into the run above by compact.mjs]
         * = $9800
 hTabG1: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,250,232,216,203,191,180,171,162,155,148,141,135,130,125,120,116,112,108,105
         !byte 101,98,96,93,90,88,85,83,81,79,77,76,74,72,71,69,68,66,65,64,62,61,60,59,58,57,56,55,54,53,52,52
@@ -10577,7 +10570,6 @@ hTabG1: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,250,232,216,20
         !byte 17,17,17,16,16,16,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13
         !byte 13,12,12,12,11,11,11,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6
         !byte 6,6,6,6,6,5,5,5,5,5,5,5,5,5,4,4
-; [origin folded into the run above by compact.mjs]
         * = $9900
 hTabG2: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,245,228,213,199,188,177,168,159,152,145,139,133,128,123,118,114,110,106,103
         !byte 100,97,94,91,89,86,84,82,80,78,76,74,72,71,69,68,66,65,64,63,61,60,59,58,57,56,55,54,53,52,51,51
@@ -10587,7 +10579,6 @@ hTabG2: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,245,228,213,19
         !byte 17,16,16,16,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13
         !byte 12,12,12,11,11,11,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6
         !byte 6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $9a00
 hTabG3: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,241,224,209,196,184,174,165,157,149,142,136,131,125,121,116,112,108,104,101
         !byte 98,95,92,90,87,85,82,80,78,76,75,73,71,70,68,67,65,64,63,61,60,59,58,57,56,55,54,53,52,51,51,50
@@ -10597,7 +10588,6 @@ hTabG3: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,241,224,209,19
         !byte 16,16,16,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,12,12
         !byte 12,12,12,11,11,11,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6
         !byte 6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $9b00
 hTabG4: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,237,220,205,193,181,171,162,154,147,140,134,128,123,118,114,110,106,103,99
         !byte 96,93,91,88,86,83,81,79,77,75,73,72,70,68,67,66,64,63,62,60,59,58,57,56,55,54,53,52,51,51,50,49
@@ -10607,7 +10597,6 @@ hTabG4: !byte 254,254,254,254,254,254,254,254,254,254,254,254,254,237,220,205,19
         !byte 16,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,12,12,12,12
         !byte 12,12,11,11,11,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6,6
         !byte 6,6,6,6,5,5,5,5,5,5,5,4,4,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $9c00
 hTabG5: !byte 254,254,254,254,254,254,254,254,254,254,254,254,252,233,216,202,189,178,168,159,151,144,138,132,126,121,116,112,108,104,101,98
         !byte 95,92,89,87,84,82,80,78,76,74,72,70,69,67,66,64,63,62,61,59,58,57,56,55,54,53,52,51,50,50,49,48
@@ -10617,7 +10606,6 @@ hTabG5: !byte 254,254,254,254,254,254,254,254,254,254,254,254,252,233,216,202,18
         !byte 16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,12,12,12,12,12,12
         !byte 12,11,11,11,11,10,10,10,9,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6,6,6
         !byte 6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $9d00
 hTabG6: !byte 254,254,254,254,254,254,254,254,254,254,254,254,248,229,213,199,186,175,165,157,149,142,135,130,124,119,115,110,106,103,99,96
         !byte 93,90,88,85,83,81,78,76,74,73,71,69,68,66,65,63,62,61,60,58,57,56,55,54,53,52,51,50,50,49,48,47
@@ -10627,7 +10615,6 @@ hTabG6: !byte 254,254,254,254,254,254,254,254,254,254,254,254,248,229,213,199,18
         !byte 16,15,15,15,15,15,15,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12
         !byte 12,11,11,11,10,10,10,10,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6,6,6,6
         !byte 6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $9e00
 hTabG7: !byte 254,254,254,254,254,254,254,254,254,254,254,254,244,225,209,195,183,172,163,154,147,140,133,127,122,117,113,109,105,101,98,95
         !byte 92,89,86,84,81,79,77,75,73,71,70,68,67,65,64,62,61,60,59,57,56,55,54,53,52,51,51,50,49,48,47,47
@@ -10637,7 +10624,6 @@ hTabG7: !byte 254,254,254,254,254,254,254,254,254,254,254,254,244,225,209,195,18
         !byte 15,15,15,15,15,15,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12,12,12
         !byte 11,11,11,10,10,10,10,9,9,9,9,9,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6,6,6,6,6
         !byte 6,6,5,5,5,5,5,5,5,4,4,4,4,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $9f00
 hTabG8: !byte 254,254,254,254,254,254,254,254,254,254,254,254,240,222,206,192,180,170,160,152,144,137,131,125,120,115,111,107,103,99,96,93
         !byte 90,87,85,82,80,78,76,74,72,70,69,67,66,64,63,61,60,59,58,57,55,54,53,52,51,51,50,49,48,47,47,46
@@ -10647,7 +10633,6 @@ hTabG8: !byte 254,254,254,254,254,254,254,254,254,254,254,254,240,222,206,192,18
         !byte 15,15,15,15,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12,12,12,11,11
         !byte 11,11,11,10,10,10,9,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6
         !byte 6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $a000
 hTabG9: !byte 254,254,254,254,254,254,254,254,254,254,254,254,237,218,203,189,177,167,158,149,142,135,129,123,118,114,109,105,101,98,95,92
         !byte 89,86,83,81,79,77,75,73,71,69,68,66,65,63,62,60,59,58,57,56,55,54,53,52,51,50,49,48,47,47,46,45
@@ -10657,7 +10642,6 @@ hTabG9: !byte 254,254,254,254,254,254,254,254,254,254,254,254,237,218,203,189,17
         !byte 15,15,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12,12,12,11,11,11,11
         !byte 11,11,10,10,10,10,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,6
         !byte 6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4
-; [origin folded into the run above by compact.mjs]
         * = $919e
 orbVarT: !byte 15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12,12,11,11,11,11,10,10,10,10,9,9,9,9,8,8,8,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         ; ---- the angel's distance maps, its pathing code, and its queue ----
@@ -10667,10 +10651,8 @@ orbVarT: !byte 15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12
         ; The two maps are ping-ponged -- bfsTick builds the WORK one a few cells a frame while
         ; anPath reads the LIVE one -- and both are page-aligned because a whole cell byte
         ; indexes them. bfsD0 lives off at $ae00 because this gap is not big enough for both.
-; [origin folded into the run above by compact.mjs]
         * = $a100
 bfsD1:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps
-; [origin folded into the run above by compact.mjs]
         * = $47e6
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
@@ -11042,7 +11024,6 @@ bgCopy: lda baseHi
 
         jmp snapCp              ; ...the shared walk, parked in a free run of its own
 
-; [origin folded into the run above by compact.mjs]
         * = $887d
 ; Page-aligned because it is indexed by a whole byte of h. See holeVarT in the build.
 holeVarT: !byte 255,255,255,255,255,255,255,19,19,19,18,18,18,17,17,17,17,16,16,16,15,15,15,15,15,15,15,14,14,14,14,14,14,14,13,13,13,13,13,13,12,12,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,0
@@ -11051,8 +11032,7 @@ holeVarT: !byte 255,255,255,255,255,255,255,19,19,19,18,18,18,17,17,17,17,16,16,
         ; VIC can see. Moving it out frees bank 0 for sprites, and gives every 256-entry
         ; table its own page for free -- an "lda table,x" that crosses a page costs an
         ; extra cycle, and these are indexed by a full byte.
-; [origin folded into the run above by compact.mjs]
-        * = $823a
+        * = $823a          ; the fall's animation data, out of the image's own segment
 arcYT: !byte 255,248,232,216,200,184,168,152,136,120,104,91,80,69,57,46,34,23,11,0     ;   which has no slack left above ORB_SMALL at $3300
 arcET: !byte 20,20,20,20,20,20,20,20,20,20,20,17,12,7,3,254,250,245,241,236
 arcYT2: !byte 200,189,177,166,154,143,131,120,109,96,80,64,48,32,16,0,0,0,0,0    ; the landing's mirrored schedule
@@ -11290,7 +11270,6 @@ fdG2:   dec fdCnt
         bne fdGl
 fdGtD:  rts
 
-; [origin folded into the run above by compact.mjs]
         * = $ab48
 ; ---- fwGenB: build THIS frame's row map, instead of storing forty of them ----
 ; Was fRowT: 40 blocks x 32 bytes = 1,280, every one of them "src = row + k" outside a single
@@ -11348,10 +11327,8 @@ fHiT:   !byte 24,24,24,24,24,22,20,18,16,14,12,10,9,7,6,4,2,0,0,0,0,24,24,24,24,
 ; So there is ONE resident, the boot's, built for $0400. entry copies it up here before the
 ; first frame writes stackLT over it, and lateLoad copies it back down to run it. It keeps its
 ; address and its state, and what it clobbers on the way back is per-frame scratch.
-; [origin folded into the run above by compact.mjs]
         * = $813f
 krillRt: !fill 251, 0
-; [origin folded into the run above by compact.mjs]
         * = $4a7b
 ; ---- klPark / lvlLoad: THE LEVEL COMES OFF THE DISK ----
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
@@ -11417,10 +11394,10 @@ lvlLoad:
         lda #$52                ; 'R'
         sta nILV+2
         jsr llName
-        lda #$4c                ; 'L' -- and back to ILV for the next level
+        lda #$4c                ; 'L'
         sta nILV+1
         lda #$56                ; 'V'
-        sta nILV+2
+        sta nILV+2               ; ...and back to ILV for the next level
 laDn:
         lda lvlAnT              ; ---- ...and over the ANGEL's ladder: IAN0 (the angel's) or IAN1 ----
         cmp anCur               ;   (the big angel's overflow, see BIGAN), the same way
@@ -11448,7 +11425,6 @@ fluteGot: !byte 0               ; 1 once the flute is taken (LEVEL_FLUTE). DATA 
 anCur:  !byte $30                ; IAN0: level 1, the boot level, has the ordinary angel
    ; the ball lightning's entity ($ff none)
    ; ...and its thrower
-bsTk:   !byte 0                 ; unused since the old AI went (2026-11-15); dropping it moves the image
 ; ---- THE LEVEL-CODE VECTORS (see LX_FEATURES) ----
 ; The engine calls level code only through these. Each is a jmp: into the module's jump table at
 ; LXAT while a level that brought code is live, at lxNone otherwise. lxOff stubs them before a load
@@ -11543,7 +11519,7 @@ klUn:   lda krillRt,x
         lda llZP+1
         sta $9a
         rts
-nILV:   !byte $49,$4c,$56,$31,0
+nILV:   !byte $49,$4c,$56,$31,0   ; NAME_BUF: see nmFits
 llZP:   !fill 2, 0              ; DFLTN, DFLTO
 llErr:  !byte 0
 
@@ -11569,7 +11545,6 @@ egF:    jmp egF
 
 
 
-; [origin folded into the run above by compact.mjs]
         * = $8f9f
 ; One bit per (orb, run): is the orb BEYOND that face's plane, hence occluded by it. A constant,
 ; because the test does not involve the camera at all -- see the data layer above.
@@ -11588,7 +11563,6 @@ darkerT: !byte 0,15,11,12,11,12,0,15,11,0,12,0,11,15,12,12
 ; hole, and moving the first one out is what freed the page-aligned kilobyte at $7900. The
 ; charset stays because it is 2,048 and there is no 2K of bank 3 left to put it in -- and it is
 ; read exactly once, by dieSwap, straight into charset B's slot.
-; [origin folded into the run above by compact.mjs]
         * = $7ad5
 faceChrT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,127,255,255,255,255,245,213,220,80,255,255,255,215,85,16,1,65
         !byte 255,255,255,255,95,87,23,5,255,255,255,255,253,245,213,212,255,255,215,85,65,72,34,36,255,255,223,85,69,0,168,0
@@ -11691,7 +11665,6 @@ fdS1:   rts
         ; ---- rung -> rows on screen, the one thing occStamp cannot derive for a socket ----
         ; See visRows. Anchored just below the run tables, in the tail the packed cut-scene
         ; charset leaves free -- the ladder tables' own block ends exactly at $4000.
-; [origin folded into the run above by compact.mjs]
         * = $acd5
 hlVisL: !byte <exitVisT,<sockVisT,<pedVisT
 exitVisT: !byte 21,21,21,21,42,38,32,26,22,18,15,11,8,5,4,2,2,2,2,2
@@ -11700,8 +11673,7 @@ pedVisT: !byte 34,26,18,13,10,8,6,5,4,2
 
         ; (runByteT / runBitT lived here: a run id as a mask byte and bit. Gone with the masks -- see occBy.)
 
-; [origin folded into the run above by compact.mjs]
-        * = $7995
+        * = $7995               ; ---- out of the main code block, into the page faceScrT vacated ----
 ; moveXT/moveYT were 512 bytes of TABLE sitting inside the code block -- the scarcest resource
 ; on the machine. Now 320 bytes out of it: the pair shares a page and a quarter (quarterPair).
 moveYT: !byte 0,2,3,5,6,8,9,11,12,14,16,17,19,20,22,23,24,26,27,29,30,32,33,34
@@ -11719,8 +11691,7 @@ moveXT: !byte 64,64,64,64,64,64,63,63,63,62,62,62,61,61,60,60,59,59,58,57,56,56,
         !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
         !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64   ; moveYT runs on into this: see sharedPair
 
-; [origin folded into the run above by compact.mjs]
-        * = $4be8
+        * = $4be7               ; ---- and the whole readout ----
 ; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
 ; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
 ; that drawFps falling through into whatever follows it still does. The only branches that
@@ -11846,8 +11817,7 @@ a2F:    sta (fdB),y
 ; under $a900 with the hazard tables and level 5's real design pushed it 96 bytes over. This
 ; routine runs ONCE, at boot, and never again -- so it was the obvious thing to move out of
 ; contested space. Same reasoning that moved dpCand out of the main block.
-; [origin folded into the run above by compact.mjs]
-        * = $4c61
+        * = $4c60
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -11993,8 +11963,7 @@ lvlFlkT:!byte 0,0,0,0,0,0,0,1,0,0   ; per level id - 1
         ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
         ; it is COLD, jsr-entered from symPut once per level entry, and it fits whole in the page
         ; bndT was holding down on its own. See bndT for the move that freed it.
-; [origin folded into the run above by compact.mjs]
-        * = $4cfb
+        * = $4cfa
 ; ---- the idol subsystem lives in the front of seamEdge's page ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
 ; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
@@ -12208,7 +12177,6 @@ seamEdge:
         ; dimension in this program that never changes, so these 96 bytes are stable in a way the
         ; !fill MAPN tails are NOT: those collapse to three bytes on a build whose live level is
         ; the 253-cell one. Code, not data, because the blocks that were full held code.
-; [origin folded into the run above by compact.mjs]
         * = $ab29
 arcCdT: !byte 2,4,5,13,15,16,19,21,23,27,29,31,35,45,49,52,63,67,69,76,86,90,95,110,121,124,126,174,183,184,187
 
@@ -12216,8 +12184,7 @@ arcCdT: !byte 2,4,5,13,15,16,19,21,23,27,29,31,35,45,49,52,63,67,69,76,86,90,95,
         ; ...and $83a0 is the same again in the next page. NOT $6d82, which is where these were:
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
         ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
-; [origin folded into the run above by compact.mjs]
-        * = $4e23
+        * = $4e22
 ; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
 ; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
 ; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
@@ -12227,8 +12194,7 @@ pedOff: ldy idolHand
         lda #$00
         sta idolOnPedT,y
 poNo:   rts
-; [origin folded into the run above by compact.mjs]
-        * = $4e2e
+        * = $4e2d
 dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
         ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
         ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
@@ -12284,7 +12250,6 @@ fdWas:  !byte $01               ; not $00 and not $ff: neither state, so the FIR
                                 ;   builds and nothing depends on what powers up here
 
 
-; [origin folded into the run above by compact.mjs]
         * = $a200
 f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,132
         !byte 144,156,169,182,196,210,225,240,0,16,33,50,68,86,105,124,144,164,185,206,228,250,17,40
@@ -12297,7 +12262,6 @@ f0LoT:  !byte 0,0,1,2,4,6,9,12,16,20,25,30,36,42,49,56,64,72,81,90,100,110,121,1
         !byte 0,96,193,34,132,230,73,172,16,116,217,62,164,10,113,216,64,168,17,122,228,78,185,36
         !byte 144,252,105,214,68,178,33,144,0,112,225,82,196,54,169,28,144,4,121,238,100,218,81,200
         !byte 64,184,49,170,36,158,25,148,16,140,9,134,4,130,1,128
-; [origin folded into the run above by compact.mjs]
         * = $a300
 f0HiT:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2
@@ -12310,7 +12274,6 @@ f0HiT:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         !byte 36,36,36,37,37,37,38,38,39,39,39,40,40,41,41,41,42,42,43,43,43,44,44,45
         !byte 45,45,46,46,47,47,48,48,49,49,49,50,50,51,51,52,52,53,53,53,54,54,55,55
         !byte 56,56,57,57,58,58,59,59,60,60,61,61,62,62,63,63
-; [origin folded into the run above by compact.mjs]
         * = $a400
 f1LoT:  !byte 0,128,1,130,4,134,9,140,16,148,25,158,36,170,49,184,64,200,81,218,100,238,121,4
         !byte 144,28,169,54,196,82,225,112,0,144,33,178,68,214,105,252,144,36,185,78,228,122,17,168
@@ -12323,7 +12286,6 @@ f1LoT:  !byte 0,128,1,130,4,134,9,140,16,148,25,158,36,170,49,184,64,200,81,218,
         !byte 0,224,193,162,132,102,73,44,16,244,217,190,164,138,113,88,64,40,17,250,228,206,185,164
         !byte 144,124,105,86,68,50,33,16,0,240,225,210,196,182,169,156,144,132,121,110,100,90,81,72
         !byte 64,56,49,42,36,30,25,20,16,12,9,6,4,2,1,0
-; [origin folded into the run above by compact.mjs]
         * = $a500
 f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,75,76
         !byte 76,77,77,78,78,79,79,80,81,81,82,82,83,83,84,84,85,86,86,87,87,88,89,89
@@ -12336,7 +12298,6 @@ f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,
         !byte 196,196,197,198,199,200,201,202,203,203,204,205,206,207,208,209,210,211,212,212,213,214,215,216
         !byte 217,218,219,220,221,222,223,224,225,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239
         !byte 240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
-; [origin folded into the run above by compact.mjs]
         * = $a600
 ; A FULL PAGE, not MAPN bytes. mkRuns clears these with "ldx #0 ... inx / bne", so all 256 are
 ; WRITTEN however few cells the live level has -- the remainder is part of the table, not a hole.
@@ -12344,13 +12305,11 @@ f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,
 ; live level) and anything placed there would be wiped on the next level change. Same reason
 ; mapT and blkT are padded to a page. See the MAPN note above MAPW.
 runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,0,0,0,0,0,10,0,0,0,0,0,0,14,0,0,0,0,0,0,22,0,0,0,0,0,0,8,0,0,0,0,0,0,0,14,0,0,0,0,19,0,22,0,0,0,0,0,0,8,0,0,0,0,0,0,0,14,0,16,0,0,19,0,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,14,0,16,0,0,0,0,22,0,0,0,0,0,0,9,0,0,0,0,0,0,0,14,0,16,0,0,20,0,22,0,0,0,0,0,0,9,0,0,0,0,0,0,0,14,0,0,0,0,20,0,22,0,0,0,0,0,0,0,11,0,0,0,0,0,0,14,0,0,0,0,0,0,22,0,0,0,5,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-; [origin folded into the run above by compact.mjs]
         * = $a700
 runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,6,0,0,0,0,0,0,0,12,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,17,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,15,0,0,17,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,17,0,21,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,0,0,21,0,0,2,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,0,0,0,21,0,0,2,0,0,0,7,0,0,0,0,0,0,0,13,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; ---- snapCp: the half-height snapshot copy, out here because both its callers' blocks are
 ; full. 64 bytes of stable slack; the origin after it puts the cursor back.
-; [origin folded into the run above by compact.mjs]
-        * = $4e74
+        * = $4e73
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         tay
@@ -12375,15 +12334,12 @@ bgcAdv: inx
         cpx #$0d
         bne bgcRow
         rts
-; [origin folded into the run above by compact.mjs]
         * = $a800
 runNT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,27,27,27,27,27,27,0,0,0,29,0,0,0,0,30,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,32,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,34,34,34,34,34,34,34,0,0,0,0,0,0,36,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,40,40,40,40,0,0,0,0,0,0,41,41,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,42,42,0,0,43,43,0,0,0,0,0,0,44,44,44,44,44,44,44,44,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-; [origin folded into the run above by compact.mjs]
         * = $a900
 runST: !byte 0,23,23,0,0,24,24,0,0,0,0,0,0,25,25,25,25,25,25,25,25,0,0,0,0,26,26,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,28,28,28,28,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,31,31,31,31,31,31,31,0,0,0,0,0,0,33,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,35,35,0,0,0,0,0,37,0,0,0,0,38,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,39,39,39,39,39,39,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; [origin folded into the run above by compact.mjs]
    ; padded to the page with WALL: mkRuns reads c-1 at cell 0 and c+1 at the last cell
-; [origin folded into the run above by compact.mjs]
         * = $aa00
 ; rsT and rbT are one formula 7 apart (rbT[c] = rsT[c + 7]; both 0 past the wall's reach), so they
 ; share bytes. rsT keeps the page; rbT, 7 in, crosses it only for a column 249+ pixels tall.
@@ -12404,8 +12360,7 @@ rbT: !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
         ; ran out of room the moment a level was allowed to declare its own sockets: the
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
-; [origin folded into the run above by compact.mjs]
-        * = $4ea5
+        * = $4ea4
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
 ; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
@@ -12692,15 +12647,13 @@ obPick: ldy obKI
         bcc obPick              ; slots left: the next nearest
 obODn:  rts
 ; [origin folded into the run above by compact.mjs]
-; [origin folded into the run above by compact.mjs]
         * = $ac00
 rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,236,237,237,237,238,238,238,238,239,239,239,239,240,240,240,241,241,241,241,242,242,242,243,243,243,244,244,244,244,245,245,245,246,246,246,247,247,247,248,248,248,249,249,249,250,250,250,251,251,251,252,252,252,253,253,253,254,254,254,255,255,255,255,0,0,1,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,10,10,10,11,11,11,12,12,12,12,13,13,13,14,14,14,15,15,15,15,16,16,16,17,17,17,17,18,18,18,18,19,19,19,20,20,20,20,21,21,21,21,22,22,22,22,23,23,23,23,24
         ; ---- the seated orb's per-variant tables ----
         ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
         ; Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
-; [origin folded into the run above by compact.mjs]
-        * = $50ae
+        * = $50ad
 
 ; ---- fwBlk and fNT live up here, away from the fall's other tables ----
 ; They were at the foot of the $6c00 block with fKT/fLoT/fHiT, and level 7's tables push that run
@@ -12743,15 +12696,12 @@ pgC:    tya
         jmp wallTog            ; tail call -- there is nothing to do afterwards
 pgNo:   rts
 
-; [origin folded into the run above by compact.mjs]
         * = $ad00
 ; each group is its own page-aligned table (hTabG0..15), so the high byte alone names it
 hPgT:   !byte >hTabG0,>hTabG0,>hTabG0,>hTabG0,>hTabG0,>hTabG0,>hTabG0,>hTabG1,>hTabG1,>hTabG1,>hTabG1,>hTabG1,>hTabG2,>hTabG2,>hTabG2,>hTabG2,>hTabG2,>hTabG3,>hTabG3,>hTabG3,>hTabG3,>hTabG3,>hTabG4,>hTabG4,>hTabG4,>hTabG4,>hTabG4,>hTabG4,>hTabG5,>hTabG5,>hTabG5,>hTabG5,>hTabG5,>hTabG5,>hTabG6,>hTabG6,>hTabG6,>hTabG6,>hTabG6,>hTabG6,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG9,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG8,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG7,>hTabG6,>hTabG6,>hTabG6,>hTabG6,>hTabG6,>hTabG6,>hTabG5,>hTabG5,>hTabG5,>hTabG5,>hTabG5,>hTabG5,>hTabG4,>hTabG4,>hTabG4,>hTabG4,>hTabG4,>hTabG4,>hTabG3,>hTabG3,>hTabG3,>hTabG3,>hTabG3,>hTabG2,>hTabG2,>hTabG2,>hTabG2,>hTabG2,>hTabG1,>hTabG1,>hTabG1,>hTabG1,>hTabG1,>hTabG0,>hTabG0,>hTabG0,>hTabG0,>hTabG0,>hTabG0,>hTabG0
-; [origin folded into the run above by compact.mjs]
         * = $acad
 
 fNT:    !byte 25,25,25,25,25,23,21,19,17,15,13,11,10,8,7,5,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-; [origin folded into the run above by compact.mjs]
         * = $ae00
 ; The DDA deltas at quarter-angle resolution. TWO pages, not the eight a naive ddx/ddy pair at
 ; 1024 entries would take: |cos| has period half a circle and sin is cos a quarter turn along,
@@ -12779,7 +12729,6 @@ ddxLoTQ: !byte 0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,2,2,3
         !byte 16,15,15,14,14,13,13,12,12,11,11,10,10,9,9,8,8,8,7,7,6,6,6,5
         !byte 5,5,4,4,4,4,3,3,3,3,2,2,2,2,2,1,1,1,1,1,1,1,0,0
         !byte 0,0,0,0,0,0,0,0
-; [origin folded into the run above by compact.mjs]
         * = $b000
 ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
@@ -12827,7 +12776,7 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; seN: named by nothing in this build, so given no RAM (compact.mjs)                 ; glyphs left
 ; seC00: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: ground/ceiling pixels, per row
 ; seNB: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: the row being built, ending exactly at $bdff
-        * = $50f3
+        * = $50f2
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -14726,7 +14675,6 @@ agPt:   lda #$00                ; fdA -> charset A's glyph for rim code X. X sur
 
 
 
-; [origin folded into the run above by compact.mjs]
         * = $9660
 ; SIGNED quarter-unit offset from the view centre, |v| < 128, so one byte covers the whole FOV
 ; and there is no second table. The first cut stored a 10-bit value as lo/hi pairs and the hi
@@ -14736,8 +14684,7 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
         ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-; [origin folded into the run above by compact.mjs]
-        * = $5d49
+        * = $5d48
 ; ---- lvlStart: put the player at the LIVE level's official start ----
 ; Boot and every death go through here. the death restart is "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
@@ -14760,7 +14707,6 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 
 
 
-; [origin folded into the run above by compact.mjs]
         * = $7895
 
 ; PIVOT's lookups live in the three pages PLAN=3 vacates -- stepT1/2/3 are replaced by the
@@ -14772,11 +14718,9 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
 ; rayOffQS. This table is what keeps the prediction divide-free; the rectilinear column
 ; spacing lives here instead of in an atan.
 qToColT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,24,25,26,27,28,29,30,31,31,32,33,34,35,36,37,37,38,39,40,41,42,42,43,44,45,46,46,47,48,49,50,50,51,52,53,54,54,55,56,57,58,58,59,60,61,61,62,63,64,64,65,66,67,67,68,69,70,70,71,72,73,73,74,75,76,77,77,78,79,80,80,81,82,82,83,84,85,86,86,87,88,89,89,90,91,92,92,93,94,95,95,96,97,98,98,99,100,101,101,102,103,104,105,105,106,107,108,109,109,110,111,112,113,113,114,115,116,117,117,118,119,120,121,122,122,123,124,125,126,127,128,128,129,130,131,132,133,134,135,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159,159
-; [origin folded into the run above by compact.mjs]
         * = $7795
 
 sinST:  !byte 0,3,6,9,13,16,19,22,25,28,31,34,37,40,43,46,49,52,55,58,60,63,66,68,71,74,76,79,81,84,86,88,91,93,95,97,99,101,103,105,106,108,110,111,113,114,116,117,118,119,121,122,122,123,124,125,126,126,127,127,127,127,127,127,127,127,127,127,127,127,127,126,126,125,124,123,122,122,121,119,118,117,116,114,113,111,110,108,106,105,103,101,99,97,95,93,91,88,86,84,81,79,76,74,71,68,66,63,60,58,55,52,49,46,43,40,37,34,31,28,25,22,19,16,13,9,6,3,0,253,250,247,243,240,237,234,231,228,225,222,219,216,213,210,207,204,201,198,196,193,190,188,185,182,180,177,175,172,170,168,165,163,161,159,157,155,153,151,150,148,146,145,143,142,140,139,138,137,135,134,134,133,132,131,130,130,129,129,129,128,128,128,128,128,128,128,129,129,129,130,130,131,132,133,134,134,135,137,138,139,140,142,143,145,146,148,150,151,153,155,157,159,161,163,165,168,170,172,175,177,180,182,185,188,190,193,196,198,201,204,207,210,213,216,219,222,225,228,231,234,237,240,243,247,250,253
-; [origin folded into the run above by compact.mjs]
         * = $7695
 
 ; 163/d as a byte, d in 1/16 cells. 163 is the constant that makes the final shift exactly
@@ -14788,8 +14732,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; config had not been built in a long time; when it was, it died with "* = $ae00 moves backward
 ; from $ae2a". They live in the stream now, with the other displaced lookups.
 
-; [origin folded into the run above by compact.mjs]
-        * = $5d68
+        * = $5d67               ; ---- the arc's pixel solver, and the fall's tail ----
 ; The page the pivot's three scratch tables vacated for VIC bank 3 (see PVBASE), and the only
 ; free run left in a four-level image big enough to hold fallTail in ONE piece -- the next
 ; largest is 36 bytes.
@@ -14964,10 +14907,8 @@ edT5:	sta fallTailB+200,x
 edT6:	sta fallTailB+240,x
 	rts
 
-; [origin folded into the run above by compact.mjs]
         * = $b200
 bfsD0:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps      ; the angel's other distance map -- see bfsD1 at $5e00
-; [origin folded into the run above by compact.mjs]
         * = $b300
 ; The ninth index bit costs a second copy of every code table plus the thresholds that derive
 ; it. Each is page-aligned so "lda table,y" stays 4 cycles -- a page crossing here would tax the
@@ -14984,7 +14925,6 @@ rampTlo: !byte 0,0,0,0,20,159,144,113,58,58,32,147,147,147,147,167,0,0,0,0,20,15
         !byte 185,143,143,143,143,79,17,53,181,63,10,1,1,1,1,1,185,143,143,143,173,17,17,182
         !byte 158,63,27,1,1,1,1,1,185,143,143,173,173,168,17,182,161,63,27,1,1,1,1,1
         !byte 24,173,173,173,168,168,182,182,161,70,27,1,1,1,1,1
-; [origin folded into the run above by compact.mjs]
         * = $b400
 rampThi: !byte 0,0,0,0,20,3,141,196,58,154,147,156,166,167,167,156,0,0,0,0,20,3,98,58
         !byte 154,142,142,156,166,166,149,101,0,0,0,0,49,3,122,43,43,142,166,156,191,191,149,101
@@ -14997,7 +14937,6 @@ rampThi: !byte 0,0,0,0,20,3,141,196,58,154,147,156,166,167,167,156,0,0,0,0,20,3,
         !byte 42,143,143,143,79,17,17,182,161,63,27,1,1,1,1,1,42,143,143,173,173,168,17,182
         !byte 161,70,27,1,1,1,1,1,143,143,143,173,173,168,182,161,161,70,27,1,1,1,1,1
         !byte 173,173,37,37,37,135,135,198,108,70,27,1,1,1,1,1
-; [origin folded into the run above by compact.mjs]
         * = $b500
 stepT1lo: !byte 109,20,3,141,196,58,58,32,32,26,114,150,65,65,162,56,56,149,61,123,123,123,123,14
         !byte 192,192,14,54,19,19,4,99,62,134,134,138,26,36,95,67,186,62,56,44,197,61,123,123
@@ -15010,7 +14949,6 @@ stepT1lo: !byte 109,20,3,141,196,58,58,32,32,26,114,150,65,65,162,56,56,149,61,1
         !byte 12,12,130,130,46,140,42,133,171,130,46,66,85,85,102,24,96,79,128,53,126,52,2,91
         !byte 12,12,151,39,151,39,12,12,140,185,185,39,130,130,46,129,137,129,24,173,168,17,182,181
         !byte 63,139,139
-; [origin folded into the run above by compact.mjs]
         * = $b600
 stepT1hi: !byte 90,49,150,122,65,43,142,142,22,26,114,150,114,114,123,192,192,101,61,123,123,123,123,14
         !byte 192,14,14,115,19,60,4,190,62,62,44,83,26,36,67,67,114,123,192,192,160,61,123,123
@@ -15023,7 +14961,6 @@ stepT1hi: !byte 90,49,150,122,65,43,142,142,22,26,114,150,114,114,123,192,192,10
         !byte 130,46,130,130,46,33,133,79,79,128,107,28,85,2,91,133,79,17,17,126,126,164,2,21
         !byte 12,151,39,130,46,129,137,139,33,143,79,79,46,46,129,137,139,91,7,7,135,135,198,161
         !byte 70,27,91
-; [origin folded into the run above by compact.mjs]
         * = $b700
 stepT2lo: !byte 109,20,3,144,196,58,58,32,32,109,19,150,65,114,162,56,149,156,109,19,150,114,114,123
         !byte 192,192,14,54,20,60,4,99,43,134,134,138,48,19,95,67,186,62,56,44,197,24,19,95
@@ -15036,7 +14973,6 @@ stepT2lo: !byte 109,20,3,144,196,58,58,32,32,109,19,150,65,114,162,56,149,156,10
         !byte 39,46,66,85,2,22,42,171,171,130,78,66,85,85,72,24,96,79,128,53,126,52,2,91
         !byte 12,151,39,130,46,129,137,139,22,185,185,171,130,46,129,137,137,33,24,96,100,100,11,158
         !byte 175,10,10
-; [origin folded into the run above by compact.mjs]
         * = $b800
 stepT2hi: !byte 90,49,187,98,98,189,189,73,22,109,19,150,114,114,123,56,192,101,109,19,150,114,114,123
         !byte 192,192,14,115,19,95,4,190,62,189,83,83,48,19,67,67,114,123,192,84,101,24,19,95
@@ -15049,7 +14985,6 @@ stepT2hi: !byte 90,49,187,98,98,189,189,73,22,109,19,150,114,114,123,56,192,101,
         !byte 39,46,66,85,2,22,42,42,171,128,107,28,85,2,91,173,79,79,17,126,126,164,2,21
         !byte 12,151,39,130,46,129,137,139,22,143,143,143,128,53,129,137,139,33,7,7,135,135,198,108
         !byte 70,27,139
-; [origin folded into the run above by compact.mjs]
         * = $b900
 stepT3lo: !byte 49,20,159,144,113,113,32,32,32,26,150,98,98,43,154,189,147,147,114,114,114,114,114,56
         !byte 56,73,156,54,19,19,141,99,99,140,140,140,36,36,95,4,190,62,62,44,197,61,123,123
@@ -15062,7 +14997,6 @@ stepT3lo: !byte 49,20,159,144,113,113,32,32,32,26,150,98,98,43,154,189,147,147,1
         !byte 171,171,171,171,171,102,133,133,80,128,107,28,85,85,72,37,37,17,17,126,126,164,2,2
         !byte 185,143,171,100,46,46,46,46,46,173,143,79,17,53,181,175,139,139,37,37,37,135,161,161
         !byte 63,10,139
-; [origin folded into the run above by compact.mjs]
         * = $ba00
 stepT3hi: !byte 90,49,187,122,196,58,58,32,32,26,150,187,65,65,162,142,166,191,114,114,114,114,114,56
         !byte 56,149,14,90,19,60,4,99,99,134,138,138,36,36,95,4,62,62,8,44,197,61,123,123
@@ -15075,16 +15009,12 @@ stepT3hi: !byte 90,49,187,122,196,58,58,32,32,26,150,187,65,65,162,142,166,191,1
         !byte 171,171,171,171,171,102,88,79,79,107,107,28,52,2,2,7,7,135,135,198,108,164,2,21
         !byte 24,143,100,100,46,46,46,46,46,37,168,168,17,182,158,175,10,139,7,7,135,135,198,108
         !byte 70,27,10
-; [origin folded into the run above by compact.mjs]
         * = $bb00
 rampThrT: !byte 0,0,0,0,0,1,1,1,0,3,3,7,5,5,6,9,0,0,0,0,0,1,2,0,3,5,0,9,0,0,10,12,0,0,0,0,1,0,2,4,0,5,7,10,9,9,0,13,0,0,0,0,1,3,0,5,0,0,8,11,0,10,0,13,0,0,1,2,0,4,0,0,0,7,0,11,0,0,12,14,1,1,0,3,4,0,6,7,0,0,0,12,12,12,0,15,0,2,3,0,5,6,0,8,8,0,11,0,0,0,14,15,1,0,4,0,0,7,7,0,10,11,0,13,13,0,0,16,2,3,0,5,6,0,8,10,0,12,13,14,15,15,0,16,0,5,5,0,7,9,0,11,12,0,13,15,0,16,16,0,3,0,7,0,0,0,11,0,13,13,0,16,16,0,0,0,7,9,10,11,11,12,0,13,14,15,16,0,0,0,0,0,5,0,0,0,10,12,0,13,15,0,16,0,0,0,0,0,5,0,0,10,0,12,0,0,15,16,0,0,0,0,0,0,6,0,0,0,0,0,14,15,0,16,0,0,0,0,0,0,9,0,13,13,14,15,15,16,16,0,0,0,0,0,0,0
-; [origin folded into the run above by compact.mjs]
         * = $bc00
 stepThrT1: !byte 2,1,3,3,3,3,4,4,5,0,0,0,7,7,9,11,11,13,0,0,0,0,0,0,0,15,0,1,0,3,0,5,0,6,6,5,0,0,6,0,8,9,11,11,11,0,0,0,0,0,0,0,15,0,2,3,0,5,1,0,1,0,6,4,0,6,0,7,9,10,10,12,0,0,0,0,0,0,0,15,0,2,3,0,5,0,1,3,3,6,5,0,6,0,7,9,11,11,0,0,0,0,0,0,0,14,0,0,1,1,3,5,0,0,0,0,5,0,0,7,7,0,9,11,0,13,0,0,0,0,0,0,14,15,16,1,3,3,0,0,0,0,0,5,5,0,0,8,9,10,11,12,14,0,0,0,0,0,0,14,15,16,1,1,3,5,0,0,0,0,5,6,7,8,8,10,11,0,13,14,8,0,12,11,0,0,14,15,16,1,1,0,3,4,0,0,0,5,6,9,8,9,10,11,0,13,9,9,11,12,11,13,0,14,0,16,0,1,3,5,3,5,5,5,6,7,8,8,7,7,9,11,13,11,12,14,15,15,15,14,16,15,15
-; [origin folded into the run above by compact.mjs]
         * = $bd00
 stepThrT2: !byte 2,1,2,2,3,4,4,4,5,0,0,0,7,0,9,0,12,13,0,0,0,0,0,0,0,0,0,1,1,3,0,5,5,6,7,7,0,0,6,0,8,9,11,8,12,0,0,0,0,0,0,0,15,0,2,3,3,5,5,0,6,7,9,4,6,6,0,8,9,0,10,12,0,0,0,0,0,0,0,15,0,1,3,0,5,5,0,7,7,8,5,0,6,0,7,8,9,10,10,0,0,0,0,0,0,0,0,0,1,3,0,5,0,0,0,0,0,4,6,6,7,7,9,10,0,11,0,0,0,0,0,0,0,15,16,1,3,0,5,0,0,0,0,0,0,8,0,8,9,9,11,12,12,0,0,0,0,0,0,14,15,16,1,3,0,5,0,0,0,0,0,6,6,9,8,10,11,11,0,0,9,9,0,0,0,0,14,15,16,1,0,0,0,0,0,0,0,0,0,6,0,8,10,11,0,13,14,10,10,0,12,13,0,14,0,16,0,0,0,0,0,0,0,0,0,6,6,8,9,10,0,0,13,0,12,13,13,14,14,15,15,16,14
-; [origin folded into the run above by compact.mjs]
         * = $be00
 stepThrT3: !byte 2,1,2,2,1,1,1,0,0,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,0,3,3,0,0,1,2,1,0,0,0,0,6,0,8,0,0,0,0,0,0,0,0,0,0,15,3,3,0,0,3,0,0,3,3,6,6,6,6,7,8,0,7,6,0,0,0,0,0,0,0,0,15,3,4,5,5,5,5,0,0,5,7,0,0,0,7,8,8,9,7,0,0,0,0,0,0,0,0,14,4,5,0,0,0,0,0,0,0,7,8,7,7,8,9,10,10,0,0,0,0,0,0,0,13,13,15,3,6,6,6,0,0,0,0,0,0,9,9,9,9,0,11,11,9,0,0,0,0,0,0,0,14,14,4,0,0,0,0,0,0,0,0,11,11,10,11,10,11,0,0,0,0,0,0,14,0,14,14,14,15,4,7,0,0,0,0,0,0,0,11,10,10,11,0,0,13,13,13,15,15,15,15,15,15,0,0,15,6,0,8,0,0,0,0,0,0,13,11,12,0,13,14,0,14,0,16,16,16,0,16,16,16,16,15
 ; [origin folded into the run above by compact.mjs]
@@ -15098,8 +15028,7 @@ stepThrT3: !byte 2,1,2,2,1,1,1,0,0,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,0,3,3,
         ; $bc00 is a whole free page and now uncontested: the merge-hazard lists used to claim
         ; the same address and only fitted because level 1 has no hazard cells. They live in
         ; the code stream now (see hzRun), well clear of this page.
-; [origin folded into the run above by compact.mjs]
-        * = $5e7d
+        * = $5e7c
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
@@ -15275,8 +15204,7 @@ picOn:  jsr dsBoom              ; the cut lands on a boom
         sta $d023
         rts
 
-; [origin folded into the run above by compact.mjs]
-        * = $adb6
+        * = $adb6               ; @FLOAT (see compact.mjs): placed in the code stream, beside readKeys,
                                 ;   this routine moved four pinned hot loops across page lines and
                                 ;   cost 402 bytes of padding; as a self-contained run it drops into
                                 ;   a pre-alignment gap instead. (The address is a placeholder.)
@@ -15327,8 +15255,7 @@ lkGo:   stx lvlNxtT             ; exit 0 now leads there... (lkGo: TESTRIG's maS
         lda orbYCT,y
         sta py+1
         rts
-; [origin folded into the run above by compact.mjs]
-        * = $ada2
+        * = $ada2               ; lvKey's tables: a data run of their own, for the same gap-filling
 lkColT: !byte $7f,$7f,$fd,$fd,$fb,$fb,$f7,$f7,$ef,$ef   ; lvKey: each level's digit, its keyboard column...
 lkBitT: !byte $01,$08,$01,$08,$01,$08,$01,$08,$01,$08   ; ...and its row bit
 
@@ -15336,10 +15263,8 @@ lkBitT: !byte $01,$08,$01,$08,$01,$08,$01,$08,$01,$08   ; ...and its row bit
         ; block, which it overflows. It is gated on ANGMID and nothing else -- it was once written
         ; inside the six-sprite angel's table block, and gating a table on one flag while its use
         ; site is gated on another broke the DEFAULT build outright.
-; [origin folded into the run above by compact.mjs]
         * = $7595
 angMidT: !byte 3,3,2,2,1,1,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,0,0,0,1,0,0,255,1,0,0,255,0,0,0,1,0,0,255,0,0,0,255,255,1,1,0,0,0,255,255,1,1,1,0,0,255,255,1,1,1,0,0,255,255,2,1,1,0,0,255,255,255,1,1,0,0,255,255,255,1,1,0,0,0,255,255,1,1,0,0,0,255,255,254,254,253,253,253,252,252,251,251,251,250,250,249,249,248,248,248,247,247,246,246,246,245,245,244,244,243,243,243,242,242,241,241,240,240,240,239,239,238,238,238,237,237,236,236,235,235,235,234,234,233,233,232,232,232,231,231,230,230,230,229,229,228,228,227,227,227,226,226,225,225,225,224,224,223,223,222,222,222,221,221,220,220,219,219,219,218,218,217,217,217,216,216,215,215,214,214,214,213,213,212,212,211,211,211,210,210,209,209,209,208,208,207,207,206,206,206,205,205,204,204,204,203,203,202,202,201,201,201,200,200,199,199,198,198,198,197,197,196,196,196,195,195,194,194,193,193,193,192,192,191,191
-; [origin folded into the run above by compact.mjs]
         * = $bf00
 qcosT: !byte 255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,254,253,253,253,253,252,252,252,252,251,251,251,250,250,250,249,249,249,248,248,248,247,247,246,246,245,245,245,244,244,243,243,242,242,241,241,240,239,239,238,238,237,237,236,235,235,234,233,233,232,231,231,230,229,229,228,227,227,226,225,224,224,223,222,221,220,220,219,218,217,216,215,215,214,213,212,211,210,209,208,207,207,206,205,204,203,202,201,200,199,198,197,196,195,194,193,192,191,190,189,188,186,185,184,183,182,181,180,179,178,177,175,174,173,172,171,170,168,167,166,165,164,162,161,160,159,157,156,155,154,152,151,150,149,147,146,145,144,142,141,140,138,137,136,134,133,132,130,129,128,126,125,123,122,121,119,118,117,115,114,112,111,109,108,107,105,104,102,101,99,98,97,95,94,92,91,89,88,86,85,83,82,80,79,77,76,74,73,71,70,68,67,65,64,62,61,59,58,56,55,53,51,50,48,47,45,44,42,41,39,38,36,34,33,31,30,28,27,25,24,22,20,19,17,16,14,13,11,9,8,6,5,3,2
 

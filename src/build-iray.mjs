@@ -39,6 +39,7 @@ if (process.env.SLOT_AT === undefined) {
   while (queue.length && tried.length < 9) {
     const sa = queue.shift(); if (tried.includes(sa)) continue; tried.push(sa);
     try { unlinkSync('./build/iray.arena.json'); } catch {}
+    try { unlinkSync('./build/iray.slotmiss'); } catch {}
     // DUMPKEEP from the second trial on: the level-table sub-builds (dumpOf) are most of a trial's
     // time, and their dumps do not depend on SLOT_AT -- the dump is taken before the slot address
     // reaches anything in it, and a dump build lays out no wall lists. So a retry reuses the ones
@@ -53,6 +54,14 @@ if (process.env.SLOT_AT === undefined) {
     }
     let ar = null; try { ar = JSON.parse(readFileSync('./build/iray.arena.json', 'utf8')); } catch {}
     if (!ar) process.exit(res.status ?? 1);            // failed before compaction: not a layout problem
+    // ...nor after it, unless the trial SAID the slot was the problem (build/iray.slotmiss: compaction's
+    // region check, or the level-region guard below). It used to retry on ANY failure past compaction,
+    // so a boot loader that overflowed its gap read "slot $6900 does not fit" five times and buried the
+    // real error (2026-11-15). The trial printed that error itself; stop on it.
+    if (!existsSync('./build/iray.slotmiss')) {
+      console.error(`  (slot $${sa.toString(16)}: the build failed for a reason other than the slot -- see the error above)`);
+      process.exit(res.status ?? 1);
+    }
     const top = (ar.dataStart - ar.regionLen) & ~255;
     console.error(`  slot: $${sa.toString(16)} does not fit (arena $${ar.codeEnd.toString(16)}-$${(ar.dataStart - 1).toString(16)}, region ${ar.regionLen} B); trying lower`);
     // every page from the highest that fits down: where the page-constrained scratch packs is not
@@ -91,7 +100,7 @@ const DIAGEARLY = [];
 import { fitOrb, fitArt, fatBits, artPath } from './fit-orb.mjs';
 import { fitBolt, ROTSTEP as BOLT_ROT, BOLT_H, HIRES as BOLT_HIRES } from './fit-bolt.mjs';
 import { silverW, silverAt, silverLeast, setSilverLuma } from './fit-silver.mjs';
-import { LOADER_RUN, KSTAGE, KRILL_RT_LEN, KRILL_RT_AT, KRILL_RESIDENT_AT } from './loader-src.mjs';
+import { LOADER_RUN, KSTAGE, KRILL_RT_LEN, KRILL_RT_AT, KRILL_RESIDENT_AT, QUOTE_NAME, fileName } from './loader-src.mjs';
 import { END_DST, IEND_NAME, IEND_RUN, buildEnding } from './ending-src.mjs';
 // THE LEVELS (2026-11-15): their definitions moved to levels.mjs, which the level-sheet printer reads
 // too. Imported under the names the build has always used, so the rest of this file is unchanged.
@@ -4423,20 +4432,13 @@ const ORBEX = LADDER.map(r => r.exp ? 1 : 0), ORBEY = LADDER.map(r => r.exp || r
 const ORBWIDE = LADDER.map((r, v) => (r.w ?? orbW(r.h)) * (ORBEX[v] ? 4 : 2));   // apparent width, screen px
 const ORBTALL = LADDER.map((r, v) => r.h * (ORBEY[v] ? 2 : 1));                  // apparent height, screen px
 // ---- TALL ENTITIES: the angel, two sprites stacked ----
-// Art came off TMP-2.d64 (GKGM, two frames; the disk is not kept) via angel-art.json. 12x42 multicolor, body and
-// underside inks only. Same resampler as the orb -- majority of 4x4 samples, transparency
-// competing on equal terms -- just over a 42-row box, so the output is TWO sprite bitmaps.
-// Step of 3 source rows a rung: 7% a step, comparable to the orb ladder, and 13 distinct heights
-// instead of 32. Heights above 21 need two bitmaps, at or below 21 only one -- so a distant angel
-// costs a single sprite, which is where the slot budget goes.
-const ANGART = JSON.parse(readFileSync('./data/angel-art.json', 'utf8'));
-// ---- THE DEATH CUT SCENE: the Haserot Angel, fitted to 256 glyphs ----
-// angel-face.json is produced by fit-angel.mjs from a GEK scene, art/gamemaker/hangl1.gek. A GEK image is
-// 160x200 multicolor stored as 4x8 tiles of 8 bytes, which IS a C64 char glyph, so the fitter's
-// output drops straight into a charset. 256 glyphs reproduce the face at RMS 0.082 -- close
-// enough that no raster split and no backup of charset A is needed.
+// 12x42 multicolor, body and underside inks only, fitted from art (ANGELART below) at every rung:
+// TWO sprite bitmaps above 21 rows, one at or below. Step of 3 source rows a rung: 7% a step,
+// comparable to the orb ladder, and 13 distinct heights instead of 32 -- so a distant angel costs a
+// single sprite, which is where the slot budget goes.
+// ---- THE DEATH CUT SCENE: the sword angel, data/death-pics.json (tools/build-facetest3.mjs) ----
 // The death cut scene, on by default. The face ships INSIDE the image at $7100 -- there is no
-// packer and no staging any more, so nothing about it is size-constrained. See fit-angel.mjs.
+// packer and no staging any more, so nothing about it is size-constrained.
 const DIE      = process.env.DIE !== '0';
 // PROFILE and the cut scene both want $bc00 and there is no longer room for both, so say which
 // two things collided instead of letting the assembler report "* = $bc00 moves backward from
@@ -4575,13 +4577,10 @@ const darkerT = [...Array(16)].map((_, c) => {
 });
 // elapsed sixtieth -> tick. A table because 54/9 is 6 and a shift cannot divide by six: with
 // >>2 the ramp finished at el=36 and the picture went black well BEFORE the face reached centre.
-// ANGELART=full digitises the angel from angel-full.png instead of using the drawn art off
-// TMP-2.d64. The figure's content box is about 604x1123, a 0.54 ratio against the sprite's
-// 0.48 displayed one, so it fits at very nearly its own proportions.
-// The SAMPLED angel is the default now, not the drawn one off TMP-2.d64 -- the two-sprite ladder
-// fits it through the same per-rung refit the pictures use. ANGELART= (empty) brings the drawn
-// art back.
-const ANGELART = process.env.ANGELART ?? 'full';
+// The angel is fitted from art/angel-<ANGELART>.png (default full). The figure's content box is about
+// 604x1123, a 0.54 ratio against the sprite's 0.48 displayed one, so it fits at very nearly its own
+// proportions.
+const ANGELART = process.env.ANGELART || 'full';
 // ANGCON: the S-curve strength for the ANGEL only. Shared with the orb it would be wrong --
 // the orb's whole character is the dither grain, and pushing tones off the middle grey collapses
 // it into a hard light/dark split. The angel wants the opposite: its shading reads as mush until
@@ -4590,43 +4589,16 @@ const ANGELART = process.env.ANGELART ?? 'full';
 // and the shading read as mush. Pushing tones off the centre is the only thing that spreads them
 // onto the outer two levels, which is where the contrast actually comes from.
 const ANGCON = +(process.env.ANGCON ?? 2.4);
-const ANGSRC42 = (() => {
-  if (ANGELART) {
-    const px = fitArt(`angel-${ANGELART}.png`, 12, 42, { mirror: false, contrast: ANGCON }).px;
-    return [...Array(42)].map((_, y) => [...px.slice(y * 12, y * 12 + 12)]);
-  }
-  const g = [];
-  for (let y = 0; y < 42; y++) { const r = [];
-    for (let b = 0; b < 3; b++) for (let i = 0; i < 4; i++)
-      r.push((ANGART.angel[y * 3 + b] >> (6 - 2 * i)) & 3);
-    g.push(r); }
-  return g; })();
 const angW = h => Math.max(1, Math.round(12 * h / 42));
 // The figure at an arbitrary resolution, as a flat w*h array. Kept separate from angScale, which
 // is built around the one 12x42 canvas the two sprites hold, so the fitting rule stays in one
 // place if a rung ever wants a different canvas again.
 function angPx(w, h) {
-  if (ANGELART) {
-    // Same reason as the orb: majority voting flattens a dithered figure as it shrinks, so
-    // every rung is fitted from the source at its own resolution instead. fitArt box-filters
-    // from the full-resolution render -- a destination pixel's footprint is bw*dx/W -- so a
-    // wider W really does sample finer, rather than resampling a smaller fit.
-    return fitArt(`angel-${ANGELART}.png`, w, h, { mirror: false, contrast: ANGCON }).px;
-  }
-  // Resampled from the 12x42 drawn art, so anything ABOVE 12x42 would be an upscale that
-  // invents no detail. Nothing asks for one today -- the ladder magnifies the sprite instead.
-  const px = new Array(w * h).fill(0);
-  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
-    const t = [0, 0, 0, 0];
-    for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
-      const sx = Math.min(11, Math.floor((dx + (i + 0.5) / ORBSAMP) * 12 / w));
-      const sy = Math.min(41, Math.floor((dy + (j + 0.5) / ORBSAMP) * 42 / h));
-      t[ANGSRC42[sy][sx]]++;
-    }
-    let best = 0; for (let v = 1; v < 4; v++) if (t[v] >= t[best]) best = v;
-    px[dy * w + dx] = best;
-  }
-  return px;
+  // Same reason as the orb: majority voting flattens a dithered figure as it shrinks, so
+  // every rung is fitted from the source at its own resolution instead. fitArt box-filters
+  // from the full-resolution render -- a destination pixel's footprint is bw*dx/W -- so a
+  // wider W really does sample finer, rather than resampling a smaller fit.
+  return fitArt(`angel-${ANGELART}.png`, w, h, { mirror: false, contrast: ANGCON }).px;
 }
 function angScale(w, h) {
   const out = [...Array(42)].map(() => new Array(12).fill(0));
@@ -4673,9 +4645,7 @@ for (const r of ANGLAD) {
   ORBTALL.push(r.h * (r.exp ? 2 : 1));
 }
 // ---- THE IDOL: the orb's ladder exactly, a different bitmap at every rung ----
-// goat-art.json is a finished 12x21 multicolor sprite -- drawn in GMC64's spritemaker, not
-// fitted from a render -- so the values ARE the VIC bit pairs and nothing has to be quantised.
-// Resampled by the same majority-of-16 vote the orb uses, over the goat's own content box.
+// Fitted from art/goat6.png at every rung (below, idolScale).
 //
 // IT ADDS NO RUNGS. Both content boxes fill the whole 12x21 frame, so idolW and orbW are the
 // same function and the two ladders are geometrically identical -- same widths, same heights,
@@ -4785,14 +4755,8 @@ const pedTex = (u0, u1, v0, v1) => {
   // flattened every dithered transition into a clean edge, which is the opposite of the point.
   return at(Math.floor((v0 + v1) / 2 * TEXH), Math.floor((u0 + u1) / 2 * TEXW));
 };
-const GOAT = JSON.parse(readFileSync('./data/goat-art.json', 'utf8')).rows
-  .map(r => [...r].map(Number));
-const _gc = [...Array(12).keys()].filter(x => GOAT.some(r => r[x]));
-const _gr = [...Array(21).keys()].filter(y => GOAT[y].some(v => v));
-const GX0 = Math.min(..._gc), GY0 = Math.min(..._gr);
-const GW = Math.max(..._gc) - GX0 + 1, GH = Math.max(..._gr) - GY0 + 1;
 // ---- the idol is FITTED FROM SOURCE ART now, rung by rung, exactly as the orb is ----
-// It used to box-filter GOAT, the hand-tuned 21x12 in goat-art.json -- a resample of something
+// It used to box-filter a hand-drawn 12x21 sprite (goat-art.json, gone) -- a resample of something
 // already crushed to sprite resolution and four colours. That is why its small rungs collapsed
 // into a cross and a dash while the orb's stayed round: the orb re-resolves from 1254x1254 at
 // every rung and keeps its grain, the idol was averaging an average. The orb done the old way (a
@@ -4804,36 +4768,20 @@ const GW = Math.max(..._gc) - GX0 + 1, GH = Math.max(..._gr) - GY0 + 1;
 // on 8fps animations rather than strips: NOT dithered, because the dither pattern re-resolves
 // at every rung and shimmers between frames, and it only differs at the two largest rungs
 // anyway (66 of 1107 pixels, 37 of them at h=21 and h=19).
-// IDOLART=hand restores the old box-filter of goat-art.json.
 const IDOLART = process.env.IDOLART ?? 'goat6.png';
 const IDOLCON = +(process.env.IDOLCON ?? 1.6);
 function idolScale(w, h) {
   const out = [...Array(21)].map(() => new Array(12).fill(0));
   const ox = (12 - w) >> 1, oy = 21 - h;        // centred across, standing on the floor
-  if (IDOLART !== 'hand') {
-    // dark: the art is lit-on-black, so the background flood fill looks for DARK from the
-    // border. Without it every pixel reads as ink and the fit is a filled rectangle.
-    const px = fitArt(IDOLART, w, h, { dither: false, contrast: IDOLCON, dark: true }).px;
-    for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
-      out[oy + dy][ox + dx] = px[dy * w + dx];
-    return out;
-  }
-  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
-    const t = [0, 0, 0, 0];
-    for (let i = 0; i < ORBSAMP; i++) for (let j = 0; j < ORBSAMP; j++) {
-      const sx = Math.floor(GX0 + GW * (dx + (i + 0.5) / ORBSAMP) / w);
-      const sy = Math.floor(GY0 + GH * (dy + (j + 0.5) / ORBSAMP) / h);
-      if (sx >= 0 && sx < 12 && sy >= 0 && sy < 21) t[GOAT[sy][sx]]++;
-    }
-    let bn = -1, v = 0;
-    for (let k = 0; k < 4; k++) if (t[k] >= bn) { bn = t[k]; v = k; }
-    out[oy + dy][ox + dx] = v;
-  }
+  // dark: the art is lit-on-black, so the background flood fill looks for DARK from the
+  // border. Without it every pixel reads as ink and the fit is a filled rectangle.
+  const px = fitArt(IDOLART, w, h, { dither: false, contrast: IDOLCON, dark: true }).px;
+  for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++)
+    out[oy + dy][ox + dx] = px[dy * w + dx];
   return out;
 }
-// THE ORB'S OWN WIDTH RULE. It used to come from goat-art.json's content box, which happened
-// to agree; fitting from other art it need not, and the guard below turns a disagreement into a
-// build error rather than a wrong pointer. Same ladder, same widths, by construction now.
+// THE ORB'S OWN WIDTH RULE: fitting from art, the idol's own content box need not agree, and the
+// guard below turns a disagreement into a build error rather than a wrong pointer.
 const idolW = h => orbW(h);
 // The idol's bitmaps sit in ORBBM in the SAME ORDER as the orb's, so one constant added to an
 // orb pointer lands on the matching idol bitmap. That constant is IDOLBM0.
@@ -5116,20 +5064,18 @@ if (HAS_BIG) {
   // THE TAIL IS STRETCHED to fill the frame (the user: "move the angel up in the frame ... extend the
   // length of the ghostly tail to go to the bottom of the bottom sprite. maximize size"). The widest
   // set is width-bound (36 columns hold the wingspan at 55 rows), so the figure keeps its proportions
-  // down to BIGSPLIT of its height -- head, wings, hands, the sword's guard -- and only the robe and
+  // down to about 0.62 of its height -- head, wings, hands, the sword's guard -- and only the robe and
   // tail below are lengthened, until the whole is exactly as tall as BIG_SETS[0] at 36 wide: top at
-  // the frame's first row, tail on its last. build/<art>-tall.png, made here with magick.
-  const BIGSPLIT = +(process.env.BIGSPLIT ?? 0.62);
-  const tall = './build/' + BIG_ART.replace(/\.png$/, '-tall.png');
+  // the frame's first row, tail on its last. The ART IS THE STRETCHED FIGURE (2026-11-15: the build
+  // used to stretch the wide original here with magick; that output is now art/angel-fly.png), so
+  // check it still has that shape: its trimmed height, against what BIG_SETS[0] at 36 wide wants.
+  const tall = artPath(BIG_ART);
   {
-    const src = artPath(BIG_ART);
-    const [tw, th] = execFileSync('magick', [src, '-fuzz', '4%', '-trim', '+repage', '-format', '%w %h', 'info:']).toString().split(' ').map(Number);
-    const want = Math.round(BIG_SETS[0] * tw / 36 / BIG_AX), split = Math.round(th * BIGSPLIT);
-    if (want <= th) throw new Error(`BIGSETS[0]=${BIG_SETS[0]}: the art already fills that height at 36 wide -- nothing to stretch`);
-    execFileSync('magick', [src, '-fuzz', '4%', '-trim', '+repage',
-      '(', '-clone', '0', '-crop', `${tw}x${split}+0+0`, '+repage', ')',
-      '(', '-clone', '0', '-crop', `${tw}x${th - split}+0+${split}`, '+repage', '-resize', `${tw}x${want - split}!`, ')',
-      '-delete', '0', '-append', '-bordercolor', 'white', '-border', '4', tall]);
+    const [tw, th] = execFileSync('magick', [tall, '-fuzz', '4%', '-trim', '+repage', '-format', '%w %h', 'info:']).toString().split(' ').map(Number);
+    const want = Math.round(BIG_SETS[0] * tw / 36 / BIG_AX);
+    if (Math.abs(th - want) > 2) throw new Error(`${BIG_ART} is ${tw}x${th} trimmed, but BIGSETS[0]=${BIG_SETS[0]} at 36 wide ` +
+      `wants it ${want} tall -- re-stretch the art (keep the top ~0.62 of the figure in proportion, ` +
+      `lengthen the robe and tail below) so the tail lands on the frame's last row`);
   }
   const [bw, bh] = fitArt(tall, 8, 8, { mirror: false }).box, ratio = (bw / bh) / BIG_AX;
   const spr = (g, r0, c0) => [...sprBytes(g, r0, c0), 0];
@@ -8035,6 +7981,24 @@ const L9T = HAS_SILVER ? (() => {
 // one wants set 0: its own (LEVEL_IDOL) and the hub that receives them (LEVEL_PEDESTALS).
 // A level's file is ILV + ONE character, '0' + n: lvlLoad forms it with ora #$30, so level 10 is 'ILV:'
 const ILV_NAME = n => 'ILV' + String.fromCharCode(0x30 + n);
+// ---- nILV: THE ONE NAME BUFFER the game loads through ----
+// Every file the ENGINE loads -- a level, an art set, an angel's ladder, the ending -- goes through one
+// zero-terminated buffer renamed in place: the last character from A (ora #$30), the letters before it
+// by storing only those that differ. So every such name is the buffer's length and shares its first
+// letter, or the 0 lands in the wrong place and Krill asks for a file that is not there. The offsets
+// were literal (nILV+1/+2/+3, four letters assumed: 2026-11-13 audit); they derive from NAME_BUF now
+// (2026-11-15), and nmFits refuses at build time a name that the buffer cannot hold.
+const NAME_BUF = ILV_NAME(1), NAME_DIG = NAME_BUF.length - 1;
+const ART_NAME = k => 'IAR' + k, ANG_NAME = k => 'IAN' + k;
+const nmFits = nm => {
+  if (nm.length !== NAME_BUF.length || nm[0] !== NAME_BUF[0]) throw new Error(`runtime file "${nm}" ` +
+    `does not fit the name buffer nILV ("${NAME_BUF}"): lvlLoad renames it in place, so every name it loads ` +
+    `must be ${NAME_BUF.length} characters starting '${NAME_BUF[0]}'`);
+  return fileName(nm);
+};
+// the stores that turn the buffer's prefix from `from` into `to` (the digit is A's, stored apart)
+const nmPrefix = (to, from) => [...to.slice(0, NAME_DIG)].map((c, i) => c === from[i] ? null :
+  `        lda #$${c.charCodeAt(0).toString(16)}                ; '${c}'\n        sta nILV+${i}`).filter(Boolean).join('\n');
 // ---- WHERE THE BIG ANGEL'S BITMAPS GO: IAR2 at OVLBASE, and the rest over the ANGEL's ladder ----
 // IAR2 holds what fits below $fe00 after BIGTBL (the user, 2026-11-10, wanting in-between sizes: "as it
 // approaches from afar there is no indication it is moving towards you"). The rest load as IAN1 over the
@@ -25056,7 +25020,7 @@ ${HAS_LX ? `        pha
 ` : ''}${ENDING ? `        cmp #${hx(END_DST)}                ; THE END is not a level: endGo loads the ending instead
         beq endGo
 ` : ''}        ora #$30                ; the file is ILV<n>: the level number IS its last character,
-        sta nILV+3              ;   so choosing a level is one byte of self-modification
+        sta nILV+${NAME_DIG}              ;   so choosing a level is one byte of self-modification
 ${HAS_LX ? `        jsr llName
         jsr lxOn                ; LEVEL CODE: the arriving level's, if it brought any
 ` : ''}${HAS_ART ? `; ---- lvlArt: and the LEVEL ART at OVLBASE, if the arriving level wants the other set ----
@@ -25068,31 +25032,19 @@ ${HAS_LX ? `        jsr llName
         cmp artCur
         beq laDn
         sta artCur
-        sta nILV+3
-        lda #$41                ; 'A'
-        sta nILV+1
-        lda #$52                ; 'R'
-        sta nILV+2
+        sta nILV+${NAME_DIG}
+${nmPrefix(ART_NAME(0), NAME_BUF)}
         jsr llName
-        lda #$4c                ; 'L' -- and back to ILV for the next level
-        sta nILV+1
-        lda #$56                ; 'V'
-        sta nILV+2
+${nmPrefix(NAME_BUF, ART_NAME(0))}               ; ...and back to ${NAME_BUF.slice(0, NAME_DIG)} for the next level
 laDn:
 ${HAS_BIG ? `        lda lvlAnT              ; ---- ...and over the ANGEL's ladder: IAN0 (the angel's) or IAN1 ----
         cmp anCur               ;   (the big angel's overflow, see BIGAN), the same way
         beq lnDn
         sta anCur
-        sta nILV+3
-        lda #$41                ; 'A'
-        sta nILV+1
-        lda #$4e                ; 'N'
-        sta nILV+2
+        sta nILV+${NAME_DIG}
+${nmPrefix(ANG_NAME(0), NAME_BUF)}
         jsr llName
-        lda #$4c                ; 'L'
-        sta nILV+1
-        lda #$56                ; 'V'
-        sta nILV+2
+${nmPrefix(NAME_BUF, ANG_NAME(0))}
 lnDn:
 ` : ''}        rts
 ; artCur is DATA, not an equate: an emitted value is the only initialisation
@@ -25104,8 +25056,7 @@ ${LD('lvlArtT', LVLT('lvlArtT').join(','), ': !byte ')}   ; the level art set th
 ${HAS_BIG ? `${LD('lvlAnT', LVLT('lvlAnT').join(','), ': !byte ')}   ; ...and over the angel's ladder: IAN0, or IAN1 the big angel's overflow
 anCur:  !byte $30                ; IAN0: level 1, the boot level, has the ordinary angel
 ${LD('bltIxT', LVLT('bltIxT').join(','), ': !byte ')}   ; the ball lightning's entity ($ff none)
-${LD('bgAIxT', LVLT('bgAIxT').join(','), ': !byte ')}   ; ...and its thrower
-bsTk:   !byte 0                 ; unused since the old AI went (2026-11-15); dropping it moves the image` : ''}
+${LD('bgAIxT', LVLT('bgAIxT').join(','), ': !byte ')}   ; ...and its thrower` : ''}
 ` : HAS_LX ? `        rts
 ` : ''}${HAS_LX ? `; ---- THE LEVEL-CODE VECTORS (see LX_FEATURES) ----
 ; The engine calls level code only through these. Each is a jmp: into the module's jump table at
@@ -25186,7 +25137,7 @@ ${process.env.LLDEN ? '' : `        and #$ef
         lda llZP+1
         sta $9a
         rts
-nILV:   !byte ${[...'ILV1'].map(c => hx(c.charCodeAt(0))).join(',')},0
+nILV:   !byte ${[...NAME_BUF].map(c => hx(c.charCodeAt(0))).join(',')},0   ; NAME_BUF: see nmFits
 llZP:   !fill 2, 0              ; DFLTN, DFLTO
 llErr:  !byte 0
 ${ENDING ? `
@@ -25195,7 +25146,7 @@ ${ENDING ? `
 ; same live resident, the same name buffer renamed ${IEND_NAME} -- and jumped into; it takes the machine
 ; (interrupts, sprites, sound) and never comes back. Its own REBOOT reloads the game for the next go.
 endGo:  sei
-${[...IEND_NAME.slice(1)].map((c, i) => `        lda #${hx(c.charCodeAt(0))}                ; '${c}'
+${[...nmFits(IEND_NAME).slice(1)].map((c, i) => `        lda #${hx(c.charCodeAt(0))}                ; '${c}'
         sta nILV+${i + 1}`).join('\n')}
         jsr llName
         bcs egFail
@@ -31082,6 +31033,7 @@ try {
     const zpSlot = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9a-fA-F]+)\s*(?:;.*)?$/gm)]
       .filter(m => slotN.has(m[1]) && (parseInt(m[2], 16) < SLOT_AT || parseInt(m[2], 16) >= end)).map(m => `${m[1]}=$${m[2]}`);
     if (zpSlot.length) throw new Error(`level-slot table(s) moved OUT of the slot, where level files never write them: ${zpSlot.join(' ')}`);
+    if (inReg.length && process.env.SLOT_PICK) writeFileSync('./build/iray.slotmiss', 'scratch in the level region');   // a SLOT miss: the picker retries lower
     if (inReg.length) throw new Error(`RAM buffer(s) inside the level region ${hx16(SLOT_AT)}-${hx16(end - 1)}, which every level load ` +
       `overwrites: ${inReg.map(([nm, a]) => `${nm}=${hx16(a)}`).join(' ')}`);
   }
@@ -31296,7 +31248,7 @@ try {
     // So the sockets go when the hub's art comes in and are back with whatever art comes in next (a level
     // with sockets and no art asks for IAR0 then: see lvlArtT). No loader code: lvlArt already does it.
     ...(SPRITES ? [...ART_SETS, ...(ISK2_DATA.length ? [ART_SETS[0]] : [])].map((data, k) => data.length
-          ? { tag: 'A' + k, name: 'IAR' + k, at: ISK2_DATA.length ? SOCKBASE : OVLBASE,
+          ? { tag: 'A' + k, name: nmFits(ART_NAME(k)), at: ISK2_DATA.length ? SOCKBASE : OVLBASE,
               data: [...(!ISK2_DATA.length ? [] : k === 3 ? [...ISK2_DATA, ...Array(OVLBASE - SOCKBASE - ISK2_DATA.length).fill(0)] : SOCKSHIP.flat()),
                      ...data.flat(), ...(k === 0 || k === 3 ? PEDTBL_BYTES : k === 1 ? SVTBL_BYTES : k === 2 ? BIGTBL_BYTES : [])],
               runtime: k !== ART_BOOT } : null)
@@ -31314,13 +31266,13 @@ try {
                             ...ORBBM.slice(0, ORBLO_N).flat()] }] : []),
     // ---- IAN0/IAN1: the ordinary angel's ladder, or the big angel's overflow over it (see BIGAN) ----
     // Both RUNTIME: level 1, the boot level, has the ordinary angel, which ISPR carries (above).
-    ...(SPRITES && HAS_BIG ? [{ tag: 'N0', name: 'IAN0', ...(FLUTE ? { at: SPRBASE, data: ORBBM.slice(0, ANGBM1).flat() }   // + the ORBS: the hub's IAN2 is over them too
+    ...(SPRITES && HAS_BIG ? [{ tag: 'N0', name: nmFits(ANG_NAME(0)), ...(FLUTE ? { at: SPRBASE, data: ORBBM.slice(0, ANGBM1).flat() }   // + the ORBS: the hub's IAN2 is over them too
                                                                 : { at: ANGBASE, data: ORBBM.slice(ANGBM0, ANGBM1).flat() }), runtime: true },
-                              { tag: 'N1', name: 'IAN1', at: ANGBASE, data: IAN1_DATA, runtime: true },
+                              { tag: 'N1', name: nmFits(ANG_NAME(1)), at: ANGBASE, data: IAN1_DATA, runtime: true },
                               // IAN2, the hub's: the flute's bitmaps, then -- at bltVarT's own address, which is
                               // IAN1's -- a rung table sending every distance to BOLT_V0: orbOne reads it for the
                               // level's "ball" entity, and ftSz picks the flute's real size from h itself
-                              ...(FLUTE ? [{ tag: 'N2', name: 'IAN2', at: SPRBASE, runtime: true, data: IAN2_DATA }] : [])] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
+                              ...(FLUTE ? [{ tag: 'N2', name: nmFits(ANG_NAME(2)), at: SPRBASE, runtime: true, data: IAN2_DATA }] : [])] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
     // ---- IPIC: every cut-scene picture after the first ----
     // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
     // bank 3 has free. This is DATA the VIC never reads -- it is copied to a
@@ -31399,7 +31351,7 @@ try {
         while (SLOT_AT + data.length < MUS_AT[n]) data.push(0);
         data.push(...MUS_BLOBS.get(n));
       }
-      return { tag: 'V' + n, name: ILV_NAME(n), at: SLOT_AT,
+      return { tag: 'V' + n, name: nmFits(ILV_NAME(n)), at: SLOT_AT,
                runtime: n !== 1, data };   // level 1 is the boot's (and rides in IMG: below)
     })),
     // HOLEBMHASH=1: checksum just the EXIT hole's bitmaps, so a change to the socket
@@ -31461,7 +31413,7 @@ try {
       `this build wants $${QUOTE_SCR.toString(16)} +${blob.length} B. Re-run make-quote.mjs.`);
     // ASSEMBLED LATER: IQOT carries the sweep's page total, and that total includes IRAY's own
     // length, which is not known until buildLoader has run.
-    return { name: 'IQOT', q, blob };
+    return { name: QUOTE_NAME, q, blob };
   })();
   // ---- ANYTHING THAT LANDS ON THE QUOTE LOADS LAST, behind a blanked screen ----
   // This was a hardcoded pair of names, and a name list cannot notice a NEW file landing there.
@@ -31581,7 +31533,7 @@ try {
   // With no quote there is no IQOT, so the autorun stub chains straight to Krill; with FASTBOOT it
   // chains to IFBT, which decides between the fast road and IQOT's KERNAL one.
   const { buildFastboot, buildDriveCode, FASTBOOT_AT, FB_NAME, FB_DRV_NAME } = await import('./loader-src.mjs');
-  const run = buildAutorun(assemble, FB ? FB_NAME : QUOTE ? 'IQOT' : 'IRAY',
+  const run = buildAutorun(assemble, FB ? FB_NAME : QUOTE ? QUOTE_NAME : 'IRAY',
                            FB ? FASTBOOT_AT : QUOTE ? QUOTE_RUN : IRAY_ENTRY);
   const writeDisk = (ifb, drv) => {
     const d = D64.createEmpty('IRAY', '01');
@@ -31596,7 +31548,7 @@ try {
     // And on a FRESH TRACK (2), so the spacing is exact: track 1 already holds IRUN/IFBT/IDRV, and
     // the allocator's "next free sector after the one wanted" there made the gaps vary 10-17.
     const il = FB ? FB_IL : undefined, it = FB ? 2 : undefined;
-    if (QUOTE) d.writeFile('IQOT', Buffer.from(QUOTE.prg), D64.FILE_TYPE_PRG, il, it);
+    if (QUOTE) d.writeFile(QUOTE_NAME, Buffer.from(QUOTE.prg), D64.FILE_TYPE_PRG, il, it);
     d.writeFile('IRAY', Buffer.from(ld.prg), D64.FILE_TYPE_PRG, il, it);
     // EVERY KRILL-LOADED FILE at Krill's native interleave: 4 on tracks 1-17 (3 on 18+; 4 there
     // costs little). Its drive code reads and decodes so fast it can take every 4th sector, so the
@@ -31617,10 +31569,10 @@ try {
                                      buildDriveCode(assemble, chains)];
     let [ifb, drv] = make({ track: 18, sector: 18 }, [{ track: 1, sector: 0 }, { track: 1, sector: 0 }]);
     const d1 = writeDisk(ifb, drv);
-    const at = { drv: ts(d1, FB_DRV_NAME), q: ts(d1, 'IQOT'), r: ts(d1, 'IRAY') };
+    const at = { drv: ts(d1, FB_DRV_NAME), q: ts(d1, QUOTE_NAME), r: ts(d1, 'IRAY') };
     [ifb, drv] = make(at.drv, [at.q, at.r]);
     d = writeDisk(ifb, drv);
-    for (const [k, n] of [['drv', FB_DRV_NAME], ['q', 'IQOT'], ['r', 'IRAY']]) {
+    for (const [k, n] of [['drv', FB_DRV_NAME], ['q', QUOTE_NAME], ['r', 'IRAY']]) {
       const t = ts(d, n);
       if (t.track !== at[k].track || t.sector !== at[k].sector) throw new Error(
         `fastboot: ${n} moved between the two disk passes (${at[k].track}/${at[k].sector} -> ${t.track}/${t.sector})`);

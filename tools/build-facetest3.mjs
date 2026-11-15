@@ -1,33 +1,305 @@
-// TWO charsets, split by a raster IRQ: 512 glyphs for one full-screen picture.
+// build-facetest3.mjs -- THE DEATH PICTURE: a photograph fitted to one multicolour charset.
 //
+// Makes data/death-pics.json, the picture the game cuts to when an angel takes you: one 256-glyph
+// charset (at most ~200 drawn, the image's budget), one 40x25 screen map, four inks (mid grey
+// behind, dark and light grey, black per cell). The game reads the asset; this tool is how it is
+// remade. Without ASSET=1 it also writes a slideshow disk (OUT, default la-test8.d64) to view
+// candidates on the machine -- the harness the scene was developed in, with a raster split for two
+// charsets (below).
+//
+// ---- REBUILD THE SHIPPED PICTURE ----
+//   SHIPPED=1 node tools/build-facetest3.mjs                  -> data/death-pics.json, byte for byte
+//   SHIPPED=1 ASSETOUT=/tmp/dp.json node tools/build-facetest3.mjs    (somewhere else, to compare)
+// SHIPPED=1 applies the settings in SHIPPED_RECIPE below (they win over the environment) and
+// records the recipe in the asset's `recipe` field. THE SOURCE IS art/death-angel-v5-85.png. It was
+// made from the user's statue render (hasterot-angel-5-sword.png, in git history) by
+//   magick <it> -background "#f8f8f8" -flatten -resize 85% -gravity south -extent 1014x760 <out>
+// (checked 2026-11-15: the same pixels again, `magick compare -metric AE` 0), but the 85% picture is
+// the source now. tools/renderpic.mjs draws an asset as a PNG.
+//
+// ---- DESIGN NOTES: what was tried for the sword angel (2026-10-15) ----
+// Candidates were fitted from the user's statue renders (hasterot-angel-N-sword.png, revisions 2-6,
+// in git history; v5 at 85% is art/death-angel-v5-85.png) and judged as rendered pictures. SHIPPED: "g20-s3", grit 20 with the seam-aware refit at
+// 3. Common to every candidate: source v5 at 85% bottom-anchored on off-white
+// (death-angel-v5-85.png); FACEBGFILL=1 (background = bright pixels CONNECTED to the top/sides, so
+// the white sword survives); FACEMAGICK="-clahe 25x25%+128+3" (local contrast); FACEEDGE=2,0.4
+// (darken a 2-pixel band inside the silhouette, so the lit rim does not halo); FACEGAMMA=1.5;
+// KONE=200; SPLITROW=9 with TRAIN=top,all (the face band counted twice).
+//   g20-s3   FACEGRIT=20 FACESEAM=3 -- SHIPPED
+//   g40-s3   grit 40, seam 3: the user's favourite BODY, but a 5-pixel light bar across the nose
+//   g30-s3   grit 30, seam 3
+//   g20top40-s3          grit 20 in the face band, 40 below (FACEGRITTOP=20 FACEGRITROW=72)
+//   g20top40-sword20-s3  that, plus grit 20 on the sword's bright pixels (FACEGRITBOX=66,120,86,199,20,0.8)
+//   g40-s3-facerun4      g40-s3 with the face-band light-bar rule (FACERUN=4): the bar gone, 2 cells changed
+//   center-c4/c6/c8      g40's body (fitted at 192) with g20's face copied exactly into the centre 4/6/8
+//                        cells (a compositing tool, compose-face.mjs, since removed: none shipped)
+//   edge2 / edge2-256    grit 40, no seam refit; 200 and 256 glyphs
+//   v3/v4/v6-85-200      the other source revisions: grit 40, no seam refit, no edge darkening
+// WHAT MATTERED, in order: a smaller figure (cells per glyph near the original angel's 1.9), local
+// contrast, the seam-aware refit (blockiness), then grit. Fit error (RMS) guided but did not
+// decide: the user judges what LOOKS good and what draws the eye.
+//
+// ---- TWO CHARSETS, split by a raster IRQ (the slideshow; the game ships ONEBOOK=1) ----
 // A charset is 256 glyphs and a picture is 1,000 cells, so the dictionary is the binding
-// constraint on how well a photograph renders. But $d018 carries the charset pointer, and the
-// game ALREADY changes it mid-screen every frame -- irqCm2 switches to the mirrored set at the
-// horizon and back below the arc. So a cut-scene picture can have TWO dictionaries: one fitted to
-// the rows above the split and one to the rows below.
+// constraint on how well a photograph renders. $d018 carries the charset pointer and the game
+// already changes it mid-screen, so a picture can have TWO dictionaries, one fitted to the rows
+// above the split and one to the rows below -- fitted SEPARATELY, so the top book spends itself on
+// the face and never on a texture that only occurs lower down. Cost: 2,048 more bytes. The game has
+// one book for the scene, so ASSET needs ONEBOOK=1.
 //
-// This is not just "twice as many glyphs". The bands are fitted SEPARATELY, so the top book spends
-// itself on whatever is up there -- face, hair, sky -- and never wastes a codeword on a texture
-// that only occurs at the bottom. Specialisation by region, not a generic doubling.
-//
-// Cost: 2,048 more bytes, ONCE, shared by every picture. Against la-test7's 7,048 that is 9,096
-// for five pictures.
-//
-//   node tools/build-facetest3.mjs        -> la-test8.d64
-//   SPLITROW=12 node tools/build-facetest3.mjs
-import { writeFileSync, readFileSync } from 'fs';
+//   node tools/build-facetest3.mjs        -> la-test8.d64 (the slideshow)
+//   IMAGES=a.png,b.png SPLITROW=12 node tools/build-facetest3.mjs
+import { writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { assemble } from '../src/asm6502.mjs';
-import { toPixels, dither, tilesOf, cluster, fitTo, LU, GREYS, BLACK } from '../src/fit-face.mjs';
 await import('../src/d64lib.js');
 import { ROOT } from '../src/paths.mjs';
 process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 const D64 = globalThis.D64;
 
-const FACE = JSON.parse(readFileSync('./data/angel-face.json', 'utf8')).hangl1;
-if (process.env.FACED023) FACE.d023 = +process.env.FACED023;   // as fit-face.mjs
-// IMAGES=a.png,b.png (2026-10-15): fit other pictures than the five angels -- a candidate for the scene.
-const IMAGES = process.env.IMAGES ? process.env.IMAGES.split(',').map(s => s.trim()).filter(Boolean)
-  : ['art/angel-1.png', 'art/angel-2.png', 'art/angel-3.png', 'art/angel-4.png', 'art/angel-5.png'];
+// The command that made the shipped data/death-pics.json (also its `recipe` field, verbatim).
+const SHIPPED_RECIPE = 'FACEGRIT=20 FACESEAM=3 FACEEDGE=2,0.4 FACEGAMMA=1.5 FACEMAGICK="-clahe 25x25%+128+3" FACEBGFILL=1 KONE=200 SPLITROW=9 ONEBOOK=1 ASSET=1 IMAGES=art/death-angel-v5-85.png TRAIN=art/death-angel-v5-85.png:top,art/death-angel-v5-85.png:all SHOW=art/death-angel-v5-85.png node tools/build-facetest3.mjs';
+const SHIPPED = process.env.SHIPPED === '1';
+// Before anything below reads its knob: every NAME=value (or NAME="...") before 'node'.
+if (SHIPPED) for (const [, k, v] of SHIPPED_RECIPE.split(' node ')[0]
+  .matchAll(/(\w+)=("[^"]*"|\S+)/g)) process.env[k] = v.replace(/^"|"$/g, '');
+
+// ==== THE FITTING PIPELINE ====
+// (Was src/fit-face.mjs, which also fitted pictures to the old GameMaker face; this tool was its only
+// live user, so the pipeline lives here now.)
+// The scene's four inks. A bit pair names a register: 00 $d021, 01 $d022, 10 $d023, 11 colour RAM.
+// Mid grey behind, dark and light grey, and BLACK in colour RAM -- so black is the per-cell pair.
+const INK = [12, 11, 15, 0];
+// FACED023=n (2026-10-15): another colour for the global third ink -- 1 makes the highlights WHITE
+if (process.env.FACED023) INK[2] = +process.env.FACED023;
+const RGB = { 0: [0,0,0], 11: [68,68,68], 12: [108,108,108], 15: [149,149,149], 1: [255,255,255] };
+const lumOf = c => (RGB[c][0]*0.299 + RGB[c][1]*0.587 + RGB[c][2]*0.114);
+const LU = INK.map(lumOf);
+
+// The picture is grey-on-WHITE and the charset is light-on-BLACK, so the background has to go.
+// NOT by inverting: the statue is darker than its background but its own shading runs the right
+// way round, and a straight negative turns every crevice into a highlight. Send everything above
+// BG to black instead, and spread what is left across the three greys -- the modelling survives
+// and only the paper disappears.
+const BG   = +(process.env.FACEBG ?? 228);
+const LO   = +(process.env.FACELO ?? 20);
+const HI   = +(process.env.FACEHI ?? 222);
+const GAM  = +(process.env.FACEGAMMA ?? 1);
+// how hard to perturb the quantiser, in luminance units. 0 = pure Floyd-Steinberg.
+const GRIT = +(process.env.FACEGRIT ?? 40);
+// FACEGRITTOP=g, FACEGRITROW=y (2026-10-15): a different grit ABOVE pixel row y (the face), easing to
+// FACEGRIT over the next 16 rows so the two textures do not meet at a visible line
+const GRITTOP = process.env.FACEGRITTOP === undefined ? GRIT : +process.env.FACEGRITTOP;
+const GRITROW = +(process.env.FACEGRITROW ?? 72);
+const gritRow = y => y < GRITROW ? GRITTOP : y >= GRITROW + 16 ? GRIT : GRITTOP + (GRIT - GRITTOP) * (y - GRITROW) / 16;
+// FACEGRITBOX="x0,y0,x1,y1,g,tmin" (2026-10-15): grit g for the BRIGHT pixels (tone >= tmin) inside a
+// box, in 160x200 pixel coordinates -- the sword, which reads better smoother than the robe around it
+const GB = process.env.FACEGRITBOX ? process.env.FACEGRITBOX.split(',').map(Number) : null;
+const gritAt = (x, y, t) => GB && x >= GB[0] && y >= GB[1] && x <= GB[2] && y <= GB[3] && t >= GB[5] ? GB[4] : gritRow(y);
+// the three non-black inks, darkest first, as pixel values
+const GREYS = [0,1,2,3].filter(v => INK[v] !== 0).sort((a, b) => LU[a] - LU[b]);
+const BLACK = [0,1,2,3].find(v => INK[v] === 0);
+
+// Error diffusion: thresholding a photograph into flat bands of four inks loses every gradient,
+// and a dithered picture's tiles are textures -- checkers, gradients, stipple -- which a
+// codebook of real tiles (the medoids below) can reproduce.
+// Floyd-Steinberg, serpentine: alternating the scan direction stops the error trailing off to
+// one side and worming.
+function dither(tone, inks) {
+  const lo = Math.min(...inks.map(v => LU[v])), hi = Math.max(...inks.map(v => LU[v]));
+  const target = Float64Array.from(tone, t => t < 0 ? -1 : lo + t * (hi - lo));
+  const buf = Float64Array.from(target);
+  const out = new Uint8Array(160 * 200);
+  for (let y = 0; y < 200; y++) {
+    const ltr = (y & 1) === 0;
+    for (let k = 0; k < 160; k++) {
+      const x = ltr ? k : 159 - k, i = y * 160 + x;
+      if (target[i] < 0) { out[i] = BLACK; continue; }   // background: not ours to dither
+      // ---- GRIT ----
+      // Error diffusion makes NO texture where the tone already sits on a palette level: the
+      // error is zero, nothing propagates, and a whole region comes out solid. Those are the
+      // flat patches with visible 8x8 seams. Perturb the DECISION with a deterministic
+      // per-pixel offset so those regions break into stipple -- and measure the error against
+      // the TRUE value, so diffusion still corrects the average and the tone does not shift.
+      const gr = gritAt(x, y, tone[i]);
+      const n = gr ? (((((x * 73856093) ^ (y * 19349663)) >>> 8) & 255) / 255 - 0.5) * gr : 0;
+      const want = buf[i] + n;
+      let best = inks[0], bd = Infinity;
+      for (const v of inks) { const d = Math.abs(LU[v] - want); if (d < bd) { bd = d; best = v; } }
+      out[i] = best;
+      const e = buf[i] - LU[best];
+      const put = (xx, yy, f) => {
+        if (xx < 0 || xx > 159 || yy > 199) return;
+        const j = yy * 160 + xx;
+        if (target[j] >= 0) buf[j] += e * f;             // never bleed into the background
+      };
+      const dx = ltr ? 1 : -1;
+      put(x + dx, y,     7 / 16);
+      put(x - dx, y + 1, 3 / 16);
+      put(x,      y + 1, 5 / 16);
+      put(x + dx, y + 1, 1 / 16);
+    }
+  }
+  return out;
+}
+
+function toPixels(file) {
+  // Fit the picture into the 320x200 display without distorting it: scale to full height and
+  // letterbox. A multicolor pixel is two hires pixels wide, so the grid is 160 across.
+  const [w, h] = execFileSync('magick', ['identify', '-format', '%w %h', file])
+    .toString().split(' ').map(Number);
+  // A multicolor pixel is 2 hires pixels wide, but the 320x200 frame is displayed at 4:3, so it
+  // is not 2 SQUARE pixels wide -- it is 320/200 / (4/3) = 1.2 times narrower than that. Dividing
+  // by a flat 2 assumed square hires pixels and letterboxed a correctly-framed 4:3 source into
+  // 133 of the 160 columns, throwing away 17% of the width and the author's crop with it.
+  const PAR = +(process.env.FACEPAR ?? (2 / 1.2));   // display width of one mc pixel, in rows
+  const mcw = Math.max(1, Math.min(160, Math.round(200 * (w / h) / PAR)));
+  const raw = execFileSync('magick',
+    // FACEMAGICK="..." (2026-10-15): extra ImageMagick steps on the greyscale BEFORE the resize --
+    // e.g. "-clahe 25x25%+128+3" for local contrast, which a softly lit statue needs: its folds are
+    // gradients a few levels deep that four inks and a dither flatten to nothing.
+    [file, '-colorspace', 'gray', ...(process.env.FACEMAGICK ?? '').split(/\s+/).filter(Boolean),
+     '-resize', `${mcw}x200!`, '-depth', '8', 'gray:-'],
+    { maxBuffer: 1 << 26 });
+  const x0 = (160 - mcw) >> 1;
+  const px = new Uint8Array(160 * 200).fill(BLACK);
+  // ...and the same thing as a CONTINUOUS 0..1 tone for the ditherer, -1 meaning background.
+  // NORMALISED, not a luminance: each palette stretches it to its own range, and baking the
+  // grey-only range in here is what made adding black to the palette do nothing at all -- no
+  // target pixel ever landed near it.
+  const tgt = new Float64Array(160 * 200).fill(-1);
+  // FACEBGFILL=1 (2026-10-15, the sword angel): background is a bright pixel CONNECTED to the top,
+  // left or right edge, not every bright pixel. A white sword held by the statue is brighter than
+  // the off-white backdrop, so the plain threshold keyed it out with the background. The bottom edge
+  // seeds nothing, because the blade runs off it.
+  // The background is judged on the image BEFORE any FACEMAGICK step: local contrast (CLAHE) stretches
+  // a flat backdrop's faint paper texture into specks below BG, which then drew as stray dots (2026-10-15).
+  const plain = process.env.FACEMAGICK ? execFileSync('magick',
+    [file, '-colorspace', 'gray', '-resize', `${mcw}x200!`, '-depth', '8', 'gray:-'], { maxBuffer: 1 << 26 }) : raw;
+  let isBg = i => plain[i] >= BG;
+  if (process.env.FACEBGFILL === '1') {
+    const bg = new Uint8Array(mcw * 200), st = [];
+    const seed = (x, y) => { const i = y * mcw + x; if (!bg[i] && plain[i] >= BG) { bg[i] = 1; st.push(i); } };
+    for (let x = 0; x < mcw; x++) seed(x, 0);
+    for (let y = 0; y < 200; y++) { seed(0, y); seed(mcw - 1, y); }
+    while (st.length) { const i = st.pop(), x = i % mcw, y = (i / mcw) | 0;
+      if (x > 0) seed(x - 1, y); if (x < mcw - 1) seed(x + 1, y); if (y > 0) seed(x, y - 1); if (y < 199) seed(x, y + 1); }
+    isBg = i => bg[i] === 1;
+  }
+  // FACEEDGE=n[,k] (2026-10-15): darken the figure's tone in a band n output pixels inside its
+  // silhouette -- by k at the very edge (default 0.4), easing to none at n -- so a statue's lit rim
+  // stops dithering into a light-grey halo against the black. 0 or unset: off.
+  const [EN, EK] = (process.env.FACEEDGE ?? '0').split(',').map(Number);
+  const edgeD = new Uint8Array(mcw * 200).fill(255);
+  if (EN > 0) {
+    let fr = [];
+    for (let i = 0; i < mcw * 200; i++) if (isBg(i)) { edgeD[i] = 0; fr.push(i); }
+    for (let d = 1; d <= EN && fr.length; d++) {
+      const nx = [];
+      for (const i of fr) { const x = i % mcw, y = (i / mcw) | 0;
+        for (const j of [x > 0 ? i - 1 : -1, x < mcw - 1 ? i + 1 : -1, y > 0 ? i - mcw : -1, y < 199 ? i + mcw : -1])
+          if (j >= 0 && edgeD[j] === 255) { edgeD[j] = d; nx.push(j); } }
+      fr = nx;
+    }
+  }
+  const edgeF = i => EN > 0 && edgeD[i] <= EN ? (EK ?? 0.4) + (1 - (EK ?? 0.4)) * (edgeD[i] - 1) / EN : 1;
+  for (let y = 0; y < 200; y++) for (let x = 0; x < mcw; x++) {
+    const v = raw[y * mcw + x];
+    if (isBg(y * mcw + x)) continue;                          // background: leave it black
+    let t = (Math.min(HI, Math.max(LO, v)) - LO) / (HI - LO); // 0 = darkest statue tone
+    t = Math.pow(t, GAM) * edgeF(y * mcw + x);
+    px[y * 160 + x0 + x] = GREYS[Math.min(GREYS.length - 1, Math.floor(t * GREYS.length))];
+    tgt[y * 160 + x0 + x] = t;
+  }
+  return { px, tgt, mcw };
+}
+
+const tilesOf = px => {
+  const out = [];
+  for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) {
+    const t = new Uint8Array(32);
+    for (let r = 0; r < 8; r++) for (let i = 0; i < 4; i++)
+      t[r * 4 + i] = px[(cy * 8 + r) * 160 + cx * 4 + i];
+    out.push(t);
+  }
+  return out;
+};
+// k-means in LUMINANCE, seeded on the commonest distinct tiles: raw 2-bit values would score a
+// light/mid swap as a smaller error than a light/dark one, which is backwards.
+function cluster(tiles, K, iters = 60) {
+  const freq = new Map();
+  for (const p of tiles) { const k = p.join(','); freq.set(k, (freq.get(k) ?? 0) + 1); }
+  const cents = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, K)
+    .map(([k]) => Uint8Array.from(k.split(',').map(Number)));
+  while (cents.length < K) cents.push(new Uint8Array(32));
+  const assign = new Int32Array(tiles.length);
+  for (let it = 0; it < iters; it++) {
+    let moved = 0;
+    for (let i = 0; i < tiles.length; i++) {
+      let best = 0, bd = Infinity;
+      for (let c = 0; c < K; c++) {
+        let d = 0;
+        for (let p = 0; p < 32; p++) { const e = LU[tiles[i][p]] - LU[cents[c][p]]; d += e * e;
+          if (d >= bd) break; }
+        if (d < bd) { bd = d; best = c; }
+      }
+      if (assign[i] !== best) { assign[i] = best; moved++; }
+    }
+    // ---- MEDOID, not mean ----
+    // Averaging the tiles in a cluster and snapping the result back to four levels drives every
+    // pixel toward the local mean, which erases exactly the high-frequency structure dithering
+    // exists to create: measured, k-means glyphs carry 18% fewer pixel transitions than the
+    // hand-dithered set. So take a REAL tile from the cluster instead -- the one with the least
+    // total distance to the rest. Every glyph then stays a genuine dither pattern, and the
+    // squared error gets slightly worse while the picture reads better.
+    const mem = [...Array(K)].map(() => []);
+    for (let i = 0; i < tiles.length; i++) mem[assign[i]].push(i);
+    for (let c = 0; c < K; c++) {
+      const m = mem[c];
+      if (!m.length) continue;
+      // A flat background collapses into one enormous cluster, and all-pairs over it would
+      // dominate the run. Score candidates against an evenly spaced sample instead; the medoid
+      // of a near-uniform cluster is not a close call.
+      const step = Math.max(1, Math.ceil(m.length / 128));
+      const ref = []; for (let i = 0; i < m.length; i += step) ref.push(m[i]);
+      let best = m[0], bd = Infinity;
+      for (const a of m) {
+        let d = 0;
+        for (const b of ref) {
+          for (let p = 0; p < 32; p++) { const e = LU[tiles[a][p]] - LU[tiles[b][p]]; d += e * e; }
+          if (d >= bd) break;
+        }
+        if (d < bd) { bd = d; best = a; }
+      }
+      cents[c] = tiles[best];
+    }
+    if (!moved && it) break;
+  }
+  return { cents, assign };
+}
+
+// each cell's nearest glyph in a book (glyphs as 32 luminances)
+function fitTo(px, glyphs) {
+  const screen = new Array(1000);
+  let err = 0;
+  const t = new Float64Array(32);
+  for (let cy = 0; cy < 25; cy++) for (let cx = 0; cx < 40; cx++) {
+    for (let r = 0; r < 8; r++) for (let i = 0; i < 4; i++)
+      t[r * 4 + i] = LU[px[(cy * 8 + r) * 160 + cx * 4 + i]];
+    let best = 0, bd = Infinity;
+    for (let g = 0; g < glyphs.length; g++) {
+      let d = 0;
+      for (let p = 0; p < 32; p++) { const e = t[p] - glyphs[g][p]; d += e * e; if (d >= bd) break; }
+      if (d < bd) { bd = d; best = g; }
+    }
+    screen[cy * 40 + cx] = best;
+    err += bd;
+  }
+  return { screen, rms: Math.sqrt(err / 32000) / 255 };
+}
+
+// IMAGES=a.png,b.png: the pictures to fit (default: the shipped one).
+const IMAGES = (process.env.IMAGES ?? 'art/death-angel-v5-85.png').split(',').map(s => s.trim()).filter(Boolean);
 const hx = n => '$' + n.toString(16);
 // Where the dictionary changes. 12 puts it just under the face on this image set; it is a build
 // knob because the right row is a property of the PICTURES, not of the hardware.
@@ -35,8 +307,7 @@ const SPLITROW = +(process.env.SPLITROW ?? 12);
 const KTOP = +(process.env.KTOP ?? 256), KBOT = +(process.env.KBOT ?? 256);
 
 // ---- fit ----
-// Same pipeline as fit-face.mjs, imported rather than reimplemented: greyscale and letterbox,
-// Floyd-Steinberg with grit over the 4-ink palette, then k-medoids over the resulting tiles.
+// The pipeline above: greyscale and letterbox, Floyd-Steinberg with grit over the 4-ink palette, then k-medoids over the resulting tiles.
 const INKS = [...GREYS, BLACK];
 const pix = {}, tiles = {}, edge = {}, tone = {};
 for (const f of IMAGES) {
@@ -62,7 +333,7 @@ const EDGETRAIN = process.env.EDGETRAIN !== '0';
 // that does not matter evenly. TRAIN names what the clusterer sees, per picture and per band;
 // SHOW names what actually gets drawn. Anything rendered but not trained on is fitted against a
 // dictionary that never saw it -- which is the interesting half of the experiment, not a bug.
-//   TRAIN=angel-1.png:top,angel-4.png:all      SHOW=angel-1.png,angel-4.png
+//   TRAIN=a.png:top,b.png:all      SHOW=a.png,b.png
 const band = r => (r < SPLITROW ? 0 : 1);
 const TRAIN = (process.env.TRAIN ?? IMAGES.map(f => `${f}:all`).join(','))
   .split(',').map(s => s.trim()).filter(Boolean).map(s => {
@@ -234,16 +505,16 @@ start:  sei
         lda $d016
         ora #$10                ; multicolor char mode
         sta $d016
-        lda #${FACE.d021}
+        lda #${INK[0]}
         sta $d021
-        lda #${FACE.d022}
+        lda #${INK[1]}
         sta $d022
-        lda #${FACE.d023}
+        lda #${INK[2]}
         sta $d023
         lda #$00
         sta $d020
         ldx #$00
-        lda #${hx(0x08 | (FACE.colram & 7))}
+        lda #${hx(0x08 | (INK[3] & 7))}
 cr:     sta $d800,x
         sta $d900,x
         sta $da00,x
@@ -407,9 +678,10 @@ if (process.env.ASSET === '1') {
     train: TRAIN.map(([f, b]) => `${f}:${b}`).join(','),
     chars: packed(books[0]),
     maps: SHOW.map((f, i) => ({ name: f, map: MAPS[i] })),
-    d021: FACE.d021, d022: FACE.d022, d023: FACE.d023,
-    colram: 0x08 | (FACE.colram & 7),
+    d021: INK[0], d022: INK[1], d023: INK[2],
+    colram: 0x08 | (INK[3] & 7),
     rms: rms.map(v => +v.toFixed(4)),
+    ...(SHIPPED ? { recipe: SHIPPED_RECIPE } : {}),
   };
   while (asset.chars.length < 2048) asset.chars.push(0);     // KONE < 256: pad to the full charset
   if (asset.chars.length !== 2048) throw new Error(`charset is ${asset.chars.length} bytes, not 2048`);
@@ -417,7 +689,12 @@ if (process.env.ASSET === '1') {
     throw new Error(`${m.name} map is ${m.map.length} cells, not 1000`);
   // ASSETOUT=path: write the asset elsewhere, to LOOK at a candidate without replacing the game's
   // (tools/renderpic.mjs draws one as a PNG)
-  writeFileSync(process.env.ASSETOUT ?? './data/death-pics.json', JSON.stringify(asset));
+  // Written with ', ' and ': ' between items (Python's json.dumps layout): the committed file was
+  // last written that way, when its `recipe` was added, so this is what reproduces it byte for byte.
+  const py = v => Array.isArray(v) ? '[' + v.map(py).join(', ') + ']'
+    : v && typeof v === 'object' ? '{' + Object.entries(v).map(([k, x]) => JSON.stringify(k) + ': ' + py(x)).join(', ') + '}'
+    : JSON.stringify(v);
+  writeFileSync(process.env.ASSETOUT ?? './data/death-pics.json', py(asset));
   console.error(`  death-pics.json: charset 2048 + ${asset.maps.length} x 1000` +
                 ` = ${2048 + asset.maps.length * 1000} bytes, RMS ${asset.rms.join('/')}`);
 }
