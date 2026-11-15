@@ -400,28 +400,8 @@ const FLOORDK_PAT = (process.env.FLOORDKPAT ?? '44,11,44,11,44,11,44,11')
 if (FLOORDK_PAT.length !== 8 || FLOORDK_PAT.some(v => !(v >= 0 && v <= 255)))
   throw new Error('FLOORDKPAT wants eight hex bytes, one per glyph row');
 const ANYFLOORDK = LEVEL_IDS.some(n => LEVEL_FLOORDK[n]);
-// ---- per level: outline the wall where it meets the ceiling, in the SEAM ink ----
-// Any bit-pair-01 (wall) pixel orthogonally touching a bit-pair-00 (ground/ceiling) pixel
-// becomes bit pair 10 (seam). Done at RUNTIME over the ramp and step glyphs, codes 2..200.
-//
-// WHY IT NEEDS NO PRISTINE COPY, which is the whole reason it is affordable: those glyphs hold
-// ONLY pairs 00 and 01. Measured off the shipped charset -- 3139 pixels of 00, 3229 of 01, and
-// ZERO of 10 or 11. So a 10 in one of them can only have been put there by this pass, and
-// leaving a level is "every 10 back to 01". There is no second charset to keep, which matters
-// because there is only ONE in memory anyway: charset B is derived from A, not loaded.
-// It is also mirror-invariant -- a vertical flip preserves orthogonal adjacency -- so the same
-// answer is written to A at row r and to B at row 7-r, and cpChr never has to run again.
-// ORTHOGONAL, not 8-way (the user's call). And per GLYPH, so a boundary that lands exactly on
-// a character row gets no line: the cell above is plain BLANK and the one below plain SOLID,
-// neither with an internal 01/00 edge. Deliberately not chased (the user's call again) -- the
-// fix wants renderSym to hand SOLID a variant, which is more work than all of this.
-// LEVEL 5 is the one that wants it, and wants it for a reason: its ground register goes BLACK
-// too (below), and $d022 is already black on every level, so the only ink left anywhere in the
-// room is the seam. The outline then IS the picture -- a wireframe of the geometry rather than
-// a decoration on it. The hub is deliberately left plain, which is the per-level switch doing
-// the job it was asked for.
-const LEVEL_SEAM = {};   // was { 5: 1 } -- the all-black wireframe, retired with level 5's design
-const ANYSEAM = LEVEL_IDS.some(n => (process.env.SEAMEDGE ? +process.env.SEAMEDGE === n : LEVEL_SEAM[n]));
+// (LEVEL_SEAM / SEAMEDGE=n -- a per-level outline in the seam ink where wall met ceiling, seamEdge --
+// went 2026-11-15: no level had used it since level 5's wireframe was retired.)
 // ---- per-level SPRITE inks, and the idol's own ----
 // A sprite's three inks are bit pair 01 = $d025 (the shaded underside, the darkest), 10 = the
 // per-sprite $d027+n (the body), 11 = $d026 (highlight and ground shadow). 01 and 11 are SHARED
@@ -5808,8 +5788,6 @@ Object.assign(RUNTIME_BUFS, {
   // whole. Between them they are 63 bytes; they were holding down 512.
   ssCut: 1, ssCutD: 1, ssHL: 1, ssHR: 1, ssPU: 1, ssPUL: 1, ssKLo: 1, ssKHi: 1,
   shD: 2, smLo: 1, smHi: 1, ssDir: 1, sHyP: 12, sHyC: 12, sHyPN: 1, sHyN: 1,
-  seB: 1, seHi: 1, seNL: 1, seLo: 1, seT: 1, seW: 1, seMsk: 1, seN: 1,
-  seC00: 8, seNB: 8,
   // The per-column and per-char-column tables. Each was reserved as a whole page for want of a
   // declared length; these are their real extents, and they are what the indexing already
   // assumes -- bndT by span index (< NBND), faceIdT/remLoT by logical column, the six caches by
@@ -7668,8 +7646,9 @@ const PEDTBL = 5 * Math.max(1, PED.L.length);
 // origin arithmetic; compact.mjs measures every run itself (it assembles with the origins removed),
 // so a miscount no longer misplaces anything, and the old "* = $3d9c moves backward" guard is gone with it.
 const PEDCODE = 18;
-// seamEdge's page, from the hand layout (an origin compaction rewrites, like PEDCODE's).
-const SEAMEDGE_AT = 0x7f00;     // the page bndT vacated; 249 of 256 used
+// A hand-layout origin for the idol subsystem's run (compaction rewrites it, like PEDCODE's). The page
+// was seamEdge's until the per-level outline went (2026-11-15); the name is kept so the diff stays small.
+const SEAMEDGE_AT = 0x7f00;
 if (process.env.PEDDUMP && HAS_PED) {
   console.error(`pedestal ladder: r=${PEDR} u=${PEDH}, ${PED.L.length} rungs, ` +
     `${PED.BM.length} slots (${PED.BM.length * 64} bytes), slots ${PED.slotT[0]}..${PED.slotEnd - 1}`);
@@ -20735,7 +20714,7 @@ okDone: rts
 ;   lvlStart   the PLAYER's pose. One place a level begins, however you got there.
 ;   lvlLook    every INK: the three screen registers (ceiling, wall, seam) and the two shared
 ;              sprite registers, plus the idol's own pair -- and the level code's own look
-;              (lxLook: symPut, shdIn, ...); lvlChr makes the charset edits (seamEdge, floorDk). The fall calls it in three stages
+;              (lxLook: symPut, shdIn, ...); lvlChr makes the charset edits (floorDk). The fall calls it in three stages
 ;              (fdSpr's irqB2 / lvlLook / lvlHi) because two levels are on screen at once during a drop;
 ;              boot calls it once through lvlBoot. The STAGING differs, the CONTENT must not.
 ;
@@ -25641,17 +25620,7 @@ ceilLog:lda clP
         sta clP
 clDn:   rts
 ` : ''}
-${ANYSEAM ? `; $55 = outline this level's walls against the ceiling, $00 = leave them plain. $55 rather
-; than a flag because it is ANDed straight into a one-bit-per-pair mask, so the switch costs no
-; branch.
-; GATED ON ANYSEAM, NOT ANYSYM. It was inside the symbol block, so the two could disagree: the
-; speckle and the outline are different features on different levels, and a chain that wanted one
-; without the other either emitted a table nothing reads or -- the way round that actually bit --
-; emitted seamEdge's body with no lvlSeamT for it to read, which is an undefined symbol at the
-; very end of a build. A table belongs with its reader.
-lvlSeamT: !byte ${[...Array(PAL_N)].map((_, i) =>
-  hx((process.env.SEAMEDGE ? +process.env.SEAMEDGE === i + 1 : LEVEL_SEAM[i + 1]) ? 0x55 : 0)).join(',')}
-` : ''}
+
 ${HAS_IDOL ? `; ---- idolLk: is the IDOL the thing in your hands? ----
 ; Called wherever carry changes. It sets one flag and touches nothing else -- the room keeps the
 ; level's own colours, and the tell is on the SPRITES: see sprPal, where holding the idol tints
@@ -25923,7 +25892,7 @@ lvlSpr:${FLKSPR ? `  lda flkLit              ; FLKSPR: a lit frame is wearing th
 lvlChr:
 
 
-` }        jmp ${ANYFLOORDK ? 'floorDk' : 'seamEdge'}   ; (level 4's wall mark is its own code now: symPut)
+` }        ${ANYFLOORDK ? 'jmp floorDk' : 'rts        '}   ; (level 4's wall mark is its own code now: symPut)
 ${ANYSYM ? (() => {
   // ONE marked level: the module's text is shared by every level that has the feature, so a second
   // would need its pattern picked by lvlMeT again -- the table this move did away with.
@@ -26832,20 +26801,12 @@ shdOn:  !byte 0                 ; 1 = the ladder holds the pair-01 shadow. It sh
 shdLoT: !byte ${at.map(([a]) => hx(a & 255)).join(',')}
 shdMkT: !byte ${at.map(([, m]) => hx(m)).join(',')}
 ;@@LX-END
-`; })() : ''}        ; ---- seamEdge has a PAGE of its own now (2026-09-26), and is not in the block below ----
-        ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
-        ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
-        ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
-        ; it is COLD, entered once per level entry (lvlChr's tail jmp, or floorDk's), and it fits whole in the page
-        ; bndT was holding down on its own. See bndT for the move that freed it.
+`; })() : ''}        ; (A hand-layout origin, rewritten by compaction like every other: it once opened the page
+        ; seamEdge had of its own -- the per-level outline, gone 2026-11-15.)
         * = ${hx16(SEAMEDGE_AT)}
-${HAS_IDOL ? `; ---- the idol subsystem lives in the front of seamEdge's page ----
+${HAS_IDOL ? `; ---- the idol subsystem ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
-; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
-; while no level asks for the wall/ceiling outline (SEAMCODE, and LEVEL_SEAM is empty since
-; level 5 became a stub). The two cannot both live here: turn the outline back on anywhere and
-; seamEdge's 249 bytes leave no room, and the "* = $8000" guard below says so at build time
-; rather than letting them overlap. Whoever turns it on has to rehome one of them.
+; four-level chain went 48 bytes over -- so it got a run of its own.
 ` : ''}${ANYFLOORDK ? `
 ; ---- floorDk: the ground's dither, per level, into charset B's BLANK ----
 ; lvlFloorT holds $ff for a level that wants it and $00 for one that does not, so the same eight
@@ -27029,133 +26990,8 @@ isNo:   rts
 idHomeT: !byte ${[...Array(IDOL_N)].map((_, i) => hx(+(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0))).join(',')}   ; each idol's own room
 idSpXT: !byte ${[...Array(IDOL_N)].map((_, i) => { const h = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0); return hx(Math.floor((LEVEL_IDOL[h] ?? [3.5, 3.5])[0])); }).join(',')}   ; ...and its spawn cell there
 idSpYT: !byte ${[...Array(IDOL_N)].map((_, i) => { const h = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0); return hx(Math.floor((LEVEL_IDOL[h] ?? [3.5, 3.5])[1])); }).join(',')}
-; ---- and seamEdge itself starts wherever the idol code ended ----
-` : ''}; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
-; Runs on every level entry, the tail of lvlChr (jmp seamEdge, or floorDk's). Codes 2..200 only -- the ramps and the
-; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
-; is written from the same answer instead of being re-derived.
-;
-; Per row byte, four bit pairs, and everything below is ONE BIT PER PAIR sitting at the pair's
-; low bit (so every mask is a subset of $55):
-;     hi   = (b >> 1) & $55        the high bit of each pair, brought into line
-;     lo   = b & $55
-;     w01  = lo & ~hi              a WALL pixel
-;     w10  = ~lo & hi              a seam pixel: only this routine can have made one
-;     c00  = ~lo & ~hi             ground or ceiling
-; and a pair is flipped by EOR with (m | m<<1): 01 EOR 11 = 10, and 10 EOR 11 = 01, which is
-; why the same trick both sets the outline and takes it away again.
-seamEdge:
-${ANYSEAM ? `        ldx lvlMeT
-        dex
-        lda lvlSeamT,x          ; $55 = outline, $00 = leave plain. ANDed into the mask below,
-        sta seMsk               ;   so a level that does not want it still gets NORMALISED.
-        lda #<${hx16(CHARSET + 16)}
-        sta seLdA+1             ; the READ operand walks too. It did not, and every one of the
-        sta seStA+1             ;   199 glyphs got code 2's rows written into it: the whole
-        sta seStB+1             ;   level came out in flat blocks with no boundary cells at all.
-        lda #>${hx16(CHARSET + 16)}
-        sta seLdA+2
-        sta seStA+2
-        clc
-        adc #$08                ; charset B is charset A plus $800, so the low byte is shared
-        sta seStB+2
-        lda #${hx(199)}         ; codes 2..200
-        sta seN
-        ; ---- pass 1: undo any previous outline, and record where the ceiling is ----
-seGly:  ldy #$07
-seP1:
-seLdA:  lda ${hx16(CHARSET + 16)},y
-        sta seB
-        lsr
-        and #$55
-        sta seHi
-        lda seB
-        and #$55
-        eor #$55
-        sta seNL                ; ~lo
-        and seHi
-        sta seW                 ; w10: a seam pixel this routine left last time
-        lda seHi
-        eor #$55
-        and seNL
-        sta seC00,y             ; c00
-        lda seW
-        asl
-        ora seW
-        eor seB
-        sta seNB,y              ; ...and the row with every 10 back to 01
-        dey
-        bpl seP1
-        ; ---- pass 2: a wall pixel with ground beside it, above it or below it ----
-        ldy #$07
-seP2:   lda seC00,y
-        asl
-        asl                     ; the pixel one to the side
-        sta seT
-        lda seC00,y
-        lsr
-        lsr                     ; ...and the other side. Pairs shifted off the ends are pixels
-        ora seT                 ;   in the NEXT CELL, which a per-glyph pass cannot see.
-        sta seT
-        cpy #$07
-        beq seNoD               ; row 7: nothing below it inside this glyph
-        iny
-        lda seC00,y
-        dey
-        ora seT
-        sta seT
-seNoD:  tya
-        beq seNoU               ; row 0: nothing above it
-        dey
-        lda seC00,y
-        iny
-        ora seT
-        sta seT
-seNoU:  lda seNB,y
-        sta seB
-        lsr
-        and #$55
-        sta seHi
-        lda seB
-        and #$55
-        sta seLo
-        lda seHi
-        eor #$55
-        and seLo                ; w01: a wall pixel
-        and seT                 ; ...with ground orthogonally next to it
-        and seMsk               ; ...on a level that asked for it. No branch.
-        sta seW
-        asl
-        ora seW
-        eor seB
-        sta seNB,y
-        dey
-        bpl seP2
-        ; ---- pass 3: out to BOTH charsets, B taking row 7-y ----
-        ldy #$07
-        ldx #$00
-seOut:  lda seNB,y
-seStA:  sta ${hx16(CHARSET + 16)},y
-seStB:  sta ${hx16(CHARSET_B + 16)},x
-        inx
-        dey
-        bpl seOut
-        lda seStA+1             ; on to the next glyph, eight bytes along in all three
-        clc
-        adc #$08
-        sta seLdA+1
-        sta seStA+1
-        sta seStB+1
-        bcc seNC
-        inc seLdA+2
-        inc seStA+2
-        inc seStB+2
-seNC:   dec seN
-        bne seGly
-` : ''}        rts
-
-        ; (An origin from the hand layout, once the guard on seamEdge's hand count: an
-        ; overrun made it "moves backward". Compaction rewrites it like every origin.)
+` : ''}
+        ; (An origin from the hand layout; compaction rewrites it like every origin.)
         * = $8000
 
         ; ---- $82a0: the tail faceIdT leaves in its page ----
@@ -27209,7 +27045,7 @@ ${!ANYFLOORDK ? '' : `
 fdGEnd: lda fallSt
         bne fdGE1
         jsr fdGlFl
-fdGE1:  jmp seamEdge
+fdGE1:  rts
 
 ; ---- fdGlFl: whatever is left of the charset sweep, on the frame the landing ends ----
 ; So a landing shorter than fdGlTk's arithmetic assumes cannot leave the charset half converted.
@@ -27645,25 +27481,6 @@ ddxHiTQ: ${chunk(ddxHiP).trim()}
 ; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
 ; do with the level. (Tucked into a gated block once, it compiled on the default build and broke
 ; the old TWOLEV=0 ones with an undefined symbol.) Nothing loads it -- it is scratch.
-; ---- seamEdge's scratch, 24 bytes ----
-; The hole below $be00 is what the dieChk block at $bc00 does not use, and the rule for picking
-; one of these is the hole REPORT, not "no label there" (OCCCHK's shadow, picked that way, once
-; landed on live variables and the program ran wild).
-; PACKED AGAINST $be00, not against the code. It used to start at $bdd4, the hole's first byte,
-; with the DIE block ending at $bdd3 -- so the block had ZERO bytes of slack and the next single
-; instruction added to it (one "lda #imm" becoming "lda abs") pushed emitted data over seB and
-; failed the build. Ending at $bdff instead leaves that growth room in front of the scratch
-; rather than behind it, where nothing can use it.
-seB     = $bde8                 ; the row being worked on
-seHi    = $bde9                 ; its high bits, brought into line with the low ones
-seNL    = $bdea                 ; ~lo
-seLo    = $bdeb
-seT     = $bdec                 ; the adjacency union
-seW     = $bded                 ; the pairs about to be flipped
-seMsk   = $bdee                 ; $55 or $00: does this level want the outline
-seN     = $bdef                 ; glyphs left
-seC00   = $bdf0                 ; 8 bytes: ground/ceiling pixels, per row
-seNB    = $bdf8                 ; 8 bytes: the row being built, ending exactly at $bdff
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick

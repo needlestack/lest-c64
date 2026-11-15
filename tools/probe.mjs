@@ -201,7 +201,7 @@ const PORT = 6600 + (process.pid % 300);
 // so autostart uses that drive rather than side-loading the first file past it. Both drive
 // resources are still passed explicitly because VICE writes vicerc on exit and drops resources
 // that are at their defaults, so the file cannot be relied on to still say what it said.
-// +minimized because the user wants to see the window.
+// Minimized unless VICESHOW=1 (LAUNCH_FLAGS, tools/vice.mjs).
 // The cost is real time: a true 1541 puts the boot at ~25 emulated seconds, against ~2 before.
 const LOG = `/tmp/probe-vice-${process.pid}.log`;
 // --trap AND --watch KEEP WARP. A checkpoint is event-driven: it fires when the PC enters the

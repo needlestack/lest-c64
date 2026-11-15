@@ -7553,7 +7553,7 @@ okDone: rts
 ;   lvlStart   the PLAYER's pose. One place a level begins, however you got there.
 ;   lvlLook    every INK: the three screen registers (ceiling, wall, seam) and the two shared
 ;              sprite registers, plus the idol's own pair -- and the level code's own look
-;              (lxLook: symPut, shdIn, ...); lvlChr makes the charset edits (seamEdge, floorDk). The fall calls it in three stages
+;              (lxLook: symPut, shdIn, ...); lvlChr makes the charset edits (floorDk). The fall calls it in three stages
 ;              (fdSpr's irqB2 / lvlLook / lvlHi) because two levels are on screen at once during a drop;
 ;              boot calls it once through lvlBoot. The STAGING differs, the CONTENT must not.
 ;
@@ -11901,20 +11901,12 @@ flkOn:  !byte 0                 ; lvlLook: this level's lvlFlkT entry
 flkLit: !byte 0                 ; the inks on screen are the LIT ones
 lvlFlkT:!byte 0,0,0,0,0,0,0,1,0,0   ; per level id - 1
 ; (level code 'flicker' cut here: see LX_SRC)
-        ; ---- seamEdge has a PAGE of its own now (2026-09-26), and is not in the block below ----
-        ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
-        ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
-        ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
-        ; it is COLD, entered once per level entry (lvlChr's tail jmp, or floorDk's), and it fits whole in the page
-        ; bndT was holding down on its own. See bndT for the move that freed it.
+        ; (A hand-layout origin, rewritten by compaction like every other: it once opened the page
+        ; seamEdge had of its own -- the per-level outline, gone 2026-11-15.)
         * = $4d16
-; ---- the idol subsystem lives in the front of seamEdge's page ----
+; ---- the idol subsystem ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
-; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
-; while no level asks for the wall/ceiling outline (SEAMCODE, and LEVEL_SEAM is empty since
-; level 5 became a stub). The two cannot both live here: turn the outline back on anywhere and
-; seamEdge's 249 bytes leave no room, and the "* = $8000" guard below says so at build time
-; rather than letting them overlap. Whoever turns it on has to rehome one of them.
+; four-level chain went 48 bytes over -- so it got a run of its own.
 
 ; ---- floorDk: the ground's dither, per level, into charset B's BLANK ----
 ; lvlFloorT holds $ff for a level that wants it and $00 for one that does not, so the same eight
@@ -12093,26 +12085,8 @@ isNo:   rts
 idHomeT: !byte $05,$06,$07   ; each idol's own room
 idSpXT: !byte $0f,$0e,$07   ; ...and its spawn cell there
 idSpYT: !byte $02,$05,$08
-; ---- and seamEdge itself starts wherever the idol code ended ----
-; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
-; Runs on every level entry, the tail of lvlChr (jmp seamEdge, or floorDk's). Codes 2..200 only -- the ramps and the
-; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
-; is written from the same answer instead of being re-derived.
-;
-; Per row byte, four bit pairs, and everything below is ONE BIT PER PAIR sitting at the pair's
-; low bit (so every mask is a subset of $55):
-;     hi   = (b >> 1) & $55        the high bit of each pair, brought into line
-;     lo   = b & $55
-;     w01  = lo & ~hi              a WALL pixel
-;     w10  = ~lo & hi              a seam pixel: only this routine can have made one
-;     c00  = ~lo & ~hi             ground or ceiling
-; and a pair is flipped by EOR with (m | m<<1): 01 EOR 11 = 10, and 10 EOR 11 = 01, which is
-; why the same trick both sets the outline and takes it away again.
-seamEdge:
-        rts
 
-        ; (An origin from the hand layout, once the guard on seamEdge's hand count: an
-        ; overrun made it "moves backward". Compaction rewrites it like every origin.)
+        ; (An origin from the hand layout; compaction rewrites it like every origin.)
 ; [origin folded into the run above by compact.mjs]
 
         ; ---- $82a0: the tail faceIdT leaves in its page ----
@@ -12127,7 +12101,7 @@ arcCdT: !byte 2,4,5,13,15,16,19,21,23,27,29,31,35,45,49,52,63,67,69,76,86,90,95,
         ; ...and $83a0 is the same again in the next page. NOT $6d82, which is where these were:
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
         ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
-        * = $4e3e
+        * = $4e3d
 ; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
 ; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
 ; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
@@ -12137,7 +12111,7 @@ pedOff: ldy idolHand
         lda #$00
         sta idolOnPedT,y
 poNo:   rts
-        * = $4e49
+        * = $4e48
 dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
         ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
         ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
@@ -12166,7 +12140,7 @@ dpCand: clc                     ; ---- the eight cells around the player, as a C
 fdGEnd: lda fallSt
         bne fdGE1
         jsr fdGlFl
-fdGE1:  jmp seamEdge
+fdGE1:  rts
 
 ; ---- fdGlFl: whatever is left of the charset sweep, on the frame the landing ends ----
 ; So a landing shorter than fdGlTk's arithmetic assumes cannot leave the charset half converted.
@@ -12252,7 +12226,7 @@ runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,10,0,0,0,
 runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,6,0,0,0,0,0,0,0,12,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,17,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,15,0,0,17,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,17,0,21,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,0,0,21,0,0,2,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,0,0,0,21,0,0,2,0,0,0,7,0,0,0,0,0,0,0,13,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; ---- snapCp: the half-height snapshot copy (its caller is bgCopy) ----
 ; Out here from the hand layout, where it filled 64 bytes of stable slack; compaction places it.
-        * = $4e8f
+        * = $4e8c
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         tay
@@ -12303,7 +12277,7 @@ rbT: !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
         ; ran out of room the moment a level was allowed to declare its own sockets: the
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
-        * = $4ec0
+        * = $4ebd
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
 ; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
@@ -12596,7 +12570,7 @@ rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,2
         ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
         ; Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
-        * = $50c9
+        * = $50c6
 
 ; ---- fwBlk and fNT live up here, away from the fall's other tables ----
 ; They were at the foot of the $6c00 block with fKT/fLoT/fHiT, and level 7's tables push that run
@@ -12695,31 +12669,11 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
         !byte 1,1,1,1,1,1,1,1
-; [origin folded into the run above by compact.mjs]
+        * = $510b
 ; ---- the angel-path fill's own state ----
 ; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
 ; do with the level. (Tucked into a gated block once, it compiled on the default build and broke
 ; the old TWOLEV=0 ones with an undefined symbol.) Nothing loads it -- it is scratch.
-; ---- seamEdge's scratch, 24 bytes ----
-; The hole below $be00 is what the dieChk block at $bc00 does not use, and the rule for picking
-; one of these is the hole REPORT, not "no label there" (OCCCHK's shadow, picked that way, once
-; landed on live variables and the program ran wild).
-; PACKED AGAINST $be00, not against the code. It used to start at $bdd4, the hole's first byte,
-; with the DIE block ending at $bdd3 -- so the block had ZERO bytes of slack and the next single
-; instruction added to it (one "lda #imm" becoming "lda abs") pushed emitted data over seB and
-; failed the build. Ending at $bdff instead leaves that growth room in front of the scratch
-; rather than behind it, where nothing can use it.
-; seB: named by nothing in this build, so given no RAM (compact.mjs)                 ; the row being worked on
-; seHi: named by nothing in this build, so given no RAM (compact.mjs)                 ; its high bits, brought into line with the low ones
-; seNL: named by nothing in this build, so given no RAM (compact.mjs)                 ; ~lo
-; seLo: named by nothing in this build, so given no RAM (compact.mjs)
-; seT: named by nothing in this build, so given no RAM (compact.mjs)                 ; the adjacency union
-; seW: named by nothing in this build, so given no RAM (compact.mjs)                 ; the pairs about to be flipped
-; seMsk: named by nothing in this build, so given no RAM (compact.mjs)                 ; $55 or $00: does this level want the outline
-; seN: named by nothing in this build, so given no RAM (compact.mjs)                 ; glyphs left
-; seC00: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: ground/ceiling pixels, per row
-; seNB: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: the row being built, ending exactly at $bdff
-        * = $510e
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -14607,7 +14561,7 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
         ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = $5d64
+        * = $5d61
 ; ---- lvlStart: put the player at the LIVE level's official start ----
 ; Boot and every death go through here. the death restart is "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
@@ -14655,7 +14609,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; config had not been built in a long time; when it was, it died with "* = $ae00 moves backward
 ; from $ae2a". They live in the stream now, with the other displaced lookups.
 
-        * = $5d83               ; ---- the arc's pixel solver, and the fall's tail ----
+        * = $5d80               ; ---- the arc's pixel solver, and the fall's tail ----
 ; The page the pivot's three scratch tables vacated for VIC bank 3 (see PVBASE), and the only
 ; free run left in a four-level image big enough to hold fallTail in ONE piece -- the next
 ; largest is 36 bytes.
@@ -14951,7 +14905,7 @@ stepThrT3: !byte 2,1,2,2,1,1,1,0,0,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,0,3,3,
         ; $bc00 is a whole free page and now uncontested: the merge-hazard lists used to claim
         ; the same address and only fitted because level 1 has no hazard cells. They live in
         ; the code stream now (see hzRun), well clear of this page.
-        * = $5e98
+        * = $5e95
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
