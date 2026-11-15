@@ -33,7 +33,14 @@ and 7):
 The build times the window itself (`MOVEAT`/`MOVEFOR`/`MOVELEGS`), so boot is excluded and a run
 repeats exactly. It exits 1 on a level that fails to build or boot, or a walk that BUMPS. That makes
 it the functionality check too: run it after every engine change. It takes ONE build and 18 emulator
-runs, about 3 minutes (2026-11-14: 173 s, the build 95 s of it).
+runs, about 3 minutes (2026-11-14: 173 s, the build 95 s of it; 2026-11-15: 97 s, the build 5 s of
+it, its sub-builds out of `build/.cache/`).
+
+**The sub-build cache (2026-11-15).** A build's 26 sub-builds (the other levels' tables, the wall
+variants) are cached in `build/.cache/`, keyed on the bytes of src/, data/, art/, music/, krill/,
+the build's environment, node and `magick -version`, so a cached dump is the one a fresh sub-build
+would make; misses run in parallel. `NOSUBCACHE=1` bypasses it (not `NOCACHE`: that is the renderer's
+run-cache poison). Clearing the directory is always safe.
 
 **One build: the test rig (2026-11-14).** Every segment used to be a build of its own (the level,
 pose, mover and window were all build flags), so the suite was 18 builds of the ten-level game,

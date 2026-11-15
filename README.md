@@ -82,9 +82,13 @@ PAL=1 node src/build-iray.mjs                         # a PAL disk -> lest-c64-p
 ```
 
 Every disk is the whole game, starting at level 1. `D64` names the disk to write;
-without it, any build replaces `lest-c64.d64`. A full build takes a few minutes:
-each level and each removable wall is built as its own sub-build first, so the
-engine can be laid out around all of them. Run it from the project directory.
+without it, any build replaces `lest-c64.d64`. Each level and each removable wall
+is built as its own sub-build first, so the engine can be laid out around all of
+them; the sub-builds run in parallel and are cached in `build/.cache/` under a hash
+of every input they read (src/, data/, art/, music/, krill/, the environment, node
+and ImageMagick), so a build is about 25 s cold and 5 s when nothing they
+depend on has changed. `NOSUBCACHE=1` makes them all fresh; deleting `build/.cache/` is
+always safe. Run it from the project directory.
 
 [`docs/TESTING.md`](docs/TESTING.md) says which test answers which question
 (does it still play, does it still draw the same, did a routine get faster) and

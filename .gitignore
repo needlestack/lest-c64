@@ -12,7 +12,7 @@
 # build/ holds: iray.prg, diagnostic builds' iray.diag.asm (so a throwaway PX/PY/PA start never
 # lands in the tracked iray.asm), compact.mjs's inputs and outputs (iray.aligned/bufsizes/hotloops/
 # reserve/syms.json, iray.compact.asm -- a stale copy would relayout the image against a build that
-# no longer exists), the sub-builds' .lvl*/.wall*-tables.json, diagnostic dumps (cellscan.json),
+# no longer exists), the sub-build cache (.cache/, see build-iray.mjs), diagnostic dumps (cellscan.json),
 # previews and frames, and c64pic's tree.kla for the end scene (see tools/endscene.mjs).
 /build/*
 !/build/iray.asm

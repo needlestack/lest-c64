@@ -14,10 +14,12 @@
 // 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
 // code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, mkdtempSync, copyFileSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, mkdtempSync, copyFileSync,
+         readdirSync, statSync, renameSync } from 'fs';
 import { join } from 'path';
-import { tmpdir, homedir } from 'os';
-import { execFileSync } from 'child_process';
+import { tmpdir, homedir, availableParallelism } from 'os';
+import { execFileSync, spawn } from 'child_process';
+import { createHash } from 'crypto';
 import { ROOT } from './paths.mjs';
 process.chdir(ROOT);   // every path below is repo-relative (see paths.mjs)
 // ---- WHERE THE LEVEL SLOT GOES: picked, not hand-set (2026-10-14) ----
@@ -29,10 +31,17 @@ process.chdir(ROOT);   // every path below is repo-relative (see paths.mjs)
 // does not fit, again at the highest page compaction says does -- then a page or two lower, should the
 // page-constrained scratch fail to pack around it. A failure BEFORE compaction is not a layout
 // problem, and is not retried. Sub-builds inherit SLOT_AT from the child's environment.
+// The shell's own variables, which no part of the build reads: left out of the slot guess's key (and,
+// with a few more, of the sub-build cache's -- see SUBENV_IGNORE).
+const SYS = /^(PATH|HOME|USER|SHELL|PWD|OLDPWD|TERM.*|LANG|LC_.*|TMPDIR|LOGNAME|SHLVL|COLORTERM|_|SSH_.*|DISPLAY|EDITOR|PAGER|MANPATH|XPC_.*|__CF.*|COMMAND_MODE|SECURITYSESSIONID|HOMEBREW_.*|INFOPATH|CLAUDE.*|NODE_.*|GIT_.*|OTEL_.*|CI|NO_COLOR|FORCE_COLOR)$/;
 if (process.env.SLOT_AT === undefined) {
   const { spawnSync } = await import('child_process');
-  const SYS = /^(PATH|HOME|USER|SHELL|PWD|OLDPWD|TERM.*|LANG|LC_.*|TMPDIR|LOGNAME|SHLVL|COLORTERM|_|SSH_.*|DISPLAY|EDITOR|PAGER|MANPATH|XPC_.*|__CF.*|COMMAND_MODE|SECURITYSESSIONID|HOMEBREW_.*|INFOPATH|CLAUDE.*|NODE_.*|GIT_.*|OTEL_.*|CI|NO_COLOR|FORCE_COLOR)$/;
-  const key = JSON.stringify(Object.entries(process.env).filter(([k]) => /^[A-Z0-9_]+$/.test(k) && !SYS.test(k)).sort());
+  // NOSUBCACHE (2026-11-15) is not a setting of the build, only of how its sub-builds are made, so a
+  // NOSUBCACHE build takes the same slot guess as the plain one. (Filtered here and not added to SYS:
+  // SYS is part of every existing key in slot-cache.json, and a changed key is a changed guess.)
+  // D64 too (2026-11-15): it only names the output file, read after the layout is fixed, so every new
+  // disk name was re-guessing the slot from $6900 and paying a failed trial for nothing.
+  const key = JSON.stringify(Object.entries(process.env).filter(([k]) => /^[A-Z0-9_]+$/.test(k) && !SYS.test(k) && k !== 'NOSUBCACHE' && k !== 'D64').sort());
   const cacheF = './build/slot-cache.json';
   let cache = {}; try { cache = JSON.parse(readFileSync(cacheF, 'utf8')); } catch {}
   const tried = [], queue = [cache[key] ?? 0x6900];
@@ -40,13 +49,11 @@ if (process.env.SLOT_AT === undefined) {
     const sa = queue.shift(); if (tried.includes(sa)) continue; tried.push(sa);
     try { unlinkSync('./build/iray.arena.json'); } catch {}
     try { unlinkSync('./build/iray.slotmiss'); } catch {}
-    // DUMPKEEP from the second trial on: the level-table sub-builds (dumpOf) are most of a trial's
-    // time, and their dumps do not depend on SLOT_AT -- the dump is taken before the slot address
-    // reaches anything in it, and a dump build lays out no wall lists. So a retry reuses the ones
-    // the FIRST trial of this same build just wrote, instead of making all ten again.
+    // A retry is cheap without any help (2026-11-15): the sub-builds are made at DUMP_SLOT whatever
+    // the trial's slot, so the second trial's are the first trial's, out of the sub-build cache.
+    // (DUMPKEEP, which reused the files the first trial left without checking they were current, is gone.)
     const res = spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit',
-      env: { ...process.env, SLOT_AT: '0x' + sa.toString(16), SLOT_PICK: '1',   // SLOT_PICK: a trial, so a miss is quiet
-             ...(tried.length > 1 ? { DUMPKEEP: '1' } : {}) } });
+      env: { ...process.env, SLOT_AT: '0x' + sa.toString(16), SLOT_PICK: '1' } });   // SLOT_PICK: a trial, so a miss is quiet
     if (res.status === 0) {
       if (cache[key] !== sa) { cache[key] = sa; writeFileSync(cacheF, JSON.stringify(cache, null, 1)); }
       if (tried.length > 1) console.error(`  slot: placed at $${sa.toString(16)} (tried ${tried.map(t => '$' + t.toString(16)).join(', ')})`);
@@ -70,26 +77,158 @@ if (process.env.SLOT_AT === undefined) {
   }
   process.exit(1);
 }
-// Run this script again as a SUB-BUILD (one level's tables, one wall variant). Its chatter is
-// dropped, but if it FAILS its own error is shown: with stderr discarded, a sub-build that hit a
-// missing file surfaced only as "Command failed" from the parent -- no file, no reason.
-const subBuild = env => {
-  try { execFileSync(process.execPath, [process.argv[1]], { env, stdio: ['ignore', 'ignore', 'pipe'] }); }
-  catch (e) {
-    // The useful part is the ERROR LINES, not the tail: a failed tool call inside the sub-build
-    // ends in a stack trace and a byte dump of the tool's stderr, which buries the message.
-    const all = (e.stderr ?? '').toString().trim().split('\n');
-    const errs = all.filter(l => /error|unable|ENOENT|not found/i.test(l) && !/^\s+at /.test(l));
-    const why = (errs.length ? errs.slice(0, 4) : all.slice(-12)).join('\n  ');
-    console.error(`sub-build failed (LVL=${env.LVL}${env.WALLOFF ? ' WALLOFF=' + env.WALLOFF : ''}):\n  ${why}`);
-    process.exit(1);
-  }
+// ---- SUB-BUILDS: run in parallel, CACHED BY CONTENT (2026-11-15) ----
+// A sub-build is this script run again with LVLDUMP set: one other level's tables (9 of them) or one
+// breakable wall's variant (WALLOFF, 18), each a full run of everything up to the LVLDUMP exit -- art
+// fitting through magick, the charset, the level -- and together they were ~95 of a build's ~100 s,
+// redone every time though nothing had changed. Now each dump is stored in build/.cache/ under a hash
+// of EVERYTHING the run can read, and a build that finds its hash there uses it instead:
+//   - every file in src/ (this script, levels.mjs, the fitters, the assembler...), data/, art/,
+//     music/ and krill/ -- the whole of each directory, bytes and names, so no input is left out
+//     by a list that forgot it. A sub-build reads nothing else of ours: its only other reads are
+//     paths named by environment variables (IDOLART=some/other.png, CHARPLAN, CELLVIEWIN), and a
+//     variable whose value names a file brings that file's bytes into the key too;
+//   - the environment the child runs with, minus the shell's own variables (SUBENV_IGNORE);
+//   - node (version, arch, binary) and `magick -version`: the fitters' output is ImageMagick's.
+// Coarse on purpose: a comment edited in this file's engine code changes the key of every dump,
+// although no dump reads the asm. That costs one cold build; a finer key costs a stale one.
+// NOSUBCACHE=1 neither reads nor writes the cache: every sub-build is made fresh, as before. (Not
+// NOCACHE, which was taken: that is the renderer's run-cache poison, an ENGINE flag -- fallInv every
+// frame -- and like any engine flag it reaches the children and the key. The first try at this used
+// NOCACHE, and its "fresh" build came out 3 bytes longer than the cached one: the invalidation test caught it.)
+//
+// The child's environment is the parent's with these taken out, so the key IS what the child saw:
+//   D64        the disk: the child stops before it writes one. Leaving it in would make the rig
+//              (build/rig.d64), regress and a plain build each a cache of their own for nothing.
+//   SLOT_PICK, NOSUBCACHE, DUMPKEEP: how the parent is run, not what it builds (DUMPKEEP is gone).
+// ...and SLOT_AT fixed at DUMP_SLOT. A dump is taken before the slot address reaches anything in it
+// (a dump build lays out no wall lists: WALL_DELTAS is [] there, so wallPtrs writes zeros), which is
+// what DUMPKEEP relied on when a slot retry reused the first trial's dumps. Pinning it makes every
+// slot trial ask for the same keys, so a retry is all cache hits. Checked directly (2026-11-15): the
+// dumps of levels 2,3,5,6,9,10 and five wall variants made at $6200, $6500 and $6900 were identical.
+//
+// IN PARALLEL: a child writes its dump (LVLDUMP, a path of its own), and nothing else -- the two
+// shared files it used to write (iray.slotnames.json, iray.reserve.json) are skipped under LVLDUMP,
+// as the parent writes both after its sub-builds are done. The diagnostic sheets an env flag asks for
+// (SUB_DIAG) are the exception: a child writes those to the same paths as the parent, so with any
+// of them set the sub-builds run one at a time and uncached, exactly as before -- the sheets come out
+// as they always have, and a cache hit would have skipped a sheet the flag asked for.
+const CACHE_DIR = './build/.cache';
+const NOSUBCACHE = process.env.NOSUBCACHE === '1';
+const SUB_DIAG = ['CELLSCAN', 'ORBSHEET', 'BIGSHEET', 'LADDERSHEET', 'ORBSHRINK', 'PEDDUMP']
+  .filter(k => process.env[k] !== undefined);
+const SUB_UNCACHED = NOSUBCACHE || SUB_DIAG.length > 0;
+const SUB_PAR = SUB_DIAG.length ? 1 : availableParallelism();
+const DUMP_SLOT = '0x6900';
+const CHILD_DROP = ['D64', 'SLOT_PICK', 'NOSUBCACHE', 'DUMPKEEP', 'LVLDUMP'];
+// SYS, minus NODE_OPTIONS (it could load code into the child), plus three set by the tools around
+// the build (zsh's function path, the agent's name, corepack's pin) that change for reasons of their own.
+const SUBENV_IGNORE = k => (SYS.test(k) && k !== 'NODE_OPTIONS') || /^(AI_AGENT|FPATH|COREPACK_.*)$/.test(k);
+const childEnv = env => {
+  const e = { ...env };
+  for (const k of CHILD_DROP) delete e[k];
+  e.SLOT_AT = DUMP_SLOT;
+  return e;
 };
-// dumpOf: one level's tables (an LVLDUMP sub-build) -> its dump. Made fresh unless DUMPKEEP: a later
-// slot trial of the same build, whose first trial has just written this very file (see the picker).
-const dumpOf = (tmp, env) => {
-  if (!(process.env.DUMPKEEP && existsSync(tmp))) subBuild({ ...env, LVLDUMP: tmp });
-  return JSON.parse(readFileSync(tmp, 'utf8'));
+let inputsSha = null;
+const inputsHash = () => {                     // once per process: ~20 MB, tens of ms
+  if (inputsSha) return inputsSha;
+  const h = createHash('sha256');
+  const walk = d => {
+    for (const n of readdirSync(d).sort()) {
+      if (n === '.DS_Store') continue;           // Finder's, rewritten whenever a folder is looked at
+      const p = `${d}/${n}`, s = statSync(p);
+      if (s.isDirectory()) walk(p);
+      else if (s.isFile()) { h.update(`${p}\0${s.size}\0`); h.update(readFileSync(p)); }
+    }
+  };
+  for (const d of ['src', 'data', 'art', 'music', 'krill']) walk(d);
+  h.update(`\0node ${process.version} ${process.arch} ${process.execPath}\0`);
+  h.update(execFileSync('magick', ['-version']));
+  return inputsSha = h.digest('hex');
+};
+const keyOf = e => {
+  const h = createHash('sha256').update(inputsHash());
+  for (const k of Object.keys(e).filter(k => !SUBENV_IGNORE(k)).sort()) {
+    const v = e[k];
+    h.update(`${k}=${v}\0`);
+    let f = false; try { f = !!v && statSync(v).isFile(); } catch {}
+    if (f) h.update(readFileSync(v));
+  }
+  return h.digest('hex').slice(0, 40);
+};
+const subName = e => `LVL=${e.LVL}${e.WALLOFF ? ' WALLOFF=' + e.WALLOFF : ''}`;
+// A failed sub-build's ERROR LINES, not its tail: a failed tool call inside it ends in a stack trace
+// and a byte dump of the tool's stderr, which buries the message. (With stderr discarded, one that
+// hit a missing file surfaced only as "Command failed" from the parent -- no file, no reason.)
+const subFail = (e, stderr) => {
+  const all = (stderr ?? '').toString().trim().split('\n');
+  const errs = all.filter(l => /error|unable|ENOENT|not found/i.test(l) && !/^\s+at /.test(l));
+  console.error(`sub-build failed (${subName(e)}):\n  ${(errs.length ? errs.slice(0, 4) : all.slice(-12)).join('\n  ')}`);
+};
+let subTmpN = 0;
+const subTmp = () => { mkdirSync(`${CACHE_DIR}/tmp`, { recursive: true }); return `${CACHE_DIR}/tmp/${process.pid}-${subTmpN++}.json`; };
+const cacheF = key => `${CACHE_DIR}/${key}.json`;
+// The child's file -> its dump; into the cache by RENAME, so a reader never sees half a file (two
+// builds at once at worst both make the same entry, and the second rename replaces it with equal bytes).
+const subTake = (key, out) => {
+  const d = JSON.parse(readFileSync(out, 'utf8'));
+  if (SUB_UNCACHED) unlinkSync(out); else renameSync(out, cacheF(key));
+  return d;
+};
+const DUMPS = new Map();                         // key -> dump, this process's
+const subCached = key => {
+  if (DUMPS.has(key)) return true;
+  if (SUB_UNCACHED || !existsSync(cacheF(key))) return false;
+  DUMPS.set(key, JSON.parse(readFileSync(cacheF(key), 'utf8')));
+  return true;
+};
+// subDumps: every sub-build this build is about to ask for, the misses SUB_PAR at a time. Only a
+// prefetch -- dumpOf below asks again at each site and runs anything not here on its own, so a
+// wrong prediction costs time, never a wrong dump.
+const subDumps = async envs => {
+  const t0 = Date.now(), jobs = new Map();
+  let hit = 0;
+  for (const env of envs) {
+    const e = childEnv(env), key = keyOf(e);
+    if (subCached(key)) hit++; else jobs.set(key, e);
+  }
+  const live = new Set(), queue = [...jobs];
+  const one = () => {
+    const [key, e] = queue.shift();
+    const out = subTmp();
+    return new Promise(done => {
+      const ch = spawn(process.execPath, [process.argv[1]], { env: { ...e, LVLDUMP: out }, stdio: ['ignore', 'ignore', 'pipe'] });
+      live.add(ch);
+      let err = '';
+      ch.stderr.on('data', b => { err += b; });
+      ch.on('close', code => {
+        live.delete(ch);
+        if (code !== 0) {
+          subFail(e, err);
+          for (const c of live) c.kill();       // only the children this build started
+          process.exit(1);
+        }
+        DUMPS.set(key, subTake(key, out));
+        done();
+      });
+    });
+  };
+  const lane = async () => { while (queue.length) await one(); };
+  await Promise.all([...Array(Math.min(SUB_PAR, jobs.size))].map(lane));
+  console.error(`  sub-builds: ${envs.length} (${hit} cached, ${jobs.size} made, ${SUB_PAR} at a time` +
+    `${NOSUBCACHE ? ', NOSUBCACHE' : SUB_DIAG.length ? ', uncached for ' + SUB_DIAG.join('/') : ''}) in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+};
+// dumpOf: one sub-build's dump, from this build's prefetch or the cache, else made here and now.
+const dumpOf = env => {
+  const e = childEnv(env), key = keyOf(e);
+  if (subCached(key)) return DUMPS.get(key);
+  console.error(`  sub-build ${subName(e)} was not prefetched: made alone`);
+  const out = subTmp();
+  try { execFileSync(process.execPath, [process.argv[1]], { env: { ...e, LVLDUMP: out }, stdio: ['ignore', 'ignore', 'pipe'] }); }
+  catch (x) { subFail(e, x.stderr); process.exit(1); }
+  DUMPS.set(key, subTake(key, out));
+  return DUMPS.get(key);
 };
 import { assemble } from './asm6502.mjs';
 
@@ -663,6 +802,15 @@ const MULTI = !process.env.LVLDUMP;
 const LVLLOAD = MULTI;
 // Every other level, ascending: each a dump of its own (an LVLDUMP sub-build knows none).
 const OTHERS = !MULTI ? [] : LEVEL_IDS.filter(n => n !== LVL);
+// EVERY sub-build this build will ask for, started together here (see subDumps): the other levels
+// below, and the wall variants WALLVARS asks for some 5,000 lines on -- predicted with WALLVARS' own
+// rule (WALL_LVLS: the levels with walls, of this build's; no variants under WALLOFF). The two sites
+// still ask through dumpOf, so if this list and theirs ever disagree, the odd one is made there.
+const { SOCKETS: _sockets, ...envNoSock } = process.env;
+const LVL_ENVS = OTHERS.map(n => ({ ...envNoSock, LVL: String(n) }));
+if (MULTI) await subDumps([...LVL_ENVS, ...(process.env.WALLOFF ? [] :
+  LEVEL_IDS.filter(n => LEVEL_WALLS[n] && (n === LVL || OTHERS.includes(n))).flatMap(lv =>
+    LEVEL_WALLS[lv].walls.map((_, k) => ({ ...process.env, LVL: String(lv), WALLOFF: String(k + 1) }))))]);
 const LVLALL = MULTI ? (() => {
   // The other level is built with the SOCKETS environment left alone, so it declares whatever
   // its own map declares. It used to be forced empty on both sides, because the entity counts
@@ -672,10 +820,8 @@ const LVLALL = MULTI ? (() => {
   // One subprocess per OTHER level, in ascending level order -- which is also the SLOT order,
   // and the slots are global to the chain. A level's own build cannot know them (its "others"
   // list is a different set), so the main build patches lvlNxtT into every dump below.
-  const { SOCKETS, ...envNoSock } = process.env;
-  return OTHERS.map(n => {
-    return dumpOf(`./build/.lvl${n}-tables.json`, { ...envNoSock, LVL: String(n) });
-  });
+  // (SOCKETS is left out of their environment: LVL_ENVS above.)
+  return LVL_ENVS.map(dumpOf);
 })() : null;
 // ---- ...and the LATE levels, built the same way but not resident ----
 // They arrive from disk at the hub, over the slots levels 1-3 vacate, so their tables have to be
@@ -5411,12 +5557,11 @@ const PED_WALL = (LEVEL_WALLS[PED_LVL]?.sockWall ?? []).length
 // ONE VARIANT PER REMOVABLE WALL: each is that wall's OWN level rebuilt with that wall alone
 // taken out, and each yields its own delta. WALLVARS[i] goes with WALLS_ALL[i]. WALLOFF stays
 // level-local (1-based within the level's own groups) -- only the id is global.
-const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.length) ? WALLS_ALL.map((w, i) => {
-  const tmp = `./build/.wall${i}-tables.json`;
+const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.length) ? WALLS_ALL.map(w => {
   // (LEVELSHEET was cleared here: a sheet build printed and stopped before the dump. The sheets are
   // printed from levels.mjs without a build since 2026-11-15, and the flag is gone.)
-  return dumpOf(tmp, { ...process.env, LVL: String(w.lvl),
-                      WALLOFF: String(w.k + 1) });
+  // Made with the others at the head of the build (subDumps, at OTHERS); this is a cache lookup.
+  return dumpOf({ ...process.env, LVL: String(w.lvl), WALLOFF: String(w.k + 1) });
 }) : null;
 // "is there a wall mechanic at all" -- an ENGINE question, so it asks LEVEL_IDS and not what
 // this build's levels happen to need. See WALL_DELTA: the flag and the per-level delta data
@@ -9444,7 +9589,9 @@ const slotEquates = () => LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n]))
 // which held only while no hand-placed buffer happened to sit there -- the level-code block grew the
 // reserve over runPlaneT's $6d00, compaction left it in place, and mkRuns wrote over level 8's
 // flicker code (2026-10-14).
-writeFileSync('./build/iray.slotnames.json', JSON.stringify(LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n]))));
+// Not in an LVLDUMP sub-build (2026-11-15): sub-builds run in parallel and would all write this one
+// file at once; the parent writes it after they are done, and it is the parent's that compaction reads.
+if (!process.env.LVLDUMP) writeFileSync('./build/iray.slotnames.json', JSON.stringify(LVL_TABLES.flatMap(([n]) => (SLOT_SUB[n] ?? [n]))));
 // Every per-level DEFINITION in the source goes through this, so SOLO can delete it in one place.
 // The label survives as an equate; only the bytes go. Written as (name, body, sep) rather than
 // wrapping each site in a nested template literal, because a backtick inside this file's one big
@@ -10349,7 +10496,8 @@ if (HAS_SILVER && !DIE) throw new Error('a build with sentries needs DIE: its sh
 // The level region is NOT emitted, so the relayout sees it as free space and would put RAM scratch
 // on top of the levels. Publish it as a reservation, the same way the buffer sizes and alignment
 // requirements are published -- compaction is a separate pass and can only respect what it is told.
-writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));   // (+ code and sound: see musBuild)
+// (Not in an LVLDUMP sub-build, for the reason iray.slotnames.json is not: the parent's is the one read.)
+if (!process.env.LVLDUMP) writeFileSync('./build/iray.reserve.json', JSON.stringify([SLOT_AT, LVLREGION_END]));   // (+ code and sound: see musBuild)
 // Above $c000 the ceiling is the top of bank 3; inside the image it is the arena, and the relayout
 // is what decides where that is -- so a region there is checked by the overlap guards instead.
 if (SLOT_AT >= 0xc000 && LVLREGION_END > 0xfff9) throw new Error(
