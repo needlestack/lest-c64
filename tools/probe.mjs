@@ -26,11 +26,11 @@ import { portHeld, launch, LAUNCH_FLAGS } from './vice.mjs';
 process.chdir(new URL('..', import.meta.url).pathname);
 
 const VICE = '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';
-// PAL=1 builds write lest-c64-pal.d64 (build-iray.mjs's D64OUT): boot THAT, or a PAL probe runs the
-// NTSC disk with the PAL build's labels and reads garbage -- every level identical (2026-10-23)
+// (PAL=1 only picks the machine VICE emulates: since 2026-11-15 there is ONE disk, which detects a PAL
+// C64 itself -- there is no lest-c64-pal.d64 any more.)
 // D64=path (2026-11-14): build to, and boot, that disk instead -- so a suite of probe runs (fpsr) can
 // leave lest-c64.d64 alone while someone is playing it. Pair it with NOPROBEREBUILD=1.
-const DISK = process.env.D64 ? './' + process.env.D64.replace(/^\.\//, '') : process.env.PAL === '1' ? './lest-c64-pal.d64' : './lest-c64.d64';
+const DISK = process.env.D64 ? './' + process.env.D64.replace(/^\.\//, '') : './lest-c64.d64';
 const args = process.argv.slice(2);
 if (!args.length) { console.error('usage: node tools/probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
 

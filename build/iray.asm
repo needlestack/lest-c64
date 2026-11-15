@@ -1937,7 +1937,7 @@ subFin:
 ; VARIES reads as stutter far more than a low rate does. frameCnt is incremented by the top-of-frame
 ; IRQ, so it keeps counting THROUGH the block copy: the deadline is absolute, not measured from
 ; whenever the work happened to finish.
-fwait:  lda frameCnt            ; PAL: the raster's own count -- the doubled tick would
+fwait:  lda palRas              ; the RASTER's own count (= the tick on NTSC; on PAL the doubled tick would
         sec                     ;   cut every fifth period short, the varying rate this exists to stop
         sbc fT0
         cmp #3
@@ -1946,7 +1946,7 @@ mvs:
 mvsW:   lda $d012
         cmp #250
         bne mvsW
-        lda frameCnt            ; the flip IS the fall's clock reference: raster 250 of a known
+        lda palRas              ; the flip IS the fall's clock reference: raster 250 of a known
         sta fT0                 ;   frame, so the next deadline is exactly fT0 + 3
         lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
         sta $d011               ;   flip below, so the fine scroll and the content it shifts reach
@@ -4535,6 +4535,7 @@ irqB0:  lda #$01      ; the ground colour ABOVE the rim: during a drop that is
         sta $d021               ;   still the level being LEFT. The middle region inherits it.
 irqArm: lda #$96
         sta $d012
+        inc palRas              ; the RASTER's count, for the one clock that is the screen's (fwait)
 irqTk:  inc frameCnt              ; ---- THE TICK: everything from here to irqd is TIME, 60 a second ----
         bne irqNf
         inc frameCnt+1
@@ -4550,6 +4551,16 @@ irqNm:  lda dsGl                ; the death's glide, kick or closing filter, 60 
         jsr dsTick
 irqNd:
         jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick
+        lda palF                ; PAL (palF, from the KERNAL's $02a6 at boot): 50 raster frames a
+        beq irqd                ;   second, 60 ticks -- so every fifth frame ticks TWICE. NTSC: never.
+        dec palQ
+        bne irqd                ; Back to back, so ticks land 20,20,20,20,20,0 ms apart
+        lda #5                  ;   rather than evenly; nothing here is tighter than a tick, and the
+        sta palQ                ;   player and dsTick only ever count them.
+        jmp irqTk
+palQ:   !byte 5
+palRas: !byte 0
+palF:   !byte 0                 ; 1 = a PAL C64: written by the boot body from $02a6, read by the IRQ
 irqd:   lda #$ff
         sta $d019
         pla
@@ -10428,7 +10439,7 @@ chainEnd:
         ; ---- the two rung finders, in the sliver before fallSnapD at $4900 ----
         ; Out here only because the main code block ends a few bytes short of ORB_SMALL once
         ; PROFILE adds its ticks. Reached by a patched jsr from holeTail, so nothing falls in.
-        * = $47ae
+        * = $47c8
 ; X = h. A = the rung, or $ff for "past the smallest".
 hlRungH:cpx #$7d               ; past here the rung is constant, and the table stops there
         bcc hlRHc
@@ -10593,7 +10604,7 @@ orbVarT: !byte 15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,13,13,13,13,12,12,12
         ; indexes them. bfsD0 lives off at $ae00 because this gap is not big enough for both.
         * = $a100
 bfsD1:  !fill 256, 255            ; A FULL PAGE: the clear loop runs until X wraps
-        * = $47e6
+        * = $4800
 ; ---- anPath: A = the first step from the angel's cell toward the player, or $ff ----
 ; Reads the LIVE distance map: find the neighbour whose distance is exactly one less than ours.
 ; BFS guarantees one exists for every reachable cell, so the only $ff cases are a map that has
@@ -11262,7 +11273,7 @@ fHiT:   !byte 24,24,24,24,24,22,20,18,16,14,12,10,9,7,6,4,2,0,0,0,0,24,24,24,24,
 ; address and its state, and what it clobbers on the way back is per-frame scratch.
         * = $813f
 krillRt: !fill 251, 0
-        * = $4a7b
+        * = $4a95
 ; ---- klPark / lvlLoad: THE LEVEL COMES OFF THE DISK ----
 ; klPark saves Krill's live resident before the renderer's span stack overwrites $0400. It is the
 ; ONLY copy that works -- the protocol is stateful across loads and the drive is talking to this
@@ -11624,7 +11635,7 @@ moveXT: !byte 64,64,64,64,64,64,63,63,63,62,62,62,61,61,60,60,59,59,58,57,56,56,
         !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
         !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64   ; moveYT runs on into this: see sharedPair
 
-        * = $4be9               ; ---- and the whole readout ----
+        * = $4c03               ; ---- and the whole readout ----
 ; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
 ; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
 ; that drawFps falling through into whatever follows it still does. The only branches that
@@ -11750,7 +11761,7 @@ a2F:    sta (fdB),y
 ; under $a900 with the hazard tables and level 5's real design pushed it 96 bytes over. This
 ; routine runs ONCE, at boot, and never again -- so it was the obvious thing to move out of
 ; contested space. Same reasoning that moved dpCand out of the main block.
-        * = $4c62
+        * = $4c7c
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -11896,7 +11907,7 @@ lvlFlkT:!byte 0,0,0,0,0,0,0,1,0,0   ; per level id - 1
         ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
         ; it is COLD, entered once per level entry (lvlChr's tail jmp, or floorDk's), and it fits whole in the page
         ; bndT was holding down on its own. See bndT for the move that freed it.
-        * = $4cfc
+        * = $4d16
 ; ---- the idol subsystem lives in the front of seamEdge's page ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
 ; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
@@ -12116,7 +12127,7 @@ arcCdT: !byte 2,4,5,13,15,16,19,21,23,27,29,31,35,45,49,52,63,67,69,76,86,90,95,
         ; ...and $83a0 is the same again in the next page. NOT $6d82, which is where these were:
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
         ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
-        * = $4e24
+        * = $4e3e
 ; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
 ; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
 ; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
@@ -12126,7 +12137,7 @@ pedOff: ldy idolHand
         lda #$00
         sta idolOnPedT,y
 poNo:   rts
-        * = $4e2f
+        * = $4e49
 dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
         ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
         ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
@@ -12241,7 +12252,7 @@ runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,10,0,0,0,
 runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,6,0,0,0,0,0,0,0,12,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,17,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,15,0,0,17,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,17,0,21,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,0,0,21,0,0,2,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,0,0,0,21,0,0,2,0,0,0,7,0,0,0,0,0,0,0,13,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 ; ---- snapCp: the half-height snapshot copy (its caller is bgCopy) ----
 ; Out here from the hand layout, where it filled 64 bytes of stable slack; compaction places it.
-        * = $4e75
+        * = $4e8f
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         tay
@@ -12292,7 +12303,7 @@ rbT: !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
         ; ran out of room the moment a level was allowed to declare its own sockets: the
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
-        * = $4ea6
+        * = $4ec0
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
 ; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
@@ -12585,7 +12596,7 @@ rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,2
         ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
         ; Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
-        * = $50af
+        * = $50c9
 
 ; ---- fwBlk and fNT live up here, away from the fall's other tables ----
 ; They were at the foot of the $6c00 block with fKT/fLoT/fHiT, and level 7's tables push that run
@@ -12708,7 +12719,7 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; seN: named by nothing in this build, so given no RAM (compact.mjs)                 ; glyphs left
 ; seC00: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: ground/ceiling pixels, per row
 ; seNB: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: the row being built, ending exactly at $bdff
-        * = $50f4
+        * = $510e
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -14596,7 +14607,7 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
         ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = $5d4a
+        * = $5d64
 ; ---- lvlStart: put the player at the LIVE level's official start ----
 ; Boot and every death go through here. the death restart is "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
@@ -14644,7 +14655,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; config had not been built in a long time; when it was, it died with "* = $ae00 moves backward
 ; from $ae2a". They live in the stream now, with the other displaced lookups.
 
-        * = $5d69               ; ---- the arc's pixel solver, and the fall's tail ----
+        * = $5d83               ; ---- the arc's pixel solver, and the fall's tail ----
 ; The page the pivot's three scratch tables vacated for VIC bank 3 (see PVBASE), and the only
 ; free run left in a four-level image big enough to hold fallTail in ONE piece -- the next
 ; largest is 36 bytes.
@@ -14940,7 +14951,7 @@ stepThrT3: !byte 2,1,2,2,1,1,1,0,0,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,0,3,3,
         ; $bc00 is a whole free page and now uncontested: the merge-hazard lists used to claim
         ; the same address and only fitted because level 1 has no hazard cells. They live in
         ; the code stream now (see hzRun), well clear of this page.
-        * = $5e7e
+        * = $5e98
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.

@@ -268,10 +268,12 @@ on CIA2's timers.
 - **New mechanics get a workload here.** If a change adds something none of the workloads above
   reaches, add one to regress.sh and say why it is there.
 
-- **PAL: the same tools with `PAL=1`.** The VICE tools launch a PAL machine and the builds they
-  make are PAL builds (`PAL=1 node tools/fpsr.mjs "" suite`). fps is still counted against the
-  game's 60 ticks a second, so it compares directly with NTSC. A `ticks` or `travelled` column
-  that differs from NTSC's means the PAL clock is wrong. NTSC stays the reference.
+- **PAL: the same tools with `PAL=1`.** The VICE tools launch a PAL machine; the disk is the same
+  one (since 2026-11-15 the game detects PAL at boot from the KERNAL's `$02a6` and ticks twice every
+  fifth raster frame). `PAL=1 node tools/fpsr.mjs "" suite`. fps is counted against the game's 60
+  ticks a second, so it compares directly with NTSC: a `ticks` or `travelled` column that differs
+  from NTSC's means the PAL clock is wrong. First one-disk PAL suite (2026-11-15): level 1 spin
+  19.34 fps, level 9 spin 18.22, all clean, ~300 ticks a segment like NTSC. NTSC stays the reference.
 
 ## Last recorded `fpsr.mjs "" suite`
 

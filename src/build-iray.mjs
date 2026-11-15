@@ -278,14 +278,17 @@ for (const k of ['CHAIN', 'BOOTLVL', 'LAB', 'WIP']) if (process.env[k] !== undef
 // D64=<name> writes somewhere other than lest-c64.d64. A variant build -- a level-wiring test, a
 // profiling shape -- otherwise silently replaces the disk being played, and probe.mjs builds
 // before every run, so a diagnostic run destroys the playable disk as a side effect.
-// PAL=1: a build for a PAL C64 (2026-10-23, the user: "most of the hobbyists are in PAL"; VICE
-// starts as one, and a .d64 cannot say which machine it wants). The game's clock stays 60 ticks a
-// second: the raster IRQ comes 50 times a second there, so every fifth one runs the tick twice (see
-// irqTk). The SID clock (CLOCK) is PAL's, so the music needs no retune. NOT yet done for PAL: the
-// art's pixel aspect (PAR) and a look at the inks. PAL=0 (NTSC, the default) emits the same bytes.
-const PAL = process.env.PAL === '1';
-const CLOCK = PAL ? 985248 : 1022727;            // the SID's clock, Hz
-const D64OUT = process.env.D64 ?? (PAL ? 'lest-c64-pal.d64' : 'lest-c64.d64');
+// ONE DISK FOR BOTH MACHINES (2026-11-15; the user: "ship one disk ... and not worry about it"). The game's
+// clock is 60 ticks a second everywhere. On a PAL C64 the raster IRQ comes 50 times a second, so every fifth
+// one runs the tick twice (irqTk) -- decided at RUN time by palF, which the boot copies from the KERNAL's own
+// PAL/NTSC flag ($02a6, set at power-on). Everything else is the same code on both: the raster splits run
+// unchanged (a full PAL playthrough, 2026-11-15), and the frame wait counts raster frames (palRas) on both.
+// The SID tables are NTSC's: on PAL every pitch is ~0.65 semitone flat, all together -- accepted by the
+// user ("pitch is fine"). The fps is ~10-15% lower there (50 Hz quantisation); the download page says the
+// game plays slightly better on NTSC. PAL=1 no longer changes the build; the tools still read it to run
+// VICE as a PAL machine. (It was a separate PAL build, lest-c64-pal.d64, from 2026-10-23 to 2026-11-15.)
+const CLOCK = 1022727;                           // the SID's clock, Hz (NTSC's: see above)
+const D64OUT = process.env.D64 ?? 'lest-c64.d64';
 const LVL = +(process.env.LVL ?? 1);
 if (!LEVEL_IDS.includes(LVL)) throw new Error(`LVL=${LVL}: the game has levels ${LEVEL_IDS[0]} to ${LEVEL_IDS[LEVEL_IDS.length - 1]}`);
 // L10OPEN="x,y;x,y" (a TEST): those cells open in the map from the start, and the corner exit counts
@@ -5014,7 +5017,7 @@ const BALL_SND = process.env.BALLSND !== '0';
 // black (the user, 2026-11-11: "turn the border flickering off for death?"; 11-12: "i like the death
 // better with the border staying black. implement that on level 9 as well")
 const BD_BORDER = process.env.BDBORDER === '1';
-const BS_C2 = Math.round(65.4064 * 16777216 / (PAL ? 985248 : 1022727));   // C2, voice 3's frequency
+const BS_C2 = Math.round(65.4064 * 16777216 / CLOCK);   // C2, voice 3's frequency
 // THE BOSS TRACK (BOSSMUS=0: none; the user, 2026-11-12): "a jaws-like background track ... F1 Pulse
 // wave. Pulse width cycles from 50% to 5% and back to 50% over 800ms. In sync, the lowpass filter goes
 // from 30% to 0%. resonance maximum." It climbs F harmonic minor ("the F minor scale that uses E as
@@ -5024,7 +5027,7 @@ const BS_C2 = Math.round(65.4064 * 16777216 / (PAL ? 985248 : 1022727));   // C2
 // ON since level 10 shipped (2026-11-13: the game the user played and approved had it); BOSSMUS=0
 // leaves it out. 254 bytes of level code, in level 10's file.
 const BOSS_MUS = BALL_SND && process.env.BOSSMUS !== '0';
-const BM_F = m => 440 * 2 ** ((m - 69) / 12) * 16777216 / (PAL ? 985248 : 1022727);
+const BM_F = m => 440 * 2 ** ((m - 69) / 12) * 16777216 / CLOCK;
 const BM_NT = [29, 31, 32, 34, 36, 37, 40, 41].map(m => Math.round(BM_F(m) / 8));   // F1 G1 Ab1 Bb1 C2 Db2 E2 F2, in 8ths of the register
 if (Math.max(...BM_NT) > 255) throw new Error('BOSS_MUS: F2 / 8 must fit a byte');
 const BM_F1 = BM_NT[0] * 8;
@@ -9808,7 +9811,7 @@ const musBuild = modLen => {
       // higher"). -G recalculates the table from the PAL clock, so A=440 on NTSC asks for
       // 440 * 985248 / 1022727 Hz.
       execFileSync(join(homedir(), 'goattracker2/linux/gt2reloc'),
-        ['s.sng', 's.prg', '-N', '-D1', ...PAL ? [] : [`-G${MUS_PITCH.toFixed(2)}`], `-W${(at >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
+        ['s.sng', 's.prg', '-N', '-D1', `-G${MUS_PITCH.toFixed(2)}`, `-W${(at >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
       const prg = readFileSync(join(d, 's.prg'));
       if ((prg[0] | (prg[1] << 8)) !== at) throw new Error(`MUSIC: gt2reloc put the player at ${hx16(prg[0] | (prg[1] << 8))}, not ${hx16(at)}`);
       // the RELEASE MASK our patch to player.s adds (music/goattracker-player.patch): the immediate of
@@ -12960,7 +12963,7 @@ noFps:` : '      '}  jmp mvs                 ; the ordinary path takes the SINGL
 ; VARIES reads as stutter far more than a low rate does. frameCnt is incremented by the top-of-frame
 ; IRQ, so it keeps counting THROUGH the block copy: the deadline is absolute, not measured from
 ; whenever the work happened to finish.
-fwait:  lda ${PAL ? 'palRas' : 'frameCnt'}            ; PAL: the raster's own count -- the doubled tick would
+fwait:  lda palRas              ; the RASTER's own count (= the tick on NTSC; on PAL the doubled tick would
         sec                     ;   cut every fifth period short, the varying rate this exists to stop
         sbc fT0
         cmp #${FALL_PERIODS}
@@ -12969,7 +12972,7 @@ mvs:
 mvsW:   lda $d012
         cmp #250
         bne mvsW
-        lda ${PAL ? 'palRas  ' : 'frameCnt'}            ; the flip IS the fall's clock reference: raster 250 of a known
+        lda palRas              ; the flip IS the fall's clock reference: raster 250 of a known
         sta fT0                 ;   frame, so the next deadline is exactly fT0 + ${FALL_PERIODS}
         lda pd11                ; PUBLISH the pending scroll and split HERE, alongside the buffer
         sta $d011               ;   flip below, so the fine scroll and the content it shifts reach
@@ -15703,8 +15706,8 @@ irqB0:  lda #${hx(palOf(LVL).ceil)}      ; the ground colour ABOVE the rim: duri
         sta $d021               ;   still the level being LEFT. The middle region inherits it.
 irqArm: lda #${hx(SPLITLINE)}
         sta $d012
-${PAL ? `        inc palRas              ; PAL: the RASTER's count, for the one clock that is the screen's (fwait)
-` : ''}irqTk:  inc frameCnt              ; ---- THE TICK: everything from here to irqd is TIME, 60 a second ----
+        inc palRas              ; the RASTER's count, for the one clock that is the screen's (fwait)
+irqTk:  inc frameCnt              ; ---- THE TICK: everything from here to irqd is TIME, 60 a second ----
         bne irqNf
         inc frameCnt+1
 irqNf:
@@ -15718,14 +15721,17 @@ irqNm:  lda dsGl                ; the death's glide, kick or closing filter, 60 
         beq irqNd
         jsr dsTick
 irqNd:
-` : ''}${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}${PAL ? `        dec palQ                ; PAL: 50 raster frames a second, 60 ticks -- so every fifth frame
-        bne irqd                ;   ticks TWICE. Back to back, so ticks land 20,20,20,20,20,0 ms apart
+` : ''}${LX_VECS.includes('lxTick') ? '        jsr lxTick              ; LEVEL CODE: flkTick (after irqB0, so a flash overrides its ground) or svTick\n' : ''}        lda palF                ; PAL (palF, from the KERNAL's $02a6 at boot): 50 raster frames a
+        beq irqd                ;   second, 60 ticks -- so every fifth frame ticks TWICE. NTSC: never.
+        dec palQ
+        bne irqd                ; Back to back, so ticks land 20,20,20,20,20,0 ms apart
         lda #5                  ;   rather than evenly; nothing here is tighter than a tick, and the
         sta palQ                ;   player and dsTick only ever count them.
         jmp irqTk
 palQ:   !byte 5
 palRas: !byte 0
-` : ''}irqd:   lda #$ff
+palF:   !byte 0                 ; 1 = a PAL C64: written by the boot body from $02a6, read by the IRQ
+irqd:   lda #$ff
         sta $d019
         pla
         tay
@@ -31430,7 +31436,8 @@ try {
   const p2Pages = p2.reduce((n, f) => n + Math.floor(f.length / 256), 0);
   // (ENDBOOT has no title: with nothing but the quote to load, the sweep is over before Krill is up)
   const title = TITLE && QUOTE && !ENDBOOT ? { row0: TITLE.row0, len: TITLE.len } : null;
-  let ld = buildLoader(assemble, ldFiles, bootEntry, 1, title);
+  const palF = ENDBOOT ? null : r.labels.palF;   // the boot copies the KERNAL's PAL flag here (see CLOCK)
+  let ld = buildLoader(assemble, ldFiles, bootEntry, 1, title, palF);
   const irayBytes = ld.prg.length - 2, irayPages = Math.floor(irayBytes / 256);
   const t1 = irayBytes / KERNAL_BPS, t2 = p2Bytes / KRILL_BPS;
   // WITH A TITLE the sweep ends at TITLE_AT of the time the quote is up (the last loads included),
@@ -31445,7 +31452,7 @@ try {
   const p2Sweep = p2Pages * Math.min(1, (tSweep - t1) / t2);
   const step1 = Math.round(col1 * 256 / irayPages), step2 = Math.round((SW_COLS - col1) * 256 / p2Sweep);
   if (step1 > 0xffff || step2 < 1 || step2 > 0xffff) throw new Error(`sweep steps out of range: ${step1}/${step2}`);
-  ld = buildLoader(assemble, ldFiles, bootEntry, step2, title);
+  ld = buildLoader(assemble, ldFiles, bootEntry, step2, title, palF);
   if (ld.prg.length - 2 !== irayBytes) throw new Error('IRAY changed length between sweep passes');
   console.error(`  sweep: ${col1} columns over IRAY's ${t1.toFixed(1)}s (step ${step1}), ` +
                 `${SW_COLS - col1} over Krill's next ${(tSweep - t1).toFixed(1)}s (step ${step2})` +

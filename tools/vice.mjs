@@ -70,7 +70,8 @@ export const portHeld = port =>
 // drive is ON and the kernal-trap loader OFF -- with the trap loader the boot stalls after the quote
 // screen. -autostart-handle-tde makes autostart use that drive. Passed explicitly every time because
 // VICE drops at-default resources from vicerc. +minimized: the user can still see the window.
-// PAL=1 (the same switch the build reads, so `PAL=1 node tools/fpsr.mjs "" suite` builds AND runs PAL)
+// PAL=1: run VICE as a PAL machine. The DISK is the same either way: since 2026-11-15 the game detects a PAL
+// C64 at boot (the KERNAL's $02a6), so `PAL=1 node tools/fpsr.mjs "" suite` tests the one disk on PAL.
 export const LAUNCH_FLAGS = [process.env.PAL === '1' ? '-pal' : '-ntsc', '+minimized', '-drive8truedrive', '+virtualdev8', '-autostart-handle-tde'];
 
 // ---- process-group lifetime: one registry, cleaned on every way out ----

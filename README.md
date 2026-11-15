@@ -46,10 +46,11 @@ You can play it online right now at:
 Or if you prefer, you can use [VICE](https://vice-emu.sourceforge.io/) with
 the disk image [`lest-c64.d64`](lest-c64.d64) in this repository.
 
-Be sure to use **x64sc**, and set the machine to **NTSC** and enable **true
-drive emulation** under peripherals. The fast loader runs its own code inside
-the 1541, so it needs a real (or truly emulated) drive. On a PAL machine the
-disk runs wrong and its loads can stall.
+Be sure to use **x64sc** and enable **true drive emulation** under
+peripherals: the fast loader runs its own code inside the 1541, so it needs a
+real (or truly emulated) drive. The same disk runs on NTSC and PAL machines (it
+detects which at boot), but it plays slightly better on NTSC, so set the
+machine to **NTSC** if you can.
 
 **Controls**
 
@@ -78,7 +79,6 @@ part of the project.
 ```sh
 node src/build-iray.mjs                               # the whole game, levels 1-10 -> lest-c64.d64
 D64=build/test.d64 node src/build-iray.mjs            # the same, to another disk
-PAL=1 node src/build-iray.mjs                         # a PAL disk -> lest-c64-pal.d64 (experimental)
 ```
 
 Every disk is the whole game, starting at level 1. `D64` names the disk to write;

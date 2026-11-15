@@ -397,7 +397,7 @@ ${lines.map(({ l, k, code }) => `ndTxt${k}: !byte ${code.join(',')}   ; "${l}"
 `).join('')}`;
 };
 
-function bodySource(files, entry, pages, first, step2, title, guard) {
+function bodySource(files, entry, pages, first, step2, title, guard, palF = null) {
   let step = 0;
   const load = f => `
         lda #${'$' + (++step).toString(16).padStart(2, '0')}
@@ -560,7 +560,9 @@ ${title ? `        jsr ${hx4(SW_TITLE)}     ; the last files land on the QUOTE: 
         lda #$ea
         sta $0315
         cli
-        jmp ${hx4(entry)}
+${palF ? `        lda $02a6               ; ONE DISK, BOTH MACHINES: the KERNAL's own PAL/NTSC flag (set at power-on;
+        sta ${hx4(palF)}               ;   1 = PAL) into the engine's palF, now that IMG is in (2026-11-15)
+` : ''}        jmp ${hx4(entry)}
 
 fail:   sta $03                 ; the status byte Krill returned, beside the step in $02
         sta $d020               ; BORDER = Krill's status, BACKGROUND = which load was in
@@ -576,7 +578,7 @@ ${names}
 
 // Returns the PRG bytes for the stub: BASIC header, a copy loop that lifts Krill's resident and
 // the body into place below $0801, the two as data, and Krill's install routine at KRILL_INSTALL.
-export function buildLoader(assemble, files, entry, step2, title = null) {
+export function buildLoader(assemble, files, entry, step2, title = null, palF = null) {
   const first = files.find(f => f.first);
   const holePages = Math.ceil((first.length ?? 2048) / 256);
   if (holePages > 16) throw new Error(`the file under the I/O hole is ${first.length} bytes; the hole is 4K`);
@@ -587,7 +589,7 @@ export function buildLoader(assemble, files, entry, step2, title = null) {
     `screen at ${hx4(KSCR)}. Lower KSTAGE -- everything below it is still empty at this point.`);
   const GUARD_AT = KRILL_RESDATA + KRILL_RES.length;     // IRAY's tail, after the resident's bytes
   const guard = assemble(guardSource(GUARD_AT));
-  const body = assemble(bodySource(files, entry, holePages, first, step2, title, guard.labels));
+  const body = assemble(bodySource(files, entry, holePages, first, step2, title, guard.labels, palF));
   if (LOADER_RUN + body.bytes.length > 0x0800) throw new Error(
     `the boot body is ${body.bytes.length} bytes and runs past $0800 from ${hx4(LOADER_RUN)}, ` +
     `into the image it is about to load. Krill's resident takes $0400-$0612 below it.`);
