@@ -461,15 +461,23 @@ export function buildLoader(assemble, files, entry, step2, title = null) {
            `        cpx #$${rem.toString(16).padStart(2, '0')}\n        bne cpbr` : '');
   // NO BASIC HEADER. This file is jumped to by IQOT, never RUN, so the twelve bytes of SYS line
   // would be twelve bytes of KERNAL-speed load for nothing -- and a half-second of black screen.
-  const stub = `        * = ${hx4(IRAY_ENTRY)}
+  // The body's bytes go in the gap between the copy loop and the installer, which is free KERNAL-speed
+  // air otherwise. A test build that boots straight into a later level carries more boot files, so a
+  // longer body, and the body can outgrow that gap (BOOTLVL=4 and 9, 2026-11-14): the assembler's
+  // overlap check caught it, naming only $09c0. Then, and only then, the body rides AFTER Krill's
+  // resident data instead -- a longer file, so a slower boot, but the shipping disk keeps its layout.
+  const front = `        * = ${hx4(IRAY_ENTRY)}
 ${cpBody}
         jmp ${hx4(LOADER_RUN)}
-bdat:   !byte ${[...body.bytes].join(',')}
-        * = ${hx4(KRILL_INSTALL)}
+`, bdat = `bdat:   !byte ${[...body.bytes].join(',')}
+`, krill = `        * = ${hx4(KRILL_INSTALL)}
         !byte ${inst.join(',')}
         * = ${hx4(KRILL_RESDATA)}
         !byte ${res.join(',')}
 `;
+  // (the loop alone, bdat given a stand-in address: it is absolute either way, so the size is the same)
+  const gapFits = IRAY_ENTRY + assemble(`bdat = $1000\n` + front).bytes.length + bl <= KRILL_INSTALL;
+  const stub = gapFits ? front + bdat + krill : front + krill + bdat;
   const out = assemble(stub);
   return { prg: out.prg, bodyLen: body.bytes.length, resLen: res.length, instLen: inst.length };
 }

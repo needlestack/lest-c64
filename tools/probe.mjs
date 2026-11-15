@@ -28,7 +28,9 @@ process.chdir(new URL('..', import.meta.url).pathname);
 const VICE = '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';
 // PAL=1 builds write lest-c64-pal.d64 (build-iray.mjs's D64OUT): boot THAT, or a PAL probe runs the
 // NTSC disk with the PAL build's labels and reads garbage -- every level identical (2026-10-23)
-const DISK = process.env.PAL === '1' ? './lest-c64-pal.d64' : './lest-c64.d64';
+// D64=path (2026-11-14): build to, and boot, that disk instead -- so a suite of probe runs (fpsr) can
+// leave lest-c64.d64 alone while someone is playing it. Pair it with NOPROBEREBUILD=1.
+const DISK = process.env.D64 ? './' + process.env.D64.replace(/^\.\//, '') : process.env.PAL === '1' ? './lest-c64-pal.d64' : './lest-c64.d64';
 const args = process.argv.slice(2);
 if (!args.length) { console.error('usage: node tools/probe.mjs "ENV=1 ..." name[:bytes] ...'); process.exit(2); }
 
@@ -114,6 +116,13 @@ if (abortC && !specs.some(s => s.split(':')[0] === abortC.name)) specs.push(abor
 const names = specs.map(s => s.split(':')[0]);
 
 // ---- ONE build: it writes the disk AND tells us the addresses in that disk ----
+// PROBESYMS=<labels.json> (2026-11-14): DON'T build -- run the disk D64 names with the addresses in
+// that file. For the test rig (TESTRIG, tools/rig.mjs): one build writes build/rig.d64 and its own
+// labels beside it (build/rig.syms.json, from the very assembly that went on the disk), and every
+// run is a patched copy of that disk, so the rule above still holds -- the labels come from the
+// build the disk is -- without a build per run. The env string is then ignored (nothing reads it).
+const PROBESYMS = process.env.PROBESYMS;
+if (PROBESYMS && !process.env.D64) { console.error('PROBESYMS needs D64=<the disk those labels belong to>'); process.exit(2); }
 const env = { ...process.env };
 for (const kv of envStr.split(/\s+/).filter(Boolean)) {
   const k = kv.slice(0, kv.indexOf('=')), v = kv.slice(kv.indexOf('=') + 1);
@@ -129,11 +138,12 @@ const SHIPENV = { ...process.env };
 const LIVE = 'frameCnt';
 env.LABELS = [...names.filter(n => !n.startsWith('@')), LIVE].join(',');   // the hook prints every label whose name contains one
 let out = '';
-try {
+if (!PROBESYMS) try {
   out = execSync(`node src/build-iray.mjs`, { env, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
 } catch (e) { out = (e.stdout || '') + (e.stderr || ''); }
 const build = out + '';
-if (!/^ok:/m.test(build)) {
+const GIVEN = PROBESYMS ? JSON.parse(readFileSync(PROBESYMS, 'utf8')) : null;
+if (!GIVEN && !/^ok:/m.test(build)) {
   const asm = build.match(/ASM ERROR.*/);
   console.error('BUILD FAILED -- the disk is whatever a previous build left behind.');
   console.error('  ' + (asm ? asm[0] : build.trim().split('\n').slice(-3).join('\n  ')));
@@ -145,6 +155,10 @@ const addr = {};
 // table's interior, the I/O area's underlying RAM. Nothing to resolve, so nothing can be stale.
 for (const n of [...names, LIVE]) {
   if (n.startsWith('@')) { addr[n] = parseInt(n.slice(1), 16); continue; }
+  if (GIVEN) {
+    if (GIVEN[n] === undefined) { console.error(`LABEL NOT FOUND: ${n} -- not in ${PROBESYMS}.`); process.exit(1); }
+    addr[n] = GIVEN[n]; continue;
+  }
   // The LAST print, not the first: with the level-slot picker the build runs a trial per slot
   // address and every trial prints its labels, so the first match can be a placement the picker
   // then rejected -- lvlMeT read 169 off a slot that was never used (2026-10-17). The final build
@@ -156,7 +170,7 @@ for (const n of [...names, LIVE]) {
 // Every label's FINAL address, written by compact.mjs after the assembly that ships. Used to set
 // an execution checkpoint by name; absent (an older build) it simply falls back to the old wait.
 let SYMS = {};
-try { SYMS = JSON.parse(readFileSync('./build/iray.syms.json', 'utf8')); } catch { /* optional */ }
+try { SYMS = GIVEN ?? JSON.parse(readFileSync('./build/iray.syms.json', 'utf8')); } catch { /* optional */ }
 if (!existsSync(DISK)) { console.error(`no ${DISK}`); process.exit(1); }
 
 // ---- run it, never touching an emulator that was already open ----
@@ -221,7 +235,7 @@ const stop = () => {
   // the floor every 256 frames, which reads as the game being broken rather than the disk being
   // the wrong one. Three times before this was added. NOPROBEREBUILD=1 skips it for a run where
   // the diagnostic disk is the point.
-  if (!process.env.NOPROBEREBUILD)
+  if (!process.env.NOPROBEREBUILD && !PROBESYMS)   // (PROBESYMS built nothing, so there is nothing to put back)
     try { execSync('node src/build-iray.mjs', { env: SHIPENV, stdio: 'ignore' }); } catch {}
 };
 // Anything that goes wrong below is nearly always explained by a line VICE printed at startup

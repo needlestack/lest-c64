@@ -1,6 +1,6 @@
 // vprof.mjs -- an EXACT cycle profile of a build, from VICE's own monitor profiler.
 //
-//   node tools/vprof.mjs "CHAIN=4 IDOLSEAT=1 ANGFREEZE=1 SPIN=1" [--t0 600] [--secs 20] [--top 25]
+//   node tools/vprof.mjs "BOOTLVL=4 IDOLSEAT=1 ANGFREEZE=1 SPIN=1" [--t0 600] [--secs 20] [--top 25]
 //                        [--disass 8] [--out prof.txt]
 //
 // VICE 3.8's monitor has `prof`: it counts every cycle the CPU spends, attributed by JSR/RTS to
@@ -23,12 +23,27 @@
 // different set of headings. In this mode the window includes BOOT, so the loader (Krill at
 // $04xx, the KERNAL's $ffcf/$eea9, stackLT used as its buffer) and the idle wait vary with disk
 // timing -- compare render routines, not the grand total.
-//   node tools/vprof.mjs "CHAIN=1 SPINF=1 BENCHF=2000 ANGFREEZE=1 NOHUD=1" --until benchEnd
+//   node tools/vprof.mjs "BOOTLVL=1 SPINF=1 BENCHF=2000 ANGFREEZE=1 NOHUD=1" --until benchEnd
 // Hard cap: the emulator is killed after --secs + 60 s whatever happens (one-minute rule).
-import { writeFileSync, mkdtempSync, unlinkSync, existsSync } from 'fs';
+//
+// ON THE TEST RIG (2026-11-14) -- THE A/B MODE NOW. The first argument may be a rig PARAMETER SET
+// (lowercase keys, tools/rig.mjs) instead of build flags:
+//   node tools/vprof.mjs "level=1 mode=spinf bench=2000 angfreeze=1" --until benchEnd
+//   node tools/vprof.mjs "level=4 mode=walkf bench=600" --flags "IDOLSEAT=1" --until benchEnd
+// It builds the rig once (TESTRIG=1, build/vprof-rig.d64, with --flags as build flags) or takes
+// RIG=<json>, and runs a patched copy -- no build per run. With --until the profile starts at rgGo,
+// the first frame of play on the level, not at boot: the rig reaches a level by a real fall from
+// level 1, and boot, the loader and the fall are not the workload (they were in the window before, and
+// varied with disk timing). So the window is exactly bench rendered frames. Every render routine then
+// agrees TO THE CYCLE between two runs; the frame loop's own line (its raster wait, which VICE files
+// under the loop's address, e.g. fce2) still moves by a few thousand cycles in 2000 frames, because
+// where the raster stands at rgGo follows the disk's timing (2026-11-14: 6,993 of 90.8M). Compare
+// routines, not the grand total. Build-flag mode stays as it was, for flags the rig does not carry.
+import { writeFileSync, mkdtempSync, unlinkSync, existsSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ROOT, buildDisk, portHeld, launch, LAUNCH_FLAGS, textMonitor, session } from './vice.mjs';
+import { buildRig, patchRig, rigFiles, parseSet } from './rig.mjs';
 
 const args = process.argv.slice(2);
 const ENV = args[0] ?? '';
@@ -47,15 +62,36 @@ const DUMP = opt('--dump', '');
 const SHOT = opt('--shot', '');
 const PORT = 6510;
 
-// ---- build to its own disk, so lest-c64.d64 is never touched ----
-const { out: b, syms: SYMS, addrOf } = buildDisk(ENV, 'build/zz-vprof.d64');
-const ok = b.split('\n').find(l => l.startsWith('ok:'));
-if (!SYMS) { console.error('this build wrote no iray.syms.json'); process.exit(1); }
+// ---- the disk: a patched rig (a rig parameter set), or a build of its own (build flags) ----
+// Either way lest-c64.d64 is never touched.
+const RIGMODE = ENV.trim() !== '' && ENV.trim().split(/\s+/).every(a => /^[a-z]+=/.test(a));
+const FLAGS = opt('--flags', '');
+let SYMS, addrOf, ok, DISK;
+if (RIGMODE) {
+  let json = process.env.RIG;
+  try {
+    if (!json) json = buildRig(Object.fromEntries(FLAGS.split(/\s+/).filter(Boolean).map(a => a.split('='))),
+      undefined, 'build/vprof-rig.d64');
+    DISK = join(mkdtempSync(join(tmpdir(), 'vprof-d64-')), 'vprof.d64');
+    patchRig(json, DISK, parseSet(ENV));
+  } catch (e) { console.error(e.message); process.exit(1); }
+  const f = rigFiles(json);
+  SYMS = JSON.parse(readFileSync(f.syms, 'utf8'));
+  addrOf = n => { if (!(n in SYMS)) throw new Error(`no label ${n} in ${f.syms}`); return SYMS[n]; };
+  ok = `ok: rig ${json}${FLAGS ? ` [flags: ${FLAGS}]` : ''} (built ${f.rig.built})`;
+} else {
+  if (FLAGS) { console.error('--flags is for a rig parameter set; put build flags in the first argument'); process.exit(2); }
+  const r = buildDisk(ENV, 'build/zz-vprof.d64');
+  SYMS = r.syms; addrOf = r.addrOf; DISK = join(ROOT, 'build/zz-vprof.d64');
+  ok = r.out.split('\n').find(l => l.startsWith('ok:'));
+  if (!SYMS) { console.error('this build wrote no iray.syms.json'); process.exit(1); }
+}
 // VICE label file: one `al C:addr .name` per label, so the profile names routines.
 const tmp = mkdtempSync(join(tmpdir(), 'vprof-'));
 const lbl = join(tmp, 'iray.lbl');
 writeFileSync(lbl, Object.entries(SYMS).filter(([n, a]) => typeof a === 'number' && /^[A-Za-z_]\w*$/.test(n))
-  .map(([n, a]) => `al C:${a.toString(16).padStart(4, '0')} .${n}`).join('\n') + '\n');
+  .map(([n, a]) => `al C:${a.toString(16).padStart(4, '0')} .${n}`).join('\n') + '\n'
+  + (RIGMODE && UNTIL ? `break ${addrOf('rgGo').toString(16)}\n` : ''));
 
 const held = portHeld(PORT);
 if (held) { console.error(`port ${PORT} is held by pid ${held} -- kill that process (not every x64sc)`); process.exit(2); }
@@ -63,19 +99,30 @@ if (held) { console.error(`port ${PORT} is held by pid ${held} -- kill that proc
 // The cap covers the whole run: --until mode waits for an event, not a wall-clock window.
 const CAP = (UNTIL ? 240 : SECS + 60) * 1000;
 launch([...LAUNCH_FLAGS, '-warp', '-remotemonitor', '-remotemonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  '-moncommands', lbl, '-autostart', join(ROOT, 'build/zz-vprof.d64')], { hardCapMs: CAP, label: 'vprof' });
+  '-moncommands', lbl, '-autostart', DISK], { hardCapMs: CAP, label: 'vprof' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const strip = o => o.replace(/^\(C:\$[0-9a-f]{4}\) /, '').replace(/\(C:\$[0-9a-f]{4}\) $/, '');
 const rd16 = async (m, a) => { const [lo, hi] = await m.mem(a, 2); return lo | (hi << 8); };
 const flatNames = flat => [...flat.matchAll(/^\s*[\d,]+\s+[\d.na]+%\s+([\d,]+)\s+[\d.na]+%\s+(\S+)/gm)]
   .map(m => m[2]).filter(n => n !== 'ROOT');
 
-await sleep(1500);
+// (The rig's first stop is armed from -moncommands, below the labels: at warp the level-1 boot can be
+// past rgGo before this connects, and the rig must catch it.)
+if (!RIGMODE) await sleep(1500);
 if (UNTIL) {
   // EVENT-DRIVEN: a checkpoint at UNTIL stops the CPU exactly there. (This used to poll the PC every
   // 300 ms, which also let the parked loop run on into the profile.)
   const at = addrOf(UNTIL);
   const m = await textMonitor(PORT);
+  if (RIGMODE) {                        // the rig: from the first frame of play on the level (rgGo)
+    const go = addrOf('rgGo');          // (its checkpoint is already set, by -moncommands, so the
+    let o = await m.cmd('r');           //   CPU may be parked on it already when this connects)
+    for (let k = 0; m.pcOf(o) !== go; k++) {
+      if (k > 20) throw new Error('never reached rgGo');
+      o = await m.cmd('x');
+    }
+    await m.cmd('delete');
+  }
   await m.cmd('prof on');
   await m.cmd(`break ${at.toString(16)}`);
   const stop = await m.cmd('x');
@@ -101,7 +148,7 @@ if (UNTIL) {
   const dis = [];
   for (const n of flatNames(flat).slice(0, NDIS)) dis.push(`==== ${n}\n${strip(await m.cmd(`prof disass ${n}`))}`);
   m.close();
-  const text = `vprof: ${ENV}\nwindow: boot to ${UNTIL}, ${frames} rendered frames; ${ok}\n\n${flat}\n${dis.join('\n')}`;
+  const text = `vprof: ${ENV}\nwindow: ${RIGMODE ? 'rgGo' : 'boot'} to ${UNTIL}, ${frames} rendered frames; ${ok}\n\n${flat}\n${dis.join('\n')}`;
   if (OUT) writeFileSync(OUT, text);
   console.log(text);
   process.exit(0);

@@ -55,7 +55,11 @@ const scan = JSON.parse(readFileSync('./build/cellscan.json', 'utf8'));
 // build, 2026-10-13) -- the line used to vanish wherever an entity passed behind a wall's edge.
 // The SHIPPED plan was not refit for them: tools/dropcodes.mjs took eight codes out of it (a fresh scan
 // does not reproduce the shipped one). 189 here keeps a regenerated plan inside the same room.
-const KCELL = +(process.env.KCELL ?? 189);
+// 197, not 189 (2026-11-14): the 20 readout glyphs left shipping builds; two of their codes went back
+// to the occluder scratch (OCCSYN_N 6 -> 8) and two to the seam-edge glyphs at columns 1-2, and these
+// eight to the codebook -- which now fills the charset to 256/256 exactly. Shipped with STEPW=6 (below),
+// regenerated from a fresh scan of all ten levels.
+const KCELL = +(process.env.KCELL ?? 197);
 const FRAMES = scan.positions * Math.ceil(256 / scan.angleStride);
 const parse = k => k.split(',').map(Number);
 const L1 = (a, b) => Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]) + Math.abs(a[2]-b[2]) + Math.abs(a[3]-b[3]);
@@ -74,8 +78,12 @@ const stepAPat = (k, slot) => { const kb = k + 1;
   const a = QA[Math.floor(slot / (LM * LB))], r = slot % (LM * LB);
   const m = QM[Math.floor(r / LB)], b = QB[r % LB];
   return (kb === 1 ? [a, ...lerp(m, b, 3)] : [...lerp(a, m, kb), ...Array(4 - kb).fill(b)]).map(C8); };
+// STEPW=w (2026-11-14): count every STEP cell w times. The clustering minimises wrong pixels weighted by
+// how often a shape occurs, and corners and edges meeting are rare beside the smooth ramps -- but they
+// are what the eye catches, and they were 2.4x as wrong per cell and 11x as often off by 3+ pixels.
+const STEPW = +(process.env.STEPW ?? 6);   // what shipped: badly-wrong step cells halved, ramps a single pixel worse here and there
 const B = scan.buckets.map(([key, hist]) => {
-  let shapes = hist.map(([s, n]) => ({ v: parse(s), n }));
+  let shapes = hist.map(([s, n]) => ({ v: parse(s), n: key[0] === 's' ? n * STEPW : n }));
   const n = shapes.reduce((a, s) => a + s.n, 0);
   if (STEPA && key[0] === 's') {
     const [k, slot] = [+key[1], +key.slice(3)];

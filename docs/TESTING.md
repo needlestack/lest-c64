@@ -11,9 +11,9 @@ Five questions, five tools:
 | question | tool | when |
 |---|---|---|
 | Does every level still play, and how fast? | `node tools/fpsr.mjs "" suite` | every change that reaches the engine |
-| Does it still DRAW the same as before? | `tools/regress.sh [REV]` | changes that move bytes but must not change the game: layout, space savings, rewrites |
+| Does it still DRAW the same as before? | `tools/regress.sh [REV]` (REV must have the rig: 2026-11-14 on) | changes that move bytes but must not change the game: layout, space savings, rewrites |
 | Are the shipped bytes unchanged? | `tools/ship.sh save`, then `tools/ship.sh` | cleanups that must emit the identical program |
-| Did this routine get faster or slower, by how many cycles? | `tools/vprof.mjs` with `SPINF=1 BENCHF=n --until benchEnd NOHUD=1` | optimisation A/B, below fpsr's 1-frame resolution |
+| Did this routine get faster or slower, by how many cycles? | `tools/vprof.mjs "level=n mode=spinf bench=N" --until benchEnd` (a rig parameter set) | optimisation A/B, below fpsr's 1-frame resolution |
 | Does the ray search (subdivision, pivot prediction) cast fewer rays, per kind of motion? | `node tools/pivlab.mjs "" "FLAG=x"` | any change to where rays are cast |
 
 ## 1. Functionality and fps: `fpsr.mjs suite`
@@ -32,8 +32,45 @@ and 7):
 
 The build times the window itself (`MOVEAT`/`MOVEFOR`/`MOVELEGS`), so boot is excluded and a run
 repeats exactly. It exits 1 on a level that fails to build or boot, or a walk that BUMPS. That makes
-it the functionality check too: run it after every engine change. It takes 18 emulator runs, a few
-minutes.
+it the functionality check too: run it after every engine change. It takes ONE build and 18 emulator
+runs, about 3 minutes (2026-11-14: 173 s, the build 95 s of it).
+
+**One build: the test rig (2026-11-14).** Every segment used to be a build of its own (the level,
+pose, mover and window were all build flags), so the suite was 18 builds of the ten-level game,
+about an hour. Now fpsr builds `TESTRIG=1 D64=build/rig.d64` once: the game with the test drivers
+compiled in, reading their settings from a parameter block in IMG (`rgBlk`, 24 bytes since stage 2:
+the frames/regress/vprof settings joined fpsr's). The build
+writes `build/rig.json` beside the disk (each parameter's byte offsets IN THE .d64 FILE, from IMG's
+sector chain, and its default) and `build/rig.syms.json` (its own labels). Each segment is then a
+copy of the disk patched by `tools/rig.mjs`, run by `probe.mjs` with `PROBESYMS=build/rig.syms.json`,
+which builds nothing. The rig never touches `lest-c64.d64`.
+
+- **Levels are entered by a real fall.** The rig boots like the game, into level 1; for another
+  level it does what the `L`+digit select does (exit 0 now leads there, and the player stands on
+  it), so `fallChk` runs the real transition. The pose lands with the level (`rgLand`, at the head
+  of `lvlStart`), and `MOVEAT` counts from the first frame of play after the landing, not from boot.
+- **The idle is the default:** level 1, standing still. `node tools/rig.mjs build/rig.json out.d64
+  level=8 mode=walk at=60 for=85 legs=4 inset=21 px=0180 py=0580 pa=00 noshock=1` writes any
+  workload's disk by hand (`mode` is idle, spin, walk or walkb -- timed -- or spinf, walkf: a fixed
+  step per rendered frame). Stage 2 added `bench`, `fallnow`, `fallhold`, `angfreeze`, `svfreeze`,
+  `angat`, `die` and `dietest` (the keys are listed at the head of rig.mjs).
+- `RIG=build/rig.json node tools/fpsr.mjs "" suite` reuses a rig already built: 18 runs, about 4 s each.
+- Flags in the first argument go into the rig build, so `fpsr.mjs "ANGEL=0" suite` still works. The
+  compile-time movers and test switches (`SPIN`, `WALK`, `MOVEAT`, `BOOTLVL`, `PX`, `BENCHF`,
+  `FALLNOW`, `ANGFREEZE`, `DIETEST`...) are refused with `TESTRIG`: they are the block's.
+- **Where the rig's code lives** is a measured answer: readKeys goes (the rig plays no keys) and
+  maStep and spinStep take its place in the code stream; rgPre, rgLand and the data are `@FLOAT`
+  runs. Other placements shifted the pinned hot loops by up to 211 bytes of padding and no level
+  slot fit (see "TESTRIG's drivers, IN readKeys' PLACE" in build-iray.mjs). With it, the rig had 170
+  bytes spendable and its slot at $6200. Stage 2 (2026-11-14) adds no byte to the code stream (each
+  hook replaces an instruction of its size: `jsr rgFrm`, `jsr rgAng`, `jsr rgFall`, rgIter's tail);
+  its code is `@FLOAT` runs of 16 bytes or less, which fill the 16-byte page tails no other run fits
+  (`RG_SPLIT`), maStep's record moved to low RAM, and lvKey's dead keys half is not emitted. The slot
+  is still at $6200, with 0 bytes spendable in the image's holes and 73 B of arena edge left over.
+- **Before the rig, levels 2 and 7 did not run from their poses.** From the switch to `BOOTLVL`
+  builds (2026-11-14) a build's `PX` moved its `LVL`'s start, and `BOOTLVL` left `LVL` at 1, so the
+  rig poses (fpsr's `POSE`) moved level 1's start, and levels 2 and 7 ran from their own -- and bumped.
+  `LEVELSTART=1` runs every level from its own start, to compare with those suites.
 
 **No bumps, asserted directly (2026-10-11).** The build counts every blocked move inside the window,
 and the `blocked` column must read 0. Any count is BUMPED, even a glancing slide that loses no
@@ -58,7 +95,8 @@ Reading it:
 - Compare against the previous suite run on the commit you started from, not against memory. The
   last recorded results are at the end of this file. Update them when a change moves them on
   purpose.
-- To watch a walk at real speed: `DISK=build/x.d64 node tools/fpsr.mjs "CHAIN=n" level walk`.
+- One level: `node tools/fpsr.mjs "" level n [spin|walk]`. To watch a walk at real speed:
+  `DISK=build/x.d64 node tools/fpsr.mjs "" level n walk` writes that segment's patched disk.
 - **An occasional `BUILD OR RUN FAILED`.** Twice in three suites (2026-10-11) one walk failed and
   passed when rerun alone; the rig now prints probe's reason after the message. On 2026-10-15 EVERY
   level failed this way: VICE had been upgraded and `tools/vice.mjs`/`tools/probe.mjs` named the old
@@ -68,32 +106,57 @@ Reading it:
 
 ```
 tools/regress.sh            # the working tree against HEAD
-tools/regress.sh 8a9f6dc    # ...or against any revision
+tools/regress.sh 8a9f6dc    # ...or against any revision THAT HAS THE RIG (2026-11-14 on)
 ```
 
 Builds REV in its own git worktree (never `git stash`, which breaks this tree) and runs the same
-fixed workloads on both builds:
+fixed workloads on both sides. **On the test rig (2026-11-14):** each side builds ONE rig
+(`TESTRIG=1 D64=build/regress-rig.d64`, REV's in its worktree and this tree's here, the two builds
+at once), and every workload is a patched copy of its own side's rig disk (`tools/rig.mjs`), run by
+this tree's tools. It used to be a build per workload per side, 24 builds of the ten-level game.
+So REV must be a revision with the rig: an older one cannot build `TESTRIG=1`, and regress stops
+with `REV ... CANNOT BUILD THE TEST RIG` (exit 2) rather than comparing something else. For a
+baseline from before the rig, use regress.sh's own previous version (git history).
+
+Each workload is a rig parameter set (see `tools/rig.mjs` for every key). A level other than 1 is
+entered by a real fall from level 1, and **frame 0 is the first frame of play on it** (`rgGo`):
+`bench` and `fallnow` count from there, so frame k means what it meant in a `BOOTLVL` build.
 
 - **Frames**: `frames.mjs` records the displayed screen after every rendered frame of a mover
-  that steps a fixed amount per rendered frame (`WALKF`), and `framecmp.mjs` compares the runs.
-  Three workloads:
-  - a level-1 walk
-  - levels 1→2 with two forced falls (`FALLNOW=128`): the drop, the level load, and level 2
+  that steps a fixed amount per rendered frame (`mode=walkf`), from frame 0 to `bench`, and
+  `framecmp.mjs` compares the runs. Five workloads:
+  - a level-1 walk (`level=1 mode=walkf bench=300`)
+  - levels 1→2 with two forced falls (`fallnow=128`): the drop, the level load, and level 2
   - the hub, level 4
   - falls out of level 4 (4→5→4) and out of level 8 (8→9): their wall mark and orb shadow are
     level code that restores the shared charset and orb ladder on the way out (`lxBye`), and no
     other workload leaves either level
-- **Stills**: a screenshot at a fixed cycle count, compared pixel for pixel:
-  - levels 5, 6, 7, 8 and 9 at their starts (level 9 with `SVFREEZE=1`: its sentries glide and
-    spark on the 60Hz clock, so a still is only comparable with them held)
-  - a fall parked mid-drop (`FALLHOLD=12`)
-  - the death picture (`DIETEST=1`: already cornered, then spin to face the angel)
+- **Stills**: a patched rig disk run to a fixed cycle count (`vicerun.mjs -limitcycles -exitscreenshot`),
+  compared pixel for pixel:
+  - levels 5, 6, 7, 8 and 9 at their starts (`angfreeze=1`; level 9 with `svfreeze=1`: its sentries
+    glide and spark on the 60Hz clock, so a still is only comparable with them held)
+  - a fall parked mid-drop (`level=1 fallnow=2 fallhold=12`)
+  - the death picture (`dietest=1 mode=spinf`: already cornered, then spin to face the angel)
 
 `framecmp` reports IDENTICAL, or IN ORDER. IN ORDER means every frame the reference drew appears,
 in the same order, in the new run. That is the pass for a build that got faster: the movers repeat
 exactly per rendered frame, but a fall and the death scene run on the raster clock, so a faster
 build can show them in a different number of frames. Anything wrong on screen is a frame the
-reference never drew, and fails. It takes 24 emulator runs.
+reference never drew, and fails. It takes 2 builds and 24 emulator runs (2026-11-14, the tree
+against itself: 272 s, the two rig builds at once about half of it).
+
+It never writes `lest-c64.d64`. Until 2026-11-14 its last step was a plain build "to leave the tree
+as a plain build leaves it", which overwrote the disk the user plays.
+
+**Rig vs the old per-build way (2026-11-14, on one tree).** Every workload was run both ways: the
+five frames workloads, IDENTICAL for levels 1 and 4 (all 300/400 frames); level 8's fall run
+differs in frame 0 only (20 cells in two panel-line columns, glyph codes one apart), because a
+BOOTLVL build drew frame 0 with no previous frame and the rig after the landing's renders of the
+same view: `SEAMHYST` holds a panel line where it was last frame. Frames 1-199 are identical. Six of
+the seven stills are the SAME; level 8's differs only in its INKS (the same lines, the tube dark):
+the flicker's random sequence steps once per tick from boot, and the rig reaches level 8 later, by a
+fall, so at 100M cycles the tube is in another phase. Two rigs reach it at the same time, so
+rig-vs-rig compares.
 
 Why each workload is there:
 
@@ -102,13 +165,15 @@ Why each workload is there:
 - **Falls and the death scene run on the raster clock.** Compare them as IN ORDER, or as stills of
   a scene that holds (a parked fall, the picture). Never a timed screenshot of a moving scene: it
   lands on a different frame every run.
-- **Forced falls never start on frame 0.** `FALLNOW=n` falls on frames n-1, 2n-1, ... Until
+- **Forced falls never start on frame 0.** `fallnow=n` falls on frames n-1, 2n-1, ... Until
   2026-10-10 it fell on frame 0, when nothing had been rendered: the drop snapshotted whatever the
   boot loader had left on screen, which varies with load timing, so the falls workload drew a
   different stray column on every run. It also used the per-frame tables (`cstepT`, `seamT`)
   before `rayAll` had ever cleared them. Real play can't fall before its first frame, so only the
-  test was affected. `FALLNOW=1` (every frame) still includes frame 0, which is why the parked
-  fall uses `FALLNOW=2`.
+  test was affected. `fallnow=1` (every frame) still includes frame 0, which is why the parked
+  fall uses `fallnow=2`. (Off level 1, rig.mjs wants `fallnow` of 4 or more: level 1's frames 0 and
+  1 come before the rig's level.) A forced fall always takes exit 0 (`hlv` is 0 whenever one can
+  fire), and stops after sixteen.
 
 ## 3. Byte-identical: `ship.sh`
 
@@ -122,9 +187,24 @@ IDENTICAL, and when they do, that is the whole proof. No emulator run is needed.
 
 ## 4. Cycles: `vprof.mjs`
 
-Only with `SPINF=1 BENCHF=n --until benchEnd` and `NOHUD=1`. That run is cycle-exact and
-deterministic. A timed spin drifts 33-71 cycles a frame between identical builds, so it can't
-compare anything.
+```
+node tools/vprof.mjs "level=1 mode=spinf bench=2000 angfreeze=1" --until benchEnd    # builds build/vprof-rig.d64
+RIG=build/rig.json node tools/vprof.mjs "level=4 mode=walkf bench=600" --until benchEnd   # a rig already built
+```
+
+Only with a fixed workload (`mode=spinf` or `mode=walkf`, `bench=n`) and `--until benchEnd`. That run
+is cycle-exact and deterministic. A timed spin drifts 33-71 cycles a frame between identical builds,
+so it can't compare anything.
+
+**On the test rig (2026-11-14):** the first argument is a rig parameter set (lowercase keys, see
+`tools/rig.mjs`); build flags for the rig go in `--flags "X=1"`. The profile runs from `rgGo`, the
+first frame of play on the level, to `benchEnd`: exactly n rendered frames, with boot, the loader
+and the fall that reaches the level left out. Two runs of one rig agree to the cycle on every render
+routine; the frame loop's own line (its raster wait) moves by a few thousand cycles in 2000 frames
+with disk timing, so compare routines, not the grand total. For an A/B, build each side's rig (the
+REV worktree's `build/regress-rig.json` from a regress run is one) and pass it as `RIG=`.
+Build-flag mode is still there for flags the rig does not carry: `node tools/vprof.mjs "BOOTLVL=1
+SPINF=1 BENCHF=n ANGFREEZE=1 NOHUD=1" --until benchEnd` (window from boot).
 
 ## 5. The ray search: `pivlab.mjs`
 
@@ -170,19 +250,21 @@ on CIA2's timers.
 
 ## Last recorded `fpsr.mjs "" suite`
 
-2026-11-12, after the full-game memory work (uncommitted): level 9's sentry tables and level 4's
-merge-hazard code and lists moved into their levels' code, pedLiftT into IAR0, rxStamp past entGate.
-Run against a reference suite of the tree just before (the `was` column): every figure the same or
-better. Levels 5 and 6 walks report BUMPED in BOTH runs -- the walk routes predate the v2 map edits.
+2026-11-14, the first suite on the TEST RIG (one build, each run a patched copy, levels entered by a
+real fall): all levels clean, 174 s in all. On the tree with the dead-code sweep's phase 2 (renderSym's
+column range constant, HUD-only zero page freed). Levels 5 and 6 re-paced for the v2 maps (CLEAR 2.95
+and 3.15, a quarter cell short of the wall a long leg met); their walk figures are a new route, not
+comparable with `was`. Levels 2 and 7 run their rig poses again (a BOOTLVL bug that day had
+ignored them). `was` = 2026-11-12, one build per segment.
 
 | level | spin fps | was | walk fps | was |
 |---|---:|---:|---:|---:|
-| 1 | 22.92 | 22.92 | 16.22 | 16.22 |
-| 2 | 31.30 | 31.30 | 13.72 | 13.72 |
-| 3 | 23.05 | 23.05 | 15.78 | 15.78 |
-| 4 | 21.60 | 21.60 | 15.67 | 15.67 |
-| 5 | 27.40 | 27.40 | 11.86 | 11.86 |
-| 6 | 24.40 | 24.40 | 14.53 | 14.49 |
-| 7 | 32.09 | 32.09 | 15.99 | 15.99 |
-| 8 | 22.45 | 22.45 | 15.28 | 15.21 |
-| 9 | 20.20 | 20.20 | 19.57 | 19.57 |
+| 1 | 23.12 | 22.92 | 16.22 | 16.22 |
+| 2 | 31.89 | 31.30 | 13.72 | 13.72 |
+| 3 | 24.92 | 23.05 | 15.78 | 15.78 |
+| 4 | 21.80 | 21.60 | 15.80 | 15.67 |
+| 5 | 27.91 | 27.40 | 11.89 (new route) | 11.86 BUMPED |
+| 6 | 25.00 | 24.40 | 14.76 (new route) | 14.53 BUMPED |
+| 7 | 33.00 | 32.09 | 16.34 | 15.99 |
+| 8 | 22.85 | 22.45 | 15.56 | 15.28 |
+| 9 | 20.66 | 20.20 | 19.93 | 19.57 |
