@@ -4,22 +4,23 @@
 //
 // WHAT KERNAL LOADS HAVE TO CARRY. A fast loader cannot load itself, so everything up to and
 // including Krill's installer arrives at ~290 bytes/sec, and that is the whole of the wait:
-// 93 bytes of autorun stub, ~1.9 K of packed quote, then Krill's 530-byte resident and its
-// 3,284-byte install routine. Everything AFTER install() runs at Krill's ~4.9 KB/s on NTSC,
-// which takes the other 57 KB from 195 seconds to 12.
+// 93 bytes of autorun stub, ~1.9 K of packed quote, then Krill's 251-byte resident and its
+// 3,224-byte install routine (krill/*.prg as built now; the build's "boot:" line has the totals).
+// Everything AFTER install() runs at Krill's ~4.9 KB/s on NTSC.
+// (The FAST boot, IFBT/IDRV, the default, streams IQOT and IRAY with the drive's own code instead.)
 //
 // THE MEMORY MAP THIS FORCES, all of it below $0801 so the 46 KB image cannot land on it:
-//   $0400-$0611  Krill's resident. It only has to survive the boot: the first rendered frame
-//                writes stackLT over it, and nothing loads again until the hub needs levels 5-7,
-//                which is not built. That is why it costs no permanent RAM at all.
-//   $0620-$07ff  this body.
-//   $0940        Krill's install routine, inside IRAY's image, overwritten later by IMG.
-// The PRG therefore spans $0801 to $0940 + 3,284 + 530, and the copy loop at $0801 lifts the
-// resident and this body into place underneath it before jumping here.
+//   $0400-$04fa  Krill's resident (KRILL_RESIDENT). The first rendered frame writes stackLT over it,
+//                so the game parks it first (klPark, to krillRt) and copies it back for every
+//                level load (llName) -- see KRILL_RT_AT.
+//   $0630-$07ff  this body (LOADER_RUN).
+//   $09c0        Krill's install routine (KRILL_INSTALL), inside IRAY's image, overwritten later by IMG.
+// The copy loop at $0801 lifts the resident and this body into place underneath it before
+// jumping here.
 //
 // Two hardware facts still set the shape:
 //   * KERNAL LOAD -- and Krill without LOAD_UNDER_D000_DFFF -- runs with I/O MAPPED, so neither
-//     can physically write $d000-$dfff. The hole ladder is landed in bank 3 at $c000 and copied
+//     can physically write $d000-$dfff. The hole ladder is landed at KSTAGE ($b000) and copied
 //     under the hole with the port at $34.
 //   * The image covers $0801-$bfff, which includes this stub's own PRG. Hence the relocation.
 // LOAD_UNDER_D000_DFFF would delete that copy, and it is deliberately OFF: it requires IRQs
@@ -28,22 +29,24 @@
 // worth 116.
 import { readFileSync } from 'fs';
 
-export const LOADER_RUN = 0x0630;   // clear of Krill's resident, which END_ADDRESS_API made
-                                    // 556 bytes: $0400-$062b. buildLoader asserts it.
+export const LOADER_RUN = 0x0630;   // clear of Krill's resident (251 bytes now; END_ADDRESS_API once
+                                    // made it 556, $0400-$062b). buildLoader asserts it.
 const KDIR = 'krill';
 const krillPrg = n => [...readFileSync(new URL(`../${KDIR}/${n}`, import.meta.url))];
 const krillAt = p => p[0] | (p[1] << 8);
 const KRILL_RES_PRG = krillPrg('loader-c64.prg'), KRILL_INST_PRG = krillPrg('install-c64.prg');
 const KRILL_RES = KRILL_RES_PRG.slice(2), KRILL_INST = KRILL_INST_PRG.slice(2);
-// $0980 is NOT Krill's default install address ($1000) -- krill/build.sh must be given the same
+// $09c0 is NOT Krill's default install address ($1000) -- krill/build.sh must be given the same
 // one, and krill/loaderconfig.inc is the config it builds against. The installer sits inside the
 // boot PRG, which is the one file loaded at KERNAL speed (~290 B/s), so every byte between the
 // stub's end and the installer's start is dead air on the loading screen: at the default it was
 // 654 bytes = 2.3 seconds of nothing.
 const KRILL_RESIDENT = 0x0400, KRILL_INSTALL = 0x09c0;
 // Where the KERNAL's screen goes so that install() cannot print on Krill's resident at $0400 --
-// and, just as important, cannot print on the QUOTE. $cc00 is the 1K above IHOL in bank 3 and is
-// exactly the 1000 bytes a screen needs; buildLoader guards that IHOL never grows into it.
+// and, just as important, cannot print on the QUOTE. $cc00 is in bank 3, in charset B's space,
+// which nothing writes until cpChr after the boot, and is exactly the 1000 bytes a screen needs.
+// (It was the 1K above IHOL while the under-hole file staged at $c000; buildLoader now guards
+// that the staged file stays below $c000 -- see KSTAGE.)
 const KSCR = 0xcc00;
 // WHERE THE UNDER-HOLE FILE IS STAGED before the port flips to $34 and it is copied to $d000.
 // It was $c000, which put it in the same page as KSCR and capped the ladder at 3K -- and the
@@ -55,7 +58,7 @@ export const KSTAGE = 0xb000;
 // There is ONE resident and it has to be this one: Krill's protocol is stateful across loads, so
 // a second pristine build at another address is not the party the drive is talking to -- it
 // hangs waiting for a reply that never comes (PC stuck at $6ec7). $0400 is about to become
-// stackLT, so entry copies it out of the way and lateLoad copies it back to run it in place.
+// stackLT, so entry (klPark) copies it out of the way and llName copies it back to run it in place.
 export const KRILL_RESIDENT_AT = KRILL_RESIDENT;
 export const KRILL_RT_AT = 0x6e00;
 export const KRILL_RT_LEN = KRILL_RES.length;
@@ -106,7 +109,8 @@ export const QUOTE_NAME = 'IQOT';
 
 // The quote screen: a charset and a 40x25 map in VIC bank 3, shown for the whole load. It is the
 // only place either can live -- IMG owns $0801-$bfff and there is nothing below it -- so it sits
-// where IPIC and ILVL eventually land, and those two go LAST, behind a blanked screen.
+// where the level art (IAR0-3, ISOK at $f380) eventually lands, and those files go LAST, behind a
+// blanked screen (the build's disk line marks them *).
 export const QUOTE_SCR = 0xf400, QUOTE_CHR = 0xf800;
 
 // ---- THE BOOT IS THREE FILES, NOT ONE ----
@@ -127,7 +131,7 @@ export const AUTORUN_AT = 0x02a7;   // free RAM below the vectors; the file runs
 export const QUOTE_RUN = 0x4000;    // clear of IRAY ($0801-~$1860, 2026-11-15) and dead by the time IMG lands
 export const IRAY_ENTRY = 0x0801;   // no BASIC line: nothing types RUN any more
 // 156 bytes of decruncher scratch, live only while the quote is decrunching. $c000 is free until
-// the body loads IHOL there, which is after install, which is long after this.
+// Krill loads ICHR there, which is after install, which is long after this.
 export const EXO_TABLE = 0xc000;
 // The decruncher is exomizer's, in acme syntax, and asm6502.mjs is not acme -- no !macro, no
 // !ifndef, no local labels. So it is PRE-ASSEMBLED by make-quote.mjs (which already needs a
@@ -607,10 +611,8 @@ export function buildLoader(assemble, files, entry, step2, title = null) {
   // NO BASIC HEADER. This file is jumped to by IQOT, never RUN, so the twelve bytes of SYS line
   // would be twelve bytes of KERNAL-speed load for nothing -- and a half-second of black screen.
   // The body's bytes go in the gap between the copy loop and the installer, which is free KERNAL-speed
-  // air otherwise. (A BOOTLVL boot into a later level carried more boot files and outgrew the gap, so
-  // from 2026-11-14 such a body rode after Krill's resident data instead; every disk boots level 1
-  // since 2026-11-15, so the gap is the only shape, and a body that outgrows it is an error here --
-  // the assembler's own overlap check names nothing but $09c0.)
+  // air otherwise. A body that outgrows the gap is an error here -- the assembler's own overlap
+  // check names nothing but $09c0. (BOOTLVL boots, which carried more boot files, went 2026-11-15.)
   const front = `        * = ${hx4(IRAY_ENTRY)}
 ${cpBody}
         jmp ${hx4(LOADER_RUN)}

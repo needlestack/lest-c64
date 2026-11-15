@@ -20,29 +20,11 @@
 // them shows that variant, as a LEVELSHEET build did.
 import { END_DST } from './ending-src.mjs';
 //
-// LEVEL 1 is the user's layout of 2026-09-15: the old level 1's room, 6 x 9 with its alcoves
-// and notch, joined by a 7-cell corridor to the ring rotated 90 degrees clockwise. 23 x 11 =
-// 253 cells, 99 open. The ring's chamber is x15-19 x y3-7 with a two-wide column at x16-17 and
-// its door on the EAST at (20,5); the exit hole is at (15,5), west of the column, inside the
-// chamber the second angel guards -- opening the door frees the angel, and the hole is round
-// the column from it. Two orbs, two angels; the first angel is unleashed and WILL corner you.
-// The user's verdict: "the first two levels separate was too simple. This feels like a real
-// first level." The old level 1, the standalone ring, and the 28x9 side-by-side join are gone;
-// they live in git before 2026-09-15.
-//
-// LEVEL 2 is the user's layout of 2026-09-18 (see SOCK_MAP): 16 x 16, a 5x9 room with an orb
-// alcove top and bottom, a socket in the doorway at (6,5) into a 2x3 pocket, and the pocket's
-// far wall at (8,5) is what seating an orb takes away -- behind it a one-wide corridor to an
-// unleashed angel on a short spine. Two more socket/wall pairs in series past it, then the exit
-// at (2,11). Three orbs, three sockets, one angel; one orb carried at a time, so the corridor
-// is walked twice with the angel loose.
-//
-// LEVEL 3 is the user's 14 x 14 of 2026-09-18 (L3_MAP, built as LVL=3 until it joined the
-// chain): a 2x2 chamber in the middle with an angel caged INSIDE it, whose north-west corner
-// goes when S1 (5,5) is fed; a second socket S2 (7,7) inside the chamber opens the exit's
-// corner at the south-east. Angels in two more corners, orbs at (12,9) and (9,12).
+// The maps below are the user's sheets of 2026-11-04 on (each level's own comment says which). The
+// layouts before them -- level 1's 23x11 room-corridor-ring of 2026-09-15, and levels 2 (16x16) and
+// 3 as first drawn on 2026-09-18 -- went with MAPSET=v1 (2026-11-15) and live in git.
 // "Interesting rooms are about 1/4-1/3 the size of the map; with pillars a space can be bigger
-// as a whole but broken up."
+// as a whole but broken up." (the user, 2026-09-18)
 //
 // Levels do NOT share a grid: lvlDimT/rowMulT/bfsDCT travel with the level and every stride site
 // reads them, so the only rule is W x H <= 256 per level.
@@ -182,11 +164,9 @@ const L7 = {
   sockWall: [0, 1], socks: '1,1;10,1',
   orbs: [[2, 4], [11, 5]], angels: [[3, 4], [3, 6], [12, 5]],
 };
-// LEVEL 10 (the user's sheet, 2026-11-10; ships since 2026-11-13): THE BIG ANGEL. 17x15 = 255 cells (rows 6-8 run two
-// cells further east than the rest; the gaps are solid). Two nested rings round a centre cell: the
-// big angel BA (7,7) is caged there by its three walls and the orb OO (7,6) in its one doorway. The
-// player P^ (13,7) starts facing north, beside the door |1 (14,7) to the exit XX (15,7); S1 (1,7),
-// the socket that opens it, is on the far side of both rings. The angel and the orb are GOLD.
+// LEVEL 10 (ships since 2026-11-13): THE BIG ANGEL, gold, in the pillar halls below. (The user's first
+// sheet, 2026-11-10 -- 17x15, the angel caged at the centre of two rings by an orb in its doorway, a
+// socket opening the exit door -- was set aside 2026-11-11.)
 const L10 = {
   // THE PILLAR HALLS (the user, 2026-11-11, for the follow/fire/back-off AI): a 10x12 floor of halls
   // between 2x2 pillars -- one-wide halls north-south, single rows at the ends and double rows between --
@@ -418,19 +398,11 @@ const L9_STAGES = (() => {
   const firstOf = (x, y) => L9.rooms.findIndex(R => R.has(`${x},${y}`));
   return { svMax, roles, slotRole, firstOf, byS };
 })();
-// LEVEL 2, the user's layout of 2026-09-18, fleshed out the same day: 16 x 16 = 256 cells.
-//   PP (2,2) in a 5x9 room with an orb alcove at (6,2) and (6,8); the socket at (6,5) IS the
-//   doorway into a 2x3 pocket whose far wall (8,5) goes when it is fed, freeing the angel (13,5)
-//   down a one-wide corridor. Past it: a third orb at (11,3) on the spine, the only way down
-//   through (9,10), and two more socket/wall pairs in series -- (12,14) opens (11,14), then
-//   (9,13) opens (8,13) -- before the exit at (2,11). Three orbs, three sockets, one carried
-//   at a time, so the corridor is walked twice with the angel loose.
-// L2_WALLS lists the removable cells; L2_SOCK_WALL says which wall each socket (in SOCKETS_AT
-// order) takes out. WALLOFF=k (1-based) builds the level with wall k-1 gone, for its delta.
 // A removable "wall" is a GROUP of cells that go together (2026-09-18, level 3's L-shaped
 // ones). WALLS[k] is group k's cells; SOCK_WALL[i] is the group socket i (SOCKETS_AT order)
-// takes out, $ff for none. Per level, and ANY NUMBER of levels in a chain may have walls --
-// see WALLS_ALL, which flattens them into one global id space.
+// takes out, $ff for none. Per level, and ANY NUMBER of levels may have walls -- see WALLS_ALL
+// in the build, which flattens them into one global id space. (WALLOFF=k builds a level with wall
+// k-1 gone, for its delta.)
 const LEVEL_WALLS = {
   // THE HUB (revised by the user 2026-09-24). Column 9 is open only at rows 3-5, where the
   // three pedestals stand; column 10 is the removable wall behind them. Feed all three and the
@@ -497,19 +469,20 @@ const IDOL_N = 3;
 // The three inks each own a register (00 = $d021 ceiling and floor, 01 = $d022 walls,
 // 10 = $d023 seams -- see the charset note), which is precisely so a level can be re-toned
 // without touching a single charset entry. Only the overrides are listed; PAL_DEF below fills
-// the rest. Applied at boot for the starting level and after every lvlSwap for the one arrived
-// at, so it travels with the level rather than with the slot.
+// the rest. Applied at boot for the starting level and on every arrival (lvlLook) for the one
+// arrived at, so it travels with the level rather than with the slot.
 // level 4: grey 1 ground, light blue seams. Overridable so a colour can be tried without an
 // edit -- CEIL4=2 SEAM4=7, say -- which also makes the raster split visible when it is loud.
-// LEVEL 5: ground and ceiling BLACK, so with $d022 black as well the seam is the only ink in
-// the room and the wall/ceiling outline (LEVEL_SEAM) is the whole image.
+// LEVEL 5 is RED (light red seams), like the hub hole that leads to it. (Its first design was black
+// ground and ceiling, the wall/ceiling outline -- LEVEL_SEAM -- the whole image; retired with it.)
 const LEVEL_PAL = { 4: { ceil: +(process.env.CEIL4 ?? 0x0b), seam: +(process.env.SEAM4 ?? 0x0e) },
                     5: { ceil: +(process.env.CEIL5 ?? 0x02), seam: +(process.env.SEAM5 ?? 0x0a) },
                     // 6 is GREEN and 7 is BLUE, the colours of the hub holes that lead to them
                     // (see IDOL_HOME and LEVEL_EXITCOL): the colour is what says where you went.
                     6: { ceil: +(process.env.CEIL6 ?? 0x05), seam: +(process.env.SEAM6 ?? 0x0d) },
                     7: { ceil: +(process.env.CEIL7 ?? 0x06), seam: +(process.env.SEAM7 ?? 0x0e) },
-                    // 8 is DARK: ground and walls black, seams grey 1. LEVEL_FLICKER lights it.
+                    // 8 is DARK: ground and walls black, seams the flicker tone's dark ink (FLKDSEAM,
+                    // set below). LEVEL_FLICKER lights it.
                     8: { ceil: 0x00, wall: 0x00, seam: 0x0b },
                     // 10, the big angel's: a dark grey ground, so its gold reads (yellow on
                     // level 1's white would vanish, as the silver orb's white did)
@@ -742,9 +715,8 @@ const entitiesOf = (n, { noOrb = false, noAngel = false, noSv = false } = {}) =>
   // orb on screen, so having one standing in front of it is the wrong thing to be looking at
   // while judging the angel's own scaling.
   if (noOrb) { /* no plain orbs */ }
-  // Level 2: ONE orb, and it is standing in the doorway at (5,2) -- the only way into the chamber
-  // that holds the exit. It reads exactly like level 1's caging orb, which is the point: the
-  // player already knows to pick it up. What is new is that they have to put it back.
+  // Level 2: three orbs for its three sockets (L2.orbs). (Its first design had ONE, in the doorway
+  // to the exit's chamber: level 1's caging orb again, but one the player has to put back.)
   else if (n === 2) {                         // level 2: OO in each alcove and one on the spine
     for (const [x, y] of L2.orbs) ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });
   }
@@ -755,11 +727,9 @@ const entitiesOf = (n, { noOrb = false, noAngel = false, noSv = false } = {}) =>
   }                                            // THE HUB IS EMPTY. No orbs, no angel: it is the
                                                //   room you come back to, and the only things in
                                                //   it are the three pedestals and four holes.
-  // The errand rooms hold no ORBS. The idol they do hold is pushed below, from LEVEL_IDOL,
-  // because "which levels have an idol and where" is already written down there and a second
-  // list that has to agree with it is the bug this file keeps re-learning.
-  // Spelled out rather than left to fall through: the branch below is level 1's, and its orbs
-  // stand at (6,5) and (20,5), which are outside a 6x6 map entirely.
+  // The errand rooms' (5-7) own orbs are their sheets'. The idol each holds is pushed below, from
+  // LEVEL_IDOL, because "which levels have an idol and where" is already written down there and a
+  // second list that has to agree with it is the bug this file keeps re-learning.
   else if (n === 5) {                          // one up the comb, one beside A2
     for (const [x, y] of L5.orbs)
       ORBS.push({ x: x + 0.5, y: y + 0.5, c: 0 });

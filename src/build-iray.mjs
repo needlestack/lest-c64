@@ -6,13 +6,13 @@
 //               Cosine correction is folded into the height tables, not applied per ray.
 //   interpSpan  Bresenham-interpolates colH across each span between two cast rays.
 //               8-bit error term, promoted to 16-bit only when dxv+dyv can exceed 255.
-//   prepCells   per 4-column cell: min/max of colH, and the cap at 100. Hoisted out of
-//               renderSym so the 495-of-520 fully-solid/blank cells reject cheaply.
-//   renderSym   picks a char per cell (blank / solid / ramp / step) and fills the runs
-//               above and below via unrolled store chains, column-major.
+//   renderSym   per 4-column cell: min/max of colH (prepCells, once a pass of its own, is
+//               folded in here), then a char per cell (blank / solid / ramp / step), capped
+//               at 100, and the runs above and below via unrolled store chains, column-major.
 //
 // 160x200 logical pixels in multicolor 4x8 cells, mirrored about the horizon so one char
-// code serves both halves. 8-bit DDA throughout. ESDF turn/move, joystick up/down = fwd/back.
+// code serves both halves. 8-bit DDA throughout. E/D move, ,/. turn, S/F strafe; the joystick
+// mirrors them (see readKeys).
 // Diagnostic knobs are collected in DIAG below; MEASURE=1 -> flat-out + fps counter.
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, mkdtempSync, copyFileSync,
          readdirSync, statSync, renameSync } from 'fs';
@@ -465,15 +465,13 @@ const LEVEL_SHD01 = Object.fromEntries(Object.keys(LEVEL_FLICKER).map(n =>
   [n, FLKSPR === 2 && (process.env.ORBSHD01 ?? '1') === '1']));
 const HAS_SHD01 = LEVEL_IDS.some(n => LEVEL_SHD01[n]);
 if (FLKSPR) LEVEL_SPR[8] = FLKSPR === 2 ? { under: 0x00, hi: 0x0b } : { under: 0x00, hi: 0x0c };
-// ---- FALLTAIL: five rows of wall BELOW the screen, so the drop has something to lift ----
+// ---- FALLTAIL: seven rows of wall BELOW the screen, so the drop has something to lift ----
 // The snapshot is 25 rows, so a wall whose base is off the bottom ends in a flat horizontal cut
 // that rises with the room. The renderer only ever computes 13 cell rows and MIRRORS them, so
-// the rows we want below row 24 are cell rows -1..-5 -- above the top -- and the mirror makes
-// them fall out of the same arithmetic. Deepest source any drop frame asks for is row 29.
-// SHIPPING as of 2026-09-24, in the four-level chain, on the one disk. FALLTAIL=0 turns it off.
-// The room it needed: the pivot's scratch went to VIC bank 3 (PVBASE) so fallTail could have the
-// $ad00 page whole, the tail buffer followed it up there (fallTailB), and arcPx/arcLvl/arcClp
-// moved out of the main block to pay for its 72 bytes of dispersed edits.
+// the rows we want below row 24 are cell rows above the top, and the mirror makes them fall out
+// of the same arithmetic: source rows 25..31 (FTROWS), the deepest any drop frame asks for (SRCMAX).
+// SHIPPING since 2026-09-24. FALLTAIL=0 turns it off. The tail buffer, fallTailB, is in low RAM
+// (LOWBOOT, see LOW RAM below).
 const FALLTAIL = (process.env.FALLTAIL ?? '1') === '1';
 const SRCMAX = FALLTAIL ? 31 : 24;
 const FTROWS = FALLTAIL ? 7 : 0;   // source rows 25..31
@@ -646,8 +644,7 @@ const D64 = globalThis.D64;
 const chunk = (arr, per = 24, ind = '        ') => { const o = []; for (let i = 0; i < arr.length; i += per) o.push(ind + '!byte ' + Array.from(arr.slice(i, i + per)).join(',')); return o.join('\n'); };
 
 
-// The live level's map, as rows of 0/1. Both levels are authored above on the same 23 x 11
-// grid; the old 16 x 16 literals and the ring's are gone.
+// The live level's map, as rows of 0/1 (each level's own shape: see MAP SHAPE below).
 // THROUGH MAP_OF, so there is exactly ONE place that answers "which map is level n?". There
 // were two -- this chain and MAP_OF -- and when 6 and 7 were added only MAP_OF learned about
 // them, so the live map for both fell through the chain's final `: L1_MAP` and they were built
@@ -660,8 +657,7 @@ const M = punchWalls(MAP_OF(LVL), LEVEL_WALLS[LVL]?.walls ?? [])
   .map(r => r.split('').map(c => c === '#' ? 1 : 0));
 // ---- MAP SHAPE ----
 // A cell id is y*MAPW + x and has to stay addressable. Stage 1 keeps it a BYTE, so the shape is
-// free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel. 16x16 is
-// exactly the old layout, so nothing about the generated code changes while these are the default.
+// free but the area is not: any W x H whose last index clears the $ff "no cell" sentinel.
 // The stride was written as a literal 16 (and as <<4 / >>4 / &15) in ~40 places; they read MAPW
 // now, which is what lets a level be 28x9 or 12x20 instead of only square.
 // EVERY LEVEL HAS ITS OWN SHAPE (2026-09-18, the user's call: "some square, some long and
@@ -761,11 +757,11 @@ const castFirst = (px, py, dx, dy, isWall) => {
   return null;
 };
 
-// ---- The OTHER resident level, fetched EARLY ----
-// Early, because constants below (NRUN, the entity counts) have to cover BOTH levels rather than
+// ---- The OTHER levels, fetched EARLY (LVLALL, below) ----
+// Early, because constants below (NRUN, the entity counts) have to cover EVERY level rather than
 // just the live one, and are baked into the code as immediates. Sized to the live level alone,
 // the old occluder masks' stride (OCCBYTES, gone 2026-11-14 with the masks) let orb 0's clear run
-// over orb 1's mask after a swap, and one orb was visible through walls.
+// over orb 1's mask after a level change, and one orb was visible through walls.
 // ---- AN IMAGE WITH NO LEVEL IN IT (once SOLO=1; the only architecture now) ----
 // Every per-level table is an EQUATE at its offset inside a page-aligned SLOT; the bytes ship as
 // their own disk file and land there. The engine's absolute references still name the same
@@ -784,8 +780,8 @@ const castFirst = (px, py, dx, dy, isWall) => {
 // 2026-10-13: MOVED OUT OF BANK 3, into the image's arena (CPU RAM). The level is only ever read by the
 // CPU, and its 3 pages at $f500 split the sprite space the sentry's frames need. compact.mjs keeps
 // scratch off it (iray.reserve.json) and refuses a layout whose code or tables reach it; IMG carries
-// the starting level there (see DISK). $6900: the arena's free run is $638e-$6cf1, and this leaves
-// room both ways -- code grows up into it from below, tables down from above.
+// the starting level there (see DISK). $6900 is only the fallback: the address is picked by the
+// slot trials at the head of this file (WHERE THE LEVEL SLOT GOES), and sub-builds run at DUMP_SLOT.
 const SLOT_AT = +(process.env.SLOT_AT ?? 0x6900);
 // MULTI -- this build KNOWS several levels. It has their tables, so every shared table is sized to
 // the largest and the per-level palette rows get emitted. False only in an LVLDUMP subprocess,
@@ -823,17 +819,11 @@ const LVLALL = MULTI ? (() => {
   // (SOCKETS is left out of their environment: LVL_ENVS above.)
   return LVL_ENVS.map(dumpOf);
 })() : null;
-// ---- ...and the LATE levels, built the same way but not resident ----
-// They arrive from disk at the hub, over the slots levels 1-3 vacate, so their tables have to be
-// laid out to the SAME shape as a shadow's -- same table list, same padding, same 882 bytes --
-// or the swap would exchange the wrong bytes. Building them here is what guarantees that: they
-// go through the identical dump, and every shared maximum below (NRUN, NHOLE, the
-// entity counts) is taken across residents AND late levels together. Size a table to the
-// residents alone and the level that arrives at the hub overruns it.
-// Not in an LVLDUMP subprocess, which is the dump of ONE level and has no chain of its own.
-// Every level whose tables this build has to accommodate, resident or arriving. The distinction
-// that matters for SIZING is not which slot a level is in -- it is whether its bytes ever land
-// in these tables at all, and a late level's do.
+// ---- every level SIZES the shared tables ----
+// Each level arrives from disk into the one slot, so every shared maximum below (NRUN, NHOLE, the
+// entity counts) is taken across ALL the levels' dumps: size a table to fewer and the level that
+// arrives overruns it. (LVLSIZED once also held the LATE levels, loaded mid-game into a bank-3
+// shadow; LATE went 2026-10-05, and today it is just LVLALL.)
 const LVLSIZED = [...(LVLALL ?? [])];
 
 // ---- ANGEL PATHING: a breadth-first distance map, filled a few cells per frame ----
@@ -902,10 +892,9 @@ const PATH_N = pathOpen.length;
 }
 // The queue never holds more than one entry per open cell, since a cell is enqueued when it is
 // first given a distance and never again.
-// Sized for the LARGEST resident level, not this one: bfsQ is emitted once and every level's
-// fill runs through it. A queue cut to the live level would overflow the moment a shadow level
-// had more open floor -- silently, since it is just the next table's bytes. Every shadow, not
-// just the first: with three resident it is not the first one that is necessarily the biggest.
+// Sized for the LARGEST level, not this one: bfsQ is one buffer and every level's fill runs
+// through it. A queue cut to the live level would overflow the moment an arriving level had more
+// open floor -- silently, since it is just the next table's bytes.
 const BFS_Q = Math.max(PATH_N, ...(LVLALL ?? []).map(l => l.pathN)) + 1;
 // Cells expanded per frame. A fill is PATH_N expansions plus the array clear, so this sets how
 // many frames it takes; anything well under ANG_PERIOD is free.
@@ -1033,7 +1022,7 @@ const rcpD = [...Array(256)].map((_, i) =>
   i === 0 ? 255 : Math.max(1, Math.min(255, Math.round(RCPK * 16 / i))));
 // Half-height from distance. Indexed by perpDist>>3 (1/32-cell units); 88 half-px at one
 // cell. Left UNCAPPED at 254 so merged spans interpolate the true (linear) height --
-// prepCells caps at 100 on draw.
+// renderSym caps at 100 on draw.
 //
 // The rectilinear cos correction depends ONLY on the column, never on the player, so it is
 // folded in here rather than multiplied onto every ray's distance. That deletes one whole
@@ -1381,13 +1370,14 @@ console.error(`  corner partners (line kept): ` +
   ` -- inside corners, plus outside corners with both faces visible; a corner facing away from` +
   ` the view has an unrelated wall across the boundary and draws no line`);
 
-// Per-frame step, in 1/256ths of a map cell (px/py are 8.8 fixed point). Must stay well
-// under 256: moveApply only collision-tests the DESTINATION cell, so a step approaching a
-// full cell would tunnel through walls. 36/256 = 0.14 cells is safe.
-// Movement is per 60Hz TICK, not per frame -- see readKeys. MOVE_STEP is the table's
+// The step, in 1/256ths of a map cell (px/py are 8.8 fixed point). Must stay well under 256:
+// moveApply only collision-tests the DESTINATION cell, so a step approaching a full cell would
+// tunnel through walls. DT_MAX caps one frame's step at half a cell.
+// Movement is per 60Hz TICK, not per frame -- see tickDelta. MOVE_STEP is the table's
 // precision, not the speed: the step is scaled by elapsed ticks and then shifted down by
-// MOVE_SHIFT, so the effective rate is 64 >> 4 = 4 units of 1/256 cell per tick = 0.94 cells
-// a second. Round numbers rather than exact ones: neither constant costs anything at runtime
+// MOVE_SHIFT, so the base rate is 64 >> 4 = 4 units of 1/256 cell per tick = 0.94 cells a
+// second -- and the player ALWAYS RUNS at 3x that (dtm, see tdDn): 12 units a tick, 2.8 cells a
+// second ("3 cells/s"). Round numbers rather than exact ones: neither constant costs anything at runtime
 // (the table is built here, the rate is an immediate), so there is no reason to carry 68 and
 // 4.25 around for the last 6%. Keeping the table at 64 rather than 4 is what stops the
 // DIRECTION quantising -- cos(a)*4 rounds to five levels and you walk visibly off-axis -- and
@@ -3387,7 +3377,8 @@ const PY = hexArg('PY', ST0[1], 0xffff);
 // Angle units per TICK while the joystick is held, in 1/256ths of a unit. Turning is
 // accumulated at that precision because the rate is well under one unit a tick: pa is the
 // high byte of a 16-bit angle and paF the low, so the fraction carries between frames
-// instead of being lost. 3/4 of a unit per tick * 60 ticks = 45 units a second = 63 degrees.
+// instead of being lost. 3/4 of a unit per tick * 60 ticks = 45 units a second = 63 degrees -- the
+// base rate; the player always runs, and tdDn doubles the turn (dtt), so it is 127 degrees a second.
 //
 // ---- what makes a turn rate smooth, and why this one is not special ----
 // The renderer draws the angle at QUARTER-unit resolution (FINEANG's 1024-entry tables, fed
@@ -3408,8 +3399,8 @@ const TURN_RATE = 192;          // 3/4 of an angle unit per tick = 3 quarter uni
 if (TURN_RATE !== 192) throw new Error(`TURN_RATE ${TURN_RATE}: readKeys' turn is the closed form for 192 (3 x 64) -- rewrite rkTL/rkTR for this rate`);
 // Ticks. The cap exists so a hitch cannot step far enough to jump a wall: at 4 units of 1/256
 // cell per tick, 32 ticks is half a cell against walls a whole cell thick, and the collision
-// box catches anything that lands inside one. It has to clear the 3x run multiplier too, or
-// running would silently stop scaling with frame rate below about 15 fps.
+// box catches anything that lands inside one. tdDn caps the 3x run (dtm) at it as well, so
+// running stops scaling with frame rate once a frame takes more than 10 ticks (under 6 fps).
 const DT_MAX = 32;
 if (3 * DT_MAX > 255) throw new Error(`DT_MAX ${DT_MAX}: readKeys' turn needs 3 x dtt in a byte`);
 // Panel seams are a look, not a diagnostic: SEAMS=0 compiles every trace of them out --
@@ -3445,16 +3436,9 @@ const ENTPROF = flag('ENTPROF');
 // readings are sums of two unrelated phases -- and they look plausible, which is worse.
 if (ENTPROF && !PROFCOARSE) throw new Error('ENTPROF=1 needs PROFCOARSE=1: it reuses the bucket ' +
   'indices PROFCOARSE frees, and without it the fine ray buckets are summed into the entity ones');
-// OCCLAZY: rebuild the occluder masks only when they can have changed.
-// ON by default since 2026-09-03, and it is the single biggest win in the frame. The masks say
-// whether an entity is beyond a wall face's PLANE -- no camera term -- so they only change when an
-// entity moves or the run tables are re-patched, and on a map that splits nothing neither happens
-// most frames. Rebuilding them regardless cost 216 lines a frame on the combined level, 16% of
-// everything, because the cost is entities x runs and that level has 4 and 44.
-//   orbOccAll 216.0 -> 4.0 lines, whole frame 1315 -> 1052 = 4 video frames = 10 -> 15 fps.
-// Verified with its own OCCCHK harness rather than by eye: rebuild anyway, compare byte for byte,
-// count differences. 255+ skipped frames checked while walking through cells with both angels
-// moving, occBad = 0.
+// (OCCLAZY, which rebuilt the per-entity occluder masks only when they could have changed -- 10 ->
+// 15 fps on the old combined level, 2026-09-03 -- went with the masks on 2026-10-14: occBy answers
+// the facing rule when asked, so there is nothing to rebuild.)
 // ENTFOV: reject an entity that is beside the camera before the reciprocal and the column
 // arithmetic, from |right| and forward alone. On since 2026-09-15.
 // ENTGATE: skip orbMove's frame trig when no entity can possibly be projected.
@@ -3472,7 +3456,7 @@ if (ENTPROF && !PROFCOARSE) throw new Error('ENTPROF=1 needs PROFCOARSE=1: it re
 //
 // STATELESS ON PURPOSE. Every input is current: no cached value, nothing to dirty, nothing to
 // audit across a level load, a death or the fall, and no writer that has to remember to
-// invalidate -- which is the bug class orbOccT already shipped once (see orbOccAll). The caching
+// invalidate -- which is the bug class the old cached occluder masks (orbOccT) shipped once. The caching
 // version of this test measured no cheaper anyway: "check the key" costs about what "recompute"
 // costs. Caching is for the OCCLUSION question, which cannot be answered per frame at all.
 
@@ -3653,25 +3637,14 @@ if (PADX !== 1) DIAG.push(`PADX=${PADX}`);
 
 
 
-// Where the CPU-only tables start, and so the ceiling on how much code there may be. A build
-// that adds code ahead of this has run into it twice, and the failure is SILENT: the assembler
-// errors, VICE boots the PREVIOUS disk, and you read stale numbers off a stale frame.
-// $8600 for every build, not just the instrumented ones. Keeping ONE base for all configs
-// matters beyond fitting: a measurement build has to have the same table layout as the build
-// it is measuring, or the number describes a different program.
-// Buffers that exist ONLY at runtime -- nothing is ever emitted into them, so every checker
-// that works from the emitted image is blind to them and must be told. See fallSnapD/fallSnapS.
-// fallTailB is 280 bytes at $a7e8, so it spans TWO pages. Left out of here it reserved only
-// $a700 and the hole report offered $a800-$a8ff as 256 spendable bytes -- the tail's own last
-// four rows, which scroll to the top of the screen late in a drop. Nothing has been placed
-// there yet; the report was simply ready to hand it to the next thing that wanted a page.
-// ---- PVBASE: the pivot's three NBND-byte scratch tables, in VIC bank 3 ----
-// They were at $ad00, taking 192 bytes of a 256-byte page in the IMAGE -- and the image is the
-// scarce resource now (306 bytes free in 26 fragments, largest 36) while bank 3 still has room
-// above the level shadows. They are per-frame scratch that nothing loads, so moving them costs
-// no file bytes and no cycles: every access is `lda pvBnd,y` with y < NBND either way, and none
-// of the three is in the page-aligned set. What it buys is a whole free PAGE at $ad00, which is
-// the only place left in a four-level image that can hold fallTail in one piece.
+// Buffers that exist ONLY at runtime (RUNTIME_BUFS, below) -- nothing is ever emitted into them, so
+// every checker that works from the emitted image is blind to them and must be told their sizes.
+// (fallTailB once spanned two pages and, left out of here, reserved only the first: the hole
+// report offered the tail's own last rows as 256 spendable bytes.)
+// ---- PVBASE: the pivot's three NBND-byte scratch tables ----
+// Per-frame scratch that nothing loads, so where they sit costs no file bytes and no cycles: every
+// access is `lda pvBnd,y` with y < NBND, and none of the three is in the page-aligned set. They
+// moved out of the image to VIC bank 3, then to low RAM's cassette half (below).
 // ---- LOW RAM: $0200-$03ff, which NOTHING was using and NOTHING was checking ----
 // It was never reserved. The free-space report starts at $0801 (where a ,8,1 PRG lands) and the
 // RAM-overlap guard started at $0400, so 512 bytes sat in neither. The reason it stayed empty is
@@ -3690,9 +3663,7 @@ if (PADX !== 1) DIAG.push(`PADX=${PADX}`);
 // would have to write it and the KERNAL would be using the same bytes to do so.
 const LOWBOOT = 0x0200, LOWSAFE = 0x033c, LOWEND = 0x03fc;
 const LOWTOP = 0x0400;           // where low RAM stops: the default screen, which stackLT and the rest occupy
-// ---- and the two tenants evicted from VIC bank 3 to make room for more level data there ----
-// They were the first CPU squatter in bank 3, capping the level region at $fe00; moving them
-// here lifted it to $fff9.
+// ---- the two tenants: the pivot scratch and the fall's tail ----
 // The pivot scratch takes the CASSETTE half because it is written from the very first frame.
 // fallTailB takes the boot half because it is not written until a fall, which is minutes after
 // the last KERNAL LOAD -- and even a KERNAL-fallback load during play only clobbers bytes that
@@ -3707,7 +3678,7 @@ const SNAP_ROWS = 13;
 // screen it grabbed. Declared as 1000, those 24 bytes were reported as free space and the packer
 // was entitled to put a table in them, to be wiped on the first fall. Same shape as the MAPN
 // tails: the declared length described the DATA, not the domain the writer actually reaches.
-// (fallSnapD really is 1000 -- bgCopy fills it row by row, 25 rows of 40.)
+// (fallSnapS is gone; fallSnapD is SNAP_OWN rows of 40, the snapshot rows no host takes -- see SNAP_HOSTS.)
 // ---- THE PROFILER'S STATE IS DECLARED, not placed (2026-09-30) ----
 // It used to be fifteen hardcoded equates from $7e00, and compaction -- which rebuilds the image
 // from the runs and buffers it is TOLD about -- dropped every one of them. The result was the
@@ -3735,8 +3706,8 @@ const OCC_BUFS = process.env.OCCFBN ? { oSHist: 8, oSDbg: 4 } : {};
 //   bfsQ       the angel fill's queue. objInit (also in fallMid, BEFORE bgCopy) sets bfsPhase = 0,
 //              and a fill writes bfsQ[0] and resets head/tail before reading anything; bfsTick does
 //              not run during the fall (the main loop takes fallStep instead). 254 bytes: 6 rows.
-// ONLY with FALLMID: without it the destination is rendered in SLICES during the drop, while the
-// tail is still being read. Whatever rows the hosts cannot take stay in fallSnapD.
+// Safe because the destination is rendered whole in fallMid's black middle (the sliced render, which
+// ran while the tail was still being read, went 2026-11-14). Rows the hosts cannot take stay in fallSnapD.
 const SNAP_HOSTS = LVLLOAD ? [['fallTailB', FTROWS * 40], ['bfsQ', 254]] : [];
 const SNAP_AT = [];                          // slot -> its address, as an assembler expression
 for (const [h, cap] of SNAP_HOSTS)
@@ -3785,7 +3756,7 @@ const NOEDGE = flag('NOEDGE');
 // what the loop costs, and this says what that loop costs.
 const FLATSPAN = flag('FLATSPAN');
 // NOMINMAX=1: take the cell's min and max from its first column instead of comparing all
-// four. Renders slightly wrong; it prices the comparison half of prepCells, leaving the loop
+// four. Renders slightly wrong; it prices the comparison half of renderSym's per-cell min/max, leaving the loop
 // overhead in place so the two can be told apart.
 const NOMINMAX = flag('NOMINMAX');
 // RAYCNT=1 shows the number of marchCol calls this frame as two hex digits on row 3. The one
@@ -4149,20 +4120,12 @@ const SCR_B = 0xe400;                   //   writes one of them every frame
 const CHARSET = 0xc000;                 // charset A: upright glyphs, above the horizon
 const CHARSET_B = 0xc800;               // charset B: every glyph flipped, below the horizon
 // Charset B is DERIVED from A at startup (see cpChr), so only ONE charset exists anywhere --
-// and it is never in the image: the loader decodes it straight into $d000, which is the one
-// thing a KERNAL LOAD cannot do. The paragraph that used to be here described a low "source"
-// copy at $3000-$3fff and two build guards defending it; all of that is gone.
-// CHARSRC is GONE. The charset is not in the image at any address: it is a separate compressed
-// segment the loader decodes straight into $d000. Nothing here may name a load address for it,
-// because there isn't one -- the destination lives in the --seg argument, and $d000/$d800 are named
-// by the `charset`/`charsetB` equates, which is where the CPU and the VIC actually find it.
-// FTABLES is GONE, and deliberately not replaced by a constant nobody uses. f0Lo/f0Hi/f1Lo/f1Hi
-// and the run-id tables were moved up to RELOC with the rest of the CPU-only tables; only this
-// constant and a build guard citing it stayed behind at $3000, reserving 2KB against a tenant that
-// had left and pinning the code's ceiling at $2800 for years. The charsets occupy $3000-$3fff now.
-// If a table needs a base address, take it from RELOC's allocation, not from a fresh constant --
-// a constant is a claim about the map that nothing checks. The charsets are NOT at $3000 any
-// more either -- that space is the orb tables and the code's growth room.
+// and it is never in the image: it is its own disk file, ICHR, loaded straight to CHARSET. (A low
+// "source" copy, CHARSRC, and the guards defending it are gone.)
+// Under compaction (compact.mjs) the hand origins below -- NEWTABLES, RELOC, ORB_VART, ORB_SMALL,
+// HUD_AT, ORB_OCC -- only open runs in the emitted source: every origin is rewritten, and where a
+// table lands is the layout's. Comments that explain a table's position by "the block had no room"
+// or "at $xxxx" date from the hand layout before it, and describe only source order now.
 const NEWTABLES = 0x4000;               // clampT / rampT / stepT
 
 // ============================ ORBS: the data layer ============================
@@ -4195,43 +4158,19 @@ const ORBFG = process.env.ORBFG;
 // Skipping the gate costs 21.59 -> 21.48 fps, which is worth not having that class of bug.
 // ORBNOCELL=1: walk and decide, but stamp nothing. Separates the SEARCH cost from the WRITING.
 const ORBNOCELL = process.env.ORBNOCELL === '1';
-// The sprite bitmaps are their own disk file, loaded straight into VIC bank 3 ($c000, 64-byte
-// aligned, first of the 159 free slots) rather than emitted into the image. They were at $2000
-// in bank 0 before the bank-3 move, which is now the code's growth room.
+// The sprite bitmaps are their own disk file, loaded straight into VIC bank 3 (64-byte aligned)
+// rather than emitted into the image.
 const SPRBASE = 0xe800;                 // orb ladder: above the screens, plain RAM (was $c000, now the charsets)
-// The orb tables go at the TOP of the hole above the code, ending at $4000 where the first
-// emitted table begins. Placing them at the top rather than the bottom keeps the code's growth
-// room ONE contiguous piece below them instead of splitting the hole in two. RELOC+0x1300,
-// where these lived before, belongs to FINEANG's quarter-angle tables now.
-//
-// Named bases rather than offsets from one origin: the visibility lists are 2.3KB, an order of
-// magnitude bigger than everything else here, and an offset scheme invites the mistake of
-// budgeting them like a small table. The four 256-entry tables are page-aligned because the
-// 6502 indexes them by a whole byte (cell number, or h).
-// These four were at $2d00-$30ff, directly above the code, and they were the ceiling on how
-// much code there could be -- 409 bytes of headroom when the fall needed 600. They are pure
-// lookup with no fixed-address dependency, so they moved into the kilobytes hTabT gave back,
-// and the code got a clean run to $3100 instead. Emitted AFTER hTabT, since the assembler
-// lays out in address order.
+// The orb tables' origins (see the compaction note above NEWTABLES: these open runs, they do not
+// place them). The 256-entry tables are page-aligned because the 6502 indexes them by a whole
+// byte (cell number, or h).
 const ORB_VART     = 0x5d00;    // h -> size variant, 256
 const ORB_OCC      = 0x7000;    // the origin the occluder masks had (gone 2026-10-14); the
                                 //   death tables that followed them still start here
-// ORBSMALL=<hex> moves this block later, handing the difference to CODE. The block has tail slack
-// below $4000, and a diagnostic build (OCCCHK and friends) needs a few dozen bytes the shipping
-// build does not have -- see [[iray-code-ceiling]]. Nothing here is alignment-sensitive; the
-// assembler's own backward-origin error is the guard if the block is pushed past its slack.
-// $3d74, not $3d40: ssAny needs the room and this block is the only slack next to the code.
-// It now ends EXACTLY at $4000 with nothing to spare, so anything added to it has to displace
-// something else -- see the run tables that already moved out below.
+// ORBSMALL=<hex> moved this block when the layout was by hand, to hand its slack to CODE; under
+// compaction the value is only the origin of a run that compact.mjs places.
 const ORB_SMALL    = parseInt(process.env.ORBSMALL ?? '3d9c', 16);
 const HUD_AT       = parseInt(process.env.HUDAT ?? '3f72', 16);   // see hudX: the block below it grows with NOCC
-                                // THREE pages of per-variant and per-orb tables, and $4000
-                                //   made every per-variant table 22 entries instead of 18, and
-                                //   the stamp pass added orbAnchT, so two pages stopped fitting.
-// DEAD as of 2026-08-17, and kept only because the build still computes the lists for its own
-// reporting. The direct entity loop in orbMove replaced them, and a movable orb invalidates
-// every field in them anyway -- the bearing, the window and the canOcc bit are all relative to
-// where the orb stood at BUILD time. Nothing is emitted; ORB_SMALL now starts here.
 
 // ORBART=rough samples the top-of-ladder sprite from a photoreal sphere render (art/sphere-rough.png)
 // instead of using the drawn art. Everything below is unchanged: orbScale still resamples
@@ -4583,23 +4522,12 @@ const ORBTALL = LADDER.map((r, v) => r.h * (ORBEY[v] ? 2 : 1));                 
 // comparable to the orb ladder, and 13 distinct heights instead of 32 -- so a distant angel costs a
 // single sprite, which is where the slot budget goes.
 // ---- THE DEATH CUT SCENE: the sword angel, data/death-pics.json (tools/build-facetest3.mjs) ----
-// The death cut scene, on by default. The face ships INSIDE the image at $7100 -- there is no
-// packer and no staging any more, so nothing about it is size-constrained.
+// The death cut scene, on by default. Its charset is in the image (a table compaction places, see
+// the repack below); the picture's map ships as IPIC in bank 3 (PICBASE).
 const DIE      = process.env.DIE !== '0';
-// PROFILE and the cut scene both want $bc00 and there is no longer room for both, so say which
-// two things collided instead of letting the assembler report "* = $bc00 moves backward from
-// $bd0a" -- which names neither of them and reads like a corrupt build.
-// This is not a new clash, it is a SILENT one: the profiler took RELOC+$3600 when that page was
-// empty, dieChk/dieGo were relocated onto the same page for the cut scene, and nothing tested
-// the pair. Every PROFILE=1 build since has failed, which is why the last round of seam work
-// counted the pass with SEAMCNT instead of timing it.
-// DIE=0 is the right fix rather than a new address for the profiler: a build being profiled has
-// no use for a cut scene, and the two pages of code it frees are the only two anywhere near.
-// OBSOLETE UNDER COMPACTION, and left here only as a comment: the profiler has no fixed
-// address any more. Its code and its buffers are placed by the relayout like everything
-// else -- pfAcc lands at $5c00 on a CHAIN=1 build, nowhere near $bc00 -- so there is no page
-// to contend for and no reason to demand DIE=0. Enforcing it made PROFILE depend on a flag
-// that does not itself boot, which is why the profiler looked broken when it was not.
+// (PROFILE once demanded DIE=0, when the profiler and the cut scene both wanted $bc00 in the hand
+// layout. Under compaction neither has a fixed address, and the demand -- which made PROFILE
+// depend on a flag that does not itself boot -- went.)
 
 // ---- the cut scene's pictures ----
 // death-pics.json is produced by build-facetest3.mjs (ASSET=1) and carries ONE 256-glyph charset
@@ -5476,26 +5404,12 @@ if (ORBS.length > 255) throw new Error(`${ORBS.length} orbs: the index tables ar
 // with the wall out and diff, whether or not it is the one on screen -- the delta has to exist
 // from boot. The triples name LIVE table addresses, so they are correct exactly when that wall's
 // own level is the live data, which is when they fire.
-// MORE THAN ONE LEVEL MAY HAVE WALLS (2026-09-19; levels 2 and 3 both do). WALLS_ALL
-// is every removable wall in the game, flattened in level order, and a wall's position in it is
-// its GLOBAL ID -- what sockWallT names and what wallStT indexes.
-//
-// Global ids rather than a per-level wall table, because the wall tables are shared unswapped
-// code and data: making them per level would mean putting them in the shadow, which has ~90
-// spare bytes. The reason it is safe is an invariant worth stating plainly, because every
-// routine here leans on it: a wall's delta triples name LIVE table addresses, so they mean
-// anything only while that wall's own level is live -- and wallsBack puts every open wall back
-// BEFORE each lvlSwap, so a level that is not live has wallStT 0 for every one of its walls.
-// Nothing therefore has to range-check by level: the other levels' entries are already zero and
-// every walk over the global list skips them.
-// RESIDENT levels only. A wall's delta is a diff against its OWN level's tables, which exist
-// only if that level is live or riding along as a shadow. Under TWOLEV=0 the base silently fell
-// back to the live level's tables, so a build of level 1 alone tried to diff level 2's opened
-// wall against level 1's room and reported 113 changed cells instead of 1.
-// LATE included: a wall's delta is a diff against its own level's tables, and those exist for a
-// late level too -- LATEALL builds them. It is not about which slot a level occupies at boot but
-// whether this build has its tables at all, and the wall ids are global to the whole chain a
-// level can ever join, not to the four that happen to be resident.
+// MORE THAN ONE LEVEL MAY HAVE WALLS (2026-09-19). WALLS_ALL is every removable wall of the levels
+// this build has tables for (RESIDENT: this level and OTHERS, i.e. every level), flattened in level
+// order -- a build-time enumeration, one variant sub-build per wall (see WALL IDS ARE LEVEL-LOCAL).
+// A wall's delta is a diff against its OWN level's tables, so a level must be in RESIDENT to have
+// one: when a build lacked them the base fell back to the live level's, and level 2's opened wall
+// was diffed against level 1's room -- 113 changed cells instead of 1.
 const RESIDENT = new Set([LVL, ...OTHERS]);
 const WALL_LVLS = LEVEL_IDS.filter(n => LEVEL_WALLS[n] && RESIDENT.has(n));
 const WALLS_ALL = WALL_LVLS.flatMap(lv => LEVEL_WALLS[lv].walls.map((cells, k) => ({ lvl: lv, k, cells })));
@@ -5539,8 +5453,8 @@ for (const lv of Object.keys(LEVEL_WALLS).filter(n => LEVEL_IDS.includes(+n)))  
 const wallGid = (lv, k) => WALLS_ALL.findIndex(w => w.lvl === lv && w.k === k);
 // Per-level values for the four wall pointer tables, level -> NWALL bytes. Declared here and
 // filled by wallPtrs() once the slot layout is known; LVL_TABLES names these Maps as its
-// per-level override, the same hook the hazard lists use, so the live level and every shadow
-// get their own addresses out of one manifest entry.
+// per-level override, the same hook the hazard lists use, so every level's file gets its own
+// addresses out of one manifest entry.
 const WALL_PTR = { wallDLoT: new Map(), wallDHiT: new Map(),
                    wallCLoT: new Map(), wallCHiT: new Map() };
 // (PACK, the wall-delta packer into the image's scraps -- packAll/PACKPROBE's two-pass hole map -- removed
@@ -5569,7 +5483,7 @@ const WALLVARS = (!process.env.WALLOFF && !process.env.LVLDUMP && WALLS_ALL.leng
 // levels had no removable walls. HAZRT below reads this, and hzRunW walks the delta lists.
 const WALL_MECH = LEVEL_IDS.some(n => LEVEL_WALLS[n]);
 const WALLVAR = WALL_MECH ? (WALLVARS?.[0] ?? true) : null;
-// ---- A LATE LEVEL'S WALL DATA TRAVELS WITH THE LEVEL, not with the engine ----
+// ---- A LEVEL'S WALL DATA TRAVELS WITH THE LEVEL, not with the engine ----
 // A wall delta is a patch list for ONE level's tables: the bytes that change when that level's
 // wall opens. It is meaningless while that level is not live, and yet every wall's list was
 // resident at once -- level 4's 197 bytes sat in memory for the whole of levels 1-3. That is the
@@ -5578,13 +5492,10 @@ const WALLVAR = WALL_MECH ? (WALLVARS?.[0] ?? true) : null;
 // So every level's walls ride in its own level file, loaded with it (see SOLO_WALL_AT). The pointer
 // tables carry the address, so wallTog neither knows nor cares where it is reading.
 
-// Sized to the LARGER level, both of them. A run id past a level's own count has runBitT = 0, so
-// it sets no bit and costs only the loop iteration -- the padding is inert, not merely harmless.
-// ...AND THE WALL VARIANTS: removing a wall can SPLIT runs and raise the count (level 3's
-// corner: 26 -> 30). Sized to the base level only, runByteT/runBitT stopped at 26 and orbOcc1's
-// walk never masked ids 27-30, so after the corner opened an angel behind one of the new runs
-// read a garbage occluder bit and vanished while it still blocked and killed (2026-09-19, the
-// user, three readouts in).
+// (Run-id tables are sized across every level AND its wall variants -- removing a wall can SPLIT
+// runs and raise the count, level 3's corner 26 -> 30 -- see DOOM_RUN0 below. Sized to the base
+// level only, the old occluder walk never masked the new ids and an angel behind one vanished
+// while it still killed: 2026-09-19.)
 // ---- THE MERGE HAZARDS, PER LEVEL, VALID IN EVERY WALL STATE (2026-11-02) ----
 // Each level's own build finds its hazards (HAZ_RAW) on its own map; this merges them with the
 // same level's wall-out variants (WALLVARS) and numbers them, so one set of lists is right
@@ -5856,16 +5767,11 @@ const HOLELIKE = [...HOLES_AT.map((h, i) => ({ x: h[0], y: h[1], exit: true, ei:
 // BOUNDARY and the orb LOOP BOUND the same number, so one byte serves both, and a combined walk
 // over every entity stays a single contiguous range. Pinned would need two ranges everywhere.
 // It is only safe because every per-entity table is swapped; see LVL_TABLES.
-// A LEVEL NUMBER, NOT A SLOT (2026-09-19). lvlSwap is a TRANSPOSITION -- live <-> slot k -- so
-// the slots PERMUTE as you fall, and a slot index baked at build time is only self-consistent
-// while there is one slot to choose. Tracing (live, slot0, slot1) for CHAIN=1,2,3:
-//     (1,2,3) -> (2,1,3) -> (3,1,2) -> (1,3,2) -> ...
-// the first lap is right and then level 1 still says "slot 0", which by then holds level 3: the
-// game oscillates 1<->3 and level 2 becomes unreachable. Three good falls and then a silently
-// wrong one. The runtime now looks the wanted level up in lvlAtT, which tracks the permutation.
-// ...and the shadows' copies are written by CHAIN_GLOBAL below, which is where every table
-// naming something chain-global now lives. Not here, because sockWallT needs NSOCK.
-const lvlMax = (f, own) => Math.max(own, ...LVLSIZED.map(f));   // late levels count too
+// A LEVEL NUMBER, NOT A SLOT (2026-09-19): an exit names the level it leads to (lvlNxtT), which
+// lvlLoad reads off the disk. (A slot index went wrong when lvlSwap, gone with the resident levels,
+// permuted the slots on every fall.) The other levels' copies are written by CHAIN_GLOBAL below,
+// which is where every table naming something global to the game lives -- sockWallT needs NSOCK.
+const lvlMax = (f, own) => Math.max(own, ...LVLSIZED.map(f));   // every level counts
 // At least ONE, even with no entities anywhere (NOORB=1 ANGEL=0 -- the bare level for working on
 // seams from first principles). Six tables are emitted at this length, and a zero-length !byte
 // assembles to "bad number: $", which names neither the table nor the flags that emptied it.
@@ -5997,7 +5903,7 @@ const angLeash = (() => {
 const NHOLE = Math.max(1, lvlMax(l => l.nHoleLike, HOLELIKE.length));   // at least one row: holeSeeT is emitted
 const NEXIT = lvlMax(l => l.nExit,     HOLES_AT.length);
 // Sockets are the hole-likes that are not exits. At least one byte: sockWallT is emitted either
-// way, and a zero-length table would be recorded in lvlLenT as 0, which the swap reads as 256.
+// way. (A zero-length table was once recorded in lvlLenT as 0, which the old swap read as 256.)
 const NSOCK = Math.max(1, lvlMax(l => l.nHoleLike - l.nExit, HOLELIKE.length - HOLES_AT.length));
 // NOT `NHOLE - NEXIT`. Those are two INDEPENDENT maxima and a level need not achieve both:
 // the hub has 4 exits and 0 sockets, level 2 has 1 exit and 3 sockets, so NHOLE=4, NEXIT=4
@@ -6005,11 +5911,11 @@ const NSOCK = Math.max(1, lvlMax(l => l.nHoleLike - l.nExit, HOLELIKE.length - H
 // reading the byte past it for the wall they open. It emitted clean and corrupted silently.
 // nExitT is a SWAPPED byte, so the exit/socket boundary is per level; only the table SIZE
 // is chain-global, and the right bound for it is the largest level's own socket count.
-// ---- CHAIN_GLOBAL: tables that name something GLOBAL TO THE CHAIN ----
-// A LEVEL'S OWN BUILD CANNOT KNOW THE CHAIN IT WILL SIT IN. A LVLDUMP subprocess runs with
-// TWOLEV false, so its OTHERS is empty, its RESIDENT set is just itself, and anything it numbers
-// across the chain it numbers as if it were alone. So the MAIN build computes these for every
-// shadow, and a dump's own value for them is always discarded.
+// ---- CHAIN_GLOBAL: tables that name something GLOBAL TO THE GAME (the name is from the CHAIN days) ----
+// A LEVEL'S OWN BUILD CANNOT KNOW THE OTHER LEVELS. A LVLDUMP sub-build is not MULTI, so its OTHERS
+// is empty, its RESIDENT set is just itself, and anything it numbers across the levels it numbers as
+// if it were alone. So the MAIN build computes these for every level's dump, and a dump's own value
+// for them is always discarded.
 //
 // This trap has caught both entries below, one of them in the user's hands:
 //   lvlNxtT   -- a dump has no fall order at all and emits $ff.
@@ -6022,13 +5928,13 @@ const NSOCK = Math.max(1, lvlMax(l => l.nHoleLike - l.nExit, HOLELIKE.length - H
 //                bug: there is no longer a number a level could get wrong by being moved.
 //
 // Adding a table here is still a human step. The tell that one belongs: its value or its LENGTH
-// is computed from CHAIN, OTHERS or anything else derived from the whole resident set. The
+// is computed from OTHERS, LVLSIZED or anything else derived from the whole set of levels. The
 // assertions below are the backstop -- they check MEANING, not just that a patch ran, which is
 // what would have caught the sockWallT bug the moment level 3 got a socket.
 // ---- a level's START POSE travels WITH the level ----
 // It was six tables indexed by `lvlMeT - 1`, which is the shape that makes levels privileged:
 // the table has to be as long as every level the build can ever BE in (PAL_N), and sizing that
-// off CHAIN is what once made every late level a grey room you spawn inside a wall. A level
+// off the old CHAIN is what once made every LATE level a grey room you spawn inside a wall. A level
 // that carries its own pose needs no id, no table length, and no entry in anything global.
 // Computed HERE for every level rather than in each level's own dump, because PX/PY/PA override
 // the LIVE level's start only -- a dump inherits that env and would apply it to itself.
@@ -6055,15 +5961,11 @@ const CHAIN_GLOBAL = {
     return [...Array(NSOCK)].map((_, i) => i < sw.length ? sw[i] : 0xff);
   },
 };
-// LATEALL as well: a late level's lvlNxtT and sockWallT are global to the chain it will JOIN,
-// and its own dump could not know them -- it was built as a chain of one.
+// Every other level's dump: its lvlNxtT and sockWallT length are global to the game, and its own
+// dump could not know them -- it was built alone.
 for (const L of LVLSIZED) for (const [n, f] of Object.entries(CHAIN_GLOBAL)) L.tables[n] = f(L);
 
-// LAND=x,y overrides where the drop puts you. It exists for testing the level transition: the
-// only way to check that the level you fall INTO renders like the level you would have booted
-// into is to arrive at the same cell, and merge-hazard cells (the ones that can go wrong) are
-// nowhere near either level's natural landing spot. It passes through to the shadow build too.
-// ---- LEASH=x,y;x,y : cells an ANGEL may not enter ----
+// ---- LEASH=x,y;x,y : cells an ANGEL may not enter (each level's own: LEVEL_LEASH, levels.mjs) ----
 // Not walls and not obstacles: a rule about TERRITORY. The player walks through them freely and
 // nothing draws them. The pathfinder is deliberately blind to them too -- the fill reads blkT and
 // knows nothing of this -- so an angel plots its route straight at the player, walks up to the
@@ -6074,14 +5976,9 @@ for (const L of LVLSIZED) for (const [n, f] of Object.entries(CHAIN_GLOBAL)) L.t
 // and TWO either side of it. Corners-only was tried first and gave it the whole arc, which was
 // far too much rope -- it could shadow you along the entire length of the room. Two squares means
 // slipping past it is a matter of a step or two, not a plan. The rest of the loop is safe ground,
-// which is what makes the door area read as guarded.
-// The COMBINED level carries the ring's leash too, shifted by the +15 the join applies to every
-// ring cell (see the orb at "ring (6,2) + 15"): (3,1) and (9,1) become (18,1) and (24,1), penning
-// the ring angel to the same door cell and two either side. It had NO leash before -- LEVEL2 is
-// false on the combined map, so this expression fell through to '' -- and with no fence at all the
-// second angel simply followed the player out of the ring, down the corridor and into the first
-// room. Reported from play, and the give-away is that it followed ALL the way: an angel that runs
-// out of rope stops facing you, it does not escort you home.
+// which is what makes the door area read as guarded. (That was the old level 2's; today only level
+// 1 has a leash.) Without a fence an angel follows the player ALL the way: one that runs out of rope
+// stops facing you, it does not escort you home.
 
 // LANDS_AT / LAND_A were the fall's landing spot and heading, one pair per level. DELETED
 // 2026-09-24 with the landXT/landYT/landAT tables they fed: lvlStart replaced them on 2026-09-22
@@ -6924,7 +6821,7 @@ const ARC_GAP = +(process.env.ARC_GAP ?? (FALLTAIL ? 0 : 2));
 // a cut-scene. It stays TWO charset regions through the window because the new room is held
 // off-screen that early: A for the departing rim (floor above, hole below), B for the arriving
 // one (hole above, floor below).
-// FALLMID (user 2026-10-04, default): ALL level work in one black moment at the MIDDLE of the
+// THE BLACK MIDDLE (the user, 2026-10-04; it was the FALLMID switch): ALL level work in one black moment at the MIDDLE of the
 // fall. The top arc leaves the screen completely (no overlap, so there is a frame of pure hole), the
 // display is blanked -- indistinguishable from the black it replaces -- and the level change, every
 // load, the inks, the charset and a FULL render of the destination happen there, before the bottom
@@ -7537,11 +7434,10 @@ for (const h of HOLELIKE)
   if (map[cellOf(h.x, h.y)] !== 0
       && !(h.exit && HAS_CORNER && LEVEL_CORNER[LVL] && LEVEL_BREAK[LVL] && BRK_CELLS(LVL).includes(cellOf(h.x, h.y)))) throw new Error(
     `${h.exit ? 'exit hole' : 'socket'} at (${h.x},${h.y}) is inside a wall`);
-// 8, not 4. The old cap was not a design limit at all -- it was the SIZE OF THE GAP holeSeeT
-// happened to be parked in ($9180, 128 bytes below the $9200 sound block). It is placed against
-// ORB_SMALL now and sized to NHOLE, so it costs exactly what the chain uses and the ceiling is
-// the real one: hlSee indexes it as `lda holeSeeT,x` with x = entity*32 + (cell>>3), so entity 7
-// ends at byte 255 and an eighth row would need a second page and 16-bit addressing.
+// 8, not 4 (the old cap was the size of the gap holeSeeT was parked in). This guard and its
+// message are holeSeeT's, a single-byte index of entity*32 + cell>>3 -- and holeSeeT is gone,
+// replaced by the zones (2026-10-04). Whether 8 is still the real ceiling (hole-like entities take
+// sprite slots down from 8) has not been re-derived; the limit stands as it was.
 if (NHOLE > 8) throw new Error(
   `${NHOLE} hole-like entities across the resident levels: holeSeeT is indexed by a single byte ` +
   `(entity*32 + cell>>3), so 8 rows of 32 is the whole of it. More wants a second page and a ` +
@@ -7765,10 +7661,11 @@ const PED = HAS_PED ? makePedLadder(PEDR, PEDH, HOLE.slotEnd)
                         flagT: [], slotEnd: HOLE.slotEnd };
 // Five tables of one byte a rung, emitted as a single run under holeSeeT.
 const PEDTBL = 5 * Math.max(1, PED.L.length);
-// ...plus hlRungP itself, which is emitted in the same run. Hand-counted, and the assembler's
-// "* = $3d9c moves backward" is the guard if it ever stops matching.
+// ...plus hlRungP itself, which is emitted in the same run. Hand-counted for the hand layout's
+// origin arithmetic; compact.mjs measures every run itself (it assembles with the origins removed),
+// so a miscount no longer misplaces anything, and the old "* = $3d9c moves backward" guard is gone with it.
 const PEDCODE = 18;
-// seamEdge's own size, hand-counted like PEDCODE; the assembler's "moves backward" is the guard.
+// seamEdge's page, from the hand layout (an origin compaction rewrites, like PEDCODE's).
 const SEAMEDGE_AT = 0x7f00;     // the page bndT vacated; 249 of 256 used
 if (process.env.PEDDUMP && HAS_PED) {
   console.error(`pedestal ladder: r=${PEDR} u=${PEDH}, ${PED.L.length} rungs, ` +
@@ -8021,7 +7918,9 @@ const STN_MAX = HAS_SILVER ? L9.stN : 1;
 // ---- LEVEL CODE (the per-level code plan, docs/SPACE.md; built 2026-10-14) ----
 // FEATURES whose code loads with the levels that use them, and the vectors each one answers. A
 // level's module is the features it uses, behind a jump table in LX_VECS order; a vector none of
-// them answers goes to an rts in the module. Two features answering one vector is not supported yet.
+// them answers goes to an rts in the module. Two features may answer one vector only when exactly
+// one of them WRAPS it (`wraps`: it goes on to the other's routine itself, as curtain's ftStop does
+// for hazSet); anything else is refused at build time.
 // DRONELV: the levels whose sound is our own drone + effect player (level code), not a GoatTracker block
 const DRONE_LV = process.env.MUSIC !== '0' ? (process.env.DRONELV ?? '1').split(',').map(Number) : [];
 const LX_FEATURES = {
@@ -8939,8 +8838,7 @@ const NOCC = NORB + NHOLE;                       // every entity orbOne can be a
 // orbProj read absCosT[pa] -- the WHOLE-unit angle -- while the rays turn on paq, which is
 // (pa:paF)>>6. A whole unit is 3 screen columns at centre and 4.3 at the edge, so while turning
 // the walls slid smoothly and every sprite sat still, then jumped a unit at once.
-// A full-circle pair of 1024-entry tables would be 2KB and there is no 2KB hole -- the big one
-// at $7058 belongs to the death face and is only free while DIE=0. But |cos| has period 512 in
+// A full-circle pair of 1024-entry tables would be 2KB, which the image cannot spare. But |cos| has period 512 in
 // quarter-units and mirrors about 256, so ONE 256-byte quarter circle serves both: |cos| folds
 // the index, and |sin(x)| = |cos(x + quarter turn)| folds the same table.
 const qcos = [...Array(256)].map((_, q) =>
@@ -9032,8 +8930,8 @@ const hx16 = n => '$' + n.toString(16).padStart(4, '0');
 //     copy renders level 2 correctly -- very slightly worse on corners. Shared deliberately: two
 //     copies would cost 972 bytes to buy back 0.36 wrong columns a frame.
 //   - bfsQ / hlSeat / orbSeenT: runtime state, not data. objInit rebuilds them.
-// The order here is the order of the shadow blob, so it is also the swap order. Anything added
-// here must be swapped, or the new level renders with the old level's geometry.
+// The order here is the order of the level blob (the slot layout). Anything per level must be
+// in it, or the new level renders with the old level's geometry.
 // GATEFAST (default with ZONES): the gate's per-entity loop with the cone INLINED (no jsr/rts, Y and A
 // only, so the loop keeps the entity index in X instead of reloading cnI), the cell delta in zero page,
 // and the per-cell lookups (mapT mask, stamp list) redone only when the player's cell changes. Off for
@@ -9333,8 +9231,8 @@ const LVL_TABLES = [
   ['mapT', [...Array(256)].map((_, i) => ZN_BUILD.enc(i))],   // a full page of WALL past the map: see the emitted mapT
   // blkT and the eight run tables USED to travel here -- 1,380 of the 1,789 bytes a level cost.
   // They are all derived from mapT: blkT by objInit, which already copied it at boot, and the
-  // rest by mkRuns. Carrying them was more expensive than recomputing them, because the swap
-  // runs at ~29 cycles a byte: not moving 1,380 saves ~40,000 cycles and mkRuns costs ~25,000,
+  // rest by mkRuns. Carrying them was more expensive than recomputing them, because the old swap
+  // ran at ~29 cycles a byte: not moving 1,380 saved ~40,000 cycles and mkRuns costs ~25,000,
   // so the drop through a hole got CHEAPER. Verified byte-identical, table by table and frame
   // by frame, against the copies the build used to ship.
   //   ['blkT', blkT],
@@ -9350,8 +9248,8 @@ const LVL_TABLES = [
   // only in the hazard lists, so its plane and face -- the parent's -- are copied from this after
   // every rebuild. Without it the socket room's column, split by its 40 hazard cells, occluded
   // and seamed against whatever level 1 had left in those slots (2026-09-17).
-  // PADDED to the largest resident level. The swap exchanges in place, so a chunk that is
-  // shorter here than in the other level would run off the end of this one. The padding sits
+  // PADDED to the largest level. Every level's file lands on the same equates, so a chunk that is
+  // shorter here than in another level would run off the end of this one. The padding sits
   // AFTER the real entries, so the packed orbs-then-holes layout is untouched and nothing
   // indexes into it -- every loop stops at the live count.
   ['orbXCT', pad([...orbXC, ...HOLELIKE.map(h => h.x)], NOCC)],
@@ -9462,8 +9360,8 @@ const LVL_TABLES = [
   // orbOccLoT is NOT here any more. It says where the ENGINE keeps entity i's mask (orbOccT +
   // i*OCCBYTES) -- engine layout, not level data. Shipped per level, each level file carried the
   // stride ITS OWN build computed (4, 7, 8 against the engine's 9): masks overlapped, ran past
-  // orbOccT and zeroed the parked Krill loader, so the next disk load hung (2026-10-03). The
-  // re-lay that once fixed this only ran under TWOLEV, which LVLLOAD switched off.
+  // orbOccT and zeroed the parked Krill loader, so the next disk load hung (2026-10-03). (The masks
+  // themselves went 2026-10-14.)
 ];
 // PED_WALL is an IMMEDIATE in pedGate, so nothing at runtime can notice it drifting from the
 // table the same fact lives in. Check the MEANING: every pedestal on the pedestal level must
@@ -9513,9 +9411,9 @@ const SLOT_SUB = { nOrbT: ['nOrbT', 'nHoleT', 'nExitT', 'nOrbM1T', 'nSockT', 'nA
 LVL_TABLES.push(['lvlMeT', [LVL]]);
 // ---- THE VARIABLE-LENGTH TAIL ----
 // Everything above is budget-sized, so its offset into the blob is identical for every level
-// and the engine names it with a fixed equate. holeSeeT is sized to the level instead, which
-// is only safe LAST: a table whose length varies moves everything after it, and there is
-// nothing after it. Its own base stays fixed, which two `lda holeSeeT,x` sites require.
+// and the engine names it with a fixed equate. The tail is sized to the level instead (zoneT
+// now, see below; it was holeSeeT before the zones replaced it), which is only safe LAST: a table
+// whose length varies moves everything after it, and there is nothing after it. Its own base stays fixed.
 // Anything added later goes BEFORE this line unless it is pointer-reached and variable too.
 // ---- STAMP LIST: from which player cells can a pedestal or socket be PARTLY hidden by a wall? ----
 // occStamp spent ~580 cycles per visible pedestal per frame on the hub concluding "nothing to
@@ -9633,7 +9531,7 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   // which no ray can hit -- their planes do not matter, and 48 bytes of delta would say so.
   // ...AND EVERY CHAIN_GLOBAL TABLE. A WALLOFF variant is built with LVLDUMP set, so it is a
   // standalone build: everything it numbers across the chain it numbers as if it were alone,
-  // exactly as a shadow dump does. Carried in the delta, opening a wall would write those
+  // exactly as another level's dump does. Carried in the delta, opening a wall would write those
   // lone-level values over the ones the main build patched in --
   //   lvlNxtT   -> $ff, turning the level's own exit into scenery until wallsBack ran;
   //   sockWallT -> local ids, so level 3's second socket would toggle LEVEL 2's wall. That is
@@ -9655,7 +9553,7 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
   // The baseline is the wall level's tables with the wall PRESENT -- not the live level's. Diffing
   // against whatever happens to be on screen produced a delta describing the difference between
   // two different rooms, which named the wrong cell entirely.
-  // LVLSIZED, not LVLALL: a LATE level's walls have a base too, and it is that level's own dump.
+  // Another level's walls are diffed against that level's own dump (LVLSIZED).
   // Searching the residents alone returned undefined, which fell back to the LIVE level's map --
   // so level 5's one-cell wall came out as "removed 120 cells", diffed against level 1's room.
   const base = LVL === WALLS_ALL[k].lvl ? null
@@ -9707,13 +9605,12 @@ const WALL_DELTAS = WALLVARS ? WALLVARS.map((WV, k) => {
            //   whose levels have no removable walls has an EMPTY list, not an absent one
 
 // ---- SOLO: the live level's wall lists ride in the slot, behind the manifest blob ----
-// Same treatment a LATE level's walls already get, and for the same reason: the bytes are the
-// level's, so they travel with it and the image only names where they will land. Without this
+// The bytes are the level's, so they travel with it and the image only names where they will land. Without this
 // the image still carries 50 bytes describing how ONE level's walls collapse -- and those bytes
 // hold mapT ADDRESSES, which is precisely the data that cannot stay behind when the level moves.
 // ---- WHERE THE LEVEL REGION SITS ----
-// One contiguous run in bank 3 holding [live blob][wall lists], all of it off the disk. The live
-// slot is page-aligned because mapT sits at its offset 0.
+// One contiguous run at SLOT_AT (in the arena, CPU RAM, since 2026-10-13) holding [live blob][wall
+// lists], all of it off the disk. The slot is page-aligned because mapT sits at its offset 0.
 // ---- WHICH TABLES ARE SIZED TO THE LEVEL rather than to the chain's widest ----
 // Only tables at the END of the manifest may be in here: a varying length moves everything
 // after it, and the engine names the rest with fixed equates. lvlBlocks must not pad these
@@ -9740,7 +9637,7 @@ const SHADOW_BASE = SLOT_AT + LVLBLOB_MAX;
 const SOLO_WALL_AT = {};
 let SOLO_WALL_LEN = 0;
 // each level's OWN last byte in the slot (its blob, then its walls): what is left up to LXAT is free for
-// its code to start in (LX_LOW). One slot only (LVLLOAD); resident levels share no such tail.
+// its code to start in (LX_LOW). One slot only (LVLLOAD).
 const LVL_END = Object.fromEntries(ALLBLOBS.map(L => [L.level, SLOT_AT + blobOf(L)]));
 // .length, not truthiness: WALL_DELTAS is [] in a build that compiles the mechanic but has no
 // deltas to lay out (a WALLOFF variant, whose own walls are already punched out of its map).
@@ -9751,8 +9648,8 @@ if (WALL_DELTAS.length) {
   const baseOf = lv => SLOT_AT + (LVLLOAD ? blobOf(ALLBLOBS.find(L => L.level === lv) ?? {})
                                           : LVLBLOB_MAX * (LVLALL ?? []).length + LVLBLOB_MAX);
   // LVLLOAD: one slot, one level in it at a time, so every level's walls start at the same
-  // address and the region is as long as the WORST level's -- not the sum. Without it (all
-  // levels resident at once) they must not overlap, so they run on from each other.
+  // address and the region is as long as the WORST level's -- not the sum. (The other branch, all
+  // levels resident at once, is from before levels loaded; an assembled build is always LVLLOAD.)
   let at = 0;
   for (const lv of WALL_LVLS) {
     if (LVLLOAD || !at) at = baseOf(lv);
@@ -11030,8 +10927,7 @@ ssDir   = $915c                 ; which way the boundary walk steps: 0 = up, 1 =
 ; steady, and the four-column rule keeps a panel far enough from one that it could never match.
 ; No seam identity is needed or wanted here -- run ids renumber every frame -- so the match is
 ; pure proximity, which is exactly what the band means.
-; At fixed addresses in this gap rather than in the free-run stream, which runs up to HAZ_BASE.
-; The gap below holeSeeT at $9180 was doing nothing.
+; (Hand-placed in a gap below the old holeSeeT before compaction; it rehomes them like every RAM equate.)
 sHyP    = $915d                 ; 12 columns
 sHyC    = $9169                 ; 12 columns
 sHyPN   = $9175
@@ -11052,16 +10948,17 @@ cy1     = $85
 ; deadvars is what makes it safe rather than an argument: it reports 0 variables read before being
 ; written, so nothing here is ever consumed before the subdivision pushes to it. If that check ever
 ; comes back non-zero for a $04xx array, this is the first thing to suspect.
-; ---- $0400-$062c IS KRILL'S RESIDENT LOADER, AND IT IS PERMANENT ----
+; ---- ORBHI_N=12 only: KRILL'S RESIDENT KEPT AT $0400 FOR GOOD ----
 ; Declared so the region is RESERVED rather than merely unused -- which is the whole history of
 ; low RAM in this build: $0200-$03ff was never reserved, only never counted, and things drifted
-; into it. The hub loads levels 5-7 from disk while the game is running, so these bytes have to
-; survive gameplay; the first rendered frame used to write stackLT straight over them.
+; into it. In the default build (ORBHI_N=0) the renderer's scratch has $0400 instead, and the
+; resident (251 bytes now, $0400-$04fa; once 556, to $062c) is parked at krillRt by klPark and
+; copied back for each level load -- see KRILL_RT_AT.
 ${ORBHI_N ? 'krillRes = $0400' : '; (ORBHI_N=0: the scratch is back in low RAM and there is no room for one)'}
-; ---- FOUR OF THE FIVE MOVED OUT OF $04xx-$06xx (see ORBHI_N) ----
-; $0400-$062c is Krill's resident, and it has to be there: the loader refuses to assemble above
-; $d000, and everything below it is either the image or the charsets. So these four went to the
-; slots the tail of the orb ladder vacated, and the ladder went under the I/O hole.
+; ---- ORBHI_N=12: FOUR OF THE FIVE MOVED OUT OF $04xx-$06xx ----
+; (With ORBHI_N=0, the default, they stay in low RAM: SCRATCH_AT.) Under ORBHI_N=12 Krill's
+; resident keeps $0400, so these four go to the slots the tail of the orb ladder vacates, and
+; the ladder goes under the I/O hole.
 ; IT COSTS NOTHING. These are NOT in zero page and never were -- $04xx is ordinary absolute
 ; memory, and for an indexed array zero page is not even faster: lda zp,x and lda abs,x are both
 ; 4 cycles, and only a STORE saves one. What the old addresses actually bought was PAGE
@@ -11075,19 +10972,10 @@ stackRT = ${hx16(SCRATCH_AT.stackRT)}
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
 ; index never needs a 16-bit add.
 colH    = ${hx16(COLH_AT)}${SHYCOL ? '                 ; SHYCOL: the page with H+1 = $ff (see ispanSto)' : ''}
-; ---- the per-frame arrays: ALL of them live in the reclaimed charset source, $3000-$37ff ----
-; Two evictions got them here, both for the same reason -- an array in the code's growth room is
-; an array that caps the engine:
-;
-;   1. Six of these sat at $2400-$27ff, the image's filler between the data segment and the
-;      charset source, i.e. the only space the CODE has to grow into. That made the build's
-;      headroom report a LIE: it printed $2800 - dataEnd = 1,762 bytes, but the code would have
-;      hit faceIdT at $2400 after 738.
-;   2. Then the charset source itself moved from $2800 up to $3000, closing a dead 2KB hole and
-;      taking the code's ceiling with it -- so the arrays followed it up here, out of the way.
-;
-; Everything is page-aligned where a full byte indexes it. Packing tighter than this would buy
-; nothing: $3000-$37ff is not the scarce resource, the ceiling below it is.
+; ---- the per-frame arrays ----
+; Their addresses are placeholders: compact.mjs rehomes them (see the note above bfsLast). They once
+; lived at $2400-$27ff and then in the charset source at $3000-$37ff, moved twice so as not to cap the
+; code's growth room in the hand layout. Page-aligned where a full byte indexes them.
 cwA     = $8400                 ; per cell-column: the ceiling run length this buffer holds
 cwB     = $8428
 cbA     = $8450                 ; ... and the solid run start, or $ff for "always redraw"
@@ -11120,36 +11008,10 @@ ${PROFMAX ? `pfFD    = $7e3e                 ; PROFMAX: raster frames the last r
 pfHist  = $7e33                 ;   8 bytes: how many frames spanned 0..7 raster frames
 mxLo    = $7e3b                 ; PROFMAX: worst whole-frame delta, in raster lines
 mxHi    = $7e3c
-` : ''}; bfsLast and mulWY were the ONLY live equates on page $7c00 -- everything else there is the
-; PROFMAX/SEAMPRE/SEAMCNT clusters, now gated above. The hole report reserves a whole PAGE per
-; squatter, so these two bytes were holding 256 out of the free map, and deleting the dead
-; equates around them would have freed NOTHING while they stayed. Parked beside obKeyT on
-; page $7c00's 24-byte tail, and the PROFILE/PROFMAX/SEAMCNT/SEAMPRE clusters take page $7e00
-; in exchange -- gated, so only their own builds reserve it. That trades 24 bytes for 256.
-; (Not $70xx: that is orbOccT's emitted range, which grows with the level's run count -- the
-; overlap guard caught exactly that.)
-; ---- rehomed 2026-09-29: $7ce8/$7d00 is free in every RESIDENT chain and NOT in a LATE one ----
-; There the $7b00 run reaches $7d18 and the program's own scratch sat inside emitted data. The
-; image-vs-equate guard says so, but only once assembly gets far enough to run it, which it did
-; not until the packer freed the block above.
-; The four single bytes go to ZERO PAGE, which is genuinely spare -- 130 bytes unclaimed, and
-; PROFILE says there is no promotion worth making from the hot paths (colH and idT are the big
-; absolute references there and are 160- and 256-byte TABLES; everything else is pivPrep, ~0.3%
-; of a frame). So zero page here is not an optimisation, it is just the safest free space:
-; unclaimed in every chain shape, and a LATE load runs Krill's resident, which owns $e0-$e6 only.
-; obKeyT (NORB bytes) and remHiT (a whole page) are too big for that and take measured-free
-; image space instead -- chosen from the PACKPROBE hole maps of all three shapes (that packer
-; was removed 2026-11-14), not from one build's report.
-; ---- $6300/$6400: pages free in EVERY chain shape ----
-; These six lived at $7ce8/$7d00, which is free in every RESIDENT chain and NOT in a LATE one --
-; there the $7b00 run reaches $7d18 and the program's own scratch sat inside emitted data. The
-; image-vs-equate guard says so, but only once assembly gets far enough to run it, which it did
-; not until the packer freed the block above.
-; $6300 and $6400 were chosen from the MEASURED hole maps of all three shapes (PACKPROBE, since
-; removed), not from reading the report of one.
-; NOT zero page, though 130 bytes of it are unclaimed: the KERNAL uses $90-$fa during a load and
-; a LATE build loads DURING PLAY. Zero page is worth having for the CYCLES, which is a job for
-; PROFILE to direct, not for a table that only needs somewhere to live.
+` : ''}; bfsLast and mulWY are zero-page scalars. The page arithmetic that once placed them and their
+; neighbours here -- page $7c00's tail, $7ce8/$7d00, $6300/$6400, chosen from the PACKPROBE hole maps
+; of the RESIDENT and LATE chain shapes -- went with the hand layout: compact.mjs rehomes every RAM
+; equate in the image range (the 4-digit addresses in this block are placeholders it replaces).
 bfsLast = $59                   ; frameCnt when the fill last ran; see bfsExp
 mulWY   = $5a                   ; mulW saves Y here
 ${CULLCNT ? `culTot  = $70d0                 ; CULLCNT: entities orbOne looked at, 16-bit, free-running
@@ -11452,11 +11314,9 @@ ooCX    = $8511                  ; occBy: the cell the entity is being tested fr
 ooCY    = $8516                  ; buffered $d01c. STALE: the held object was a hi-res icon once;
                                  ;   it is the full multicolor sprite now, so this is $ff always
                                  ;   and the held object shares $d025/$d026 like everything else
-; ---- the fall's two SCREEN SNAPSHOTS, 1000 bytes each ----
-; fallDraw scrolls one room past another by copying rows out of these. They are written and read
-; ONLY at runtime -- nothing is emitted into them -- so before they were named here the hole
-; report counted both as free space and handed them out twice: the angel path table landed on
-; $4900 and the BFS distance maps on $6200, and the drop came up as a screenful of garbage.
+; (The fall's two 1000-byte SCREEN SNAPSHOTS were runtime-only, and before they were named here
+; the hole report handed them out twice -- the drop came up as a screenful of garbage. Today the
+; arriving room's snapshot is SNAP_ROWS rows in buffers dead at the time: see SNAP_HOSTS.)
 ; ---- $6c00-$6fff: the four CPU pages, back in the image where they belong ----
 ; All four were exiled into VIC bank 3 for ONE reason, each comment saying so in its own words:
 ; the image had no free PAGE. Deleting fRowT (40 blocks x 32 bytes, all of it derivable) made
@@ -11557,8 +11417,8 @@ arcIx   = $81e5                  ; which arc frame to draw -- not always fFrm, s
 ; ($81eb-$81ec: rsHi/rsLo, renderSym's column range, went 2026-11-14 -- always 39..0 now)
 otmp    = $81ed
                                  ; ($81e6-$81ea held the sliced background render's state,
-                                 ; bgOn/bgN/bgMore/bgCol/bgPh; never emitted under FALLMID and
-                                 ; removed 2026-11-14.) renderSym cannot target fallBuf2 -- its
+                                 ; bgOn/bgN/bgMore/bgCol/bgPh; never emitted once the drop rendered
+                                 ; in the black middle, and removed 2026-11-14.) renderSym cannot target fallBuf2 -- its
                                  ; fill chains bake the screen address in -- so fallMid renders
                                  ; into the back buffer and bgCopy copies it out.
 pCh2    = $81e3                  ;   then A for the rim. The LANDING wants B,A,B: its rim is at
@@ -11931,9 +11791,9 @@ ${DIE ? `        lda #$00
 ${WALL_DELTA ? `        jsr wallsBack           ;   anything mid-animation is still live RAM and has to be
                                 ;   cleared by hand. A wall the sockets took out must come back
                                 ;   too, or a restart hands you a level already solved.
-` : ''}        jsr mkRuns              ; ALWAYS at boot now: runPlaneT/runFaceT are not emitted at all
-                                ;   (bank-3 scratch), so the live level derives them exactly as a
-                                ;   swapped-in one does. The four per-cell run tables are still
+` : ''}        jsr mkRuns              ; ALWAYS at boot now: runPFT is not emitted at all
+                                ;   (RAM scratch), so the live level derives it exactly as an
+                                ;   arriving one does. The four per-cell run tables are still
                                 ;   carried, and this rewrites them byte for byte (MKRUNS=1 was
                                 ;   the proof of that, and is now simply the default).
         jsr objInit             ; entities back to their starting cells -- a death restarts by
@@ -12168,7 +12028,7 @@ ${PROFSUB ? '        jsr pfT12              ; ray: hit + height + marchCol store
         sta stackRT             ; push (0,159)
         lda #$01
         sta sp
-`}subLp:   ; FALLMID renders the destination WHOLE in the drop's black middle, so the cast is
+`}subLp:   ; fallMid renders the destination WHOLE in the drop's black middle, so the cast is
                                 ;   never interrupted and the per-pop budget check below is gone
                                 ;   (2026-10-11) -- one compare a pop off every frame.
 subLp0: ldx sp
@@ -13201,7 +13061,7 @@ rgItC:  jmp rgIter
 ; The old makeDiv drew a white seam slit by ZEROING colH at each face boundary. That is
 ; incompatible with 4-wide cells -- a zeroed column silently became a ramp endpoint, so a
 ; boundary landing on a cell edge turned the whole cell into a diagonal. It is also now
-; redundant: the face boundary is rendered as a true vertical step (see prepCells/cstepT).
+; redundant: the face boundary is rendered as a true vertical step (see cstepT).
 
 ; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
 mul8:   sta mp
@@ -13286,7 +13146,7 @@ ${SEAMS ? '        sty rfCb3+1\n' : ''}
 
         ldx #39                 ; X = cell column throughout; the chains use it as their index.
                                 ; ALWAYS 39..0 (2026-11-14): the range rsLo..rsHi served the sliced
-                                ; fall render, which went with FALLMID's alternative.
+                                ; fall render, which went that day.
         ; The cell's min and max heights, computed HERE rather than in a pass of their own.
         ; prepCells walked these same 40 cell columns to write cmnT/cmxT for renderSym to read
         ; back one loop later -- 40 iterations of loop overhead and a store-then-load round
@@ -14474,7 +14334,8 @@ rkJD:   rts
 ;                                                           32 B of padding, and it fits (slot $6200).
 ; So the stream keeps maStep and spinStep, and the rest drops into the data section's gaps.
 ; Stage 2 (2026-11-14) put nothing in the stream (same-size hooks, see TESTRIG) and its floats in
-; runs of 16 bytes or less (RG_SPLIT); maS moved to low RAM. The slot is still at $6200.
+; runs of 16 bytes or less (RG_SPLIT); maS moved to low RAM. (The slot picker places the rig's slot
+; where it fits: $6500 on 2026-11-15, like the game's.)
 ${MASTEP_CODE}${SPINSTEP_ASM}        * = $bd00               ; @FLOAT (see compact.mjs). (Placeholder address.)
 ${RGPRE_ASM}        * = $bd00               ; @FLOAT (see compact.mjs)
 ${RGLAND_ASM}        * = $bd00               ; the rig's data: maStep's record, the rig's state, the block
@@ -14520,10 +14381,10 @@ strafeR:
         lda moveYT,x
         sta dyv
 moveApply:
-        ; Scale the step by elapsed ticks: dxs = dxv * dtv >> MOVE_SHIFT, sign extended to 16
-        ; bits. dtv is single digits, so repeated addition beats setting up a multiply, and
-        ; doing the shift AFTER is what keeps the direction accurate -- the table is deliberately
-        ; 8x coarser than the speed so cos(a) has somewhere to live.
+        ; Scale the step by elapsed ticks: dxs = dxv * dtm >> MOVE_SHIFT, sign extended to 16
+        ; bits. dtm (the run-scaled ticks, tdDn) is small, so repeated addition beats setting up a
+        ; multiply, and doing the shift AFTER is what keeps the direction accurate -- the table is
+        ; deliberately 16x finer than the step so cos(a) has somewhere to live.
         ldy #$00
         lda dxv
         bpl maSx
@@ -16311,7 +16172,7 @@ nmi:    pha
         pla
         rti
 
-; ---- fps = 960 / (frames per 16 renders) ----
+; (the fps readout is hudX's, HUD=1 only)
 
 ; ================= data =================
 dirXT:  !byte 1,1,0,255,255,255,0,1
@@ -18908,7 +18769,7 @@ osSv0:  lda svCnt
         sta $d010
         rts
 
-; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
+; (orbOne -- project orb oidx, and if it lands on screen take the next sprite slot -- is below, after orbProj.)
 
 ; ---- orbProj: cell delta (oix, oiy) -> ohgt and |column offset from screen centre| ----
 ; Split out of orbOne so the drop-target chooser can ask "where would an entity standing in
@@ -19645,8 +19506,8 @@ opBR3:  sta ocr`,
 })}
 ${ORBOCC ? `        ; ---- is this orb WHOLLY occluded? ----
         ; The rule is the user's: a wall facing AWAY from an orb always occludes it, and a wall
-        ; facing the orb never can. Which side of each face's plane every orb lies on is a
-        ; build-time constant (orbOccT, one bit per orb x run), so the only runtime question is
+        ; facing the orb never can. Which side of each face's plane an orb lies on is asked
+        ; when needed (occBy, from runPFT and the orb's cell), so the only runtime question is
         ; whether some column under the orb shows a run that does NOT occlude it -- and the first
         ; such column means the orb is visible. There is no depth test and no height test:
         ;
@@ -20096,9 +19957,9 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
 fcLp:   lda lvlNxtT,y           ; an exit with nowhere to go is NOT an exit: walk straight over
         cmp #$ff                ;   it. Without this the drop ran anyway and lvlEnd put you back
         beq fcNx                ;   at the same level's start -- a hole that falls you on the
-        lda px+1                ;   spot, which is worse than one that does nothing. Three of the
-        cmp orbXCT,x            ;   hub's four are marked and unwired, so this is now reachable
-        bne fcNx                ;   in a chain build for the first time.
+        lda px+1                ;   spot, which is worse than one that does nothing. Every
+        cmp orbXCT,x            ;   shipping exit is wired (levelExitDst), so this guards a
+        bne fcNx                ;   new level's unwired exit, not the game's.
         lda py+1
         cmp orbYCT,x
         beq fcHit
@@ -20143,7 +20004,7 @@ fdZLp:  sta omEn,x
         dex
         bpl fdZLp
 fdSpr:
-        ldx hlv                 ; FALLMID: the destination's NUMBER is all the hole needs. The level
+        ldx hlv                 ; the destination's NUMBER is all the hole needs. The level
         lda lvlNxtT,x           ;   change, the loads and the render all wait for fallMid; the colour
         cmp #$fe                ;   seen THROUGH the hole is an engine palette entry, so it can be
         bcs fmHole              ;   the arriving level's already, as it always was. $fe is THE END
@@ -20183,13 +20044,16 @@ fcNo:${HAS_IDOL ? `   lda px+1                ; not in a hole: this is the last 
 ; ---- fallMid: EVERY piece of level work, in one black moment between the two arcs ----
 ; Called at the handover, when the top arc has left the screen and the bottom one has not appeared:
 ; the display is pure hole, so blanking it is invisible. Then the level change, and the
-; destination rendered in FULL: one cast, one renderSym over all 40 columns, one copy. (It was
-; bgStep driven to completion, the machinery for rendering in slices across the fall's frames,
-; which FALLMID no longer does.) DEN stays off until the landing's first flip publishes
+; destination rendered in FULL: one cast, one renderSym over all 40 columns, one copy. (It was the
+; sliced render's step -- an engine bgStep, not level 10's -- driven to completion; the sliced
+; render went 2026-11-14.) DEN stays off until the landing's first flip publishes
 ; pd11. With FMLOG=1, fmTk = the ticks it all took, so the pause can be measured rather than guessed.
 fallMid:lda $d011
-        and #$ef
-        sta $d011
+        and #$6f                ; DEN off -- AND bit 7: a READ of $d011 returns the raster's ninth bit,
+        sta $d011               ;   a WRITE sets the IRQ line's. Read below line 255 and written back, it
+                                ;   moved the raster IRQ to line 256+n, which never comes: palRas stopped
+                                ;   and fwait hung in the black (PAL, 2026-11-15: 56 lines a frame there,
+                                ;   7 on NTSC, so PAL found it). Same fix in the load wrapper below.
 ${FMLOG ? `        lda frameCnt
         sta fmT0
 ` : ''}${MUSIC ? '        jsr musOff              ; MUSIC: before the load writes over the song\n' : ''}        ldx hlv                 ; the exit taken -- still the departing level's numbering here
@@ -20259,18 +20123,17 @@ ${process.env.FALLHOLD ? `        bcs fstLimD
         cmp #$03
         beq fstEnd
         lda #$03                ; drop over -- straight into the landing. The destination room
-        sta fallSt              ;   was rendered and snapshotted before the drop began, so there
-        jsr fallMid             ; FALLMID: the level work, all of it, while the screen is black
+        sta fallSt              ;   is loaded, rendered and snapshotted right here, by fallMid, so there
+        jsr fallMid             ; the level work, all of it, while the screen is black
         jsr lvlLook             ; the arriving level's inks and wall mark
-${ANYFLOORDK ? `        jsr lvlChr              ; FALLMID: the charset too, and the WHOLE rebuild -- still blanked
+${ANYFLOORDK ? `        jsr lvlChr              ; the charset too, and the WHOLE rebuild -- still blanked
         jsr fdGlFl
 ` : ''}
-                                ; ^ the arriving level's LOOK lands here, not at the swap:
-                                ;   the swap happens the moment you step into the hole (the
-                                ;   destination render needs the new geometry from its first
-                                ;   slice), but the drop is still showing the room being LEFT,
-                                ;   so repainting its ceiling and stamping its walls there was
-                                ;   recolouring the wrong room for the whole descent.
+                                ; ^ the arriving level's LOOK lands here, after the drop: the
+                                ;   drop shows the room being LEFT, so repainting its ceiling
+                                ;   and stamping its walls any earlier (when the level was
+                                ;   swapped in as you stepped into the hole)
+                                ;   recoloured the wrong room for the whole descent.
         ldx #25                 ;   is nothing to stall for here. Neither buffer holds any of the
         stx phA                 ;   landing's colour yet.
         stx phB
@@ -20645,7 +20508,7 @@ fwDnL:  rts
 ; pa is a full byte of turn, so +16 then >>5 rounds to the nearest octant instead of truncating
 ; toward the one you have just left. Eight rather than four because "the square most in front of
 ; you" means exactly that when you are facing a corner, and because the angels move in eight.
-; ---- dpCand: the neighbouring cell one step along direction X, and its parts ----
+; (dpCand -- the neighbouring cell one step along direction X -- is out of line, beside pedGate.)
 
 ; ---- dropPick: which neighbouring cell the carried orb should go in ----
 ; NOT the one the facing rounds to. An entity is drawn at its cell's CENTRE, and the centre of
@@ -20856,17 +20719,17 @@ okDone: rts
 ; colour. So: every piece of per-level state has exactly ONE owner below, and a new one goes to
 ; whichever owner already holds the thing it depends on. Nothing is set at a call site.
 ;
-;   lvlSwap    THE LEVEL ITSELF. Every table in the manifest -- map, dimensions, entity cells
-;              and colours, counts, exits, hazards. The arriving level's bytes replace the
-;              departing level's in place.
-;   mkRuns     everything derived from the map: the run tables. After the swap, before anything
+;   lvlLoad    THE LEVEL ITSELF. Every table in the manifest -- map, dimensions, entity cells
+;              and colours, counts, exits, hazards -- read off the disk over the departing
+;              level's, in place (and its level code, art and angel ladder with it).
+;   mkRuns     everything derived from the map: the run tables. After the load, before anything
 ;              renders.
 ;   objInit    all ENTITY and player state: entity cells, blkT, carry (and therefore idolHd --
 ;              see the note at its tail), marked, bfsPhase, hlSeat, bfsDone.
 ;   lvlStart   the PLAYER's pose. One place a level begins, however you got there.
 ;   lvlLook    every INK: the three screen registers (ceiling, wall, seam) and the two shared
-;              sprite registers, plus the idol's own pair -- then falls through to symPut and
-;              seamEdge for the per-level charset edits. The fall calls it in three stages
+;              sprite registers, plus the idol's own pair -- and the level code's own look
+;              (lxLook: symPut, shdIn, ...); lvlChr makes the charset edits (seamEdge, floorDk). The fall calls it in three stages
 ;              (fdSpr's irqB2 / lvlLook / lvlHi) because two levels are on screen at once during a drop;
 ;              boot calls it once through lvlBoot. The STAGING differs, the CONTENT must not.
 ;
@@ -21333,7 +21196,7 @@ ${HAS_IDOL ? `        lda idolHd
         ; the user had once seen an angel go missing. Still one: markC and markPa are the
         ; first one's. The newcomer just stands beside you; its own step re-checks every period.
         lda marked
-        bne anNoMk              ; (anNoMk refreshes its occluder mask, harmless if it never moved)
+        bne anNoMk              ; (anNoMk only reloads X now: the occluder mask it refreshed is gone, see occBy)
         ldx amIdx
         stx dieIdx              ; from the mark on, the projection stashes THIS angel's side of the
         lda #$ff                ;   screen in dieOff/dieSgn -- which it only does while the angel
@@ -21478,7 +21341,7 @@ anSqN:
         ; hidden, so this is a fraction, not a boolean, and the compare needs no division.
         ; Off screen and behind a wall are the same case, deliberately.
         ldx amIdx
-        lda orbXCT,x            ; point it at the DESTINATION, occluder mask and all
+        lda orbXCT,x            ; point it at the DESTINATION (culling, zones and occBy read it)
         pha
         lda orbYCT,x
         pha
@@ -21529,7 +21392,7 @@ anNo:   clc
 ${ANGSLIDE ? `; ---- THE LUNGE (ANGSLIDE): every step drawn as a slide, not a teleport (see slTick) ----
 ; An angel lunging owns BOTH cells -- the one it left and the one it is going to are 2 in blkT for
 ; the whole slide -- so nothing can walk into either and the landing is always legal. Halfway, its
-; orbXCT/orbYCT switch to the new cell: culling, zones and the occluder mask then answer for the
+; orbXCT/orbYCT switch to the new cell: culling, zones and the facing rule (occBy) then answer for the
 ; cell it is NEARER, and its projection offset (slOn) runs -0.5..0 from there instead of 0..+0.5.
 angSlDT: !byte ${pad([], NORB).join(',')}   ; 0 = not lunging, else 1..4 = +x,-x,+y,-y; bit 7 once switched
 ${HAS_SILVER ? `angSlFT = $b110             ; how far, in 256ths of the cell. RAM in a build with sentries
@@ -21646,7 +21509,7 @@ slBack: lda angSlDT,x
 
 ; ---- slLand: the step falls due mid-lunge. Land it through anGo, the instant step's own tail ----
 ; anGo moves an angel from orbXCT/orbYCT to amX/amY: it frees the cell left, takes the new one,
-; marks the player if that is beside them, and rebuilds the occluder mask. So put the cell back
+; marks the player if that is beside them (the occluder mask it rebuilt is gone). So put the cell back
 ; where the lunge set out from, name the landing cell, and let it do exactly what it always did.
 slLand: lda angSlDT,x
         bmi slL2
@@ -23468,12 +23331,11 @@ hlSdn:  rts
 ; is in front (exits included -- they stopped being the wall's own black when level 4 coloured them).
 holeTail:
         ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
-        ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
-        ; points across the player's whole cell, ANY of which seeing the hole means it is drawn.
-        ; Deliberately a superset -- it was added because orbs popped in and out along a corridor
-        ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
-        ; The real test is the span walk in orbOne, and it works for any entity with an occluder
-        ; mask; holes had none, which is the only reason they were excluded. They have one now.
+        ; The zones (mapT's mask) are the only other occlusion a hole gets, and they are per CELL:
+        ; a zone counts as seen if it is visible from ANYWHERE in the player's cell. Deliberately a
+        ; superset (as holeSeeT, which they replaced, was), so a hole stays drawn from a spot in the
+        ; cell with a wall squarely in front of it. The real test is the span walk in orbOne, and
+        ; holes were once excluded from it only because they had no occluder mask.
 ${HAS_CORNER && CORN_SCALE !== 1 ? `        lda oidx                ; ---- the CORNER exit: a BIGGER rung (CORNSCALE), so it is seen ----
         cmp lvlCorT             ; It must stay black (see LEVEL_EXITCOL), so size is what makes it
         bne hlNoBig             ;   read as a hole. Asking the h -> rung table for a larger h picks
@@ -23521,10 +23383,10 @@ hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -
 hlShrX: tax
 hlNoShr:
         ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
-        ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
-        ; points across the player's whole cell, ANY of which seeing the hole means it is drawn.
-        ; Deliberately a superset -- it was added because orbs popped in and out along a corridor
-        ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
+        ; The zones (mapT's mask) are the only other occlusion a hole gets, and they are per CELL:
+        ; a zone counts as seen if it is visible from ANYWHERE in the player's cell. Deliberately a
+        ; superset (as holeSeeT, which they replaced, was), so a hole stays drawn from a spot in the
+        ; cell with a wall squarely in front of it.
         ;
         ; THE BOX IS THIS RUNG'S OWN WIDTH. Two earlier versions of it were wrong in opposite
         ; directions, and both were visible:
@@ -23736,7 +23598,7 @@ ohNoPri:lda ohP
                                 ;   a stale obL/obR and scribbling occluders over a garbage cell
                                 ;   range. 29,510 cycles for a hole that costs 2,400 to project.
         ; ---- ...and a SOCKET fills that stamp state in, so occStamp treats it as an orb ----
-        ; Same span walk, same per-run occluder mask, same edge glyphs. That is what gets a
+        ; Same span walk, same per-run facing test (occBy), same edge glyphs. That is what gets a
         ; socket clipped at a cell edge by the corner in front of it, instead of the whole thing
         ; blinking out the moment its CENTRE column goes behind a wall.
         lda ocl2
@@ -23998,13 +23860,11 @@ ${process.env.PAD ? `        !fill ${+process.env.PAD}, $ea   ; PAD=<n>: n inert
                                 ;   branches here and nothing falls into it.
 ` : ''}${EDGCHK ? `ehgLoT: !byte $00,$40,$80,$c0,$00,$40,$80,$c0,$00,$40,$80,$c0,$00
 ehgHiT: !byte $74,$74,$74,$74,$75,$75,$75,$75,$76,$76,$76,$76,$77
-` : ''}; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
+` : ''}; sideT / idT / colH are per-frame mutable arrays in scratch RAM (see their equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-; The charset is NOT in the image. It is shipped as its own compressed segment and decoded
-; straight into $d000-$d7ff by the loader, with the port at $34 -- which is the one thing a KERNAL
-; LOAD can never do, and the reason a low "source" copy existed here for as long as it did. See
-; the ICHR file on the disk, which the boot loader lands at $c000 and copies under the hole.
+; The charset is NOT in the image. It is its own disk file, ICHR, loaded straight to $c000
+; (CHARSET, plain RAM in VIC bank 3); cpChr derives charset B from it.
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 
@@ -24013,10 +23873,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; is emitted, which is the point: it was a permutation of bytes already in the image.
 
 ; ---- the per-level sprite and palette rows ----
-; In the main code stream, not with lvlStart's own tables at $a9a0: that block is the tail of
-; rayOffQS's page, 96 bytes, and once PAL_N counted the LATE levels the nine rows came to 99.
-; These are the movable three (the other six are read by lvlStart's straight-line code and want
-; to stay next to it), so they are the ones that come down here and get priced as code headroom.
+; (In the main code stream, a placement from the hand layout: the block beside lvlStart was full.)
 ;
 ; Every level in the "do the levels actually differ?" filter (LEVEL_IDS) as well as in PAL_N: a row
 ; is emitted only when some level disagrees with the first.
@@ -24024,9 +23881,9 @@ ${SPRVARY ? ['under', 'hi'].filter(k => LEVEL_IDS.some(n => sprOf(n)[k] !== sprO
   .map(k => `lvlSpr${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(sprOf(i + 1)[k])).join(',')}`)
   .join('\n') : ''}
 ${(() => {
-  // MULTI, not TWOLEV: under SOLO there is no shadow, but there are still several levels and
-  // lvlBoot still indexes these rows by lvlMeT. Gated on TWOLEV, a SOLO build emitted no rows at
-  // all and every level would have rendered in the inks of the one the image was built around.
+  // Emitted whenever the levels disagree: lvlBoot and lvlLook index these rows by lvlMeT. (Gated on
+  // the old TWOLEV, a one-slot build emitted no rows at all, and every level would have rendered in
+  // the inks of the one the image was built around.)
   const REG = { ceil: 'colW', wall: 'colB', seam: 'colS' };
   return Object.keys(REG).filter(k => LEVEL_IDS.some(n => palOf(n)[k] !== palOf(LEVEL_IDS[0])[k]))
     .map(k => `lvlPal${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(palOf(i + 1)[k])).join(',')}`)
@@ -24036,22 +23893,15 @@ ${HAS_IDOL ? ['under', 'hi'].filter(IDOLVARY)
   .map(k => `lvlIdol${k}T: !byte ${[...Array(PAL_N)].map((_, i) => hx(idolSprOf(i + 1)[k])).join(',')}`)
   .join('\n') : ''}
 ${SPRITES ? `; ================= orb tables =================
-; These sit in the hole between the code and the first emitted table. Only what the projection
+; (Hand-placed in the hole between the code and the tables before compaction.) Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
-        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
-        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
-        ; block, and outgrew both, and then sat at $9180 where the gap above the $9100 jsr target
-        ; is exactly 128 bytes -- which is the ONLY reason NHOLE was capped at four.
-        ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
-        ; chain that needs more rows takes them out of the code headroom below and the headroom
-        ; report says so, instead of the build dying on an origin that moves backward.
+        ; (holeSeeT -- one bit per cell per hole-like entity: can it be seen from anywhere in that
+        ; cell? -- was placed here by hand, sized to NHOLE. The visibility zones replaced it
+        ; (ZONES, 2026-10-04). The origin below is the hand layout's.)
         * = ${hx16(ORB_SMALL - NHOLE * 33 - PEDTBL - PEDCODE)}
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
-        ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
-        ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
-        ; are one run taken off the top of the code headroom and the report prices them as one.
+        ; (Down here rather than beside the socket's for room in the hand layout.)
         ; Same five tables again, so hlSet's patch run does not know or care that this kind
         ; stands up. One sprite a rung (see makePedLadder), so pedPtrT is the whole pointer --
         ; there is no right half to increment onto.
@@ -24093,9 +23943,8 @@ ${LD('stmpT', STMP_LIST.join(','), ': !byte ')}   ; STMP: [count, (cell, hole-li
 stmpM:  !byte 0                 ; STMP: this frame's hole-likes that CAN be partly hidden from here${process.env.OSCNT ? '\nosCntV: !byte 0,0\nosCntS: !byte 0,0\nosCntP: !byte 0,0\nosCntD: !byte 0,0\nosCntE: !byte 0,0\nosCntB: !byte 0,0\nosCntR: !byte 0,0' : ''}
 znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
-        ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
-        ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
-        ; over; one run of NHOLE-sized things in one place is what makes that cost legible.
+        ; manifest table -- hlSCl clears NHOLE of them on every restart. (Placed beside the old
+        ; holeSeeT, NHOLE-sized too, in the hand layout.)
 hlSeat: !fill ${NHOLE}, 0
 
         * = ${hx16(ORB_SMALL)}
@@ -24120,7 +23969,7 @@ sockFlagT: !byte ${SOCK.flagT.join(',')}
 sockHT: !byte ${SOCK.hT.join(',')}   ; DESCENDING h thresholds, scanned by hlRungS
         ; ---- and an orb seated in one ----
 
-        ; orbColLT / orbColRT moved out to the free run below HAZ_BASE -- see them there.
+        ; (orbColLT / orbColRT are further down, beside occRT/occLT.)
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.
 ;   occRT[k] -- the stamp STARTS at column k of this cell, so columns k..3 clip: "from the right"
@@ -24156,20 +24005,9 @@ cellFillT: !byte ${[...Array(256)].map((_, c) => {
     if (g.filter(row => ((row >> (6 - 2 * col)) & 3) !== 0).length >= 4) m |= 8 >> col;
   return m;
 }).join(',')}
-; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
-; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
-; instead of three lsrs and an and per column: this runs once per logical column under every orb
-; that might be occluded, which is the only part of the test that is not O(1).
-; The plane test itself, so a MOVED entity can rebuild its own mask. runFaceT encodes the two
-; things the comparison needs: bit 0 picks the axis (0 = x, 1 = y) and bit 7 the sense (0 = the
-; entity's cell must be >= the plane, 1 = strictly less). Entities are cell-centred, so the
-; build's "o.x > k" on a .5 coordinate is exactly "cellX >= k" on an integer one.
-        ; Straight from the per-level manifest, not a second copy of the same expression: these
-        ; are NRUN long rather than this level's own run count, and the swap exchanges them
-        ; against a shadow sized the same way. Two sources for one table is how they drift.
-; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
-; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
-; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
+; (The occluder masks' run-id tables, runByteT/runBitT, went with the masks, 2026-10-14.)
+; runPFT (plane, axis and sense per run id) is DERIVED on every arrival (mkRuns, from entry too)
+; and lives in RAM scratch: nothing emits it; mkRuns + hazSpFix write every byte that is read.
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
 ${LD('orbXCT', LVLT('orbXCT').join(','), ': !byte ')}      ; from the MANIFEST, so its length cannot
@@ -24178,9 +24016,8 @@ ${LD('orbColT2', LVLT('orbColT2').join(','), ': !byte ')}   ; from the MANIFEST 
                                 ;   more entities than this one indexes past this one's count
 
 ${HUD ? `        ; ---- hudX (HUD=1): the readout -- raster count, LEVEL line, fps, X/Y/angle ----
-        ; Out here in the slack above ORB_SMALL because the main block has no room for it.
-        ; jsr-entered from mloop; nothing falls into it. The address is a knob because the block
-        ; BELOW it grows with NOCC. Both ends are guarded by the assembler's own "moves backward".
+        ; jsr-entered from mloop; nothing falls into it. (HUDAT, its origin, was a knob of the
+        ; hand layout; compaction places the run.)
         * = ${hx16(HUD_AT)}
 hudX:
         ; ---- how many raster interrupts the frame just drawn took ----
@@ -24803,13 +24640,11 @@ pathDYT: !byte 0,0,1,255${ANG_DIAG ? ',1,1,255,255' : ''}         ;   (ANGDIAG: 
 ${LD('hlFillT', LVLT('hlFillT').join(','), ': !byte ')}
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
-; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
-; into the hole under holeVarT: entered by jsr only, nothing falls in, and "* = $6100 moves
-; backward" is the guard if this block grows into it.
+; Entered by jsr only, nothing falls in. (Placed out of the main block in the hand layout, under
+; holeVarT's old $6100; compaction places it now.)
 ; bgCopy / snapCp: copy the top 13 rows of a screen into a half-height snapshot, all 40
-; columns. bgCopy names the background render's buffers; fallSnap (in the fall block, which has
-; no room to spare) sets the same two bytes and jumps straight in. One walk, two callers -- they
-; were the same loop written twice, and the second copy is what pushed its block past $9500.
+; columns. bgCopy names the back buffer fallMid just rendered and jumps into snapCp. (The walk
+; was once written twice; fallSnap, its other caller, is gone.)
 bgCopy: lda baseHi
         sta snSrc
 
@@ -24931,7 +24766,7 @@ bigVarT = ${hx16(BLTVAR_AT + VAR_CLAMP + 1)}             ; ...and the BIG angel'
 ` : ''}
 ; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
 ; 64 + ${CONE_DMAX + 1} bytes of PURE GEOMETRY. atan2 of a cell delta is the same on every level, so unlike
-; holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
+; the old holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
 ; First quadrant only, stride 8, both magnitudes 0..7; the other three come from the signs.
 coneBQT: !byte ${CONE_BQ.join(',')}
 ; Indexed by Chebyshev distance. ${CONE_HALF} is half the cone (atan(3/4), ENTFOV's own verified bound,
@@ -25111,14 +24946,9 @@ fKT:    !byte ${P.K.join(',')}
 fLoT:   !byte ${P.LO.join(',')}
 fHiT:   !byte ${P.HI.join(',')}
 `; })()}
-; ---- $6d82: lateLoad, sitting directly below the loader it calls ----
+; ---- an origin with nothing after it: lateLoad, then dpCand/dpDiag, lived here ----
         * = $6d82
-; ---- dpCand and dpDiag lived here, in the space lateLoad wanted when a level was LATE (history: LATE is
-; gone, and dpDiag became seeDiag, in the main block beside takePick, 2026-10-27) ----
-; The two are mutually exclusive by construction: a build with no LATE level has no lateLoad, and
-; this is the only stretch big enough. They are here rather than in the main code block because
-; that block is at ZERO headroom and these are COLD -- eight calls on a keypress -- so they had no
-; business holding the tightest bytes in the program. Moving dpCand out is what paid for dpDiag.
+; (LATE went 2026-10-05; dpDiag became seeDiag, in the main block beside takePick, 2026-10-27.)
 
 
 ; ---- $6e00: WHERE THE LIVE LOADER IS PARKED ----
@@ -25126,7 +24956,7 @@ fHiT:   !byte ${P.HI.join(',')}
 ; loads, and a pristine copy has none of the state install() and the boot's own loads left in
 ; the live one -- the drive simply does not answer it, and the resident spins at $6ec7 for ever.
 ; So there is ONE resident, the boot's, built for $0400. entry copies it up here before the
-; first frame writes stackLT over it, and lateLoad copies it back down to run it. It keeps its
+; first frame writes stackLT over it, and llName (klUn) copies it back down to run it. It keeps its
 ; address and its state, and what it clobbers on the way back is per-frame scratch.
         * = ${hx16(KRILL_RT_AT)}
 krillRt: !fill ${KRILL_RT_LEN}, 0
@@ -25156,11 +24986,10 @@ kpL:    lda ${hx16(KRILL_RESIDENT_AT)},x
 kpDn:   rts
 klParked: !byte 0
 
-; lvlLoad: A = the level to bring in. Called from the fall where lvlSwap used to be. With one
-; slot there is nothing to exchange, so the arriving level is simply read over the departing one:
-; the room being left was snapshotted a moment earlier and is what the drop animates, and the
-; destination render starts a slice per frame once this returns. It BLOCKS, deliberately -- ~705
-; bytes is about 0.15s, spent inside an animation that is already playing.
+; lvlLoad: A = the level to bring in. Called from fallMid, in the drop's black middle (where lvlSwap
+; was). With one slot there is nothing to exchange, so the arriving level is simply read over the
+; departing one, and fallMid renders the destination whole once this returns. It BLOCKS,
+; deliberately: the screen is black and nothing else is drawn until the landing.
 lvlLoad:
 ${HAS_LX ? `        pha
         jsr lxOff               ; LEVEL CODE: the departing level's is about to be read over
@@ -25269,6 +25098,7 @@ klUn:   lda krillRt,x
         cpx #${hx(KRILL_RT_LEN)}
         bne klUn
         lda $d011               ; DEN off across the transfer: badlines and sprite DMA steal the
+        and #$7f                ;   (bit 7 is the raster's ninth bit when READ: never restore it -- see fallMid)
         pha                     ;   cycles the serial handshake needs, and the fall is on screen
 ${process.env.LLDEN ? '' : `        and #$ef
 `}        sta $d011               ; (LLDEN=1, a test: leave the display ON -- can Krill load under badlines?)
@@ -27000,7 +26830,7 @@ shdMkT: !byte ${at.map(([, m]) => hx(m)).join(',')}
         ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
         ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
         ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
-        ; it is COLD, jsr-entered from symPut once per level entry, and it fits whole in the page
+        ; it is COLD, entered once per level entry (lvlChr's tail jmp, or floorDk's), and it fits whole in the page
         ; bndT was holding down on its own. See bndT for the move that freed it.
         * = ${hx16(SEAMEDGE_AT)}
 ${HAS_IDOL ? `; ---- the idol subsystem lives in the front of seamEdge's page ----
@@ -27195,7 +27025,7 @@ idSpXT: !byte ${[...Array(IDOL_N)].map((_, i) => { const h = +(Object.keys(IDOL_
 idSpYT: !byte ${[...Array(IDOL_N)].map((_, i) => { const h = +(Object.keys(IDOL_HOME).find(n => IDOL_HOME[n] === i) ?? 0); return hx(Math.floor((LEVEL_IDOL[h] ?? [3.5, 3.5])[1])); }).join(',')}
 ; ---- and seamEdge itself starts wherever the idol code ended ----
 ` : ''}; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
-; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
+; Runs on every level entry, the tail of lvlChr (jmp seamEdge, or floorDk's). Codes 2..200 only -- the ramps and the
 ; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
 ; is written from the same answer instead of being re-derived.
 ;
@@ -27318,9 +27148,8 @@ seNC:   dec seN
         bne seGly
 ` : ''}        rts
 
-        ; The guard: seamEdge is hand-counted (SEAMCODE) and the next origin was
-        ; $8600, so an overrun would have run silently into the RAM equates at
-        ; $8000 rather than failing. This origin makes it "moves backward" instead.
+        ; (An origin from the hand layout, once the guard on seamEdge's hand count: an
+        ; overrun made it "moves backward". Compaction rewrites it like every origin.)
         * = $8000
 
         ; ---- $82a0: the tail faceIdT leaves in its page ----
@@ -27418,8 +27247,8 @@ f1HiT:  ${chunk(f1Hi).trim()}
 runWT: !byte ${[...runW, ...Array(256 - MAPN).fill(0)].join(',')}
         * = ${hx16(RELOC + 0x500)}
 runET: !byte ${[...runE, ...Array(256 - MAPN).fill(0)].join(',')}
-; ---- snapCp: the half-height snapshot copy, out here because both its callers' blocks are
-; full. 64 bytes of stable slack; the origin after it puts the cursor back.
+; ---- snapCp: the half-height snapshot copy (its caller is bgCopy) ----
+; Out here from the hand layout, where it filled 64 bytes of stable slack; compaction places it.
         * = $91c0
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
@@ -27467,8 +27296,8 @@ ${sharedPair('rsT', rsT, 'rbT', rbT, 7)}
 ; tail): the merge-hazard lists split runs into pieces with ids of their own, which no pass over
 ; the map can produce, and this routine used to leave those ids' plane and face holding the level
 ; you fell FROM -- the socket room's column then occluded against level 1's planes. Carrying them was costing more
-; than recomputing them: the swap runs at ~29 cycles a byte, so not moving 1,124 of them saves
-; ~32,000 cycles, and this costs about 25,000. The drop through a hole gets CHEAPER, not dearer.
+; than recomputing them: the old swap ran at ~29 cycles a byte, so not moving 1,124 of them saved
+; ~32,000 cycles, and this costs about 25,000 (and it is fewer bytes off the disk now).
 ;
 ; The id order is load-bearing and must match the build exactly: columns first (west then east
 ; per cell), then rows (north then south), ids handed out in that interleaved order. Any other
@@ -27808,8 +27637,8 @@ ddxHiTQ: ${chunk(ddxHiP).trim()}
         * = ${hx16(RELOC + 0x1700)}
 ; ---- the angel-path fill's own state ----
 ; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
-; do with how many levels are resident. Tucking it in there compiled fine on the default build and
-; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
+; do with the level. (Tucked into a gated block once, it compiled on the default build and broke
+; the old TWOLEV=0 ones with an undefined symbol.) Nothing loads it -- it is scratch.
 ; ---- seamEdge's scratch, 24 bytes ----
 ; The hole below $be00 is what the dieChk block at $bc00 does not use, and the rule for picking
 ; one of these is the hole REPORT, not "no label there" (OCCCHK's shadow, picked that way, once
@@ -27859,9 +27688,8 @@ ${WALL_DELTA ? `; ---- A WALL, TAKEN OUT AND PUT BACK ----
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
 ; the two sets together overran rayOffQS at $a900: the addresses were stored twice.
-; NOT in the delta, deliberately: stepT (map-independent since STEPFB), orbOccT (orbOccAll
-; rebuilds every mask every frame) and the charset (canonical -- fontA is byte-identical with the
-; column present and removed).
+; NOT in the delta, deliberately: stepT (map-independent since STEPFB) and the charset (canonical
+; -- fontA is byte-identical with the column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
 ; The four pointer tables that used to stand here are LVL_TABLES entries now (see wallPtrs):
@@ -28312,31 +28140,18 @@ ${LD('nPedT', hx(HOLES_AT.length + SOCKETS_AT.length), ':  !byte ')}            
                                 ;   Equal to nHoleT on a level with none, so the test never fires.
 ${LD('angPerT', hx(ANG_PERIOD), ': !byte ')}   ; 60ths between angel steps on THIS level, when it is close
 ${HAS_CORNER ? `${LD('lvlCorT', '$ff', ': !byte ')}   ; the CORNER exit's entity on this level, $ff for none (LEVEL_CORNER)` : ''}
-${LD('lvlMeT', hx(LVL), ': !byte ')}                 ; the level that is live. OUTSIDE the TWOLEV block below,
-                                ;   because the HUD's LEVEL line reads it in every build -- a
-                                ;   standalone one included, where it is simply a constant. A
-                                ;   single-slot chain still CHANGES level, it just never has to
-                                ;   search for the slot.
+${LD('lvlMeT', hx(LVL), ': !byte ')}                 ; the level that is live (its id): every per-level
+                                ;   row indexed by level id - 1 reads it.
 
 ; ---- orbColLT / orbColRT: the ball's extent each side of its centre column, per rung ----
-; Eighty-four more bytes out of the ORB_SMALL block, for the same reason as everything below: pure
-; functions of the ladder, not in the swap manifest. The two-level build with level 1 (44 runs,
-; six masks an entity) and the socket room (40 merge-hazard cells, 315 list bytes) as each other's
-; shadows overran $4000 by four bytes; these are the smallest self-contained pair that clears it.
+; Pure functions of the ladder, in no level file. (This table and the ones below were evicted from
+; the hand layout's ORB_SMALL block, which ended at $4000, to give the code room.)
 orbColLT: !byte ${orbColLT.join(',')}
 orbColRT: !byte ${orbColRT.join(',')}
-; ---- runByteT / runBitT ----
-; Out of the ORB_SMALL block, which ends at $4000 and was full: both are pure functions of the run
-; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
-; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
-; NRUN-sized tables in that block overran it by 38 bytes.
 
 ; ---- occRT / occLT / occRTW / occLTW ----
-; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
-; that block ends at $4000 with nothing spare, so the only way to give the CODE more room
-; is to need less of it. They are indexed by a clip column 0-3, are the same on every
-; level, and travel in no manifest, so their address is free. What they MEAN is explained
-; where they used to sit, next to the glyph scheme they belong to.
+; Sixteen bytes, indexed by a clip column 0-3, the same on every level and in no level file.
+; What they MEAN is explained next to the glyph scheme ("The stamp's edge cells").
 occRT: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCC0 + 3 + (4 - k)).join(',')}
 occLT: !byte ${[0,1,2,3].map(m => OCC0 + m).join(',')}
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
@@ -28344,11 +28159,7 @@ occRTW: !byte ${[0,1,2,3].map(k => k === 0 ? OCC_FULL : OCCW0 + 2 + (4 - k)).joi
 occLTW: !byte ${[0,1,2,3].map(m => m === 3 ? OCC_FULL : OCCW0 + m).join(',')}
 
 ; ---- kMskT / mMskT / orbBitT ----
-; Twenty-four more bytes evicted from the ORB_SMALL block, same reason as the four above:
-; that block is the only slack the CODE has, so the way to give the code room is to need
-; less of the block. All five are small fixed lookups, identical on every level and in no
-; manifest, so their address is free. This lever is nearly spent -- what is left in there
-; is cellFillT (256 B) and the two 42-byte orb colour tables, which want a real home.
+; Small fixed lookups, identical on every level and in no level file.
 orbBitT: !byte ${orbBitT.join(',')}
 
 
@@ -28913,12 +28724,10 @@ ssPwOk: clc
 ; ---- entGate: can ANY entity be projected this frame? Carry SET = no, and the sprite
 ; registers have been cleared; carry CLEAR = yes, run the frame trig and the loops.
 ; The frame trig in orbMove -- two qTrig, four oFrac, four kSgn, ~800 cycles -- was computed
-; before anything asked whether an entity would use it. Exact conditions under which nothing
-; can: no un-hidden orb exists, no hole-like entity is in line of sight from this cell
-; (holeSeeT is the per-cell LOS bitmap the hole loop already tests, hoisted), and no icon wants
-; a slot (the carried orb, a socket animation). This pays on an empty level -- the benchmark --
-; and in any corridor with nothing in sight; a level with an orb placed always has something to
-; project and takes the full path from the first test. Orbs have no LOS bitmap because they move.
+; before anything asked whether an entity would use it. Nothing can when no entity passes the
+; cone and zone tests (the loop below fills cnOkT) and no icon wants a slot (the carried orb, a
+; socket animation). (It once asked only whether an un-hidden orb existed and whether a hole was
+; in line of sight -- holeSeeT, which the zones replaced; see the history in the loop's comment.)
 entGate:
         ; ---- ASK THE CONE, FOR EVERY ENTITY, ONCE ----
         ; THE CARRY/sokAn TEST MOVED BELOW THE LOOP. It used to return "yes" before anything else
@@ -30063,7 +29872,7 @@ rayOffQS: !byte ${rayOffQ.map(v => v & 255).join(',')}
 ; makes a death return you to THAT level's spot rather than the build's.
 lvlStart:${TESTRIG ? ` jsr rgLand             ; TESTRIG: the rig's pose, and "its level has started"
         ` : ''} lda lvlStartT      ; the LIVE level's own six bytes: no level id, no table length
-        sta px               ;   -- lvlSwap brought them in with everything else
+        sta px               ;   -- lvlLoad brought them in with everything else
         lda lvlStartT+1
         sta px+1
         lda lvlStartT+2
@@ -30075,8 +29884,8 @@ lvlStart:${TESTRIG ? ` jsr rgLand             ; TESTRIG: the rig's pose, and "it
         lda lvlStartT+5
         sta paF
         rts
-; The live level's own start pose. A LVL_TABLES entry, so lvlSwap exchanges it with the shadow's
-; like any other per-level table -- which is the whole point: no level id, no PAL_N.
+; The live level's own start pose. A LVL_TABLES entry, so it arrives in the level file like any
+; other per-level table -- which is the whole point: no level id, no PAL_N.
 ${LD('lvlStartT', startBytes(LVL).map(hx).join(','), ': !byte ')}
 
 
@@ -30113,8 +29922,8 @@ ${SEAMS ? `; The corner-partner tables used to sit at RELOC+$2800, which IS $ae0
 ; arcPx is out here for the room, not for tidiness. FALLTAIL's dispersed edits -- cmp hCap at
 ; nine sites, fwSrcA's redirect for source rows past 24, fdNoF's bound on arcHi -- cost 72 bytes
 ; of a main block that has 3. arcPx is a jsr target only and runs once per arc COLUMN during a
-; fall, which is a cold path, so the move costs nothing; hlRungH/S/E at $48c3 and fallSnap at
-; $9500 are here for exactly the same reason.
+; fall, which is a cold path, so the move costs nothing. (A hand-layout placement, like the others
+; of its day; compaction places it now.)
 ; ---- arcPx: the boundary's pixel row at cell edge Y ----
 ; px = crown + (|E| * arcD[edge] >> 8), signed by arcNg. mul8 keeps Y, which is what lets the
 ; caller walk the 41 edges with the index in Y throughout.
@@ -30696,7 +30505,7 @@ fnTest:
         cmp #${hx((+process.env.FALLNOW - 1) & 255)}                ;   is rendered yet and the drop would snapshot boot's leftovers
         bne fnDone              ;   (2026-10-10). A headless run falls again and again. It sets only
                                 ;   the player's CELL and lets fallChk find it the normal way, so
-        lda fallSt              ;   the whole path -- fallStep, wallsBack, the slot lookup, lvlSwap,
+        lda fallSt              ;   the whole path -- fallStep, wallsBack, fallMid's lvlLoad,
         bne fnDone              ;   mkRuns, objInit -- runs exactly as it does in play. Not while a
         ldx fnCnt               ;   fall is already running, or it would retrigger mid-animation.
         cpx #$10
@@ -30907,15 +30716,12 @@ const BANK3_SQUATTERS = [...asm.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*)\s*=\s*\$([0-9
 // it overflows the moment the engine is sized for seven levels. Neither map needs an assembly.
 // ocos: 1 declares the $8500 scalar run UNALIGNED (compact.mjs would otherwise infer a page from
 // its address): it is ~100 one-byte variables, nothing indexes it by a whole byte, and the page
-// rounding is exactly what four slots could not afford. runPlaneT/runFaceT likewise: indexed by run id
+// rounding is exactly what four slots could not afford. runPFT likewise: indexed by run id
 // (< NRUN), never by a whole byte, so a page boundary is at most a cycle, never a wrong read.
 const ALIGNED_T = {
-    // runPlaneT + runFaceT, packed nose to tail: neither may CROSS a page (see the NRUN guard), but
-    // nothing needs them to start on one, and inferring that from $6d00 stranded them when the
-    // arena ran short (2026-10-09).
-    // (2026-10-14: declared apart, NRUN each. They are separate labels to every reader -- nothing
-    // indexes runFaceT off runPlaneT -- and two 65-byte runs fit the arena's edges where one 130-byte
-    // run did not, once the sentry's code took the slack. A declared buffer is never clustered.)
+    // runPFT (once two tables, runPlaneT and runFaceT): it may not CROSS a page (see the NRUN guard),
+    // but nothing needs it to start on one, and inferring that from an old $6d00 stranded the pair
+    // when the arena ran short (2026-10-09). A declared buffer is never clustered.
     runPFT: { within: NRUN },
     // the fall's arc map: read arcMap,x only, nothing builds a pointer from it, so it need not START
     // on a page -- only not cross one. Inferred page-aligned from its old $6e00, it wasted the rest of
@@ -31206,8 +31012,8 @@ try {
         `${hx16(e.at ?? 0)} ${[...(e.bytes ?? [])].slice(0, e.len).map(b => b.toString(16).padStart(2, "0")).join(" ").padEnd(9)} ${e.src ?? e.text ?? ''}`).join('\n'));
     }
   }
-  // Every manifest table must be emitted at EXACTLY the length the swap moves. Emitted short,
-  // the swap runs off the end into whatever follows -- which is how a stray byte landed on a
+  // Every manifest table must be emitted at EXACTLY the length the level file carries. Emitted
+  // short, the level's bytes run off the end into whatever follows -- which is how a stray byte landed on a
   // colour table and turned an orb black on level 2. Labels are sorted by address, so the next
   // label is the ceiling for the one before it.
   {
@@ -31296,14 +31102,13 @@ try {
   // the two piles had closed to 156 bytes of each other. A packed byte cost two bytes of
   // headroom; a byte of image LENGTH bought one back, which is why the image was padded rather
   // than compacted. None of that arithmetic exists any more: nothing is duplicated, so the only
-  // constraint left is that the program fits in the machine, which it does with 9K to spare.
+  // constraint left is that the program fits in the machine (the build's "code headroom" line).
   // Compression was only ever buying load TIME, and a fastloader buys that better.
   const prgOf = (addr, data) => Buffer.from([addr & 255, addr >> 8, ...data]);
-  // ---- one level block builder, used by BOTH the resident shadows and the late levels ----
-  // They must be byte-for-byte the same shape: lvlSwap exchanges a fixed-size run, and a late
-  // level lands on the slots the resident ones vacate. Two copies of this would be two chances
-  // for the layouts to drift apart, and the failure would be a level that renders as garbage
-  // after a swap rather than anything that names itself.
+  // ---- one level block builder, used by every level file ----
+  // Every level lands at the same equates in the one slot, so every file must be byte-for-byte the
+  // same shape. Two copies of this would be two chances for the layouts to drift apart, and the
+  // failure would be a level that renders as garbage rather than anything that names itself.
   // Every entry the manifest expresses as an assembler expression is resolved here, because the
   // block is RAW BYTES and not assembled: '<hazLstT+N', '>hazLstT+N', '$ff'. Written through
   // Buffer.from as-is a string is NaN is 0, which once put $0000 in every hazard list pointer.
@@ -31373,17 +31178,14 @@ try {
     // name, load address, bytes, and whether it must land BEFORE the charset copy
     // ---- IHOL FIRST: it is the file that goes UNDER THE I/O HOLE ----
     // KERNAL LOAD runs with I/O mapped and cannot write $d000-$dfff, so the hole ladder lands at
-    // $c000 and the loader copies it under with the port at $34. THEN the charsets load straight
+    // KSTAGE ($b000) and the loader copies it under with the port at $34. THEN the charsets load straight
     // to $c000/$c800 over the top -- they are plain RAM now -- and the orb ladder to $e800.
     // (Until 2026-09-16 the charset took the trip and the ladders lived in plain RAM. The user's
     // rule: bank 3 is for what the VIC reads; what the CPU never touches belongs under the hole.)
-    // IHOL carries the idol too: `first` means "landed at $c000 and copied under the I/O hole
-    // page by page", and the idol's base is defined as HOLEBASE + the exit ladder's length, so
-    // appending its bytes here puts them exactly where IDOLBASE says they are.
-    // ...and the tail of the ORB ladder rides along on the end of it, because that file is the
-    // one that lands under the hole. See ORBHI_N: the bytes it frees at SPRBASE are what the
-    // renderer's scratch moves into, so that Krill's resident can have $0400 back.
-    // (The pedestal and the idol left it for OVLBASE, 2026-10-14 -- IAR0 below.)
+    // `first` means "landed at KSTAGE and copied under the I/O hole page by page", so whatever is
+    // appended here lands at HOLEBASE + its offset. With ORBHI_N=12 (not the default) the tail of
+    // the ORB ladder rides along on the end of it, freeing SPRBASE slots for the renderer's scratch.
+    // (The pedestal and the idol rode here too, until they left for OVLBASE, 2026-10-14 -- IAR0 below.)
     // ...and then the sentry's frames 0 and 1 (SVBASE), in a build with sentries.
     ...(SPRITES ? [{ tag: 'H', name: 'IHOL', first: true, at: KSTAGE,
                      data: [...HOLE.BM.flat(), ...ORBBM.slice(ORBLO_N, NORBBM).flat(), ...SVBM.flat()],
@@ -31421,21 +31223,19 @@ try {
                               // IAN1's -- a rung table sending every distance to BOLT_V0: orbOne reads it for the
                               // level's "ball" entity, and ftSz picks the flute's real size from h itself
                               ...(FLUTE ? [{ tag: 'N2', name: nmFits(ANG_NAME(2)), at: SPRBASE, runtime: true, data: IAN2_DATA }] : [])] : []),   // the idol's bitmaps are NOT here any more -- they ride under the hole with IHOL   // no ISEAT: seating consumes the orb, so nothing is ever drawn sitting in a socket
-    // ---- IPIC: every cut-scene picture after the first ----
-    // They have no contiguous home in the image, so they ride in bank 3 instead, in the space the
+    // ---- IPIC: the cut-scene picture's map (one picture since 2026-10-30) ----
+    // It has no contiguous home in the image, so it rides in bank 3 instead, in the space
     // bank 3 has free. This is DATA the VIC never reads -- it is copied to a
     // screen slot when its turn comes -- so it only has to be RAM that nothing else touches, and
     // it has to survive a warm restart, because the death restart does `jmp entry` and reloads nothing.
     ...(DIE && PICSEG.length ? [{ tag: 'P', name: 'IPIC', at: PICBASE, data: PICSEG }] : []),
-    // ---- ILVL: the other level's tables, exchanged into place by lvlSwap at each fall ----
-    // Built HERE, at the end, and not where the manifest is first assembled: the hazard tables are
-    // pushed onto LVL_TABLES after that point, and a shadow built early was 435 bytes short of
-    // them -- lvlSwap would have exchanged the hazard lists with whatever followed the file.
     // ---- ILVn: THE LEVEL ITSELF, as its own file ----
+    // (Built HERE, at the end: the hazard tables are pushed onto LVL_TABLES after the manifest is
+    // first assembled, and the old ILVL shadow, built early, came out 435 bytes short of them.)
     // Not a shadow and not a spare copy: this IS the level the engine plays. The image carries
     // none of it -- every table it names is an equate into this file's landing ground -- so the
     // engine cannot run until this has loaded, which is exactly the property the split is for.
-    // Built through lvlBlocks, the same resolver ILVL and ILAT use, so a table that is an
+    // Built through lvlBlocks (the resolver above), so a table that is an
     // assembler expression (the hazard lists are '<hazLstT+N') resolves against the equates.
     // ---- ILVn: ONE FILE PER LEVEL, all landing on the single live slot ----
     // There is no shadow: the fall READS the destination over the departing level, so every file
@@ -31458,7 +31258,7 @@ try {
         : [...WALL_DELTAS[k].quad.flatMap(q => q.split(',')).map(lvlResolve), 0xff,
            ...WALL_DELTAS[k].cells, 0xff]);
       const body = lvlBlocks([L]);
-      // Blobs no longer have to MATCH -- holeSeeT is sized to its level (see LVL_VARLEN), so a
+      // Blobs no longer have to MATCH -- the tail table (zoneT) is sized to its level (see LVL_VARLEN), so a
       // file is as long as its own room needs. What still has to hold is that none overflows the
       // region the slot reserves, since they all land at the same address.
       if (body.length > LVLBLOB_MAX) throw new Error(
@@ -31477,7 +31277,7 @@ try {
         for (const [what, a] of [['delta', lo | (hi << 8)], ['cells', clo | (chi << 8)]]) {
           if (!a) continue;                     // 0 = an id this level does not use
           // body.length, not LVLBLOB: a level's walls start where ITS OWN blob ends, and blobs
-          // differ now that holeSeeT is sized to the level. Against the live level's length the
+          // differ now that the tail is sized to the level. Against the live level's length the
           // range came out inverted and every other level looked out of bounds.
           if (a < SLOT_AT + body.length || a >= SLOT_AT + data.length) throw new Error(
             `level ${n}'s wall ${j} ${what} list is at $${a.toString(16)}, outside the bytes ILV${n} ` +
@@ -31617,8 +31417,8 @@ try {
                    ...(ENDBOOT ? [{ tag: 'E', name: END.iend.name, last: true, length: END.iend.prg.length - 2 }] : [])];
   const bootEntry = ENDBOOT ? END.iend.run : r.labels.entry;
   // How many 256-byte pages arrive WHILE THE QUOTE IS UP -- the denominator of the sweep. IRAY
-  // itself counts (IQOT reads it a byte at a time and ticks per page); IPIC and ILVL do not,
-  // because they land after the screen is blanked. Two passes because IRAY's own length is part
+  // itself counts (IQOT reads it a byte at a time and ticks per page); the files marked `last`
+  // (IPIC, the level art) do not, because they land after the screen is blanked. Two passes because IRAY's own length is part
   // of its own total; the constant is an immediate, so pass 2 cannot change the length again.
   // Split the 40 columns between the two phases BY TIME, not by bytes. IRAY is a twentieth of
   // the bytes and more than half the wait, because it comes down the KERNAL's ~290 B/s while

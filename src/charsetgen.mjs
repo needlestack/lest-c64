@@ -24,41 +24,21 @@ import { ROOT } from './paths.mjs';
 process.chdir(ROOT);   // paths below are repo-relative (see src/paths.mjs)
 
 const scan = JSON.parse(readFileSync('./build/cellscan.json', 'utf8'));
-// KCELL is what is left for cell patterns after BLANK, SOLID, the 18 readout glyphs and the 4
-// seam codes: 256 - 2 - 18 - 4 = 232. BLANK and SOLID are not in the codebook -- they answer the
-// all-white and all-black cells, which are not "mixed" and never reach a bucket.
-//
-// Declared HERE, above every consumer. It used to sit at the bottom, below the finer-index loop
-// that quantises the codebook PLAN=3 actually ships -- and that loop had 232 hardcoded twice. So
-// setting KCELL resized the PLAN=1 codebook, which the shipping build does not use, and silently
-// left PLAN=3 at 232. It looked like it worked: the plan file changed and the build did not.
-// 219, not 232: THIRTEEN codes are reserved for the sprite occluders -- one all-foreground-black
-// cell plus the six vertical splits (boundary at column 1, 2 or 3 x which side is foreground).
-// ... plus six more of those splits backed by WHITE rather than black, for a cell straddling a
-// wall's vertical silhouette, where beyond the edge is floor or ceiling and painting it black
-// would blot out the corridor. Measured cost of the thirteen: the shipped codebook goes 97.570%
-// -> 97.459% accurate, and 0.019 -> 0.020 predicted px/frame, against 445.194 pre-plan.
-// charset-plan.json is derived and untracked, so this default IS the reservation: regenerating
-// with 232 would build a plan the occluders have no room in.
-// 207: the seam codes are 16 -- 4 singles and 12 sub-cell starts (rows 2/4/6 x 4 columns). The
-// six two-line PAIRS are gone: two lines closer than a cell now collapse to the nearer one, so
-// 0.020 -> 0.020 px/frame against a shipped 445, so the six cost nothing measurable.
-// 197, not 207: OCCSYN_N went 6 -> 8 so the occluder synthesiser gets four scratch codes per
-// screen buffer instead of three, and those come off the top of the charset. 207 fitted 201 cell
-// codes into 250 of 256; 197 fits 199 into 248, leaving the 8. Cost on the 2M scan: predicted
-// error 6,932,472 -> 6,963,243 px over 512M frames, i.e. 0.014 px/frame either way -- the tail of
-// this codebook is nearly free, which is the whole point of the char-headroom measurement.
-// charset-plan.json is derived and untracked, so THIS DEFAULT IS THE RESERVATION: regenerating
-// at 207 builds a plan the eight scratch codes have no room in, and the build's charset guard
-// fires rather than anything silently overlapping.
-// 189, not 197: eight EDGE splits that keep a corner line under an occluder stamp (SEDGE in the
-// build, 2026-10-13) -- the line used to vanish wherever an entity passed behind a wall's edge.
-// The SHIPPED plan was not refit for them: tools/dropcodes.mjs took eight codes out of it (a fresh scan
-// does not reproduce the shipped one). 189 here keeps a regenerated plan inside the same room.
-// 197, not 189 (2026-11-14): the 20 readout glyphs left shipping builds; two of their codes went back
-// to the occluder scratch (OCCSYN_N 6 -> 8) and two to the seam-edge glyphs at columns 1-2, and these
-// eight to the codebook -- which now fills the charset to 256/256 exactly. Shipped with STEPW=6 (below),
-// regenerated from a fresh scan of all ten levels.
+// KCELL is what is left for cell patterns after everything else the charset holds: BLANK and SOLID,
+// the 16 seam codes, the 13 occluders (black- and white-backed), the seam-edge glyphs, the new-face
+// mark and the occluder synthesiser's scratch codes (the build's "charset:" line counts them). BLANK
+// and SOLID are not in the codebook -- they answer the all-white and all-black cells, which are not
+// "mixed" and never reach a bucket.
+// Declared HERE, above every consumer: it once sat below a loop with 232 hardcoded twice, so setting
+// KCELL resized the PLAN=1 codebook and silently left the shipped PLAN=3 one alone.
+// charset-plan.json is derived and untracked, so THIS DEFAULT IS THE RESERVATION: regenerating at a
+// larger KCELL builds a plan the other codes have no room in, and the build's charset guard fires.
+// History of the default: 232 (BLANK, SOLID, 18 readout glyphs, 4 seams); 219 (the 13 occluders:
+// 97.570% -> 97.459% accurate); 207 (seams 4 -> 16); 197 (OCCSYN_N 6 -> 8, 0.014 px/frame either
+// way); 189 (eight SEDGE splits, 2026-10-13, taken out of the shipped plan by tools/dropcodes.mjs);
+// 197 again (2026-11-14): the 20 readout glyphs left shipping builds, two codes went to the occluder
+// scratch, two to the seam-edge glyphs and eight back to the codebook, which now fills the charset to
+// 256/256 exactly. Shipped with STEPW=6 (below), regenerated from a fresh scan of all ten levels.
 const KCELL = +(process.env.KCELL ?? 197);
 const FRAMES = scan.positions * Math.ceil(256 / scan.angleStride);
 const parse = k => k.split(',').map(Number);

@@ -4,10 +4,11 @@
 //   DATA TABLES   grow DOWN  from $c000 (VIC bank 3 is graphics and is not in the image)
 //   between them: one contiguous arena, which is the whole point of the exercise.
 //
-// This produces a build that ASSEMBLES, not one that runs: nothing here fixes code that depends
-// on where it sits. It exists to answer "how much contiguous room is there", which cannot be
-// answered by adding up free bytes -- today's 6K of free space is ~40 fragments, and the largest
-// is 178 bytes.
+// It is the shipping layout: every build is relaid out here before it is assembled, and the arena
+// is where the level slot and RAM scratch go. Nothing here fixes code that depends on where it sits
+// -- the build's published facts (alignment, hot loops, reserved ranges) say what may not move.
+// (It began as a measurement, "how much contiguous room is there", when the hand layout's free
+// space was ~40 fragments, the largest 178 bytes.)
 //
 // Method: the assembler emits statements in SOURCE order, so a contiguous run of emitted bytes
 // ends exactly where an origin directive moves the cursor. Reconstruct those runs from the
@@ -544,7 +545,7 @@ writeFileSync(ROOT + 'iray.syms.json', JSON.stringify(out.labels));
 // ---- 5. what would still have to move: RAM equates that used to live in the old holes ----
 // A buffer declared as `name = $xxxx` is not emitted, so compaction cannot see it. Any that now
 // fall inside the code or table sections have to be rehomed -- into the arena, or above the
-// tables. Reported, because they are the difference between "it assembles" and "it could run".
+// tables. All of them are (the rehoming step at the end of this file); this collects them.
 // NOT the level slot's equates: since the slot moved into CPU RAM (2026-10-13) its tables are equates
 // in the image range too, but they are where the level FILES land -- a fixed address, not scratch.
 // BY NAME (iray.slotnames.json), not by address: a hand-placed buffer whose address happens to fall
@@ -554,23 +555,20 @@ const eqs = [...src.matchAll(/^([a-zA-Z][a-zA-Z0-9_]*) *= *\$([0-9a-fA-F]{4})(?:
   .map(m => [m[1], parseInt(m[2], 16)]).filter(([n, a]) => a >= ORG && a < CEIL && !SLOTN.has(n));
 
 // ---- HOW BIG IS EACH SCRATCH BUFFER, REALLY ----
-// An equate declares no length, so build-iray.mjs reserves its whole PAGE -- safe, and here it
-// costs 3,840 bytes for 345 buffers that need nothing like that. Three rules, strongest first:
-//   1. DECLARED. The two fall snapshots are the only big ones and the build already states them.
+// An equate declares no length, so build-iray.mjs reserves its whole PAGE -- safe, and it once
+// cost 3,840 bytes for 345 buffers that need nothing like that. Three rules, strongest first:
+//   1. DECLARED. The build states these (RUNTIME_BUFS, published as iray.bufsizes.json).
 //   2. NEVER INDEXED -> exactly `1 + max(+k)`. If no instruction reaches it through ,x or ,y then
-//      the program has no way to touch a byte past its largest literal offset. 316 of 345 qualify
-//      and they total 320 bytes between them.
+//      the program has no way to touch a byte past its largest literal offset. (316 of 345 did,
+//      320 bytes between them, when this was written.)
 //   3. INDEXED -> the gap to the NEXT equate, capped at a page. They were hand-packed adjacently,
 //      so that gap is what each was given; the cap stops a buffer that happens to be last in its
 //      region from claiming everything up to the next one far away.
-// The 29 indexed buffers, sized from the source's OWN comments and from the addresses they were
-// hand-packed at. Gap-to-the-next is a bad proxy for these -- it gives obC 44 bytes where the
-// layout gives it 8, and in aggregate it came out WORSE than page-rounding. These belong in
-// build-iray.mjs's RUNTIME_BUFS, derived from the same constants that size them (NRUN, NORB,
-// MAPN), so they cannot drift; they are written out here to get the measurement.
+// Gap-to-the-next is a bad proxy for an indexed buffer -- it once gave obC 44 bytes where the
+// layout gave it 8 -- which is why rule 1 comes first.
 // SIZES COME FROM THE BUILD, not from here. build-iray.mjs already maintains the authoritative
 // map for its own RAM-overlap guard, and several entries are derived from constants that vary with
-// the chain -- runPlaneT is NRUN, which was 44 in one build and 65 in the next. Hardcoding them
+// the chain -- runPFT (then runPlaneT) is NRUN, which was 44 in one build and 65 in the next. Hardcoding them
 // placed a buffer 21 bytes inside another. Read what the build published; fall back to the
 // never-indexed rule and then to adjacency for anything it does not name.
 const DECLARED = (() => {
@@ -630,8 +628,8 @@ for (const b of sized) {
   if ((nameCount.get(b.n) ?? 0) <= 1 && !inIndexedRun && ALIGNED[b.n] === undefined) { unnamed.push(b); continue; }
   // A buffer that DECLARES alignment cannot be a cluster member: a cluster is placed as one run
   // and aligned at its start, so a declared buffer sitting 520 bytes in lands wherever it lands.
-  // fallSnapD and fallSnapS are adjacent and both declared -- merged, the second was never on a
-  // page and the straddle guard refused the image.
+  // (The old fall snapshots, fallSnapD and fallSnapS, were adjacent and both declared -- merged,
+  // the second was never on a page and the straddle guard refused the image.)
   if (last && b.a === last.a + last.size && ALIGNED[b.n] === undefined) {
     last.size += b.size; last.members.push(b); continue;
   }

@@ -84,28 +84,19 @@ const show = (title, list, note) => {
 };
 console.log(`${vars.size} RAM variables in ${process.argv[2] ?? 'build/iray.asm'}`);
 // ---- two more facts about this codebase, in the same spirit as the notes above ----
-// cpChr copies the charsets from where the LOADER put them to where the VIC reads them, and both
-// ends of that copy look like bugs from here:
-//   chrSrc / chrSrcB  are read and never written, because the loader writes them -- they name
-//                     emitted data, not scratch.
-//   charset / charsetB are written and never read, because the VIC reads them, not the CPU. They
-//                     sit under the I/O hole, where the CPU cannot read them at all in normal
-//                     port mode.
+// The charsets look like bugs from here, both ways:
+//   charset            can be read and never written by the CPU, because the LOADER writes it (the
+//                      ICHR file, loaded straight to $c000); cpChr reads it to build charset B.
+//   charset / charsetB can be written and never read, because the VIC reads them, not the CPU.
 // Exempting them keeps both columns at zero, which is the only state in which anyone keeps
-// reading this tool's output.
-// Read but never written BY THE CPU, because the LOADER is the writer. This used to be
-// chrSrc/chrSrcB -- emitted charset data copied up by cpChr. Both are gone; the charset is a
-// compressed segment the self-extracting loader decodes straight into $d000, so `charset` itself
-// is now the entry. cpChr reads it to build the mirror. Sprites will join this list.
+// reading this tool's output. (chrSrc/chrSrcB, an emitted source copy cpChr copied up, are gone.)
 const LOADER_WRITES = new Set(['charset']);
 const VIC_READS = new Set(['charset', 'charsetB']);
-// Written by orbOne, read by nobody YET: the per-orb bounding box, index, variant and
-// occluder-plane mask. These are the inputs the occlusion pass consumes, and that pass is
-// deliberately not ported alongside the projection -- occlusion is being rebuilt as stamped
-// foreground-black chars rather than the charset-twin scheme that used to read these. Kept
-// declared rather than deleted so the next step has its inputs, and listed here rather than
-// left as noise, because a dirty deadvars baseline hides the next real bug.
-const OCCLUSION_PENDING = new Set(['obCL', 'obCR', 'obIX', 'obV', 'obOcc']);     // the VIC is the reader, not the CPU
+// Written by orbOne and once read by nobody, while occlusion was being rebuilt as stamped
+// foreground-black chars: the per-orb bounding box, index, variant and occluder bits. The stamp
+// pass reads every one of them now (2026-11-15: each has a read in build/iray.asm), so this
+// exemption no longer removes anything (harmless; a candidate for deletion).
+const OCCLUSION_PENDING = new Set(['obCL', 'obCR', 'obIX', 'obV', 'obOcc']);
 for (const n of OCCLUSION_PENDING) { const i = writtenNeverRead.findIndex(e => e[0] === n);
   if (i >= 0) writtenNeverRead.splice(i, 1); }
 for (const n of LOADER_WRITES) { const i = readNeverWritten.findIndex(e => e[0] === n);

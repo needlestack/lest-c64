@@ -69,7 +69,7 @@ const petscii = s => [...s].map(c => hx(c.charCodeAt(0))).join(',') + ',0';
 // sound (2026-11-10, the user: "the wind from level 4 without the hum ... after 20 or so seconds of the
 // final screen, there could be a song in the distance"): tune = parseTune()'s events, tuneS = seconds
 // after the cut before it first plays, breath = voice 3's noise pitch (high byte; 0 = no breath),
-// brSus its sustain. wind/gust/calm: see leafCode and windCode.
+// brSus its sustain. wind/gust/calm: see leafCode, and soundCode for the wind's filter steps.
 // ramp: the dissolve's ending, { at: frames at the base pace, cap: pixels a frame at the end }.
 export function buildEnding({ scene, quote, files, entry, krill, holdS = 6, dissolveS = 8, autoF = 0, flute = null,
                               tune = [], tuneS = 20, breath = 0x38, brSus = 1,

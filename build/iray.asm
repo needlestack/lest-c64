@@ -206,8 +206,7 @@ ssDir   = $963c                 ; which way the boundary walk steps: 0 = up, 1 =
 ; steady, and the four-column rule keeps a panel far enough from one that it could never match.
 ; No seam identity is needed or wanted here -- run ids renumber every frame -- so the match is
 ; pure proximity, which is exactly what the band means.
-; At fixed addresses in this gap rather than in the free-run stream, which runs up to HAZ_BASE.
-; The gap below holeSeeT at $9180 was doing nothing.
+; (Hand-placed in a gap below the old holeSeeT before compaction; it rehomes them like every RAM equate.)
 sHyP    = $963d                 ; 12 columns
 sHyC    = $9649                 ; 12 columns
 sHyPN   = $9655
@@ -225,16 +224,17 @@ cy1     = $85
 ; deadvars is what makes it safe rather than an argument: it reports 0 variables read before being
 ; written, so nothing here is ever consumed before the subdivision pushes to it. If that check ever
 ; comes back non-zero for a $04xx array, this is the first thing to suspect.
-; ---- $0400-$062c IS KRILL'S RESIDENT LOADER, AND IT IS PERMANENT ----
+; ---- ORBHI_N=12 only: KRILL'S RESIDENT KEPT AT $0400 FOR GOOD ----
 ; Declared so the region is RESERVED rather than merely unused -- which is the whole history of
 ; low RAM in this build: $0200-$03ff was never reserved, only never counted, and things drifted
-; into it. The hub loads levels 5-7 from disk while the game is running, so these bytes have to
-; survive gameplay; the first rendered frame used to write stackLT straight over them.
+; into it. In the default build (ORBHI_N=0) the renderer's scratch has $0400 instead, and the
+; resident (251 bytes now, $0400-$04fa; once 556, to $062c) is parked at krillRt by klPark and
+; copied back for each level load -- see KRILL_RT_AT.
 ; (ORBHI_N=0: the scratch is back in low RAM and there is no room for one)
-; ---- FOUR OF THE FIVE MOVED OUT OF $04xx-$06xx (see ORBHI_N) ----
-; $0400-$062c is Krill's resident, and it has to be there: the loader refuses to assemble above
-; $d000, and everything below it is either the image or the charsets. So these four went to the
-; slots the tail of the orb ladder vacated, and the ladder went under the I/O hole.
+; ---- ORBHI_N=12: FOUR OF THE FIVE MOVED OUT OF $04xx-$06xx ----
+; (With ORBHI_N=0, the default, they stay in low RAM: SCRATCH_AT.) Under ORBHI_N=12 Krill's
+; resident keeps $0400, so these four go to the slots the tail of the orb ladder vacates, and
+; the ladder goes under the I/O hole.
 ; IT COSTS NOTHING. These are NOT in zero page and never were -- $04xx is ordinary absolute
 ; memory, and for an indexed array zero page is not even faster: lda zp,x and lda abs,x are both
 ; 4 cycles, and only a STORE saves one. What the old addresses actually bought was PAGE
@@ -248,19 +248,10 @@ stackRT = $0480
 ; per-logical-column arrays, now 160 entries each (was 80). Page-aligned so a column
 ; index never needs a 16-bit add.
 colH    = $fe00                 ; SHYCOL: the page with H+1 = $ff (see ispanSto)
-; ---- the per-frame arrays: ALL of them live in the reclaimed charset source, $3000-$37ff ----
-; Two evictions got them here, both for the same reason -- an array in the code's growth room is
-; an array that caps the engine:
-;
-;   1. Six of these sat at $2400-$27ff, the image's filler between the data segment and the
-;      charset source, i.e. the only space the CODE has to grow into. That made the build's
-;      headroom report a LIE: it printed $2800 - dataEnd = 1,762 bytes, but the code would have
-;      hit faceIdT at $2400 after 738.
-;   2. Then the charset source itself moved from $2800 up to $3000, closing a dead 2KB hole and
-;      taking the code's ceiling with it -- so the arrays followed it up here, out of the way.
-;
-; Everything is page-aligned where a full byte indexes it. Packing tighter than this would buy
-; nothing: $3000-$37ff is not the scarce resource, the ceiling below it is.
+; ---- the per-frame arrays ----
+; Their addresses are placeholders: compact.mjs rehomes them (see the note above bfsLast). They once
+; lived at $2400-$27ff and then in the charset source at $3000-$37ff, moved twice so as not to cap the
+; code's growth room in the hand layout. Page-aligned where a full byte indexes them.
 cwA     = $6100                 ; per cell-column: the ceiling run length this buffer holds
 cwB     = $6128
 cbA     = $6150                 ; ... and the solid run start, or $ff for "always redraw"
@@ -280,36 +271,10 @@ rqH     = $baff                 ; rqH (0..3) picks which quarter of the 1024-ent
 cmtmp   = $86                   ; PLAN=3: calcM scratch, and the m it returns. m = w1 + w2 is
 cmv     = $b0                   ; the ninth index bit -- the two columns the bucket throws away
 
-; bfsLast and mulWY were the ONLY live equates on page $7c00 -- everything else there is the
-; PROFMAX/SEAMPRE/SEAMCNT clusters, now gated above. The hole report reserves a whole PAGE per
-; squatter, so these two bytes were holding 256 out of the free map, and deleting the dead
-; equates around them would have freed NOTHING while they stayed. Parked beside obKeyT on
-; page $7c00's 24-byte tail, and the PROFILE/PROFMAX/SEAMCNT/SEAMPRE clusters take page $7e00
-; in exchange -- gated, so only their own builds reserve it. That trades 24 bytes for 256.
-; (Not $70xx: that is orbOccT's emitted range, which grows with the level's run count -- the
-; overlap guard caught exactly that.)
-; ---- rehomed 2026-09-29: $7ce8/$7d00 is free in every RESIDENT chain and NOT in a LATE one ----
-; There the $7b00 run reaches $7d18 and the program's own scratch sat inside emitted data. The
-; image-vs-equate guard says so, but only once assembly gets far enough to run it, which it did
-; not until the packer freed the block above.
-; The four single bytes go to ZERO PAGE, which is genuinely spare -- 130 bytes unclaimed, and
-; PROFILE says there is no promotion worth making from the hot paths (colH and idT are the big
-; absolute references there and are 160- and 256-byte TABLES; everything else is pivPrep, ~0.3%
-; of a frame). So zero page here is not an optimisation, it is just the safest free space:
-; unclaimed in every chain shape, and a LATE load runs Krill's resident, which owns $e0-$e6 only.
-; obKeyT (NORB bytes) and remHiT (a whole page) are too big for that and take measured-free
-; image space instead -- chosen from the PACKPROBE hole maps of all three shapes (that packer
-; was removed 2026-11-14), not from one build's report.
-; ---- $6300/$6400: pages free in EVERY chain shape ----
-; These six lived at $7ce8/$7d00, which is free in every RESIDENT chain and NOT in a LATE one --
-; there the $7b00 run reaches $7d18 and the program's own scratch sat inside emitted data. The
-; image-vs-equate guard says so, but only once assembly gets far enough to run it, which it did
-; not until the packer freed the block above.
-; $6300 and $6400 were chosen from the MEASURED hole maps of all three shapes (PACKPROBE, since
-; removed), not from reading the report of one.
-; NOT zero page, though 130 bytes of it are unclaimed: the KERNAL uses $90-$fa during a load and
-; a LATE build loads DURING PLAY. Zero page is worth having for the CYCLES, which is a job for
-; PROFILE to direct, not for a table that only needs somewhere to live.
+; bfsLast and mulWY are zero-page scalars. The page arithmetic that once placed them and their
+; neighbours here -- page $7c00's tail, $7ce8/$7d00, $6300/$6400, chosen from the PACKPROBE hole maps
+; of the RESIDENT and LATE chain shapes -- went with the hand layout: compact.mjs rehomes every RAM
+; equate in the image range (the 4-digit addresses in this block are placeholders it replaces).
 bfsLast = $59                   ; frameCnt when the fill last ran; see bfsExp
 mulWY   = $5a                   ; mulW saves Y here
 
@@ -499,11 +464,9 @@ ooCX    = $8f98                  ; occBy: the cell the entity is being tested fr
 ooCY    = $8f9d                  ; buffered $d01c. STALE: the held object was a hi-res icon once;
                                  ;   it is the full multicolor sprite now, so this is $ff always
                                  ;   and the held object shares $d025/$d026 like everything else
-; ---- the fall's two SCREEN SNAPSHOTS, 1000 bytes each ----
-; fallDraw scrolls one room past another by copying rows out of these. They are written and read
-; ONLY at runtime -- nothing is emitted into them -- so before they were named here the hole
-; report counted both as free space and handed them out twice: the angel path table landed on
-; $4900 and the BFS distance maps on $6200, and the drop came up as a screenful of garbage.
+; (The fall's two 1000-byte SCREEN SNAPSHOTS were runtime-only, and before they were named here
+; the hole report handed them out twice -- the drop came up as a screenful of garbage. Today the
+; arriving room's snapshot is SNAP_ROWS rows in buffers dead at the time: see SNAP_HOSTS.)
 ; ---- $6c00-$6fff: the four CPU pages, back in the image where they belong ----
 ; All four were exiled into VIC bank 3 for ONE reason, each comment saying so in its own words:
 ; the image had no free PAGE. Deleting fRowT (40 blocks x 32 bytes, all of it derivable) made
@@ -604,8 +567,8 @@ arcIx   = $baf8                  ; which arc frame to draw -- not always fFrm, s
 ; ($81eb-$81ec: rsHi/rsLo, renderSym's column range, went 2026-11-14 -- always 39..0 now)
 otmp    = $fc
                                  ; ($81e6-$81ea held the sliced background render's state,
-                                 ; bgOn/bgN/bgMore/bgCol/bgPh; never emitted under FALLMID and
-                                 ; removed 2026-11-14.) renderSym cannot target fallBuf2 -- its
+                                 ; bgOn/bgN/bgMore/bgCol/bgPh; never emitted once the drop rendered
+                                 ; in the black middle, and removed 2026-11-14.) renderSym cannot target fallBuf2 -- its
                                  ; fill chains bake the screen address in -- so fallMid renders
                                  ; into the back buffer and bgCopy copies it out.
 pCh2    = $fd                  ;   then A for the rim. The LANDING wants B,A,B: its rim is at
@@ -958,9 +921,9 @@ ccf:    sta $d800,x
         jsr wallsBack           ;   anything mid-animation is still live RAM and has to be
                                 ;   cleared by hand. A wall the sockets took out must come back
                                 ;   too, or a restart hands you a level already solved.
-        jsr mkRuns              ; ALWAYS at boot now: runPlaneT/runFaceT are not emitted at all
-                                ;   (bank-3 scratch), so the live level derives them exactly as a
-                                ;   swapped-in one does. The four per-cell run tables are still
+        jsr mkRuns              ; ALWAYS at boot now: runPFT is not emitted at all
+                                ;   (RAM scratch), so the live level derives it exactly as an
+                                ;   arriving one does. The four per-cell run tables are still
                                 ;   carried, and this rewrites them byte for byte (MKRUNS=1 was
                                 ;   the proof of that, and is now simply the default).
         jsr objInit             ; entities back to their starting cells -- a death restarts by
@@ -1184,7 +1147,7 @@ sHyCp:  lda sHyC,x              ;   tick and the "lda py+1" below both reload it
 
         jsr pivPrep             ; marches 0 and 159, then a bracket per predicted boundary,
                                 ; and leaves the stack holding the spans between them
-subLp:   ; FALLMID renders the destination WHOLE in the drop's black middle, so the cast is
+subLp:   ; fallMid renders the destination WHOLE in the drop's black middle, so the cast is
                                 ;   never interrupted and the per-pop budget check below is gone
                                 ;   (2026-10-11) -- one compare a pop off every frame.
 subLp0: ldx sp
@@ -2041,7 +2004,7 @@ mnext:
 ; The old makeDiv drew a white seam slit by ZEROING colH at each face boundary. That is
 ; incompatible with 4-wide cells -- a zeroed column silently became a ramp endpoint, so a
 ; boundary landing on a cell edge turned the whole cell into a diagonal. It is also now
-; redundant: the face boundary is rendered as a true vertical step (see prepCells/cstepT).
+; redundant: the face boundary is rendered as a true vertical step (see cstepT).
 
 ; 8x8 -> 16 unsigned, A * mq -> phi:plo, off the same quarter-square tables as sideMul.
 mul8:   sta mp
@@ -2154,7 +2117,7 @@ rfCbS:  sta rfCw1+1
 
         ldx #39                 ; X = cell column throughout; the chains use it as their index.
                                 ; ALWAYS 39..0 (2026-11-14): the range rsLo..rsHi served the sliced
-                                ; fall render, which went with FALLMID's alternative.
+                                ; fall render, which went that day.
         ; The cell's min and max heights, computed HERE rather than in a pass of their own.
         ; prepCells walked these same 40 cell columns to write cmnT/cmxT for renderSym to read
         ; back one loop later -- 40 iterations of loop overhead and a store-then-load round
@@ -3155,10 +3118,10 @@ strafeR:
         lda moveYT,x
         sta dyv
 moveApply:
-        ; Scale the step by elapsed ticks: dxs = dxv * dtv >> MOVE_SHIFT, sign extended to 16
-        ; bits. dtv is single digits, so repeated addition beats setting up a multiply, and
-        ; doing the shift AFTER is what keeps the direction accurate -- the table is deliberately
-        ; 8x coarser than the speed so cos(a) has somewhere to live.
+        ; Scale the step by elapsed ticks: dxs = dxv * dtm >> MOVE_SHIFT, sign extended to 16
+        ; bits. dtm (the run-scaled ticks, tdDn) is small, so repeated addition beats setting up a
+        ; multiply, and doing the shift AFTER is what keeps the direction accurate -- the table is
+        ; deliberately 16x finer than the step so cos(a) has somewhere to live.
         ldy #$00
         lda dxv
         bpl maSx
@@ -4909,7 +4872,7 @@ nmi:    pha
         pla
         rti
 
-; ---- fps = 960 / (frames per 16 renders) ----
+; (the fps readout is hudX's, HUD=1 only)
 
 ; ================= data =================
 dirXT:  !byte 1,1,0,255,255,255,0,1
@@ -5819,7 +5782,7 @@ osBits: lda omEn
         sta $d010
         rts
 
-; ---- orbOne: project orb oidx, and if it lands on screen take the next sprite slot ----
+; (orbOne -- project orb oidx, and if it lands on screen take the next sprite slot -- is below, after orbProj.)
 
 ; ---- orbProj: cell delta (oix, oiy) -> ohgt and |column offset from screen centre| ----
 ; Split out of orbOne so the drop-target chooser can ask "where would an entity standing in
@@ -6495,8 +6458,8 @@ opBR2: sta ocmax
 opBR3:  sta ocr
         ; ---- is this orb WHOLLY occluded? ----
         ; The rule is the user's: a wall facing AWAY from an orb always occludes it, and a wall
-        ; facing the orb never can. Which side of each face's plane every orb lies on is a
-        ; build-time constant (orbOccT, one bit per orb x run), so the only runtime question is
+        ; facing the orb never can. Which side of each face's plane an orb lies on is asked
+        ; when needed (occBy, from runPFT and the orb's cell), so the only runtime question is
         ; whether some column under the orb shows a run that does NOT occlude it -- and the first
         ; such column means the orb is visible. There is no depth test and no height test:
         ;
@@ -6908,9 +6871,9 @@ fallChk:lda nExitT              ; no exit on this level: nothing to fall through
 fcLp:   lda lvlNxtT,y           ; an exit with nowhere to go is NOT an exit: walk straight over
         cmp #$ff                ;   it. Without this the drop ran anyway and lvlEnd put you back
         beq fcNx                ;   at the same level's start -- a hole that falls you on the
-        lda px+1                ;   spot, which is worse than one that does nothing. Three of the
-        cmp orbXCT,x            ;   hub's four are marked and unwired, so this is now reachable
-        bne fcNx                ;   in a chain build for the first time.
+        lda px+1                ;   spot, which is worse than one that does nothing. Every
+        cmp orbXCT,x            ;   shipping exit is wired (levelExitDst), so this guards a
+        bne fcNx                ;   new level's unwired exit, not the game's.
         lda py+1
         cmp orbYCT,x
         beq fcHit
@@ -6955,7 +6918,7 @@ fdZLp:  sta omEn,x
         dex
         bpl fdZLp
 fdSpr:
-        ldx hlv                 ; FALLMID: the destination's NUMBER is all the hole needs. The level
+        ldx hlv                 ; the destination's NUMBER is all the hole needs. The level
         lda lvlNxtT,x           ;   change, the loads and the render all wait for fallMid; the colour
         cmp #$fe                ;   seen THROUGH the hole is an engine palette entry, so it can be
         bcs fmHole              ;   the arriving level's already, as it always was. $fe is THE END
@@ -6996,13 +6959,16 @@ fcNo:   lda px+1                ; not in a hole: this is the last floor cell, if
 ; ---- fallMid: EVERY piece of level work, in one black moment between the two arcs ----
 ; Called at the handover, when the top arc has left the screen and the bottom one has not appeared:
 ; the display is pure hole, so blanking it is invisible. Then the level change, and the
-; destination rendered in FULL: one cast, one renderSym over all 40 columns, one copy. (It was
-; bgStep driven to completion, the machinery for rendering in slices across the fall's frames,
-; which FALLMID no longer does.) DEN stays off until the landing's first flip publishes
+; destination rendered in FULL: one cast, one renderSym over all 40 columns, one copy. (It was the
+; sliced render's step -- an engine bgStep, not level 10's -- driven to completion; the sliced
+; render went 2026-11-14.) DEN stays off until the landing's first flip publishes
 ; pd11. With FMLOG=1, fmTk = the ticks it all took, so the pause can be measured rather than guessed.
 fallMid:lda $d011
-        and #$ef
-        sta $d011
+        and #$6f                ; DEN off -- AND bit 7: a READ of $d011 returns the raster's ninth bit,
+        sta $d011               ;   a WRITE sets the IRQ line's. Read below line 255 and written back, it
+                                ;   moved the raster IRQ to line 256+n, which never comes: palRas stopped
+                                ;   and fwait hung in the black (PAL, 2026-11-15: 56 lines a frame there,
+                                ;   7 on NTSC, so PAL found it). Same fix in the load wrapper below.
         jsr musOff              ; MUSIC: before the load writes over the song
         ldx hlv                 ; the exit taken -- still the departing level's numbering here
         lda lvlNxtT,x
@@ -7043,18 +7009,17 @@ fstLimD:bcc fstFOk
         cmp #$03
         beq fstEnd
         lda #$03                ; drop over -- straight into the landing. The destination room
-        sta fallSt              ;   was rendered and snapshotted before the drop began, so there
-        jsr fallMid             ; FALLMID: the level work, all of it, while the screen is black
+        sta fallSt              ;   is loaded, rendered and snapshotted right here, by fallMid, so there
+        jsr fallMid             ; the level work, all of it, while the screen is black
         jsr lvlLook             ; the arriving level's inks and wall mark
-        jsr lvlChr              ; FALLMID: the charset too, and the WHOLE rebuild -- still blanked
+        jsr lvlChr              ; the charset too, and the WHOLE rebuild -- still blanked
         jsr fdGlFl
 
-                                ; ^ the arriving level's LOOK lands here, not at the swap:
-                                ;   the swap happens the moment you step into the hole (the
-                                ;   destination render needs the new geometry from its first
-                                ;   slice), but the drop is still showing the room being LEFT,
-                                ;   so repainting its ceiling and stamping its walls there was
-                                ;   recolouring the wrong room for the whole descent.
+                                ; ^ the arriving level's LOOK lands here, after the drop: the
+                                ;   drop shows the room being LEFT, so repainting its ceiling
+                                ;   and stamping its walls any earlier (when the level was
+                                ;   swapped in as you stepped into the hole)
+                                ;   recoloured the wrong room for the whole descent.
         ldx #25                 ;   is nothing to stall for here. Neither buffer holds any of the
         stx phA                 ;   landing's colour yet.
         stx phB
@@ -7360,7 +7325,7 @@ fwDnL:  rts
 ; pa is a full byte of turn, so +16 then >>5 rounds to the nearest octant instead of truncating
 ; toward the one you have just left. Eight rather than four because "the square most in front of
 ; you" means exactly that when you are facing a corner, and because the angels move in eight.
-; ---- dpCand: the neighbouring cell one step along direction X, and its parts ----
+; (dpCand -- the neighbouring cell one step along direction X -- is out of line, beside pedGate.)
 
 ; ---- dropPick: which neighbouring cell the carried orb should go in ----
 ; NOT the one the facing rounds to. An entity is drawn at its cell's CENTRE, and the centre of
@@ -7567,17 +7532,17 @@ okDone: rts
 ; colour. So: every piece of per-level state has exactly ONE owner below, and a new one goes to
 ; whichever owner already holds the thing it depends on. Nothing is set at a call site.
 ;
-;   lvlSwap    THE LEVEL ITSELF. Every table in the manifest -- map, dimensions, entity cells
-;              and colours, counts, exits, hazards. The arriving level's bytes replace the
-;              departing level's in place.
-;   mkRuns     everything derived from the map: the run tables. After the swap, before anything
+;   lvlLoad    THE LEVEL ITSELF. Every table in the manifest -- map, dimensions, entity cells
+;              and colours, counts, exits, hazards -- read off the disk over the departing
+;              level's, in place (and its level code, art and angel ladder with it).
+;   mkRuns     everything derived from the map: the run tables. After the load, before anything
 ;              renders.
 ;   objInit    all ENTITY and player state: entity cells, blkT, carry (and therefore idolHd --
 ;              see the note at its tail), marked, bfsPhase, hlSeat, bfsDone.
 ;   lvlStart   the PLAYER's pose. One place a level begins, however you got there.
 ;   lvlLook    every INK: the three screen registers (ceiling, wall, seam) and the two shared
-;              sprite registers, plus the idol's own pair -- then falls through to symPut and
-;              seamEdge for the per-level charset edits. The fall calls it in three stages
+;              sprite registers, plus the idol's own pair -- and the level code's own look
+;              (lxLook: symPut, shdIn, ...); lvlChr makes the charset edits (seamEdge, floorDk). The fall calls it in three stages
 ;              (fdSpr's irqB2 / lvlLook / lvlHi) because two levels are on screen at once during a drop;
 ;              boot calls it once through lvlBoot. The STAGING differs, the CONTENT must not.
 ;
@@ -8004,7 +7969,7 @@ anReach:
         ; the user had once seen an angel go missing. Still one: markC and markPa are the
         ; first one's. The newcomer just stands beside you; its own step re-checks every period.
         lda marked
-        bne anNoMk              ; (anNoMk refreshes its occluder mask, harmless if it never moved)
+        bne anNoMk              ; (anNoMk only reloads X now: the occluder mask it refreshed is gone, see occBy)
         ldx amIdx
         stx dieIdx              ; from the mark on, the projection stashes THIS angel's side of the
         lda #$ff                ;   screen in dieOff/dieSgn -- which it only does while the angel
@@ -8151,7 +8116,7 @@ anSqN:
         ; hidden, so this is a fraction, not a boolean, and the compare needs no division.
         ; Off screen and behind a wall are the same case, deliberately.
         ldx amIdx
-        lda orbXCT,x            ; point it at the DESTINATION, occluder mask and all
+        lda orbXCT,x            ; point it at the DESTINATION (culling, zones and occBy read it)
         pha
         lda orbYCT,x
         pha
@@ -8202,7 +8167,7 @@ anNo:   clc
 ; ---- THE LUNGE (ANGSLIDE): every step drawn as a slide, not a teleport (see slTick) ----
 ; An angel lunging owns BOTH cells -- the one it left and the one it is going to are 2 in blkT for
 ; the whole slide -- so nothing can walk into either and the landing is always legal. Halfway, its
-; orbXCT/orbYCT switch to the new cell: culling, zones and the occluder mask then answer for the
+; orbXCT/orbYCT switch to the new cell: culling, zones and the facing rule (occBy) then answer for the
 ; cell it is NEARER, and its projection offset (slOn) runs -0.5..0 from there instead of 0..+0.5.
 angSlDT: !byte 0,0,0,0,0,0,0,0,0,0   ; 0 = not lunging, else 1..4 = +x,-x,+y,-y; bit 7 once switched
 angSlFT = $758a             ; how far, in 256ths of the cell. RAM in a build with sentries
@@ -8309,7 +8274,7 @@ slBack: lda angSlDT,x
 
 ; ---- slLand: the step falls due mid-lunge. Land it through anGo, the instant step's own tail ----
 ; anGo moves an angel from orbXCT/orbYCT to amX/amY: it frees the cell left, takes the new one,
-; marks the player if that is beside them, and rebuilds the occluder mask. So put the cell back
+; marks the player if that is beside them (the occluder mask it rebuilt is gone). So put the cell back
 ; where the lunge set out from, name the landing cell, and let it do exactly what it always did.
 slLand: lda angSlDT,x
         bmi slL2
@@ -9535,12 +9500,11 @@ hlSdn:  rts
 ; is in front (exits included -- they stopped being the wall's own black when level 4 coloured them).
 holeTail:
         ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
-        ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
-        ; points across the player's whole cell, ANY of which seeing the hole means it is drawn.
-        ; Deliberately a superset -- it was added because orbs popped in and out along a corridor
-        ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
-        ; The real test is the span walk in orbOne, and it works for any entity with an occluder
-        ; mask; holes had none, which is the only reason they were excluded. They have one now.
+        ; The zones (mapT's mask) are the only other occlusion a hole gets, and they are per CELL:
+        ; a zone counts as seen if it is visible from ANYWHERE in the player's cell. Deliberately a
+        ; superset (as holeSeeT, which they replaced, was), so a hole stays drawn from a spot in the
+        ; cell with a wall squarely in front of it. The real test is the span walk in orbOne, and
+        ; holes were once excluded from it only because they had no occluder mask.
         ldx ohgt                ; h; the rung comes straight out of a page-aligned table. This was a
 hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -> rung table,
                                 ;   hlRungS scans the socket's 10 rungs
@@ -9572,10 +9536,10 @@ hlRung: jsr hlRungH             ; PATCHED: hlRungH reads the hole's 256-byte h -
 hlShrX: tax
 hlNoShr:
         ; ---- FULLY OCCLUDED? ASK THE TEST THE ORBS AND THE ANGEL ALREADY USE ----
-        ; holeSeeT is the only other occlusion a hole gets, and it is a per-CELL bitmap: nine eye
-        ; points across the player's whole cell, ANY of which seeing the hole means it is drawn.
-        ; Deliberately a superset -- it was added because orbs popped in and out along a corridor
-        ; -- so a hole stays drawn from a spot in the cell with a wall squarely in front of it.
+        ; The zones (mapT's mask) are the only other occlusion a hole gets, and they are per CELL:
+        ; a zone counts as seen if it is visible from ANYWHERE in the player's cell. Deliberately a
+        ; superset (as holeSeeT, which they replaced, was), so a hole stays drawn from a spot in the
+        ; cell with a wall squarely in front of it.
         ;
         ; THE BOX IS THIS RUNG'S OWN WIDTH. Two earlier versions of it were wrong in opposite
         ; directions, and both were visible:
@@ -9822,7 +9786,7 @@ ohNoPri:lda ohP
                                 ;   a stale obL/obR and scribbling occluders over a garbage cell
                                 ;   range. 29,510 cycles for a hole that costs 2,400 to project.
         ; ---- ...and a SOCKET fills that stamp state in, so occStamp treats it as an orb ----
-        ; Same span walk, same per-run occluder mask, same edge glyphs. That is what gets a
+        ; Same span walk, same per-run facing test (occBy), same edge glyphs. That is what gets a
         ; socket clipped at a cell edge by the corner in front of it, instead of the whole thing
         ; blinking out the moment its CENTRE column goes behind a wall.
         lda ocl2
@@ -10078,13 +10042,11 @@ mulW:   sty mulWY
         rts
    ; from the MANIFEST: the live level's stride
 
-; sideT / idT / colH are per-frame mutable arrays in scratch RAM at $c100+ (see equates)
+; sideT / idT / colH are per-frame mutable arrays in scratch RAM (see their equates)
 dataEnd:                        ; guard: must clear both screen buffers AND the charset -- see the layout check in build-iray.mjs
 
-; The charset is NOT in the image. It is shipped as its own compressed segment and decoded
-; straight into $d000-$d7ff by the loader, with the port at $34 -- which is the one thing a KERNAL
-; LOAD can never do, and the reason a low "source" copy existed here for as long as it did. See
-; the ICHR file on the disk, which the boot loader lands at $c000 and copies under the hole.
+; The charset is NOT in the image. It is its own disk file, ICHR, loaded straight to $c000
+; (CHARSET, plain RAM in VIC bank 3); cpChr derives charset B from it.
 
 ; connected-wall-run id tables (indexed by cell id) live above the f-tables in free RAM
 
@@ -10093,10 +10055,7 @@ dataEnd:                        ; guard: must clear both screen buffers AND the 
 ; is emitted, which is the point: it was a permutation of bytes already in the image.
 
 ; ---- the per-level sprite and palette rows ----
-; In the main code stream, not with lvlStart's own tables at $a9a0: that block is the tail of
-; rayOffQS's page, 96 bytes, and once PAL_N counted the LATE levels the nine rows came to 99.
-; These are the movable three (the other six are read by lvlStart's straight-line code and want
-; to stay next to it), so they are the ones that come down here and get priced as code headroom.
+; (In the main code stream, a placement from the hand layout: the block beside lvlStart was full.)
 ;
 ; Every level in the "do the levels actually differ?" filter (LEVEL_IDS) as well as in PAL_N: a row
 ; is emitted only when some level disagrees with the first.
@@ -10107,22 +10066,15 @@ lvlPalseamT: !byte $0b,$0b,$0b,$0e,$0a,$0d,$0e,$06,$0b,$0c
 lvlIdolunderT: !byte $0b,$0b,$0b,$00,$09,$09,$09,$0b,$0b,$0b
 lvlIdolhiT: !byte $0c,$0c,$0c,$0c,$07,$07,$07,$0c,$0c,$0c
 ; ================= orb tables =================
-; These sit in the hole between the code and the first emitted table. Only what the projection
+; (Hand-placed in the hole between the code and the tables before compaction.) Only what the projection
 ; and the whole-orb hide need: the painting pass's tables (fgCodeT, kMaskT, bbLT/bbRT, opbBaseT,
 ; popcT) are NOT here, because they addressed charset twins that no longer exist.
-        ; One bit per cell per hole-like entity: can it be seen from anywhere in that cell?
-        ; 32 bytes each, sized to the LARGEST resident level -- a level with sockets has more
-        ; hole-like entities than one without. It lived in the fall's block, then in the bfs
-        ; block, and outgrew both, and then sat at $9180 where the gap above the $9100 jsr target
-        ; is exactly 128 bytes -- which is the ONLY reason NHOLE was capped at four.
-        ; It is butted up under ORB_SMALL (the hole-ladder block) now and sized to NHOLE, so a
-        ; chain that needs more rows takes them out of the code headroom below and the headroom
-        ; report says so, instead of the build dying on an origin that moves backward.
+        ; (holeSeeT -- one bit per cell per hole-like entity: can it be seen from anywhere in that
+        ; cell? -- was placed here by hand, sized to NHOLE. The visibility zones replaced it
+        ; (ZONES, 2026-10-04). The origin below is the hand layout's.)
         * = $8d97
         ; ---- the pedestal's ladder: the same disc, EXTRUDED ----
-        ; Down here rather than beside the socket's because the ORB_SMALL block ends 47 bytes
-        ; short of hudX at $3f5f with these in it. Butted under holeSeeT, so the two together
-        ; are one run taken off the top of the code headroom and the report prices them as one.
+        ; (Down here rather than beside the socket's for room in the hand layout.)
         ; Same five tables again, so hlSet's patch run does not know or care that this kind
         ; stands up. One sprite a rung (see makePedLadder), so pedPtrT is the whole pointer --
         ; there is no right half to increment onto.
@@ -10164,9 +10116,8 @@ ogTol:  !byte 0                 ; GATEFAST: the inlined cone's tolerance for thi
 stmpM:  !byte 0                 ; STMP: this frame's hole-likes that CAN be partly hidden from here
 znP:    !byte 0                 ; ZONES: mapT[player cell] -- the zones visible from it, this frame
         ; Which seats hold an orb: bit 7 set, low nibble the orb's colour. RUNTIME state, not a
-        ; manifest table -- hlSCl clears NHOLE of them on every restart. Up here with holeSeeT
-        ; because it is NHOLE-sized too, and raising NHOLE to seven put the $5f00 block six bytes
-        ; over; one run of NHOLE-sized things in one place is what makes that cost legible.
+        ; manifest table -- hlSCl clears NHOLE of them on every restart. (Placed beside the old
+        ; holeSeeT, NHOLE-sized too, in the hand layout.)
 hlSeat: !fill 7, 0
 
         * = $8afb
@@ -10191,7 +10142,7 @@ sockFlagT: !byte 2,2,2,2,2,2,1,1,1,1
 sockHT: !byte 77,70,64,57,50,44,37,30,23,13   ; DESCENDING h thresholds, scanned by hlRungS
         ; ---- and an orb seated in one ----
 
-        ; orbColLT / orbColRT moved out to the free run below HAZ_BASE -- see them there.
+        ; (orbColLT / orbColRT are further down, beside occRT/occLT.)
 ; The stamp's edge cells. A cell is 4 logical columns, so a stamp that begins or ends inside one
 ; needs a glyph with only part of it foreground.
 ;   occRT[k] -- the stamp STARTS at column k of this cell, so columns k..3 clip: "from the right"
@@ -10221,20 +10172,9 @@ sockHT: !byte 77,70,64,57,50,44,37,30,23,13   ; DESCENDING h thresholds, scanned
 ;     would punch a hole through the first stamp.
 occVrtT: !byte 0,1,0,0,0,0,0,1,0,0,1,1,1,0,1,1,0,1,1,0,0,1,1,0,1,0,0,1,0,0,0,0,1,1,1,0,0,1,0,1,0,0,0,0,0,0,1,1,0,0,1,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1,0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,1,1,1,1,0,0,1,0,1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,0,1,1,1,1,0,0,1,0,0,0,1,1,1,0,1,1,0,0,1,1,1,1,0,1,1,0,0,0,0,1,1,1,0,1,0,0,1,0,1,1,0,0,0,0,1,1,0,0,1,0,0,1,0,0,1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,1,1   ; 1 = a column split expresses this cell; see OCC_VRT
 cellFillT: !byte 0,15,15,0,0,15,15,14,3,8,15,15,8,7,7,15,0,14,15,0,0,15,3,15,12,0,0,15,15,12,8,15,1,15,3,15,0,14,8,8,12,15,12,1,3,0,15,1,0,0,15,0,15,15,0,7,7,12,1,15,0,14,3,15,0,1,15,0,15,15,15,0,15,3,15,8,15,15,15,14,12,12,3,3,7,15,15,8,14,3,0,15,15,14,0,0,12,15,0,1,12,7,15,7,8,0,15,15,15,0,0,14,0,1,7,0,3,7,0,14,12,15,0,7,0,3,15,12,14,15,8,8,1,12,1,14,0,15,1,15,1,0,3,12,0,12,0,3,7,7,0,8,15,14,1,15,3,15,15,0,7,15,3,15,15,0,3,3,14,0,15,12,12,14,15,15,15,8,0,12,0,15,15,15,0,12,1,0,1,3,1,3,7,12,8,14,1,3,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,8,12,14,1,3,7,15,15,15,15,15,15,15,15,15,15,15,15,15,0,0,0,15,15,15,15,0,0,0,0,0,0,0,0
-; the columns a split leaves uncovered: kMskT by the START offset, mMskT by the END offset
-; Run id -> which byte of an orb's occluder mask holds its bit, and which bit. Two small tables
-; instead of three lsrs and an and per column: this runs once per logical column under every orb
-; that might be occluded, which is the only part of the test that is not O(1).
-; The plane test itself, so a MOVED entity can rebuild its own mask. runFaceT encodes the two
-; things the comparison needs: bit 0 picks the axis (0 = x, 1 = y) and bit 7 the sense (0 = the
-; entity's cell must be >= the plane, 1 = strictly less). Entities are cell-centred, so the
-; build's "o.x > k" on a .5 coordinate is exactly "cellX >= k" on an integer one.
-        ; Straight from the per-level manifest, not a second copy of the same expression: these
-        ; are NRUN long rather than this level's own run count, and the swap exchanges them
-        ; against a shadow sized the same way. Two sources for one table is how they drift.
-; runPlaneT / runFaceT are DERIVED at boot now (mkRuns runs from entry, see there) and live in
-; bank 3 as equates: level 4's 100 runs made them 202 bytes, which the ORB_SMALL block did not
-; have (2026-09-18). Nothing emits them; mkRuns + hazSpFix write every byte that is read.
+; (The occluder masks' run-id tables, runByteT/runBitT, went with the masks, 2026-10-14.)
+; runPFT (plane, axis and sense per run id) is DERIVED on every arrival (mkRuns, from entry too)
+; and lives in RAM scratch: nothing emits it; mkRuns + hazSpFix write every byte that is read.
 ; The last entry in each is the HOLE's cell, not an orb -- orbOne projects it with the same
 ; arithmetic and branches to holeTail on the index. HOLEX/HOLEY move it.
       ; from the MANIFEST, so its length cannot
@@ -11012,13 +10952,11 @@ pathDYT: !byte 0,0,1,255,1,1,255,255         ;   (ANGDIAG: 4..7 = SE SW NE NW)
 
         ; Runtime, one per hole-like entity: bit 7 = an orb is seated here, low nibble its body
         ; colour. Emitted rather than equated so a fresh load starts it clear.
-; Out of the main block (which the landing's arc-to-room fill overran by 24 bytes, 2026-09-17)
-; into the hole under holeVarT: entered by jsr only, nothing falls in, and "* = $6100 moves
-; backward" is the guard if this block grows into it.
+; Entered by jsr only, nothing falls in. (Placed out of the main block in the hand layout, under
+; holeVarT's old $6100; compaction places it now.)
 ; bgCopy / snapCp: copy the top 13 rows of a screen into a half-height snapshot, all 40
-; columns. bgCopy names the background render's buffers; fallSnap (in the fall block, which has
-; no room to spare) sets the same two bytes and jumps straight in. One walk, two callers -- they
-; were the same loop written twice, and the second copy is what pushed its block past $9500.
+; columns. bgCopy names the back buffer fallMid just rendered and jumps into snapCp. (The walk
+; was once written twice; fallSnap, its other caller, is gone.)
 bgCopy: lda baseHi
         sta snSrc
 
@@ -11137,7 +11075,7 @@ bigVarT = $eea2             ; ...and the BIG angel's, behind that, cut at BIGVAR
 
 ; ---- ENTCONE: the bearing of a cell delta, and how wrong it can be ----
 ; 64 + 32 bytes of PURE GEOMETRY. atan2 of a cell delta is the same on every level, so unlike
-; holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
+; the old holeSeeT this costs no per-level bytes, ships once with the engine, and cannot go stale.
 ; First quadrant only, stride 8, both magnitudes 0..7; the other three come from the signs.
 coneBQT: !byte 0,0,0,0,0,0,0,0,64,32,19,13,10,8,7,6,64,45,32,24,19,16,13,11,64,51,40,32,26,22,19,16,64,54,45,38,32,27,24,21,64,56,48,42,37,32,28,25,64,57,51,45,40,36,32,29,64,58,53,48,43,39,35,32
 ; Indexed by Chebyshev distance. 29 is half the cone (atan(3/4), ENTFOV's own verified bound,
@@ -11310,14 +11248,9 @@ fKT:    !byte 0,1,3,5,7,9,11,13,15,17,19,21,22,23,25,26,28,29,0,0,0,232,234,235,
 fLoT:   !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,25,25,25,24,22,21,19,18,16,15,14,12,10,8,6,4,2,0,0,0,0,0
 fHiT:   !byte 24,24,24,24,24,22,20,18,16,14,12,10,9,7,6,4,2,0,0,0,0,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24
 
-; ---- $6d82: lateLoad, sitting directly below the loader it calls ----
+; ---- an origin with nothing after it: lateLoad, then dpCand/dpDiag, lived here ----
 ; [origin folded into the run above by compact.mjs]
-; ---- dpCand and dpDiag lived here, in the space lateLoad wanted when a level was LATE (history: LATE is
-; gone, and dpDiag became seeDiag, in the main block beside takePick, 2026-10-27) ----
-; The two are mutually exclusive by construction: a build with no LATE level has no lateLoad, and
-; this is the only stretch big enough. They are here rather than in the main code block because
-; that block is at ZERO headroom and these are COLD -- eight calls on a keypress -- so they had no
-; business holding the tightest bytes in the program. Moving dpCand out is what paid for dpDiag.
+; (LATE went 2026-10-05; dpDiag became seeDiag, in the main block beside takePick, 2026-10-27.)
 
 
 ; ---- $6e00: WHERE THE LIVE LOADER IS PARKED ----
@@ -11325,7 +11258,7 @@ fHiT:   !byte 24,24,24,24,24,22,20,18,16,14,12,10,9,7,6,4,2,0,0,0,0,24,24,24,24,
 ; loads, and a pristine copy has none of the state install() and the boot's own loads left in
 ; the live one -- the drive simply does not answer it, and the resident spins at $6ec7 for ever.
 ; So there is ONE resident, the boot's, built for $0400. entry copies it up here before the
-; first frame writes stackLT over it, and lateLoad copies it back down to run it. It keeps its
+; first frame writes stackLT over it, and llName (klUn) copies it back down to run it. It keeps its
 ; address and its state, and what it clobbers on the way back is per-frame scratch.
         * = $813f
 krillRt: !fill 251, 0
@@ -11364,11 +11297,10 @@ kpL:    lda $0400,x
 kpDn:   rts
 klParked: !byte 0
 
-; lvlLoad: A = the level to bring in. Called from the fall where lvlSwap used to be. With one
-; slot there is nothing to exchange, so the arriving level is simply read over the departing one:
-; the room being left was snapshotted a moment earlier and is what the drop animates, and the
-; destination render starts a slice per frame once this returns. It BLOCKS, deliberately -- ~705
-; bytes is about 0.15s, spent inside an animation that is already playing.
+; lvlLoad: A = the level to bring in. Called from fallMid, in the drop's black middle (where lvlSwap
+; was). With one slot there is nothing to exchange, so the arriving level is simply read over the
+; departing one, and fallMid renders the destination whole once this returns. It BLOCKS,
+; deliberately: the screen is black and nothing else is drawn until the landing.
 lvlLoad:
         pha
         jsr lxOff               ; LEVEL CODE: the departing level's is about to be read over
@@ -11503,6 +11435,7 @@ klUn:   lda krillRt,x
         cpx #$fb
         bne klUn
         lda $d011               ; DEN off across the transfer: badlines and sprite DMA steal the
+        and #$7f                ;   (bit 7 is the raster's ninth bit when READ: never restore it -- see fallMid)
         pha                     ;   cycles the serial handshake needs, and the fall is on screen
         and #$ef
         sta $d011               ; (LLDEN=1, a test: leave the display ON -- can Krill load under badlines?)
@@ -11691,7 +11624,7 @@ moveXT: !byte 64,64,64,64,64,64,63,63,63,62,62,62,61,61,60,60,59,59,58,57,56,56,
         !byte 36,37,38,39,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,56,57,58,59
         !byte 59,60,60,61,61,62,62,62,63,63,63,64,64,64,64,64   ; moveYT runs on into this: see sharedPair
 
-        * = $4be7               ; ---- and the whole readout ----
+        * = $4be9               ; ---- and the whole readout ----
 ; 322 bytes of the main block, all of it jsr-only and drawn once a frame -- nowhere near a hot
 ; path, and the last big thing in there that is not the engine. Moved as ONE run, in order, so
 ; that drawFps falling through into whatever follows it still does. The only branches that
@@ -11817,7 +11750,7 @@ a2F:    sta (fdB),y
 ; under $a900 with the hazard tables and level 5's real design pushed it 96 bytes over. This
 ; routine runs ONCE, at boot, and never again -- so it was the obvious thing to move out of
 ; contested space. Same reasoning that moved dpCand out of the main block.
-        * = $4c60
+        * = $4c62
 ; ---- symPut: install SOLID's glyph for the LIVE level, into BOTH charsets ----
 ; The mark is per level, so it is written at runtime rather than baked into the charset: cpChr
 ; builds charset B from A at startup with y = x EOR 7, and this symbol is NOT its own vertical
@@ -11961,9 +11894,9 @@ lvlFlkT:!byte 0,0,0,0,0,0,0,1,0,0   ; per level id - 1
         ; It is 249 bytes and it only exists when a resident level wants the outline -- so with
         ; level 5 in the chain it appeared underneath ORB_SMALL and pushed that whole block down
         ; into a 211-byte code headroom, 89 bytes too far. Nothing about it wanted to be there:
-        ; it is COLD, jsr-entered from symPut once per level entry, and it fits whole in the page
+        ; it is COLD, entered once per level entry (lvlChr's tail jmp, or floorDk's), and it fits whole in the page
         ; bndT was holding down on its own. See bndT for the move that freed it.
-        * = $4cfa
+        * = $4cfc
 ; ---- the idol subsystem lives in the front of seamEdge's page ----
 ; It was in the main code stream and it ate the last of the code headroom -- CARRY=1 on a
 ; four-level chain went 48 bytes over. This page holds 256 and seamEdge is ONE byte of it
@@ -12151,7 +12084,7 @@ idSpXT: !byte $0f,$0e,$07   ; ...and its spawn cell there
 idSpYT: !byte $02,$05,$08
 ; ---- and seamEdge itself starts wherever the idol code ended ----
 ; ---- seamEdge: a wall pixel touching a ceiling pixel takes the SEAM ink ----
-; Runs on every level entry, straight out of symPut. Codes 2..200 only -- the ramps and the
+; Runs on every level entry, the tail of lvlChr (jmp seamEdge, or floorDk's). Codes 2..200 only -- the ramps and the
 ; steps. See LEVEL_SEAM in the build for why this needs no pristine charset and why charset B
 ; is written from the same answer instead of being re-derived.
 ;
@@ -12167,9 +12100,8 @@ idSpYT: !byte $02,$05,$08
 seamEdge:
         rts
 
-        ; The guard: seamEdge is hand-counted (SEAMCODE) and the next origin was
-        ; $8600, so an overrun would have run silently into the RAM equates at
-        ; $8000 rather than failing. This origin makes it "moves backward" instead.
+        ; (An origin from the hand layout, once the guard on seamEdge's hand count: an
+        ; overrun made it "moves backward". Compaction rewrites it like every origin.)
 ; [origin folded into the run above by compact.mjs]
 
         ; ---- $82a0: the tail faceIdT leaves in its page ----
@@ -12184,7 +12116,7 @@ arcCdT: !byte 2,4,5,13,15,16,19,21,23,27,29,31,35,45,49,52,63,67,69,76,86,90,95,
         ; ...and $83a0 is the same again in the next page. NOT $6d82, which is where these were:
         ; runFaceT moves into that stretch on a chain whose live level is 7, and the RAM-overlap
         ; guard catches it -- a reminder that "free" in one chain's report is not free in all.
-        * = $4e22
+        * = $4e24
 ; ---- pedOff: lifting an idol OFF a pedestal empties that pedestal ----
 ; Without it idolOnPedT still read "up on the drum" while the idol was in your hands, so two on
 ; drums plus one held would have opened the wall. A CALL and not eleven inline bytes, because
@@ -12194,7 +12126,7 @@ pedOff: ldy idolHand
         lda #$00
         sta idolOnPedT,y
 poNo:   rts
-        * = $4e2d
+        * = $4e2f
 dpCand: clc                     ; ---- the eight cells around the player, as a CELL index ----
         ; No mask on either coordinate. It used to "and #$0f", which is only the map's width on a
         ; 16-wide one: on the 28x9 combined level an x of 16..27 wrapped round to 0..11 and the
@@ -12307,9 +12239,9 @@ f1HiT:  !byte 64,64,65,65,66,66,67,67,68,68,69,69,70,70,71,71,72,72,73,73,74,74,
 runWT: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0,0,10,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,0,0,0,0,0,10,0,0,0,0,0,0,14,0,0,0,0,0,0,22,0,0,0,0,0,0,8,0,0,0,0,0,0,0,14,0,0,0,0,19,0,22,0,0,0,0,0,0,8,0,0,0,0,0,0,0,14,0,16,0,0,19,0,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,14,0,16,0,0,0,0,22,0,0,0,0,0,0,9,0,0,0,0,0,0,0,14,0,16,0,0,20,0,22,0,0,0,0,0,0,9,0,0,0,0,0,0,0,14,0,0,0,0,20,0,22,0,0,0,0,0,0,0,11,0,0,0,0,0,0,14,0,0,0,0,0,0,22,0,0,0,5,0,0,0,11,0,0,0,0,0,0,0,0,0,0,0,0,0,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
         * = $a700
 runET: !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,6,0,0,0,0,0,0,0,12,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,12,0,0,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,0,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,12,0,15,0,0,17,0,18,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,15,0,0,17,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,17,0,21,0,0,0,3,0,0,0,0,0,0,0,0,0,0,13,0,15,0,0,0,0,21,0,0,2,0,0,0,0,0,0,0,0,0,0,0,13,0,0,0,0,0,0,21,0,0,2,0,0,0,7,0,0,0,0,0,0,0,13,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-; ---- snapCp: the half-height snapshot copy, out here because both its callers' blocks are
-; full. 64 bytes of stable slack; the origin after it puts the cursor back.
-        * = $4e73
+; ---- snapCp: the half-height snapshot copy (its caller is bgCopy) ----
+; Out here from the hand layout, where it filled 64 bytes of stable slack; compaction places it.
+        * = $4e75
 snapCp: ldx #$00                ; x = the SLOT being filled, 0..12
 bgcRow: lda snapSrcT,x          ; ...from this screen row, which is not always x
         tay
@@ -12360,15 +12292,15 @@ rbT: !byte 12,12,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9
         ; ran out of room the moment a level was allowed to declare its own sockets: the
         ; shadow carries the other level's tables and those grew with it. This hole is
         ; 768 bytes and holds nothing else.
-        * = $4ea4
+        * = $4ea6
 ; ---- mkRuns: rebuild the wall-run tables from mapT ----
 ; Four 256-byte tables plus 100 bytes of per-run metadata -- 1,124 of the 1,789 bytes a level
 ; used to carry -- are DERIVED from the map by two passes over it, PLUS the split ids (see the
 ; tail): the merge-hazard lists split runs into pieces with ids of their own, which no pass over
 ; the map can produce, and this routine used to leave those ids' plane and face holding the level
 ; you fell FROM -- the socket room's column then occluded against level 1's planes. Carrying them was costing more
-; than recomputing them: the swap runs at ~29 cycles a byte, so not moving 1,124 of them saves
-; ~32,000 cycles, and this costs about 25,000. The drop through a hole gets CHEAPER, not dearer.
+; than recomputing them: the old swap ran at ~29 cycles a byte, so not moving 1,124 of them saved
+; ~32,000 cycles, and this costs about 25,000 (and it is fewer bytes off the disk now).
 ;
 ; The id order is load-bearing and must match the build exactly: columns first (west then east
 ; per cell), then rows (north then south), ids handed out in that interleaved order. Any other
@@ -12653,7 +12585,7 @@ rayOffT: !byte 233,233,233,233,233,234,234,234,234,235,235,235,235,236,236,236,2
         ; Indexed by ORB VARIANT, because a seated orb steps exactly as a standing one and
         ; Out here in the tails of two pages the ray tables do
         ; not fill: the ORB_SMALL region they were in has no room for 44-entry tables.
-        * = $50ad
+        * = $50af
 
 ; ---- fwBlk and fNT live up here, away from the fall's other tables ----
 ; They were at the foot of the $6c00 block with fKT/fLoT/fHiT, and level 7's tables push that run
@@ -12755,8 +12687,8 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; [origin folded into the run above by compact.mjs]
 ; ---- the angel-path fill's own state ----
 ; UNCONDITIONAL, and deliberately outside the block below: this is engine state and has nothing to
-; do with how many levels are resident. Tucking it in there compiled fine on the default build and
-; broke every TWOLEV=0 one with an undefined-symbol error. Nothing swaps it -- it is scratch.
+; do with the level. (Tucked into a gated block once, it compiled on the default build and broke
+; the old TWOLEV=0 ones with an undefined symbol.) Nothing loads it -- it is scratch.
 ; ---- seamEdge's scratch, 24 bytes ----
 ; The hole below $be00 is what the dieChk block at $bc00 does not use, and the rule for picking
 ; one of these is the hole REPORT, not "no label there" (OCCCHK's shadow, picked that way, once
@@ -12776,7 +12708,7 @@ ddxHiTQ: !byte 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 ; seN: named by nothing in this build, so given no RAM (compact.mjs)                 ; glyphs left
 ; seC00: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: ground/ceiling pixels, per row
 ; seNB: named by nothing in this build, so given no RAM (compact.mjs)                 ; 8 bytes: the row being built, ending exactly at $bdff
-        * = $50f2
+        * = $50f4
 bfsBlk: !byte 0                 ; was the neighbour the fill is looking at a blocked cell?
 bfsEnI: !byte 0                 ; entity index, saved across the early-out's cell arithmetic
 blkVer: !byte 0                 ; bumped whenever blkT changes -- see bfsTick
@@ -12805,9 +12737,8 @@ sokShrT: !byte 0,3,6   ; rungs down, per closing frame
 ; The format is (addrLo, addrHi, outValue, backValue) until $ff -- see hzRunW. It was two
 ; separate hzRun triple lists, one a direction, until levels 2 and 3 both had removable walls and
 ; the two sets together overran rayOffQS at $a900: the addresses were stored twice.
-; NOT in the delta, deliberately: stepT (map-independent since STEPFB), orbOccT (orbOccAll
-; rebuilds every mask every frame) and the charset (canonical -- fontA is byte-identical with the
-; column present and removed).
+; NOT in the delta, deliberately: stepT (map-independent since STEPFB) and the charset (canonical
+; -- fontA is byte-identical with the column present and removed).
 ; ONE PAIR PER REMOVABLE WALL (2026-09-18): level 2 has three sockets and three walls, and each
 ; socket names its wall through sockWallT. wsWall is the wall being toggled; wallStT its state.
 ; The four pointer tables that used to stand here are LVL_TABLES entries now (see wallPtrs):
@@ -13264,31 +13195,18 @@ sokDY:  !byte 0
                                 ;   Equal to nHoleT on a level with none, so the test never fires.
    ; 60ths between angel steps on THIS level, when it is close
    ; the CORNER exit's entity on this level, $ff for none (LEVEL_CORNER)
-                 ; the level that is live. OUTSIDE the TWOLEV block below,
-                                ;   because the HUD's LEVEL line reads it in every build -- a
-                                ;   standalone one included, where it is simply a constant. A
-                                ;   single-slot chain still CHANGES level, it just never has to
-                                ;   search for the slot.
+                 ; the level that is live (its id): every per-level
+                                ;   row indexed by level id - 1 reads it.
 
 ; ---- orbColLT / orbColRT: the ball's extent each side of its centre column, per rung ----
-; Eighty-four more bytes out of the ORB_SMALL block, for the same reason as everything below: pure
-; functions of the ladder, not in the swap manifest. The two-level build with level 1 (44 runs,
-; six masks an entity) and the socket room (40 merge-hazard cells, 315 list bytes) as each other's
-; shadows overran $4000 by four bytes; these are the smallest self-contained pair that clears it.
+; Pure functions of the ladder, in no level file. (This table and the ones below were evicted from
+; the hand layout's ORB_SMALL block, which ended at $4000, to give the code room.)
 orbColLT: !byte 11,12,9,10,7,8,6,6,5,5,4,4,3,3,2,1,11,11,9,9,9,7,7,6,6,5,5,5,4,4,3,3,2,2,2,1,9,7,5,4,4,2,2,1,1,36,18,30,15,24,12,20,10,8,8,6,5,4,12,6,9,4,7,3,3,2
 orbColRT: !byte 12,9,10,7,8,5,5,4,4,3,3,2,2,1,0,0,12,10,10,8,8,8,6,5,4,4,3,3,3,2,2,1,1,0,0,0,8,6,5,3,3,2,1,0,0,35,17,29,14,23,11,19,9,8,7,5,4,4,11,5,8,4,6,3,2,2
-; ---- runByteT / runBitT ----
-; Out of the ORB_SMALL block, which ends at $4000 and was full: both are pure functions of the run
-; INDEX rather than of the map, and neither travels in the swap manifest, so they can live in the
-; free run below HAZ_BASE. A 28-wide level has 44 runs where a 16-wide one has 24, and four
-; NRUN-sized tables in that block overran it by 38 bytes.
 
 ; ---- occRT / occLT / occRTW / occLTW ----
-; Sixteen bytes, moved here out of the ORB_SMALL block for the same reason runByteT was:
-; that block ends at $4000 with nothing spare, so the only way to give the CODE more room
-; is to need less of it. They are indexed by a clip column 0-3, are the same on every
-; level, and travel in no manifest, so their address is free. What they MEAN is explained
-; where they used to sit, next to the glyph scheme they belong to.
+; Sixteen bytes, indexed by a clip column 0-3, the same on every level and in no level file.
+; What they MEAN is explained next to the glyph scheme ("The stamp's edge cells").
 occRT: !byte 218,221,220,219
 occLT: !byte 215,216,217,218
 ; the same two, backed by white, for a cell on a wall's vertical silhouette
@@ -13296,11 +13214,7 @@ occRTW: !byte 218,227,226,225
 occLTW: !byte 222,223,224,218
 
 ; ---- kMskT / mMskT / orbBitT ----
-; Twenty-four more bytes evicted from the ORB_SMALL block, same reason as the four above:
-; that block is the only slack the CODE has, so the way to give the code room is to need
-; less of the block. All five are small fixed lookups, identical on every level and in no
-; manifest, so their address is free. This lever is nearly spent -- what is left in there
-; is cellFillT (256 B) and the two 42-byte orb colour tables, which want a real home.
+; Small fixed lookups, identical on every level and in no level file.
 orbBitT: !byte 1,2,4,8,16,32,64,128
 
 
@@ -13664,12 +13578,10 @@ ssPwOk: clc
 ; ---- entGate: can ANY entity be projected this frame? Carry SET = no, and the sprite
 ; registers have been cleared; carry CLEAR = yes, run the frame trig and the loops.
 ; The frame trig in orbMove -- two qTrig, four oFrac, four kSgn, ~800 cycles -- was computed
-; before anything asked whether an entity would use it. Exact conditions under which nothing
-; can: no un-hidden orb exists, no hole-like entity is in line of sight from this cell
-; (holeSeeT is the per-cell LOS bitmap the hole loop already tests, hoisted), and no icon wants
-; a slot (the carried orb, a socket animation). This pays on an empty level -- the benchmark --
-; and in any corridor with nothing in sight; a level with an orb placed always has something to
-; project and takes the full path from the first test. Orbs have no LOS bitmap because they move.
+; before anything asked whether an entity would use it. Nothing can when no entity passes the
+; cone and zone tests (the loop below fills cnOkT) and no icon wants a slot (the carried orb, a
+; socket animation). (It once asked only whether an un-hidden orb existed and whether a hole was
+; in line of sight -- holeSeeT, which the zones replaced; see the history in the loop's comment.)
 entGate:
         ; ---- ASK THE CONE, FOR EVERY ENTITY, ONCE ----
         ; THE CARRY/sokAn TEST MOVED BELOW THE LOOP. It used to return "yes" before anything else
@@ -14684,13 +14596,13 @@ rayOffQS: !byte 162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,
         ; Step tables, one page each. Addressed by qA*(LM*LB) + qM*LB + qB, so a full byte of
         ; index -- exactly the case a page crossing taxes, and exactly why they are up here
         ; rather than packed in below the height tables where they used to live.
-        * = $5d48
+        * = $5d4a
 ; ---- lvlStart: put the player at the LIVE level's official start ----
 ; Boot and every death go through here. the death restart is "jmp entry", but lvlMeT is RAM and
 ; still names the level you died on, so reading the start from a table indexed by it is what
 ; makes a death return you to THAT level's spot rather than the build's.
 lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no table length
-        sta px               ;   -- lvlSwap brought them in with everything else
+        sta px               ;   -- lvlLoad brought them in with everything else
         lda lvlStartT+1
         sta px+1
         lda lvlStartT+2
@@ -14702,8 +14614,8 @@ lvlStart: lda lvlStartT      ; the LIVE level's own six bytes: no level id, no t
         lda lvlStartT+5
         sta paF
         rts
-; The live level's own start pose. A LVL_TABLES entry, so lvlSwap exchanges it with the shadow's
-; like any other per-level table -- which is the whole point: no level id, no PAL_N.
+; The live level's own start pose. A LVL_TABLES entry, so it arrives in the level file like any
+; other per-level table -- which is the whole point: no level id, no PAL_N.
 
 
 
@@ -14732,7 +14644,7 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; config had not been built in a long time; when it was, it died with "* = $ae00 moves backward
 ; from $ae2a". They live in the stream now, with the other displaced lookups.
 
-        * = $5d67               ; ---- the arc's pixel solver, and the fall's tail ----
+        * = $5d69               ; ---- the arc's pixel solver, and the fall's tail ----
 ; The page the pivot's three scratch tables vacated for VIC bank 3 (see PVBASE), and the only
 ; free run left in a four-level image big enough to hold fallTail in ONE piece -- the next
 ; largest is 36 bytes.
@@ -14740,8 +14652,8 @@ rcpDT:  !byte 255,255,255,255,255,255,255,255,255,255,255,237,217,201,186,174,16
 ; arcPx is out here for the room, not for tidiness. FALLTAIL's dispersed edits -- cmp hCap at
 ; nine sites, fwSrcA's redirect for source rows past 24, fdNoF's bound on arcHi -- cost 72 bytes
 ; of a main block that has 3. arcPx is a jsr target only and runs once per arc COLUMN during a
-; fall, which is a cold path, so the move costs nothing; hlRungH/S/E at $48c3 and fallSnap at
-; $9500 are here for exactly the same reason.
+; fall, which is a cold path, so the move costs nothing. (A hand-layout placement, like the others
+; of its day; compaction places it now.)
 ; ---- arcPx: the boundary's pixel row at cell edge Y ----
 ; px = crown + (|E| * arcD[edge] >> 8), signed by arcNg. mul8 keeps Y, which is what lets the
 ; caller walk the 41 edges with the index in Y throughout.
@@ -15028,7 +14940,7 @@ stepThrT3: !byte 2,1,2,2,1,1,1,0,0,0,0,4,5,5,5,6,6,7,0,0,0,0,0,0,0,9,14,1,0,3,3,
         ; $bc00 is a whole free page and now uncontested: the merge-hazard lists used to claim
         ; the same address and only fitted because level 1 has no hazard cells. They live in
         ; the code stream now (see hzRun), well clear of this page.
-        * = $5e7c
+        * = $5e7e
 ; ---- dieChk: is the mark still on, and has the player nearly turned far enough? ----
 ; The mark is SET by angOne when a step lands beside the player -- caused by the ANGEL moving,
 ; which is what makes walking into one harmless. Here we only LIFT it, and fire.
