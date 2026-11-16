@@ -231,6 +231,7 @@ const dumpOf = env => {
   return DUMPS.get(key);
 };
 import { assemble } from './asm6502.mjs';
+import { buildCart, crtOffset, CART_END_HOLD_S } from './cart-src.mjs';
 
 // Diagnostic flags read BEFORE flag() exists -- charset construction runs long before it. They
 // land in DIAG all the same, so a build that rewrites the charset writes iray.diag.asm and leaves
@@ -29799,6 +29800,7 @@ let LX_BYTES = null;       // the linked level code, per feature set (see LX_SRC
 const LX_ORG = {};         // ...and where each one's bytes start: LXAT, or lower with a low part (LX_LOW)
 lintReach(asm);            // AFTER the write: a failure should leave the file to look at
 let diskBytes = null;              // the finished disk image, held until the last guard has passed
+let cartBytes = null, cartFiles = null;   // ...and the cartridge (cart-src.mjs), written beside it
 try {
   const r = assemble(asm);
   // ---- NOTHING BUT THE LEVEL'S OWN TABLES MAY LIVE IN THE LEVEL REGION ----
@@ -30209,12 +30211,14 @@ try {
     if (f.name === 'IPIC' || QSEG.some(([a, b]) => hi > a && lo < b)) f.last = true;
   }
   // ---- THE ENDING: IEND and ITRE, loaded by the game itself when the last hole is fallen through ----
-  const END = ENDING ? buildEnding({
+  // END_OPTS is kept: the cartridge builds its own IEND from it with a longer hold (CART_END_HOLD_S)
+  const END_OPTS = ENDING ? {
     scene: JSON.parse(readFileSync('./data/end-scene.json', 'utf8')),
     quote: JSON.parse(readFileSync('./data/quote-end.json', 'utf8')),
     files: DISK.map(f => ({ tag: f.tag, name: f.name, at: f.at, length: f.length ?? f.data.length,
                             first: f.first, runtime: f.runtime })),
     entry: r.labels.entry, krill: KRILL_RESIDENT_AT, autoF: +(process.env.ENDAUTO ?? 0),
+    palF: r.labels.palF,   // REBOOT restores it: IMG's reload resets it to 0
     flute: HAS_FLUTE ? r.labels.fluteGot : null,   // the ending plays its tune only if the flute was taken
     // the ending's sound and wind (2026-11-10): ENDTUNE = gen (the generative flute, default) or a fixed tune's name in src/end-tunes.mjs, ENDTUNE_S =
     // seconds after the cut before it plays, ENDBREATH = the breath's noise pitch (hex high byte, 0 =
@@ -30228,15 +30232,18 @@ try {
     // ENDGENNOW=1 (a TEST): the generative flute skips the user's two opening phrases; ENDGAP=base,mult:
     // its long silences are base + mult * 0..255 frames (default 300,4: 5-22 s)
     genOpts: { now: !!process.env.ENDGENNOW, gap: (process.env.ENDGAP ?? '300,4').split(',').map(Number) },
-    ramp: (([at, cap]) => ({ at, cap }))((process.env.ENDRAMP ?? '240,120').split(',').map(Number)) }) : null;
+    ramp: (([at, cap]) => ({ at, cap }))((process.env.ENDRAMP ?? '240,120').split(',').map(Number)) } : null;
+  const END = END_OPTS ? buildEnding(END_OPTS) : null;
   if (END) {
+    writeFileSync('./build/end.syms.json', JSON.stringify(END.iend.labels));   // IEND's labels, for a monitor session
+    writeFileSync('./build/itre.syms.json', JSON.stringify(END.itre.labels));   // ...and ITRE's
     // IEND lands while the game is still running endGo, which called lvlLoad to load it: neither may
     // be under it. (Krill's resident is checked by ending-src.mjs: nothing there goes below $0800.)
     for (const l of ['endGo', 'lvlLoad', 'llName', 'nILV', ...(HAS_FLUTE ? ['fluteGot'] : [])])
       if (r.labels[l] >= END.iend.at && r.labels[l] < END.iend.end) throw new Error(
         `IEND (${hx16(END.iend.at)}-${hx16(END.iend.end)}) would land on the game's ${l} at ${hx16(r.labels[l])} while it loads`);
     console.error(`  ending: IEND ${END.iend.prg.length - 2} B at ${hx16(END.iend.at)}, ITRE ${END.itre.prg.length - 2} B at ` +
-      `${hx16(END.itre.at)} (code to ${hx16(END.itre.codeEnd)}), dissolve ${END.steps} pixels a frame, ${END.dsFrames} frames in all`);
+      `${hx16(END.itre.at)} (code to ${hx16(END.itre.codeEnd)}), dissolve ${END.steps} pixels a frame, ${END.dsFrames} frames in all (PAL ${END.dsFramesPal}: ${(END.dsFramesPal / 50).toFixed(2)} s against ${(END.dsFrames / 60).toFixed(2)} s)`);
   }
   // ENDBOOT=1 (a TEST disk): the boot loads only IHOL and the end quote, and jumps into the ending
   // instead of the game -- the quote, the tree and the dissolve without a playthrough. Fire then
@@ -30363,6 +30370,37 @@ try {
                   `(${at.q.track}/${at.q.sector}) and IRAY (${at.r.track}/${at.r.sector})`);
   } else d = writeDisk();
   diskBytes = Buffer.from(d.getData());   // WRITTEN AT THE END, after every guard: see diskBytes
+  // ---- THE CARTRIDGE (2026-11-15): the same files on an EasyFlash .crt, beside the disk ----
+  // Byte for byte the disk's PRGs, plus the quote unpacked (the cart has room, and a raw copy needs no
+  // decruncher), loaded by a 251-byte loader that stands in for Krill's resident at $0400. See
+  // cart-src.mjs for why the engine cannot tell the difference. Not for ENDBOOT (a test disk only).
+  if (QUOTE && !ENDBOOT) {
+    // THE CART'S OWN IEND: on disk the end quote is up while ITRE loads (~5 s) and then holdS (6 s)
+    // more; from the cart ITRE is in at once, so the hold alone is the quote's time. The user
+    // (2026-11-15): 11 s on the cart. The hold is a count of seconds in one immediate, so the two
+    // IENDs are the same code at the same addresses: any other difference is a bug.
+    const cartIend = () => {
+      const e = buildEnding({ ...END_OPTS, holdS: CART_END_HOLD_S }).iend;
+      const diff = e.prg.length !== END.iend.prg.length ? -1 : e.prg.filter((b, i) => b !== END.iend.prg[i]).length;
+      if (diff !== 1) throw new Error(`cart: its IEND should differ from the disk's in the hold byte alone (${diff < 0 ? 'lengths differ' : diff + ' bytes differ'})`);
+      return e;
+    };
+    const hole = DISK.find(f => f.first);
+    if (!hole) throw new Error('cart: the boot has no file under the I/O hole (IHOL), which the cart boot copies');
+    const holeLen = hole.length ?? hole.data.length;
+    const cart = buildCart(assemble, {
+      files: [...DISK.map(f => ({ tag: f.tag, name: f.name, prg: [...prgOf(f.at, f.data)],
+                                  first: f.first, last: f.last, runtime: f.runtime })),
+              ...(END ? [cartIend(), END.itre].map((e, k) => ({ tag: 'X' + k, name: e.name, prg: [...e.prg], runtime: true })) : [])],
+      entry: bootEntry, palF,
+      quote: { name: 'IQSC', prg: [QUOTE_SCR & 255, QUOTE_SCR >> 8, ...QUOTE.blob], scr: QUOTE_SCR, chr: QUOTE_CHR },
+      title: title ? { ...title, scr: TITLE_SCR, chr: TITLE_CHR, col: TITLE_COL } : null,
+      hole: { stage: KSTAGE, length: holeLen, pages: Math.ceil(holeLen / 256) } });
+    cartBytes = Buffer.from(cart.crt); cartFiles = cart.files;
+    writeFileSync('./build/cart.syms.json', JSON.stringify(cart.labels));   // the cart boot's labels, for a monitor session
+    console.log(`cart: ${cart.files.length} files in ${cart.banks} banks (${(cart.crt.length / 1024).toFixed(0)}K .crt); ` +
+                `loader ${cart.loaderLen}/251 B at $0400, boot body ${cart.bodyLen} B at $0500`);
+  }
   const kern = (run.length - 2) + (QUOTE ? QUOTE.len : 0) + ld.prg.length;
   console.log(`boot: IRUN ${run.length - 2}B` + (QUOTE ? ` + IQOT ${QUOTE.len}B` : '') +
     ` + IRAY ${ld.prg.length}B = ${kern}B at KERNAL speed (~${(kern / 290).toFixed(1)}s); ` +
@@ -30930,6 +30968,7 @@ try {
   // lest-c64.d64 behind it (the 2026-11-13 audit). Nothing between building the image and here
   // reads the file back.
   writeFileSync('./' + D64OUT, diskBytes);
+  if (cartBytes && /\.d64$/.test(D64OUT)) writeFileSync('./' + D64OUT.replace(/\.d64$/, '.crt'), cartBytes);
   // ---- TESTRIG: where each parameter sits IN THE .d64 FILE (2026-11-14) ----
   // tools/rig.mjs patches a copy of this disk without a rebuild, so it needs file offsets, not RAM
   // addresses. IMG is a plain PRG (two bytes of load address, then the image from r.org), stored as
@@ -30989,11 +31028,20 @@ try {
       const dflt = offsets.map(o => diskBytes[o]);
       offsets.forEach((o, i) => { if (diskBytes[o] !== r.bytes[addr + i - r.org]) throw new Error(
         `TESTRIG: ${label}+${i}'s d64 offset ${o} holds ${diskBytes[o]}, the image ${r.bytes[addr + i - r.org]}`); });
-      return { key, label, addr, size, offsets, default: dflt, what };
+      // ...and IN THE .crt (2026-11-15): IMG is stored whole there, page-aligned, so tools/rig.mjs can
+      // run any segment from the cartridge too (CART=1) -- every level load then goes through the cart loader
+      let crtOffsets = null;
+      if (cartBytes) {
+        const im = cartFiles.find(f => f.name === 'IMG');
+        crtOffsets = [...Array(size).keys()].map(i => crtOffset(im.bank, im.off, addr + i - r.org));
+        crtOffsets.forEach((o, i) => { if (cartBytes[o] !== r.bytes[addr + i - r.org]) throw new Error(
+          `TESTRIG: ${label}+${i}'s crt offset ${o} holds ${cartBytes[o]}, the image ${r.bytes[addr + i - r.org]}`); });
+      }
+      return { key, label, addr, size, offsets, crtOffsets, default: dflt, what };
     });
     const base = D64OUT.replace(/\.d64$/i, '');
     writeFileSync(`./${base}.syms.json`, JSON.stringify(r.labels));
-    writeFileSync(`./${base}.json`, JSON.stringify({ d64: D64OUT, syms: `${base}.syms.json`,
+    writeFileSync(`./${base}.json`, JSON.stringify({ d64: D64OUT, ...(cartBytes ? { crt: `${base}.crt` } : {}), syms: `${base}.syms.json`,
       built: new Date().toISOString(), flags: DIAG, fields,
       // DIETEST's angel: the build knows only its OWN level's entities (LVL, the level it boots), so
       // rig.mjs's dietest=1 is that level's, as the DIETEST build's was (ORBS.findIndex, at boot).

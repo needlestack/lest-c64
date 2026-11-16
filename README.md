@@ -44,13 +44,22 @@ You can play it online right now at:
   https://needlestack.github.io/lest-c64/
 
 Or if you prefer, you can use [VICE](https://vice-emu.sourceforge.io/) with
-the disk image [`lest-c64.d64`](lest-c64.d64) in this repository.
+the disk image [`lest-c64.d64`](lest-c64.d64) in this repository, or the
+cartridge image [`lest-c64.crt`](lest-c64.crt) (see below).
 
 Be sure to use **x64sc** and enable **true drive emulation** under
 peripherals: the fast loader runs its own code inside the 1541, so it needs a
 real (or truly emulated) drive. The same disk runs on NTSC and PAL machines (it
 detects which at boot), but it plays slightly better on NTSC, so set the
 machine to **NTSC** if you can.
+
+**The cartridge.** [`lest-c64.crt`](lest-c64.crt) is the same game as an
+EasyFlash cartridge image, for an EasyFlash 3, Kung Fu Flash, Ultimate 64 or
+1541 Ultimate, or any emulator (in VICE: `x64sc -cartcrt lest-c64.crt`). It
+needs no disk drive at all, so it is the way to play on a machine whose drive is
+an SD2IEC, which the disk's fast loader cannot talk to. It loads in under a
+second; the opening quote and title then hold for a few seconds each, and fire or
+SPACE skips them.
 
 **Controls**
 
@@ -77,7 +86,7 @@ assembler (`src/asm6502.mjs`) and the disk-image writer (`src/d64lib.js`) are
 part of the project.
 
 ```sh
-node src/build-iray.mjs                               # the whole game, levels 1-10 -> lest-c64.d64
+node src/build-iray.mjs                               # the whole game, levels 1-10 -> lest-c64.d64 and lest-c64.crt
 D64=build/test.d64 node src/build-iray.mjs            # the same, to another disk
 ```
 
@@ -115,6 +124,10 @@ charset of wall-edge shapes, giving 160×200 multicolour pixels. Around it:
   disk, which brings in the loading screen and Krill's installer quickly; Krill
   then loads everything else, laid out at its native interleave. Drives that
   are not a 1541 take the stock route automatically.
+- **Cartridge**: the disk's own files, byte for byte, in EasyFlash banks, and
+  a 251-byte loader that stands in for Krill's resident at the same address
+  with the same calling convention, so the game cannot tell which medium it
+  came from (`src/cart-src.mjs`).
 
 The build also checks itself as it goes. Page alignment, memory overlaps,
 zero-page ownership, unreachable code, and the precondition of every
@@ -130,11 +143,13 @@ src/build-iray.mjs`).
 | path | what |
 |---|---|
 | `lest-c64.d64` | the game, ready to play |
+| `lest-c64.crt` | the same game as an EasyFlash cartridge |
 | `index.html` | the game in a browser (EmulatorJS), served by GitHub Pages |
 | `src/build-iray.mjs` | the game: emits 6502 assembly, builds every level, writes the disk |
 | `src/levels.mjs` | the ten levels as data: maps, walls, sockets, exits, entities, starts, inks (read by the build and by `tools/levelsheet.mjs`) |
 | `src/compact.mjs` | the image layout pass (run by the build) |
 | `src/loader-src.mjs` | the boot: autorun, fast first stage, quote, Krill's installer |
+| `src/cart-src.mjs` | the cartridge: its boot, loader and `.crt` writer |
 | `src/ending-src.mjs` | the ending: end quote, the tree dissolving in, and the reload |
 | `src/asm6502.mjs`, `src/d64lib.js` | assembler and disk writer |
 | `src/fit-*.mjs`, `src/make-*.mjs`, `src/charsetgen.mjs`, `tools/endscene.mjs`, `tools/build-facetest3.mjs` | the art converters: the `fit-*` ones run inside every build, the rest by hand to make the assets in `data/` (see `docs/ASSETS.md`) |

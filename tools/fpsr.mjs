@@ -151,7 +151,8 @@ const runSeg = (rig, s) => {
     patchRig(abs(rig), abs(process.env.DISK), s.par);
     return `${s.name.padEnd(9)} -> ${process.env.DISK}`;
   }
-  const tmp = `build/tmp/rig-run-${process.pid}.d64`;
+  // CART=1 (2026-11-15): from the rig's cartridge, so every level comes in through the cart loader
+  const tmp = `build/tmp/rig-run-${process.pid}.${process.env.CART === '1' ? 'crt' : 'd64'}`;
   mkdirSync(ROOT + 'build/tmp', { recursive: true });
   patchRig(abs(rig), ROOT + tmp, s.par);
   const syms = JSON.parse(readFileSync(abs(rig), 'utf8')).syms;

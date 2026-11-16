@@ -226,7 +226,9 @@ const CFG = `/tmp/probe-vice-${process.pid}.vrc`;
 // the run -- a concurrent run's, or a window the user opened meanwhile -- and leaked on Ctrl-C.
 const vice = launch([...LAUNCH_FLAGS, '-warp', '-jamaction', '1',
   '-binarymonitor', '-binarymonitoraddress', `ip4://127.0.0.1:${PORT}`,
-  ...(snapArg ? ['-8', DISK] : ['-autostart', DISK])], { config: CFG, log: LOG });
+  // a .crt (2026-11-15) is the EasyFlash cartridge: attached, not autostarted -- it boots itself. And
+  // +easyflashcrtwrite: VICE otherwise WRITES THE CARTRIDGE BACK on exit (renamed, empty chips dropped)
+  ...(/\.crt$/i.test(DISK) ? ['-cartcrt', DISK, '+easyflashcrtwrite'] : snapArg ? ['-8', DISK] : ['-autostart', DISK])], { config: CFG, log: LOG });
 const stop = () => {
   vice.kill();                      // this run's process group, and nothing else
   // PUT THE SHIPPING DISK BACK. The build above runs with THIS probe's env, so lest-c64.d64 is

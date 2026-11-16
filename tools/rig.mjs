@@ -128,7 +128,8 @@ export const parseSet = str => Object.fromEntries(String(str).split(/\s+/).filte
 // tree (regress.sh's REV worktree), whose json names its paths relative to THAT tree's root.
 export function rigFiles(jsonPath) {
   const rig = JSON.parse(readFileSync(jsonPath, 'utf8')), dir = dirname(jsonPath);
-  return { rig, d64: join(dir, basename(rig.d64)), syms: join(dir, basename(rig.syms)) };
+  return { rig, d64: join(dir, basename(rig.d64)), crt: rig.crt ? join(dir, basename(rig.crt)) : null,
+           syms: join(dir, basename(rig.syms)) };
 }
 
 // Build the rig in `root` (default: this tree) with extra build flags; returns its json's path.
@@ -150,18 +151,22 @@ export function buildRig(flags = {}, root = new URL('..', import.meta.url).pathn
 }
 
 // Copy the rig disk named by the json to `dst` with `params` written in; returns dst.
+// A dst ending .crt patches the CARTRIDGE the build wrote beside the disk (2026-11-15): the same
+// fields at their .crt offsets, so a segment runs from the cart and every load goes through its loader.
 export function patchRig(jsonPath, dst, params) {
-  const { rig, d64 } = rigFiles(jsonPath);
-  const disk = readFileSync(d64);
-  for (const f of rig.fields) f.offsets.forEach((o, i) => {
-    if (disk[o] !== f.default[i]) throw new Error(`rig: ${rig.d64} byte ${o} (${f.label}+${i}) is ${disk[o]}, ` +
+  const { rig, d64, crt } = rigFiles(jsonPath);
+  const cart = /\.crt$/i.test(dst);
+  if (cart && !crt) throw new Error(`rig: ${jsonPath} has no cartridge (a rig built before 2026-11-15?)`);
+  const disk = readFileSync(cart ? crt : d64), offs = f => cart ? f.crtOffsets : f.offsets;
+  for (const f of rig.fields) offs(f).forEach((o, i) => {
+    if (disk[o] !== f.default[i]) throw new Error(`rig: ${cart ? rig.crt : rig.d64} byte ${o} (${f.label}+${i}) is ${disk[o]}, ` +
       `${jsonPath} says ${f.default[i]} -- the json and the disk are from different builds`);
   });
   const enc = encode({ ...params }, rig);
   for (const [k, bytes] of Object.entries(enc)) {
     const f = rig.fields.find(x => x.key === k);
     if (!f) throw new Error(`rig: this rig has no ${k} field`);
-    bytes.forEach((b, i) => { disk[f.offsets[i]] = b; });
+    bytes.forEach((b, i) => { disk[offs(f)[i]] = b; });
   }
   writeFileSync(dst, disk);
   return dst;

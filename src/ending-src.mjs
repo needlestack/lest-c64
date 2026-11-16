@@ -62,7 +62,8 @@ const petscii = s => [...s].map(c => hx(c.charCodeAt(0))).join(',') + ',0';
 
 // opts: scene (end-scene.json), quote (quote-end.json), files (the boot's file list: tag, name, at,
 // length, first, runtime), entry (the game's entry address), krill (loadraw's address),
-// holdS / dissolveS (timings; see below)
+// holdS / dissolveS (timings; see below), palF (the game's PAL flag: read at qStart, written back by
+// REBOOT -- IMG's reload resets it to 0, and only the boot body sets it)
 // autoF (TEST ONLY, ENDAUTO=n in build-iray.mjs): press fire by itself n frames after the dissolve
 // ends, so a headless run can reach REBOOT -- with interrupts off the keyboard matrix is read
 // directly, and VICE's monitor can only feed the KERNAL's buffer, which nothing here reads.
@@ -71,10 +72,11 @@ const petscii = s => [...s].map(c => hx(c.charCodeAt(0))).join(',') + ',0';
 // after the cut before it first plays, breath = voice 3's noise pitch (high byte; 0 = no breath),
 // brSus its sustain. wind/gust/calm: see leafCode, and soundCode for the wind's filter steps.
 // ramp: the dissolve's ending, { at: frames at the base pace, cap: pixels a frame at the end }.
-export function buildEnding({ scene, quote, files, entry, krill, holdS = 6, dissolveS = 8, autoF = 0, flute = null,
+export function buildEnding({ scene, quote, files, entry, krill, palF = null, holdS = 6, dissolveS = 8, autoF = 0, flute = null,
                               tune = [], tuneS = 20, breath = 0x38, brSus = 1,
                               genOpts = {}, grate = 384, gust = [5, 4], calm = 60, ramp = { at: 240, cap: 120 } }) {
   if (autoF > 255) throw new Error('autoF counts frames in one byte');
+  if (!(holdS >= 1 && holdS <= 255 && Number.isInteger(holdS))) throw new Error('holdS: whole seconds, 1-255');
   const GEN = tune === 'gen';         // the generative flute (genCode), else a fixed tune's events
   const G = GEN ? genCode(genOpts) : null;
   // ======================================================================================== IEND
@@ -97,6 +99,8 @@ qStart: sei
         sta $01             ;   ENDBOOT test disk, arriving straight from the boot, does not
 ${flute !== null ? `        lda ${hx(flute, 4)}           ; THE FLUTE (the game's fluteGot): read NOW -- ITRE loads over the game --
         sta qFl             ;   and handed to ITRE's tFl once it is in` : ''}
+${palF !== null ? `        lda ${hx(palF, 4)}           ; PAL OR NTSC (the game's palF): read NOW too -- REBOOT reloads IMG,
+        sta qPal            ;   whose palF is 0 again, and writes this back before the game restarts` : ''}
         lda #$00
         sta $d015           ; the game's sprites
         sta $d01a           ; ...and its raster interrupt: this owns the machine now
@@ -129,29 +133,59 @@ ${flute !== null ? `        lda ${hx(flute, 4)}           ; THE FLUTE (the game'
         bcs qFail
 ${flute !== null ? `        lda qFl             ; the flute, taken or not: the tune plays only if it was
         sta ${hx(T_RUN + 6, 4)}           ;   (ITRE's tFl)
+` : ''}${palF !== null ? `        lda qPal            ; PAL or NTSC: ITRE keeps NTSC time on both
+        sta ${hx(T_RUN + 7, 4)}           ;   (ITRE's tPal)
 ` : ''}        jsr ${hx(T_RUN + 3, 4)}       ; ITRE's tPrep: its setup, done now behind the quote
         ; READING TIME. The load is blocking, so it cannot be counted in frames; the quote is held
         ; HOLD seconds more after it, then CUT straight to the dissolve: the first frame after the
         ; quote is the tree's black bitmap. (It faded grey2 -> dark grey -> black at first; two steps
         ; did not read as a fade, per the user.)
-        ; holdS * 60 frames EXACTLY, in qWait calls of at most 240 (a byte). It used to round UP to
-        ; whole 240-frame calls, so holdS = 6 held 8 s (2026-10-15).
-${(() => { const out = []; for (let left = Math.round(holdS * 60); left > 0; left -= 240)
-  out.push(`        lda #${Math.min(240, left)}\n        jsr qWait`); return out.join('\n'); })()}
-        jmp ${hx(T_RUN, 4)}       ; ITRE's tStart
+        ; holdS SECONDS, one qHold a second: 60 frames on NTSC, 50 on PAL (it was holdS * 60 frames
+        ; on both, so PAL held 7.2 s for 6). FIRE or SPACE cuts it short (the user, 2026-11-15) -- read
+        ; as the game reads them, and only a FRESH press: a button held through the fall skips nothing.
+        lda #$00
+        sta qArm
+        lda #${holdS}
+        sta qSec
+qhL:    lda #60
+${palF !== null ? `        ldx qPal
+        beq qhN
+        lda #50
+qhN:` : ''}        jsr qHold
+        bcs qhD             ; skipped
+        dec qSec
+        bne qhL
+qhD:    jmp ${hx(T_RUN, 4)}       ; ITRE's tStart
 
 ; A frames, each ended at raster line 250 -- by waiting for the line and then for it to pass, so a
-; caller with nothing to do between two calls cannot see the same line twice
-qWait:  sta qt
-qw1:    lda $d012
+; caller with nothing to do between two calls cannot see the same line twice. Carry set = cut short
+; by a fresh fire/SPACE press (interrupts are off: the matrix is read directly, $dc00 = $7f is
+; SPACE's column, and joystick-1 fire pulls the same line).
+qHold:  sta qt
+qh1:    lda $d012
         cmp #$fa
-        bne qw1
-qw2:    lda $d012
+        bne qh1
+qh2:    lda $d012
         cmp #$fa
-        beq qw2
-        dec qt
-        bne qw1
+        beq qh2
+        lda #$7f
+        sta $dc00
+        lda $dc01
+        ldx #$ff
+        stx $dc00
+        and #$10
+        bne qhUp
+        lda qArm
+        beq qhNx            ; still the press from before the quote
+        sec
         rts
+qhUp:   lda #$01
+        sta qArm
+qhNx:   dec qt
+        bne qh1
+        clc
+        rts
+
 
 qInk:   ldx #$00            ; colour RAM, all of it, to A
 qi1:    sta $d800,x
@@ -187,10 +221,15 @@ ${reload.map(f => `        ldx #<n${f.tag}
         ldy #>n${f.tag}
         jsr ${hx(krill, 4)}
         bcs qFail`).join('\n')}
-        jmp ${hx(entry, 4)}
+${palF !== null ? `        lda qPal            ; the PAL flag back into the freshly loaded IMG, as the boot body does
+        sta ${hx(palF, 4)}
+` : ''}        jmp ${hx(entry, 4)}
 
 nTre:   !byte ${petscii(ITRE_NAME)}
 ${flute !== null ? 'qFl:    !byte 1             ; the flute, read from the game at qStart' : ''}
+qPal:   !byte 0             ; the game's palF, read at qStart
+qSec:   !byte 0             ; seconds of the hold left
+qArm:   !byte 0             ; fire/SPACE seen UP during the hold: a press now is a fresh one
 ${reload.map(f => `n${f.tag}:   !byte ${petscii(f.name)}`).join('\n')}
 ${G ? G.code : ''}`;
   const qa = assemble(qsrc), QL = qa.labels;
@@ -222,8 +261,8 @@ ${G ? G.code : ''}`;
         sta ptr+1
         ldy #$00
         lda (ptr),y`;
-  // THE DISSOLVE'S PACE: the whole period over dissolveS seconds at 60 frames a second (NTSC; a PAL
-  // machine takes a fifth longer) -- at first; see the ramp below.
+  // THE DISSOLVE'S PACE: the whole period over dissolveS seconds at 60 frames a second -- at first;
+  // see the ramp below, and PSTEPS for PAL.
   // A step is ~95 cycles since the table-driven dslv (2026-11-10; it was ~150), so 120 a frame is
   // ~11,400 of the ~16,000 a bitmap frame leaves -- with the leaves, lights and sound beside it.
   const STEPS = Math.ceil(32767 / (dissolveS * 60));
@@ -235,6 +274,14 @@ ${G ? G.code : ''}`;
   const RAMPAT = ramp.at, RAMPCAP = ramp.cap;
   if (RAMPAT > 255 || RAMPCAP > 120 || RAMPCAP < STEPS) throw new Error('ramp: at <= 255 frames, STEPS <= cap <= 120');
   const dsFrames = (() => { let f = 0, done = 0, s = STEPS; while (done < 32767) { done += s; f++; if (f > RAMPAT && s < RAMPCAP) s++; } return f; })();
+  // PAL: the dissolve runs once a FRAME (two in a frame would not fit at the end of the climb), so
+  // it gets the same curve in seconds: 6/5 the pixels a frame, 5/6 the frames before the climb, and
+  // a climb of 1.5 a frame (alternating 1 and 2: the NTSC climb is 60 a second each second, 1.44 a PAL
+  // frame each frame) to 6/5 the cap. dsl's step is ~95 cycles, and a PAL bitmap frame leaves ~18,600.
+  const PSTEPS = Math.round(STEPS * 6 / 5), PRAMPAT = Math.round(RAMPAT * 5 / 6), PRAMPCAP = Math.round(RAMPCAP * 6 / 5);
+  if (PRAMPCAP > 146) throw new Error(`PAL dissolve cap ${PRAMPCAP} will not fit a PAL frame`);
+  const dsFramesPal = (() => { let f = 0, done = 0, s = PSTEPS; while (done < 32767) { done += s; f++; if (f > PRAMPAT && s < PRAMPCAP) s += 1 + (f - PRAMPAT - 1) % 2; } return f; })();
+  if (Math.abs(dsFramesPal / 50 - dsFrames / 60) > 0.1) throw new Error(`PAL dissolve ${(dsFramesPal / 50).toFixed(2)} s against NTSC ${(dsFrames / 60).toFixed(2)} s`);
   // TURNS PER FRAME inside a gust, in 256ths: 171 was 2 every 3 frames, 128 before the user's "a bit
   // more wind in the leaves -- not a lot, just a little more"; 384 (1.5 a frame) since 2026-11-10 ("I
   // also think the tree could move more ... in gusts that move across the tree")
@@ -314,6 +361,9 @@ brsh    = $5b               ;   ...and its decay: it loses 1/2^brsh of itself a 
 mt      = $5c               ;   scratch (and $5d)
 voffh   = $5e
 vdeep   = $5f               ;   this note's vibrato is twice as deep
+ltimer  = ${hx(TB + 0x400, 4)}             ; each light's frames to its next toggle, and its state: RUN-TIME
+lstate  = ${hx(TB + 0x400 + NL, 4)}             ;   only (li sets both), so they live past the dissolve's tables, not
+                            ;   in the file's code page (2026-11-15: that page was full)
 dsteps  = $3e               ; the dissolve's pixels a frame
 dwait   = $3f               ; frames before it starts to speed up
 
@@ -321,6 +371,10 @@ dwait   = $3f               ; frames before it starts to speed up
         jmp tStart          ; IEND, when the quote has had its time
         jmp tPrep           ; IEND, as soon as this file is in
 tFl:    !byte 1             ; 0: no flute was taken, so no tune (IEND writes it; 1 plays, as an ENDBOOT test does)
+tPal:   !byte 0             ; 1: a PAL machine (IEND writes the game's palF here before tPrep)
+t5:     !byte 5             ; PAL: frames to the next double tick
+dcap:   !byte ${RAMPCAP}    ; the dissolve's top pace, and on PAL its climb alternates +1/+2 (dTog)
+dTog:   !byte 0
 
 ; ---- tPrep: everything that can be made ready while the quote is still up ----
 ; About 0.2 s of work (16K zeroed, a screen copied). Done in the reading hold, the cut from the quote
@@ -366,6 +420,17 @@ cp:     lda ${hx(SRC_SCR, 4)},x     ;   24 -- harmless: past the end of the data
         sta dsteps
         lda #${RAMPAT}
         sta dwait
+        lda tPal
+        beq tpN
+        lda #${PSTEPS}      ; PAL: the same curve in SECONDS (see P* in the build)
+        sta dsteps
+        lda #${PRAMPAT}
+        sta dwait
+        lda #${PRAMPCAP}
+        sta dcap
+        lda #$03            ; the climb's step toggles 1 <-> 2
+        sta dTog
+tpN:
         lda #$01            ; the wind's first filter step on the first frame
         sta wtk
         lda #$10
@@ -511,8 +576,48 @@ frame:  lda $d012           ; once per frame: raster line 250, the bottom border
 fw:     lda $d012
         cmp #$fa
         beq fw
-        jsr snd             ; first, so the sound's tick is the same point of every frame
-        jsr dslv
+        ; ONE TICK = 1/60 s of the scene: the sound, the leaves and the lights all count in ticks. A
+        ; PAL frame is 1/50 s, so on PAL every 5th frame runs a second tick -- as the game's IRQ does --
+        ; and the scene keeps NTSC time on both (2026-11-15; before that PAL ran it at 5/6 speed).
+        jsr tick
+        lda tPal
+        beq fOne
+        dec t5
+        bne fOne
+        lda #$05
+        sta t5
+        jsr tick
+fOne:   jsr dslv            ; the dissolve is per FRAME, with its own pace for each machine (tPrep)
+        ; ---- FIRE: the end of the end. A PRESS, not a key held since before the scene ----
+${autoF ? `        lda ddone           ; ENDAUTO (a test): fire presses itself
+        beq kau9
+        dec kauto
+        beq kgo
+kau9:
+` : ''}        lda #$7f            ; SPACE's column: bit 4 is SPACE there, and the stick's FIRE pulls the
+        sta $dc00           ;   same line whatever the column -- so either one (SPACE as well since
+        lda $dc01           ;   2026-11-13, as at a death's black; the only read here, so no restore)
+        and #$10            ; low when down (RETURN until 2026-11-12: the game's keys went with
+        bne kup             ;   the HUD)
+        lda krel
+        beq kdn             ; down, but never seen up: still held from before
+kgo:    lda #$0b            ; BLACK: display off, border black
+        sta $d011
+        lda #$80            ; the wind lets go (release 10: it fades over ~1.5 s while the game
+        sta $d404           ;   reloads), and so does the tune -- gates off, waveforms kept, since
+        lda #$10            ;   a waveform of 0 is a DC step on a 6581, a pop
+        sta $d40b
+${breath ? `        lda #$80
+        sta $d412
+` : ''}        lda #$00
+        sta $d020
+        jmp ${hx(QL.reboot, 4)}   ; IEND's REBOOT: the game again, from level 1
+kup:    lda #$01
+        sta krel
+kdn:    jmp frame
+
+; ---- tick: one 1/60 s of the sound, the wind in the leaves and the lights ----
+tick:   jsr snd             ; first, so the sound's tick is the same point of every frame
 ${leafCode(fld, GRATE, GUSTW, GUSTH, calm)}
         ; ---- lights: when a light's time is up it toggles, then picks its next wait ----
         ldx #${NL - 1}
@@ -574,33 +679,7 @@ actsh:  jsr rnd
 lset:   sta ltimer,x
 lt9:    dex
         bpl lt
-        ; ---- FIRE: the end of the end. A PRESS, not a key held since before the scene ----
-${autoF ? `        lda ddone           ; ENDAUTO (a test): fire presses itself
-        beq kau9
-        dec kauto
-        beq kgo
-kau9:
-` : ''}        lda #$7f            ; SPACE's column: bit 4 is SPACE there, and the stick's FIRE pulls the
-        sta $dc00           ;   same line whatever the column -- so either one (SPACE as well since
-        lda $dc01           ;   2026-11-13, as at a death's black; the only read here, so no restore)
-        and #$10            ; low when down (RETURN until 2026-11-12: the game's keys went with
-        bne kup             ;   the HUD)
-        lda krel
-        beq kdn             ; down, but never seen up: still held from before
-kgo:    lda #$0b            ; BLACK: display off, border black
-        sta $d011
-        lda #$80            ; the wind lets go (release 10: it fades over ~1.5 s while the game
-        sta $d404           ;   reloads), and so does the tune -- gates off, waveforms kept, since
-        lda #$10            ;   a waveform of 0 is a DC step on a 6581, a pop
-        sta $d40b
-${breath ? `        lda #$80
-        sta $d412
-` : ''}        lda #$00
-        sta $d020
-        jmp ${hx(QL.reboot, 4)}   ; IEND's REBOOT: the game again, from level 1
-kup:    lda #$01
-        sta krel
-kdn:    jmp frame
+        rts
 
 ; ---- the dissolve: dsteps pixels a frame, in the LFSR's order, until it is back at its seed ----
 ; (the tables tPrep made say where each pixel is: see there)
@@ -611,10 +690,13 @@ dslv:   lda ddone
         dec dwait
         jmp dsg
 dsr:    lda dsteps
-        cmp #${RAMPCAP}
+        cmp dcap
         bcs dsg
-        adc #$01            ; (carry clear)
+dsInc:  adc #$01            ; (carry clear) -- 1 on NTSC; 1, 2, 1, 2... on PAL
         sta dsteps
+        lda dsInc+1
+        eor dTog
+        sta dsInc+1
 dsg:    lda dsteps
         sta dcnt
         lda #$00            ; the pointers are page bases, Y the byte in the page (the leaves'
@@ -711,8 +793,6 @@ rnd:    lsr seedhi
 rnd1:   lda seedlo
         rts
 
-ltimer: !fill ${NL},0
-lstate: !fill ${NL},0
 lfirst:
 ${rows(lfirst)}
 lcount:
@@ -748,13 +828,14 @@ ${rows(scene.col)}
 ${rows(scene.scr)}
 `;
   const ta = assemble(tsrc), TL = ta.labels;
+  if (TL.tFl !== T_RUN + 6 || TL.tPal !== T_RUN + 7) throw new Error('ITRE: IEND writes tFl and tPal at T_RUN+6 and +7');
   if (TL.tCodeEnd > SITE) throw new Error(`ITRE's code and light tables run to ${hx(TL.tCodeEnd, 4)}, into the leaf sites at ${hx(SITE, 4)}`);
   if (ta.end > T_END) throw new Error(`ITRE runs to ${hx(ta.end, 4)}, into the mask at ${hx(MASK, 4)}`);
   if (ta.org < 0x0800) throw new Error(`ITRE starts at ${hx(ta.org, 4)}, on Krill's resident`);
   return {
-    iend: { name: IEND_NAME, prg: qa.prg, at: qa.org, end: qa.end, run: QL.qStart, reboot: QL.reboot },
+    iend: { name: IEND_NAME, prg: qa.prg, at: qa.org, end: qa.end, run: QL.qStart, reboot: QL.reboot, labels: QL },
     itre: { name: ITRE_NAME, prg: ta.prg, at: ta.org, end: ta.end, run: TL.tStart, codeEnd: TL.tCodeEnd, labels: TL },
-    steps: STEPS, dsFrames,
+    steps: STEPS, dsFrames, dsFramesPal,
   };
 }
 

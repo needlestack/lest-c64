@@ -23,6 +23,12 @@ node tools/fpsr.mjs "" suite          # the game as shipped
 node tools/fpsr.mjs "FLAG=x" suite    # the same with a build flag on every level
 ```
 
+**From the cartridge** (2026-11-15): `CART=1 node tools/fpsr.mjs "" suite` runs every segment from the
+rig's `.crt` instead of its `.d64` (the build writes both; `rig.json` carries each field's offsets in
+both). Every level then arrives through the cart loader with the game's interrupts live, so this is
+the cartridge's regression test. On 2026-11-15 its 18 figures were identical to the same rig's disk
+suite, in 45 s against the disk's 74.
+
 For each of levels 1-9, from one fixed pose (the level's start, or the rig's own pose for levels 2
 and 7):
 
@@ -198,7 +204,8 @@ tools/ship.sh save     # before the change
 tools/ship.sh          # after: IDENTICAL or DIFFERS (the one shipping disk; never writes lest-c64.d64)
 ```
 
-For deletions of code no shipping build emits, and flag folds. They must leave the disk
+For deletions of code no shipping build emits, and flag folds. They must leave the disk (and,
+since 2026-11-15, the cartridge the build writes beside it)
 IDENTICAL, and when they do, that is the whole proof. No emulator run is needed.
 
 ## 4. Cycles: `vprof.mjs`
