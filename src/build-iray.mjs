@@ -566,15 +566,6 @@ if (![1, 1.25, 1.5, 2].includes(CORN_SCALE)) throw new Error(`CORNSCALE=${CORN_S
 
 const BRK_MARK = HAS_BRK && process.env.BRKMARK !== '0' ? (process.env.BRKMARK ?? 'dot') : null;
 if (BRK_MARK && !['dot', 'quad', 'stripe'].includes(BRK_MARK)) throw new Error(`BRKMARK=${BRK_MARK}: dot, quad, stripe or 0`);
-// level n's OPEN cells at the start, as y*W + x: a face is one of the level's own iff its neighbour is here
-const OPEN_CELLS = n => {
-  const rows = MAP_OF(n), W = rows[0].length, out = [];
-  // L10OPEN's cells count as BROKEN, not as the level's own: the faces they bare are marked, as the
-  // ball's would be -- the case the user saw (2026-11-13)
-  const brk = n === 10 && process.env.L10OPEN ? process.env.L10OPEN.split(';').map(c => { const [x, y] = c.split(',').map(Number); return y * W + x; }) : [];
-  rows.forEach((r, y) => [...r].forEach((ch, x) => { if (ch === '.' && !brk.includes(y * W + x)) out.push(y * W + x); }));
-  return out;
-};
 const HAS_QUAD = HAS_SILVER || HAS_BIG;          // a rung may have a RIGHT column (svQuad)
 // The big angel borrows the sentry's right-column machinery (svQuad, svRX, the right-column tables),
 // which is built with the sentries -- and level 9 ships, so every build has them.
@@ -16892,7 +16883,11 @@ bdY:    !byte 0
 bdSd:   !byte $a7,$5c
 `}
 ${HAS_BRK ? (() => { const BL = LEVEL_IDS.find(n => LEVEL_BREAK[n] && LEVEL_BIG[n]), BC = BRK_CELLS(BL);
-  const bits = [...Array(32)].map((_, i) => [...Array(8)].reduce((b, _, k) => b | (BC.includes(i * 8 + k) ? 1 << k : 0), 0));
+  // L10OPEN (a test) opens cells at the start and wants them counted as BROKEN -- the faces they bare
+  // are marked, as the ball's would be (2026-11-13): they join the breakable bits (brkQ answers "a
+  // wall at the start?" for the cell in front of a face). The ball never strikes an open cell.
+  const L10O = BL === 10 && process.env.L10OPEN ? process.env.L10OPEN.split(';').map(c => { const [x, y] = c.split(',').map(Number); return y * MAP_OF(BL)[0].length + x; }) : [];
+  const bits = [...Array(32)].map((_, i) => [...Array(8)].reduce((b, _, k) => b | (BC.includes(i * 8 + k) || L10O.includes(i * 8 + k) ? 1 << k : 0), 0));
   const BW = MAP_OF(BL)[0].length, BH = MAP_OF(BL).length;
   // the corner exit's own cell: only level 10 has one (LEVEL_CORNER)
   const CXY = !HAS_CORNER ? [0, 0] : BL === 10 && LEVEL_CORNER[10] ? L10.exit : (() => { throw new Error(`corner exit: level ${BL}'s exit cell is not known here`); })();
@@ -16902,9 +16897,14 @@ ${HAS_BRK ? (() => { const BL = LEVEL_IDS.find(n => LEVEL_BREAK[n] && LEVEL_BIG[
   // before fallChk takes it, so at level 10's frame rate you could run across it and never fall (the
   // user, 2026-11-13: "i thought i walked on it and i didn't fall"). 0.5 is 128, the most bhAx's
   // compares can express: the corner's own cell (offset < Q) or the one before it (offset >= 256-Q).
+  // the corner exit's four cells (y*W + x), and the run ids kept back for them (brHit)
+  const CORNER_CELLS = [[-1, -1], [0, -1], [-1, 0], [0, 0]].map(([dx, dy]) => (CXY[1] + dy) * BW + CXY[0] + dx);
+  if (CORNER_CELLS[1] !== CORNER_CELLS[0] + 1 || CORNER_CELLS[2] !== CORNER_CELLS[0] + BW || CORNER_CELLS[0] < 1)
+    throw new Error('brHit: the corner cells are not the 2x2 block the range test assumes');
+  const BRK_KEEP = 4;
   const BRK_FALLQ = Math.round(+(process.env.BRKFALLR ?? 0.5) * 256);
   if (!(BRK_FALLQ >= 1 && BRK_FALLQ <= 128)) throw new Error(`BRKFALLR: 0 < r <= 0.5 cells`);
-  const OC = OPEN_CELLS(BL), opnBits = [...Array(32)].map((_, i) => [...Array(8)].reduce((b, _, k) => b | (OC.includes(i * 8 + k) ? 1 << k : 0), 0));
+  // (opnBT, the cells open at the start, went 2026-11-16: brkQ answers it -- see brkQ)
   return `
 ; ==== BREAKABLE WALLS (LEVEL_BREAK): the ball breaks the wall cell it flies into ====
 ; It just DISAPPEARS (the user, 2026-11-11: "they can just disappear ... I've never seen one drop"):
@@ -16919,8 +16919,24 @@ brHit:  sty brC
         lda mrNext              ; the run ids are nearly spent: this one stands. ALL of them, to
         cmp #${hx(NRUN - BRK_GROW + 1)}               ;   NRUN: the doors' DOOM ids are only for the sink, which a broken
         bcs brHo                ;   wall no longer uses (the user's pillar halls start at 40 of them)
-        lda brC
-        sta brPnd               ; (cell 0 is the shell, so 0 can mean none)
+${HAS_CORNER ? `        ; THE WAY OUT IS NEVER REFUSED (the user, 2026-11-16): every other wall stops BRK_KEEP ids
+        ; early, so the corner exit's four cells can always be broken. Digging them out adds at most
+        ; ${BRK_KEEP} runs at any point (two diagonal cells left standing: four sides each, where the
+        ; whole pillar had four), and the limit above still bounds each break. The four cells are two
+        ; pairs, c0 c0+1 and c0+W c0+W+1: one subtraction and two range tests.
+        lda brC                 ; (carry is clear: the bcs above fell through)
+        sbc #${hx(CORNER_CELLS[0] - 1)}               ; A = cell - c0
+        cmp #$02
+        bcc brOk                ; c0, c0+1
+        sbc #${hx(BW)}               ; (carry set: A >= 2) A = cell - c0 - W
+        cmp #$02
+        bcc brOk                ; c0+W, c0+W+1
+        lda mrNext
+        cmp #${hx(NRUN - BRK_GROW + 1 - BRK_KEEP)}
+        bcs brHo
+brOk:   lda brC
+` : `        lda brC
+`}        sta brPnd               ; (cell 0 is the shell, so 0 can mean none)
 brHo:   ldx bltIxT
         rts
 ; brGo (the end of brStr): the noted wall out. brLst remembers it, for brIn to put back.
@@ -16953,20 +16969,16 @@ brGv:   lda bsSidT+7,x          ;   Dun left there (its pitch, envelope and sawt
         sta $d40b
         rts
 brGx:   rts
-${BRK_MARK ? `; opnQ: Y = a cell -> A non-zero (Z clear) if it was OPEN at the start: opnBT, which sits right
-; after brkBT, so it is brkQ 32 bytes on. Takes X and Y.
-opnQ:   tya
-        lsr
-        lsr
-        lsr
-        ora #$20                ; the byte, in opnBT
-        bne bkQx                ; always
-` : ''}; brkQ: Y = a cell -> A non-zero (Z clear) if it is a breakable wall. Takes X and Y.
+; brkQ: Y = a cell -> A non-zero (Z clear) if it is a breakable wall. Takes X and Y.
+; It also answers "was the cell IN FRONT of a face a wall at the start?" (a new face, BRK_MARK): that
+; cell is open now, and a cell open now that was a wall at the start can only be a broken one -- the
+; outer shell never opens -- so it is breakable. (That was opnQ over a second 32-byte table, opnBT,
+; until 2026-11-16: the 40 bytes went to brHit's reserve for the corner exit.)
 brkQ:   tya
         lsr
         lsr
         lsr
-bkQx:   tax
+        tax
         tya
         and #$07
         tay
@@ -16975,7 +16987,7 @@ bkQx:   tax
         rts
 ${BRK_MARK ? `; brSplit (lxBur, at the tail of mkRuns): break every run where a NEW face meets one of the level's
 ; own, so a run is all one or the other: brStr asks the same question of a face's first cell. A face is new when the
-; cell beyond it was a wall at the start (opnBT): a dug side, a dug back wall, the shell. A pass over
+; cell beyond it was a wall at the start (brkQ): a dug side, a dug back wall, the shell. A pass over
 ; the four per-cell run tables in mkRuns's own order -- W/E walk each column down, N/S each row across
 ; (level ${BL}'s ${BW}x${BH}, from the build) -- giving the
 ; rest of a run a fresh id (mrNext, plane and face copied) at each change. A level without it takes
@@ -17051,9 +17063,9 @@ bpNew:  ldx bpI
         clc
         adc bpDT,x
         tay
-        jsr opnQ
-        beq bpN0                ; 0: new...
-        lda #$01                ; ...1: the level's own (only ever compared for equality)
+        jsr brkQ
+        beq bpN0                ; 0: the level's own (the cell in front was open at the start)...
+        lda #$01                ; ...1: new (only ever compared for equality)
 bpN0:   ldy bpCl
         rts
 bpLo:   !byte <runWT,<runET,<runNT,<runST
@@ -17122,7 +17134,7 @@ brMk:   jsr mkRuns              ; (brGo's too: the walls moved)
 ${BRK_MARK ? `; first marks every NEW face with BRK_MK. The faces are the cast's own: bndT's delimiters, column 0 to
 ; the first, each to the next, the last to ${NLOG - 1}; at a face's first column idT is its cell and faceIdT its
 ; run, whose runPFT says which side faces you -- new when the cell on that side was a wall at the start
-; (opnQ). brSplit made each run all new or all old, so its first cell answers for all of it. Only a plain SOLID column changes -- a seam keeps
+; (brkQ). brSplit made each run all new or all old, so its first cell answers for all of it. Only a plain SOLID column changes -- a seam keeps
 ; its line. A char shared by two faces is marked if either is. renderSym keys a marked column's cache
 ; rs + $40, and a PLAIN entry left under it could pass for a mark that only grew (PARTIAL), so such
 ; an entry, in either buffer's cache, becomes $ff: drawn in full once, then cached as marked.
@@ -17153,8 +17165,8 @@ brDE:   sta bkN
         clc
         adc bpDT2,y             ; ...and the one in front of it
         tay
-        jsr opnQ
-        bne brDS                ; open at the start: one of the level's own faces, plain
+        jsr brkQ
+        beq brDS                ; not breakable, so open at the start: one of the level's own faces, plain
         lda bkN                 ; cells bkS/4 .. (bkN-1)/4
         sec
         sbc #$01
@@ -17298,8 +17310,7 @@ bhOpen: !byte 0                 ;   exit; orbX0T covers only the orbs). bhOpen: 
 bhCY:   !byte ${CXY[1]}                 ;   open -- BETWEEN them, so bhCY is bhCX+2 as py is px+2 (bhStep)
 bhDst:  !byte $ff               ; exit 0's destination, while lvlNxtT says scenery
 ` : ''}brkBT:  !byte ${bits.join(',')}   ; level ${BL}'s ${BC.length} breakable cells, a bit each
-${BRK_MARK ? `opnBT:  !byte ${opnBits.join(',')}   ; ...and its ${OC.length} OPEN ones at the start (OPEN_CELLS): RIGHT AFTER brkBT (opnQ)
-` : ''}brC:    !byte 0
+brC:    !byte 0
 brPnd:  !byte 0                 ; the cell the ball broke this frame, for brGo; 0 = none
 bkS:    !byte 0                 ; brStr: this face's first column, the next's, the index into bndT,
 bkN:    !byte 0                 ;   the face's last cell
