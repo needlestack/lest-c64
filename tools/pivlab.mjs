@@ -18,8 +18,9 @@
 //   cast   kcycles in the whole cast (rayAll); piv = of which pivOne, the prediction arithmetic
 //   fps    from the ticks the frames took (whole frame, raster wait included)
 // and checks that each shuttle (a segment followed by its mirror) ended where it began.
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { execFileSync } from 'node:child_process';
-process.chdir(new URL('..', import.meta.url).pathname);
+process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 
 const BASE = process.env.PLBASE ?? 'LVL=9 NOSV=1 SEAMS=0 STAGE=2 NOSHOCK=1 MUSIC=0 PX=0xe00 PY=0xa80 PA=0xc5';
 const variants = process.argv.slice(2);

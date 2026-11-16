@@ -22,6 +22,7 @@
 //   runToExit(args, capMs)         launch, wait for the emulator to exit by itself (or the cap), clean up
 //   textMonitor(port)              a persistent text-monitor connection: { cmd, mem, pcOf, resume, close }
 //   session(port, cmds)            one-shot: connect (stops the CPU), run cmds, resume
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { execSync, spawn } from 'child_process';
 import { readFileSync, statSync, writeFileSync, mkdtempSync, openSync } from 'fs';
 import net from 'net';
@@ -31,8 +32,8 @@ import { join } from 'path';
 // LEST_ROOT: the tree to build and run, when it isn't this one. regress.sh points THIS tree's tools
 // at the base revision's worktree, so both sides are measured by one tool set and a tool change in
 // the working tree (a new VICE path, 2026-10-15) can't make the base side fail.
-export const ROOT = process.env.LEST_ROOT || new URL('..', import.meta.url).pathname;
-export const X64 = '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';
+export const ROOT = process.env.LEST_ROOT || fileURLToPath(new URL('..', import.meta.url));
+export const X64 = process.env.X64SC || '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';   // X64SC=<path> for another VICE install
 
 export const parseEnv = (str, base = process.env) => {
   const env = { ...base };

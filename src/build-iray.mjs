@@ -113,14 +113,24 @@ if (process.env.SLOT_AT === undefined) {
 // (SUB_DIAG) are the exception: a child writes those to the same paths as the parent, so with any
 // of them set the sub-builds run one at a time and uncached, exactly as before -- the sheets come out
 // as they always have, and a cache hit would have skipped a sheet the flag asked for.
+// THE MUSIC TOOLCHAIN, checked before anything expensive runs: the songs are packed by GoatTracker 2's
+// gt2reloc, with OUR patch to its player (music/goattracker-player.patch; README "Building"). GT2RELOC
+// names it if it is not at ~/goattracker2/linux/gt2reloc. MUSIC=0 builds without it (and without music).
+const GT2RELOC = process.env.GT2RELOC ?? join(homedir(), 'goattracker2/linux/gt2reloc');
+if (process.env.MUSIC !== '0' && !existsSync(GT2RELOC)) throw new Error(
+  `MUSIC: no gt2reloc at ${GT2RELOC} -- build GoatTracker 2 with music/goattracker-player.patch applied ` +
+  `(see README, Building), set GT2RELOC=<path to gt2reloc>, or build without music: MUSIC=0`);
 const CACHE_DIR = './build/.cache';
 const NOSUBCACHE = process.env.NOSUBCACHE === '1';
-const SUB_DIAG = ['CELLSCAN', 'ORBSHEET', 'BIGSHEET', 'LADDERSHEET', 'ORBSHRINK', 'PEDDUMP']
+const SUB_DIAG = ['ORBSHEET', 'BIGSHEET', 'LADDERSHEET', 'ORBSHRINK', 'PEDDUMP']
   .filter(k => process.env[k] !== undefined);
 const SUB_UNCACHED = NOSUBCACHE || SUB_DIAG.length > 0;
 const SUB_PAR = SUB_DIAG.length ? 1 : availableParallelism();
 const DUMP_SLOT = '0x6900';
-const CHILD_DROP = ['D64', 'SLOT_PICK', 'NOSUBCACHE', 'DUMPKEEP', 'LVLDUMP'];
+// CELLSCAN is the PARENT's analysis: a child that inherited it ran the scan itself and exited before
+// writing the table dump it was started for, and the parent failed on the missing file (since the
+// sub-build cache, 583c364; found by the outside review, 2026-11-16)
+const CHILD_DROP = ['D64', 'SLOT_PICK', 'NOSUBCACHE', 'DUMPKEEP', 'LVLDUMP', 'CELLSCAN'];
 // SYS, minus NODE_OPTIONS (it could load code into the child), plus three set by the tools around
 // the build (zsh's function path, the agent's name, corepack's pin) that change for reasons of their own.
 const SUBENV_IGNORE = k => (SYS.test(k) && k !== 'NODE_OPTIONS') || /^(AI_AGENT|FPATH|COREPACK_.*)$/.test(k);
@@ -9512,7 +9522,7 @@ const musBuild = modLen => {
       // every song played ~0.65 semitone sharp (the user, against a keyboard: "almost a semitone
       // higher"). -G recalculates the table from the PAL clock, so A=440 on NTSC asks for
       // 440 * 985248 / 1022727 Hz.
-      execFileSync(join(homedir(), 'goattracker2/linux/gt2reloc'),
+      execFileSync(GT2RELOC,
         ['s.sng', 's.prg', '-N', '-D1', `-G${MUS_PITCH.toFixed(2)}`, `-W${(at >> 8).toString(16)}`, `-Z${MUS_ZP.toString(16)}`], { cwd: d, stdio: 'ignore' });
       const prg = readFileSync(join(d, 's.prg'));
       if ((prg[0] | (prg[1] << 8)) !== at) throw new Error(`MUSIC: gt2reloc put the player at ${hx16(prg[0] | (prg[1] << 8))}, not ${hx16(at)}`);
@@ -9520,7 +9530,7 @@ const musBuild = modLen => {
       // "and #$ff" between the gate and the waveform store. Found by its bytes, and exactly once.
       const blob = [...prg.slice(2)], pat = [0x29, 0xff, 0x9d, 0x04, 0xd4];
       const hits = blob.flatMap((_, i) => pat.every((v, k) => blob[i + k] === v) ? [i] : []);
-      if (hits.length !== 1) throw new Error(`MUSIC: ${sng}'s player has ${hits.length} release masks, not 1 -- is ~/goattracker2 patched? (music/goattracker-player.patch)`);
+      if (hits.length !== 1) throw new Error(`MUSIC: ${sng}'s player has ${hits.length} release masks, not 1 -- is ${GT2RELOC}'s GoatTracker patched? (music/goattracker-player.patch)`);
       // the FILTER HOLD (mt_filtheld, the same patch): "sty abs" into the immediate of an "lda #$00 /
       // beq" -- once in a player with a filter; a song with none has no filter code (and must be silent)
       const held = blob.flatMap((x, i) => x === 0x8c ? [(blob[i + 1] | blob[i + 2] << 8) - at - 1] : [])
@@ -15284,9 +15294,11 @@ irqNd:
         beq irqd                ;   second, 60 ticks -- so every fifth frame ticks TWICE. NTSC: never.
         dec palQ
         bne irqd                ; Back to back, so ticks land 20,20,20,20,20,0 ms apart
-        lda #5                  ;   rather than evenly; nothing here is tighter than a tick, and the
-        sta palQ                ;   player and dsTick only ever count them.
-        jmp irqTk
+        lda #6                  ;   rather than evenly; nothing here is tighter than a tick, and the
+        sta palQ                ;   player and dsTick only ever count them. SIX, not five: the second
+        jmp irqTk               ;   tick comes back through the dec above, which takes one -- at 5 the
+                                ;   double came every FOURTH frame, 62.5 ticks a second (2026-11-16,
+                                ;   found by an outside review; measured 250 ticks in 200 frames)
 palQ:   !byte 5
 palRas: !byte 0
 palF:   !byte 0                 ; 1 = a PAL C64: written by the boot body from $02a6, read by the IRQ

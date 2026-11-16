@@ -17,15 +17,16 @@
 //     it was given; match on that, never on arrival order, and check the length that comes back.
 //   * --expect assertions run before anything is printed, so an impossible value stops the run
 //     instead of being interpreted.
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { execSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import net from 'net';
 import { portHeld, launch, LAUNCH_FLAGS } from './vice.mjs';
 // It builds and reads the build's files (lest-c64.d64, build/iray.syms.json, src/build-iray.mjs) by name, so it
 // runs from the project root wherever it is started from. It takes no file paths of its own.
-process.chdir(new URL('..', import.meta.url).pathname);
+process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 
-const VICE = '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';
+const VICE = process.env.X64SC || '/Applications/vice-arm64-gtk3-3.9/bin/x64sc';   // as tools/vice.mjs
 // (PAL=1 only picks the machine VICE emulates: since 2026-11-15 there is ONE disk, which detects a PAL
 // C64 itself -- there is no lest-c64-pal.d64 any more.)
 // D64=path (2026-11-14): build to, and boot, that disk instead -- so a suite of probe runs (fpsr) can

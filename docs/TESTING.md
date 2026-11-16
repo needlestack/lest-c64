@@ -6,15 +6,28 @@ not a workload made up for the occasion, not fps timed from the host, not a sing
 "it looked fine". Each of those has produced a wrong answer at least once. The tools exist because
 the obvious way to check something was misleading.
 
-Five questions, five tools:
+Six questions, six tools:
 
 | question | tool | when |
 |---|---|---|
-| Does every level still play, and how fast? | `node tools/fpsr.mjs "" suite` | every change that reaches the engine |
+| Does every level still play, and how fast -- and does the ending still work? | `node tools/fpsr.mjs "" suite` (levels 1-10, then `endcheck.mjs`) | every change that reaches the engine |
+| The ending alone: the end quote's hold and skip, the tree's clock, the restart, from disk and cart, NTSC and PAL | `node tools/endcheck.mjs` (the suite's last step) | a change to the ending, when the levels need no re-run |
 | Does it still DRAW the same as before? | `tools/regress.sh [REV]` (REV must have the rig: 2026-11-14 on) | changes that move bytes but must not change the game: layout, space savings, rewrites |
 | Are the shipped bytes unchanged? | `tools/ship.sh save`, then `tools/ship.sh` | cleanups that must emit the identical program |
 | Did this routine get faster or slower, by how many cycles? | `tools/vprof.mjs "level=n mode=spinf bench=N" --until benchEnd` (a rig parameter set) | optimisation A/B, below fpsr's 1-frame resolution |
 | Does the ray search (subdivision, pivot prediction) cast fewer rays, per kind of motion? | `node tools/pivlab.mjs "" "FLAG=x"` | any change to where rays are cast |
+
+## The ending: `endcheck.mjs`
+
+`node tools/endcheck.mjs` (2026-11-16) builds one test disk and cartridge (`ENDTEST=1`: level 1's exit
+is the last hole, `FALLNOW=64` falls through it, `ENDAUTO=30` presses fire after the dissolve) to
+`build/zz-end.*`, and runs it four times: disk and cart, NTSC and PAL. The disk runs time the end
+quote's hold (6 s on both machines); the cart runs check its skip (a press held from the start skips
+nothing, a fresh one does; the cart's hold is 11 s). Every run counts the tree's ticks through the
+whole dissolve (1 a frame on NTSC, 1.2 on PAL), checks that no frame is lost and no gust starts
+during it, and that the first gust comes about a second after it, then follows REBOOT to the game's
+entry with the PAL flag intact. (Until 2026-11-16 gusts ran during the dissolve, and one at its
+full-speed end overran frames: 2-8 of 387 lost on NTSC, 0-16 of 322 on PAL. The gusts now wait.) About 20-40 s; exit 1 on any failure.
 
 ## 1. Functionality and fps: `fpsr.mjs suite`
 
@@ -29,12 +42,15 @@ both). Every level then arrives through the cart loader with the game's interrup
 the cartridge's regression test. On 2026-11-15 its 18 figures were identical to the same rig's disk
 suite, in 45 s against the disk's 74.
 
-For each of levels 1-9, from one fixed pose (the level's start, or the rig's own pose for levels 2
-and 7):
+For each of levels 1-10, from one fixed pose (the level's start, or the rig's own pose for levels 2
+and 7), and then the ending (`endcheck.mjs`, below, with the suite's flags):
 
 - **spin**: turn through every cast angle, standing still.
 - **walk**: a shuttle run. Run as far as the pose clears without meeting a wall, come straight back,
   and repeat for about 5 s. Level 6 runs backwards, because its forward run falls into an exit.
+  Level 10 (2026-11-16) runs 5 cells forward from its start and back: its interesting parts (the big
+  angel, the ball lightning, the final exit) are interactive, so its segments check that the level
+  and its code load and run, and how fast it renders.
 
 The build times the window itself (`MOVEAT`/`MOVEFOR`/`MOVELEGS`), so boot is excluded and a run
 repeats exactly. It exits 1 on a level that fails to build or boot, or a walk that BUMPS. That makes
@@ -67,7 +83,7 @@ which builds nothing. The rig never touches `lest-c64.d64`.
   workload's disk by hand (`mode` is idle, spin, walk or walkb -- timed -- or spinf, walkf: a fixed
   step per rendered frame). Stage 2 added `bench`, `fallnow`, `fallhold`, `angfreeze`, `svfreeze`,
   `angat`, `die` and `dietest` (the keys are listed at the head of rig.mjs).
-- `RIG=build/rig.json node tools/fpsr.mjs "" suite` reuses a rig already built: 18 runs, about 4 s each.
+- `RIG=build/rig.json node tools/fpsr.mjs "" suite` reuses a rig already built: 20 runs, about 4 s each (then the ending, which builds its own test disk).
 - Flags in the first argument go into the rig build, so `fpsr.mjs "ANGEL=0" suite` still works. The
   compile-time movers and test switches (`SPIN`, `WALK`, `MOVEAT`, `PX`, `BENCHF`,
   `FALLNOW`, `ANGFREEZE`, `DIETEST`...) are refused with `TESTRIG`: they are the block's.
@@ -163,8 +179,11 @@ entered by a real fall from level 1, and **frame 0 is the first frame of play on
 `framecmp` reports IDENTICAL, or IN ORDER. IN ORDER means every frame the reference drew appears,
 in the same order, in the new run. That is the pass for a build that got faster: the movers repeat
 exactly per rendered frame, but a fall and the death scene run on the raster clock, so a faster
-build can show them in a different number of frames. Anything wrong on screen is a frame the
-reference never drew, and fails. It takes 2 builds and 24 emulator runs, about 5 minutes (2026-11-14,
+build can show them in a different number of frames. A reference frame that is wrong or missing
+in the new run fails. A frame the new run draws EXTRA is not checked at all: IN ORDER cannot tell a
+legitimate in-between frame of a faster fall from a corrupt one (the outside review, 2026-11-16,
+inserted a garbage frame and it passed). So IN ORDER is a weaker pass than IDENTICAL; for the changes
+regress is for, which should not alter timing, expect IDENTICAL and look into an IN ORDER. It takes 2 builds and 24 emulator runs, about 5 minutes (2026-11-14,
 the tree against itself: 272 s, the two rig builds at once about half of it).
 
 It never writes `lest-c64.d64`. Until 2026-11-14 its last step was a plain build "to leave the tree
@@ -294,7 +313,8 @@ ignored them). `was` = 2026-11-12, one build per segment.
 Updated 2026-11-15 to the rig as it stands (stage 2 and phase 3 give identical figures): level 3 spin
 125 -> 122 frames, level 6 spin 125 -> 124, level 7 walk 79 -> 78 frames, from the rig's own layout
 changing between stage 1 and stage 2, with the engine unchanged. Compare fps only between rigs of
-the same rig code.
+the same rig code. 2026-11-16: level 10 added (identical from the cartridge); level 3 spin 122 -> 124
+frames (24.72 fps), the rig layout again; the ending runs last, clean. 113 s in all.
 
 | level | spin fps | was | walk fps | was |
 |---|---:|---:|---:|---:|
@@ -307,3 +327,4 @@ the same rig code.
 | 7 | 33.00 | 32.09 | 16.25 | 15.99 |
 | 8 | 22.85 | 22.45 | 15.56 | 15.28 |
 | 9 | 20.66 | 20.20 | 19.93 | 19.57 |
+| 10 | 27.20 | (new, 2026-11-16) | 14.41 | (new) |

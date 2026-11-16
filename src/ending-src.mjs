@@ -411,7 +411,7 @@ cp:     lda ${hx(SRC_SCR, 4)},x     ;   24 -- harmless: past the end of the data
         sta krel
         lda #${autoF & 255}
         sta kauto
-        lda #$00            ; no gust yet: the first comes after a second of calm
+        lda #$00            ; no gust yet: the first comes a second after the dissolve (gc1)
         sta gact
         sta gacc
         lda #$3c
@@ -856,9 +856,11 @@ const leafCode = (fld, GRATE, GUSTW, GUSTH, CALM) => `
         bne gc1
         jsr pick
         jsr turn
-gc1:    dec gcalm
-        beq gnew
-        jmp sdone
+gc1:    lda ddone           ; NO GUST WHILE THE PICTURE DISSOLVES IN (the user, 2026-11-16): the calm's
+        beq gcw             ;   count waits, so the first gust comes a second after the dissolve ends.
+        dec gcalm           ;   A gust turning many leaves in the dissolve's full-speed end ran the
+        beq gnew            ;   frame over (endcheck counted 2-8 frames lost on NTSC, 0-16 on PAL)
+gcw:    jmp sdone
 gnew:   jsr rnd             ; ---- a new GUST: which way, how high, how fast ----
         and #$01
         sta gdir

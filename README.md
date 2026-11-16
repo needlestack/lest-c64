@@ -79,11 +79,33 @@ gamepad to joystick port 1. The online version is already set up that way.
 
 ## Building
 
-Requirements: a recent [Node.js](https://nodejs.org/) (developed on 26), and
-[ImageMagick](https://imagemagick.org/) 7 (`magick` on the path; the build fits
-sprite art from the images in `art/`). There's no other toolchain: the
-assembler (`src/asm6502.mjs`) and the disk-image writer (`src/d64lib.js`) are
-part of the project.
+Requirements:
+
+- a recent [Node.js](https://nodejs.org/) (developed on 26)
+- [ImageMagick](https://imagemagick.org/) 7 (`magick` on the path; the build
+  fits sprite art from the images in `art/`)
+- for the music, **GoatTracker 2 (v2.76) with this project's patch to its
+  player**: the build packs every song with its `gt2reloc`. Using the
+  macOS-buildable fork:
+
+  ```sh
+  git clone https://github.com/joelricci/goattracker2 ~/goattracker2
+  cd ~/goattracker2 && git checkout 3885f28    # the commit LEST is built with
+  cd src
+  patch player.s < /path/to/lest-c64/music/goattracker-player.patch
+  make            # macOS: needs `brew install sdl12-compat` and the Xcode command-line tools
+  ```
+
+  (`gt2reloc` carries the player inside it, so the patch goes in before `make`.)
+
+  The build looks for `~/goattracker2/linux/gt2reloc`; set `GT2RELOC` to use
+  another. A stock GoatTracker is not enough (the build checks for the patch).
+  `MUSIC=0` builds without music, and without needing GoatTracker.
+
+The assembler (`src/asm6502.mjs`) and the disk-image writer (`src/d64lib.js`)
+are part of the project. The test tools in `tools/` also need
+[VICE](https://vice-emu.sourceforge.io/) 3.9; they look for
+`/Applications/vice-arm64-gtk3-3.9/bin/x64sc`, and `X64SC` names another.
 
 ```sh
 node src/build-iray.mjs                               # the whole game, levels 1-10 -> lest-c64.d64 and lest-c64.crt

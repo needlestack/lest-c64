@@ -4552,9 +4552,11 @@ irqNd:
         beq irqd                ;   second, 60 ticks -- so every fifth frame ticks TWICE. NTSC: never.
         dec palQ
         bne irqd                ; Back to back, so ticks land 20,20,20,20,20,0 ms apart
-        lda #5                  ;   rather than evenly; nothing here is tighter than a tick, and the
-        sta palQ                ;   player and dsTick only ever count them.
-        jmp irqTk
+        lda #6                  ;   rather than evenly; nothing here is tighter than a tick, and the
+        sta palQ                ;   player and dsTick only ever count them. SIX, not five: the second
+        jmp irqTk               ;   tick comes back through the dec above, which takes one -- at 5 the
+                                ;   double came every FOURTH frame, 62.5 ticks a second (2026-11-16,
+                                ;   found by an outside review; measured 250 ticks in 200 frames)
 palQ:   !byte 5
 palRas: !byte 0
 palF:   !byte 0                 ; 1 = a PAL C64: written by the boot body from $02a6, read by the IRQ

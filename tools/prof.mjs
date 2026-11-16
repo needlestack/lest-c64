@@ -17,6 +17,7 @@
 // pfTick fires that often for each and charges its own cost to every one -- the fine shares once
 // summed to 119% of the frame. ENTPROF reuses buckets 8-11 for the entity split, so it cannot be
 // combined with the fine ray ones.
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { execFileSync } from 'child_process';
 
 const COARSE = {
@@ -67,7 +68,7 @@ for (const [seg, pose] of Object.entries(SEGMENTS)) {
        // A profile whose player DIES never closes its window: the cut scene owns the main loop and
        // pfN stops. That is not a slow run, it is a void one, and it deserves to say so in seconds.
        '--abort', 'dieSt>=1'],
-      { cwd: new URL('.', import.meta.url).pathname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      { cwd: fileURLToPath(new URL('.', import.meta.url)), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, DEADOK: '1' } });   // the profiler HALTS when it is done
   } catch (e) { console.log(`${seg}: build or run failed`); continue; }
   // The trailing "(16-bit: n)" is only printed for MULTI-byte specs, so a regex that requires the

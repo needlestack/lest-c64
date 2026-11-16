@@ -50,11 +50,12 @@
 // WHAT THE NUMBER CANNOT TELL YOU: fps is an integer frame count over ~5 s, so its resolution is
 // ONE FRAME, printed as the +-1 frame column (~1-2%). A change smaller than that is inside it; for
 // a fine A/B use vprof (SPINF/WALKF/BENCHF, cycle-exact).
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { execFileSync } from 'child_process';
 import { readFileSync, mkdirSync, unlinkSync } from 'fs';
 import { patchRig } from './rig.mjs';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const abs = p => p.startsWith('/') ? p : ROOT + p;   // paths are the project root's, as probe runs
 const MV_RUN = 12, TICKS = 300, T0 = 60;   // the player always runs: 12 units of 1/256 cell a tick
 
@@ -96,7 +97,9 @@ const buildRig = () => {
 // face graze-bumped (a leg overshoots by a frame), so a quarter cell less.
 // Levels 5 and 6 (2026-11-14): the v2 maps put a wall into their runs -- one long leg (LEGS=1 LEG=120 on
 // the rig) stopped at 3.19 and 3.38 cells -- so each is a quarter cell short of that, as level 9's is.
-const CLEAR = { 1: 3 * Math.SQRT2, 2: 6.75, 3: 4 * Math.SQRT2, 4: 5, 5: 2.95, 6: 3.15, 7: 7, 8: 5.25, 9: 4.25 };
+// Level 10 (2026-11-16, the user): forward 5 cells from its start and back. Its interesting parts
+// are interactive; this checks that it loads, its code runs, and how fast it renders.
+const CLEAR = { 1: 3 * Math.SQRT2, 2: 6.75, 3: 4 * Math.SQRT2, 4: 5, 5: 2.95, 6: 3.15, 7: 7, 8: 5.25, 9: 4.25, 10: 5 };
 // INSET (the user, 2026-10-11): ticks every leg after the first runs SHORT, so the return legs turn
 // back before the start instead of on it. A leg reverses on the first rendered frame past its tick
 // count, so it can overshoot by a frame, ~0.23 cells at 11 fps. Level 5's start has a quarter cell
@@ -197,18 +200,29 @@ const runSeg = (rig, s) => {
 // ---- `suite`: every level, one after another, on ONE rig ----
 // Any build flag in the first argument goes into the rig, so it applies to every level. A level
 // that fails to boot, cannot be read, or whose run BUMPS makes the whole suite exit 1.
+const isBad = l => /BUMPED|FAILED|could not/.test(l);   // a segment's line says it went wrong
+
 if (only === 'suite') {
   const t0 = Date.now();
   const rig = buildRig();
   let bad = 0, runs = 0;
+  // Levels 1-10, then THE ENDING (tools/endcheck.mjs: the end hold and skip, the tree's clock, REBOOT,
+  // from disk and cart on NTSC and PAL) with the same flags -- every level and the end of the game
+  // (2026-11-16; until then the suite stopped at level 9, which the outside review caught).
   console.log(`level  segment   fps     frames  ticks   +-1 frame   travelled`);
-  for (let n = 1; n <= 9; n++) for (const s of segsOf(n)) {
+  for (let n = 1; n <= 10; n++) for (const s of segsOf(n)) {
     const l = runSeg(rig, s); runs++;
-    if (/BUMPED|FAILED|could not/.test(l)) bad++;
-    console.log(`  ${n}    ${l}`);
+    if (isBad(l)) bad++;
+    console.log(`  ${String(n).padEnd(2)}   ${l}`);
   }
-  console.log(bad ? `*** ${bad} PROBLEM(S) -- see above ***` : 'all levels ran clean');
-  console.error(`  (${runs} runs on one rig, ${((Date.now() - t0) / 1000).toFixed(0)} s in all)`);
+  console.error(`  (${runs} runs on one rig, ${((Date.now() - t0) / 1000).toFixed(0)} s)`);
+  console.log('the ending:');
+  let endOk = true;
+  try { process.stdout.write(execFileSync(process.execPath, ['tools/endcheck.mjs', extra], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
+  catch (e) { endOk = false; process.stdout.write(String(e.stdout ?? '') + String(e.stderr ?? '').split('\n').slice(-4).join('\n')); }
+  if (!endOk) bad++;
+  console.log(bad ? `*** ${bad} PROBLEM(S) -- see above ***` : 'levels 1-10 and the ending ran clean');
+  console.error(`  (${((Date.now() - t0) / 1000).toFixed(0)} s in all)`);
   process.exit(bad ? 1 : 0);
 }
 
@@ -218,4 +232,7 @@ const want = segsOf(LVL).filter(s => !pick || (pick === 'walk' ? s.moves : s.nam
 if (!want.length) { console.error(`no such segment: ${pick}. known: spin, walk`); process.exit(2); }
 const rig = buildRig();
 console.log(`segment   fps     frames  ticks   +-1 frame   travelled`);
-for (const s of want) console.log(runSeg(rig, s));
+// ...and fails like the suite does: it used to print the failure and exit 0 (the review, 2026-11-16)
+let bad = 0;
+for (const s of want) { const l = runSeg(rig, s); if (isBad(l)) bad++; console.log(l); }
+process.exit(bad ? 1 : 0);

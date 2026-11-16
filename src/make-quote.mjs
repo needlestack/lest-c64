@@ -21,6 +21,7 @@
 // bytes is ~4.5 seconds off the black screen. Packing HERE and not in build-iray.mjs keeps the main
 // build free of a C toolchain -- this generator is run by hand, like make-pedestal-art.mjs, and the
 // result is committed.
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
@@ -175,7 +176,7 @@ if (blank > 0) { const t = glyphs[0]; glyphs[0] = glyphs[blank]; glyphs[blank] =
 const blob = [...screen, ...Array(QUOTE_CHR - QUOTE_SCR - screen.length).fill(0), ...glyphs.flat()];
 // tools/get-exomizer.sh builds the pinned release (3.1.2, which reproduces the committed quote) there;
 // EXOMIZER=<path> overrides, and a plain `exomizer` on PATH is the last resort.
-const EXO_LOCAL = new URL('../tools/exomizer-3.1/src/exomizer', import.meta.url).pathname;
+const EXO_LOCAL = fileURLToPath(new URL('../tools/exomizer-3.1/src/exomizer', import.meta.url));
 const exo = process.env.EXOMIZER ?? (existsSync(EXO_LOCAL) ? EXO_LOCAL : 'exomizer');
 const tmp = mkdtempSync(`${tmpdir()}/quote-`);
 let packed = [], decr = null;

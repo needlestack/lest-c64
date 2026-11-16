@@ -7,13 +7,14 @@
 // The sprite's four pixel values are fixed by the VIC, not chosen here:
 //   0 transparent   1 = $d025 (grey1, 68)   2 = sprite colour (grey2, 108)   3 = $d026 (grey3, 149)
 // so this is the same three-level problem as the face charset, on a 180-pixel canvas.
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { execFileSync } from 'child_process';
 import { existsSync } from 'fs';
 
 // SOURCE ART lives in art/. A bare file name ('goat6.png') means art/goat6.png; anything with a
 // slash is a path and is taken as given -- so IDOLART=some/other.png still points anywhere.
 // Resolved against this file, not the working directory, so a tool run from elsewhere finds it.
-const ART = new URL('../art/', import.meta.url).pathname;
+const ART = fileURLToPath(new URL('../art/', import.meta.url));
 export const artPath = f => {
   const p = f.includes('/') ? f : ART + f;
   if (!existsSync(p)) throw new Error(`source art not found: ${p}`);

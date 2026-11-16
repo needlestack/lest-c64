@@ -39,6 +39,7 @@
 // SAFETY: the bytes at every offset must still hold the json's defaults before anything is written,
 // which proves the json and the disk came from the same build. A stale json would otherwise patch
 // some other byte of the game and every run would measure something else, plausibly.
+import { fileURLToPath } from 'url';   // a FILE path: .pathname is URL-encoded (a space is %20)
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { dirname, basename, join } from 'path';
@@ -135,7 +136,7 @@ export function rigFiles(jsonPath) {
 // Build the rig in `root` (default: this tree) with extra build flags; returns its json's path.
 // Throws with the build's own reason if it fails, or if the tree's build makes no rig at all (a
 // revision from before TESTRIG=1, which ignores the flag and builds the plain game).
-export function buildRig(flags = {}, root = new URL('..', import.meta.url).pathname, d64 = 'build/rig.d64') {
+export function buildRig(flags = {}, root = fileURLToPath(new URL('..', import.meta.url)), d64 = 'build/rig.d64') {
   let out;
   try {
     out = execFileSync(process.execPath, ['src/build-iray.mjs'], { cwd: root, encoding: 'utf8',
