@@ -33,8 +33,8 @@ and 7):
 The build times the window itself (`MOVEAT`/`MOVEFOR`/`MOVELEGS`), so boot is excluded and a run
 repeats exactly. It exits 1 on a level that fails to build or boot, or a walk that BUMPS. That makes
 it the functionality check too: run it after every engine change. It takes ONE build and 18 emulator
-runs, about 3 minutes (2026-11-14: 173 s, the build 95 s of it; 2026-11-15: 97 s, the build 5 s of
-it, its sub-builds out of `build/.cache/`).
+runs, about 100 s (2026-11-15: 97 s, the build 5 s of it, its sub-builds out of `build/.cache/`; a
+source edit makes that build ~25 s. 2026-11-14, before the cache: 173 s, the build 95 s of it).
 
 **The sub-build cache (2026-11-15).** A build's 26 sub-builds (the other levels' tables, the wall
 variants) are cached in `build/.cache/`, keyed on the bytes of src/, data/, art/, music/, krill/,
@@ -45,8 +45,8 @@ run-cache poison). Clearing the directory is always safe.
 **One build: the test rig (2026-11-14).** Every segment used to be a build of its own (the level,
 pose, mover and window were all build flags), so the suite was 18 builds of the ten-level game,
 about an hour. Now fpsr builds `TESTRIG=1 D64=build/rig.d64` once: the game with the test drivers
-compiled in, reading their settings from a parameter block in IMG (`rgBlk`, 24 bytes since stage 2:
-the frames/regress/vprof settings joined fpsr's). The build
+compiled in, reading their settings from a parameter block in IMG (`rgBlk`, 18 fields in 23 bytes since
+stage 2, in four short data runs: the frames/regress/vprof settings joined fpsr's). The build
 writes `build/rig.json` beside the disk (each parameter's byte offsets IN THE .d64 FILE, from IMG's
 sector chain, and its default) and `build/rig.syms.json` (its own labels). Each segment is then a
 copy of the disk patched by `tools/rig.mjs`, run by `probe.mjs` with `PROBESYMS=build/rig.syms.json`,
@@ -68,12 +68,13 @@ which builds nothing. The rig never touches `lest-c64.d64`.
 - **Where the rig's code lives** is a measured answer: readKeys goes (the rig plays no keys) and
   maStep and spinStep take its place in the code stream; rgPre, rgLand and the data are `@FLOAT`
   runs. Other placements shifted the pinned hot loops by up to 211 bytes of padding and no level
-  slot fit (see "TESTRIG's drivers, IN readKeys' PLACE" in build-iray.mjs). With it, the rig had 170
-  bytes spendable and its slot at $6200. Stage 2 (2026-11-14) adds no byte to the code stream (each
+  slot fit (see "TESTRIG's drivers, IN readKeys' PLACE" in build-iray.mjs). With it, the stage-1 rig
+  had 170 bytes spendable and its slot at $6200. Stage 2 (2026-11-14) adds no byte to the code stream (each
   hook replaces an instruction of its size: `jsr rgFrm`, `jsr rgAng`, `jsr rgFall`, rgIter's tail);
   its code is `@FLOAT` runs of 16 bytes or less, which fill the 16-byte page tails no other run fits
   (`RG_SPLIT`), maStep's record moved to low RAM, and lvKey's dead keys half is not emitted. The slot
-  is still at $6200, with 0 bytes spendable in the image's holes and 73 B of arena edge left over.
+  is now where the shipping build's is, at $6500 (the build log's `ILV1 ...@$6500`, 2026-11-15), with
+  0 bytes spendable in the image's holes and 46 B of arena edge left over (shipping: 246 and 73).
 - **Before the rig, levels 2 and 7 did not run from their poses.** From the switch to `BOOTLVL`
   builds (2026-11-14) a build's `PX` moved its `LVL`'s start, and `BOOTLVL` left `LVL` at 1, so the
   rig poses (fpsr's `POSE`) moved level 1's start, and levels 2 and 7 ran from their own -- and bumped.
@@ -157,8 +158,8 @@ entered by a real fall from level 1, and **frame 0 is the first frame of play on
 in the same order, in the new run. That is the pass for a build that got faster: the movers repeat
 exactly per rendered frame, but a fall and the death scene run on the raster clock, so a faster
 build can show them in a different number of frames. Anything wrong on screen is a frame the
-reference never drew, and fails. It takes 2 builds and 24 emulator runs (2026-11-14, the tree
-against itself: 272 s, the two rig builds at once about half of it).
+reference never drew, and fails. It takes 2 builds and 24 emulator runs, about 5 minutes (2026-11-14,
+the tree against itself: 272 s, the two rig builds at once about half of it).
 
 It never writes `lest-c64.d64`. Until 2026-11-14 its last step was a plain build "to leave the tree
 as a plain build leaves it", which overwrote the disk the user plays.

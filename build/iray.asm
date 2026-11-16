@@ -79,7 +79,6 @@ col     = $17
 tmp     = $1f
 baseHi  = $22
 paF     = $1e                  ; low byte of the 16-bit player angle; pa is the high
-; smCnt: named by nothing in this build, so given no RAM (compact.mjs)                  ; SLOWMO: frames left before the auto-mover steps again
                                  ; $8060-$8073 are free: they held the sprite GRID walk and its
                                  ; debug capture, both gone with the six-sprite angel
 oqa     = $b6fe                  ; 9-bit angle being folded onto the quarter circle
@@ -1590,7 +1589,7 @@ pivLp:  ldx pvI
         bcs pivNx               ; anything out of order is simply dropped -- it costs one
         pha                     ; unpredicted boundary, not a wrong image.
         pla
-        ; ---- PIVNEAR: march the bracket, and if it missed, its two neighbours ----
+        ; ---- march the bracket, and if it missed, its two neighbours ----
         ; A boundary is only known to lie BETWEEN two marched columns, so where it lands after
         ; any motion that is not a whole number of columns is ambiguous by one column either way
         ; -- tools/pivlab.mjs measured the misses as almost all exactly 1 off, evenly split
@@ -1654,7 +1653,7 @@ pnP1:   lda pvP
         adc #$02
         jsr pivPush
 pivNx:  jmp pivLp               ; pvI was decremented at the top; 0 ends the walk
-pvP:    !byte 0                 ; PIVNEAR: this hint's predicted column
+pvP:    !byte 0                 ; this hint's predicted column
 pvNb:   !byte 0                 ;   ...and which neighbours were marched
 pivEnd: lda #$9f    ; the last span always runs to the right edge
         jsr pivPush
@@ -3537,8 +3536,7 @@ ssNp:   ldx #$01
         ; border. What it actually did was silently deny seams to any wall longer than 16 cells,
         ; near part included, because it rejects before ssCutS could clip the far end.
         ; The only real requirement is that the count fit the byte the walk counts down, and that
-        ; is proved at build time from the map's dimensions. SEAMMAXN=n restores a cap for
-        ; experiments.
+        ; is proved at build time from the map's dimensions.
 ssCnt:  sta ssN
         jsr ssCutS              ; the column where this wall gets too short for a line
         jsr ssPwS               ; dp, and the widest s that still leaves a placeable panel
@@ -3695,7 +3693,6 @@ interpSpan:
         ldx spanL
         lda colH,x
         sta hcur                ; h = colH[spanL]
-
         ldx spanR
         lda colH,x
         sec
@@ -5226,7 +5223,7 @@ oSLoop: ldx osI
         lda obOcc,x             ; hole-like: only a slot holeSlot made STAMPABLE carries it (bit 7) --
         bpl oSNext              ;   every kind has a rows table now, exits included; otherwise obOcc
                                 ;   holds the fill colour (0-15) and the slot is not stamped.
-        lda obIX,x              ; RAGGED: the CORNER exit always goes on. STMP is worked out from the map
+        lda obIX,x              ; the CORNER exit always goes on. STMP is worked out from the map
         cmp lvlCorT             ;   as built, where its cell is wall: it cannot know which blocks round
         beq oSEnt               ;   it the ball has taken, so it would never let it be stamped
         lda obIX,x              ; STMP: can a wall partly hide THIS one from the player's cell at all?
@@ -5264,7 +5261,7 @@ oSEnt:
         sta ooCX
         lda orbYCT,y
         sta ooCY
-        lda #$00                ; RAGGED: is this slot the CORNER exit? (osRag)
+        lda #$00                ; is this slot the CORNER exit? (osRag)
         cpy lvlCorT
         bne oSRg0
         lda #$01
@@ -5386,7 +5383,7 @@ oSChk:  ldx ohL
         jmp lxBgOcc             ; (level code: bgOcc)
 oSChkN:
         sty ohSv
-        lda osRag               ; RAGGED: the corner exit takes EVERY face in its box. It is flat on the
+        lda osRag               ; the corner exit takes EVERY face in its box. It is flat on the
         bne oSAll               ;   floor, so any wall pixel drawn over it is nearer than it -- and the
                                 ;   facing test, asked from the quadrant cell bhStep gives it, says no
                                 ;   face at all is in front, since it straddles their planes
@@ -6639,7 +6636,7 @@ obNotI:
         lda orbExpT,y
         beq oNoX
         lsr                     ; SILVER: bit 0 doubles the WIDTH, bit 1 the HEIGHT -- apart, for
-        bcc oNoXy              ;   the two-wide rungs that double only the height (SVQUAD=v)
+        bcc oNoXy              ;   the two-wide rungs that double only the height
         lda omBit               ; (X is the SLOT here -- the flags are re-read, not parked in it)
         ora omXX
         sta omXX
@@ -6716,7 +6713,7 @@ oSvR2:
         lda orbExpT,y
         beq oNoX2
         lsr                     ; SILVER: bit 0 doubles the WIDTH, bit 1 the HEIGHT -- apart, for
-        bcc oNoX2y              ;   the two-wide rungs that double only the height (SVQUAD=v)
+        bcc oNoX2y              ;   the two-wide rungs that double only the height
         lda omBit               ; (X is the SLOT here -- the flags are re-read, not parked in it)
         ora omXX
         sta omXX
@@ -8328,7 +8325,7 @@ opsS:   jsr slOn
 ; switch, f-256 (from the new cell) after it -- turned round for a lunge west or north. Along x
 ; it adds o*cos to forward and takes o*sin from right; along y, o*sin and o*cos, the same shape
 ; as omTrig's kf = kxc + kys and kr = kyc - kxs.
-slOn:   lda kfL                 ; ---- ANGDIAG: keep the player's terms, add x and y parts in place ----
+slOn:   lda kfL                 ; ---- keep the player's terms, add x and y parts in place ----
         sta slF                 ; slOff puts these back exactly: nothing between the two writes kf/kr
         lda kfH                 ;   (omTrig sets them once a frame; orbProj only reads them), and a
         sta slFH                ;   diagonal's two parts together can pass the 8 bits a total would get
@@ -8468,7 +8465,7 @@ sqNoM:  ldy ovar
         lda orbExpT,y
         beq sqNoX
         lsr                     ; SILVER: bit 0 doubles the WIDTH, bit 1 the HEIGHT -- apart, for
-        bcc sqNoXy              ;   the two-wide rungs that double only the height (SVQUAD=v)
+        bcc sqNoXy              ;   the two-wide rungs that double only the height
         lda omBit               ; (X is the SLOT here -- the flags are re-read, not parked in it)
         ora omXX
         sta omXX
@@ -8527,8 +8524,8 @@ bsHY:   !byte 0
 bsS:    !byte 0
 bsC:    !byte 0                 ; bsOpen's row offset
 bsFl:   !byte 0                 ; bgStep: ticks of the hit flash left (0 = none)
-bsL:    !byte 0
-bsH:    !byte 0
+bsL:    !byte 0                 ; bsL/bsH: UNREFERENCED since the whoosh went (2026-11-15); kept only so
+bsH:    !byte 0                 ;   that cleanup left the disk byte-identical -- free to delete
 bgHgt:  !byte 0                 ; ...its h (88/d) this frame, for the stamp's depth test
 osBig:  !byte 0                 ; occStamp: this slot is the big angel's (stamp by depth)
 bgC:    !byte 0                 ; bgOcc's scan column and the overlap's end
@@ -8969,7 +8966,7 @@ dshHld: rts
 ; after the death-angel close-up disappears"), and only on a fresh press: a player who died with
 ; the button down -- carrying, reaching for an orb -- must not skip the black they are still
 ; holding it through. (RETURN restarted from anywhere until 2026-11-12, for testing; the user
-; dropped it with the HUD. RESETNOW=n is the headless test's restart.)
+; dropped it with the HUD.)
 ; (A blind playtester sat at this black with only the joystick: "Fire did nothing ... A real
 ; player might sit at a black screen wondering if it crashed.")
 dshFir: lda #$7f                ; SPACE's column: bit 4 is SPACE there, and joystick-1 FIRE pulls the same
@@ -10619,7 +10616,7 @@ anPath: ldx amIdx
         adc orbXCT,x
         sta apC
         tax
-        ; ---- BFSJIT: read the fill IN FLIGHT if it has reached this angel ----
+        ; ---- read the fill IN FLIGHT if it has reached this angel ----
         ; BFS labels in order of distance, so once this cell has one, every cell nearer the player
         ; has one too -- which is all this walk reads. The fresher map wins; otherwise the live one.
         lda bfsLiveP
@@ -10640,7 +10637,7 @@ apLdA:  lda bfsD0,x             ; operand PATCHED to the live map
         sbc #$01
         bcc anPNo               ; distance 0: standing on the player
         sta apD
-        ; ---- ANGDIAG: a diagonal step two closer, both corner cells clear ----
+        ; ---- a diagonal step two closer, both corner cells clear ----
         ; Tried FIRST: where it exists it is the shorter walk. Only from d >= 3, so the cell it lands
         ; in is never the player's (d = 2 diagonally is already beside you, and anAdj marks).
         cmp #$02
@@ -10704,7 +10701,7 @@ bfsLiveP: !byte >bfsD0            ; which page anPath's LIVE reads use (apLdA's 
 bfsMiss: !byte 0
 bdT:    !byte 0
 
-; ---- bfsDue (BFSJIT): C set if some angel will choose a step within its lead ----
+; ---- bfsDue: C set if some angel will choose a step within its lead ----
 ; Ticks until it sets out = period - slide - banked; lead = cells the last fill took to reach it,
 ; at BFSTICK a tick, plus the clear. Angels held by your gaze are skipped: their clocks are stopped
 ; (unless you carry the idol), and one that turns free reads whatever map exists, a moment stale.
@@ -10768,7 +10765,7 @@ bfsTick:
         lda blkVer
         cmp bfsBVD
         beq bfsRts
-bfsJit: lda bfsDone                ; ---- BFSJIT: the map is stale, but is anyone about to read it? ----
+bfsJit: lda bfsDone                ; ---- the map is stale, but is anyone about to read it? ----
         cmp #$ff
         beq bfsGo               ; no map at all yet this level (objInit): fill now
         jsr bfsDue
@@ -10821,8 +10818,8 @@ bfsSd:  sta bfsD1,x             ; operand PATCHED to the work map
         ; It used to be $02 cells a FRAME, which tied the angel's route freshness to the frame
         ; rate -- so it was least alert exactly when the scene was most expensive, and two builds
         ; of different speed sent it to different places from the same inputs. frameCnt is the
-        ; raster IRQ at 60Hz, so its delta is real time; half a cell a tick is the same average
-        ; rate $02 a frame gave at 15fps. Computed here rather than from dtt because dtt only
+        ; raster IRQ at 60Hz, so its delta is real time: BFSTICK cells a tick (the first timed
+        ; rate, half a cell, matched $02 a frame at 15fps). Computed here rather than from dtt because dtt only
         ; exists when readKeys runs, and the auto-movers replace it.
 bfsExp: lda frameCnt
         tax
@@ -10912,7 +10909,7 @@ bfsLdE: lda bfsD1,x             ; operand PATCHED to the work map
         jsr angRx               ; ANGREACT: reached -- the first time this fill, has its way round turned?
         jmp bfsEnN              ;   (angRx leaves X = bfsEnI)
 bfsEnM:        inc bfsMiss             ; not reached yet -- go on, the others' counts still get written
-        lda bfsHead             ; ---- BFSJIT: cells expanded so far without reaching this angel ----
+        lda bfsHead             ; ---- cells expanded so far without reaching this angel ----
         sta angLabT,x           ;   the next fill's lead for it, at BFSTICK cells a tick
 bfsEnN: dex
         bpl bfsEnL
@@ -10957,7 +10954,7 @@ bfsFin: lda bfsFor
    ; W, H, -W, W+H, H-1: the live level's shape, for every
                                 ;   stride the code used to carry as an immediate
 pathDXT: !byte 1,255,0,0,1,255,1,255        ; ...and as the amTX/amTY pair anTry wants
-pathDYT: !byte 0,0,1,255,1,1,255,255         ;   (ANGDIAG: 4..7 = SE SW NE NW)
+pathDYT: !byte 0,0,1,255,1,1,255,255         ;   (4..7 = SE SW NE NW)
         ; Per hole-like entity: the FILL ink. 0 is a pit, grey3 an empty socket, an orb's colour
         ; a seated one -- the whole difference, one byte. See holeTail.
 
@@ -11070,7 +11067,7 @@ cnOkT:  !byte 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
 
 angAccT: !byte 0,0,0,0,0,0,0,0,0,0   ; 60ths banked toward this angel's next step
-angLabT: !byte 0,0,0,0,0,0,0,0,0,0   ; BFSJIT: cells the last fill expanded before reaching this angel
+angLabT: !byte 0,0,0,0,0,0,0,0,0,0   ; cells the last fill expanded before reaching this angel
 
 orbExpT: !byte 3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,3,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,3,0,3,0,3,0,3,0,0,0,0,0,0,3,0,3,0,3,0,0,0
 orbXOffT: !byte 1,0,1,0,1,0,6,6,6,6,6,6,6,6,6,6,1,1,1,1,1,1,1,6,6,6,6,6,6,6,6,6,6,6,6,6,0,0,1,6,6,7,6,6,6,0,6,0,6,0,6,0,6,7,6,6,6,7,0,6,1,7,1,7,6,7
@@ -11449,7 +11446,7 @@ klUn:   lda krillRt,x
         and #$7f                ;   (bit 7 is the raster's ninth bit when READ: never restore it -- see fallMid)
         pha                     ;   cycles the serial handshake needs, and the fall is on screen
         and #$ef
-        sta $d011               ; (LLDEN=1, a test: leave the display ON -- can Krill load under badlines?)
+        sta $d011
         ldx #<nILV
         ldy #>nILV
         jsr $0400   ; = loadraw, at the address it was assembled for
@@ -13320,7 +13317,6 @@ sdFull: lda sdRow
         lda seamT,x
         jmp (jv)                ; -> ascending chain -> jmp rfNext
 sdNext: jmp rfNext
-
 ; sdCode into row sdRow of the live buffer at this column, AND into the row it mirrors to below
 ; the horizon -- the same pairing the solid chain does in one store, so callers never have to
 ; think about the second write. The buffer base is page-aligned, so rowLoT/rowHiT (which hold
@@ -13779,7 +13775,7 @@ rxsD:   rts
 ;   SOLID or seam   fully wall: the split glyph, black-backed, as before
 ;   a ramp / step   a wall EDGE: copy its 8 rows into the next scratch glyph with 01 -> 11 on the
 ;                   covered columns, in BOTH charsets (B is the row-reversed copy), store that code
-;   scratch full    fall back to the old rule: oSBack picks the backing, the split glyph goes in
+;   scratch full    leave the cell as drawn (oSPfb)
 ; The synthesis is the whole point: at a wall's base the cell is floor with a sliver of wall along
 ; its top, and stamping a whole-column split there hung the stamp 7 px over the floor. Now the ink
 ; follows the wall's own outline in that cell, pixel for pixel.
@@ -13805,7 +13801,7 @@ oSPut:  sta ohMsk
 oSPnbk:
         cmp #$f0               ; ...and so is the CURTAIN's
         beq oSPsol
-        ldx osRag               ; RAGGED, the corner exit: a SPLIT here is the other face's stamp. The
+        ldx osRag               ; the corner exit: a SPLIT here is the other face's stamp. The
         beq oSPq                ;   two faces meet at the corner line, right over the hole, in one cell:
         sec                     ;   the first span's stamp covered its side of it and the second found an
         sbc #$d7            ;   occluder and left it, so the hole showed through the line's foot (the
@@ -13825,7 +13821,7 @@ oSPedg: cmp #$01
         ; actually needs synthesising. Testing this is what stops a tall wall edge eating the
         ; whole scratch budget and leaving its lower cells unstamped.
         tax
-        lda osRag               ; ---- RAGGED: the corner exit's stamp over a wall's BASE -> rubble ----
+        lda osRag               ; ---- the corner exit's stamp over a wall's BASE -> rubble ----
         beq oSPnr
         lda occVrtT,x           ; 0: some row of this cell has no wall -- the base crosses it
         bne oSPnr
@@ -13863,7 +13859,7 @@ oSRgH:  clc
         sta (osPtr),y
         rts
 oSPnr:
-        lda osLast              ; bottom of this column only -- OCCSYNROW=all drops this gate (see OCCSYNTH)
+        lda osLast              ; bottom of this column only
         beq oSPnos
         lda occVrtT,x
         beq oSPsyn
@@ -13934,9 +13930,9 @@ oSPb:   sta $cfc0,x
         lda osTmp
         sta (osPtr),y
         rts
-oSPfb:                          ; OCCFB=skip: fall through to the rts and leave the cell as drawn.
-                        ; See OCCFB -- stamping OCC_FULL here is the wall-base overhang bug,
-                        ; and it fires fifteen times a frame on the hub.
+oSPfb:                          ; the scratch is full: fall through to the rts and leave the cell as
+                        ; drawn. Stamping OCC_FULL here is the wall-base overhang bug (see
+                        ; OCCSYNTH's history), and it fires fifteen times a frame on the hub.
 oSPdn:  rts
 oSPsol: cmp #$c7         ; a SEAM cell whose stamp ends on the line: the edge split that
         bcc oSPso2              ;   keeps it (SEDGE). SOLID comes here too, and goes straight on.
@@ -13957,7 +13953,7 @@ oSPsep: cmp seKT,x              ; partly covered: the edge split whose line is t
 oSPso2: lda osGly               ; fully wall: black-backed split, no question to ask
         sta (osPtr),y
         rts
-osRag:  !byte 0                 ; RAGGED: 1 while occStamp is on the corner exit's slot
+osRag:  !byte 0                 ; 1 while occStamp is on the corner exit's slot
 ragMgT: !byte $da,$da,$da,$da,$da,$da,$da,$da,$da,$da,$da,$da,$da,$ea,$eb,$ec,$eb,$ec,$ed   ; an occluder/split code - OCC0 -> the same cell covered whole
 seKT:   !byte $ff,2,$ff,1,$ff,$ff,$ff,0,1,$ff,$ff,$ff,2,$ff,3,$ff   ; cellFillT mask -> the seam column its edge split keeps, $ff none
 seGT:   !byte 0,230,0,229,0,0,0,228,231,0,0,0,232,0,233,0   ; ...and that split's code
@@ -14977,7 +14973,7 @@ dcBmp:  lda mvBmp               ; 2. you walked into it (mvEnt): the scene turns
         adc #$01
 dcPos:  cmp #$0e
         bcc dcNo
-dcGo:                           ; also the entry DIENOW uses, so the test path is the real one
+dcGo:
 dieGo:  jsr dsGo                ; MUSIC: the song drops out, the glide begins
         jsr idolDie             ; ---- THE IDOL ON A DEATH: see idolDie ----
         ; ---- aim, and unhide it ----
@@ -14992,7 +14988,7 @@ dieGo:  jsr dsGo                ; MUSIC: the song drops out, the glide begins
         lda #$ff                ; unsigned "never projected", far outside the lock window
         sta dieOff
         lda #$00
-        sta dieRem              ; no turn unless an angel marked us (DIENOW may fire without one)
+        sta dieRem              ; no turn unless an angel marked us (a forced death may come without one)
         sta dieLk
         lda #$b4     ; ...and the glide then takes the longest
         sta dieArr

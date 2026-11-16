@@ -1,28 +1,46 @@
 # Where the image's bytes go
 
-What each feature of LEST costs in the C64 image. Measured 2026-10-10 on the default build
-(chain 1–7; level 8 is work in progress and builds only with `WIP=1`), after the space audit
-below. Rerun with:
+What each feature of LEST costs in the C64 image. The current state (the image, the cost by
+feature, the other memory) was measured 2026-11-15 on the shipping build of the ten-level game,
+from the build's own log and `tools/space.mjs`. The dated sections after "The image" are HISTORY:
+what was done when, with the numbers of the day. Rerun with:
 
 ```
 node tools/space.mjs          # the table below
 node tools/space.mjs "" -v    # plus each feature's largest items
 ```
 
-## The image
+## The image (2026-11-15)
 
 The image runs from `$0801` to `$bfff`: **47,103 bytes**. It holds three kinds of bytes, and
 `space.mjs` charges all three to a feature:
 
 | | bytes | what |
 |---|---:|---|
-| code | 20,682 | the engine, from `$0801` up |
-| tables | 21,498 | precomputed data, from `$bfff` down, plus a few variables in its holes |
-| scratch | 2,346 | RAM buffers, packed into the arena between code and tables (another 184 sit in alignment padding) |
-| **free** | **~2,700** | **2,565 B of level arena in one run (9 whole pages)**, plus 127 B of alignment padding |
+| code | 22,454 | the engine, `$0801`-`$5fb6` (code headroom 0: it runs straight into the arena) |
+| tables | 18,675 | precomputed data, `$7595`-`$bfff`, plus 376 B of alignment padding (199 of it holding scratch) |
+| arena | 5,598 | `$5fb7`-`$7594`: the level slot and its code, and the RAM scratch (184 buffers, 1,667 B) |
+| **free** | **246** | **in 13 fragments**: 73 B of arena edge at `$5fb7`, ten 16-byte page tails at `$97f0`-`$a0ff`, 13 B at `$bef3` |
 
-All 88 free bytes of zero page are now in use: `compact.mjs` promotes the most-referenced
-variables into them (see the audit).
+The level arena -- the room a level slot could grow into -- is 73 bytes, none of it a whole page.
+
+**The level slot is at `$6500`.** Every level file (`ILV1`-`ILV:`) loads there: 705 B of tables and 51 B
+of wall lists, 756 B a slot, 3 pages; then the level's code (`LXAT` = `$67f4`, 3,301 B reserved, to
+`$74d8`), which also holds levels 2-7's songs.
+
+**The charset is full: 256/256.** 199 cell codes (BLANK, SOLID and the 197 ramps and steps from
+charsetgen, `KCELL=197`), 16 seam, 7 occluder on black, 6 on white, 10 seam-edge and 1 new-face mark
+make 248; the last 8 (`SYN0` = 248 up) are the occlusion stamp's synthesis scratch (`OCCSYNN=8`).
+
+**Zero page:** `compact.mjs` promotes 91 buffers into the 92 bytes it finds free (~826 B of code
+saved). The build counts 225 names and 29 bytes no name claims: `$b5`-`$bf` (11, level code's own
+zero page), `$e0`-`$e6` (Krill's), `$03` and `$05`.
+
+The one duplicate table the build still flags: `orbSeenT == cnOkT` (17 bytes each).
+
+## History
+
+Everything from here to "Cost by feature" is history: the numbers are the ones measured that day.
 
 ## The space audit, 2026-10-10
 
@@ -179,28 +197,35 @@ Checked: falling 9 -> 7 reloads `IAR0`, and level 7 is pixel-identical to bootin
 Level-loaded CODE is the same shape plus one hard part, linking code to run at the landing
 address. That's "Level code: BUILT" above.
 
-## Cost by feature
+## Cost by feature (2026-11-15)
+
+`node tools/space.mjs` on the shipping build. "scratch" is the arena's share, so the renderer's
+includes the level slot's tables (`mapT` and the rest) and the slot's level-code space.
 
 | feature | code | tables | scratch | **total** |
 |---|---:|---:|---:|---:|
-| renderer: cast, subdivide, draw | 5,113 | 13,921 | 907 | **19,941** |
-| entities: projection, sprites, occlusion | 5,115 | 2,366 | 88 | **7,569** |
-| level fall + load (the drop) | 2,200 | 1,002 | 1,042 | **4,244** |
-| death scene | 994 | 1,837 | 6 | **2,837** |
-| angel AI + BFS pathing | 998 | 801 | 257 | **2,056** |
-| seams | 1,285 | 675 | 40 | **2,000** |
-| movement + input | 759 | 328 | 0 | **1,087** |
-| level setup (entering a level) | 825 | 0 | 3 | **828** |
-| sound | 388 | 290 | 56 | **734** |
-| boot, main loop, IRQ | 664 | 0 | 0 | **664** |
-| angel lunge (slide) | 448 | 156 | 0 | **604** |
-| orb carry (pick up / put down) | 595 | 3 | 0 | **598** |
-| HUD + fps readout | 560 | 0 | 0 | **560** |
-| wall collapse (sockets) | 485 | 0 | 0 | **485** |
-| idol + pedestals | 228 | 2 | 0 | **230** |
-| THE END | 37 | 0 | 0 | **37** |
-| FREE: nothing lives here | 0 | 117 | 2,512 | **2,629** |
-| **total** | **20,694** | **21,498** | **4,911** | **47,103** |
+| renderer: cast, subdivide, draw | 6,176 | 12,389 | 4,691 | **23,256** |
+| entities: projection, sprites, occlusion | 5,758 | 2,427 | 279 | **8,464** |
+| level fall + load (the drop) | 2,080 | 1,026 | 200 | **3,306** |
+| death scene | 1,440 | 1,634 | 0 | **3,074** |
+| angel AI + BFS pathing | 1,270 | 815 | 268 | **2,353** |
+| seams | 1,254 | 34 | 40 | **1,328** |
+| movement + input | 840 | 326 | 1 | **1,167** |
+| level setup (entering a level) | 757 | 3 | 20 | **780** |
+| wall collapse (sockets) | 699 | 0 | 16 | **715** |
+| angel lunge (slide) | 511 | 156 | 10 | **677** |
+| boot, main loop, IRQ | 661 | 0 | 0 | **661** |
+| orb carry (pick up / put down) | 569 | 3 | 0 | **572** |
+| idol + pedestals | 274 | 0 | 0 | **274** |
+| sound | 109 | 0 | 0 | **109** |
+| THE END | 37 | 65 | 0 | **102** |
+| flicker (level 8) | 19 | 0 | 0 | **19** |
+| FREE: nothing lives here | 0 | 173 | 73 | **246** |
+| **total** | **22,454** | **19,051** | **5,598** | **47,103** |
+
+Since October: the HUD is gone (2026-11-12, `HUD=1` brings it back), the songs and their player
+and most per-level features moved into level code (in the level file, not the image), and the
+arena became the level slot.
 
 **How bytes are charged:**
 
@@ -221,7 +246,7 @@ the engine is identical whatever the chain is. That is why a work-in-progress le
 of the game entirely (`WIP_LEVEL_IDS`, built only with `WIP=1`): level 8's flicker would otherwise
 put about 400 bytes into the shipping image.
 
-### The renderer, 20.7K
+### The renderer, 20.7K (history)
 
 *(Measured before the audit at `38fa972`. The table names still hold. The sizes of `rbT`/`rsT` and the move/seam pairs are now shared, as above.)*
 
@@ -250,7 +275,7 @@ Code, 5.3K:
 - step-column prep: 593
 - `interpSpan`: 432
 
-### Entities, 7.9K
+### Entities, 7.9K (history, `38fa972`)
 
 Code, 5.4K:
 
@@ -270,15 +295,15 @@ Tables, 2.3K:
 - `orbOccT`: 108
 - ENTCONE: 96
 
-### The fall, 4.4K
+### The fall, 4.4K (history, `38fa972`)
 
 - **the two half-height screen snapshots, 1,040:** the scratch column
 - **Krill's parked loader, 251**
 - **code, 2.3K:** the arc, the warp copy, `fallMid`, the tail rows, background loading
 
-## What an off-switch actually frees
+## What an off-switch actually frees (history)
 
-*(Measured before the audit at `38fa972`. `PALKEYS` and `SNDTEST` no longer exist.)*
+*(Measured before the audit at `38fa972`. `PALKEYS`, `SNDTEST` and `SOUND` no longer exist.)*
 
 Measured by building with the switch and comparing against the default build. These differ from
 the table above for two reasons. An off-switch can leave its feature's tables behind. And some
@@ -298,7 +323,7 @@ code is shared, so it can't be removed with the feature.
 | `PARTIAL=0` | 4 | 0 | 0 | **4** | |
 | `CELLANG=0`, `FASTBOOT=0`, `IDOLCON=0`, `SNDSTEP=0` | 0 | 0 | 0 | **0** | no effect on the image |
 
-**Broken switches.** These no longer build, which is worth fixing or deleting in the pass:
+**Broken switches (as of 2026-10).** These did not build then, which was worth fixing or deleting in the pass (`PALKEYS` has since gone):
 
 | switch | what it does now |
 |---|---|
@@ -309,21 +334,22 @@ code is shared, so it can't be removed with the feature.
 | `SHYCOL=0` | overflows. Expected: it restores the older, bigger path |
 | `WIP=1 FLKSPR=2` | about 100 B over in the full game. Expected: the new sprite flicker needs room |
 
-## The other memory
+## The other memory (2026-11-15)
 
 | region | used | free |
 |---|---|---|
-| VIC bank 3 (charsets, sprites, screens) | orb ladder 30 slots, hole ladder 41, idol 10, level slot `$f500` | **1,256 B = 19 sprite slots** |
-| low RAM `$0200`–`$03fb` | 472 of 508 | 36 B |
-| zero page | 159 named | 95 B, 46 of them in one run at `$d2`–`$ff` |
-| level file (per level, loaded on entry) | 686 B per slot, 3 pages | not image space |
+| VIC bank 3 (charsets, sprites, screens) | the orb, hole and socket ladders, the angel's, the level art sets at `$f380` | **248 B at `$ddc0`-`$deb7` = 3 sprite slots** (56 B lost to 64-byte alignment) |
+| low RAM `$0200`–`$03fb` | 472 of 508 (`fallTailB`, `pvBnd`, `pvAng`, `pvRcp`) | 36 B |
+| zero page | 225 named | 29 B unclaimed: `$b5`-`$bf` (level code's), `$e0`-`$e6` (Krill), `$03`, `$05` |
+| level file (per level, loaded on entry to the slot at `$6500`) | 756 B of tables + wall lists (3 pages), then up to 3,301 B of level code from `$67f4` | not image space |
+| disk | the boot files, the image, ten level files, the art sets, the ending | 99 blocks free |
 
-Bank 3 is where a level-8-only orb with a different shadow would go: a second orb ladder costs
-about 30 slots, and only 19 are free.
+In October bank 3 had 19 sprite slots free (1,256 B); the sentry's, the big angel's, the flute's
+and the level art sets have taken all but three.
 
 ## Where a pass could find room
 
-*(Written before the audit. Done since: the zero-page pass, the duplicate tables, the palette keys. Done 2026-11-12: the HUD readout and its keys. Still open: the death picture charset, per-level overlays, the clamp-table overlap.)*
+*(History: written before the audit. Done since: the zero-page pass, the duplicate tables, the palette keys, per-level overlays (level code, 2026-10-14). Done 2026-11-12: the HUD readout and its keys. Still open: the death picture charset (never from disk: see the death scene rule), the clamp-table overlap.)*
 
 Ranked by size. Each one's cost in cycles or features has to be weighed against the room it
 frees.

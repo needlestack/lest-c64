@@ -477,7 +477,7 @@ for (let pass = 0; pass < 6 && !settled; pass++) {
   // inside a page, from where the loops would sit with no pad at all. It used to accumulate: a loop
   // that straddled was pushed to the NEXT page and its pad never shrank, so code growing in front of
   // ogEnL by 60 bytes added ~200 of padding where taking 60 away would have done -- 420 bytes across
-  // three loops, enough to push the level slot off the arena (RAGGED, 2026-11-13). From the fourth
+  // three loops, enough to push the level slot off the arena (the corner exit's rubble, 2026-11-13). From the fourth
   // pass a pad may only grow, so a layout that would otherwise see-saw still settles.
   const loops = new Map();                          // run -> [{ name, base, len }]
   for (const name of HOTLOOPS) {
@@ -586,12 +586,9 @@ for (const raw of src.split('\n')) {
   }
 }
 const sorted = [...eqs].sort((a, b) => a[1] - b[1]);
-// FATBUF=1: size EVERY buffer by the gap to the next one in the ORIGINAL layout. That is what the
-// hand layout actually gave it, so it cannot be an under-estimate -- and if rehoming works with
-// these sizes and fails with the declared ones, then a declared size is short and that is the bug.
-const fatOf = (a, i) => Math.min((sorted[i + 1] ? sorted[i + 1][1] : CEIL) - a, 2048);
+// (FATBUF=1 sized every buffer by its gap in the hand layout, to catch a short declared size; the
+// hand layout's origins are placeholders now, so it went 2026-11-15.)
 const sizeOf = (n, a, i) => {
-  if (process.env.FATBUF) return fatOf(a, i);
   if (DECLARED[n]) return DECLARED[n];
   const u = use.get(n);
   if (!u.indexed) return u.max + 1;

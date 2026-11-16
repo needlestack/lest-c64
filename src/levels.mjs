@@ -15,8 +15,7 @@
 // PALTEST, ENDTEST, WALLOFF) stay in the build and are applied there, on top of these.
 // THE ENV THIS MODULE STILL READS, deliberately: the knobs that RE-TONE or RE-SHAPE a level's own
 // content, which the build used to read right where the definition stood -- CEILn/SEAMn, SEAMCOL,
-// FLKTONE/FLKDSEAM/FLKGND/FLKWALL/FLKSEAM, FLOORDK, IDOLBn, IDOLROOMB, BOLTCOL, RAGGED (level 10's
-// exit ink), BIG=0 and BREAK=0. Read once, at import, exactly as before; a sheet printed under one of
+// FLKTONE/FLKDSEAM/FLKGND/FLKWALL/FLKSEAM, FLOORDK, IDOLBn, IDOLROOMB, BOLTCOL, BIG=0 and BREAK=0. Read once, at import, exactly as before; a sheet printed under one of
 // them shows that variant, as a LEVELSHEET build did.
 import { END_DST } from './ending-src.mjs';
 //
@@ -854,11 +853,11 @@ const entitiesOf = (n, { noOrb = false, noAngel = false, noSv = false } = {}) =>
 // Seen from the start, facing the pedestals, the holes behind read red / green / blue left to right
 // like the drums (the user, 2026-11-08) -- (1,1), then (1,6) right behind you, then (1,11) -- and
 // lead to 5 / 6 / 7. So (1,11) is BLUE and (1,6) GREEN: the colours follow the levels.
-// 10's corner exit is YELLOW (RAGGED, 2026-11-13). It lies ACROSS the faces of the blocks still standing
+// 10's corner exit is YELLOW (2026-11-13). It lies ACROSS the faces of the blocks still standing
 // round it, which no other entity does, so it is stamped its own way -- every face in its box, and the
-// cells a block's base crosses filled to the wall's own height (RAGGED, at the rubble glyphs). Without
-// that it went unstamped, and had to be black on black walls to hide it (RAGGED=0, drawn 1.5x to be seen).
-const LEVEL_EXITCOL = { 4: [2, 6, 5, 0], ...(process.env.RAGGED !== '0' ? { 10: [7] } : {}) };   // red, green, blue, black; 10's yellow
+// cells a block's base crosses filled to the wall's own height (at the rubble glyphs). The old black,
+// unstamped 1.5x hole (RAGGED=0) went on 2026-11-15.
+const LEVEL_EXITCOL = { 4: [2, 6, 5, 0], 10: [7] };   // red, green, blue, black; 10's yellow
 // ---- and where each exit GOES ----
 // lvlNxtT is nExit bytes a level, indexed by the exit fallChk matched: the hub has four, and the
 // whole point of that room is that they are four CHOICES. null = the next level in LEVEL_IDS
@@ -919,7 +918,7 @@ const cellsOf = s => s.split(';').filter(Boolean).map(p => p.split(',').map(Numb
 // leads to the next level, wrapping round to 1.
 const nextLevel = n => LEVEL_IDS[(LEVEL_IDS.indexOf(n) + 1) % LEVEL_IDS.length];
 // Level 1's moved out from (21,2)/(21,8) to the corners on 2026-10-30: with diagonal steps and fresher
-// maps (BFSJIT/ANGDIAG) angel 2 got round the ring to the door too fast -- the user needed room to
+// maps (the angels of 2026-11-01) angel 2 got round the ring to the door too fast -- the user needed room to
 // draw it further up or down the east column before slipping past to the hole. Moved back on
 // 2026-11-01 for a playtest, then OUT to the corners again the same day once the fixed reaction
 // (ANGREACT) made the race consistent: "now we have to move the leash out to the corners". A group
