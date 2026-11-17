@@ -10940,7 +10940,7 @@ dmT     = $806e                  ; scratch
 dmU     = $806f
 plLX    = $8072                  ; the last cell you stood on that was not a hole (fallChk; idolStay)
 plLY    = $8073
-lkArm   = $8066                  ; lvKey: nonzero once 'L' has been seen UP -- one drop per press (LVSKIP)
+lkArm   = $8066                  ; lvKey: 4 while 'L' is up, 1 once it came down with no digit, 0 spent (LVSKIP)
 dieArr  = $8070                  ; this death's turn and glide, in 60ths: one of DIE_ARRS
 dieQ    = $8071                  ; ...and which (0 front, 1 side, 2 back), times 24: dsPlan's row
 dieCy   = $8060                  ; ($8060-$8073 came free with the six-sprite angel; $8066-$8068 went to
@@ -29406,6 +29406,8 @@ fnDone: rts
 ; so one drop per press needs a latch: lkArm is set while 'L' is up and spent by a drop, or a combo
 ; still held after landing would drop again and again. (Uninitialised is fine: garbage arms it, 0
 ; just waits for the first frame without 'L'.)
+; 'L' FIRST (the user, 2026-11-16): lkArm is 4 while 'L' is up; the frame it comes down, a digit already
+; held spends the press, and no digit sets 1 -- only then does a digit drop you.
 ; From readKeys, A = the column-5 read with the stick masked. Keeps rowv; leaves $dc00 neutral.
 ${TESTRIG || AUTOMOVE ? `; No readKeys in this build (TESTRIG or an auto-mover), so the keys half is not emitted: only readKeys
 ; calls lvKey, and it was ~75 bytes of dead code and tables (stage 2, 2026-11-14; auto-movers too since
@@ -29424,6 +29426,8 @@ lkDg:   lda lkColT,x
         beq lkSeen
         dex
         bpl lkDg
+        lda #1                  ; no digit: 'L' is down and clean, so a digit from now on drops
+        sta lkArm
 lkOut:  lda #$ff
         sta $dc00               ; leave the port neutral for the next joystick read
         rts
@@ -29433,7 +29437,10 @@ lkSeen: jsr lkOut               ; the port neutral...
         ora joyEor
         and #$1f
         bne lkOut               ; a stick line was down at either sample: no key is believed
-        sta lkArm               ; A = 0: this press is spent
+        ldy lkArm               ; 4: 'L' came down THIS frame with the digit already held --
+        sta lkArm               ; A = 0: this press is spent, either way
+        cpy #4                  ;   'L' FIRST (the user, 2026-11-16): a digit held before 'L' drops nothing
+        beq lkOut
         inx                     ; the level: its digit's index + 1 (1..${LVSKIP_KEY.length})
 `}lkGo:   stx lvlNxtT             ; exit 0 now leads there... (lkGo: TESTRIG's maStep enters here too)
 ${TESTRIG ? 'lkOn:                           ; (TESTRIG: the forced fall enters here: exit 0 as it already leads)\n' : ''}        ldy nOrbT               ; ...and we stand on it (exit 0's entity index, as fallChk counts)
