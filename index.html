@@ -89,6 +89,14 @@
   .space { width: 210px; height: 44px; font-size: 13px; letter-spacing: 0.25em; }
   .space-note { margin-top: 6px; color: var(--dim); font-size: 13px; text-align: center; }
   .turn { display: grid; grid-template-columns: repeat(2, 52px); gap: 6px; margin-top: 54px; }
+  /* THE KEYS ARE TOUCH CONTROLS (see "TOUCH" below): a finger on them must not scroll, zoom, select
+     or call up the long-press menu; a held key looks pressed */
+  .keys, .space-row { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .key.down { background: var(--key-edge); border-bottom-width: 1px; transform: translateY(3px); }
+  /* NO VIRTUAL GAMEPAD: on a touch screen EmulatorJS 4.2.3 covers the picture with one, and shows it
+     when the game starts whatever 'virtual-gamepad' says (emulator.js:1014, display = '' if touched),
+     so the setting alone cannot keep it away. The keys below take its place. */
+  .ejs_virtualGamepad_parent { display: none !important; }
 
   table { border-collapse: collapse; margin: 0 auto; }
   td { padding: 3px 0; vertical-align: top; }
@@ -114,22 +122,22 @@
     <div>
       <div class="label">MOVE</div>
       <div class="cluster">
-        <div class="key e">E<span class="arrow">&uarr;</span></div>
-        <div class="key row2">S<span class="arrow">&larr;</span></div>
-        <div class="key row2">D<span class="arrow">&darr;</span></div>
-        <div class="key row2">F<span class="arrow">&rarr;</span></div>
+        <div class="key e" data-code="KeyE">E<span class="arrow">&uarr;</span></div>
+        <div class="key row2" data-code="KeyS">S<span class="arrow">&larr;</span></div>
+        <div class="key row2" data-code="KeyD">D<span class="arrow">&darr;</span></div>
+        <div class="key row2" data-code="KeyF">F<span class="arrow">&rarr;</span></div>
       </div>
     </div>
     <div>
       <div class="label">TURN</div>
       <div class="turn">
-        <div class="key">&lt;<span class="alt">,</span></div>
-        <div class="key">&gt;<span class="alt">.</span></div>
+        <div class="key" data-code="Comma">&lt;<span class="alt">,</span></div>
+        <div class="key" data-code="Period">&gt;<span class="alt">.</span></div>
       </div>
     </div>
   </div>
   <div class="space-row">
-    <div class="key space">SPACE</div>
+    <div class="key space" data-code="Space">SPACE</div>
     <div class="space-note">pick up, put down, restart</div>
   </div>
 
@@ -157,12 +165,13 @@
   // reads . O E U / W V where the game reads E S D F / , . (a Dvorak player, 2026-11-18).
   const DVORAK = new URLSearchParams(location.search).has('dvorak');
   if (DVORAK) {
-    const relabel = (sel, labels) => document.querySelectorAll(sel).forEach((k, i) => {
+    const relabel = (sel, labels, codes) => document.querySelectorAll(sel).forEach((k, i) => {
       k.firstChild.textContent = labels[i];
+      k.dataset.code = codes[i];         // a touch sends what the Dvorak disk reads
       k.querySelector('.alt')?.remove();
     });
-    relabel('.cluster .key', ['.', 'O', 'E', 'U']);
-    relabel('.turn .key', ['W', 'V']);
+    relabel('.cluster .key', ['.', 'O', 'E', 'U'], ['Period', 'KeyO', 'KeyE', 'KeyU']);
+    relabel('.turn .key', ['W', 'V'], ['KeyW', 'KeyV']);
   }
   EJS_gameUrl = DVORAK ? 'lest-c64-dvorak.d64' : 'lest-c64.d64';   // the committed disks, beside this page
   EJS_gameName = 'LEST';
@@ -183,6 +192,7 @@
                                            //   and no memory to read; VICE's own bar was tried and dropped)
     'keyboardInput': 'enabled',            // every key to the C64: by default EmulatorJS takes S, E,
                                            //   F and others for its gamepad and the game never sees them
+    'virtual-gamepad': 'disabled',         // (and hidden by CSS: see .ejs_virtualGamepad_parent)
     'lockMouse': 'disabled',               // no pointer grab on a click: the C64 core says it has a
                                            //   mouse, so EmulatorJS would lock it, and LEST uses none
   };
@@ -212,6 +222,46 @@
       setTimeout(() => { if (document.hasFocus()) g.focus(); }, 0);
   });
   window.addEventListener('focus', () => game()?.focus());
+
+  // ---- TOUCH: the key diagram plays the game ----
+  // A finger (or the mouse) on a key holds that key down on the C64, and SLIDING moves the hold to
+  // whatever key is under the finger now -- across E S D F, or between < and > -- with no lift. Each
+  // pointer is tracked on its own, so one thumb can walk while the other turns; a key held by two
+  // fingers is let go when the last one leaves. The press is a synthetic KeyboardEvent on document
+  // with the key's physical code: the core's listener is there (bubble phase, no isTrusted check) and
+  // reads KeyboardEvent.code alone (EmulatorJS's RetroArch fork, input/drivers/emulatorjs_input.c).
+  {
+    const send = (code, down) => document.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup',
+      { code, key: code === 'Space' ? ' ' : '', bubbles: true, cancelable: true }));
+    const holders = new Map();           // code -> how many pointers hold it
+    const held = new Map();              // pointerId -> the key element it holds
+    const hold = (id, el) => {
+      const old = held.get(id);
+      if (old === el) return;
+      if (old) {
+        const n = holders.get(old.dataset.code) - 1;
+        holders.set(old.dataset.code, n);
+        if (!n) { send(old.dataset.code, false); old.classList.remove('down'); }
+        held.delete(id);
+      }
+      if (el) {
+        const n = (holders.get(el.dataset.code) ?? 0) + 1;
+        holders.set(el.dataset.code, n);
+        if (n === 1) { send(el.dataset.code, true); el.classList.add('down'); }
+        held.set(id, el);
+      }
+    };
+    const keyAt = (x, y) => document.elementFromPoint(x, y)?.closest('[data-code]') ?? null;
+    document.addEventListener('pointerdown', (ev) => {
+      const el = ev.target.closest?.('[data-code]');
+      if (!el) return;
+      ev.preventDefault();
+      el.releasePointerCapture?.(ev.pointerId);   // a touch captures to its first element; the slide needs hit-testing
+      hold(ev.pointerId, el);
+    });
+    document.addEventListener('pointermove', (ev) => { if (held.has(ev.pointerId)) hold(ev.pointerId, keyAt(ev.clientX, ev.clientY)); });
+    for (const t of ['pointerup', 'pointercancel']) document.addEventListener(t, (ev) => hold(ev.pointerId, null));
+  }
 
   // ---- LEAVING: let go of the heavy parts now ----
   // Safari kept each reload's emulator alive beside the new one: ~3 GB on a fresh load (its memory
