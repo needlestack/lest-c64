@@ -2894,6 +2894,25 @@ const joyMask = dst => `        lda #$ff
         lda $dc01
         eor #$ff
         sta ${dst}               ; 1 where a joystick line is active`;
+// ---- dvKey: one key, read alone (DVORAK's readKeys): Z set = held ----
+// THE SHIPPING LAYOUT IS PINNED: readKeys sits in the code stream before the hot loops, and the
+// image has 0 bytes of headroom -- any change in readKeys' SIZE, either way, moved them and failed
+// the layout (2026-11-18: inline reads, +25 B, and a streamed dvK, +12 B, both failed). So the
+// DVORAK reader is the shipping one's exact size: its variable parts are 83 bytes there (two shared
+// row reads, then rowv tests); here six `ldx / jsr dvK / and` (7 B each) plus the branches come to
+// 82, dvK itself is an @FLOAT (outside the stream), and DVK_PAD makes up the last byte. Guarded by
+// the layout itself: a size slip fails the build the same way.
+const dvKey = (col, bit) => `        ldx #$${col.toString(16)}
+        jsr dvK
+        and #$${bit.toString(16).padStart(2, '0')}`;
+const DVK_PAD = 1;                               // 83 - 82: see above
+// dvK: X = the $dc00 column; A = that column's $dc01 lines, with the stick's forced high (joyEor).
+const DVK_CODE = `        * = $bd00               ; @FLOAT (see compact.mjs): DVORAK's key read, outside the stream
+dvK:    stx $dc00
+        lda $dc01
+        ora joyEor
+        rts
+        * = $bd00               ; (the stream resumes)`;
 // ---- absA: |A| after "sec / lda a / sbc b" on two cell coordinates ----
 // The absolute value of a player-to-entity cell delta was hand-written six times in three variants
 // (bpl or bcs, with or without a clc). Coordinates are 0..MAPW-1, so "negative" and "borrowed" are
@@ -3505,6 +3524,16 @@ const HUD = flag('HUD');
 // default since the same day's audit made room (level 4's wall mark and level 8's orb shadow went
 // to level code); LVSKIP=0 leaves it out.
 const LVSKIP = process.env.LVSKIP !== '0';
+// DVORAK=1 (a special build, the user 2026-11-18): the six MOVEMENT keys sit where E D S F , . sit
+// on a QWERTY keyboard, but by the letters a Dvorak layout puts there -- . O E U / W V -- for a
+// keyboard that does Dvorak in its own FIRMWARE (a Kinesis, say: a Dvorak player, 2026-11-18). The
+// web page's EmulatorJS maps keys by physical code, so a Dvorak typist on a QWERTY board is already
+// fine; a firmware-Dvorak board reports the Dvorak keys themselves, and only a disk can follow it.
+// index.html serves this build at ?dvorak. L, the digits, SPACE and the stick are untouched.
+// Matrix places ([$dc00 column, $dc01 bit]): '.' $df/$10 (FIRE's line, as the QWERTY '.' turn already
+// is: masked while the stick's fire is down), E $fd/$40, O $ef/$40, U $f7/$40, W $fd/$02, V $f7/$80.
+// Off, readKeys is byte-for-byte the shipping one.
+const DVORAK = process.env.DVORAK === '1';
 if (PIVLAB && LVL !== 1 && (!LVSKIP || process.env.FALL === '0'))
   throw new Error(`PIVLAB on LVL=${LVL} falls there through lvKey's tail (lkGo): it needs LVSKIP and FALL`);
 // FIRESTRAFE (DEFAULT; =0 for the old controls): a joystick game needs strafing, and the stick has
@@ -13886,7 +13915,28 @@ readKeys:
         sta joyv
         eor #$ff
         sta joyEor
-        lda #$fd
+${DVORAK ? `        ; DVORAK: each key read on its own (no two share a column the way E/S and D/F do)
+${dvKey(0xdf, 0x10)}
+        beq rkFwd               ; '.' held (Dvorak's letter where QWERTY has E)
+        lda joyv
+        and #$01
+        bne rkNotE              ; joystick-1 up also moves forward
+rkFwd:  jsr moveFwd
+rkNotE:
+${dvKey(0xef, 0x40)}
+        bne rkNotS              ; O (where QWERTY has S)
+        jsr strafeL
+rkNotS:
+${dvKey(0xfd, 0x40)}
+        beq rkBack              ; E (where QWERTY has D)
+        lda joyv
+        and #$02
+        bne rkNotD              ; joystick-1 down also moves back
+rkBack: jsr moveBack
+rkNotD:
+${dvKey(0xf7, 0x40)}
+        bne rkNotF              ; U (where QWERTY has F)
+        jsr strafeR` : `        lda #$fd
         sta $dc00
         lda $dc01
         ora joyEor
@@ -13915,7 +13965,7 @@ rkNotD: lda $dc01
         ora joyEor
         and #$20
         bne rkNotF
-        jsr strafeR
+        jsr strafeR`}
 rkNotF: lda #$df                ; ---- ',' and '.': the '<' and '>' keys turn, for a keyboard alone ----
         sta $dc00               ; (the user, 2026-11-12). Column 5: ',' is bit 7, '.' bit 4 -- bit 4
         lda $dc01               ;   is also the stick's FIRE, and joyEor forces whatever the stick
@@ -13925,9 +13975,11 @@ ${LVSKIP && FALL ? `        jsr lvKey               ; LVSKIP: 'L' is bit 2 of th
 ` : ''}        lda joyv
         and #$04
         beq rkSL                ; joystick-1 left
-        lda rowv
+${DVORAK ? `${dvKey(0xfd, 0x02)}
+        bne rkJR                ; nor W (where QWERTY has ',')
+        beq rkTL                ; always: W turns left` : `        lda rowv
         bmi rkJR                ; nor ','
-        bpl rkTL                ; always: ',' turns left
+        bpl rkTL                ; always: ',' turns left`}
 rkSL:
 ${FIRE_STRAFE ? `        lda joyv
         and #$10
@@ -13960,10 +14012,12 @@ ${FIRE_STRAFE ? `        lda joyv
 rkJR:   lda joyv
         and #$08
         beq rkSR                ; joystick-1 right
-        lda rowv
+${DVORAK ? `${dvKey(0xf7, 0x80)}
+        bne rkJD                ; nor V (where QWERTY has '.')
+        beq rkTR                ; always: V turns right` : `        lda rowv
         and #$10
         bne rkJD                ; nor '.'
-        beq rkTR                ; always: '.' turns right
+        beq rkTR                ; always: '.' turns right`}
 rkSR:
 ${FIRE_STRAFE ? `        lda joyv
         and #$10
@@ -13990,7 +14044,9 @@ ${FIRE_STRAFE ? `        lda joyv
         adc pa                  ; ...carrying into the angle byte
         sta pa
 rkJD:   rts
-` : TESTRIG ? `; ---- TESTRIG's drivers, IN readKeys' PLACE (2026-11-14) ----
+${DVORAK ? `        !fill ${DVK_PAD}, $ea          ; DVORAK: readKeys at the shipping size (see dvKey)
+${DVK_CODE}
+` : ''}` : TESTRIG ? `; ---- TESTRIG's drivers, IN readKeys' PLACE (2026-11-14) ----
 ; The rig plays no keys (its idle stands still), so readKeys goes, as in every auto-mover build, and
 ; the drivers take its place. WHERE each piece goes is a measured answer to the pinned hot loops
 ; after this point (cdda/asLp, sdWl/ogEnL), which move with every byte the stream gains or loses:

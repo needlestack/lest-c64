@@ -21,6 +21,8 @@
 *.d64
 # ...except THE game, committed so a visitor can play it without building
 !/lest-c64.d64
+# ...and its Dvorak build (DVORAK=1 D64=lest-c64-dvorak.d64), which index.html serves at ?dvorak
+!/lest-c64-dvorak.d64
 
 # data/charset-plan.json is TRACKED. It looks derived and it is not: it is the k-medians fit over a
 # 2M-position scan of a shape-rich maze, canonical input to every build, and no level's map is an
@@ -50,3 +52,4 @@ krill/loader-rt-c64.prg
 
 # exomizer, fetched and built by tools/get-exomizer.sh (zlib licence; ~740 KB of source we do not carry)
 tools/exomizer-3.1/
+/lest-c64-dvorak.crt

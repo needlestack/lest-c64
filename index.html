@@ -149,7 +149,22 @@
   EJS_core = 'vice_x64sc';                 // the cycle-exact core: the game's raster timing and its
                                            //   fast loader both need it
   EJS_pathtodata = 'https://cdn.emulatorjs.org/4.2.3/data/';
-  EJS_gameUrl = 'lest-c64.d64';            // the committed master disk, beside this page
+  // ?dvorak: THE DVORAK DISK (DVORAK=1 in build-iray.mjs), for a keyboard that does Dvorak in its own
+  // firmware (a Kinesis, say). EmulatorJS takes each key by its PHYSICAL code (its RetroArch input
+  // driver reads KeyboardEvent.code alone), so a QWERTY-layout Dvorak typist already plays the
+  // shipping disk with E S D F , . under the fingers. A firmware-Dvorak keyboard reports the Dvorak
+  // keys themselves -- the key under the left middle finger is "Period" -- so it needs a disk that
+  // reads . O E U / W V where the game reads E S D F / , . (a Dvorak player, 2026-11-18).
+  const DVORAK = new URLSearchParams(location.search).has('dvorak');
+  if (DVORAK) {
+    const relabel = (sel, labels) => document.querySelectorAll(sel).forEach((k, i) => {
+      k.firstChild.textContent = labels[i];
+      k.querySelector('.alt')?.remove();
+    });
+    relabel('.cluster .key', ['.', 'O', 'E', 'U']);
+    relabel('.turn .key', ['W', 'V']);
+  }
+  EJS_gameUrl = DVORAK ? 'lest-c64-dvorak.d64' : 'lest-c64.d64';   // the committed disks, beside this page
   EJS_gameName = 'LEST';
   EJS_startOnLoaded = false;               // ONE click, on Play: it is the interaction the browser wants
   EJS_startButtonName = 'Play';            //   before it allows sound, so the game is heard from its
