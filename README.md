@@ -180,6 +180,7 @@ src/build-iray.mjs`).
 | `art/` | source art: every picture in the game starts here (`docs/ASSETS.md` says how); `art/tree/` is the end scene's |
 | `krill/` | Krill's loader, prebuilt |
 | `docs/` | `TESTING.md`, THE tests: what to run for which question and how to read it; `SPACE.md`, where the image's bytes go; `RENDERING.md`; `levels/`, every level as a sheet (key in `levels/KEY.txt`, regenerate with `node tools/levelsheet.mjs`); and `ladders/`: every entity's ladder of sprite sizes, as pictures |
+| branch `history-main` | the project's first two months (7 Aug - 8 Oct 2026, 645 commits), before `main` began; some comments in the code cite commits that live only there |
 | `tools/` | live-machine inspection (`probe`), frame-rate and cycle benchmarks (`fpsr`, `prof`, `vprof`), test rigs (`regress.sh`, `ship.sh`, `frames`), the level sheets (`levelsheet`), and the music tools (`song-*`, `sidtrace`) |
 
 ## Credits and licence
