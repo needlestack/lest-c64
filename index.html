@@ -173,7 +173,10 @@
     relabel('.cluster .key', ['.', 'O', 'E', 'U'], ['Period', 'KeyO', 'KeyE', 'KeyU']);
     relabel('.turn .key', ['W', 'V'], ['KeyW', 'KeyV']);
   }
-  EJS_gameUrl = DVORAK ? 'lest-c64-dvorak.d64' : 'lest-c64.d64';   // the committed disks, beside this page
+  // ?cart: THE CARTRIDGE (lest-c64.crt, EasyFlash) instead of the disk -- no drive to wait on, so no
+  // load times; to become the default later. Combines with ?dvorak (the Dvorak build writes both).
+  const CART = new URLSearchParams(location.search).has('cart');
+  EJS_gameUrl = `lest-c64${DVORAK ? '-dvorak' : ''}.${CART ? 'crt' : 'd64'}`;   // the committed games, beside this page
   EJS_gameName = 'LEST';
   EJS_startOnLoaded = false;               // ONE click, on Play: it is the interaction the browser wants
   EJS_startButtonName = 'Play';            //   before it allows sound, so the game is heard from its
@@ -227,11 +230,13 @@
   // A finger (or the mouse) on a key holds that key down on the C64, and SLIDING moves the hold to
   // whatever key is under the finger now -- across E S D F, or between < and > -- with no lift. Each
   // pointer is tracked on its own, so one thumb can walk while the other turns; a key held by two
-  // fingers is let go when the last one leaves. The press is a synthetic KeyboardEvent on document
-  // with the key's physical code: the core's listener is there (bubble phase, no isTrusted check) and
-  // reads KeyboardEvent.code alone (EmulatorJS's RetroArch fork, input/drivers/emulatorjs_input.c).
+  // fingers is let go when the last one leaves. The press is a synthetic KeyboardEvent with the key's
+  // physical code, which is all the core reads (EmulatorJS's RetroArch fork, emulatorjs_input.c), sent
+  // to the GAME'S OWN ELEMENT: that is where the core's listeners are (Chrome's getEventListeners,
+  // 2026-11-18), not on document -- the first version dispatched there and the game never saw it,
+  // since an event goes UP from its target, never down. Nothing checks isTrusted.
   {
-    const send = (code, down) => document.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup',
+    const send = (code, down) => emu()?.elements?.parent?.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup',
       { code, key: code === 'Space' ? ' ' : '', bubbles: true, cancelable: true }));
     const holders = new Map();           // code -> how many pointers hold it
     const held = new Map();              // pointerId -> the key element it holds
