@@ -238,34 +238,62 @@
   {
     const send = (code, down) => emu()?.elements?.parent?.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup',
       { code, key: code === 'Space' ? ' ' : '', bubbles: true, cancelable: true }));
-    const holders = new Map();           // code -> how many pointers hold it
-    const held = new Map();              // pointerId -> the key element it holds
+    const holders = new Map();           // code -> how many fingers hold it
+    // EVERY FINGER IS TRACKED FROM DOWN TO UP, holding a key or, between keys, nothing (null). The
+    // first version forgot a finger the moment it crossed the 6-px gap between two keys, so the key
+    // beyond never pressed: a slide worked only when no move happened to land in a gap ("about half
+    // the time", the user on a phone, 2026-11-18; the headless test jumped centre to centre).
+    const fingers = new Map();           // finger id -> the key element under it, or null
     const hold = (id, el) => {
-      const old = held.get(id);
-      if (old === el) return;
+      const old = fingers.get(id) ?? null;
+      if (fingers.has(id) && old === el) return;
       if (old) {
         const n = holders.get(old.dataset.code) - 1;
         holders.set(old.dataset.code, n);
         if (!n) { send(old.dataset.code, false); old.classList.remove('down'); }
-        held.delete(id);
       }
       if (el) {
         const n = (holders.get(el.dataset.code) ?? 0) + 1;
         holders.set(el.dataset.code, n);
         if (n === 1) { send(el.dataset.code, true); el.classList.add('down'); }
-        held.set(id, el);
       }
+      fingers.set(id, el);
     };
+    const lift = id => { if (fingers.has(id)) { hold(id, null); fingers.delete(id); } };
     const keyAt = (x, y) => document.elementFromPoint(x, y)?.closest('[data-code]') ?? null;
+    // FINGERS USE TOUCH EVENTS, not pointer events: a fast slide can read to a phone's browser as a
+    // pan, which it takes over with a pointercancel (and touch-action: none is not reliably honoured
+    // by iOS Safari). Touch events keep coming for the whole touch, and preventDefault on them --
+    // non-passive -- is what reliably stops the scroll and zoom. Ids carry a 't' to stay apart from
+    // pointer ids.
+    const tid = t => 't' + t.identifier;
+    document.addEventListener('touchstart', (ev) => {
+      let ours = false;
+      for (const t of ev.changedTouches) {
+        const el = t.target.closest?.('[data-code]');
+        if (el) { hold(tid(t), el); ours = true; }
+      }
+      if (ours) ev.preventDefault();     // no scroll, no zoom, no mouse events after it
+    }, { passive: false });
+    document.addEventListener('touchmove', (ev) => {
+      let ours = false;
+      for (const t of ev.changedTouches) if (fingers.has(tid(t))) { hold(tid(t), keyAt(t.clientX, t.clientY)); ours = true; }
+      if (ours) ev.preventDefault();
+    }, { passive: false });
+    for (const type of ['touchend', 'touchcancel'])
+      document.addEventListener(type, (ev) => { for (const t of ev.changedTouches) lift(tid(t)); });
+    // THE MOUSE (and a pen): pointer events; a mouse is never taken over by a scroll
     document.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'touch') return;
       const el = ev.target.closest?.('[data-code]');
       if (!el) return;
       ev.preventDefault();
-      el.releasePointerCapture?.(ev.pointerId);   // a touch captures to its first element; the slide needs hit-testing
+      el.releasePointerCapture?.(ev.pointerId);   // the slide needs hit-testing, not the first element
       hold(ev.pointerId, el);
     });
-    document.addEventListener('pointermove', (ev) => { if (held.has(ev.pointerId)) hold(ev.pointerId, keyAt(ev.clientX, ev.clientY)); });
-    for (const t of ['pointerup', 'pointercancel']) document.addEventListener(t, (ev) => hold(ev.pointerId, null));
+    document.addEventListener('pointermove', (ev) => { if (ev.pointerType !== 'touch' && fingers.has(ev.pointerId)) hold(ev.pointerId, keyAt(ev.clientX, ev.clientY)); });
+    for (const type of ['pointerup', 'pointercancel'])
+      document.addEventListener(type, (ev) => { if (ev.pointerType !== 'touch') lift(ev.pointerId); });
   }
 
   // ---- LEAVING: let go of the heavy parts now ----
