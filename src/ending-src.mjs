@@ -29,10 +29,11 @@
 // values past the picture are simply skipped. When the register is back at its seed, every pixel has
 // been drawn exactly once: no pixel twice, none left over, no bookkeeping.
 import { assemble } from './asm6502.mjs';
+import { renderNote } from './note-font.mjs';
 import { TUNE_ROW, TUNE_GAP, sidFreq, GEN_LOW, GEN_MODES, GEN_CELLS, GEN_LEN, GEN_ENDS, GEN_TRILL, GEN_TRILL_LAND, GEN_TRILL_IN, GEN_QUOTES, GEN_MOVES, GEN_HOMES, GEN_ENDINGS, GEN_OPEN, GEN_GLIDE_IN, GEN_BEND_IN, GEN_BEND_MIN, GEN_SLUR, GEN_SLUR_RUN, VIB_DEEP_IN } from './end-tunes.mjs';
 
 export const END_DST = 0xfe;        // lvlNxtT's "this hole is the end of the game" ($ff = no exit)
-export const IEND_NAME = 'IEND', ITRE_NAME = 'ITRE';
+export const IEND_NAME = 'IEND', ITRE_NAME = 'ITRE', NOTE_NAME = 'INOT';
 
 // ---- IEND: bank 3 ($c000-$cfff), clear of every file REBOOT reloads (ICHR is $c000-$c7ff and
 // lands on the quote's charset, which is dead by then -- but not on REBOOT itself at $cc00) ----
@@ -59,6 +60,20 @@ const hx = (n, w = 2) => '$' + n.toString(16).padStart(w, '0');
 const B = a => a.map(v => hx(v & 255)).join(',');
 const rows = (a, n = 32) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(`        !byte ${B(a.slice(i, i + n))}`); return o.join('\n'); };
 const petscii = s => [...s].map(c => hx(c.charCodeAt(0))).join(',') + ',0';
+// THE NOTE after the tree (the user, 2026-11-17): the level select, revealed. Drawn at build time in
+// the user's small pixel face (note-font.mjs; 2026-11-18, it was the ROM's font for a day), six
+// 8-pixel lines centred on the screen, in grey 3. It is its own FILE, INOT, loaded on the press that
+// takes the tree down (IEND's qNote): no room is left in IEND or ITRE for 84 glyphs and a screen.
+// It loads into the tree's display, finished with by then: the charset at NOTE_CHR (DSP), the screen
+// at NOTE_SCR -- and only its first NOTE_ROWS rows, the last that hold any text; lnote blanks the rest.
+const NOTE = ['DURING GAMEPLAY YOU MAY NOW GO TO', "ANY LEVEL BY PRESSING 'L' AND A NUMBER", 'AT THE SAME TIME.',
+              '', '', 'PRESS SPACE TO CONTINUE'];
+const NOTE_INK = 15;                // grey 3: chosen over the quotes' grey 2 by eye on a CRT (2026-11-18)
+const NOTE_CHR = 0xa000, NOTE_SCR = 0xa400;   // bank 2: charset at +$2000, screen at +$2400
+const note = renderNote(NOTE);
+const NOTE_ROWS = Math.max(...note.screen.map((c, i) => c ? Math.floor(i / 40) + 1 : 0));
+if (NOTE_CHR + note.chars.length > NOTE_SCR) throw new Error(`the note's ${note.chars.length / 8} glyphs run into its screen`);
+if (1000 - NOTE_ROWS * 40 > 512 || 1000 - NOTE_ROWS * 40 < 256) throw new Error(`lnote blanks the screen's last 256-512 bytes with two stores; the note leaves ${1000 - NOTE_ROWS * 40}`);
 
 // opts: scene (end-scene.json), quote (quote-end.json), files (the boot's file list: tag, name, at,
 // length, first, runtime), entry (the game's entry address), krill (loadraw's address),
@@ -89,6 +104,16 @@ export function buildEnding({ scene, quote, files, entry, krill, palF = null, ho
         * = ${hx(Q_CHR, 4)}
 ${rows(quote.chars)}
 ${G ? G.data : ''}
+; ---- qNote: load THE NOTE (INOT), for ITRE's lnote. Here in the charset slot's tail, as $cc00-$cfff
+; is full: the quote is long gone when it runs, and its 180 glyphs end before this ----
+qNote:  jsr qKern
+        ldx #<nNot
+        ldy #>nNot
+        jsr ${hx(krill, 4)}       ; Krill's loadraw (the cart's own loader on the cart, same call)
+        bcs qFail
+        rts
+nNot:   !byte ${petscii(NOTE_NAME)}
+qNoteEnd:
         * = ${hx(Q_SCR, 4)}
 ${rows(quote.screen)}
         * = ${hx(Q_RUN, 4)}
@@ -211,7 +236,7 @@ qFail:  sta $03             ; Krill's status, where the boot's own fail: keeps i
         sta $02
 qf:     jmp qf
 
-; ---- REBOOT: ITRE jumps here on fire, with the display blanked ----
+; ---- REBOOT: ITRE's note (lnote) jumps here on the press that takes it down, display blanked ----
 ; The game's own files, in the boot's order, then the game's entry -- which is also where a death
 ; restarts it, so it already sets up everything it needs from a dirty machine. Level 1 is ILV1,
 ; reloaded with the rest, and entry starts at the boot level.
@@ -235,6 +260,7 @@ ${G ? G.code : ''}`;
   const qa = assemble(qsrc), QL = qa.labels;
   if (QL.qStart !== IEND_RUN) throw new Error(`IEND's entry is ${hx(QL.qStart, 4)}, but the game jumps to ${hx(IEND_RUN, 4)}`);
   if (qa.end > 0xd000) throw new Error(`IEND runs to ${hx(qa.end, 4)}, into the I/O hole`);
+  if (QL.qNoteEnd > Q_SCR) throw new Error(`qNote runs to ${hx(QL.qNoteEnd, 4)}, past the quote charset into its screen`);
   if (G && QL.genDataEnd > Q_SCR) throw new Error(`the generator's tables run to ${hx(QL.genDataEnd, 4)}, past the quote charset into its screen`);
   // REBOOT must not be loaded over while it is running the loads
   for (const f of reload) if (f.at < qa.end && f.at + f.length > Q_RUN) throw new Error(
@@ -611,7 +637,7 @@ ${breath ? `        lda #$80
         sta $d412
 ` : ''}        lda #$00
         sta $d020
-        jmp ${hx(QL.reboot, 4)}   ; IEND's REBOOT: the game again, from level 1
+        jmp lnote           ; THE NOTE (the level select), then IEND's REBOOT: the game again, from level 1
 kup:    lda #$01
         sta krel
 kdn:    jmp frame
@@ -822,6 +848,48 @@ rings:
 ${rows(sites.flatMap(st => [...st.ring, ...Array(8 - st.ring.length).fill(0)]))}
         * = ${hx(SRC, 4)}
 ${rows(scene.bm)}
+; ---- THE NOTE: kgo jumps here on fire, with the display blanked ----
+; The ending's last gift (the user, 2026-11-17): the level select, revealed. A picture of text in the
+; user's pixel face (note-font.mjs), its own file INOT, loaded now by IEND's qNote into the tree's
+; display, which is finished with: charset ${hx(NOTE_CHR, 4)}, screen ${hx(NOTE_SCR, 4)}. Interrupts are off and the
+; SID releases on its own, so nothing runs during the load. The wind and the tune are already letting
+; go (kgo): they fade under it. A FRESH fire/SPACE (IEND's qHold, as the quote's skip reads it: the
+; press that got here skips nothing) blanks the screen again and goes to REBOOT.
+; IT LIVES IN THE BITMAP'S TAIL, ${hx(SRC + 8000, 4)}-${hx(SRC_COL - 1, 4)}: SRC is 8000 bytes in a 32-page slot, and nothing
+; reads or writes past its end (dslv skips the LFSR values past the picture; the leaves and lights
+; touch picture bytes only). The code page ($0800-$0fff) and IEND's $cc00 page are full.
+lnote:  lda #$00            ; the screen's rows past the file's (code 0 is the blank cell): two
+        tax                 ;   overlapping 256-byte stores, from the first such row and up to the 1000th
+ln0:    sta ${hx(NOTE_SCR + NOTE_ROWS * 40, 4)},x
+        sta ${hx(NOTE_SCR + 1000 - 256, 4)},x
+        inx
+        bne ln0
+        jsr ${hx(QL.qNote, 4)}       ; IEND's qNote: INOT, the glyphs and the screen's first ${NOTE_ROWS} rows
+        lda #${NOTE_INK}            ; grey 3
+        jsr ${hx(QL.qInk, 4)}       ; (IEND's qInk)
+        lda #${hx(((NOTE_SCR - 0x8000) >> 10) << 4 | ((NOTE_CHR - 0x8000) >> 11) << 1)}
+        sta $d018           ; screen ${hx(NOTE_SCR, 4)}, charset ${hx(NOTE_CHR, 4)}
+        lda #$08
+        sta $d016           ; hi-res text, 40 columns
+        lda #$00
+        sta $d021
+lnW:    lda $d012           ; on in the bottom border, as every cut here is
+        cmp #$fa
+        bne lnW
+        lda #$1b
+        sta $d011           ; text mode, display ON: the note is up
+        lda #$00            ; the press that brought it here must be let go first
+        sta ${hx(QL.qArm, 4)}       ; (IEND's qArm)
+lnL:
+${autoF ? `        lda #${autoF & 255}         ; ENDAUTO (a test): if no press comes, go on after autoF frames
+        jsr ${hx(QL.qHold, 4)}
+` : `        lda #$00            ; (256 frames a call; any count will do)
+        jsr ${hx(QL.qHold, 4)}       ; (IEND's qHold: carry set = a fresh press)
+        bcc lnL
+`}        lda #$0b            ; BLACK again for the reload
+        sta $d011
+        jmp ${hx(QL.reboot, 4)}   ; IEND's REBOOT
+lnEnd:
         * = ${hx(SRC_COL, 4)}
 ${rows(scene.col)}
         * = ${hx(SRC_SCR, 4)}
@@ -830,11 +898,22 @@ ${rows(scene.scr)}
   const ta = assemble(tsrc), TL = ta.labels;
   if (TL.tFl !== T_RUN + 6 || TL.tPal !== T_RUN + 7) throw new Error('ITRE: IEND writes tFl and tPal at T_RUN+6 and +7');
   if (TL.tCodeEnd > SITE) throw new Error(`ITRE's code and light tables run to ${hx(TL.tCodeEnd, 4)}, into the leaf sites at ${hx(SITE, 4)}`);
+  if (TL.lnEnd > SRC_COL) throw new Error(`ITRE's note runs to ${hx(TL.lnEnd, 4)}, into the colour data at ${hx(SRC_COL, 4)}`);
+  if (scene.bm.length !== 8000) throw new Error('the note sits right after an 8000-byte bitmap');
+  // INOT: the glyphs, then the screen's first NOTE_ROWS rows. It loads over the tree's display (DSP),
+  // never over anything the note or REBOOT still needs
+  const na = assemble(`        * = ${hx(NOTE_CHR, 4)}
+${rows(note.chars)}
+        * = ${hx(NOTE_SCR, 4)}
+${rows(note.screen.slice(0, NOTE_ROWS * 40))}
+`);
+  if (NOTE_CHR !== DSP || na.end > DSP + 8000) throw new Error(`INOT (${hx(na.org, 4)}-${hx(na.end, 4)}) must load into the tree's display, ${hx(DSP, 4)}`);
   if (ta.end > T_END) throw new Error(`ITRE runs to ${hx(ta.end, 4)}, into the mask at ${hx(MASK, 4)}`);
   if (ta.org < 0x0800) throw new Error(`ITRE starts at ${hx(ta.org, 4)}, on Krill's resident`);
   return {
     iend: { name: IEND_NAME, prg: qa.prg, at: qa.org, end: qa.end, run: QL.qStart, reboot: QL.reboot, labels: QL },
     itre: { name: ITRE_NAME, prg: ta.prg, at: ta.org, end: ta.end, run: TL.tStart, codeEnd: TL.tCodeEnd, labels: TL },
+    inot: { name: NOTE_NAME, prg: na.prg, at: na.org, end: na.end },
     steps: STEPS, dsFrames, dsFramesPal,
   };
 }

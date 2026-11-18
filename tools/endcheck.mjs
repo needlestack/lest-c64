@@ -7,7 +7,7 @@
 // The fps suite stops at level 9 and nothing else reaches the ending (the outside review, 2026-11-16),
 // so this is its regression test. One test build (ENDTEST=1: level 1's exit is the last hole;
 // FALLNOW=64 falls through it; ENDAUTO=120 presses fire 120 frames after the dissolve, which starts
-// REBOOT), written to build/zz-end.d64 and its .crt -- never to lest-c64.d64 -- then four runs:
+// the note, then REBOOT), written to build/zz-end.d64 and its .crt -- never to lest-c64.d64 -- then four runs:
 //
 //   disk, NTSC   the hold timed: 6 s (holdS) on the 60 Hz clock
 //   disk, PAL    the hold timed: 6 s on the 50 Hz clock (it was 7.2 before 2026-11-15)
@@ -16,8 +16,9 @@
 //
 // and in every run: the tree's sound/leaves/lights ticks per frame through the whole dissolve (1 on
 // NTSC, 6/5 on PAL), that no frame is lost and no gust starts while it runs, that the first gust
-// comes about a second after it (2026-11-16: gusts wait for the dissolve), and
-// REBOOT reaching the game's entry with palF what the machine is (the reload used to zero it).
+// comes about a second after it (2026-11-16: gusts wait for the dissolve), THE NOTE after the tree
+// (2026-11-17: the level select revealed; disk runs: a press held from the tree leaves it up, cart
+// runs: a fresh one takes it down), and REBOOT reaching the game's entry with palF what the machine is (the reload used to zero it).
 // Every number is checked; exit 1 if any fails. About a minute and a half.
 //
 // The build rewrites build/iray.asm and the symbol files; the tracked iray.asm is put back after.
@@ -102,8 +103,26 @@ async function run(medium, machine, test, n) {
     let after = 0;
     while (after < 200) { const p = m.pcOf(await m.cmd('x')); if (p === T.gnew) break; if (p === T.tick) after++; }
     check(after >= 55 && after <= 65, `the first gust came ${after} ticks after the dissolve (wants ~60)`);
-    // ENDAUTO presses fire: REBOOT reloads the game and starts it
-    await go(Q.reboot);
+    // ENDAUTO presses fire: THE NOTE (the level select revealed) comes up. A press held from the tree
+    // must not dismiss it -- ENDAUTO then lets it go after its own 120 frames -- and a fresh one must,
+    // at once. Then REBOOT reloads the game and starts it.
+    await go(T.lnL);
+    check(!(await b(Q.qArm)), 'the note is up, waiting for a fresh press');
+    await m.cmd('sw reset');
+    if (test === 'time') {
+      await press(true);                               // held from the tree
+      await go(Q.reboot);
+      const s = await sw() / C.hz;
+      const want = 120 / (pal ? 50 : 60);              // ENDAUTO's 120 frames
+      check(Math.abs(s - want) < 0.1, `a press held from the tree did not dismiss the note (it went after ${s.toFixed(2)} s: ENDAUTO's ${want})`);
+    } else {
+      await go(Q.qhUp);                                // seen up
+      await press(true);
+      await go(Q.reboot);
+      const s = await sw() / C.hz;
+      check(s < 0.1, `a fresh press dismissed the note (${s.toFixed(2)} s)`);
+    }
+    await press(false);
     const pc = await go(R.entry);
     check(pc === R.entry && await b(R.palF) === (pal ? 1 : 0), `REBOOT reached entry with palF = ${await b(R.palF)}`);
     return cyc / C.hz;

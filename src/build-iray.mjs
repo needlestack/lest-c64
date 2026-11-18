@@ -30372,7 +30372,7 @@ try {
     // DOS default of 10 left it waiting out ten revolutions per track: measured ~3.6 KB/s for the
     // boot's 58 KB. See krill/README-krill, "native interleave".
     for (const f of DISK) d.writeFile(f.name, prgOf(f.at, f.data), D64.FILE_TYPE_PRG, KRILL_IL);
-    if (END) for (const e of [END.iend, END.itre]) d.writeFile(e.name, Buffer.from(e.prg), D64.FILE_TYPE_PRG, KRILL_IL);
+    if (END) for (const e of [END.iend, END.itre, END.inot]) d.writeFile(e.name, Buffer.from(e.prg), D64.FILE_TYPE_PRG, KRILL_IL);
     // KRILL'S CREDIT, which his BSD licence asks of a binary release ("Loader by Krill" in the
     // production or its documentation; see krill/README). A line of the disk's own directory, LAST, so
     // LOAD"*",8,1 still finds IRUN first. The cartridge needs none: it holds no byte of Krill's code
@@ -30426,7 +30426,7 @@ try {
     const cart = buildCart(assemble, {
       files: [...DISK.map(f => ({ tag: f.tag, name: f.name, prg: [...prgOf(f.at, f.data)],
                                   first: f.first, last: f.last, runtime: f.runtime })),
-              ...(END ? [cartIend(), END.itre].map((e, k) => ({ tag: 'X' + k, name: e.name, prg: [...e.prg], runtime: true })) : [])],
+              ...(END ? [cartIend(), END.itre, END.inot].map((e, k) => ({ tag: 'X' + k, name: e.name, prg: [...e.prg], runtime: true })) : [])],
       entry: bootEntry, palF,
       quote: { name: 'IQSC', prg: [QUOTE_SCR & 255, QUOTE_SCR >> 8, ...QUOTE.blob], scr: QUOTE_SCR, chr: QUOTE_CHR },
       title: title ? { ...title, scr: TITLE_SCR, chr: TITLE_CHR, col: TITLE_COL } : null,
@@ -30989,7 +30989,7 @@ try {
       for (let i = 0; i < nExit; i++) {
         const v = f.data[SLOT_OFF.lvlNxtT + i];
         if (v === END_DST) { if (!END) missing.push(`the ending (level ${lvn}'s exit ${i} leads there, and this build has none)`);
-                             else for (const e of [END.iend, END.itre]) if (!onDisk.has(e.name)) missing.push(`${e.name} (the ending, level ${lvn}'s exit ${i})`); }
+                             else for (const e of [END.iend, END.itre, END.inot]) if (!onDisk.has(e.name)) missing.push(`${e.name} (the ending, level ${lvn}'s exit ${i})`); }
         else if (!onDisk.has(ILV_NAME(v))) missing.push(`${ILV_NAME(v)} (level ${v}: level ${lvn}'s exit ${i} leads there)`);
       }
     }
